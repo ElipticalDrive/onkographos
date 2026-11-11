@@ -3,123 +3,103 @@
 Also called: N-DGS
 
 ## Overview
-N-DGS is a parameterization for the joint covariance of 3D Gaussians that uses bounded Cholesky coefficients multiplied by query diagonal scales to control spatial extent and cross-covariance [S1, unofficial]. It sets itself apart from sibling methods like [dGS Direct Regression Parameterization](2821-dgs-direct-regression-parameterization.md) by implicitly deriving the regression operator from the ambient joint Cholesky factor, rather than optimizing operational quantities directly [S1, unofficial]. This approach avoids the computational cost and instability of inverting the query covariance block during rendering, which is required by methods that explicitly parameterize the regression operator [S1, unofficial].
+N-DGS is a parameterization for the joint covariance of 3D Gaussians that uses bounded Cholesky coefficients multiplied by query diagonal scales to control spatial extent and cross-covariance [S1, unofficial]. It differs from sibling methods like [dGS Direct Regression Parameterization](2821-dgs-direct-regression-parameterization.md) by implicitly deriving the regression operator from the ambient joint Cholesky factor, rather than optimizing operational quantities directly [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** The diagonal scales of the query covariance, $\mathbf{s}_q \in \mathbb{R}^C$; the Cholesky factor of the spatial covariance, $\mathbf{A}$ (lower triangular); and the Cholesky factor of the cross-covariance block, $\mathbf{B}$ [S1, unofficial].
-*   **Output:** The joint covariance matrix $\boldsymbol{\Sigma}$, decomposed into blocks $\boldsymbol{\Sigma}_{pp}$ (spatial), $\boldsymbol{\Sigma}_{qq}$ (query), and $\boldsymbol{\Sigma}_{pq}$ (cross) [S1, unofficial].
+*   **Input:** Query diagonal scales $\mathbf{s}_q \in \mathbb{R}^C$, spatial Cholesky factor $\mathbf{A} \in \mathbb{R}^{p \times p}$, bounded cross-covariance coefficients $\mathbf{B}_e \in \mathbb{R}^{C \times p}$, and query Cholesky factor $\mathbf{D} \in \mathbb{R}^{C \times C}$ [S1, unofficial].
+*   **Output:** Joint covariance blocks $\boldsymbol{\Sigma}_{pp} \in \mathbb{R}^{p \times p}$, $\boldsymbol{\Sigma}_{pq} \in \mathbb{R}^{p \times C}$, and $\boldsymbol{\Sigma}_{qq} \in \mathbb{R}^{C \times C}$ [S1, unofficial].
 
 **Data Structures**
-The parameterization relies on the Cholesky decomposition of the joint covariance $\boldsymbol{\Sigma} \in \mathbb{R}^{(p+C) \times (p+C)}$.
-Let $\mathbf{L}$ be the lower Cholesky factor such that $\boldsymbol{\Sigma} = \mathbf{L}\mathbf{L}^\top$.
-$\mathbf{L}$ is partitioned into blocks corresponding to spatial ($p$) and query ($C$) dimensions:
+The parameterization relies on the Cholesky decomposition of the joint covariance $\boldsymbol{\Sigma} \in \mathbb{R}^{(p+C) \times (p+C)}$ [G]. The lower Cholesky factor $\mathbf{L}$ is partitioned into spatial ($p$) and query ($C$) blocks [G]:
 $$
 \mathbf{L} = \begin{pmatrix} \mathbf{A} & \mathbf{0} \\ \mathbf{B} & \mathbf{D} \end{pmatrix}
 $$
-where:
-*   $\mathbf{A} \in \mathbb{R}^{p \times p}$ is lower triangular.
-*   $\mathbf{B} \in \mathbb{R}^{C \times p}$ is the cross-covariance Cholesky component.
-*   $\mathbf{D} \in \mathbb{R}^{C \times C}$ is lower triangular.
-
-The key innovation is the parameterization of $\mathbf{B}$. Instead of storing $\mathbf{B}$ directly, it is stored as a bounded matrix $\mathbf{B}_e$ scaled by $\mathbf{s}_q$:
-$$
-\mathbf{B} = \text{diag}(\mathbf{s}_q) \mathbf{B}_e
-$$
-where $|\mathbf{B}_{e,jk}| \leq 1$ for all entries [S1, unofficial].
+where $\mathbf{A}$ and $\mathbf{D}$ are lower triangular, and $\mathbf{B} \in \mathbb{R}^{C \times p}$ is the cross-covariance Cholesky component [G]. N-DGS parameterizes $\mathbf{B}$ as $\mathbf{B} = \text{diag}(\mathbf{s}_q) \mathbf{B}_e$ with $|\mathbf{B}_{e,jk}| \leq 1$ for all entries [S1, unofficial].
 
 **Numbered Steps**
-1.  **Retrieve Scales:** Obtain the query diagonal scales $\mathbf{s}_q$ from the Gaussian set. These represent the standard deviations of the query covariance diagonal.
-2.  **Reconstruct Cross-Covariance Factor:** Compute $\mathbf{B}$ using the bounded coefficients $\mathbf{B}_e$ and scales $\mathbf{s}_q$:
-    $$ \mathbf{B} = \text{diag}(\mathbf{s}_q) \mathbf{B}_e $$
-3.  **Compute Spatial Covariance:** Compute $\boldsymbol{\Sigma}_{pp}$ from $\mathbf{A}$:
-    $$ \boldsymbol{\Sigma}_{pp} = \mathbf{A}\mathbf{A}^\top $$
-4.  **Compute Cross-Covariance:** Compute $\boldsymbol{\Sigma}_{pq}$ using $\mathbf{A}$ and $\mathbf{B}$:
-    $$ \boldsymbol{\Sigma}_{pq} = \mathbf{A}\mathbf{B}^\top $$
-    *(Note: Since $\boldsymbol{\Sigma}$ is symmetric, $\boldsymbol{\Sigma}_{qp} = \boldsymbol{\Sigma}_{pq}^\top$)*
-5.  **Compute Query Covariance:** Compute $\boldsymbol{\Sigma}_{qq}$ from $\mathbf{B}$ and $\mathbf{D}$:
-    $$ \boldsymbol{\Sigma}_{qq} = \mathbf{B}\mathbf{B}^\top + \mathbf{D}\mathbf{D}^\top $$
-6.  **Assemble Joint Covariance:** Construct the full joint covariance matrix $\boldsymbol{\Sigma}$:
-    $$ \boldsymbol{\Sigma} = \begin{pmatrix} \boldsymbol{\Sigma}_{pp} & \boldsymbol{\Sigma}_{pq} \\ \boldsymbol{\Sigma}_{qp} & \boldsymbol{\Sigma}_{qq} \end{pmatrix} $$
+1.  Retrieve query diagonal scales $\mathbf{s}_q$ from the Gaussian set [S1, unofficial].
+2.  Scale the bounded coefficients: $\mathbf{B} \leftarrow \text{diag}(\mathbf{s}_q) \mathbf{B}_e$ [S1, unofficial].
+3.  Compute spatial covariance: $\boldsymbol{\Sigma}_{pp} \leftarrow \mathbf{A}\mathbf{A}^\top$ [S1, unofficial].
+4.  Compute cross-covariance: $\boldsymbol{\Sigma}_{pq} \leftarrow \mathbf{A}\mathbf{B}^\top$ [S1, unofficial].
+5.  Compute query covariance: $\boldsymbol{\Sigma}_{qq} \leftarrow \mathbf{B}\mathbf{B}^\top + \mathbf{D}\mathbf{D}^\top$ [S1, unofficial].
+6.  Assemble the joint covariance $\boldsymbol{\Sigma} = \begin{pmatrix} \boldsymbol{\Sigma}_{pp} & \boldsymbol{\Sigma}_{pq} \\ \boldsymbol{\Sigma}_{pq}^\top & \boldsymbol{\Sigma}_{qq} \end{pmatrix}$ [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ndgs_parameterize(A, B_e, D, s_q):
+    # A: (p, p) lower triangular, B_e: (C, p) bounded, D: (C, C) lower triangular, s_q: (C,)
+    B = diag(s_q) @ B_e
+    Sigma_pp = A @ A.T
+    Sigma_pq = A @ B.T
+    Sigma_qq = B @ B.T + D @ D.T
+    return Sigma_pp, Sigma_pq, Sigma_qq
+
+def ndgs_shift(Sigma_pq, Sigma_qq, delta):
+    # Sigma_pq: (p, C), Sigma_qq: (C, C), delta: (C,)
+    # Solve Sigma_qq @ x = delta for x, then compute shift
+    x = solve(Sigma_qq, delta)
+    return Sigma_pq @ x
+```
 
 **Formulas and Definitions**
-*   $\mathbf{s}_q$: Diagonal of the query covariance $\boldsymbol{\Sigma}_{qq}$.
-*   $\mathbf{B}_e$: Bounded Cholesky coefficient matrix with entries in $[-1, 1]$.
-*   $\boldsymbol{\Sigma}_{pp}$: Spatial covariance block.
-*   $\boldsymbol{\Sigma}_{pq}$: Cross-covariance block between spatial and query dimensions.
-*   $\boldsymbol{\Sigma}_{qq}$: Query covariance block.
-
-**Bounds and Properties**
-The bounded nature of $\mathbf{B}_e$ imposes constraints on the cross-covariance. Specifically:
-$$
-\|\mathbf{B}\|_2 \leq \|\mathbf{B}\|_F \leq \sqrt{p} \|\mathbf{s}_q\|_2
-$$
-Consequently, the row-wise norm of the cross-covariance is bounded by:
-$$
-\|(\boldsymbol{\Sigma}_{pq})_{i,:}\|_2 \leq \sqrt{p} \|\mathbf{s}_q\|_2 \sqrt{(\boldsymbol{\Sigma}_{pp})_{ii}}
-$$
-[S1, unofficial]
-
-The rendered spatial shift (conditional mean update) is given by:
-$$
-\Delta \mu_{\text{N-DGS}} = \boldsymbol{\Sigma}_{pq} \boldsymbol{\Sigma}_{qq}^{-1} \delta = \mathbf{M}_{\text{N-DGS}} \delta
-$$
-where $\delta$ is the query deviation from the mean [S1, unofficial].
-
-A basis-independent bound exists using the normalized cross-covariance $\mathbf{K}$:
-$$
-\mathbf{K} = \boldsymbol{\Sigma}_{pp}^{-1/2} \boldsymbol{\Sigma}_{pq} \boldsymbol{\Sigma}_{qq}^{-1/2}
-$$
-With whitened query deviation $\mathbf{h} = \boldsymbol{\Sigma}_{qq}^{-1/2} \delta$, the shift satisfies:
-$$
-\Delta \mu_{\text{N-DGS}} = \boldsymbol{\Sigma}_{pp}^{1/2} \mathbf{K} \mathbf{h}
-$$
-$$
-\left\| \boldsymbol{\Sigma}_{pp}^{-1/2} \Delta \mu_{\text{N-DGS}} \right\|_2 \leq \left\| \boldsymbol{\Sigma}_{qq}^{-1/2} \delta \right\|_2
-$$
-This indicates that the shift, measured in marginal spatial standard-deviation units, is bounded by the query deviation in query standard-deviation units [S1, unofficial].
+*   $\mathbf{s}_q$: Diagonal of the query covariance $\boldsymbol{\Sigma}_{qq}$ [S1, unofficial].
+*   $\mathbf{B}_e$: Bounded Cholesky coefficient matrix with entries in $[-1, 1]$ [S1, unofficial].
+*   $\boldsymbol{\Sigma}_{pp}$: Spatial covariance block [S1, unofficial].
+*   $\boldsymbol{\Sigma}_{pq}$: Cross-covariance block between spatial and query dimensions [S1, unofficial].
+*   $\boldsymbol{\Sigma}_{qq}$: Query covariance block [S1, unofficial].
+*   Bounded norm: $\|\mathbf{B}\|_2 \leq \|\mathbf{B}\|_F \leq \sqrt{p} \|\mathbf{s}_q\|_2$ [S1, unofficial].
+*   Cross-covariance row bound: $\|(\boldsymbol{\Sigma}_{pq})_{i,:}\|_2 \leq \sqrt{p} \|\mathbf{s}_q\|_2 \sqrt{(\boldsymbol{\Sigma}_{pp})_{ii}}$ [S1, unofficial].
+*   Rendered shift: $\Delta \mu_{\text{N-DGS}} = \boldsymbol{\Sigma}_{pq} \boldsymbol{\Sigma}_{qq}^{-1} \delta = \mathbf{M}_{\text{N-DGS}} \delta$ [S1, unofficial].
+*   Normalized cross-covariance: $\mathbf{K} = \boldsymbol{\Sigma}_{pp}^{-1/2} \boldsymbol{\Sigma}_{pq} \boldsymbol{\Sigma}_{qq}^{-1/2}$ [S1, unofficial].
+*   Whitened shift: $\Delta \mu_{\text{N-DGS}} = \boldsymbol{\Sigma}_{pp}^{1/2} \mathbf{K} \mathbf{h}$ where $\mathbf{h} = \boldsymbol{\Sigma}_{qq}^{-1/2} \delta$ [S1, unofficial].
+*   Basis-independent bound: $\left\| \boldsymbol{\Sigma}_{pp}^{-1/2} \Delta \mu_{\text{N-DGS}} \right\|_2 \leq \left\| \boldsymbol{\Sigma}_{qq}^{-1/2} \delta \right\|_2$ [S1, unofficial].
 
 **Parameters**
-*   $\mathbf{s}_q$: Query diagonal scales. Typical values depend on the scene scale and query resolution.
-*   $\mathbf{B}_e$: Bounded coefficients. Values are constrained to $[-1, 1]$ during optimization or clamping.
+*   $\mathbf{s}_q$: Query diagonal scales [S1, unofficial].
+*   $\mathbf{B}_e$: Bounded coefficients constrained to $[-1, 1]$ [S1, unofficial].
 
 **Edge Cases and Pitfalls**
-1.  **Interpretation of Off-Diagonals:** Off-diagonal entries of $\mathbf{A}$ contribute to both $\boldsymbol{\Sigma}_{pq}$ and the spatial extent $(\boldsymbol{\Sigma}_{pp})_{ii}$. They should not be interpreted as producing cross-covariance independently of spatial scale [S1, unofficial].
-2.  **Ill-Conditioned Query Covariance:** A bound on $\boldsymbol{\Sigma}_{pq}$ alone does not bound the shift $\Delta \mu$. The inverse query covariance $\boldsymbol{\Sigma}_{qq}^{-1}$ and the query deviation $\delta$ also enter the calculation. A narrow or ill-conditioned query covariance can amplify the regression operator, leading to large shifts [S1, unofficial].
-3.  **Precision:** The inversion of $\boldsymbol{\Sigma}_{qq}$ during the computation of the shift $\Delta \mu$ can be numerically unstable if $\boldsymbol{\Sigma}_{qq}$ is close to singular. However, N-DGS avoids this inversion during the *parameterization* and *slicing* steps, only requiring it for the final shift calculation if conditional mean is needed [S1, unofficial].
+1.  **Interpretation of Off-Diagonals:** Off-diagonal entries of $\mathbf{A}$ contribute to both $\boldsymbol{\Sigma}_{pq}$ and the spatial extent $(\boldsymbol{\Sigma}_{pp})_{ii}$; they should not be interpreted as producing cross-covariance independently of spatial scale [S1, unofficial].
+2.  **Ill-Conditioned Query Covariance:** A bound on $\boldsymbol{\Sigma}_{pq}$ alone does not bound the shift $\Delta \mu$ [S1, unofficial]. The inverse query covariance $\boldsymbol{\Sigma}_{qq}^{-1}$ and the query deviation $\delta$ also enter the calculation [S1, unofficial]. A narrow or ill-conditioned query covariance can amplify the regression operator [S1, unofficial].
+3.  **Precision:** The inversion of $\boldsymbol{\Sigma}_{qq}$ during the computation of the shift $\Delta \mu$ can be numerically unstable if $\boldsymbol{\Sigma}_{qq}$ is close to singular [S1, unofficial].
 
 ## Subtopics
 
+### [dGS Direct Regression Parameterization](2821-dgs-direct-regression-parameterization.md)
+dGS is a parameterization for 3D Gaussian Splatting that computes conditional opacity and position directly from explicit per-primitive parameters, avoiding the query-block inversion and covariance correction required by N-DGS. It replaces the joint covariance-derived conditioning with a Cholesky factor for opacity precision, a spatial coupling factor for position, and a coupling vector to tie them, enabling faster slicing and differentiable optimization of Gaussian positions without local minima. [dGS Direct Regression Parameterization](2821-dgs-direct-regression-parameterization.md)
+
+### [Conditional-coordinate parameterization](2822-conditional-coordinate-parameterization.md)
+Conditional-coordinate parameterization provides a non-redundant, smooth bijection between the space of joint Gaussian covariances and a set of operational quantities: conditional spatial covariance, query-space precision, and a regression operator. It solves the problem of efficiently representing and optimizing the cross-covariance between spatial and query dimensions in differentiable Gaussian splatting by avoiding the computational cost and instability of inverting the query covariance block during rendering. Unlike N-DGS, which derives the regression operator from a joint Cholesky factor, this method directly optimizes the regression operator and precision, treating the coupling as a block shear. [Conditional-coordinate parameterization](2822-conditional-coordinate-parameterization.md)
+
 ### N-DGS Covariance-Derived Regression
-N-DGS derives the regression operator implicitly from covariance blocks, requiring inversion of the query block to compute the conditional mean [S1, unofficial]. This contrasts with dGS, which directly parameterizes the regression operator $\mathbf{M}$, avoiding this inversion [S1, unofficial]. The off-diagonal entries of the Cholesky factor $\mathbf{A}$ contribute to both cross-covariance and spatial extent, meaning they cannot be interpreted as producing cross-covariance independently of spatial scale [S1, unofficial].
+In N-DGS, the off-diagonal entries of $\mathbf{A}$ contribute to both cross-covariance and spatial extent, meaning they cannot be interpreted as producing cross-covariance independently of spatial scale [S1, unofficial]. N-DGS derives the regression operator implicitly from covariance blocks, requiring inversion of the query block to compute the conditional mean [S1, unofficial]. This contrasts with dGS, which directly parameterizes the regression operator $\mathbf{M}$, avoiding this inversion [S1, unofficial].
 
 ### dGS Exact Implicit Joint Gaussian
-This variant refers to the dGS formulation where the joint covariance $\boldsymbol{\Sigma}^*$ is defined by conditional covariance $\boldsymbol{\Sigma}_{\text{cond}}$, regression operator $\mathbf{M}$, and query precision $\boldsymbol{\Pi}$ [S1, unofficial]. The blocks are:
-$$
-\Sigma_{qq}^* = \frac{1}{2\lambda_o} \mathbf{V}_{qq}^{-1}, \quad \Sigma_{pq}^* = \frac{1}{2\lambda_o} \mathbf{V}_{pq} \text{diag}(\boldsymbol{\Lambda}), \quad \Sigma_{pp}^* = \boldsymbol{\Sigma}_{\text{cond}} + \frac{1}{2\lambda_0} \mathbf{V}_{pq} \text{diag}(\boldsymbol{\Lambda}) \mathbf{V}_{qq} \text{diag}(\boldsymbol{\Lambda}) \mathbf{V}_{pq}^\top
-$$
-[S1, unofficial]. The opacity exponent corresponds to the query-marginal quadratic form $-\lambda_o \delta^\top \mathbf{V}_{qq} \delta$ [S1, unofficial]. The coupling strength is controlled by $\boldsymbol{\Lambda} \in [0, 1]^C$, where $\boldsymbol{\Lambda}=0$ decouples position from query and $\boldsymbol{\Lambda}=1$ enables full coupling [S1, unofficial]. The internal factorization of $\mathbf{M}$ into $\mathbf{V}_{pq}$ and $\boldsymbol{\Lambda}$ is not claimed to be bijective [S1, unofficial]. Standard Gaussian splatting uses an unnormalized Gaussian kernel, so the normalization factor is omitted from the renderer [S1, unofficial].
+The dGS joint covariance $\boldsymbol{\Sigma}^*$ is defined by conditional covariance $\boldsymbol{\Sigma}_{\text{cond}}$, regression operator $\mathbf{M}$, and query precision $\boldsymbol{\Pi}$ [S1, unofficial]. Its blocks are $\Sigma_{qq}^* = \frac{1}{2\lambda_o} \mathbf{V}_{qq}^{-1}$, $\Sigma_{pq}^* = \frac{1}{2\lambda_o} \mathbf{V}_{pq} \text{diag}(\boldsymbol{\Lambda})$, and $\Sigma_{pp}^* = \boldsymbol{\Sigma}_{\text{cond}} + \frac{1}{2\lambda_0} \mathbf{V}_{pq} \text{diag}(\boldsymbol{\Lambda}) \mathbf{V}_{qq} \text{diag}(\boldsymbol{\Lambda}) \mathbf{V}_{pq}^\top$ [S1, unofficial]. The opacity exponent corresponds to the query-marginal quadratic form $-\lambda_o \delta^\top \mathbf{V}_{qq} \delta$ [S1, unofficial]. The coupling strength is controlled by $\boldsymbol{\Lambda} \in [0, 1]^C$, where $\boldsymbol{\Lambda}=0$ decouples position from query and $\boldsymbol{\Lambda}=1$ enables full coupling [S1, unofficial]. The internal factorization of $\mathbf{M}$ into $\mathbf{V}_{pq}$ and $\boldsymbol{\Lambda}$ is not claimed to be bijective [S1, unofficial]. Standard Gaussian splatting uses an unnormalized Gaussian kernel, so the normalization factor is omitted from the renderer [S1, unofficial].
 
 ## Operating characteristics
 **Time and Memory Complexity**
-*   **Memory:** N-DGS stores the Cholesky factors $\mathbf{A}$, $\mathbf{B}_e$, and $\mathbf{D}$. The dimensionality matches the joint covariance: $\frac{p(p+1)}{2} + pC + \frac{C(C+1)}{2}$ parameters [S1, unofficial]. This is equivalent to storing the full joint covariance but with bounded coefficients for $\mathbf{B}$.
-*   **Time:** Rendering requires computing the conditional mean shift $\Delta \mu = \boldsymbol{\Sigma}_{pq} \boldsymbol{\Sigma}_{qq}^{-1} \delta$. This involves inverting $\boldsymbol{\Sigma}_{qq}$ ($O(C^3)$) and matrix-vector multiplication. N-DGS avoids inverting the query block during the slicing and parameterization steps, which is a computational advantage over methods that explicitly invert it during optimization [S1, unofficial].
+*   **Memory:** N-DGS stores the Cholesky factors $\mathbf{A}$, $\mathbf{B}_e$, and $\mathbf{D}$, matching the joint covariance parameter count $\frac{p(p+1)}{2} + pC + \frac{C(C+1)}{2}$ [S1, unofficial].
+*   **Time:** Rendering requires computing the conditional mean shift $\Delta \mu = \boldsymbol{\Sigma}_{pq} \boldsymbol{\Sigma}_{qq}^{-1} \delta$, which involves inverting $\boldsymbol{\Sigma}_{qq}$ ($O(C^3)$) and matrix-vector multiplication [S1, unofficial]. N-DGS derives the regression operator implicitly from covariance blocks, requiring inversion of the query block, whereas dGS directly parameterizes the regression operator $\mathbf{M}$, avoiding this inversion [S1, unofficial].
 
 **Measured Performance**
 On two trained MCMC scenes with six views each, the opacity-weighted $\|\Delta \mu\|/\bar{s}$ has a median of 0.29–0.30 and a 99th percentile of 4.8–7.0 for N-DGS [S1, unofficial].
 
 **Strengths and Limitations**
-*   **Strengths:** Avoids query-block inversion during slicing and parameterization. Provides a bounded parameterization for cross-covariance.
-*   **Limitations:** The regression operator is implicit, making it harder to control directly compared to dGS. The shift can be amplified by ill-conditioned query covariance. The bounded Cholesky coefficients do not directly bound the shift, only the cross-covariance norm [S1, unofficial].
+*   **Strengths:** Provides a bounded parameterization for cross-covariance [S1, unofficial].
+*   **Limitations:** The regression operator is implicit, making it harder to control directly compared to dGS [S1, unofficial]. The shift can be amplified by ill-conditioned query covariance [S1, unofficial]. The bounded Cholesky coefficients do not directly bound the shift, only the cross-covariance norm [S1, unofficial].
 
 **When to Use**
-Use N-DGS when computational efficiency in slicing is prioritized and the implicit parameterization is acceptable. It is suitable for scenes where the query covariance is well-conditioned.
+Use N-DGS when the implicit parameterization is acceptable and the query covariance is well-conditioned [S1, unofficial].
 
 **When Not to Use**
-Avoid N-DGS if direct control over the regression operator is required, or if the query covariance is likely to be ill-conditioned. In such cases, dGS may be more robust [S1, unofficial].
+Avoid N-DGS if direct control over the regression operator is required or if the query covariance is likely to be ill-conditioned [S1, unofficial].
 
 ## Background
-N-DGS was introduced in the context of differentiable Gaussian splatting to provide a stable parameterization for joint covariances. It builds on the Cholesky decomposition of the joint covariance matrix. The method was proposed to address the instability of inverting the query covariance block during rendering and optimization [S1, unofficial]. It is part of the family of N-Dimensional Gaussian Splatting methods, which extend 3DGS to higher dimensions (e.g., including time or other attributes) [S1, unofficial].
+N-DGS is part of the family of N-Dimensional Gaussian Splatting methods, which extend 3DGS to higher dimensions [S1, unofficial]. It parameterizes the joint covariance using bounded Cholesky coefficients multiplied by query diagonal scales to control spatial extent and cross-covariance [S1, unofficial].
 
 ## Sources
 [S1] Direct Conditional Parameterization for N-Dimensional Splatting, https://arxiv.org/abs/2610.22778, fetched 2026-10-30 (unofficial)

@@ -3,216 +3,184 @@
 Also called: Block.h block_faces, Cube Geometry Definition, Cube face vertices
 
 ## Overview
-Block face vertex layout defines the static geometric primitives for a unit cube, serving as the fundamental mesh template for blocky meshing algorithms. It specifies the positions, colors, and texture coordinates for the six faces of a cube, allowing surface extraction methods to generate meshes by instantiating these faces for visible voxel boundaries. It differs from sibling methods like [Greedy Meshing](1776-greedy-meshing.md) or [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) by providing only the raw vertex data for individual faces without performing topology optimization, face culling, or merging of adjacent coplanar faces.
+Block face vertex layout defines the explicit geometric structure of a single unit voxel cube, specifying the positions, normals, colors, and texture coordinates for its six faces. It solves the problem of rendering individual voxel units as distinct geometric primitives with independent per-face attributes, such as distinct ambient occlusion colors or texture tiling, which requires vertex duplication at corners to support non-shared face normals. It differs from smooth surface extraction methods (like Marching Cubes) that merge vertices to create continuous surfaces, and from higher-level meshing strategies (like [Greedy face merging](8935-greedy-face-merging.md)) that optimize topology; instead, it provides the foundational atomic geometry upon which blocky meshing techniques build.
 
 ## How it works
-The method constructs a unit cube mesh centered at the origin or defined in local space, consisting of 6 faces. Each face is composed of 2 triangles, resulting in 6 vertices per face and 36 vertices total for the complete cube. The layout supports instanced rendering where the base geometry is constant, and instance attributes (position, color, texture index) vary per voxel.
+The method constructs a static, axis-aligned cube mesh for a single voxel block. The cube is defined within a local coordinate system, typically centered at the origin or spanning $[0,1]^3$. The geometry consists of 6 faces, each composed of 2 triangles, resulting in 12 triangles (36 vertices) if fully expanded, or a more compact indexed representation using shared vertex buffers.
 
 ### Inputs and Outputs
 - **Input**: None (static definition).
-- **Output**: Vertex buffer data containing positions, colors, and UV coordinates for 36 vertices.
+- **Output**: Vertex buffer data containing positions, colors, and UV coordinates for a unit cube.
 
 ### Data Structures
-Two primary data structures define the geometry. The first, used in [S1, unofficial], defines a unit cube with corners at $(0,0,0)$ to $(1,1,1)$ and uses an index-based quad-to-triangle mapping. The second, used in [S2, unofficial], defines a cube centered at $(0,0,0)$ with corners at $\pm 0.5$ and uses a flat array of explicit vertex attributes.
+Two primary layout styles are documented in the sources.
 
-#### Structure A: Index-Based Unit Cube (Source [S1, unofficial])
-This structure defines 8 unique vertices and maps them to 12 triangles (6 quads) via indices.
+**Style 1: Indexed Quad Mapping (Source [S1, unofficial])**
+This style uses a compact vertex array and index mapping to generate triangles.
+- `Cube.vertices`: Array of 8 `Vector3` positions.
+- `Cube.uvOffsets`: Array of 4 `Vector2` UV coordinates.
+- `Cube.quads`: Flattened array of 24 integers, defining 6 quads (each quad is 4 vertex indices).
+- `Cube.quadsOffsetForTris`: Array of 6 integers, defining the triangle split for each quad.
 
-1.  **Vertices Array (`Cube.vertices`)**: 8 `Vector3` elements.
-    -   Index 0: $(0, 0, 0)$
-    -   Index 1: $(1, 0, 0)$
-    -   Index 2: $(1, 1, 0)$
-    -   Index 3: $(0, 1, 0)$
-    -   Index 4: $(0, 0, 1)$
-    -   Index 5: $(1, 0, 1)$
-    -   Index 6: $(1, 1, 1)$
-    -   Index 7: $(0, 1, 1)$
+**Style 2: Explicit Face Array (Source [S2, unofficial])**
+This style explicitly lists every vertex for every face, including colors.
+- `block_faces[6][6]`: A 2D array where the first dimension is the face index (0-5) and the second is the vertex index within that face (0-5).
+- Each vertex element contains:
+  - `Position`: `vec3`
+  - `Color`: `vec3`
+  - `Texture Coordinate`: `vec2`
 
-2.  **UV Offsets Array (`Cube.uvOffsets`)**: 4 `Vector2` elements.
-    -   Index 0: $(0, 0)$
-    -   Index 1: $(0, 1)$
-    -   Index 2: $(1, 0)$
-    -   Index 3: $(1, 1)$
+### Numbered Steps
 
-3.  **Quad Index Mapping (`Cube.quads`)**: Flattened array of 24 integers, representing 6 quads (4 indices each). The order corresponds to faces: Front (Z+), Back (Z-), Right (X+), Left (X-), Top (Y+), Bottom (Y-).
-    -   Values: `[0, 3, 1, 2, 5, 6, 4, 7, 3, 7, 2, 6, 1, 5, 0, 4, 4, 7, 0, 3, 1, 2, 5, 6]`
-    -   Face 0 (Front, Z+): Indices `0, 3, 1, 2`
-    -   Face 1 (Back, Z-): Indices `5, 6, 4, 7`
-    -   Face 2 (Right, X+): Indices `3, 7, 2, 6`
-    -   Face 3 (Left, X-): Indices `1, 5, 0, 4`
-    -   Face 4 (Top, Y+): Indices `4, 7, 0, 3`
-    -   Face 5 (Bottom, Y-): Indices `1, 2, 5, 6`
+**Step 1: Define Corner Vertices (Style 1)**
+Define the 8 corners of a unit cube. Source [S1, unofficial] uses coordinates $[0,1]$. Source [S2, unofficial] uses coordinates $[-0.5, 0.5]$. Both are valid depending on the rendering context (e.g., instancing offset vs. local model space).
+- If using $[0,1]^3$:
+  - $v_0 = (0,0,0)$
+  - $v_1 = (1,0,0)$
+  - $v_2 = (1,1,0)$
+  - $v_3 = (0,1,0)$
+  - $v_4 = (0,0,1)$
+  - $v_5 = (1,0,1)$
+  - $v_6 = (1,1,1)$
+  - $v_7 = (0,1,1)$
 
-4.  **Triangle Offset Mapping (`Cube.quadsOffsetForTris`)**: Array of 6 integers mapping quad indices to triangle vertices.
-    -   Values: `[0, 1, 2, 2, 1, 3]`
-    -   This allows iterating $t$ from 0 to 5 to get the two triangles for each quad. For a given face $f$, the triangle vertices are derived from `quads[4*f + quadsOffsetForTris[t]]`.
+**Step 2: Define UV Offsets (Style 1)**
+Define the 4 corners of the texture space.
+- $u_0 = (0,0)$
+- $u_1 = (0,1)$
+- $u_2 = (1,0)$
+- $u_3 = (1,1)$
 
-#### Structure B: Explicit Vertex Attribute Cube (Source [S2, unofficial])
-This structure defines 36 explicit vertices (6 per face), each containing Position (`vec3`), Color (`vec3`), and Texture Coordinate (`vec2`). The cube is centered at $(0,0,0)$ with side length 1 (range $[-0.5, 0.5]$).
+**Step 3: Define Quad Indices (Style 1)**
+Map the 6 faces to the 8 vertices. Each face is a quad defined by 4 vertex indices.
+- `Cube.quads` = $[0, 3, 1, 2, \quad 5, 6, 4, 7, \quad 3, 7, 2, 6, \quad 1, 5, 0, 4, \quad 4, 7, 0, 3, \quad 1, 2, 5, 6]$
+  - Face 0 (Bottom?): $0,3,1,2$
+  - Face 1 (Top?): $5,6,4,7$
+  - Face 2 (Left?): $3,7,2,6$
+  - Face 3 (Right?): $1,5,0,4$
+  - Face 4 (Back?): $4,7,0,3$
+  - Face 5 (Front?): $1,2,5,6$
+  *(Note: The specific face-to-axis mapping depends on the coordinate system handedness and winding order, but the connectivity is fixed by the array.)*
 
-The array `block_faces[6][6]` stores the vertices. The faces are ordered: Back (Z-), Front (Z+), Left (X-), Right (X+), Bottom (Y-), Top (Y+).
+**Step 4: Define Triangle Splitting (Style 1)**
+Split each quad into two triangles.
+- `Cube.quadsOffsetForTris` = $[0, 1, 2, \quad 2, 1, 3]$
+  - For each quad, the first triangle uses indices $0, 1, 2$ of the quad's vertex list.
+  - The second triangle uses indices $2, 1, 3$ (note the reversed winding for the second triangle to maintain consistent normal direction, or $0, 2, 3$ depending on winding convention). Source [S1, unofficial] uses $[0,1,2]$ and $[2,1,3]$.
 
-1.  **Back Face (Z-)**:
-    -   Vertices:
-        1.  Pos: $(-0.5, -0.5, -0.5)$, Color: $(0.9, 0.9, 0.9)$, UV: $(0, 0)$
-        2.  Pos: $(0.5, 0.5, -0.5)$, Color: $(0.9, 0.9, 0.9)$, UV: $(1, 1)$
-        3.  Pos: $(0.5, -0.5, -0.5)$, Color: $(0.9, 0.9, 0.9)$, UV: $(1, 0)$
-        4.  Pos: $(0.5, 0.5, -0.5)$, Color: $(0.9, 0.9, 0.9)$, UV: $(1, 1)$
-        5.  Pos: $(-0.5, -0.5, -0.5)$, Color: $(0.9, 0.9, 0.9)$, UV: $(0, 0)$
-        6.  Pos: $(-0.5, 0.5, -0.5)$, Color: $(0.9, 0.9, 0.9)$, UV: $(0, 1)$
+**Step 5: Generate Explicit Face Data (Style 2)**
+For each of the 6 faces, define 6 vertices (2 triangles, sharing no vertices to allow unique normals/colors).
+- **Back Face (Z-)**:
+  - Vertices: $(-0.5,-0.5,-0.5), (0.5,0.5,-0.5), (0.5,-0.5,-0.5), (0.5,0.5,-0.5), (-0.5,-0.5,-0.5), (-0.5,0.5,-0.5)$
+  - Color: $(0.9, 0.9, 0.9)$
+  - UVs: $(0,0), (1,1), (1,0), (1,1), (0,0), (0,1)$
+- **Front Face (Z+)**:
+  - Vertices: $(-0.5,-0.5,0.5), (0.5,-0.5,0.5), (0.5,0.5,0.5), (0.5,0.5,0.5), (-0.5,0.5,0.5), (-0.5,-0.5,0.5)$
+  - Color: $(0.9, 0.9, 0.9)$
+  - UVs: $(0,0), (1,0), (1,1), (1,1), (0,1), (0,0)$
+- **Left Face (X-)**:
+  - Vertices: $(-0.5,0.5,0.5), (-0.5,0.5,-0.5), (-0.5,-0.5,-0.5), (-0.5,-0.5,-0.5), (-0.5,-0.5,0.5), (-0.5,0.5,0.5)$
+  - Color: $(0.8, 0.8, 0.8)$
+  - UVs: $(1,0), (1,1), (0,1), (0,1), (0,0), (1,0)$
+- **Right Face (X+)**:
+  - Vertices: $(0.5,0.5,0.5), (0.5,-0.5,-0.5), (0.5,0.5,-0.5), (0.5,-0.5,-0.5), (0.5,0.5,0.5), (0.5,-0.5,0.5)$
+  - Color: $(0.8, 0.8, 0.8)$
+  - UVs: $(1,0), (0,1), (1,1), (0,1), (0,0), (1,0)$
+- **Bottom Face (Y-)**:
+  - Vertices: $(-0.5,-0.5,-0.5), (0.5,-0.5,-0.5), (0.5,-0.5,0.5), (0.5,-0.5,0.5), (-0.5,-0.5,0.5), (-0.5,-0.5,-0.5)$
+  - Color: $(1.0, 1.0, 1.0)$
+  - UVs: $(0,1), (1,1), (1,0), (1,0), (0,0), (0,1)$
+- **Top Face (Y+)**:
+  - Vertices: $(-0.5,0.5,-0.5), (0.5,0.5,0.5), (0.5,0.5,-0.5), (0.5,0.5,0.5), (-0.5,0.5,-0.5), (-0.5,0.5,0.5)$
+  - Color: $(1.0, 1.0, 1.0)$
+  - UVs: $(0,1), (1,0), (1,1), (1,0), (0,1), (0,0)$
 
-2.  **Front Face (Z+)**:
-    -   Vertices:
-        1.  Pos: $(-0.5, -0.5, 0.5)$, Color: $(0.9, 0.9, 0.9)$, UV: $(0, 0)$
-        2.  Pos: $(0.5, -0.5, 0.5)$, Color: $(0.9, 0.9, 0.9)$, UV: $(1, 0)$
-        3.  Pos: $(0.5, 0.5, 0.5)$, Color: $(0.9, 0.9, 0.9)$, UV: $(1, 1)$
-        4.  Pos: $(0.5, 0.5, 0.5)$, Color: $(0.9, 0.9, 0.9)$, UV: $(1, 1)$
-        5.  Pos: $(-0.5, 0.5, 0.5)$, Color: $(0.9, 0.9, 0.9)$, UV: $(0, 1)$
-        6.  Pos: $(-0.5, -0.5, 0.5)$, Color: $(0.9, 0.9, 0.9)$, UV: $(0, 0)$
-
-3.  **Left Face (X-)**:
-    -   Vertices:
-        1.  Pos: $(-0.5, 0.5, 0.5)$, Color: $(0.8, 0.8, 0.8)$, UV: $(1, 0)$
-        2.  Pos: $(-0.5, 0.5, -0.5)$, Color: $(0.8, 0.8, 0.8)$, UV: $(1, 1)$
-        3.  Pos: $(-0.5, -0.5, -0.5)$, Color: $(0.8, 0.8, 0.8)$, UV: $(0, 1)$
-        4.  Pos: $(-0.5, -0.5, -0.5)$, Color: $(0.8, 0.8, 0.8)$, UV: $(0, 1)$
-        5.  Pos: $(-0.5, -0.5, 0.5)$, Color: $(0.8, 0.8, 0.8)$, UV: $(0, 0)$
-        6.  Pos: $(-0.5, 0.5, 0.5)$, Color: $(0.8, 0.8, 0.8)$, UV: $(1, 0)$
-
-4.  **Right Face (X+)**:
-    -   Vertices:
-        1.  Pos: $(0.5, 0.5, 0.5)$, Color: $(0.8, 0.8, 0.8)$, UV: $(1, 0)$
-        2.  Pos: $(0.5, -0.5, -0.5)$, Color: $(0.8, 0.8, 0.8)$, UV: $(0, 1)$
-        3.  Pos: $(0.5, 0.5, -0.5)$, Color: $(0.8, 0.8, 0.8)$, UV: $(1, 1)$
-        4.  Pos: $(0.5, -0.5, -0.5)$, Color: $(0.8, 0.8, 0.8)$, UV: $(0, 1)$
-        5.  Pos: $(0.5, 0.5, 0.5)$, Color: $(0.8, 0.8, 0.8)$, UV: $(0, 0)$
-        6.  Pos: $(0.5, -0.5, 0.5)$, Color: $(0.8, 0.8, 0.8)$, UV: $(1, 0)$
-
-5.  **Bottom Face (Y-)**:
-    -   Vertices:
-        1.  Pos: $(-0.5, -0.5, -0.5)$, Color: $(1.0, 1.0, 1.0)$, UV: $(0, 1)$
-        2.  Pos: $(0.5, -0.5, -0.5)$, Color: $(1.0, 1.0, 1.0)$, UV: $(1, 1)$
-        3.  Pos: $(0.5, -0.5, 0.5)$, Color: $(1.0, 1.0, 1.0)$, UV: $(1, 0)$
-        4.  Pos: $(0.5, -0.5, 0.5)$, Color: $(1.0, 1.0, 1.0)$, UV: $(1, 0)$
-        5.  Pos: $(-0.5, -0.5, 0.5)$, Color: $(1.0, 1.0, 1.0)$, UV: $(0, 0)$
-        6.  Pos: $(-0.5, -0.5, -0.5)$, Color: $(1.0, 1.0, 1.0)$, UV: $(0, 1)$
-
-6.  **Top Face (Y+)**:
-    -   Vertices:
-        1.  Pos: $(-0.5, 0.5, -0.5)$, Color: $(1.0, 1.0, 1.0)$, UV: $(0, 1)$
-        2.  Pos: $(0.5, 0.5, 0.5)$, Color: $(1.0, 1.0, 1.0)$, UV: $(1, 0)$
-        3.  Pos: $(0.5, 0.5, -0.5)$, Color: $(1.0, 1.0, 1.0)$, UV: $(1, 1)$
-        4.  Pos: $(0.5, 0.5, 0.5)$, Color: $(1.0, 1.0, 1.0)$, UV: $(1, 0)$
-        5.  Pos: $(-0.5, 0.5, -0.5)$, Color: $(1.0, 1.0, 1.0)$, UV: $(0, 1)$
-        6.  Pos: $(-0.5, 0.5, 0.5)$, Color: $(1.0, 1.0, 1.0)$, UV: $(0, 0)$
-
-### Pseudocode
-The following Python-like pseudocode implements the generation of the explicit vertex layout (Structure B) as described in [S2, unofficial]. It creates a list of 36 vertices, each with position, color, and UV.
-
+### Pseudocode (Style 1 Implementation)
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def generate_block_face_vertices():
-    """
-    Generates the 36 vertices for a unit cube centered at (0,0,0).
-    Returns a list of 36 vertex dictionaries, each containing 'pos', 'color', and 'uv'.
-    Order: Back (Z-), Front (Z+), Left (X-), Right (X+), Bottom (Y-), Top (Y+).
-    """
-    vertices = []
-
-    # Helper to add a vertex
-    def add_vertex(x, y, z, r, g, b, u, v):
-        vertices.append({
-            'pos': (x, y, z),
-            'color': (r, g, b),
-            'uv': (u, v)
-        })
-
-    # Back Face (Z-)
-    # Vertices: (-0.5,-0.5,-0.5), (0.5,0.5,-0.5), (0.5,-0.5,-0.5), (0.5,0.5,-0.5), (-0.5,-0.5,-0.5), (-0.5,0.5,-0.5)
-    # UVs: (0,0), (1,1), (1,0), (1,1), (0,0), (0,1)
-    # Color: (0.9, 0.9, 0.9)
-    add_vertex(-0.5, -0.5, -0.5, 0.9, 0.9, 0.9, 0.0, 0.0)
-    add_vertex(0.5, 0.5, -0.5, 0.9, 0.9, 0.9, 1.0, 1.0)
-    add_vertex(0.5, -0.5, -0.5, 0.9, 0.9, 0.9, 1.0, 0.0)
-    add_vertex(0.5, 0.5, -0.5, 0.9, 0.9, 0.9, 1.0, 1.0)
-    add_vertex(-0.5, -0.5, -0.5, 0.9, 0.9, 0.9, 0.0, 0.0)
-    add_vertex(-0.5, 0.5, -0.5, 0.9, 0.9, 0.9, 0.0, 1.0)
-
-    # Front Face (Z+)
-    # Vertices: (-0.5,-0.5,0.5), (0.5,-0.5,0.5), (0.5,0.5,0.5), (0.5,0.5,0.5), (-0.5,0.5,0.5), (-0.5,-0.5,0.5)
-    # UVs: (0,0), (1,0), (1,1), (1,1), (0,1), (0,0)
-    # Color: (0.9, 0.9, 0.9)
-    add_vertex(-0.5, -0.5, 0.5, 0.9, 0.9, 0.9, 0.0, 0.0)
-    add_vertex(0.5, -0.5, 0.5, 0.9, 0.9, 0.9, 1.0, 0.0)
-    add_vertex(0.5, 0.5, 0.5, 0.9, 0.9, 0.9, 1.0, 1.0)
-    add_vertex(0.5, 0.5, 0.5, 0.9, 0.9, 0.9, 1.0, 1.0)
-    add_vertex(-0.5, 0.5, 0.5, 0.9, 0.9, 0.9, 0.0, 1.0)
-    add_vertex(-0.5, -0.5, 0.5, 0.9, 0.9, 0.9, 0.0, 0.0)
-
-    # Left Face (X-)
-    # Vertices: (-0.5,0.5,0.5), (-0.5,0.5,-0.5), (-0.5,-0.5,-0.5), (-0.5,-0.5,-0.5), (-0.5,-0.5,0.5), (-0.5,0.5,0.5)
-    # UVs: (1,0), (1,1), (0,1), (0,1), (0,0), (1,0)
-    # Color: (0.8, 0.8, 0.8)
-    add_vertex(-0.5, 0.5, 0.5, 0.8, 0.8, 0.8, 1.0, 0.0)
-    add_vertex(-0.5, 0.5, -0.5, 0.8, 0.8, 0.8, 1.0, 1.0)
-    add_vertex(-0.5, -0.5, -0.5, 0.8, 0.8, 0.8, 0.0, 1.0)
-    add_vertex(-0.5, -0.5, -0.5, 0.8, 0.8, 0.8, 0.0, 1.0)
-    add_vertex(-0.5, -0.5, 0.5, 0.8, 0.8, 0.8, 0.0, 0.0)
-    add_vertex(-0.5, 0.5, 0.5, 0.8, 0.8, 0.8, 1.0, 0.0)
-
-    # Right Face (X+)
-    # Vertices: (0.5,0.5,0.5), (0.5,-0.5,-0.5), (0.5,0.5,-0.5), (0.5,-0.5,-0.5), (0.5,0.5,0.5), (0.5,-0.5,0.5)
-    # UVs: (1,0), (0,1), (1,1), (0,1), (0,0), (1,0)
-    # Color: (0.8, 0.8, 0.8)
-    add_vertex(0.5, 0.5, 0.5, 0.8, 0.8, 0.8, 1.0, 0.0)
-    add_vertex(0.5, -0.5, -0.5, 0.8, 0.8, 0.8, 0.0, 1.0)
-    add_vertex(0.5, 0.5, -0.5, 0.8, 0.8, 0.8, 1.0, 1.0)
-    add_vertex(0.5, -0.5, -0.5, 0.8, 0.8, 0.8, 0.0, 1.0)
-    add_vertex(0.5, 0.5, 0.5, 0.8, 0.8, 0.8, 0.0, 0.0)
-    add_vertex(0.5, -0.5, 0.5, 0.8, 0.8, 0.8, 1.0, 0.0)
-
-    # Bottom Face (Y-)
-    # Vertices: (-0.5,-0.5,-0.5), (0.5,-0.5,-0.5), (0.5,-0.5,0.5), (0.5,-0.5,0.5), (-0.5,-0.5,0.5), (-0.5,-0.5,-0.5)
-    # UVs: (0,1), (1,1), (1,0), (1,0), (0,0), (0,1)
-    # Color: (1.0, 1.0, 1.0)
-    add_vertex(-0.5, -0.5, -0.5, 1.0, 1.0, 1.0, 0.0, 1.0)
-    add_vertex(0.5, -0.5, -0.5, 1.0, 1.0, 1.0, 1.0, 1.0)
-    add_vertex(0.5, -0.5, 0.5, 1.0, 1.0, 1.0, 1.0, 0.0)
-    add_vertex(0.5, -0.5, 0.5, 1.0, 1.0, 1.0, 1.0, 0.0)
-    add_vertex(-0.5, -0.5, 0.5, 1.0, 1.0, 1.0, 0.0, 0.0)
-    add_vertex(-0.5, -0.5, -0.5, 1.0, 1.0, 1.0, 0.0, 1.0)
-
-    # Top Face (Y+)
-    # Vertices: (-0.5,0.5,-0.5), (0.5,0.5,0.5), (0.5,0.5,-0.5), (0.5,0.5,0.5), (-0.5,0.5,-0.5), (-0.5,0.5,0.5)
-    # UVs: (0,1), (1,0), (1,1), (1,0), (0,1), (0,0)
-    # Color: (1.0, 1.0, 1.0)
-    add_vertex(-0.5, 0.5, -0.5, 1.0, 1.0, 1.0, 0.0, 1.0)
-    add_vertex(0.5, 0.5, 0.5, 1.0, 1.0, 1.0, 1.0, 0.0)
-    add_vertex(0.5, 0.5, -0.5, 1.0, 1.0, 1.0, 1.0, 1.0)
-    add_vertex(0.5, 0.5, 0.5, 1.0, 1.0, 1.0, 1.0, 0.0)
-    add_vertex(-0.5, 0.5, -0.5, 1.0, 1.0, 1.0, 0.0, 1.0)
-    add_vertex(-0.5, 0.5, 0.5, 1.0, 1.0, 1.0, 0.0, 0.0)
-
-    return vertices
+    # Define 8 corner positions for a unit cube [0,1]^3
+    vertices = [
+        (0,0,0), (1,0,0), (1,1,0), (0,1,0),
+        (0,0,1), (1,0,1), (1,1,1), (0,1,1)
+    ]
+    
+    # Define 4 UV corners
+    uv_offsets = [
+        (0,0), (0,1), (1,0), (1,1)
+    ]
+    
+    # Quad indices: 6 quads, each 4 vertex indices
+    quads = [
+        0, 3, 1, 2,  # Face 0
+        5, 6, 4, 7,  # Face 1
+        3, 7, 2, 6,  # Face 2
+        1, 5, 0, 4,  # Face 3
+        4, 7, 0, 3,  # Face 4
+        1, 2, 5, 6   # Face 5
+    ]
+    
+    # Triangle offsets for each quad: [i0, i1, i2, i2, i1, i3]
+    quads_offset_for_tris = [0, 1, 2, 2, 1, 3]
+    
+    # Generate final vertex stream
+    final_vertices = []
+    final_uvs = []
+    
+    for face_idx in range(6):
+        quad_start = face_idx * 4
+        quad_indices = quads[quad_start : quad_start + 4]
+        
+        # Split quad into 2 triangles
+        tri_indices = quads_offset_for_tris
+        
+        for tri_idx in range(2):
+            # Get the 3 vertex indices for this triangle
+            v0_idx = quad_indices[tri_indices[tri_idx * 3]]
+            v1_idx = quad_indices[tri_indices[tri_idx * 3 + 1]]
+            v2_idx = quad_indices[tri_indices[tri_idx * 3 + 2]]
+            
+            # Get UVs for these vertices
+            # Note: In this layout, UVs are associated with vertex indices in the quad
+            # The source implies a mapping where UVs are looked up by a specific offset
+            # For simplicity, assuming standard UV mapping per vertex index in the quad
+            u0_idx = tri_indices[tri_idx * 3]
+            u1_idx = tri_indices[tri_idx * 3 + 1]
+            u2_idx = tri_indices[tri_idx * 3 + 2]
+            
+            final_vertices.append(vertices[v0_idx])
+            final_vertices.append(vertices[v1_idx])
+            final_vertices.append(vertices[v2_idx])
+            
+            final_uvs.append(uv_offsets[u0_idx])
+            final_uvs.append(uv_offsets[u1_idx])
+            final_uvs.append(uv_offsets[u2_idx])
+            
+    return final_vertices, final_uvs
 ```
 
 ### Parameters and Edge Cases
-- **Cube Size**: The sources define a unit cube (side length 1). Scaling is applied via instance transformation matrices or vertex shader uniforms.
-- **Centering**: Source [S1, unofficial] uses $[0,1]^3$, while [S2, unofficial] uses $[-0.5, 0.5]^3$. Implementers must ensure consistency with their coordinate system.
-- **Winding Order**: The vertex order in [S2, unofficial] ensures consistent front-face winding (counter-clockwise) for all faces when viewed from the outside.
-- **Color Variation**: [S2, unofficial] assigns different base colors to different faces (Z-faces: 0.9, X-faces: 0.8, Y-faces: 1.0). This is likely for debugging or simple shading. In production, colors are typically passed via instance attributes or texture sampling.
-- **UV Mapping**: The UVs in [S2, unofficial] are not standard planar projections for all faces; they are specific to the face's orientation to ensure texture alignment. For example, the Left and Right faces have UVs that may require rotation or flipping depending on the texture atlas layout.
+- **Coordinate System**: Sources differ on origin. [S1, unofficial] uses $[0,1]^3$, [S2, unofficial] uses $[-0.5, 0.5]^3$. The implementer must choose based on whether the cube is instanced at integer grid coordinates (offset by 0.5) or if the mesh is centered.
+- **Winding Order**: The triangle splitting $[0,1,2]$ and $[2,1,3]$ ensures consistent normal direction (counter-clockwise or clockwise depending on view).
+- **Vertex Duplication**: Style 2 duplicates vertices for every face to allow unique normals and colors. This increases memory usage (36 vertices vs 8) but simplifies shading for per-face attributes.
+
+## Subtopics
+
+### [Voxel Mesh Generation (Cube Construction)](11001-voxel-mesh-generation-cube-construction.md)
+Constructs a static, axis-aligned cube mesh for a single voxel block by explicitly defining its geometry, normals, and per-vertex attributes. It solves the problem of rendering individual voxel units as distinct geometric primitives with specific material properties, such as texture tiles and ambient occlusion colors. Unlike smooth surface extraction methods that merge vertices to create continuous surfaces, this method duplicates vertices for each face to support independent face normals and per-vertex colors, resulting in a "blocky" aesthetic. It builds on the vertex data layout defined in [Block face vertex layout](2374-block-face-vertex-layout.md).
 
 ## Operating characteristics
-- **Time Complexity**: $O(1)$ to generate the static vertex buffer.
-- **Memory Complexity**: $O(1)$ for the static mesh data (36 vertices).
-- **Performance**: Rendering requires one draw call per visible face if not instanced, or one instanced draw call per chunk/region if instancing is used. The lack of face culling in the layout itself means the mesh generation step (handled by parent methods like [Face Culling and Visibility Optimization](3861-face-culling-and-visibility-optimization.md)) determines the actual vertex count sent to the GPU.
-- **Strengths**: Simple to implement, minimal memory overhead for the mesh definition, supports instancing efficiently.
-- **Limitations**: High vertex count for large scenes if not culled, no topology optimization (no greedy meshing), potential for overdraw if backfaces are not culled.
+- **Time Complexity**: $O(1)$ for mesh generation, as the cube geometry is static and pre-defined.
+- **Memory Complexity**: $O(1)$ per voxel if using instancing with a single shared cube mesh. If using explicit vertex arrays per voxel (Style 2 without instancing), it is $O(1)$ but with a higher constant factor (36 vertices vs 8).
+- **Performance**: Highly efficient for rendering large numbers of voxels via instanced rendering. The small, fixed geometry allows for minimal vertex buffer updates.
+- **Strengths**: Simple to implement, supports per-face attributes (colors, normals), compatible with standard graphics APIs.
+- **Limitations**: High vertex count if not instanced or indexed properly. Does not support smooth shading or curved surfaces.
+- **When to use**: Blocky voxel games, Minecraft-like environments, debugging voxel data.
+- **When not to use**: Smooth terrain, organic shapes, or when memory bandwidth is extremely constrained and vertex sharing is critical (though instancing mitigates this).
 
 ## Background
-The block face vertex layout is a standard technique in voxel rendering, particularly in games like Minecraft and its clones. It provides a simple, unoptimized mesh for each voxel face. The specific implementations in [S1, unofficial] and [S2, unofficial] reflect common patterns in open-source voxel engines, where the geometry is defined as a static constant to minimize runtime allocation.
+The method originates from early voxel rendering techniques where individual cubes were rendered as distinct entities. It is commonly found in voxel engine implementations that prioritize simplicity and per-face customization over mesh optimization. The specific layouts documented in [S1, unofficial] and [S2, unofficial] are from unofficial GitHub repositories implementing voxel renderers.
 
 ## Sources
 [S1] rarefushion/Cubic-Grid_Voxel_Renderer, https://github.com/rarefushion/Cubic-Grid_Voxel_Renderer, fetched 2026-10-27 (unofficial)

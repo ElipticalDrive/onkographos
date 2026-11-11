@@ -1,0 +1,148 @@
+--- v007.md
++++ v008.md
+@@ -4,28 +4,28 @@
+ 
+ ## Overview
+-This method computes the primary photometric reconstruction loss for differentiable volume rendering by weighting pixel-wise errors with a visibility map $V_M$. It solves the problem of supervising rendered images against ground-truth references in scenes with partial observability or occlusions, ensuring that gradients are only propagated through visible regions. It sets itself apart from standard photometric losses by explicitly masking the L1 and SSIM terms with visibility, while retaining the perceptual LPIPS term unmasked to preserve global structural consistency [S1].
++This method computes the primary photometric reconstruction loss for differentiable volume rendering by combining pixel-wise, structural, and perceptual metrics, weighted by a visibility mask to ignore occluded or background regions. It sets itself apart from standard photometric losses by explicitly incorporating a visibility map $\mathbf{V}_M$ to prevent gradients from propagating through unobserved areas, and by including a perceptual LPIPS term which is less sensitive to high-frequency noise than raw pixel differences [4262-composite-image-loss-with-visibility-weighting.md]. It builds on [Photometric and Image Reconstruction Losses](9789-photometric-and-image-reconstruction-losses.md).
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Inputs: Rendered image $\mathbf{I}_r$, ground-truth image $\mathbf{I}_{gt}$, visibility map $\mathbf{V}_M$.
+-- Output: Composite image loss scalar $L_c$.
++- **Inputs:** Rendered image $\mathbf{I}_r$, ground-truth image $\mathbf{I}_{gt}$, visibility map $\mathbf{V}_M$ (same spatial dimensions as images), and loss weights $\lambda_1, \lambda_{SSIM}, \lambda_{LPIPS}$.
++- **Output:** Composite image loss scalar $L_c$.
+ 
+ **Data Structures:**
+-- $\mathbf{I}_r, \mathbf{I}_{gt}$: Images of size $H \times W \times C$ (typically $C=3$ for RGB), values in $[0, 1]$.
+-- $\mathbf{V}_M$: Visibility map of size $H \times W$, values in $[0, 1]$. This map indicates the probability or certainty that a pixel corresponds to a visible surface point.
++- $\mathbf{I}_r, \mathbf{I}_{gt}$: 3D tensors of shape $(H, W, C)$, typically float32, normalized to $[0, 1]$ or $[-1, 1]$ depending on the specific LPIPS implementation.
++- $\mathbf{V}_M$: 2D or 3D tensor of shape $(H, W)$ or $(H, W, 1)$, values in $[0, 1]$.
+ 
+ **Formulas:**
+ The composite loss $L_c$ is defined as [S1]:
+ $$
+-L_c = \lambda_1 L_1(\mathbf{V}_M \odot \mathbf{I}_r, \mathbf{V}_M \odot \mathbf{I}_{gt}) + \lambda_{SSIM} L_{SSIM}(\mathbf{V}_M \odot \mathbf{I}_r, \mathbf{V}_M \odot \mathbf{I}_{gt}) + \lambda_{LPIPS} L_{LPIPS}(\mathbf{I}_r, \mathbf{I}_{gt})
++L_c = \lambda_1 L_1 (\mathbf{V}_M \odot \mathbf{I}_r, \mathbf{V}_M \odot \mathbf{I}_{gt}) + \lambda_{SSIM} L_{SSIM} (\mathbf{V}_M \odot \mathbf{I}_r, \mathbf{V}_M \odot \mathbf{I}_{gt}) + \lambda_{LPIPS} L_{LPIPS} (\mathbf{I}_r, \mathbf{I}_{gt})
+ $$
+-where $\odot$ denotes the Hadamard (element-wise) product. The total training loss $L$ combines this with regularization terms [S1]:
++where $\odot$ denotes the Hadamard (element-wise) product. The total training loss $L$ further includes regularization terms [S1]:
+ $$
+ L = L_c + \lambda_{sc} L_{sc} + \lambda_{vm} L_{vm}
+ $$
+-Here, $L_{sc}$ is the sampling coordinate regularization loss and $L_{vm}$ is the visibility map regularization loss [S1].
++Here, $L_{sc}$ is the sampling coordinate regularization loss and $L_{vm}$ is the visibility map regularization loss.
+ 
+ **Parameters:**
+-Typical values used in the source implementation [S1]:
++Typical values from the source implementation [S1]:
+ - $\lambda_1 = 0.8$
+ - $\lambda_{SSIM} = 0.2$
+@@ -43,5 +43,5 @@
+         I_r: Rendered image tensor (H, W, C).
+         I_gt: Ground truth image tensor (H, W, C).
+-        V_M: Visibility map tensor (H, W).
++        V_M: Visibility map tensor (H, W) or (H, W, 1).
+         lambda_1: Weight for L1 loss.
+         lambda_ssim: Weight for SSIM loss.
+@@ -49,26 +49,29 @@
+         
+     Returns:
+-        L_c: Scalar tensor representing the composite loss.
++        L_c: Scalar composite loss.
+     """
+-    # Mask the images with the visibility map
+-    # V_M needs to be broadcasted to (H, W, 1) for element-wise multiplication with images
+-    V_M_expanded = V_M.unsqueeze(-1)
+-    I_r_masked = I_r * V_M_expanded
+-    I_gt_masked = I_gt * V_M_expanded
++    # Ensure V_M has compatible shape for broadcasting with I_r and I_gt
++    # If V_M is (H, W), expand to (H, W, 1)
++    if V_M.ndim == 2:
++        V_M = V_M.unsqueeze(-1)
++        
++    # Apply visibility mask via Hadamard product
++    masked_I_r = I_r * V_M
++    masked_I_gt = I_gt * V_M
+     
+-    # Calculate L1 loss on masked images
+-    # L1 is typically mean absolute error
+-    l1_loss = torch.mean(torch.abs(I_r_masked - I_gt_masked))
++    # 1. L1 Loss on masked images
++    # L1 is the mean absolute error
++    l1_loss = torch.mean(torch.abs(masked_I_r - masked_I_gt))
+     
+-    # Calculate SSIM loss on masked images
+-    # Note: Standard SSIM implementations often assume unmasked inputs.
+-    # Here, we apply the mask before computing SSIM as per the formula.
+-    # Implementation of SSIM requires a helper function or library.
+-    # We assume a function ssim_loss(img1, img2) that returns a scalar.
+-    ssim_loss = ssim_loss_function(I_r_masked, I_gt_masked)
++    # 2. SSIM Loss on masked images
++    # SSIM is typically computed as 1 - SSIM_value to make it a loss
++    # Implementation depends on library (e.g., torchmetrics or custom)
++    # Assuming a function ssim_loss that returns a scalar between 0 and 1
++    ssim_loss = 1.0 - compute_ssim(masked_I_r, masked_I_gt)
+     
+-    # Calculate LPIPS loss on unmasked images
+-    # LPIPS is computed on the full images to capture perceptual differences
+-    lpips_loss = lpips_loss_function(I_r, I_gt)
++    # 3. LPIPS Loss on unmasked images
++    # LPIPS measures perceptual similarity using deep features
++    # Implementation depends on library (e.g., lpips package)
++    lpips_loss = compute_lpips(I_r, I_gt)
+     
+     # Combine losses
+@@ -76,10 +79,28 @@
+     
+     return L_c
++
++def compute_total_loss(L_c, L_sc, L_vm, lambda_sc=0.001, lambda_vm=0.15):
++    """
++    Computes the total loss L including regularization terms.
++    
++    Args:
++        L_c: Composite image loss.
++        L_sc: Sampling coordinate regularization loss.
++        L_vm: Visibility map regularization loss.
++        lambda_sc: Weight for sampling coordinate regularization.
++        lambda_vm: Weight for visibility map regularization.
++        
++    Returns:
++        L: Total loss.
++    """
++    L = L_c + (lambda_sc * L_sc) + (lambda_vm * L_vm)
++    return L
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Zero Visibility:** If $V_M$ is zero for a pixel, the L1 and SSIM terms contribute zero loss for that pixel. This prevents gradients from updating the scene representation for occluded or background regions where the rendered image might differ significantly from the ground truth (e.g., due to different camera poses or incomplete geometry) [S1].
+-- **LPIPS Masking:** The LPIPS term is *not* masked. This ensures that perceptual quality is maintained globally, even if specific pixels are masked out for photometric accuracy [S1].
+-- **Precision:** Ensure that the visibility map $V_M$ is normalized to $[0, 1]$ and matches the spatial dimensions of $\mathbf{I}_r$ and $\mathbf{I}_{gt}$.
++- **Visibility Mask Shape:** The visibility map $\mathbf{V}_M$ must be broadcastable to the image dimensions. If $\mathbf{V}_M$ is 2D, it must be expanded to match the channel dimension of $\mathbf{I}_r$ and $\mathbf{I}_{gt}$ before multiplication [S1].
++- **LPIPS Input Range:** LPIPS implementations often expect inputs in specific ranges (e.g., $[-1, 1]$ or $[0, 1]$). Ensure $\mathbf{I}_r$ and $\mathbf{I}_{gt}$ are normalized correctly before passing to the LPIPS function.
++- **SSIM on Masked Data:** Applying SSIM to masked images requires care. If $\mathbf{V}_M$ contains zeros, the local variance in those regions becomes zero, which can cause division by zero in SSIM calculations. The SSIM implementation should handle zero-variance regions by ignoring them or setting the local SSIM to 1 (perfect match) for those regions.
++- **Gradient Flow:** The visibility mask $\mathbf{V}_M$ is typically treated as a constant during the backward pass for $L_c$ to avoid updating the mask itself through the photometric loss. Updates to $\mathbf{V}_M$ are handled via its own regularization loss $L_{vm}$ [S1].
+ 
+ ## Subtopics
+@@ -89,12 +110,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by the computation of SSIM and LPIPS, which are more expensive than L1. SSIM involves local window operations, and LPIPS involves deep network feature extraction. The visibility weighting adds negligible overhead (element-wise multiplication).
+-- **Memory Complexity:** Requires storing the visibility map $\mathbf{V}_M$ and the intermediate masked images. LPIPS requires storing feature maps from the perceptual network.
+-- **Strengths:** Effectively handles occlusions and partial observations by ignoring unreliable pixels in photometric terms. The inclusion of LPIPS helps maintain perceptual quality.
+-- **Limitations:** Relies on an accurate visibility map $\mathbf{V}_M$. If $\mathbf{V}_M$ is inaccurate, the loss may incorrectly ignore or penalize pixels. The unmasked LPIPS term may still propagate gradients from occluded regions, potentially conflicting with the masked photometric terms.
+-- **When to use:** When training radiance fields or 3D Gaussians from image collections with varying coverage, occlusions, or noise, where simple pixel-wise losses fail due to misalignment or missing data [S1].
++- **Time Complexity:** Dominated by the SSIM and LPIPS computations. LPIPS involves forward passes through a pre-trained VGG network, which is computationally expensive compared to L1. SSIM involves local window statistics.
++- **Memory Complexity:** Requires storing intermediate tensors for masked images and gradients. LPIPS requires caching features from the VGG network.
++- **Performance:** The use of LPIPS improves perceptual quality but increases training time. The visibility weighting prevents artifacts in unobserved regions.
++- **Strengths:** Robust to occlusions, perceptually motivated, combines multiple loss types for balanced optimization.
++- **Limitations:** Computationally heavy due to LPIPS and SSIM. Sensitive to the choice of weights.
++- **When to Use:** When training differentiable volume rendering models where perceptual quality and handling of occlusions are critical.
++- **When Not to Use:** When computational resources are extremely limited and only basic pixel-wise accuracy is required.
+ 
+ ## Background
+-The method originates from the "Gaussian in the Wild" paper, which proposes 3D Gaussian Splatting for unconstrained image collections [S1]. It was introduced to address the challenges of training 3D Gaussian Splatting on real-world, unstructured image sets where traditional NeRF-like losses are insufficient due to the lack of precise depth or visibility information. The visibility map is derived from the Gaussian splatting process itself, indicating which pixels are reliably covered by Gaussians [S1].
++The method originates from the "Gaussian in the Wild" paper, which introduces 3D Gaussian Splatting for unconstrained image collections [S1]. It is used in the optimization phase of training 3D Gaussian Splatting models to ensure high-fidelity reconstruction from sparse or noisy input images. The visibility weighting mechanism is adapted from prior work on differentiable rendering to handle partial observability [S1].
+ 
+ ## Sources

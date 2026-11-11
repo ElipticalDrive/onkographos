@@ -3,174 +3,185 @@
 Also called: Face culling meshing, Face-based Meshing, Block Mesh Generation, Voxel Face Generation, Voxel face extraction, Block Surface Extraction, Voxel Surface Extraction
 
 ## Overview
-Greedy Meshing / Face Culling is a surface extraction technique that generates a static triangle mesh for a voxel chunk by iterating through occupied voxel positions and emitting geometry only for faces that are adjacent to empty space or transparent blocks [S1, S2, S3, unofficial]. It solves the problem of excessive polygon counts in voxel worlds by skipping interior faces, generating geometry only for exterior (exposed) faces [S4, unofficial]. Unlike its parent method, [Greedy Meshing](1776-greedy-meshing.md), which merges adjacent coplanar faces into larger quads, this approach does not perform merging, resulting in a mesh where each exposed face is represented by a distinct quad [S1, S2, unofficial]. This reduces vertex count and draw calls compared to naive voxel rendering (one quad per voxel face) by excluding internal faces [S2, unofficial].
+Greedy Meshing / Face Culling is a surface extraction technique that generates a static triangle mesh for a voxel chunk by iterating through occupied voxel positions and emitting geometry only for faces that are adjacent to empty space or transparent blocks [S1, S2, S3, unofficial]. It differs from its parent method, [Greedy Meshing](3519-greedy-meshing.md), by not merging adjacent coplanar faces into larger quads [S1, S2, unofficial]. This approach reduces vertex count and draw calls compared to naive voxel rendering by excluding internal faces [S2, unofficial].
 
 ## How it works
-The method iterates over every voxel in a chunk, determines visibility for each of its six faces by checking neighbors, and emits vertex/index data for exposed faces.
+**Inputs:** A 3D voxel grid (chunk) representing block presence (boolean or material ID) and optional metadata (colors, textures).
+**Outputs:** A vertex buffer and an index buffer containing triangles for all exposed faces.
 
-### Inputs and Outputs
-*   **Input**: A voxel chunk data structure containing block presence information (e.g., a 3D boolean array or bit-packed array) and optionally block type/texture data.
-*   **Output**: A vertex buffer and an index buffer containing the triangle mesh for the chunk.
+**Data Structures:**
+*   **Voxel Grid:** A 3D array `blockMap` or `filled` of size $(S+2) \times (S+2) \times (S+2)$ or $S \times S \times S$, where $S$ is the chunk dimension. Values indicate block presence (true/1) or absence (false/0) [S1, S2, S6, unofficial].
+*   **Vertex Buffer:** An interleaved array of floats. Each vertex consists of 6 floats: 3 for position $(x, y, z)$ and 3 for normal $(n_x, n_y, n_z)$ [S6, unofficial].
+*   **Index Buffer:** An array of unsigned integers. Indices are 0-based relative to the start of a quad's 4 vertices [S6, unofficial].
+*   **Face Definitions:**
+    *   `VOXEL_FACE_NORMALS`: Map from Face enum to outward normal vectors: LEFT $(-1,0,0)$, RIGHT $(1,0,0)$, BOTTOM $(0,-1,0)$, TOP $(0,1,0)$, BACK $(0,0,-1)$, FRONT $(0,0,1)$ [S5, unofficial].
+    *   `VOXEL_VERTEX_LOCATIONS`: Array of 8 unit cube vertices centered at origin: $\{-0.5,-0.5,0.5\}, \{0.5,-0.5,0.5\}, \{0.5,-0.5,-0.5\}, \{-0.5,-0.5,-0.5\}, \{-0.5,0.5,0.5\}, \{0.5,0.5,0.5\}, \{0.5,0.5,-0.5\}, \{-0.5,0.5,-0.5\}$ [S5, unofficial].
+    *   `VOXEL_FACE_VERTEX_INDICES`: Map from Face enum to arrays of 2 triangles (each triangle is 3 vertex indices). Example for LEFT: $\{\{3,7,4\}, \{3,4,0\}\}$ [S5, unofficial].
+    *   `face_normals[6][3]`: Array of 6 unit vectors representing face directions [S3, unofficial].
+    *   `face_vertices[6][4][3]`: Array of 4 vertex offsets per face [S3, unofficial].
 
-### Data Structures
-Sources define several layouts for the voxel data and mesh buffers:
+**Steps:**
 
-1.  **Voxel Storage**:
-    *   A 3D boolean array `filled[512][512][512]` representing block presence [S2, unofficial].
-    *   A bit-packed array `active[x][y]` where each integer represents a column of blocks along the Z-axis, allowing neighbor checks via bit shifting [S1, unofficial].
-    *   A padded 3D boolean array `blockMap` of size `(size + 2) x (size + 2) x (size + 2)` to simplify boundary checks [S6, unofficial].
+1.  **Initialization:**
+    *   Initialize the voxel grid `blockMap` of size $(S+2) \times (S+2) \times (S+2)$ with all values false [S6, unofficial].
+    *   Allocate vertex buffer `chunkVertices` of size $S \times S \times S \times 144$ floats and index buffer `chunkIndices` of size $S \times S \times S \times 36$ unsigned ints [S6, unofficial].
+    *   Initialize a counter `counter = 0` for tracking vertex/face indices [S6, unofficial].
 
-2.  **Mesh Buffers**:
-    *   **Vertex Buffer**: An interleaved array of `GLfloat`. Each vertex consists of 6 floats: 3 for position (x, y, z) and 3 for normal (nx, ny, nz) [S6, unofficial]. Some implementations include color (RGB) or UV coordinates [S1, S3, unofficial].
-    *   **Index Buffer**: An array of `unsigned int`. Indices are 0-based relative to the start of a quad's 4 vertices, typically using the pattern `{0, 1, 2, 2, 3, 0}` to form two triangles [S6, unofficial].
+2.  **Iteration:**
+    *   Loop $x$ from $0$ to $S+1$, $y$ from $0$ to $S+1$, and $z$ from $0$ to $S+1$ [S6, unofficial].
+    *   Calculate local coordinates: $posX = x - xPos$, $posY = y - yPos$, $posZ = z - zPos$ [S6, unofficial].
+    *   If $posX \le 1$ or $posY \le 1$ or $posZ \le 1$, skip (boundary check) [S6, unofficial].
+    *   If `blockMap[posX][posY][posZ]` is false, skip [S6, unofficial].
 
-3.  **Face Definitions**:
-    *   **Normals**: Six unit vectors representing face directions: LEFT(-1,0,0), RIGHT(1,0,0), BOTTOM(0,-1,0), TOP(0,1,0), BACK(0,0,-1), FRONT(0,0,1) [S5, unofficial].
-    *   **Vertex Offsets**: For a unit cube centered at origin, vertices are defined at coordinates like {-0.5,-0.5,0.5}, etc. [S5, unofficial]. Alternatively, face-specific vertex positions are calculated using offsets of 0 or `-blockSize` relative to the block's base position [S1, unofficial].
-    *   **Face Indices**: A mapping from face direction to two triangles (arrays of 3 vertex indices). Example for LEFT face: `{{3,7,4}, {3,4,0}}` [S5, unofficial].
+3.  **Face Culling:**
+    *   For each of the 6 neighbors (X-, X+, Y-, Y+, Z-, Z+):
+        *   Check if the neighbor block in `blockMap` is false (empty) [S6, unofficial].
+        *   If empty, the face is exposed.
 
-### Algorithm Steps
+4.  **Geometry Generation:**
+    *   Define vertex arrays for the 6 faces of the cube centered at $(x, y, z)$. Each face has 4 vertices with 3 position floats and 3 normal floats (24 floats per face) [S6, unofficial].
+    *   Define index array `ind[] = {0, 1, 2, 2, 3, 0}` for two triangles forming a quad [S6, unofficial].
+    *   For each exposed face:
+        *   Copy the corresponding face's 24 floats to `chunkVertices` at offset $24 \times counter$ [S6, unofficial].
+        *   Copy indices to `chunkIndices` at offset $6 \times counter$, adding $4 \times counter$ to each index value [S6, unofficial].
+        *   Increment `counter` [S6, unofficial].
 
-1.  **Initialize Buffers**: Allocate memory for vertices and indices. If using a padded map, initialize `blockMap` with false values [S6, unofficial].
-2.  **Iterate Voxels**: Loop through all voxel coordinates $(x, y, z)$ within the chunk bounds. If the voxel at $(x, y, z)$ is empty, skip it [S3, S6, unofficial].
-3.  **Check Face Visibility**: For each of the 6 faces, determine if the adjacent neighbor is empty or transparent.
-    *   **Neighbor Check**: Calculate neighbor coordinates $(cx, cy, cz)$ using face normals [S3, unofficial].
-    *   **Boundary Handling**: If the neighbor coordinate is outside the chunk bounds, treat it as empty (exposed face) [S1, S6, unofficial].
-    *   **Data Check**: If the neighbor voxel is present (solid), the face is internal and skipped. If the neighbor is absent (empty), the face is exposed [S3, S4, unofficial].
-    *   *Bit-packed Optimization*: If using bit-packed columns, check specific bits in the `active` array for Z-neighbors, and check existence of adjacent column arrays for X/Y neighbors [S1, unofficial].
-4.  **Generate Geometry**: For each exposed face:
-    *   **Calculate Position**: Determine the world position of the face vertices. For a block at $(x,y,z)$ with block size $B$, positions are offset by $0$ or $-B$ depending on the face direction [S1, unofficial].
-    *   **Calculate Normal**: Assign the outward normal vector for the face [S5, unofficial].
-    *   **Calculate UV/Color**: If texture mapping is used, compute UV offsets based on texture atlas indices. Formula for UV offset in a grid of $cols \times rows$:
-        $$u_{off} = (tex\_idx \mod cols) \times (1.0 / cols)$$
-        $$v_{off} = \lfloor tex\_idx / cols \rfloor \times (1.0 / rows)$$
-        [S3, unofficial]
-    *   **Ambient Occlusion (Optional)**: Sample AO for the 4 vertices. To resolve ambiguous winding order due to AO, compare diagonal AO sums: if $(ao[0] + ao[2]) > (ao[1] + ao[3])$, flip the triangle winding [S3, unofficial].
-    *   **Emit Vertices**: Add 4 vertices (position, normal, UV, color) to the vertex buffer [S3, S6, unofficial].
-    *   **Emit Indices**: Add 6 indices to the index buffer using the face-specific triangle pattern, adjusting for the current vertex offset [S3, S6, unofficial].
+5.  **Advanced Face Generation (with Textures/AO):**
+    *   For each block at $(x,y,z)$ in chunk, check 6 neighbors [S1, S3, unofficial].
+    *   Front (z+1): check if bit (z+1) is set in `active[x][y]`. Back (z-1): check if bit (z-1) is set. Bottom (y-1): check if `active[x][y-1]` exists and bit z is set. Top (y+1): check if `active[x][y+1]` exists and bit z is set. Right (x+1): check if `active[x+1][y]` exists and bit z is set. Left (x-1): check if `active[x-1][y]` exists and bit z is set [S1, unofficial].
+    *   If a face is exposed (!face), push 6 vertices forming 2 triangles to the `vertices` array and 6 color entries to the `colors` array [S1, unofficial].
+    *   Compute UV offset from atlas properties: $u_{off} = (tex\_idx \mod cols) \times (1.0 / cols)$, $v_{off} = \lfloor tex\_idx / cols \rfloor \times (1.0 / rows)$ [S3, unofficial].
+    *   Sample AO for 4 vertices.
+    *   Emit 4 vertices with position, normal, UV, material ID, and AO [S3, unofficial].
+    *   In `emit_indices`: compute flip = $(ao[0] + ao[2]) > (ao[1] + ao[3])$. If flip, emit triangles (start, start+1, start+3) and (start+1, start+2, start+3). Else, emit (start, start+1, start+2) and (start+2, start+3, start) [S3, unofficial].
 
-### Pseudocode
+6.  **Buffer Creation:**
+    *   Create THREE.BufferGeometry. Create Float32Array for positions (length * 3) and colors (length * 3) [S1, unofficial].
+    *   Set XYZ for positions and XYZW for colors (alpha always 1) [S1, unofficial].
+    *   Compute vertex and face normals [S1, unofficial].
+    *   Create MeshLambertMaterial with vertexColors [S1, unofficial].
+
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def generate_face_culled_mesh(chunk_data, chunk_size, block_size):
+def generate_mesh(block_map, chunk_size, block_size):
+    """
+    block_map: 3D array of booleans, size (chunk_size + 2)^3
+    chunk_size: int, dimension of the voxel grid
+    block_size: float, size of one voxel
+    """
     vertices = []
     indices = []
-    vertex_offset = 0
+    counter = 0
     
-    # Define face normals and corresponding vertex offsets for a unit cube
-    # Normals: Left(-1,0,0), Right(1,0,0), Bottom(0,-1,0), Top(0,1,0), Back(0,0,-1), Front(0,0,1)
+    # Face definitions
     face_normals = [
-        (-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)
+        [-1, 0, 0], [1, 0, 0],  # Left, Right
+        [0, -1, 0], [0, 1, 0],  # Bottom, Top
+        [0, 0, -1], [0, 0, 1]   # Back, Front
     ]
     
-    # Vertex offsets for each face relative to block origin (0,0,0)
-    # Each face has 4 vertices. Order must match index pattern {0,1,2,2,3,0}
-    face_vertex_offsets = [
-        # Left (x-1)
-        [(-1,0,0), (-1,0,-1), (-1,-1,-1), (-1,-1,0)],
-        # Right (x+1)
-        [(1,0,0), (1,0,-1), (1,-1,-1), (1,-1,0)],
-        # Bottom (y-1)
-        [(0,-1,0), (0,-1,-1), (-1,-1,-1), (-1,-1,0)],
-        # Top (y+1)
-        [(0,1,0), (0,1,-1), (-1,1,-1), (-1,1,0)],
-        # Back (z-1)
-        [(0,0,-1), (-1,0,-1), (-1,-1,-1), (0,-1,-1)],
-        # Front (z+1)
-        [(0,0,0), (-1,0,0), (-1,-1,0), (0,-1,0)]
+    # Vertex offsets for a unit cube centered at origin
+    unit_vertices = [
+        [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, -0.5, -0.5], [-0.5, -0.5, -0.5],
+        [-0.5, 0.5, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5]
     ]
     
-    # Standard index pattern for two triangles forming a quad
-    quad_indices = [0, 1, 2, 2, 3, 0]
+    # Indices for 2 triangles per face (quad)
+    # Note: Specific index mapping depends on face orientation. 
+    # Simplified generic quad indices for demonstration:
+    quad_indices = [0, 1, 2, 2, 3, 0] 
 
-    for x in range(chunk_size):
-        for y in range(chunk_size):
-            for z in range(chunk_size):
-                # Skip empty voxels
-                if not chunk_data.is_occupied(x, y, z):
+    for x in range(1, chunk_size + 1):
+        for y in range(1, chunk_size + 1):
+            for z in range(1, chunk_size + 1):
+                if not block_map[x][y][z]:
                     continue
-
-                for face_idx in range(6):
-                    nx, ny, nz = face_normals[face_idx]
+                
+                for face_idx, normal in enumerate(face_normals):
+                    # Check neighbor
+                    nx, ny, nz = x + normal[0], y + normal[1], z + normal[2]
                     
-                    # Calculate neighbor coordinates
-                    neighbor_x = x + nx
-                    neighbor_y = y + ny
-                    neighbor_z = z + nz
-                    
-                    # Check if neighbor is empty or out of bounds
-                    is_exposed = False
-                    if (neighbor_x < 0 or neighbor_x >= chunk_size or
-                        neighbor_y < 0 or neighbor_y >= chunk_size or
-                        neighbor_z < 0 or neighbor_z >= chunk_size):
+                    # Boundary check: if neighbor is out of bounds or empty, face is exposed
+                    if nx < 0 or nx >= chunk_size + 2 or ny < 0 or ny >= chunk_size + 2 or nz < 0 or nz >= chunk_size + 2:
                         is_exposed = True
-                    elif not chunk_data.is_occupied(neighbor_x, neighbor_y, neighbor_z):
-                        is_exposed = True
+                    else:
+                        is_exposed = not block_map[nx][ny][nz]
                     
-                    if not is_exposed:
-                        continue
-
-                    # Emit geometry for this exposed face
-                    for v_idx in range(4):
-                        ox, oy, oz = face_vertex_offsets[face_idx][v_idx]
+                    if is_exposed:
+                        # Generate 4 vertices for this face
+                        # Note: In a real implementation, specific vertex indices 
+                        # from unit_vertices must be mapped to the correct face geometry.
+                        # For simplicity, we assume a generic quad generation here.
+                        # A robust implementation uses face-specific vertex mappings.
                         
-                        # World position
-                        wx = (x + ox) * block_size
-                        wy = (y + oy) * block_size
-                        wz = (z + oz) * block_size
+                        # Example: Generate a quad at the face position
+                        # This part requires precise mapping of unit_vertices to face geometry
+                        # based on the normal. The source [S6, unofficial] implies copying pre-defined 
+                        # face vertex arrays.
                         
-                        # Normal is constant for the face
-                        nx_f, ny_f, nz_f = face_normals[face_idx]
+                        # Placeholder for precise face vertex generation based on normal
+                        face_vertices = get_face_vertices(normal, unit_vertices)
                         
-                        # Add vertex (Position + Normal)
-                        vertices.append((wx, wy, wz, nx_f, ny_f, nz_f))
-                    
-                    # Add indices
-                    for i in quad_indices:
-                        indices.append(vertex_offset + i)
-                    
-                    vertex_offset += 4
-
+                        for vx, vy, vz in face_vertices:
+                            # Position
+                            px = (x + vx) * block_size
+                            py = (y + vy) * block_size
+                            pz = (z + vz) * block_size
+                            vertices.append([px, py, pz])
+                            # Normal
+                            vertices.append([normal[0], normal[1], normal[2]])
+                        
+                        # Add indices
+                        for idx in quad_indices:
+                            indices.append(counter + idx)
+                        
+                        counter += 4
+                        
     return vertices, indices
-```
 
-### Parameters and Edge Cases
-*   **Block Size**: Typically 1.0 unit, but can be scaled [S1, S6, unofficial].
-*   **Chunk Size**: Common sizes are 16x16x16 or 512x512x512 depending on implementation [S1, S2, unofficial].
-*   **Boundary Conditions**: When checking neighbors at chunk boundaries (e.g., $y=0$ for bottom face), the neighbor is considered empty unless cross-chunk data is explicitly available [S1, S6, unofficial].
-*   **Precision**: Using integer coordinates for voxel positions avoids floating-point errors in neighbor lookups [S5, unofficial].
-*   **Empty Data**: If the voxel data array is empty, the mesh generation should return early to prevent errors [S5, unofficial].
+def get_face_vertices(normal, unit_vertices):
+    """
+    Returns 4 vertices for the face defined by the normal.
+    This is a simplified mapping; real implementations use specific face index maps.
+    """
+    # This is a placeholder. Real implementation uses VOXEL_FACE_VERTEX_INDICES
+    # from [S5, unofficial] to select correct 4 vertices from unit_vertices.
+    # For example, if normal is (0,0,1) (Front), specific indices are used.
+    return unit_vertices[:4] # Simplified
+```
 
 ## Subtopics
 
 ### [Visible Block Face Meshing](4919-visible-block-face-meshing.md)
-Explicitly handles cross-chunk boundary visibility checks to ensure global consistency, differing from the parent by not merging faces.
+Visible Block Face Meshing is a surface extraction technique that generates a static triangle mesh for a voxel chunk by iterating through occupied voxel positions and emitting geometry only for faces that are adjacent to empty space or transparent blocks. It differs from its parent method, [Voxel Chunk Mesh Generation (Face Culling)](4888-voxel-chunk-mesh-generation-face-culling.md), by explicitly handling cross-chunk boundary visibility checks to ensure global consistency, and it differs from [Greedy Meshing](52-greedy-meshing.md) by not merging adjacent coplanar faces into larger quads. This approach reduces vertex count and draw calls compared to naive voxel rendering by excluding internal faces.
 
 ### [Chunk Mesh Generation](8755-chunk-mesh-generation.md)
-Often incorporates dynamic zone management and recalculates merge boundaries based on player movement, unlike static greedy meshing.
+Chunk Mesh Generation creates a single vertex buffer for a voxel chunk by iterating through its voxels and generating geometry only for faces exposed to air or transparent blocks. It reduces draw calls by batching all visible faces of a chunk into one mesh, differing from instancing which draws individual block instances. It serves as the foundational geometry step before greedy face merging [Greedy Meshing / Face Culling](8774-greedy-meshing-face-culling.md).
 
 ### [Chunk Loading and Mesh Generation](8774-chunk-loading-and-mesh-generation.md)
-Manages the lifecycle of chunk geometry, caching GPU resources and handling updates when chunks change.
+This method manages the lifecycle of voxel chunk geometry by loading chunk data from a world, generating its mesh via a mesher, and caching the resulting GPU resources. It solves the problem of efficiently updating visible geometry when chunks are first accessed or when their content changes, ensuring that only chunks with non-empty geometry are rendered. It builds on [Greedy Meshing / Face Culling](8783-greedy-meshing-face-culling.md) for the actual triangle generation.
 
 ### Voxel Mesh Synthesis
-A post-processing step that converts validated leaf voxels from an octree into standard 3D cube meshes for export [S7, unofficial]. It generates 8 unique corner vertices for the cube, constructs 12 counter-clockwise triangular faces with outward-pointing normals, and outputs clean Wavefront .obj data [S7, unofficial].
+Voxel Mesh Synthesis is a post-processing step that converts validated leaf voxels from the octree into standard 3D cube meshes for export [S7, unofficial]. It generates 8 unique corner vertices for the cube, translated by the box's min and max coordinates, constructs 12 counter-clockwise triangular faces (2 triangles per cube face) ensuring outward-pointing surface normals, and outputs clean, standard Wavefront .obj data compatible with external 3D software [S7, unofficial].
 
 ### Chunk-based Voxel Rendering Pipeline
-A pipeline that instantiates a chunk, fills its grid from a world grid, generates the surface mesh, and allocates heap memory for vertex and index arrays. It creates Vertex Buffer Objects (VBO) and Index Buffer Objects (IBO) with specific layouts (e.g., `layout.Push(GL_FLOAT, 4)`) and draws the mesh using `glDrawElements` [S2, unofficial].
+This pipeline instantiates a chunk, fills its grid from a global grid using triple nested loops, generates the surface mesh by calling `c.Render()`, extracts vertex and index counts, allocates heap memory, copies data to arrays, creates a Vertex Buffer Object (VBO) and Index Buffer Object (IBO), and draws the mesh using `glDrawElements` [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: $O(N)$ where $N$ is the number of voxels in the chunk, as each voxel and its 6 neighbors are checked once [S1, S3, unofficial].
-*   **Memory Complexity**: $O(F)$ where $F$ is the number of exposed faces. In the worst case (checkerboard pattern), $F \approx 3N$, leading to high memory usage. In typical terrain, $F \ll N$.
-*   **Performance**: Reduces triangle count significantly compared to naive rendering (one quad per voxel face) but is higher than greedy meshing which merges faces. Performance is heavily dependent on the surface-to-volume ratio of the chunk [S2, unofficial].
-*   **Strengths**: Simple to implement, deterministic, no merging artifacts, good for static chunks [S1, S5, unofficial].
-*   **Limitations**: High draw call count if not batched, no quad merging leads to larger vertex buffers than greedy meshing [S1, S2, unofficial].
-*   **When to Use**: Static voxel worlds, simple terrain, or when implementation simplicity is prioritized over maximum mesh compression [S1, S4, unofficial].
-*   **When Not to Use**: Highly dynamic scenes requiring frequent mesh updates where greedy meshing's reduced triangle count would offer better performance, or when memory bandwidth is a critical bottleneck [S2, unofficial].
+**Time Complexity:** $O(N)$ where $N$ is the number of voxels in the chunk, as each voxel is visited once and up to 6 faces are checked [S1, S3, S6, unofficial].
+**Memory Complexity:** $O(F)$ where $F$ is the number of exposed faces, as each exposed face generates 4 vertices and 6 indices [S6, unofficial].
+**Measured Performance:** Not given in the sources.
+**Scaling:** Performance scales linearly with chunk size. Parallelization is possible by processing slabs (fixed Y-slices) asynchronously and merging results with a mutex [S2, unofficial].
+**Strengths:** Simple to implement, reduces vertex count significantly compared to rendering all voxels, suitable for static chunks [S1, S2, S3, unofficial].
+**Limitations:** Does not merge coplanar faces, resulting in higher vertex/face count than greedy meshing [S1, S2, unofficial]. Boundary checks can be complex for cross-chunk rendering [S1, unofficial].
+**When to use:** When simplicity is prioritized over mesh compactness, or as a baseline for more complex meshing algorithms [S1, S2, S3, unofficial].
+**When not to use:** When mesh compactness is critical for performance or memory, in which case [Greedy Meshing](3519-greedy-meshing.md) or [Voxel Mesh Generation (Run-based Greedy Meshing)](3127-voxel-mesh-generation-run-based-greedy-meshing.md) should be used.
 
 ## Background
-The technique is a fundamental surface extraction method in voxel rendering, originating from early voxel engines and games like Minecraft. It is widely used in WebGL voxel engines [S1, unofficial], C++ voxelizers [S2, unofficial], and game engine plugins [S5, unofficial]. The method is often implemented with optimizations like bit-packing for neighbor checks [S1, unofficial] or multi-threaded slab rendering [S2, unofficial].
+Greedy Meshing / Face Culling is a foundational technique in voxel engine development for generating geometry from voxel data. It is widely used in voxel engines and games to render large voxel worlds efficiently by only drawing visible surfaces [S1, S2, S3, S4, S5, S6, unofficial]. The method is often implemented as a precursor to more advanced meshing techniques like greedy face merging [S2, unofficial].
 
 ## Sources
 [S1] Show HN: Basic voxel engine in WebGL/JavaScript with full source, https://github.com/Lallassu/vox2, fetched 2026-10-26 (unofficial)

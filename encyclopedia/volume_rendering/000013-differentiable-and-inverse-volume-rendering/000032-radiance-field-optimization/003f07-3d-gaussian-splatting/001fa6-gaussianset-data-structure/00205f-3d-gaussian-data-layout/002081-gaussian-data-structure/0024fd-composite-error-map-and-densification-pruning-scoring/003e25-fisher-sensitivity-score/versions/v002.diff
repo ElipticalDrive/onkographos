@@ -1,0 +1,148 @@
+--- v001.md
++++ v002.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-The Fisher Sensitivity Score is a pruning metric for 3D Gaussian primitives that estimates the impact of each Gaussian on the L2 reconstruction loss using a block-diagonal approximation of the Hessian. It sets itself apart from visibility-based siblings like [Efficient Pruning Score](3598-efficient-pruning-score.md) by evaluating geometric sensitivity through the log-determinant of parameter gradients, thereby avoiding the bias toward larger Gaussians inherent in pixel-coverage heuristics.
++The Fisher Sensitivity Score is a pruning metric for 3D Gaussian primitives that estimates the impact of each Gaussian on the L2 reconstruction loss using a block-diagonal approximation of the Hessian [S1]. It sets itself apart from visibility-based siblings like [Efficient Pruning Score](3598-efficient-pruning-score.md) by evaluating geometric sensitivity through the log-determinant of parameter gradients, thereby avoiding the bias toward larger Gaussians inherent in pixel-coverage heuristics [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A trained 3D Gaussian scene model (means $\mathbf{x}_i$, scales $\mathbf{s}_i$, etc.) and a set of training views.
+-- **Output:** A scalar sensitivity score $U_i$ for each Gaussian $i$, used to rank and prune primitives.
++- **Input:** A trained 3D Gaussian scene model (means $\mathbf{x}_i$, scales $\mathbf{s}_i$, etc.) and a set of training views [S1].
++- **Output:** A scalar sensitivity score $U_i$ for each Gaussian $i$, used to rank and prune primitives [S1].
+ 
+ **Data Structures:**
+-The method operates on the standard 3D Gaussian attributes. For the score calculation, only the spatial mean $\mathbf{x}_i \in \mathbb{R}^3$ and scaling parameters $\mathbf{s}_i \in \mathbb{R}^3$ are utilized [S1].
++The method operates on the standard 3D Gaussian attributes [S1]. For the score calculation, only the spatial mean $\mathbf{x}_i \in \mathbb{R}^3$ and scaling parameters $\mathbf{s}_i \in \mathbb{R}^3$ are utilized [S1].
+ 
+ **Formulas:**
+@@ -23,5 +23,5 @@
+ \nabla_{\mathcal{G}}^2 L_2 = \sum_{\phi \in \mathcal{P}_{gt}} \nabla_{\mathcal{G}} I_{\mathcal{G}}(\phi) \nabla_{\mathcal{G}} I_{\mathcal{G}}(\phi)^T + (I_{\mathcal{G}}(\phi) - I_{gt}) \nabla_{\mathcal{G}}^2 I_{\mathcal{G}}(\phi) \quad (6)
+ $$
+-On a converged model, the residual term $(I_{\mathcal{G}}(\phi) - I_{gt})$ approaches zero, causing the second-order term to vanish. The Hessian approximates the Fisher Information Matrix:
++On a converged model, the residual term $(I_{\mathcal{G}}(\phi) - I_{gt})$ approaches zero, causing the second-order term to vanish [S1]. The Hessian approximates the Fisher Information Matrix:
+ $$
+ \nabla_{\mathcal{G}}^2 L_2 \approx \sum_{\phi \in \mathcal{P}_{gt}} \nabla_{\mathcal{G}} I_{\mathcal{G}}(\phi) \nabla_{\mathcal{G}} I_{\mathcal{G}}(\phi)^T \quad (7)
+@@ -35,9 +35,9 @@
+ **Steps:**
+ 1. **Patch Selection:** Render the scene at a lower resolution to form image patches. The standard patch size is $4 \times 4$ pixels [S1].
+-2. **Gradient Computation:** For each pixel in the patches, compute the gradient of the rendered image $I_{\mathcal{G}}$ with respect to the mean $\mathbf{x}_i$ and scale $\mathbf{s}_i$ of all visible Gaussians.
+-3. **Fisher Approximation:** Compute the outer product $\nabla_{\mathbf{x}_i, \mathbf{s}_i} I_{\mathcal{G}} \nabla_{\mathbf{x}_i, \mathbf{s}_i} I_{\mathcal{G}}^T$ for each pixel.
++2. **Gradient Computation:** For each pixel in the patches, compute the gradient of the rendered image $I_{\mathcal{G}}$ with respect to the mean $\mathbf{x}_i$ and scale $\mathbf{s}_i$ of all visible Gaussians [S1].
++3. **Fisher Approximation:** Compute the outer product $\nabla_{\mathbf{x}_i, \mathbf{s}_i} I_{\mathcal{G}} \nabla_{\mathbf{x}_i, \mathbf{s}_i} I_{\mathcal{G}}^T$ for each pixel [S1].
+ 4. **Aggregation:** Sum the Fisher approximations over all pixels within each patch and then sum these patch-wise results over all training views to obtain the scene-level Hessian approximation for each Gaussian [S1].
+-5. **Score Calculation:** Compute $U_i = \log |\text{Hessian}_{i}|$ for each Gaussian.
+-6. **Pruning:** Sort Gaussians by $U_i$ and remove the least sensitive ones.
++5. **Score Calculation:** Compute $U_i = \log |\text{Hessian}_{i}|$ for each Gaussian [S1].
++6. **Pruning:** Sort Gaussians by $U_i$ and remove the least sensitive ones [S1].
+ 7. **Refinement:** Fine-tune the remaining model without densification for a fixed number of iterations (e.g., 5,000) to recover quality [S1].
+ 8. **Iteration:** Repeat steps 1-7 for multiple rounds (e.g., two rounds) to achieve higher compression ratios [S1].
+@@ -52,53 +52,44 @@
+     patch_size: int, dimension of the square patch (default 4)
+     """
+-    n_gaussians = len(gaussians)
+-    # Accumulator for the Hessian approximation for each Gaussian
+-    # Shape: (n_gaussians, param_dim, param_dim)
+-    # param_dim = 6 (3 for mean, 3 for scale)
+-    hessian_accumulators = np.zeros((n_gaussians, 6, 6))
+-    
+-    # Downsample factor for patch rendering
+-    # If patch_size is 4, we render at 1/4 resolution to get one pixel per patch
+-    # Note: The paper says "rendering images at lower resolution... computing Fisher on each pixel"
+-    # effectively treating each low-res pixel as a patch aggregate.
+-    
++    n = len(gaussians)
++    k = 6  # 3 mean + 3 scale parameters
++    H_accum = [[0.0] * (k * k) for _ in range(n)]
++
+     for view in training_views:
+-        # Render at reduced resolution
+-        low_res_image = render_low_res(view, gaussians, scale_factor=patch_size)
+-        low_h, low_w, _ = low_res_image.shape
+-        
+-        # Iterate over low-res pixels (each represents a patch)
+-        for y in range(low_h):
+-            for x in range(low_w):
+-                # Get gradient of rendered pixel w.r.t Gaussian parameters
+-                # dI/dx_i and dI/ds_i for all visible Gaussians
+-                # This requires backpropagation through the splatting kernel
+-                gradients = compute_gradients(view, gaussians, x, y, patch_size)
+-                
+-                # gradients shape: (n_gaussians, 6)
+-                # Compute outer product for each Gaussian
+-                for i in range(n_gaussians):
+-                    grad_vec = gradients[i] # Shape (6,)
+-                    outer_prod = np.outer(grad_vec, grad_vec) # Shape (6, 6)
+-                    hessian_accumulators[i] += outer_prob
++        # Render scene at reduced resolution; each low-res pixel aggregates a patch_size x patch_size region
++        low_res_image = render_downsampled(view, gaussians, factor=patch_size)
++        H_img, W_img, _ = low_res_image.shape
+ 
+-    scores = np.zeros(n_gaussians)
+-    for i in range(n_gaussians):
+-        H_i = hessian_accumulators[i]
+-        # Compute log determinant
+-        # Handle singular matrices by adding small epsilon or checking condition number
+-        try:
+-            det = np.linalg.det(H_i)
+-            if det <= 0:
+-                # If determinant is non-positive, the matrix is singular or indefinite.
+-                # In practice, use absolute value or regularize.
+-                # The paper uses log|det|.
+-                scores[i] = np.log(np.abs(det) + 1e-8)
+-            else:
+-                scores[i] = np.log(det)
+-        except:
+-            scores[i] = -np.inf
+-            
++        for y in range(H_img):
++            for x in range(W_img):
++                # Compute gradients of the rendered pixel color w.r.t. mean and scale for all visible Gaussians
++                # Using automatic differentiation through the differentiable splatting kernel
++                grads = compute_gradients(view, gaussians, x, y, patch_size)
++                # grads[i] is a list of k floats: [dI/dx_i, dI/dy_i, dI/dz_i, dI/sx_i, dI/sy_i, dI/sz_i]
++
++                for i in range(n):
++                    g = grads[i]
++                    # Accumulate outer product for the block-diagonal Hessian approximation
++                    for r in range(k):
++                        for c in range(k):
++                            H_accum[i][r * k + c] += g[r] * g[c]
++
++    scores = [0.0] * n
++    for i in range(n):
++        # Extract k x k matrix from flattened accumulator
++        H_mat = [[H_accum[i][r * k + c] for c in range(k)] for r in range(k)]
++        det_val = compute_determinant(H_mat)
++        # Log-determinant score; add epsilon to handle singular matrices [G]
++        scores[i] = math.log(max(abs(det_val), 1e-8))
+     return scores
++
++def render_downsampled(view, gaussians, factor):
++    # Standard differentiable rasterization at reduced resolution
++    return render(view, gaussians, resolution_scale=1.0 / factor)
++
++def compute_gradients(view, gaussians, x, y, patch_size):
++    # Standard automatic differentiation through the splatting kernel
++    # Returns gradient of pixel color w.r.t. mean and scale for each Gaussian
++    return backprop_pixel(view, gaussians, x, y, patch_size)
+ ```
+ 
+@@ -122,6 +113,6 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Computing the full Hessian is expensive as it requires summing over all pixels/views. The patch-wise approximation reduces this cost by rendering at lower resolution [S1].
+-- **Memory Complexity:** Requires storing the Hessian accumulator for each Gaussian, which is $O(N \cdot k^2)$ where $N$ is the number of Gaussians and $k$ is the number of parameters considered (6 for mean/scale) [S1].
++- **Time Complexity:** Computing the full Hessian is expensive as it requires summing over all pixels/views [S1]. The patch-wise approximation reduces this cost by rendering at lower resolution [S1].
++- **Memory Complexity:** Requires storing a $6 \times 6$ accumulator per Gaussian, resulting in $O(N)$ memory where $N$ is the number of Gaussians [G].
+ - **Performance:** On Mip-NeRF 360, PUP 3D-GS achieves 26.67 PSNR, 0.7862 SSIM, 0.2719 LPIPS, 204.81 FPS, and 74.65 MB size after 90% pruning [S1]. It increases rendering speed by 3.56x on average compared to LightGaussian [S1].
+ - **Strengths:** Retains smaller Gaussians better than visibility-based methods; principled mathematical foundation [S1].
+@@ -129,5 +120,5 @@
+ 
+ ## Background
+-The Fisher Sensitivity Score was introduced in "PUP 3D-GS: Principled Uncertainty Pruning for 3D Gaussian Splatting" (2025) [S1]. It builds on the Fisher Information Matrix concept from statistical estimation theory, applying it to the differentiable rendering pipeline of 3D Gaussian Splatting. The method was developed to address the limitations of heuristic pruning scores, such as the bias toward large Gaussians in LightGaussian [S1].
++The method was introduced in "PUP 3D-GS: Principled Uncertainty Pruning for 3D Gaussian Splatting" (2025) [S1]. It builds on the Fisher Information Matrix concept from statistical estimation theory, applying it to the differentiable rendering pipeline of 3D Gaussian Splatting [S1]. The method was developed to address the limitations of heuristic pruning scores, such as the bias toward large Gaussians in LightGaussian [S1].
+ 
+ ## Sources

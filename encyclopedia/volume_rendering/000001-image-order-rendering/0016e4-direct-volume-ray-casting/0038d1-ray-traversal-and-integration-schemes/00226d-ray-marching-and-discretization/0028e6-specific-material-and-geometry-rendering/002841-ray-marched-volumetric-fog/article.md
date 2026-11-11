@@ -20,11 +20,11 @@ Ray-marched volumetric fog simulates light absorption, scattering, soft shadows,
 2. **Ray Clamping:** Clamp the maximum ray distance to a predefined `zfar` value to prevent infinite marching when the ray misses scene geometry [S1, unofficial].
 3. **Jittering:** Add a pseudo-random delta step to the ray's starting position to fix slice artifacts caused by aligned samples [S1, unofficial].
 4. **Ray Marching Loop:** Iterate from the camera (start) to the scene intersection (finish) at regular intervals $\Delta l$ [S1, unofficial].
-    - Calculate the current sample position $x(l_n)$ along the ray.
-    - Calculate the distance $l_n$ traveled from the camera to the current sample.
-    - Calculate the in-scattering term $L_i(x(l_n), \omega)$ for the current sample.
+    - Calculate the current sample position $x(l_n)$ along the ray [S1, unofficial].
+    - Calculate the distance $l_n$ traveled from the camera to the current sample [S1, unofficial].
+    - Calculate the in-scattering term $L_i(x(l_n), \omega)$ for the current sample [S1, unofficial].
     - Accumulate the contribution: $L \leftarrow L + L_i(x(l_n), \omega) \cdot e^{-\tau l_n} \cdot \Delta l$ [S1, unofficial].
-    - Update cumulative transmittance: $T \leftarrow T \cdot e^{-\tau \Delta l}$.
+    - Update cumulative transmittance: $T \leftarrow T \cdot e^{-\tau \Delta l}$ [S1, unofficial].
     - Early-out: If cumulative transmittance drops below a threshold, break the loop [S1, unofficial].
 5. **Final Composition:** Combine the accumulated fog radiance with the background scene color using the final transmittance [G].
 
@@ -65,9 +65,9 @@ Where:
 
 ```python
 def ray_marched_volumetric_fog(camera_pos, uv, depth_buffer, light_pos, light_intensity, fog_density, scattering_coeff, step_size, zfar, jitter_seed):
-    # Reconstruct scene intersection from depth buffer
+    # Reconstruct scene intersection from depth buffer [G]
     depth = depth_buffer[uv]
-    scene_pos = inverse_projection(uv, depth) # Standard inverse projection step [G]
+    scene_pos = inverse_projection(uv, depth)
     
     # Ray direction and length
     ray_dir = normalize(scene_pos - camera_pos)
@@ -75,39 +75,35 @@ def ray_marched_volumetric_fog(camera_pos, uv, depth_buffer, light_pos, light_in
     if ray_length > zfar:
         ray_length = zfar
         
-    # Jitter start position to fix slice artifacts
+    # Jitter start position to fix slice artifacts [S1, unofficial]
     jitter = pseudo_random(jitter_seed) * step_size
     current_pos = camera_pos + ray_dir * jitter
     current_dist = jitter
     
     accumulated_radiance = vec3(0.0)
-    transmittance = 1.0
     
-    # March from camera to scene
+    # March from camera to scene [S1, unofficial]
     while current_dist < ray_length:
         # Distance from sample to light
         dist_to_light = length(current_pos - light_pos)
         
-        # Visibility (1 if no shadow map)
+        # Visibility (1 if no shadow map) [S1, unofficial]
         visibility = 1.0 
         
-        # Phase function (Schlick approximation of HG)
+        # Phase function (Schlick approximation of HG) [S1, unofficial]
         phase = schlick_phase_function(ray_dir, normalize(light_pos - current_pos))
         
         # In-scattering term: L_i = (a * Phi / (4 * pi * d^2)) * v(x) * e^(-tau * d) * P
         in_scattering = (scattering_coeff * light_intensity / (4.0 * 3.14159 * dist_to_light * dist_to_light)) * visibility * exp(-fog_density * dist_to_light) * phase
         
-        # Transmittance from camera to current sample
+        # Transmittance from camera to current sample: e^(-tau * l_n)
         camera_transmittance = exp(-fog_density * current_dist)
         
-        # Accumulate radiance: L += L_i * T_camera * delta_l
+        # Accumulate radiance: L += L_i * T_camera * delta_l [S1, unofficial]
         accumulated_radiance += in_scattering * camera_transmittance * step_size
         
-        # Update transmittance for next step
-        transmittance *= exp(-fog_density * step_size)
-        
-        # Early-out optimization
-        if transmittance < 0.01:
+        # Early-out optimization when transmittance gets too low [S1, unofficial]
+        if camera_transmittance < 0.01:
             break
             
         # Move to next step
@@ -115,6 +111,11 @@ def ray_marched_volumetric_fog(camera_pos, uv, depth_buffer, light_pos, light_in
         current_pos = camera_pos + ray_dir * current_dist
         
     return accumulated_radiance
+
+def inverse_projection(uv, depth):
+    # Standard reconstruction of world position from UV and depth [G]
+    # Assumes normalized device coordinates and linear depth for simplicity
+    return camera_pos + ray_dir * depth
 
 def pseudo_random(seed):
     # Deterministic hash for jitter [G]
@@ -125,11 +126,6 @@ def schlick_phase_function(view_dir, light_dir, g=0.7):
     cos_theta = dot(view_dir, light_dir)
     g_sq = g * g
     return (1.0 - g_sq) / (1.0 + g_sq - 2.0 * g * cos_theta)
-
-def inverse_projection(uv, depth):
-    # Standard reconstruction of world position from UV and depth [G]
-    # Assumes normalized device coordinates and linear depth for simplicity
-    return camera_pos + ray_dir * depth
 ```
 
 ## Operating characteristics

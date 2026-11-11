@@ -3,139 +3,155 @@
 Also called: AABB Geometry, RenderClippedBoundingBox, Volume Extent Bounding Box
 
 ## Overview
-This method renders the clipped bounding box geometry of a volume extent to the framebuffer, optionally including texture coordinates [S1, S2, S3, unofficial]. It serves as a debug and visualization primitive in the [Debug and Visualization](4974-debug-and-visualization.md) family, converting scalar field data bounds into explicit geometric primitives for the graphics pipeline [G]. Unlike [Debug Voxel Visualization](7095-debug-voxel-visualization.md), which renders individual occupied voxels, this method renders a single box representing the entire volume extent [S2, unofficial]. It differs from [Bounding Box Drawing](2733-bounding-box-drawing.md) by specifically handling the update of vertex positions based on dynamic volume extents and supporting optional texture coordinate generation for mapping volume data onto the box faces [S1, S3, unofficial].
+This method renders the clipped bounding box geometry of a volume dataset to the framebuffer, optionally including texture coordinates [S1, S2, unofficial]. It serves as a debug and visualization primitive to delineate the spatial extent of the volume data [S2, unofficial]. Unlike [Debug Voxel Visualization](7095-debug-voxel-visualization.md), which renders individual voxels, this method renders a single wireframe or solid box representing the entire volume extent [S2, unofficial]. It builds on the [Debug and Visualization](4974-debug-and-visualization.md) principles by converting scalar field data boundaries into geometric primitives submitted to the graphics pipeline [G].
 
 ## How it works
-**Inputs:**
-- `minB`: Minimum corner of the bounding box (e.g., $(-1.0, -1.0, -0.42578125)$) [S2, unofficial].
-- `maxB`: Maximum corner of the bounding box (e.g., $(1.0, 1.0, 0.42578125)$) [S2, unofficial].
-- `tcoordFlag`: Boolean/int flag indicating whether to render texture coordinates [S1, unofficial].
-- `currentBlock`: Size index of the current rendering block [S1, unofficial].
-- `numberOfBlocks`: Total number of blocks to process [S1, unofficial].
-- `renWin`: Render window pointer for context and framebuffer access [S1, unofficial].
-- `img_size`: Image dimensions $(N_x, N_y, N_z)$ required for texture coordinate normalization [S3, unofficial].
-- `min_corner`, `max_corner`: Integer voxel indices defining the extent for texture coordinate calculation [S3, unofficial].
-
-**Outputs:**
-- Vertex Array Object (VAO) and Vertex Buffer Object (VBO) containing the box geometry [S2, unofficial].
-- Framebuffer output with the rendered box [S1, unofficial].
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `currentBlock`: `size_t` index of the current rendering block [S1, unofficial].
+    *   `numberOfBlocks`: `size_t` total number of blocks to process [S1, unofficial].
+    *   `tcoordFlag`: Boolean/int flag indicating whether to render texture coordinates [S1, unofficial].
+    *   `renWin`: Pointer to the render window context (e.g., `vtkRenderWindow`) [S1, unofficial].
+    *   `minB`, `maxB`: The minimum and maximum corners of the bounding box [S2, unofficial].
+*   **Outputs:**
+    *   Rendered geometry on the framebuffer [S1, unofficial].
 
 **Data Structures:**
-- **Vertices Array**: A flat array of 36 floats (12 triangles $\times$ 3 vertices $\times$ 3 components) defining the 6 faces of the box [S2, unofficial]. The corner coordinates used are $(x_0,y_0,z_1), (x_1,y_0,z_1), (x_1,y_1,z_1), (x_0,y_1,z_1)$ for one face and $(x_0,y_0,z_0), (x_1,y_0,z_0), (x_1,y_1,z_0), (x_0,y_1,z_0)$ for the opposite face [S3, unofficial].
+*   **Vertices Array:** A static array of 36 floats (12 triangles $\times$ 3 vertices $\times$ 3 components) defining the 6 faces of the box [S2, unofficial].
+*   **VAO/VBO:** Vertex Array Object and Vertex Buffer Object handles created via `glGenVertexArrays` and `glGenBuffers` [S2, unofficial].
 
 **Steps:**
-1. Extract minimum and maximum corners from the bounding box definition [S3, unofficial].
-2. If texture coordinates are requested, calculate normalized coordinates using image dimensions and voxel indices [S3, unofficial]:
-   $$
-   dx = \frac{0.5}{N_x}, \quad dy = \frac{0.5}{N_y}, \quad dz = \frac{0.5}{N_z}
-   $$
-   $$
-   x_0 = \frac{\text{min\_corner}.x}{N_x} + dx, \quad x_1 = \frac{\text{max\_corner}.x}{N_x} - dx
-   $$
-   $$
-   y_0 = \frac{\text{min\_corner}.y}{N_y} + dy, \quad y_1 = \frac{\text{max\_corner}.y}{N_y} - dy
-   $$
-   $$
-   z_0 = \frac{\text{min\_corner}.z}{N_z} + dz, \quad z_1 = \frac{\text{max\_corner}.z}{N_z} - dz
-   $$
-3. Construct the vertex positions using the extracted corners [S3, unofficial].
-4. Generate a VAO and VBO, upload the vertex data to the GPU with `GL_STATIC_DRAW`, set the vertex attribute pointer for position data (location 0, 3 floats, stride $3 \times \text{sizeof(float)}$, offset 0), and enable the attribute array [S2, unofficial].
-5. If texture coordinates are enabled, upload them to a separate buffer or interleaved array [S1, S3, unofficial].
-6. Bind the VAO and issue draw calls for the 12 triangles representing 6 faces [S2, unofficial].
-7. Return a status indicating whether rendering should abort [S1, unofficial].
+1.  **Validation:** Check if `currentBlock` is within the valid range $[0, \text{numberOfBlocks})$. If not, abort rendering [S1, unofficial].
+2.  **Geometry Generation:** Define the 8 corners of the axis-aligned bounding box.
+    *   Let $minB = (x_{min}, y_{min}, z_{min})$ and $maxB = (x_{max}, y_{max}, z_{max})$ [S2, unofficial].
+    *   The vertices are ordered to form 12 triangles (2 per face). The specific vertex order for the 8 corners is:
+        1.  $(x_{min}, y_{min}, z_{max})$
+        2.  $(x_{max}, y_{min}, z_{max})$
+        3.  $(x_{max}, y_{max}, z_{max})$
+        4.  $(x_{min}, y_{max}, z_{max})$
+        5.  $(x_{min}, y_{min}, z_{min})$
+        6.  $(x_{max}, y_{min}, z_{min})$
+        7.  $(x_{max}, y_{max}, z_{min})$
+        8.  $(x_{min}, y_{max}, z_{min})$ [S3, unofficial].
+    *   *Note:* Some implementations use specific default values for $minB$ and $maxB$, such as $(-1.0, -1.0, -0.42578125)$ and $(1.0, 1.0, 0.42578125)$ respectively [S2, unofficial].
+3.  **Texture Coordinates (Optional):** If `tcoordFlag` is true, generate texture coordinates based on the image size and corners.
+    *   Calculate deltas: $dx = 0.5 / \text{img\_size}.x$, $dy = 0.5 / \text{img\_size}.y$, $dz = 0.5 / \text{img\_size}.z$ [S3, unofficial].
+    *   Calculate normalized coordinates:
+        $$x_0 = \frac{\text{min\_corner}.x}{\text{img\_size}.x} + dx, \quad x_1 = \frac{\text{max\_corner}.x}{\text{img\_size}.x} - dx$$
+        $$y_0 = \frac{\text{min\_corner}.y}{\text{img\_size}.y} + dy, \quad y_1 = \frac{\text{max\_corner}.y}{\text{img\_size}.y} - dy$$
+        $$z_0 = \frac{\text{min\_corner}.z}{\text{img\_size}.z} + dz, \quad z_1 = \frac{\text{max\_corner}.z}{\text{img\_size}.z} - dz$$
+    *   Assign these coordinates to the corresponding vertices [S3, unofficial].
+4.  **Buffer Upload:**
+    *   Create VAO and VBO: `glGenVertexArrays(1, &vao); glGenBuffers(1, &vbo);` [S2, unofficial].
+    *   Upload vertex data: `glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);` [S2, unofficial].
+5.  **Attribute Setup:**
+    *   Set vertex attribute pointer: `glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), (GLvoid*)0);` [S2, unofficial].
+    *   Enable attribute: `glEnableVertexAttribArray(0);` [S2, unofficial].
+6.  **Rendering:** Submit the geometry to the graphics pipeline [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_aabb_geometry(minB, maxB, tcoordFlag, currentBlock, numberOfBlocks, img_size=None, min_corner=None, max_corner=None):
-    # Step 1: Geometry Generation
-    x0, y0, z0 = minB[0], minB[1], minB[2]
-    x1, y1, z1 = maxB[0], maxB[1], maxB[2]
+def render_aabb_geometry(current_block, number_of_blocks, tcoord_flag, ren_win, min_b, max_b, img_size=None):
+    # Step 1: Validation
+    if current_block < 0 or current_block >= number_of_blocks:
+        return False  # Abort rendering
 
-    vertices = []
-    texture_coords = []
+    # Step 2: Geometry Generation
+    # Define 8 corners based on min_b and max_b
+    # Order: Front-Top-Left, Front-Top-Right, Front-Bottom-Right, Front-Bottom-Left,
+    #        Back-Top-Left, Back-Top-Right, Back-Bottom-Right, Back-Bottom-Left
+    # Note: Coordinate system orientation (z-up vs z-forward) affects interpretation of min/max z
+    vertices = [
+        (min_b.x, min_b.y, max_b.z), (max_b.x, min_b.y, max_b.z), (max_b.x, max_b.y, max_b.z), (min_b.x, max_b.y, max_b.z),
+        (min_b.x, min_b.y, min_b.z), (max_b.x, min_b.y, min_b.z), (max_b.x, max_b.y, min_b.z), (min_b.x, max_b.y, min_b.z)
+    ]
 
-    if tcoordFlag and img_size is not None and min_corner is not None and max_corner is not None:
-        # Calculate normalized texture coordinates [S3, unofficial]
-        dx = 0.5 / img_size[0]
-        dy = 0.5 / img_size[1]
-        dz = 0.5 / img_size[2]
-        tx0 = min_corner[0] / img_size[0] + dx
-        tx1 = max_corner[0] / img_size[0] - dx
-        ty0 = min_corner[1] / img_size[1] + dy
-        ty1 = max_corner[1] / img_size[1] - dy
-        tz0 = min_corner[2] / img_size[2] + dz
-        tz1 = max_corner[2] / img_size[2] - dz
+    # Step 3: Texture Coordinates (Optional)
+    tex_coords = None
+    if tcoord_flag and img_size is not None:
+        if img_size.x == 0 or img_size.y == 0 or img_size.z == 0:
+            raise ValueError("Invalid image size")
+        
+        dx = 0.5 / img_size.x
+        dy = 0.5 / img_size.y
+        dz = 0.5 / img_size.z
+        
+        x0 = min_b.x / img_size.x + dx
+        x1 = max_b.x / img_size.x - dx
+        y0 = min_b.y / img_size.y + dy
+        y1 = max_b.y / img_size.y - dy
+        z0 = min_b.z / img_size.z + dz
+        z1 = max_b.z / img_size.z - dz
+        
+        # Assign tex coords to vertices (same order as vertices)
+        tex_coords = [
+            (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1),
+            (x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0)
+        ]
 
-        # Define vertices and texture coordinates for all 6 faces [S3, unofficial]
-        # Face z1
-        vertices.extend([(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)])
-        texture_coords.extend([(tx0, ty0, tz1), (tx1, ty0, tz1), (tx1, ty1, tz1), (tx0, ty1, tz1)])
-        # Face z0
-        vertices.extend([(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0)])
-        texture_coords.extend([(tx0, ty0, tz0), (tx1, ty0, tz0), (tx1, ty1, tz0), (tx0, ty1, tz0)])
-        # Face y1
-        vertices.extend([(x0, y1, z0), (x1, y1, z0), (x1, y1, z1), (x0, y1, z1)])
-        texture_coords.extend([(tx0, ty1, tz0), (tx1, ty1, tz0), (tx1, ty1, tz1), (tx0, ty1, tz1)])
-        # Face y0
-        vertices.extend([(x0, y0, z1), (x1, y0, z1), (x1, y0, z0), (x0, y0, z0)])
-        texture_coords.extend([(tx0, ty0, tz1), (tx1, ty0, tz1), (tx1, ty0, tz0), (tx0, ty0, tz0)])
-        # Face x1
-        vertices.extend([(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1)])
-        texture_coords.extend([(tx1, ty0, tz0), (tx1, ty1, tz0), (tx1, ty1, tz1), (tx1, ty0, tz1)])
-        # Face x0
-        vertices.extend([(x0, y0, z1), (x0, y1, z1), (x0, y1, z0), (x0, y0, z0)])
-        texture_coords.extend([(tx0, ty0, tz1), (tx0, ty1, tz1), (tx0, ty1, tz0), (tx0, ty0, tz0)])
-    else:
-        # Standard vertex positions without texture coordinates
-        vertices.extend([(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)])
-        vertices.extend([(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0)])
-        vertices.extend([(x0, y1, z0), (x1, y1, z0), (x1, y1, z1), (x0, y1, z1)])
-        vertices.extend([(x0, y0, z1), (x1, y0, z1), (x1, y0, z0), (x0, y0, z0)])
-        vertices.extend([(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1)])
-        vertices.extend([(x0, y0, z1), (x0, y1, z1), (x0, y1, z0), (x0, y0, z0)])
+    # Step 4: Buffer Upload
+    vao = glGenVertexArrays(1)
+    vbo = glGenBuffers(1)
+    
+    glBindVertexArray(vao)
+    glBindBuffer(GL_ARRAY_BUFFER, vbo)
+    
+    # Flatten vertices for upload
+    flat_vertices = []
+    for v in vertices:
+        flat_vertices.extend(v)
+        
+    glBufferData(GL_ARRAY_BUFFER, len(flat_vertices) * 4, flat_vertices, GL_STATIC_DRAW) # 4 bytes per float
+    
+    # Step 5: Attribute Setup
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * 4, None)
+    glEnableVertexAttribArray(0)
+    
+    # If texture coordinates are needed, add another attribute pointer
+    if tex_coords is not None:
+        flat_tex = []
+        for t in tex_coords:
+            flat_tex.extend(t)
+        glBufferSubData(GL_ARRAY_BUFFER, len(flat_vertices) * 4, len(flat_tex) * 4, flat_tex) # Assuming interleaved or separate buffer logic needed
+        # Note: Standard VAO setup for tex coords would require a second attribute pointer
+        # glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 3 * 4, offset)
+        # glEnableVertexAttribArray(1)
 
-    # Step 2: Buffer Upload
-    # Convert lists to flat arrays of floats for GPU upload
-    vertex_array = [v for vert in vertices for v in vert]
-    tex_coord_array = [v for vert in texture_coords for v in vert] if texture_coords else []
-
-    # Standard graphics API handles VAO/VBO generation, buffer allocation, and attribute setup [S2, unofficial]
-    # Example standard operations: glGenVertexArrays, glGenBuffers, glBindBuffer, glBufferData, glVertexAttribPointer, glEnableVertexAttribArray
-
-    # Step 3: Rendering
-    # Bind VAO and issue draw calls for the 12 triangles (36 vertices) [S2, unofficial]
-    # Return false to continue processing [S1, unofficial]
-    return False
+    glBindVertexArray(0)
+    
+    # Step 6: Rendering
+    # glDrawArrays(GL_TRIANGLES, 0, 36) # 12 triangles * 3 vertices
+    return True
 ```
 
 **Parameters:**
-- `minB`: Minimum corner, typically $(-1.0, -1.0, -0.42578125)$ [S2, unofficial].
-- `maxB`: Maximum corner, typically $(1.0, 1.0, 0.42578125)$ [S2, unofficial].
-- `tcoordFlag`: Boolean flag for texture coordinate rendering [S1, unofficial].
-- `currentBlock`: Current block index [S1, unofficial].
-- `numberOfBlocks`: Total blocks [S1, unofficial].
+*   `minB`: Default $(-1.0, -1.0, -0.42578125)$ [S2, unofficial].
+*   `maxB`: Default $(1.0, 1.0, 0.42578125)$ [S2, unofficial].
+*   `tcoordFlag`: Controls inclusion of texture coordinates [S1, unofficial].
 
-**Edge Cases:**
-- If `img_size` contains zero dimensions, texture coordinate generation fails and logs an error [S3, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Invalid Image Size:** If `img_size` components are zero, texture coordinate generation fails [S3, unofficial].
+*   **Scalar Type Support:** When used in conjunction with volume mappers, unsupported scalar types (e.g., `VTK_CHAR`, `VTK_BIT`, `VTK_ID_TYPE`, `VTK_STRING`) may cause rendering errors [S1, unofficial].
+*   **Precision:** Floating-point precision in coordinate calculations should be maintained to avoid gaps in the box geometry [S3, unofficial].
 
 ## Subtopics
 
 ### AABB Geometry Update
-Updates the vertex positions of the volume box based on a new Axis-Aligned Bounding Box (AABB) [S3, unofficial]. It extracts the min and max corners, assigns vertex positions in the order $(x_0,y_0,z_1), (x_1,y_0,z_1), (x_1,y_1,z_1), (x_0,y_1,z_1), (x_0,y_0,z_0), (x_1,y_0,z_0), (x_1,y_1,z_0), (x_0,y_1,z_0)$, copies them to the vertex coordinate buffer `mVertCoord`, and marks the bounds as dirty to trigger a redraw [S3, unofficial]. This variant is chosen when the volume extent changes dynamically and needs to be reflected in the visualization without regenerating the entire geometry from scratch.
+Updates the vertex positions of the volume box based on a new Axis-Aligned Bounding Box (AABB) [S3, unofficial]. It extracts the min and max corners of the new box, assigns them to the vertex positions in the specific order: $(x_0,y_0,z_1), (x_1,y_0,z_1), (x_1,y_1,z_1), (x_0,y_1,z_1), (x_0,y_0,z_0), (x_1,y_0,z_0), (x_1,y_1,z_0), (x_0,y_1,z_0)$, copies the vertices to the coordinate buffer (`mVertCoord`), and marks the geometry bounds as dirty to trigger a redraw [S3, unofficial]. This variant is chosen when the volume extent changes dynamically and needs to be reflected in the debug visualization without recreating the entire VAO/VBO [S3, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources.
-- **Memory Complexity**: Not given in the sources.
-- **Performance**: Highly efficient for debug visualization due to low vertex count. Performance is limited by the overhead of buffer updates if the bounding box changes frequently [S2, S3, unofficial].
-- **Strengths**: Simple to implement, low memory footprint, supports texture coordinate mapping for accurate volume extent visualization [S1, S3, unofficial].
-- **Limitations**: Only represents the volume extent, not the internal data distribution.
-- **When to use**: Debugging volume rendering pipelines, visualizing the active region of a volume dataset [S1, S3, unofficial].
-- **When not to use**: When detailed internal structure visualization is required; use [Debug Voxel Visualization](7095-debug-voxel-visualization.md) instead [G].
+*   **Time Complexity:** $O(1)$ for geometry generation and upload, as the number of vertices is fixed (36 floats) [S2, unofficial].
+*   **Memory Complexity:** $O(1)$, requiring a fixed-size buffer for 36 floats [S2, unofficial].
+*   **Performance:** Extremely fast due to minimal geometry and static draw usage [S2, unofficial].
+*   **Strengths:** Low overhead, simple implementation, effective for visualizing volume bounds [S2, unofficial].
+*   **Limitations:** Does not provide internal structure details, only the outer extent [S2, unofficial].
+*   **When to use:** Debugging volume placement, checking extent alignment [S2, unofficial].
+*   **When not to use:** When detailed internal voxel visualization is required [S2, unofficial].
 
 ## Background
-This method originates from implementations in VTK-based volume renderers and custom raycasting engines [S1, S2, unofficial]. It is used in visualization libraries like Visualization Library (vlVolume) for updating volume box geometry [S3, unofficial]. The approach of rendering bounding boxes as geometry is a standard technique in computer graphics for debugging and scene management [G].
+The method originates from implementations in VTK-based volume ray casting and custom ray tracing engines [S1, S2, S3, unofficial]. It is used in debug and visualization tools to provide a visual cue for the volume's spatial boundaries [S1, S2, unofficial]. The specific vertex ordering and texture coordinate generation logic are documented in visualization library source code [S3, unofficial].
 
 ## Sources
 [S1] bozorgi/VTKMultiVolumeRayCaster, https://github.com/bozorgi/VTKMultiVolumeRayCaster, fetched 2026-10-26 (unofficial)

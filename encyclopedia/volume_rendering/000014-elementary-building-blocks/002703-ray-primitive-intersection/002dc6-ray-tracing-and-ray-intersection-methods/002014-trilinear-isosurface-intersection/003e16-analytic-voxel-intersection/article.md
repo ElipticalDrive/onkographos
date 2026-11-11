@@ -3,28 +3,28 @@
 Also called: Cubic Voxel Intersection, SDF Grid Ray Tracing
 
 ## Overview
-Analytic Voxel Intersection is a method for computing the intersection between a ray and the isosurface defined by the zero level set of a signed distance function (SDF) within a single voxel of an SDF grid [S1, unofficial]. It solves the cubic polynomial derived from trilinear interpolation of the corner signed distances to find the exact intersection distance $t$ [S1, unofficial]. Unlike sphere tracing, which requires iterative stepping that slows down near the surface, this method provides a direct solution, avoiding iterative step reduction and offering superior performance for silhouette and secondary rays [S1, unofficial]. It builds on [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md) by providing the specific algebraic formulation and solution strategies for the resulting cubic equation.
+Analytic Voxel Intersection is a method for computing the intersection between a ray and the isosurface defined by the zero level set of a signed distance function (SDF) within a single voxel of an SDF grid [S1, unofficial]. It solves the cubic polynomial derived from trilinear interpolation of the corner signed distances to find the exact intersection distance $t$ [S1, unofficial]. Unlike sphere tracing, which requires iterative stepping that slows down near the surface, this method provides a direct solution, avoiding iterative step reduction and offering superior performance for silhouette and secondary rays [S1, unofficial]. The method computes the intersection by solving the cubic polynomial derived from trilinear interpolation of the corner signed distances [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Ray origin $o = (o_x, o_y, o_z)$ and direction $d = (d_x, d_y, d_z)$ in world space.
-- Voxel bounds in world space (to compute entry/exit).
-- Signed distances at the eight corners of the voxel: $s_{ijk}$ for $i,j,k \in \{0,1\}$, where $s_{000}$ is the corner at $(0,0,0)$ in canonical space.
+- Ray origin $o = (o_x, o_y, o_z)$ and direction $d = (d_x, d_y, d_z)$ in world space [S1, unofficial].
+- Voxel bounds in world space to compute entry and exit points [S1, unofficial].
+- Signed distances at the eight corners of the voxel: $s_{ijk}$ for $i,j,k \in \{0,1\}$, where $s_{000}$ is the corner at $(0,0,0)$ in canonical space [S1, unofficial].
 
 **Outputs:**
-- Intersection distance $t \in [0, t_{far}]$, where $t_{far}$ is the distance to the voxel exit. If no intersection exists, returns no hit.
+- Intersection distance $t \in [0, t_{far}]$, where $t_{far}$ is the distance to the voxel exit [S1, unofficial]. If no intersection exists, the method returns no hit [S1, unofficial].
 
 **Data Structures:**
-- The voxel is treated as a unit cube in canonical space $[0, 1]^3$.
-- Constants $k_i$ ($i=0..7$) and intermediate variables $m_j$ ($j=0..5$) are computed once per voxel/ray pair.
-- Cubic coefficients $c_i$ ($i=0..3$).
+- The voxel is treated as a unit cube in canonical space $[0, 1]^3$ [S1, unofficial].
+- Constants $k_i$ ($i=0..7$) and intermediate variables $m_j$ ($j=0..5$) are computed once per voxel/ray pair [S1, unofficial].
+- Cubic coefficients $c_i$ ($i=0..3$) [S1, unofficial].
 
 **Step 1: Ray-Voxel Box Intersection**
 Compute the intersection of the ray with the voxel bounding box to determine the entry point and $t_{far}$ [S1, unofficial].
-1. If the ray origin is inside the box, set the new origin $o_{new} = o$.
-2. Otherwise, compute the entry point $o_{new}$ on the box surface.
-3. Compute $t_{far}$ as the distance from $o_{new}$ to the exit point on the box surface.
-4. Transform $o_{new}$ and $d$ into the canonical voxel space $[0, 1]^3$. Note that $d$ remains unchanged if the voxel is axis-aligned and unit-sized, but $o$ must be shifted to the local corner. Let the transformed origin be $o$ and direction be $d$ for subsequent steps [S1, unofficial].
+1. If the ray origin is inside the box, set the new origin $o_{new} = o$ [S1, unofficial].
+2. Otherwise, compute the entry point $o_{new}$ on the box surface [S1, unofficial].
+3. Compute $t_{far}$ as the distance from $o_{new}$ to the exit point on the box surface [S1, unofficial].
+4. Transform $o_{new}$ and $d$ into the canonical voxel space $[0, 1]^3$ [S1, unofficial]. Note that $d$ remains unchanged if the voxel is axis-aligned and unit-sized, but $o$ must be shifted to the local corner [S1, unofficial]. Let the transformed origin be $o$ and direction be $d$ for subsequent steps [S1, unofficial].
 
 **Step 2: Compute Polynomial Constants**
 Calculate the constants $k_i$ from the corner signed distances $s_{ijk}$ [S1, unofficial]:
@@ -66,19 +66,19 @@ $$
 This computation requires 37 operations (counting FMA as one) [S1, unofficial].
 
 **Step 4: Solve for Intersection**
-Solve the cubic equation for the smallest real root $t$ such that $t \in [0, t_{far}]$. Two primary approaches are described:
+Solve the cubic equation for the smallest real root $t$ such that $t \in [0, t_{far}]$ [S1, unofficial]. Two primary approaches are described:
 
 *Approach A: Analytic Solver*
 Use an analytic cubic root solver (e.g., Vieta's approach) to find all real roots and select the smallest valid $t$ [S1, unofficial]. This is the fastest voxel intersection method [S1, unofficial].
 
 *Approach B: Numerical (Marmitt et al. + Newton-Raphson)*
-1. Differentiate the cubic: $g'(t) = 3c_3 t^2 + 2c_2 t + c_1 = 0$.
-2. Solve the quadratic $g'(t)=0$ to find critical points.
-3. Split the interval $[0, t_{far}]$ into subintervals based on these critical points.
-4. Process subintervals from $t=0$ to $t_{far}$. For each subinterval $[t_{start}, t_{end}]$, check if $g(t_{start})g(t_{end}) \le 0$.
-5. If a sign change is detected, a root exists in the interval.
+1. Differentiate the cubic: $g'(t) = 3c_3 t^2 + 2c_2 t + c_1 = 0$ [S1, unofficial].
+2. Solve the quadratic $g'(t)=0$ to find critical points [S1, unofficial].
+3. Split the interval $[0, t_{far}]$ into subintervals based on these critical points [S1, unofficial].
+4. Process subintervals from $t=0$ to $t_{far}$ [S1, unofficial]. For each subinterval $[t_{start}, t_{end}]$, check if $g(t_{start})g(t_{end}) \le 0$ [S1, unofficial].
+5. If a sign change is detected, a root exists in the interval [S1, unofficial].
 6. Refine the root using Newton-Raphson iteration:
-   - Initialize $t$ using linear interpolation: $t = \frac{g(t_{end})t_{start} - g(t_{start})t_{end}}{g(t_{end}) - g(t_{start})}$.
+   - Initialize $t$ using linear interpolation: $t = \frac{g(t_{end})t_{start} - g(t_{start})t_{end}}{g(t_{end}) - g(t_{start})}$ [S1, unofficial].
    - Iterate:
      $$
      \begin{aligned}
@@ -93,9 +93,65 @@ Use an analytic cubic root solver (e.g., Vieta's approach) to find all real root
 - **Mitigation:** Add a test: if the ray origin is on a voxel face and $f(o_x, o_y, o_z) < 0$, return an immediate hit to make the surface solid [S1, unofficial].
 - **Derivative Magnitude:** In Newton-Raphson, if the starting point is on the cubic curve and the derivative magnitude is small, convergence may be slow or unstable [S1, unofficial].
 
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def analytic_voxel_intersection(o, d, s_corners, voxel_min, voxel_max):
+    # 1. Ray-box intersection (standard slab method) [G]
+    t_near, t_far = ray_box_intersect(o, d, voxel_min, voxel_max)
+    if t_near > t_far or t_far < 0:
+        return None
+    if t_near == 0:
+        o_local = o - voxel_min
+        d_local = d * (voxel_max - voxel_min)
+    else:
+        o_local = o + d * t_near - voxel_min
+        d_local = d * (voxel_max - voxel_min)
+        t_far = t_far - t_near
+
+    # 2. Compute k constants
+    k0 = s_corners[0,0,0]
+    k1 = s_corners[1,0,0] - k0
+    k2 = s_corners[0,1,0] - k0
+    k3 = s_corners[1,1,0] - s_corners[0,1,0] - k1
+    a = s_corners[1,0,1] - s_corners[0,0,1]
+    k4 = k0 - s_corners[0,0,1]
+    k5 = k1 - a
+    k6 = k2 - (s_corners[0,1,1] - s_corners[0,0,1])
+    k7 = k3 - (s_corners[1,1,1] - s_corners[0,1,1] - a)
+
+    # 3. Compute m variables
+    m0 = o_local.x * o_local.y
+    m1 = d_local.x * d_local.y
+    m2 = o_local.x * d_local.y + o_local.y * d_local.x
+    m3 = k5 * o_local.z - k1
+    m4 = k6 * o_local.z - k2
+    m5 = k7 * o_local.z - k3
+
+    # 4. Compute cubic coefficients
+    c0 = (k4 * o_local.z - k0) + o_local.x * m3 + o_local.y * m4 + m0 * m5
+    c1 = d_local.x * m3 + d_local.y * m4 + m2 * m5 + d_local.z * (k4 + k5 * o_local.x + k6 * o_local.y + k7 * m0)
+    c2 = m1 * m5 + d_local.z * (k5 * d_local.x + k6 * d_local.y + k7 * m2)
+    c3 = k7 * m1 * d_local.z
+
+    # 5. Solve cubic for smallest real root in [0, t_far]
+    # Analytic cubic root solver (e.g., Vieta's approach) [S1, unofficial]
+    roots = solve_cubic_analytic(c3, c2, c1, c0)
+    valid_roots = [t for t in roots if 0 <= t <= t_far]
+    if not valid_roots:
+        return None
+    t_hit = min(valid_roots)
+
+    # 6. Edge case: floating-point cracks mitigation [S1, unofficial]
+    if t_hit == 0 and f(o_local.x, o_local.y, o_local.z) < 0:
+        return 0.0
+    return t_hit
+```
+
 ## Operating characteristics
-- **Time Complexity:** The coefficient computation is constant time, $O(1)$, with 37 operations [S1, unofficial]. Solving the cubic is also $O(1)$. The analytic solver is generally faster than the numerical Newton-Raphson approach, which depends on convergence speed [S1, unofficial].
-- **Memory Complexity:** $O(1)$ auxiliary memory for constants and coefficients.
+- **Time Complexity:** The coefficient computation is constant time, $O(1)$, with 37 operations [S1, unofficial]. Solving the cubic is also $O(1)$ [S1, unofficial]. The analytic solver is generally faster than the numerical Newton-Raphson approach, which depends on convergence speed [S1, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary memory for constants and coefficients [S1, unofficial].
 - **Performance:** The analytic test (A) is the fastest voxel intersection method [S1, unofficial]. In benchmarks, it outperforms sphere tracing and numerical methods, especially near silhouettes and for secondary rays [S1, unofficial].
 - **Strengths:** Direct solution avoids iterative step reduction; high performance; continuous normals can be computed via the gradient of the trilinear function [S1, unofficial].
 - **Limitations:** Requires solving a cubic equation; floating-point errors can cause cracks without additional tests; complex to implement compared to simple sphere tracing [S1, unofficial].

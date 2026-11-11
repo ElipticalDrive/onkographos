@@ -1,0 +1,3831 @@
+Greedy voxel meshing implementation in webgl
+
+used https://github.com/paulmg/ThreeJS-Webpack-ES6-Boilerplate to set up webgl/ThreeJS
+
+### webpack.config.js
+```
+// Global imports
+var webpack = require('webpack'),
+    path    = require('path');
+
+// Paths
+var entry           = './src/js/app.js',
+    includePath     = path.join(__dirname, 'src/js'),
+    nodeModulesPath = path.join(__dirname, 'node_modules'),
+    outputPath      = path.join(__dirname, 'src/public/assets/js');
+
+// Environment
+var PROD = JSON.parse(process.env.NODE_ENV || 0);
+
+// Dev environment
+var env = 'dev',
+    time = Date.now(),
+    devtool = 'eval',
+    mode = 'development',
+    stats = 'minimal',
+    plugins = [
+      //new webpack.NoErrorsPlugin(),
+      new webpack.DefinePlugin({
+        __ENV__: JSON.stringify(env),
+        ___BUILD_TIME___: time
+      })
+    ];
+
+// Production environment
+if(PROD) {
+  env = 'prod';
+  devtool = 'hidden-source-map';
+  mode = 'production';
+  stats = 'none';
+  outputPath = __dirname + '/build/public/assets/js';
+}
+
+console.log('Webpack build - ENV: ' + env + ' V: ' + time);
+console.log('    - outputPath ', outputPath);
+console.log('    - includePath ', includePath);
+console.log('    - nodeModulesPath ', nodeModulesPath);
+
+module.exports = {
+  // Here the application starts executing
+  // and webpack starts bundling
+  entry: [
+    entry
+  ],
+
+  // options related to how webpack emits results
+  output: {
+    // the target directory for all output files
+    // must be an absolute path (use the Node.js path module)
+    path: outputPath,
+    // the url to the output directory resolved relative to the HTML page
+    publicPath: 'assets/js',
+    // the filename template for entry chunks
+    filename: 'app.js'
+  },
+
+  mode: mode,
+
+  // configuration regarding modules
+  module: {
+    // rules for modules (configure loaders, parser options, etc.)
+    rules: [
+      {
+        // these are matching conditions, each accepting a regular expression or string
+        // test and include have the same behavior, both must be matched
+        // exclude must not be matched (takes preference over test and include)
+        // Best practices:
+        // - Use RegExp only in test and for filename matching
+        // - Use arrays of absolute paths in include and exclude
+        // - Try to avoid exclude and prefer include
+        test: /\.js?$/,
+        // the loader which should be applied, it'll be resolved relative to the context
+        // -loader suffix is no longer optional in webpack2 for clarity reasons
+        // see webpack 1 upgrade guide
+        use: {
+          loader: 'babel-loader',
+        },
+        include: includePath,
+        exclude: nodeModulesPath,
+      }
+    ]
+  },
+
+  // options for resolving module requests
+  // (does not apply to resolving to loaders)
+  resolve: {
+
+    // directories where to look for modules,
+    modules: [
+      'node_modules',
+      path.resolve(__dirname, 'app')
+    ],
+
+    // extensions that are used
+    extensions: ['.js', '.json', '.css'],
+  },
+
+  performance: {
+    hints: 'warning' // enum
+  },
+
+  // lets you precisely control what bundle information gets displayed
+  stats: stats,
+
+  // enhance debugging by adding meta info for the browser devtools
+  // source-map most detailed at the expense of build speed.
+  devtool: devtool, // enum
+
+  devServer: {
+    contentBase: 'src/public'
+  },
+
+  plugins: plugins
+};
+```
+
+### src/js/app.js
+```
+import Config from './data/config';
+import Detector from './utils/detector';
+import Main from './app/main';
+
+// Check environment and set the Config helper
+if(__ENV__ === 'dev') {
+  console.log('----- RUNNING IN DEV ENVIRONMENT! -----');
+
+  Config.isDev = true;
+}
+
+function init() {
+  // Check for webGL capabilities
+  if(!Detector.webgl) {
+    Detector.addGetWebGLMessage();
+  } else {
+    const container = document.getElementById('appContainer');
+    new Main(container);
+  }
+}
+
+init();
+```
+
+### src/js/app/main.js
+```
+// Global imports -
+import * as THREE from 'three';
+import TWEEN from 'tween.js';
+
+// Local imports -
+// Components
+import Renderer from './components/renderer';
+import Camera from './components/camera';
+import Light from './components/light';
+import Controls from './components/controls';
+
+// Helpers
+import Geometry from './helpers/geometry';
+import Voxel from './helpers/voxel';
+import Greedy from './helpers/greedy';
+import Stats from './helpers/stats';
+
+import Material from './helpers/material';
+// Model
+import Texture from './model/texture';
+// import Model from './model/model';
+
+// Managers
+import Interaction from './managers/interaction';
+import DatGUI from './managers/datGUI';
+
+// data
+import Config from './../data/config';
+// -- End of imports
+
+// This class instantiates and ties all of the components together, starts the loading process and renders the main loop
+export default class Main {
+  constructor(container) {
+    // Set container property to container element
+    this.container = container;
+
+    // Start Three clock
+    this.clock = new THREE.Clock();
+
+    // Main scene creation
+    this.scene = new THREE.Scene();
+    this.scene.fog = new THREE.FogExp2(Config.fog.color, Config.fog.near);
+
+    // Get Device Pixel Ratio first for retina
+    // if(window.devicePixelRatio) {
+    //   Config.dpr = window.devicePixelRatio;
+    // }
+
+    // Main renderer constructor
+    this.renderer = new Renderer(this.scene, container);
+
+    // Components instantiations
+    this.camera = new Camera(this.renderer.threeRenderer);
+    this.controls = new Controls(this.camera.threeCamera, container);
+    this.light = new Light(this.scene);
+
+    // Create and place lights in scene
+    const lights = ['ambient', 'directional', 'point', 'hemi'];
+    lights.forEach((light) => this.light.place(light));
+
+    // Create and place geo in scene
+    this.geometry = new Geometry(this.scene);
+    this.geometry.make('plane')(150, 150, 10, 10);
+    this.geometry.place([0, -0.5, 0], [Math.PI / 2, 0, 0]);
+
+    // fetch("assets/models/smile.txt").then((response) => {
+    fetch("assets/models/FlameThrower.txt").then((response) => {
+
+      return response.text();
+    }).then((goxText) => {
+      const voxels = goxText.split("\n");
+      this.stupid(voxels);
+      this.greedy(voxels);
+    });
+    // Set up rStats if dev environment
+    if (Config.isDev && Config.isShowingStats) {
+      this.stats = new Stats(this.renderer);
+      this.stats.setUp();
+    }
+
+    // Instantiate texture class
+    this.texture = new Texture();
+
+    // Start loading the textures and then go on to load the model after the texture Promises have resolved
+    this.texture.load().then(() => {
+      this.manager = new THREE.LoadingManager();
+
+      // Textures loaded, load model
+      // this.model = new Model(this.scene, this.manager, this.texture.textures);
+      // this.model.load();
+
+      // onProgress callback
+      this.manager.onProgress = (item, loaded, total) => {
+        //console.log(`${item}: ${loaded} ${total}`);
+      };
+
+      // All loaders done now
+      this.manager.onLoad = () => {
+        // Set up interaction manager with the app now that the model is finished loading
+        new Interaction(this.renderer.threeRenderer, this.scene, this.camera.threeCamera, this.controls.threeControls);
+
+        // Add dat.GUI controls if dev
+        if (Config.isDev) {
+          new DatGUI(this, this.model.obj);
+        }
+
+        // Everything is now fully loaded
+        Config.isLoaded = true;
+        this.container.querySelector('#loading').style.display = 'none';
+      };
+      new Interaction(this.renderer.threeRenderer, this.scene, this.camera.threeCamera, this.controls.threeControls);
+
+      // Add dat.GUI controls if dev
+      if (Config.isDev) {
+        // new DatGUI(this, null);
+      }
+
+      // Everything is now fully loaded
+      Config.isLoaded = true;
+
+      this.container.querySelector('#loading').style.display = 'none';
+
+    });
+
+    // Start render which does not wait for model fully loaded
+    this.render();
+  }
+  stupid(voxels) {
+    for (const voxel of voxels) {
+      if (voxel.indexOf("#") !== 0 && voxel.indexOf(" ") !== -1) {
+        const xyzi = voxel.split(" ");
+        const offset = { x: 20, y: 0, z: 0 };
+        const geometry = new Voxel(this.scene, xyzi, offset);
+      }
+    }
+  }
+  greedy(voxels) {
+    const startTime = Date.now();
+    const offset = { x: -20, y: 0, z: 0 };
+    let geometry = new THREE.Geometry();
+    let greedyVoxels = new Greedy(voxels);
+    var d = 0;
+    let bounds = [
+      { start: greedyVoxels.boundingBox.z, end: greedyVoxels.boundingBox.z + greedyVoxels.boundingBox.depth },
+      { start: greedyVoxels.boundingBox.y, end: greedyVoxels.boundingBox.y + greedyVoxels.boundingBox.height },
+      { start: greedyVoxels.boundingBox.x, end: greedyVoxels.boundingBox.x + greedyVoxels.boundingBox.width }
+    ];
+    var xy = function(direction, reverse) {
+      reverse = reverse || 0;
+      for (d = bounds[direction].start; d < bounds[direction].end; d++) {
+        let mask = greedyVoxels.getMask(direction, d, reverse);
+        let quads = greedyVoxels.getQuads(mask, d);
+        for (let quad of quads) {
+          let vertexOffset = geometry.vertices.length;
+          switch(direction) {
+            case 0:
+              quad.sub({ x: 0.5, y: 0.5 - greedyVoxels.boundingBox.y, z: 0.5 - reverse });
+              geometry.vertices.push(new THREE.Vector3(quad.x,              quad.z, quad.y));
+              geometry.vertices.push(new THREE.Vector3(quad.x + quad.width, quad.z, quad.y));
+              geometry.vertices.push(new THREE.Vector3(quad.x + quad.width, quad.z, quad.y + quad.height));
+              geometry.vertices.push(new THREE.Vector3(quad.x,              quad.z, quad.y + quad.height));
+              break;            
+            case 1:
+              quad.sub({ x: 0.5, y: 0.5, z: 0.5 - reverse + greedyVoxels.boundingBox.z });
+              geometry.vertices.push(new THREE.Vector3(quad.x,              quad.y,               quad.z));
+              geometry.vertices.push(new THREE.Vector3(quad.x + quad.width, quad.y,               quad.z));
+              geometry.vertices.push(new THREE.Vector3(quad.x + quad.width, quad.y + quad.height, quad.z));
+              geometry.vertices.push(new THREE.Vector3(quad.x,              quad.y + quad.height, quad.z));
+              break;
+            case 2:
+              quad.sub({ x: 0.5 - greedyVoxels.boundingBox.y, y: 0.5, z: 0.5 - reverse + greedyVoxels.boundingBox.x });
+              geometry.vertices.push(new THREE.Vector3(quad.z, quad.y,               quad.x));
+              geometry.vertices.push(new THREE.Vector3(quad.z, quad.y,               quad.x + quad.width));
+              geometry.vertices.push(new THREE.Vector3(quad.z, quad.y + quad.height, quad.x + quad.width));
+              geometry.vertices.push(new THREE.Vector3(quad.z, quad.y + quad.height, quad.x));
+              break;
+            default:
+              break;
+          }
+          if((reverse && direction == 1) || (!reverse && direction != 1)) {
+            geometry.faces.push(new THREE.Face3(0 + vertexOffset, 1 + vertexOffset, 2 + vertexOffset, null, quad.color));
+            geometry.faces.push(new THREE.Face3(2 + vertexOffset, 3 + vertexOffset, 0 + vertexOffset, null, quad.color));
+          } else {
+            geometry.faces.push(new THREE.Face3(2 + vertexOffset, 1 + vertexOffset, 0 + vertexOffset, null, quad.color));
+            geometry.faces.push(new THREE.Face3(0 + vertexOffset, 3 + vertexOffset, 2 + vertexOffset, null, quad.color));
+          }
+        }
+      }
+    }
+
+    xy(0);
+    xy(0, 1);
+
+    xy(1);
+    xy(1, 1);
+
+    xy(2)
+    xy(2, 1);
+
+    geometry.computeFaceNormals();
+    var voxelMaterial = new THREE.MeshPhongMaterial( {
+      color: 0xffffff,
+      flatShading: true,
+      vertexColors: THREE.VertexColors,
+      shininess: 0
+    } );
+    var wireframeMaterial = new THREE.MeshBasicMaterial( { color: 0x000000, wireframe: true, transparent: true } );
+    let mesh = new THREE.Mesh(geometry, voxelMaterial);
+    mesh.add(new THREE.Mesh(geometry, wireframeMaterial));
+    // let mesh = new THREE.Mesh(geometry, new THREE.MeshNormalMaterial());            
+    mesh.receiveShadow = true;
+    mesh.castShadow = true;
+    mesh.position.x = offset.x;
+    mesh.position.y = offset.y;
+    mesh.position.z = offset.z;
+    this.scene.add(mesh);
+    const duration = Date.now() - startTime;
+    console.log(`Voxeled in ${duration}ms`);
+  }
+  render() {
+    // Render rStats if Dev
+    if (Config.isDev && Config.isShowingStats) {
+      Stats.start();
+    }
+
+    // Call render function and pass in created scene and camera
+    this.renderer.render(this.scene, this.camera.threeCamera);
+
+    // rStats has finished determining render call now
+    if (Config.isDev && Config.isShowingStats) {
+      Stats.end();
+    }
+
+    // Delta time is sometimes needed for certain updates
+    //const delta = this.clock.getDelta();
+
+    // Call any vendor or module frame updates here
+    TWEEN.update();
+    this.controls.threeControls.update();
+
+    // RAF
+    requestAnimationFrame(this.render.bind(this)); // Bind the main class instead of window object
+  }
+}
+```
+
+### src/js/data/config.js
+```
+import TWEEN from 'tween.js';
+
+// This object contains the state of the app
+export default {
+  isDev: false,
+  isShowingStats: false,
+  isLoaded: false,
+  isTweening: false,
+  isRotating: true,
+  isMouseMoving: false,
+  isMouseOver: false,
+  maxAnisotropy: 1,
+  dpr: 1,
+  easing: TWEEN.Easing.Quadratic.InOut,
+  duration: 500,
+  model: {
+    path: './assets/models/Teapot.json',
+    scale: 20
+  },
+  texture: {
+    path: './assets/textures/',
+    imageFiles: [
+      {name: 'UV', image: 'UV_Grid_Sm.jpg'}
+    ]
+  },
+  mesh: {
+    enableHelper: false,
+    wireframe: false,
+    translucent: false,
+    material: {
+      color: 0xffffff,
+      emissive: 0xffffff
+    }
+  },
+  fog: {
+    color: 0xffffff,
+    near: 0.0008
+  },
+  camera: {
+    fov: 40,
+    near: 2,
+    far: 1000,
+    aspect: 1,
+    posX: 20,
+    posY: 60,
+    posZ: -80
+  },
+  controls: {
+    autoRotate: false,
+    autoRotateSpeed: -0.5,
+    rotateSpeed: 0.5,
+    zoomSpeed: 0.8,
+    minDistance: 10,
+    maxDistance: 600,
+    minPolarAngle: 0,
+    maxPolarAngle: Math.PI / 2,
+    minAzimuthAngle: -Infinity,
+    maxAzimuthAngle: Infinity,
+    enableDamping: true,
+    dampingFactor: 0.5,
+    enableZoom: true,
+    target: {
+      x: 0,
+      y: 0,
+      z: 0
+    }
+  },
+  ambientLight: {
+    enabled: false,
+    color: 0x141414
+  },
+  directionalLight: {
+    enabled: true,
+    color: 0xffffff,
+    intensity: 0.4,
+    x: -200,
+    y: 200,
+    z: 150
+  },
+  shadow: {
+    enabled: true,
+    helperEnabled: false,
+    bias: 0,
+    mapWidth: 2048,
+    mapHeight: 2048,
+    near: 250,
+    far: 400,
+    top: 100,
+    right: 100,
+    bottom: -100,
+    left: -100
+  },
+  pointLight: {
+    enabled: false,
+    color: 0xffffff,
+    intensity: 0.34,
+    distance: 115,
+    x: 0,
+    y: 0,
+    z: 0
+  },
+  hemiLight: {
+    enabled: true,
+    color: 0xc8c8c8,
+    groundColor: 0xffffff,
+    intensity: 0.55,
+    x: 0,
+    y: 0,
+    z: 0
+  }
+};
+```
+
+### src/js/utils/detector.js
+```
+/**
+ * @author alteredq / http://alteredqualia.com/
+ * @author mr.doob / http://mrdoob.com/
+ */
+
+export default {
+  canvas: !!window.CanvasRenderingContext2D,
+  webgl: (function() {
+    try {
+      var canvas = document.createElement('canvas');
+
+      return !!(window.WebGLRenderingContext && (canvas.getContext('webgl') || canvas.getContext('experimental-webgl')));
+    } catch(e) {
+      return false;
+    }
+  })(),
+
+  workers: !!window.Worker,
+  fileapi: window.File && window.FileReader && window.FileList && window.Blob,
+
+  getWebGLErrorMessage: function() {
+    var element = document.createElement('div');
+    element.id = 'webgl-error-message';
+    element.style.fontFamily = 'monospace';
+    element.style.fontSize = '13px';
+    element.style.fontWeight = 'normal';
+    element.style.textAlign = 'center';
+    element.style.background = '#fff';
+    element.style.color = '#000';
+    element.style.padding = '1.5em';
+    element.style.width = '400px';
+    element.style.margin = '5em auto 0';
+
+    if(!this.webgl) {
+      element.innerHTML = window.WebGLRenderingContext ? [
+        'Your graphics card does not seem to support <a href="http://khronos.org/webgl/wiki/Getting_a_WebGL_Implementation" style="color:#000000">WebGL</a>.<br />',
+        'Find out how to get it <a href="http://get.webgl.org/" style="color:#000000">here</a>.'
+      ].join('\n') : [
+        'Your browser does not seem to support <a href="http://khronos.org/webgl/wiki/Getting_a_WebGL_Implementation" style="color:#000000">WebGL</a>.<br/>',
+        'Find out how to get it <a href="http://get.webgl.org/" style="color:#000000">here</a>.'
+      ].join('\n');
+    }
+
+    return element;
+  },
+
+  addGetWebGLMessage: function(parameters) {
+    var parent, id, element;
+
+    parameters = parameters || {};
+
+    parent = parameters.parent !== undefined ? parameters.parent : document.body;
+    id = parameters.id !== undefined ? parameters.id : 'oldie';
+
+    element = this.getWebGLErrorMessage();
+    element.id = id;
+
+    parent.appendChild(element);
+  }
+};
+```
+
+### src/js/utils/helpers.js
+```
+// Provides simple static functions that are used multiple times in the app
+export default class Helpers {
+  static throttle(fn, threshhold, scope) {
+    threshhold || (threshhold = 250);
+    let last, deferTimer;
+
+    return function() {
+      const context = scope || this;
+
+      const now  = +new Date,
+          args = arguments;
+
+      if(last && now < last + threshhold) {
+        clearTimeout(deferTimer);
+        deferTimer = setTimeout(function() {
+          last = now;
+          fn.apply(context, args);
+        }, threshhold);
+      }
+      else {
+        last = now;
+        fn.apply(context, args);
+      }
+    };
+  }
+
+  static logProgress() {
+    return function(xhr) {
+      if(xhr.lengthComputable) {
+        const percentComplete = xhr.loaded / xhr.total * 100;
+
+        console.log(Math.round(percentComplete, 2) + '% downloaded');
+      }
+    }
+  }
+
+  static logError() {
+    return function(xhr) {
+      console.error(xhr);
+    }
+  }
+
+  static handleColorChange(color) {
+    return (value) => {
+      if(typeof value === 'string') {
+        value = value.replace('#', '0x');
+      }
+
+      color.setHex(value);
+    };
+  }
+
+  static update(mesh) {
+    this.needsUpdate(mesh.material, mesh.geometry);
+  }
+
+  static needsUpdate(material, geometry) {
+    return function() {
+      material.shading = +material.shading; //Ensure number
+      material.vertexColors = +material.vertexColors; //Ensure number
+      material.side = +material.side; //Ensure number
+      material.needsUpdate = true;
+      geometry.verticesNeedUpdate = true;
+      geometry.normalsNeedUpdate = true;
+      geometry.colorsNeedUpdate = true;
+    };
+  }
+
+  static updateTexture(material, materialKey, textures) {
+    return function(key) {
+      material[materialKey] = textures[key];
+      material.needsUpdate = true;
+    };
+  }
+}
+```
+
+### src/js/utils/keyboard.js
+```
+const ALIAS = {
+  'left'		: 37,
+  'up'		  : 38,
+  'right'		: 39,
+  'down'		: 40,
+  'space'		: 32,
+  'tab'		  : 9,
+  'escape'	: 27
+};
+
+export default class Keyboard {
+  constructor(domElement) {
+    this.domElement = domElement || document;
+    this.keyCodes = {};
+
+    // bind keyEvents
+    this.domElement.addEventListener('keydown', (event) => this.onKeyChange(event), false);
+    this.domElement.addEventListener('keyup', (event) => this.onKeyChange(event), false);
+
+    // bind window blur
+    window.addEventListener('blur', () => this.onBlur, false);
+  }
+
+  destroy() {
+    this.domElement.removeEventListener('keydown', (event) => this.onKeyChange(event), false);
+    this.domElement.removeEventListener('keyup', (event) => this.onKeyChange(event), false);
+
+    // unbind window blur event
+    window.removeEventListener('blur', () => this.onBlur, false);
+  }
+
+  onBlur() {
+    for(const prop in this.keyCodes)
+      this.keyCodes[prop] = false;
+  }
+
+  onKeyChange(event) {
+    // log to debug
+    //console.log('onKeyChange', event, event.keyCode, event.shiftKey, event.ctrlKey, event.altKey, event.metaKey)
+
+    // update this.keyCodes
+    const keyCode = event.keyCode;
+    this.keyCodes[keyCode] = event.type === 'keydown';
+  }
+
+  pressed(keyDesc) {
+    const keys = keyDesc.split('+');
+    for(let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      let pressed = false;
+      if(Object.keys(ALIAS).indexOf(key) != -1) {
+        pressed = this.keyCodes[ALIAS[key]];
+      } else {
+        pressed = this.keyCodes[key.toUpperCase().charCodeAt(0)];
+      }
+      if(!pressed)
+        return false;
+    }
+
+    return true;
+  }
+
+  eventMatches(event, keyDesc) {
+    const aliases = ALIAS;
+    const aliasKeys = Object.keys(aliases);
+    const keys = keyDesc.split('+');
+    // log to debug
+    // console.log('eventMatches', event, event.keyCode, event.shiftKey, event.ctrlKey, event.altKey, event.metaKey)
+    for(let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      let pressed = false;
+      if(key === 'shift') {
+        pressed = event.shiftKey ? true : false;
+      } else if(key === 'ctrl') {
+        pressed = event.ctrlKey ? true : false;
+      } else if(key === 'alt') {
+        pressed = event.altKey ? true : false;
+      } else if(key === 'meta') {
+        pressed = event.metaKey ? true : false;
+      } else if(aliasKeys.indexOf(key) !== -1) {
+        pressed = event.keyCode === aliases[key];
+      } else if(event.keyCode === key.toUpperCase().charCodeAt(0)) {
+        pressed = true;
+      }
+      if(!pressed)
+        return false;
+    }
+
+    return true;
+  }
+}
+```
+
+### src/js/utils/orbitControls.js
+```
+module.exports = function(THREE) {
+  var MOUSE = THREE.MOUSE
+  if (!MOUSE)
+    MOUSE = { LEFT: 0, MIDDLE: 1, RIGHT: 2 };
+
+  /**
+   * @author qiao / https://github.com/qiao
+   * @author mrdoob / http://mrdoob.com
+   * @author alteredq / http://alteredqualia.com/
+   * @author WestLangley / http://github.com/WestLangley
+   * @author erich666 / http://erichaines.com
+   */
+  /*global THREE, console */
+
+  function OrbitConstraint ( object ) {
+
+    this.object = object;
+
+    // "target" sets the location of focus, where the object orbits around
+    // and where it pans with respect to.
+    this.target = new THREE.Vector3();
+
+    // Limits to how far you can dolly in and out ( PerspectiveCamera only )
+    this.minDistance = 0;
+    this.maxDistance = Infinity;
+
+    // Limits to how far you can zoom in and out ( OrthographicCamera only )
+    this.minZoom = 0;
+    this.maxZoom = Infinity;
+
+    // How far you can orbit vertically, upper and lower limits.
+    // Range is 0 to Math.PI radians.
+    this.minPolarAngle = 0; // radians
+    this.maxPolarAngle = Math.PI; // radians
+
+    // How far you can orbit horizontally, upper and lower limits.
+    // If set, must be a sub-interval of the interval [ - Math.PI, Math.PI ].
+    this.minAzimuthAngle = - Infinity; // radians
+    this.maxAzimuthAngle = Infinity; // radians
+
+    // Set to true to enable damping (inertia)
+    // If damping is enabled, you must call controls.update() in your animation loop
+    this.enableDamping = false;
+    this.dampingFactor = 0.25;
+
+    ////////////
+    // internals
+
+    var scope = this;
+
+    var EPS = 0.000001;
+
+    // Current position in spherical coordinate system.
+    var theta;
+    var phi;
+
+    // Pending changes
+    var phiDelta = 0;
+    var thetaDelta = 0;
+    var scale = 1;
+    var panOffset = new THREE.Vector3();
+    var zoomChanged = false;
+
+    // API
+
+    this.getPolarAngle = function () {
+
+      return phi;
+
+    };
+
+    this.getAzimuthalAngle = function () {
+
+      return theta;
+
+    };
+
+    this.rotateLeft = function ( angle ) {
+
+      thetaDelta -= angle;
+
+    };
+
+    this.rotateUp = function ( angle ) {
+
+      phiDelta -= angle;
+
+    };
+
+    // pass in distance in world space to move left
+    this.panLeft = function() {
+
+      var v = new THREE.Vector3();
+
+      return function panLeft ( distance ) {
+
+        var te = this.object.matrix.elements;
+
+        // get X column of matrix
+        v.set( te[ 0 ], te[ 1 ], te[ 2 ] );
+        v.multiplyScalar( - distance );
+
+        panOffset.add( v );
+
+      };
+
+    }();
+
+    // pass in distance in world space to move up
+    this.panUp = function() {
+
+      var v = new THREE.Vector3();
+
+      return function panUp ( distance ) {
+
+        var te = this.object.matrix.elements;
+
+        // get Y column of matrix
+        v.set( te[ 4 ], te[ 5 ], te[ 6 ] );
+        v.multiplyScalar( distance );
+
+        panOffset.add( v );
+
+      };
+
+    }();
+
+    // pass in x,y of change desired in pixel space,
+    // right and down are positive
+    this.pan = function ( deltaX, deltaY, screenWidth, screenHeight ) {
+
+      if ( scope.object instanceof THREE.PerspectiveCamera ) {
+
+        // perspective
+        var position = scope.object.position;
+        var offset = position.clone().sub( scope.target );
+        var targetDistance = offset.length();
+
+        // half of the fov is center to top of screen
+        targetDistance *= Math.tan( ( scope.object.fov / 2 ) * Math.PI / 180.0 );
+
+        // we actually don't use screenWidth, since perspective camera is fixed to screen height
+        scope.panLeft( 2 * deltaX * targetDistance / screenHeight );
+        scope.panUp( 2 * deltaY * targetDistance / screenHeight );
+
+      } else if ( scope.object instanceof THREE.OrthographicCamera ) {
+
+        // orthographic
+        scope.panLeft( deltaX * ( scope.object.right - scope.object.left ) / screenWidth );
+        scope.panUp( deltaY * ( scope.object.top - scope.object.bottom ) / screenHeight );
+
+      } else {
+
+        // camera neither orthographic or perspective
+        console.warn( 'WARNING: OrbitControls.js encountered an unknown camera type - pan disabled.' );
+
+      }
+
+    };
+
+    this.dollyIn = function ( dollyScale ) {
+
+      if ( scope.object instanceof THREE.PerspectiveCamera ) {
+
+        scale /= dollyScale;
+
+      } else if ( scope.object instanceof THREE.OrthographicCamera ) {
+
+        scope.object.zoom = Math.max( this.minZoom, Math.min( this.maxZoom, this.object.zoom * dollyScale ) );
+        scope.object.updateProjectionMatrix();
+        zoomChanged = true;
+
+      } else {
+
+        console.warn( 'WARNING: OrbitControls.js encountered an unknown camera type - dolly/zoom disabled.' );
+
+      }
+
+    };
+
+    this.dollyOut = function ( dollyScale ) {
+
+      if ( scope.object instanceof THREE.PerspectiveCamera ) {
+
+        scale *= dollyScale;
+
+      } else if ( scope.object instanceof THREE.OrthographicCamera ) {
+
+        scope.object.zoom = Math.max( this.minZoom, Math.min( this.maxZoom, this.object.zoom / dollyScale ) );
+        scope.object.updateProjectionMatrix();
+        zoomChanged = true;
+
+      } else {
+
+        console.warn( 'WARNING: OrbitControls.js encountered an unknown camera type - dolly/zoom disabled.' );
+
+      }
+
+    };
+
+    this.update = function() {
+
+      var offset = new THREE.Vector3();
+
+      // so camera.up is the orbit axis
+      var quat = new THREE.Quaternion().setFromUnitVectors( object.up, new THREE.Vector3( 0, 1, 0 ) );
+      var quatInverse = quat.clone().inverse();
+
+      var lastPosition = new THREE.Vector3();
+      var lastQuaternion = new THREE.Quaternion();
+
+      return function () {
+
+        var position = this.object.position;
+
+        offset.copy( position ).sub( this.target );
+
+        // rotate offset to "y-axis-is-up" space
+        offset.applyQuaternion( quat );
+
+        // angle from z-axis around y-axis
+
+        theta = Math.atan2( offset.x, offset.z );
+
+        // angle from y-axis
+
+        phi = Math.atan2( Math.sqrt( offset.x * offset.x + offset.z * offset.z ), offset.y );
+
+        theta += thetaDelta;
+        phi += phiDelta;
+
+        // restrict theta to be between desired limits
+        theta = Math.max( this.minAzimuthAngle, Math.min( this.maxAzimuthAngle, theta ) );
+
+        // restrict phi to be between desired limits
+        phi = Math.max( this.minPolarAngle, Math.min( this.maxPolarAngle, phi ) );
+
+        // restrict phi to be betwee EPS and PI-EPS
+        phi = Math.max( EPS, Math.min( Math.PI - EPS, phi ) );
+
+        var radius = offset.length() * scale;
+
+        // restrict radius to be between desired limits
+        radius = Math.max( this.minDistance, Math.min( this.maxDistance, radius ) );
+
+        // move target to panned location
+        this.target.add( panOffset );
+
+        offset.x = radius * Math.sin( phi ) * Math.sin( theta );
+        offset.y = radius * Math.cos( phi );
+        offset.z = radius * Math.sin( phi ) * Math.cos( theta );
+
+        // rotate offset back to "camera-up-vector-is-up" space
+        offset.applyQuaternion( quatInverse );
+
+        position.copy( this.target ).add( offset );
+
+        this.object.lookAt( this.target );
+
+        if ( this.enableDamping === true ) {
+
+          thetaDelta *= ( 1 - this.dampingFactor );
+          phiDelta *= ( 1 - this.dampingFactor );
+
+        } else {
+
+          thetaDelta = 0;
+          phiDelta = 0;
+
+        }
+
+        scale = 1;
+        panOffset.set( 0, 0, 0 );
+
+        // update condition is:
+        // min(camera displacement, camera rotation in radians)^2 > EPS
+        // using small-angle approximation cos(x/2) = 1 - x^2 / 8
+
+        if ( zoomChanged ||
+          lastPosition.distanceToSquared( this.object.position ) > EPS ||
+          8 * ( 1 - lastQuaternion.dot( this.object.quaternion ) ) > EPS ) {
+
+          lastPosition.copy( this.object.position );
+          lastQuaternion.copy( this.object.quaternion );
+          zoomChanged = false;
+
+          return true;
+
+        }
+
+        return false;
+
+      };
+
+    }();
+
+  };
+
+
+  // This set of controls performs orbiting, dollying (zooming), and panning. It maintains
+  // the "up" direction as +Y, unlike the TrackballControls. Touch on tablet and phones is
+  // supported.
+  //
+  //    Orbit - left mouse / touch: one finger move
+  //    Zoom - middle mouse, or mousewheel / touch: two finger spread or squish
+  //    Pan - right mouse, or arrow keys / touch: three finter swipe
+
+  function OrbitControls ( object, domElement ) {
+
+    var constraint = new OrbitConstraint( object );
+
+    this.domElement = ( domElement !== undefined ) ? domElement : document;
+
+    // API
+
+    Object.defineProperty( this, 'constraint', {
+
+      get: function() {
+
+        return constraint;
+
+      }
+
+    } );
+
+    this.getPolarAngle = function () {
+
+      return constraint.getPolarAngle();
+
+    };
+
+    this.getAzimuthalAngle = function () {
+
+      return constraint.getAzimuthalAngle();
+
+    };
+
+    // Set to false to disable this control
+    this.enabled = true;
+
+    // center is old, deprecated; use "target" instead
+    this.center = this.target;
+
+    // This option actually enables dollying in and out; left as "zoom" for
+    // backwards compatibility.
+    // Set to false to disable zooming
+    this.enableZoom = true;
+    this.zoomSpeed = 1.0;
+
+    // Set to false to disable rotating
+    this.enableRotate = true;
+    this.rotateSpeed = 1.0;
+
+    // Set to false to disable panning
+    this.enablePan = true;
+    this.keyPanSpeed = 7.0;	// pixels moved per arrow key push
+
+    // Set to true to automatically rotate around the target
+    // If auto-rotate is enabled, you must call controls.update() in your animation loop
+    this.autoRotate = false;
+    this.autoRotateSpeed = 2.0; // 30 seconds per round when fps is 60
+
+    // Set to false to disable use of the keys
+    this.enableKeys = true;
+
+    // The four arrow keys
+    this.keys = { LEFT: 37, UP: 38, RIGHT: 39, BOTTOM: 40 };
+
+    // Mouse buttons
+    this.mouseButtons = { ORBIT: THREE.MOUSE.LEFT, ZOOM: THREE.MOUSE.MIDDLE, PAN: THREE.MOUSE.RIGHT };
+
+    ////////////
+    // internals
+
+    var scope = this;
+
+    var rotateStart = new THREE.Vector2();
+    var rotateEnd = new THREE.Vector2();
+    var rotateDelta = new THREE.Vector2();
+
+    var panStart = new THREE.Vector2();
+    var panEnd = new THREE.Vector2();
+    var panDelta = new THREE.Vector2();
+
+    var dollyStart = new THREE.Vector2();
+    var dollyEnd = new THREE.Vector2();
+    var dollyDelta = new THREE.Vector2();
+
+    var STATE = { NONE : - 1, ROTATE : 0, DOLLY : 1, PAN : 2, TOUCH_ROTATE : 3, TOUCH_DOLLY : 4, TOUCH_PAN : 5 };
+
+    var state = STATE.NONE;
+
+    // for reset
+
+    this.target0 = this.target.clone();
+    this.position0 = this.object.position.clone();
+    this.zoom0 = this.object.zoom;
+
+    // events
+
+    var changeEvent = { type: 'change' };
+    var startEvent = { type: 'start' };
+    var endEvent = { type: 'end' };
+
+    // pass in x,y of change desired in pixel space,
+    // right and down are positive
+    function pan( deltaX, deltaY ) {
+
+      var element = scope.domElement === document ? scope.domElement.body : scope.domElement;
+
+      constraint.pan( deltaX, deltaY, element.clientWidth, element.clientHeight );
+
+    }
+
+    this.update = function () {
+
+      if ( this.autoRotate && state === STATE.NONE ) {
+
+        constraint.rotateLeft( getAutoRotationAngle() );
+
+      }
+
+      if ( constraint.update() === true ) {
+
+        this.dispatchEvent( changeEvent );
+
+      }
+
+    };
+
+    this.reset = function () {
+
+      state = STATE.NONE;
+
+      this.target.copy( this.target0 );
+      this.object.position.copy( this.position0 );
+      this.object.zoom = this.zoom0;
+
+      this.object.updateProjectionMatrix();
+      this.dispatchEvent( changeEvent );
+
+      this.update();
+
+    };
+
+    function getAutoRotationAngle() {
+
+      return 2 * Math.PI / 60 / 60 * scope.autoRotateSpeed;
+
+    }
+
+    function getZoomScale() {
+
+      return Math.pow( 0.95, scope.zoomSpeed );
+
+    }
+
+    function onMouseDown( event ) {
+
+      if ( scope.enabled === false ) return;
+
+      event.preventDefault();
+
+      if ( event.button === scope.mouseButtons.ORBIT ) {
+
+        if ( scope.enableRotate === false ) return;
+
+        state = STATE.ROTATE;
+
+        rotateStart.set( event.clientX, event.clientY );
+
+      } else if ( event.button === scope.mouseButtons.ZOOM ) {
+
+        if ( scope.enableZoom === false ) return;
+
+        state = STATE.DOLLY;
+
+        dollyStart.set( event.clientX, event.clientY );
+
+      } else if ( event.button === scope.mouseButtons.PAN ) {
+
+        if ( scope.enablePan === false ) return;
+
+        state = STATE.PAN;
+
+        panStart.set( event.clientX, event.clientY );
+
+      }
+
+      if ( state !== STATE.NONE ) {
+
+        document.addEventListener( 'mousemove', onMouseMove, false );
+        document.addEventListener( 'mouseup', onMouseUp, false );
+        scope.dispatchEvent( startEvent );
+
+      }
+
+    }
+
+    function onMouseMove( event ) {
+
+      if ( scope.enabled === false ) return;
+
+      event.preventDefault();
+
+      var element = scope.domElement === document ? scope.domElement.body : scope.domElement;
+
+      if ( state === STATE.ROTATE ) {
+
+        if ( scope.enableRotate === false ) return;
+
+        rotateEnd.set( event.clientX, event.clientY );
+        rotateDelta.subVectors( rotateEnd, rotateStart );
+
+        // rotating across whole screen goes 360 degrees around
+        constraint.rotateLeft( 2 * Math.PI * rotateDelta.x / element.clientWidth * scope.rotateSpeed );
+
+        // rotating up and down along whole screen attempts to go 360, but limited to 180
+        constraint.rotateUp( 2 * Math.PI * rotateDelta.y / element.clientHeight * scope.rotateSpeed );
+
+        rotateStart.copy( rotateEnd );
+
+      } else if ( state === STATE.DOLLY ) {
+
+        if ( scope.enableZoom === false ) return;
+
+        dollyEnd.set( event.clientX, event.clientY );
+        dollyDelta.subVectors( dollyEnd, dollyStart );
+
+        if ( dollyDelta.y > 0 ) {
+
+          constraint.dollyIn( getZoomScale() );
+
+        } else if ( dollyDelta.y < 0 ) {
+
+          constraint.dollyOut( getZoomScale() );
+
+        }
+
+        dollyStart.copy( dollyEnd );
+
+      } else if ( state === STATE.PAN ) {
+
+        if ( scope.enablePan === false ) return;
+
+        panEnd.set( event.clientX, event.clientY );
+        panDelta.subVectors( panEnd, panStart );
+
+        pan( panDelta.x, panDelta.y );
+
+        panStart.copy( panEnd );
+
+      }
+
+      if ( state !== STATE.NONE ) scope.update();
+
+    }
+
+    function onMouseUp( /* event */ ) {
+
+      if ( scope.enabled === false ) return;
+
+      document.removeEventListener( 'mousemove', onMouseMove, false );
+      document.removeEventListener( 'mouseup', onMouseUp, false );
+      scope.dispatchEvent( endEvent );
+      state = STATE.NONE;
+
+    }
+
+    function onMouseWheel( event ) {
+
+      if ( scope.enabled === false || scope.enableZoom === false || state !== STATE.NONE ) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      var delta = 0;
+
+      if ( event.wheelDelta !== undefined ) {
+
+        // WebKit / Opera / Explorer 9
+
+        delta = event.wheelDelta;
+
+      } else if ( event.detail !== undefined ) {
+
+        // Firefox
+
+        delta = - event.detail;
+
+      }
+
+      if ( delta > 0 ) {
+
+        constraint.dollyOut( getZoomScale() );
+
+      } else if ( delta < 0 ) {
+
+        constraint.dollyIn( getZoomScale() );
+
+      }
+
+      scope.update();
+      scope.dispatchEvent( startEvent );
+      scope.dispatchEvent( endEvent );
+
+    }
+
+    function onKeyDown( event ) {
+
+      if ( scope.enabled === false || scope.enableKeys === false || scope.enablePan === false ) return;
+
+      switch ( event.keyCode ) {
+
+        case scope.keys.UP:
+          pan( 0, scope.keyPanSpeed );
+          scope.update();
+          break;
+
+        case scope.keys.BOTTOM:
+          pan( 0, - scope.keyPanSpeed );
+          scope.update();
+          break;
+
+        case scope.keys.LEFT:
+          pan( scope.keyPanSpeed, 0 );
+          scope.update();
+          break;
+
+        case scope.keys.RIGHT:
+          pan( - scope.keyPanSpeed, 0 );
+          scope.update();
+          break;
+
+      }
+
+    }
+
+    function touchstart( event ) {
+
+      if ( scope.enabled === false ) return;
+
+      switch ( event.touches.length ) {
+
+        case 1:	// one-fingered touch: rotate
+
+          if ( scope.enableRotate === false ) return;
+
+          state = STATE.TOUCH_ROTATE;
+
+          rotateStart.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
+          break;
+
+        case 2:	// two-fingered touch: dolly
+
+          if ( scope.enableZoom === false ) return;
+
+          state = STATE.TOUCH_DOLLY;
+
+          var dx = event.touches[ 0 ].pageX - event.touches[ 1 ].pageX;
+          var dy = event.touches[ 0 ].pageY - event.touches[ 1 ].pageY;
+          var distance = Math.sqrt( dx * dx + dy * dy );
+          dollyStart.set( 0, distance );
+          break;
+
+        case 3: // three-fingered touch: pan
+
+          if ( scope.enablePan === false ) return;
+
+          state = STATE.TOUCH_PAN;
+
+          panStart.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
+          break;
+
+        default:
+
+          state = STATE.NONE;
+
+      }
+
+      if ( state !== STATE.NONE ) scope.dispatchEvent( startEvent );
+
+    }
+
+    function touchmove( event ) {
+
+      if ( scope.enabled === false ) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      var element = scope.domElement === document ? scope.domElement.body : scope.domElement;
+
+      switch ( event.touches.length ) {
+
+        case 1: // one-fingered touch: rotate
+
+          if ( scope.enableRotate === false ) return;
+          if ( state !== STATE.TOUCH_ROTATE ) return;
+
+          rotateEnd.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
+          rotateDelta.subVectors( rotateEnd, rotateStart );
+
+          // rotating across whole screen goes 360 degrees around
+          constraint.rotateLeft( 2 * Math.PI * rotateDelta.x / element.clientWidth * scope.rotateSpeed );
+          // rotating up and down along whole screen attempts to go 360, but limited to 180
+          constraint.rotateUp( 2 * Math.PI * rotateDelta.y / element.clientHeight * scope.rotateSpeed );
+
+          rotateStart.copy( rotateEnd );
+
+          scope.update();
+          break;
+
+        case 2: // two-fingered touch: dolly
+
+          if ( scope.enableZoom === false ) return;
+          if ( state !== STATE.TOUCH_DOLLY ) return;
+
+          var dx = event.touches[ 0 ].pageX - event.touches[ 1 ].pageX;
+          var dy = event.touches[ 0 ].pageY - event.touches[ 1 ].pageY;
+          var distance = Math.sqrt( dx * dx + dy * dy );
+
+          dollyEnd.set( 0, distance );
+          dollyDelta.subVectors( dollyEnd, dollyStart );
+
+          if ( dollyDelta.y > 0 ) {
+
+            constraint.dollyOut( getZoomScale() );
+
+          } else if ( dollyDelta.y < 0 ) {
+
+            constraint.dollyIn( getZoomScale() );
+
+          }
+
+          dollyStart.copy( dollyEnd );
+
+          scope.update();
+          break;
+
+        case 3: // three-fingered touch: pan
+
+          if ( scope.enablePan === false ) return;
+          if ( state !== STATE.TOUCH_PAN ) return;
+
+          panEnd.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
+          panDelta.subVectors( panEnd, panStart );
+
+          pan( panDelta.x, panDelta.y );
+
+          panStart.copy( panEnd );
+
+          scope.update();
+          break;
+
+        default:
+
+          state = STATE.NONE;
+
+      }
+
+    }
+
+    function touchend( /* event */ ) {
+
+      if ( scope.enabled === false ) return;
+
+      scope.dispatchEvent( endEvent );
+      state = STATE.NONE;
+
+    }
+
+    function contextmenu( event ) {
+
+      event.preventDefault();
+
+    }
+
+    this.dispose = function() {
+
+      this.domElement.removeEventListener( 'contextmenu', contextmenu, false );
+      this.domElement.removeEventListener( 'mousedown', onMouseDown, false );
+      this.domElement.removeEventListener( 'mousewheel', onMouseWheel, false );
+      this.domElement.removeEventListener( 'MozMousePixelScroll', onMouseWheel, false ); // firefox
+
+      this.domElement.removeEventListener( 'touchstart', touchstart, false );
+      this.domElement.removeEventListener( 'touchend', touchend, false );
+      this.domElement.removeEventListener( 'touchmove', touchmove, false );
+
+      document.removeEventListener( 'mousemove', onMouseMove, false );
+      document.removeEventListener( 'mouseup', onMouseUp, false );
+
+      window.removeEventListener( 'keydown', onKeyDown, false );
+
+    }
+
+    this.domElement.addEventListener( 'contextmenu', contextmenu, false );
+
+    this.domElement.addEventListener( 'mousedown', onMouseDown, false );
+    this.domElement.addEventListener( 'mousewheel', onMouseWheel, false );
+    this.domElement.addEventListener( 'MozMousePixelScroll', onMouseWheel, false ); // firefox
+
+    this.domElement.addEventListener( 'touchstart', touchstart, false );
+    this.domElement.addEventListener( 'touchend', touchend, false );
+    this.domElement.addEventListener( 'touchmove', touchmove, false );
+
+    window.addEventListener( 'keydown', onKeyDown, false );
+
+    // force an update at start
+    this.update();
+
+  };
+
+  OrbitControls.prototype = Object.create( THREE.EventDispatcher.prototype );
+  OrbitControls.prototype.constructor = OrbitControls;
+
+  Object.defineProperties( OrbitControls.prototype, {
+
+    object: {
+
+      get: function () {
+
+        return this.constraint.object;
+
+      }
+
+    },
+
+    target: {
+
+      get: function () {
+
+        return this.constraint.target;
+
+      },
+
+      set: function ( value ) {
+
+        console.warn( 'THREE.OrbitControls: target is now immutable. Use target.set() instead.' );
+        this.constraint.target.copy( value );
+
+      }
+
+    },
+
+    minDistance : {
+
+      get: function () {
+
+        return this.constraint.minDistance;
+
+      },
+
+      set: function ( value ) {
+
+        this.constraint.minDistance = value;
+
+      }
+
+    },
+
+    maxDistance : {
+
+      get: function () {
+
+        return this.constraint.maxDistance;
+
+      },
+
+      set: function ( value ) {
+
+        this.constraint.maxDistance = value;
+
+      }
+
+    },
+
+    minZoom : {
+
+      get: function () {
+
+        return this.constraint.minZoom;
+
+      },
+
+      set: function ( value ) {
+
+        this.constraint.minZoom = value;
+
+      }
+
+    },
+
+    maxZoom : {
+
+      get: function () {
+
+        return this.constraint.maxZoom;
+
+      },
+
+      set: function ( value ) {
+
+        this.constraint.maxZoom = value;
+
+      }
+
+    },
+
+    minPolarAngle : {
+
+      get: function () {
+
+        return this.constraint.minPolarAngle;
+
+      },
+
+      set: function ( value ) {
+
+        this.constraint.minPolarAngle = value;
+
+      }
+
+    },
+
+    maxPolarAngle : {
+
+      get: function () {
+
+        return this.constraint.maxPolarAngle;
+
+      },
+
+      set: function ( value ) {
+
+        this.constraint.maxPolarAngle = value;
+
+      }
+
+    },
+
+    minAzimuthAngle : {
+
+      get: function () {
+
+        return this.constraint.minAzimuthAngle;
+
+      },
+
+      set: function ( value ) {
+
+        this.constraint.minAzimuthAngle = value;
+
+      }
+
+    },
+
+    maxAzimuthAngle : {
+
+      get: function () {
+
+        return this.constraint.maxAzimuthAngle;
+
+      },
+
+      set: function ( value ) {
+
+        this.constraint.maxAzimuthAngle = value;
+
+      }
+
+    },
+
+    enableDamping : {
+
+      get: function () {
+
+        return this.constraint.enableDamping;
+
+      },
+
+      set: function ( value ) {
+
+        this.constraint.enableDamping = value;
+
+      }
+
+    },
+
+    dampingFactor : {
+
+      get: function () {
+
+        return this.constraint.dampingFactor;
+
+      },
+
+      set: function ( value ) {
+
+        this.constraint.dampingFactor = value;
+
+      }
+
+    },
+
+    // backward compatibility
+
+    noZoom: {
+
+      get: function () {
+
+        console.warn( 'THREE.OrbitControls: .noZoom has been deprecated. Use .enableZoom instead.' );
+        return ! this.enableZoom;
+
+      },
+
+      set: function ( value ) {
+
+        console.warn( 'THREE.OrbitControls: .noZoom has been deprecated. Use .enableZoom instead.' );
+        this.enableZoom = ! value;
+
+      }
+
+    },
+
+    noRotate: {
+
+      get: function () {
+
+        console.warn( 'THREE.OrbitControls: .noRotate has been deprecated. Use .enableRotate instead.' );
+        return ! this.enableRotate;
+
+      },
+
+      set: function ( value ) {
+
+        console.warn( 'THREE.OrbitControls: .noRotate has been deprecated. Use .enableRotate instead.' );
+        this.enableRotate = ! value;
+
+      }
+
+    },
+
+    noPan: {
+
+      get: function () {
+
+        console.warn( 'THREE.OrbitControls: .noPan has been deprecated. Use .enablePan instead.' );
+        return ! this.enablePan;
+
+      },
+
+      set: function ( value ) {
+
+        console.warn( 'THREE.OrbitControls: .noPan has been deprecated. Use .enablePan instead.' );
+        this.enablePan = ! value;
+
+      }
+
+    },
+
+    noKeys: {
+
+      get: function () {
+
+        console.warn( 'THREE.OrbitControls: .noKeys has been deprecated. Use .enableKeys instead.' );
+        return ! this.enableKeys;
+
+      },
+
+      set: function ( value ) {
+
+        console.warn( 'THREE.OrbitControls: .noKeys has been deprecated. Use .enableKeys instead.' );
+        this.enableKeys = ! value;
+
+      }
+
+    },
+
+    staticMoving : {
+
+      get: function () {
+
+        console.warn( 'THREE.OrbitControls: .staticMoving has been deprecated. Use .enableDamping instead.' );
+        return ! this.constraint.enableDamping;
+
+      },
+
+      set: function ( value ) {
+
+        console.warn( 'THREE.OrbitControls: .staticMoving has been deprecated. Use .enableDamping instead.' );
+        this.constraint.enableDamping = ! value;
+
+      }
+
+    },
+
+    dynamicDampingFactor : {
+
+      get: function () {
+
+        console.warn( 'THREE.OrbitControls: .dynamicDampingFactor has been renamed. Use .dampingFactor instead.' );
+        return this.constraint.dampingFactor;
+
+      },
+
+      set: function ( value ) {
+
+        console.warn( 'THREE.OrbitControls: .dynamicDampingFactor has been renamed. Use .dampingFactor instead.' );
+        this.constraint.dampingFactor = value;
+
+      }
+
+    }
+
+  } );
+
+  return OrbitControls;
+}
+```
+
+### src/js/app/components/camera.js
+```
+import * as THREE from 'three';
+
+import Config from '../../data/config';
+
+// Class that creates and updates the main camera
+export default class Camera {
+  constructor(renderer) {
+    const width = renderer.domElement.width;
+    const height = renderer.domElement.height;
+
+    // Create and position a Perspective Camera
+    this.threeCamera = new THREE.PerspectiveCamera(Config.camera.fov, width / height, Config.camera.near, Config.camera.far);
+    this.threeCamera.position.set(Config.camera.posX, Config.camera.posY, Config.camera.posZ);
+
+    // Initial sizing
+    this.updateSize(renderer);
+    
+    // Listeners
+    window.addEventListener('resize', () => this.updateSize(renderer), false);
+  }
+
+  updateSize(renderer) {
+    // Multiply by dpr in case it is retina device
+    this.threeCamera.aspect = renderer.domElement.width * Config.dpr / renderer.domElement.height * Config.dpr;
+
+    // Always call updateProjectionMatrix on camera change
+    this.threeCamera.updateProjectionMatrix();
+  }
+}
+```
+
+### src/js/app/components/controls.js
+```
+import * as THREE from 'three';
+
+import OrbitControls from '../../utils/orbitControls';
+import Config from '../../data/config';
+
+// Controls based on orbit controls
+export default class Controls {
+  constructor(camera, container) {
+    // Orbit controls first needs to pass in THREE to constructor
+    const orbitControls = new OrbitControls(THREE);
+    this.threeControls = new orbitControls(camera, container);
+
+    this.init();
+  }
+
+  init() {
+    this.threeControls.target.set(Config.controls.target.x, Config.controls.target.y, Config.controls.target.z);
+    this.threeControls.autoRotate = Config.controls.autoRotate;
+    this.threeControls.autoRotateSpeed = Config.controls.autoRotateSpeed;
+    this.threeControls.rotateSpeed = Config.controls.rotateSpeed;
+    this.threeControls.zoomSpeed = Config.controls.zoomSpeed;
+    this.threeControls.minDistance = Config.controls.minDistance;
+    this.threeControls.maxDistance = Config.controls.maxDistance;
+    this.threeControls.minPolarAngle = Config.controls.minPolarAngle;
+    this.threeControls.maxPolarAngle = Config.controls.maxPolarAngle;
+    this.threeControls.enableDamping = Config.controls.enableDamping;
+    this.threeControls.enableZoom = Config.controls.enableZoom;
+    this.threeControls.dampingFactor = Config.controls.dampingFactor;
+  }
+}
+```
+
+### src/js/app/components/light.js
+```
+import * as THREE from 'three';
+
+import Config from '../../data/config';
+
+// Sets up and places all lights in scene
+export default class Light {
+  constructor(scene) {
+    this.scene = scene;
+
+    this.init();
+  }
+
+  init() {
+    // Ambient
+    this.ambientLight = new THREE.AmbientLight(Config.ambientLight.color);
+    this.ambientLight.visible = Config.ambientLight.enabled;
+
+    // Point light
+    this.pointLight = new THREE.PointLight(Config.pointLight.color, Config.pointLight.intensity, Config.pointLight.distance);
+    this.pointLight.position.set(Config.pointLight.x, Config.pointLight.y, Config.pointLight.z);
+    this.pointLight.visible = Config.pointLight.enabled;
+
+    // Directional light
+    this.directionalLight = new THREE.DirectionalLight(Config.directionalLight.color, Config.directionalLight.intensity);
+    this.directionalLight.position.set(Config.directionalLight.x, Config.directionalLight.y, Config.directionalLight.z);
+    this.directionalLight.visible = Config.directionalLight.enabled;
+
+    // Shadow map
+    this.directionalLight.castShadow = Config.shadow.enabled;
+    this.directionalLight.shadow.bias = Config.shadow.bias;
+    this.directionalLight.shadow.camera.near = Config.shadow.near;
+    this.directionalLight.shadow.camera.far = Config.shadow.far;
+    this.directionalLight.shadow.camera.left = Config.shadow.left;
+    this.directionalLight.shadow.camera.right = Config.shadow.right;
+    this.directionalLight.shadow.camera.top = Config.shadow.top;
+    this.directionalLight.shadow.camera.bottom = Config.shadow.bottom;
+    this.directionalLight.shadow.mapSize.width = Config.shadow.mapWidth;
+    this.directionalLight.shadow.mapSize.height = Config.shadow.mapHeight;
+
+    // Shadow camera helper
+    this.directionalLightHelper = new THREE.CameraHelper(this.directionalLight.shadow.camera);
+    this.directionalLightHelper.visible = Config.shadow.helperEnabled;
+
+    // Hemisphere light
+    this.hemiLight = new THREE.HemisphereLight(Config.hemiLight.color, Config.hemiLight.groundColor, Config.hemiLight.intensity);
+    this.hemiLight.position.set(Config.hemiLight.x, Config.hemiLight.y, Config.hemiLight.z);
+    this.hemiLight.visible = Config.hemiLight.enabled;
+  }
+
+  place(lightName) {
+    switch(lightName) {
+      case 'ambient':
+        this.scene.add(this.ambientLight);
+        break;
+
+      case 'directional':
+        this.scene.add(this.directionalLight);
+        this.scene.add(this.directionalLightHelper);
+        break;
+
+      case 'point':
+        this.scene.add(this.pointLight);
+        break;
+
+      case 'hemi':
+        this.scene.add(this.hemiLight);
+        break;
+    }
+  }
+}
+```
+
+### src/js/app/components/renderer.js
+```
+import * as THREE from 'three';
+
+import Config from '../../data/config';
+
+// Main webGL renderer class
+export default class Renderer {
+  constructor(scene, container) {
+    // Properties
+    this.scene = scene;
+    this.container = container;
+
+    // Create WebGL renderer and set its antialias
+    this.threeRenderer = new THREE.WebGLRenderer({antialias: true});
+
+    // Set clear color to fog to enable fog or to hex color for no fog
+    this.threeRenderer.setClearColor(scene.fog.color);
+    this.threeRenderer.setPixelRatio(window.devicePixelRatio); // For retina
+
+    // Appends canvas
+    container.appendChild(this.threeRenderer.domElement);
+
+    // Shadow map options
+    this.threeRenderer.shadowMap.enabled = true;
+    this.threeRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    // Get anisotropy for textures
+    Config.maxAnisotropy = this.threeRenderer.getMaxAnisotropy();
+
+    // Initial size update set to canvas container
+    this.updateSize();
+
+    // Listeners
+    document.addEventListener('DOMContentLoaded', () => this.updateSize(), false);
+    window.addEventListener('resize', () => this.updateSize(), false);
+  }
+
+  updateSize() {
+    this.threeRenderer.setSize(this.container.offsetWidth, this.container.offsetHeight);
+  }
+
+  render(scene, camera) {
+    // Renders scene to canvas target
+    this.threeRenderer.render(scene, camera);
+  }
+}
+```
+
+### src/js/app/helpers/animation.js
+```
+import * as THREE from 'three';
+
+export default class Animation {
+  constructor(obj, clip) {
+    // Object with animations
+    this.obj = obj;
+
+    // Initialize animation mixer
+    this.mixer = new THREE.AnimationMixer(this.obj);
+
+    // Simple animation player
+    this.playClip(clip);
+  }
+
+  playClip(clip) {
+    this.action = this.mixer.clipAction(clip);
+
+    this.action.play();
+  }
+
+  // Call update in loop
+  update(delta) {
+    if(this.mixer) {
+      this.mixer.update(delta);
+    }
+  }
+}
+```
+
+### src/js/app/helpers/geometry.js
+```
+import * as THREE from 'three';
+
+import Material from './material';
+
+import Config from '../../data/config';
+
+// This helper class can be used to create and then place geometry in the scene
+export default class Geometry {
+  constructor(scene) {
+    this.scene = scene;
+    this.geo = null;
+  }
+
+  make(type) {
+    if(type === 'plane') {
+      return (width, height, widthSegments = 1, heightSegments = 1) => {
+        this.geo = new THREE.PlaneGeometry(width, height, widthSegments, heightSegments);
+      };
+    }
+
+    if(type === 'sphere') {
+      return (radius, widthSegments = 32, heightSegments = 32) => {
+        this.geo = new THREE.SphereGeometry(radius, widthSegments, heightSegments);
+      };
+    }
+  }
+
+  place(position, rotation) {
+    const material = new Material(0xeeeeee).standard;
+    const mesh = new THREE.Mesh(this.geo, material);
+
+    // Use ES6 spread to set position and rotation from passed in array
+    mesh.position.set(...position);
+    mesh.rotation.set(...rotation);
+
+    if(Config.shadow.enabled) {
+      mesh.receiveShadow = true;
+    }
+
+    this.scene.add(mesh);
+  }
+}
+```
+
+### src/js/app/helpers/greedy.js
+```
+import * as THREE from 'three';
+// a Voxtor is a voxel vector - x,y,z,color
+function xyziToVoxtor(voxtor, currentValue, index) {
+    const properties = [ "x", "y", "z", "color" ];
+    voxtor[properties[index]] = index < 3 ? parseFloat(currentValue) : currentValue;
+    return voxtor;
+};
+
+class Quad {
+    constructor(x, y, z, width, height, color) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+        this.width = width || 1;
+        this.height = height || 1;
+        // this.color = color || "white";
+        this.color = color ? new THREE.Color(parseInt(color, 16)) : 0xffffff;
+    }
+    add(quad) {
+        this.x += quad.x ? quad.x : 0;
+        this.y += quad.y ? quad.y : 0;
+        this.z += quad.z ? quad.z : 0;
+        this.width += quad.width ? quad.width : 0;
+        this.height += quad.height ? quad.height : 0;
+    }
+    sub(quad) {
+        this.x -= quad.x ? quad.x : 0;
+        this.y -= quad.y ? quad.y : 0;
+        this.z -= quad.z ? quad.z : 0;
+        this.width -= quad.width ? quad.width : 0;
+        this.height -= quad.height ? quad.height : 0;
+    }
+
+}
+
+class Greedy {
+    constructor(voxels) {
+        this.palette = [ 0 ];
+        this.modelSize = { width: 0, height: 0 };
+        this.model = [];
+        let voxtors = [];
+        let minX = 0, minY = 0, minZ = 0, maxX = 0, maxY = 0, maxZ = 0;
+        for (const voxel of voxels) {
+            if (voxel.indexOf("#") !== 0 && voxel.indexOf(" ") !== -1) {
+                const xyzi = voxel.split(" ").reduce(xyziToVoxtor, {});
+                voxtors.push(xyzi);    
+                if(xyzi.x > maxX) maxX = xyzi.x;
+                if(xyzi.y > maxY) maxY = xyzi.y;
+                if(xyzi.z > maxZ) maxZ = xyzi.z;
+
+                if(xyzi.x < minX) minX = xyzi.x;
+                if(xyzi.y < minY) minY = xyzi.y;
+                if(xyzi.z < minZ) minZ = xyzi.z;
+                if(this.palette.indexOf(xyzi.color) == -1) {
+                    this.palette.push(xyzi.color);
+                }
+            }
+        }
+        this.boundingBox = {
+            x: minX, y: minY, z: minZ,
+            width: maxX - minX + 1,
+            height: maxY - minY + 1,
+            depth: maxZ - minZ + 1
+        };
+        this.model.length = this.boundingBox.width * this.boundingBox.height * this.boundingBox.depth;
+        this.model.fill(0);
+        for(const voxtor of voxtors) {
+            const index = this.toIndex(voxtor.x, voxtor.y, voxtor.z);
+            this.model[index] = this.palette.indexOf(voxtor.color);            
+        }
+    }
+    toIndex(x, y, z) {
+        // normalize, then return index
+        x -= this.boundingBox.x;
+        y -= this.boundingBox.y;
+        z -= this.boundingBox.z;
+        if (x < 0 || x > this.boundingBox.width || 
+            y < 0 || y > this.boundingBox.height || 
+            z < 0 || z > this.boundingBox.depth) {
+            ////console.log("out of bounds");
+            return "OUT OF BOUNDS";
+        }
+        return y * this.boundingBox.width + x + (this.boundingBox.height * this.boundingBox.width * z);
+    }
+    getMask(direction, depth, reverse) {
+        let mask = [];
+        let horizontal = { start: this.boundingBox.x, end: this.boundingBox.x + this.boundingBox.width };
+        let vertical = { start: this.boundingBox.y, end: this.boundingBox.y + this.boundingBox.height };
+
+        switch(direction) {
+            case 1:
+                horizontal = { start: this.boundingBox.x, end: this.boundingBox.x + this.boundingBox.width };
+                vertical = { start: this.boundingBox.z, end: this.boundingBox.z + this.boundingBox.depth };
+                break;
+            case 2:
+                horizontal = { start: this.boundingBox.y, end: this.boundingBox.y + this.boundingBox.height };
+                vertical = { start: this.boundingBox.z, end: this.boundingBox.z + this.boundingBox.depth };
+                break;
+            default:
+                break;
+        }
+        let depths = ["z", "y", "x" ];
+        let ranges = ["depth", "height", "width" ];
+        let depthBoundary = this.boundingBox[ depths[direction] ];
+        let depthNeighbor = -1;
+        if(reverse) {
+            depthBoundary += this.boundingBox[ ranges[direction] ] - 1;
+            depthNeighbor = 1;
+        }
+        
+        for(let x = horizontal.start; x < horizontal.end; x++) {
+            for(let y = vertical.start; y < vertical.end; y++) {
+                let xMask = x - horizontal.start;
+                let yMask = y - vertical.start;
+                mask[xMask] = mask[xMask] || [];
+                let index = 0;
+                let neighbor = 0;
+                switch(direction) {
+                    case 0:
+                        index = this.toIndex(x, y, depth);       
+                        neighbor = depth !== depthBoundary ? this.model[this.toIndex(x, y, depth + depthNeighbor)] : 0;
+                        break;
+                    case 1:
+                        index = this.toIndex(x, depth, y);   
+                        neighbor = depth !== depthBoundary ? this.model[this.toIndex(x, depth + depthNeighbor, y)] : 0;
+                        break;
+                    case 2:
+                        index = this.toIndex(depth, x, y);       
+                        neighbor = depth !== depthBoundary ? this.model[this.toIndex(depth + depthNeighbor, x, y)] : 0;
+                        break;
+                    default: 
+                        break;
+                }
+                if(neighbor === 0) {
+                    mask[xMask][yMask] = this.model[index];
+                } else {
+                    mask[xMask][yMask] = 0;
+                }
+            }
+        }
+        return mask;
+    }
+
+    getQuads(mask, depth) {
+        let quads = [];
+        let x = 0, y = 0;
+        while (y < mask[0].length) {
+            if (mask[x][y]) {
+                let quadWidth = 1;
+                let quadHeight = 1;
+                let next = x + 1;
+                while (next < mask.length) {
+                    if (mask[next][y] == mask[x][y]) {
+                        quadWidth++;
+                    } else {
+                        break;
+                    }
+                    next++;
+                }
+                next = y + 1;
+                let lineMatch = true;
+                while (next < mask[0].length && lineMatch) {
+                    for (let l = 0; l < quadWidth; l++) {
+                        if (mask[x + l][next] != mask[x][y]) {
+                            lineMatch = false;
+                        }
+                    }
+                    if (lineMatch) {
+                        quadHeight++;
+                        next++;
+                    }
+                }
+                let quad = new Quad( x, y, depth, quadWidth, quadHeight, this.palette[mask[x][y]] );
+                quads.push(quad);
+                for (let mx = x; mx < x + quadWidth; mx++) {
+                    for (let my = y; my < y + quadHeight; my++) {
+                        mask[mx][my] = false;
+                    }
+                }
+                x += quadWidth;
+                if (x >= mask.length) {
+                    x = 0;
+                    y++;
+                }
+
+            } else {
+                x++;
+                if (x >= mask.length) {
+                    x = 0;
+                    y++;
+                }
+            }
+        }
+        return quads;
+    }
+
+}
+
+export default Greedy;
+```
+
+### src/js/app/helpers/material.js
+```
+import * as THREE from 'three';
+
+import Config from '../../data/config';
+
+// USe this class as a helper to set up some default materials
+export default class Material {
+  constructor(color) {
+    this.basic = new THREE.MeshBasicMaterial({
+      color,
+      side: THREE.DoubleSide
+    });
+
+    this.standard = new THREE.MeshStandardMaterial({
+      color,
+      flatShading: true,
+      roughness: 1,
+      metalness: 0,
+      side: THREE.DoubleSide
+    });
+
+    this.wire = new THREE.MeshBasicMaterial({wireframe: true});
+  }
+}
+```
+
+### src/js/app/helpers/meshHelper.js
+```
+import * as THREE from 'three';
+
+// Simple mesh helper that shows edges, wireframes, and face and vertex normals
+export default class MeshHelper {
+  constructor(scene, mesh) {
+    const wireframe = new THREE.WireframeGeometry(mesh.geometry);
+    const wireLine = new THREE.LineSegments(wireframe);
+    wireLine.material.depthTest = false;
+    wireLine.material.opacity = 0.25;
+    wireLine.material.transparent = true;
+    mesh.add(wireLine);
+
+    const edges = new THREE.EdgesGeometry(mesh.geometry);
+    const edgesLine = new THREE.LineSegments(edges);
+    edgesLine.material.depthTest = false;
+    edgesLine.material.opacity = 0.25;
+    edgesLine.material.transparent = true;
+    mesh.add(edgesLine);
+
+    scene.add(new THREE.BoxHelper(mesh));
+    scene.add(new THREE.FaceNormalsHelper(mesh, 2));
+    scene.add(new THREE.VertexNormalsHelper(mesh, 2));
+  }
+}
+```
+
+### src/js/app/helpers/stats.js
+```
+// Local vars for rStats
+let rS, bS, glS, tS;
+
+export default class Stats {
+  constructor(renderer) {
+    this.renderer = renderer;
+  }
+
+  setUp() {
+    bS = new BrowserStats();
+    glS = new glStats();
+    tS = new threeStats(this.renderer.threeRenderer);
+
+    rS = new rStats({
+      CSSPath: './assets/css/',
+      userTimingAPI: true,
+      values: {
+        frame: { caption: 'Total frame time (ms)', over: 16, average: true, avgMs: 100 },
+        fps: { caption: 'Framerate (FPS)', below: 30 },
+        calls: { caption: 'Calls (three.js)', over: 3000 },
+        raf: { caption: 'Time since last rAF (ms)', average: true, avgMs: 100 },
+        rstats: { caption: 'rStats update (ms)', average: true, avgMs: 100 },
+        texture: { caption: 'GenTex', average: true, avgMs: 100 }
+      },
+      groups: [
+        { caption: 'Framerate', values: ['fps', 'raf'] },
+        { caption: 'Frame Budget', values: ['frame', 'texture', 'setup', 'render'] }
+      ],
+      fractions: [
+        { base: 'frame', steps: ['texture', 'setup', 'render'] }
+      ],
+      plugins: [bS, tS, glS]
+    });
+  };
+
+  static start() {
+    rS('frame').start();
+    glS.start();
+
+    rS('rAF').tick();
+    rS('FPS').frame();
+
+    rS('render').start();
+  };
+
+  static end() {
+    rS('render').end(); // render finished
+    rS('frame').end(); // frame finished
+
+    // Local rStats update
+    rS('rStats').start();
+    rS().update();
+    rS('rStats').end();
+  };
+}
+```
+
+### src/js/app/helpers/voxel.js
+```
+import * as THREE from 'three';
+
+import Material from './material';
+
+import Config from '../../data/config';
+
+// This helper class can be used to create and then place geometry in the scene
+export default class Geometry {
+    constructor(scene, xyzi, offset) {
+        this.scene = scene;
+        this.geo = null;
+        this.offset = offset || { x: 0, y: 0, z: 0 };
+        this.color = parseInt(`0x${xyzi[3]}`, 16);
+        const vector = new THREE.Vector3(parseFloat(xyzi[0]) + offset.x, parseFloat(xyzi[2]) + offset.y, parseFloat(xyzi[1]) + offset.z);
+        this.geo = new THREE.BoxGeometry(1, 1, 1);
+        this.place(vector, [0, 0, 0]);
+
+    }
+
+    place(position, rotation) {
+        var voxelMaterial = new THREE.MeshPhongMaterial( {
+            color: new THREE.Color(this.color),
+            flatShading: true,
+            vertexColors: THREE.VertexColors,
+            shininess: 0
+        } );
+        var wireframeMaterial = new THREE.MeshBasicMaterial( { color: 0x000000, wireframe: true, transparent: true } );
+        const mesh = new THREE.Mesh(this.geo, voxelMaterial);
+        mesh.add(new THREE.Mesh(this.geo, wireframeMaterial));
+        mesh.position.x = position.x;
+        mesh.position.y = position.y;
+        mesh.position.z = position.z;
+        mesh.rotation.set(...rotation);
+
+        if (Config.shadow.enabled) {
+            mesh.receiveShadow = true;
+            mesh.castShadow = true;
+        }
+
+        this.scene.add(mesh);
+    }
+}
+```
+
+### src/js/app/loaders/goxtext.js
+```
+
+```
+
+### src/js/app/managers/datGUI.js
+```
+import Config from '../../data/config';
+
+// Manages all dat.GUI interactions
+export default class DatGUI {
+  constructor(main, mesh) {
+    const gui = new dat.GUI();
+
+    this.camera = main.camera.threeCamera;
+    this.controls = main.controls.threeControls;
+    this.light = main.light;
+
+    /* Global */
+    //gui.close();
+
+    /* Camera */
+    const cameraFolder = gui.addFolder('Camera');
+    const cameraFOVGui = cameraFolder.add(Config.camera, 'fov', 0, 180).name('Camera FOV');
+    cameraFOVGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.camera.fov = value;
+    });
+    cameraFOVGui.onFinishChange(() => {
+      this.camera.updateProjectionMatrix();
+
+      this.controls.enableRotate = true;
+    });
+    const cameraAspectGui = cameraFolder.add(Config.camera, 'aspect', 0, 4).name('Camera Aspect');
+    cameraAspectGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.camera.aspect = value;
+    });
+    cameraAspectGui.onFinishChange(() => {
+      this.camera.updateProjectionMatrix();
+
+      this.controls.enableRotate = true;
+    });
+    const cameraFogColorGui = cameraFolder.addColor(Config.fog, 'color').name('Fog Color');
+    cameraFogColorGui.onChange((value) => {
+      main.scene.fog.color.setHex(value);
+    });
+    const cameraFogNearGui = cameraFolder.add(Config.fog, 'near', 0.000, 0.010).name('Fog Near');
+    cameraFogNearGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      main.scene.fog.density = value;
+    });
+    cameraFogNearGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+
+
+    /* Controls */
+    const controlsFolder = gui.addFolder('Controls');
+    controlsFolder.add(Config.controls, 'autoRotate').name('Auto Rotate').onChange((value) => {
+      this.controls.autoRotate = value;
+    });
+    const controlsAutoRotateSpeedGui = controlsFolder.add(Config.controls, 'autoRotateSpeed', -1, 1).name('Rotation Speed');
+    controlsAutoRotateSpeedGui.onChange((value) => {
+      this.controls.enableRotate = false;
+      this.controls.autoRotateSpeed = value;
+    });
+    controlsAutoRotateSpeedGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+
+
+    /* Mesh */
+    const meshFolder = gui.addFolder('Mesh');
+    meshFolder.add(Config.mesh, 'translucent', true).name('Translucent').onChange((value) => {
+      if(value) {
+        mesh.material.transparent = true;
+        mesh.material.opacity = 0.5;
+      } else {
+        mesh.material.opacity = 1.0;
+      }
+    });
+    meshFolder.add(Config.mesh, 'wireframe', true).name('Wireframe').onChange((value) => {
+      mesh.material.wireframe = value;
+    });
+
+
+    /* Lights */
+    // Ambient Light
+    const ambientLightFolder = gui.addFolder('Ambient Light');
+    ambientLightFolder.add(Config.ambientLight, 'enabled').name('Enabled').onChange((value) => {
+      this.light.ambientLight.visible = value;
+    });
+    ambientLightFolder.addColor(Config.ambientLight, 'color').name('Color').onChange((value) => {
+      this.light.ambientLight.color.setHex(value);
+    });
+
+
+    // Directional Light
+    const directionalLightFolder = gui.addFolder('Directional Light');
+    directionalLightFolder.add(Config.directionalLight, 'enabled').name('Enabled').onChange((value) => {
+      this.light.directionalLight.visible = value;
+    });
+    directionalLightFolder.addColor(Config.directionalLight, 'color').name('Color').onChange((value) => {
+      this.light.directionalLight.color.setHex(value);
+    });
+    const directionalLightIntensityGui = directionalLightFolder.add(Config.directionalLight, 'intensity', 0, 2).name('Intensity');
+    directionalLightIntensityGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.directionalLight.intensity = value;
+    });
+    directionalLightIntensityGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+    const directionalLightPositionXGui = directionalLightFolder.add(Config.directionalLight, 'x', -1000, 1000).name('Position X');
+    directionalLightPositionXGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.directionalLight.position.x = value;
+    });
+    directionalLightPositionXGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+    const directionalLightPositionYGui = directionalLightFolder.add(Config.directionalLight, 'y', -1000, 1000).name('Position Y');
+    directionalLightPositionYGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.directionalLight.position.y = value;
+    });
+    directionalLightPositionYGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+    const directionalLightPositionZGui = directionalLightFolder.add(Config.directionalLight, 'z', -1000, 1000).name('Position Z');
+    directionalLightPositionZGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.directionalLight.position.z = value;
+    });
+    directionalLightPositionZGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+
+    // Shadow Map
+    const shadowFolder = gui.addFolder('Shadow Map');
+    shadowFolder.add(Config.shadow, 'enabled').name('Enabled').onChange((value) => {
+      this.light.directionalLight.castShadow = value;
+    });
+    shadowFolder.add(Config.shadow, 'helperEnabled').name('Helper Enabled').onChange((value) => {
+      this.light.directionalLightHelper.visible = value;
+    });
+    const shadowNearGui = shadowFolder.add(Config.shadow, 'near', 0, 400).name('Near');
+    shadowNearGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.directionalLight.shadow.camera.near = value;
+    });
+    shadowNearGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+      this.light.directionalLight.shadow.map.dispose();
+      this.light.directionalLight.shadow.map = null;
+      this.light.directionalLightHelper.update();
+    });
+    const shadowFarGui = shadowFolder.add(Config.shadow, 'far', 0, 1200).name('Far');
+    shadowFarGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.directionalLight.shadow.camera.far = value;
+    });
+    shadowFarGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+      this.light.directionalLight.shadow.map.dispose();
+      this.light.directionalLight.shadow.map = null;
+      this.light.directionalLightHelper.update();
+    });
+    const shadowTopGui = shadowFolder.add(Config.shadow, 'top', -400, 400).name('Top');
+    shadowTopGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.directionalLight.shadow.camera.top = value;
+    });
+    shadowTopGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+      this.light.directionalLight.shadow.map.dispose();
+      this.light.directionalLight.shadow.map = null;
+      this.light.directionalLightHelper.update();
+    });
+    const shadowRightGui = shadowFolder.add(Config.shadow, 'right', -400, 400).name('Right');
+    shadowRightGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.directionalLight.shadow.camera.right = value;
+    });
+    shadowRightGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+      this.light.directionalLight.shadow.map.dispose();
+      this.light.directionalLight.shadow.map = null;
+      this.light.directionalLightHelper.update();
+    });
+    const shadowBottomGui = shadowFolder.add(Config.shadow, 'bottom', -400, 400).name('Bottom');
+    shadowBottomGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.directionalLight.shadow.camera.bottom = value;
+    });
+    shadowBottomGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+      this.light.directionalLight.shadow.map.dispose();
+      this.light.directionalLight.shadow.map = null;
+      this.light.directionalLightHelper.update();
+    });
+    const shadowLeftGui = shadowFolder.add(Config.shadow, 'left', -400, 400).name('Left');
+    shadowLeftGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.directionalLight.shadow.camera.left = value;
+    });
+    shadowLeftGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+      this.light.directionalLight.shadow.map.dispose();
+      this.light.directionalLight.shadow.map = null;
+      this.light.directionalLightHelper.update();
+    });
+    const shadowBiasGui = shadowFolder.add(Config.shadow, 'bias', -0.000010, 1).name('Bias');
+    shadowBiasGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.directionalLight.shadow.bias = value;
+    });
+    shadowBiasGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+      this.light.directionalLight.shadow.map.dispose();
+      this.light.directionalLight.shadow.map = null;
+      this.light.directionalLightHelper.update();
+    });
+
+
+    // Point Light
+    const pointLightFolder = gui.addFolder('Point Light');
+    pointLightFolder.add(Config.pointLight, 'enabled').name('Enabled').onChange((value) => {
+      this.light.pointLight.visible = value;
+    });
+    pointLightFolder.addColor(Config.pointLight, 'color').name('Color').onChange((value) => {
+      this.light.pointLight.color.setHex(value);
+    });
+    const pointLightIntensityGui = pointLightFolder.add(Config.pointLight, 'intensity', 0, 2).name('Intensity');
+    pointLightIntensityGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.pointLight.intensity = value;
+    });
+    pointLightIntensityGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+    const pointLightDistanceGui = pointLightFolder.add(Config.pointLight, 'distance', 0, 1000).name('Distance');
+    pointLightDistanceGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.pointLight.distance = value;
+    });
+    pointLightDistanceGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+    const pointLightPositionXGui = pointLightFolder.add(Config.pointLight, 'x', -1000, 1000).name('Position X');
+    pointLightPositionXGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.pointLight.position.x = value;
+    });
+    pointLightPositionXGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+    const pointLightPositionYGui = pointLightFolder.add(Config.pointLight, 'y', -1000, 1000).name('Position Y');
+    pointLightPositionYGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.pointLight.position.y = value;
+    });
+    pointLightPositionYGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+    const pointLightPositionZGui = pointLightFolder.add(Config.pointLight, 'z', -1000, 1000).name('Position Z');
+    pointLightPositionZGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.pointLight.position.z = value;
+    });
+    pointLightPositionZGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+
+
+    // Hemi Light
+    const hemiLightFolder = gui.addFolder('Hemi Light');
+    hemiLightFolder.add(Config.hemiLight, 'enabled').name('Enabled').onChange((value) => {
+      this.light.hemiLight.visible = value;
+    });
+    hemiLightFolder.addColor(Config.hemiLight, 'color').name('Color').onChange((value) => {
+      this.light.hemiLight.color.setHex(value);
+    });
+    hemiLightFolder.addColor(Config.hemiLight, 'groundColor').name('ground Color').onChange((value) => {
+      this.light.hemiLight.groundColor.setHex(value);
+    });
+    const hemiLightIntensityGui = hemiLightFolder.add(Config.hemiLight, 'intensity', 0, 2).name('Intensity');
+    hemiLightIntensityGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.hemiLight.intensity = value;
+    });
+    hemiLightIntensityGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+    const hemiLightPositionXGui = hemiLightFolder.add(Config.hemiLight, 'x', -1000, 1000).name('Position X');
+    hemiLightPositionXGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.hemiLight.position.x = value;
+    });
+    hemiLightPositionXGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+    const hemiLightPositionYGui = hemiLightFolder.add(Config.hemiLight, 'y', -500, 1000).name('Position Y');
+    hemiLightPositionYGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.hemiLight.position.y = value;
+    });
+    hemiLightPositionYGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+    const hemiLightPositionZGui = hemiLightFolder.add(Config.hemiLight, 'z', -1000, 1000).name('Position Z');
+    hemiLightPositionZGui.onChange((value) => {
+      this.controls.enableRotate = false;
+
+      this.light.hemiLight.position.z = value;
+    });
+    hemiLightPositionZGui.onFinishChange(() => {
+      this.controls.enableRotate = true;
+    });
+  }
+}
+```
+
+### src/js/app/managers/interaction.js
+```
+import Keyboard from '../../utils/keyboard';
+import Helpers from '../../utils/helpers';
+import Config from '../../data/config';
+
+// Manages all input interactions
+export default class Interaction {
+  constructor(renderer, scene, camera, controls) {
+    // Properties
+    this.renderer = renderer;
+    this.scene = scene;
+    this.camera = camera;
+    this.controls = controls;
+
+    this.timeout = null;
+
+    // Instantiate keyboard helper
+    this.keyboard = new Keyboard();
+
+    // Listeners
+    // Mouse events
+    this.renderer.domElement.addEventListener('mousemove', (event) => Helpers.throttle(this.onMouseMove(event), 250), false);
+    this.renderer.domElement.addEventListener('mouseleave', (event) => this.onMouseLeave(event), false);
+    this.renderer.domElement.addEventListener('mouseover', (event) => this.onMouseOver(event), false);
+
+    // Keyboard events
+    this.keyboard.domElement.addEventListener('keydown', (event) => {
+      // Only once
+      if(event.repeat) {
+        return;
+      }
+
+      if(this.keyboard.eventMatches(event, 'escape')) {
+        console.log('Escape pressed');
+      }
+    });
+  }
+
+  onMouseOver(event) {
+    event.preventDefault();
+
+    Config.isMouseOver = true;
+  }
+
+  onMouseLeave(event) {
+    event.preventDefault();
+
+    Config.isMouseOver = false;
+  }
+
+  onMouseMove(event) {
+    event.preventDefault();
+
+    clearTimeout(this.timeout);
+
+    this.timeout = setTimeout(function() {
+      Config.isMouseMoving = false;
+    }, 200);
+
+    Config.isMouseMoving = true;
+  }
+}
+```
+
+### src/js/app/model/goxtext.js
+```
+import * as THREE from 'three';
+
+import Material from '../helpers/material';
+import MeshHelper from '../helpers/meshHelper';
+import Helpers from '../../utils/helpers';
+import Config from '../../data/config';
+
+// Loads in a single object from the config file
+export default class GoxText {
+  constructor(scene, manager) {
+    this.scene = scene;
+    // this.textures = textures;
+
+    // Manager is passed in to loader to determine when loading done in main
+    this.loader = new THREE.ObjectLoader(manager);
+    this.obj = null;
+  }
+
+  load() {
+    // Load model with ObjectLoader
+    this.loader.load(Config.model.path, obj => {
+      obj.traverse(child => {
+        if(child instanceof THREE.Mesh) {
+          // Create material for mesh and set its map to texture by name from preloaded textures
+          const material = new Material(0xffffff).standard;
+          //   material.map = this.textures.UV;
+          child.material = material;
+
+          // Set to cast and receive shadow if enabled
+          if(Config.shadow.enabled) {
+            child.receiveShadow = true;
+            child.castShadow = true;
+          }
+        }
+      });
+
+      // Add mesh helper if Dev
+      if(Config.isDev && Config.mesh.enableHelper) {
+        new MeshHelper(this.scene, obj);
+      }
+
+      // Set prop to obj
+      this.obj = obj;
+
+      obj.scale.multiplyScalar(Config.model.scale);
+      this.scene.add(obj);
+    }, Helpers.logProgress(), Helpers.logError());
+  }
+}
+```
+
+### src/js/app/model/model.js
+```
+import * as THREE from 'three';
+
+import Material from '../helpers/material';
+import MeshHelper from '../helpers/meshHelper';
+import Helpers from '../../utils/helpers';
+import Config from '../../data/config';
+
+// Loads in a single object from the config file
+export default class Model {
+  constructor(scene, manager, textures) {
+    this.scene = scene;
+    this.textures = textures;
+
+    // Manager is passed in to loader to determine when loading done in main
+    this.loader = new THREE.ObjectLoader(manager);
+    this.obj = null;
+  }
+
+  load() {
+    // Load model with ObjectLoader
+    this.loader.load(Config.model.path, obj => {
+      obj.traverse(child => {
+        if(child instanceof THREE.Mesh) {
+          // Create material for mesh and set its map to texture by name from preloaded textures
+          const material = new Material(0xffffff).standard;
+          material.map = this.textures.UV;
+          child.material = material;
+
+          // Set to cast and receive shadow if enabled
+          if(Config.shadow.enabled) {
+            child.receiveShadow = true;
+            child.castShadow = true;
+          }
+        }
+      });
+
+      // Add mesh helper if Dev
+      if(Config.isDev && Config.mesh.enableHelper) {
+        new MeshHelper(this.scene, obj);
+      }
+
+      // Set prop to obj
+      this.obj = obj;
+
+      obj.scale.multiplyScalar(Config.model.scale);
+      this.scene.add(obj);
+    }, Helpers.logProgress(), Helpers.logError());
+  }
+}
+```
+
+### src/js/app/model/texture.js
+```
+import * as THREE from 'three';
+// Promise polyfill for IE
+import { Promise } from 'es6-promise';
+
+import Helpers from '../../utils/helpers';
+import Config from '../../data/config';
+
+// This class preloads all textures in the imageFiles array in the Config via ES6 Promises.
+// Once all textures are done loading the model itself will be loaded after the Promise .then() callback.
+// Using promises to preload textures prevents issues when applying textures to materials
+// before the textures have loaded.
+export default class Texture {
+  constructor() {
+    // Prop that will contain all loaded textures
+    this.textures = {};
+  }
+
+  load() {
+    const loader = new THREE.TextureLoader();
+    const maxAnisotropy = Config.maxAnisotropy;
+    const imageFiles = Config.texture.imageFiles;
+    const promiseArray = [];
+
+    loader.setPath(Config.texture.path);
+
+    imageFiles.forEach(imageFile => {
+      // Add an individual Promise for each image in array
+      promiseArray.push(new Promise((resolve, reject) => {
+        // Each Promise will attempt to load the image file
+        loader.load(imageFile.image,
+          // This gets called on load with the loaded texture
+          texture => {
+            texture.anisotropy = maxAnisotropy;
+
+            // Resolve Promise with object of texture if it is instance of THREE.Texture
+            const modelOBJ = {};
+            modelOBJ[imageFile.name] = texture;
+            if(modelOBJ[imageFile.name] instanceof THREE.Texture)
+              resolve(modelOBJ);
+          },
+          Helpers.logProgress(),
+          xhr => reject(new Error(xhr + 'An error occurred loading while loading ' + imageFile.image))
+        )
+      }));
+    });
+
+    // Iterate through all Promises in array and return another Promise when all have resolved or console log reason when any reject
+    return Promise.all(promiseArray).then(textures => {
+      // Set the textures prop object to have name be the resolved texture
+      for(let i = 0; i < textures.length; i++) {
+        this.textures[Object.keys(textures[i])[0]] = textures[i][Object.keys(textures[i])[0]];
+      }
+    }, reason => console.log(reason));
+  }
+}
+```
+
+### src/public/assets/js/rStats.extras.js
+```
+window.glStats = function () {
+
+  var _rS = null;
+
+  var _totalDrawArraysCalls = 0,
+      _totalDrawElementsCalls = 0,
+      _totalUseProgramCalls = 0,
+      _totalFaces = 0,
+      _totalVertices = 0,
+      _totalPoints = 0,
+      _totalBindTexures = 0;
+
+  function _h ( f, c ) {
+    return function () {
+      c.apply( this, arguments );
+      f.apply( this, arguments );
+    };
+  }
+
+  WebGLRenderingContext.prototype.drawArrays = _h( WebGLRenderingContext.prototype.drawArrays, function () {
+    _totalDrawArraysCalls++;
+    if ( arguments[ 0 ] == this.POINTS ) _totalPoints += arguments[ 2 ];
+    else _totalVertices += arguments[ 2 ];
+  } );
+
+  WebGLRenderingContext.prototype.drawElements = _h( WebGLRenderingContext.prototype.drawElements, function () {
+    _totalDrawElementsCalls++;
+    _totalFaces += arguments[ 1 ] / 3;
+    _totalVertices += arguments[ 1 ];
+  } );
+
+  WebGLRenderingContext.prototype.useProgram = _h( WebGLRenderingContext.prototype.useProgram, function () {
+    _totalUseProgramCalls++;
+  } );
+
+  WebGLRenderingContext.prototype.bindTexture = _h( WebGLRenderingContext.prototype.bindTexture, function () {
+    _totalBindTexures++;
+  } );
+
+  var _values = {
+    allcalls: {
+      over: 3000,
+      caption: 'Calls (hook)'
+    },
+    drawelements: {
+      caption: 'drawElements (hook)'
+    },
+    drawarrays: {
+      caption: 'drawArrays (hook)'
+    }
+  };
+
+  var _groups = [ {
+    caption: 'WebGL',
+    values: [ 'allcalls', 'drawelements', 'drawarrays', 'useprogram', 'bindtexture', 'glfaces', 'glvertices', 'glpoints' ]
+  } ];
+
+  var _fractions = [ {
+    base: 'allcalls',
+    steps: [ 'drawelements', 'drawarrays' ]
+  } ];
+
+  function _update () {
+    _rS( 'allcalls' ).set( _totalDrawArraysCalls + _totalDrawElementsCalls );
+    _rS( 'drawElements' ).set( _totalDrawElementsCalls );
+    _rS( 'drawArrays' ).set( _totalDrawArraysCalls );
+    _rS( 'bindTexture' ).set( _totalBindTexures );
+    _rS( 'useProgram' ).set( _totalUseProgramCalls );
+    _rS( 'glfaces' ).set( _totalFaces );
+    _rS( 'glvertices' ).set( _totalVertices );
+    _rS( 'glpoints' ).set( _totalPoints );
+  }
+
+  function _start () {
+    _totalDrawArraysCalls = 0;
+    _totalDrawElementsCalls = 0;
+    _totalUseProgramCalls = 0;
+    _totalFaces = 0;
+    _totalVertices = 0;
+    _totalPoints = 0;
+    _totalBindTexures = 0;
+  }
+
+  function _end () {}
+
+  function _attach ( r ) {
+    _rS = r;
+  }
+
+  return {
+    update: _update,
+    start: _start,
+    end: _end,
+    attach: _attach,
+    values: _values,
+    groups: _groups,
+    fractions: _fractions
+  };
+
+};
+
+window.threeStats = function ( renderer ) {
+
+  var _rS = null;
+
+  var _values = {
+    'renderer.info.memory.geometries': {
+      caption: 'Geometries'
+    },
+    'renderer.info.memory.textures': {
+      caption: 'Textures'
+    },
+    'renderer.info.programs': {
+      caption: 'Programs'
+    },
+    'renderer.info.render.calls': {
+      caption: 'Calls'
+    },
+    'renderer.info.render.faces': {
+      caption: 'Faces',
+      over: 1000
+    },
+    'renderer.info.render.points': {
+      caption: 'Points'
+    },
+    'renderer.info.render.vertices': {
+      caption: 'Vertices'
+    }
+  };
+
+  var _groups = [ {
+    caption: 'Three.js - Memory',
+    values: [ 'renderer.info.memory.geometries', 'renderer.info.programs', 'renderer.info.memory.textures' ]
+  }, {
+    caption: 'Three.js - Render',
+    values: [ 'renderer.info.render.calls', 'renderer.info.render.faces', 'renderer.info.render.points', 'renderer.info.render.vertices' ]
+  } ];
+
+  var _fractions = [];
+
+  function _update () {
+
+    _rS( 'renderer.info.memory.geometries' ).set( renderer.info.memory.geometries );
+    //_rS( 'renderer.info.programs' ).set( renderer.info.programs.length );
+    _rS( 'renderer.info.memory.textures' ).set( renderer.info.memory.textures );
+    _rS( 'renderer.info.render.calls' ).set( renderer.info.render.calls );
+    _rS( 'renderer.info.render.faces' ).set( renderer.info.render.faces );
+    _rS( 'renderer.info.render.points' ).set( renderer.info.render.points );
+    _rS( 'renderer.info.render.vertices' ).set( renderer.info.render.vertices );
+
+  }
+
+  function _start () {}
+
+  function _end () {}
+
+  function _attach ( r ) {
+    _rS = r;
+  }
+
+  return {
+    update: _update,
+    start: _start,
+    end: _end,
+    attach: _attach,
+    values: _values,
+    groups: _groups,
+    fractions: _fractions
+  };
+
+};
+
+/*
+ *   From https://github.com/paulirish/memory-stats.js
+ */
+
+window.BrowserStats = function () {
+
+  var _rS = null;
+
+  var _usedJSHeapSize = 0,
+      _totalJSHeapSize = 0;
+
+  var memory = {
+    usedJSHeapSize: 0,
+    totalJSHeapSize: 0
+  };
+
+  if ( window.performance && performance.memory )
+    memory = performance.memory;
+
+  if ( memory.totalJSHeapSize === 0 ) {
+    console.warn( 'totalJSHeapSize === 0... performance.memory is only available in Chrome .' );
+  }
+
+  var _values = {
+    memory: {
+      caption: 'Used Memory',
+      average: true,
+      avgMs: 1000,
+      over: 22
+    },
+    total: {
+      caption: 'Total Memory'
+    }
+  };
+
+  var _groups = [ {
+    caption: 'Browser',
+    values: [ 'memory', 'total' ]
+  } ];
+
+  var _fractions = [ {
+    base: 'total',
+    steps: [ 'memory' ]
+  } ];
+
+  var log1024 = Math.log( 1024 );
+
+  function _size ( v ) {
+
+    var precision = 100; //Math.pow(10, 2);
+    var i = Math.floor( Math.log( v ) / log1024 );
+    if( v === 0 ) i = 1;
+    return Math.round( v * precision / Math.pow( 1024, i ) ) / precision; // + ' ' + sizes[i];
+
+  }
+
+  function _update () {
+    _usedJSHeapSize = _size( memory.usedJSHeapSize );
+    _totalJSHeapSize = _size( memory.totalJSHeapSize );
+
+    _rS( 'memory' ).set( _usedJSHeapSize );
+    _rS( 'total' ).set( _totalJSHeapSize );
+  }
+
+  function _start () {
+    _usedJSHeapSize = 0;
+  }
+
+  function _end () {}
+
+  function _attach ( r ) {
+    _rS = r;
+  }
+
+  return {
+    update: _update,
+    start: _start,
+    end: _end,
+    attach: _attach,
+    values: _values,
+    groups: _groups,
+    fractions: _fractions
+  };
+
+};
+
+if (typeof module === 'object') {
+  module.exports = {
+    glStats: window.glStats,
+    threeStats: window.threeStats,
+    BrowserStats: window.BrowserStats
+  };
+}
+```
+
+### src/public/assets/js/rStats.js
+```
+// performance.now() polyfill from https://gist.github.com/paulirish/5438650
+'use strict';
+
+( function () {
+
+  // prepare base perf object
+  if ( typeof window.performance === 'undefined' ) {
+    window.performance = {};
+  }
+
+  if ( !window.performance.now ) {
+
+    var nowOffset = Date.now();
+
+    if ( performance.timing && performance.timing.navigationStart ) {
+      nowOffset = performance.timing.navigationStart;
+    }
+
+    window.performance.now = function now () {
+      return Date.now() - nowOffset;
+    };
+
+  }
+
+  if( !window.performance.mark ) {
+    window.performance.mark = function(){}
+  }
+
+  if( !window.performance.measure ) {
+    window.performance.measure = function(){}
+  }
+
+} )();
+
+/**
+ * @class rStats
+ * @param {rStats~Settings} [settings] Settings for the rStats instance.
+ */
+
+/**
+ * @typedef {Object} rStats~Settings
+ * @property {Array.<String>} [colours] An array of CSS colour values.
+ * @property {String} [CSSPath=''] Base URL where rStats.css is located.
+ * @property {Array.<String>} [css] URLs of CSS or font files to import.
+ * @property {Object.<String, rStats~CounterProperties>} [values] Properties to use for each counter.
+ * @property {Array.<Object>} [groups] Define groups of counters.
+ * @property {Array.<Object>} [fractions] Define stacked counters.
+ * @property {Array.<Object>} [plugins] Additional plugins.
+ */
+
+/**
+ * @typedef {Object} rStats~CounterProperties
+ * @property {String} [caption] Caption for this counter.
+ * @property {Boolean} [average=false] Whether the values should be averaged.
+ * @property {Number} [avgMs=1000] Duration for which the values should be averaged.
+ * @property {Number} [below] Value below which the graph should be highlighted.
+ * @property {Number} [over] Value over which the graph should be highlighted.
+ * @property {Boolean} [interpolate=true] Whether framerate should be interpolated.
+ */
+
+window.rStats = function rStats ( settings ) {
+
+  function iterateKeys ( array, callback ) {
+    var keys = Object.keys( array );
+    for ( var j = 0, l = keys.length; j < l; j++ ) {
+      callback( keys[ j ] );
+    }
+  }
+
+  function importCSS ( url ) {
+
+    var element = document.createElement( 'link' );
+    element.href = url;
+    element.rel = 'stylesheet';
+    element.type = 'text/css';
+    document.getElementsByTagName( 'head' )[ 0 ].appendChild( element );
+
+  }
+
+  var _settings = settings || {};
+  var _colours = _settings.colours || [ '#850700', '#c74900', '#fcb300', '#284280', '#4c7c0c' ];
+
+  var _cssFont = 'https://fonts.googleapis.com/css?family=Roboto+Condensed:400,700,300';
+  var _cssRStats = ( _settings.CSSPath ? _settings.CSSPath : '' ) + 'rStats.css';
+
+  var _css = _settings.css || [ _cssFont, _cssRStats ];
+  _css.forEach(function (uri) {
+    importCSS( uri );
+  });
+
+  if ( !_settings.values ) _settings.values = {};
+
+  var _base, _div, _elHeight = 10, _elWidth = 200;
+  var _perfCounters = {};
+
+
+  function Graph ( _dom, _id, _defArg ) {
+
+    var _def = _defArg || {};
+    var _canvas = document.createElement( 'canvas' ),
+        _ctx = _canvas.getContext( '2d' ),
+        _max = 0,
+        _current = 0;
+
+    var c = _def.color ? _def.color : '#666666';
+
+    var _dotCanvas = document.createElement( 'canvas' ),
+        _dotCtx = _dotCanvas.getContext( '2d' );
+    _dotCanvas.width = 1;
+    _dotCanvas.height = 2 * _elHeight;
+    _dotCtx.fillStyle = '#444444';
+    _dotCtx.fillRect( 0, 0, 1, 2 * _elHeight );
+    _dotCtx.fillStyle = c;
+    _dotCtx.fillRect( 0, _elHeight, 1, _elHeight );
+    _dotCtx.fillStyle = '#ffffff';
+    _dotCtx.globalAlpha = 0.5;
+    _dotCtx.fillRect( 0, _elHeight, 1, 1 );
+    _dotCtx.globalAlpha = 1;
+
+    var _alarmCanvas = document.createElement( 'canvas' ),
+        _alarmCtx = _alarmCanvas.getContext( '2d' );
+    _alarmCanvas.width = 1;
+    _alarmCanvas.height = 2 * _elHeight;
+    _alarmCtx.fillStyle = '#444444';
+    _alarmCtx.fillRect( 0, 0, 1, 2 * _elHeight );
+    _alarmCtx.fillStyle = '#b70000';
+    _alarmCtx.fillRect( 0, _elHeight, 1, _elHeight );
+    _alarmCtx.globalAlpha = 0.5;
+    _alarmCtx.fillStyle = '#ffffff';
+    _alarmCtx.fillRect( 0, _elHeight, 1, 1 );
+    _alarmCtx.globalAlpha = 1;
+
+    function _init () {
+
+      _canvas.width = _elWidth;
+      _canvas.height = _elHeight;
+      _canvas.style.width = _canvas.width + 'px';
+      _canvas.style.height = _canvas.height + 'px';
+      _canvas.className = 'rs-canvas';
+      _dom.appendChild( _canvas );
+
+      _ctx.fillStyle = '#444444';
+      _ctx.fillRect( 0, 0, _canvas.width, _canvas.height );
+
+    }
+
+    function _draw ( v, alarm ) {
+      _current += ( v - _current ) * 0.1;
+      _max *= 0.99;
+      if ( _current > _max ) _max = _current;
+      _ctx.drawImage( _canvas, 1, 0, _canvas.width - 1, _canvas.height, 0, 0, _canvas.width - 1, _canvas.height );
+      if ( alarm ) {
+        _ctx.drawImage( _alarmCanvas, _canvas.width - 1, _canvas.height - _current * _canvas.height / _max - _elHeight );
+      } else {
+        _ctx.drawImage( _dotCanvas, _canvas.width - 1, _canvas.height - _current * _canvas.height / _max - _elHeight );
+      }
+    }
+
+    _init();
+
+    return {
+      draw: _draw
+    };
+
+  }
+
+  function StackGraph ( _dom, _num ) {
+
+    var _canvas = document.createElement( 'canvas' ),
+        _ctx = _canvas.getContext( '2d' );
+
+    function _init () {
+
+      _canvas.width = _elWidth;
+      _canvas.height = _elHeight * _num;
+      _canvas.style.width = _canvas.width + 'px';
+      _canvas.style.height = _canvas.height + 'px';
+      _canvas.className = 'rs-canvas';
+      _dom.appendChild( _canvas );
+
+      _ctx.fillStyle = '#444444';
+      _ctx.fillRect( 0, 0, _canvas.width, _canvas.height );
+
+    }
+
+    function _draw ( v ) {
+      _ctx.drawImage( _canvas, 1, 0, _canvas.width - 1, _canvas.height, 0, 0, _canvas.width - 1, _canvas.height );
+      var th = 0;
+      iterateKeys( v, function ( j ) {
+        var h = v[ j ] * _canvas.height;
+        _ctx.fillStyle = _colours[ j ];
+        _ctx.fillRect( _canvas.width - 1, th, 1, h );
+        th += h;
+      } );
+    }
+
+    _init();
+
+    return {
+      draw: _draw
+    };
+
+  }
+
+  function PerfCounter ( id, group ) {
+
+    var _id = id,
+        _time,
+        _value = 0,
+        _total = 0,
+        _averageValue = 0,
+        _accumValue = 0,
+        _accumStart = performance.now(),
+        _accumSamples = 0,
+        _dom = document.createElement( 'div' ),
+        _spanId = document.createElement( 'span' ),
+        _spanValue = document.createElement( 'div' ),
+        _spanValueText = document.createTextNode( '' ),
+        _def = _settings ? _settings.values[ _id.toLowerCase() ] : null,
+        _graph = new Graph( _dom, _id, _def ),
+        _started = false;
+
+    _spanId.className = 'rs-counter-id';
+    _spanId.textContent = ( _def && _def.caption ) ? _def.caption : _id;
+
+    _spanValue.className = 'rs-counter-value';
+    _spanValue.appendChild( _spanValueText );
+
+    _dom.appendChild( _spanId );
+    _dom.appendChild( _spanValue );
+    if ( group ) group.div.appendChild( _dom );
+    else _div.appendChild( _dom );
+
+    _time = performance.now();
+
+    function _average ( v ) {
+      if ( _def && _def.average ) {
+        _accumValue += v;
+        _accumSamples++;
+        var t = performance.now();
+        if ( t - _accumStart >= ( _def.avgMs || 1000 ) ) {
+          _averageValue = _accumValue / _accumSamples;
+          _accumValue = 0;
+          _accumStart = t;
+          _accumSamples = 0;
+        }
+      }
+    }
+
+    function _start () {
+      _time = performance.now();
+      if( _settings.userTimingAPI ) performance.mark( _id + '-start' );
+      _started = true;
+    }
+
+    function _end () {
+      _value = performance.now() - _time;
+      if( _settings.userTimingAPI ) {
+        performance.mark( _id + '-end' );
+        if( _started ) {
+          performance.measure( _id, _id + '-start', _id + '-end' );
+        }
+      }
+      _average( _value );
+    }
+
+    function _tick () {
+      _end();
+      _start();
+    }
+
+    function _draw () {
+      var v = ( _def && _def.average ) ? _averageValue : _value;
+      _spanValueText.nodeValue = Math.round( v * 100 ) / 100;
+      var a = ( _def && ( ( _def.below && _value < _def.below ) || ( _def.over && _value > _def.over ) ) );
+      _graph.draw( _value, a );
+      _dom.className = a ? 'rs-counter-base alarm' : 'rs-counter-base';
+
+    }
+
+    function _frame () {
+      var t = performance.now();
+      var e = t - _time;
+      _total++;
+      if ( e > 1000 ) {
+        if ( _def && _def.interpolate === false ) {
+          _value = _total;
+        } else {
+          _value = _total * 1000 / e;
+        }
+        _total = 0;
+        _time = t;
+        _average( _value );
+      }
+    }
+
+    function _set ( v ) {
+      _value = v;
+      _average( _value );
+    }
+
+    return {
+      set: _set,
+      start: _start,
+      tick: _tick,
+      end: _end,
+      frame: _frame,
+      value: function () {
+        return _value;
+      },
+      draw: _draw
+    };
+
+  }
+
+  function sample () {
+
+    var _value = 0;
+
+    function _set ( v ) {
+      _value = v;
+    }
+
+    return {
+      set: _set,
+      value: function () {
+        return _value;
+      }
+    };
+
+  }
+
+  function _perf ( idArg ) {
+
+    var id = idArg.toLowerCase();
+    if ( id === undefined ) id = 'default';
+    if ( _perfCounters[ id ] ) return _perfCounters[ id ];
+
+    var group = null;
+    if ( _settings && _settings.groups ) {
+      iterateKeys( _settings.groups, function ( j ) {
+        var g = _settings.groups[ parseInt( j, 10 ) ];
+        if ( !group && g.values.indexOf( id.toLowerCase() ) !== -1 ) {
+          group = g;
+        }
+      } );
+    }
+
+    var p = new PerfCounter( id, group );
+    _perfCounters[ id ] = p;
+    return p;
+
+  }
+
+  function _init () {
+
+    if ( _settings.plugins ) {
+      if ( !_settings.values ) _settings.values = {};
+      if ( !_settings.groups ) _settings.groups = [];
+      if ( !_settings.fractions ) _settings.fractions = [];
+      for ( var j = 0; j < _settings.plugins.length; j++ ) {
+        _settings.plugins[ j ].attach( _perf );
+        iterateKeys( _settings.plugins[ j ].values, function ( k ) {
+          _settings.values[ k ] = _settings.plugins[ j ].values[ k ];
+        } );
+        _settings.groups = _settings.groups.concat( _settings.plugins[ j ].groups );
+        _settings.fractions = _settings.fractions.concat( _settings.plugins[ j ].fractions );
+      }
+    } else {
+      _settings.plugins = {};
+    }
+
+    _base = document.createElement( 'div' );
+    _base.className = 'rs-base';
+    _div = document.createElement( 'div' );
+    _div.className = 'rs-container';
+    _div.style.height = 'auto';
+    _base.appendChild( _div );
+    document.body.appendChild( _base );
+
+    if ( !_settings ) return;
+
+    if ( _settings.groups ) {
+      iterateKeys( _settings.groups, function ( j ) {
+        var g = _settings.groups[ parseInt( j, 10 ) ];
+        var div = document.createElement( 'div' );
+        div.className = 'rs-group';
+        g.div = div;
+        var h1 = document.createElement( 'h1' );
+        h1.textContent = g.caption;
+        h1.addEventListener( 'click', function ( e ) {
+          this.classList.toggle( 'hidden' );
+          e.preventDefault();
+        }.bind( div ) );
+        _div.appendChild( h1 );
+        _div.appendChild( div );
+      } );
+    }
+
+    if ( _settings.fractions ) {
+      iterateKeys( _settings.fractions, function ( j ) {
+        var f = _settings.fractions[ parseInt( j, 10 ) ];
+        var div = document.createElement( 'div' );
+        div.className = 'rs-fraction';
+        var legend = document.createElement( 'div' );
+        legend.className = 'rs-legend';
+
+        var h = 0;
+        iterateKeys( _settings.fractions[ j ].steps, function ( k ) {
+          var p = document.createElement( 'p' );
+          p.textContent = _settings.fractions[ j ].steps[ k ];
+          p.style.color = _colours[ h ];
+          legend.appendChild( p );
+          h++;
+        } );
+        div.appendChild( legend );
+        div.style.height = h * _elHeight + 'px';
+        f.div = div;
+        var graph = new StackGraph( div, h );
+        f.graph = graph;
+        _div.appendChild( div );
+      } );
+    }
+
+  }
+
+  function _update () {
+
+    iterateKeys( _settings.plugins, function ( j ) {
+      _settings.plugins[ j ].update();
+    } );
+
+    iterateKeys( _perfCounters, function ( j ) {
+      _perfCounters[ j ].draw();
+    } );
+
+    if ( _settings && _settings.fractions ) {
+      iterateKeys( _settings.fractions, function ( j ) {
+        var f = _settings.fractions[ parseInt( j, 10 ) ];
+        var v = [];
+        var base = _perfCounters[ f.base.toLowerCase() ];
+        if ( base ) {
+          base = base.value();
+          iterateKeys( _settings.fractions[ j ].steps, function ( k ) {
+            var s = _settings.fractions[ j ].steps[ parseInt( k, 10 ) ].toLowerCase();
+            var val = _perfCounters[ s ];
+            if ( val ) {
+              v.push( val.value() / base );
+            }
+          } );
+        }
+        f.graph.draw( v );
+      } );
+    }
+
+    /*if( _height != _div.clientHeight ) {
+        _height = _div.clientHeight;
+        _base.style.height = _height + 2 * _elHeight + 'px';
+    console.log( _base.clientHeight );
+    }*/
+
+  }
+
+  _init();
+
+  return function ( id ) {
+    if ( id ) return _perf( id );
+    return {
+      element: _base,
+      update: _update
+    };
+  };
+
+}
+
+if (typeof module === 'object') {
+  module.exports = window.rStats;
+}
+```

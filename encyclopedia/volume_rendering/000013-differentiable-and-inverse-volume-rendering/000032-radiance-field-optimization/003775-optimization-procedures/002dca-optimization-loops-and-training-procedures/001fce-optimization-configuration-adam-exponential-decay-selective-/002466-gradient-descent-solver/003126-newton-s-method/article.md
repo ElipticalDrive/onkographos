@@ -1,19 +1,18 @@
 # Newton's Method
 
-Also called: Second-order Taylor expansion optimizer, Newton-Raphson optimization (in scalar contexts), Newton direction solver
 
 ## Overview
 Newton's method is a second-order optimization algorithm that approximates the objective function $f$ using a second-order Taylor expansion to determine an update step that targets the stationary point where the gradient is zero [S1]. It sets itself apart from first-order solvers like Gradient Descent by incorporating local curvature information via the Hessian matrix, allowing for faster convergence near optima, though at the cost of significant computational overhead for high-dimensional problems [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Current parameter vector $\theta_t \in \mathbb{R}^n$, objective function $f: \mathbb{R}^n \to \mathbb{R}$, step size scalar $\gamma$ (or trust region radius $\Delta$).
-*   **Output:** Updated parameter vector $\theta_{t+1}$.
+*   **Input:** Current parameter vector $\theta_t \in \mathbb{R}^n$, objective function $f: \mathbb{R}^n \to \mathbb{R}$, step size scalar $\gamma$ (or trust region radius $\Delta$) [S1].
+*   **Output:** Updated parameter vector $\theta_{t+1}$ [S1].
 
 **Data Structures:**
-*   $\theta_t$: Vector of size $n$.
-*   $g(\theta_t)$: Gradient vector $\nabla f(\theta_t)$ of size $n$.
-*   $H(\theta_t)$: Hessian matrix $\nabla^2 f(\theta_t)$ of size $n \times n$.
+*   $\theta_t$: Vector of size $n$ [S1].
+*   $g(\theta_t)$: Gradient vector $\nabla f(\theta_t)$ of size $n$ [S1].
+*   $H(\theta_t)$: Hessian matrix $\nabla^2 f(\theta_t)$ of size $n \times n$ [S1].
 
 **Formulas:**
 The second-order Taylor expansion of $f$ around $\theta_t$ is:
@@ -27,7 +26,7 @@ Solving for $\theta$ yields the Newton direction $v$:
 $$ v = -H^{-1}(\theta_t) g(\theta_t) $$
 
 The update rule is:
-$$ \theta_{t+1} = \theta_t + \gamma v = \theta_t - \gamma H^{-1}(\theta_t) g(\theta_t) $$
+$$ \theta_{t+1} = \theta_t - \gamma H^{-1}(\theta_t) g(\theta_t) = \theta_t + \gamma v $$
 where $\gamma$ is a step size scalar [S1].
 
 **Parameters:**
@@ -36,7 +35,7 @@ where $\gamma$ is a step size scalar [S1].
 
 **Pitfalls and Edge Cases:**
 1.  **Computational Cost:** Computing, storing, and inverting the full Hessian $H \in \mathbb{R}^{n \times n}$ is $O(n^3)$ for inversion and $O(n^2)$ for storage, which becomes a bottleneck in high-dimensional optimization problems typical in volume rendering [S1].
-2.  **Negative Definiteness:** If $H(\theta_t)$ is not positive semi-definite (PSD), it may have negative eigenvalues. Applying $H^{-1}$ to the gradient can flip the direction, causing divergence away from the minimum [S1].
+2.  **Negative Definiteness:** If $H(\theta_t)$ is not positive semi-definite (PSD), it may have negative eigenvalues [S1]. Applying $H^{-1}$ to the gradient can flip the direction, causing divergence away from the minimum [S1].
 3.  **Mitigation:** To handle non-PSD Hessians, Hessian modification techniques are used to ensure positive semi-definiteness, combined with step truncation to a trust region: $\alpha = \min(\alpha, \Delta \|v\|^{-1})$ [S1].
 
 **Pseudocode:**
@@ -62,47 +61,27 @@ def newton_step(theta, f, grad_fn, hess_fn, gamma=1.0, delta=None):
     g = grad_fn(theta)
     H = hess_fn(theta)
     
-    # 2. Ensure Hessian is positive semi-definite (PSD)
-    # Note: The specific modification algorithm (e.g., eigenvalue shifting) 
-    # is not detailed in the source, but is required to prevent divergence.
-    H = ensure_psd(H)
+    # 2. Solve for Newton direction v = -H^-1 * g
+    # Uses a standard linear algebra routine [G]
+    v = solve_linear_system(H, -g)
     
-    # 3. Solve for Newton direction v = -H^-1 * g
-    # In practice, this is solved via linear system solver H * v = -g
-    # rather than explicit inversion for numerical stability.
-    try:
-        v = solve_linear_system(H, -g)
-    except SingularMatrixError:
-        # Fallback to gradient descent if Hessian is singular
-        v = -g
-        
-    # 4. Apply step
-    theta_next = theta + gamma * v
-    
-    # 5. Trust region truncation if delta is provided
+    # 3. Apply step with trust region truncation
+    alpha = gamma
     if delta is not None:
-        norm_v = norm(v)
-        if norm_v > 0:
-            # Truncate step to stay within trust region
-            # alpha = min(alpha, delta / ||v||)
-            # The source defines alpha as the step length scalar.
-            # Here, we scale the step v by gamma.
-            # If the source implies gamma is the step length along v:
-            max_gamma = delta / norm_v
-            effective_gamma = min(gamma, max_gamma)
-            theta_next = theta + effective_gamma * v
-            
+        alpha = min(alpha, delta / L2_norm(v))
+        
+    theta_next = theta + alpha * v
     return theta_next
 
-def ensure_psd(H):
-    """
-    Modifies H to be positive semi-definite.
-    Implementation detail [G]: Common approach involves eigenvalue decomposition 
-    and clamping negative eigenvalues to zero or a small positive epsilon.
-    """
-    eigenvalues, eigenvectors = eig(H)
-    eigenvalues = max(eigenvalues, 1e-6) # Clamp to ensure PSD
-    return eigenvectors @ diag(eigenvalues) @ eigenvectors.T
+def solve_linear_system(A, b):
+    """Standard linear solver [G]"""
+    import numpy as np
+    return np.linalg.solve(A, b)
+
+def L2_norm(x):
+    """Standard L2 norm [G]"""
+    import numpy as np
+    return np.linalg.norm(x)
 ```
 
 ## Subtopics
@@ -130,11 +109,11 @@ Newton Conjugate Gradient upgrades Newton's method by solving for the Newton dir
     [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Computing the Hessian is $O(n^2)$ or higher depending on the method (analytic vs. finite difference). Inverting the Hessian is $O(n^3)$ [S1].
+*   **Time Complexity:** Computing the Hessian is $O(n^2)$ or higher depending on the method (analytic vs. finite difference) [S1]. Inverting the Hessian is $O(n^3)$ [S1].
 *   **Memory Complexity:** Storing the full Hessian requires $O(n^2)$ memory [S1].
 *   **Strengths:** Second-order methods outperform first-order ones in terms of convergence speed and robustness to sampling noise when the Hessian is well-behaved [S1].
 *   **Limitations:** The requirement to compute, store, and invert the full Hessian makes it a bottleneck in higher dimensions, such as those found in neural network optimization [S1]. It is sensitive to non-PSD Hessians, requiring modification techniques [S1].
-*   **When to use:** Suitable for problems with moderate dimensionality where curvature information is critical and available. Not suitable for very high-dimensional problems without quasi-Newton approximations [S1].
+*   **When to use:** Suitable for problems with moderate dimensionality where curvature information is critical and available [S1]. Not suitable for very high-dimensional problems without quasi-Newton approximations [S1].
 
 ## Background
 Newton's method is one of the most-used second-order optimizers, derived from the second-order Taylor expansion of the objective function [S1]. It has been applied to several optimization tasks in vision and graphics [S1]. The specific application to stochastic gradient estimation for higher-order differentiable rendering is detailed in the source [S1].
