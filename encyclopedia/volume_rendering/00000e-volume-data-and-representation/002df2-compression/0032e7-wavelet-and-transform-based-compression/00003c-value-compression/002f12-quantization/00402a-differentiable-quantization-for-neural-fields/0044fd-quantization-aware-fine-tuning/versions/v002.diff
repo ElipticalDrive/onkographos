@@ -1,0 +1,277 @@
+--- v001.md
++++ v002.md
+@@ -4,165 +4,139 @@
+ 
+ ## Overview
+-Quantization-Aware Fine-Tuning (QAT) is a post-clustering optimization step designed to recover reconstruction quality lost during the vector quantization of scene parameters. While clustering compresses parameters into compact codebooks, it introduces discretization errors; QAT mitigates this by optimizing the scene parameters at reduced bit-rates using simulated quantization. It differs from post-training quantization by simulating quantization errors during the training process, allowing gradients to remain numerically stable and the model to adapt to the low-precision representation, whereas post-training quantization reduces weights only after full-precision training is complete [S1].
++Quantization-Aware Fine-Tuning is a post-clustering optimization step designed to regain reconstruction quality lost during the vector quantization (clustering) of scene parameters. It solves the problem of information loss inherent in compressing continuous neural field or Gaussian splatting parameters into discrete codebooks by re-optimizing the scene representation under the constraint of reduced bit-rates. Unlike post-training quantization, which applies quantization only after convergence, this method simulates quantization during the optimization process to allow the model to adapt its parameters to the specific errors introduced by the target precision, thereby minimizing the final reconstruction error [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussians with parameters (position, opacity, scaling, rotation, color) that have been clustered into codebooks. Training images and camera poses.
+-*   **Output:** Optimized scene parameters stored at reduced bit-precision (e.g., 8-bit for most parameters, 16-bit for position) and updated codebook entries.
++*   **Input:** A set of scene parameters (e.g., 3D Gaussian positions, opacities, scales, rotations, colors) that have been clustered into compact codebooks. The minimum and maximum values for each parameter type are tracked.
++*   **Output:** Optimized scene parameters stored at reduced bit-precision (e.g., 8-bit integers or 16-bit floats), along with the full-precision min/max values required for dequantization during inference.
+ 
+ **Data Structures:**
+-*   **Scene Parameters:** Each Gaussian $i$ has parameters $p_i$.
+-*   **Codebooks:** Two codebooks store clustered appearance and shape parameters. Entries are updated based on accumulated gradients.
+-*   **Min-Max Statistics:** Moving averages of minimum and maximum values for each parameter type are maintained to define the quantization range $[min, max]$.
++*   **Codebooks:** Arrays storing the clustered representative values for appearance and shape parameters.
++*   **Parameter Buffers:** Full-precision buffers (typically 32-bit float) holding the current state of parameters during optimization.
++*   **Min/Max Buffers:** Full-precision buffers tracking the moving average of minimum and maximum values for each parameter type to define the quantization range.
++
++**Method Steps:**
++1.  **Initialization:** Initialize the scene parameters using the values from the clustered codebooks. Initialize the min/max buffers with the initial parameter values.
++2.  **Forward Pass (Simulation):** For each parameter $p$ to be quantized:
++    *   Determine the current quantization range $[min, max]$ based on the moving average buffers.
++    *   Simulate quantization by rounding $p$ to the target bit-depth $b$. This involves mapping $p$ to $[0, 2^b-1]$, rounding to the nearest integer, and mapping back to $[min, max]$.
++    *   Use the quantized value for the rendering computation.
++3.  **Loss Computation:** Compute the reconstruction loss (e.g., MSE) between the rendered image and the ground truth training image.
++4.  **Backward Pass (Straight-Through Estimator):**
++    *   Compute gradients with respect to the full-precision parameters $p$.
++    *   Ignore the simulated quantization operation in the backward pass. The gradient flows through the quantization simulation as if it were an identity function (Straight-Through Estimator).
++5.  **Parameter Update:** Update the full-precision parameters using an optimizer (e.g., Adam).
++6.  **Codebook Update:** Accumulate incoming gradients for the codebook entries corresponding to the quantized parameters. Update the codebook parameters using these accumulated gradients.
++7.  **Range Update:** Update the moving average of the min/max values for each parameter type based on the current full-precision parameter values.
++8.  **Iteration:** Repeat steps 2-7 for the specified number of optimization steps.
++9.  **Finalization:** After optimization, store the parameters at the target low precision (e.g., 8-bit) and the full-precision min/max values.
++
++**Formulas:**
++The Min-Max quantization for a parameter $p$ with bit-depth $b$ is simulated as follows:
++$$ q(p) = \text{clamp}\left( \text{round}\left( \frac{p - min}{max - min} \cdot (2^b - 1) \right), 0, 2^b - 1 \right) $$
++$$ p_{quantized} = min + \frac{q(p)}{2^b - 1} \cdot (max - min) $$
++Where $min$ and $max$ are the moving average minimum and maximum values for the parameter.
+ 
+ **Parameters:**
+ *   **Quantization Precision:** 8-bit for all parameters except position. 16-bit float for position [S1].
+ *   **Optimization Steps:** 5000 steps [S1].
+-*   **Batch Size:** $2^{18}$ for color features, $2^{20}$ for Gaussian parameters [S1].
++*   **Batch Size:** 218 for color features, 220 for Gaussian parameters [S1].
+ *   **Codebook Size:** 4096 (default) [S1].
++*   **Learning Rate Coefficients:** $\beta_c = 6 \cdot 10^{-7}$, $\beta_g = 3 \cdot 10^{-6}$ [S1].
+ 
+-**Method Steps:**
+-1.  **Initialization:** Initialize scene parameters from the clustered codebooks. Initialize moving average min/max statistics for each parameter type.
+-2.  **Forward Pass (Simulation):** For each parameter $p$:
+-    *   Calculate the quantized value $\hat{p}$ using Min-Max quantization. This involves rounding $p$ based on the number of bits $b$ and the current moving average range $[min, max]$.
+-    *   Apply specific quantization timing for certain parameters:
+-        *   **Opacity:** Quantize after the sigmoid activation function.
+-        *   **Scaling/Rotation:** Quantize before the normalization step.
+-        *   **Scale Factor:** Quantize before the exponential activation function to preserve fine-grained representation for small Gaussians while allowing large ones [S1].
+-    *   Render the scene using the quantized parameters $\hat{p}$ to compute the loss against training images.
+-3.  **Backward Pass (Straight-Through Estimator):**
+-    *   Ignore the simulated quantization in the backward pass.
+-    *   Calculate gradients with respect to the full-precision parameters $p$ as if no quantization occurred. This ensures numerically stable gradients [S1].
+-4.  **Update:**
+-    *   Update the scene parameters $p$ using the computed gradients.
+-    *   Accumulate incoming gradients for codebook entries.
+-    *   Update the codebook parameters based on the accumulated gradients.
+-    *   Update the moving average min/max statistics for the parameters.
+-5.  **Iteration:** Repeat steps 2-4 for the specified number of optimization steps (e.g., 5000).
+-6.  **Final Storage:** After training, store the parameters at the target low precision (e.g., 8-bit). Store the final min/max values at full precision (e.g., 32-bit float) for re-scaling during inference [S1].
++**Edge Cases and Pitfalls:**
++*   **Position Precision:** Reducing position precision below 16-bit float considerably decreases reconstruction quality; thus, 16-bit is used for position while other parameters use 8-bit [S1].
++*   **Activation Order:** Quantization must be applied at specific points relative to activation functions:
++    *   Opacity: After sigmoid activation [S1].
++    *   Scaling/Rotation: Before normalization [S1].
++    *   Scale Factor: Before exponential activation to allow fine-grained representation of small Gaussians without losing the ability to model large ones [S1].
++*   **Gradient Stability:** The straight-through estimator is used to ensure numerically stable gradients, as the rounding operation is non-differentiable [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def quantization_aware_fine_tuning(gaussians, training_data, num_steps=5000, bit_precision=8, pos_bit_precision=16):
+-    """
+-    Fine-tune Gaussian parameters using quantization-aware training.
++def quantization_aware_fine_tuning(scene_params, codebooks, training_images, num_steps=5000):
++    # Initialize min/max buffers with full precision
++    min_vals = {p: scene_params[p].clone() for p in scene_params}
++    max_vals = {p: scene_params[p].clone() for p in scene_params}
+     
+-    Args:
+-        gaussians: List of Gaussian objects with parameters (pos, opacity, scale, rot, color).
+-        training_data: Iterable of (image, camera_pose) pairs.
+-        num_steps: Number of optimization steps.
+-        bit_precision: Bit precision for most parameters (default 8).
+-        pos_bit_precision: Bit precision for position (default 16).
+-        
+-    Returns:
+-        Optimized gaussians and codebooks.
+-    """
+-    
+-    # Initialize moving averages for min/max
+-    min_vals = {p: float('inf') for p in gaussian_params}
+-    max_vals = {p: float('-inf') for p in gaussian_params}
+-    
+-    # Initialize codebooks (assumed pre-populated by clustering)
+-    codebooks = initialize_codebooks(gaussians)
++    optimizer = Adam(scene_params.values(), lr=...)
++    codebook_optimizer = Adam(codebooks.values(), lr=...)
+     
+     for step in range(num_steps):
+-        # Sample batch
+-        images, cameras = sample_batch(training_data, batch_size=2**18) # Color batch size
++        optimizer.zero_grad()
++        codebook_optimizer.zero_grad()
++        
++        rendered_image = render(scene_params)
++        loss = compute_loss(rendered_image, training_images)
+         
+         # Forward pass with quantization simulation
+-        quantized_gaussians = []
+-        for g in gaussians:
+-            q_g = Gaussian()
++        quantized_params = {}
++        for p_name, p_val in scene_params.items():
++            if p_name == 'position':
++                # Position uses 16-bit float, no min/max quantization simulation in this context
++                quantized_params[p_name] = p_val
++            else:
++                # Min-Max quantization simulation
++                min_v = min_vals[p_name]
++                max_v = max_vals[p_name]
++                # Clamp to avoid division by zero
++                range_v = max(max_v - min_v, 1e-8)
++                # Map to [0, 255] for 8-bit
++                normalized = (p_val - min_v) / range_v
++                quantized_int = torch.round(normalized * 255).clamp(0, 255)
++                # Map back to [min, max]
++                quantized_p = min_v + (quantized_int / 255.0) * range_v
++                
++                # Apply specific quantization timing rules
++                if p_name == 'opacity':
++                    quantized_p = apply_sigmoid(quantized_p) # Quantize after sigmoid
++                elif p_name in ['scale', 'rotation']:
++                    quantized_p = normalize(quantized_p) # Quantize before normalization
++                elif p_name == 'scale_factor':
++                    quantized_p = torch.exp(quantized_p) # Quantize before exp activation
++                    
++                quantized_params[p_name] = quantized_p
++        
++        # Re-render with quantized params for loss calculation? 
++        # Note: The source says "simulate quantization... to obtain numerically stable gradients"
++        # and "backward pass ignores simulated quantization". 
++        # This implies the loss is computed on the quantized output, but gradients flow to full precision.
++        # However, standard QAT usually computes loss on the quantized output.
++        # Let's assume the render function takes the quantized params.
++        rendered_image_quantized = render(quantized_params)
++        loss = compute_loss(rendered_image_quantized, training_images)
++        
++        # Backward pass
++        loss.backward()
++        
++        # Update full precision parameters
++        optimizer.step()
++        
++        # Update codebooks based on accumulated gradients
++        # The source mentions accumulating gradients for codebook entries
++        for p_name, codebook in codebooks.items():
++            # Assuming gradients are accumulated in the codebook entries
++            codebook_optimizer.step()
+             
+-            # Position: 16-bit float
+-            q_g.pos = min_max_quantize(g.pos, min_vals['pos'], max_vals['pos'], pos_bit_precision)
+-            
+-            # Opacity: Quantize after sigmoid
+-            raw_opacity = g.opacity
+-            sigmoid_opacity = sigmoid(raw_opacity)
+-            q_g.opacity = min_max_quantize(sigmoid_opacity, min_vals['opacity'], max_vals['opacity'], bit_precision)
+-            
+-            # Scale Factor: Quantize before exponential activation
+-            raw_scale = g.scale
+-            q_g.scale = min_max_quantize(raw_scale, min_vals['scale'], max_vals['scale'], bit_precision)
+-            # Note: Exponential activation is applied during rendering, not here
+-            
+-            # Scaling/Rotation: Quantize before normalization
+-            raw_rot = g.rotation
+-            q_g.rot = min_max_quantize(raw_rot, min_vals['rot'], max_vals['rot'], bit_precision)
+-            # Normalization is applied during rendering
+-            
+-            # Color: Quantize
+-            q_g.color = min_max_quantize(g.color, min_vals['color'], max_vals['color'], bit_precision)
+-            
+-            quantized_gaussians.append(q_g)
+-            
+-        # Render scene
+-        rendered_images = render(quantized_gaussians, cameras)
+-        
+-        # Compute loss
+-        loss = compute_loss(rendered_images, images)
+-        
+-        # Backward pass (Straight-Through Estimator)
+-        # Gradients are computed w.r.t. full-precision parameters, ignoring quantization
+-        gradients = compute_gradients(loss, gaussians)
+-        
+-        # Update parameters
+-        for i, g in enumerate(gaussians):
+-            g.pos = g.pos - learning_rate * gradients[i]['pos']
+-            g.opacity = g.opacity - learning_rate * gradients[i]['opacity']
+-            g.scale = g.scale - learning_rate * gradients[i]['scale']
+-            g.rotation = g.rotation - learning_rate * gradients[i]['rotation']
+-            g.color = g.color - learning_rate * gradients[i]['color']
+-            
+-            # Update moving averages
+-            min_vals['pos'] = min(min_vals['pos'], g.pos)
+-            max_vals['pos'] = max(max_vals['pos'], g.pos)
+-            # ... update for other params ...
+-            
+-        # Update codebooks
+-        update_codebooks(codebooks, gaussians, gradients)
+-        
+-    return gaussians, codebooks
+-
+-def min_max_quantize(value, min_val, max_val, bits):
+-    """
+-    Simulate Min-Max quantization.
+-    Returns quantized value.
+-    """
+-    if max_val == min_val:
+-        return value
+-        
+-    # Normalize to [0, 1]
+-    normalized = (value - min_val) / (max_val - min_val)
+-    
+-    # Quantize to integer range
+-    num_levels = 2 ** bits
+-    quantized_int = round(normalized * (num_levels - 1))
+-    
+-    # Dequantize back to [0, 1]
+-    dequantized_normalized = quantized_int / (num_levels - 1)
+-    
+-    # Scale back to original range
+-    dequantized_value = dequantized_normalized * (max_val - min_val) + min_val
+-    
+-    return dequantized_value
++        # Update min/max moving averages
++        for p_name in scene_params:
++            if p_name != 'position':
++                min_vals[p_name] = update_moving_average(min_vals[p_name], scene_params[p_name])
++                max_vals[p_name] = update_moving_average(max_vals[p_name], scene_params[p_name])
++                
++    return scene_params, codebooks, min_vals, max_vals
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision Loss:** Reducing position precision below 16-bit significantly decreases reconstruction quality [S1].
+-*   **Activation Order:** Quantization must be applied at specific points relative to activations (e.g., before exponential for scale, after sigmoid for opacity) to maintain model integrity [S1].
+-*   **Gradient Stability:** Using straight-through estimator is crucial; otherwise, gradients through the quantization step would be zero or unstable [S1].
++## Subtopics
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Adds an additional optimization phase of 5000 steps to the pipeline [S1].
+-*   **Memory Complexity:** Reduces storage size by storing parameters at 8-bit (or 16-bit for position) precision, with min/max values stored at 32-bit [S1].
+-*   **Performance:** Enables real-time novel view synthesis on low-end devices due to reduced memory bandwidth requirements and compatibility with hardware rasterization [S1].
+-*   **Strengths:** Recovers quality lost during clustering; allows for significant compression ratios while maintaining high PSNR/SSIM [S1].
+-*   **Limitations:** Requires additional training time; sensitive to the choice of bit precision for different parameters [S1].
++*   **Time Complexity:** The fine-tuning step adds significant training time, typically 5000 optimization steps [S1]. The complexity is dominated by the rendering and gradient computation per step.
++*   **Memory Complexity:** During training, full-precision buffers are used, so memory usage is similar to standard training. After training, storage is reduced to 8-bit for most parameters and 16-bit for position, significantly reducing memory bandwidth requirements [S1].
++*   **Performance:** The method enables real-time novel view synthesis on low-end devices due to reduced memory bandwidth and the use of hardware rasterization [S1]. It achieves high reconstruction quality (PSNR, SSIM) comparable to uncompressed methods while using much less storage [S1].
++*   **Strengths:** Recovers quality lost during clustering; allows for low-bit storage without significant quality drop; compatible with standard optimizers.
++*   **Limitations:** Requires additional training time; requires careful handling of quantization timing for different parameters.
+ 
+ ## Background
+-Quantization-Aware Fine-Tuning is proposed in the context of Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis [S1]. It builds upon the idea that post-clustering parameters can be fine-tuned to regain lost information [S1]. The method is inspired by volumetric NeRF compression techniques [15, 25] and adapts quantization-aware training principles from deep learning [18] to the 3D Gaussian Splatting framework [13].
++Quantization-Aware Fine-Tuning was proposed in the context of Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis [S1]. It builds on the idea that post-training quantization can lead to significant quality degradation, and simulating quantization during training allows the model to adapt to the quantization errors. The method is part of a larger compression pipeline that includes sensitivity-aware vector clustering and entropy encoding [S1]. It is particularly relevant for applications requiring real-time rendering on resource-constrained devices, such as web-based viewers using WebGPU [S1].
+ 
+ ## Sources

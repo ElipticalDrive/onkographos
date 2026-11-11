@@ -1,0 +1,144 @@
+# Rate-Distortion Joint Finetuning
+
+Also called: RD Joint Finetuning, Simultaneous Bitrate-Distortion Training
+
+## Overview
+Rate-Distortion Joint Finetuning is a training approach that treats compression and 3D-scene representation as a single optimization problem, training the NeRF model for bitrate and distortion simultaneously [S1]. Unlike techniques that treat compression and 3D-scene representation as two independent optimization problems, which reduces compression performance and limits effectiveness across a wider bitrate range, this method jointly optimizes the model parameters to achieve an optimal Rate-Distortion (RD) curve by adjusting a single trade-off factor [S1]. It builds on [JointRF Training Procedure](11657-jointrf-training-procedure.md) by introducing a differentiable entropy model and noise-based gradient approximation to enable end-to-end learning of quantized features.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A pre-trained NeRF model (or feature grid), a reference graph $G$ defining spatial dependencies, and a quantization step $Q_{step}$.
+*   **Output:** A finetuned NeRF model optimized for a specific bitrate-distortion trade-off defined by $\lambda$.
+
+**Data Structures:**
+*   **Feature Grid:** A 3D grid of feature vectors $v$.
+*   **Reference Graph $G$:** A set of edges $(v_i, v_j)$ where $v_j$ is a reference candidate for $v_i$. The implementation uses preceding voxels (previously reconstructed in the decoding process) as references. For training convenience, only complete voxels are used as prediction values, avoiding interpolation at non-integer positions [S1].
+*   **Critical Voxels Set $C$:** A subset of voxels identified as critical for rendering quality, used in the two-step variant.
+
+**Numbered Steps:**
+
+1.  **Quantization with Noise Injection:**
+    During training, the feature vector $x$ is quantized using a uniform quantizer. To handle the zero-gradient problem of standard quantization, the quantization error is substituted with uniform noise for backpropagation [S1]. The quantized feature $\tilde{x}$ is computed as:
+    $$ \tilde{x} = \hat{x} + U\left(-\frac{1}{2Q_{step}}, \frac{1}{2Q_{step}}\right) $$
+    where $\hat{x}$ is the quantized feature, $Q_{step}$ is the quantization step, and $U$ denotes the uniform distribution [S1].
+
+2.  **Entropy Modeling and Bitrate Estimation:**
+    The method assumes the prediction residuals $y = \hat{x} - \hat{x}_{ref}$ follow an exponential distribution $EXP(\epsilon)$ [S1]. The bitrate $R$ is estimated as the entropy of these residuals. The theoretical bitrate is given by:
+    $$ R = E_{y \sim EXP(\epsilon)}[-\log(p(y))] = \kappa E(|y|) + \beta $$
+    where $\kappa$ and $\beta$ are constant terms related to the exponential distribution parameters [S1].
+    
+    Assuming the quantization error conforms to a uniform distribution, the expected absolute residual is approximated as:
+    $$ E|y| = E|\hat{x} - \hat{x}_{ref}| \approx E|\tilde{x} - \tilde{x}_{ref}| = \frac{E|x - x_{ref}|}{Q_{step}} $$
+    [S1].
+    
+    Since constant terms ($\beta$) and the factor $\kappa/Q_{step}$ (which can be absorbed into the hyperparameter $\lambda$) do not affect the optimization direction, the practical bitrate loss term $R$ is simplified to the mean absolute difference over the reference graph edges [S1]:
+    $$ R = \frac{1}{|G|} \sum_{(v_i, v_j) \in G} \|v_i - v_j\|_1 $$
+    where $|G|$ is the number of edges in the reference graph $G$, and $v$ denotes the feature voxel [S1].
+
+3.  **Loss Calculation:**
+    The total loss function combines the bitrate estimate and the rendering distortion loss $D$ (from the original NeRF method) using a Lagrangian multiplier $\lambda$ [S1]:
+    $$ \text{Loss} = \lambda \times R + D $$
+    where $\lambda$ is a hyperparameter balancing bitrate and distortion [S1].
+
+4.  **Optimization:**
+    The model parameters are updated by minimizing the total loss. An optimal RD curve is obtained by adjusting $\lambda$ [S1].
+
+**Parameters:**
+*   $\lambda$: Lagrangian multiplier. Typical values are not specified in the sources, but it is adjusted to traverse the RD curve [S1].
+*   $Q_{step}$: Quantization step. In experiments, a value of 0.5 was used for the synthetic lego scene [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Large Quantization Steps:** Large $Q_{step}$ values lead to unacceptable performance loss even with noise compensation, while finer quantization increases bit cost [S1].
+*   **Gradient Vanishing:** Standard quantization has zero gradients almost everywhere; the noise substitution method is required to enable backpropagation [S1].
+*   **Reference Selection:** The method uses Sum of Absolute Differences (SAD) to choose the optimal reference voxel from available neighbors (preceding voxels) [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def rate_distortion_joint_finetuning(nerf_model, feature_grid, reference_graph, lambda_param, q_step, distortion_loss_fn):
+    """
+    Performs joint rate-distortion finetuning.
+    
+    Args:
+        nerf_model: The NeRF model parameters.
+        feature_grid: 3D grid of feature vectors.
+        reference_graph: List of tuples (v_i, v_j) representing edges in the reference graph.
+        lambda_param: Hyperparameter lambda for balancing rate and distortion.
+        q_step: Quantization step size.
+        distortion_loss_fn: Function to compute rendering distortion loss D.
+        
+    Returns:
+        Finetuned nerf_model parameters.
+    """
+    
+    # Initialize optimizer with nerf_model parameters
+    optimizer = Optimizer(nerf_model.parameters())
+    
+    for epoch in range(num_epochs):
+        # 1. Forward pass to get raw features
+        raw_features = nerf_model.forward()
+        
+        # 2. Quantization with uniform noise injection
+        # Quantize to nearest multiple of q_step
+        quantized_features = round_to_grid(raw_features, q_step)
+        
+        # Add uniform noise for gradient estimation
+        # U(-1/(2*Qstep), 1/(2*Qstep))
+        noise = UniformDistribution(-1/(2*q_step), 1/(2*q_step))
+        quantized_features_noisy = quantized_features + noise.sample()
+        
+        # 3. Compute Bitrate Loss R
+        # R = (1/|G|) * sum(||vi - vj||_1) for all (vi, vj) in G
+        # Note: We use the noisy quantized features for the rate calculation 
+        # to reflect the actual encoded residuals during training.
+        rate_loss = 0.0
+        edge_count = 0
+        for v_i, v_j in reference_graph:
+            # v_i is the current voxel, v_j is the reference
+            diff = abs(v_i - v_j)
+            rate_loss += diff
+            edge_count += 1
+            
+        if edge_count > 0:
+            rate_loss = rate_loss / edge_count
+        else:
+            rate_loss = 0.0
+            
+        # 4. Compute Distortion Loss D
+        # Render images using the quantized features (or raw features if the 
+        # renderer expects continuous input, but the gradient flows through the noise)
+        # The distortion loss is computed against ground truth images.
+        distortion_loss = distortion_loss_fn(nerf_model, quantized_features_noisy)
+        
+        # 5. Compute Total Loss
+        total_loss = lambda_param * rate_loss + distortion_loss
+        
+        # 6. Backpropagation and Update
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+        
+    return nerf_model
+```
+
+## Subtopics
+
+### Two-step Finetuning Procedure
+A procedure to handle large quantization steps by performing precise quantization only for critical voxels, combining hierarchical quantization with finetuning to maximize bit saving without excessive rendering degradation [S1]. It involves a post-finetuning stage where a coarse feature grid is reconstructed after quantization and dequantization. All non-critical voxels in the feature grid are frozen, and only the remaining parameters (critical voxels) are finetuned. Non-pruned volume density and RGB networks are included to compensate for quantization loss [S1]. The bitrate for this stage is modeled as the residual bits for critical voxels: $R = \frac{1}{|C|} \sum_{v_i \in C} \|v_i - \hat{v}_i\|_1$, where $C$ is the set of all critical voxels and $\hat{v}$ denotes the feature voxel in the coarse grid [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Tested on Synthetic-NeRF (8 scenes), Synthetic-NSVF (8 scenes), and Blended-MVS [S1]. The method achieves an optimal RD curve by adjusting $\lambda$ [S1].
+*   **Strengths:** Simultaneous optimization of compression and representation avoids the performance reduction caused by treating them as independent problems [S1].
+*   **Limitations:** Large quantization steps still cause unacceptable performance loss without the two-step procedure [S1].
+*   **When to use:** When a wide bitrate range is required and joint optimization of compression artifacts and rendering quality is desired.
+*   **When not to use:** When computational resources for joint training are insufficient or when a fixed, low-bitrate compression is required without the ability to finetune the model.
+
+## Background
+The method originates from SPC-NeRF (Spatial Predictive Compression for Voxel-Based Radiance Field) [S1]. It addresses the limitation of previous NeRF compression techniques that treated compression and 3D-scene representation as two independent optimization problems [S1]. The approach leverages predictive coding paradigms and entropy modeling based on exponential distributions of prediction residuals [S1].
+
+## Sources
+[S1] SPC-NeRF: Spatial Predictive Compression for Voxel-Based Radiance Field, https://doi.org/10.1145/3795528, fetched 2026-10-26

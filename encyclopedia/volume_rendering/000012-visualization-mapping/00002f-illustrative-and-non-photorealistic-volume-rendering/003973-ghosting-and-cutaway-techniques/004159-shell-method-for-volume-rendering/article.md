@@ -1,0 +1,119 @@
+# Shell Method for Volume Rendering
+
+Also called: Shell Rendering, Shell idea for volume rendering
+
+## Overview
+The Shell Method is a software-based hybrid of surface and volume rendering that utilizes a compact data structure called a "shell," defined as a set of non-transparent voxels located near an extracted object boundary, with associated attributes for visualization [S1]. It solves the problem of efficiently rendering complex volumetric data by focusing computational resources on the object's periphery, effectively bridging the gap between crisp surface rendering and full volume rendering [S1]. Unlike its siblings, it explicitly constructs a boundary-centric data structure rather than operating on the raw volume or pre-computed isosurfaces alone [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scene (binary or continuous) and a segmentation or extraction criterion defining the object boundary.
+*   **Output:** A rendered image of the object, where the shell region is visualized using volume rendering techniques [S1].
+
+**Data Structures:**
+The core data structure is the **Shell**, which stores:
+1.  **Voxel Data:** A subset of the 3D grid containing only non-transparent voxels near the boundary.
+2.  **Attributes:** Associated visualization attributes for each voxel in the shell [S1].
+The shell can store either the entire 3D scene data or only the hard (binary) boundary information [S1].
+
+**Algorithm Steps:**
+1.  **Scene Filtering:** If starting from a binary scene, filter the shape-interpolated binary scene to create a "grey scene" (a continuous representation of the structure) [S2].
+2.  **Grey Segmentation:** Grey segment the grey scene to create the shell. This step essentially creates a shell around the object boundary by identifying voxels in the vicinity of the extracted surface [S2].
+    *   For a **hard boundary**, the shell is crisp and contains only voxels on the object surface. In this case, the method degenerates to Surface Rendering (SR) [S1].
+    *   For a **fuzzy boundary**, the shell includes voxels in the vicinity of the extracted surface. Here, the method is identified as Digital Volume Rendering (DVR) [S1].
+3.  **Volume Rendering:** Render the shell using volume rendering techniques (e.g., raycasting) [S1, S2].
+
+**Formulas and Parameters:**
+The method is conceptually linked to expression 15d and 18c in the source literature, which describe combining filtering ($F$), structure interpolation ($G_o, G_b$), and opacity ($O_s$) to prepare the structure for rendering [S2]. Specifically, expression 18c represents an interesting volume rendering method using this shell approach [S2]. Exact mathematical formulations for the grey segmentation and rendering compositing are not provided in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Extraction Errors:** Explicit surface extraction can introduce errors [S1].
+*   **Mitigation:** To address extraction errors, segmented object boundaries can be selectively dilated along all axes to visualize a fuzzy shell with raycasting [S1].
+*   **Boundary Type:** The choice between SR and DVR behavior depends strictly on whether the boundary is defined as hard or fuzzy [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def shell_rendering(scene, boundary_type="fuzzy"):
+    """
+    Renders a 3D scene using the Shell Method.
+    
+    Args:
+        scene: 3D array representing the input volume (binary or continuous).
+        boundary_type: 'hard' for crisp surface rendering, 'fuzzy' for volume rendering.
+        
+    Returns:
+        rendered_image: 2D array representing the final image.
+    """
+    # Step 1: Filter shape-interpolated binary scene to create grey scene
+    # Note: If input is already continuous/grey, this step may be skipped or identity.
+    grey_scene = filter_shape_interpolated(scene)
+    
+    # Step 2: Grey segment the grey scene to create a shell
+    # This identifies voxels near the object boundary.
+    shell_data, shell_attributes = grey_segment(grey_scene, boundary_type)
+    
+    # Step 3: Volume render the shell
+    # If boundary_type is 'hard', this degenerates to Surface Rendering.
+    # If 'fuzzy', it performs DVR.
+    rendered_image = volume_render_shell(shell_data, shell_attributes)
+    
+    return rendered_image
+
+def filter_shape_interpolated(binary_scene):
+    """
+    Filters a binary scene to create a grey scene.
+    Implementation detail: Not given in the sources.
+    """
+    # Placeholder for specific filtering algorithm (e.g., Gaussian smoothing,
+    # shape-based interpolation) as referenced in [S2].
+    return apply_smoothing(binary_scene)
+
+def grey_segment(grey_scene, boundary_type):
+    """
+    Segments the grey scene to extract the shell.
+    """
+    if boundary_type == "hard":
+        # Extract crisp boundary voxels
+        shell_voxels = extract_surface(grey_scene)
+        shell_attrs = compute_surface_attributes(shell_voxels)
+    elif boundary_type == "fuzzy":
+        # Extract voxels in the vicinity of the surface
+        # May involve dilation to address extraction errors [S1]
+        shell_voxels = extract_fuzzy_boundary(grey_scene)
+        shell_attrs = compute_volume_attributes(shell_voxels)
+    else:
+        raise ValueError("Unknown boundary type")
+        
+    return shell_voxels, shell_attrs
+
+def volume_render_shell(shell_data, shell_attributes):
+    """
+    Renders the shell data.
+    """
+    # Perform raycasting or other volume rendering technique
+    # on the shell_data using shell_attributes.
+    # Implementation detail: Not given in the sources.
+    return cast_rays(shell_data, shell_attributes)
+```
+
+## Subtopics
+
+### Real-time shell space rendering
+A technique for real-time rendering of arbitrary volumetric geometry into a polygonal mesh's shell space, which is a layer of variable thickness on top or below the polygonal mesh [S3, abstract only]. It computes view ray shell geometry intersections in a pixel shader and uses a 3D distance map to skip empty space in the shell volume, minimizing ray tracing steps [S3, abstract only]. The shell volume is defined by a pre-computed tetrahedra mesh, where tetrahedra subdivide prisms extruded from the polygonal base mesh [S3, abstract only]. A vertex shader computes tetrahedron face plane distances to generate per-pixel tetrahedron thickness using non-linear interpolation [S3, abstract only]. It includes local lighting and reduces rendering artifacts for shallow view angles [S3, abstract only]. It overcomes shortcomings of previous approaches: Wang et al. [2004] had high storage requirements and involved per-vertex computations, while Policarpo and Oliveira [2006] had low shell geometry depth complexity and mapping distortions [S3, abstract only].
+
+## Operating characteristics
+*   **Complexity:** Not given in the sources.
+*   **Performance:** Acceleration techniques have been added, such as shear-warp factorization [S1] and splat-like elliptical Gaussian computation for voxel contribution energy [S1].
+*   **Strengths:** Provides a compact data structure for visualization; allows for both crisp surface rendering and fuzzy volume rendering depending on boundary definition [S1].
+*   **Limitations:** Explicit surface extraction can create errors [S1].
+*   **When to use:** When a hybrid of surface and volume rendering is desired, particularly for segmented structures like vessels and arteries [S1].
+
+## Background
+The Shell Method was introduced as a software-based hybrid approach [S1]. Key contributors include Udupa and Odhner, who provided detailed descriptions of the algorithm [S1]. Applications include rendering segmented structures of vessels and arteries in contrast-enhanced magnetic resonance angiography images [S1]. Improvements were made by Falcão and colleagues (shear-warp factorization) [S1], Botha and Post (elliptical Gaussian splatting) [S1], and Grevera et al. (T-shell element for isosurface rendering) [S1]. The method is conceptually related to expressions in the work of [S2], particularly 15d and 18c.
+
+## Sources
+[S1] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+[S2] Imaging transforms for visualizing surfaces and volumes, https://doi.org/10.1007/bf03168529, fetched 2026-10-29
+[S3] Real-time shell space rendering of volumetric geometry, https://doi.org/10.1145/1174429.1174477, fetched 2026-10-26 (abstract only)

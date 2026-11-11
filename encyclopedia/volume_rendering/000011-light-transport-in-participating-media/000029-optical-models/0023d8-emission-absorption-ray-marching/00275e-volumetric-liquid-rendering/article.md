@@ -15,19 +15,19 @@ Volumetric Liquid Rendering is a specific application of emission-absorption ray
 
 **Steps:**
 1. **Ray Casting:** Cast a ray from the camera through the pixel [G].
-2. **Wax Masking:** Intersect the ray with the wax surface using the depth buffer. If the ray does not intersect the wax, or if the intersection is behind the liquid volume, the liquid is not visible. The liquid is masked by the depth of the wax [S1, unofficial].
+2. **Wax Masking:** Intersect the ray with the wax surface using the depth buffer [S1, unofficial]. If the ray does not intersect the wax, or if the intersection is behind the liquid volume, the liquid is not visible [S1, unofficial].
 3. **Liquid Marching:** For the segment of the ray inside the liquid volume: sample the liquid density, accumulate absorption using the Beer-Lambert law, and accumulate emission driven by proximity to the light source below [S1, unofficial][G].
 4. **Compositing:** Combine the accumulated transmission and emission with the background color [G].
 
 **Formulas:**
-- Transmission: $T = \exp(-\sigma_a \cdot \Delta l)$
-- Emission: $E = \sigma_e \cdot \Delta l \cdot f_{\text{light}}$
-- Final Color: $C_{\text{out}} = C_{\text{in}} \cdot T + E$
+- Transmission: $T = \exp(-\sigma_a \cdot \Delta l)$ [G]
+- Emission: $E = \sigma_e \cdot \Delta l \cdot f_{\text{light}}$ [G]
+- Final Color: $C_{\text{out}} = C_{\text{in}} \cdot T + E$ [G]
 
 **Parameters:**
-- Absorption coefficient: Not given in the sources.
+- Absorption coefficient: Not given in the sources. [G]
 - Emission intensity: Proportional to proximity to the light source [S1, unofficial].
-- Ray step size: Not given in the sources.
+- Ray step size: Not given in the sources. [G]
 
 **Edge Cases:**
 - Precision issues may arise if the liquid volume is thin or the step size is too large [G].
@@ -59,7 +59,7 @@ def render_liquid(ray_origin, ray_direction, wax_depth_buffer, liquid_bounds, li
     while t < t_end:
         pos = ray_origin + ray_direction * t
         density = sample_volume(pos) # [G] standard 3D volume texture lookup
-        delta_l = step_size * length(ray_direction)
+        delta_l = step_size
 
         trans = exp(-sigma_a * density * delta_l)
         dist_to_light = length(pos - light_position)
@@ -80,11 +80,11 @@ def render_liquid(ray_origin, ray_direction, wax_depth_buffer, liquid_bounds, li
 A ray-casting method based on a height field (2D grid containing elevation in each cell) used for real-time rendering of liquid volumes [S2, unofficial]. It allows handling of reflections, refractions, and complex effects like light absorption, refracted shadows, and caustics [S2, unofficial]. It was used by [BD06] [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
+- **Time Complexity:** Not given in the sources. [G]
+- **Memory Complexity:** Not given in the sources. [G]
 - **Performance:** Splatting CPU median 1.1–1.25 ms, p95 1.3–1.9 ms on Xeon 2.1 GHz [S1, unofficial]. Texture reads: 5.9 M/frame at 1080p default view, 46 M fullscreen lamp; without empty space skipping, 17.6 M and 138 M [S1, unofficial].
-- **Strengths:** Not given in the sources.
-- **Limitations:** Not given in the sources.
+- **Strengths:** Not given in the sources. [G]
+- **Limitations:** Not given in the sources. [G]
 
 ## Background
 Volumetric liquid rendering is discussed in the context of a lava lamp simulation [S1, unofficial]. The height field ray-casting variant was used by [BD06] [S2, unofficial].

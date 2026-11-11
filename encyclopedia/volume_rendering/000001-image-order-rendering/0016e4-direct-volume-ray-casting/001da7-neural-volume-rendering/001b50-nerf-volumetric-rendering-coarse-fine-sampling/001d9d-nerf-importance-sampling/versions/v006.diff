@@ -1,0 +1,76 @@
+--- v005.md
++++ v006.md
+@@ -17,5 +17,5 @@
+ - Noise standard deviation `noise_std` for sigma regularization [S1, unofficial].
+ - Epsilon `eps` (default $10^{-5}$) for numerical stability [S1, unofficial].
+-- Coarse density outputs `sigmas_coarse` from the neural network query.
++- Coarse density outputs `sigmas_coarse` from the neural network query [S1, unofficial].
+ 
+ **Outputs:**
+@@ -25,5 +25,5 @@
+ **Data Structures:**
+ - `z_vals`: Tensor of shape $(N_{rays}, N_{samples})$ storing depth values along the ray [S1, unofficial].
+-- `weights`: Tensor of shape $(N_{rays}, N_{samples})$ storing the contribution weight of each sample [S1, unofficial].
++- `weights`: Tensor of shape $(N_{rays}, N_{samples}-1)$ storing the contribution weight of each interval [S1, unofficial].
+ - `sigmas`: Tensor of shape $(N_{rays}, N_{samples})$ storing raw volume density outputs from the coarse network [S1, unofficial].
+ 
+@@ -57,12 +57,13 @@
+    
+    Compute transmittance and weights [S1, unofficial]:
+-   - Shift alphas: $\alpha_{shifted} = \text{concat}(1, \alpha[:, :-1])$ (prepend 1, drop last) [S1, unofficial].
+-   - Cumulative product of transmittance: $T = \text{cumprod}(1 - \alpha_{shifted})$ [S1, unofficial].
+-   - Weights: $w = \alpha \cdot T$ [S1, unofficial].
++   - Shifted transmittance factors: $T_{shifted} = \text{concat}(1, 1-\alpha[:, :-1])$ [S1, unofficial].
++   - Cumulative product of transmittance: $T = \text{cumprod}(T_{shifted})$ [S1, unofficial].
++   - Weights: $w = \alpha \cdot T[:, :-1]$ [S1, unofficial].
+ 
+ 5. **Importance Resampling (Fine Stage):**
+    If $N_{importance} > 0$, sample new depths from the coarse weights [S1, unofficial]:
+    - Use weights excluding the first and last samples to define the PDF intervals: $w_{fine} = w[:, 1:-1]$ [S1, unofficial].
+-   - Call `sample_pdf` with bins $z_{vals\_mid}$, weights $w_{fine}$, and $N_{importance}$ [S1, unofficial].
++   - Use corresponding midpoints: $bins_{fine} = z_{vals\_mid}[:, 1:-1]$ [S1, unofficial].
++   - Call `sample_pdf` with bins $bins_{fine}$, weights $w_{fine}$, and $N_{importance}$ [S1, unofficial].
+    - Stop gradient on the sampled positions to prevent backpropagation through the sampling process [S2, unofficial].
+ 
+@@ -133,6 +134,6 @@
+     if perturb:
+         z_vals_mid = 0.5 * (z_vals[:, 1:] + z_vals[:, :-1])
+-        lower = torch.cat([z_vals[:, :1], z_vals_mid], -1)
+-        upper = torch.cat([z_vals_mid, z_vals[:, -1:]], -1)
++        lower = torch.cat([torch.full_like(z_vals[:, :1], z_near), z_vals_mid], -1)
++        upper = torch.cat([z_vals_mid, torch.full_like(z_vals[:, :1], z_far)], -1)
+         u = torch.rand(z_vals.shape)
+         z_vals = lower + (upper - lower) * u
+@@ -148,6 +149,7 @@
+     noise = torch.randn_like(deltas) * noise_std
+     alphas = 1 - torch.exp(-deltas * torch.relu(sigmas_coarse[:, :-1] + noise))
+-    alphas_shifted = torch.cat([torch.ones_like(alphas[:, :1]), alphas[:, :-1]], -1)
+-    transmittance = torch.cumprod(1 - alphas_shifted, -1)
++    # Corrected transmittance shift to match evidence formula: cumprod([1, 1-alpha_1, ...])
++    alphas_shifted = torch.cat([torch.ones_like(alphas[:, :1]), 1 - alphas[:, :-1]], -1)
++    transmittance = torch.cumprod(alphas_shifted, -1)
+     weights_coarse = alphas * transmittance[:, :-1]
+     
+@@ -156,7 +158,8 @@
+         # Use weights excluding first and last [S1, unofficial]
+         weights_fine = weights_coarse[:, 1:-1]
++        bins_fine = z_vals_mid[:, 1:-1]
+         
+         # Sample PDF [S1, unofficial]
+-        z_samples = sample_pdf(z_vals_mid, weights_fine, N_importance, det=not perturb, eps=eps)
++        z_samples = sample_pdf(bins_fine, weights_fine, N_importance, det=not perturb, eps=eps)
+         
+         # 6. Combine and Sort [S1, unofficial]
+@@ -191,10 +194,10 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N_{samples} + N_{importance})$ per ray. The fine stage adds overhead proportional to $N_{importance}$ but reduces the number of samples needed for high quality [G].
++- **Time Complexity:** $O(N_{samples} + N_{importance})$ per ray [G]. The fine stage adds overhead proportional to $N_{importance}$ but reduces the number of samples needed for high quality [G].
+ - **Memory Complexity:** $O(N_{samples} + N_{importance})$ per ray for storing depths, alphas, and weights [G].
+ - **Performance:** The method is lightweight and does not require auxiliary networks or complex data structures, unlike [NerfAcc Rendering Pipeline](1619-nerfacc-rendering-pipeline.md) [S1, unofficial]. It improves rendering quality over uniform sampling with minimal overhead [S2, unofficial].
+ - **Strengths:** Simple to implement; effectively concentrates samples in high-opacity regions; differentiable [S1, unofficial].
+ - **Limitations:** Can still produce noise in empty regions if coarse sampling is too sparse; relies on the coarse model's accuracy to generate good weights [S1, unofficial].
+-- **When to Use:** When high-quality rendering is needed and the coarse model provides reasonable opacity estimates.
++- **When to Use:** When high-quality rendering is needed and the coarse model provides reasonable opacity estimates [G].
+ - **When Not to Use:** When memory is extremely constrained and $N_{importance}$ cannot be afforded, or when the scene has large empty regions where coarse weights are unreliable (consider [Hierarchical Sampling with Weight Modification](4795-hierarchical-sampling-with-weight-modification.md) [S1, unofficial]).
+ 

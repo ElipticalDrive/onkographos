@@ -3,7 +3,7 @@
 Also called: Lighting Calculation
 
 ## Overview
-Lighting models evaluate local illumination at a point $\mathbf{p}$ within or on the boundary of a volume to enhance the perception of 3D shape, surface detail, and orientation [S1, unofficial]. Unlike full light transport methods that simulate scattering, these models approximate surface-like appearance using local shading (diffuse/specular) and shadowing [S1, unofficial]. They are distinguished from participating media scattering methods (e.g., [Gradient-based Shading with Phase Functions](1020-gradient-based-shading-with-phase-functions.md)) by treating the volume as a collection of pseudo-surfaces, and from frequency-domain approximations (e.g., [Frequency Domain Directional Shading](852-frequency-domain-directional-shading.md)) by operating in spatial domain [S1, unofficial].
+Lighting models in volume rendering evaluate local illumination at a specific point $\mathbf{p}$ to enhance the perception of 3D shape, surface detail, and orientation [S1, S3, unofficial]. Unlike global light transport methods that simulate complex scattering, these models approximate direct lighting and shadows using local shading techniques, often treating the volume as a collection of semi-transparent surfaces defined by gradients [S3, unofficial]. They are distinguished from sibling methods like [Path Tracing and Sampling](2526-path-tracing-and-sampling.md) by their reliance on simplified, computationally cheap local approximations rather than stochastic integration of the rendering equation.
 
 ## Shared principles
 All methods in this family share the core mechanism of evaluating visibility or illumination at a specific point $\mathbf{p}$ within or on the boundary of a volume, based on a light source direction $\mathbf{l}$ or environment [G].
@@ -12,7 +12,7 @@ All methods in this family share the core mechanism of evaluating visibility or 
     $$ T = \exp\left(-\int_{\mathbf{p}_{source}}^{\mathbf{p}} \sigma_t(\mathbf{x}) \, d\mathbf{x}\right) $$
     In discrete implementations, this integral is approximated by summing $\sigma_t \cdot \Delta s$ over samples along the ray [G].
 
-2.  **Local Shading Models:** For surface-like appearance in volumes, normals are approximated from the volume gradient $\mathbf{g} = \nabla V$ [G]. Usually, a simple absorption and emission model is used because it is relatively cheap to evaluate and gives good enough results [S1, unofficial].
+2.  **Local Shading Models:** For surface-like appearance in volumes, normals are approximated from the volume gradient $\mathbf{g} = \nabla V$ [G]. Usually, a simple absorption and emission model is used because it is relatively cheap to evaluate and gives good enough results [S1, S3, unofficial].
 
 3.  **Shadowing Approximation:** Shadows are computed by testing occlusion along the direction to the light source [G].
 
@@ -23,35 +23,47 @@ All methods in this family share the core mechanism of evaluating visibility or 
 ## Subtopics
 
 ### [Shading models](837-shading-models.md)
-Applies local illumination to scalar field data to enhance 3D shape perception. It treats the volume as pseudo-surfaces, computing diffuse and specular contributions based on data values and gradients. It distinguishes itself from [Simplified Phong Lighting Model](885-simplified-phong-lighting-model.md) by managing opacity and light transport modes in a single pass, and from [Lambert Shading with Shadow Rays](1133-lambert-shading-with-shadow-rays.md) by including specular highlights.
+Computes diffuse and specular contributions from volume gradients within a ray-casting framework. It differs from [Simplified Phong Lighting Model](885-simplified-phong-lighting-model.md) by explicitly calculating both terms and from [Lambert Shading with Shadow Rays](1133-lambert-shading-with-shadow-rays.md) by including specular highlights.
 
 ### [Shading for Semi-Transparent Volumes](2144-shading-for-semi-transparent-volumes.md)
-Enables local diffuse illumination for semi-transparent volumes using multi-stage rasterization hardware (register combiners) for single-pass interactive performance. It differs from isosurface shading by using alpha blending and from 3D texture methods by sacrificing trilinear interpolation to fit gradient and color data into separate 2D textures.
+Enables local diffuse illumination for semi-transparent volumes using multi-stage rasterization hardware (register combiners) to compute lighting in a single pass. It sacrifices real trilinear interpolation to fit gradient and color data into separate 2D textures.
 
 ### [Cook-Torrance BRDF](2509-cook-torrance-brdf.md)
-A physically based rendering (PBR) model using the microfacet surface model to represent real-world reflectance, distinguishing metals and dielectrics. It ensures energy conservation and models roughness via statistical microfacet alignment, separating diffuse and specular lobes with energy-conserving weights and Fresnel effects.
+A physically based rendering (PBR) model using the microfacet surface model to represent real-world reflectance, distinguishing between metals and dielectrics. It sets itself apart by explicitly separating diffuse and specular lobes with energy-conserving weights and using the Fresnel effect.
 
 ### [Direct Lighting and Shading](3953-direct-lighting-and-shading.md)
-Evaluates illumination from discrete light sources and ambient terms, approximating surface appearance through local shading. It differs from [Shading models](837-shading-models.md) by integrating direct light visibility into volume traversal, and from [Cook-Torrance BRDF](2509-cook-torrance-brdf.md) by often employing simplified specular approximations.
+Computes illumination by evaluating contributions from discrete light sources and ambient terms, approximating surface-like appearance through local shading models. It differs from [Shading models](837-shading-models.md) by explicitly integrating direct light visibility and shadowing into the volume traversal context.
 
 ### [Whitted-Style Shading with Diffuse/Glossy Materials](4896-whitted-style-shading-with-diffuse-glossy-materials.md)
-Evaluates local illumination by combining ambient lighting with direct light contributions and shadow rays. It limits recursion to direct lighting and simple reflections, treating interaction as a local surface-like reflection model. Chosen for real-time performance with opaque/semi-transparent surfaces requiring approximate shadows and basic specular highlights.
+Evaluates local illumination by combining ambient lighting with direct light contributions, using shadow rays to determine visibility. It differs from full path tracing by limiting recursion to direct lighting and simple reflections.
 
-### Two-sided Lighting
-Under two-sided lighting, each directional light shines in two directions: both the specified direction and the opposite direction [S3]. Implementation involves setting light color and direction via `vpSetLight` and enabling the light with `vpEnable`, specifically using the `VP_LIGHT_BOTH_SIDES` option [S3].
+### [Shading models](837-shading-models.md)
+A minor variant where shading aims to enhance appearance by modeling shadows, light scattering, and absorption. It depends on the chosen optical model, often using a simple absorption and emission model for cost efficiency. Local illumination shades each sample independently, ignoring the rest of the scene, so it cannot produce shadows or scattering but is cheap to compute.
 
-### Atmospheric Lighting Model
-A lighting model that attenuates light through the volume, providing simple but robust lighting without relying on a surface normal [S4, unofficial]. It is used for multi-field gradients because the gradient orientation may not correspond to the surface of the classified region and can flip direction [S4, unofficial].
+### [Shading models](837-shading-models.md)
+A variant where each directional light shines in two directions: both the specified direction and the opposite direction. It is configured via specific API calls to enable the `VP_LIGHT_BOTH_SIDES` option.
 
-### Spot Light with Cone Falloff
-A spot light implementation with smooth cone falloff and optional IES profile, acting as a delta light [S5, unofficial]. It involves implementing smooth cone falloff and blending with optional IES profile [S5, unofficial].
+### [Shading models](837-shading-models.md)
+Defines the data structure for lights, including position (homogeneous 3D vector), color (homogeneous 3D vector with inverse intensity), attenuation (constant, linear, quadratic), hardness (shadow softness), radius, shadowRadius, and shadows flag. Lights are stored in a vector on the host and copied to device memory once per frame. The first two lights are special, used for 'sky' and 'fog' calculations. Sky lights ignore attenuation values and use [1,0,0] as they are infinitely distant.
+
+### [Shading models](837-shading-models.md)
+A model that attenuates light through the volume without relying on a surface normal. It is used for multi-field gradients where gradient orientation may not correspond to the surface of the classified region and can flip direction.
+
+### [Shading models](837-shading-models.md)
+Computes and sets shader uniforms for up to 4 lights, eye position, and eye look direction in object space. It involves computing the inverse of the actor's world matrix and transforming light positions and eye look direction accordingly.
+
+### [Shading models](837-shading-models.md)
+A spot light implementation with smooth cone falloff and optional IES profile, acting as a delta light.
 
 ## Background
-Lighting models for volume rendering originated with the need to enhance the visual interpretation of scalar field data. Early implementations focused on simple diffuse and specular shading applied to ray-casted volumes [S1, unofficial]. The use of hardware acceleration, such as register combiners, allowed for interactive shading of semi-transparent volumes on early PC hardware by offloading dot product calculations [S1, unofficial][S2, unofficial]. Physically based models like Cook-Torrance were adapted for volumetric contexts to improve material realism [S1, unofficial][S5, unofficial]. Atmospheric lighting models were developed specifically for multivariate data visualization where gradient-based normals are unreliable [S4, unofficial].
+The concept of lighting in volume rendering evolved from surface-based techniques, adapting local illumination models to scalar field data. Early methods focused on simple absorption and emission due to computational constraints [S3, unofficial]. The introduction of hardware-accelerated shading allowed for more complex models like the Cook-Torrance BRDF in volume contexts [S1, unofficial][S5]. Modern implementations often combine these local shading models with shadow casting techniques to enhance depth perception [S3, unofficial].
 
 ## Sources
 [S1] rokcej/volumetric-ray-casting, https://github.com/rokcej/volumetric-ray-casting, fetched 2026-10-26 (unofficial)
 [S2] Sample - Ray Marching and Signed Distance Functions, https://github.com/ComputeNode/cyfra/pull/13, fetched 2026-10-27 (unofficial)
-[S3] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
-[S4] Volume rendering multivariate data to visualize meteorological ..., https://www.researchgate.net/publication/262237652_Volume_rendering_multivariate_data_to_visualize_meteorological_simulations_a_case_study, fetched 2026-10-29 (unofficial)
-[S5] Add volumetric rendering, advanced materials, and imager effects, https://github.com/MihrimatriX/photon-engine/pull/3, fetched 2026-10-28 (unofficial)
+[S3] Advanced illumination and view-selection techniques for volume rendering and its application to medical imaging, http://hdl.handle.net/10803/371154, fetched 2026-10-27 (unofficial)
+[S4] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
+[S5] Raymarching Distance Fields with CUDA, https://doi.org/10.3390/electronics10222730, fetched 2026-10-26
+[S6] Volume rendering multivariate data to visualize meteorological ..., https://www.researchgate.net/publication/262237652_Volume_rendering_multivariate_data_to_visualize_meteorological_simulations_a_case_study, fetched 2026-10-29 (unofficial)
+[S7] RaycastVolume.cpp, https://visualizationlibrary.org/documentation/_raycast_volume_8cpp_source.html, fetched 2026-10-27 (unofficial)
+[S8] Add volumetric rendering, advanced materials, and imager effects, https://github.com/MihrimatriX/photon-engine/pull/3, fetched 2026-10-28 (unofficial)

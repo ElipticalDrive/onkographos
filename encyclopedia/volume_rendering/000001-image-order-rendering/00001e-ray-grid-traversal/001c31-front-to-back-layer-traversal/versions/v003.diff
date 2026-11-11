@@ -1,0 +1,171 @@
+--- v002.md
++++ v003.md
+@@ -4,91 +4,108 @@
+ 
+ ## Overview
+-Front-to-Back Layer Traversal is a rendering order strategy for Matryoshka layers that processes cells in front-to-back order along the viewing direction to handle occlusion correctly [S1, unofficial]. It solves the problem of correctly rendering nested volumetric layers by ensuring that outer cells occlude inner cells, and that cells on the same layer are processed in the correct depth sequence [S1, unofficial]. The method builds on [Ray-grid traversal](17-ray-grid-traversal.md) but operates on discrete layer planes rather than continuous ray steps.
++Front-to-Back Layer Traversal is a rendering order strategy for Matryoshka-like hierarchical data structures that processes cells in front-to-back order along the viewing direction to handle occlusion correctly [S1, unofficial]. It sets itself apart from standard ray-grid traversal methods by operating on pre-defined "layers" composed of six planes, ensuring that outer cells occlude inner cells without requiring per-ray depth sorting [S1, unofficial]. It builds on [Ray-grid traversal](17-ray-grid-traversal.md) but applies a specific plane-grouping logic to manage the visibility of nested structures.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A Matryoshka layer $l_m$ composed of six planes, and a camera viewing direction [S1, unofficial].
+-- Output: An ordered sequence of cell processing instructions that guarantees front-to-back visibility [S1, unofficial].
++- Input: A Matryoshka layer $l_m$ defined by six planes ($X_{kx}, Y_{ky}, Z_{kz}$ and their opposites), a viewing direction (camera position), and an auxiliary buffer for marking drawable cells.
++- Output: A sequence of cell processing instructions ordered front-to-back.
+ 
+ **Data Structures:**
+-- Each layer $l_m$ is defined by its six planes [S1, unofficial]. For a layer with dimensions in $x, y, z$, the planes are defined by indices $X_{k_x}, Y_{k_y}, Z_{k_z}$ where $k \in \{0, 1\}$ [S1, unofficial].
+-- An auxiliary buffer stores cells marked as drawable during the first pass and holds them for ordered processing in the second pass [S1, unofficial].
++- **Layer Definition:** A layer consists of six planes. The planes are classified into two groups based on the camera position:
++    - **Closest Planes:** The three planes closest to the camera. Defined by binary indices $k_x, k_y, k_z \in \{0, 1\}$.
++    - **Furthest Planes:** The three planes furthest from the camera. Defined by the opposite indices $k'_x, k'_y, k'_z$.
++- **Auxiliary Buffer:** A memory structure used to mark cells as "drawable" during the first pass, allowing them to be processed in the correct order during the second pass.
+ 
+ **Parameters:**
+ - $k_x, k_y, k_z$: Binary values (0 or 1) determined by the viewing camera to define which planes are closest to the camera position [S1, unofficial].
+-- $k'_x, k'_y, k'_z$: The opposite values of $k_x, k_y, k_z$ (i.e., $k' = 1 - k$), defining the planes furthest from the camera [S1, unofficial].
++- $k'_x, k'_y, k'_z$: The opposite values of $k_x, k_y, k_z$ (i.e., $1-k_x$, etc.), defining the furthest planes [S1, unofficial].
+ 
+-**Algorithm Steps:**
+-1. **Determine Plane Orientation:** Based on the camera viewing direction, determine the binary values $k_x, k_y, k_z$ for the current layer $l_m$ [S1, unofficial]. These identify the three planes closest to the viewer [S1, unofficial].
+-2. **Process Closest Planes:** Process the cells from the planes $X = X_{k_x}$, $Y = Y_{k_y}$, and $Z = Z_{k_z}$ [S1, unofficial].
+-   - **Intra-Plane Ordering:** Within this group, specific ordering rules apply to handle shared cells correctly: cells from plane $X = X_{k_x}$ that also belong to $Y = Y_{k_y}$ must be treated before any other cells from $Y = Y_{k_y}$ [S1, unofficial]. Plane $Z = Z_{k_z}$ must be processed last among the three closest planes because cells from $X = X_{k_x}$ and $Y = Y_{k_y}$ may occlude cells in $Z = Z_{k_z}$ [S1, unofficial].
+-   - **Buffering:** Use an auxiliary buffer to mark cells as drawable and then process them in the correct front-to-back order within each plane [S1, unofficial].
+-3. **Process Inner Layers:** If $l_m$ is not the last layer, process the next inner layer $l_{m+1}$ using the same logic [S1, unofficial].
+-4. **Process Furthest Planes:** Process the cells from the planes $X = X_{k'_x}$, $Y = Y_{k'_y}$, and $Z = Z_{k'_z}$ (the planes furthest from the camera) [S1, unofficial].
+-   - **Intra-Plane Ordering:** Within this group, the ordering is reversed relative to the closest planes: plane $Z = Z_{k'_z}$ is processed first among the three furthest planes because it may occlude cells in $Y = Y_{k'_y}$ [S1, unofficial]. Plane $Y = Y_{k'_y}$ is processed next, as it may occlude cells in $X = X_{k'_x}$ [S1, unofficial]. Plane $X = X_{k'_x}$ is processed last [S1, unofficial].
++**Steps:**
++1.  **Classify Planes:** Determine the values of $k_x, k_y, k_z$ based on the camera's viewing direction. These indices identify the planes closest to the viewer.
++2.  **Process Closest Planes:**
++    -   Identify the three planes closest to the camera: $X=X_{kx}$, $Y=Y_{ky}$, $Z=Z_{kz}$.
++    -   **Intra-Plane Ordering:** Within this group, specific ordering rules apply to handle shared cells (edges/corners) correctly:
++        -   Cells from plane $X=X_{kx}$ that also belong to plane $Y=Y_{ky}$ must be treated before any other cells from plane $Y=Y_{ky}$ [S1, unofficial].
++        -   Plane $Z=Z_{kz}$ must be processed last among the three closest planes because cells from $X=X_{kx}$ and $Y=Y_{ky}$ may occlude cells in $Z=Z_{kz}$ [S1, unofficial].
++    -   Use the auxiliary buffer to mark these cells as drawable.
++3.  **Process Inner Layers:** If $l_m$ is not the last layer, recursively or iteratively process the next inner layer $l_{m+1}$ using the same logic [S1, unofficial].
++4.  **Process Furthest Planes:**
++    -   Identify the three planes furthest from the camera: $X=X_{k'x}$, $Y=Y_{k'y}$, $Z=Z_{k'z}$.
++    -   **Intra-Plane Ordering:** Within this group, the ordering is inverted to maintain front-to-back consistency relative to the inner layers:
++        -   Plane $Z=Z_{k'z}$ is processed first among the three furthest planes because it may occlude cells in $Y=Y_{k'y}$, which in turn may occlude cells in $X=X_{k'x}$ [S1, unofficial].
++    -   Process the cells marked in the auxiliary buffer in this specific order.
+ 
+ **Pseudocode:**
+ ```python
+-def process_layer(layer, camera_dir):
+-    """Processes a single Matryoshka layer in front-to-back order."""
+-    # Determine closest planes based on camera direction components
+-    kx = 1 if camera_dir[0] > 0 else 0
+-    ky = 1 if camera_dir[1] > 0 else 0
+-    kz = 1 if camera_dir[2] > 0 else 0
++def front_to_back_layer_traversal(layer, camera_position, auxiliary_buffer):
++    # Determine closest planes based on camera position
++    # kx, ky, kz are 0 or 1 indicating the index of the closest plane on each axis
++    kx, ky, kz = determine_closest_planes(camera_position, layer.dimensions)
++    
++    # Opposite indices for furthest planes
+     kpx, kpy, kpz = 1 - kx, 1 - ky, 1 - kz
++    
++    # Step 1: Process closest planes
++    # Order: X_kx, Y_ky, then Z_kz (last among closest)
++    # Note: Shared cells between X_kx and Y_ky are processed with X_kx first
++    
++    # Mark cells in auxiliary buffer
++    mark_cells_in_buffer(layer.plane_x[kx], auxiliary_buffer)
++    mark_cells_in_buffer(layer.plane_y[ky], auxiliary_buffer)
++    mark_cells_in_buffer(layer.plane_z[kz], auxiliary_buffer)
++    
++    # Process in correct intra-plane order
++    process_cells_from_buffer(auxiliary_buffer, order=[layer.plane_x[kx], layer.plane_y[ky], layer.plane_z[kz]])
++    
++    # Step 2: Process inner layers if not the last layer
++    if not layer.is_last_layer():
++        front_to_back_layer_traversal(layer.next_inner_layer, camera_position, auxiliary_buffer)
++        
++    # Step 3: Process furthest planes
++    # Order: Z_kpz first, then Y_kpy, then X_kpx (last among furthest)
++    # This ensures Z_kpz occludes Y_kpy which occludes X_kpx
++    
++    # Mark cells in auxiliary buffer (reset or use new buffer)
++    mark_cells_in_buffer(layer.plane_z[kpz], auxiliary_buffer)
++    mark_cells_in_buffer(layer.plane_y[kpy], auxiliary_buffer)
++    mark_cells_in_buffer(layer.plane_x[kpx], auxiliary_buffer)
++    
++    # Process in correct intra-plane order
++    process_cells_from_buffer(auxiliary_buffer, order=[layer.plane_z[kpz], layer.plane_y[kpy], layer.plane_x[kpx]])
+ 
+-    # Step 1: Process closest planes with specific intra-plane ordering
+-    process_plane_ordered(layer.plane_X[kx], layer.plane_Y[ky], "first_shared")
+-    process_plane_ordered(layer.plane_Y[ky], None, "normal")
+-    process_plane_ordered(layer.plane_Z[kz], None, "last")
++def determine_closest_planes(camera_position, dimensions):
++    # Returns kx, ky, kz (0 or 1) for the planes closest to the camera
++    # Implementation depends on specific coordinate system and camera setup [G]
++    pass
+ 
+-    # Step 2: Process inner layers recursively
+-    if layer.inner_layer is not None:
+-        process_layer(layer.inner_layer, camera_dir)
++def mark_cells_in_buffer(plane_cells, buffer):
++    # Marks cells as drawable in the buffer [G]
++    pass
+ 
+-    # Step 3: Process furthest planes with reversed intra-plane ordering
+-    process_plane_ordered(layer.plane_Z[kpz], None, "first")
+-    process_plane_ordered(layer.plane_Y[kpy], None, "normal")
+-    process_plane_ordered(layer.plane_X[kpx], None, "last")
+-
+-def process_plane_ordered(plane, shared_plane=None, position="normal"):
+-    """Processes a single plane using an auxiliary buffer for correct ordering."""
+-    buffer = []
+-    # First pass: mark cells as drawable
+-    for cell in plane.cells:
+-        if shared_plane is not None and cell.is_on_plane(shared_plane):
+-            buffer.append(cell)
+-        elif shared_plane is None or not cell.is_on_plane(shared_plane):
+-            buffer.append(cell)
+-    # Second pass: process buffer in front-to-back order
+-    buffer.sort(key=lambda c: c.depth)
+-    for cell in buffer:
+-        render_cell(cell)
+-
+-def render_cell(cell):
+-    """Renders a single cell to the output buffer."""
+-    pass  # Implementation depends on the specific renderer [G]
++def process_cells_from_buffer(buffer, order):
++    # Processes cells in the buffer according to the specified plane order [G]
++    pass
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Shared Cells:** Cells at the intersection of planes (edges/corners) must be processed only once [S1, unofficial]. The auxiliary buffer and specific intra-plane ordering rules prevent double-rendering or incorrect occlusion [S1, unofficial].
+-- **Viewing Direction:** The values of $k_x, k_y, k_z$ must be dynamically calculated based on the camera position [S1, unofficial]. Incorrect calculation leads to back-to-front rendering or incorrect occlusion [S1, unofficial].
+-- **Precision:** Floating-point precision in determining the "closest" plane can be critical if the camera is aligned with a plane normal [G]. Guard clauses or epsilon comparisons may be needed to avoid ambiguous plane selection [G].
++-   **Shared Cells:** Cells at the intersection of planes (edges/corners) must be handled carefully to avoid double processing or incorrect occlusion. The intra-plane ordering rules specifically address this [S1, unofficial].
++-   **Camera Position:** The values of $k_x, k_y, k_z$ depend on the camera position. If the camera moves, these values may change, requiring a re-evaluation of the plane grouping [S1, unofficial].
++-   **Auxiliary Buffer:** Requires sufficient memory to store the drawable cells for each layer.
+ 
+ ## Subtopics
+ 
+ ### Intra-Plane Rendering Order
+-A specific ordering rule for processing cells within the same plane group to handle shared cells (edges/corners) correctly, ensuring correct occlusion between planes [S1, unofficial]. It dictates that for closest planes, $X_{k_x}$ (with shared $Y_{k_y}$ cells) is processed before $Y_{k_y}$, and $Z_{k_z}$ is last [S1, unofficial]. For furthest planes, $Z_{k'_z}$ is first, $Y_{k'_y}$ is next, and $X_{k'_x}$ is last [S1, unofficial]. This variant is chosen when precise occlusion handling is required for Matryoshka layers with shared boundaries [S1, unofficial].
++A specific ordering rule for processing cells within the same plane group to handle shared cells (edges/corners) correctly, ensuring correct occlusion between planes [S1, unofficial]. It dictates that for closest planes, cells from $X=X_1$ belonging to $Y=Y_1$ are processed before $Y=Y_1$, and $Z=Z_1$ is last. For furthest planes, $Z=Z_0$ is first, occluding $Y=Y_0$, which occludes $X=X_0$ [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The traversal visits each cell in the layer exactly once, avoiding the need for a second round of processing if cells were considered separately [S1, unofficial]. However, the use of an auxiliary buffer and two-pass marking adds overhead [S1, unofficial].
+-- **Memory Complexity:** Requires an auxiliary buffer proportional to the number of cells in the layer to mark drawable cells [S1, unofficial].
+-- **Strengths:** Correctly handles occlusion for nested layers without complex ray-casting logic; efficient for Matryoshka structures.
+-- **Limitations:** Requires explicit layer decomposition; performance may degrade if the number of layers is very large or if intra-plane sorting is expensive [G].
+-- **When to use:** When rendering Matryoshka layers where occlusion between layers and within layers is critical [S1, unofficial].
+-- **When not to use:** For unstructured volumes or when hierarchical acceleration is more appropriate [G].
++-   **Time Complexity:** Linear with respect to the number of cells in the layer, plus the cost of marking and processing the auxiliary buffer. The intra-plane ordering adds a constant overhead per plane group.
++-   **Memory Complexity:** Requires an auxiliary buffer proportional to the number of cells in the layer to mark drawable cells.
++-   **Strengths:** Correctly handles occlusion for nested Matryoshka structures without per-ray depth sorting. Efficient for parallel projections where the viewing direction is fixed for a frame.
++-   **Limitations:** Requires an auxiliary buffer. The ordering logic is specific to the Matryoshka structure and may not generalize to other hierarchical structures. Performance may degrade if the camera position changes frequently, requiring re-computation of plane groups.
++-   **When to Use:** When rendering Matryoshka-like data structures with parallel projection and correct occlusion is required.
++-   **When Not to Use:** For structures that do not fit the Matryoshka layer model, or when memory for the auxiliary buffer is constrained.
+ 
+ ## Background
+-The method originates from the Matryoshka Algorithm for speeding up isosurfacing [S1, unofficial]. It was developed to handle the visualization of multiple isosurfaces by decomposing the volume into nested layers [S1, unofficial]. The approach leverages the geometric properties of the layers to determine a safe rendering order [S1, unofficial].
++The method was introduced in the context of the Matryoshka algorithm for speeding up isosurfacing [S1, unofficial]. It addresses the challenge of visualizing active cells in a hierarchical data structure while maintaining correct front-to-back rendering order for occlusion. The approach leverages the geometric properties of the layer planes relative to the camera position.
+ 
+ ## Sources

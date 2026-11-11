@@ -3,192 +3,162 @@
 Also called: Labeled Point Cloud Voxelization with Occlusion Handling, Voxel Grid Generation from Scans
 
 ## Overview
-This method generates labeled 3D voxel grids from sequential scan data, specifically designed to handle occlusions and temporal consistency between prior and current observations [S1, unofficial]. It differs from standard voxelization by maintaining two distinct grid states (prior and past) and explicitly updating occlusion masks based on camera pose transformations, ensuring that newly observed geometry correctly occludes previous estimates [S1, unofficial]. It builds on [Voxelization](12-voxelization.md) by adding a temporal, scan-based processing loop [G].
+This method generates labeled voxel grids from sequential scan data (point clouds) by managing occlusions and temporal consistency between "prior" and "past" (target) states [S1, unofficial]. It solves the problem of creating discrete volumetric representations from sparse, potentially occluded sensor data for tasks such as change detection or training data generation. It distinguishes itself from simple occupancy voxelization by explicitly handling label propagation, occlusion updates, and stride-based scan selection to ensure valid labeled data [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- A sequence of poses (`poses`), where each pose is a 4x4 transformation matrix [S1, unofficial].
-- Point clouds associated with each pose (`pastPoints`, `priorPoints`) [S1, unofficial].
-- Labels associated with each point (`pastLabels`, `priorLabels`) [S1, unofficial].
-- Configuration parameters: `stride_num`, `stride_distance` [S1, unofficial].
-- Output directory and naming convention (`output_voxel_dirname`, `outname`) [S1, unofficial].
+- A sequence of poses (camera or sensor positions) and associated point clouds with labels.
+- Configuration parameters: `stride_num`, `stride_distance`, `output_voxel_dirname`, `outname`.
+- Two voxel grid instances: `priorGrid` and `pastGrid` [S1, unofficial].
 
 **Outputs:**
-- Two voxel grids: `priorGrid` and `pastGrid`, saved to disk [S1, unofficial].
+- Saved voxel grid files for the prior and past states, labeled as "input" and "target" respectively [S1, unofficial].
 
 **Data Structures:**
-- `VoxelGrid`: Contains an occupancy map and an occlusion mask. The specific internal layout is implementation-dependent but must support `updateOcclusions()` and `updateInvalid()` [S1, unofficial].
-- `Pose`: 4x4 matrix representing camera position and orientation [G].
+- **Voxel Grid**: Stores voxel states including occupancy and labels. Specific internal layout is not detailed in the source, but it supports methods `updateOcclusions()` and `updateInvalid()` [S1, unofficial].
+- **Point Cloud**: Array of points with associated poses and labels.
+- **Labels**: Integer values where `label > 0` indicates a valid label [S1, unofficial].
+
+**Parameters:**
+- `stride_num`: Maximum number of scans to skip between selected frames [S1, unofficial].
+- `stride_distance`: Maximum cumulative distance between selected frames [S1, unofficial].
+- `percentageLabeled`: Threshold for valid data (skip if $\le 0.0\%$) [S1, unofficial].
 
 **Steps:**
-
-1. **Initialization**: Initialize `priorGrid` and `pastGrid` with the target resolution and bounds [G].
-
-2. **Iteration Loop**: Iterate through the scan sequence [S1, unofficial]. For each current scan index `current`:
-   a. Retrieve `priorPoints`, `priorLabels`, `pastPoints`, and `pastLabels` for the current index [S1, unofficial].
-   b. **Label Counting**:
-      - Initialize `labelCount = 0`.
-      - Iterate through `pastLabels`. If `label > 0`, increment `labelCount` [S1, unofficial].
-      - Calculate `pointCount` as the total number of points in `pastPoints` [S1, unofficial].
-      - Calculate `percentageLabeled = 100.0f * labelCount / pointCount` [S1, unofficial].
-   c. **Validation**: If `percentageLabeled <= 0.0f`, skip grid generation for this step to avoid empty or invalid data [S1, unofficial].
-   d. **Occlusion Update**:
-      - Call `priorGrid.updateOcclusions()` [S1, unofficial].
-      - Call `pastGrid.updateOcclusions()` [S1, unofficial].
-   e. **Invalid Voxel Marking**:
-      - Iterate through `pastPoints` [S1, unofficial].
-      - For each point `i`, compute the endpoint in the anchor frame:
-        $$ \text{endpoint} = (\text{anchor\_pose}^{-1} \times \text{pastPoints}[i].\text{pose}).\text{col}(3).\text{head}(3) $$
-        where `anchor_pose` is the reference frame transformation, `col(3)` extracts the translation vector, and `head(3)` takes the first three components [S1, unofficial].
-      - Call `pastGrid.updateInvalid(endpoint)` to mark voxels along the ray or at the endpoint as invalid/occluded [S1, unofficial].
-   f. **Save Grids**:
-      - Call `saveVoxelGrid(priorGrid, output_voxel_dirname, outname.str(), "input")` [S1, unofficial].
-      - Call `saveVoxelGrid(pastGrid, output_voxel_dirname, outname.str(), "target")` [S1, unofficial].
-   g. **Advance Index**:
-      - Initialize `distance = 0`, `count = 0` [G].
-      - While `(count < config.stride_num || distance < config.stride_distance || count == 0) && current + 1 < poses.size()`:
-        - `distance += poseDistance(poses[current], poses[current + 1])` [S1, unofficial].
-        - `count += 1` [G].
-        - `current += 1` [G].
-      - Break if no further scan is possible [S1, unofficial].
+1. **Iterate through scans**: Process the sequence of poses and point clouds.
+2. **Retrieve Data**: For the current index, retrieve `priorPoints`, `priorLabels`, `pastPoints`, and `pastLabels` [S1, unofficial].
+3. **Validate Labeled Data**:
+   - Count labeled points in `pastLabels`:
+     $$ \text{labelCount} = \sum_{i} \mathbb{I}(\text{pastLabels}[i] > 0) $$
+   - Calculate percentage of labeled points:
+     $$ \text{percentageLabeled} = 100.0 \times \frac{\text{labelCount}}{\text{pointCount}} $$
+   - **Pitfall**: If `percentageLabeled <= 0.0`, skip grid generation to avoid empty/invalid data [S1, unofficial].
+4. **Update Occlusions**:
+   - Call `priorGrid.updateOcclusions()` [S1, unofficial].
+   - Call `pastGrid.updateOcclusions()` [S1, unofficial].
+5. **Mark Invalid Voxels**:
+   - For each point in `pastPoints`:
+     - Compute the endpoint in the anchor frame:
+       $$ \mathbf{p}_{\text{endpoint}} = (\mathbf{P}_{\text{anchor}}^{-1} \times \mathbf{P}_{\text{past}}[i])_{0:3, 3} $$
+       where $\mathbf{P}_{\text{anchor}}$ and $\mathbf{P}_{\text{past}}[i]$ are 4x4 pose matrices, and `.col(3).head(3)` extracts the translation vector [S1, unofficial].
+     - Call `pastGrid.updateInvalid(p_{\text{endpoint}})` [S1, unofficial].
+6. **Save Grids**:
+   - Save `priorGrid` to `output_voxel_dirname` with filename `outname` and label "input" [S1, unofficial].
+   - Save `pastGrid` to `output_voxel_dirname` with filename `outname` and label "target" [S1, unofficial].
+7. **Advance Scan Index**:
+   - Use stride logic to select the next scan:
+     ```python
+     count = 0
+     distance = 0.0
+     current = 0
+     while (count < config.stride_num or distance < config.stride_distance or count == 0) and (current + 1 < poses.size()):
+         distance += poseDistance(poses[current], poses[current + 1])
+         count += 1
+         current += 1
+     if current + 1 >= poses.size():
+         break
+     ```
+     where `poseDistance` computes the spatial distance between two poses [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-class VoxelGrid:
-    def __init__(self):
-        self.occlusion_mask = {}
-    def updateOcclusions(self):
-        # Implementation-dependent occlusion update logic [G]
-        pass
-    def updateInvalid(self, endpoint):
-        # Mark voxel at endpoint as invalid [G]
-        self.occlusion_mask[tuple(endpoint)] = True
-
-def saveVoxelGrid(grid, output_dir, outname, suffix):
-    # Save grid data to disk [G]
-    filepath = f"{output_dir}/{outname}_{suffix}.bin"
-    with open(filepath, 'wb') as f:
-        f.write(str(grid.occlusion_mask).encode())
-
-def generate_voxel_grids(poses, pastPoints, pastLabels, priorPoints, priorLabels, config, anchor_pose, output_dir, outname):
-    priorGrid = VoxelGrid()
-    pastGrid = VoxelGrid()
-
+def generate_voxel_grids(poses, point_clouds, labels, config, output_dir):
+    prior_grid = VoxelGrid()
+    past_grid = VoxelGrid()
+    
     current = 0
-    while current < len(poses):
-        # Retrieve data for current index [S1, unofficial]
-        # Data alignment assumed per source structure
-
-        # Count labeled points [S1, unofficial]
-        labelCount = 0
-        pointCount = len(pastLabels)
-        for label in pastLabels:
-            if label > 0:
-                labelCount += 1
-
-        percentageLabeled = 100.0 * labelCount / pointCount
-
-        # Skip if no labels [S1, unofficial]
-        if percentageLabeled <= 0.0:
+    while current + 1 < len(poses):
+        # Retrieve data for current and next scan
+        prior_points = point_clouds[current]
+        prior_labels = labels[current]
+        past_points = point_clouds[current + 1]
+        past_labels = labels[current + 1]
+        
+        # Validate labeled data
+        label_count = sum(1 for l in past_labels if l > 0)
+        point_count = len(past_labels)
+        percentage_labeled = 100.0 * label_count / point_count
+        
+        if percentage_labeled <= 0.0:
+            # Skip grid generation if no valid labels
             current += 1
             continue
-
-        # Update occlusions [S1, unofficial]
-        priorGrid.updateOcclusions()
-        pastGrid.updateOcclusions()
-
-        # Mark invalid voxels [S1, unofficial]
-        for i in range(len(pastPoints)):
-            # Compute endpoint in anchor frame [S1, unofficial]
-            # anchor_pose_inverse * pastPoints[i].pose
-            transformed = mat4_multiply(mat4_inverse(anchor_pose), pastPoints[i].pose)
-            endpoint = [transformed[0][3], transformed[1][3], transformed[2][3]]
-            pastGrid.updateInvalid(endpoint)
-
-        # Save grids [S1, unofficial]
-        saveVoxelGrid(priorGrid, output_dir, outname, "input")
-        saveVoxelGrid(pastGrid, output_dir, outname, "target")
-
-        # Advance scan index [S1, unofficial]
-        distance = 0.0
+            
+        # Update occlusions
+        prior_grid.update_occlusions()
+        past_grid.update_occlusions()
+        
+        # Mark invalid voxels based on past points transformed to anchor frame
+        for i in range(len(past_points)):
+            # Compute endpoint in anchor pose frame
+            # Assuming poses are 4x4 matrices
+            anchor_inv = poses[current].inverse()
+            past_pose = poses[current + 1]
+            endpoint = (anchor_inv @ past_pose)[:3, 3] # Translation part
+            past_grid.update_invalid(endpoint)
+            
+        # Save grids
+        save_voxel_grid(prior_grid, output_dir, f"scan_{current}", "input")
+        save_voxel_grid(past_grid, output_dir, f"scan_{current}", "target")
+        
+        # Advance scan index using stride logic
         count = 0
-        while (count < config.stride_num or distance < config.stride_distance or count == 0) and current + 1 < len(poses):
-            distance += pose_distance(poses[current], poses[current + 1])
+        distance = 0.0
+        next_current = current + 1
+        
+        # Ensure at least one step is taken (count == 0 condition)
+        while (count < config.stride_num or distance < config.stride_distance or count == 0) and next_current + 1 < len(poses):
+            dist = pose_distance(poses[next_current], poses[next_current + 1])
+            distance += dist
             count += 1
-            current += 1
-
-        if current >= len(poses):
+            next_current += 1
+            
+        if next_current + 1 >= len(poses):
             break
-
-def mat4_multiply(A, B):
-    # Standard 4x4 matrix multiplication [G]
-    return [[sum(A[i][k] * B[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
-
-def mat4_inverse(M):
-    # Standard 4x4 matrix inverse [G]
-    pass
-
-def pose_distance(pose1, pose2):
-    # Euclidean distance between translation components [G]
-    t1 = [pose1[0][3], pose1[1][3], pose1[2][3]]
-    t2 = [pose2[0][3], pose2[1][3], pose2[2][3]]
-    return math.sqrt(sum((a - b) ** 2 for a, b in zip(t1, t2)))
+            
+        current = next_current
 ```
-
-**Parameters:**
-- `stride_num`: Maximum number of scans to skip in one stride [S1, unofficial].
-- `stride_distance`: Maximum distance between scans to allow a stride [S1, unofficial].
-
-**Edge Cases:**
-- **Empty Labels**: If `percentageLabeled <= 0.0`, the grid generation is skipped to prevent invalid output [S1, unofficial].
-- **Boundary Conditions**: The loop breaks if `current + 1 >= poses.size()` [S1, unofficial].
 
 ## Subtopics
 
 ### [Voxel Grid Generation & Expansion](2979-voxel-grid-generation-expansion.md)
-Generates a 3D occupancy grid of voxels representing a smoke volume, expanded over time from an origin point using CPU iteration and GPU buffer upload [2979-voxel-grid-generation-expansion.md].
+This method generates a 3D occupancy grid representing a volumetric smoke cloud by iteratively expanding a spherical radius from a central origin point over time. It solves the problem of creating a discrete voxel representation of a continuous smoke volume for GPU-based ray marching, distinguishing itself from particle-based splatting by using a simple radial distance check against an easing curve to fill the grid. Unlike siblings that load pre-existing scene data or generate synthetic medical CTs, this method procedurally constructs the volume geometry from scratch based on temporal expansion parameters.
 
 ### [Scene Data Loading & Resizing](3420-scene-data-loading-resizing.md)
-Loads camera parameters and 3D point clouds from Structure-from-Motion (SfM) reconstructions, resizes source images to a target resolution, and adjusts coordinate systems to match rendering requirements. It serves as the initial data preparation step in the Voxel Grid Data Generation Pipeline, ensuring that geometric and photometric inputs are normalized for downstream voxelization. It differs from sibling methods by focusing specifically on the ingestion and normalization of external SfM data rather than grid construction or compression.
+This method loads camera poses, intrinsics, and 3D point clouds from various SfM/MVS formats (COLMAP, instant-npg/sdfstudio), normalizes them to a canonical coordinate system, and resizes input images to a target resolution. It ensures all camera poses are in a consistent 4x4 matrix format and scales intrinsics to match the resized image dimensions. It differs from [Voxel Grid Generation & Expansion](2979-voxel-grid-generation-expansion.md) by focusing on the initial ingestion and normalization of scene geometry rather than the construction of the voxel grid itself, and from [DCX Pipeline](3770-dcx-pipeline.md) by handling raw SfM outputs directly without intermediate DCX-specific transformations.
 
 ### [DCX Pipeline](3770-dcx-pipeline.md)
-Converts point clouds or volumetric inputs into explicit surface triangle meshes by learning a discrete topology class and continuous vertex offset for each voxel grid cell, then extracting the mesh via a C++/CUDA extension. It distinguishes itself from direct surface reconstruction methods (like Poisson Reconstruction) by operating on a discrete voxel grid, allowing explicit control over topology via cube types and enabling supplementary sampling to fill geometric holes. It builds on [Voxel Grid Data Generation Pipeline](1208-voxel-grid-data-generation-pipeline.md).
+The DCX Pipeline is a method for converting point clouds or volumetric inputs into explicit surface triangle meshes by learning a discrete topology class and continuous vertex offset for each voxel grid cell, then extracting the mesh via a C++/CUDA extension. It distinguishes itself from direct surface reconstruction methods (like Poisson Reconstruction) by operating on a discrete voxel grid, allowing for explicit control over topology via cube types and enabling supplementary sampling to fill geometric holes. It builds on [Voxel Grid Data Generation Pipeline](1208-voxel-grid-data-generation-pipeline.md).
+
+### [Synthetic CT Data Generation](8251-synthetic-ct-data-generation.md)
+Synthetic CT Data Generation creates labeled training pairs for computed tomography reconstruction algorithms by procedurally generating ground-truth phantoms, simulating their projection data (sinograms), and reconstructing them. It solves the data scarcity problem in medical imaging by providing infinite, perfectly aligned input-target pairs without requiring real patient scans. It differs from [Voxel Grid Generation & Expansion](2979-voxel-grid-generation-expansion.md) by focusing on the full forward-backward pipeline (projection + noise + reconstruction) rather than just voxel occupancy, and from [Scene Data Loading & Resizing](3420-scene-data-loading-resizing.md) by generating data from mathematical primitives rather than loading existing assets.
 
 ### Direct Geometry Scan-Conversion
-Scan-converts the geometry directly into the sampled array and renders the ensemble, allowing for true 3-D merge of visualizations [S2, unofficial].
+Scan-convert the geometry directly into the sampled array and render the ensemble [S2, unofficial].
 
 ### KITTI Dataset Preprocessing
 Prepares KITTI dataset for training by parsing camera extrinsics/intrinsics, downsampling point clouds, adding background shell, and splitting into train/validation sets [S3, unofficial].
-- **Definition**: Prepares KITTI dataset for training by parsing camera extrinsics/intrinsics, downsampling point clouds, adding background shell, and splitting into train/validation sets [S3, unofficial].
-- **Steps**:
-  1. Parse camera extrinsics from XML to get `T_pointcloud_camera`, `label`, `sensor_id`, `path` [S3, unofficial].
-  2. Parse intrinsics to get `K`, `width`, `height` [S3, unofficial].
-  3. Load point cloud from PLY [S3, unofficial].
-  4. Downsample point cloud by 99% (`frac=0.01`) [S3, unofficial].
-  5. Add 1000 random shell points around scene center/radius [S3, unofficial].
-  6. Save to parquet [S3, unofficial].
-  7. Split frames every 3 for train/val [S3, unofficial].
-  8. Save JSON metadata [S3, unofficial].
+- **Steps**: Parse camera extrinsics from XML to get $T_{\text{pointcloud\_camera}}$, label, sensor_id, path. Parse intrinsics to get $K$, width, height. Load point cloud from PLY. Downsample point cloud by 99% ($\text{frac}=0.01$). Add 1000 random shell points around scene center/radius. Save to parquet. Split frames every 3 for train/val. Save JSON metadata [S3, unofficial].
 - **Formula**: Intrinsic matrix $K$ is computed as:
   $$ K = \begin{bmatrix} f & 0 & w/2 \\ 0 & f & h/2 \\ 0 & 0 & 1 \end{bmatrix} $$
   where $f$ is focal length, $w$ and $h$ are image dimensions [S3, unofficial].
-- **Parameters**:
-  - `frac=0.01`: downsampling fraction for the point cloud [S3, unofficial].
-  - `num_shell_points=1000`: number of background points added around the scene center [S3, unofficial].
-  - `train every 3 frames`: ratio used to split data into training and validation sets [S3, unofficial].
+- **Parameters**: $\text{frac}=0.01$: downsampling fraction for the point cloud [S3, unofficial]. $\text{num\_shell\_points}=1000$: number of background points added around the scene center [S3, unofficial]. $\text{train every 3 frames}$: ratio used to split data into training and validation sets [S3, unofficial].
+
+### Midpoint Grid Arrangement
+A preprocessing step to convert irregular volumetric data from an endoscope scanning system into a regular 3-D grid suitable for Marching Cubes. It solves the problem of non-regular data structures typical of endoscope/MR data by assigning points to grid cells based on projection distances [S4, unofficial].
+- **Steps**: For each point in the volumetric dataset, calculate three projections along the $i$, $j$, and $k$ directions respectively. If the projection distance on an axis is less than the midpoint of that axis, assign the point to the current coordinate index ($i$, $j$, or $k$). If the projection distance on an axis is not less than the midpoint, assign the point to the next coordinate index ($i+1$, $j+1$, or $k+1$). Loop over the entire volumetric dataset to generate the regular 3-D grid, replacing the original irregular data [S4, unofficial].
+- **Parameter**: $I_c$ (cube interval): A parameter set in advance that determines the size of the logical cubes in the grid [S4, unofficial].
 
 ## Operating characteristics
 Not given in the sources.
 
 ## Background
-The core pipeline originates from sequential scan processing code that handles labeled point clouds and occlusion updates [S1, unofficial]. The concept of direct geometry scan-conversion for merging volume and geometric data originates from earlier work on volume rendering and visualization [S2, unofficial]. The KITTI dataset preprocessing steps are derived from a Taichi-based 3D Gaussian Splatting implementation [S3, unofficial].
+Not given in the sources.
 
 ## Sources
 [S1] jbehley/voxelizer, https://github.com/jbehley/voxelizer, fetched 2026-10-27 (unofficial)
 [S2] DTIC ADA193649: Rendering of Surfaces from Volume Data,, https://archive.org/details/DTIC_ADA193649, fetched 2026-10-26 (unofficial)
 [S3] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
+[S4] A Marching Cubes Algorithm: Application for Three-dimensional Surface Reconstruction Based on Endoscope and Optical Fiber, https://inria.hal.science/hal-01205823v1, fetched 2026-10-26 (unofficial)

@@ -3,102 +3,137 @@
 Also called: NeRF training loss, RGB and TV loss calculation
 
 ## Overview
-This method computes the photometric training loss for differentiable volume rendering by combining a Huber loss on RGB values with ray-level validity masking. It addresses the problem of robust optimization in the presence of noisy or saturated pixels, which can destabilize geometry and appearance recovery. It sets itself apart from standard MSE loss [MSE Loss and PSNR Conversion](1651-mse-loss-and-psnr-conversion.md) by using a linear penalty for large errors (reducing outlier sensitivity) and explicitly filtering invalid rays before aggregation.
+This method defines the primary photometric loss function for training differentiable volume rendering models, specifically those utilizing sparse voxel grids or neural radiance fields. It computes the discrepancy between rendered and ground-truth images using a Huber loss on RGB values, masked by ray validity to exclude invalid or background-only rays. It sets itself apart from standard MSE loss by being more robust to outliers (such as saturated pixels or noise) while maintaining differentiability, and explicitly handles the aggregation of valid rays to prevent bias from empty space.
 
 ## How it works
+
+### Inputs and Outputs
 **Inputs:**
-- `pred_rgbds`: Predicted tensor from the renderer, shape `(batch_size, num_rays, 4)` containing RGB and depth.
-- `gt_rgba_f32`: Ground truth RGBA image array, shape `(batch_size, height, width, 4)`.
+- `pred_rgbds`: Tensor of shape $(N, 4)$ containing predicted RGB and depth values for $N$ rays.
+- `gt_rgba_f32`: Ground truth RGBA image array (float32).
 - `bg`: Background color tensor.
-- `batch_metrics`: Dictionary containing `ray_is_valid` (boolean mask, shape `(batch_size, num_rays)`) and `n_valid_rays` (scalar count of valid rays).
-- `delta`: Huber loss threshold parameter.
+- `batch_metrics`: Dictionary containing `ray_is_valid` (boolean mask of shape $(N,)$) and `n_valid_rays` (scalar count of valid rays).
+- `loss`: Accumulator for loss components (from previous regularization steps).
 
 **Outputs:**
-- `loss`: Scalar total loss value.
+- `loss`: Scalar total loss value including the RGB Huber loss.
 
-**Data Structures:**
-- `pred_rgbs`: Tensor of shape `(batch_size, num_rays, 3)` extracted from `pred_rgbds`.
-- `gt_rgbs`: Tensor of shape `(batch_size, num_rays, 3)` representing the blended ground truth.
-- `loss_rgb`: Tensor of shape `(batch_size, num_rays)` containing per-ray Huber losses.
+### Data Structures
+- `pred_rgbds`: Packed tensor where the first 3 channels are RGB and the 4th is depth.
+- `ray_is_valid`: Boolean array indicating whether a ray intersects the scene geometry or contains meaningful signal.
 
-**Steps:**
-1. **Render:** Call the training renderer `render_rays_train` with worldspace rays, appearance embeddings, background, and total samples to obtain `pred_rgbds`.
-2. **Split:** Separate the predicted RGB and depth components from `pred_rgbds`. The RGB component occupies the first 3 channels.
-   $$ \text{pred\_rgbs}, \text{pred\_depths} = \text{split}(\text{pred\_rgbds}, [3], \text{axis}=-1) $$
-3. **Blend Ground Truth:** Blend the ground truth RGBA image with the background color to match the rendering conditions. This ensures the comparison is against the full composite image, not just the foreground.
+### Steps
+1. **Render Predictions**: Generate predicted RGB and depth values for the current batch of rays. This is typically done via a volume rendering function (e.g., `render_rays_train`) that integrates density and color along the rays.
+2. **Split Predictions**: Separate the packed prediction tensor into RGB and depth components. The RGB component is the first 3 channels.
+   $$ \text{pred\_rgbs}, \text{pred\_depths} = \text{split}(\text{pred\_rgbds}, [3]) $$
+3. **Blend Ground Truth**: To ensure fair comparison, blend the ground truth RGB with the background color if the ground truth image is not already composited against the same background used during rendering.
    $$ \text{gt\_rgbs} = \text{blend\_rgba}(\text{gt\_rgba\_f32}, \text{bg}) $$
-4. **Compute Huber Loss:** Calculate the per-ray Huber loss between predicted and ground truth RGB. The Huber loss function $L_\delta(a, b)$ is defined as:
-   $$ L_\delta(a, b) = \begin{cases} \frac{1}{2}(a - b)^2 & \text{for } |a - b| \le \delta \\ \delta \cdot (|a - b| - \frac{1}{2}\delta) & \text{otherwise} \end{cases} $$
-   Apply the validity mask `ray_is_valid` to zero out losses for invalid rays. Average the loss over the spatial/ray dimensions for each sample in the batch, then sum across the batch.
-   $$ \text{loss\_rgb} = \frac{\sum_{i} \mathbb{I}(\text{ray\_is\_valid}_i) \cdot \text{Huber}(\text{pred\_rgbs}_i, \text{gt\_rgbs}_i, \delta=0.1)}{\sum_{i} \mathbb{I}(\text{ray\_is\_valid}_i)} $$
-   *Note: The source implementation averages over the ray axis first, then sums over the batch axis, dividing by the count of valid rays.*
-5. **Aggregate:** Combine the RGB loss with other components stored in `batch_metrics["loss"]` (e.g., TV loss, if present) using tree reduction.
-   $$ \text{loss} = \sum_{l \in \text{batch\_metrics["loss"]}} l $$
+4. **Compute Huber Loss**: Calculate the per-ray Huber loss between predicted and ground truth RGB values. The Huber loss uses a delta parameter ($\delta$) to switch between L2 and L1 loss behavior.
+   $$ L_{\text{huber}}(r, g) = \begin{cases} \frac{1}{2}(r - g)^2 & \text{if } |r - g| \leq \delta \\ \delta(|r - g| - \frac{1}{2}\delta) & \text{otherwise} \end{cases} $$
+   Typical value for $\delta$ is $0.1$ [S1, unofficial].
+5. **Mask and Average**: Apply the `ray_is_valid` mask to the per-ray loss. Only valid rays contribute to the loss. Average the loss over the number of valid rays.
+   $$ \text{loss\_rgb} = \frac{\sum_{i=1}^{N} \mathbb{I}(\text{valid}_i) \cdot \text{mean\_channel}(\text{Huber}(\text{pred\_rgbs}_i, \text{gt\_rgbs}_i, \delta=0.1))}{\sum_{i=1}^{N} \mathbb{I}(\text{valid}_i)} $$
+   Where $\mathbb{I}(\text{valid}_i)$ is 1 if the ray is valid, 0 otherwise.
+6. **Aggregate**: Add the computed RGB loss to the existing loss accumulator (which may contain regularization terms like TV loss).
 
-**Parameters:**
-- `delta`: Huber loss threshold. Typical value: `0.1` [S1, unofficial].
+### Pseudocode
 
-**Edge Cases:**
-- **Zero Valid Rays:** If `n_valid_rays` is 0, division by zero occurs. A guard should ensure `n_valid_rays > 0` or handle the zero case explicitly [G].
-- **Precision:** Use float32 for RGB values to maintain standard rendering precision.
-
-**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_training_loss(pred_rgbds, gt_rgba_f32, bg, batch_metrics, delta=0.1):
-    # 1. Split predicted RGBD tensor
-    # pred_rgbds shape: (batch_size, num_rays, 4)
-    pred_rgbs, pred_depths = jnp.array_split(pred_rgbds, [3], axis=-1)
+def compute_training_loss(pred_rgbds, gt_rgba_f32, bg, batch_metrics):
+    """
+    Computes the training loss using Huber loss on RGB, masked by ray validity.
     
-    # 2. Blend ground truth RGBA with background
-    # gt_rgba_f32 shape: (batch_size, height, width, 4)
-    # bg shape: (3,) or (4,)
-    gt_rgbs = blend_rgba_image_array(imgarr=gt_rgba_f32, bg=bg)
+    Args:
+        pred_rgbds: Array of shape (N, 4), predicted RGBD.
+        gt_rgba_f32: Array of shape (H, W, 4), ground truth RGBA.
+        bg: Array of shape (3,), background color.
+        batch_metrics: Dict with 'ray_is_valid' (N,) and 'n_valid_rays' (scalar).
+        
+    Returns:
+        loss: Scalar total loss.
+    """
+    # Step 1 & 2: Split predictions into RGB and Depth
+    # Assuming pred_rgbds is (N, 4), split at index 3
+    pred_rgbs = pred_rgbds[:, :3]
+    # pred_depths = pred_rgbds[:, 3:] # Not used in RGB loss
     
-    # 3. Compute per-ray Huber loss
-    # huber_loss computes element-wise Huber loss
-    # mean(axis=-1) averages over the ray dimension
-    ray_losses = optax.huber_loss(pred_rgbs, gt_rgbs, delta=delta).mean(axis=-1)
+    # Step 3: Blend ground truth RGB with background
+    # gt_rgba_f32 is (H, W, 4). We need to extract RGB and blend with bg.
+    # Note: In practice, gt_rgba_f32 might already be blended, but if not:
+    gt_rgb = gt_rgba_f32[:, :, :3]
+    gt_alpha = gt_rgba_f32[:, :, 3:4]
+    gt_rgbs = gt_rgb * gt_alpha + bg * (1.0 - gt_alpha)
     
-    # 4. Mask by validity
-    # ray_is_valid shape: (batch_size, num_rays)
-    # We need to sum over valid rays and divide by count of valid rays
-    valid_mask = batch_metrics["ray_is_valid"]
+    # Flatten for ray-wise computation if necessary, or assume batch_metrics
+    # aligns with the ray order. For simplicity, assume gt_rgbs is flattened
+    # to (N, 3) corresponding to the rays in pred_rgbs.
+    # [G] Implementation detail: gt_rgbs must be reshaped/flattened to match
+    # the ray order of pred_rgbs.
+    gt_rgbs_flat = gt_rgbs.reshape(-1, 3)
     
-    # Sum losses for valid rays
-    total_loss = jnp.where(valid_mask, ray_losses, 0.).sum()
-    
-    # Count valid rays
+    # Step 4 & 5: Compute Huber Loss with masking
+    delta = 0.1
+    ray_is_valid = batch_metrics["ray_is_valid"]
     n_valid_rays = batch_metrics["n_valid_rays"]
     
-    # Avoid division by zero
-    if n_valid_rays == 0:
-        return 0.0
+    # Compute Huber loss per pixel/channel
+    # jnp.where selects 0.0 for invalid rays, Huber loss for valid rays
+    # optax.huber_loss returns per-pixel loss (mean over channels)
+    per_ray_loss = jnp.where(
+        ray_is_valid,
+        optax.huber_loss(pred_rgbs, gt_rgbs_flat, delta=delta).mean(axis=-1),
+        0.0
+    )
+    
+    # Average over valid rays
+    # Avoid division by zero if no rays are valid
+    if n_valid_rays > 0:
+        loss_rgb = per_ray_loss.sum() / n_valid_rays
+    else:
+        loss_rgb = 0.0
         
-    loss_rgb = total_loss / n_valid_rays
+    # Step 6: Aggregate with existing loss components
+    # batch_metrics["loss"] contains previous regularization losses (e.g., TV)
+    # tree_reduce sums all elements in the tree structure
+    loss = jax.tree_util.tree_reduce(lambda x, y: x + y, batch_metrics["loss"])
+    loss = loss + loss_rgb
     
-    # 5. Aggregate with other loss components
-    # batch_metrics["loss"] is a tree of loss components
-    # tree_reduce sums them all
-    other_losses = batch_metrics["loss"]
-    total_other = jax.tree_util.tree_reduce(lambda x, y: x + y, other_losses)
-    
-    return loss_rgb + total_other
+    return loss
 ```
+
+### Parameters
+- **Huber Delta ($\delta$)**: $0.1$ [S1, unofficial].
+- **Convergence Loss Weights ($\lambda_{cvg}^{fg}, \lambda_{cvg}^{bg}$)**: $0.1$ [S2].
+- **Foreground Coverage Threshold ($\eta_{fg}$)**: $0.4$ for AFHQ/FFHQ, $0.1$ for Carla [S2].
+- **Background Coverage Threshold ($\eta_{bg}$)**: $0.1$ [S2].
+
+### Edge Cases and Pitfalls
+- **No Valid Rays**: If `n_valid_rays` is zero, division by zero occurs. The pseudocode guards against this by setting `loss_rgb` to 0.0.
+- **Masking Accuracy**: The `ray_is_valid` mask must correctly identify rays that intersect the scene. Invalid rays (e.g., those hitting only the background) should be excluded to prevent the model from optimizing for background colors that are already fixed.
+- **Precision**: Use float32 for RGB values to maintain gradient stability. The Huber loss is continuous and differentiable everywhere, avoiding gradient vanishing/exploding issues associated with pure L1 or L2 at the boundary.
 
 ## Subtopics
 
+### Convergence Hinge Loss
+A regularization term used to ensure that both foreground and background generators in a sparse voxel grid architecture (like VoxGRAF) are actively used and cover a minimum fraction of the image. It prevents the model from collapsing to a single generator (all foreground or all background). It sets itself apart from standard photometric losses by operating on the mask values themselves rather than pixel colors. When to choose it: When using a dual-generator architecture (foreground/background) with sparse voxels to avoid degenerate solutions where one generator dominates. Formula:
+$$ L_{cvg}^{fg} = \lambda_{cvg}^{fg} \max\left(0, \eta_{fg} - \frac{1}{|S|} \sum_{i \in S} \hat{m}_{mask}^{fg}[i]\right) $$
+$$ L_{cvg}^{bg} = \lambda_{cvg}^{bg} \max\left(0, \eta_{bg} - \frac{1}{|S|} \sum_{i \in S} (1 - \hat{m}_{mask}^{bg}[i])\right) $$
+where $\hat{m}_{mask}$ is the predicted mask value, $S$ is the set of voxels, and $\eta$ is the minimum coverage fraction [S2].
+
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of rays and batch size. The Huber loss computation is element-wise and efficient.
-- **Memory Complexity:** Requires storing intermediate tensors for predicted RGB, ground truth RGB, and loss masks.
-- **Strengths:** Robust to outliers (saturated pixels) due to Huber loss. Explicit masking prevents invalid rays (e.g., outside the image bounds) from corrupting the gradient.
-- **Limitations:** The choice of `delta` is critical; too small approaches MSE, too large approaches L1. Blending ground truth requires access to the background color and correct ray-to-pixel mapping.
-- **When to use:** Standard for NeRF training where photometric accuracy is key and outliers are present.
-- **When not to use:** If strict L2 optimality is required (use MSE) or if no invalid ray masking is needed.
+- **Time Complexity**: $O(N)$ where $N$ is the number of rays, as it involves element-wise operations and a sum.
+- **Memory Complexity**: $O(N)$ for storing per-ray losses.
+- **Performance**: The Huber loss is computationally similar to MSE but provides better robustness to outliers. The masking step adds negligible overhead.
+- **Strengths**: Robust to saturated pixels and noise; handles invalid rays explicitly; differentiable.
+- **Limitations**: Requires a valid mask; delta parameter needs tuning for specific datasets.
+- **When to use**: Standard photometric loss for NeRF and volume rendering training, especially when outliers are present.
+- **When not to use**: When strict L2 optimality is required (use MSE) or when no valid mask is available.
 
 ## Background
-Originated in the implementation of differentiable volume rendering frameworks, specifically within the JAX-based NeRF implementations. The use of Huber loss for RGB and masking for validity is a common practice in modern NeRF training pipelines to stabilize convergence. The specific implementation details are derived from the `jaxngp` repository [S1, unofficial].
+Originated in the context of training Neural Radiance Fields (NeRF) and related differentiable volume rendering methods. The use of Huber loss for RGB is common in modern NeRF implementations to handle outliers. The convergence hinge loss was introduced in VoxGRAF to manage sparse voxel grid generators [S2]. The specific implementation details (splitting RGBD, blending GT) are derived from JAX-based NeRF implementations [S1, unofficial].
 
 ## Sources
 [S1] blurgyy/jaxngp, https://github.com/blurgyy/jaxngp, fetched 2026-10-27 (unofficial)
+[S2] VoxGRAF: Fast 3D-Aware Image Synthesis with Sparse Voxel Grids, https://doi.org/10.52202/068431-2464, fetched 2026-10-26

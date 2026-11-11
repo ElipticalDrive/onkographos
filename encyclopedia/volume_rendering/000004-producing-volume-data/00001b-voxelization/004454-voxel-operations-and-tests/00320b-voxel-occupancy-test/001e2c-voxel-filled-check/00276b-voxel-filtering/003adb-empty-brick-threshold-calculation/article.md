@@ -1,0 +1,88 @@
+# Empty-Brick Threshold Calculation
+
+Also called: emptyBrickThresholdFor
+
+## Overview
+Computes the voxel intensity threshold below which a volume brick is considered empty and can be skipped during streaming [S1, unofficial]. It determines a static cutoff value based on metadata and channel windows, enabling the renderer to avoid loading or processing bricks that contain no relevant data [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `metadata.bitDepth`: Integer, 8 or 16, determining intensity range scaling [S1, unofficial].
+- `channelWindows`: Array of window/level pairs per channel, or undefined [S1, unofficial].
+- `isFloat`: Boolean indicating if data is floating-point [S1, unofficial].
+
+**Outputs:**
+- A single scalar threshold value [S1, unofficial].
+
+**Data Structures:**
+- `channelWindows`: Array of objects/tuples, each containing `window` (width) and `level` (center) values [S1, unofficial].
+
+**Steps:**
+1. Determine the intensity range based on `metadata.bitDepth` and `isFloat` [S1, unofficial].
+2. If `channelWindows` is provided, use the window/level parameters to calculate the lower bound of the visible intensity range [S1, unofficial].
+3. If `channelWindows` is undefined, use the full dynamic range of the bit depth [S1, unofficial].
+4. Return the calculated lower bound as the threshold [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def emptyBrickThresholdFor(bitDepth, channelWindows, isFloat):
+    # Determine max intensity value based on bit depth
+    if bitDepth == 8:
+        max_val = 255
+    elif bitDepth == 16:
+        max_val = 65535
+    else:
+        raise ValueError("Unsupported bit depth")
+
+    # If floating point, assume normalized range [0, 1] or handle accordingly
+    # Note: Source [S1, unofficial] implies integer scaling for 8/16 bit
+    if isFloat:
+        # For float, the threshold logic may differ or rely on specific normalization
+        # Source [S1, unofficial] does not specify float threshold calculation details beyond the flag
+        # Assuming standard float volume handling where 0 is often background
+        return 0.0
+
+    # If channel windows are provided, calculate threshold from window/level
+    if channelWindows is not None and len(channelWindows) > 0:
+        # Use the first channel's window/level as per typical implementation
+        # window = width, level = center
+        win = channelWindows[0]['window']
+        lev = channelWindows[0]['level']
+        
+        # Lower bound of the window
+        lower_bound = lev - win / 2.0
+        
+        # Clamp to valid range
+        threshold = max(0, lower_bound)
+        return threshold
+    
+    # If no channel windows, default to 0 (entire range is valid)
+    return 0
+```
+
+**Edge Cases and Pitfalls:**
+- If `channelWindows` is empty or undefined, the threshold defaults to 0, meaning no bricks are skipped based on intensity [S1, unofficial].
+- Precision issues may arise if `level` and `window` result in non-integer thresholds for integer data types; rounding or flooring should be applied consistently [G].
+- For floating-point data, the interpretation of "empty" may vary; the source indicates `isFloat` is a flag but does not detail the specific threshold calculation for floats beyond returning 0.0 in the pseudocode logic derived from the integer case [S1, unofficial].
+
+## Subtopics
+
+### Background Thresholding via K-Means
+Fits two intensity populations on a bounded, seeded sample of nonzero data to determine a background threshold [S2, unofficial]. It extracts nonzero values from the volume, samples up to 10,000 values without replacement, and fits a K-Means model with 2 clusters to separate foreground and background [S2, unofficial]. The threshold is the minimum cluster center, rounded to 6 decimal places [S2, unofficial]. If the sample has fewer than 2 unique values, it returns 0.0 to preserve constant-valued foreground [S2, unofficial]. This method is data-driven and adaptive, unlike the static metadata-based calculation in the parent method [S2, unofficial].
+
+## Operating characteristics
+**Time Complexity:** Not given in the sources.
+**Memory Complexity:** Not given in the sources.
+**Strengths:** Enables efficient streaming by skipping empty bricks [S1, unofficial].
+**Limitations:** Relies on accurate metadata; if the threshold is set incorrectly, relevant data may be skipped [G].
+**When to use:** When streaming large volume datasets and bricks can be safely skipped if their intensity is below a known background level [S1, unofficial].
+**When not to use:** When the background intensity is not uniform or when the threshold cannot be determined from metadata alone [G].
+
+## Background
+Originated in the context of out-of-core volume rendering for multi-GB datasets, specifically in the Kiln renderer [S1, unofficial]. It is used to optimize I/O by avoiding the loading of bricks that contain only background data [S1, unofficial].
+
+## Sources
+[S1] Show HN: Kiln – WebGPU-native out-of-core volume rendering for multi-GB datasets, https://github.com/MPanknin/kiln-render, fetched 2026-10-26 (unofficial)
+[S2] Winson-L/VolumeSegmenter, https://github.com/Winson-L/VolumeSegmenter, fetched 2026-10-27 (unofficial)

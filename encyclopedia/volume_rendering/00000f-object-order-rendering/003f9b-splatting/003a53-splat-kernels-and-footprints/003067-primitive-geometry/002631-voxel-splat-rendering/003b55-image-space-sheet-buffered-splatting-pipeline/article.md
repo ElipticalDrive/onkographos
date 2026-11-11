@@ -3,143 +3,115 @@
 Also called: GPU ISBS, GPU-based ISSB Splatting, GPU-based Image-Space Sheet-Buffered Splatting, ISSB Splatting on the GPU, Image-Space Sheet-Buffered Splatting on the GPU
 
 ## Overview
-
-Image-Space Sheet-Buffered Splatting on the GPU (GPU ISBS) is a volume rendering technique that processes voxels in slabs parallel to the image plane while performing all bucket construction, voxel transformation, and depth sorting entirely on the GPU [S1, S2, unofficial]. It solves the CPU-GPU memory transfer bottleneck inherent in previous CPU-based bucket management approaches by using depth-sorted textures to implicitly define buckets [S1, S2, unofficial]. Unlike its siblings, it avoids scattering (random writes) by relying on GPGPU sorting to order voxels, thereby keeping data flow within the GPU's texture memory [S1, S2, unofficial].
+Image-Space Sheet-Buffered Splatting on the GPU (GPU ISBS) is a volume rendering technique that processes voxels in slabs parallel to the image plane, performing all bucket construction, voxel transformation, and depth sorting entirely on the GPU to avoid CPU-GPU memory transfer bottlenecks [S1, unofficial][S2, unofficial]. Unlike the CPU-based approach where buckets contain all voxels intersecting a slab, the GPU method defines a bucket as the subset of depth-sorted voxels whose center falls inside a specific slab, allowing each voxel to belong to exactly one bucket while still being splatted for all intersecting slabs [S1, unofficial]. This method accelerates rendering by a factor of 2 to 2.5 compared to implementations that compute buckets on the CPU [S1, unofficial].
 
 ## How it works
+The pipeline processes voxels through texture-based stages: loading, viewing transform, GPGPU sorting, bucket size computation, and rendering [S1, unofficial].
 
-**Inputs and Outputs:**
-*   **Input:** A set of selected non-empty voxels, each defined by 3D coordinates $(x, y, z)$ and a property value $v$.
-*   **Output:** A composited image buffer.
+**Inputs and Outputs**
+*   **Input:** A set of selected non-empty voxels, each defined by 3D coordinates $(x, y, z)$ and a property value $v$ (e.g., density or opacity).
+*   **Output:** A composited 2D image buffer.
 
-**Data Structures:**
-The pipeline uses 2D textures to store voxel data throughout all stages.
-1.  **Voxels Texture:** Stores the original voxel data. Each voxel is encoded in a texel using `FP32RGBA` format (32-bit floating point per channel). The layout is `<x, y, z, v>` where $x, y, z$ are stored in the Red, Green, and Blue channels, and the property value $v$ is stored in the Alpha channel [S2, unofficial].
-2.  **View Transformed Voxels Texture:** Stores the result of the viewing transform. Each texel contains `<i, j, b, v>`, where $i, j$ are the 2D raster projection coordinates (R, G channels), $b$ is the depth value in the viewing coordinate system (B channel), and $v$ is the voxel property value (A channel) [S1, S2, unofficial].
-3.  **Depth-Sorted Voxels Texture (or Z-Sorted Voxels Texture):** Stores the voxels sorted by depth. This texture provides an implicit representation of buckets [S1, S2, unofficial].
-4.  **Buckets Texture:** Stores the position (index) of the last voxel of each bucket. This texture is small, containing one entry per slab/bucket [S1, S2, unofficial].
-5.  **Auxiliary Texture:** Used during bucket size computation to mark boundary voxels [S2, unofficial].
+**Data Structures**
+1.  **Voxels Texture:** A 2D texture storing the input voxels. Each voxel is encoded in a texel using `FP32RGBA` format (32-bit floating point per channel). The RGB channels store the voxel coordinates $(x, y, z)$, and the Alpha channel stores the property value $v$ [S2, unofficial].
+2.  **View Transformed Voxels Texture:** A 2D texture storing the result of the viewing transform. Each texel stores the 2D raster projection coordinates in the R and G channels, the depth value in the viewing coordinate system in the B channel, and the voxel property value in the Alpha channel, denoted as $(i, j, b, v)$ [S2, unofficial].
+3.  **Depth-Sorted Voxels Texture (Z-Sorted Voxels Texture):** A 2D texture containing the voxels from the View Transformed Voxels Texture sorted by depth $b$ [S2, unofficial].
+4.  **Buckets Texture:** A 2D texture storing the position (index) of the last voxel of each bucket (bucket boundary voxel) [S1, unofficial].
+5.  **Auxiliary Texture:** Used during bucket size computation to mark boundary voxels. It stores bucket coordinates in R and G, a z-value inside the frustum for boundary voxels (outside otherwise) in B, and the bucket index in Alpha [S2, unofficial].
 
-**Parameters:**
-*   **Voxel Kernel Radius:** Determines the number of previous and following buckets that affect a single slab in addition to its own bucket [S1, S2, unofficial].
-*   **Texture Memory Limit:** The implementation assumes a maximum texture size of $4096 \times 4096$, allowing up to 16 million selected voxels [S1, S2, unofficial].
+**Parameters**
+*   **Voxel Kernel Radius:** Determines the number of previous and following buckets that affect a single slab in addition to its own bucket [S1, unofficial].
+*   **Texture Memory Limit:** The method assumes a maximum texture size of $4096 \times 4096$, allowing up to 16 million selected voxels [S1, unofficial].
 
-**Algorithm Steps:**
+**Steps**
 
-1.  **Load Voxels:** Load the selected non-empty voxels into the `Voxels Texture` on the GPU using asynchronous PCI Express transfer [S2, unofficial].
-2.  **Viewing Transform:** Compute the `View Transformed Voxels Texture` using a fragment shader. For each texel in the `Voxels Texture`, transform the voxel coordinates $(x, y, z)$ using the viewing matrix. Store the 2D raster projection coordinates in the R and G channels, the depth value $b$ in the B channel, and the voxel property value $v$ in the Alpha channel [S1, S2, unofficial].
-3.  **GPGPU Sorting:** Sort the `View Transformed Voxels Texture` by depth to produce the `Depth-Sorted Voxels Texture`.
-    *   The sorting key is the depth value $b$ (B channel) [S2, unofficial].
-    *   The sort uses a Bitonic Sort algorithm, which is a data-independent network sorting strategy suitable for GPU parallel architecture [S1, S2, unofficial].
-    *   The implementation uses Multiple Render Targets (MRT) to store keys and values in separate textures, allowing four `<key, value>` instances per RGBA texel [S2, unofficial].
-    *   A ping-pong technique using Frame Buffer Objects (FBO) is used in the sorting stage to manage source and target textures [S2, unofficial].
-    *   After sorting, a fragment shader fills the `Depth-Sorted Voxels Texture` from the sorted render targets [S2, unofficial].
-4.  **Bucket Size Computation:** Compute the `Buckets Texture` on the GPU. This texture stores the index of the last voxel of each bucket [S1, S2, unofficial].
-    *   **Definition of Bucket:** A bucket for a specific slab is defined as the subset of depth-sorted voxels whose center falls inside that slab [S1, unofficial]. Unlike the CPU approach, a voxel belongs to only one bucket (the one containing its center), even though it is splatted for all slabs it intersects [S1, S2, unofficial].
-    *   **Two-Step Process:**
-        1.  **Fragment Shader Step:** Render the `Depth-Sorted Voxels Texture` into an auxiliary texture. For each voxel, determine if it is a bucket boundary voxel (i.e., its center is in a slab, but the next voxel in the sorted texture is not). If it is a boundary voxel, store an arbitrary z-value inside the viewing frustum in the B channel; otherwise, store a value outside the frustum. Store the bucket index in the Alpha channel and bucket coordinates in R and G [S2, unofficial].
-        2.  **Vertex Shader Step:** Construct the `Buckets Texture` using a vertex shader. The vertex shader reads the auxiliary texture. Boundary voxels (identified by the B channel) are rendered to write their position into the `Buckets Texture`. Non-boundary voxels are rejected [S1, S2, unofficial].
-5.  **Transfer Buckets:** Transfer the small `Buckets Texture` to the CPU. This is a low-cost operation because the texture size is small (one entry per slab) [S1, unofficial].
-6.  **Rendering:** Process slabs sequentially.
-    *   For each slab $i$, retrieve its bucket range from the `Buckets Texture` on the CPU [S2, unofficial].
-    *   The radius of the voxel kernel determines that a slab is affected by its own bucket plus previous and following buckets (e.g., from bucket $i-radius$ to bucket $i+radius$) [S1, S2, unofficial].
-    *   Use the Render to Vertex Buffer (R2VB) technique to create a Vertex Buffer Object (VBO) from the `Depth-Sorted Voxels Texture` on the GPU, keeping data flow inside the GPU [S2, unofficial].
-    *   For each relevant bucket, use `DrawArrays` to splat the voxels onto a sheet buffer according to a preintegrated kernel slice [S1, S2, unofficial].
-    *   Composite the sheet buffer with the image buffer. No sorting is required inside the buckets as splats are simply added [S2, unofficial].
-    *   The rendering phase uses `glPoint` primitives with the Point Sprites extension to create automatic quads, reducing vertex instances from four to one [S1, S2, unofficial].
+1.  **Load Voxels:** Load the selected non-empty voxels into the `Voxels Texture` on the GPU. Each voxel is encoded as `<x, y, z, v>` in `FP32RGBA` format [S2, unofficial].
 
-**Pseudocode:**
+2.  **Viewing Transform:** Compute the `View Transformed Voxels Texture` using a fragment shader. For each texel in the `Voxels Texture`, transform the voxel coordinates (RGB) using the viewing matrix. Store the 2D raster projection coordinates in R and G, the depth value in B, and the voxel property value in Alpha [S2, unofficial].
+
+3.  **GPGPU Sorting:** Sort the `View Transformed Voxels Texture` by depth using a GPU Bitonic Sort. The sorting key is the depth value (B channel). The sort uses Multiple Render Targets (MRT) to store keys and values in separate textures, allowing four `<key, value>` instances per RGBA texel. The key is the depth value, and the value is the voxel index in the texture. After sorting, a fragment shader fills the `Depth-Sorted Voxels Texture` from the sorted render targets [S2, unofficial]. This sorting creates an implicit representation of buckets, where slabs correspond to overlapping sorted subsequences of voxels in the texture [S1, unofficial].
+
+4.  **Bucket Size Computation:** Compute the `Buckets Texture` in two steps [S2, unofficial]:
+    *   **Step 4a:** Use a fragment shader to identify bucket boundary voxels. Render the `Depth-Sorted Voxels Texture` into an `Auxiliary Texture`. For each voxel, determine if it is a boundary voxel (i.e., its center falls inside a slab but the next voxel in the sorted texture does not). If it is a boundary voxel, store its bucket coordinates in R and G, an arbitrary z-value inside the viewing frustum in B, and the bucket index in Alpha. If not, store a z-value outside the frustum in B [S2, unofficial].
+    *   **Step 4b:** Use a vertex shader to construct the `Buckets Texture` from the `Auxiliary Texture`. The vertex shader renders the boundary voxels (identified by the z-value in B) to write the position of the last voxel of each bucket into the `Buckets Texture` [S2, unofficial].
+
+5.  **Transfer Bucket Data:** Transfer the small `Buckets Texture` to the CPU to determine bucket distribution. This is a low-cost operation because the texture size is small (number of buckets/slabs) [S1, unofficial].
+
+6.  **Rendering:** Process slabs sequentially. For each slab $i$, retrieve its bucket from the `Buckets Texture`. The radius of the voxel kernel determines that a slab is affected by its own bucket plus previous and following buckets (from $bucket_{i-radius}$ to $bucket_{i+radius}$) [S2, unofficial].
+    *   Use the Render to Vertex Buffer (R2VB) technique to create a Vertex Buffer Object (VBO) containing all voxels from the relevant buckets [S2, unofficial].
+    *   Render slabs by splatting voxels from the relevant buckets using `DrawArrays` [S1, unofficial].
+    *   Project voxels from the current bucket onto a sheet buffer according to a preintegrated kernel slice. Composite the sheet buffer with the image buffer. No sorting is required inside the buckets as splats are simply added [S2, unofficial].
+    *   Use the `glPoint` primitive with the Point Sprites extension to create automatic quads for splats [S1, unofficial].
+
+**Pseudocode**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Stage 1: Load Voxels
-# Voxels_Texture is a 2D texture of size N x 1 (or similar layout for N voxels)
-# Format: FP32RGBA, channels: R=x, G=y, B=z, A=v
-Voxels_Texture = load_voxels_to_gpu(selected_voxels)
+# Step 1: Load Voxels
+Voxels_Texture = load_voxels_to_gpu(voxels, format="FP32RGBA")
+# Each texel: <x, y, z, v>
 
-# Stage 2: Viewing Transform
-# View_Transformed_Texture is a 2D texture of size N x 1
-# Format: FP32RGBA, channels: R=i, G=j, B=b, A=v
+# Step 2: Viewing Transform
+View_Transformed_Texture = fragment_shader(Voxels_Texture, viewing_matrix)
+# Each texel: <i, j, b, v>
 # i, j: 2D raster projection coordinates
-# b: depth value in viewing coordinate system
+# b: depth value in viewing coordinates
 # v: voxel property value
-View_Transformed_Texture = fragment_shader_transform(Voxels_Texture, viewing_matrix)
 
-# Stage 3: GPGPU Sorting (Bitonic Sort)
-# Sort View_Transformed_Texture by depth (B channel)
-# Uses MRT: Render Target 1 stores keys (depth), Render Target 2 stores values (indices)
-# Ping-pong technique with FBOs is used for iterative sorting steps
-Sorted_Keys_Texture, Sorted_Values_Texture = bitonic_sort_gpu(
-    source_texture=View_Transformed_Texture,
-    key_channel='B',
-    value_channel='index_in_texture'
-)
+# Step 3: GPGPU Sorting (Bitonic Sort)
+# Use MRT to store keys (depth) and values (voxel index)
+Sorted_Keys, Sorted_Values = bitonic_sort_gpu(View_Transformed_Texture, key_channel="B")
+Depth_Sorted_Texture = fragment_shader_fill(Sorted_Keys, Sorted_Values)
+# Depth_Sorted_Texture contains voxels sorted by depth b
 
-# Fill Depth_Sorted_Texture from sorted render targets
-Depth_Sorted_Texture = fragment_shader_fill_sorted_texture(
-    keys_texture=Sorted_Keys_Texture,
-    values_texture=Sorted_Values_Texture
-)
+# Step 4: Bucket Size Computation
+# Step 4a: Identify boundary voxels
+Auxiliary_Texture = fragment_shader_boundary(Depth_Sorted_Texture)
+# Each texel: <bucket_i, bucket_j, z_in_frustum_or_out, bucket_index>
+# z_in_frustum_or_out: arbitrary z inside frustum if boundary, outside otherwise
 
-# Stage 4: Bucket Size Computation
-# Step 4a: Fragment Shader to identify boundary voxels
-# Auxiliary_Texture stores: R=bucket_coord_x, G=bucket_coord_y, B=frustum_z_if_boundary_else_outside, A=bucket_index
-Auxiliary_Texture = fragment_shader_identify_boundaries(Depth_Sorted_Texture)
+# Step 4b: Construct Buckets Texture
+Buckets_Texture = vertex_shader_buckets(Auxiliary_Texture)
+# Stores position of last voxel of each bucket
 
-# Step 4b: Vertex Shader to construct Buckets_Texture
-# Buckets_Texture stores the position (index) of the last voxel of each bucket
-Buckets_Texture = vertex_shader_construct_buckets(Auxiliary_Texture)
+# Step 5: Transfer Bucket Data
+Bucket_Distribution = transfer_to_cpu(Buckets_Texture)
 
-# Stage 5: Transfer Buckets to CPU
-Buckets_Data = transfer_texture_to_cpu(Buckets_Texture)
-
-# Stage 6: Rendering
-# Create VBO from Depth_Sorted_Texture using R2VB
-VBO = render_to_vertex_buffer(Depth_Sorted_Texture)
-
-for each slab i:
-    # Determine bucket range based on kernel radius
-    start_bucket = max(0, i - kernel_radius)
-    end_bucket = min(num_slabs, i + kernel_radius)
+# Step 6: Rendering
+for slab_i in range(number_of_slabs):
+    # Determine relevant buckets based on kernel radius
+    start_bucket = max(0, slab_i - kernel_radius)
+    end_bucket = min(number_of_buckets, slab_i + kernel_radius)
     
-    for each bucket k in [start_bucket, end_bucket]:
-        # Get voxel range for bucket k from Buckets_Data
-        voxel_start_index, voxel_count = get_bucket_range(Buckets_Data, k)
-        
-        # Splat voxels using Point Sprites
-        draw_arrays(
-            primitive='GL_POINTS',
-            vbo=VBO,
-            start=voxel_start_index,
-            count=voxel_count,
-            point_sprite_params=kernel_params
-        )
-        
-        # Composite sheet buffer with image buffer
-        composite_sheet_buffer_with_image()
+    # Get voxel range for each relevant bucket from Buckets_Texture
+    # Use R2VB to create VBO with voxels from start_bucket to end_bucket
+    VBO = render_to_vertex_buffer(Buckets_Texture, start_bucket, end_bucket)
+    
+    # Splat voxels using Point Sprites
+    draw_arrays(VBO, primitive_type="POINTS", extension="POINT_SPRITES")
+    
+    # Composite sheet buffer with image buffer
+    composite_sheet_buffer()
 ```
 
 ## Subtopics
 
 ### [ISSB Rendering with Point Sprites and Dynamic Footprints](9055-issb-rendering-with-point-sprites-and-dynamic-footprints.md)
-The rendering phase of ISSB where voxels are splatted using glPoint primitives with the PointSprites extension to create automatic quads, reducing vertex instances from four to one.
+This method defines the final rendering stage of the Image-Space Sheet-Buffered (ISSB) splatting pipeline, where depth-sorted voxels are rasterized using `glPoint` primitives and the Point Sprites extension. It distinguishes itself from prior ISSB implementations by computing and storing distinct kernel footprints for each voxel across all intersecting slabs, rather than storing a single footprint modulated by a slab coefficient. This approach provides finer tuning of the splat appearance at the cost of increased texture memory for footprint storage.
 
 ## Operating characteristics
-
-*   **Time Complexity:** The most expensive stage of the pipeline is the GPGPU sorting (Bitonic Sort) [S1, unofficial]. Sorting on the GPU uses data-independent network sorting strategies like Bitonic Sort or Odd-Even Merge Sort, which are suitable for parallel architecture but may be slower than data-driven CPU algorithms like Quicksort for small datasets [S2, unofficial].
-*   **Memory Complexity:** The method requires storing multiple 2D textures on the GPU: `Voxels Texture`, `View Transformed Voxels Texture`, `Depth-Sorted Voxels Texture`, `Buckets Texture`, and auxiliary textures for sorting and bucket computation [S1, S2, unofficial]. The texture memory limit is typically $4096 \times 4096$, allowing up to 16 million selected voxels [S1, S2, unofficial]. For larger volumes, bricking is used [S1, unofficial].
-*   **Measured Performance:** On a Pentium Dual Core 3.2 GHz with 3.2 GB memory and an NVIDIA GeForce 7900 GTX with 512 MB memory, the GPU ISBS method accelerates rendering by a factor of 2 to 2.5 compared to an implementation that computes buckets on the CPU [S1, unofficial]. For the "Lobster" dataset (324x301x56, 233K effective voxels), CPU FPS was 13.2 and GPU FPS was 35.4 [S1, unofficial]. For the "Engine" dataset (256x128, 1.3M effective voxels), CPU FPS was 2.4 and GPU FPS was 5.6 [S1, unofficial].
-*   **Strengths:** Avoids CPU-GPU memory transfer bottlenecks by keeping bucket construction and voxel transformation on the GPU [S1, S2, unofficial]. Simplifies bucket structure by ensuring each voxel belongs to exactly one bucket [S1, unofficial]. Efficiently uses GPU parallel architecture for sorting and rendering [S1, S2, unofficial].
-*   **Limitations:** Texture memory limits the number of voxels that can be processed at once (up to 16M for $4096 \times 4096$ textures) [S1, S2, unofficial]. Sorting is the bottleneck [S1, unofficial]. Determining bucket boundaries in a vertex shader is expensive due to inefficient texture fetches, requiring a two-step process [S2, unofficial].
-*   **When to use:** When high performance is required for volume rendering and the volume size fits within GPU texture memory limits. Especially beneficial when the camera moves frequently, as the entire pipeline (except voxel loading) can be executed on the GPU without CPU-GPU transfers for bucket data [S1, S2, unofficial].
-*   **When not to use:** For volumes larger than the texture memory limit without bricking. If the sorting stage becomes a bottleneck and faster GPU sorting algorithms are not available [S1, unofficial].
+*   **Time Complexity:** The most expensive stage of the pipeline is sorting, which uses data-independent network sorting strategies like Bitonic Sort [S2, unofficial].
+*   **Memory Complexity:** The method is limited by texture memory size. A $4096 \times 4096$ texture allows up to 16 million selected voxels [S1, unofficial]. For larger models, the volume is subdivided into bricks, each stored as a 2D texture [S1, unofficial].
+*   **Measured Performance:** On a Pentium Dual Core 3.2 GHz with 3.2 GB memory and an NVIDIA GeForce 7900 GTX with 512 MB memory, the method accelerates rendering by a factor of 2 to 2.5 compared to an implementation that computes buckets on the CPU [S1, unofficial]. For the "Lobster" dataset (324x301x56, 233K effective voxels), CPU FPS was 13.2 and GPU FPS was 35.4. For the "Engine" dataset (256x128, 1.3M effective voxels), CPU FPS was 2.4 and GPU FPS was 5.6 [S1, unofficial].
+*   **Strengths:** Avoids CPU-GPU memory transfer bottlenecks by performing all data management on the GPU. Simplifies bucket structure by assigning each voxel to exactly one bucket [S1, unofficial].
+*   **Limitations:** Scattering (random writes) is inefficient on GPUs, necessitating the use of sorting and implicit bucket representation [S1, unofficial]. Determining bucket boundaries in a vertex shader is expensive due to inefficient texture fetches, requiring a two-step computation [S2, unofficial]. The bottleneck is the computation of the buckets [S2, unofficial].
+*   **When to use:** When GPU computational resources are available and CPU-GPU memory transfer is a bottleneck. Suitable for static cameras where only the transfer function changes (only the render stage needs to be redone) or moving cameras where the full pipeline is executed [S2, unofficial].
+*   **When not to use:** When the number of voxels exceeds the texture memory limit and bricking is not feasible or desirable. When the overhead of sorting outweighs the benefits of GPU-based bucket construction (e.g., very small datasets).
 
 ## Background
-
-Image-Space Sheet-Buffered Splatting was originally proposed as a feed-forward algorithm for voxel-based volume datasets [S2, unofficial]. It processes the volume by slabs parallel to the image plane [S1, S2, unofficial]. The GPU-based implementation was proposed to address the memory transfer bottleneck between CPU buckets and GPU slices in previous methods, such as those by Neophitou and Mueller, which kept bucket construction on the CPU [S2, unofficial]. The method uses GPGPU sorting and OpenGL Depth Test to manage buckets on the GPU [S1, unofficial]. It accelerates rendering by avoiding the CPU-GPU memory transfer bottleneck [S1, S2, unofficial].
+Image-Space Sheet-Buffered Splatting was originally proposed as a feed-forward algorithm for voxel-based volume datasets [S2, unofficial]. It processes the volume by slabs parallel to the image plane [S1, unofficial]. The GPU-based implementation was proposed to address the memory transfer bottleneck between CPU buckets and GPU slices present in earlier implementations by Neophitou and Mueller [S2, unofficial]. The method uses GPGPU sorting and OpenGL Depth Test to manage buckets on the GPU [S1, unofficial].
 
 ## Sources
-
 [S1] Image-space sheet-buffered splatting on the GPU, https://openalex.org/W2419486389, fetched 2026-10-27 (unofficial)
 [S2] PDF Image-space Sheet-buffered Splatting on The Gpu, https://iadisportal.org/ijcsis/papers/2007110210.pdf, fetched 2026-10-29 (unofficial)

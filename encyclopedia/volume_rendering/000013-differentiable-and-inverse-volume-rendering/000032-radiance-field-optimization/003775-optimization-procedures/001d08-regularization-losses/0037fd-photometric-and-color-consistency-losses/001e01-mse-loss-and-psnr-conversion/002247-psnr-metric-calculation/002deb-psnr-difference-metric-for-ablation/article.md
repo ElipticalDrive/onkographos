@@ -1,90 +1,88 @@
 # PSNR Difference Metric for Ablation
-
 Also called: Delta PSNR
 
 ## Overview
-The PSNR Difference Metric for Ablation isolates the error ratio between two configurations independent of the bit depth (MAX), as MAX cancels out in the logarithmic difference [S1, unofficial]. It sets itself apart from absolute metrics like [PSNR Metric Calculation](2742-psnr-metric-calculation.md) by providing a relative measure of loss, and from [3D Evaluation Metrics](2903-3d-evaluation-metrics.md) by focusing specifically on the delta between two specific configurations rather than a global scene score [S1, unofficial].
+The PSNR Difference Metric for Ablation quantifies the performance degradation caused by removing a specific component from a rendering pipeline by comparing the Peak Signal-to-Noise Ratio (PSNR) of the ablated configuration against the full method [S1, unofficial]. It isolates the error ratio independent of the bit depth (MAX), as MAX cancels out in the logarithmic difference, providing a scale-invariant measure of quality loss [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- **Inputs:** $\text{MSE}_{\text{config}}$ (Mean Squared Error of the ablated configuration), $\text{MSE}_{\text{full}}$ (Mean Squared Error of the full baseline method) [S1, unofficial].
-- **Output:** $\Delta$ (The PSNR difference in dB) [S1, unofficial].
+**Inputs and Outputs**
+- **Inputs**: $\text{MSE}_{\text{full}}$ (Mean Squared Error of the full method), $\text{MSE}_{\text{config}}$ (Mean Squared Error of the ablated configuration).
+- **Output**: $\Delta$ (The PSNR difference in decibels).
 
-**Data Structures:**
-No complex data structures are required; the metric operates on scalar MSE values derived from pixel-wise comparisons [G].
+**Data Structures**
+- No specific data structures are required; the metric operates on scalar MSE values derived from image comparisons.
 
-**Steps:**
-1. Calculate the PSNR for the full method: $\text{PSNR}_{\text{full}} = 10 \log_{10} \frac{\text{MAX}^2}{\text{MSE}_{\text{full}}}$ [G].
-2. Calculate the PSNR for the ablated configuration: $\text{PSNR}_{\text{config}} = 10 \log_{10} \frac{\text{MAX}^2}{\text{MSE}_{\text{config}}}$ [G].
+**Steps**
+1. Calculate the PSNR for the full method: $\text{PSNR}_{\text{full}} = 10 \log_{10} \frac{\text{MAX}^2}{\text{MSE}_{\text{full}}}$.
+2. Calculate the PSNR for the ablated configuration: $\text{PSNR}_{\text{config}} = 10 \log_{10} \frac{\text{MAX}^2}{\text{MSE}_{\text{config}}}$.
 3. Compute the difference $\Delta$ by subtracting the two PSNR values. The $\text{MAX}^2$ terms cancel out, simplifying the calculation to the ratio of the MSEs [S1, unofficial]:
-   $$ \Delta = \text{PSNR}_{\text{config}} - \text{PSNR}_{\text{full}} = 10 \log_{10} \frac{\text{MSE}_{\text{full}}}{\text{MSE}_{\text{config}}} $$
+   $$ \Delta = 10 \log_{10} \frac{\text{MSE}_{\text{full}}}{\text{MSE}_{\text{config}}} $$
 4. To recover the error ratio from the difference, use the inverse relation [S1, unofficial]:
    $$ \frac{\text{MSE}_{\text{config}}}{\text{MSE}_{\text{full}}} = 10^{-\Delta/10} $$
 
-**Parameters:**
-- **MAX:** The maximum possible pixel value (e.g., 255 for 8-bit). It is not needed for the final calculation of $\Delta$ as it cancels out, provided both MSEs are computed using the same bit depth [S1, unofficial].
+**Parameters**
+- **MAX**: The maximum possible pixel value (e.g., 255 for 8-bit images). This parameter is implicit in the cancellation and does not appear in the final difference formula [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-- **Precision:** The metric relies on the stability of the MSE calculation. If $\text{MSE}_{\text{config}}$ is zero (perfect reconstruction), the logarithm is undefined [G].
-- **Interpretation:** A fixed gap in $\Delta$ corresponds to a fixed ratio of error, not a fixed amount. For example, a difference of 3 dB corresponds to exactly a factor of two in error ($10^{3/10} \approx 2$), and 6 dB corresponds to a factor of four, independent of the absolute PSNR values [S1, unofficial].
+**Edge Cases and Pitfalls**
+- **Division by Zero**: If $\text{MSE}_{\text{config}}$ is zero, the logarithm is undefined. This implies the ablated method produces an identical result to the ground truth, which is rare in ablation studies involving component removal [G].
+- **Sign Interpretation**: A positive $\Delta$ indicates the ablated method has higher error (worse quality) than the full method. A negative $\Delta$ indicates the ablated method has lower error (better quality), which may suggest the removed component was detrimental or the full method was overfitting [G].
+- **Fixed Gaps**: A difference of 3 dB corresponds to exactly a factor of two in error, and 6 dB to a factor of four, independent of the absolute PSNR values [S1, unofficial].
 
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
 
-def calculate_psnr_difference(mse_full: float, mse_config: float) -> float:
+def psnr_difference(mse_full: float, mse_config: float) -> float:
     """
-    Calculates the PSNR difference (Delta PSNR) between a full method and an ablated configuration.
+    Calculate the PSNR difference between a full method and an ablated configuration.
     
     Args:
-        mse_full: Mean Squared Error of the full baseline method.
+        mse_full: Mean Squared Error of the full method.
         mse_config: Mean Squared Error of the ablated configuration.
         
     Returns:
-        Delta PSNR in dB.
+        Delta PSNR in decibels.
     """
-    if mse_full <= 0 or mse_config <= 0:
-        raise ValueError("MSE values must be positive.")
-    
+    if mse_config == 0:
+        raise ValueError("MSE of config cannot be zero (logarithm undefined).")
+    if mse_full == 0:
+        # If full MSE is 0, the full method is perfect. 
+        # Any non-zero config MSE results in infinite loss.
+        if mse_config > 0:
+            return float('inf')
+        return 0.0
+        
     # Formula: Delta = 10 * log10(MSE_full / MSE_config)
-    # The MAX^2 term cancels out in the subtraction of two PSNRs.
+    # This cancels out MAX^2 from the individual PSNR definitions.
     ratio = mse_full / mse_config
-    delta_psnr = 10 * math.log10(ratio)
-    
-    return delta_psnr
+    delta = 10 * math.log10(ratio)
+    return delta
 
-def recover_error_ratio(delta_psnr: float) -> float:
+def mse_ratio_from_delta(delta: float) -> float:
     """
-    Recovers the ratio of MSE_config / MSE_full from the Delta PSNR.
+    Recover the MSE ratio from the PSNR difference.
     
     Args:
-        delta_psnr: The PSNR difference in dB.
+        delta: The PSNR difference in decibels.
         
     Returns:
         The ratio MSE_config / MSE_full.
     """
-    # Formula: MSE_config / MSE_full = 10^(-Delta / 10)
-    return math.pow(10, -delta_psnr / 10)
+    return 10 ** (-delta / 10)
 ```
 
 ## Subtopics
 
-### Bjøntegaard Delta PSNR (BD-PSNR) and BD-BR
-BD-PSNR and BD-BR are metrics used to evaluate lossy compression performance by calculating the average difference in quality (BD-PSNR) or bit-rate (BD-BR) between two rate-distortion curves [S2]. Originally designed within the Video Coding Experts Group (VCEG) – ITU SG 16 – for comparing video coding techniques, BD-PSNR measures the difference in compression performance by calculating the average difference in quality between two rate-distortion curves, represented by the area between the curves [S2]. The result is a single PSNR value (in dB) that facilitates the objective comparison of investigated compression techniques [S2]. Similarly, BD-BR calculates the average bit-rate difference [S2]. Implementation for these metrics has been written in Excel VBA [S2].
-
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Strengths:** It provides a bit-depth-independent comparison of error ratios. A fixed dB difference always implies a fixed error ratio (e.g., 3 dB = 2x error), making it intuitive for ablation studies [S1, unofficial].
-- **Limitations:** It only compares two specific configurations. It does not account for perceptual quality beyond MSE [G]. It is sensitive to the choice of the baseline "full" method [G].
-- **When to use:** When performing ablation studies to quantify the contribution of specific components to the overall rendering quality [G].
-- **When not to use:** When comparing methods with different bit depths or when perceptual metrics are more appropriate than MSE-based metrics [G].
+- **Time Complexity**: $O(1)$ for the calculation itself, assuming MSE values are precomputed.
+- **Memory Complexity**: $O(1)$.
+- **Strengths**: It provides a single scalar value that facilitates objective comparison of compression techniques or architectural changes, avoiding the impracticality of displaying full rate-distortion curves [S1, unofficial]. It is independent of the bit depth of the image format [S1, unofficial].
+- **Limitations**: It only measures the difference relative to a specific baseline (the full method) and does not provide an absolute quality metric [G]. It assumes the MSE values are computed on the same pixel grid and color space [G].
 
 ## Background
-The PSNR Difference Metric for Ablation is derived from the properties of the logarithmic scale used in PSNR calculations [S1, unofficial]. The key property that the MAX term cancels out when subtracting two PSNR values was highlighted in architectural reviews of 3D Gaussian Splatting rendering pipelines [S1, unofficial]. This allows for a clean comparison of error ratios without needing to specify the bit depth explicitly in the delta calculation [S1, unofficial]. The metric is particularly useful in the context of differentiable volume rendering and radiance-field optimization, where ablation studies are common to understand the impact of various optimization procedures and regularization losses [G].
+The metric is derived from the properties of the logarithmic scale used in PSNR calculations. It is used in ablation studies to isolate the error ratio caused by removing a specific component from a rendering pipeline, such as in 3D Gaussian Splatting [S1, unofficial]. The cancellation of the MAX term is a key property that makes the metric robust across different image formats [S1, unofficial].
 
 ## Sources
 [S1] An Architectural Review of the 3D Gaussian Splatting Rendering Pipeline, https://doi.org/10.5281/zenodo.21739653, fetched 2026-10-26 (unofficial)
-[S2] Wavelet based volumetric medical image compression, https://doi.org/10.1016/j.image.2014.12.007, fetched 2026-10-26

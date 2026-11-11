@@ -45,15 +45,13 @@ class RayBuffer:
         self.width = width
         self.height = height
         # 2D array of linked list heads
-        self.buckets = [[None for _ in range(width)] for _ in range(height)]
+        self.buckets = [[None] * width for _ in range(height)]
 
     def add_segment(self, pixel_x, pixel_y, segment):
         # Insert segment into the linked list for the specific pixel
         # Maintains sorted order by depth (visibility)
         node = LinkedListNode(segment)
         head = self.buckets[pixel_y][pixel_x]
-        
-        # Insertion sort for linked list
         if head is None or head.segment.depth >= segment.depth:
             node.next = head
             self.buckets[pixel_y][pixel_x] = node
@@ -64,26 +62,35 @@ class RayBuffer:
             node.next = current.next
             current.next = node
 
-def compositing_overlapping(image_width, image_height, rows_per_proc, segments_by_pixel):
-    # 1. Initialize Local Ray Buffer
+def parallel_compositing_overlapping(image_width, image_height, rows_per_proc, y_offset, volume_data):
+    # 1. Initialization
     local_buffer = RayBuffer(image_width, rows_per_proc)
-    
-    # 2. Populate Buffer (Simulates receiving and sorting segments)
+
+    # 2. Ray Casting and Immediate Delivery
     for y_local in range(rows_per_proc):
+        y_global = y_offset + y_local
         for x in range(image_width):
-            pixel_y_global = y_local
-            for seg in segments_by_pixel.get((x, pixel_y_global), []):
-                local_buffer.add_segment(x, y_local, seg)
-                
-    # 3. Final Compositing
-    final_subimage = [[[0.0, 0.0, 0.0] for _ in range(image_width)] for _ in range(rows_per_proc)]
-    
+            # Generate ray segment as it traverses local volume data [G]
+            segment = RaySegment(color=[0.0, 0.0, 0.0], opacity=0.0, depth=0.0)
+            if segment is not None:
+                # Group segments by destination pixel and send immediately [S1, unofficial]
+                send_segment(x, y_global, segment)
+
+    # 3. Sorting
     for y_local in range(rows_per_proc):
+        y_global = y_offset + y_local
+        for x in range(image_width):
+            # Receive segments and sort into local Ray Buffer by destination pixel [S1, unofficial]
+            for segment in receive_segments(x, y_global):
+                local_buffer.add_segment(x, y_local, segment)
+
+    # 4. Final Compositing
+    final_subimage = [[[0.0, 0.0, 0.0] for _ in range(image_width)] for _ in range(rows_per_proc)]
+    for y_local in range(rows_per_proc):
+        y_global = y_offset + y_local
         for x in range(image_width):
             head = local_buffer.buckets[y_local][x]
             r, g, b, a = 0.0, 0.0, 0.0, 0.0
-            
-            # Front-to-back compositing
             while head is not None:
                 seg = head.segment
                 contrib = seg.opacity * (1.0 - a)
@@ -92,10 +99,18 @@ def compositing_overlapping(image_width, image_height, rows_per_proc, segments_b
                 b += contrib * seg.color[2]
                 a += contrib
                 head = head.next
-            
             final_subimage[y_local][x] = [r, g, b]
-            
+
+    # 5. Result Submission
     return final_subimage
+
+def send_segment(pixel_x, pixel_y, segment):
+    # Point-to-point communication to responsible processor [S1, unofficial]
+    pass
+
+def receive_segments(pixel_x, pixel_y):
+    # Yields ray segments grouped by destination pixel [S1, unofficial]
+    return []
 ```
 
 **Parameters:**

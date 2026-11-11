@@ -1,0 +1,133 @@
+# Learnable Normal Estimation with Pseudo-Normal Supervision
+
+Also called: Learnable Unit Normal with Depth Gradient Supervision, Phys3DGS Normal Regularizer, Pseudo-Normal Supervision
+
+## Overview
+This method introduces a learnable unit normal per 3D Gaussian to replace noisy, gradient-based normal estimates, preventing the optimization from overfitting to training lighting conditions by aligning rendered normals with geometry priors derived from depth gradients [S1, unofficial][S2]. It differs from pure gradient-based approaches by assigning explicit normal attributes to Gaussians and using expected depth to generate stable pseudo-normal targets for supervision [S2].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** 3D Gaussian parameters (position, covariance, opacity $\alpha$, view-dependent color), camera parameters, ground truth RGB images, and binary image masks $M$ indicating valid pixels.
+- **Output:** Optimized Gaussian normals $\mathbf{n}_i$, rendered normal maps, and the normal loss value.
+
+**Data Structures:**
+- **Gaussian Normal:** Each Gaussian $i$ stores a learnable unit normal vector $\mathbf{n}_i \in \mathbb{R}^3$. It is constrained to unit length during initialization or via normalization.
+- **Rendered Normal:** A 2D image buffer where each pixel stores a 3D vector $\mathbf{n}_i$ (pre-normalization) or the final normalized normal.
+
+**Steps:**
+1. **Compute Expected Depth:** For each pixel, compute the expected depth $z_E$ along the ray using the weighted sum of Gaussian depths $z_i$ [S2]:
+   $$ z_E = \frac{\sum_{i \in N} w_i z_i}{\sum_{i \in N} w_i} $$
+   where $w_i = T_i g_i \alpha_i$ are the splatting weights, $T_i$ is transmittance, $g_i$ is the Gaussian density, and $\alpha_i$ is opacity. $N$ is the set of Gaussians overlapping the pixel.
+
+2. **Compute Pseudo-Normals:** Calculate the image-space gradients of the expected depth $\nabla z_E = (\partial_x z_E, \partial_y z_E)$ [S2]. Convert these gradients into world-space pseudo-normals $\mathbf{n}'_i$ (or $\hat{\mathbf{n}}_\nabla$). Note: The exact conversion from depth gradient to world normal depends on the camera projection matrix and is assumed to be handled by the rendering pipeline's geometry module [S2].
+
+3. **Splat Learnable Normals:** For each pixel, accumulate the learnable normals $\mathbf{n}_i$ from overlapping Gaussians using the same splatting weights $w_i$ [S2]:
+   $$ \tilde{\mathbf{n}} = \frac{\sum_{i \in N} w_i \mathbf{n}_i}{\sum_{i \in N} w_i + \epsilon_n} $$
+   where $\epsilon_n$ is a small constant for numerical stability [S2].
+
+4. **Normalize Rendered Normals:** L2-normalize the accumulated normal $\tilde{\mathbf{n}}$ to ensure unit length, as alpha-blending does not preserve unit length [S1, unofficial]:
+   $$ \hat{\mathbf{n}} = \frac{\tilde{\mathbf{n}}}{\|\tilde{\mathbf{n}}\|_2 + \epsilon_n} $$
+
+5. **Compute Loss:** Calculate the normal loss $L_n$ as the sum of the pseudo-normal alignment loss and a total variation smoothness term [S2]:
+   $$ L_{n-p} = \|\hat{\mathbf{n}} - \hat{\mathbf{n}}_\nabla\| $$
+   $$ L_n = L_{n-p} + \lambda_{n-TV} TV_{normal} $$
+   Alternatively, as described in [S1, unofficial], the loss can be formulated as minimizing the negative dot product (maximizing cosine similarity) between the normalized rendered normal and the pseudo-normal:
+   $$ L_{normal} = -\sum_{i \in M} \left( \frac{\mathbf{n}_i}{\|\mathbf{n}_i\|} \cdot \mathbf{n}'_i \right) $$
+   where $M$ is the binary image mask [S1, unofficial]. The sources present slightly different formulations for the alignment term ($L_{n-p}$ vs $L_{normal}$), but both aim to align the rendered normal with the depth-derived pseudo-normal.
+
+**Parameters:**
+- $\epsilon_n$: Small constant for numerical stability in normalization denominator [S2]. Typical value: $10^{-6}$ or similar small float [G].
+- $\lambda_{n-TV}$: Weight for the total variation loss [S2]. Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_normal_loss(gaussians, camera, gt_image, mask):
+    """
+    Compute the normal loss for learnable normal estimation with pseudo-normal supervision.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes:
+            - pos: (3,) position
+            - n: (3,) learnable unit normal
+            - alpha: scalar opacity
+            - cov: (3,3) covariance matrix
+        camera: Camera object with projection and view matrices
+        gt_image: (H, W, 3) ground truth RGB image
+        mask: (H, W) binary mask of valid pixels
+        
+    Returns:
+        loss: scalar loss value
+    """
+    # Step 1: Render expected depth and accumulated normals
+    # This requires a custom rasterizer pass that outputs:
+    # - expected_depth: (H, W) float32
+    # - accumulated_normal: (H, W, 3) float32 (sum of w_i * n_i)
+    # - accumulated_weight: (H, W) float32 (sum of w_i)
+    expected_depth, acc_normal, acc_weight = render_depth_and_normals(gaussians, camera)
+    
+    # Step 2: Compute pseudo-normals from depth gradients
+    # Compute image-space gradients of expected depth
+    depth_grad_x = expected_depth[:, 1:] - expected_depth[:, :-1]
+    depth_grad_y = expected_depth[1:, :] - expected_depth[:-1, :]
+    # Pad gradients to match image size (simple forward difference)
+    depth_grad_x = np.pad(depth_grad_x, ((0, 0), (0, 1)), mode='edge')
+    depth_grad_y = np.pad(depth_grad_y, ((0, 1), (0, 0)), mode='edge')
+    
+    # Convert depth gradients to world-space pseudo-normals
+    # This step depends on the camera model and is assumed to be implemented elsewhere
+    pseudo_normals = depth_gradient_to_world_normal(depth_grad_x, depth_grad_y, camera)
+    
+    # Step 3: Normalize accumulated normals
+    epsilon_n = 1e-6
+    norm_acc_normal = np.linalg.norm(acc_normal, axis=-1, keepdims=True)
+    normalized_normals = acc_normal / (norm_acc_normal + epsilon_n)
+    
+    # Step 4: Compute alignment loss
+    # Using the dot product formulation from [S1, unofficial]
+    # Mask out invalid pixels
+    valid_mask = mask > 0.5
+    
+    # Compute dot product between normalized rendered normals and pseudo-normals
+    dot_product = np.sum(normalized_normals * pseudo_normals, axis=-1)
+    
+    # Sum over valid pixels
+    loss_normal = -np.sum(dot_product[valid_mask])
+    
+    # Step 5: Add total variation loss for smoothness
+    # TV loss on the normalized normals
+    tv_loss = compute_total_variation(normalized_normals)
+    lambda_n_tv = 0.1 # Example value, not given in sources
+    loss = loss_normal + lambda_n_tv * tv_loss
+    
+    return loss
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The normalization denominator must include a small epsilon to avoid division by zero [S2].
+- **Boundaries:** Depth gradients at image boundaries may be inaccurate; padding or boundary handling is required [S2].
+- **Degenerate Input:** If a pixel has no overlapping Gaussians, the accumulated normal is zero, leading to undefined normalization. The mask $M$ should exclude such pixels [S1, unofficial].
+
+## Subtopics
+
+### Normal Field Supervision via Rendering and Depth Derivatives
+The parent method that uses depth derivatives to supervise the normal field. This method extends it by introducing learnable normals per Gaussian [9627-normal-field-supervision-via-rendering-and-depth-derivatives.md].
+
+### Gaussian Splatting Volume Rendering
+The base rendering technique that this method extends with normal attributes [52-gaussian-splatting-volume-rendering.md].
+
+## Operating characteristics
+- **Time Complexity:** Additional overhead per pixel for accumulating normals and computing depth gradients. The depth gradient computation is $O(HW)$, and the normal accumulation is part of the standard rasterization pass.
+- **Memory Complexity:** Requires storing an additional learnable normal vector per Gaussian and rendering buffers for expected depth and accumulated normals.
+- **Strengths:** Prevents overfitting to lighting conditions by providing a geometry prior [S1, unofficial]. More stable than pure gradient-based normals [S2].
+- **Limitations:** Requires additional parameters per Gaussian. The quality of pseudo-normals depends on the accuracy of expected depth [S2].
+- **When to use:** When accurate surface normals are needed for inverse rendering or PBR, and lighting conditions vary [S1, unofficial].
+- **When not to use:** When computational resources are extremely limited, as it adds overhead to the rasterization pass.
+
+## Background
+The method originates from Phys3DGS [S1, unofficial] and VisibilitySplat [S2], which aim to improve the geometric consistency of 3D Gaussian Splatting for inverse rendering tasks. It addresses the issue that gradient-based normals are noisy and inconsistent across views [S2].
+
+## Sources
+[S1] Phys3DGS: Physically-based 3D Gaussian Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2409.10335, fetched 2026-10-26 (unofficial)
+[S2] VisibilitySplat: Ray-Traced Occlusion for Relighting with 3D Gaussian Splatting, https://doi.org/10.24132/csrn.2026-e17, fetched 2026-10-26

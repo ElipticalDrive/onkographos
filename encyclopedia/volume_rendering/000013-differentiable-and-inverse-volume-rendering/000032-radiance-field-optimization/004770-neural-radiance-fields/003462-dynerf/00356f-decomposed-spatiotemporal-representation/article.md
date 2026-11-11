@@ -7,39 +7,26 @@ Decomposed Spatiotemporal Representation is a method for modeling dynamic volume
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D spatial coordinate $p \in \mathbb{R}^3$ and a scalar time $t \in \mathbb{R}$.
-*   **Output:** A density $\sigma \in \mathbb{R}$ and a view-dependent color $c \in \mathbb{R}^3$.
+*   **Input:** A 3D spatial coordinate $p \in \mathbb{R}^3$ and a scalar time $t \in \mathbb{R}$ [S1].
+*   **Output:** A density $\sigma \in \mathbb{R}$ and a view-dependent color $c \in \mathbb{R}^3$ [S1].
 
 **Data Structures:**
-1.  **Decomposition Field ($f$):** Maps $(p, t)$ to a probability distribution over three categories. Implemented as an explicitly cached feature volume $V_f$ and a small MLP decoder $D_f$.
-    *   Output: Probabilities $P_{static}, P_{deform}, P_{new}$ such that $\sum P_* = 1$.
-2.  **Stationary Field ($s$):** Maps $(p)$ to a feature vector $v_{static}$. Used for static geometry and low-frequency appearance.
-    *   Implementation: Explicitly cached features $V_s$ and a tiny MLP.
-3.  **Deformation Field ($d$):** Maps $(p, t)$ to a displacement vector $\Delta p$.
-    *   Implementation: A small MLP.
-4.  **Newness Field ($n$):** Maps $(p, t)$ to a feature vector $v_{new}$.
-    *   Implementation: Explicitly cached features $V_n$ and a tiny MLP.
-5.  **View-Conditioned Network (Decoder):** Maps the aggregated feature vector $v$ and view direction $d_v$ to density and color.
+1.  **Decomposition Field ($f$):** Maps $(p, t)$ to a probability distribution over three categories [S1]. Implemented as an explicitly cached feature volume $V_f$ and a small MLP decoder $D_f$ [S1]. Output: Probabilities $P_{static}, P_{deform}, P_{new}$ such that $\sum P_* = 1$ [S1].
+2.  **Stationary Field ($s$):** Maps $p$ to a feature vector $v_{static}$ [S1]. Used for static geometry and low-frequency appearance [S1]. Implementation: Explicitly cached features $V_s$ and a tiny MLP [S1].
+3.  **Deformation Field ($d$):** Maps $(p, t)$ to a displacement vector $\Delta p$ [S1]. Implementation: A small MLP [S1].
+4.  **Newness Field ($n$):** Maps $(p, t)$ to a feature vector $v_{new}$ [S1]. Implementation: Explicitly cached features and a tiny MLP [S1].
+5.  **View-Conditioned Network (Decoder):** Maps the aggregated feature vector $v$ and view direction $d_v$ to density and color [S1].
 
 **Numbered Steps:**
-1.  **Query Decomposition:** For a query point $p$ at time $t$, compute the decomposition probabilities $P_{static}(p,t)$, $P_{deform}(p,t)$, and $P_{new}(p,t)$ using the decomposition field $f(p,t)$.
-2.  **Compute Expected Feature Vector:**
-    *   Retrieve $v_{static}$ from the stationary field $s(p)$.
-    *   Retrieve $\Delta p$ from the deformation field $d(p,t)$. Compute the deformed position $p' = p + \Delta p$. Query $v_{deform}$ from the stationary field $s(p')$ (canonical space) [S1].
-    *   Retrieve $v_{new}$ from the newness field $n(p,t)$.
-    *   Compute the aggregated feature vector:
-        $$ v = P_{static} v_{static} + P_{deform} v_{deform} + P_{new} v_{new} $$
+1.  **Query Decomposition:** For a query point $p$ at time $t$, compute the decomposition probabilities $P_{static}(p,t)$, $P_{deform}(p,t)$, and $P_{new}(p,t)$ using the decomposition field $f(p,t)$ [S1].
+2.  **Compute Expected Feature Vector:** Retrieve $v_{static}$ from the stationary field $s(p)$ [S1]. Retrieve $\Delta p$ from the deformation field $d(p,t)$ [S1]. Compute the deformed position $p' = p + \Delta p$ [S1]. Query $v_{deform}$ from the stationary field $s(p')$ in canonical space [S1]. Retrieve $v_{new}$ from the newness field $n(p,t)$ [S1]. Compute the aggregated feature vector: $v = \sum_{* \in \{static, deform, new\}} P_* v_*$ [S1].
 3.  **Thresholding (Optimization):** If any probability $P_* < \tau$ (default $\tau = 0.001$), set the corresponding feature vector $v_* = \mathbf{0}$ and skip the field query to save computation [S1].
-4.  **Decode Radiance:** Pass the aggregated feature vector $v$ and the view direction $d_v$ to the lightweight view-conditioned network to predict density $\sigma$ and color $c$.
+4.  **Decode Radiance:** Pass the aggregated feature vector $v$ and the view direction $d_v$ to the lightweight view-conditioned network to predict density $\sigma$ and color $c$ [S1].
 
 **Formulas:**
 *   **Aggregation:** $v = \sum_{* \in \{static, deform, new\}} P_* v_*$ [S1].
-*   **Regularization Loss:** To encourage static background and penalize new content (assuming most points are static or deforming):
-    $$ L_{reg} = \alpha P_{deform} + P_{new} $$
-    where $P_* = \frac{1}{|R_p|} \sum_{p \in R_p} P_*(p)$ is the average probability over the batch $R_p$, and $\alpha$ weights the ratio of deforming to new [S1].
-*   **Total Loss:**
-    $$ L = L_{rec} + \lambda L_{reg} $$
-    where $L_{rec}$ is the reconstruction loss and $\lambda$ is a balancing hyper-parameter [S1].
+*   **Regularization Loss:** To encourage static background and penalize new content (assuming most points are static or deforming): $L_{reg} = \alpha P_{deform} + P_{new}$ [S1]. Here, $P_* = \frac{1}{|R_p|} \sum_{p \in R_p} P_*(p)$ is the average probability over the batch $R_p$, and $\alpha$ weights the ratio of deforming to new [S1].
+*   **Total Loss:** $L = L_{rec} + \lambda L_{reg}$ [S1]. Here, $L_{rec}$ is the reconstruction loss and $\lambda$ is a balancing hyper-parameter [S1].
 
 **Parameters:**
 *   $\tau$: Threshold for skipping fields. Default: 0.001 [S1].
@@ -48,12 +35,15 @@ Decomposed Spatiotemporal Representation is a method for modeling dynamic volume
 
 **Edge Cases and Pitfalls:**
 *   **Precision:** The sum of probabilities must be normalized to 1. If the decomposition field outputs unnormalized logits, a softmax is required [G].
-*   **Deformation Query:** The deformation field outputs $\Delta p$, which is added to $p$ before querying the *static* field for the deforming component's feature. This implies the deforming component's appearance is anchored to the canonical static geometry [S1].
+*   **Deformation Query:** The deformation field outputs $\Delta p$, which is added to $p$ before querying the *static* field for the deforming component's feature, implying the deforming component's appearance is anchored to the canonical static geometry [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+def zeros(n):
+    return [0.0] * n
+
 def decomposed_spatiotemporal_render(p, t, view_dir, model):
     """
     p: (3,) spatial coordinate
@@ -70,7 +60,7 @@ def decomposed_spatiotemporal_render(p, t, view_dir, model):
     
     # Deformation: query canonical space
     delta_p = model.d(p, t)
-    p_deformed = p + delta_p
+    p_deformed = [p[i] + delta_p[i] for i in range(3)]
     v_deform = model.s(p_deformed)
     
     # Newness
@@ -79,14 +69,14 @@ def decomposed_spatiotemporal_render(p, t, view_dir, model):
     # 3. Thresholding
     tau = 0.001
     if P_static < tau:
-        v_static = zeros(3) # Assuming 3D feature vector, size depends on implementation
+        v_static = zeros(len(v_static))
     if P_deform < tau:
-        v_deform = zeros(3)
+        v_deform = zeros(len(v_deform))
     if P_new < tau:
-        v_new = zeros(3)
+        v_new = zeros(len(v_new))
         
     # 4. Weighted sum
-    v = P_static * v_static + P_deform * v_deform + P_new * v_new
+    v = [P_static * v_static[i] + P_deform * v_deform[i] + P_new * v_new[i] for i in range(len(v_static))]
     
     # 5. Decode
     sigma, color = model.decoder(v, view_dir)
@@ -97,18 +87,22 @@ def decomposed_spatiotemporal_render(p, t, view_dir, model):
 ## Subtopics
 
 ### [Dynamic Field Blending](9485-dynamic-field-blending.md)
-A technique that explicitly linearly interpolates opacity and premultiplied radiance terms based on learned blending weights, rather than aggregating feature vectors before decoding. It is chosen when adaptive mixing of static and dynamic radiance is preferred over feature-space blending.
+A technique that explicitly linearly interpolates opacity and premultiplied radiance terms based on learned blending weights, rather than aggregating feature vectors before decoding. It sets itself apart from sibling methods by avoiding separate volume rendering integrals or hard segmentation masks. Choose it when adaptive mixing of static and dynamic radiance is preferred over feature-space blending.
+
+### Panoptic Neural Fields
+A method that separates 'stuff' (background static objects) from 'things' (moving objects), representing stuff with a single radiance field MLP and each dynamic thing with its own radiance field inside a dynamic bounding box [S2]. It sets itself apart from the Decomposed Spatiotemporal Representation family by assigning individual MLPs to each dynamic instance within bounding boxes rather than using a unified decomposition field [S2]. Choose it when instance-level semantic segmentation and editing of moving objects are required [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering time depends on the number of active fields. With thresholding, fields with low probability are skipped, reducing computation for static backgrounds [S1].
-*   **Memory Complexity:** Uses explicit feature volumes for static and new fields, which can increase model size compared to pure MLPs, but allows for smaller MLPs for deformation and newness due to specialized representation [S1].
-*   **Strengths:** Maintains temporal consistency by separating static, deforming, and new content; saves computation by not modeling static areas with time-dependent fields; handles rigid and non-rigid motion [S1].
-*   **Limitations:** Requires careful tuning of regularization parameters ($\alpha, \lambda$); assumes static background exists; new content must be modeled explicitly, which may be inefficient for highly dynamic scenes with no static parts [S1].
-*   **When to use:** Dynamic scenes with significant static background and distinct deforming objects.
-*   **When not to use:** Scenes with no static elements or highly chaotic dynamics where decomposition is unstable.
+*   **Time Complexity:** Rendering time depends on the number of active fields [S1]. With thresholding, fields with low probability are skipped, reducing computation for static backgrounds [S1].
+*   **Memory Complexity:** Uses explicit feature volumes for static and new fields, which can increase model size compared to pure MLPs [S1]. However, it allows for smaller MLPs for deformation and newness due to specialized representation [S1].
+*   **Strengths:** Maintains temporal consistency by separating static, deforming, and new content [S1]. Saves computation by not modeling static areas with time-dependent fields [S1]. Handles rigid and non-rigid motion [S1].
+*   **Limitations:** Requires careful tuning of regularization parameters ($\alpha, \lambda$) [S1]. Assumes static background exists [S1]. New content must be modeled explicitly, which may be inefficient for highly dynamic scenes with no static parts [S1].
+*   **When to use:** Dynamic scenes with significant static background and distinct deforming objects [S1].
+*   **When not to use:** Scenes with no static elements or highly chaotic dynamics where decomposition is unstable [S1].
 
 ## Background
-The method was introduced in "NeRFPlayer: A Streamable Dynamic Scene Representation with Decomposed Neural Radiance Fields" by the authors of [S1] in 2023. It builds on the DyNeRF baseline [7274-dynerf.md] by addressing its limitation of using a single MLP for all temporal variations, which can lead to temporal inconsistency and high computational cost for static regions [S1].
+The method was introduced in [S1] as a streamable dynamic scene representation that decomposes the scene into static, deforming, and new areas to maintain temporal consistency and reduce computation [S1]. It builds on the DyNeRF baseline [7274-dynerf.md] by addressing its limitation of using a single MLP for all temporal variations, which can lead to temporal inconsistency and high computational cost for static regions [S1].
 
 ## Sources
 [S1] NeRFPlayer: A Streamable Dynamic Scene Representation with Decomposed Neural Radiance Fields, https://doi.org/10.1109/tvcg.2023.3247082, fetched 2026-10-26
+[S2] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

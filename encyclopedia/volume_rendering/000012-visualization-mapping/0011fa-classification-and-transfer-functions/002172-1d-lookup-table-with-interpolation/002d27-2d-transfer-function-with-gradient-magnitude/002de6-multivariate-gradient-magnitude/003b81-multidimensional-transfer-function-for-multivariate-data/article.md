@@ -7,13 +7,13 @@ Multidimensional transfer functions (MTFs) visualize multivariate data by assign
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A multivariate dataset represented as a function $\mathbf{f}(x,y,z)$ where each voxel contains $m$ scalar values (e.g., RGB color, or combined MRI/CT/PET values).
-*   **Output:** A classification space (typically 2D or 3D) where axes correspond to data components and/or derivative measures, used to map opacity and color for volume rendering.
+*   **Input:** A multivariate dataset represented as a function $\mathbf{f}(x,y,z)$ where each voxel contains $m$ scalar values (e.g., RGB color, or combined MRI/CT/PET values) [S1].
+*   **Output:** A classification space (typically 2D or 3D) where axes correspond to data components and/or derivative measures, used to map opacity and color for volume rendering [S1].
 
 **Data Structures**
-*   **Multivariate Function $\mathbf{f}$:** An array of shape $(N_x, N_y, N_z, m)$, where $N_x, N_y, N_z$ are grid dimensions and $m$ is the number of variables per sample.
-*   **Jacobian Matrix $\text{Df}$:** A matrix of first partial derivatives. For a 3D grid, this is computed per voxel.
-*   **Tensor $\mathbf{G}$:** A $3 \times 3$ symmetric matrix (tensor) per voxel, derived from the Jacobian.
+*   **Multivariate Function $\mathbf{f}$:** An array of shape $(N_x, N_y, N_z, m)$, where $N_x, N_y, N_z$ are grid dimensions and $m$ is the number of variables per sample [S1].
+*   **Jacobian Matrix $\text{Df}$:** A matrix of first partial derivatives for all $m$ components and 3 spatial dimensions [S1].
+*   **Tensor $\mathbf{G}$:** A $3 \times 3$ symmetric matrix (tensor) per voxel, derived from the Jacobian [S1].
 
 **Steps**
 
@@ -46,64 +46,60 @@ Multidimensional transfer functions (MTFs) visualize multivariate data by assign
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_multivariate_transfer_function(data, num_components):
+def compute_multivariate_transfer_function(data, nx, ny, nz, m):
     """
     Computes the Jacobian and Tensor G for multivariate volume data.
     
     Args:
-        data: numpy array of shape (Nx, Ny, Nz, m) containing multivariate values.
-        num_components: integer m, the number of variables per voxel.
+        data: 4D list/array of shape (nx, ny, nz, m) containing multivariate values.
+        nx, ny, nz: integer grid dimensions.
+        m: integer number of variables per voxel.
         
     Returns:
-        G: numpy array of shape (Nx, Ny, Nz, 3, 3) containing the tensor G.
+        G: 5D list/array of shape (nx, ny, nz, 3, 3) containing the tensor G.
     """
-    Nx, Ny, Nz, m = data.shape
+    # Initialize G array
+    G = [[[None for _ in range(nz)] for _ in range(ny)] for _ in range(nx)]
     
-    # Initialize Jacobian Df: shape (Nx, Ny, Nz, m, 3)
-    # Df[i,j,k, component, direction]
-    Df = np.zeros((Nx, Ny, Nz, m, 3))
-    
-    # Compute partial derivatives for each component
-    # Using central differences for interior points, forward/backward for boundaries
-    for c in range(m):
-        # Derivatives along x
-        Df[:, :, 1:, c, 0] = (data[:, :, 2:, c] - data[:, :, :-2, c]) / 2.0
-        Df[:, :, 0, c, 0] = data[:, :, 1, c] - data[:, :, 0, c]
-        Df[:, :, -1, c, 0] = data[:, :, -1, c] - data[:, :, -2, c]
-        
-        # Derivatives along y
-        Df[:, 1:, :, c, 1] = (data[:, 2:, :, c] - data[:, :-2, :, c]) / 2.0
-        Df[:, 0, :, c, 1] = data[:, 1, :, c] - data[:, 0, :, c]
-        Df[:, -1, :, c, 1] = data[:, -1, :, c] - data[:, -2, :, c]
-        
-        # Derivatives along z
-        Df[1:, :, :, c, 2] = (data[2:, :, :, c] - data[:-2, :, :, c]) / 2.0
-        Df[0, :, :, c, 2] = data[1, :, :, c] - data[0, :, :, c]
-        Df[-1, :, :, c, 2] = data[-1, :, :, c] - data[-2, :, :, c]
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                # Initialize Df for this voxel: m components x 3 directions
+                df = [[0.0] * 3 for _ in range(m)]
+                
+                for c in range(m):
+                    # Derivative along x
+                    if i == 0:
+                        df[c][0] = data[1][j][k][c] - data[0][j][k][c]
+                    elif i == nx - 1:
+                        df[c][0] = data[i][j][k][c] - data[i-1][j][k][c]
+                    else:
+                        df[c][0] = (data[i+1][j][k][c] - data[i-1][j][k][c]) / 2.0
+                        
+                    # Derivative along y
+                    if j == 0:
+                        df[c][1] = data[i][1][k][c] - data[i][0][k][c]
+                    elif j == ny - 1:
+                        df[c][1] = data[i][j][k][c] - data[i][j-1][k][c]
+                    else:
+                        df[c][1] = (data[i][j+1][k][c] - data[i][j-1][k][c]) / 2.0
+                        
+                    # Derivative along z
+                    if k == 0:
+                        df[c][2] = data[i][j][1][c] - data[i][j][0][c]
+                    elif k == nz - 1:
+                        df[c][2] = data[i][j][k][c] - data[i][j][k-1][c]
+                    else:
+                        df[c][2] = (data[i][j][k+1][c] - data[i][j][k-1][c]) / 2.0
 
-    # Compute Tensor G = (Df)^T * Df
-    # Df is (Nx, Ny, Nz, m, 3). Transpose last two dims for matrix mult logic.
-    # We want G[i,j,k] = sum_c Df[i,j,k,c,:]^T * Df[i,j,k,c,:]
-    # This results in a 3x3 matrix per voxel.
-    
-    G = np.zeros((Nx, Ny, Nz, 3, 3))
-    
-    # Vectorized computation of G
-    # Df shape: (N, m, 3) where N = Nx*Ny*Nz
-    Df_flat = Df.reshape(-1, m, 3)
-    
-    # (Df)^T is (3, m). Df is (m, 3). Result (3, 3).
-    # However, standard matrix mult: (3, m) @ (m, 3) -> (3, 3)
-    # But Df is (m, 3). So we need (Df)^T @ Df.
-    # Df.T is (3, m).
-    
-    Df_T = Df_flat.transpose(0, 2, 1) # Shape (N, 3, m)
-    
-    # Matrix multiplication: (N, 3, m) @ (N, m, 3) -> (N, 3, 3)
-    G_flat = np.matmul(Df_T, Df_flat)
-    
-    G = G_flat.reshape(Nx, Ny, Nz, 3, 3)
-    
+                # Compute Tensor G = (Df)^T * Df
+                # G is 3x3. G[u][v] = sum_c df[c][u] * df[c][v]
+                g_voxel = [[0.0] * 3 for _ in range(3)]
+                for u in range(3):
+                    for v in range(3):
+                        for c in range(m):
+                            g_voxel[u][v] += df[c][u] * df[c][v]
+                G[i][j][k] = g_voxel
     return G
 
 def compute_squared_local_contrast(G, direction_n):
@@ -111,14 +107,17 @@ def compute_squared_local_contrast(G, direction_n):
     Computes S(n) = n^T G n for a given direction n.
     
     Args:
-        G: numpy array of shape (3, 3) for a single voxel.
-        direction_n: numpy array of shape (3,) representing vector n.
+        G: 3x3 list/array for a single voxel.
+        direction_n: list/array of length 3 representing vector n.
         
     Returns:
         S_n: float, the squared local contrast.
     """
     # S(n) = n^T G n
-    S_n = np.dot(direction_n, np.dot(G, direction_n))
+    S_n = 0.0
+    for u in range(3):
+        for v in range(3):
+            S_n += direction_n[u] * G[u][v] * direction_n[v]
     return S_n
 ```
 
@@ -132,9 +131,9 @@ def compute_squared_local_contrast(G, direction_n):
 *   **Boundary Conditions:** Derivative computation at grid boundaries requires careful handling (e.g., forward/backward differences) to avoid artifacts [G].
 
 ## Operating characteristics
-*   **Complexity:** Computing the Jacobian requires $O(N \cdot m)$ operations where $N$ is the number of voxels and $m$ is the number of components. Computing $\mathbf{G}$ is $O(N \cdot m)$ due to the fixed $3 \times 3$ matrix multiplication per voxel.
+*   **Complexity:** Not given in the sources.
 *   **Strengths:** Generalizes gradient-based edge detection to multivariate data, allowing isolation of features based on total local change across all components [S1].
-*   **Limitations:** High dimensionality makes direct manipulation difficult; requires projection-based interaction [S1]. Performance depends on the number of data components $m$.
+*   **Limitations:** High dimensionality makes direct manipulation difficult; requires projection-based interaction [S1].
 
 ## Background
 This method was introduced in the context of interactive volume rendering for multivariate data, such as MRI/CT/PET combinations or color cryosection data (e.g., Visible Male RGB data) [S1]. It builds on previous work in color image segmentation, specifically the concept of squared local contrast [S1].

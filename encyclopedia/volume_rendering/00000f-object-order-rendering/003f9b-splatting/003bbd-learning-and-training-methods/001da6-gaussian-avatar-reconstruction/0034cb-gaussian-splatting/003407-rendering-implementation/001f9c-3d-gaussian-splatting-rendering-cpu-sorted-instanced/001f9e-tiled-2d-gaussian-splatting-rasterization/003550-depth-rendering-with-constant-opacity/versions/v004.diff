@@ -1,0 +1,246 @@
+--- v003.md
++++ v004.md
+@@ -4,29 +4,33 @@
+ 
+ ## Overview
+-Depth Rendering with Constant Opacity is a specialized rendering pass for 3D Gaussian Splatting designed to extract clean, geometrically accurate depth maps by decoupling depth accumulation from opacity weighting [S1, unofficial]. Unlike standard rendering where depth is influenced by the varying opacity of Gaussians, this method forces uniform opacity and color across all Gaussians, ensuring that the rasterizer's depth accumulation is driven solely by geometric distance [S1, unofficial]. It serves as a foundation for variants like Normalized Depth Rendering and Depth Rendering with Variable Opacity.
++Depth Rendering with Constant Opacity is a specialized rendering pass designed to extract clean depth maps from 3D Gaussian Splatting models by forcing uniform opacity across all Gaussians [S1, unofficial]. Unlike standard rendering which weights depth accumulation by per-Gaussian opacity, this method ensures that the rasterizer's depth accumulation is driven strictly by geometric distance, removing shading and opacity variations that can distort depth estimation [S1, unofficial]. It serves as the foundation for depth-only passes in Gaussian Avatar Reconstruction pipelines, enabling accurate depth extraction before further processing like normalization or compositing [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `pc`: The Gaussian model object containing 3D means, scales, rotations, covariances, and SH coefficients.
+-- `viewpoint_camera`: The camera object containing field of view (FoV) and projection matrices.
+-- `image_width`, `image_height`: The resolution of the output depth map.
+-- `value`: The constant opacity multiplier (default 0.95) [S1, unofficial].
++- `pc`: The Gaussian model object containing methods `get_xyz`, `get_scaling`, `get_rotation`, `get_covariance`, and `sh_degree`.
++- `viewpoint_camera`: The camera object containing `FoVx`, `FoVy`, and projection/view matrices.
++- `image_size`: Tuple `(width, height)` of the output image.
++- `value`: Constant opacity multiplier (default 0.95) [S1, unofficial].
+ 
+ **Outputs:**
+-- `render`: The rendered image (all ones due to constant color).
+-- `depth`: The accumulated depth buffer.
+-- `alpha`: The accumulated opacity buffer.
+-- `viewspace_points`: The 3D positions of the Gaussians in view space.
+-- `visibility_filter`: A boolean mask indicating which Gaussians contributed to the image (radii > 0).
+-- `radii`: The radius of each Gaussian's bounding box in screen space.
++- Dictionary containing:
++  - `render`: The rendered image tensor (all ones, effectively white).
++  - `depth`: The accumulated depth buffer.
++  - `alpha`: The accumulated alpha buffer.
++  - `viewspace_points`: The 3D positions of the Gaussians in view space.
++  - `visibility_filter`: Boolean mask of Gaussians with `radii > 0`.
++  - `radii`: The radii of visible Gaussians.
+ 
+ **Data Structures:**
+-- `screenspace_points`: A tensor of shape `(num_gaussians, 2)` initialized to zeros, with gradient retention enabled to allow backpropagation if needed for training [S1, unofficial].
+-- `opacity`: A tensor of shape `(num_gaussians, 1)` filled with the constant `value` [S1, unofficial].
+-- `colors_precomp`: A tensor of shape `(num_gaussians, 3)` filled with ones, removing color information [S1, unofficial].
+-- `shs`: Set to `None` to disable spherical harmonics processing [S1, unofficial].
++- `screenspace_points`: Tensor of shape `(num_gaussians, 2)`, initialized to zeros, with gradient retention enabled [S1, unofficial].
++- `opacity`: Tensor of shape `(num_gaussians, 1)`, filled with `value` [S1, unofficial].
++- `colors_precomp`: Tensor of shape `(num_gaussians, 3)`, filled with ones [S1, unofficial].
++- `scales`, `rotations`, `cov3D_precomp`: Set to `None` or detached tensors to prevent gradient leakage [S1, unofficial].
++
++**Parameters:**
++- `value`: Constant opacity value. Default is 0.95 [S1, unofficial].
+ 
+ **Steps:**
+-1. **Initialize Screenspace Points:** Create a tensor `screenspace_points` with the same dtype and device as `pc.get_xyz`, initialized to zero. Enable gradient retention:
++1. Initialize `screenspace_points` tensor with zeros, matching the dtype and device of `pc.get_xyz()`, and enable gradient retention:
+    ```python
+    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+@@ -38,72 +42,143 @@
+    [S1, unofficial]
+ 
+-2. **Compute Tangent FOV:** Calculate the tangent of half the field of view from the `viewpoint_camera`:
+-   $$ \text{tanfovx} = \tan(\text{FoV}_x / 2) $$
+-   $$ \text{tanfovy} = \tan(\text{FoV}_y / 2) $$
++2. Compute tangent field of view values from the `viewpoint_camera`:
++   $$ \text{tanfovx} = \tan\left(\frac{\text{FoVx}}{2}\right) $$
++   $$ \text{tanfovy} = \tan\left(\frac{\text{FoVy}}{2}\right) $$
+    [S1, unofficial]
+ 
+-3. **Configure Rasterization Settings:** Create a `GaussianRasterizationSettings` object with:
+-   - Image dimensions: `(image_width, image_height)`
++3. Configure `GaussianRasterizationSettings` with:
++   - Image dimensions: `(width, height)`
+    - Tangent FOV: `(tanfovx, tanfovy)`
+-   - Background color: Typically white `[1, 1, 1]` or black `[0, 0, 0]` depending on the dataset [S1, unofficial].
+-   - Scale modifier: As defined in the pipeline.
+-   - View and projection matrices: From `viewpoint_camera`.
+-   - SH degree: From the pipeline.
+-   - Camera position: From `viewpoint_camera`.
+-   - Prefiltered: `False` [S1, unofficial].
++   - Background color: Typically white `[1, 1, 1]` or black `[0, 0, 0]` depending on dataset settings [S1, unofficial]
++   - Scale modifier: As provided by pipeline
++   - View and projection matrices: From `viewpoint_camera`
++   - SH degree: From `pc.sh_degree`
++   - Camera position: From `viewpoint_camera`
++   - Prefiltered: `False`
++   - Debug flag: As required [S1, unofficial]
+ 
+-4. **Set Gaussian Attributes:**
+-   - `means3D`: Set to `pc.get_xyz`.
+-   - `means2D`: Set to `screenspace_points`.
+-   - `opacity`: Set to `torch.ones(num_gaussians, 1, device=device) * value` [S1, unofficial].
+-   - `colors_precomp`: Set to `torch.ones_like(pc.get_xyz)` [S1, unofficial].
+-   - `shs`: Set to `None` [S1, unofficial].
++4. Set Gaussian attributes:
++   - `means3D`: `pc.get_xyz()`
++   - `means2D`: `screenspace_points`
++   - `opacity`: `torch.ones(pc.get_xyz.shape[0], 1, device=pc.get_xyz.device) * value`
++   - `shs`: `None`
++   - `colors_precomp`: `torch.ones_like(pc.get_xyz)`
++   [S1, unofficial]
+ 
+-5. **Detach Scales and Rotations:** Within a `torch.no_grad()` block:
+-   - Set `scales`, `rotations`, and `cov3D_precomp` to `None` initially.
+-   - If `pipe.compute_cov3D_python` is true, compute `cov3D_precomp` using `pc.get_covariance(scaling_modifier)`.
+-   - Otherwise, set `scales = pc.get_scaling.detach()` and `rotations = pc.get_rotation.detach()` [S1, unofficial].
+-   - This step prevents gradient leakage into depth estimation during training [S1, unofficial].
++5. Within a `torch.no_grad()` context, prepare scales, rotations, and covariance:
++   - If `pipe.compute_cov3D_python` is true:
++     - `cov3D_precomp = pc.get_covariance(scaling_modifier)`
++   - Else:
++     - `scales = pc.get_scaling().detach()`
++     - `rotations = pc.get_rotation().detach()`
++     - `cov3D_precomp = None`
++   [S1, unofficial]
+ 
+-6. **Rasterize:** Call the Gaussian rasterizer with the configured attributes:
+-   - Inputs: `means3D`, `means2D`, `shs=None`, `colors_precomp`, `opacity`, `scales`, `rotations`, `cov3D_precomp`.
+-   - Outputs: `rendered_image`, `radii`, `rendered_depth`, `rendered_alpha` [S1, unofficial].
++6. Call the rasterizer with the configured settings and attributes to obtain `rendered_image`, `radii`, `rendered_depth`, and `rendered_alpha` [S1, unofficial].
+ 
+-7. **Return Results:** Return a dictionary containing:
+-   - `render`: `rendered_image`
+-   - `depth`: `rendered_depth`
+-   - `alpha`: `rendered_alpha`
+-   - `viewspace_points`: The 3D points in view space.
+-   - `visibility_filter`: `radii > 0`
+-   - `radii`: The screen-space radii [S1, unofficial].
++7. Return the dictionary with results [S1, unofficial].
+ 
+-**Parameters:**
+-- `value`: The constant opacity multiplier. Default is 0.95 [S1, unofficial].
++**Pseudocode:**
++```python
++import torch
++import math
++
++def render_depth_constant_opacity(pc, viewpoint_camera, image_size, value=0.95):
++    # Step 1: Initialize screenspace_points with gradient retention
++    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
++    try:
++        screenspace_points.retain_grad()
++    except:
++        pass
++
++    # Step 2: Compute tangent FOV
++    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
++    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
++
++    # Step 3: Configure rasterization settings
++    # Note: Background color depends on dataset (white for many, black for others)
++    bg_color = [1, 1, 1] # Assumed white background based on common usage [S1, unofficial]
++    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
++    
++    raster_settings = GaussianRasterizationSettings(
++        image_height=image_size[1],
++        image_width=image_size[0],
++        tanfovx=tanfovx,
++        tanfovy=tanfovy,
++        bg=background,
++        scale_modifier=1.0, # Assuming default scale modifier
++        viewmatrix=viewpoint_camera.world_view_transform,
++        projmatrix=viewpoint_camera.full_proj_transform,
++        sh_degree=pc.sh_degree,
++        campos=viewpoint_camera.camera_center,
++        prefiltered=False,
++        debug=False
++    )
++
++    # Step 4: Set attributes
++    means3D = pc.get_xyz()
++    means2D = screenspace_points
++    opacity = torch.ones(means3D.shape[0], 1, device=means3D.device) * value
++    shs = None
++    colors_precomp = torch.ones_like(means3D)
++
++    # Step 5: Prepare scales, rotations, cov3D
++    with torch.no_grad():
++        if hasattr(pc, 'compute_cov3D_python') and pc.compute_cov3D_python:
++            cov3D_precomp = pc.get_covariance(scaling_modifier=1.0)
++            scales = None
++            rotations = None
++        else:
++            cov3D_precomp = None
++            scales = pc.get_scaling().detach()
++            rotations = pc.get_rotation().detach()
++
++    # Step 6: Rasterize
++    rasterizer = GaussianRasterizer(raster_settings=raster_settings)
++    rendered_image, radii, rendered_depth, rendered_alpha = rasterizer(
++        means3D=means3D,
++        means2D=means2D,
++        shs=shs,
++        colors_precomp=colors_precomp,
++        opacities=opacity,
++        scales=scales,
++        rotations=rotations,
++        cov3D_precomp=cov3D_precomp
++    )
++
++    # Step 7: Return results
++    return {
++        "render": rendered_image,
++        "depth": rendered_depth,
++        "alpha": rendered_alpha,
++        "viewspace_points": screenspace_points,
++        "visibility_filter": radii > 0,
++        "radii": radii
++    }
++```
++[S1, unofficial]
+ 
+ **Edge Cases and Pitfalls:**
+-- **Gradient Leakage:** Failing to detach scales and rotations or disable SHs can cause gradients to leak into the depth estimation, corrupting the geometric accuracy [S1, unofficial].
+-- **Precision:** The use of `torch.zeros_like` with explicit device placement ensures no NaNs or infinities are introduced during initialization [S1, unofficial].
+-- **Color Information:** Setting `colors_precomp` to ones and `shs` to `None` ensures that no color information affects the depth pass, which is critical for pure depth extraction [S1, unofficial].
++- Gradient leakage: Scales and rotations must be detached or set to None to prevent gradients from flowing into depth estimation [S1, unofficial].
++- Opacity value: Using a value too close to 1.0 may cause over-saturation in alpha accumulation, while too low may result in sparse depth maps. 0.95 is the empirical default [S1, unofficial].
++- Background color: Mismatched background color can affect depth accumulation at edges. Ensure consistency with the dataset's expected background [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Normalized Depth Rendering](8298-normalized-depth-rendering.md)
+-Computes a depth map by dividing the accumulated depth buffer by the accumulated opacity buffer, correcting for transparency artifacts inherent in standard Gaussian splatting compositing. Unlike its parent method, which forces constant opacity to decouple depth from alpha weighting, this method preserves the original scene's opacity distribution while producing a geometrically accurate depth estimate.
+-
+-### [Depth Rendering with Variable Opacity](12622-depth-rendering-with-variable-opacity.md)
+-A feature that enables Gaussian splatting backends to write a per-pixel depth buffer (NDC depth, +inf where there is no surface) which can be read via getGaussianSplattingDepth() to composite other geometry into the splat scene.
++### Normalized Depth Rendering
++Normalized Depth Rendering extends the constant opacity pass by dividing the accumulated depth buffer by the accumulated alpha buffer to correct for transparency artifacts [S2, unofficial]. It converts the normalized depth to displayable disparity using near and far clipping planes: $ \text{rendered\_disp\_norm} = 1 - \frac{\text{rendered\_depth\_norm} - z_{\text{near}}}{z_{\text{far}} - z_{\text{near}}} $ [S2, unofficial]. This method is chosen when accurate depth estimation in semi-transparent regions is required, as it accounts for the varying opacity contributions that constant opacity rendering ignores [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of Gaussians and pixels, as it involves a single rasterization pass [S1, unofficial].
+-- **Memory Complexity:** Linear with respect to the number of Gaussians for storing intermediate tensors like `screenspace_points` and `opacity` [S1, unofficial].
+-- **Performance:** The method is efficient as it avoids complex shading calculations by using constant color and opacity [S1, unofficial].
+-- **Strengths:** Produces clean, geometrically accurate depth maps without shading or opacity variations [S1, unofficial].
+-- **Limitations:** Does not provide color information or opacity variations, making it unsuitable for standard image rendering [S1, unofficial].
+-- **When to Use:** When a pure depth map is required for downstream tasks like geometry reconstruction or compositing [S1, unofficial].
+-- **When Not to Use:** When color or opacity information is needed [S1, unofficial].
++- **Time Complexity:** Linear with respect to the number of Gaussians and pixels, similar to standard Gaussian Splatting rasterization, as it uses the same tiled rasterization pipeline [S1, unofficial].
++- **Memory Complexity:** Low, as it only requires storing the depth and alpha buffers, plus the screenspace points tensor [S1, unofficial].
++- **Strengths:** Produces clean, consistent depth maps unaffected by per-Gaussian opacity variations, making it suitable for depth-based applications like compositing or depth-aware post-processing [S1, unofficial].
++- **Limitations:** Does not account for actual opacity variations, which can lead to inaccurate depth in semi-transparent regions compared to variable opacity methods [S1, unofficial][S2, unofficial].
++- **When to use:** When a geometrically accurate depth map is needed for downstream tasks like depth normalization or compositing, and opacity variations are not critical to the depth estimation [S1, unofficial].
++- **When not to use:** When accurate depth in semi-transparent regions is required, in which case Depth Rendering with Variable Opacity should be used [S2, unofficial].
+ 
+ ## Background
+-Depth Rendering with Constant Opacity is a technique developed within the context of 3D Gaussian Splatting to address the need for accurate depth extraction. It was introduced in the DNGaussian repository, which provides unofficial implementations and extensions to the original Gaussian Splatting framework [S1, unofficial]. The method is particularly useful in applications where geometric accuracy is paramount, such as in neural rendering and 3D reconstruction pipelines.
++Depth Rendering with Constant Opacity originates from the Gaussian Splatting ecosystem, specifically adapted for depth extraction in 3D Gaussian Avatar Reconstruction pipelines [S1, unofficial]. It was developed to address the need for clean depth maps that are not skewed by the varying opacity of Gaussians, which is common in standard rendering passes [S1, unofficial]. The method is implemented in unofficial repositories such as DNGaussian, which extend the original Gaussian Splatting codebase for specialized rendering tasks [S1, unofficial].
+ 
+ ## Sources
+-[S1] Fictionarry/DNGaussian, https://github.com/Fictionarry/DNGaussian, fetched 2026-10-27 (unofficial)+[S1] Fictionarry/DNGaussian, https://github.com/Fictionarry/DNGaussian, fetched 2026-10-27 (unofficial)
++[S2] brownvc/gftorf, https://github.com/brownvc/gftorf, fetched 2026-10-27 (unofficial)

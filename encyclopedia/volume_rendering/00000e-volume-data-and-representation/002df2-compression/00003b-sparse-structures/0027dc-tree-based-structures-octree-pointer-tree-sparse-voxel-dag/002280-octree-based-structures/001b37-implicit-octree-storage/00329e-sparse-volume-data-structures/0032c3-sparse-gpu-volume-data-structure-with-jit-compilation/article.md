@@ -11,10 +11,10 @@ JiTTree is a sparse hybrid volume data structure that combines multiple elementa
 *   **Output:** A JIT-compiled OpenCL kernel containing specialized traversal code and the memory layout for the optimal hybrid data structure [S1, unofficial].
 
 **Data Structures:**
-The volume is decomposed into bricks of size $m^3$. Each brick is assigned one of four elemental node types based on local sparsity [S1, unofficial]:
-1.  **Empty:** Omitted from storage; requires zero memory [S1, unofficial].
-2.  **Voxel List:** Stores sparse data as a list of quadruples $(x, y, z, \text{value})$. Coordinates are 2-byte integers; values are stored in a separate buffer. The list is sorted in Morton order [S1, unofficial].
-3.  **Pointer Octree:** A modified octree where leaf nodes store 8 data values (block size $2^3$) instead of single scalars. Internal nodes store 8 pointers. This reduces overhead to $\sim 1/6$ pointer per data entry for a full octree [S1, unofficial].
+The volume is decomposed into bricks of size $m^3$ [S1, unofficial]. Each brick is assigned one of four elemental node types based on local sparsity [S1, unofficial]:
+1.  **Empty:** Empty bricks are omitted from storage [S1, unofficial].
+2.  **Voxel List:** Stores sparse data as a list of quadruples $(x, y, z, \text{value})$ [S1, unofficial]. Coordinates are 2-byte integers; values are stored in a separate buffer. The list is sorted in Morton order [S1, unofficial].
+3.  **Pointer Octree:** A modified octree where leaf nodes store 8 data values (block size $2^3$) instead of single scalars [S1, unofficial]. Internal nodes store 8 pointers. This reduces overhead to $\sim 1/6$ pointer per data entry for a full octree [S1, unofficial].
 4.  **Dense Volume:** A Cartesian grid storing $m^3$ values per brick [S1, unofficial].
 
 **Root Level Layout:**
@@ -22,19 +22,19 @@ The root level is an array of nodes. Each node stores a tuple `(type, pointer)` 
 *   `type`: Enum identifying the elemental structure (empty, voxel list, octree, dense) [S1, unofficial].
 *   `pointer`: Two 4-byte integers. The interpretation depends on the type:
     *   **Dense:** Pointer into the global dense volume array. Size is $m^3 \times N_{dense}$ [S1, unofficial].
-    *   **Voxel List:** Pointer to the last element in a global list offset array. Access requires binary search on Morton-sorted coordinates [S1, unofficial].
+    *   **Voxel List:** Pointer to the last element in a global list offset array [S1, unofficial]. Access to voxel lists uses binary search on Morton-sorted coordinates [S1, unofficial].
     *   **Octree:** Pointer to the root of the subtree in a global octree pointer array. Leaf values are in a separate memory region [S1, unofficial].
     *   **Empty:** Null pointer [S1, unofficial].
 
 **Algorithm Steps:**
 
-1.  **Brick Classification:** Divide the volume into bricks of size $m^3$. For each brick, determine the optimal elemental node type by comparing memory requirements for all four types. Select the type with the minimum memory footprint [S1, unofficial].
-2.  **Global Optimization:** Repeat Step 1 for all candidate brick sizes $m$. Select the global minimum across all sizes as the memory-optimal solution [S1, unofficial].
-3.  **KD-Tree Construction:** Build a KD-tree to index the elemental bricks. Split the set of bricks at brick boundaries into large homogeneous regions containing only one elemental type. The splitting criterion maximizes information gain (minimizes entropy $E$ of brick types in a region $S$) [S1, unofficial].
-4.  **JIT Code Generation:** Transform the KD-tree and the root-level data into a single OpenCL kernel.
+1.  **Brick Classification:** Divide the volume into bricks of size $m^3$ [S1, unofficial]. For each brick, determine the optimal elemental node type by comparing memory requirements for all four types [S1, unofficial]. Select the type with the minimum memory footprint [S1, unofficial].
+2.  **Global Optimization:** Repeat Step 1 for all candidate brick sizes $m$ [S1, unofficial]. From the results of all considered brick sizes, the global minimum is picked as the memory-optimal solution [S1, unofficial].
+3.  **KD-Tree Construction:** Build a KD-tree to index the elemental bricks [S1, unofficial]. Split the set of bricks at brick boundaries into large homogeneous regions containing only one elemental type [S1, unofficial]. The splitting criterion maximizes information gain (minimizes entropy $E$ of brick types in a region $S$) [S1, unofficial].
+4.  **JIT Code Generation:** Transform the KD-tree and the root-level data into a single OpenCL kernel [S1, unofficial].
     *   Inline the comparison logic from the KD-tree nodes directly into the code, eliminating memory fetches for node keys [S1, unofficial].
     *   Perform dead code removal: Remove branches corresponding to elemental types not present in the optimal structure (e.g., if no voxel lists exist, remove voxel list traversal code) [S1, unofficial].
-    *   Implement empty space skipping: Use a simplified kd-restart algorithm. When an empty brick is hit, advance the ray to the most distant point on the empty brick's bounding box [S1, unofficial].
+    *   Implement empty space skipping: Use a simplified kd-restart algorithm [S1, unofficial]. When an empty brick is hit, advance the ray to the most distant point on the empty brick's bounding box [S1, unofficial].
     *   (Optional) Implement a software stack cache for regular access patterns to benefit ray traversal for small work group sizes [S1, unofficial].
 5.  **Data Initialization:**
     *   Initialize voxel lists on the GPU using histogram pyramids, ensuring Morton order sorting [S1, unofficial].
@@ -76,7 +76,7 @@ def jit_find(k):
         return 7
 ```
 
-For the full JiTTree, the generated kernel replaces the recursive `find(key, node)` calls with this flattened, data-dependent conditional logic, routing lookups to specialized functions for each elemental type [S1, unofficial].
+The JIT compilation flattens the recursive tree traversal into data-dependent conditional logic, eliminating memory fetches for node keys [S1, unofficial].
 
 **Parameters:**
 *   $m$: Side length of a data block (brick). Must be a power of two [S1, unofficial].
@@ -98,7 +98,7 @@ For the full JiTTree, the generated kernel replaces the recursive `find(key, nod
     *   Compilation Time: For Connectomics dataset ($1024^3$, 32,768 bricks, 2,148 leaves, max branch depth 22), KD-tree generation took 1085.25 ms and OpenCL compilation took 78,306 ms [S1, unofficial].
 *   **Strengths:** Superior memory usage for datasets with locally varying sparsity; reduces traversal overhead by eliminating pointer chasing and dead code [S1, unofficial].
 *   **Limitations:** Poor performance for ray casting on large, heterogeneous datasets due to branch divergence; limited by compiler leaf node count (32,768) [S1, unofficial].
-*   **When to Use:** Mean filtering (stencil access) on sparse GPU volumes with moderate brick counts.
+*   **When to Use:** Mean filtering (stencil access) on sparse GPU volumes with moderate brick counts [S1, unofficial].
 *   **When Not to Use:** Ray casting on large datasets with high brick counts or when exceeding compiler leaf node limits [S1, unofficial].
 
 ## Background

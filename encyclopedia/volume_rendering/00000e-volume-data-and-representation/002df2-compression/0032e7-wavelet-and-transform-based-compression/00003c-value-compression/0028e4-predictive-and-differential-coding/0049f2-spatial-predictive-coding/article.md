@@ -1,0 +1,117 @@
+# Spatial Predictive Coding
+
+Also called: Spatial Prediction for Feature Grids
+
+## Overview
+Spatial Predictive Coding reduces information redundancy in voxel grids by exploiting statistical dependence between spatially adjacent samples, analogous to adjacent pixel correlation in images [S1]. It sets itself apart from sibling methods by constructing a reference graph to select the optimal neighbor via Sum of Absolute Differences (SAD) and by performing quantization *before* prediction to improve parallelism [S1]. Unlike methods that predict raw values, this approach operates specifically on quantized feature vectors, calculating residuals from quantized references [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A grid of feature vectors (typically color/RGB features, not density) [S1].
+*   **Output:** A bitstream containing reference indices and encoded residuals [S1].
+
+**Data Structures:**
+*   **Feature Grid:** Stores quantized feature vectors $\hat{x}$ for each voxel.
+*   **Reference Index:** An integer identifying the chosen neighbor for each voxel.
+*   **Residual:** The difference between the current quantized feature and the reference quantized feature.
+
+**Parameters:**
+*   **Quantization:** Scalar quantization is used for feature vectors [S1].
+*   **Reference Scope:** Only complete, previously reconstructed voxels are used as references; interpolation at non-integer positions is not used [S1].
+*   **Block Size:** Voxels can be partitioned into blocks to share a single reference mode, trading prediction accuracy for lower index bit cost [S1].
+
+**Steps:**
+1.  **Quantization:** Quantize the original feature vector $x$ to obtain $\hat{x}$ using scalar quantization [S1].
+2.  **Reference Selection:** For each voxel, identify candidate neighbors (previously reconstructed voxels). Calculate the Sum of Absolute Differences (SAD) between the current quantized feature $\hat{x}$ and each candidate's quantized feature $\hat{x}_{ref}$ [S1].
+3.  **Optimal Reference:** Select the neighbor with the minimum SAD as the reference. Record the index of this reference in the bitstream [S1].
+4.  **Residual Calculation:** Compute the residual $y$ using the formula:
+    $$ y = \hat{x} - \hat{x}_{ref} $$
+    where $\hat{x}$ is the quantized feature to be coded and $\hat{x}_{ref}$ is the quantized reference feature [S1].
+5.  **Entropy Coding:** Encode the reference indices and the residuals $y$ using an entropy coder (e.g., Huffman or Arithmetic coding) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def spatial_predictive_encode(feature_grid):
+    """
+    Encodes a feature grid using spatial predictive coding.
+    feature_grid: List of feature vectors [x_1, x_2, ..., x_N]
+    Returns: bitstream containing reference indices and residuals
+    """
+    bitstream = []
+    reconstructed_features = [] # Stores quantized features for causal access
+    
+    # 1. Quantization
+    # Scalar quantization applied to each feature vector
+    quantized_features = [quantize_scalar(x) for x in feature_grid]
+    
+    for i, x_hat in enumerate(quantized_features):
+        # 2. Reference Selection
+        # Identify causal neighbors (previously reconstructed voxels)
+        candidates = reconstructed_features
+        
+        if not candidates:
+            # Edge case: First voxel, no reference available
+            # [G] Default to zero or previous frame if available; 
+            # source implies causal neighborhood, so first voxel has no spatial pred.
+            ref_index = -1 
+            x_ref_hat = [0, 0, 0] # [G] Placeholder for no reference
+        else:
+            # Calculate SAD for all candidates
+            min_sad = infinity
+            best_ref_index = -1
+            best_ref_hat = None
+            
+            for idx, x_ref_hat in enumerate(candidates):
+                sad = sum(abs(a - b) for a, b in zip(x_hat, x_ref_hat))
+                if sad < min_sad:
+                    min_sad = sad
+                    best_ref_index = idx
+                    best_ref_hat = x_ref_hat
+            
+            ref_index = best_ref_index
+            x_ref_hat = best_ref_hat
+
+        # 3. Residual Calculation
+        # y = x_hat - x_ref_hat
+        residual = [a - b for a, b in zip(x_hat, x_ref_hat)]
+        
+        # 4. Encode
+        # Encode reference index
+        bitstream.append(encode_index(ref_index))
+        # Encode residual
+        bitstream.append(encode_residual(residual))
+        
+        # 5. Update Reconstructed List (Closed-Loop)
+        reconstructed_features.append(x_hat)
+        
+    return bitstream
+
+def quantize_scalar(feature_vector):
+    """
+    Applies straightforward scalar quantization to a feature vector.
+    """
+    # [G] Implementation detail: typically rounding to nearest integer 
+    # or fixed-point representation. Source specifies scalar, not vector.
+    return [round(val) for val in feature_vector]
+```
+
+**Edge Cases and Pitfalls:**
+*   **High Bit Cost of Indices:** Selecting the optimal reference per voxel incurs a high bit cost for storing reference indexes [S1]. Mitigation: Partition voxels into blocks and select a single mode for all voxels within a block [S1].
+*   **Feature vs. Density:** Prediction is performed only on the feature grid, not on density grids, because color feature grids typically cost much more storage [S1].
+*   **Quantization Choice:** Scalar quantization is preferred over vector quantization to avoid difficulties in subsequent prediction and bitrate estimation [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Reference selection requires comparing the current voxel against all previously reconstructed causal neighbors. In a naive implementation, this is $O(N \cdot K)$ where $N$ is the number of voxels and $K$ is the number of causal neighbors. Block-based selection reduces this to $O(N)$ with a constant factor for block size.
+*   **Memory Complexity:** Requires storing the reconstructed feature grid for causal access.
+*   **Strengths:** Exploits strong spatial correlation in feature grids. Quantization before prediction improves parallelism.
+*   **Limitations:** High bit cost for reference indices if not block-quantized. Scalar quantization may be less efficient than vector quantization for high-dimensional features, though source notes residuals are often near zero [S1].
+*   **When to use:** When compressing feature grids (e.g., in NeRFs) where spatial correlation is high and storage cost of features is significant.
+*   **When not to use:** When density grids are the primary target (source specifies feature grids only).
+
+## Background
+Spatial Predictive Coding in the context of voxel-based radiance fields was proposed in "SPC-NeRF: Spatial Predictive Compression for Voxel-Based Radiance Field" [S1]. The method addresses the redundancy in feature grids by modeling the bit cost of residuals through a reference relation graph. It integrates with rate-distortion joint finetuning to optimize compression performance [S1].
+
+## Sources
+[S1] SPC-NeRF: Spatial Predictive Compression for Voxel-Based Radiance Field, https://doi.org/10.1145/3795528, fetched 2026-10-26

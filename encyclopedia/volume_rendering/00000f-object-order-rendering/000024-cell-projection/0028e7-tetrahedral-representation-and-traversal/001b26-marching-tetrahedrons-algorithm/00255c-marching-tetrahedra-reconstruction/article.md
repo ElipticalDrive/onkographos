@@ -11,7 +11,7 @@ Marching Tetrahedra Reconstruction is a surface reconstruction method that conve
 - `N`: Input vertex normals, shape $(N, 3)$.
 - `epsilon`: Distance control parameter.
 - `num_tets`: Grid resolution $\{n_x, n_y, n_z\}$.
-- `welland_radius`: Radius parameter for the Welland function (often derived from grid spacing or epsilon).
+- `welland_radius`: Radius parameter $h$ for the Welland function.
 - `return_largest`: Boolean flag to keep only the largest connected component.
 
 **Outputs:**
@@ -30,7 +30,7 @@ Marching Tetrahedra Reconstruction is a surface reconstruction method that conve
 **Steps:**
 
 1. **Preprocess Input:**
-   Scale vertices by `mesh_scale` (if applicable) and re-center them on the origin:
+   Re-center vertices on the origin:
    $$ V = V - \text{mean}(V, \text{axis}=0) $$
    [S1, unofficial]
 
@@ -38,20 +38,19 @@ Marching Tetrahedra Reconstruction is a surface reconstruction method that conve
    Calculate `eps` as:
    $$ \text{eps} = \epsilon \cdot \| \min(V) - \max(V) \| $$
    [S1, unofficial]
-   Initialize `C` (size $3N \times 3$) and `D` (size $3N$).
+   Initialize `C` (size $3N \times 3$) and `D` (size $3N$) [S1, unofficial].
    For each vertex $i$ from $0$ to $N-1$:
    a. Set $C[i] = V[i]$ and $D[i] = 0.0$.
-   b. Find the distance to the second nearest neighbor of $V[i]$ in $V$ (the nearest is itself). Let this be $d_{nn}$. If $d_{nn} = 0$, set $d_{nn} = 0.1$.
-   c. Compute constraint point $c_{out}$ and value $d_{out}$ by moving from $V[i]$ along normal $N[i]$ by distance `eps`, clamped by $d_{nn}$. Specifically, $c_{out} = V[i] + N[i] \cdot \text{eps}$, $d_{out} = \text{eps}$. If $\|c_{out} - V[i]\| > d_{nn}$, clamp the distance.
-   d. Set $C[N+i] = c_{out}$ and $D[N+i] = d_{out}$.
-   e. Compute constraint point $c_{in}$ and value $d_{in}$ by moving from $V[i]$ along normal $-N[i]$ by distance `eps`, clamped by $d_{nn}$.
-   f. Set $C[2N+i] = c_{in}$ and $D[2N+i] = -d_{in}$.
-   [S1, unofficial]
+   b. Find the distance to the second nearest neighbor of $V[i]$ in $V$ (the nearest is itself) [S1, unofficial]. Let this be $d_{nn}$. If $d_{nn} = 0$, set $d_{nn} = 0.1$.
+   c. Compute constraint point $c_{out}$ and value $d_{out}$ by moving from $V[i]$ along normal $N[i]$ by distance `eps`, clamped by $d_{nn}$ [S1, unofficial]. Specifically, $c_{out} = V[i] + N[i] \cdot \text{eps}$ [S1, unofficial]. If $\|c_{out} - V[i]\| > d_{nn}$, clamp the step to $d_{nn}$ along the normal direction [S1, unofficial]. Set $d_{out} = \text{eps}$.
+   d. Set $C[N+i] = c_{out}$ and $D[N+i] = d_{out}$ [S1, unofficial].
+   e. Compute constraint point $c_{in}$ and value $d_{in}$ by moving from $V[i]$ along normal $-N[i]$ by distance `eps`, clamped by $d_{nn}$ [S1, unofficial].
+   f. Set $C[2N+i] = c_{in}$ and $D[2N+i] = -d_{in}$ [S1, unofficial].
 
 3. **Generate Tet Grid:**
-   Compute grid bounds $g_{min} = \min(V)$ and $g_{max} = \max(V)$.
-   Add padding $p = \{\text{eps}, \text{eps}, \text{eps}\}$.
-   Generate grid vertices $TV$ of size $n_x n_y n_z$ using linear spacing over $[g_{min}-p, g_{max}+p]$.
+   Compute grid bounds $g_{min} = \min(V)$ and $g_{max} = \max(V)$ [S1, unofficial].
+   Add padding $p = \{\text{eps}, \text{eps}, \text{eps}\}$ [S1, unofficial].
+   Generate grid vertices $TV$ of size $n_x n_y n_z$ using linear spacing over $[g_{min}-p, g_{max}+p]$ [S1, unofficial].
    Generate tetrahedron connectivity $TF$. Each grid cell (cube) defined by corners $v_1 \dots v_8$ is split into 6 tetrahedra:
    - $T_1: (v_1, v_3, v_8, v_7)$
    - $T_2: (v_1, v_8, v_5, v_7)$
@@ -63,24 +62,22 @@ Marching Tetrahedra Reconstruction is a surface reconstruction method that conve
 
 4. **Compute Implicit Function Values:**
    For each grid vertex $p$ in $TV$:
-   a. Construct a basis vector $b(p)$ of degree 2: $[1, x, y, z, xy, xz, yz, x^2, y^2, z^2]$.
-   b. Construct the weights matrix $W$ for the Welland function. For each constraint point $C_j$ with value $D_j$, compute weight $w_j = \left( \frac{4 r_j}{h} + 1 \right) \left( 1 - \frac{r_j}{h} \right)^4$, where $r_j = \|p - C_j\|$ and $h$ is `welland_radius`. $W$ is diagonal with $W_{jj} = w_j$.
-   c. Construct the basis matrix $B$ where row $j$ is $b(C_j)$.
-   d. Solve for coefficients $a$ in the system $B^T W B a = B^T W D$. This is typically done via Cholesky decomposition ($LL^T$) or LDLT decomposition.
+   a. Construct a basis vector $b(p)$ of degree 2: $[1, x, y, z, xy, xz, yz, x^2, y^2, z^2]$ [S1, unofficial].
+   b. Construct the weights matrix $W$ for the Welland function [S1, unofficial]. For each constraint point $C_j$ with value $D_j$, compute weight $w_j = \left( \frac{4 r_j}{h} + 1 \right) \left( 1 - \frac{r_j}{h} \right)^4$, where $r_j = \|p - C_j\|$ and $h$ is `welland_radius`. $W$ is diagonal with $W_{jj} = w_j$ [S1, unofficial].
+   c. Construct the basis matrix $B$ where row $j$ is $b(C_j)$ [S1, unofficial].
+   d. Solve for coefficients $a$ in the system $B^T W B a = B^T W D$ [S1, unofficial]. This is typically done via Cholesky decomposition ($LL^T$) or LDLT decomposition [S1, unofficial].
    e. Evaluate $fx(p) = b(p) \cdot a$.
-   [S1, unofficial]
 
 5. **March Tetrahedra:**
    For each tetrahedron $T$ in $TF$ with vertices $p_0, p_1, p_2, p_3$ and values $v_0, v_1, v_2, v_3$:
-   a. Determine configuration index $C = 1 \cdot (v_0 < 0) + 2 \cdot (v_1 < 0) + 4 \cdot (v_2 < 0) + 8 \cdot (v_3 < 0)$.
-   b. Based on $C$, generate triangle vertices using linear interpolation on edges. The function `generate_triangle_point(p1, p2, v1, v2)` returns $p_1 + \frac{0 - v_1}{v_2 - v_1}(p_2 - p_1)$.
+   a. Determine configuration index $C = 1 \cdot (v_0 < 0) + 2 \cdot (v_1 < 0) + 4 \cdot (v_2 < 0) + 8 \cdot (v_3 < 0)$ [S1, unofficial].
+   b. Based on $C$, generate triangle vertices using linear interpolation on edges [S1, unofficial]. The function `generate_triangle_point(p1, p2, v1, v2)` returns $p_1 + \frac{0 - v_1}{v_2 - v_1}(p_2 - p_1)$ [S1, unofficial].
    c. Handle cases:
       - $C \in \{0, 15\}$: No triangles.
       - $C \in \{1, 2, 4, 8\}$: One triangle.
       - $C \in \{3, 5, 6, 9, 10, 12\}$: Two triangles.
-      - $C \in \{7, 11, 13, 14\}$: One triangle (note: source lists these as single triangle cases in the switch statement, but standard MT usually has 1 or 2 triangles for non-trivial cases. The source code explicitly handles 1 or 2 triangles per case).
+      - $C \in \{7, 11, 13, 14\}$: One triangle.
    d. Append generated vertices to $v_i$ and face indices to $f_i$.
-   [S1, unofficial]
 
 6. **Cleanup (if `return_largest` is true):**
    a. **Merge Vertices:** Build a KDTree from $SV$. For each vertex, find neighbors within tolerance $0.00001$. Compute the centroid of the cluster and replace all vertices in the cluster with this centroid. Update face indices accordingly.
@@ -93,12 +90,14 @@ Marching Tetrahedra Reconstruction is a surface reconstruction method that conve
 
 **Pseudocode:**
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
 import numpy as np
-from scipy.spatial import KDTree
-from scipy.linalg import cho_factor, cho_solve
+
+def generate_triangle_point(p1, p2, v1, v2):
+    denom = v2 - v1
+    if abs(denom) < 1e-9:
+        return (p1 + p2) / 2.0
+    return p1 + (0.0 - v1) / denom * (p2 - p1)
 
 def marching_tetrahedra_reconstruction(V, N, epsilon, num_tets, welland_radius, return_largest=True):
     # 1. Preprocess
@@ -111,12 +110,16 @@ def marching_tetrahedra_reconstruction(V, N, epsilon, num_tets, welland_radius, 
     D = np.zeros(3 * N_verts)
     
     # Build KDTree for neighbor search
-    tree = KDTree(V)
-    
+    tree = np.empty((N_verts, 3))
+    tree[:] = V
+    # Simple brute-force kNN for 2nd nearest neighbor to avoid external libs
+    def get_2nd_nn_dist(p, V):
+        dists = [np.linalg.norm(p - v) for v in V]
+        dists.sort()
+        return dists[1] if len(dists) > 1 else 0.1
+
     for i in range(N_verts):
-        # Self is nearest, get second nearest
-        dists, idxs = tree.query(V[i], k=2)
-        nn_dist = dists[1]
+        nn_dist = get_2nd_nn_dist(V[i], V)
         if nn_dist == 0:
             nn_dist = 0.1
             
@@ -127,9 +130,9 @@ def marching_tetrahedra_reconstruction(V, N, epsilon, num_tets, welland_radius, 
         # Constraint 2: Outside
         c_out = V[i] + N[i] * eps
         if np.linalg.norm(c_out - V[i]) > nn_dist:
-            c_out = V[i] + N[i] * (nn_dist / np.linalg.norm(N[i])) # Normalize N if not unit
+            c_out = V[i] + N[i] * (nn_dist / np.linalg.norm(N[i]))
         C[N_verts + i] = c_out
-        D[N_verts + i] = eps # Simplified: source uses norm of n*eps
+        D[N_verts + i] = eps 
         
         # Constraint 3: Inside
         c_in = V[i] - N[i] * eps
@@ -180,21 +183,18 @@ def marching_tetrahedra_reconstruction(V, N, epsilon, num_tets, welland_radius, 
 
     # 4. Compute Implicit Field
     fx = np.zeros(nx * ny * nz)
-    basis_dim = 10 # Degree 2
+    basis_dim = 10 
     
     for idx in range(nx * ny * nz):
         p = TV[idx]
-        # Basis vector for p
         x, y, z = p
         b_p = np.array([1, x, y, z, x*y, x*z, y*z, x*x, y*y, z*z])
         
-        # Basis matrix B for constraints
         B = np.zeros((3 * N_verts, basis_dim))
         for j in range(3 * N_verts):
             cx, cy, cz = C[j]
             B[j] = np.array([1, cx, cy, cz, cx*cy, cx*cz, cy*cz, cx*cx, cy*cy, cz*cz])
             
-        # Weights matrix W
         W = np.zeros((3 * N_verts, 3 * N_verts))
         for j in range(3 * N_verts):
             r = np.linalg.norm(p - C[j])
@@ -202,14 +202,11 @@ def marching_tetrahedra_reconstruction(V, N, epsilon, num_tets, welland_radius, 
             w = w**4
             W[j, j] = w
             
-        # Solve L a = R where L = B^T W B, R = B^T W D
         L = B.T @ W @ B
         R = B.T @ W @ D
         
-        # Use Cholesky decomposition
         try:
-            cho, low = cho_factor(L)
-            a = cho_solve((cho, low), R)
+            a = np.linalg.solve(L, R)
         except np.linalg.LinAlgError:
             a = np.linalg.lstsq(L, R, rcond=None)[0]
             
@@ -220,11 +217,6 @@ def marching_tetrahedra_reconstruction(V, N, epsilon, num_tets, welland_radius, 
     f_i = []
     t = 0
     
-    def interp(p1, p2, v1, v2):
-        if abs(v2 - v1) < 1e-9:
-            return (p1 + p2) / 2.0
-        return p1 + (0 - v1) / (v2 - v1) * (p2 - p1)
-        
     for tet_idx in range(TF.shape[0]):
         tet = TF[tet_idx]
         p0, p1, p2, p3 = TV[tet[0]], TV[tet[1]], TV[tet[2]], TV[tet[3]]
@@ -240,130 +232,136 @@ def marching_tetrahedra_reconstruction(V, N, epsilon, num_tets, welland_radius, 
             continue
             
         if config == 1:
-            t1a = interp(p0, p1, v0, v1)
-            t2a = interp(p0, p2, v0, v2)
-            t3a = interp(p0, p3, v0, v3)
+            t1a = generate_triangle_point(p0, p1, v0, v1)
+            t2a = generate_triangle_point(p0, p2, v0, v2)
+            t3a = generate_triangle_point(p0, p3, v0, v3)
             v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
             f_i.extend([t, t+1, t+2])
             t += 3
         elif config == 2:
-            t1a = interp(p1, p0, v1, v0)
-            t2a = interp(p1, p3, v1, v3)
-            t3a = interp(p1, p2, v1, v2)
+            t1a = generate_triangle_point(p1, p0, v1, v0)
+            t2a = generate_triangle_point(p1, p3, v1, v3)
+            t3a = generate_triangle_point(p1, p2, v1, v2)
             v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
             f_i.extend([t, t+1, t+2])
             t += 3
         elif config == 3:
-            t1a = interp(p0, p3, v0, v3)
-            t2a = interp(p1, p2, v1, v2)
-            t3a = interp(p1, p3, v1, v3)
+            t1a = generate_triangle_point(p0, p3, v0, v3)
+            t2a = generate_triangle_point(p1, p2, v1, v2)
+            t3a = generate_triangle_point(p1, p3, v1, v3)
             v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
             f_i.extend([t+2, t+1, t])
             t += 3
             t1b = t2a
             t2b = t1a
-            t3b = interp(p0, p2, v0, v2)
+            t3b = generate_triangle_point(p0, p2, v0, v2)
             v_i.extend(t1b); v_i.extend(t2b); v_i.extend(t3b)
             f_i.extend([t+2, t+1, t])
             t += 3
         elif config == 4:
-            t1a = interp(p2, p0, v2, v0)
-            t2a = interp(p2, p1, v2, v1)
-            t3a = interp(p2, p3, v2, v3)
+            t1a = generate_triangle_point(p2, p0, v2, v0)
+            t2a = generate_triangle_point(p2, p1, v2, v1)
+            t3a = generate_triangle_point(p2, p3, v2, v3)
             v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
             f_i.extend([t+2, t+1, t])
             t += 3
         elif config == 5:
-            t1a = interp(p0, p1, v0, v1)
-            t2a = interp(p0, p3, v0, v3)
-            t3a = interp(p2, p3, v2, v3)
-            v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
-            f_i.extend([t, t+1, t+2])
-            t += 3
-            t1b = t2a
-            t2b = t3a
-            t3b = interp(p0, p2, v0, v2)
-            v_i.extend(t1b); v_i.extend(t2b); v_i.extend(t3b)
-            f_i.extend([t, t+1, t+2])
-            t += 3
-        elif config == 6:
-            t1a = interp(p0, p1, v0, v1)
-            t2a = interp(p0, p2, v0, v2)
-            t3a = interp(p1, p2, v1, v2)
+            t1a = generate_triangle_point(p0, p3, v0, v3)
+            t2a = generate_triangle_point(p1, p2, v1, v2)
+            t3a = generate_triangle_point(p0, p1, v0, v1)
             v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
             f_i.extend([t+2, t+1, t])
             t += 3
+            t1b = t2a
+            t2b = generate_triangle_point(p2, p3, v2, v3)
+            t3b = t3a
+            v_i.extend(t1b); v_i.extend(t2b); v_i.extend(t3b)
+            f_i.extend([t+2, t+1, t])
+            t += 3
+        elif config == 6:
+            t1a = generate_triangle_point(p0, p1, v0, v1)
+            t2a = generate_triangle_point(p1, p3, v1, v3)
+            t3a = generate_triangle_point(p0, p2, v0, v2)
+            v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
+            f_i.extend([t, t+1, t+2])
+            t += 3
+            t1b = t3a
+            t2b = t2a
+            t3b = generate_triangle_point(p2, p3, v2, v3)
+            v_i.extend(t1b); v_i.extend(t2b); v_i.extend(t3b)
+            f_i.extend([t, t+1, t+2])
+            t += 3
         elif config == 7:
-            t1a = interp(p3, p0, v3, v0)
-            t2a = interp(p3, p2, v3, v2)
-            t3a = interp(p3, p1, v3, v1)
+            t1a = generate_triangle_point(p3, p0, v3, v0)
+            t2a = generate_triangle_point(p3, p2, v3, v2)
+            t3a = generate_triangle_point(p3, p1, v3, v1)
             v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
             f_i.extend([t+2, t+1, t])
             t += 3
         elif config == 8:
-            t1a = interp(p3, p0, v3, v0)
-            t2a = interp(p3, p2, v3, v2)
-            t3a = interp(p3, p1, v3, v1)
+            t1a = generate_triangle_point(p3, p0, v3, v0)
+            t2a = generate_triangle_point(p3, p2, v3, v2)
+            t3a = generate_triangle_point(p3, p1, v3, v1)
             v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
             f_i.extend([t, t+1, t+2])
             t += 3
         elif config == 9:
-            t1a = interp(p0, p1, v0, v1)
-            t2a = interp(p1, p3, v1, v3)
-            t3a = interp(p0, p2, v0, v2)
+            t1a = generate_triangle_point(p0, p1, v0, v1)
+            t2a = generate_triangle_point(p1, p3, v1, v3)
+            t3a = generate_triangle_point(p0, p2, v0, v2)
             v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
             f_i.extend([t+2, t+1, t])
             t += 3
             t1b = t3a
             t2b = t2a
-            t3b = interp(p2, p3, v2, v3)
+            t3b = generate_triangle_point(p2, p3, v2, v3)
             v_i.extend(t1b); v_i.extend(t2b); v_i.extend(t3b)
             f_i.extend([t+2, t+1, t])
             t += 3
         elif config == 10:
-            t1a = interp(p0, p1, v0, v1)
-            t2a = interp(p0, p3, v0, v3)
-            t3a = interp(p1, p2, v1, v2)
+            t1a = generate_triangle_point(p0, p1, v0, v1)
+            t2a = generate_triangle_point(p0, p3, v0, v3)
+            t3a = generate_triangle_point(p1, p2, v1, v2)
             v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
             f_i.extend([t, t+1, t+2])
             t += 3
             t1b = t2a
-            t2b = interp(p2, p3, v2, v3)
+            t2b = generate_triangle_point(p2, p3, v2, v3)
             t3b = t3a
             v_i.extend(t1b); v_i.extend(t2b); v_i.extend(t3b)
             f_i.extend([t, t+1, t+2])
             t += 3
         elif config == 11:
-            t1a = interp(p2, p0, v2, v0)
-            t2a = interp(p2, p1, v2, v1)
-            t3a = interp(p2, p3, v2, v3)
+            t1a = generate_triangle_point(p2, p0, v2, v0)
+            t2a = generate_triangle_point(p2, p1, v2, v1)
+            t3a = generate_triangle_point(p2, p3, v2, v3)
             v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
             f_i.extend([t+2, t+1, t])
             t += 3
         elif config == 12:
-            t1a = interp(p0, p2, v0, v2)
-            t2a = interp(p1, p2, v1, v2)
-            t3a = interp(p1, p3, v1, v3)
+            t1a = generate_triangle_point(p0, p2, v0, v2)
+            t2a = generate_triangle_point(p1, p2, v1, v2)
+            t3a = generate_triangle_point(p1, p3, v1, v3)
             v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
             f_i.extend([t, t+1, t+2])
             t += 3
             t1b = t3a
-            t2b = interp(p0, p3, v0, v3)
+            t2b = generate_triangle_point(p0, p3, v0, v3)
             t3b = t1a
             v_i.extend(t1b); v_i.extend(t2b); v_i.extend(t3b)
             f_i.extend([t, t+1, t+2])
             t += 3
         elif config == 13:
-            t1a = interp(p1, p0, v1, v0)
-            t2a = interp(p1, p3, v1, v3)
-            t3a = interp(p1, p2, v1, v2)
+            t1a = generate_triangle_point(p1, p0, v1, v0)
+            t2a = generate_triangle_point(p1, p3, v1, v3)
+            t3a = generate_triangle_point(p1, p2, v1, v2)
             v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
             f_i.extend([t+2, t+1, t])
             t += 3
         elif config == 14:
-            t1a = interp(p0, p1, v0, v1)
-            t2a = interp(p0, p2, v0, v2)
-            t3a = interp(p0, p3, v0, v3)
+            t1a = generate_triangle_point(p0, p1, v0, v1)
+            t2a = generate_triangle_point(p0, p2, v0, v2)
+            t3a = generate_triangle_point(p0, p3, v0, v3)
             v_i.extend(t1a); v_i.extend(t2a); v_i.extend(t3a)
             f_i.extend([t+2, t+1, t])
             t += 3
@@ -374,23 +372,17 @@ def marching_tetrahedra_reconstruction(V, N, epsilon, num_tets, welland_radius, 
     # 6. Cleanup
     if return_largest and len(SV) > 0:
         # Merge vertices
-        merge_tree = KDTree(SV)
-        merged_verts = []
-        visited = set()
-        current_new_v_i = 0
-        
-        # This part is complex to parallelize and requires careful index management
-        # Simplified sequential merge
+        merge_tree = np.empty((len(SV), 3))
+        merge_tree[:] = SV
         new_SV = []
-        new_SF = []
+        visited = set()
         vert_map = {}
         
         for i in range(len(SV)):
             if i in visited:
                 continue
-            dists, idxs = merge_tree.query(SV[i], k=100) # Approximate neighborhood
-            # Filter by tolerance
-            neighbors = [idxs[j] for j in range(len(dists)) if dists[j] < 0.00001]
+            dists = [np.linalg.norm(SV[i] - v) for v in SV]
+            neighbors = [j for j, d in enumerate(dists) if d < 0.00001]
             
             if not neighbors:
                 neighbors = [i]
@@ -406,6 +398,7 @@ def marching_tetrahedra_reconstruction(V, N, epsilon, num_tets, welland_radius, 
         SV = np.array(new_SV)
         
         # Remap faces
+        new_SF = []
         for face in SF:
             new_face = [vert_map[f] for f in face]
             new_SF.append(new_face)
@@ -421,7 +414,6 @@ def marching_tetrahedra_reconstruction(V, N, epsilon, num_tets, welland_radius, 
             adj[f[2]].append(f[0])
             adj[f[2]].append(f[1])
             
-        # Remove duplicates in adj
         for k in adj:
             adj[k] = list(set(adj[k]))
             
@@ -447,25 +439,30 @@ def marching_tetrahedra_reconstruction(V, N, epsilon, num_tets, welland_radius, 
                 max_size = len(comp)
                 largest_comp = comp
                 
-        # Keep only largest component faces
         comp_set = set(largest_comp)
         final_SF = [f for f in SF if f[0] in comp_set and f[1] in comp_set and f[2] in comp_set]
         final_SV = SV[list(comp_set)]
         
-        # Remap SF indices to compact 0..M-1
         idx_map = {old: new for new, old in enumerate(comp_set)}
         final_SF = [[idx_map[f[0]], idx_map[f[1]], idx_map[f[2]]] for f in final_SF]
         
         return final_SV, np.array(final_SF)
         
     return SV, SF
-```
+
+**Pitfalls:**
+- Using conservative matrix resizing (e.g., repeated `push_back` or resize on Eigen matrices) is extremely slow. The implementation avoids this by filling temporary vectors (`v_i`, `f_i`) and converting to matrices only once at the end [S1, unofficial].
+- The `merge_vertices` function is not parallelizable because range search requires unique results, making iterations dependent. Additionally, `replace_values` may cause race conditions if `merge_vertices` is parallelized [S1, unofficial].
+- The `connected_components` function is not easy to parallelize because the `seen` vector makes iterations dependent on each other [S1, unofficial].
+- Accessing `adj.at(u)` multiple times in the DFS loop is inefficient. A suggestion is to make a local copy of `adj.at(u)` [S1, unofficial].
+- The `add_edge` function uses linear search (`find`) to check for duplicates, which is slow. A suggestion is to ensure the vector is sorted and perform binary search [S1, unofficial].
+- Using `unordered_map` for the adjacency list is inefficient for DFS. A suggestion is to replace `unordered_map` with `vector<vector<T>>` to speed up DFS execution [S1, unofficial].
 
 ## Operating characteristics
 - **Time Complexity:** Dominated by the implicit field evaluation, which involves solving a linear system for each grid vertex. With $N$ constraints and $V_g$ grid vertices, the cost is roughly $O(V_g \cdot N^3)$ if naive inversion is used, or $O(V_g \cdot N^2)$ with optimized solvers, as the system size is $10 \times 10$ (degree 2 basis), so it is effectively constant per vertex but depends on the number of constraints $N$ if the basis size changes. The source uses a fixed degree 2 basis, so the linear system is always $10 \times 10$. The dominant cost is the matrix multiplication $B^T W B$ and the solve.
 - **Memory Complexity:** $O(N + V_g)$. The constraint matrices $C, D$ are $O(N)$. The grid $TV, TF$ is $O(V_g)$. The implicit field $fx$ is $O(V_g)$.
-- **Performance:** The implementation notes that conservative matrix resizing (e.g., repeated `push_back`) is extremely slow and recommends filling temporary vectors and converting to matrices once [S1, unofficial]. The merge vertices and connected components steps are not easily parallelizable due to data dependencies [S1, unofficial].
-- **Strengths:** Eliminates ambiguity cases of Marching Cubes. Uses normals to guide the implicit field, providing better reconstruction for sparse or noisy data [S1, unofficial].
+- **Performance:** The implementation notes that conservative matrix resizing is extremely slow and recommends filling temporary vectors and converting to matrices once [S1, unofficial]. The merge vertices and connected components steps are not easily parallelizable due to data dependencies [S1, unofficial].
+- **Strengths:** Eliminates ambiguity cases of Marching Cubes. Uses normals to guide the implicit field [S1, unofficial].
 - **Limitations:** Requires normals as input. The Welland function evaluation is computationally expensive per grid point. The cleanup steps (merging, connected components) are sequential bottlenecks [S1, unofficial].
 
 ## Background
