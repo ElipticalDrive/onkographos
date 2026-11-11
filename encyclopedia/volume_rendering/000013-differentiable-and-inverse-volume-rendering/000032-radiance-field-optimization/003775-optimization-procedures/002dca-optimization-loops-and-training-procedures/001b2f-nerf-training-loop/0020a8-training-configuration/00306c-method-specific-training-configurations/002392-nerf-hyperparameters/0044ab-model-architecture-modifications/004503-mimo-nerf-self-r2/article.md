@@ -1,0 +1,78 @@
+# MIMO-NeRF-self-R2
+
+Also called: MIMO-NeRF with reduction factors R1=1, R2=1
+
+## Overview
+MIMO-NeRF-self-R2 is a specific configuration of the MIMO-NeRF architecture that utilizes two reformulated Multi-Input Multi-Output (MIMO) Multi-Layer Perceptrons (MLPs) with reduction factors $R^1=1$ and $R^2=1$ [S1]. It addresses the computational bottleneck of standard NeRF training by grouping rays and processing them in parallel through shared MLP instances, thereby reducing the total number of MLP forward passes required per training step [S1]. Unlike the baseline MIMO-NeRF which may use different reduction strategies, MIMO-NeRF-self-R2 is designed to balance training speed and rendering quality, achieving performance comparable to more complex variants like MIMO-NeRF-distill while maintaining faster training times than the original NeRF [S1].
+
+## How it works
+MIMO-NeRF-self-R2 builds on the MIMO-NeRF framework [S1]. It modifies the training loop by grouping rays and assigning them to a subset of MLPs defined by the reduction factors $R^m$ [S1].
+
+**Inputs and Outputs:**
+*   **Inputs:** A batch of $N$ rays, a group size parameter $N_p$ (number of rays per group), and the reduction factors $R^1=1, R^2=1$ [S1].
+*   **Outputs:** Rendered colors for the batch of rays, and gradients for the MLP weights [S1].
+
+**Data Structures:**
+*   **Ray Groups:** The $N$ rays are partitioned into groups. The number of groups is determined by the reduction factors.
+*   **MLP Instances:** There are $M$ MLP instances, where $M$ is the total number of MLPs running. For MIMO-NeRF-self-R2, $M = 2 \frac{N}{N_p}$ [S1].
+
+**Number of MLPs:**
+The total number of MLPs running in a single step is calculated as [S1]:
+$$
+\sum_{m=1}^2 \frac{N}{N_p} R^m = N \frac{2}{N_p}
+$$
+This value is strictly less than $N$ when $N_p > 2$ [S1].
+
+**Algorithm Steps:**
+1.  **Ray Grouping:** Divide the $N$ randomly sampled rays into groups. The specific grouping logic follows the MIMO-NeRF self-distillation approach, where rays are grouped to share MLP computations [S1].
+2.  **MLP Assignment:** Assign each group to one of the $M$ available MLP instances. The number of instances is determined by the formula above [S1].
+3.  **Forward Pass:** For each ray in a group, query the assigned MLP instance to obtain volume density $\sigma$ and color $\mathbf{c}$ at the sampled points along the ray [S1].
+    *   *Note:* The source notes that in typical NeRF training, rays are randomly sampled, so a batch does not necessarily include near rays, and searching for near points across different rays is non-trivial due to uneven hierarchical sampling [S1].
+4.  **Rendering:** Compute the final color for each ray using the standard volume rendering integral with the queried $\sigma$ and $\mathbf{c}$ [S1].
+5.  **Loss Computation:** Calculate the loss between rendered colors and ground truth images [S1].
+6.  **Backpropagation:** Update the weights of the MLP instances based on the computed gradients [S1].
+
+**Parameters:**
+*   $N_p$: Number of rays per group. Typical values used in evaluation are $N_p=4$ and $N_p=8$ [S1].
+*   $R^1, R^2$: Reduction factors. For MIMO-NeRF-self-R2, $R^1=1$ and $R^2=1$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Padding:** When a group shift is conducted, padding is performed. The number of group shifts is added to the number of MLPs running. However, the number of group shifts is equal to or smaller than the number of reformulated MIMO MLPs, so the effect on performance is small [S1].
+*   **Constraint:** The formula $N \frac{2}{N_p} < N$ holds only when $N_p > 2$ [S1].
+
+## Subtopics
+
+### MIMO-NeRF-self-R5
+A variant using two reformulated MIMO MLPs with reduction factors $R^1=1$ and $R^2=N_p/2$ [S1]. The total number of MLPs running is $\sum_{m=1}^2 \frac{N}{N_p} R^m = N \left( \frac{1}{2} + \frac{1}{N_p} \right) < N$ when $N_p > 2$ [S1]. On the Blender dataset with $N_p=4$, it achieves PSNR 29.81, SSIM 0.939, LPIPS 0.076, and T-time 4.38h. On the LLFF dataset with $N_p=4$, it achieves PSNR 26.61, SSIM 0.838, LPIPS 0.202, and T-time 3.37h [S1]. This method is identical to MIMO-NeRF-self-R1 when $N_p=4$ [S1].
+
+### MIMO-NeRF-self-R4
+A variant adopting two reformulated MIMO MLPs with reduction factors $R^1=1$ and $R^2=2$ [S1]. The total number of MLPs running is $\sum_{m=1}^2 \frac{N}{N_p} R^m = N \frac{3}{N_p} < N$ when $N_p > 3$ [S1]. On the Blender dataset with $N_p=4$, it achieves PSNR 29.86, SSIM 0.939, LPIPS 0.077, and T-time 3.33h. On the LLFF dataset with $N_p=4$, it achieves PSNR 26.61, SSIM 0.836, LPIPS 0.205, and T-time 2.41h [S1]. This method is identical to MIMO-NeRF-self-R1 when $N_p=4$ [S1].
+
+### MIMO-NeRF-self-R6
+A variant using three reformulated MIMO MLPs with reduction factors $R^1=1, R^2=1, R^3=1$ [S1]. The total number of MLPs running is $\sum_{m=1}^3 \frac{N}{N_p} R^m = N \frac{3}{N_p} < N$ when $N_p > 3$ [S1]. On the Blender dataset with $N_p=4$, it achieves PSNR 30.11, SSIM 0.941, LPIPS 0.074, and T-time 3.76h. On the LLFF dataset with $N_p=4$, it achieves PSNR 26.41, SSIM 0.830, LPIPS 0.208, and T-time 2.73h [S1]. This method is identical to MIMO-NeRF-self-R3 when $N_p=4$ [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The method reduces the total number of MLP forward passes from $N$ (in standard NeRF) to $N \frac{2}{N_p}$ for MIMO-NeRF-self-R2 [S1]. This reduction leads to faster training times.
+
+**Measured Performance:**
+*   **Blender Dataset ($N_p=4$):** PSNR 30.95, SSIM 0.950, LPIPS 0.060, Training Time 3.65h [S1].
+*   **LLFF Dataset ($N_p=4$):** PSNR 27.35, SSIM 0.861, LPIPS 0.169, Training Time 2.70h [S1].
+*   **Blender Dataset ($N_p=8$):** PSNR 30.02, SSIM 0.940, LPIPS 0.076, Training Time 2.61h [S1].
+*   **LLFF Dataset ($N_p=8$):** PSNR 26.52, SSIM 0.833, LPIPS 0.207, Training Time 2.13h [S1]
+
+**Scaling:**
+Increasing $N_p$ reduces the number of MLPs running, further decreasing training time but potentially impacting quality. For example, increasing $N_p$ from 4 to 8 on the Blender dataset reduces training time from 3.65h to 2.61h, with a slight drop in PSNR from 30.95 to 30.02 [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** MIMO-NeRF-self-R2 achieves performance comparable to MIMO-NeRF-distill while achieving faster training than the original NeRF [S1]. It is particularly effective when $N_p=4$ on both Blender and LLFF datasets [S1].
+*   **Limitations:** It is outperformed by MIMO-NeRF-self-R1 (the main variant) in most cases in terms of PSNR, SSIM, and LPIPS [S1].
+
+**When to Use:**
+Use MIMO-NeRF-self-R2 when a balance between training speed and quality is needed, and when $N_p=4$ is a suitable group size. It is a good alternative to MIMO-NeRF-distill when faster training is prioritized over marginal quality gains [S1].
+
+## Background
+MIMO-NeRF-self-R2 is introduced in the paper "MIMO-NeRF: Fast Neural Rendering with Multi-input Multi-output Neural Radiance Fields" [S1]. The paper proposes MIMO-NeRF as a method to accelerate NeRF training by leveraging multi-input multi-output MLPs. MIMO-NeRF-self-R2 is one of several reformulation variants (along with R3, R4, R5, R6) explored to optimize the trade-off between computational efficiency and rendering quality [S1].
+
+## Sources
+[S1] MIMO-NeRF: Fast Neural Rendering with Multi-input Multi-output Neural Radiance Fields, https://arxiv.org/abs/2310.01821v1, fetched 2026-10-26

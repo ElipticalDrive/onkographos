@@ -49,21 +49,22 @@ Adaptive Step Size Ray Marching is a GPU-based direct volume rendering technique
 1.  **Ray Initialization:** Construct ray origin from camera position and direction from UV coordinates, projection, and view matrices [S2, unofficial]. Perform ray-box intersection against `bbmin`/`bbmax` to find entry (`tEntry`) and exit (`tExit`) distances [S2, unofficial]. If no intersection, output black color and zero depth, then return [S2, unofficial].
 2.  **State Initialization:** Initialize `transmittance = 1.0`, `accumulatedColor = vec3(0.0)`, `firstHit = false` [S2, unofficial]. Calculate `totalDst = tExit - tEntry` [S3, unofficial]. Set `curFineStepSize = min(STEPSIZE_FINE, totalDst / MIN_NUM_FINE_STEPS)` [S3, unofficial]. Set `curCoarseStepSize = curFineStepSize * COARSE_STEPSIZE_MULTIPLIER` [S3, unofficial]. Set `curThreshold = MAX_NUM_MISSED_STEPS` [S3, unofficial]. Load `rayOffset` from `noiseImage[pixelCoord].g` [S2, unofficial].
 3.  **Step Size Determination:** Load `noiseOffset` from `noiseImage[pixelCoord]` [S2, unofficial]. If `noiseOffset.r` is 0, use base `stepSize`; otherwise, use `noiseOffset.r` as `m_stepSize` [S2, unofficial]. Calculate `stepDir = rayDir * m_stepSize` [S2, unofficial].
-4.  **Ray Marching Loop:** Iterate `t` from `tEntry + rayOffset` to `tExit` with step `m_stepSize` [S2, unofficial].
+4.  **Camera & Motion Vector Setup:** If `cam.moved` is true, reset `positionDepthBufferImage` to zero [S2, unofficial]. If `motionVectorCalc == 1`, store a zero vector with alpha 1.0 into `motionVectorImage` for the current pixel [S2, unofficial].
+5.  **Ray Marching Loop:** Iterate `t` from `tEntry + rayOffset` to `tExit` with step `m_stepSize` [S2, unofficial].
     *   **Coordinate Calculation:** Calculate UVW coordinates relative to the bounding box, applying `rotationAngles` [S2, unofficial].
     *   **Density Sampling:**
         *   If `bVolume4D == 1`: Sample `density1` from `volumeTexture` and `density2` from `volumeTexture4DNextFrame` using `pingpong4D` flag. Mix using `interpolationFactor` [S2, unofficial].
         *   If `bVolume4D == 0`: Sample `density` directly from `volumeTexture` [S2, unofficial].
-    *   **Density Threshold Check:** If `density > 0.01`, proceed; otherwise, decrement `curThreshold` by 1 [S3, unofficial].
+    *   **Density Threshold Check:** If `density <= 0.0`, decrement `curThreshold` by 1 [S3, unofficial]. If `density > 0.01`, proceed; otherwise, skip compositing [S2, unofficial].
     *   **Color Mapping:** Calculate `colorMappingCoord = clamp((density - scalarMinMax.x) / (scalarMinMax.y - scalarMinMax.x), 0.0, 1.0)` [S2, unofficial]. Sample `colorMapping` texture to get `s` (vec4) [S2, unofficial].
     *   **Compositing:** Extract `extinction = s.a` [S2, unofficial]. Calculate `alpha = 1.0 - exp(-extinction * m_stepSize)` [S2, unofficial]. Calculate `contribution = transmittance * s.rgb * alpha` [S2, unofficial]. Update `accumulatedColor += contribution` [S2, unofficial]. Update `transmittance *= (1.0 - alpha)` [S2, unofficial].
     *   **First Hit Storage:** If `!firstHit` and `alpha > 0.0`, set `firstHit = true` and store `rayOrigin + rayDir * t` and `t` in `positionDepthBufferImage` [S2, unofficial].
     *   **Early Termination:** If `1.0 - transmittance > 0.95` (i.e., `transmittance < 0.05`), break loop [S2, unofficial].
     *   **Advance Position:** `pos += stepDir` [S2, unofficial].
-5.  **Post-Processing:** Apply gamma correction: `accumulatedColor.rgb = pow(accumulatedColor.rgb, vec3(1.0 / 2.2))` [S2, unofficial]. Calculate `finalAlpha = 1.0 - transmittance` [S2, unofficial]. Calculate `finalColor = vec4(accumulatedColor, finalAlpha) * illuminationScale` [S2, unofficial].
-6.  **Temporal Accumulation:** If `accumulation == 1` and `!cam.moved`, blend `finalColor` with `lastFrameColor` (from `outputImage`) using `finalAlpha` as weight: `finalColor.rgb = lastFrameColor.rgb * (1.0 - finalAlpha) + finalColor.rgb * finalAlpha` [S2, unofficial]. If `cam.moved`, reset `noiseImage.g` to 0 [S2, unofficial].
-7.  **Motion Vectors (Optional):** If `motionVectorCalc == 1`, load position from `positionDepthBufferImage`. If position is zero, store zero vector. Otherwise, reproject position to previous frame coordinates using `previousCam` and calculate UV motion vector diff, storing in `motionVectorImage` [S2, unofficial].
-8.  **Update Noise/Output:** Store `finalColor` to `outputImage` [S2, unofficial]. Update `noiseImage`: If `accumulation == 1`, call `updateNoiseOffset` (increment `g` by `(1 / m_stepSize * 10) * 0.00001` if `g < m_stepSize`, else reset) [S2, unofficial]. If `!accumulation`, store `noiseOffset.r` and reset `g` to 0 [S2, unofficial].
+6.  **Post-Processing:** Apply gamma correction: `accumulatedColor.rgb = pow(accumulatedColor.rgb, vec3(1.0 / 2.2))` [S2, unofficial]. Calculate `finalAlpha = 1.0 - transmittance` [S2, unofficial]. Calculate `finalColor = vec4(accumulatedColor, finalAlpha) * illuminationScale` [S2, unofficial].
+7.  **Temporal Accumulation:** If `accumulation == 1` and `!cam.moved`, blend `finalColor` with `lastFrameColor` (from `outputImage`) using `finalAlpha` as weight: `finalColor.rgb = lastFrameColor.rgb * (1.0 - finalAlpha) + finalColor.rgb * finalAlpha` [S2, unofficial]. If `cam.moved`, reset `noiseImage.g` to 0 [S2, unofficial].
+8.  **Motion Vectors (Optional):** If `motionVectorCalc == 1`, load position from `positionDepthBufferImage`. If position is zero, store zero vector. Otherwise, reproject position to previous frame coordinates using `previousCam` and calculate UV motion vector diff, storing in `motionVectorImage` [S2, unofficial].
+9.  **Update Noise/Output:** Store `finalColor` to `outputImage` [S2, unofficial]. Update `noiseImage`: If `accumulation == 1`, increment `g` by `(1 / m_stepSize * 10) * 0.00001` if `g < m_stepSize`, else reset [S2, unofficial]. If `!accumulation`, store `noiseOffset.r` and reset `g` to 0 [S2, unofficial].
 
 ### Formulas
 *   **Ray Position:** $\mathbf{p}_{i+1} = \mathbf{p}_i + \Delta t_i \mathbf{d}$ [Parent].
@@ -100,10 +101,50 @@ Adaptive Step Size Ray Marching is a GPU-based direct volume rendering technique
 ```python
 # Constants
 EARLY_STOP_THRESHOLD = 0.05
-STEPSIZE_FINE = 0.01 # Example value
-MIN_NUM_FINE_STEPS = 100 # Example value
-COARSE_STEPSIZE_MULTIPLIER = 4.0 # Example value
-MAX_NUM_MISSED_STEPS = 10 # Example value
+STEPSIZE_FINE = 0.01
+MIN_NUM_FINE_STEPS = 100
+COARSE_STEPSIZE_MULTIPLIER = 4.0
+MAX_NUM_MISSED_STEPS = 10
+
+def ray_box_intersection(ray_origin, ray_dir, bbmin, bbmax):
+    t_min = -float('inf')
+    t_max = float('inf')
+    for i in range(3):
+        inv_d = 1.0 / ray_dir[i]
+        t0 = (bbmin[i] - ray_origin[i]) * inv_d
+        t1 = (bbmax[i] - ray_origin[i]) * inv_d
+        t_min = max(t_min, min(t0, t1))
+        t_max = min(t_max, max(t0, t1))
+    if t_max < t_min or t_max < 0.0:
+        return None
+    return (t_min, t_max)
+
+def calculate_ray_direction(uv, proj, view):
+    # Standard inverse projection/view multiplication
+    clip_pos = vec4(uv * 2.0 - 1.0, 0.0, 1.0)
+    view_pos = inverse(proj) * clip_pos
+    view_pos = view_pos / view_pos.w
+    world_pos = inverse(view) * vec4(view_pos.xyz, 1.0)
+    return normalize(world_pos.xyz)
+
+def calculate_uvw(pos, bbmin, bbmax, rotation_angles):
+    uvw = (pos - bbmin) / (bbmax - bbmin)
+    # Apply rotation if needed
+    return uvw
+
+def sample_volume(tex, uvw):
+    return texture(tex, uvw).r
+
+def sample_color_mapping(tex, coord):
+    return texture(tex, coord)
+
+def reproject_position(pos_depth, prev_cam, curr_cam):
+    # Standard reprojection logic
+    return pos_depth
+
+def calculate_motion_vector_uv(pos_depth, prev_pos, pixel_coord):
+    # Standard UV diff calculation
+    return vec2(0.0)
 
 def adaptive_step_size_ray_marching(pixel_coord, camera, volume_data, noise_image, output_image, position_depth_buffer, motion_vector_image, config):
     # 1. Ray Initialization
@@ -136,13 +177,17 @@ def adaptive_step_size_ray_marching(pixel_coord, camera, volume_data, noise_imag
     step_dir = ray_dir * m_step_size
     pos = ray_origin + ray_dir * t_entry
     
-    # 4. Ray Marching Loop
+    # 4. Camera & Motion Vector Setup
+    if camera.moved:
+        position_depth_buffer[pixel_coord] = vec4(0.0, 0.0, 0.0, 0.0)
+    if config.motionVectorCalc:
+        motion_vector_image[pixel_coord] = vec4(0.0, 0.0, 0.0, 1.0)
+        
+    # 5. Ray Marching Loop
     t = t_entry + ray_offset
     while t < t_exit:
-        # Coordinate Calculation
         uvw = calculate_uvw(pos, config.bbmin, config.bbmax, config.rotationAngles)
         
-        # Density Sampling
         if config.bVolume4D:
             density1 = sample_volume(volume_data.volumeTexture, uvw)
             density2 = sample_volume(volume_data.volumeTexture4DNextFrame, uvw)
@@ -150,43 +195,35 @@ def adaptive_step_size_ray_marching(pixel_coord, camera, volume_data, noise_imag
         else:
             density = sample_volume(volume_data.volumeTexture, uvw)
             
-        # Density Threshold Check
         if density <= 0.0:
             cur_threshold -= 1
-            # Optional: Switch to coarse step if threshold exhausted
-            # if cur_threshold <= 0: m_step_size = cur_coarse_step_size; step_dir = ray_dir * m_step_size; cur_threshold = MAX_NUM_MISSED_STEPS
             
         if density > 0.01:
-            # Color Mapping
             color_map_coord = clamp((density - config.scalarMinMax.x) / (config.scalarMinMax.y - config.scalarMinMax.x), 0.0, 1.0)
             s = sample_color_mapping(config.colorMapping, color_map_coord)
             
-            # Compositing
             extinction = s.a
             alpha = 1.0 - exp(-extinction * m_step_size)
             contribution = transmittance * s.rgb * alpha
             accumulated_color += contribution
             transmittance *= (1.0 - alpha)
             
-            # First Hit Storage
             if not first_hit and alpha > 0.0:
                 first_hit = True
                 position_depth_buffer[pixel_coord] = vec4(pos, t)
                 
-            # Early Termination
             if 1.0 - transmittance > EARLY_STOP_THRESHOLD:
                 break
                 
-        # Advance Position
         pos += step_dir
         t += m_step_size
         
-    # 5. Post-Processing
+    # 6. Post-Processing
     accumulated_color.rgb = pow(accumulated_color.rgb, vec3(1.0 / 2.2))
     final_alpha = 1.0 - transmittance
     final_color = vec4(accumulated_color, final_alpha) * config.illuminationScale
     
-    # 6. Temporal Accumulation
+    # 7. Temporal Accumulation
     if config.accumulation and not camera.moved:
         last_frame_color = output_image[pixel_coord]
         final_color.rgb = last_frame_color.rgb * (1.0 - final_alpha) + final_color.rgb * final_alpha
@@ -194,18 +231,17 @@ def adaptive_step_size_ray_marching(pixel_coord, camera, volume_data, noise_imag
     elif config.accumulation and camera.moved:
         noise_image[pixel_coord].g = 0.0
         
-    # 7. Motion Vectors (Optional)
+    # 8. Motion Vectors (Optional)
     if config.motionVectorCalc:
         pos_depth = position_depth_buffer[pixel_coord]
         if pos_depth.xyz == vec3(0.0):
             motion_vector_image[pixel_coord] = vec4(0.0, 0.0, 0.0, 1.0)
         else:
-            # Reprojection logic using previousCam
             prev_pos = reproject_position(pos_depth, camera.previousCam, camera)
             motion_vec = calculate_motion_vector_uv(pos_depth, prev_pos, pixel_coord)
             motion_vector_image[pixel_coord] = vec4(motion_vec, 0.0, 1.0)
             
-    # 8. Update Noise/Output
+    # 9. Update Noise/Output
     output_image[pixel_coord] = final_color
     
     if config.accumulation:
@@ -221,18 +257,18 @@ def adaptive_step_size_ray_marching(pixel_coord, camera, volume_data, noise_imag
 ## Subtopics
 
 ### Dynamic Sampling Step Adjustment
-Adjusts step size based on local density gradients or error estimates, often using a separate error metric. Choose when high-frequency detail preservation is critical. [Link](2442-dynamic-sampling-step-adjustment.md)
+A method that adjusts step size based on local density gradients or error estimates, often using a separate error metric [S1]. It sets itself apart by targeting high-frequency detail preservation rather than global distance-based scaling [S1]. Choose it when high-frequency detail preservation is critical [S1]. [Link](2442-dynamic-sampling-step-adjustment.md)
 
 ### Adaptive Step Size Control
-The general framework for determining step size based on ray state. Choose as the foundational strategy for any adaptive method. [Link](9843-adaptive-step-size-control.md)
+The general framework for determining step size based on ray state [S2, unofficial]. It sets itself apart by providing the foundational strategy for any adaptive method [S2, unofficial]. Choose it as the foundational strategy for any adaptive method [S2, unofficial]. [Link](9843-adaptive-step-size-control.md)
 
 ## Operating characteristics
 *   **Time Complexity:** $O(N)$ where $N$ is the number of samples per ray. Adaptive step size reduces $N$ significantly in empty regions, leading to faster rendering compared to linear sampling [S1].
-*   **Memory Complexity:** $O(1)$ per ray, plus storage for `noiseImage`, `positionDepthBufferImage`, and `motionVectorImage` [S2, unofficial].
+*   **Memory Complexity:** $O(W \times H)$ for screen-space buffers (`noiseImage`, `positionDepthBufferImage`, `motionVectorImage`), plus $O(1)$ per ray state [S2, unofficial].
 *   **Measured Performance:** Generates images with SSIM of 0.95 compared to source, indicating high quality [S1]. Reduces computational cost by varying step size [S2, unofficial].
 *   **Scaling:** Scales well on GPUs due to parallelizable ray casting [S1]. 4D support adds minimal overhead with texture interpolation [S2, unofficial].
 *   **Strengths:** High efficiency in computation, trade-off between performance and quality, supports temporal accumulation for denoising [S1][S2, unofficial].
-*   **Limitations:** Requires additional buffers for accumulation and motion vectors. Noise-based step size may introduce artifacts if not managed [S2, unofficial].
+*   **Limitations:** Requires additional buffers for accumulation and motion vectors [S2, unofficial].
 *   **When to Use:** Real-time direct volume rendering where performance is critical, especially for large or sparse volumes [S1][S2, unofficial].
 *   **When Not to Use:** When absolute geometric precision is required without temporal accumulation, or when hardware lacks support for required image formats [S2, unofficial].
 

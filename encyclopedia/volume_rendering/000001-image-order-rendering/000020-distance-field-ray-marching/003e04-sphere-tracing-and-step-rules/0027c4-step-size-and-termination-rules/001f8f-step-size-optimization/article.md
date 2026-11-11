@@ -1,24 +1,11 @@
 # Step Size Optimization
 
-Also called: Adaptive Step Size, Dynamic Step Sizing
 
 ## Overview
-Step Size Optimization determines the distance $\Delta t$ advanced along a ray in each iteration of a ray-marching loop to balance rendering performance against visual fidelity. It solves the problem of fixed-step methods either wasting samples in empty space or skipping over thin geometry and high-frequency details. It sets itself apart from its siblings by dynamically adjusting $\Delta t$ based on local scene properties (such as distance field values, projected voxel size, or integration error) rather than using a constant or purely geometric bound.
+Step Size Optimization dynamically adjusts the step length $\Delta t$ along a ray to balance rendering performance and visual fidelity [S1, S2]. It solves the problem of fixed-step methods wasting samples in empty space or skipping thin geometry and high-frequency details [S1, S2]. It sets itself apart from siblings by adapting $\Delta t$ based on local scene properties (distance field values, projected voxel size, or integration error) rather than using a constant or purely geometric bound [S1, S2].
 
 ## Shared principles
-The core mechanism involves an iterative loop that updates the ray parameter $t$ and checks for convergence. The step size $\Delta t$ is generally constrained by the local geometry or density to ensure safety (no overshooting) or efficiency (skipping empty space).
-
-**Step Size Determination:**
-The step size $\Delta t_i$ at iteration $i$ is typically a function of the current position $\mathbf{p}_i = \mathbf{o} + t_i \mathbf{d}$ and the scene function $f(\mathbf{p})$.
-1.  **Safety Constraint:** For Signed Distance Functions (SDFs) with Lipschitz constant $\lambda=1$, the step size must satisfy $\Delta t \le f(\mathbf{p})$ to guarantee the ray does not penetrate the surface [Parent].
-2.  **Adaptation:** In volumetric rendering or optimized sphere tracing, $\Delta t$ may be dynamically adjusted based on accumulated density, distance from the camera, or low-resolution approximations to reduce sample counts in less critical areas [S1, S2].
-
-**Termination Conditions:**
-The loop terminates when one or more of the following conditions are met:
-1.  **Convergence (Hit):** The ray has reached the surface or sufficient density. For SDFs, this is typically $f(\mathbf{p}_i) < \epsilon$ [Parent]. For volumes, this may be based on accumulated opacity or density thresholds.
-2.  **Escape (Miss):** The ray has exited the scene or bounding volume, typically when accumulated distance $t > t_{max}$ [Parent].
-3.  **Resource Limit:** A maximum number of iterations $N_{max}$ is reached to prevent infinite loops [Parent].
-4.  **Stagnation/Oscillation:** The step size or distance value fails to decrease significantly, indicating the ray is stuck or oscillating near a surface or in noise [Parent].
+Builds on [Step Size and Termination Rules](4132-step-size-and-termination-rules.md).
 
 ## Subtopics
 
@@ -26,50 +13,55 @@ The loop terminates when one or more of the following conditions are met:
 Safe Raymarching Step Size is a method for determining the step length $\Delta t$ along a ray in volume rendering and implicit surface rendering to prevent the ray from overshooting geometry or density features. It solves the problem of artifacts caused by large steps that skip over thin structures or surface intersections, particularly when the distance field is distorted or when sampling neural implicit representations. It sets itself apart from its siblings by explicitly combining clamping of the distance value, a configurable ratio multiplier, and strict boundary checks to ensure numerical stability and correctness in both parallel and recursive marching implementations.
 
 ### [Compute Minimal Sample Distance Per Pixel](2684-compute-minimal-sample-distance-per-pixel.md)
-This method computes the minimal sample distance per pixel by projecting each dataset cell axis onto the viewport, accounting for camera and volume transforms. It serves as a geometric heuristic to determine the appropriate step size for ray marching, ensuring that the sampling density is sufficient to resolve the voxel structure without excessive oversampling. It differs from [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by focusing on the projected geometric footprint of the volume cells rather than local field gradients or distance field bounds.
+This method computes the minimal sample distance per pixel by projecting each dataset cell axis onto the viewport, accounting for camera and volume transforms. It differs from [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by using the projected geometric footprint of volume cells rather than local field gradients or distance-field bounds.
 
 ### [Error Estimate](2768-error-estimate.md)
-Error Estimate calculates a relative error metric for adaptive ray marching in scalar volume rendering by weighting interpolation error based on the distance to a user-specified isovalue $v_{iso}$. It sets itself apart from uniform error metrics by refining the sampling only in regions where scalar field values are close to $v_{iso}$, significantly reducing computation time in areas far from the isosurface.
+Error Estimate calculates a relative error metric to guide adaptive stepping in volume rendering or ray marching. It sets itself apart from siblings by focusing on the *relative* change in the field value rather than the absolute geometric distance, allowing for adaptive precision in regions of high signal variance.
 
 ### [Gap-Limited Ray Marching](4412-gap-limited-ray-marching.md)
 Gap-Limited Ray Marching is a step-size optimization for heightfield terrain rendering that prevents the ray from overshooting ridgelines and creating visual holes. It differs from standard sphere tracing by using a step size proportional to the distance traveled, bounded by half the vertical gap to the surface, rather than the distance field value itself. This approach avoids stalling on non-distance fields while ensuring robust intersection detection.
 
 ### [Adaptive Volume Rendering Integration](9817-adaptive-volume-rendering-integration.md)
-Adaptive Volume Rendering Integration (VRI) is a method for computing the Volume Rendering Integral using adaptive numerical integration with step size control. It separates the integration into an inner integral (handling density/opacity variations) and an outer integral (handling color/transparency variations) to achieve high accuracy with fewer samples than uniform Riemann summation. It is distinguished from sibling methods like [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by its explicit coupling of error estimation to the volume rendering equation's specific structure (inner/outer integrals) rather than generic geometric or density field properties.
+Adaptive Volume Rendering Integration (VRI) is an iterative numerical method that evaluates the Volume Rendering Integral using adaptive step sizes for both the inner (transparency) and outer (color) integrals to control accuracy and efficiency. It solves the problem of mapping recursive adaptive integration to GPU architectures by avoiding recursion depth issues and excessive re-computation, allowing step sizes to be controlled in consonance. Unlike naive recursive approaches, it advances both integrals iteratively, reusing function evaluations where possible.
 
 ### [Adaptive Step Size Control](9843-adaptive-step-size-control.md)
-Adaptive Step Size Control is a family of ray marching techniques that dynamically adjust the step size $\Delta t_i$ based on local scene properties (such as density, gradient, or distance field values) to optimize the trade-off between rendering performance and visual quality. Unlike fixed-step methods, it reduces computational cost by taking larger steps in empty or low-detail regions and smaller steps in high-detail areas. It distinguishes itself from siblings like [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by explicitly using noise buffers or temporal accumulation to drive variation, and from [Gap-Limited Ray Marching](4412-gap-limited-ray-Marching.md) by its continuous adaptive scaling rather than discrete gap skipping.
+Adaptive Step Size Control is a family of ray marching techniques that dynamically adjust the step size $\Delta t_i$ based on local scene properties to optimize the trade-off between rendering performance and visual quality. It distinguishes itself from siblings like [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by explicitly using noise buffers or temporal accumulation to drive variation, and from [Gap-Limited Ray Marching](4412-gap-limited-ray-Marching.md) by its continuous adaptive scaling rather than discrete gap skipping.
 
 ### Convexity Enhancement
-**Definition**
-Convexity Enhancement uses the geometric property of convexity to increase the step size along a ray in sphere tracing, thereby hastening convergence [S1]. For a convex set, the line segment from the current point to the tangent plane intersection does not intersect the surface except possibly at the endpoint [S1]. This optimization provides a faster order of convergence than standard sphere tracing, which is linearly convergent [S1].
 
-**Formula**
-Given a convex set $A$ defined implicitly by the signed distance function $d(\mathbf{p})$ and a unit vector $\mathbf{v}$, the line segment:
-$$ \text{lerp}(\mathbf{p}, \mathbf{p} + d(\mathbf{p}) \frac{\mathbf{n}(\mathbf{p})}{\|\mathbf{n}(\mathbf{p})\|}) = \mathbf{p} + d(\mathbf{p}) \mathbf{v} $$
-does not intersect $A$ except possibly at its second endpoint [S1]. If $d(\mathbf{p}) < 0$, the ray does not intersect the implicit surface of $A$ [S1].
+### definition
+- [S1] Using knowledge of convexity to increase step size along the ray. For a convex set, the line segment from the current point to the tangent plane intersection does not intersect the surface except possibly at the endpoint.
+- [S1] An optimization that hastens convergence by leveraging convexity properties, providing a faster order of convergence than standard sphere tracing.
 
-**Pitfall**
-Rays parallel to a horizon line (e.g., a ground plane) would step at fixed intervals looking for an intersection that never happens. Corollary 4.1 avoids this by detecting if the ray has stepped beyond the object [S1].
+### formula
+- [S1] lerp(p, p + d(p) * n(p) / ||n(p)||) = p + d(p) * v
+- [S1] lerp(p, p + d(p) * n(p))
+- [S1] If d(p) < 0, the ray does not intersect the implicit surface of A.
 
-**Numbers**
-In the zeno logo test, convexity enhancement reduced execution time from 26:29 to 19:23 (73% relative time) [S1]. For a single sphere, convexity reduced execution time from 2:00 to 1:23 (69% relative time) [S1].
+### pitfall
+- [S1] Rays parallel to a horizon line (e.g., ground plane) would step at fixed intervals looking for an intersection that never happens. Corollary 4.1 avoids this by detecting if the ray has stepped beyond the object.
 
-**Comparison**
-Convexity enhancement causes sphere tracing to converge quadratically, similar to Newton's method [S1]. The slope on the left of the step-size histogram confirms this faster order of convergence, whereas standard sphere tracing is linearly convergent [S1].
+### number
+- [S1] In the zeno logo test, convexity enhancement reduced execution time from 26:29 to 19:23 (73% relative time).
+- [S1] For a single sphere, convexity reduced execution time from 2:00 to 1:23 (69% relative time).
+
+### comparison
+- [S1] Convexity enhancement causes sphere tracing to converge quadratically, similar to Newton's method.
+- [S1] Convexity enhancement provides a faster order of convergence, confirmed by the slope on the left of the step-size histogram, whereas standard sphere tracing is linearly convergent.
 
 ### FBM Performance Optimization
-**Steps**
-1.  Reduce octave count based on distance or time parameter $t$ using logarithmic scaling [S2].
-2.  Use multi-level LOD with different octave counts for different resolutions (e.g., 3, 9, 16 octaves) [S2].
-3.  Use texture sampling instead of mathematical hash functions for noise generation [S2].
-4.  Manually unroll small loops and vary lacunarity slightly [S2].
-5.  Use adaptive step size based on distance or time [S2].
-6.  Use directional derivative instead of full gradient to reduce sample count from 3 to 1 [S2].
-7.  Terminate loop early if accumulated amplitude exceeds 0.99 [S2].
+
+### step
+- [S2] Reduce octave count based on distance or time parameter t using logarithmic scaling.
+- [S2] Use multi-level LOD with different octave counts for different resolutions (e.g., 3, 9, 16 octaves).
+- [S2] Use texture sampling instead of mathematical hash functions for noise generation.
+- [S2] Manually unroll small loops and vary lacunarity slightly.
+- [S2] Use adaptive step size based on distance or time.
+- [S2] Use directional derivative instead of full gradient to reduce sample count from 3 to 1.
+- [S2] Terminate loop early if accumulated amplitude exceeds 0.99.
 
 ## Background
-Originating from the geometric method of sphere tracing for antialiased ray tracing of implicit surfaces, step size optimization has evolved to address the computational costs of evaluating distance fields and noise functions [S1]. The convexity enhancement was introduced to accelerate convergence for convex primitives [S1]. In procedural noise rendering, optimizations such as adaptive step sizing and LOD reduction were developed to manage the high cost of Fractal Brownian Motion (FBM) evaluations [S2]. These techniques are widely used in real-time ray marching for terrain, ocean, and implicit surface rendering [S1, S2].
+Step size optimization originated from sphere tracing for antialiased ray tracing of implicit surfaces [S1]. Convexity enhancement was introduced to accelerate convergence for convex primitives [S1]. In procedural noise rendering, optimizations such as adaptive step sizing and LOD reduction manage the high cost of Fractal Brownian Motion (FBM) evaluations [S2]. These techniques are widely used in real-time ray marching for terrain, ocean, and implicit surface rendering [S1, S2].
 
 ## Sources
 [S1] (PDF) Sphere Tracing: A Geometric Method for the Antialiased Ray ..., https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27

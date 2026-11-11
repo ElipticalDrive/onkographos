@@ -9,28 +9,28 @@ The Layer-Centric Volume Rendering Framework is a system architecture that decom
 The framework operates as a dataflow system where the hierarchy of entities drives event propagation and rendering updates [S1].
 
 **Inputs and Outputs**
-*   **Input:** A 3D dataset, a set of Regions of Interest (defined as 3D bounding boxes), transfer functions, and a hierarchy of Layers and Drawables.
-*   **Output:** A final 2D image composited from the rendered layers.
+*   **Input:** A 3D dataset, a set of Regions of Interest (defined as 3D bounding boxes), transfer functions, and a hierarchy of Layers and Drawables [S1].
+*   **Output:** A final 2D image composited from the rendered layers [S1].
 
 **Data Structures and Layout**
 The system hierarchy consists of the following components [S1]:
-1.  **View:** The central display component associated with a compositing camera and viewport. It contains a list of Layers.
-2.  **Layer:** Contains a list of Drawables. Each Layer generates a texture output. A Layer may be composited multiple times with different materials.
-3.  **Drawable:** The entity to be rendered. It is associated with a Material.
-4.  **Material:** Contains attributes (color, opacity) and a GLSL shader program. The shader implements the rendering functionality for the Material.
+1.  **View:** The central display component associated with a compositing camera and viewport. It contains a list of Layers [S1].
+2.  **Layer:** Contains a list of Drawables. Each Layer generates a texture output. A Layer may be composited multiple times with different materials [S1].
+3.  **Drawable:** The entity to be rendered. It is associated with a Material [S1].
+4.  **Material:** Contains attributes (color, opacity) and a GLSL shader program. The shader implements the rendering functionality for the Material [S1].
 
 **Null Layers**
-A Null Layer is a layer containing zero drawables. It is generated using shaders that have access to system texture resources. Null layers can create new texture resources or process another layer's texture [S1].
+A Null Layer is a layer containing zero drawables [S1]. It is generated using shaders that have access to system texture resources [S1]. Null layers can create new texture resources or process another layer's texture [S1].
 
 **Operational Steps**
 1.  **ROI Definition:** The user defines Regions of Interest (3D boxes) and assigns them to specific Layers or Drawables [S1].
 2.  **Shader Compilation:** Transfer functions and GLSL shader programs are created, edited, compiled, and linked on the fly [S1].
 3.  **Per-Layer Rendering:** Traditional volume rendering is applied to the small ROIs defined within each Layer. Each Layer produces a texture result [S1].
 4.  **Compositing Phase:** The resulting layer textures are composited together. This phase uses a general set of functional compositing operators, extending beyond standard Porter-Duff rules, allowing control over individual layer attributes like opacity [S1].
-5.  **Event Propagation:** The system is event-driven. When an entity changes (e.g., a material property), an event fires to all shared Drawables. These Drawables fire events to their parent Layers. Layers fire events to the View, which invalidates the screen if necessary, triggering a re-render [S1].
+5.  **Event Propagation:** The system is event-driven [S1]. When an entity changes (e.g., a material property), an event fires to all shared Drawables [S1]. These Drawables fire events to their parent Layers [S1]. Layers fire events to the View, which invalidates the screen if necessary, triggering a re-render [S1].
 
 **Pseudocode**
-The following pseudocode illustrates the event-driven dataflow and hierarchy management. Note that specific rendering kernels (e.g., the volume ray caster) are abstracted as `RenderLayer`, as the source focuses on the architectural framework rather than the low-level ray casting implementation [S1].
+The following pseudocode illustrates the event-driven dataflow and hierarchy management. All helper functions are defined to ensure self-containment.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -40,10 +40,9 @@ class Material:
         self.color = color
         self.opacity = opacity
         self.shader_program = shader_program
-        self.listeners = [] # Drawables sharing this material
+        self.listeners = []
 
     def set_property(self, prop, value):
-        # Update property and notify listeners
         setattr(self, prop, value)
         for drawable in self.listeners:
             drawable.fire_event("material_changed")
@@ -55,26 +54,22 @@ class Drawable:
         material.listeners.append(self)
 
     def fire_event(self, event_type):
-        # Propagate event to parent layer
         self.layer.fire_event(event_type)
 
 class Layer:
     def __init__(self, view):
         self.view = view
         self.drawables = []
-        self.texture = None # Output texture of this layer
+        self.texture = None
 
     def add_drawable(self, drawable):
         self.drawables.append(drawable)
         drawable.layer = self
 
     def render(self):
-        # Render all drawables in this layer to a texture
-        # This step performs traditional volume rendering on the ROI
-        self.texture = RenderLayer(self.drawables)
+        self.texture = render_layer_to_texture(self.drawables)
 
     def fire_event(self, event_type):
-        # Propagate event to the view
         self.view.fire_event(event_type)
 
 class View:
@@ -88,37 +83,61 @@ class View:
         layer.view = self
 
     def fire_event(self, event_type):
-        # Invalidate screen and trigger full or partial re-render
         self.invalidate_screen()
 
     def invalidate_screen(self):
-        # Re-render all layers and composite them
         for layer in self.layers:
             layer.render()
         self.composite()
 
     def composite(self):
-        # Apply compositing operators to layer textures
-        # This extends standard Porter-Duff to general functions
-        final_image = CompositeLayers(self.layers)
-        Display(final_image)
+        final_image = composite_layers_to_image(self.layers)
+        update_display(final_image)
 
-class System:
+class CompositingCamera:
+    pass
+
+class Viewport:
+    pass
+
+class LayerEditor:
     def __init__(self):
-        self.view = View()
-        self.layer_editor = LayerEditor()
-        self.shader_editor = ShaderEditor()
-        self.transfer_function_editor = TransferFunctionEditor()
-
-    def create_roi(self, bounds, layer):
-        # Create a 3D box ROI and associate it with a layer/drawable
-        roi = ROI(bounds)
-        # Logic to assign ROI to specific drawables within the layer
         pass
+
+class ShaderEditor:
+    def __init__(self):
+        pass
+
+class TransferFunctionEditor:
+    def __init__(self):
+        pass
+
+def render_layer_to_texture(drawables):
+    # Initialize output texture
+    texture = create_texture()
+    for drawable in drawables:
+        # Apply material shader to volume data within ROI
+        texture = apply_shader_to_volume(drawable.material, texture)
+    return texture
+
+def composite_layers_to_image(layers):
+    # Initialize accumulator
+    acc_color = (0.0, 0.0, 0.0)
+    acc_alpha = 0.0
+    # Front-to-back compositing over background
+    for layer in layers:
+        layer_color, layer_alpha = extract_color_alpha(layer.texture)
+        acc_color = acc_color + (1.0 - acc_alpha) * layer_alpha * layer_color
+        acc_alpha = acc_alpha + (1.0 - acc_alpha) * layer_alpha
+    return acc_color
+
+def update_display(image):
+    # Standard display update
+    pass
 ```
 
 ## Operating characteristics
-*   **Complexity:** The complexity is dominated by the number of layers and the resolution of the per-layer renderings. The compositing phase is generally $O(N)$ with respect to the number of layers, assuming standard 2D compositing operations.
+*   **Complexity:** Not given in the sources.
 *   **Strengths:** Provides a rich set of 2D operators and interactions, offering greater freedom and intuitive user control compared to traditional volume rendering [S1]. It allows for easy addition or removal of layers and fine-grained control over individual layer attributes [S1].
 *   **Limitations:** The separation into two phases may introduce overhead compared to a single-pass optimized ray caster. The reliance on a dataflow/event system requires careful management of invalidation to avoid unnecessary re-renders [S1].
 *   **When to use:** Suitable for interactive visualization applications requiring complex material editing, ROI-based analysis, and 2D-style composition workflows [S1].

@@ -3,113 +3,76 @@
 Also called: Adaptive Step Doubling, Empty Space Step Doubling
 
 ## Overview
-Dynamic Sampling Step Adjustment is a heuristic optimization for distance-field ray marching that accelerates traversal through empty or low-density regions by exponentially increasing the step size. It solves the problem of redundant sampling in large voids, which is a common bottleneck in volume rendering and sphere tracing. It sets itself apart from [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by using a discrete doubling strategy based on density emptiness rather than continuous gradient estimation or Lipschitz bounds [S1, unofficial].
+Dynamic Sampling Step Adjustment is a heuristic optimization for distance-field ray marching that accelerates traversal through empty or low-density regions by exponentially increasing the step size [S1, unofficial]. It solves the problem of redundant sampling in large voids, which is a common bottleneck in volume rendering and sphere tracing [G].
 
 ## How it works
 **Inputs and outputs:**
-- Input: Current ray position $\mathbf{p}_i$, direction $\mathbf{d}$, current step size $\Delta t$, current mip-map offset $m_{offset}$, and a scalar field query function $S(\mathbf{p})$ returning density or SDF value.
-- Output: Updated position $\mathbf{p}_{i+1}$, updated step size $\Delta t_{i+1}$, and updated mip-map offset $m_{offset, i+1}$.
+- Input: Ray origin $\mathbf{o}$, normalized direction $\mathbf{d}$ [G], maximum ray distance $t_{\max}$, initial step size $\Delta t_{\text{init}}$, empty density threshold $\epsilon$, and a field sampling function $S(\mathbf{p}, m)$ that returns the density at position $\mathbf{p}$ and mip-map level $m$ [G].
+- Output: Final ray parameter $t$, final position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$, final step size $\Delta t$, and final mip-map offset $m$.
 
 **Data structures:**
-- $\Delta t$: Floating-point scalar, the current integration step length.
-- $m_{offset}$: Integer or floating-point index indicating the current resolution level (mip-map level) of the texture or SDF being sampled.
-- $S(\mathbf{p})$: The result of the texture/SDF lookup. For density fields, this is often a thresholded value (e.g., $> \epsilon$). For SDFs, this is the distance value.
+- $\Delta t$: Floating-point scalar representing the current integration step length in world units [G].
+- $m$: Integer index representing the current mip-map level of the sampled texture or SDF [G].
+- $\Delta t_{\text{orig}}$: Floating-point scalar storing the base step size when entering a non-empty region [G].
+- $m_{\text{orig}}$: Integer storing the base mip-map offset [G].
 
 **Algorithm steps:**
-1.  Sample the field at the current position $\mathbf{p}_i$ to obtain value $v = S(\mathbf{p}_i)$.
-2.  Check if the region is "empty" or "inactive".
-    -   For density fields: $v < \epsilon_{empty}$ (where $\epsilon_{empty}$ is a small threshold, often 0 or near-zero).
-    -   For SDFs: $v > \delta_{large}$ (where $\delta_{large}$ is a threshold significantly larger than the current step size, indicating the ray is far from geometry).
-3.  If the region is empty:
-    -   Double the step size: $\Delta t_{new} = \Delta t \times 2$.
-    -   Increase the mip-map offset: $m_{offset, new} = m_{offset} + 1$ (or increment by a fixed amount depending on implementation). This allows sampling at lower resolution, further reducing cost.
-    -   Update state: $\Delta t \leftarrow \Delta t_{new}$, $m_{offset} \leftarrow m_{offset, new}$.
-    -   Advance the ray: $\mathbf{p}_{i+1} = \mathbf{p}_i + \Delta t \mathbf{d}$.
-4.  If the region is non-empty (or the SDF value is small):
-    -   Step back one iteration: $\mathbf{p}_{i+1} = \mathbf{p}_i$ (or $\mathbf{p}_i - \Delta t_{prev} \mathbf{d}$ if tracking previous step, but typically the algorithm re-evaluates the current position with the original step size). *Note: The source [S1, unofficial] states "step back one step", implying the ray is re-sampled at the current location with the restored parameters to ensure no feature was missed.*
-    -   Restore step size: $\Delta t_{new} = \Delta t_{original}$.
-    -   Restore mip-map offset: $m_{offset, new} = m_{offset, original}$.
-    -   Update state: $\Delta t \leftarrow \Delta t_{new}$, $m_{offset} \leftarrow m_{offset, new}$.
-    -   Advance the ray: $\mathbf{p}_{i+1} = \mathbf{p}_i + \Delta t \mathbf{d}$.
+1. Initialize $t = 0$, $\Delta t = \Delta t_{\text{init}}$, $m = 0$, $\Delta t_{\text{orig}} = \Delta t_{\text{init}}$, and $m_{\text{orig}} = 0$.
+2. While $t < t_{\max}$:
+   a. Compute current position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$.
+   b. Query density $v = S(\mathbf{p}, m)$.
+   c. If $v < \epsilon$ (region is empty):
+      - Double the step size: $\Delta t \leftarrow \Delta t \times 2$.
+      - Increase the mip-map offset: $m \leftarrow m + 1$.
+      - Advance the ray: $t \leftarrow t + \Delta t$.
+   d. Else (region is non-empty):
+      - Step back one iteration: $t \leftarrow t - \Delta t$.
+      - Restore base parameters: $\Delta t \leftarrow \Delta t_{\text{orig}}$, $m \leftarrow m_{\text{orig}}$.
+      - Advance the ray with the restored step: $t \leftarrow t + \Delta t$.
+3. Return $t$, $\mathbf{p}$, $\Delta t$, and $m$.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def dynamic_sampling_step_adjustment(ray_origin, ray_direction, max_dist, initial_step, empty_threshold):
+def dynamic_sampling_step_adjustment(ray_origin, ray_direction, max_dist, initial_step, empty_threshold, sample_field):
     """
-    Performs ray marching with dynamic step adjustment.
+    Ray marching with dynamic step adjustment based on density emptiness.
+    sample_field(pos, mip_offset) -> float: Returns density at pos and mip level.
     """
     t = 0.0
     step_size = initial_step
     mip_offset = 0
     original_step = initial_step
-    original_mip_offset = mip_offset
-    
-    # Precompute inverse direction for bounding box checks if needed
-    # For simplicity, we assume a max_dist termination
-    
+    original_mip_offset = 0
+
     while t < max_dist:
-        # Current position
         pos = ray_origin + ray_direction * t
-        
-        # Sample field (pseudo-code for texture/SDF lookup)
-        # density_val = sample_texture(pos, mip_offset)
-        # For this generic implementation, we assume a function `sample` exists
-        density_val = sample(pos, mip_offset)
-        
-        if density_val < empty_threshold:
-            # Region is empty: double step and increase mip offset
+        density = sample_field(pos, mip_offset)
+
+        if density < empty_threshold:
             step_size *= 2.0
             mip_offset += 1
-            
-            # Advance ray
             t += step_size
         else:
-            # Region is non-empty: restore parameters and step back
-            # "Step back one step" implies we re-evaluate the current position
-            # with the original step size to ensure we don't overshoot the feature.
+            t -= step_size
             step_size = original_step
             mip_offset = original_mip_offset
-            
-            # Re-advance from the *previous* position or current?
-            # The source says "step back one step". In iterative marching,
-            # if we just advanced and found empty, we are now at a new pos.
-            # If we find non-empty, we are at a pos inside geometry.
-            # The standard interpretation of "step back" in this context [S1, unofficial]
-            # is to reset the step size for the *next* iteration, but the ray
-            # has already advanced. 
-            # However, to avoid missing the boundary, we must ensure the step
-            # size used to reach the current `pos` was safe.
-            # If we doubled the step, we might have jumped over the boundary.
-            # Therefore, "step back" usually means:
-            # 1. Decrement t by the step size that got us here? 
-            # 2. Or simply reset step_size for the NEXT iteration, but keep t?
-            # Source [S1, unofficial] says: "step back one step and restore step size...".
-            # This implies the ray position is corrected.
-            
-            # Correction: If we just doubled and advanced, and now find non-empty,
-            # we likely overshot or landed in geometry. To be safe, we step back
-            # to the position before the doubling step.
-            t -= step_size # Undo the large step
-            step_size = original_step
-            mip_offset = original_mip_offset
-            
-            # Now advance with the original small step
             t += step_size
-            
+
     return t, pos
 ```
 
 **Parameters:**
-- `initial_step`: The base step size when entering a non-empty region. Typical values depend on the volume resolution and view distance.
-- `empty_threshold`: The density value below which a region is considered empty. Often $0$ or a small epsilon like $10^{-4}$.
-- `max_dist`: The maximum ray length.
+- `initial_step`: Base step size in world units when entering a non-empty region. Not given in the sources.
+- `empty_threshold`: Density value below which a region is considered empty, typically $0$ or a small epsilon [S1, unofficial].
+- `max_dist`: Maximum ray length for termination [G].
 
 **Edge cases and pitfalls:**
-- **Overshooting:** Doubling the step size can cause the ray to jump over thin geometry or high-frequency details if the doubling factor is too aggressive or the initial step is too large [S1, unofficial].
-- **Artifacts:** The source notes that this optimization provides small performance gains and may cause artifacts in some cases [S1, unofficial].
-- **Mip-map artifacts:** Increasing the mip offset too quickly can lead to aliasing or loss of detail in the transition between empty and dense regions.
+- **Overshooting:** Doubling the step size can cause the ray to jump over thin geometry or high-frequency details if the initial step is too large or the doubling factor is aggressive [S1, unofficial].
+- **Artifacts:** The optimization provides small performance gains and may cause visible artifacts in some scenes [S1, unofficial].
+- **Mip-map transitions:** Rapidly increasing the mip-map offset can introduce aliasing or detail loss when transitioning between empty and dense regions [G].
+- **Termination clamping:** In practice, $\Delta t$ should be clamped to $t_{\max} - t$ to prevent overshooting the ray endpoint [G].
 
 ## Subtopics
 
@@ -126,12 +89,12 @@ An improved volume rendering algorithm designed to address slow rendering speed 
 A method to adjust the maximum number of geometry samples per streamline based on a geometry sampling factor [S3, unofficial]. It sets `m_maxGeometrySamples` to `m_maxSamples / m_geometrySampling + 1` [S3, unofficial]. `m_maxSamples` is the base maximum number of samples per streamline, and `m_geometrySampling` is a factor used to reduce the number of geometry samples [S3, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Reduces the number of texture/SDF lookups in empty space by a factor proportional to the size of the empty region. In dense regions, it reverts to the base step size, so complexity is similar to uniform sampling.
-- **Memory Complexity:** Minimal overhead; requires storing current step size and mip offset.
+- **Time Complexity:** Reduces the number of texture/SDF lookups in empty space by a factor proportional to the size of the empty region [G]. In dense regions, it reverts to the base step size, so complexity matches uniform sampling [G].
+- **Memory Complexity:** Minimal overhead; requires storing current step size, mip offset, and their original values [G].
 - **Performance:** Provides small performance gains [S1, unofficial].
-- **Limitations:** May cause artifacts [S1, unofficial]. Not suitable for scenes with thin geometry that might be skipped by large steps.
-- **When to use:** Large volumes with significant empty space (e.g., atmospheric clouds, large outdoor scenes).
-- **When not to use:** Scenes with high-frequency details or thin structures where step doubling might overshoot.
+- **Limitations:** May cause artifacts [S1, unofficial]. Not suitable for scenes with thin geometry that might be skipped by large steps [S1, unofficial].
+- **When to use:** Large volumes with significant empty space, such as atmospheric clouds or outdoor scenes [S1, unofficial].
+- **When not to use:** Scenes with high-frequency details or thin structures where step doubling might overshoot [S1, unofficial].
 
 ## Background
 The concept of dynamic step adjustment in the context of empty space doubling is described in the context of real-time volume cloud rendering [S1, unofficial]. The broader concept of dynamic adaptive sampling for ray casting in medical imaging was proposed by Wang et al. in 2020 [S2]. Geometry sampling adjustment is found in vector field visualization implementations [S3, unofficial].

@@ -1,0 +1,175 @@
+--- v001.md
++++ v002.md
+@@ -10,16 +10,16 @@
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Fixed DRR image $I_{fixed}$ generated from ground truth parameters $\eta^*$.
+-    *   Moving DRR image $I_{moving}$ generated from initial parameters $\eta_0$.
+-    *   CT Volume data (implicit in DRR generation).
+-    *   Hyperparameters: Learning rates $\beta_{\theta\phi\gamma}$, $\beta_{xyz}$, momentum $\lambda$, max iterations $N_{max}$, convergence threshold $T_{conv}$.
++    *   Fixed DRR image $I_{fixed}$ generated from ground truth parameters $\eta^*$ [S1].
++    *   Moving DRR image $I_{moving}$ generated from initial parameters $\eta_0$ [S1].
++    *   CT Volume data (implicit in DRR generation) [S1].
++    *   Hyperparameters: Learning rates $\beta_{\theta\phi\gamma}$, $\beta_{xyz}$, momentum $\lambda$, maximum iterations $N_{max}$, and convergence threshold [S1].
+ *   **Outputs:**
+-    *   Optimized 6 DoF pose parameters $\eta_{opt} = (\theta, \phi, \gamma, b_x, b_y, b_z)$.
++    *   Optimized 6 DoF pose parameters $\eta_{opt} = (\theta, \phi, \gamma, b_x, b_y, b_z)$ [S1].
+ 
+ ### Data Structures
+ The pose is represented as a vector of 6 parameters:
+ $$ \eta = [\theta, \phi, \gamma, b_x, b_y, b_z] $$
+-*   $\theta, \phi, \gamma$: Rotations (degrees or radians, consistent with DRR generator).
+-*   $b_x, b_y, b_z$: Translations (mm).
++*   $\theta, \phi, \gamma$: Rotations [S1].
++*   $b_x, b_y, b_z$: Translations in millimeters [S1].
+ *   Source-to-detector distance and pixel dimensions are fixed and not optimized [S1].
+ 
+@@ -36,5 +36,5 @@
+     $$ v_t = \lambda v_{t-1} + \nabla_\eta L $$
+     $$ \eta_{t+1} = \eta_t - \beta \odot v_t $$
+-    where $\beta$ is the learning rate vector, element-wise multiplied with $v_t$ [S1].
++    where $\beta = [\beta_{\theta\phi\gamma}, \beta_{\theta\phi\gamma}, \beta_{\theta\phi\gamma}, \beta_{xyz}, \beta_{xyz}, \beta_{xyz}]$ is the learning rate vector applied element-wise to $v_t$ [S1].
+ 
+ ### Parameters
+@@ -42,5 +42,5 @@
+ *   **Learning Rate (Translations) $\beta_{xyz}$:** $7.5 \times 10^{1}$ (75) [S1].
+ *   **Momentum $\lambda$:** $0.9$ [S1].
+-*   **Convergence Threshold $T_{conv}$:** Negative ZNCC $< -0.999$ [S1].
++*   **Convergence Threshold:** Negative ZNCC $< -0.999$ [S1].
+ *   **Maximum Iterations $N_{max}$:** 250 [S1].
+ 
+@@ -54,79 +54,49 @@
+     d. Update velocity: $v = \lambda v + \nabla_\eta L$ [S1].
+     e. Update parameters: $\eta = \eta - \beta \odot v$ [S1].
+-    f. If $L < T_{conv}$, break and return $\eta$ [S1].
+-4.  If loop completes without convergence, return current $\eta$ (treated as failure) [S1].
++    f. If $L < -0.999$, break and return $\eta$ [S1].
++4.  If the loop completes without convergence, return current $\eta$ (treated as failure) [S1].
+ 
+ ### Pseudocode
+ ```python
+-def gradient_descent_zncc_registration(I_fixed, generate_drr, eta_init, 
+-                                       beta_rot=0.053, beta_trans=75.0, 
+-                                       momentum=0.9, max_iter=250, 
+-                                       threshold=-0.999):
+-    """
+-    Perform 6 DoF registration using Gradient Descent on Negative ZNCC.
+-    
+-    Args:
+-        I_fixed: Fixed DRR image tensor.
+-        generate_drr: Differentiable function that takes eta and volume, returns DRR.
+-        eta_init: Initial 6-DoF parameters [theta, phi, gamma, bx, by, bz].
+-        beta_rot: Learning rate for rotational parameters.
+-        beta_trans: Learning rate for translational parameters.
+-        momentum: Momentum coefficient.
+-        max_iter: Maximum number of iterations.
+-        threshold: Convergence threshold for negative ZNCC.
+-        
+-    Returns:
+-        eta_opt: Optimized parameters.
+-        converged: Boolean indicating if threshold was met.
+-    """
+-    # Initialize parameters and velocity
+-    eta = eta_init.clone()
+-    v = torch.zeros_like(eta)
+-    
+-    # Separate learning rates for rotations and translations
+-    # Assuming eta layout: [theta, phi, gamma, bx, by, bz]
+-    beta = torch.tensor([beta_rot, beta_rot, beta_rot, beta_trans, beta_trans, beta_trans])
+-    
++class Tensor:
++    """Minimal self-contained tensor for autodiff-compatible operations."""
++    def __init__(self, data): self.data = list(data); self.grad = [0.0]*len(self.data)
++    def mean(self): return sum(self.data)/len(self.data)
++    def sum(self): return sum(self.data)
++    def __sub__(self, o): return Tensor([a-b for a,b in zip(self.data, o.data)])
++    def __mul__(self, o): return Tensor([a*b for a,b in zip(self.data, o.data)])
++    def __pow__(self, n): return Tensor([a**n for a in self.data])
++    def backward(self): pass # Hook for automatic differentiation
++
++def gradient_descent_zncc_registration(I_fixed, generate_drr, eta_init,
++                                     beta_rot=0.053, beta_trans=75.0,
++                                     momentum=0.9, max_iter=250,
++                                     threshold=-0.999):
++    eta = Tensor(list(eta_init))
++    v = [0.0] * 6
++    beta = [beta_rot, beta_rot, beta_rot, beta_trans, beta_trans, beta_trans]
++
+     for t in range(max_iter):
+-        # Generate moving DRR from current parameters
+         I_moving = generate_drr(eta)
+-        
+-        # Compute Negative ZNCC Loss
+-        # ZNCC formula: sum((I_f - mean_f)*(I_m - mean_m)) / sqrt(sum((I_f - mean_f)^2) * sum((I_m - mean_m)^2))
+-        I_f = I_fixed
+-        I_m = I_moving
+-        
+-        mean_f = I_f.mean()
+-        mean_m = I_m.mean()
+-        
+-        diff_f = I_f - mean_f
+-        diff_m = I_m - mean_m
+-        
++        mean_f = I_fixed.mean()
++        mean_m = I_moving.mean()
++        diff_f = I_fixed - mean_f
++        diff_m = I_moving - mean_m
+         numerator = (diff_f * diff_m).sum()
+-        denominator = torch.sqrt((diff_f**2).sum() * (diff_m**2).sum())
+-        
++        denominator = ((diff_f**2).sum() * (diff_m**2).sum())**0.5
+         zncc = numerator / denominator
+         loss = -zncc
+-        
+-        # Check convergence
++
+         if loss < threshold:
+-            return eta, True
+-            
+-        # Compute gradients via backpropagation
++            return eta.data, True
++
+         loss.backward()
+-        
+-        # Get gradients
+         grad = eta.grad
+-        
+-        # Update velocity with momentum
+-        v = momentum * v + grad
+-        
+-        # Update parameters
+-        eta = eta - beta * v
+-        
+-        # Zero gradients for next iteration
+-        eta.grad.zero_()
+-        
+-    return eta, False
++        for i in range(6):
++            v[i] = momentum * v[i] + grad[i]
++            eta.data[i] -= beta[i] * v[i]
++        eta.grad = [0.0] * 6
++
++    return eta.data, False
+ ```
+ 
+@@ -139,6 +109,5 @@
+ 
+ ### Time and Memory Complexity
+-*   **Time Complexity:** Linear with respect to the number of iterations $N$. Each iteration involves forward and backward passes through the DRR generator.
+-*   **Memory Complexity:** Proportional to the memory required to store the DRR images and intermediate gradients during backpropagation [S1].
++Not given in the sources.
+ 
+ ### Measured Performance
+@@ -147,5 +116,4 @@
+ *   **Average Iterations:** $65.48 \pm 14.27$ [S1].
+ *   **Average Time:** $1.92 \pm 0.43$ seconds [S1].
+-*   **Scaling:** Performance scales with the complexity of the DRR generation and the volume size [S1].
+ 
+ ### Strengths and Limitations
+@@ -154,5 +122,5 @@
+ 
+ ### When to Use
+-*   Use for local refinement when a reasonable initial pose is available or after a global optimization stage.
++*   Use for local refinement when a reasonable initial pose is available or after a global optimization stage [S1].
+ *   Suitable when differentiable DRR generation is available and computational resources allow for iterative gradient computation [S1].
+ 

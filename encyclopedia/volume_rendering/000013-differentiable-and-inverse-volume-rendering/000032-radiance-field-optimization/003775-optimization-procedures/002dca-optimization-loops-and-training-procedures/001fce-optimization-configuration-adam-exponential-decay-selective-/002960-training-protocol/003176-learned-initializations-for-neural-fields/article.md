@@ -17,9 +17,8 @@ This method addresses the inefficiency of optimizing coordinate-based neural net
 **Steps:**
 1. **Meta-Training Phase:**
    - Define a meta-loss function that measures the performance of the network after a few steps of gradient descent on a support set (training signal) from the target class [G].
-   - Use standard meta-learning algorithms (such as MAML or first-order approximations) to update the initial weights $\theta_0$ such that they minimize this meta-loss [S1, unofficial].
-   - The goal is to find $\theta_0$ such that for any new signal $S$ from the class, a few gradient steps on $S$ starting from $\theta_0$ yield a good approximation [S1, unofficial].
-
+   - Use standard meta-learning algorithms (such as MAML or first-order approximations) to update the initial weights $\theta_0$ such that they minimize this meta-loss [G].
+   - The goal is to find $\theta_0$ such that for any new signal $S$ from the class, a few gradient steps on $S$ starting from $\theta_0$ yield a good approximation [G].
 2. **Instance Optimization Phase:**
    - For a new target signal (e.g., a specific 3D shape or image), initialize the network weights with the learned $\theta_0$ [S1, unofficial].
    - Perform standard gradient descent (or Adam) to optimize the network parameters $\theta$ to fit the new signal's observations [S1, unofficial].
@@ -36,20 +35,21 @@ Let $\mathcal{D}_{meta}$ be the meta-training dataset. For a task $T_i \sim p(T)
 - Number of inner loop steps [G].
 
 **Edge Cases and Pitfalls:**
-- **Class Mismatch:** If the new signal does not belong to the class used for meta-training, the initialization may not provide benefits and could hinder convergence [S1, unofficial].
+- **Class Mismatch:** Not given in the sources.
 - **Overfitting to Meta-Training Data:** The learned initialization might overfit to the specific distribution of the meta-training set, reducing generalization to unseen variations within the class [G].
 
 ## Subtopics
+
 ## Operating characteristics
-- **Time Complexity:** The meta-training phase is computationally expensive, requiring multiple gradient steps over many tasks [S1, unofficial]. However, the instance optimization phase is significantly faster than training from random initialization [S1, unofficial].
+- **Time Complexity:** Not given in the sources.
 - **Memory Complexity:** Requires storing the learned initialization weights, which is negligible compared to the network weights themselves [G].
 - **Strengths:** Faster convergence, better generalization with partial data, strong prior for the signal class [S1, unofficial].
-- **Limitations:** Requires a diverse and representative meta-training dataset; not suitable for out-of-distribution signals [S1, unofficial].
+- **Limitations:** Requires a diverse and representative meta-training dataset [G].
 - **When to Use:** When optimizing multiple instances from the same signal class (e.g., reconstructing multiple faces) [S1, unofficial].
-- **When Not to Use:** For single-instance optimization or when the signal class is unknown or highly diverse [S1, unofficial].
+- **When Not to Use:** Not given in the sources.
 
 ## Background
-The method was proposed by Mildenhall et al. as part of their work on generalizing neural radiance fields and coordinate-based representations [S1, unofficial]. It builds on the observation that coordinate-based MLPs suffer from slow convergence when trained from scratch [S1, unofficial]. The approach leverages meta-learning to transfer knowledge across signals of the same class [S1, unofficial].
+The method was proposed by Mildenhall et al. as part of their work on generalizing neural radiance fields and coordinate-based representations [S1, unofficial]. It builds on the observation that coordinate-based MLPs suffer from slow convergence when trained from scratch [S1, unofficial]. The approach leverages meta-learning to transfer knowledge across signals of the same class [S1, unofficial]. It builds on [Training Protocol](4528-training-protocol.md).
 
 ## Sources
 [S1] Generalizing Neural Radiance Fields - BAIR Commons, https://bcommons.berkeley.edu/generalizing-neural-radiance-fields, fetched 2026-10-28 (unofficial)

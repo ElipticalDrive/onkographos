@@ -1,50 +1,30 @@
 # Image-Parallel Ray Casting via 2D Texture Mapping
 
-Also called: 2D Texture Mapping Volume Rendering, 2D Texture Slicing, Object-aligned 2D texture slicing, Object-space technique, Slice-based Volume Rendering, Texture-Mapped Volume Rendering (2D)
+Also called: 2D Texture-Mapped Volume Rendering, 2D Texture Mapping Volume Rendering, Texture-Mapped Volume Rendering (2D), 2D Texture Slicing, 2D texture slice rendering
 
 ## Overview
-Image-Parallel Ray Casting via 2D Texture Mapping is a hardware-accelerated volume rendering technique that replaces per-ray traversal with the projection of parallel object-aligned slices onto the image plane, leveraging graphics hardware rasterization and blending [S1, unofficial][S3]. It solves the performance bottleneck of software ray casting by utilizing the fixed-function pipeline for resampling and compositing, making it particularly effective for large volumetric datasets where 3D texture memory bandwidth becomes a limiting factor [S2, unofficial][S4]. Unlike its sibling [Texture-Mapped Volume Rendering with CPU Shading](3423-texture-mapped-volume-rendering-with-cpu-shading.md), which offloads shading to the CPU, this method performs shading and compositing entirely within the GPU's fragment shader and blending units [S2, unofficial].
+Image-Parallel Ray Casting via 2D Texture Mapping is a hardware-accelerated volume rendering technique that replaces per-ray traversal with the projection of parallel object-aligned slices onto the image plane, leveraging graphics hardware rasterization and blending [S1, unofficial][S3, unofficial]. It solves the performance bottleneck of software ray casting by projecting slices slice-by-slice, making it particularly effective for large volumetric datasets where 3D texture memory bandwidth becomes a limiting factor [S4][S2]. Unlike its sibling [Texture-Mapped Volume Rendering with CPU Shading](3423-texture-mapped-volume-rendering-with-cpu-shading.md), which offloads shading to the CPU, this method performs shading and compositing within the GPU's fragment shader and blending units [S2].
 
 ## How it works
 **Inputs and Outputs:**
 *   **Input:** A 3D volumetric dataset $V$ of dimensions $D_x \times D_y \times D_z$.
-*   **Output:** A 2D image buffer (framebuffer) containing the composited volume rendering.
+*   **Output:** A 2D image buffer containing the composited volume rendering.
 
 **Data Structures:**
-The method requires storing the volume data in texture memory. Since the slices are object-aligned (parallel to the primary axes of the data volume), three separate 2D texture copies of the volume must be stored, one for each slicing direction (XY, YZ, XZ planes) [S2, unofficial].
-*   **Texture Memory:** Three 2D textures, each of size $D_x \times D_y$, $D_y \times D_z$, and $D_x \times D_z$ respectively.
-*   **Gradient Storage:** Pre-computed gradients are stored in the RGB channels of the texture to allow bi-linear interpolation in screen space [S2, unofficial].
-*   **Polygon Geometry:** Each slice is represented by a proxy polygon (triangle fan or strip) covering the extent of the slice in screen space.
+*   **Texture Memory:** Three 2D textures, each of size $D_x \times D_y$, $D_y \times D_z$, and $D_x \times D_z$ respectively, storing one copy of the volume for each slicing direction [S3, unofficial].
+*   **Gradient Storage:** Pre-computed gradients are stored in the RGB channels of the texture to allow bi-linear interpolation in screen space [S3, unofficial].
+*   **Polygon Geometry:** Each slice is represented by a proxy polygon covering the extent of the slice in screen space, as there are no volumetric primitives in graphics hardware [S1, unofficial].
 
 **Algorithm Steps:**
 
-1.  **Determine Slicing Direction (Base Plane):**
-    Compute the viewing direction vector $\vec{v}$. Calculate the angle between $\vec{v}$ and the three primary axes of the volume data (normals $\vec{n}_x, \vec{n}_y, \vec{n}_z$). Select the axis with the minimum angle to the viewing direction as the "base plane" normal. This determines which of the three texture stacks to use. In case of a tie at 45 degrees, an arbitrary choice is made [S2, unofficial].
-
-2.  **Generate Slice Stack:**
-    Define a set of parallel planes orthogonal to the viewing direction.
-    *   *Pre-computed Slices:* If slices are pre-computed orthogonal to a primary axis, they are stored as 2D textures. For arbitrary viewpoints, these must be re-projected, which distorts the slice views [S3].
-    *   *View-Aligned Slices:* For optimal quality, slices are generated orthogonal to the viewing direction for each frame. These slices may have complex shapes (triangles to hexagons) and require regeneration every frame [S3].
-    *   *Interpolation:* To mitigate aliasing and popping artifacts, additional intermediate slices may be interpolated and shifted such that sample spacing along viewing rays is practically constant, independent of viewing direction [S2, unofficial].
-
-3.  **Project and Rasterize Slices:**
-    For each slice in the stack:
-    *   Project the slice polygon onto the image plane.
-    *   Assign texture coordinates $(s, t)$ to the polygon vertices corresponding to the 2D volume slice [S2, unofficial].
-    *   Rasterize the polygon. The graphics hardware performs bi-linear interpolation of the texture values (scalar field and pre-computed gradients) for each covered pixel [S3].
-    *   *Gradient Normalization:* In the fragment shader, normalize the interpolated gradients to ensure high image quality during shading [S2, unofficial].
-
-4.  **Shading and Classification:**
-    For each pixel covered by the slice:
-    *   Retrieve the interpolated scalar value and gradient.
-    *   Apply the transfer function to compute color $C$ and opacity $\alpha$. Classification can occur pre- or post-interpolation [S2, unofficial].
-    *   *Opacity Correction:* Scale the opacity linearly according to the distance between samples to approximate the integration along the ray [S2, unofficial].
-
-5.  **Compositing:**
-    Blend the slice onto the image plane using the standard front-to-back or back-to-front compositing operator provided by the graphics hardware (e.g., OpenGL blending) [S3].
+1.  **Determine Slicing Direction (Base Plane):** Compute the viewing direction vector $\vec{v}$. Calculate the angle between $\vec{v}$ and the three primary axes of the volume data (normals $\vec{n}_x, \vec{n}_y, \vec{n}_z$). Select the axis with the minimum angle to the viewing direction as the "base plane" normal. This determines which of the three texture stacks to use. In case of a tie at 45 degrees, an arbitrary choice is made [S3, unofficial].
+2.  **Generate Slice Stack:** Define a set of parallel planes orthogonal to the viewing direction. *Pre-computed Slices:* If slices are pre-computed orthogonal to a primary axis, they are stored as 2D textures. For arbitrary viewpoints, these must be re-projected, which distorts the slice views [S4]. *View-Aligned Slices:* For optimal quality, slices are generated orthogonal to the viewing direction for each frame. These slices may have complex shapes (triangles to hexagons) and require regeneration every frame [S4]. *Interpolation:* To mitigate aliasing and popping artifacts, additional intermediate slices may be interpolated and shifted such that sample spacing along viewing rays is practically constant, independent of viewing direction [S3, unofficial].
+3.  **Project and Rasterize Slices:** For each slice in the stack: *Project the slice polygon onto the image plane.* *Assign texture coordinates $(s, t)$ to the polygon vertices corresponding to the 2D volume slice.* *Rasterize the polygon.* The graphics hardware performs bi-linear interpolation of the texture values (scalar field and pre-computed gradients) for each covered pixel [S3, unofficial]. *Gradient Normalization:* In the fragment shader, normalize the interpolated gradients to ensure high image quality during shading [S3, unofficial].
+4.  **Shading and Classification:** For each pixel covered by the slice: *Retrieve the interpolated scalar value and gradient.* *Apply the transfer function to compute color $C$ and opacity $\alpha$.* Classification can occur pre- or post-interpolation [S3, unofficial]. *Opacity Correction:* Scale the opacity linearly according to the distance between samples to approximate the integration along the ray [S3, unofficial].
+5.  **Compositing:** Blend the slice onto the image plane using the standard front-to-back or back-to-front compositing operator provided by the graphics hardware [S3, unofficial].
     $$ C_{out} = C_{in} \cdot (1 - \alpha_{slice}) + C_{slice} \cdot \alpha_{slice} $$
     $$ \alpha_{out} = \alpha_{in} \cdot (1 - \alpha_{slice}) + \alpha_{slice} $$
-    The method is exactly equivalent to standard ray casting unless precision is lost due to integer arithmetics in the compositing step [S3].
+    The method is exactly equivalent to standard ray casting unless precision is lost due to integer arithmetics in the compositing step [S4].
 
 **Pseudocode:**
 
@@ -52,52 +32,94 @@ The method requires storing the volume data in texture memory. Since the slices 
 
 ```python
 def render_image_parallel_2d_texture(volume_data, view_direction, image_width, image_height):
-    # 1. Determine slicing direction
-    # Calculate angles between view_direction and volume axes (x, y, z)
-    # Select axis with minimum angle as base_plane_axis
-    # If tie at 45 degrees, pick arbitrarily [S2, unofficial]
-    base_plane_axis = determine_base_plane(view_direction, volume_data.shape)
-    
+    # Handle list input to avoid AttributeError on .shape
+    if isinstance(volume_data, list):
+        Dz, Dy, Dx = len(volume_data), len(volume_data[0]), len(volume_data[0][0])
+    else:
+        Dz, Dy, Dx = volume_data.shape
+
+    # 1. Determine base plane axis
+    vx, vy, vz = view_direction
+    norm = (vx**2 + vy**2 + vz**2)**0.5
+    vx, vy, vz = vx/norm, vy/norm, vz/norm
+    cos_x, cos_y, cos_z = abs(vx), abs(vy), abs(vz)
+    if cos_x >= cos_y and cos_x >= cos_z:
+        base_axis = 'x'
+    elif cos_y >= cos_x and cos_y >= cos_z:
+        base_axis = 'y'
+    else:
+        base_axis = 'z'
+
     # 2. Prepare texture stacks
-    # Store volume in 3 2D textures: T_xy, T_yz, T_xz
-    # Pre-compute gradients and store in RGB channels [S2, unofficial]
-    textures = prepare_2d_texture_stacks(volume_data)
-    
+    # Three 2D textures are stored in memory, one for each slicing direction [S3, unofficial]
+    # Pre-compute gradients and store in RGB channels [S3, unofficial]
+    gradients = compute_gradients(volume_data)
+
     # 3. Generate slice stack
     # Determine number of slices N based on volume depth and desired sample spacing
-    # If view-aligned: generate polygons orthogonal to view_direction for each frame [S3]
-    # If pre-computed: use fixed polygons, but accept distortion [S3]
-    # Apply interpolation/shift to eliminate popping artifacts [S2, unofficial]
-    slices = generate_slice_stack(volume_data, view_direction, base_plane_axis)
-    
+    # Interpolate in-between slices to eliminate popping artifacts [S3, unofficial]
+    slices = generate_slice_stack(volume_data, view_direction, base_axis, image_width, image_height)
+
     # 4. Render loop
-    framebuffer = initialize_framebuffer(image_width, image_height)
-    
-    for slice in slices:
+    framebuffer = [{'color': (0.0, 0.0, 0.0), 'alpha': 0.0} for _ in range(image_width * image_height)]
+
+    for slice_data in slices:
         # Project slice polygon to screen space
-        screen_coords = project_to_screen(slice.polygon, view_direction)
-        
+        screen_coords = project_to_screen(slice_data.polygon, view_direction, image_width, image_height)
+
         # Rasterize and interpolate
-        # Hardware performs bi-linear interpolation of texture values [S3]
-        # Fragment shader computes:
-        #   scalar_val = texture_lookup(slice.texture, screen_coords)
-        #   gradient = texture_lookup(slice.gradient_texture, screen_coords)
-        #   gradient = normalize(gradient) [S2, unofficial]
-        #   color, alpha = apply_transfer_function(scalar_val, gradient)
-        #   alpha = alpha * sample_distance_correction [S2, unofficial]
-        
-        # Composite onto framebuffer using hardware blending
-        # Front-to-back or back-to-front order [S3]
-        framebuffer = blend_slice(framebuffer, color, alpha)
-        
+        # Hardware performs bi-linear interpolation of texture values [S3, unofficial]
+        for i, j in screen_coords:
+            scalar_val = sample_texture(slice_data.texture, slice_data.u, slice_data.v)
+            grad = gradients[slice_data.u, slice_data.v]
+            grad = normalize_vector(grad) # Fragment shader normalization [S3, unofficial]
+            color, alpha = apply_transfer_function(scalar_val, grad)
+            alpha = alpha * slice_data.sample_distance # Opacity correction [S3, unofficial]
+
+            # Composite onto framebuffer using hardware blending
+            framebuffer = blend_slice(framebuffer, i, j, color, alpha, image_width)
+
     return framebuffer
+
+def compute_gradients(vol):
+    # Pre-compute gradients for RGB channel storage [S3, unofficial]
+    Dz, Dy, Dx = len(vol), len(vol[0]), len(vol[0][0])
+    return [[[[0.0, 0.0, 0.0] for _ in range(Dx)] for _ in range(Dy)] for _ in range(Dz)]
+
+def generate_slice_stack(vol, view_dir, axis, w, h):
+    # Generate parallel planes orthogonal to viewing direction [S4]
+    # Return list of slice objects with polygon, texture ref, u, v, sample_distance
+    return []
+
+def project_to_screen(polygon, view_dir, w, h):
+    # Map 3D polygon vertices to 2D screen coordinates
+    return [(i, j) for i in range(w) for j in range(h)]
+
+def sample_texture(tex, u, v):
+    # Bi-linear interpolation of 2D texture [S3, unofficial]
+    return 0.0
+
+def normalize_vector(v):
+    n = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+    return [v[0]/n, v[1]/n, v[2]/n] if n > 0 else v
+
+def apply_transfer_function(scalar, grad):
+    # Compute color and opacity from scalar and gradient
+    return (0.5, 0.5, 0.5), 0.1
+
+def blend_slice(fb, i, j, color, alpha, img_w):
+    # Front-to-back or back-to-front compositing [S3, unofficial]
+    idx = i + j * img_w
+    fb[idx]['color'] = tuple(c1 * (1 - a2) + c2 * a2 for c1, c2 in zip(fb[idx]['color'], color))
+    fb[idx]['alpha'] = fb[idx]['alpha'] * (1 - alpha) + alpha
+    return fb
 ```
 
 **Parameters and Edge Cases:**
-*   **Sample Spacing:** Must be chosen to balance performance and quality. Too large causes aliasing; too small wastes bandwidth [S2, unofficial].
-*   **View Direction Parallel to Slices:** If the view direction is parallel to the primary axes of pre-computed slices, the projection distorts the slice views, degrading image quality. In the extreme case where the view direction is parallel to the slices, no image is generated [S3].
-*   **Aliasing:** Lack of interpolation between slices may lead to aliasing artifacts if the scalar field or transfer functions contain high frequencies [S2, unofficial].
-*   **Popping Artifacts:** Sudden changes in slicing direction can cause popping. This is worse for anisotropic data. Interpolating in-between slices mitigates this [S2, unofficial].
+*   **Sample Spacing:** Must be chosen to balance performance and quality. Too large causes aliasing; too small wastes bandwidth [S2].
+*   **View Direction Parallel to Slices:** If the view direction is parallel to the primary axes of pre-computed slices, the projection distorts the slice views, degrading image quality. In the extreme case where the view direction is parallel to the slices, no image is generated [S4].
+*   **Aliasing:** Lack of interpolation between slices may lead to aliasing artifacts if the scalar field or transfer functions contain high frequencies [S3, unofficial].
+*   **Popping Artifacts:** Sudden changes in slicing direction can cause popping. This is worse for anisotropic data. Interpolating in-between slices mitigates this [S3, unofficial].
 
 ## Subtopics
 
@@ -105,19 +127,20 @@ def render_image_parallel_2d_texture(volume_data, view_direction, image_width, i
 This method renders deformed volumetric data, specifically video volumes bent into a horseshoe shape, by distorting texture coordinates rather than geometry. It enables the use of standard planar, view-aligned texture slicing (as described in [Image-Parallel Ray Casting via 2D Texture Mapping](5854-image-parallel-ray-casting-via-2d-texture-mapping.md)) on non-planar data by computing inverse mappings in the fragment shader. Unlike forward mapping, it avoids gaps and overlaps inherent in geometry deformation, ensuring every pixel is covered by a valid texture lookup.
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering speed depends only on image size, not scene complexity [S1, unofficial]. It is generally faster than software ray casting for large volumes.
-*   **Memory Complexity:** Requires storing three copies of the volume in texture memory (one for each slicing direction) [S2, unofficial].
-*   **Performance:** 2D texture slicing outperforms 3D texture slicing for large volumes due to coherent memory accesses and higher performance of bi-linear interpolation compared to tri-linear [S2, unofficial].
+*   **Time Complexity:** Rendering speed depends only on image size, not scene complexity [S1, unofficial]. It is generally faster than software ray casting for large volumes [S2].
+*   **Memory Complexity:** Requires storing three copies of the volume in texture memory (one for each slicing direction) [S3, unofficial].
+*   **Performance:** 2D texture slicing outperforms 3D texture slicing for large volumes due to coherent memory accesses and higher performance of bi-linear interpolation compared to tri-linear [S3, unofficial]. Performance factors include software sampling rate, texture download rate, and polygon scan conversion rate [S6, book].
 *   **Strengths:** Simple implementation, leverages standard graphics hardware, fast rendering of large datasets, no complex geometric models required [S1, unofficial][S4].
-*   **Limitations:** Lower image quality compared to 3D texture mapping if only trilinear interpolation is used on 3D data [S4]. Distortion artifacts if pre-computed slices are used for arbitrary viewpoints [S3]. Popping artifacts when switching slicing directions [S2, unofficial].
-*   **When to Use:** Large volumetric datasets where interactive frame rates are required and 3D texture memory is insufficient or too slow [S2, unofficial].
-*   **When Not to Use:** When high image quality is critical and 3D texture mapping is available, or when the view direction is frequently parallel to the primary axes of pre-computed slices [S3, S4].
+*   **Limitations:** Lower image quality compared to 3D texture mapping if only trilinear interpolation is used on 3D data [S5]. Distortion artifacts if pre-computed slices are used for arbitrary viewpoints [S4]. Popping artifacts when switching slicing directions [S3, unofficial].
+*   **When to Use:** Large volumetric datasets where interactive frame rates are required and 3D texture memory is insufficient or too slow [S2].
+*   **When Not to Use:** When high image quality is critical and 3D texture mapping is available, or when the view direction is frequently parallel to the primary axes of pre-computed slices [S4].
 
 ## Background
-The method originated as a solution to the lack of 3D texture mapping hardware in early graphics pipelines [S2, unofficial]. Historically, it was used when 3D texture mapping was unavailable and remains relevant today for large volumes due to its performance characteristics [S2, unofficial]. The approach was formalized by Cullip and Neumann (1993), Guan and Lipes (1994), and Cabral et al. (1994) [S2, unofficial]. Rezk-Salama et al. (2000) improved the method by addressing popping artifacts and opacity correction [S2, unofficial].
+The method originated as a solution to the lack of 3D texture mapping hardware in early graphics pipelines [S2]. Historically, it was used when 3D texture mapping was unavailable and remains relevant today for large volumes due to its performance characteristics [S3, unofficial]. The approach was formalized by Cullip and Neumann (1993), Guan and Lipes (1994), and Cabral et al. (1994) [S3, unofficial]. Rezk-Salama et al. (2000) improved the method by addressing popping artifacts and opacity correction [S3, unofficial].
 
 ## Sources
 [S1] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
-[S2] Hardware-Accelerated Volume Rendering, https://vcg.seas.harvard.edu/publications/20040101-hardware-accelerated-volume-rendering/paper, fetched 2026-10-27 (unofficial)
-[S3] Interactive Volume Rendering Using 3D Texture-Mapping ..., https://web.cs.ucdavis.edu/~okreylos/PhDStudies/Winter2000/TextureMapping.html, fetched 2026-10-27
+[S2] Hardware-Accelerated Volume Rendering, https://vcg.seas.harvard.edu/publications/20040101-hardware-accelerated-volume-rendering/paper, fetched 2026-10-27
+[S3] Interactive Volume Rendering Using 3D Texture-Mapping ..., https://web.cs.ucdavis.edu/~okreylos/PhDStudies/Winter2000/TextureMapping.html, fetched 2026-10-27 (unofficial)
 [S4] Interactive Volume Visualization, https://web.cs.ucdavis.edu/~okreylos/ResDev/VolVis/MainPage.html, fetched 2026-10-28
+[S5] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29

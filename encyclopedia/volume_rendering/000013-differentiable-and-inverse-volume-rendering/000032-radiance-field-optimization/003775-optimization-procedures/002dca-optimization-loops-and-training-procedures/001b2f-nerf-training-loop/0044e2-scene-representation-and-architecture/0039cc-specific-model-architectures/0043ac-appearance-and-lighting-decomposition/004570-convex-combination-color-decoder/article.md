@@ -3,102 +3,60 @@
 Also called: Color Decoder
 
 ## Overview
-The Convex Combination Color Decoder is a method for predicting view-dependent appearance in neural radiance fields by blending a direct view-dependent color component with a reflection-based color component [S1]. It addresses the challenge of modeling glossy or reflective surfaces where standard view-dependent MLPs fail to capture consistent reflections across varying viewpoints [S1]. Unlike the standard NeRF color decoder which maps position and direction directly to color, this method explicitly separates the appearance into a base view-dependent term and a reflection term, weighted by a geometry-derived coefficient [S1].
+The Convex Combination Color Decoder is a method for decomposing view-dependent appearance into a diffuse-like base component and a glossy reflection component, weighted by a geometry-derived coefficient [S1]. It solves the problem of modeling specular highlights and environment reflections in neural radiance fields by ensuring that reflection features are utilized at every sample point along a ray, rather than just in image space, which aids convergence when geometry is initially fuzzy [S1]. It differs from standard NeRF color decoders by explicitly separating the view-dependent term from a reflection term that utilizes a pre-computed reflection feature $\bar{\mathbf{f}}$ [S1].
 
 ## How it works
-The decoder predicts the color $\mathbf{c}$ for a sample point $\mathbf{x}^{(i)}$ along a camera ray with viewing direction $\mathbf{d}$ [S1]. It relies on intermediate features from a geometry encoder, specifically a bottleneck vector $\mathbf{b}^{(i)}$ and a surface normal $\mathbf{n}^{(i)}$, as well as a reflection feature $\bar{\mathbf{f}}$ [S1].
-
-**Inputs:**
-*   $\mathbf{x}^{(i)}$: 3D position of the sample point.
-*   $\mathbf{d}$: Viewing direction of the camera ray.
-*   $\mathbf{b}^{(i)}$: Bottleneck feature vector, output by a small MLP applied to geometry features [S1].
-*   $\mathbf{n}^{(i)}$: Surface normal at $\mathbf{x}^{(i)}$, output by the geometry encoder [S1].
-*   $\bar{\mathbf{f}}$: Reflection feature, computed in 3D space (not image space) [S1].
-
-**Outputs:**
-*   $\mathbf{c}(\mathbf{x}^{(i)}, \mathbf{d})$: Predicted RGB color.
+**Inputs and Outputs:**
+*   **Inputs:** 3D position $\mathbf{x}^{(i)}$, viewing direction $\mathbf{d}$, normal $\mathbf{n}^{(i)}$, bottleneck feature $\mathbf{b}^{(i)}$, dot product $\mathbf{d} \cdot \mathbf{n}^{(i)}$, reflected direction $\mathbf{d}'$, and reflection feature $\bar{\mathbf{f}}$.
+*   **Outputs:** Final color $\mathbf{c}(\mathbf{x}^{(i)}, \mathbf{d}) \in \mathbb{R}^3$.
 
 **Data Structures:**
-*   $\beta^{(i)}$: A scalar weighting coefficient in $[0, 1]$, output by the geometry encoder followed by a sigmoid nonlinearity [S1].
-*   $g(\cdot)$: A small Multi-Layer Perceptron (MLP) for the view-dependent color component [S1].
-*   $h(\cdot)$: A small Multi-Layer Perceptron (MLP) for the reflection color component [S1].
+*   **MLPs $g$ and $h$:** Small Multi-Layer Perceptrons. The specific architecture (layers, dimensions) is not given in the primary text but is referenced as being detailed in the supplement [S1].
+*   **Geometry Encoder:** Outputs the weighting coefficient $\beta^{(i)}$ and the bottleneck vector $\mathbf{b}^{(i)}$. The coefficient $\beta^{(i)}$ is passed through a sigmoid nonlinearity to ensure it lies in $[0, 1]$ [S1].
+*   **Reflection Feature $\bar{\mathbf{f}}$:** A feature vector computed by the geometry encoder (Section 4.2 of [S1]), which is fed into the color decoder at every sample point [S1].
 
 **Steps:**
-1.  Compute the weighting coefficient $\beta^{(i)}$ from the geometry encoder features using a sigmoid activation [S1].
-2.  Compute the view-dependent color component $\mathbf{c}_v$:
+1.  **Compute Weighting Coefficient:** The geometry encoder outputs a value which is passed through a sigmoid function to produce $\beta^{(i)} \in [0, 1]$ [S1].
+2.  **Compute Bottleneck Feature:** A small MLP applied to geometry features outputs the bottleneck vector $\mathbf{b}^{(i)}$ [S1].
+3.  **Compute View-Dependent Color Component:** Calculate $\mathbf{c}_v$ using MLP $g$ with inputs $\mathbf{x}^{(i)}$, $\mathbf{b}^{(i)}$, $\mathbf{n}^{(i)}$, and $\mathbf{d}$:
     $$
     \mathbf{c}_v(\mathbf{x}^{(i)}, \mathbf{d}) = g(\mathbf{x}^{(i)}, \mathbf{b}^{(i)}, \mathbf{n}^{(i)}, \mathbf{d})
     $$
-    where $g$ takes the position, bottleneck, normal, and viewing direction as inputs [S1].
-3.  Compute the reflection direction $\mathbf{d}'$ based on $\mathbf{d}$ and $\mathbf{n}^{(i)}$ (standard specular reflection: $\mathbf{d}' = 2(\mathbf{d} \cdot \mathbf{n}^{(i)})\mathbf{n}^{(i)} - \mathbf{d}$) [S1].
-4.  Compute the reflection color component $\mathbf{c}_r$:
+    [S1]
+4.  **Compute Reflection Color Component:** Calculate $\mathbf{c}_r$ using MLP $h$ with inputs $\mathbf{x}^{(i)}$, $\mathbf{b}^{(i)}$, $\mathbf{n}^{(i)}$, $\mathbf{d} \cdot \mathbf{n}^{(i)}$, reflected direction $\mathbf{d}'$, and reflection feature $\bar{\mathbf{f}}$:
     $$
     \mathbf{c}_r(\mathbf{x}^{(i)}, \mathbf{d}') = h(\mathbf{x}^{(i)}, \mathbf{b}^{(i)}, \mathbf{n}^{(i)}, \mathbf{d} \cdot \mathbf{n}^{(i)}, \mathbf{d}', \bar{\mathbf{f}})
     $$
-    where $h$ takes the position, bottleneck, normal, dot product $\mathbf{d} \cdot \mathbf{n}^{(i)}$, reflection direction $\mathbf{d}'$, and reflection feature $\bar{\mathbf{f}}$ as inputs [S1].
-5.  Compute the final color as a convex combination:
+    [S1]
+5.  **Compute Final Color:** Combine the components using the convex combination:
     $$
     \mathbf{c}(\mathbf{x}^{(i)}, \mathbf{d}) = \beta^{(i)} \mathbf{c}_v(\mathbf{x}^{(i)}, \mathbf{d}) + (1 - \beta^{(i)}) \mathbf{c}_r(\mathbf{x}^{(i)}, \mathbf{d}')
     $$
-    [S1].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def convex_combination_color_decoder(x, d, b, n, f_bar, beta, mlp_g, mlp_h):
-    """
-    Predicts color using convex combination of view-dependent and reflection components.
-    
-    Args:
-        x: Position vector (3,)
-        d: Viewing direction vector (3,)
-        b: Bottleneck feature vector
-        n: Normal vector (3,)
-        f_bar: Reflection feature vector
-        beta: Weighting coefficient scalar in [0, 1]
-        mlp_g: MLP for view-dependent color
-        mlp_h: MLP for reflection color
-        
-    Returns:
-        c: Predicted color vector (3,)
-    """
-    # Compute view-dependent color component
-    # Inputs: position, bottleneck, normal, viewing direction
-    c_v = mlp_g(x, b, n, d)
-    
-    # Compute reflection direction d' = 2(d . n)n - d
-    dot_prod = np.dot(d, n)
-    d_prime = 2 * dot_prod * n - d
-    
-    # Compute reflection color component
-    # Inputs: position, bottleneck, normal, dot product, reflection direction, reflection feature
-    c_r = mlp_h(x, b, n, dot_prod, d_prime, f_bar)
-    
-    # Convex combination
-    c = beta * c_v + (1 - beta) * c_r
-    
-    return c
-```
+    [S1]
 
 **Parameters:**
-*   $\beta^{(i)}$: Output by geometry encoder + sigmoid. Typical value range $[0, 1]$ [S1].
-*   MLPs $g$ and $h$: Described as "small MLPs" in the source [S1]. Specific layer counts and widths are not given in the main text, referring to a supplement [S1].
+*   $\beta^{(i)}$: Weighting coefficient, output by geometry encoder + sigmoid. Typical value range $[0, 1]$.
+*   MLPs $g, h$: Small networks. Sizes not given in the sources [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Fuzzy Geometry:** The method feeds reflected features $\bar{\mathbf{f}}$ into the color decoder at every sample along the ray, not just in image space. This is crucial for convergence when geometry is fuzzy during early optimization, as every point along the ray can utilize the reflected feature [S1].
-*   **Distant Reflections:** Proper downweighting of distant content is crucial to prevent aliasing in reflections of distant illumination [S1].
+*   **Fuzzy Geometry:** Early in optimization, geometry is fuzzy. Feeding $\bar{\mathbf{f}}$ into the color decoder at every sample (3D space) rather than just in image space is crucial for convergence [S1].
+*   **Distant Content:** Properly downweighting distant content is crucial to prevent aliasing in reflections of distant illumination [S1].
 
 ## Subtopics
 
 ### Disentangled Appearance Modeling
-A technique to handle inconsistent lighting, transient objects, or weather variations by disentangling scene content from appearance factors, enabling robust reconstruction from unstructured image collections [S2, unofficial]. It introduces learnable per-image latent appearance codes as input to the network alongside samples to explain per-view variability such as lighting, tone, or transient content [S2, unofficial]. This allows the core geometry and consistent aspects of the scene to be reconstructed while residual factors are absorbed by the appearance codes [S2, unofficial]. Extensions such as GRAF, HaNeRF, and RawNeRF further refine this idea [S2, unofficial]. Introduced in NeRF-in-the-wild [S2, unofficial].
+A technique to handle inconsistent lighting, transient objects, or weather variations by disentangling scene content from appearance factors, enabling robust reconstruction from unstructured image collections [S2, unofficial]. It introduces learnable per-image latent appearance codes as input to the network alongside samples to explain per-view variability such as lighting, tone, or transient content [S2, unofficial]. This allows the core geometry to be reconstructed while residual factors are absorbed by the appearance codes, enabling rendering with varying lighting/weather by exploring the latent spaces [S2, unofficial]. Introduced in NeRF-in-the-wild, with extensions including GRAF, HaNeRF, and RawNeRF [S2, unofficial].
 
 ## Operating characteristics
-The method adds computational overhead due to the additional MLPs ($g$ and $h$) and the computation of reflection features and directions [S1]. By computing reflection features in 3D space and feeding them to the decoder at every sample, it ensures consistency but requires careful management of memory and computation along the ray [S1]. The use of a convex combination allows for smooth transitions between diffuse and glossy appearances based on the learned coefficient $\beta$ [S1].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Improves convergence when geometry is fuzzy by utilizing reflection features at every sample point [S1]. Explicitly models glossy appearance and reflections [S1].
+*   **Limitations:** Requires computation of reflection features $\bar{\mathbf{f}}$ and reflected directions $\mathbf{d}'$ [S1]. Sensitive to aliasing in distant reflections if distant content is not properly downweighted [S1].
+*   **When to use:** When modeling glossy/specular appearance and reflections is important [S1].
+*   **When not to use:** When computational resources are extremely limited and simple view-dependent appearance is sufficient [S1].
 
 ## Background
-The Convex Combination Color Decoder is inspired by UniSDF [S1]. It was introduced in NeRF-Casting to improve view-dependent appearance with consistent reflections [S1]. The geometry representation is based on Zip-NeRF, and it applies orientation loss similar to Ref-NeRF [S1].
+The Convex Combination Color Decoder was introduced in NeRF-Casting [S1]. It is inspired by UniSDF [S1]. It builds on the specific model architectures described in [Parent](11061-appearance-and-lighting-decomposition.md).
 
 ## Sources
 [S1] NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections, https://arxiv.org/abs/2405.14871v1, fetched 2026-10-26
