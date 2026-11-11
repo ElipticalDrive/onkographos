@@ -3,12 +3,12 @@
 Also called: Local Coordinate System for Moment Calculation, Shifted Integration Domain for Moments
 
 ## Overview
-This method mitigates catastrophic cancellation errors in volume and moment calculations for simplicial decomposition by shifting the integration domain into a local coordinate system near the origin before calculation [S1, unofficial]. It sets itself apart from naive global-coordinate integration by changing the error scaling from cubic to linear with respect to the ratio of the integration domain size to its absolute coordinate position [S1, unofficial].
+This method mitigates cancellation errors in volume and moment calculations for simplicial decomposition by shifting the integration domain into a local coordinate system near the origin before calculation [S1, unofficial]. It builds on [Polynomial Field Integration via Coordinate Moments](3791-polynomial-field-integration-via-coordinate-moments.md) by changing the error scaling from cubic to linear with respect to the ratio of the integration domain size to its absolute coordinate position [S1, unofficial].
 
 ## How it works
 **Inputs:** A voxel $V$ defined by a clipped simplicial mesh, its center coordinate $x_0$ in the global frame, and the desired moment order [S1, unofficial].
 **Outputs:** The volume $V$ and coordinate moments $\int_V x^k \, dV$ (or higher-order tensor equivalents) computed with reduced floating-point error [S1, unofficial].
-**Data Structures:** Not given in the sources.
+**Data Structures:** Not given in the sources [S1, unofficial].
 **Steps:**
 1. **Local Coordinate Transformation:** For each voxel, define a local coordinate system where the voxel center $x_0$ lies at the origin [S1, unofficial]. Transform all vertex coordinates $x$ of the voxel to local coordinates $x' = x - x_0$ [G].
 2. **Local Moment Calculation:** Compute the volume $V$ and the "local" moments $\int_V (x - x_0)^k \, dV$ using the standard analytic voxelization formulas applied to the transformed geometry [G].
@@ -31,7 +31,7 @@ This changes the error scaling from cubic to linear with respect to $x/\Delta x$
 
 **Pitfalls:**
 *   **Volume Error Propagation:** Any numerical error in the calculation of the volume $V$ is scaled by a factor of $x_0$ and propagated into the final result for moments. This is unavoidable [S1, unofficial].
-*   **Higher-Order Cross-Terms:** Errors in volume or lower-order moments will similarly scale with $x_0$ when reconstructing higher-order moments via binomial expansion [S1, unofficial].
+*   **Higher-Order Cross-Terms:** Errors in volume or lower-order moments will similarly scale with $x_0$ when reconstructing higher-order moments via binomial expansion. The same applies to cross-terms arising in the evaluation of higher-order moments. This is unavoidable [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -57,10 +57,10 @@ def compute_moments_local_coords(voxel_vertices, voxel_center, precision_bits):
         local_vertices.append(local_v)
         
     # Step 2: Compute local volume and local moments
-    # The analytic integration of the clipped simplicial mesh on local_vertices 
-    # is performed by the parent method [Polynomial Field Integration via Coordinate Moments] [G]
-    local_volume = 0.0  # Computed by parent method
-    local_moments = {'m1_x': 0.0, 'm1_y': 0.0, 'm1_z': 0.0, 'm2_xx': 0.0}  # Computed by parent method
+    # Local volume and moments are computed by the parent method [Polynomial Field Integration via Coordinate Moments] [G]
+    # Not given in the sources; delegated to parent method
+    local_volume = 0.0
+    local_moments = {'m1_x': 0.0, 'm1_y': 0.0, 'm1_z': 0.0, 'm2_xx': 0.0}
     
     # Step 3: Reconstruct global moments
     global_volume = local_volume
@@ -81,11 +81,11 @@ def compute_moments_local_coords(voxel_vertices, voxel_center, precision_bits):
 ```
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Performance:** Significantly improves accuracy for voxels far from the origin, especially in single precision. The error scaling improves from $O((x/\Delta x)^3)$ to $O(x/\Delta x)$ [S1, unofficial].
-*   **Strengths:** Drastically reduces cancellation errors in high-precision requirements or single-precision environments for distant objects [S1, unofficial].
-*   **Limitations:** Does not eliminate error; volume calculation errors are amplified by $x_0$ [S1, unofficial].
+*   **Time Complexity:** Not given in the sources [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+*   **Performance:** The method significantly improves accuracy for voxels far from the origin, especially in single precision [S1, unofficial]. The error scaling improves from $O((x/\Delta x)^3)$ to $O(x/\Delta x)$ [S1, unofficial].
+*   **Strengths:** It drastically reduces cancellation errors in high-precision requirements or single-precision environments for distant objects [S1, unofficial].
+*   **Limitations:** It does not eliminate error, as volume calculation errors are amplified by $x_0$ [S1, unofficial].
 
 ## Background
 This technique is described in the context of an exact general remeshing scheme for conservative voxelization [S1, unofficial]. It addresses the numerical instability inherent in computing moments for geometric primitives located far from the coordinate origin [S1, unofficial].

@@ -1,0 +1,82 @@
+# Scaffold-GS
+
+Also called: Scaffold-Gaussian Splatting
+
+## Overview
+Scaffold-GS is a 3D Gaussian Splatting variant that replaces the standard per-Gaussian attribute storage with a voxel-based scaffold representation to reduce memory usage and improve training stability [S1]. It solves the problem of high memory consumption and redundant Gaussian proliferation in large scenes by decoupling the geometric scaffold from the appearance modeling [S1]. Unlike vanilla 3D Gaussian Splatting, which stores explicit attributes for every Gaussian, Scaffold-GS determines all Gaussian attributes via interpolation from a voxel grid and lightweight neural networks, allowing for a more compact scene representation [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A sparse Structure-from-Motion (SfM) point cloud and a set of multi-view images.
+- **Output:** A set of 3D Gaussians rendered from novel viewpoints.
+
+**Data Structures:**
+1.  **Voxel Grid:** A 3D grid initialized from the SfM point cloud. Each voxel contains learnable features. The specific resolution and bit-packing of the voxel grid are not given in the sources [S1].
+2.  **Anchor Points:** Corresponding to the voxel grid centers or active voxels. These anchors serve as the geometric primitives.
+3.  **Lightweight Neural Networks:** Small networks that take interpolated voxel features as input and output Gaussian attributes (position, scale, rotation, opacity, and view-dependent color coefficients) [S1].
+
+**Method Steps:**
+1.  **Voxelization:** Initialize a voxel grid and attach learnable features to each voxel point based on the input SfM cloud [S1].
+2.  **Feature Interpolation:** For each Gaussian to be rendered, determine its position within the voxel grid and interpolate the learnable features from the surrounding voxels [S1].
+3.  **Attribute Prediction:** Pass the interpolated features through lightweight neural networks to predict all attributes of the Gaussians, including view-dependent color, opacity, and geometric parameters [S1].
+4.  **Rendering:** Project the predicted Gaussians to 2D, sort by depth, and composite using alpha blending [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_scaffold_gs(view, voxel_grid, neural_networks, sfm_cloud):
+    # Step 1: Initialize voxel grid from SfM cloud (done during training setup)
+    # voxel_grid = init_voxel_grid(sfm_cloud)
+    
+    # Step 2: For each pixel/ray, identify relevant Gaussians
+    # In Scaffold-GS, Gaussians are associated with anchors/voxels
+    active_anchors = get_active_anchors(voxel_grid, view.camera)
+    
+    rendered_image = zeros_like(view.resolution)
+    
+    for anchor in active_anchors:
+        # Step 3: Interpolate features from voxel grid
+        voxel_features = interpolate_features(anchor.position, voxel_grid)
+        
+        # Step 4: Predict Gaussian attributes using lightweight NN
+        # This replaces the explicit storage of attributes per Gaussian
+        gaussian_attrs = neural_networks.predict(voxel_features)
+        
+        # gaussian_attrs contains: position, scale, rotation, opacity, sh_coeffs
+        
+        # Step 5: Project and rasterize
+        # Standard 3DGS rasterization pipeline
+        projected_gaussian = project_to_2d(gaussian_attrs, view.camera)
+        rendered_image += composite_alpha_blend(projected_gaussian, view.resolution)
+        
+    return rendered_image
+```
+
+**Parameters:**
+- Voxel grid resolution: Not given in the sources [S1].
+- Neural network architecture: Described as "lightweight" but specific layer counts or sizes are not given [S1].
+
+**Edge Cases and Pitfalls:**
+- Sparse initialization: The method relies on the initial SfM cloud for voxelization. Poor SfM reconstruction may lead to inadequate anchor placement [S1].
+- Precision: Interpolation artifacts may occur if the voxel grid resolution is too coarse relative to the scene detail [S1].
+
+## Subtopics
+
+### Scaffold-GS Integration
+A variant where DART (Distance-Aware Replication) and AGE (Age-Gated Densification) are applied to the Scaffold-GS backbone [S2]. DART augments the anchor-seeding SfM cloud before optimization, and AGE gates anchor growth during optimization [S2]. This integration is backbone-agnostic, meaning it does not modify the rendering path or the optimizer [S2]. Hyperparameters used: $m=10$, $T_{mat}=200$, and DART disk-radius/neighborhood settings from Section 3.6 of the source [S2]. This configuration lifts performance over a reproduced Scaffold-GS* baseline by +0.37 dB PSNR, +0.012 SSIM, and -0.028 LPIPS on Mip-NeRF 360; +0.29 dB PSNR, +0.012 SSIM, and -0.033 LPIPS on Tanks & Temples; and marginal changes on Deep Blending [S2]. DART enlarges the Scaffold-GS anchor set by a mean of 64% (0.63M to 1.03M anchors), with the largest growth in sparse scenes (e.g., +310% on 'counter') [S2].
+
+## Operating characteristics
+- **Memory:** Significantly reduced compared to vanilla 3DGS because attributes are stored in a voxel grid and predicted by lightweight networks rather than stored explicitly per Gaussian [S1].
+- **Speed:** Not given in the sources [S1].
+- **Quality:** On Mip-NeRF 360, Scaffold-GS achieves competitive PSNR and SSIM [S2]. When combined with DART/AGE, it outperforms the baseline Scaffold-GS [S2].
+- **Scaling:** The anchor count scales with scene complexity and sparsity. DART increases anchor count by 64% on average, with higher increases in sparse scenes [S2].
+- **Strengths:** Compact representation, reduced redundancy, better handling of sparse scenes when combined with DART [S1, S2].
+- **Limitations:** Relies on initial SfM quality; performance gains from DART are marginal in densely covered scenes like Deep Blending [S2].
+
+## Background
+Scaffold-GS was proposed as an improvement over vanilla 3D Gaussian Splatting to address memory and redundancy issues [S1]. It was introduced in the context of recent advances in 3D Gaussian Splatting, following methods like VDGS which also use neural networks for attribute prediction [S1]. Scaffold-GS inspired further developments like Octree-GS, which adds level-of-detail strategies [S1].
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] DART-3DGS: Distance-Aware Replication and Age-Gated Densification for 3D Gaussian Splatting, https://europepmc.org/article/PMC/PMC13705904, fetched 2026-10-27

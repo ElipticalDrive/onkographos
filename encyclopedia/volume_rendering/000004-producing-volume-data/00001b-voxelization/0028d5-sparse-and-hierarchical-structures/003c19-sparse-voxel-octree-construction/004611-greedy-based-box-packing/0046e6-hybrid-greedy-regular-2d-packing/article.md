@@ -1,0 +1,195 @@
+# Hybrid Greedy/Regular 2D Packing
+
+Also called: Greedy-based approach, Regular 2D packing approach
+
+## Overview
+Hybrid Greedy/Regular 2D Packing is a volume rendering pre-processing method that partitions a 3D volume into non-empty bounding boxes and packs them into 2D texture slices to bypass 3D texture padding waste [S1]. It distinguishes itself from sibling methods by dynamically selecting between a recursive greedy packing strategy and a regular 2D packing strategy based on dataset sparsity, followed by post-packing rotation optimization to minimize memory overhead [S1]. Unlike [Li03a], which partitions based on density and gradient magnitude, this method applies only to alpha values as density magnitude for a streamlined process [S1].
+
+## How it works
+**Inputs:** 3D volume dataset (voxel grid with alpha values), density threshold ($\tau_{density}$), sparsity threshold ($\tau_{sparsity}$), aspect ratio threshold ($\tau_{ratio}$).
+**Outputs:** Packed 2D texture atlas, lookup tables mapping slice coordinates to packed texture coordinates, final texture dimensions $(W, H)$.
+
+**Data Structures:**
+1.  **Seed Map:** Binary 3D array $M$ of size $D_x \times D_y \times D_z$. $M_{i,j,k} = 1$ if voxel alpha $\ge \tau_{density}$, else $0$.
+2.  **Rectangles:** List of 2D bounding boxes for each slice, defined by $(x, y, w, h)$.
+3.  **Slice Classification:** List of slices labeled as "square-like", "tall", or "wide".
+
+**Steps:**
+
+1.  **Seed Map Creation:** Iterate over all voxels. If voxel alpha value $\alpha \ge \tau_{density}$, mark as seed (important voxel). Otherwise, mark as unimportant [S1].
+2.  **Sparse Check:** Calculate dataset sparsity $S$ (ratio of unimportant voxels to total voxels).
+    *   If $S < \tau_{sparsity}$, proceed to **2D Greedy Packing**.
+    *   If $S \ge \tau_{sparsity}$, proceed to **Regular 2D Packing** [S1].
+3.  **2D Greedy Packing:**
+    *   For each 2D slice, intersect 3D density boxes to obtain 2D rectangles [S1].
+    *   Sort rectangles by area descending [S1].
+    *   Place the largest rectangle to define the initial packed area [S1].
+    *   For each subsequent rectangle, evaluate four placement scenarios in empty regions adjacent to the current packed area: (a) place right, (b) place top, (c) place right-transposed, (d) place top-transposed [S1].
+    *   Select the placement that minimizes the growth of the slice's total bounding area [S1].
+4.  **Regular 2D Packing:** (Details not given in the sources for the specific algorithmic steps of "Regular 2D Packing" distinct from Greedy, other than it being the alternative path in the Sparse Check).
+5.  **Post-packing Optimisation:**
+    *   Pre-classify slices based on aspect ratio threshold $\tau_{ratio}$.
+    *   Evaluate two strategies: Strategy A (Uniformly Vertical) and Strategy B (Uniformly Horizontal) [S1].
+    *   Select the strategy with the smallest overall texture area [S1].
+    *   Rotate minority slices (wide in A, tall in B) by 90 degrees and repack them [S1].
+6.  **Rendering:** Upload final 3D texture atlas and lookup tables to GPU. Apply mipmapping. Render slice-by-slice using a proxy polygon and fragment shader sampling from the packed texture using lookup tables [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_packing(volume_data, tau_density, tau_sparsity, tau_ratio):
+    # Step 1: Seed Map Creation
+    seed_map = zeros_like(volume_data, dtype=bool)
+    for i, j, k in volume_data.indices():
+        if volume_data[i, j, k] >= tau_density:
+            seed_map[i, j, k] = True
+    
+    # Step 2: Sparse Check
+    total_voxels = volume_data.size
+    unimportant_voxels = (seed_map == False).sum()
+    sparsity = unimportant_voxels / total_voxels
+    
+    if sparsity < tau_sparsity:
+        packing_method = "greedy"
+    else:
+        packing_method = "regular"
+        
+    slices = []
+    for z in range(volume_data.shape[2]):
+        slice_data = volume_data[:, :, z]
+        # Extract 2D rectangles from non-empty regions
+        rectangles = extract_rectangles(slice_data, seed_map[:, :, z])
+        
+        if packing_method == "greedy":
+            packed_rects = greedy_pack_rectangles(rectangles)
+        else:
+            # Regular 2D packing implementation details not provided in sources
+            packed_rects = regular_pack_rectangles(rectangles)
+            
+        slices.append({
+            'z': z,
+            'rects': packed_rects,
+            'width': max(r.w for r in packed_rects),
+            'height': max(r.h for r in packed_rects)
+        })
+        
+    # Step 5: Post-packing Optimisation
+    optimized_slices = post_packing_optimization(slices, tau_ratio)
+    
+    # Step 6: Rendering Setup
+    texture_atlas = create_texture_atlas(optimized_slices)
+    lookup_tables = generate_lookup_tables(optimized_slices)
+    
+    return texture_atlas, lookup_tables
+
+def greedy_pack_rectangles(rectangles):
+    # Sort by area descending
+    rectangles.sort(key=lambda r: r.w * r.h, reverse=True)
+    
+    if not rectangles:
+        return []
+        
+    # Place first rectangle
+    packed_area = rectangles[0]
+    remaining_rects = rectangles[1:]
+    
+    for rect in remaining_rects:
+        best_placement = None
+        min_area_growth = infinity
+        
+        # Evaluate four placement scenarios
+        # Note: The specific geometry of "right", "top", "right-transposed", "top-transposed"
+        # relative to the current packed area boundary is not fully defined in sources.
+        # This is a placeholder for the recursive evaluation logic described in [S1].
+        scenarios = [
+            place_right(packed_area, rect),
+            place_top(packed_area, rect),
+            place_right_transposed(packed_area, rect),
+            place_top_transposed(packed_area, rect)
+        ]
+        
+        for scenario in scenarios:
+            growth = calculate_area_growth(packed_area, scenario)
+            if growth < min_area_growth:
+                min_area_growth = growth
+                best_placement = scenario
+                
+        packed_area = best_placement
+        
+    return packed_area
+
+def post_packing_optimization(slices, tau_ratio):
+    # Pre-classification
+    tall_slices = []
+    wide_slices = []
+    square_like_slices = []
+    
+    for s in slices:
+        aspect = max(s['width'] / s['height'], s['height'] / s['width'])
+        if aspect > tau_ratio:
+            if s['height'] > s['width']:
+                tall_slices.append(s)
+            else:
+                wide_slices.append(s)
+        else:
+            square_like_slices.append(s)
+            
+    # Calculate Potential Strategies
+    # Strategy A: Force all imbalanced slices to be tall (vertical orientation)
+    # Strategy B: Force all imbalanced slices to be wide (horizontal orientation)
+    # Note: Exact calculation of Area_A and Area_B is not fully detailed in sources.
+    # This assumes a function that computes total texture area for a given orientation strategy.
+    Area_A = calculate_total_texture_area(slices, orientation='tall')
+    Area_B = calculate_total_texture_area(slices, orientation='wide')
+    
+    if Area_A < Area_B:
+        # Strategy A selected
+        final_dims = (Width_A, Height_A)
+        for s in wide_slices:
+            rotate_and_repack(s)
+    else:
+        # Strategy B selected
+        final_dims = (Width_B, Height_B)
+        for s in tall_slices:
+            rotate_and_repack(s)
+            
+    return slices
+```
+
+**Parameters:**
+*   **density threshold ($\tau_{density}$):** User-defined alpha value threshold to distinguish important (seed) voxels from empty voxels. Typical values tested: 0.05, 0.5 [S1].
+*   **sparsity threshold ($\tau_{sparsity}$):** User-defined threshold for dataset sparsity to decide between Greedy-based and Regular 2D packing approaches [S1].
+*   **aspect ratio threshold ($\tau_{ratio}$):** Aspect ratio threshold used to classify slices as square-like or imbalanced during post-packing optimisation [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Increasing the density threshold leads to a significant FPS decrease due to increased box count, particularly on discrete GPUs like Nvidia 1050M [S1].
+*   **Boundaries:** The method explicitly bypasses 3D texture padding waste, but performance is sensitive to hardware architecture [S1].
+*   **Degenerate Input:** If a slice has no seed voxels, it may be excluded or handled as empty; specific handling is not detailed in the sources.
+
+## Subtopics
+
+### Greedy-based Box Packing
+*   **What it is:** A volume rendering pre-processing method that partitions a volume into variably-sized bounding boxes based on alpha values and packs these boxes into 2D texture slices.
+*   **What sets it apart:** It uses a recursive greedy algorithm to minimize bounding area growth during packing.
+*   **When to choose:** When dataset sparsity is low (below the sparsity threshold).
+*   **Link:** [Greedy-based Box Packing](11669-greedy-based-box-packing.md)
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Reduces memory overhead by compacting isolated non-empty voxels into 2D texture slices, bypassing 3D texture padding waste [S1].
+*   **Measured Performance:** On a Head768x768x273 dataset with Nvidia 1050M, increasing the density threshold leads to a significant FPS decrease due to increased box count [S1]. Performance is not primarily limited by fragment processing and is less sensitive to geometric complexity [S1].
+*   **Scaling:** Results reveal a strong dependency on hardware architecture, with varying levels of efficiency observed across the proposed greedy-based pipeline [S1].
+*   **Strengths:** Streamlined process using only alpha values; reduces texture size; enables empty-space skipping; mipmapping improves rendering performance [S1].
+*   **Limitations:** Volatile performance on discrete GPUs; strong dependency on hardware architecture; increasing box count degrades FPS [S1].
+*   **When to use:** For memory-efficient volume rendering of medical image data where 3D texture padding waste is a concern.
+*   **When not:** When hardware architecture is unknown or highly variable, or when gradient magnitude information is critical for partitioning (use [Li03a] instead) [S1].
+
+## Background
+*   **Origin:** Proposed in "A Hybrid CPU-GPU Approach for Memory-Efficient Volume Rendering of Medical Image Data" (WSCG 2026) [S1].
+*   **History and Development:** Bridges the gap between AMR structures and out-of-core streaming by applying fast 2D packing strategies directly to non-empty voxels [S1]. It adapts the box-growing algorithm and 2D greedy-packing proposed by [Li03a] but simplifies the partitioning criteria to alpha values only [S1].
+*   **Where it is used:** Practical 3D volume rendering pipelines, specifically for medical image data [S1].
+
+## Sources
+[S1] A Hybrid CPU-GPU Approach for Memory-Efficient Volume Rendering of Medical Image Data, https://doi.org/10.24132/csrn.2026-d53, fetched 2026-10-26

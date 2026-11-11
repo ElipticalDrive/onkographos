@@ -3,14 +3,14 @@
 Also called: COM unit, Compositing Unit
 
 ## Overview
-The Cube-4 COM unit is a hardware accelerator designed to compose shaded volumetric samples into final pixel values using slice-by-slice front-to-back compositing [S1]. It solves the problem of accumulating color and opacity for rays traversing a volume by managing intermediate results in a base-plane buffer, allowing parallel pipelines to handle different parts of the image plane [S1]. It is distinguished from sibling methods by its specific implementation on the Teramac custom computing machine, utilizing dedicated addressing and traversal units to handle the skewing and partial beam dependencies inherent in its rasterization order [S1].
+The Cube-4 COM unit composes shaded volumetric samples into final pixel values using a slice-by-slice front-to-back compositing order [S1]. It solves the accumulation of color and opacity for rays traversing a volume by storing intermediate results in a base-plane buffer, enabling parallel processing across multiple rendering pipelines [S1]. It is distinguished from sibling methods by its dedicated hardware implementation on the Teramac custom computing machine, which uses specific traversal and addressing units to manage skewing and partial-beam dependencies [S1].
 
 ## How it works
 **Inputs and Outputs:**
 *   **Input:** Shaded samples (RGB and opacity) delivered by the SHA unit [S1].
 *   **Input:** Intermediate compositing results stored in the base-plane buffer [S1].
 *   **Output:** Final pixel values (RGB and opacity) written to Teramac memory [S1].
-*   **Output:** Intermediate results written back to the base-plane buffer if the ray is not finished [S1].
+*   **Output:** Intermediate results written back to the base-plane buffer if the ray traversal is not finished [S1].
 
 **Data Structures:**
 *   **Base-Plane Buffer:** Stores intermediate compositing results. The layout is $125 \times 25$ entries per pipeline [S1]. Implemented using Teramac memory [S1].
@@ -18,71 +18,66 @@ The Cube-4 COM unit is a hardware accelerator designed to compose shaded volumet
 
 **Components:**
 *   **TRAVERSAL-UNIT:** Tracks the current slice, beam, and partial beam indices [S1].
-*   **ADDRESSING_UNIT:** Addresses the intermediate compositing results in the base-plane buffer that need to be composited with incoming shaded samples [S1].
-*   **COMPOSING_UNIT:** Performs the actual front-to-back compositing operation [S1].
+*   **ADDRESSING_UNIT:** Calculates the memory address in the base-plane buffer for the intermediate compositing results [S1].
+*   **COMPOSING_UNIT:** Performs the front-to-back compositing operation [S1].
 
 **Algorithm Steps:**
 1.  The TRAVERSAL-UNIT determines the current slice, beam, and partial beam indices for the incoming shaded samples [S1].
 2.  The ADDRESSING_UNIT calculates the memory address in the base-plane buffer corresponding to the current sample's position [S1].
 3.  The COMPOSING_UNIT retrieves the intermediate compositing result from the base-plane buffer at the addressed location [S1].
 4.  The COMPOSING_UNIT composites the incoming shaded sample with the retrieved intermediate result using the front-to-back over operator [S1].
-5.  **Skewing and Forwarding:** Due to the slice-by-slice order and skewing, values from adjacent partial beams may need to be forwarded to pipelines 0, 1, 2, and 4 [S1]. Special handling is required when values do not come from the same partial-beam range (cases 0, 2, 3, and 4) [S1]. In these cases, intermediate results from adjacent partial beams are required [S1].
+5.  **Skewing and Forwarding:** Due to the slice-by-slice order and skewing, values from adjacent partial beams must be forwarded to pipelines 0, 1, 2, and 4 [S1]. Special handling is required when values do not originate from the same partial-beam range (cases 0, 2, 3, and 4) [S1]. In these cases, intermediate results from adjacent partial beams are required [S1].
 6.  The result of the compositing operation is stored back into the base-plane buffer at the addressed location [S1].
 7.  If the ray traversal is finished, the final accumulated value is output to Teramac memory along with the X and Y coordinates on the base-plane [S1]. Otherwise, the intermediate result remains in the base-plane buffer for the next sample [S1].
+
+**Formulas:**
+The front-to-back compositing over operator is applied per cycle [S1]:
+$$C_{out} = C_{in} + C_{prev} \times (1 - A_{in})$$
+$$A_{out} = A_{in} + A_{prev} \times (1 - A_{in})$$
+where $C_{in}$ and $A_{in}$ are the RGB color and opacity of the incoming shaded sample, and $C_{prev}$ and $A_{prev}$ are the RGB color and opacity of the intermediate result retrieved from the base-plane buffer. All color values are assumed to be pre-multiplied by opacity.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for the COM unit operation per cycle
-# Assumes parallel execution across 8 pipelines
-
-def com_posing_unit_cycle(pipeline_id, shaded_sample, traversal_unit, addressing_unit, base_plane_buffer):
+def com_posing_unit_cycle(pipeline_id, shaded_sample, traversal_unit, addressing_unit, base_plane_buffer, final_memory):
     """
     Composes a shaded sample with the intermediate result from the base-plane buffer.
-    
     Args:
-        pipeline_id: The ID of the current pipeline (0-7).
-        shaded_sample: Tuple (R, G, B, A) from the SHA unit.
-        traversal_unit: Object tracking current slice, beam, and partial beam indices.
-        addressing_unit: Object calculating memory addresses.
-        base_plane_buffer: 2D array of size [125][25] per pipeline storing intermediate results.
-        
-    Returns:
-        None (updates base_plane_buffer or writes to final memory)
+        pipeline_id: Pipeline index (0-7).
+        shaded_sample: Tuple (R, G, B, A) from SHA unit.
+        traversal_unit: Tracks current slice, beam, and partial beam indices.
+        addressing_unit: Calculates memory addresses for base-plane buffer.
+        base_plane_buffer: 3D array [pipeline][y][x] of (R, G, B, A) tuples, zero-initialized per frame.
+        final_memory: Output storage for completed rays.
     """
     # 1. Get current indices from traversal unit
     current_slice = traversal_unit.get_slice_index()
     current_beam = traversal_unit.get_beam_index()
     current_partial_beam = traversal_unit.get_partial_beam_index()
-    
+
     # 2. Address the intermediate result
-    # The addressing unit maps the current sample position to the base-plane buffer
     buffer_x, buffer_y = addressing_unit.calculate_address(current_slice, current_beam, current_partial_beam)
-    
+
     # 3. Retrieve intermediate result
-    # Note: Teramac limits memory access to one read and one write per cycle [S1]
-    intermediate_result = base_plane_buffer[pipeline_id][buffer_y][buffer_x]
-    
+    # Teramac limits memory access to one read and one write per cycle [S1]
+    prev_r, prev_g, prev_b, prev_a = base_plane_buffer[pipeline_id][buffer_y][buffer_x]
+
     # 4. Handle skewing and adjacent partial beams
-    # Special handling for cases 0, 2, 3, 4 where values from adjacent partial beams are needed [S1]
-    # This logic is typically handled by the addressing unit or dedicated forwarding logic
-    # to ensure the correct intermediate result is retrieved for compositing [S1].
-    
+    # Special handling required when values do not come from the same partial-beam range (cases 0, 2, 3, 4) [S1].
+    # Intermediate results from adjacent partial beams are forwarded to pipelines 0, 1, 2, and 4 [S1].
+    # (Hardware routing logic for skewing is handled by the addressing/forwarding unit, not shown here)
+
     # 5. Composite using front-to-back over operator
-    # C_out = C_in + C_prev * (1 - A_in)
-    # A_out = A_in + A_prev * (1 - A_in)
-    # Where (C_in, A_in) is the shaded sample and (C_prev, A_prev) is the intermediate result
-    new_r = shaded_sample.R + intermediate_result.R * (1 - shaded_sample.A)
-    new_g = shaded_sample.G + intermediate_result.G * (1 - shaded_sample.A)
-    new_b = shaded_sample.B + intermediate_result.B * (1 - shaded_sample.A)
-    new_a = shaded_sample.A + intermediate_result.A * (1 - shaded_sample.A)
-    
+    new_r = shaded_sample.R + prev_r * (1.0 - shaded_sample.A)
+    new_g = shaded_sample.G + prev_g * (1.0 - shaded_sample.A)
+    new_b = shaded_sample.B + prev_b * (1.0 - shaded_sample.A)
+    new_a = shaded_sample.A + prev_a * (1.0 - shaded_sample.A)
+
     # 6. Check if ray is finished
     if traversal_unit.is_ray_finished():
-        # 7. Output final value to Teramac memory
-        # Write (new_r, new_g, new_b, new_a) to Teramac memory at (X, Y)
-        teramac_memory.write(current_slice, current_beam, new_r, new_g, new_b, new_a)
+        # 7. Output final value to Teramac memory with X/Y address
+        final_memory.write(current_slice, current_beam, new_r, new_g, new_b, new_a)
     else:
         # 8. Store intermediate result back to base-plane buffer
         base_plane_buffer[pipeline_id][buffer_y][buffer_x] = (new_r, new_g, new_b, new_a)
@@ -97,6 +92,7 @@ def com_posing_unit_cycle(pipeline_id, shaded_sample, traversal_unit, addressing
 *   **Skewing:** Values from adjacent partial beams must be forwarded in pipelines 0, 1, 2, and 4 [S1].
 *   **Partial Beam Boundaries:** Special handling is required when values do not come from the same partial-beam range (cases 0, 2, 3, and 4) [S1]. Intermediate results from adjacent partial beams are required in these cases [S1].
 *   **Memory Access Limits:** Teramac limits memory access to one read and one write per cycle [S1].
+*   **Initialization:** The base-plane buffer must be zero-initialized at the start of each frame to prevent stale data from corrupting new ray accumulations [G].
 
 ## Operating characteristics
 *   **Performance:** Achieved a frame rate of 1.5 Hz using eight parallel rendering pipelines [S1].
@@ -106,7 +102,7 @@ def com_posing_unit_cycle(pipeline_id, shaded_sample, traversal_unit, addressing
 *   **Limitations:** Limited by Teramac's memory access constraints (one read/write per cycle) [S1].
 
 ## Background
-The Cube-4 COM unit was implemented on the Teramac custom computing machine [S1]. The Teramac was a reconfigurable computing system developed by H. John Paul and colleagues at Caltech in the mid-1990s [S1]. The Cube-4 project aimed to implement a high-performance volume rendering system on this hardware [S1]. The COM unit is part of the Cube-4 architecture, which includes other units like the SHA (Shading), TRI (Triangle), and GRA (Gridding) units [S1].
+The Cube-4 COM unit was implemented on the Teramac custom computing machine [S1]. The COM unit is part of the Cube-4 architecture, which includes other units like the SHA (Shading), TRI (Triangle), and GRA (Gridding) units [S1].
 
 ## Sources
 [S1] Cube-4 Implementations on the Teramac Custom Computing Machine, https://doi.org/10.2312/eggh/eggh96/133-143, fetched 2026-10-26
