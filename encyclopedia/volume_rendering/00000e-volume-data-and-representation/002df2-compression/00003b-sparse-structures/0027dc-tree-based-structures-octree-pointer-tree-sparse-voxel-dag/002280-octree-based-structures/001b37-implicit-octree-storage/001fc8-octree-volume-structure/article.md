@@ -19,7 +19,7 @@ The structure consists of three main components [S1, S2, S3][S4, S5, unofficial]
     *   `OctCap* caps`: A pointer to the array of cap nodes at depth $d_{max}-1$ [S2].
     *   `int child_bit_depth[max_depth]`: A precomputed array for hashing (see below) [S2].
 
-2.  **`OctNode`**: Represents an interior node at depth $d < d_{max}-1$. It stores data for its 8 children [S3].
+2.  **`OctNode`**: Represents an interior node at depth $d < d_{max}-1$ [S3]. It stores data for its 8 children [S3].
     *   `T child_scalars[8]`: Stores scalar values for children that are **scalar leaves**. A child is a scalar leaf if its corresponding offset is -1 [S3].
     *   `T child_mins[8]`: Stores the minimum value of the 8-voxel cell (including forward neighbors) for each child [S2].
     *   `T child_maxs[8]`: Stores the maximum value of the 8-voxel cell for each child [S2].
@@ -126,11 +126,11 @@ def point_locate(octdata, dest_x, dest_y, dest_z, depth, index):
 Octree Volume Ray Tracing is a technique for interactive isosurface rendering of large compressed structured volumes by using a single octree structure that serves simultaneously as a lossless compression format for scalar data and an acceleration structure for ray traversal. It solves the problem of rendering multi-gigabyte volumes on commodity hardware by avoiding the memory overhead of separate acceleration structures (which can exceed 3x the data size) and the topological inaccuracies of mesh extraction methods. Unlike siblings such as [Compact Octree Memory Layout](2828-compact-octree-memory-layout.md) which focus on storage efficiency, this method integrates traversal and compression into a unified rendering pipeline.
 
 ### [Compact Octree Memory Layout](2828-compact-octree-memory-layout.md)
-Compact Octree Memory Layout is a memory-efficient storage format for voxel octrees that packs node validity and leaf status into compact bitmasks while using relative pointers to minimize address space usage. It solves the problem of high memory overhead in traditional pointer-based octrees by embedding structural metadata directly within node structures and deferring large address offsets to separate indirection entries. Unlike sibling methods that may use explicit parent pointers or full-resolution grids, this layout optimizes for cache locality and reduced pointer size, making it suitable for large-scale volume rendering where memory bandwidth is a constraint.
+Compact Octree Memory Layout is a memory layout for voxel octree nodes that packs validity and leaf status into 2 bytes and uses relative pointers, with support for far pointers via a separate indirection entry to handle large address spaces.
 
 ## Operating characteristics
-*   **Time Complexity:** Construction is $O(N^3)$ where $N$ is the volume dimension, as it processes each voxel once. Point location is $O(d_{max}) = O(\log N)$ per lookup.
-*   **Memory Complexity:** Significantly lower than standard octrees because it avoids storing explicit leaf nodes and uses compact offsets. The min/max tree adds approximately 22% overhead on top of the raw octree voxel data [S6].
+*   **Time Complexity:** Construction is $O(N^3)$ where $N$ is the volume dimension, as it processes each voxel once [G]. Point location is $O(d_{max}) = O(\log N)$ per lookup [G].
+*   **Memory Complexity:** Significantly lower than standard octrees because it avoids storing explicit leaf nodes and uses compact offsets [G]. The min/max tree adds approximately 22% overhead on top of the raw octree voxel data [S6].
 *   **Performance:** Optimized for ray tracing on commodity hardware. The unified structure reduces cache misses by allowing rejection of children without traversal using the min/max bounds [S2][S7, unofficial].
 *   **Strengths:** Low memory footprint, fast point location, integrated acceleration structure.
 *   **Limitations:** Requires power-of-2 volume dimensions (padding may be needed). Neighbor finding requires careful handling of the 27-voxel min/max computation [S2][S7, unofficial].

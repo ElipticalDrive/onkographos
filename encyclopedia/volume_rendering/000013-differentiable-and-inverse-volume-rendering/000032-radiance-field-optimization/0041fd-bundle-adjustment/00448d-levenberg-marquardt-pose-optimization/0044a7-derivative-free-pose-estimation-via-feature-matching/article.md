@@ -1,0 +1,218 @@
+# Derivative-free Pose Estimation via Feature Matching
+
+Also called: Feature-based differentiable rendering pose estimation, Gradient-free 6-DoF pose optimization
+
+## Overview
+This method estimates the 6-DoF pose of a target from a single reference image by rendering multiple images at sampled pose perturbations, extracting feature correspondences, and computing a least-squares estimate for the pose using differential corrections to an initial guess [S1]. Unlike its sibling [Differentiable Rendering for Pose Estimation](11554-differentiable-rendering-for-pose-estimation.md), which explicitly constructs a numerical Jacobian of the image with respect to pose perturbations to drive gradient-based optimization, this method relies on differential corrections to an initial guess via feature matching [S1]. It bypasses the analytical description of the image formation model, which is complex due to lens and illumination dependencies, by seeking a local numerical solution in the feature space [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A reference image $I_{ref}$ containing the target, a 3D model of the target (mesh or point cloud), an initial pose guess $p_{init}$, and camera calibration parameters [S1].
+- **Output:** The optimized 6-DoF pose $p^*$ [S1].
+
+**Data Structures:**
+- **Pose Vector $p$:** Composed of rotation and translation components. The rotation is represented using the Gibbs vector $q$ [S1]. Thus, $p = [q_x, q_y, q_z, t_x, t_y, t_z]^T$ [S1].
+- **Feature Vector $x$:** For $N_f$ key-point features, $x$ is a vector of $2N_f$ coordinates: $x = (x_1, y_1, \dots, x_{N_f}, y_{N_f})$ [S1]. The method requires at least three features, but uses four in the primary description [S1].
+- **Pose Difference Matrix $B$:** Size $6 \times N_s$, where $N_s$ is the number of sampled pose perturbations [S1].
+- **Feature Difference Matrix $E$:** Size $2N_f \times N_s$, containing the differences between reference features and rendered features for each perturbation [S1].
+
+**Numbered Steps:**
+
+1.  **Initialization:** Start with an informed initial pose guess $p_{init}$ for the target [S1]. This guess must be meaningful enough to find a minimum number of feature matches between the reference image and the image rendered at $p_{init}$ [S1].
+
+2.  **Pose Sampling:** Generate $N_s$ random pose perturbations $\Delta p_i$ for $i = 1, \dots, N_s$ [S1].
+    -   Sample rotation axis uniformly on a spherical surface [S1].
+    -   Sample Gibbs vectors for orientation [S1].
+    -   Sample translation components [S1].
+    -   Construct the relative pose difference $\Delta p_i = [\Delta q_i, \Delta t_i]^T$ [S1].
+    -   Compute the sampled poses $p_i = p_{init} \oplus \Delta p_i$ [S1].
+
+3.  **Rendering:** Render $N_s$ images of the target using the current pose guess and the sampled pose perturbations $p_i$ [S1].
+
+4.  **Feature Extraction:** Extract feature descriptors from the reference image $I_{ref}$ and the rendered images $I_i$ using robust geometric feature detectors consistent with the image region type (e.g., SURF, Good Features to Track) [S1].
+    -   *Note:* If rendered views are close to the reference camera, use the Kanade-Lucas-Tomasi (KLT) feature-based tracking algorithm for efficient real-time feature correspondence [S1].
+
+5.  **Feature Matching:** Match features between the reference image and rendered images using the extracted descriptors [S1].
+
+6.  **Outlier Rejection:** Reject outliers to block mismatched pairs and select the best few feature matches as sparse measurements [S1]. Let $x_{ref}$ be the feature vector from the reference image and $x_i$ be the feature vector from the $i$-th rendered image [S1].
+
+7.  **Compute Feature Differences:** Compute the 2D feature differences $\Delta x_i$ between the reference and rendered images [S1]:
+    $$ \Delta x_i = x_{ref} - x_i $$
+    [S1]
+
+8.  **Compute Pose Differences:** For all pose perturbations, populate the difference between the reference pose $p_{ref}$ (the true pose corresponding to $I_{ref}$, or the current estimate in an iterative loop) and the sampled pose $p_i$ [S1].
+    -   Compute rotation difference: $\Delta R_i = R_{ref}^T R_i$ [S1].
+    -   Compute translation difference: $\Delta t_i = t_{ref} - t_i$ [S1].
+    -   Combine into relative pose difference: $\Delta p_i = [\Delta q_i, \Delta t_i]^T$ [S1].
+
+9.  **Jacobian Estimation:** Linearize the nonlinear transformation $H$ from the image feature space to the pose space [S1]. The relationship is approximated as:
+    $$ \Delta x \approx J_f \Delta p $$
+    where $J_f$ is the Jacobian matrix of size $2N_f \times 6$ [S1].
+    -   Construct the matrix equation for $N_s$ samples:
+        $$ E = J_f B $$
+        where $E$ is $2N_f \times N_s$ and $B$ is $6 \times N_s$ [S1].
+    -   Solve for $J_f$ using least squares:
+        $$ J_f = E B^T (B B^T)^{-1} $$
+        [S1]
+    -   *Pitfall:* Rank deficiency in $B$ if perturbations do not cover all 6 degrees of freedom. Mitigation: Randomly and carefully perturb pose along all 6 axes [S1].
+    -   *Note:* Learning the inverse Jacobian $J_f^{-1}$ is noted to result in better performance than inverting an estimate of the Jacobian [S1].
+
+10. **Pose Optimization:** Apply differential corrections to the initial pose guess to obtain the least-squares estimate of the 6-DoF pose [S1].
+    -   Compute the current feature error $\Delta x_{curr} = x_{ref} - x_{curr}$, where $x_{curr}$ is the feature vector from the image rendered at the current pose estimate [S1].
+    -   Compute the pose correction $\Delta p_{corr}$:
+        $$ \Delta p_{corr} = J_f^{-1} \Delta x_{curr} $$
+        [S1]
+    -   Update the pose: $p_{new} = p_{curr} \oplus \Delta p_{corr}$ [S1].
+    -   Repeat steps 2-10 until convergence or a maximum number of iterations is reached [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def derivative_free_pose_estimation(I_ref, model, p_init, K, N_s=10, max_iter=10):
+    """
+    Estimate 6-DoF pose using derivative-free feature matching.
+    
+    Args:
+        I_ref: Reference image.
+        model: 3D model of the target.
+        p_init: Initial pose guess [q_x, q_y, q_z, t_x, t_y, t_z].
+        K: Camera intrinsic matrix.
+        N_s: Number of pose perturbations.
+        max_iter: Maximum number of optimization iterations.
+        
+    Returns:
+        p_opt: Optimized pose.
+    """
+    p_curr = p_init.copy()
+    
+    for iteration in range(max_iter):
+        # 1. Render reference features at current pose
+        x_curr = extract_features(render_image(model, p_curr, K))
+        
+        # 2. Check for minimum feature matches
+        if len(x_curr) < 3:
+            # Re-initialize with conservative pose samples
+            p_curr = p_init
+            continue
+            
+        # 3. Generate pose perturbations
+        deltas_p = generate_random_pose_perturbations(N_s) # Shape: (N_s, 6)
+        
+        # 4. Render perturbed images and extract features
+        x_perturbed = []
+        for i in range(N_s):
+            p_pert = compose_pose(p_curr, deltas_p[i])
+            I_pert = render_image(model, p_pert, K)
+            x_pert = extract_features(I_pert)
+            x_perturbed.append(x_pert)
+            
+        # 5. Match features and compute differences
+        # Assume feature matching returns indices or direct correspondence
+        # For simplicity, assume we have matched features x_ref and x_pert[i]
+        # In practice, use KLT if close, or robust detectors if far
+        x_ref = extract_features(I_ref)
+        
+        # Compute feature differences E (2*N_f, N_s)
+        # And pose differences B (6, N_s)
+        E = np.zeros((len(x_ref), N_s))
+        B = np.zeros((6, N_s))
+        
+        for i in range(N_s):
+            # Match x_ref with x_perturbed[i]
+            # Get corresponding coordinates
+            x_match = match_features(x_ref, x_perturbed[i])
+            if len(x_match) < 3:
+                continue # Skip if not enough matches
+            
+            # Feature difference
+            E[:, i] = x_ref[:len(x_match)*2] - x_match[:len(x_match)*2] # Flatten
+            
+            # Pose difference
+            # Compute relative pose between p_curr and p_pert[i]
+            # Delta R = R_curr^T * R_pert
+            # Delta t = t_curr - t_pert
+            # Convert to Gibbs vector if necessary
+            delta_p = compute_pose_difference(p_curr, p_pert[i])
+            B[:, i] = delta_p
+            
+        # 6. Estimate Jacobian J_f (2*N_f, 6)
+        # Solve E = J_f * B for J_f
+        # J_f = E * B^T * (B * B^T)^-1
+        try:
+            J_f = E @ B.T @ np.linalg.inv(B @ B.T)
+        except np.linalg.LinAlgError:
+            # Rank deficiency in B
+            # Mitigation: Perturb along all 6 axes more carefully
+            continue
+            
+        # 7. Compute pose correction
+        # Delta x_curr = x_ref - x_curr
+        delta_x_curr = x_ref[:len(x_match)*2] - x_curr[:len(x_match)*2]
+        
+        # Delta p_corr = J_f^-1 * delta_x_curr
+        # Learning inverse Jacobian is better
+        try:
+            J_f_inv = np.linalg.inv(J_f)
+            delta_p_corr = J_f_inv @ delta_x_curr
+        except np.linalg.LinAlgError:
+            continue
+            
+        # 8. Update pose
+        p_curr = compose_pose(p_curr, delta_p_corr)
+        
+    return p_curr
+
+def generate_random_pose_perturbations(N_s):
+    """Generate random pose perturbations covering all 6 DOFs."""
+    # Sample rotation axis uniformly on spherical surface
+    # Sample Gibbs vectors for orientation
+    # Sample translation components
+    # Return N_s x 6 matrix
+    pass
+
+def extract_features(I):
+    """Extract features using robust geometric detectors or KLT."""
+    pass
+
+def render_image(model, pose, K):
+    """Render image from model and pose."""
+    pass
+
+def match_features(x_ref, x_pert):
+    """Match features between two sets of keypoints."""
+    pass
+
+def compute_pose_difference(p1, p2):
+    """Compute relative pose difference in Gibbs vector representation."""
+    pass
+
+def compose_pose(p1, delta_p):
+    """Compose pose p1 with delta_p."""
+    pass
+```
+
+## Subtopics
+
+### Jacobian Estimation via Random Pose Perturbation
+A method to numerically compute the Jacobian matrix $J_f$ of the image formation model $x = f(p)$ by generating random pose perturbations, rendering images, and solving a linear least-squares system [S1]. It bypasses analytical differentiation of the image formation process [S1]. Unlike methods that only track a target pose, this method estimates the pose by minimizing feature errors using the estimated Jacobian [S1]. Learning the inverse Jacobian is noted to result in better performance than inverting an estimate of the Jacobian [S1]. The rank deficiency in the pose difference matrix $B$ can be avoided by randomly and carefully perturbing pose along all 6 axes [S1].
+
+## Operating characteristics
+- **Time Complexity:** The method is computationally expensive due to the rendering step, which is performed $N_s$ times per iteration [S1]. Feature matching is also computationally inefficient, especially when images are far apart, but KLT tracking improves efficiency when views are close [S1].
+- **Memory Complexity:** Depends on the number of features and samples. The matrices $E$ and $B$ scale with $N_s$ and the number of features [S1].
+- **Measured Performance:**
+    - **ISS Experiment:** After 10 iterations, translation error was 0.12 m and rotation error was 0.116 degrees [S1].
+    - **Rheasilvia Experiment:** Final translation error was 2.38 m and rotation error was 2.11 degrees [S1].
+- **Strengths:** Bypasses complex analytical image formation models; uses sparse 2D feature correspondences; efficient real-time correspondence with KLT when views are close [S1].
+- **Limitations:** Sensitive to establishing a minimum number of 2D feature correspondences; sensitive to illumination and shape mismatches which affect convergence accuracy; computationally expensive rendering step [S1].
+- **When to Use:** Proximity operations for space objects where a 3D model is available and real-time performance is not strictly constrained by the rendering cost [S1].
+- **When Not to Use:** When illumination changes are significant and cannot be accounted for, or when feature matching fails due to lack of texture [S1].
+
+## Background
+The method builds on KLT tracking [41] (Lucas, Kanade, 1981), robust feature detectors like SURF [39] (Bay et al., 2006) and Good Features to Track [40] (Shi et al., 1994), and least-squares differential corrections [S1]. It was proposed for proximity operations for space objects, specifically tested on the International Space Station (ISS) and the Rheasilvia basin on Vesta [S1]. The availability of a 3D model enables the rendering of images at different pose perturbations to facilitate feature-rich datasets for online learning [S1]. If a model is not readily available for an uncooperative target, a dense point cloud can be constructed from a LiDAR scanner or synthesized from multiview 3D reconstruction [S1].
+
+## Sources
+[S1] Differentiable Rendering for Pose Estimation in Proximity Operations, https://core.ac.uk/download/552738213.pdf, fetched 2026-10-30

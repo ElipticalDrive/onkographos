@@ -1,26 +1,19 @@
 # BasicDAGColorErrors
+
+
 ## Overview
-BasicDAGColorErrors computes a binary error flag by comparing compressed and uncompressed color representations for adaptive quality control [S1, unofficial]. It differs from other siblings in the BasicDAGColorsBase family by focusing exclusively on error metric generation rather than storage optimization or compression algorithms [G]. The algorithm retrieves compressed and uncompressed colors, computes their error via `ColorUtils::color_error()`, and returns `1.f` if the error exceeds `0.04`, otherwise `0.f` [S1, unofficial].
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def get_color(leave_count):
-    # Retrieve compressed and uncompressed colors based on leave_count (Not given in the sources.)
-    compressed_color = retrieve_compressed_color(leave_count)
-    uncompressed_color = retrieve_uncompressed_color(leave_count)
-    error = color_error(compressed_color, uncompressed_color)
-    return 1.0 if error > 0.04 else 0.0
-```
+BasicDAGColorErrors is a specific implementation of color error computation for Sparse Voxel DAGs, designed to provide adaptive quality control by comparing compressed and uncompressed color representations [S1, unofficial]. It differs from its sibling [BasicDAGColorsBase](6742-basicdagcolorsbase.md) by introducing a binary error flag mechanism rather than just storing leaf counts, and from [BasicDAGColors](6743-basicdagcolors.md) by focusing on a fixed threshold comparison rather than general error metrics.
 
 ## Shared principles
-Builds on [BasicDAGColorsBase](6742-basicdagcolorsbase.md).
+The family shares the foundational data layout defined in [BasicDAGColorsBase](6742-basicdagcolorsbase.md), specifically the `topLevels` and `enclosedLeaves` structures, which allow for independent access to leaf counts without re-implementing storage logic [S1, unofficial]. However, BasicDAGColorErrors specifically utilizes these counts to retrieve corresponding color data for error calculation.
 
 ## Subtopics
-This family contains no further child articles.
+
+### BasicDAGColorErrors
+The core class that computes a binary error flag. It is chosen when a hard threshold for color fidelity is required to determine if a node's color data is acceptable or needs refinement. It is distinct from other color error methods by its use of a fixed 0.04 threshold. See [BasicDAGColorErrors](6744-basicdagcolorerrors.md).
 
 ## Background
-Not given in the sources.
+The method originates from the HashDAG project by Phyronnaz, which implements efficient Sparse Voxel DAGs for volume rendering [S1, unofficial]. It is used in contexts where computational efficiency is prioritized, and a simple binary pass/fail on color accuracy is sufficient for adaptive compression or rendering decisions.
 
 ## Sources
 [S1] Phyronnaz/HashDAG, https://github.com/Phyronnaz/HashDAG, fetched 2026-10-26 (unofficial)

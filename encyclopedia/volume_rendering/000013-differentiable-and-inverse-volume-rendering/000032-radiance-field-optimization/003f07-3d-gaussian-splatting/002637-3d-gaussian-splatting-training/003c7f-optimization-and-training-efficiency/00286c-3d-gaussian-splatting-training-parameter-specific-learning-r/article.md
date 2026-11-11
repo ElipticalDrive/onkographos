@@ -1,27 +1,25 @@
 # 3D Gaussian Splatting Training > Parameter-Specific Learning Rates
 
-Also called: Adam parameter learning rates, Gaussian Optimizer Configuration, Per-parameter group learning rates, Training Optimizer Setup, X-Gaussian Hyperparameters, X-Gaussian Implementation Details
+Also called: Adam parameter learning rates, Gaussian Optimizer Configuration, Parameter-Specific Learning Rates, Per-parameter group learning rates, Training Optimizer Setup, X-Gaussian Hyperparameters, X-Gaussian Implementation Details
 
 ## Overview
-Configures the Adam optimizer with distinct learning rates for each Gaussian parameter group to stabilize training and prevent rapid divergence [S2, unofficial]. It addresses the varying sensitivity of Gaussian attributes (position, scale, opacity, color) to gradient updates, ensuring that parameters prone to instability (like position) are updated more conservatively than robust parameters (like color) [S1][S2, unofficial].
+Configures the Adam optimizer with distinct learning rates for each Gaussian parameter group to stabilize training and prevent rapid divergence [S2, unofficial]. It addresses the varying sensitivity of Gaussian attributes (position, scale, opacity, color) to gradient updates, ensuring that parameters prone to instability are updated more conservatively than robust parameters [S1][S2, unofficial].
 
 ## How it works
 The method initializes a PyTorch `torch.optim.Adam` optimizer with a base learning rate of 0.0, delegating rate control to parameter-specific groups [S2, unofficial]. It verifies that all required parameters are marked as trainable before instantiation [S2, unofficial].
 
 **Inputs:**
-- Gaussian parameters: means ($\mathbf{p}$), scales ($\mathbf{s}$), opacities ($\alpha$), colors ($\mathbf{c}$), rotations ($\mathbf{q}$), and spherical harmonics coefficients (if used).
-- Configuration flags: isotropic mode (boolean).
+- Gaussian parameters: means ($\mathbf{p}$), scales ($\mathbf{s}$), opacities ($\alpha$), colors ($\mathbf{c}$), rotations ($\mathbf{q}$), and spherical harmonics coefficients (if used) [S1][S2, unofficial].
+- Configuration flags: isotropic mode (boolean) [S2, unofficial].
 
 **Outputs:**
-- An Adam optimizer instance configured with per-group learning rates.
+- An Adam optimizer instance configured with per-group learning rates [S2, unofficial].
 
 **Data Structures:**
-- **Parameter Groups**: A list of dictionaries passed to the optimizer. Each dictionary contains:
-  - `params`: A list of tensors corresponding to a specific attribute (e.g., all mean vectors).
-  - `lr`: The specific learning rate for this group.
+- **Parameter Groups**: A list of dictionaries passed to the optimizer, where each dictionary contains `params` (a list of tensors for a specific attribute) and `lr` (the specific learning rate for that group) [S2, unofficial].
 
 **Steps:**
-1. **Verify Trainability**: Call `gaussians.check_if_trainable()` to ensure all parameters intended for optimization are flagged. If `isotropic=True` and quaternions are marked as trainable, raise a `RuntimeError` [S2, unofficial].
+1. **Verify Trainability**: Call `gaussians.check_if_trainable()` to ensure all parameters intended for optimization are flagged [S2, unofficial].
 2. **Define Groups**: Create parameter groups with the following learning rates:
    - **Opacities**: $8 \times 10^{-3}$ [S1] or $0.00085$ [S2, unofficial].
    - **Scales**: $5 \times 10^{-3}$ [S1] or $0.001$ [S2, unofficial].
@@ -45,61 +43,60 @@ def setup_optimizer(gaussians, isotropic=True):
     Configures Adam optimizer with per-parameter learning rates.
     
     Args:
-        gaussians: Object containing Gaussian attributes.
+        gaussians: Object containing Gaussian attributes as tensors.
         isotropic: Boolean flag for isotropic scaling mode.
         
     Returns:
         torch.optim.Adam: Configured optimizer.
     """
     # Step 1: Verify trainability
-    # [G] Implementation detail: This method typically checks internal flags
-    # and raises RuntimeError if quaternions are trainable in isotropic mode.
+    # [G] Implementation detail: This method checks internal trainable flags
+    # and raises RuntimeError if quaternions are trainable when isotropic=True.
     gaussians.check_if_trainable(isotropic=isotropic)
     
     # Step 2: Define parameter groups with specific learning rates
-    # Note: Sources [S1] and [S2, unofficial] provide conflicting values. 
-    # [S1] uses smaller, decayed rates for position; [S2, unofficial] uses uniform 0.05 for 
-    # pre-activation parameters and different fixed rates for others.
-    # We list the groups as defined in [S2, unofficial] for the 'setup_optimizer' alias,
-    # but acknowledge [S1] values for standard 3DGS.
+    # Sources [S1] and [S2, unofficial] provide conflicting values.
+    # [S1] uses smaller, decayed rates for position; [S2, unofficial] uses 
+    # uniform 0.05 for pre-activation parameters and different fixed rates for others.
+    # We list the groups as defined in [S2, unofficial] for the 'setup_optimizer' alias.
     
     param_groups = []
     
     # Opacities
     param_groups.append({
-        'params': gaussians.get_opacities(),
+        'params': gaussians.opacities,
         'lr': 0.00085  # [S2, unofficial]
     })
     
     # Scales
     param_groups.append({
-        'params': gaussians.get_scales(),
+        'params': gaussians.scales,
         'lr': 0.001    # [S2, unofficial]
     })
     
     # Colors
     param_groups.append({
-        'params': gaussians.get_colors(),
+        'params': gaussians.colors,
         'lr': 0.05     # [S2, unofficial]
     })
     
     # Means (Positions)
     param_groups.append({
-        'params': gaussians.get_means(),
+        'params': gaussians.means,
         'lr': 0.00015  # [S2, unofficial]
     })
     
     # Pre-activation parameters (if used)
     param_groups.append({
-        'params': gaussians.get_pre_act_opacities(),
+        'params': gaussians.pre_act_opacities,
         'lr': 0.05     # [S2, unofficial]
     })
     param_groups.append({
-        'params': gaussians.get_pre_act_scales(),
+        'params': gaussians.pre_act_scales,
         'lr': 0.05     # [S2, unofficial]
     })
     param_groups.append({
-        'params': gaussians.get_pre_act_means(),
+        'params': gaussians.pre_act_means,
         'lr': 0.05     # [S2, unofficial]
     })
     
@@ -116,8 +113,8 @@ def setup_optimizer(gaussians, isotropic=True):
 
 **Edge Cases and Pitfalls:**
 - **Isotropic Mode**: If `isotropic=True`, quaternions must not be marked as trainable. The `check_if_trainable` function enforces this [S2, unofficial].
-- **Parameterization**: Standard 3DGS uses logarithmic parameterization for scales ($\log \sigma$) to allow fast evolution for distant Gaussians [S3]. However, this can cause instability (explosion) in outdoor scenes [S3]. Some variants use linear parameterization for scales [S3].
-- **Learning Rate Decay**: In some configurations (e.g., X-Gaussian), the position learning rate decays exponentially from $1.9 \times 10^{-4}$ to $1.9 \times 10^{-6}$ [S1].
+- **Parameterization**: Standard 3DGS uses logarithmic parameterization for scales ($\log \sigma$) to allow fast evolution for distant Gaussians [S3]. However, this can cause instability (explosion) in outdoor scenes [S3]. Some variants use linear parameterization for scales ($\theta_\sigma = \sigma$) [S3].
+- **Learning Rate Decay**: In some configurations (e.g., X-Gaussian), the position learning rate decays exponentially from $1.9 \times 10^{-4}$ to $1.9 \times 10^{-6}$ over $2 \times 10^4$ iterations [S1].
 
 ## Subtopics
 
@@ -137,3 +134,4 @@ Originated from the 3D Gaussian Splatting paper [S1] and subsequent implementati
 [S1] Radiative Gaussian Splatting for Efficient X-Ray Novel View Synthesis, https://doi.org/10.1007/978-3-031-73232-4_16, fetched 2026-10-26
 [S2] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)
 [S3] BOGausS: Better Optimized Gaussian Splatting, https://doi.org/10.23919/eusipco63237.2025.11226626, fetched 2026-10-26
+[S4] Yang-SyZng/AVM-GS, https://github.com/Yang-SyZng/AVM-GS, fetched 2026-10-27 (unofficial)

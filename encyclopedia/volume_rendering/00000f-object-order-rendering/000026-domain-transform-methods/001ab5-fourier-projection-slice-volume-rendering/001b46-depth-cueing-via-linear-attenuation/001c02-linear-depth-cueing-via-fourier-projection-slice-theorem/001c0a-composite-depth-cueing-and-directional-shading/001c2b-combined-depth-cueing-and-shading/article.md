@@ -3,10 +3,10 @@
 Also called: Directional Shading in Frequency Domain, Frequency Domain Shading and Depth Cueing, Reversed order shading and cueing
 
 ## Overview
-Combined Depth Cueing and Shading is a frequency-domain volume rendering technique that integrates linear attenuation (depth cueing) and hemispherical directional shading into a single rendering pass [S1, S2, unofficial]. It solves the problem of high computational cost associated with applying both effects in the spatial domain by leveraging the Fourier Projection-Slice Theorem [S1, S2, unofficial]. Unlike standard spatial rendering which requires $O(n^3)$ operations for these effects, this method reduces complexity to $O(n^2)$ [S1, S2, unofficial]. It is distinct from its sibling [Composite Depth Cueing and Directional Shading](1143-composite-depth-cueing-and-directional-shading.md) by specifically addressing the order of operations to optimize performance, often using a "reversed order" approximation to avoid multiple convolutions [S1, S2, unofficial].
+Combined Depth Cueing and Shading is a frequency-domain volume rendering technique that integrates linear attenuation (depth cueing) and hemispherical directional shading into a single rendering pass [S1, S2, unofficial]. It replaces $O(n^3)$ spatial domain computations for these effects with $O(n^2)$ frequency domain methods [S1, S2, unofficial]. It is distinct from its sibling [Composite Depth Cueing and Directional Shading](1143-composite-depth-cueing-and-directional-shading.md) by specifically addressing the order of operations to optimize performance, often using a "reversed order" approximation to avoid multiple convolutions [S1, S2, unofficial].
 
 ## How it works
-The method computes the final image by combining ambient illumination, directional shading, and depth cueing in the frequency domain. The physically correct order requires shading first, then depth cueing, to prevent the depth cueing function from distorting the gradient vectors used for shading [S1, S2, unofficial]. However, this correct order requires two separate convolutions: one to recover the pure spectrum via the interpolation filter $H$ for shading, and a second to apply the depth cueing function [S1, S2, unofficial]. This makes depth cueing expensive as the composite filter $H'$ cannot be used directly [S1, S2, unofficial].
+The physically correct order requires shading first, then depth cueing, to prevent the depth cueing function from distorting the gradient vectors used for shading [S1, S2, unofficial]. However, this correct order requires two separate convolutions: one to recover the pure spectrum via the interpolation filter $H$ for shading, and a second to apply the depth cueing function [S1, S2, unofficial]. This makes depth cueing expensive as the composite filter $H'$ cannot be used directly [S1, S2, unofficial].
 
 To optimize, the method reverses the order: depth cueing and interpolation are applied simultaneously using the composite filter $H'$, followed by shading [S1, S2, unofficial]. This reversal introduces an error term. For linear depth cueing, this error can be computed during slice extraction without convolution if the light vector is not perpendicular to the view vector [S1, S2, unofficial].
 
@@ -21,31 +21,29 @@ To optimize, the method reverses the order: depth cueing and interpolation are a
 *   Rendered 2D image intensity/color.
 
 **Data Structures:**
-*   3D Spectrum $F(k)$: The 3D Fourier transform of the volume data.
+*   3D Spectrum $F(k)$: The 3D Fourier transform of the volume data [S1, S2, unofficial].
 *   Composite Filter $H'(s)$: A 3D filter in frequency space that handles both slice interpolation and linear depth cueing [S1, S2, unofficial].
 *   Adjustment Term: A scalar or low-frequency correction term derived from the dot product $V \cdot L$ [S1, S2, unofficial].
 
 **Steps:**
 1.  **Compute 3D Spectrum:** Calculate the 3D Fourier transform of the input volume data $f(x)$ to obtain $F(k)$ [S1, S2, unofficial].
 2.  **Apply Composite Filter:** Multiply the spectrum $F(k)$ by the composite filter $H'(s)$ to perform interpolation and linear depth cueing simultaneously in the frequency domain [S1, S2, unofficial].
-3.  **Inverse Transform:** Compute the inverse 3D Fourier transform to obtain the depth-cued volume in the spatial domain [S1, S2, unofficial].
-4.  **Extract Slices:** Extract 2D slices from the depth-cued volume corresponding to the desired view plane [S1, S2, unofficial].
-5.  **Compute Shading:** Calculate the directional shading term. The gradient term of the shading equation is affected by the order reversal [S1, S2, unofficial].
-6.  **Apply Adjustment (if necessary):** If the light direction $L$ is not perpendicular to the view direction $V$, compute the difference term adjustment [S1, S2, unofficial].
+3.  **Extract Slices:** Extract 2D slices from the filtered spectrum corresponding to the desired view plane [S1, S2, unofficial].
+4.  **Compute Shading:** Calculate the directional shading term. The gradient term of the shading equation is affected by the order reversal [S1, S2, unofficial].
+5.  **Apply Adjustment (if necessary):** If the light direction $L$ is not perpendicular to the view direction $V$, compute the difference term adjustment during slice extraction without convolution [S1, S2, unofficial].
     *   The error introduced by reversing the order is given by the second term of the product rule expansion:
-        $$ (r f(x) \cdot L) d(x) + f(x) (r d(x) \cdot L) $$
+        $$ (\nabla f(x) \cdot L) d(x) + f(x) (\nabla d(x) \cdot L) $$
     *   The difference term is:
-        $$ f(x) (r d_{1D}(V \cdot x) \cdot L) = f(x) d'_{1D}(V \cdot x) (V \cdot L) $$
+        $$ f(x) (\nabla d_{1D}(V \cdot x) \cdot L) = f(x) d'_{1D}(V \cdot x) (V \cdot L) $$
     *   For linear depth cueing, the adjustment term including coefficients is:
         $$ \frac{1}{2} C_{cue} C_{dif} L_{dif} f(x) (V \cdot L) $$
-    *   This adjustment is computed during slice extraction without convolution [S1, S2, unofficial].
-7.  **Combine Terms:** Sum the ambient term, the adjusted shading term, and the depth cueing effect to produce the final pixel value [S1, S2, unofficial].
+6.  **Combine Terms:** Sum the ambient term, the adjusted shading term, and the depth cueing effect to produce the final pixel value [S1, S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def combined_depth_cueing_shading(volume_data, V, L, C_amb, C_dif, C_cue, L_dif):
+def combined_depth_cueing_shading(volume_data, V, L, C_amb, C_dif, C_cue, L_dif, filter_size=3):
     """
     Renders volume with depth cueing and shading using frequency domain methods.
     volume_data: 3D array of shape (N, N, N)
@@ -55,69 +53,53 @@ def combined_depth_cueing_shading(volume_data, V, L, C_amb, C_dif, C_cue, L_dif)
     C_dif: Diffuse coefficient
     C_cue: Depth cueing coefficient
     L_dif: Light intensity factor for diffuse term
+    filter_size: Size of the interpolation filter (e.g., 3)
     """
-    # Step 1: Compute 3D Spectrum
-    F = fft3(volume_data)
+    # Step 1: Compute 3D spectrum
+    F = standard_3d_fft(volume_data)
     
-    # Step 2: Apply Composite Filter H'(s) for interpolation and depth cueing
-    # H_prime is precomputed based on view direction V and depth cueing parameters
-    F_cued = F * H_prime(V)
+    # Step 2: Apply composite filter H'(s) for interpolation and depth cueing
+    H_prime = compute_composite_filter(V, filter_size)
+    F_filtered = F * H_prime
     
-    # Step 3: Inverse Transform to get depth-cued volume
-    volume_cued = ifft3(F_cued).real
+    # Step 3: Extract slices and compute shading
+    # Extract 2D slice corresponding to the view plane in frequency domain
+    slice_freq = extract_slice(F_filtered, V)
+    slice_spatial = standard_3d_ifft(slice_freq).real
     
-    # Step 4 & 5: Extract slices and compute shading
-    # Assuming we are rendering a specific slice or projection
-    # The shading calculation focuses on the gradient term
-    # Gradient of the original volume f(x) is needed for shading
-    grad_f = compute_gradient(volume_data)
+    # Compute gradient of the extracted slice for shading
+    grad_slice = standard_spatial_gradient(slice_spatial)
     
-    # Base shading term (ignoring depth cueing distortion for a moment)
-    # Shading term = 1/2 * C_dif * L_dif * (grad_f . L)
-    shading_term = 0.5 * C_dif * L_dif * dot(grad_f, L)
+    # Base shading term (ignoring depth cueing distortion)
+    shading_term = 0.5 * C_dif * L_dif * dot(grad_slice, L)
     
-    # Step 6: Apply Adjustment for Reversed Order
-    # The reversed order (cueing then shading) introduces an error term:
-    # Error = f(x) * d'_1D(V . x) * (V . L)
-    # For linear depth cueing, d'_1D is constant relative to the cueing function slope.
-    # The adjustment term is: 1/2 * C_cue * C_dif * L_dif * f(x) * (V . L)
-    
+    # Step 4: Apply adjustment for reversed order
     dot_VL = dot(V, L)
-    
-    # If L is perpendicular to V, dot_VL is 0, and no adjustment is needed.
-    adjustment_term = 0.0
+    adjustment_term = zeros_like(slice_spatial)
     if abs(dot_VL) > 1e-6:
-        # Compute adjustment during slice extraction
-        # f(x) is the original volume data (or depth-cued? Sources imply f(x) in the difference term derivation)
-        # The source derivation uses f(x) from the original volume in the difference term context
-        adjustment_term = 0.5 * C_cue * C_dif * L_dif * volume_data * dot_VL
-        
-    # Step 7: Combine
-    # Ambient term is typically C_amb * f(x) * d(x) or similar, handled by the filter H'
-    # The final image is the sum of ambient, shading, and depth cueing effects.
-    # Note: The composite filter H' handles the depth cueing of the base intensity.
-    # The shading term is added on top.
+        # Adjustment term: 1/2 * C_cue * C_dif * L_dif * f(x) * (V . L)
+        # Computed during slice extraction without convolution
+        adjustment_term = 0.5 * C_cue * C_dif * L_dif * slice_spatial * dot_VL
     
-    # Reconstructing the final intensity based on the model:
-    # I = Ambient + Shading + DepthCueingEffect
-    # The depth cueing effect is embedded in the filtered volume_cued for the base intensity.
-    # However, the shading term must be adjusted.
-    
+    # Step 5: Combine
+    base_intensity = slice_spatial
     final_shading = shading_term + adjustment_term
-    
-    # The base intensity (ambient + depth cued) comes from the filtered volume
-    # Assuming the filter H' applies the depth cueing function d(x) to f(x)
-    base_intensity = volume_cued 
-    
-    # Combine ambient and shading
-    # Ambient is usually C_amb * f(x) * d(x)
-    # Shading is (1/2 * C_dif * L_dif * (grad_f . L)) * d(x) in correct order
-    # In reversed order, we add the adjustment to the shading part
-    
-    # Simplified final output for a pixel at x:
     result = base_intensity + final_shading
-    
     return result
+
+# Standard operations defined for self-containment
+def standard_3d_fft(data): # Standard 3D FFT [G]
+    pass
+def standard_3d_ifft(data): # Standard 3D IFFT [G]
+    pass
+def standard_spatial_gradient(data): # Standard spatial gradient computation [G]
+    pass
+def compute_composite_filter(V, size): # Standard interpolation and depth cueing filter [G]
+    pass
+def extract_slice(F, V): # Standard slice extraction in frequency domain [G]
+    pass
+def dot(a, b): return sum(a_i * b_i for a_i, b_i in zip(a, b))
+def zeros_like(data): return array of zeros with same shape as data
 ```
 
 **Parameters:**
@@ -142,15 +124,15 @@ The parent method that combines linear attenuation and hemispherical illuminatio
 
 ## Operating characteristics
 *   **Time Complexity:** $O(n^2 \log n)$ for the frequency domain computation, replacing $O(n^3)$ spatial domain computations for shading and depth cueing [S1, S2, unofficial]. The interpolation step, which consumes most of the running time, is $O(n^2)$ [S1, S2, unofficial].
-*   **Memory Complexity:** Requires storage for the 3D spectrum and the volume data. Zero-padding is used (e.g., $106^3$ to $128^3$) [S1, S2, unofficial].
+*   **Memory Complexity:** Requires storage for the 3D spectrum and the volume data [S1, S2, unofficial]. Zero-padding is used (e.g., $106^3$ to $128^3$) [S1, S2, unofficial].
 *   **Measured Performance:** A $128^3$ volume can be rendered in a fraction of a second on a conventional workstation [S1, S2, unofficial]. Adaptive filtering can reduce interpolation cost to about 15% of the non-adaptive case [S1, S2, unofficial].
 *   **Strengths:** Significant speed advantage over spatial domain rendering; no visible difference compared to conventional spatial domain rendering when identical shading and depth cueing are applied [S1, S2, unofficial].
 *   **Limitations:** The frequency domain projection operator is non-occluding, resulting in a loss of realism compared to ray-casting methods [S1, S2, unofficial]. The reversed order approximation may introduce errors if not adjusted, particularly when $V \cdot L \neq 0$ [S1, S2, unofficial].
-*   **When to Use:** When real-time or near-real-time rendering of large volumes is required, and occlusion is not critical.
-*   **When Not to Use:** When accurate occlusion is required, or when the light direction is such that the adjustment term is complex and expensive to compute.
+*   **When to Use:** When real-time or near-real-time rendering of large volumes is required, and occlusion is not critical [S1, S2, unofficial].
+*   **When Not to Use:** When accurate occlusion is required, or when the light direction is such that the adjustment term is complex and expensive to compute [S1, S2, unofficial].
 
 ## Background
-The method originates from the work of Totsuka and Hudson on Frequency Domain Volume Rendering, presented at SIGGRAPH 1993 [S1, S2, unofficial]. It was developed to address the high computational cost of spatial domain volume rendering techniques, specifically shading and depth cueing, by leveraging the Fourier Projection-Slice Theorem [S1, S2, unofficial]. The technique was demonstrated on CT data of a human skull and 3D scan-converted data of the Utah teapot [S1, S2, unofficial].
+Not given in the sources.
 
 ## Sources
 [S1] Frequency Domain Volume Rendering - Stanford University, https://graphics.stanford.edu/papers/fvr/totsuka-fvr-sig93.pdf, fetched 2026-10-27 (unofficial)

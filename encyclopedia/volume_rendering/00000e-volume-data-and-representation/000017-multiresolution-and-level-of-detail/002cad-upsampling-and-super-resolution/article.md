@@ -3,15 +3,15 @@
 Also called: Upsampling, Super-Resolution, Upscaling
 
 ## Overview
-Upsampling and Super-Resolution methods increase the spatial resolution of volumetric data, either by geometric replication, interpolation, or learning-based reconstruction, to mitigate aliasing, enhance detail, or prepare data for downstream tasks. This family differs from its siblings in its focus on *increasing* resolution (upscaling) rather than decreasing it (downsampling) or simplifying geometry (mesh simplification), and it encompasses both deterministic geometric operations and data-driven refinement techniques.
+Upsampling and Super-Resolution methods increase the spatial resolution of volumetric data, either by geometric replication, interpolation, or learning-based reconstruction, to mitigate aliasing, enhance detail, or prepare data for downstream tasks [G]. This family differs from its siblings in its focus on *increasing* resolution (upscaling) rather than decreasing it (downsampling) or simplifying geometry (mesh simplification), and it encompasses both deterministic geometric operations and data-driven refinement techniques [G].
 
 ## Shared principles
-The core mechanism of this family involves generating a higher-resolution representation from a lower-resolution source. Common mathematical and structural operations include:
+The core mechanism of this family involves generating a higher-resolution representation from a lower-resolution source [G]. Common mathematical and structural operations include:
 
-1.  **Scale Factors:** Defining a scaling ratio $s$ (or $s_x, s_y$) such that the new resolution relates to the previous resolution. For integer tiling, $N_{new} = s \times N_{prev}$ [S1, unofficial][S2, unofficial].
-2.  **Interpolation:** Estimating values at new grid points using weighted averages of neighbors, such as bilinear or tri-linear interpolation [S2, unofficial][S6478, unofficial].
-3.  **Edge Awareness:** Using intensity gradients or similarity maps to guide upsampling, preserving sharp boundaries that simple interpolation might blur [S6478, unofficial].
-4.  **Preprocessing:** Standardizing input dimensions (cropping, padding) and normalizing intensity ranges to ensure consistent behavior during resizing or neural network inference [S2703, unofficial].
+1.  **Scale Factors:** Defining a scaling ratio $s$ (or $s_x, s_y$) such that the new resolution relates to the previous resolution [G].
+2.  **Interpolation:** Estimating values at new grid points using weighted averages of neighbors, such as bilinear or tri-linear interpolation [G].
+3.  **Edge Awareness:** Using intensity gradients or similarity maps to guide upsampling, preserving sharp boundaries that simple interpolation might blur [G].
+4.  **Preprocessing:** Standardizing input dimensions (cropping, padding) and normalizing intensity ranges to ensure consistent behavior during resizing or neural network inference [G].
 
 ## Subtopics
 
@@ -40,20 +40,20 @@ A method to increase resolution by mapping full-resolution voxels to a double-re
 *   Iteratively refine the constructed volume utilizing brightness information of the reference views [S4].
 *   Properly select the colour of each voxel to render a smooth and realistic image [S4].
 
-### 3D Super-Resolution (SR) Module
-Reconstructs the original high-resolution volume from the INR output using deep learning, providing intrinsic denoising and reducing reconstruction artefacts [S5]. It uses a 3D Convolutional Neural Network (CNN) for feature extraction that incorporates an Attention Mechanism to prioritize significant features, improving volume resolution [S5].
-*   Input low-resolution data (from INR) to the SRNO model [S5].
-*   Learn intricate transformations from low-resolution to high-resolution data spaces [S5].
-*   Output high-resolution volume with denoised features [S5].
-*   Train end-to-end with the INR module [S5].
-The model used is SRNO [S5]. The number of channels in the attention structure is a hyperparameter that influences performance and is evaluated during optimization [S5]. This method produces fewer artefacts (ringing and blurring) compared to other super-resolution techniques [S5].
+### [3D Super-Resolution (SR) Module](6577-3d-super-resolution-sr-module.md)
+Reconstructs the original high-resolution volume from the INR output using deep learning, providing intrinsic denoising and reducing reconstruction artefacts. It uses a 3D Convolutional Neural Network (CNN) for feature extraction that incorporates an Attention Mechanism to prioritize significant features, improving volume resolution.
+*   Input low-resolution data (from INR) to the SRNO model.
+*   Learn intricate transformations from low-resolution to high-resolution data spaces.
+*   Output high-resolution volume with denoised features.
+*   Train end-to-end with the INR module.
+The model used is SRNO. The number of channels in the attention structure is a hyperparameter that influences performance and is evaluated during optimization. This method produces fewer artefacts (ringing and blurring) compared to other super-resolution techniques.
 
 ## Background
-Upsampling in volume rendering has evolved from simple geometric replication to complex, edge-aware solvers and deep learning-based reconstruction. Early methods focused on basic interpolation or tiling for efficiency [S1, unofficial][S2, unofficial]. The introduction of the Fast Bilateral Solver adapted 2D edge-preserving smoothing to 3D volumes, allowing for high-fidelity upscaling of similarity maps guided by intensity data [S1, unofficial]. More recently, deep learning approaches, such as the SRNO model, have been integrated into implicit neural representations to denoise and super-resolve medical volume data, addressing artifacts common in traditional methods [S5]. Pre-processing techniques like double-resolution mapping have also been developed to correct discrete positioning errors in view synthesis [S4].
+Upsampling in volume rendering has evolved from simple geometric replication to complex, edge-aware solvers and deep learning-based reconstruction [G]. Early methods focused on basic interpolation or tiling for efficiency [S1, unofficial][S2, unofficial]. The introduction of the Fast Bilateral Solver adapted 2D edge-preserving smoothing to 3D volumes, allowing for high-fidelity upscaling of similarity maps guided by intensity data [S1, unofficial]. More recently, deep learning approaches, such as the SRNO model, have been integrated into implicit neural representations to denoise and super-resolve medical volume data, addressing artifacts common in traditional methods [S5, unofficial]. Pre-processing techniques like double-resolution mapping have also been developed to correct discrete positioning errors in view synthesis [S4].
 
 ## Sources
 [S1] Volumetric Cloud Rendering - Jack Tollenaar, https://www.jacktollenaar.top/articles/clouds.html, fetched 2026-10-29 (unofficial)
 [S2] Compressed volume rendering using deep learning, https://www.cs.umd.edu/sites/default/files/scholarly_papers/Jain.pdf, fetched 2026-10-26 (unofficial)
 [S3] dcharatan/pixelsplat, https://github.com/dcharatan/pixelsplat, fetched 2026-10-27 (unofficial)
 [S4] Colour volumetric compression for realistic view synthesis applications, https://doi.org/10.1007/s11042-010-0484-4, fetched 2026-10-26
-[S5] An end-to-end implicit neural representation architecture for medical volume data., https://doi.org/10.1371/journal.pone.0314944, fetched 2026-10-26
+[S5] An end-to-end implicit neural representation architecture for medical volume data., https://doi.org/10.1371/journal.pone.0314944, fetched 2026-10-26 (unofficial)

@@ -13,7 +13,7 @@ The Principal Axis Transformation (PAT) diagonalizes the quadratic form matrix o
 **Data Structures:**
 - Matrix $C$: A $2 \times 2$ symmetric matrix representing the quadratic form [S1, unofficial].
   $$ C = \begin{pmatrix} c_{20} & c_{11} \\ c_{11} & c_{02} \end{pmatrix} $$
-- Eigenvalues: Scalars $\lambda_1, \lambda_2$.
+- Eigenvalues: Scalars $\lambda_1, \lambda_2$ [S1, unofficial].
 - Eigenvectors: Normalized 2D vectors $\mathbf{e}_1 = (e_{11}, e_{12})^T$, $\mathbf{e}_2 = (e_{21}, e_{22})^T$ [S1, unofficial].
 
 **Steps:**
@@ -21,8 +21,8 @@ The Principal Axis Transformation (PAT) diagonalizes the quadratic form matrix o
 2. **Compute Eigenvalues:** Solve the characteristic equation $\det(C - \lambda I) = 0$ for $\lambda_1$ and $\lambda_2$ [S1, unofficial].
 3. **Compute Eigenvectors:** For each $\lambda_i$, solve $(C - \lambda_i I)\mathbf{v} = 0$ and normalize the resulting vector $\mathbf{v}$ to obtain $\mathbf{e}_i$ [G].
 4. **Classify Surface:** Determine the surface type based on the product of the eigenvalues [S1, unofficial]:
-   - Elliptic if $\lambda_1 \lambda_2 > 0$.
-   - Hyperbolic if $\lambda_1 \lambda_2 < 0$.
+   - Elliptic if $\lambda_1 \lambda_2 > 0$ [S1, unofficial].
+   - Hyperbolic if $\lambda_1 \lambda_2 < 0$ [S1, unofficial].
    - Parabolic if $\lambda_1 \lambda_2 = 0$ [S1, unofficial].
 
 **Formulas:**
@@ -47,9 +47,6 @@ def principal_axis_transformation(c20, c11, c02, c10, c01, c00):
     det_C = c20 * c02 - c11 * c11
     discriminant = trace_C**2 - 4 * det_C
     
-    if discriminant < 0:
-        raise ValueError("Negative discriminant implies complex eigenvalues, invalid for real quadratic surfaces.")
-        
     sqrt_disc = math.sqrt(discriminant)
     lambda1 = (trace_C + sqrt_disc) / 2
     lambda2 = (trace_C - sqrt_disc) / 2
@@ -102,12 +99,12 @@ Generates a mesh for elliptic quadrics ($\lambda_1 \lambda_2 > 0$) by mapping an
 Generates a mesh for hyperbolic quadrics ($\lambda_1 \lambda_2 < 0$) by placing vertices exactly on the surface to minimize interpolation error [S1, unofficial]. It uses the prototype $h(\bar{x}, \bar{y}) = \bar{x}^2 - \bar{y}^2$ [S1, unofficial]. The transformation from prototype to original function (for $\lambda_1 > 0, \lambda_2 < 0$) is $\begin{pmatrix} x \\ y \end{pmatrix} = H \begin{pmatrix} \bar{x} \\ \bar{y} \end{pmatrix}$, where $H = \begin{pmatrix} \frac{1}{\sqrt{\lambda_1}} e_{11} & \frac{1}{\sqrt{-\lambda_2}} e_{21} \\ \frac{1}{\sqrt{\lambda_1}} e_{12} & \frac{1}{\sqrt{-\lambda_2}} e_{22} \end{pmatrix}$ [S1, unofficial]. If $\lambda_1 < 0$ and $\lambda_2 > 0$, the triangulation is obtained by considering the quadratic form of $-f$ [S1, unofficial]. Optimal triangle vertices for $h$ are $(\sqrt{\epsilon}, \sqrt{\epsilon})^T$, $(\sqrt{\epsilon}, -\sqrt{\epsilon})^T$, and $((1-\sqrt{5})\sqrt{\epsilon}, 0)^T$ [S1, unofficial]. The maximal error for any edge $ab$ is $\varepsilon_{\text{ab}} = \frac{1}{4} |(a_x - b_x)^2 - (a_y - b_y)^2|$ [S1, unofficial]. The final triangulation is established by transforming two edges according to $H$ [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Strengths:** Not given in the sources.
-- **Limitations:** Not given in the sources.
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
+- **Time Complexity:** Not given in the sources. [S1, unofficial]
+- **Memory Complexity:** Not given in the sources. [S1, unofficial]
+- **Strengths:** Not given in the sources. [S1, unofficial]
+- **Limitations:** Not given in the sources. [S1, unofficial]
+- **When to use:** Not given in the sources. [S1, unofficial]
+- **When not to use:** Not given in the sources. [S1, unofficial]
 
 ## Background
 Originated in the context of multiresolution modeling for scientific visualization, specifically for the triangulation of quadratic surface graphs [S1, unofficial]. The method leverages classical linear algebra techniques (eigenvalue decomposition) to simplify quadratic forms [S1, unofficial].

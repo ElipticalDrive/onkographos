@@ -1,0 +1,150 @@
+--- v001.md
++++ v002.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs:**
+-- `ibuffer`: A device memory array storing vertex indices. Layout: `int` array of size `(n - 1) * TILE_HEIGHT * 2`, initialized to `-1` [S1, unofficial]. It stores indices for the current, left, and down vertices relative to the processing tile [S1, unofficial].
++- `ibuffer`: Device memory array storing vertex indices. Layout: `int` array of size `(n - 1) * TILE_HEIGHT * 2`, initialized to `-1` [S1, unofficial]. It stores indices for the current, left, and down vertices relative to the processing tile [S1, unofficial].
+ - `n`: Number of mesh grid vertices along one axis [S1, unofficial].
+ - `TILE_WIDTH`, `TILE_HEIGHT`: Compile-time constants defining CUDA block dimensions [S1, unofficial].
+@@ -15,5 +15,5 @@
+ 
+ **Outputs:**
+-- `edges`: Array of integers storing edge connections. Each edge is defined by two vertex indices. The array is filled sequentially based on computed global offsets [S1, unofficial].
++- `edges`: Array of integers storing edge connections. The array is filled sequentially based on computed global offsets [S1, unofficial].
+ - `ecnt`: Updated global count of generated edges [S1, unofficial].
+ 
+@@ -23,79 +23,57 @@
+ **Steps:**
+ 1. **Fetch Indices:** Each thread fetches the vertex indices for the current cell (`self`), the left neighbor (`left`), and the down neighbor (`down`) from `ibuffer`. If a neighbor is outside the grid or tile boundary, the index is `-1` [S1, unofficial].
+-2. **Count Connections:** Compute the number of valid connections for the current cell:
+-   $$ count = (self \neq -1) \times ((left \neq -1) + (down \neq -1)) $$
+-   If `self == -1`, `count` is 0 [S1, unofficial].
+-3. **Shared Memory Reduction:** Perform a warp-level or block-level reduction in shared memory to count how many threads have `count == 1` and `count == 2`:
+-   $$ total1 = \text{__syncthreads\_count}(count == 1) $$
+-   $$ total2 = \text{__syncthreads\_count}(count == 2) $$
+-   The total edges contributed by this tile is:
+-   $$ total = total1 + total2 \times 2 $$
+-   [S1, unofficial].
+-4. **Global Offset:** Compute the global starting index for this tile's edges using an atomic add:
+-   $$ base = \text{atomicAdd}(ecnt, total) $$
+-   [S1, unofficial].
+-5. **Prefix Sum:** Execute a parallel prefix sum (scan) on the `count` values stored in `s` to determine local edge indices. The local edge index for a thread is:
+-   $$ ei = base + s[ti] - count $$
+-   [S1, unofficial].
+-6. **Write Edges:** Write the edges to the `edges` array based on `ei`:
+-   - If `left != -1`, write edge `(self, left)` at `edges[ei]` and `edges[ei + (left != -1 ? 1 : 0)]`? No, the source specifies: "first edge connects `self` to `left` (or `down`), second edge connects `self` to `down`". Specifically:
+-     - If `left != -1`, write `edges[ei] = self`, `edges[ei + 1] = left`. Increment `ei` by 1 if only one edge, or handle sequentially. The source says: "Write edges to `edges` array: first edge connects `self` to `left` (or `down`), second edge connects `self` to `down`." This implies a specific order. If `count == 1`, write one edge. If `count == 2`, write two edges. The index `ei` is the start position.
+-     - Implementation detail: If `left != -1`, write `(self, left)`. If `down != -1`, write `(self, down)`. The `ei` calculated is the base index for the *first* edge of the cell. If `count=1`, `ei` is the index for that single edge. If `count=2`, `ei` is the index for the first edge, and `ei+1` for the second [S1, unofficial].
++2. **Count Connections:** Compute the number of valid connections for the current cell: `count = (left != -1) + (down != -1)` if `self != -1`; otherwise `count = 0` [S1, unofficial].
++3. **Shared Memory Reduction:** Perform a block-level reduction in shared memory to count how many threads have `count == 1` and `count == 2`: `total1 = reduction_count(s, count == 1)`, `total2 = reduction_count(s, count == 2)`. The total edges contributed by this tile is `total = total1 + total2 * 2` [S1, unofficial].
++4. **Global Offset:** Compute the global starting index for this tile's edges using an atomic add: `base = atomic_add(ecnt, total)` [S1, unofficial].
++5. **Prefix Sum:** Execute a parallel inclusive prefix sum (scan) on the `count` values stored in `s` to determine local edge indices. The local edge index for a thread is `ei = base + s[ti] - count` [S1, unofficial].
++6. **Write Edges:** Write the edges to the `edges` array based on `ei`. The source specifies: "first edge connects `self` to `left` (or `down`), second edge connects `self` to `down`" [S1, unofficial]. Specifically, if `left != -1`, write `(self, left)` at `edges[ei]` and `edges[ei + 1]`. If `count == 2`, write the second edge `(self, down)` at `edges[ei + 2]` and `edges[ei + 3]`. If `count == 1`, only the first edge is written [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Inside CUDA kernel KBuildTopology
+-ti = threadIdx.y * TILE_WIDTH + threadIdx.x
+-# Fetch indices from ibuffer based on tileY and thread position
+-# self, left, down are integers, -1 if out of bounds
++# Kernel entry for a single thread block
++BLOCK_SIZE = TILE_WIDTH * TILE_HEIGHT
++ti = (thread_idx_y * TILE_WIDTH) + thread_idx_x
++s = [0] * BLOCK_SIZE  # Shared memory array
++
++# 1. Fetch indices from ibuffer
++self_idx = ibuffer[ti]
++left_idx = ibuffer[ti + 1] if ti + 1 < len(ibuffer) else -1
++down_idx = ibuffer[ti + TILE_WIDTH] if ti + TILE_WIDTH < len(ibuffer) else -1
++
++# 2. Count connections
+ count = 0
+-if self != -1:
+-    if left != -1:
++if self_idx != -1:
++    if left_idx != -1:
+         count += 1
+-    if down != -1:
++    if down_idx != -1:
+         count += 1
++s[ti] = count
+ 
+-# Store count in shared memory for reduction
+-s[ti] = count
+-__syncthreads()
++# 3. Shared memory reduction (parallel primitive)
++total1 = sum(1 for c in s if c == 1)
++total2 = sum(1 for c in s if c == 2)
++total = total1 + total2 * 2
+ 
+-# Reduction to count total1 (count==1) and total2 (count==2)
+-# Note: __syncthreads_count is a hypothetical helper for reduction
+-# In practice, this requires a full reduction kernel or warp shuffle logic
+-# Assuming a simplified reduction for the article:
+-total1 = 0
+-total2 = 0
++# 4. Global offset (parallel atomic primitive)
++base = ecnt + total  # In hardware: atomicAdd(ecnt, total)
++
++# 5. Prefix sum (parallel scan primitive)
++prefix_sum = [0] * BLOCK_SIZE
++running = 0
+ for i in range(BLOCK_SIZE):
+-    if s[i] == 1:
+-        total1 += 1
+-    elif s[i] == 2:
+-        total2 += 1
++    running += s[i]
++    prefix_sum[i] = running
++ei = base + prefix_sum[ti] - count
+ 
+-# Compute global edge offset
+-base = atomicAdd(ecnt, total1 + total2 * 2)
+-
+-# Parallel prefix sum on s to get local offsets
+-# This requires a scan operation. Assuming s is modified in-place or a separate array is used.
+-# For simplicity, we assume a standard inclusive scan on the count values
+-# Let local_offset be the result of the scan for this thread's count
+-# The source formula: ei = base + s[ti] - count
+-# This implies s[ti] holds the prefix sum value *before* subtraction or is the rank.
+-# Re-reading source: "Execute parallel prefix sum (scan) on s array to determine local edge indices ei = base + s[ti] - count"
+-# This suggests s[ti] is the prefix sum of counts up to ti.
+-# If s[ti] is the inclusive prefix sum, then the number of edges before this thread is s[ti] - count.
+-# So ei = base + (s[ti] - count)
+-
+-# Write edges
+-idx = base + s[ti] - count
+-if left != -1:
+-    edges[idx] = self
+-    edges[idx + 1] = left
+-    if down != -1:
+-        idx += 1
+-if down != -1:
+-    edges[idx] = self
+-    edges[idx + 1] = down
++# 6. Write edges
++idx = ei
++if left_idx != -1:
++    edges[idx] = self_idx
++    edges[idx + 1] = left_idx
++    idx += 2
++if count == 2:
++    edges[idx] = self_idx
++    edges[idx + 1] = down_idx
+ ```
+-*Note: The pseudocode above simplifies the CUDA-specific reduction and scan. A real implementation would use warp shuffles or a dedicated scan kernel. The formula `ei = base + s[ti] - count` is taken directly from [S1, unofficial].*
+ 
+ **Parameters:**
+@@ -109,10 +87,9 @@
+ 
+ ### DCx Mesh Generation Pipeline
+-DCx (Dual Contouring over Expanded Cubes) extends this topology generation to 3D UDFs. It applies a thinning algorithm to refine active cubes predicted by generative models like TRELLIS.2 [S2]. It constructs mesh topology by connecting dual vertices via a V2M (Voxel-to-Mesh) look-up table over expanded cubes [S2]. It includes a post-processing step to eliminate residual topological noise [S2]. Unlike Faithful Contouring (FC), which uses standard QEF and suffers from artifacts, DCx uses an optimization-based projection strategy and the V2M lookup table, yielding cleaner topology with fewer spurious non-manifold artifacts and topological holes [S2].
++DCx (Dual Contouring over Expanded Cubes) extends this topology generation methodology to 3D UDFs [S2]. It applies a thinning algorithm to refine active cubes predicted by generative models like TRELLIS.2 [S2]. It constructs mesh topology by connecting dual vertices via a V2M (Voxel-to-Mesh) look-up table over expanded cubes [S2]. It includes a post-processing step to eliminate residual topological noise [S2]. Unlike Faithful Contouring (FC), which uses standard QEF and suffers from artifacts, DCx uses an optimization-based projection strategy and the V2M lookup table, yielding cleaner topology with fewer spurious non-manifold artifacts and topological holes [S2].
+ 
+ ## Operating characteristics
+ - **Time Complexity:** Linear with respect to the number of grid cells, $O(N)$, due to the parallel nature of the reduction and prefix sum [S1, unofficial].
+ - **Memory Complexity:** $O(N)$ for the `edges` array and $O(BLOCK\_SIZE)$ for shared memory `s` [S1, unofficial].
+-- **Performance:** Efficient on CUDA hardware due to coalesced memory access and shared memory usage [S1, unofficial].
+ - **Strengths:** High parallelism, handles tile boundaries gracefully, avoids race conditions via atomic operations [S1, unofficial].
+ - **Limitations:** Requires sufficient grid resolution to resolve details; lower resolutions may lead to topological ambiguities [S2].

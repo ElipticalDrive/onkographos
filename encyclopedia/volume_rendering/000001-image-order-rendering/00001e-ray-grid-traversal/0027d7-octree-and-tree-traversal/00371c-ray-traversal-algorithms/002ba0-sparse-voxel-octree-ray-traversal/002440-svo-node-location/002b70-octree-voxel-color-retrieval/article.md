@@ -1,168 +1,145 @@
 # Octree Voxel Color Retrieval
 
-Also called: Color Lookup with Shading, lookupColor
+Also called: Color Lookup with Shading, Voxel Lighting and Color Retrieval, lookupColor
 
 ## Overview
-Retrieves the color of a voxel from the sparse voxel octree (SVO) data structure, applying lighting if the scene is not shadeless [S1, unofficial]. It navigates the tree from a given node to find the leaf node containing the color data [S1, unofficial].
+Octree Voxel Color Retrieval computes the final color of a hit voxel by retrieving its stored base color and normal from a Sparse Voxel Octree (SVO) and applying a directional lighting model [S1, S2, unofficial]. It differs from [Octree Node Lookup by Voxel](5120-octree-node-lookup-by-voxel.md) by explicitly performing shading calculations (ambient and diffuse) on the retrieved data rather than returning raw texture or color values [S1, S2, unofficial].
 
 ## How it works
 **Inputs:**
-- `castRes`: Result from ray traversal containing `pos` (float3), `node` (uint), `childIdx` (uint), `scale` (uint), and `normal` (float3) [S1, unofficial].
-- `octree`: Data structure containing a flat `data` array of uints [S1, unofficial].
-- `renderList`: Contains an `offsets` array for instances [S1, unofficial].
-- `ubo`: Uniform buffer object containing `shadeless` (int), `ambientStrength` (scalar), `lightColor` (vec3), `lightPos` (vec3), `blockInfoEnd` (offset), `pageBytes` (bytes), and `transformCount` (int) [S1, unofficial].
-- `index`: Instance index [S1, unofficial].
+*   Ray hit position, normal, and tree state from [SVO Node Location](3249-svo-node-location.md).
+*   Octree data structure containing color, normal, and metadata.
+*   Light direction vector $L$.
+*   Shading mode flag (shadeless or shaded).
 
 **Outputs:**
-- `vec4`: Final color with alpha [S1, unofficial].
+*   Final voxel color $C_{final}$ (RGB).
 
 **Data Structures:**
-The octree is stored in a flat array `octree.data` [S1, unofficial]. Nodes are organized into pages with headers, and the layout relies on bit-packing for node pointers and color data [S1, unofficial].
+*   **Octree Data:** A flat array of integers/floats.
+*   **Voxel Color:** Stored as 8-bit integers per channel (R, G, B) packed into a 32-bit integer or separate components, normalized by a divisor $d$ [S2, unofficial].
+*   **Voxel Normal:** Stored as 8-bit signed integers, normalized by dividing by 128.0 [S1, unofficial].
+*   **Light Direction:** Defined as $L = \{-0.039030, -0.866792, 0.497139\}$ [S1, unofficial].
 
 **Steps:**
 
-1. **Extract Position and Tree State:** Convert ray position to integer coordinates for indexing [S1, unofficial].
-   $$ px = \text{floatBitsToInt}(castRes.pos.x) $$
-   $$ node = castRes.node $$
-   $$ cidx = castRes.childIdx $$
-   $$ level = castRes.scale $$
+1.  **Navigate to Color Data:**
+    Using the node index and child index from the traversal state, navigate the octree hierarchy to find the leaf node containing the color data [S2, unofficial].
+    *   Extract position and tree state: `px`, `node`, `cidx`, `level` [S2, unofficial].
+    *   Calculate page header and block info to locate the palette node [S2, unofficial].
+    *   Loop while the current node does not have color data (check bit `cidx` of `paletteNode`), incrementing level and updating pointers until the color-bearing leaf is found [S2, unofficial].
+    *   Calculate the attach offset to retrieve the raw color component $c$ [S2, unofficial].
 
-2. **Calculate Page Header and Block Info:** Extract the page header from the node index [S1, unofficial].
-   $$ pageHeader = node \ \& \ 0xFFFFF800 $$
-   Retrieve block information from the data array [S1, unofficial].
-   $$ blockInfo = pageHeader + octree.data[pageHeader] $$
-   Get attach data by adding the block info end offset [S1, unofficial].
-   $$ attachData = \text{int}(blockInfo) + ubo.blockInfoEnd $$
+2.  **Extract and Normalize Base Color:**
+    *   Extract RGB components from $c$:
+        $$ r = (c \gg 16) \ \& \ 0xFF $$
+        $$ g = (c \gg 8) \ \& \ 0xFF $$
+        $$ b = c \ \& \ 0xFF $$
+    *   Normalize to $[0, 1]$:
+        $$ C_{base} = \left( \frac{r}{d}, \frac{g}{d}, \frac{b}{d} \right) $$
+        Where $d$ is the normalization divisor [S2, unofficial].
 
-3. **Get Palette Node:** Calculate the palette node index [S1, unofficial].
-   $$ paletteNode = octree.data[attachData + \text{int}(node) - \text{renderList.offsets}[index] / 4 - 1] $$
+3.  **Handle Shadeless Mode:**
+    If the `shadeless` flag is set, return $C_{base}$ with alpha 1.0 and terminate [S2, unofficial].
 
-4. **Traverse to Leaf:** Loop while the current node does not have color data (indicated by the bit at `cidx` not being set) [S1, unofficial].
-   $$ \text{while } ((\text{int}(paletteNode \gg cidx) \ \& \ 1) \neq 1) $$
-   Inside the loop: increment level, check bounds, and update `node`, `cidx`, `pageHeader`, `blockInfo`, `attachData`, and `paletteNode` according to the octree traversal logic [S1, unofficial].
+4.  **Transform Normal to World Space:**
+    *   Load the transformation matrix $M_{octree \to world}$ from the render list offsets [S2, unofficial].
+    *   Transform the hit normal $N_{local}$ (from traversal) to world space:
+        $$ N_{world} = \text{normalize}(M_{octree \to world} \times N_{local}) $$
+        [S2, unofficial]
 
-5. **Calculate Attach Offset and Extract Color Component:**
-   $$ attachOffset = attachData + \text{int}(paletteNode \gg 8) + \text{bitCount}(paletteNode \ \& \ (1 \ll cidx) - 1) $$
-   $$ c = \text{int}(octree.data[attachOffset]) $$
+5.  **Compute Lighting:**
+    *   **Ambient Component:**
+        $$ C_{ambient} = S_{ambient} \times C_{light} $$
+        Where $S_{ambient}$ is ambient strength and $C_{light}$ is light color [S2, unofficial].
+    *   **Diffuse Component:**
+        $$ C_{diffuse} = \max(N_{world} \cdot L, 0.0) \times C_{light} $$
+        Where $L$ is the normalized light direction [S2, unofficial].
+    *   **Final Color:**
+        $$ C_{final} = (C_{ambient} + C_{diffuse}) \times C_{base} $$
+        [S2, unofficial]
 
-6. **Extract RGB and Normalize:**
-   $$ r = (c \gg 16) \ \& \ 0xFF $$
-   $$ g = (c \gg 8) \ \& \ 0xFF $$
-   $$ b = c \ \& \ 0xFF $$
-   $$ octreeColor = \text{vec3}(r / d, g / d, b / d) $$
-   where $d$ is a normalization divisor [G].
-
-7. **Handle Shadeless Mode:** If `ubo.shadeless == 1`, return the color with alpha 1.0 [S1, unofficial].
-   $$ \text{return vec4}(octreeColor, 1.0) $$
-
-8. **Load Transformation Matrix:** Calculate offset for transform data [S1, unofficial].
-   $$ offset = \text{int}(\text{renderList.offsets}[index] + ubo.pageBytes) / 4 - ubo.transformCount * 4 $$
-   Read 16 floats into `v[]` and construct `mat4 octreeToWorld` [S1, unofficial].
-
-9. **Normalize Hit Normal in World Space:**
-   $$ hitNormalWorld = \text{normalize}(octreeToWorld * castRes.normal) $$
-
-10. **Calculate Lighting:**
-    $$ ambient = ubo.ambientStrength * \text{vec3}(ubo.lightColor) $$
-    $$ lightDir = \text{vec3}(\text{normalize}(ubo.lightPos)) $$
-    $$ diffuse = \max(\text{dot}(hitNormalWorld, lightDir), 0.0) * \text{vec3}(ubo.lightColor) $$
-    $$ color = (ambient + diffuse) * octreeColor $$
+    *Alternative Normalization (Source [S1, unofficial]):*
+    Some implementations compute brightness $B$ using the dot product of the normalized normal and light direction:
+    $$ B = \frac{\arccos\left( \frac{N_x}{128.0} L_x + \frac{N_y}{128.0} L_y + \frac{N_z}{128.0} L_z \right)}{\pi} $$
+    Then apply to color:
+    $$ R = \text{uint}(V_{color}[1] \times B) $$
+    $$ G = \text{uint}(V_{color}[1] \times B) $$
+    $$ B_{val} = \text{uint}(V_{color}[0] \times B) $$
+    [S1, unofficial]
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import struct
-
-def float_bits_to_int(f):
-    return struct.unpack('i', struct.pack('f', f))[0]
-
-def bit_count(n):
-    return bin(n).count('1')
-
-def mat_vec_mul(m, v):
-    return (
-        m[0]*v[0] + m[1]*v[1] + m[2]*v[2] + m[3]*v[3],
-        m[4]*v[0] + m[5]*v[1] + m[6]*v[2] + m[7]*v[3],
-        m[8]*v[0] + m[9]*v[1] + m[10]*v[2] + m[11]*v[3]
-    )
-
-def normalize(v):
-    l = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
-    return (v[0]/l, v[1]/l, v[2]/l) if l else (0, 0, 0)
-
-def dot(a, b):
-    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
-
-def max(a, b):
-    return a if a > b else b
-
-def octree_voxel_color_retrieval(castRes, octree, renderList, ubo, index):
-    # 1. Extract Position and Tree State
-    px = float_bits_to_int(castRes.pos.x)
-    node = castRes.node
-    cidx = castRes.childIdx
-    level = castRes.scale
-
-    # 2. Calculate Page Header and Block Info
+def octree_voxel_color_retrieval(hit_pos, hit_normal, tree_state, octree_data, light_dir, shadeless, ambient_strength, light_color):
+    # 1. Navigate to color data
+    node = tree_state.node
+    cidx = tree_state.childIdx
+    level = tree_state.scale
+    
+    # Calculate page header and block info
     page_header = node & 0xFFFFF800
-    block_info = page_header + octree.data[page_header]
-    attach_data = int(block_info) + ubo.block_info_end
-
-    # 3. Get Palette Node
-    palette_node = octree.data[attach_data + int(node) - renderList.offsets[index] // 4 - 1]
-
-    # 4. Traverse to Leaf
-    while (int(palette_node >> cidx) & 1) != 1:
+    block_info = page_header + octree_data[page_header]
+    attach_data = int(block_info) + octree_data.blockInfoEnd
+    
+    # Get palette node
+    palette_node = octree_data[attach_data + int(node) - render_list.offsets[index] / 4 - 1]
+    
+    # Loop until color data is found
+    while ((int(palette_node >> cidx) & 1) != 1):
         level += 1
-        # [G] Update node, cidx, pageHeader, blockInfo, attachData, and paletteNode
-        # per standard SVO traversal rules. Source omits exact update formulas.
-        pass
-
-    # 5. Calculate Attach Offset and Extract Color Component
+        # Update bounds, node, cidx, pageHeader, blockInfo, attachData, paletteNode
+        # [G] Implementation details for tree navigation loop omitted as per source structure
+        pass 
+        
+    # Calculate attach offset and get color component
     attach_offset = attach_data + int(palette_node >> 8) + bit_count(palette_node & ((1 << cidx) - 1))
-    c = int(octree.data[attach_offset])
-
-    # 6. Extract RGB and Normalize
+    c = int(octree_data[attach_offset])
+    
+    # 2. Extract and normalize base color
     r = (c >> 16) & 0xFF
     g = (c >> 8) & 0xFF
     b = c & 0xFF
-    d = 255.0  # [G] normalization divisor for 8-bit RGB
-    octree_color = (r / d, g / d, b / d)
-
-    # 7. Handle Shadeless Mode
-    if ubo.shadeless == 1:
-        return (octree_color[0], octree_color[1], octree_color[2], 1.0)
-
-    # 8. Load Transformation Matrix
-    offset = int(renderList.offsets[index] + ubo.page_bytes) // 4 - ubo.transform_count * 4
-    v = [octree.data[offset + i] for i in range(16)]
-    octree_to_world = v
-
-    # 9. Normalize Hit Normal in World Space
-    hit_normal_world = normalize(mat_vec_mul(octree_to_world, castRes.normal))
-
-    # 10. Calculate Lighting
-    ambient = (ubo.ambient_strength * ubo.light_color[0],
-               ubo.ambient_strength * ubo.light_color[1],
-               ubo.ambient_strength * ubo.light_color[2])
-    light_dir = normalize(ubo.light_pos)
-    diffuse = (max(dot(hit_normal_world, light_dir), 0.0) * ubo.light_color[0],
-               max(dot(hit_normal_world, light_dir), 0.0) * ubo.light_color[1],
-               max(dot(hit_normal_world, light_dir), 0.0) * ubo.light_color[2])
-    color = (ambient[0] + diffuse[0],
-             ambient[1] + diffuse[1],
-             ambient[2] + diffuse[2])
-
-    return (color[0], color[1], color[2], 1.0)
+    d = 255.0 # Typical divisor for 8-bit normalization
+    octree_color = vec3(r / d, g / d, b / d)
+    
+    # 3. Handle shadeless mode
+    if shadeless:
+        return vec4(octree_color, 1.0)
+        
+    # 4. Transform normal to world space
+    offset = int(render_list.offsets[index] + ubo.pageBytes) / 4 - ubo.transformCount * 4
+    v = octree_data[offset : offset + 16] # Read 16 floats
+    octree_to_world = mat4(v)
+    hit_normal_world = normalize(octree_to_world * vec4(hit_normal, 0.0))
+    
+    # 5. Compute lighting
+    ambient = ambient_strength * light_color
+    light_dir_normalized = normalize(light_dir)
+    diffuse = max(dot(hit_normal_world, light_dir_normalized), 0.0) * light_color
+    
+    final_color = (ambient + diffuse) * octree_color
+    return final_color
 ```
 
+## Subtopics
+
+### Hierarchical Octree Voxel Coloring
+Starts with a low-resolution voxel structure and refines it to higher resolutions [S3, unofficial]. Processing time is approximately 15 seconds for a reconstruction with 3,256 voxels [S3, unofficial]. Unlike uniform resolution methods, it may introduce perceptual saliency components [S3, unofficial].
+
 ## Operating characteristics
-Time complexity is linear with respect to the octree depth from the hit node to the leaf [S1, unofficial]. Memory complexity is constant for local variables [G]. Not given in the sources: specific performance metrics, scaling behavior, or explicit usage recommendations.
+*   **Time Complexity:** Linear with respect to the depth of the octree traversal to find the leaf node [S2, unofficial].
+*   **Memory:** Depends on the SVO structure size; color data is stored per leaf [S2, unofficial].
+*   **Performance:** Hierarchical approaches can reduce processing time for large reconstructions (e.g., 15s for 3,256 voxels) [S3, unofficial].
+*   **Strengths:** Efficient retrieval of pre-shaded or dynamically shaded voxel colors; supports hierarchical refinement [S3, unofficial].
+*   **Limitations:** Requires careful handling of coordinate transformations and normal storage formats (8-bit vs float) [S1, S2, unofficial].
 
 ## Background
-Derived from the `origin` repository, which implements sparse voxel octree rendering [S1, unofficial]. Used in real-time ray tracing to provide shaded voxel colors [S1, unofficial].
+Originated in the context of volumetric reconstruction from uncalibrated camera views, specifically utilizing hierarchical octree representations to speed up voxel coloring [S3, unofficial]. Prock and Dyer [ProDye98] utilized this approach to refine low-resolution structures to higher resolutions [S3, unofficial].
 
 ## Sources
-[S1] krre/origin, https://github.com/krre/origin, fetched 2026-10-26 (unofficial)
+[S1] rools/voxl, https://github.com/rools/voxl, fetched 2026-10-26 (unofficial)
+[S2] krre/origin, https://github.com/krre/origin, fetched 2026-10-26 (unofficial)
+[S3] Accelerated volumetric reconstruction from uncalibrated camera views, http://doras.dcu.ie/157/, fetched 2026-10-26 (unofficial)

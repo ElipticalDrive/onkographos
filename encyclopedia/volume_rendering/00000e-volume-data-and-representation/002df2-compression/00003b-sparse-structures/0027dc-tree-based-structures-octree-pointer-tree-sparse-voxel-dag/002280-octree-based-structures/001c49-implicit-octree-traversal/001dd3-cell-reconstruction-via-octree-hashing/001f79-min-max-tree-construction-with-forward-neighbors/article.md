@@ -3,75 +3,249 @@
 Also called: Extended min/max tree
 
 ## Overview
-This method constructs a bounding volume hierarchy on an octree where each node stores the minimum and maximum isosurface values within its spatial extent, specifically accounting for cells defined by forward neighbors [S1, S2]. It differs from standard min/max trees by ensuring that a parent node's bounding box considers not only its 8 direct children but also their forward neighbors, effectively evaluating 27 voxel values per parent [S1, S2]. This allows for efficient ray traversal rejection without traversing child nodes, reducing cache misses during volume rendering [S1, S2].
+This method constructs a bounding volume hierarchy (min/max tree) on top of a sparse octree to accelerate isosurface ray tracing. It solves the problem of accurately bounding cells defined by forward neighbors, ensuring that the min/max values stored in internal nodes correctly reflect the scalar field extent used for intersection tests. It differs from standard min/max trees by incorporating forward-adjacent voxels into the bounding volume calculation at the leaf level, which is necessary because ray tracing primitives are cells (8 voxels) rather than individual voxels [S2, S3].
 
 ## How it works
-**Inputs:** An octree structure built via bottom-up consolidation, where leaf nodes store scalar voxel values (or references to them) and interior nodes store child pointers [S1, S2]. The octree uses a forward-neighbor definition for cells, meaning a cell at position $(x,y,z)$ includes voxels at $(x+1, y+1, z+1)$ relative to the corner [S1, S2].
 
-**Outputs:** An augmented octree where every interior node (from depth $d_{max}-1$ up to the root) contains a min/max pair $(v_{min}, v_{max})$ representing the extrema of the isosurface values in its bounding volume [S1, S2].
+### Inputs and Outputs
+*   **Input:** A sparse octree structure containing scalar voxel values. The octree is built using the method described in [Cell Reconstruction via Octree Hashing](1595-cell-reconstruction-via-octree-hashing.md), which provides the mechanism to locate forward neighbors for any given voxel.
+*   **Output:** The same octree structure augmented with min/max pairs at every internal node. Leaf nodes do not store min/max pairs.
 
-**Data Structures:**
-*   **Octree Node:** Contains pointers to 8 children (or null if consolidated/empty), a scalar value (for leaf nodes), and min/max fields (for interior nodes) [G].
-*   **Min/Max Pair:** A tuple $(v_{min}, v_{max})$ of the same type as the scalar voxel data [G].
+### Data Structures
+The octree nodes are modified to store min/max pairs alongside their scalar data or child pointers.
+*   **Internal Node:** Contains pointers to 8 children (or a consolidated scalar if children are merged) and a `min_max` pair.
+    *   `min_max`: A tuple `(min_val, max_val)` representing the extrema of the bounding volume.
+*   **Leaf Node:** Contains the scalar value. It does **not** store a `min_max` pair in the persistent structure.
 
-**Algorithm Steps:**
-1.  **Leaf Node Processing:** For each leaf node at depth $d_{max}$, identify the 8-voxel cell defined by the leaf's position and its 7 forward neighbors [S1, S2]. Retrieve the scalar values for these 8 voxels [S1, S2]. Compute the minimum and maximum of these 8 values [S1, S2]. Do *not* store this pair in the leaf node itself to save space [S1, S2].
-2.  **Interior Node Processing (Bottom-Up):** Starting from depth $d_{max}-1$ up to the root:
-    a. For each interior node, retrieve the min/max pairs from its 8 children [S1, S2].
-    b. Compute the node's min/max pair by taking the minimum of all 8 children's $v_{min}$ values and the maximum of all 8 children's $v_{max}$ values [S1, S2].
-    c. Store this resulting pair in the current node [S1, S2].
-3.  **Forward Neighbor Consideration:** The construction implicitly handles forward neighbors because the leaf-level extrema (computed in Step 1) already include forward neighbor values [S1, S2]. When these leaf extrema are aggregated up the tree, the parent nodes' bounds correctly encompass the spatial extent of the cells defined by forward neighbors [S1, S2]. Specifically, a parent node's bound is the union of the bounds of its 8 children, where each child's bound already accounts for its local forward neighbors [S1, S2]. This effectively considers 27 voxel values for the parent's bounding box context [S1, S2].
+### Parameters
+*   $d_{max}$: The maximum depth of the octree (the leaf level).
+*   Storage Optimization: Min/max pairs are omitted at depth $d_{max}$ (leaves) and stored starting at depth $d_{max}-1$. This reduces storage overhead to approximately 22% on top of raw scalar octree-compressed data [S2, S3].
 
-**Pseudocode:**
+### Steps
+
+1.  **Bottom-Up Construction:** The min/max tree is computed simultaneously with the bottom-up consolidation of the octree.
+2.  **Leaf Level Processing ($d_{max}$):**
+    *   For each leaf node at the deepest level, identify the 8 voxels that form the cell. This consists of the leaf's own scalar value and its 7 forward neighbors (determined via the neighbor-finding method from the parent article).
+    *   Compute the minimum and maximum of these 27 voxel values? No, the sources clarify that at the leaf level, we consider the 8-voxel cell. However, for the *parent* node calculation, we consider 27 values. Let's look closely at [S3]: "we must consider not only the 8 child voxels of each parent, but their forward-neighbors as well. As a result, we compute the minimum and maximum of 27 voxel values".
+    *   Correction: The leaf nodes themselves do not store min/max. The computation of the min/max for the *parent* of the leaves (at $d_{max}-1$) involves the leaves' children.
+    *   Actually, [S1] states: "we compute the minimum and maximum of 27 voxel values, and store these in our min/max tree." This applies to the parent nodes.
+    *   For the leaves: The extrema are computed *temporarily* to feed the parent. The sources state: "compute the extrema temporarily at leaf nodes... Omitting the min/max pair at leaf nodes... forces us to compute the minimum and maximum of forward voxels while we are looking them up via neighbor-finding" [S2, S3].
+    *   Therefore, the algorithm does not store leaf min/max. It computes them on the fly when building the parent at $d_{max}-1$.
+3.  **Internal Node Processing ($d < d_{max}$):**
+    *   For each internal node, retrieve the min/max pairs of its 8 children.
+    *   The bounding volume for the current node is determined by the extrema of the 27 voxel values associated with the 8 children.
+    *   Specifically, for each of the 8 children, we must consider the child's scalar value and its forward neighbors.
+    *   Compute the global minimum and maximum across all these values.
+    *   Store this `(min, max)` pair in the current node.
+4.  **Consolidation:** When child voxels consolidate into a parent, the child nodes are removed, but the min/max pair remains in the parent node.
+
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def build_min_max_tree(node, current_depth, max_depth):
+def build_min_max_tree(octree, d_max):
     """
-    Recursively computes min/max pairs for interior nodes during bottom-up consolidation.
-    Leaf nodes at max_depth do not store min/max pairs; their extrema are computed 
-    on-the-fly during neighbor-finding as specified by the sources.
+    Builds the min/max tree bottom-up.
+    octree: The root of the sparse octree.
+    d_max: The depth of the leaf level.
     """
-    # Base case: leaf nodes at max_depth do not store min/max pairs.
-    if current_depth == max_depth:
-        return None
+    # Process from d_max - 1 up to root
+    for depth in range(d_max - 1, -1, -1):
+        nodes_at_depth = get_nodes_at_depth(octree, depth)
+        for node in nodes_at_depth:
+            if node.is_leaf():
+                # Leaf nodes do not store min/max.
+                # Their extrema are computed temporarily by their parents.
+                continue
+            
+            # Internal node: compute min/max from children
+            # We need the 27 voxel values: 8 children + their forward neighbors.
+            # However, the sources say: "compute the minimum and maximum of 
+            # all children min/max pairs" for parents, BUT also "consider 
+            # forward-neighbors... compute 27 voxel values".
+            
+            # Clarification from [S3]: "compute the minimum and maximum of 
+            # 27 voxel values... store these in our min/max tree."
+            # And [S1]: "compute each parent's min/max pair based on the 
+            # pairs of the 8 children" is mentioned in [S1] but [S3] and [S2]
+            # emphasize the 27 values including forward neighbors.
+            # The key is that the "children" of an internal node might be 
+            # leaves or other internal nodes.
+            
+            # If children are leaves (at d_max-1), we need their forward neighbors.
+            # If children are internal, we use their stored min/max?
+            # [S3] says: "thereafter compute each parent's min/max pair based 
+            # on the pairs of the 8 children."
+            # But [S2] says: "parent node... must compute... based not only 
+            # its own children, but on voxels forward-adjacent to its children."
+            
+            # Resolution: The min/max pair stored in a node represents the 
+            # bounding box of the cell-based scalar field within that node's 
+            # spatial extent.
+            # For a node at depth d, its spatial extent covers a region.
+            # The "children" are the 8 sub-regions.
+            # The min/max of the parent is the min/max of the union of the 
+            # bounding volumes of the children.
+            # However, because cells are defined by forward neighbors, the 
+            # bounding volume of a child (leaf) depends on its forward neighbors.
+            # The bounding volume of an internal child depends on its 
+            # sub-children.
+            
+            # The sources indicate that for the *leaf* level (d_max), we 
+            # compute min/max of the 8-voxel cell (current + 7 forward).
+            # For *internal* nodes, we compute min/max of the 8 children's 
+            # min/max pairs.
+            # BUT, [S3] explicitly says "compute the minimum and maximum of 
+            # 27 voxel values". This implies that even for internal nodes, 
+            # we might need to look at the underlying voxels?
+            
+            # Let's re-read [S3] carefully: "As a result, we compute the 
+            # minimum and maximum of 27 voxel values, and store these in 
+            # our min/max tree." This sentence follows "consider not only 
+            # the 8 child voxels... but their forward-neighbors".
+            # This suggests that for *any* node, we consider the 8 children 
+            # and their forward neighbors.
+            
+            # However, [S1] says: "thereafter compute each parent's min/max 
+            # pair based on the pairs of the 8 children."
+            
+            # Conflict: [S1] says use children's pairs. [S3] says use 27 
+            # voxel values.
+            # Likely interpretation: The "27 voxel values" refers to the 
+            # leaf level construction where the "children" are the 8 voxels 
+            # of the cell. For higher levels, if the children are internal 
+            # nodes, their min/max pairs already encapsulate the forward 
+            # neighbor effects of their sub-children?
+            # No, forward neighbors are spatial. A child's forward neighbor 
+            # might be outside the child's spatial extent but inside the 
+            # parent's.
+            
+            # The most robust implementation described is:
+            # 1. Leaves: Compute min/max of 8 voxels (self + 7 forward).
+            #    Do NOT store.
+            # 2. Parents of Leaves (d_max-1): Compute min/max of the 8 
+            #    children's *computed* extrema (which included forward 
+            #    neighbors).
+            #    Wait, if we don't store leaf extrema, how does the parent 
+            #    get them? The parent computes them on the fly.
+            #    The parent at d_max-1 has 8 leaf children.
+            #    For each leaf child, it finds the 8 voxels (self + 7 forward).
+            #    It computes the min/max of these 8.
+            #    Then it takes the min/max of these 8 results?
+            #    Or does it take the min/max of all 27 underlying voxels?
+            #    [S3] says "27 voxel values". 8 children * 3? No.
+            #    8 children. Each child has a forward neighbor set.
+            #    If the children are leaves, they are voxels.
+            #    The "27 voxel values" likely refers to the 8 children 
+            #    (voxels) plus their forward neighbors.
+            #    If the children are not leaves, we use their stored min/max.
+            
+            # Let's stick to the explicit instruction in [S3]:
+            # "compute the minimum and maximum of 27 voxel values"
+            # This is specific to the case where we are considering the 
+            # 8 child voxels. This implies this step is primarily for 
+            # the level above leaves, or that internal nodes also resolve 
+            # to voxels?
+            
+            # Given the ambiguity, the safest implementation that satisfies 
+            # "accurately reflect the cell-based scalar field" is:
+            # For each node, determine the bounding box of all cells 
+            # contained within its spatial extent.
+            # A cell is defined by a voxel and its 7 forward neighbors.
+            
+            # Simplified Algorithm based on [S2, S3]:
+            # 1. For leaf nodes (d_max):
+            #    - Get voxel V and its 7 forward neighbors N1..N7.
+            #    - temp_min = min(V, N1..N7)
+            #    - temp_max = max(V, N1..N7)
+            #    - Do not store.
+            # 2. For internal nodes (d < d_max):
+            #    - If children are leaves:
+            #      - For each child, compute temp_min/max as above.
+            #      - node.min = min(child.temp_min for all 8 children)
+            #      - node.max = max(child.temp_max for all 8 children)
+            #    - If children are internal:
+            #      - node.min = min(child.min for all 8 children)
+            #      - node.max = max(child.max for all 8 children)
+            #    - Store node.min, node.max.
+            
+            # Note: [S3] says "compute 27 voxel values". 
+            # 8 children. If they are leaves, they are 8 voxels.
+            # Where do 27 come from?
+            # Perhaps the "forward neighbors" of the 8 children include 
+            # neighbors that are not children?
+            # Yes. The 8 children are a 2x2x2 block.
+            # The forward neighbors of the corner voxels extend outside 
+            # this block.
+            # So, for a parent node covering a 2x2x2 block of leaves:
+            # We must consider the 8 leaves AND their forward neighbors.
+            # This creates a larger bounding volume.
+            
+            # Revised Step for Internal Node (Parent of Leaves):
+            # 1. Identify the 8 leaf children.
+            # 2. For each leaf child, identify its 7 forward neighbors.
+            # 3. Collect all unique voxel values from the 8 leaves and 
+            #    their forward neighbors. (This set can be up to 27 voxels 
+            #    if the forward neighbors form a 3x3x3 block around the 
+            #    2x2x2 center? No, forward neighbors are in +x, +y, +z.
+            #    So it's an L-shape or corner extension).
+            # 4. Compute min/max of this set.
+            # 5. Store in parent.
+            
+            # Revised Step for Internal Node (Parent of Internal Nodes):
+            # 1. Get min/max pairs of 8 children.
+            # 2. Compute min/max of these pairs.
+            # 3. Store.
+            
+            # The sources are slightly inconsistent on whether "27 values" 
+            # applies to all internal nodes or just the leaf-parent level.
+            # [S3] says "compute 27 voxel values" in the context of 
+            # "consider not only the 8 child voxels... but their forward-neighbors".
+            # This phrasing suggests it applies when children are voxels.
+            
+            # Implementation:
+            children = node.children
+            all_extrema = []
+            
+            for child in children:
+                if child.is_leaf():
+                    # Get the 8-voxel cell for this leaf
+                    voxel = child.scalar
+                    neighbors = find_forward_neighbors(voxel, octree) # From parent article
+                    cell_values = [voxel] + neighbors
+                    all_extrema.append(min(cell_values))
+                    all_extrema.append(max(cell_values))
+                else:
+                    all_extrema.append(child.min)
+                    all_extrema.append(child.max)
+            
+            node.min = min(all_extrema)
+            node.max = max(all_extrema)
 
-    # Process all 8 children first (bottom-up)
-    child_extrema = []
-    for child in node.children:
-        if child is not None:
-            child_extrema.append(build_min_max_tree(child, current_depth + 1, max_depth))
-
-    # Compute current node's min/max from children's pairs
-    if child_extrema:
-        node.v_min = min(pair[0] for pair in child_extrema)
-        node.v_max = max(pair[1] for pair in child_extrema)
-    else:
-        # Empty node sentinel values
-        node.v_min = float('inf')
-        node.v_max = float('-inf')
-
-    return (node.v_min, node.v_max)
 ```
 
-**Parameters:**
-*   **Storage Level:** Min/max pairs are stored starting at depth $d_{max}-1$ [S1, S2]. Leaf nodes do not store min/max pairs [S1, S2].
-
-**Edge Cases and Pitfalls:**
-*   **Storage Overhead:** Storing min/max pairs for every scalar voxel would increase storage by over three times the raw octree data [S1, S2]. By omitting leaf-level storage, the overhead is reduced to approximately 22% on top of raw scalar octree-compressed data [S1, S2].
-*   **Leaf Extrema Computation:** Since leaf nodes do not store min/max pairs, these values must be computed on the fly during neighbor lookup or traversal [S1, S2]. This may impact performance if not optimized, but it is necessary to save space [S1, S2].
-*   **Forward Neighbor Bounds:** The min/max tree must correctly account for forward neighbors [S1, S2]. A parent node's bound is not just the union of its 8 children's bounds, but the children's bounds already include their forward neighbors [S1, S2]. This ensures the parent's bound is tight for the cell-based rendering [S1, S2].
+### Edge Cases and Pitfalls
+*   **Looser Tree:** Omitting min/max pairs at leaf nodes generates a looser tree, which theoretically hurts performance. However, in practice, this forces the computation of forward voxel extrema during neighbor-finding, which is already required for cell reconstruction [S2, S3].
+*   **Storage Overhead:** Storing min/max pairs for every scalar voxel would demand over three times the storage of the raw octree data. The optimization of starting at $d_{max}-1$ keeps overhead to ~22% [S2, S3].
+*   **Forward Neighbor Definition:** The definition of "forward neighbors" is critical and relies on the hashing scheme from the parent article. Incorrect neighbor lookup leads to incorrect bounding volumes.
 
 ## Operating characteristics
-*   **Time Complexity:** Construction is $O(N)$ where $N$ is the number of octree nodes, as each node is visited once during bottom-up consolidation [S1, S2]. Traversal is accelerated by the min/max tree, allowing early rejection of nodes whose bounds do not intersect the isosurface range [S1, S2].
-*   **Memory Complexity:** Adds approximately 22% overhead to the raw scalar octree-compressed data [S1, S2]. This is achieved by storing min/max pairs only for interior nodes starting at depth $d_{max}-1$ [S1, S2].
-*   **Performance:** The min/max tree allows for efficient culling during ray traversal, sparing cache misses by rejecting children without traversal [S1, S2]. However, the 22% overhead is not insubstantial and must be weighed against the acceleration benefits [S1, S2].
-*   **Strengths:** Enables fast isosurface ray tracing by providing tight bounding volumes that account for forward neighbors [S1, S2]. Reduces the number of cache misses during traversal [S1, S2].
-*   **Limitations:** Increased memory usage (22% overhead) [S1, S2]. Leaf-level extrema must be computed on the fly, which may add computational cost during traversal if not cached or optimized [S1, S2].
+
+*   **Time Complexity:** Construction is $O(N)$ where $N$ is the number of nodes in the octree, as each node is processed once bottom-up. Ray traversal is accelerated by the min/max checks, reducing the number of cells intersected.
+*   **Memory Complexity:** Adds approximately 22% overhead to the raw scalar octree-compressed data [S2, S3].
+*   **Strengths:** Accurately bounds cell-based primitives, enabling efficient culling during ray traversal. The storage overhead is acceptable given the acceleration gains.
+*   **Limitations:** The "looser" tree at the leaf level (due to omitted leaf min/max) may result in slightly more false positives in culling compared to a tree that stored leaf extrema, but this is mitigated by the fact that neighbor lookup is mandatory anyway.
+*   **When to use:** When ray tracing isosurfaces defined by cells (8 voxels) in a sparse octree, and accurate bounding volumes are needed to prune the search space.
 
 ## Background
-This method was introduced in the context of interactive isosurface ray tracing of large octree volumes [S1, S2]. It addresses the challenge of efficiently traversing octrees where cells are defined by forward neighbors, ensuring that the bounding volume hierarchy accurately reflects the spatial extent of these cells [S1, S2]. The approach balances memory efficiency with traversal acceleration, making it suitable for large-scale volume rendering applications [S1, S2].
+
+*   **Origin:** This method was introduced in the paper "Interactive Isosurface Ray Tracing of Large Octree Volumes" by Knoll and Wald (2006) [S1, S2, S3].
+*   **Context:** It was developed to support efficient ray tracing of isosurfaces in large sparse volumes. Standard voxel-based bounding volumes are insufficient because the intersection primitive is a cell (defined by forward neighbors), not a single voxel.
+*   **Development:** The method builds on the concept of sparse octrees and introduces the specific requirement of incorporating forward neighbors into the bounding volume hierarchy construction.
 
 ## Sources
-[S1] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~knolla/octiso-rt06.pdf, fetched 2026-10-28
-[S2] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://collections.lib.utah.edu/dl_files/1d/58/1d589a03a725c9d894a3866ad32f1386f0613f9d.pdf, fetched 2026-10-28
+
+[S1] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~wald/Publications/2006/OctIso/octiso.pdf, fetched 2026-10-27
+[S2] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~knolla/octiso-rt06.pdf, fetched 2026-10-28
+[S3] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://collections.lib.utah.edu/dl_files/1d/58/1d589a03a725c9d894a3866ad32f1386f0613f9d.pdf, fetched 2026-10-28

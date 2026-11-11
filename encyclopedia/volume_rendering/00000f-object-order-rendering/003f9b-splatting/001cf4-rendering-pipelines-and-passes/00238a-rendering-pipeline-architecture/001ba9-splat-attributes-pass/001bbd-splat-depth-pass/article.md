@@ -24,8 +24,8 @@ The Splat Depth Pass computes the depth of the front surface of a spherical spla
     $$ \mathbf{p}_{world\_xy} = \mathbf{p}_{local} \times 2 \times i.radius $$
 4.  **Calculate depth offset:** Compute the $z$-offset from the center to the front surface of the sphere at the given $(x,y)$ position [S1, unofficial].
     $$ z_{offset} = \sqrt{i.radius^2 - (\mathbf{p}_{world\_xy} \cdot \mathbf{p}_{world\_xy})} $$
-5.  **Compute final depth:** Subtract the depth offset from the center depth to get the front surface depth [S1, unofficial].
-    $$ z_{front} = \text{linearDepth}(\text{gl\_FragCoord}.z) - z_{offset} + \epsilon $$
+5.  **Compute final depth:** Subtract the depth offset from the center depth to get the front surface depth, apply depth sampling, and add epsilon [S1, unofficial].
+    $$ z_{front} = \text{depthSample}(\text{linearDepth}(\text{gl\_FragCoord}.z) - z_{offset} + \epsilon) $$
     $$ \text{gl\_FragDepth} = z_{front} $$
 
 **Parameters:**
@@ -49,7 +49,7 @@ def splat_depth_pass(gl_frag_coord, gl_point_coord, i_radius, linear_depth_func,
     
     # Discard if outside the unit circle (radius 0.5, squared 0.25)
     if mag_sq > 0.25:
-        discard_fragment()
+        raise StopIteration("discard")
         
     # Step 3: Calculate world-space XY offset
     from_center_wld_spc = from_center_pt_spc * 2.0 * i_radius
@@ -60,13 +60,9 @@ def splat_depth_pass(gl_frag_coord, gl_point_coord, i_radius, linear_depth_func,
     
     # Step 5: Calculate final depth
     center_depth = linear_depth_func(gl_frag_coord.z)
-    final_depth = center_depth - depth_offset + epsilon
+    final_depth = depth_sample(center_depth - depth_offset + epsilon)
     
     return final_depth
-
-def discard_fragment():
-    # Standard fragment shader operation to skip further processing
-    raise StopIteration
 ```
 
 ## Subtopics
@@ -75,16 +71,16 @@ def discard_fragment():
 A rasterization technique for point-sampled surfaces that maintains only a single surface layer per pixel, using a depth band to decide whether to blend, replace, or discard incoming fragments. It differs from multi-layer approaches by strictly limiting visibility to one depth value per pixel, which introduces visibility and occlusion artifacts in complex geometry. Choose it when rendering simple point clouds where memory is constrained and complex occlusion is not required.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Performance:** Not given in the sources.
-*   **Strengths:** Not given in the sources.
-*   **Limitations:** Not given in the sources.
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources. [S1, unofficial]
+*   **Memory Complexity:** Not given in the sources. [S1, unofficial]
+*   **Performance:** Not given in the sources. [S1, unofficial]
+*   **Strengths:** Not given in the sources. [S1, unofficial]
+*   **Limitations:** Not given in the sources. [S1, unofficial]
+*   **When to use:** Not given in the sources. [S1, unofficial]
+*   **When not to use:** Not given in the sources. [S1, unofficial]
 
 ## Background
-The method is implemented in point cloud rendering pipelines using standard fragment shaders to compute front-face depth for spherical splats [S1, unofficial]. Specific historical origins or earlier papers are not given in the sources.
+The method is implemented in point cloud rendering pipelines using standard fragment shaders to compute front-face depth for spherical splats [S1, unofficial]. Specific historical origins or earlier papers are not given in the sources. [S1, unofficial]
 
 ## Sources
 [S1] arminkz/PointCloudRendering, https://github.com/arminkz/PointCloudRendering, fetched 2026-10-28 (unofficial)

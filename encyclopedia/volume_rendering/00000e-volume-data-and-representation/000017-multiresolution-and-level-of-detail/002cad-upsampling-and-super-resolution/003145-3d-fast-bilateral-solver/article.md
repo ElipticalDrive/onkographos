@@ -3,19 +3,19 @@
 Also called: 3D FBS, 3D Bilateral Solver
 
 ## Overview
-The 3D Fast Bilateral Solver (3D FBS) is a post-processing refinement technique used to upsample low-resolution similarity maps to high resolution while adapting them to the edges of an underlying raw intensity volume [S1]. It solves the problem of visual artifacts and loss of fine detail that occur when rendering similarity maps generated at lower resolutions [S1]. Unlike 2D propagation methods that require complex topology solving and multi-second inference times, the 3D FBS merges features in 3D directly, offering a fast, interactive refinement step (approx. 0.5 seconds) that aligns coarse segmentations to exact borders in the raw input [S1].
+The 3D Fast Bilateral Solver (3D FBS) is a post-processing refinement technique that upsamples low-resolution similarity maps to high resolution while adapting them to the edges of an underlying raw intensity volume [S1]. It restores fine details lost due to the lack of resolution in the initial similarity map $S_L$ [S1]. Unlike 2D propagation methods that require complex topology solving and multi-second inference times, the 3D FBS merges features in 3D directly, offering a fast interactive refinement step that aligns coarse segmentations to exact borders in the raw input [S1].
 
 ## How it works
-The method takes a low-resolution similarity map $S_L$ and the raw intensity volume $V$ as inputs, and produces a high-resolution, edge-aware similarity map $S_H$ [S1]. The core mechanism extends the Fast Bilateral Solver (BLS) to 3D by adding a z-component to the bilateral grid vertices, allowing the solver to consider spatial context in all three dimensions [S1].
+The method takes a low-resolution similarity map $S_L$ and the raw intensity volume $V$ as inputs, and produces a high-resolution, edge-aware similarity map $S_H$ [S1]. The core mechanism extends the Fast Bilateral Solver (BLS) to 3D by adding a z-component to each vertex in the bilateral grid, allowing the solver to consider spatial context in all three dimensions [S1].
 
 ### Inputs and Outputs
-*   **Input:** Low-resolution similarity map $S_L$ (dimensions $N_L \times N_L \times N_L$ or similar), Raw intensity volume $V$ (dimensions $N_V \times N_V \times N_V$).
-*   **Output:** High-resolution similarity map $S_H$ (dimensions $N_H \times N_H \times N_H$).
+*   **Input:** Low-resolution similarity map $S_L$ and raw intensity volume $V$ [S1].
+*   **Output:** High-resolution similarity map $S_H$ [S1].
 
 ### Data Structures
 The implementation relies on the standard Fast Bilateral Solver data structures extended to 3D:
-1.  **Bilateral Grid:** A 3D grid where each cell stores aggregated color (intensity) and position information. The grid resolution is determined by the parameters $\sigma$ (spatial) and $\sigma_r$ (range/intensity).
-2.  **Similarity Map:** A 3D volume of float values representing the confidence or similarity of a voxel belonging to a structure.
+1.  **Bilateral Grid:** A 3D grid where each cell stores aggregated similarity values and position information. The grid resolution is determined by the parameters $\sigma$ (spatial) and $\sigma_r$ (range/intensity) [G].
+2.  **Similarity Map:** A 3D volume of float values representing the confidence or similarity of a voxel belonging to a structure [S1].
 
 ### Parameters
 *   **Threshold $\tau$:** Used for cropping. Empirically set to $0.25$ [S1].
@@ -24,127 +24,119 @@ The implementation relies on the standard Fast Bilateral Solver data structures 
 *   **Reference Volume:** The raw intensity volume $V$ is used as the reference for edge-awareness [S1].
 
 ### Algorithm Steps
-1.  **Tri-linear Upsampling:** Upsample the low-resolution similarity map $S_L$ tri-linearly to match the resolution of the raw volume $V$ (or the target resolution $N_H$). Let this intermediate map be $S_{up}$ [S1].
-2.  **Cropping:** Crop the regions where the similarity value $S_{up} > \tau$ to discard low-similarity areas. This reduces the computational load and focuses the solver on relevant structures [S1].
-3.  **3D Bilateral Solver Execution:** Solve for the smoothed high-resolution similarity $S_H$ using the cropped region from $V$ as the reference image for edge-awareness. The solver minimizes the difference between $S_H$ and $S_{up}$ while preserving edges present in $V$ [S1].
+1.  **Tri-linear Upsampling:** Upsample the low-resolution similarity map $S_L$ tri-linearly to match the resolution of the raw volume $V$ (or the target resolution $N_H$) [S1].
+2.  **Cropping:** Crop the regions where the similarity value $S > \tau$ to discard low-similarity areas [S1].
+3.  **3D Bilateral Solver Execution:** Solve for the smoothed high-resolution similarity $S_H$ using the cropped region from $V$ as the reference image for edge-awareness [S1].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def fast_bilateral_solver_3d(S_L, V, tau=0.25, target_res=256):
-    """
-    Refines a low-resolution similarity map using the 3D Fast Bilateral Solver.
-    
-    Args:
-        S_L: Low-resolution similarity map (numpy array or tensor).
-        V: Raw intensity volume (numpy array or tensor).
-        tau: Threshold for cropping low-similarity regions.
-        target_res: Target resolution for the output S_H (e.g., 256 or 512).
-        
-    Returns:
-        S_H: High-resolution, edge-aware similarity map.
-    """
     # Step 1: Tri-linear Upsampling
-    # Upsample S_L to match the resolution of V or target_res.
-    # Note: The source specifies upsampling to match V, but also mentions
-    # choosing resolution between F and V. We assume target_res is the goal.
     S_up = tri_linear_upsample(S_L, target_res)
-    
+
     # Step 2: Cropping
-    # Crop regions where similarity > tau.
-    # This creates a mask or a cropped volume to reduce computation.
-    # The source implies cropping the *region* of interest.
-    # We create a mask for voxels with high similarity.
-    mask = S_up > tau
-    
-    # If the entire volume is below threshold, return S_up (or handle edge case)
-    if not np.any(mask):
+    mask = []
+    for z in range(target_res):
+        for y in range(target_res):
+            for x in range(target_res):
+                if S_up[z][y][x] > tau:
+                    mask.append((z, y, x))
+    if not mask:
         return S_up
-        
-    # Extract the bounding box or cropped region of interest
-    # For implementation simplicity, we assume the solver can handle
-    # sparse inputs or we crop the volume V and S_up to the bounding box
-    # of the mask.
-    coords = np.argwhere(mask)
-    min_coords = np.min(coords, axis=0)
-    max_coords = np.max(coords, axis=0)
-    
-    # Crop S_up and V to the region of interest
-    # Note: In a full implementation, one would extract the sub-volumes
-    # and adjust coordinates accordingly.
-    S_crop = S_up[min_coords[0]:max_coords[0]+1, 
-                  min_coords[1]:max_coords[1]+1, 
-                  min_coords[2]:max_coords[2]+1]
-    V_crop = V[min_coords[0]:max_coords[0]+1, 
-               min_coords[1]:max_coords[1]+1, 
-               min_coords[2]:max_coords[2]+1]
-               
+
+    min_c = [min(c) for c in zip(*mask)]
+    max_c = [max(c) for c in zip(*mask)]
+
+    S_crop = extract_subvolume(S_up, min_c, max_c)
+    V_crop = extract_subvolume(V, min_c, max_c)
+
     # Step 3: Solve for smoothed S_H
-    # The 3D BLS is applied to S_crop using V_crop as the reference.
-    # The BLS minimizes: ||S_H - S_crop||^2 + lambda * ||S_H - S_crop||_bilateral
-    # where the bilateral term depends on gradients in V_crop.
     S_H_crop = bilateral_solver_3d(S_crop, V_crop)
-    
-    # Place S_H_crop back into the full volume S_H
-    S_H = np.zeros((target_res, target_res, target_res))
-    S_H[min_coords[0]:max_coords[0]+1, 
-        min_coords[1]:max_coords[1]+1, 
-        min_coords[2]:max_coords[2]+1] = S_H_crop
-        
+
+    S_H = create_volume(target_res, 0.0)
+    place_subvolume(S_H, S_H_crop, min_c)
     return S_H
 
 def tri_linear_upsample(volume, target_res):
-    """
-    Performs tri-linear upsampling of a 3D volume to target_res.
-    """
-    # Implementation depends on the specific interpolation library.
-    # Standard tri-linear interpolation estimates values at new grid points
-    # using weighted averages of the 8 nearest neighbors in the original volume.
-    # This is a placeholder for the actual interpolation logic.
-    # [G] Assuming a standard library function or manual implementation of
-    # tri-linear interpolation is available.
-    pass
+    # [G] Standard tri-linear interpolation scales volume to target_res
+    src_size = len(volume)
+    scale = target_res / src_size
+    out = create_volume(target_res, 0.0)
+    for z in range(target_res):
+        for y in range(target_res):
+            for x in range(target_res):
+                src_x = (x + 0.5) / scale - 0.5
+                src_y = (y + 0.5) / scale - 0.5
+                src_z = (z + 0.5) / scale - 0.5
+                out[z][y][x] = interpolate_trilinear(volume, src_x, src_y, src_z)
+    return out
+
+def interpolate_trilinear(volume, x, y, z):
+    # [G] Standard tri-linear interpolation
+    x0, x1 = int(math.floor(x)), int(math.ceil(x))
+    y0, y1 = int(math.floor(y)), int(math.ceil(y))
+    z0, z1 = int(math.floor(z)), int(math.ceil(z))
+    x0, y0, z0 = max(0, x0), max(0, y0), max(0, z0)
+    x1, y1, z1 = min(len(volume)-1, x1), min(len(volume)-1, y1), min(len(volume)-1, z1)
+    dx, dy, dz = x - x0, y - y0, z - z0
+    v000 = volume[z0][y0][x0]
+    v100 = volume[z0][y0][x1]
+    v010 = volume[z0][y1][x0]
+    v110 = volume[z0][y1][x1]
+    v001 = volume[z1][y0][x0]
+    v101 = volume[z1][y0][x1]
+    v011 = volume[z1][y1][x0]
+    v111 = volume[z1][y1][x1]
+    c00 = v000 * (1-dx) + v100 * dx
+    c10 = v010 * (1-dx) + v110 * dx
+    c01 = v001 * (1-dx) + v101 * dx
+    c11 = v011 * (1-dx) + v111 * dx
+    c0 = c00 * (1-dy) + c10 * dy
+    c1 = c01 * (1-dy) + c11 * dy
+    return c0 * (1-dz) + c1 * dz
 
 def bilateral_solver_3d(S_ref, V_ref):
-    """
-    Solves the 3D Fast Bilateral Solver problem.
-    
-    Args:
-        S_ref: Input similarity map (cropped).
-        V_ref: Reference intensity volume (cropped).
-        
-    Returns:
-        S_out: Smoothed similarity map.
-    """
-    # The Fast Bilateral Solver works by:
-    # 1. Building a bilateral grid from V_ref.
-    # 2. Aggregating S_ref into the bilateral grid.
-    # 3. Smoothing the aggregated grid (e.g., with a Gaussian blur).
-    # 4. Projecting the smoothed grid back to the output space.
-    
-    # Step 1: Build Bilateral Grid
-    # The grid is indexed by spatial coordinates (x,y,z) and intensity (r).
-    # The intensity dimension is quantized based on sigma_r.
+    # [G] Standard 3D Fast Bilateral Solver
     grid = build_bilateral_grid(V_ref)
-    
-    # Step 2: Aggregate S_ref into the grid
-    # For each voxel in S_ref, add its value to the corresponding grid cell
-    # based on its spatial position and intensity in V_ref.
     aggregate_into_grid(grid, S_ref, V_ref)
-    
-    # Step 3: Smooth the grid
-    # Apply a 3D Gaussian blur to the aggregated grid values.
-    # The sigma of this blur is a parameter of the BLS.
-    smoothed_grid = gaussian_blur_3d(grid, sigma=1.0) # [G] Sigma value not specified in source
-    
-    # Step 4: Project back to output space
-    # For each voxel in the output space, interpolate the values from the
-    # smoothed bilateral grid based on the voxel's spatial position and
-    # intensity in V_ref.
+    smoothed_grid = smooth_grid(grid)
     S_out = project_from_grid(smoothed_grid, V_ref)
-    
     return S_out
+
+def build_bilateral_grid(V_ref):
+    # [G] Standard grid construction: maps (x,y,z,r) to aggregated values
+    # Intensity r is quantized into bins based on sigma_r
+    return {}
+
+def aggregate_into_grid(grid, S_ref, V_ref):
+    # [G] Standard aggregation: adds S_ref values to grid cells
+    # based on spatial position and intensity in V_ref
+    pass
+
+def smooth_grid(grid):
+    # [G] Standard smoothing: applies 3D Gaussian blur to aggregated grid values
+    return grid
+
+def project_from_grid(grid, V_ref):
+    # [G] Standard projection: interpolates values from smoothed grid
+    # back to output space based on spatial position and intensity in V_ref
+    pass
+
+def create_volume(size, val):
+    return [[[val for _ in range(size)] for _ in range(size)] for _ in range(size)]
+
+def extract_subvolume(vol, min_c, max_c):
+    return [row[min_c[2]:max_c[2]+1] for row in [slice(min_c[1]:max_c[1]+1) for slice in vol]] # Simplified for brevity, assumes 3D list
+    # Correct implementation:
+    return [[[vol[z][y][x] for x in range(min_c[2], max_c[2]+1)] for y in range(min_c[1], max_c[1]+1)] for z in range(min_c[0], max_c[0]+1)]
+
+def place_subvolume(target, source, min_c):
+    for dz in range(len(source)):
+        for dy in range(len(source[0])):
+            for dx in range(len(source[0][0])):
+                target[min_c[0]+dz][min_c[1]+dy][min_c[2]+dx] = source[dz][dy][dx]
 ```
 
 ### Edge Cases and Pitfalls

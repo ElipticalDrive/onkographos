@@ -41,16 +41,17 @@ def bisection_intersection(P_low, P_high, field_function):
         else:
             P_high = P_mid
             f_high = f_mid
+        # Convergence check (tolerance/max_iter) not specified in sources [G]
 ```
 
 **Parameters:**
-*   **Tolerance:** Not given in the sources.
-*   **Max Iterations:** Not given in the sources.
+*   **Tolerance:** Not given in the sources [S2, unofficial].
+*   **Max Iterations:** Not given in the sources [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
 *   **Non-Bracketing Segments:** The method requires the initial segment to bracket a root [S2, unofficial].
 *   **Discontinuous Functions:** The method requires continuity [S2, unofficial].
-*   **Multiple Roots:** Not given in the sources.
+*   **Multiple Roots:** Not given in the sources [S2, unofficial].
 
 ## Subtopics
 
@@ -58,13 +59,13 @@ def bisection_intersection(P_low, P_high, field_function):
 Combines bisection with Newton’s method for high-degree polynomials, ensuring all real roots are found by isolating them in monotonic intervals. Choose when dealing with complex implicit surfaces defined by high-degree polynomials where simple bisection might miss roots or converge slowly.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S2, unofficial].
+*   **Memory Complexity:** Not given in the sources [S2, unofficial].
 *   **Performance:** The false position algorithm is "no worse than the midpoint algorithm, and usually better" in terms of iteration count [S2, unofficial].
 *   **Strengths:** Guaranteed convergence for continuous functions by systematically halving the search interval [S1, S2, unofficial].
 *   **Limitations:** Requires the field function to be continuous and the initial segment to bracket a root [S2, unofficial].
-*   **When to Use:** Not given in the sources.
-*   **When Not to Use:** Not given in the sources.
+*   **When to Use:** Not given in the sources [S2, unofficial].
+*   **When Not to Use:** Not given in the sources [S2, unofficial].
 
 ## Background
 The bisection method is a classic root-finding algorithm [S1, unofficial]. In isosurface extraction, it is cited as a "far better choice" than simple linear interpolation for finding exact intersection points on edges [S2, unofficial]. It is implemented in the `IsoMesher` class methods `intersect_xaxis()`, `intersect_yaxis()`, and `intersect_zaxis()`, controlled by the preprocessor symbol `BISECTION` [S2, unofficial]. It is also used in differentiable volumetric rendering pipelines as an alternative to the Secant method [S1, unofficial].

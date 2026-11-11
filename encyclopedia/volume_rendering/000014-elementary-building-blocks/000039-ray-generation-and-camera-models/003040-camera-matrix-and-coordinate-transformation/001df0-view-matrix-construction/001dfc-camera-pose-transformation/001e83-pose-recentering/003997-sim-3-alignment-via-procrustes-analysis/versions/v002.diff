@@ -1,0 +1,301 @@
+--- v001.md
++++ v002.md
+@@ -4,195 +4,140 @@
+ 
+ ## Overview
+-Sim(3) Alignment via Procrustes Analysis is a method to align estimated camera poses to ground truth by computing a 3D similarity transformation (Sim(3)) using Procrustes analysis on camera pose locations [S1, unofficial][S3]. It solves the problem of evaluating pose accuracy or initializing test-time optimization by finding the optimal scale, rotation, and translation that minimizes the distance between predicted and reference camera centers [S1, unofficial][S3]. It sets itself apart from [PCA Pose Alignment](7626-pca-pose-alignment.md) by explicitly solving for a global scale factor in addition to rotation and translation, whereas PCA typically only aligns axes without scaling [S1, S2, unofficial].
++Sim(3) Alignment via Procrustes Analysis computes a 3D similarity transformation (rotation, translation, and uniform scale) to align estimated camera poses to ground truth by applying Procrustes analysis on camera pose locations [S1, unofficial]. It is primarily used for pose quality assessment and as an initialization step for test-time optimization in neural radiance field (NeRF) reconstruction [S1, unofficial]. Unlike [PCA Pose Alignment](7626-pca-pose-alignment.md), which aligns poses based on principal component analysis of their spatial distribution, this method explicitly minimizes the geometric error between corresponding camera centers under a similarity transform [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- `camtoworlds`: A set of $N$ camera poses, where each pose is a $4 \times 4$ matrix representing the transformation from camera coordinates to world coordinates.
+-- `points` (optional): A set of 3D points in world coordinates, used for principal axes alignment.
++**Inputs and Outputs**
++*   **Input:** A set of estimated camera poses $P_{est} = \{T_1, \dots, T_N\}$ and a set of ground truth camera poses $P_{gt} = \{T'_1, \dots, T'_N\}$, where each $T_i$ is a $4 \times 4$ transformation matrix representing the camera-to-world transformation.
++*   **Output:** A $4 \times 4$ similarity transformation matrix $S \in Sim(3)$ that best aligns $P_{est}$ to $P_{gt}$ [S1, unofficial].
+ 
+-**Outputs:**
+-- `aligned_camtoworlds`: The transformed camera poses.
+-- `aligned_points` (optional): The transformed points.
+-- `T_combined`: The cumulative transformation matrix applied to the inputs.
++**Data Structures**
++The method extracts the translation vectors (camera centers) from the pose matrices. For a pose $T$, the camera center $C$ is the upper-right $3 \times 1$ column of the matrix:
++$$ C = \begin{bmatrix} T_{0,3} \\ T_{1,3} \\ T_{2,3} \end{bmatrix} $$
++Let $C_{est} = \{c_1, \dots, c_N\}$ be the set of estimated camera centers and $C_{gt} = \{c'_1, \dots, c'_N\}$ be the set of ground truth camera centers [S1, unofficial].
+ 
+-**Data Structures:**
+-- Camera poses are represented as $4 \times 4$ homogeneous transformation matrices:
+-  $$
+-  T = \begin{bmatrix} R & t \\ 0 & 1 \end{bmatrix}
+-  $$
+-  where $R \in \mathbb{R}^{3 \times 3}$ is a rotation matrix and $t \in \mathbb{R}^3$ is the translation vector (camera center).
++**Algorithm Steps**
++1.  **Centering:** Compute the centroid of the estimated centers $\bar{c}_{est} = \frac{1}{N} \sum_{i=1}^N c_i$ and the centroid of the ground truth centers $\bar{c}_{gt} = \frac{1}{N} \sum_{i=1}^N c'_i$.
++2.  **Demean:** Subtract the centroids from each point to obtain centered sets:
++    $$ \tilde{c}_i = c_i - \bar{c}_{est} $$
++    $$ \tilde{c}'_i = c'_i - \bar{c}_{gt} $$
++3.  **Covariance Matrix:** Compute the $3 \times 3$ covariance matrix $H$ between the centered estimated and ground truth points:
++    $$ H = \sum_{i=1}^N \tilde{c}_i \tilde{c}'_i^T $$
++4.  **Singular Value Decomposition (SVD):** Perform SVD on $H$:
++    $$ H = U \Sigma V^T $$
++5.  **Rotation Calculation:** Compute the rotation matrix $R$. To ensure a proper rotation (determinant +1) and handle reflections, calculate:
++    $$ d = \text{sign}(\det(V U^T)) $$
++    $$ R = V \begin{bmatrix} 1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & d \end{bmatrix} U^T $$
++    [G: This is the standard Kabsch algorithm step for Procrustes analysis, necessary to ensure $R$ is a valid rotation matrix.]
++6.  **Scale Calculation:** Compute the uniform scale factor $s$:
++    $$ s = \frac{\sum_{i=1}^N \tilde{c}'_i \cdot (R \tilde{c}_i)}{\sum_{i=1}^N \| \tilde{c}_i \|^2} $$
++    [G: This formula minimizes the least-squares error for the scale component in similarity Procrustes analysis.]
++7.  **Translation Calculation:** Compute the translation vector $t$:
++    $$ t = \bar{c}_{gt} - s R \bar{c}_{est} $$
++8.  **Construct Sim(3) Matrix:** Assemble the final $4 \times 4$ transformation matrix $S$:
++    $$ S = \begin{bmatrix} sR & t \\ 0 & 1 \end{bmatrix} $$
+ 
+-**Steps:**
+-1. **Compute Initial Similarity Transform ($T_1$):**
+-   Extract the camera centers (translation vectors $t_i$) from all `camtoworlds` matrices. Compute the Sim(3) transformation $T_1$ that aligns these centers to the ground truth centers using Procrustes analysis. This involves:
+-   - Centering the source and target points by subtracting their centroids.
+-   - Computing the covariance matrix between centered source and target points.
+-   - Using Singular Value Decomposition (SVD) to find the optimal rotation.
+-   - Computing the optimal scale factor $s$ and translation $t$.
+-   [S2, unofficial]
++**Parameters**
++*   $N$: Number of camera poses.
++*   Typical values: None specific; depends on the dataset size.
+ 
+-2. **Transform Cameras:**
+-   Apply $T_1$ to all camera poses:
+-   $$
+-   \text{camtoworlds} = T_1 \times \text{camtoworlds}
+-   $$
+-   If `points` are provided, transform them as well:
+-   $$
+-   \text{points} = T_1 \times \text{points}
+-   $$
+-   [S2, unofficial]
++**Edge Cases and Pitfalls**
++*   **Degenerate Configurations:** Procrustes analysis is unreliable when all cameras lie in a line or when the camera translation contains significant noise [S1, unofficial]. In such cases, the covariance matrix may be ill-conditioned, leading to unstable rotation estimates.
++*   **Precision:** Numerical stability depends on the conditioning of the covariance matrix $H$.
+ 
+-3. **Compute Principal Axes Transform ($T_2$):**
+-   If `points` are provided, compute the principal axes transform $T_2$ from the transformed points. This aligns the coordinate system with the principal components of the point cloud distribution.
+-   [S2, unofficial]
+-
+-4. **Transform Cameras and Points Again:**
+-   Apply $T_2$ to the cameras and points:
+-   $$
+-   \text{camtoworlds} = T_2 \times \text{camtoworlds}
+-   $$
+-   $$
+-   \text{points} = T_2 \times \text{points}
+-   $$
+-   [S2, unofficial]
+-
+-5. **Return Results:**
+-   Return the aligned cameras, aligned points, and the combined transform $T_{combined} = T_2 \times T_1$.
+-   [S2, unofficial]
+-
+-**Pseudocode:**
++**Pseudocode**
+ ```python
+ import numpy as np
+ 
+-def procrustes_analysis(source, target):
++def sim3_procrustes(poses_est, poses_gt):
+     """
+-    Computes the Sim(3) transformation (scale, rotation, translation)
+-    that aligns source points to target points.
++    Aligns estimated poses to ground truth using Sim(3) Procrustes analysis.
++    
++    Args:
++        poses_est: List of N 4x4 numpy arrays (camera-to-world matrices).
++        poses_gt: List of N 4x4 numpy arrays (camera-to-world matrices).
++        
++    Returns:
++        S: 4x4 numpy array representing the Sim(3) transformation.
+     """
+-    # Center points
+-    source_mean = np.mean(source, axis=0)
+-    target_mean = np.mean(target, axis=0)
+-    source_centered = source - source_mean
+-    target_centered = target - target_mean
++    N = len(poses_est)
+     
+-    # Compute scale
+-    # s = sum(||target_centered||^2) / sum(||source_centered||^2) ? 
+-    # Standard Procrustes for Sim(3) usually involves SVD for rotation and scale calculation.
+-    # Here we assume a standard implementation that returns s, R, t.
+-    # Note: Exact SVD-based Sim(3) derivation is complex; this is a placeholder for the logic.
+-    # In practice, this often uses the Kabsch algorithm extended for scale.
++    # Extract camera centers (translation components)
++    centers_est = np.array([T[:3, 3] for T in poses_est])
++    centers_gt = np.array([T[:3, 3] for T in poses_gt])
+     
+-    # Covariance matrix
+-    H = source_centered.T @ target_centered
+-    U, S, Vt = np.linalg.svd(H)
++    # Step 1: Compute centroids
++    centroid_est = np.mean(centers_est, axis=0)
++    centroid_gt = np.mean(centers_gt, axis=0)
+     
+-    # Rotation
+-    d = np.sign(np.linalg.det(Vt.T @ U.T))
++    # Step 2: Demean
++    centered_est = centers_est - centroid_est
++    centered_gt = centers_gt - centroid_gt
++    
++    # Step 3: Covariance matrix
++    H = centered_est.T @ centered_gt
++    
++    # Step 4: SVD
++    U, S_vals, Vt = np.linalg.svd(H)
++    V = Vt.T
++    
++    # Step 5: Rotation
++    d = np.sign(np.linalg.det(V @ U.T))
+     D = np.diag([1, 1, d])
+-    R = Vt.T @ D @ U.T
++    R = V @ D @ U.T
+     
+-    # Scale
+-    # s = trace(S * D) / sum(||source_centered||^2)
+-    scale = np.trace(np.diag(S) @ D) / np.sum(source_centered**2)
++    # Step 6: Scale
++    numerator = np.sum(centered_gt * (R @ centered_est.T).T, axis=1).sum()
++    denominator = np.sum(centered_est ** 2)
++    s = numerator / denominator
+     
+-    # Translation
+-    t = target_mean - scale * (R @ source_mean.T).T
++    # Step 7: Translation
++    t = centroid_gt - s * R @ centroid_est
+     
+-    return scale, R, t
+-
+-def apply_sim3_transform(camtoworlds, scale, R, t):
+-    """
+-    Applies a Sim(3) transformation to a set of camera poses.
+-    """
+-    aligned_camtoworlds = []
+-    for T in camtoworlds:
+-        # Extract R_cam, t_cam from T
+-        R_cam = T[:3, :3]
+-        t_cam = T[:3, 3]
+-        
+-        # Apply scale, rotation, translation
+-        # New rotation: R @ R_cam
+-        # New translation: scale * (R @ t_cam) + t
+-        new_R = R @ R_cam
+-        new_t = scale * (R @ t_cam) + t
+-        
+-        new_T = np.eye(4)
+-        new_T[:3, :3] = new_R
+-        new_T[:3, 3] = new_t
+-        aligned_camtoworlds.append(new_T)
+-    return np.array(aligned_camtoworlds)
+-
+-def align_poses_procrustes(camtoworlds, points=None):
+-    """
+-    Aligns camera poses using Sim(3) Procrustes analysis.
+-    """
+-    # Step 1: Get camera centers
+-    centers = np.array([T[:3, 3] for T in camtoworlds])
++    # Step 8: Construct Sim(3) matrix
++    S = np.eye(4)
++    S[:3, :3] = s * R
++    S[:3, 3] = t
+     
+-    # Note: Ground truth centers are assumed to be available for alignment.
+-    # In evaluation contexts, 'target' is ground truth, 'source' is estimated.
+-    # Here we assume 'camtoworlds' are estimated and we align them to a reference.
+-    # For the purpose of this method description, we assume the function
+-    # computes the transform relative to a known ground truth set.
+-    
+-    # Let's assume we have 'gt_centers' available for the Procrustes step.
+-    # This is a simplification for the pseudocode structure.
+-    # In reality, this function would take both estimated and ground truth.
+-    
+-    # Placeholder for the actual Procrustes call which requires both sets
+-    # scale, R, t = procrustes_analysis(centers, gt_centers)
+-    
+-    # Step 2: Transform cameras
+-    # camtoworlds = apply_sim3_transform(camtoworlds, scale, R, t)
+-    
+-    # Step 3: If points are provided, transform them
+-    # if points is not None:
+-    #     points = transform_points(points, scale, R, t)
+-    
+-    # Step 4: Compute principal axes transform T2 from points
+-    # if points is not None:
+-    #     T2 = align_principle_axes(points)
+-    #     camtoworlds = apply_transform(camtoworlds, T2)
+-    #     points = apply_transform(points, T2)
+-    
+-    # Step 5: Return
+-    # return camtoworlds, points, T2 @ T1
+-    pass
++    return S
+ ```
+-*Note: The pseudocode above is a structural guide. The actual `procrustes_analysis` and `align_principle_axes` functions require specific implementations of SVD and PCA, which are standard linear algebra operations. The key is the order of operations: Sim(3) on centers, then PCA on points if available.*
+-
+-**Parameters:**
+-- Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-- Procrustes analysis is unreliable when all cameras lie in a line or camera translation contains noise [S1, unofficial].
+-- Incorrect pose estimations can affect the Sim(3) alignment, causing the initialization to fail [S1, unofficial].
+ 
+ ## Subtopics
+ 
++### [Test-time Optimization with Sim(3) Initialization](8565-test-time-optimization-with-sim-3-initialization.md)
++A testing procedure involving Sim(3) alignment initialization followed by additional test-time optimization to adjust test poses for view synthesis. It sets itself apart from sibling methods like [Rigid Parametric Alignment](8609-rigid-parametric-alignment.md) by explicitly decoupling the coarse alignment (via Procrustes analysis on locations) from the fine-grained pose refinement (via gradient-based optimization).
++
+ ### [Rigid Parametric Alignment](8609-rigid-parametric-alignment.md)
+-A differentiable solver that estimates a 3D rigid transformation $T \in SE(3)$ from correspondences by minimizing the reprojection error in a closed form using Singular Value Decomposition (SVD). It differs from Sim(3) by not estimating a scale factor, assuming the scale is known or fixed. Choose this when the scale is accurate and only rotation/translation need adjustment. [Link: [Rigid Parametric Alignment](8609-rigid-parametric-alignment.md)]
++Rigid Parametric Alignment is a differentiable solver that estimates a 3D rigid transformation $T \in SE(3)$ from point correspondences by minimizing the reprojection error in a closed form using Singular Value Decomposition (SVD). It builds on [Sim(3) Alignment via Procrustes Analysis](8526-sim-3-alignment-via-procrustes-analysis.md) by restricting the transformation group to rigid motions (rotation and translation only), thereby removing the scale component. Unlike [Test-time Optimization with Sim(3) Initialization](8565-test-time-optimization-with-sim-3-initialization.md), which uses optimization-based approaches, this method provides an analytical solution.
+ 
+ ### Sim(3) with Rotation Alignment
+-A variant of Sim(3) alignment that adds a virtual point to mitigate Procrustes analysis failures in degenerate cases, using camera rotation during alignment. It is chosen when cameras lie in a line or translation is noisy. However, it causes more translation errors compared to standard Sim(3). [Link: [Sim(3) with Rotation Alignment](8609-sim3-with-rotation-alignment.md)]
+-
+-### Test-time Optimization with Sim(3) Initialization
+-A testing procedure involving Sim(3) alignment initialization followed by additional test-time optimization to adjust test poses for view synthesis. It is used when estimated poses can be aligned precisely to COLMAP poses. Incorrect pose estimations can affect the Sim(3) alignment, causing the initialization to fail. [Link: [Test-time Optimization with Sim(3) Initialization](8609-test-time-optimization.md)]
++A variant of Sim(3) alignment that adds a virtual point to mitigate Procrustes analysis failures in degenerate cases, using camera rotation during alignment [S1, unofficial].
++**Steps:**
++1.  Add a virtual point at coordinates $(0, 0, 1)$ in the camera coordinate system of each image.
++2.  Use the camera parameter to transform this virtual point to the world coordinate.
++3.  Use the camera rotation during the alignment process [S1, unofficial].
++**Pitfalls:** This approach causes more translation errors compared to standard Sim(3) [S1, unofficial].
++**Comparison:** Reduces rotation errors ($\Delta R$) but harms translation accuracy ($\Delta T$) when pose accuracy is high [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Procrustes analysis is $O(N)$ for centering and $O(1)$ for SVD on $3 \times 3$ matrices, making it very fast.
+-- **Memory Complexity:** $O(N)$ to store camera centers and points.
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** Scales linearly with the number of cameras.
+-- **Strengths:** Provides a robust global alignment for pose evaluation and initialization.
+-- **Limitations:** Unreliable in degenerate cases (collinear cameras, noisy translations).
+-- **When to use:** For pose accuracy measurement and test-time optimization initialization in NeRF pipelines.
+-- **When not to use:** When cameras are collinear or translation noise is high; consider [Sim(3) with Rotation Alignment](8609-sim3-with-rotation-alignment.md) instead, accepting higher translation errors.
++**Time and Memory Complexity**
++The complexity is dominated by the SVD of a $3 \times 3$ matrix, which is $O(1)$ per dataset alignment. Memory usage is $O(N)$ to store the camera centers.
++
++**Measured Performance**
++Standard Sim(3) causes fewer translation errors, especially when pose accuracy is high, whereas Sim(3) with rotation reduces rotation errors but increases translation errors [S1, unofficial].
++
++**Strengths and Limitations**
++*   **Strengths:** Provides a robust, closed-form solution for aligning camera trajectories. Effective for pose quality assessment [S1, unofficial].
++*   **Limitations:** Unreliable for degenerate camera configurations (e.g., collinear cameras) or noisy translations [S1, unofficial]. Does not account for rotation alignment in the standard Procrustes formulation, focusing only on translation centers.
++
++**When to Use**
++Use for initial alignment of estimated poses to ground truth for error measurement or as a coarse initialization for test-time optimization in NeRF methods like BARF and L2G-NeRF [S1, unofficial].
++
++**When Not to Use**
++Avoid when cameras are collinear or translation noise is high; consider [Sim(3) with Rotation Alignment](8526-sim-3-alignment-via-procrustes-analysis.md#sim3-with-rotation-alignment) or other variants [S1, unofficial].
+ 
+ ## Background
+-Originated from the BARF [20] and L2G-NeRF [6] papers, this method is used for pose quality assessment alignment. It was derived from the official open-source version of BARF [S1, unofficial]. It is also used in CF-NeRF [41] and DBARF [S3] for evaluating pose accuracy.
++The method originates from the use of Procrustes analysis in computer vision for pose alignment. It was notably employed in the BARF (Bundle-Adjusting NeRF) paper [20] and L2G-NeRF [6] for pose quality assessment and test-time optimization [S1, unofficial]. The specific variant "Sim(3) with Rotation" was introduced in CF-NeRF [41] to address degeneracies in standard Procrustes analysis [S1, unofficial].
+ 
+ ## Sources
+ [S1] CT-NeRF: Incremental Optimizing Neural Radiance Field and Poses with Complex Trajectory, https://doi.org/10.48550/arxiv.2404.13896, fetched 2026-10-26 (unofficial)
+-[S2] meshroomHub/mrGSplat, https://github.com/meshroomHub/mrGSplat, fetched 2026-10-27 (unofficial)
+-[S3] DBARF: Deep Bundle-Adjusting Generalizable Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00011, fetched 2026-10-29+[S2] DBARF: Deep Bundle-Adjusting Generalizable Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00011, fetched 2026-10-29
