@@ -3,140 +3,121 @@
 Also called: Block model rendering, Shader-driven voxel volume
 
 ## Overview
-Voxel volume rendering visualizes a 3D scalar field by projecting light absorption and emission through the volume, revealing internal density variations without requiring surface extraction [S1, unofficial]. It differs from isosurface methods (like Marching Cubes) by preserving continuous volumetric data rather than extracting discrete boundaries, and from point-cloud rendering by operating on a structured grid [S1, S2, unofficial]. It is distinct from analytic volume rendering (e.g., ray marching through signed distance fields) by relying on pre-computed or interpolated discrete samples stored in a texture [S2, unofficial].
+Voxel volume rendering visualizes a 3D scalar field by projecting light absorption and emission through a discrete voxel grid, revealing internal density variations without surface extraction [S1, S2, unofficial]. It differs from isosurface methods (like [Marching Cubes](link)) by rendering the entire volume data rather than a single thresholded boundary, and from analytic methods by operating on pre-computed discrete samples [S1, S2, unofficial]. The method supports two distinct visual styles: "block mode," which snaps raymarching to voxel centers for a crisp, discrete appearance, and "smooth compositing," which interpolates values for a continuous look [S2, unofficial].
 
 ## How it works
-**Inputs:**
-1.  **Voxel Grid:** A 3D array of scalar values (e.g., density, concentration). In implementation, this is often a `Float32Array` uploaded as a `Data3DTexture` [S2, unofficial].
-2.  **Transfer Function:** A mapping from scalar values to color and opacity. This can be a preset (e.g., "Viridis") or a custom two-stop function defined by display min/max and thresholds [S1, S2, unofficial].
-3.  **Camera Parameters:** Position, focal point, and view-up vector [S1, unofficial].
-
-**Outputs:**
-*   A 2D image where pixel intensity represents the accumulated light through the volume [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar field represented as a voxel grid (e.g., `Float32Array` of size $N_x \times N_y \times N_z$) [S2, unofficial].
+*   **Input:** Camera parameters (position, focal point, view-up vector) [S1, unofficial].
+*   **Input:** Transfer function parameters (display min/max, opacity, threshold, color gradient) [S2, unofficial].
+*   **Output:** A 2D rendered image (e.g., PNG) [S1, unofficial].
 
 **Data Structures:**
-*   **Voxel Grid:** A 1D array of size $N_x \times N_y \times N_z$. For a $64^3$ grid, this is approximately 1 MB; for $256^3$, approximately 64 MB [S2, unofficial].
-*   **Texture:** The grid is uploaded to GPU memory as a 3D texture (e.g., `Data3DTexture` in WebGL/Three.js) [S2, unofficial].
+1.  **Voxel Grid:** A 1D array of 32-bit floats representing the scalar value at each voxel. Memory usage scales as $N^3 \times 4$ bytes (e.g., $64^3 \approx 1$ MB) [S2, unofficial].
+2.  **3D Texture:** The voxel grid is uploaded to GPU memory as a `Data3DTexture` (or equivalent 3D texture object) [S2, unofficial].
+3.  **Transfer Function:** A mapping from scalar value to color and opacity. In the shader-driven approach, this is often a simple two-stop linear interpolation or threshold-based cutoff [S2, unofficial].
 
 **Steps:**
-1.  **Data Preparation:** Load the 3D dataset and associate the scalar array with the rendering proxy [S1, unofficial]. If generating from sparse samples, interpolate onto a regular grid (e.g., using Inverse Distance Weighting) [S2, unofficial].
-2.  **Texture Upload:** Upload the voxel grid to the GPU as a 3D texture [S2, unofficial].
-3.  **Transfer Function Setup:** Apply a color and opacity mapping. This can be a preset or a user-defined range (displayMin/displayMax) [S1, S2, unofficial].
-4.  **Ray Marching:** Cast rays from the camera through the volume. For each ray step:
-    *   Sample the 3D texture at the current ray position [S2, unofficial].
-    *   Check for valid data (skip sentinel values like $< -1e29$) [S2, unofficial].
-    *   Apply the transfer function to get color ($C$) and opacity ($\alpha$) [S2, unofficial].
-    *   Perform front-to-back compositing:
-        $$ C_{out} = C_{in} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{in}) $$
-        $$ \alpha_{out} = \alpha_{in} + \alpha_{sample} \cdot (1 - \alpha_{in}) $$
-5.  **Rendering Mode Selection:**
-    *   **Smooth Compositing:** Standard ray marching with linear interpolation between voxel centers [S2, unofficial].
-    *   **Block Mode:** Snap ray steps to voxel centers for a crisp, blocky appearance [S2, unofficial].
-6.  **Display Tweaks:** Adjust opacity, threshold, and color gradient. These are uniform updates and do not require re-uploading the texture [S2, unofficial].
+1.  **Data Preparation:** Evaluate the scalar field onto a regular grid. If using procedural generation (e.g., IDW interpolation), compute values for each voxel center $(x_i, y_j, z_k)$ [S2, unofficial].
+2.  **Texture Upload:** Upload the scalar array to the GPU as a 3D texture. The texture coordinates map linearly from the grid indices to the $[0, 1]$ range [S2, unofficial].
+3.  **Geometry Setup:** Create a unit cube (or bounding box of the volume) to serve as the rendering primitive [S2, unofficial].
+4.  **Ray Marching:** For each pixel in the output image, cast a ray through the volume. The ray is parameterized by $t$, where $P(t) = O + tD$ ($O$ is origin, $D$ is direction) [G].
+5.  **Sampling:** For each step along the ray:
+    *   Determine the 3D texture coordinate corresponding to the ray's current position.
+    *   Sample the texture. If "block mode" is enabled, snap the coordinate to the nearest voxel center (nearest-neighbor filtering). If "smooth" mode is enabled, use trilinear interpolation [S2, unofficial].
+    *   Check for sentinel values (e.g., $< -1e29$) indicating empty space or nodata. Skip these voxels [S2, unofficial].
+6.  **Compositing:** Apply front-to-back compositing. For each step $i$ with sample value $v_i$, compute color $C_i$ and opacity $\alpha_i$ using the transfer function. Update the accumulated color $C_{acc}$ and opacity $\alpha_{acc}$:
+    $$
+    \alpha_i = \alpha_{global} \cdot \text{opacity}(v_i)
+    $$
+    $$
+    C_{acc} = C_{acc} + C_i \cdot \alpha_i \cdot (1 - \alpha_{acc})
+    $$
+    $$
+    \alpha_{acc} = \alpha_{acc} + \alpha_i \cdot (1 - \alpha_{acc})
+    $$
+    Stop if $\alpha_{acc}$ exceeds a threshold (e.g., 1.0) or the ray exits the volume [S2, unofficial].
+7.  **Display Parameter Application:** Apply global opacity and threshold cutoffs. Voxels with scalar values below the threshold are treated as transparent [S2, unofficial].
 
-**Pseudocode:**
+**Pseudocode (Shader Logic):**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Assuming a WebGL/Three.js-like environment with a 3D texture 'volumeTexture'
-# and a fragment shader performing the compositing.
-
-def render_voxel_volume(camera, volume_texture, transfer_function, dims, block_mode=False):
-    """
-    Renders a voxel volume using ray marching.
+# Pseudocode for the fragment shader logic
+def ray_march_volume(ray_origin, ray_direction, texture_3d, params):
+    # Initialize accumulators
+    acc_color = [0.0, 0.0, 0.0, 0.0]
+    acc_alpha = 0.0
     
-    Args:
-        camera: Camera object with position, focal point, and view-up.
-        volume_texture: 3D texture containing the scalar field.
-        transfer_function: Function mapping scalar value -> (color, opacity).
-        dims: Tuple (width, height, depth) of the voxel grid.
-        block_mode: Boolean, if True, snap ray steps to voxel centers.
-    """
-    # 1. Set up camera
-    set_camera_position(camera.position)
-    set_camera_focal_point(camera.focal_point)
-    set_camera_view_up(camera.view_up)
+    # Ray parameters
+    t_min = 0.0
+    t_max = 1.0 # Assuming unit cube or normalized bounds
+    step_size = 1.0 / params.ray_steps # Fixed step size for simplicity
     
-    # 2. Setup rendering context
-    set_texture_3d(volume_texture)
-    set_transfer_function(transfer_function)
-    
-    # 3. Ray Marching Loop (conceptual, executed in shader)
-    for each pixel (x, y) in image:
-        ray_origin = camera.position
-        ray_direction = compute_ray_direction(x, y, camera)
+    t = t_min
+    while t < t_max and acc_alpha < 0.99:
+        # Current position in texture space [0,1]
+        pos = ray_origin + ray_direction * t
+        tex_coord = map_to_texture_space(pos)
         
-        accumulated_color = (0, 0, 0, 0)
-        accumulated_alpha = 0.0
-        
-        # Determine step size and range based on dims and camera
-        step_size = compute_step_size(dims, ray_direction)
-        t_min, t_max = compute_ray_bounds(ray_origin, ray_direction, dims)
-        
-        t = t_min
-        while t < t_max:
-            # Sample position in voxel space
-            sample_pos = ray_origin + ray_direction * t
+        # Sample voxel value
+        if params.block_mode:
+            # Snap to nearest voxel center
+            voxel_val = texture_3d_sample_nearest(tex_coord)
+        else:
+            # Trilinear interpolation
+            voxel_val = texture_3d_sample_trilinear(tex_coord)
             
-            if block_mode:
-                # Snap to voxel center
-                sample_pos = snap_to_voxel_center(sample_pos, dims)
-            
-            # Sample scalar value from texture
-            scalar_value = sample_3d_texture(volume_texture, sample_pos)
-            
-            # Skip invalid data (sentinel value)
-            if scalar_value < -1e29:
-                t += step_size
-                continue
-            
-            # Apply transfer function
-            color, opacity = transfer_function(scalar_value)
-            
-            # Front-to-back compositing
-            alpha_contribution = opacity * (1.0 - accumulated_alpha)
-            accumulated_color = accumulated_color + color * alpha_contribution
-            accumulated_alpha = accumulated_alpha + opacity * (1.0 - accumulated_alpha)
-            
-            # Early exit if fully opaque
-            if accumulated_alpha >= 1.0:
-                break
-                
+        # Check for nodata sentinel
+        if voxel_val < -1e29:
             t += step_size
-        
-        # Apply global opacity and threshold
-        final_color = accumulated_color * global_opacity
-        if accumulated_alpha < threshold:
-            final_color = (0, 0, 0, 0)
+            continue
             
-        set_pixel_color(x, y, final_color)
-
-    # 4. Render and save
-    render()
-    save_screenshot(output_path, image_resolution=(1600, 1200))
+        # Apply threshold
+        if voxel_val < params.threshold:
+            t += step_size
+            continue
+            
+        # Transfer function: map scalar to color and opacity
+        # Simple two-stop linear mapping between displayMin and displayMax
+        normalized_val = clamp((voxel_val - params.display_min) / (params.display_max - params.display_min), 0.0, 1.0)
+        color = lerp(params.color_start, params.color_end, normalized_val)
+        opacity = params.opacity * normalized_val # Simplified opacity model
+        
+        # Front-to-back compositing
+        alpha_contribution = opacity * (1.0 - acc_alpha)
+        acc_color = acc_color + color * alpha_contribution
+        acc_alpha = acc_alpha + alpha_contribution
+        
+        t += step_size
+        
+    return acc_color
 ```
 
 **Parameters:**
-*   **dims:** Voxel grid dimensions. Typical: $[64, 64, 64]$ [S2, unofficial].
-*   **displayMin/Max:** Range for the transfer function. Typical: $0$ to $500$ [S2, unofficial].
-*   **opacity:** Global volume opacity. Typical: $0.4$ [S2, unofficial].
-*   **threshold:** Alpha cutoff for rendering. Typical: $0.1$ [S2, unofficial].
-*   **ImageResolution:** Output image size. Typical: $[1600, 1200]$ for production, $[1000, 800]$ for animation [S1, unofficial].
+*   `dims`: Voxel grid dimensions $(N_x, N_y, N_z)$. Typical: $[64, 64, 64]$ [S2, unofficial].
+*   `displayMin/Max`: Range of scalar values mapped to the color transfer function. Typical: $[0, 500]$ [S2, unofficial].
+*   `opacity`: Global volume opacity. Typical: $0.4$ [S2, unofficial].
+*   `threshold`: Minimum scalar value to render (alpha cutoff). Typical: $0.1$ [S2, unofficial].
+*   `ImageResolution`: Output image size. Typical: $[1600, 1200]$ [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Sentinel Values:** Invalid data points (e.g., $< -1e29$) must be skipped to prevent artifacts [S2, unofficial].
-*   **Memory Usage:** High-resolution grids consume significant memory ($256^3 \approx 64$ MB) [S2, unofficial].
-*   **Uniform Updates:** Display parameters (min/max, opacity, threshold) are uniform updates and do not require texture re-upload, allowing real-time tweaking [S2, unofficial].
+## Subtopics
+
+### [Simple Shader (3D Texture Mapping)](12431-simple-shader-3d-texture-mapping.md)
+Performs basic volume rendering by mapping the volume data to a 3D texture and rendering polygonal geometry generated from the volume's slicing. It differs from advanced shading methods by relying solely on raw interpolated texel values without computing surface normals. Choose this for foundational, low-complexity rendering.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of ray steps and pixels. Complexity is $O(P \cdot S)$, where $P$ is the number of pixels and $S$ is the number of steps per ray [G].
-*   **Memory Complexity:** Linear with respect to the number of voxels, $O(N_x \cdot N_y \cdot N_z)$ [S2, unofficial].
-*   **Performance:** Real-time rendering is possible with lower resolutions (e.g., $64^3$) and optimized ray marching [S2, unofficial]. Higher resolutions may require down-sampling or hierarchical structures.
-*   **Strengths:** Preserves internal structure; supports real-time parameter tweaking; suitable for sparse data interpolated onto a grid [S2, unofficial].
-*   **Limitations:** Memory intensive for high-resolution volumes; block mode sacrifices visual smoothness [S2, unofficial].
+*   **Time Complexity:** $O(P \cdot S)$, where $P$ is the number of pixels and $S$ is the number of ray steps per pixel. Performance is heavily dependent on the number of steps and the efficiency of texture sampling [S2, unofficial].
+*   **Memory Complexity:** $O(N_x N_y N_z)$ for the voxel grid storage [S2, unofficial].
+*   **Performance:** A $64^3$ grid uses ~1 MB of memory; $256^3$ uses ~64 MB [S2, unofficial]. Real-time tweaking of display parameters (opacity, threshold) is possible without re-uploading the texture, as these are uniform updates in the shader [S2, unofficial].
+*   **Strengths:** Direct visualization of internal structures; supports real-time parameter adjustment; simple implementation in modern graphics APIs (e.g., Three.js) [S2, unofficial].
+*   **Limitations:** Block mode can appear aliased; smooth mode requires interpolation which may blur sharp features; performance degrades with high resolution or many ray steps [S2, unofficial].
+*   **When to use:** When internal density variations are important and surface extraction is not desired [S1, unofficial]. When real-time parameter tweaking is needed [S2, unofficial].
+*   **When not to use:** When high-fidelity surface geometry is required (use isosurfaces instead) [S1, unofficial]. When memory is extremely constrained and the volume is very large [S2, unofficial].
 
 ## Background
-Voxel volume rendering is a standard technique in scientific visualization, often implemented in libraries like VTK and ParaView [S1, unofficial]. It is used to visualize scalar fields such as concentration, density, or interpolated geological data [S1, S2, unofficial]. The method has been adapted for web-based rendering using WebGL and libraries like Three.js [S2, unofficial].
+Voxel volume rendering is a standard technique in scientific visualization, often implemented in tools like ParaView and VTK [S1, unofficial]. It allows for the visualization of complex 3D scalar fields, such as concentration data or velocity fields, by leveraging 3D textures and ray marching in shaders [S2, unofficial]. The method has been adapted for various domains, including geological modeling (e.g., drill-hole sample interpolation) and fluid dynamics [S1, S2, unofficial].
 
 ## Sources
 [S1] cjcamp16/sciviz-paraview, https://github.com/cjcamp16/sciviz-paraview, fetched 2026-10-26 (unofficial)

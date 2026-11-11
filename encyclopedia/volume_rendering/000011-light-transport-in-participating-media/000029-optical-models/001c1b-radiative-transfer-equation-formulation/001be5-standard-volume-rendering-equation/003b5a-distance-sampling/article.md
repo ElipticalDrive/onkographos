@@ -3,24 +3,41 @@
 Also called: Distance Sampling for Free Paths, Inverse CDF sampling for transmittance, Monte Carlo with Distance Sampling (MCDS)
 
 ## Overview
-Distance sampling is a Monte Carlo technique used to estimate the Volume Rendering Equation (VRE) by importance sampling the non-recursive terms, specifically the medium extinction transmittance, to determine the free flight distance (distance to the next collision) [S2, unofficial]. It is a stochastic integrator that distributes samples according to transmittance along the current path segment, ignoring the overall shape of the medium [S1]. Unlike [Whole Volume Distance Sampling](9002-whole-volume-distance-sampling.md), which accounts for medium geometry via histograms, distance sampling assumes a homogeneous medium where the extinction coefficient is constant, making it simpler but less accurate for complex occluders [S1].
+Distance sampling is a Monte Carlo technique used to estimate the Volume Rendering Equation (VRE) by importance sampling the non-recursive terms, specifically the medium extinction transmittance, to determine the free flight distance (distance to the next collision) [S2, unofficial]. It addresses the problem of stochastically constructing photon trajectories in participating media by distributing samples proportional to the transmittance along the current path segment [S1]. Unlike [Whole Volume Distance Sampling](9002-whole-volume-distance-sampling.md), which accounts for the overall shape of the medium and reduces variance in occluded areas, standard distance sampling ignores the global geometry, leading to higher variance in complex scenes but offering simplicity and good performance at very low sample counts [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A starting position $x_0$, a direction $\omega$, and the homogeneous medium extinction coefficient $\mu_t$ (constant throughout the volume) [S2, unofficial].
-*   **Output:** A sampled free path distance $t$ representing the distance to the next interaction point [S2, unofficial].
+- Input: Homogeneous medium extinction coefficient $\mu_t$ (constant throughout the volume) [S2, unofficial].
+- Input: Uniform random number $\xi \in [0, 1]$ [S2, unofficial].
+- Output: Sampled free path distance $t$ [S2, unofficial].
 
 **Data Structures:**
-No complex data structures are required for the basic homogeneous case. The method relies on a uniform random number generator.
+No complex data structures are required for the basic homogeneous case. The method relies on scalar arithmetic.
 
 **Steps:**
-1.  Generate a uniform random number $\xi$ in the interval $[0, 1]$ [S2, unofficial].
-2.  Compute the sampled distance $t$ using the inverse cumulative distribution function (CDF) of the normalized transmittance [S2, unofficial]. The probability density function (PDF) for the free path distance in a homogeneous medium is defined as:
-    $$ p(t) = \mu_t e^{-\mu_t t} = \mu_t T(t) $$
-    where $T(t) = e^{-\mu_t t}$ is the transmittance [S2, unofficial].
-3.  The inverse CDF yields the closed-form solution for $t$:
-    $$ t = \frac{-\ln(1-\xi)}{\mu_t} $$
-    [S2, unofficial]
+1. Generate a uniform random number $\xi$ in the interval $[0, 1]$ [S2, unofficial].
+2. Define the probability density function (PDF) for the free path distance $t$ in a homogeneous medium as:
+   $$p(t) = \mu_t e^{-\mu_t t} = \mu_t T(t)$$
+   where $T(t) = e^{-\mu_t t}$ is the transmittance [S2, unofficial].
+3. Compute the Cumulative Distribution Function (CDF) $P(t)$ by integrating the PDF from $0$ to $t$:
+   $$P(t) = \int_0^t \mu_t e^{-\mu_t t'} dt' = 1 - e^{-\mu_t t}$$
+4. Set the CDF equal to the random number $\xi$ and solve for $t$:
+   $$\xi = 1 - e^{-\mu_t t}$$
+5. Rearrange to find the inverse CDF (ICDF) to sample $t$:
+   $$e^{-\mu_t t} = 1 - \xi$$
+   $$-\mu_t t = \ln(1 - \xi)$$
+   $$t = \frac{-\ln(1 - \xi)}{\mu_t}$$
+   Since $\xi$ is uniformly distributed in $[0, 1]$, $1 - \xi$ is also uniformly distributed in $[0, 1]$. Thus, the formula is often implemented as:
+   $$t = \frac{-\ln(\xi)}{\mu_t}$$
+   [S2, unofficial].
+
+**Parameters:**
+- $\mu_t$: The homogeneous medium extinction coefficient. It is constant throughout the volume [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Heterogeneous Media:** This method assumes $\mu_t$ is constant. For heterogeneous media where $\mu_t$ varies with position, the transmittance is not analytically invertible, and this method cannot be applied directly [S2, unofficial]. Alternative strategies like Rejection Sampling or Closed-form Tracking (if applicable) are required [S2, unofficial][S3].
+- **Precision:** When $\xi$ is very close to 0, $\ln(\xi)$ approaches $-\infty$, potentially causing overflow or large distances. In practice, $\xi$ is often clamped to a small epsilon or generated from a source that avoids exact zero [G].
+- **Variance in Complex Scenes:** Because distance sampling distributes samples proportional to the distance to the observer (along the ray segment) rather than the full transmittance integrand of the entire scene, it does not perfectly match the transmittance integrand in occluded areas, leading to higher variance compared to Whole Volume Distance Sampling [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -29,86 +46,54 @@ No complex data structures are required for the basic homogeneous case. The meth
 import math
 import random
 
-def sample_distance_homogeneous(x0, omega, mu_t):
+def sample_distance_homogeneous(mu_t: float) -> float:
     """
-    Samples the free path distance in a homogeneous medium.
+    Samples the free path distance in a homogeneous medium with extinction coefficient mu_t.
     
     Args:
-        x0: Starting point (not used in homogeneous calculation, but part of signature).
-        omega: Direction vector (not used in homogeneous calculation, but part of signature).
         mu_t: Homogeneous medium extinction coefficient (constant).
         
     Returns:
-        t: Sampled distance to the next collision.
+        Sampled distance t to the next collision.
     """
-    # Step 1: Generate uniform random number in [0, 1]
+    # Generate uniform random number in [0, 1]
     xi = random.random()
     
-    # Step 2 & 3: Inverse CDF sampling
-    # t = -ln(1 - xi) / mu_t
-    # Note: Since xi is uniform in [0,1), 1-xi is also uniform in (0,1].
-    # Using -ln(xi) is statistically equivalent and avoids subtraction.
-    if mu_t == 0:
-        return float('inf') # No extinction, infinite free path
+    # Avoid log(0) by ensuring xi is not exactly 0, though random.random() 
+    # typically returns [0.0, 1.0). If 0 is possible, clamp or regenerate.
+    if xi == 0.0:
+        xi = 1e-9
         
-    t = -math.log(1.0 - xi) / mu_t
+    # Inverse CDF sampling: t = -ln(xi) / mu_t
+    # Note: Using xi directly is equivalent to using 1-xi due to symmetry of uniform distribution
+    t = -math.log(xi) / mu_t
     
     return t
 ```
 
-**Parameters:**
-*   $\mu_t$: Homogeneous medium extinction coefficient. It is constant throughout the volume [S2, unofficial].
-*   $\xi$: Uniform random number in $[0, 1]$ [S2, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Heterogeneous Media:** This method is only valid for homogeneous media where $\mu_t$ is constant. For heterogeneous media, $\mu_t$ varies with position, making the transmittance non-invertible in closed form, requiring different strategies such as rejection sampling or whole-volume techniques [S2, unofficial].
-*   **Zero Extinction:** If $\mu_t = 0$, the transmittance is 1 everywhere, and the free path distance is infinite [G].
-
 ## Subtopics
 
+### [Whole Volume Distance Sampling](9002-whole-volume-distance-sampling.md)
+Whole Volume Distance Sampling (WVDS) is a Monte Carlo importance sampling strategy for estimating the VRE in participating media. It addresses the limitation of standard distance sampling, which only accounts for transmittance along the current path segment, by distributing samples proportional to the transmittance integrand across the entire camera line segment geometry. This approach reduces variance in occluded areas compared to ray marching and converges in a single sample in unoccluded sections. Choose this when variance reduction in complex, occluded scenes is critical and computational cost of global statistics is acceptable. See [Whole Volume Distance Sampling](9002-whole-volume-distance-sampling.md).
+
+### [Closed-form Tracking](9223-closed-form-tracking.md)
+Closed-form Tracking is a Monte Carlo technique for sampling the free-flight distance in participating media where the extinction coefficient $\mu_t$ follows a simple analytical form (constant, polynomial, or exponential). It solves the problem of determining the distance to the next collision by applying inverse transform sampling directly to the transmittance function. It is distinguished from [Whole Volume Distance Sampling](9002-whole-volume-distance-sampling.md) by its reliance on local analytical invertibility of the optical depth integral rather than global volume statistics, allowing for exact sampling without rejection steps when the cumulative distribution function (CDF) is analytically invertible. Choose this when the medium's extinction coefficient has a known, invertible analytical form. See [Closed-form Tracking](9223-closed-form-tracking.md).
+
 ### Rejection Sampling for Arbitrary Media
-An unbiased Monte Carlo method to sample the distance to the next interaction point in heterogeneous participating media, avoiding the bias of classic ray marching [S3]. It uses a constant extinction coefficient $\bar{\sigma}_t$ such that $\bar{\sigma}_t \ge \sigma_t(x)$ for all $x$ in the volume $V$ as an upper bound for rejection sampling [S3]. The target density for distance $t$ is $p(t) = \sigma_t(x_0 + t\omega)e^{-K(t)}$, where $K(t) = \int_0^t \sigma_t(x_0 + t'\omega) dt'$ [S3]. Choosing a larger $\bar{\sigma}_t$ than the true supremum increases the number of iterations in the rejection loop but remains unbiased [S3].
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def sample_distance_rejection(x0, omega, sigma_t_func, sigma_t_max):
-    """
-    Unbiased distance sampling for arbitrary (heterogeneous) media using rejection sampling.
-    
-    Args:
-        x0: Starting point.
-        omega: Direction vector.
-        sigma_t_func: Function returning local extinction coefficient sigma_t(x).
-        sigma_t_max: Constant upper bound such that sigma_t_max >= sigma_t(x) for all x.
-        
-    Returns:
-        t: Sampled distance to the next interaction point.
-    """
-    while True:
-        # Sample candidate distance from exponential distribution with rate sigma_t_max
-        t = -math.log(random.random()) / sigma_t_max
-        
-        # Evaluate local extinction at the candidate point
-        local_sigma_t = sigma_t_func(x0 + t * omega)
-        
-        # Rejection condition
-        # Accept if local_sigma_t / sigma_t_max >= random number
-        if local_sigma_t / sigma_t_max >= random.random():
-            return t
-```
+Rejection Sampling is an unbiased Monte Carlo method to sample the distance to the next interaction point in heterogeneous participating media, avoiding the bias of classic ray marching [S3]. The target density for distance $t$ is $p(t) = \sigma_t(x_0 + t\omega)e^{-K(t)}$, where $K(t) = \int_0^t \sigma_t(x_0 + t'\omega) dt'$ [S3]. It uses a constant extinction coefficient $\sigma_t$ such that $\sigma_t \ge \sigma_t(x)$ for all $x$ in the volume $V$ as an upper bound for rejection sampling [S3]. Choose this when the medium is heterogeneous and no closed-form inverse CDF is available. Pitfall: Choosing a larger $\sigma_t$ than the true supremum increases the number of iterations in the rejection loop but remains unbiased [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ for homogeneous media, as it involves a single logarithm and division [S2, unofficial]. For rejection sampling in heterogeneous media, the complexity is probabilistic, depending on the tightness of the bound $\bar{\sigma}_t$ [S3].
-*   **Memory Complexity:** $O(1)$, requiring no storage of medium data structures beyond the constant $\mu_t$ or the bound $\bar{\sigma}_t$ [S2, unofficial][S3].
-*   **Performance:** Distance sampling performs well at very low sample counts but has a lower convergence rate at higher sample counts compared to methods that account for geometry, such as [Whole Volume Distance Sampling](9002-whole-volume-distance-sampling.md) [S1]. It fails to distribute samples proportional to transmittance in complex occluders, leading to higher variance than MCWVDS [S1].
-*   **Strengths:** Simple to implement; unbiased for homogeneous media; efficient for simple geometries [S2, unofficial].
-*   **Limitations:** Inaccurate for heterogeneous media or complex occluders; ignores medium geometry [S1][S2, unofficial].
-*   **When to use:** Homogeneous media with simple geometry or as a baseline component in null-scattering methods [S2, unofficial].
-*   **When not to use:** Heterogeneous media or scenes with complex occlusion where variance reduction is critical [S1][S2, unofficial].
+- **Time Complexity:** $O(1)$ per sample for homogeneous media [S2, unofficial]. For heterogeneous media using rejection sampling, the expected number of iterations depends on the ratio of the bounding extinction coefficient to the actual extinction, which can be high if the bound is loose [S3].
+- **Memory Complexity:** $O(1)$ for homogeneous media. Rejection sampling requires access to the medium's extinction coefficient at arbitrary points, implying $O(1)$ access to the medium data structure [S3].
+- **Measured Performance:** On an RTX 8000 GPU, at 1024 samples per pixel (spp), Ray Marching (RM) took 11.0 ms for a room scene, while MCWVDS (Whole Volume) was faster (exact time not fully listed in snippet, but implied to be better) [S1]. Distance sampling performs good at very low sample counts but has a lower convergence rate at higher sample counts due to simple geometry assumptions [S1].
+- **Scaling:** Performance degrades in complex, occluded scenes compared to Whole Volume Distance Sampling because it does not account for global occlusion [S1].
+- **Strengths:** Simple to implement; unbiased for homogeneous media; good performance at low sample counts [S1][S2, unofficial].
+- **Limitations:** High variance in occluded or heterogeneous scenes; not applicable to heterogeneous media without modification [S1][S2, unofficial].
+- **When to use:** Homogeneous media; low sample count requirements; simple scenes.
+- **When not to use:** Heterogeneous media; complex occluded scenes requiring low variance; high sample count requirements where convergence rate is critical [S1][S2, unofficial].
 
 ## Background
-Distance sampling originates from the statistical description of light transport in participating media, where interaction events are described by coefficients $\mu$ representing the probability density of events per unit distance [S2, unofficial]. It is a standard approach for solving the VRE via Monte Carlo integration by importance sampling the non-recursive terms [S2, unofficial]. The technique is often referred to as "closed form tracking" when applied to homogeneous media [S2, unofficial]. It is a foundational method in path tracing and null-scattering formulations for participating media [S2, unofficial][S3].
+Distance sampling originates from Monte Carlo methods for solving the Radiative Transfer Equation (RTE) in participating media. It is a standard approach for importance sampling the non-recursive terms of the VRE, specifically the medium extinction transmittance [S2, unofficial]. The technique relies on the statistical independence of atoms in the medium and the definition of extinction coefficients $\mu_t$ [S2, unofficial]. It was implemented and compared against ray marching and Whole Volume Distance Sampling in studies of collimated whole volume light scattering [S1]. The method is foundational in stochastic construction of photon trajectories [S2, unofficial].
 
 ## Sources
 [S1] Collimated Whole Volume Light Scattering in Homogeneous Finite Media, https://doi.org/10.1109/tvcg.2021.3135764, fetched 2026-10-27

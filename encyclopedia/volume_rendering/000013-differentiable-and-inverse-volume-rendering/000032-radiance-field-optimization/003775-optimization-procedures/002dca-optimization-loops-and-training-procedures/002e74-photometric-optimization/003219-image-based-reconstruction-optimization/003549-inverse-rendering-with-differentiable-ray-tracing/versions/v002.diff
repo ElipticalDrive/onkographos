@@ -1,0 +1,140 @@
+--- v001.md
++++ v002.md
+@@ -4,20 +4,15 @@
+ 
+ ## Overview
+-Inverse rendering recovers latent scene parameters—such as camera pose, light placement, and surface color—that produce a given target photograph by formulating the problem as an unconstrained optimization task using gradients from the rendering pipeline [S1]. This method specifically estimates the 3D position and intensity of a punctual light source by minimizing the photometric error between a rendered image and an observed RGBD image, using a completely differentiable renderer based on the Blinn-Phong model with cast shadows [S2, unofficial]. Unlike methods that use discrete candidate light sources or explicit shadow detection, this approach performs continuous optimization of light position and renders a shadow map at each iteration [S2, unofficial]. Unlike Neverova et al. [22], this method does not rely on explicit separation between specular and diffuse components, nor does it segment images or extract surface properties [S2, unofficial].
++Inverse rendering recovers latent scene parameters—such as camera pose, light placement, and surface color—that produce a given target photograph by formulating the problem as an unconstrained optimization task using gradients from the rendering pipeline [S1]. This method specifically estimates the 3D position and intensity of a punctual light source by minimizing the photometric error between a rendered image and an observed RGBD image, using a completely differentiable renderer based on the Blinn-Phong model with cast shadows [S2, unofficial]. Unlike methods that use discrete candidate light sources or explicit shadow detection, this approach performs continuous optimization of light position and renders a shadow map at each iteration [S2, unofficial]. Unlike Neverova et al. [22], this method does not rely on explicit separation between specular and diffuse components, nor does it segment images or extract surface properties [S2, unofficial]. Builds on [Image-based reconstruction optimization](6677-image-based-reconstruction-optimization.md).
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:**
+-    *   Scene geometry $G = (X, N, C)$, where $X$ is a 3D point cloud, $N$ is the surface normals, and $C$ is the camera pose [S2, unofficial].
+-    *   Material properties $M = (k_d, k_s, \alpha)$, where $k_d$ is diffuse reflectance, $k_s$ is specular reflectance, and $\alpha$ is shininess [S2, unofficial].
+-    *   Observed target image $I^*$ [S2, unofficial].
+-    *   Ambient illumination $L_a$ [S2, unofficial].
+-*   **Outputs:**
+-    *   Optimized light parameters $L = (L_i, I_{L,i})$, where $L_i$ is the 3D location of the light and $I_{L,i}$ is its scalar intensity [S2, unofficial].
++*   **Inputs:** Scene geometry $G = (X, N, C)$, where $X$ is a 3D point cloud, $N$ is the surface normals, and $C$ is the camera pose [S2, unofficial]. Material properties $M = (k_d, k_s, \alpha)$, where $k_d$ is diffuse reflectance, $k_s$ is specular reflectance, and $\alpha$ is shininess [S2, unofficial]. Observed target image $I^*$ [S2, unofficial]. Ambient illumination $L_a$ [S2, unofficial].
++*   **Outputs:** Optimized light parameters $L = (L_i, I_{L,i})$, where $L_i$ is the 3D location of the light and $I_{L,i}$ is its scalar intensity [S2, unofficial].
+ 
+ **Data Structures**
+-*   **Point Cloud $X$:** Array of 3D coordinates $(x, y, z)$.
+-*   **Normals $N$:** Array of unit vectors corresponding to points in $X$.
+-*   **Light Parameters:** A vector containing the 3D position of the light source and its intensity.
++*   **Point Cloud $X$:** Array of 3D coordinates $(x, y, z)$ [S2, unofficial].
++*   **Normals $N$:** Array of unit vectors corresponding to points in $X$ [S2, unofficial].
++*   **Light Parameters:** A vector containing the 3D position of the light source and its intensity [S2, unofficial].
+ 
+ **Rendering Model (Blinn-Phong with Shadows)**
+@@ -31,5 +26,5 @@
+ 2.  **Diffuse Term:**
+     $$ I_d = k_d \times S_i \times (L_i - X)^t \times N \times I_{L,i} $$
+-    where $S_i$ is the shadow term (1 if illuminated, 0 otherwise), $L_i$ is the light position, $X$ is the surface point, $N$ is the normal, and $I_{L,i}$ is the light intensity [S2, unofficial].
++    where $S_i$ is the shadow term, $L_i$ is the light position, $X$ is the surface point, $N$ is the normal, and $I_{L,i}$ is the light intensity [S2, unofficial].
+ 
+ 3.  **Specular Term:**
+@@ -38,5 +33,5 @@
+ 
+ 4.  **Shadow Term $S_i$:**
+-    $S_i$ equals 1 when the light illuminates the point $X$ and 0 otherwise. This is determined by casting a ray from $X$ to $L_i$ and checking for occlusion [S2, unofficial].
++    $S_i$ equals 1 when the light illuminates the point $X$ and 0 otherwise. The shadow term is computed by rendering a shadow map at each iteration given the current illumination estimate [S2, unofficial].
+ 
+ **Optimization Objective**
+@@ -56,59 +51,52 @@
+ **Pseudocode**
+ ```python
+-def inverse_rendering_optimization(G, M, I_star, L_a, theta_0, N_max, epsilon_loss, optimizer_config):
+-    """
+-    G: Scene geometry (X, N, C)
+-    M: Material properties (k_d, k_s, alpha)
+-    I_star: Observed target image
+-    L_a: Ambient illumination
+-    theta_0: Initial scene parameters (including light position and intensity)
+-    N_max: Maximum iterations
+-    epsilon_loss: Loss tolerance for convergence
+-    optimizer_config: Hyperparameters for Adam (eta, beta_1, beta_2, epsilon)
+-    """
++def inverse_rendering_optimization(G, M, I_star, L_a, theta_0, N_max, epsilon_loss, eta, beta_1, beta_2, epsilon_adam):
++    # G: Scene geometry (X, N, C)
++    # M: Material properties (k_d, k_s, alpha)
++    # I_star: Observed target image
++    # L_a: Ambient illumination
++    # theta_0: Initial scene parameters (including light position and intensity)
++    # N_max: Maximum iterations
++    # epsilon_loss: Loss tolerance for convergence
++    # eta, beta_1, beta_2, epsilon_adam: Adam optimizer hyperparameters
+     theta = theta_0
+     converged = False
+     iter_count = 0
+-    
+-    # Initialize Adam state
+-    m = zeros_like(theta)
+-    v = zeros_like(theta)
++    m = [0.0] * len(theta)  # Biased first moment estimates
++    v = [0.0] * len(theta)  # Biased second moment estimates
+     t = 0
+-    
++
+     while not converged and iter_count < N_max:
+-        # 1. Forward Pass: Render image
+-        I_rendered = render(G, M, L_a, theta)
+-        
+-        # 2. Compute Loss
+-        # N = H * W * C
+-        loss = mean((I_rendered - I_star) ** 2)
+-        
+-        # 3. Check Convergence
++        # Forward pass: evaluate rendering function I(G, M, L_a, theta) [G]
++        I_rendered = ... # Evaluate differentiable renderer
++
++        # Compute MSE loss: L(theta) = 1/N * sum((I_i - T_i)^2)
++        N = I_rendered.shape[0] * I_rendered.shape[1] * I_rendered.shape[2]
++        loss = sum((I_rendered[i] - I_star[i])**2 for i in range(N)) / N
++
++        # Check Convergence
+         if loss < epsilon_loss:
+             converged = True
+             break
+-            
+-        # 4. Compute Gradients via Automatic Differentiation
+-        # The renderer must support backpropagation through the Blinn-Phong model
+-        # and shadow casting logic.
+-        grad = compute_gradients(loss, theta)
+-        
+-        # 5. Update Parameters using Adam
++
++        # Backward pass: compute gradients via automatic differentiation [G]
++        grad = ... # Compute ∇_θ loss
++
++        # Update Parameters using Adam
+         t += 1
+-        m = beta_1 * m + (1 - beta_1) * grad
+-        v = beta_2 * v + (1 - beta_2) * (grad ** 2)
+-        
+-        m_hat = m / (1 - beta_1 ** t)
+-        v_hat = v / (1 - beta_2 ** t)
+-        
+-        theta = theta - eta * (m_hat / (sqrt(v_hat) + epsilon))
+-        
+-        # 6. Project material parameters if optimizing colors
+-        # If optimizing RGB albedo, project onto [0, 1]^3
++        for i in range(len(theta)):
++            m[i] = beta_1 * m[i] + (1 - beta_1) * grad[i]
++            v[i] = beta_2 * v[i] + (1 - beta_2) * (grad[i] ** 2)
++            m_hat = m[i] / (1 - beta_1 ** t)
++            v_hat = v[i] / (1 - beta_2 ** t)
++            theta[i] = theta[i] - eta * (m_hat / (v_hat + epsilon_adam)**0.5)
++
++        # Project material parameters onto [0, 1]^3 if optimizing colors
+         if optimizing_material_colors:
+-            theta.materials = clamp(theta.materials, 0, 1)
+-            
++            for i in range(len(theta.materials)):
++                theta.materials[i] = max(0.0, min(1.0, theta.materials[i]))
++
+         iter_count += 1
+-        
++
+     return theta
+ ```

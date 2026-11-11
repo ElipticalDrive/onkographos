@@ -3,86 +3,86 @@
 Also called: Multi-resolution volume hierarchy, Visibility hierarchy
 
 ## Overview
-This method accelerates volume rendering by combining spatial culling with multi-resolution data approximation. It solves the performance bottleneck of rendering large volumetric datasets by discarding invisible subregions and rendering visible regions at resolutions proportional to their screen importance. It differs from sibling methods like [Streaming and Level-of-Detail (LOD) selection](3087-streaming-and-level-of-detail-lod-selection.md) by explicitly coupling frustum culling with hardware-assisted cell projection for exploration, and from [Focus Point Based Brick LOD Selection](5282-focus-point-based-brick-lod-selection.md) by using a global projected size threshold rather than a specific focus point for LOD selection.
+This method accelerates volume rendering by combining spatial frustum culling with multi-resolution data approximation [S1][S2, unofficial]. It solves the performance bottleneck of rendering large volumetric datasets by discarding invisible subregions and rendering visible regions at resolutions proportional to their screen importance [S1][S3]. It explicitly couples frustum culling with hardware-assisted cell projection for exploration [S1][S3].
 
 ## How it works
-**Inputs:** A hierarchical volume data structure (e.g., octree or brick grid) where each node represents a subregion of the volume at a specific resolution. Camera parameters (view frustum, projection matrix).
-**Outputs:** A rendered image.
+**Inputs:** A hierarchical volume data structure (e.g., octree or brick grid) where each node represents a subregion [S1]. Camera parameters defining the view frustum and projection plane [S1][S3].
+**Outputs:** A rendered image using the selected resolution levels [S1].
 
 **Data Structures:**
 The hierarchy is a tree where each node contains:
-1.  **Bounding Volume:** Axis-aligned bounding box (AABB) or sphere defining the spatial extent of the subregion in world space.
-2.  **Resolution Level:** An integer indicating the detail level (e.g., leaf nodes are full resolution, root is coarsest).
-3.  **Data Pointer:** Reference to the voxel data or approximation coefficients for that node.
+1.  **Bounding Volume:** Axis-aligned bounding box (AABB) defining the spatial extent of the subregion in world space [S1][S2, unofficial].
+2.  **Resolution Level:** An integer indicating the detail level (e.g., leaf nodes are full resolution, root is coarsest) [S1].
+3.  **Data Pointer:** Reference to the voxel data or approximation coefficients for that node [S1].
 
 **Steps:**
-1.  **Build Hierarchy:** Construct the multi-resolution hierarchy from the source volume data. This involves downsampling or aggregating data to create coarser levels. The scale factor $s$ determines the reduction ratio between levels, such that $N_{new} = N_{prev} / s$ [S1][S5, unofficial].
-2.  **Frustum Culling:** For each node in the hierarchy, test its bounding volume against the view frustum.
-    *   If the bounding volume is completely outside the frustum, discard the node and all its children [S1][S2, unofficial].
-    *   If the bounding volume intersects or is inside the frustum, proceed to LOD selection [S1][S3].
-3.  **Projected Size Estimation:** For visible nodes, compute the estimated projected size of the node on the screen. This is derived from the node's spatial size and the distance from the node's center to the screen projection plane [S3].
-4.  **LOD Selection:**
-    *   Compare the projected size to a minimum projected size threshold $T_{min}$.
-    *   If the projected size is smaller than $T_{min}$ (e.g., smaller than a pixel), stop exploring children. Render the current node using an approximated representation (e.g., hardware-assisted cell projection) [S1][S3].
-    *   If the projected size is larger than $T_{min}$, recursively process the children of the current node [S3].
-5.  **Rendering:**
-    *   For leaf nodes selected for rendering, use the appropriate rendering algorithm. High-resolution leaves may use raycasting or scanline algorithms for final images. Coarser approximations use hardware-assisted cell projection for exploration [S1].
+1.  **Build Hierarchy:** Construct the multi-resolution hierarchy from the source volume data by downsampling or aggregating data to create coarser levels [S1].
+2.  **Frustum Culling:** For each node in the hierarchy, test its bounding volume against the view frustum [S1][S2, unofficial]. If the bounding volume is completely outside the frustum, discard the node and all its children [S1]. If it intersects or is inside, proceed to LOD selection [S1][S3].
+3.  **Projected Size Estimation:** For visible nodes, compute the estimated projected size of the node on the screen [S3]. This is derived from the node's spatial size and the distance from the node's center to the screen projection plane [S3].
+4.  **LOD Selection:** Compare the projected size to a minimum projected size threshold $T_{min}$ [S3]. If the projected size is smaller than $T_{min}$ (e.g., smaller than a pixel), stop exploring children and render the current node using an approximated representation (e.g., hardware-assisted cell projection or surface element) [S1][S3]. If the projected size is larger than $T_{min}$, recursively process the children of the current node [S3].
+5.  **Rendering:** For leaf nodes selected for rendering, use the appropriate rendering algorithm [S1]. High-resolution leaves may use raycasting or scanline algorithms for final images, while coarser approximations use hardware-assisted cell projection for exploration [S1].
 
 **Parameters:**
-*   **Scale Factor ($s$):** Controls the zoom level and hierarchy depth. Typical tested range is 1.0 to 5.16. Scales of 256 and larger are often required for effective viewing of large volumes [S1].
-*   **Minimum Projected Size ($T_{min}$):** A global threshold controlling the number of displayed cells. Can be user-editable or dynamically adjusted [S3].
+*   **Scale Factor:** Controls the zoom level. Tested range is 1.0 to 5.16. Scales of 256 and larger are required to view these volumes effectively [S1].
+*   **Minimum Projected Size ($T_{min}$):** A global threshold controlling the number of displayed cells. Can be user-editable or dynamically adjusted to maintain a target framerate [S3].
 
 **Edge Cases and Pitfalls:**
-*   **Low Scale Performance:** At scale 1, the hierarchy overhead can make rendering slightly slower than non-hierarchical methods. Significant speedups are only achieved when zoomed in considerably (e.g., scale 256 is about twice as fast) [S1].
+*   **Low Scale Performance:** At scale 1, the hierarchy overhead can make rendering slightly slower than non-hierarchical methods. Significant speedups are only achieved when zoomed in considerably (e.g., at scale 256, it is about twice as fast) [S1].
 *   **Idle Rendering:** If $T_{min}$ is fixed, the model may remain under-refined during idle moments. Dynamic adjustment of $T_{min}$ is recommended to allow full detail when the user is idle [S3].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_hierarchy(node, camera, t_min):
-    """
-    Recursively render a volume hierarchy node.
-    node: The current hierarchy node with bounding_volume, children, and resolution.
-    camera: Contains view frustum and projection matrix.
-    t_min: Minimum projected size threshold.
-    """
+def render_hierarchy(node, frustum_planes, t_min):
+    """Recursively render a volume hierarchy node."""
     # Step 2: Frustum Culling
-    if not is_inside_frustum(node.bounding_volume, camera.frustum):
-        return # Discard invisible subregion
+    if not aabb_intersects_frustum(node.bounding_volume, frustum_planes):
+        return  # Discard invisible subregion
 
     # Step 3: Projected Size Estimation
-    projected_size = estimate_projected_size(node.bounding_volume, camera)
+    projected_size = estimate_projected_size(node.bounding_volume, frustum_planes)
 
     # Step 4: LOD Selection
     if projected_size < t_min or node.is_leaf():
         # Render current node with approximation
-        render_node_approximation(node, camera)
+        draw_cell_projection(node.data)
     else:
         # Recurse into children
         for child in node.children:
-            render_hierarchy(child, camera, t_min)
+            render_hierarchy(child, frustum_planes, t_min)
 
-def estimate_projected_size(bounding_volume, camera):
-    """
-    Estimate the projected size of a bounding volume on the screen.
-    Uses the size of the volume and distance to the projection plane.
-    """
-    center = bounding_volume.center
-    distance = distance_to_projection_plane(center, camera)
-    size = bounding_volume.max_extent
-    # Simplified estimation: size scales inversely with distance
-    # Exact formula depends on projection matrix specifics
-    projected_size = size / distance
-    return projected_size
+def aabb_intersects_frustum(aabb, frustum_planes):
+    """Standard test: AABB intersects frustum if not separated by any frustum plane."""
+    for plane in frustum_planes:
+        # plane: (nx, ny, nz, d)
+        max_val = 0.0
+        if plane.nx > 0: max_val += aabb.max.x * plane.nx
+        else: max_val += aabb.min.x * plane.nx
+        if plane.ny > 0: max_val += aabb.max.y * plane.ny
+        else: max_val += aabb.min.y * plane.ny
+        if plane.nz > 0: max_val += aabb.max.z * plane.nz
+        else: max_val += aabb.min.z * plane.nz
+        if max_val < plane.d:
+            return False
+    return True
 
-def render_node_approximation(node, camera):
-    """
-    Render a node using hardware-assisted cell projection or similar approximation.
-    """
-    # Implementation depends on hardware capabilities
-    # For exploration, this is much faster than full raycasting
-    draw_cell_projection(node.data, camera)
+def estimate_projected_size(aabb, frustum_planes):
+    """Estimate projected size from cell size and distance to projection plane."""
+    # Assume frustum_planes[0] is the near plane with normal (0,0,1)
+    near_plane = frustum_planes[0]
+    center = ((aabb.min.x + aabb.max.x) / 2.0,
+              (aabb.min.y + aabb.max.y) / 2.0,
+              (aabb.min.z + aabb.max.z) / 2.0)
+    distance = center[0]*near_plane.nx + center[1]*near_plane.ny + center[2]*near_plane.nz - near_plane.d
+    distance = max(1.0, distance)
+    size = max(aabb.max.x - aabb.min.x, aabb.max.y - aabb.min.y, aabb.max.z - aabb.min.z)
+    return size / distance
+
+def draw_cell_projection(data):
+    """Render node using hardware-assisted cell projection or surface element."""
+    # Implementation depends on hardware capabilities [S1][S3]
+    pass
 ```
 
 ## Subtopics
@@ -91,20 +91,20 @@ def render_node_approximation(node, camera):
 Coarse Floor Rendering prevents scene flicker during chunk plan swaps in hierarchical volume rendering by rendering the coarsest pyramid level as a continuous whole-volume floor behind the active octree. Unlike previous implementations where unmatched bricks were synchronously destroyed and revealed the scene background, this method ensures no brick draws nothing while waiting for re-stream, providing continuous coverage.
 
 ### Frustum Culling for Volumetric Data
-Frustum culling eliminates elements outside the view frustum to save memory transfer and generation, performed hierarchically on the data structure before data generation and transfer. Unlike surface rendering where culling is for rendering economy, here it is crucial for memory transfer and space savings because volumetric data sizes are very large (e.g., $256^3$ voxels at 32-bit is 65MB, $512^3$ is 500MB) [S2, unofficial].
+Frustum culling eliminates elements outside the view frustum to save memory transfer and generation, performed hierarchically on the data structure before data generation and transfer [S2, unofficial]. Unlike surface rendering where culling is for rendering economy, here it is crucial for memory transfer and space savings because volumetric data sizes are very large (e.g., $256^3$ voxels at 32-bit is 65MB, $512^3$ is 500MB) [S2, unofficial].
 
 ### Projected Size LOD with Frustum Culling
-This variant uses projected size estimation to dynamically adjust LOD. It computes the estimated projected size for each cell based on its size and distance to the screen projection plane. Hierarchy exploration stops when the projection becomes too small (e.g., smaller than a pixel), avoiding visiting children and drawing the surface element of the current cell instead. It dynamically adjusts the minimum projected size from frame to frame to maintain a given framerate. The adjustment uses the third power of the difference between actual and desired display time to weight the growing factor, minimizing influence when near the goal and emphasizing it when far, keeping its sign. When idle, the limit projected size is reduced close to zero [S3].
+This variant uses projected size estimation to dynamically adjust LOD [S3]. It computes the estimated projected size for each cell based on its size and distance to the screen projection plane [S3]. Hierarchy exploration stops when the projection becomes too small (e.g., smaller than a pixel), avoiding visiting children and drawing the surface element of the current cell instead [S3]. It dynamically adjusts the minimum projected size from frame to frame to maintain a given framerate [S3]. The adjustment uses the third power of the difference between actual and desired display time to weight the growing factor, minimizing influence when near the goal and emphasizing it when far, keeping its sign [S3]. When idle, the limit projected size is reduced close to zero [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the hierarchy depth and the number of visible nodes. Culling reduces the number of nodes processed. Approximation at lower levels is faster than full resolution rendering.
-*   **Memory Complexity:** Requires storing the hierarchy structure in addition to the base volume data. The hierarchy overhead is generally small compared to the volume data itself.
+*   **Time Complexity:** Not given in the sources. Depends on hierarchy depth and the number of visible nodes.
+*   **Memory Complexity:** Not given in the sources. Requires storing the hierarchy structure in addition to the base volume data.
 *   **Measured Performance:** On the Lockheed fighter dataset, rendering every cell with the scanline algorithm took over 3 minutes. Using the hierarchy to draw an approximated version took less than 3 seconds [S1].
-*   **Scaling:** Speedups are significant when zoomed in considerably (e.g., scale 256 is about twice as fast as non-hierarchical). At scale 1, the hierarchy is slightly slower due to overhead [S1].
-*   **Strengths:** Significant performance gains for large volumes, especially during exploration. Effective culling of invisible regions.
-*   **Limitations:** Overhead at low zoom levels. Approximation quality may be lower than full resolution.
-*   **When to Use:** Interactive exploration of large volumetric datasets where full resolution is not always needed.
-*   **When Not to Use:** Final image rendering where maximum quality is required, or at very low zoom levels where hierarchy overhead dominates.
+*   **Scaling:** Speedups are significant when zoomed in considerably. At scale 1, the hierarchy is slightly slower due to overhead. At scale 256, it is about twice as fast [S1].
+*   **Strengths:** Significant performance gains for large volumes during exploration. Effective culling of invisible regions saves memory transfer [S1][S2, unofficial].
+*   **Limitations:** Overhead at low zoom levels. Approximation quality may be lower than full resolution [S1].
+*   **When to Use:** Interactive exploration of large volumetric datasets where full resolution is not always needed [S1][S3].
+*   **When Not to Use:** Final image rendering where maximum quality is required, or at very low zoom levels where hierarchy overhead dominates [S1].
 
 ## Background
 The method originates from early work on hierarchical and parallelizable direct volume rendering for irregular and multiple grids [S1]. It builds on the principles of multiresolution and level of detail selection [S2, unofficial][S3]. The use of frustum culling for volumetric data was highlighted as crucial for memory transfer savings due to the large size of volumetric datasets [S2, unofficial]. The projected size LOD approach was developed for resolution adaptive volume sculpting to maintain interactive framerates [S3].

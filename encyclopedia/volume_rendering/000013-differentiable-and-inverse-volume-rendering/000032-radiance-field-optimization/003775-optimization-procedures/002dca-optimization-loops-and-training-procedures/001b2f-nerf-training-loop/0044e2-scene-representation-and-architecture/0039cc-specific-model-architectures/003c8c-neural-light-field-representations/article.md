@@ -1,9 +1,9 @@
 # Neural Light Field Representations
 
-Also called: NeLF
+Also called: NeLF, Neural Light Fields
 
 ## Overview
-Neural Light Field Representations map camera ray parameters directly to final accumulated RGB values, bypassing the volumetric rendering integral and density prediction used in standard Neural Radiance Fields (NeRF). This approach enables single-pass rendering without ray marching, primarily achieved through knowledge distillation from a pre-trained NeRF teacher model to a deep residual student network.
+Neural Light Field Representations map camera ray parameters directly to final pixel color, bypassing the volumetric ray-marching and alpha-composition steps required by Neural Radiance Fields (NeRF) [S2]. Unlike NeRF, which predicts density and radiance at sampled points along a ray requiring multiple forward passes per pixel, NeLF performs a single forward pass per ray to output the integrated RGB value directly [S2]. This approach enables orders-of-magnitude faster rendering speeds and reduced computational complexity (FLOPs) while maintaining or exceeding the visual quality of NeRF [S2].
 
 ## Shared principles
 All methods in this family share the mechanism of mapping 6D input coordinates (3D position $\mathbf{x}$ and 2D viewing direction $\mathbf{d}$) to 4D output values (density $\sigma$ and color $\mathbf{c}$) using a differentiable neural network. This allows the radiance field to be optimized through the volumetric rendering integral.
@@ -30,10 +30,10 @@ and $\delta_i$ is the distance between samples [S1][S3].
 ## Subtopics
 
 ### [Neural Light Field (NeLF)](9257-neural-light-field-nelf.md)
-Neural Light Field (NeLF) via R2L Distillation represents a 3D scene as a Neural Light Field rather than a Neural Radiance Field. It maps camera ray origin and direction directly to RGB values, avoiding ray-marching and iterative sampling. Unlike the parent architecture which predicts density $\sigma$ to compute transmittance $T_i$ and alpha $\alpha_i$ for volume integration, NeLF outputs the final accumulated color $\mathbf{c}$ directly. The method distills a pre-trained NeRF teacher model into a deep residual MLP student model, enabling a single forward pass per ray for rendering.
+Neural Light Field (NeLF) represents a 3D scene as a direct mapping from camera ray parameters to final pixel color, bypassing the volumetric ray-marching and alpha-composition steps required by Neural Radiance Fields (NeRF). Unlike NeRF, which predicts density and radiance at sampled points along a ray requiring multiple forward passes per pixel, NeLF performs a single forward pass per ray to output the integrated RGB value directly. This approach enables orders-of-magnitude faster rendering speeds and reduced computational complexity (FLOPs) while maintaining or exceeding the visual quality of NeRF. The method is distinguished by its use of a deep residual Multi-Layer Perceptron (MLP) architecture and knowledge distillation from a pre-trained NeRF teacher model to handle the data scarcity inherent in training such deep networks.
 
 ### Neural Multi-Light Implicit Representation (Stage 1)
-An extension of Neuralangelo that incorporates light position as an input to the network to enable multi-light implicit representation [S1]. Input consists of camera pose, light position, and points $(x, y, z)$ [S1]. Training time for Stage 1 follows Neuralangelo training time, while Stage 2 takes 19 hours [S1]. Experiments were conducted on a single Nvidia RTX 3090 [S1].
+An extension of Neuralangelo that incorporates light position as an input to the network to enable multi-light implicit representation [S1]. Input includes camera pose, light position, and points (x, y, z) [S1]. Training time for Stage 1 follows Neuralangelo training time; Stage 2 takes 19 hours [S1]. Experiments were conducted on a single Nvidia RTX 3090 [S1].
 
 ## Background
 Not given in the sources.

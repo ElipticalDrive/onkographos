@@ -7,127 +7,150 @@ This method manages 1D transfer functions for volume rendering by mapping scalar
 
 ## How it works
 **Inputs and Outputs:**
-- **Inputs:** Scalar density value (float $t \in [0, 1]$ or integer $isoValue \in [0, 255]$), control points for color and alpha.
-- **Outputs:** RGBA color vector.
+- **Inputs:** Scalar density value (float $t \in [0, 1]$ or integer $isoValue \in [0, 255]$), control points for color and alpha [S1, unofficial].
+- **Outputs:** RGBA color vector [S1, unofficial].
 
 **Data Structures:**
-The implementation maintains the following structures:
-- `colorPoints`: `std::vector<TransferFunctionColorPoint>`. Each point contains an `isoValue` (int) and `color` (`glm::vec3`).
-- `alphaPoints`: `std::vector<TransferFunctionAlphaPoint>`. Each point contains an `isoValue` (int) and `alpha` (float).
-- `colorSpline`: `std::vector<CubicSpline>`. Interpolates color values between color points.
-- `alphaSpline`: `std::vector<CubicSpline>`. Interpolates alpha values between alpha points.
-- `indexedTransferFunction`: `std::array<vec4, 256>`. Caches the final RGBA result for each integer iso value 0–255.
-- `colorMappingTexture`: `gl::Texture1dRef`. A 1D OpenGL texture (GL_RGBA, GL_FLOAT, size 256) used for GPU access.
-- `threshold`: `vec2`. Clamps the effective range of iso values.
+The implementation maintains the following structures [S1, unofficial]:
+- `colorPoints`: `std::vector<TransferFunctionColorPoint>`. Each point contains an `isoValue` (int) and `color` (`glm::vec3`) [S1, unofficial].
+- `alphaPoints`: `std::vector<TransferFunctionAlphaPoint>`. Each point contains an `isoValue` (int) and `alpha` (float) [S1, unofficial].
+- `colorSpline`: `std::vector<CubicSpline>`. Interpolates color values between color points [S1, unofficial].
+- `alphaSpline`: `std::vector<CubicSpline>`. Interpolates alpha values between alpha points [S1, unofficial].
+- `indexedTransferFunction`: `std::array<vec4, 256>`. Caches the final RGBA result for each integer iso value 0–255 [S1, unofficial].
+- `colorMappingTexture`: `gl::Texture1dRef`. A 1D OpenGL texture (GL_RGBA, GL_FLOAT, size 256) used for GPU access [S1, unofficial].
+- `threshold`: `vec2`. Clamps the effective range of iso values [S1, unofficial].
 
 **Initialization:**
-1. Set threshold to $(0, 255)$.
-2. Add two default color points: $(vec3(1), 0)$ and $(vec3(1), 255)$.
-3. Add two default alpha points: $(1.0, 0)$ and $(1.0, 255)$.
-4. Call `updateFunction()` to initialize splines and cache.
+1. Set threshold to $(0, 255)$ [S1, unofficial].
+2. Add two default color points: $(vec3(1), 0)$ and $(vec3(1), 255)$ [S1, unofficial].
+3. Add two default alpha points: $(1.0, 0)$ and $(1.0, 255)$ [S1, unofficial].
+4. Call `updateFunction()` to initialize splines and cache [S1, unofficial].
 
 **Adding a Color Point:**
-1. Check validity: `isoValue > 0`, `isoValue < colorPoints.back().getIsoValue()`, and `colorPoints.size() < 255`.
-2. Create `TransferFunctionColorPoint` with color and iso value.
-3. Insert into `colorPoints` using `upper_bound` to maintain sorted order by `isoValue`.
-4. Call `updateFunction()`.
+1. Check validity: `isoValue > 0`, `isoValue < colorPoints.back().getIsoValue()`, and `colorPoints.size() <= 255` [S1, unofficial].
+2. Create `TransferFunctionColorPoint` with color and iso value [S1, unofficial].
+3. Insert into `colorPoints` using `upper_bound` to maintain sorted order by `isoValue` [S1, unofficial].
+4. Call `updateFunction()` [S1, unofficial].
 
 **Adding an Alpha Point:**
-1. Check validity: `isoValue > 0`, `isoValue < alphaPoints.back().getIsoValue()`, and `alphaPoints.size() < 255`.
-2. Create `TransferFunctionAlphaPoint` with alpha and iso value.
-3. Insert into `alphaPoints` using `upper_bound` to maintain sorted order by `isoValue`.
-4. Call `updateFunction()`.
+1. Check validity: `isoValue > 0`, `isoValue < alphaPoints.back().getIsoValue()`, and `alphaPoints.size() <= 255` [S1, unofficial].
+2. Create `TransferFunctionAlphaPoint` with alpha and iso value [S1, unofficial].
+3. Insert into `alphaPoints` using `upper_bound` to maintain sorted order by `isoValue` [S1, unofficial].
+4. Call `updateFunction()` [S1, unofficial].
 
 **Removing a Color Point:**
-1. Check validity: `index > 0` and `index < colorPoints.size()`.
-2. Erase element at `index` from `colorPoints`.
-3. Call `updateFunction()`.
+1. Check validity: `index > 0` and `index < colorPoints.size()` [S1, unofficial].
+2. Erase element at `index` from `colorPoints` [S1, unofficial].
+3. Call `updateFunction()` [S1, unofficial].
 
 **Removing an Alpha Point:**
-1. Check validity: `index > 0` and `index < alphaPoints.size()`.
-2. Erase element at `index` from `alphaPoints`.
-3. Call `updateFunction()`.
+1. Check validity: `index > 0` and `index < alphaPoints.size()` [S1, unofficial].
+2. Erase element at `index` from `alphaPoints` [S1, unofficial].
+3. Call `updateFunction()` [S1, unofficial].
 
 **Setting Alpha Value:**
-1. Check validity: `index >= 0` and `index < alphaPoints.size()`.
-2. Set alpha to `clamp(alpha, 0.0f, 1.0f)`.
-3. Call `updateFunction()`.
+1. Check validity: `index >= 0` and `index < alphaPoints.size()` [S1, unofficial].
+2. Set alpha to `clamp(alpha, 0.0f, 1.0f)` [S1, unofficial].
+3. Call `updateFunction()` [S1, unofficial].
 
 **Setting Threshold:**
-1. Clamp `minIso` to $[0, maxIso - 1]$.
-2. Clamp `maxIso` to $[minIso + 1, 255]$.
-3. Store in `threshold.x` and `threshold.y`.
+1. Clamp `minIso` to $[0, maxIso - 1]$ [S1, unofficial].
+2. Clamp `maxIso` to $[minIso + 1, 255]$ [S1, unofficial].
+3. Store in `threshold.x` and `threshold.y` [S1, unofficial].
 
 **Setting Color:**
-1. Check validity: `index >= 0` and `index < colorPoints.size()`.
-2. Set color to `clamp(color, vec3(0), vec3(1))`.
-3. Call `updateFunction()`.
+1. Check validity: `index >= 0` and `index < colorPoints.size()` [S1, unofficial].
+2. Set color to `clamp(color, vec3(0), vec3(1))` [S1, unofficial].
+3. Call `updateFunction()` [S1, unofficial].
 
 **Setting Alpha Point Iso Value:**
-1. Check validity: `index > 0`, `index < alphaPoints.size()`, `isoValue > 0`, and `isoValue < 255`.
-2. Set iso value.
-3. If `alphaPoints` is not sorted, sort it.
-4. Call `updateFunction()`.
+1. Check validity: `index > 0`, `index < alphaPoints.size()`, `isoValue > 0`, and `isoValue < 255` [S1, unofficial].
+2. Set iso value [S1, unofficial].
+3. If `alphaPoints` is not sorted, sort it [S1, unofficial].
+4. Call `updateFunction()` [S1, unofficial].
 
 **Setting Color Point Iso Value:**
-1. Check validity: `index > 0`, `index < colorPoints.size()`, `isoValue > 0`, and `isoValue < 255`.
-2. Set iso value.
-3. If `colorPoints` is not sorted, sort it.
-4. Call `updateFunction()`.
+1. Check validity: `index > 0`, `index < colorPoints.size()`, `isoValue > 0`, and `isoValue < 255` [S1, unofficial].
+2. Set iso value [S1, unofficial].
+3. If `colorPoints` is not sorted, sort it [S1, unofficial].
+4. Call `updateFunction()` [S1, unofficial].
 
 **Updating Texture:**
-1. If `colorMappingTexture` is null, create a 1D texture with format GL_RGBA, internal format GL_RGBA, data type GL_FLOAT, min/mag filter GL_LINEAR, wrap GL_CLAMP_TO_EDGE, size 256, initialized with `indexedTransferFunction.data()`.
-2. If `updateColorTexture` is true, update texture data with `indexedTransferFunction.data()`, GL_RGBA, GL_FLOAT, size 256.
-3. Set `updateColorTexture = true` in `updateFunction()` to trigger this update.
+1. If `colorMappingTexture` is null, create a 1D texture with format GL_RGBA, internal format GL_RGBA, data type GL_FLOAT, min/mag filter GL_LINEAR, wrap GL_CLAMP_TO_EDGE, size 256, initialized with `indexedTransferFunction.data()` [S1, unofficial].
+2. If `updateColorTexture` is true, update texture data with `indexedTransferFunction.data()`, GL_RGBA, GL_FLOAT, size 256 [S1, unofficial].
+3. Reset `updateColorTexture` to false after update [S1, unofficial].
 
 **Evaluating Color by Float $t$:**
-1. Convert $t$ to integer: $isoValue = \lfloor 255.0 \times t \rfloor$.
-2. Iterate through `alphaPoints` to find the interval $[currentIso, nextIso]$ containing $isoValue$.
-3. Calculate interpolation factor: $evalAt = \frac{isoValue - currentIso}{nextIso - currentIso}$.
-4. Get alpha from `alphaSpline[i].getPointOnSpline(evalAt).r`.
-5. Repeat for color using `colorPoints` and `colorSpline`.
-6. Return $vec4(color.r, color.g, color.b, alpha)$.
+1. Convert $t$ to integer: $isoValue = \lfloor 255.0 \times t \rfloor$ [S1, unofficial].
+2. Iterate through `alphaPoints` to find the interval $[currentIso, nextIso]$ containing $isoValue$ [S1, unofficial].
+3. Calculate interpolation factor: $evalAt = \frac{isoValue - currentIso}{nextIso - currentIso}$ [S1, unofficial].
+4. Get alpha from `alphaSpline[i].getPointOnSpline(evalAt).r` [S1, unofficial].
+5. Repeat for color using `colorPoints` and `colorSpline` [S1, unofficial].
+6. Return $vec4(color.r, color.g, color.b, alpha)$ [S1, unofficial].
 
 **Evaluating Color by Integer $isoValue$:**
-1. If $isoValue < 0$ or $isoValue > 255$, return $vec4(-1)$.
-2. Otherwise, return `indexedTransferFunction[isoValue]`.
+1. If $isoValue < 0$ or $isoValue > 255$, return $vec4(-1)$ [S1, unofficial].
+2. Otherwise, return `indexedTransferFunction[isoValue]` [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+# Standard constants and helpers
+GL_RGBA = 6407
+GL_FLOAT = 5126
+GL_LINEAR = 9729
+GL_CLAMP_TO_EDGE = 33071
+
+def clamp(val, lo, hi):
+    return max(lo, min(hi, val))
+
+def bisect_right(a, x):
+    lo, hi = 0, len(a)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if x < a[mid][0]: hi = mid
+        else: lo = mid + 1
+    return lo
+
+class CubicSpline:
+    def __init__(self, p0, p1):
+        self.p0 = p0
+        self.p1 = p1
+    def get_point_on_spline(self, t):
+        # Placeholder for cubic spline evaluation logic defined in parent article [G]
+        return self.p0 + t * (self.p1 - self.p0)
+
 class CubicSplineTFWithIndexedCaching:
     def __init__(self):
-        self.color_points = []  # List of (iso_value: int, color: vec3)
-        self.alpha_points = []  # List of (iso_value: int, alpha: float)
+        self.color_points = []
+        self.alpha_points = []
         self.color_splines = []
         self.alpha_splines = []
-        self.indexed_tf = [vec4(0,0,0,0)] * 256
+        self.indexed_tf = [None] * 256
         self.color_mapping_texture = None
         self.update_color_texture = False
         self.threshold = (0, 255)
         
         # Initialization
-        self.add_color_point(vec3(1,1,1), 0)
-        self.add_color_point(vec3(1,1,1), 255)
+        self.add_color_point((1.0, 1.0, 1.0), 0)
+        self.add_color_point((1.0, 1.0, 1.0), 255)
         self.add_alpha_point(1.0, 0)
         self.add_alpha_point(1.0, 255)
 
     def add_color_point(self, color, iso_value):
-        if iso_value <= 0 or iso_value >= self.color_points[-1][0] or len(self.color_points) > 255:
+        if iso_value <= 0 or iso_value >= self.color_points[-1][0] or len(self.color_points) >= 255:
             return
-        # Insert maintaining sorted order
-        self.color_points.append((iso_value, color))
-        self.color_points.sort(key=lambda p: p[0])
+        idx = bisect_right(self.color_points, iso_value)
+        self.color_points.insert(idx, (iso_value, color))
         self.update_function()
 
     def add_alpha_point(self, alpha, iso_value):
-        if iso_value <= 0 or iso_value >= self.alpha_points[-1][0] or len(self.alpha_points) > 255:
+        if iso_value <= 0 or iso_value >= self.alpha_points[-1][0] or len(self.alpha_points) >= 255:
             return
-        # Insert maintaining sorted order
-        self.alpha_points.append((iso_value, alpha))
-        self.alpha_points.sort(key=lambda p: p[0])
+        idx = bisect_right(self.alpha_points, iso_value)
+        self.alpha_points.insert(idx, (iso_value, alpha))
         self.update_function()
 
     def remove_color_point(self, index):
@@ -145,7 +168,8 @@ class CubicSplineTFWithIndexedCaching:
     def set_alpha(self, index, alpha):
         if index < 0 or index >= len(self.alpha_points):
             return
-        self.alpha_points[index] = (self.alpha_points[index][0], clamp(alpha, 0.0, 1.0))
+        iso, _ = self.alpha_points[index]
+        self.alpha_points[index] = (iso, clamp(alpha, 0.0, 1.0))
         self.update_function()
 
     def set_threshold(self, min_iso, max_iso):
@@ -156,7 +180,8 @@ class CubicSplineTFWithIndexedCaching:
     def set_color(self, index, color):
         if index < 0 or index >= len(self.color_points):
             return
-        self.color_points[index] = (self.color_points[index][0], clamp(color, vec3(0), vec3(1)))
+        iso, _ = self.color_points[index]
+        self.color_points[index] = (iso, (clamp(color[0], 0, 1), clamp(color[1], 0, 1), clamp(color[2], 0, 1)))
         self.update_function()
 
     def set_alpha_point_iso_value(self, index, iso_value):
@@ -164,8 +189,9 @@ class CubicSplineTFWithIndexedCaching:
             return
         if iso_value <= 0 or iso_value >= 255:
             return
-        self.alpha_points[index] = (iso_value, self.alpha_points[index][1])
-        if not is_sorted(self.alpha_points, key=lambda p: p[0]):
+        _, alpha = self.alpha_points[index]
+        self.alpha_points[index] = (iso_value, alpha)
+        if not all(self.alpha_points[i][0] <= self.alpha_points[i+1][0] for i in range(len(self.alpha_points)-1)):
             self.alpha_points.sort(key=lambda p: p[0])
         self.update_function()
 
@@ -174,15 +200,16 @@ class CubicSplineTFWithIndexedCaching:
             return
         if iso_value <= 0 or iso_value >= 255:
             return
-        self.color_points[index] = (iso_value, self.color_points[index][1])
-        if not is_sorted(self.color_points, key=lambda p: p[0]):
+        _, color = self.color_points[index]
+        self.color_points[index] = (iso_value, color)
+        if not all(self.color_points[i][0] <= self.color_points[i+1][0] for i in range(len(self.color_points)-1)):
             self.color_points.sort(key=lambda p: p[0])
         self.update_function()
 
     def update_function(self):
-        # Rebuild splines from points
-        self.color_splines = build_cubic_splines(self.color_points)
-        self.alpha_splines = build_cubic_splines(self.alpha_points)
+        # Rebuild splines from consecutive point pairs
+        self.color_splines = [CubicSpline(self.color_points[i], self.color_points[i+1]) for i in range(len(self.color_points)-1)]
+        self.alpha_splines = [CubicSpline(self.alpha_points[i], self.alpha_points[i+1]) for i in range(len(self.alpha_points)-1)]
         
         # Update indexed cache
         for i in range(256):
@@ -194,58 +221,51 @@ class CubicSplineTFWithIndexedCaching:
         iso_value = int(255.0 * t)
         
         # Find alpha interval
-        current_alpha_point = None
-        next_alpha_point = None
+        alpha_idx = -1
         for i in range(len(self.alpha_points) - 1):
             if self.alpha_points[i][0] <= iso_value <= self.alpha_points[i+1][0]:
-                current_alpha_point = self.alpha_points[i]
-                next_alpha_point = self.alpha_points[i+1]
+                alpha_idx = i
                 break
         
-        if current_alpha_point is None:
+        if alpha_idx == -1:
             alpha = 0.0
         else:
-            eval_at = (iso_value - current_alpha_point[0]) / (next_alpha_point[0] - current_alpha_point[0])
-            alpha = self.alpha_splines[i].get_point_on_spline(eval_at).r
+            current_iso = self.alpha_points[alpha_idx][0]
+            next_iso = self.alpha_points[alpha_idx+1][0]
+            eval_at = (iso_value - current_iso) / (next_iso - current_iso)
+            alpha = self.alpha_splines[alpha_idx].get_point_on_spline(eval_at)
             
         # Find color interval
-        current_color_point = None
-        next_color_point = None
+        color_idx = -1
         for i in range(len(self.color_points) - 1):
             if self.color_points[i][0] <= iso_value <= self.color_points[i+1][0]:
-                current_color_point = self.color_points[i]
-                next_color_point = self.color_points[i+1]
+                color_idx = i
                 break
                 
-        if current_color_point is None:
-            color = vec3(0)
+        if color_idx == -1:
+            color = (0.0, 0.0, 0.0)
         else:
-            eval_at = (iso_value - current_color_point[0]) / (next_color_point[0] - current_color_point[0])
-            color = self.color_splines[i].get_point_on_spline(eval_at)
+            current_iso = self.color_points[color_idx][0]
+            next_iso = self.color_points[color_idx+1][0]
+            eval_at = (iso_value - current_iso) / (next_iso - current_iso)
+            color = self.color_splines[color_idx].get_point_on_spline(eval_at)
             
-        return vec4(color.r, color.g, color.b, alpha)
+        return (color[0], color[1], color[2], alpha)
 
     def evaluate_color_float(self, t):
         return self._evaluate_float(t)
 
     def evaluate_color_int(self, iso_value):
         if iso_value < 0 or iso_value > 255:
-            return vec4(-1)
+            return (-1.0, -1.0, -1.0, -1.0)
         return self.indexed_tf[iso_value]
 
     def update_texture(self):
         if self.color_mapping_texture is None:
-            self.color_mapping_texture = create_1d_texture(
-                format=GL_RGBA, internal_format=GL_RGBA, 
-                data_type=GL_FLOAT, size=256, 
-                data=self.indexed_tf.data(),
-                min_filter=GL_LINEAR, mag_filter=GL_LINEAR, 
-                wrap=GL_CLAMP_TO_EDGE
-            )
+            # create_1d_texture(format=GL_RGBA, internal_format=GL_RGBA, data_type=GL_FLOAT, size=256, data=self.indexed_tf, min_filter=GL_LINEAR, mag_filter=GL_LINEAR, wrap=GL_CLAMP_TO_EDGE)
+            self.color_mapping_texture = True
         elif self.update_color_texture:
-            update_texture_data(self.color_mapping_texture, 
-                                data=self.indexed_tf.data(), 
-                                format=GL_RGBA, data_type=GL_FLOAT, size=256)
+            # update_texture_data(self.color_mapping_texture, data=self.indexed_tf, format=GL_RGBA, data_type=GL_FLOAT, size=256)
             self.update_color_texture = False
 ```
 
@@ -257,16 +277,16 @@ class CubicSplineTFWithIndexedCaching:
 - **Precision:** Float evaluation converts to integer index, potentially losing sub-integer precision compared to direct spline evaluation [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Evaluation by integer iso value is $O(1)$ due to indexed caching. Evaluation by float $t$ is $O(N)$ where $N$ is the number of control points, due to interval search. Updating the cache is $O(256 \times N)$.
-- **Memory Complexity:** $O(N)$ for control points and splines, plus $O(1)$ fixed size for the 256-entry indexed array and texture.
+- **Time Complexity:** Evaluation by integer iso value is $O(1)$ due to indexed caching. Evaluation by float $t$ is $O(N)$ where $N$ is the number of control points, due to interval search. Updating the cache is $O(256 \times N)$ [S1, unofficial].
+- **Memory Complexity:** $O(N)$ for control points and splines, plus $O(1)$ fixed size for the 256-entry indexed array and texture [S1, unofficial].
 - **Measured Performance:** The indexed cache provides fast access for rendering loops, while the spline ensures smooth interpolation for UI or non-integer queries [S1, unofficial].
-- **Strengths:** Fast integer lookup, smooth interpolation, lazy texture updates reduce GPU overhead.
-- **Limitations:** Fixed 256-entry resolution limits precision for float inputs. Sorting overhead when modifying iso values.
-- **When to Use:** When fast, discrete lookup is needed for volume rendering, and smooth interpolation is required for UI or parameter tweaking.
-- **When Not to Use:** When higher resolution than 256 is needed, or when dynamic resolution is required.
+- **Strengths:** Fast integer lookup, smooth interpolation, lazy texture updates reduce GPU overhead [S1, unofficial].
+- **Limitations:** Fixed 256-entry resolution limits precision for float inputs. Sorting overhead when modifying iso values [S1, unofficial].
+- **When to Use:** When fast, discrete lookup is needed for volume rendering, and smooth interpolation is required for UI or parameter tweaking [S1, unofficial].
+- **When Not to Use:** When higher resolution than 256 is needed, or when dynamic resolution is required [S1, unofficial].
 
 ## Background
-This implementation originates from the `VolumeRendering` project by Jose Villegas, providing a practical class for managing 1D transfer functions in Cinder-based volume rendering applications [S1, unofficial]. It extends the theoretical cubic spline transfer function by adding practical caching and texture management for real-time rendering.
+This implementation originates from the `VolumeRendering` project by Jose Villegas, providing a practical class for managing 1D transfer functions in Cinder-based volume rendering applications [S1, unofficial]. It extends the theoretical cubic spline transfer function by adding practical caching and texture management for real-time rendering [S1, unofficial].
 
 ## Sources
 [S1] jose-villegas/VolumeRendering, https://github.com/jose-villegas/VolumeRendering, fetched 2026-10-27 (unofficial)

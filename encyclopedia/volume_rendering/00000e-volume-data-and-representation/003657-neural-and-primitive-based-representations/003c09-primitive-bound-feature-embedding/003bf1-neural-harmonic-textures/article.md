@@ -3,43 +3,41 @@
 Also called: Harmonic Texturing
 
 ## Overview
-Neural Harmonic Textures (NHT) is a primitive-based neural representation that increases the expressive power of individual primitives by anchoring latent feature vectors to a virtual scaffold surrounding each primitive, applying periodic activations to interpolated features, and decoding the accumulated signal via a single deferred MLP pass [S1]. Unlike prior methods that process interpolated features with a lightweight MLP per primitive followed by alpha compositing (requiring numerous neural evaluations), NHT applies periodic functions before compositing and decodes the accumulated signal once per pixel [S1]. This approach yields a harmonic decomposition of the signal, bridging the gap between primitive- and neural-field-based reconstruction while maintaining real-time performance [S1]. It builds on [Primitive-bound feature embedding](9161-primitive-bound-feature-embedding.md) by defining the specific encoding and decoding mechanics of the feature vectors attached to the scaffold.
+Neural Harmonic Textures (NHT) is a primitive-based neural representation that increases the expressive power of individual primitives by anchoring latent feature vectors to a virtual scaffold surrounding each primitive, applying periodic activations to interpolated features, and decoding the accumulated signal via a single deferred MLP pass [S1]. Unlike prior methods that process interpolated features with a lightweight MLP per primitive followed by alpha compositing (requiring numerous neural evaluations), NHT applies periodic functions before compositing and decodes the accumulated signal once per pixel [S1]. This approach yields a harmonic decomposition of the signal, bridging the gap between primitive- and neural-field-based reconstruction while maintaining real-time performance [S1].
 
 ## How it works
-**Inputs:**
-*   A set of primitives $\mathcal{G}$ (e.g., Gaussians, triangles, tetrahedra).
-*   For each primitive $i$, a set of learnable feature vectors $\mathbf{f}_{i,v}$ anchored to its virtual scaffold vertices.
-*   Primitive opacity $\alpha_i$ and transmittance $T_i$ along the ray.
-*   Ray direction $\mathbf{d}$ (or central camera ray for high-parallax scenes).
-
-**Outputs:**
-*   Pixel color $\mathbf{c}$ (and optionally other semantic signals).
+**Inputs and Outputs:**
+*   **Input:** A set of primitives $\mathcal{G}$ (e.g., Gaussians, tetrahedra, triangles), each associated with a virtual scaffold. For 3D primitives, this scaffold is a bounding tetrahedron; for 2D primitives, it is a virtual triangle [S1].
+*   **Input:** Camera parameters (position, orientation, intrinsics) and ray directions $\mathbf{d}$ [S1].
+*   **Output:** Pixel color $\mathbf{c}$ and optionally high-dimensional semantic features [S1].
 
 **Data Structures:**
-*   **Primitive Scaffold:** For 3D primitives (e.g., Gaussians), a bounding tetrahedron is defined. Four learnable feature vectors $\mathbf{f}_{i,0}, \mathbf{f}_{i,1}, \mathbf{f}_{i,2}, \mathbf{f}_{i,3}$ are attached to the tetrahedron vertices [S1]. For 2D primitives (2DGS, Triangle Splatting), virtual triangles are used, with three feature vectors per primitive [S1].
-*   **Feature Vector Size:** The total number of features per primitive is $F$. For tetrahedral primitives, this is distributed as $F/4$ per vertex [S1]. Typical value: $F=64$ (16 per vertex) [S1].
-*   **MLP Decoder:** A shallow Multi-Layer Perceptron. Typical architecture: 128-wide with 3 hidden layers [S1].
+*   **Primitive Scaffold:** Each primitive $i$ has a virtual scaffold defined by vertices.
+    *   For 3D primitives (e.g., Gaussians encapsulated in tetrahedra): 4 vertices [S1].
+    *   For 2D primitives (e.g., 2DGS, Triangle Splatting): 3 vertices [S1].
+*   **Feature Vectors:** Learnable feature vectors $\mathbf{f}_{v}$ are attached to each vertex $v$ of the scaffold.
+    *   Total features per primitive: 64 [S1].
+    *   Distribution: 16 features per vertex for tetrahedral primitives (4 vertices $\times$ 16 = 64) [S1]. For 2D primitives, 3 vertices $\times$ 16 = 48 features [S1].
+*   **MLP Decoder:** A shallow Multi-Layer Perceptron with 128 hidden units and 3 hidden layers [S1].
 
-**Steps:**
+**Numbered Steps:**
 
-1.  **Ray-Primitive Intersection:** For each pixel, cast a ray and identify the set of intersected primitives $\mathcal{G}$. Determine the point $p^*_i$ on each primitive $i$ where the projected primitive has maximum response (e.g., maximum Gaussian response) [S1].
-
-2.  **Local Interpolation:** Barycentrically interpolate the vertex feature vectors at $p^*_i$ to obtain the interpolated feature vector $\mathbf{f}_i$ for primitive $i$ [S1].
-    $$ \mathbf{f}_i = \text{Interpolate}(\{\mathbf{f}_{i,v}\}, p^*_i) $$
-
-3.  **Harmonic Encoding:** Encode the interpolated feature vector $\mathbf{f}_i$ using sine and cosine functions into separate channels. This creates a harmonic representation where the interpolation acts as a frequency modulator [S1].
+1.  **Ray-Primitive Intersection:** For each pixel, cast a ray and determine the intersection point $p^*_i$ with each primitive $i \in \mathcal{G}$. The point $p^*_i$ is typically defined as the point along the ray where the projected primitive has its maximum response [S1].
+2.  **Local Interpolation:** Interpolate the vertex feature vectors $\mathbf{f}_{v_i}$ of the primitive's scaffold at the intersection point $p^*_i$ to obtain the primitive's local feature vector $\mathbf{f}_i$ [S1].
+    *   For 3D tetrahedral primitives, use barycentric interpolation [S1].
+    *   For 2D primitives, use barycentric interpolation on the virtual triangle [S1].
+    *   *Note:* In 2D Image Reconstruction Adaptation, Clough-Tocher cubic interpolation is used to ensure feature continuity across triangle edges [9148-neural-harmonic-textures-2d-image-reconstruction-adaptation.md].
+3.  **Harmonic Encoding:** Encode the interpolated feature vector $\mathbf{f}_i$ using periodic sine and cosine functions into separate channels [S1].
     $$ \mathbf{h}_i = \begin{bmatrix} \sin(\mathbf{f}_i) \\ \cos(\mathbf{f}_i) \end{bmatrix} $$
-    Note: The sine and cosine are applied element-wise to $\mathbf{f}_i$ [S1].
-
-4.  **Accumulation (Alpha Blending):** Composite the encoded features $\mathbf{h}_i$ along the ray, weighted by the primitive's kernel-weighted opacity $\alpha_i$ and accumulated transmittance $T_i$ [S1]. The primitive opacity modulates the amplitude of each harmonic component [S1].
-    $$ \mathbf{H} = \sum_{i \in \mathcal{G}} \alpha_i T_i \mathbf{h}_i = \sum_{i \in \mathcal{G}} \alpha_i T_i \begin{bmatrix} \sin(\mathbf{f}_i) \\ \cos(\mathbf{f}_i) \end{bmatrix} $$
-    where $T_i = \prod_{j < i} (1 - \alpha_j)$ [S1].
-
-5.  **Directional Encoding (Optional):** Encode the ray direction $\mathbf{d}$ using second-degree spherical harmonics $\text{SH}_2(\mathbf{d}) \in \mathbb{R}^9$ [S1]. For indoor/high-parallax datasets, encode the central camera ray instead of the individual ray direction to regularize training [S1].
-
-6.  **Deferred Decoding:** Decode the accumulated implicit signal $\mathbf{H}$ and the directional encoding in a single pass per pixel using the lightweight MLP $\text{MLP}_\theta$ [S1].
-    $$ \mathbf{c} = \text{MLP}_\theta \left( \mathbf{H}, k \cdot \text{SH}_2(\mathbf{d}) \right) $$
-    where $k$ is a scaling factor (not explicitly defined in sources, but implied by concatenation or weighting) [S1]. The MLP does not use further positional encoding [S1].
+    where $\mathbf{f}_i$ is the interpolated feature at $p^*_i$ [S1].
+4.  **Alpha Blending (Accumulation):** Composite the encoded features $\mathbf{h}_i$ along the ray using the primitive's kernel-weighted opacity $\alpha_i$ and accumulated transmittance $T_i$ [S1]. The accumulated harmonic signal $H$ is computed as:
+    $$ H = \sum_{i \in \mathcal{G}} \alpha_i T_i \begin{bmatrix} \sin(\mathbf{f}_i) \\ \cos(\mathbf{f}_i) \end{bmatrix} $$
+    where $\mathcal{G}$ is the set of primitives intersected by the ray, $\alpha_i$ is the primitive opacity, and $T_i$ is the accumulated transmittance [S1].
+5.  **Directional Encoding (Optional):** Encode the ray direction $\mathbf{d}$ using second-degree spherical harmonics $\text{SH}_2(\mathbf{d}) \in \mathbb{R}^9$ [S1].
+    *   *Pitfall/Edge Case:* For indoor/high-parallax datasets, encode the central camera ray instead of the individual ray direction to regularize training [S1].
+6.  **Deferred Decoding:** Decode the accumulated signal $H$ (and optionally the encoded direction) using the lightweight MLP in a single pass per pixel [S1].
+    $$ \mathbf{c} = \text{MLP}_\theta \left( H, k \cdot \text{SH}_2(\mathbf{d}) \right) $$
+    where $k$ is a scaling factor [S1].
 
 **Pseudocode:**
 
@@ -55,108 +53,106 @@ def neural_harmonic_textures(primitives, ray_origin, ray_direction, mlp_weights)
     
     Args:
         primitives: List of primitive objects. Each primitive has:
-            - vertices: List of 4 (or 3 for 2D) feature vectors (numpy arrays).
-            - opacity: Scalar alpha.
-            - get_max_response_point(ray_origin, ray_direction): Returns point p* and barycentric coords.
-        ray_origin: 3D point.
-        ray_direction: Normalized 3D vector.
+            - vertices: List of 3D points defining the virtual scaffold (4 for 3D, 3 for 2D).
+            - vertex_features: List of feature vectors (numpy arrays) for each vertex.
+            - opacity: Scalar alpha value.
+            - get_intersection(ray_origin, ray_direction): Returns (point, barycentric_coords) 
+              or None if no intersection.
+        ray_origin: 3D numpy array.
+        ray_direction: 3D numpy array.
         mlp_weights: Weights for the 128x3 MLP decoder.
         
     Returns:
-        color: 3D vector (RGB).
+        color: 3D numpy array (RGB).
     """
-    # Sort primitives by distance if necessary, though alpha blending order matters
-    # Assuming primitives are sorted by depth or handled by the specific primitive type's rasterization
-    # For standard 3DGS-like splatting, we iterate through sorted primitives
     
-    accumulated_harmonic = np.zeros(2 * 64) # 64 features -> 128 channels (sin + cos)
+    # Step 1 & 2: Intersect and Interpolate Features
+    harmonic_accumulator = np.zeros(128) # 64 sin + 64 cos channels
+    
+    # Sort primitives by distance for correct alpha blending order
+    intersections = []
+    for prim in primitives:
+        result = prim.get_intersection(ray_origin, ray_direction)
+        if result is not None:
+            point, bary_coords = result
+            # Calculate distance from origin
+            dist = np.linalg.norm(point - ray_origin)
+            intersections.append((dist, prim, point, bary_coords))
+            
+    intersections.sort(key=lambda x: x[0])
+    
     transmittance = 1.0
     
-    # Determine directional encoding
-    # Use central camera ray for high-parallax, else ray direction
-    # For simplicity, assume ray_direction is used unless specified otherwise
-    # SH2 encoding of direction
-    sh2_d = spherical_harmonics_degree_2(ray_direction) # Returns 9D vector
-    
-    for prim in primitives:
-        # 1. Find intersection/max response point
-        p_star, barycentric_coords = prim.get_max_response_point(ray_origin, ray_direction)
-        
-        # If no intersection or max response is negligible, skip
-        if p_star is None:
-            continue
+    for dist, prim, point, bary_coords in intersections:
+        # Interpolate vertex features at the intersection point
+        # bary_coords should sum to 1.0 and correspond to prim.vertices
+        f_i = np.zeros(64)
+        for v_idx, weight in enumerate(bary_coords):
+            f_i += weight * prim.vertex_features[v_idx]
             
-        # 2. Interpolate features
-        # Barycentric interpolation of vertex features
-        # prim.vertices is a list of feature vectors (size F)
-        f_i = np.zeros_like(prim.vertices[0])
-        for v_idx, coord in enumerate(barycentric_coords):
-            f_i += coord * prim.vertices[v_idx]
-            
-        # 3. Harmonic Encoding
-        # Encode sin and cos element-wise
-        h_i_sin = np.sin(f_i)
-        h_i_cos = np.cos(f_i)
-        h_i = np.concatenate([h_i_sin, h_i_cos])
+        # Step 3: Harmonic Encoding
+        # Apply sin and cos to the feature vector
+        sin_features = np.sin(f_i)
+        cos_features = np.cos(f_i)
+        h_i = np.concatenate([sin_features, cos_features])
         
-        # 4. Alpha Blending
+        # Step 4: Alpha Blending
         alpha = prim.opacity
-        # Modulate harmonic amplitude by opacity
-        weighted_h = alpha * transmittance * h_i
+        contribution = alpha * transmittance * h_i
+        harmonic_accumulator += contribution
         
-        accumulated_harmonic += weighted_h
         transmittance *= (1.0 - alpha)
         
-        # Early exit if fully opaque
         if transmittance < 1e-4:
             break
             
-    # 5. Deferred Decoding
-    # Concatenate accumulated harmonic and directional encoding
-    # Note: The formula shows concatenation. We assume k=1 or scaling is handled in MLP
-    input_to_mlp = np.concatenate([accumulated_harmonic, sh2_d])
+    # Step 5: Directional Encoding (Standard case)
+    # Encode ray direction with 2nd degree spherical harmonics (9 coefficients)
+    sh2_d = spherical_harmonics_2(ray_direction)
     
-    # Decode using MLP
-    color = mlp_forward(input_to_mlp, mlp_weights)
+    # Step 6: Deferred Decoding
+    # Concatenate harmonic signal and directional encoding
+    input_to_mlp = np.concatenate([harmonic_accumulator, sh2_d])
+    
+    # Simple 3-layer MLP: 128 -> 128 -> 128 -> 3 (RGB)
+    # Assuming mlp_weights is structured as [W1, b1, W2, b2, W3, b3, W4, b4]
+    # W1: 137x128, b1: 128, W2: 128x128, b2: 128, W3: 128x128, b3: 128, W4: 128x3, b4: 3
+    # Note: This is a simplified representation. In practice, weights are loaded from the trained model.
+    
+    x = input_to_mlp
+    x = np.dot(x, mlp_weights[0]) + mlp_weights[1]
+    x = np.maximum(0, x) # ReLU
+    
+    x = np.dot(x, mlp_weights[2]) + mlp_weights[3]
+    x = np.maximum(0, x) # ReLU
+    
+    x = np.dot(x, mlp_weights[4]) + mlp_weights[5]
+    x = np.maximum(0, x) # ReLU
+    
+    color = np.dot(x, mlp_weights[6]) + mlp_weights[7]
     
     return color
 
-def spherical_harmonics_degree_2(direction):
+def spherical_harmonics_2(direction):
     """
-    Computes 2nd degree spherical harmonics for a direction vector.
-    Returns a 9D vector.
+    Computes 2nd degree spherical harmonics for a normalized direction vector.
+    Returns 9 coefficients.
     """
     x, y, z = direction
-    # Standard SH2 basis functions (unnormalized for brevity, normalization constants can be absorbed in MLP)
+    # Standard SH2 basis functions (unnormalized for simplicity, scaling handled in MLP)
     # L0: 1
     # L1: x, y, z
     # L2: xy, xz, yz, x^2-y^2, 3z^2-1 (or similar variants)
-    # Using standard real SH2 basis:
-    sh = np.zeros(9)
-    sh[0] = 1.0 # L0
-    sh[1] = x   # L1
-    sh[2] = y   # L1
-    sh[3] = z   # L1
-    sh[4] = x * y # L2
-    sh[5] = x * z # L2
-    sh[6] = y * z # L2
-    sh[7] = x**2 - y**2 # L2
-    sh[8] = 3 * z**2 - 1 # L2
-    return sh
-
-def mlp_forward(x, weights):
-    """
-    Simple 3-hidden layer MLP (128 wide).
-    weights: List of [W1, b1, W2, b2, W3, b3, W4, b4]
-    """
-    h = x
-    for i in range(3):
-        W, b = weights[2*i], weights[2*i+1]
-        h = np.maximum(0, h @ W.T + b) # ReLU activation
-    # Output layer
-    W_out, b_out = weights[6], weights[7]
-    out = h @ W_out.T + b_out
-    return out
+    # Using common OpenGL/WebGL SH2 order
+    return np.array([
+        1.0,
+        x, y, z,
+        x * y,
+        x * z,
+        y * z,
+        x**2 - y**2,
+        3 * z**2 - 1
+    ])
 ```
 
 **Parameters:**
@@ -164,47 +160,44 @@ def mlp_forward(x, weights):
 *   `MLP architecture`: 128-wide × 3 hidden layers [S1].
 *   `training_iterations`: 30,000 (default for MipNeRF360 benchmark) [S1].
 *   `primitive_cap`: 1,000,000 (1M primitives) [S1].
-*   `indoor_iterations`: 45,000 (for indoor datasets with ~290 images) [S1].
-*   `outdoor_iterations`: 25,000 (for outdoor datasets with ~175 images) [S1].
 
 **Edge Cases and Pitfalls:**
 *   **Convergence Speed:** MLP-based appearance models converge slower than SH-based ones [S1].
-*   **High-Parallax Regularization:** For indoor/high-parallax datasets, encode the central camera ray instead of the individual ray direction to regularize training [S1].
-*   **Semantic Supervision Resolution:** For semantic field reconstruction, the limited resolution of feature maps (e.g., LSEG) requires rendering and predicting at RGB resolution, then bilinearly downsampling the spatial dimension of the resulting feature maps to supervise against ground truth features [S1].
-*   **2D Primitives:** For 2D primitives (2DGS, Triangle Splatting), replace bounding tetrahedra with virtual triangles and anchor feature vectors to explicit triangle geometry, using three feature vectors per primitive instead of four [S1].
+*   **High-Parallax Scenes:** For indoor datasets, encoding the central camera ray instead of the individual ray direction helps regularize training [S1].
+*   **Resolution Limitations:** When supervising against low-resolution feature maps (e.g., LSEG), render and predict at RGB resolution, then bilinearly downsample the spatial dimension of the resulting feature maps to supervise against ground truth features [S1].
 
 ## Subtopics
 
 ### [Neural Harmonic Textures (2D Image Reconstruction Adaptation)](9148-neural-harmonic-textures-2d-image-reconstruction-adaptation.md)
-An adaptation of Neural Harmonic Textures for 2D image fitting that replaces 3D primitives with a connected 2D triangle mesh and modifies the interpolation scheme to eliminate high-frequency artifacts.
+Adapts NHT for 2D image fitting by replacing 3D volumetric primitives with a connected 2D triangle mesh. It uses Clough-Tocher cubic interpolation to ensure feature continuity across triangle edges, removing high-frequency artifacts common in standard barycentric interpolation [9148-neural-harmonic-textures-2d-image-reconstruction-adaptation.md].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   **Memory:** Uses less storage than Spherical Harmonics (SH) and Spherical Voronoi (SV) [S1]. For semantic reconstruction, it uses ~3× lower memory footprint than Feature 3DGS (80 features + 128×3 MLP vs 176 features + 128×512 CNN) [S1].
-*   **Compute:** Significantly reduces computational cost compared to per-primitive MLP decoding by decoding the accumulated signal once per pixel [S1].
+*   **Memory:** Uses less storage than Spherical Harmonics (SH) and Spherical Voronoi (SV) [S1]. For semantic reconstruction, it achieves ~3× lower memory footprint than Feature 3DGS (80 features + 128×3 MLP vs 176 features + 512×128 CNN) [S1].
+*   **Time:** Rendering is real-time. On an RTX A6000 Ada, NHT achieves 140 FPS on MipNeRF360 [S1]. Training takes ~14.5 minutes on MipNeRF360 (1M primitives, RTX 5090) up to 30k iterations [S1].
 
 **Measured Performance:**
-*   **Training Time:** ~14.5 minutes on MipNeRF360 (1M primitives, RTX 5090) up to 30k iterations [S1].
-*   **Rendering Speed:** 140 FPS on RTX A6000 Ada for MipNeRF360 [S1].
-*   **Quality (MipNeRF360):** PSNR 28.74, SSIM 0.834, LPIPS 0.216 [S1].
-*   **Quality (MipNeRF360, RTX A6000 Ada):** PSNR 28.46, SSIM 0.830, LPIPS 0.232 [S1].
-*   **Scaling:** Improves over prior art across all primitive counts (1K to 4M), excelling particularly in the low primitive count regime (≤ 100k) [S1]. Achieves performance comparable to previous methods using 1M primitives with only a third of that amount [S1].
+*   **MipNeRF360 (Offline/High Quality):** PSNR 28.74, SSIM 0.834, LPIPS 0.216 [S1].
+*   **MipNeRF360 (Real-time, RTX A6000 Ada):** PSNR 28.46, SSIM 0.830, LPIPS 0.232, FPS 140 [S1].
+*   **Tanks & Temples:** PSNR 25.68, SSIM 0.882, LPIPS 0.141 [S1].
+*   **Deep Blending:** PSNR 30.94, SSIM 0.919, LPIPS 0.302 [S1].
+
+**Scaling:**
+*   Quality improves with primitive count, excelling in the low primitive count regime (≤ 100k), where deltas upwards of 2dB PSNR are observed compared to prior art [S1]. Performance comparable to previous methods using 1M primitives can be achieved with only a third of that amount [S1].
 
 **Strengths and Limitations:**
-*   **Strengths:** State-of-the-art performance in real-time novel view synthesis; bridges gap between primitive- and neural-field-based reconstruction; agnostic to underlying primitive type (triangles, 2D/3D Gaussians, tetrahedra); supports motion, deformation, and scene editing naturally; extends to higher-dimensional signals (semantic reconstruction) [S1].
-*   **Limitations:** MLP-based appearance models converge slower than SH-based ones [S1]. Limited resolution of semantic feature maps requires specific downsampling strategies for supervision [S1].
+*   **Strengths:** State-of-the-art performance among real-time and offline methods; seamlessly integrates into existing primitive-based pipelines (3DGUT, Triangle Splatting, 2DGS); supports motion, deformation, and scene editing due to primitive-bound features; generalizes to high-dimensional signals (semantic reconstruction) [S1].
+*   **Limitations:** MLP convergence is slower than SH-based methods; limited resolution of external feature maps (e.g., LSEG) requires specific supervision strategies [S1].
 
 **When to Use:**
-*   When high-quality novel view synthesis is required with real-time rendering constraints.
-*   When integrating with existing primitive-based pipelines (3DGUT, Triangle Splatting, 2DGS) to boost expressivity.
-*   When semantic field reconstruction is needed with lower memory footprint than CNN-based approaches.
+*   Use when high-quality novel view synthesis is required with real-time rendering constraints, especially when integrating with existing primitive-based pipelines [S1].
+*   Use for semantic scene reconstruction where memory efficiency is critical [S1].
 
 **When Not to Use:**
-*   When extremely fast convergence is prioritized over final quality (SH-based models converge faster).
-*   When scene editing or motion support is not required and global grids are sufficient (though NHT still offers quality benefits).
+*   Avoid if extremely fast training convergence is prioritized over final quality, as MLP-based models converge slower than SH-based ones [S1].
 
 ## Background
-Neural Harmonic Textures were introduced by Nicolas M. et al. from NVIDIA and Università della Svizzera italiana in 2024 [S1]. The method was presented in the paper "Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction" [S1]. It addresses the limited expressivity of individual primitives in Lagrangian primitive-based approaches like 3D Gaussian Splatting, which struggle with high-frequency detail compared to Eulerian continuous neural radiance fields [S1]. By reinterpreting primitives as both geometric carriers and local positional encodings, NHT anchors latent feature vectors on a virtual scaffold, moving with the primitives to support operations such as motion, deformation, and scene editing [S1]. The approach integrates seamlessly into existing primitive-based pipelines and has been validated on standard novel view synthesis benchmarks (MipNeRF360, Tanks & Temples, Deep Blending) as well as 2D image fitting and semantic reconstruction tasks [S1].
+Neural Harmonic Textures were introduced by researchers from NVIDIA and Università della Svizzera italiana in 2024 [S1]. The method builds on the success of primitive-based approaches like 3D Gaussian Splatting, which displaced continuous neural radiance fields for novel view synthesis due to improved speed and scalability [S1]. NHT addresses the limited expressivity of individual primitives by reinterpreting them as both geometric carriers and local positional encodings, inspired by Fourier analysis [S1]. It integrates seamlessly into pipelines such as 3DGUT, Triangle Splatting, and 2DGS [S1].
 
 ## Sources
 [S1] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26

@@ -97,7 +97,7 @@ def lerp(a: float, b: float, t: float) -> float:
 
 **Edge Cases and Pitfalls:**
 - **Boundary Conditions:** The source code checks if coordinates are outside the grid bounds (`texCoord.x < 0` or `texCoord.x > dataDim.width - 1`, etc.) and returns a default value if true [S1, unofficial].
-- **Precision:** The calculation of `w0/(w0+w1)` and `w3/(w2+w3)` involves division [S1, unofficial]. Not given in the sources.
+- **Precision:** The calculation of `w0/(w0+w1)` and `w3/(w2+w3)` involves division [S1, unofficial]. Not given in the sources [S1, unofficial].
 
 ## Subtopics
 
@@ -108,11 +108,11 @@ This method calculates the coefficients of the multi-variate polynomial that rep
 Computes cubic interpolation weights and fractional offsets for a 1D coordinate, used for higher-order volume interpolation [S1, unofficial]. It computes the integer part $i = \lfloor x \rfloor$ and fractional part $a = x - i$, then calculates powers $a_2 = a^2$ and $a_3 = a^3$ [S1, unofficial]. The weights are $w_0 = -a_3 + 2a_2 - a$, $w_1 = a_3 - 2a_2 + 1$, $w_2 = -a_3 + a_2 + a$, $w_3 = a_3 - a_2$ [S1, unofficial]. It returns a 3D vector containing the fractional offsets for the two texels involved in the interpolation and the sum of weights for normalization [S1, unofficial].
 
 ## Operating characteristics
-- **Time and memory complexity:** Not given in the sources.
-- **Measured performance on specific hardware or resolutions:** Not given in the sources.
-- **Scaling behavior:** Not given in the sources.
-- **Strengths and limitations:** Not given in the sources.
-- **When to use or not use:** Not given in the sources.
+- **Time and memory complexity:** Not given in the sources [S1, unofficial].
+- **Measured performance on specific hardware or resolutions:** Not given in the sources [S1, unofficial].
+- **Scaling behavior:** Not given in the sources [S1, unofficial].
+- **Strengths and limitations:** Not given in the sources [S1, unofficial].
+- **When to use or not use:** Not given in the sources [S1, unofficial].
 
 ## Background
 Cubic Volume Interpolation is implemented in CUDA-based volume rendering pipelines, as seen in the `dtu-2010-cuda-volume-rendering` repository [S1, unofficial]. It extends the concept of trilinear interpolation by using cubic basis functions to determine the interpolation weights, aiming to improve visual smoothness in ray-casted volumes [S1, unofficial].

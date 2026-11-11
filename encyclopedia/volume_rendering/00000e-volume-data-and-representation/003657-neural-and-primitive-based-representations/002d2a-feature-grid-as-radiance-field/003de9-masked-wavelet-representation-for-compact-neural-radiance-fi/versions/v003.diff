@@ -1,0 +1,90 @@
+--- v002.md
++++ v003.md
+@@ -8,13 +8,11 @@
+ ## How it works
+ **Inputs:**
+-- Training images and corresponding camera poses [S1].
+-- Grid resolution parameters ($H, W, D$) and number of ranks ($N_r$) [S1].
++The method takes training images and corresponding camera poses as inputs [S1]. Grid resolution parameters ($H, W, D$) and the number of ranks ($N_r$) are also provided as inputs [S1].
+ 
+ **Outputs:**
+-- Compressed wavelet coefficients and binary masks [S1].
+-- A rendering pipeline that reconstructs spatial grids from these coefficients at test time [S1].
++The method outputs compressed wavelet coefficients and binary masks [S1]. It also provides a rendering pipeline that reconstructs spatial grids from these coefficients at test time [S1].
+ 
+ **Data Structures:**
+-The 3D grid is decomposed into 2D matrices and 1D vectors using matrix-vector decomposition (TensoRF) [S1]. For density (subscript $\sigma$, omitted for brevity), the set is:
++The 3D grid is decomposed into 2D matrices and 1D vectors using matrix-vector decomposition (TensoRF) [S1]. For density (subscript $\sigma$, omitted for brevity), the set is defined as:
+ $$ \gamma_\sigma = \{W_{x,\sigma,r}, W_{y,\sigma,r}, W_{z,\sigma,r}, v_{x,\sigma,r}, v_{y,\sigma,r}, v_{z,\sigma,r}\}_{r=1}^{N_\sigma} $$
+ - $W_{x,r} \in \mathbb{R}^{H \times W}$, $W_{y,r} \in \mathbb{R}^{W \times D}$, $W_{z,r} \in \mathbb{R}^{H \times D}$ are 2D matrices [S1].
+@@ -41,11 +39,12 @@
+ ```python
+ import numpy as np
++import heapq
+ 
+ def nearest_neighbor_upscale(x, factor=2):
+-    """Upscales a 2D array by factor using nearest neighbor interpolation."""
++    """Upscales a 2D array by factor using nearest neighbor interpolation [G]."""
+     return np.repeat(np.repeat(x, factor, axis=0), factor, axis=1)
+ 
+ def cross_correlate_2d(x, kernel):
+-    """Performs 2D cross-correlation with zero-padding."""
++    """Performs 2D cross-correlation with zero-padding [G]."""
+     kh, kw = kernel.shape
+     ph, pw = kh // 2, kw // 2
+@@ -82,5 +81,5 @@
+ 
+ def rle_encode(data):
+-    """Run-length encoding for 1D array."""
++    """Run-length encoding for 1D array [G]."""
+     if len(data) == 0: return []
+     rle = []
+@@ -98,12 +97,19 @@
+ 
+ def huffman_encode(rle_stream):
+-    """Assigns variable-length codes based on frequency [G]."""
++    """Assigns variable-length codes based on frequency using Huffman tree [G]."""
+     freq = {}
+     for val, count in rle_stream:
+         freq[val] = freq.get(val, 0) + count
+-    sorted_items = sorted(freq.items(), key=lambda x: x[1], reverse=True)
+-    codes = {}
+-    for i, (val, _) in enumerate(sorted_items):
+-        codes[val] = format(i, 'b')
++    heap = [[weight, [symbol, ""]] for symbol, weight in freq.items()]
++    heapq.heapify(heap)
++    while len(heap) > 1:
++        lo = heapq.heappop(heap)
++        hi = heapq.heappop(heap)
++        for pair in lo[1:]:
++            pair[1] = '0' + pair[1]
++        for pair in hi[1:]:
++            pair[1] = '1' + pair[1]
++        heapq.heappush(heap, [lo[0] + hi[0]] + lo[1:] + hi[1:])
++    codes = dict(sorted(heapq.heappop(heap)[1:], key=lambda p: (len(p[-1]), p)))
+     bit_stream = ""
+     for val, count in rle_stream:
+@@ -135,9 +141,10 @@
+     for epoch in range(num_epochs):
+         # 1. Multi-level DWT & Scaling [S1]
+-        # In practice, DWT splits matrices into LL, HL, LH, HH quadrants.
+-        # Apply scaling factors s for multi-level DWT [S1].
++        # Group coefficients by decomposition level and apply inverse frequency scaling
+         W_x_scaled = W_x.copy()
+-        W_x_scaled[:, :, 1:] *= 1.0/3.0  # Simplified scaling for high-pass components
+-
++        # Level 1 high-pass (HL1, LH1, HH1) scaled by 1/3
++        W_x_scaled[:, :, 1:] *= 1.0/3.0
++        # Level 2 high-pass would be in deeper splits; scaling logic applies per quadrant group [S1]
++        
+         # 2. Masking with STE [S1]
+         W_x_hat, _ = apply_ste_mask(M_x, W_x_scaled)
+@@ -149,6 +156,6 @@
+ 
+         # 4. Render and compute loss [S1]
+-        # render_from_grids is a standard NeRF rendering step [G]
+-        images = render_from_grids(grid_x, scene_data.cameras)
++        # Standard grid-based NeRF forward pass [G]
++        images = forward_pass_grids(grid_x, scene_data.cameras)
+         loss_r = np.mean((images - scene_data.targets) ** 2)
+ 

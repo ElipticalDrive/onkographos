@@ -3,105 +3,158 @@
 Also called: 2D-Lift-3D Segmentation for Partial Scene Editing, PSE with 2D-lift-3D segmentation
 
 ## Overview
-This method segments 3D Gaussian primitives in a volume visualization scene by lifting 2D segmentation masks from reference views into 3D space. It solves the problem of applying distinct editing effects (color, opacity, lighting) to specific regions of a scene represented by millions of Gaussians. Unlike sibling methods that optimize learnable feature vectors for segmentation [S1], this approach is training-free, relying on multi-view label voting to assign labels to primitives.
+This method segments 3D Gaussian primitives in a volume visualization scene by lifting 2D segmentation masks from reference views into 3D space, enabling partial scene editing [S1]. It differs from sibling methods like [Gaussian Opacity Fields (GOF) Mesh Extraction](3692-gaussian-opacity-fields-gof-mesh-extraction.md) and [Distance-based Gaussian Splatting](7411-distance-based-gaussian-splatting.md) by avoiding mesh extraction or distance field discretization; instead, it operates directly on the volumetric Gaussian primitives using multi-view label voting to assign semantic labels, allowing independent editing of color, opacity, and lighting per segment [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A trained set of $N$ 3D Gaussian primitives $\mathcal{G} = \{g_1, \dots, g_N\}$; a set of training views with known camera poses; a reference view image rendered from the Gaussian splatting pipeline; user-specified point prompts on the reference view.
-*   **Output:** A label assignment $L_i \in \{0, \dots, K\}$ for each Gaussian primitive $g_i$, where $K$ is the number of segmented parts.
+**Inputs:**
+- A trained set of $N$ 3D Gaussian primitives $\mathcal{G} = \{g_1, \dots, g_N\}$, where each $g_i$ has center $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $o_i$, and spherical harmonics coefficients $\mathbf{c}_i$ [Parent].
+- A set of $V$ training view cameras with known extrinsics and intrinsics.
+- A reference view image rendered from the Gaussian scene.
+- User-specified point prompts on the reference view.
+
+**Outputs:**
+- A label assignment $L = \{l_1, \dots, l_N\}$, where $l_i \in \{0, 1, \dots, K\}$ is the semantic label for each Gaussian primitive $g_i$.
 
 **Data Structures:**
-*   **Gaussian Primitive $g_i$:** Defined by center $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $o_i$, and spherical harmonics coefficients $\mathbf{c}_i$ [Parent].
-*   **Label Map:** A 1D array of size $N$ storing the final assigned label for each primitive.
+- **Gaussian List:** Array of size $N$. Each element stores $\boldsymbol{\mu}_i \in \mathbb{R}^3$, $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$ (or its Cholesky factorization/rotation/scale representation), $o_i \in [0,1]$, and $\mathbf{c}_i$.
+- **Label Buffer:** Array of size $N$, initialized to $-1$ (unassigned).
+- **View Masks:** For each training view $v \in \{1, \dots, V\}$, a 2D mask $M_v$ of resolution $H_v \times W_v$, where each pixel $(u,v)$ holds a label ID.
 
 **Steps:**
-1.  **Render Reference View:** Render an image from the current Gaussian representation using the standard differentiable rendering pipeline [Parent].
-2.  **Generate 2D Mask:** Use the Segment Anything Model (SAM) with user-specified point prompts on the rendered reference view to generate a 2D segmentation mask [S1].
-3.  **Generate Multi-View Masks:** Use SAM with the same point prompts (mapped to corresponding locations) on all available training views to generate 2D segmentation masks for each view [S1].
-4.  **Label Propagation:** For each training view, project all $N$ Gaussian primitives into 2D image space. Assign a temporary label to each Gaussian based on which 2D segmentation mask pixel it overlaps with. If a Gaussian overlaps multiple masks or none, handle according to voting rules [S1].
-5.  **Multi-View Label Voting:** For each Gaussian primitive $g_i$, collect the labels assigned from all training views. Determine the final label $L_i$ by majority voting among the views that successfully segmented the primitive [S1].
-6.  **Decomposition:** Group Gaussians by their final label $L_i$ to form distinct 3D segments. These segments can then be independently edited using Partial Scene Editing (PSE) techniques [S1].
+
+1. **Render Reference View:** Render an image $I_{ref}$ from an arbitrary view using the current Gaussian primitives [S1].
+2. **Generate 2D Mask (Reference):** Use the Segment Anything Model (SAM) with user-specified point prompts on $I_{ref}$ to generate a 2D segmentation mask $M_{ref}$ [S1]. Let $K$ be the number of segments identified.
+3. **Generate 2D Masks (Training Views):** For each training view $v \in \{1, \dots, V\}$:
+   a. Render the image $I_v$ from view $v$.
+   b. Use SAM with corresponding point prompts (or transferred prompts) to generate mask $M_v$ [S1]. *Note: The source implies generating masks for "corresponding parts across all training views" [S1]. In practice, this often requires iterative refinement or specific prompt transfer strategies if direct transfer is not supported by SAM's interface.*
+4. **Label Propagation (2D to 3D Candidates):** For each training view $v$:
+   a. For each pixel $(u,v)$ in $M_v$ with label $k > 0$:
+      i. Compute the ray $r$ from the camera center through pixel $(u,v)$.
+      ii. Intersect ray $r$ with the Gaussian primitives. Since Gaussians are volumetric, a primitive $g_i$ is considered "hit" if the ray passes through its effective volume. A common approximation is checking if the distance from the ray to the Gaussian center $\boldsymbol{\mu}_i$ is less than a threshold derived from the covariance $\boldsymbol{\Sigma}_i$ (e.g., $3\sigma$ along the ray direction) [G].
+      iii. For each hit primitive $g_i$, record a vote: `votes[i][k] += 1`.
+5. **Multi-View Label Voting:** For each Gaussian primitive $g_i$:
+   a. Find the label $k^*$ with the maximum vote count: $k^* = \arg\max_k \text{votes}[i][k]$.
+   b. If $\text{votes}[i][k^*] > \tau$ (threshold, e.g., 1), assign $l_i = k^*$. Otherwise, $l_i = 0$ (background/unassigned) [S1].
+6. **Decomposition:** The scene is now decomposed into $K$ groups of Gaussian primitives based on labels $L$.
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def segment_gaussians(gaussians, training_views, reference_view, point_prompts):
+import numpy as np
+
+def ray_gaussian_intersection(ray_origin, ray_direction, gaussian_center, gaussian_cov_inv):
     """
-    gaussians: List of N Gaussian primitives.
-    training_views: List of camera poses and intrinsics for training views.
-    reference_view: Camera pose and intrinsics for the reference view.
-    point_prompts: List of 2D points on the reference view for SAM.
+    Checks if a ray intersects a 3D Gaussian.
+    Uses the Mahalanobis distance from the ray to the Gaussian center.
+    Returns True if the closest point on the ray to the center is within 3 standard deviations.
+    """
+    # Vector from ray origin to Gaussian center
+    oc = gaussian_center - ray_origin
+    
+    # Project oc onto ray direction
+    t = np.dot(oc, ray_direction)
+    
+    # Closest point on ray to Gaussian center
+    closest_point = ray_origin + t * ray_direction
+    
+    # Vector from closest point to Gaussian center
+    diff = gaussian_center - closest_point
+    
+    # Mahalanobis distance squared
+    dist_sq = np.dot(diff, np.dot(gaussian_cov_inv, diff))
+    
+    # Threshold: 3 sigma corresponds to dist_sq < 9
+    return dist_sq < 9.0
+
+def lift_2d_to_3d(gaussians, training_views, masks_2d, point_prompts_ref):
+    """
+    gaussians: List of Gaussian objects with attributes: center, cov_inv, opacity
+    training_views: List of dicts with 'origin', 'directions' (HxWx3), 'intrinsics'
+    masks_2d: List of 2D masks (HxW) for each training view, containing integer labels
+    point_prompts_ref: List of points for SAM on reference view
+    
+    Returns:
+    labels: Array of size N, where labels[i] is the assigned label for gaussian i
     """
     N = len(gaussians)
-    final_labels = [-1] * N  # Initialize with -1 (unassigned)
+    V = len(training_views)
     
-    # Step 1 & 2: Generate 2D mask for reference view
-    # Note: In practice, this requires rendering the image first.
-    ref_image = render_scene(gaussians, reference_view)
-    ref_mask = sam_segment(ref_image, point_prompts)
+    # Initialize vote counts: N gaussians x (K+1) labels (0 is background)
+    # K is determined by the max label in masks_2d
+    max_label = 0
+    for m in masks_2d:
+        max_label = max(max_label, np.max(m))
     
-    # Step 3: Generate masks for all training views
-    # This assumes point prompts can be projected to training views or 
-    # the user provides prompts for each view. The source implies 
-    # "corresponding parts across all training views" are segmented.
-    training_masks = []
-    for view in training_views:
-        view_image = render_scene(gaussians, view)
-        # Assuming prompts are adapted or SAM is run on corresponding regions
-        view_mask = sam_segment(view_image, get_prompts_for_view(view, point_prompts))
-        training_masks.append(view_mask)
-        
+    votes = np.zeros((N, max_label + 1), dtype=int)
+    
+    # Step 1 & 2: Reference view mask generation is assumed done externally via SAM
+    # Step 3: Generate masks for training views (assumed done externally via SAM)
+    
     # Step 4 & 5: Label Propagation and Voting
-    for i in range(N):
-        g = gaussians[i]
-        votes = {}
+    for v_idx in range(V):
+        view = training_views[v_idx]
+        mask = masks_2d[v_idx]
+        H, W = mask.shape
         
-        for view_idx, view in enumerate(training_views):
-            mask = training_masks[view_idx]
+        # Precompute ray directions for this view
+        # Assuming view['directions'] is HxWx3 array of normalized ray directions
+        # and view['origin'] is the camera center
+        ray_origins = np.broadcast_to(view['origin'], (H, W, 3))
+        ray_dirs = view['directions']
+        
+        for i in range(N):
+            g = gaussians[i]
+            # Check intersection for all pixels in this view
+            # Optimization: Only check pixels where mask > 0
+            hit_pixels = np.argwhere(mask > 0)
             
-            # Project Gaussian center to 2D
-            u, v = project_point(g.center, view.projection_matrix, view.intrinsics)
-            
-            # Check if projection is within image bounds
-            if not is_in_bounds(u, v, mask.shape):
-                continue
+            for p in hit_pixels:
+                y, x = p
+                ray_o = ray_origins[y, x]
+                ray_d = ray_dirs[y, x]
                 
-            # Check if the pixel is part of the segmentation
-            label = mask[v, u]
-            
-            # If the pixel is background (label 0) or valid segment
-            if label > 0:
-                votes[label] = votes.get(label, 0) + 1
-                
-        # Step 5: Majority Vote
-        if votes:
-            final_labels[i] = max(votes, key=votes.get)
+                if ray_gaussian_intersection(ray_o, ray_d, g.center, g.cov_inv):
+                    label = mask[y, x]
+                    votes[i, label] += 1
+                    
+    # Step 5: Determine final labels
+    labels = np.zeros(N, dtype=int)
+    for i in range(N):
+        # Find argmax
+        best_label = np.argmax(votes[i])
+        best_vote_count = votes[i, best_label]
+        
+        # Threshold check (G: default threshold not specified, using 1 as minimal vote)
+        if best_vote_count > 1:
+            labels[i] = best_label
         else:
-            final_labels[i] = 0  # Assign to background if not segmented in any view
+            labels[i] = 0 # Background
             
-    return final_labels
+    return labels
 ```
 
 **Parameters:**
-*   **Point Prompts:** User-defined 2D coordinates on the reference view.
-*   **SAM Model:** The specific implementation of Segment Anything Model used for mask generation [S1].
+- **SAM Model:** Used for 2D segmentation [S1].
+- **Threshold $\tau$:** Minimum votes required to assign a label. Not explicitly given in sources; default assumption is $>1$ to require multi-view consistency [G].
+- **Intersection Threshold:** $3\sigma$ (Mahalanobis distance squared < 9) [G].
 
 **Edge Cases and Pitfalls:**
-*   **Inefficiency:** The method cannot immediately generate a 3D segmentation from a single 2D mask created by point prompts. It may require multiple rounds of segmentation for certain scenes, which is inefficient [S1].
-*   **Occlusion:** If a Gaussian is occluded in all training views, it may not receive a label.
-*   **Boundary Precision:** Projecting 3D Gaussians to 2D pixels can lead to ambiguous assignments if the Gaussian spans multiple segments.
+- **Inefficiency:** The method cannot immediately generate a 3D segmentation from 2D masks created with point prompts on a single reference view. It requires multiple rounds of segmentation across multiple views, which is inefficient for certain scenes [S1].
+- **Prompt Accuracy:** Inaccurate or vague point prompts lead to erroneous 2D masks, propagating errors to 3D segmentation [S1].
+- **Ambiguity:** If a Gaussian is intersected by rays from multiple views with conflicting labels, the voting mechanism resolves it, but low-confidence votes may result in unassigned primitives [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by the rendering of $V$ training views and the inference of SAM for each view. Projection and voting are $O(N \cdot V)$.
-*   **Memory Complexity:** $O(N)$ for storing labels. Additional memory for storing $V$ segmentation masks.
-*   **Strengths:** Training-free; does not require optimizing learnable feature vectors per Gaussian; enables real-time partial scene editing (PSE) after segmentation [S1].
-*   **Limitations:** Relies on the accuracy of SAM and the availability of training views; inefficient for scenes requiring multiple segmentation rounds [S1].
-*   **When to use:** When rapid, interactive segmentation of a pre-trained Gaussian scene is needed without retraining or optimizing features.
-*   **When not to use:** When high precision is required for complex occlusions or when training views are insufficient.
+- **Time Complexity:** $O(N \cdot V \cdot P)$, where $N$ is the number of Gaussians, $V$ is the number of training views, and $P$ is the number of non-background pixels in the masks. In practice, $P$ is sparse, but the intersection check is per-pixel per-Gaussian.
+- **Memory Complexity:** $O(N \cdot K)$ for the vote matrix, where $K$ is the number of segments.
+- **Strengths:** Training-free segmentation; allows independent editing of color, opacity, and lighting per segment via the textures attribute and Blinn-Phong model [S1]. Supports post-stylization editing, unlike StyleRF-VolVis [S1].
+- **Limitations:** Inefficient due to multi-view voting and potential need for multiple segmentation rounds; dependent on SAM's accuracy; does not produce a mesh, so it is not suitable for geometry-based operations [S1].
+- **When to use:** When partial scene editing (e.g., changing color of specific objects) is required in a Gaussian-based volume visualization without mesh extraction.
+- **When not to use:** When real-time single-shot segmentation is required, or when mesh geometry is needed for collision detection or physics.
 
 ## Background
-The method was introduced in the context of TexGS-VolVis, a framework for expressive scene editing in volume visualization using 2D Gaussian Splatting [S1]. It builds on prior work in 2D-lift-3D segmentation [5, 8, 25, 35] and specifically adapts the training-free strategy from SAGD [25] for Gaussian primitives. It addresses the limitation of previous methods like StyleRF-VolVis, which could not apply distinct edits to different parts of a basic scene [S1].
+The method was introduced in **TexGS-VolVis** (2025) by the authors of [S1]. It builds on the idea of partial scene editing (PSE) and non-photorealistic style editing (NPSE) in volume visualization. Prior methods like StyleRF-VolVis lacked the ability to edit specific parts of a scene or adjust lighting after stylization [S1]. The 2D-lift-3D approach was inspired by SAGD [25] and other works [5, 8, 35] that integrate learnable features, but TexGS-VolVis adopts a training-free strategy using SAM and multi-view voting [S1].
 
 ## Sources
 [S1] TexGS-VolVis: Expressive Scene Editing for Volume Visualization via Textured Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3634643, fetched 2026-10-30

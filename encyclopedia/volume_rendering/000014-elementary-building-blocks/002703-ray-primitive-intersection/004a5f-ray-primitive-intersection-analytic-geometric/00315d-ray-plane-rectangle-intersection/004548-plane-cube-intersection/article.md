@@ -1,137 +1,116 @@
 # Plane-Cube Intersection
 Also called: Plane-Cube Intersection Volume, Volume from a plane slicing a cube
+
 ## Overview
-A geometric computation to determine the volume of the intersection between a plane and a cube, resulting in an inscribed irregular polyhedron with 3 to 6 intersection points [S1, unofficial]. It extends the method of Salama & Kolb (2005) by constructing an ordered list of face vertices to compute the volume of the resulting irregular polyhedron [S1, unofficial].
+The Plane-Cube Intersection method computes the geometric intersection between an infinite plane and a cube, resulting in an inscribed irregular polygon with 3 to 6 vertices [S1, unofficial]. It is primarily used to calculate the volume of the portion of the cube sliced by the plane, a computation relevant in computational astrophysics for determining partial cell coverage (e.g., by burning fronts) and in solid modeling [S1, unofficial]. Unlike standard ray-primitive intersection which returns a single point or segment, this method constructs the full cross-sectional polygon to enable volume integration [S1, unofficial].
+
 ## How it works
-**Inputs and Outputs**
-*   **Inputs**:
-    *   Cube vertices $\mathbf{V}_i$ (typically a unit cube with enumerated vertices).
-    *   Plane defined by a unit normal vector $\mathbf{\hat{n}}$ and a scalar distance $dl$ from the origin.
-    *   Edges $E_{i \rightarrow j}$ connecting vertices $\mathbf{V}_i$ and $\mathbf{V}_j$.
-*   **Outputs**:
-    *   The volume of the irregular polyhedron formed by the intersection.
-    *   The set of intersection points on the cube edges.
+**Inputs:**
+*   Cube vertices $\mathbf{V}_i$ (typically a unit cube, but the method generalizes).
+*   Plane defined by a unit normal vector $\mathbf{\hat{n}}$ and a scalar distance $dl$ from the origin.
 
-**Data Structures**
-*   **Vertices**: A list of 8 3D coordinates for the cube vertices $\mathbf{V}_1$ through $\mathbf{V}_8$.
-*   **Edges**: A list of vertex pairs $(i, j)$ defining the 12 edges of the cube.
-*   **Intersection Points**: A list of 3D coordinates where the plane intersects the cube edges.
+**Outputs:**
+*   An ordered list of intersection points forming the polygon vertices.
+*   The volume of the polyhedron defined by the plane and the cube.
 
-**Steps**
-1.  **Define the Plane**: The plane is defined by the length of the normal ray $dl$ and spherical angles $0 \le \theta \le 2\pi$ and $0 \le \phi \le \pi$ [S1, unofficial]. The Cartesian coordinates of the normal ray $\mathbf{n}$ are:
-    $$ \mathbf{n}= [dl \cos(\theta), \ dl \sin(\theta)\sin(\phi), \ dl \cos(\phi) ] $$
+**Data Structures:**
+*   **Plane Definition:** The plane is defined using spherical angles $\theta$ and $\phi$ and a length $dl$. The normal vector $\mathbf{n}$ (before normalization) is:
+    $$ \mathbf{n} = [dl \cos(\theta), \ dl \sin(\theta)\sin(\phi), \ dl \cos(\phi) ] $$
+    The unit normal is $\mathbf{\hat{n}} = \mathbf{n} / \|\mathbf{n}\|$ [S1, unofficial].
     The plane equation is:
     $$ dl = \mathbf{\hat{n}} \cdot \mathbf{x} $$
-    where $\mathbf{\hat{n}}$ is the unit normal vector derived from $\mathbf{n}$ [S1, unofficial].
+    where $\mathbf{x}$ is a point on the plane [S1, unofficial].
 
-2.  **Iterate Over Edges**: For each edge $E_{i \rightarrow j}$ between vertices $\mathbf{V}_i$ and $\mathbf{V}_j$:
-    *   The edge is described by the line:
-        $$ E_{i \rightarrow j} = \mathbf{V}_i + \lambda ( \mathbf{V}_j - \mathbf{V}_i ) $$
-    *   Calculate the intersection parameter $\lambda$:
-        $$ \lambda = \frac{ dl - \mathbf{\hat{n}} \cdot \mathbf{V}_i }{\mathbf{\hat{n}} \cdot (\mathbf{V}_j - \mathbf{V}_i ) } $$
-    *   **Check Validity**: An intersection exists only if $0 \le \lambda \le 1$ [S1, unofficial]. If valid, the intersection point is $\mathbf{P} = \mathbf{V}_i + \lambda ( \mathbf{V}_j - \mathbf{V}_i )$. Add $\mathbf{P}$ to the list of intersection points.
+*   **Edge Representation:** Each edge $E_{i \rightarrow j}$ connects vertex $\mathbf{V}_i$ to $\mathbf{V}_j$ and is parameterized by $\lambda$:
+    $$ E_{i \rightarrow j}(\lambda) = \mathbf{V}_i + \lambda (\mathbf{V}_j - \mathbf{V}_i) $$
+    where $0 \le \lambda \le 1$ [S1, unofficial].
 
-3.  **Construct Polyhedron**: The intersection points form an irregular polygon (3 to 6 vertices) on the surface of the cube. To compute the volume, construct an ordered list of the face vertices of the resulting irregular polyhedron [S1, unofficial]. This involves determining which vertices of the cube are on one side of the plane and using the intersection points to define the new faces.
+**Steps:**
+1.  **Define Plane:** Calculate $\mathbf{\hat{n}}$ from $\theta, \phi, dl$ using the spherical coordinate conversion [S1, unofficial].
+2.  **Iterate Edges:** For each of the 12 edges of the cube, defined by vertex pairs $(\mathbf{V}_i, \mathbf{V}_j)$:
+    a. Calculate the denominator $D = \mathbf{\hat{n}} \cdot (\mathbf{V}_j - \mathbf{V}_i)$.
+    b. If $D \approx 0$, the edge is parallel to the plane; skip or handle as degenerate [G].
+    c. Calculate the intersection parameter $\lambda$:
+       $$ \lambda = \frac{ dl - \mathbf{\hat{n}} \cdot \mathbf{V}_i }{ \mathbf{\hat{n}} \cdot (\mathbf{V}_j - \mathbf{V}_i ) } $$
+    d. **Validation:** Check if $0 \le \lambda \le 1$. If true, the plane intersects the edge segment within the cube. Compute the intersection point $\mathbf{P} = \mathbf{V}_i + \lambda (\mathbf{V}_j - \mathbf{V}_i)$ [S1, unofficial].
+3.  **Construct Polygon:** Collect all valid intersection points. The method requires constructing an *ordered* list of these face vertices to compute the volume [S1, unofficial]. The number of vertices ranges from 3 to 6 [S1, unofficial].
+4.  **Compute Volume:** Use the ordered vertices to calculate the volume of the resulting irregular polyhedron [S1, unofficial].
 
-4.  **Compute Volume**: Calculate the volume of the irregular polyhedron defined by the ordered list of vertices. The specific algorithm for this volume calculation is not detailed in the source, but it relies on the ordered vertex list [S1, unofficial].
-
-**Parameters**
-*   $dl$: Length of the normal ray (distance from origin to plane).
-*   $\theta$: Spherical angle, $0 \le \theta \le 2\pi$.
-*   $\phi$: Spherical angle, $0 \le \phi \le \pi$.
-
-**Edge Cases and Pitfalls**
-*   **Degenerate Intersections**: If the denominator $\mathbf{\hat{n}} \cdot (\mathbf{V}_j - \mathbf{V}_i )$ is zero, the edge is parallel to the plane. No unique intersection point exists on that edge segment.
-*   **Precision**: Numerical stability may be an issue when $\lambda$ is very close to 0 or 1.
-*   **Vertex Ordering**: The correct volume calculation depends on the correct ordering of the intersection points and cube vertices to form a valid polyhedron. The source mentions "wild patterns" in the number of vertices as a function of $\theta$ and $\phi$, indicating complex topological changes [S1, unofficial].
-
-**Pseudocode**
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def plane_cube_intersection(cube_vertices, theta, phi, dl):
-    """
-    Computes the volume of the intersection between a plane and a cube.
+    # 1. Define plane normal
+    # n is the unnormalized vector from spherical coords
+    n_x = dl * cos(theta)
+    n_y = dl * sin(theta) * sin(phi)
+    n_z = dl * cos(phi)
     
-    Args:
-        cube_vertices: List of 8 3D tuples representing cube vertices V1 to V8.
-        theta: Spherical angle for plane normal (0 to 2*pi).
-        phi: Spherical angle for plane normal (0 to pi).
-        dl: Distance from origin to plane.
-        
-    Returns:
-        Volume of the intersecting polyhedron.
-    """
-    # 1. Define Plane Normal
-    # n = [dl * cos(theta), dl * sin(theta) * sin(phi), dl * cos(phi)]
-    # n_hat = n / |n|
-    # Note: Since dl is the distance, |n| should be 1 if dl is the magnitude of the normal vector.
-    # However, the formula defines n as the vector with length dl.
-    # So n_hat = n / dl.
-    nx = dl * math.cos(theta)
-    ny = dl * math.sin(theta) * math.sin(phi)
-    nz = dl * math.cos(phi)
+    # Normalize to get unit normal n_hat
+    norm = sqrt(n_x**2 + n_y**2 + n_z**2)
+    n_hat = (n_x / norm, n_y / norm, n_z / norm)
     
-    # Unit normal vector
-    n_hat_x = nx / dl
-    n_hat_y = ny / dl
-    n_hat_z = nz / dl
-    
-    # 2. Find Intersection Points on Edges
     intersection_points = []
     
-    # Define edges as pairs of vertex indices (0-based for implementation, assuming V1 is index 0)
-    # Standard cube edges: (0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4),
-    #                       (0,4), (1,5), (2,6), (3,7)
-    # This mapping depends on the specific vertex enumeration of the cube.
-    # The source mentions "front vertex V1 to back vertex V8" and "three independent paths".
-    # We assume a standard cube vertex ordering for this example.
-    edges = [
-        (0, 1), (1, 2), (2, 3), (3, 0), # Front face
-        (4, 5), (5, 6), (6, 7), (7, 4), # Back face
-        (0, 4), (1, 5), (2, 6), (3, 7)  # Connecting edges
-    ]
+    # 2. Iterate over all 12 edges of the cube
+    # Edges are defined by pairs of vertex indices (i, j)
+    edges = get_cube_edges(cube_vertices) 
     
-    for i, j in edges:
-        Vi = cube_vertices[i]
-        Vj = cube_vertices[j]
-        
+    for V_i, V_j in edges:
         # Edge vector
-        dx = Vj[0] - Vi[0]
-        dy = Vj[1] - Vi[1]
-        dz = Vj[2] - Vi[2]
+        edge_vec = (V_j.x - V_i.x, V_j.y - V_i.y, V_j.z - V_i.z)
         
-        # Denominator: n_hat . (Vj - Vi)
-        denom = n_hat_x * dx + n_hat_y * dy + n_hat_z * dz
+        # Denominator: n_hat . (V_j - V_i)
+        denom = dot(n_hat, edge_vec)
         
-        if abs(denom) > 1e-9: # Avoid division by zero
-            # Numerator: dl - n_hat . Vi
-            num = dl - (n_hat_x * Vi[0] + n_hat_y * Vi[1] + n_hat_z * Vi[2])
-            lam = num / denom
+        # Avoid division by zero (parallel edge)
+        if abs(denom) < epsilon:
+            continue
             
-            if 0 <= lam <= 1:
-                # Intersection point
-                px = Vi[0] + lam * dx
-                py = Vi[1] + lam * dy
-                pz = Vi[2] + lam * dz
-                intersection_points.append((px, py, pz))
+        # Numerator: dl - n_hat . V_i
+        # Note: The source defines plane as dl = n_hat . x
+        # So dl - n_hat . V_i is the offset of V_i from the plane along normal
+        num = dl - dot(n_hat, V_i)
+        
+        # Calculate lambda
+        lam = num / denom
+        
+        # 3. Validation: Check if intersection is within the edge segment
+        if 0.0 <= lam <= 1.0:
+            # Compute intersection point
+            P_x = V_i.x + lam * edge_vec.x
+            P_y = V_i.y + lam * edge_vec.y
+            P_z = V_i.z + lam * edge_vec.z
+            intersection_points.append((P_x, P_y, P_z))
+            
+    # 4. Order vertices and compute volume
+    # The source states an ordered list is required for volume calculation.
+    # The specific ordering algorithm is not detailed in the provided text.
+    ordered_vertices = order_polygon_vertices(intersection_points)
+    volume = compute_polyhedron_volume(ordered_vertices, cube_vertices)
     
-    # 3. Compute Volume
-    # The source states that the volume is computed from an ordered list of face vertices.
-    # The specific algorithm for this is not provided in the source.
-    # This is a placeholder for the volume calculation step.
-    # [G] A common method is to decompose the polyhedron into tetrahedra or use the divergence theorem.
-    # Since the source does not provide this, we cannot implement it fully.
-    # We return the number of intersection points as a proxy for the result structure.
-    return len(intersection_points) # Placeholder
+    return ordered_vertices, volume
 ```
+
+**Parameters:**
+*   $\theta$: Azimuthal angle, $0 \le \theta \le 2\pi$ [S1, unofficial].
+*   $\phi$: Polar angle, $0 \le \phi \le \pi$ [S1, unofficial].
+*   $dl$: Length of the normal ray (distance from origin to plane) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Parallel Edges:** If $\mathbf{\hat{n}} \cdot (\mathbf{V}_j - \mathbf{V}_i) = 0$, the edge is parallel to the plane. The source does not specify handling for coplanar edges, only that intersection requires $0 \le \lambda \le 1$ [S1, unofficial].
+*   **Vertex Ordering:** The source emphasizes that constructing an *ordered* list of vertices is critical for volume computation, but does not provide the specific sorting algorithm [S1, unofficial].
+*   **Polygon Complexity:** The number of vertices in the intersecting polygon can vary between 3 and 6, showing "wild patterns" with respect to $\theta$ and $\phi$ [S1, unofficial].
+
 ## Operating characteristics
-*   **Time Complexity**: Linear with respect to the number of edges (constant for a cube, 12 edges).
-*   **Memory Complexity**: Constant, storing a small number of intersection points.
-*   **Strengths**: Simple geometric computation, applicable to solid modeling and computational astrophysics.
-*   **Limitations**: The volume calculation step requires an additional algorithm not detailed in the source. The number of vertices of the intersecting polygon can change abruptly, leading to complex topological changes [S1, unofficial].
-*   **When to Use**: When the volume of a plane-cube intersection is needed, particularly in contexts like partial ionization calculations in astrophysics.
+*   **Complexity:** The method iterates over a fixed number of cube edges (12), making it $O(1)$ with respect to scene complexity, but dependent on the cube's topology.
+*   **Performance:** The source does not provide measured performance metrics or hardware specifics [S1, unofficial].
+*   **Strengths:** Provides exact geometric volume for partial cell coverage in astrophysical simulations [S1, unofficial].
+*   **Limitations:** Requires explicit vertex ordering for volume calculation, which is not trivial for irregular polygons [S1, unofficial]. The number of vertices changes discontinuously, which may complicate gradient-based optimizations [S1, unofficial].
+
 ## Background
-The method is described in the context of computer graphics, solid modeling, and computational astrophysics (e.g., fraction of cell that may be partial ionized or covered by a burning front) [S1, unofficial]. It extends the idea in Salama & Kolb (2005) by constructing an ordered list of the face vertices, and hence the volume of the irregular polyhedron [S1, unofficial]. The tool `cube_and_plane.tbz` is mentioned as a reference implementation [S1, unofficial].
+The method was presented by F.X. Timmes in the context of computational astrophysics, specifically for calculating the fraction of a cell that is partially ionized or covered by a burning front [S1, unofficial]. It extends the idea from Salama & Kolb (2005) by explicitly constructing an ordered list of face vertices to compute the volume of the irregular polyhedron resulting from the plane slicing the cube [S1, unofficial]. The tool `cube_and_plane.tbz` is provided as a reference implementation [S1, unofficial].
+
 ## Sources
 [S1] volume of intersection between a plane and a cube - cococubed, https://cococubed.com/code_pages/raybox.shtml, fetched 2026-10-29 (unofficial)

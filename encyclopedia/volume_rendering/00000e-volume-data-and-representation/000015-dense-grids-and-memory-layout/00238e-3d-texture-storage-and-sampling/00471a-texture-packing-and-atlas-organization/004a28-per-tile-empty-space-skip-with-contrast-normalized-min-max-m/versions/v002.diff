@@ -1,0 +1,313 @@
+--- v001.md
++++ v002.md
+@@ -4,224 +4,111 @@
+ 
+ ## Overview
+-This method is a rendering-side optimization that skips raymarch stepping through resident-but-empty tiles by comparing tile-local density bounds against a global contrast floor [S1, unofficial]. It solves the gap left by residency/LOD-walk skipping, which only skips unloaded space [S1, unofficial]. Unlike its siblings which focus on memory packing, this method operates on resident tiles to reduce shader execution time without evicting data or touching the wanted set [S1, unofficial].
++This method is a rendering-side optimization that skips raymarch stepping through resident-but-empty tiles by comparing tile-local density bounds against a global contrast floor [S1, unofficial]. It solves the gap left by residency/LOD-walk skipping, which only skips unloaded space, by allowing the raymarcher to bypass empty regions within already-loaded data [S1, unofficial]. It differs from its siblings, which focus on memory packing, by operating on the raymarching logic itself, using metadata to avoid unnecessary sampling and shading calculations [S1, unofficial].
+ 
+ ## How it works
+-### Inputs and Outputs
+-**Inputs:**
+-*   Volume density data stored in R16Float chunks.
+-*   A global contrast floor value (`contrast_min`), recomputed every frame.
+-*   A skip toggle flag (`skip_empty`), defaulting to enabled.
+-*   Tile metadata: minimum and maximum density values for each resident tile, stored in a parallel texture.
++**Inputs and Outputs:**
++*   **Input:** Raymarcher state (position, direction, step size), tile resolution, global contrast floor (`contrast_min`), and a toggle flag (`skip_empty`).
++*   **Output:** Updated ray position (advanced past empty tiles) and raymarch result (value, LOD, tile_max).
+ 
+-**Outputs:**
+-*   Raymarch step advancement: either a standard step or a jump to the tile's far boundary if the tile is determined to be empty.
+-*   Shader return tuple: `(value, lod, tile_max)` from the volume sampling functions.
++**Data Structures:**
++1.  **Metadata Texture:** A parallel `Rg8Unorm` texture with the same dimensions as the `PageTable`. It holds each resident tile's (min, max) density values in the contrast-normalized [0, 1] range.
++    *   Channel `.r`: Minimum density value.
++    *   Channel `.g`: Maximum density value.
++    *   Binding: Group 1, Binding 8.
++    *   Filtering: Non-filtering (nearest neighbor).
++    *   Format: Float D2Array (2D Array of floats, though stored as Rg8Unorm for upload efficiency, sampled as float) [S1, unofficial].
++2.  **Tile Min/Max Map (`tile_minmax`):** A CPU-side cache mirroring the `slot_map`'s lifetime. It stores the computed (min, max) tuples for resident tiles.
++    *   Insert: On upload.
++    *   Remove: On eviction/scrub.
++    *   Default: If a tile's metadata is absent (e.g., initial load), it defaults to `(0, 1)`, meaning "never skip" [S1, unofficial].
+ 
+-### Data Structures
+-1.  **Metadata Texture:**
+-    *   Format: `Rg8Unorm` (8-bit unsigned normalized integer for each channel).
+-    *   Dimensions: Identical to the `PageTable` dimensions.
+-    *   Layout:
+-        *   `.r` channel: Minimum density value, normalized to `[0, 1]`.
+-        *   `.g` channel: Maximum density value, normalized to `[0, 1]`.
+-    *   Binding: Bound at `group(1) binding 8` in the shader [S1, unofficial].
+-    *   Sampling: Non-filtering (nearest neighbor) `Float D2Array` [S1, unofficial].
++**Numbered Steps:**
++1.  **Compute Tile Min/Max:** During data upload, the `compute_tile_min_max` function scans the `R16Float` chunk corresponding to a tile to determine the minimum and maximum density values for that tile [S1, unofficial].
++2.  **Cache Metadata:** The computed (min, max) values are inserted into the `tile_minmax` map. The parallel metadata texture is updated with these values normalized to [0, 1] [S1, unofficial].
++3.  **Shader Sampling:** When the raymarcher resolves a tile (`try_lod`/`sample_vvt`), it reads the metadata texture at the tile's coordinate. The function returns a tuple `(value, lod, tile_max)`, where `tile_max` is the value from the `.g` channel of the parallel metadata texel [S1, unofficial].
++4.  **Skip Condition Check:** In `fs_translucent` mode 0, if the `skip_empty` flag is enabled and `tile_max < contrast_min + ε`, the tile is considered empty [S1, unofficial].
++5.  **Skip Advancement:** If the skip condition is met, the ray advances to the resolved tile's far boundary using `tile_skip_advance`.
++6.  **Clamp Advancement:** The advancement is clamped to `step_size` to ensure grazing rays still make progress and do not skip over the entire tile in one step, which could cause visual artifacts [S1, unofficial].
++7.  **Fallback:** If the skip condition is not met, or if debug/other render modes are active, the ray steps verbatim through the tile [S1, unofficial].
+ 
+-2.  **Tile Min/Max Map (`tile_minmax`):**
+-    *   A CPU-side cache mirroring the lifetime of `slot_map` [S1, unofficial].
+-    *   Keys: Tile identifiers.
+-    *   Values: Tuple `(min, max)` in contrast-normalized `[0, 1]` range.
+-    *   Management:
+-        *   Insert on upload.
+-        *   Remove on eviction/scrub.
+-        *   Default value if absent: `(0, 1)` (meaning "never skip") [S1, unofficial].
++**Formulas:**
++*   **Normalization:** $v_{norm} = \frac{v - v_{min\_global}}{v_{max\_global} - v_{min\_global}}$ (Implicit in the contrast-normalized [0,1] range, though exact global bounds are not specified, the metadata stores values in this range) [S1, unofficial].
++*   **Skip Condition:** $tile\_max < contrast\_min + \epsilon$ [S1, unofficial].
++*   **Advancement:** $pos_{new} = pos_{old} + \min(tile\_skip\_advance, step\_size) \cdot direction$ [S1, unofficial].
+ 
+-### Parameters
+-*   **`contrast_min`**: The global contrast floor. Computed every frame. [S1, unofficial].
+-*   **`step_size`**: The current raymarch step size. [S1, unofficial].
+-*   **`skip_empty`**: Boolean flag in `VolumeUniforms` (repurposing `_pad0`). Controlled via `VolumeCore::set_skip_empty`. Default: `true`. Exposed via `K` key in native renderer and `setSkipEmpty` in web WASM wrappers [S1, unofficial].
+-*   **`ε` (epsilon)**: A small numerical tolerance added to `contrast_min` for comparison. [S1, unofficial].
++**Parameters:**
++*   `contrast_min`: Global contrast floor. Recomputed every frame.
++*   `skip_empty`: Toggle flag in `VolumeUniforms` (repurposing `_pad0`). Default: On. Exposed via `K` key in native renderer and `setSkipEmpty` in web WASM wrappers [S1, unofficial].
++*   `ε`: Small epsilon for floating-point comparison. Not given in the sources.
+ 
+-### Numbered Steps
++**Pitfalls:**
++*   **Grazing Rays:** Without clamping `tile_skip_advance` to `step_size`, grazing rays might skip over the entire tile in one step, potentially missing boundaries or causing visual artifacts [S1, unofficial].
++*   **Missing Metadata:** If a tile's metadata is absent from the `tile_minmax` map, it defaults to `(0, 1)`, ensuring the tile is never skipped incorrectly [S1, unofficial].
+ 
+-1.  **Compute Tile Min/Max (Upload Phase):**
+-    *   During data upload, invoke `compute_tile_min_max` on the R16Float chunk for the tile.
+-    *   Determine the minimum and maximum density values within the tile.
+-    *   Normalize these values to the `[0, 1]` range based on the current contrast settings.
+-    *   Store the normalized `(min, max)` tuple in the `tile_minmax` map.
+-    *   Update the parallel `Rg8Unorm` metadata texture with these values at the corresponding tile coordinate [S1, unofficial].
++**Pseudocode:**
++```python
++# Pseudocode for the raymarcher's tile processing step
+ 
+-2.  **Shader Sampling (Raymarch Phase):**
+-    *   Call `try_lod` or `sample_vvt` to sample the volume at the current ray position.
+-    *   These functions now return a tuple `(value, lod, tile_max)`.
+-    *   `tile_max` is read from the `.g` channel of the parallel metadata texel corresponding to the currently resident tile [S1, unofficial].
++def process_tile(ray, tile_coord, metadata_texture, step_size, contrast_min, skip_empty_enabled):
++    """
++    Processes a single tile for raymarching.
++    Returns: (new_ray_position, value, lod, tile_max)
++    """
++    # 1. Sample metadata
++    # Metadata texture is bound at group(1) binding 8, non-filtering Float D2Array
++    # Returns (min_norm, max_norm) in [0, 1] range
++    min_norm, max_norm = metadata_texture.sample(tile_coord)
++    
++    # 2. Check skip condition
++    # Only applies in fs_translucent mode 0 and if skip_empty is enabled
++    if skip_empty_enabled and max_norm < contrast_min + EPSILON:
++        # 3. Skip the tile
++        # Calculate distance to far boundary of the tile
++        tile_skip_distance = calculate_tile_far_boundary_distance(ray, tile_coord)
++        
++        # Clamp advancement to step_size to prevent grazing ray artifacts
++        advance_distance = min(tile_skip_distance, step_size)
++        
++        # Advance ray
++        new_ray_pos = ray.position + advance_distance * ray.direction
++        
++        # Return a marker or default value indicating skip
++        # The actual value/lod are not computed for this tile
++        return (new_ray_pos, 0.0, 0, max_norm)
++    
++    else:
++        # 4. Step verbatim (or use residency/LOD-walk logic if applicable)
++        # This part is handled by the parent method's logic or standard raymarching
++        # For this method, we just return the metadata for potential future use
++        # The actual stepping is done by the caller or parent method
++        return (ray.position, 0.0, 0, max_norm)
+ 
+-3.  **Skip Condition Check:**
+-    *   If `skip_empty` is `false`, or if the render mode is not `fs_translucent mode 0`, or if debug modes are active, proceed with standard stepping [S1, unofficial].
+-    *   Otherwise, check if `tile_max < contrast_min + ε`.
+-    *   If the condition is true, the tile is considered empty relative to the contrast floor.
+-
+-4.  **Skip Advancement:**
+-    *   If the skip condition is met, jump the ray to the resolved tile's far boundary using `tile_skip_advance`.
+-    *   **Crucial:** Clamp the advancement distance to `step_size` to ensure grazing rays still make progress and do not skip over boundaries entirely [S1, unofficial].
+-    *   Continue raymarching from the new position [S1, unofficial].
+-
+-### Pseudocode
+-
+-```python
+-# CPU Side: Upload and Metadata Management
+-
+-def compute_tile_min_max(r16_float_chunk):
++def compute_tile_min_max(chunk_data):
+     """
+     Scans an R16Float chunk to find min and max density values.
+-    Returns (min_val, max_val) in original density units.
+     """
+     min_val = infinity
+     max_val = -infinity
+-    for density in r16_float_chunk:
+-        if density < min_val:
+-            min_val = density
+-        if density > max_val:
+-            max_val = density
++    
++    for value in chunk_data:
++        if value < min_val:
++            min_val = value
++        if value > max_val:
++            max_val = value
++            
+     return (min_val, max_val)
+-
+-def normalize_to_contrast(val, contrast_min, contrast_max):
+-    """
+-    Normalizes a density value to [0, 1] range based on contrast bounds.
+-    """
+-    if contrast_max == contrast_min:
+-        return 0.0
+-    normalized = (val - contrast_min) / (contrast_max - contrast_min)
+-    # Clamp to [0, 1]
+-    return max(0.0, min(1.0, normalized))
+-
+-def update_tile_metadata(tile_id, r16_float_chunk, contrast_min, contrast_max):
+-    """
+-    Updates the tile_minmax map and the parallel metadata texture.
+-    """
+-    (min_val, max_val) = compute_tile_min_max(r16_float_chunk)
+-    
+-    min_norm = normalize_to_contrast(min_val, contrast_min, contrast_max)
+-    max_norm = normalize_to_contrast(max_val, contrast_min, contrast_max)
+-    
+-    # Update CPU cache
+-    tile_minmax[tile_id] = (min_norm, max_norm)
+-    
+-    # Update GPU metadata texture (Rg8Unorm)
+-    # r_channel = min_norm, g_channel = max_norm
+-    metadata_texture.set_tile(tile_id, (min_norm, max_norm))
+-
+-def remove_tile_metadata(tile_id):
+-    """
+-    Removes metadata on eviction/scrub.
+-    """
+-    if tile_id in tile_minmax:
+-        del tile_minmax[tile_id]
+-    # Note: GPU texture update may be deferred or batched
+-
+-def get_tile_metadata(tile_id):
+-    """
+-    Retrieves metadata, defaulting to (0, 1) if absent.
+-    """
+-    if tile_id in tile_minmax:
+-        return tile_minmax[tile_id]
+-    else:
+-        return (0.0, 1.0) # Default: never skip
+-
+-# GPU Side: Raymarch Shader Logic (Pseudo-WGSL/Python-like)
+-
+-def sample_vvt(ray_origin, ray_direction, current_pos, page_table, metadata_texture):
+-    """
+-    Samples the volume at current_pos.
+-    Returns (value, lod, tile_max).
+-    """
+-    # Determine which tile the current_pos falls into
+-    tile_id = page_table.get_tile_id(current_pos)
+-    
+-    # Sample the actual volume data
+-    value = volume_data.sample(ray_origin, ray_direction, current_pos)
+-    lod = page_table.get_lod(tile_id)
+-    
+-    # Read tile_max from the parallel metadata texture (.g channel)
+-    # metadata_texture is bound at group(1) binding 8
+-    metadata_texel = metadata_texture.sample_nearest(tile_id)
+-    tile_max = metadata_texel.g
+-    
+-    return (value, lod, tile_max)
+-
+-def raymarch_step(ray_origin, ray_direction, current_pos, step_size, contrast_min, skip_empty, render_mode):
+-    """
+-    Performs a single raymarch step, potentially skipping empty tiles.
+-    """
+-    # Check if skipping is enabled and appropriate mode
+-    if not skip_empty:
+-        return current_pos + ray_direction * step_size
+-    
+-    if render_mode != "fs_translucent_mode_0":
+-        return current_pos + ray_direction * step_size
+-    
+-    # Sample volume and get tile metadata
+-    (value, lod, tile_max) = sample_vvt(ray_origin, ray_direction, current_pos, page_table, metadata_texture)
+-    
+-    # Skip condition: tile_max < contrast_min + epsilon
+-    epsilon = 1e-6 # Small numerical tolerance
+-    if tile_max < contrast_min + epsilon:
+-        # Tile is empty relative to contrast floor
+-        # Jump to the far boundary of the current tile
+-        far_boundary = page_table.get_tile_far_boundary(current_pos)
+-        
+-        # Calculate distance to far boundary
+-        dist_to_far = length(far_boundary - current_pos)
+-        
+-        # Clamp advancement to step_size to prevent grazing rays from skipping entirely
+-        # This ensures progress
+-        actual_advance = min(dist_to_far, step_size)
+-        
+-        # Advance the ray
+-        new_pos = current_pos + normalize(ray_direction) * actual_advance
+-        
+-        # If we hit the far boundary exactly, we might need to handle the next tile
+-        # The tile_skip_advance function handles the logic of resolving the next tile
+-        return tile_skip_advance(new_pos, ray_direction, step_size)
+-    else:
+-        # Tile has content, step normally
+-        return current_pos + ray_direction * step_size
+-
+-def tile_skip_advance(pos, ray_direction, step_size):
+-    """
+-    Advances the ray to the resolved tile's far boundary, clamped to step_size.
+-    This is a helper for the skip logic.
+-    """
+-    # Resolve the tile at the new position
+-    # If the ray is still within the same tile, advance by step_size
+-    # If it crossed a boundary, resolve the new tile and continue
+-    # This function ensures that grazing rays make progress
+-    # Implementation details depend on the specific page table structure
+-    # For the purpose of this article, we assume it returns the next valid position
+-    return pos + ray_direction * step_size
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Grazing Rays:** Without clamping `tile_skip_advance` to `step_size`, grazing rays might skip over the entire tile in one step, potentially missing boundaries or causing visual artifacts. The clamp ensures progress [S1, unofficial].
+-*   **Missing Metadata:** If a tile's metadata is absent from the `tile_minmax` map (e.g., during initial load or specific refresh paths), it defaults to `(0, 1)`, ensuring the tile is never skipped incorrectly [S1, unofficial].
+-*   **Debug Modes:** Debug modes and other render modes step verbatim, ignoring the skip [S1, unofficial].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces the number of texture samples and shader computations for empty tiles. The complexity of the skip check is O(1) per step.
+-*   **Memory Complexity:** Adds a parallel `Rg8Unorm` metadata texture, doubling the memory footprint for the page table metadata. The `tile_minmax` map adds CPU memory proportional to the number of resident tiles.
+-*   **Performance:** Provides a measurable reduction in render-pass time for sparse datasets, as confirmed by A/B testing with GPU frame captures [S1, unofficial].
+-*   **Strengths:**
+-    *   Operates on resident tiles, avoiding the overhead of residency management for empty space.
+-    *   Coupling the threshold to the contrast floor is safe and requires zero re-streaming [S1, unofficial].
+-    *   Does not conflict with residency-layer empty-tile dropping rules [S1, unofficial].
+-*   **Limitations:**
+-    *   Only effective when tiles are resident.
+-    *   Requires additional memory for metadata.
+-    *   Does not handle the case of completely unloaded space (handled by residency/LOD-walk skipping) [S1, unofficial].
+-*   **When to Use:** Use when rendering sparse volumes with significant empty space, and residency/LOD-walk skipping is already in place. It is particularly effective when the contrast floor can effectively filter out noise or low-density regions.
+-*   **When Not to Use:** Do not use if memory is extremely constrained, or if the volume is dense with no significant empty regions.
++*   **Time Complexity:** Reduces the number of raymarch steps for empty tiles, potentially improving performance in sparse volumes. The overhead of sampling the metadata texture is minimal.
++*   **Memory Complexity:** Adds a parallel `Rg8Unorm` metadata texture, doubling the memory requirement for the page table's spatial data (though the metadata is smaller per element). The `tile_minmax` map adds CPU-side memory proportional to the number of resident tiles.
++*   **Performance:** Measured performance gains depend on the sparsity of the volume. In dense volumes, the skip is rarely triggered, and the overhead is negligible. In sparse volumes, significant speedups are possible. Not given in the sources.
++*   **Strengths:** Effective for sparse volumes; no impact on residency/LOD-walk skipping; easy to toggle for A/B testing.
++*   **Limitations:** Only applies to resident tiles; requires additional memory for metadata; requires careful handling of grazing rays.
++*   **When to use:** When rendering sparse volumes with significant empty space within resident tiles.
++*   **When not to use:** When rendering dense volumes; when memory is constrained; when debug modes are active.
+ 
+ ## Background
+-This method was forward-ported from the `stranded phase-3-tile-cached-raymarch` branch to the current multi-atlas Virtual Texture (VT) implementation [S1, unofficial]. It addresses the limitation of previous skipping methods that only operated on unloaded space, leaving resident empty tiles to be sampled unnecessarily [S1, unofficial]. The implementation was verified in a Python volume rendering example and builds cleanly on native and WASM platforms [S1, unofficial]. A tile-cache optimization was deliberately omitted from this port, as it was written against the pre-multi-atlas shader and is considered a separate follow-up [S1, unofficial].
++This method was forward-ported from the `stranded phase-3-tile-cached-raymarch` branch to the `multi-atlas VT` branch by aganders3 in June 2026 [S1, unofficial]. It addresses a limitation in the original residency/LOD-walk skipping, which only skipped unloaded space, by adding a rendering-side optimization to skip empty space within loaded tiles [S1, unofficial]. The method was verified in a Python volume rendering example and builds cleanly on native and WASM platforms [S1, unofficial].
+ 
+ ## Sources

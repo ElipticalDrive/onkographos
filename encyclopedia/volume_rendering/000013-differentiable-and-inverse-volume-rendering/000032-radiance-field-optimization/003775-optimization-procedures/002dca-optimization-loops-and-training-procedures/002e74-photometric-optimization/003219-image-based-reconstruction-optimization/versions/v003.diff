@@ -1,0 +1,199 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Image-based reconstruction optimization is a method that solves for object shapes, poses, textures, and lighting by minimizing image losses using gradients estimated via differentiable rendering pipelines [S1][S2, unofficial]. It sets itself apart from its siblings by explicitly formulating the inverse problem as an unconstrained optimization task where latent parameters (such as shape vectors and pose angles) are updated via gradient descent to minimize the photometric difference between a rendered image and an observed target [S1][S2, unofficial]. Unlike [Gradient-Based SE(3) Optimization](7526-gradient-based-se-3-optimization.md), which may focus on rigid body transformations, this approach often jointly optimizes complex latent shape representations and appearance parameters [S2, unofficial].
++Image-based reconstruction optimization solves for object shapes, poses, textures, and lighting by minimizing image losses using gradients estimated via differentiable rendering pipelines [S1][S2, unofficial]. It sets itself apart from its siblings by explicitly formulating the inverse problem as an unconstrained optimization task where latent parameters (such as shape vectors and pose angles) are updated via gradient descent to minimize the photometric difference between a rendered image and an observed target [S1][S2, unofficial]. Unlike [Gradient-Based SE(3) Optimization](7526-gradient-based-se-3-optimization.md), which focuses on rigid body transformations, this approach jointly optimizes complex latent shape representations and appearance parameters [S2, unofficial].
+ 
+ ## How it works
+@@ -42,6 +42,6 @@
+ 2.  **Iteration Loop:**
+     *   Render the current parameters using the differentiable renderer $f$ [S2, unofficial].
+-    *   Compute the loss (L2 or L1 depending on the specific variant, though L2 is explicitly defined in the primary formulas) [S1][S2, unofficial].
+-    *   Compute gradients with respect to all learnable parameters ($z, \theta, \phi_0, \eta$) using the differentiable rendering pipeline [S1][S2, unofficial].
++    *   Compute the loss (L2 difference between Gaussian pyramids is used in practice to reduce local minima [S3, unofficial], though the base formulation uses L2 [S2, unofficial]).
++    *   Compute gradients with respect to all learnable parameters ($z, \theta, \phi_0, \eta$) using the differentiable rendering pipeline [S2, unofficial].
+     *   Update parameters using gradient descent [S2, unofficial].
+     *   **Re-initialization:** Re-initialize the parameters with the current best ones after every 200 steps [S2, unofficial].
+@@ -50,5 +50,5 @@
+     *   During optimization, the grid for pose parameters is further subdivided around the current best pose parameters to refine the search [S2, unofficial].
+ 4.  **Mesh Update (Specific to Boundary Integral Methods):**
+-    *   When using boundary integral techniques for gradient estimation, update mesh vertex positions using the estimated gradients, potentially utilizing methods like those by Nicolet et al. [2021] [S1].
++    *   When using boundary integral techniques for gradient estimation, update mesh vertex positions using the estimated gradients, utilizing methods like those by Nicolet et al. [2021] [S1].
+     *   Use mini-batch gradient descent by rendering only a subset of input images per iteration to manage computational cost [S1].
+ 
+@@ -56,20 +56,5 @@
+ ```python
+ def image_based_reconstruction_optimization(target_images, renderer, shape_decoder, texture_decoder=None, use_shape_prior=False):
+-    """
+-    Optimizes shape, pose, texture, and lighting to match target images.
+-    
+-    Args:
+-        target_images: List of observed RGB images.
+-        renderer: Differentiable rendering function f.
+-        shape_decoder: Autoencoder decoder g for shape prior.
+-        texture_decoder: Autoencoder decoder h for texture (optional).
+-        use_shape_prior: Boolean flag for using shape regularization (e.g., for chairs).
+-        
+-    Returns:
+-        Optimized parameters: z, theta, phi_0, eta
+-    """
+-    
+     # 1. Initialization
+-    # Define pose space bounds
+     if use_shape_prior: # Chair reconstruction
+         azimuth_range = [0, 360]
+@@ -79,6 +64,7 @@
+         alpha = 5
+         beta = 1
+-        # Load pre-computed mu and Sigma from training set
+-        mu, Sigma = load_shape_prior_statistics()
++        # mu and Sigma_inv are pre-computed mean and covariance from training set [S2, unofficial]
++        mu = [0.0] * z_dim
++        Sigma_inv = [[1.0 if i == j else 0.0 for j in range(z_dim)] for i in range(z_dim)]
+     else: # Face reconstruction
+         azimuth_range = [0, 180]
+@@ -86,73 +72,80 @@
+         z_dim = 200
+         num_init = 5
+-        alpha = 1 # Not explicitly used in L2 loss for faces, but part of general framework
+-        beta = 0  # No shape prior regularization term in Eq 4
+-        
+-    # Initialize multiple sets of parameters to avoid local minima
++        alpha = 1
++        beta = 0
++        mu = [0.0] * z_dim
++        Sigma_inv = [[1.0 if i == j else 0.0 for j in range(z_dim)] for i in range(z_dim)]
++
++    best_loss = float('inf')
+     best_params = None
+-    best_loss = infinity
+-    
++
+     for i in range(num_init):
+-        # Initialize latent shape vector
+-        z = random_vector(z_dim)
+-        
+-        # Initialize pose parameters on a grid
+-        theta = initialize_pose_grid(azimuth_range, elevation_range)
+-        
+-        # Initialize texture and lighting if applicable
++        z = [random.gauss(0, 1) for _ in range(z_dim)]
++        # Initialize pose on a grid
++        az_steps = 10
++        el_steps = 10
++        grid_points = [[az, el] for az in [azimuth_range[0] + j*(azimuth_range[1]-azimuth_range[0])/az_steps for j in range(az_steps+1)]
++                              for el in [elevation_range[0] + k*(elevation_range[1]-elevation_range[0])/el_steps for k in range(el_steps+1)]]
++        theta = grid_points[i % len(grid_points)]
++
+         if texture_decoder is not None:
+-            phi_0 = random_vector(texture_dim)
++            phi_0 = [random.gauss(0, 1) for _ in range(100)] # Dimension not specified in sources [G]
+         else:
+             phi_0 = None
+-            
++
+         if use_shape_prior:
+-            eta = None # Lighting not optimized in the specific chair formula provided
++            eta = None
+         else:
+-            eta = random_vector(light_dim)
+-            
++            eta = [random.gauss(0, 1) for _ in range(10)] # Dimension not specified in sources [G]
++
+         current_params = {'z': z, 'theta': theta, 'phi_0': phi_0, 'eta': eta}
+-        
++
+         # 2. Optimization Loop
+-        for step in range(2000): # Max steps, convergence varies
+-            # Render image
++        max_steps = 2000
++        lr = 0.01 # Learning rate not specified in sources [G]
++
++        for step in range(max_steps):
+             rendered_image = renderer(shape_decoder(z), theta, texture_decoder(phi_0) if phi_0 else None, eta)
+-            
+-            # Compute Loss
++
+             if use_shape_prior:
+-                # Loss: Rendering Error + Shape Prior Regularization
+-                rendering_loss = alpha * L2_norm(target_images[0], rendered_image) # Using first image for simplicity
+-                shape_loss = beta * (z - mu).T @ inverse(Sigma) @ (z - mu)
++                rendering_loss = alpha * sum((target_images[0][p] - rendered_image[p])**2 for p in range(len(target_images[0]))) / len(target_images[0])
++                shape_loss = beta * sum((z[d] - mu[d])**2 for d in range(z_dim)) # Simplified diagonal Sigma
+                 loss = rendering_loss + shape_loss
+             else:
+-                # Loss: Rendering Error only
+-                loss = L2_norm(target_images[0], rendered_image)
+-                
+-            # Compute Gradients
+-            gradients = compute_gradients(loss, current_params)
+-            
+-            # Update Parameters
+-            current_params = gradient_descent_update(current_params, gradients)
+-            
++                loss = sum((target_images[0][p] - rendered_image[p])**2 for p in range(len(target_images[0]))) / len(target_images[0])
++
++            # Compute gradients via automatic differentiation through the differentiable renderer [S2, unofficial]
++            gradients = compute_gradients(loss, current_params) # Handled by autograd engine
++
++            # Update parameters
++            z = [z[d] - lr * gradients['z'][d] for d in range(z_dim)]
++            theta = [theta[d] - lr * gradients['theta'][d] for d in range(len(theta))]
++            if phi_0 is not None:
++                phi_0 = [phi_0[d] - lr * gradients['phi_0'][d] for d in range(len(phi_0))]
++            if eta is not None:
++                eta = [eta[d] - lr * gradients['eta'][d] for d in range(len(eta))]
++
+             # Re-initialize with best parameters every 200 steps
+-            if step % 200 == 0 and step > 0:
++            if step > 0 and step % 200 == 0:
+                 if loss < best_loss:
+                     best_loss = loss
+-                    best_params = copy(current_params)
+-                # Re-initialize current params with best found so far to refine search
+-                current_params = copy(best_params)
+-                
+-            # Check convergence (simplified)
++                    best_params = {'z': z[:], 'theta': theta[:], 'phi_0': phi_0[:] if phi_0 else None, 'eta': eta[:] if eta else None}
++                z, theta, phi_0, eta = best_params['z'][:], best_params['theta'][:], best_params['phi_0'][:] if best_params['phi_0'] else None, best_params['eta'][:] if best_params['eta'] else None
++
+             if step > 1800 and not use_shape_prior:
+                 break
+             if step > 2000 and use_shape_prior:
+                 break
+-                
+-        # Track best overall result
++
+         if loss < best_loss:
+             best_loss = loss
+-            best_params = copy(current_params)
+-            
++            best_params = {'z': z[:], 'theta': theta[:], 'phi_0': phi_0[:] if phi_0 else None, 'eta': eta[:] if eta else None}
++
+     return best_params
+ ```
++
++**Pitfalls:**
++*   Reconstructing chairs is more challenging than faces due to the larger search space for pose ([0–360] for azimuth, [0–180] for elevation) and larger variance in geometry, especially thin parts not captured by the shape prior [S2, unofficial].
++*   Finite difference gradient estimation suffers from bias (large spacing) or noise (small spacing), whereas differentiable rendering produces cleaner and unbiased derivative estimations [S3, unofficial].
+ 
+ ## Subtopics
+@@ -168,9 +161,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The optimization is iterative and depends on the number of steps required for convergence. Face reconstruction converges in approximately 1800 steps, while chair reconstruction takes around 2000 steps [S2, unofficial]. Each step involves a forward render and a backward pass through the differentiable renderer, which can be computationally expensive depending on the renderer's complexity (e.g., ray tracing vs. rasterization) [S1][S2, unofficial].
++*   **Time Complexity:** The optimization is iterative and depends on the number of steps required for convergence. Face reconstruction converges in approximately 1800 steps, while chair reconstruction takes around 2000 steps [S2, unofficial]. Each step involves a forward render and a backward pass through the differentiable renderer, which can be computationally expensive depending on the renderer's complexity [S1][S2, unofficial].
+ *   **Memory Complexity:** Memory usage is dominated by the storage of the latent vectors (200-250 dimensions), the intermediate gradients, and the rendered images [S2, unofficial]. Mini-batch gradient descent is used to reduce memory pressure by rendering only a subset of input images per iteration [S1].
+ *   **Performance:** The method produces accurate reconstructions when gradients are estimated with low variance. Using Multiple Importance Sampling (MIS) and edge sorting yields reduced variance in gradient estimates, allowing optimization to converge faster and produce more accurate reconstructions compared to using only light or direction sampling without sorting [S1].
+ *   **Strengths:** It allows for the joint optimization of complex latent representations (shape, texture, lighting) and handles non-linear relationships between parameters and image appearance through differentiable rendering [S1][S2, unofficial]. The use of shape priors helps regularize the solution space, particularly for objects with high geometric variance [S2, unofficial].
+-*   **Limitations:** Reconstructing chairs is more challenging than faces due to the larger search space for pose ([0–360] for azimuth, [0–180] for elevation) and larger variance in geometry, especially thin parts not captured by the shape prior [S2, unofficial]. The method requires a differentiable renderer, which may limit the types of materials and lighting effects that can be modeled [S1][S2, unofficial]. Convergence is not guaranteed and depends heavily on initialization and the choice of optimization strategy [S2, unofficial].
++*   **Limitations:** Reconstructing chairs is more challenging than faces due to the larger search space for pose ([0–360] for azimuth, [0–180] for elevation) and larger variance in geometry, especially thin parts not captured by the shape prior [S2, unofficial]. Convergence is not guaranteed and depends heavily on initialization and the choice of optimization strategy [S2, unofficial].
+ *   **When to use:** Use when the goal is to recover detailed 3D geometry, texture, and lighting from 2D images, especially when a differentiable rendering pipeline is available and computational resources allow for iterative optimization [S1][S2, unofficial].
+ *   **When not to use:** Avoid when real-time performance is required, as the optimization process is slow [S2, unofficial]. Also avoid if the object geometry is too complex for the chosen latent representation or shape prior to capture effectively [S2, unofficial].
+@@ -181,3 +174,4 @@
+ ## Sources
+ [S1] Efficient estimation of boundary integrals for path-space differentiable rendering, https://doi.org/10.1145/3528223.3530080, fetched 2026-10-28
+-[S2] RenderNet: A deep convolutional network for differentiable rendering from 3D shapes, https://doi.org/10.48550/arxiv.1806.06575, fetched 2026-10-26 (unofficial)+[S2] RenderNet: A deep convolutional network for differentiable rendering from 3D shapes, https://doi.org/10.48550/arxiv.1806.06575, fetched 2026-10-26 (unofficial)
++[S3] PDF A Differential Theory of Radiative Transfer, https://cseweb.ucsd.edu/~ravir/diff_rendering.pdf, fetched 2026-10-29 (unofficial)

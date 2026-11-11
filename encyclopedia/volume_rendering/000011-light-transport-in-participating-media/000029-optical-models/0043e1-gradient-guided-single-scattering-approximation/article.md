@@ -1,0 +1,136 @@
+# Gradient-guided single scattering approximation
+
+Also called: GPU Based On-the-fly Light Emission-absorption Approximation, On-the-fly scatter approximation
+
+## Overview
+A GPU-based direct volume rendering method that approximates single scattering and shadowing on-the-fly for multiple intersecting volumetric datasets [S1, unofficial]. It improves visual quality over local illumination models by using local gradients to guide scatter sample positions and in-scatter coefficients, while maintaining interactive frame rates [S1, unofficial]. It builds on [Emission-Absorption Volume Rendering](4040-emission-absorption-volume-rendering.md) by adding a simplified single scattering term derived from [Max95].
+
+## How it works
+**Inputs:**
+*   Volumetric datasets (e.g., MRI, DTI-MRI) [S1, unofficial].
+*   Transfer functions defining opacity and scattering properties [S1, unofficial].
+*   Camera parameters and light sources [S1, unofficial].
+
+**Outputs:**
+*   Rendered image with single scattering and shadowing effects [S1, unofficial].
+
+**Data Structures:**
+*   Voxel grids containing density and optical properties [S1, unofficial].
+*   Gradient approximations computed per voxel [S1, unofficial].
+
+**Steps:**
+1.  **Gradient Approximation:** Compute the gradient at the current voxel position [S1, unofficial].
+2.  **Sample Position Determination:** Determine up to 15 scatter sample positions in the local neighborhood of the current voxel, guided by the gradient approximation [S1, unofficial]. The number of samples depends on the strength of the gradient at the current volume sampling position [S1, unofficial].
+3.  **Scattering Angle Calculation:** Calculate the scattering angle $\theta$ for each sample position. The cosine of the scattering angle is determined by the angle between the gradient approximation at the scatter sample point and the gradient approximation at the current sample position [S1, unofficial]. The cosine is zero only if the direction of the scatter sample gradient is identical to the current sampling point’s gradient vector [S1, unofficial].
+4.  **Weighting:** Weight the influence of each scatter sample position by the distance to the actual sampling point and the gradient magnitude at the given scatter sampling position [S1, unofficial].
+5.  **In-scattering Coefficient:** Assume that a strong gradient indicates a less scattering, more reflecting surface, and that the gradient points in the direction of less dense, more scattering media [S1, unofficial]. Use this to define the amount of in-scattering to the current sample position [S1, unofficial].
+6.  **Light Transfer:** Calculate light transfer through the volumes using standard lighting absorption calculation as described in [Max95] [S1, unofficial].
+7.  **Rendering:** Perform all computations on-the-fly on the GPU without the need for further parameter buffers [S1, unofficial].
+
+**Formulas:**
+The phase function for scattered light is defined as [S1, unofficial]:
+$$ p(\theta) = \frac{1-g^2}{4\pi (1+g^2 +2g \cos\theta)^{3/2}} $$
+where:
+*   $g$ is the average cosine of the scattering angle, ranging from -1 to 1 [S1, unofficial].
+*   $g < 0$ indicates backward scattering [S1, unofficial].
+*   $g > 0$ indicates forward scattering [S1, unofficial].
+*   $g = 0$ results in isotropic scattering where light is scattered equally in all directions [S1, unofficial].
+
+**Parameters:**
+*   Maximum number of scatter sample positions: 15 [S1, unofficial].
+*   Phase function parameter $g$: Average cosine of the scattering angle, ranging from -1 to 1 [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gradient_guided_single_scattering(current_voxel, volume_data, light_source):
+    # Compute gradient at current voxel position
+    current_gradient = compute_gradient(current_voxel, volume_data)
+    
+    # Determine number of scatter samples based on gradient strength
+    num_samples = min(15, compute_num_samples(current_gradient))
+    
+    # Initialize accumulated in-scattered radiance
+    in_scatter_radiance = 0.0
+    
+    # Iterate over scatter sample positions in local neighborhood
+    for i in range(num_samples):
+        # Determine scatter sample position guided by gradient
+        scatter_pos = determine_scatter_position(current_voxel, current_gradient, i)
+        
+        # Compute gradient at scatter sample position
+        scatter_gradient = compute_gradient(scatter_pos, volume_data)
+        
+        # Calculate cosine of scattering angle
+        # Cosine is zero if scatter gradient direction is identical to current gradient direction
+        cos_theta = cosine_between_vectors(current_gradient, scatter_gradient)
+        
+        # Calculate phase function value
+        phase = heney_greenstein_phase_function(cos_theta, g=0.0) # g is parameter
+        
+        # Weight influence by distance and gradient magnitude
+        distance = distance_between(current_voxel, scatter_pos)
+        gradient_magnitude = magnitude(scatter_gradient)
+        weight = compute_weight(distance, gradient_magnitude)
+        
+        # Calculate in-scattering contribution
+        # Assume strong gradient indicates less scattering, more reflecting surface
+        # Gradient points in direction of less dense, more scattering media
+        in_scatter_contribution = calculate_in_scatter(scatter_pos, light_source, phase, weight)
+        
+        in_scatter_radiance += in_scatter_contribution
+        
+    # Calculate light transfer using standard absorption calculation (Max95)
+    transmittance = calculate_transmittance(current_voxel, volume_data)
+    
+    # Combine emission, absorption, and in-scattering
+    final_radiance = calculate_emission_absorption(current_voxel, volume_data, light_source) + in_scatter_radiance * transmittance
+    
+    return final_radiance
+```
+
+**Edge Cases and Pitfalls:**
+*   Precision issues may arise when calculating gradients in low-density regions [G].
+*   Boundary conditions for voxels at the edge of the volume need handling [G].
+*   Degenerate input (e.g., constant density) may result in zero gradients, affecting sample position determination [G].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   Time complexity: Depends on the number of scatter samples (up to 15) and the cost of gradient computation per voxel [S1, unofficial].
+*   Memory complexity: On-the-fly computation avoids large parameter buffers [S1, unofficial].
+
+**Measured Performance:**
+*   Tested on Intel QuadCore 3.16 GHz and two Nvidia Geforce 480 GPUs rendering two registered 256^3 datasets in a 1024x768 viewport [S1, unofficial].
+*   Frame rates (fps) for different transfer functions (TF) and light transport (L) configurations:
+    *   T1 (both opaque) L1: 45, L2: 21
+    *   T2 (1 opaque, 1 translucent) L1: 11, L2: 9
+    *   T3 (both half-opaque/half-scattering) L1: 41, L2: 19
+    *   T4 (both translucent) L1: 41, L2: 11
+    *   L2 includes scattering [S1, unofficial].
+
+**Strengths and Limitations:**
+*   Strengths: Interactive frame rates, improved visual quality over local illumination models, no need for pre-calculation or large parameter buffers [S1, unofficial].
+*   Limitations: Approximation may not capture complex scattering effects accurately, performance depends on gradient computation cost [G].
+
+**When to Use:**
+*   Suitable for direct multi-volume rendering of intersecting datasets where interactive frame rates are required [S1, unofficial].
+
+**When Not to Use:**
+*   Not suitable for high-fidelity rendering requiring accurate multiple scattering effects [G].
+
+## Background
+**Origin:**
+*   Proposed by Rostislav Khlebnikov, Bernhard Kainz, Bernhard Roth, Judith Muehl, and Dieter Schmalstieg from the Institute for Computer Graphics and Vision, Graz University of Technology [S1, unofficial].
+*   Presented in the EUROGRAPHICS 2011 poster [S1, unofficial].
+
+**History and Development:**
+*   Influenced by algorithms proposed by Ropinski et al. [RDRS10] and Šoltészová et al. [ŠPBV10], which were not directly applicable to the multi-volume case [S1, unofficial].
+*   Uses a simplified version of the emission-absorption model including single scattering and shadowing from Max [Max95] [S1, unofficial].
+*   Uses the Henyey-Greenstein phase function from [HG41] [S1, unofficial].
+
+**Usage:**
+*   Used in the EUROGRAPHICS 2011 poster by Khlebnikov et al. for direct multi-volume rendering of intersecting datasets [S1, unofficial].
+
+## Sources
+[S1] GPU Based On-the-fly Light Emission-absorption Approximation for Direct Multi-volume Rendering, https://doi.org/10.2312/eg2011/posters/011-012, fetched 2026-10-26 (unofficial)

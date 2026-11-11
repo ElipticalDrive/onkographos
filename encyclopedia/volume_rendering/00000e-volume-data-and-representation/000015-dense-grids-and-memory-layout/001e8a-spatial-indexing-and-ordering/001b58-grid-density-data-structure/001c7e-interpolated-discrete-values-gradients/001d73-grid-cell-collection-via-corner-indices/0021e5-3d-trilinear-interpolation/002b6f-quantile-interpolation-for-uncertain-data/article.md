@@ -3,36 +3,27 @@
 Also called: Analytic Quantile Interpolation, Quantile Interpolation of Histograms in 1D
 
 ## Overview
-Quantile Interpolation is a technique for interpolating nonparametric probability distributions (PDFs) represented as histograms or Kernel Density Estimates (KDEs) by breaking them into a fixed number of quantiles and interpolating the quantile widths linearly, resulting in a closed-form PDF at the interpolated point with linear time complexity relative to the number of quantiles [S1]. It solves the problem of reconstructing uncertain volume data where each grid vertex holds a distribution rather than a scalar, enabling Direct Volume Rendering (DVR) that preserves statistical properties like modality and variance [S1]. Unlike convolution-based nonparametric approaches which have exponential time complexity, this method is feasible for real-time DVR reconstruction because its complexity scales linearly with the number of quantiles [S1]. It builds on [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) by applying the trilinear logic to the widths of quantile intervals rather than scalar values [S1].
+Quantile Interpolation is a technique for interpolating nonparametric probability distributions (PDFs) represented as histograms or Kernel Density Estimates (KDEs) by breaking them into a fixed number of quantiles and interpolating the quantile widths linearly, resulting in a closed-form PDF at the interpolated point with linear time complexity relative to the number of quantiles [S1]. It solves the problem of reconstructing uncertain volume data where each grid vertex holds a distribution rather than a scalar, enabling Direct Volume Rendering (DVR) that preserves statistical properties like modality and variance [S1]. Unlike convolution-based nonparametric approaches which have exponential time complexity, this method is feasible for DVR reconstruction because its complexity scales linearly with the number of quantiles [S1]. It builds on [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) by applying the trilinear logic to the widths of quantile intervals rather than scalar values [S1].
 
 ## How it works
 **Inputs:**
 - A 3D grid of size $L \times M \times N$ [S1].
 - At each grid vertex $v_i$, a nonparametric PDF $pdf_{X_i}(x)$ estimated from noise samples (via histograms or KDE) [S1].
 - A user-set quantile value $qval$ (e.g., 0.5 for median, 0.25 for quartiles) [S1].
-- The number of quantiles $q$ is derived from $qval$ (e.g., $qval=0.5 \implies q=2$) [S1].
 
 **Outputs:**
 - For any arbitrary 3D position within a grid cell, the interpolated Probability Density Function (PDF) $pdf_X(x)$ represented as a tuple of quantile densities $\{Pr(Q_1), \dots, Pr(Q_q)\}$ [S1].
 - Expected color and opacity for DVR by integrating a Transfer Function (TF) against this interpolated PDF [S1].
 
 **Data Structures:**
-- **Quantile Representation:** Stored at each grid vertex. A tuple $\{Pr(Q_{i1}), \dots, Pr(Q_{iq})\}$ where $Pr(Q_{ij})$ is the probability density of the $j$-th quantile at vertex $i$ [S1].
+- **Quantile Representation:** Stored at each grid vertex [S1]. A tuple $\{Pr(Q_{i1}), \dots, Pr(Q_{iq})\}$ where $Pr(Q_{ij})$ is the probability density of the $j$-th quantile at vertex $i$ [S1].
 - **Memory Layout:** The grid stores $L \times M \times N$ vertices [S1]. Each vertex stores $q+1$ values: $q$ quantile densities and $q+1$ boundaries defining the quantile intervals (or equivalently, the widths $w_{ij}$) [S1]. Total memory: $L \times M \times N \times (q+1)$ [S1].
 
-**Preprocessing (Offline):**
-1. For each grid vertex $v_i$, estimate the continuous PDF $pdf_{X_i}(x)$ from noise samples using histograms or KDE [S1].
-2. Partition the continuous distribution into $q$ quantiles based on $qval$ [S1].
-3. Compute the width $w_{ij}$ of the $j$-th quantile for vertex $i$ [S1].
-4. Compute the quantile density $Pr(Q_{ij}) = qval \cdot w_{ij}$ [S1].
-5. Store the tuple $\{Pr(Q_{i1}), \dots, Pr(Q_{iq})\}$ in the grid [S1].
-
-**Runtime (Fragment Shader / Ray Marching):**
-For a sample point inside a grid cell defined by 8 vertices $v_1, \dots, v_8$:
-
-1. **Lookup:** Retrieve the quantile representations $\{Pr(Q_{i1}), \dots, Pr(Q_{iq})\}$ for all 8 vertices $i=1 \dots 8$ [S1].
-2. **Interpolation:** Compute the quantile representation $\{Pr(Q_1), \dots, Pr(Q_q)\}$ for the interpolated random variable $X$ using the 3D analytic formula [S1].
-3. **Integration:** Compute the expected TF value $E(\text{TF}(X)) = \int \text{TF}(x) pdf_X(x) dx$ using either Quantile Range or Quantile Mean integration schemes [S1].
+**Numbered Steps:**
+1. **Preprocessing:** At each grid position $v_i$, estimate the continuous PDF $pdf_{X_i}(x)$ from noise samples using histograms or KDE [S1]. Partition the continuous distribution into $q$ quantiles based on $qval$ [S1]. Compute the width $w_{ij}$ of the $j$-th quantile for vertex $i$ [S1]. Compute the quantile density $Pr(Q_{ij}) = qval \cdot w_{ij}$ [S1]. Store the tuple $\{Pr(Q_{i1}), \dots, Pr(Q_{iq})\}$ in the grid [S1].
+2. **Lookup:** For each sample along a viewing ray, look up quantile-based PDFs at the neighboring eight vertices in a fragment shader [S1].
+3. **Interpolation:** Apply the 3D analytic formula to the neighboring vertex quantile densities to compute, in closed form, the quantile representation $\{Pr(Q_1), \dots, Pr(Q_q)\}$ for the continuous distribution $pdf_X(x)$ of the interpolated random variable $X$ [S1].
+4. **Integration:** Compute opacity and color for the interpolated random variable $X$ by applying the uncertainty integration framework using either the Quantile Range or Quantile Mean technique [S1].
 
 **Formulas:**
 The core interpolation is performed quantile-wise [S1]. For the $j$-th quantile, let $Pr_i$ denote $Pr(Q_{ij})$ for vertex $i$ [S1]. Let $\alpha, \beta, \gamma \in [0,1]$ be the spatial distance parameters along the three axes of the 3D cell (consistent with trilinear interpolation weights) [S1].
@@ -56,6 +47,10 @@ Pr(Q_j) = \frac{Pr_1 Pr_2 Pr_3 Pr_4 Pr_5 Pr_6 Pr_7 Pr_8}{t_1 t_2 t_3 t_4 t_5 t_6
 $$
 
 This is equivalent to computing the width $w_j$ via trilinear interpolation of the vertex widths $w_{ij}$ and then setting $Pr(Q_j) = qval \cdot w_j$ [S1].
+
+**Parameters:**
+- $qval$: The quantile value determining the number of quantiles $q$ (e.g., $qval=0.5 \implies q=2$, $qval=0.25 \implies q=4$) [S1]. Typical value: 0.001, resulting in 1000 quantiles [S1].
+- $\alpha, \beta, \gamma$: Spatial distance parameters in $[0,1]$ along the $x$, $y$, and $z$ axes of the grid cell [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
