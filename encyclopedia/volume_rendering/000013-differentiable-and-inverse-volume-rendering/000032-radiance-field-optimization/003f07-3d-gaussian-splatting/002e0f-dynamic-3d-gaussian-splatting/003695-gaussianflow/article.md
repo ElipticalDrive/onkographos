@@ -1,82 +1,69 @@
 # GaussianFlow
 
-Also called: A method using an explicit flow field for temporal regularization in dynamic scenes, Guo et al
 
 ## Overview
-GaussianFlow is a dynamic 3D Gaussian Splatting method that treats each Gaussian as a dynamic particle advected by a 3D velocity field, obtaining the 4D reconstruction by integrating the flow over time [S1, unofficial][S2]. It introduces 2D flow estimation results into the training of dynamic 3D Gaussians to support deformation modeling between neighboring frames [S2]. Unlike parent methods that rely on local-rigid or ARAP constraints, GaussianFlow uses an explicit flow field for temporal regularization [S3, unofficial].
+GaussianFlow is a dynamic 3D Gaussian Splatting method that treats each Gaussian as a dynamic particle advected by a 3D velocity field, obtaining the 4D reconstruction by integrating the flow over time [S1, unofficial][S2]. It introduces 2D flow estimation results into the training of dynamic 3D Gaussians to support deformation modeling between neighboring frames [S2]. It uses an explicit flow field for temporal regularization in dynamic scenes [S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Inputs:** A sequence of 2D images (video frames); 2D optical flow estimates between neighboring frames.
-- **Outputs:** A set of 3D Gaussians with time-varying attributes (position, rotation, color) reconstructed over time.
+- **Inputs:** A sequence of 2D images (video frames); 2D optical flow estimates between neighboring frames [S2].
+- **Outputs:** A set of 3D Gaussians with time-varying attributes (position, rotation, color) reconstructed over time [S2].
 
 **Data Structures:**
-The method extends the standard 3D Gaussian representation. Each Gaussian $i$ maintains attributes that vary over time $t$:
-- Position $\boldsymbol{\mu}_i(t)$
-- Rotation $q_i(t)$ (quaternion)
-- Color $c_i(t)$
-- Other standard attributes (opacity, scale) may also be time-varying or static depending on implementation details not fully specified in the provided notes.
+Each Gaussian $i$ maintains attributes that vary over time $t$: position $\boldsymbol{\mu}_i(t)$, rotation $q_i(t)$ (quaternion), and color $c_i(t)$ [S2]. Other standard attributes (opacity, scale) are not specified as time-varying in the sources [G].
 
 **Dual-Domain Deformation Model (DDDM):**
-To capture time-dependent residuals of attributes, GaussianFlow combines polynomial fitting and Fourier approximation in time and frequency domains [S2].
-- **Polynomial fitting:** Advantages in modeling smooth motion [S2].
-- **Fourier approximation:** Advantages in modeling violent motion [S2].
-The position, rotation, and color are considered to change over time [S2].
+To capture time-dependent residuals of attributes, GaussianFlow combines polynomial fitting and Fourier approximation in time and frequency domains [S2]. Polynomial fitting is advantageous for modeling smooth motion, while Fourier approximation is advantageous for modeling violent motion [S2]. The position, rotation, and color are considered to change over time [S2].
 
 **Optimization Steps:**
 1. **Adaptive Timestep Scaling:** To prevent optimization problems caused by uniform time division, adaptive timestep scaling is adopted [S2].
 2. **Iterative Optimization:** The optimization iterates between static optimization and dynamic optimization [S2].
-3. **Loss Functions:**
-   - Image reconstruction loss (standard).
-   - Bidirectional optical flow loss (to align with 2D flow estimates) [S2].
-   - Temporal smoothness loss [S2].
-   - KNN rigid loss [S2].
+3. **Loss Functions:** The method uses image reconstruction loss, a bidirectional optical flow loss, temporal smoothness loss, and KNN rigid loss [S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 # GaussianFlow Optimization Loop
-# Inputs: frames [I_0, ..., I_T], 2D flows [F_0->1, ..., F_{T-1}->T]
+# Inputs: frames [I_0, ..., I_T], 2D flows [F_0, ..., F_{T-1}]
 # Initialize Gaussians with static attributes
 
 for epoch in range(num_epochs):
     # 1. Static Optimization Phase
-    # Optimize static components (e.g., background, static geometry)
-    # using image loss on static frames or combined frames
-    
+    # Optimize static components using image loss on static frames or combined frames
+
     # 2. Dynamic Optimization Phase
     for t in range(T):
         # Apply adaptive timestep scaling to determine effective time delta
-        dt = adaptive_timestep_scaling(t, T)
-        
+        dt = adaptive_timestep_scaling(t, T)  # Not given in the sources
+
         # Compute time-varying attributes using DDDM
         # Position: mu(t) = mu(0) + integral(flow) + polynomial/Fourier residuals
         # Rotation: q(t) = q(0) * exp(skew_symmetric(residuals))
         # Color: c(t) = base_color + polynomial/Fourier_color_residuals
-        
+
         # Render frame I_t_hat from Gaussians at time t
-        I_t_hat = render(Gaussians_at_t)
-        
+        I_t_hat = render(Gaussians_at_t)  # Standard 3DGS rasterization
+
         # Compute losses
-        image_loss = L1(I_t, I_t_hat) + SSIM(I_t, I_t_hat)
-        
+        image_loss = L1(I_t, I_t_hat) + SSIM(I_t, I_t_hat)  # Standard losses
+
         # Bidirectional optical flow loss
-        # Warp I_t_hat using estimated 2D flow to get I_{t+1}_warped
+        # Warp I_t_hat using estimated 2D flow to get I_next_hat
         # Compare with I_{t+1} or use flow consistency
-        flow_loss = bidirectional_flow_loss(I_t_hat, I_{t+1}_hat, F_t->t+1)
-        
+        flow_loss = bidirectional_flow_loss(I_t_hat, I_next_hat, F_t)  # Not given in the sources
+
         # Temporal smoothness loss
-        temporal_loss = temporal_smoothness_loss(Gaussians_at_t, Gaussians_at_t+1)
-        
+        temporal_loss = temporal_smoothness_loss(Gaussians_at_t, Gaussians_at_t_plus_1)  # Not given in the sources
+
         # KNN rigid loss
         # Enforce rigid body motion for neighbors
-        knn_rigid_loss = knn_rigid_loss(Gaussians_at_t)
-        
+        knn_rigid_loss = knn_rigid_loss(Gaussians_at_t)  # Not given in the sources
+
         total_loss = image_loss + flow_loss + temporal_loss + knn_rigid_loss
-        
+
         # Backpropagate and update Gaussian attributes
-        update(Gaussians, total_loss)
+        update(Gaussians, total_loss)  # Standard optimizer step
 ```
 
 **Edge Cases and Pitfalls:**
@@ -87,7 +74,7 @@ for epoch in range(num_epochs):
 ## Subtopics
 
 ### Gaussian Splatting Lucas-Kanade
-A method that directly applies optical flow estimation to the rendered Gaussians, using the flow to align dynamic objects across frames and improve temporal consistency [S1, unofficial]. It differs from GaussianFlow by applying flow directly to rendered Gaussians rather than integrating a 3D velocity field for 4D reconstruction.
+A method that directly applies optical flow estimation to the rendered Gaussians, using the flow to align dynamic objects across frames and improve temporal consistency [S1, unofficial]. It differs from GaussianFlow by applying flow directly to rendered Gaussians rather than integrating a 3D velocity field for 4D reconstruction [S1, unofficial].
 
 ## Operating characteristics
 - **Time Complexity:** Not given in the sources.
@@ -96,10 +83,9 @@ A method that directly applies optical flow estimation to the rendered Gaussians
 - **Strengths:** Explicit flow field for temporal regularization [S3, unofficial]; handles both smooth and violent motion via DDDM [S2]; improves temporal consistency [S1, unofficial].
 - **Limitations:** Relies on 2D flow estimation quality [S2]; optimization is complex due to iterative static/dynamic phases and multiple loss terms [S2].
 - **When to use:** When explicit flow-based temporal regularization is desired for dynamic scenes [S3, unofficial].
-- **When not to use:** When computational resources are limited for complex optimization loops [S2].
 
 ## Background
-GaussianFlow was introduced by Guo et al. [72, 77]. It is part of the evolution of dynamic 3D Gaussian Splatting, building on parent methods like Dynamic 3D Gaussian Splatting [5703-dynamic-3d-gaussian-splatting.md]. It addresses the need for better temporal consistency and deformation modeling in dynamic scenes by incorporating 2D flow estimation [S2].
+GaussianFlow is attributed to Guo et al. [S2]. It is part of the evolution of dynamic 3D Gaussian Splatting, building on parent methods like Dynamic 3D Gaussian Splatting [5703-dynamic-3d-gaussian-splatting.md]. It addresses the need for better temporal consistency and deformation modeling in dynamic scenes by incorporating 2D flow estimation [S2].
 
 ## Sources
 [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)

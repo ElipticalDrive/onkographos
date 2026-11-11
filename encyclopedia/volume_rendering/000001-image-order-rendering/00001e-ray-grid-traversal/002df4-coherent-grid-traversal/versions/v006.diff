@@ -1,0 +1,374 @@
+--- v005.md
++++ v006.md
+@@ -1,250 +1,169 @@
+ # Coherent Grid Traversal
+ 
+-Also called: CGT algorithm, Packetized Grid Traversal, Packet-based grid traversal, Modified Coherent Grid Traversal (CGT)
++Also called: CGT, CGT algorithm, Ize et al. traversal
+ 
+ ## Overview
+-Coherent Grid Traversal (CGT) is a ray-grid traversal method that accelerates rendering by processing bundles (frustums) of coherent rays through uniform grids slice-by-slice along a dominant axis, abandoning per-ray 3DDDA to avoid state invalidation caused by ray divergence within a packet [S2, S3]. Unlike standard grid traversal which steps cell-by-cell and breaks when rays diverge to different neighbors, CGT computes the bounding frustum of the ray packet and incrementally updates its overlap with grid slices, allowing the entire packet to be processed as a coherent whole without splitting or merging [S2, S3, S5].
++Coherent Grid Traversal (CGT) is a ray-grid traversal method that accelerates ray tracing in uniform grids by processing bundles of coherent rays as frustums, advancing slice-by-slice along a dominant axis rather than cell-by-cell [S4, S5]. It solves the packet divergence problem inherent in cell-by-cell traversal (like 3DDDA), where rays in a group disagree on the next cell, by maintaining packet coherence through incremental frustum-slice overlap computation [S2, S4]. Unlike hierarchical structures like kd-trees, CGT uses a flat uniform grid, enabling extremely fast per-frame rebuilds suitable for fully dynamic scenes [S3, unofficial][S4].
+ 
+ ## How it works
+-CGT traverses a uniform grid by maintaining a bounding frustum for a packet of rays and advancing this frustum through the grid one slice at a time along a principal axis [S2, S3].
++**Inputs and Outputs:**
++*   **Input:** A packet of $N \times N$ coherent rays (primary or secondary), a uniform grid of dimensions $N_x \times N_y \times N_z$, and the grid's bounding box. For volume rendering, the input is a "bricked" volume [S1, S8, unofficial].
++*   **Output:** A sequence of grid cells (or bricks) overlapped by the ray packet frustum, along with the ray-cell intersection intervals.
+ 
+-### Inputs and Outputs
+-- **Inputs**: A packet of $N$ rays (origin $\mathbf{o}_i$, direction $\mathbf{d}_i$), a uniform grid defined by dimensions $N_x, N_y, N_z$ and cell size $v$ (or canonical bounds $[0, N_x) \times [0, N_y) \times [0, N_z)$) [S2, S3].
+-- **Outputs**: A list of grid cells (or bricks) intersected by the frustum, ordered by traversal depth, along with the ray-cell intersection results [S2, S3].
++**Data Structures:**
++*   **Canonical Grid Space:** Rays are transformed into a coordinate system where the grid maps to $[0, N_x) \times [0, N_y) \times [0, N_z)$ [S4, S5]. Cell coordinates are obtained by truncating floating-point positions to integers [S4, S5].
++*   **Frustum Representation:** Defined by four bounding planes in the minor axes ($\tilde{U}, \tilde{V}$) and two planes in the major axis ($\tilde{K}$) [S4, S6]. For primary rays, the four corner rays define these planes [S2, S4].
++*   **Overlap Box $B(i)$:** A 2D bounding box in the $\tilde{U}, \tilde{V}$ plane representing the frustum's intersection with slice $i$ along the major axis $\tilde{K}$ [S4, S5]. It is stored as four floats: $[u_{min}, v_{min}, u_{max}, v_{max}]$ [S9, unofficial].
++*   **Bricked Volume (Volume Rendering):** The volume is stored as bricks referenced by 3 maps (one per principal axis). Empty bricks are not stored to achieve compression [S1, S8, unofficial].
+ 
+-### Data Structures
+-1.  **Ray Packet**: An array of ray structures. For primary rays, the packet is typically $N \times N$ (e.g., $8 \times 8$) [S4, S5].
+-2.  **Canonical Grid Coordinates**: Rays are transformed into a coordinate system where the grid occupies $[0, N_x) \times [0, N_y) \times [0, N_z)$ [S2, S3]. Cell indices are computed by truncating floating-point coordinates to integers [S3].
+-3.  **Overlap Box $B(i)$**: A 2D bounding box defined by minimum and maximum coordinates in the minor axes ($\tilde{U}, \tilde{V}$) for the current slice $k$ along the major axis $\tilde{K}$ [S2, S3]. Stored as a vector of 4 floats: $[u_{min}, v_{min}, u_{max}, v_{max}]$ [S7, unofficial].
+-4.  **Increment Vector $\Delta B$**: A constant vector $[du_{min}, du_{max}, dv_{min}, dv_{max}]$ representing the slope of the frustum bounding planes in grid space [S2, S3].
+-5.  **Brick/Cell Map**: For volume rendering, a "bricked" volume structure where bricks are referenced by 3 maps (one per principal axis). Empty bricks are not stored to achieve compression [S1, S6, unofficial].
++**Parameters:**
++*   **Packet Size:** Typically $4 \times 4$ or $8 \times 8$ rays [S6, S7].
++*   **Coherence Constraint:** Rays in a packet must span an angle of less than $\pi/2$ to ensure they share the same sign along the major traversal axis [S2, S4, S5].
++*   **Macrocell Size (Hierarchical):** $M \times M \times M$ blocks of fine cells (e.g., $6 \times 6 \times 6$) [S7, S4].
+ 
+-### Algorithm Steps
++**Algorithm Steps:**
+ 
+-1.  **Transform and Setup**:
+-    - Transform all rays into canonical grid coordinates [S2, S3].
+-    - Determine the dominant traversal axis $\tilde{K}$ (the axis with the largest absolute direction component of the first ray) [S2, S3].
+-    - Ensure all rays have the same sign along $\tilde{K}$ (angle between any two rays $< \pi/2$) to allow front-to-back traversal [S2, S3]. If not, split the packet [S3].
+-    - Define the remaining minor axes $\tilde{U}$ and $\tilde{V}$ [S2, S3].
++1.  **Transform to Canonical Space:** Transform all rays in the packet into the canonical grid coordinate system [S4, S5].
++2.  **Determine Major Axis:** Select the major traversal axis $\tilde{K}$ based on the dominant component ($\pm X, \pm Y, \pm Z$) of the direction of the first ray in the packet [S4, S5]. The remaining axes are $\tilde{U}$ and $\tilde{V}$ [S4, S5].
++3.  **Compute Frustum Planes:** Calculate the four bounding planes of the frustum in $\tilde{U}$ and $\tilde{V}$ using the extremal slopes of the rays along $\tilde{K}$ [S4, S5]. For primary packets, use the four corner rays [S4].
++4.  **Clip to Grid:** Intersect the frustum with the grid's bounding box to determine the first and last slice indices ($k_{min}, k_{max}$) along $\tilde{K}$ [S4, S5]. If the interval is empty, terminate.
++5.  **Initialize Overlap Box:** Compute the initial overlap box $B(0)$ for the first slice by finding the minimum and maximum $\tilde{U}$ and $\tilde{V}$ coordinates of the frustum's entry and exit points with that slice [S4, S5].
++6.  **Compute Increment Vector:** Calculate the constant vector $\Delta B = (du_{min}, du_{max}, dv_{min}, dv_{max})$, where the terms are the slopes of the bounding frustum planes in grid coordinate space [S4, S5].
++7.  **Traverse Slices:** For each slice $k$ from $k_{min}$ to $k_{max}$:
++    a.  **Update Overlap Box:** Incrementally compute the next slice's overlap box using $B(k+1) = B(k) + \Delta B$ [S4, S5]. This requires four floating-point additions [S4, S5].
++    b.  **Compute Cell IDs:** Convert the floating-point coordinates of $B(k)$ to integer cell indices $[i_0..i_1] \times [j_0..j_1]$ by truncating the min/max $\tilde{U}$ and $\tilde{V}$ coordinates [S4, S5].
++    c.  **Intersect:** Intersect all rays in the packet with all primitives (triangles or volume data) in the cells defined by $[i_0..i_1] \times [j_0..j_1]$ [S4, S5].
++    d.  **Early Termination:** If all rays have intersected their targets, terminate traversal [S4, S5].
+ 
+-2.  **Frustum Construction**:
+-    - Compute the bounding frustum of the ray packet. For primary rays, this is defined by the four corner rays [S2, S3].
+-    - Calculate the slopes of the four bounding planes of the frustum in the $\tilde{U}-\tilde{V}$ plane relative to $\tilde{K}$ [S2, S3].
+-    - Compute the increment vector $\Delta B = (du_{min}, du_{max}, dv_{min}, dv_{max})$ [S2, S3].
+-
+-3.  **Initial Slice Intersection**:
+-    - Intersect the frustum with the grid's bounding box to determine the first and last slice indices $k_{min}$ and $k_{max}$ along $\tilde{K}$ [S2, S3]. If the interval is empty, terminate [S2, S3].
+-    - Compute the initial overlap box $B(0)$ for slice $k_{min}$ by finding the min/max $\tilde{U}$ and $\tilde{V}$ coordinates of the frustum's entry and exit points with that slice [S2, S3].
+-
+-4.  **Incremental Slice Traversal Loop**:
+-    - For each slice $k$ from $k_{min}$ to $k_{max}$:
+-        1.  **Truncate to Cells**: Convert the floating-point coordinates of $B(k)$ to integer cell indices $[i_0..i_1] \times [j_0..j_1]$ by truncating the min/max $\tilde{U}$ and $\tilde{V}$ coordinates [S2, S3]. This is performed using a single SIMD float-to-int conversion instruction [S2, S3].
+-        2.  **Process Cells**: For each cell in the range $[i_0..i_1] \times [j_0..j_1]$:
+-            - If the cell is empty (or brick is empty), skip or handle as empty [S1, S6, unofficial].
+-            - Intersect all rays in the packet with the primitives (triangles or volume data) in the cell [S2, S3].
+-            - Apply **Mailboxing**: Tag primitives with a unique packet ID to skip redundant intersection tests if the packet has already visited the primitive [S2, S3].
+-            - Apply **Frustum Culling**: Reject primitives that lie entirely outside the frustum using SIMD shaft culling (checking if all four corner rays miss the same edge of the primitive) [S2, S3].
+-        3.  **Increment Overlap Box**: Compute $B(k+1) = B(k) + \Delta B$ using four floating-point additions, performable with a single SIMD instruction [S2, S3].
+-
+-5.  **Termination**:
+-    - Stop when $k > k_{max}$ or all rays have intersected their targets (early termination) [S2, S3].
+-
+-### Pseudocode
+-
++**Pseudocode:**
+ ```python
+-def coherent_grid_traversal(rays, grid_dims, grid_data):
+-    # 1. Transform rays to canonical grid space [0..Nx) x [0..Ny) x [0..Nz)
+-    # Assume rays are transformed. Grid dims are Nx, Ny, Nz.
+-    Nx, Ny, Nz = grid_dims
++def coherent_grid_traversal(rays, grid_dims, grid_bounds):
++    # 1. Transform rays to canonical grid space
++    # rays: list of Ray objects with origin and direction
++    # grid_dims: (Nx, Ny, Nz)
++    # Transform function maps world coordinates to [0, Nx) x [0, Ny) x [0, Nz)
++    canonical_rays = [transform_to_canonical(ray, grid_dims) for ray in rays]
+     
+-    # 2. Determine dominant axis K (0=x, 1=y, 2=z)
+-    # Pick the axis with the largest absolute direction component of the first ray
+-    first_ray = rays[0]
+-    abs_dirs = [abs(first_ray.d[0]), abs(first_ray.d[1]), abs(first_ray.d[2])]
+-    K = argmax(abs_dirs)
+-    U = (K + 1) % 3
+-    V = (K + 2) % 3
++    # 2. Determine major axis K
++    # Select axis with max absolute direction component of the first ray
++    first_ray_dir = canonical_rays[0].direction
++    k_axis = argmax(abs(first_ray_dir))
++    u_axis = (k_axis + 1) % 3
++    v_axis = (k_axis + 2) % 3
+     
+-    # 3. Ensure all rays have same sign along K (front-to-back)
+-    # If not, split packet (not implemented here, assume coherent)
++    # 3. Compute Frustum Planes
++    # For primary rays, use 4 corner rays to define the frustum
++    # Calculate slopes of bounding planes in U and V directions along K
++    # du_min, du_max, dv_min, dv_max are the increments per unit step in K
++    du_min, du_max, dv_min, dv_max = compute_frustum_slopes(canonical_rays, k_axis, u_axis, v_axis)
+     
+-    # 4. Compute Frustum Planes and Increment Delta B
+-    # Compute min/max U and V slopes for all rays in packet
+-    # du_min, du_max, dv_min, dv_max are the slopes of the bounding planes
+-    du_min, du_max, dv_min, dv_max = compute_frustum_slopes(rays, K, U, V)
+-    delta_B = [du_min, du_max, dv_min, dv_max]
+-    
+-    # 5. Intersect Frustum with Grid Bounding Box to get k_min, k_max
+-    # Compute entry and exit points of frustum with grid bounds along K
+-    k_min, k_max = intersect_frustum_grid_bounds(rays, K, Nx, Ny, Nz)
+-    
++    # 4. Clip to Grid
++    # Determine k_min and k_max where frustum intersects grid bounds in K
++    k_min, k_max = clip_frustum_to_grid_bounds(canonical_rays, k_axis, grid_bounds)
+     if k_min > k_max:
+         return [] # Frustum misses grid
+     
+-    # 6. Compute initial overlap box B(0) for slice k_min
+-    # Find min/max U, V coordinates of frustum intersection with slice k_min
+-    B = compute_initial_overlap_box(rays, K, U, V, k_min, Nx, Ny, Nz)
+-    # B is [u_min, u_max, v_min, v_max]
++    # 5. Initialize Overlap Box B(0)
++    # Compute min/max U, V coordinates of frustum intersection with slice k_min
++    b_u_min, b_v_min, b_u_max, b_v_max = compute_initial_overlap_box(canonical_rays, k_min, k_axis, u_axis, v_axis)
++    
++    # 6. Increment Vector
++    delta_b = (du_min, du_max, dv_min, dv_max)
+     
+     visited_cells = []
+     
+-    # 7. Traverse slices
++    # 7. Traverse Slices
+     for k in range(k_min, k_max + 1):
+-        # Truncate B to integer cell indices
+-        # SIMD float-to-int truncation
+-        u_min_int = floor(B[0])
+-        u_max_int = floor(B[1])
+-        v_min_int = floor(B[2])
+-        v_max_int = floor(B[3])
++        # a. Update Overlap Box
++        b_u_min += delta_b[0]
++        b_u_max += delta_b[1]
++        b_v_min += delta_b[2]
++        b_v_max += delta_b[3]
+         
+-        # Clamp to grid bounds
+-        u_min_int = clamp(u_min_int, 0, Nx - 1)
+-        u_max_int = clamp(u_max_int, 0, Nx - 1)
+-        v_min_int = clamp(v_min_int, 0, Ny - 1)
+-        v_max_int = clamp(v_max_int, 0, Ny - 1)
++        # b. Compute Cell IDs (Truncate)
++        i0 = floor(b_u_min)
++        i1 = floor(b_u_max)
++        j0 = floor(b_v_min)
++        j1 = floor(b_v_max)
+         
+-        # 8. Process cells in slice k
+-        for u in range(u_min_int, u_max_int + 1):
+-            for v in range(v_min_int, v_max_int + 1):
+-                cell = grid_data.get_cell(K, u, v, k) # Access via brick map or direct index
++        # Clamp to grid dimensions
++        i0 = clamp(i0, 0, grid_dims[0] - 1)
++        i1 = clamp(i1, 0, grid_dims[0] - 1)
++        j0 = clamp(j0, 0, grid_dims[1] - 1)
++        j1 = clamp(j1, 0, grid_dims[1] - 1)
++        
++        # c. Intersect
++        # Yield cells and intervals for intersection
++        for i in range(i0, i1 + 1):
++            for j in range(j0, j1 + 1):
++                # In volume rendering, check brick map for this (i, j, k)
++                # In ray tracing, intersect rays with primitives in cell (i, j, k)
++                yield (i, j, k)
+                 
+-                if cell.is_empty():
+-                    continue
+-                
+-                # Intersect rays with cell primitives
+-                for ray in rays:
+-                    if ray.has_hit():
+-                        continue
+-                    
+-                    # Apply Frustum Culling (SIMD shaft culling)
+-                    if not frustum_cull(ray, rays, K, U, V):
+-                        continue
+-                    
+-                    # Apply Mailboxing
+-                    if cell.is_tagged_with(ray.packet_id):
+-                        continue
+-                    
+-                    # Perform intersection
+-                    hit = intersect_ray_cell(ray, cell)
+-                    if hit:
+-                        cell.tag_with(ray.packet_id)
+-                        ray.record_hit(hit)
+-        
+-        # 9. Increment overlap box for next slice
+-        # B(k+1) = B(k) + Delta B
+-        B[0] += delta_B[0]
+-        B[1] += delta_B[1]
+-        B[2] += delta_B[2]
+-        B[3] += delta_B[3]
+-        
+-        # Early termination if all rays hit
+-        if all_ray_hits(rays):
++        # d. Early Termination Check
++        if all_rays_intersected(canonical_rays):
+             break
+-            
+-    return visited_cells
+-
+-def compute_frustum_slopes(rays, K, U, V):
+-    # Compute min/max U and V slopes relative to K for all rays
+-    # Slope = (coord_U / coord_K) or similar depending on parameterization
+-    # For canonical grid, this is derived from ray origins and directions
+-    min_u_slope = infinity
+-    max_u_slope = -infinity
+-    min_v_slope = infinity
+-    max_v_slope = -infinity
+-    
+-    for ray in rays:
+-        # Calculate slopes based on ray direction and origin
+-        # du = dU / dK, dv = dV / dK
+-        # Handle dK=0 case (ray parallel to slice, handled by angle check)
+-        du = ray.d[U] / ray.d[K]
+-        dv = ray.d[V] / ray.d[K]
+-        
+-        # Also consider origin offsets if necessary for tight bounds
+-        # Simplified: using slopes of bounding planes
+-        if du < min_u_slope: min_u_slope = du
+-        if du > max_u_slope: max_u_slope = du
+-        if dv < min_v_slope: min_v_slope = dv
+-        if dv > max_v_slope: max_v_slope = dv
+-        
+-    return [min_u_slope, max_u_slope, min_v_slope, max_v_slope]
+-
+-def compute_initial_overlap_box(rays, K, U, V, k, Nx, Ny, Nz):
+-    # Compute min/max U, V coordinates of frustum intersection with slice k
+-    # This involves intersecting the frustum planes with the plane K=k
+-    # Simplified: find min/max U, V of all rays at K=k
+-    u_min = infinity
+-    u_max = -infinity
+-    v_min = infinity
+-    v_max = -infinity
+-    
+-    for ray in rays:
+-        # Parameter t where ray.K = k
+-        # o_K + t * d_K = k  => t = (k - o_K) / d_K
+-        t = (k - ray.o[K]) / ray.d[K]
+-        
+-        u = ray.o[U] + t * ray.d[U]
+-        v = ray.o[V] + t * ray.d[V]
+-        
+-        if u < u_min: u_min = u
+-        if u > u_max: u_max = u
+-        if v < v_min: v_min = v
+-        if v > v_max: v_max = v
+-        
+-    return [u_min, u_max, v_min, v_max]
+-
+-def frustum_cull(ray, rays, K, U, V):
+-    # SIMD shaft culling: check if all 4 corner rays miss the triangle
+-    # Simplified placeholder for the actual SIMD intersection logic
+-    # Returns True if triangle is inside frustum (not culled)
+-    return True
+ ```
+ 
+-### Parameters and Typical Values
+-- **Packet Size**: $N \times N$ primary rays. Typical values are $4 \times 4$ or $8 \times 8$ [S4, S5].
+-- **Macrocell Size**: For hierarchical variants, $M \times M \times M$ blocks. Typical value $M=6$ [S2, S5].
+-- **Grid Dimensions**: $N_x, N_y, N_z$ determined by scene bounds and voxel size [S2].
+-
+-### Edge Cases and Pitfalls
+-- **Ray Divergence**: If rays in a packet span an angle $> \pi/2$, they will have different signs along the traversal axis, violating the front-to-back assumption [S2, S3]. Mitigation: Split the packet [S3].
+-- **Silhouette Hit Points**: If primary rays hit object silhouettes, shadow ray origins can be distant, creating a wide frustum where CGT breaks down [S2, S3]. Mitigation: Split packet if hit points are too far apart [S2, S3].
+-- **Roll Angle**: When the "roll" angle of bundles to the volume is close to $\pi/4$, block fetches can double [S1, S6, unofficial].
+-- **Triangle Overlap**: Large triangles or those straddling boundaries appear in multiple cells. Mailboxing avoids redundant tests [S2, S3].
+-- **Frustum Culling Limitation**: A triangle's bounding box may overlap traversed cells but not fall entirely outside the frustum; this overhead cannot be avoided by frustum culling [S2, S3].
++**Edge Cases and Pitfalls:**
++*   **Ray Divergence:** If rays in a packet span an angle greater than $\pi/2$, they will have different signs along the traversal axis, violating the front-to-back traversal assumption [S4, S5].
++*   **Silhouette Hit Points:** If primary rays hit an object's silhouette, the resulting hit points can be distant, creating a wide frustum where the method breaks down [S5]. Mitigation: Split the packet into subpackets if hit points are too far apart [S4, S5].
++*   **Roll Angle:** When the "roll" angle of the bundles to the volume is close to $\pi/4$, the number of block fetches can double [S1, S8, unofficial].
++*   **Redundant Intersections:** Grids do not conform tightly to geometry, causing redundant triangle intersections. Large triangles or those straddling boundaries may appear in multiple cells [S4]. Use mailboxing to avoid re-intersection [S4, S5].
++*   **Frustum Culling Overhead:** A triangle's bounding box may overlap traversed cells but not fall entirely outside the frustum. This overhead cannot be avoided by frustum culling [S4].
+ 
+ ## Subtopics
+ 
+ ### [Sphere-Center Method](5200-sphere-center-method.md)
+-An optimization for glyph-based particle visualization within CGT that eliminates data duplication by storing each particle in exactly one grid cell. It traverses an enlarged frustum accounting for the maximum particle radius, ensuring any sphere intersecting the view volume has its center within the bounds. Choose this for particle datasets to avoid mailboxing and redundant intersection tests. [Sphere-Center Method](5200-sphere-center-method.md)
++An optimization for glyph-based particle visualization within CGT that eliminates data duplication by storing each particle in exactly one grid cell, using an enlarged frustum traversal.
+ 
+ ### [Macrocell Hierarchical CGT](5464-macrocell-hierarchical-cgt.md)
+-Extends CGT to handle large volumes by introducing a recursive hierarchy of macrocells ($2^3$ children per parent). It amortizes traversal costs across multiple granularity levels using an iterative stack, solving the performance degradation of flat CGT on large datasets. Choose this for large-scale volumes where flat grid traversal is too slow. [Macrocell Hierarchical CGT](5464-macrocell-hierarchical-cgt.md)
++Extends CGT to large volumes by introducing a recursive hierarchy of macrocells ($2^3$ children), amortizing traversal costs across multiple levels of granularity.
+ 
+ ### [Slice Parallelisation](6292-slice-parallelisation.md)
+-A parallelization scheme where processing elements are assigned to specific slices of the volume rather than individual rays or bundles. It reduces redundant block fetches from neighboring bundles by organizing work per slice, unlike Bundle Parallelisation which processes bundles directly. Choose this when memory bandwidth is a bottleneck and slice-level parallelism fits the hardware architecture. [Slice Parallelisation](6292-slice-parallelisation.md)
++A parallelization scheme for CGT where processing elements are assigned to slices of the volume, reducing redundant block fetches from neighboring bundles.
+ 
+ ### [Bundle Parallelisation](6293-bundle-parallelisation.md)
+-A parallelization scheme where bundles of rays are processed in parallel across multiple processing elements. It is simpler to implement than slice parallelisation but may result in redundant block fetches from neighboring bundles. Choose this for straightforward multi-core implementations where bundle coherence is high. [Bundle Parallelisation](6293-bundle-parallelisation.md)
++A parallelization scheme for CGT where bundles of rays are processed in parallel, distributing work across processing elements.
+ 
+ ### [SIMD Sphere/Frustum Culling](10012-simd-sphere-frustum-culling.md)
+-A culling technique to reject non-overlapping spheres by checking if the sphere center is contained within an enlarged bounding frustum. It avoids unnecessary ray/sphere intersection tests caused by discretization artifacts. Choose this for particle visualization where shaft culling is not applicable due to the lack of planar edges on spheres. [SIMD Sphere/Frustum Culling](10012-simd-sphere-frustum-culling.md)
++A culling technique for spheres in CGT that checks if the sphere center is contained within an enlarged bounding frustum, avoiding unnecessary intersection tests.
++
++### [Hierarchical Grid with Macrocells](10019-hierarchical-grid-with-macrocells.md)
++A hierarchical grid structure that divides densely populated regions more finely, using parameter range culling for aggressive early-out tests.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Traversal cost per step is independent of the number of rays in the packet, encouraging larger packets [S2]. Computing the next slice's overlapped cells requires only two SIMD operations (one addition, one truncation) [S4].
+-- **Memory Complexity**: Linear with respect to the number of grid cells. Bricked volumes compress empty space [S1, S6, unofficial].
+-- **Performance**: On a dual 3.2 GHz Xeon, CGT achieves 1.4 fps for a 174K triangle animated scene at 1024x1024 with shading/shadows, excluding shading/texturing/shadows it achieves 3.4 fps [S2, S3]. It outperforms single-ray 3DDDA by a factor of 6 to 21 [S2, S3]. Compared to GPU-based systems, CGT can be 5 to 50 times faster on certain datasets despite lower raw FLOPS [S4, S5].
+-- **Strengths**: Cache-friendly, handles dynamic scenes efficiently by rebuilding the grid per frame, avoids packet splitting/merging overhead, sublinear scaling with image resolution [S1, unofficial][S2, S3, S4].
+-- **Limitations**: Uniform grids are ill-suited for highly complex scenes with high variation in geometry size/density (e.g., Boeing 777) [S2, S3]. Performance degrades if ray packets are incoherent or if the roll angle is near $\pi/4$ [S1, S6, unofficial].
+-- **When to Use**: Interactive ray tracing of animated scenes, particle visualization, volume rendering with coherent rays.
+-- **When Not to Use**: Highly complex static scenes with varying density (use kd-tree/BVH), scenes with incoherent ray packets.
++**Time and Memory Complexity:**
++*   **Traversal Cost:** The traversal cost per step becomes independent of the number of rays in the packet, encouraging larger packets [S4].
++*   **Cell Visits:** Frustum traversal visits roughly 10 to 20 times fewer cells for $4 \times 4$ packets and over 50 times fewer for $8 \times 8$ packets compared to single-ray traversal [S5, S4].
++*   **Memory:** The uniform grid is simple to build but less efficient than kd-trees for complex scenes. It requires storing the grid structure, which can be large for high-resolution volumes [S3, unofficial][S5].
++
++**Measured Performance:**
++*   On a dual 3.2 GHz Xeon, rendering a 174K triangle animated scene at 1024x1024 with shading/textures/shadows achieves 1.4 fps [S4, S5]. Excluding shading, it achieves 3.4 fps [S4, S5].
++*   For a 16K triangle animated hand, it achieves 15.3 fps with shading/shadows and 34.5 fps without [S4, S5].
++*   In the 'toys' scene (11K tris), mailboxing and frustum culling reduced ray-triangle intersections from 14.0M to 1.0M (factor of 14.0), compared to 0.82M for a kd-tree [S5].
++*   CGT outperforms single-ray 3DDDA by a factor of 6 to 21, depending on the scene and viewpoint [S4, S5].
++*   Sublinear scaling with image resolution is observed because higher resolutions enable larger packets [S2, S6].
++
++**Strengths and Limitations:**
++*   **Strengths:** Fast grid rebuilds make it ideal for dynamic/animated scenes [S3, unofficial][S4]. SIMD optimizations make the traversal step extremely cheap (2 instructions per slice) [S4, S6].
++*   **Limitations:** Uniform grids are ill-suited for highly complex scenes with high variation in geometry size and density (e.g., Boeing 777, teapot-in-a-stadium) [S5, S4]. Performance degrades if the roll angle is close to $\pi/4$ [S1, S8, unofficial].
++
++**When to Use:**
++*   Use for dynamic scenes requiring per-frame grid rebuilds [S3, unofficial][S4].
++*   Use for coherent ray packets where rays span an angle less than $\pi/2$ [S2, S4].
++*   Avoid for highly complex, static scenes with high density variation where kd-trees or BVHs are more efficient [S5, S4].
+ 
+ ## Background
+-Coherent Grid Traversal was introduced in 2006 by Wald et al. in "Ray Tracing Animated Scenes using Coherent Grid Traversal" published in ACM Transactions on Graphics (SIGGRAPH) [S2, S5]. It was developed to address the limitations of 3DDDA for ray packets and the high rebuild cost of kd-trees for animated scenes [S2, S3]. The method leverages SIMD instructions to incrementally compute frustum overlaps with grid slices, enabling efficient traversal of coherent ray bundles [S2, S3]. It has been extended to particle visualization (PCGT) and hierarchical structures (Macrocell CGT) [S4, S5].
++Coherent Grid Traversal was introduced in 2006 by Wald, Ize, Kensler, Knoll, and Parker, published in ACM Transactions on Graphics (SIGGRAPH) [S4, S7]. It was developed to address the limitations of packet-based ray tracing on uniform grids, specifically the packet divergence problem that breaks cell-by-cell traversal algorithms like 3DDDA [S4, S5]. The method was initially designed for ray tracing animated scenes, leveraging the fast rebuildability of uniform grids [S4, S5]. It has since been adapted for volume rendering and particle visualization [S1, unofficial][S7].
+ 
+ ## Sources
+ [S1] PPT - A Coherent Grid Traversal Algorithm for Volume Rendering PowerPoint Presentation - ID:991792, https://slideserve.com/kineta/a-coherent-grid-traversal-algorithm-for-volume-rendering-powerpoint-ppt-presentation, fetched 2026-10-24 (unofficial)
+-[S2] PDF Ray Tracing Animated Scenes using Coherent Grid Traversal, https://www.sci.utah.edu/~thiago/papers/grid.pdf, fetched 2026-10-25
+-[S3] PDF Ray Tracing Animated Scenes using Coherent Grid Traversal, https://www.sci.utah.edu/~wald/Publications/2006/CGT/grid.pdf, fetched 2026-10-25
+-[S4] A coherent grid traversal approach to visualizing particle-based simulation data, https://ieeexplore.ieee.org/abstract/document/4293019/, fetched 2026-10-25
+-[S5] A Coherent Grid Traversal Approach to Visualizing Particle ..., https://www.sci.utah.edu/~thiago/papers/pcgt_revised.pdf, fetched 2026-10-25
+-[S6] A Coherent Grid Traversal Algorithm for Volume Rendering, https://www.slideserve.com/iliana-house/a-coherent-grid-traversal-algorithm-for-volume-rendering, fetched 2026-10-26 (unofficial)
+-[S7] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)+[S2] A Survey on Exploiting Grids for Ray Tracing, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/089-096, fetched 2026-10-24
++[S3] Ray Tracing Animated Scenes using Coherent Grid Traversal Ray Tracing Animated Scenes using Coherent Grid Traversal. I Wald, T Ize, A Kensler, A Knoll, S Parker SCI Institute, University of Utah. Cohe, https://www.slideserve.com/penn/ray-tracing-animated-scenes-using-coherent-grid-traversal, fetched 2026-10-25 (unofficial)
++[S4] PDF Ray Tracing Animated Scenes using Coherent Grid Traversal, https://www.sci.utah.edu/~thiago/papers/grid.pdf, fetched 2026-10-25
++[S5] PDF Ray Tracing Animated Scenes using Coherent Grid Traversal, https://www.sci.utah.edu/~wald/Publications/2006/CGT/grid.pdf, fetched 2026-10-25
++[S6] A coherent grid traversal approach to visualizing particle-based simulation data, https://ieeexplore.ieee.org/abstract/document/4293019/, fetched 2026-10-25
++[S7] A Coherent Grid Traversal Approach to Visualizing Particle ..., https://www.sci.utah.edu/~thiago/papers/pcgt_revised.pdf, fetched 2026-10-25
++[S8] A Coherent Grid Traversal Algorithm for Volume Rendering, https://www.slideserve.com/iliana-house/a-coherent-grid-traversal-algorithm-for-volume-rendering, fetched 2026-10-26 (unofficial)
++[S9] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,121 @@
+# Volume-Sampled Antialiasing
+
+Also called: 3D Antialiasing (Object-Space), Density-based voxelization, Object-Space Antialiasing, Volume sampling technique
+
+## Overview
+Volume-Sampled Antialiasing is a 3D object-space technique that performs antialiasing once on a view-independent representation during the modeling stage to produce alias-free 3D models stored in a volume buffer [S1, unofficial]. Unlike 2D scan-converted graphics antialiasing, which focuses on aesthetically pleasing displays, this method emphasizes producing smooth, alias-free 3D models suitable for volume graphics manipulations [S1, unofficial]. It builds on [Distance-based Voxelization](3500-distance-based-voxelization.md) by replacing binary occupancy with continuous density values.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A geometric primitive (e.g., plane, sphere, cylinder) defined in object space, and a target voxel grid resolution.
+*   **Output:** A 3D volume buffer where each voxel stores a density value in the interval $[0, 1]$ [S1, unofficial].
+
+**Data Structures:**
+*   **Volume Buffer:** A 3D array of floating-point values. Each element represents the density contribution of the geometric primitive to that voxel.
+*   **Lookup Table (Optional):** A precomputed 1D array of density values indexed by distance. This table maps the distance from a voxel center to the primitive to a specific density weight [S1, unofficial].
+
+**Method Steps:**
+1.  **Iterate Voxels:** For each voxel in the target grid, determine if it is potentially intersected by the geometric primitive. This can be done using a bounding volume check or by iterating only voxels within the primitive's extent.
+2.  **Calculate Distance:** Compute the Euclidean distance $d$ between the center of the current voxel and the geometric primitive [S1, unofficial].
+3.  **Determine Density:**
+    *   If a lookup table is used, use $d$ as an index into the table to retrieve the density weight $w$ [S1, unofficial].
+    *   If no lookup table is used, compute $w$ using a filter weight function $f(d)$ that is proportional to the distance $d$ [S1, unofficial]. The function should attenuate the density as the distance increases, typically resulting in $w=1$ at the surface and $w=0$ beyond a certain cutoff distance.
+4.  **Store Density:** Assign the calculated density value $w$ to the voxel in the volume buffer. The value is mapped to the interval $[0, 1]$ [S1, unofficial].
+
+**Formulas:**
+The density $D$ of a voxel is given by:
+$$ D = f(d) $$
+where $d$ is the distance from the voxel center to the primitive, and $f$ is a filter weight function [S1, unofficial].
+
+**Parameters:**
+*   **Filter Function:** The specific form of $f(d)$ is not explicitly defined in the sources, but it must be proportional to distance and support attenuation [S1, unofficial].
+*   **Lookup Table Resolution:** The number of entries in the precomputed density table depends on the maximum distance considered and the desired precision. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Binary Voxelization:** Using point sampling (evaluating the object at the voxel center and assigning 0 or 1) results in object space aliasing, manifesting as jagged surfaces [S1, unofficial]. Volume-Sampled Antialiasing avoids this by using non-binary density values [S1, unofficial].
+*   **Precision:** The use of floating-point density values in $[0, 1]$ supports higher quality rendering compared to binary representations [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_sampled_antialiasing(primitive, grid_resolution, lookup_table=None):
+    """
+    Performs volume-sampled antialiasing for a geometric primitive.
+    
+    Args:
+        primitive: An object with a method `distance_to_point(point)` that returns
+                   the distance from a 3D point to the primitive.
+        grid_resolution: A tuple (nx, ny, nz) defining the dimensions of the output volume.
+        lookup_table: An optional 1D array of density weights indexed by distance.
+                      If None, a default filter function is used.
+                      
+    Returns:
+        volume_buffer: A 3D numpy array of shape (nx, ny, nz) with density values in [0, 1].
+    """
+    nx, ny, nz = grid_resolution
+    volume_buffer = np.zeros((nx, ny, nz))
+    
+    # Determine voxel size and origin based on primitive bounds
+    # [G] Assuming primitive provides bounding box or extent.
+    # For simplicity, assume voxel size is 1.0 and origin is (0,0,0).
+    # In practice, voxel centers are at (i+0.5, j+0.5, k+0.5) for i,j,k in range.
+    
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                # Calculate voxel center coordinates
+                voxel_center = np.array([i + 0.5, j + 0.5, k + 0.5])
+                
+                # Calculate distance from voxel center to the primitive
+                distance = primitive.distance_to_point(voxel_center)
+                
+                # Determine density weight
+                if lookup_table is not None:
+                    # [G] Assuming lookup_table is indexed by integer distance or scaled distance.
+                    # The source says "distance ... is used as an index".
+                    # This implies a discrete mapping or a pre-sampled table.
+                    # We assume the table is large enough or distance is quantized.
+                    # A more robust implementation would interpolate or clamp.
+                    # For this pseudocode, we assume distance is an integer index.
+                    idx = int(distance)
+                    if idx < len(lookup_table):
+                        density = lookup_table[idx]
+                    else:
+                        density = 0.0
+                else:
+                    # [G] Default filter function proportional to distance.
+                    # The source states density is "attenuated by a filter weight function
+                    # which is proportional to the distance".
+                    # This phrasing is ambiguous: does density increase with distance?
+                    # No, it says "attenuated", implying decrease.
+                    # A common interpretation is a linear or Gaussian falloff.
+                    # Since the source does not specify the exact function, we use a simple linear falloff
+                    # from 1.0 at distance 0 to 0.0 at distance 1.0.
+                    # This is a [G] implementation detail to fill the gap.
+                    if distance <= 1.0:
+                        density = 1.0 - distance
+                    else:
+                        density = 0.0
+                
+                # Clamp density to [0, 1]
+                density = max(0.0, min(1.0, density))
+                
+                volume_buffer[i, j, k] = density
+                
+    return volume_buffer
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the grid, assuming constant-time distance calculation and lookup. If a bounding volume check is used to skip empty voxels, the complexity is proportional to the number of voxels intersected by the primitive.
+*   **Memory Complexity:** $O(N)$ for the volume buffer. If a lookup table is used, an additional $O(M)$ memory is required, where $M$ is the size of the table.
+*   **Strengths:** Produces alias-free 3D models that are view-independent. The smoothness of the volume-sampled objects carries over into image space during volume rendering, improving silhouette quality [S1, unofficial].
+*   **Limitations:** Requires more memory than binary voxelization due to floating-point density values. Performance depends on the efficiency of distance calculations and lookup table access.
+*   **When to use:** When high-quality, alias-free 3D models are needed for volume graphics manipulations, such as volume rendering or global illumination.
+*   **When not to use:** When memory is constrained and binary voxelization is sufficient, or when real-time performance is critical and the overhead of density calculation is unacceptable.
+
+## Background
+Volume-Sampled Antialiasing was developed to address object space aliasing in 3D voxelization [S1, unofficial]. Traditional point sampling methods result in jagged surfaces due to the binary classification of voxels [S1, unofficial]. This technique was introduced as part of the modeling stage to produce view-independent representations that can be used for various volume graphics manipulations [S1, unofficial]. It is particularly useful for applications such as 3D medical imaging, where smooth surfaces are critical for accurate visualization and analysis [S1, unofficial].
+
+## Sources
+[S1] Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)

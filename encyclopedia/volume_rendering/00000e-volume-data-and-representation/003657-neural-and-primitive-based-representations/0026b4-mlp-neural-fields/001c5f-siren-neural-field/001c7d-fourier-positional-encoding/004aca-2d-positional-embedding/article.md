@@ -1,0 +1,109 @@
+# 2D Positional Embedding
+
+Also called: Fourier Feature Encoding, Fourier Features, Fourier Positional Encoding, Sinusoidal Positional Embedding
+
+## Overview
+2D Positional Embedding maps 2D spatial coordinates $(x, y)$ into a higher-dimensional space using interleaved sine and cosine functions at exponentially increasing frequencies. It solves the problem of MLPs struggling to represent high-frequency details by providing a rich, non-linear basis for the network to learn from [S1, unofficial]. It differs from its parent, Fourier Positional Encoding, by being explicitly designed for 2D inputs, often used in 2D image or feature map processing contexts within neural fields [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A tensor `xy` of shape $(B, N, 2)$, where $B$ is batch size, $N$ is number of points, and the last dimension contains $(x, y)$ coordinates [S1, unofficial].
+- Output: A tensor of shape $(B, N, C)$, where $C$ is the embedding dimension [S1, unofficial].
+- Parameter: `cat_coords` (bool), if True, the original coordinates are concatenated to the embedding [S1, unofficial].
+
+**Data Structures:**
+- `div_term`: A 1D tensor of shape $(C/2)$ containing frequency scaling factors [S1, unofficial].
+
+**Steps:**
+1. Extract $x$ and $y$ from `xy`. $x$ has shape $(B, N)$, $y$ has shape $(B, N)$ [S1, unofficial].
+2. Compute `div_term` as $\text{arange}(0, C, 2) \times \frac{1000.0}{C}$, reshaped to $(1, 1, C/2)$ [S1, unofficial].
+3. Initialize `pe_x` and `pe_y` as zero tensors of shape $(B, N, C)$ [S1, unofficial].
+4. Fill even indices of `pe_x` with $\sin(x \cdot \text{div\_term})$ and odd indices with $\cos(x \cdot \text{div\_term})$ [S1, unofficial].
+5. Fill even indices of `pe_y` with $\sin(y \cdot \text{div\_term})$ and odd indices with $\cos(y \cdot \text{div\_term})$ [S1, unofficial].
+6. Concatenate `pe_x` and `pe_y` along the last dimension to form the base embedding [S1, unofficial].
+7. If `cat_coords` is True, concatenate the original $x$ and $y$ coordinates to the embedding [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import math
+
+def two_d_positional_embedding(xy, C, cat_coords=False):
+    """
+    xy: Tensor of shape (B, N, 2) containing (x, y) coordinates.
+    C: Embedding dimension size.
+    cat_coords: Boolean flag to concatenate original coordinates.
+    Returns: Tensor of shape (B, N, C) or (B, N, C+2) if cat_coords is True.
+    """
+    B, N, _ = xy.shape
+    
+    # Extract x and y coordinates
+    x = xy[:, :, 0]  # Shape (B, N)
+    y = xy[:, :, 1]  # Shape (B, N)
+    
+    # Compute frequency terms
+    # arange(0, C, 2) generates [0, 2, 4, ..., C-2] if C is even
+    div_term = torch.arange(0, C, 2, dtype=xy.dtype, device=xy.device) * (1000.0 / C)
+    div_term = div_term.view(1, 1, -1)  # Shape (1, 1, C/2)
+    
+    # Initialize embeddings
+    pe_x = torch.zeros(B, N, C, dtype=xy.dtype, device=xy.device)
+    pe_y = torch.zeros(B, N, C, dtype=xy.dtype, device=xy.device)
+    
+    # Fill pe_x with sin and cos of x * div_term
+    # Even indices: sin, Odd indices: cos
+    pe_x[:, :, 0::2] = torch.sin(x.unsqueeze(-1) * div_term)
+    pe_x[:, :, 1::2] = torch.cos(x.unsqueeze(-1) * div_term)
+    
+    # Fill pe_y with sin and cos of y * div_term
+    pe_y[:, :, 0::2] = torch.sin(y.unsqueeze(-1) * div_term)
+    pe_y[:, :, 1::2] = torch.cos(y.unsqueeze(-1) * div_term)
+    
+    # Concatenate x and y embeddings
+    pe = torch.cat([pe_x, pe_y], dim=-1)  # Shape (B, N, C)
+    
+    # Optionally concatenate original coordinates
+    if cat_coords:
+        pe = torch.cat([pe, x.unsqueeze(-1), y.unsqueeze(-1)], dim=-1)
+        
+    return pe
+```
+
+**Edge Cases and Pitfalls:**
+- $C$ must be even for the indexing `0::2` and `1::2` to cover the entire dimension evenly. If $C$ is odd, the last element will be uninitialized (zero) unless handled explicitly [S1, unofficial].
+- Precision issues may arise if coordinates are very large or very small, affecting the stability of sine/cosine evaluations [G].
+
+## Subtopics
+
+### Expected Sine/Cosine Encoding
+Computes the expected value of $\sin(x)$ and $\cos(x)$ for a Gaussian variable $x \sim \mathcal{N}(\mu, \sigma^2)$. It uses the identity $\mathbb{E}[\sin(x)] = \sin(\mu) \exp(-\sigma^2/2)$ and $\mathbb{E}[\cos(x)] = \cos(\mu) \exp(-\sigma^2/2)$ [S2, unofficial]. This variant is useful when dealing with uncertain or noisy coordinates [S2, unofficial]. Input: means $y$ and variances $y\_var$. The implementation concatenates $y$ with $y + \pi/2$ and $y\_var$ with itself along the last dimension before applying the transformation [S2, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time: $O(N \cdot C)$, where $N$ is the number of points and $C$ is the embedding dimension [S1, unofficial].
+- Memory: $O(N \cdot C)$ for storing the embedding [S1, unofficial].
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Scales linearly with the number of points and embedding dimension [S1, unofficial].
+
+**Strengths and Limitations:**
+- Strengths: Provides a rich frequency basis for MLPs to learn high-frequency details [S1, unofficial].
+- Limitations: Requires careful selection of $C$ and frequency scaling factor [S1, unofficial].
+
+**When to Use:**
+- Use when processing 2D coordinates in neural fields or image-based representations [S1, unofficial].
+
+**When Not to Use:**
+- Not suitable for 3D or higher-dimensional inputs without extension [S1, unofficial].
+
+## Background
+Originated in the context of neural radiance fields and implicit neural representations to help MLPs learn high-frequency details [S1, unofficial]. Developed by various researchers in the computer graphics and vision communities, with implementations found in libraries like PyTorch [S1, unofficial].
+
+## Sources
+[S1] InternRobotics/AnySplat, https://github.com/InternRobotics/AnySplat, fetched 2026-10-27 (unofficial)
+[S2] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)

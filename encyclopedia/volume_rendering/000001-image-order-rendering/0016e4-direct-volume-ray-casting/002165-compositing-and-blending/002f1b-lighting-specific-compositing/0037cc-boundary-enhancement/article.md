@@ -1,58 +1,76 @@
 # Boundary Enhancement
 
-Also called: Organ/tissue boundary emphasis, Material boundary enhancement
+Also called: Edge Enhancement
 
 ## Overview
-Boundary Enhancement is a compositing technique designed to improve the visibility of object boundaries within volume data by modulating opacity based on geometric cues [S1][S2, unofficial]. It sets itself apart from standard Direct Volume Rendering (DVR) by explicitly suppressing opacity in regions where the view vector is aligned with the surface normal (silhouettes), thereby creating dark outlines that define material edges [S2, unofficial]. Unlike [Incremental Blending for In-scattering](2880-incremental-blending-for-in-scattering.md) which focuses on light transport, or [Intermixing](5139-intermixing.md) which blends multiple transfer functions, Boundary Enhancement operates as a geometric modifier to the alpha compositing equation [S1][S2, unofficial].
+Boundary Enhancement is a compositing technique designed to improve the visibility of object boundaries and material interfaces within volume data [S1][S2, unofficial]. It addresses the common issue in Direct Volume Ray Casting (DVRC) where internal structures lack distinct edges, leading to ambiguous depth perception and reduced readability of complex anatomical or material structures [S1][S2, unofficial]. Unlike standard compositing which blends samples based solely on density and color, Boundary Enhancement modifies the opacity contribution of samples to emphasize gradients or silhouettes, often serving as a foundational step for further illustrative effects like Feature Enhancement [S2, unofficial][S3].
 
 ## How it works
+Boundary Enhancement operates within the standard ray-casting accumulator state $(C_{acc}, \alpha_{acc})$ [S1, S51, unofficial]. It modifies the effective opacity contribution $\Delta \alpha_i$ of each sample $i$ to increase opacity at material boundaries while suppressing it in homogeneous regions.
+
 **Inputs and Outputs:**
-*   **Input:** Ray-casting accumulator state $(C_{acc}, \alpha_{acc})$, current sample position $x$, volume gradient $\nabla V(x)$, view vector $v$ (pointing from camera to sample), and base transfer function values $c_i$ (color) and $\alpha_i$ (opacity).
-*   **Output:** Updated accumulators $(C_{acc}^{(i)}, \alpha_{acc}^{(i)})$ for the next step.
+*   **Input:** Volume dataset $V$, transfer function $TF$ mapping density/gradient to color/opacity, camera parameters, ray origin $O$ and direction $D$.
+*   **Output:** Final pixel color $C_{final}$ and accumulated opacity $\alpha_{acc}$.
 
 **Data Structures:**
-*   **Gradient:** 3D vector $\nabla V = (\frac{\partial V}{\partial x}, \frac{\partial V}{\partial y}, \frac{\partial V}{\partial z})$.
-*   **View Vector:** Normalized vector $v = \frac{x - c_{am}}{\|x - c_{am}\|}$, where $c_{am}$ is the camera position [S2, G, unofficial].
+*   **Sample State:** For each sample $i$ along the ray:
+    *   $d_i$: Density value from $V$ at sample position.
+    *   $g_i$: Gradient magnitude at sample position.
+    *   $n_i$: Normal vector (gradient direction) at sample position.
+    *   $v_i$: View vector from camera to sample position.
+    *   $c_i$: Base color from $TF(d_i)$.
+    *   $\alpha_{base, i}$: Base opacity from $TF(d_i)$.
 
 **Method Steps:**
-1.  **Compute Silhouette Term:** Calculate the dot product between the view vector $v$ and the normalized gradient $\hat{n} = \frac{\nabla V}{\|\nabla V\|}$. This term, $s$, represents the silhouette strength:
-    $$ s = v \cdot \hat{n} $$
-    When $s \approx 1$, the surface faces the camera (silhouette); when $s \approx -1$, it faces away [S2, unofficial].
-
-2.  **Modify Opacity:** Adjust the sample opacity $\alpha_i$ using the silhouette term. The goal is to lower opacity when the silhouette term is small (i.e., when the surface is facing the viewer, creating a dark edge). A common implementation multiplies the base opacity by a factor derived from $s$:
-    $$ \alpha_{enhanced} = \alpha_i \cdot (1 - k \cdot \max(0, s)) $$
-    Where $k$ is a strength parameter, typically $k \in [0, 1]$ [S2, G, unofficial]. If $s=1$ (perfect silhouette), opacity is reduced by $k$. If $s \le 0$ (back-facing or tangent), opacity remains $\alpha_i$.
-
-3.  **Composite:** Use $\alpha_{enhanced}$ and $c_i$ in the standard compositing step:
-    $$ \Delta \alpha_i = \alpha_{enhanced} $$
-    $$ \Delta C_i = c_i \cdot \alpha_{enhanced} $$
-    $$ C_{acc}^{(i)} = C_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \cdot \Delta C_i $$
-    $$ \alpha_{acc}^{(i)} = \alpha_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \cdot \Delta \alpha_i $$
+1.  **Initialization:** Initialize accumulated color $C_{acc} = (0,0,0)$ and accumulated opacity $\alpha_{acc} = 0$. Initialize transmittance $T = 1.0$ [G].
+2.  **Ray Marching:** For each sample $i$ along the ray from near to far clipping plane:
+    a.  **Sample Data:** Trilinearly interpolate $d_i$ and compute gradient $\nabla V_i$ from $V$. Compute normal $n_i = \nabla V_i / \|\nabla V_i\|$ if $\|\nabla V_i\| > \epsilon$. Compute view vector $v_i = (O - P_i) / \|O - P_i\|$.
+    b.  **Boundary Detection:** Calculate a boundary term $B_i$. Common implementations use the gradient magnitude $g_i = \|\nabla V_i\|$ or a silhouette term based on the dot product of the view vector and normal. For silhouette-based enhancement, compute $S_i = \max(0, n_i \cdot v_i)$ [S2, unofficial].
+    c.  **Modify Opacity:** Compute the enhanced opacity contribution $\Delta \alpha_i$. A typical approach increases opacity where the boundary term is high. For gradient-based enhancement:
+        $$ \Delta \alpha_i = \alpha_{base, i} \cdot (1 + k \cdot g_i) $$
+        where $k$ is a scaling factor controlling the strength of the enhancement [G]. For silhouette-based enhancement, opacity might be boosted when $S_i$ is high (grazing angles) [S2, unofficial].
+    d.  **Compute Color Contribution:** The color contribution $\Delta C_i$ is typically the base color $c_i$ modulated by the lighting model (e.g., Phong) [S1].
+        $$ \Delta C_i = c_i \cdot L(n_i, v_i, l_i) $$
+        where $L$ is the lighting function and $l_i$ is the light direction.
+    e.  **Composite:** Update accumulator using the modified opacity:
+        $$ C_{acc} \leftarrow C_{acc} + \Delta C_i \cdot T $$
+        $$ T \leftarrow T \cdot (1 - \Delta \alpha_i) $$
+        $$ \alpha_{acc} \leftarrow 1 - T $$
+    f.  **Early Termination:** If $\alpha_{acc} > 0.99$, break loop [S10, S12, unofficial].
+3.  **Background Compositing:**
+    $$ C_{final} = C_{acc} + (1 - \alpha_{acc}) C_{bg} $$
+    [S1, S14, unofficial].
 
 **Parameters:**
-*   **Silhouette Strength ($k$):** Controls the darkness of the boundary. Not given in the sources. Typical values range from 0.5 to 1.0 [G].
-*   **Gradient Threshold:** Gradients below a certain magnitude are treated as homogeneous interior, not boundaries. Not given in the sources [G].
+*   $k$: Enhancement strength factor. Typical values depend on gradient magnitude scale; often tuned empirically [G].
+*   Silhouette threshold: If using silhouette terms, a threshold may be applied to $S_i$ [S2, unofficial].
 
-**Edge Cases:**
-*   **Zero Gradient:** In homogeneous regions, $\nabla V = 0$. The silhouette term is undefined. Handle by setting $s=0$ or using a fallback opacity [G].
-*   **Noise:** Gradient noise can cause flickering boundaries. Apply gradient smoothing or thresholding [G].
+**Edge Cases and Pitfalls:**
+*   **Noise Amplification:** Gradient-based enhancement can amplify noise in homogeneous regions, creating false edges. Pre-filtering (e.g., Gaussian or median filter) is often required [S3].
+*   **Over-saturation:** Excessive enhancement can make the volume appear opaque and hide internal structures.
+*   **Silhouette Artifacts:** Silhouette-based methods may produce strong edges only at specific viewing angles, leading to view-dependent artifacts if not combined with other techniques [S2, unofficial].
 
 ## Subtopics
 
 ### [Temporal Gradient Enhancement](8138-temporal-gradient-enhancement.md)
-Extends boundary enhancement to time-varying data by computing gradients in the time dimension to highlight features varying rapidly over time, ensuring visual coherence across frames.
+Temporal Gradient Enhancement is a boundary enhancement technique for time-varying volume data that highlights features varying rapidly over time by computing gradients in the time dimension and modifying shading/opacity based on these gradients. Unlike standard animation which renders individual time steps independently, this method uses data from previous and next time steps for the current rendering to maintain coherence. It sets itself apart from spatial enhancement techniques (such as those using Non-Photorealistic Rendering strokes) by avoiding artifacts introduced into animations, ensuring visual coherence from one time step to the next.
+
+### Feature Enhancement
+Feature Enhancement is a technique that adds texture and contrast to the volume render, furthering the effects of edge enhancement [S3]. It builds on Boundary Enhancement by adding additional texture to the volume and increasing the contrast between objects at different depths, often in conjunction with depth-based shading and Phong lighting [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per sample for the dot product and opacity modulation, assuming gradient is precomputed or interpolated.
-*   **Memory Complexity:** No additional storage if gradients are computed on-the-fly. If precomputed, requires storing gradient fields [S1].
-*   **Strengths:** Significantly improves readability of complex anatomical structures by defining clear material boundaries [S1][S2, unofficial].
-*   **Limitations:** Can introduce artifacts if gradient estimation is noisy. Relies on accurate gradient computation [S2, unofficial].
-*   **When to use:** Medical illustration, anatomical visualization where boundary clarity is critical [S2, unofficial].
-*   **When not to use:** When interior texture detail is more important than boundary definition [S2, unofficial].
+*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of samples per ray, same as standard DVRC. However, computing gradients and normals adds a constant overhead per sample [S1, S3].
+*   **Memory Complexity:** $O(1)$ additional memory per ray for accumulator state, plus storage for the volume data [S1].
+*   **Performance:** Real-time performance is achievable on modern GPUs if gradient computation is optimized (e.g., using hardware texture units) [S3].
+*   **Strengths:** Significantly improves readability of complex structures, especially in medical imaging where organ/tissue boundaries are critical [S2, unofficial]. Works well with other lighting models like Phong shading [S1, S3].
+*   **Limitations:** Can introduce artifacts if noise is not handled; view-dependent if silhouette-based; requires careful tuning of enhancement parameters [S2, unofficial][S3].
+*   **When to Use:** When clear visualization of material interfaces or organ boundaries is the primary goal, particularly in medical illustration or scientific visualization [S2, unofficial].
+*   **When Not to Use:** When internal density variations are more important than boundaries, or when real-time performance is critical and gradient computation is too expensive [S3].
 
 ## Background
-Boundary Enhancement originated in the context of illustrative visualization for medicine and science, specifically to address the need for clear organ/tissue boundaries in medical illustrations [S2, unofficial]. It is often used in conjunction with silhouette techniques [S2, unofficial]. The method was implemented in volume ray casters for advanced volumetric display of the human musculoskeletal system, where it was combined with Phong illumination and view-dependent transparency [S1].
+Boundary Enhancement originated as a technique to improve the visual clarity of volume-rendered data, particularly in medical visualization where distinguishing between tissues is crucial [S2, unofficial]. It was integrated into advanced volumetric display systems for the human musculoskeletal system, often in conjunction with Phong illumination and view-dependent transparency [S1]. The technique has been extended to temporal data for 4D visualization, such as in intraoperative ophthalmic OCT, where it helps highlight dynamic features [S3]. It is a key component of Illustrative Visualization (IVIS) pipelines, which aim to produce images that resemble traditional medical illustrations [S2, unofficial].
 
 ## Sources
 [S1] Towards Advanced Volumetric Display of the Human Musculoskeletal System, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/021-025, fetched 2026-10-26
 [S2] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)
+[S3] Enhanced volumetric visualization for real time 4D intraoperative ophthalmic swept-source OCT, https://doi.org/10.1364/boe.7.001815, fetched 2026-11-08

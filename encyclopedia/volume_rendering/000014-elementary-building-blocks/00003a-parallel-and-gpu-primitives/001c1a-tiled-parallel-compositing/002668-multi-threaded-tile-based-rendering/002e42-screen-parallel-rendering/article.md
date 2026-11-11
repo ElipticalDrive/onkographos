@@ -1,93 +1,156 @@
 # Screen Parallel Rendering
 
-Also called: Demand-Driven Ray-Parallel Rendering, Demand-driven, Sort-First Parallel Rendering, Image Space Partitioning
+Also called: Demand-Driven Ray-Parallel Rendering, Demand-driven, Sort-First Parallel Rendering, Image Space Partitioning, Parallel Row Rendering
 
 ## Overview
-Screen Parallel Rendering is a parallelization technique that exploits parallelism in screen space by dividing the screen into regions (tasks) and assigning each region to a processor [S1, S3, unofficial]. It solves the problem of rendering large scenes by distributing the workload of ray traversal across multiple processors, where each processor is responsible for the entire ray for its assigned subscreen [S3, unofficial]. Unlike object-parallel methods that partition the volume data, this approach partitions the image space, allowing each processor to access the full dataset [S3, unofficial]. It is a form of sort-first parallel rendering, where primitives are distributed based on their projected screen location [S4, unofficial].
+Screen Parallel Rendering is a parallelization technique that exploits parallelism in screen space by dividing the screen into regions (tasks) and assigning each region to a processor [S4, unofficial]. It solves the problem of rendering large scenes by distributing the workload of ray traversal across multiple processors, where each processor is responsible for the entire ray for its assigned subscreen [S4, unofficial]. Unlike object-parallel methods that partition the volume data, this approach partitions the image space, allowing each processor to access the full dataset [S4, unofficial]. It is a form of sort-first parallel rendering, where primitives are distributed based on their projected screen location [S5, unofficial].
 
 ## How it works
 **Inputs:**
-- A volume dataset (or scene primitives).
-- A camera view (viewpoint and projection).
-- A set of $p$ processors.
+- A volume dataset (or scene primitives) [S3, unofficial].
+- A camera view (viewpoint and projection) [S1, unofficial].
+- A set of $p$ processors [S4, unofficial].
 
 **Outputs:**
-- A final composite image.
+- A final composite image [S3, unofficial].
 
 **Data Structures:**
-- **Screen Partitioning:** The screen is divided into $p$ disjoint subscreens or tiles [S3, S4, unofficial].
+- **Screen Partitioning:** The screen is divided into $p$ disjoint subscreens or tiles [S4, unofficial].
 - **Task Queue:** A master node maintains a queue of tasks (subscreen regions) [S1, unofficial].
-- **Volume Data:** The entire volume dataset must be accessible to every processor [S3, unofficial].
+- **Volume Data:** The entire volume dataset must be accessible to every processor [S4, unofficial].
 
 **Steps:**
-1. **Partitioning:** Divide the screen into $p$ subscreens, where $p$ is the number of available processors [S3, unofficial].
-2. **Assignment:** Assign tasks associated with each subscreen to processors. Tasks are often assigned in a cyclic manner to statically balance processing workloads [S3, unofficial].
-3. **Execution:** Each processor takes responsibility for the entire ray for its subscreen. All voxels along a ray are processed simultaneously by the respective processor [S1, S3, unofficial].
-4. **Demand-Driven Scheduling:** Processors execute tasks and request new ones from a master node upon completion of the current task [S1, unofficial]. This is referred to as the "demand-driven" approach [S1, unofficial].
-5. **Compositing:** Rendered portions are assembled or pasted together to form the final image [S2, unofficial].
+1. **Partitioning:** Divide the screen into $p$ subscreens, where $p$ is the number of available processors [S4, unofficial].
+2. **Assignment:** Assign tasks associated with each subscreen to processors [S4, unofficial]. Tasks are assigned in a cyclic manner to statically balance processing workloads [S4, unofficial].
+3. **Execution:** Each processor takes responsibility for the entire ray for its subscreen [S4, unofficial]. All voxels along a ray are processed simultaneously by the respective processor [S2, unofficial].
+4. **Demand-Driven Scheduling:** Processors execute tasks and request new ones from a master node upon completion of the current task [S2, unofficial]. This is referred to as the "demand-driven" approach [S1, unofficial].
+5. **Compositing:** Rendered portions are assembled or pasted together to form the final image [S3, unofficial].
+
+**Formulas:**
+Ray direction computation per pixel $(x, y)$ [S1, unofficial]:
+$$r_x = (x - \text{res}[0]/2) \cdot f_x$$
+$$r_y = (y - \text{res}[1]/2) \cdot f_y$$
+$$r_z = 1.0$$
+$$f_x = \frac{\tan(\text{fov})}{\text{res}[0]/2}$$
+$$f_y = \frac{\tan(\text{fov})}{\text{res}[1]/2} \cdot \frac{\text{res}[1]}{\text{res}[0]}$$
+The ray direction is then rotated using Rodrigues' rotation formula around the camera rotation vector [S1, unofficial].
+
+**Parameters:**
+- $p$: Number of processors. Must match the number of subscreens [S4, unofficial].
+- `RENDERING_THREADS`: Number of threads, typically set to 8 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Memory Requirements:** Every processor needs to load the entire volume into memory, requiring large main memory [S4, unofficial]. This makes the approach infeasible for massive datasets where data cannot be replicated [S2, unofficial].
+- **Load Balancing:** Primitives may cluster into specific regions, causing load balancing problems between renderers [S5, unofficial].
+- **Boundary Processing:** Primitives overlapping screen region boundaries may be processed by more than one renderer, leading to redundant computation [S5, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def screen_parallel_rendering(volume, camera, num_processors):
     # Step 1: Partition screen into p subscreens
-    subscreens = divide_screen_into_p_regions(camera, num_processors)
-    
-    # Step 2: Assign tasks to processors
-    # Tasks are assigned cyclically for static load balancing
-    task_queue = []
-    for i, subscreen in enumerate(subscreens):
-        processor_id = i % num_processors
-        task_queue.append((processor_id, subscreen))
-    
-    # Step 3 & 4: Processors execute tasks and request new ones
-    # This is a simplified representation of the demand-driven loop
-    processors = [Processor(id=i, volume=volume) for i in range(num_processors)]
-    
-    # Master node manages the queue
+    resolution = camera.resolution
+    subscreens = []
+    for i in range(num_processors):
+        y_start = (i * resolution[1]) // num_processors
+        y_end = ((i + 1) * resolution[1]) // num_processors if i < num_processors - 1 else resolution[1]
+        subscreens.append({'id': i, 'x_start': 0, 'x_end': resolution[0], 'y_start': y_start, 'y_end': y_end})
+
+    # Step 2 & 4: Demand-driven task queue
+    task_queue = list(subscreens)
+    rendered_portions = [None] * num_processors
+
     while task_queue:
-        processor_id, subscreen = task_queue.pop(0)
-        processor = processors[processor_id]
-        
-        # Each processor renders its entire subscreen
-        # All voxels along each ray in the subscreen are processed
-        image_portion = processor.render_subscreen(subscreen, camera)
-        
-        # Store result for compositing
-        save_portion(processor_id, image_portion)
-        
-        # Processor requests new task from master (implicit in loop)
-        # If more tasks exist, they are popped in the next iteration
-        
-    # Step 5: Assemble final image
-    final_image = composite_portions(save_results)
+        subscreen = task_queue.pop(0)
+        proc_id = subscreen['id']
+        portion = render_subscreen(subscreen, camera, volume)
+        rendered_portions[proc_id] = portion
+
+    # Step 5: Compositing
+    final_image = composite_portions(rendered_portions, resolution)
     return final_image
 
-class Processor:
-    def __init__(self, id, volume):
-        self.id = id
-        self.volume = volume # Each processor loads the entire volume
-        
-    def render_subscreen(self, subscreen, camera):
-        # For each pixel/ray in the subscreen
-        image = empty_image(subscreen.width, subscreen.height)
-        for y in range(subscreen.y_start, subscreen.y_end):
-            for x in range(subscreen.x_start, subscreen.x_end):
-                ray = camera.generate_ray(x, y)
-                # All voxels along the ray are processed simultaneously
-                color = ray_cast_volume(ray, self.volume)
-                image.set_pixel(x, y, color)
-        return image
+def render_subscreen(subscreen, camera, volume):
+    resolution = camera.resolution
+    fov = camera.fov
+    res_x, res_y = resolution[0], resolution[1]
+    x_factor = math.tan(fov) / (res_x / 2)
+    y_factor = (math.tan(fov) / (res_y / 2)) * (res_y / res_x)
+
+    image = [[0.0] * 3 for _ in range(subscreen['y_end'] - subscreen['y_start'])]
+    for y in range(subscreen['y_start'], subscreen['y_end']):
+        for x in range(subscreen['x_start'], subscreen['x_end']):
+            # Compute ray direction [S1, unofficial]
+            rx = (x - res_x / 2) * x_factor
+            ry = (y - res_y / 2) * y_factor
+            rz = 1.0
+            ray_dir = normalize([rx, ry, rz])
+            ray_origin = camera.origin
+
+            # Cast ray through volume [S1, unofficial]
+            color = ray_cast_volume(ray_origin, ray_dir, volume)
+            image[y - subscreen['y_start']][x] = color
+    return image
+
+def ray_cast_volume(ray_origin, ray_direction, volume):
+    # Standard ray-marching for volume rendering [G]
+    color = [0.0, 0.0, 0.0]
+    alpha = 0.0
+    t = 0.0
+    step_size = 0.1
+    while t < 10.0 and alpha < 1.0:
+        point = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
+        density = sample_volume(point, volume)
+        if density > 0:
+            transmittance = math.exp(-density * step_size)
+            color = [color[i] + (1.0 - alpha) * density * step_size * color_map(density)[i] for i in range(3)]
+            alpha = 1.0 - (1.0 - alpha) * transmittance
+        t += step_size
+    return color
+
+def composite_portions(portions, resolution):
+    final = [[0.0] * 3 for _ in range(resolution[1])]
+    for portion in portions:
+        if portion is None: continue
+        for y in range(len(portion)):
+            for x in range(len(portion[0])):
+                final[y][x] = portion[y][x]
+    return final
+
+def normalize(v):
+    mag = math.sqrt(sum(c*c for c in v))
+    return [c/mag for c in v]
+
+def sample_volume(point, volume):
+    # Placeholder for volume trilinear interpolation [G]
+    return 0.0
+
+def color_map(density):
+    # Placeholder for transfer function [G]
+    return [density, density, density]
 ```
 
-**Parameters:**
-- $p$: Number of processors. Must match the number of subscreens [S3, unofficial].
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of pixels in the subscreen and the number of voxels along the ray for each processor [G]. The total time is dominated by the slowest processor if load balancing is poor [S4, unofficial].
+- **Memory Complexity:** $O(N)$ per processor, where $N$ is the size of the entire volume dataset [S4, unofficial]. This is a significant limitation as memory usage scales with the dataset size, not the subscreen size [S4, unofficial].
+- **Measured Performance:** Effective for small datasets that require no data decomposition [S4, unofficial]. Performance degrades for large-scale datasets due to memory constraints [S4, unofficial].
+- **Strengths:**
+    - Exploits parallelism in screen space [S4, unofficial].
+    - Each processor has all information needed for complete rendering, allowing use of any rendering algorithm [S5, unofficial].
+    - Takes advantage of frame-to-frame coherence, as few primitives move between tiles from one frame to the next [S5, unofficial].
+- **Limitations:**
+    - Requires large main memory because every processor needs to load the entire volume [S4, unofficial].
+    - Infeasible for massive volumes where data cannot be replicated [S2, unofficial].
+    - Load balancing issues due to primitive clustering [S5, unofficial].
+    - Redundant processing of primitives at region boundaries [S5, unofficial].
+- **When to Use:** Small datasets where memory is not a constraint and frame-to-frame coherence is high [S4, S5, unofficial].
+- **When Not to Use:** Large-scale datasets requiring out-of-core processing or distributed memory management [S2, S5, unofficial].
 
-**Edge Cases and Pitfalls:**
-- **Memory Requirements:** Every processor needs to load the entire volume into memory, requiring large main memory [S3, unofficial]. This makes the approach infeasible for massive datasets where data cannot be replicated [S1, unofficial].
-- **Load Balancing:** Primitives may cluster into specific regions, causing load balancing problems between renderers [S4, unofficial].
-- **Boundary Processing:** Primitives overlapping screen region boundaries may be processed by more than one renderer, leading to redundant computation [S4, unofficial].
+## Background
+Screen Parallel Rendering is one of the earliest parallel schemes for volume rendering, classified under screen parallel rendering as opposed to object parallel rendering [S4, unofficial]. It is a form of sort-first parallel rendering, a concept identified by Molnar et al. [S5, unofficial]. The Chromium System uses the sort-first approach to distribute rendering work to cluster nodes before the transformation and lighting stages [S3, unofficial]. The technique is also known as demand-driven ray-parallel rendering, where processors request new tasks from a master upon completion [S1, unofficial].
 
 ## Subtopics
 
@@ -97,27 +160,9 @@ A broader category that includes Screen Parallel Rendering. It distributes raw p
 ### Object Parallel Rendering
 Contrasts with screen parallel rendering by dividing the volume into subvolumes. It requires image compositing to merge subimages. [Object Parallel Rendering](3786-object-parallel-rendering.md)
 
-## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of pixels in the subscreen and the number of voxels along the ray for each processor. The total time is dominated by the slowest processor if load balancing is poor [S3, S4, unofficial].
-- **Memory Complexity:** $O(N)$ per processor, where $N$ is the size of the entire volume dataset. This is a significant limitation as memory usage scales with the dataset size, not the subscreen size [S3, unofficial].
-- **Measured Performance:** Effective for small datasets that require no data decomposition [S3, unofficial]. Performance degrades for large-scale datasets due to memory constraints [S3, unofficial].
-- **Strengths:**
-    - Exploits parallelism in screen space [S3, unofficial].
-    - Each processor has all information needed for complete rendering, allowing use of any rendering algorithm [S4, unofficial].
-    - Takes advantage of frame-to-frame coherence, as few primitives move between tiles from one frame to the next [S4, unofficial].
-- **Limitations:**
-    - Requires large main memory because every processor needs to load the entire volume [S3, unofficial].
-    - Infeasible for massive volumes where data cannot be replicated [S1, unofficial].
-    - Load balancing issues due to primitive clustering [S4, unofficial].
-    - Redundant processing of primitives at region boundaries [S4, unofficial].
-- **When to Use:** Small datasets where memory is not a constraint and frame-to-frame coherence is high [S3, S4, unofficial].
-- **When Not to Use:** Large-scale datasets requiring out-of-core processing or distributed memory management [S1, S3, unofficial].
-
-## Background
-Screen Parallel Rendering is one of the earliest parallel schemes for volume rendering, classified under screen parallel rendering as opposed to object parallel rendering [S3, unofficial]. It is a form of sort-first parallel rendering, a concept identified by Molnar et al. [S2, S4, unofficial]. The Chromium System uses the sort-first approach to distribute rendering work to cluster nodes before the transformation and lighting stages [S2, unofficial]. The technique is also known as demand-driven ray-parallel rendering, where processors request new tasks from a master upon completion [S1, unofficial].
-
 ## Sources
-[S1] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
-[S2] Volume visualization of time-varying data using parallel, multiresolution and adaptive-resolution techniques, https://scholars.unh.edu/cgi/viewcontent.cgi?article=1245&context=thesis, fetched 2026-10-27 (unofficial)
-[S3] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
-[S4] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)
+[S1] rools/voxl, https://github.com/rools/voxl, fetched 2026-10-26 (unofficial)
+[S2] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
+[S3] Volume visualization of time-varying data using parallel, multiresolution and adaptive-resolution techniques, https://scholars.unh.edu/cgi/viewcontent.cgi?article=1245&context=thesis, fetched 2026-10-27 (unofficial)
+[S4] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
+[S5] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)

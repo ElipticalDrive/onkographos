@@ -37,13 +37,13 @@ Regular-Adaptive Octree Construction is an iterative top-bottom algorithm that b
     e.  If $\text{minLevel} \le n \le \text{maxLevel}$:
         i.  Check if `currentCell` is **Complex**. If **Yes**, set `divide = true` [S3].
         ii. If **No**, check if `currentCell` is **Inhomogeneous** [S3].
-        iii. If **Yes**, check if it has **High Curvature** using Rule 2. If **Yes**, set `divide = true` [S3].
+        iii. If **Yes**, check if it has **High Curvature** using Rule 2 [S3]. If **Yes**, set `divide = true` [S3].
         iv. If **No** (not inhomogeneous or low curvature), mark `currentCell` as a **compact leaf** [S3].
     f.  If `divide` is true: Subdivide `currentCell` into 8 children $\{q_1, ..., q_8\}$ and add each child to `toProcess` [S2, unofficial][S3].
 
 **Formulas:**
 *   **Rule 1 (Complexity):** Subdivide if $C$ is complex [S3].
-*   **Rule 2 (Curvature):** Let $I_i$ ($i=0...n$) be the intersection points of cell edges with $\partial V$. Let $n_i$ be the normals at $I_i$. Subdivide if:
+*   **Rule 2 (Curvature):** Let $I_i$ ($i=0...n$) be the intersection points of cell edges with $\partial V$ [S3]. Let $n_i$ be the normals at $I_i$. Subdivide if:
     $$ \min_{i \neq j} (n_i \cdot n_j) \le \delta $$
     where $\delta \in [0, 1]$ is the curvature threshold [S3].
 
@@ -112,7 +112,7 @@ def is_face_complex(face):
     return False
 
 def is_inhomogeneous(cell):
-    return cell.has_intersection_with_boundary()
+    return cell.has_intersection_with_boundary()  # [G] Checks if cell contains surface intersection points
 
 def has_high_curvature(cell, delta):
     intersections = cell.get_edge_intersections_with_boundary()
@@ -145,11 +145,11 @@ def compute_normal_at(point):
 A recursive post-processing algorithm used to fix topological problems (non-manifold configurations) caused by collapsed cells adjacent to higher-resolution cells [S2, unofficial]. It identifies affected cells adjacent to collapsed cells and subdivides them until complex faces are eliminated [S2, unofficial]. It operates on a set of affected cells $A$ (initially containing collapsed cells $T$) and recursively expands $A$ by checking faces of cells in $A$ for complexity, adding adjacent cells to $A$ if complex faces are found [S2, unofficial]. The complexity is linear with respect to the number of affected cells [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The main construction is iterative. The local refinement step has linear complexity over the number of cells affected by induced subdivision [S2, unofficial].
-*   **Memory Complexity:** Depends on the depth of the octree and the surface complexity. The regular phase ensures a predictable base memory usage [S2, unofficial][S3].
-*   **Measured Performance:** Regular Construction (Serial) takes 129s at Level 6 and 226s at Level 7. Regular Construction (Parallel, 8 threads) takes ~23s at Level 6 and 78s at Level 7 [S1, unofficial].
+*   **Time Complexity:** The main construction is iterative [S2, unofficial]. The local refinement step has linear complexity over the number of cells affected by induced subdivision [S2, unofficial].
+*   **Memory Complexity:** Depends on the depth of the octree and the surface complexity [S2, unofficial][S3]. The regular phase ensures a predictable base memory usage [S2, unofficial].
+*   **Measured Performance:** Regular Construction (Serial) takes 129s at Level 6 and 226s at Level 7 [S1, unofficial]. Regular Construction (Parallel, 8 threads) takes ~23s at Level 6 and 78s at Level 7 [S1, unofficial].
 *   **Strengths:** Guarantees manifold surfaces by eliminating complex cells [S3]. The regular phase captures general features efficiently [S3].
-*   **Limitations:** Requires explicit topological checks (complexity, curvature) which are more expensive than simple occupancy checks. The local refinement step adds overhead if many collapsed cells exist [S2, unofficial].
+*   **Limitations:** Requires explicit topological checks (complexity, curvature) which are more expensive than simple occupancy checks [S2, unofficial][S3]. The local refinement step adds overhead if many collapsed cells exist [S2, unofficial].
 *   **When to use:** When manifold surface extraction is required from implicit or voxel data, and topological correctness is critical [S2, unofficial][S3].
 *   **When not to use:** When performance is prioritized over strict manifold guarantees, or when the surface is simple enough that standard occupancy-based SVO construction suffices [S1, unofficial].
 

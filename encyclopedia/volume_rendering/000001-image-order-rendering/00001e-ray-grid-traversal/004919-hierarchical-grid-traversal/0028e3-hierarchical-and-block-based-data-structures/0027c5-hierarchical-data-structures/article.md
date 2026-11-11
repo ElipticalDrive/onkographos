@@ -1,14 +1,12 @@
 # Hierarchical Data Structures
-
-
 ## Overview
-Hierarchical data structures accelerate volume rendering by organizing voxel data into a spatial subdivision hierarchy where internal nodes store aggregate information derived from their children or leaf voxels [Parent]. This structure enables the renderer to prune empty or inactive regions during ray traversal, significantly reducing the number of samples required to generate an image. Unlike flat grid traversal methods, hierarchical approaches adaptively skip large volumes of empty space, making them particularly effective for sparse or multi-resolution datasets [Parent].
+Hierarchical data structures accelerate volume rendering by organizing voxel data into a spatial subdivision hierarchy where internal nodes store aggregate information derived from their children or leaf voxels [Parent](4392-hierarchical-and-block-based-data-structures.md). This structure enables the renderer to prune empty or inactive regions during ray traversal, significantly reducing the number of samples required to generate an image [G]. Unlike flat grid traversal methods, hierarchical approaches adaptively skip large volumes of empty space, making them particularly effective for sparse or multi-resolution datasets [G].
 
 ## Shared principles
-All methods in this family rely on a spatial subdivision hierarchy where internal nodes store aggregate information derived from their children or leaf voxels. The core mechanism is:
-1.  **Aggregation:** Leaf nodes encode voxel properties. Internal nodes aggregate these properties (e.g., binary occupancy, min/max scalar ranges) from their children.
-2.  **Pruning:** During ray traversal, if a node indicates an empty or inactive region (e.g., occupancy flag is 0, or min/max bounds are outside the transfer function's opacity range), the entire subtree is skipped.
-3.  **Construction:** The hierarchy is typically constructed bottom-up. The depth is determined by data dimensions, often requiring padding to powers of two or specific size constraints to maintain regular subdivision [2560-hierarchical-grid-traversal].
+All methods in this family rely on a spatial subdivision hierarchy where internal nodes store aggregate information derived from their children or leaf voxels [Parent](4392-hierarchical-and-block-based-data-structures.md). The core mechanism is:
+1.  **Aggregation:** Leaf nodes encode voxel properties [Parent](4392-hierarchical-and-block-based-data-structures.md). Internal nodes aggregate these properties (e.g., binary occupancy, min/max scalar ranges) from their children [Parent](4392-hierarchical-and-block-based-data-structures.md).
+2.  **Pruning:** During ray traversal, if a node indicates an empty or inactive region (e.g., occupancy flag is 0, or min/max bounds are outside the transfer function's opacity range), the entire subtree is skipped [Parent](4392-hierarchical-and-block-based-data-structures.md).
+3.  **Construction:** The hierarchy is typically constructed bottom-up [Parent](4392-hierarchical-and-block-based-data-structures.md). The depth is determined by data dimensions, often requiring padding to powers of two or specific size constraints to maintain regular subdivision [Parent](4392-hierarchical-and-block-based-data-structures.md).
 
 ## Subtopics
 
@@ -25,7 +23,7 @@ This method accelerates voxelization queries by providing conservative bounds on
 The flex-block tree is a hierarchical spatial subdivision structure derived from a kd-tree, designed primarily for load balancing in distributed volume rendering (both ray casting and ray tracing). Unlike traditional hierarchical structures that enforce strict axis-alternating splits, the flex-block partition allows flexible cut orientations to accommodate non-empty subvolume boundaries and render-node constraints. It serves as a dependency graph that determines the deterministic depth order of cells for image compositing in ray casting and accelerates ray traversal by indicating potential neighbor cells in ray tracing.
 
 ### Spatial Partitioning Tree for Unstructured Data
-- [S1, unofficial] A preprocessing step that performs a parallel, synchronized partitioning of the volume data to produce a hierarchical spatial tree. This tree is used during rendering to optimize the compositing process, reduce runtime memory consumption, and speed up cell searching for zoom-in viewing.
+- [S1, unofficial] A preprocessing step that performs a parallel, synchronized partitioning of the volume data to produce a hierarchical spatial tree. This tree is used during rendering to optimize the compositing process, reduce runtime memory consumption, and speed up cell searching for zoom-in viewing [S1, unofficial].
 - [S1, unofficial] Perform parallel, synchronized partitioning of the volume data.
 - [S1, unofficial] Construct a hierarchical representation (spatial tree) of the data space.
 - [S1, unofficial] Use the spatial tree during rendering to guide the compositing process.
@@ -36,9 +34,9 @@ The flex-block tree is a hierarchical spatial subdivision structure derived from
 - [S2, unofficial] A hierarchical rendering architecture that achieves real-time performance through adaptive level selection and efficient GPU execution.
 
 ### Cell-tree Peeling
-- [S3, unofficial] An efficient cell-processing schedule for the next frame determined using a ray dependency graph (the cell-tree). When a render-node becomes available, the cell with the longest queue is assigned to it.
-- [S3, unofficial] The cell-tree represents ray dependencies between cells. Each node in the cell-tree has an associated cell ID, and more than one node may have the same cell ID.
-- [S3, unofficial] The algorithm exploits frame-to-frame coherence by using the cell tree to find potential cache savings links. A schedule with any combination of non-conflicting link groups is a feasible one, and the optimal schedule for a single render-node includes a maximal group of cache savings links.
+- [S3, unofficial] An efficient cell-processing schedule for the next frame determined using a ray dependency graph (the cell-tree). When a render-node becomes available, the cell with the longest queue is assigned to it [S3, unofficial].
+- [S3, unofficial] The cell-tree represents ray dependencies between cells. Each node in the cell-tree has an associated cell ID, and more than one node may have the same cell ID [S3, unofficial].
+- [S3, unofficial] The algorithm exploits frame-to-frame coherence by using the cell tree to find potential cache savings links. A schedule with any combination of non-conflicting link groups is a feasible one, and the optimal schedule for a single render-node includes a maximal group of cache savings links [S3, unofficial].
 - [S3, unofficial] As long as a cell of data is in local memory, all rays on the corresponding queue are processed before it is replaced with another cell.
 - [S3, unofficial] The tree is processed starting with the leaves by peeling the tree nodes with the same cell ID and adding it to the reverse schedule.
 - [S3, unofficial] An interim tree is maintained by keeping a list of nodes that have not been included in the schedule.
@@ -46,7 +44,7 @@ The flex-block tree is a hierarchical spatial subdivision structure derived from
 - [S3, unofficial] The cell-tree peeling algorithm performs well and has polynomial worst time.
 
 ## Background
-The concept of hierarchical spatial subdivision for volume rendering originated in the mid-1990s as a means to handle the computational cost of ray marching through large, sparse datasets. Early work focused on octrees and kd-trees to skip empty space [Parent]. The specific formulation of "Hierarchical Spatial Enumeration" using binary volume pyramids was detailed in the early 2000s, addressing the inefficiencies of traditional geometric acceleration structures when applied to dense voxel grids [S1, unofficial]. The "Flex-block tree" and associated distributed rendering techniques were developed later to address load balancing in parallel volume rendering systems, particularly for massive datasets where static partitioning leads to severe load imbalances [S3, unofficial]. More recently, hierarchical structures have been adapted for novel rendering paradigms such as 3D Gaussian Splatting, where hierarchical architectures like HiGS enable real-time performance through adaptive level selection [S2, unofficial].
+The concept of hierarchical spatial subdivision for volume rendering originated in the mid-1990s as a means to handle the computational cost of ray marching through large, sparse datasets [G]. Early work focused on octrees and kd-trees to skip empty space [Parent](4392-hierarchical-and-block-based-data-structures.md). The specific formulation of "Hierarchical Spatial Enumeration" using binary volume pyramids was detailed in the early 2000s, addressing the inefficiencies of traditional geometric acceleration structures when applied to dense voxel grids [S1, unofficial]. The "Flex-block tree" and associated distributed rendering techniques were developed to address load balancing in parallel volume rendering systems, particularly for massive datasets where static partitioning leads to severe load imbalances [S3, unofficial]. More recently, hierarchical structures have been adapted for novel rendering paradigms such as 3D Gaussian Splatting, where hierarchical architectures like HiGS enable real-time performance through adaptive level selection [S2, unofficial].
 
 ## Sources
 [S1] DTIC ADA329328: A Scalable Parallel Cell-Projection Volume Rendering Algorithm for Three-Dimensional Unstructured Data, https://archive.org/details/DTIC_ADA329328, fetched 2026-10-26 (unofficial)

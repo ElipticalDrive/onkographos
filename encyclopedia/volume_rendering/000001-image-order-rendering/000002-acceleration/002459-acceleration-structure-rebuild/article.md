@@ -18,7 +18,7 @@ Acceleration Structure Rebuild discards the previous frame's acceleration struct
   - Derived data structures for triangle intersection tests [S1, S2].
 
 ### Data Structures
-1. **Grid**: A hash map or sparse array where keys are 3D cell coordinates $(i, j, k)$ and values are lists of triangle indices. The grid dimensions $(N_x, N_y, N_z)$ are calculated per frame [S1, S2].
+1. **Grid**: A sparse array or hash map mapping 3D cell coordinates $(i, j, k)$ to lists of triangle indices. The grid dimensions $(N_x, N_y, N_z)$ are calculated per frame [S1, S2].
 2. **Triangle List**: An array of triangle primitives [G].
 3. **Derived Data**: Precomputed data for fast triangle-ray intersection as described by Wald [S1, S2].
 4. **Macrocell Map**: A coarse grid structure from the previous frame, used to identify which fine cells might contain changed geometry [S1, S2].
@@ -45,10 +45,9 @@ Acceleration Structure Rebuild discards the previous frame's acceleration struct
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def rebuild_acceleration_structure(triangles, grid_min, grid_max, lambda_param, prev_macrocells=None):
-    """
-    Rebuilds the acceleration grid from scratch for an animated scene.
-    """
     # 1. Calculate Grid Resolution
     diag = [grid_max[i] - grid_min[i] for i in range(3)]
     volume = diag[0] * diag[1] * diag[2]
@@ -81,7 +80,10 @@ def rebuild_acceleration_structure(triangles, grid_min, grid_max, lambda_param, 
             t_max = (aabb_max[i] - grid_min[i]) / diag[i]
             min_cell[i] = max(0, int(t_min * dims[i]))
             max_cell[i] = min(dims[i] - 1, int(t_max * dims[i]))
-            
+            # Clamp to prevent out-of-bounds when t_max is exactly 1.0
+            if max_cell[i] >= dims[i]:
+                max_cell[i] = dims[i] - 1
+                
         for x in range(min_cell[0], max_cell[0] + 1):
             for y in range(min_cell[1], max_cell[1] + 1):
                 for z in range(min_cell[2], max_cell[2] + 1):
@@ -90,23 +92,19 @@ def rebuild_acceleration_structure(triangles, grid_min, grid_max, lambda_param, 
                     new_grid[(x, y, z)].append(tri_idx)
                     
     # 4. Build Derived Data (Parallelizable)
-    # Precompute data for fast triangle-ray intersection (standard math step) [G]
+    # Precompute plane normal and D for fast triangle-ray intersection [G]
     derived_data = []
     for tri in triangles:
-        # Compute plane equation and barycentric coordinates for the triangle
         v0, v1, v2 = tri.vertices
         normal = cross(sub(v1, v0), sub(v2, v0))
         d = dot(normal, v0)
-        derived_data.append({"normal": normal, "d": d, "barycentric": compute_barycentric_basis(v0, v1, v2)})
+        derived_data.append({"normal": normal, "d": d})
             
     return new_grid, derived_data, (nx, ny, nz)
 
 def sub(a, b): return [a[i] - b[i] for i in range(3)]
 def cross(a, b): return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
 def dot(a, b): return sum(a[i]*b[i] for i in range(3))
-def compute_barycentric_basis(v0, v1, v2):
-    # Standard basis vectors for barycentric coordinate testing [G]
-    return [[sub(v1, v0), sub(v2, v0)]]
 ```
 
 ### Edge Cases and Pitfalls
@@ -115,9 +113,9 @@ def compute_barycentric_basis(v0, v1, v2):
 - **Memory Fragmentation**: Without a pooled memory scheme, frequent rebuilds can lead to significant fragmentation and allocation overhead [S1, S2].
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources.
-- **Memory Complexity**: Not given in the sources.
-- **Performance**: Optimal $\lambda \approx 5$ for most scenes [S1, S2]. The rebuild time is generally less than the time saved by efficient traversal in animated scenes. Parallel execution of triangle rebuild and derived data construction improves throughput [S1, S2].
+- **Time Complexity**: Not given in the sources [S1, S2].
+- **Memory Complexity**: Not given in the sources [S1, S2].
+- **Performance**: Optimal $\lambda \approx 5$ for most scenes [S1, S2]. The triangle rebuild takes less time than the grid rebuild and can be run in parallel [S1, S2].
 - **Strengths**: Supports any type of animation without restrictions; simple implementation; no need for complex incremental update logic [S1, S2].
 - **Limitations**: High build cost per frame compared to incremental updates; not suitable for static scenes where incremental or hierarchical updates would be more efficient; conservative bounding box test may lead to more ray-triangle intersections than necessary [S1, S2].
 

@@ -3,98 +3,149 @@
 Also called: EWA surface splatting with deferred shading, Finalization Shader, Lighting Pass, Point Cloud Splatting, Point cloud splatting to G-buffer, Surface Splatting Finalization Pass
 
 ## Overview
-Deferred Surface Splatting is a rendering technique that converts unstructured point clouds into continuous, shaded surfaces by projecting points as splats into a deferred rendering pipeline [S2, unofficial]. It solves the aliasing and transparency artifacts inherent in raw point clouds by assigning each sample an extent drawn as a small oriented primitive (a splat) carrying a radially decreasing reconstruction kernel [S2, unofficial]. Unlike forward splatting methods that apply lighting during rasterization, this method decouples geometric projection from lighting calculation, accumulating surface attributes (depth, normals, color/weight) into a G-buffer and applying lighting in a final screen-space pass [S2, unofficial]. This approach efficiently handles heavy overlap and multiple light sources without re-projecting geometry [G].
+Deferred Surface Splatting is a rendering technique that converts unstructured point clouds into continuous, shaded surfaces by projecting points as splats into a deferred rendering pipeline [S2, unofficial]. It solves the problem of sparse dot cloud aliasing and transparency artifacts inherent in raw point rendering by accumulating weighted surface attributes (color, normal, depth) into a G-buffer, followed by a final screen-space lighting pass [S2, unofficial]. It differs from forward splatting methods like [Phong Splatting](2802-phong-splatting.md) by decoupling geometric projection from lighting calculation, allowing multiple light sources to be applied efficiently without re-projecting geometry [G].
 
 ## How it works
-The method operates in three distinct phases: depth visibility, attribute accumulation, and deferred lighting resolve. It builds on the surface splatting primitives defined in [Surface Splatting and Lighting](9275-surface-splatting-and-lighting.md).
+**Inputs and Outputs:**
+*   **Input:** A set of point samples (position, color, optional normal) from a point cloud (e.g., PLY format) [S2, unofficial].
+*   **Output:** A final shaded image where the point cloud appears as a continuous surface with correct lighting [S2, unofficial].
 
-### Inputs and Outputs
-*   **Input:** An unstructured point cloud (positions, colors, optional normals) and camera parameters (view-projection matrix, viewport dimensions).
-*   **Output:** A final shaded image.
-*   **Intermediate Data:** A G-buffer consisting of three textures:
-    1.  **Depth:** `GL_DEPTH_COMPONENT32F` storing the front-surface depth of the visible splats.
-    2.  **Normals:** `GL_RGBA32F` storing view-space surface normals (Alpha channel is unused but allocated) [S2, unofficial].
-    3.  **Color/Weight:** `GL_RGBA32F` storing the weighted color `(R, G, B, Weight)` [S2, unofficial].
+**Data Structures:**
+The method relies on a G-buffer stored in off-screen textures (Framebuffers). The specific layout used in the reference implementation is:
+1.  **Depth Attachment:** `GL_DEPTH_ATTACHMENT` using a `GL_DEPTH_COMPONENT32F` texture [S2, unofficial].
+2.  **Normal Attachment:** `GL_COLOR_ATTACHMENT0` using a `GL_RGBA32F` texture. The RGB channels store the view-space normal; the Alpha channel is allocated but unused [S2, unofficial].
+3.  **Color/Weight Attachment:** `GL_COLOR_ATTACHMENT1` using a `GL_RGBA32F` texture. It stores `(colorR, colorG, colorB, weight)` [S2, unofficial].
 
-### Data Structures
-The implementation uses OpenGL Uniform Blocks (`std140`, column-major) to pass parameters to shaders [S1, unofficial]:
+**Uniform Blocks (std140, column_major):**
+*   `Camera`: `mat4 modelview_matrix`, `mat4 modelview_matrix_it`, `mat4 projection_matrix` [S1, unofficial].
+*   `Raycast`: `mat4 projection_matrix_inv`, `vec4 viewport` [S1, unofficial].
+*   `Parameter`: `vec3 material_color`, `float material_shininess`, `float radius_scale`, `float ewa_radius`, `float epsilon` [S1, unofficial].
 
-1.  **`Camera` Block:**
-    *   `mat4 modelview_matrix`
-    *   `mat4 modelview_matrix_it` (Inverse Transpose)
-    *   `mat4 projection_matrix`
-2.  **`Raycast` Block:**
-    *   `mat4 projection_matrix_inv`
-    *   `vec4 viewport` (width, height, inv_width, inv_height)
-3.  **`Parameter` Block:**
-    *   `vec3 material_color`
-    *   `float material_shininess`
-    *   `float radius_scale`
-    *   `float ewa_radius`
-    *   `float epsilon` (Depth slab thickness)
+**Parameters:**
+*   `epsilon`: A float parameter calculated as `_renderingParams->_epsilonMultiplier * _renderingParams->_pointSize`. It defines the depth slab thickness [S2, unofficial].
+*   `particle_radius`: The splat size, passed to vertex and fragment shaders [S2, unofficial].
+*   `SMOOTH`: Boolean define (1 if smooth shading, 0 if flat) [S1, unofficial].
+*   `MULTISAMPLING`: Boolean define (1 if multisampling is enabled) [S1, unofficial].
 
-### Steps
+**Steps:**
 
 1.  **Initialization:**
-    *   Load and compile shaders with compile-time defines: `SMOOTH` (1 for smooth shading, 0 for flat), `MULTISAMPLING` (1 if enabled), `EWA_FILTER`, `BACKFACE_CULLING`, `VISIBILITY_PASS`, `COLOR_MATERIAL` [S1, unofficial].
-    *   Initialize OpenGL state: Enable `GL_DEPTH_TEST` (`GL_LESS`), `GL_VERTEX_PROGRAM_POINT_SIZE`, set point sprite origin to `GL_LOWER_LEFT` [S2, unofficial].
+    *   Load shaders: `finalization_vs_glsl`, `finalization_fs_glsl`, `lighting_glsl` [S1, unofficial].
+    *   Compile shaders with defines `SMOOTH` and `MULTISAMPLING` [S1, unofficial].
+    *   Link program and bind uniform blocks: `Camera` to binding point 0, `Raycast` to 1, `Parameter` to 3 [S1, unofficial].
+    *   Initialize OpenGL state: Enable depth test (`GL_LESS`), enable vertex program point size, set point sprite coordinate origin to `GL_LOWER_LEFT`, enable blending with `GL_ONE, GL_ONE` (pure additive) [S2, unofficial].
 
 2.  **Depth Pass (Visibility):**
-    *   Bind the G-Buffer. Set color mask to `false` for RGB channels (only depth is written).
-    *   Draw the point cloud using the depth shader (`splat.vert`, `splat_depth.frag`).
-    *   Each splat is rendered as a sphere impostor. The fragment shader calculates the analytic front-surface depth of a sphere:
-        $$z = z_{center} - \sqrt{r^2 - x^2 - y^2}$$
-    *   This depth is pushed back by $\varepsilon$ before writing to the depth buffer, creating a thin depth slab around the visible surface [S2, unofficial].
-    *   Uniforms passed: `view_proj_matrix`, `fov_y`, `viewport_size`, `epsilon`, `particle_radius`, `z_near`, `z_far` [S2, unofficial].
+    *   Bind G-Buffer.
+    *   Set color mask to false for RGB (only write depth).
+    *   Draw scene using depth shader (`splat.vert`, `splat_depth.frag`) [S2, unofficial].
+    *   Uniforms: `view_proj_matrix`, `fov_y`, `viewport_size`, `epsilon`, `particle_radius`, `z_near`, `z_far` [S2, unofficial].
+    *   *Note:* This pass establishes the visible surface depth for each splat, pushing the depth back by $\varepsilon$ to create a slab [S2, unofficial].
 
 3.  **Attribute Blend Pass (G-Buffer Accumulation):**
-    *   Bind the G-Buffer. Bind the depth texture from Pass 1 to `GL_TEXTURE0`.
-    *   Set color mask to `true` for all channels. Disable depth mask and depth test. Enable blending with `GL_ONE, GL_ONE` (pure additive) [S2, unofficial].
-    *   Draw the point cloud using the attribute shader (`splat.vert`, `splat_attributes.frag`).
-    *   For each fragment, compare its sphere depth against the depth texture from Pass 1. Discard fragments falling behind the $\varepsilon$ slab [S2, unofficial].
-    *   Surviving fragments accumulate attributes. The weight $w$ is the product of radial and depth falloffs:
-        $$w_{radial} = 1 - \frac{d}{r}$$
-        $$w_{depth} = \frac{z_{surface} - z_{frag}}{\varepsilon}$$
-        $$w = w_{radial} \cdot w_{depth}$$
-    *   Where $d$ is the distance from the splat center in screen space, $r$ is the splat radius, $z_{surface}$ is the depth from the depth pass, and $z_{frag}$ is the current fragment's depth [S2, unofficial].
-    *   Accumulate `Color * w` into the Color/Weight attachment and `Normal * w` into the Normal attachment [S2, unofficial].
+    *   Bind G-Buffer. Bind `_gDepthTex` to `GL_TEXTURE0`.
+    *   Set color mask to true for all channels.
+    *   Disable depth mask (do not write depth). Disable depth test. Enable blending (`GL_ONE, GL_ONE`) [S2, unofficial].
+    *   Draw scene using attribute shader (`splat.vert`, `splat_attributes.frag`) [S2, unofficial].
+    *   Uniforms: `view_proj_matrix`, `fov_y`, `viewport_size`, `epsilon`, `particle_radius`, `z_near`, `z_far` [S2, unofficial].
+    *   *Logic:* Fragments discard if they fall behind the $\varepsilon$ slab established in Step 2. Surviving fragments accumulate with weight $w = w_{radial} \cdot w_{depth}$, where $w_{radial} = 1 - \frac{d}{r}$ and $w_{depth} = \frac{z_{surface} - z_{frag}}{\varepsilon}$ [S2, unofficial]. Overlapping splats are blended and normalized by total accumulated weight to reconstruct a smooth signal [S2, unofficial].
 
-4.  **Deferred Lighting Resolve (Finalization):**
-    *   Bind the default framebuffer. Clear the color buffer.
-    *   Draw a full-screen quad using the finalization shader (`finalization_vs_glsl`, `finalization_fs_glsl`, `lighting_glsl`) [S1, unofficial].
-    *   The shader reads the G-Buffer textures. If `MULTISAMPLING` is defined, loop $i$ from 0 to 3, fetching texels using `texelFetch` with integer coordinates derived from `textureSize` and `In.texture_uv` [S1, unofficial]. Otherwise, use `texture` with `In.texture_uv` [S1, unofficial].
-    *   Initialize accumulator `res = vec4(0.0)` [S1, unofficial].
-    *   For each sample (or single sample if not multisampling):
-        *   Fetch `pixel` from Color/Weight texture.
-        *   If `SMOOTH` is defined:
-            *   Fetch `normal` from Normal texture (normalized).
-            *   Fetch `depth` from Depth texture.
-            *   If `pixel.a > 0.0`:
-                *   Reconstruct NDC position `p_ndc`: $x,y$ from viewport and `gl_FragCoord`, $z$ from depth and `gl_DepthRange`, $w=1.0$.
-                *   Transform `p_ndc` to eye space `v_eye` using `projection_matrix_inv` and divide by $w$.
-                *   Compute lighting: `lighting(normal, v_eye.xyz, pixel.rgb / pixel.a, material_shininess)`.
-                *   Add to `res`: `vec4(lighting_result, 1.0)`.
-            *   Else:
-                *   Add `vec4(1.0, 1.0, 1.0, 1.0)` to `res` [S1, unofficial].
-        *   If `SMOOTH` is not defined:
-            *   If `pixel.a > 0.0`:
-                *   Add `vec4(pixel.rgb / pixel.a, 1.0)` to `res` (premultiplied color) [S1, unofficial].
-            *   Else:
-                *   Add `vec4(1.0, 1.0, 1.0, 1.0)` to `res` [S1, unofficial].
-    *   After processing all samples:
-        *   If `MULTISAMPLING`: Output `frag_color = sqrt(res / 4.0)` [S1, unofficial].
-        *   Else: Output `frag_color = sqrt(res)` [S1, unofficial].
+4.  **Finalization / Lighting Pass:**
+    *   Bind default framebuffer (0). Clear color buffer.
+    *   Select shader based on display mode: `DEPTH` (reads `_gDepthTex`), `COLORS` (reads `_gColorTex`), `NORMALS` (reads `_gNormalTex`), or `FULL` (reads `_gNormalTex` and `_gColorTex`, applies lighting) [S2, unofficial].
+    *   Draw full-screen quad using `_quadVAO` [S2, unofficial].
+    *   *Fragment Shader Logic (Pseudocode below):*
+        *   Initialize accumulator `res` to `vec4(0.0)` [S1, unofficial].
+        *   If `MULTISAMPLING` is defined, convert UVs to integer coordinates and loop `i` from 0 to 3. Otherwise, process single sample [S1, unofficial].
+        *   Fetch pixel from color texture. If multisampling, use `texelFetch` with index `i`; else use `texture` with UV [S1, unofficial].
+        *   If `SMOOTH` is defined, fetch normal (normalized) and depth from respective textures [S1, unofficial].
+        *   If pixel alpha > 0.0:
+            *   Reconstruct NDC position `p_ndc`: x,y from viewport and `gl_FragCoord`, z from depth and `gl_DepthRange`, w=1.0 [S1, unofficial].
+            *   Transform `p_ndc` to eye space `v_eye` using `projection_matrix_inv` and divide by w [S1, unofficial].
+            *   If `SMOOTH`: Add lighting result to `res`: `lighting(normal, v_eye.xyz, pixel.rgb / pixel.a, material_shininess)` with alpha 1.0 [S1, unofficial].
+            *   If not `SMOOTH`: Add premultiplied color to `res`: `pixel.rgb / pixel.a` with alpha 1.0 [S1, unofficial].
+        *   If pixel alpha <= 0.0: Add white (1.0) to `res` [S1, unofficial].
+        *   After loop/processing: If `MULTISAMPLING`, output `frag_color` as `sqrt(res / 4.0)`; otherwise `sqrt(res)` [S1, unofficial].
 
-### Parameters
-*   `epsilon`: Float parameter calculated as `_renderingParams->_epsilonMultiplier * _renderingParams->_pointSize`. Controls the depth slab thickness [S2, unofficial].
-*   `particle_radius`: Float representing the splat size [S2, unofficial].
-*   `material_shininess`: Float for specular lighting exponent [S1, unofficial].
-*   `material_color`: Vec3 for base material color [S1, unofficial].
+**Pseudocode (Finalization Fragment Shader Core):**
 
-### Edge Cases and Pitfalls
-*   **Normal Buffer Format:** The implementation uses `GL_RGBA32F` for the normal buffer instead of `GL_RGB32F` due to hardware compatibility issues ("RGB doesn't work on my laptop"). The Alpha channel is allocated but unused [S2, unofficial].
-*   **Raw Points Mode:** If `_renderingParams->_rawPoints` is true, the splatting pipeline is skipped. The scene is drawn directly using `GL_POINTS` with additive blending disabled and depth test enabled, using the same vertex shader for consistent screen-space sizing [S2, unofficial].
-*   **Precision:** The depth slab approach relies on precise depth comparisons. Insufficient `epsilon` may cause holes; excessive `epsilon` may cause z-fighting or incorrect normal reconstruction [S2, unofficial].
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Inputs:
+# In.texture_uv: vec2, texture coordinates
+# color_texture: sampler2D (or sampler2DArray for multisampling)
+# normal_texture: sampler2D
+# depth_texture: sampler2D
+# projection_matrix_inv: mat4
+# viewport: vec4 (x=width, y=height, z=0.5, w=0.5) # Assuming standard viewport mapping logic
+# gl_FragCoord: vec4 (provided by GLSL)
+# gl_DepthRange: vec3 (zNear, zFar, diff) # Provided by GLSL
+# material_shininess: float
+# SMOOTH: bool
+# MULTISAMPLING: bool
+
+vec4 finalization_pass(vec2 uv) {
+    vec4 res = vec4(0.0);
+    
+    int samples = MULTISAMPLING ? 4 : 1;
+    
+    for (int i = 0; i < samples; i++) {
+        vec4 pixel;
+        if (MULTISAMPLING) {
+            // Convert UV to integer texel coordinates for texelFetch
+            vec2 texel_uv = uv * textureSize(color_texture, 0);
+            pixel = texelFetch(color_texture, ivec2(texel_uv), i);
+        } else {
+            pixel = texture(color_texture, uv);
+        }
+        
+        if (pixel.a > 0.0) {
+            // Reconstruct NDC position
+            vec2 ndc_xy = (gl_FragCoord.xy / viewport.xy) * 2.0 - 1.0;
+            float ndc_z = (gl_FragCoord.z - gl_DepthRange.n) / gl_DepthRange.d;
+            vec4 p_ndc = vec4(ndc_xy, ndc_z, 1.0);
+            
+            // Transform to eye space
+            vec4 v_eye = projection_matrix_inv * p_ndc;
+            v_eye.xyz /= v_eye.w;
+            
+            if (SMOOTH) {
+                vec3 normal;
+                float depth_val;
+                if (MULTISAMPLING) {
+                    vec2 texel_uv_n = uv * textureSize(normal_texture, 0);
+                    normal = normalize(texelFetch(normal_texture, ivec2(texel_uv_n), i).rgb);
+                    depth_val = texelFetch(depth_texture, ivec2(texel_uv_n), i).r;
+                } else {
+                    normal = normalize(texture(normal_texture, uv).rgb);
+                    depth_val = texture(depth_texture, uv).r;
+                }
+                
+                // Reconstruct albedo from accumulated color and weight
+                vec3 albedo = pixel.rgb / pixel.a;
+                
+                // Apply lighting model (simplified)
+                // Note: Specific lighting function implementation depends on lighting_glsl
+                vec3 lit_color = apply_lighting(normal, v_eye.xyz, albedo, material_shininess);
+                res += vec4(lit_color, 1.0);
+            } else {
+                // Flat shading: just add normalized color
+                res += vec4(pixel.rgb / pixel.a, 1.0);
+            }
+        } else {
+            // Background / No splat contribution
+            res += vec4(1.0, 1.0, 1.0, 1.0);
+        }
+    }
+    
+    if (MULTISAMPLING) {
+        return sqrt(res / 4.0);
+    } else {
+        return sqrt(res);
+    }
+}
+```
 
 ## Subtopics
 
@@ -102,22 +153,22 @@ The implementation uses OpenGL Uniform Blocks (`std140`, column-major) to pass p
 Deferred Lighting Resolve is the final shading pass in a deferred surface splatting pipeline. It reconstructs the final pixel color by applying a lighting model (ambient, diffuse, specular) to the weighted color and surface normals accumulated in the G-buffers during the splatting phase. It differs from forward rendering by decoupling the geometric projection (splatting) from the lighting calculation, allowing multiple light sources to be applied efficiently in screen space without re-projecting geometry [G].
 
 ### [Point-Based Rendering](2827-point-based-rendering.md)
-A method to approximate an implicit surface with nonpolygonal proxy geometry (points, billboards, or volumetric representation) when the underlying discrete geometry is sufficiently dense. Deferred Surface Splatting is a specific implementation within this family that uses deferred shading for lighting.
+Point-based rendering approximates an implicit or dense discrete surface using a set of nonpolygonal proxy geometry, typically points or billboards, rather than triangles. It solves the problem of rendering large, unstructured point clouds or dense meshes by rasterizing these proxies directly, avoiding the overhead of mesh generation and complex topology management. Unlike its sibling [Deferred Surface Splatting](1072-deferred-surface-splatting.md), which focuses on deferred shading of splatted points, point-based rendering is a broader category that includes early procedural particle systems and modern GPU-accelerated splatting, often relying on distance adaptation to maintain frame rates.
 
 ### Weighted Splatting with Depth Proximity
-A rendering technique where point clouds are rendered as spheres (splats) in a multi-pass pipeline. It accumulates weighted attributes (color, normal) into a G-buffer to handle heavy overlap and reconstruct surface properties, deferring lighting to a final resolve pass [S2, unofficial].
+Weighted Splatting with Depth Proximity is a rendering technique where point clouds are rendered as spheres (splats) in a multi-pass pipeline. It accumulates weighted attributes (color, normal) into a G-buffer to handle heavy overlap and reconstruct surface properties, deferring lighting to a final resolve pass [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N + P)$, where $N$ is the number of points and $P$ is the number of pixels. The splatting pass is proportional to the number of points (rasterizing splats), and the resolve pass is proportional to the screen resolution.
-*   **Memory Complexity:** $O(P)$ for the G-buffer (Depth, Normal, Color/Weight textures).
-*   **Performance:** Efficient for large point clouds because lighting is computed once per pixel in screen space, regardless of the number of overlapping splats [S2, unofficial].
-*   **Strengths:** Handles heavy overlap gracefully; supports smooth shading; decouples geometry from lighting; allows easy visualization of intermediate buffers (albedo, normals, depth) [S2, unofficial].
-*   **Limitations:** Requires multiple render passes; G-buffer memory usage increases with screen resolution; depth slab approach may introduce artifacts if `epsilon` is not tuned correctly [S2, unofficial].
-*   **When to use:** Real-time visualization of large, unstructured point clouds where surface continuity and lighting quality are important.
-*   **When not to use:** When memory is extremely constrained (due to G-buffer) or when the point cloud is too sparse to benefit from surface reconstruction.
+*   **Time Complexity:** Linear with respect to the number of splats for the rasterization passes. The finalization pass is constant per pixel (O(1) per screen pixel, potentially O(M) for M samples if multisampling is used).
+*   **Memory Complexity:** O(W * H) for the G-buffer textures, where W and H are screen dimensions. Additional memory for the point cloud data and octree if Level of Detail is used [S2, unofficial].
+*   **Measured Performance:** Real-time rendering of large point clouds is achievable on modern GPUs (OpenGL 4.x) [S2, unofficial]. Performance scales with screen resolution and the number of overlapping splats.
+*   **Strengths:** Handles heavy overlap gracefully; avoids lighting artifacts from unnormalized attribute sums; supports multiple lights efficiently in the final pass; reduces aliasing compared to raw points [S2, unofficial].
+*   **Limitations:** Requires multiple render passes; G-buffer memory usage; potential precision issues with depth reconstruction if not handled carefully (e.g., using `GL_DEPTH_COMPONENT32F`) [S2, unofficial].
+*   **When to use:** Rendering large, unstructured point clouds where surface continuity and correct lighting are required [S2, unofficial].
+*   **When not to use:** When memory bandwidth is extremely constrained and G-buffers cannot be afforded; or when the point cloud is very sparse and raw points with simple shading are sufficient [S2, unofficial].
 
 ## Background
-The technique is based on the Surface Splatting formulation by Zwicker, Pfister, van Baar, and Gross (SIGGRAPH 2001) and the multi-pass GPU pipeline described by Botsch, Hornung, Zwicker, and Kobbelt (PBG 2005) [S2, unofficial]. It extends these concepts by integrating a deferred shading pipeline to handle lighting efficiently. The specific implementation details provided in the sources are from unofficial repositories: `sebastianlipponer/surface_splatting` [S1, unofficial] and `arminkz/PointCloudRendering` [S2, unofficial].
+Deferred Surface Splatting builds on the EWA (Elliptical Weighted Average) splatting formulation introduced by Zwicker, Pfister, van Baar, and Gross in *Surface Splatting*, SIGGRAPH 2001 [S2, unofficial]. The multi-pass GPU pipeline for high-quality surface splatting was further developed by Botsch, Hornung, Zwicker, and Kobbelt in *High-Quality Surface Splatting on Today's GPUs*, PBG 2005 [S2, unofficial]. The specific implementation details described here are derived from unofficial GitHub repositories [S1, unofficial][S2, unofficial].
 
 ## Sources
 [S1] sebastianlipponer/surface_splatting, https://github.com/sebastianlipponer/surface_splatting, fetched 2026-10-28 (unofficial)

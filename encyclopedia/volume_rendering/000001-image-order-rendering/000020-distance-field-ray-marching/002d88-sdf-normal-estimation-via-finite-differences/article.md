@@ -3,129 +3,140 @@
 Also called: Finite Difference Normal Estimation, Inigo Quilez's Normal Method, Normal Estimation via Finite Differences, SDF Gradient, SDF Gradient Normal, SDF Gradient Normal Estimation via Finite Differences, View Space Normal Estimation
 
 ## Overview
-SDF Normal Estimation via Finite Differences computes the surface normal at a point on a Signed Distance Field (SDF) by numerically approximating the gradient of the distance function $f$ using finite differences and normalizing the result [S2, S4, S5, unofficial][S6][S7, S12, S14, S30, S32, S33, S34, S40, S45, S46, S50, S54, S55, unofficial]. It solves the problem of shading implicit surfaces that lack explicit mesh normals, allowing for realistic lighting without polygonization artifacts [S4, S5, S33, unofficial]. Unlike sibling methods that may use analytic normals, tetrahedral interpolation, or regularization, this method relies on central finite differences along the coordinate axes [S3, S12, S14, unofficial]. It differs from [Tetrahedral Normal Estimation](1986-tetrahedral-normal-estimation.md) by using six samples (or three for forward differences) instead of four, and from [Normal Regularization](3704-normal-regularization.md) by not explicitly smoothing the resulting normals near cusps [S1].
+SDF Normal Estimation via Finite Differences computes the surface normal at a point on a Signed Distance Field (SDF) by numerically approximating the gradient of the distance function $f(\mathbf{p})$ and normalizing the result [S2, S4, S5, unofficial]. This method solves the problem of shading implicit surfaces that lack explicit mesh topology or analytic derivatives, which is common when SDFs are constructed from Boolean combinations of primitives or neural networks [S33, S40, unofficial]. It is distinguished from sibling methods like [Tetrahedral Normal Estimation](1986-tetrahedral-normal-estimation.md) by using axis-aligned offsets rather than geometric stencils, and from [Normal Regularization](3704-normal-regularization.md) by relying on raw numerical gradients without post-processing smoothing [S1][S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A point $\mathbf{p} = (x, y, z)$ on or near the SDF surface (typically where $f(\mathbf{p}) \approx 0$), and the SDF evaluation function $f(\mathbf{q})$ which returns the signed distance at any query point $\mathbf{q}$ [S1][S12, S33, unofficial].
-*   **Output:** A unit normal vector $\mathbf{n}$ representing the surface orientation at $\mathbf{p}$ [S2, S16, S30, S32, unofficial].
+*   **Input:** A query point $\mathbf{p} = (x, y, z)$ on or near the SDF surface (typically where $f(\mathbf{p}) \approx 0$) and a step size $\epsilon$ [S4, S32, unofficial].
+*   **Output:** A unit normal vector $\mathbf{n}$ [S2, S32, unofficial].
 
 **Data Structures:**
-No specific data structures are required beyond the SDF function itself. The method operates on scalar values and 3D vectors. In some implementations, a small constant $\epsilon$ (epsilon) is stored as a parameter [S13, S22, S23, S34, unofficial].
+No specific data structures are required beyond the SDF evaluation function `SDF(p)` and standard 3D vector types. The step size $\epsilon$ is a scalar parameter [S32, unofficial].
+
+**Steps:**
+1.  **Define Step Size:** Select a small positive scalar $\epsilon$ [S4, S32, unofficial]. Typical values range from $10^{-4}$ to $10^{-3}$ depending on the scale of the scene [S12, S27, S34, unofficial].
+2.  **Evaluate Axis Offsets:** Query the SDF at six points offset from $\mathbf{p}$ along the coordinate axes:
+    *   $d_{x+} = f(\mathbf{p} + (\epsilon, 0, 0))$
+    *   $d_{x-} = f(\mathbf{p} - (\epsilon, 0, 0))$
+    *   $d_{y+} = f(\mathbf{p} + (0, \epsilon, 0))$
+    *   $d_{y-} = f(\mathbf{p} - (0, \epsilon, 0))$
+    *   $d_{z+} = f(\mathbf{p} + (0, 0, \epsilon))$
+    *   $d_{z-} = f(\mathbf{p} - (0, 0, \epsilon))$
+    [S1][S12, S33, unofficial].
+3.  **Compute Gradient Components:** Calculate the partial derivatives using central differences. The division by $2\epsilon$ is often omitted in implementation because it cancels out during normalization, but the mathematical definition includes it [S32, S46, unofficial]:
+    $$
+    \begin{aligned}
+    g_x &= d_{x+} - d_{x-} \\
+    g_y &= d_{y+} - d_{y-} \\
+    g_z &= d_{z+} - d_{z-}
+    \end{aligned}
+    $$
+    [S12, S30, S34, unofficial].
+4.  **Normalize:** Construct the gradient vector $\mathbf{g} = (g_x, g_y, g_z)$ and normalize it to obtain the normal $\mathbf{n}$ [S2, S32, unofficial]:
+    $$ \mathbf{n} = \frac{\mathbf{g}}{\|\mathbf{g}\|} $$
+    [S2, S32, unofficial].
+
+**Formulas:**
+The central difference approximation for the gradient is:
+$$ \nabla f(\mathbf{p}) \approx \begin{bmatrix} f(x+\epsilon, y, z) - f(x-\epsilon, y, z) \\ f(x, y+\epsilon, z) - f(x, y-\epsilon, z) \\ f(x, y, z+\epsilon) - f(x, y, z-\epsilon) \end{bmatrix} $$
+[S30, S32, unofficial].
+The normal is:
+$$ \mathbf{n} = \text{normalize}(\nabla f(\mathbf{p})) $$
+[S16, S35, unofficial].
 
 **Parameters:**
-*   $\epsilon$ (epsilon): The step size for finite differences. Typical values range from $0.0001$ to $0.01$ [S12, S14, S15, S22, S23, S27, S34, S40, S45, S47, S50, S52, S58, unofficial]. The magnitude affects the correctness of the normal calculation; too small leads to floating-point noise, too large leads to inaccurate gradients [S45, S54, unofficial].
+*   **$\epsilon$ (Step Size):** Controls the trade-off between approximation accuracy and numerical stability. Too large $\epsilon$ causes aliasing and inaccurate normals on high-frequency details; too small $\epsilon$ leads to floating-point noise [S32, S59, unofficial]. Typical values: $0.0001$ to $0.001$ [S12, S27, S34, unofficial].
 
-**Numbered Steps:**
-1.  **Define Step Size:** Choose a small positive scalar $\epsilon$ [S4, S12, S22, S23, S27, S34, S40, S45, S47, S50, S52, S58, unofficial].
-2.  **Sample X-Axis:** Evaluate the SDF at $\mathbf{p} + (\epsilon, 0, 0)$ and $\mathbf{p} - (\epsilon, 0, 0)$ [S1][S9, S12, S14, S17, S23, S24, S25, S26, S27, S31, S33, S34, S35, S36, S38, S39, S40, S45, S46, S47, S51, S54, unofficial].
-3.  **Sample Y-Axis:** Evaluate the SDF at $\mathbf{p} + (0, \epsilon, 0)$ and $\mathbf{p} - (0, \epsilon, 0)$ [S1][S9, S12, S14, S17, S23, S24, S25, S26, S27, S31, S33, S34, S35, S36, S38, S39, S40, S45, S46, S47, S51, S54, unofficial].
-4.  **Sample Z-Axis:** Evaluate the SDF at $\mathbf{p} + (0, 0, \epsilon)$ and $\mathbf{p} - (0, 0, \epsilon)$ [S1][S9, S12, S14, S17, S23, S24, S25, S26, S27, S31, S33, S34, S35, S36, S38, S39, S40, S45, S46, S47, S51, S54, unofficial].
-5.  **Compute Gradient Components:** Calculate the partial derivatives using central differences. The gradient vector $\nabla f(\mathbf{p})$ is approximated as:
-    $$ \nabla f(\mathbf{p}) \approx \begin{bmatrix} f(x+\epsilon, y, z) - f(x-\epsilon, y, z) \\ f(x, y+\epsilon, z) - f(x, y-\epsilon, z) \\ f(x, y, z+\epsilon) - f(x, y, z-\epsilon) \end{bmatrix} $$
-    Note: Some implementations omit the division by $2\epsilon$ because it cancels out during normalization [S32, S46, unofficial].
-6.  **Normalize:** Compute the unit normal vector $\mathbf{n}$ by normalizing the gradient:
-    $$ \mathbf{n} = \frac{\nabla f(\mathbf{p})}{\|\nabla f(\mathbf{p})\|} $$
-    [S2, S15, S16, S30, S32, S35, S45, S46, S54, unofficial].
-7.  **Handle Degeneracy:** If the gradient magnitude is zero or near-zero (e.g., at singularities or flat regions where precision fails), return a default normal (such as $(0,0,1)$) or handle as an edge case [S17, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Zero Gradient:** If $\|\mathbf{g}\| \approx 0$ (e.g., at singularities or flat regions with insufficient precision), normalization fails. A guard should return a default normal (e.g., $(0,0,1)$) or the view direction [S17, unofficial].
+*   **Precision:** In double-precision contexts, $\epsilon$ can be smaller. In single-precision, $\epsilon$ must be large enough to exceed machine epsilon relative to the SDF values [S32, S59, unofficial].
+*   **Sharp Edges:** Finite differences on sharp edges (where the SDF is not differentiable) produce averaged normals, which may appear soft or incorrect compared to analytic normals [S44].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def estimate_normal(p: Vector3, sdf: Callable[[Vector3], float], epsilon: float = 0.001) -> Vector3:
+def estimate_sdf_normal(p: Vector3, sdf_func, epsilon: float) -> Vector3:
     """
     Estimates the surface normal at point p using central finite differences.
     
     Args:
-        p: The 3D point on the SDF surface.
-        sdf: A function that returns the signed distance at a given 3D point.
+        p: The query point (Vector3).
+        sdf_func: The signed distance function f(p).
         epsilon: The step size for finite differences.
         
     Returns:
-        A normalized 3D vector representing the surface normal.
+        The normalized gradient vector.
     """
-    # Sample along X axis
-    dx = sdf(Vector3(p.x + epsilon, p.y, p.z)) - sdf(Vector3(p.x - epsilon, p.y, p.z))
+    # Define offset vectors
+    offset_x = Vector3(epsilon, 0.0, 0.0)
+    offset_y = Vector3(0.0, epsilon, 0.0)
+    offset_z = Vector3(0.0, 0.0, epsilon)
     
-    # Sample along Y axis
-    dy = sdf(Vector3(p.x, p.y + epsilon, p.z)) - sdf(Vector3(p.x, p.y - epsilon, p.z))
-    
-    # Sample along Z axis
-    dz = sdf(Vector3(p.x, p.y, p.z + epsilon)) - sdf(Vector3(p.x, p.y, p.z - epsilon))
+    # Evaluate SDF at perturbed positions
+    # Note: Division by 2*epsilon is omitted as it cancels during normalization
+    grad_x = sdf_func(p + offset_x) - sdf_func(p - offset_x)
+    grad_y = sdf_func(p + offset_y) - sdf_func(p - offset_y)
+    grad_z = sdf_func(p + offset_z) - sdf_func(p - offset_z)
     
     # Construct gradient vector
-    # Note: Division by 2*epsilon is omitted as it cancels during normalization [S46, unofficial]
-    gradient = Vector3(dx, dy, dz)
+    gradient = Vector3(grad_x, grad_y, grad_z)
     
-    # Normalize
+    # Handle zero-length gradient (degenerate case)
     length = gradient.length()
     if length < 1e-6:
-        # Handle degenerate case where gradient is zero or near-zero [S17, unofficial]
-        return Vector3(0.0, 0.0, 1.0)
+        return Vector3(0.0, 0.0, 1.0) # Default normal
         
+    # Normalize and return
     return gradient / length
 ```
-
-**Edge Cases and Pitfalls:**
-*   **Precision:** If $\epsilon$ is too small, floating-point noise in the SDF evaluation can dominate the difference, leading to jittery normals [S45, S54, unofficial]. If $\epsilon$ is too large, the approximation deviates from the true tangent plane, causing shading errors on curved surfaces [S45, S54, unofficial].
-*   **Boundaries:** The method assumes the SDF is defined in all directions around $\mathbf{p}$. If $\mathbf{p}$ is near the boundary of a bounded volume or texture, sampling outside the domain may require clamping or reflection [S6].
-*   **Singularities:** At sharp corners or cusps, the gradient may be undefined or unstable. [Normal Regularization](3704-normal-regularization.md) addresses this by smoothing normals in these regions [S1].
 
 ## Subtopics
 
 ### [Lambertian Shading with Gradient Normals](1229-lambertian-shading-with-gradient-normals.md)
-Lambertian Shading with Gradient Normals is a surface shading technique for ray-marched signed distance fields (SDFs) or scalar volumes that approximates the surface normal using the numerical gradient of the field, then applies the Lambertian reflectance model to compute diffuse illumination. It solves the problem of shading implicit surfaces that lack explicit mesh normals, allowing for realistic diffuse lighting without polygonization artifacts. Unlike sibling methods that may use analytic normals, tetrahedral interpolation, or regularization, this method relies on finite-difference or analytic gradient estimation of the scalar field $f$ (or $\phi$) at the hit point.
+Lambertian Shading with Gradient Normals applies the Lambertian reflectance model using the normals estimated via finite differences. It is chosen when diffuse lighting is required for implicit surfaces without explicit meshes. It differs from sibling methods by relying on the numerical gradient of the scalar field rather than analytic normals or tetrahedral interpolation.
 
 ### [Tetrahedral Normal Estimation](1986-tetrahedral-normal-estimation.md)
-Tetrahedral Normal Estimation is a technique to approximate the surface normal of a Signed Distance Field (SDF) at a point $p$ using only four evaluations of the distance function, reducing computational cost by 33% compared to the standard six-call central difference method. It leverages the symmetry of a tetrahedron inscribed in the cube around $p$ to sum directional derivatives, providing accuracy comparable to central differences with fewer samples.
+Tetrahedral Normal Estimation approximates the normal by evaluating the SDF at four vertices of a tetrahedron inscribed in the voxel cube, reducing SDF queries from six to four. It is distinguished by its reliance on geometric symmetry rather than axis-aligned offsets. It is chosen when performance is critical and slight accuracy trade-offs are acceptable.
 
 ### [Face Normal Computation](2042-face-normal-computation.md)
-Face normal computation determines the geometric orientation of a polygonal face or voxel grid cell to provide a surface normal for shading or ray intersection handling. It solves the problem of defining a consistent surface orientation when explicit vertex normals are unavailable or when a flat, geometric normal is required for primary-ray shading in voxel or mesh-based rendering.
+Face Normal Computation determines the geometric orientation of a polygonal face or voxel grid cell to provide a surface normal. It is used when explicit vertex normals are unavailable or a flat geometric normal is required for primary-ray shading in voxel/mesh-based rendering.
 
 ### [Normal Regularization](3704-normal-regularization.md)
-Normal Regularization is a technique to alleviate numerical instability (jitter) of surface normals near the Unsigned Distance Function (UDF) zero-level set (cusps) by replacing naively sampled normals with interpolated normals from the neighborhood. It prevents highly bright and dark regions in 2D images that occur with high-quality reconstruction without it.
+Normal Regularization alleviates numerical instability (jitter) of surface normals near the UDF zero-level set by replacing naively sampled normals with interpolated normals from the neighborhood. It prevents high-contrast artifacts in 2D images. It is chosen when finite difference normals exhibit excessive noise or jitter.
 
 ### [Gradient-Based Surface Normal Estimation](4261-gradient-based-surface-normal-estimation.md)
-Gradient-Based Surface Normal Estimation computes surface normals by evaluating the gradient of a local density field (resembling a signed distance field) on the fly, rather than storing or retrieving pre-computed normal vectors. It solves the problem of deriving high-resolution, coherent surface orientations for ray marching or particle systems without relying on explicit mesh normals or expensive depth-peeling techniques. It differs from its sibling [Lambertian Shading with Gradient Normals](1229-lambertian-shading-with-gradient-normals.md) by focusing on the general estimation mechanism for any shading model, and from [Scene-Space Normal Estimation](10497-scene-space-normal-estimation.md) by operating directly on the volumetric density data rather than post-processed image-space depth buffers.
+Gradient-Based Surface Normal Estimation computes normals for volumetric representations by evaluating the spatial gradient of a local density field. It derives normals "on the fly" from the scalar field, ensuring coherence with voxel resolution. It is distinct from Scene-Space Normal Estimation by operating in volume space and from Tetrahedral Normal Estimation by using axis-aligned differences.
 
 ### [Principal Curvature Direction Estimation](6492-principal-curvature-direction-estimation.md)
-Principal Curvature Direction Estimation computes the principal directions of curvature for a 3D scalar field (such as a Signed Distance Field) by solving for an angle $\theta$ in a local orthonormal basis, offering a faster alternative to extremal value quadratic forms. It sets itself apart from sibling methods like [SDF Normal Estimation via Finite Differences](4619-sdf-normal-estimation-via-finite-differences.md) by providing directional curvature information rather than just surface normals, and from [Gradient-Based Surface Normal Estimation](4261-gradient-based-surface-normal-estimation.md) by explicitly handling the 2D subspace orthogonal to the gradient.
+Principal Curvature Direction Estimation computes the principal directions of curvature for a 3D scalar field by solving for an angle $\theta$ in a local orthonormal basis. It provides directional curvature information rather than just surface normals.
 
 ### [Scene-Space Normal Estimation](10497-scene-space-normal-estimation.md)
-Scene-Space Normal Estimation is a surface rendering method that uses ray-casting and binary segmentation to determine object boundary locations and estimate normals in scene space. It is characterized by the expression $R_{bs}(S_{bl}, I_s)$. Unlike view-space methods, it operates directly on the scene data structure, making it suitable for volume-rendering pipelines that utilize scene space normals.
+Scene-Space Normal Estimation uses ray-casting and binary segmentation to determine object boundary locations and estimate normals in scene space. It operates directly on scene data structures, making it suitable for pipelines utilizing scene space normals.
 
 ### SDF Normal Estimation via Backpropagation
-SDF Normal Estimation via Backpropagation estimates mesh vertex normals by computing the negative gradient of the occupancy output with respect to the vertex positions [S60, unofficial]. It converts vertices to a PyTorch tensor, enables gradients, passes them through a model to get occupancy logits, computes the gradient by summing the output and calling backward, and extracts the normal as the negative gradient, normalized [S60, unofficial].
+SDF Normal Estimation via Backpropagation estimates mesh vertex normals by computing the negative gradient of the occupancy output with respect to the vertex positions using automatic differentiation [S60, unofficial]. It is used in differentiable rendering pipelines where analytical gradients are unavailable or too complex [S60, unofficial].
 
 ### Normal Estimation based on 4D Linear Regression
-Normal Estimation based on 4D Linear Regression is a normal estimation scheme that integrates filtering and normal computation into one process to provide a smooth approximated gradient function, compensating for staircase artifacts caused by low sampling rates in shear-warp projection [S61, unofficial]. It estimates surface inclination by investigating a close neighborhood of a given voxel, as exact surface normals are not available after discretization of continuous objects [S61, unofficial].
+Normal Estimation based on 4D Linear Regression integrates filtering and normal computation into one process to provide a smooth approximated gradient function, compensating for staircase artifacts caused by low sampling rates in shear-warp projection [S61, unofficial]. It is used in volume rendering to smooth normals [S61, unofficial].
 
 ### Surface Normal Computation from MDF
-Surface Normal Computation from MDF computes surface normals $n(p, v)$ for a point $p$ and associated closest point $v$ using the gradient of the distance function $d(p, v)$, ensuring the normal points away from the surface [S62]. The formula is $n(p, v) = \frac{\nabla_p d(p, v)^T}{\|\nabla_p d(p, v)\|}$, where $n(p, v)^T v < 0$ (Property II), $p$ is the query point, $v$ is the closest point on the surface or medial axis, and $d(p, v)$ is the distance function [S62].
+Surface Normal Computation from MDF computes surface normals for a point $p$ and closest point $v$ using the gradient of the distance function $d(p, v)$, ensuring the normal points away from the surface [S62]. It is used in Medial Axis Distance Fields [S62].
 
 ### Object Space Normal Estimation
-Object Space Normal Estimation is a method to estimate normals based on the local geometry of the surface in the object/surface description, rather than the scene density [S57]. For nonbinary volumes, it quantizes the density range into discrete levels, computes an isodensity surface for each level, and estimates normals using object space methods for each surface [S57]. It is primarily used for rendering binary volumes [S57].
+Object Space Normal Estimation estimates normals based on the local geometry of the surface in object space, rather than scene density [S57]. It is primarily used for rendering binary volumes by quantizing density levels and estimating normals for each isodensity surface [S57].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-The method requires 6 evaluations of the SDF function per pixel (or per hit point) for the standard central difference scheme [S1][S17, S33, S34, S40, S54, unofficial]. Memory complexity is $O(1)$ per evaluation, as it only stores the current point and the resulting gradient vector [S1][S12, S32, unofficial].
-
-**Measured Performance:**
-Performance depends heavily on the cost of the SDF evaluation itself. For simple primitives (spheres, boxes), the normal estimation is negligible compared to the SDF call. For complex procedural SDFs or neural SDFs, the 6 additional calls can be a significant bottleneck [S1][S13, S33, unofficial].
-
-**Scaling:**
-The method scales linearly with the number of pixels or hit points. It is highly parallelizable on GPUs, as each pixel's normal estimation is independent [S1][S13, S33, unofficial].
-
-**Strengths and Limitations:**
-*   **Strengths:** Simple to implement, works with any SDF (including those defined by CSG operations where analytic normals are complex or unavailable) [S40, unofficial], provides smooth normals for smooth SDFs [S15, unofficial].
-*   **Limitations:** Requires 6 SDF evaluations, which is more expensive than analytic normals (1 evaluation) or tetrahedral estimation (4 evaluations) [S1][S20, unofficial][S44]. Accuracy degrades near sharp features or if $\epsilon$ is poorly chosen [S45, S54, unofficial]. Does not handle discontinuities well without regularization [S1].
-
-**When to Use:**
-Use when analytic normals are unavailable (e.g., complex CSG combinations) or when implementing a quick-and-dirty normal estimation for prototyping [S40, S33, unofficial]. Avoid when performance is critical and the SDF is simple enough for analytic normals, or when using [Tetrahedral Normal Estimation](1986-tetrahedral-normal-estimation.md) for a 33% speedup [S1].
+**Time Complexity:** $O(1)$ per hit point, requiring exactly 6 SDF evaluations [S1][S12, S33, unofficial].
+**Memory Complexity:** $O(1)$, storing only the gradient vector and temporary SDF values [S32, unofficial].
+**Performance:** The method is computationally inexpensive but requires 6 texture/function lookups per shading point. It is significantly faster than higher-order finite difference stencils (e.g., 5-point stencil requiring 5-9 samples) [S6].
+**Strengths:** Simple to implement; works with any SDF definition (analytic, procedural, neural); provides smooth normals for smooth SDFs [S16, S33, unofficial].
+**Limitations:** Accuracy degrades with large $\epsilon$ (aliasing) or small $\epsilon$ (noise); inaccurate on sharp edges or discontinuities; requires the SDF to be differentiable at the query point [S32, unofficial][S44][S59, unofficial].
+**When to use:** Standard shading for smooth SDFs where analytic normals are unavailable [S33, S40, unofficial].
+**When not to use:** When sharp, crisp edges are required (use analytic normals or [Tetrahedral Normal Estimation](1986-tetrahedral-normal-estimation.md) with care); when performance is extremely constrained and 6 samples are prohibitive (use [Tetrahedral Normal Estimation](1986-tetrahedral-normal-estimation.md) with 4 samples) [S2, S4, unofficial].
 
 ## Background
-The method originates from the mathematical property that the gradient of a scalar field is perpendicular to its level sets (isosurfaces) [S5, S7, S30, unofficial]. It was popularized in the context of ray marching and SDFs by Inigo Quilez, who demonstrated its effectiveness for shading implicit surfaces in real-time graphics [S5, S16, unofficial]. The technique is widely used in modern ray marching tutorials and implementations, including those using GLSL and PyTorch [S5, S13, S33, unofficial]. It is a standard component of [Distance-field ray marching](21-distance-field-ray-marching.md) pipelines [S2055, S4619, unofficial].
+The method originates from the fundamental property that the gradient of a distance function is orthogonal to its level sets (isosurfaces) [S5, S30, unofficial]. It was popularized in the context of ray marching and SDFs by Inigo Quilez and others in the demoscene and real-time graphics community [S5, S16, unofficial]. It is a standard technique in [Distance-field ray marching](21-distance-field-ray-marching.md) for shading implicit geometry [S1][S33, unofficial].
 
 ## Sources
 [S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26

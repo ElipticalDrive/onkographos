@@ -3,116 +3,58 @@
 Also called: Coordinate-based MLP Compression, SIREN-based INR Compression, neurcomp
 
 ## Overview
-Neural Implicit Network (INR) Compression maps spatial coordinates directly to field values using a coordinate-based neural network, serving as simultaneously compressed storage and a queryable data source [S1, unofficial]. It solves the problem of high storage and I/O strain for scientific volumes by replacing large voxel grids with compact network weights [S1, unofficial]. Unlike traditional lossy compressors (e.g., SZ, ZFP) that produce bitstreams requiring full decoding before visualization, INR compression allows direct querying of values at arbitrary resolutions [S1, unofficial]. It sets itself apart from sibling quantization methods by learning a continuous parametric representation rather than discretizing static data into codebooks or uniform levels [S1, unofficial].
+Neural Implicit Network (INR) Compression replaces traditional lossy compression bitstreams with a compact coordinate-based neural network that maps spatial coordinates directly to field values [S1, unofficial]. This approach serves as simultaneously compressed storage and a queryable data source, eliminating the need to fully decode the volume before visualization [S1, unofficial]. Unlike sibling methods like [Scalar Quantization](5726-scalar-quantization.md) which operate on discrete grid values, INR compression learns a continuous function, allowing for infinite resolution queries and superior performance at high compression ratios, though it incurs significant training costs and lacks interactive rendering capabilities [S1, unofficial].
 
 ## How it works
-**Inputs:**
-*   A 3D scalar or multivariate field $V$ defined on a grid or unstructured mesh.
-*   A set of sample coordinates $\{(x_j, y_j, z_j)\}$ and their corresponding field values $v_j = V(x_j, y_j, z_j)$.
+The core method, known as neurcomp, utilizes a coordinate-based SIREN (Sinusoidal Representation Network) Multi-Layer Perceptron (MLP) with residual connections [S1, unofficial]. The network is trained to minimize the reconstruction error between the predicted field values and the ground truth data, with an optional gradient regularization term to improve isosurface fidelity [S1, unofficial].
 
-**Outputs:**
-*   A trained neural network model (weights and biases) that approximates $V$.
-*   The model size in bytes, representing the compressed storage.
+**Inputs and Outputs:**
+*   **Input:** A set of spatial coordinates $\{(x_j, y_j, z_j)\}$ and their corresponding scalar field values $v_j$ from a volumetric dataset of size $N^3$ (e.g., $512^3$) [S1, unofficial].
+*   **Output:** A trained neural network model (weights and biases) that approximates the function $f(x, y, z) \approx v$ [S1, unofficial].
 
 **Data Structures:**
-*   **Network Architecture:** Typically a Multi-Layer Perceptron (MLP). The standard implementation (neurcomp) uses a SIREN (Sinusoidal Representation Network) with residual connections [S1, unofficial].
-*   **Weight Quantization:** Weights are quantized to low bit-depths (e.g., 9-bit) using k-means clustering [S1, unofficial].
-*   **Encoding:** Input coordinates are mapped via positional or hash encoding $\gamma(x)$ before entering the MLP [S1, unofficial].
+*   **Network Architecture:** A coordinate-based MLP. The specific layer dimensions are not detailed in the sources, but it is identified as a SIREN with residual connections [S1, unofficial].
+*   **Weight Quantization:** Weights are quantized to 9 bits using k-means clustering [S1, unofficial].
 
 **Steps:**
-1.  **Sampling:** Sample coordinates from the volume. For time-varying data, entropy-based adaptive sampling may be used to concentrate training on high-information blocks [S1, unofficial].
-2.  **Training:** Train the coordinate-based MLP to minimize the reconstruction error between the network output and the sampled field values $v_j$ [S1, unofficial].
-    *   *Optional:* Apply a gradient regularization term to improve isosurface fidelity, accepting a slight reduction in PSNR [S1, unofficial].
-3.  **Quantization:** Apply k-means clustering to the trained network weights to reduce precision (e.g., to 9-bit) [S1, unofficial].
-4.  **Storage:** Save the quantized weights. The network serves as the compressed representation [S1, unofficial].
-5.  **Query/Rendering:** To render or inspect the volume, evaluate the network at desired coordinates. For interactive rendering, GPU caching or multi-resolution caches may be employed [S1, unofficial].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-import numpy as np
-from sklearn.cluster import KMeans
-
-def train_neurcomp(samples, targets, num_clusters=512, bit_depth=9):
-    """
-    Trains a SIREN-based INR and quantizes weights.
-    samples: Nx3 array of coordinates
-    targets: N array of field values
-    """
-    # 1. Initialize SIREN with residual connections
-    # [G] Standard SIREN initialization uses uniform distribution scaled by 1/sqrt(fan_in)
-    # for layers before the first, and 6/fan_in for subsequent layers to satisfy 
-    # the Lipschitz condition for sinusoidal activation.
-    model = initialize_siren()
-    
-    # 2. Train the model
-    # [G] Standard MSE loss with optional gradient penalty
-    loss = compute_mse(model(samples), targets)
-    optimizer = Adam(model.parameters(), lr=1e-4)
-    for epoch in range(num_epochs):
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        
-    # 3. Quantize weights using k-means
-    # Flatten all weight tensors
-    all_weights = np.concatenate([w.flatten() for w in model.get_weights()])
-    
-    # Determine number of levels from bit depth
-    num_levels = 2 ** bit_depth
-    
-    # Perform k-means clustering on weights
-    kmeans = KMeans(n_clusters=num_clusters, random_state=42)
-    kmeans.fit(all_weights.reshape(-1, 1))
-    
-    # Replace weights with cluster centers
-    quantized_weights = kmeans.cluster_centers_[kmeans.predict(all_weights.reshape(-1, 1))]
-    model.set_weights(quantized_weights)
-    
-    return model
-
-def query_volume(model, coords):
-    """
-    Evaluates the compressed INR at given coordinates.
-    """
-    # Apply positional encoding if used
-    encoded_coords = positional_encoding(coords)
-    return model(encoded_coords)
-```
+1.  **Sampling:** Sample spatial coordinates from the volumetric grid. The sources do not specify the sampling strategy (e.g., uniform, random) for the base neurcomp method [G].
+2.  **Encoding:** Pass coordinates through positional encoding $\gamma(x)$ if used (standard for SIRENs, though not explicitly detailed in the neurcomp snippet, it is implied by the SIREN architecture) [G].
+3.  **Forward Pass:** Compute the predicted field value $\hat{v}$ using the MLP with residual connections [S1, unofficial].
+4.  **Loss Calculation:** Compute the reconstruction loss (e.g., MSE) between $\hat{v}$ and the ground truth $v$. Optionally, add a gradient regularization term to the loss to preserve high-frequency details and isosurface fidelity [S1, unofficial].
+5.  **Optimization:** Train the network parameters to minimize the loss [S1, unofficial].
+6.  **Quantization:** Apply k-means clustering to the trained weights to quantize them to 9 bits [S1, unofficial].
 
 **Parameters:**
-*   **Bit Depth:** 9-bit is typical for weight quantization [S1, unofficial].
-*   **Hardware:** Training reported on NVIDIA V100 GPU [S1, unofficial].
-*   **Resolution:** Tested on scalar fields up to $512^3$ [S1, unofficial].
+*   **Weight Quantization Bits:** 9 bits [S1, unofficial].
+*   **Hardware:** V100 GPU [S1, unofficial].
+*   **Training Time:** Hours per volume [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Interactive Rendering:** The method could not render interactively from the volume in its basic form due to the computational cost of evaluating the network per pixel/voxel [S1, unofficial].
-*   **Training Time:** Training requires hours per volume on a V100 GPU [S1, unofficial].
-*   **Precision:** Gradient regularization improves isosurface fidelity but reduces PSNR [S1, unofficial].
+**Pitfalls:**
+*   **Rendering Speed:** The method cannot render interactively from the volume due to the computational cost of querying the neural network [S1, unofficial].
+*   **Fidelity vs. PSNR:** Adding gradient regularization improves isosurface fidelity but causes a slight reduction in PSNR [S1, unofficial].
 
 ## Subtopics
 
 ### Time-varying INR compression via Laplacian pyramid
-A method that decomposes time-varying volumes via a Laplacian pyramid with per-block MLPs to improve decoding speed [S1, unofficial]. It is chosen when fast decoding of large time-varying datasets is required. It achieves decoding speeds 13–30× faster than neurcomp on datasets up to $1,728^3$ [S1, unofficial].
+A method that decomposes time-varying volumes using a Laplacian pyramid with per-block MLPs to improve decoding speed [S1, unofficial]. It is chosen when fast decoding of large time-varying datasets is required. It achieves decoding speeds 13–30× faster than neurcomp on datasets up to $1,728^3$ [S1, unofficial].
 
 ### MVNet
-A method for compressing multivariate data by formulating it as multi-task learning, using a Residual SIREN with a v-dimensional output layer (v = number of physical variables) that shares all intermediate parameters across variables [S1, unofficial]. It is chosen for multivariate scientific data to preserve inter-variable statistical dependencies (Pearson correlation and mutual information) better than traditional compressors [S1, unofficial]. It outperforms TTHRESH (48.62 dB at 343:1) on a 100-variable climate dataset (1568 MB) with 49.68 dB PSNR at 1298:1 compression [S1, unofficial]. Pitfall: Only tested on static datasets [S1, unofficial].
+A method for compressing multivariate data by formulating it as multi-task learning, using a Residual SIREN with a $v$-dimensional output layer (where $v$ is the number of physical variables) that shares all intermediate parameters across variables [S1, unofficial]. It is chosen for multivariate datasets to preserve inter-variable statistical dependencies (Pearson correlation and mutual information) better than traditional compressors [S1, unofficial]. On a 100-variable climate dataset (1568 MB), it achieved 49.68 dB PSNR at 1298:1 compression, outperforming TTHRESH (48.62 dB at 343:1) [S1, unofficial]. It has only been tested on static datasets [S1, unofficial].
 
 ### KD-INR
-A two-stage pipeline for compressing time-varying data: first compressing each timestep independently with a small INR with bottleneck layers, then merging all per-timestep teacher models into a single student via offline knowledge distillation (an O(n) procedure) [S1, unofficial]. It is chosen for efficient compression of large time-varying datasets where training each timestep from scratch is too slow. It uses entropy-based adaptive sampling to concentrate training on high-information blocks [S1, unofficial]. It outperformed CoordNet, NeurComp, and SIREN at compression ratios from 733 to 10,000 on time-varying datasets up to 23.44 GB (argon bubble, 150 timesteps), with per-timestep compression requiring 1–6 minutes on a single GPU [S1, unofficial].
+A two-stage pipeline for compressing time-varying data: Stage 1 compresses each timestep independently with a small INR with bottleneck layers, using entropy-based adaptive sampling to concentrate training on high-information blocks; Stage 2 merges all per-timestep teacher models into a single student via offline knowledge distillation (an $O(n)$ procedure) [S1, unofficial]. It is chosen for time-varying datasets where a single unified model is preferred over per-timestep models. On time-varying datasets up to 23.44 GB (argon bubble, 150 timesteps), it outperformed CoordNet, NeurComp, and SIREN at compression ratios from 733 to 10,000, with per-timestep compression requiring 1–6 minutes on a single GPU [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Training time is high, requiring hours per volume on a V100 GPU for basic neurcomp [S1, unofficial]. KD-INR reduces per-timestep training to 1–6 minutes [S1, unofficial].
-*   **Memory Complexity:** Storage is determined by the number of network weights, which is significantly smaller than the original voxel grid at high compression ratios.
-*   **Measured Performance:** On scalar fields up to $512^3$, neurcomp outperformed tensor decomposition (TTHRESH) at high compression ratios, achieving 47.9 dB PSNR at 545:1 compression on the Rayleigh-Taylor dataset [S1, unofficial].
-*   **Strengths:** Simultaneously compressed storage and queryable data source; high compression ratios; preserves inter-variable dependencies (MVNet); fast decoding with Laplacian pyramid variants [S1, unofficial].
-*   **Limitations:** Cannot render interactively in its basic form; high training time; quality upper-bounded by teacher model in distillation methods [S1, unofficial].
-*   **When to use:** When storage is constrained and random access to continuous field values is needed, and interactive rendering is not required during the compression phase.
-*   **When not to use:** When interactive rendering speed is critical without caching strategies, or when training time is a bottleneck.
+*   **Time Complexity:** Training requires hours per volume on a V100 GPU for the base neurcomp method [S1, unofficial]. KD-INR reduces per-timestep training to 1–6 minutes [S1, unofficial].
+*   **Memory Complexity:** The model size is determined by the number of parameters in the MLP, quantized to 9 bits [S1, unofficial].
+*   **Performance:** On scalar fields up to $512^3$, neurcomp outperformed tensor decomposition (TTHRESH) at high compression ratios, achieving 47.9 dB PSNR at 545:1 compression on the Rayleigh-Taylor dataset [S1, unofficial].
+*   **Strengths:** Simultaneously compressed storage and queryable data source; superior performance at high compression ratios compared to traditional compressors; preserves inter-variable dependencies in multivariate cases [S1, unofficial].
+*   **Limitations:** Cannot render interactively; high training time; no shared benchmark dataset or standardized evaluation protocol makes cross-method comparison difficult [S1, unofficial].
+*   **When to use:** When storage and I/O are constrained, and interactive rendering is not required during the compression phase; for high compression ratios where traditional methods degrade quality significantly [S1, unofficial].
+*   **When not to use:** When interactive rendering is required; when training time is a critical constraint [S1, unofficial].
 
 ## Background
-Neural Implicit Network Compression originated as a method for scientific volumes, with neurcomp being the first INR compression method for this domain [S1, unofficial]. It leverages coordinate-based SIREN MLPs with residual connections and 9-bit weight quantization via k-means clustering [S1, unofficial]. The approach addresses the limitations of traditional lossy compressors like SZ and ZFP, which produce bitstreams that must be fully decoded before visualization [S1, unofficial]. Subsequent variants like MVNet and KD-INR extended the method to multivariate and time-varying data, respectively [S1, unofficial].
+Neural Implicit Network Compression was introduced as a method for scientific volumes, with neurcomp being the first INR compression method for this domain [S1, unofficial]. It addresses the strain on storage systems and I/O pipelines caused by full-resolution scientific volumes [S1, unofficial]. The method builds on the SIREN architecture and k-means clustering for weight quantization [S1, unofficial].
 
 ## Sources
 [S1] Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
