@@ -1,0 +1,234 @@
+# Zip-NeRF Hash Encoding with Gaussian Expectation
+
+Also called: Hash-NeRF with Gaussian smoothing
+
+## Overview
+Zip-NeRF Hash Encoding with Gaussian Expectation is a spatial encoding method for Neural Radiance Fields (NeRF) that replaces large multi-layer perceptrons (MLPs) with a multi-scale hash grid to store 3D features, using Gaussian expectation approximation to prevent aliasing during grid queries [S1]. It serves as an acceleration of mip-NeRF 360, replacing its large MLP with a hash encoding based on Instant Neural Graphics Primitives, followed by a smaller MLP [S1]. The method sets itself apart from standard hash-based NeRFs by explicitly modeling the query as an expectation over 3D Gaussians rather than point samples, thereby mitigating high-frequency aliasing artifacts inherent in sparse grid representations [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   A 3D position $\mathbf{x}$ (typically in contracted space).
+*   A ray direction $\dot{r}$ (unit vector).
+*   A hyperparameter $\gamma$ (fixed scalar).
+*   Hash grid parameters: number of levels $L$, base resolution $n_0$, hash table size $T$, and number of bits per entry $b$ (standard Instant-NGP parameters).
+*   MLP weights for density decoding (1 layer, width 64) and color decoding (3 layers, width 256) [S1].
+
+**Outputs:**
+*   Density $\sigma$ and feature vector $\mathbf{f}$ (used for color prediction).
+
+### Data Structures
+The method relies on the Multi-resolution Hash Encoding structure from Instant Neural Graphics Primitives [Müller et al. 2022], cited in [S1].
+*   **Hash Grid:** A collection of $L$ levels. Level $\ell$ has resolution $n_\ell = n_0 \cdot 2^\ell$.
+*   **Hash Table:** For each level, a hash table of size $T$ mapping hashed coordinates to feature vectors of size $b$ bits.
+*   **Contraction Function:** A function $C(\mathbf{x})$ that maps $\mathbb{R}^3$ to a bounded domain (typically $[-1, 1]^3$ or similar), defined in Equation 2 of [S1].
+
+### Numbered Steps
+
+1.  **Contraction:** Map the input position $\mathbf{x}$ to the contracted space using the contraction function $C(\mathbf{x})$ [S1]. The function is defined as:
+    $$
+    C(\mathbf{x}) = \begin{cases} \mathbf{x} & \text{if } \|\mathbf{x}\| \leq 1, \\ \left(2 - \frac{1}{\|\mathbf{x}\|}\right) \frac{\mathbf{x}}{\|\mathbf{x}\|} & \text{if } \|\mathbf{x}\| > 1. \end{cases}
+    $$
+    [S1]
+
+2.  **Compute Effective Sigma:** Calculate the effective standard deviation $\sigma(\mathbf{x})$ that accounts for the ray direction, distance from origin, and the volume deformation caused by the contraction function [S1]:
+    $$
+    \sigma(\mathbf{x}) = \gamma \cdot \dot{r} \|\mathbf{x} - \mathbf{0}\| \sqrt[3]{\det J_C(\mathbf{x})}
+    $$
+    where $\dot{r}$ is the ray direction, $\|\mathbf{x} - \mathbf{0}\|$ is the distance from the origin, and $\det J_C(\mathbf{x})$ is the determinant of the Jacobian of the contraction function $C$ at $\mathbf{x}$ [S1].
+
+3.  **Determine Downweighting Multiplier:** For each hash grid level $\ell$, compute the downweighting multiplier to prevent voxels much smaller than the Gaussian from affecting the features [S1]. The multiplier is derived from the error function ($\text{erf}$):
+    $$
+    w_\ell = \text{erf}\left( \sqrt{8} \sigma(\mathbf{x}) n_\ell \right) - 1
+    $$
+    Note: The source text states "downweights the grid resolution $n_\ell$ by $\text{erf} \sqrt{8\sigma(x)n_\ell} - 1$". This implies the feature contribution is scaled by this term [S1].
+
+4.  **Multisampling:** Replace the single point sample $\mathbf{x}$ with multiple smaller Gaussian samples. This involves generating $K$ sample points $\mathbf{x}_k$ around $\mathbf{x}$ according to the Gaussian distribution defined by $\sigma(\mathbf{x})$ [S1].
+
+5.  **Feature Aggregation:** For each level $\ell$ and each sample $k$:
+    a. Query the hash grid at $\mathbf{x}_k$ for level $\ell$ to get feature $\mathbf{f}_{\ell, k}$ [S1].
+    b. Apply the downweighting multiplier $w_\ell$ to $\mathbf{f}_{\ell, k}$ [S1].
+    c. Aggregate the features across all samples and levels. The exact aggregation (e.g., weighted average) is not explicitly detailed beyond "gathered features" being multiplied by the multiplier [S1].
+
+6.  **MLP Decoding:**
+    a. Pass the aggregated feature vector through a small MLP (1 layer, width 64) to decode density $\sigma$ [S1].
+    b. Pass the aggregated feature vector through a larger MLP (3 layers, width 256) to decode color features, which are then used to compute final color [S1].
+
+### Formulas
+*   **Contraction Function $C(\mathbf{x})$:**
+    $$
+    C(\mathbf{x}) = \begin{cases} \mathbf{x} & \text{if } \|\mathbf{x}\| \leq 1, \\ \left(2 - \frac{1}{\|\mathbf{x}\|}\right) \frac{\mathbf{x}}{\|\mathbf{x}\|} & \text{if } \|\mathbf{x}\| > 1. \end{cases}
+    $$
+    [S1]
+
+*   **Effective Sigma $\sigma(\mathbf{x})$:**
+    $$
+    \sigma(\mathbf{x}) = \gamma \cdot \dot{r} \|\mathbf{x} - \mathbf{0}\| \sqrt[3]{\det J_C(\mathbf{x})}
+    $$
+    [S1]
+
+*   **Downweighting Multiplier:**
+    $$
+    w_\ell = \text{erf}\left( \sqrt{8} \sigma(\mathbf{x}) n_\ell \right) - 1
+    $$
+    [S1]
+
+### Parameters
+*   $\gamma$: A fixed hyperparameter. Value not given in the sources.
+*   Density MLP: 1 layer, width 64 [S1].
+*   Color MLP: 3 layers, width 256 [S1].
+*   Hash Grid: Based on Instant Neural Graphics Primitives [Müller et al. 2022] [S1]. Specific values for $L, n_0, T, b$ are not given in the sources.
+
+### Edge Cases and Pitfalls
+*   **Jacobian Determinant:** Computing $\det J_C(\mathbf{x})$ requires the derivative of the contraction function. At $\|\mathbf{x}\|=1$, the function is continuous but the derivative may require careful handling.
+*   **Alias Prevention:** The downweighting is designed to prevent voxels much smaller than the Gaussian from affecting features. If $\sigma(\mathbf{x})$ is very small, the multiplier may approach -1 or 0, potentially leading to vanishing features if not normalized correctly.
+*   **Multisampling:** The number of samples $K$ is not specified. Insufficient samples may lead to noisy expectations.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def contraction(x):
+    """
+    Contraction function C(x) mapping R^3 to bounded domain.
+    """
+    norm = np.linalg.norm(x)
+    if norm <= 1.0:
+        return x
+    else:
+        return (2.0 - 1.0 / norm) * (x / norm)
+
+def contraction_jacobian_determinant(x):
+    """
+    Computes det(J_C(x)) for the contraction function.
+    Note: The exact analytical form is not provided in the sources.
+    This is a placeholder for the implementation detail.
+    """
+    # Placeholder: Implement based on derivative of C(x)
+    # For x > 1, C(x) = (2 - 1/||x||) * x/||x||
+    # The Jacobian determinant calculation is complex and source-dependent.
+    # [G] Assuming a simplified radial scaling factor for demonstration.
+    # In practice, this must be derived from the specific contraction function.
+    norm = np.linalg.norm(x)
+    if norm <= 1.0:
+        return 1.0
+    else:
+        # Simplified placeholder for det(J_C)
+        # Actual implementation requires full Jacobian matrix determinant
+        return 1.0 / (norm ** 2) 
+
+def gaussian_expectation_hash_query(x, r_dot, gamma, hash_grids, levels, n0, num_samples=10):
+    """
+    Queries the hash grid with Gaussian expectation approximation.
+    
+    Args:
+        x: Input 3D position.
+        r_dot: Ray direction (unit vector).
+        gamma: Fixed hyperparameter.
+        hash_grids: List of hash tables for each level.
+        levels: List of resolutions n_l for each level.
+        n0: Base resolution.
+        num_samples: Number of Gaussian samples for multisampling.
+        
+    Returns:
+        aggregated_feature: Aggregated feature vector.
+    """
+    # Step 1: Contraction
+    x_contracted = contraction(x)
+    
+    # Step 2: Compute Effective Sigma
+    # ||x - 0|| is simply ||x||
+    dist = np.linalg.norm(x)
+    det_J = contraction_jacobian_determinant(x_contracted)
+    sigma = gamma * r_dot * dist * (det_J ** (1.0/3.0))
+    
+    aggregated_feature = np.zeros(64) # Assuming feature size matches MLP input
+    
+    # Step 3 & 4: Multisampling and Downweighting
+    for l, n_l in enumerate(levels):
+        # Compute downweighting multiplier
+        # w_l = erf(sqrt(8) * sigma * n_l) - 1
+        # Note: erf is not in standard numpy, using scipy or approximation
+        # [G] Using math.erf for standard library compliance
+        multiplier = math.erf(math.sqrt(8) * sigma * n_l) - 1
+        
+        # Multisampling: Generate samples around x_contracted
+        # [G] Assuming isotropic Gaussian sampling scaled by sigma
+        # In practice, samples should be drawn from N(x_contracted, sigma^2 * I)
+        samples = np.random.normal(loc=x_contracted, scale=sigma, size=(num_samples, 3))
+        
+        level_feature = np.zeros(64)
+        
+        for sample in samples:
+            # Query hash grid at sample for level l
+            # [G] Hash grid query implementation details (hashing, interpolation)
+            # are assumed to be handled by the hash_grids structure.
+            feature = query_hash_grid(hash_grids[l], sample)
+            
+            # Apply downweighting
+            level_feature += multiplier * feature
+            
+        # Aggregate level features (e.g., average or sum)
+        # [G] The source does not specify the exact aggregation across levels.
+        # Assuming simple summation for now.
+        aggregated_feature += level_feature
+        
+    return aggregated_feature
+
+def query_hash_grid(hash_table, x):
+    """
+    Queries a single hash grid level for a feature vector.
+    [G] Placeholder for standard Instant-NGP hash grid query logic.
+    """
+    # Hash x to index
+    # Retrieve feature
+    # Return feature
+    return np.zeros(64)
+```
+
+## Subtopics
+
+### HybridNeRF Model Architecture
+Uses a hybrid approach combining hash grids and other representations. [HybridNeRF Model Architecture](4842-hybridnerf-model-architecture.md)
+
+### Simple-ZipNeRF
+A simplified version of Zip-NeRF. [Simple-ZipNeRF](7424-simple-zipnerf.md)
+
+### MVS Network Query
+Uses multi-view stereo information for network queries. [MVS Network Query](7517-mvs-network-query.md)
+
+### VoxNeRF
+Uses voxel-based representations. [VoxNeRF](8865-voxnerf.md)
+
+### Multi-resolution hash encoding
+The underlying encoding technique used by Zip-NeRF. [Multi-resolution hash encoding](10203-multi-resolution-hash-encoding.md)
+
+### Deformation Field Integration for Telepresence
+Integrates deformation fields with hash encoding. [Deformation Field Integration for Telepresence](10866-deformation-field-integration-for-telepresence.md)
+
+### DWTNeRF
+Uses discrete wavelet transform for NeRF. [DWTNeRF](11913-dwtnerf.md)
+
+## Operating characteristics
+
+*   **Time Complexity:** Querying the hash grid is $O(1)$ per level per sample. The MLP decoding is $O(1)$ with fixed layer sizes. The multisampling adds a factor of $K$ (number of samples). Overall, it is significantly faster than large MLPs but slower than point queries due to multisampling.
+*   **Memory Complexity:** Dominated by the hash grid storage. The MLPs are small (1 layer width 64, 3 layers width 256).
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales with the number of hash levels and samples.
+*   **Strengths:** Prevents aliasing artifacts common in hash-based NeRFs. Accelerates mip-NeRF 360 by replacing large MLPs.
+*   **Limitations:** Requires careful tuning of $\gamma$ and number of samples. Jacobian determinant calculation can be complex.
+*   **When to use:** When high-quality, alias-free rendering is required with hash-based encodings.
+*   **When not:** When computational resources are extremely limited and aliasing is acceptable.
+
+## Background
+
+Zip-NeRF was introduced as an acceleration of mip-NeRF 360 [S1]. It replaces the large MLP in mip-NeRF 360 with a hash encoding based on Instant Neural Graphics Primitives [Müller et al. 2022], followed by a smaller MLP [S1]. The Gaussian expectation approximation was added to prevent aliasing during grid queries [S1]. The method is used in NeRF-Casting for improved view-dependent appearance with consistent reflections [S1].
+
+## Sources
+
+[S1] NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections, https://arxiv.org/abs/2405.14871v1, fetched 2026-10-26

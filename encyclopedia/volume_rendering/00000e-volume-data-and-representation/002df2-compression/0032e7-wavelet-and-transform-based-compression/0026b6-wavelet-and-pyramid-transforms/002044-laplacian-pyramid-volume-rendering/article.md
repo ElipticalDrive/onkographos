@@ -41,7 +41,7 @@ def render_laplacian_pyramid(pyramid_levels, camera_params, cache, threshold=0.9
             t = 0.0
             while t < camera_params.max_depth:
                 voxel_coord = ray_origin + ray_direction * t
-                x_idx, y_idx, z_idx = voxel_coord
+                x_idx, y_idx, z_idx = int(voxel_coord[0]), int(voxel_coord[1]), int(voxel_coord[2])
                 if not (0 <= x_idx < pyramid_levels[0].width and 0 <= y_idx < pyramid_levels[0].height and 0 <= z_idx < pyramid_levels[0].depth):
                     t += step_size
                     continue
@@ -87,8 +87,8 @@ def transfer_function(value):
 
 **Edge Cases and Pitfalls:**
 *   **Precision:** Quantization introduces RMSE. With bin sizes $\{32, 16, 16, 16, 16, 1\}$, RMSE was 1.3 for CTHead data [S1, unofficial].
-*   **Cache Misses:** If the cache is too small or access patterns are random, reconstruction overhead increases. The average number of reconstructions per voxel was ~1.08, indicating high cache hit rates [S1, unofficial].
-*   **Boundary Conditions:** Not given in the sources.
+*   **Cache Misses:** If the cache is too small or access patterns are random, reconstruction overhead increases. The average number of reconstructions per voxel was 1.08, indicating high cache hit rates [S1, unofficial].
+*   **Boundary Conditions:** Not given in the sources. [G]
 
 ## Operating characteristics
 *   **Time Complexity:** Rendering time includes reconstruction overhead. For CTHead data on a Silicon Graphics Indigo (150 MHz), average rendering time was ~3 minutes per image, including reconstruction [S1, unofficial].

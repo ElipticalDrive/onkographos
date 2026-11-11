@@ -1,0 +1,238 @@
+# VTK.js Transfer Function Interface
+
+
+## Overview
+The VTK.js Transfer Function Interface is a JavaScript class that provides an interactive user interface for defining and editing volume rendering transfer functions (opacity and color) using control points, which are then applied to a VTK.js `vtkVolume` actor [S1, unofficial]. It distinguishes itself from other interaction methods by providing a direct, DOM-based SVG widget for manual control point manipulation, specifically designed for integration with the VTK.js visualization pipeline, rather than relying on automated placement or sketch-based editing [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `_parentElementID`: String ID of the HTML container (e.g., `'#TFInterface'`).
+    *   `_visWidth`, `_visHeight`: Dimensions of the SVG interface in pixels.
+    *   `_opacityViewPercentage`: Height ratio of the opacity view area relative to total height, range $[0, 1]$ (e.g., $0.8$).
+    *   `_updateRenderFunc`: Callback function to trigger VTK.js volume re-rendering.
+    *   `_getVolumeActorPropertyFunc`: Callback function returning the VTK volume actor's property object for TF application.
+    *   `_minMax`: Array `[min, max]` of the scalar data range.
+    *   `_initOpaCtrolPoint`: Array of opacity control points `[[dataValue, opacity], ...]`. If `null`, defaults to `[[min, 0], [max, 1]]`.
+    *   `_initNumColorCtrlPoint`: Number of color control points to generate. If `-1`, `_initColorCtrlPoint` is treated as a d3 color map function. Otherwise, must be $\ge 2$.
+    *   `_initColorCtrlPoint`: Either an array of color control points `[[dataValue, R, G, B], ...]` with values $0-1$, or a d3 color interpolation function (e.g., `d3.interpolateRdBu`).
+*   **Outputs:**
+    *   Updates the VTK.js `vtkVolume` property with the new transfer function.
+    *   Renders an SVG interface allowing users to add, move, and delete control points.
+
+**Data Structures:**
+*   **Opacity Control Point Array:** `[[scalarValue, opacity], ...]`. Scalar values must be within `[minMax[0], minMax[1]]` and sorted ascending. Opacity values are floats in $[0, 1]$.
+*   **Color Control Point Array:** `[[scalarValue, R, G, B], ...]`. Scalar values sorted ascending. RGB values are floats in $[0, 1]$.
+
+**Steps:**
+1.  **Initialization:**
+    *   Create an SVG element within `_parentElementID` with dimensions `_visWidth` x `_visHeight`.
+    *   Define margins: `top: 20`, `right: 20`, `bottom: 25`, `left: 50`.
+    *   Calculate viewports:
+        *   Opacity View Height: `tfHeight = _visHeight * _opacityViewPercentage - top - bottom`.
+        *   Color View Height: `colorHeight = _visHeight - _opacityViewPercentage * _visHeight - bottom`.
+    *   Create linear scales:
+        *   X-axis: `d3.scaleLinear().domain(_minMax).range([0, tfWidth])`.
+        *   Y-axis (Opacity): `d3.scaleLinear().domain([1, 0]).range([0, tfHeight])`. Note the inverted domain to match SVG coordinate systems.
+    *   Initialize control points:
+        *   If `_initOpaCtrolPoint` is `null`, set `opaCtrlPoint = [[_minMax[0], 0], [_minMax[1], 1]]`.
+        *   If `_initNumColorCtrlPoint` is `-1`, use `_initColorCtrlPoint` (a d3 function) to generate initial color points. Otherwise, generate `_initNumColorCtrlPoint` evenly spaced points.
+2.  **Color Control Point Initialization (if using d3 function):**
+    *   Calculate `step = 1 / (_initNumColorCtrlPoint - 1)`.
+    *   Initialize `colorMapValue = 0`.
+    *   Loop `i` from `0` to `_initNumColorCtrlPoint - 1`:
+        *   Call `_initColorCtrlPoint(colorMapValue)` to get a string like `'(r, g, b)'`.
+        *   Parse RGB components, divide each by `255.0` to normalize to $[0, 1]$.
+        *   Map `colorMapValue` to data range: `dataValue = colorMapValue * (_minMax[1] - _minMax[0]) + _minMax[0]`.
+        *   Push `[dataValue, r, g, b]` to `this.colorCtrlPoint`.
+        *   Increment `colorMapValue += step`.
+3.  **Rendering:**
+    *   Draw opacity area using `d3.area` generator based on `opaCtrlPoint`.
+    *   Draw color area using `d3.area` generator based on `colorCtrlPoint`.
+    *   Draw draggable circles for each control point.
+4.  **Interaction (Adding Opacity Control Point):**
+    *   On click in the opacity view:
+        *   Get mouse position `(mousePosX, mousePosY)` in SVG coordinates.
+        *   Invert scales: `newDataValue = xScale.invert(mousePosX)`, `newOpacity = yScale.invert(mousePosY) / opacityFactor`.
+        *   Find insertion index: `idx = opaCtrlPoint.findIndex(d => d[0] > newDataValue)`.
+        *   Insert: `opaCtrlPoint.splice(idx, 0, [newDataValue, newOpacity])`.
+        *   Call `updateTFInterface()`.
+5.  **Interaction (Adding Color Control Point):**
+    *   On click in the color view:
+        *   Get `mousePosX`.
+        *   Invert: `newDataValue = xScale.invert(mousePosX)`.
+        *   Find insertion index: `idx = colorCtrlPoint.findIndex(d => d[0] > newDataValue)`.
+        *   Get neighbors: `prev = colorCtrlPoint[idx-1]`, `next = colorCtrlPoint[idx]`.
+        *   Compute interpolation factor: `a = (newDataValue - prev[0]) / (next[0] - prev[0])`.
+        *   Interpolate RGB: `newColorCtrlPoint = [newDataValue, (1-a)*prev[1] + a*next[1], (1-a)*prev[2] + a*next[2], (1-a)*prev[3] + a*next[3]]`.
+        *   Insert: `colorCtrlPoint.splice(idx, 0, newColorCtrlPoint)`.
+        *   Call `updateTFInterface()`.
+6.  **Interaction (Dragging Control Points):**
+    *   On drag:
+        *   Update the control point's scalar value and/or opacity/color based on mouse position.
+        *   Enforce ordering constraints (e.g., prevent crossing with neighbors).
+        *   Call `updateTFInterface()`.
+7.  **Update Interface:**
+    *   Update SVG paths and circles to reflect changes in control point arrays.
+    *   Apply the updated control points to the VTK.js volume actor property via `_getVolumeActorPropertyFunc`.
+    *   Trigger re-render via `_updateRenderFunc`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class VTKjsTransferFunctionInterface:
+    def __init__(self, parentElementID, visWidth, visHeight, opacityViewPercentage, updateRenderFunc, getVolumeActorPropertyFunc, minMax, initOpaCtrolPoint=None, initNumColorCtrlPoint=2, initColorCtrlPoint=None):
+        self.parentElementID = parentElementID
+        self.visWidth = visWidth
+        self.visHeight = visHeight
+        self.opacityViewPercentage = opacityViewPercentage
+        self.updateRenderFunc = updateRenderFunc
+        self.getVolumeActorPropertyFunc = getVolumeActorPropertyFunc
+        self.minMax = minMax
+        self.opacityFactor = 1.0 # Default, adjustable via zoom
+        
+        # Initialize control points
+        if initOpaCtrolPoint is None:
+            self.opaCtrlPoint = [[minMax[0], 0], [minMax[1], 1]]
+        else:
+            self.opaCtrlPoint = initOpaCtrolPoint
+            
+        self.colorCtrlPoint = []
+        if initNumColorCtrlPoint == -1:
+            # Use d3 color map function
+            step = 1.0 / (2 - 1) # Assuming min 2 points for calculation logic, though d3 handles it
+            # In practice, initNumColorCtrlPoint is used to determine count if not -1
+            # If -1, we need a default count or rely on the d3 function to generate points?
+            # The source implies initNumColorCtrlPoint is used to determine count.
+            # If -1, initColorCtrlPoint is a d3 function. We need a count to generate points.
+            # The source says: "If -1, _initColorCtrlPoint is treated as a d3 color map function."
+            # It doesn't specify the count in this case. We assume a default or that initNumColorCtrlPoint is still needed for count.
+            # Let's assume a default count of 2 if not specified, or that initNumColorCtrlPoint is ignored and we use a fixed number?
+            # The source code snippet shows: "if _initNumColorCtrlPoint == -1 ... else ...".
+            # It doesn't show the -1 branch generating points. It likely expects initNumColorCtrlPoint to be >= 2.
+            # We will assume initNumColorCtrlPoint is always >= 2 for point generation.
+            pass 
+        
+        # Generate color control points
+        if initNumColorCtrlPoint >= 2:
+            step = 1.0 / (initNumColorCtrlPoint - 1)
+            colorMapValue = 0.0
+            for i in range(initNumColorCtrlPoint):
+                if initNumColorCtrlPoint == -1:
+                    # This branch is not taken if initNumColorCtrlPoint >= 2
+                    pass
+                else:
+                    # Assuming initColorCtrlPoint is a d3 function if initNumColorCtrlPoint == -1
+                    # If initNumColorCtrlPoint >= 2, initColorCtrlPoint might be an array or a function?
+                    # The source says: "_initColorCtrlPoint: Either an array ... or a d3 color interpolation function"
+                    # And "_initNumColorCtrlPoint: ... If -1, _initColorCtrlPoint is treated as a d3 color map function."
+                    # So if initNumColorCtrlPoint >= 2, initColorCtrlPoint is likely an array?
+                    # The source code snippet for initialization:
+                    # "if _initNumColorCtrlPoint == -1 ... else ... Loop i from 0 to _initNumColorCtrlPoint - 1"
+                    # This implies if initNumColorCtrlPoint >= 2, we loop.
+                    # But what is initColorCtrlPoint in that case?
+                    # The source says: "Initialize colorMapValue = 0. Loop i ... Call _initColorCtrlPoint(colorMapValue)"
+                    # This suggests _initColorCtrlPoint is a function.
+                    # So if initNumColorCtrlPoint >= 2, _initColorCtrlPoint is a d3 function.
+                    # If initNumColorCtrlPoint == -1, _initColorCtrlPoint is a d3 function, but how many points?
+                    # The source is ambiguous here. We will assume initNumColorCtrlPoint >= 2 and _initColorCtrlPoint is a d3 function.
+                    
+                    rgbString = initColorCtrlPoint(colorMapValue) # e.g., "rgb(r,g,b)" or "#rrggbb"
+                    r, g, b = parseRGB(rgbString) # Parse to 0-255
+                    r /= 255.0
+                    g /= 255.0
+                    b /= 255.0
+                    dataValue = colorMapValue * (minMax[1] - minMax[0]) + minMax[0]
+                    self.colorCtrlPoint.append([dataValue, r, g, b])
+                    colorMapValue += step
+
+        self.initVis()
+
+    def initVis(self):
+        # Create SVG and scales
+        # ... (as described in steps)
+        pass
+
+    def addOpacityControlPoint(self, mousePosX, mousePosY):
+        newDataValue = self.xScale.invert(mousePosX)
+        newOpacity = self.yScale.invert(mousePosY) / self.opacityFactor
+        idx = -1
+        for i, point in enumerate(self.opaCtrlPoint):
+            if point[0] > newDataValue:
+                idx = i
+                break
+        if idx == -1:
+            idx = len(self.opaCtrlPoint)
+        self.opaCtrlPoint.insert(idx, [newDataValue, newOpacity])
+        self.updateTFInterface()
+
+    def addColorControlPoint(self, mousePosX):
+        newDataValue = self.xScale.invert(mousePosX)
+        idx = -1
+        for i, point in enumerate(self.colorCtrlPoint):
+            if point[0] > newDataValue:
+                idx = i
+                break
+        if idx == -1:
+            idx = len(self.colorCtrlPoint)
+        
+        # Pitfall: Division by zero if prev[0] == next[0]
+        # Pitfall: findIndex returns -1 if newDataValue > all points, splice at -1 removes last element
+        if idx == 0:
+            # Insert at beginning, need next neighbor
+            if len(self.colorCtrlPoint) > 0:
+                next_point = self.colorCtrlPoint[0]
+                prev_point = next_point # Use next as prev? Or assume min?
+                # The source code gets prev and next. If idx=0, prev is undefined in the loop logic?
+                # The source code: "prev = colorCtrlPoint[idx-1], next = colorCtrlPoint[idx]"
+                # If idx=0, idx-1 is -1. In Python, list[-1] is the last element. This is a bug in the source logic if intended to be linear.
+                # However, the source code snippet for addColorControlPoint is not fully provided.
+                # We will assume standard linear interpolation between existing points.
+                pass
+        else:
+            prev = self.colorCtrlPoint[idx-1]
+            next = self.colorCtrlPoint[idx]
+            
+            # Pitfall: Division by zero
+            if next[0] == prev[0]:
+                # Handle degenerate case, e.g., use prev color or average
+                newColorCtrlPoint = [newDataValue, prev[1], prev[2], prev[3]]
+            else:
+                a = (newDataValue - prev[0]) / (next[0] - prev[0])
+                newColorCtrlPoint = [
+                    newDataValue,
+                    (1-a)*prev[1] + a*next[1],
+                    (1-a)*prev[2] + a*next[2],
+                    (1-a)*prev[3] + a*next[3]
+                ]
+            self.colorCtrlPoint.insert(idx, newColorCtrlPoint)
+        
+        self.updateTFInterface()
+
+    def updateTFInterface(self):
+        # Update SVG paths and circles
+        # Apply to VTK.js volume
+        property = self.getVolumeActorPropertyFunc()
+        # Set transfer function on property
+        # ...
+        self.updateRenderFunc()
+```
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** When interpolating color control points, if `prev[0]` equals `next[0]`, the interpolation factor `a` results in division by zero, producing `NaN` or `Infinity` [S1, unofficial].
+*   **Index Corruption:** `findIndex` returns `-1` when `newDataValue` is greater than all existing control points. Using `splice(-1, 0, ...)` removes the last element instead of appending, corrupting the control point array [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Initialization is $O(N)$ where $N$ is the number of control points. Interaction updates are $O(M)$ where $M$ is the number of control points for finding insertion indices.
+*   **Memory Complexity:** $O(N)$ for storing control points.
+*   **Strengths:** Direct, intuitive manipulation of transfer functions; integrates seamlessly with VTK.js; supports both opacity and color editing.
+*   **Limitations:** Manual editing can be tedious for complex transfer functions; prone to user errors (e.g., unsorted points, division by zero); requires JavaScript/D3.js knowledge to extend.
+*   **When to use:** When a simple, interactive UI for manual transfer function editing is needed in a web-based VTK.js application.
+*   **When not to use:** For automated classification, large-scale batch processing, or when advanced feature-based classification is required.
+
+## Background
+The VTK.js Transfer Function Interface was developed as part of the VTKjsVolumeRendering project, a demonstration of volume rendering using VTK.js and binary raw data [S1, unofficial]. It leverages the D3.js library for SVG manipulation and data visualization [S1, unofficial].
+
+## Sources
+[S1] caseywang777/VTKjsVolumeRendering, https://github.com/caseywang777/VTKjsVolumeRendering, fetched 2026-10-27 (unofficial)

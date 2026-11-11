@@ -1,29 +1,29 @@
 # Ray-Occlusion Traversal in Octree
 
-Also called: Octree Ray Traversal, Ray-Octree Traversal
+Also called: Arvo's approach, HERO algorithm, Octree Ray Traversal, Ray-Octree Traversal, Recursive Top-Down Octree Traversal, Top-down recursive approach
 
 ## Overview
-Ray-Occlusion Traversal in Octree is a hierarchical ray-intersection algorithm that traverses an octree structure to determine if a ray intersects any solid voxel or leaf node, primarily used for shadow ray computation and early termination in volume rendering [S1, S3, S4, unofficial]. It differs from its siblings by explicitly handling rays starting inside or outside the root bounding box via plane intersection logic and using a fixed-depth descent loop with explicit parent-boundary checks to manage traversal state, rather than relying solely on neighbor-finding or bottom-up approaches [S1, unofficial][S2].
+Ray-Occlusion Traversal in Octree is a hierarchical ray-intersection algorithm that traverses an octree structure to determine if a ray intersects any solid voxel or leaf node, primarily used for shadow ray computation and early termination in volume rendering [S1, unofficial][S3][S4, unofficial]. It differs from its siblings by explicitly handling rays starting inside or outside the root bounding box via plane intersection logic and using a fixed-depth descent loop with explicit parent-boundary checks to manage traversal state, rather than relying solely on neighbor-finding or bottom-up approaches [S1, unofficial][S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), octree root bounding box defined by position $\mathbf{p}_{root}$ and size $s_{root}$, octree node array `octreeArray`, maximum traversal depth `MAX_DEPTH`, maximum traversal steps `MAX_TRAVERSALS`.
-- **Output:** Boolean indicating intersection, or intersection point/color if a leaf is hit.
+- **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), octree root bounding box defined by position $\mathbf{p}_{root}$ and size $s_{root}$, octree node array `octreeArray`, maximum traversal depth `MAX_DEPTH`, maximum traversal steps `MAX_TRAVERSALS` [S1, unofficial].
+- **Output:** Boolean indicating intersection, or intersection point/color if a leaf is hit [S1, unofficial].
 
 **Data Structures:**
 - **OctreeNode:** A struct containing 8 integer child pointers `p0` through `p7` [S1, unofficial].
-    - `p_i >= 0`: Index into `octreeArray` pointing to a child node.
+    - `p_i >= 0`: Index into `octreeArray` pointing to a child node [S1, unofficial].
     - `p_i == -1`: Indicates no child exists (empty leaf or boundary) [S1, unofficial].
     - `p_i < -1`: Indicates a material leaf (solid voxel) [S1, unofficial].
-- **Storage:** `octreeArray` is a flat vector of `OctreeNode` structs, stored in reverse depth order (deepest layers first) [S1, unofficial]. Pointers are relative to the start of this array.
+- **Storage:** `octreeArray` is a flat vector of `OctreeNode` structs, stored in reverse depth order (deepest layers first) [S1, unofficial]. Pointers are relative to the start of this array [S1, unofficial].
 
 **Algorithm Steps:**
 
 1.  **Root Intersection (Entry Point Calculation):**
     If the ray origin $\mathbf{o}$ is outside the root bounding box $[\mathbf{p}_{root}, \mathbf{p}_{root} + s_{root}]$, calculate the intersection distances to the 6 planes of the root box [S1, unofficial].
-    - For each axis $a \in \{x, y, z\}$, compute near and far intersection parameters $t_{near}^a, t_{far}^a$ using ray-plane intersection formulas.
+    - For each axis $a \in \{x, y, z\}$, compute near and far intersection parameters $t_{near}^a, t_{far}^a$ using ray-plane intersection formulas [S1, unofficial].
     - Clamp negative distances to $\infty$ (INF) to ignore back-facing intersections [S1, unofficial].
-    - Compute candidate collision points: $\mathbf{c}_a = \mathbf{o} + t_{min}^a \mathbf{d}$, where $t_{min}^a$ is the smallest valid distance for axis $a$.
+    - Compute candidate collision points: $\mathbf{c}_a = \mathbf{o} + t_{min}^a \mathbf{d}$, where $t_{min}^a$ is the smallest valid distance for axis $a$ [S1, unofficial].
     - Validate if $\mathbf{c}_a$ lies within the root voxel bounds using a containment check `voxelInParent` [S1, unofficial].
     - Add a small epsilon offset $\epsilon_{entry} = 0.001 \cdot \text{sign}(\mathbf{d}_a)$ to $\mathbf{c}_a$ along the intersecting axis to avoid self-intersection [S1, unofficial].
     - Select the minimum valid distance $t_{entry} = \min_a(t_{min}^a)$. If $t_{entry} = \infty$, return miss [S1, unofficial].
@@ -31,19 +31,18 @@ Ray-Occlusion Traversal in Octree is a hierarchical ray-intersection algorithm t
     - Set initial ray position $\mathbf{p} = \mathbf{o} + t_{entry} \mathbf{d}$ [S1, unofficial].
 
 2.  **Initialization:**
-    - Set `curDepth = 0`.
-    - Set `nodeIndices[0]` to the root node index.
-    - Set `parentVoxels[0]` to the root voxel coordinates.
-    - Set `voxelSize = s_{root} / 2`.
+    - Set `curDepth = 0` [S1, unofficial].
+    - Set `nodeIndices[0]` to the root node index [S1, unofficial].
+    - Set `parentVoxels[0]` to the root voxel coordinates [S1, unofficial].
+    - Set `voxelSize = s_{root} / 2` [S1, unofficial].
     - Set `curVoxel` to the integer coordinates of $\mathbf{p}$ [S1, unofficial].
 
 3.  **Descent Loop:**
     Iterate up to `MAX_TRAVERSALS` times [S1, unofficial]:
-    - **Child Selection:** Calculate the child index $k \in \{0, \dots, 7\}$ based on the position of `curVoxel` relative to `parentVoxels[curDepth]` [S1, unofficial].
+    - **Child Selection:** Calculate the child index $k \in \{0, \dots, 7\}$ based on the position of `curVoxel` relative to `parentVoxels[curDepth]` [S1, unofficial][S2, unofficial].
         $$
         k = 4 \cdot \mathbb{I}(curVoxel_x \ge parentVoxels_x) + 2 \cdot \mathbb{I}(curVoxel_y \ge parentVoxels_y) + 1 \cdot \mathbb{I}(curVoxel_z \ge parentVoxels_z)
         $$
-        [S1, unofficial][S2]
     - **Node Access:** Retrieve `subNodeValue = octreeArray[nodeIndices[curDepth]].p_k` [S1, unofficial].
     - **Leaf Handling:**
         - If `subNodeValue < -1`: Hit a material leaf. Compute shadow factor/color and return result [S1, unofficial].
@@ -51,31 +50,30 @@ Ray-Occlusion Traversal in Octree is a hierarchical ray-intersection algorithm t
         - If `curDepth + 1 == MAX_DEPTH`: Max depth reached. Check `subNodeValue`. If material, return color. If empty/leaf, increment depth and break [S1, unofficial].
     - **Internal Node Descent:**
         - If `subNodeValue >= 0`:
-            - Set `nodeIndices[curDepth + 1] = subNodeValue`.
-            - Increment `curDepth`.
-            - Halve `voxelSize` and `parentVoxelSize`.
+            - Set `nodeIndices[curDepth + 1] = subNodeValue` [S1, unofficial].
+            - Increment `curDepth` [S1, unofficial].
+            - Halve `voxelSize` and `parentVoxelSize` [S1, unofficial].
             - Update `parentVoxels[curDepth]` by scaling `curVoxel` [S1, unofficial].
 
 4.  **Stepping and Backtracking (Post-Descent):**
     If the descent loop breaks due to an empty leaf or max depth:
     - **Voxel Advancement:**
         - Calculate deltas to next voxel boundaries for x, y, z axes using `getDelta` (returns INF if direction component is 0) [S1, unofficial].
-        - Find minimum delta `minDelta` among valid axes.
+        - Find minimum delta `minDelta` among valid axes [S1, unofficial].
         - Advance ray position: $\mathbf{p} \leftarrow \mathbf{p} + \text{minDelta} \cdot \mathbf{d}$ [S1, unofficial].
         - Update `curVoxel` by rounding $\mathbf{p}$ with an epsilon offset $\epsilon_{step} = 0.01 \cdot \text{sign}(\mathbf{d}_{axis})$ to prevent re-entering the same voxel [S1, unofficial].
         - Determine collision type (axis crossed) [S1, unofficial].
     - **Parent Boundary Check:**
         - While `curVoxel` is outside `parentVoxels[curDepth]` bounds:
-            - Decrement `curDepth`.
-            - Double `voxelSize` and `parentVoxelSize`.
+            - Decrement `curDepth` [S1, unofficial].
+            - Double `voxelSize` and `parentVoxelSize` [S1, unofficial].
             - Update `parentVoxels[curDepth]` [S1, unofficial].
             - If `curDepth < 0`, return miss [S1, unofficial].
     - **Re-Descent:**
-        - Return to Step 3 with the new `curVoxel` and `curDepth`.
+        - Return to Step 3 with the new `curVoxel` and `curDepth` [S1, unofficial].
 
 5.  **Termination:**
     - If `MAX_TRAVERSALS` is exceeded, return miss/black color [S1, unofficial].
-    - If ray exits scene bounds, return miss [S1, unofficial].
 
 **Pseudocode:**
 
@@ -83,139 +81,163 @@ Ray-Occlusion Traversal in Octree is a hierarchical ray-intersection algorithm t
 
 ```python
 def ray_occlusion_traversal(ray_origin, ray_dir, octree_array, root_pos, root_size, max_depth, max_traversals):
-    # Constants
     INF = float('inf')
     EPS_ENTRY = 0.001
     EPS_STEP = 0.01
-    
+
+    # Helper: scale voxel coordinates to world position
+    def scale_voxel(voxel_coords, size):
+        return voxel_coords * size
+
+    # Helper: check if world position is inside parent voxel bounds
+    def voxel_in_parent(pos, parent_voxel_coords, parent_size):
+        min_w = scale_voxel(parent_voxel_coords, parent_size)
+        max_w = min_w + parent_size
+        return min_w.x <= pos.x < max_w.x and min_w.y <= pos.y < max_w.y and min_w.z <= pos.z < max_w.z
+
+    # Helper: compute deltas to next voxel boundaries
+    def get_deltas(pos, dir, voxel_size):
+        deltas = [INF, INF, INF]
+        for i in range(3):
+            if dir[i] != 0:
+                next_boundary = (floor(pos[i] / voxel_size) + (1 if dir[i] > 0 else 0)) * voxel_size
+                deltas[i] = (next_boundary - pos[i]) / dir[i]
+            else:
+                deltas[i] = INF
+        return deltas
+
+    # Helper: round position to voxel coordinates
+    def round_voxel(pos, voxel_size):
+        return [floor(pos[i] / voxel_size) for i in range(3)]
+
+    # Helper: compute root intersection
+    def compute_root_intersection(origin, dir, root_pos, root_size):
+        t_min = -INF
+        t_max = INF
+        for i in range(3):
+            if dir[i] != 0:
+                t1 = (root_pos[i] - origin[i]) / dir[i]
+                t2 = (root_pos[i] + root_size - origin[i]) / dir[i]
+                if t1 > t2: t1, t2 = t2, t1
+                t_min = max(t_min, t1)
+                t_max = min(t_max, t2)
+            else:
+                if origin[i] < root_pos[i] or origin[i] >= root_pos[i] + root_size:
+                    return INF
+        if t_min < 0: t_min = 0
+        if t_min < t_max:
+            return t_min
+        return INF
+
     # 1. Root Intersection
-    # Calculate intersection with root bounding box planes
-    # For each axis, compute t_near and t_far
-    # Select min positive t_entry
-    # If no intersection, return False
-    
     t_entry = compute_root_intersection(ray_origin, ray_dir, root_pos, root_size)
     if t_entry == INF:
         return False
-        
+
     current_pos = ray_origin + t_entry * ray_dir
-    current_voxel = round_voxel(current_pos)
-    
+    # Add epsilon to avoid self-intersection at entry
+    entry_axis = 0
+    for i in range(3):
+        if abs(current_pos[i] - ray_origin[i]) > 0.5:
+            entry_axis = i
+            break
+    current_pos[entry_axis] += EPS_ENTRY * (1 if ray_dir[entry_axis] > 0 else -1)
+
     # 2. Initialization
     cur_depth = 0
-    node_indices = [0] * max_depth # Root is index 0
-    parent_voxels = [root_pos] * max_depth
+    node_indices = [0] * max_depth
+    parent_voxels = [0, 0, 0] # Root voxel coordinates
     voxel_size = root_size / 2.0
     parent_voxel_size = root_size
-    
+    current_voxel = round_voxel(current_pos, voxel_size)
+
     # 3. Descent Loop
     for step in range(max_traversals):
         # Child Selection
-        p = parent_voxels[cur_depth]
+        p = parent_voxels
         v = current_voxel
-        
-        # Determine child index k
         k = 0
-        if v.x >= p.x: k += 4
-        if v.y >= p.y: k += 2
-        if v.z >= p.z: k += 1
-        
+        if v[0] >= p[0]: k += 4
+        if v[1] >= p[1]: k += 2
+        if v[2] >= p[2]: k += 1
+
         # Access Node
         node = octree_array[node_indices[cur_depth]]
         sub_node_value = node.p[k]
-        
+
         # Leaf Handling
         if sub_node_value < -1:
-            # Material leaf hit
-            return compute_color(ray_origin, ray_dir, sub_node_value)
-        
+            return True # Material leaf hit
         if sub_node_value == -1:
-            # Empty leaf, break to stepping
-            break
-            
+            break # Empty leaf, proceed to stepping
         if cur_depth + 1 == max_depth:
-            # Max depth reached
             if sub_node_value >= 0:
                 cur_depth += 1
                 voxel_size /= 2.0
                 parent_voxel_size /= 2.0
-            break
-            
+            break # Max depth reached
+
         # Internal Node Descent
         if sub_node_value >= 0:
             node_indices[cur_depth + 1] = sub_node_value
             cur_depth += 1
             voxel_size /= 2.0
             parent_voxel_size /= 2.0
-            parent_voxels[cur_depth] = scale_voxel(current_voxel, parent_voxel_size)
-            
+            parent_voxels = scale_voxel(current_voxel, parent_voxel_size)
+
     # 4. Stepping and Backtracking
     while True:
-        # Calculate deltas to next voxel boundaries
         deltas = get_deltas(current_pos, ray_dir, voxel_size)
-        
-        # Find min delta
         min_delta = INF
         min_axis = -1
-        for axis in [0, 1, 2]:
-            if deltas[axis] < min_delta:
-                min_delta = deltas[axis]
-                min_axis = axis
-                
+        for i in range(3):
+            if deltas[i] < min_delta:
+                min_delta = deltas[i]
+                min_axis = i
+
         if min_delta == INF:
-            return False # Ray direction is zero or invalid
-            
-        # Advance ray
+            return False # Zero direction or invalid
+
         current_pos += min_delta * ray_dir
-        
-        # Update voxel with epsilon to avoid re-entry
-        current_pos[min_axis] += EPS_STEP * sign(ray_dir[min_axis])
-        current_voxel = round_voxel(current_pos)
-        
-        # Check parent boundary
-        while not voxel_in_parent(current_voxel, parent_voxels[cur_depth], parent_voxel_size):
+        current_pos[min_axis] += EPS_STEP * (1 if ray_dir[min_axis] > 0 else -1)
+        current_voxel = round_voxel(current_pos, voxel_size)
+
+        # Parent Boundary Check
+        while not voxel_in_parent(current_pos, parent_voxels, parent_voxel_size):
             cur_depth -= 1
             if cur_depth < 0:
                 return False
             voxel_size *= 2.0
             parent_voxel_size *= 2.0
-            parent_voxels[cur_depth] = scale_voxel(current_voxel, parent_voxel_size)
-            
+            parent_voxels = scale_voxel(current_voxel, parent_voxel_size)
+
         # Re-descent from current depth
-        # (Loop back to child selection logic using current_voxel and cur_depth)
-        # This is implicitly handled by the outer loop structure if we re-enter
-        # For clarity, we can re-run the child selection logic immediately
-        p = parent_voxels[cur_depth]
+        p = parent_voxels
         v = current_voxel
         k = 0
-        if v.x >= p.x: k += 4
-        if v.y >= p.y: k += 2
-        if v.z >= p.z: k += 1
-        
+        if v[0] >= p[0]: k += 4
+        if v[1] >= p[1]: k += 2
+        if v[2] >= p[2]: k += 1
+
         node = octree_array[node_indices[cur_depth]]
         sub_node_value = node.p[k]
-        
+
         if sub_node_value < -1:
-            return compute_color(ray_origin, ray_dir, sub_node_value)
-        
+            return True
         if sub_node_value == -1:
-            # Still empty, continue stepping
             continue
-            
         if cur_depth + 1 == max_depth:
             if sub_node_value >= 0:
-                return compute_color(ray_origin, ray_dir, sub_node_value)
+                return True
             else:
-                # Empty at max depth, continue stepping
                 continue
-                
         if sub_node_value >= 0:
             node_indices[cur_depth + 1] = sub_node_value
             cur_depth += 1
             voxel_size /= 2.0
             parent_voxel_size /= 2.0
-            parent_voxels[cur_depth] = scale_voxel(current_voxel, parent_voxel_size)
-            
+            parent_voxels = scale_voxel(current_voxel, parent_voxel_size)
+
     return False
 ```
 
@@ -247,19 +269,20 @@ Octree-based raycasting is a volume rendering technique that accelerates ray tra
 Octree Traversal via Voxel Grid is a method to traverse an octree by mapping ray origin/direction to chunk coordinates and checking if the ray stays within the current chunk bounds, using a loop condition based on distance from center [S1, unofficial]. It defines a voxel center, computes the current voxel (chunk) position, and checks validity. It loops while the squared distance from the center to the ray origin is greater than the squared distance to the ray end, advancing the ray origin if out of bounds [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(d)$ per ray segment, where $d$ is the depth of the octree. In sparse scenes, this is significantly faster than $O(n)$ naive marching. However, worst-case complexity is $O(n)$ if the ray traverses many small occupied nodes.
-- **Memory Complexity:** $O(N)$ for the octree storage, where $N$ is the number of nodes. The flat array storage is cache-friendly [S1, unofficial].
+- **Time Complexity:** $O(d)$ per ray segment, where $d$ is the depth of the octree [G]. In sparse scenes, this is significantly faster than $O(n)$ naive marching [S1, unofficial]. However, worst-case complexity is $O(n)$ if the ray traverses many small occupied nodes [G].
+- **Memory Complexity:** $O(N)$ for the octree storage, where $N$ is the number of nodes [G].
 - **Measured Performance:** Implementation in Vulkan compute shaders shows slight performance improvements when combined with a low-resolution depth pass to initialize rays closer to collision points [S1, unofficial].
 - **Strengths:** Efficient culling of empty space; handles rays starting inside or outside the root; explicit stack/loop management avoids recursion overhead on GPU [S1, unofficial].
 - **Limitations:** Requires careful handling of precision errors at boundaries; fixed `MAX_TRAVERSALS` may miss distant objects if set too low; zero-direction rays cause infinite loops if not guarded [S1, unofficial].
-- **When to Use:** Shadow ray computation, early termination in volume rendering, sparse voxel octrees.
-- **When Not to Use:** Dense uniform grids where simple DDA is faster; scenes with high frequency detail requiring very deep octrees without level-of-detail.
+- **When to Use:** Shadow ray computation, early termination in volume rendering, sparse voxel octrees [S1, unofficial].
+- **When Not to Use:** Dense uniform grids where simple DDA is faster; scenes with high frequency detail requiring very deep octrees without level-of-detail [G].
 
 ## Background
-The method originates from implementations of ray-tracing sparse voxel octrees for real-time rendering, particularly in Vulkan compute shaders [S1, unofficial]. It builds on the principles of hierarchical descent and neighbor-finding [S2][S3, S4, unofficial]. The specific handling of entry points and fixed-depth loops is documented in unofficial implementations such as `sebbooth/vkEngine` [S1, unofficial], `itsyouyi/Voxelizer` [S3, unofficial], and `Mike-Leo-Smith/SolidVoxelization` [S4, unofficial]. The concept of using octrees for isosurface ray tracing was introduced by Wald et al. [S2].
+The method originates from implementations of ray-tracing sparse voxel octrees for real-time rendering, particularly in Vulkan compute shaders [S1, unofficial]. It builds on the principles of hierarchical descent and neighbor-finding [S2, unofficial][S3][S4, unofficial]. The specific handling of entry points and fixed-depth loops is documented in unofficial implementations such as `sebbooth/vkEngine` [S1, unofficial], `itsyouyi/Voxelizer` [S3], and `Mike-Leo-Smith/SolidVoxelization` [S4, unofficial].
 
 ## Sources
 [S1] sebbooth/vkEngine, https://github.com/sebbooth/vkEngine, fetched 2026-10-24 (unofficial)
-[S2] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~wald/Publications/2006/OctIso/octiso.pdf, fetched 2026-10-27
-[S3] itsyouyi/Voxelizer, https://github.com/itsyouyi/Voxelizer, fetched 2026-10-27 (unofficial)
-[S4] Mike-Leo-Smith/SolidVoxelization, https://github.com/Mike-Leo-Smith/SolidVoxelization, fetched 2026-10-27 (unofficial)
+[S2] Recursive Octree traversal, https://chiranjivi.tripod.com/octrav.html, fetched 2026-10-24 (unofficial)
+[S3] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~wald/Publications/2006/OctIso/octiso.pdf, fetched 2026-10-27
+[S4] itsyouyi/Voxelizer, https://github.com/itsyouyi/Voxelizer, fetched 2026-10-27 (unofficial)
+[S5] Mike-Leo-Smith/SolidVoxelization, https://github.com/Mike-Leo-Smith/SolidVoxelization, fetched 2026-10-27 (unofficial)

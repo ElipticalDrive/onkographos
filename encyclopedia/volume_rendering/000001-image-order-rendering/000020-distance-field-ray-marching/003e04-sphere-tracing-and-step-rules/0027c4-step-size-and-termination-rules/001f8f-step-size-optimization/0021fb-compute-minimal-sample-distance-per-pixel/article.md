@@ -1,113 +1,81 @@
 # Compute Minimal Sample Distance Per Pixel
 
-
 ## Overview
-This method computes the minimal sample distance per pixel by projecting each dataset cell axis onto the viewport, accounting for camera and volume transforms [S1, unofficial]. It differs from [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by using the projected geometric footprint of volume cells rather than local field gradients or distance-field bounds [G].
+This method computes the minimal sample distance per pixel for volume rendering by projecting each dataset cell axis onto the viewport, accounting for camera and volume transforms [S1, unofficial]. It serves as a geometric heuristic to determine the appropriate step size for ray marching, ensuring that samples are dense enough to resolve the smallest visible voxel features [S1, unofficial]. It differs from [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by relying on explicit axis projection rather than conservative bounds, and from [Error Estimate](2768-error-estimate.md) by using geometric projection instead of field value derivatives.
 
 ## How it works
 **Inputs:**
-*   `renderer`: A `vtkRenderer` pointer providing camera position, orientation, and viewport dimensions [S1, unofficial].
-*   `volume`: A `vtkVolume` pointer providing dataset geometry (cell dimensions) and transformation matrices [S1, unofficial].
+- `renderer`: A pointer to the rendering context, providing camera position, orientation, and viewport dimensions [S1, unofficial].
+- `volume`: A pointer to the volume object, providing the dataset geometry (extent, spacing) and transformation matrix [S1, unofficial].
 
 **Data Structures:**
-*   The method operates on the volume's dataset cell axes. Let the cell dimensions in local space be $\mathbf{c} = (c_x, c_y, c_z)$ [G].
-*   The camera state provides a view matrix $\mathbf{V}$, projection matrix $\mathbf{P}$, camera position $\mathbf{o}$, and view direction $\mathbf{v}$ [G].
+- `CellFlag`: An integer indicating the scalar data type (e.g., point vs. cell scalars). If `CellFlag == 2` (field data), the method fails [S1, unofficial].
+- `scalars`: The scalar data array associated with the volume. Must have 1 component or 4 components with `IndependentComponents` set to false [S1, unofficial].
 
 **Steps:**
-1.  **Transform Axes:** Transform the volume's local cell axes into world space using the volume's transformation matrix $\mathbf{T}_{\text{vol}}$ [G].
-2.  **Project to Viewport:** Project the world-space axes onto the viewport using $\mathbf{V}$, $\mathbf{P}$, and $\mathbf{o}$ [G].
-3.  **Compute Projected Size:** Calculate the projected length in pixels for each axis by mapping the transformed endpoints to screen coordinates [G].
-4.  **Determine Minimal Distance:** The minimal sample distance is derived from the smallest projected axis length to guarantee at least one sample per cell width in the worst-case orientation [G].
-5.  **Degeneracy Check:** If any axis is degenerate (aligned with the view direction), the projected size becomes zero or undefined. In this case, set `IgnoreSampleDistancePerPixel` to true [S1, unofficial]. This flag indicates that this specific heuristic should not constrain the step size, allowing fallback to other step size rules [G].
+1. **Validation:** Check if `scalars` exist. If not, abort [S1, unofficial]. Check if `scalars` are field data (`CellFlag == 2`). If so, abort with error "Only point or cell scalar support" [S1, unofficial]. Verify component count is 1 or 4 (non-independent) [S1, unofficial].
+2. **Transform Update:** Ensure the volume's transformed input data is up to date by calling `UpdateInformation()`, `SetUpdateExtentToWholeExtent()`, and `Update()` on the relevant input objects [S1, unofficial].
+3. **Axis Projection:** For each of the three dataset cell axes (x, y, z):
+   a. Determine the axis vector in world space using the volume's transformation matrix and spacing.
+   b. Project this axis vector onto the viewport plane using the camera's projection matrix and viewport dimensions.
+   c. Calculate the projected length of the axis in pixel units.
+4. **Minimal Distance Calculation:** The minimal sample distance is derived from the minimum projected axis length. This value represents the smallest resolvable feature size in pixels for the current view [S1, unofficial].
+5. **Degeneracy Check:** If any axis is degenerate (aligned with the view direction, resulting in near-zero projected length), set `IgnoreSampleDistancePerPixel` to true. This indicates that the geometric heuristic is unreliable for this view [S1, unofficial].
 
 **Parameters:**
-*   `renderer`: VTK `vtkRenderer` pointer [S1, unofficial].
-*   `volume`: VTK `vtkVolume` pointer [S1, unofficial].
+- `IgnoreSampleDistancePerPixel`: Boolean flag. Set to true if axes are degenerate [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def compute_minimal_sample_distance_per_pixel(renderer, volume):
-    # Inputs from evidence
-    # renderer: vtkRenderer pointer providing camera and viewport state
-    # volume: vtkVolume pointer providing dataset geometry and transformation
-    c = volume.get_cell_dimensions() # (cx, cy, cz)
-    T_vol = volume.get_transformation_matrix() # 4x4 matrix
-    V = renderer.get_view_matrix() # 4x4 matrix
-    P = renderer.get_projection_matrix() # 4x4 matrix
-    o = renderer.get_camera_position() # 3D vector
-    view_dir = renderer.get_view_direction() # 3D vector
-    width, height = renderer.get_viewport_size() # pixels
-
-    def transform_point(p, M):
-        # Apply 4x4 matrix M to point p (homogeneous coordinates)
-        w = M[3][0]*p[0] + M[3][1]*p[1] + M[3][2]*p[2] + M[3][3]
-        return (M[0][0]*p[0] + M[0][1]*p[1] + M[0][2]*p[2] + M[0][3]) / w, \
-               (M[1][0]*p[0] + M[1][1]*p[1] + M[1][2]*p[2] + M[1][3]) / w, \
-               (M[2][0]*p[0] + M[2][1]*p[1] + M[2][2]*p[2] + M[2][3]) / w
-
-    def project_to_screen(p_world):
-        # View transform
-        p_view = transform_point(p_world, V)
-        # Projection transform
-        p_proj = transform_point(p_view, P)
-        # Perspective divide and scale to viewport
-        sx = (p_proj[0] + 1.0) * 0.5 * width
-        sy = (p_proj[1] + 1.0) * 0.5 * height
-        return sx, sy
-
-    def vector_length(v):
-        return (v[0]**2 + v[1]**2)**0.5
-
-    def dot(a, b):
-        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
-
-    def normalize(v):
-        l = vector_length(v)
-        return (v[0]/l, v[1]/l, v[2]/l) if l > 1e-8 else (0, 0, 0)
-
-    ignore_flag = False
-    min_projected_len = float('inf')
-
-    # Process each axis
-    axes = [
-        (c[0], 0, 0),
-        (0, c[1], 0),
-        (0, 0, c[2])
-    ]
-
+    # 1. Validation
+    scalars = volume.get_scalars()
+    if scalars is None:
+        raise Error("No scalars found on input.")
+    
+    cell_flag = volume.get_cell_flag()
+    if cell_flag == 2:
+        raise Error("Only point or cell scalar support - found field scalars instead.")
+    
+    num_components = scalars.get_number_of_components()
+    independent_components = volume.get_property().get_independent_components()
+    
+    if not (num_components == 1 or (num_components == 4 and independent_components == 0)):
+        raise Error("Only one component scalars, or four component with non-independent components.")
+    
+    # 2. Transform Update
+    # Ensure transformed input is updated
+    volume.get_transformed_input().update_information()
+    volume.get_transformed_input().set_update_extent_to_whole_extent()
+    volume.get_transformed_input().update()
+    
+    # 3. Axis Projection
+    # Get axis vectors in world space
+    axes = volume.get_axes_in_world_space() # Returns list of 3 vectors
+    
+    min_projected_length = infinity
+    
     for axis in axes:
-        p0 = transform_point((0, 0, 0), T_vol)
-        p1 = transform_point(axis, T_vol)
-        dir_vec = (p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2])
-
-        # Degeneracy check
-        if abs(dot(normalize(dir_vec), normalize(view_dir))) > 0.999:
-            ignore_flag = True
-            continue
-
-        sx0, sy0 = project_to_screen(p0)
-        sx1, sy1 = project_to_screen(p1)
-        proj_len = vector_length((sx1-sx0, sy1-sy0))
-        if proj_len < min_projected_len:
-            min_projected_len = proj_len
-
-    if ignore_flag:
-        return {"minimal_distance": None, "ignore_flag": True}
-
-    # Convert minimal projected pixel length to world distance
-    # Approximate pixel size at camera origin distance [G]
-    cam_dist = vector_length(o)
-    focal_length = renderer.get_focal_length() # [G]
-    minimal_distance = min_projected_len * (cam_dist / width) * focal_length
-
-    return {"minimal_distance": minimal_distance, "ignore_flag": False}
+        # Project axis onto viewport
+        # This involves transforming the axis vector by the camera's projection matrix
+        # and mapping to viewport coordinates
+        projected_axis = project_axis_to_viewport(axis, renderer.get_camera(), renderer.get_viewport())
+        
+        # Calculate length in pixels
+        length = projected_axis.get_length_in_pixels()
+        
+        if length < min_projected_length:
+            min_projected_length = length
+            
+    # 4. Degeneracy Check
+    ignore_sample_distance = False
+    if min_projected_length < epsilon: # epsilon is a small threshold
+        ignore_sample_distance = True
+        
+    return min_projected_length, ignore_sample_distance
 ```
-
-**Edge cases and pitfalls:**
-*   Precision loss may occur when axes are nearly parallel to the view direction; the degeneracy threshold ($0.999$) prevents division by zero or invalid projections [G].
-*   Non-uniform cell sizes require processing each axis independently to find the true minimal projected dimension [G].
 
 ## Subtopics
 
@@ -115,14 +83,15 @@ def compute_minimal_sample_distance_per_pixel(renderer, volume):
 This method computes a scalar metric representing the projected size of a voxel relative to the camera, primarily used for Level of Detail (LOD) decisions and step size adaptation in distance-field ray marching. It evaluates the angular spread of the voxel as seen from the camera center to provide a normalized measure of voxel appearance in viewing space.
 
 ## Operating characteristics
-*   **Complexity:** The computation is $O(1)$ per pixel as it involves a fixed number of matrix-vector multiplications and comparisons [G].
-*   **Strengths:** Provides a geometrically sound lower bound on step size based on the volume's resolution and camera distance [G]. It prevents undersampling of fine details in the volume [G].
-*   **Limitations:** It does not account for local variations in density or opacity [G]. It may overestimate the required step size in regions of low gradient or underestimate it in regions with high-frequency features not captured by cell size [G]. It is sensitive to the volume's orientation relative to the camera [G].
-*   **When to use:** Use as a baseline step size constraint in conjunction with other adaptive methods [G]. It is particularly useful for static volumes with uniform resolution [G].
-*   **When not to use:** Do not use as the sole step size determinant for volumes with highly anisotropic resolution or when the volume is viewed edge-on (degenerate case) [S1, unofficial].
+- **Time Complexity:** Linear with respect to the number of axes (constant 3 for 3D data) plus the cost of matrix multiplications for projection.
+- **Memory Complexity:** Constant, requiring storage for a few vectors and scalars.
+- **Strengths:** Provides a direct geometric measure of resolvable detail. Simple to implement given camera and volume transforms.
+- **Limitations:** Fails or becomes unreliable when axes are aligned with the view direction (degenerate). Does not account for the actual data values or transfer function, only geometry.
+- **When to use:** When a quick geometric estimate of step size is needed and the view is not aligned with dataset axes.
+- **When not to use:** When axes are degenerate (use fallback or ignore). When data-dependent step sizing is required.
 
 ## Background
-This method is implemented in the VTK multi-volume ray casting pipeline [S1, unofficial]. The specific implementation resides in the `bozorgi/VTKMultiVolumeRayCaster` repository [S1, unofficial].
+This method is implemented in the `vtkMultiVolumeRayCaster` mapper within the VTK library ecosystem [S1, unofficial]. It is part of the broader effort to optimize volume rendering performance by adapting sample spacing to the viewer's perspective.
 
 ## Sources
 [S1] bozorgi/VTKMultiVolumeRayCaster, https://github.com/bozorgi/VTKMultiVolumeRayCaster, fetched 2026-10-26 (unofficial)

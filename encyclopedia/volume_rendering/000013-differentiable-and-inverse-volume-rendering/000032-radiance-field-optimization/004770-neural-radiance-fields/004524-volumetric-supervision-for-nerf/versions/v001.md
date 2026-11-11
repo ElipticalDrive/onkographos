@@ -1,0 +1,80 @@
+# Volumetric Supervision for NeRF
+
+Also called: Hybrid NeRF reconstruction, NeRF with volumetric loss
+
+## Overview
+Volumetric Supervision for NeRF is a hybrid reconstruction method designed to improve the fidelity of the canonical volume in dynamic tomography by combining projection-based training with volumetric supervision from high-fidelity static X-CT data [S1, unofficial]. It addresses the limitation where neural rendering methods fail to achieve high normalized correlation coefficients for complex objects, even when conventional data-rich X-CT can reconstruct such volumes with high fidelity [S1, unofficial]. It sets itself apart from standard NeRF optimization by explicitly incorporating a ground-truth volumetric loss term derived from external high-resolution scans, rather than relying solely on 2D projection consistency [S1, unofficial].
+
+## How it works
+The method operates within a dynamic tomography framework where a canonical volume is reconstructed at specific key time steps (typically $t=0$ and $t=1$) using high-fidelity X-CT data, while intermediate deformation steps are reconstructed using sparse projections [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   Sparse 2D projections for intermediate time steps (e.g., 2 projections for $t=0.1, \dots, 0.9$) [S1, unofficial].
+    *   High-fidelity 3D X-CT volumes for key time steps (e.g., $t=0$ and $t=1$) [S1, unofficial].
+    *   A set of 2D projections for the canonical step (e.g., 256 projections for $t=0$) [S1, unofficial].
+    *   A deformation field parametrization (e.g., B-spline grid) [S1, unofficial].
+*   **Outputs:**
+    *   A high-fidelity canonical volume at $t=0$ (and optionally $t=1$).
+    *   A trained deformation field mapping the canonical volume to dynamic states.
+
+**Data Structures:**
+*   **Canonical Volume:** Represented as a 3D density field $\sigma(\mathbf{x})$ evaluated by a neural network or grid structure.
+*   **Ground Truth X-CT:** A 3D volume of density values $\sigma_{gt}(\mathbf{x})$ obtained from high-fidelity static scans.
+*   **Deformation Field:** Parametrized by a B-spline grid. In the cited implementation, the resolution is $6 \times 6 \times 6$ [S1, unofficial].
+
+**Loss Function:**
+The total training loss $L$ for the canonical volume reconstruction is defined as:
+
+$$
+L = L_{proj} + \lambda L_{vol}
+$$
+
+Where:
+*   $L_{proj}$ is the projection loss, computed by rendering the canonical volume from the available 2D projections and comparing against the measured projection data [S1, unofficial].
+*   $L_{vol}$ is the volumetric loss, calculated as the negative normalized correlation $C_{cor}$ between the predicted density of the canonical volume and the ground truth X-CT volume [S1, unofficial].
+*   $\lambda$ is a weighting coefficient for the volumetric supervision [S1, unofficial].
+
+**Normalized Correlation ($C_{cor}$):**
+While the exact mathematical formula for $C_{cor}$ is not explicitly expanded in the source, it is defined as the correlation between the predicted density field and the ground truth X-CT volume [S1, unofficial]. The loss $L_{vol}$ is derived from this metric to maximize structural similarity in the 3D domain.
+
+**Algorithm Steps:**
+1.  **Initialize:** Set up the neural radiance field for the canonical volume and the deformation field (e.g., B-spline grid with resolution $6 \times 6 \times 6$) [S1, unofficial].
+2.  **Set Coefficient:** Initialize the volumetric supervision weight $\lambda = 0$ [S1, unofficial].
+3.  **Iterate for First 200 Steps:**
+    *   Render the canonical volume from the 256 available projections at $t=0$.
+    *   Compute $L_{proj}$ based on the difference between rendered and measured projections.
+    *   Update network parameters using $L = L_{proj}$ (since $\lambda=0$) [S1, unofficial].
+4.  **Iterate for Remaining Steps:**
+    *   Set $\lambda = 0.005$ [S1, unofficial].
+    *   Render the canonical volume from the 256 projections.
+    *   Compute $L_{proj}$ [S1, unofficial].
+    *   Compute $L_{vol}$ using the normalized correlation between the predicted canonical volume density and the high-fidelity X-CT ground truth at $t=0$ [S1, unofficial].
+    *   Compute total loss $L = L_{proj} + 0.005 L_{vol}$ [S1, unofficial].
+    *   Update network parameters [S1, unofficial].
+5.  **Train Deformation Field:**
+    *   Using the reconstructed canonical volume, train the deformation field to map to the intermediate time steps ($t=0.1, \dots, 0.9$) using the sparse 2 projections per step [S1, unofficial].
+    *   The deformation field is optimized to minimize the projection error for these intermediate steps [S1, unofficial].
+
+**Parameters:**
+*   $\lambda$: Volumetric supervision weight. Set to 0 for the first 200 iterations, then set to 0.005 [S1, unofficial].
+*   B-spline Grid Resolution: $6 \times 6 \times 6$ [S1, unofficial].
+*   Projections at $t=0$: 256 [S1, unofficial].
+*   Projections at intermediate steps: 2 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Initialization:** The coefficient $\lambda$ must be 0 initially to allow the projection-based loss to establish a basic geometry before introducing the volumetric constraint [S1, unofficial].
+*   **Data Availability:** This method requires high-fidelity static X-CT data at key time steps, which may not be available in all dynamic tomography scenarios [S1, unofficial].
+
+## Operating characteristics
+*   **Accuracy:** Volumetric supervision significantly improves reconstruction quality. In simulated lattice datasets, it improved both normalized correlation and Peak Signal-to-Noise Ratio (PSNR) compared to training purely with projections [S1, unofficial].
+*   **Displacement Error:** In simulated deformation experiments (Kelvin lattice), the displacement error $E_{disp}$ was $0.5 \times 10^{-5}$ when using both volumetric supervision and rich data at $t=1$, compared to $6.4 \times 10^{-5}$ with neither [S1, unofficial].
+*   **Complexity:** The method adds the computational cost of computing the normalized correlation between the predicted volume and the ground truth X-CT volume to the training loop [S1, unofficial].
+*   **Strengths:** Overcomes the low normalized correlation limits of pure neural rendering for complex objects [S1, unofficial]. Synergistically improves accuracy when combined with rich data at multiple time steps [S1, unofficial].
+*   **Limitations:** Requires high-fidelity X-CT data at key time steps, which increases data acquisition requirements [S1, unofficial].
+
+## Background
+This method was proposed in the context of dynamic tomography, where neural rendering is used to reconstruct 4D volumes from sparse 2D projections [S1, unofficial]. It leverages the observation that while neural rendering struggles with high normalized correlation for complex objects, conventional X-CT can achieve high fidelity when many projections are available [S1, unofficial]. The method was tested on simulated lattice datasets and deformation experiments inspired by uniaxial tensile tests [S1, unofficial].
+
+## Sources
+[S1] Neural rendering enables dynamic tomography, https://doi.org/10.48550/arxiv.2410.20558, fetched 2026-10-26 (unofficial)

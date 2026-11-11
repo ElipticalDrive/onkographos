@@ -1,0 +1,88 @@
+# Online Replanning
+
+Also called: Feedback-based trajectory replanning, Closed-loop trajectory optimization
+
+## Overview
+Online Replanning is a pipeline component that re-plans collision-free trajectories when state estimates deviate significantly from the planned path [S1]. It solves the problem of catastrophic collisions caused by external disturbances or state estimation errors during execution [S1]. Unlike open-loop execution, which follows a pre-computed plan regardless of deviations, online replanning uses feedback to generate new collision-free paths to the goal, ensuring robustness in dynamic or uncertain environments [S1].
+
+## How it works
+Inputs: Current state estimate (position, orientation, velocity), planned trajectory, environment map (implicit via NeRF or explicit), and goal state.
+Outputs: New collision-free trajectory segment.
+
+Data Structures:
+- State Vector $x_t$: Contains translational position $\mathbf{p}$, orientation $\mathbf{q}$ (quaternion), and velocity $\mathbf{v}$.
+- Trajectory: Sequence of waypoints or control inputs over a time horizon.
+- Cost Function: Evaluates collision risk and path optimality.
+
+Steps:
+1. Monitor state estimate $x_t$ against the planned trajectory.
+2. If deviation exceeds a threshold, trigger replanning.
+3. Use current state $x_t$ as the new initial condition.
+4. Optimize a new trajectory to the goal, ensuring collision-free paths using the NeRF-based environment representation.
+5. Execute the new trajectory segment.
+
+Pseudocode:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def online_replanning(current_state, planned_trajectory, goal, nerf_model):
+    # Step 1: Check for significant deviation
+    deviation = compute_deviation(current_state, planned_trajectory)
+    if deviation < THRESHOLD:
+        return planned_trajectory
+    
+    # Step 2: Trigger replanning
+    # Step 3: Use current state as initial condition
+    new_initial_state = current_state
+    
+    # Step 4: Optimize new trajectory
+    # This involves optimizing waypoint locations using NeRF for collision checking
+    new_trajectory = optimize_trajectory(
+        initial_state=new_initial_state,
+        goal=goal,
+        nerf_model=nerf_model,
+        cost_function=collision_and_optimality_cost
+    )
+    
+    # Step 5: Return new trajectory for execution
+    return new_trajectory
+
+def compute_deviation(state, trajectory):
+    # Compute distance between current state and nearest point on planned trajectory
+    # Return L2 norm or similar metric
+    pass
+
+def optimize_trajectory(initial_state, goal, nerf_model, cost_function):
+    # Use NeRF-based trajectory optimization to find collision-free path
+    # Minimize cost_function subject to collision constraints
+    pass
+```
+
+Parameters:
+- THRESHOLD: Deviation threshold triggering replanning. Not given in the sources.
+- Cost Function: Balances collision avoidance and path optimality. Not given in the sources.
+
+Edge Cases:
+- Precision: Accurate state estimation is critical for effective replanning.
+- Boundaries: Ensure new trajectory respects environment boundaries.
+- Degenerate Input: Handle cases where no collision-free path exists.
+
+## Subtopics
+
+## Operating characteristics
+Time Complexity: Depends on the complexity of the trajectory optimization algorithm. Not given in the sources.
+Memory Complexity: Depends on the size of the NeRF model and trajectory data. Not given in the sources.
+Measured Performance: Online replanning with feedback avoids catastrophic collisions caused by external disturbances, unlike open-loop execution [S1].
+Scaling: Performance may degrade with increased environment complexity or state estimation errors.
+Strengths: Robustness to disturbances, ability to recover from deviations.
+Limitations: Computational overhead of replanning, dependency on accurate state estimation.
+When to Use: In dynamic environments or when state estimation errors are significant.
+When Not to Use: In static, well-controlled environments where open-loop execution is sufficient.
+
+## Background
+Origin: Online Replanning is discussed in the context of vision-only robot navigation in a Neural Radiance World [S1].
+History: The method is part of a broader trend towards integrating neural radiance fields (NeRFs) into robotic planning and control.
+Usage: Used in robotic navigation systems that require robustness to environmental disturbances and state estimation errors.
+
+## Sources
+[S1] Vision-Only Robot Navigation in a Neural Radiance World, https://doi.org/10.1109/lra.2022.3150497, fetched 2026-10-26

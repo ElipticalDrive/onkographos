@@ -1,0 +1,72 @@
+# Surf²f Training and Rendering Pipeline
+
+Also called: Surf2f
+
+## Overview
+Surf²f is a hybrid neural representation that simultaneously learns an implicit Signed Distance Function (SDF) $f$ and an explicit surrogate surface mesh, unified by a shared neural shader for both volume and surface rendering [S1]. It solves the synchronization and efficiency issues inherent in separate implicit and explicit surface representations by maintaining a parallel dual-stream architecture [S1]. Unlike methods that rely solely on SDF volume rendering or static mesh extraction, Surf²f enables real-time interactive rendering of the extracted mesh while leveraging volume rendering for training stability, outperforming NDS, UNISURF, and NeuS in both geometric accuracy and rendering speed [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view images (and optional binary masks), camera poses, and a bounding box defining the scene volume.
+*   **Outputs:** A learned implicit SDF $f$, a surrogate surface mesh $S$, and a shared neural shader network.
+
+**Data Structures:**
+*   **Multi-resolution Hash Grids:** Two separate hash grid structures are used:
+    *   Surface rendering branch: 8 levels [S1].
+    *   Volume rendering branch: 14 levels [S1].
+    *   Hash resolutions range from 16 to 1024 across levels [S1].
+    *   Feature dimension per entry: 2 [S1].
+*   **Neural Shader:** A network taking position and view direction as input, outputting color [S1]. It uses Spherical Harmonics (SH) of degree 4 to encode view-dependent appearance [S1].
+*   **Surrogate Mesh $S$:** An explicit triangle mesh maintained in parallel with the SDF [S1].
+
+**Numbered Steps:**
+
+1.  **Initialization:** Initialize the multi-resolution hash grids for both surface and volume branches [S1]. Initialize the shared neural shader parameters [S1]. Initialize the surrogate mesh $S$ (e.g., from a coarse initialization or random points within the bounding box) [S1].
+2.  **Ray Sampling:** For each training iteration, sample a batch of $N=14,800$ rays $\mathcal{R}$ from the input images [S1].
+3.  **Surface-Guided Volume Sampling:** Use the current surrogate mesh $S$ to guide the sampling of points along the rays [S1]. This strategy improves sampling efficiency by concentrating samples near the surface [S1].
+4.  **Implicit SDF Evaluation:** For each sampled point $\mathbf{x}$ along a ray $\mathbf{r}$, query the implicit SDF $f(\mathbf{x}; \boldsymbol{\theta})$ using the volume rendering hash grid [S1].
+5.  **Neural Shader Evaluation:** Evaluate the shared neural shader to obtain the expected color $\mathbf{C}_v(\mathbf{r})$ for the volume rendering stream and $\mathbf{C}_s(\mathbf{r})$ for the surface rendering stream [S1]. The shader takes the position and view direction as input, utilizing SH coefficients [S1].
+6.  **Volume Rendering (Alpha Compositing):** Calculate the volume rendering color $\mathbf{C}_v(\mathbf{r})$ using customized CUDA kernels that perform $\alpha$-compositing along the ray [S1]. The opacity $\alpha_i$ and transmittance $T_i$ are derived from the SDF values $f(\mathbf{x}_i)$ and the step size [S1]. The formula for ray opacity is:
+    $$ O(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i $$
+    where the compositing follows Equation 1 in the source [S1].
+7.  **Surface Rendering:** Render the surrogate mesh $S$ using the same shared neural shader [S1]. This involves rasterizing the mesh and evaluating the shader at the fragment positions [S1].
+8.  **Loss Calculation:** Compute the total loss $\mathcal{L}$ as a weighted sum of surface loss, volume loss, and Eikonal loss:
+    $$ \mathcal{L} = \lambda_s \mathcal{L}_s + \lambda_v \mathcal{L}_v + \mathcal{L}_{\text{Ek}} $$
+    where:
+    *   $\mathcal{L}_s = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \text{Smooth}_{\text{L1}}(\mathbf{C}(\mathbf{r}), \mathbf{C}_s(\mathbf{r}))$ is the surface rendering loss comparing observed color $\mathbf{C}(\mathbf{r})$ with surface rendered color [S1].
+    *   $\mathcal{L}_v = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \text{Smooth}_{\text{L1}}(\mathbf{C}(\mathbf{r}), \mathbf{C}_v(\mathbf{r}))$ is the volume rendering loss [S1].
+    *   $\mathcal{L}_{\text{Ek}}$ is the Eikonal loss regularizing the gradient of the SDF to be 1 near the surface [S1].
+    *   Optional mask loss $\mathcal{L}_{\text{mask}}$ can be added if binary masks $m(\mathbf{r})$ are available:
+        $$ \mathcal{L}_{\text{mask}} = \lambda_{\text{mask}} \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \mathbf{1}_{\text{mask}}(\mathbf{r}) \text{BCE}(m(\mathbf{r}), O(\mathbf{r})) $$
+        where $\mathbf{1}_{\text{mask}}(\mathbf{r})$ is an indicator function for mask availability [S1].
+9.  **Optimization:** Update the parameters of the hash grids and the neural shader using the Adam optimizer with a learning rate of $2 \times 10^{-3}$ [S1].
+10. **Mesh Synchronization:** Update the surrogate mesh $S$ to remain synchronized with the implicit SDF $f$ [S1]. This is achieved by driving the deformation of the mesh based on the SDF values, ensuring the explicit and implicit representations converge to the same surface [S1].
+11. **Inference (Mesh Extraction):** After training, extract the final surface mesh $\mathcal{S}$ from the learned SDF $f$ using the Marching Cubes algorithm [S1].
+12. **Realtime Rendering:** Render the extracted mesh $\mathcal{S}$ using an off-the-shelf graphics pipeline (e.g., rasterization) with the learned neural shader for real-time interactive visualization [S1].
+
+**Parameters:**
+*   **Hash Grids:** 8 levels for surface branch, 14 levels for volume branch [S1].
+*   **Spherical Harmonics:** Degree 4 [S1].
+*   **Optimizer:** Adam, learning rate $2 \times 10^{-3}$ [S1].
+*   **Loss Weights:** $\lambda_s = 1$, $\lambda_v = 1$, $\lambda_{\text{Ek}} = 0.05$, $\lambda_{\text{mask}} = 0.1$ [S1].
+*   **Batch Size:** 14,800 rays per iteration [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Synchronization Discrepancy:** Without a shared shading network, significant discrepancies occur between the renderings of the surrogate mesh and the implicit SDF, leading to poor convergence [S1].
+*   **Boundary Conditions:** The Eikonal loss is critical for ensuring the SDF represents a valid distance function, especially near the surface [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training is significantly faster than previous hybrid methods [S1]. On the DTU dataset, Surf²f achieves convergence in 5 minutes, compared to 7 minutes for NDS, 22 hours for UNISURF, and 6.5 hours for NeuS [S1].
+*   **Memory Complexity:** Uses multi-resolution hash grids with a feature dimension of 2 [S1]. The memory footprint is determined by the number of hash entries (resolutions 16 to 1024 across 8-14 levels) [S1].
+*   **Measured Performance:**
+    *   **DTU Dataset:** Mean Chamfer Distance (CD) of 0.66 and Mean PSNR of 33.95 [S1]. Rendering time is 5ms [S1].
+    *   **NeRF Synthetic Dataset:** Mean PSNR ranges from 27.1 (Ship) to 31.9 (Chair), with lower Mean-Angle Error compared to DMTet and FlexiCubes [S1].
+*   **Strengths:** Fast convergence, real-time rendering capability, high geometric accuracy, and effective handling of view-dependent appearance via the shared neural shader [S1].
+*   **Limitations:** Requires careful tuning of loss weights and hash grid parameters [S1].
+*   **When to use:** Suitable for high-quality surface reconstruction from multi-view images where both geometric accuracy and rendering speed are critical [S1].
+
+## Background
+Surf²f was introduced in the paper "Sur²f: A Hybrid Representation for High-Quality and Efficient Surface Reconstruction from Multi-view Images" [S1]. It builds upon the Neural Distance Field (NDS) and UNISURF paradigms, aiming to unify the benefits of implicit SDFs and explicit meshes [S1]. The method leverages NVIDIA OptiX for ray casting and custom CUDA kernels for efficient computation [S1]. It has been applied to various tasks including indoor and outdoor scene reconstruction, and text-to-3D generation [S1].
+
+## Sources
+[S1] Sur$$^{2}$$f: A Hybrid Representation for High-Quality and Efficient Surface Reconstruction from Multi-view Images, https://doi.org/10.1007/978-3-031-73027-6_1, fetched 2026-10-26

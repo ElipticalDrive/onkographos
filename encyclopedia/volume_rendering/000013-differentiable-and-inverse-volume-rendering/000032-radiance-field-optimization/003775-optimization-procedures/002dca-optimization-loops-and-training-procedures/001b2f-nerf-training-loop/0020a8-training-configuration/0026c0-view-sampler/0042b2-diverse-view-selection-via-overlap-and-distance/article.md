@@ -1,0 +1,147 @@
+# Diverse View Selection via Overlap and Distance
+
+Also called: Alg.1, Camera View Selection Algorithm, Iterative Diverse View Sampling
+
+## Overview
+An iterative algorithm to select a diverse set of $N_v$ camera views from a 3D scene by ensuring minimum overlap and distance between newly sampled views and previously selected views. It differs from [Diverse View Selection via Maximum K-Coverage](11482-diverse-view-selection-via-maximum-k-coverage.md) by using geometric thresholds on frustum intersection and camera pose displacement rather than set-theoretic coverage maximization.
+
+## How it works
+**Inputs:**
+- A pool of candidate camera views (extrinsics $E=[R, t]$).
+- Target number of views $N_v$.
+- Overlap threshold $T_o$.
+- Distance threshold $T_d$.
+
+**Outputs:**
+- A list of selected camera views $V$.
+
+**Data Structures:**
+- $E$: A list of selected camera extrinsics. Initially empty.
+- $n$: Integer counter of selected views. Initially 0.
+
+**Definitions:**
+- Camera extrinsic $E_i = [R_i, t_i]$, where $R_i \in \mathbb{R}^{3 \times 3}$ is the rotation matrix and $t_i \in \mathbb{R}^3$ is the translation vector.
+- Frustum $A$ and $B$: The 3D volume visible to camera $E_1$ and $E_2$ respectively.
+
+**Formulas:**
+1.  **Frustum Overlap ($O$):** The Intersection over Union (IoU) of the frustums of two cameras $E_1$ and $E_2$ [S1]:
+    $$ O(E_1, E_2) = \frac{|A \cap B|}{|A \cup B|} $$
+    where $| \cdot |$ denotes the volume.
+
+2.  **Pose Distance ($D$):** The sum of Euclidean distance between centers and angular difference between orientations [S1]:
+    $$ D(E_1, E_2) = \|t_1 - t_2\|_2 + \arccos\left(\frac{\text{Tr}(R_2^T R_1) - 1}{2}\right) $$
+    Note: The term $\frac{\text{Tr}(R_2^T R_1) - 1}{2}$ computes $\cos(\theta)$, where $\theta$ is the rotation angle. The result of $\arccos$ is in radians.
+
+3.  **Aggregate Overlap:** For a new view $E$ against existing set $E$, the maximum overlap with any existing view [S1]:
+    $$ \text{Overlap}(E, E) = \max(O(E, E_1), \dots, O(E, E_N)) $$
+    where $N$ is the current number of views in $E$.
+
+4.  **Aggregate Distance:** For a new view $E$ against existing set $E$, the minimum distance to any existing view [S1]:
+    $$ \text{Distance}(E, E) = \min(D(E, E_1), \dots, D(E, E_N)) $$
+
+**Parameters:**
+- $N_v = 200$: Target number of views [S1].
+- $T_o = 0.3$: Minimum overlap threshold [S1].
+- $T_d = 0.2$: Minimum distance threshold [S1].
+
+**Algorithm Steps:**
+1.  Initialize $E \leftarrow \{\}$, $n \leftarrow 0$, $N_v \leftarrow 200$, $T_o \leftarrow 0.3$, $T_d \leftarrow 0.2$.
+2.  Repeat the following loop:
+    a. Sample a candidate camera view $E_{cand}$ from the available pool.
+    b. If $n = 0$:
+        i. Append $E_{cand}$ to $E$.
+        ii. Increment $n \leftarrow n + 1$.
+    c. Else ($n > 0$):
+        i. Calculate $\text{overlap} \leftarrow \text{Overlap}(E_{cand}, E)$.
+        ii. Calculate $\text{distance} \leftarrow \text{Distance}(E_{cand}, E)$.
+        iii. If $\text{overlap} \ge T_o$ AND $\text{distance} \ge T_d$:
+            1. Append $E_{cand}$ to $E$.
+            2. Increment $n \leftarrow n + 1$.
+    d. Continue until $n \ge N_v$.
+3.  Output $V = E$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def select_views(candidate_pool, Nv=200, To=0.3, Td=0.2):
+    selected_views = []
+    n = 0
+    
+    while n < Nv:
+        # Sample a candidate view. In practice, this iterates through 
+        # or randomly samples from the available input cameras.
+        E_cand = sample_candidate(candidate_pool)
+        
+        if n == 0:
+            selected_views.append(E_cand)
+            n += 1
+        else:
+            # Calculate max overlap with any existing view
+            max_overlap = 0.0
+            for E_existing in selected_views:
+                o = compute_overlap(E_cand, E_existing)
+                if o > max_overlap:
+                    max_overlap = o
+            
+            # Calculate min distance to any existing view
+            min_distance = float('inf')
+            for E_existing in selected_views:
+                d = compute_distance(E_cand, E_existing)
+                if d < min_distance:
+                    min_distance = d
+            
+            # Check thresholds
+            if max_overlap >= To and min_distance >= Td:
+                selected_views.append(E_cand)
+                n += 1
+                
+    return selected_views
+
+def compute_overlap(E1, E2):
+    # A and B are frustums of E1 and E2
+    # Intersection and Union volumes must be computed based on 
+    # camera intrinsics and extrinsics.
+    # O(E1, E2) = |A ∩ B| / |A ∪ B|
+    intersection_vol = compute_frustum_intersection_volume(E1, E2)
+    union_vol = compute_frustum_union_volume(E1, E2)
+    if union_vol == 0:
+        return 0.0
+    return intersection_vol / union_vol
+
+def compute_distance(E1, E2):
+    # E = [R, t]
+    t1, t2 = E1.t, E2.t
+    R1, R2 = E1.R, E2.R
+    
+    pos_dist = np.linalg.norm(t1 - t2)
+    
+    # Rotation angle from trace
+    # cos_theta = (Tr(R2^T R1) - 1) / 2
+    trace = np.trace(R2.T @ R1)
+    cos_theta = (trace - 1.0) / 2.0
+    # Clamp to [-1, 1] for numerical stability
+    cos_theta = np.clip(cos_theta, -1.0, 1.0)
+    angle_dist = np.arccos(cos_theta)
+    
+    return pos_dist + angle_dist
+```
+
+**Edge Cases and Pitfalls:**
+- **Frustum Computation:** The IoU calculation requires defining the frustum geometry. If the scene depth range is not specified, the frustums are unbounded, making IoU undefined. The source implies a bounded volume or specific depth estimation context [S1].
+- **Rotation Ambiguity:** The trace formula assumes $R_1, R_2$ are valid rotation matrices. Numerical instability in `arccos` near $\pm 1$ should be handled via clamping [G].
+- **Sampling Bias:** If the candidate pool is small, the loop may terminate early or fail to find $N_v$ views satisfying the constraints. The source does not specify fallback behavior if the pool is exhausted before $N_v$ is reached [S1].
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** $O(N_v \cdot M)$ per iteration where $M$ is the number of candidate views considered or the size of the selected set during overlap/distance checks. Since it iterates until $N_v$ views are found, and each addition requires checking against all $n$ existing views, the total complexity is roughly $O(N_v^2)$ for the selection phase if candidates are pre-filtered or if the pool is large.
+- **Memory Complexity:** $O(N_v)$ to store the selected views.
+- **Strengths:** Ensures geometric diversity by explicitly penalizing high overlap and low distance. Simple to implement.
+- **Limitations:** Computationally expensive for large candidate pools due to repeated frustum intersection calculations. Thresholds ($T_o, T_d$) are fixed and may not adapt to scene complexity.
+
+## Background
+Originated in ContraNeRF [S1] for generalizable neural radiance fields. The method is presented as Algorithm 1 in the source paper to select context views for contrastive learning.
+
+## Sources
+[S1] ContraNeRF: Generalizable Neural Radiance Fields for Synthetic-to-real Novel View Synthesis via Contrastive Learning, https://doi.org/10.1109/cvpr52729.2023.01584, fetched 2026-10-29

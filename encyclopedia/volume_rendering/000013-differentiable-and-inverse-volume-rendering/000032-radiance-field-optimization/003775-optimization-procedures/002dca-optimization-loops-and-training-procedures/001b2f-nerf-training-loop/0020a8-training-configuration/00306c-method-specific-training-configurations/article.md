@@ -2,54 +2,59 @@
 
 
 ## Overview
-Method-Specific Training Configurations define the hyperparameters, architectural constraints, and optimization schedules required to train specific Neural Radiance Field (NeRF) variants and related inverse rendering models. This family addresses the problem that standard NeRF configurations (e.g., basic MLPs with ReLU) often fail to converge, suffer from instability, or lack the fidelity required for specific datasets (e.g., LLFF vs. Blender) or architectural innovations (e.g., hash grids, dual-networks). It sets itself apart from generic [Training Configuration](2332-training-configuration.md) by providing the exact numerical values, loss weights, and network layer counts necessary to replicate the results of specific papers, rather than describing the general loop structure.
+Method-Specific Training Configurations define the precise hyperparameters, architectural constraints, and optimization schedules required to train specific Neural Radiance Field (NeRF) variants and related implicit surface representations. This family addresses the problem that standard NeRF configurations (e.g., basic MLPs with ReLU and MSE loss) often fail to converge, produce artifacts, or lack the fidelity required for specific datasets (synthetic vs. real-world) or architectures (hash grids, SDFs, depth-oracles). It sets itself apart from generic [Training Configuration](2332-training-configuration.md) by providing concrete, implementation-ready values for distinct methods such as Mip-NeRF, DONeRF, and Neuralangelo, rather than abstract principles.
 
 ## Shared principles
-The shared principles across these configurations involve the minimization of a photometric loss, typically Mean Squared Error (MSE) or Charbonnier loss, between rendered images and ground truth. All methods utilize an optimizer, predominantly Adam or AdamW, to update network weights. The core mechanism involves sampling rays, querying a neural representation (MLP, hash grid, or dual-network) for density and color, and accumulating these values via volume rendering. Specific configurations differ in the choice of activation functions (e.g., shifted softplus vs. ReLU), the number of sampling stages (coarse/fine vs. single), and dataset-specific adjustments (e.g., background handling, distortion regularization).
+The articles in this family share the following mechanisms and terms:
+*   **Optimizer:** All cited methods use variants of the Adam optimizer [S1, S2, S3, S7, S8, S9].
+*   **Loss Function:** The primary loss is photometric, typically Mean Squared Error (MSE) or Charbonnier loss, comparing rendered pixel colors against ground truth [S1, S3, S7, S8].
+*   **Sampling:** Training involves sampling rays from camera poses and querying the implicit field at sample points along these rays [S1, S2, S3, S4, S5, S6, S7, S8].
+*   **Batching:** Training is performed in batches of rays or pixels [S1, S2, S3, S4, S5, S6, S7, S8].
+*   **Learning Rate Scheduling:** All methods employ a learning rate schedule, often involving warmup and decay steps [S1, S2, S4, S6, S8].
 
 ## Subtopics
 
 ### [NeRF Hyperparameters](3065-nerf-hyperparameters.md)
-Defines the baseline configuration for the original NeRF model. It specifies an 8-layer Position MLP (256/512 units) and a 4-layer Direction MLP (128 units) with axis-aligned IPE. It uses a two-stage sampling process (64 coarse, 128 fine samples) and Adam optimizer with an initial learning rate of $5 \times 10^{-4}$. Choose this for standard synthetic datasets like Blender or LLFF when implementing the original NeRF architecture.
+Defines the baseline configuration for standard NeRF. It uses an 8-layer position MLP (256/512 units) and 4-layer direction MLP (128 units) with axis-aligned IPE. It employs hierarchical sampling (64 coarse, 128 fine) and Adam with an initial LR of $5 \times 10^{-4}$ decaying to $5 \times 10^{-6}$. Choose this for standard synthetic datasets like Blender when baseline performance is required.
 
 ### [Mip-NeRF Optimization and Activation Details](3409-mip-nerf-optimization-and-activation-details.md)
-Specifies the training details for Mip-NeRF and JaxNeRF. It distinguishes itself by using Integrated Positional Encoding (IPE) without identity concatenation, shifted softplus for density, and a widened sigmoid for color. It employs a specific warmup learning rate schedule. Choose this when implementing anti-aliased, cone-traced NeRF variants to avoid gradient vanishing and saturation issues.
+Modifies NeRF to handle anti-aliasing via integrated positional encoding (IPE) and robust activations. It replaces ReLU with shifted softplus for density and uses a widened sigmoid for color. It removes identity encoding from inputs and uses a specific warmup LR schedule. Choose this for unbounded scenes requiring anti-aliasing and stability.
 
 ### [DONeRF](4461-donerf.md)
-Defines a dual-network training pipeline consisting of a Depth Oracle Network and a Shading Network. It replaces standard raymarching with oracle-guided sampling (2–4 samples per ray). It uses a non-end-to-end two-phase training process: Phase 1 trains the oracle with BCE loss on depth classification; Phase 2 trains the shading network with MSE and an opacity loss. Choose this for real-time rendering applications requiring low sample counts and high speed.
+Replaces dense raymarching with a two-network architecture: a depth oracle and a shading network. The oracle predicts high-importance sample locations using classification-based depth prediction, allowing the shading network to render with only 2–16 samples per ray. Choose this when computational cost is prohibitive and depth supervision (or initialization) is available.
 
 ### Blender Dataset Simplified Configuration
-A simplified variant of Mip-NeRF for synthetic object datasets. It uses a single sampling round with 128 samples for the proposal MLP and 32 for the NeRF MLP. The proposal MLP has 4 layers (256 units), and the NeRF MLP has 8 layers (256/512 units). It uses axis-aligned IPE, MSE loss, and disables the distortion regularizer [S1].
+A simplified variant of Mip-NeRF for synthetic Blender datasets. It uses one round of sampling, 128 samples for the proposal MLP, and 32 samples for the NeRF MLP. The proposal MLP has 4 layers/256 units, and the NeRF MLP has 8 layers/256 (or 512) units. It uses axis-aligned IPE, MSE loss, and no distortion regularizer [S1].
 
 ### LLFF Training Configuration
-A variant of Mip-NeRF tailored for forward-facing scenes. It differs from the Blender configuration by keeping the distortion regularizer enabled and using Charbonnier loss instead of MSE. Performance metrics on LLFF with 256 hidden units show PSNR 26.68, SSIM 0.847, LPIPS 0.150, and training time 2.39 hours, compared to mip-NeRF's PSNR 26.93 and 2.48 hours [S1].
+A variant for the LLFF dataset. It differs from the Blender simplified config by keeping the distortion regularizer enabled and using Charbonnier loss instead of MSE. Performance metrics on LLFF with 256 hidden units show PSNR 26.68, SSIM 0.847, LPIPS 0.150, Time 2.39 hrs, Params 0.84M for the proposed model, compared to Mip-NeRF's PSNR 26.93, SSIM 0.830, LPIPS 0.177, Time 2.48 hrs, Params 0.61M [S1].
 
 ### NeUDF Training Configuration
-Configures the training for Neural Unsigned Distance Fields. It uses the Adam optimizer with a learning rate warming up to $2 \times 10^{-4}$ in the first 5k iterations and decreasing to $1 \times 10^{-5}$. The batch size is 512 random rays from 8 randomly selected camera poses. Training lasts 400k iterations, taking 9 hours with masks and 11 hours without on an Nvidia 3090 [S2].
+Configures NeUDF for unsigned distance fields. It uses Adam with LR warming up to $2 \times 10^{-4}$ in the first 5k iterations and decreasing to $1 \times 10^{-5}$. Batch size is 512 rays from 8 random poses. Total training is 400k iterations (9-11 hours on RTX 3090) [S2].
 
 ### NeRF-SDP Training Configuration
-Defines the setup for NeRF-SDP, which uses a Res-UNet and other components. The Adam optimizer uses a learning rate of $1 \times 10^{-3}$ for the Res-UNet and $5 \times 10^{-4}$ for other parts. The batch size is 500. Training runs for 250,000 steps on an Nvidia RTX 3090: the first 170,000 steps optimize auxiliary and rendering losses, while the last 80,000 steps optimize only the rendering loss. Feature dimensions are 24 for 2D and 8 for 3D [S3].
+Configures NeRF-SDP for generalizable NeRF with depth perception. It uses Adam with LR $1 \times 10^{-3}$ for Res-UNet and $5 \times 10^{-4}$ for other parts. Batch size is 500. Total steps are 250,000: first 170,000 optimize auxiliary and rendering losses, last 80,000 optimize only rendering loss. Feature dimensions are 24 (2D) and 8 (3D) [S3].
 
 ### Neuralangelo Training Configuration
-Configures the training for high-fidelity surface reconstruction using hash encoding. It assumes a unit sphere ROI and runs for 500k iterations. The learning rate is $1 \times 10^{-3}$ with a 5k linear warmup, decaying by 10x at 300k and 400k iterations. It uses AdamW with weight decay $10^{-2}$ and $w_{iek}=0.1$. The SDF MLP has one layer, and the color MLP has four layers. Batch size is 1 for DTU and 16 for Tanks and Temples. Inactive hash resolutions set feature vectors to zero [S4].
+Configures Neuralangelo for high-fidelity surface reconstruction using hash encoding. It assumes ROI inside a unit sphere. Total iterations are 500k. LR is $1 \times 10^{-3}$ with 5k warmup, decaying by 10x at 300k and 400k. Optimizer is AdamW with weight decay $10^{-2}$. SDF MLP has 1 layer, color MLP has 4 layers. Batch size is 1 for DTU, 16 for Tanks and Temples [S4].
 
 ### GO-NeRF Training Configuration
-Configures the generation model for virtual reality content. It optimizes a hash grid representation for 20,000 iterations on a single Nvidia 3090. 30% of iterations use background augmentation. The scheduler values for $\lambda_S$ and $\lambda_O$ range from 30 to 300, and $\lambda_R$ is set to 500 [S5].
+Configures GO-NeRF for object generation in NeRF. It optimizes a hash grid representation. $\lambda_S$ and $\lambda_O$ use a cosine scheduler (30 to 300), and $\lambda_R$ is 500. Training is 20,000 iterations on a single RTX 3090, with 30% iterations using background augmentation [S5].
 
 ### Tri-MipRF Training Configuration
-Configures the Tri-Mip representation. The base mipmap shape is $H=512, W=512, C=16$. It uses AdamW with weight decay $1 \times 10^{-5}$ and learning rate $2 \times 10^{-3}$, scheduled by MultiStepLR. The Tri-Mip encoding learning rate is scaled up 10x relative to the MLP. It uses an area loss $L_{area}$ scaling pixel loss by footprint area. Implementation uses PyTorch, tiny-cuda-nn, and nvdiffrast [S6].
+Configures Tri-MipRF for anti-aliasing using tri-mip representations. Base mipmap shape is $H=512, W=512, C=16$. Optimizer is AdamW with weight decay $10^{-5}$ and LR $2 \times 10^{-3}$ (MultiStepLR). Tri-Mip encoding LR is scaled 10x relative to MLP. Loss is area loss [S6].
 
 ### NeRF† Implementation Configuration
-A variant of nerfacto using a standard MLP density field. For Blender, $t_n=2.0, t_f=6.0$, with camera optimizer, appearance embedding, distortion loss, and scene contraction disabled. Background is white. Batch size is 2048 rays, initial sampler is uniform, and training is 16.5k epochs. For LLFF, scene contraction uses $\ell_\infty$ norm. Batch size is 1024 rays (2048 eval), training is 30k epochs. On Mip-NeRF 360, it achieves PSNR 24.20, SSIM 0.726, LPIPS 0.247 [S7].
+A variant of nerfacto using a standard MLP density field. For Blender: $t_n=2.0, t_f=6.0$, no camera optimizer/appearance/distortion/contraction, white background, batch 2048, 16.5k epochs. For LLFF: no camera optimizer/appearance/distortion, $\ell_\infty$ contraction, batch 1024 (train)/2048 (eval), 30k epochs. On Mip-NeRF 360, it achieves PSNR 24.20, SSIM 0.726, LPIPS 0.247 [S7].
 
 ### AR-NeRF Training Configuration
-Configures the unsupervised learning of depth and defocus. R1 regularization weight is 0.2, identity regularizer weight is 15. Learning rate is 0.00006, training for 200,000 iterations with Adam. The mapping network is an MLP with 3 hidden layers (256 units, LReLU). Foreground synthesis uses 8 FiLM-SIREN layers (128 units), background uses 8 layers (64 units). Discriminators vary by dataset (FFHQ uses CoordConv, others do not). Applied to Oxford Flowers, CUB-200-2011, and FFHQ [S8].
+Configures AR-NeRF for depth/defocus learning. R1 regularization weight is 0.2, identity regularizer weight is 15. LR is 0.00006. Training is 200,000 iterations. Mapping network: 3 hidden layers, 256 units. Foreground synthesis: 8 FiLM-SIREN layers, 128 units. Background synthesis: 8 FiLM-SIREN layers, 64 units. Applied to Oxford Flowers, CUB-200-2011, and FFHQ [S8].
 
 ### DVGO Reference Architecture
-References the architecture for DVGO. It uses Re:NeRF for compression. Experiments are performed on an NVIDIA A40 GPU using PyTorch 1.12 [S9].
+Reference architecture for DVGO (Deep Voxel Grids). Uses Re:NeRF for compression. Hardware is NVIDIA A40 GPU. Software is PyTorch 1.12 [S9].
 
 ## Background
-The original NeRF paper [S3] established the baseline hyperparameters (8-layer MLP, 256 units, Adam optimizer, $5 \times 10^{-4}$ LR) which became the standard reference. Subsequent works identified specific failure modes: Mip-NeRF [S1] addressed gradient vanishing and saturation with shifted softplus and widened sigmoid; DONeRF [S3] introduced dual-networks for speed; Neuralangelo [S4] adapted configurations for hash grids and SDFs; and others like NeUDF [S2] and NeRF-SDP [S3] tailored settings for distance fields and generalizable fields respectively. The family evolved to include dataset-specific tweaks (LLFF vs. Blender) and architectural variants (HashMLPDensityField vs. MLP in nerfacto† [S7]).
+The concept of method-specific training configurations emerged as NeRF variants diverged significantly from the original NeRF architecture [S1, S3, S4, S7]. The original NeRF paper [S3] established baseline hyperparameters (8-layer MLP, Adam, MSE), but subsequent works like Mip-NeRF [S1] and Neuralangelo [S4] demonstrated that activation functions, encoding strategies, and optimization schedules were critical for stability and fidelity. The proliferation of specialized architectures (hash grids, SDFs, depth oracles) necessitated distinct training protocols, leading to the categorization of these configurations as a family of methods [S1, S2, S3, S4, S5, S6, S7, S8, S9].
 
 ## Sources
 [S1] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26

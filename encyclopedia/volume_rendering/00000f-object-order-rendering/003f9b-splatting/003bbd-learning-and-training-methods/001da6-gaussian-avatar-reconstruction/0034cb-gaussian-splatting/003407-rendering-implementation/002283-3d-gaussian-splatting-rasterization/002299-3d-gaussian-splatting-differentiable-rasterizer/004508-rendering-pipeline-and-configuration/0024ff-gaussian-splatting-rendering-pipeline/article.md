@@ -1,280 +1,148 @@
 # Gaussian Splatting Rendering Pipeline
 
-Also called: 2D Gaussian Splatting Forward Pass, 2D Gaussian Splatting Renderer, 3D Gaussian Splatting Rendering Pipeline, Gaussian Rasterization Rendering, Gaussian Splatting Rasterization and Rendering Pipeline, GaussianRasterizer, gaussian_renderer/__init__.py render, gaussian_renderer/__init__3dgs.py render
+Also called: 3D Gaussian Splatting Rendering Pipeline, Gaussian Splatting Rasterization and Rendering Pipeline
 
 ## Overview
-The Gaussian Splatting Rendering Pipeline orchestrates the final stage of 3D Gaussian Splatting, converting a set of learned 3D Gaussian primitives into a 2D image for a specific camera view [S1, S3, S4, unofficial]. It solves the problem of differentiable rasterization by projecting 3D Gaussians to screen space, evaluating view-dependent appearance, and compositing them front-to-back to produce color, depth, and auxiliary maps [S2, S4, unofficial]. It differs from its siblings by providing the complete high-level orchestration (camera setup, SH evaluation, feature assembly, and rasterization invocation) rather than just the low-level kernel logic [S1, S3, unofficial].
+The Gaussian Splatting Rendering Pipeline orchestrates the differentiable rasterization of a scene represented as a set of 3D Gaussians into a 2D image for a single camera view [S1][S6, unofficial]. It solves the problem of efficiently rendering millions of adaptive, view-dependent primitives by projecting 3D covariances to 2D, evaluating spherical harmonics for color, and compositing the results via alpha blending [S3, S6, unofficial]. It sets itself apart from standard polygon rasterization by handling soft, overlapping volumetric primitives without geometry clipping or complex shader pipelines, and from NeRFs by offering explicit, differentiable scene representations that render at interactive frame rates [S1]. It builds on [GaussianRasterizer Initialization and Input Validation](2923-gaussianrasterizer-initialization-and-input-validation.md) and [GaussianRasterizationSettings](2924-gaussianrasterizationsettings.md).
 
 ## How it works
-**Inputs and Outputs:**
-The pipeline takes a set of $N$ 3D Gaussians and camera parameters for $C$ views [S3, S4, unofficial].
-*   **Gaussian Parameters:**
-    *   `means3D`: Position tensor, shape $[N, 3]$ [S3, S4, unofficial].
-    *   `scales`: Log-scale tensor, shape $[N, 3]$ [S4, unofficial].
-    *   `rotations`: Quaternion tensor, shape $[N, 4]$ (w, x, y, z) [S3, S4, unofficial].
-    *   `opacities`: Scalar tensor, shape $[N]$ [S3, S4, unofficial].
-    *   `features`: Spherical Harmonics (SH) coefficients tensor, shape $[N, K, 3]$ where $K=(d+1)^2$ for degree $d$, or direct RGB colors $[N, 3]$ [S3, S4, unofficial].
-*   **Camera Parameters:**
-    *   `viewmats`: World-to-camera transformation matrices, shape $[C, 4, 4]$ [S3, unofficial].
-    *   `Ks`: Camera intrinsic matrices, shape $[C, 3, 3]$ [S3, unofficial].
-    *   `image_dims`: Height $H$ and Width $W$ [S2, unofficial].
-*   **Outputs:**
-    *   `rendered_image`: Color tensor, shape $[C, H, W, 3]$ [S3, unofficial].
-    *   `rendered_opacity`: Alpha tensor, shape $[C, H, W, 1]$ [S3, unofficial].
-    *   `rendered_depth`: Accumulated projection depth or hit distance [S3, unofficial].
-    *   `rendered_feature`: Concatenated feature maps (normals, depth components, etc.) [S1, S2, unofficial].
+The pipeline executes five main steps: covariance reconstruction, 2D projection, color evaluation, tile intersection, and alpha compositing [S5, unofficial]. It accepts Gaussian attributes (position, scale, rotation, opacity, SH coefficients) and camera parameters, and outputs a rendered image along with auxiliary channels (depth, normals, opacity) and visibility masks [S3, S5, unofficial].
 
-**Data Structures:**
-The pipeline uses `GaussianRasterizationSettings` to bundle camera and rendering configuration [S2, unofficial]. Key fields include:
-*   `image_width`, `image_height`: Resolution [S2, unofficial].
-*   `tanfovx`, `tanfovy`: Tangents of horizontal and vertical field of view [S1, S2, unofficial].
-*   `cx`, `cy`: Principal point coordinates [S1, unofficial].
-*   `background`: Background color tensor $[3]$ [S2, unofficial].
-*   `scale_modifier`: Multiplier for Gaussian scales (default 1.0) [S2, unofficial].
-*   `viewmat`, `projmat`: View and projection matrices [S2, unofficial].
-*   `sh_degree`: Active SH degree (None for direct color) [S3, unofficial].
-*   `campos`: Camera position in world space [S2, unofficial].
-*   `near_plane`, `far_plane`: Clipping distances (default 0.01, 1e10) [S3, unofficial].
-*   `tile_size`: Tile side length for rasterization (default 16) [S3, unofficial].
-*   `eps2d`: Regularization added to 2D covariance diagonal (default 0.3) [S3, unofficial].
-*   `pix_guard`: Pixel guard band width for culling (default 64) [S4, unofficial].
-*   `alpha_max`: Maximum alpha value to prevent instability (default 0.99) [S4, unofficial].
-*   `alpha_cutoff`: Alpha cutoff for early termination (default 1/255) [S4, unofficial].
-*   `chi_square_clip`: Chi-square clipping threshold for covariance regularization (default 9.21) [S4, unofficial].
+### Inputs and Outputs
+**Inputs:**
+*   `means3D`: 3D positions, shape $[N, 3]$ [S5, S6, unofficial].
+*   `quats`: Unit quaternions for rotation, shape $[N, 4]$ (w,x,y,z) [S5, unofficial].
+*   `scales`: Log-scales, shape $[N, 3]$ [S6, unofficial].
+*   `opacities`: Raw opacity values, shape $[N]$ [S6, unofficial].
+*   `shs`: Spherical Harmonics coefficients, shape $[N, K, 3]$ where $K = (d_{max}+1)^2$ [S5, unofficial].
+*   `viewpoint_camera`: Contains intrinsics ($fx, fy, cx, cy$), resolution ($H, W$), and extrinsics ($c2w$ matrix) [S6, unofficial].
+*   `pipe`: Configuration flags including `convert_SHs_python`, `compute_cov3D_python`, `depth_ratio`, and `debug` [S3, S4, unofficial].
+*   `bg`: Background color tensor, shape $[3]$ [S4, unofficial].
 
-**Steps:**
+**Outputs:**
+*   `render`: Image tensor, shape $[H, W, 3]$ for RGB or $[H, W, D]$ for multi-channel [S5, S6, unofficial].
+*   `viewspace_points`: 2D mean positions with gradients enabled, shape $[N, 2]$ [S2, S4, unofficial].
+*   `visibility_filter`: Boolean tensor $[N]$, true if Gaussian radius $> 0$ [S4, unofficial].
+*   `radii`: Screen-space radii of visible Gaussians, shape $[N]$ [S4, unofficial].
 
-1.  **Covariance Reconstruction:**
-    Convert log-scales and quaternions into 3D covariance matrices $\Sigma_{3D}$ [S3, S4, unofficial].
-    $$ \Sigma_{3D} = R \cdot S \cdot S^T \cdot R^T $$
-    Where $R$ is the rotation matrix derived from the quaternion and $S$ is the diagonal scale matrix [G].
-    *   *Implementation Detail:* If `pipe.compute_cov3D_python` is true, this is computed in Python using `pc.get_covariance(scaling_modifier)` [S1, S2, unofficial]. Otherwise, scales and rotations are passed directly to the rasterizer [S2, unofficial].
+### Data Structures
+*   **GaussianRasterizationSettings**: Encapsulates camera intrinsics, extrinsics, and rasterization flags. Fields include `image_height`, `image_width`, `tanfovx`, `tanfovy`, `bg`, `scale_modifier`, `viewmatrix`, `projmatrix`, `sh_degree`, `campos`, `prefiltered`, and `debug` [S4, S7, unofficial].
+*   **Covariance Representation**: Can be precomputed 3D covariance matrices ($\Sigma_{3D}$) or parametric scales/rotations passed to the rasterizer [S3, S4, unofficial].
+*   **Color Representation**: Either precomputed RGB (from SH evaluation) or raw SH coefficients [S4, unofficial].
 
-2.  **Projection to 2D:**
-    Transform 3D Gaussians to camera space and project to 2D screen space [S4, unofficial].
-    *   Transform mean $\mu_{3D}$ to camera space: $\mu_{cam} = R_{w2c} \cdot (\mu_{3D} - t_{w2c})$ [S4, unofficial].
-    *   Project the 3D covariance to 2D using the Jacobian $J$ of the perspective projection transformation:
-        $$ \Sigma_{2D} = J \cdot \Sigma_{3D_{cam}} \cdot J^T $$
-        [S5, unofficial].
-    *   Add regularization: $\Sigma_{2D} \leftarrow \Sigma_{2D} + \epsilon_{2d} I$ [S3, unofficial].
-    *   Compute 2D means (screen coordinates) from $\mu_{cam}$ [S4, unofficial].
+### Steps
 
-3.  **Spherical Harmonics Evaluation (Optional):**
-    If SH degree > 0 and `pipe.convert_SHs_python` is false, the rasterizer handles SH evaluation. If `pipe.convert_SHs_python` is true, compute colors in Python [S2, unofficial]:
-    *   Compute view directions: $v = \frac{\mu_{3D} - \text{campos}}{\|\mu_{3D} - \text{campos}\|}$ [S2, unofficial].
-    *   Evaluate SH: $c = \text{eval\_sh}(d, \text{features}, v)$ [S2, unofficial].
-    *   Clamp: $\text{colors\_precomp} = \max(c + 0.5, 0.0)$ [S2, unofficial].
-    *   *Note:* If `override_color` is provided, use it instead [S1, unofficial].
+1.  **Initialize Screenspace Points**: Create a zero tensor `screenspace_points` on the target device (e.g., CUDA) with `requires_grad=True` to capture 2D mean gradients. Attempt to retain gradients via `retain_grad()` for debugging [S2, S7, unofficial].
 
-4.  **Tile-Gaussian Intersection:**
-    Divide the image into tiles of size `tile_size` x `tile_size` [S3, unofficial].
-    *   The rasterizer determines which tiles intersect with each Gaussian's projected footprint [S3, unofficial].
-    *   Sort Gaussians within each tile by depth (z-coordinate in camera space) for front-to-back rendering [S4, unofficial].
+2.  **Compute Camera Parameters**: Calculate half-field-of-view tangents:
+    $$ \text{tanfovx} = \tan(\text{FoVx} \times 0.5) $$
+    $$ \text{tanfovy} = \tan(\text{FoVy} \times 0.5) $$
+    Extract principal point $(cx, cy)$ from camera intrinsics [S4, S7, unofficial].
 
-5.  **Rasterization and Alpha Compositing:**
-    For each pixel in each tile, composite the contributions of overlapping Gaussians [S4, unofficial].
-    *   For each Gaussian $i$ in the tile (sorted front-to-back):
-        *   Compute 2D Gaussian value at pixel $(u, v)$:
-            $$ \alpha_i = \exp\left(-\frac{1}{2} (\mathbf{x} - \mu_i)^T \Sigma_{2D_i}^{-1} (\mathbf{x} - \mu_i)\right) $$
-        *   Apply opacity: $\alpha_i \leftarrow \alpha_i \cdot \text{opacity}_i$ [S4, unofficial].
-        *   Clamp $\alpha_i$ to $[0, \alpha_{max}]$ [S4, unofficial].
-        *   Composite:
-            $$ C_{final} = \sum_i \alpha_i c_i \prod_{j<i} (1 - \alpha_j) $$
-            $$ \alpha_{final} = \sum_i \alpha_i \prod_{j<i} (1 - \alpha_j) $$
-            [S5, unofficial].
-    *   Early termination: Stop compositing if accumulated alpha exceeds $1 - \alpha_{cutoff}$ [S4, unofficial].
-    *   Add background color for pixels with $\alpha_{final} < 1$ [S2, unofficial].
+3.  **Select Covariance Representation**:
+    *   If `pipe.compute_cov3D_python` is true: Compute $\Sigma_{3D}$ from scales and rotations in Python using `pc.get_covariance(scaling_modifier)` [S3, S4, unofficial].
+    *   Else: Pass `scales` and `rotations` directly to the rasterizer to compute covariances internally [S3, S4, unofficial].
 
-**Pseudocode:**
+4.  **Select Color Representation**:
+    *   If `override_color` is None:
+        *   If `pipe.convert_SHs_python` is true:
+            1.  Extract SH view: `shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)` [S4, unofficial].
+            2.  Compute direction: `dir_pp = pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1)` [S4, unofficial].
+            3.  Normalize: `dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)` [S4, unofficial].
+            4.  Evaluate SH: `sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)` [S4, unofficial].
+            5.  Clamp: `colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)` [S4, unofficial].
+        *   Else: Set `shs = pc.get_features` [S4, unofficial].
+    *   If `override_color` is not None: Set `colors_precomp = override_color` [S4, unofficial].
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+5.  **Construct Settings and Rasterizer**: Instantiate `GaussianRasterizationSettings` with image dimensions, FOV tangents, background, scale modifier, view/projection matrices, SH degree, camera position, and debug flags [S4, S7, unofficial]. Instantiate `GaussianRasterizer` with these settings [S7, unofficial].
 
-```python
-import math
-
-class GaussianRasterizationSettings:
-    def __init__(self, image_width, image_height, tanfovx, tanfovy, cx, cy,
-                 background, scale_modifier, viewmat, projmat, sh_degree,
-                 campos, near_plane, far_plane, eps2d, tile_size, alpha_max,
-                 alpha_cutoff, chi_square_clip, pix_guard):
-        self.image_width = image_width
-        self.image_height = image_height
-        self.tanfovx = tanfovx
-        self.tanfovy = tanfovy
-        self.cx = cx
-        self.cy = cy
-        self.background = background
-        self.scale_modifier = scale_modifier
-        self.viewmat = viewmat
-        self.projmat = projmat
-        self.sh_degree = sh_degree
-        self.campos = campos
-        self.near_plane = near_plane
-        self.far_plane = far_plane
-        self.eps2d = eps2d
-        self.tile_size = tile_size
-        self.alpha_max = alpha_max
-        self.alpha_cutoff = alpha_cutoff
-        self.chi_square_clip = chi_square_clip
-        self.pix_guard = pix_guard
-
-def quaternion_to_rotation_matrix(quats):
-    """Convert batch of quaternions [N, 4] (w,x,y,z) to rotation matrices [N, 3, 3]."""
-    w, x, y, z = quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3]
-    R = math.zeros((quats.shape[0], 3, 3))
-    R[:, 0, 0] = 1 - 2*(y*y + z*z)
-    R[:, 0, 1] = 2*(x*y - w*z)
-    R[:, 0, 2] = 2*(x*z + w*y)
-    R[:, 1, 0] = 2*(x*y + w*z)
-    R[:, 1, 1] = 1 - 2*(x*x + z*z)
-    R[:, 1, 2] = 2*(y*z - w*x)
-    R[:, 2, 0] = 2*(x*z - w*y)
-    R[:, 2, 1] = 2*(y*z + w*x)
-    R[:, 2, 2] = 1 - 2*(x*x + y*y)
-    return R
-
-def eval_sh(degree, features, directions):
-    """Evaluate spherical harmonics for given directions [N, 3] and coefficients [N, K, 3]."""
-    # Standard SH basis evaluation up to degree `degree`
-    # Returns RGB colors [N, 3]
-    # Implementation follows standard SH basis polynomials [G]
-    return features @ directions[:, None, :] # Simplified placeholder for standard SH eval [G]
-
-def render_pipeline(means3D, scales, rotations, opacities, features, 
-                    viewmats, Ks, image_dims, pipe, background):
-    C, H, W = len(viewmats), image_dims[0], image_dims[1]
-    N = len(means3D)
+6.  **Invoke Rasterizer**: Call the rasterizer with:
+    *   `means3D`: `pc.get_xyz`
+    *   `means2D`: `screenspace_points`
+    *   `shs`: (if using SH)
+    *   `colors_precomp`: (if precomputed)
+    *   `opacity`: `pc.get_opacity`
+    *   `scales`/`rotations`/`cov3D_precomp`: Based on step 3 selection [S4, S7, unofficial].
     
-    # 1. Setup Rasterization Settings
-    # tanfovx/tanfovy computed from FOV, not intrinsics directly [S1, S3, S6, unofficial]
-    settings = GaussianRasterizationSettings(
-        image_width=W, image_height=H,
-        tanfovx=math.tan(pipe.FoVx * 0.5), tanfovy=math.tan(pipe.FoVy * 0.5),
-        cx=Ks[0, 0, 2], cy=Ks[0, 1, 2],
-        background=background, scale_modifier=pipe.scale_modifier,
-        viewmat=viewmats[0], projmat=Ks[0] @ viewmats[0],
-        sh_degree=pipe.sh_degree,
-        campos=-viewmats[0, :3, :3].T @ viewmats[0, :3, 3], # Camera position [S4, unofficial]
-        near_plane=pipe.near_plane, far_plane=pipe.far_plane,
-        eps2d=pipe.eps2d, tile_size=pipe.tile_size,
-        alpha_max=pipe.alpha_max, alpha_cutoff=pipe.alpha_cutoff,
-        chi_square_clip=pipe.chi_square_clip, pix_guard=pipe.pix_guard
-    )
-    
-    # 2. Precompute 3D Covariances if needed
-    if pipe.compute_cov3D_python:
-        cov3D_precomp = compute_cov3D_python(means3D, scales, rotations, pipe.scale_modifier)
-    else:
-        cov3D_precomp = None
-        
-    # 3. Precompute Colors if SH evaluation is in Python
-    if pipe.convert_SHs_python and features.shape[1] > 1:
-        R_w2c = viewmats[0, :3, :3]
-        t_w2c = viewmats[0, :3, 3]
-        campos = -R_w2c.T @ t_w2c
-        
-        dir_pp = means3D - campos
-        dir_pp_normalized = dir_pp / math.norm(dir_pp, axis=1, keepdims=True)
-        
-        shs_view = features.transpose(1, 2).reshape(-1, 3, features.shape[1])
-        colors_precomp = eval_sh(pipe.sh_degree, shs_view, dir_pp_normalized)
-        colors_precomp = math.clamp_min(colors_precomp + 0.5, 0.0)
-    else:
-        colors_precomp = None
-        
-    # 4. Initialize screenspace points for gradient storage
-    screenspace_points = math.zeros_like(means3D, requires_grad=True, device=means3D.device)
-    try:
-        screenspace_points.retain_grad()
-    except:
-        pass # Framework-specific gradient retention [S1, S2, S6, unofficial]
-        
-    # 5. Invoke Rasterizer (Tiling, Intersection, Sorting, Compositing)
-    # The rasterizer handles projection, tiling, intersection, and compositing [S3, S4, unofficial]
-    num_rendered, num_contrib, rendered_image, rendered_opacity, rendered_depth, \
-        rendered_feature, rendered_pseudo_normal, rendered_surface_xyz, radii = \
-        rasterizer(
-            means3D=means3D, means2D=screenspace_points,
-            shs=features if colors_precomp is None else None,
-            colors_precomp=colors_precomp, opacities=opacities,
-            scales=scales, rotations=rotations, cov3D_precomp=cov3D_precomp,
-            settings=settings
-        )
-        
-    # 6. Post-process features if needed
-    if rendered_feature is not None:
-        # Split feature tensor based on channel widths [S1, unofficial]
-        rendered_phong, rendered_normal, rendered_offset_color, \
-        rendered_diffuse_factor, rendered_shininess, rendered_ambient_factor, \
-        rendered_specular_factor, rendered_offset_color_norm = \
-            split_features(rendered_feature, [3, 3, 3, 1, 1, 1, 1, 1])
-            
-    # 7. Depth Rendering (Optional) [S6, unofficial]
-    # If return_depth is true, compute depth by rasterizing means3D_depth
-    # means3D_depth = dot(means3D, projvect1) + projvect2, repeated 3 times
-    # Rasterize again with shs=None, colors_precomp=means3D_depth
-    # Average resulting depth image over channels
-    pass 
+    The rasterizer performs:
+    *   **Projection**: Transform 3D Gaussians to camera space and project to 2D [S6, unofficial].
+    *   **Covariance Projection**: Project 3D covariance $\Sigma_{3D}$ to 2D using the Jacobian $J$ of the affine approximation of the projective transformation:
+        $$ \Sigma_{2D} = J \Sigma_{3D}^{\text{camera}} J^T $$
+        where $W$ is the view transformation matrix and $J$ is the Jacobian [S1][S6, unofficial].
+    *   **Tiling**: Divide the image into tiles (default size $16 \times 16$ pixels) for efficient parallel processing [S6, unofficial].
+    *   **Rasterization**: Evaluate Gaussian contributions per pixel within each tile [S6, unofficial].
+    *   **Alpha Blending**: Composite Gaussians front-to-back. For a pixel, let $N$ be the set of contributing Gaussians sorted by depth. The color $C$ is:
+        $$ C = \sum_{i \in N} c_i \alpha_i \prod_{j < i} (1 - \alpha_j) $$
+        where $c_i$ is the view-dependent color and $\alpha_i$ is the opacity of Gaussian $i$ [S1][S6, unofficial].
 
-def compute_cov3D_python(means3D, scales, rotations, scale_modifier):
-    linear_scales = math.exp(scales) * scale_modifier
-    rotations_mat = quaternion_to_rotation_matrix(rotations)
-    S = math.diag_embed(linear_scales)
-    cov3D = rotations_mat @ S @ S.transpose(1, 2) @ rotations_mat.transpose(1, 2)
-    return cov3D
+7.  **Compute Depth (Optional)**: If `return_depth` is true:
+    *   Extract view direction `projvect1` (first 3 elements of `world_view_transform[:,2]`) and offset `projvect2` (last element) [S7, unofficial].
+    *   Compute depth values: `means3D_depth = dot(means3D, projvect1) + projvect2` [S7, unofficial].
+    *   Repeat depth values 3 times to match RGB channel count [S7, unofficial].
+    *   Rasterize again with `shs=None`, `colors_precomp=means3D_depth` [S7, unofficial].
+    *   Average resulting depth image over channels: `render_depth = render_depth.mean(dim=0)` [S7, unofficial].
 
-def split_features(feature_tensor, channel_widths):
-    start = 0
-    components = []
-    for width in channel_widths:
-        end = start + width
-        components.append(feature_tensor[..., start:end])
-        start = end
-    return components
+8.  **Return Results**: Construct a dictionary with keys: `render`, `viewspace_points`, `visibility_filter` (`radii > 0`), and `radii` [S4, S7, unofficial].
 
-def rasterizer(means3D, means2D, shs, colors_precomp, opacities, scales, rotations, cov3D_precomp, settings):
-    # Implements tile-Gaussian intersection, depth sorting, and front-to-back alpha compositing [S3, S4, unofficial]
-    # Returns rendered_image, rendered_opacity, rendered_depth, rendered_feature, radii, etc.
-    pass # Core CUDA/MLX kernel implementation [S4, unofficial]
-```
+### Parameters and Defaults
+*   `tile_size`: Tile side length. Default: 16 [S5, S6, unofficial].
+*   `near_plane`: Near clipping plane. Default: 0.01 [S5, unofficial] or 2e-3 [S6, unofficial].
+*   `far_plane`: Far clipping plane. Default: 1e10 [S5, unofficial] or 100 [S6, unofficial].
+*   `eps2d`: Regularization added to 2D covariance diagonal. Default: 0.3 [S5, unofficial].
+*   `chi_square_clip`: Chi-square clipping threshold for covariance regularization. Default: 9.21 (approx 3σ) [S6, unofficial].
+*   `alpha_max`: Maximum alpha value to prevent numerical instability. Default: 0.99 [S6, unofficial].
+*   `alpha_cutoff`: Alpha cutoff threshold for early termination. Default: 1/255 [S6, unofficial].
+*   `scale_factor`: Factor to scale rendering resolution. Default: 2 (half resolution) [S6, unofficial].
+*   `pix_guard`: Pixel guard band width for culling. Default: 64 [S6, unofficial].
+*   `scaling_modifier`: Multiplier applied to Gaussian scales. Default: 1.0 [S3, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Depth Sorting Swaps**: As the camera moves, overlapping Gaussians may swap sort order, causing popping artifacts (temporal instability) [S10]. Per-pixel depth comparison or ray-tracing can resolve this [S10].
+*   **Near-Plane Culling**: Gaussians behind the camera near-plane must be filtered to reduce computation. Condition: $z_{\max} < z_{\text{near}}$, where $z_{\max} = z + \Delta z$ is the Gaussian center depth plus half-extent along the camera z-axis [S11].
+*   **Precision**: Lower weight precision (e.g., 8-bit) may be required for inference compared to training [S1].
 
 ## Subtopics
 
 ### [Neural Gaussian Rasterization Pipeline](7419-neural-gaussian-rasterization-pipeline.md)
-The Neural Gaussian Rasterization Pipeline replaces the standard exponential opacity formulation of 3D Gaussian Splatting with direct neural network outputs for per-Gaussian opacity and color, while retaining the standard 2D Gaussian rasterizer for compositing. It computes view-dependent color and density ($\sigma$) for each Gaussian center, maps $\sigma$ directly to opacity, and composites the result using standard alpha blending.
+Replaces the standard exponential opacity formulation with direct neural network outputs for per-Gaussian opacity and color, retaining the standard 2D Gaussian rasterizer for compositing. It computes view-dependent color and density ($\sigma$) for each Gaussian center, maps $\sigma$ directly to opacity, and composites using standard alpha blending.
 
 ### Octree-GS Rendering
-Initializes `GaussianModel` with dataset parameters including `feat_dim`, `n_offsets`, `fork`, `use_feat_bank`, `appearance_dim`, `add_opacity_dist`, `add_cov_dist`, `add_color_dist`, `add_level`, `visible_threshold`, `dist2level`, `base_layer`, `progressive`, `extend` [S7, unofficial]. Applies a compatibility patch to `gaussian_renderer.generate_neural_gaussians` to replace `ape_code[0]` with `ape_code` [S7, unofficial]. Sets the anchor mask for the current view using `gaussians.set_anchor_mask(view.camera_center, scene.loaded_iter, view.resolution_scale)` [S7, unofficial]. Prefilters voxels to determine visibility using `prefilter_voxel(view, gaussians, pipeline, background)` [S7, unofficial]. Renders the scene using `render(view, gaussians, pipeline, background, visible_mask=visible, ape_code=args.ape)` [S7, unofficial]. Clamps the rendered image to `[0.0, 1.0]` and saves it [S7, unofficial]. Records the number of visible Gaussians per view in `per_view_count.json` [S7, unofficial]. The `ape_code` integer argument passed to the render function defaults to 10 [S7, unofficial].
+Uses an octree structure to manage Gaussian visibility. It initializes `GaussianModel` with dataset parameters, sets anchor masks based on camera position, prefilters voxels for visibility, and renders the scene. It clamps the rendered image to $[0.0, 1.0]$ and records visible Gaussian counts per view [S8, unofficial]. Parameter `ape_code` (default 10) is passed to the render function [S8, unofficial].
 
 ### Unity 3DGS Rendering Pipeline Integration
-Inserts an additional sorting pass into each camera's command buffer [S8, unofficial]. Inserts draw calls for 3DGS objects into the existing rendering queue for transparent meshes based on their bounding boxes [S8, unofficial]. Differs from separate render texture approaches by avoiding an intermediate texture and color space conversion pass after alpha blending [S8, unofficial].
+Integrates 3DGS into the Unity engine by inserting an additional sorting pass into each camera's command buffer and draw calls for 3DGS objects into the transparent mesh queue based on bounding boxes. It avoids intermediate texture and color space conversion passes by rendering directly to the final target [S9, unofficial].
 
 ### Per-pixel Depth Comparison for Transparency
-A technique to resolve popping artifacts (temporal instability) caused by depth-sorting swaps by replacing global sorting with per-pixel depth comparison or ray-tracing [S9]. Popping artifacts arise from the depth-sorting step; as the camera moves, two overlapping Gaussians may swap their sort order, causing a sudden discontinuity in the alpha-blending accumulation [S9].
+Resolves popping artifacts caused by depth-sorting swaps by replacing global sorting with per-pixel depth comparison or ray-tracing [S10].
 
 ### Near-plane Culling
-A culling method using axis-aligned bounding boxes (AABB) to check depth and remove Gaussian points that are behind the camera near-plane, reducing unnecessary computations and memory accesses [S10]. Filters out Gaussian points that lie behind or too close to the near clipping plane before they enter the rendering pipeline [S10]. Checks each Gaussian's position relative to the camera near plane; discards or skips points that fail the test before projection [S10]. Culling condition: $z_{\max} < z_{\text{near}}$, where $z$ is the Gaussian center depth in camera coordinates, $\Delta z \ge 0$ is the half-extent of the AABB along the camera z-axis, $z_{\min} = z - \Delta z$, $z_{\max} = z + \Delta z$, and $z_{\text{near}}$ is the camera near-plane depth [S10]. Hardware unit design operates with a single MAC unit, latency of 4 cycles, processing inputs (x, y, depth) and view matrix row [3:0], using D flip-flops between operations for timing stability at 800 MHz FP16 [S10]. Achieves a 56% culling rate on the compressed model, saving 56% of unnecessary Gaussian point computations and memory accesses [S10]. Increases throughput from 15.81% to 35.94% (2.27× gain), raising FPS from 20.4 to 46.4 at 1080p [S10].
+Filters out Gaussian points behind or too close to the near clipping plane using axis-aligned bounding boxes (AABB) before projection. The culling condition is $z_{\max} < z_{\text{near}}$. This hardware unit design uses a single MAC unit, achieving a 56% culling rate and increasing throughput from 15.81% to 35.94% (2.27× gain) at 1080p [S11].
+
+### Radiance Field Reconstruction from Gaussians
+Renders RGB, depth, alpha, and normal maps from Gaussian splats. It initializes a background color tensor, iterates over viewpoints, extracts RGB, alpha, depth, and normals from the render package, and estimates the scene's bounding sphere [S12, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot T \cdot P)$ where $N$ is the number of Gaussians, $T$ is the number of tiles, and $P$ is the number of pixels per tile. In practice, culling and early termination reduce this significantly [S3, S4, unofficial].
-*   **Memory Complexity:** $O(N + H \cdot W)$ for storing Gaussian parameters and output buffers [S3, unofficial].
-*   **Performance:** On Apple Silicon (M1/M2/M3/M4) with MLX, the full pipeline (forward pass) for 1000 Gaussians at 128x128 resolution takes approximately 73ms [S4, unofficial]. The CUDA implementation (gsplat) is generally faster due to optimized kernels [S4, unofficial].
-*   **Strengths:** Differentiable end-to-end, supports view-dependent appearance via SH, efficient tiling-based rasterization [S2, S3, unofficial].
-*   **Limitations:** High memory usage for large scenes, artifacts from overlapping Gaussians, sensitivity to hyperparameters like `eps2d` and `alpha_cutoff` [S3, S4, unofficial].
-*   **When to use:** Novel view synthesis, real-time rendering of Gaussian splats, differentiable rendering for optimization [S2, S3, unofficial].
-*   **When not to use:** Scenes with extremely high Gaussian counts where memory is constrained, or when non-differentiable rendering is sufficient [S3, unofficial].
+*   **Time Complexity**: Dominated by projection and rasterization. Projection is $O(N)$ per Gaussian. Rasterization is $O(N \cdot T)$ where $T$ is the number of tiles, but optimized via tile-Gaussian intersection to only process visible Gaussians [S5, unofficial].
+*   **Memory Complexity**: $O(N)$ for Gaussian attributes. The `screenspace_points` tensor requires additional memory for gradients [S2, unofficial].
+*   **Performance**: Real-time performance on high-end GPUs (e.g., 100+ FPS at 1080p with millions of Gaussians) [S1]. On Apple Silicon via MLX, forward pass for 100K Gaussians at 256x256 takes ~62.6ms for projection and ~29.8ms for covariance [S5, unofficial].
+*   **Strengths**: High rendering speed, differentiable, explicit scene representation, view-dependent appearance via SH [S1].
+*   **Limitations**: High memory usage for large scenes (gigabytes), potential popping artifacts from depth sorting, limited integration with standard hardware rasterization pipelines without custom shaders [S1, S10].
+*   **When to Use**: Novel view synthesis, real-time rendering of dynamic scenes, applications requiring differentiable rendering for optimization [S1].
+*   **When Not to Use**: Low-end devices with limited VRAM without compression, environments requiring seamless integration with polygon-based hardware rasterization without custom pipelines [S1].
 
 ## Background
-The Gaussian Splatting Rendering Pipeline is based on the 3D Gaussian Splatting method introduced by Kerbl et al. in 2023 [S2, S4, unofficial]. It builds on the concept of splatting, where 3D primitives are projected to 2D and accumulated [S4, unofficial]. The pipeline has been implemented in various frameworks, including the original CUDA-based `diff-gaussian-rasterization` [S2, unofficial], the optimized `gsplat` library [S3, unofficial], and the MLX port `gsplat-mlx` for Apple Silicon [S3, unofficial]. It is widely used in 3D reconstruction, novel view synthesis, and SLAM systems [S3, unofficial].
+3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S1]. It builds upon EWA volume splatting [34] to efficiently compute the footprint of projected Gaussians [S1]. The method models a scene as a set of 3D Gaussians with shape and appearance parameters, optimized via differentiable rendering to match recorded images [S1]. It has become a backbone for modern 3DGS research, powering projects like SplaTAM, MonoGS, WildGS-SLAM, and nerfstudio [S5, unofficial]. Variants include compressed 3DGS for accelerated synthesis [S1], neural Gaussian rasterization [S1], and hardware accelerators [S11].
 
 ## Sources
-[S1] ldyken53/VEG, https://github.com/ldyken53/VEG, fetched 2026-10-26 (unofficial)
-[S2] hbb1/2d-gaussian-splatting, https://github.com/hbb1/2d-gaussian-splatting, fetched 2026-10-27 (unofficial)
-[S3] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
-[S4] RobotFlow-Labs/gsplat-mlx, https://github.com/RobotFlow-Labs/gsplat-mlx, fetched 2026-10-27 (unofficial)
-[S5] ashu1069/3D-Gaussian-Splatting-for-Novel-View-Synthesis, https://github.com/ashu1069/3D-Gaussian-Splatting-for-Novel-View-Synthesis, fetched 2026-10-27 (unofficial)
-[S6] Yang-SyZng/AVM-GS, https://github.com/Yang-SyZng/AVM-GS, fetched 2026-10-27 (unofficial)
-[S7] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)
-[S8] wuyize25/gsplat-unity, https://github.com/wuyize25/gsplat-unity, fetched 2026-10-27 (unofficial)
-[S9] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
-[S10] A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3683714, fetched 2026-10-27
+[S1] Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis, https://doi.org/10.1109/cvpr52733.2024.00985, fetched 2026-10-26
+[S2] ldyken53/VEG, https://github.com/ldyken53/VEG, fetched 2026-10-26 (unofficial)
+[S3] hbb1/2d-gaussian-splatting, https://github.com/hbb1/2d-gaussian-splatting, fetched 2026-10-27 (unofficial)
+[S4] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
+[S5] RobotFlow-Labs/gsplat-mlx, https://github.com/RobotFlow-Labs/gsplat-mlx, fetched 2026-10-27 (unofficial)
+[S6] ashu1069/3D-Gaussian-Splatting-for-Novel-View-Synthesis, https://github.com/ashu1069/3D-Gaussian-Splatting-for-Novel-View-Synthesis, fetched 2026-10-27 (unofficial)
+[S7] Yang-SyZng/AVM-GS, https://github.com/Yang-SyZng/AVM-GS, fetched 2026-10-27 (unofficial)
+[S8] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)
+[S9] wuyize25/gsplat-unity, https://github.com/wuyize25/gsplat-unity, fetched 2026-10-27 (unofficial)
+[S10] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+[S11] A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3683714, fetched 2026-10-27
+[S12] Zhaoyibinn/VGVGGT, https://github.com/Zhaoyibinn/VGVGGT, fetched 2026-10-27 (unofficial)

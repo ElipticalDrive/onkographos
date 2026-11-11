@@ -1,0 +1,227 @@
+# Sparse Voxel Octree Ray Casting with Distance Fields
+
+Also called: Distance Field Voxel Rendering
+
+## Overview
+A rendering method that ray-casts directly against a Sparse Voxel Octree (SVO) using distance fields to render isosurfaces, avoiding conversion to polygonal geometry [S1, unofficial]. It uses a hybrid octree structure: an octree down to a certain level, then bricks of voxels for the final levels [S1, unofficial]. Unlike [Sparse Voxel Octree Ray Tracing](2989-sparse-voxel-octree-ray-tracing.md) which may store down to individual voxel level, this method stores bricks of voxels at the bottom levels, which is more scalable for planetary scales and better suited for GPU application [S1, unofficial].
+
+## How it works
+**Inputs:** Ray origin, ray direction, SVO structure (hybrid octree with leaf bricks), distance field data.
+**Outputs:** Intersection point, surface normal, depth.
+
+**Data Structures:**
+*   **Voxel:** Contains a distance value (float) and material types (future/mentioned but not detailed) [S1, unofficial].
+*   **Brick:** A leaf node in the octree, consisting of a fixed-size grid of voxels. The implementation uses 8x8x8 voxel bricks [S1, unofficial].
+*   **Octree:** Hierarchical structure down to the brick level [S1, unofficial].
+
+**Steps:**
+1.  **Traverse Octree:** Traverse the octree from the root until arriving at a suitable level of detail or a leaf node (brick) [S1, unofficial].
+2.  **Ray-March Brick:** Ray-march through the chosen 8x8x8 leaf brick to find the accurate intersection [S1, unofficial].
+3.  **Compute Normal:** Calculate the normal at the intersection point. Normals can be pre-calculated and stored in the voxels or calculated at runtime from the gradient of the distance field [S1, unofficial]. Empirical testing suggests storing higher precision distance values and calculating the normal when needed is likely faster [S1, unofficial].
+4.  **Shade:** Use the normal and distance value for shading. Only the normal at the closest intersection is needed, so it only needs to be calculated once before shading [S1, unofficial].
+
+**Formulas:**
+The isosurface is rendered where the distance value equals zero:
+$$ d = 0 $$
+Voxels above ground have positive values; underground have negative values [S1, unofficial].
+
+**Parameters:**
+*   Brick size: 8x8x8 voxels per leaf node [S1, unofficial].
+*   Data resolution: 128x128x128 for the initial noise-blob data [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   Sharp edges (e.g., cubes) cannot be produced properly because normals are calculated from the distance field gradient, and data samples represent an area of space equivalent to at least a single voxel [S1, unofficial].
+*   Undersampling artifacts appear as lumpy blobs rather than hard square edges [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_cast_svo_distance_field(ray_origin, ray_direction, svo_root):
+    """
+    Ray-cast against a Sparse Voxel Octree using distance fields.
+    Assumes a hybrid octree where leaf nodes are 8x8x8 voxel bricks.
+    """
+    # Step 1: Traverse the octree to find the appropriate leaf brick
+    current_node = svo_root
+    while current_node is not None and not current_node.is_leaf():
+        # Determine which child octant the ray enters
+        # This depends on the specific octree traversal algorithm defined in parent article
+        # For this method, we assume standard octree traversal logic
+        child_index = get_octant_index(ray_origin, ray_direction, current_node.bounds)
+        current_node = current_node.children[child_index]
+    
+    # Step 2: Ray-march through the chosen leaf brick
+    if current_node is not None and current_node.is_leaf():
+        brick = current_node.brick
+        # Brick is an 8x8x8 grid of voxels
+        # Perform ray marching within the brick bounds
+        intersection = ray_march_brick(ray_origin, ray_direction, brick)
+        
+        if intersection is not None:
+            # Step 3: Compute normal
+            # Calculate normal from distance field gradient at intersection point
+            normal = compute_normal_from_gradient(intersection, brick)
+            
+            # Step 4: Return result
+            return {
+                'point': intersection,
+                'normal': normal,
+                'depth': distance(ray_origin, intersection)
+            }
+    
+    return None
+
+def ray_march_brick(ray_origin, ray_direction, brick):
+    """
+    Ray-march through an 8x8x8 voxel brick to find the zero-crossing of the distance field.
+    """
+    # Define brick bounds
+    brick_min = brick.min_bound
+    brick_max = brick.max_bound
+    
+    # Intersect ray with brick bounding box
+    t_min, t_max = intersect_bounding_box(ray_origin, ray_direction, brick_min, brick_max)
+    
+    if t_max < 0:
+        return None
+    
+    # Step size for marching
+    # Use a fixed step size based on voxel size or adaptive step
+    voxel_size = brick.voxel_size
+    step_size = voxel_size * 0.5 # Example step size
+    
+    t = t_min
+    
+    while t < t_max:
+        # Get world position
+        pos = ray_origin + ray_direction * t
+        
+        # Sample distance field at position
+        # Interpolate from surrounding voxels in the brick
+        d = sample_distance_field(pos, brick)
+        
+        # Check for isosurface (d = 0)
+        # Use a small epsilon for floating point comparison
+        if abs(d) < 1e-6:
+            return pos
+        
+        # Advance ray
+        # Simple marching; could use Newton-Raphson for faster convergence
+        t += step_size
+        
+    return None
+
+def sample_distance_field(pos, brick):
+    """
+    Sample the distance field at a given position using trilinear interpolation.
+    """
+    # Convert world position to brick-local coordinates
+    local_pos = pos - brick.min_bound
+    
+    # Determine voxel indices
+    voxel_size = brick.voxel_size
+    x = local_pos.x / voxel_size
+    y = local_pos.y / voxel_size
+    z = local_pos.z / voxel_size
+    
+    # Get voxel indices
+    ix = int(floor(x))
+    iy = int(floor(y))
+    iz = int(floor(z))
+    
+    # Get fractional parts
+    fx = x - ix
+    fy = y - iy
+    fz = z - iz
+    
+    # Sample 8 surrounding voxels
+    d000 = brick.voxels[ix, iy, iz].distance
+    d100 = brick.voxels[ix+1, iy, iz].distance
+    d010 = brick.voxels[ix, iy+1, iz].distance
+    d110 = brick.voxels[ix+1, iy+1, iz].distance
+    d001 = brick.voxels[ix, iy, iz+1].distance
+    d101 = brick.voxels[ix+1, iy, iz+1].distance
+    d011 = brick.voxels[ix, iy+1, iz+1].distance
+    d111 = brick.voxels[ix+1, iy+1, iz+1].distance
+    
+    # Trilinear interpolation
+    d00 = lerp(d000, d100, fx)
+    d01 = lerp(d010, d110, fx)
+    d10 = lerp(d001, d101, fx)
+    d11 = lerp(d011, d111, fx)
+    
+    d0 = lerp(d00, d01, fy)
+    d1 = lerp(d10, d11, fy)
+    
+    d = lerp(d0, d1, fz)
+    
+    return d
+
+def compute_normal_from_gradient(pos, brick):
+    """
+    Calculate the normal at a position by computing the gradient of the distance field.
+    """
+    epsilon = 1e-6
+    
+    # Compute partial derivatives using central differences
+    d_dx = sample_distance_field(pos + vec3(epsilon, 0, 0), brick) - sample_distance_field(pos - vec3(epsilon, 0, 0), brick)
+    d_dy = sample_distance_field(pos + vec3(0, epsilon, 0), brick) - sample_distance_field(pos - vec3(0, epsilon, 0), brick)
+    d_dz = sample_distance_field(pos + vec3(0, 0, epsilon), brick) - sample_distance_field(pos - vec3(0, 0, epsilon), brick)
+    
+    normal = normalize(vec3(d_dx, d_dy, d_dz))
+    
+    return normal
+
+def lerp(a, b, t):
+    return a + t * (b - a)
+
+def intersect_bounding_box(ray_origin, ray_direction, min_bound, max_bound):
+    """
+    Intersect a ray with an axis-aligned bounding box.
+    Returns t_min and t_max.
+    """
+    t_min = -inf
+    t_max = inf
+    
+    for i in range(3):
+        if ray_direction[i] == 0:
+            if ray_origin[i] < min_bound[i] or ray_origin[i] > max_bound[i]:
+                return None, None
+        else:
+            t1 = (min_bound[i] - ray_origin[i]) / ray_direction[i]
+            t2 = (max_bound[i] - ray_origin[i]) / ray_direction[i]
+            t_min = max(t_min, min(t1, t2))
+            t_max = min(t_max, max(t1, t2))
+            
+    if t_max < t_min:
+        return None, None
+        
+    return t_min, t_max
+
+def get_octant_index(ray_origin, ray_direction, bounds):
+    """
+    Determine which octant of the current node the ray enters.
+    This is a placeholder for the specific octree traversal logic.
+    """
+    # Placeholder: In a real implementation, this would use the ray direction
+    # and the center of the current node to determine the child index.
+    # For simplicity, we assume the ray always enters the first child.
+    # This is incorrect for general ray traversal and must be replaced
+    # with the correct logic from the parent article or standard octree traversal.
+    return 0
+```
+
+## Operating characteristics
+*   **Time Complexity:** Rendering a 128x128x128 SVO on GPU takes a few milliseconds, compared to a couple of hundred milliseconds on CPU [S1, unofficial].
+*   **Memory Complexity:** At the lowest detail level, 128x128x128 original data is effectively rendered at 16x16x16 resolution (1/512th of the data) [S1, unofficial].
+*   **Strengths:** Scalable for planetary scales; better suited for GPU application; avoids polygonal soup; allows for easier handling of Level of Detail (LOD) transitions; enables effects like cone tracing for shadows/GI [S1, unofficial].
+*   **Limitations:** Cannot produce truly sharp edges (e.g., cubes); undersampling artifacts appear as lumpy blobs [S1, unofficial].
+*   **When to use:** When rendering large-scale isosurfaces (e.g., virtual planets) where scalability and GPU performance are critical, and sharp polygonal edges are not required [S1, unofficial].
+*   **When not to use:** When sharp, hard-edged geometry is required, or when converting to polygonal geometry is preferred for other reasons [S1, unofficial].
+
+## Background
+Originated by Scott (author of the blog post) in 2012, building on concepts from Cyril Crassin's paper on SVOs [S1, unofficial]. The author initially attempted the Laine & Karras technique but switched to the Crassin-style approach due to scalability concerns for planetary scales [S1, unofficial]. Implemented in C++ on CPU for debugging, then ported to GPU using HLSL pixel shaders for real-time rendering [S1, unofficial].
+
+## Sources
+[S1] http://johnwhigham.blogspot.co.uk/2012/10/sparse-voxel-octrees-new-beginning.html, http://johnwhigham.blogspot.co.uk/2012/10/sparse-voxel-octrees-new-beginning.html, fetched 2026-10-30 (unofficial)

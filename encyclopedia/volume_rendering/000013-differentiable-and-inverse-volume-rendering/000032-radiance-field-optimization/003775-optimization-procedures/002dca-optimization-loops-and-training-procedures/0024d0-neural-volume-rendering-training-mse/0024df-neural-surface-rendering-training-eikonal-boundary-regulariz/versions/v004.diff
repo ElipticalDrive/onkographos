@@ -1,0 +1,117 @@
+--- v003.md
++++ v004.md
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-*   **Neural SDF Model:** An MLP that takes 3D coordinates $\mathbf{x}$ and outputs a scalar SDF value $d(\mathbf{x})$ and optionally color features [S1, unofficial]. The model often uses Harmonic Embedding for input coordinates [S1, unofficial]. Exact bit packing and layer sizes are Not given in the sources.
++*   **Neural SDF Model:** An MLP that takes 3D coordinates $\mathbf{x}$ and outputs a scalar SDF value $d(\mathbf{x})$ and optionally color features [S1, unofficial]. The model often uses Harmonic Embedding for input coordinates [S1, unofficial]. Exact bit packing and layer sizes are Not given in the sources [S1, S2, unofficial].
+ *   **Ray Bundle:** Contains origin $\mathbf{o}$ and direction $\mathbf{d}$ for each pixel, generated from pixel coordinates and camera intrinsics/extrinsics [S1, S2, unofficial].
+ *   **Training Batch:** Contains image tensor, camera object, and iteration index [S1, unofficial].
+@@ -63,5 +63,5 @@
+ *   `checkpoint_interval`: Number of epochs between model checkpoints [S1, unofficial].
+ *   `render_interval`: Number of epochs between visualization renders [S1, unofficial].
+-*   Typical values: Not given in the sources.
++*   Typical values: Not given in the sources [S1, S2, unofficial].
+ 
+ **Pseudocode:**
+@@ -84,7 +84,6 @@
+     # Optional: Pretrain SDF with sphere loss if configured
+     if cfg.training.pretrain_sphere:
+-        # Standard operation: optimize SDF to match a ground-truth sphere SDF
+         for _ in range(cfg.training.pretrain_epochs):
+-            sphere_points = get_random_points(batch_size, bounds, device)
++            sphere_points = torch.rand(batch_size, 3, device=device) * (bounds.max - bounds.min) + bounds.min
+             sphere_sdf = compute_sphere_sdf(sphere_points, cfg.sphere_cfg)
+             pred_sdf = model.get_distance(sphere_points)
+@@ -100,9 +99,11 @@
+             
+             # 1. Sample random points for regularization
+-            eikonal_points = get_random_points(batch_size, bounds, device)
++            eikonal_points = torch.rand(batch_size, 3, device=device) * (bounds.max - bounds.min) + bounds.min
+             
+             # 2. Compute SDF and gradients at random points
+             eikonal_distances = model.get_distance(eikonal_points)
+-            eikonal_gradients = model.get_gradient(eikonal_points)
++            eikonal_gradients = torch.autograd.grad(
++                eikonal_distances.sum(), eikonal_points, create_graph=True
++            )[0]
+             
+             # 3. Compute Eikonal Loss: ||grad(d)||^2 - 1
+@@ -114,11 +115,15 @@
+             
+             # 5. Sample random pixels for rendering
+-            xy_grid = get_random_pixels_from_image(batch_size, cfg.data.image_size, camera)
++            h, w = cfg.data.image_size
++            u = torch.randint(0, w, (batch_size, 1), dtype=torch.float32, device=device)
++            v = torch.randint(0, h, (batch_size, 1), dtype=torch.float32, device=device)
++            xy_grid = torch.cat([u, v], dim=-1)
+             
+             # 6. Generate rays from pixels
+-            ray_bundle = get_rays_from_pixels(xy_grid, cfg.data.image_size, camera)
++            origins, directions = camera.generate_rays(u, v)
++            ray_bundle = {'origins': origins, 'directions': directions}
+             
+             # 7. Sample ground truth RGB
+-            rgb_gt = sample_images_at_xy(image, xy_grid)
++            rgb_gt = image[0, v.long().clamp(0, h-1), u.long().clamp(0, w-1), :]
+             
+             # 8. Render predicted RGB
+@@ -142,19 +147,13 @@
+         # Optional: Save checkpoints or render visualizations
+         if epoch % cfg.training.checkpoint_interval == 0:
+-            # Standard operation: serialize model and optimizer state to disk
+             torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch}, cfg.checkpoint_path)
+         if epoch % cfg.training.render_interval == 0:
+-            # Standard operation: render a test image and save to disk
+-            test_ray_bundle = generate_test_rays(camera, cfg.data.image_size)
++            test_origins, test_directions = camera.generate_rays(
++                torch.arange(w, device=device).unsqueeze(1).repeat(1, h).view(-1, 1),
++                torch.arange(h, device=device).unsqueeze(0).repeat(w, 1).view(-1, 1)
++            )
++            test_ray_bundle = {'origins': test_origins, 'directions': test_directions}
+             test_out = model(test_ray_bundle)
+             torch.save(test_out['color'], cfg.render_path)
+-
+-def get_random_points(batch_size, bounds, device):
+-    """Sample uniform random points within a 3D bounding box."""
+-    min_bound = torch.tensor(bounds.min, device=device)
+-    max_bound = torch.tensor(bounds.max, device=device)
+-    points = torch.rand(batch_size, 3, device=device)
+-    points = points * (max_bound - min_bound) + min_bound
+-    return points
+ 
+ def compute_sphere_sdf(points, cfg):
+@@ -163,33 +162,4 @@
+     signed_distance = torch.linalg.norm(torch.maximum(diff, torch.zeros_like(diff)), dim=-1) + torch.minimum(torch.max(diff, dim=-1)[0], torch.zeros_like(diff[..., 0]))
+     return signed_distance.unsqueeze(-1)
+-
+-def get_random_pixels_from_image(batch_size, image_size, camera):
+-    """Sample random pixel coordinates (u, v)."""
+-    h, w = image_size
+-    u = torch.randint(0, w, (batch_size, 1), dtype=torch.float32)
+-    v = torch.randint(0, h, (batch_size, 1), dtype=torch.float32)
+-    return torch.cat([u, v], dim=-1)
+-
+-def get_rays_from_pixels(xy_grid, image_size, camera):
+-    """Generate ray origins and directions from pixel coordinates and camera."""
+-    h, w = image_size
+-    u, v = xy_grid[:, 0], xy_grid[:, 1]
+-    origins, directions = camera.generate_rays(u, v)
+-    return {'origins': origins, 'directions': directions}
+-
+-def sample_images_at_xy(image, xy_grid):
+-    """Sample RGB values from the image tensor at given pixel coordinates."""
+-    h, w = image.shape[1], image.shape[2]
+-    u = xy_grid[:, 0].long().clamp(0, w-1)
+-    v = xy_grid[:, 1].long().clamp(0, h-1)
+-    rgb_gt = image[0, v, u, :]
+-    return rgb_gt
+-
+-def generate_test_rays(camera, image_size):
+-    """Generate rays for the full image for visualization."""
+-    h, w = image_size
+-    u, v = torch.meshgrid(torch.arange(w), torch.arange(h), indexing='ij')
+-    xy_grid = torch.cat([u.unsqueeze(-1), v.unsqueeze(-1)], dim=-1).float()
+-    return get_rays_from_pixels(xy_grid, image_size, camera)
+ ```
+ 
