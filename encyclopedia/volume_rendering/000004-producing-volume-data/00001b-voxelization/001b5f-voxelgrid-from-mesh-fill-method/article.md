@@ -1,18 +1,21 @@
 # VoxelGrid from Mesh (Fill Method)
 ## Overview
-The Fill Method generates a solid voxel grid from a mesh by computing surface occupancy and then applying binary morphological hole filling [S1, unofficial]. It builds on [Voxelization](12-voxelization.md) by using a two-step surface-then-fill approach rather than direct volume rasterization or geometric intersection tests.
+The Fill Method generates a solid voxel grid from a mesh by computing surface occupancy and then applying binary morphological hole filling [S1, unofficial]. It builds on [Voxelization](12-voxelization.md) by using a two-step surface-then-fill approach rather than direct volume rasterization or geometric intersection tests [S1, unofficial].
 ## How it works
 **Inputs and Outputs**
-- Input: A mesh object (vertices and faces) and a target grid resolution (integer).
-- Output: A 3D boolean occupancy grid where `True` indicates a filled voxel.
+- Input: A mesh object (vertices and faces) and a target grid resolution (integer) [S1, unofficial].
+- Output: A 3D boolean occupancy grid where `True` indicates a filled voxel [S1, unofficial].
 
 **Data Structures**
-- `occ`: A 3D NumPy array of shape `(resolution, resolution, resolution)` with boolean dtype.
+- `occ`: A 3D NumPy array of shape `(resolution, resolution, resolution)` with boolean dtype [G].
 
 **Steps**
-1. **Validate Bounds**: Check if the mesh bounds are within the normalized range $[-0.5, 0.5]$. Raise a `ValueError` if any bound satisfies `np.abs(bounds) >= 0.5` [S1, unofficial].
+1. **Validate Bounds**: Check if the mesh bounds are within the normalized range $[-0.5, 0.5]$; raise a `ValueError` if `np.abs(bounds) >= 0.5` [S1, unofficial].
 2. **Surface Voxelization**: Compute the surface occupancy grid by voxelizing the mesh surface [S1, unofficial].
 3. **Fill Holes**: Apply binary morphological hole filling to the surface grid to produce the final occupancy grid [S1, unofficial].
+
+**Formulas**
+Coordinate mapping for grid indices follows $idx = \lfloor (x - origin) / voxel\_size \rfloor$, where $x$ is the world coordinate, $origin$ is the grid origin, and $voxel\_size$ is the physical dimension of a voxel [G].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -34,9 +37,8 @@ def voxelize_fill(mesh, resolution):
     """
     # Step 1: Validate bounds
     vertices = np.asarray(mesh.vertices)
-    bounds_min = np.min(vertices, axis=0)
-    bounds_max = np.max(vertices, axis=0)
-    if np.any(np.abs(bounds_min) >= 0.5) or np.any(np.abs(bounds_max) >= 0.5):
+    bounds = np.concatenate([vertices.min(axis=0), vertices.max(axis=0)])
+    if np.any(np.abs(bounds) >= 0.5):
         raise ValueError("Bounds must be within [-0.5, 0.5]")
 
     # Step 2: Compute surface occupancy
@@ -44,10 +46,8 @@ def voxelize_fill(mesh, resolution):
     occ = np.zeros((resolution, resolution, resolution), dtype=bool)
     origin = np.array([-0.5, -0.5, -0.5])
     voxel_size = 1.0 / resolution
-    for v in vertices:
-        idx = np.floor((v - origin) / voxel_size).astype(int)
-        if np.all(idx >= 0) and np.all(idx < resolution):
-            occ[idx[0], idx[1], idx[2]] = True
+    # The source does not specify the exact surface rasterization algorithm [G]
+    # occ = voxelize_surface(mesh, resolution, origin, voxel_size)
 
     # Step 3: Fill holes
     occ = ndimage.morphology.binary_fill_holes(occ)
@@ -55,7 +55,7 @@ def voxelize_fill(mesh, resolution):
 ```
 
 **Parameters**
-- `resolution`: The number of voxels along each axis. Typical values: Not given in the sources.
+- `resolution`: The number of voxels along each axis. Typical values: Not given in the sources [G].
 
 **Edge Cases and Pitfalls**
 - **Bounds Validation**: The method strictly requires bounds within $[-0.5, 0.5]$; out-of-bounds inputs raise a `ValueError` [S1, unofficial].
@@ -68,17 +68,17 @@ def voxelize_fill(mesh, resolution):
 Expands foreground voxels based on neighborhood connectivity to ensure watertightness. Used as a post-processing step after surface voxelization to propagate the filled state to adjacent voxels.
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources.
-- **Memory Complexity**: Not given in the sources.
-- **Strengths**: Not given in the sources.
-- **Limitations**: Not given in the sources.
-- **When to Use**: Not given in the sources.
-- **When Not to Use**: Not given in the sources.
+- **Time Complexity**: Not given in the sources [G].
+- **Memory Complexity**: Not given in the sources [G].
+- **Strengths**: Not given in the sources [G].
+- **Limitations**: Not given in the sources [G].
+- **When to Use**: Not given in the sources [G].
+- **When Not to Use**: Not given in the sources [G].
 
 ## Background
 - **Origin**: Part of the `differentiable_volumetric_rendering` repository [S1, unofficial].
-- **History**: Not given in the sources.
-- **Usage**: Not given in the sources.
+- **History**: Not given in the sources [G].
+- **Usage**: Not given in the sources [G].
 
 ## Sources
 [S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)

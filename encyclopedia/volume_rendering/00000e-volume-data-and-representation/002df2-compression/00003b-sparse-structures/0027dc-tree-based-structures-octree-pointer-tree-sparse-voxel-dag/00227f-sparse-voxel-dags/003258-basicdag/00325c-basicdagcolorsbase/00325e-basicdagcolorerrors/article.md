@@ -1,17 +1,26 @@
 # BasicDAGColorErrors
-
-
 ## Overview
-BasicDAGColorErrors is a specific implementation of color data handling for Sparse Voxel DAGs that computes a binary error flag to assess the quality of compressed color representations. It solves the problem of adaptive quality control by comparing compressed and uncompressed color values. It differs from other siblings in the BasicDAGColorsBase family by focusing exclusively on error metric generation rather than storage optimization or compression algorithms.
+BasicDAGColorErrors computes a binary error flag by comparing compressed and uncompressed color representations for adaptive quality control [S1, unofficial]. It differs from other siblings in the BasicDAGColorsBase family by focusing exclusively on error metric generation rather than storage optimization or compression algorithms [G]. The algorithm retrieves compressed and uncompressed colors, computes their error via `ColorUtils::color_error()`, and returns `1.f` if the error exceeds `0.04`, otherwise `0.f` [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_color(leave_count):
+    # Retrieve compressed and uncompressed colors based on leave_count (Not given in the sources.)
+    compressed_color = retrieve_compressed_color(leave_count)
+    uncompressed_color = retrieve_uncompressed_color(leave_count)
+    error = color_error(compressed_color, uncompressed_color)
+    return 1.0 if error > 0.04 else 0.0
+```
 
 ## Shared principles
-Builds on [BasicDAGColorsBase](6742-basicdagcolorsbase.md). The family shares a specific memory layout strategy where leaf counts are stored in a dedicated, enclosed array rather than interleaved with the DAG node indices. This design ensures that the core DAG structure, which stores node indices in a flat array for fast traversal, remains compact and uniform.
+Builds on [BasicDAGColorsBase](6742-basicdagcolorsbase.md).
 
 ## Subtopics
 This family contains no further child articles.
 
 ## Background
-The method originates from the HashDAG project by Phyronnaz [S1, unofficial]. It is used in the context of real-time volume rendering and compression, specifically within the Python-based analysis tools provided in the repository.
+Not given in the sources.
 
 ## Sources
 [S1] Phyronnaz/HashDAG, https://github.com/Phyronnaz/HashDAG, fetched 2026-10-26 (unofficial)

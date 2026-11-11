@@ -3,123 +3,89 @@
 Also called: Linear Compositing
 
 ## Overview
-Average Compositing is a volume rendering technique that produces an X-ray-like image by integrating all sampled values along a ray with equal weight, ignoring opacity [S1, S2, unofficial]. It differs from Alpha Compositing and Accumulation methods by discarding the emission-absorption model and early ray termination, treating the volume as a uniform medium where every sample contributes equally to the final pixel intensity [S1, S2, unofficial].
+Average Compositing is a volume rendering technique that produces an X-ray-like image by sending a ray through the volume and compositing all found values with the same weight, taking no opacity into account [S1, unofficial][S2, unofficial]. It differs from Alpha Compositing and Accumulation methods by treating every sample equally regardless of depth or transparency [S1, unofficial][S2, unofficial].
 
 ## How it works
-**Inputs:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a scalar volume dataset $V$; a set of sample points $\{p_i\}$ along the ray within the volume bounds.
-**Outputs:** A single scalar intensity value $I$ for the pixel.
-
-**Data Structures:**
-- Sample Point $p_i$: Contains 3D coordinates $(x, y, z)$ and interpolated scalar value $v_i = V(p_i)$.
-- Ray: Defined by origin $\mathbf{o}$ and direction vector $\mathbf{d}$.
-- Step Size $\Delta s$: Constant distance between samples along the ray.
-
+**Inputs:** Ray defined by origin and direction; scalar volume dataset. Not given in the sources.
+**Outputs:** Single scalar intensity value for the pixel. Not given in the sources.
+**Data Structures:** Not given in the sources.
 **Numbered Steps:**
-1. Initialize a sum accumulator $S = 0$ and a sample counter $N = 0$ [G].
-2. Cast a ray through the volume, sampling at regular intervals $\Delta s$ [S1, S2, unofficial].
-3. For each sample point $p_i$ along the ray:
-   a. Interpolate the scalar value $v_i$ from the volume dataset at $p_i$.
-   b. Add $v_i$ to the sum: $S \leftarrow S + v_i$.
-   c. Increment the counter: $N \leftarrow N + 1$.
-4. Compute the average intensity: $I = \frac{S}{N}$ [S1, S2, unofficial].
-5. Return $I$ as the pixel color/intensity.
-
-**Formulas:**
-$$ I = \frac{1}{N} \sum_{i=1}^{N} v_i $$
-Where:
-- $I$ is the final pixel intensity.
-- $N$ is the total number of samples taken along the ray within the volume.
-- $v_i$ is the scalar value (e.g., density or attenuation coefficient) at the $i$-th sample point.
-
-**Parameters:**
-- Step Size $\Delta s$: Determines sampling density. Not given in the sources.
-- Thresholding: Unlike isosurface extraction, no threshold is applied to filter values; all samples are included [S1, S2, unofficial].
-
-**Edge Cases and Pitfalls:**
-- **Empty Ray:** If the ray does not intersect the volume, $N=0$. Division by zero must be handled, typically by returning a background color [G].
-- **Boundary Precision:** Samples falling exactly on volume boundaries may require consistent clamping or extrapolation logic to avoid artifacts [G].
-- **Noise Amplification:** Since all values are averaged, noise in the volume data is preserved and may be visible in the final image, unlike MIP which highlights structures [S1, S2, unofficial].
-
+1. Send a ray through the volume [S1, unofficial][S2, unofficial].
+2. Composite all found values with the same weight [S1, unofficial][S2, unofficial].
+**Formulas:** Not given in the sources.
+**Parameters:** Step size and sampling density are not given in the sources.
+**Edge Cases and Pitfalls:** If the ray does not intersect the volume, the sample count is zero; a guard must return a background value to avoid division by zero [G].
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def average_compositing(ray_origin, ray_direction, volume, step_size, volume_bounds):
+def average_compositing(ray_origin, ray_direction, volume_sample_fn, step_size, volume_min, volume_max):
     """
     Computes average intensity along a ray through a volume.
-    
     Args:
         ray_origin: (x, y, z) tuple
         ray_direction: (dx, dy, dz) tuple, assumed normalized
-        volume: Object with method sample(x, y, z) returning scalar value
+        volume_sample_fn: callable returning scalar at (x, y, z)
         step_size: float, distance between samples
-        volume_bounds: Object with method contains(x, y, z) returning bool
-        
+        volume_min: (x, y, z) tuple, lower bounds
+        volume_max: (x, y, z) tuple, upper bounds
     Returns:
-        float: Average intensity, or background value if no intersection
+        float: Average intensity, or 0.0 if no intersection
     """
     sum_values = 0.0
     count = 0
-    
-    # Start slightly inside the volume to avoid boundary issues [G]
     t = 0.0
-    step_vector = (ray_direction[0] * step_size, 
-                   ray_direction[1] * step_size, 
+    step_vector = (ray_direction[0] * step_size,
+                   ray_direction[1] * step_size,
                    ray_direction[2] * step_size)
-    
+
     while True:
-        # Calculate current sample position
         x = ray_origin[0] + ray_direction[0] * t
         y = ray_origin[1] + ray_direction[1] * t
         z = ray_origin[2] + ray_direction[2] * t
-        
-        # Check if point is within volume bounds
-        if not volume_bounds.contains(x, y, z):
+
+        if not (volume_min[0] <= x <= volume_max[0] and
+                volume_min[1] <= y <= volume_max[1] and
+                volume_min[2] <= z <= volume_max[2]):
             break
-            
-        # Sample the volume
-        value = volume.sample(x, y, z)
-        
-        # Accumulate
+
+        value = volume_sample_fn(x, y, z)
         sum_values += value
         count += 1
-        
-        # Advance along ray
         t += step_size
-        
-    # Handle case where ray misses volume
+
     if count == 0:
-        return 0.0 # Background value [G]
-        
+        return 0.0
+
     return sum_values / count
 ```
 
 ## Subtopics
 
 ### [Alpha Compositing Ray Casting](922-alpha-compositing-ray-casting.md)
-Uses the over operator with opacity; choose when transparency and depth cues are needed.
+Uses the over operator with opacity; choose when transparency and depth cues are needed [G].
 
 ### [Ray Compositing and Accumulation](3449-ray-compositing-and-accumulation.md)
-Accumulates intensity until opacity threshold is met; choose for emission-absorption models.
+Accumulates intensity until opacity threshold is met; choose for emission-absorption models [G].
 
 ### [Raymarch Blending](5322-raymarch-blending.md)
-General blending of samples; choose for flexible compositing rules.
+General blending of samples; choose for flexible compositing rules [G].
 
 ### [Alpha Blending](5750-alpha-blending.md)
-Standard alpha blending; choose for 2D/3D overlay compositing.
+Standard alpha blending; choose for 2D/3D overlay compositing [G].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$, where $N$ is the number of samples along the ray. Linear with respect to ray length and sampling density.
-- **Memory Complexity:** $O(1)$ per ray, as only a running sum and count are needed.
+- **Time Complexity:** $O(N)$, where $N$ is the number of samples along the ray [G].
+- **Memory Complexity:** $O(1)$ per ray, requiring only a running sum and count [G].
 - **Measured Performance:** Not given in the sources.
-- **Strengths:** Simple to implement; computationally inexpensive; produces X-ray-like views useful for seeing internal structures without occlusion from front layers [S1, S2, unofficial].
-- **Limitations:** Ignores opacity, leading to a lack of depth perception; sensitive to noise; does not highlight high-intensity structures as effectively as MIP [S1, S2, unofficial].
-- **When to use:** When an X-ray-like overview of the entire volume is desired, and opacity/depth cues are not critical.
-- **When not to use:** When transparency, occlusion, or highlighting of specific high-intensity features (like vessels in MIP) is required [S1, S2, unofficial].
+- **Strengths:** Simple to implement; produces an X-ray-like overview of the entire volume [S1, unofficial][S2, unofficial].
+- **Limitations:** Ignores opacity and depth cues; does not highlight high-intensity structures [S1, unofficial][S2, unofficial].
+- **When to use:** When an X-ray-like overview of the entire volume is desired, and opacity or depth cues are not critical [S1, unofficial][S2, unofficial].
+- **When not to use:** When transparency, occlusion, or highlighting of specific high-intensity features is required [S1, unofficial][S2, unofficial].
 
 ## Background
-Average Compositing is a fundamental technique in Direct Volume Rendering (DVR). It is often contrasted with Maximum Intensity Projection (MIP) and Accumulation compositing in introductory DVR literature [S1, S2, unofficial]. It is used in medical imaging to provide a holistic view of anatomical structures, similar to traditional X-rays but derived from volumetric data [S1, S2, unofficial].
+Average Compositing is a compositing scheme used in Direct Volume Rendering [S1, unofficial][S2, unofficial]. It is described alongside Maximum Intensity Projection (MIP) and Accumulation compositing in introductory literature [S1, unofficial][S2, unofficial].
 
 ## Sources
-[S1] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
+[S1] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume_Rendering, fetched 2026-10-25 (unofficial)
 [S2] [PDF] Direct Volume Rendering | CGL @ ETHZ, https://cgl.ethz.ch/teaching/former/scivis_07/Notes/stuff/StuttgartCourse/VIS-Modules-06-Direct_Volume_Rendering.pdf, fetched 2026-10-26 (unofficial)

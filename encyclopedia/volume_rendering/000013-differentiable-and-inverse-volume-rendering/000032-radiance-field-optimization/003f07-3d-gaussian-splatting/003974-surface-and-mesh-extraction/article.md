@@ -1,0 +1,32 @@
+# Surface and Mesh Extraction
+
+Also called: Gaussian Surface Extraction, Mesh Generation from Gaussians, 3D Segmentation from Gaussians
+
+## Overview
+This family comprises methods for deriving structured geometric representations—specifically triangulated meshes and semantic segmentations—from trained 3D Gaussian Splatting (3DGS) models. Standard 3DGS represents scenes as unstructured point clouds of opaque ellipsoids, which lack explicit surface topology and semantic grouping. These methods solve the problem of extracting editable, watertight meshes or distinct object parts from these implicit representations. They differ from sibling methods by focusing on post-training analysis or hybrid initialization rather than the core rendering pipeline or densification strategies.
+
+## Shared principles
+All methods in this family operate on the output of a trained 3D Gaussian Splatting model. The fundamental data structure is the set of $N$ Gaussian primitives $\{G_i\}$, where each primitive $i$ is defined by:
+*   Center position $\mathbf{p}_i \in \mathbb{R}^3$ [S1].
+*   3D covariance matrix $\mathbf{\Sigma}_i \in \mathbb{R}^{3\times3}$, parameterized as $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$ using rotation $\mathbf{R}_i$ and scaling $\mathbf{S}_i$ [S1].
+*   Opacity $\alpha_i \in [0, 1]$ [S1].
+*   View-dependent color represented by spherical harmonics [S1].
+
+The rendering process projects these 3D Gaussians into 2D screen space using an affine transformation $\mathbf{J}_i$ to compute the 2D covariance $\mathbf{\Sigma}'_i = \mathbf{J}_i \mathbf{\Sigma}_{ic} \mathbf{J}_i^T$, followed by alpha blending to produce the final image [S1]. Surface and segmentation methods leverage this differentiable rendering capability or the geometric properties of the Gaussians (position, normal derived from covariance) to infer higher-level structures.
+
+## Subtopics
+
+### [Gaussian Opacity Fields (GOF) Mesh Extraction](3692-gaussian-opacity-fields-gof-mesh-extraction.md)
+A method to extract a 3-D triangulated mesh from a trained Gaussian model without retraining. It constructs a volumetric density field from the Gaussian opacities and extracts an isosurface using marching cubes [3692-gaussian-opacity-fields-gof-mesh-extraction.md]. Choose this when a watertight mesh is required for downstream geometric processing.
+
+### [Distance-based Gaussian Splatting](7411-distance-based-gaussian-splatting.md)
+Integrates a pre-existing large-scale mesh with 3D Gaussian splats by classifying splats as tightly-bound or loosely-bound based on distance to the mesh surface [7411-distance-based-gaussian-splatting.md]. It solves GPU memory redundancy and artifacts from dense mesh initialization by masking occluded splats and applying normal consistency losses to tightly-bound splats [7411-distance-based-gaussian-splatting.md]. Choose this when initializing Gaussians from a known mesh to reduce memory usage and improve surface adherence.
+
+### [2D-Lift-3D Scene Segmentation](11513-2d-lift-3d-scene-segmentation.md)
+Segments 3D Gaussian primitives by lifting 2D segmentation masks from a reference view into 3D space using multi-view label voting [11513-2d-lift-3d-scene-segmentation.md]. It solves partial scene editing by decomposing the scene into distinct parts without learnable feature optimization [11513-2d-lift-3d-scene-segmentation.md]. Choose this for training-free semantic editing and part decomposition.
+
+## Background
+3D Gaussian Splatting was introduced as a real-time rendering technique [1795-3d-gaussian-splatting.md]. Subsequent research identified the need for explicit geometry and semantics. Mesh extraction methods like GOF adapted volume rendering techniques to Gaussian fields. Distance-based methods hybridized traditional mesh rendering with Gaussian appearance modeling. Segmentation methods leveraged foundation models like SAM to bridge 2D and 3D representations.
+
+## Sources
+[S1] Child article notes for 7411-distance-based-gaussian-splatting.md and 11513-2d-lift-3d-scene-segmentation.md.

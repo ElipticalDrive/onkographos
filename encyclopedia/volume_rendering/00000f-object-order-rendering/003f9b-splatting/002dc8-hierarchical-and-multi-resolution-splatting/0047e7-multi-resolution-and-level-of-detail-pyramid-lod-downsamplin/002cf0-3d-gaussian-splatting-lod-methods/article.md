@@ -1,161 +1,163 @@
 # 3D Gaussian Splatting LOD methods
 
-Also called: RTGS, Hierarchical 3DGS, LODGE, EAGLES, SOGS, H-3DGS, SPTs, Virtual Memory for 3D Gaussian Splatting, Budgeted Gaussian Splatting, Iterative Gaussian Synopsis, Scale-Adaptive Gaussian Splatting, Multi-scale filtering, LightGaussian, Gaussian clustering and merging, Unreachable Gaussian Handling
+Also called: RTGS, Hierarchical 3DGS, LODGE, EAGLES, SOGS, Unreachable Gaussian Handling
 
 ## Overview
-3D Gaussian Splatting (3DGS) Level-of-Detail (LOD) methods address the prohibitive memory consumption and rendering latency of monolithic 3D Gaussian representations, particularly in large-scale or high-fidelity scenes. While standard 3DGS requires storing and rasterizing all primitives, LOD methods decompose the scene into hierarchical structures or compressed representations to dynamically select the appropriate granularity based on camera distance, resolution, or hardware constraints. These methods distinguish themselves from sibling techniques like [Hierarchical Splatting](1168-hierarchical-splatting.md) by specifically adapting the 3DGS primitive (Gaussian) properties—such as covariance, opacity, and spherical harmonics—into multi-resolution hierarchies or quantized codebooks, rather than relying solely on generic point-cloud or voxel-based aggregation.
+3D Gaussian Splatting LOD methods address the memory bottlenecks and rendering latency of standard 3D Gaussian Splatting (3DGS) by reducing primitive redundancy through spatial, attribute-based, or hierarchical strategies [S1, S2, unofficial][S3]. Unlike monolithic 3DGS which stores all primitives in VRAM, these methods employ multi-level redundancy reduction, cluster-based octrees, or virtual memory paging to enable interactive rendering of large-scale scenes [S1, S2, S4, unofficial]. They are distinguished from sibling methods like [Hierarchical Splatting](1168-hierarchical-splatting.md) by their specific adaptation to the differentiable Gaussian rasterization pipeline, often integrating LOD selection directly into the training or compression process rather than relying solely on post-hoc spatial culling [S2, unofficial][S3].
 
 ## How it works
-The implementation of 3DGS LOD methods varies significantly by variant, but they generally follow a pattern of spatial partitioning, attribute compression, or hierarchical merging. Below are the core mechanisms for the primary families.
+The implementation of 3D Gaussian Splatting LOD methods varies significantly depending on the specific variant (hierarchical, compression-based, or memory-mapped). However, the general workflow for hierarchical and redundancy-reduction methods follows these steps:
 
-### Hierarchical and Tree-Based LOD (H-3DGS, Octree-GS, SPTs)
-These methods build a spatial hierarchy (octree or sequential point tree) to manage LOD.
+**Inputs:** A set of 3D Gaussians $\mathcal{G} = \{g_i\}$, where each $g_i$ is defined by mean position $\mu_i$, covariance $\Sigma_i$ (or scale $s_i$ and rotation $q_i$), opacity $\alpha_i$, and spherical harmonic (SH) coefficients $c_{i,lm}$.
+**Outputs:** A reduced set of Gaussians $\mathcal{G}'$ or a hierarchical structure enabling dynamic LOD selection.
 
-**Inputs:** A set of optimized 3D Gaussians $\mathcal{G} = \{g_i\}$, where each $g_i$ has position $\mu_i$, covariance $\Sigma_i$ (or scale $s_i$ and rotation $q_i$), opacity $\alpha_i$, and spherical harmonics coefficients $c_{i, l, m}$.
-**Outputs:** A hierarchical structure (e.g., Octree or SPT) and a rendering pipeline that traverses this structure.
+### 1. Redundancy Reduction and Clustering (RTGS / Hierarchical 3DGS)
+Methods like RTGS and Hierarchical 3DGS reduce the Gaussian count by identifying and merging or removing redundant primitives [S1, S2, unofficial].
 
-**Data Structures:**
-1.  **Octree Node:** Stores aggregated Gaussian properties (mean position, merged covariance, total opacity) and a pointer to children or a leaf Gaussian.
-2.  **Sequential Point Tree (SPT):** A dynamic tree structure where nodes represent clusters of Gaussians. Each node maintains a "cut" level indicating the current LOD.
+1.  **Spatial Overlap Analysis:** Compute the spatial overlap between Gaussians. Gaussians with high spatial overlap and similar radiance properties are identified as redundant [S1, unofficial].
+2.  **Temporal Consistency (RTGS):** For dynamic or multi-view consistency, assess temporal consistency of Gaussian attributes across views. Gaussians that do not contribute significantly to novel view synthesis are flagged for removal [S1, unofficial].
+3.  **Cluster Formation (Hierarchical 3DGS):** Organize Gaussians into an octree-like tree structure. Each node represents a spatial region and stores aggregate properties (mean position, average color/density, total opacity) derived from its children [S2, unofficial][S3].
+4.  **LOD Selection:** During rendering, traverse the hierarchy. Select a node as a leaf (rendered as a single representative primitive) if its projected screen-space footprint is small or its local error metric $E$ is below a threshold $\epsilon$ [S2, unofficial][S3]. If the error exceeds the threshold, recurse to children [S2, unofficial].
+5.  **Primitive Aggregation:** When a node is selected, merge children into a single Gaussian. The merged covariance $\Sigma_{parent}$ and opacity $\alpha_{parent}$ are computed as weighted sums/averages of children attributes [S3].
 
-**Algorithm: Hierarchical Construction and Rendering (Generic)**
-1.  **Initialization:** Start with the full set of Gaussians $\mathcal{G}$.
-2.  **Clustering/Merging:**
-    *   Group Gaussians into spatial clusters (e.g., using an octree grid or anchor points).
-    *   For each cluster, compute a representative Gaussian $g_{parent}$ by merging children properties.
-    *   *Merging Formula (Approximate):* The mean $\mu_{parent}$ is the weighted average of children means. The covariance $\Sigma_{parent}$ is the weighted sum of children covariances plus the weighted outer product of mean differences. Opacity $\alpha_{parent}$ is the sum of children opacities (capped at 1.0). [S2, unofficial][S4, unofficial]
-3.  **Hierarchy Construction:**
-    *   Recursively subdivide clusters until a minimum size or maximum depth is reached.
-    *   In SPTs, this is done dynamically during training via densification and pruning. [S4, unofficial]
-4.  **Rendering Traversal:**
-    *   For each pixel or tile, traverse the tree from the root.
-    *   **Criterion:** Stop at node $N$ if the projected screen-space footprint of $N$ is smaller than a threshold $\tau$ (e.g., 1-2 pixels) OR if the error between $N$'s aggregate and its children is below a precision bound. [S3]
-    *   **Render:** Rasterize the representative Gaussian of node $N$.
-    *   **Fallback:** If the criterion is not met, recurse to children.
+### 2. Attribute Quantization and Compression (EAGLES / SOGS / Compact3D)
+These methods reduce memory footprint by quantizing attributes and using entropy coding [S3].
 
-**Pitfalls:**
-*   **Unreachable Gaussians:** In SPTs, a child Gaussian may become larger than its parent during training, violating the cut condition. These Gaussians occupy RAM but are never rendered. Rebalancing is too costly; they are left as dead leaves. [S4, unofficial]
-*   **Boundary Artifacts:** Chunk-based methods (like H-3DGS) suffer from "chunk bleeding" or ghosting at tile boundaries. [S1, unofficial]
+1.  **Attribute Quantization:**
+    *   **EAGLES:** Quantize all attributes: position, scale, rotation, opacity, and SH coefficients [S3]. Opacity is quantized to 8 bits (raw logit) to reduce floaters [S3].
+    *   **SOGS:** Arrange attributes into 2D grids. Apply smoothness regularization to penalize pixels with values different from their local neighborhood [S3]. Compress RGB grid with JPEG XL; store other attributes as 32-bit OpenEXR images with zip compression [S3].
+    *   **Compact3D:** Do *not* quantize opacity and position to avoid overlapping Gaussians, which degrades rasterization accuracy [S3].
+2.  **Entropy Coding:** Group quantized values using Huffman, range, or zstd coding [S2, unofficial][S3].
+3.  **Storage:** Store compressed data in tiled files with bounding box headers [S2, unofficial].
 
-### Compression and Quantization (EAGLES, SOGS, LightGaussian)
-These methods reduce memory footprint by quantizing attributes and pruning redundant Gaussians.
+### 3. Virtual Memory and External Storage (Vmem / H-3DGS / SPTs)
+For ultra-large scenes, methods use external memory to manage Gaussians that do not fit in VRAM [S4, unofficial].
 
-**Inputs:** Optimized 3D Gaussians $\mathcal{G}$.
-**Outputs:** Compressed bitstream or quantized codebooks.
+1.  **Hierarchy Construction (SPTs):** Build a Sequential Point Tree (SPT) where nodes represent spatial regions. The tree is dynamic and evolves during training [S4, unofficial].
+2.  **Page Management:** Group Gaussians into fixed-size pages. Use a proxy mesh for visibility culling [S1, unofficial].
+3.  **Streaming:** Stream only visible pages into GPU memory. Maintain a mapping between virtual and physical address spaces [S1, unofficial].
+4.  **Unreachable Gaussian Handling:** Identify Gaussians where a child's scale is larger than its parent's, violating the SPT cut condition. Leave these in RAM but do not render or transfer them [S4, unofficial]. Do not rebalance the hierarchy, as it is too costly [S4, unofficial].
 
-**Algorithm: Quantization and Pruning (EAGLES/SOGS)**
-1.  **Importance Scoring:** Calculate an importance score for each Gaussian based on its contribution to the rendered image (e.g., opacity $\times$ projected area). [S3]
-2.  **Pruning:** Remove Gaussians with the lowest importance scores (e.g., top 50% for aggressive compression). [S2, unofficial]
-3.  **Quantization:**
-    *   **Position/Scale:** Quantize to 16-bit half-precision or lower. [S2, unofficial]
-    *   **Opacity:** Quantize to 8-bit raw logit. Note: Quantizing opacity can reduce floaters/artifacts. [S3]
-    *   **Rotation:** Quantize to 8-16 bits. [S2, unofficial]
-    *   **Spherical Harmonics (SH):** Factorize SH coefficients or quantize to INT6/INT8. LightGaussian uses structured pruning and SH factorization. [S1, unofficial][S3]
-4.  **Grid-Based Storage (SOGS):**
-    *   Arrange attributes into 2D grids.
-    *   Sort grid cells and apply smoothness regularization to penalize local variance. [S3]
-    *   Compress RGB grid with JPEG XL; other attributes with OpenEXR/ZIP. [S3]
+### Pseudocode: Hierarchical LOD Selection (Generic)
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-**Parameters:**
-*   **EAGLES:** Quantizes all attributes. Achieves 68 MB on MipNeRF360. [S3]
-*   **SOGS:** Uses 2D grids. Achieves 28.80 MB on MipNeRF360. [S3]
-*   **LightGaussian:** Prunes + SH factorization. Achieves >200 FPS. [S1, unofficial]
+```python
+def render_hierarchical_lod(node, camera, threshold_epsilon):
+    """
+    Recursively traverse the Gaussian hierarchy to select primitives for rendering.
+    
+    Args:
+        node: The current node in the hierarchy (can be a leaf or internal node).
+        camera: Camera parameters (view matrix, projection matrix, resolution).
+        threshold_epsilon: The error threshold for selecting a node as a leaf.
+        
+    Returns:
+        list: A list of Gaussian primitives to be rasterized.
+    """
+    # Base case: Leaf node
+    if node.is_leaf:
+        return [node.representative_gaussian]
+    
+    # Compute local error metric E for this node
+    # E quantifies the approximation cost of representing children with the parent's aggregate properties
+    error_E = compute_error_metric(node)
+    
+    # Check if the node's projected footprint is smaller than a pixel threshold
+    # This is a common LOD criterion for distant objects
+    projected_area = compute_projected_area(node, camera)
+    
+    if error_E < threshold_epsilon or projected_area < 1.0:
+        # Select this node as a leaf (render as single primitive)
+        return [node.representative_gaussian]
+    else:
+        # Recurse to children
+        primitives = []
+        for child in node.children:
+            primitives.extend(render_hierarchical_lod(child, camera, threshold_epsilon))
+        return primitives
 
-### Adaptive Filtering (Scale-Adaptive, Multi-scale)
-These methods address aliasing by adjusting the Gaussian footprint during rendering or training.
+def compute_error_metric(node):
+    """
+    Compute the RMS error of scalar values or deviation of child properties from parent mean.
+    """
+    # Implementation depends on specific variant (e.g., Octree-GS, Hierarchical 3DGS)
+    # Not given in the sources. [G]
+    pass
 
-**Algorithm: Scale-Adaptive Filtering (SA-GS)**
-1.  **Input:** Camera parameters (resolution, distance).
-2.  **Filter Calculation:** Compute a 2D low-pass filter kernel based on the current rendering resolution and camera distance. [S1, unofficial]
-3.  **Rendering:** Apply the filter to the projected Gaussian footprint before rasterization. This dynamically adjusts the effective scale of the Gaussian to match the sampling frequency, preventing high-frequency artifacts. [S1, unofficial]
-
-**Algorithm: Multi-scale Filtering**
-1.  **Training:** Apply 3D smoothing regularization to constrain the frequency content of the Gaussians. [S1, unofficial]
-2.  **Rendering:** Use resolution-aware selection or filtering to ensure alias-free images across sampling rates. [S1, unofficial]
-
-### Virtual Memory and Streaming (Vmem, Budgeted GS)
-These methods handle scenes larger than GPU memory.
-
-**Algorithm: Virtual Memory (Vmem)**
-1.  **Page Grouping:** Group Gaussians into fixed-size pages.
-2.  **Culling:** Use a proxy mesh to determine visibility.
-3.  **Streaming:** Load only visible pages into GPU buffer. [S1, unofficial]
-
-**Algorithm: Budgeted GS (BCT)**
-1.  **Training:** Train a single model with a continuous budget-quality curve.
-2.  **Deployment:** Select primitives based on a target budget (primitive count) without retraining. [S1, unofficial]
+def compute_projected_area(node, camera):
+    """
+    Compute the screen-space footprint of the node's bounding volume.
+    """
+    # Implementation depends on specific variant
+    # Not given in the sources. [G]
+    pass
+```
 
 ## Subtopics
 
 ### [CityGaussian / VastGaussian / DoGaussian](6143-citygaussian-vastgaussian-dogaussian.md)
-Block-based partitioning for city-scale scenes. Divides environments into overlapping tiles, trains independent 3DGS models per tile, and merges them at render time. Solves memory/convergence limits of monolithic training. Decouples training for distributed execution.
+Block-based partitioning methods that divide large environments into overlapping spatial tiles, training independent 3DGS models per tile, and merging them at render time. They solve memory and convergence limitations of monolithic 3DGS on city-scale scenes. Unlike anchor-based hierarchical methods, they decouple training into independent blocks, allowing distributed training and handling lighting variations.
 
 ### [Octree-GS](7341-octree-gs.md)
-Hierarchical LOD using a strict octree hierarchy for merging Gaussians. Builds upon Scaffold-GS. Sets itself apart by using octree merging rather than voxel-grid scaffolding or clustering.
+A Level-of-Detail (LOD) structured approach that dynamically selects appropriate levels from a set of multi-scale Gaussian primitives organized in an octree. It builds on Scaffold-GS by introducing an explicit octree structure with an accumulative LOD strategy, where rendering at LOD $K$ rasterizes all primitives from LOD 0 to $K$. It decouples multi-scale primitives into varying LOD levels, enabling finer primitives to capture details while coarse primitives represent low-frequency information, reducing redundancy.
 
 ### [LightGaussian](8036-lightgaussian.md)
-Compression via structured pruning and Spherical Harmonic (SH) factorization. Achieves 15x size reduction and >200 FPS. Focuses on attribute-level compression (SH/position) rather than spatial clustering.
-
-### [Scale-Adaptive Gaussian Splatting](8085-scale-adaptive-gaussian-splatting.md)
-Addresses aliasing by employing an adaptive 2D low-pass filter during rendering, dynamically adjusted by resolution and camera distance. Prevents artifacts without changing the underlying Gaussian representation.
-
-### [Multi-scale filtering](8244-multi-scale-filtering.md)
-Addresses aliasing via 3D smoothing during optimization and resolution-aware filtering during rendering. Constrains frequency content to ensure alias-free images.
-
-### [Virtual Memory for 3D Gaussian Splatting](8403-virtual-memory-for-3d-gaussian-splatting.md)
-Enables rendering of scenes exceeding GPU memory by grouping Gaussians into pages, using a proxy mesh for culling, and streaming visible pages. Separates virtual and physical address spaces.
-
-### [Gaussian clustering and merging](8436-gaussian-clustering-and-merging.md)
-Reduces cost by grouping splats into clusters and replacing them with a representative Gaussian or hierarchy. Focuses on the merging primitive and culling logic.
-
-### [Iterative Gaussian Synopsis](9289-iterative-gaussian-synopsis.md)
-Top-down LOD construction. Derives coarser levels from a full-fidelity model via adaptive pruning, ensuring inter-layer consistency. Shares a foundational codebook and grids.
-
-### [Budgeted Gaussian Splatting](9672-budgeted-gaussian-splatting.md)
-Enables variable primitive counts (LOD) without retraining using a continuous budget-quality curve. Decouples LOD selection from training.
-
-### [Hierarchical 3D Gaussian Splatting (H-3DGS)](10279-hierarchical-3d-gaussian-splatting-h-3dgs.md)
-Large-scale reconstruction via chunking and merging into a global LoD hierarchy. Uses a Split Point Tree (SPT) structure. Introduces boundary artifacts like chunk bleeding.
-
-### [Sequential Point Trees (SPTs)](10290-sequential-point-trees-spts.md)
-Dynamic LoD hierarchy structure for 3DGS. Enables view-dependent LOD selection without full tree traversal. Evolves continuously during optimization.
-
-### Hierarchical 3DGS
-Cluster-based LoD method developed by Inria. Uses an octree-like tree of clusters; renders only relevant LoD. Achieves 99% reduction at far distances. Capable of interactive rendering of large scenes like Mont Saint-Michel. [S2, unofficial]
-
-### LODGE
-Level-of-detail framework for large-scale 3DGS. Dynamically selects appropriate detail levels for efficient rendering. [S1, unofficial]
-
-### EAGLES
-Quantizes all Gaussian attributes (color, position, opacity, rotation, scaling). Quantization of opacity reduces floaters/artifacts. On MipNeRF360: SSIM 0.81, PSNR 27.15, LPIPS 0.24, Size 68 MB. [S3]
-
-### SOGS (Sparse Orthographic Grid Splatting)
-Arranges attributes into 2D grids, sorts them, and applies smoothness regularization. Compresses RGB with JPEG XL, other attributes with 32-bit OpenEXR/ZIP. On MipNeRF360: SSIM 0.801, PSNR 26.98, LPIPS 0.238, Size 28.80 MB. [S3]
-
-### 3D Gaussian Splatting Compression
-Does not quantize opacity and position to avoid overlapping Gaussians. On MipNeRF360: SSIM 0.808, PSNR 27.16, LPIPS 0.228. Size unspecified. [S3]
+A compression method that reduces model size and improves rendering speed by combining structured pruning with Spherical Harmonic (SH) factorization and vector quantization. It achieves significant size reduction (up to 15x) and high frame rates (>200 FPS) with minimal quality degradation, focusing on attribute-level compression rather than purely spatial clustering.
 
 ### TRIPS
-Attaches a neural feature onto Gaussians. Renders pyramid-like image feature planes according to projected Gaussian size to resolve blur issues. [S3]
+A point-based radiance field rendering technique that rasterizes points into a screen-space image pyramid using trilinear splats, followed by a neural reconstruction network to produce hole-free, crisp images [S2, unofficial]. It solves the blurriness and cloudy artifacts of 3DGS and the temporal instability of ADOP by projecting neural color descriptors into an image pyramid using trilinear writes to two neighboring resolution layers [S2, unofficial].
+
+### [Scale-Adaptive Gaussian Splatting](8085-scale-adaptive-gaussian-splatting.md)
+Addresses aliasing artifacts in standard 3DGS when rendering at varying resolutions or camera distances. Unlike methods with fixed pre-computed dilation scales, SA-GS employs an adaptive 2D low-pass filter during rendering, dynamically adjusted based on current resolution and camera distance, ensuring the projected Gaussian footprint is appropriately filtered.
+
+### [Multi-scale filtering](8244-multi-scale-filtering.md)
+A family of techniques that mitigates aliasing and geometric artifacts by applying low-pass filters to the Gaussian representation. It solves quality degradation when the camera zooms out (aliasing) or zooms in (dilation artifacts) by modifying the Gaussian's covariance and opacity directly to match the physical sampling limits of the camera sensor.
+
+### [Virtual Memory for 3D Gaussian Splatting](8403-virtual-memory-for-3d-gaussian-splatting.md)
+Enables rendering of large-scale 3DGS scenes that exceed GPU memory by applying virtual texturing concepts. It groups Gaussians into fixed-size pages, uses a proxy mesh for visibility culling, and streams only visible pages into a limited GPU buffer. It separates virtual and physical address spaces, allowing dynamic LOD selection and just-in-time memory allocation.
+
+### [Gaussian clustering and merging](8436-gaussian-clustering-and-merging.md)
+Reduces computational and memory cost by grouping splats into spatial or attribute-based clusters and replacing them with a single representative Gaussian or a hierarchical structure. It differs from sibling methods by focusing specifically on the *merging* primitive (how to compute the representative Gaussian) or the *culling* logic (how to select which merged clusters to render).
+
+### [Iterative Gaussian Synopsis](9289-iterative-gaussian-synopsis.md)
+A top-down strategy for constructing a hierarchy of Level of Detail (LOD) representations for 3DGS [1]. It begins with a full-fidelity model and progressively derives coarser levels through adaptive, learnable pruning of anchors and downsampling of hierarchical grids, ensuring coherent simplification without error accumulation inherent in bottom-up training. It differs from independent per-resolution models by sharing a foundational codebook and grids, extracting all LODs from a single optimization.
+
+### [Budgeted Gaussian Splatting](9672-budgeted-gaussian-splatting.md)
+A training and deployment method that enables variable primitive counts (Level of Detail) without retraining, using a continuous budget-quality curve to select primitives. It decouples LOD selection from the training process, allowing a single trained model to be exported to any standard rasterizer with different budgets, achieving near-lossless quality at low compression ratios.
+
+### [Hierarchical 3D Gaussian Splatting (H-3DGS)](10279-hierarchical-3d-gaussian-splatting-h-3dgs.md)
+Addresses memory bottlenecks of standard 3DGS by training scene chunks independently and merging them into a global Level-of-Detail (LoD) hierarchy. Unlike standard 3DGS, it uses chunking to mitigate memory usage during training, though this introduces boundary artifacts such as chunk bleeding and ghosting. It builds on 3D Gaussian Splatting LOD methods by introducing a Split Point Tree (SPT) structure to manage the hierarchy.
+
+### [Sequential Point Trees (SPTs)](10290-sequential-point-trees-spts.md)
+A data structure originally developed for point cloud rendering, adapted here for efficient, view-dependent Level-of-Detail (LoD) selection in 3DGS without requiring full tree traversal. Unlike sibling methods that may rely on static spatial partitioning, SPTs enable dynamic LoD hierarchies that evolve continuously during optimization, supporting stable refinement and restructuring. They are primarily used within the Hierarchical SPT (HSPT) framework to compute the correct LoD cut efficiently for individual views and camera paths.
+
+### Hierarchical 3DGS
+Uses an octree-like tree of clusters; renders only the relevant LoD; achieves 99% reduction at far distances [S2, unofficial]. A cluster-based Level of Detail (LoD) method developed by Inria, capable of rendering large scenes like Mont Saint-Michel interactively [S2, unofficial].
+
+### LODGE
+A level-of-detail framework for large-scale 3D Gaussian Splatting that enables efficient rendering by dynamically selecting appropriate detail levels [S1, unofficial].
+
+### EAGLES
+A method that quantizes all Gaussian attributes including color, position, opacity, rotation, and scaling [S3]. Quantization of opacity leads to fewer floaters or visual artifacts in the novel view synthesis task [S3]. On the MipNeRF360 dataset, EAGLES achieves SSIM 0.81, PSNR 27.15, LPIPS 0.24, and a size of 68 MB [S3].
+
+### SOGS (Sparse Orthographic Grid Splatting)
+A method that arranges Gaussian attributes into multiple 2D grids, sorts them, and applies a smoothness regularization to penalize pixels with values very different from their local neighborhood on the 2D grid [S3]. For storage, SOGS compresses the RGB grid with JPEG XL and stores all other attributes as 32-bit OpenEXR images with zip compression [S3]. On the MipNeRF360 dataset, SOGS achieves SSIM 0.801, PSNR 26.98, LPIPS 0.238, and a size of 28.80 MB [S3].
+
+### 3D Gaussian Splatting Compression
+A compression method that does not quantize opacity and position because sharing them results in overlapping Gaussians [S3]. On the MipNeRF360 dataset, Compact3D achieves SSIM 0.808, PSNR 27.16, LPIPS 0.228, and a size of / MB (unspecified) [S3].
 
 ### Unreachable Gaussian Handling
-Strategy to tolerate cases where a child Gaussian is larger than its parent, violating the SPT cut condition. These Gaussians are left in RAM but not rendered. Rebalancing is too costly. Affects <10% of Gaussians. [S4, unofficial]
+A strategy to tolerate cases where a child Gaussian becomes larger than its parent, making it impossible for the parent to fulfill the SPT cut condition, by leaving these Gaussians in RAM but not rendering them [S4, unofficial]. Identify Gaussians where the child's scale is larger than the parent's, violating the SPT cut condition. Do not rebalance the hierarchy. Leave these Gaussians in RAM, but never render or transfer them [S4, unofficial]. Rebalancing the hierarchy during training was experimented with but found to be too costly for little benefit. Generating improper cuts to fix this is considered worse as it derails training [S4, unofficial]. This inefficiency affects less than 10% of Gaussians in practice [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering complexity is reduced from $O(N)$ to $O(\sqrt{N})$ or better for hierarchical methods, depending on the scene distribution and LOD threshold. [Parent]
-*   **Memory Complexity:** Compression methods (EAGLES, SOGS) reduce storage by 8–20x. Virtual memory methods (Vmem) decouple scene size from GPU memory, allowing rendering of scenes larger than VRAM. [S1, S2, unofficial][S3]
-*   **Performance:** LightGaussian achieves >200 FPS. Hierarchical 3DGS achieves 99% reduction at far distances. [S1, S2, unofficial]
-*   **Strengths:** Enables real-time rendering of city-scale scenes; reduces VRAM usage; mitigates aliasing artifacts.
-*   **Limitations:** Hierarchical methods may introduce boundary artifacts (chunk bleeding). Quantization may cause minor quality loss (SSIM/PSNR drop). Unreachable Gaussians waste RAM. [S1, unofficial][S3][S4, unofficial]
-*   **When to Use:** Large-scale scenes, memory-constrained hardware, or when high frame rates are required.
-*   **When Not to Use:** Small scenes where standard 3DGS fits in VRAM and maximum fidelity is required without compression artifacts.
+- **Time and Memory Complexity:** Hierarchical methods (e.g., Octree-GS, Hierarchical 3DGS) reduce memory usage by up to 99% at far distances through LOD selection [S2, unofficial]. Compression methods (e.g., LightGaussian, EAGLES) reduce model size by factors of 15x to 20x, enabling storage on consumer hardware [S2, unofficial][S3].
+- **Measured Performance:** LightGaussian achieves over 200 FPS with slight quality loss [S1, unofficial]. EAGLES achieves SSIM 0.81, PSNR 27.15, LPIPS 0.24, and 68 MB size on MipNeRF360 [S3]. SOGS achieves SSIM 0.801, PSNR 26.98, LPIPS 0.238, and 28.80 MB size on MipNeRF360 [S3].
+- **Scaling:** Virtual memory methods (Vmem, H-3DGS) enable rendering of scenes exceeding GPU memory by streaming pages [S1, S4, unofficial]. Block-based methods (CityGaussian) enable training on city-scale scenes [S2, unofficial].
+- **Strengths and Limitations:** Hierarchical methods provide consistent rendering performance by adapting to viewing distance [S3]. Compression methods may introduce artifacts if quantization is too aggressive (e.g., opacity quantization in EAGLES reduces floaters but may affect detail) [S3]. Unreachable Gaussians in SPTs occupy RAM but are not rendered, affecting less than 10% of Gaussians [S4, unofficial].
+- **When to Use:** Use hierarchical methods for large-scale scenes requiring interactive LOD [S2, unofficial][S3]. Use compression methods for storage-constrained applications [S3]. Use virtual memory methods for scenes exceeding GPU memory [S1, S4, unofficial].
 
 ## Background
-3D Gaussian Splatting was introduced by Kerbl et al. (2023) as a real-time radiance field representation. The rapid adoption of 3DGS for large-scale reconstruction (e.g., cityscapes) exposed limitations in memory and training stability. Subsequent research focused on LOD and compression:
-*   **Hierarchical Methods:** Inria's Hierarchical 3DGS (SIGGRAPH'24) and Octree-GS introduced tree-based LOD. [S2, unofficial]
-*   **Compression:** EAGLES, SOGS, and LightGaussian (2024-2025) focused on quantization and pruning. [S3]
-*   **Large-Scale Training:** CityGaussian, VastGaussian, and H-3DGS addressed training scalability via chunking. [S1, S2, unofficial]
-*   **Dynamic LOD:** SPTs and Budgeted GS introduced dynamic, view-dependent LOD selection. [S4, S1, unofficial]
+3D Gaussian Splatting LOD methods originated from the need to scale 3DGS to large scenes and reduce its memory footprint. Early works like RTGS applied multi-level redundancy reduction based on spatial overlap and temporal consistency [S1, unofficial]. Hierarchical 3DGS (Inria, SIGGRAPH'24) introduced cluster-based LoD for interactive rendering of large scenes like Mont Saint-Michel [S2, unofficial]. Google's LODGE and Nvidia's HiGS introduced level-of-detail frameworks for large-scale 3DGS [S1, unofficial]. Compression methods like EAGLES, SOGS, and LightGaussian emerged to reduce model size through quantization and pruning [S3]. Virtual memory approaches like Vmem and H-3DGS addressed GPU memory limitations by streaming Gaussians [S1, S4, unofficial].
 
 ## Sources
 [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)

@@ -3,195 +3,239 @@
 Also called: Sample-based volume classification, Neural-network-driven volume renderer, Interactive classification via painting, Painting-Based Intelligent User Interface for Volume Classification
 
 ## Overview
-Neural Network Volume Classification is an interactive method for segmenting volumetric data into material classes by replacing traditional transfer function tuning with a user-painting interface and a neural network classifier [S1, S2]. The user paints sample points on slicing planes to indicate regions of interest, and a neural network learns a high-dimensional classification function that maps voxel properties to an uncertainty value (0 to 1), which serves as the transfer function for opacity [S1, S2]. Unlike [Direct volume ray casting](19-direct-volume-ray-casting.md) which relies on hand-crafted transfer functions, this method eliminates the transfer function space entirely, allowing users to work directly in volume space [S2]. It differs from [NeRF Volumetric Rendering (Coarse/Fine Sampling)](979-nerf-volumetric-rendering-coarse-fine-sampling.md) by focusing on explicit material segmentation via supervised learning of user intent rather than implicit scene reconstruction from images [S1, S2].
+Neural Network Volume Classification is an interactive method that allows users to partition volume data into material classes by painting sample points on slicing planes, which an intelligent system (a machine learning classifier) uses to learn a classification function [S1, S2]. It solves the problem of interactive volume classification where users need real-time visual feedback to refine their segmentation, replacing the traditional transfer function space with a direct volume-space painting interface [S2]. It sets itself apart from its parent [Neural volume rendering](1576-neural-volume-rendering.md) by explicitly replacing the opacity mapping step with a learned neural classifier trained on user annotations, and from its sibling [NeRF Volumetric Rendering (Coarse/Fine Sampling)](979-nerf-volumetric-rendering-coarse-fine-sampling.md) by focusing on supervised classification of discrete material boundaries rather than continuous radiance field reconstruction [S1, S2].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** Volumetric data (scalar or color), user-painted sample points on slicing planes (indicating class membership), and network hyperparameters (input dimensionality, hidden nodes).
-*   **Output:** A classified volume where each voxel has an uncertainty value (opacity), or a real-time rendered visualization of the classification.
+The method operates in two distinct phases: an interactive training phase where the user paints samples and the network learns, and a rendering phase where the trained network classifies the volume. The core computational engine consists of four sequential stages applied to each ray [S1, S14, unofficial], but the classification logic replaces the standard neural query with a specific feed-forward network trained on user data.
 
-**Data Structures:**
-1.  **Sample Point Table:** Stores training data for the neural network. Each entry contains:
-    *   Scalar value (or RGB values for color data).
-    *   Gradient magnitude.
-    *   Neighbor values (scalar or RGB) for a defined neighborhood (e.g., 6 or 12 neighbors).
-    *   Position coordinates ($x, y, z$).
-    *   Desired output label (1 for class member, 0 for non-member) [S1, S2].
-2.  **Neural Network Weights:**
-    *   Input-to-hidden weights ($W_{ih}$): Dimensions $m \times n$.
-    *   Hidden-to-output weights ($W_{ho}$): Dimensions $n \times 1$.
-    *   Biases for hidden layer ($b_h$) and output layer ($b_o$) [S1, S2].
-    *   Total size for hardware implementation: < 1 KB [S2].
+### Inputs and Outputs
+*   **Inputs**:
+    *   Volume data (scalar or color).
+    *   User-painted sample points on slicing planes (x, y, z coordinates).
+    *   For each sample point, a feature vector is constructed. For scalar data, this includes the scalar value, gradient magnitude, scalar values of 6 neighbors (up, down, left, right, front, back), and the voxel's 3D position [S1, S2]. For color data with 6 neighbors, the input dimensionality is $3 + 6 \times 3 + 3 = 24$ (RGB values, neighbor RGB values, and position) [S1]. With 12 neighbors, the dimensionality is $3 + 12 \times 3 + 3 = 42$ [S2].
+    *   Desired output labels: 1 for regions part of the material class (e.g., painted red/pink), 0 for regions not part of the class (e.g., painted blue) [S1, S2].
+*   **Outputs**:
+    *   A trained neural network (weights).
+    *   A classified volume where each voxel has an uncertainty value (0 to 1) indicating membership in the material class [S2].
+    *   The final rendered image, where opacity is mapped from the uncertainty value [S2].
 
-**Network Topology:**
-A three-layer feed-forward perceptron [S1, S2]:
-*   **Input Layer:** $m$ inputs.
-*   **Hidden Layer:** $n$ nodes.
-*   **Output Layer:** 1 node (uncertainty value).
-*   **Activation:** Sigmoid function $f(x) = \frac{1}{1 + e^{-x}}$ [S1, S2].
+### Data Structures
+*   **Sample Point Table**: A list of records containing the feature vector for each painted voxel and its label.
+    *   Fields: `scalar_value` (float), `gradient_magnitude` (float), `neighbor_values` (array of floats), `position` (vec3), `label` (float: 0 or 1).
+*   **Neural Network Topology**: A three-layer perceptron (Input -> Hidden -> Output) [S1, S2].
+    *   Input Layer: $m$ inputs (dimensionality of feature vector).
+    *   Hidden Layer: $n$ hidden nodes.
+    *   Output Layer: 1 output node (uncertainty value).
+    *   Connections: Fully connected feed-forward. Every input neuron connects to all hidden neurons; all hidden neurons connect to the output neuron [S1, S2].
+*   **Weights**:
+    *   $W_{ih}$: Weights between input and hidden layers ($m \times n$).
+    *   $W_{ho}$: Weights between hidden and output layers ($n \times 1$).
+    *   Biases: $b_h$ (hidden), $b_o$ (output).
 
-**Input Dimensionality ($m$):**
-*   **Scalar Data:** $m = 1 \text{ (scalar)} + 1 \text{ (gradient)} + 6 \times 1 \text{ (neighbors)} + 3 \text{ (position)} = 11$ [S1].
-*   **Color Data (6 neighbors):** $m = 3 \text{ (RGB)} + 6 \times 3 \text{ (neighbors)} + 3 \text{ (position)} = 24$ [S1].
-*   **Color Data (12 neighbors):** $m = 3 + 12 \times 3 + 3 = 42$ [S2].
+### Numbered Steps
 
-**Algorithm Steps:**
+1.  **Initialization**:
+    *   Weights $W_{ih}, W_{ho}$ and biases $b_h, b_o$ are initialized to random values [S1, S2].
+    *   The sample point table is empty.
 
-1.  **Initialization:**
-    *   Initialize network weights $W_{ih}$ and $W_{ho}$ randomly [S1, S2].
-    *   Initialize sample point table as empty [S2].
+2.  **User Painting and Data Collection**:
+    *   The user paints on a slicing plane using two colors (e.g., red for class member, blue for non-member) [S1, S2].
+    *   Painted voxels are recorded in the sample point table with their corresponding feature vectors and labels (1 for red, 0 for blue) [S1, S2].
+    *   Painted regions are shown in other slicers for context [S2].
 
-2.  **User Interaction (Painting):**
-    *   User selects a slicing plane (x, y, or z-aligned).
-    *   User paints regions using two colors:
-        *   Color A (e.g., red/pink): Indicates voxels belonging to the material class (Label = 1).
-        *   Color B (e.g., blue): Indicates voxels not belonging to the class (Label = 0).
-    *   For each painted voxel, extract features (scalar/RGB, gradient, neighbors, position) and add to the Sample Point Table [S1, S2].
-    *   *Pitfall:* If position information is used, painted voxels must be spread across different slices to ensure generalization; otherwise, the network fails to generalize to unpainted regions [S1, S2].
-
-3.  **Training (Incremental Back-Propagation):**
-    *   To maintain interactivity, training occurs in the system idle loop [S1, S2].
+3.  **Training (Iterative)**:
+    *   Training occurs in the system idle loop to maintain interactivity [S1, S2].
     *   For each iteration:
-        a.  **Forward Pass:** For each sample point $\mathbf{x}_i$ in the table:
-            $$ \mathbf{h}_i = f(\mathbf{W}_{ih}^T \mathbf{x}_i + \mathbf{b}_h) $$
-            $$ y_i = f(\mathbf{W}_{ho}^T \mathbf{h}_i + b_o) $$
-            where $\mathbf{h}_i$ is the hidden layer output, $y_i$ is the predicted uncertainty, and $f$ is the sigmoid function [S1, S2].
-        b.  **Error Calculation:**
-            $$ E_i = \frac{1}{2} (y_i - t_i)^2 $$
-            where $t_i$ is the target label (1 or 0) [S1, S2].
-        c.  **Back-Propagation:**
-            Compute gradients $\frac{\partial E}{\partial W}$ and update weights using gradient descent [S1, S2].
-            $$ W \leftarrow W - \eta \frac{\partial E}{\partial W} $$
-            where $\eta$ is the learning rate [G].
+        a.  **Forward Propagation**: For each sample point $j$ in the table:
+            i.  Compute hidden layer activations: $H_j = \sigma(W_{ih}^T \mathbf{x}_j + b_h)$, where $\mathbf{x}_j$ is the input feature vector and $\sigma(x) = \frac{1}{1 + e^{-x}}$ is the sigmoid activation function [S1, S2].
+            ii. Compute output: $y_j = \sigma(W_{ho}^T H_j + b_o)$ [S1, S2].
+        b.  **Error Calculation**: Calculate error $E_j = y_j - t_j$, where $t_j$ is the target label (1 or 0) [S1, S2].
+        c.  **Back-Propagation**:
+            i.  Compute output error term: $\delta_o = E_j \cdot \sigma'(y_j)$ [S1, S2].
+            ii. Compute hidden error term: $\delta_h = (W_{ho} \delta_o) \cdot \sigma'(H_j)$ [S1, S2].
+            iii. Update weights: $W_{ho} \leftarrow W_{ho} - \eta \delta_o H_j^T$, $W_{ih} \leftarrow W_{ih} - \eta \delta_h \mathbf{x}_j^T$ [S1, S2].
+            iv. Update biases: $b_o \leftarrow b_o - \eta \delta_o$, $b_h \leftarrow b_h - \eta \delta_h$ [S1, S2].
+            *   $\eta$ is the learning rate [G].
+    *   After each iteration, a classified slice is rendered to provide real-time visual feedback [S1, S2].
 
-4.  **Classification and Rendering:**
-    *   **Software Path:** Apply the trained network to every voxel in the volume to generate a classified uncertainty volume. Render this volume using standard volume rendering techniques (e.g., [Direct volume ray casting](19-direct-volume-ray-casting.md)). Interpolation is performed on the scalar uncertainty volume [S1].
-    *   **Hardware Path:** Render a stack of view-aligned polygons sampling the 3D texture. Use a pixel shader to implement the neural network during rasterization. The pixel shader retrieves the center voxel and neighbors via texture lookups, computes the network output, and maps it to opacity [S2].
+4.  **Classification and Rendering**:
+    *   The trained network is applied to the entire volume (or current view) to classify each voxel [S1, S2].
+    *   **Software Approach**: Each voxel is sent to the neural network to obtain a classified uncertainty volume. This scalar volume is then rendered using traditional volume rendering methods with linear interpolation [S1].
+    *   **Hardware Approach**: A pixel shader implements the neural network during rasterization. The shader performs classification in the fragment program using interpolated data (postclassification) [S1].
+        *   The pixel shader requires seven texture lookups for the center voxel and its neighbors [S2].
+        *   The position is derived from texture coordinates [S2].
+        *   The output uncertainty value is mapped to opacity [S2].
+    *   **Compositing**: The optical properties are accumulated into the final pixel color using the front-to-back volume rendering equation [S1, S14, unofficial]. For each sample $i$ from front ($t_{start}$) to back ($t_{end}$), the accumulated color $C_{acc}$ and accumulated opacity $\alpha_{acc}$ are updated as follows:
+        $$
+        C_{acc}^{(i)} = C_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha_i \mathbf{c}_i
+        $$
+        $$
+        \alpha_{acc}^{(i)} = \alpha_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha_i
+        $$
+        where $C_{acc}^{(0)} = 0$ and $\alpha_{acc}^{(0)} = 0$ [S12, S43, unofficial][S50, abstract only, unofficial]. The term $(1 - \alpha_{acc}^{(i-1)})$ represents the transmittance [S1, S51, unofficial]. The final pixel color is often composited over a background color $C_{bg}$ using $C_{final} = C_{acc} + (1 - \alpha_{acc}) C_{bg}$ [S1, S14, unofficial].
+    *   Early termination is used if $\alpha_{acc}$ exceeds a threshold (e.g., 1.0) [S10, S12, unofficial].
 
-**Pseudocode:**
+### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
-import random
 
 def sigmoid(x):
+    """Sigmoid activation function."""
     return 1.0 / (1.0 + math.exp(-x))
 
-class NeuralVolumeClassifier:
+def sigmoid_derivative(x):
+    """Derivative of sigmoid function."""
+    s = sigmoid(x)
+    return s * (1.0 - s)
+
+class NeuralNetwork:
     def __init__(self, input_dim, hidden_dim):
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        # Initialize weights randomly
-        self.W_ih = [[random.uniform(-0.5, 0.5) for _ in range(input_dim)] for _ in range(hidden_dim)]
-        self.W_ho = [random.uniform(-0.5, 0.5) for _ in range(hidden_dim)]
+        """
+        Initialize a 3-layer perceptron.
+        input_dim: Number of input features (m).
+        hidden_dim: Number of hidden nodes (n).
+        """
+        # Initialize weights randomly [S1, S2]
+        self.W_ih = [[random.uniform(-1, 1) for _ in range(hidden_dim)] for _ in range(input_dim)]
+        self.W_ho = [random.uniform(-1, 1) for _ in range(hidden_dim)]
         self.b_h = [0.0 for _ in range(hidden_dim)]
         self.b_o = 0.0
-        self.learning_rate = 0.1
-        self.samples = [] # List of (input_vector, target_label)
 
-    def add_sample(self, input_vector, label):
-        self.samples.append((input_vector, label))
-
-    def forward(self, input_vector):
+    def forward(self, x):
+        """
+        Forward propagation.
+        x: Input feature vector (list of floats).
+        Returns: Output uncertainty value (float).
+        """
         # Hidden layer
-        hidden = []
-        for j in range(self.hidden_dim):
-            net_input = sum(self.W_ih[j][i] * input_vector[i] for i in range(self.input_dim)) + self.b_h[j]
-            hidden.append(sigmoid(net_input))
+        h = []
+        for j in range(len(self.W_ho)):
+            net_input = sum(x[i] * self.W_ih[i][j] for i in range(len(x))) + self.b_h[j]
+            h.append(sigmoid(net_input))
         
         # Output layer
-        net_output = sum(self.W_ho[j] * hidden[j] for j in range(self.hidden_dim)) + self.b_o
+        net_output = sum(h[j] * self.W_ho[j] for j in range(len(h))) + self.b_o
         output = sigmoid(net_output)
-        return output, hidden
-
-    def train_step(self):
-        if not self.samples:
-            return
         
-        # Accumulate gradients
-        dW_ih = [[0.0] * self.input_dim for _ in range(self.hidden_dim)]
-        dW_ho = [0.0] * self.hidden_dim
-        db_h = [0.0] * self.hidden_dim
-        db_o = 0.0
+        return output, h
 
-        for input_vec, target in self.samples:
-            output, hidden = self.forward(input_vec)
+    def train(self, samples, learning_rate=0.1):
+        """
+        Train the network on a set of samples.
+        samples: List of tuples (input_vector, target_label).
+        """
+        for x, t in samples:
+            # Forward pass
+            output, h = self.forward(x)
             
-            # Output error derivative
-            error = output - target
-            d_output = error * output * (1.0 - output) # Sigmoid derivative
+            # Calculate error
+            error = output - t
             
-            # Update W_ho and b_o
-            for j in range(self.hidden_dim):
-                dW_ho[j] += d_output * hidden[j]
-            db_o += d_output
+            # Back-propagation
+            # Output layer error term
+            delta_o = error * sigmoid_derivative(output)
             
-            # Hidden layer error derivative
-            for j in range(self.hidden_dim):
-                d_hidden = d_output * self.W_ho[j] * hidden[j] * (1.0 - hidden[j])
-                db_h[j] += d_hidden
-                for i in range(self.input_dim):
-                    dW_ih[j][i] += d_hidden * input_vec[i]
+            # Hidden layer error terms
+            delta_h = []
+            for j in range(len(h)):
+                # Error from output weighted by hidden-to-output weights
+                error_from_output = delta_o * self.W_ho[j]
+                delta_h.append(error_from_output * sigmoid_derivative(h[j]))
+            
+            # Update weights and biases
+            # Update W_ho
+            for j in range(len(h)):
+                self.W_ho[j] -= learning_rate * delta_o * h[j]
+            
+            # Update W_ih
+            for i in range(len(x)):
+                for j in range(len(h)):
+                    self.W_ih[i][j] -= learning_rate * delta_h[j] * x[i]
+            
+            # Update biases
+            self.b_o -= learning_rate * delta_o
+            for j in range(len(h)):
+                self.b_h[j] -= learning_rate * delta_h[j]
 
-        # Update weights
-        for j in range(self.hidden_dim):
-            for i in range(self.input_dim):
-                self.W_ih[j][i] -= self.learning_rate * dW_ih[j][i]
-            self.W_ho[j] -= self.learning_rate * dW_ho[j]
-            self.b_h[j] -= self.learning_rate * db_h[j]
-        self.b_o -= self.learning_rate * db_o
+def classify_volume(volume_data, network, use_hardware=False):
+    """
+    Classify the volume using the trained network.
+    volume_data: 3D array of voxel values.
+    network: Trained NeuralNetwork object.
+    use_hardware: If True, use hardware shader approach (postclassification).
+                  If False, use software approach (preclassification).
+    Returns: Classified volume (uncertainty values).
+    """
+    classified_volume = create_empty_volume_like(volume_data)
+    
+    if use_hardware:
+        # Hardware approach: Classification in fragment program during rasterization
+        # This is handled by the GPU shader, not CPU code.
+        # The shader uses 7 texture lookups for center and neighbors [S2].
+        pass
+    else:
+        # Software approach: Preclassification
+        # Each voxel is sent to the network to obtain a classified uncertainty volume [S1]
+        for x in range(volume_data.shape[0]):
+            for y in range(volume_data.shape[1]):
+                for z in range(volume_data.shape[2]):
+                    # Construct feature vector
+                    # Scalar value, gradient magnitude, neighbors, position [S1, S2]
+                    scalar_val = volume_data[x, y, z]
+                    grad_mag = calculate_gradient_magnitude(volume_data, x, y, z)
+                    neighbors = get_neighbor_values(volume_data, x, y, z)
+                    position = [x, y, z]
+                    
+                    input_vector = [scalar_val, grad_mag] + neighbors + position
+                    
+                    # Classify
+                    uncertainty, _ = network.forward(input_vector)
+                    classified_volume[x, y, z] = uncertainty
+                    
+    return classified_volume
 
-    def classify_volume(self, volume_data):
-        """
-        volume_data: 3D array of voxels. Each voxel is a feature vector.
-        Returns: 3D array of uncertainty values.
-        """
-        classified_volume = []
-        for voxel in volume_data:
-            output, _ = self.forward(voxel)
-            classified_volume.append(output)
-        return classified_volume
-
-    def render_hardware_shader(self, pixel_coords, volume_texture):
-        """
-        Simulates the pixel shader logic for hardware rendering.
-        pixel_coords: (x, y, z) in volume space.
-        volume_texture: Function to lookup voxel values and neighbors.
-        """
-        # Retrieve center voxel and neighbors
-        # Note: In actual hardware, this is done via texture lookups
-        center_val = volume_texture.get_center(pixel_coords)
-        neighbors = volume_texture.get_neighbors(pixel_coords)
-        
-        # Construct input vector
-        input_vec = construct_input_vector(center_val, neighbors, pixel_coords)
-        
-        # Forward pass
-        output, _ = self.forward(input_vec)
-        return output # Opacity
+def render_volume(classified_volume, background_color):
+    """
+    Render the classified volume using front-to-back compositing.
+    classified_volume: Volume of uncertainty values (0-1).
+    background_color: Background color to composite over.
+    Returns: Final image.
+    """
+    # Standard volume rendering loop [S1, S14, unofficial]
+    # For each pixel, cast ray, sample classified_volume, composite
+    pass
 ```
+
+### Parameters
+*   **Network Size**:
+    *   Input dimensionality ($m$): 11 for scalar data (scalar, gradient, 6 neighbors, position) [S1]. 24 for color data with 6 neighbors [S1]. 42 for color data with 12 neighbors [S2].
+    *   Hidden nodes ($n$): 8 in the reported implementation [S1, S2]. Hardware implementation limited to max 8 hidden nodes due to instruction limits [S2]. Hidden nodes should be divisible by 4 for vectorization [S2].
+*   **Learning Rate**: Not given in the sources. [G] Typical value 0.1.
+*   **Training Iterations**: Incremental, occurring in the system idle loop [S1, S2].
+
+### Edge Cases and Pitfalls
+*   **Generalization Failure**: If position information is used in the input vector, painted voxels must be spread out across different slices to provide general samples for training. Otherwise, the network may overfit to specific locations [S1, S2].
+*   **Hardware Limits**: The hardware implementation is limited by the number of texture lookups (7) and instruction count, restricting the network size to 8 hidden nodes [S2].
+*   **Interpolation Differences**: Software classification performs preclassification (interpolation on scalar uncertainty volume), while hardware classification performs postclassification (interpolation of raw data before classification) [S1]. This can lead to slight differences in results [S1].
 
 ## Subtopics
 
 ### Hardware vs Software Neural Network Rendering
-*   **Software:** Classifies each voxel in the volume before rendering (preclassification). The resulting uncertainty volume is interpolated during rendering. Advantages: No graphics hardware required, arbitrary network size, one-time preprocessing. Disadvantages: Slow performance (e.g., 9 seconds for 256³ volume on 2.8 GHz Pentium 4), unsuitable for real-time feedback [S1].
-*   **Hardware:** Classifies during rendering in the fragment program using interpolated data (postclassification). Advantages: Real-time performance (e.g., 1.5 fps for 256³ volume on ATI Radeon 9700 Pro), low data transfer (<1 KB weights per frame). Disadvantages: Limited by hardware constraints (max 8 hidden nodes, instruction limits), requires specific graphics hardware [S2].
+Hardware rendering performs classification in the fragment program using interpolated data (postclassification), allowing for real-time interactivity but limited by hardware constraints (max 8 hidden nodes, 7 texture lookups) [S1, S2]. Software rendering performs preclassification (classifying each voxel before rendering), allowing for arbitrary network sizes but suffering from slow performance (up to 9 seconds for a 256x256x256 volume on a 2.8 GHz Pentium 4), making it unsuitable for real-time training feedback [S1, S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Training is incremental and runs in the idle loop to maintain interactivity. Software classification is $O(V \cdot (m \cdot n + n))$ per volume pass, where $V$ is the number of voxels, $m$ is input dimension, and $n$ is hidden nodes. Hardware rendering is $O(P \cdot (m \cdot n + n))$ per frame, where $P$ is the number of pixels/samples [S1, S2].
-*   **Memory Complexity:** Network weights are small (<1 KB). Sample point table size depends on user interaction. Classified volume requires $O(V)$ storage if precomputed [S1, S2].
-*   **Performance:**
-    *   Software: ~9 seconds for 256×256×256 volume (11 inputs, 8 hidden nodes) on 2.8 GHz Pentium 4 [S1, S2].
-    *   Hardware: ~1.5 frames per second for 256×256×256 volume rendered to 512×512 window on ATI Radeon 9700 Pro [S2].
-*   **Strengths:** Intuitive user interface (painting in volume space), high-dimensional classification (uses neighbors, gradient, position), real-time feedback (with hardware) [S1, S2].
-*   **Limitations:** Requires user expertise to paint representative samples, generalization depends on sample distribution, hardware implementation limited by network size and instruction count [S1, S2].
-*   **When to use:** Interactive segmentation of complex volumetric data where traditional transfer functions are difficult to define.
-*   **When not to use:** When real-time performance is critical and hardware constraints limit network complexity, or when automatic segmentation without user input is required [S1, S2].
+*   **Time Complexity**: Training is iterative and depends on the number of samples and network size. Software classification of a 256x256x256 volume with 11 input nodes and 8 hidden nodes takes 9 seconds on a 2.8 GHz Pentium 4 [S1, S2]. Hardware rendering achieves 1.5 frames per second for a 256x256x256 volume rendered to a 512x512 window on an ATI Radeon 9700 Pro [S2].
+*   **Memory Complexity**: The network weights are small (under 1 kilobyte) and can be sent to the renderer asynchronously [S2]. The classified volume requires storage for the uncertainty values [S1].
+*   **Strengths**: Interactive, intuitive user interface (painting in volume space); eliminates the need for transfer function tuning; high-dimensional classification improves material differentiation [S2].
+*   **Limitations**: Requires user interaction and training time; hardware implementation is limited in network size; software implementation is too slow for real-time feedback [S1, S2].
+*   **When to use**: When users have a good understanding of the data and can identify regions of interest visually, and real-time feedback is desired [S1, S2].
+*   **When not to use**: When automatic classification is required without user input, or when the hardware constraints are too restrictive for the desired network complexity [S1, S2].
 
 ## Background
-The method was introduced by [S1] and [S2] in the mid-2000s (2003/2005). It addresses the difficulty users face in defining transfer functions in derived spaces (e.g., 1D or 2D intensity/gradient plots) by providing a direct volume-space interface [S1, S2]. The approach builds on traditional back-propagation neural networks [S1] and hardware-accelerated volume rendering [S2]. It is primarily used in biomedical imaging and scientific visualization for segmenting complex structures like MRI data [S1, S2].
+The method was introduced by [S1] and [S2] in the mid-2000s. [S2] presented the initial interface and hardware-assisted renderer in 2003, while [S1] provided a more detailed analysis of the intelligent system approach and software implementation in 2005. It is used in biomedical imaging and other fields where interactive volume segmentation is required [S2]. The method builds on the principles of [Direct volume ray casting](19-direct-volume-ray-casting.md) and [Neural volume rendering](1576-neural-volume-rendering.md), specifically replacing the neural query stage with a user-trained classifier [S1, S2].
 
 ## Sources
 [S1] An Intelligent System Approach to Higher-Dimensional Classification of Volume Data, https://doi.org/10.1109/tvcg.2005.38, fetched 2026-10-27

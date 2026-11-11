@@ -1,0 +1,130 @@
+--- v006.md
++++ v007.md
+@@ -14,5 +14,5 @@
+ - **Spectrum:** A vector of 3 floats (R, G, B) used to track transmittance and PDFs independently per channel [S1, S4].
+ - **Majorant ($\sigma_m$):** A constant Spectrum representing the upper bound of the extinction coefficient [S1, S4].
+-- **Null Scattering Coefficient ($\sigma_n$):** Computed as $\sigma_n = \max(0, \sigma_m - \sigma_t)$ [S4].
++- **Null Scattering Coefficient ($\sigma_n$):** Computed per channel as $\sigma_n = \max(0, \sigma_m - \sigma_a - \sigma_s)$ [S4].
+ 
+ **Parameters:**
+@@ -43,20 +43,13 @@
+     """
+     Estimates transmittance using ratio tracking with null scattering.
++    medium.sigma_a and medium.sigma_s are evaluated at the current ray position.
+     """
+-    # Helper functions for Spectrum (list of 3 floats: R, G, B)
+-    def make_spectrum(val): return [val, val, val]
+-    def clamp_zero(x): return [max(0.0, c) for c in x]
+-    def exp_spectrum(x): return [exp(c) for c in x]
+-    def avg_spectrum(x): return sum(x) / len(x)
+-    def max_component(x): return max(x)
+-    
+-    T_ray = make_spectrum(1.0)
+-    r_l = make_spectrum(1.0)
+-    r_u = make_spectrum(1.0)
+-    
++    T_ray = [1.0, 1.0, 1.0]
++    r_l = [1.0, 1.0, 1.0]
++    r_u = [1.0, 1.0, 1.0]
+     t_current = t_min
+     iteration = 0
+     max_null_collisions = 1000
+-    
++
+     while iteration < max_null_collisions:
+         # 1. Sample a color channel for distance sampling
+@@ -64,46 +57,48 @@
+         channel = int(u * 3)
+         if channel > 2: channel = 2
+-        
+         if sigma_maj[channel] <= 0.0:
+             break
+-            
++
+         # 2. Sample distance using majorant
+         t = -log(1.0 - rng.uniform(0.0, 1.0)) / sigma_maj[channel]
+         dt = t_max - t_current
+-        
++
+         # 3. Check if we reached the end of the segment
+         if t >= dt:
+-            # Reached surface/endpoint
+-            T_maj = exp_spectrum([-sigma_maj[c] * dt for c in range(3)])
++            # Reached surface/endpoint: update for the final segment
++            T_maj = [exp(-sigma_maj[c] * dt) for c in range(3)]
+             T_ray = [T_ray[c] * T_maj[c] for c in range(3)]
+             r_l = [r_l[c] * T_maj[c] for c in range(3)]
+             r_u = [r_u[c] * T_maj[c] for c in range(3)]
+             break
+-            
+-        # 4. Update accumulated distance
+-        t_current = min(t_current + t, t_max)
+-        
++
++        # 4. Advance position
++        t_current = t_current + t
++
+         # 5. Compute null scattering coefficient at current position
+         sigma_a = medium.get_sigma_a()
+         sigma_s = medium.get_sigma_s()
+-        sigma_n = clamp_zero([sigma_maj[c] - sigma_a[c] - sigma_s[c] for c in range(3)])
+-        
+-        # 6. Compute PDF of the majorant sampling
+-        T_maj = exp_spectrum([-sigma_maj[c] * t for c in range(3)])
++        sigma_n = [max(0.0, sigma_maj[c] - sigma_a[c] - sigma_s[c]) for c in range(3)]
++
++        # 6. Compute majorant transmittance and PDF for this step
++        T_maj = [exp(-sigma_maj[c] * t) for c in range(3)]
+         pdf = [T_maj[c] * sigma_maj[c] for c in range(3)]
+-        
+-        # 7. Update transmittance and rescaled probabilities
+-        T_ray = [T_ray[c] * T_maj[c] * (sigma_n[c] / pdf[c]) for c in range(3)]
+-        r_l = [r_l[c] * T_maj[c] * (sigma_maj[c] / pdf[c]) for c in range(3)]
+-        r_u = [r_u[c] * T_maj[c] * (sigma_n[c] / pdf[c]) for c in range(3)]
+-        
++        max_sigma_maj = max(sigma_maj)
++
++        # 7. Update transmittance and rescaled probabilities (normalize by max_sigma_maj for stability)
++        T_ray = [T_ray[c] * T_maj[c] * (sigma_n[c] / pdf[c]) / max_sigma_maj for c in range(3)]
++        r_l = [r_l[c] * T_maj[c] * (sigma_maj[c] / pdf[c]) / max_sigma_maj for c in range(3)]
++        r_u = [r_u[c] * T_maj[c] * (sigma_n[c] / pdf[c]) / max_sigma_maj for c in range(3)]
++
+         # 8. Russian Roulette for low transmittance
+-        avg_pdf = avg_spectrum(r_l) + avg_spectrum(r_u)
++        avg_r_l = sum(r_l) / 3.0
++        avg_r_u = sum(r_u) / 3.0
++        avg_pdf = avg_r_l + avg_r_u
+         if avg_pdf > 0:
+             Tr = [T_ray[c] / avg_pdf for c in range(3)]
+         else:
+             Tr = [0.0, 0.0, 0.0]
+-            
+-        if max_component(Tr) < 0.05:
++
++        if max(Tr) < 0.05:
+             q = 0.75
+             if rng.uniform(0.0, 1.0) < q:
+@@ -112,13 +107,15 @@
+             else:
+                 T_ray = [T_ray[c] / (1.0 - q) for c in range(3)]
+-                
++
+         iteration += 1
+-        
+-    # 9. Update for final segment (if loop broke early or for last segment logic)
+-    # In some implementations, this handles the segment from last sample to t_max
+-    # if the loop didn't break on 't >= dt' but on max iterations.
+-    # However, standard ratio tracking usually breaks on endpoint.
+-    # If using the callback structure from [S4], this update happens inside SampleT_maj.
+-    
++
++    # 9. Update for final segment if loop broke on max iterations
++    if iteration >= max_null_collisions:
++        dt = t_max - t_current
++        T_maj = [exp(-sigma_maj[c] * dt) for c in range(3)]
++        T_ray = [T_ray[c] * T_maj[c] / T_maj[0] for c in range(3)]
++        r_l = [r_l[c] * T_maj[c] / T_maj[0] for c in range(3)]
++        r_u = [r_u[c] * T_maj[c] / T_maj[0] for c in range(3)]
++
+     return T_ray
+ ```

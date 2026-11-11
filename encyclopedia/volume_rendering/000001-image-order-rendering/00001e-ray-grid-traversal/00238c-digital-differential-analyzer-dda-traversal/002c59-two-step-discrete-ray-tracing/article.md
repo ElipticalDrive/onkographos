@@ -8,69 +8,55 @@ Two-Step Discrete Ray Tracing is a ray traversal optimization for huge voxel spa
 ## How it works
 **Inputs and Outputs:**
 *   **Input:** An octree representing the voxel space; a ray defined by origin $O$ and direction $D$; the total number of octree levels $L_{total}$ [S1, unofficial].
-*   **Output:** A sequence of occupied voxels (or object lists) encountered by the ray, ordered by distance.
+*   **Output:** A sequence of occupied voxels (or object lists) encountered by the ray, ordered by distance [S1, unofficial].
 
 **Data Structures:**
 *   **Octree Cell:** A simple array of eight elements, each identifying a sub-octant and containing a pointer to a descendent cell or a null pointer if the sub-octant is empty [S1, unofficial].
-*   **XYZ Register:** A single integer variable containing the three coordinates of the current voxel packed into one register. The width of each coordinate in bits corresponds to the number of levels in the current step [S1, unofficial].
+*   **XYZ Register:** A single integer variable containing the three coordinates of the current voxel packed into one register [S1, unofficial]. The width of each coordinate in bits corresponds to the number of levels in the current step [S1, unofficial].
 *   **Fixed-Point Variables:** 64-bit integers used to represent real values ($l_1, l_2, q_1, q_2$) to maintain precision beyond the 53-bit mantissa limit of double-precision floats [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Initialization (Step 1):** Calculate inverse slopes for the coarse resolution. Determine signs of increments $inc_1, inc_2, inc_d$ based on direction components. Calculate initial intersection distances $l_1$ and $l_2$ using heights $h_1, h_2$ and slopes. Convert $l_1, l_2, q_1, q_2$ to 64-bit fixed-point notation. Initialize $XYZ$ and $mask$. Set $XYZ_{ant} = XYZ$ and $end\_condition = mask \ll 1$ [S1, unofficial].
+2.  **Step 1 Traversal (Coarse Octree):** Loop while the current voxel's octant parent bits remain unchanged from the initial value ($XYZ_{ant}$) [S1, unofficial]. If no incremental axis transition is imminent ($d \ge limit$), increment the driving axis coordinate ($XYZ += inc_{drive}$), increment $d$ ($d++$), and check for octant exit [S1, unofficial]. If an incremental axis transition is imminent ($d < limit$), select the nearest incremental axis ($i_1$ or $i_2$), increment that axis coordinate, update the intersection distance ($l += q$), update the limit, and check for octant exit [S1, unofficial]. If the ray exits the empty octant (parent bits change), break the loop [S1, unofficial].
+3.  **Transition to Step 2:** If a non-empty voxel is reached in Step 1, initialize Step 2 parameters. Convert ray parameters ($d', i'_1, i'_2$) to the finer resolution (second step) [S1, unofficial]. If Step 2 does not reach a non-empty voxel, continue tracing in Step 1 [S1, unofficial].
+4.  **Step 2 Traversal (Fine Sub-grid):** Execute a three-dimensional DDA within the fine sub-grid [S1, unofficial]. Advance axes based on minimum $tMax$ values ($tMaxX, tMaxY, tMaxZ$) [S1, unofficial]. After advancing, retrieve the object list: $list = ObjectList[X][Y][Z]$ [S1, unofficial]. Loop while $list == NIL$ [S1, unofficial].
+
+**Formulas:**
+*   Slope calculation for incremental steps: $q_1 = \frac{\Delta d}{\Delta i_1}$ and $q_2 = \frac{\Delta d}{\Delta i_2}$, where $\Delta d$ is the ray step size and $\Delta i_1, \Delta i_2$ are voxel grid spacings [S1, unofficial].
 
 **Parameters:**
 *   **Step 1 Levels ($L_1$):** Optimal value is 6 [S1, unofficial].
 *   **Step 2 Levels ($L_2$):** $L_{total} - L_1$ [S1, unofficial].
 *   **Connection Type:** Algorithm must use 6-connected neighborhood for continuity in the second step [S1, unofficial].
 
-**Algorithm Steps:**
-
-1.  **Initialization (Step 1):**
-    *   Calculate inverse slopes for the coarse resolution: $q_1 = \frac{\Delta d}{\Delta i_1}$ and $q_2 = \frac{\Delta d}{\Delta i_2}$, where $\Delta d$ is the ray step size and $\Delta i_1, \Delta i_2$ are voxel grid spacings [S1, unofficial].
-    *   Determine signs of increments $inc_1, inc_2, inc_d$ based on direction components [S1, unofficial].
-    *   Calculate initial intersection distances $l_1$ and $l_2$ using heights $h_1, h_2$ and slopes [S1, unofficial].
-    *   Convert $l_1, l_2, q_1, q_2$ to 64-bit fixed-point notation [S1, unofficial].
-    *   Initialize $XYZ$ and $mask$. Set $XYZ_{ant} = XYZ$ and $end\_condition = mask \ll 1$ [S1, unofficial].
-
-2.  **Step 1 Traversal (Coarse Octree):**
-    *   Loop while the current voxel's octant parent bits remain unchanged from the initial value ($XYZ_{ant}$) [S1, unofficial].
-    *   **Driving Axis Advance:** If no incremental axis transition is imminent ($d \ge limit$), increment the driving axis coordinate ($XYZ += inc_{drive}$), increment $d$ ($d++$), and check for octant exit [S1, unofficial].
-    *   **Incremental Axis Advance:** If an incremental axis transition is imminent ($d < limit$), select the nearest incremental axis ($i_1$ or $i_2$). Increment that axis coordinate, update the intersection distance ($l += q$), update the limit, and check for octant exit [S1, unofficial].
-    *   If the ray exits the empty octant (parent bits change), break the loop [S1, unofficial].
-
-3.  **Transition to Step 2:**
-    *   If a non-empty voxel is reached in Step 1, initialize Step 2 parameters. Convert ray parameters ($d', i'_1, i'_2$) to the finer resolution (second step) [S1, unofficial].
-    *   If Step 2 does not reach a non-empty voxel, continue tracing in Step 1 [S1, unofficial].
-
-4.  **Step 2 Traversal (Fine Sub-grid):**
-    *   Execute a three-dimensional DDA within the fine sub-grid [S1, unofficial].
-    *   Advance axes based on minimum $tMax$ values ($tMaxX, tMaxY, tMaxZ$) [S1, unofficial].
-    *   After advancing, retrieve the object list: $list = ObjectList[X][Y][Z]$. Loop while $list == NIL$ [S1, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Precision Error:** Standard double precision (53-bit mantissa) propagates errors rapidly in incremental calculus. Fixed-point notation is required to maintain precision for connection-6 continuity [S1, unofficial].
+*   **Transition Errors:** The transition between the two levels is calculated in floating-point arithmetic, requiring high precision for correctness [S1, unofficial].
+*   **Resolution Scaling:** The advantage of the two-step process decreases for lower screen resolutions due to floating-point calculation errors during the transition between the two steps [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def two_step_dda_octree(ray_origin, ray_direction, octree_root, total_levels):
-    # Constants
+def two_step_dda_octree(ray_origin, ray_direction, octree_root, total_levels, grid_bounds):
     L1 = 6  # Optimal levels for first step [S1, unofficial]
     L2 = total_levels - L1
-    bits = L1  # Width of each coordinate in bits for Step 1
-    SHIFT = 32 # Fixed-point fractional bits
+    bits = L1
+    SHIFT = 32
 
-    # 1. Step 1 Initialization (Coarse)
     dx, dy, dz = ray_direction
     abs_dx, abs_dy, abs_dz = abs(dx), abs(dy), abs(dz)
     
-    # Determine driving axis (max abs direction) and incremental axes
+    # Determine driving axis and incremental axes
     if abs_dx >= abs_dy and abs_dx >= abs_dz: drive, i1, i2 = 0, 1, 2
     elif abs_dy >= abs_dx and abs_dy >= abs_dz: drive, i1, i2 = 1, 0, 2
     else: drive, i1, i2 = 2, 0, 1
 
     d_prime = abs(dx); i1_prime = abs(dy); i2_prime = abs(dz)
-    # Handle zero direction components (axis-aligned rays)
     if i1_prime == 0: i1_prime = 1.0
     if i2_prime == 0: i2_prime = 1.0
 
-    spacing = 1.0 # Normalized grid spacing
+    spacing = 1.0
     d_prime /= spacing; i1_prime /= spacing; i2_prime /= spacing
     q1 = d_prime / i1_prime; q2 = d_prime / i2_prime
 
@@ -91,7 +77,6 @@ def two_step_dda_octree(ray_origin, ray_direction, octree_root, total_levels):
         l1 = h1 * q1 + d_prime; l2 = h2 * q2 + d_prime
         inc_q1 = q1; inc_q2 = q2; inc_d = 1
 
-    # Convert to fixed-point
     l1_fp = int(l1 * (1<<SHIFT)); l2_fp = int(l2 * (1<<SHIFT))
     q1_fp = int(inc_q1 * (1<<SHIFT)); q2_fp = int(inc_q2 * (1<<SHIFT))
 
@@ -99,17 +84,16 @@ def two_step_dda_octree(ray_origin, ray_direction, octree_root, total_levels):
     mask = (1 << bits) - 1
     XYZ_ant = XYZ & mask
 
-    # 2. Step 1 Loop (Coarse Traversal)
+    # Step 1 Loop (Coarse Traversal)
     while (XYZ & mask) == XYZ_ant:
-        if d * (1<<SHIFT) >= l1_fp and d * (1<<SHIFT) >= l2_fp:
-            # Driving axis advance
+        limit = min(l1_fp >> SHIFT, l2_fp >> SHIFT)
+        if d >= limit:
             if drive == 0: x0 += inc_drive
             elif drive == 1: y0 += inc_drive
             else: z0 += inc_drive
             XYZ = (x0 << 2*bits) | (y0 << bits) | z0
             d += inc_d
         else:
-            # Incremental axis advance
             if l1_fp < l2_fp:
                 if i1 == 0: x0 += inc1
                 elif i1 == 1: y0 += inc1
@@ -127,26 +111,40 @@ def two_step_dda_octree(ray_origin, ray_direction, octree_root, total_levels):
             XYZ_ant = XYZ & mask
             break
 
-    # 3. Transition & Step 2 (Fine Traversal)
-    # Check occupancy (implementation depends on octree structure)
-    # [G] Standard octree occupancy check: traverse down to leaf level L1
+    # Transition & Step 2 (Fine Traversal)
     occupied = octree_root.check_occupied(x0, y0, z0, L1)
     
     if occupied:
-        # Initialize Step 2 with fine resolution
         fine_spacing = spacing / (1 << L2)
-        # Re-initialize DDA variables for fine grid using same logic as Step 1
-        # [G] Parameters d', i1', i2', q1, q2, l1, l2, incs are recalculated 
-        #     using fine_spacing and current voxel coordinates.
-        # [G] Fixed-point conversion and loop follow identical structure to Step 1
-        #     but with L2 bits and fine spacing.
-        # [G] Step 2 uses Amanatides & Woo tMax advancement for object retrieval:
-        #     tMaxX, tMaxY, tMaxZ initialized; advance axis with min tMax;
-        #     list = ObjectList[X][Y][Z]; while list == NIL: advance.
-        pass
+        # Recalculate DDA variables for fine grid using fine_spacing [G]
+        # Fixed-point conversion and loop follow identical structure to Step 1 [G]
+        # Step 2 uses Amanatides & Woo tMax advancement for object retrieval [S1, unofficial]
+        tMaxX = (x0 + (1 if dx > 0 else 0)) / abs(dx) if abs(dx) > 0 else float('inf')
+        tMaxY = (y0 + (1 if dy > 0 else 0)) / abs(dy) if abs(dy) > 0 else float('inf')
+        tMaxZ = (z0 + (1 if dz > 0 else 0)) / abs(dz) if abs(dz) > 0 else float('inf')
+        tDeltaX = 1.0 / abs(dx) if abs(dx) > 0 else float('inf')
+        tDeltaY = 1.0 / abs(dy) if abs(dy) > 0 else float('inf')
+        tDeltaZ = 1.0 / abs(dz) if abs(dz) > 0 else float('inf')
+        
+        while True:
+            if tMaxX < tMaxY and tMaxX < tMaxZ:
+                x0 += (1 if dx > 0 else -1)
+                if x0 == grid_bounds.max_x: return None
+                tMaxX += tDeltaX
+            elif tMaxY < tMaxZ:
+                y0 += (1 if dy > 0 else -1)
+                if y0 == grid_bounds.max_y: return None
+                tMaxY += tDeltaY
+            else:
+                z0 += (1 if dz > 0 else -1)
+                if z0 == grid_bounds.max_z: return None
+                tMaxZ += tDeltaZ
+            
+            obj_list = octree_root.get_object_list(x0, y0, z0)
+            if obj_list is not None:
+                return obj_list
     else:
-        # Continue Step 1 if Step 2 didn't find anything [S1, unofficial]
-        pass
+        continue_step_1()  # Continue Step 1 if Step 2 didn't find anything [S1, unofficial]
 ```
 
 ## Subtopics

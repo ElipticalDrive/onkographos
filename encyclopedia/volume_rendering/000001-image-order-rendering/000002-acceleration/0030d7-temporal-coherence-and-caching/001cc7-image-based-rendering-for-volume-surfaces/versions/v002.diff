@@ -1,0 +1,245 @@
+--- v001.md
++++ v002.md
+@@ -4,145 +4,125 @@
+ 
+ ## Overview
+-Image-Based Rendering (IBR) for Volume Surfaces is an acceleration technique that caches a previously fully volume-rendered image (the "keyview") and generates novel views by ray-casting only through pixels representing previously hidden objects, while generating the rest of the view via image transformation from the keyview [S1, unofficial][S2, unofficial]. It sets itself apart from sibling methods like [Reprojection with Temporal Accumulation](8337-reprojection-with-temporal-accumulation.md) by using explicit geometric surface models and projective texture mapping rather than simple pixel blending or motion vectors, allowing for higher fidelity in regions where occlusion changes significantly.
++Image-Based Rendering (IBR) for Volume Surfaces is an acceleration technique that reduces the computational cost of volume rendering by caching a fully rendered view (the "keyview") and reusing it for novel views via geometric projection, only ray-casting newly visible regions [S1, S2, unofficial]. It sets itself apart from sibling methods like [Temporal Differential Rendering](5499-temporal-differential-rendering.md) by explicitly constructing an intermediate geometric iso-surface model to texture-map the keyview, rather than relying solely on pixel-space reprojection or buffer accumulation [S1, S2, unofficial]. This approach is particularly effective for large static volumes where camera motion is incremental, such as in virtual colon navigation [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   3D volume dataset $V$.
+-*   Transfer function $T$ mapping scalar values to color/opacity.
+-*   Camera parameters for the keyview ($C_{key}$) and the novel view ($C_{novel}$).
++The method operates by decoupling the rendering of visible surfaces from the volumetric integration process for the majority of the image, leveraging the assumption that most of the visible surface remains unchanged between adjacent frames.
+ 
+-**Outputs:**
+-*   Rendered image $I_{novel}$ for the novel view.
++### Inputs and Outputs
++*   **Inputs:**
++    *   $V$: A 3D volume dataset (e.g., $512^3$ medical scan) [S1, S2, unofficial].
++    *   $T$: A transfer function mapping scalar values to color and opacity [S1, unofficial].
++    *   $C_{key}$: The camera pose (view and projection matrices) of the cached keyview [S1, unofficial].
++    *   $C_{novel}$: The camera pose of the current novel view [S1, unofficial].
++    *   $I_{key}$: The fully volume-rendered image buffer from the keyview [S1, S2, unofficial].
++*   **Outputs:**
++    *   $I_{novel}$: The rendered image for the novel view [S1, S2, unofficial].
+ 
+-**Data Structures:**
+-1.  **Keyview Image ($I_{key}$):** A 2D texture buffer storing the color and depth (or surface normal) information of the fully volume-rendered keyview.
+-2.  **Surface Model ($M$):** A geometric mesh (typically an iso-surface) extracted from the volume $V$. The iso-value is derived from the input transfer function $T$ [S1, unofficial].
+-3.  **Texture Map:** The mapping of $I_{key}$ onto the vertices of $M$.
++### Data Structures
++1.  **Iso-Surface Model ($M$):** A geometric mesh representing the iso-surface extracted from $V$.
++    *   **Iso-value ($v_{iso}$):** Derived from the transfer function $T$ [S1, unofficial].
++    *   **Attributes:** Each vertex $p$ in $M$ stores its 3D position and potentially UV coordinates for texture mapping [S1, unofficial].
++    *   **Generation:** Extracted using a levels-of-detail (LOD) algorithm optimized for regular volumes [S1, unofficial].
++2.  **Keyview Cache:**
++    *   **Image ($I_{key}$):** A 2D texture buffer containing the color/opacity data from the previous full render [S1, S2, unofficial].
++    *   **Camera Pose ($C_{key}$):** Stored to compute the transformation to the novel view [S1, unofficial].
+ 
+-**Steps:**
+-1.  **Surface Extraction:** Construct a geometric iso-surface model $M$ from the volume data $V$. The iso-value is determined by the transfer function $T$ [S1, unofficial].
+-2.  **Keyview Rendering:** Perform a full volume rendering of the volume $V$ from the keyview camera $C_{key}$ to generate the keyview image $I_{key}$ [S1, unofficial][S2, unofficial].
+-3.  **Texture Mapping:** Texture-map the keyview image $I_{key}$ onto the geometric surface model $M$ using projective texture mapping [S1, unofficial]. This associates each pixel in $I_{key}$ with a corresponding point on the surface mesh $M$.
+-4.  **Projection:** Project the texture-mapped surface model $M$ into the novel view camera $C_{novel}$ [S1, unofficial]. This generates a preliminary image where most of the visible surface is covered by the texture from $I_{key}$.
+-5.  **Ray Casting for New Regions:** Identify pixels in the novel view that correspond to "newly visible" regions (previously hidden objects or occluded areas not covered by the projected surface model) [S1, unofficial][S2, unofficial]. Cast rays only through these specific pixels to compute their color values via standard volume rendering [S1, unofficial].
+-6.  **Compositing:** Combine the projected texture from the surface model with the newly ray-cast pixels to form the final image $I_{novel}$ [S1, unofficial][S2, unofficial].
++### Steps
++1.  **Iso-Surface Extraction:** Construct the geometric model $M$ from volume $V$ using the iso-value $v_{iso}$ deduced from $T$ [S1, unofficial]. This model approximates the visible boundaries of the volume [S2, unofficial].
++2.  **Keyview Rendering (Initial or Update):**
++    *   If no keyview exists, perform a full volume render of $V$ using camera $C_{key}$ to generate $I_{key}$ [S1, S2, unofficial].
++    *   *Note:* The source mentions optimizations for this step, such as decomposing 3D rotation into shear transformations for hardware acceleration [S1, unofficial], but the core IBR logic assumes $I_{key}$ is available.
++3.  **Texture Mapping:** Projectively texture-map the image $I_{key}$ onto the geometric model $M$ [S1, unofficial].
++    *   This creates a texture-coordinated mesh where each point on $M$ corresponds to a pixel in $I_{key}$ [S1, unofficial].
++    *   The source notes the use of backward and forward processing orders for high-quality texture mapping [S1, unofficial].
++4.  **Novel View Projection:**
++    *   Render the textured model $M$ using the novel camera pose $C_{novel}$ [S1, unofficial].
++    *   This generates a preliminary image $I_{proj}$ where the keyview content is correctly projected into the new perspective [S1, unofficial].
++5.  **Identify Newly Visible Regions:**
++    *   Compare the depth or visibility of $M$ in the novel view against the keyview.
++    *   Identify pixels in $I_{novel}$ that correspond to regions of $V$ that were occluded or hidden in the keyview but are now visible [S1, S2, unofficial].
++    *   Let $P_{new}$ be the set of pixel coordinates in the image plane corresponding to these newly visible regions [S1, unofficial].
++6.  **Ray Casting for New Regions:**
++    *   For each pixel $(u, v) \in P_{new}$, cast a ray through the volume $V$ using the novel camera $C_{novel}$ [S1, S2, unofficial].
++    *   Perform standard volume integration (e.g., ray marching) to compute the color $C_{ray}(u, v)$ [S1, unofficial].
++7.  **Composite Image:**
++    *   Initialize $I_{novel}$ with $I_{proj}$ [S1, unofficial].
++    *   For each $(u, v) \in P_{new}$, replace the pixel value in $I_{novel}$ with $C_{ray}(u, v)$ [S1, S2, unofficial].
++    *   *Guard Check [G]:* If the camera motion is too large, $P_{new}$ may cover the entire image, negating the speedup. In such cases, fall back to a full volume render and update $I_{key}$ and $C_{key}$ [G].
+ 
+-**Pseudocode:**
++### Pseudocode
+ 
+ ```python
+-def render_novel_view(volume, transfer_func, camera_key, camera_novel, keyview_cache):
++def render_novel_view(volume, transfer_function, keyview_image, keyview_camera, novel_camera, iso_value):
+     """
+-    Renders a novel view using the IBR for Volume Surfaces method.
++    Renders a novel view using Image-Based Rendering for Volume Surfaces.
+     
+     Args:
+         volume: 3D array of scalar data.
+-        transfer_func: Function mapping scalar to color/opacity.
+-        camera_key: Camera parameters for the cached keyview.
+-        camera_novel: Camera parameters for the current novel view.
+-        keyview_cache: Object containing the cached keyview image and surface model.
++        transfer_function: Function mapping scalar -> (color, opacity).
++        keyview_image: 2D array (texture) of the previously rendered view.
++        keyview_camera: Camera parameters (view/projection) of the keyview.
++        novel_camera: Camera parameters for the current frame.
++        iso_value: Scalar value for iso-surface extraction.
+         
+     Returns:
+-        novel_image: The rendered image for the novel view.
++        novel_view_image: 2D array of the rendered novel view.
+     """
+-    # Step 1: Extract surface model if not already cached or if volume changed
+-    # Note: In practice, the surface model M is extracted once or updated incrementally.
+-    # Here we assume M is part of the cache or extracted from volume.
+-    if not keyview_cache.has_surface_model:
+-        iso_value = extract_iso_value_from_transfer(transfer_func)
+-        keyview_cache.surface_model = extract_iso_surface(volume, iso_value)
+-        keyview_cache.has_surface_model = True
+-
+-    # Step 2: If keyview is not cached, render it fully
+-    if not keyview_cache.has_keyview:
+-        keyview_cache.keyview_image = volume_render_full(volume, transfer_func, camera_key)
+-        keyview_cache.has_keyview = True
++    
++    # Step 1: Get or create the iso-surface model
++    # In a real implementation, M is cached and updated only if volume changes.
++    # Here we assume M is available or extracted once.
++    mesh = extract_iso_surface(volume, iso_value)
++    
++    # Step 2: Texture map the keyview onto the mesh
++    # This projects the keyview image onto the 3D geometry.
++    textured_mesh = texture_map(mesh, keyview_image, keyview_camera)
++    
++    # Step 3: Project the textured mesh to the novel view
++    # This gives us the "cached" part of the image, correctly perspective-corrected.
++    projected_image = render_mesh(textured_mesh, novel_camera)
++    
++    # Step 4: Identify newly visible pixels
++    # We need to know which pixels in the novel view correspond to volume data
++    # that was NOT visible in the keyview.
++    # This typically involves depth testing or visibility comparison.
++    # Let's assume a function that returns the mask of pixels requiring new ray casting.
++    new_pixel_mask = identify_newly_visible_pixels(mesh, keyview_camera, novel_camera)
++    
++    # Step 5: Ray cast only the new pixels
++    new_colors = {}
++    for u, v in pixels_where(new_pixel_mask):
++        # Construct ray from novel camera
++        ray_origin, ray_direction = get_ray(novel_camera, u, v)
+         
+-        # Step 3: Texture map keyview onto surface model
+-        # This involves projecting the keyview image onto the surface mesh M
+-        keyview_cache.texture_map = projective_texture_map(keyview_cache.keyview_image, 
+-                                                           keyview_cache.surface_model, 
+-                                                           camera_key)
+-
+-    # Step 4: Project the texture-mapped surface model to the novel view
+-    # This creates a base image using the cached keyview data
+-    projected_image = project_surface_model(keyview_cache.surface_model, 
+-                                            keyview_cache.texture_map, 
+-                                            camera_novel)
+-    
+-    # Step 5: Identify newly visible regions
+-    # These are pixels in the novel view that are not covered by the projected surface model
+-    # or where the surface model does not accurately represent the volume (e.g., occlusion changes)
+-    new_region_mask = identify_newly_visible_regions(projected_image, camera_novel, volume, transfer_func)
+-    
+-    # Step 6: Ray-cast only for the new regions
+-    new_region_pixels = ray_cast_volume(volume, transfer_func, camera_novel, new_region_mask)
+-    
+-    # Step 7: Composite the results
+-    novel_image = composite_images(projected_image, new_region_pixels, new_region_mask)
+-    
+-    return novel_image
+-
+-def extract_iso_value_from_transfer(transfer_func):
+-    # Implementation depends on the specific transfer function definition.
+-    # Typically, this might be the scalar value with maximum opacity or a user-defined threshold.
+-    # [G] Placeholder for specific transfer function logic.
+-    return 0.5 
+-
+-def extract_iso_surface(volume, iso_value):
+-    # Extracts a mesh (e.g., using Marching Cubes) from the volume at the given iso-value.
+-    # [G] Standard geometry processing algorithm.
+-    return Mesh() 
+-
+-def projective_texture_map(image, mesh, camera):
+-    # Maps the 2D image onto the 3D mesh using the camera's projection.
+-    # [G] Standard graphics pipeline operation.
+-    return TextureMap()
+-
+-def project_surface_model(mesh, texture_map, camera):
+-    # Renders the textured mesh from the new camera perspective.
+-    # [G] Standard rasterization or ray-tracing of the mesh.
+-    return Image()
+-
+-def identify_newly_visible_regions(projected_image, camera, volume, transfer_func):
+-    # Determines which pixels in the new view were not visible or are different in the keyview.
+-    # This can be done by comparing depth buffers or checking for uncovered pixels.
+-    # [G] Logic to detect occlusion changes.
+-    return Mask()
+-
+-def ray_cast_volume(volume, transfer_func, camera, mask):
+-    # Performs standard volume rendering only for pixels in the mask.
+-    # [G] Standard ray-marching loop.
+-    return Image()
+-
+-def composite_images(base_image, new_pixels, mask):
+-    # Blends the new ray-cast pixels into the base projected image.
+-    # [G] Simple alpha blending or overwrite based on mask.
+-    return Image()
++        # Perform volume integration along the ray
++        color = volume_ray_cast(volume, transfer_function, ray_origin, ray_direction)
++        new_colors[(u, v)] = color
++        
++    # Step 6: Composite the result
++    novel_view_image = projected_image.copy()
++    for (u, v), color in new_colors.items():
++        novel_view_image[u, v] = color
++        
++    return novel_view_image
+ ```
+ 
+-**Parameters:**
+-*   **Volume Size Threshold:** The method is particularly demanded for volumes over $1024^3$ [S1, unofficial].
+-*   **Camera Motion:** The method assumes the novel view camera moves only slightly away from the keyview camera, such that ray-cast pixels occupy only a small percent of the current view [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Large Camera Motion:** If the camera moves significantly, the "newly visible" regions may become large, reducing the speedup benefit as more ray-casting is required [S1, unofficial].
+-*   **Occlusion Changes:** The surface model must accurately represent the volume's geometry. If the iso-surface extraction fails to capture complex internal structures, the texture mapping may result in visual artifacts in newly visible regions [S1, unofficial].
+-*   **Precision:** Projective texture mapping requires accurate depth information to avoid z-fighting or gaps between the projected texture and the newly ray-cast regions [S1, unofficial].
++### Parameters and Edge Cases
++*   **Volume Size:** The method is designed for large volumes, specifically those over $1024^3$ where traditional rendering is too slow [S1, unofficial]. However, it has been successfully tested on $512^3$ datasets [S1, S2, unofficial].
++*   **Iso-value Selection:** The choice of $v_{iso}$ affects the accuracy of the surface model $M$. If $M$ is too coarse, texture mapping artifacts (z-fighting, holes) may occur in $I_{proj}$ [S1, unofficial].
++*   **Camera Motion:** The method assumes small camera movements. If the novel view is significantly different from the keyview, the "newly visible" region becomes large, and the overhead of ray casting increases, potentially making the method slower than direct rendering [S1, unofficial].
++*   **Occlusion Handling:** The geometric model $M$ must accurately represent occlusions. If $M$ fails to occlude parts of the volume that should be hidden, the projected image $I_{proj}$ will show incorrect data [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The rendering time is proportional to the number of pixels in the "newly visible" regions. If the camera motion is small, this is a small fraction of the total image, leading to an average speedup of an order of magnitude (10x) over traditional volume rendering [S1, unofficial][S2, unofficial].
+-*   **Memory Complexity:** Requires storing the keyview image and the surface model mesh. The surface model size depends on the volume resolution and the chosen iso-value.
+-*   **Measured Performance:** Tested on a $512^3$ patient colon dataset, achieving interactive frame rates for virtual colon navigation [S1, unofficial][S2, unofficial].
+-*   **Strengths:** Significant speedup for interactive navigation with small camera movements; maintains high image quality with very little loss compared to full volume rendering [S2, unofficial].
+-*   **Limitations:** Performance degrades with large camera movements; requires pre-computation of the surface model and keyview; may introduce artifacts if the surface model is not a good approximation of the volume's visible surfaces.
+-*   **When to Use:** Interactive visualization of large volumes (e.g., biomedical simulation, geoscience) where camera motion is typically small and incremental [S1, unofficial].
+-*   **When Not to Use:** Scenes with large, rapid camera movements or where the volume's internal structure is too complex to be accurately represented by a single iso-surface.
++*   **Time Complexity:** $O(N_{new} \cdot L)$, where $N_{new}$ is the number of pixels in newly visible regions and $L$ is the average ray length through the volume. The cost of texture mapping and mesh projection is $O(V_{mesh})$, where $V_{mesh}$ is the number of vertices in the iso-surface [S1, unofficial].
++*   **Memory Complexity:** $O(V)$ for the volume data, $O(V_{mesh})$ for the surface model, and $O(W \cdot H)$ for the keyview image buffer [S1, S2, unofficial].
++*   **Performance:** Provides an average speedup of an order of magnitude (10x) over traditional volume rendering [S1, S2, unofficial]. Achieves interactive frame rates for $512^3$ datasets in virtual colon navigation [S1, S2, unofficial].
++*   **Strengths:** Significant reduction in ray casting operations when camera motion is small; leverages existing hardware rasterization for the bulk of the image [S1, S2, unofficial].
++*   **Limitations:** Requires construction and maintenance of a geometric iso-surface model; quality depends on the accuracy of the iso-surface approximation; not suitable for highly dynamic volumes or large camera jumps [S1, S2, unofficial].
+ 
+ ## Background
+-*   **Origin:** Proposed in a dissertation by Baoquan Chen, presented at Eurographics 2001 [S1, unofficial][S2, unofficial].
+-*   **History:** Developed to address the computational expense of interactive volume rendering for large datasets (over $1024^3$), which existing software optimizations and special-purpose hardware could not handle efficiently [S1, unofficial].
+-*   **Usage:** Applied to practical navigation systems, including virtual colon navigation, height field terrain, and photograph sequence rendering [S1, unofficial].
++The method was proposed in the context of interactive volume rendering for large biomedical and geoscience datasets [S1, unofficial]. It was introduced by Baoquan Chen in a dissertation and subsequent Eurographics 2001 paper [S1, S2, unofficial]. The work addresses the computational bottleneck of ray casting large volumes by exploiting temporal coherence between adjacent frames in navigation sequences [S1, unofficial]. It extends the concept of image-based rendering from surface models to volumetric data by using an intermediate iso-surface representation [S1, S2, unofficial].
+ 
+ ## Sources
+ [S1] Image-based volume rendering, https://openalex.org/W2514442513, fetched 2026-10-26 (unofficial)
+-[S2] Academia | (PDF) FAST VOLUME RENDERING USING A SHEAR-WARP FACTORIZATION ..., https://www.academia.edu/6981092/FAST_VOLUME_RENDERING_USING_A_SHEAR_WARP_FACTORIZATION_OF_THE_VIEWING_TRANSFORMATION, fetched 2026-10-27 (unofficial)+[S2] Image-Based Rendering of Surfaces from Volume Data, https://www.academia.edu/6981092/FAST_VOLUME_RENDERING_USING_A_SHEAR_WARP_FACTORIZATION_OF_THE_VIEWING_TRANSFORMATION, fetched 2026-10-27 (unofficial)

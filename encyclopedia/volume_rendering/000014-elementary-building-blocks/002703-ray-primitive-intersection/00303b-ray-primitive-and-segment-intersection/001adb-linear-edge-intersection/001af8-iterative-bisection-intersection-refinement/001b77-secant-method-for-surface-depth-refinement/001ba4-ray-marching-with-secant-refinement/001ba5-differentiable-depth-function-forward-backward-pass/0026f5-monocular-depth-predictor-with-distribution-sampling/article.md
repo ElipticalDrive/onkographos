@@ -3,7 +3,7 @@
 Also called: Depth Prediction via Discrete Distribution Sampling, DepthPredictorMonocular
 
 ## Overview
-A neural network module that predicts a depth distribution for each ray from image features by discretizing the depth range into buckets, predicting a probability density function (PDF) and intra-bucket offsets, and sampling from this distribution to determine depth values [S1, unofficial]. It differs from the sibling [DepthPredictor](4097-depthpredictor.md) by explicitly modeling the depth uncertainty via a discrete probability distribution over sampled buckets rather than predicting a single deterministic depth value [S1, unofficial]. This method is implemented as a PyTorch Autograd Function wrapper that builds on [Differentiable Depth Function Forward/Backward Pass](1047-differentiable-depth-function-forward-backward-pass.md) [G].
+A neural network module that predicts a depth distribution for each ray from image features by discretizing the depth range into buckets, predicting a probability density function (PDF) and intra-bucket offsets, and sampling from this distribution to determine depth values [S1, unofficial]. It differs from the sibling [DepthPredictor](4097-depthpredictor.md) by explicitly modeling depth uncertainty via a discrete probability distribution over sampled buckets rather than predicting a single deterministic depth value [S1, unofficial]. It is wrapped in a PyTorch Autograd Function to enable gradient flow, building on [Differentiable Depth Function Forward/Backward Pass](1047-differentiable-depth-function-forward-backward-pass.md) [G].
 
 ## How it works
 **Inputs:**
@@ -22,23 +22,22 @@ A neural network module that predicts a depth distribution for each ray from ima
 **Data Structures:**
 The module `DepthPredictorMonocular` contains:
 - `projection`: An `nn.Sequential` module consisting of `nn.ReLU()` followed by `nn.Linear(d_in, 2 * num_samples * num_surfaces)` [S1, unofficial].
-- `sampler`: A `DistributionSampler` instance responsible for sampling indices and gathering offsets [S1, unofficial].
 - `to_pdf`: `nn.Softmax(dim=-1)` hook to normalize raw logits into a valid PDF [S1, unofficial].
 - `to_offset`: `nn.Sigmoid()` hook to normalize raw logits into the range $[0, 1]$ [S1, unofficial].
 - `num_samples`: Integer, the number of depth samples (buckets) per surface [S1, unofficial].
 - `num_surfaces`: Integer, the number of distinct surfaces to model [S1, unofficial].
 
 **Parameters:**
-- `num_samples`: Number of depth samples per surface. Not given in the sources.
-- `num_surfaces`: Number of distinct surfaces to model. Not given in the sources.
-- `gaussians_per_pixel`: Number of samples to draw. Not given in the sources.
+- `num_samples`: Number of depth samples per surface. Not given in the sources. [G]
+- `num_surfaces`: Number of distinct surfaces to model. Not given in the sources. [G]
+- `gaussians_per_pixel`: Number of samples to draw. Not given in the sources. [G]
 
 **Steps:**
 1. Project input features through `self.projection` to obtain raw logits of shape `(batch, view, ray, surface, depth, 2)` where the last dimension corresponds to `pdf_raw` and `offset_raw` [S1, unofficial].
 2. Rearrange the projected features from shape `... (dpt srf c)` to `c ... srf dpt` where $c=2$, separating `pdf_raw` and `offset_raw` tensors [S1, unofficial].
 3. Apply `self.to_pdf` (Softmax) to `pdf_raw` along the last dimension (depth dimension) to obtain normalized PDF values `pdf` [S1, unofficial].
 4. Apply `self.to_offset` (Sigmoid) to `offset_raw` to obtain intra-bucket offsets `offset` in the range $[0, 1]$ [S1, unofficial].
-5. Sample depth indices and corresponding PDF densities from the distribution using `self.sampler.sample(pdf, deterministic, gaussians_per_pixel)`. This returns `index` (sampled bucket indices) and `pdf_i` (PDF values at sampled indices) [S1, unofficial].
+5. Sample depth indices and corresponding PDF densities from the distribution using `self.sampler.sample(pdf, deterministic, gaussians_per_pixel)` [S1, unofficial]. This returns `index` (sampled bucket indices) and `pdf_i` (PDF values at sampled indices).
 6. Gather the intra-bucket offsets corresponding to the sampled indices: `offset = self.sampler.gather(index, offset)` [S1, unofficial].
 7. Calculate the relative disparity for each sample:
    $$relative\_disparity = \frac{index + offset}{s}$$
@@ -56,7 +55,6 @@ The module `DepthPredictorMonocular` contains:
      a. Set opacity directly to the sampled PDF density: `opacity = pdf_i` [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -70,20 +68,12 @@ class DepthPredictorMonocular(nn.Module):
         self.num_samples = num_samples
         self.num_surfaces = num_surfaces
         self.use_transmittance = use_transmittance
-        
-        # Projection layer: ReLU followed by Linear
-        # Output channels: 2 * num_samples * num_surfaces
         self.projection = nn.Sequential(
             nn.ReLU(),
             nn.Linear(d_in, 2 * num_samples * num_surfaces)
         )
-        
-        # Hooks for normalization
         self.to_pdf = nn.Softmax(dim=-1)
         self.to_offset = nn.Sigmoid()
-        
-        # Sampler instance
-        self.sampler = DistributionSampler()
 
     def forward(
         self,
@@ -93,174 +83,73 @@ class DepthPredictorMonocular(nn.Module):
         deterministic: bool = False,
         gaussians_per_pixel: int = 1
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            features: Tensor of shape (batch, view, ray, surface, depth, 2)
-            near: Tensor of shape (batch, view)
-            far: Tensor of shape (batch, view)
-            deterministic: If True, sampling is deterministic (argmax).
-            gaussians_per_pixel: Number of samples to draw.
-            
-        Returns:
-            depth: Tensor of shape (batch, view, ray, surface, sample)
-            opacity: Tensor of shape (batch, view, ray, surface, sample)
-            pdf: Tensor of shape (batch, view, ray, surface, sample)
-        """
-        # Step 1: Project features
-        # features shape: (batch, view, ray, surface, depth, 2)
+        # features: (batch, view, ray, surface, depth, 2)
         projected = self.projection(features)
-        
-        # Step 2: Rearrange to separate PDF and Offset
-        # projected shape: (batch, view, ray, surface, depth, 2 * num_samples * num_surfaces)
-        # Reshape last dimension into (num_samples, num_surfaces, 2)
+        # projected: (batch, view, ray, surface, depth, 2 * num_samples * num_surfaces)
+        # Rearrange to (2, batch, view, ray, num_surfaces, depth)
         B, V, R, S, D, C = projected.shape
-        projected = projected.view(B, V, R, S, D, self.num_samples, self.num_surfaces, 2)
-        # Permute to (2, batch, view, ray, surface, num_samples)
-        projected = projected.permute(7, 0, 1, 2, 3, 4, 6, 5)
-        projected = projected.reshape(2, B, V, R, S, D)
-        
+        projected = projected.view(B, V, R, S, D, self.num_surfaces, 2)
+        projected = projected.permute(6, 0, 1, 2, 3, 4, 5)
         pdf_raw = projected[0]
         offset_raw = projected[1]
-        
-        # Step 3: Normalize PDF
+
         pdf = self.to_pdf(pdf_raw)
-        
-        # Step 4: Normalize Offset
         offset = self.to_offset(offset_raw)
-        
-        # Step 5: Sample indices and PDF values
-        # index shape: (batch, view, ray, surface, gaussians_per_pixel)
-        # pdf_i shape: (batch, view, ray, surface, gaussians_per_pixel)
-        index, pdf_i = self.sampler.sample(pdf, deterministic, gaussians_per_pixel)
-        
-        # Step 6: Gather offsets
-        # offset shape: (batch, view, ray, surface, gaussians_per_pixel)
-        offset = self.sampler.gather(index, offset)
-        
-        # Step 7: Calculate relative disparity
-        # index is integer tensor, offset is float tensor [0, 1]
-        # s is num_samples
-        s = self.num_samples
-        relative_disparity = (index + offset) / s
-        
-        # Step 8: Convert to absolute depth
-        # Helper function assumed to exist
-        depth = relative_disparity_to_depth(relative_disparity, near, far)
-        
-        # Step 9: Compute opacity
+
+        index, pdf_i = self._sample(pdf, deterministic, gaussians_per_pixel)
+        offset = self._gather(index, offset)
+
+        relative_disparity = (index + offset) / self.num_samples
+        depth = self._relative_disparity_to_depth(relative_disparity, near, far)
+
         if self.use_transmittance:
-            # Cumulative sum along the depth dimension (dim=-1 of pdf)
-            # pdf shape: (2, batch, view, ray, num_surfaces, num_samples)
             partial = pdf.cumsum(dim=-1)
-            
-            # Shift partial: cat zeros at start, drop last
-            # partial shape: (2, batch, view, ray, num_surfaces, num_samples)
-            zeros = torch.zeros_like(partial[..., :1])
-            partial_shifted = torch.cat((zeros, partial[..., :-1]), dim=-1)
-            
-            # Compute opacity
-            # pdf_i is the PDF value at the sampled index.
-            # But the formula uses pdf (the full distribution) and partial (cumsum).
-            # The source says: `opacity = pdf / (1 - partial + 1e-10)`
-            # Then gather.
-            # So we compute opacity for all buckets, then gather.
-            
-            opacity_full = pdf / (1 - partial_shifted + 1e-10)
-            
-            # Gather opacity for sampled indices
-            # opacity_full shape: (2, batch, view, ray, num_surfaces, num_samples)
-            # index shape: (batch, view, ray, surface, gaussians_per_pixel)
-            # We need to gather along the last dimension (num_samples)
-            # But opacity_full has the 'c' dim at front.
-            # We need to gather from the correct channel?
-            # The source says `opacity = self.sampler.gather(index, opacity)`
-            # Assuming gather handles the dimensions correctly.
-            opacity = self.sampler.gather(index, opacity_full)
+            partial = torch.cat((torch.zeros_like(partial[..., :1]), partial[..., :-1]), dim=-1)
+            opacity_full = pdf / (1 - partial + 1e-10)
+            opacity = self._gather(index, opacity_full)
         else:
             opacity = pdf_i
-            
+
         return depth, opacity, pdf_i
 
-def rearrange_projected(projected, num_surfaces):
-    # projected: (B, V, R, S, D, 2*D*S)
-    B, V, R, S, D, C = projected.shape
-    # Reshape last dim to (D, S, 2)
-    # Note: depth dimension in input is assumed to equal num_samples
-    projected = projected.view(B, V, R, S, D, num_surfaces, 2)
-    # Permute to (2, B, V, R, S, D)
-    projected = projected.permute(5, 0, 1, 2, 3, 4, 6)
-    return projected
-
-def relative_disparity_to_depth(relative_disparity: torch.Tensor, near: torch.Tensor, far: torch.Tensor) -> torch.Tensor:
-    """
-    Converts relative disparity to absolute depth.
-    Formula: depth = 1 / ( (1 - relative_disparity) / near + relative_disparity / far )
-    Or similar inverse depth interpolation.
-    Not given in the sources. [G]
-    """
-    # Standard inverse depth interpolation
-    # relative_disparity in [0, 1]
-    # depth = 1 / ( (1 - rd) / near + rd / far )
-    inv_near = 1.0 / near
-    inv_far = 1.0 / far
-    inv_depth = (1 - relative_disparity) * inv_near + relative_disparity * inv_far
-    depth = 1.0 / inv_depth
-    return depth
-
-class DistributionSampler:
-    def sample(self, pdf: torch.Tensor, deterministic: bool, gaussians_per_pixel: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Samples indices and PDF values.
-        """
-        # If deterministic, use argmax
+    def _sample(self, pdf: torch.Tensor, deterministic: bool, gaussians_per_pixel: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        # pdf shape: (2, batch, view, ray, num_surfaces, num_samples)
+        # Sample over the last dimension
         if deterministic:
             index = torch.argmax(pdf, dim=-1)
-            # Gather PDF value at index
-            # pdf shape: (2, ..., num_samples)
-            # We need to gather from the correct channel?
-            # The source implies pdf_i is the PDF value.
-            # Assuming pdf is (..., num_samples) for sampling logic
-            # But pdf has shape (2, ...).
-            # Let's assume we sample from the first channel or aggregate?
-            # The source says `pdf_i = self.sampler.sample(pdf, ...)`
-            # And later `opacity = pdf_i` if not transmittance.
-            # This implies pdf_i is the sampled PDF value.
-            # If pdf is (2, ...), we might need to select one channel.
-            # Let's assume pdf is reshaped to (..., num_samples) for sampling.
-            pass
         else:
-            # Stochastic sampling
-            # Sample from categorical distribution
-            pass
-        # Return index and pdf_i
-        return torch.zeros_like(pdf[..., 0]), torch.zeros_like(pdf[..., 0])
+            index = torch.multinomial(pdf, num_samples=gaussians_per_pixel, replacement=True)
+        # Gather PDF values at sampled indices
+        index_expanded = index.unsqueeze(0).expand(2, *index.shape)
+        pdf_i = torch.gather(pdf, dim=-1, index=index_expanded).squeeze(0)
+        return index, pdf_i
 
-    def gather(self, index: torch.Tensor, tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Gathers values from tensor along the last dimension using index.
-        """
-        # tensor shape: (2, ..., num_samples)
-        # index shape: (..., gaussians_per_pixel)
-        # We need to gather from the correct channel.
-        # Assuming we gather from the first channel or the tensor is already aligned.
-        pass
+    def _gather(self, index: torch.Tensor, tensor: torch.Tensor) -> torch.Tensor:
+        # tensor shape: (2, batch, view, ray, num_surfaces, num_samples)
+        # index shape: (batch, view, ray, num_surfaces, gaussians_per_pixel)
+        index_expanded = index.unsqueeze(0).expand(2, *index.shape)
+        return torch.gather(tensor, dim=-1, index=index_expanded).squeeze(0)
+
+    def _relative_disparity_to_depth(self, relative_disparity: torch.Tensor, near: torch.Tensor, far: torch.Tensor) -> torch.Tensor:
+        # Standard inverse depth interpolation [G]
+        inv_near = 1.0 / near
+        inv_far = 1.0 / far
+        inv_depth = (1 - relative_disparity) * inv_near + relative_disparity * inv_far
+        return 1.0 / inv_depth
 ```
 
 ## Subtopics
-
-### DepthPredictor
-Predicts a single deterministic depth value per ray [S1, unofficial]. Choose when uncertainty modeling is not required [G].
 
 ### Depth Probability Volume Estimation
 A 3D CNN converts the cost volume $V_c$ into a depth probability volume $V_p$ and a 3D feature volume $F_{cv}$ [S2]. $V_p$ is used to calculate estimated depth $D$ and confidence interval $S$ [S2]. The number of layers $L$ in the depth probability volume typically equals 16 [S2].
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources.
-- **Memory Complexity**: Not given in the sources.
+- **Time Complexity**: Not given in the sources. [G]
+- **Memory Complexity**: Not given in the sources. [G]
 - **Strengths**: Provides a probabilistic estimate of depth, allowing for uncertainty quantification and multi-modal surface prediction via `num_surfaces` [S1, unofficial].
 - **Limitations**: Numerical stability must be handled in opacity calculation [S1, unofficial].
-- **When to use**: Not given in the sources.
-- **When not to use**: Not given in the sources.
+- **When to use**: Not given in the sources. [G]
+- **When not to use**: Not given in the sources. [G]
 
 ## Background
 The method originates from the PixelSplat project, which uses monocular depth prediction for novel view synthesis [S1, unofficial]. It was developed to handle the ambiguity in monocular depth estimation by modeling depth as a distribution rather than a point estimate [G].

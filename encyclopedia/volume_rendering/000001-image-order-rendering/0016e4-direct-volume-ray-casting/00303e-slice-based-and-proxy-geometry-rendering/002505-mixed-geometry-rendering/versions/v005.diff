@@ -1,0 +1,189 @@
+--- v004.md
++++ v005.md
+@@ -4,131 +4,82 @@
+ 
+ ## Overview
+-Mixed geometry rendering integrates explicit geometric primitives (isosurfaces, bounding boxes, wireframes) with volumetric data in a single image to provide spatial context and structural clarity [S2, book][S1]. It solves the problem of isolating volumetric features from their surrounding environment by allowing users to see both the internal scalar field distribution and the discrete boundaries or grid structures that define the data domain [S2, book][S1]. Unlike pure volume rendering, which treats the dataset as a continuous medium, this method explicitly renders surface geometry, often using the hardware depth buffer to occlude volume data behind opaque surfaces [S2, book].
++Mixed Geometry Rendering integrates explicit geometric primitives (isosurfaces, bounding boxes, wireframes) with volumetric data in a single image to improve spatial understanding and context [S2, book]. It solves the occlusion and compositing problem between opaque/transparent surfaces and semi-transparent volumes by leveraging hardware depth buffers or explicit sorting [S2, book]. Unlike pure volume rendering which treats the scene as a continuous density field, or pure surface rendering which discards internal structure, this method combines the structural clarity of geometry with the internal detail of volumes [S1].
+ 
+ ## How it works
+-The method adapts the rendering pipeline based on whether the volume rendering is performed via hardware texture mapping or software ray casting/splatting. The core challenge is maintaining correct depth ordering between opaque geometry, semi-transparent geometry, and the volume samples.
++The method adapts based on whether the volume rendering is performed via hardware texture mapping or software ray casting/splatting. Both approaches rely on the standard volume rendering pipeline defined in [Slice-based and Proxy Geometry Rendering](6225-slice-based-and-proxy-geometry-rendering.md), extended with geometric primitives.
+ 
+ ### Inputs and Outputs
+-*   **Inputs**: Volumetric scalar field data (3D texture or cell-organized grid), geometric primitives (triangles, wireframes), camera parameters, transfer functions (scalar-to-color/opacity mapping), and lighting parameters.
+-*   **Outputs**: A 2D image where geometry and volume are composited correctly according to depth.
++*   **Inputs**: 3D volumetric scalar field, geometric primitives (triangles, lines, bounding boxes), camera parameters, transfer functions for volume, and lighting parameters for geometry.
++*   **Outputs**: A 2D image where geometry and volume are correctly composited.
+ 
+ ### Data Structures
+-1.  **Volumetric Data**: Stored as a 3D texture (for hardware) or in CPU memory (for software ray casting) [S2, book][S1].
+-2.  **Transfer Function**: A 1D texture mapping scalar values to RGBA [S2, book].
+-3.  **Geometry**: Standard triangle meshes or line segments [S2, book][S1].
+-4.  **Depth Buffer**: Hardware Z-buffer storing the depth of the closest opaque geometry [S2, book].
+-5.  **A-Buffer (Variant)**: A linked list of fragments per pixel, sorted by depth, used in scanline hybrid rendering [S3, unofficial].
++*   **Geometry Buffer**: Standard graphics primitive list (vertices, indices).
++*   **Depth Buffer (Z-Buffer)**: Hardware buffer storing depth values for opaque geometry.
++*   **Volume Texture**: 3D texture array storing scalar values [S2, book].
+ 
+-### Steps
++### Algorithm: Hardware-Based Volume Rendering (Texture Mapping)
++This approach uses the GPU's rasterization pipeline for both geometry and volume slices.
+ 
+-#### 1. Gradient Computation (For Lighting)
+-To model light interaction with the volume (e.g., for wireframes or implicit surfaces within the volume), the gradient at each voxel is computed [S1].
+-*   Let $A$ represent the differences in coordinates and values between three neighboring points.
+-*   The X component of the gradient is calculated as the ratio of two determinants [S1]:
+-    $$
+-    \nabla_x = \frac{\det \begin{pmatrix} A_{f0} & A_{y0} & A_{z0} \\ A_{f1} & A_{y1} & A_{z1} \\ A_{f2} & A_{y2} & A_{z2} \end{pmatrix}}{\det \begin{pmatrix} A_{x0} & A_{y0} & A_{z0} \\ A_{x1} & A_{y1} & A_{z1} \\ A_{x2} & A_{y2} & A_{z2} \end{pmatrix}}
+-    $$
+-    Where $A_{xi}, A_{yi}, A_{zi}$ are coordinate differences and $A_{fi}$ are value differences for three pairs of points [S1].
+-*   The Y and Z components are computed similarly by substituting the value differences into the second and third columns of the numerator determinant, respectively [S1].
++1.  **Render Opaque Geometry**: Render all opaque geometric primitives (e.g., bounding boxes, solid isosurfaces) first. This populates the depth buffer with the closest surface depths [S2, book].
++2.  **Sort Semi-Transparent Elements**: Sort all semi-transparent geometric primitives and volume slice polygons in back-to-front order relative to the camera. If primitives intersect, they may need to be split to maintain a valid sorted order [S2, book].
++3.  **Render Semi-Transparent Geometry**: Render the sorted semi-transparent geometry using alpha blending (`GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA`) [S2, book].
++4.  **Render Volume Slices**: Render the volume slices (as defined in the parent article) in back-to-front order. The fragment shader samples the 3D texture to get scalar values, maps them to color/opacity, and blends them into the frame buffer [S1][S2, book].
+ 
+-#### 2. Geometry and Volume Preparation
+-*   **Hardware Volume Rendering**:
+-    1.  Render all **opaque** geometric primitives first [S2, book].
+-    2.  Sort semi-transparent geometric primitives and texture-mapped volume polygons in back-to-front order. This may require splitting polygons to ensure correct sorting [S2, book].
+-*   **Software Volume Rendering (Ray Casting/Splatting)**:
+-    1.  Render opaque geometry and capture the results into the hardware depth buffer [S2, book].
+-    2.  For ray casting: Convert the depth value $Z$ for each pixel into a distance $t$ along the view ray. This $t$ bounds the segment of the ray considered during volume rendering [S2, book].
+-    3.  For splatting: Compare the depth of every volume sample to the value stored in the depth buffer. Accumulate the sample's contribution only if the sample is in front of the geometry for that pixel [S2, book].
++### Algorithm: Software-Based Volume Rendering (Ray Casting / Splatting)
++This approach computes volume data on the CPU or via custom shaders that do not rely on standard texture-mapped slice rasterization for the final compositing, often used for irregular grids or complex lighting.
+ 
+-#### 3. Volume Rendering and Compositing
+-*   **Hardware Path**:
+-    1.  Enable alpha blending with Source = `GL_ONE`, Destination = `GL_ONE_MINUS_SRC_ALPHA` [S2, book].
+-    2.  Draw the sorted semi-transparent geometry and volume polygons.
+-    3.  The fragment shader samples the volume, looks up the transfer function, and outputs color/opacity for hardware compositing [S2, book].
+-*   **Software Path**:
+-    1.  Perform ray marching or splatting for the volume, respecting the depth bounds from the geometry [S2, book].
+-    2.  Convert scalar values to opacity and color using mapping functions [S1].
+-    3.  Integrate opacity and color along the ray [S1].
+-    4.  Blend the final volume color with the geometric color using the over operator [S2, book].
+-    5.  Specifically, multiply the stored geometric color in the pixel by $(1 - \text{integral of opacity along the ray})$ and add this product to the volume ray color [S1].
++1.  **Render Opaque Geometry**: Render all opaque geometric primitives. Capture the resulting depth values in the hardware depth buffer [S2, book].
++2.  **Volume Rendering with Depth Clipping**:
++    *   For **Ray Casting**: For each pixel, retrieve the depth value $z_{geo}$ from the depth buffer. Convert this depth into a distance $t_{geo}$ along the view ray. Perform ray integration for the volume only for $t < t_{geo}$ [S2, book].
++    *   For **Splatting/Object-Order**: For each volume sample (splat), determine its depth. Compare this depth to the value stored in the depth buffer at the corresponding pixel. Accumulate the sample's contribution only if the sample is in front of the geometry for that pixel [S2, book].
++3.  **Compositing**:
++    *   Let $C_{geo}$ be the color from the geometric rendering.
++    *   Let $C_{vol}$ be the color computed from volume integration.
++    *   Let $\alpha_{vol}$ be the integral of opacity along the ray (or accumulated opacity from splats).
++    *   The final pixel color $C_{final}$ is computed using the over operator:
++        $$ C_{final} = C_{geo} \cdot (1 - \alpha_{vol}) + C_{vol} $$
++        *Note: In the specific implementation described in [S1], the stored color in the pixel (from geometry) is multiplied by $(1 - \alpha_{vol})$ and added to the volume ray color. This effectively places the volume *in front* of the geometry if the volume rendering is done after, or requires careful ordering. However, [S2, book] states the volume rendered image is blended *over* the geometric image, implying the geometry is the background layer.*
++    *   Clarification from [S1]: "The stored color in the pixel is then multiplied by one minus the integral of the opacity along the ray. This product is added to color of the ray. This is the finished color of the pixel." This implies the geometry is rendered *first* (background), and the volume is rendered *on top* (foreground), but the volume's opacity determines how much of the background geometry is visible.
+ 
+-#### 4. Wireframe Specifics
+-*   Wireframe geometry is rendered using a standard Z-buffer technique [S1].
+-*   **Pitfall**: Wireframe geometry completely occludes volume data behind it. However, volume data in front of the wireframe correctly transmits colors from the geometry [S1].
++### Gradient Computation for Lighting (Wireframe/Structure)
++To give geometric feel to the volume or wireframes, the gradient is computed at each voxel/node [S1].
+ 
+-### Pseudocode
++1.  **Compute Differences**: For a point $P$, select three neighboring points to form a local basis. Let $A$ represent the differences in coordinates and values.
++2.  **Gradient Formula**: The X component of the gradient $\nabla f_x$ is calculated as the ratio of two determinants [S1]:
++    $$ \nabla f_x = \frac{\begin{vmatrix} A_{f0} & A_{y0} & A_{z0} \\ A_{f1} & A_{y1} & A_{z1} \\ A_{f2} & A_{y2} & A_{z2} \end{vmatrix}}{\begin{vmatrix} A_{x0} & A_{y0} & A_{z0} \\ A_{x1} & A_{y1} & A_{z1} \\ A_{x2} & A_{y2} & A_{z2} \end{vmatrix}} $$
++    Where $A_{x}, A_{y}, A_{z}$ are coordinate differences and $A_{f}$ is the value difference between the reference point and the neighbor.
++3.  **Y and Z Components**: Computed similarly by substituting the value differences into the second and third columns of the numerator determinant, respectively [S1].
++4.  **Lighting**: Use the gradient vector as the surface normal in a simple lighting equation (e.g., diffuse shading) to model light interaction [S1].
+ 
+-```python
+-def render_mixed_geometry(volume_data, geometry, camera, transfer_function):
+-    # 1. Setup Depth Buffer for Geometry
+-    # Clear depth buffer
+-    clear_depth_buffer()
+-    
+-    # 2. Render Opaque Geometry
+-    # Set blend mode to None (opaque)
+-    set_blend_mode(OPAQUE)
+-    for prim in geometry.opaque_primitives:
+-        rasterize(prim)
+-        
+-    # 3. Prepare Volume Rendering Context
+-    # For software ray casting, read depth buffer to get bounds
+-    depth_buffer = read_depth_buffer()
+-    
+-    # 4. Render Semi-Transparent Geometry and Volume
+-    # Sort semi-transparent geometry and volume polygons back-to-front
+-    sorted_primitives = sort_back_to_front(geometry.transparent_primitives, volume_polygons)
+-    
+-    set_blend_mode(SRC_ONE, GL_ONE_MINUS_SRC_ALPHA)
+-    
+-    for prim in sorted_primitives:
+-        if prim.is_geometry:
+-            rasterize(prim)
+-        elif prim.is_volume:
+-            # Hardware texture mapping path
+-            render_volume_polygon(prim, volume_data, transfer_function)
+-            
+-    # 5. Software Ray Casting Path (Alternative to Hardware)
+-    # If using software ray casting instead of hardware polygons:
+-    for y in range(height):
+-        for x in range(width):
+-            # Get depth bound from opaque geometry
+-            z_depth = depth_buffer[y, x]
+-            t_bound = convert_z_to_t(z_depth, camera)
+-            
+-            # Ray march volume, stopping at t_bound
+-            color_vol, opacity_vol = ray_march_volume(
+-                volume_data, 
+-                camera.ray(x, y), 
+-                max_t=t_bound,
+-                transfer_function=transfer_function
+-            )
+-            
+-            # Get geometric color from depth buffer (already rendered)
+-            color_geo = color_buffer[y, x]
+-            
+-            # Composite: Color_geo * (1 - opacity_vol) + Color_vol
+-            final_color = color_geo * (1.0 - opacity_vol) + color_vol
+-            color_buffer[y, x] = final_color
++### Parameters
++*   **Resolution**: Performance results cited use a 512x512 pixel window [S1].
++*   **Sorting**: Critical for correct alpha blending. Not given in the sources how splitting is performed algorithmically, only that it is required [S2, book].
+ 
+-    return color_buffer
+-```
++### Edge Cases and Pitfalls
++*   **Wireframe Occlusion**: Wireframe geometry completely occludes volume data behind it, although volume data in front of the wireframe correctly transmits colors from the geometry [S1].
++*   **Memory Usage**: High for cell-organized data (e.g., tetrahedral meshes). A model with 381,548 cells required over 50 Megabytes [S1].
++*   **Polygon Splitting**: If semi-transparent geometry intersects, simple sorting fails. Polygons must be split to obtain a valid sorted order [S2, book].
+ 
+ ## Subtopics
+ 
+-### Hybrid Scanline A-Buffer Volume Rendering
+-A hybrid rendering system that uses a fast scanline a-buffer algorithm for surface-defined objects and volume rendering for procedural gases, combining them via Z-sorted a-buffer fragments [S3, unofficial]. It creates an a-buffer for a scanline containing a list for each pixel of all fragments that partially or fully cover the pixel. For each volume covering the scanline, volume rendering is performed, creating a-buffer fragments for separate sections of the volumes. Volume rendering ceases once full coverage of the pixel by volume or surface-defined elements is achieved. These volume a-buffer fragments are sorted into the a-buffer fragment list based on their average Z-depth values, and the list is rendered to produce the final color [S3, unofficial]. It uses a physically-based low-albedo illumination and atmospheric attenuation model for gases, with volumetric shadows combined using three-dimensional shadow tables [S3, unofficial].
++### [Hybrid Scanline A-Buffer Volume Rendering](3616-hybrid-scanline-a-buffer-volume-rendering.md)
++Uses scanline-based A-buffer for surfaces and volume rendering for gases, merging via Z-sorted fragments. Chosen when spatial coherence in scanlines can optimize mixed surface/volume compositing.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The complexity of volume rendering is $O(n^3)$ if every voxel is visited [S2, book]. Performance is heavily dependent on the resolution and the number of geometry primitives.
+-*   **Memory Usage**: High for cell-organized data. For example, a model with 381,548 tetrahedral cells required over 50 Megabytes of memory [S1].
+-*   **Performance**: On a Stardent ST1000 (5 Mips processors), rendering a 512x512 window for a bearing housing (16,896 tetrahedral cells) took 149.2 seconds, and a CFD analysis (381,548 cells) took 591.6 seconds [S1].
+-*   **Strengths**: Provides clear structural context (e.g., bounding boxes, cut planes) alongside volumetric data [S2, book]. Efficient for hardware-accelerated opaque geometry integration [S2, book].
+-*   **Limitations**: Wireframe geometry can incorrectly occlude volume data behind it [S1]. High memory consumption for large cell-organized datasets [S1]. Sorting semi-transparent geometry and volume polygons can be computationally expensive and may require polygon splitting [S2, book].
++*   **Time Complexity**:
++    *   Volume rendering alone is $O(n^3)$ if every voxel is visited [S2, book].
++    *   Performance on Stardent ST1000 (5 Mips processors):
++        *   16,896 tetrahedral cells (Bearing Housing): 149.2 seconds for 512x512 image [S1].
++        *   381,548 tetrahedral cells (CFD Analysis): 591.6 seconds for 512x512 image [S1].
++*   **Memory Complexity**: High for cell-organized data. Over 50 MB for ~380k cells [S1].
++*   **Strengths**: Provides clear structural context (bounding boxes, cut planes) alongside internal volume details. Hardware-based approach is efficient for simple geometry.
++*   **Limitations**: Wireframes occlude background volume. Sorting semi-transparent geometry is complex. Software ray casting is slow on older hardware.
++*   **When to use**: When understanding the spatial relationship between external structures (e.g., CFD grid, bounding box) and internal volume data is critical.
++*   **When not to use**: When performance is critical and geometry is complex enough to require expensive sorting/splitting, or when the volume is the sole focus.
+ 
+ ## Background
+-The technique originated in the late 1980s as a way to combine the structural clarity of geometric modeling with the continuous data representation of volume rendering. Early implementations focused on finite element models and computational fluid dynamics (CFD) visualizations [S1]. The method was detailed in works such as "Raytracing irregular volume data" (1989) which described combining wireframe grids with ray-traced volume data [S1], and later formalized in VTK documentation as a standard approach for intermixing volumes and geometry [S2, book]. Hybrid approaches using a-buffers for gases and surfaces were also explored in the context of procedural modeling and animation [S3, unofficial].
++The technique was developed in the late 1980s and early 1990s for scientific visualization, particularly for Finite Element Models (FEM) and Computational Fluid Dynamics (CFD) [S1]. It addresses the limitation of pure volume rendering which can obscure the underlying mesh structure or domain boundaries [S1]. Key early implementations were demonstrated on the Stardent ST1000 [S1]. The VTK book formalizes the hardware and software pipelines for intermixing these data types [S2, book].
+ 
+ ## Sources
+ [S1] Raytracing irregular volume data, https://doi.org/10.1145/99307.99316, fetched 2026-10-25
+-[S2] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)
+-[S3] Procedural Modeling, Animation, and Rendering of Gases, Fluids, and Textures, https://www.researchgate.net/profile/David-Ebert-4/publication/2786953_Procedural_Modeling_Animation_and_Rendering_of_Gases_Fluids_and_Textures/links/00b7d51a73e42a3c4e000000/Procedural-Modeling-Animation-and-Rendering-of-Gases-Fluids-and-Textures.pdf, fetched 2026-10-31 (unofficial)+[S2] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)

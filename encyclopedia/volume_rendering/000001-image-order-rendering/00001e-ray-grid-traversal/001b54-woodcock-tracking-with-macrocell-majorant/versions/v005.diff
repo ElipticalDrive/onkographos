@@ -1,0 +1,141 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Woodcock Tracking with Macrocell Majorant is a stochastic ray marching technique for volume rendering on unstructured tetrahedral meshes that utilizes a coarse mesh hierarchy to compute a tighter majorant extinction value [S1, unofficial]. It solves the problem of high null-collision rates in heterogeneous volumes by bounding the local extinction with a precomputed macrocell value, thereby reducing the number of rejected samples compared to using a global or loose majorant [S1, unofficial]. It differs from standard Woodcock tracking by integrating coarse mesh traversal logic to manage the majorant bounds, and from [Hierarchical Trilinear Ray Casting](851-hierarchical-trilinear-ray-casting.md) by relying on stochastic free-path sampling rather than deterministic grid traversal [S1, unofficial].
++Woodcock Tracking with Macrocell Majorant is a stochastic ray marching technique for volume rendering on unstructured tetrahedral meshes that utilizes a coarse mesh hierarchy to compute a tighter majorant extinction value [S1, unofficial]. It solves the problem of high null-collision rates in heterogeneous volumes by bounding the local extinction with a precomputed macrocell value, thereby reducing the number of rejected samples compared to using a global or loose majorant on most datasets [S1, unofficial]. It differs from standard Woodcock tracking by integrating coarse mesh traversal logic to manage the majorant bounds, and from [Hierarchical Trilinear Ray Casting](851-hierarchical-trilinear-ray-casting.md) by relying on stochastic free-path sampling rather than deterministic grid traversal [S1, unofficial].
+ 
+ ## How it works
+@@ -18,10 +18,9 @@
+ **Parameters:**
+ *   $t_{\text{max}}$: The maximum distance the ray is allowed to travel [S1, unofficial].
+-*   $\varepsilon$: A small epsilon value used for floating-point comparisons (implied by `nextafterf` usage) [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 1.  **Initialize Majorant:** Compute the effective majorant $M$ as the product of the transfer function's maximum opacity and the macrocell majorant: $M = \text{tf.opacity} \times M_{\text{macro}}$ [S1, unofficial].
+ 2.  **Check Validity:** If $M \le 0$, the ray is skipped and `false` is returned [S1, unofficial].
+-3.  **Set Exit Boundary:** Initialize the exit distance for the current coarse element. This is set to the smallest representable float less than the current ray distance $t$ to ensure the first sample is processed: $t_{\text{exit}} = \text{nextafterf}(t, -\infty)$ [S1, unofficial].
++3.  **Set Exit Boundary:** Initialize the exit distance for the current coarse element to the smallest representable float less than the current ray distance $t$ to ensure the first sample is processed: $t_{\text{exit}} = \text{nextafter}(t, -\infty)$ [S1, unofficial].
+ 4.  **Initialize State:** Set `sampleTetID` to 0 and `tetVertices` to an empty set [S1, unofficial].
+ 5.  **Stochastic Step:** Generate a random number $r \in [0, 1)$. Advance the ray distance $t$ using the Woodcock step formula:
+@@ -41,5 +40,5 @@
+     $$ s \leftarrow \text{sampleData}(\mathbf{p}, \text{sampleTetID}, \text{tetVertices}) $$
+     [S1, unofficial].
+-10. **Check Transfer Function Range:** If $s$ is not within the transfer function's valid range, continue to step 5 (null collision due to empty space) [S1, unofficial].
++10. **Check Transfer Function Range:** If $s$ is not within the transfer function's valid range, continue to the next iteration [S1, unofficial].
+ 11. **Get Color:** Retrieve the color $C$ and opacity $\alpha$ from the transfer function:
+     $$ (C, \alpha) \leftarrow \text{tf.getColor}(s) $$
+@@ -47,56 +46,81 @@
+ 12. **Acceptance Test:** Perform the analog acceptance test. Generate a new random number $r' \in [0, 1)$. If:
+     $$ \alpha \times \text{tf.opacity} \ge r' \times M $$
+-    return $C$ [S1, unofficial]. Otherwise, continue to step 5 (null collision) [S1, unofficial].
++    return $C$ [S1, unofficial]. Otherwise, continue to the next iteration [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
+ def woodcock_tracking_with_macrocell(ray_origin, ray_direction, t_max, coarse_tet_id, macrocell_majorant, tf):
+     # 1. Initialize majorant
+     majorant = tf.opacity * macrocell_majorant
+-    
+-    # 2. Check validity
+     if majorant <= 0:
+         return False
+-    
++
++    # 2. Initialize distance along ray
++    t = 0.0
+     # 3. Set exit boundary
+-    # nextafterf(t, -INFINITY) gets the smallest representable float < t
+-    t_exit = nextafterf(ray_origin.t, -float('inf'))
+-    
++    t_exit = math.nextafter(t, -float('inf'))
++
+     # 4. Initialize state
+     sample_tet_id = 0
+-    tet_vertices = {}
+-    
+-    # 5-12. Loop
++    tet_vertices = []
++
+     while True:
+         # 5. Stochastic step
+-        r = random()
+-        ray_origin.t -= log(1 - r) / majorant
+-        
++        r = random.random()
++        t -= math.log(1.0 - r) / majorant
++
+         # 6. Check max distance
+-        if ray_origin.t >= t_max:
++        if t >= t_max:
+             return False
+-            
++
+         # 7. Calculate sample point
+-        sample_point = ray_origin.org + ray_origin.t * ray_direction
+-        
++        sample_point = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
++
+         # 8. Check element boundary
+-        if ray_origin.t > t_exit:
++        if t > t_exit:
+             sample_tet_id, tet_vertices = traverse(sample_point, coarse_tet_id)
+-            t_exit = intersect_faces(ray_origin.t, sample_point, ray_direction, tet_vertices)
+-            
++            t_exit = intersect_faces(t, sample_point, ray_direction, tet_vertices)
++
+         # 9. Sample data
+         scalar = sample_data(sample_point, sample_tet_id, tet_vertices)
+-        
++
+         # 10. Check transfer function range
+         if not tf.in_range(scalar):
+             continue
+-            
++
+         # 11. Get color
+         color = tf.get_color(scalar)
+-        
++
+         # 12. Acceptance test
+-        r_prime = random()
++        r_prime = random.random()
+         if color.opacity * tf.opacity >= r_prime * majorant:
+             return color
++
++def traverse(point, coarse_tet_id):
++    # Standard coarse mesh traversal to find the tetrahedron containing point
++    # Returns (tet_id, vertices) [G]
++    return coarse_tet_id, get_tet_vertices(coarse_tet_id)
++
++def intersect_faces(t, p, d, vertices):
++    # Computes the exit distance of ray R(s) = p + s*d from the tetrahedron
++    # defined by vertices. Returns the smallest positive s > 0 added to t.
++    min_exit = float('inf')
++    faces = [(0,1,2), (0,1,3), (0,2,3), (1,2,3)]
++    for i, j, k in faces:
++        v0, v1, v2 = vertices[i], vertices[j], vertices[k]
++        n = cross(sub(v1, v0), sub(v2, v0))
++        denom = dot(n, d)
++        if abs(denom) > 1e-9:
++            dist = dot(n, sub(v0, p)) / denom
++            if dist > 0:
++                min_exit = min(min_exit, dist)
++    return t + min_exit
++
++def cross(a, b): return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
++def dot(a, b): return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
++def sub(a, b): return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]
++def sample_data(point, tet_id, vertices): return 0.0 # Standard point-in-tetrahedron scalar lookup [G]
+ ```
+ 
+@@ -114,5 +138,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the density of the volume and the tightness of the majorant. Tighter majorants reduce the number of null collisions, improving performance [S1, unofficial].
++*   **Rendering Performance:** Tighter majorants reduce the number of null collisions, improving rendering times on most datasets [S1, unofficial].
+ *   **Memory Complexity:** Low, as it primarily stores the coarse mesh structure and transfer function data [S1, unofficial].
+ *   **Measured Performance:** On the Agulhas dataset, macrocell optimizations degraded performance due to traversal overhead [S1, unofficial]. On other datasets, tighter majorants generally improved rendering times [S1, unofficial].

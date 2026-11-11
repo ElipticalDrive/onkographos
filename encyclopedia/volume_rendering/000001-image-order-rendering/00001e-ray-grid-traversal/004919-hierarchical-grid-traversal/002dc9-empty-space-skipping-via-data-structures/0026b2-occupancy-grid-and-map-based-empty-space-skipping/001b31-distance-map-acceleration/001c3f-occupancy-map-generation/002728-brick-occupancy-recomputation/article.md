@@ -1,11 +1,11 @@
 # Brick Occupancy Recomputation
 Also called: Brick Occupancy Compute
 ## Overview
-Brick Occupancy Recomputation is a GPU compute shader routine that regenerates the occupancy status of volumetric bricks after dynamic voxel changes, ensuring the hierarchical traversal structure remains consistent with the underlying voxel data [S1, unofficial]. It differs from static generation methods by being designed for frequent, localized updates in interactive simulations, relying on shared memory reduction to avoid global memory contention [S1, unofficial].
+Brick Occupancy Recomputation is a GPU compute shader routine that regenerates the occupancy status of volumetric bricks after dynamic voxel changes, ensuring the hierarchical traversal structure remains consistent with the underlying voxel data [S1, unofficial]. It differs from static generation methods by being designed for frequent, localized updates in interactive simulations, relying on shared memory reduction to avoid atomic operations and global memory contention [S1, unofficial].
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A texture containing voxel data (typically 1-bit solid/air flags) organized into fixed-size bricks.
-*   **Output:** An occupancy map (brickmap) where each entry corresponds to a brick, storing the count of non-air voxels within that brick.
+*   **Input:** A texture containing voxel data (1-bit solid/air flags) organized into fixed-size bricks [S1, unofficial].
+*   **Output:** An occupancy map (brickmap) where each entry corresponds to a brick, storing the count of non-air voxels within that brick [S1, unofficial].
 
 **Data Structures:**
 *   **Voxel Texture:** 1-bit per voxel representation of solid vs. air [S1, unofficial].
@@ -22,63 +22,54 @@ Brick Occupancy Recomputation is a GPU compute shader routine that regenerates t
 2.  **Load:** Each of the 32 threads reads 16 voxels from its assigned segment of the brick [S1, unofficial].
 3.  **Count:** Each thread counts the number of voxels in its segment that are not air (i.e., are solid) [S1, unofficial].
 4.  **Store:** Each thread writes its count to a unique index in a shared memory array of unsigned integers [S1, unofficial].
-5.  **Sync:** Execute a barrier synchronization (`__syncthreads()`) to ensure all threads have written their partial counts to shared memory [S1, unofficial].
+5.  **Sync:** Execute a barrier synchronization to ensure all threads have written their partial counts to shared memory [S1, unofficial].
 6.  **Reduce:** The first thread (thread ID 0) sums the values from the shared memory array [S1, unofficial].
-7.  **Write:** Thread 0 writes the total sum to the corresponding entry in the global occupancy map [S1, unofficial].
+7.  **Write:** Thread 0 writes the total sum to the corresponding entry in the brickmap [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Compute Shader Entry Point
-# Each block handles one brick.
-# 32 threads per block.
+# Compute shader entry point: one block per brick, 32 threads per block
+def brick_occupancy_recompute(brick_id, voxel_texture, occupancy_map):
+    shared_counts = [0] * 32
+    thread_idx = get_local_thread_id()  # 0 to 31
+    brick_start = brick_id * 512
+    voxel_base = brick_start + (thread_idx * 16)
+    count = 0
+    for i in range(16):
+        voxel_val = voxel_texture[voxel_base + i]
+        if voxel_val & 1:  # 1-bit solid/air flag
+            count += 1
+    shared_counts[thread_idx] = count
+    thread_barrier()  # Synchronize all threads in the block
+    if thread_idx == 0:
+        total = sum(shared_counts)
+        occupancy_map[brick_id] = total
 
-shared_counts = [0] * 32  # Shared memory array
-
-# Determine brick coordinates and global index
-brick_id = gl_WorkGroupID.x
-voxel_start = brick_id * 512  # 32 threads * 16 voxels
-
-# Each thread processes 16 voxels
-thread_id = gl_LocalInvocationID.x
-voxel_base = voxel_start + (thread_id * 16)
-
-count = 0
-for i in range(16):
-    voxel_index = voxel_base + i
-    # Read voxel data (1-bit solid/air)
-    is_solid = read_voxel(voxel_index)
-    if is_solid:
-        count += 1
-
-# Store partial count in shared memory
-shared_counts[thread_id] = count
-
-# Synchronize all threads in the block
-__syncthreads()
-
-# First thread sums the shared counts
-if thread_id == 0:
-    total_occupied = 0
-    for i in range(32):
-        total_occupied += shared_counts[i]
-    # Write result to occupancy map
-    write_occupancy(brick_id, total_occupied)
+# Helper definitions for GPU context
+def get_local_thread_id():
+    return 0  # Thread 0 to 31 within the block
+def thread_barrier():
+    pass  # Blocks until all threads in the group reach this point
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The count fits in an unsigned integer for standard brick sizes (512 voxels max) [S1, unofficial].
+*   **Precision:** Uses a 1-bit per voxel solid/air flag; maximum count per brick is 512 [S1, unofficial].
 *   **Boundaries:** Assumes brick boundaries align with the voxel grid and texture sampling coordinates [S1, unofficial].
 *   **Degenerate Input:** If the voxel texture is not properly bound or aligned, reads may return undefined values [G].
 
 ## Subtopics
+
+### [N3-tree with regular mipmapped bricks](6344-n3-tree-with-regular-mipmapped-bricks.md)
+A two-level hierarchical data structure combining an N-ary tree for hierarchy with regular voxel bricks in leaves, generalizing octree-based Brick Maps for efficient GPU traversal and filtering. See [N3-tree with regular mipmapped bricks](6344-n3-tree-with-regular-mipmapped-bricks.md).
+
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per brick, proportional to the number of voxels in the brick (512 reads, 32 writes).
+*   **Time Complexity:** $O(1)$ per brick, proportional to the number of voxels in the brick (512 reads, 32 writes) [S1, unofficial].
 *   **Memory Complexity:** $O(1)$ per brick for shared memory (32 integers) [S1, unofficial].
 *   **Performance:** Fast due to avoidance of atomic operations and use of fast shared memory [S1, unofficial].
-*   **Strengths:** Low latency, no global memory contention, suitable for dynamic scenes [S1, unofficial].
-*   **Limitations:** Fixed brick size and thread count; not suitable for variable-sized bricks without modification [S1, unofficial].
+*   **Strengths:** Low latency and no global memory contention [S1, unofficial].
+*   **Limitations:** Fixed brick size (512 voxels) and thread count (32) [S1, unofficial].
 *   **When to Use:** Interactive voxel simulations where the world changes frequently and collision detection requires up-to-date occupancy data [S1, unofficial].
 *   **When Not to Use:** Static volumes or scenes where occupancy rarely changes [G].
 

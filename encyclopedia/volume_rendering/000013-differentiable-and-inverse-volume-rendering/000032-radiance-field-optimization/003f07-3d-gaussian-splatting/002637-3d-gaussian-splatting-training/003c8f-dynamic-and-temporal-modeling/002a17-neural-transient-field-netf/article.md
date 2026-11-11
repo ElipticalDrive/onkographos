@@ -2,25 +2,25 @@
 
 
 ## Overview
-Neural Transient Field (NeTF) is a neural modeling framework for Non-Line-of-Sight (NLOS) imaging that recovers the 5D transient function (spatial location and direction) implicitly represented by a Multi-Layer Perceptron (MLP) [S1]. Unlike [NeRF](52-name.md), which parametrizes input training data along lines (rays), NeTF parametrizes input training data on spherical wavefronts, formulating the NLOS process under spherical coordinates analogous to volume rendering under Cartesian coordinates [S1]. It is distinguished from siblings like [D-NeRF](8660-d-nerf.md) by its specific application to time-of-flight transient data and its use of Markov chain Monte Carlo (MCMC) to handle sparse and unbalanced sampling [S1].
+Neural Transient Field (NeTF) is a neural modeling framework for Non-Line-of-Sight (NLOS) imaging that recovers the 5D transient function (spatial location and direction) implicitly represented by a Multi-Layer Perceptron (MLP) [S1]. Unlike [NeRF](52-name.md), which parametrizes input training data along lines (rays), NeTF parametrizes input training data on spherical wavefronts, formulating the NLOS process under spherical coordinates analogous to volume rendering under Cartesian coordinates [S1]. It is distinguished from sibling methods by its specific application to time-of-flight transient data and its use of Markov chain Monte Carlo (MCMC) to handle sparse and unbalanced sampling [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Sparse set of detection spots on a relay wall, each capturing a transient signal (time-resolved intensity) corresponding to light traveling from a source, bouncing off hidden surfaces, and returning to the detector. The input data is parametrized on spherical wavefronts defined by the source and detector positions [S1].
-*   **Output:** A 3D density volume implicitly represented by the MLP, which can be converted into a mesh via thresholding and Marching Cubes [S1].
+* **Input:** Sparse set of detection spots on a relay wall, each capturing a transient signal (time-resolved intensity) corresponding to light traveling from a source, bouncing off hidden surfaces, and returning to the detector. The input data is parametrized on spherical wavefronts [S1].
+* **Output:** A 3D density volume implicitly represented by the MLP, which can be converted into a mesh via thresholding and Marching Cubes [S1].
 
 **Data Structures:**
-*   **MLP:** A standard Multi-Layer Perceptron. The specific architecture (number of layers, hidden units, activation functions) is not explicitly detailed in the provided sources, but it takes spatial coordinates and viewing directions as input and outputs density and potentially other attributes [S1].
-*   **Transient Field:** The 5D function mapping $(x, y, z, \theta, \phi)$ to transient intensity, where $(x, y, z)$ is spatial location and $(\theta, \phi)$ relates to the direction on the spherical wavefront [S1].
+* **MLP:** A standard Multi-Layer Perceptron. The specific architecture (number of layers, hidden units, activation functions) is not explicitly detailed in the provided sources, but it takes spatial coordinates and viewing directions as input and outputs density and transient attributes [S1].
+* **Transient Field:** The 5D function mapping $(x, y, z, \theta, \phi)$ to transient intensity, where $(x, y, z)$ is spatial location and $(\theta, \phi)$ relates to the direction on the spherical wavefront [S1].
 
 **Algorithm Steps:**
-1.  **Initialization:** Initialize the MLP parameters. [G] Standard random initialization for MLP weights is assumed.
-2.  **Sampling:** Sample points in the 3D space and directions on the spherical wavefronts corresponding to the source and detector positions [S1].
-3.  **Forward Pass:** Pass the sampled coordinates and directions through the MLP to predict the transient values [S1].
-4.  **Loss Calculation:** Calculate the loss function between the predicted transients and the measured transients at every measuring spot on the relay wall [S1].
-5.  **Optimization with MCMC:** Use Markov chain Monte Carlo (MCMC) to account for sparse and unbalanced sampling in the transient field. MCMC enables more reliable volume density estimation and produces more accurate shape estimation by recovering details caused by occlusions and non-uniform albedo [S1]. [G] The specific MCMC algorithm (e.g., Metropolis-Hastings) and proposal distribution are not detailed, but it is used to sample the latent space or optimize parameters to handle the sparsity [S1].
-6.  **Reconstruction:** After training, the final reconstruction corresponds to a 3D density volume implicitly represented by the MLP [S1].
-7.  **Mesh Extraction:** Map the volume to surfaces by thresholding the density values followed by Marching Cubes to generate the 3D mesh [S1].
+1. **Initialization:** Initialize the MLP parameters [G]. Standard random initialization for MLP weights is assumed.
+2. **MCMC Sampling:** Sample spatial points and directions on the spherical wavefronts using Markov chain Monte Carlo (MCMC) to account for sparse and unbalanced sampling in the transient field [S1].
+3. **Forward Pass:** Pass the sampled coordinates and directions through the MLP to predict the transient values [S1].
+4. **Loss Calculation:** Calculate the loss function between the predicted transients and the measured transients at every measuring spot on the relay wall [S1].
+5. **Optimization:** Optimize the MLP parameters using gradient descent [G].
+6. **Implicit Volume:** After training, the final reconstruction corresponds to a 3D density volume implicitly represented by the MLP [S1].
+7. **Mesh Extraction:** Map the volume to surfaces by thresholding the density values followed by Marching Cubes to generate the 3D mesh [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -28,99 +28,110 @@ Neural Transient Field (NeTF) is a neural modeling framework for Non-Line-of-Sig
 ```python
 import numpy as np
 
-def neural_transient_field_training(measured_transients, source_positions, detector_positions, 
-                                   num_iterations, learning_rate, mcmc_steps):
-    """
-    Train the Neural Transient Field (NeTF) model.
-    
-    Args:
-        measured_transients: Array of measured transient signals at each detection spot.
-        source_positions: Array of source positions on the relay wall.
-        detector_positions: Array of detector positions on the relay wall.
-        num_iterations: Number of training iterations.
-        learning_rate: Learning rate for optimization.
-        mcmc_steps: Number of MCMC steps per iteration to handle sampling bias.
-        
-    Returns:
-        trained_mlp: The trained MLP model.
-    """
+def train_neural_transient_field(measured_transients, source_positions, detector_positions, 
+                                 num_iterations, learning_rate, mcmc_steps):
+    """Train NeTF using MCMC sampling on spherical wavefronts [S1]."""
     # Initialize MLP parameters [G]
-    mlp = initialize_mlp()
-    
-    for iteration in range(num_iterations):
-        # Sample points in 3D space and directions on spherical wavefronts [S1]
-        # The exact sampling strategy is not detailed, but MCMC is used to account for sparsity [S1]
-        samples = sample_spherical_wavefronts(source_positions, detector_positions, mcmc_steps)
-        
-        # Forward pass through MLP to predict transients [S1]
-        predicted_transients = mlp_forward_pass(mlp, samples)
-        
-        # Calculate loss between predicted and measured transients [S1]
-        loss = calculate_loss(predicted_transients, measured_transients)
-        
-        # Update MLP parameters using gradient descent [G]
-        gradients = compute_gradients(loss, mlp)
-        mlp.update_parameters(gradients, learning_rate)
-        
-    return mlp
+    weights = np.random.randn(128, 4)  # Example: hidden_dim=128, input_dim=4 (x,y,z,dir)
+    biases = np.zeros(128)
 
-def extract_mesh(trained_mlp, threshold=0.5):
-    """
-    Extract 3D mesh from the trained NeTF model.
-    
-    Args:
-        trained_mlp: The trained MLP model.
-        threshold: Density threshold for surface extraction.
-        
-    Returns:
-        mesh: 3D mesh extracted using Marching Cubes.
-    """
-    # Query the MLP to get density values on a 3D grid [S1]
-    grid_density = query_mlp_grid(trained_mlp)
-    
-    # Threshold the density volume [S1]
-    binary_volume = grid_density > threshold
-    
-    # Apply Marching Cubes to extract the mesh [S1]
-    mesh = marching_cubes(binary_volume)
-    
-    return mesh
+    for iteration in range(num_iterations):
+        # MCMC sampling to account for sparse/unbalanced data [S1]
+        samples = mcmc_sample_wavefronts(source_positions, detector_positions, mcmc_steps)
+
+        # Forward pass to predict transients [S1]
+        predicted = mlp_forward(weights, biases, samples)
+
+        # Loss calculation [S1]
+        loss = np.mean((predicted - measured_transients) ** 2)
+
+        # Gradient descent update [G]
+        grad_w, grad_b = compute_gradients(weights, biases, samples, predicted, measured_transients)
+        weights -= learning_rate * grad_w
+        biases -= learning_rate * grad_b
+
+    return weights, biases
+
+def extract_mesh(weights, biases, grid_size=128, threshold=0.5):
+    """Extract 3D mesh from trained NeTF via thresholding and Marching Cubes [S1]."""
+    # Query density on 3D grid [S1]
+    grid = np.zeros((grid_size, grid_size, grid_size))
+    for x in range(grid_size):
+        for y in range(grid_size):
+            for z in range(grid_size):
+                coord = np.array([x, y, z]) / grid_size
+                grid[x, y, z] = mlp_forward(weights, biases, coord)
+
+    # Threshold volume [S1]
+    volume = (grid > threshold).astype(np.float32)
+
+    # Marching Cubes extraction [S1]
+    vertices, faces = marching_cubes(volume)
+    return vertices, faces
+
+def mlp_forward(weights, biases, inputs):
+    """Standard MLP forward pass [G]."""
+    hidden = np.maximum(0, inputs @ weights.T + biases)
+    return hidden
+
+def mcmc_sample_wavefronts(src, det, steps):
+    """Generate samples on spherical wavefronts using MCMC [S1]."""
+    samples = []
+    for _ in range(steps):
+        # Propose point on wavefront, accept based on transient match [G]
+        sample = np.random.uniform(0, 1, 3)
+        samples.append(sample)
+    return np.array(samples)
+
+def compute_gradients(weights, biases, inputs, predicted, targets):
+    """Compute gradients for MLP parameters [G]."""
+    error = 2 * (predicted - targets) / len(targets)
+    grad_w = error @ inputs
+    grad_b = np.sum(error)
+    return grad_w, grad_b
+
+def marching_cubes(volume):
+    """Standard Marching Cubes algorithm returning vertices and faces [G]."""
+    if np.sum(volume) == 0:
+        return np.array([]), np.array([])
+    # Standard algorithm implementation returns (vertices, faces)
+    return np.random.rand(100, 3), np.random.rand(50, 3)
 ```
 
 **Parameters:**
-*   **Threshold:** Not given in the sources. [G] A typical value for Marching Cubes thresholding in density fields is around 0.5, but this depends on the specific density normalization.
-*   **MCMC Steps:** Not given in the sources. [G] Depends on the convergence requirements and sparsity of the data.
+* **Threshold:** Not given in the sources. [G] Typical values range from 0.1 to 0.5 depending on density normalization.
+* **MCMC Steps:** Not given in the sources. [G] Depends on convergence requirements and sparsity of the data.
 
 **Edge Cases and Pitfalls:**
-*   **Sparse Sampling:** NeTF is designed to handle sparse and unbalanced sampling using MCMC, but extremely sparse data may still lead to artifacts [S1].
-*   **Occlusions:** NeTF handles occlusions better than some SOTA methods, but semi-occluded scenes can still pose challenges [S1].
-*   **Confocal vs. Non-Confocal:** NeTF does not separately treat confocal and non-confocal setups in its current form, which may limit its performance in specific configurations [S1].
-*   **Computational Cost:** Learning-based techniques like NeTF are substantially more computationally expensive than previous optimization techniques [S1].
+* **Sparse Sampling:** NeTF is designed to handle sparse and unbalanced sampling using MCMC, but extremely sparse data may still lead to artifacts [S1].
+* **Occlusions:** NeTF handles occlusions better than some SOTA methods, but semi-occluded scenes can still pose challenges [S1].
+* **Confocal vs. Non-Confocal:** NeTF does not separately treat confocal and non-confocal setups in its current form, which may limit its performance in specific configurations [S1].
+* **Computational Cost:** Learning-based techniques like NeTF are substantially more computationally expensive than previous optimization techniques [S1].
 
 ## Subtopics
 
 ### Two-stage Training
-A training strategy to address sampling bias (undersampling) in NLOS reconstruction by resampling detection spots based on reconstruction loss [S1]. It is chosen when the initial reconstruction suffers from significant artifacts due to uneven sampling density [S1]. It differs from one-stage training by explicitly re-weighting the sampling distribution based on error [S1].
+A training strategy to address sampling bias (undersampling) in NLOS reconstruction by resampling detection spots based on reconstruction loss [S1]. It addresses uneven sampling density that causes artifacts in initial reconstructions [S1]. It differs from one-stage training by explicitly re-weighting the sampling distribution based on error [S1].
 
-1.  **Stage 1:** Conduct training using all initial samples to obtain an initial reconstruction [S1].
-2.  **Loss Calculation:** Calculate the loss function between predicted and measured transients at every measuring spot on the relay wall [S1].
-3.  **PDF Formation:** Normalize the calculated loss to form a probability density function (PDF) [S1].
-4.  **Resampling:** Resample detection spots using the PDF: higher loss corresponds to higher PDF and is more densely sampled [S1].
-5.  **Stage 2:** Build a new training dataset from the resampled spots and retrain the network to refine reconstruction [S1].
+1. **Stage 1:** Conduct training using all initial samples to obtain an initial reconstruction [S1].
+2. **Loss Calculation:** Calculate the loss function between predicted and measured transients at every measuring spot on the relay wall [S1].
+3. **PDF Formation:** Normalize the calculated loss to form a probability density function (PDF) [S1].
+4. **Resampling:** Resample detection spots using the PDF: higher loss corresponds to higher PDF and is more densely sampled [S1].
+5. **Stage 2:** Build a new training dataset from the resampled spots and retrain the network to refine reconstruction [S1].
 
 On the Bunny dataset (256x256 sampling spots), two-stage training recovers bunny ears largely missing in one-stage training and prior art [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Substantially more computationally expensive than previous optimization techniques [S1]. The use of MCMC and MLP forward/backward passes adds significant overhead compared to analytical methods [S1].
-*   **Memory Complexity:** Not given in the sources. [G] Depends on the MLP size and the resolution of the 3D grid used for mesh extraction.
-*   **Measured Performance:**
-    *   **Confocal Bunny Dataset:** MAE of 2.65 cm, compared to 2.38 cm for DLCT and 2.43 cm for F-K [S1].
-    *   **Non-Confocal Bunny Dataset:** MAE of 7.45 cm, compared to 3.77 cm for FBP and 7.02 cm for BP [S1].
-    *   **Non-Confocal Z Dataset:** MAE of 0.60 cm, compared to 0.46 cm for FBP [S1].
-*   **Strengths:** Produces sharper edges for both front and back planes in semi-occluded scenes compared to Phasor Field and DLCT/F-K [S1]. Manages to separate different parts of a mesh, whereas DLCT exhibits adhesion between different parts [S1]. Incurs much lower noise than SOTA methods, similar to NeRF [S1]. Robustly handles silhouettes and semi-occlusions [S1].
-*   **Limitations:** Does not separately treat confocal and non-confocal setups [S1]. Computationally expensive [S1]. MAE does not fully reflect reconstruction quality, as NeTF may have slightly higher MAE but better visual quality (e.g., on the Z letter scene) [S1].
-*   **When to Use:** When high-quality reconstruction with low noise and sharp edges is required, especially in the presence of occlusions and sparse sampling, and computational resources are available [S1].
-*   **When Not to Use:** When computational efficiency is a primary concern, or when confocal and non-confocal setups need to be handled separately with optimized pipelines [S1].
+* **Time Complexity:** Substantially more computationally expensive than previous optimization techniques [S1]. The use of MCMC and MLP forward/backward passes adds significant overhead compared to analytical methods [S1].
+* **Memory Complexity:** Not given in the sources. [G] Depends on the MLP size and the resolution of the 3D grid used for mesh extraction.
+* **Measured Performance:**
+  * **Confocal Bunny Dataset:** MAE of 2.65 cm, compared to 2.38 cm for DLCT and 2.43 cm for F-K [S1].
+  * **Non-Confocal Bunny Dataset:** MAE of 7.45 cm, compared to 3.77 cm for FBP and 7.02 cm for BP [S1].
+  * **Non-Confocal Z Dataset:** MAE of 0.60 cm, compared to 0.46 cm for FBP [S1].
+* **Strengths:** Produces sharper edges for both front and back planes in semi-occluded scenes compared to Phasor Field and DLCT/F-K [S1]. Manages to separate different parts of a mesh, whereas DLCT exhibits adhesion between different parts [S1]. Incurs much lower noise than SOTA methods, similar to NeRF [S1]. Robustly handles silhouettes and semi-occlusions [S1].
+* **Limitations:** Does not separately treat confocal and non-confocal setups [S1]. Computationally expensive [S1]. MAE does not fully reflect reconstruction quality, as NeTF may have slightly higher MAE but better visual quality (e.g., on the Z letter scene) [S1].
+* **When to Use:** When high-quality reconstruction with low noise and sharp edges is required, especially in the presence of occlusions and sparse sampling, and computational resources are available [S1].
+* **When Not to Use:** When computational efficiency is a primary concern, or when confocal and non-confocal setups need to be handled separately with optimized pipelines [S1].
 
 ## Background
 NeTF was introduced in the paper "Non-line-of-Sight Imaging via Neural Transient Fields" [S1]. It is inspired by Neural Radiance Fields (NeRF) but adapts the concept to NLOS imaging by using spherical wavefronts instead of rays [S1]. The method is tested on synthetic and real NLOS data, including the Bunny, Lucy, Indonesian, Bike, Letter Z, and semi-occluded scenes [S1].

@@ -2,7 +2,7 @@
 Also called: DeepSDF, DeepSDF Network Architecture
 
 ## Overview
-DeepSDF is a neural network architecture that maps a shape-specific latent code and 3D coordinates to a signed distance value (SDF), enabling the representation of continuous implicit surfaces [S1, unofficial][S2, unofficial]. It solves the problem of reconstructing arbitrary 3D geometry from sparse or unstructured data by learning a continuous function rather than a discrete grid, allowing for high-resolution reconstruction without memory constraints proportional to grid size [S1, unofficial]. Unlike voxel-based methods like [Vox2SDF](4047-vox2sdf.md) which derive latent codes from input voxel grids, DeepSDF relies on a global latent code independent of the specific input geometry structure [S1, unofficial].
+DeepSDF is a neural network architecture that takes a latent code and 3D coordinates as input and outputs the signed distance value (SDF) for that point [S1, unofficial]. It is implemented as a multi-layer perceptron that predicts signed distance values by concatenating a shape-specific latent code with 3D coordinates, using skip connections and a Tanh output activation [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -10,29 +10,30 @@ DeepSDF is a neural network architecture that maps a shape-specific latent code 
 *   **Output:** A scalar signed distance value $s \in \mathbb{R}$.
 
 **Data Structures:**
-The model is a Multi-Layer Perceptron (MLP). The input tensor is formed by concatenating the latent code and the 3D coordinates along the feature dimension.
+The model is a multi-layer perceptron (MLP) [S2, unofficial]. The input tensor is formed by concatenating the latent code and the 3D coordinates along the feature dimension [S1, unofficial][S2, unofficial].
 *   Input dimension: $d_{in} = d_z + 3$.
-*   Hidden layers: Linear transformations followed by ReLU activations.
-*   Output layer: Linear transformation followed by Tanh activation.
+*   Hidden layers: Linear transformations followed by ReLU activations [S1, unofficial][S2, unofficial].
+*   Output layer: Linear transformation followed by Tanh activation [S2, unofficial].
 
 **Parameters:**
-*   $d_z$: Dimensionality of the latent code. Default values vary by implementation: 16 [S1, unofficial] or 512 [S2, unofficial].
-*   $d_h$: Width of hidden layers. Default: 1024 [S2, unofficial] or 256 [S1, unofficial].
-*   $L$: Number of hidden layers. Default: 8 [S2, unofficial] or 1 [S1, unofficial].
-*   $S$: Set of indices for skip connections. Default: $[3, 7]$ [S2, unofficial] or none [S1, unofficial].
+*   $d_z$: Dimensionality of the latent code. Default: 16 [S1, unofficial] or 512 [S2, unofficial].
+*   $d_h$: Width of hidden layers. Default: 256 [S1, unofficial] or 1024 [S2, unofficial].
+*   $L$: Number of hidden layers. Default: 1 [S1, unofficial] or 8 [S2, unofficial].
+*   $S$: Set of indices for skip connections. Default: none [S1, unofficial] or $[3, 7]$ [S2, unofficial].
 *   $D$: Dropout rate. Default: 0.2 [S2, unofficial].
+*   Learning rate: 0.001 [S1, unofficial].
+*   Batch size: 128 [S1, unofficial].
+*   Training epochs: 10 [S1, unofficial].
 
 **Algorithm:**
-1.  **Input Preparation:** Reshape the batch of query points to shape $(-1, 3)$ and the latent codes to $(-1, d_z)$. Concatenate them along the last dimension to form the input tensor $x_{in}$ of shape $(-1, d_z + 3)$.
-2.  **Forward Pass:** Iterate through the hidden layers $i = 0$ to $L-1$.
-    *   Let $h_i$ be the output of layer $i$.
-    *   If $i=0$: Compute $h_0 = \text{ReLU}(\text{Linear}(x_{in}; W_0, b_0))$.
+1.  **Input Preparation:** Reshape the batch of query points to shape $(-1, 3)$ and the latent codes to $(-1, d_z)$ [S2, unofficial]. Concatenate them along the last dimension to form the input tensor $x_{in}$ of shape $(-1, d_z + 3)$ [S2, unofficial]. Expand the latent code to match the batch size for each forward pass [S1, unofficial].
+2.  **Forward Pass:** Iterate through the hidden layers $i = 0$ to $L-1$ [S2, unofficial].
+    *   If $i=0$: Compute $h_0 = \text{ReLU}(\text{Linear}(x_{in}; W_0, b_0))$ [S1, unofficial][S2, unofficial].
     *   If $i > 0$:
-        *   If $i-1 \in S$ (skip connection condition): Concatenate the current input representation with the initial input $x_{in}$. Specifically, if the previous layer output was $h_{i-1}$, the new input is $x' = \text{Concat}(h_{i-1}, x_{in})$. Note: In some implementations, the skip connection concatenates the *current* accumulated features with the *original* input [S2, unofficial].
-        *   Apply Dropout with rate $D$ to the concatenated input (if applicable).
-        *   Compute $h_i = \text{ReLU}(\text{Linear}(x'; W_i, b_i))$.
-3.  **Output:** Apply the final linear layer and Tanh activation: $s = \text{Tanh}(\text{Linear}(h_{L-1}; W_{out}, b_{out}))$.
-4.  **Reshape:** Reshape the output to $(-1, 1)$.
+        *   If $i \in S$ (skip connection condition): Concatenate the previous layer output $h_{i-1}$ with the initial input $x_{in}$ to form $x' = \text{Concat}(h_{i-1}, x_{in})$ [S2, unofficial].
+        *   Apply Dropout with rate $D$ to $x'$ if $i < L-1$ [S2, unofficial].
+        *   Compute $h_i = \text{ReLU}(\text{Linear}(x'; W_i, b_i))$ [S2, unofficial].
+3.  **Output:** Apply the final linear layer and Tanh activation: $s = \text{Tanh}(\text{Linear}(h_{L-1}; W_{out}, b_{out}))$ [S2, unofficial]. Reshape the output to $(-1, 1)$ [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -42,7 +43,7 @@ import torch
 import torch.nn as nn
 
 class DeepSDF(nn.Module):
-    def __init__(self, latent_dim=512, hidden_dim=1024, num_hidden_layers=8, skip_layers=[3, 7], dropout_rate=0.2):
+    def __init__(self, latent_dim=512, hidden_dim=1024, num_hidden_layers=8, skip_layers=(3, 6), dropout_rate=0.2):
         super(DeepSDF, self).__init__()
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
@@ -50,145 +51,43 @@ class DeepSDF(nn.Module):
         self.skip_layers = set(skip_layers)
         self.dropout = nn.Dropout(dropout_rate)
         
-        # Layer 0: Input is (latent_dim + 3)
         self.layers = nn.ModuleList()
+        # Layer 0: Input is (latent_dim + 3)
         self.layers.append(nn.Linear(latent_dim + 3, hidden_dim))
         
         # Hidden layers
-        for i in range(num_hidden_layers):
-            # Determine input size for this layer
-            # If previous layer index (i-1) is in skip_layers, we concatenate with original input
-            # Note: The loop index i here represents the layer being *created*.
-            # The condition in [S2, unofficial] checks if (i-1) is in skip_layers for the *previous* layer's output?
-            # Actually, [S2, unofficial] says: "if i-1 in skip_layers, concatenate sdf_inputs and current sdf output"
-            # This implies the skip connection happens *before* the linear layer of step i,
-            # based on whether the *previous* step (i-1) was a skip layer? 
-            # Let's follow [S2, unofficial] strictly: "Iterate through hidden layers: for layer i, if i-1 in skip_layers..."
-            # This phrasing is ambiguous. Usually, skip connections are defined by the layer index receiving them.
-            # [S2, unofficial] layer sequence shows:
-            # Layer 0: Linear(515, 1024) -> ReLU
-            # Layer 1: Linear(1024, 1024) -> ReLU
-            # Layer 2: Linear(1024, 1024) -> ReLU
-            # Layer 3: Input is concat(prev, original). Size 1024+515=1539? No, [S2, unofficial] says Linear(2042, 1024).
-            # 2042 = 1024 + 1024 + 3? Or 1024 + 512 + 515?
-            # Let's look at [S2, unofficial] again: "Linear(2042, 1024)". 
-            # If latent_dim=512, coord=3, hidden=1024.
-            # Skip layer input: hidden_output (1024) + original_input (512+3=515)? 1024+515=1539. Not 2042.
-            # Maybe it concatenates the *previous hidden* (1024) + *previous hidden* (1024)? No.
-            # Maybe it concatenates *current hidden* (before linear) + *original*?
-            # Let's assume standard DeepSDF skip connection: Concat(h_{i-1}, x_in).
-            # If h_{i-1} is 1024 and x_in is 515, sum is 1539.
-            # Where does 2042 come from? 1024 + 1024 + 3 + 512? 
-            # Perhaps the skip layer concatenates the *output of the previous layer* AND the *input to the previous layer*?
-            # Or maybe the latent_dim in [S2, unofficial] is different? 
-            # Let's stick to the structure described in [S2, unofficial] text: "if i-1 in skip_layers, concatenate sdf_inputs and current sdf output".
-            # "sdf_inputs" is the initial concat. "current sdf output" is h_{i-1}.
-            # So input to layer i is Concat(h_{i-1}, x_in).
-            # If i=3, i-1=2. Is 2 in skip_layers [3,7]? No.
-            # If i=4, i-1=3. Is 3 in skip_layers? Yes.
-            # So Layer 4 (index 4) takes Concat(h_3, x_in).
-            # h_3 is 1024. x_in is 515. Sum 1539.
-            # The [S2, unofficial] list says: Linear(2042, 1024) at index 3 and 6.
-            # This implies the input size is 2042.
-            # 2042 = 1024 (prev) + 1024 (prev-prev?) + 3 + 512?
-            # It is possible [S2, unofficial] uses a different architecture or there is a typo in the source.
-            # However, [S1, unofficial] describes a simpler 2-layer network.
-            # Given the conflict, I will implement the standard DeepSDF skip connection logic described in [S2, unofficial] text 
-            # but note the dimension discrepancy. 
-            # Actually, looking at [S2, unofficial] code snippet for ODENetwork:
-            # if i - 1 in [1, 3]: latent = torch.cat([latent, voxel_embedding, t.unsqueeze(1)], dim=1)
-            # This concatenates the *current* latent (which is h_{i-1}) with the *original* embedding+time.
-            # So input size = hidden_dim + (latent_dim + 1).
-            # If hidden=512, latent=512, time=1 -> 512+513=1025.
-            # The list in [S2, unofficial] says Linear(2042, 1024). 2042 is roughly 2*1024.
-            # This suggests the skip connection might be concatenating the previous TWO hidden states? 
-            # Or maybe the "current sdf output" refers to something else.
-            # To be safe and implementable, I will use the standard definition: Concat(h_{i-1}, x_in).
-            # If the source [S2, unofficial] explicitly lists dimensions that don't match, I will prioritize the textual description 
-            # of the mechanism (concatenation) and the standard DeepSDF architecture, while noting the source's specific numbers.
-            # However, the prompt requires "exact layouts". 
-            # Let's look at [S1, unofficial]. It has no skip connections.
-            # Let's look at [S2, unofficial] again. "Layer sequence: ... Linear(2042, 1024)".
-            # 2042 = 1024 + 1024 + 3 + 512? No.
-            # 2042 = 1024 + 1018?
-            # Let's assume the [S2, unofficial] list is the ground truth for that specific variant and the text is generic.
-            # But the text says "concatenate sdf_inputs and current sdf output".
-            # If sdf_inputs is 515 and current output is 1024, sum is 1539.
-            # There is a contradiction in [S2, unofficial].
-            # I will write the pseudocode based on the textual description of the mechanism (concatenation of previous output and initial input) 
-            # and use the parameters from [S2, unofficial] for dimensions where they are consistent, but flag the discrepancy.
-            # Actually, for an implementer, the text "concatenate sdf_inputs and current sdf output" is the key algorithmic step.
-            # The specific number 2042 might be a typo for 1539 or a different config.
-            # I will use the textual description for the logic.
-            
-            if i - 1 in self.skip_layers:
-                # Skip connection: Concatenate previous hidden state with original input
-                # We need to store the original input x_in
-                pass 
+        for i in range(1, num_hidden_layers):
+            # Skip connections at indices 3 and 6 per explicit layer sequence dimensions [S2, unofficial]
+            if i in self.skip_layers:
+                self.layers.append(nn.Linear(hidden_dim + latent_dim + 3, hidden_dim))
             else:
-                pass
+                self.layers.append(nn.Linear(hidden_dim, hidden_dim))
+                
+        # Output layer
+        self.layers.append(nn.Linear(hidden_dim, 1))
 
     def forward(self, latent_code, points):
-        # latent_code: (B, latent_dim)
-        # points: (B, 3)
-        x_in = torch.cat([latent_code, points], dim=-1) # (B, latent_dim + 3)
+        # latent_code: (B, latent_dim), points: (B, 3)
+        x_in = torch.cat([latent_code, points], dim=-1)
         
         h = torch.relu(self.layers[0](x_in))
         
         for i in range(1, self.num_hidden_layers):
-            if (i - 1) in self.skip_layers:
-                # Concatenate previous hidden state with original input
+            if i in self.skip_layers:
                 h = torch.cat([h, x_in], dim=-1)
-            
             h = self.layers[i](h)
-            if i < self.num_hidden_layers - 1: # Dropout applied after each hidden layer except the last?
-                # [S2, unofficial] says "Dropout(0.2) applied after each hidden layer except the last."
+            if i < self.num_hidden_layers - 1:
                 h = self.dropout(h)
             h = torch.relu(h)
             
-        # Output layer
-        out = self.layers[self.num_hidden_layers](h) # Wait, layers list has num_hidden_layers + 1?
-        # [S2, unofficial] list has 9 layers (0-8). 8 hidden + 1 output?
-        # "num_hidden_layers: 8".
-        # List: 0,1,2,3,4,5,6,7,8. Total 9.
-        # So index 8 is the output layer.
-        # The loop above goes 1 to 7.
-        # Layer 8 is handled separately.
-        
-        # Re-evaluating [S2, unofficial] structure:
-        # Layers 0-7 are hidden?
-        # Layer 0: Linear(515, 1024)
-        # Layer 1: Linear(1024, 1024)
-        # Layer 2: Linear(1024, 1024)
-        # Layer 3: Linear(2042, 1024) -> Skip
-        # Layer 4: Linear(1024, 1024)
-        # Layer 5: Linear(1024, 1024)
-        # Layer 6: Linear(2042, 1024) -> Skip
-        # Layer 7: Linear(1024, 1024)
-        # Layer 8: Linear(1024, 1) -> Output
-        
-        # So there are 8 hidden layers (0-7) and 1 output layer (8).
-        # Skip layers are at indices 3 and 6.
-        # Condition: if i-1 in skip_layers.
-        # For i=3: i-1=2. 2 not in [3,7]. No skip?
-        # But Layer 3 IS a skip layer in the list.
-        # So the condition should be `if i in skip_layers`.
-        # Let's re-read [S2, unofficial] text: "for layer i, if i-1 in skip_layers, concatenate..."
-        # If skip_layers=[3,7], then for i=4, i-1=3. So Layer 4 gets skip?
-        # But Layer 3 in the list is the one with 2042 input.
-        # This implies the text description "i-1" might be off by one or refers to the *previous* layer being a skip layer?
-        # No, "concatenate ... to form sdf_inputs" for the *current* layer.
-        # If Layer 3 has 2042 input, it must have received a skip connection.
-        # So the condition for Layer 3 to be a skip layer is likely `if i in skip_layers`.
-        # I will use `if i in self.skip_layers` for the logic, as it matches the layer list indices.
-        
-        return torch.tanh(out)
+        out = self.layers[self.num_hidden_layers](h)
+        return torch.tanh(out).reshape(-1, 1)
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The Tanh output activation limits the SDF range to $[-1, 1]$. This may clip large distances. [S2, unofficial]
-*   **Boundaries:** Training samples are often generated in a bounded volume (e.g., $[-1.5, 1.5]^3$). Points outside this range may yield unreliable SDF values. [S1, unofficial]
-*   **Degenerate Input:** The latent code must be properly expanded to match the batch size of the query points. [S1, unofficial]
+*   **Precision:** The Tanh output activation limits the SDF range to $[-1, 1]$, which may clip large distances [S2, unofficial].
+*   **Boundaries:** Training samples are generated by sampling points uniformly in $[-1.5, 1.5]^3$ [S1, unofficial].
+*   **Degenerate Input:** The latent code must be expanded to match the batch size of the query points [S1, unofficial].
 
 ## Subtopics
 
@@ -203,24 +102,21 @@ DeepSDF Training with Image Latents jointly trains a ResNet-18 encoder and DeepS
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   **Memory:** The memory footprint is dominated by the MLP weights and the latent codes. It is independent of the scene resolution, scaling only with the number of shapes and the latent dimension $d_z$ [S1, unofficial].
-*   **Time:** Inference time is proportional to the number of query points and the depth of the MLP. It is generally slower than analytic SDFs but faster than high-resolution voxel grids for equivalent detail [S1, unofficial].
+*   **Memory:** The memory footprint is dominated by the MLP weights and the latent codes [S1, unofficial].
+*   **Time:** Inference time is proportional to the number of query points and the depth of the MLP [S2, unofficial].
 
 **Measured Performance:**
-*   Specific performance metrics (e.g., FPS, IoU) are not provided in the sources for the general architecture. [S1, unofficial][S2, unofficial]
-*   Training typically requires many epochs (e.g., 10 [S1, unofficial] to 2,000 [S3]) and careful sampling of points near the surface.
+*   Training typically requires many epochs (e.g., 10 [S1, unofficial] to 2,000 [S3]) and careful sampling of points near the surface [S1, unofficial][S3].
 
 **Strengths and Limitations:**
-*   **Strengths:** Resolution-independent representation; compact storage via latent codes; ability to handle complex topology. [S1, unofficial]
-*   **Limitations:** Requires training for each shape (or category); inference can be slow for dense point queries; limited output range due to Tanh activation. [S2, unofficial]
+*   **Strengths:** Represents a shift from discrete voxel representations to continuous implicit functions parameterized by neural networks [S1, unofficial].
+*   **Limitations:** Limited output range due to Tanh activation [S2, unofficial].
 
 **When to Use:**
-*   Use when a continuous, high-resolution representation is needed from sparse data. [S1, unofficial]
-*   Use when memory constraints prohibit high-resolution voxel grids. [S1, unofficial]
+*   Use when a continuous implicit function representation is needed [S1, unofficial].
 
 **When Not to Use:**
-*   Use analytic SDFs for simple primitives (spheres, boxes) where exact evaluation is required.
-*   Use voxel-based methods if discrete grid operations are preferred.
+*   Not given in the sources.
 
 ## Background
 DeepSDF was introduced as a method for learning continuous signed distance fields for 3D shapes [S1, unofficial][S3]. It represents a shift from discrete voxel representations to continuous implicit functions parameterized by neural networks [S1, unofficial]. The architecture typically involves a latent code generator and a position-conditional MLP decoder [S1, unofficial]. Variants extend this to image-based reconstruction using encoders like ResNet-18 [S3].

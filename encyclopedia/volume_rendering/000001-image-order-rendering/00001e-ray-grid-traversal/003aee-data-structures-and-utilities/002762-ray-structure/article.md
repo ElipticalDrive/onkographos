@@ -3,126 +3,122 @@
 Also called: Ray Data Structure, Ray Representation, Ray3D
 
 ## Overview
-The Ray Structure is a fundamental data container in volume rendering and ray tracing that represents a geometric ray in 3D space using an origin point and a direction vector [S1, S2, S3, unofficial]. It solves the problem of providing a unified interface for ray parameterization, allowing the computation of points along the ray path at arbitrary distances [S1, S2, unofficial]. It differs from sibling structures like the [Ray Bundle](2179-ray-bundle.md) and [RayBatch container](4187-raybatch-container.md) by focusing on the definition of a single ray's geometry rather than batching multiple rays or bundling sampling metadata [G]. It is distinct from the [Hit Record Structure](4953-hit-record-structure.md), which stores intersection results rather than ray definition [G].
+A Ray Structure is a data object representing a geometric ray in 3D space, defined by an origin point and a direction vector [S1, S2, S3, unofficial]. It serves as the fundamental primitive for image-order volume rendering, enabling the evaluation of scene properties at arbitrary distances along the viewing path [S1, S2, unofficial]. Unlike batched containers like the [Ray Bundle](2179-ray-bundle.md) or [RayBatch container](4187-raybatch-container.md), which manage collections of rays and associated sampling metadata for vectorized processing, the Ray Structure focuses on the geometric definition and point evaluation of a single ray [G]. It differs from the [Hit Record Structure](4953-hit-record-structure.md) by representing the input query path rather than the output intersection state [G].
 
 ## How it works
-**Inputs:** Origin point $\mathbf{o}$ (3D vector), Direction vector $\mathbf{d}$ (3D vector), and optionally a parameter range $[t_{min}, t_{max}]$.
-**Outputs:** A ray object capable of evaluating points at parameter $t$.
+**Inputs:** Origin point $\mathbf{o}$ (3D vector), Direction vector $\mathbf{d}$ (3D vector), and optionally a valid parameter range $[t_{min}, t_{max}]$.
+**Outputs:** A ray object capable of evaluating the position $\mathbf{p}(t)$ for any scalar $t$ within the valid range.
 
-**Data Structures:**
-The core layout consists of two primary fields [S2, unofficial]:
-1.  `orig`: The ray origin, stored as a 3D point (alias for `vec3`) [S2, unofficial].
-2.  `dir`: The ray direction, stored as a 3D vector (`vec3`) [S2, unofficial].
+**Data Structure Layout:**
+The structure typically consists of two primary fields [S2, unofficial]:
+1.  `orig`: A 3D point (or vector) representing the ray origin.
+2.  `dir`: A 3D vector representing the ray direction.
 
-Optional fields for traversal bounds [S3, unofficial]:
-1.  `range_min`: Minimum valid parameter $t$ (default $10^{-5}$) [S3, unofficial].
-2.  `range_max`: Maximum valid parameter $t$ (default $10^{30}$) [S3, unofficial].
+Some implementations include explicit range parameters [S3, unofficial]:
+3.  `range_min`: Minimum valid $t$ value (default $10^{-5}$) [S3, unofficial].
+4.  `range_max`: Maximum valid $t$ value (default $10^{30}$) [S3, unofficial].
 
-**Steps:**
-1.  **Initialization:** The ray is constructed with an origin $\mathbf{o}$ and a direction $\mathbf{d}$ [S2, unofficial].
-2.  **Normalization:** The direction vector is normalized to unit length, and optionally scaled by a specific length if required [S2, unofficial].
-    $$ \mathbf{d} \leftarrow \frac{\mathbf{d}}{\|\mathbf{d}\|} \times \text{length} $$
-    If no specific length is provided, $\mathbf{d}$ is normalized to unit length [S2, unofficial].
-3.  **Point Evaluation:** To find the point on the ray at parameter $t$, the following linear combination is computed [S1, S2, S3, unofficial]:
-    $$ P(t) = \mathbf{o} + t \cdot \mathbf{d} $$
-    This operation is valid for $t \in [t_{min}, t_{max}]$ [S3, unofficial].
+**Numbered Steps:**
+
+1.  **Initialization:**
+    *   Default Constructor: Initialize `orig` to $(0, 0, 0)$ and `dir` to $(0, 0, -1)$ [S1, unofficial].
+    *   Parameterized Constructor: Accept `orig` and `dir`. Normalize `dir` to unit length. Set `range_min` to $10^{-5}$ and `range_max` to $10^{30}$ [S3, unofficial].
+    *   [G] If the input direction is zero, the implementation should handle this as a degenerate case (e.g., by setting direction to a default or raising an error), though sources do not explicitly specify the guard.
+
+2.  **Direction Normalization and Length Setting:**
+    *   To set a specific length $L$ for the direction vector:
+        $$ \mathbf{d} \leftarrow \frac{\mathbf{d}}{\|\mathbf{d}\|} \times L $$
+    *   This ensures the direction is a unit vector scaled by the desired length [S2, unofficial].
+
+3.  **Point Evaluation:**
+    *   Compute the point on the ray at parameter $t$:
+        $$ \mathbf{p}(t) = \mathbf{o} + t \cdot \mathbf{d} $$
+    *   This formula is used to sample the volume at specific distances along the ray [S1, S2, S3, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 class Ray:
-    def __init__(self, origin, direction, range_min=1e-5, range_max=1e30):
-        """
-        Initialize a ray.
-        :param origin: 3D vector (x, y, z)
-        :param direction: 3D vector (x, y, z)
-        :param range_min: Minimum t value (default 1e-5)
-        :param range_max: Maximum t value (default 1e30)
-        """
-        self.orig = origin
-        # Normalize direction and store as unit vector
-        length = sqrt(direction.x**2 + direction.y**2 + direction.z**2)
-        if length > 0:
-            self.dir = Vector3(
-                direction.x / length,
-                direction.y / length,
-                direction.z / length
-            )
+    def __init__(self, origin=None, direction=None):
+        # Default initialization if not provided
+        if origin is None:
+            self.orig = [0.0, 0.0, 0.0]
         else:
-            self.dir = Vector3(0, 0, 0)
+            self.orig = list(origin)
+            
+        if direction is None:
+            self.dir = [0.0, 0.0, -1.0]
+        else:
+            # Normalize direction
+            d = list(direction)
+            length = math.sqrt(d[0]**2 + d[1]**2 + d[2]**2)
+            if length == 0:
+                # Handle degenerate case: [G] Default to zero vector or identity?
+                # Source S1 defaults to (0,0,-1) in constructor, 
+                # but S3 implies normalization happens on construction.
+                # We assume valid input or default fallback.
+                self.dir = [0.0, 0.0, -1.0] 
+            else:
+                self.dir = [d[0]/length, d[1]/length, d[2]/length]
         
-        self.range_min = range_min
-        self.range_max = range_max
+        # Range parameters [S3, unofficial]
+        self.range_min = 1e-5
+        self.range_max = 1e30
 
     def at(self, t):
-        """
-        Compute the point on the ray at distance t.
-        :param t: Scalar parameter
-        :return: 3D point (origin + t * direction)
-        """
-        return Vector3(
-            self.orig.x + t * self.dir.x,
-            self.orig.y + t * self.dir.y,
-            self.orig.z + t * self.dir.z
-        )
+        """Compute point on ray at distance t."""
+        # Clamp t to valid range [S3, unofficial]
+        t = max(self.range_min, min(t, self.range_max))
+        return [
+            self.orig[0] + t * self.dir[0],
+            self.orig[1] + t * self.dir[1],
+            self.orig[2] + t * self.dir[2]
+        ]
 
     def set_ray_length(self, length):
-        """
-        Normalize direction and scale by specified length.
-        :param length: Desired length of the direction vector
-        """
-        current_len = sqrt(self.dir.x**2 + self.dir.y**2 + self.dir.z**2)
+        """Normalize direction and scale by length."""
+        # Recalculate length of current dir (should be 1.0 if normalized)
+        current_len = math.sqrt(self.dir[0]**2 + self.dir[1]**2 + self.dir[2]**2)
         if current_len > 0:
             scale = length / current_len
-            self.dir.x *= scale
-            self.dir.y *= scale
-            self.dir.z *= scale
+            self.dir[0] *= scale
+            self.dir[1] *= scale
+            self.dir[2] *= scale
 ```
 
 **Parameters:**
 *   `RAY_MIN_T`: $10^{-5}$ [S3, unofficial].
 *   `RAY_MAX_T`: $10^{30}$ [S3, unofficial].
-*   Default Origin: $(0, 0, 0)$ [S3, unofficial].
-*   Default Direction: $(0, 0, -1)$ [S1, unofficial] or normalized input direction [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Zero Direction:** If the input direction vector has zero length, normalization fails. The implementation should handle this by setting the direction to $(0,0,0)$ or raising an error [S2, G, unofficial].
-*   **Precision:** Using $10^{30}$ for `range_max` may cause floating-point precision issues for very large scenes or very small $t$ values [S3, unofficial].
-*   **Boundary Checks:** The `at(t)` function does not inherently clamp $t$ to $[t_{min}, t_{max}]$ in the basic definition; the caller must ensure $t$ is within bounds if strict ray segment behavior is required [S3, G, unofficial].
+*   **Zero Direction:** If the input direction vector is zero, normalization fails. The default constructor uses $(0,0,-1)$ [S1, unofficial], but parameterized constructors must handle this [G].
+*   **Precision:** Using large $t$ values (near $10^{30}$) may cause floating-point precision issues in the addition $\mathbf{o} + t\mathbf{d}$ [S3, unofficial].
+*   **Boundary Clamping:** The `at` method should clamp $t$ to $[t_{min}, t_{max}]$ to prevent sampling outside the valid volume bounds [S3, unofficial].
 
 ## Subtopics
 
 ### Plücker Ray Embedding
-Embeds a ray defined by origin $\mathbf{o}$ and direction $\mathbf{v}$ into a 16-dimensional multivector using Plücker coordinates $(\mathbf{v}, \mathbf{o} \times \mathbf{v})$ [S4, unofficial]. The input tensor has shape $[..., 6]$ and the output has shape $[..., 16]$ [S4, unofficial]. It is chosen when ray operations require algebraic manipulation in geometric algebra or for specific differentiable rendering pipelines [S4, unofficial].
-1.  Initialize a zero tensor `mv` of shape $[..., 16]$ with the same device and dtype as the input `pluecker_ray` [S4, unofficial].
-2.  Assign the direction vector $\mathbf{v}$ (indices 3:6 of input) to multivector indices 5:8 [S4, unofficial].
-3.  Assign the cross product component $\mathbf{o} \times \mathbf{v}$ to multivector indices 8, 9, 10 [S4, unofficial]:
-    *   Index 8 gets input index 2.
-    *   Index 9 gets negative input index 1.
-    *   Index 10 gets input index 0 [S4, unofficial].
-4.  Extract Plücker ray from multivector by concatenating: multivector index 10, negative multivector index 9, multivector index 8, and multivector indices 5:8 [S4, unofficial].
+Embeds a ray defined by origin $\mathbf{o}$ and direction $\mathbf{v}$ into a 16-dimensional multivector using Plücker coordinates $(\mathbf{v}, \mathbf{o} \times \mathbf{v})$ [S4, unofficial]. The input tensor has shape $[..., 6]$ and the output has shape $[..., 16]$ [S4, unofficial]. It is used in neural rendering pipelines for differentiable ray operations [S4, unofficial].
+*   **Step:** Initialize a zero tensor `mv` of shape $[..., 16]$. Assign direction $\mathbf{v}$ (input indices 3:6) to multivector indices 5:8. Assign cross product $\mathbf{o} \times \mathbf{v}$ to indices 8, 9, 10: index 8 gets input index 2; index 9 gets negative input index 1; index 10 gets input index 0 [S4, unofficial].
+*   **Extraction:** Concatenate multivector index 10, negative index 9, index 8, and indices 5:8 to recover the ray [S4, unofficial].
 
 ### Z-list-buffer Ray Representation
-A data structure storing volume data as an array of rays, where each ray contains a list of sample points (position and normal) defining regions, replacing traditional scalar fields to reduce storage and preserve sharp features [S5]. It is chosen for efficient Boolean operations and sculpting in virtual worlds, offering better performance than scalar fields for sparse or sharp-edged volumes [S5].
-1.  Acquire Hermite data at fine resolution $n_k \times n_k \times n_k$ [S5].
-2.  Shoot axis-aligned rays along x, y, and z axes [S5].
-3.  For each ray, store intersection points and normals [S5].
-4.  Use orthographic projection and Z-buffer with Z-list for faster scan conversion than modified ray tracing [S5].
-*   **Layout:** Array of Rays. Each Ray contains a list of Samples. Each Sample stores: 1) Position (3D point), 2) Normal direction (3D vector) [S5].
-*   **Parameters:** Average number of samples per ray is ~2.86 for a dragon model and ~2.05 for a fandisk model, compared to 512 samples for a $512^3$ distance field [S5].
-*   **Resolution:** The array resolution is $(n_k + 1) \times (n_k + 1)$, where $n_k$ is the finest resolution [S5].
+A data structure storing volume data as an array of rays, where each ray contains a list of sample points (position and normal) defining regions, replacing traditional scalar fields to reduce storage and preserve sharp features [S5]. It uses axis-aligned rays along x, y, and z axes [S5].
+*   **Layout:** Array of Rays. Each Ray contains a list of Samples. Each Sample stores: 1) Position (3D point), 2) Normal direction (3D vector) [S5]. The array resolution is $(n_k + 1) \times (n_k + 1)$, where $n_k$ is the finest resolution [S5].
+*   **Step:** 1. Acquire Hermite data at fine resolution $n_k \times n_k \times n_k$. 2. Shoot axis-aligned rays along x, y, and z axes. 3. For each ray, store intersection points and normals. 4. Use orthographic projection and Z-buffer with Z-list for faster scan conversion [S5].
+*   **Parameter:** Average number of samples per ray is ~2.86 for a dragon model and ~2.05 for a fandisk model, compared to 512 samples for a $512^3$ distance field [S5].
 
 ## Operating characteristics
-*   **Time Complexity:** Point evaluation $P(t)$ is $O(1)$ [S1, S2, unofficial].
-*   **Memory Complexity:** $O(1)$ per ray for the basic structure (6 floats for origin and direction) [S2, unofficial]. The Z-list variant is $O(N \cdot S)$ where $N$ is the number of rays and $S$ is the average samples per ray [S5].
-*   **Strengths:** Simple, efficient, and standard for ray tracing and volume rendering pipelines [S1, S2, unofficial].
-*   **Limitations:** Does not inherently support batching or complex sampling metadata without additional structures like [Ray Bundle](2179-ray-bundle.md) [G].
-*   **When to use:** When representing individual rays for traversal, shading, or intersection testing [S1, S2, unofficial].
-*   **When not to use:** When rendering large batches of rays where memory overhead of individual objects is prohibitive; use [RayBatch container](4187-raybatch-container.md) instead [G].
+*   **Time Complexity:** Point evaluation is $O(1)$ [S1, S2, S3, unofficial].
+*   **Memory Complexity:** $O(1)$ per ray (typically 6-12 floats) [S2, S3, unofficial].
+*   **Strengths:** Simple, efficient geometric primitive for ray marching and tracing [S1, S2, unofficial].
+*   **Limitations:** Does not handle batching or sampling metadata natively; requires external structures for volume rendering pipelines [G].
+*   **When to use:** When representing a single viewing ray or a segment of a ray for sampling [S1, S2, unofficial].
+*   **When not to use:** When managing large batches of rays for neural rendering; use [Ray Bundle](2179-ray-bundle.md) or [RayBatch container](4187-raybatch-container.md) instead [G].
 
 ## Background
-The Ray Structure is a standard component in computer graphics, originating from foundational ray tracing literature. It is widely used in CPU and GPU voxel raycasters, sphere tracing, and volume rendering engines [S1, S2, S3, unofficial]. The Z-list-bufffer variant was introduced for detail sculpting using cubical marching squares to improve Boolean operations on volume data [S5].
+The Ray Structure is a fundamental concept in computer graphics, originating from early ray tracing and volume rendering techniques. It is widely used in CPU-based voxel raycasters [S1, unofficial], sphere tracing implementations [S2, unofficial], and CUDA-based volume renderers [S3, unofficial]. The specific parameter defaults ($10^{-5}$ to $10^{30}$) are common in practical implementations to avoid numerical instability near the origin and to support large-scale scenes [S3, unofficial].
 
 ## Sources
 [S1] Forceflow/cpu_voxel_raycaster, https://github.com/Forceflow/cpu_voxel_raycaster, fetched 2026-10-24 (unofficial)

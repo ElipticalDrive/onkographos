@@ -3,127 +3,106 @@
 Also called: Beam Optimization for Primary Rays, Ray Batching, Ray Grouping Optimization
 
 ## Overview
-Beam Optimization is an acceleration technique for primary rays in distance-field ray marching that groups adjacent rays into beams to reduce redundant scene queries [S1][S2, unofficial]. By marching a group of rays together along a central path, the method exploits spatial coherence to advance multiple rays simultaneously when the distance to the nearest geometry exceeds the group's spatial extent [S2, unofficial]. This reduces the total number of SDF evaluations, at the cost of splitting overhead when rays diverge near surfaces [S2, unofficial].
+Beam optimization is a technique to improve the performance of primary rays in volume rendering by grouping adjacent rays into beams and marching them together [S1][S2, unofficial]. It reduces redundant computations for rays far from geometry by treating a group as a single entity until local detail requires splitting [S2, unofficial]. Unlike [Block Culling](5431-block-culling.md) which skips entire blocks, or [Bounding Shape Optimization](7750-bounding-shape-optimization.md) which tightens bounds, beam optimization adapts the granularity of ray evaluation based on proximity to surfaces [S2, unofficial].
 
 ## How it works
-**Inputs:** A rectangular grid of primary rays, a Signed Distance Function (SDF) evaluator, and a beam size parameter (typically $8 \times 8$ pixels) [S1][S2, unofficial].
-**Outputs:** Hit distances or visibility flags for each pixel [G].
-
+**Inputs:** A set of primary rays defined by pixel coordinates $(u, v)$ and camera parameters.
+**Outputs:** Intersection distances or hit status for each pixel.
 **Data Structures:**
-*   **Beam:** A 2D block of pixels defined by top-left coordinate $(x, y)$ and dimensions $(w, h)$ [G].
-*   **Ray State:** For each pixel, stores current position $\mathbf{p}$, direction $\mathbf{d}$, and accumulated distance $t$ [G].
+- **Beam:** A rectangular group of rays. Defined by top-left pixel $(u_{min}, v_{min})$, bottom-right pixel $(u_{max}, v_{max})$, and the current ray origin $O$ and direction $D$ (typically the center ray of the beam).
+- **Distance Field:** A function $SDF(P)$ returning the minimum distance from point $P$ to the scene geometry.
+
+**Parameters:**
+- **Beam Size:** Typically $8 \times 8$ pixels [S1].
 
 **Algorithm:**
-1.  **Initialization:** Divide the image into non-overlapping beams of size $W \times H$ (default $8 \times 8$) [S1]. Initialize all rays with $t=0$ and $\mathbf{p} = \text{origin} + t \cdot \mathbf{d}$ [G].
-2.  **Marching Loop:** While there are active beams:
-    a.  **Central March:** For each active beam, compute the SDF value $d_{\text{center}}$ at the center pixel's current position using standard Sphere Tracing logic [S2, unofficial].
-    b.  **Step Size:** Advance the center ray by $t_{\text{step}} = d_{\text{center}}$ [S2, unofficial]. Update the center ray's position $\mathbf{p}_{\text{center}} \leftarrow \mathbf{p}_{\text{center}} + t_{\text{step}} \cdot \mathbf{d}_{\text{center}}$ [G].
-    c.  **Collision Check:** Compare $d_{\text{center}}$ with the total spatial size of the group to check for potential collision [S2, unofficial]. If $d_{\text{center}}$ exceeds the beam's spatial radius, no ray in the group can have hit geometry yet, so the beam is safe to advance without splitting [S2, unofficial].
-    d.  **Splitting:** If $d_{\text{center}} \le R_{\text{beam}}$, the beam might contain rays intersecting geometry. Split the beam into four new sub-groups (quadrants) [S2, unofficial].
-    e.  **Recursion:** Each new group repeats the steps individually along its new center ray [S2, unofficial].
-    f.  **Termination:** Repeat splitting until a group steps far enough into the scene to be discarded entirely, or until a group contains only one ray that has hit an object [S2, unofficial].
-3.  **Repeat:** Process the new set of sub-beams [G].
+1. Initialize a queue of beams, initially containing one beam covering the entire image (or a tile).
+2. While the queue is not empty:
+    a. Pop a beam $B$.
+    b. Let $O_B, D_B$ be the origin and direction of the center ray of $B$.
+    c. Perform standard Sphere Tracing (marching) along $O_B, D_B$ using $SDF$.
+    d. Let $d_{min}$ be the smallest distance to geometry found during the march so far.
+    e. Calculate the maximum spatial extent of the beam $W_B$ (e.g., the diagonal length of the beam's pixel footprint at the current step).
+    f. If $d_{min} > W_B$, the beam is far from geometry. The entire beam can be advanced by $d_{min}$ without risk of missing intersections for any ray in the group [S2, unofficial].
+    g. If $d_{min} \le W_B$, the beam is close to geometry. Split $B$ into four sub-beams (quadrants) and push them to the queue.
+    h. If a ray in the beam hits an object (distance $< \epsilon$), mark the corresponding pixels as hit and remove the beam from further processing [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-class Ray:
-    def __init__(self, pos, dir):
-        self.pos = pos
-        self.dir = dir
-        self.t = 0.0
-        self.hit = False
-
-class Beam:
-    def __init__(self, rays, w, h):
-        self.rays = rays
-        self.w = w
-        self.h = h
-    def get_center_ray(self):
-        return self.rays[len(self.rays) // 2]
-
-def beam_optimization(rays, beam_size=8, max_ray_length=float('inf'), sdf=None):
-    # rays: 2D list of Ray objects
+def beam_optimization(rays, sdf, beam_size=8):
+    # rays: list of (origin, direction, u, v)
+    # Initialize beams
     beams = []
-    for i in range(0, len(rays), beam_size):
-        for j in range(0, len(rays[0]), beam_size):
-            sub_rays = [rays[i+k][j+l] for k in range(beam_size) for l in range(beam_size) 
-                        if i+k < len(rays) and j+l < len(rays[0])]
-            beams.append(Beam(sub_rays, beam_size, beam_size))
+    # Group rays into initial beams
+    for i in range(0, len(rays), beam_size * beam_size):
+        chunk = rays[i:i + beam_size * beam_size]
+        if len(chunk) < beam_size * beam_size:
+            continue # Handle edge cases if image not divisible
+        beams.append(Beam(chunk, beam_size))
+    
+    queue = beams
+    
+    while queue:
+        beam = queue.pop(0)
+        if beam.is_empty():
+            continue
             
-    while beams:
-        next_beams = []
-        for beam in beams:
-            center = beam.get_center_ray()
-            d_center = sdf(center.pos)
+        # Center ray of the beam
+        center_ray = beam.get_center_ray()
+        origin, direction = center_ray
+        
+        # March along center ray
+        t = 0.0
+        hit = False
+        while t < MAX_DISTANCE:
+            dist = sdf(origin + t * direction)
+            if dist < EPSILON:
+                hit = True
+                break
+            t += dist
             
-            if d_center <= 0:
-                if len(beam.rays) == 1:
-                    center.hit = True
-                    center.t += d_center
-                else:
-                    next_beams.extend(split_beam(beam))
-                continue
+            # Check if beam can advance safely
+            # W_beam is the max deviation of any ray in beam from center ray at distance t
+            w_beam = beam.get_max_deviation(t)
             
-            center.pos += center.dir * d_center
-            center.t += d_center
-            
-            beam_radius = max(beam.w, beam.h) * 0.5 # [G]
-            
-            if d_center > beam_radius:
-                for ray in beam.rays:
-                    ray.pos += ray.dir * d_center
-                    ray.t += d_center
-                if center.t <= max_ray_length:
-                    next_beams.append(beam)
+            if dist > w_beam:
+                # Safe to advance entire beam
+                origin += t * direction
+                t = 0.0
             else:
-                if len(beam.rays) == 1:
-                    ray = beam.rays[0]
-                    ray.pos += ray.dir * d_center
-                    ray.t += d_center
-                    if ray.t <= max_ray_length:
-                        next_beams.append(beam)
-                else:
-                    next_beams.extend(split_beam(beam))
-        beams = next_beams
-    return rays
-
-def split_beam(beam):
-    w, h = beam.w, beam.h
-    mid_x, mid_y = w // 2, h // 2
-    n = len(beam.rays)
-    return [
-        Beam(beam.rays[:n//4], mid_x, mid_y),
-        Beam(beam.rays[n//4:n//2], mid_x, mid_y),
-        Beam(beam.rays[n//2:3*n//4], mid_x, h-mid_y),
-        Beam(beam.rays[3*n//4:], mid_x, h-mid_y)
-    ]
+                # Too close, split
+                sub_beams = beam.split()
+                queue.extend(sub_beams)
+                break # Stop marching this beam, let children handle it
+        
+        if hit:
+            beam.mark_hit()
 ```
-
-**Parameters:**
-*   **Beam Size:** $8 \times 8$ pixels is a common default [S1].
-
-**Edge Cases:**
-*   **Precision:** Floating-point errors in SDF evaluation can cause rays to oscillate or miss intersections near the threshold [G].
-*   **Boundaries:** Rays near the edge of the image must be handled to avoid out-of-bounds beam creation [G].
 
 ## Subtopics
 
 ### Beam Optimization for Soft Shadows
-An extension of beam optimization applied to shadow ray tracing [S1]. Instead of primary rays, beams are shot from the view-sample position to the area light [S1].
-*   **Method:** Shoot a beam of four rays per pixel from the view-sample to the light [S1]. Find the conservative furthest distance along these rays where no geometry is intersected [S1]. Shorten all shadow rays for that pixel by this distance [S1]. Trace the same beam rays in reverse (from light to view) to find a conservative interval where geometry *may* be intersected [S1].
-*   **Benefit:** Improves traversal speed of shadow rays and allows discarding pixels whose entire beams have no intersection with geometry, requiring no additional shadow rays [S1].
+An extension of beam optimization for primary rays applied to shadow ray computation [S1].
+- **Definition:** Shoots a beam of rays from the view-sample position to an area light to find conservative bounds for shadowing [S1].
+- **Steps:**
+    1. Shoot a beam of four rays per pixel from the view-sample position to the area light [S1].
+    2. Find the conservative furthest distance along these rays where no geometry is intersected [S1].
+    3. Shorten all shadow rays accordingly based on this conservative furthest distance [S1].
+    4. Trace the same beam rays in the reverse direction (from the light source) to find a conservative interval where geometry may be intersected [S1].
+- **Pitfall:** Pixels whose entire beams have no intersection with geometry require no additional shadow rays, allowing for significant culling [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces the number of SDF evaluations for rays far from geometry [S2, unofficial].
-*   **Memory Complexity:** Low overhead, requiring only minor changes to the codebase and minimal metadata storage [S1].
-*   **Strengths:** Effective for primary rays in rasterization-based rendering pipelines [S1].
-*   **Limitations:** Not given in the sources.
-*   **When to Use:** Best for primary rays in distance-field ray marching [S1][S2, unofficial].
+- **Time Complexity:** Reduces the number of SDF evaluations for rays far from geometry. Complexity depends on the distribution of geometry; near surfaces, it degrades to per-ray evaluation due to splitting [S2, unofficial].
+- **Memory Complexity:** Low overhead, requiring storage for the beam queue and ray states [S1].
+- **Strengths:** Effective for sparse scenes or large empty volumes where many rays travel long distances without intersecting [S2, unofficial].
+- **Limitations:** In dense geometry, frequent splitting can introduce overhead. Beam size must be tuned; too large causes missed intersections, too small reduces benefit [S2, unofficial].
+- **When to use:** Primary ray tracing in sparse voxel DAGs or large open volumes [S1].
+- **When not to use:** Dense, complex geometry where rays intersect frequently, or when memory bandwidth is the bottleneck rather than computation [S2, unofficial].
 
 ## Background
-Beam optimization was introduced by Laine and Karras in 2010 for high-resolution sparse voxel DAGs [S1]. It builds on the concept of ray grouping to leverage the coherence of primary rays in rasterization-based rendering pipelines [S1]. The technique is particularly relevant in the context of distance-field ray marching, where sphere tracing is the standard traversal method [S2, unofficial].
+Beam optimization was introduced by Laine and Karras in the context of high-resolution sparse voxel DAGs [S1]. It was originally described in [2010a] for primary rays and extended in [2010b] for soft shadows and ambient occlusion [S1]. The technique leverages the coherence of adjacent rays in image-order rendering to reduce redundant distance field queries [S1][S2, unofficial].
 
 ## Sources
 [S1] High resolution sparse voxel DAGs, https://www.researchgate.net/publication/262367808_High_resolution_sparse_voxel_DAGs, fetched 2026-10-27

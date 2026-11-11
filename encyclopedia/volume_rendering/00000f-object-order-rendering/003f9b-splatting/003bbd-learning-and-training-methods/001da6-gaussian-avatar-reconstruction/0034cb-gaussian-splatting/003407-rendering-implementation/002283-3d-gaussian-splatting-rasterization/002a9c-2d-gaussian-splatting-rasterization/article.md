@@ -3,81 +3,66 @@
 Also called: 2D Gaussian Splatting Surfel Rasterization
 
 ## Overview
-2D Gaussian Splatting Rasterization renders a scene represented by 3D Gaussian surfels by projecting them to 2D screen-space ellipses and performing tile-based, front-to-back alpha compositing. It differs from its parent [3D Gaussian Splatting Rasterization](2812-3d-gaussian-splatting-rasterization.md) by treating primitives as planar surfels with explicit normal vectors, enabling the accumulation of normal maps alongside color and depth, and by using a specific ray-surfel intersection logic to determine the contribution of each surfel to a pixel. It serves as a differentiable rendering kernel for 2D Gaussian Splatting, allowing gradients to flow from the rendered image back to the Gaussian parameters.
+2D Gaussian Splatting Rasterization renders a scene represented by 3D Gaussian surfels by projecting them to 2D screen-space ellipses and performing tile-based, front-to-back alpha compositing [S1, unofficial]. It differs from its parent [3D Gaussian Splatting Rasterization](2812-3d-gaussian-splatting-rasterization.md) by treating primitives as planar surfels with explicit normal vectors, enabling the accumulation of normal maps alongside color and depth, and by using a specific ray-surfel intersection logic to determine the contribution of each surfel to a pixel [S1, unofficial]. It serves as a differentiable rendering kernel for 2D Gaussian Splatting, allowing gradients to flow from the rendered image back to the Gaussian parameters [G].
 
 ## How it works
 **Inputs:**
-- `means`: $[N, 3]$ array of 3D Gaussian centers.
-- `quats`: $[N, 4]$ array of unit quaternions $(w, x, y, z)$ representing orientation.
-- `scales`: $[N, 3]$ array of Gaussian scales.
-- `opacities`: $[N]$ array of scalar opacities.
-- `colors`: $[N, D]$ or $[C, N, D]$ array of color coefficients (or SH coefficients if `sh_degree` is set).
-- `viewmats`: $[C, 4, 4]$ camera view matrices.
-- `Ks`: $[C, 3, 3]$ camera intrinsic matrices.
-- `width`, `height`: Integer image dimensions.
-- `tile_size`: Integer, default 16.
-- `near_plane`, `far_plane`: Float clipping distances, defaults 0.01 and $10^{10}$.
-- `sh_degree`: Integer or None. If not None, spherical harmonics are evaluated.
-- `backgrounds`: $[C, 3]$ background colors.
+- `means`: $[N, 3]$ array of 3D Gaussian centers [S1, unofficial].
+- `quats`: $[N, 4]$ array of unit quaternions $(w, x, y, z)$ representing orientation [S1, unofficial].
+- `scales`: $[N, 3]$ array of Gaussian scales [S1, unofficial].
+- `opacities`: $[N]$ array of scalar opacities [S1, unofficial].
+- `colors`: $[N, D]$ or $[C, N, D]$ array of color coefficients (or SH coefficients if `sh_degree` is set) [S1, unofficial].
+- `viewmats`: $[C, 4, 4]$ camera view matrices [S1, unofficial].
+- `Ks`: $[C, 3, 3]$ camera intrinsic matrices [S1, unofficial].
+- `width`, `height`: Integer image dimensions [G].
+- `tile_size`: Integer, default 16 [S1, unofficial].
+- `near_plane`, `far_plane`: Float clipping distances, defaults 0.01 and $10^{10}$ [S1, unofficial].
+- `sh_degree`: Integer or None. If not None, spherical harmonics are evaluated [S1, unofficial].
+- `backgrounds`: $[C, 3]$ background colors [S1, unofficial].
 
 **Outputs:**
-- `render_colors`: $[C, H, W, 3]$ rendered RGB images.
-- `render_alphas`: $[C, H, W, 1]$ rendered alpha channels.
-- `render_normals`: $[C, H, W, 3]$ rendered normal vectors.
+- `render_colors`: $[C, H, W, 3]$ rendered RGB images [S1, unofficial].
+- `render_alphas`: $[C, H, W, 1]$ rendered alpha channels [S1, unofficial].
+- `render_normals`: $[C, H, W, 3]$ rendered normal vectors [S1, unofficial].
 
 **Data Structures:**
-- **Tiles**: The image is divided into non-overlapping tiles of size `tile_size` $\times$ `tile_size`.
-- **Intersection IDs**: A mapping from tile to the list of Gaussels intersecting it, sorted by depth.
+- **Tiles**: The image is divided into non-overlapping tiles of size `tile_size` $\times$ `tile_size` [S1, unofficial].
+- **Intersection IDs**: A mapping from tile to the list of Gaussians intersecting it, sorted by depth [S1, unofficial].
 
 **Steps:**
 
-1. **Projection**: Project 3D Gaussians to 2D screen space using `fully_fused_projection_2dgs`. This computes the 2D mean $\mu_{2d}$, radius $r$, depth $z$, ray transform matrix, and normal vector for each Gaussian.
-   - Input: `means`, `quats`, `scales`, `viewmats`, `Ks`, `width`, `height`, `near_plane`, `far_plane`.
-   - Output: `means2d` $[N, 2]$, `radii` $[N]$, `depths` $[N]$, `ray_transforms` $[N, 3, 3]$, `normals` $[N, 3]$.
+1. **Projection**: Project 2D Gaussian surfels to 2D screen space using `fully_fused_projection_2dgs`, passing `means`, `quats`, `scales`, `viewmats`, `Ks`, `width`, `height`, `near_plane`, `far_plane` [S1, unofficial]. This computes the 2D mean $\mu_{2d}$, radius $r$, depth $z$, ray transform matrix, and normal vector for each Gaussian [S1, unofficial].
+   - Output: `means2d` $[N, 2]$, `radii` $[N]$, `depths` $[N]$, `ray_transforms` $[N, 3, 3]$, `normals` $[N, 3]$ [S1, unofficial].
 
 2. **Color/SH Evaluation**:
-   - If `sh_degree` is not None:
-     - Compute view directions: $\mathbf{dirs} = \text{normalize}(\text{means} - \text{campos})$.
-     - Broadcast SH coefficients to $[C, N, K, 3]$.
-     - Evaluate spherical harmonics: $\mathbf{rgb} = \text{spherical\_harmonics}(\text{sh\_degree}, \mathbf{dirs}, \text{coeffs})$.
-     - Clamp: $\mathbf{rgb} = \max(\mathbf{rgb} + 0.5, 0.0)$.
-   - If `sh_degree` is None:
-     - Use direct colors, broadcasting to $[C, N, D]$.
-   - Result: `colors_for_raster` $[C, N, 3]$.
+   - If `sh_degree` is not None: compute view directions $\mathbf{dirs} = \text{normalize}(\text{means} - \text{campos})$, broadcast color coefficients to $[C, N, K, 3]$, evaluate spherical harmonics $\mathbf{rgb} = \text{spherical\_harmonics}(\text{sh\_degree}, \mathbf{dirs}, \text{coeffs})$ to get $\mathbf{rgb}$ $[C, N, 3]$, and clamp with $\max(\mathbf{rgb} + 0.5, 0.0)$ [S1, unofficial].
+   - If `sh_degree` is None: broadcast colors $[N, D]$ to $[C, N, D]$ or use colors $[C, N, D]$ directly as `colors_for_raster` [S1, unofficial].
 
-3. **Opacity Broadcasting**:
-   - Broadcast per-surfel opacities $[N]$ to per-camera $[C, N]$ using `mx.broadcast_to(mx.expand_dims(opacities, axis=0), (C, N))`.
+3. **Opacity Broadcasting**: Broadcast per-surfel opacities $[N]$ to per-camera $[C, N]$ using `mx.broadcast_to(mx.expand_dims(opacities, axis=0), (C, N))` [S1, unofficial].
 
-4. **Tile Intersection**:
-   - Compute tile dimensions: $W_{tile} = \lceil \text{width} / \text{tile\_size} \rceil$, $H_{tile} = \lceil \text{height} / \text{tile\_size} \rceil$.
-   - Call `isect_tiles(means2d, radii, depths, tile_size, W_{tile}, H_{tile}, sort=True)`.
-   - Output: `tiles_per_gauss` (count), `isect_ids` (flattened list of tile indices for each gaussel), `flatten_ids` (sorted list of gaussel indices per tile).
+4. **Tile Intersection**: Compute tile dimensions $W_{tile} = \lceil \text{width} / \text{tile\_size} \rceil$, $H_{tile} = \lceil \text{height} / \text{tile\_size} \rceil$ [S1, unofficial]. Call `isect_tiles(means2d, radii, depths, tile_size, W_{tile}, H_{tile}, sort=True)` to get `tiles_per_gauss`, `isect_ids`, `flatten_ids` [S1, unofficial].
 
-5. **Offset Encoding**:
-   - Encode intersection offsets using `isect_offset_encode(isect_ids, C, W_{tile}, H_{tile})` to produce `isect_offsets` $[C, H_{tile}, W_{tile}]$, which maps each tile to the start index in the flattened gaussel list.
+5. **Offset Encoding**: Encode intersection offsets using `isect_offset_encode(isect_ids, C, W_{tile}, H_{tile})` to produce `isect_offsets` $[C, H_{tile}, W_{tile}]$, which maps each tile to the start index in the flattened gaussian list [S1, unofficial].
 
-6. **Rasterization (Pixel Compositing)**:
-   - Call `rasterize_to_pixels_2dgs` with `means2d`, `ray_transforms`, `colors_for_raster`, `normals`, `opacities_cn`, `width`, `height`, `tile_size`, `isect_offsets`, `flatten_ids`, and `backgrounds`.
-   - For each pixel $(x, y)$ in each tile:
-     - Iterate through intersecting Gaussels in depth order.
-     - Compute ray-surfel intersection vectors:
-       $$ \mathbf{h}_u = -\mathbf{M}_g[0, :3] + \mathbf{M}_g[2, :3] \cdot p_x $$
-       $$ \mathbf{h}_v = -\mathbf{M}_g[1, :3] + \mathbf{M}_g[2, :3] \cdot p_y $$
-       where $\mathbf{M}_g$ is the ray transform matrix for the gaussel, and $p_x, p_y$ are the pixel coordinates relative to the center.
-     - Compute cross product: $\mathbf{tmp} = \mathbf{h}_u \times \mathbf{h}_v$.
-     - **Guard**: If $|\mathbf{tmp}[2]| < 10^{-10}$, skip this gaussel (degenerate case).
-     - Compute intersection coordinates:
-       $$ u_s = \frac{\mathbf{tmp}[0]}{\mathbf{tmp}[2]}, \quad v_s = \frac{\mathbf{tmp}[1]}{\mathbf{tmp}[2]} $$
-     - Compute 3D sigma:
-       $$ \sigma_{3d} = u_s^2 + v_s^2 $$
-     - Compute 2D fallback sigma (distance to center):
-       $$ \sigma_{2d} = 2.0 \cdot (d_x^2 + d_y^2) $$
-       where $d_x, d_y$ are the distances from the pixel to the 2D mean.
-     - Take tighter bound:
-       $$ \sigma = 0.5 \cdot \min(\sigma_{3d}, \sigma_{2d}) $$
-     - Compute alpha:
-       $$ \alpha = \min(\text{opacity} \cdot \exp(-\sigma), \text{MAX\_ALPHA}) $$
-     - If $\alpha > 0$, accumulate color, alpha, and normal using front-to-back compositing.
+6. **Rasterization (Pixel Compositing)**: Call `rasterize_to_pixels_2dgs` with `means2d`, `ray_transforms`, `colors_for_raster`, `normals`, `opacities_cn`, `width`, `height`, `tile_size`, `isect_offsets`, `flatten_ids`, and `backgrounds` [S1, unofficial].
+   - For each surfel `gid` in depth order, compute ray-surfel intersection vectors:
+     $$ \mathbf{h}_u = -\mathbf{M}_g[0, :3] + \mathbf{M}_g[2, :3] \cdot p_x $$
+     $$ \mathbf{h}_v = -\mathbf{M}_g[1, :3] + \mathbf{M}_g[2, :3] \cdot p_y $$
+     where $\mathbf{M}_g$ is the ray transform matrix for the gaussian, and $p_x, p_y$ are the pixel coordinates relative to the center [S1, unofficial].
+   - Compute cross product: $\mathbf{tmp} = \mathbf{h}_u \times \mathbf{h}_v$ [S1, unofficial].
+   - **Guard**: If $|\mathbf{tmp}[2]| < 10^{-10}$, skip this gaussian (degenerate case) [S1, unofficial].
+   - Compute intersection coordinates:
+     $$ u_s = \frac{\mathbf{tmp}[0]}{\mathbf{tmp}[2]}, \quad v_s = \frac{\mathbf{tmp}[1]}{\mathbf{tmp}[2]} $$
+   - Compute 3D sigma:
+     $$ \sigma_{3d} = u_s^2 + v_s^2 $$
+   - Compute 2D fallback sigma (distance to center):
+     $$ \sigma_{2d} = 2.0 \cdot (d_x^2 + d_y^2) $$
+     where $d_x, d_y$ are the distances from the pixel to the 2D mean [S1, unofficial].
+   - Take tighter bound:
+     $$ \sigma = 0.5 \cdot \min(\sigma_{3d}, \sigma_{2d}) $$
+   - Compute alpha:
+     $$ \alpha = \min(\text{opacity} \cdot \exp(-\sigma), \text{MAX\_ALPHA}) $$
+   - If $\alpha > 0$, accumulate color, alpha, and normal using front-to-back compositing [S1, unofficial].
 
 **Pseudocode:**
 
@@ -105,16 +90,12 @@ def rasterize_to_pixels_2dgs(
     Returns: (render_colors, render_alphas, render_normals)
     """
     C = colors.shape[0]
-    H_tile = (height + tile_size - 1) // tile_size
-    W_tile = (width + tile_size - 1) // tile_size
+    H_tile = int(np.ceil(height / tile_size))
+    W_tile = int(np.ceil(width / tile_size))
     
     render_colors = np.zeros((C, height, width, 3), dtype=np.float32)
     render_alphas = np.zeros((C, height, width, 1), dtype=np.float32)
     render_normals = np.zeros((C, height, width, 3), dtype=np.float32)
-    
-    # Pre-calculate pixel coordinates
-    px = np.arange(width).reshape(1, -1)
-    py = np.arange(height).reshape(-1, 1)
     
     for c in range(C):
         bg_color = backgrounds[c]
@@ -122,76 +103,68 @@ def rasterize_to_pixels_2dgs(
         for ty in range(H_tile):
             for tx in range(W_tile):
                 offset = isect_offsets[c, ty, tx]
-                # Get list of gaussel indices for this tile
-                # Note: flatten_ids is a flat array, we need to know the range.
-                # In practice, flatten_ids is structured such that we can iterate.
-                # Assuming flatten_ids contains the gaussel IDs for all tiles in order.
-                # We need a way to know the start/end for this specific tile.
-                # The source uses `isect_ids` and `flatten_ids` from `isect_tiles`.
-                # Let's assume `tile_gaussels` is a list of lists or similar structure
-                # derived from the output of isect_tiles for simplicity in this reference.
-                # However, the source code implies `flatten_ids` is used with offsets.
-                # Let's reconstruct the iteration based on standard tile rasterization logic.
-                
-                # Get gaussels for this tile
-                # In the source, `isect_offsets` encodes the start index in `flatten_ids`
-                # and potentially the count. Let's assume a standard structure:
-                # `isect_offsets` might be [C, H_tile, W_tile, 2] or similar if it stores count.
-                # The source says `isect_offset_encode(isect_ids, C, tile_width, tile_height)`.
-                # Let's assume `isect_offsets` stores the start index, and we need a separate
-                # count or end index. For this reference, we assume `tile_gaussels` is available.
-                
-                # Placeholder for tile gaussel retrieval logic based on isect_offsets
-                # In the actual gsplat-mlx implementation, this is handled by the C++/CUDA kernel.
-                # Here we simulate the loop over gaussels in the tile.
-                tile_gaussels = get_gaussels_for_tile(tx, ty, isect_offsets, flatten_ids)
+                # Determine the range of gaussels for this tile in flatten_ids.
+                # isect_offsets stores the starting index. We find the end index by 
+                # checking the next tile's offset or the array length.
+                next_offset = isect_offsets[c, ty, tx + 1] if tx + 1 < W_tile else len(flatten_ids)
+                tile_gaussels = flatten_ids[offset:next_offset]
                 
                 for gid in tile_gaussels:
-                    # Get gaussel properties
                     m2d = means2d[gid]
                     rt = ray_transforms[gid]
                     col = colors[c, gid]
                     norm = normals[gid]
                     op = opacities[c, gid]
                     
-                    # Compute intersection
-                    # h_u = -Mg[0, :3] + Mg[2, :3] * px
-                    # h_v = -Mg[1, :3] + Mg[2, :3] * py
-                    # Note: px, py are pixel coordinates. The source uses pxf, pyf.
-                    # We need to map pixel coordinates to the local space of the gaussel.
-                    # The source code: h_u = -Mg[0, :3] + Mg[2, :3] * pxf
-                    # This implies pxf, pyf are the pixel coordinates.
-                    
-                    # Compute tmp = cross(h_u, h_v)
-                    # tmp = np.cross(h_u, h_v)
-                    # if abs(tmp[2]) < 1e-10: continue
-                    
-                    # us = tmp[0] / tmp[2]
-                    # vs = tmp[1] / tmp[2]
-                    
-                    # sigma_3d = us*us + vs*vs
-                    # sigma_2d = 2.0 * (dx*dx + dy*dy)
-                    # sigma = 0.5 * min(sigma_3d, sigma_2d)
-                    
-                    # alpha = min(op * exp(-sigma), max_alpha)
-                    
-                    # If alpha > 0, composite
-                    # C_out = (C_in * (1 - alpha) + C_gaussel * alpha) / (1 - alpha_out) ...
-                    # Standard front-to-back:
-                    # alpha_out = alpha_in + alpha_g * (1 - alpha_in)
-                    # color_out = (color_in * alpha_in + color_g * alpha_g * (1 - alpha_in)) / alpha_out
-                    
-                    pass # Implementation details depend on the specific compositing loop
-    
-    return render_colors, render_alphas, render_normals
+                    # Iterate over pixels in this tile
+                    for py in range(ty * tile_size, min((ty + 1) * tile_size, height)):
+                        for px in range(tx * tile_size, min((tx + 1) * tile_size, width)):
+                            # Compute ray-surfel intersection vectors
+                            pxf = px - m2d[0]
+                            pyf = py - m2d[1]
+                            
+                            h_u = -rt[0, :3] + rt[2, :3] * pxf
+                            h_v = -rt[1, :3] + rt[2, :3] * pyf
+                            
+                            tmp = np.cross(h_u, h_v)
+                            if abs(tmp[2]) < 1e-10:
+                                continue
+                            
+                            us = tmp[0] / tmp[2]
+                            vs = tmp[1] / tmp[2]
+                            
+                            sigma_3d = us * us + vs * vs
+                            dx = px - m2d[0]
+                            dy = py - m2d[1]
+                            sigma_2d = 2.0 * (dx * dx + dy * dy)
+                            
+                            sigma = 0.5 * min(sigma_3d, sigma_2d)
+                            if sigma < 0:
+                                continue
+                                
+                            alpha = min(op * np.exp(-sigma), max_alpha)
+                            if alpha <= 0:
+                                continue
+                                
+                            # Front-to-back compositing
+                            alpha_in = render_alphas[c, py, px, 0]
+                            color_in = render_colors[c, py, px, :]
+                            normal_in = render_normals[c, py, px, :]
+                            
+                            alpha_out = alpha_in + alpha * (1.0 - alpha_in)
+                            if alpha_out > 0:
+                                color_out = (color_in * alpha_in + col * alpha * (1.0 - alpha_in)) / alpha_out
+                                normal_out = (normal_in * alpha_in + norm * alpha * (1.0 - alpha_in)) / alpha_out
+                                
+                                render_colors[c, py, px, :] = color_out
+                                render_alphas[c, py, px, 0] = alpha_out
+                                render_normals[c, py, px, :] = normal_out
+                                
+        # Apply background for pixels with zero alpha
+        mask = render_alphas[c, :, :, 0] < 1e-5
+        render_colors[c, mask] = bg_color
 
-def get_gaussels_for_tile(tx, ty, isect_offsets, flatten_ids):
-    # This is a placeholder for the actual indexing logic.
-    # In the source, `isect_offsets` is used to index into `flatten_ids`.
-    # The exact structure of `isect_offsets` is not fully detailed in the notes,
-    # but it typically stores the start index and count for each tile.
-    # For the purpose of this reference, we assume this function returns the list.
-    return []
+    return render_colors, render_alphas, render_normals
 ```
 
 ## Subtopics
@@ -203,14 +176,14 @@ Enhances 2DGS by replacing single attribute values with spatially varying textur
 Extends 2DGS to output phase and amplitude information for Time-of-Flight rendering by treating phasors as additional vector attributes.
 
 ## Operating characteristics
-- **Time Complexity**: $O(N \cdot T)$ where $N$ is the number of Gaussians and $T$ is the average number of Gaussians per tile. The projection step is $O(N)$, and the rasterization step is proportional to the number of pixel-gaussian intersections.
-- **Memory Complexity**: $O(N + H \cdot W)$ for storing Gaussian properties and the output image. The tile-based approach reduces memory pressure by only processing active tiles.
-- **Performance**: The reference implementation in `gsplat-mlx` is written in NumPy/MLX and is not optimized for production. It is used for testing and verification. Production implementations use CUDA/C++ kernels for significant speedups.
-- **Strengths**: Differentiable, supports normal accumulation, handles various camera models (pinhole, fisheye, orthographic).
-- **Limitations**: The NumPy reference is slow. Degenerate cases (parallel rays/surfels) must be handled explicitly.
+- **Time Complexity**: $O(N \cdot T)$ where $N$ is the number of Gaussians and $T$ is the average number of Gaussians per tile. The projection step is $O(N)$, and the rasterization step is proportional to the number of pixel-gaussian intersections [S1, unofficial].
+- **Memory Complexity**: $O(N + H \cdot W)$ for storing Gaussian properties and the output image. The tile-based approach reduces memory pressure by only processing active tiles [S1, unofficial].
+- **Performance**: The reference implementation in `gsplat-mlx` is written in NumPy/MLX and is not optimized for production. It is used for testing and verification. Production implementations use CUDA/C++ kernels for significant speedups [S1, unofficial].
+- **Strengths**: Differentiable, supports normal accumulation, handles various camera models (pinhole, fisheye, orthographic) [S1, unofficial].
+- **Limitations**: The NumPy reference is slow. Degenerate cases (parallel rays/surfels) must be handled explicitly [S1, unofficial].
 
 ## Background
-The method is part of the 2D Gaussian Splatting framework, which extends 3D Gaussian Splatting by using surfels (surface elements) instead of ellipsoids. The reference implementation is provided by `gsplat-mlx`, an unofficial MLX-based port of the `gsplat` library.
+The method is part of the 2D Gaussian Splatting framework, which extends 3D Gaussian Splatting by using surfels (surface elements) instead of ellipsoids. The reference implementation is provided by `gsplat-mlx`, an unofficial MLX-based port of the `gsplat` library [S1, unofficial].
 
 ## Sources
 [S1] RobotFlow-Labs/gsplat-mlx, https://github.com/RobotFlow-Labs/gsplat-mlx, fetched 2026-10-27 (unofficial)

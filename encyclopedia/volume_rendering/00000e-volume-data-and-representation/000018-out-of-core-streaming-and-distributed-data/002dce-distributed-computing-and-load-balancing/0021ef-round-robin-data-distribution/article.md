@@ -3,129 +3,127 @@
 Also called: Round-Robin Cell Distribution, Round-Robin Static Load Balancing, Round-robin distribution, Static Load Balanced Partitioning, Static Load Balancing via Round Robin
 
 ## Overview
-Round-Robin Data Distribution is a static load balancing strategy for parallel volume rendering where data cells are assigned to processors in a cyclic order [S2, unofficial]. It solves the problem of load imbalance caused by variations in cell size, shape, and opacity by dispersing connected cells widely among processors, thereby averaging out computational requirements [S2, unofficial]. Unlike methods that group connected cells to exploit spatial coherence, this approach scatters them to avoid exacerbating imbalances, as connected cells often share similar rendering costs [S2, unofficial]. It is distinct from [Scalable Distributed Volume Rendering (SDVR)](863-scalable-distributed-volume-rendering-sdvr.md) and [MPI Volume Rendering (1D/2D Decomposition)](2249-mpi-volume-rendering-1d-2d-decomposition.md) by prioritizing computational balance over spatial locality [S2, unofficial].
+Round-Robin Data Distribution is a static load balancing strategy for parallel volume rendering that assigns data cells to processors in a cyclic order to average out computational requirements [S2, unofficial][S3]. It solves the problem of load imbalance caused by variations in cell size, shape, and opacity by dispersing connected cells widely among processors, thereby avoiding the exacerbation of workload disparities that occurs when similar cells are grouped together [S2, unofficial]. Unlike methods that prioritize spatial locality or communication minimization, this approach prioritizes computational balance, relying on statistical averaging to achieve approximate load balance [S2, unofficial][S3].
 
 ## How it works
-**Inputs:**
-*   Unstructured grid data consisting of mesh cells and nodes [S2, unofficial].
-*   Total number of processors $P$ [S2, unofficial].
-*   Total number of cells $N$ [S2, unofficial].
+**Inputs and Outputs**
+*   **Input**: A set of $N$ data cells (e.g., tetrahedral cells in an unstructured mesh) and $P$ processors.
+*   **Output**: An assignment map where each cell is associated with a specific processor ID.
 
-**Outputs:**
-*   Assignment map mapping each cell index $i$ to a processor ID $p_i$ [S2, unofficial].
-*   Local data subsets containing the assigned cells and their required node information for each processor [S2, unofficial].
+**Data Structures**
+The method operates on the raw cell and node data. The specific storage layout required for the worst-case communication analysis is:
+*   **Cell**: 16 bytes, containing four node indices.
+*   **Node**: 16 bytes, containing three coordinates (floats) and one scalar value.
 
-**Data Structures:**
-*   **Cell:** Stores 4 node indices. Size: 16 bytes [S2, unofficial].
-*   **Node:** Stores 3 coordinates and 1 scalar value. Size: 16 bytes [S2, unofficial].
-*   **Assignment:** Implicitly computed via modulo arithmetic; no explicit large lookup table is required for the distribution logic itself [S2, unofficial].
+**Steps**
+1.  **Cell Enumeration**: Assign a unique sequential index $i$ to each cell in the dataset, where $0 \le i < N$.
+2.  **Processor Assignment**: For each cell $i$, determine the target processor $p$ using the modulo operation:
+    $$ p = i \mod P $$
+    where $P$ is the total number of processors.
+3.  **Data Distribution**: Transfer the cell data and the necessary node data to the assigned processor.
+    *   The cell data (16 bytes) is always transferred.
+    *   The node data is transferred if not already present on the processor. In the worst-case scenario where no node information is shared between cells assigned to the same processor, all nodes for all cells must be transferred.
 
-**Steps:**
-1.  **Cell Distribution:** Assign cells to processors sequentially in a cyclic manner. Cell $i$ is assigned to processor $p = i \mod P$, where $i$ ranges from $0$ to $N-1$ and $P$ is the total number of processors [S2, unofficial].
-2.  **Image Space Partitioning:** Assign successive scanlines to processors in round-robin fashion (scanline interleaving) to evenly distribute pixel-oriented ray-merging computations [S2, unofficial].
-3.  **Local Rendering:** Each processor renders its assigned cells independently using cell-projection [S2, unofficial].
-4.  **Compositing:** Local results are combined. A spatial partitioning tree is often employed to guide rendering and optimize compositing, as the round-robin distribution destroys spatial relationships [S2, unofficial].
+**Formulas**
+*   **Assignment**: $p_i = i \mod P$
+*   **Worst-Case Data Transfer Volume**: If no node sharing occurs, the maximum data transferred to a single processor for $n$ cells is:
+    $$ V_{max} = n \times (\text{size}_{cell} + 4 \times \text{size}_{node}) $$
+    Substituting the values from [S2, unofficial][S3]:
+    $$ V_{max} = n \times (16 + 4 \times 16) = 80n \text{ bytes} $$
 
-**Formulas:**
-*   **Processor Assignment:**
-    $$ p_i = i \mod P $$
-    Where $p_i$ is the processor ID for cell $i$, $i$ is the cell index, and $P$ is the number of processors [S2, unofficial].
-*   **Worst-Case Data Transfer Volume:**
-    $$ V_{transfer} = 80n \text{ bytes} $$
-    Where $n$ is the number of cells assigned to a single processor [S2, unofficial].
-    *Derivation:* Each cell requires 16 bytes. Each cell references 4 nodes, each node requiring 16 bytes. In the worst case where no node information is shared between cells on the same processor, the cost is $16n + (4 \times 16)n = 80n$ [S2, unofficial].
+**Parameters**
+*   **Cell Storage Size**: 16 bytes [S2, unofficial][S3].
+*   **Node Storage Size**: 16 bytes [S2, unofficial][S3].
+*   **Typical Values**: In an example with 1 million cells distributed across 128 processors, each processor receives approximately $1,000,000 / 128 \approx 7,812$ cells. The average data transferred per processor is $80 \times 7,812 \approx 624,960$ bytes, cited as 640,000 bytes in [S3] (likely accounting for rounding or specific dataset characteristics).
 
-**Parameters:**
-*   **Cell Storage Size:** 16 bytes (4 node indices) [S2, unofficial].
-*   **Node Storage Size:** 16 bytes (3 coordinates + 1 scalar) [S2, unofficial].
-*   **Magic Number $n$ (variant):** Determined empirically via 1-2 test runs to partition the volume into $n-p$ subvolumes [S4, unofficial].
-*   **Typical Values:** Not given in the sources.
+**Edge Cases and Pitfalls**
+*   **Loss of Spatial Locality**: The method destroys the spatial relationship between mesh cells, making an unstructured dataset appear more regular [S3]. This complicates optimizations that rely on spatial coherence, such as early ray termination or efficient neighbor lookups, unless a secondary spatial partitioning tree is used [S2, unofficial].
+*   **Communication Overhead**: By discouraging data sharing, the method can lead to higher communication costs in the worst case (no node sharing) compared to spatially coherent distributions [S2, unofficial][S3].
+*   **Approximate Balance**: Load balance is statistical and approximate. It relies on having a sufficiently large number of cells for the law of large numbers to smooth out local variations in cell size and opacity [S2, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Destruction of Spatial Relationships:** The method destroys spatial locality, making unstructured data appear more regular and complicating efficient ray merging without additional structures like a spatial partitioning tree [S2, unofficial].
-*   **Worst-Case Memory/Transfer:** If no node information is shared, the data transfer volume reaches $80n$ bytes per processor [S2, unofficial].
-*   **Compositing Overhead:** In the Static Round-Robin Partitioning variant, scattering subvolumes increases the number of ray segments, raising image compositing costs [S4, unofficial].
-*   **Zoom-in Views:** Static round-robin fails for zoom-in views on adaptive grids, as it does not adapt to local density changes [S4, unofficial].
-
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def round_robin_distribution(cells, nodes, num_processors):
+def round_robin_distribution(cells, num_processors):
     """
-    Distributes mesh cells to processors using round-robin assignment.
+    Distributes cells to processors using round-robin assignment.
     
     Args:
-        cells: List of cell objects, each containing 4 node indices.
-        nodes: List of node objects, each containing 3 coordinates and 1 scalar.
-        num_processors: Total number of processing units (P).
+        cells: List of cell objects, each having a unique index i and 
+               a method get_node_indices() returning 4 node IDs.
+        num_processors: Total number of processors P.
         
     Returns:
-        processor_assignments: List where index is cell_id and value is processor_id.
-        local_data: Dict mapping processor_id to list of (cell, required_nodes).
+        processor_assignments: Dictionary mapping processor_id to list of cells.
+        node_data: Dictionary mapping node_id to node data (coordinates, scalar).
     """
-    num_cells = len(cells)
-    processor_assignments = [0] * num_cells
+    processor_assignments = {p: [] for p in range(num_processors)}
+    required_nodes = set()
     
-    # Step 1: Assign cells to processors cyclically
-    for i in range(num_cells):
+    # Step 1 & 2: Assign cells to processors
+    for i, cell in enumerate(cells):
         processor_id = i % num_processors
-        processor_assignments[i] = processor_id
+        processor_assignments[processor_id].append(cell)
+        
+        # Step 3: Identify required nodes for worst-case analysis
+        # In a real implementation, nodes would be fetched and sent.
+        # Here we just track which nodes are needed for the specific cells
+        # assigned to each processor to calculate transfer volume.
+        for node_id in cell.get_node_indices():
+            required_nodes.add(node_id)
+            
+    return processor_assignments, required_nodes
 
-    # Step 2: Gather local data for each processor
-    local_data = {p: [] for p in range(num_processors)}
+def calculate_worst_case_transfer_volume(num_cells_per_processor):
+    """
+    Calculates the worst-case data transfer volume per processor.
     
-    for i in range(num_cells):
-        p_id = processor_assignments[i]
-        cell = cells[i]
+    Args:
+        num_cells_per_processor: Number of cells assigned to a single processor (n).
         
-        # Extract node indices for this cell
-        node_indices = cell.node_indices # List of 4 integers
-        
-        # Retrieve node data. 
-        # In worst-case no-sharing scenario, all nodes are transferred.
-        required_nodes = [nodes[idx] for idx in node_indices]
-        
-        local_data[p_id].append({
-            'cell': cell,
-            'nodes': required_nodes
-        })
-        
-    return processor_assignments, local_data
-
-def scanline_interleaving(image_height, num_processors):
+    Returns:
+        Volume in bytes.
     """
-    Assigns scanlines to processors in round-robin fashion.
-    """
-    scanline_assignments = [0] * image_height
-    for y in range(image_height):
-        scanline_assignments[y] = y % num_processors
-    return scanline_assignments
+    cell_size = 16  # bytes
+    node_size = 16  # bytes
+    nodes_per_cell = 4
+    
+    # V_max = n * (cell_size + nodes_per_cell * node_size)
+    volume = num_cells_per_processor * (cell_size + nodes_per_cell * node_size)
+    return volume
 ```
 
 ## Subtopics
 
-### Static Round-Robin Partitioning
-A variant where the data volume is partitioned into $n-p$ subvolumes (where $n$ is a magic number determined by test runs) and distributed round-robin across $p$ processors [S4, unofficial]. It aims to average out projected area and element count differences [S4, unofficial]. It differs from dynamic load balancing by being fixed after initial tests and is less effective for zoom-in views on adaptive grids [S4, unofficial]. It increases compositing cost due to more ray segments [S4, unofficial].
+### [Static Round-Robin Partitioning](2728-static-round-robin-partitioning.md)
+A static load balancing strategy that partitions a data volume into many small subvolumes and distributes them round-robin across processors to average out projected area and element count differences.
 
 ### [Scattered Assignment](4204-scattered-assignment.md)
-A scheme used in the LPM (Local Pixel Merging) step where mesh cells are assigned to processors in a scattered fashion for load balancing. Each processor determines the assignment concurrently without communication.
+Scattered Assignment (SCA) is a data distribution scheme for parallel direct volume rendering on unstructured grids that assigns mesh-cells to processors in a scattered fashion to achieve load balancing during the Light Path Mapping (LPM) step. It sets itself apart from its siblings, Minimum-Communication Assignment (MCA) and Balanced-Load Minimized-Communication Assignment (BLMCA), by prioritizing computational load balance over communication minimization, relying on the assumption that neighboring cells have similar workloads due to similar views of the volume.
+
+### [Randomized Data Decomposition](11592-randomized-data-decomposition.md)
+A data distribution method where blocks are randomly assigned to processors with equal probability, relying on statistical theorems to guarantee load balance with high probability.
 
 ## Operating characteristics
-*   **Time Complexity:** Distribution is $O(N)$ where $N$ is the number of cells, as it involves a simple modulo operation [S2, unofficial].
-*   **Memory Complexity:** $O(N)$ for storing the assignment map implicitly; local memory usage depends on the data transfer volume, up to $80n$ bytes per processor in the worst case [S2, unofficial].
-*   **Measured Performance:** On an IBM SP2 with 128 processors, rendering a dataset of 500,000 tetrahedral cells achieved 2 frames per second for a 400x400-pixel image [S2, unofficial].
-*   **Scaling:** Provides good scalability for large numbers of processors due to the simplicity of the distribution and the ability to overlap communication with rendering [S2, unofficial].
-*   **Strengths:** Flexibility; works for any number of processors without expensive preprocessing; approximates static load balance by averaging out computational requirements [S2, unofficial].
-*   **Limitations:** Destroys spatial relationships; high worst-case data transfer if nodes are not shared; ineffective for adaptive grids with zoom-in views; increases compositing cost in the subvolume variant [S2, unofficial][S4, unofficial].
-*   **When to use:** When computational load varies significantly due to cell size or opacity and spatial locality is less critical than balance; on massively parallel distributed-memory systems [S2, unofficial].
-*   **When not to use:** When spatial coherence is needed for efficient ray merging without additional overhead; for zoom-in views on adaptive grids [S4, unofficial].
+*   **Time Complexity**: The assignment step is $O(N)$, where $N$ is the number of cells, as it involves a simple modulo operation per cell. No complex graph partitioning or iterative refinement is required, making the setup time negligible compared to dynamic methods [S2, unofficial].
+*   **Memory Complexity**: $O(N)$ for storing the cell and node data. The distribution itself requires minimal additional memory for the assignment map.
+*   **Measured Performance**: On an IBM SP2 supercomputer, a dataset of 500,000 tetrahedral cells achieved two frames per second for a 400x400-pixel image using 128 processors [S2, unofficial].
+*   **Strengths**:
+    *   **Simplicity**: Trivial to compute for any number of processors without expensive preprocessing [S2, unofficial].
+    *   **Load Balance**: Effective at averaging out computational requirements when the number of cells is large, avoiding the severe load imbalances caused by grouping similar cells [S2, unofficial].
+    *   **Flexibility**: Does not require connectivity data, only cell and node information [S2, unofficial][S3].
+*   **Limitations**:
+    *   **Communication**: Worst-case data transfer can be high if node sharing is minimal [S2, unofficial][S3].
+    *   **Spatial Coherence**: Destroys spatial relationships, which can hinder optimizations like early ray termination or efficient compositing unless supplemented by a spatial partitioning tree [S2, unofficial][S3].
+    *   **Approximate Balance**: Not guaranteed to be perfectly balanced for small datasets or highly heterogeneous cell properties [S2, unofficial].
+*   **When to Use**: Suitable for large-scale unstructured datasets on massively parallel distributed-memory systems where computational balance is critical and spatial locality can be managed via secondary structures (e.g., a spatial tree) [S2, unofficial].
+*   **When Not to Use**: Unsuitable for small datasets where statistical averaging fails, or when communication bandwidth is severely constrained and node sharing is high in the original mesh [S2, unofficial][S3].
 
 ## Background
-The method was developed for scalable parallel cell-projection volume rendering of three-dimensional unstructured data on massively parallel distributed-memory supercomputers, such as the IBM SP2 [S2, unofficial]. It was introduced to address load imbalances inherent in grouping connected cells, which often have similar rendering costs [S2, unofficial]. The approach was supported by the National Aeronautics and Space Administration (NASA) [S2, unofficial].
+Round-Robin Data Distribution was proposed as part of a scalable parallel cell-projection volume rendering algorithm for three-dimensional unstructured data [S2, unofficial]. It was implemented and tested on the IBM SP2 supercomputer [S2, unofficial]. The method serves as a baseline for static load balancing, often compared against dynamic approaches like Load-Based Cell (LBC) and Load-Based Adaptive Cell (LBAC) distribution to evaluate the trade-off between static assignment overhead and dynamic rebalancing costs [S1]. The approach was developed to address the limitations of ray-casting methods, which benefit from spatial coherence, by adopting a cell-projection method that allows for greater flexibility in data distribution [S2, unofficial].
 
 ## Sources
 [S1] Parallel Isosurface Extraction for 3D Data Analysis Workflows in Distributed Environments, https://doi.org/10.1002/cpe.1710, fetched 2026-10-26
 [S2] DTIC ADA329328: A Scalable Parallel Cell-Projection Volume Rendering Algorithm for Three-Dimensional Unstructured Data, https://archive.org/details/DTIC_ADA329328, fetched 2026-10-26 (unofficial)
 [S3] PDF A Scalable Parallel Cell-Projection Volume Rendering Algorithm for ..., https://web.cs.ucdavis.edu/~ma/papers/PRS97.pdf, fetched 2026-10-27
-[S4] DTIC ADA301855: Parallel Volume Ray-Casting for Unstructured-Grid Data on Distributed-Memory Architectures., https://archive.org/details/DTIC_ADA301855, fetched 2026-10-26 (unofficial)

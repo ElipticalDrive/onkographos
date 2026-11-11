@@ -1,27 +1,24 @@
 # Block Writer for SVO Serialization
-
 Also called: BlockWriter class
-
 ## Overview
 The Block Writer is a class that serializes Sparse Voxel Octree (SVO) nodes to a binary file while tracking cumulative byte and element counts [S1, unofficial].
-
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** An SVO node object to be serialized.
-*   **Output:** Binary data written to a stream, with internal state updates.
+*   **Input:** An SVO node object to be serialized [S1, unofficial].
+*   **Output:** Binary data written to a stream, with internal state updates [S1, unofficial].
 
 **Data Structures:**
 The class maintains two internal counters:
-1.  `byte_count`: Tracks the total number of bytes written to the binary stream.
-2.  `element_count`: Tracks the number of elements written, calculated based on a constant block size.
+1.  `byte_count`: Tracks the total number of bytes written to the binary stream [S1, unofficial].
+2.  `element_count`: Tracks the number of elements written, calculated based on a constant block size [S1, unofficial].
 
 **Parameters:**
 *   `Block::ELEMENT_SIZE`: A constant value of 4, used to calculate the element count [S1, unofficial].
 
 **Steps:**
-1.  The `operator<<(node)` method receives an SVO node.
-2.  The node is written to the underlying binary stream.
-3.  `byte_count` is incremented by the number of bytes written for the node.
+1.  The `operator<<(node)` method receives an SVO node [S1, unofficial].
+2.  The node is written to the underlying binary stream [S1, unofficial].
+3.  `byte_count` is incremented by the number of bytes written for the node [S1, unofficial].
 4.  `element_count` is updated based on `byte_count` and `Block::ELEMENT_SIZE` [S1, unofficial].
 
 **Pseudocode:**
@@ -38,8 +35,7 @@ class BlockWriter:
         """Writes a node to the binary stream and updates counters."""
         bytes_written = self.stream.write(node)
         self.byte_count += bytes_written
-        # Block::ELEMENT_SIZE is 4
-        self.element_count = self.byte_count // 4
+        self.element_count = self.byte_count // 4  # Block::ELEMENT_SIZE is 4
         return self
 ```
 
@@ -49,10 +45,10 @@ Not given in the sources.
 ## Subtopics
 
 ### [SVO Binary Serialization Format](5123-svo-binary-serialization-format.md)
-A binary file format for serializing SVOs that stores tree topology, leaf specifications, and arbitrary data arrays with strict bounds checking and overflow protection. It differs from its sibling by defining the complete file structure and validation logic rather than just the node descriptor packing.
+A binary file format for serializing SVOs that stores tree topology, leaf specifications, and arbitrary data arrays with strict bounds checking and overflow protection. It differs from its sibling by defining the complete file structure and validation logic rather than just the node descriptor packing. Choose it when a complete, validated file structure is required for reconstruction.
 
 ### [WideNodeDescriptor Binary Layout](5156-widenodedescriptor-binary-layout.md)
-The on-disk or in-memory serialization format for a "wide" node in an SVO. It stores structural topology and offsets to children, enabling efficient traversal without explicit pointers. It differs from standard SVO node encodings by using 64-bit masks and base offsets for larger subtrees or denser packing.
+The on-disk or in-memory serialization format for a "wide" node in an SVO. It stores structural topology and offsets to children, enabling efficient traversal without explicit pointers. It differs from standard SVO node encodings by using 64-bit masks and base offsets for larger subtrees or denser packing. Choose it when supporting larger subtrees or denser packing is necessary.
 
 ## Operating characteristics
 Not given in the sources.

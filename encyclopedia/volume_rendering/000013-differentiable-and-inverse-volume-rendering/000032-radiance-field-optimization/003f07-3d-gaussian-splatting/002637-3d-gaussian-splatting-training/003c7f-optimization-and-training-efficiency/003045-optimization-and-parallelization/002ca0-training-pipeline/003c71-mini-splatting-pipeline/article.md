@@ -3,19 +3,15 @@
 Also called: Mini-Splatting, Mini-Splatting-D, Mini-Splatting-C
 
 ## Overview
-The Mini-Splatting Pipeline is a training strategy for 3D Gaussian Splatting that explicitly manages the total number of Gaussians through periodic densification, simplification, and depth-based reinitialization phases [S1]. It distinguishes itself from standard 3D Gaussian Splatting by enforcing a constrained Gaussian count to improve training efficiency and reduce memory footprint, while maintaining or improving rendering quality [S1].
+The Mini-Splatting Pipeline is a training strategy for 3D Gaussian Splatting that explicitly manages the total number of Gaussians through periodic densification, simplification, and depth-based reinitialization phases [S1]. It distinguishes itself from standard 3D Gaussian Splatting by enforcing a constrained Gaussian count via a manually controlled sampling ratio [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Sparse Structure-from-Motion (SfM) points, camera poses, and multi-view images.
-*   **Output:** A set of 3D Gaussians with optimized attributes (position, covariance, opacity, spherical harmonics coefficients) and a compressed model representation (for Mini-Splatting-C).
+*   **Input:** Sparse Structure-from-Motion (SfM) points, camera poses, and multi-view images [S1].
+*   **Output:** A set of optimized 3D Gaussians and, for the compression variant, a compressed model representation [S1].
 
 **Data Structures:**
-The pipeline maintains a dynamic list of Gaussians. Each Gaussian $g$ is defined by:
-*   Center $\mathbf{p} \in \mathbb{R}^3$
-*   Scale $\mathbf{s} \in \mathbb{R}^3$ (or rotation quaternion $\mathbf{q}$ and scale vector)
-*   Opacity $\alpha \in [0, 1]$
-*   Spherical Harmonics (SH) coefficients $\mathbf{c}$
+The pipeline maintains a dynamic list of Gaussians [S1]. Each Gaussian $g$ is defined by standard 3D Gaussian Splatting attributes: center $\mathbf{p} \in \mathbb{R}^3$, scale $\mathbf{s} \in \mathbb{R}^3$ (or rotation quaternion $\mathbf{q}$ and scale vector), opacity $\alpha \in [0, 1]$, and spherical harmonics (SH) coefficients $\mathbf{c}$ [G].
 
 **Parameters:**
 *   `DensificationIteration`: 15,000 [S1].
@@ -26,13 +22,11 @@ The pipeline maintains a dynamic list of Gaussians. Each Gaussian $g$ is defined
 
 **Algorithm Steps:**
 1.  **Initialization:** Initialize the set of Gaussians from SfM points [S1, Line 1]. Set iteration counter $i = 0$ [S1, Line 2].
-2.  **Loop:** While not converged:
-    a.  **Render and Loss:** Render the current Gaussian set and compute loss against ground truth images.
-    b.  **Densification:** If $i$ is a multiple of `DensificationIteration` (15K), perform densification. This involves splitting and cloning Gaussians based on importance metrics (e.g., gradient magnitude or intersection counts) to increase density in under-represented areas [S1, Lines 15-17]. The specific importance metrics used are described as experimental tricks in the source appendix, but generally involve intersection-preserving sampling [S1].
-    c.  **Depth Reinitialization:** If $i$ is a multiple of 5,000, perform depth-based reinitialization. This strategy reinitializes Gaussian models based on depth information to correct drift or improve geometric consistency [S1].
-    d.  **Simplification:**
-        i.  If $i = \text{SimplificationIteration1}$ (15K), perform simplification. This reduces the number of Gaussians by removing low-importance ones or merging them, using intersection-preserving sampling [S1, Lines 19-21].
-        ii. If $i = \text{SimplificationIteration2}$ (20K), perform simplification again [S1, Lines 19-21].
+2.  **Loop:** While not converged [S1, Line 3]:
+    a.  **Render and Loss:** Render the current Gaussian set and compute loss against ground truth images [G].
+    b.  **Densification:** If $i$ is a multiple of `DensificationIteration` (15K), perform densification. The design of importance metrics for this step is case-dependent and hand-crafted, presented as an experimental trick in the appendix [S1].
+    c.  **Depth Reinitialization:** If $i$ is a multiple of 5,000, perform depth-based reinitialization [S1].
+    d.  **Simplification:** If $i = \text{SimplificationIteration1}$ (15K), perform simplification [S1, Lines 19-21]. If $i = \text{SimplificationIteration2}$ (20K), perform simplification again [S1, Lines 19-21].
     e.  **Increment:** $i \leftarrow i + 1$ [S1, Line 24].
 
 **Variants:**
@@ -49,7 +43,15 @@ The pipeline maintains a dynamic list of Gaussians. Each Gaussian $g$ is defined
 
 ```python
 def mini_splatting_pipeline(sfm_points, images, camera_poses):
-    # Initialization
+    # Helper definitions:
+    # initialize_from_sfm: Standard 3DGS initialization from SfM points [G]
+    # check_convergence: Standard convergence check based on loss/iterations [G]
+    # render_gaussians: Differentiable rasterization of Gaussians [G]
+    # compute_loss: Standard loss computation (e.g., L1 + SSIM) [G]
+    # densify_gaussians: Split/clone Gaussians based on importance metrics [G]
+    # depth_reinitialize_gaussians: Reinitialize Gaussians using depth maps [G]
+    # simplify_gaussians: Remove/merge low-importance Gaussians [G]
+    
     gaussians = initialize_from_sfm(sfm_points)
     i = 0
     densification_interval = 15000
@@ -57,25 +59,23 @@ def mini_splatting_pipeline(sfm_points, images, camera_poses):
     simplification_iter2 = 20000
     reinit_interval = 5000
     
-    while not converged(gaussians, images):
-        # Render and compute loss
-        rendered_images = render(gaussians, camera_poses)
+    while not check_convergence(gaussians, images):
+        rendered_images = render_gaussians(gaussians, camera_poses)
         loss = compute_loss(rendered_images, images)
         loss.backward()
         
-        # Densification
         if i % densification_interval == 0:
-            gaussians = densify(gaussians, importance_metric)
+            # Importance metrics are case-dependent and hand-crafted; see appendix [S1]
+            gaussians = densify_gaussians(gaussians)
             
-        # Depth Reinitialization
         if i % reinit_interval == 0:
-            gaussians = depth_reinitialize(gaussians, depth_maps)
+            # Fails in sky regions without reliable depth values [S1]
+            gaussians = depth_reinitialize_gaussians(gaussians)
             
-        # Simplification
         if i == simplification_iter1:
-            gaussians = simplify(gaussians, intersection_preserving_sampling)
+            gaussians = simplify_gaussians(gaussians)
         if i == simplification_iter2:
-            gaussians = simplify(gaussians, intersection_preserving_sampling)
+            gaussians = simplify_gaussians(gaussians)
             
         i += 1
         
@@ -88,11 +88,11 @@ def mini_splatting_pipeline(sfm_points, images, camera_poses):
     *   **PSNR:** bicycle 25.15, flowers 21.58, garden 26.84, stump 27.26, treehill 22.72, room 31.39, counter 28.41, kitchen 31.17, bonsai 31.57, truck 25.09, train 21.28, johnson 29.47, playroom 30.49 [S1].
     *   **LPIPS:** bicycle 0.225, flowers 0.327, garden 0.150, stump 0.199, treehill 0.312, room 0.211, counter 0.199, kitchen 0.130, bonsai 0.199, truck 0.159, train 0.245, johnson 0.257, playroom 0.250 [S1].
 *   **Comparison:** Mini-Splatting demonstrates consistent improvement compared to standard 3D Gaussian Splatting (3DGS) in most scans and surpasses Zip-NeRF in SSIM and LPIPS metrics on certain datasets [S1].
-*   **Strengths:** Reduced Gaussian count leads to lower memory usage and potentially faster training/inference. The compression variant (Mini-Splatting-C) further reduces storage size.
+*   **Strengths:** Reduced Gaussian count leads to lower memory usage. The compression variant (Mini-Splatting-C) further reduces storage size [S1].
 *   **Limitations:** Manual tuning of the sampling ratio is required. Depth-based reinitialization fails in sky regions. High sampling ratios can distort backgrounds [S1].
 
 ## Background
-Mini-Splatting was introduced to address the high memory and computational costs associated with the large number of Gaussians in standard 3D Gaussian Splatting [S1]. The method was proposed by the authors of the "Mini-Splatting: Representing Scenes with a Constrained Number of Gaussians" paper [S1]. It builds on the foundational 3D Gaussian Splatting framework [Parent](5325-training-pipeline.md).
+Mini-Splatting was introduced in the paper "Mini-Splatting: Representing Scenes with a Constrained Number of Gaussians" [S1]. It builds on the foundational 3D Gaussian Splatting framework [Parent](5325-training-pipeline.md) [S1].
 
 ## Sources
 [S1] Mini-Splatting: Representing Scenes with a Constrained Number of Gaussians, https://doi.org/10.1007/978-3-031-72980-5_10, fetched 2026-10-26

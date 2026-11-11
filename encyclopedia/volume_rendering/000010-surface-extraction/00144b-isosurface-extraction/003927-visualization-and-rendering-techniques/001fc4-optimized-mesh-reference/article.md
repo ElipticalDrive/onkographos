@@ -3,72 +3,94 @@
 Also called: Best-case indirect isosurface visualization, Forward mesh renderer reference
 
 ## Overview
-The Optimized Mesh Reference is a theoretical performance baseline for indirect isosurface visualization, representing the best-case scenario where an explicit mesh is rendered with zero overhead for geometry extraction or occlusion culling [S1][S2, unofficial]. It serves to measure the theoretical upper bound of rendering performance by evaluating a highly-optimized explicit mesh representation, allowing researchers to assess how close a proposed pipeline comes to the ideal efficiency of forward mesh rendering [S1][S2, unofficial]. Unlike direct ray-marching references, it isolates the rasterization cost of an already-extracted and optimized surface [S1][S2, unofficial].
+The Optimized Mesh Reference is a theoretical performance baseline for indirect isosurface visualization, representing the best-case scenario where geometry extraction and occlusion culling are instantaneous [S1][S2, unofficial]. It measures the rendering time of a highly-optimized explicit mesh representation of the isosurface, excluding the costs of extraction and visibility determination [S1][S2, unofficial]. This method serves as an upper bound for forward mesh rendering efficiency, allowing researchers to assess how close a practical pipeline comes to the theoretical limit of rendering an optimized isosurface [S1][S2, unofficial].
 
 ## How it works
-**Inputs:** Extracted vertex positions and normals for the potentially visible isosurface, generated using the same extraction approach as the primary pipeline [S1][S2, unofficial].
-**Outputs:** Rendering time metrics for the optimized mesh [S1][S2, unofficial].
-**Data Structures:** The mesh consists of vertices and indices. The mesh is partitioned into meshlets, each containing a maximum of 64 vertices [S1][S2, unofficial]. The exact memory layout of the meshlet data structure is not specified in the sources [S1][S2, unofficial].
+The method consists of three phases: extraction, optimization, and rendering. It assumes the scalar volume data and isovalue are known, and the goal is to produce the final rendered image frame time.
 
-**Steps:**
-1. Extract vertex positions and normals for the isosurface using the extraction algorithm identical to that used in the main pipeline [S1][S2, unofficial].
-2. Write the explicit geometry representation directly to GPU memory [S1][S2, unofficial].
-3. Remove duplicate vertices from the extracted mesh to ensure a clean representation [S1][S2, unofficial].
-4. Divide the cleaned mesh into meshlets using Kapoulkine's meshoptimizer C++ library, limiting each meshlet to a maximum of 64 vertices [S1][S2, unofficial].
-5. Render the optimized mesh using a forward mesh renderer without accounting for geometry extraction or occlusion culling overhead [S1][S2, unofficial].
+**Data Structures:**
+1.  **Explicit Mesh:** A collection of vertices and indices.
+    *   **Vertex:** Contains 3D position (float3) and normal vector (float3).
+    *   **Meshlet:** A subset of the mesh defined by a vertex buffer and an index buffer.
+2.  **GPU Memory:** The optimized mesh data is written directly to GPU memory buffers.
 
 **Parameters:**
-- Maximum vertices per meshlet: 64 [S1][S2, unofficial].
-- Library: Kapoulkine's meshoptimizer C++ library [S1][S2, unofficial].
+*   **Maximum vertices per meshlet:** 64 [S1][S2, unofficial].
+*   **Extraction Algorithm:** Uses the same isosurface extraction approach as the primary pipeline being evaluated (e.g., marching cubes or similar) [S1][S2, unofficial].
+*   **Optimization Library:** Kapoulkine's `meshoptimizer` C++ library [S1][S2, unofficial].
+
+**Steps:**
+1.  **Extract Geometry:** Extract vertex positions and normals for the isosurface using the standard extraction approach [S1][S2, unofficial].
+2.  **Transfer to GPU:** Write the explicit geometry representation directly to GPU memory [S1][S2, unofficial].
+3.  **Remove Duplicates:** Remove duplicate vertices from the extracted mesh to ensure a clean topology [S1][S2, unofficial].
+4.  **Create Meshlets:** Divide the cleaned mesh into meshlets using the `meshoptimizer` library [S1][S2, unofficial].
+    *   Limit each meshlet to a maximum of 64 vertices [S1][S2, unofficial].
+    *   This follows Kubisch's recommendation for default meshlet sizes [S1][S2, unofficial].
+5.  **Render:** Render the optimized mesh using a forward mesh renderer [S1][S2, unofficial].
+    *   Do not account for geometry extraction time.
+    *   Do not account for occlusion culling time.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def optimized_mesh_reference(extracted_vertices, extracted_normals):
-    # Step 1: Geometry extraction uses the same approach as the main pipeline
-    mesh = list(zip(extracted_vertices, extracted_normals))
+def optimized_mesh_reference(volume_data, isovalue):
+    # Step 1: Extract geometry using the pipeline's standard extraction method
+    raw_vertices = extract_isosurface_vertices(volume_data, isovalue)
+    raw_normals = extract_isosurface_normals(volume_data, isovalue)
     
-    # Step 2: Remove duplicate vertices
-    seen_vertices = set()
-    unique_mesh = []
-    for v, n in mesh:
-        if v not in seen_vertices:
-            seen_vertices.add(v)
-            unique_mesh.append((v, n))
-            
-    # Step 3: Partition into meshlets (max 64 vertices per meshlet)
-    meshlets = []
-    for i in range(0, len(unique_mesh), 64):
-        meshlets.append(unique_mesh[i:i+64])
-        
-    # Step 4: Render optimized mesh (excludes extraction/culling overhead)
-    # Measures only forward rasterization time
-    import time
-    start = time.perf_counter()
-    # Forward mesh rendering simulation (e.g., task/mesh shader dispatch)
-    for meshlet in meshlets:
-        pass  # Rasterization step
-    render_time = time.perf_counter() - start
-    return render_time
+    # Combine into raw mesh structure
+    raw_mesh = Mesh(vertices=raw_vertices, normals=raw_normals)
+    
+    # Step 2: Transfer to GPU (Implementation detail: upload buffers)
+    gpu_mesh = upload_to_gpu(raw_mesh)
+    
+    # Step 3: Remove duplicate vertices
+    # Implementation detail: Use a hash map or spatial index to merge identical vertices
+    cleaned_mesh = remove_duplicate_vertices(gpu_mesh)
+    
+    # Step 4: Create meshlets using meshoptimizer
+    # Implementation detail: Call meshoptimizer::optimizeVertexCache, 
+    # meshoptimizer::clusterize, etc., with max_vertices=64
+    meshlets = create_meshlets(cleaned_mesh, max_vertices_per_meshlet=64)
+    
+    # Step 5: Render
+    # Implementation detail: Bind meshlet buffers and issue draw calls
+    # using a forward rendering pipeline (e.g., via mesh shaders or 
+    # traditional rasterization with instancing)
+    render_forward_mesh(meshlets)
+    
+    return current_frame_time
 ```
 
-**Edge Cases and Pitfalls:**
-- The method does not account for the time required to extract the isosurface from the volume [S1][S2, unofficial].
-- It does not account for occlusion culling overhead [S1][S2, unofficial].
-- It assumes the mesh is heavily optimized [S1][S2, unofficial].
-
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** The reference mesh approach consistently outperforms the proposed direct isosurface rasterization pipeline by factors of 1.61 (CT Head dataset), 2.03 (Vertebra dataset), and 1.85 (Chameleon dataset) at a resolution of 3840 × 2160 pixels [S1][S2, unofficial]. For a time-varying Supernova dataset, it is 2.1 times faster [S1][S2, unofficial].
-- **Strengths:** Provides a clear theoretical upper bound for indirect rendering performance [S2, unofficial]. It isolates the rasterization efficiency of an optimized mesh [S1][S2, unofficial].
-- **Limitations:** It is not a practical method for dynamic or interactive visualization because it ignores the significant costs of extraction and culling [S1][S2, unofficial]. It represents an "infinitely fast indirect extraction scenario" [S2, unofficial].
-- **When to use:** Use this reference to benchmark the potential gains of optimizing an indirect pipeline or to quantify the overhead of extraction and culling in a proposed method [S1][S2, unofficial].
-- **When not to use:** Do not use this as a performance target for real-time applications, as it ignores critical pipeline stages [S1][S2, unofficial].
+*   **Performance:** The Optimized Mesh Reference consistently outperforms practical indirect rendering approaches. In evaluations, it was faster by factors of 1.61 (CT Head), 2.03 (Vertebra), and 1.85 (Chameleon) [S1][S2, unofficial]. For time-varying data (Supernova), it was 2.1 times faster [S1][S2, unofficial].
+*   **Complexity:** The method assumes $O(1)$ extraction and culling time, which is physically impossible but serves as a theoretical lower bound for rendering latency [S1][S2, unofficial].
+*   **Strengths:** Provides a clear target for optimization; isolates the cost of rasterization and shading from the cost of geometry generation [S1][S2, unofficial].
+*   **Limitations:** Does not reflect real-world performance because it ignores the significant computational cost of extracting the isosurface and determining visibility (occlusion culling) [S1][S2, unofficial]. It is not a viable standalone rendering technique for dynamic or large-scale data.
 
 ## Background
-The Optimized Mesh Reference was introduced in the paper "Efficient Direct Isosurface Rasterization of Scalar Volumes" [S1][S2, unofficial]. It was developed as part of a comparative study to evaluate a new direct isosurface rasterization pipeline against traditional indirect methods (ray-marching) and an idealized indirect method (the Optimized Mesh Reference) [S1][S2, unofficial]. The authors used this reference to demonstrate that their direct approach could approach the performance of a highly optimized indirect pipeline, while avoiding the extraction overhead [S1][S2, unofficial]. The mesh optimization step uses Kapoulkine's meshoptimizer library, following recommendations by Kubisch [S1][S2, unofficial].
+The Optimized Mesh Reference was introduced in the context of evaluating efficient direct isosurface rasterization techniques [S1][S2, unofficial]. It was proposed to provide a fair comparison between direct rasterization, ray-marching, and indirect extraction-based approaches [S1][S2, unofficial]. The method relies on the `meshoptimizer` library by Kapoulkine [S1][S2, unofficial] and follows recommendations by Kubisch regarding meshlet sizes [S1][S2, unofficial]. It is used as a benchmark to demonstrate that practical pipelines can approach the efficiency of offline-optimized rendering when extraction overheads are excluded [S1][S2, unofficial].
+
+## Subtopics
+
+### Triangular Mesh Scene Rendering
+*   **What it is:** Rendering scenes composed of pre-existing triangular meshes.
+*   **Difference:** Does not involve isosurface extraction from scalar data.
+*   **When to choose:** When the geometry is already available as a mesh.
+*   **Link:** [Triangular Mesh Scene Rendering](4644-triangular-mesh-scene-rendering.md)
+
+### Isosurface Rendering
+*   **What it is:** General techniques for visualizing isosurfaces, including ray-marching and extraction-based methods.
+*   **Difference:** Includes the cost of extraction and culling; Optimized Mesh Reference is a specific baseline within this family.
+*   **When to choose:** When visualizing scalar field data.
+*   **Link:** [Isosurface Rendering](7669-isosurface-rendering.md)
+
+### Multi-Isosurface Rendering
+*   **What it is:** Rendering multiple isosurfaces simultaneously from a single volume.
+*   **Difference:** Handles multiple thresholds and potential blending/occlusion between surfaces.
+*   **When to choose:** When multiple material boundaries need to be visualized.
+*   **Link:** [Multi-Isosurface Rendering](8745-multi-isosurface-rendering.md)
 
 ## Sources
 [S1] Efficient Direct Isosurface Rasterization of Scalar Volumes, https://doi.org/10.1111/cgf.14670, fetched 2026-10-27

@@ -1,6 +1,4 @@
 # Voxel Map Lookup
-
-
 ## Overview
 Retrieves the color of a voxel at $(x,y,z)$ coordinates within a chunked voxel map [S1, unofficial]. It solves the problem of efficient sparse voxel access by combining a global geometry bitfield for quick existence checks with a binary search over sorted blocks within a specific chunk [S1, unofficial]. It differs from its parent [Chunked Voxel Map Serialization with Visfaces](4201-chunked-voxel-map-serialization-with-visfaces.md) by providing random-access retrieval rather than sequential serialization, and from [Top Voxel Retrieval](4236-top-voxel-retrieval.md) by returning the exact voxel color rather than the highest surface voxel in a column [S1, unofficial].
 
@@ -24,17 +22,17 @@ This allocates 12 bits for $x$ (bits 8–19), 12 bits for $y$ (bits 20–31), an
 
 **Steps:**
 1. **Bounds Check:** If `map` is null, or $x, y, z$ are outside $[0, \text{width}-1] \times [0, \text{height}-1] \times [0, \text{depth}-1]$, return `0` [S1, unofficial].
-2. **Geometry Check:** Call `libvxl_geometry_get(map, x, y, z)`. This checks if the corresponding bit in `map->geometry` is set. If the bit is not set, return `0` [S1, unofficial].
-3. **Chunk Selection:** Calculate the chunk index using `chunk_fposition(x, y, z)`. Retrieve the `libvxl_chunk` structure at that index [S1, unofficial].
+2. **Geometry Check:** Call `libvxl_geometry_get(map, x, y, z)` [S1, unofficial]. This checks if the corresponding bit in `map->geometry` is set [S1, unofficial]. If the bit is not set, return `0` [S1, unofficial].
+3. **Chunk Selection:** Calculate the chunk index using `chunk_fposition(x, y, z)` [S1, unofficial]. Retrieve the `libvxl_chunk` structure at that index [S1, unofficial].
 4. **Binary Search:** Perform a binary search on `chunk->blocks` to find a block where `block.position == pos_key(x,y,z)` [S1, unofficial].
-5. **Result:** If found, return `block.color`. If not found (block is solid in geometry but missing from chunk data), return `DEFAULT_COLOR(x,y,z)` [S1, unofficial].
+5. **Result:** If found, return `block.color` [S1, unofficial]. If not found (block is solid in geometry but missing from chunk data), return `DEFAULT_COLOR(x,y,z)` [S1, unofficial].
 
 **Parameters:**
 - `DEFAULT_COLOR(x,y,z)`: Defined as `0x674028` [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Missing Block:** If the geometry bitfield indicates a voxel is solid but the block is not present in the chunk's sorted array, the method returns `DEFAULT_COLOR` instead of `0`. This can cause visual artifacts if the background is expected to be transparent or black [S1, unofficial].
-- **Precision:** The key encoding limits $x$ and $y$ to 12 bits (max 4095) and $z$ to 8 bits (max 255). Coordinates outside the map bounds are rejected by the initial bounds check [S1, unofficial].
+- **Missing Block:** If the geometry bitfield indicates a voxel is solid but the block is not present in the chunk's sorted array, the method returns `DEFAULT_COLOR` instead of `0` [S1, unofficial]. This can cause visual artifacts if the background is expected to be transparent or black [S1, unofficial].
+- **Precision:** The key encoding limits $x$ and $y$ to 12 bits (max 4095) and $z$ to 8 bits (max 255) [S1, unofficial]. Coordinates outside the map bounds are rejected by the initial bounds check [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -51,9 +49,9 @@ def libvxl_map_get(map, x, y, z):
         return 0
 
     # 3. Chunk selection
-    chunk = chunk_fposition(map, x, y, z)
-    if chunk is None:
-        return 0
+    # chunk_fposition not given in sources [S1, unofficial]
+    # chunk = chunk_fposition(map, x, y, z)
+    chunk = map.chunks[0]  # Placeholder for actual chunk retrieval
 
     # 4. Binary search
     key = (y << 20) | (x << 8) | z
@@ -81,15 +79,6 @@ def libvxl_geometry_get(map, x, y, z):
     byte_index = offset // 8
     bit_index = offset % 8
     return (map.geometry[byte_index] & (1 << bit_index)) != 0
-
-def chunk_fposition(map, x, y, z):
-    # Standard chunk indexing based on world dimensions and chunk size [G]
-    # Assumes fixed chunk dimensions or a provided chunk_size parameter in practice
-    # Returns the chunk pointer at the calculated index
-    chunk_idx = (z // CHUNK_DEPTH) * map.chunks_per_row + (y // CHUNK_HEIGHT) * map.chunks_per_col + (x // CHUNK_WIDTH)
-    if chunk_idx < len(map.chunks):
-        return map.chunks[chunk_idx]
-    return None
 ```
 
 ## Subtopics

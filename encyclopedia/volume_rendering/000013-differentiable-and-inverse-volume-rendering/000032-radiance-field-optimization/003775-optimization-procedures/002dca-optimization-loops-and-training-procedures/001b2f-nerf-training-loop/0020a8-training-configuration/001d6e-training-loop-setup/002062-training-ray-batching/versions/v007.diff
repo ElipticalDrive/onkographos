@@ -1,0 +1,99 @@
+--- v006.md
++++ v007.md
+@@ -24,6 +24,6 @@
+ 4.  **Filter Training Set:** Stack only the images in the training index list $i_{train}$ into `rays_rgb`, resulting in shape $(len(i_{train}), H, W, ro+rd+rgb, 3)$ [S2, unofficial].
+ 5.  **Flatten:** Reshape `rays_rgb` to $(-1, 3, 3)$, resulting in shape $(N_{train} \times H \times W, 3, 3)$ [S2, unofficial].
+-6.  **Cast and Shuffle:** Cast `rays_rgb` to `np.float32`. Randomly shuffle the order of rays in `rays_rgb` using `np.random.shuffle(rays_rgb)` to ensure random sampling during training [S2, unofficial].
+-7.  **Batch Sampling (Per Iteration):** Maintain a global index `i_batch` initialized to 0. Slice `rays_rgb[i_batch:i_batch+N_rand]` to get the batch. Transpose the batch to shape $(2+1, N_{rand}, 3)$ where the first dimension represents ray origins, ray directions, and target values. Increment `i_batch` by $N_{rand}$. If `i_batch >= rays_rgb.shape[0]`, shuffle `rays_rgb` again using `torch.randperm` and reset `i_batch` to 0 [S2, unofficial].
++6.  **Cast and Shuffle:** Cast `rays_rgb` to `np.float32` [S2, unofficial]. Randomly shuffle the order of rays in `rays_rgb` using `np.random.shuffle(rays_rgb)` to ensure random sampling during training [S2, unofficial].
++7.  **Batch Sampling (Per Iteration):** Maintain a global index `i_batch` initialized to 0 [S2, unofficial]. Slice `rays_rgb[i_batch:i_batch+N_rand]` to get the batch [S2, unofficial]. Transpose the batch to shape $(2+1, N_{rand}, 3)$ where the first dimension represents ray origins, ray directions, and target values [S2, unofficial]. Increment `i_batch` by $N_{rand}$. If `i_batch >= rays_rgb.shape[0]`, shuffle `rays_rgb` again using `torch.randperm` and reset `i_batch` to 0 [S2, unofficial].
+ 
+ **Pseudocode:**
+@@ -34,21 +34,14 @@
+ def get_rays_np(H, W, K, pose):
+     # pose is (3, 4) [R|t]
+-    # i, j are pixel coordinates
+     i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
+-    # Direction vectors in camera space
+     dirs = np.stack([(i - K[0, 2]) / K[0, 0],
+                      (j - K[1, 2]) / K[1, 1],
+                      np.ones_like(i)], axis=-1)
+-    # Normalize directions
+     dirs = dirs / np.linalg.norm(dirs, axis=-1, keepdims=True)
+-    # Transform to world space
+     R = pose[:, :3]
+     t = pose[:, 3]
+-    # Rotate directions
+     dirs_world = np.sum(np.expand_dims(dirs, -2) * R, axis=-1)
+-    # Origins are the camera center
+     origins = np.dot(-R.T, t)
+     origins_world = np.broadcast_to(origins, (H, W, 3))
+-    # Stack origins and directions: shape (2, H, W, 3)
+     rays = np.stack([origins_world, dirs_world], axis=0)
+     return rays
+@@ -56,18 +49,11 @@
+ def prepare_ray_batch(images, poses, K, i_train, H, W, N_rand):
+     N_img = len(images)
+-    # Step 1: Generate rays for all images
+-    rays = np.stack([get_rays_np(H, W, K, p) for p in poses[:N_img]], axis=0)  # (N_img, 2, H, W, 3)
+-    # Step 2: Concatenate with target RGB
+-    rays_rgb = np.concatenate([rays, images[:, None]], axis=1)  # (N_img, 3, H, W, 3)
+-    # Step 3: Transpose to (N_img, H, W, 3, 3)
++    rays = np.stack([get_rays_np(H, W, K, p) for p in poses[:N_img]], axis=0)
++    rays_rgb = np.concatenate([rays, images[:, None]], axis=1)
+     rays_rgb = np.transpose(rays_rgb, [0, 2, 3, 1, 4])
+-    # Step 4: Filter for training set
+-    rays_rgb = np.stack([rays_rgb[i] for i in i_train], axis=0)  # (N_train, H, W, 3, 3)
+-    # Step 5: Reshape to flat list (-1, 3, 3)
+-    rays_rgb = rays_rgb.reshape(-1, 3, 3)  # (N_train * H * W, 3, 3)
+-    # Step 6: Cast to float32 and Shuffle
++    rays_rgb = np.stack([rays_rgb[i] for i in i_train], axis=0)
++    rays_rgb = rays_rgb.reshape(-1, 3, 3)
+     rays_rgb = rays_rgb.astype(np.float32)
+     np.random.shuffle(rays_rgb)
+-    # Convert to tensor for GPU
+     rays_rgb = torch.Tensor(rays_rgb)
+     return rays_rgb
+@@ -75,26 +61,19 @@
+ def sample_batch(rays_rgb, i_batch, N_rand):
+     N_total = rays_rgb.shape[0]
+-    # Slice batch
+-    batch_flat = rays_rgb[i_batch : i_batch + N_rand]  # (N_rand, 3, 3)
+-    # Transpose to (3, N_rand, 3)
++    batch_flat = rays_rgb[i_batch : i_batch + N_rand]
+     batch_transposed = torch.transpose(batch_flat, 0, 1)
+-    # Extract origins/directions (first 2) and targets (last 1)
+-    batch_rays = batch_transposed[:2]  # (2, N_rand, 3)
+-    target_s = batch_transposed[2]     # (N_rand, 3)
++    batch_rays = batch_transposed[:2]
++    target_s = batch_transposed[2]
+     new_i_batch = i_batch + N_rand
+-    needs_shuffle = False
+-    # Check if end of dataset reached
+     if new_i_batch >= N_total:
+-        # Shuffle again
+         rand_idx = torch.randperm(N_total)
+         rays_rgb = rays_rgb[rand_idx]
+         new_i_batch = 0
+-        needs_shuffle = True
+-    return batch_rays, target_s, new_i_batch, needs_shuffle
++    return batch_rays, target_s, new_i_batch, rays_rgb
+ ```
+ 
+ **Parameters:**
+ *   `N_rand`: Number of rays per batch. Default value is $32 \times 32 \times 4 = 4096$ [S2, unofficial]. Controls memory footprint and gradient noise [S1, unofficial].
+-*   `use_batching`: Boolean flag. If `True`, rays are sampled from all training images globally. If `False`, rays are sampled from a single random image per iteration [S2, unofficial].
++*   `use_batching`: Boolean flag. If `True`, rays are sampled from all training images globally [S2, unofficial]. If `False`, rays are sampled from a single random image per iteration [S2, unofficial].
+ *   `K`: Camera intrinsic calibration matrix, shape $(3, 3)$. Simplified form: $\begin{bmatrix} f_{camera} & 0 & W/2 \\ 0 & f_{camera} & H/2 \\ 0 & 0 & 1 \end{bmatrix}$ [S2, unofficial].
+ *   `image_size`: Resolution of the target image, determines the search space for random sampling [S1, unofficial].
+@@ -114,7 +93,7 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources. [S2, unofficial]
++*   **Memory Complexity:** Not given in the sources. [S2, unofficial]
++*   **Measured Performance:** Not given in the sources. [S2, unofficial]
+ *   **Strengths:** Reduces GPU memory usage during the backward pass of gradient descent [S1, unofficial]. Enables training on large datasets by processing only a subset of pixels per step [S2, unofficial].
+ *   **Limitations:** Requires pre-computation and shuffling of all rays, which consumes memory proportional to the training set size [S2, unofficial].
