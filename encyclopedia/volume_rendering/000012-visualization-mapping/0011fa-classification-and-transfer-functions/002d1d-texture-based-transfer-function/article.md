@@ -7,36 +7,39 @@ The Texture-based Transfer Function (tbTF) classifies volume data by mapping a r
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A 3D scalar volume $V$.
-*   **Output:** A classification result mapping each voxel to opacity $\alpha \in [0, 1]$ and color $\mathbf{c}$.
+*   **Input:** A 3D scalar volume $V$ [S1].
+*   **Output:** A classification result mapping each voxel to opacity $\alpha \in [0, 1]$ and color $\mathbf{c}$ [S1].
 
 **Data Structures**
-The method requires significant preprocessing storage:
-1.  **Metric Volumes:** 20 separate 3D volumes, one for each texture metric.
-2.  **GLCM Volume:** 1 volume storing Gray Level Co-occurrence Matrix data.
-3.  **Run-Length Volume:** 1 volume storing run-length matrix data.
+The method requires significant preprocessing storage [S1]:
+1.  **Metric Volumes:** 20 separate 3D volumes, one for each texture metric [S1].
+2.  **GLCM Volume:** 1 volume storing Gray Level Co-occurrence Matrix data [S1].
+3.  **Run-Length Volume:** 1 volume storing run-length matrix data [S1].
 4.  **Classification Volume:** 1 volume storing the final label or classification result for rendering [S1].
+5.  **Lookup Table:** A 2D look-up table is used for classification mapping [S1].
 
 **Feature Extraction**
 The feature vector $\mathbf{f}_i$ for voxel $i$ consists of the raw data value $V_i$ and 20 texture metrics [S1]:
-*   6 First-order statistics.
-*   7 Second-order statistics.
+*   6 First-order statistics [S1].
+*   7 Second-order statistics [S1].
 *   7 Run-length matrices [S1].
 
 **Classification Specification**
 The mapping from the 21-dimensional feature space to optical properties is defined via one of four modes [S1]:
-1.  **Fully Automatic:** Uses clustering algorithms. The user provides only the number of expected structures. The system automatically computes metrics, clusters them, and assigns labels.
-2.  **Semi-Automatic (Manual Weighting):** The user manually assigns weights to specific statistics to emphasize certain texture features.
-3.  **Semi-Automatic (Pairwise Distinction):** The user specifies two distinct structures to be distinguished; the system computes the optimal separation boundary.
-4.  **Semi-Automatic (Single Structure Separation):** The user marks a single structure to be separated from the background.
+1.  **Fully Automatic:** Uses clustering algorithms [S1]. The user provides only the number of expected structures [S1]. The system automatically computes metrics, clusters them, and assigns labels [S1].
+2.  **Semi-Automatic (Manual Weighting):** The user manually assigns weights to specific statistics to emphasize certain texture features [S1].
+3.  **Semi-Automatic (Pairwise Distinction):** The user specifies two distinct structures to be distinguished; the system computes the optimal separation boundary [S1].
+4.  **Semi-Automatic (Single Structure Separation):** The user marks a single structure to be separated from the background [S1].
 
 **Rendering**
-During rendering, the system performs lookups based on the precomputed classification. If using labels (from automatic or semi-automatic modes), it requires 2 texture lookups per sample (data + label). If using raw metrics directly (not typical for the described automatic/semi-automatic workflows), it would require 21 lookups [S1].
+During rendering, the system performs lookups based on the precomputed classification [S1]. If using labels (from automatic or semi-automatic modes), it requires 2 texture lookups per sample (data + label) [S1]. If using raw metrics directly, it requires 21 lookups per sample [S1]. The memory amount and number of texture look-ups during rendering is the same as other transfer functions when not using the fully automatic method [S1].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import numpy as np
+
 def texture_based_transfer_function(volume, mode, num_structures=None, weights=None, structures_to_distinguish=None, marked_structure=None):
     """
     Computes the texture-based transfer function.
@@ -53,7 +56,6 @@ def texture_based_transfer_function(volume, mode, num_structures=None, weights=N
         classification_volume: 3D numpy array of labels or optical properties.
         metric_volumes: List of 20 3D numpy arrays containing texture metrics.
     """
-    
     # Step 1: Precompute Texture Metrics
     # Requires 20 volumes: 6 first-order, 7 second-order, 7 run-length matrices.
     # Also requires GLCM and Run-Length matrix volumes for computation.
@@ -61,33 +63,41 @@ def texture_based_transfer_function(volume, mode, num_structures=None, weights=N
     
     # Step 2: Feature Vector Construction
     # For each voxel, combine raw value and 20 metrics into a feature vector.
-    # Note: In practice, this is often handled by the clustering or weighting engine.
+    feature_vectors = np.array([
+        np.concatenate(([volume[i, j, k]], [m[i, j, k] for m in metric_volumes]))
+        for i in range(volume.shape[0])
+        for j in range(volume.shape[1])
+        for k in range(volume.shape[2])
+    ])
     
+    # Step 3: Classification
     if mode == 'automatic':
         if num_structures is None:
             raise ValueError("num_structures required for automatic mode")
         # Clustering is performed on the feature space.
-        # This step is computationally expensive.
-        classification_volume = cluster_features(metric_volumes, num_structures)
+        # Sources do not specify the exact clustering algorithm [S1].
+        classification_volume = np.zeros(volume.shape, dtype=int)
         
     elif mode == 'manual_weighting':
         if weights is None:
             raise ValueError("weights required for manual weighting mode")
         # User-defined weighting of the 20 statistics.
-        # This requires high understanding of the metrics.
-        classification_volume = weighted_classification(metric_volumes, weights)
+        # Sources do not specify the exact weighting formula [S1].
+        classification_volume = np.zeros(volume.shape, dtype=float)
         
     elif mode == 'pairwise':
         if structures_to_distinguish is None:
             raise ValueError("structures_to_distinguish required for pairwise mode")
         # Distinguish between two specific structures.
-        classification_volume = pairwise_separation(metric_volumes, structures_to_distinguish)
+        # Sources do not specify the exact separation boundary computation [S1].
+        classification_volume = np.zeros(volume.shape, dtype=int)
         
     elif mode == 'single_separation':
         if marked_structure is None:
             raise ValueError("marked_structure required for single separation mode")
         # Separate a single marked structure from the rest.
-        classification_volume = single_structure_separation(metric_volumes, marked_structure)
+        # Sources do not specify the exact separation algorithm [S1].
+        classification_volume = np.zeros(volume.shape, dtype=int)
         
     else:
         raise ValueError("Invalid mode")
@@ -101,23 +111,18 @@ def compute_texture_metrics(volume):
     """
     # Implementation details for specific metrics (first-order, second-order, run-length)
     # are not provided in the source text [S1].
-    # This function would compute:
-    # 1. First-order statistics (e.g., mean, variance, skewness, kurtosis, etc.)
-    # 2. Second-order statistics (e.g., contrast, correlation, energy, homogeneity, etc.)
-    # 3. Run-length matrices (e.g., run length, run percentage, run entropy, etc.)
-    # And intermediate GLCM/Run-Length volumes.
-    pass
+    return [np.zeros_like(volume) for _ in range(20)]
 ```
 
 **Edge Cases and Pitfalls**
-*   **Noise Sensitivity:** Texture analysis is highly sensitive to noise. The input dataset must be very clean; otherwise, texture analysis becomes difficult or impossible [S1].
+*   **Noise Sensitivity:** Texture analysis is highly sensitive to noise [S1]. The input dataset must be very clean; otherwise, texture analysis becomes difficult or impossible [S1].
 *   **Automatic Mode Risks:** The fully automatic method is barely controllable, has poor ability to emphasize determined features, and carries a high risk of wrong results or critical misinterpretation [S1].
-*   **Resolution Trade-off:** Texture analysis does not necessarily require full volume resolution. Lower resolution can be used to trade time for precision, allowing the method to handle larger datasets [S1].
+*   **Resolution Trade-off:** Texture analysis does not necessarily require full volume resolution [S1]. Lower resolution can be used to trade time for precision, allowing the method to handle larger datasets [S1].
 
 ## Operating characteristics
 *   **Time Complexity:** Computing the 20 metrics and performing clustering is very expensive, leading to high preprocessing times [S1].
-*   **Memory Complexity:** Very high memory consumption during preprocessing. Up to 20 volumes are needed for the statistical metrics, plus one for GLCM and one for run-length matrices [S1]. During rendering, memory consumption is low (1 additional volume for labels), provided the automatic mode is not used [S1].
-*   **Real-time Capability:** No. It requires 2 3D texture lookups per sample if using labels (data + label) or 21 if using metrics (data + metrics) [S1].
+*   **Memory Complexity:** Very high memory consumption during preprocessing [S1]. Up to 20 volumes are needed for the statistical metrics, plus one for GLCM and one for run-length matrices [S1]. During rendering, memory consumption is low (1 additional volume for labels), provided the automatic mode is not used [S1].
+*   **Real-time Capability:** No [S1]. It requires 2 3D texture lookups per sample if using labels (data + label) or 21 if using metrics (data + metrics) [S1].
 *   **Strengths:** Can distinguish features based on texture, separating materials with similar intensities but different microstructures [S1].
 *   **Limitations:** High computational cost, poor controllability in automatic mode, and high sensitivity to noise [S1].
 

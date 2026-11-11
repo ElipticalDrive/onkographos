@@ -1,113 +1,147 @@
 # Non-local Approximated Gradients
 
-Also called: Loper and Black, OpenDR (Approximated Spatial Gradients), OpenDR gradients
+Also called: Approximate Gradient, Approximated Spatial Gradients, Loper and Black, OpenDR (Approximated Spatial Gradients), OpenDR Gradients
 
 ## Overview
-Non-local approximated gradients are a gradient estimation technique used in differentiable rendering to provide non-zero, directed gradients that guide optimization away from local minima caused by the "localness" of standard rasterizer derivatives [S1, unofficial]. While standard differentiable rendering methods often fail because the rendering integrand is discontinuous with respect to scene parameters (such as vertex positions), causing the derivative of the integral to be zero almost everywhere, this method addresses the specific limitations of early differentiable renderers like OpenDR [S1, unofficial]. It sets itself apart from its sibling [Smooth Gradient Estimation via Convolution](6449-smooth-gradient-estimation-via-convolution.md) by explicitly incorporating backpropagated loss gradients to make the gradient flow "objective-aware," whereas convolution-based methods typically apply a fixed smoothing kernel to the integrand [S1, unofficial].
+Non-local approximated gradients are a technique for differentiable rendering that approximates the gradient of the rendering integrand with respect to geometric parameters (such as vertex positions) by incorporating gradients backpropagated from a loss function [S1, unofficial]. Unlike standard differentiable rendering methods that rely on local geometric derivatives, this approach aims to provide non-zero, directed gradients that guide optimization away from local minima by leveraging the specific optimization objective (e.g., image reconstruction) [S1, unofficial]. It sets itself apart from its siblings, such as [Smooth Gradient Estimation via Convolution](6449-smooth-gradient-estimation-via-convolution.md) and [Axis-Aligned Neighbor Smoothing](7600-axis-aligned-neighbor-smoothing.md), by explicitly using the loss gradient to determine the direction of vertex displacement, rather than relying solely on spatial smoothing or local neighbor interactions [S1, unofficial].
 
 ## How it works
-The method computes pixel derivatives with respect to vertex positions using differential filters, but extends the basic spatial gradient approach by incorporating gradients of pixels backpropagated from a loss function [S1, unofficial]. This allows gradient flow from pixels outside the immediate primitive boundary to influence parameters, addressing the "localness" issue where only boundary pixels contribute to gradients in standard differential filter approaches [S1, unofficial].
+The method retains a standard rasterizer in the forward pass and computes approximated gradients in the backward pass [S2]. It addresses the limitations of the original OpenDR approach, which suffered from "localness" (only boundary pixels provided gradients) and a lack of "objective awareness" (gradients did not consider the loss function) [S1, unofficial].
 
-**Inputs and Outputs:**
-*   **Input:** Vertex positions $v_i$, rendered pixel values $v_p$, and the gradient of the loss function with respect to the pixel values $\frac{\partial \mathcal{L}}{\partial v_p}$ [S1, unofficial].
-*   **Output:** Gradients of the loss with respect to vertex positions $\frac{\partial \mathcal{L}}{\partial v_i}$ [S1, unofficial].
+### Inputs and Outputs
+- **Inputs**: 
+  - Vertex positions $V$.
+  - Image resolution and camera parameters.
+  - Loss function $L$ and its gradient with respect to the rendered image pixels $\frac{\partial L}{\partial I}$.
+- **Outputs**: 
+  - Approximated gradients $\frac{\partial L}{\partial V}$ with respect to vertex positions.
 
-**Data Structures:**
-*   **Pixel Representation:** A pixel $v_p$ is represented as a weighted average of vertex positions:
-    $$ v_p = \frac{\sum \tilde{w}_i v_i}{\sum \tilde{w}_i} $$
-    where $\tilde{w}_i = 1$ for all vertices $i$ contributing to the pixel [S1, unofficial].
-*   **Differential Filters:** Standard spatial differential filters (e.g., Sobel filters) are used to approximate spatial derivatives [S1, unofficial].
+### Data Structures
+No specific complex data structures are required beyond standard rasterization outputs (pixel colors, coverage) and the loss gradient map. The core mechanism relies on differential filters applied to the image plane.
 
-**Steps:**
-1.  **Compute Spatial Gradients:** Calculate the spatial derivatives of the pixel value $v_p$ with respect to its screen coordinates $(\tilde{x}_p, \tilde{y}_p)$ using differential filters. The pixel derivatives with respect to the vertex position $v_p$ are computed as:
-    $$ \left\{ \frac{\partial c_v}{\partial \tilde{x}_p}, \frac{\partial c_v}{\partial \tilde{y}_p} \right\} = \frac{\partial c_v}{\partial v_p} $$
-    where $c_v$ represents the color or intensity value associated with the pixel [S1, unofficial].
-2.  **Incorporate Loss Gradients:** Instead of using only the spatial derivatives, incorporate the gradients of pixels backpropagated from the loss function $\frac{\partial \mathcal{L}}{\partial v_p}$ [S1, unofficial]. This step ensures that the gradient flow is aware of the specific optimization objective (e.g., image reconstruction) [S1, unofficial].
-3.  **Backpropagate to Vertices:** Propagate the combined gradients (spatial and loss-aware) back to the vertex positions $v_i$ [S1, unofficial].
+### Steps
+1. **Forward Pass**: Render the scene using a standard rasterizer to obtain the image $I$.
+2. **Loss Computation**: Compute the loss $L$ based on the rendered image $I$ and the target.
+3. **Backpropagate Loss**: Compute the gradient of the loss with respect to each pixel $v_p$ in the image, denoted as $\frac{\partial L}{\partial v_p}$ [S1, unofficial].
+4. **Differential Filter Application**: For each vertex $v_i$, compute the approximate gradient by applying differential filters (e.g., Sobel filter) to the loss gradients of neighboring pixels. The pixel $v_p$ is represented as $v_p = \frac{\tilde{w}_i v_i}{\tilde{w}_i}$ with $\tilde{w}_i = 1$ [S1, unofficial]. The pixel derivatives with respect to $v_p$ are computed using differential filters:
+   $$
+   \left\{ \frac{\partial c_v}{\partial x_p}, \frac{\partial c_v}{\partial y_p} \right\} = \frac{\partial c_v}{\partial v_p}
+   $$
+   where $\frac{\partial c_v}{\partial x_p}$ and $\frac{\partial c_v}{\partial y_p}$ are the spatial gradients of the pixel color/value $c_v$ with respect to pixel coordinates $x_p, y_p$, and $\frac{\partial c_v}{\partial v_p}$ represents the gradient with respect to the vertex position $v_p$ [S1, unofficial].
+5. **Aggregation**: Aggregate these gradients to update the vertex positions. The key distinction is that the gradient flow is aware of the specific optimization objective because it uses $\frac{\partial L}{\partial v_p}$ [S1, unofficial].
 
-**Pseudocode:**
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_non_local_approximated_gradients(vertices, pixels, loss_gradients, filter_kernel):
+def compute_non_local_approximated_gradients(vertices, image, loss_gradient):
     """
-    Compute gradients for vertices using non-local approximated gradients.
+    Compute approximated gradients for vertices using loss-aware differential filters.
     
     Args:
-        vertices: Array of vertex positions (N, 3).
-        pixels: Array of rendered pixel values (H, W).
-        loss_gradients: Array of loss gradients with respect to pixels (H, W).
-        filter_kernel: Differential filter kernel (e.g., Sobel).
+        vertices: Array of vertex positions.
+        image: Rendered image tensor.
+        loss_gradient: Gradient of the loss with respect to the image pixels.
         
     Returns:
-        vertex_gradients: Gradients of loss with respect to vertices (N, 3).
+        vertex_gradients: Gradients with respect to vertex positions.
     """
-    # Step 1: Compute spatial gradients using differential filters
-    # Approximate spatial derivatives of pixel values
-    spatial_gradients_x = apply_filter(pixels, filter_kernel_x)
-    spatial_gradients_y = apply_filter(pixels, filter_kernel_y)
+    vertex_gradients = zeros_like(vertices)
     
-    # Step 2: Incorporate loss gradients
-    # Multiply spatial gradients by loss gradients to make them objective-aware
-    # This allows gradients from pixels outside the immediate boundary to influence vertices
-    weighted_gradients_x = spatial_gradients_x * loss_gradients
-    weighted_gradients_y = spatial_gradients_y * loss_gradients
-    
-    # Step 3: Backpropagate to vertices
-    # Initialize vertex gradients
-    vertex_gradients = np.zeros_like(vertices)
-    
-    # For each vertex, accumulate gradients from all pixels it influences
-    # Note: The exact accumulation depends on the rasterization model
-    # For simplicity, assuming a direct mapping or barycentric weighting
-    for i in range(len(vertices)):
-        # Get pixels influenced by vertex i
-        # In a real implementation, this would involve rasterization data structures
-        influenced_pixels = get_influenced_pixels(vertices[i], rasterization_data)
+    # Identify pixels covered by each vertex (or triangle)
+    # In OpenDR/NMR, this is typically done by tracking which pixels 
+    # are influenced by which vertices during rasterization.
+    for each vertex v_i:
+        covered_pixels = get_pixels_covered_by_vertex(v_i)
         
-        # Accumulate gradients
-        for pixel in influenced_pixels:
-            # Weight by the contribution of the vertex to the pixel
-            # In OpenDR, w_i = 1, so the contribution is uniform
-            vertex_gradients[i] += weighted_gradients_x[pixel] * spatial_gradient_x_contribution
-            vertex_gradients[i] += weighted_gradients_y[pixel] * spatial_gradient_y_contribution
+        if not covered_pixels:
+            continue
             
+        # Initialize gradient accumulator for this vertex
+        grad_v_i = zeros(3) # Assuming 3D vertices
+        
+        for each pixel p in covered_pixels:
+            # Get the loss gradient at this pixel
+            dL_dp = loss_gradient[p]
+            
+            # Apply differential filter to estimate spatial gradient
+            # The original OpenDR uses Sobel-like filters on the image 
+            # to estimate derivatives. Here, we incorporate the loss gradient.
+            # The formula from [S1, unofficial] suggests:
+            # { dCv/dxp, dCv/dyp } = dCv/dvp
+            # This implies the gradient w.r.t vertex is proportional to 
+            # the spatial gradient of the pixel value weighted by the loss gradient.
+            
+            # Estimate spatial gradient of the rendered image at pixel p
+            # using neighboring pixels in the image plane.
+            # Let I be the rendered image.
+            dI_dx = sobel_x(I, p)
+            dI_dy = sobel_y(I, p)
+            
+            # The gradient with respect to the vertex is approximated by
+            # combining the spatial derivative and the loss gradient.
+            # Note: The exact weighting depends on the specific implementation 
+            # of OpenDR/NMR. A common interpretation is that the vertex 
+            # moves in the direction that reduces the loss, guided by the 
+            # spatial gradient of the pixel it affects.
+            
+            # Approximation: grad_v_i += dL_dp * (dI_dx, dI_dy)
+            # This is a simplified representation. The actual OpenDR/NMR 
+            # implementation may involve more complex Jacobian approximations.
+            
+            # [G] In practice, the gradient is often computed as:
+            # dL/dv_i = sum_p ( dL/dI_p * dI_p/dv_i )
+            # where dI_p/dv_i is approximated by the differential filter 
+            # applied to the pixel's position relative to the vertex.
+            
+            # For non-local gradients, the loss gradient dL/dI_p is used 
+            # to weight the contribution of each pixel.
+            
+            # Simplified step:
+            grad_v_i += dL_dp * estimate_vertex_gradient_from_pixel(p, v_i)
+            
+        vertex_gradients[i] = grad_v_i
+        
     return vertex_gradients
 
-def apply_filter(image, kernel):
-    """Apply a convolution filter to an image."""
-    # Standard convolution operation
-    return convolve(image, kernel)
-
-def get_influenced_pixels(vertex, rasterization_data):
-    """Get all pixels that are influenced by a given vertex."""
-    # This function would typically use rasterization data to find pixels
-    # covered by triangles containing the vertex
-    # Implementation detail: [G]
-    pass
+def estimate_vertex_gradient_from_pixel(p, v_i):
+    """
+    Estimate the gradient of the pixel value with respect to the vertex position.
+    This is approximated using differential filters on the image.
+    """
+    # [G] This function would typically involve calculating the 
+    # barycentric coordinates or the distance of the pixel to the 
+    # vertex/triangle edges.
+    # For OpenDR, it uses the spatial gradient of the pixel.
+    # The exact formula is: { dCv/dxp, dCv/dyp } = dCv/dvp
+    # This implies that the gradient w.r.t the vertex is the spatial 
+    # gradient of the pixel value.
+    
+    # Return a placeholder for the spatial gradient component
+    # In a real implementation, this would be the Jacobian of the 
+    # rasterization process.
+    return spatial_gradient_at_pixel(p)
 ```
 
-**Parameters:**
-*   **Filter Kernel:** Typically a Sobel filter or similar differential filter [S1, unofficial].
-*   **Weights:** $\tilde{w}_i = 1$ for all vertices [S1, unofficial].
+### Parameters
+- **Differential Filter**: Typically a Sobel filter or similar kernel used to estimate spatial gradients [S1, unofficial].
+- **Weighting**: The loss gradient $\frac{\partial L}{\partial v_p}$ is used to weight the contribution of each pixel [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Boundary Pixels:** Gradients are only non-zero for pixels located on the boundary of the triangle; gradients at interior pixels are zero because they do not depend on the vertex positions in the same way [S1, unofficial].
-*   **Standard Gradients:** Standard gradients at pixels not covered by primitives cannot be used, leading to poor local minima [S1, unofficial].
-*   **Objective Awareness:** Standard derivatives do not leverage the loss gradient of the target application (e.g., image reconstruction), meaning they may displace vertices in directions that do not minimize the specific objective [S1, unofficial].
+### Edge Cases and Pitfalls
+- **Boundary Pixels**: Gradients are only non-zero for pixels located on the boundary of the triangle; gradients at interior pixels are zero because they do not depend on the vertex positions in the same way [S1, unofficial].
+- **Local Minima**: Standard gradients at pixels not covered by primitives cannot be used, leading to poor local minima [S1, unofficial].
+- **Objective Awareness**: Standard derivatives do not leverage the loss gradient of the target application, meaning they may displace vertices in directions that do not minimize the specific objective [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Not given in the sources.
-*   **Strengths:** Provides non-zero gradients for optimization, addressing the "localness" issue of standard differentiable rendering [S1, unofficial]. Incorporates loss gradients to make the gradient flow objective-aware [S1, unofficial].
-*   **Limitations:** Only boundary pixels contribute to gradients in the basic spatial gradient approach, which can lead to poor local minima [S1, unofficial]. The method was later replaced by local gradients similar to OpenDR to reduce computation complexity [S1, unofficial].
-*   **When to Use:** When standard differentiable rendering methods fail due to discontinuous integrands and local minima [S1, unofficial].
-*   **When Not to Use:** When computation complexity is a concern, as the method was later replaced by simpler local gradients [S1, unofficial].
+- **Time Complexity**: The method requires computing spatial gradients for all pixels, which is $O(N)$ where $N$ is the number of pixels. The aggregation step is also linear in the number of pixels covered by each vertex.
+- **Memory Complexity**: Requires storing the loss gradient map, which is $O(N)$.
+- **Strengths**: Provides non-zero gradients for optimization, even in regions where standard differentiable rendering would yield zero gradients. It is objective-aware, leading to better convergence in tasks like image reconstruction [S1, unofficial].
+- **Limitations**: The approximation may not be as accurate as full differentiable rasterization. The "localness" of the differential filters can still limit the gradient flow to boundary pixels, although the loss-awareness helps mitigate this [S1, unofficial].
+- **When to Use**: Suitable for optimization tasks where the goal is to fit a rendered image to a target, and where standard differentiable rendering fails due to lack of gradients [S1, unofficial].
 
 ## Background
-Non-local approximated gradients were proposed by the authors of OpenDR, the first general purpose differentiable renderer [S1, unofficial]. The method was introduced to address the limitations of standard differentiable rendering, such as the "localness" of gradient computation and the lack of objective awareness [S1, unofficial]. The authors later replaced non-local gradients with local gradients similar to OpenDR to reduce computation complexity [S1, unofficial].
+Non-local approximated gradients were introduced by the authors of OpenDR (Loper and Black) in 2014 as part of the first general-purpose differentiable renderer [S1, unofficial][S2]. The method was later refined by Kato et al. in the Neural 3D Mesh Renderer (NMR) in 2018, who proposed non-local approximated gradients to address the limitations of OpenDR's local gradient computation [S1, unofficial]. The authors of NMR later replaced non-local gradients with local gradients similar to OpenDR to reduce computational complexity [S1, unofficial]. The method is used in various differentiable rendering pipelines, particularly in tasks involving 3D shape optimization from 2D images [S1, unofficial][S2].
 
 ## Sources
 [S1] Differentiable Rendering: A Survey, https://doi.org/10.48550/arxiv.2006.12057, fetched 2026-10-26 (unofficial)
+[S2] Differentiable Rendering - 可微渲染：从2D 学习3D, https://www.ultralytics.com/zh/glossary/differentiable-rendering, fetched 2026-10-30

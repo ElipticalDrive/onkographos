@@ -30,19 +30,19 @@ $$ \text{ToIndex}(x, y) = y \times \text{width} + x $$
 
     **`CreateOneSet(x, y)`:**
     1.  Identify `rootVoxel` at `(x, y)` [S1, unofficial].
-    2.  **Expand Right:** Initialize `currentWidth = 1`. While `x + currentWidth < width`:
+    2.  **Expand Right:** Initialize `currentWidth = 1` [S1, unofficial]. While `x + currentWidth < width`:
         *   Check if `voxels[x + currentWidth, y]` is not null [S1, unofficial].
         *   Check if `voxels[x + currentWidth, y].ID == rootVoxel.ID` [S1, unofficial].
         *   Check if `IsNotAlone(x + currentWidth, y)` is false [S1, unofficial].
-        *   If all true, increment `currentWidth`. Else, break [S1, unofficial].
-    3.  **Expand Down:** Initialize `currentHeight = 1`. While `y + currentHeight < height`:
+        *   If all true, increment `currentWidth` [S1, unofficial]. Else, break [S1, unofficial].
+    3.  **Expand Down:** Initialize `currentHeight = 1` [S1, unofficial]. While `y + currentHeight < height`:
         *   Set `canExpand = true` [S1, unofficial].
         *   For each `dx` from `0` to `currentWidth - 1`:
             *   Let `cx = x + dx`, `cy = y + currentHeight` [S1, unofficial].
             *   If `voxels[cx, cy]` is null, set `canExpand = false` and break [S1, unofficial].
             *   If `voxels[cx, cy].ID != rootVoxel.ID`, set `canExpand = false` and break [S1, unofficial].
             *   If `IsNotAlone(cx, cy)` is true, set `canExpand = false` and break [S1, unofficial].
-        *   If `canExpand` is true, increment `currentHeight`. Else, break [S1, unofficial].
+        *   If `canExpand` is true, increment `currentHeight` [S1, unofficial]. Else, break [S1, unofficial].
     4.  **Union:** For all `dx` from `0` to `currentWidth - 1` and `dy` from `0` to `currentHeight - 1`:
         *   Call `disjointSet.Union(ToIndex(x, y), ToIndex(x + dx, y + dy))` [S1, unofficial].
 
@@ -190,7 +190,7 @@ def create_mesh_quad(plane, chunk, min_x, max_x, min_y, max_y, voxel_id):
     if axis == "X":
         if order == "Ascending":
             x = plane.SliceIndex
-            y1 = min_y
+            y1 = min_x
             y2 = max_x + 1
             z1 = min_y
             z2 = max_y + 1
@@ -245,46 +245,46 @@ def create_mesh_quad(plane, chunk, min_x, max_x, min_y, max_y, voxel_id):
 ```
 
 **Coordinate Transformation:**
-The vertices of the `MeshQuad` are determined by the `VisiblePlane`'s axis configuration. Let `chunk` be the containing 3D chunk with dimensions `XDepth`, `YDepth`, `ZDepth` [S1, unofficial].
+The vertices of the `MeshQuad` are determined by the `VisiblePlane`'s axis configuration [S1, unofficial]. Let `chunk` be the containing 3D chunk with dimensions `XDepth`, `YDepth`, `ZDepth` [S1, unofficial].
 
 *   **Axis X, Ascending:**
-    *   $x = \text{plane.SliceIndex}$
-    *   $y_1 = \text{minY}, y_2 = \text{maxX} + 1$
-    *   $z_1 = \text{minY}, z_2 = \text{maxY} + 1$
+    *   $x = \text{plane.SliceIndex}$ [S1, unofficial]
+    *   $y_1 = \text{minX}, y_2 = \text{maxX} + 1$ [S1, unofficial]
+    *   $z_1 = \text{minY}, z_2 = \text{maxY} + 1$ [S1, unofficial]
     *   Vertices: $V_1(x, y_1, z_1)$, $V_0(x, y_2, z_1)$, $V_3(x, y_2, z_2)$, $V_2(x, y_1, z_2)$
     *   Normal: $(1, 0, 0)$ [S1, unofficial]
 
 *   **Axis X, Descending:**
-    *   $x = \text{chunk.XDepth} - \text{plane.SliceIndex}$
-    *   $y_1 = \text{chunk.YDepth} - \text{minX}, y_2 = \text{chunk.YDepth} - \text{maxX} - 1$
-    *   $z_1 = \text{chunk.ZDepth} - \text{minY}, z_2 = \text{chunk.ZDepth} - \text{maxY} - 1$
+    *   $x = \text{chunk.XDepth} - \text{plane.SliceIndex}$ [S1, unofficial]
+    *   $y_1 = \text{chunk.YDepth} - \text{minX}, y_2 = \text{chunk.YDepth} - \text{maxX} - 1$ [S1, unofficial]
+    *   $z_1 = \text{chunk.ZDepth} - \text{minY}, z_2 = \text{chunk.ZDepth} - \text{maxY} - 1$ [S1, unofficial]
     *   Vertices: $V_0(x, y_1, z_1)$, $V_1(x, y_2, z_1)$, $V_2(x, y_2, z_2)$, $V_3(x, y_1, z_2)$
     *   Normal: $(1, 0, 0)$ [S1, unofficial]
 
 *   **Axis Y, Ascending:**
-    *   $x_1 = \text{minY}, x_2 = \text{maxY} + 1$
-    *   $y = \text{plane.SliceIndex}$
-    *   $z_1 = \text{minX}, z_2 = \text{maxX} + 1$
+    *   $x_1 = \text{minY}, x_2 = \text{maxY} + 1$ [S1, unofficial]
+    *   $y = \text{plane.SliceIndex}$ [S1, unofficial]
+    *   $z_1 = \text{minX}, z_2 = \text{maxX} + 1$ [S1, unofficial]
     *   Vertices: $V_1(x_1, y, z_1)$, $V_0(x_1, y, z_2)$, $V_3(x_2, y, z_2)$, $V_2(x_2, y, z_1)$
     *   Normal: $(1, 0, 0)$ [S1, unofficial]
 
 *   **Axis Y, Descending:**
-    *   $x_1 = \text{chunk.XDepth} - \text{minY}, x_2 = \text{chunk.XDepth} - \text{maxY} - 1$
-    *   $y = \text{chunk.YDepth} - \text{plane.SliceIndex}$
-    *   $z_1 = \text{chunk.ZDepth} - \text{minX}, z_2 = \text{chunk.ZDepth} - \text{maxX} - 1$
+    *   $x_1 = \text{chunk.XDepth} - \text{minY}, x_2 = \text{chunk.XDepth} - \text{maxY} - 1$ [S1, unofficial]
+    *   $y = \text{chunk.YDepth} - \text{plane.SliceIndex}$ [S1, unofficial]
+    *   $z_1 = \text{chunk.ZDepth} - \text{minX}, z_2 = \text{chunk.ZDepth} - \text{maxX} - 1$ [S1, unofficial]
     *   Vertices: $V_0(x_1, y, z_1)$, $V_1(x_1, y, z_2)$, $V_2(x_2, y, z_2)$, $V_3(x_2, y, z_1)$
     *   Normal: $(1, 0, 0)$ [S1, unofficial]
 
 *   **Axis Z, Descending:**
-    *   $x_1 = \text{chunk.XDepth} - \text{minY}, x_2 = \text{chunk.XDepth} - \text{maxY} - 1$
-    *   $y_1 = \text{chunk.YDepth} - \text{minX}, y_2 = \text{chunk.YDepth} - \text{maxX} - 1$
-    *   $z = \text{chunk.ZDepth} - \text{plane.SliceIndex}$
+    *   $x_1 = \text{chunk.XDepth} - \text{minY}, x_2 = \text{chunk.XDepth} - \text{maxY} - 1$ [S1, unofficial]
+    *   $y_1 = \text{chunk.YDepth} - \text{minX}, y_2 = \text{chunk.YDepth} - \text{maxX} - 1$ [S1, unofficial]
+    *   $z = \text{chunk.ZDepth} - \text{plane.SliceIndex}$ [S1, unofficial]
     *   Vertices: $V_1(x_1, y_1, z)$, $V_0(x_1, y_2, z)$, $V_3(x_2, y_2, z)$, $V_2(x_2, y_1, z)$
     *   Normal: $(1, 0, 0)$ [S1, unofficial]
 
 **Edge Cases and Pitfalls:**
 *   **Boundary Checks:** Ensure all neighbor accesses in `IsNotAlone` and expansion loops are bounded by `width` and `height` to prevent out-of-bounds array access [S1, unofficial].
-*   **Null Voxels:** The algorithm explicitly skips null voxels. If the input plane contains holes, they are ignored, and merging stops at the hole boundary [S1, unofficial].
+*   **Null Voxels:** The algorithm explicitly skips null voxels [S1, unofficial]. If the input plane contains holes, they are ignored, and merging stops at the hole boundary [S1, unofficial].
 *   **Precision:** The algorithm relies on integer coordinates and IDs. Floating-point precision issues do not apply to the merging logic, but vertex generation assumes unit-sized voxels [S1, unofficial].
 
 ## Subtopics
@@ -293,7 +293,7 @@ The vertices of the `MeshQuad` are determined by the `VisiblePlane`'s axis confi
 An optimization pipeline that first culls occluded faces using a voxel occlusion algorithm, then processes the remaining visible faces plane-by-plane using a disjoint set data structure to merge adjacent quads. It is chosen when full 3D occlusion culling is required before meshing to reduce the number of planes processed. It differs from Disjoint Set Visible Plane Optimization by including the initial culling step.
 
 ### Visible Plane Representation
-A data structure representing a 2D slice of visible voxels, defined by a specific iteration order (Major, Middle, Minor axes) and a slice index along the minor axis [S1, unofficial]. It is used to decompose the 3D voxel space into 2D planes for efficient greedy meshing [S1, unofficial]. It sets itself apart by encapsulating the axis configuration and voxel data for a single slice [S1, unofficial].
+A data structure representing a 2D slice of visible voxels, defined by a specific iteration order (Major, Middle, Minor axes) and a slice index along the minor axis [S1, unofficial]. It is used to decompose the 3D voxel space into 2D planes for efficient greedy meshing [S1, unofficial]. It sets itself apart by encapsulating the axis configuration and voxel data for a single slice [S1, unofficial]. MajorAxis is the first axis iterated in the nested loops (outermost loop) [S1, unofficial]. MiddleAxis is the second axis iterated (middle loop) [S1, unofficial]. SliceIndex is the index along the MinorAxis dimension, representing the depth inside the chunk along the major axis [S1, unofficial]. Voxels is a 2D array of optional voxel references contained within the plane, with dimensions depending on the axes (e.g., if MinorAxis is Z, dimensions are `Voxels[x, y]`) [S1, unofficial]. The class contains `MajorAxis`, `MajorAxisOrder`, `MiddleAxis`, `MiddleAxisOrder`, `MinorAxis`, `MinorAxisOrder`, `SliceIndex` (uint), and `Voxels` (Voxel?[,] 2D array) [S1, unofficial].
 
 ## Operating characteristics
 Not given in the sources.

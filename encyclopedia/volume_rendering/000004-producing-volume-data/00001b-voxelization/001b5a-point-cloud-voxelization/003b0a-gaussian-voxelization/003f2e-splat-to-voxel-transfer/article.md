@@ -3,171 +3,205 @@
 Also called: Gaussian Splat Voxelization, Gaussian to Voxel Grid Conversion
 
 ## Overview
-Splat-to-Voxel Transfer is a method for converting unstructured 3D Gaussian primitives into a structured, dense voxel grid representation by depositing splat attributes onto the grid [S1]. It solves the problem of bridging point-based Gaussian representations with grid-based neural processing by creating a spatial proxy that aggregates and distributes splat information [S1]. Unlike sibling methods that may generate voxels directly from point clouds or other formats, this method specifically handles the continuous-to-discrete mapping of Gaussian distributions, often serving as a preprocessing step for a Sparse Voxel Transformer [S1].
+Splat-to-Voxel Transfer is a method for converting unstructured 3D Gaussian primitives into a structured, dense voxel grid representation by depositing splat attributes onto grid cells [S1]. It solves the problem of bridging point-based Gaussian representations with grid-based neural processing, enabling the use of voxel transformers for feature fusion and refinement [S1]. Unlike sibling methods that may focus on sparse grid generation or direct format conversion, this method explicitly constructs a coarse-to-fine hierarchy and applies sparsification based on geometric weights to reduce computational load for downstream transformer networks [S1].
 
 ## How it works
-The method operates on a set of 3D Gaussian primitives $G_k$, each defined by a mean position $\mu_k$, opacity $\alpha_k$, feature vector $F_k$, and additional Gaussian parameters $G_k$ (e.g., covariance, spherical harmonics coefficients) [S1]. The output is a structured voxel grid $V$ containing aggregated attributes $E_j$ for each voxel $j$ [S1].
+The method operates in three main phases: Splat Depositing, Splat Fusion, and Coarse-to-fine Hierarchy Construction with Sparsification.
 
-### Data Structures
-*   **Gaussian Primitive $G_k$**: Contains $\mu_k \in \mathbb{R}^3$, $\alpha_k \in [0, 1]$, $F_k$ (feature vector), and $G_k$ (other Gaussian attributes) [S1].
-*   **Voxel Grid $V$**: A 3D grid where each voxel $V_j$ has a center $\mathbf{x}_j$ and an attribute vector $E_j$ [S1].
-*   **Coarse-to-Fine Hierarchy**: The high-resolution grid is downsampled by factors $[d, h, w]$ to create a coarse grid. Each coarse voxel $i$ corresponds to a block $N_i$ of $d \times h \times w$ fine voxels [S1].
+**Inputs:**
+- Set of Gaussian primitives $G_k$, each defined by mean position $\mu_k$, opacity $\alpha_k$, feature vector $F_k$, and other Gaussian parameters $G_k$ (e.g., covariance, spherical harmonics coefficients) [S1].
+- Target high-resolution voxel grid dimensions and resolution [S1].
 
-### Steps
+**Outputs:**
+- Sparse set of fine-level voxel attributes $E_j$ and corresponding Gaussian parameters $G'_j$ [S1].
+- Coarse-level voxel features $E^c_i$ used for transformer input [S1].
 
-1.  **Splat Depositing**: For each Gaussian primitive $G_k$, identify the set $\{\mathbf{M}_k\}$ of nearest voxels. In the standard implementation, this set consists of the 8 adjacent voxels surrounding the Gaussian center $\mu_k$ [S1]. Compute the spatial weight $w_{jk}$ for each voxel $V_j \in \{\mathbf{M}_k\}$ using a distance kernel $\mathcal{K}$:
-    $$
-    w_{jk} = \begin{cases} \frac{\mathcal{K}(\mu_k - \mathbf{x}_j)}{\sum_{j' \in \{\mathbf{M}_k\}} \mathcal{K}(\mu_k - \mathbf{x}_{j'})}, & \text{if } j \in \{\mathbf{M}_k\}, \\ 0 & \text{otherwise.} \end{cases}
-    $$
-    where $\mathbf{x}_j$ is the center of the $j$-th voxel [S1]. The kernel $\mathcal{K}$ and specific parameter choices are detailed in supplementary materials of the source [S1].
+**Data Structures:**
+- **Voxel Grid:** A 3D array where each voxel $V_j$ stores an attribute vector $E_j$ and a weight $W_j$.
+- **Coarse Grid:** A downsampled version of the fine grid, where each coarse voxel $V^c_i$ corresponds to a block $N_i$ of $d \times h \times w$ fine voxels [S1].
+- **Tokens:** Coarse voxel features reshaped into 1D vectors for transformer input [S1].
 
-2.  **Splat Fusion**: For each voxel $V_j$, accumulate the contributions from all Gaussians $k$ that influence it. Compute the total weight $W_j$ and the voxel attribute $E_j$:
-    $$
-    W_j = \sum_{k \in \{\mathbf{M}_k\}} w_{jk} \alpha_k
-    $$
-    $$
-    E_j = \frac{1}{W_j} \sum_{k \in \{\mathbf{M}_k\}} w_{jk} \alpha_k [\mathbf{F}_k; \mathbf{G}_k]
-    $$
-    where $[\mathbf{F}_k; \mathbf{G}_k]$ denotes the concatenation of the feature vector and Gaussian attributes [S1]. The notation $k \in \{\mathbf{M}_k\}$ indicates indexing over all Gaussian primitives associated with a weight and attributes [S1].
+**Parameters:**
+- **Nearest Voxels:** The implementation uses the adjacent 8 voxels for each splat [S1].
+- **Sparsification Ratio:** Top 20% of coarse voxels are retained [S1].
+- **Kernel Function:** $\mathcal{K}$ is a distance kernel (specific function details in supplementary material of [S1], not explicitly defined in the main text, but implied to be normalized) [S1].
 
-3.  **Coarse-to-Fine Hierarchy Construction**: Downsample the high-resolution voxel grid by factors $[d, h, w]$ to generate a low-resolution coarse grid [S1]. Each coarse voxel $i$ corresponds to a block $N_i$ of $d \times h \times w$ fine voxels [S1]. Coarse voxel features $E^c_i$ are derived using a shallow multi-layer perceptron (MLP) on the concatenation of the fine features and set coarse voxel weights (details on the MLP architecture are in the source [S1]).
+**Steps:**
 
-4.  **Voxel Sparsification**: To manage computational cost for downstream processing, sort coarse-level voxels by their weights $W_i$. Retain only the top 20% of coarse voxels with the largest weights [S1]. Cull the corresponding high-resolution fine-level voxels if their parent coarse voxel is culled [S1]. This reduces the input token count to fewer than 10K tokens [S1].
+1.  **Splat Depositing:**
+    For each Gaussian primitive $G_k$ with mean $\mu_k$:
+    a. Identify the set $\{M_k\}$ of nearest voxels (typically the 8 adjacent voxels) [S1].
+    b. For each voxel $V_j \in \{M_k\}$ with center $\mathbf{x}_j$, compute the interpolation weight $w_{jk}$:
+       $$w_{jk} = \begin{cases} \frac{\mathcal{K}(\mu_k - \mathbf{x}_j)}{\sum_{j' \in \{M_k\}} \mathcal{K}(\mu_k - \mathbf{x}_{j'})}, & \text{if } j \in \{M_k\}, \\ 0 & \text{otherwise.} \end{cases}$$
+       where $\mathcal{K}$ is the distance kernel [S1].
 
-### Pseudocode
+2.  **Splat Fusion:**
+    For each voxel $V_j$ in the high-resolution grid:
+    a. Compute the total accumulated weight $W_j$ from all contributing Gaussians $k$:
+       $$W_j = \sum_{k \in \{M_k\}} w_{jk} \alpha_k$$
+       where $\alpha_k$ is the opacity of Gaussian $k$ [S1].
+    b. Compute the voxel attribute $E_j$ as the normalized weighted sum of concatenated features and Gaussian parameters:
+       $$E_j = \frac{1}{W_j} \sum_{k \in \{M_k\}} w_{jk} \alpha_k [F_k; G_k]$$
+       where $[F_k; G_k]$ denotes the concatenation of the feature vector $F_k$ and Gaussian attributes $G_k$ [S1]. If $W_j = 0$, $E_j$ is undefined or zero-initialized [G].
+
+3.  **Coarse-to-fine Hierarchy Construction:**
+    a. Downsample the high-resolution voxel grid by factors $[d, h, w]$ to create a low-resolution coarse grid [S1].
+    b. Each coarse voxel $V^c_i$ corresponds to a block $N_i$ of $d \times h \times w$ fine voxels [S1].
+    c. Compute coarse voxel features $E^c_i$ using a shallow multi-layer perceptron (MLP) on the concatenation of the fine features $E_j$ for all $j \in N_i$ and the set of fine voxel weights [S1]. (Note: The exact MLP architecture and input concatenation details are described as "shallow" and using "concatenation of the fine features and set coarse voxel we..." in [S1], implying aggregation of fine-level data).
+
+4.  **Voxel Sparsification:**
+    a. Sort coarse-level voxels by their weight $W_i$ (derived from $E^c_i$ or associated opacity) [S1].
+    b. Retain only the top 20% of coarse voxels with the largest weights [S1].
+    c. Cull corresponding high-resolution fine-level voxels if their parent coarse voxel is culled [S1].
+    d. This reduces the input token count to fewer than 10K tokens [S1].
+
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def splat_to_voxel_transfer(gaussians, voxel_grid_shape, kernel_func, d, h, w, sparsify_ratio=0.2):
+import numpy as np
+
+def splat_to_voxel_transfer(gaussians, voxel_grid_shape, kernel_func, d, h, w, sparsification_ratio=0.2):
     """
-    Converts Gaussian primitives to a structured voxel grid.
+    Convert Gaussian primitives to a sparse voxel grid.
     
     Args:
-        gaussians: List of Gaussian primitives, each with attributes:
-                   mu (3D vector), alpha (float), F (feature vector), G (other params).
-        voxel_grid_shape: Tuple (D, H, W) defining the high-resolution voxel grid.
-        kernel_func: Function K(delta) computing the distance kernel weight.
-        d, h, w: Downsampling factors for the coarse-to-fine hierarchy.
-        sparsify_ratio: Fraction of coarse voxels to retain (default 0.2).
+        gaussians: List of dicts with keys 'mu' (pos), 'alpha' (opacity), 'F' (features), 'G' (params).
+        voxel_grid_shape: Tuple (D, H, W) for high-res grid.
+        kernel_func: Function K(dist) for distance weighting.
+        d, h, w: Downsampling factors for coarse grid.
+        sparsification_ratio: Fraction of coarse voxels to retain.
         
     Returns:
-        sparse_voxels: List of active fine voxels with aggregated attributes.
-        coarse_voxels: List of active coarse voxels with aggregated attributes.
+        sparse_fine_voxels: List of voxel indices and their attributes E_j, G'_j.
+        coarse_voxels: List of coarse voxel indices and features E^c_i.
     """
-    
-    # Initialize high-resolution voxel grid
-    # Each voxel stores: weight_sum (W_j), attribute_sum (weighted sum of [F; G])
-    fine_voxels = {} 
+    # Initialize high-res grid
+    # E_j stores concatenated [F_k; G_k] weighted sum
+    # W_j stores total weight
+    fine_E = np.zeros((*voxel_grid_shape, gaussians[0]['F'].shape[0] + gaussians[0]['G'].shape[0]))
+    fine_W = np.zeros((*voxel_grid_shape))
     
     # Step 1 & 2: Splat Depositing and Fusion
-    for k in gaussians:
-        mu_k = k.mu
-        alpha_k = k.alpha
-        F_k = k.F
-        G_k = k.G
+    for g in gaussians:
+        mu = g['mu']
+        alpha = g['alpha']
+        F = g['F']
+        G = g['G']
         
-        # Identify 8 adjacent voxels surrounding mu_k
-        # Implementation note: Map continuous mu_k to discrete voxel indices
-        voxel_indices = get_adjacent_voxel_indices(mu_k, voxel_grid_shape)
+        # Find 8 adjacent voxels
+        # Assuming mu is in voxel coordinates, find integer bounds
+        x, y, z = np.floor(mu).astype(int)
+        neighbors = []
+        for dx in range(2):
+            for dy in range(2):
+                for dz in range(2):
+                    nx, ny, nz = x + dx, y + dy, z + dz
+                    if 0 <= nx < voxel_grid_shape[0] and 0 <= ny < voxel_grid_shape[1] and 0 <= nz < voxel_grid_shape[2]:
+                        neighbors.append((nx, ny, nz))
         
-        # Compute kernel weights for these 8 voxels
-        kernel_weights = {}
-        sum_kernel = 0.0
-        for j in voxel_indices:
-            x_j = get_voxel_center(j, voxel_grid_shape)
-            delta = mu_k - x_j
-            w_jk = kernel_func(delta)
-            kernel_weights[j] = w_jk
-            sum_kernel += w_jk
+        # Compute weights
+        weights = []
+        for (nx, ny, nz) in neighbors:
+            voxel_center = np.array([nx + 0.5, ny + 0.5, nz + 0.5])
+            dist = mu - voxel_center
+            k_val = kernel_func(dist)
+            weights.append(k_val)
+        
+        total_k = sum(weights)
+        if total_k == 0:
+            continue
             
-        # Normalize weights
-        for j in voxel_indices:
-            kernel_weights[j] /= sum_kernel
+        normalized_weights = [w / total_k for w in weights]
+        
+        # Aggregate
+        combined_attr = np.concatenate([F, G])
+        for idx, (nx, ny, nz) in enumerate(neighbors):
+            w_jk = normalized_weights[idx]
+            fine_E[nx, ny, nz] += w_jk * alpha * combined_attr
+            fine_W[nx, ny, nz] += w_jk * alpha
             
-        # Aggregate into voxels
-        for j in voxel_indices:
-            w_jk = kernel_weights[j]
-            combined_attr = concatenate(F_k, G_k)
-            
-            if j not in fine_voxels:
-                fine_voxels[j] = {'W_j': 0.0, 'attr_sum': zeros_like(combined_attr)}
+    # Normalize attributes
+    # Avoid division by zero
+    valid_mask = fine_W > 1e-8
+    fine_E[valid_mask] /= fine_W[valid_mask][:, np.newaxis]
+    
+    # Step 3: Coarse-to-fine Hierarchy
+    # Downsample by d, h, w
+    coarse_shape = (voxel_grid_shape[0] // d, voxel_grid_shape[1] // h, voxel_grid_shape[2] // w)
+    coarse_E = np.zeros((*coarse_shape, fine_E.shape[-1]))
+    coarse_W = np.zeros(coarse_shape)
+    
+    for i in range(coarse_shape[0]):
+        for j in range(coarse_shape[1]):
+            for k in range(coarse_shape[2]):
+                # Block of fine voxels
+                block = fine_E[i*d:(i+1)*d, j*h:(j+1)*h, k*w:(k+1)*w]
+                block_W = fine_W[i*d:(i+1)*d, j*h:(j+1)*h, k*w:(k+1)*w]
                 
-            fine_voxels[j]['W_j'] += w_jk * alpha_k
-            fine_voxels[j]['attr_sum'] += w_jk * alpha_k * combined_attr
-            
-    # Normalize voxel attributes
-    for j in fine_voxels:
-        if fine_voxels[j]['W_j'] > 0:
-            fine_voxels[j]['E_j'] = fine_voxels[j]['attr_sum'] / fine_voxels[j]['W_j']
-            fine_voxels[j]['W_i'] = fine_voxels[j]['W_j'] # Weight for sparsification
-        else:
-            fine_voxels[j]['E_j'] = zeros_like(combined_attr)
-            fine_voxels[j]['W_i'] = 0.0
-
-    # Step 3: Coarse-to-Fine Hierarchy Construction
-    # Downsample fine voxels to coarse grid
-    coarse_voxels = {}
-    for j, voxel_data in fine_voxels.items():
-        # Map fine voxel index j to coarse voxel index i
-        i = map_to_coarse_index(j, d, h, w)
-        
-        if i not in coarse_voxels:
-            coarse_voxels[i] = {'fine_voxels': [], 'W_i': 0.0}
-            
-        coarse_voxels[i]['fine_voxels'].append(j)
-        coarse_voxels[i]['W_i'] += voxel_data['W_i'] # Aggregate weight for coarse voxel
-        
-    # Compute coarse voxel features using MLP (pseudo-code for MLP call)
-    # E^c_i = MLP(concat(E_j for j in N_i))
-    for i in coarse_voxels:
-        fine_list = coarse_voxels[i]['fine_voxels']
-        fine_features = [fine_voxels[j]['E_j'] for j in fine_list]
-        # Note: Source mentions MLP on concatenation of fine features and set coarse voxel weights
-        coarse_voxels[i]['E^c_i'] = apply_mlp_on_fine_features(fine_features, coarse_voxels[i]['W_i'])
-
+                # Aggregate fine features to coarse
+                # Note: Source says "shallow MLP on concatenation of fine features and set coarse voxel we..."
+                # Simplified: Weighted average of fine features in block
+                total_block_W = np.sum(block_W)
+                if total_block_W > 1e-8:
+                    coarse_E[i, j, k] = np.sum(block * block_W[:, :, :, np.newaxis], axis=(0,1,2)) / total_block_W
+                    coarse_W[i, j, k] = total_block_W
+                else:
+                    coarse_E[i, j, k] = 0
+                    coarse_W[i, j, k] = 0
+                    
     # Step 4: Voxel Sparsification
-    # Sort coarse voxels by weight W_i
-    sorted_coarse_voxels = sort_by_weight(coarse_voxels, key='W_i', reverse=True)
+    # Flatten coarse weights
+    coarse_weights_flat = coarse_W.flatten()
+    num_retain = int(len(coarse_weights_flat) * sparsification_ratio)
     
-    # Retain top 20%
-    num_retain = int(len(sorted_coarse_voxels) * sparsify_ratio)
-    retained_coarse_indices = set([sorted_coarse_voxels[i]['index'] for i in range(num_retain)])
+    # Get indices of top weights
+    top_indices = np.argsort(coarse_weights_flat)[-num_retain:]
     
-    # Filter fine voxels
-    sparse_voxels = {}
-    for i in retained_coarse_indices:
-        for j in coarse_voxels[i]['fine_voxels']:
-            sparse_voxels[j] = fine_voxels[j]
-            
-    return sparse_voxels, coarse_voxels
+    # Create sparse representation
+    sparse_fine_voxels = []
+    coarse_voxels = []
+    
+    for idx in top_indices:
+        ci, cj, ck = np.unravel_index(idx, coarse_shape)
+        
+        # Add coarse voxel
+        coarse_voxels.append({
+            'index': (ci, cj, ck),
+            'feature': coarse_E[ci, cj, ck],
+            'weight': coarse_W[ci, cj, ck]
+        })
+        
+        # Add corresponding fine voxels
+        for di in range(d):
+            for dj in range(h):
+                for dk in range(w):
+                    fi, fj, fk = ci * d + di, cj * h + dj, ck * w + dk
+                    if fine_W[fi, fj, fk] > 1e-8:
+                        sparse_fine_voxels.append({
+                            'index': (fi, fj, fk),
+                            'feature': fine_E[fi, fj, fk],
+                            'weight': fine_W[fi, fj, fk]
+                        })
+                        
+    return sparse_fine_voxels, coarse_voxels
 ```
-
-### Parameters
-*   **Nearest Voxels**: The implementation uses the adjacent 8 voxels for each splat [S1].
-*   **Sparsification Ratio**: Top 20% of coarse voxels are retained [S1].
-*   **Kernel Function $\mathcal{K}$**: Specific choice is in supplementary material [S1].
-
-### Edge Cases and Pitfalls
-*   **Empty Voxels**: Voxels with no contributing Gaussians or zero total weight $W_j$ must be handled to avoid division by zero during normalization [S1].
-*   **Boundary Conditions**: The mapping of Gaussian centers to voxel indices must handle boundaries of the grid correctly [S1].
-*   **Precision**: The aggregation involves weighted sums which may suffer from precision issues if weights vary significantly; however, the source does not specify mitigation strategies [S1].
 
 ## Subtopics
 
 ### Sparse Voxel Transformer
-A Transformer network that processes coarse voxel features as tokens to fuse information in a canonical 3D space and produce refined splats [S1]. It treats each coarse voxel feature as a token and reshapes them to 1D vectors [S1]. The processed latent features $O^c$ from the coarse voxel grids are replicated to their corresponding fine voxel grids to produce fine-level latent features $O_j$ [S1]. A shallow MLP subsequently generates refined Gaussian primitives $G'_j$ by integrating the initial fine-level voxel attributes $E_j$ with the fine-level transformer latents $O_j$ [S1]. The output dimension is $G'_j \in \mathbb{R}^l$ where $l$ is the number of rendering parameters [S1].
+A Transformer network that processes coarse voxel features as tokens to fuse information in a canonical 3D space and produce refined splats [S1]. It treats each coarse voxel feature as a token, reshapes them to 1D vectors, and processes them via $\{\mathbf{O}^c\} = \text{Transformer}_{voxel}(\{\mathbf{E}^c\})$ [S1]. The processed latent features $\mathbf{O}^c$ are then replicated from coarse voxel grids to their corresponding fine voxel grids to produce fine-level latent features $\mathbf{O}_j$ [S1]. Finally, a shallow MLP generates refined Gaussian primitives $\mathbf{G}'_j = \text{MLP}_{fine}([\mathbf{O}_j, \mathbf{E}_j])$, where $\mathbf{G}'_j \in \mathbb{R}^l$ and $l$ is the number of rendering parameters [S1].
 
 ## Operating characteristics
-*   **Time Complexity**: The sparsification step reduces the input token count to fewer than 10K tokens, allowing the downstream voxel transformer to run in 15 ms [S1].
-*   **Memory Complexity**: By retaining only the top 20% of coarse voxels and culling corresponding fine voxels, the method significantly reduces memory usage compared to a dense full-resolution grid [S1].
-*   **Strengths**: Provides a structured spatial proxy for aggregating and distributing splats, enabling the use of efficient Transformer architectures in 3D space [S1].
-*   **Limitations**: Relies on the quality of the initial Gaussian primitives and the kernel function choice [S1]. The sparsification may lose detail in regions with low Gaussian weight [S1].
-*   **When to Use**: When integrating Gaussian splats into a grid-based neural network pipeline, particularly for feed-forward 3D Gaussian Splatting methods [S1].
-*   **When Not to Use**: When real-time dense rendering without neural processing is required, or when the scene has uniform Gaussian distribution making sparsification ineffective [S1].
+- **Time Complexity:** The sparsification step reduces the input token count to fewer than 10K tokens, allowing the downstream voxel transformer to run in 15 ms [S1].
+- **Memory Complexity:** Depends on the initial high-resolution grid size and the sparsification ratio (20% retained) [S1].
+- **Performance:** Achieves state-of-the-art performance among recent feed-forward 3D Gaussian Splatting methods on datasets like RealEstate10K (e.g., PSNR 30.61, SSIM 0.935) [S1].
+- **Strengths:** Efficiently culls empty and insignificant regions using geometric cues from coarse voxel weights, reducing computational load for transformer processing [S1].
+- **Limitations:** Requires a dense high-resolution voxel grid as an intermediate step before sparsification, which may be memory-intensive for very large scenes before culling [S1].
 
 ## Background
-The method was introduced in the context of learning efficient fuse-and-refine techniques for feed-forward 3D Gaussian Splatting [S1]. It is part of a hybrid Splat-Voxel representation framework where an intermediate voxel grid serves as a structured spatial proxy [S1]. The approach aims to improve reconstruction performance by leveraging the strengths of both point-based and grid-based representations [S1].
+The method was proposed in the context of learning efficient feed-forward 3D Gaussian Splatting, specifically in the "Fuse-and-Refine" module [S1]. It was introduced to bridge point-based Gaussian representations with grid-based neural processing, enabling the use of voxel transformers for feature fusion and refinement [S1]. The approach was evaluated on multi-view static scene datasets [S1].
 
 ## Sources
 [S1] Learning Efficient Fuse-and-Refine for Feed-Forward 3D Gaussian Splatting, https://arxiv.org/abs/2503.14698v2, fetched 2026-10-27

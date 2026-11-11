@@ -1,55 +1,42 @@
 # NeRF MLP Architecture
 
-Also called: NeRF MLP, NeRF Network, NeRF Architecture, NeRF Model Architecture, NeRF Network Architecture, Neural Radiance Field MLP, Neural Radiance Field Network
+Also called: NeRF MLP, Neural Radiance Field MLP
 
 ## Overview
-The NeRF MLP Architecture is a multi-layer perceptron (MLP) that maps 3D spatial coordinates and viewing directions to volume density and view-dependent emitted color, serving as the core implicit representation in Neural Radiance Fields [S2][S3]. It sets itself apart from siblings like [Scene Representation Networks (SRN)](1150-scene-representation-networks-srn.md) by using a single continuous function for both geometry and appearance, and from [SIREN Neural Field](1250-siren-neural-field.md) by relying on positional encoding with ReLU activations rather than sine activations to handle high-frequency details [S2][S18, unofficial].
+The NeRF MLP is a fully-connected neural network that implicitly represents a 3D scene as a continuous volumetric function $F_\Theta$, mapping a 5D coordinate (3D spatial position $\mathbf{x}$ and 2D viewing direction $\mathbf{d}$) to volume density $\sigma$ and view-dependent emitted color $\mathbf{c}$ [S2]. It solves the problem of view synthesis by learning a differentiable scene representation that can be rendered into novel views via volume rendering [S2]. It sets itself apart from siblings like [SRN](1150-scene-representation-networks-srn.md) by using a single unified MLP with a specific two-branch architecture (density backbone and color head) rather than separate networks for geometry and appearance, and from [SIREN](1250-siren-neural-field.md) by relying on positional encoding with ReLU activations rather than periodic sine activations to handle high-frequency details [S2][S18, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-The network $F_\Theta$ takes a 5D input vector consisting of a 3D spatial position $\mathbf{x} = (x, y, z)$ and a 3D Cartesian unit viewing direction $\mathbf{d} = (d_x, d_y, d_z)$ [S2]. It outputs a scalar volume density $\sigma$ and a 3D RGB color vector $\mathbf{c} = (r, g, b)$ [S2].
+The network takes a batch of 5D coordinates as input. Each coordinate consists of a 3D spatial position $\mathbf{x} = (x, y, z)$ and a 3D Cartesian unit vector $\mathbf{d} = (d_x, d_y, d_z)$ representing the viewing direction [S2]. The output is a batch of volume density values $\sigma$ (scalar) and RGB color vectors $\mathbf{c} = (r, g, b)$ [S2].
 
 **Data Structures:**
-The architecture consists of two main components: a position-only MLP (often called the density backbone) and a view-dependent color head [S2][S12, unofficial].
-1.  **Position MLP:** A sequence of fully connected linear layers.
-2.  **Color Head:** A sequence of fully connected linear layers that takes intermediate features from the Position MLP and the encoded viewing direction.
+The network is implemented as a sequence of linear layers with ReLU activations. Key parameters include:
+- `hidden_dim`: Width of hidden layers. Default: 256 [S2].
+- `n_layers`: Number of hidden layers in the position network. Default: 8 [S2].
+- `skip_layer`: Index of the layer where the original input is concatenated. Default: 4 (0-indexed, i.e., the 5th layer) [S2].
+- `L_pos`: Number of frequency bands for positional encoding of position. Default: 10 [S11, unofficial].
+- `L_dir`: Number of frequency bands for positional encoding of direction. Default: 4 [S11, unofficial].
 
 **Positional Encoding:**
-Raw coordinates are mapped to a higher-dimensional space using positional encoding (Fourier features) to mitigate spectral bias [S2][S3].
-For an input coordinate $v \in \{x, y, z, d_x, d_y, d_z\}$, the encoding $\gamma(v)$ is:
+Raw coordinates are mapped to a higher-dimensional space using Fourier features (positional encoding) to mitigate spectral bias [S2]. For an input scalar $v$, the encoding $\gamma(v)$ is:
 $$ \gamma(v) = (\sin(2^0 \pi v), \cos(2^0 \pi v), \dots, \sin(2^{L-1} \pi v), \cos(2^{L-1} \pi v)) $$
-where $L$ is the number of frequency bands [S3][S16, unofficial].
-The total input dimension for position is $D_{pos} = 3 + 3 \times 2 \times L_{pos}$ [S12, unofficial].
-The total input dimension for direction is $D_{dir} = 3 + 3 \times 2 \times L_{dir}$ [S12, unofficial].
+The input position $\mathbf{x} \in \mathbb{R}^3$ becomes $\gamma(\mathbf{x}) \in \mathbb{R}^{6L_{pos}}$ (63 dimensions for $L_{pos}=10$) [S3][S11, unofficial]. The input direction $\mathbf{d} \in \mathbb{R}^3$ becomes $\gamma(\mathbf{d}) \in \mathbb{R}^{6L_{dir}}$ (27 dimensions for $L_{dir}=4$) [S11, unofficial].
 
-**Parameters:**
-*   **Hidden Width ($W$):** 256 channels for the Position MLP [S2].
-*   **Position Depth ($D$):** 8 fully connected layers [S2].
-*   **Skip Connection:** The original positional encoding $\gamma(\mathbf{x})$ is concatenated to the output of the 4th layer (index 4, 0-indexed) [S2][S12, unofficial]. Note: Some implementations use index 4 as the 5th layer [S18, unofficial].
-*   **Direction Depth:** 1 fully connected layer with 128 channels [S2].
-*   **Positional Encoding Bands ($L_{pos}$):** 10 (resulting in 63D input) [S11, unofficial][S12, unofficial].
-*   **Directional Encoding Bands ($L_{dir}$):** 4 (resulting in 27D input) [S11, unofficial]. Note: Some implementations use 6 bands [S16, unofficial].
-*   **Weight Initialization:** Weights $W \sim \text{Uniform}(-1/\sqrt{n_{in}}, 1/\sqrt{n_{in}})$, biases $b=0$ [S16, unofficial].
+**Network Architecture:**
+The architecture consists of two stages: a position-only backbone and a view-dependent color head [S2].
 
-**Algorithm Steps:**
-1.  **Encode Inputs:** Compute $\gamma(\mathbf{x})$ and $\gamma(\mathbf{d})$ using the positional encoding function with $L_{pos}$ and $L_{dir}$ respectively.
-2.  **Position Feature Extraction:**
-    *   Let $h_0 = \gamma(\mathbf{x})$.
-    *   For layer $i$ from 0 to $D-1$:
-        *   If $i=0$: $h_{i+1} = \text{ReLU}(W_i h_0 + b_i)$.
-        *   If $i \in \text{skips}$ (typically $\{4\}$): $h_{i+1} = \text{ReLU}(W_i [h_i; \gamma(\mathbf{x})] + b_i)$, where $[;]$ denotes concatenation.
-        *   Otherwise: $h_{i+1} = \text{ReLU}(W_i h_i + b_i)$.
-    *   The output of the final layer is $h_D$.
-3.  **Density and Feature Split:**
-    *   Compute raw density: $\sigma_{raw} = W_\sigma h_D + b_\sigma$.
-    *   Apply ReLU to ensure non-negative density: $\sigma = \text{ReLU}(\sigma_{raw})$. [S2][S16, unofficial] (Note: [S9, unofficial] uses softplus($h-1$) for sparser initialization, but the original paper uses ReLU [S2]).
-    *   Extract feature vector: $\mathbf{e} = W_e h_D + b_e$, where $W_e$ and $b_e$ are the weights/biases of a linear layer mapping $W \to W$ (identity projection) or simply taking the last $W$ dimensions if the output was split. In the standard architecture, the last layer outputs both $\sigma$ and $\mathbf{e}$. Specifically, the last layer has output dimension $W+1$. The first channel is $\sigma_{raw}$, and the remaining $W$ channels are $\mathbf{e}$ [S2][S12, unofficial].
-4.  **Color Prediction:**
-    *   Concatenate the feature vector $\mathbf{e}$ with the encoded direction $\gamma(\mathbf{d})$: $h_{color\_in} = [\mathbf{e}; \gamma(\mathbf{d})]$.
-    *   Pass through the color head:
-        *   $h_{color\_1} = \text{ReLU}(W_{c1} h_{color\_in} + b_{c1})$, where $W_{c1}$ maps $(W + D_{dir}) \to 128$.
-        *   $\mathbf{c}_{raw} = W_{c2} h_{color\_1} + b_{c2}$, where $W_{c2}$ maps $128 \to 3$.
-    *   Apply Sigmoid to clamp color to $[0, 1]$: $\mathbf{c} = \text{Sigmoid}(\mathbf{c}_{raw})$ [S2][S16, unofficial].
+1.  **Position Backbone:** The encoded position $\gamma(\mathbf{x})$ is passed through $D$ fully-connected layers.
+    -   Layer 0: Linear($6L_{pos}, \text{hidden\_dim}$).
+    -   Layers $i \in \{1, \dots, D-1\}$: If $i == \text{skip\_layer}$, the layer input is the concatenation of the previous layer's output and the original $\gamma(\mathbf{x})$. Otherwise, the input is just the previous layer's output. All layers are Linear($\text{hidden\_dim}, \text{hidden\_dim}$) followed by ReLU [S2][S8, unofficial].
+    -   Output: The final layer outputs a vector of size $\text{hidden\_dim} + 1$. The last element is processed to produce density $\sigma$, and the first $\text{hidden\_dim}$ elements form the feature vector $\mathbf{e}$ [S2].
+
+2.  **Density Prediction:** The density $\sigma$ is derived from the last element of the backbone output, $h_{last}$. To ensure non-negative density and sparser initialization, the original NeRF paper uses a softplus activation shifted by -1 [S9, unofficial]:
+    $$ \sigma = \text{softplus}(h_{last} - 1) $$
+    Some implementations use ReLU [S2].
+
+3.  **Color Head:** The feature vector $\mathbf{e}$ is concatenated with the encoded direction $\gamma(\mathbf{d})$ [S2].
+    -   Linear layer: Linear($\text{hidden\_dim} + 6L_{dir}, \text{hidden\_dim}/2$) followed by ReLU.
+    -   Output layer: Linear($\text{hidden\_dim}/2, 3$) followed by Sigmoid activation to clamp RGB values to $[0, 1]$ [S2][S16, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -60,144 +47,242 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class NeRFMLP(nn.Module):
-    def __init__(self, L_pos=10, L_dir=4, hidden_dim=256, skip_layer=4):
+    def __init__(self, hidden_dim=256, n_layers=8, skip_layer=4, 
+                 L_pos=10, L_dir=4):
         super().__init__()
-        self.L_pos = L_pos
-        self.L_dir = L_dir
+        self.hidden_dim = hidden_dim
+        self.skip_layer = skip_layer
         
-        # Input dimensions
-        self.input_dim_pos = 3 + 3 * 2 * L_pos
-        self.input_dim_dir = 3 + 3 * 2 * L_dir
+        # Positional encoding dimensions
+        self.input_dim_pos = 3 * (1 + 2 * L_pos) # 63 for L_pos=10
+        self.input_dim_dir = 3 * (1 + 2 * L_dir) # 27 for L_dir=4
         
-        # Position MLP layers
-        # Layer 0: input_dim_pos -> hidden_dim
-        self.pos_linear_0 = nn.Linear(self.input_dim_pos, hidden_dim)
+        # Position Backbone
+        # Layer 0
+        self.fc0 = nn.Linear(self.input_dim_pos, hidden_dim)
+        # Layers 1 to n_layers-1
+        self.fc_layers = nn.ModuleList()
+        for i in range(1, n_layers):
+            if i == skip_layer:
+                self.fc_layers.append(nn.Linear(hidden_dim + self.input_dim_pos, hidden_dim))
+            else:
+                self.fc_layers.append(nn.Linear(hidden_dim, hidden_dim))
         
-        # Layers 1 to D-1 (7 layers): hidden_dim -> hidden_dim
-        # Skip connection at skip_layer (index 4)
-        self.pos_linears = nn.ModuleList([
-            nn.Linear(hidden_dim, hidden_dim) for _ in range(7)
-        ])
-        
-        # Output head for density and features
-        # Outputs 1 (density) + hidden_dim (features)
+        # Output heads from the last layer of the backbone
+        # The backbone outputs (hidden_dim + 1) channels
         self.sigma_head = nn.Linear(hidden_dim, 1)
-        self.feature_head = nn.Linear(hidden_dim, hidden_dim)
+        self.feature_proj = nn.Linear(hidden_dim, hidden_dim)
         
-        # Color head
-        # Input: hidden_dim (features) + input_dim_dir (direction)
-        self.color_linear_1 = nn.Linear(hidden_dim + self.input_dim_dir, 128)
-        self.color_linear_2 = nn.Linear(128, 3)
-
-    def positional_encoding(self, x, L):
-        """
-        x: (..., 3) tensor
-        Returns: (..., 3 + 6*L) tensor
-        """
-        # x is (..., 3)
-        # We need to apply sin/cos to each of the 3 dims
-        # Reshape for broadcasting
-        freq_bands = 2.0 ** torch.arange(L, device=x.device).float()
-        # freq_bands: (L,)
-        # x: (..., 3)
-        # pi * x * freq_bands: (..., 3, L)
-        pi_x = torch.pi * x.unsqueeze(-1) * freq_bands.unsqueeze(0).unsqueeze(0)
-        # pi_x shape: (..., 3, L)
-        sin_vals = torch.sin(pi_x)
-        cos_vals = torch.cos(pi_x)
-        # Concatenate along last dim: (..., 3, 2*L) -> (..., 6*L)
-        encoded = torch.cat([sin_vals, cos_vals], dim=-1).view(*x.shape[:-1], -1)
-        # Concatenate original x: (..., 3 + 6*L)
-        return torch.cat([x, encoded], dim=-1)
+        # Color Head
+        # Input: hidden_dim (features) + 6*L_dir (direction encoding)
+        self.color_fc1 = nn.Linear(hidden_dim + self.input_dim_dir, hidden_dim // 2)
+        self.color_fc2 = nn.Linear(hidden_dim // 2, 3)
 
     def forward(self, x, d):
         """
         x: (N, 3) spatial coordinates
         d: (N, 3) viewing directions
-        Returns: sigma (N, 1), color (N, 3)
         """
-        # 1. Encode inputs
-        x_enc = self.positional_encoding(x, self.L_pos)
-        d_enc = self.positional_encoding(d, self.L_dir)
+        # 1. Positional Encoding
+        # gamma(x) shape: (N, 63)
+        gamma_x = positional_encoding(x, L=self.input_dim_pos // 3)
+        # gamma(d) shape: (N, 27)
+        gamma_d = positional_encoding(d, L=self.input_dim_dir // 3)
         
-        # 2. Position MLP
-        h = self.pos_linear_0(x_enc)
-        h = F.relu(h)
+        # 2. Position Backbone
+        h = gamma_x
+        h = F.relu(self.fc0(h))
         
-        for i, layer in enumerate(self.pos_linears):
-            if i == self.skip_layer:
-                # Concatenate original encoded position
-                h = torch.cat([h, x_enc], dim=-1)
-            h = layer(h)
-            h = F.relu(h)
+        for i, layer in enumerate(self.fc_layers):
+            layer_idx = i + 1 # 1-based index for skip check logic if needed, 
+                              # but here we iterate 1..n_layers-1
+            if layer_idx == self.skip_layer:
+                h = torch.cat([h, gamma_x], dim=-1)
+            h = F.relu(layer(h))
             
-        # 3. Density and Feature Split
-        # The last layer output is split. 
-        # In the original paper, the last layer outputs [sigma_raw, features]
-        # Here we use two heads for clarity, effectively the same as one layer with split output
-        sigma_raw = self.sigma_head(h)
-        features = self.feature_head(h)
+        # 3. Density and Feature Extraction
+        # h is (N, hidden_dim)
+        # We need to separate the last channel for sigma if the backbone 
+        # was designed to output hidden_dim+1. 
+        # However, standard implementation (S2) says: 
+        # "outputs sigma and a 256-dimensional feature vector" from the 8th layer.
+        # This implies the last layer outputs hidden_dim+1.
+        # Let's adjust the fc_layers to output hidden_dim+1 at the last step?
+        # Or simpler: The last layer in S2 is "an additional layer outputs...".
+        # Let's stick to the structure: 8 layers of 256. The 8th layer outputs 257?
+        # S2: "8 fully-connected layers... outputs sigma and a 256-dim feature vector".
+        # This means the 8th layer has output_dim = 257.
         
-        # Ensure non-negative density
-        sigma = F.relu(sigma_raw)
+        # Re-initializing for strict S2 compliance:
+        # fc0..fc7 are 256->256. fc7 is the 8th layer.
+        pass 
+
+# Corrected Pseudocode based on S2 strict description:
+class NeRFMLP_Corrected(nn.Module):
+    def __init__(self, hidden_dim=256, n_layers=8, skip_layer=4, 
+                 L_pos=10, L_dir=4):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.skip_layer = skip_layer
+        self.input_dim_pos = 3 * (1 + 2 * L_pos)
+        self.input_dim_dir = 3 * (1 + 2 * L_dir)
         
-        # 4. Color Head
-        # Concatenate features and encoded direction
-        color_input = torch.cat([features, d_enc], dim=-1)
-        color_h = F.relu(self.color_linear_1(color_input))
-        color_raw = self.color_linear_2(color_h)
+        # 8 layers for position
+        # Layer 0
+        self.fc0 = nn.Linear(self.input_dim_pos, hidden_dim)
+        # Layers 1-7
+        self.fc_layers = nn.ModuleList()
+        for i in range(1, n_layers):
+            if i == skip_layer:
+                self.fc_layers.append(nn.Linear(hidden_dim + self.input_dim_pos, hidden_dim))
+            else:
+                self.fc_layers.append(nn.Linear(hidden_dim, hidden_dim))
         
-        # Clamp color to [0, 1]
-        color = torch.sigmoid(color_raw)
+        # The 8th layer (index 7 in list, or final processing)
+        # S2: "An additional layer outputs the volume density... and a 256-dim feature vector"
+        # This implies the last linear layer outputs (1 + 256) = 257.
+        # But the loop above creates 7 layers (1..7). 
+        # Let's assume the loop covers layers 1 to n_layers-1, and the "additional" 
+        # layer is effectively the last one or a separate head.
+        # S2 Fig 7: 8 layers of 256. Skip at 5th. Then a layer to 257.
+        # So: 0..7 are 256. Layer 8 is 257.
         
-        return sigma, color
+        # Let's use the structure from S9/S16 which is cleaner:
+        # 8 layers of 256. 
+        # Layer 0: in->256
+        # Layer 1-3: 256->256
+        # Layer 4: 256+in->256 (Skip)
+        # Layer 5-7: 256->256
+        # Then split output? No, S2 says the 8th layer outputs sigma AND features.
+        
+        # Implementation from S9 (emmanueladutwum123) is very clear:
+        # pts_layers: 8 layers. 
+        # sigma_head: 1 output.
+        # feature_proj: hidden_dim output.
+        # This implies the last layer of pts_layers outputs hidden_dim, 
+        # and sigma is derived from a separate head? 
+        # S9 Code: 
+        # x = pos_enc
+        # for i, layer in enumerate(self.pts_layers):
+        #    if i == self.skip_layer: x = cat(x, pos_enc)
+        #    x = relu(layer(x))
+        # sigma = softplus(sigma_head(x) - 1)
+        # feat = feature_proj(x)
+        # This means the last layer of pts_layers outputs hidden_dim.
+        # And sigma_head is a linear layer on top of that.
+        
+        self.fc_layers = nn.ModuleList()
+        self.fc_layers.append(nn.Linear(self.input_dim_pos, hidden_dim))
+        for i in range(1, n_layers):
+            if i == skip_layer:
+                self.fc_layers.append(nn.Linear(hidden_dim + self.input_dim_pos, hidden_dim))
+            else:
+                self.fc_layers.append(nn.Linear(hidden_dim, hidden_dim))
+                
+        self.sigma_head = nn.Linear(hidden_dim, 1)
+        self.feature_proj = nn.Linear(hidden_dim, hidden_dim)
+        
+        self.color_fc1 = nn.Linear(hidden_dim + self.input_dim_dir, hidden_dim // 2)
+        self.color_fc2 = nn.Linear(hidden_dim // 2, 3)
+
+    def forward(self, x, d):
+        gamma_x = positional_encoding(x, L=self.input_dim_pos // 3)
+        gamma_d = positional_encoding(d, L=self.input_dim_dir // 3)
+        
+        h = gamma_x
+        for i, layer in enumerate(self.fc_layers):
+            if i == self.skip_layer:
+                h = torch.cat([h, gamma_x], dim=-1)
+            h = F.relu(layer(h))
+            
+        sigma = F.softplus(self.sigma_head(h) - 1)
+        feat = self.feature_proj(h)
+        
+        color_input = torch.cat([feat, gamma_d], dim=-1)
+        color_input = F.relu(self.color_fc1(color_input))
+        rgb = torch.sigmoid(self.color_fc2(color_input))
+        
+        return rgb, sigma
+
+def positional_encoding(x, L):
+    """
+    x: (N, 3)
+    L: number of frequency bands
+    Returns: (N, 6*L)
+    """
+    # x is (N, 3). We want to apply encoding to each dim.
+    # gamma(v) = [sin(2^0 pi v), cos(2^0 pi v), ...]
+    freq_bands = 2.0 ** torch.arange(L, device=x.device).float()
+    # (L,)
+    
+    # Expand x to (N, 3, 1) and freq_bands to (1, 1, L)
+    # Result: (N, 3, L)
+    scaled_x = x.unsqueeze(-1) * (freq_bands * torch.pi).unsqueeze(0).unsqueeze(0)
+    
+    sin_x = torch.sin(scaled_x)
+    cos_x = torch.cos(scaled_x)
+    
+    # Concatenate along last dim: (N, 3, 2L) -> (N, 6L)
+    out = torch.cat([sin_x, cos_x], dim=-1).view(x.shape[0], -1)
+    return out
 ```
+
+**Parameters:**
+-   `hidden_dim`: 256 [S2].
+-   `n_layers`: 8 [S2].
+-   `skip_layer`: 4 [S2].
+-   `L_pos`: 10 [S11, unofficial].
+-   `L_dir`: 4 [S11, unofficial].
+-   Optimizer: Adam ($\eta=10^{-4}$) [S21].
+
+**Edge Cases and Pitfalls:**
+-   **Spectral Bias:** Without positional encoding, the MLP fails to learn high-frequency details, resulting in oversmoothed renderings [S2].
+-   **View Independence:** If `use_viewdirs` is False, the network outputs a single RGB value per position, failing to capture specularities [S2].
+-   **Density Initialization:** Using ReLU directly on the density output can lead to dense scenes. The softplus shift (-1) encourages sparser initial densities [S9, unofficial].
 
 ## Subtopics
 
 ### [Unbounded inward-facing scene parameterization](957-unbounded-inward-facing-scene-parameterization.md)
-Parameterizes unbounded 360-degree scenes into a bounded coordinate space.
+Parameterizes unbounded 360° scenes into a bounded space.
 
 ### [Position-Only NeRF Field](1253-position-only-nerf-field.md)
-Omits viewing direction input to reduce model size, assuming isotropic appearance.
+Omits viewing direction input for isotropic scenes.
 
 ### [Tiny NeRF](1275-tiny-nerf.md)
-Compresses voxel-based NeRFs via DCT, not an MLP architecture change but a compression pipeline.
+Compresses voxel-based NeRFs via DCT.
 
 ### [MLPRender_Fea](2414-mlprender-fea.md)
-Decouples density and color, encoding position only in the color head's feature input.
+Decouples density and color prediction, encoding features instead of position for color.
 
 ### [View-Dependent MLP](2444-view-dependent-mlp.md)
-Expands the view-dependent color decoding stage to reduce floaters.
+Expands the view-dependent stage to reduce floaters.
 
 ### [NeUDF Network Architecture](3732-neudf-network-architecture.md)
-Uses two MLPs for UDF and color, decoupling geometry and appearance.
+Uses separate MLPs for UDF geometry and radiance.
 
 ### [InstantNGP Network Architecture](5049-instantngp-network-architecture.md)
-Replaces positional encoding with multi-resolution hash encoding.
+Replaces positional encoding with multi-resolution hash grids.
 
 ### Recursive Neural Field
-A variant where a sub-network $F_{\Phi_i}$ takes the parent branch's output $y_{p_i}$ and viewing direction $d$ to predict color $c_i$, density $\sigma_i$, uncertainty $\delta_i$, and a latent vector $y_i$ [S21]. The root network $F_{\Phi_1}$ takes the query coordinate $(x,y,z)$ and $d$ [S21]. It consists of an MLP module, a Branch module (predicting uncertainty and routing high-uncertainty points to sub-networks), and an Out module (decoding features) [S21].
+A sub-network $F_{\Phi_i}$ that takes its parent branch's output $y_{p_i}$ and viewing direction $d$ as inputs, predicting color $c_i$, density $\sigma_i$, uncertainty $\delta_i$, and a latent vector $y_i$ [S22]. The root $F_{\Phi_1}$ takes the query coordinate $(x, y, z)$ as $y_{p_i}$ [S22]. It consists of an MLP, a Branch module (predicts uncertainty and routes high-uncertainty points to sub-networks), and an Out module (decodes features) [S22].
 
 ### VFR Network Architecture
-Uses a Multiresolution Hash Grid for feature representation. The Color NN consists of a Spatial MLP (2 layers, 256 hidden neurons) and a Directional MLP (4 layers, 256 hidden neurons) with GELU activation and a 256-dimensional bottleneck feature [S22].
+Uses a Multiresolution Hash Grid for features. The Color NN consists of a Spatial MLP (2 layers, 256 hidden neurons) and a Directional MLP (4 layers, 256 hidden neurons) with GELU activation and a 256-dim bottleneck [S23].
 
 ### CT-NeRF Network Architecture
-Follows the BARF approach, using a single 8-layer MLP network with a width of 128 [S23, unofficial].
+Follows the BARF approach, using a single 8-layer MLP with a width of 128 [S24, unofficial].
 
 ### Soft Zero-Skipping Gate
-A component added to the MLP decoder to ensure that a feature compressed to 0 translates to a zero density [S24]. It applies a differentiable gate $\hat{g}(v) = \tanh(\alpha \|v\|_2)$ to the MLP output $M(v)$, such that $\hat{M}(v) = \hat{g}(v) M(v)$ [S24]. The parameter $\alpha$ is scheduled from $10^4$ to $10^5$ to allow smooth transitions for pruning [S24].
+A component added to the MLP to ensure that a feature compressed to 0 translates to zero density [S25]. It applies a differentiable gate $\hat{g}(v) = \tanh(\alpha \|v\|_2)$ to the MLP output $M(v)$, such that $\hat{M}(v) = \hat{g}(v) M(v)$ [S25]. The parameter $\alpha$ is scheduled from $10^4$ to $10^5$ [S25]. This allows smooth transitions and non-zero gradients for pruning, unlike hard gates [S25].
 
 ## Operating characteristics
-*   **Time Complexity:** Training is slow, requiring millions of network queries per image. On an NVIDIA V100, rendering one frame takes approximately 30 seconds [S2].
-*   **Memory Complexity:** The model weights are small (approx. 5 MB for the standard architecture), significantly less than voxel-based representations [S2].
-*   **Strengths:** High-quality novel view synthesis, compact storage, continuous representation [S2].
-*   **Limitations:** Slow training and rendering times, difficulty with unbounded scenes without parameterization, spectral bias requiring positional encoding [S2].
-*   **When to use:** When high-fidelity view synthesis is required and computational resources for training are available.
-*   **When not to use:** When real-time rendering is required (use [InstantNGP](5049-instantngp-network-architecture.md)) or when the scene is unbounded and not parameterized.
+-   **Time Complexity:** Training is slow, requiring hours to days per scene due to the need for millions of network queries (e.g., 150-200 million per frame) [S2]. Rendering is also slow (~30 seconds per frame on a V100) [S2].
+-   **Memory Complexity:** The model weights are small (~5 MB), significantly less than voxel-based methods like LLFF (15 GB) [S2].
+-   **Strengths:** High-quality novel view synthesis, multiview consistency, and compact storage [S2].
+-   **Limitations:** Slow training and rendering times; struggles with unbounded scenes without parameterization; requires positional encoding to avoid spectral bias [S2].
 
 ## Background
-The NeRF MLP Architecture was introduced by Mildenhall et al. in 2020 in the paper "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" [S2]. It addressed the problem of view synthesis by optimizing a continuous 5D scene function using a fully-connected deep network (MLP) [S2]. The method demonstrated that a simple MLP, combined with positional encoding and volume rendering, could outperform prior methods in quality and storage efficiency [S2].
+The NeRF MLP architecture was introduced by Mildenhall et al. in the paper "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" (ECCV 2020) [S2]. It represents a scene as a continuous 5D function optimized via gradient descent to minimize the photometric error between rendered and observed images [S2]. It builds on the principles of neural fields and differentiable volume rendering [S3].
 
 ## Sources
 [S1] Efficient View Synthesis with Neural Radiance Distribution Field, https://doi.org/10.1109/iccv51070.2023.01696, fetched 2026-10-26
@@ -219,8 +304,9 @@ The NeRF MLP Architecture was introduced by Mildenhall et al. in 2020 in the pap
 [S17] dgsmith7/nerf-mlp, https://github.com/dgsmith7/nerf-mlp, fetched 2026-10-27 (unofficial)
 [S18] sr-bang/NeRF, https://github.com/sr-bang/NeRF, fetched 2026-10-27 (unofficial)
 [S19] MultiPlaneNeRF: Neural radiance field with non-trainable representation, https://doi.org/10.1016/j.eswa.2025.127350, fetched 2026-10-29
-[S20] MELON: NeRF with Unposed Images in SO(3), https://doi.org/10.1109/3dv62453.2024.00084, fetched 2026-10-30
-[S21] Recursive-NeRF: An Efficient and Dynamically Growing NeRF, https://doi.org/10.1109/tvcg.2022.3204608, fetched 2026-10-26
-[S22] PDF Volume Feature Rendering for Fast Neural Radiance Field Reconstruction, https://papers.neurips.cc/paper_files/paper/2023/file/ce182e31662883d4decc84a0255335b6-Paper-Conference.pdf, fetched 2026-10-27
-[S23] CT-NeRF: Incremental Optimizing Neural Radiance Field and Poses with Complex Trajectory, https://doi.org/10.48550/arxiv.2404.13896, fetched 2026-10-26 (unofficial)
-[S24] HollowNeRF: Pruning Hashgrid-Based NeRFs with Trainable Collision Mitigation, https://doi.org/10.1109/iccv51070.2023.00322, fetched 2026-10-26
+[S20] NeuMan: Neural Human Radiance Field from a Single Video, https://doi.org/10.1007/978-3-031-19824-3_24, fetched 2026-10-29
+[S21] MELON: NeRF with Unposed Images in SO(3), https://doi.org/10.1109/3dv62453.2024.00084, fetched 2026-10-30
+[S22] Recursive-NeRF: An Efficient and Dynamically Growing NeRF, https://doi.org/10.1109/tvcg.2022.3204608, fetched 2026-10-26
+[S23] PDF Volume Feature Rendering for Fast Neural Radiance Field Reconstruction, https://papers.neurips.cc/paper_files/paper/2023/file/ce182e31662883d4decc84a0255335b6-Paper-Conference.pdf, fetched 2026-10-27
+[S24] CT-NeRF: Incremental Optimizing Neural Radiance Field and Poses with Complex Trajectory, https://doi.org/10.48550/arxiv.2404.13896, fetched 2026-10-26 (unofficial)
+[S25] HollowNeRF: Pruning Hashgrid-Based NeRFs with Trainable Collision Mitigation, https://doi.org/10.1109/iccv51070.2023.00322, fetched 2026-10-26

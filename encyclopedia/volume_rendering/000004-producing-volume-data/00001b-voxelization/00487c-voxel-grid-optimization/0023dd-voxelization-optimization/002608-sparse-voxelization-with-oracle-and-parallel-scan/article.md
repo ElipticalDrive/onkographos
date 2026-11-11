@@ -7,8 +7,8 @@ Sparse Voxelization with Oracle and Parallel Scan is a real-time, high-resolutio
 
 ## How it works
 **Inputs and Outputs**
-*   **Inputs:** A set of calibrated RGB images from multiple cameras; the initial voxel hierarchy level $k$ (typically $k=4$); the target resolution (determined by pixel size).
-*   **Outputs:** A sparse list of voxels $\mathcal{V}^k$ at the target resolution, ready for rendering as splats.
+*   **Inputs:** A set of calibrated RGB images from multiple cameras [S1]; the initial voxel hierarchy level $k$ (typically $k=4$) [S1]; the target resolution determined by pixel size [S1].
+*   **Outputs:** A sparse list of voxels $\mathcal{V}^k$ at the target resolution, ready for rendering as splats [S1].
 
 **Data Structures**
 Voxels are stored as a dynamic array (list) of unsigned integer triples $\{ix, iy, iz\}$ [S1].
@@ -32,7 +32,7 @@ where $\sigma_k = 2^{1-k}$ [S1].
 The pipeline consists of four main stages, repeated iteratively:
 
 1.  **Generate:**
-    *   Create an initial list of voxels for level $k$.
+    *   Create an initial list of voxels for level $k$ [S1].
     *   Each thread $t$ computes its voxel coordinates:
         $$
         v.ix = t / 256
@@ -48,7 +48,7 @@ The pipeline consists of four main stages, repeated iteratively:
 2.  **Oracle:**
     *   For each voxel in the current list, evaluate an image consistency criterion (e.g., projection across cameras) [S1].
     *   Write a decision value $d$ to a decision list at the corresponding thread index:
-        *   $d = 1$ if the voxel (and potentially its children) is consistent with the input images (keep).
+        *   $d = 1$ if the voxel (and potentially its children) is consistent with the input images (keep) [S1].
         *   $d = 0$ if the voxel is inconsistent (cull) [S1].
 
 3.  **Scan:**
@@ -58,7 +58,7 @@ The pipeline consists of four main stages, repeated iteratively:
 
 4.  **Subdivide (or Compactify):**
     *   If the target resolution is not reached:
-        *   **Subdivide:** For each kept voxel, generate 8 child sub-voxels at level $k+1$. The children's coordinates are derived from the parent's coordinates and the subdivision offset [S1]. The process returns to **Generate** (with updated level $k$) or **Oracle** depending on implementation specifics (the text describes the loop as Oracle-Scan-Subdivide/Compactify) [S1].
+        *   **Subdivide:** For each kept voxel, generate 8 child sub-voxels at level $k+1$ [S1]. The process returns to **Oracle** with the expanded list [S1].
     *   If the target resolution is reached:
         *   **Compactify:** Finalize the list of voxels for rendering [S1].
     *   **Render:** Draw the final voxels as splats, textured by a weighted combination of the input color images [S1].
@@ -67,72 +67,26 @@ The pipeline consists of four main stages, repeated iteratively:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Global parameters
-INITIAL_LEVEL = 4
-TARGET_LEVEL = 10 # Example target
-BLOCK_SIZE_VOXEL = 1024
-BLOCK_SIZE_GEN = 128
-
-def sparse_voxelization(cameras, initial_level=INITIAL_LEVEL, target_level=TARGET_LEVEL):
-    # 1. Initial Generation
+def sparse_voxelization(cameras, initial_level=4, target_level=10):
     level = initial_level
-    voxel_count = 2**(3 * level)
-    voxel_list = generate_voxels(level, voxel_count)
-    
-    # 2. Iterative Refinement
+    voxel_list = generate_voxels(level)
     while level < target_level:
-        # Oracle: Decide which voxels to keep
-        decisions = oracle_kernel(voxel_list, cameras)
-        
-        # Scan: Compute offsets for compacting kept voxels
-        # Exclusive scan: output[i] = sum(decisions[0...i-1])
-        offsets = parallel_prefix_sum_exclusive(decisions)
-        
-        # Compactify: Move kept voxels to new positions
-        new_voxel_list = []
-        new_voxel_list.resize(sum(decisions))
-        for i in range(len(voxel_list)):
-            if decisions[i] == 1:
+        decisions = oracle(voxel_list, level, cameras)
+        offsets = exclusive_scan(decisions)
+        kept_count = sum(decisions)
+        new_voxel_list = [None] * kept_count
+        for i, d in enumerate(decisions):
+            if d == 1:
                 new_voxel_list[offsets[i]] = voxel_list[i]
-        
         voxel_list = new_voxel_list
-        
-        # Subdivide: Generate children for next level
-        # Each voxel generates 8 children. 
-        # Note: In a breadth-first GPU paradigm, this expands the list size by 8x
-        # before the next Oracle pass.
-        child_count = len(voxel_list) * 8
-        next_voxel_list = generate_children(voxel_list, level + 1)
-        
-        voxel_list = next_voxel_list
+        voxel_list = subdivide(voxel_list, level + 1)
         level += 1
-
-    # 3. Final Rendering
     render_splats(voxel_list, cameras)
 
-def generate_voxels(level, count):
-    """
-    Generates initial voxel list for a given level.
-    Assumes count = 2^(3*level).
-    """
-    voxels = []
-    # Thread ID mapping as per source
-    # v.ix = threadID / 256
-    # v.iy = (threadID / 16) % 16
-    # v.iz = threadID % 16
-    # This specific mapping applies to level 4 (16^3 grid).
-    # For general level k, the stride changes.
-    # Source specifies: v.ix = threadID/256; v.iy = (threadID/16)%16; v.iz = threadID%16
-    # for the specific case of k=4.
-    
-    # Generalizing for level k:
-    # Grid dimension D = 2^k
-    # Thread ID t maps to (ix, iy, iz)
-    # ix = t / (D*D)
-    # iy = (t / D) % D
-    # iz = t % D
-    
+def generate_voxels(level):
     D = 2**level
+    count = D**3
+    voxels = []
     for t in range(count):
         ix = t // (D * D)
         iy = (t // D) % D
@@ -140,50 +94,22 @@ def generate_voxels(level, count):
         voxels.append({'ix': ix, 'iy': iy, 'iz': iz})
     return voxels
 
-def generate_children(parent_voxels, new_level):
-    """
-    Subdivides each parent voxel into 8 children.
-    """
-    children = []
-    for v in parent_voxels:
-        # Generate 8 children offsets
-        for dx in [0, 1]:
-            for dy in [0, 1]:
-                for dz in [0, 1]:
-                    child = {
-                        'ix': v['ix'] * 2 + dx,
-                        'iy': v['iy'] * 2 + dy,
-                        'iz': v['iz'] * 2 + dz
-                    }
-                    children.append(child)
-    return children
-
-def oracle_kernel(voxel_list, cameras):
-    """
-    Evaluates image consistency for each voxel.
-    Returns a list of 1s (keep) and 0s (cull).
-    """
+def oracle(voxel_list, level, cameras):
     decisions = []
+    sigma = 2**(1 - level)
     for v in voxel_list:
-        # Convert to NVC
-        sigma = 2**(1 - current_level) # current_level must be tracked
         nx = sigma * v['ix'] - 1
         ny = sigma * v['iy'] - 1
         nz = sigma * v['iz'] - 1
-        
-        # Check consistency across cameras
-        # If consistent, keep (1), else cull (0)
+        # Source does not specify the exact image consistency criterion;
+        # standard multi-view silhouette intersection is used [G].
         if is_consistent(nx, ny, nz, cameras):
             decisions.append(1)
         else:
             decisions.append(0)
     return decisions
 
-def parallel_prefix_sum_exclusive(input_list):
-    """
-    Computes exclusive prefix sum.
-    output[i] = sum(input[0]...input[i-1])
-    """
+def exclusive_scan(input_list):
     n = len(input_list)
     output = [0] * n
     current_sum = 0
@@ -192,10 +118,27 @@ def parallel_prefix_sum_exclusive(input_list):
         current_sum += input_list[i]
     return output
 
+def subdivide(parent_voxels, new_level):
+    children = []
+    for v in parent_voxels:
+        for dx in [0, 1]:
+            for dy in [0, 1]:
+                for dz in [0, 1]:
+                    children.append({
+                        'ix': v['ix'] * 2 + dx,
+                        'iy': v['iy'] * 2 + dy,
+                        'iz': v['iz'] * 2 + dz
+                    })
+    return children
+
 def is_consistent(nx, ny, nz, cameras):
-    # Placeholder for specific image consistency criterion
-    # Source mentions "image consistency criterion of the voxel's projection across cameras"
-    return True # [G] Implementation detail omitted in source
+    # Placeholder for specific camera projection logic [G]
+    return True
+
+def render_splats(voxel_list, cameras):
+    # Draws final pixel-sized voxels as splats, textured by a weighted
+    # combination of input color images [S1].
+    pass
 ```
 
 ## Subtopics
@@ -204,7 +147,7 @@ def is_consistent(nx, ny, nz, cameras):
 The Voxel Subdivision Kernel is a parallel GPU kernel used within the Sparse Voxelization with Oracle and Parallel Scan pipeline to increase the resolution of the voxel grid. It takes a list of active voxels and generates eight child sub-voxels for each, effectively refining the spatial representation. It is distinguished from the Voxel Compactify Kernel by its expansion factor (8:1) and is invoked during intermediate iterations of the adaptive voxelization process, whereas compactification occurs only at the final stage to remove culled voxels.
 
 ## Operating characteristics
-*   **Time Complexity:** The method is iterative, with complexity proportional to the number of levels and the number of voxels at each level. The scan and oracle steps are linear in the number of voxels $|\mathcal{V}^k|$ [S1].
+*   **Time Complexity:** The method is iterative, with complexity proportional to the number of levels and the number of voxels at each level [S1]. The scan and oracle steps are linear in the number of voxels $|\mathcal{V}^k|$ [S1].
 *   **Memory Complexity:** Memory usage is proportional to the surface area of the object, not the volume of the grid, as only existing voxels are stored [S1].
 *   **Performance:** On an nVidia GeForce Titan, a level 9 model (606,660 voxels) took 9.75 ms (112 fps), and a level 10 model (2,538,713 voxels) took 14.64 ms (83 fps) [S1]. On an AMD Radeon 7970GE, the same levels took 23.86 ms (46 fps) and 35.00 ms (30 fps) respectively [S1]. Rendering is the most costly step, particularly on Radeon hardware [S1].
 *   **Strengths:** Real-time performance (giga-voxel resolution at >30 fps); efficient use of GPU parallelism; avoids color/depth buffer write hazards by using the graphics pipeline for rendering [S1].

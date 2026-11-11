@@ -3,11 +3,11 @@
 Also called: Wilhelms et al. Per-Pixel Sort, Wilhelms et al. Sorting
 
 ## Overview
-Per-Pixel Sorting (General Variant) is an image-space visibility ordering method that sorts all cell faces projecting onto a specific pixel at render time, just prior to compositing [S2, unofficial][S3, unofficial]. It solves the problem of determining the correct back-to-front rendering order for transparent volumes in scenes where a global topological sort is impossible due to visibility cycles [S2, unofficial]. Unlike its sibling [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md), which sorts only exterior faces and exploits spatial coherence, this variant sorts *all* faces (including interior ones) independently or incrementally per pixel [S2, unofficial]. It is distinguished from [Mammen's Technique](1279-mammen-s-technique.md) by its broader application to general cell projection rather than just transparent fragments in front of opaque ones, though it shares similar data structures [S3, unofficial].
+Per-Pixel Sorting (General Variant) is an image-space visibility ordering method that sorts all cell faces projecting onto a specific pixel at render time, just prior to compositing [S2, unofficial][S3, unofficial]. It solves the problem of determining the correct back-to-front rendering order for transparent volumes in scenes where a global topological sort is impossible due to visibility cycles [S2, unofficial]. Unlike its sibling [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md), which sorts only exterior faces and exploits spatial coherence, this variant sorts all faces (including interior ones) independently or incrementally per pixel [S2, unofficial]. It differs from [Mammen's Technique](1279-mammen-s-technique.md) in that it sorts all cell faces per pixel, whereas Mammen's technique specifically sorts transparent fragments in front of the front-most opaque one [S3, unofficial].
 
 ## How it works
-**Inputs:** A set of convex polyhedral cells forming a volume mesh; a viewpoint; a rasterization grid (screen).
-**Outputs:** A sorted list of face fragments for each pixel, ordered from back to front.
+**Inputs:** A set of convex polyhedral cells forming a volume mesh; a viewpoint; a rasterization grid (screen) [S1][S3, unofficial].
+**Outputs:** A sorted list of face fragments for each pixel, ordered from back to front [S2, unofficial].
 
 **Data Structures:**
 The method adapts scan-line visible surface algorithms using the following structures [S1][S3, unofficial]:
@@ -17,15 +17,15 @@ The method adapts scan-line visible surface algorithms using the following struc
 4.  **Z-Sorted List:** A list of faces at the current pixel $(x, y)$, sorted by their depth $z$ value at that pixel.
 
 **Steps:**
-1.  **Initialization:** Create empty Y-Buckets for all scan lines.
-2.  **Scan Line Processing:** Iterate through each scan line $y$ from top to bottom (or bottom to top, depending on coordinate system).
-    3.  **Update Active List:** For the current scan line $y$, add all faces found in Y-Bucket $y$ to the Active List. Remove faces from the Active List that no longer overlap the current scan line.
-    4.  **Pixel Processing:** Iterate through each pixel column $x$ on the current scan line.
-        5.  **Update X-Buckets:** For the current pixel $(x, y)$, add all faces found in X-Bucket $x$ to the local processing set.
-        6.  **Filter Active List:** Identify faces in the Active List that cover the current pixel $(x, y)$.
-        7.  **Sort:** Sort the identified faces by their depth $z$ at the pixel center $(x, y)$. If the previous pixel $(x-1, y)$ was processed, the sort can be updated incrementally rather than performed from scratch, taking partial advantage of coherence in $x$ [S1][S3, unofficial].
-        8.  **Compositing:** Composite the sorted faces from back to front.
-        9.  **Cleanup:** Prepare for the next pixel. If not using incremental update, clear the Z-Sorted List.
+1.  **Initialization:** Create empty Y-Buckets for all scan lines [S1][S3, unofficial].
+2.  **Scan Line Processing:** Iterate through each scan line $y$ from top to bottom (or bottom to top, depending on coordinate system) [S1][S3, unofficial].
+3.  **Update Active List:** For the current scan line $y$, add all faces found in Y-Bucket $y$ to the Active List. Remove faces from the Active List that no longer overlap the current scan line [S1][S3, unofficial].
+4.  **Pixel Processing:** Iterate through each pixel column $x$ on the current scan line [S1][S3, unofficial].
+5.  **Update X-Buckets:** For the current pixel $(x, y)$, add all faces found in X-Bucket $x$ to the local processing set [S1][S3, unofficial].
+6.  **Filter Active List:** Identify faces in the Active List that cover the current pixel $(x, y)$ [S1][S3, unofficial].
+7.  **Sort:** Sort the identified faces by their depth $z$ at the pixel center $(x, y)$ [S2, unofficial]. If the previous pixel $(x-1, y)$ was processed, the sort can be updated incrementally rather than performed from scratch, taking partial advantage of coherence in $x$ [S1][S3, unofficial].
+8.  **Compositing:** Composite the sorted faces from back to front [S2, unofficial].
+9.  **Cleanup:** Prepare for the next pixel. If not using incremental update, clear the Z-Sorted List [S1][S3, unofficial].
 
 **Formulas:**
 *   Depth $z$ at pixel $(x, y)$ for a planar face with vertices $\mathbf{v}_i = (x_i, y_i, z_i)$:
@@ -33,8 +33,8 @@ The method adapts scan-line visible surface algorithms using the following struc
     (Assuming a triangular face; generalized for polygons via barycentric interpolation or plane equation $Ax + By + Cz + D = 0$ where $z = -(Ax + By + D)/C$) [G].
 
 **Parameters:**
-*   Scan line order: Not specified.
-*   Sort stability: Not specified.
+*   Scan line order: Not given in the sources.
+*   Sort stability: Not given in the sources.
 
 **Edge Cases and Pitfalls:**
 *   **Visibility Cycles:** This method handles visibility cycles gracefully because a local visibility sort always exists for each pixel center, even if no global sort exists [S2, unofficial].
@@ -46,48 +46,59 @@ The method adapts scan-line visible surface algorithms using the following struc
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+class Face:
+    def __init__(self, min_x, max_x, min_y, max_y, plane_coeffs):
+        self.min_x, self.max_x = min_x, max_x
+        self.min_y, self.max_y = min_y, max_y
+        self.A, self.B, self.C, self.D = plane_coeffs
+
+    def covers_pixel(self, x, y):
+        return self.min_x <= x <= self.max_x and self.min_y <= y <= self.max_y
+
+    def get_z_at(self, x, y):
+        return -(self.A * x + self.B * y + self.D) / self.C
+
 def per_pixel_sort_general_variant(faces, screen_width, screen_height):
-    # Initialize Y-Buckets
+    # Initialize Y-Buckets and X-Buckets
     y_buckets = [[] for _ in range(screen_height)]
-    
-    # Populate Y-Buckets: assign each face to the first scan line it crosses
+    x_buckets = [[] for _ in range(screen_width)]
+
+    # Populate buckets: assign each face to the first scan line and pixel column it crosses
     for face in faces:
-        min_y, max_y = face.get_y_range()
-        if min_y < screen_height and max_y >= 0:
-            first_scan_line = max(0, min_y)
-            y_buckets[first_scan_line].append(face)
-            
+        if face.min_y < screen_height and face.max_y >= 0:
+            y_buckets[max(0, face.min_y)].append(face)
+        if face.min_x < screen_width and face.max_x >= 0:
+            x_buckets[max(0, face.min_x)].append(face)
+
+    pixel_fragments = [[[] for _ in range(screen_height)] for _ in range(screen_width)]
+    active_list = []
+
     # Process each scan line
     for y in range(screen_height):
-        active_list = []
-        
-        # Add new faces to active list
+        # Add new faces to active list from Y-Buckets
         for face in y_buckets[y]:
             active_list.append(face)
-            
+
         # Remove faces that no longer overlap this scan line
-        active_list = [f for f in active_list if f.overlaps_scan_line(y)]
-        
+        active_list = [f for f in active_list if f.max_y > y]
+
         # Process each pixel in the scan line
         for x in range(screen_width):
-            # Identify faces covering this pixel
+            # Add faces starting at this pixel column to local set
+            local_faces = list(x_buckets[x])
+
+            # Identify faces in Active List that cover this pixel
             covering_faces = [f for f in active_list if f.covers_pixel(x, y)]
-            
+            covering_faces.extend(local_faces)
+
             # Sort faces by depth z at (x, y)
-            # Optimization: If x > 0, use incremental sort based on previous pixel's order
-            if x > 0:
-                covering_faces = incremental_sort(covering_faces, previous_pixel_faces)
-            else:
-                covering_faces.sort(key=lambda f: f.get_z_at(x, y))
-                
-            # Composite faces back-to-front
-            for face in covering_faces:
-                composite_pixel(x, y, face)
-                
-            # Store current pixel's faces for incremental sort of next pixel
-            previous_pixel_faces = covering_faces
-            
-    return rendered_image
+            # Note: Incremental update from previous pixel (x-1, y) is possible but not specified in sources [G]
+            covering_faces.sort(key=lambda f: f.get_z_at(x, y))
+
+            # Store sorted fragments for compositing
+            pixel_fragments[x][y] = covering_faces
+
+    return pixel_fragments
 ```
 
 ## Subtopics
@@ -103,12 +114,12 @@ PLP is an approximate, from-point, object-space visibility algorithm designed fo
 
 ## Operating characteristics
 *   **Time Complexity:** $O(N \cdot P)$ in the worst case, where $N$ is the number of faces and $P$ is the number of pixels, as each pixel may require sorting all overlapping faces. Incremental updates in $x$ reduce the constant factor but do not change the asymptotic complexity for dense scenes [S1][S3, unofficial].
-*   **Memory Complexity:** Requires substantial memory proportional to the projected area, in pixels, of *all* faces in the mesh, not just the boundary [S3, unofficial]. This contrasts with methods like SXMPVO which only require memory proportional to the boundary [S3, unofficial].
+*   **Memory Complexity:** Requires substantial memory proportional to the projected area, in pixels, of all faces in the mesh, not just the boundary [S3, unofficial]. This contrasts with [SXMPVO](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md), which handles fragments proportional to the projected area of the boundary [S3, unofficial].
 *   **Measured Performance:** Not given in the sources.
 *   **Strengths:** Handles visibility cycles gracefully; robust for non-convex meshes where global sorting fails [S2, unofficial].
 *   **Limitations:** High memory usage; high computational cost due to sorting all faces (including interior ones); poor coherence in $y$ [S1][S2, unofficial][S3, unofficial].
-*   **When to use:** When a global topological sort is impossible and memory is not a constraint; for scenes with complex visibility cycles.
-*   **When not to use:** For large datasets with many interior faces; when memory bandwidth is limited; when global sorting is possible (use [Topological Sort for Cell Projection](999-topological-sort-for-cell-projection.md) or [SXMPVO](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md) instead).
+*   **When to use:** When a global topological sort is impossible and memory is not a constraint; for scenes with complex visibility cycles [S2, unofficial].
+*   **When not to use:** For large datasets with many interior faces; when memory bandwidth is limited; when global sorting is possible (use [Topological Sort for Cell Projection](999-topological-sort-for-cell-projection.md) or [SXMPVO](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md) instead) [S3, unofficial].
 
 ## Background
 The method was introduced by Wilhelms et al. [S1][S3, unofficial]. It is based on techniques similar to scan-line visible surface algorithms [S1][S3, unofficial]. Hardware proposals, such as the R-Buffer by Wittenbrink, aimed to implement this efficiently by scanning polygons once and storing fragments in a recirculating buffer for multiple depth comparison passes [S3, unofficial]. However, the R-Buffer hardware does not exist, and software implementations are less efficient than incremental methods [S3, unofficial]. The method is often compared to Mammen's Technique, which is similar but focuses on transparent fragments in front of opaque ones [S3, unofficial].

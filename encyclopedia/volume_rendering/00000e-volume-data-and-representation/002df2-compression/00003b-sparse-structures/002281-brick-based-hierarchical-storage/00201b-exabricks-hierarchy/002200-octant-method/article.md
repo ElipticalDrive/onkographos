@@ -29,7 +29,7 @@ For any point $P$:
 1.  **Find Leaf Octant and Dual Cell:** Identify the leaf cell $C$ containing $P$ and its corresponding octant $O$. Identify the corresponding dual cell $D$ on this level [S1, unofficial].
 2.  **Initialize Center Vertex:** Set the value of the center vertex $O(0)$ to the cell center value:
     $$ O(0).v = C.v $$
-3.  **Compute Boundary Vertices:** For each boundary vertex (face, edge, corner), determine if it lies on a refinement boundary.
+3.  **Compute Boundary Vertices:** For each boundary vertex (face, edge, corner), determine if it lies on a refinement boundary [S1, unofficial].
     *   **Non-Boundary Case:** If all required dual cell corners (e.g., $D(0), D(X)$ for face vertex $O(X)$) exist and are at the same level as $C$, compute the value using non-boundary averaging rules [S1, unofficial]:
         *   Face vertex $O(X)$: Average of two cells.
             $$ O(X).v = \frac{1}{2} (D(0).v + D(X).v) $$
@@ -37,17 +37,17 @@ For any point $P$:
             $$ O(XY).v = \frac{1}{4} (D(0).v + D(X).v + D(Y).v + D(XY).v) $$
         *   Corner vertex $O(XYZ)$: Average of eight vertices of the dual cell.
             $$ O(XYZ).v = \frac{1}{8} \sum_{v \in D.vertices} v.v $$
-    *   **Boundary Case:** If at least one input lies on a coarser level:
-        *   **Fine Side:** If the current octant $O$ is on the finer level ($O.l > \min(\text{input levels})$), the vertex value is determined by the coarser side. Shift the vertex position $O(v).p$ minutely away from the cell center $C$ in the direction of the vertex offset $dX$ by $\epsilon$, and recursively call the octant function on the shifted position:
+    *   **Boundary Case:** If at least one input lies on a coarser level [S1, unofficial]:
+        *   **Fine Side:** If the current octant $O$ is on the finer level ($O.l > \min(\text{input levels})$), the vertex value is determined by the coarser side [S1, unofficial]. Shift the vertex position $O(v).p$ minutely away from the cell center $C$ in the direction of the vertex offset $dX$ by $\epsilon$, and recursively call the octant function on the shifted position:
             $$ O(v).v = \text{octant}(O(v).p + \epsilon \cdot dX) $$
         *   **Coarse Side:** If the current octant is on the coarser side, compute the vertex value locally using one of four coarser side interpolant options (see below) [S1, unofficial].
 4.  **Trilinear Interpolation:** Once all 8 vertex values of octant $O$ are set, perform trilinear interpolation within $O$ to find $F(P)$ [S1, unofficial].
 
 **Coarser Side Interpolant Options:**
 When computing the value for the coarser side octant, four options exist [S1, unofficial]:
-1.  **Coarsest-Level Lerp:** Perform trilinear interpolation on the coarsest level involved for any of the inputs.
-2.  **Current-Level Lerp:** Perform trilinear interpolation on the current level.
-3.  **Basis Function:** Use a basis function interpolation.
+1.  **Coarsest-Level Lerp:** Perform trilinear interpolation on the coarsest level involved for any of the inputs [S1, unofficial].
+2.  **Current-Level Lerp:** Perform trilinear interpolation on the current level [S1, unofficial].
+3.  **Basis Function:** Use a basis function interpolation [S1, unofficial].
 4.  **Finest-Level Lerp:** Perform trilinear interpolation on the finest level involved [S1, unofficial].
 
 **Pseudocode:**
@@ -127,17 +127,32 @@ def octant(P: Point3D) -> float:
     # 6. Trilinear interpolation within octant O at point P
     return trilinear_interpolate(oct, P)
 
+def find_leaf_octant(P: Point3D) -> Octant:
+    # Standard AMR traversal to find the finest cell containing P, then split into 8 octants.
+    # Returns the octant corresponding to P's position relative to the cell center.
+    pass # Implementation details for AMR traversal are not given in the sources. [G]
+
+def find_dual_cell(oct: Octant) -> DualCell:
+    # Constructs the dual cell D from the octant's cell center and its neighbors.
+    # D(0) is at the cell center. D(X) is at the center of the neighbor cell in +X direction, etc.
+    pass # Implementation details for dual cell construction are not given in the sources. [G]
+
+def trilinear_interpolate(oct: Octant, P: Point3D) -> float:
+    # Standard trilinear interpolation using the 8 vertex values of the octant.
+    # Returns the interpolated scalar value at P.
+    pass # Standard trilinear interpolation formula. [G]
+
 def compute_coarser_side_vertex(D: DualCell, vertex_name: str) -> float:
-    # Implementation depends on chosen coarser side interpolant option
-    # Options: coarsest-level lerp, current-level lerp, basis function, finest-level lerp
-    # Not given in the sources. [G] Placeholder for specific implementation logic.
+    # Implementation depends on chosen coarser side interpolant option.
+    # Options: coarsest-level lerp, current-level lerp, basis function, finest-level lerp.
+    # Not given in the sources. [G]
     pass
 ```
 
 **Edge Cases and Pitfalls:**
 *   **Accuracy Sacrifice:** Setting fine-side vertex values based on the coarse-side interpolant ensures continuity but sacrifices some accuracy at the boundary [S1, unofficial].
-*   **Recursion Depth:** The recursive call for fine-side vertices must terminate. Since the shift moves the point to the coarser side, and the coarser side computes locally, recursion depth is limited by the refinement levels [S1, unofficial].
-*   **Epsilon Value:** The choice of $\epsilon$ must be small enough to not cross into another cell but large enough to avoid numerical precision issues [S1, unofficial].
+*   **Recursion Depth:** The recursive call for fine-side vertices must terminate [S1, unofficial]. Since the shift moves the point to the coarser side, and the coarser side computes locally, recursion depth is limited by the refinement levels [S1, unofficial].
+*   **Epsilon Value:** A small epsilon value is used to minutely shift vertex positions away from the cell center to find coarsest level neighbors [S1, unofficial].
 
 ## Subtopics
 
@@ -148,9 +163,9 @@ An optimization for isosurface extraction on Adaptive Mesh Refinement (AMR) data
 Generalized Trilinear Interpolation (GTI) is a reconstruction method for cell-centered Block-Structured Adaptive Mesh Refinement (BS-AMR) data that computes field values at arbitrary points, specifically the vertices of dual cells or octants, ensuring $C^0$ continuity across refinement level boundaries. It solves the problem where standard trilinear interpolation fails because neighbors at different resolution levels are missing or misaligned, by using virtual unstructured elements to initialize octant vertices with precomputed weights derived from a multivariate polynomial basis. It builds on [Octant Method](2648-octant-method.md) by providing the vertex initialization step required before trilinear interpolation within an octant can proceed.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources. The method involves finding the leaf cell, computing vertex values (potentially recursively), and trilinear interpolation. The recursion depth is bounded by the number of refinement levels.
-*   **Memory Complexity:** Not given in the sources. The method requires storing cell-centered data and potentially dual cell information.
-*   **Measured Performance:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S1, unofficial]. The method involves finding the leaf cell, computing vertex values (potentially recursively), and trilinear interpolation [S1, unofficial]. The recursion depth is bounded by the number of refinement levels [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial]. The method requires storing cell-centered data and potentially dual cell information [S1, unofficial].
+*   **Measured Performance:** Not given in the sources [S1, unofficial].
 *   **Strengths:**
     *   Ensures $C^0$ continuity across level boundaries [S1, unofficial].
     *   Uses rectilinear octants that do not cross level boundaries, simplifying implementation compared to unstructured dual cell methods [S1, unofficial].
@@ -167,3 +182,4 @@ The Octant Method was introduced as a novel BS-AMR reconstruction strategy in th
 
 ## Sources
 [S1] CPU Isosurface Ray Tracing of Adaptive Mesh Refinement Data, https://www.sci.utah.edu/~feng/assets/papers/Fen-AMR-VIS18.pdf, fetched 2026-10-26 (unofficial)
+[S2] CPU Ray Tracing of Tree‐Based Adaptive Mesh Refinement Data, https://publications.sci.utah.edu/publications/Wan2020a/cgf.13958.pdf, fetched 2026-10-27

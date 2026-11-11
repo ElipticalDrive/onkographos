@@ -3,158 +3,190 @@
 Also called: Mesh-based Gaussian Splatting, Tightly/Loosely-bound Gaussian Splatting
 
 ## Overview
-Distance-based Gaussian Splatting is a method that integrates a pre-existing 3D mesh with 3D Gaussian splats to improve rendering quality and geometric consistency, particularly for large-scale scenes [S1]. It solves the problem of redundant or distorted Gaussian splats in regions where the underlying mesh geometry is inaccurate or overly dense by classifying splats as either "tightly-bound" or "loosely-bound" based on their distance to the mesh surface [S1]. Unlike standard 3D Gaussian Splatting which relies solely on view-dependent densification, this method explicitly aligns a subset of splats to the mesh surface to correct geometric artifacts while allowing others to capture fine details [S1].
+Distance-based Gaussian Splatting (MeshGS) connects a large-scale 3D mesh with Gaussian splats by classifying primitives as tightly-bound or loosely-bound based on their distance to the mesh surface, while masking out splats occluded by the mesh [S1]. It differs from sibling methods like Gaussian Opacity Fields (GOF) by explicitly leveraging a pre-existing mesh geometry to prune redundant internal splats and align surface-aligned splats, rather than relying solely on volumetric opacity fields or 2D segmentation masks [S1, S2, S3].
 
 ## How it works
-**Inputs:**
-*   A 3D mesh $M$ composed of triangles $f_j$ with centers $m_j$ [S1].
-*   A set of training images with known camera poses [S1].
-*   Standard 3D Gaussian Splatting parameters (opacity, spherical harmonics coefficients) [S1].
+**Inputs and Outputs**
+*   **Inputs:** A trained set of $N$ 3D Gaussian primitives $\mathcal{G}$ (initialized from mesh triangles), a 3D mesh $M$ (vertices and faces), and a set of training views.
+*   **Outputs:** A refined set of Gaussian primitives optimized for high-quality rendering, categorized into tightly-bound ($G_t$) and loosely-bound ($G_l$) splats.
 
-**Outputs:**
-*   A set of 3D Gaussian splats $\{G_i\}$, classified into tightly-bound ($G^t_i$) and loosely-bound ($G^l_i$) subsets [S1].
-*   A rendered image $\mathbf{c}$ [S1].
+**Data Structures**
+*   **Mesh $M$:** Defined by a set of triangles $f_j$.
+*   **Gaussian Primitive $g_i$:**
+    *   Center position $\boldsymbol{p}_i \in \mathbb{R}^3$.
+    *   3D Covariance $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3\times3}$, parameterized by scale $\mathbf{S}_i \in \mathbb{R}^3$ and rotation $\mathbf{R}_i \in \mathbb{R}^{3\times3}$ (encoded by quaternion $\mathbf{q} \in \mathbb{R}^4$) such that $\boldsymbol{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$.
+    *   Opacity $o_i \in [0, 1]$.
+    *   Spherical Harmonics coefficients $\mathbf{c}_i$.
 
-**Data Structures:**
-*   **Gaussian Splat $i$:**
-    *   Center: $\mathbf{p}_i \in \mathbb{R}^3$ [S1].
-    *   Covariance: $\mathbf{\Sigma}_i \in \mathbb{R}^{3\times3}$, parameterized as $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$, where $\mathbf{S}_i \in \mathbb{R}^3$ is a scaling vector and $\mathbf{R}_i \in \mathbb{R}^{3\times3}$ is a rotation matrix encoded by a quaternion $\mathbf{q} \in \mathbb{R}^4$ [S1].
-    *   Opacity: $o_i \in [0, 1]$ [S1].
-    *   Color: View-dependent color $\mathbf{c}_i$ represented by spherical harmonics [S1].
-*   **Mesh $M$:** List of triangles $f_j$ with associated surface normals and centers $m_j$ [S1].
+**Numbered Steps**
 
-**Parameters:**
-*   Distance threshold $d_{th} = 0.01$ [S1].
-*   Pruning interval: Every 500 training iterations [S1].
-*   Depth offset: $+0.01$ added to rendered depth $D_i$ [S1].
-*   Loss weights: $\lambda_{img} = 0.001$, $\lambda_{nc} = 0.1$, $\lambda_{min} = 0.1$, $\lambda_{max} = 10$, $\lambda_{proj} = 50$ [S1].
-*   Threshold $\rho = 0.1$ [S1].
+1.  **Initialization:** Initialize a 3D Gaussian splat at the center $\boldsymbol{m}_j$ of each triangle $f_j$ of the mesh $M$ [S1].
+2.  **Occlusion Masking:** For each training viewpoint $\boldsymbol{P}_i$, render a depth map $D_i$. Assume the mesh surface is entirely opaque. Mask out Gaussian splats that are occluded by the mesh surface in the rendered depth [S1].
+3.  **Visibility Assessment:** Assess the visibility of Gaussian splats across all training views. Identify splats located behind the mesh surface that are never observed by any training view [S1].
+4.  **Pruning:** Remove all redundant Gaussian splats situated behind the mesh surface. This pruning occurs at specific training iterations (e.g., every 500 iterations) [S1].
+5.  **Distance Calculation:** Calculate the Euclidean distance $d_i$ between each Gaussian splat’s center $\boldsymbol{p}_i$ and the corresponding mesh faces $f_j$ [S1].
+6.  **Classification:** Classify Gaussian splats based on the distance $d_i$ and a threshold $d_{th}$:
+    *   **Tightly-bound ($G_{ti}$):** If $d_i < d_{th}$.
+    *   **Loosely-bound ($G_{li}$):** If $d_i > d_{th}$ [S1].
+7.  **Alignment:** Flatten the tightly-bound splats $G_{ti}$ and align them with the mesh surface [S1].
+8.  **Rendering Projection:** To render, transform camera space into ray space using an affine transformation $\mathbf{J}_i \in \mathbb{R}^{2\times3}$ defined by the camera position $\boldsymbol{p}_{ci}$. Compute the 2D covariance in ray space:
+    $$ \boldsymbol{\Sigma}'_i = \mathbf{J}_i \boldsymbol{\Sigma}_{ic} \mathbf{J}_i^T $$
+    where $\boldsymbol{\Sigma}_{ic}$ is the 3D covariance in camera space [S1].
 
-**Algorithm Steps:**
+**Formulas**
+*   **3D Gaussian Definition:**
+    $$ G_{i}(\boldsymbol{x}) = e^{-\frac {1}{2}(\boldsymbol{x}-\boldsymbol{p}_{i})^T \boldsymbol{\Sigma }_{i}^{-1}(\boldsymbol{x}-\boldsymbol{p}_{i})} $$
+    where $\boldsymbol{p}_i$ is the center and $\boldsymbol{\Sigma}_i$ is the 3D covariance [S1].
+*   **2D Gaussian Definition:**
+    $$ g_{i}(\boldsymbol{x}) = e^{-\frac {1}{2}(\boldsymbol{x}-\boldsymbol{p}'_{i})^T {\boldsymbol{\Sigma }'_{i}}^{-1}(\boldsymbol{x}-\boldsymbol{p}'_{i})} $$
+    where $\boldsymbol{p}'_i$ is the 2D center and $\boldsymbol{\Sigma}'_i$ is the 2D covariance [S1].
+*   **Rendering Equation:**
+    $$ c = \sum _{i=1}^{n} c_{i}\alpha _{i}\prod _{j=1}^{i-1}(1-\alpha _{j}), \quad \alpha _{i} = o_{i}g_{i}(\boldsymbol{x}) $$
+    where $c_i$ is view-dependent color, $o_i$ is opacity, and $g_i(\boldsymbol{x})$ is the 2D Gaussian value [S1].
 
-1.  **Initialization:** Initialize a 3D Gaussian splat $G_i$ at the center $\mathbf{m}_j$ of each triangle $f_j$ of the mesh $M$ [S1]. The initial covariance and orientation are derived from the mesh geometry [S1].
+**Parameters**
+*   **Depth Offset:** Add $0.01$ to the rendered depth $D_i$ when applying occlusion masking [S1].
+*   **Pruning Interval:** Prune splats behind the mesh every $500$ training iterations [S1].
+*   **Distance Threshold ($d_{th}$):** Set to $0.01$ to distinguish tightly-bound from loosely-bound splats [S1].
+*   **Loss Weights:** $\lambda_{img} = 0.001$, $\lambda_{nc} = 0.1$, $\lambda_{min} = 0.1$, $\lambda_{max} = 10$, $\lambda_{proj} = 50$ [S1].
 
-2.  **Occlusion Masking:** For each training viewpoint $\mathbf{P}_i$, render a depth map $D_i$ from the mesh $M$. Add $0.01$ to $D_i$ to ensure proper depth testing [S1]. Use this depth map to mask out Gaussian splats that are occluded by the mesh surface, assuming the mesh is entirely opaque [S1]. Splats located behind the mesh surface relative to the camera are excluded from rendering [S1].
-
-3.  **Visibility Assessment and Pruning:** Assess the visibility of all Gaussian splats across all training views. Identify splats located behind the mesh surface that are never observed by any training view [S1]. Remove these redundant splats at every 500 training iterations [S1].
-
-4.  **Distance Calculation:** Calculate the Euclidean distance $d_i$ between the center $\mathbf{p}_i$ of each Gaussian splat and the corresponding mesh face $f_j$ [S1].
-
-5.  **Classification:** Classify each Gaussian splat based on the distance $d_i$ and threshold $d_{th}$:
-    *   If $d_i < d_{th}$, classify as **tightly-bound** ($G^t_i$) [S1].
-    *   If $d_i > d_{th}$, classify as **loosely-bound** ($G^l_i$) [S1] [S1].
-
-6.  **Alignment:** Flatten the tightly-bound splats $G^t_i$ and align them with the mesh surface [S1]. This involves constraining their covariance and orientation to match the local surface geometry [S1].
-
-7.  **Rendering:** Render the image using the standard differentiable rasterization pipeline [S1]:
-    *   Transform camera space into ray space using an affine transformation $\mathbf{J}_i \in \mathbb{R}^{2\times3}$ defined by the camera position $\mathbf{p}_{ci}$ [S1].
-    *   Compute the 2D covariance in ray space: $\mathbf{\Sigma}'_i = \mathbf{J}_i \mathbf{\Sigma}_{ic} \mathbf{J}_i^T$, where $\mathbf{\Sigma}_{ic}$ is the 3D covariance in camera space [S1].
-    *   Compute the 2D Gaussian value: $g_i(\mathbf{x}) = e^{-\frac{1}{2}(\mathbf{x}-\mathbf{p}'_i)^T {\mathbf{\Sigma}'_i}^{-1}(\mathbf{x}-\mathbf{p}'_i)}$ [S1].
-    *   Render the image using alpha blending: $\mathbf{c} = \sum_{i=1}^{n} \mathbf{c}_i \alpha_i \prod_{j=1}^{i-1}(1-\alpha_j)$, where $\alpha_i = o_i g_i(\mathbf{x})$ [S1].
-
-8.  **Optimization:** Minimize the total loss function, which includes image loss, normal consistency loss for tightly-bound splats, and other regularization terms [S1].
-
-**Pseudocode:**
+**Pseudocode**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def distance_based_gaussian_splatting(mesh M, training_views V, iterations=30000):
-    # Initialization
-    splats = []
-    for triangle f_j in M.triangles:
-        center m_j = f_j.center
-        # Initialize Gaussian at mesh triangle center
-        G = Gaussian(center=m_j, covariance=compute_covariance_from_mesh(f_j), 
-                     opacity=1.0, color=compute_color_from_mesh(f_j))
-        splats.append(G)
+def distance_based_gaussian_splatting(mesh, training_views, num_iterations=30000):
+    """
+    Implements Distance-based Gaussian Splatting (MeshGS).
     
+    Args:
+        mesh: 3D mesh object with triangles f_j and vertices.
+        training_views: List of camera poses and images.
+        num_iterations: Total training iterations.
+        
+    Returns:
+        Optimized set of Gaussian primitives.
+    """
+    # 1. Initialization
+    gaussians = []
+    for triangle in mesh.triangles:
+        center = triangle.center
+        # Initialize Gaussian at triangle center
+        g = Gaussian(center=center)
+        gaussians.append(g)
+        
+    # Parameters
     d_th = 0.01
     prune_interval = 500
+    depth_offset = 0.01
     
-    for iter in range(iterations):
-        # Occlusion Masking
-        for view in V:
-            # Render depth from mesh, adding 0.01 offset
-            depth_map = render_mesh_depth(M, view.camera) + 0.01
+    for iteration in range(1, num_iterations + 1):
+        # 2. Occlusion Masking & 3. Visibility Assessment
+        occluded_indices = set()
+        for view in training_views:
+            # Render depth map from current view
+            depth_map = render_depth(gaussians, view.camera)
             
-            # Mask out splats occluded by mesh
-            for G in splats:
-                if is_occluded_by_mesh(G.center, view.camera, depth_map):
-                    G.visible = False
-                else:
-                    G.visible = True
-        
-        # Visibility Assessment and Pruning
-        if iter % prune_interval == 0:
-            # Identify splats behind mesh and never observed
-            redundant_splats = []
-            for G in splats:
-                if not G.visible and is_behind_mesh(G.center, M):
-                    redundant_splats.append(G)
-            # Remove redundant splats
-            splats = [G for G in splats if G not in redundant_splats]
+            # Apply depth offset
+            depth_map += depth_offset
             
-        # Distance Calculation and Classification
+            # Identify splats occluded by mesh surface
+            # Assume mesh is opaque; if splat depth > mesh depth, it is occluded
+            for idx, g in enumerate(gaussians):
+                if is_occluded_by_mesh(g.center, view.camera, mesh, depth_map):
+                    occluded_indices.add(idx)
+                    
+        # 4. Pruning (at specific intervals)
+        if iteration % prune_interval == 0:
+            # Remove splats that are behind the mesh and never observed
+            # (Simplified: remove those identified as occluded/redundant)
+            gaussians = [g for i, g in enumerate(gaussians) if i not in occluded_indices]
+            
+        # 5. Distance Calculation & 6. Classification
         tightly_bound = []
         loosely_bound = []
-        for G in splats:
-            # Calculate distance to corresponding mesh face
-            d_i = distance_to_mesh_face(G.center, M)
-            if d_i < d_th:
-                G.type = 'tightly_bound'
-                tightly_bound.append(G)
+        
+        for g in gaussians:
+            # Calculate distance to nearest mesh face
+            dist = distance_to_mesh(g.center, mesh)
+            
+            if dist < d_th:
+                tightly_bound.append(g)
             else:
-                G.type = 'loosely_bound'
-                loosely_bound.append(G)
+                loosely_bound.append(g)
                 
-        # Alignment for tightly-bound splats
-        for G in tightly_bound:
-            align_to_mesh_surface(G, M)
+        # 7. Alignment for tightly-bound splats
+        for g in tightly_bound:
+            align_with_mesh_surface(g, mesh)
             
-        # Rendering and Loss Computation
-        for view in V:
-            # Standard 3DGS Rendering Pipeline
-            # 1. Transform to camera space
-            for G in splats:
-                if G.visible:
-                    G.camera_center = view.camera.transform(G.center)
-                    G.camera_cov = view.camera.R @ G.covariance @ view.camera.R.T
-            
-            # 2. Project to 2D ray space
-            for G in splats:
-                if G.visible:
-                    J_i = view.camera.affine_transform(G.camera_center)
-                    G.sigma_2d = J_i @ G.camera_cov @ J_i.T
-                    G.g_2d = compute_2d_gaussian(G.sigma_2d, G.camera_center)
-            
-            # 3. Alpha Blending
-            rendered_image = alpha_blend(splats, view.camera)
-            
-            # Compute Loss
-            L_img = compute_image_loss(rendered_image, view.gt_image)
-            L_nc = compute_normal_consistency_loss(tightly_bound, M)
-            total_loss = (1 - 0.001) * L_img + 0.001 * SSIM(rendered_image, view.gt_image) + 0.1 * L_nc
-            # Add other regularization losses (lambda_min, lambda_max, lambda_proj)
-            
-            # Backpropagation
-            optimize(splats, total_loss)
+        # 8. Rendering and Optimization
+        # Standard 3DGS optimization step using L1 and D-SSIM losses
+        # plus normal consistency loss for tightly-bound splats
+        optimize_gaussians(gaussians, training_views, tightly_bound)
+        
+    return gaussians
+
+def is_occluded_by_mesh(point, camera, mesh, depth_map):
+    """
+    Checks if a 3D point is occluded by the mesh surface in the given view.
+    """
+    # Project point to 2D screen coordinates
+    screen_pos = project_to_screen(point, camera)
+    
+    # Get depth of the point in camera space
+    point_depth = get_depth_in_camera_space(point, camera)
+    
+    # Get depth of the mesh surface at screen_pos from depth_map
+    mesh_depth = depth_map[screen_pos.y][screen_pos.x]
+    
+    # If point is behind the mesh surface (greater depth value)
+    return point_depth > mesh_depth
+
+def distance_to_mesh(point, mesh):
+    """
+    Calculates the minimum Euclidean distance from a point to the mesh faces.
+    """
+    min_dist = infinity
+    for face in mesh.faces:
+        dist = point_to_triangle_distance(point, face)
+        if dist < min_dist:
+            min_dist = dist
+    return min_dist
+
+def align_with_mesh_surface(gaussian, mesh):
+    """
+    Flattens the Gaussian and aligns its orientation with the mesh surface normal.
+    """
+    # Find nearest face
+    nearest_face = get_nearest_face(gaussian.center, mesh)
+    
+    # Get surface normal
+    normal = nearest_face.normal
+    
+    # Adjust Gaussian covariance to be flat along the normal
+    # This constrains the scale along the normal to be very small
+    gaussian.scale = adjust_scale_for_alignment(gaussian.scale, normal)
+    
+    # Adjust rotation to align with normal
+    gaussian.rotation = align_rotation_with_normal(gaussian.rotation, normal)
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Mesh Artifacts:** If the mesh has severe geometric artifacts, tightly binding all splats can degrade rendering performance. The loose-bound classification allows splats to deviate from the mesh to capture these inaccuracies or fine details [S1].
-*   **Depth Precision:** The addition of $0.01$ to the depth map is critical to prevent self-occlusion errors when masking splats against the mesh [S1].
-*   **Pruning Timing:** Pruning must occur at regular intervals (every 500 iterations) to prevent memory bloat from redundant splats behind the mesh [S1].
+**Edge Cases and Pitfalls**
+*   **Mesh Artifacts:** Real-world reconstructed meshes often exhibit geometric artifacts. Tightly binding all splats exclusively to the surface can suffer rendering performance issues in these regions. The loose-bound classification helps mitigate this by allowing splats to deviate slightly from the surface [S1].
+*   **Precision:** The depth offset ($0.01$) is critical to prevent self-occlusion or incorrect masking due to floating-point precision errors between the rendered depth and the mesh geometry [S1].
+*   **Redundancy:** Without pruning, initializing a Gaussian per triangle can lead to a rapid increase in GPU memory usage, especially if the mesh has a high triangle count (e.g., 44 million triangles) [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering complexity is dominated by the number of Gaussian splats $n$, similar to standard 3D Gaussian Splatting $O(n)$ per pixel [S1]. The additional cost comes from mesh intersection tests for occlusion masking and distance calculations, which are performed per splat per view [S1].
-*   **Memory Complexity:** Memory usage is proportional to the number of splats. By pruning redundant splats behind the mesh, this method can reduce memory usage compared to a naive initialization of one splat per triangle if many triangles are occluded [S1]. However, if the mesh is very dense (e.g., 44 million triangles), initializing a splat per triangle can still lead to high memory usage before pruning [S1].
-*   **Performance:** The method improves rendering quality in regions with mesh artifacts by allowing loosely-bound splats to compensate [S1]. It is particularly effective for large-scale scenes where mesh quality varies [S1].
-*   **Strengths:** Explicit geometric alignment improves normal consistency and reduces artifacts in tightly-bound regions. Pruning reduces redundancy.
-*   **Limitations:** Relies on the quality of the input mesh. If the mesh is poor, the classification and alignment may not be beneficial. The method requires additional computation for mesh-splat distance calculations and occlusion testing.
+*   **Time Complexity:** Depends on the number of Gaussians $N$ and the number of training views. Pruning every 500 iterations reduces the number of Gaussians over time, potentially speeding up later iterations.
+*   **Memory Complexity:** Proportional to the number of Gaussians. Initialization scales with the number of mesh triangles. Pruning reduces memory usage compared to initializing splats for every triangle without removal [S1].
+*   **Performance:** The method is designed for high-quality rendering on large-scale scenes. It balances geometric fidelity (via tight binding) and robustness to mesh artifacts (via loose binding) [S1].
+*   **Strengths:** Reduces redundant splats, aligns surface geometry with appearance, and handles mesh artifacts better than strict surface binding.
+*   **Limitations:** Relies on the quality of the input mesh. If the mesh is poor, the classification and alignment may not yield optimal results.
+*   **When to use:** When a high-quality mesh is available and the goal is to extract a mesh-aligned Gaussian representation for high-fidelity rendering.
+*   **When not to use:** When no mesh is available or when the scene geometry is too complex/unstructured for a clean mesh representation.
 
 ## Background
-Distance-based Gaussian Splatting was introduced in the paper "MeshGS: Adaptive Mesh-Aligned Gaussian Splatting for High-Quality Rendering" by Jaehoon et al. [S1]. The method addresses the limitations of existing approaches like LTM (Lightweight Triangular Mesh) and SuGaR, which either use minimal triangles (leading to loss of detail) or impose strict vertex constraints [S1]. The authors note that standard 3D Gaussian Splatting can require millions of splats to achieve high fidelity, which is inefficient when a mesh representation is available [S1]. The method was evaluated on the Mip-NeRF360 dataset, using 30,000 training iterations [S1].
+Distance-based Gaussian Splatting was introduced in the paper "MeshGS: Adaptive Mesh-Aligned Gaussian Splatting for High-Quality Rendering" by Jaehoon et al. [S1]. It builds upon the original 3D Gaussian Splatting (3DGS) framework [S1] and aims to address the issue of redundant Gaussian splats and geometric artifacts in large-scale mesh reconstruction. The method was developed to improve rendering quality by adaptively aligning Gaussians with the mesh surface while allowing flexibility for inaccuracies.
 
 ## Sources
 [S1] MeshGS: Adaptive Mesh-Aligned Gaussian Splatting for High-Quality Rendering, https://arxiv.org/abs/2410.08941v1, fetched 2026-10-26

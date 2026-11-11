@@ -36,26 +36,36 @@ This method decimates a triangular mesh by iteratively collapsing edges to minim
     h. **Compact:** Remove invalid faces and unused vertices [S1, unofficial]. Re-index active vertices and faces [S1, unofficial]. Update `num_vertices` and `num_faces` [S1, unofficial]. If `num_valid_faces == 0`, terminate [S1, unofficial].
 
 **Formulas:**
-- **Face Normal and Area:** $n = (v_1 - v_0) \times (v_2 - v_0)$, $area = 0.5 \times ||n||$.
-- **Plane Distance:** $d = -n \cdot v_0$ (using normalized $n$).
+- **Face Normal and Area:** $n = (v_1 - v_0) \times (v_2 - v_0)$, $area = 0.5 \times ||n||$ [S1, unofficial].
+- **Plane Distance:** $d = -n \cdot v_0$ (using normalized $n$) [S1, unofficial].
 - **Quadric Construction:**
   $$q_{a00} = n_x^2 \times area, \quad q_{a01} = n_x n_y \times area, \quad q_{a02} = n_x n_z \times area$$
   $$q_{a11} = n_y^2 \times area, \quad q_{a12} = n_y n_z \times area, \quad q_{a22} = n_z^2 \times area$$
   $$q_{b0} = n_x d \times area, \quad q_{b1} = n_y d \times area, \quad q_{b2} = n_z d \times area$$
   $$q_c = d^2 \times area$$
-- **Collapse Position:** Solve $Q \times pos = -b$. If singular, $pos = (v_0 + v_1)/2$.
+- **Collapse Position:** Solve $Q \times pos = -b$. If singular, $pos = (v_0 + v_1)/2$ [S1, unofficial].
 - **Cost Function:**
   $$cost = pos^T Q pos + 2 b^T pos + c$$
   $$= q_{a00}pos_x^2 + 2q_{a01}pos_x pos_y + 2q_{a02}pos_x pos_z + q_{a11}pos_y^2 + 2q_{a12}pos_y pos_z + q_{a22}pos_z^2 + 2q_{b0}pos_x + 2q_{b1}pos_y + 2q_{b2}pos_z + q_c$$
+
+**Edge Cases and Pitfalls:**
+- **Singular quadric matrix:** If determinant is near zero, collapse position falls back to midpoint [S1, unofficial].
+- **Numerical instability:** If new position is too far from midpoint (distance squared > edge length squared), clamp to midpoint [S1, unofficial].
+- **Topological validity:** Edge collapse is rejected (cost increased by 1000x edge length squared) if it causes normal flip or degeneracy in the one-ring neighborhood of either endpoint [S1, unofficial].
+- **Boundary preservation:** Boundary edges incur a heavy penalty (1000x edge length squared) to discourage collapse [S1, unofficial].
+- **Vertex count variance:** The actual number of vertices in the output may be slightly different from `target_vertex_count` depending on the mesh topology [S1, unofficial].
+- **Empty collapses:** If no valid collapses can be performed, the loop breaks immediately to prevent infinite loops [S1, unofficial].
+- **Zero faces:** If the number of valid faces becomes 0 during compaction, the vertex and face counts are set to 0 and the process terminates [S1, unofficial].
+- **Memory layout:** Input tensors must be contiguous in memory for direct pointer casting [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def decimate_mesh(vertices, faces, target_vertex_count):
-    # 1. Transfer to device
-    d_vertices = to_device(vertices)
-    d_faces = to_device(faces)
+    # 1. Transfer to device (simulated)
+    d_vertices = list(vertices)
+    d_faces = list(faces)
     num_vertices = len(vertices)
     num_faces = len(faces)
     
@@ -64,8 +74,8 @@ def decimate_mesh(vertices, faces, target_vertex_count):
 
     # 2. Build initial adjacency on host
     h_v_to_f_map, h_v_to_f_offsets = build_vertex_to_face_adjacency(faces, num_vertices)
-    d_v_to_f_map = to_device(h_v_to_f_map)
-    d_v_to_f_offsets = to_device(h_v_to_f_offsets)
+    d_v_to_f_map = list(h_v_to_f_map)
+    d_v_to_f_offsets = list(h_v_to_f_offsets)
 
     MAX_ITERATIONS = 2
     THREADS_PER_BLOCK = 256
@@ -75,41 +85,45 @@ def decimate_mesh(vertices, faces, target_vertex_count):
             break
 
         # 2a. Rebuild adjacency
-        h_faces = to_host(d_faces)
+        h_faces = list(d_faces)
         h_v_to_f_map, h_v_to_f_offsets = build_vertex_to_face_adjacency(h_faces, num_vertices)
-        d_v_to_f_map = to_device(h_v_to_f_map)
-        d_v_to_f_offsets = to_device(h_v_to_f_offsets)
+        d_v_to_f_map = list(h_v_to_f_map)
+        d_v_to_f_offsets = list(h_v_to_f_offsets)
 
         # 2b. Calculate Vertex Quadrics
-        d_vertex_quadrics = zero_init(num_vertices, Quadricf)
+        d_vertex_quadrics = [Quadricf() for _ in range(num_vertices)]
         grid_size = (num_faces + THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
         kernel_calculate_vertex_quadrics(d_vertices, d_faces, num_faces, d_vertex_quadrics, grid_size, THREADS_PER_BLOCK)
 
         # 2c. Extract Edges
-        d_all_edges = empty(num_faces * 3, Edge)
+        d_all_edges = [None] * (num_faces * 3)
         kernel_extract_face_edges(d_faces, num_faces, d_all_edges, grid_size, THREADS_PER_BLOCK)
 
         # 2d. Identify Unique and Boundary Edges
-        sort(d_all_edges)
-        d_unique_edges = unique(d_all_edges)
+        d_all_edges.sort()
+        d_unique_edges = list(dict.fromkeys(d_all_edges))
         num_unique_edges = len(d_unique_edges)
         
-        d_edge_counts = reduce_by_key(d_all_edges, constant(1))
-        d_is_boundary = (d_edge_counts == 1)
+        # reduce_by_key: sum counts for each unique edge
+        d_edge_counts = [0] * num_unique_edges
+        for e in d_all_edges:
+            idx = d_unique_edges.index(e)
+            d_edge_counts[idx] += 1
+        d_is_boundary = [count == 1 for count in d_edge_counts]
 
         # 2e. Calculate Edge Costs
-        d_edge_costs = empty(num_unique_edges, float)
-        d_collapse_pos = empty(num_unique_edges, V3f)
+        d_edge_costs = [0.0] * num_unique_edges
+        d_collapse_pos = [V3f() for _ in range(num_unique_edges)]
         kernel_calculate_edge_costs(d_unique_edges, num_unique_edges,
             d_vertices, d_vertex_quadrics, d_faces,
             d_is_boundary, d_v_to_f_map, d_v_to_f_offsets,
             d_edge_costs, d_collapse_pos, grid_size, THREADS_PER_BLOCK)
 
         # 2f. Select Collapses
-        d_edge_indices = argsort(d_edge_costs)
-        h_sorted_indices = to_host(d_edge_indices)
-        h_unique_edges = to_host(d_unique_edges)
-        h_collapse_pos = to_host(d_collapse_pos)
+        d_edge_indices = sorted(range(num_unique_edges), key=lambda i: d_edge_costs[i])
+        h_sorted_indices = list(d_edge_indices)
+        h_unique_edges = list(d_unique_edges)
+        h_collapse_pos = list(d_collapse_pos)
 
         vertex_used = [False] * num_vertices
         collapses = []
@@ -138,19 +152,19 @@ def decimate_mesh(vertices, faces, target_vertex_count):
             break
 
         # 2g. Update Mesh
-        d_remap_table = identity(num_vertices)
+        d_remap_table = list(range(num_vertices))
         for v_remove, v_keep in collapses:
             d_remap_table[v_remove] = v_keep
         
         kernel_resolve_remap_table(d_remap_table, num_vertices, grid_size, THREADS_PER_BLOCK)
         kernel_update_faces(d_faces, num_faces, d_remap_table, grid_size, THREADS_PER_BLOCK)
         kernel_update_vertex_positions(d_vertices, d_remap_table, 
-            to_device(new_positions_batch), 
-            to_device(collapse_v0_indices_batch), 
+            new_positions_batch, 
+            collapse_v0_indices_batch, 
             len(collapses), grid_size, THREADS_PER_BLOCK)
 
         # 2h. Compact
-        d_valid_faces = copy_if(d_faces, lambda f: f.v0 != -1)
+        d_valid_faces = [f for f in d_faces if f.v0 != -1]
         num_valid_faces = len(d_valid_faces)
         d_faces = d_valid_faces
         num_faces = num_valid_faces
@@ -159,13 +173,12 @@ def decimate_mesh(vertices, faces, target_vertex_count):
             num_vertices = 0
             break
 
-        d_active_vertices = mark_active(d_faces, num_vertices)
-        d_new_indices = exclusive_scan(d_active_vertices)
-        # Compact vertices using functor matching source implementation
+        d_active_vertices = [1 if any(f.v0 == i or f.v1 == i or f.v2 == i for f in d_faces) else 0 for i in range(num_vertices)]
+        d_new_indices = [sum(d_active_vertices[:i]) for i in range(num_vertices)]
         compact_vertices(d_vertices, d_new_indices, d_active_vertices, grid_size, THREADS_PER_BLOCK)
         num_vertices = sum(d_active_vertices)
 
-    return to_host(d_vertices), to_host(d_faces)
+    return list(d_vertices), list(d_faces)
 ```
 
 ## Subtopics
@@ -174,16 +187,16 @@ def decimate_mesh(vertices, faces, target_vertex_count):
 A mesh simplification algorithm that minimizes geometric error using quadric metrics, enhanced with a positional correction term for numerical stability [S2]. Apply quadric error metrics to evaluate simplification cost and incorporate a positional correction term during vertex/edge collapse operations to maintain stability [S2].
 
 ## Operating characteristics
-- **Time Complexity:** Dominated by sorting and adjacency rebuilding in each iteration. With `MAX_ITERATIONS=2`, it is significantly faster than iterative greedy approaches.
-- **Memory Complexity:** Requires storage for vertices, faces, quadrics, edges, and adjacency structures. Thrust vectors add overhead.
+- **Time Complexity:** Dominated by sorting and adjacency rebuilding in each iteration [S1, unofficial]. With `MAX_ITERATIONS=2`, it is significantly faster than iterative greedy approaches [S1, unofficial].
+- **Memory Complexity:** Requires storage for vertices, faces, quadrics, edges, and adjacency structures [S1, unofficial]. Thrust vectors add overhead.
 - **Measured Performance:** Optimized for GPU memory bandwidth and parallelism using Thrust for sorting/scanning and CUDA kernels for computation [S1, unofficial].
 - **Strengths:** Fast, parallelizable, handles boundary preservation and topological validity checks on-device.
 - **Limitations:** Fixed iteration count may not reach exact target vertex count. Actual output vertex count may vary slightly due to mesh topology and invalid collapses [S1, unofficial]. Numerical instability causing spikes is mitigated by clamping the new position to the midpoint if the distance squared exceeds the edge length squared [S1, unofficial].
-- **When to Use:** When speed is prioritized over absolute geometric fidelity, and the mesh is triangular.
-- **When Not to Use:** When exact vertex count is required, or for non-triangular meshes.
+- **When to Use:** When speed is prioritized over absolute geometric fidelity, and the mesh is triangular [S1, unofficial].
+- **When Not to Use:** When exact vertex count is required, or for non-triangular meshes [S1, unofficial].
 
 ## Background
-This GPU-accelerated implementation adapts the Quadric Error Metrics (QEM) technique for parallel execution on CUDA architectures [S1, unofficial]. It leverages Thrust for efficient data parallel operations and CUDA kernels for fine-grained control over mesh updates. The method is used in geometry processing pipelines where rapid mesh simplification is required.
+This GPU-accelerated implementation adapts the Quadric Error Metrics (QEM) technique for parallel execution on CUDA architectures [S1, unofficial]. It leverages Thrust for efficient data parallel operations and CUDA kernels for fine-grained control over mesh updates [S1, unofficial].
 
 ## Sources
 [S1] hwanhuh/spcumc, https://github.com/hwanhuh/spcumc, fetched 2026-10-27 (unofficial)

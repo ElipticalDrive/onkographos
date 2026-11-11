@@ -1,35 +1,26 @@
 # Surface and Mesh Extraction
-Also called: Gaussian Mesh Extraction, 3DGS Geometry Reconstruction
+Also called: Gaussian Mesh Extraction, 3DGS Meshing
 
 ## Overview
-This family encompasses methods for extracting explicit geometric representations (meshes) or semantic partitions (segments) from trained 3D Gaussian Splatting (3DGS) models. While 3DGS is primarily a radiance field representation optimized for novel view synthesis, these techniques bridge the gap to traditional computer graphics by providing watertight meshes or editable semantic regions. The methods differ in their reliance on external geometry: [Gaussian Opacity Fields (GOF) Mesh Extraction](3692-gaussian-opacity-fields-gof-mesh-extraction.md) derives geometry solely from the Gaussian opacity field via isosurface extraction, whereas [Distance-based Gaussian Splatting](7411-distance-based-gaussian-splatting.md) leverages a pre-existing mesh to guide splat alignment and pruning, and [2D-Lift-3D Scene Segmentation](11513-2d-lift-3d-scene-segmentation.md) lifts 2D semantic masks into 3D space for region-based editing.
+This family provides methods to convert trained 3D Gaussian Splatting (3DGS) models into explicit polygonal meshes or segmented 3D structures. While 3DGS [1795-3d-gaussian-splatting.md] represents scenes as implicit volumetric primitives, these methods extract surface geometry for downstream applications like simulation, compression, or editing. They differ from sibling methods like [CoR-GS](1486-cor-gs.md) or [EffGS](3365-effgs.md) by focusing on geometric fidelity and structural decomposition rather than rendering speed or training efficiency.
 
 ## Shared principles
-All methods operate on the standard 3D Gaussian Splatting primitive structure defined in [3D Gaussian Splatting](1795-3d-gaussian-splatting.md):
-*   **Center:** $\mathbf{p}_i \in \mathbb{R}^3$.
-*   **Covariance:** $\mathbf{\Sigma}_i \in \mathbb{R}^{3\times3}$, parameterized as $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$, where $\mathbf{S}_i \in \mathbb{R}^3$ is a scaling vector and $\mathbf{R}_i \in \mathbb{R}^{3\times3}$ is a rotation matrix encoded by a quaternion $\mathbf{q} \in \mathbb{R}^4$ [S1].
-*   **Opacity:** $o_i \in [0, 1]$.
-*   **Color:** View-dependent color $\mathbf{c}_i$ represented by spherical harmonics [S1].
+All methods in this family operate on a trained set of $N$ 3D Gaussian primitives $\mathcal{G} = \{g_1, \dots, g_N\}$, where each primitive $g_i$ is defined by its center $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $o_i$, and spherical harmonics coefficients $\mathbf{c}_i$. The core challenge is bridging the gap between the volumetric, alpha-blended representation of 3DGS and the explicit, watertight nature of triangle meshes or discrete segment labels.
 
-Rendering follows the standard differentiable rasterization pipeline:
-1.  Transform camera space into ray space using an affine transformation $\mathbf{J}_i \in \mathbb{R}^{2\times3}$ defined by the camera position $\mathbf{p}_{ci}$.
-2.  Compute the 2D covariance in ray space: $\mathbf{\Sigma}'_i = \mathbf{J}_i \mathbf{\Sigma}_{ic} \mathbf{J}_i^T$, where $\mathbf{\Sigma}_{ic}$ is the 3D covariance in camera space [S1].
-3.  Compute the 2D Gaussian value: $g_i(\mathbf{x}) = e^{-\frac{1}{2}(\mathbf{x}-\mathbf{p}'_i)^T {\mathbf{\Sigma}'_i}^{-1}(\mathbf{x}-\mathbf{p}'_i)}$ [S1].
-4.  Render the image using alpha blending: $\mathbf{c} = \sum_{i=1}^{n} \mathbf{c}_i \alpha_i \prod_{j=1}^{i-1}(1-\alpha_j)$, where $\alpha_i = o_i g_i(\mathbf{x})$ [S1].
+The shared mathematical foundation involves evaluating the spatial distribution of the Gaussians. For mesh extraction, this typically involves aggregating opacity or density values onto a discrete grid or calculating distances to existing geometry. For segmentation, it involves projecting 3D primitives into 2D image space to associate them with semantic labels. All methods assume the availability of the standard 3DGS rendering pipeline to generate reference views or depth maps [1795-3d-gaussian-splatting.md].
 
 ## Subtopics
 
 ### [Gaussian Opacity Fields (GOF) Mesh Extraction](3692-gaussian-opacity-fields-gof-mesh-extraction.md)
-A method to extract a 3-D triangulated mesh from a trained Gaussian model without retraining. It builds a volumetric density field from the Gaussian opacities and extracts an isosurface. It is chosen when a mesh is needed from a standard trained 3DGS model without external geometric priors.
+Extracts a mesh by building a volumetric density field from Gaussian opacities and applying marching cubes. It relies on opacity accumulation rather than signed distance functions. Choose this when a training-free, direct mesh extraction from an existing 3DGS model is required.
 
 ### [Distance-based Gaussian Splatting](7411-distance-based-gaussian-splatting.md)
-Establishes a structural connection between a large-scale 3D mesh and 3D Gaussian splats. It classifies splats as "tightly-bound" or "loosely-bound" based on distance to the mesh surface, masking out occluded splats. It is chosen when a high-quality pre-existing mesh is available and one needs to align splats to that geometry while handling redundancy. It differs from GOF by explicitly leveraging mesh topology for pruning and alignment rather than relying solely on opacity field regularization.
+Connects a pre-existing 3D mesh with Gaussian splats by classifying them as tightly-bound or loosely-bound based on distance to the surface. It prunes occluded splats and aligns surface-aligned ones. Choose this when refining a mesh-initialized 3DGS model to reduce redundancy and improve surface adherence.
 
 ### [2D-Lift-3D Scene Segmentation](11513-2d-lift-3d-scene-segmentation.md)
-Segments 3D Gaussian primitives by lifting 2D segmentation masks from a reference view into 3D space using multi-view label voting. It solves the problem of partial scene editing, allowing distinct effects to be applied to specific regions. It is chosen for training-free semantic segmentation of Gaussian scenes. Unlike methods requiring learnable features, it uses a training-free strategy based on multi-view voting.
+Segments 3D Gaussians by lifting 2D segmentation masks from reference views into 3D space using multi-view voting. It is training-free and relies on SAM. Choose this for partial scene editing or semantic decomposition without requiring learnable feature vectors.
 
 ## Background
-The extraction of explicit geometry from 3D Gaussian Splatting is a recent development following the introduction of 3DGS [S1]. Standard 3DGS produces high-fidelity renderings but lacks an explicit mesh representation, which is required for many downstream applications like physics simulation, collision detection, and traditional rendering pipelines. Methods like GOF and Distance-based GS address this by converting the implicit Gaussian representation into explicit triangular meshes. Segmentation methods like 2D-Lift-3D extend the utility of 3DGS from pure rendering to interactive scene understanding and editing.
+The extraction of explicit geometry from 3D Gaussian Splatting is a recent development following the introduction of 3DGS [1795-3d-gaussian-splatting.md]. Early 3DGS models were purely implicit, making them unsuitable for applications requiring explicit topology. Methods like GOF [3692-gaussian-opacity-fields-gof-mesh-extraction.md] and MeshGS [7411-distance-based-gaussian-splatting.md] emerged to address this, leveraging the density properties of Gaussians or their initialization from mesh data. Segmentation methods like [11513-2d-lift-3d-scene-segmentation.md] extend this by enabling semantic understanding of the extracted geometry.
 
 ## Sources
-[S1] Distance-based Gaussian Splatting notes, 2024.

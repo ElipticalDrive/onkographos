@@ -1,0 +1,146 @@
+--- v003.md
++++ v004.md
+@@ -7,18 +7,19 @@
+ 
+ ## How it works
+-The method separates the forward pass (robust, non-differentiable tracing) from the backward pass (analytic gradient computation via IFT).
++The method separates the forward pass (robust, non-differentiable tracing) from the backward pass (analytic gradient computation via IFT) [S2, unofficial].
+ 
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Ray origins $\mathbf{o} \in \mathbb{R}^3$ and directions $\mathbf{d} \in \mathbb{R}^3$ (normalized).
+-    *   Implicit function $f(\mathbf{x}; \boldsymbol{\theta})$ returning value and optionally gradient, parameterized by $\boldsymbol{\theta}$.
+-    *   Forward depth estimate $t_{\text{det}}$ obtained via a robust solver (e.g., bisection or sphere tracing).
++    *   Ray origins $\mathbf{o} \in \mathbb{R}^3$ and directions $\mathbf{d} \in \mathbb{R}^3$ (normalized) [S2, unofficial].
++    *   Implicit function $f(\mathbf{x}; \boldsymbol{\theta})$ returning value and optionally gradient, parameterized by $\boldsymbol{\theta}$ [S2, unofficial].
++    *   Forward depth estimate $t_{\text{det}}$ obtained via a robust solver (e.g., bisection or sphere tracing) [S2, unofficial].
++    *   Hit mask identifying pixels where the ray intersects the surface (SDF value crosses zero) [S2, unofficial].
+ *   **Outputs:**
+-    *   Differentiable depth tensor $\hat{t}$ compatible with autograd frameworks.
+-    *   Gradients $\frac{\partial \hat{t}}{\partial \boldsymbol{\theta}}$ computed during the backward pass.
++    *   Differentiable depth tensor $\hat{t}$ compatible with autograd frameworks [S2, unofficial].
++    *   Gradients $\frac{\partial \hat{t}}{\partial \boldsymbol{\theta}}$ computed during the backward pass [S2, unofficial].
+ 
+ ### Data Structures
+-*   **Hit Mask:** Boolean array identifying pixels where the ray intersects the surface (SDF value crosses zero).
+-*   **Surface Points:** $\mathbf{p}^* = \mathbf{o} + t_{\text{det}} \mathbf{d}$, the 3D coordinates of the intersection.
++*   **Hit Mask:** Boolean array identifying pixels where the ray intersects the surface (SDF value crosses zero) [S2, unofficial].
++*   **Surface Points:** $\mathbf{p}^* = \mathbf{o} + t_{\text{det}} \mathbf{d}$, the 3D coordinates of the intersection [S2, unofficial].
+ *   **Tensors:** PyTorch tensors with `requires_grad=True` for $\mathbf{p}^*$ to enable automatic differentiation of $f(\mathbf{p}^*)$ [S2, unofficial].
+ 
+@@ -29,13 +30,12 @@
+ 
+ 2.  **Surface Point Evaluation:**
+-    Calculate the 3D position of the surface intersection:
++    Calculate the 3D position of the surface intersection for hit rays:
+     $$ \mathbf{p}^* = \mathbf{o} + t_{\text{det}} \mathbf{d} $$
+-    Convert $\mathbf{p}^*$ to a tensor requiring gradients.
++    Convert $\mathbf{p}^*$ to a tensor requiring gradients [S2, unofficial].
+ 
+ 3.  **Implicit Function Evaluation:**
+-    Evaluate the implicit function and its spatial gradient at $\mathbf{p}^*$:
++    Evaluate the implicit function at $\mathbf{p}^*$:
+     $$ v = f(\mathbf{p}^*; \boldsymbol{\theta}) $$
+-    $$ \nabla_{\mathbf{x}} f = \nabla_{\mathbf{x}} f(\mathbf{p}^*; \boldsymbol{\theta}) $$
+-    Note: Due to the solver, $v$ is approximately zero but may have small residual error.
++    Note: Due to the solver, $v$ is approximately zero but may have small residual error [S2, unofficial].
+ 
+ 4.  **IFT Gradient Computation:**
+@@ -66,5 +66,6 @@
+     directions: torch.Tensor,    # (N, 3), normalized
+     t_detached: torch.Tensor,    # (N,), forward depth from bisection/sphere tracing
+-    implicit_fn: callable,       # f(x, theta) -> (values, gradients_or_None)
++    hit_mask: torch.Tensor,      # (N,), boolean mask for rays that hit the surface
++    implicit_fn: callable,       # f(x, theta) -> values
+     grad_clamp: float = 1e-6
+ ) -> torch.Tensor:
+@@ -76,4 +77,5 @@
+         directions: Ray directions.
+         t_detached: Non-differentiable depth from forward solver.
++        hit_mask: Boolean mask identifying hit pixels.
+         implicit_fn: Function evaluating SDF. Must support autograd.
+         grad_clamp: Minimum absolute directional derivative.
+@@ -82,27 +84,22 @@
+         Differentiable depth tensor.
+     """
+-    # 1. Compute surface points
+-    # t_detached is detached from graph to avoid backprop through solver
+-    p_star = origins + t_detached.unsqueeze(1) * directions
++    # 1. Extract hit indices and corresponding t values
++    hit_idx = torch.nonzero(hit_mask, as_tuple=True)[0]
++    t_hit = t_detached[hit_idx]
+     
+-    # 2. Enable gradient tracking for p_star to compute grad of f
+-    p_star.requires_grad_(True)
++    # 2. Compute surface points for hit rays
++    p_star = origins[hit_idx] + t_hit[:, None] * directions[hit_idx]
+     
+-    # 3. Evaluate implicit function
+-    # implicit_fn should return (values, gradients) or just values
+-    # If it returns gradients, use them; otherwise compute via autograd
+-    f_vals, f_grads = implicit_fn(p_star)
++    # 3. Convert to torch tensors with requires_grad=True
++    p_star = p_star.detach().requires_grad_(True)
+     
+-    # If implicit_fn does not return gradients, compute them
+-    if f_grads is None:
+-        # f_vals is (N,), sum to create scalar for backward
+-        (grad_x,) = torch.autograd.grad(f_vals.sum(), p_star, create_graph=True)
+-    else:
+-        grad_x = f_grads
+-        
+-    # 4. Compute directional derivative: dot = grad_x . d
+-    dot = torch.sum(grad_x * directions, dim=1)
++    # 4. Evaluate implicit function and compute gradient via autograd
++    f_vals = implicit_fn(p_star)
++    (grad_x,) = torch.autograd.grad(f_vals.sum(), p_star, create_graph=True)
+     
+-    # 5. Clamp directional derivative to avoid division by zero
++    # 5. Compute directional derivative: dot = grad_x . d
++    dot = torch.sum(grad_x * directions[hit_idx], dim=1)
++    
++    # 6. Clamp directional derivative to avoid division by zero
+     abs_dot = torch.abs(dot)
+     dot_clamped = torch.where(
+@@ -112,10 +109,12 @@
+     )
+     
+-    # 6. Compute IFT surrogate depth
+-    # t_surr = t_det - f(p*) / dot
+-    # Note: t_detached is detached, so gradient flows only through f_vals and dot
+-    t_surr = t_detached - f_vals / dot_clamped
++    # 7. Compute IFT surrogate depth
++    t_surr = t_detached[hit_idx] - f_vals / dot_clamped
+     
+-    return t_surr
++    # 8. Scatter t_surr into full depth tensor at hit indices
++    t_differentiable = t_detached.clone()
++    t_differentiable[hit_idx] = t_surr
++    
++    return t_differentiable
+ ```
+ 
+@@ -127,5 +126,4 @@
+ *   **Grazing Rays:** When the ray direction is perpendicular to the surface normal, $\nabla_{\mathbf{x}} f \cdot \mathbf{d} \approx 0$. The clamping mechanism is essential to prevent NaNs or infinite gradients [S2, unofficial].
+ *   **Non-Zero Residuals:** The forward solver may not find the exact zero-crossing, leaving $f(\mathbf{p}^*) \neq 0$. The surrogate formula $t_{\text{det}} - f/\text{dot}$ corrects this residual in the gradient computation, effectively linearizing the error [S2, unofficial].
+-*   **Solver Discontinuity:** The forward solver (e.g., bisection) may jump between local minima or branches. The IFT gradient is only valid if the surface is smooth and the solver converges to the correct branch [S1][S2, unofficial].
+ *   **Implementation Gap:** The core IFT logic is often implemented in a separate module (e.g., `isoray/torch/render.py`) and not always shown in the main rendering loop examples, requiring careful integration [S2, unofficial].
+ 
+@@ -139,14 +137,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per ray, dominated by the implicit function evaluation and gradient computation. The backward pass is as expensive as the forward pass if gradients are computed via autograd, but avoids storing the entire trace history [S2, unofficial].
+-*   **Memory Complexity:** $O(N)$ for storing surface points and gradients. Significantly lower than Reverse-Mode AD which requires $O(kn)$ intermediate states for $k$ samples [S5][S2, unofficial].
+ *   **Accuracy:** Provides exact gradients with respect to $\boldsymbol{\theta}$ assuming the implicit function is differentiable. The surrogate ensures the gradient matches the IFT derivative, correcting for solver residuals [S2, unofficial].
+ *   **Strengths:** Robust forward tracing (can use any solver); low memory; exact gradients for implicit parameters.
+ *   **Limitations:** Requires the implicit function to be differentiable; sensitive to grazing rays (requires clamping); forward solver must be stable [S2, unofficial].
+ *   **When to Use:** Optimizing neural implicit representations (SDFs) where memory is a constraint and exact gradients are needed for weights/latent codes [S1][S2, unofficial].
+-*   **When Not to Use:** When the surface is not defined by a smooth implicit function, or when the forward solver is inherently non-differentiable and cannot be decoupled [S2, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ 
+ ## Background
+-The method originates from the need to optimize neural implicit shapes (e.g., DeepSDF) using differentiable rendering. Standard backpropagation through sphere tracing or bisection is memory-intensive and unstable [S1]. The Implicit Function Theorem provides an analytic way to compute $\frac{dt}{d\boldsymbol{\theta}}$ without differentiating the solver [S2, unofficial]. It was implemented in libraries like `isoray` to provide robust, differentiable depth rendering for implicit surfaces [S2, unofficial].
++The method originates from the need to optimize neural implicit shapes (e.g., DeepSDF) using differentiable rendering [S1]. The Implicit Function Theorem provides an analytic way to compute $\frac{dt}{d\boldsymbol{\theta}}$ without differentiating the solver [S2, unofficial]. It was implemented in libraries like `isoray` to provide robust, differentiable depth rendering for implicit surfaces [S2, unofficial].
+ 
+ ## Sources

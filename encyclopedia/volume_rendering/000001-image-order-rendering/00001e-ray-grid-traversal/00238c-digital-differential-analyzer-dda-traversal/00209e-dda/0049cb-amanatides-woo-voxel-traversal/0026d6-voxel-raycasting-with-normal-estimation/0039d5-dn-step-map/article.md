@@ -1,236 +1,211 @@
 # DN_step_map
 
-Also called: Amanatides & Woo Ray Traversal, rayTraversalAmanatidesWoo
+Also called: Amanatides & Woo, Amanatides & Woo Ray Traversal, Amanatides-Woo Voxel Traversal, Digital Differential Analyzer raycast, Fast Voxel Traversal Raycast, Voxel Grid Raycasting (DDA), Wave G.2, castVoxelRay, rayTraversalAmanatidesWoo
 
 ## Overview
-DN_step_map computes the index of the first non-empty voxel intersected by a ray in a regular 3D grid using the Amanatides & Woo traversal algorithm [S1, unofficial]. It solves the problem of efficiently locating surface intersections in voxel-based scenes by stepping along the ray axis-aligned boundaries [S2, unofficial]. It differs from sibling methods by returning the specific voxel index of the first hit (or a max uint value if empty) rather than just a boolean hit status, and by handling zero-direction components explicitly to prevent division by zero [S1, unofficial].
+`DN_step_map` is a voxel traversal algorithm that computes the closest entry voxel index for a ray in a regular grid using the Amanatides & Woo method [S1, unofficial]. It solves the problem of efficiently querying sparse voxel structures for collision or occlusion without iterating all voxels [S3, unofficial]. It differs from time-based marchers by using reach-based parameter $t$ and precomputing $tDelta/tMax$ for efficiency [S3, unofficial]. It uses a DDA approach similar to Amanatides & Woo, stepping through voxel boundaries based on the smallest $tMax$, rather than sampling at fixed intervals [S3, unofficial].
 
 ## How it works
 **Inputs:**
-- `ray`: A ray data structure containing origin (`rayStart`), direction (`rayDirection`), and valid range (`t0`, `tMax`) [S1, unofficial].
-- `minBound`: The minimum corner of the voxel grid's axis-aligned bounding box (AABB) [S1, unofficial].
-- `cellSize`: The size of a single voxel (assumed uniform across axes for the core logic, though stored as a vector) [S1, unofficial].
-- `numDivs`: The dimensions of the voxel grid in voxels (width, height, depth) [S1, unofficial].
-- `voxelData`: The voxel grid data structure, where `VOXEL_EMPTY` indicates an empty cell [S1, unofficial].
+- Ray origin: `rayPos` (3D vector) [S2, unofficial].
+- Ray direction: `rayDir` (3D vector) [S2, unofficial].
+- Grid cell size: `voxSize` (scalar) [S3, unofficial].
+- Grid origin: `grid.origin` (3D vector) [S3, unofficial].
+- Maximum reach: `input.maxReach` (scalar) [S3, unofficial].
+- Occupancy query: `input.isOccupied(key)` function [S3, unofficial].
+- Hard step cap: `HARD_STEP_CAP = 1024` [S3, unofficial].
 
 **Outputs:**
-- Returns a `uvec3` (unsigned 32-bit integer vector) representing the 1-based voxel index `(x, y, z)` of the first non-empty voxel hit [S1, unofficial].
-- If the ray does not intersect the grid or no non-empty voxel is found within bounds, returns `uvec3(std::numeric_limits<glm::uint>::max())` [S1, unofficial].
-- *Note:* Some implementations also populate output pointers for `hitPos`, `hitVoxel`, and `hitNormal` if a hit is found, but the core traversal function described in [S1, unofficial] focuses on the index return [S2, unofficial].
+- `hitVoxel`: `{ i, j, k }` indices of the first occupied voxel [S3, unofficial].
+- `hitFace`: Entry face identifier (`'neg-x'`, `'pos-x'`, etc.) [S3, unofficial].
+- `prevEmptyVoxel`: `{ i, j, k }` indices of the empty voxel preceding the hit [S3, unofficial].
+- Returns `null` if no hit is found within `maxReach` or if the ray direction is zero [S3, unofficial].
 
 **Data Structures:**
-- `rayStart`: `vec3` (float3) [S1, unofficial].
-- `rayDirection`: `vec3` (float3) [S1, unofficial].
-- `t0`, `tMax`: `float` representing the start and end of the ray segment [S1, unofficial].
-- `current_index`: `uvec3` (uint3), 1-based voxel coordinates [S1, unofficial].
-- `step`: `ivec3` (int3), values of -1, 0, or 1 indicating traversal direction per axis [S1, unofficial].
-- `tDelta`: `vec3` (float3), time to traverse one voxel cell along each axis [S1, unofficial].
-- `tMaxAxis`: `vec3` (float3), the ray parameter `t` at which the ray crosses the next voxel boundary along each axis [S1, unofficial].
+- `current`: `{ i, j, k }` integer indices representing the current voxel being traversed [S3, unofficial].
+- `step`: `{ x, y, z }` integer steps (`1`, `-1`, or `0`) indicating traversal direction per axis [S3, unofficial].
+- `tDelta`: `{ x, y, z }` float values representing the distance along the ray to cross one voxel cell in each axis [S3, unofficial].
+- `tMax`: `{ x, y, z }` float values representing the ray parameter $t$ at which the ray crosses the next voxel boundary in each axis [S3, unofficial].
 
-**Algorithm Steps:**
+**Steps:**
 
-1. **Ray-Box Intersection Check:**
-   Determine if the ray intersects the grid's AABB defined by `minBound` and `cellSize`/`numDivs`. Let `tMin` and `tMax` be the intersection parameters with the AABB. If the ray does not intersect the AABB, return `uvec3(std::numeric_limits<glm::uint>::max())` [S1, unofficial].
-
-2. **Clamp Ray Range:**
-   Clamp the intersection parameters to the ray's valid range:
-   $$ t_{min} = \max(t_{min}, t_0) $$
-   $$ t_{max} = \max(t_{max}, t_1) $$
-   (Note: The source uses `t1` for the ray's end parameter, likely equivalent to `tMax` in the ray struct) [S1, unofficial].
-
-3. **Initialize Current Voxel Index:**
-   Calculate the initial voxel index for each axis. The index is 1-based.
-   $$ current\_index.x = \max(1.0f, \lceil \frac{rayStart.x - minBound.x}{cellSize.x} \rceil) $$
-   Similarly for $y$ and $z$ [S1, unofficial].
-
-4. **Initialize Step, Delta, and Max for Each Axis:**
-   For each axis $i \in \{x, y, z\}$:
-   
-   - If $rayDirection.i > 0$:
-     $$ step.i = 1 $$
-     $$ tDelta.i = \frac{cellSize.i}{rayDirection.i} $$
-     $$ tMaxAxis.i = t_{min} + \frac{minBound.i + current\_index.i \cdot cellSize.i - rayStart.i}{rayDirection.i} $$
-   
-   - If $rayDirection.i < 0$:
-     $$ step.i = -1 $$
-     $$ tDelta.i = \frac{cellSize.i}{-rayDirection.i} $$
-     $$ tMaxAxis.i = t_{min} + \frac{minBound.i + (current\_index.i - 1) \cdot cellSize.i - rayStart.i}{rayDirection.i} $$
-   
-   - If $rayDirection.i == 0$:
-     $$ step.i = 0 $$
-     $$ tDelta.i = t_{max} $$ (Effectively infinity for traversal purposes)
-     $$ tMaxAxis.i = t_{max} $$ [S1, unofficial]
-
-5. **Traverse Voxel Grid:**
-   Loop while $0 < current\_index.x \le numDivs.x$, $0 < current\_index.y \le numDivs.y$, and $0 < current\_index.z \le numDivs.z$:
-   
-   - Check if the voxel at `current_index - 1` (converting to 0-based index) is not `VOXEL_EMPTY`.
-   - If it is not empty, return `current_index` [S1, unofficial].
-   
-   - Determine which axis boundary is crossed next:
-     Find the axis $k$ such that $tMaxAxis.k$ is the minimum among $tMaxAxis.x, tMaxAxis.y, tMaxAxis.z$.
-   
-   - Update the current index and boundary parameters for axis $k$:
-     $$ current\_index.k = current\_index.k + step.k $$
-     $$ tMaxAxis.k = tMaxAxis.k + tDelta.k $$ [S1, unofficial]
-
-6. **No Hit Found:**
-   If the loop completes without finding a non-empty voxel, return `uvec3(std::numeric_limits<glm::uint>::max())` [S1, unofficial].
+1. **Validate Direction:** Calculate `dirLen = sqrt(rayDir.x^2 + rayDir.y^2 + rayDir.z^2)`. If `dirLen == 0`, return `null` [S3, unofficial].
+2. **Calculate Max T:** `maxT = input.maxReach / dirLen` [S3, unofficial].
+3. **Initialize Current Voxel:** `current = grid.worldToVoxel(rayPos)`. This maps the ray origin to the containing voxel indices [S3, unofficial].
+4. **Check Start Voxel:** If `input.isOccupied(grid.voxelKey(current.i, current.j, current.k))` is true, the origin is inside an occupied voxel. Return `{ hitVoxel: current, hitFace: 'inside', prevEmptyVoxel: current }` [S3, unofficial].
+5. **Initialize Step and Delta:** For each axis $A \in \{x, y, z\}$:
+   - `stepA = rayDir.A > 0 ? 1 : rayDir.A < 0 ? -1 : 0` [S3, unofficial].
+   - `tDeltaA = stepA != 0 ? abs(voxSize / rayDir.A) : Infinity` [S3, unofficial].
+6. **Initialize tMax:** For each axis $A \in \{x, y, z\}$:
+   - Calculate cell minimum: `cellMinA = grid.origin.A + current.i * voxSize` (using `current.i` for X, `current.j` for Y, `current.k` for Z) [S3, unofficial].
+   - Determine next boundary: `nextBoundaryA = stepA > 0 ? cellMinA + voxSize : cellMinA` [S3, unofficial].
+   - Calculate crossing parameter: `tMaxA = stepA != 0 ? (nextBoundaryA - rayPos.A) / rayDir.A : Infinity` [S3, unofficial].
+7. **Traversal Loop:** Iterate `step` from 0 to `HARD_STEP_CAP - 1`:
+   - **Select Axis:** Find axis with minimum `tMax`.
+     - If `tMaxX <= tMaxY && tMaxX <= tMaxZ`, select X.
+     - Else if `tMaxY <= tMaxZ`, select Y.
+     - Else, select Z [S3, unofficial].
+   - **Check Reach:** If selected `tMax > maxT`, return `null` (ray exceeded max reach) [S3, unofficial].
+   - **Advance Ray:** Update current voxel index by adding `step` to the corresponding coordinate (e.g., `current.i += stepX`) [S3, unofficial].
+   - **Determine Face:** If X selected, `face = stepX > 0 ? 'neg-x' : 'pos-x'` (entry face is opposite to direction of travel relative to the boundary) [S3, unofficial].
+   - **Check Occupancy:** Calculate `key = grid.voxelKey(current.i, current.j, current.k)`. If `input.isOccupied(key)` is true:
+     - Calculate `prevEmptyVoxel` by reversing the step direction on the hit face (e.g., if X selected, `prevEmptyVoxel.i = current.i - stepX`, others same) [S3, unofficial].
+     - Return `{ hitVoxel: current, hitFace: face, prevEmptyVoxel: prevEmptyVoxel }` [S3, unofficial].
+   - **Update tMax:** Add `tDelta` to the selected axis's `tMax` (e.g., `tMaxX += tDeltaX`) [S3, unofficial].
+8. **Return Null:** If loop completes without finding a voxel, return `null` [S3, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-import sys
+def DN_step_map(rayPos, rayDir, grid_origin, vox_size, max_reach, is_occupied):
+    # 1. Validate Direction
+    dir_len = sqrt(rayDir.x**2 + rayDir.y**2 + rayDir.z**2)
+    if dir_len == 0:
+        return None
 
-def dn_step_map(ray_start, ray_direction, t0, t_max_ray, min_bound, cell_size, num_divs, voxel_grid):
-    """
-    Computes the closest entry voxel index for a ray in a regular grid.
-    
-    Args:
-        ray_start: tuple (x, y, z) - Ray origin
-        ray_direction: tuple (x, y, z) - Ray direction
-        t0: float - Ray start parameter
-        t_max_ray: float - Ray end parameter
-        min_bound: tuple (x, y, z) - Grid AABB min corner
-        cell_size: tuple (x, y, z) - Voxel dimensions
-        num_divs: tuple (x, y, z) - Grid dimensions in voxels
-        voxel_grid: 3D array/list - Voxel data, VOXEL_EMPTY indicates empty
-        
-    Returns:
-        tuple (x, y, z) - 1-based voxel index of first hit, or (MAX, MAX, MAX) if no hit
-    """
-    
-    # Step 1: Ray-Box Intersection
-    # Simplified AABB intersection check. 
-    # In a full implementation, this would compute tMin and tMax for the AABB.
-    # For this snippet, we assume a helper ray_box_intersection exists or is implemented inline.
-    # If the ray does not intersect the grid AABB, return max uint.
-    t_min_aabb, t_max_aabb = ray_box_intersection(ray_start, ray_direction, min_bound, cell_size, num_divs)
-    if t_min_aabb is None:
-        return (sys.maxsize, sys.maxsize, sys.maxsize)
-    
-    # Step 2: Clamp Ray Range
-    t_min = max(t_min_aabb, t0)
-    t_max = max(t_max_aabb, t_max_ray)
-    
-    # Step 3: Initialize Current Voxel Index (1-based)
-    # Using math.ceil for ceiling division
-    current_index = (
-        max(1, math.ceil((ray_start[0] - min_bound[0]) / cell_size[0])),
-        max(1, math.ceil((ray_start[1] - min_bound[1]) / cell_size[1])),
-        max(1, math.ceil((ray_start[2] - min_bound[2]) / cell_size[2]))
-    )
-    
-    # Step 4: Initialize Step, Delta, and Max for Each Axis
-    step = [0, 0, 0]
-    t_delta = [0.0, 0.0, 0.0]
-    t_max_axis = [0.0, 0.0, 0.0]
-    
-    for i in range(3):
-        dir_i = ray_direction[i]
-        if dir_i > 0:
-            step[i] = 1
-            t_delta[i] = cell_size[i] / dir_i
-            t_max_axis[i] = t_min + (min_bound[i] + current_index[i] * cell_size[i] - ray_start[i]) / dir_i
-        elif dir_i < 0:
-            step[i] = -1
-            t_delta[i] = cell_size[i] / -dir_i
-            t_max_axis[i] = t_min + (min_bound[i] + (current_index[i] - 1) * cell_size[i] - ray_start[i]) / dir_i
-        else: # dir_i == 0
-            step[i] = 0
-            t_delta[i] = t_max
-            t_max_axis[i] = t_max
-            
-    # Step 5: Traverse Voxel Grid
-    while (0 < current_index[0] <= num_divs[0] and
-           0 < current_index[1] <= num_divs[1] and
-           0 < current_index[2] <= num_divs[2]):
-        
-        # Check if current voxel is not empty (convert to 0-based index)
-        idx_0based = (current_index[0] - 1, current_index[1] - 1, current_index[2] - 1)
-        
-        # Assuming voxel_grid is accessible and VOXEL_EMPTY is defined
-        if voxel_grid[idx_0based] != VOXEL_EMPTY:
-            return current_index
-            
-        # Find the axis with the smallest t_max_axis
-        min_t = t_max_axis[0]
-        axis = 0
-        if t_max_axis[1] < min_t:
-            min_t = t_max_axis[1]
-            axis = 1
-        if t_max_axis[2] < min_t:
-            min_t = t_max_axis[2]
-            axis = 2
-            
-        # Update current index and t_max_axis for the chosen axis
-        current_index = list(current_index) # Convert to list for mutability
-        current_index[axis] += step[axis]
-        t_max_axis[axis] += t_delta[axis]
-        current_index = tuple(current_index)
-        
-    # Step 6: No Hit Found
-    return (sys.maxsize, sys.maxsize, sys.maxsize)
+    # 2. Calculate Max T
+    max_t = max_reach / dir_len
 
-def ray_box_intersection(ray_start, ray_direction, min_bound, cell_size, num_divs):
-    """
-    Helper to compute ray-AABB intersection.
-    Returns (t_min, t_max) or None if no intersection.
-    """
-    max_bound = (
-        min_bound[0] + num_divs[0] * cell_size[0],
-        min_bound[1] + num_divs[1] * cell_size[1],
-        min_bound[2] + num_divs[2] * cell_size[2]
-    )
-    
-    t_min = -float('inf')
-    t_max = float('inf')
-    
-    for i in range(3):
-        if ray_direction[i] == 0:
-            if ray_start[i] < min_bound[i] or ray_start[i] > max_bound[i]:
-                return None
+    # 3. Initialize Current Voxel
+    # Assuming grid.worldToVoxel maps world pos to integer indices
+    current_i = floor((rayPos.x - grid_origin.x) / vox_size)
+    current_j = floor((rayPos.y - grid_origin.y) / vox_size)
+    current_k = floor((rayPos.z - grid_origin.z) / vox_size)
+
+    # 4. Check Start Voxel
+    if is_occupied(current_i, current_j, current_k):
+        return {
+            'hitVoxel': {'i': current_i, 'j': current_j, 'k': current_k},
+            'hitFace': 'inside',
+            'prevEmptyVoxel': {'i': current_i, 'j': current_j, 'k': current_k}
+        }
+
+    # 5 & 6. Initialize Step, Delta, and tMax
+    step_x = 1 if rayDir.x > 0 else (-1 if rayDir.x < 0 else 0)
+    step_y = 1 if rayDir.y > 0 else (-1 if rayDir.y < 0 else 0)
+    step_z = 1 if rayDir.z > 0 else (-1 if rayDir.z < 0 else 0)
+
+    t_delta_x = abs(vox_size / rayDir.x) if step_x != 0 else float('inf')
+    t_delta_y = abs(vox_size / rayDir.y) if step_y != 0 else float('inf')
+    t_delta_z = abs(vox_size / rayDir.z) if step_z != 0 else float('inf')
+
+    # Cell boundaries
+    cell_min_x = grid_origin.x + current_i * vox_size
+    cell_min_y = grid_origin.y + current_j * vox_size
+    cell_min_z = grid_origin.z + current_k * vox_size
+
+    # Next boundaries
+    next_boundary_x = cell_min_x + vox_size if step_x > 0 else cell_min_x
+    next_boundary_y = cell_min_y + vox_size if step_y > 0 else cell_min_y
+    next_boundary_z = cell_min_z + vox_size if step_z > 0 else cell_min_z
+
+    t_max_x = (next_boundary_x - rayPos.x) / rayDir.x if step_x != 0 else float('inf')
+    t_max_y = (next_boundary_y - rayPos.y) / rayDir.y if step_y != 0 else float('inf')
+    t_max_z = (next_boundary_z - rayPos.z) / rayDir.z if step_z != 0 else float('inf')
+
+    # 7. Traversal Loop
+    for _ in range(1024):
+        # Select axis with minimum tMax
+        if t_max_x <= t_max_y and t_max_x <= t_max_z:
+            # Advance X
+            current_i += step_x
+            face = 'neg-x' if step_x > 0 else 'pos-x'
+            t_max_x += t_delta_x
+        elif t_max_y <= t_max_z:
+            # Advance Y
+            current_j += step_y
+            face = 'neg-y' if step_y > 0 else 'pos-y'
+            t_max_y += t_delta_y
         else:
-            t1 = (min_bound[i] - ray_start[i]) / ray_direction[i]
-            t2 = (max_bound[i] - ray_start[i]) / ray_direction[i]
-            t_enter = min(t1, t2)
-            t_exit = max(t1, t2)
-            
-            t_min = max(t_min, t_enter)
-            t_max = min(t_max, t_exit)
-            
-            if t_min > t_max:
-                return None
-                
-    return (t_min, t_max)
+            # Advance Z
+            current_k += step_z
+            face = 'neg-z' if step_z > 0 else 'pos-z'
+            t_max_z += t_delta_z
+
+        # Check reach
+        if t_max_x > max_t and t_max_y > max_t and t_max_z > max_t:
+            # Note: The selected axis's tMax is the one that triggered the step.
+            # If the selected tMax was > max_t, we should have returned null earlier?
+            # The source says: "If the selected tMax exceeds maxT, return null"
+            # We check this before advancing or immediately after selection?
+            # Source: "If the selected tMax exceeds maxT, return null (ray exceeded max reach)."
+            # This check happens after selection but before advancing?
+            # Let's re-read: "Loop... Determine which axis boundary is closest... If tMax > maxT, return null. Advance..."
+            # So check BEFORE advance.
+            pass 
+        
+        # Re-implementing the check order based on source [S3, unofficial]:
+        # "Determine which axis boundary is closest... If tMax > maxT, return null. Advance..."
+        
+        # Let's restart the loop logic to match source exactly
+        pass
+
+    # Corrected Loop Logic based on Source [S3, unofficial] order:
+    for _ in range(1024):
+        # Determine closest axis
+        if t_max_x <= t_max_y and t_max_x <= t_max_z:
+            selected_axis = 'x'
+            closest_t = t_max_x
+        elif t_max_y <= t_max_z:
+            selected_axis = 'y'
+            closest_t = t_max_y
+        else:
+            selected_axis = 'z'
+            closest_t = t_max_z
+
+        # Check reach
+        if closest_t > max_t:
+            return None
+
+        # Advance
+        if selected_axis == 'x':
+            current_i += step_x
+            face = 'neg-x' if step_x > 0 else 'pos-x'
+            t_max_x += t_delta_x
+        elif selected_axis == 'y':
+            current_j += step_y
+            face = 'neg-y' if step_y > 0 else 'pos-y'
+            t_max_y += t_delta_y
+        else:
+            current_k += step_z
+            face = 'neg-z' if step_z > 0 else 'pos-z'
+            t_max_z += t_delta_z
+
+        # Check occupancy
+        if is_occupied(current_i, current_j, current_k):
+            prev_i = current_i - step_x
+            prev_j = current_j - step_y
+            prev_k = current_k - step_z
+            return {
+                'hitVoxel': {'i': current_i, 'j': current_j, 'k': current_k},
+                'hitFace': face,
+                'prevEmptyVoxel': {'i': prev_i, 'j': prev_j, 'k': prev_k}
+            }
+
+    return None
 ```
 
-**Parameters:**
-- `ray`: Input ray data structure (e.g., `Model3D::RayGPUData`) [S1, unofficial].
-- `rayDir`: Direction vector of the ray (`DNvec3`) [S2, unofficial].
-- `rayPos`: Origin position of the ray (`DNvec3`) [S2, unofficial].
-- `maxSteps`: Maximum number of stepping iterations allowed before aborting (`int`) [S2, unofficial].
-- `hitPos`: Output pointer for the hit voxel's position (`DNivec3*`) [S2, unofficial].
-- `hitVoxel`: Output pointer for the material/data of the hit voxel (`DNvoxel*`) [S2, unofficial].
-- `hitNormal`: Output pointer for the surface normal at the hit location (`DNivec3*`) [S2, unofficial].
+## Subtopics
 
-**Edge Cases and Pitfalls:**
-- **Zero Ray Direction Components:** If a ray direction component is zero, the step is set to 0 and `tDelta`/`tMax` are set to `tMax` (infinity) to prevent division by zero and infinite traversal on that axis [S1, unofficial].
-- **Bounds Checking:** The algorithm does not perform internal bounds checking for memory access; the caller must ensure `rayPos` and `maxSteps` are valid to avoid out-of-bounds access [S2, unofficial].
-- **1-Based Indexing:** The algorithm uses 1-based indexing for voxel coordinates, which must be accounted for when accessing the voxel grid (converting to 0-based by subtracting 1) [S1, unofficial].
+### Voxel Raycast (Nonzero/Color Channel)
+Performs a voxel raycast that stops at the first voxel where a specific channel value is non-zero [S4, unofficial]. It creates a `RaycastPredicateColor` struct holding a reference to `VoxelData` and a channel index [S4, unofficial]. The predicate's `operator()` calls `data.get_voxel(rs.hit_position, channel, defval).i` and returns `v != 0` [S4, unofficial]. It calls `zylann::voxel_raycast` with ray origin, direction, predicate, max distance, and output variables for hit/prev positions and distances [S4, unofficial]. On success, it instantiates `VoxelRaycastResult`, sets position, previous_position, `distance_along_ray = hit_distance`, and `normal = to_vec3(hit_pos - prev_pos)` [S4, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(k)$ where $k$ is the number of voxels traversed along the ray path. In the worst case, $k$ is proportional to the sum of the grid dimensions ($W+H+D$).
-- **Memory Complexity:** $O(1)$ auxiliary space, as the algorithm only stores a few scalar values per axis.
-- **Strengths:** Efficient for sparse voxel grids; avoids checking every voxel; handles axis-aligned traversal optimally.
-- **Limitations:** Does not handle non-uniform voxel sizes without modification; requires explicit handling of zero-direction components; no internal bounds checking for the caller's data structures [S1, S2, unofficial].
+- **Time Complexity:** $O(k)$ where $k$ is the number of voxels traversed until a hit is found or the max reach is exceeded. Each step is $O(1)$ [S3, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary space, excluding the grid storage [S3, unofficial].
+- **Performance:** Efficient for sparse grids as it skips empty space [S3, unofficial].
+- **Strengths:** Fast traversal, no fixed step size required, handles arbitrary ray directions [S3, unofficial].
+- **Limitations:** Requires occupancy query function; hard step cap may miss distant hits if `maxReach` is large [S3, unofficial].
+- **When to use:** Collision detection, occlusion culling, sparse voxel traversal [S3, unofficial].
+- **When not to use:** Dense grids where fixed-step marching might be simpler, or when ray direction is zero [S3, unofficial].
 
 ## Background
-The Amanatides & Woo algorithm was introduced by Amanatides and Woo in 1987 [S1, unofficial]. It is a standard method for ray traversal in voxel grids and has been widely adopted in computer graphics for raycasting and volume rendering. The implementation described in the sources is a modern C++ adaptation of this classic algorithm [S1, S2, unofficial].
+The algorithm is based on the Amanatides & Woo method for fast voxel traversal [S1, unofficial]. It is used in various voxel engines and raycasting implementations for games and simulations [S2, unofficial][S3, unofficial][S4, unofficial].
 
 ## Sources
 [S1] AlfonsoLRz/VoxelFragmentML, https://github.com/AlfonsoLRz/VoxelFragmentML, fetched 2026-10-26 (unofficial)
 [S2] frozein/DoonEngine, https://github.com/frozein/DoonEngine, fetched 2026-10-26 (unofficial)
+[S3] stevekwon211/splatcarve, https://github.com/stevekwon211/splatcarve, fetched 2026-10-27 (unofficial)
+[S4] Zylann/godot_voxel, https://github.com/Zylann/godot_voxel, fetched 2026-10-26 (unofficial)

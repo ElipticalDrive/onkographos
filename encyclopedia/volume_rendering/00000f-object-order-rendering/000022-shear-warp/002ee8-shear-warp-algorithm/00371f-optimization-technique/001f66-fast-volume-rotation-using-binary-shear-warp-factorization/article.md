@@ -75,7 +75,6 @@ def shear_left(mask, shift_x, depth, height, width):
             for i in range(width - 1):
                 mask[k][j][i] = (mask[k][j][i] & ~shift_x[k]) | (mask[k][j][i+1] & shift_x[k])
             mask[k][j][width - 1] &= ~shift_x[k]
-            
     # Second half of depth array: shift bits from i-1 to i
     for k in range(depth // 2, depth):
         for j in range(height):
@@ -101,8 +100,6 @@ def compute_new_shift_x(trans_x, shift_x, Z, depth):
         if math.floor(x) != math.floor(trans_x[z]):
             shift_x[z // 32] |= bit >> (z % 32)
         else:
-            # Clear bit at position z % 32 in shift_x[z // 32]
-            # Note: Source uses |= ~(...), which is a known typo for &= ~(...)
             shift_x[z // 32] &= ~(bit >> (z % 32))
         trans_x[z] = x
 ```
