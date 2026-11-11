@@ -24,14 +24,14 @@ Stochastic Gaussian Splatting is a rendering method for massive 3D Gaussian Spla
 6.  **Opacity Correction:** Apply stochastic transparency to the splatted points [S2, unofficial].
 
 **Formulas**
-Let $\alpha_{true}$ be the true opacity of a Gaussian at a specific pixel. Let $k$ be the number of points sampled for this Gaussian. The effective opacity $\alpha_{eff}$ (or per-point hit probability $p$) is derived such that the probability of splatting *no* points to a pixel is exactly $1 - \alpha_{true}$ [S2, unofficial]. Since points are sampled independently, if each point has an effective hit probability $p$, then:
+Let $\alpha_{true}$ be the true opacity of a Gaussian at a specific pixel [S2, unofficial]. Let $k$ be the number of points sampled for this Gaussian [S2, unofficial]. The effective opacity $\alpha_{eff}$ (or per-point hit probability $p$) is derived such that the probability of splatting *no* points to a pixel is exactly $1 - \alpha_{true}$ [S2, unofficial]. Since points are sampled independently, if each point has an effective hit probability $p$, then:
 $$ (1 - p)^k = 1 - \alpha_{true} $$
 Solving for $p$:
 $$ p = 1 - (1 - \alpha_{true})^{1/k} $$
 The method uses this $p$ to determine the contribution of each sampled point, ensuring that the expected accumulated opacity matches $\alpha_{true}$ as $k \to \infty$ and correcting for collisions at finite $k$ [S2, unofficial].
 
 **Parameters**
-*   **Samples Per Pixel (SPP):** The number of points sampled per pixel. Typical value: 4 [S2, unofficial].
+*   **Samples Per Pixel (SPP):** The number of points sampled per pixel [S2, unofficial]. Typical value: 4 [S2, unofficial].
 
 **Pitfalls**
 *   **Opacity Underestimation:** Splatting points sampled directly from Gaussian distributions without opacity correction leads to underestimation of true opacity because independently and identically sampled points may collide on the same pixel [S2, unofficial].
@@ -119,7 +119,7 @@ def stochastic_gaussian_splatting(gaussians, camera, spp=4):
         k_total = point_counts[idx]
         p_eff = 1.0 - (1.0 - alpha_true) ** (1.0 / k_total)
         
-        # Splat using 64-bit atomic accumulation
+        # Splat using 64-bit atomic accumulation [G]
         atomic_add(color_buf, py, px, g['color'] * p_eff)
         atomic_add(alpha_buf, py, px, p_eff)
         
@@ -134,7 +134,7 @@ def stochastic_gaussian_splatting(gaussians, camera, spp=4):
 
 # Helper definitions (standard math/vector operations)
 def is_in_frustum(pos, proj_matrix):
-    # Standard view-space and depth bounds check
+    # Standard view-space and depth bounds check [G]
     view_pos = proj_matrix @ np.append(pos, 1.0)
     return -view_pos[3] <= view_pos[2] <= view_pos[3]
 
@@ -144,13 +144,13 @@ def project_to_pixel(pos, proj_matrix):
     return np.array([(ndc[0] + 1) * 0.5, (ndc[1] + 1) * 0.5])
 
 def sample_from_gaussian(mean, cov):
-    # Standard multivariate normal sampling via Cholesky decomposition
+    # Standard multivariate normal sampling via Cholesky decomposition [G]
     L = np.linalg.cholesky(cov)
     z = np.random.randn(2)
     return mean + L @ z
 
 def atomic_add(buf, y, x, val):
-    # Conceptual 64-bit atomic accumulation for GPU implementation
+    # Conceptual 64-bit atomic accumulation for GPU implementation [G]
     buf[y, x] += val
 ```
 
@@ -159,10 +159,10 @@ def atomic_add(buf, y, x, val):
 *   **Memory Complexity:** Linear with respect to the number of Gaussians and the total number of sampled points [S2, unofficial].
 *   **Measured Performance:** Renders a scene of 425M Gaussians interactively on an NVIDIA RTX 4070 Ti SUPER with 4 SPP without temporal reuse [S2, unofficial].
 *   **Scaling:** Scales to hundreds of millions of Gaussians, far beyond what is possible with traditional tile-based rasterization methods [S2, unofficial].
-*   **Strengths:** Eliminates sorting and tile-based rendering bottlenecks. Unbiased noise that can be mitigated with temporal accumulation. Renders all Gaussians within the frustum [S2, unofficial].
+*   **Strengths:** Eliminates sorting and tile-based rendering bottlenecks. Unbiased noise that can be mitigated with temporal accumulation [S2, unofficial]. Renders all Gaussians within the frustum [S2, unofficial].
 *   **Limitations:** Introduces noise at low sample counts (e.g., 4 SPP). Requires 64-bit atomic operations. The exact heuristic for point count per Gaussian is not specified in the sources [S2, unofficial].
 *   **When to Use:** When rendering massive 3DGS scenes on hardware with limited sorting/tile memory or when simplicity of pipeline is preferred over deterministic rasterization [S2, unofficial].
-*   **When Not to Use:** When deterministic, noise-free results are required without temporal accumulation. When hardware lacks 64-bit atomic support [S2, unofficial].
+*   **When Not to Use:** When deterministic, noise-free results are required without temporal accumulation [S2, unofficial]. When hardware lacks 64-bit atomic support [S2, unofficial].
 
 ## Background
 Stochastic Gaussian Splatting, also known as Gaussian Point Splatting, was proposed by Joris Rijsdijk, Christoph Peters, Michael Weinmann, and Ricardo Marroquim from Delft University of Technology [S2, unofficial]. It was published in ACM Transactions on Graphics (SIGGRAPH) in 2026 [S2, unofficial]. The method addresses the scalability issues of standard 3DGS rendering by replacing the expensive sorting and rasterization steps with a stochastic sampling approach [S2, unofficial].

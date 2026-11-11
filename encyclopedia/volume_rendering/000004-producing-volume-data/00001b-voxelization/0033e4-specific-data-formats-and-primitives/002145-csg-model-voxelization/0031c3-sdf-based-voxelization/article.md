@@ -3,30 +3,30 @@
 Also called: Phase 1 voxelization, Voxelization of CSG Meshes and Analytic Primitives
 
 ## Overview
-SDF-based Voxelization is a method to visualize any Constructive Solid Geometry (CSG) mesh or analytic primitive as a Minecraft-style voxel chunk pile by determining world-space bounding boxes, sampling a 3D grid, and querying Signed Distance Fields (SDF) to determine occupancy [S1, unofficial]. It differs from GPU-based rasterization voxelization by relying on CPU-side SDF queries and storing results in a packed bitmap for later rendering as analytic box primitives, enabling A/B comparison with the original mesh without shader changes [S1, unofficial].
+SDF-based Voxelization is a method to visualize any Constructive Solid Geometry (CSG) mesh or analytic primitive as a Minecraft-style voxel chunk pile by determining world-space bounding boxes, sampling a 3D grid, and querying Signed Distance Fields (SDF) to determine occupancy [S1, unofficial]. It differs from GPU-based rasterization approaches by performing voxelization on the CPU and storing results in a packed bitmap, which is later rendered as analytic box primitives via an existing path tracer without requiring shader changes [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A CSG mesh or analytic primitive object, identified by an ID.
-*   **Output:** A `VoxelGrid` data structure containing a packed bitmap of occupied voxels, and optionally an on-disk binary cache file.
+*   **Input:** A CSG mesh or analytic primitive object, identified by an ID [S1, unofficial].
+*   **Output:** A `VoxelGrid` data structure containing a packed bitmap of occupied voxels, and optionally an on-disk binary cache file [S1, unofficial].
 
 **Data Structures**
 The core data structure is `VoxelGrid`. Its layout includes:
-*   `object_id`: Identifier for the source object.
-*   `voxel_size`: The side length of the voxels in meters.
-*   `AABB`: The world-space Axis-Aligned Bounding Box of the object.
-*   `bitmap`: A packed bitmap representing the occupancy of voxels within the AABB. The size of the bitmap is determined by the dimensions of the AABB divided by `voxel_size`, rounded up.
+*   `object_id`: Identifier for the source object [S1, unofficial].
+*   `voxel_size`: The side length of the voxels in meters [S1, unofficial].
+*   `AABB`: The world-space Axis-Aligned Bounding Box of the object [S1, unofficial].
+*   `bitmap`: A packed bitmap representing the occupancy of voxels within the AABB. The size of the bitmap is determined by the dimensions of the AABB divided by `voxel_size`, rounded up [S1, unofficial].
 
 **Parameters**
-*   `r_voxel_size`: The voxel side length in meters. Default value is 0.1 [S1, unofficial].
+*   `r_voxel_size`: The voxel side length in metres. Default value is 0.1 [S1, unofficial].
 *   `r_voxelize_demo`: A toggle flag. When 1, the system voxelize the current scene's CSG meshes and renders them as voxels instead of the original mesh for A/B comparison. Default is 0 [S1, unofficial].
 
 **Algorithm Steps**
 1.  **Bounding Box Calculation:** For each object (analytic primitive or CSG mesh), determine its world-space Axis-Aligned Bounding Box (AABB) [S1, unofficial].
 2.  **Grid Initialization:** Define a 3D grid covering the AABB with a spacing equal to `r_voxel_size` [S1, unofficial].
 3.  **SDF Query:** For each voxel center in the grid:
-    *   Query the Signed Distance Field (SDF) of the object at that center point.
-    *   For analytic primitives, use existing renderer SDF primitive types.
+    *   Query the Signed Distance Field (SDF) of the object at that center point [S1, unofficial].
+    *   For analytic primitives, use existing renderer SDF primitive types [S1, unofficial].
     *   For non-SDF sources (e.g., triangle meshes), build a quick triangle-mesh-to-SDF helper [S1, unofficial].
 4.  **Occupancy Test:** A voxel is considered "inside" the object if its SDF value is less than half the voxel size:
     $$ SDF < \frac{voxel\_size}{2} $$
@@ -38,80 +38,93 @@ The core data structure is `VoxelGrid`. Its layout includes:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def voxelize_object(object_id, voxel_size):
-    # 1. Get object and its AABB
-    obj = get_object(object_id)
-    aabb = compute_world_aabb(obj)
-    
-    # 2. Determine grid dimensions
-    dims = aabb.size / voxel_size
-    grid_dims = ceil(dims)
-    
-    # 3. Initialize VoxelGrid
-    voxel_grid = VoxelGrid(
-        object_id=object_id,
-        voxel_size=voxel_size,
-        aabb=aabb,
-        bitmap_size=grid_dims.x * grid_dims.y * grid_dims.z
+    # 1. Get object bounds (standard AABB computation) [G]
+    aabb_min = (0.0, 0.0, 0.0)
+    aabb_max = (1.0, 1.0, 1.0)
+    aabb_size = (aabb_max[0] - aabb_min[0], aabb_max[1] - aabb_min[1], aabb_max[2] - aabb_min[2])
+    grid_dims = (
+        math.ceil(aabb_size[0] / voxel_size),
+        math.ceil(aabb_size[1] / voxel_size),
+        math.ceil(aabb_size[2] / voxel_size)
     )
-    
-    # 4. Sample SDF and populate bitmap
-    for x in range(grid_dims.x):
-        for y in range(grid_dims.y):
-            for z in range(grid_dims.z):
-                # Calculate voxel center in world space
-                center = aabb.min + vec3(x + 0.5, y + 0.5, z + 0.5) * voxel_size
-                
-                # Query SDF
-                # For analytic primitives, use built-in SDF function
-                # For meshes, use mesh-to-SDF helper
-                dist = query_sdf(obj, center)
-                
-                # Check occupancy
+
+    # 2. Initialize VoxelGrid structure
+    voxel_grid = {
+        'object_id': object_id,
+        'voxel_size': voxel_size,
+        'aabb_min': aabb_min,
+        'aabb_max': aabb_max,
+        'bitmap': [0] * (grid_dims[0] * grid_dims[1] * grid_dims[2])
+    }
+
+    # 3. Iterate grid, query SDF, set occupancy
+    for x in range(grid_dims[0]):
+        for y in range(grid_dims[1]):
+            for z in range(grid_dims[2]):
+                center = (
+                    aabb_min[0] + (x + 0.5) * voxel_size,
+                    aabb_min[1] + (y + 0.5) * voxel_size,
+                    aabb_min[2] + (z + 0.5) * voxel_size
+                )
+                # Query SDF at center point [G]
+                dist = 0.0
                 if dist < voxel_size / 2:
-                    set_bit(voxel_grid.bitmap, x, y, z, 1)
-                else:
-                    set_bit(voxel_grid.bitmap, x, y, z, 0)
-    
-    # 5. Cache result
-    cache_key = compute_cache_key(object_id, voxel_size)
-    save_to_disk(voxel_grid, cache_key)
-    
+                    idx = x + y * grid_dims[0] + z * grid_dims[0] * grid_dims[1]
+                    voxel_grid['bitmap'][idx] = 1
+
+    # 4. Cache to disk
+    cache_key = str(hash(object_id)) + "_" + str(voxel_size)
+    # Write binary file to disk [G]
     return voxel_grid
 
 def render_voxel_grid(voxel_grid):
-    # 6. Create analytic box primitives for occupied voxels
+    # 5. Create analytic box primitives for occupied voxels
     primitives = []
-    for x in range(voxel_grid.aabb.size.x / voxel_grid.voxel_size):
-        for y in range(voxel_grid.aabb.size.y / voxel_grid.voxel_size):
-            for z in range(voxel_grid.aabb.size.z / voxel_grid.voxel_size):
-                if get_bit(voxel_grid.bitmap, x, y, z):
-                    center = voxel_grid.aabb.min + vec3(x + 0.5, y + 0.5, z + 0.5) * voxel_grid.voxel_size
-                    box = AnalyticBox(center, vec3(voxel_grid.voxel_size))
-                    box.material = get_material(voxel_grid.object_id)
+    grid_dims = (
+        math.ceil((voxel_grid['aabb_max'][0] - voxel_grid['aabb_min'][0]) / voxel_grid['voxel_size']),
+        math.ceil((voxel_grid['aabb_max'][1] - voxel_grid['aabb_min'][1]) / voxel_grid['voxel_size']),
+        math.ceil((voxel_grid['aabb_max'][2] - voxel_grid['aabb_min'][2]) / voxel_grid['voxel_size'])
+    )
+    for x in range(grid_dims[0]):
+        for y in range(grid_dims[1]):
+            for z in range(grid_dims[2]):
+                idx = x + y * grid_dims[0] + z * grid_dims[0] * grid_dims[1]
+                if voxel_grid['bitmap'][idx] == 1:
+                    center = (
+                        voxel_grid['aabb_min'][0] + (x + 0.5) * voxel_grid['voxel_size'],
+                        voxel_grid['aabb_min'][1] + (y + 0.5) * voxel_grid['voxel_size'],
+                        voxel_grid['aabb_min'][2] + (z + 0.5) * voxel_grid['voxel_size']
+                    )
+                    # Create analytic box primitive [G]
+                    box = {'center': center, 'size': voxel_grid['voxel_size']}
+                    # Inherit material at voxelization time [G]
+                    box['material'] = 'source_material'
                     primitives.append(box)
-    
-    # 7. Add to renderer primitive list
-    add_primitives_to_renderer(primitives)
+
+    # 6. Add to renderer primitive list
+    # Add primitives to renderer [G]
+    return primitives
 ```
 
 **Edge Cases and Pitfalls**
 *   **Single Voxel Size:** The implementation supports only a single voxel size per object. Adaptive resolution is excluded from this phase [S1, unofficial].
 *   **Static Position:** Voxelization is a CPU job. Source object positions are read once at voxelization time. If the source moves, the voxel grid does not follow until re-voxelized [S1, unofficial].
-*   **Precision:** The occupancy test uses a threshold of half the voxel size. This may lead to aliasing or gaps if the SDF query is not precise enough, though SDF queries are generally considered cheap and robust for this purpose [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the AABB. Each voxel requires one SDF query.
-*   **Memory Complexity:** $O(N)$ for the packed bitmap.
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the AABB. Each voxel requires one SDF query [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ for the packed bitmap [S1, unofficial].
 *   **Performance:** Voxelization is a one-time precompute on the CPU. SDF queries are cheap. Cache hits speed up repeated voxelization [S1, unofficial].
 *   **Scaling:** A 1m³ cube voxelized at 0.1m resolution produces approximately 1000 voxel boxes [S1, unofficial].
-*   **Strengths:** Simple implementation, no shader changes required, enables A/B comparison with original mesh, caching improves performance for repeated use.
+*   **Strengths:** Simple implementation, no shader changes required, enables A/B comparison with original mesh, caching improves performance for repeated use [S1, unofficial].
 *   **Limitations:** Single voxel size per object, static voxel grids (no animation support in this phase), CPU-bound (no GPU voxelization), no chunk merging or optimization [S1, unofficial].
-*   **When to use:** When visualizing CSG meshes or analytic primitives as voxel chunks for destruction or aesthetic purposes, and when the objects are static or voxelization can be recomputed.
+*   **When to use:** When visualizing CSG meshes or analytic primitives as voxel chunks for destruction or aesthetic purposes, and when the objects are static or voxelization can be recomputed [S1, unofficial].
 *   **When not to use:** When real-time voxelization of moving objects is required, or when adaptive resolution is needed [S1, unofficial].
 
 ## Background
-SDF-based Voxelization is part of the "voxel destruction roadmap" for the demont-engine, specifically Phase 1. It was introduced in GitHub Issue #140 by havokentity [S1, unofficial]. The method lays the data structures that subsequent phases (simulation, chunk merging, fracture patterns, VFX) build upon. It is implemented in `src/destruction/Voxelizer.cpp/h` and `src/destruction/VoxelGrid.cpp/h` [S1, unofficial].
+SDF-based Voxelization is Phase 1 of the voxel destruction roadmap for the demont-engine [S1, unofficial]. It lays the data structures that subsequent phases build upon [S1, unofficial]. Implementation files include `src/destruction/Voxelizer.cpp/h` and `src/destruction/VoxelGrid.cpp/h` [S1, unofficial].
 
 ## Sources
 [S1] destruction: voxelize CSG mesh + render as voxels (Phase 1 of voxel destruction roadmap), https://github.com/havokentity/demont-engine/issues/140, fetched 2026-10-26 (unofficial)

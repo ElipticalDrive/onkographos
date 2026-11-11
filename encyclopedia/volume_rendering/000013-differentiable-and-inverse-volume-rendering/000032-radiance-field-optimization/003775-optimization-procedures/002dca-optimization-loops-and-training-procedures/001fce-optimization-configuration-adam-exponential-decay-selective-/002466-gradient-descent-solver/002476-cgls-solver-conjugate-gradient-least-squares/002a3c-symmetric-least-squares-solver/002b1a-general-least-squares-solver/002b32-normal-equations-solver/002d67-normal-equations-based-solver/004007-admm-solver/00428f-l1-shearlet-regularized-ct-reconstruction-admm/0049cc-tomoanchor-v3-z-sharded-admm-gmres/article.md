@@ -1,0 +1,170 @@
+# TomoAnchor V3 Z-Sharded ADMM-GMRES
+
+Also called: V3 solver
+
+## Overview
+A GPU-based cone-beam CT reconstruction method that uses TIGRE for forward/backward projections and an ADMM solver with restarted GMRES for the x-update step to handle numerical mismatch between TIGRE's $Ax$ and $A^Tb$ operators [S1, unofficial]. It sets itself apart from its parent [L1 Shearlet Regularized CT Reconstruction (ADMM)](10811-l1-shearlet-regularized-ct-reconstruction-admm.md) by returning to TIGRE reconstruction physics, using matched $A$ and $A^T$ operators from TIGRE, and employing GMRES to solve the linear system arising from the ADMM x-update due to potential numerical mismatch between the forward and adjoint operators [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Projection data $y$, system matrix components $A_s$ (forward projection for shard $s$), $B_s$ (backprojection for shard $s$), weight matrix $W$, regularization parameter $\rho$, and initial volume estimate $x$.
+- Output: Reconstructed volume $x$, split into shards $x_s$.
+
+**Data Structures:**
+- `ShardedVolume`: A dataclass with the following fields:
+  - `shards`: tuple of arrays representing the volume shards.
+  - `volume_shards`: tuple of `VolumeShard` objects, each containing metadata about the shard's location and shape.
+  - `xp`: array library, default `np` (NumPy) [S1, unofficial].
+
+**Numbered Steps:**
+1. **Initialization**: Initialize the volume $x$ and its shards $x_s$. Ensure the number of arrays matches the number of volume shards; raise `ValueError` if mismatched [S1, unofficial]. Ensure shard local shape matches array shape; raise `ValueError` if `tuple(int(value) for value in array.shape) != tuple(int(value) for value in shard.local_shape)` [S1, unofficial].
+2. **ADMM Loop**: For each ADMM iteration:
+   a. **x-update**: Solve the linear system using restarted GMRES. The core computation involves a matrix-vector product (matvec) defined as:
+      $$ y = \sum_s A_s x_s $$
+      $$ out_s = B_s W^2 y + \rho (G^T G x)_s $$
+      where $G$ is the gradient operator [S1, unofficial].
+   b. **z-update**: Update the auxiliary variable $z$ based on the current $x$ and dual variable $u$.
+   c. **u-update**: Update the dual variable $u$ based on the current $x$ and $z$.
+3. **Termination**: Check for convergence criteria (e.g., relative change in $x$, residual norm). If converged, stop; otherwise, return to step 2.
+
+**Parameters:**
+- Residency mode: Determines how data is managed between host and device. Options are `staged_tigre` (production default, uses stock TIGRE NumPy wrappers with pinned/staged host buffers), `device_tigre` (strict native bridge backend, keeps ADMM-GMRES solver vectors host-resident, streams one z-shard at a time to GPU), `device_tigre_resident` (full CuPy-resident backend, keeps all V3 solver shards on selected GPUs), and `auto` (uses `device_tigre` if available, otherwise `staged_tigre`) [S1, unofficial].
+- Number of GMRES restarts: Not given in the sources.
+- Tolerance for GMRES convergence: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Mismatch between the number of arrays and volume shards raises a `ValueError` [S1, unofficial].
+- Mismatch between shard local shape and array shape raises a `ValueError` [S1, unofficial].
+- Numerical mismatch between TIGRE's $Ax$ and $A^Tb$ operators necessitates the use of GMRES instead of CG [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def admm_gmres_x_update(x_shards, A_s, B_s, W, rho, G, max_restarts=10, tol=1e-6):
+    """
+    Perform the x-update step in ADMM using restarted GMRES.
+    
+    Args:
+    x_shards: tuple of arrays, the current volume shards.
+    A_s: list of forward projection operators for each shard.
+    B_s: list of backprojection operators for each shard.
+    W: weight matrix.
+    rho: regularization parameter.
+    G: gradient operator.
+    max_restarts: maximum number of GMRES restarts.
+    tol: tolerance for GMRES convergence.
+    
+    Returns:
+    x_new: tuple of arrays, the updated volume shards.
+    """
+    # Compute global projection y
+    y = sum(A_s[i](x_shards[i]) for i in range(len(x_shards)))
+    
+    # Compute the right-hand side for the linear system
+    rhs = [B_s[i](W**2 @ y) + rho * (G.T @ G @ x_shards[i]) for i in range(len(x_shards))]
+    
+    # Define the matrix-vector product for the linear system
+    def matvec(v_shards):
+        v_proj = sum(A_s[i](v_shards[i]) for i in range(len(v_shards)))
+        return [B_s[i](W**2 @ v_proj) + rho * (G.T @ G @ v_shards[i]) for i in range(len(v_shards))]
+    
+    # Solve the linear system using restarted GMRES
+    x_new = gmres_restarted(matvec, rhs, x_shards, max_restarts=max_restarts, tol=tol)
+    
+    return x_new
+
+def gmres_restarted(matvec, rhs, x0, max_restarts=10, tol=1e-6):
+    """
+    Solve the linear system Ax = b using restarted GMRES.
+    
+    Args:
+    matvec: function that computes the matrix-vector product.
+    rhs: right-hand side vector.
+    x0: initial guess.
+    max_restarts: maximum number of GMRES restarts.
+    tol: tolerance for convergence.
+    
+    Returns:
+    x: solution vector.
+    """
+    x = x0
+    for _ in range(max_restarts):
+        # Compute residual
+        r = rhs - matvec(x)
+        if norm(r) < tol:
+            break
+        
+        # Perform GMRES step
+        x_new, _ = gmres_step(matvec, rhs, x, r)
+        x = x_new
+    
+    return x
+
+def gmres_step(matvec, rhs, x, r):
+    """
+    Perform one step of GMRES.
+    
+    Args:
+    matvec: function that computes the matrix-vector product.
+    rhs: right-hand side vector.
+    x: current solution vector.
+    r: residual vector.
+    
+    Returns:
+    x_new: updated solution vector.
+    h: Hessenberg matrix.
+    """
+    # Initialize Hessenberg matrix and Arnoldi vectors
+    n = len(rhs)
+    h = np.zeros((n+1, n))
+    V = [np.zeros(n)] * (n+1)
+    V[0] = r / norm(r)
+    
+    # Arnoldi iteration
+    for j in range(n):
+        w = matvec(V[j])
+        for i in range(j+1):
+            h[i, j] = np.dot(w, V[i])
+            w = w - h[i, j] * V[i]
+        h[j+1, j] = norm(w)
+        if h[j+1, j] == 0:
+            break
+        V[j+1] = w / h[j+1, j]
+    
+    # Solve the least squares problem
+    g = np.zeros(n+1)
+    g[0] = norm(r)
+    for j in range(n):
+        theta = np.arccos(h[j, j] / np.sqrt(h[j, j]**2 + h[j+1, j]**2))
+        phi = np.sin(theta) * g[j]
+        g[j] = np.cos(theta) * g[j]
+        h[j, j] = np.cos(theta) * h[j, j] + np.sin(theta) * h[j+1, j]
+        h[j+1, j] = phi
+    
+    # Back substitution to find the solution
+    y = np.zeros(n)
+    for j in range(n-1, -1, -1):
+        y[j] = (g[j] - np.dot(h[:j, j], y[:j])) / h[j, j]
+    
+    # Update the solution
+    x_new = x + np.dot(V[:n], y)
+    
+    return x_new, h
+```
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources.
+- **Memory Complexity**: Not given in the sources.
+- **Measured Performance**: Not given in the sources.
+- **Scaling**: Not given in the sources.
+- **Strengths**: Uses TIGRE for accurate forward and backward projections, handles numerical mismatch between operators using GMRES, supports GPU acceleration via residency modes [S1, unofficial].
+- **Limitations**: Numerical mismatch between operators may require careful tuning of GMRES parameters, residency modes may impact performance and memory usage [S1, unofficial].
+- **When to Use**: Suitable for cone-beam CT reconstruction where TIGRE's physics are desired and GPU acceleration is needed [S1, unofficial].
+- **When Not to Use**: Not suitable when strict GPU residency is required and the whole ADMM-GMRES state does not fit in aggregate VRAM, or when TIGRE's numerical mismatch cannot be handled by GMRES [S1, unofficial].
+
+## Background
+Originated as part of the TomoAnchor V3 project, which aims to provide a flexible and efficient framework for CT reconstruction [S1, unofficial]. The method builds on the L1 Shearlet Regularized CT Reconstruction (ADMM) algorithm, adapting it to use TIGRE for projections and GMRES for the x-update step [S1, unofficial]. It is used in research and production environments for high-quality CT reconstruction [S1, unofficial].
+
+## Sources
+[S1] alidarbandi/TomoAnchor-V3, https://github.com/alidarbandi/TomoAnchor-V3, fetched 2026-10-27 (unofficial)

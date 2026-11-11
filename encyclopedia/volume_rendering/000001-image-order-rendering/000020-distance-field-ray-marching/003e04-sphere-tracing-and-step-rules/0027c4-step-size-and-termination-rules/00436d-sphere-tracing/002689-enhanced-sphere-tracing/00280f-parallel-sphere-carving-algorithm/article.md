@@ -1,5 +1,4 @@
 # Parallel Sphere Carving Algorithm
-Also called: Sphere Carving
 
 ## Overview
 The Parallel Sphere Carving Algorithm is a method for automatically computing tight bounding volumes for objects defined by a conservative signed distance field (SDF) [S1]. It solves the problem of accelerating implicit surface queries (such as sphere tracing or polygonization) by generating a lightweight bounding proxy function $f_e$ that avoids expensive SDF evaluations outside the object [S1]. Unlike sphere tracing, which discards empty segments along a ray to find an intersection, Sphere Carving discards empty volumes (spheres) in space to find a bounding volume of the surface [S1]. It is agnostic of the function representation, requiring only a conservative SDF query, and provides strict bounding guarantees that neural or interval-arithmetic methods may lack [S1].
@@ -12,7 +11,7 @@ The algorithm iteratively carves an initial large bounding volume $V_0$ using sp
 *   **Outputs:** A set of empty spheres $S$ and a point set $P$ whose convex hull bounds the object surface $\partial \mathcal{O}$ [S1].
 
 **Data Structures:**
-*   $S$: Array of spheres, where each sphere is defined by center $c$ and radius $r$ [S1].
+*   $S$: Array of empty spheres (center and radius) [S1].
 *   $P$: Array of 3D points [S1].
 *   $P'$: Temporary array of intermediate intersection points [S1].
 *   $pairs$: Array of sphere index pairs $(a, b)$ [S1].
@@ -26,10 +25,10 @@ Here, $f$ is a conservative SDF where $|f(p)| \le d(p, \partial O)$ [S1].
 **Algorithm Steps:**
 1.  **Initialization:** Sample points $P$ on the surface of $V_0$ [S1]. Create initial sphere set $S_0 = \{ \text{sphere}(p, |f(p)|) \mid p \in P \}$ [S1]. Verify coverage: for an icosphere, ensure every triangle $\Delta(a,b,c)$ is contained in the union of spheres at its vertices: $\Delta(a,b,c) \subset S(a) \cup S(b) \cup S(c)$ [S1]. If not, increase subdivision [S1].
 2.  **Iteration Loop:** While $\max_{p \in P} f(p) > \tau$:
-    *   **Kernel 1 (Gather Pairs):** Identify intersecting sphere pairs.
-    *   **Kernel 2 (Compute Intersections):** Calculate 3-sphere intersections (trilateration) for triplets.
-    *   **Kernel 3 (Filter Points):** Discard points inside the current sphere set.
-    *   **Kernel 4 (Augment Spheres):** Add new spheres based on filtered points.
+    *   **Kernel 1 (Gather Pairs):** Identify intersecting sphere pairs [S1].
+    *   **Kernel 2 (Compute Intersections):** Calculate 3-sphere intersections (trilateration) for triplets [S1].
+    *   **Kernel 3 (Filter Points):** Discard points inside the current sphere set [S1].
+    *   **Kernel 4 (Augment Spheres):** Add new spheres based on filtered points [S1].
 3.  **Termination:** The loop ends when $\max(f(P)) \le \tau$ [S1]. The result is the final sphere set $S$ and point set $P$ [S1].
 
 **Pseudocode:**
@@ -49,23 +48,23 @@ def parallel_sphere_carving(f: Callable, V0, tau: float) -> Tuple[List, List]:
     if not is_icosphere_covered(V0, S):
         raise ValueError("Initial coverage constraint not met")
 
-    while max(f(p) for p in P) > tau:
+    while P and max(f(p) for p in P) > tau:
         pairs = []
-        # Kernel 1: Gather intersecting sphere pairs
+        # Kernel 1: Gather intersecting sphere pairs [S1]
         for a in range(len(S)):
             for b in range(a + 1, len(S)):
                 if spheres_intersect(S[a], S[b]):
                     pairs.append((a, b))
 
         P_prime = []
-        # Kernel 2: Compute intersection points for triplets (trilateration)
+        # Kernel 2: Compute intersection points for triplets (trilateration) [S1]
         for (a, b) in pairs:
             for c in range(b + 1, len(S)):
                 pts = intersect_three_spheres(S[a], S[b], S[c])
                 P_prime.extend(pts)
 
         P_new = []
-        # Kernel 3: Filter points inside the volume
+        # Kernel 3: Filter points inside the volume [S1]
         for p in P_prime:
             is_inside = False
             for s in S:
@@ -76,7 +75,7 @@ def parallel_sphere_carving(f: Callable, V0, tau: float) -> Tuple[List, List]:
             if not is_inside:
                 P_new.append(p)
 
-        # Kernel 4: Augment sphere set
+        # Kernel 4: Augment sphere set [S1]
         for p in P_new:
             if f(p) > tau:
                 S.append((p, abs(f(p))))
@@ -99,9 +98,12 @@ def is_icosphere_covered(V0, S):
     return True
 
 def triangle_in_sphere_union(a, b, c, Sa, Sb, Sc):
-    # Standard geometric coverage test: verifies triangle is within the union of three spheres [G]
-    # Implementation uses barycentric coordinates and distance checks [G]
-    return True # Exact geometric coverage check [G]
+    # Standard geometric coverage test [G]
+    # Checks if triangle vertices and centroid are within the union of spheres
+    centers = [Sa[0], Sb[0], Sc[0]]
+    radii = [Sa[1], Sb[1], Sc[1]]
+    points = [a, b, c, ((a[0]+b[0]+c[0])/3, (a[1]+b[1]+c[1])/3, (a[2]+b[2]+c[2])/3)]
+    return all(any(math.dist(p, ctr) <= rad for ctr, rad in zip(centers, radii)) for p in points)
 
 def spheres_intersect(s1, s2):
     c1, r1 = s1

@@ -1,0 +1,176 @@
+--- v001.md
++++ v002.md
+@@ -4,44 +4,37 @@
+ 
+ ## Overview
+-HashNeRF is a method for optimizing Neural Radiance Fields (NeRF) that drastically reduces training time by replacing expensive positional encoding with a trainable multiresolution hash encoding [S1, unofficial]. It maps 3D coordinates to a higher-dimensional feature space using multiple hash tables and linear interpolation, followed by a shallow neural network [S1, unofficial]. It sets itself apart from standard NeRF [52-nerf.md] by enabling convergence in significantly fewer iterations due to the generic, trainable nature of the encoding and the reduced parameter count of the shallow decoder [S1, unofficial].
++HashNeRF is a method for optimizing Neural Radiance Fields (NeRF) that drastically reduces training time by replacing positional encoding with a trainable multiresolution hash encoding [S1, unofficial]. It maps 3D coordinates to a high-dimensional feature space using multiple hash tables and linear interpolation, followed by a shallow neural network to predict density and color [S1, unofficial]. It sets itself apart from standard NeRF by using a generic, trainable encoding that allows the model to converge in fewer iterations and train significantly faster on modern GPUs [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** 3D spatial coordinates $\mathbf{x} = (x, y, z)$ and viewing direction $\mathbf{d}$.
++*   **Input:** A 3D spatial coordinate $\mathbf{x} = (x, y, z)$ and a viewing direction $\mathbf{d}$.
+ *   **Output:** Volume density $\sigma$ and view-dependent color $\mathbf{c}$.
+ 
+ **Data Structures:**
+-The method relies on a **Multiresolution Hash Encoding** structure, detailed in [Multi-resolution hash encoding](10203-multi-resolution-hash-encoding.md). This consists of $L$ hash tables $H_0, \dots, H_{L-1}$, where each table $H_l$ has a fixed size $T_l$ and maps hashed coordinate indices to feature vectors of dimension $F$ [S1, unofficial].
++The method relies on $L$ hash tables $H_0, \dots, H_{L-1}$, where each table $H_l$ corresponds to a specific resolution level $l$. Each table has a fixed size $T_l$ and maps hashed coordinate indices to feature vectors of dimension $F$ [S1, unofficial]. The shallow neural network consists of two parts: Density MLP layers (outputting log-space density) and Color MLP layers (adding color variation information) [S1, unofficial].
+ 
+-**Numbered Steps:**
+-1.  **Coordinate Hashing:** For each resolution level $l \in \{0, \dots, L-1\}$, the input coordinate $\mathbf{x}$ is hashed to an index $i_l$ using the multiresolution hash encoding scheme [S1, unofficial].
+-2.  **Feature Fetching:** Retrieve the feature vector $\mathbf{f}_l$ from hash table $H_l$ at index $i_l$ [S1, unofficial].
+-3.  **Interpolation:** Perform linear interpolation of features from the surrounding grid vertices to obtain the interpolated feature vector $\mathbf{v}_l$ for level $l$ [S1, unofficial].
+-4.  **Concatenation:** Concatenate the interpolated feature vectors from all $L$ levels to form the combined feature vector $\mathbf{V} = [\mathbf{v}_0; \dots; \mathbf{v}_{L-1}]$ [S1, unofficial].
+-5.  **Density Decoding:** Pass $\mathbf{V}$ through the **Density MLP** (a shallow multi-layer perceptron of fully connected layers) to output the log-space density $\sigma$ [S1, unofficial].
+-6.  **Color Decoding:** Pass $\mathbf{V}$ and the viewing direction $\mathbf{d}$ through the **Color MLP** (another shallow MLP) to output the color $\mathbf{c}$ [S1, unofficial].
+-7.  **Rendering:** Use $\sigma$ and $\mathbf{c}$ in the volume rendering integral to compute the pixel color [S1, unofficial].
+-
+-**Parameters:**
+-*   **Hardware:** Experiments were conducted on NVIDIA GeForce RTX 3090 Ti GPUs [S1, unofficial].
+-*   **Iterations:** Training was evaluated at 500 and 1,000 iterations [S1, unofficial].
+-*   **Dataset:** 100 training, 100 validation, and 200 test images (RGB + depth) [S1, unofficial].
++**Algorithm Steps:**
++1.  **Coordinate Hashing:** For each resolution level $l$, the input coordinate $\mathbf{x}$ is hashed to an index $i_l$. This involves scaling $\mathbf{x}$ to the resolution of level $l$, computing grid coordinates, and applying a hash function to map these to the table size $T_l$ [S1, unofficial].
++2.  **Feature Fetching:** The feature vector $\mathbf{f}_l$ is retrieved from hash table $H_l$ at index $i_l$ [S1, unofficial].
++3.  **Interpolation:** Linear interpolation is performed on the features from the surrounding grid vertices (corners of the voxel containing $\mathbf{x}$) to obtain the interpolated feature vector $\mathbf{v}_l$ for level $l$ [S1, unofficial].
++4.  **Concatenation:** The interpolated feature vectors from all $L$ levels are concatenated to form the combined feature vector $\mathbf{V} = [\mathbf{v}_0; \dots; \mathbf{v}_{L-1}]$ [S1, unofficial].
++5.  **Decoding:** $\mathbf{V}$ is passed through shallow neural network heads (MLPs) to predict volume density $\sigma$ and view-dependent color $\mathbf{c}$ [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def hashnerf_query(x, d, hash_tables, density_mlp, color_mlp):
++def hash_neRF_query(x, d, hash_tables, mlp_density, mlp_color):
+     """
+-    Query HashNeRF for density and color at coordinate x and direction d.
++    Query the HashNeRF model for density and color at coordinate x and direction d.
+     
+     Args:
+-        x: 3D coordinate (3,)
+-        d: Viewing direction (3,)
+-        hash_tables: List of L hash tables, each mapping indices to feature vectors (F,)
+-        density_mlp: MLP for density output
+-        color_mlp: MLP for color output
++        x: 3D coordinate (x, y, z)
++        d: Viewing direction vector
++        hash_tables: List of L hash tables H_0 ... H_{L-1}
++        mlp_density: MLP for density prediction
++        mlp_color: MLP for color prediction
+         
+     Returns:
+-        sigma: Volume density (scalar)
+-        c: View-dependent color (3,)
++        sigma: Volume density
++        c: View-dependent color
+     """
+     features = []
+@@ -49,9 +42,30 @@
+     # Step 1-3: Hash, Fetch, and Interpolate for each resolution level
+     for l in range(len(hash_tables)):
+-        # Hash coordinate x to index i_l using multiresolution hash encoding
+-        # This involves hashing x to a grid index and fetching/interpolating
+-        # from hash_tables[l]. The exact hashing/interpolation logic is 
+-        # defined in the Multi-resolution hash encoding article.
+-        v_l = interpolate_hash_features(x, hash_tables[l])
++        # Scale coordinate to level l resolution
++        x_scaled = x * (2**l)
++        
++        # Compute grid coordinates (floor)
++        x_floor = floor(x_scaled)
++        
++        # Compute fractional part for interpolation
++        frac = x_scaled - x_floor
++        
++        # Get the 8 corner indices for trilinear interpolation
++        # Note: The parent article describes linear interpolation; 
++        # standard 3D implementation requires trilinear interpolation.
++        # We assume standard trilinear interpolation over the voxel corners.
++        corner_indices = get_corner_indices(x_floor)
++        
++        # Fetch features from the hash table
++        corner_features = []
++        for idx in corner_indices:
++            # Hash index to table size T_l
++            hash_idx = hash_function(idx, table_size=hash_tables[l].size)
++            # Retrieve feature vector
++            f = hash_tables[l][hash_idx]
++            corner_features.append(f)
++            
++        # Trilinear interpolation of corner features
++        v_l = trilinear_interpolate(corner_features, frac)
+         features.append(v_l)
+         
+@@ -59,36 +73,56 @@
+     V = concatenate(features)
+     
+-    # Step 5: Decode density
+-    sigma = density_mlp(V)
++    # Step 5: Decode Density
++    # The density MLP outputs log-space density
++    sigma_log = mlp_density(V)
++    sigma = exp(sigma_log)
+     
+-    # Step 6: Decode color
+-    c = color_mlp(V, d)
++    # Step 5: Decode Color
++    # Concatenate V and viewing direction d for color prediction
++    # Note: Standard NeRF concatenates direction to the feature vector
++    # before the color MLP. The source mentions "Color MLP layers - 
++    # the former outputs the log-space density, while the color layers 
++    # add color variation information".
++    # We assume standard NeRF color input: [V; d]
++    color_input = concatenate([V, d])
++    c = mlp_color(color_input)
+     
+     return sigma, c
+ ```
+ 
++**Parameters:**
++*   **Hardware:** NVIDIA GeForce RTX 3090 Ti GPUs [S1, unofficial].
++*   **Training Iterations:** Evaluated at 500 and 1,000 iterations [S1, unofficial].
++*   **Dataset:** 100 training, 100 validation, 200 test images (RGB + depth) [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Hash Collisions:** Hash collisions are a known phenomenon. In Instant-NGP, the hash table directly stores features, and collisions are handled by overwriting or specific hashing strategies [S1, unofficial]. In other implementations like MERF, collisions are resolved using a 2-layer MLP with 64 hidden units [S2].
++*   **Vanishing Gradients:** The default architecture includes residual connections between the image generation and color generation pipelines to ensure communication and avoid vanishing gradients [S1, unofficial].
++
+ ## Subtopics
+ 
+ ### [HashNeRF Architectural Variants](8688-hashnerf-architectural-variants.md)
+-This variant explores modifications to the standard shallow multi-layer perceptron (MLP) decoder to improve reconstruction quality and training time. It addresses the limitations of the base method by altering the internal connectivity and layer types of the feature-decoding stage. Specifically, it introduces convolutional and dilated convolutional layers into the color generation pipeline to provide context from surrounding pixels, hypothesizing this helps faster convergence and improved accuracy. It also evaluates the impact of residual connections between the image generation and color generation pipelines to ensure communication and avoid vanishing gradients.
++This variant details four specific architectural modifications to the HashNeRF color and density networks, proposed to evaluate the impact of residual connections, convolutional layers, and network depth on reconstruction quality and training time. These variants address the limitations of the standard shallow multi-layer perceptron (MLP) decoder by exploring alternative feature aggregation and information preservation strategies. They are distinct from the base HashNeRF method [8678-hashnerf.md] by altering the internal connectivity and layer types of the feature-decoding stage.
+ 
+ ### HollowNeRF
+-HollowNeRF is a compression method that automatically sparsifies the feature grid during training by using a trainable 3D saliency mask to guide efficient feature pruning, redistributing hash collisions to improve rendering quality with fewer parameters [S2]. It uses 31% of the parameters of Instant-NGP while delivering comparable rendering quality, and achieves up to 1dB PSNR accuracy gain using only 56% of the parameters [S2].
+-1.  **Saliency Prediction:** Given input coordinate $\mathbf{x}=(x,y,z)$, fetch feature $\mathbf{f}$ from the multi-level hashgrid following Instant-NGP [S2]. Predict saliency weight $p$ by processing information from a trainable 3D saliency grid $G$ (resolution $T \times T \times T$) through trilinear interpolation and a sigmoid function [S2].
+-2.  **Feature Scaling:** Scale feature $\mathbf{f}$ by $p$ to get weighted feature $\mathbf{v} = p\mathbf{f}$ [S2].
+-3.  **Decoding:** Feed weighted feature $\mathbf{v}$ into an MLP to decode density $\sigma$ and color [S2].
+-4.  **Zero-Skipping Gate:** Ensure $\mathbf{v}=0$ maps to $\sigma=0$ using a zero-skipping gate [S2].
+-5.  **Rendering and Loss:** Use density and color for volume rendering, compare to ground truth for loss $L$ [S2].
+-6.  **Pruning:** During training, use an ADMM pruner to sparsify saliency value distribution by enforcing a sparsity constraint when optimizing loss $L$ [S2].
++HollowNeRF is a NeRF compression method that automatically sparsifies the feature grid during training by using a trainable 3D saliency mask to guide efficient feature pruning, redistributing hash collisions to improve rendering quality with fewer parameters [S2]. It uses 31% of the parameters of Instant-NGP while delivering comparable rendering quality [S2]. It achieves up to 1dB PSNR accuracy gain using only 56% of the parameters compared to Instant-NGP [S2].
++
++**Steps:**
++1.  Given input coordinate $\mathbf{x}=(x,y,z)$, fetch feature $\mathbf{f}$ from multi-level hashgrid following Instant-NGP [S2].
++2.  Predict saliency weight $p$ by processing information from trainable 3D saliency grid $G$ through trilinear interpolation and a sigmoid function [S2].
++3.  Scale feature $\mathbf{f}$ by $p$ to get weighted feature $\mathbf{v} = p\mathbf{f}$ [S2].
++4.  Feed weighted feature $\mathbf{v}$ into MLP to decode density $\sigma$ and color [S2].
++5.  Ensure $\mathbf{v}=0$ maps to $\sigma=0$ using a zero-skipping gate [S2].
++6.  Use density and color for volume rendering, compare to ground truth for loss $L$ [S2].
++7.  During training, use ADMM pruner to sparsify saliency value distribution by enforcing sparsity constraint when optimizing loss $L$ [S2].
++
++**Parameters:**
++*   $T$: Resolution of the trainable 3D saliency grid $G$, typically much smaller than the resolution of the dense feature grid [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** HashNeRF trains significantly faster and converges in fewer iterations than standard NeRF [S1, unofficial]. This is attributed to the generic, trainable encoding and the shallow network with fewer parameters [S1, unofficial].
+-*   **Memory Complexity:** The method uses multiple hash tables for different resolutions. The memory footprint is determined by the total size of these hash tables and the shallow MLP weights [S1, unofficial]. HollowNeRF reduces this further by sparsifying the grid [S2].
+-*   **Performance:** Evaluated on NVIDIA GeForce RTX 3090 Ti GPUs, with results at 500 and 1,000 iterations [S1, unofficial].
+-*   **Strengths:** Fast training, low data requirements, generic applicability to various neural graphics primitives (e.g., Gigapixel approximation, SDF generation) [S1, unofficial].
+-*   **Limitations:** The shallow MLP may have limited capacity compared to deeper networks, potentially affecting the representation of highly complex scenes without sufficient hash resolution [S1, unofficial].
++HashNeRF trains faster and converges in fewer iterations than NeRF because the encoding is generic, trainable, and the network is shallow with fewer parameters [S1, unofficial]. The shallow network architecture reduces the computational load per iteration, while the hash encoding allows for efficient memory access and parallelization on GPUs [S1, unofficial]. The method is particularly effective for real-time applications and scenarios requiring rapid iteration, such as Gigapixel approximation, generating signed distance functions, and Neural Radiance Caching [S1, unofficial].
+ 
+ ## Background
+-HashNeRF, formally known as "Instant Neural Graphics Primitives with a Multiresolution Hash Encoding," was proposed by Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller [S1, unofficial]. It was published in ACM Transactions on Graphics, Vol. 41, No. 4, Article 102, in July 2022 [S1, unofficial]. The method was designed to address the long training times associated with traditional NeRF models [S1, unofficial]. It builds on the concept of neural radiance fields introduced by NeRF [52-nerf.md] but introduces a radical approach to encoding to enable instant training [S1, unofficial].
++HashNeRF, formally known as "Instant Neural Graphics Primitives with a Multiresolution Hash Encoding," was proposed by Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller [S1, unofficial]. It was published in ACM Transactions on Graphics in July 2022 [S1, unofficial]. The method builds on the original NeRF framework [S1, unofficial] but introduces a radical approach to reducing training times by leveraging multiresolution hash encoding [S1, unofficial].
+ 
+ ## Sources

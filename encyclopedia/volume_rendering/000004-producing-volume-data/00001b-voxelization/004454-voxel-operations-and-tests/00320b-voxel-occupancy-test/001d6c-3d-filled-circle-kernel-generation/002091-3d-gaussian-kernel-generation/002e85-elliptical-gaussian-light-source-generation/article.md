@@ -1,85 +1,64 @@
 # Elliptical Gaussian Light Source Generation
 
-Also called: Poisson Disk Light Sampling
+Also called: Poisson Disk Light Sampling [S1, unofficial]
 
 ## Overview
 Generates spatially distributed light sources using either Poisson disk or uniform sampling, then constructs a luminance field by evaluating scaled multivariate Gaussian probability density functions (PDFs) at query points [S1, unofficial]. It differs from its parent [3D Gaussian Kernel Generation](2297-3d-gaussian-kernel-generation.md) by treating the Gaussian as an emission model for light sources rather than a smoothing kernel, and by supporting spatially varying elliptical covariances via eigen-decomposition [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `source_locs`: `jnp.ndarray` of shape `(num_sources, 3)`, the 3D locations of the light sources.
-- `covs`: `jnp.ndarray` of shape `(num_sources, 3, 3)`, the covariance matrix for each light source.
-- `xs`: `jnp.ndarray` of shape `(num_points, 3)`, the query points (ray positions) where luminance is evaluated.
-- `damp`: `float`, optional scaling factor for the emission function, default 200 [S1, unofficial].
+- `source_locs`: `jnp.ndarray` of shape `(num_sources, 3)`, the 3D locations of the light sources [S1, unofficial].
+- `covs`: `jnp.ndarray` of shape `(num_sources, 3, 3)`, the covariance matrix for each light source [S1, unofficial].
+- `xs`: `jnp.ndarray` of shape `(num_points, 3)`, the query points (ray positions) where luminance is evaluated [S1, unofficial].
+- `damp`: `float`, scaling factor for the emission function, default 200 [S1, unofficial].
 - `ls_type`: `str`, either `'poisson'` or `'uniform'`, determining the sampling strategy for source locations [S1, unofficial].
-- `num_sources`: `int`, the number of light sources to generate.
+- `num_sources`: `int`, the number of light sources to generate [S1, unofficial].
 - `seed`: `int` or `jax.random.PRNGKey`, for reproducibility [S1, unofficial].
 
 **Outputs:**
-- `out`: `jnp.ndarray` of shape `(num_points,)`, the computed luminance values at the query points.
+- `luminance`: `jnp.ndarray` of shape `(num_sources, num_points)`, the computed luminance values at the query points [S1, unofficial].
 
 **Data Structures:**
-- `self.Us`: `jnp.ndarray` of shape `(num_sources, 3, 3)`, the transformation matrix for each source, computed as $U = V \Lambda^{-1/2}$, where $V$ are eigenvectors and $\Lambda$ are eigenvalues.
-- `self.logdets`: `jnp.ndarray` of shape `(num_sources,)`, the log determinants of the covariance matrices, computed as $\sum \log(\lambda_i)$.
+- `self.Us`: `jnp.ndarray` of shape `(num_sources, 3, 3)`, the transformation matrix for each source, computed as $U = V \Lambda^{-1/2}$, where $V$ are eigenvectors and $\Lambda$ are eigenvalues [S1, unofficial].
+- `self.logdets`: `jnp.ndarray` of shape `(num_sources,)`, the log determinants of the covariance matrices, computed as $\sum \log(\lambda_i)$ [S1, unofficial].
 
 **Steps:**
 
 1. **Source Location Generation:**
-   - If `ls_type == 'poisson'`:
-     - Initialize a random number generator with `seed`.
-     - Create a Poisson disk sampler with dimension $d=3$, radius $r=0.13$, and the initialized generator.
-     - Sample `num_sources` points (default 1000 in source code) from the unit cube [S1, unofficial].
-   - If `ls_type == 'uniform'`:
-     - Initialize a JAX PRNGKey with `seed`.
-     - Sample points uniformly in $[0,1]^3$ until `num_sources` are collected (default 500 in source code, but `num_sources` is used for stacking) [S1, unofficial].
+   - If `ls_type == 'poisson'`: Initialize a random number generator with `seed` [S1, unofficial]. Create a Poisson disk sampler with dimension $d=3$, radius $r=0.13$, and the initialized generator [S1, unofficial]. Sample 1000 points from the unit cube [S1, unofficial].
+   - If `ls_type == 'uniform'`: Initialize a JAX PRNGKey with `seed` [S1, unofficial]. Sample points uniformly in $[0,1]^3$ until 500 are collected, then stack the first `num_sources` points [S1, unofficial].
 
 2. **Covariance Generation:**
    - Define a base covariance matrix $C_{base}$:
-     $$
-     C_{base} = \begin{bmatrix} 2 & 0 & 0 \\ 0 & 0.5 & 0 \\ 0 & 0 & 0.5 \end{bmatrix} \times 10^{-3}
-     $$
-   - Rotate this base covariance for each source using a rotation function `rotate_cov(cov, num_sources, seed)` to create `covs` of shape `(num_sources, 3, 3)` [S1, unofficial].
+     $$C_{base} = \begin{bmatrix} 2 & 0 & 0 \\ 0 & 0.5 & 0 \\ 0 & 0 & 0.5 \end{bmatrix} \times 10^{-3}$$
+   - Rotate this base covariance for each source using `rotate_cov(cov, num_sources, seed)` to create `covs` of shape `(num_sources, 3, 3)` [S1, unofficial].
 
 3. **Eigen-decomposition (Initialization):**
    - Compute eigenvalues `vals` and eigenvectors `vecs` of `covs` using `jnp.linalg.eigh(self.covs)` [S1, unofficial].
-   - Compute inverse square roots of eigenvalues: `valsinvs = 1. / vals`.
+   - Compute inverse square roots of eigenvalues: `valsinvs = 1. / vals` [S1, unofficial].
    - Compute transformation matrix `Us`:
-     $$
-     U_s = V_s \cdot \Lambda_s^{-1/2}
-     $$
-     In code: `self.Us = vecs * jnp.sqrt(valsinvs)[:, None]`. This broadcasts the scaling across the 3x3 matrix [S1, unofficial].
+     $$U_s = V_s \cdot \Lambda_s^{-1/2}$$
+     In code: `self.Us = vecs * jnp.sqrt(valsinvs)[:, None]` [S1, unofficial].
    - Compute log determinants:
-     $$
-     \log \det(C_s) = \sum_{i=1}^3 \log(\lambda_{s,i})
-     $$
+     $$\log \det(C_s) = \sum_{i=1}^3 \log(\lambda_{s,i})$$
      In code: `self.logdets = jnp.sum(jnp.log(vals), axis=1)` [S1, unofficial].
 
 4. **PDF Evaluation:**
    - Compute deviations between query points and source locations:
-     $$
-     \Delta_{s,p} = x_p - l_s
-     $$
-     In code: `devs = xs[:, None, :] - source_locs[None, :, :]`. Shape: `(num_points, num_sources, 3)` [S1, unofficial].
+     $$\Delta_{s,p} = x_p - l_s$$
+     In code: `devs = xs[:, None, :] - source_locs[None, :, :]` [S1, unofficial].
    - Transform deviations using the precomputed `Us`:
-     $$
-     \tilde{\Delta}_{s,p} = \Delta_{s,p} \cdot U_s
-     $$
-     In code: `devUs = einsum('jnk,nki->jni', devs, Us)`. Shape: `(num_points, num_sources, 3)` [S1, unofficial].
+     $$\tilde{\Delta}_{s,p} = \Delta_{s,p} \cdot U_s$$
+     In code: `devUs = einsum('jnk,nki->jni', devs, Us)` [S1, unofficial].
    - Compute Mahalanobis distances (squared):
-     $$
-     D^2_{s,p} = \|\tilde{\Delta}_{s,p}\|^2 = \sum_{k=1}^3 (\tilde{\Delta}_{s,p,k})^2
-     $$
-     In code: `mahas = sum(square(devUs), axis=2)`. Shape: `(num_points, num_sources)` [S1, unofficial].
+     $$D^2_{s,p} = \|\tilde{\Delta}_{s,p}\|^2 = \sum_{k=1}^3 (\tilde{\Delta}_{s,p,k})^2$$
+     In code: `mahas = sum(square(devUs), axis=2)` [S1, unofficial].
    - Compute log PDF for each source-point pair:
-     $$
-     \log \text{PDF}_{s,p} = -\frac{1}{2} \left( d \log(2\pi) + D^2_{s,p} + \log \det(C_s) \right)
-     $$
+     $$\log \text{PDF}_{s,p} = -\frac{1}{2} \left( d \log(2\pi) + D^2_{s,p} + \log \det(C_s) \right)$$
      In code: `out = -0.5 * (dim * log(2*pi) + mahas + logdets[None, :])`. Here $d=3$ [S1, unofficial].
    - Return the final luminance:
-     $$
-     L_p = \frac{1}{\text{damp}} \sum_{s=1}^{N} \exp(\log \text{PDF}_{s,p})
-     $$
-     In code: `return exp(out.T) / damp`. Note: The source code returns `exp(out.T) / damp`, which implies summing over sources if `out` was summed, but the code snippet shows `out` as the log PDF per source. The return statement `exp(out.T) / damp` suggests the final output is the sum of exponentials divided by damp, or potentially just the exponential if the sum is implicit in the context of the class. However, the definition says "summing multivariate Gaussian PDFs". The code `exp(out.T)` returns a matrix of shape `(num_sources, num_points)`. To get a single luminance per point, one must sum over the source dimension. The provided code snippet `return exp(out.T) / damp` might be incomplete or assume a specific reduction. Based on the definition "summing multivariate Gaussian PDFs", the correct implementation should sum over sources. We will assume the standard interpretation: $L_p = \frac{1}{\text{damp}} \sum_s \exp(\log \text{PDF}_{s,p})$. If the code literally returns `exp(out.T) / damp`, it returns a matrix. Given the context of "luminance field", a vector per point is expected. We will note this discrepancy [S1, unofficial].
+     $$L_{s,p} = \frac{1}{\text{damp}} \exp(\log \text{PDF}_{s,p})$$
+     In code: `return exp(out.T) / damp` [S1, unofficial].
 
 **Pseudocode:**
 
@@ -88,100 +67,62 @@ Generates spatially distributed light sources using either Poisson disk or unifo
 ```python
 import jax.numpy as jnp
 import jax.random as random
-from jax.scipy.special import logsumexp
+from scipy.stats import qmc
 
 def generate_source_locations(ls_type, num_sources, seed):
     if ls_type == 'poisson':
-        # Assuming qmc.PoissonDisk is available
-        # engine = qmc.PoissonDisk(d=3, radius=0.13, seed=seed)
-        # source_locs = engine.random(num_sources)
-        # Placeholder for Poisson Disk sampling
-        source_locs = random.uniform(random.PRNGKey(seed), (num_sources, 3), minval=0, maxval=1)
+        rng = random.PRNGKey(seed)
+        engine = qmc.PoissonDisk(d=3, radius=0.13, seed=rng)
+        source_locs = engine.random(1000)
     elif ls_type == 'uniform':
-        # Sample until num_sources are collected
-        # Placeholder for uniform sampling
-        source_locs = random.uniform(random.PRNGKey(seed), (num_sources, 3), minval=0, maxval=1)
+        rng = random.PRNGKey(seed)
+        points = []
+        while len(points) < num_sources:
+            batch = random.uniform(rng, (500, 3), minval=0, maxval=1)
+            points.append(batch)
+        source_locs = jnp.concatenate(points)[:num_sources]
     else:
         raise ValueError("ls_type must be 'poisson' or 'uniform'")
     return source_locs
 
 def rotate_cov(cov, num_sources, seed):
-    # Placeholder for rotation logic
-    # Returns covs of shape (num_sources, 3, 3)
-    return jnp.tile(cov, (num_sources, 1, 1))
+    rng = random.PRNGKey(seed)
+    random_matrices = random.normal(rng, (num_sources, 3, 3))
+    Q, _ = jnp.linalg.qr(random_matrices)
+    Q = Q * jnp.sign(jnp.linalg.det(Q))[:, None, None]
+    covs = jnp.einsum('nij,njk,nkl->nil', Q, cov, Q)
+    return covs
 
 def elliptical_gaussian_light_source(xs, source_locs, covs, damp=200.0):
-    """
-    xs: (num_points, 3)
-    source_locs: (num_sources, 3)
-    covs: (num_sources, 3, 3)
-    damp: float
-    """
     num_sources = source_locs.shape[0]
     dim = 3
-    
-    # 1. Eigen-decomposition
-    vals, vecs = jnp.linalg.eigh(covs) # vals: (num_sources,), vecs: (num_sources, 3, 3)
-    
-    # Guard against non-positive eigenvalues
-    vals = jnp.maximum(vals, 1e-8)
-    
+    vals, vecs = jnp.linalg.eigh(covs)
     valsinvs = 1.0 / vals
-    # Us: (num_sources, 3, 3)
     Us = vecs * jnp.sqrt(valsinvs)[:, None, :]
-    
-    # logdets: (num_sources,)
     logdets = jnp.sum(jnp.log(vals), axis=1)
-    
-    # 2. Deviations
-    # devs: (num_points, num_sources, 3)
     devs = xs[:, None, :] - source_locs[None, :, :]
-    
-    # 3. Transform deviations
-    # devUs: (num_points, num_sources, 3)
     devUs = jnp.einsum('jnk,nki->jni', devs, Us)
-    
-    # 4. Mahalanobis distances
-    # mahas: (num_points, num_sources)
     mahas = jnp.sum(devUs ** 2, axis=2)
-    
-    # 5. Log PDF
-    # log_pdf: (num_points, num_sources)
-    log_pdf = -0.5 * (dim * jnp.log(2 * jnp.pi) + mahas + logdets[None, :])
-    
-    # 6. Sum of PDFs
-    # Use logsumexp for numerical stability
-    # log_sum_pdf: (num_points,)
-    log_sum_pdf = logsumexp(log_pdf, axis=1)
-    
-    # 7. Final luminance
-    luminance = jnp.exp(log_sum_pdf) / damp
-    
-    return luminance
+    out = -0.5 * (dim * jnp.log(2 * jnp.pi) + mahas + logdets[None, :])
+    return jnp.exp(out.T) / damp
 ```
 
 **Edge Cases and Pitfalls:**
 - **Non-positive eigenvalues:** Covariance matrices must be positive semi-definite. If eigenvalues are zero or negative, the log determinant and inverse square root will fail or produce NaNs. A guard `vals = jnp.maximum(vals, 1e-8)` is recommended [G].
-- **Boundary conditions:** Source locations are sampled in $[0,1]^3$. Query points outside this range may result in very small PDF values, but no explicit boundary handling is described in the source [S1, unofficial].
-- **Numerical stability:** Computing `exp(log_pdf)` directly can lead to underflow. Using `logsumexp` before exponentiation is recommended [G].
-- **Damping factor:** The `damp` parameter scales the final luminance. A value of 200 is used in the source. If `damp` is too small, luminance values may be excessively large [S1, unofficial].
+- **Numerical stability:** Computing `exp(log_pdf)` directly can lead to underflow. Using `logsumexp` or explicit summation before exponentiation is recommended [G].
+- **Damping factor:** The `damp` parameter scales the final luminance. A value of 200 is used in the source [S1, unofficial].
+- **Code discrepancy:** The source code returns `exp(out.T) / damp`, yielding a `(num_sources, num_points)` matrix, whereas the definition specifies summing PDFs over sources. Implementations should sum over the source dimension to match the emission model definition [S1, unofficial].
 
 ## Subtopics
 
 ### Multivariate Gaussian PDF Emission Model
-A method to simulate elliptical light sources by summing multivariate Gaussian probability density functions (PDFs) evaluated at ray positions. It uses precomputed eigen-decomposition of covariance matrices for efficient vectorized evaluation. It is chosen when elliptical light sources with varying orientations and scales are required. It is implemented in the `Light_SourcesCov` class in the source code [S1, unofficial].
+A method to simulate elliptical light sources by summing multivariate Gaussian probability density functions (PDFs) evaluated at ray positions [S1, unofficial]. It uses precomputed eigen-decomposition of covariance matrices for efficient vectorized evaluation [S1, unofficial]. It is implemented in the `Light_SourcesCov` class in the source code [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot M \cdot d)$, where $N$ is the number of query points, $M$ is the number of light sources, and $d=3$ is the dimension. The eigen-decomposition is $O(M \cdot d^3)$, which is negligible compared to the evaluation step.
-- **Memory Complexity:** $O(N \cdot M)$ for storing the intermediate Mahalanobis distances and log PDFs. This can be a bottleneck for large $N$ and $M$.
-- **Measured Performance:** Not given in the sources.
-- **Strengths:** Efficient vectorized evaluation using JAX; supports elliptical shapes via covariance matrices; flexible sampling strategies (Poisson disk, uniform).
-- **Limitations:** Memory intensive for large numbers of sources and query points; requires positive definite covariance matrices; damping factor is arbitrary.
-- **When to use:** When simulating light sources with elliptical intensity profiles in a volume rendering context.
-- **When not to use:** When computational resources are limited and a large number of sources are needed; when point sources are sufficient.
+Not given in the sources.
 
 ## Background
-Originated in the `rtnf` repository by brandonyzhao [S1, unofficial]. The method is part of a neural radiance field (NeRF) based approach for volume rendering, specifically for generating light sources within the volume. It builds on [3D Gaussian Kernel Generation](2297-3d-gaussian-kernel-generation.md) by adapting the Gaussian kernel for emission rather than smoothing.
+Implemented in the `rtnf` repository [S1, unofficial]. The method is part of a neural radiance field (NeRF) based approach for volume rendering, specifically for generating light sources within the volume. It builds on [3D Gaussian Kernel Generation](2297-3d-gaussian-kernel-generation.md) by adapting the Gaussian kernel for emission rather than smoothing [S1, unofficial].
 
 ## Sources
 [S1] brandonyzhao/rtnf, https://github.com/brandonyzhao/rtnf, fetched 2026-10-27 (unofficial)

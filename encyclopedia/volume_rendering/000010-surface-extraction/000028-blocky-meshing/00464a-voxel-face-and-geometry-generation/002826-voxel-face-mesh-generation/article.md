@@ -1,9 +1,9 @@
 # Voxel Face Mesh Generation
 
-Also called: Block Face Culling, Visible Block Faces Meshing, Voxel Quad Generation
+Also called: Blocky Voxel Mesh Generation, Visible Block Faces Meshing, Voxel Quad Generation
 
 ## Overview
-Voxel Face Mesh Generation is a surface extraction method that emits one unit quad per visible block face in a padded voxel chunk, creating a mesh suitable for opaque geometry rendering [S2, unofficial]. It differs from greedy meshing by not merging adjacent coplanar faces, and from Marching Cubes by strictly adhering to the voxel grid axes, resulting in blocky but computationally inexpensive geometry [S1, unofficial]. The method solves the problem of converting abstract voxel visibility into concrete vertex buffer data by iterating interior voxels, checking neighbor visibility, and populating a mesh data structure with positions, normals, UVs, and indices [S1, unofficial].
+Voxel Face Mesh Generation is a surface extraction method that emits one unit quad per visible block face in a padded voxel chunk, creating a mesh suitable for opaque geometry rendering [S2, unofficial]. It solves the problem of converting abstract voxel visibility into concrete vertex buffer data by iterating interior voxels, checking neighbor visibility, and populating a mesh data structure with positions, normals, UVs, and indices [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -12,20 +12,20 @@ Voxel Face Mesh Generation is a surface extraction method that emits one unit qu
 
 **Data Structures:**
 - **MeshData (S1):** Contains:
-    - `vertices`: Dynamic array of `FVector` (32-bit floats).
-    - `Triangles`: Dynamic array of `int` (32-bit integers).
-    - `normals`: Dynamic array of `FVector`.
-    - `UV0`: Dynamic array of `FVector2D`.
-    - `tangents`: Dynamic array of `FProcMeshTangent`.
-    - `vertexColors`: Dynamic array of `FLinearColor`.
-    - `VERTICES[6][4]`: Static lookup table of base quad vertices for 6 face directions.
-    - `NORMALS[6]`: Static lookup table of normals.
-    - `UVS_Inverted[6][4]`: Static lookup table of inverted UVs.
-    - `TANGENTS[6]`: Static lookup table of tangents.
-    - `BlockTypeTextureIndex[MAX_TYPES][6]`: Lookup table mapping block types and face directions to texture atlas indices.
-    - `ATLAS_SIZE`: Float constant defining texture atlas resolution.
-- **Quad (S2):** Struct containing `voxel` (position `[x, y, z]`), `width` (1), `height` (1).
-- **FaceDir:** Enum or integer discriminant for 6 axis-aligned directions (UP, DOWN, LEFT, RIGHT, FORWARD, BACK).
+    - `vertices`: Dynamic array of `FVector` (32-bit floats) [S1, unofficial].
+    - `Triangles`: Dynamic array of `int` (32-bit integers) [S1, unofficial].
+    - `normals`: Dynamic array of `FVector` [S1, unofficial].
+    - `UV0`: Dynamic array of `FVector2D` [S1, unofficial].
+    - `tangents`: Dynamic array of `FProcMeshTangent` [S1, unofficial].
+    - `vertexColors`: Dynamic array of `FLinearColor` [S1, unofficial].
+    - `VERTICES[6][4]`: Static lookup table of base quad vertices for 6 face directions [S1, unofficial].
+    - `NORMALS[6]`: Static lookup table of normals [S1, unofficial].
+    - `UVS_Inverted[6][4]`: Static lookup table of inverted UVs [S1, unofficial].
+    - `TANGENTS[6]`: Static lookup table of tangents [S1, unofficial].
+    - `BlockTypeTextureIndex[MAX_TYPES][6]`: Lookup table mapping block types and face directions to texture atlas indices [S1, unofficial].
+    - `ATLAS_SIZE`: Float constant defining texture atlas resolution [S1, unofficial].
+- **Quad (S2):** Struct containing `voxel` (position `[x, y, z]`), `width` (1), `height` (1) [S2, unofficial].
+- **FaceDir:** Enum or integer discriminant for 6 axis-aligned directions (UP, DOWN, LEFT, RIGHT, FORWARD, BACK) [S1, unofficial][S2, unofficial].
 
 **Parameters:**
 - `BlockSize`: Voxel world unit size, used to scale vertex positions [S1, unofficial].
@@ -34,29 +34,10 @@ Voxel Face Mesh Generation is a surface extraction method that emits one unit qu
 
 **Steps:**
 1. **Iterate Voxels:** Loop through interior voxels only, indices $1$ to $PADDED\_CHUNK\_MAX\_INDEX$ exclusive, to leverage 1-voxel padding for neighbor lookups without bounds checks [S2, unofficial].
-2. **Check Visibility:** For each non-empty voxel, iterate all 6 `FaceDir` directions. Calculate the neighbor index using the face normal:
-   $$ neighbor\_idx = padded\_linearize([x + n_x, y + n_y, z + n_z]) $$
-   Determine if a face needs meshing using the visibility rule [S2, unofficial]:
-   - Return `true` if: $(voxel \in Opaque \land neighbor \notin Empty) \lor (voxel \in Translucent \land neighbor \in Empty)$.
-   - Return `false` if: $(voxel \in Empty) \lor (neighbor \in Opaque) \lor (voxel \in Translucent \land neighbor \in Translucent)$.
-3. **Generate Geometry (S1 Style):**
-   - Calculate position offset: $position = [k \cdot BlockSize, j \cdot BlockSize, i \cdot BlockSize]$.
-   - Add 4 vertices: $v = VERTICES[direction][v] \cdot 100 + position$ for $v \in \{0,1,2,3\}$ [S1, unofficial].
-   - Add 6 indices forming two triangles: $(0,1,2)$ and $(3,2,1)$ relative to the last vertex count. The winding order $(3,2,1)$ for the second triangle maintains consistent face culling orientation [S1, unofficial].
-   - Add 4 normals by repeating $NORMALS[direction]$ four times.
-   - Add 4 tangents by repeating $TANGENTS[direction]$ four times.
-   - Add 4 vertex colors hardcoded to $(0.75, 0.75, 0.75, 1.0)$ [S1, unofficial].
-4. **Compute UVs (S1 Style):**
-   - Determine atlas coordinates: $UVI = index / ATLAS\_SIZE$, $UVJ = index \% ATLAS\_SIZE$, $UVSize = 1.0 / ATLAS\_SIZE$.
-   - Map direction to texture index: UP $\to 0$, DOWN $\to 2$, others $\to 1$ [S1, unofficial].
-   - Look up texture index from `BlockTypeTextureIndex`.
-   - Add 4 UVs using inverted base UVs scaled by $UVSize$ and offset by $UVJ/UVI$. Components are swapped via $FVector2D(UVJ \cdot UVSize, UVI \cdot UVSize)$ to align with atlas layout [S1, unofficial].
-5. **Generate Geometry (S2 Style):**
-   - If face needs meshing, push a `Quad { voxel: [x, y, z], width: 1, height: 1 }` to the output array indexed by face direction [S2, unofficial].
-   - In `build_mesh_info`, for each quad, generate 4 positions, 4 normals, 4 colors, and 4 UVs.
-   - Indices are generated via `Quad::indices(base, face)` where `base` is the current vertex count [S2, unofficial].
-   - For Opaque style, look up texture in `block_textures` using `chunk_block_id`, `block_face`, and `face_uvs`. If texture exists, use its coords; if color, use raw RGBA; if missing, use black UVs/colors [S2, unofficial].
-   - Handle texture fallback: For side faces of grass/snow-style blocks, if the voxel directly above is opaque, set face to `Face::Bottom` to use the bottom texture [S2, unofficial].
+2. **Check Visibility:** For each non-empty voxel, iterate all 6 `FaceDir` directions. Calculate the neighbor index using the face normal: $neighbor\_idx = padded\_linearize([x + n_x, y + n_y, z + n_z])$ [S2, unofficial]. Determine if a face needs meshing using the visibility rule [S2, unofficial]: Return `true` if $(voxel \in Opaque \land neighbor \notin Empty) \lor (voxel \in Translucent \land neighbor \in Empty)$. Return `false` if $(voxel \in Empty) \lor (neighbor \in Opaque) \lor (voxel \in Translucent \land neighbor \in Translucent)$ [S2, unofficial].
+3. **Generate Geometry (S1 Style):** Calculate position offset: $position = [k \cdot BlockSize, j \cdot BlockSize, i \cdot BlockSize]$ [S1, unofficial]. Add 4 vertices: $v = VERTICES[direction][v] \cdot 100 + position$ for $v \in \{0,1,2,3\}$ [S1, unofficial]. Add 6 indices forming two triangles: $(0,1,2)$ and $(3,2,1)$ relative to the last vertex count. The winding order $(3,2,1)$ for the second triangle maintains consistent face culling orientation [S1, unofficial]. Add 4 normals by repeating $NORMALS[direction]$ four times [S1, unofficial]. Add 4 tangents by repeating $TANGENTS[direction]$ four times [S1, unofficial]. Add 4 vertex colors hardcoded to $(0.75, 0.75, 0.75, 1.0)$ [S1, unofficial].
+4. **Compute UVs (S1 Style):** Determine atlas coordinates: $UVI = index / ATLAS\_SIZE$, $UVJ = index \% ATLAS\_SIZE$, $UVSize = 1.0 / ATLAS\_SIZE$ [S1, unofficial]. Map direction to texture index: UP $\to 0$, DOWN $\to 2$, others $\to 1$ [S1, unofficial]. Look up texture index from `BlockTypeTextureIndex` [S1, unofficial]. Add 4 UVs using inverted base UVs scaled by $UVSize$ and offset by $UVJ/UVI$. Components are swapped via $FVector2D(UVJ \cdot UVSize, UVI \cdot UVSize)$ to align with atlas layout [S1, unofficial].
+5. **Generate Geometry (S2 Style):** If face needs meshing, push a `Quad { voxel: [x, y, z], width: 1, height: 1 }` to the output array indexed by face direction [S2, unofficial]. In `build_mesh_info`, for each quad, generate 4 positions, 4 normals, 4 colors, and 4 UVs [S2, unofficial]. Indices are generated via `Quad::indices(base, face)` where `base` is the current vertex count [S2, unofficial]. For Opaque style, look up texture in `block_textures` using `chunk_block_id`, `block_face`, and `face_uvs`. If texture exists, use its coords; if color, use raw RGBA; if missing, use black UVs/colors [S2, unofficial]. Handle texture fallback: For side faces of grass/snow-style blocks, if the voxel directly above is opaque, set face to `Face::Bottom` to use the bottom texture [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -68,80 +49,63 @@ def generate_voxel_faces(chunk, mesh_data):
         for j in range(1, chunk.max_index - 1):
             for k in range(1, chunk.max_index - 1):
                 voxel = chunk.get_voxel(i, j, k)
-                
-                # Skip empty voxels
                 if voxel.is_empty():
                     continue
-                
+
                 # Iterate all 6 face directions
-                for direction in [UP, DOWN, LEFT, RIGHT, FORWARD, BACK]:
-                    # Calculate neighbor position
+                for direction in mesh_data.FACE_DIRECTIONS:
                     nx, ny, nz = direction.normal
-                    neighbor_pos = [i + nx, j + ny, k + nz]
-                    neighbor = chunk.get_voxel_at(neighbor_pos)
-                    
-                    # Check visibility rule
-                    if face_needs_mesh(voxel, neighbor):
-                        # Calculate world position
-                        position = [k * chunk.block_size, j * chunk.block_size, i * chunk.block_size]
-                        
-                        # Get base quad vertices for this direction
-                        base_vertices = mesh_data.VERTICES[direction]
-                        
-                        # Add 4 vertices
-                        last_vertex_count = len(mesh_data.vertices)
-                        for v in range(4):
-                            # Scale base vertices by 100 and add position
-                            # [G] Assuming base vertices are unit quads centered or aligned appropriately
-                            scaled_v = [base_vertices[v][x] * 100 for x in range(3)]
-                            mesh_data.vertices.append([scaled_v[x] + position[x] for x in range(3)])
-                        
-                        # Add 6 indices (2 triangles)
-                        # Triangle 1: 0, 1, 2
-                        # Triangle 2: 3, 2, 1 (reverse winding for consistent culling)
-                        mesh_data.triangles.extend([
-                            last_vertex_count + 0,
-                            last_vertex_count + 1,
-                            last_vertex_count + 2,
-                            last_vertex_count + 3,
-                            last_vertex_count + 2,
-                            last_vertex_count + 1
+                    neighbor = chunk.get_voxel_at(i + nx, j + ny, k + nz)
+                    if not face_needs_mesh(voxel, neighbor):
+                        continue
+
+                    # Calculate world position
+                    position = [k * chunk.block_size, j * chunk.block_size, i * chunk.block_size]
+                    last_vertex_count = len(mesh_data.vertices)
+
+                    # Add 4 vertices
+                    for vert_i in range(4):
+                        base_v = mesh_data.VERTICES[direction.index][vert_i]
+                        mesh_data.vertices.append([
+                            base_v[0] * 100 + position[0],
+                            base_v[1] * 100 + position[1],
+                            base_v[2] * 100 + position[2]
                         ])
-                        
-                        # Add 4 normals
-                        normal = mesh_data.NORMALS[direction]
-                        for _ in range(4):
-                            mesh_data.normals.append(normal)
-                        
-                        # Add 4 tangents
-                        tangent = mesh_data.TANGENTS[direction]
-                        for _ in range(4):
-                            mesh_data.tangents.append(tangent)
-                        
-                        # Add 4 vertex colors
-                        color = [0.75, 0.75, 0.75, 1.0]
-                        for _ in range(4):
-                            mesh_data.vertex_colors.append(color)
-                        
-                        # Compute UVs
-                        atlas_index = mesh_data.BlockTypeTextureIndex[voxel.type][direction]
-                        uvi = atlas_index // mesh_data.ATLAS_SIZE
-                        uvj = atlas_index % mesh_data.ATLAS_SIZE
-                        uv_size = 1.0 / mesh_data.ATLAS_SIZE
-                        
-                        # Get inverted base UVs
-                        base_uvs = mesh_data.UVS_Inverted[direction]
-                        
-                        for v in range(4):
-                            # Swap U/V components and scale/offset
-                            # [G] Assuming base_uvs[v] is (u, v)
-                            u, v_coord = base_uvs[v]
-                            new_u = uvj * uv_size + u * uv_size
-                            new_v = uvi * uv_size + v_coord * uv_size
-                            mesh_data.uv0.append([new_u, new_v])
+
+                    # Add 6 indices (2 triangles)
+                    mesh_data.triangles.extend([
+                        last_vertex_count + 0, last_vertex_count + 1, last_vertex_count + 2,
+                        last_vertex_count + 3, last_vertex_count + 2, last_vertex_count + 1
+                    ])
+
+                    # Add 4 normals
+                    normal = mesh_data.NORMALS[direction.index]
+                    for _ in range(4):
+                        mesh_data.normals.append(normal)
+
+                    # Add 4 tangents
+                    tangent = mesh_data.TANGENTS[direction.index]
+                    for _ in range(4):
+                        mesh_data.tangents.append(tangent)
+
+                    # Add 4 vertex colors
+                    color = [0.75, 0.75, 0.75, 1.0]
+                    for _ in range(4):
+                        mesh_data.vertex_colors.append(color)
+
+                    # Compute UVs
+                    atlas_index = mesh_data.BlockTypeTextureIndex[voxel.type][direction.texture_index]
+                    uvi = atlas_index // mesh_data.ATLAS_SIZE
+                    uvj = atlas_index % mesh_data.ATLAS_SIZE
+                    uv_size = 1.0 / mesh_data.ATLAS_SIZE
+
+                    for uv_i in range(4):
+                        base_uv = mesh_data.UVS_Inverted[direction.index][uv_i]
+                        new_u = uvj * uv_size + base_uv[0] * uv_size
+                        new_v = uvi * uv_size + base_uv[1] * uv_size
+                        mesh_data.uv0.append([new_u, new_v])
 
 def face_needs_mesh(voxel, neighbor):
-    # Returns true if face should be meshed
     if voxel.is_empty():
         return False
     if neighbor.is_opaque():
@@ -164,16 +128,14 @@ Texture Atlas UV Mapping assigns UV coordinates to voxel face meshes by mapping 
 Face Direction and Quad Geometry defines the six axis-aligned face orientations on a voxel cube and provides the deterministic logic for generating quad geometry (positions, indices, UVs, and normals) for meshing. It solves the problem of converting abstract voxel face visibility into concrete vertex buffer data suitable for standard rasterization pipelines. Unlike context-aware methods that may require post-processing to resolve overlaps, this method relies on strict axis conventions and winding rules to ensure consistent texture orientation and backface culling behavior.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the chunk, as each voxel and its 6 faces are processed once.
-- **Memory Complexity:** $O(F)$ where $F$ is the number of visible faces, as each visible face generates 4 vertices and 6 indices.
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the chunk, as each voxel and its 6 faces are processed once [S2, unofficial].
+- **Memory Complexity:** $O(F)$ where $F$ is the number of visible faces, as each visible face generates 4 vertices and 6 indices [S1, unofficial].
 - **Performance:** Efficient for opaque geometry due to simple visibility checks and lack of complex mesh merging algorithms [S2, unofficial].
 - **Strengths:** Simple implementation, low memory overhead per face, easy to parallelize, consistent winding and normals [S1, unofficial].
 - **Limitations:** High vertex count compared to greedy meshing, resulting in more draw calls or larger buffers for large scenes [S1, unofficial].
-- **When to use:** When simplicity and speed of generation are prioritized over mesh density, or for small-scale voxel worlds [S2, unofficial].
-- **When not to use:** For large-scale worlds where draw call overhead or memory bandwidth is a bottleneck, greedy meshing or other optimization techniques are preferred [S1, unofficial].
 
 ## Background
-Voxel Face Mesh Generation is a fundamental technique in voxel-based game development, particularly in engines like Unreal Engine and custom Rust-based voxel engines [S1, unofficial][S2, unofficial]. It is often used as a baseline for more advanced meshing techniques due to its simplicity and deterministic output [S1, unofficial]. The method is closely related to block culling strategies and is a precursor to more optimized meshing approaches like greedy meshing [S1, unofficial][S2, unofficial].
+Voxel Face Mesh Generation is a fundamental technique in voxel-based game development, particularly in engines like Unreal Engine and custom Rust-based voxel engines [S1, unofficial][S2, unofficial].
 
 ## Sources
 [S1] Manolo94/UE5MinecraftClone, https://github.com/Manolo94/UE5MinecraftClone, fetched 2026-10-26 (unofficial)

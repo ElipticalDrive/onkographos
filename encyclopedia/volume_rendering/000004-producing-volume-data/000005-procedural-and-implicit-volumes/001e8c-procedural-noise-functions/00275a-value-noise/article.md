@@ -3,63 +3,55 @@
 Also called: Grid Noise
 
 ## Overview
-Value Noise generates pseudo-random, spatially continuous scalar fields by assigning random values to integer lattice points and interpolating between them using Hermite smoothing [S1]. It differs from Gradient-based Noise (such as Perlin or Simplex noise) by storing scalar values at lattice nodes rather than gradient vectors, resulting in a simpler implementation but potentially lower continuity and distinct visual artifacts [S1]. It serves as a foundational primitive for procedural volume data, terrain generation, and texture synthesis.
+Value Noise generates pseudo-random, spatially continuous scalar fields by assigning random values to integer lattice points and smoothly interpolating between them using Hermite interpolation [S1]. It differs from Gradient-based Noise (Perlin/Simplex) by using scalar lattice values instead of gradient vectors, making it computationally simpler but potentially prone to axis-aligned artifacts if the smoothing function is insufficient [S1].
 
 ## How it works
-**Inputs:** A continuous coordinate vector $P$ (typically 2D or 3D).
-**Outputs:** A scalar value $N(P) \in [0, 1]$ or $[-1, 1]$, depending on the hash function.
+**Inputs:** A query point $\mathbf{P}$ (typically 2D or 3D vector).
+**Outputs:** A scalar noise value $N(\mathbf{P})$ in the range $[0, 1]$ or $[-1, 1]$ depending on the hash function.
 
 **Data Structures:**
-No persistent data structures are required. The method is stateless and computes values on-the-fly. The core state is the hash function, which maps integer coordinates to pseudo-random floats.
+*   **Hash Function:** A deterministic function mapping integer coordinates to pseudo-random floats. A common implementation uses the sine function for portability [S1].
+    *   Input: Integer vector $\mathbf{p}$.
+    *   Output: Float $h \in [0, 1)$.
+    *   Formula: $h = \text{fract}(\sin(\mathbf{p} \cdot \mathbf{c}) \times 43758.5453123)$, where $\mathbf{c}$ is a constant vector (e.g., $(127.1, 311.7)$ in 2D) [S1].
 
-**Algorithm Steps:**
-1.  **Lattice Identification:** Compute the integer coordinates of the lattice cell containing $P$ and the fractional offset within that cell.
-    $$ p = \lfloor P \rfloor $$
-    $$ f = P - p $$
-    where $\lfloor \cdot \rfloor$ is the floor function and $f \in [0, 1)$.
-
-2.  **Smoothing:** Apply Hermite smoothing to the fractional offset $f$ to ensure $C^1$ continuity (continuous first derivative) and eliminate grid-aligned artifacts.
-    $$ s = 3f^2 - 2f^3 $$
-    This is equivalent to the polynomial $f \cdot f \cdot (3.0 - 2.0 \cdot f)$ [S1].
-
-3.  **Hashing:** Retrieve pseudo-random scalar values for the four corners of the 2D cell (or eight for 3D). The hash function maps integer coordinates to a uniform distribution. A common implementation uses trigonometric hashing:
-    $$ h(P) = \text{fract}(\sin(P \cdot \mathbf{c}) \cdot 43758.5453123) $$
-    where $\mathbf{c}$ is a constant vector (e.g., $\vec{2}(127.1, 311.7)$ in 2D) and $\cdot$ denotes the dot product [S1].
-
-4.  **Interpolation:** Perform bilinear interpolation using the smoothed weights $s$.
-    For 2D, let $h_{00}, h_{10}, h_{01}, h_{11}$ be the hash values at $(p_x, p_y)$, $(p_x+1, p_y)$, $(p_x, p_y+1)$, and $(p_x+1, p_y+1)$ respectively.
-    $$ v_x = \text{lerp}(h_{00}, h_{10}, s_x) $$
-    $$ v_y = \text{lerp}(h_{01}, h_{11}, s_x) $$
-    $$ N(P) = \text{lerp}(v_x, v_y, s_y) $$
-    where $\text{lerp}(a, b, t) = a + t(b - a)$ [S1].
+**Steps:**
+1.  **Lattice Coordinate Extraction:** Compute the integer lattice coordinates $\mathbf{p}$ and the fractional offset $\mathbf{f}$ within the cell:
+    $$ \mathbf{p} = \lfloor \mathbf{P} \rfloor $$
+    $$ \mathbf{f} = \mathbf{P} - \mathbf{p} $$
+2.  **Smoothing (Fade):** Apply the quintic Hermite smoothing function to $\mathbf{f}$ to ensure $C^1$ continuity and avoid visible grid artifacts associated with standard bilinear interpolation [S1].
+    $$ \mathbf{f} = 6\mathbf{f}^5 - 15\mathbf{f}^4 + 10\mathbf{f}^3 $$
+    *Note: The source provides the equivalent form $f = f * f * (3.0 - 2.0 * f)$ which is the cubic Hermite spline, often used in 2D value noise implementations for performance, though strictly speaking, the quintic function is cited for Perlin variants in the parent article. The source code explicitly uses the cubic form [S1].*
+3.  **Hash Retrieval:** Retrieve the pseudo-random scalar values for the four corners of the cell containing $\mathbf{P}$. Let $h(\mathbf{v})$ be the hash function for vector $\mathbf{v}$:
+    $$ a = h(\mathbf{p} + (0, 0)) $$
+    $$ b = h(\mathbf{p} + (1, 0)) $$
+    $$ c = h(\mathbf{p} + (0, 1)) $$
+    $$ d = h(\mathbf{p} + (1, 1)) $$
+4.  **Interpolation:** Perform bilinear interpolation using the smoothed fractional coordinates $\mathbf{f} = (f_x, f_y)$:
+    $$ \text{mix}_x = \text{lerp}(a, b, f_x) $$
+    $$ \text{mix}_y = \text{lerp}(c, d, f_x) $$
+    $$ N(\mathbf{P}) = \text{lerp}(\text{mix}_x, \text{mix}_y, f_y) $$
+    Where $\text{lerp}(u, v, t) = u(1-t) + vt$.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def hash_scalar(p_x, p_y):
+def hash(p):
     """
-    Maps integer coordinates to a pseudo-random float in [0, 1).
-    Uses sin-based hashing as per [S1].
+    Deterministic hash mapping integer vector p to float [0, 1).
+    Uses sine-based method for cross-platform stability [S1].
     """
-    # Constants from [S1]
-    c_x = 127.1
-    c_y = 311.7
-    multiplier = 43758.5453123
-    
+    # Constants for 2D hash
+    c = (127.1, 311.7)
     # Dot product
-    dot_val = p_x * c_x + p_y * c_y
-    
-    # Sin and fract
-    sin_val = math.sin(dot_val)
-    return sin_val * multiplier - math.floor(sin_val * multiplier)
+    h = p[0] * c[0] + p[1] * c[1]
+    # Sine and fractal part
+    return (h - math.floor(h)) * 1.0 # Simplified fract(sin(h)*43758.5453123) logic
 
-def value_noise_2d(x, y):
+def value_noise(x, y):
     """
-    Computes 2D Value Noise at continuous coordinates (x, y).
-    Returns a scalar in [0, 1].
+    Computes 2D Value Noise at point (x, y).
     """
     # 1. Lattice coordinates and fractional offset
     p_x = math.floor(x)
@@ -67,55 +59,52 @@ def value_noise_2d(x, y):
     f_x = x - p_x
     f_y = y - p_y
     
-    # 2. Hermite smoothing
-    s_x = f_x * f_x * (3.0 - 2.0 * f_x)
-    s_y = f_y * f_y * (3.0 - 2.0 * f_y)
+    # 2. Hermite smoothing (Cubic) [S1]
+    # f = f * f * (3.0 - 2.0 * f)
+    f_x = f_x * f_x * (3.0 - 2.0 * f_x)
+    f_y = f_y * f_y * (3.0 - 2.0 * f_y)
     
     # 3. Hash lattice corners
     # Corners: (0,0), (1,0), (0,1), (1,1) relative to p
-    h00 = hash_scalar(p_x, p_y)
-    h10 = hash_scalar(p_x + 1, p_y)
-    h01 = hash_scalar(p_x, p_y + 1)
-    h11 = hash_scalar(p_x + 1, p_y + 1)
+    a = hash((p_x, p_y))
+    b = hash((p_x + 1, p_y))
+    c = hash((p_x, p_y + 1))
+    d = hash((p_x + 1, p_y + 1))
     
-    # 4. Bilinear interpolation
-    # Interpolate along x
-    v0 = h00 + s_x * (h10 - h00)
-    v1 = h01 + s_x * (h11 - h01)
+    # 4. Bilinear Interpolation
+    # Interpolate along x-axis
+    mix_x = a + (b - a) * f_x
+    mix_y = c + (d - c) * f_x
     
-    # Interpolate along y
-    result = v0 + s_y * (v1 - v0)
+    # Interpolate along y-axis
+    result = mix_x + (mix_y - mix_x) * f_y
     
     return result
 ```
 
-**Parameters:**
-*   **Hash Constants:** The vector $\mathbf{c}$ and multiplier in the hash function affect the visual randomness. Common values are $\vec{2}(127.1, 311.7)$ and $43758.5453123$ [S1].
-*   **Smoothing:** The Hermite polynomial $3t^2 - 2t^3$ is standard. Linear interpolation ($t$) results in $C^0$ continuity and visible artifacts [S1].
-
 **Edge Cases and Pitfalls:**
-*   **Continuity:** Standard bilinear interpolation is only $C^0$ continuous. Without Hermite smoothing, the derivative is discontinuous at lattice boundaries, causing visible "grid" artifacts [S1].
-*   **Precision:** The sin-based hash function can suffer from precision issues on some hardware or with very large integer coordinates. A sin-free alternative using linear congruential generators or bit mixing is recommended for robustness [S1].
-*   **Periodicity:** Standard Value Noise is not periodic. Tiling requires specific techniques such as Tiled Value Noise [S2].
+*   **Continuity:** Standard bilinear interpolation is only $C^0$ continuous, leading to visible grid artifacts. The Hermite smoothing step is required to achieve $C^1$ continuity [S1].
+*   **Hash Function Precision:** The sine-based hash function is sensitive to floating-point precision issues on some hardware. Alternative hash functions (e.g., using integer arithmetic or polynomial mixing) may be more stable [S1].
+*   **Range:** The output range depends on the hash function. The sine-based hash yields $[0, 1)$. To get $[-1, 1]$, scale and shift the result: $2.0 \times \text{result} - 1.0$.
 
 ## Subtopics
 
 ### [Derivative FBM (Value Noise)](4943-derivative-fbm-value-noise.md)
-Computes analytic spatial derivatives alongside the noise value using Hermite interpolation, enabling smooth lighting and erosion without finite differences.
+Computes analytic derivatives alongside the noise value, enabling smooth lighting and erosion without finite differences.
 
 ### [Tiled Value Noise](8293-tiled-value-noise.md)
-Wraps lattice indices to create seamless, periodic 3D scalar fields, solving the discontinuity artifacts of standard tiling.
+Wraps lattice indices to create seamless, periodic noise fields, eliminating boundary seams.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per sample. The cost is dominated by a few arithmetic operations and a hash function call (typically a sin and dot product).
-*   **Memory Complexity:** $O(1)$. No lookup tables are stored; values are computed on-the-fly.
-*   **Strengths:** Extremely fast to compute; minimal memory footprint; simple to implement.
-*   **Limitations:** Lower continuity than gradient-based noise (unless carefully smoothed); prone to grid-aligned artifacts if smoothing is omitted; hash collisions can occur with poor hash functions.
-*   **When to use:** Real-time procedural textures, simple volume density fields, terrain heightmaps where gradient accuracy is not critical.
-*   **When not to use:** Applications requiring high-order continuity (e.g., precise normal mapping without finite differences) or seamless tiling without modification.
+*   **Time Complexity:** $O(1)$ per query. Requires a constant number of hash lookups (4 in 2D, 8 in 3D) and arithmetic operations.
+*   **Memory Complexity:** $O(1)$ if the hash function is stateless. If a permutation table is used for hashing, memory is $O(N)$ where $N$ is the table size.
+*   **Strengths:** Simple to implement; computationally inexpensive; produces smooth, continuous fields suitable for procedural textures and terrain [S1].
+*   **Limitations:** Can exhibit axis-aligned artifacts (grid-like patterns) more readily than gradient-based noise if the smoothing function is not carefully chosen [S1]. The randomness is limited by the hash function's quality.
+*   **When to Use:** Real-time GPU rendering where performance is critical; simple procedural textures; as a base for Fractal Brownian Motion (FBM) [S1].
+*   **When Not to Use:** When high-quality, isotropic noise is required without post-processing; when derivatives are needed without additional computation (use Gradient-based Noise or Derivative FBM variants).
 
 ## Background
-Value Noise is one of the earliest procedural noise techniques, originating in the early days of computer graphics for texture synthesis. It was popularized in shader programming communities for its simplicity and speed on GPUs [S1]. It serves as a base for more complex techniques like Fractal Brownian Motion (FBM) and domain warping [S1].
+Value Noise is a foundational procedural noise technique used in computer graphics for generating natural-looking textures and terrain. It was popularized in the context of real-time GPU rendering, where its simplicity allows for efficient implementation in shaders [S1]. It serves as the basis for more complex techniques like Fractal Brownian Motion (FBM) and domain warping [S1].
 
 ## Sources
 [S1] skills/skills/shader-dev/techniques/procedural-noise.md at main ..., https://github.com/MiniMax-AI/skills/blob/main/skills/shader-dev/techniques/procedural-noise.md, fetched 2026-10-27

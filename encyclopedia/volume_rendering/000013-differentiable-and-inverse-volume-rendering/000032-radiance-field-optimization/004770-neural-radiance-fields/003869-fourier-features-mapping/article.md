@@ -1,95 +1,117 @@
 # Fourier Features Mapping
 
-Also called: FFM, Feature Mapping (Fourier Feature Mapping), Fourier Features
+Also called: FFM, Feature Mapping (Fourier Feature Mapping), Fourier Features, Random Fourier Feature Mapping
 
 ## Overview
-Fourier Features Mapping (FFM) is a coordinate encoding technique used to overcome the spectral bias of vanilla Multi-Layer Perceptrons (MLPs), which tend to fail to capture high-frequency details in low-dimensional domains [S1][S2, unofficial]. It transforms input spatial coordinates into higher-dimensional vectors, enabling the network to converge faster and represent fine-grained scene details with fewer parameters [S1]. Unlike geometric approaches such as octrees or subdomain grids, FFM decouples the neural network design from the underlying data structure, allowing for flexible integration into sparse volume representations like NeuralVDB [S1].
+Fourier Features Mapping (FFM) is a preprocessing technique that transforms low-dimensional input coordinates into a higher-dimensional space using sinusoidal functions, enabling fully-connected MLPs to learn high-frequency details that are otherwise inaccessible due to spectral bias [S1][S3, unofficial]. It sets itself apart from geometric approaches (like octrees or grid subdomains) by decoupling the neural network architecture from the spatial representation structure, allowing the same MLP to converge rapidly on sharp edges and fine textures without requiring architectural changes [S1][S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A low-dimensional coordinate vector $\mathbf{x} \in \mathbb{R}^3$ [S1].
-- Output: A high-dimensional feature vector $\mathbf{z}$ [S1].
+- Input: A coordinate vector $\boldsymbol{v} \in \mathbb{R}^d$ (typically $d=3$ for spatial coordinates or $d=4$ for space-time).
+- Output: A feature vector $\boldsymbol{z} \in \mathbb{R}^{2m}$, where $m$ is the number of sinusoid pairs.
 
 **Data Structures:**
-- **Random Matrix $B$**: A tall and skinny random matrix used to project the input coordinates [S2, unofficial].
-
-**Formulas:**
-The Fourier feature mapping transforms the input $\mathbf{x}$ using the random matrix $B$ as follows [S2, unofficial]:
-
-$$
-\mathbf{z} = \gamma(\mathbf{x}) = [\sin(2\pi \mathbf{B}\mathbf{x}), \cos(2\pi \mathbf{B}\mathbf{x})]
-$$
-
-Where:
-- $B$ is the random projection matrix [S2, unofficial].
-- $\mathbf{x}$ is the input coordinate [S1].
-- $\sin$ and $\cos$ are applied element-wise [G].
-- The output $\mathbf{z}$ concatenates the sine and cosine components [S1].
+- Random Matrix $B$: A matrix of shape $m \times d$. The entries $B_{ij}$ are sampled independently from a Gaussian distribution $\mathcal{N}(0, \sigma^2)$ [S3, unofficial].
+- Amplitude Scalars $a_j$: A vector of length $m$. In the basic implementation, these are often set to 1, but they can be tuned [S3, unofficial].
 
 **Parameters:**
-- **$L$ (Number of Frequencies)**: Determines the highest frequency the network can represent [S2, unofficial].
-- **Bandwidth of $B$**: Controls the distribution of frequencies [S2, unofficial].
+- $m$: The number of sinusoid pairs (half the output dimension). Not given in the sources.
+- $\sigma$: The standard deviation of the Gaussian distribution used to sample $B$. Identified as the most important hyperparameter in the mapping [S3, unofficial].
+- $d$: The dimensionality of the input coordinate space [S3, unofficial].
 
 **Steps:**
-1. Initialize the random matrix $B$ [G].
-2. For each input coordinate $\mathbf{x}$, compute the linear projection $\mathbf{y} = \mathbf{B}\mathbf{x}$ [S2, unofficial].
-3. Apply the sine and cosine functions to $\mathbf{y}$ [S2, unofficial].
-4. Concatenate the sine and cosine components to form the final feature vector $\mathbf{z}$ [S1].
-5. Feed $\mathbf{z}$ into the MLP for density and color prediction [S1].
+1. Sample the random matrix $B \in \mathbb{R}^{m \times d}$ from $\mathcal{N}(0, \sigma^2)$ [S3, unofficial].
+2. Compute the linear projection $\boldsymbol{u} = 2\pi B \boldsymbol{v}$ [S3, unofficial].
+3. Apply sinusoidal activation to each component of $\boldsymbol{u}$ to form the feature vector $\boldsymbol{z}$ [S3, unofficial].
+
+**Formula:**
+The mapping $\gamma(\boldsymbol{v})$ is defined as [S3, unofficial]:
+
+$$
+\gamma(\boldsymbol{v}) = \begin{bmatrix} a_1 \cos(2\pi \boldsymbol{b}_1^T \boldsymbol{v}) \\ a_1 \sin(2\pi \boldsymbol{b}_1^T \boldsymbol{v}) \\ \vdots \\ a_m \cos(2\pi \boldsymbol{b}_m^T \boldsymbol{v}) \\ a_m \sin(2\pi \boldsymbol{b}_m^T \boldsymbol{v}) \end{bmatrix}
+$$
+
+where $\boldsymbol{b}_j$ is the $j$-th row of $B$, and $a_j$ is the amplitude scalar for the $j$-th pair [S3, unofficial].
+
+In matrix notation, this can be written as [S3, unofficial]:
+
+$$
+\gamma(\boldsymbol{v}) = \begin{bmatrix} \cos(2\pi B \boldsymbol{v}) \\ \sin(2\pi B \boldsymbol{v}) \end{bmatrix}
+$$
+
+assuming $a_j=1$ for all $j$ [S3, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import numpy as np
 
-def fourier_feature_mapping(x, B):
+def fourier_feature_mapping(v, B, a=None):
     """
-    Applies Fourier Feature Mapping to input coordinates x using random matrix B.
+    Applies Fourier Feature Mapping to input coordinates v.
     
     Args:
-        x: numpy array of shape (N, 3), N input coordinates.
-        B: numpy array of shape (L, 3), random projection matrix.
+        v: Input coordinate vector of shape (d,) or (batch_size, d).
+        B: Random matrix of shape (m, d) sampled from N(0, sigma^2).
+        a: Amplitude scalars of shape (m,). If None, defaults to ones.
         
     Returns:
-        z: numpy array of shape (N, 2*L), encoded features.
+        z: Transformed feature vector of shape (2*m,) or (batch_size, 2*m).
     """
-    y = x @ B.T
-    sin_y = np.sin(2 * np.pi * y)
-    cos_y = np.cos(2 * np.pi * y)
-    z = np.concatenate([sin_y, cos_y], axis=-1)
+    if a is None:
+        a = np.ones(B.shape[0])
+    
+    # Linear projection: 2 * pi * B @ v
+    # v shape: (d,) or (batch, d)
+    # B shape: (m, d)
+    # u shape: (m,) or (batch, m)
+    u = 2 * np.pi * np.dot(B, v.T) if v.ndim == 1 else 2 * np.pi * np.dot(B, v)
+    
+    # Apply sinusoids
+    # cos_u shape: (m,) or (batch, m)
+    cos_u = np.cos(u)
+    sin_u = np.sin(u)
+    
+    # Scale by amplitudes
+    # a shape: (m,)
+    cos_scaled = cos_u * a
+    sin_scaled = sin_u * a
+    
+    # Concatenate along the last axis
+    z = np.concatenate([cos_scaled, sin_scaled], axis=-1)
+    
     return z
 ```
 
 **Edge Cases and Pitfalls:**
-- **Precision**: High-frequency components may lead to numerical instability if not properly scaled [G].
-- **Spectral Bias**: Vanilla MLPs inherently bias towards low-frequency signals, which FFM explicitly addresses [S1].
+- Without FFM, reconstructing sharp edges or high-frequency details requires impractically long training times (e.g., months on a server) due to the slow convergence of small eigenvalues in the Neural Tangent Kernel (NTK) [S3, unofficial].
+- The variance $\sigma$ is the most critical hyperparameter; incorrect values can lead to poor frequency coverage [S3, unofficial].
+- The mapping assumes inputs are normalized or scaled appropriately relative to the frequencies in $B$ [S3, unofficial].
 
 ## Subtopics
 
-### Positional Encoding
-A coordinate encoding method that uses deterministic sinusoidal functions at fixed frequencies [S1]. It is simpler than FFM but less flexible for learning arbitrary high-frequency patterns [S1]. Choose it when fixed frequency bands are sufficient [G].
-
 ### Neural Hash Encoding
-A sparse, learnable feature mapping that replaces random projection with a hash table of trainable vectors [S1]. It is more memory-efficient for large scenes but requires careful hash collision management [S1]. Choose it when memory constraints dominate [G].
+A sparse, learnable alternative to random Fourier features that maps coordinates to a hash table of embeddings, offering higher efficiency for large scenes [S1].
+
+### Positional Encoding
+A deterministic variant of Fourier features using fixed sinusoids at powers of two, commonly used in Transformers and early NeRF implementations [S1].
 
 ### One-Blob Encoding
-A feature mapping technique that uses Gaussian radial basis functions instead of periodic sine/cosine functions [S1]. It provides smooth local support but may require more parameters to capture high frequencies [S1]. Choose it when local smoothness is prioritized over global frequency coverage [G].
-
-### Triangle Wave Encoding
-A feature mapping technique that uses periodic triangle waves [S1]. It offers a different frequency response than sine/cosine mappings [S1]. Choose it when specific harmonic properties are required [G].
-
-### Neural Hash Grids
-A feature mapping technique that uses hash tables to index trainable feature vectors [S1]. It decouples network design from tree structure and allows adopting new techniques without heavy refactoring [S1]. Choose it for highly sparse volumetric representations [G].
+A technique using localized basis functions to handle high-frequency details, proposed as another alternative to spectral bias [S1].
 
 ## Operating characteristics
-- **Performance**: Significantly improves the ability of MLPs to learn high-frequency details compared to vanilla MLPs, reducing training time and improving reconstruction quality [S1][S2, unofficial].
-- **Strengths**: Simple to implement, differentiable, and effective at overcoming spectral bias [S1][S2, unofficial]. Decouples network design from data structure [S1].
-- **Limitations**: Requires careful tuning of $L$ and the bandwidth of $B$ [S2, unofficial].
+- **Time Complexity**: The mapping itself is $O(m \cdot d)$ per coordinate, which is negligible compared to the MLP evaluation [S3, unofficial].
+- **Memory Complexity**: Requires storing the random matrix $B$ of size $m \times d$ [S3, unofficial].
+- **Performance**: Enables MLPs to learn high-frequency details early and fast, achieving results in minutes or hours that would otherwise take months [S3, unofficial].
+- **Strengths**: Decouples network design from spatial representation; simple to implement; effective for low-dimensional regression tasks [S2, S3, unofficial].
+- **Limitations**: Requires careful tuning of $\sigma$; random features may not be optimal for all specific frequency bands compared to learned encodings [S2, S3, unofficial].
 
 ## Background
-Fourier Features Mapping was introduced by Tancik et al. in 2020 to address the spectral bias of MLPs in coordinate-based neural representations [S1][S2, unofficial]. It was shown that standard MLPs fail to learn high frequencies both in theory and in practice [S2, unofficial]. By projecting inputs into a Fourier feature space, the effective Neural Tangent Kernel (NTK) becomes stationary with a tunable bandwidth, enabling the network to learn high-frequency functions [S2, unofficial]. The technique has become a standard component in Neural Radiance Fields (NeRF) and related methods [S1].
+Fourier Features Mapping was introduced by Tancik et al. in 2020 for implicit neural representations [S3, unofficial]. It is based on the random Fourier feature mapping originally proposed by Rahimi & Recht in 2007 [S3, unofficial]. The method addresses the spectral bias of vanilla MLPs, which tend to fail to capture high-frequency details even with deep and wide networks [S1]. It has been widely adopted in Neural Fields for applications such as image super-resolution, denoising, inpainting, video generation, and 3D content rendering [S3, unofficial].
 
 ## Sources
 [S1] NeuralVDB: High-resolution Sparse Volume Representation using Hierarchical Neural Networks, https://www.emergentmind.com/papers/2208.04448, fetched 2026-10-27
 [S2] Generalizing Neural Radiance Fields - BAIR Commons, https://bcommons.berkeley.edu/generalizing-neural-radiance-fields, fetched 2026-10-28 (unofficial)
+[S3] Introduction to Neural Fields - inovex GmbH, https://www.inovex.de/de/blog/introduction-to-neural-fields/, fetched 2026-10-29 (unofficial)

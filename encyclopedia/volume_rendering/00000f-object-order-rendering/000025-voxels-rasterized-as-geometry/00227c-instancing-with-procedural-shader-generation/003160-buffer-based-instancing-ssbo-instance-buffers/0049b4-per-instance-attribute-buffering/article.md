@@ -3,95 +3,107 @@
 Also called: Regular Vertex Buffers, Textures and Texture Buffers, Uniform Buffers
 
 ## Overview
-Per-Instance Attribute Buffering is a method for supplying per-instance data to vertex shaders by leveraging standard graphics API mechanisms rather than dedicated shader storage buffers. It solves the problem of how to pass transformation parameters, material IDs, or voxel metadata to individual instances during instanced rendering. It is distinguished from [Buffer-Based Instancing (SSBO/Instance Buffers)](6501-buffer-based-instancing-ssbo-instance-buffers.md) by its reliance on legacy or specific hardware-supported attribute delivery paths (Uniforms, Textures, or Vertex Attributes) instead of the flexible, large-capacity SSBO model.
+Per-Instance Attribute Buffering is a method for supplying per-instance data to vertex shaders by leveraging standard graphics API mechanisms other than the dedicated hardware instancing SSBO lookup. It addresses the problem of distributing instance-specific parameters (position, scale, rotation) to a single draw call without relying on `gl_InstanceID`-based indexing into a large structured buffer [S1, unofficial]. It differs from its parent [Buffer-Based Instancing (SSBO/Instance Buffers)](6501-buffer-based-instancing-ssbo-instance-buffers.md) by offloading the data loading and indexing logic to the hardware or driver, rather than performing dynamic memory lookups in the vertex shader [S1, unofficial].
 
 ## How it works
-The method operates by binding per-instance data to one of three hardware-supported mechanisms. The vertex shader accesses this data either via uniform arrays, texture lookups, or hardware-managed vertex attributes.
+The method consists of three distinct sub-techniques, each utilizing a different buffer type to store per-instance attributes. The vertex shader receives this data either as uniform arrays or vertex attributes, eliminating the need for explicit instance ID lookups.
 
 ### Inputs and Outputs
-*   **Input:** A set of per-instance parameters (e.g., position, scale, rotation, material ID) stored in a buffer object.
-*   **Output:** Transformed vertex positions and attributes passed to the fragment shader.
+*   **Input:** Per-instance data (e.g., transformation matrices, visibility flags, texture indices).
+*   **Output:** Transformed vertex positions and attributes for rasterization.
 
 ### Data Structures and Layouts
-The layout depends on the chosen mechanism:
 
-1.  **Uniform Buffers:** Data is stored in a `Uniform Buffer Object` (UBO). The shader declares a uniform array, e.g., `uniform InstanceData { vec3 pos; mat4 mat; } instances[MaxInstances];`. The layout is strictly defined by the GLSL `layout` qualifier or standard uniform rules.
-2.  **Textures and Texture Buffers:** Data is packed into a 1D or 2D texture (e.g., `textureBuffer` or `samplerBuffer`). Each texel represents one instance's data. The shader uses `texelFetch` or `textureGather` to retrieve data. The format must match the data type (e.g., `GL_RGBA32F` for four floats).
-3.  **Regular Vertex Buffers:** Data is stored in a `Vertex Buffer Object` (VBO) and bound as an instance attribute. The vertex shader declares an `in` variable with the `flat` qualifier and `instance` divisor. The hardware automatically loads the correct instance's data into registers.
+#### 1. Uniform Buffers
+*   **Layout:** Shader uniform arrays (e.g., `uniform vec3 instancePos[MAX_INSTANCES]`).
+*   **Size Limit:** Typically limited to 64 KB [S1, unofficial].
+*   **Access:** Data is exposed as regular shader uniform variables. The application must manage buffer splitting if data exceeds the limit.
+
+#### 2. Textures and Texture Buffers
+*   **Layout:** Per-instance data encoded into texels. The data must be converted and packed according to the texture's pixel format (e.g., `RGBA32F`) [S1, unofficial].
+*   **Size Limit:** Constrained by video memory and maximum texture resolution/format supported by hardware [S1, unofficial].
+*   **Access:** Retrieved via texel-fetching instructions (e.g., `texelFetch`) in the vertex shader. The instance index is used as the texture coordinate.
+
+#### 3. Regular Vertex Buffers
+*   **Layout:** Standard vertex attribute buffers. Each instance is treated as a distinct vertex or a set of vertices with associated attributes.
+*   **Size Limit:** Restricted only by available video memory [S1, unofficial].
+*   **Access:** Hardware loads per-instance data into registers prior to invoking the vertex program. No instance identifier is needed [S1, unofficial].
 
 ### Numbered Steps
-1.  **Data Preparation:** Populate the chosen buffer type with per-instance data. For textures, encode data into texels. For vertex buffers, interleave or separate instance data.
-2.  **Binding:**
-    *   Bind UBO to a uniform binding point.
-    *   Bind texture to a texture unit and sampler.
-    *   Bind VBO to an attribute location with `glVertexAttribDivisor` set to 1 (or equivalent).
-3.  **Shader Execution:**
-    *   For UBOs: Access `instances[gl_InstanceID]`.
-    *   For Textures: Fetch texel at index `gl_InstanceID`.
-    *   For Vertex Buffers: Access the attribute directly; the hardware selects the data based on `gl_InstanceID`.
-4.  **Transformation:** Compute world-space position and orientation using the fetched data.
-5.  **Rasterization:** Render the instanced geometry.
 
-### Formulas
-*   **Uniform Access:** $Data_i = \text{UniformArray}[i]$
-*   **Texture Access:** $Data_i = \text{texelFetch}(Texture, i, 0)$
-*   **Vertex Attribute Access:** $Data_i = \text{AttributeBuffer}[i]$ (Hardware-managed)
-
-### Parameters
-*   **Max Instances:** Limited by UBO size (typically 64KB) [S1, unofficial], texture resolution, or available video memory for vertex buffers [S1, unofficial].
-*   **Divisor:** 1 for instance attributes [S1, unofficial].
-
-### Edge Cases and Pitfalls
-*   **UBO Size Limits:** Exceeding the maximum uniform buffer size requires multiple draw calls or subregions [S1, unofficial].
-*   **Texture Format Conversion:** Data must be encoded/decoded according to pixel description, potentially losing precision or requiring bit-packing [S1, unofficial].
-*   **Vertex Buffer Memory:** While limited only by video memory, large vertex buffers may impact cache efficiency [S1, unofficial].
+1.  **Data Preparation:** Encode per-instance data into the chosen buffer type (Uniform, Texture, or Vertex Buffer).
+2.  **Buffer Binding:** Bind the buffer to the appropriate shader stage (Uniform Block, Texture Unit, or Vertex Attribute Array).
+3.  **Draw Call:** Issue a single instanced draw call (e.g., `glDrawArraysInstanced`) with the instance count equal to the number of valid instances [S1, unofficial].
+4.  **Shader Execution:**
+    *   *Uniform:* Shader reads from uniform arrays.
+    *   *Texture:* Shader fetches texels using instance-derived coordinates.
+    *   *Vertex Buffer:* Hardware automatically loads attributes into registers; shader accesses them as standard vertex attributes.
 
 ### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Example for Uniform Buffer approach
-def render_with_uniforms(instance_count, instance_data_array):
-    # instance_data_array is a list of structs/vecs
-    bind_ubo(instance_data_array)
-    for i in range(instance_count):
-        # Shader accesses instances[i]
-        draw_arrays_instanced(mode, first_vertex, vertex_count, instance_count)
+# Example for Regular Vertex Buffers (most common for large datasets)
+# Assume 'instance_data' is a buffer containing N instances, each with a transformation matrix (16 floats)
+# and a base vertex buffer containing the unit cube (8 vertices).
 
-# Example for Texture Buffer approach
-def render_with_texture(instance_count, instance_data_array):
-    texture = create_texture_buffer(instance_data_array)
-    bind_texture(texture)
-    draw_arrays_instanced(mode, first_vertex, vertex_count, instance_count)
+def render_per_instance_vertex_buffer(instance_data, base_geometry, instance_count):
+    # 1. Bind instance data as a vertex attribute
+    # The hardware treats each instance's data as if it were part of the vertex stream
+    bind_vertex_attribute(buffer=instance_data, attribute_index=1, stride=64) # 16 floats * 4 bytes
+    
+    # 2. Bind base geometry
+    bind_vertex_buffer(buffer=base_geometry, attribute_index=0)
+    
+    # 3. Issue instanced draw call
+    # The driver/hardware handles the repetition of base geometry for each instance
+    # and loads the corresponding instance attribute data into registers
+    draw_arrays_instanced(
+        mode=TRIANGLES,
+        first=0,
+        count=base_geometry.vertex_count,
+        instance_count=instance_count
+    )
 
-# Example for Vertex Buffer approach
-def render_with_vertex_buffer(instance_count, instance_data_array):
-    vbo = create_vertex_buffer(instance_data_array)
-    bind_vertex_buffer(vbo)
-    set_vertex_attrib_divisor(location, 1) # Critical step
-    draw_arrays_instanced(mode, first_vertex, vertex_count, instance_count)
+def vertex_shader():
+    # Access base vertex position
+    pos = vertex_attribute(0)
+    
+    # Access instance-specific transformation matrix
+    # No gl_InstanceID lookup needed; hardware provides the correct instance's data
+    mat = vertex_attribute(1) 
+    
+    # Compute final position
+    final_pos = mat * vec4(pos, 1.0)
+    return final_pos
 ```
+
+### Edge Cases and Pitfalls
+*   **Uniform Buffer Size:** Exceeding the 64 KB limit requires multiple draw calls or buffer subregions [S1, unofficial].
+*   **Texture Encoding:** Data must be correctly encoded/decoded according to pixel format, adding overhead [S1, unofficial].
+*   **Precision:** Texture-based lookups may suffer from precision loss if not using high-precision formats [S1, unofficial].
 
 ## Subtopics
 
 ### Uniform Buffers
-Uses uniform arrays. Best for small, fixed-size data. Limited by 64KB size [S1, unofficial].
+Best for small datasets (<64KB) due to simplicity. Limited by uniform buffer size restrictions [S1, unofficial].
 
 ### Textures and Texture Buffers
-Uses texel fetches. Good for large datasets if encoding is efficient. Constrained by texture resolution [S1, unofficial].
+Useful when data fits well into texture formats or when uniform limits are hit. Requires encoding/decoding overhead [S1, unofficial].
 
 ### Regular Vertex Buffers
-Uses vertex attributes with divisor. Most flexible size-wise (limited by VRAM). Hardware handles data loading [S1, unofficial].
+Best for large datasets limited only by video memory. Hardware handles data loading, avoiding dynamic indexing penalties [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per instance for data access.
-*   **Memory Complexity:** Depends on the mechanism. UBOs are limited to ~64KB [S1, unofficial]. Textures are limited by max texture size. Vertex buffers are limited by VRAM [S1, unofficial].
-*   **Strengths:** Leverages existing hardware pipelines; no need for custom SSBO logic.
-*   **Limitations:** UBOs have strict size limits; Textures require encoding/decoding; Vertex Buffers may have alignment restrictions.
-*   **When to use:** When SSBOs are unavailable or when data size fits within UBO limits.
+*   **Time Complexity:** $O(1)$ per vertex for data access (hardware registers) or $O(1)$ for uniform/texture lookups. No dynamic branching for instance ID calculation.
+*   **Memory Complexity:** Proportional to the number of instances and data size per instance. Vertex buffers are limited only by video memory [S1, unofficial].
+*   **Performance:** Regular vertex buffers are generally more efficient for large instance counts as they avoid the dynamic SSBO lookup penalty associated with `gl_InstanceID` [S1, S2, S4, unofficial]. Uniform buffers are fast but limited in size. Texture buffers add encoding/decoding overhead.
+*   **Strengths:** No need for explicit instance ID management in shader; hardware handles data loading for vertex buffers.
+*   **Limitations:** Uniform buffers have strict size limits; texture buffers require data encoding.
 
 ## Background
-Originated with early hardware instancing support in OpenGL and DirectX. The three methods (Uniforms, Textures, Vertex Buffers) were the primary ways to pass per-instance data before the introduction of Shader Storage Buffer Objects (SSBOs) [S1, unofficial].
+This method is described in the context of hardware-accelerated geometry instancing for surfel and voxel rendering [S1, unofficial]. It represents an alternative to dedicated instancing mechanisms by utilizing existing buffer types.
 
 ## Sources
 [S1] Hardware-accelerated geometry instancing for surfel and voxel rendering of scanned 4d media, http://133.5.19.150/papers/2010_2013/1-1-36.pdf, fetched 2026-10-31 (unofficial)

@@ -4,56 +4,48 @@ Also called: Classic Voxel Meshing, Face-by-face meshing, Naive Meshing, Naïve 
 
 ## Overview
 
-Naive Voxel Meshing is a surface extraction algorithm that generates a mesh by iterating through every voxel in a chunk and emitting a quad for each exposed face between a solid voxel and an empty neighbor [S2, S5, unofficial]. Unlike [Greedy Meshing](2268-greedy-meshing.md), which merges adjacent coplanar faces into larger rectangles, Naive Voxel Meshing produces only unit-sized quads, resulting in a higher polygon count but simpler logic and deterministic output [S1, S2, unofficial]. It serves as a baseline implementation for voxel chunk rendering and is often contrasted with [Face Culling Voxel Meshing](2268-face-culling-voxel-meshing.md) in performance comparisons [S2, unofficial].
+Naive Voxel Meshing is a surface extraction algorithm that generates a mesh by iterating over every voxel in a chunk and emitting geometry for all six faces of every solid voxel, regardless of adjacency [S2, S5, unofficial]. It solves the problem of converting discrete voxel data into a format renderable by standard graphics pipelines without performing any face culling or vertex sharing [S1, S5, unofficial]. Unlike its sibling [Face Culling Voxel Meshing](2268-face-culling-voxel-meshing.md), which checks neighbors to omit internal faces, Naive Voxel Meshing treats each voxel as an independent cube, resulting in a significantly higher polygon count and draw call overhead [S1, S2, unofficial].
 
 ## How it works
 
 **Inputs and Outputs:**
-*   **Input:** A voxel chunk defined by dimensions $W \times H \times D$ (typically cubic, $N \times N \times N$) and a voxel access function or 3D array storing voxel states (e.g., material IDs or solid/empty flags) [S2, S4, unofficial].
-*   **Output:** A list of mesh primitives (quads) representing the voxel surfaces [S2, S5, unofficial].
+*   **Input:** A voxel chunk defined by dimensions $W \times H \times D$ and a voxel access function `get_voxel(x, y, z)` returning a material ID (0 for empty/air, non-zero for solid).
+*   **Output:** A list of `Quad` objects, where each quad represents a single unit face of a voxel.
 
 **Data Structures:**
-*   **Voxel Grid:** A 3D array or linear buffer storing voxel states. In array-based implementations, the index for $(x, y, z)$ is linearized as $x + y \cdot W + z \cdot W \cdot H$ or similar, depending on memory layout [S2, S4, unofficial]. A value of $0$ denotes empty/transparent space; non-zero denotes solid [S2, S4, unofficial].
-*   **Quad Representation:** Each generated face is represented by its axis, direction, slice coordinate, position, dimensions, and material ID [S1, S12, unofficial]. A minimal quad struct includes:
-    *   `axis`: The normal axis ($0=\text{X}$, $1=\text{Y}$, $2=\text{Z}$).
-    *   `dir`: The direction sign ($+1$ or $-1$).
-    *   `slice`: The integer coordinate along the axis where the face lies.
-    *   `u, v`: The starting coordinates on the plane's local axes.
-    *   `w, h`: The width and height of the face (always $1$ for naive culling).
-    *   `material`: The ID of the voxel material.
-    [S1, S12, unofficial]
-*   **Vertex Buffer:** A list of 3D coordinates [G].
-*   **Index Buffer:** A list of integer indices referencing the vertex buffer [S3, unofficial].
+The algorithm produces a list of quads. Each quad is defined by the following fields [S1, S12, unofficial]:
+*   `axis`: The normal axis ($0=\text{X}$, $1=\text{Y}$, $2=\text{Z}$).
+*   `dir`: The direction sign ($+1$ for positive axis face, $-1$ for negative axis face).
+*   `slice`: The integer coordinate along the axis where the face lies.
+*   `u, v`: The starting coordinates on the plane's local axes.
+*   `w, h`: The width and height of the face (always $1$ for naive meshing).
+*   `material`: The ID of the voxel material.
 
 **Algorithm Steps:**
-
-1.  **Initialize** an empty list for quads [S1, S5, unofficial].
-2.  **Iterate** through every voxel $(x, y, z)$ in the chunk grid using three nested loops [S2, S4, S5, unofficial].
-3.  **Check State:** Retrieve the voxel state at $(x, y, z)$. If the state is $0$ (empty/transparent), skip to the next voxel [S2, S4, unofficial].
-4.  **Check Neighbors:** For each of the $6$ face directions ($\pm X, \pm Y, \pm Z$):
-    a. Calculate the neighbor's coordinates $(nx, ny, nz)$ [S1, S3, unofficial].
+1.  Initialize an empty list `quads`.
+2.  Iterate through every voxel coordinate $(x, y, z)$ within the chunk bounds $[0, W) \times [0, H) \times [0, D)$ [S2, S5, unofficial].
+3.  Retrieve the material ID of the current voxel. If the material ID is $0$ (empty), skip to the next voxel [S2, S5, unofficial].
+4.  For each of the 6 face directions (defined by axis and direction sign):
+    a. Calculate the neighbor's coordinates $(nx, ny, nz)$ by adding the direction offset to $(x, y, z)$ [S11, unofficial].
     b. Determine the neighbor's state:
-        i. If $(nx, ny, nz)$ is outside the chunk bounds, apply the Boundary Policy (return $0$ for Air, non-$0$ for Solid) [S1, S2, unofficial].
-        ii. If inside bounds, lookup the voxel state at $(nx, ny, nz)$ [S1, S3, unofficial].
-    c. If the neighbor is empty (state $0$), the face is exposed. Generate a quad for this face [S1, S6, S11, unofficial].
-    d. If the neighbor is solid, the face is internal and is culled (not generated) [S1, S6, S11, unofficial].
-5.  **Return** the list of generated quads [S5, unofficial].
+        i. If $(nx, ny, nz)$ is outside the chunk bounds, apply the Boundary Policy (return $0$ for "Air", non-zero for "Solid") [S6, unofficial].
+        ii. If inside bounds, lookup the voxel state at $(nx, ny, nz)$ [S2, unofficial].
+    c. **Naive Variant:** In the strict naive implementation, neighbor checks are often skipped entirely, or the algorithm simply emits all 6 faces for every solid voxel without checking if the neighbor is solid [S2, S5, unofficial]. However, the reference implementation provided below includes neighbor checks but does not cull based on solid neighbors in the same way culled meshing does; rather, it generates the face if the neighbor is empty. *Note: The term "Naive" in this context primarily refers to the lack of vertex sharing and the generation of redundant geometry for internal faces if neighbor checks are omitted or if the "naive" definition implies emitting all faces regardless.* The provided pseudocode follows the logic where it checks neighbors but generates the face if the neighbor is empty, which is technically the same logic as face culling but without the optimization of skipping the neighbor lookup for solid neighbors, or it implies that "Naive" here refers to the specific implementation style where every voxel is processed individually with full face generation logic [S2, S5, unofficial]. *Correction based on sources:* Source [S2, unofficial] explicitly states Naive emits all six faces for every solid voxel without checking neighbors. Source [S5, unofficial] states it generates six quads for the solid voxel. The pseudocode below reflects the "emit all 6 faces" behavior for solid voxels, which is the defining characteristic of "Naive" vs "Culled" [S2, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def face_culling_meshing(chunk_width, chunk_height, chunk_depth, get_voxel, boundary_policy="air"):
+def naive_voxel_meshing(chunk_width, chunk_height, chunk_depth, get_voxel):
     """
-    Generates a mesh for a voxel chunk using face culling.
+    Generates a mesh for a voxel chunk using naive meshing.
+    Emits all 6 faces for every solid voxel, ignoring neighbors.
     
     Args:
         chunk_width, chunk_height, chunk_depth: Dimensions of the chunk.
         get_voxel(x, y, z): Function returning the material ID of a voxel.
                            Returns 0 for empty/air.
-        boundary_policy: "air" or "solid".
-        
+                           
     Returns:
         A list of Quad objects.
     """
@@ -62,14 +54,13 @@ def face_culling_meshing(chunk_width, chunk_height, chunk_depth, get_voxel, boun
     # Define the 6 face directions: (axis_index, direction_sign, neighbor_offset_axis, neighbor_offset_sign)
     # axis_index: 0=X, 1=Y, 2=Z
     # direction_sign: +1 for positive axis face, -1 for negative axis face
-    # neighbor_offset: how to get to the neighbor (e.g., +1 in X for +X face)
     faces = [
-        (0, 1, 1, 0, 0),  # +X face: normal +X, neighbor at x+1
-        (0, -1, -1, 0, 0), # -X face: normal -X, neighbor at x-1
-        (1, 1, 0, 1, 0),  # +Y face: normal +Y, neighbor at y+1
-        (1, -1, 0, -1, 0), # -Y face: normal -Y, neighbor at y-1
-        (2, 1, 0, 0, 1),  # +Z face: normal +Z, neighbor at z+1
-        (2, -1, 0, 0, -1)  # -Z face: normal -Z, neighbor at z-1
+        (0, 1, 1, 0, 0),  # +X face
+        (0, -1, -1, 0, 0), # -X face
+        (1, 1, 0, 1, 0),  # +Y face
+        (1, -1, 0, -1, 0), # -Y face
+        (2, 1, 0, 0, 1),  # +Z face
+        (2, -1, 0, 0, -1)  # -Z face
     ]
     
     for z in range(chunk_depth):
@@ -80,84 +71,63 @@ def face_culling_meshing(chunk_width, chunk_height, chunk_depth, get_voxel, boun
                 if current_material == 0:
                     continue
                 
-                # Step 4: Check each of the 6 faces
+                # Step 4: Naive approach - emit all 6 faces for solid voxels
+                # No neighbor checks are performed to cull internal faces [S2, S5, unofficial]
                 for axis, dir_sign, nx_off, ny_off, nz_off in faces:
-                    # Calculate neighbor coordinates
-                    nx = x + nx_off
-                    ny = y + ny_off
-                    nz = z + nz_off
-                    
-                    # Determine neighbor state
-                    # Check bounds
-                    if nx < 0 or nx >= chunk_width or \
-                       ny < 0 or ny >= chunk_height or \
-                       nz < 0 or nz >= chunk_depth:
-                        # Apply boundary policy
-                        if boundary_policy == "air":
-                            neighbor_material = 0
-                        else: # solid
-                            neighbor_material = 1 # Non-zero implies solid
-                    else:
-                        neighbor_material = get_voxel(nx, ny, nz)
-                    
-                    # Step 4c: If neighbor is empty, generate face
-                    if neighbor_material == 0:
-                        # Determine slice coordinate and local u,v
-                        # For axis 0 (X), slice is x (for -X) or x+1 (for +X)
-                        # Local axes u, v are the other two dimensions
-                        if axis == 0:
-                            slice_coord = x if dir_sign == -1 else x + 1
-                            u, v = (y, z) if dir_sign == 1 else (z, y)
-                        elif axis == 1:
-                            slice_coord = y if dir_sign == -1 else y + 1
-                            u, v = (z, x) if dir_sign == 1 else (x, z)
-                        else: # axis == 2
-                            slice_coord = z if dir_sign == -1 else z + 1
-                            u, v = (x, y) if dir_sign == 1 else (y, x)
-                            
-                        quads.append({
-                            "axis": axis,
-                            "dir": dir_sign,
-                            "slice": slice_coord,
-                            "u": u,
-                            "v": v,
-                            "w": 1,
-                            "h": 1,
-                            "material": current_material
-                        })
+                    # Determine slice coordinate and local u,v
+                    # For axis 0 (X), slice is x (for -X) or x+1 (for +X)
+                    # Local axes u, v are the other two dimensions
+                    if axis == 0:
+                        slice_coord = x if dir_sign == -1 else x + 1
+                        u, v = y, z
+                    elif axis == 1:
+                        slice_coord = y if dir_sign == -1 else y + 1
+                        u, v = z, x
+                    else: # axis == 2
+                        slice_coord = z if dir_sign == -1 else z + 1
+                        u, v = x, y
+                        
+                    quads.append({
+                        "axis": axis,
+                        "dir": dir_sign,
+                        "slice": slice_coord,
+                        "u": u,
+                        "v": v,
+                        "w": 1,
+                        "h": 1,
+                        "material": current_material
+                    })
                         
     return quads
 ```
 
 **Edge Cases and Pitfalls:**
 *   **Precision:** Integer coordinates are used for slice and position, avoiding floating-point errors in face placement [S1, unofficial].
-*   **Boundaries:** Incorrect handling of out-of-bounds checks leads to crashes or incorrect culling. The boundary policy must be consistent across adjacent chunks to avoid gaps or double geometry [S1, S6, unofficial].
-*   **Translucency:** The basic algorithm assumes opaque voxels. If translucent blocks (e.g., water, glass) are present, the culling logic must be extended to check if the neighbor is opaque vs. translucent, as translucent faces may need to be rendered even if adjacent to another translucent block [S7, S10, unofficial].
-*   **Vertex Sharing:** The naive approach typically does not share vertices between adjacent quads, leading to higher memory usage and vertex buffer sizes compared to optimized meshing techniques [G].
-*   **Time Complexity:** $O(N^3)$, where $N$ is the chunk dimension, as every voxel is visited and a constant number of neighbor checks are performed [S2, S5, unofficial].
-*   **Memory Complexity:** $O(N^3)$ for the output mesh, proportional to the number of solid voxels times the maximum number of exposed faces [S2, unofficial].
+*   **Boundaries:** Since naive meshing does not check neighbors, boundary conditions are handled implicitly by the chunk iteration bounds. However, if the mesh is rendered as part of a larger world, the lack of culling at chunk edges may result in double-sided geometry if adjacent chunks also emit their outer faces [S1, unofficial].
+*   **Translucency:** The basic algorithm assumes opaque voxels. If translucent blocks are present, the culling logic must be extended, but naive meshing typically ignores this, emitting all faces regardless of material properties [S7, S10, unofficial].
 
 ## Subtopics
 
 ### [Naive Surface Net](3679-naive-surface-net.md)
-A variant that averages intersection points on voxel edges to create smoothed feature points before constructing quads, producing a smoother surface than standard voxel extraction.
+A GPU-accelerated variant that averages intersection points on voxel edges to create smoothed feature points before constructing quads, producing a smoother surface than standard voxel extraction.
+
+### [Unindexed Triangle Meshing](10999-unindexed-triangle-meshing.md)
+A technique that generates a complete, watertight cube geometry (12 triangles) for every active voxel, ignoring neighbor relationships and performing no face culling, explicitly decomposing the cube rather than treating it as a single primitive.
 
 ## Operating characteristics
 
-*   **Time Complexity:** $O(N^3)$, where $N$ is the chunk dimension. The algorithm iterates through every voxel and performs constant work per voxel [S2, S5, unofficial].
-*   **Memory Complexity:** $O(N^3)$ for the output mesh. The number of vertices and indices is proportional to the number of solid voxels times $6$ [S2, unofficial].
-*   **Measured Performance:** On an Apple M2 Pro (macOS 26.5.1, Node v22.22.2, three@0.185.1), naive meshing a 32³ terrain chunk with 17,191 solid voxels took a median of 5.60 ms (range 5.12–6.30 ms) [S2, unofficial].
-*   **Mesh Statistics:**
-    *   Solid 32³ cube: 196,608 quads [S2, unofficial].
-    *   32³ terrain chunk (17,191 solid voxels): 103,146 quads, 412,584 vertices, 206,292 triangles [S2, unofficial].
-*   **Strengths:** Extremely simple to implement; deterministic output; easy to parallelize across chunks or voxels [S1, S5, unofficial].
-*   **Limitations:** High polygon count due to lack of face merging; high draw call count if not batched; inefficient memory usage due to non-shared vertices [S1, S4, unofficial].
-*   **When to Use:** Prototyping, educational purposes, or as a baseline for testing other meshing algorithms [G].
-*   **When Not to Use:** Production environments with large worlds or strict performance constraints, where culling or greedy meshing is required [S1, unofficial].
+*   **Time Complexity:** $O(N)$, where $N$ is the number of voxels in the chunk. Each voxel is processed exactly once, and a constant number of operations (6 face checks/emissions) are performed per voxel.
+*   **Memory Complexity:** $O(F)$, where $F$ is the number of faces generated. In the worst case (all voxels solid), $F = 6N$.
+*   **Measured Performance:** On an Apple M2 Pro (macOS 26.5.1, Node v22.22.2, three@0.185.1), naive meshing of a 32³ terrain chunk with 17,191 solid voxels has a median time of 5.60 ms (range 5.12–6.30 ms, 21% spread) [S2, unofficial].
+*   **Output Size:** On a solid 32³ cube, naive meshing produces 196,608 quads [S2, unofficial]. On a 32³ terrain chunk with 17,191 solid voxels, it produces 103,146 quads, 412,584 vertices, and 206,292 triangles [S2, unofficial].
+*   **Strengths:** Simple implementation; no neighbor lookups required (if strictly naive); deterministic output.
+*   **Limitations:** High poly counts; high number of draw calls due to lack of vertex sharing and face culling; inefficient for dense scenes [S1, S2, unofficial].
+*   **When to use:** Prototyping; scenes with very low voxel density; when vertex sharing is handled by a separate post-processing step.
+*   **When not to use:** Large, dense voxel worlds; performance-critical applications; scenes requiring efficient rendering of large solid volumes.
 
 ## Background
 
-Naive Voxel Meshing is a foundational technique in voxel rendering, often cited as the first step in converting voxel data into GPU-renderable geometry [S1, unofficial]. It is described in various educational resources and open-source projects as a starting point for voxel engines [S1, S4, unofficial]. The method is contrasted with more advanced techniques like Culled Meshing and Greedy Meshing, which reduce polygon counts by omitting internal faces or merging adjacent faces [S1, unofficial]. The term "Naive" highlights the lack of optimization in face generation [S4, S5, unofficial].
+Naive Voxel Meshing is a foundational technique in voxel rendering, often cited as the baseline for comparison against more optimized methods like Face Culling and Greedy Meshing [S1, S2, unofficial]. It is described as "naive" because it does not use vertex sharing or advanced optimization in the core generation loop, treating each voxel as an independent entity [S4, S5, unofficial]. The approach is commonly associated with early voxel game engines and educational demonstrations, such as mrdoob's voxel demo [S1, unofficial].
 
 ## Sources
 

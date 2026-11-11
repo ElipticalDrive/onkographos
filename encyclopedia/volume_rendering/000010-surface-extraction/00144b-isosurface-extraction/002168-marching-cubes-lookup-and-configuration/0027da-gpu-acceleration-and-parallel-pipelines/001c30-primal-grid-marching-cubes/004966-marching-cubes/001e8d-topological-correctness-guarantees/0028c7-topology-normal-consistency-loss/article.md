@@ -3,141 +3,213 @@
 Also called: Normal Consistency Loss, Topology Consistency Loss
 
 ## Overview
-This method computes a differentiable loss function to enforce topological and geometric consistency in learned Marching Cubes networks [S1, unofficial]. It addresses the ambiguity of the standard 15-case lookup table by penalizing configurations where predicted triangle probabilities and surface normals violate valid connectivity constraints [S1, unofficial]. Unlike discrete topological deciders, this approach integrates topology enforcement directly into the gradient-based optimization of neural network parameters [S1, unofficial].
+The Topology/Normal Consistency Loss is a differentiable regularization term used in learned Marching Cubes networks to enforce topological validity and geometric smoothness of the extracted surface [S1, unofficial]. It addresses the problem of ambiguous triangulations in differentiable volume rendering by penalizing configurations where predicted triangle connectivity conflicts with the local surface normal orientation. Unlike deterministic topological correctness guarantees (e.g., [Asymptotic Decider](790-asymptotic-decider.md)) which resolve ambiguities via discrete logic, this loss provides a soft constraint that guides gradient-based optimization toward manifold-consistent outputs [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs**
+The method computes a loss based on the consistency between predicted triangle probabilities, their connectivity, and the surface normals derived from vertex offsets.
+
+**Inputs and Outputs:**
 *   **Inputs:**
-    *   `topology`: A tensor of raw logits or scores for each valid topology case for a given grid cell.
-    *   `offset`: Predicted vertex offsets for the grid cell, used to determine the precise location of the isosurface and thus the surface normals.
-    *   `connected_inner`: A binary or weight matrix indicating valid connections between triangles within a cell.
-    *   `topology_to_triangle`: An integer mapping array that expands topology indices to specific triangle indices.
-*   **Outputs:**
-    *   `loss`: A scalar value representing the topological inconsistency for the cell.
+    *   `topology`: Tensor of shape $(N, C)$ containing raw logits for $N$ grid cells and $C$ topology classes.
+    *   `offset`: Tensor of shape $(N, 8, 3)$ containing predicted vertex offsets for the 8 corners of each grid cell.
+    *   `connected_inner`: Binary or weight matrix of shape $(K, K)$ indicating valid connections between the $K$ possible triangles in a cell.
+    *   `topology_to_triangle`: Integer mapping array of shape $(C, K)$ expanding topology indices to triangle indices.
+*   **Output:**
+    *   `loss`: Scalar loss value for the batch.
 
-**Data Structures**
-*   `topology`: Shape $(N, C)$, where $N$ is the number of cells and $C$ is the number of topology cases.
-*   `offset`: Shape $(N, 8, 3)$, representing 8 vertices per cell with 3D coordinates.
-*   `connected_inner`: Shape $(T, T)$, where $T$ is the total number of possible triangles across all topology cases.
-*   `topology_to_triangle`: Shape $(C, T_{max})$, mapping case indices to triangle indices.
+**Data Structures:**
+*   `topology_to_triangle`: A lookup table mapping each of the $C$ topology classes to a subset of the $K$ possible triangle configurations.
+*   `connected_inner`: A symmetric matrix where $W_{ij} = 1$ if triangle $i$ and triangle $j$ can coexist in a valid manifold configuration, and $0$ otherwise.
 
-**Steps**
-1.  **Compute Topology Probabilities:** Apply softmax along the topology dimension to obtain probabilities $p_1$ for each valid topology case [S1, unofficial].
-    $$ p_1 = \text{softmax}(topology, \text{dim}=0) $$
-2.  **Expand to Triangle Probabilities:** Map the topology probabilities to individual triangle probabilities using the `topology_to_triangle` mapping array [S1, unofficial].
-    $$ p_{\text{tri}} = p_1[\text{topology\_to\_triangle}] $$
-3.  **Compute Outer Product:** Calculate the outer product of the triangle probabilities to form a joint probability matrix [S1, unofficial].
-    $$ p_{\text{outer}} = p_{\text{tri}} \otimes p_{\text{tri}} $$
-4.  **Form Weight Matrix:** Apply the connectivity mask to the outer product to create the weight matrix $W$, which represents the probability of valid triangle pairs [S1, unofficial].
-    $$ W = p_{\text{outer}} \odot \text{connected\_inner} $$
-5.  **Compute Normals:** Extract normal vectors for the current grid cell using the predicted vertex offsets. The normals are computed based on the triangle geometry defined by the offsets [S1, unofficial].
-    $$ n_i = \text{compute\_normal}(\text{offset}, \text{triangle}_i) $$
-6.  **Normalize Normals:** Normalize the normal vectors along the last dimension [S1, unofficial].
-    $$ N = \frac{n}{\|n\|_2} $$
-7.  **Compute Consistency Term:** Calculate the matrix product involving the normalized normals and the weight matrix [S1, unofficial].
-    $$ \text{tmp} = N^T W N $$
-8.  **Compute Loss:** Calculate the final loss term using the trace of the matrix product and the sum of the weight matrix [S1, unofficial].
-    $$ L_{\text{topo}} = 2 \sum W - 2 \text{tr}(\text{tmp}) $$
-9.  **Accumulate:** Add the loss to the total loss for the batch [S1, unofficial].
+**Steps:**
+1.  **Compute Topology Probabilities:** Apply softmax along the class dimension to convert raw topology logits into probabilities:
+    $$ p_{\text{topo}} = \text{softmax}(\text{topology}, \text{dim}=0) $$
+2.  **Expand to Triangle Probabilities:** Map the topology probabilities to triangle probabilities using the mapping array:
+    $$ p_{\text{tri}} = p_{\text{topo}}[\text{topology\_to\_triangle}] $$
+    This results in a probability distribution over the $K$ possible triangles.
+3.  **Construct Connectivity Matrix:** Compute the outer product of triangle probabilities and apply the connectivity mask:
+    $$ P_{\text{outer}} = p_{\text{tri}} \otimes p_{\text{tri}} $$
+    $$ W = P_{\text{outer}} \odot \text{connected\_inner} $$
+    Here, $W$ is a matrix where $W_{ij}$ represents the joint probability that triangle $i$ and triangle $j$ are both present and connected.
+4.  **Compute Normal Vectors:** Extract the normal vectors for the current grid cell. For each of the 8 vertices, compute the offset from the grid position, then derive the triangle normals. The source code implies computing normals for the triangles defined by the topology. Let $N$ be the matrix of normalized normal vectors for the active triangles.
+    $$ n_v = \text{offset}[v] - \text{grid\_position} $$
+    $$ N = \text{compute\_normals}(n_v) $$
+    Normalize $N$ along the last dimension:
+    $$ N = \frac{N}{\|N\|_2} $$
+5.  **Compute Consistency Term:** Calculate the trace of the product of the normal matrix, the connectivity matrix, and the transpose of the normal matrix:
+    $$ T = N^T W N $$
+    $$ \text{trace\_term} = \text{tr}(T) $$
+6.  **Compute Loss:** The loss is defined as:
+    $$ L_{\text{topo}} = 2 \sum W - 2 \text{tr}(T) $$
+    This formulation penalizes cases where high-probability connected triangles have inconsistent normals (i.e., normals pointing in conflicting directions relative to the connectivity).
 
-**Formula**
-The core loss function is defined as [S1, unofficial]:
-$$ L_{\text{topo}} = 2\sum W - 2\text{tr}(N^T W N) $$
-Where:
-*   $W$ is the probability-weighted connectivity matrix.
-*   $N$ is the matrix of normalized triangle normals.
-*   $\text{tr}(\cdot)$ denotes the trace of a matrix.
-
-**Parameters**
-*   `topology_to_triangle`: Integer mapping array. Not given in the sources.
-*   `connected_inner`: Binary or weight matrix. Not given in the sources.
-*   `offset`: Predicted vertex offsets. Not given in the sources.
-
-**Edge Cases and Pitfalls**
-*   **Precision:** The softmax operation can lead to numerical instability if logits are very large or small. [G] Use log-sum-exp trick for stability.
-*   **Boundaries:** The source code assumes that the outside faces of the grid are always free, applying a negative weight mask to boundary cells [S1, unofficial].
-*   **Degenerate Input:** If the offset values result in degenerate triangles (zero area), the normal computation may fail. [G] Add a small epsilon to the norm calculation to prevent division by zero.
-
-**Pseudocode**
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
 import torch.nn.functional as F
 
-def topology_normal_consistency_loss(offset, topology, connected_inner, topology_to_triangle):
+def topology_normal_consistency_loss(topology, offset, connected_inner, topology_to_triangle, grid_positions):
     """
-    Compute the Topology/Normal Consistency Loss.
+    Computes the Topology/Normal Consistency Loss.
     
     Args:
-    offset: Tensor of shape (N, 8, 3) containing predicted vertex offsets for N cells.
-    topology: Tensor of shape (N, C) containing raw logits for C topology cases.
-    connected_inner: Tensor of shape (T, T) indicating valid triangle connections.
-    topology_to_triangle: Tensor of shape (C, T) mapping topology cases to triangle indices.
-    
+        topology: Tensor of shape (N, C), raw logits for topology classes.
+        offset: Tensor of shape (N, 8, 3), predicted vertex offsets.
+        connected_inner: Tensor of shape (K, K), connectivity mask.
+        topology_to_triangle: Tensor of shape (C, K), mapping topology to triangle indices.
+        grid_positions: Tensor of shape (N, 3), grid positions for each cell.
+        
     Returns:
-    loss: Scalar tensor representing the loss.
+        loss: Scalar tensor.
     """
     # Step 1: Compute topology probabilities
-    p1 = F.softmax(topology, dim=1)
+    p_topo = F.softmax(topology, dim=1) # Assuming dim=1 is classes
     
-    # Step 2: Expand topology probabilities to triangle probabilities
-    # topology_to_triangle is assumed to be a long tensor indexing into the second dimension
-    p_tri = p1[:, topology_to_triangle]
+    # Step 2: Expand to triangle probabilities
+    # topology_to_triangle maps (C, K)
+    # p_topo is (N, C), topology_to_triangle is (C, K)
+    # We need to gather probabilities for each triangle
+    # p_tri shape: (N, K)
+    # Using advanced indexing or gather
+    # p_tri[n, k] = p_topo[n, topology_to_triangle[c, k]] where c is the class index?
+    # Actually, topology_to_triangle likely maps class c to a set of valid triangles.
+    # If topology_to_triangle is (C, K), it might be a one-hot or index mapping.
+    # Based on source: p1 = p1[topology_to_triangle]
+    # If p1 is (N, C) and topology_to_triangle is (C, K), this implies gathering.
+    # Let's assume topology_to_triangle contains class indices for each triangle.
+    # p_tri[n, k] = p_topo[n, topology_to_triangle[k]]
     
-    # Step 3: Compute outer product
-    # p_outer shape: (N, T, T)
-    p_outer = torch.einsum('nt,ns->nts', p_tri, p_tri)
+    # Reshape for gather: topology_to_triangle needs to be (K,) or (1, K) if mapping 1-to-1?
+    # Source says: p1 = p1[topology_to_triangle]. 
+    # If topology_to_triangle is (C, K), and p1 is (N, C), this indexing is ambiguous without more context.
+    # Assuming topology_to_triangle is a (K,) array of class indices for each triangle.
+    # Or, if it's (C, K), it might be that each class maps to multiple triangles.
+    # Let's assume the standard case: topology_to_triangle is (K,) mapping triangle index to class index.
+    # Then p_tri = p_topo[:, topology_to_triangle] -> (N, K)
     
-    # Step 4: Apply connectivity mask
+    # Re-reading source: "p1 = p1[topology_to_triangle]"
+    # If p1 is (N, C) and topology_to_triangle is (C, K), this is not standard PyTorch indexing.
+    # It might be that topology_to_triangle is (K,) and p1 is (C,)?
+    # Let's stick to the source's variable names and assume p1 is (N, C) and topology_to_triangle is (K,)
+    # Wait, source says: "p1 = F.softmax(topology[i_,:], dim=0).data" -> p1 is (C,)
+    # Then "p1 = p1[topology_to_triangle]" -> topology_to_triangle is (K,)
+    # So for each cell, we get a (K,) vector of triangle probabilities.
+    
+    # Generalizing to batch N:
+    # p_topo shape (N, C)
+    # topology_to_triangle shape (K,)
+    # p_tri shape (N, K)
+    p_tri = p_topo[:, topology_to_triangle]
+    
+    # Step 3: Construct Connectivity Matrix W
+    # p_outer = torch.ger(p1, p1) -> outer product
+    # For batch: p_outer[n] = p_tri[n] outer p_tri[n]
+    # W = p_outer * connected_inner
+    # connected_inner is (K, K)
+    
+    # p_tri is (N, K)
+    # p_outer is (N, K, K)
+    p_outer = torch.einsum('ni,nj->nij', p_tri, p_tri)
     W = p_outer * connected_inner
     
-    # Step 5: Compute normals from offsets
-    # Assuming a helper function to compute normals from offsets and triangle indices
-    # This is a placeholder for the specific normal computation logic
-    # norm1 shape: (N, T, 3)
-    norm1 = compute_normals_from_offsets(offset, topology_to_triangle)
+    # Step 4: Compute Normal Vectors
+    # offset is (N, 8, 3)
+    # grid_positions is (N, 3)
+    # vertex_positions = grid_positions + offset
+    vertex_positions = grid_positions + offset
     
-    # Step 6: Normalize normals
-    norm1 = norm1 / (torch.norm(norm1, dim=2, keepdim=True) + 1e-8)
+    # Compute normals for triangles.
+    # The source uses "offset_to_normal(offset, x_idx, y_idx, z_idx, 6)"
+    # This implies computing normals for 6 faces or specific triangles.
+    # Let's assume we compute normals for the K triangles.
+    # This part is implementation-specific. We need to define how normals are derived from offsets.
+    # Typically, normals are computed from the cross product of edges of the triangle vertices.
+    # Let's assume a helper function compute_normals(vertex_positions, triangle_indices)
+    # triangle_indices would be derived from the topology or assumed to be all K.
     
-    # Step 7: Compute matrix product
+    # For the sake of the loss formula, we need N, the matrix of normalized normals.
+    # N shape: (N, K, 3)
+    # We need to define triangle_indices. Let's assume they are fixed for the K triangles.
+    # This is a gap filled by [G].
+    triangle_indices = get_triangle_indices() # Placeholder for specific triangle vertex indices
+    N = compute_normals(vertex_positions, triangle_indices)
+    N = N / torch.norm(N, dim=2, keepdim=True)
+    
+    # Step 5: Compute Consistency Term
+    # tmp3 = norm1^T @ W @ norm1
+    # norm1 is (N, K, 3)
+    # W is (N, K, K)
     # tmp3 shape: (N, 3, 3)
-    tmp3 = torch.bmm(torch.bmm(norm1.transpose(1, 2), W), norm1)
+    # tmp3 = N^T @ W @ N
+    # N^T is (N, 3, K)
+    # N^T @ W is (N, 3, K) @ (N, K, K) = (N, 3, K)
+    # (N^T @ W) @ N is (N, 3, K) @ (N, K, 3) = (N, 3, 3)
     
-    # Step 8: Compute loss term
-    # sum(W) is sum over all dimensions for each cell, then summed over N
-    # trace(tmp3) is sum over the last two dimensions for each cell
-    loss1 = 2 * torch.sum(W, dim=(1, 2)) - 2 * torch.sum(tmp3, dim=(1, 2))
+    N_T = N.transpose(1, 2) # (N, 3, K)
+    tmp3 = torch.einsum('nij,njk,nkl->nil', N_T, W, N)
     
-    # Step 9: Accumulate loss
-    loss = torch.mean(loss1)
+    # Step 6: Compute Loss
+    # loss1 = 2 * sum(W) - 2 * trace(tmp3)
+    # sum(W) is sum over all elements
+    # trace(tmp3) is sum of diagonal elements of tmp3
+    sum_W = torch.sum(W)
+    trace_term = torch.sum(torch.diagonal(tmp3, dim1=1, dim2=2))
+    loss = 2 * sum_W - 2 * trace_term
     
     return loss
 
-def compute_normals_from_offsets(offset, topology_to_triangle):
+def compute_normals(vertex_positions, triangle_indices):
     """
-    Placeholder for normal computation.
-    In the actual implementation, this would use the offset values to compute
-    the normal vectors for each triangle in each topology case.
+    Computes normals for triangles given vertex positions and indices.
+    vertex_positions: (N, 8, 3)
+    triangle_indices: (K, 3)
+    Returns: (N, K, 3)
     """
-    # This is a simplified example. The actual implementation would be more complex.
-    # For demonstration, we return random normals.
-    N, _, _ = offset.shape
-    T = topology_to_triangle.shape[1]
-    return torch.randn(N, T, 3)
+    # Gather vertices for each triangle
+    # v0, v1, v2 shape: (N, K, 3)
+    v0 = vertex_positions[:, triangle_indices[:, 0], :]
+    v1 = vertex_positions[:, triangle_indices[:, 1], :]
+    v2 = vertex_positions[:, triangle_indices[:, 2], :]
+    
+    # Compute edges
+    e1 = v1 - v0
+    e2 = v2 - v0
+    
+    # Compute cross product
+    normals = torch.cross(e1, e2, dim=2)
+    return normals
+
+def get_triangle_indices():
+    """
+    Returns the indices of the 8 vertices for each of the K triangles.
+    This is specific to the Marching Cubes configuration.
+    """
+    # Placeholder for actual triangle indices
+    return torch.tensor([[0, 1, 2], [1, 2, 3], ...]) # Example
 ```
 
+**Parameters:**
+*   `topology_to_triangle`: Integer mapping array. Size depends on the number of topology classes and triangles.
+*   `connected_inner`: Binary or weight matrix. Size $K \times K$.
+*   `offset`: Predicted vertex offsets. Size $(N, 8, 3)$.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The loss involves matrix multiplications and traces, which can be sensitive to numerical precision. Normalization of normals is critical to avoid division by zero.
+*   **Boundaries:** The source mentions assuming outside faces are free, which may require special handling for boundary voxels.
+*   **Degenerate Input:** If the offset leads to degenerate triangles (zero area), the normal computation may fail. A small epsilon should be added to the norm calculation.
+
 ## Operating characteristics
-*   **Time Complexity:** The complexity is dominated by the matrix multiplications and outer products, which are $O(N \cdot T^2)$, where $N$ is the number of cells and $T$ is the number of triangles. [S1, unofficial]
-*   **Memory Complexity:** The memory usage is also $O(N \cdot T^2)$ due to the storage of the weight matrix $W$. [S1, unofficial]
-*   **Strengths:** It provides a differentiable way to enforce topological constraints, allowing for end-to-end training of neural networks for surface extraction. [S1, unofficial]
-*   **Limitations:** It relies on the accuracy of the predicted offsets and topology probabilities. If the network fails to predict accurate offsets, the loss may not effectively guide the topology. [S1, unofficial]
-*   **When to Use:** Use this method when training a neural network for Marching Cubes where topological correctness is critical and differentiable optimization is required. [S1, unofficial]
-*   **When Not to Use:** Avoid this method if computational resources are limited, as the matrix operations can be expensive for large volumes. [S1, unofficial]
+*   **Time Complexity:** The loss computation is dominated by the outer product and matrix multiplications, which are $O(N \cdot K^2)$ for $N$ grid cells and $K$ triangles. This is efficient on GPUs.
+*   **Memory Complexity:** Requires storing the connectivity matrix $W$ of size $N \times K \times K$.
+*   **Strengths:** Provides a differentiable signal for topological consistency, enabling end-to-end training of neural networks for surface extraction.
+*   **Limitations:** It is a soft constraint and does not guarantee topological correctness. It may converge to local minima where the surface is smooth but topologically incorrect.
+*   **When to Use:** When training learned Marching Cubes models where differentiability is required.
+*   **When Not to Use:** When strict topological correctness is required and differentiability is not needed; use deterministic methods like [Asymptotic Decider](790-asymptotic-decider.md) instead.
 
 ## Background
-The Topology/Normal Consistency Loss was introduced in the context of deep learning for surface extraction, specifically in the "Deep Marching Cubes" framework [S1, unofficial]. It aims to address the limitations of traditional Marching Cubes algorithms by integrating topological constraints into the learning process. The method was developed to improve the quality of extracted surfaces by ensuring that the predicted topology and geometry are consistent with each other. [S1, unofficial]
+The Topology/Normal Consistency Loss was introduced in the context of deep learning for surface extraction, specifically in the "Deep Marching Cubes" framework [S1, unofficial]. It aims to bridge the gap between discrete topological constraints and differentiable optimization.
 
 ## Sources
 [S1] yiyiliao/deep_marching_cubes, https://github.com/yiyiliao/deep_marching_cubes, fetched 2026-10-26 (unofficial)
