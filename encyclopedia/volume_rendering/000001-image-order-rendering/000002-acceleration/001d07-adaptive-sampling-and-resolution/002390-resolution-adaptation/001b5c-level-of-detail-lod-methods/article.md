@@ -3,67 +3,125 @@
 Also called: Adaptive resolution rendering, Dynamic LOD, Dynamic Level-of-Detail (LOD) Framework, Interactive Rendering via Level of Detail (LOD), Sample-Based LOD
 
 ## Overview
-Level-of-detail (LOD) methods are techniques for interactive visualization of large scalar fields that maintain responsive frame rates by generating reduced-resolution approximations of the original data during user interaction [S1, unofficial][S2, book][S3]. Unlike static resolution schemes, these methods dynamically adjust the rendering quality based on performance metrics or visual error, switching to higher quality representations only when necessary [S1, unofficial][S3]. They are distinguished from sibling methods like [Dynamic Volume Resolution & Alpha Mask Update](2539-dynamic-volume-resolution-alpha-mask-update.md) by their primary focus on temporal adaptability during interaction rather than static spatial partitioning or alpha-mask-driven culling.
+Level-of-detail (LOD) methods maintain interactive frame rates during viewpoint interaction by dynamically changing the resolution of the rendering to match the available computational budget [S2, book][S3]. Unlike static pre-computed LOD hierarchies, these methods adapt the sampling density or geometric approximation in real-time based on rendering performance metrics [S1, unofficial]. This approach solves the problem of high computational cost in volume rendering by trading visual fidelity for speed during interactive manipulation, switching to higher quality only when the view is static or when the frame budget allows [S3].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** Original scalar field $f$ defined on domain $D$ (e.g., tetrahedral mesh or voxel grid), target frame time $T_{target}$, and current render time $T_{actual}$ [S1, unofficial].
-*   **Output:** A reduced-resolution approximation $\bar{f}$ defined on domain $\bar{D} \subseteq D$, where $|\bar{f} - f| \le \epsilon$ [S1, unofficial].
+The core mechanism involves generating reduced-resolution approximations of the original scalar field or geometry to maintain responsive frame rates [S1, unofficial][S2, book]. The method operates by monitoring the time taken to render the previous frame and adjusting the complexity of the current frame accordingly.
 
-**Data Structures:**
-*   **Mesh/Volume Representation:** For unstructured grids, the domain is represented by a set of faces $F$, partitioned into boundary faces $B$ and internal faces $I$ [S1, unofficial].
-*   **Auxiliary Texture (for GPU-based isosurface LOD):** A texture $T$ storing the rendered isosurface, analyzed for "lone" and "tooth" texels [S4, unofficial].
+### Inputs and Outputs
+*   **Inputs:** The original high-resolution scalar field $f$ defined on domain $D$, the target frame time $\text{TargetTime}$, and the measured render time of the previous frame $\text{RenderTime}$ [S1, unofficial].
+*   **Outputs:** A reduced-resolution approximation $\bar{f}$ defined on a smaller domain $\bar{D} \subseteq D$, or a coarser sampling representation, such that $|\bar{f} - f| \le \epsilon$ [S1, unofficial].
 
-**Steps:**
-1.  **Metric Evaluation:** Compute the current rendering performance or visual error.
-    *   *Performance-based:* Measure $T_{actual}$, the time taken to render the previous frame [S1, unofficial].
-    *   *Visual-based:* Calculate the ratio $S_i$ of problematic texels (lone or tooth) to total texels in the auxiliary texture $T$ [S4, unofficial]. A "lone texel" contains the isosurface but has no neighbors containing it; a "tooth texel" contains the isosurface and has exactly one neighbor containing it [S4, unofficial].
-2.  **Discretization Adjustment:** Modify the resolution parameter based on the metric.
-    *   *For unstructured meshes (Sample-based):* Determine the number of internal faces $|I|$ to include in the current pass using the formula:
-        $$ |I| = \frac{|I| \times T_{target}}{T_{actual}} $$
-        where $|I|$ on the right-hand side refers to the count from the previous frame or a baseline [S1, unofficial]. Boundary faces $B$ are always included [S1, unofficial].
-    *   *For GPU isosurface rendering:* Adjust the resolution reduction factor $n$ for the auxiliary texture for the next frame ($n_{i+1}$) based on $S_i$:
-        $$ n_{i+1} = \begin{cases} n_i & \text{if } S_{min} \le S_i \le S_{max} \\ n_i - 1 & \text{if } S_i > S_{max} \\ n_i + 1 & \text{if } S_i < S_{min} \end{cases} $$
-        where $n \in [2, 5]$ [S4, unofficial].
-3.  **Rendering:** Execute the volume rendering integral using the adjusted discretization.
-    *   *Ray-casting:* Use larger step sizes or fewer rays [S2, book].
-    *   *Texture Slicing:* Use fewer slices through the data (e.g., every fourth slice) [S2, book].
-    *   *Unstructured Grids:* Render only the selected faces $B \cup I$. If high-quality volume rendering is unavailable, render only the outer faces as a translucent surface [S3].
-    *   *ZSWEEP/Ray-casting fallback:* Generate a smaller image and render it as a translucent texture-mapped polygon with bilinear interpolation [S3].
-4.  **Stability Control:** Apply hysteresis or clamping. For the $n$-factor method, $S_{min}$ is set to $S_{max} / 2$ to prevent oscillation between resolution levels [S4, unofficial].
+### Data Structures
+The implementation typically relies on one of two simplification strategies, which dictate the data structure layout:
+1.  **Sample-based simplification:** Uses the original geometry (e.g., tetrahedral mesh) but computes an approximate volume integral. The data structure remains the full mesh, but a subset of faces is selected for rendering [S1, unofficial].
+2.  **Domain-based simplification:** Approximates the domain geometry first (e.g., via edge collapses on a tetrahedral mesh) and then computes the exact integral over the simplified geometry. The data structure is a hierarchical mesh with connectivity information allowing incremental culling of simplices [S1, unofficial].
 
-**Parameters:**
-*   $T_{target}$: Desired frame time for interactive viewing. Typical value: 0.01 seconds [S1, unofficial].
-*   $n$: Resolution reduction factor for auxiliary texture. Range: $[2, 5]$. Lower $n$ means higher resolution ($n=1$ is full size) [S4, unofficial].
-*   $S_{max}$: User-defined quality threshold. $S_{min} = S_{max} / 2$ [S4, unofficial].
+### Algorithm Steps
+The following steps describe the adaptive control loop, primarily derived from the sample-based approach for unstructured grids [S1, unofficial]:
 
-**Edge Cases and Pitfalls:**
-*   **Sample-based vs. Domain-based:** Sample-based simplification uses the original geometry to compute an approximate integral, whereas domain-based simplifies the geometry first and computes an exact integral over the approximation. Sample-based is simpler to implement but may yield different visual results [S1, unofficial].
-*   **Precision:** When $T_{actual}$ is very small, $|I|$ may exceed the total available faces; clamp $|I|$ to the total number of internal faces [G].
-*   **Degenerate Input:** If the mesh has no internal faces ($|I|=0$), the LOD mechanism cannot reduce complexity further; fall back to boundary-only rendering [S1, unofficial].
+1.  **Initialize:** Set $\text{TargetTime}$ to the desired frame time for interactive viewing (typically 0.01 seconds) [S1, unofficial].
+2.  **Measure:** Record $\text{RenderTime}$, the time taken to render the previous frame [S1, unofficial].
+3.  **Calculate Selection Count:** Determine the number of internal faces $|I|$ to include in the current LOD pass using the formula:
+    $$ |I| = \frac{|I|_{prev} \times \text{TargetTime}}{\text{RenderTime}} $$
+    Where $|I|_{prev}$ is the number of internal faces selected in the previous frame. Note: The source formula uses $|I|$ on both sides, implying an iterative update where the new count is proportional to the previous count scaled by the time ratio [S1, unofficial].
+4.  **Select Faces:** Choose $|I|$ internal faces from the mesh. To maximize visual smoothness, faces should be selected based on mesh geometry and scalar values, accounting for transfer function and viewpoint if possible, though static geometric criteria are often used for performance [S1, unofficial].
+5.  **Render:**
+    *   If using **sample-based** simplification: Render the selected faces $I$ combined with the boundary faces $B$ (where $B \cup I \subseteq F$, and $F$ is the full face set) [S1, unofficial].
+    *   If using **domain-based** simplification: Render the simplified mesh where simplices have been removed based on error criteria [S1, unofficial].
+    *   If using **coarse sampling** (texture slicing): Render every $k$-th slice (e.g., every fourth slice) instead of all slices [S2, book].
+    *   If using **ray casting**: Use larger step sizes or cast fewer rays [S2, book].
+6.  **Fallback:** If high-quality volume rendering (HAVS) is unavailable, render only the outer faces of the unstructured grid as a translucent surface [S3]. Alternatively, generate a smaller image via ZSWEEP or ray casting and render it as a texture-mapped polygon with bilinear interpolation [S3].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lod_render_loop(mesh, target_time=0.01):
+    """
+    Adaptive LOD rendering loop for unstructured grids.
+    mesh: Object containing faces F, boundary faces B, and internal faces I_all.
+    target_time: Desired frame time in seconds.
+    """
+    # Initialize state
+    num_internal_faces = len(mesh.I_all)
+    
+    while user_interacting:
+        start_time = current_time()
+        
+        # 1. Select faces based on previous frame's performance
+        # Formula: |I| = (|I|_prev * TargetTime) / RenderTime
+        # Note: This implies |I| is updated iteratively.
+        # If RenderTime is 0 or very small, clamp to avoid division by zero or explosion.
+        if prev_render_time > 0:
+            num_internal_faces = int((num_internal_faces * target_time) / prev_render_time)
+        
+        # Clamp to valid range [0, len(I_all)]
+        num_internal_faces = max(0, min(num_internal_faces, len(mesh.I_all)))
+        
+        # 2. Select specific faces
+        # In practice, this requires a priority queue or error metric to select the best |I| faces.
+        # The source notes that faces should be chosen accounting for transfer function and viewpoint.
+        selected_faces = select_faces(mesh.I_all, num_internal_faces)
+        
+        # 3. Render
+        # Combine boundary faces (always rendered) with selected internal faces
+        renderable_faces = mesh.B + selected_faces
+        
+        # Perform volume rendering (e.g., ray casting or texture slicing)
+        # For texture slicing, this might correspond to selecting every k-th slice
+        image = render_volume(renderable_faces)
+        
+        # 4. Update timing
+        prev_render_time = current_time() - start_time
+        
+        # 5. Display
+        display(image)
+```
+
+### Parameters
+*   **TargetTime:** The amount of time desired for each frame for interactive viewing. Typical value: 0.01 seconds [S1, unofficial].
+*   **Step Size / Ray Count:** For ray-casting LOD, the step size $\Delta t$ is increased or the number of rays is decreased [S2, book].
+*   **Slice Interval:** For texture slicing, the interval between sampled slices (e.g., every fourth slice) [S2, book].
+
+### Edge Cases and Pitfalls
+*   **Oscillation:** Rapid changes in view complexity can cause the LOD level to oscillate between high and low resolutions. The source notes that face selection should be based on mesh geometry and scalar values to maximize visual smoothness when the viewpoint changes [S1, unofficial].
+*   **Fallback Quality:** If HAVS is unavailable, rendering only outer faces may result in significant loss of internal structure visibility [S3].
+*   **Approximation Error:** Sample-based simplification provides different results than domain-based simplification. Sample-based uses the original geometry to compute an approximate integral, while domain-based approximates the geometry first [S1, unofficial].
 
 ## Subtopics
 
 ### [Frustum-based LOD Selection](2986-frustum-based-lod-selection.md)
-Frustum-based LOD Selection determines the appropriate resolution level for a volume entity by calculating the distance from the camera to the entity relative to the camera's frustum faces. It solves the problem of maintaining responsive frame rates for large-scale datasets by selecting lower resolutions for distant or peripheral rays, thereby minimizing memory bandwidth and sample counts. Unlike [Footprint-based LOD Selection](3088-footprint-based-lod-selection.md), which relies on the actual projected footprint of the data to select the coarsest level satisfying a pixel threshold, this method uses distance-to-frustum-face metrics to drive LOD selection.
+Frustum-based LOD Selection determines the appropriate resolution level for a volume entity by calculating the distance from the camera to the entity relative to the camera's frustum faces. It solves the problem of maintaining responsive frame rates for large-scale datasets by selecting lower resolutions for distant or peripheral rays, thereby minimizing memory bandwidth and sample counts. Unlike Footprint-based LOD Selection, which relies on the actual projected footprint of the data to select the coarsest level satisfying a pixel threshold, this method uses distance-to-frustum-face metrics to drive LOD selection.
 
 ### [View-Dependent Adaptive Refinement](6952-view-dependent-adaptive-refinement.md)
-View-Dependent Adaptive Refinement is a method for rendering large-volume datasets at interactive frame rates by dynamically adjusting mesh resolution based on the viewer's position. It solves the trade-off between rendering quality and performance by maintaining high resolution in regions of interest (close to the viewpoint or line of sight) while using lower resolution for distant regions. It differs from [Frustum-based LOD Selection](2986-frustum-based-lod-selection.md) by using a continuous distance-dependent error threshold rather than discrete frustum culling or fixed level selection, and builds on the general principles of [Level-of-detail (LOD) methods](1007-level-of-detail-lod-methods.md).
+View-Dependent Adaptive Refinement is a technique for displaying large-volume data at interactive frame rates by adaptively refining meshes in regions of interest (close to the viewpoint or line of sight) while using lower resolution for distant regions. It solves the problem of rendering high-fidelity volume data in real-time by balancing approximation error against distance from the viewer. It differs from Frustum-based LOD Selection by using a continuous, error-driven subdivision criterion based on distance rather than discrete frustum culling or static LOD levels.
 
 ### Adaptive Resolution Selection Logic
-This logic variant specifically governs the adjustment of the resolution reduction factor $n$ in GPU-based isosurface rendering. It uses the ratio $S_i$ of lone and tooth texels to total texels in an auxiliary texture to drive the next frame's resolution. The logic ensures that resolution is only decreased when visual error (indicated by high $S_i$) exceeds a threshold $S_{max}$, and increased when error is low ($S_i < S_{min}$). The range of $n$ is experimentally determined to be $[2, 5]$ [S4, unofficial].
+This variant uses an auxiliary texture analysis to dynamically adjust the resolution of the rendering. The algorithm analyzes the rendered image to count "lone texels" (texels containing the isosurface with no neighbors also containing it) and "tooth texels" (texels containing the isosurface with only one neighbor also containing it). The ratio $S_i$ of these texels to the total texels in the auxiliary texture $T$ determines the resolution factor $n$ for the next frame [S4, unofficial].
+
+**Formula:**
+$$ n_{i+1} = \begin{cases} n_i & \text{if } S_{min} \le S_i \le S_{max} \\ n_i - 1 & \text{if } S_i > S_{max} \\ n_i + 1 & \text{if } S_i < S_{min} \end{cases} $$
+
+**Parameters:**
+*   $n$: The resolution reduction factor for the auxiliary texture. Range is $[2, 5]$. Lower $n$ means higher resolution ($n=1$ is full size) [S4, unofficial].
+*   $S_{max}$: User-defined quality threshold.
+*   $S_{min}$: Set to $S_{max} / 2$ [S4, unofficial].
+*   $S_i$: The ratio of (lone texels + tooth texels) to total texels in the auxiliary texture $T$ for frame $i$ [S4, unofficial].
+
+**Implementation Note:** To increase performance, the auxiliary texture analysis is done on the CPU in parallel with the second step of the rendering process (e.g., ray casting), increasing frame time only by the time taken to copy texture data from GPU to CPU [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the LOD level. For mesh-based LOD, complexity is proportional to the number of selected faces $|B| + |I|$. For ray-casting, it is proportional to the number of samples, which decreases as step size increases or ray count decreases [S2, book].
-*   **Memory Complexity:** For sample-based LOD, memory usage is dominated by the original geometry, as the domain $D$ remains constant; only the subset of faces $I$ is processed [S1, unofficial]. For domain-based LOD, memory may be reduced if the simplified domain $\bar{D}$ is stored [S1, unofficial].
-*   **Measured Performance:** In ParaView, LOD methods enable interactive rendering of large unstructured grids by reducing detail during manipulation, with full quality restored for final images [S3].
-*   **Strengths:** Maintains interactivity during user manipulation; simple to implement for sample-based approaches; effective for large datasets [S1, unofficial][S3].
-*   **Limitations:** Visual discontinuities may occur if LOD transitions are not smoothed; sample-based simplification may not preserve geometric features as well as domain-based methods [S1, unofficial].
-*   **When to use:** Interactive visualization of large scalar fields where frame rate is critical [S1, unofficial][S3].
-*   **When not to use:** Offline rendering where quality is paramount and interactivity is not required [S3].
+*   **Time Complexity:** The complexity is adaptive. The rendering time is bounded by $\text{TargetTime}$ during interaction. The cost of LOD selection is generally low compared to rendering, especially if using sample-based simplification which avoids complex geometry rebuilding [S1, unofficial].
+*   **Memory Complexity:** Sample-based simplification requires storing the full mesh but only rendering a subset, so memory usage remains high but constant. Domain-based simplification may require storing hierarchical mesh structures, potentially increasing memory overhead [S1, unofficial].
+*   **Performance:** Provides substantial improvements in interactivity for large unstructured grids, especially on GPUs which are efficient for rendering large scenes of polygons [S2, book].
+*   **Strengths:** Maintains interactive frame rates during user manipulation; simple data structures for sample-based approaches; easy return to full quality by selecting all internal faces [S1, unofficial].
+*   **Limitations:** Visual quality may degrade significantly if the LOD is too aggressive; sample-based simplification may produce artifacts if the transfer function is not accounted for in face selection [S1, unofficial].
+*   **When to use:** Interactive visualization of large scalar fields where user manipulation is frequent [S1, unofficial].
+*   **When not to use:** Offline rendering where maximum visual fidelity is required regardless of frame rate [S3].
 
 ## Background
-LOD methods originated as a solution to the computational intensity of volume rendering, particularly for unstructured grids and large scalar fields [S3]. Early work by Levoy (1990b) proposed using larger step sizes or fewer rays for ray-casting to improve interactivity [S2, book]. Danskin and Hanrahan (1992) introduced hierarchical representations like octrees for adaptive resolution [S2, book]. The K-Buffer thesis (Callahan) formalized sample-based simplification for tetrahedral meshes, distinguishing it from domain-based simplification [S1, unofficial]. ParaView's implementation of LOD for unstructured grids, including HAVS and fallback techniques, has been a significant driver of interactive scientific visualization [S3]. The adaptive algorithm for GPU isosurface rendering using auxiliary texture analysis was developed to accelerate direct isosurface rendering on GPUs [S4, unofficial].
+LOD techniques for volume rendering originated from the need to visualize large scalar fields represented as tetrahedral meshes interactively [S1, unofficial]. Early methods proposed hierarchically simplifying the tetrahedral mesh using edge collapses, similar to triangle-based simplification, using connectivity information to incrementally cull simplices [S1, unofficial]. The distinction between sample-based and domain-based simplification was highlighted in early works, with sample-based approaches favored for their simplicity in dynamic LOD implementation [S1, unofficial]. The concept was further popularized in textbooks and practical applications like ParaView, where LOD is used to provide interactive rendering rates for unstructured data [S2, book][S3].
 
 ## Sources
 [S1] THE K-BUFFER AND ITS APPLICATIONS TO VOLUME RENDERING, https://ctsilva.github.io/thesis/steve-callahan-ms-thesis.pdf, fetched 2026-10-27 (unofficial)

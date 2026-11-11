@@ -1,0 +1,112 @@
+# Texture Optimization for Volume Synthesis
+
+Also called: Kwatra et al. method adaptation
+
+## Overview
+A method to synthesize a 3D cloud volume $V$ from a set of $K$ example voxel blocks $C_{ex}$ by minimizing an energy function that measures the distance between input image pixel blocks and rendered voxel blocks [S1]. It adapts the texture synthesis technique of Kwatra et al. to the volume domain, solving for voxel values and example selection simultaneously [S1]. It differs from direct volume rendering by optimizing the internal structure of the volume to match photographic input, rather than just rendering a pre-defined volume [S1].
+
+## How it works
+**Inputs:**
+*   Input photograph $I_{ph}$ [S1].
+*   Example cloud volume database $V_{ex}$, from which $K$ voxel blocks $C_{ex} = \{C_1, \dots, C_K\}$ are extracted [S1].
+*   Pre-computed lighting parameters $L^*_0, L^*_a$ (ambient and directional light) obtained via prior optimization [S1].
+*   Parameters: $\lambda$ (weight for pixel difference, default 100), $k$ (number of nearest neighbors) [S1].
+
+**Outputs:**
+*   Synthesized volume $V$ [S1].
+
+**Data Structures:**
+*   **Voxel Block:** A 3D grid of size $w \times w \times N_z$. The example volumes are resampled so the Z-resolution is $N_z$ [S1].
+*   **Vector $x_p$:** Concatenated vector for pixel $p$: $x_p = \{x^I_p, x^V_p\}$, where $x^I_p$ is the pixel value block in $I_{ph}$ and $x^V_p$ is the voxel value block in $V$ corresponding to pixel $p$ [S1].
+*   **Vector $z$:** Concatenated vector for an example block: $z = \{z^I, z^V\}$, where $z^V$ is the example voxel block and $z^I = R(z^V, \tau, L^*_0, L^*_a)$ is the rendered image of that block [S1].
+*   **Distance Metric:** $d(x_p, z) = \|x^V_p - z^V\|^2 + \lambda \|x^I_p - z^I\|^2$ [S1].
+
+**Algorithm:**
+The method minimizes the energy function $E(x; \{z\}) = \sum_{p \in X_{ph}} d(x_p, z_p)$ using an Expectation-Maximization (EM) approach [S1].
+
+1.  **Sorting:** Sort all voxel blocks in the order in which incident sunlight reaches them. This ensures transmittance $\tau$ can be calculated for voxels closer to the sun first [S1].
+2.  **Iteration:** Repeat E-step and M-step until convergence or a specified iteration count [S1].
+    *   **E-step (Update $x_p$):** Minimize energy with respect to $x_p$ (specifically $x^V_p$) keeping $z_p$ fixed. This results in a least squares problem. The derivative of Eq. (9) w.r.t $x^V_p$ is set to zero, simplifying to a weighted average computation of neighbor voxel blocks [S1].
+    *   **M-step (Update $z_p$):** Minimize energy with respect to $z_p$ keeping $x_p$ fixed. This involves searching for the closest vector $z_p$ from the set of all vectors $z$ [S1].
+        *   **Acceleration:** To avoid rendering all $K$ blocks, find $k$ nearest neighbor vectors $z^V_1, \dots, z^V_k$ to $x^V_p$ using a library like FLANN [S1].
+        *   Render each $z^V_i$ to compute $z^I_i$.
+        *   Search for the closest vector from these $k$ candidates $\{z_1, \dots, z_k\}$ [S1].
+        *   Accumulate the best $z^V_p$ into the corresponding voxels in $V$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def synthesize_volume(input_image, example_blocks, lighting_params, lambda_weight, k_neighbors, max_iters):
+    """
+    Synthesize volume V from example blocks to match input_image.
+    """
+    # Initialize V with zeros or random values from examples
+    V = initialize_volume(example_blocks)
+    
+    # Pre-sort blocks by sunlight incidence order
+    sorted_blocks = sort_blocks_by_sunlight(example_blocks)
+    
+    for iteration in range(max_iters):
+        energy = 0.0
+        
+        # Process blocks in sunlight order
+        for block in sorted_blocks:
+            # Identify pixel block B_ph(p) and voxel block C(p)
+            p = block.pixel_index
+            xI_p = get_pixel_block(input_image, p)
+            xV_p = get_voxel_block(V, p)
+            
+            # E-step: Update xV_p
+            # Solve least squares for xV_p keeping zp fixed
+            # Simplifies to weighted average of neighbors
+            xV_p = compute_weighted_average_neighbor(V, p)
+            update_voxel_block(V, p, xV_p)
+            
+            # M-step: Update zp
+            # 1. Find k nearest neighbors in example space
+            zV_candidates = find_k_nearest_neighbors(xV_p, example_blocks, k=k_neighbors)
+            
+            # 2. Render candidates and find best match
+            best_z = None
+            min_dist = infinity
+            
+            for zV_cand in zV_candidates:
+                # Render the candidate voxel block
+                zI_cand = render_volume_block(zV_cand, lighting_params)
+                
+                # Compute distance
+                dist = norm(xV_p - zV_cand)**2 + lambda_weight * norm(xI_p - zI_cand)**2
+                
+                if dist < min_dist:
+                    min_dist = dist
+                    best_z = zV_cand
+            
+            # Accumulate best zV into V
+            update_voxel_block(V, p, best_z)
+            energy += min_dist
+            
+        if converged(energy, previous_energy):
+            break
+        previous_energy = energy
+        
+    return V
+```
+
+## Subtopics
+
+### Two-Orthogonal Image Synthesis Extension
+An extension to synthesize a cloud volume such that rendered images from two orthogonal directions (e.g., xy and xz planes) match two input images [S1]. The vector $x_p$ is augmented with pixel values from the second image plane ($x^I_{xz}$), and $z$ is augmented with rendered values from the second plane ($z^I_{xz}$) [S1]. The distance metric becomes $d(x_p, z) = \|x^V_p - z^V\|^2 + \lambda \|x^I_p - z^I\|^2 + \mu \|x^I_{xz} - z^I_{xz}\|^2$, where $\mu$ is a relative weighting coefficient (default 10 in experiments) [S1].
+
+## Operating characteristics
+*   **Complexity:** The M-step is computationally expensive because rendering is required for candidate blocks. The acceleration strategy reduces this by limiting rendering to $k$ nearest neighbors [S1].
+*   **Performance:** On a desktop PC (Intel Core-i7 4790 3.60 GHz), preprocessing takes about 4 minutes for a database of 137 volumes [S1].
+*   **Strengths:** Produces photorealistic results by leveraging example-based details [S1].
+*   **Limitations:** Requires a database of example volumes [S1]. The search for the closest vector is infeasible without acceleration due to the large number of examples $K$ and the cost of rendering [S1].
+
+## Background
+Originated from the work of Kei Iwasaki, Yoshinori Dobashi, and Makoto Okabe, presented at CGI ’17 in Yokohama, Japan [S1]. It adapts the texture optimization technique proposed by Kwatra et al. [11] to the volume domain for cloud synthesis [S1].
+
+## Sources
+[S1] Example-based synthesis of three-dimensional clouds from photographs, https://doi.org/10.1145/3095140.3095168, fetched 2026-10-29

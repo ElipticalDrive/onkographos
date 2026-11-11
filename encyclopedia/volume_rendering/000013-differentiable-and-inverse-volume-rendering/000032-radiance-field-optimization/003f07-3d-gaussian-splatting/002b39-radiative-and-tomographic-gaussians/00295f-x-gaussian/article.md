@@ -1,25 +1,24 @@
 # X-Gaussian
 
-Also called: Radiative Gaussian Splatting for X-ray NVS, X-Ray 3DGS
 
 ## Overview
 X-Gaussian is a 3D Gaussian Splatting (3DGS) framework adapted for X-ray imaging, designed for efficient X-ray novel view synthesis (NVS) and sparse-view CT reconstruction [S1]. It replaces the view-dependent RGB color of standard 3DGS with a view-independent radiation intensity model, enabling the generation of high-quality synthetic X-ray projections [S1]. Unlike standard 3DGS which optimizes for visual appearance, X-Gaussian optimizes for radiative physics, allowing it to serve as a high-fidelity prior for learning-free CT reconstruction algorithms like FDK, SART, and ASD-POCS [S1]. It distinguishes itself from NeRF-based X-ray methods (e.g., NAF) by offering significantly faster inference and training times while achieving higher PSNR [S1].
 
 ## How it works
 **Inputs:**
-*   A set of $N$ input X-ray projections with known acquisition geometry (angles, source-detector distances).
-*   X-ray scanner parameters (intrinsic and extrinsic matrices).
+*   A set of $N$ input X-ray projections with known acquisition geometry (angles, source-detector distances) [S1].
+*   X-ray scanner parameters (intrinsic and extrinsic matrices) [S1].
 
 **Outputs:**
-*   A set of $M$ 3D Gaussian kernels $\mathcal{G}_3 = \{G_i\}_{i=1}^M$ representing the radiative scene.
-*   Synthesized X-ray projections for arbitrary viewing angles.
+*   A set of $M$ 3D Gaussian kernels $\mathcal{G}_3 = \{G_i\}_{i=1}^M$ representing the radiative scene [S1].
+*   Synthesized X-ray projections for arbitrary viewing angles [S1].
 
 **Data Structures:**
 Each Gaussian kernel $G_i$ is defined by the following attributes, stored as learnable parameters:
-*   $\mathbf{p}_i \in \mathbb{R}^3$: 3D position of the Gaussian center.
-*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix (orthonormal).
-*   $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$: Scale matrix (diagonal).
-*   $\rho_i \in \mathbb{R}$: Central radiation intensity (scalar, view-independent). Note: In the context of X-ray attenuation, this acts as the source intensity or density contribution along the ray [S1].
+*   $\mathbf{p}_i \in \mathbb{R}^3$: 3D position of the Gaussian center [S1].
+*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix (orthonormal) [S1].
+*   $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$: Scale matrix (diagonal) [S1].
+*   $\rho_i \in \mathbb{R}$: Central radiation intensity (scalar, view-independent) [S1].
 *   $\alpha_i \in \mathbb{R}$: Opacity/Alpha parameter controlling the Gaussian's contribution weight (standard 3DGS attribute) [S1].
 
 The covariance matrix is computed as $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^\top \mathbf{R}_i^\top$ [S1].
@@ -28,26 +27,26 @@ The covariance matrix is computed as $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S
 
 1.  **Initialization (ACUI Strategy):**
     *   Compute the intrinsic matrix $K$ and extrinsic matrix $E$ for each input view using the provided X-ray scanner parameters [S1].
-    *   Define a bounding cuboid enclosing the scanned object.
+    *   Define a bounding cuboid enclosing the scanned object [S1].
     *   Uniformly sample $M$ center points $\mathbf{p}_i$ within this cuboid [S1].
-    *   Initialize $\mathbf{R}_i$ to identity, $\mathbf{S}_i$ to a small uniform scale, and $\rho_i$ to a constant initial intensity value [S1].
+    *   Initialize $\mathbf{R}_i$ to identity, $\mathbf{S}_i$ to a small uniform scale, and $\rho_i$ to a constant initial intensity value [G].
 
 2.  **Differentiable Radiative Rasterization (DRR):**
-    *   For a target view, transform the 3D Gaussians into the camera's ray space.
+    *   For a target view, transform the 3D Gaussians into the camera's ray space [S1].
     *   Project the 3D covariance $\mathbf{\Sigma}_i$ to the 2D image plane using the Jacobian $J$ of the affine approximation of the projection and the rotation part $W$ of the extrinsic matrix:
         $$ \mathbf{\hat{\Sigma}}_i = J W \mathbf{\Sigma}_i W^T J^T $$
         [S1]
-    *   Sort Gaussians along the viewing ray by depth.
+    *   Sort Gaussians along the viewing ray by depth [S1].
     *   Compute the 2D Gaussian density at pixel $\mathbf{x}$:
         $$ \alpha_i(\mathbf{x}) = \exp\left(-\frac{1}{2} (\mathbf{x} - \mathbf{c}_i)^T \mathbf{\hat{\Sigma}}_i^{-1} (\mathbf{x} - \mathbf{c}_i)\right) $$
         where $\mathbf{c}_i$ is the projected center [S1].
-    *   Apply alpha compositing to render the final intensity $I_{\text{rendered}}$ for the pixel. Since X-ray intensity is additive/attenuative in this model, the rendering equation follows the standard 3DGS alpha compositing but with $\rho_i$ as the color/intensity term:
+    *   Apply alpha compositing to render the final intensity $I_{\text{rendered}}$ for the pixel:
         $$ I_{\text{rendered}} = \sum_{i=1}^M \rho_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
         [S1]
     *   This step is implemented via a custom CUDA kernel for GPU efficiency [S1].
 
 3.  **Optimization:**
-    *   Minimize the difference between rendered projections and ground truth X-ray images using Mean Squared Error (MSE) or L1 loss.
+    *   Minimize the difference between rendered projections and ground truth X-ray images using Mean Squared Error (MSE) or L1 loss [G].
     *   Update $\mathbf{p}_i, \mathbf{R}_i, \mathbf{S}_i, \rho_i, \alpha_i$ using Adam optimizer [S1].
     *   The model excludes view-direction dependence for $\rho_i$, fitting it as a scalar property of the Gaussian [S1].
 
@@ -57,143 +56,60 @@ The covariance matrix is computed as $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S
 
 ```python
 import torch
-import torch.nn as nn
-import numpy as np
 
-class XGaussianKernel:
-    def __init__(self, positions, scales, rotations, intensities, alphas):
-        self.p = nn.Parameter(positions) # (M, 3)
-        self.s = nn.Parameter(scales)    # (M, 3)
-        self.r = nn.Parameter(rotations) # (M, 3, 3)
-        self.rho = nn.Parameter(intensities) # (M,)
-        self.alpha = nn.Parameter(alphas) # (M,)
-        
-    def get_covariance(self):
-        # Sigma = R S S^T R^T
-        # S is diagonal, so S S^T is element-wise square
-        S_sq = self.s * self.s
-        # Reshape for batch matrix mult
-        S_mat = torch.diag_embed(S_sq) # (M, 3, 3)
-        R = self.r
-        # Cov = R @ S_mat @ R^T
-        Cov = torch.bmm(torch.bmm(R, S_mat), R.transpose(1, 2))
-        return Cov
+def render_x_gaussian(positions, covariances, intensities, extrinsic, intrinsic, height, width):
+    # 1. Camera space transform
+    R_cam = extrinsic[:3, :3]
+    T_cam = extrinsic[:3, 3]
+    p_cam = (R_cam @ positions.T + T_cam.unsqueeze(1)).T
+    Cov_cam = torch.bmm(torch.bmm(R_cam.unsqueeze(0).expand(covariances.shape[0], -1, -1),
+                                  covariances),
+                        R_cam.transpose(0, 1).unsqueeze(0).expand(covariances.shape[0], -1, -1))
 
-class XGaussianRenderer:
-    def __init__(self, kernel: XGaussianKernel):
-        self.kernel = kernel
-        
-    def render(self, extrinsic_matrix, intrinsic_matrix, image_width, image_height):
-        """
-        Renders a single X-ray projection.
-        extrinsic_matrix: (4, 4)
-        intrinsic_matrix: (3, 3)
-        """
-        # 1. Transform Gaussians to Camera Space
-        # Extract rotation and translation from extrinsic
-        R_cam = extrinsic_matrix[:3, :3]
-        T_cam = extrinsic_matrix[:3, 3]
-        
-        # Transform positions
-        p_cam = self.kernel.p @ R_cam.transpose(0, 1) + T_cam.unsqueeze(0)
-        
-        # Transform Covariance to Camera Space
-        # Cov_cam = R_cam @ Cov_world @ R_cam^T
-        Cov_world = self.kernel.get_covariance()
-        Cov_cam = torch.bmm(torch.bmm(R_cam.unsqueeze(0).expand(Cov_world.shape[0], -1, -1), 
-                                       Cov_world), 
-                            R_cam.transpose(0, 1).unsqueeze(0).expand(Cov_world.shape[0], -1, -1))
-        
-        # 2. Project to 2D
-        # Affine approximation Jacobian J and Projection
-        # For perspective projection, we use the standard 3DGS projection logic
-        # K is intrinsic (3,3)
-        K = intrinsic_matrix
-        
-        # Compute 2D covariance using Jacobian J
-        # J involves partial derivatives of projection equations
-        # Simplified: Project centers to get depth z
-        z = p_cam[:, 2].unsqueeze(1) # (M, 1)
-        
-        # Jacobian J for perspective projection
-        # J = (1/z) * [ K[0,0] 0 -K[0,0]*cx/z ... ] 
-        # Standard 3DGS derivation:
-        # Let's assume a helper function for J calculation based on standard 3DGS
-        J = self._compute_jacobian(p_cam, K) # (M, 2, 3)
-        
-        # W is the rotation part of extrinsic (R_cam)
-        W = R_cam
-        
-        # Projected 2D Covariance: Sigma_hat = J W Sigma W^T J^T
-        # Note: In 3DGS, Sigma is already in world space. We transformed it to cam space above.
-        # The formula in parent is Sigma_hat = J W Sigma W^T J^T. 
-        # Here, if Cov_cam is R_cam Sigma W^T, then we just need J Cov_cam J^T?
-        # Parent says: Sigma_hat = J W Sigma W^T J^T. 
-        # W is rotation of extrinsic. So W Sigma W^T is Cov in camera space.
-        # So Cov_cam = W Sigma W^T.
-        # Then Sigma_hat = J Cov_cam J^T.
-        
-        Cov_cam = torch.bmm(torch.bmm(W.unsqueeze(0).expand(Cov_world.shape[0], -1, -1), 
-                                       Cov_world), 
-                            W.transpose(0, 1).unsqueeze(0).expand(Cov_world.shape[0], -1, -1))
-        
-        Sigma_hat = torch.bmm(torch.bmm(J, Cov_cam), J.transpose(1, 2)) # (M, 2, 2)
-        
-        # 3. Sort Gaussians by depth (z)
-        _, sort_indices = torch.sort(z.squeeze(1), dim=0, descending=False)
-        
-        # 4. Rasterize (Simplified Alpha Compositing)
-        # In practice, this is done via CUDA kernel. Here is the logical flow.
-        # For each pixel, sum contributions.
-        # This is a placeholder for the CUDA kernel logic described in [S1]
-        
-        # Initialize output image
-        H, W_img = image_height, image_width
-        rendered_image = torch.zeros((H, W_img), device=self.kernel.p.device)
-        
-        # Get projected centers
-        centers_2d = (K @ p_cam.transpose(0, 1)).transpose(0, 1) # (M, 3)
-        cx = centers_2d[:, 0] / centers_2d[:, 2]
-        cy = centers_2d[:, 1] / centers_2d[:, 2]
-        
-        # This part requires a grid loop or CUDA kernel for efficiency.
-        # We define the contribution function.
-        
-        return rendered_image # Placeholder for CUDA implementation
+    # 2. Jacobian and projection
+    z = p_cam[:, 2].unsqueeze(1)
+    J = torch.zeros(positions.shape[0], 2, 3, device=positions.device)
+    J[:, 0, 0] = intrinsic[0, 0] / z.squeeze()
+    J[:, 0, 2] = -intrinsic[0, 0] * p_cam[:, 0] / (z.squeeze() ** 2)
+    J[:, 1, 1] = intrinsic[1, 1] / z.squeeze()
+    J[:, 1, 2] = -intrinsic[1, 1] * p_cam[:, 1] / (z.squeeze() ** 2)
 
-    def _compute_jacobian(self, p_cam, K):
-        # Compute Jacobian of the projection function
-        # x = K * [X/Z, Y/Z, 1]^T
-        # dx/dX = K[0,0]/Z, dx/dY = 0, dx/dZ = -K[0,0]*X/Z^2
-        # dy/dX = 0, dy/dY = K[1,1]/Z, dy/dZ = -K[1,1]*Y/Z^2
-        # dz/dX = 0, dz/dY = 0, dz/dZ = 1 (for depth sorting)
-        
-        X = p_cam[:, 0]
-        Y = p_cam[:, 1]
-        Z = p_cam[:, 2]
-        
-        Z_inv = 1.0 / Z
-        Z_inv_sq = Z_inv * Z_inv
-        
-        J = torch.zeros((p_cam.shape[0], 2, 3), device=p_cam.device)
-        
-        J[:, 0, 0] = K[0, 0] * Z_inv
-        J[:, 0, 1] = 0.0
-        J[:, 0, 2] = -K[0, 0] * X * Z_inv_sq
-        
-        J[:, 1, 0] = 0.0
-        J[:, 1, 1] = K[1, 1] * Z_inv
-        J[:, 1, 2] = -K[1, 1] * Y * Z_inv_sq
-        
-        return J
+    # Projected covariance: Sigma_hat = J @ Cov_cam @ J^T
+    Sigma_hat = torch.bmm(torch.bmm(J, Cov_cam), J.transpose(1, 2))
 
-# Usage Example
-# 1. Initialize Gaussians using ACUI
-# 2. Create Renderer
-# 3. Loop over training steps:
-#    - Render projection
-#    - Compute Loss vs Ground Truth
-#    - Backpropagate
+    # 2D centers
+    centers_2d = (intrinsic @ p_cam.T).T
+    cx = centers_2d[:, 0] / centers_2d[:, 2]
+    cy = centers_2d[:, 1] / centers_2d[:, 2]
+
+    # 3. Sort by depth
+    sort_idx = torch.argsort(z.squeeze(), dim=0)
+    p_cam = p_cam[sort_idx]
+    Sigma_hat = Sigma_hat[sort_idx]
+    intensities = intensities[sort_idx]
+
+    # 4. Rasterization
+    image = torch.zeros(height, width, device=positions.device)
+    y, x = torch.meshgrid(torch.arange(height), torch.arange(width), indexing='ij')
+    pixels = torch.stack([x.float(), y.float()], dim=-1) # (H, W, 2)
+
+    # Compute quadratic form for all pixels and Gaussians
+    diff = pixels.unsqueeze(1) - centers_2d[:, :2].unsqueeze(0).unsqueeze(0) # (H, W, M, 2)
+    Sigma_inv = torch.inverse(Sigma_hat) # (M, 2, 2)
+    diff_inv = diff @ Sigma_inv # (H, W, M, 2)
+    quad = torch.sum(diff_inv * diff, dim=-1) # (H, W, M)
+    alpha = torch.exp(-0.5 * quad)
+    alpha = torch.clamp(alpha, max=0.999) # Prevent NaN in compositing
+
+    # Alpha compositing: I = sum rho_i alpha_i prod (1-alpha_j)
+    T = torch.ones(height, width, 1, device=positions.device) # Transmittance
+    rendered = torch.zeros(height, width, device=positions.device)
+    for i in range(intensities.shape[0]):
+        a = alpha[:, :, i].unsqueeze(-1)
+        rendered += intensities[i] * a * T
+        T *= (1 - a)
+        if T.sum() < 1e-5: break
+    return rendered
 ```
 
 **Parameters:**
@@ -209,13 +125,13 @@ class XGaussianRenderer:
 ## Subtopics
 
 ### Radiative Gaussian Splatting
-The parent method that introduces the general radiative transfer model for 3DGS, using central density $\rho_i$ for isotropic density fields [3040-radiative-gaussian-splatting.md]. Choose when general radiative physics (not specific to X-ray NVS) are needed.
+The parent method that introduces the general radiative transfer model for 3DGS, using central density $\rho_i$ for isotropic density fields [3040-radiative-gaussian-splatting.md]. Choose when general radiative physics (not specific to X-ray NVS) are needed [G].
 
 ### Radiative Gaussian Point Cloud Model
-A variant that uses a feature vector $\mathbf{f}_i$ mapped to intensity via a Radiation Intensity Response Function (RIRF) [5304-radiative-gaussian-point-cloud-model.md]. Choose when a non-linear response function is required.
+A variant that uses a feature vector $\mathbf{f}_i$ mapped to intensity via a Radiation Intensity Response Function (RIRF) [5304-radiative-gaussian-point-cloud-model.md]. Choose when a non-linear response function is required [G].
 
 ### Volumetric Primitives Radiance Field
-Uses volumetric primitives instead of Gaussians for radiative modeling [5900-volumetric-primitives-radiance-field.md]. Choose when volumetric representation is preferred over point-based splatting.
+Uses volumetric primitives instead of Gaussians for radiative modeling [5900-volumetric-primitives-radiance-field.md]. Choose when volumetric representation is preferred over point-based splatting [G].
 
 ## Operating characteristics
 *   **Time Complexity:** Training is significantly faster than NeRF-based methods. X-Gaussian requires less than 15% of the training time of NAF (Neural Attenuation Field) [S1].
@@ -227,8 +143,8 @@ Uses volumetric primitives instead of Gaussians for radiative modeling [5900-vol
     *   When used to generate novel views for sparse-view CT reconstruction (FDK, SART, ASD-POCS), it yields PSNR improvements of 15.19, 13.01, and 13.53 dB respectively, outperforming NAF by 1.32, 2.41, and 2.65 dB [S1].
 *   **Strengths:** Fast convergence (basic shape formed by 1000 iterations), clear structural details (ribs, blood vessels) even in early training stages, cleaner backgrounds, and no redundant Gaussians [S1].
 *   **Limitations:** Requires CUDA implementation, increasing development and debugging complexity [S1].
-*   **When to use:** X-ray novel view synthesis and sparse-view CT reconstruction where speed and high-frequency detail preservation are critical.
-*   **When not to use:** When Python-only implementation is required or when view-dependent color (RGB) is the target output.
+*   **When to use:** X-ray novel view synthesis and sparse-view CT reconstruction where speed and high-frequency detail preservation are critical [S1].
+*   **When not to use:** When Python-only implementation is required or when view-dependent color (RGB) is the target output [G].
 
 ## Background
 X-Gaussian was proposed as the first 3DGS-based framework specifically for X-ray novel view synthesis [S1]. It builds on the Radiative and Tomographic Gaussians family, adapting the radiative transfer model to align with X-ray physics [S1]. The method was developed to address the limitations of NeRF-based X-ray methods, which are computationally expensive and slow to converge [S1]. It utilizes an ACUI (Acquisition-Conditioned Uniform Initialization) strategy to initialize Gaussians based on scanner parameters, bypassing the need for Structure-from-Motion (SfM) [S1].

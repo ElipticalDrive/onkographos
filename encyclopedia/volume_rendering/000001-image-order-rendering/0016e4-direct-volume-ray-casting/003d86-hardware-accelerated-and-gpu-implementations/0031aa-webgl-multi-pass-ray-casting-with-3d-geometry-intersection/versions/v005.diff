@@ -1,0 +1,170 @@
+--- v004.md
++++ v005.md
+@@ -23,10 +23,10 @@
+     *   **Encoding Function:** A 24-bit float value is packed into four 8-bit channels using bit shifting [S1]:
+         $$
+-        \text{packFloat}(v) = \text{vec4}(
+-        \text{fract}(v \cdot 256.0 \cdot 256.0 \cdot 256.0),
+-        \text{fract}(v \cdot 256.0 \cdot 256.0) \cdot 256.0,
++        \text{packFloat}(v) = \text{vec4}\left(
++        \text{fract}(v \cdot 256.0^3),
++        \text{fract}(v \cdot 256.0^2) \cdot 256.0,
+         \text{fract}(v \cdot 256.0) \cdot 256.0,
+         \text{fract}(v) \cdot 256.0
+-        )
++        \right)
+         $$
+     *   **Unpacking Function:** In the final pass, the RGBA color is unpacked back to a float depth value [S1]:
+@@ -38,5 +38,5 @@
+     2.  Color of 3D meshes (Pass 2).
+     3.  Depth of volume back face (Pass 3).
+-    4.  Coordinates/Depth of volume back face (Pass 4).
++    4.  Coordinates/Depth of volume back face (Pass 4) [S1].
+ 
+ ### Numbered Steps
+@@ -77,4 +77,17 @@
+ ### Pseudocode
+ ```python
++def fract(x):
++    return x - math.floor(x)
++
++def pack_float(v):
++    """Packs a 24-bit float depth into RGBA channels per [S1]."""
++    bit_sh = [256.0**3, 256.0**2, 256.0, 1.0]
++    bit_msk = [0.0, 1.0/256.0, 1.0/256.0, 1.0/256.0]
++    return [fract(v * s) * m for s, m in zip(bit_sh, bit_msk)]
++
++def unpack_float(c):
++    """Unpacks RGBA channels back to a float depth value per [S1]."""
++    return c[0] * 256.0**3 + c[1] * 256.0**2 + c[2] * 256.0 + c[3]
++
+ def ray_aabb_intersect(origin, direction, aabb_min, aabb_max):
+     """Slab method for ray-AABB intersection. Returns (t_min, t_max) or None."""
+@@ -96,93 +109,45 @@
+     return t_min, t_max
+ 
+-def pack_float(v):
+-    """Packs a float into RGBA channels for WebGL 1.0 FBO storage."""
+-    return (
+-        fract(v * 256.0 * 256.0 * 256.0),
+-        fract(v * 256.0 * 256.0) * 256.0,
+-        fract(v * 256.0) * 256.0,
+-        fract(v) * 256.0
+-    )
+-
+-def unpack_float(c):
+-    """Unpacks RGBA channels back to a float depth value."""
+-    return c[0] * 256.0**3 + c[1] * 256.0**2 + c[2] * 256.0 + c[3]
+-
+-def pass1_mesh_depth(meshes, fbo_depth):
+-    """Pass 1: Render mesh depth encoded as RGBA."""
+-    bind_fbo(fbo_depth)
+-    for mesh in meshes:
+-        render_depth_shader(mesh) # Outputs depth packed as RGBA
+-
+-def pass2_mesh_color(meshes, fbo_color):
+-    """Pass 2: Render mesh color."""
+-    bind_fbo(fbo_color)
+-    for mesh in meshes:
+-        render_color_shader(mesh) # Outputs RGB color
+-
+-def pass3_volume_back_depth(volume_box, fbo_vol_back_depth):
+-    """Pass 3: Render volume back face depth encoded as RGBA."""
+-    bind_fbo(fbo_vol_back_depth)
+-    render_cube_back_faces(volume_box) # Outputs back face depth packed as RGBA
+-
+-def pass4_volume_back_coords(volume_box, fbo_vol_back_coords):
+-    """Pass 4: Render volume back face coordinates."""
+-    bind_fbo(fbo_vol_back_coords)
+-    render_cube_back_faces_with_coords(volume_box) # Outputs 3D coords/depth
+-
+ def pass5_ray_casting(camera, volume_atlas, fbo_mesh_depth, fbo_mesh_color, 
+-                      fbo_vol_back_depth, fbo_vol_back_coords, screen_buffer, 
+-                      aabb_min, aabb_max, transfer_function):
+-    """Pass 5: Ray traversal and 3D surface integration."""
++                      fbo_vol_back_depth, screen_buffer, aabb_min, aabb_max, 
++                      transfer_function, num_steps):
++    """Pass 5: Ray traversal and 3D surface integration per [S1]."""
+     bind_fbo(screen_buffer)
+     
+-    # Get ray parameters for each pixel
+     ray_origin = camera.position
+     ray_direction = normalize(camera.direction)
+     
+-    # Determine interval using ray-AABB intersection
+     hit = ray_aabb_intersect(ray_origin, ray_direction, aabb_min, aabb_max)
+     if hit is None:
+-        return # Ray misses volume entirely
++        return
+     
+     t_start, t_end_raw = hit
+     
+-    # Back face depth from Pass 3 (unpacked)
++    # Unpack depth values from previous passes
+     t_back = unpack_float(read_texture(fbo_vol_back_depth, pixel_uv))
+-    
+-    # Mesh depth from Pass 1 (unpacked)
+     t_mesh = unpack_float(read_texture(fbo_mesh_depth, pixel_uv))
+     
+-    # Termination point is the closer of back face or mesh surface
++    # Termination point is the closer of the back face or mesh surface [S1, S2]
+     t_end = min(t_end_raw, t_back, t_mesh)
+     
+-    # Initialize accumulation
+     acc_color = vec3(0.0)
+     acc_alpha = 0.0
++    step_size = (t_end - t_start) / num_steps
++    current_t = t_start
+     
+-    # Number of steps S and step size s
+-    S = compute_num_steps(t_end - t_start)
+-    s = (t_end - t_start) / S
+-    ray_pos = ray_origin + ray_direction * t_start
+-    
+-    for i in range(S):
+-        # Check for 3D geometry intersection
+-        # Access depth from Pass 1 to see if mesh is closer than current ray_pos
+-        current_depth = unpack_float(read_texture(fbo_mesh_depth, pixel_uv))
+-        current_t = dot(ray_pos - ray_origin, ray_direction)
+-        
+-        if current_t >= current_depth:
+-            # Intersection with mesh
++    for i in range(num_steps):
++        # Check for 3D geometry intersection at current step [S1]
++        if current_t >= t_mesh:
+             mesh_color = read_texture(fbo_mesh_color, pixel_uv)
+-            # Blend mesh color with accumulated volume color
+-            acc_color = acc_color + (1.0 - acc_alpha) * mesh_color * 1.0
++            acc_color = acc_color + (1.0 - acc_alpha) * mesh_color
+             acc_alpha = 1.0
+             break
+         
+-        # Sample Volume
++        # Sample volume data from 2D texture atlas [S1]
++        ray_pos = ray_origin + ray_direction * current_t
+         sample_val = sample_volume_atlas(volume_atlas, ray_pos)
+         color, alpha = transfer_function(sample_val)
+         
+-        # Accumulate
++        # Front-to-back compositing [S1]
+         acc_color = acc_color + (1.0 - acc_alpha) * alpha * color
+         acc_alpha = acc_alpha + (1.0 - acc_alpha) * alpha
+@@ -191,7 +156,7 @@
+             break
+             
+-        ray_pos = ray_pos + ray_direction * s
++        current_t += step_size
+         
+-    # Composite over background
++    # Back-to-front blending composition for final output [S1]
+     final_color = acc_color + (1.0 - acc_alpha) * background_color
+     write_color(final_color)
+@@ -210,6 +175,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method requires $O(P \cdot S)$ operations for the final pass, where $P$ is the number of pixels and $S$ is the number of samples per ray. Additionally, there is a constant overhead of 5 rendering passes for geometry and volume box rasterization [S1].
+-*   **Memory Complexity:** Requires storage for multiple FBOs (depth and color for meshes, depth and coords for volume box) plus the 2D texture atlas for the volume. Memory usage is higher than single-pass methods due to the multiple FBOs [S1].
++*   **Time Complexity:** Not given in the sources. The method requires five rendering passes and multiple FBOs, which is a downside in terms of computational overhead [S1].
++*   **Memory Complexity:** Not given in the sources. Requires storage for multiple FBOs (depth and color for meshes, depth and coords for volume box) plus the 2D texture atlas for the volume [S1].
+ *   **Strengths:** Enables coexistence of 3D meshes and volumes in WebGL; handles occlusion correctly; works on devices without advanced WebGL extensions [S1].
+ *   **Limitations:** High memory usage due to multiple FBOs; reduced performance due to multiple passes; limited by WebGL 1.0 constraints (no 3D/float textures) [S1].

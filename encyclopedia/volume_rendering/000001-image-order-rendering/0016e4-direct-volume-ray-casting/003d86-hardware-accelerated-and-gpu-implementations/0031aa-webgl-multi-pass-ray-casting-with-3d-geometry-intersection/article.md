@@ -6,7 +6,7 @@ Also called: Five-pass ray-casting pipeline, VMesh Real-Time Rendering, WebGL vo
 This method enables interactive volume rendering of 3D volumetric datasets coexisting with 3D triangular meshes within the constraints of the WebGL API [S1, S2]. It solves the problem of rendering hybrid scenes (volumes + geometry) on web platforms that lack native 3D texture support and often lack robust depth texture support [S1]. Unlike standard ray-casting which only samples volume data, this method integrates 3D surface occlusion and color by using a multi-pass pipeline to pre-compute depth and color information for both the volume bounding box and the 3D meshes, allowing the final ray-casting pass to correctly handle intersections and alpha blending [S1, S2]. It is distinguished from single-pass WebGL ray-casting by its explicit handling of 3D geometry occlusion through depth buffering [S1].
 
 ## How it works
-The method implements a rendering pipeline consisting of five distinct passes (or four in the VMesh variant) to prepare data for the final ray-casting step. The core challenge addressed is the lack of 3D textures in WebGL, requiring volume data to be stored in a 2D texture atlas, and the lack of float textures, requiring depth values to be encoded into RGBA channels [S1].
+The method implements a rendering pipeline consisting of five distinct passes (or four in the VMesh variant) to prepare data for the final ray-casting step [S1, S2]. The core challenge addressed is the lack of 3D textures in WebGL, requiring volume data to be stored in a 2D texture atlas, and the lack of float textures, requiring depth values to be encoded into RGBA channels [S1].
 
 ### Inputs and Outputs
 *   **Inputs:**
@@ -29,12 +29,10 @@ The method implements a rendering pipeline consisting of five distinct passes (o
         \text{fract}(v) \cdot 256.0
         )
         $$
-        *(Note: The source provides a GLSL snippet using bit masks and shifts. The standard implementation involves extracting bits. The source code snippet provided is: `const vec4 bitSh = vec4(256.0*256.0*256.0, 256.0*256.0, 256.0, 1.0); const vec4 bitMsk = vec4(0.0, 1.0/256.0, 1.0/256.0, 1.0/256.0);` followed by operations. We define the unpacking logic below.)*
     *   **Unpacking Function:** In the final pass, the RGBA color is unpacked back to a float depth value [S1]:
         $$
         \text{unpackFloat}(c) = c.r \cdot 256.0^3 + c.g \cdot 256.0^2 + c.b \cdot 256.0 + c.a
         $$
-        *(Note: The source implies this reconstruction. The exact GLSL code in the source is truncated, but the logic of packing into 8-bit channels is explicit.)*
 *   **Frame Buffer Objects (FBOs):** Multiple FBOs are created to store intermediate results:
     1.  Depth of 3D meshes (Pass 1).
     2.  Color of 3D meshes (Pass 2).
@@ -42,28 +40,27 @@ The method implements a rendering pipeline consisting of five distinct passes (o
     4.  Coordinates/Depth of volume back face (Pass 4).
 
 ### Numbered Steps
-
 **Pass 1: Mesh Depth Pass**
-1.  Render all 3D triangular meshes into an FBO.
+1.  Render all 3D triangular meshes into an FBO [S1].
 2.  The fragment shader outputs the depth of each fragment encoded as an RGBA color value [S1].
 
 **Pass 2: Mesh Color Pass**
-1.  Render all 3D triangular meshes into a separate FBO.
+1.  Render all 3D triangular meshes into a separate FBO [S1].
 2.  Store the computed color (diffuse/specular/texture) of each fragment [S1].
-    *   *Note: In the VMesh variant [S2], this pass also generates normal and feature images.*
+    *   *Note: In the VMesh variant, this pass also generates normal and feature images [S2].*
 
 **Pass 3: Volume Back Face Depth Pass**
-1.  Render the back faces of the volume bounding box (the cube containing the volume data) into an FBO.
+1.  Render the back faces of the volume bounding box (the cube containing the volume data) into an FBO [S1].
 2.  Use the same shader as Pass 1 to encode the depth of the back faces into RGBA [S1].
 
 **Pass 4: Volume Back Face Coordinates Pass**
-1.  Render the back faces of the volume bounding box into a separate FBO.
+1.  Render the back faces of the volume bounding box into a separate FBO [S1].
 2.  Assign 3D texture coordinates to the vertices of the cube. During rasterization, these interpolated per-vertex colors represent the 3D texture coordinates (or depth/position) of the volume data [S1].
-    *   *Note: In the VMesh variant [S2], the start point is determined from the front face position (rasterized in a pass similar to Pass 1/2 for the front face), and the termination point is the closer of the back face position or the mesh surface position.*
+    *   *Note: In the VMesh variant, the start point is determined from the front face position (rasterized in a pass similar to Pass 1/2 for the front face), and the termination point is the closer of the back face position or the mesh surface position [S2].*
 
 **Pass 5: Ray Traversal and 3D Surface Integration**
 1.  **Initialization:** For each pixel, initialize the number of steps $S$, compute the ray position $\mathbf{ray\_pos}$, ray direction $\mathbf{ray\_direction}$, and maximum distance $D$ [S1].
-2.  **Interval Calculation:** Determine the valid raymarching interval.
+2.  **Interval Calculation:** Determine the valid raymarching interval [S1, S2].
     *   Start point: Front face of the volume bounding box [S1, S2].
     *   End point: The closer of the back face of the volume bounding box or the 3D mesh surface [S1, S2].
 3.  **Ray Casting Loop:** Iterate $i$ from 0 to $S$:
@@ -78,45 +75,79 @@ The method implements a rendering pipeline consisting of five distinct passes (o
     *   The final result is rendered to the screen buffer using back-to-front blending composition [S1].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pass 1: Render Mesh Depth
+def ray_aabb_intersect(origin, direction, aabb_min, aabb_max):
+    """Slab method for ray-AABB intersection. Returns (t_min, t_max) or None."""
+    t_min = -float('inf')
+    t_max = float('inf')
+    for i in range(3):
+        if direction[i] == 0:
+            if origin[i] < aabb_min[i] or origin[i] > aabb_max[i]:
+                return None
+        else:
+            t1 = (aabb_min[i] - origin[i]) / direction[i]
+            t2 = (aabb_max[i] - origin[i]) / direction[i]
+            if t1 > t2:
+                t1, t2 = t2, t1
+            t_min = max(t_min, t1)
+            t_max = min(t_max, t2)
+            if t_min > t_max:
+                return None
+    return t_min, t_max
+
+def pack_float(v):
+    """Packs a float into RGBA channels for WebGL 1.0 FBO storage."""
+    return (
+        fract(v * 256.0 * 256.0 * 256.0),
+        fract(v * 256.0 * 256.0) * 256.0,
+        fract(v * 256.0) * 256.0,
+        fract(v) * 256.0
+    )
+
+def unpack_float(c):
+    """Unpacks RGBA channels back to a float depth value."""
+    return c[0] * 256.0**3 + c[1] * 256.0**2 + c[2] * 256.0 + c[3]
+
 def pass1_mesh_depth(meshes, fbo_depth):
+    """Pass 1: Render mesh depth encoded as RGBA."""
     bind_fbo(fbo_depth)
     for mesh in meshes:
-        render_mesh_depth_shader(mesh) # Outputs depth packed as RGBA
+        render_depth_shader(mesh) # Outputs depth packed as RGBA
 
-# Pass 2: Render Mesh Color
 def pass2_mesh_color(meshes, fbo_color):
+    """Pass 2: Render mesh color."""
     bind_fbo(fbo_color)
     for mesh in meshes:
-        render_mesh_color_shader(mesh) # Outputs RGB color
+        render_color_shader(mesh) # Outputs RGB color
 
-# Pass 3: Render Volume Back Face Depth
 def pass3_volume_back_depth(volume_box, fbo_vol_back_depth):
+    """Pass 3: Render volume back face depth encoded as RGBA."""
     bind_fbo(fbo_vol_back_depth)
     render_cube_back_faces(volume_box) # Outputs back face depth packed as RGBA
 
-# Pass 4: Render Volume Back Face Coordinates
 def pass4_volume_back_coords(volume_box, fbo_vol_back_coords):
+    """Pass 4: Render volume back face coordinates."""
     bind_fbo(fbo_vol_back_coords)
     render_cube_back_faces_with_coords(volume_box) # Outputs 3D coords/depth
 
-# Pass 5: Ray Traversal
 def pass5_ray_casting(camera, volume_atlas, fbo_mesh_depth, fbo_mesh_color, 
-                      fbo_vol_back_depth, fbo_vol_back_coords, screen_buffer):
+                      fbo_vol_back_depth, fbo_vol_back_coords, screen_buffer, 
+                      aabb_min, aabb_max, transfer_function):
+    """Pass 5: Ray traversal and 3D surface integration."""
     bind_fbo(screen_buffer)
     
     # Get ray parameters for each pixel
     ray_origin = camera.position
-    ray_direction = compute_ray_direction(pixel_uv, camera)
+    ray_direction = normalize(camera.direction)
     
-    # Determine interval
-    # Front face position (not explicitly detailed as a separate pass in S1, 
-    # but implied as the start of the ray inside the box)
-    t_start = intersect_front_face(ray_origin, ray_direction, volume_box)
+    # Determine interval using ray-AABB intersection
+    hit = ray_aabb_intersect(ray_origin, ray_direction, aabb_min, aabb_max)
+    if hit is None:
+        return # Ray misses volume entirely
+    
+    t_start, t_end_raw = hit
     
     # Back face depth from Pass 3 (unpacked)
     t_back = unpack_float(read_texture(fbo_vol_back_depth, pixel_uv))
@@ -125,7 +156,7 @@ def pass5_ray_casting(camera, volume_atlas, fbo_mesh_depth, fbo_mesh_color,
     t_mesh = unpack_float(read_texture(fbo_mesh_depth, pixel_uv))
     
     # Termination point is the closer of back face or mesh surface
-    t_end = min(t_back, t_mesh)
+    t_end = min(t_end_raw, t_back, t_mesh)
     
     # Initialize accumulation
     acc_color = vec3(0.0)
@@ -134,28 +165,20 @@ def pass5_ray_casting(camera, volume_atlas, fbo_mesh_depth, fbo_mesh_color,
     # Number of steps S and step size s
     S = compute_num_steps(t_end - t_start)
     s = (t_end - t_start) / S
-    
     ray_pos = ray_origin + ray_direction * t_start
     
     for i in range(S):
         # Check for 3D geometry intersection
         # Access depth from Pass 1 to see if mesh is closer than current ray_pos
         current_depth = unpack_float(read_texture(fbo_mesh_depth, pixel_uv))
+        current_t = dot(ray_pos - ray_origin, ray_direction)
         
-        if current_depth < ray_pos.z: # Assuming Z-depth comparison in view space
+        if current_t >= current_depth:
             # Intersection with mesh
             mesh_color = read_texture(fbo_mesh_color, pixel_uv)
             # Blend mesh color with accumulated volume color
-            # Standard alpha blending: C_out = C_vol * alpha_vol + C_mesh * (1 - alpha_vol)
-            # However, S1 mentions "alpha-composite volume-rendered color with mesh color"
-            # and "back-to-front blending".
-            # If mesh is opaque and in front, it occludes.
-            # The exact blending logic for hybrid is complex; S1 states:
-            # "alpha-composite volume-rendered color with mesh color for final result"
-            # We assume the mesh color is composited over the volume accumulation
-            # if the mesh is hit.
-            acc_color = acc_color + (1.0 - acc_alpha) * mesh_color * 1.0 # Mesh is opaque
-            acc_alpha = 1.0 # Mesh occludes further volume
+            acc_color = acc_color + (1.0 - acc_alpha) * mesh_color * 1.0
+            acc_alpha = 1.0
             break
         
         # Sample Volume
@@ -188,12 +211,12 @@ def pass5_ray_casting(camera, volume_atlas, fbo_mesh_depth, fbo_mesh_color,
 *   **Precision:** Packing depth into RGBA introduces quantization errors. Unpacking must be precise to avoid artifacts in intersection detection [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** The method requires $O(P \cdot S)$ operations for the final pass, where $P$ is the number of pixels and $S$ is the number of samples per ray. Additionally, there is a constant overhead of 5 rendering passes for geometry and volume box rasterization.
+*   **Time Complexity:** The method requires $O(P \cdot S)$ operations for the final pass, where $P$ is the number of pixels and $S$ is the number of samples per ray. Additionally, there is a constant overhead of 5 rendering passes for geometry and volume box rasterization [S1].
 *   **Memory Complexity:** Requires storage for multiple FBOs (depth and color for meshes, depth and coords for volume box) plus the 2D texture atlas for the volume. Memory usage is higher than single-pass methods due to the multiple FBOs [S1].
 *   **Strengths:** Enables coexistence of 3D meshes and volumes in WebGL; handles occlusion correctly; works on devices without advanced WebGL extensions [S1].
 *   **Limitations:** High memory usage due to multiple FBOs; reduced performance due to multiple passes; limited by WebGL 1.0 constraints (no 3D/float textures) [S1].
-*   **When to use:** When rendering hybrid volume/mesh scenes on web platforms with limited WebGL support.
-*   **When not to use:** When high performance is critical and the platform supports native 3D/float textures or more advanced ray-tracing APIs.
+*   **When to use:** When rendering hybrid volume/mesh scenes on web platforms with limited WebGL support [S1].
+*   **When not to use:** When high performance is critical and the platform supports native 3D/float textures or more advanced ray-tracing APIs [S1].
 
 ## Background
 This method was introduced by Arbelaiz, Moreno, and Kabongo in 2016 [S1]. It extends previous WebGL ray-casting efforts by Congote et al. [CSK* 11], Mobeen et al. [MF12], and Noguera and Jiménez [NJ12] by exploring the coexistence of 3D triangular meshes along volume data within the constraints of the Web platform [S1]. The work addresses challenges such as the lack of 3D and depth textures in WebGL, which are common in desktop volume rendering techniques [S1]. A related implementation, VMesh, uses a four-pass approach for real-time rendering of hybrid volume-mesh representations [S2].

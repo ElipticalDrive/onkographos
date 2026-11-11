@@ -25,11 +25,11 @@ Raster Occlusion Culling is a GPU-driven visibility determination technique that
 
 **Numbered Steps:**
 
-1.  **Task Shader: Block-wise Stream Compaction**
+1.  **Task Shader: Block-wise Stream Compaction** [S3]
     The task shader analyzes a localized group of 256 blocks [S3][S4, unofficial].
     1.  For each block in the group, sample the min-max texture at the block's location [S3][S4, unofficial].
     2.  Determine occupancy: if the isovalue lies between the sampled minimum and maximum values, the block is marked as occupied [S3][S4, unofficial].
-    3.  Generate a dense list of occupied blocks. The task shader creates mesh shader workgroups that process sets of 32 occupied blocks [S3][S4, unofficial].
+    3.  Generate a dense list of occupied blocks [S3]. The task shader creates mesh shader workgroups that process sets of 32 occupied blocks [S3][S4, unofficial].
     4.  Populate the `block_occupancy_index` array with the indices of occupied blocks [S4, unofficial].
     5.  Dispatch mesh shader workgroups. Each workgroup operates on a fixed length of 32 blocks (except possibly the final workgroup, which handles 1–32 blocks) [S3][S4, unofficial]. No list offset or length buffers are required in the interface block because of the fixed-length operation [S3][S4, unofficial].
 
@@ -39,7 +39,7 @@ Raster Occlusion Culling is a GPU-driven visibility determination technique that
     2.  This reduces the geometry from 6 triangles (3 visible cube faces, 224 vertices for 32 blocks) to 2 triangles (1 quad, 128 vertices for 32 blocks) [S3][S4, unofficial].
     3.  Write the vertex and index buffers for the quad proxies [S3][S4, unofficial].
 
-3.  **Rasterization and Visibility Buffer Update**
+3.  **Rasterization and Visibility Buffer Update** [S4, unofficial]
     1.  Rasterize the proxy geometry [S3][S4, unofficial].
     2.  Perform standard rendering with `glDepthFunc(GL_LEQUAL)` to discard fragments hidden by closer fragments [S2, unofficial].
     3.  Leverage the **Representative Fragment Test** extension [KTB*18], which allows the rasterizer to terminate early-depth testing earlier if at least one fragment shader instance was invoked [S3][S4, unofficial]. Rasterizing fewer primitives (quads vs. cube faces) increases the likelihood of this early termination [S3][S4, unofficial].
@@ -58,7 +58,7 @@ Raster Occlusion Culling is a GPU-driven visibility determination technique that
 -   **Min-Max Texture Resolution:** $\frac{X}{U} \times \frac{Y}{V} \times \frac{Z}{W}$ [S4, unofficial].
 
 **Edge Cases and Pitfalls:**
--   **Multi-view Rendering:** When using multi-view rendering (per-eye), generating one quad per eye is straightforward. If using three cube faces, one must account for rendering more than 3 sides if the block is located between the viewer's eyes on any cardinal axis [S3][S4, unofficial].
+-   **Multi-view Rendering:** When using multi-view rendering (per-eye), generating one quad per eye is straightforward [S3]. If using three cube faces, one must account for rendering more than 3 sides if the block is located between the viewer's eyes on any cardinal axis [S3][S4, unofficial].
 -   **Conservatism:** The method is conservative, not probabilistic, ensuring no occupied blocks are incorrectly culled [S4, unofficial].
 -   **Precision:** The min-max texture lookup must be precise enough to distinguish blocks where the isovalue is near the min or max values [S3][S4, unofficial].
 
@@ -88,10 +88,8 @@ def sample_min_max_texture(coord, min_max_texture):
     return min_max_texture[coord]
 
 def create_quad_proxy(block_coord, block_dims, view_proj_matrix):
-    # Generates a single quad (2 triangles, 6 vertices) representing the block's
-    # bounding box projected into screen space with minimal z-coordinate.
-    # (Standard projection math omitted; returns vertex positions and indices)
-    pass
+    # Sources do not provide projection math; standard view-projection multiplication applies [G]
+    return []
 
 def run_raster_occlusion_culling(volume_dims, block_dims, isovalue, min_max_texture, view_proj_matrix):
     # Calculate total blocks
@@ -111,14 +109,11 @@ def run_raster_occlusion_culling(volume_dims, block_dims, isovalue, min_max_text
             task_struct.num_occupied_blocks += 1
 
     # 2. Mesh Shader: Proxy Geometry Creation
-    # Dispatch mesh shader workgroups. Each workgroup handles 32 blocks.
     quad_list = []
-    occupied_count = 0
     for i in range(256):
         if task_struct.block_occupancy_index[i] == 1:
             coord = get_block_coord(i, block_dims)
             quad_list.append(create_quad_proxy(coord, block_dims, view_proj_matrix))
-            occupied_count += 1
 
     # 3. Rasterization & Visibility Buffer Update
     # Rasterize proxy geometry with glDepthFunc(GL_LEQUAL)
@@ -149,13 +144,13 @@ Determines if a voxel block is visible by rasterizing its bounding box and check
 A fully GPU-driven technique that reduces rasterization overhead by performing visibility tests on a coarse hierarchy of group nodes rather than individual leaf objects, refining results via ray traversal to the leaf level. It distinguishes itself from standard Raster Occlusion Culling by replacing the exhaustive rasterization of all leaf proxies with a hierarchical culling pass, and from Iterative Raster Occlusion Culling by utilizing a hybrid raster-ray approach for full hierarchy descent. Choose this variant for scenes with deep hierarchies to minimize rasterization costs.
 
 ### Hierarchical Visibility Mask
-A visibility culling technique where triangles are marked as visible and forwarded to graphics hardware rather than being rendered by the CPU, allowing the GPU to determine actual visibility and handle occlusion [S5, book]. It projects the polygon onto the top meta-tile of a hierarchical structure and recursively checks only those subtiles in which the polygon might be visible, leading to a logarithmic search [S5, book]. If a meta-cell size is approximately the size of a single pixel, it stops recursion and forwards a single point with an associated normal to the graphics hardware [S5, book]. The normal is estimated by calculating the gradient of the field [S5, book]. It differs from Greene's implementation by not rendering the visible portion on the CPU; instead, it relies on the graphics accelerator to determine visible pieces and render them correctly [S5, book]. Choose this variant when CPU rendering overhead must be avoided.
+A visibility culling technique where triangles are marked as visible and forwarded to graphics hardware rather than being rendered by the CPU, allowing the GPU to determine actual visibility and handle occlusion [S5, book]. It projects the polygon onto the top meta-tile of a hierarchical structure and recursively checks only those subtiles in which the polygon might be visible, leading to a logarithmic search [S5, book]. If a meta-cell size is approximately the size of a single pixel, it stops recursion and forwards a single point with an associated normal to the graphics hardware [S5, book]. The normal is estimated by calculating the gradient of the field [S5, book]. It differs from Greene's implementation by not rendering the visible portion on the CPU; instead, it relies on the graphics accelerator to determine visible pieces and render them correctly [S5, book]. Choose this variant when CPU rendering overhead must be avoided [S5, book].
 
 ### Cluster Visibility Buffer Culling
-A culling technique using a visibility buffer to prune non-visible clusters, performing back-face and occlusion culling without requiring a hierarchical Z-buffer or storing cluster bounds/normal cones [S6]. It avoids full cell rasterisation of clusters that are fully occluded or backfacing by storing visibility bits per cluster [S6]. Choose this variant when working with clustered grid cell data structures and deferred splatting pipelines.
+A culling technique using a visibility buffer to prune non-visible clusters, performing back-face and occlusion culling without requiring a hierarchical Z-buffer or storing cluster bounds/normal cones [S6]. It avoids full cell rasterisation of clusters that are fully occluded or backfacing by storing visibility bits per cluster [S6]. Choose this variant when working with clustered grid cell data structures and deferred splatting pipelines [S6].
 
 ## Operating characteristics
--   **Time Complexity:** The culling pass is dominated by the rasterization of proxy geometry and the subsequent stream compaction. The task shader processes blocks in groups of 256, and the mesh shader processes 32 blocks per workgroup [S4, unofficial]. The compute shader performs bit compactification, which is efficient for dense lists [S4, unofficial].
+-   **Time Complexity:** The culling pass is dominated by the rasterization of proxy geometry and the subsequent stream compaction [S4, unofficial]. The task shader processes blocks in groups of 256, and the mesh shader processes 32 blocks per workgroup [S4, unofficial]. The compute shader performs bit compactification, which is efficient for dense lists [S4, unofficial].
 -   **Memory Complexity:** Requires storage for the min-max texture ($\frac{X}{U} \times \frac{Y}{V} \times \frac{Z}{W}$ 2-channel volume texture) [S4, unofficial], the visibility buffer, and the PVS lists [S3][S4, unofficial].
 -   **Measured Performance:** Outperforms methods that process depth textures of previously established occluder representations, such as hierarchical occlusion maps [ZMHH97] and iterative depth warping [LKE18] [S1, S3]. It is effective for scenes with high depth complexity where the fragment shader is heavy, as it reduces the number of task shader workgroups launched [S3][S4, unofficial].
 -   **Scaling:** Not scalable for very high polygon counts in general scenes, but effective for volume data because the fragment shader cost dominates [S2, unofficial]. The method is conservative, ensuring no occupied blocks are incorrectly culled, unlike probabilistic methods [S4, unofficial].

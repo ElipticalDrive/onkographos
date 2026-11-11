@@ -1,0 +1,175 @@
+# VoxelBlockyTypeLibrary with Attributes
+
+Also called: Minecraft-like block states, VoxelBlockyType
+
+## Overview
+`VoxelBlockyTypeLibrary` is a model management system for blocky voxel terrains that organizes meshes by logical "block types" with configurable state attributes, rather than storing individual model references directly. It solves the problem of managing complex block behaviors (e.g., orientation, powered state, connections) by automatically generating unique numerical IDs for every combination of attribute values, similar to Minecraft's block state system. It differs from the standard `VoxelBlockyLibrary` by decoupling model identity from manual ID assignment, using a combinatorial attribute system instead.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A list of `VoxelBlockyType` definitions. Each type specifies a base model and a set of `VoxelBlockyAttribute` definitions.
+*   **Output:** A library containing a mapping from type/attribute combinations to unique numerical model IDs. The library provides functions to resolve these IDs at runtime.
+
+**Data Structures:**
+*   **VoxelBlockyType:** Defines a logical block. Contains:
+    *   `name`: StringName identifier for the type (e.g., `"button"`).
+    *   `attributes`: List of `VoxelBlockyAttribute` objects.
+    *   `models`: Internal list of generated mesh instances for all valid state combinations.
+*   **VoxelBlockyAttribute:** Represents a state variable.
+    *   `name`: StringName identifier (e.g., `"direction"`).
+    *   `values`: Enum or integer range (0–255) representing possible states.
+    *   `default_value`: The default state index.
+*   **Model ID Map:** An internal hash map or array mapping the canonical string identifier `<type_name>[attr1=val,attr2=val,...]` to a unique integer ID. IDs are unique within the library instance but not portable across different worlds or library instances.
+
+**Numbered Steps:**
+
+1.  **Define Block Types:** Create `VoxelBlockyType` entries. Assign a name and a list of attributes.
+    *   *Constraint:* Types should have few attributes. Each attribute value is an integer between 0 and 255.
+2.  **Assign Attribute Values:** For each attribute, define its possible integer values.
+    *   *Built-in Rotations:* Use `VoxelBlockyAttributeAxis`, `VoxelBlockyAttributeDirection`, or `VoxelBlockyAttributeRotation` for common geometric states. These attributes have predefined default rotations. Models are authored for the default rotation; the system generates rotated variants automatically.
+3.  **Generate Variants:** The system computes the Cartesian product of all attribute values for each type.
+    *   For each combination, a unique model instance is created (or referenced).
+    *   If built-in rotation attributes are used, pre-rotated models are generated for all specified rotation axes/directions.
+    *   *Pitfall:* Excluding unnecessary rotations (e.g., vertical for flat blocks) reduces memory cost, as `VoxelBlockyAttributeRotation` generates the highest number of variants.
+4.  **Assign Numerical IDs:** The system automatically assigns a unique integer ID to each generated variant.
+    *   The ID is derived from the combination of type name and attribute values.
+    *   Renaming a type or attribute changes the canonical identifier, effectively creating a new voxel type with a new ID. Existing saved worlds using old IDs will not recognize the new variants.
+5.  **Runtime Lookup:** Use library functions to resolve model IDs from attribute values.
+    *   Cache resolved IDs for performance if accessed frequently.
+    *   Use `VoxelTool` to set the resolved ID into the voxel data.
+
+**Formulas:**
+*   **Canonical Identifier:**
+    $$ ID_{key} = \text{hash}(\text{type\_name}, \{ \text{attr}_1 = \text{val}_1, \dots, \text{attr}_n = \text{val}_n \}) $$
+    Where $\text{val}_i \in [0, 255]$.
+*   **Total Variants per Type:**
+    $$ N_{variants} = \prod_{i=1}^{n} V_i $$
+    Where $n$ is the number of attributes and $V_i$ is the number of possible values for attribute $i$.
+    *   *Example:* Redstone dust with 1,296 variants exceeds practical limits for a simple list-of-variants approach.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization and Type Definition
+class VoxelBlockyTypeLibrary:
+    def __init__(self):
+        self.types = {}  # Map: StringName -> VoxelBlockyType
+        self.id_map = {} # Map: CanonicalString -> int
+
+    def add_type(self, type_name: StringName, attributes: List[VoxelBlockyAttribute]):
+        """
+        Register a block type. Generates all variant IDs.
+        """
+        # 1. Generate all combinations of attribute values
+        combinations = self._get_attribute_combinations(attributes)
+        
+        # 2. Assign IDs and generate models
+        for combo in combinations:
+            # Construct canonical key: type_name[attr1=val1, attr2=val2]
+            key_parts = [f"{attr.name}={val}" for attr, val in zip(attributes, combo)]
+            canonical_key = f"{type_name}[{','.join(key_parts)}]"
+            
+            # Assign unique ID (implementation detail: sequential or hash-based)
+            model_id = self._assign_unique_id(canonical_key)
+            
+            # Generate or reference the model for this state
+            # If rotation attributes are present, apply rotation to base model
+            model = self._generate_model_for_state(type_name, attributes, combo)
+            
+            # Store mapping
+            self.id_map[canonical_key] = model_id
+            # Store model reference internally for meshing
+            self._store_model(model_id, model)
+
+    def get_model_index_with_attributes(self, type_name: StringName, attrs: Dict[str, int]) -> int:
+        """
+        Get the numerical model ID for a specific type and attribute values.
+        Uses StringName (&) for type name, but standard strings for dict keys.
+        """
+        # Construct canonical key
+        key_parts = []
+        for attr_name, val in attrs.items():
+            key_parts.append(f"{attr_name}={val}")
+        canonical_key = f"{type_name}[{','.join(key_parts)}]"
+        
+        return self.id_map.get(canonical_key, -1) # -1 or error if not found
+
+    def get_model_index_single_attribute(self, type_name: StringName, attr_val: int) -> int:
+        """
+        Shortcut for types with exactly one attribute.
+        """
+        # Assumes single attribute name is known or fixed for this type
+        # Implementation depends on internal type structure
+        # This is a performance optimization
+        pass
+
+    def get_model_index_default(self, type_name: StringName) -> int:
+        """
+        Get the model ID for a type with no attributes, or its default state.
+        """
+        # Find the variant where all attributes are at their default values
+        # Or find the variant with no attributes if n=0
+        pass
+
+    def _get_attribute_combinations(self, attributes: List[VoxelBlockyAttribute]) -> List[List[int]]:
+        """
+        Generate Cartesian product of attribute values.
+        """
+        # Recursive or iterative product generation
+        # Values are integers 0-255
+        pass
+
+    def _generate_model_for_state(self, type_name, attributes, combo):
+        """
+        Generate the mesh for a specific state.
+        Handles rotation attributes by transforming the base model.
+        """
+        # If rotation attributes are in combo, apply rotation matrix to base mesh
+        # Otherwise, return base mesh or specific variant mesh
+        pass
+
+    def _assign_unique_id(self, canonical_key: str) -> int:
+        """
+        Assign a unique integer ID.
+        IDs are unique within the library but not portable across worlds.
+        """
+        # Implementation: maintain a counter or hash map
+        pass
+```
+
+**Parameters:**
+*   **Attribute Values:** Integers between 0 and 255.
+*   **Attribute Count:** Should be very low. High counts lead to exponential growth in variants.
+*   **Rotation Attributes:** `VoxelBlockyAttributeAxis`, `VoxelBlockyAttributeDirection`, `VoxelBlockyAttributeRotation`. Default rotations are assumed for base models.
+
+**Edge Cases and Pitfalls:**
+*   **Complex States:** If a block requires complex states (objects, lists), this system fails. Fallback to voxel metadata and actual nodes (entities) is required.
+*   **Large Variant Lists:** Many attributes or states lead to a very large list of variants (e.g., redstone dust has 1,296 variants). In such cases, conditional combination of models is preferred over a list of variants.
+*   **Memory Cost:** `VoxelBlockyAttributeRotation` has the highest number of variants and incurs significant memory cost for pre-rotated models. Exclude unnecessary rotations (e.g., vertical) to reduce cost.
+*   **ID Portability:** Numerical IDs are not portable across worlds. Renaming types or attributes changes IDs, breaking compatibility with saved worlds.
+
+## Subtopics
+
+### [Three-Valued Opacity Classification for Meshing](4414-three-valued-opacity-classification-for-meshing.md)
+A method for classifying voxel opacity to optimize mesh generation. It sets apart by focusing on visibility culling logic rather than state management. Choose it when optimizing mesh output size based on transparency.
+
+### [Voxel Block Shape & Culling Configuration](2176-voxel-block-shape-culling-configuration.md)
+The parent trait-based configuration system. It sets apart by defining the geometry and culling rules per block type. Choose it as the foundation for configuring how `VoxelBlockyTypeLibrary` blocks are rendered and culled.
+
+## Operating characteristics
+*   **Time Complexity:** Lookup is $O(1)$ after caching, or $O(k)$ where $k$ is the number of attributes for string construction. Generation of variants is $O(N_{variants})$, which can be large.
+*   **Memory Complexity:** $O(N_{types} \times N_{variants})$. Memory usage scales with the number of attribute combinations. Pre-rotated models increase memory footprint significantly.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales poorly with high attribute counts or high value ranges per attribute. Redstone dust example (1,296 variants) illustrates the limit.
+*   **Strengths:** Automatic ID management, intuitive state representation (Minecraft-like), built-in rotation support.
+*   **Limitations:** Not suitable for complex states (objects/lists). High memory cost for rotations. Non-portable IDs.
+*   **When to use:** Simple to moderately complex block states (orientation, on/off, basic connections).
+*   **When not to use:** Blocks requiring complex dynamic states, or when memory is extremely constrained and rotations are not needed.
+
+## Background
+Originating from the Voxel Tools library for Godot, this system was inspired by Minecraft's block state system (specifically ForgeModLoader documentation). It was introduced as an alternative to `VoxelBlockyLibrary` to better handle the complexity of block states in voxel games. The system automates model generation and ID assignment, reducing manual configuration effort.
+
+## Sources
+[S1] Blocky terrains - Voxel Tools documentation, https://voxel-tools.readthedocs.io/en/latest/blocky_terrain/, fetched 2026-10-27

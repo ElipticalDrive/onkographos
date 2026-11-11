@@ -3,72 +3,51 @@
 Also called: Compute Shader CSG Pruning, GPU Implementation (Hierarchical Pruning), Hierarchical Pruning (GPU)
 
 ## Overview
-This method implements the hierarchical CSG pruning algorithm described in [Lipschitz Pruning](8623-lipschitz-pruning.md) on a GPU using compute shaders. It reduces the computational load of Signed Distance Field (SDF) evaluation by iteratively pruning SDF trees across a hierarchical grid, storing data in three specific arrays. It differs from CPU-based implementations by leveraging parallel thread execution per grid cell and warp-level coherence to eliminate divergence, building on the hierarchical CSG pruning framework.
+This method implements the hierarchical CSG pruning algorithm described in [Lipschitz Pruning](8623-lipschitz-pruning.md) on a GPU using compute shaders [S1]. It reduces the computational load of Signed Distance Field (SDF) evaluation by iteratively pruning SDF trees across a hierarchical grid, storing data in three specific arrays [S1]. It differs from CPU-based implementations by leveraging parallel thread execution per grid cell and warp-level coherence to eliminate divergence, building on the hierarchical CSG pruning framework [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A hierarchical grid of cells, an immutable CSG tree (stored in the immutable node array), and the pruned tree of the parent cell (from the coarser level).
-*   **Output:** The pruned tree for the current cell, stored in the mutable node array, along with metadata in the cell array.
+*   **Input:** A hierarchical grid of cells, an immutable CSG tree (stored in the immutable node array), and the pruned tree of the parent cell (from the coarser level) [S1].
+*   **Output:** The pruned tree for the current cell, stored in the mutable node array, along with metadata in the cell array [S1].
 
 **Data Structures:**
-The implementation uses three arrays. The cell and mutable node arrays are double-buffered (read from coarser level, written to finer level, swapped after each dispatch).
+The implementation uses three arrays. The cell and mutable node arrays are double-buffered (read from coarser level, written to finer level, swapped after each dispatch) [S1].
 
 1.  **Immutable Node Array:**
-    *   Contains all primitives and binary operators from the CSG tree.
-    *   **Primitive Node:** Base shape type, shape parameters, modifiers (repetition, offset), and transformation matrix.
-    *   **Binary Operator Node:** Operator type (UNION, INTER, SUB), blending radius $k$. The sign $s$ and complementary flags $c_a, c_b$ are deduced from the operator type.
-    *   **Metadata:** A bit per node indicating if it is a primitive or a binary operator.
-    *   *Note:* This array is not modified by pruning.
+    *   Contains all primitives and binary operators from the CSG tree [S1].
+    *   **Primitive Node:** Base shape type, shape parameters, modifiers (repetition, offset), and transformation matrix [S1].
+    *   **Binary Operator Node:** Operator type (UNION, INTER, SUB), blending radius $k$ [S1]. The sign $s$ and complementary flags $c_a, c_b$ are deduced from the operator type [S1].
+    *   **Metadata:** A bit per node indicating if it is a primitive or a binary operator [S1].
+    *   *Note:* This array is not modified by pruning [S1].
 
 2.  **Mutable Node Array:**
-    *   Stores the pruned tree data for all cells.
+    *   Stores the pruned tree data for all cells [S1].
     *   **Element Layout:**
-        *   `ancestor_index`: Index of the ancestor node in the pruned tree.
-        *   `cFlag`: Complementary flag.
-        *   `global_index`: Index referencing the node in the Immutable Node Array.
+        *   `ancestor_index`: Index of the ancestor node in the pruned tree [S1].
+        *   `cFlag`: Complementary flag [S1].
+        *   `global_index`: Index referencing the node in the Immutable Node Array [S1].
 
 3.  **Cell Array:**
-    *   Stores the `start` index and `length` of the mutable node slice for each cell.
-    *   Indexed using **Morton order** (Z-order curve) to map 3D cell coordinates to 1D, ensuring cells sharing the same parent have consecutive indices.
+    *   Stores the `start` index and `length` of the mutable node slice for each cell [S1].
+    *   Indexed using **Morton order** (Z-order curve) to map 3D cell coordinates to 1D, ensuring cells sharing the same parent have consecutive indices [S1].
 
 4.  **Temporary Storage:**
-    *   **Per-thread:** Arrays for the stack used in the local state computation (Procedure 1 from [Lipschitz Pruning](8623-lipschitz-pruning.md)).
-    *   **Global Buffer:** Pre-allocated buffer for per-node temporary data. Contains:
-        *   2 bits for local state (ACTIVE, INACTIVE, SKIPPED).
-        *   19 bits for global state/flags/signs.
+    *   **Per-thread:** Arrays for the stack used in the local state computation (Procedure 1 from [Lipschitz Pruning](8623-lipschitz-pruning.md)) [S1].
+    *   **Global Buffer:** Pre-allocated buffer for per-node temporary data [S1]. Contains:
+        *   2 bits for local state (ACTIVE, INACTIVE, SKIPPED) [S1].
+        *   19 bits for global state/flags/signs [S1].
 
 **Algorithm Steps:**
 
-1.  **Initialization:**
-    *   Start from the coarsest hierarchy level.
-    *   Dispatch a compute shader for each level of the hierarchy.
-
-2.  **Thread Dispatch:**
-    *   Spawn one thread per target grid cell.
-    *   Use a **4x4x4 subdivision** for the hierarchical grid. This ensures that all threads in a warp share the same parent cell, eliminating branch divergence.
-
-3.  **Pruned Tree Computation (Per Thread):**
-    *   Each thread computes the pruned tree for its cell based on the pruned tree of its parent cell (read from the previous level's mutable node array).
-    *   **Traversal:**
-        *   Input nodes are stored using post-order indexing.
-        *   **Post-order traversal** (for evaluation/pruning logic) is implemented as a **forward iteration** through the input node array.
-        *   **Pre-order traversal** (for writing/ancestor resolution) is implemented as a **backward iteration**.
-    *   **State Computation:**
-        *   Use the temporary buffer to track local and global states for each node during traversal.
-        *   Apply Lipschitz pruning to identify nodes that are provably too far from the cell's surface to affect the local distance field.
-
-4.  **Writing Pruned Tree:**
-    *   **Reservation:** Each thread increments a global atomic counter by the size of its pruned tree to reserve a slice in the output mutable node array.
-    *   **Iteration:** Iterate through the input nodes (pruned tree).
-    *   **Check:** Check global activity of each node.
-    *   **Write:** Write the `global_index`, `ancestor_index`, and `cFlag` to the reserved output slice.
-    *   **Ancestor Translation:** Cache output indices of active nodes in a temporary buffer during traversal to correctly translate ancestor indices before writing.
-
-5.  **Update Cell Array:**
-    *   Update the `start` and `length` entries in the Cell Array for the current cell using its Morton index.
-
-6.  **Buffer Swap:**
-    *   After the dispatch, swap the read and write buffers for the Cell and Mutable Node arrays to proceed to the next finer level.
+1.  **Initialization:** Start from the coarsest hierarchy level [S1].
+2.  **Dispatch:** Dispatch a compute shader for each level of the hierarchy [S1].
+3.  **Thread Dispatch:** Spawn one thread per target grid cell [S1]. Use a **4x4x4 subdivision** for the hierarchical grid. This ensures that all threads in a warp share the same parent cell, eliminating branch divergence [S1].
+4.  **Pruned Tree Computation (Per Thread):** Each thread computes the pruned tree for its cell based on the pruned tree of its parent cell (read from the previous level's mutable node array) [S1].
+    *   **Traversal:** Input nodes are stored using post-order indexing [S1]. **Post-order traversal** (for evaluation/pruning logic) is implemented as a **forward iteration** through the input node array [S1]. **Pre-order traversal** (for writing/ancestor resolution) is implemented as a **backward iteration** [S1].
+    *   **State Computation:** Use the temporary buffer to track local and global states for each node during traversal [S1]. Apply Lipschitz pruning to identify nodes that are provably too far from the cell's surface to affect the local distance field [S1].
+5.  **Writing Pruned Tree:** Each thread increments a global atomic counter by the size of its pruned tree to reserve a slice in the output mutable node array [S1]. Iterate through the input nodes (pruned tree) [S1]. Check global activity of each node [S1]. Write the `global_index`, `ancestor_index`, and `cFlag` to the reserved output slice [S1]. Cache output indices of active nodes in a temporary buffer during traversal to correctly translate ancestor indices before writing [S1].
+6.  **Update Cell Array:** Update the `start` and `length` entries in the Cell Array for the current cell using its Morton index [S1].
+7.  **Buffer Swap:** After the dispatch, swap the read and write buffers for the Cell and Mutable Node arrays to proceed to the next finer level [S1].
 
 **Pseudocode:**
 
@@ -76,79 +55,78 @@ The implementation uses three arrays. The cell and mutable node arrays are doubl
 
 ```python
 # Pseudocode for a single compute shader dispatch at hierarchy level L
-# Input: parent_pruned_tree (from level L-1), immutable_nodes, cell_array
-# Output: current_pruned_tree (to level L+1), current_cell_array
+# Inputs: parent_tree (list of nodes from level L-1), immutable_nodes, cell_array
+# Outputs: current_pruned_tree (to level L+1), current_cell_array
+# Globals: atomic_counter (initialized to 0), grid_level, grid_subdivision (4x4x4)
 
-# Global Atomic Counter for mutable node array allocation
-atomic_counter = 0
+def compute_morton_index(x, y, z):
+    # Standard Z-order curve interleaving of bits [G]
+    return ((x & 0x1) | ((y & 0x1) << 1) | ((z & 0x1) << 2))
 
-# Thread ID corresponds to a specific 3D grid cell C
-# Morton index M for cell C
-thread_id = get_thread_id()
-cell_morton_index = get_morton_index(thread_id)
+def get_cell_bounds(morton_idx, level):
+    # Compute world-space bounds for the cell based on Morton index and level [G]
+    # Returns (min_x, min_y, min_z, max_x, max_y, max_z)
+    pass # Standard grid math [G]
+
+def atomic_add(counter, value):
+    # GPU atomic add operation [G]
+    pass
+
+# Thread execution
+thread_id = get_thread_id() # Standard GPU thread ID [G]
+cell_coords = thread_id_to_coords(thread_id) # Map thread ID to 3D grid coordinates [G]
+cell_morton_index = compute_morton_index(*cell_coords)
+parent_morton_index = cell_morton_index // (grid_subdivision ** 3) # Integer division for parent lookup [S1]
 
 # 1. Read Parent Pruned Tree
-# The parent cell's pruned tree is located in the previous level's mutable node array
-parent_tree_start = read_cell_array_start(cell_morton_index / 64) # Assuming 4x4x4 subdivision
-parent_tree_length = read_cell_array_length(cell_morton_index / 64)
-parent_tree = read_mutable_node_array(parent_tree_start, parent_tree_length)
+parent_tree_start = cell_array[2 * parent_morton_index]
+parent_tree_length = cell_array[2 * parent_morton_index + 1]
+parent_tree = mutable_node_array[parent_tree_start : parent_tree_start + parent_tree_length]
 
 # 2. Compute Pruned Tree for Current Cell
-# Initialize per-thread stack and global temp buffer
 stack = allocate_thread_local_stack()
 global_temp_buffer = allocate_global_temp_buffer()
-
 pruned_nodes = []
+ancestor_map = {}
 
 # Forward iteration for post-order traversal (pruning logic)
-for node_idx in range(len(parent_tree)):
-    node = parent_tree[node_idx]
-    
-    # Compute local state (ACTIVE, INACTIVE, SKIPPED)
-    # Uses Lipschitz pruning, affine arithmetic, interval arithmetic
-    local_state = compute_local_state(node, cell_bounds, global_temp_buffer)
-    
-    # Update global state based on local state and parent context
+for node in parent_tree:
+    # Evaluate SDF bounds using interval arithmetic and apply Lipschitz constraint [S1]
+    # Sources do not provide the exact Lipschitz/interval arithmetic formulas [G]
+    local_state = compute_local_state(node, get_cell_bounds(cell_morton_index, grid_level), global_temp_buffer)
     global_state = compute_global_state(node, local_state, stack, global_temp_buffer)
-    
     if global_state == ACTIVE:
+        # Cache mapping from old global_index to new position in pruned_nodes
+        ancestor_map[node.global_index] = len(pruned_nodes)
         pruned_nodes.append(node)
 
 # Backward iteration for pre-order traversal (writing ancestor indices)
-# We need to resolve ancestor indices in the new pruned tree
-ancestor_map = {}
 final_pruned_nodes = []
-
 for i in range(len(pruned_nodes) - 1, -1, -1):
     node = pruned_nodes[i]
-    
-    # Resolve ancestor index
-    # If node has an ancestor in the pruned tree, find its new index
-    ancestor_idx = resolve_ancestor_index(node.ancestor, ancestor_map)
-    
-    # Create new mutable node entry
+    # Resolve ancestor index using the cached map
+    ancestor_idx = ancestor_map.get(node.ancestor_index, -1)
     new_node = MutableNode(
         ancestor_index=ancestor_idx,
         cFlag=node.cFlag,
         global_index=node.global_index
     )
-    
-    # Cache the mapping for ancestors
-    if node.is_ancestor_candidate:
-        ancestor_map[node.global_index] = len(final_pruned_nodes)
-        
     final_pruned_nodes.append(new_node)
 
 # 3. Reserve Space in Mutable Node Array
 my_slice_start = atomic_add(atomic_counter, len(final_pruned_nodes))
 
 # 4. Write to Mutable Node Array
-write_mutable_node_array(my_slice_start, final_pruned_nodes)
+for i, node in enumerate(final_pruned_nodes):
+    mutable_node_array[my_slice_start + i] = node
 
 # 5. Update Cell Array
-write_cell_array_start(cell_morton_index, my_slice_start)
-write_cell_array_length(cell_morton_index, len(final_pruned_nodes))
+cell_array[2 * cell_morton_index] = my_slice_start
+cell_array[2 * cell_morton_index + 1] = len(final_pruned_nodes)
 ```
+
+**Pitfalls:**
+*   Data structures assume only primitives have affine transformations. If input trees have transforms on internal nodes, compose them down to leaves as a pre-processing step [S1].
 
 ## Subtopics
 
@@ -156,16 +134,16 @@ write_cell_array_length(cell_morton_index, len(final_pruned_nodes))
 ComputeLocalState is a procedure that determines the local state (ACTIVE, INACTIVE, or SKIPPED) of nodes in a hierarchical Signed Distance Field (SDF) tree relative to a specific spatial cell. It utilizes Lipschitz pruning to identify and ignore primitives that are provably too far from the cell's surface to affect the local distance field, thereby optimizing subsequent ray marching or evaluation steps. It differs from standard tree traversal by combining post-order evaluation with immediate state-based culling, building on the hierarchical CSG pruning framework described in [GPU Implementation of Hierarchical CSG Pruning](8626-gpu-implementation-of-hierarchical-csg-pruning.md).
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of nodes in the pruned tree per cell. The hierarchical nature reduces the average tree size significantly compared to the full CSG tree.
-*   **Memory Complexity:** Proportional to the sum of pruned tree sizes across all cells. The double-buffering requires $2 \times$ the memory of the mutable node array. The immutable node array is stored once.
-*   **Performance:** The 4x4x4 subdivision ensures warp coherence, minimizing divergence and maximizing throughput. The use of atomic counters for dynamic tree sizing allows for variable-length pruned trees without pre-allocation overhead.
-*   **Strengths:** Efficient pruning of large CSG trees; suitable for real-time rendering due to GPU parallelism; reduces SDF evaluation cost in far-field regions.
-*   **Limitations:** Requires pre-processing to compose transforms down to leaves if internal nodes have transforms. The atomic counter can become a bottleneck if many threads have large pruned trees.
-*   **When to use:** When rendering complex CSG models with SDFs on the GPU, especially when the model has large empty regions or far-field areas where pruning is effective.
-*   **When not to use:** When the CSG tree is very small or the pruning ratio is low (e.g., dense geometry everywhere), the overhead of the hierarchical traversal and atomic operations may outweigh the benefits.
+*   **Time Complexity:** Linear with respect to the number of nodes in the pruned tree per cell. The hierarchical nature reduces the average tree size significantly compared to the full CSG tree [S1].
+*   **Memory Complexity:** Proportional to the sum of pruned tree sizes across all cells. The double-buffering requires $2 \times$ the memory of the mutable node array. The immutable node array is stored once [S1].
+*   **Performance:** The 4x4x4 subdivision ensures warp coherence, minimizing divergence and maximizing throughput. The use of atomic counters for dynamic tree sizing allows for variable-length pruned trees without pre-allocation overhead [S1].
+*   **Strengths:** Efficient pruning of large CSG trees; suitable for real-time rendering due to GPU parallelism; reduces SDF evaluation cost in far-field regions [S1].
+*   **Limitations:** Requires pre-processing to compose transforms down to leaves if internal nodes have transforms. The atomic counter can become a bottleneck if many threads have large pruned trees [S1].
+*   **When to use:** When rendering complex CSG models with SDFs on the GPU, especially when the model has large empty regions or far-field areas where pruning is effective [S1].
+*   **When not to use:** When the CSG tree is very small or the pruning ratio is low (e.g., dense geometry everywhere), the overhead of the hierarchical traversal and atomic operations may outweigh the benefits [S1].
 
 ## Background
-This method is a GPU-based implementation of the hierarchical CSG pruning algorithm. It was introduced in the paper "Lipschitz Pruning: Hierarchical Simplification of Primitive‐Based SDFs" [S1]. The implementation leverages modern GPU compute shaders to parallelize the pruning process across a hierarchical grid.
+This method is a GPU-based implementation of the hierarchical CSG pruning algorithm. It was introduced in the paper "Lipschitz Pruning: Hierarchical Simplification of Primitive‐Based SDFs" [S1]. The implementation leverages modern GPU compute shaders to parallelize the pruning process across a hierarchical grid [S1].
 
 ## Sources
 [S1] Lipschitz Pruning: Hierarchical Simplification of Primitive‐Based SDFs, https://doi.org/10.1111/cgf.70057, fetched 2026-10-26

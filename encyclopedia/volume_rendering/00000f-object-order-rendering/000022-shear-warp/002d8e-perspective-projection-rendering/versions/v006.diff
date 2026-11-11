@@ -1,0 +1,86 @@
+--- v005.md
++++ v006.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method extends the Shear-warp factorization to perspective projections. The viewing transformation matrix $M_{view}$ is factored into a permutation $P$, a perspective shear $S_{\text{persp}}$, and a warp $M_{\text{warp}}$ [S2]:
++The method extends the Shear-warp factorization to perspective projections [S2]. The viewing transformation matrix $M_{view}$ is factored into a permutation $P$, a perspective shear $S_{\text{persp}}$, and a warp $M_{\text{warp}}$ [S2]:
+ $$ M_{view} = M_{\text{warp}} \cdot S_{\text{persp}} \cdot P $$
+ The perspective shear matrix is defined as [S2]:
+@@ -14,9 +14,9 @@
+ $$ M_{\text{warp}} = S_{\text{persp}}^{-1} \cdot P^{-1} \cdot M_{\text{view}} $$
+ 
+-**Inputs:** Volume data (scalar field), $M_{view}$, image dimensions.
+-**Outputs:** Final rendered image.
++**Inputs:** Volume data (scalar field), $M_{view}$, image dimensions [S2].
++**Outputs:** Final rendered image [S2].
+ **Data Structures:**
+ *   **Volume:** Run-length encoded (RLE) copies. Each copy contains 4 bytes per non-transparent voxel and 1 byte per run [S2].
+-*   **Intermediate Image:** Buffer for resampled slices.
++*   **Intermediate Image:** Buffer for resampled slices [S2].
+ 
+ **Steps:**
+@@ -25,5 +25,5 @@
+     *   Translate the slice by $(z_0 s'_x, z_0 s'_y)$ [S2].
+     *   Scale the slice uniformly by a factor of $1/(1 + z_0 s'_w)$ [S2].
+-    *   Resample the transformed slice into the intermediate image buffer.
++    *   Resample the transformed slice into the intermediate image buffer [S2].
+     *   *Note:* Because of the scaling, more than 2 voxel scanlines may need to be traversed simultaneously to contribute to a single intermediate image scanline, and voxel scanlines may not be traversed at the same rate as image scanlines [S1, unofficial].
+     *   *Filtering:* Use a box reconstruction filter and a box low-pass filter [S1, unofficial].
+@@ -32,4 +32,5 @@
+     $$ C_{new} = C_{slice} \cdot \alpha_{slice} + C_{accum} \cdot (1 - \alpha_{slice}) $$
+     $$ \alpha_{new} = \alpha_{slice} + \alpha_{accum} \cdot (1 - \alpha_{slice}) $$
++    Early ray termination is applied when $\alpha_{accum}$ exceeds a threshold (e.g., 0.95) [S2].
+ 4.  **Warp:** Transform the intermediate image to the final image space using $M_{\text{warp}}$ [S2].
+ 
+@@ -37,12 +38,15 @@
+ ```python
+ def perspective_shear_warp(volume, M_view, image_width, image_height):
+-    # 1. Factorize M_view to extract perspective shear parameters [S2]
++    # Derive s'_x, s'_y, s'_w from M_view according to the perspective shear factorization [S2]
+     s_prime_x, s_prime_y, s_prime_w = M_view[2][0], M_view[2][1], M_view[2][3]
+     # P determines the principal slicing axis (assume Z-axis for this implementation)
+     
+-    # 2. Initialize intermediate image buffer with zeros
+-    intermediate = [[(0.0, 0.0, 0.0, 0.0) for _ in range(image_width)] for _ in range(image_height)]
++    # Initialize intermediate image buffer with zeros (front-to-back accumulation)
++    intermediate = [[(0.0, 0.0) for _ in range(image_width)] for _ in range(image_height)]
+     
+-    # 3. Process each volume slice z0
++    # Early termination threshold [S2]
++    alpha_threshold = 0.95
++    
++    # Process each volume slice z0 in front-to-back order
+     for z0 in range(volume.depth):
+         # Calculate depth-dependent scaling factor [S2]
+@@ -53,19 +57,25 @@
+         
+         # Resample slice z0 into intermediate buffer
+-        # Apply box reconstruction and box low-pass filters [S1, unofficial]
++        # Apply box reconstruction filter and box low-pass filter [S1, unofficial]
+         # Note: More than 2 voxel scanlines may contribute to one image scanline [S1, unofficial]
+         for y in range(image_height):
+             for x in range(image_width):
++                # Early termination check
++                if intermediate[y][x][1] >= alpha_threshold:
++                    continue
++                    
+                 # Map image coordinates to sheared object space
+                 src_x = (x - tx) / scale
+                 src_y = (y - ty) / scale
++                
+                 # Sample voxel using box reconstruction filter
+                 voxel = volume.get_voxel(src_x, src_y, z0)
++                
+                 # Composite front-to-back using Porter-Duff "over" operator [S2]
+-                c_new = voxel.color * voxel.alpha + intermediate[y][x].color * (1.0 - voxel.alpha)
+-                a_new = voxel.alpha + intermediate[y][x].alpha * (1.0 - voxel.alpha)
+-                intermediate[y][x] = (c_new, c_new, c_new, a_new)
++                C_new = voxel.color * voxel.alpha + intermediate[y][x][0] * (1.0 - voxel.alpha)
++                A_new = voxel.alpha + intermediate[y][x][1] * (1.0 - voxel.alpha)
++                intermediate[y][x] = (C_new, A_new)
+     
+-    # 4. Warp intermediate image to final image space using M_warp [S2]
++    # Warp intermediate image to final image space using M_warp [S2]
+     final_image = [[intermediate[y][x] for x in range(image_width)] for y in range(image_height)]
+     return final_image

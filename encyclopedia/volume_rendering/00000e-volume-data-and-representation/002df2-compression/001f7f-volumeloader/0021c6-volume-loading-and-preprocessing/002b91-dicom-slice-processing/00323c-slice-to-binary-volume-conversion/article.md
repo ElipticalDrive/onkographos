@@ -1,0 +1,91 @@
+# Slice to Binary Volume Conversion
+
+Also called: Volume Data Loading from Slices
+
+## Overview
+Converts a directory of 2D image slices into a binary volume file (`.bin`) by assuming slices are ordered and calculating bounding box dimensions based on a fixed X width [S1, unofficial]. It differs from PNG-based loading by relying on explicit directory structure and fixed world-space constraints rather than parsing a single multi-slice image file [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs:** Directory of 2D image slices (e.g., DICOM or PNG), fixed bounding box width parameter.
+**Outputs:** Binary volume file (`.bin`) containing float data.
+
+**Data Structures:**
+- `grid_dim`: Tuple `(w, h, z)` representing voxel grid dimensions.
+- `bbox_size`: Tuple `(x, y, z)` representing world-space bounding box dimensions.
+
+**Steps:**
+1. Read the first slice image to determine width ($w$) and height ($h$) [S1, unofficial].
+2. Calculate grid dimensions: $grid\_dim = (w, h, N)$, where $N$ is the number of slices [S1, unofficial].
+3. Calculate bounding box size:
+   $$bbox\_size[0] = BBOX\_SIZE\_X$$
+   $$bbox\_size[1] = \left(\frac{BBOX\_SIZE\_X}{grid\_dim[0]}\right) \times \left(\frac{vol\_size[1]}{vol\_size[0]}\right) \times grid\_dim[1]$$
+   Where $vol\_size$ refers to the original volume dimensions or aspect ratio constraints [S1, unofficial].
+4. Store the calculated dimensions and data into the binary file [S1, unofficial].
+
+**Parameters:**
+- `BBOX_SIZE_X`: Fixed width of the bounding box in world units. Default: 5.0 [S1, unofficial].
+
+**Edge Cases:**
+- Slices must be strictly ordered; incorrect ordering results in a corrupted volume [S1, unofficial].
+- Precision issues may arise if $vol\_size$ ratios are not preserved accurately during the bounding box calculation [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def convert_slices_to_binary(slice_directory, bbox_size_x=5.0):
+    """
+    Converts a directory of 2D slices to a binary volume file.
+    Assumes slices are ordered and calculates bounding box based on fixed X width.
+    """
+    # 1. Read first slice to determine width and height
+    first_slice_path = get_first_slice(slice_directory)
+    w, h = get_image_dimensions(first_slice_path)
+    
+    # 2. Calculate grid dimensions
+    num_slices = count_slices(slice_directory)
+    grid_dim = (w, h, num_slices)
+    
+    # 3. Calculate bounding box size
+    # Note: vol_size[0] and vol_size[1] are assumed to be known or derived from 
+    # the original volume's aspect ratio if not explicitly provided.
+    # If vol_size is not available, this step may require additional context.
+    # Assuming vol_size is derived from the image dimensions or a known reference.
+    vol_size_0 = w  # Assuming original volume width corresponds to grid width
+    vol_size_1 = h  # Assuming original volume height corresponds to grid height
+    
+    bbox_x = bbox_size_x
+    bbox_y = (bbox_size_x / grid_dim[0]) * (vol_size_1 / vol_size_0) * grid_dim[1]
+    bbox_z = grid_dim[2] # Assuming unit depth or derived from slice spacing
+    
+    bbox_size = (bbox_x, bbox_y, bbox_z)
+    
+    # 4. Load all slices and write to binary file
+    # Implementation detail: Load slices in order, convert to float, write to .bin
+    data = []
+    for slice_path in get_ordered_slices(slice_directory):
+        img = load_image(slice_path)
+        data.extend(img_to_float_array(img))
+        
+    write_binary_volume("volume.bin", data, grid_dim, bbox_size)
+```
+
+## Subtopics
+
+### Volume Data Loading (PNG Slices)
+Loads a single PNG image representing multiple volume slices, parses dimensions, converts to float, filters, and optionally saves as a binary volume file [S2, unofficial]. It differs from the standard slice conversion by treating a single file as a multi-slice container and using a default slice count [S2, unofficial].
+- **Definition:** Loads PNG, parses XDIM, YDIM, components; sets ZDIM to `slices`; adjusts YDIM [S2, unofficial].
+- **Steps:** Load PNG with `stbi_load` (`STBI_grey`); set `ZDIM = slices`; adjust `YDIM = YDIM / ZDIM`; convert to floats; filter using `S_FILTER`; save to `file_S_FILTER.vol` if not pre-filtered [S2, unofficial].
+- **Parameters:** `slices`: Integer specifying number of Z-slices. Default: 176 [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of pixels and slices $O(w \times h \times N)$.
+- **Memory Complexity:** $O(w \times h \times N)$ for storing the float data.
+- **Strengths:** Simple implementation; fixed bounding box ensures consistent world-space scaling [S1, unofficial].
+- **Limitations:** Assumes strict slice ordering; requires prior knowledge of volume aspect ratio for accurate Y-dimension bounding box calculation [S1, unofficial].
+
+## Background
+Originated in CUDA-based interactive volume rendering projects for loading DICOM-like slice data [S1, unofficial]. Also used in educational computer graphics projects for volume ray casting [S2, unofficial].
+
+## Sources
+[S1] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29 (unofficial)
+[S2] CSE-333-Computer-Graphics-2020/VolumeRayCasting, https://github.com/CSE-333-Computer-Graphics-2020/VolumeRayCasting, fetched 2026-10-26 (unofficial)

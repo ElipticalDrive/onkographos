@@ -1,0 +1,270 @@
+# SSDNeRF
+
+Also called: Single-Stage Diffusion NeRF
+
+## Overview
+SSDNeRF is a unified framework that jointly optimizes a NeRF auto-decoder and a latent diffusion model in a single training stage to learn generalizable 3D priors from multi-view images [S1, S2]. Unlike two-stage approaches that pretrain auto-decoders without diffusion models, SSDNeRF blends generative and rendering biases coherently, enabling robust training on sparse-view data (as few as three views) and avoiding the noisy latent manifolds induced by inverse rendering uncertainty [S2]. It supports flexible test-time sampling for both unconditional 3D generation and reconstruction from arbitrary view counts [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A dataset of multi-view images $\{y_{ij}\}$ for a set of scenes indexed by $i$, where $j$ indexes the rays (pixels) and their corresponding camera poses $r_{ij}$.
+*   **Outputs:** Optimized decoder parameters $\psi$, diffusion prior parameters $\phi$, and scene latent codes $x_i$.
+
+**Data Structures:**
+*   **Scene Code ($x_i$):** A latent representation for scene $i$. The source specifies a triplane NeRF representation where $x_i \in \mathbb{R}^{3 \times 6 \times 128 \times 128}$ [S2].
+*   **NeRF Decoder ($p_\psi$):** A network that maps the scene code $x_i$ and ray parameters $r_{ij}$ to predicted RGB color $y_{ij}$. It uses spherical harmonic (SH) encoding for position features, Linear layers, SiLU activations, and Sigmoid/Exp activations for output [S2].
+*   **Diffusion Prior ($p_\phi$):** A U-Net based denoising network conditioned on time step $t$ and scene code $x_i$. It takes a noisy code $x_i^{(t)}$ and outputs a denoised estimate $\hat{x}_\phi(x_i, t)$ [S2].
+
+**Parameters:**
+*   **Time Step ($t$):** Sampled uniformly from $U(0, T)$ [S2].
+*   **Weighting Function ($w(t)$):** An empirical time-dependent weighting function for the diffusion loss [S2].
+*   **Minimum Views:** Training requires at least 3 views per scene [S2].
+
+**Formulas:**
+The total loss $\mathcal{L}$ is a simplified variational upper bound on the negative log-likelihood (NLL), ignoring uncertainty in latent codes [S2]:
+
+$$
+\mathcal{L} = \mathbb{E}_i [-\log p_\psi(\{y_{ij}\}|x_i, \{r_{ij}\})] + \mathbb{E}_i [-\log p_\phi(x_i)]
+$$
+
+Where:
+*   The first term is the **rendering loss** $\mathcal{L}_{rend}$, measuring the likelihood of observed data given the scene code and ray parameters [S2].
+*   The second term is the **prior term**, measuring the likelihood of the scene code under the diffusion prior [S2].
+
+The diffusion loss component is typically formulated as:
+$$
+\mathcal{L}_{diff} = \mathbb{E}_{t, x_i} [w(t) \| x_i^{(t)} - \hat{x}_\phi(x_i, t) \|^2]
+$$
+where $x_i^{(t)}$ is the noisy code at step $t$ and $\hat{x}_\phi(x_i, t)$ is the denoised prediction [S2].
+
+**Numbered Steps:**
+
+1.  **Initialization:** Initialize NeRF decoder parameters $\psi$, diffusion prior parameters $\phi$, and scene latent codes $x_i$ for all scenes in the dataset [S2].
+2.  **Forward Pass (Rendering):** For each scene $i$ and ray $j$:
+    *   Encode position features using Spherical Harmonics (SH) [S2].
+    *   Pass scene code $x_i$ and ray parameters $r_{ij}$ through the NeRF decoder $p_\psi$ to predict RGB color $\hat{y}_{ij}$ [S2].
+    *   Compute rendering loss $\mathcal{L}_{rend}$ between predicted $\hat{y}_{ij}$ and ground truth $y_{ij}$ [S2].
+3.  **Forward Pass (Diffusion):**
+    *   Sample a time step $t \sim U(0, T)$ [S2].
+    *   Add noise to scene code $x_i$ to obtain noisy code $x_i^{(t)}$ [S2].
+    *   Pass $x_i^{(t)}$ and $t$ through the U-Net denoiser $p_\phi$ to predict the denoised code $\hat{x}_\phi(x_i, t)$ [S2].
+    *   Compute diffusion loss $\mathcal{L}_{diff}$ using the weighting function $w(t)$ [S2].
+4.  **Loss Combination:** Compute total loss $\mathcal{L} = \mathcal{L}_{rend} + \mathcal{L}_{prior}$, where $\mathcal{L}_{prior}$ is derived from $-\log p_\phi(x_i)$ [S2].
+5.  **Optimization:** Update $\psi$, $\phi$, and $x_i$ jointly using gradient descent on $\mathcal{L}$ [S2].
+6.  **Test-Time Sampling (Unconditional):**
+    *   Sample random Gaussian noise $x^{(T)}$ [S2].
+    *   Use a solver (e.g., DDIM) to recursively denoise $x^{(t)}$ to $x^{(0)}$ using the trained prior $p_\phi$ [S2].
+    *   Decode $x^{(0)}$ using $p_\psi$ to generate a 3D scene [S2].
+7.  **Test-Time Sampling (Guided Reconstruction):**
+    *   Start with random noise or a prior sample [S2].
+    *   Guide the denoising process by computing gradients of the rendering loss with respect to the latent code $x_i$ against known observations $y_{ij}$ [S2].
+    *   Update $x_i$ during the reverse diffusion process to reconstruct the scene from arbitrary view counts [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class SSDNeRF:
+    def __init__(self, num_scenes, num_views_per_scene, T=1000):
+        """
+        Initialize SSDNeRF model.
+        :param num_scenes: Number of scenes in the dataset.
+        :param num_views_per_scene: Number of views per scene (min 3).
+        :param T: Total number of diffusion timesteps.
+        """
+        self.num_scenes = num_scenes
+        self.num_views = num_views_per_scene
+        self.T = T
+        
+        # Initialize NeRF Decoder parameters psi
+        # Structure: SH encoding, Linear, SiLU, Linear, Sigmoid/Exp
+        self.decoder = NeRFDecoder() 
+        self.psi = self.decoder.parameters()
+        
+        # Initialize Diffusion Prior parameters phi (U-Net)
+        self.diffusion_model = UNetDenoiser()
+        self.phi = self.diffusion_model.parameters()
+        
+        # Initialize scene latent codes x_i
+        # Shape: [num_scenes, 3, 6, 128, 128]
+        self.x = torch.randn(num_scenes, 3, 6, 128, 128)
+        
+        # Optimizer for joint optimization
+        self.optimizer = optim.Adam(list(self.psi) + list(self.phi) + [self.x], lr=1e-4)
+        
+        # Time-dependent weighting function w(t) [G: Placeholder for specific empirical function]
+        self.w_t = self._get_weighting_function()
+
+    def _get_weighting_function(self):
+        # Returns a tensor of weights for each timestep t
+        # Implementation depends on the specific empirical function used in [S2]
+        return torch.ones(self.T) 
+
+    def render(self, x_i, rays):
+        """
+        Render RGB colors from scene code x_i and rays.
+        :param x_i: Scene code [3, 6, 128, 128]
+        :param rays: Ray parameters r_ij [num_rays, ...]
+        :return: Predicted RGB colors y_hat [num_rays, 3]
+        """
+        # Encode position features using SH
+        pos_feats = encode_sh(rays)
+        # Pass through NeRF decoder
+        y_hat = self.decoder(x_i, pos_feats)
+        return y_hat
+
+    def diffuse(self, x_i, t):
+        """
+        Add noise to scene code x_i at timestep t.
+        :param x_i: Scene code
+        :param t: Timestep
+        :return: Noisy code x_i^(t)
+        """
+        # Standard Gaussian diffusion forward process
+        # x_i^(t) = sqrt(alpha_bar_t) * x_i + sqrt(1 - alpha_bar_t) * epsilon
+        # [G: Assume standard DDPM forward process implementation]
+        return add_noise(x_i, t)
+
+    def denoise(self, x_i_t, t):
+        """
+        Predict denoised code from noisy code.
+        :param x_i_t: Noisy scene code
+        :param t: Timestep
+        :return: Denoised estimate x_hat_phi
+        """
+        return self.diffusion_model(x_i_t, t)
+
+    def compute_rendering_loss(self, y_hat, y_gt):
+        """
+        Compute rendering loss L_rend.
+        :param y_hat: Predicted RGB
+        :param y_gt: Ground truth RGB
+        :return: Scalar loss
+        """
+        # Negative log-likelihood approximation (e.g., MSE or L1)
+        return torch.mean((y_hat - y_gt) ** 2)
+
+    def compute_prior_loss(self, x_i, x_i_t, t):
+        """
+        Compute prior loss L_prior (diffusion loss).
+        :param x_i: Original scene code
+        :param x_i_t: Noisy scene code
+        :param t: Timestep
+        :return: Scalar loss
+        """
+        x_hat = self.denoise(x_i_t, t)
+        # L_diff = w(t) * || x_i^(t) - x_hat_phi ||^2
+        # Note: The source formula uses -log p_phi(x_i), which is approximated by the diffusion loss
+        weight = self.w_t[t]
+        return torch.mean(weight * (x_i_t - x_hat) ** 2)
+
+    def train_step(self, batch_data):
+        """
+        Single training step.
+        :param batch_data: Dictionary containing images, rays, and scene indices
+        :return: Total loss
+        """
+        self.optimizer.zero_grad()
+        
+        total_loss = 0.0
+        
+        for i, scene_idx in enumerate(batch_data['scene_indices']):
+            x_i = self.x[scene_idx]
+            rays = batch_data['rays'][i]
+            y_gt = batch_data['images'][i]
+            
+            # 1. Rendering Loss
+            y_hat = self.render(x_i, rays)
+            l_rend = self.compute_rendering_loss(y_hat, y_gt)
+            
+            # 2. Prior Loss
+            t = torch.randint(0, self.T, (1,)).item()
+            x_i_t = self.diffuse(x_i, t)
+            l_prior = self.compute_prior_loss(x_i, x_i_t, t)
+            
+            # 3. Total Loss
+            l_total = l_rend + l_prior
+            total_loss += l_total
+            
+        total_loss.backward()
+        self.optimizer.step()
+        return total_loss.item()
+
+    def sample_unconditional(self, num_samples=1):
+        """
+        Unconditional 3D generation.
+        :param num_samples: Number of samples to generate
+        :return: List of scene codes x^(0)
+        """
+        samples = []
+        for _ in range(num_samples):
+            # Start from random Gaussian noise x^(T)
+            x_t = torch.randn(3, 6, 128, 128)
+            
+            # Recursively denoise using DDIM or similar solver
+            for t in reversed(range(self.T)):
+                x_hat = self.denoise(x_t, t)
+                # [G: Implement DDIM update step from x_t to x_{t-1} using x_hat]
+                x_t = update_ddim(x_t, x_hat, t)
+            
+            samples.append(x_t)
+        return samples
+
+    def reconstruct_guided(self, observations, rays, num_guidance_steps=10):
+        """
+        Guided reconstruction from arbitrary observations.
+        :param observations: Known RGB images
+        :param rays: Corresponding ray parameters
+        :param num_guidance_steps: Number of guidance steps per diffusion step
+        :return: Reconstructed scene code x^(0)
+        """
+        # Start from random noise or prior sample
+        x_t = torch.randn(3, 6, 128, 128)
+        
+        for t in reversed(range(self.T)):
+            # Compute gradient of rendering loss w.r.t latent code
+            # [G: This requires backpropagating through the renderer to the latent code]
+            x_t.requires_grad = True
+            y_hat = self.render(x_t, rays)
+            l_rend = self.compute_rendering_loss(y_hat, observations)
+            
+            # Guidance step: update x_t to minimize rendering loss
+            # [G: Implement gradient ascent on l_rend w.r.t x_t]
+            grad = torch.autograd.grad(l_rend, x_t)[0]
+            x_t = x_t - guidance_scale * grad
+            
+            # Denoising step
+            x_hat = self.denoise(x_t, t)
+            x_t = update_ddim(x_t, x_hat, t)
+            
+        return x_t
+```
+
+## Subtopics
+
+### DiffusioNeRF
+A method that utilizes a denoising diffusion model to learn priors for scene geometry and color, normalizing the geometry and color of the scene to achieve better quality in reconstructed geometry under sparse input views. It serves as the parent method, focusing on geometry normalization, whereas SSDNeRF focuses on joint optimization for generalizable priors. [DiffusioNeRF](8703-diffusionerf.md)
+
+### Two-Stage Diffusion NeRF
+Approaches that pretrain auto-decoders or VAEs without diffusion models, then train diffusion models on the resulting latent codes. SSDNeRF differs by jointly optimizing both stages to avoid noisy latent manifolds.
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Joint optimization of $\psi$, $\phi$, and $x_i$ increases memory usage compared to single-stage NeRF due to storing latent codes for all scenes and the diffusion model. Training time is longer than standard NeRF but avoids the separate pretraining phase of two-stage methods.
+*   **Measured Performance:** Demonstrates robust results comparable to or better than leading task-specific methods in unconditional generation and single/sparse-view 3D reconstruction [S2].
+*   **Scaling:** Enables training on as sparse as three views per scene, which is previously infeasible for two-stage methods [S2].
+*   **Strengths:** Blends generative and rendering biases coherently; supports flexible test-time sampling (unconditional and guided); robust to sparse-view input.
+*   **Limitations:** Requires joint optimization which may be computationally intensive; sensitive to the choice of weighting function $w(t)$ and guidance scale in reconstruction.
+*   **When to use:** When generalizable 3D priors are needed from sparse multi-view data, or for unconditional 3D generation.
+*   **When not to use:** When high-fidelity reconstruction from dense views is the only goal and computational resources are limited, as standard NeRF may be more efficient.
+
+## Background
+SSDNeRF was proposed in April 2023 [S1, S2]. It addresses the issue that previous two-stage approaches (pretraining auto-decoders/VAEs then training diffusion models) induce noisy patterns and artifacts in the latent code due to the uncertain nature of inverse rendering, particularly with sparse-view data [S2]. The method was developed during a remote internship with UCSD [S2]. It advances the field of 3D learning by providing a general-purpose framework for both generation and reconstruction [S1].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] Single-Stage Diffusion NeRF: A Unified Approach to 3D Generation and Reconstruction, https://doi.org/10.1109/iccv51070.2023.00229, fetched 2026-10-29

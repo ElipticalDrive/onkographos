@@ -1,195 +1,141 @@
 # TRFRay3 (DDA Ray Representation)
 
-Also called: Block picking raycast, CPU DDA raycast for picking, DDA Ray Marching, DDA Raycasting with zero-direction handling, Digital Differential Analyzer raymarching, voxel walk
+Also called: Digital Differential Analyzer Traversal, DDA Ray Marching, Ray Marching with DDA, Digital Differential Analyzer raymarching, DDA Raycasting with zero-direction handling
 
 ## Overview
-TRFRay3 is a CPU-side Digital Differential Analyzer (DDA) ray representation and traversal engine designed for picking and raycasting in voxel worlds, specifically engineered to match the toroidal GPU storage layout exactly [S1, unofficial]. It solves the problem of efficiently finding the first solid voxel hit along a ray in a sparse or dense voxel grid while handling edge cases like zero-direction vectors and toroidal wrapping [S1, unofficial][S2, unofficial]. It differs from the Amanatides–Woo Voxel Traversal by explicitly providing a C++ class structure (`TRFRay3`) that pre-computes inverse directions and origin-inverse direction (OOD) terms for SIMD-friendly, division-free traversal loops, and from the Differentiable DDA Loop by being a non-differentiable, integer-step traversal method [S3, unofficial].
+TRFRay3 is a specific data structure and traversal algorithm for performing Digital Differential Analyzer (DDA) ray marching through a voxel grid [S4, unofficial]. It solves the problem of efficiently determining which voxels a ray intersects by stepping through adjacent grid cells based on the ray's direction [S2, unofficial]. It sets itself apart from its siblings by encapsulating the ray state (origin, direction, inverse direction, and signs) into a contiguous, SIMD-friendly structure that precomputes division-heavy terms to avoid runtime division [S4, unofficial]. Unlike [Amanatides-Woo Voxel Traversal](3132-amanatides-woo-voxel-traversal.md) which explicitly tracks `tMax` and `tDelta` per axis, TRFRay3 often utilizes an Origin-Inverse Direction (OOD) formulation or similar precomputed offsets to drive the integer-step traversal [S4, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** Ray origin $\mathbf{O}$, ray direction $\mathbf{D}$ (normalized), world bounds (min/max), and voxel grid metadata (brick dimensions, occupancy data).
-*   **Output:** The first solid voxel coordinate hit by the ray, or `None` if no hit occurs within bounds or steps.
+**Inputs:** Ray origin $\mathbf{O}$, ray direction $\mathbf{D}$ (assumed non-zero components for standard DDA), and voxel grid dimensions.
+**Outputs:** Sequence of visited voxel coordinates $(x, y, z)$ and traversal parameters.
 
-**Data Structures:**
-The core data structure is `TRFRay3<T>`, which contains five `TRFVector3<T>` fields arranged contiguously in memory to enable SIMD/vectorization [S3, unofficial]:
-1.  `kOrigin`: The ray origin $(O_x, O_y, O_z)$.
-2.  `kDirection`: The ray direction $(D_x, D_y, D_z)$.
-3.  `kInvDirection`: The component-wise reciprocal $(1/D_x, 1/D_y, 1/D_z)$.
-4.  `kOod`: The Origin-Inverse Direction product $(O_x/D_x, O_y/D_y, O_z/D_z)$.
-5.  `kSigns`: The component-wise sign of the direction $(-1$ if $D_i < 0$, else $1)$.
+### Data Structures
+The core structure `TRFRay3<T>` contains five 3-component vectors, laid out contiguously in memory to support SIMD vectorization [S4, unofficial]:
+1.  `kOrigin`: The ray origin $\mathbf{O}$.
+2.  `kDirection`: The ray direction $\mathbf{D}$.
+3.  `kInvDirection`: The component-wise reciprocal of the direction, $1/\mathbf{D}$.
+4.  `kOod`: The Origin-Inverse Direction product, $\mathbf{O} \odot (1/\mathbf{D})$.
+5.  `kSigns`: The component-wise sign of the direction, $\text{sign}(\mathbf{D})$.
 
-The `Data()` method returns a pointer to `kOrigin`, ensuring the five vectors are contiguous [S3, unofficial].
+The data layout allows `Data()` to return a pointer to `kOrigin`, ensuring all five fields are contiguous [S4, unofficial].
 
-**Formulas:**
-*   **Inverse Direction:** $kInvDirection_i = \frac{1}{Direction_i}$ for $i \in \{x, y, z\}$ [S3, unofficial].
-*   **Origin-Inverse Direction (OOD):** $OOD_i = \frac{Origin_i}{Direction_i}$ for $i \in \{x, y, z\}$ [S3, unofficial].
-*   **Signs:** $kSigns_i = \text{sign}(Direction_i)$ [S2, unofficial][S3, unofficial].
+### Formulas
+The traversal relies on precomputed values to avoid division inside the loop [S4, unofficial]:
 
-**Parameters:**
-*   `MAX_STEPS`: Maximum number of DDA steps allowed per raycast call to prevent infinite loops [S1, unofficial].
-*   `epsilon`: A small value (e.g., $10^{-3}$) used to clamp the ray origin to prevent degenerate cases [S1, unofficial].
+1.  **Inverse Direction:**
+    $$ \text{kInvDirection}_i = \frac{1}{\text{kDirection}_i} \quad \text{for } i \in \{x, y, z\} $$
+2.  **Signs:**
+    $$ \text{kSigns}_i = \begin{cases} -1 & \text{if } \text{kDirection}_i < 0 \\ 1 & \text{otherwise} \end{cases} $$
+3.  **Origin-Inverse Direction (OOD):**
+    $$ \text{kOod}_i = \text{kOrigin}_i \times \text{kInvDirection}_i $$
 
-**Steps:**
+*Note: Some implementations (e.g., [S3, unofficial]) use a `sideDist` approach where `sideDist` is initialized as $(\text{sign}(\mathbf{D}) \times (\lfloor \mathbf{P} \rfloor - \mathbf{O}) + 0.5) \times \text{invDir}$, where $\mathbf{P}$ is the current voxel position. This is mathematically equivalent to tracking distance to the next grid boundary.*
 
+### Algorithm Steps
 1.  **Initialization:**
-    *   Validate the ray direction. If the direction is near-zero or un-normalized, return `None` [S1, unofficial].
-    *   Compute `kSigns` component-wise: $-1$ if $Direction_i < 0$, else $1$ [S3, unofficial].
-    *   Compute `kInvDirection` via component-wise reciprocal. Note: Division by zero is avoided by requiring floating-point types and assuming non-zero direction components, enforced by a `static_assert` [S3, unofficial].
-    *   Compute `kOod` as the component-wise product of `kOrigin` and `kInvDirection` [S3, unofficial].
-    *   Clamp the ray origin `p` with an epsilon ($10^{-3}$) to prevent precision issues [S1, unofficial].
-    *   Calculate the initial voxel coordinate containing the ray origin.
-    *   Compute `tDelta` for each axis: $tDelta_i = |kInvDirection_i|$ [S1, unofficial][S2, unofficial].
-    *   Compute `tMax` for each axis:
-        *   If $Direction_i > 0$: $tMax_i = (Voxel_i + 1 - Origin_i) \times tDelta_i$ [S2, unofficial].
-        *   If $Direction_i < 0$: $tMax_i = (Origin_i - Voxel_i) \times tDelta_i$ [S2, unofficial].
-        *   If $Direction_i = 0$: Set $tDelta_i = \infty$, $tMax_i = \infty$, and step $= 0$ to prevent the axis from being selected [S2, unofficial].
+    *   Validate that $\mathbf{D}$ components are non-zero. If any component is zero, handle as a special case (see Pitfalls) [S2, unofficial].
+    *   Compute `kInvDirection`, `kSigns`, and `kOod` [S4, unofficial].
+    *   Determine the starting voxel index $\mathbf{V}_{start} = \lfloor \mathbf{O} \rfloor$ [S3, unofficial].
+    *   Compute initial distances to the next grid boundaries. In the OOD formulation, the distance to the next boundary in axis $i$ is related to $\text{kOod}_i$ and the fractional part of the origin. In the `sideDist` formulation, `sideDist` is initialized to the distance from the origin to the first voxel boundary in each direction [S3, unofficial].
+    *   Compute `deltaDist` (distance between adjacent voxel boundaries) as $|\text{kInvDirection}|$ [S3, unofficial].
 
-2.  **Phase 1: Skip Interior Solid Voxels:**
-    *   Check if the current voxel is within the world window using modulo arithmetic for toroidal wrapping [S1, unofficial].
-    *   Check if the voxel is solid by computing the brick index, checking the occupancy bit, and excluding `MAT_LEAF_FRINGE` [S1, unofficial].
-    *   If the voxel is solid, advance the ray to the next voxel (see Step 3) and repeat until a non-solid voxel is found or the ray exits the world [S1, unofficial].
+2.  **Traversal Loop:**
+    *   While valid voxels remain and step limit not reached:
+        *   Identify the axis $i$ with the minimum distance to the next boundary. In the `sideDist` method, this is found by comparing `sideDist.xyz` against its cyclic shifts:
+            $$ \text{mask}_i = \text{sideDist}_i \le \min(\text{sideDist}_{i+1}, \text{sideDist}_{i+2}) $$
+            (Indices wrap modulo 3) [S3, unofficial].
+        *   Update the current voxel coordinate:
+            $$ \mathbf{V}_{new} = \mathbf{V}_{old} + \text{mask} \times \text{kSigns} $$
+        *   Update the distance to the next boundary for the selected axis:
+            $$ \text{sideDist}_{new} = \text{sideDist}_{old} + \text{mask} \times \text{deltaDist} $$
+        *   Record the hit voxel $\mathbf{V}_{new}$ [S3, unofficial].
 
-3.  **Phase 2: Traverse to First Solid Voxel:**
-    *   Loop up to `MAX_STEPS`:
-        *   Check if the current voxel is within the world window (toroidal wrap) [S1, unofficial].
-        *   Check if the voxel is solid [S1, unofficial].
-        *   If solid, return the current voxel coordinate as the hit [S1, unofficial].
-        *   Find the axis with the minimum `tMax` [S1, unofficial][S2, unofficial].
-        *   If no valid axis exists (e.g., all `tMax` are infinite), return `None` [S1, unofficial].
-        *   Advance the ray along the selected axis:
-            *   Increment the voxel coordinate in that direction by `kSigns_axis` [S1, unofficial][S2, unofficial].
-            *   Update `tMax_axis` by adding `tDelta_axis` [S1, unofficial][S2, unofficial].
-        *   If the new voxel is out of bounds (and not toroidally wrapped), return `None` [S1, unofficial].
+3.  **Termination:**
+    *   Stop if the ray exits the world bounds or a maximum step count is reached [S1, unofficial].
 
-4.  **Termination:**
-    *   If `MAX_STEPS` is reached, return `None` [S1, unofficial].
-    *   If the ray exits the world window without hitting a solid voxel, return `None` [S1, unofficial].
-
-**Pseudocode:**
-
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-class TRFRay3:
-    def __init__(self, origin, direction):
-        # Defensive normalization and validation
-        length = math.sqrt(sum(d**2 for d in direction))
-        if length < 1e-6:
-            return None # Near-zero direction
+def traverse_dda(ray_origin, ray_direction, world_bounds, max_steps):
+    """
+    TRFRay3-style DDA traversal.
+    Assumes ray_direction components are non-zero.
+    """
+    # 1. Precompute constants
+    inv_dir = 1.0 / ray_direction
+    signs = vec3(1.0 if d > 0 else -1.0 for d in ray_direction)
+    delta_dist = abs(inv_dir)
+    
+    # 2. Initial voxel and side distances
+    # Current voxel is floor of origin
+    current_voxel = floor(ray_origin)
+    
+    # Calculate distance to the first grid boundary in each axis
+    # Using the sideDist formulation from [S3, unofficial]
+    # sideDist = (sign(D) * (floor(P) - O) + 0.5) * invDir
+    # Note: The +0.5 term accounts for the center of the voxel or specific boundary alignment
+    side_dist = (signs * (current_voxel - ray_origin) + 0.5) * inv_dir
+    
+    visited_voxels = []
+    
+    for step in range(max_steps):
+        # 3. Select axis with minimum sideDist
+        # Compare side_dist.x, y, z. 
+        # If x is min, mask is (1,0,0). If y is min, mask is (0,1,0), etc.
+        # Handle ties deterministically (e.g., prefer x, then y, then z)
+        min_val = min(side_dist.x, side_dist.y, side_dist.z)
         
-        self.origin = origin
-        self.direction = [d / length for d in direction]
-        
-        # Pre-compute constants for DDA
-        self.inv_direction = [1.0 / d if abs(d) > 1e-9 else float('inf') for d in self.direction]
-        self.signs = [1 if d > 0 else -1 if d < 0 else 0 for d in self.direction]
-        self.ood = [o * inv for o, inv in zip(self.origin, self.inv_direction)]
-        
-        # Handle zero-direction components
-        for i in range(3):
-            if self.direction[i] == 0:
-                self.inv_direction[i] = float('inf')
-                self.ood[i] = float('inf')
-                self.signs[i] = 0
-
-    def raycast(self, world_min, world_max, voxel_grid, max_steps=1000):
-        # Clamp origin to avoid precision issues
-        p = [o + 1e-3 for o in self.origin]
-        
-        # Initial voxel
-        voxel = [int(math.floor(p[i])) for i in range(3)]
-        
-        # Compute tDelta and tMax
-        t_delta = [abs(self.inv_direction[i]) for i in range(3)]
-        t_max = [0.0, 0.0, 0.0]
-        
-        for i in range(3):
-            if self.direction[i] > 0:
-                t_max[i] = (voxel[i] + 1 - p[i]) * t_delta[i]
-            elif self.direction[i] < 0:
-                t_max[i] = (p[i] - voxel[i]) * t_delta[i]
-            else:
-                t_max[i] = float('inf')
-                t_delta[i] = float('inf')
-        
-        # Phase 1: Skip solid voxels if camera is inside one
-        while self._is_solid(voxel, voxel_grid, world_min, world_max):
-            # Advance to next voxel
-            axis = self._get_min_t_max_axis(t_max)
-            if axis is None:
-                return None
-            voxel[axis] += self.signs[axis]
-            t_max[axis] += t_delta[axis]
+        if side_dist.x == min_val:
+            axis = 0
+        elif side_dist.y == min_val:
+            axis = 1
+        else:
+            axis = 2
             
-            # Check bounds
-            if not self._is_in_world(voxel, world_min, world_max):
-                return None
-
-        # Phase 2: Find first solid voxel
-        for _ in range(max_steps):
-            if self._is_solid(voxel, voxel_grid, world_min, world_max):
-                return voxel
+        # 4. Update voxel and sideDist
+        step_vec = vec3(0, 0, 0)
+        step_vec[axis] = 1.0
+        
+        current_voxel += step_vec * signs[axis]
+        side_dist[axis] += delta_dist[axis]
+        
+        # 5. Check bounds and record
+        if not is_inside_world(current_voxel, world_bounds):
+            break
             
-            axis = self._get_min_t_max_axis(t_max)
-            if axis is None:
-                return None
-            
-            voxel[axis] += self.signs[axis]
-            t_max[axis] += t_delta[axis]
-            
-            if not self._is_in_world(voxel, world_min, world_max):
-                return None
-                
-        return None
-
-    def _get_min_t_max_axis(self, t_max):
-        min_t = float('inf')
-        axis = None
-        for i in range(3):
-            if t_max[i] < min_t:
-                min_t = t_max[i]
-                axis = i
-        return axis
-
-    def _is_in_world(self, voxel, world_min, world_max):
-        # Toroidal wrapping check
-        # Assuming world dimensions are known or passed
-        # For simplicity, checking bounds without wrap for this example
-        # In actual implementation, use modulo arithmetic for toroidal wrapping
-        return True # Placeholder for toroidal logic
-
-    def _is_solid(self, voxel, voxel_grid, world_min, world_max):
-        # Check occupancy bit and exclude MAT_LEAF_FRINGE
-        # Placeholder for actual voxel grid lookup
-        return False
+        visited_voxels.append(current_voxel)
+        
+    return visited_voxels
 ```
+
+### Parameters
+*   `MAX_STEPS`: Maximum number of DDA steps allowed per raycast call to prevent infinite loops in degenerate cases [S1, unofficial]. Typical value depends on world size; often set to the total number of voxels along the longest diagonal or a fixed large integer.
+
+### Edge Cases and Pitfalls
+*   **Zero Direction Components:** If any component of $\mathbf{D}$ is 0, `sign()` returns 0, and `inv_dir` is undefined (division by zero) [S4, unofficial]. In the traversal loop, a zero step means the voxel coordinate never changes for that axis. If `tDelta`/`sideDist` is finite, this axis might still be selected as the "minimum," causing the ray to advance in time/parameter without moving in grid space, leading to infinite loops or incorrect normals [S2, unofficial].
+    *   *Fix:* Set `inv_dir` component to `Infinity`, `sign` to 0, and `delta_dist` to `Infinity`. This ensures the axis never wins the `min` comparison [S2, unofficial].
+*   **Precision:** The method requires floating-point types for `inv_dir` and `side_dist`. Integer arithmetic alone is insufficient for the distance calculations unless fixed-point approximations are used [S4, unofficial].
+*   **Toroidal Wrapping:** In some implementations (e.g., voxelG), world bounds are handled via modulo arithmetic for toroidal wrapping [S1, unofficial].
 
 ## Subtopics
 
-### Amanatides–Woo Voxel Traversal
-The foundational DDA algorithm for voxel traversal. TRFRay3 implements this logic but encapsulates it in a C++ class with pre-computed inverse directions and OOD terms for performance [S3, unofficial].
-
-### Differentiable DDA Loop
-A variant of DDA designed for gradient-based optimization. TRFRay3 is non-differentiable and intended for standard raycasting/picking [S2, unofficial].
-
-### Multi-level DDA with Adaptive Mip Selection
-Uses multiple levels of detail for voxel traversal. TRFRay3 operates on a single level of voxel resolution [S2, unofficial].
+### [Hierarchical DDA](12757-hierarchical-dda.md)
+Hierarchical DDA accelerates ray traversal in sparse voxel grids by skipping empty regions using a multi-level occupancy hierarchy, avoiding the $O(N)$ voxel visits of standard DDA. It sets itself apart from standard DDA by descending the hierarchy only upon hitting occupied nodes, allowing large open spaces to be skipped at coarse granularities.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels traversed along the ray, bounded by `MAX_STEPS` [S1, unofficial].
-*   **Memory Complexity:** $O(1)$ for the ray state, plus $O(1)$ for the voxel grid lookup [S3, unofficial].
-*   **Performance:** Efficient on CPU due to pre-computed constants and contiguous memory layout for SIMD [S3, unofficial]. Matches GPU traversal behavior exactly [S1, unofficial].
-*   **Strengths:** Handles toroidal wrapping, zero-direction vectors, and solid voxel skipping efficiently [S1, unofficial][S2, unofficial].
-*   **Limitations:** Not differentiable. Requires floating-point precision for inverse direction calculations [S3, unofficial].
-*   **When to use:** CPU-side picking, shadow raycasting, and any scenario requiring exact parity with GPU voxel traversal [S1, unofficial].
-*   **When not to use:** Differentiable rendering or hierarchical traversal where SVOs are more appropriate [S2, unofficial].
+*   **Time Complexity:** $O(K)$, where $K$ is the number of voxels visited. In dense scenes, $K$ is proportional to the ray length. In sparse scenes with standard DDA, $K$ can be large; Hierarchical DDA reduces this significantly.
+*   **Memory Complexity:** $O(1)$ auxiliary memory for the traversal state (TRFRay3 structure). The voxel grid itself is external.
+*   **Performance:** The precomputation of `inv_dir`, `signs`, and `ood` moves division operations out of the inner loop, making it efficient on modern CPUs and GPUs [S4, unofficial]. The contiguous memory layout of `TRFRay3` facilitates SIMD vectorization [S4, unofficial].
+*   **Strengths:** Simple to implement, robust for dense grids, low memory overhead.
+*   **Limitations:** Inefficient for sparse grids with large empty regions compared to hierarchical methods. Sensitive to zero-direction rays if not handled explicitly.
 
 ## Background
-TRFRay3 originates from the voxelG engine, a hardware ray tracing experimental graphics playground [S1, unofficial]. It was developed to provide a CPU-side raycasting method that matches the toroidal GPU storage layout exactly, ensuring consistency between software and hardware rendering paths [S1, unofficial]. The class structure is inspired by general DDA ray representations in computer graphics, specifically those used in voxel-based games and simulations [S3, unofficial].
+TRFRay3 is a specific implementation of the DDA ray traversal algorithm, often found in custom C++ math libraries (e.g., RFMath) and voxel rendering engines [S4, unofficial]. It is used in applications requiring efficient voxel raycasting, such as hardware-accelerated ray tracing in voxel engines (e.g., voxelG) where it serves as the software fallback or the in-brick resolution step for hardware RT cores [S1, unofficial]. The OOD (Origin-Inverse Direction) formulation is a common optimization in DDA implementations to reduce computational cost per step [S4, unofficial].
 
 ## Sources
 [S1] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)
 [S2] Voxelarchitect day 226, https://github.com/Shubham-cyber-prog/100-Days-Of-Web-Development-ECWoC26/pull/1699, fetched 2026-10-25 (unofficial)
-[S3] itsyouyi/Voxelizer, https://github.com/itsyouyi/Voxelizer, fetched 2026-10-27 (unofficial)
+[S3] frozein/DoonEngine, https://github.com/frozein/DoonEngine, fetched 2026-10-26 (unofficial)
+[S4] itsyouyi/Voxelizer, https://github.com/itsyouyi/Voxelizer, fetched 2026-10-27 (unofficial)
+[S5] Voxel Rendering Techniques - Breck Massey, https://breckmassey.com/project?id=voxelRenderingTechniques, fetched 2026-10-25 (unofficial)

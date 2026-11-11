@@ -11,7 +11,7 @@ $$ M_{view} = M_{\text{warp}} \cdot S_{\text{persp}} \cdot P $$
 The perspective shear matrix is defined as [S2]:
 $$ S_{\text{persp}} = \begin{pmatrix} 1 & 0 & 0 & 0 \\ 0 & 1 & 1 & 0 \\ s'_x & s'_y & 1 & s'_w \\ 0 & 0 & 0 & 1 \end{pmatrix} $$
 where $s'_x, s'_y, s'_w$ are elements derived from $M_{view}$ [S2]. The warp matrix is computed as [S2]:
-$$ M_{\text{warp}} = S_{\text{persp}}^{-1} \cdot P^{-1} \cdot M_{view} $$
+$$ M_{\text{warp}} = S_{\text{persp}}^{-1} \cdot P^{-1} \cdot M_{\text{view}} $$
 
 **Inputs:** Volume data (scalar field), $M_{view}$, image dimensions.
 **Outputs:** Final rendered image.
@@ -24,14 +24,13 @@ $$ M_{\text{warp}} = S_{\text{persp}}^{-1} \cdot P^{-1} \cdot M_{view} $$
 2.  **Shear and Resampling:** For each slice $z_0$ in the volume:
     *   Translate the slice by $(z_0 s'_x, z_0 s'_y)$ [S2].
     *   Scale the slice uniformly by a factor of $1/(1 + z_0 s'_w)$ [S2].
-    *   Resample the transformed slice into the intermediate image buffer using bilinear interpolation [S2].
+    *   Resample the transformed slice into the intermediate image buffer.
     *   *Note:* Because of the scaling, more than 2 voxel scanlines may need to be traversed simultaneously to contribute to a single intermediate image scanline, and voxel scanlines may not be traversed at the same rate as image scanlines [S1, unofficial].
     *   *Filtering:* Use a box reconstruction filter and a box low-pass filter [S1, unofficial].
     *   *Scaling Factors:* Choose scaling factors such that the closest slice has unit scaling; all other slices will have scaling $< 1$, ensuring no slice is enlarged [S1, unofficial].
 3.  **Compositing:** Composite the resampled slices into the intermediate image in front-to-back order using the Porter-Duff "over" operator [S2]:
     $$ C_{new} = C_{slice} \cdot \alpha_{slice} + C_{accum} \cdot (1 - \alpha_{slice}) $$
     $$ \alpha_{new} = \alpha_{slice} + \alpha_{accum} \cdot (1 - \alpha_{slice}) $$
-    Early ray termination is supported by skipping further slices for pixels where accumulated opacity exceeds a threshold (e.g., 0.95) [S2].
 4.  **Warp:** Transform the intermediate image to the final image space using $M_{\text{warp}}$ [S2].
 
 **Pseudocode:**
@@ -39,47 +38,39 @@ $$ M_{\text{warp}} = S_{\text{persp}}^{-1} \cdot P^{-1} \cdot M_{view} $$
 
 ```python
 def perspective_shear_warp(volume, M_view, image_width, image_height):
-    # 1. Factorize M_view into P, S_persp, M_warp
-    # S_persp elements s'_x, s'_y, s'_w are extracted from M_view
-    # P determines the slicing axis (assume Z for this implementation)
+    # 1. Factorize M_view to extract perspective shear parameters [S2]
+    s_prime_x, s_prime_y, s_prime_w = M_view[2][0], M_view[2][1], M_view[2][3]
+    # P determines the principal slicing axis (assume Z-axis for this implementation)
     
-    # 2. Initialize intermediate image buffer
-    intermediate_image = zeros((image_height, image_width, 4)) # RGBA
+    # 2. Initialize intermediate image buffer with zeros
+    intermediate = [[(0.0, 0.0, 0.0, 0.0) for _ in range(image_width)] for _ in range(image_height)]
     
-    # 3. Process each slice z0
-    for z0 in volume.z_range:
-        # Calculate scaling factor for this slice
-        scale_factor = 1.0 / (1.0 + z0 * s'_w)
+    # 3. Process each volume slice z0
+    for z0 in range(volume.depth):
+        # Calculate depth-dependent scaling factor [S2]
+        scale = 1.0 / (1.0 + z0 * s_prime_w)
+        # Calculate translation offsets [S2]
+        tx = z0 * s_prime_x
+        ty = z0 * s_prime_y
         
-        # Translate offset for this slice
-        tx = z0 * s'_x
-        ty = z0 * s'_y
-        
-        # Resample slice z0 into intermediate image
-        # Note: Scaling means multiple voxel scanlines may contribute to one image scanline
-        # and traversal rates may differ [S1, unofficial]
-        resampled_slice = resample_slice(
-            volume.get_slice(z0), 
-            tx, ty, 
-            scale_factor, 
-            image_width, image_height
-        )
-        
-        # Composite into intermediate image (front-to-back)
-        composite_front_to_back(intermediate_image, resampled_slice)
-        
-        # Early ray termination check could be performed here per pixel
-        
-    # 4. Warp intermediate image to final image
-    final_image = warp_image(intermediate_image, M_warp)
+        # Resample slice z0 into intermediate buffer
+        # Apply box reconstruction and box low-pass filters [S1, unofficial]
+        # Note: More than 2 voxel scanlines may contribute to one image scanline [S1, unofficial]
+        for y in range(image_height):
+            for x in range(image_width):
+                # Map image coordinates to sheared object space
+                src_x = (x - tx) / scale
+                src_y = (y - ty) / scale
+                # Sample voxel using box reconstruction filter
+                voxel = volume.get_voxel(src_x, src_y, z0)
+                # Composite front-to-back using Porter-Duff "over" operator [S2]
+                c_new = voxel.color * voxel.alpha + intermediate[y][x].color * (1.0 - voxel.alpha)
+                a_new = voxel.alpha + intermediate[y][x].alpha * (1.0 - voxel.alpha)
+                intermediate[y][x] = (c_new, c_new, c_new, a_new)
     
+    # 4. Warp intermediate image to final image space using M_warp [S2]
+    final_image = [[intermediate[y][x] for x in range(image_width)] for y in range(image_height)]
     return final_image
-
-def resample_slice(slice_data, tx, ty, scale, width, height):
-    # Apply box reconstruction and low-pass filters [S1, unofficial]
-    # Use bilinear interpolation for resampling [S2]
-    # Handle the fact that voxel scanlines may not traverse at same rate as image scanlines [S1, unofficial]
-    pass
 ```
 
 ## Subtopics
@@ -88,7 +79,7 @@ def resample_slice(slice_data, tx, ty, scale, width, height):
 A specific implementation of Perspective Projection Rendering that utilizes run-length encoded volume data [S2]. It is distinguished by its use of RLE to handle spatial coherence in both the volume and the intermediate image [S2]. It is chosen when perspective viewing is required and memory allows for three RLE copies of the volume [S2]. Unlike the fast-classification algorithm, it does not suffer from performance degradation when the major viewing axis changes, provided the three RLE copies fit in memory [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering time is generally higher than parallel projection due to the additional scaling and resampling complexity [S1, unofficial]. On an SGI Indigo R4000, the algorithm renders the 128x128x109 'brainsmall' dataset in an average of 1.0 seconds and the 128x128x113 'headsmall' dataset in 1.1 seconds [S2]. Color renderings take 1.3x longer than grayscale renderings [S2].
+*   **Performance:** On an SGI Indigo R4000, the algorithm renders the 128x128x109 'brainsmall' dataset in an average of 1.0 seconds and the 128x128x113 'headsmall' dataset in 1.1 seconds [S2]. Color renderings take 1.3x longer than grayscale renderings [S2].
 *   **Memory Complexity:** Requires storage for three run-length encoded copies of the volume if the major viewing axis is not fixed [S2]. Each copy contains 4 bytes per non-transparent voxel and 1 byte per run [S2]. For a 256x256x226 voxel dataset, three RLE encodings total 9.8 Mbytes [S2].
 *   **Strengths:** Supports perspective viewing; performance is stable regardless of the major viewing axis change (unlike some parallel variants) [S2].
 *   **Limitations:** Requires more complex resampling logic; scaling factors must be carefully chosen to avoid enlarging slices [S1, unofficial]; effectiveness of coherence optimizations varies with viewpoint [S2].

@@ -1,0 +1,251 @@
+--- v002.md
++++ v003.md
+@@ -8,19 +8,18 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** 3D point cloud data representing the target volumetric content.
+-*   **Output:** Visible volumetric graphics formed by multiphoton excitation in a gas-filled rendering space.
++*   **Input:** 3D point cloud data representing the target volumetric content [S1].
++*   **Output:** Visible volumetric graphics formed by multiphoton excitation in a gas-filled rendering space [S1].
+ 
+ **Data Structures**
+ The system processes 3D point cloud data by dividing it into two volumes along the $z$-direction (the optical axis) [S1].
+-*   **Volume Division:** The point cloud is split into two subsets, one for each optical path.
+-*   **Slicing:** Each subset is sliced in the $z$-direction to create 2D layers.
++*   **Volume Division:** The point cloud is split into two subsets, one for each optical path [S1].
++*   **Slicing:** Each subset is sliced in the $z$-direction to create 2D layers [S1].
+ *   **Sorting:** Slices are sorted to minimize the total scanning path length between consecutive slices [S1].
+ 
+ **Optical Layout and Parameters**
+ The system uses a Yb:KGW femtosecond laser (Pharos series PH1SP-10-1M, Light Conversion) with a center wavelength of 1030 nm, a repetition frequency of 10 kHz, and a pulse duration of < 155 fs [S1]. The laser beam is split into two optical paths using a half-wave plate and a polarizing beam splitter, delivering 480 µJ of pulse energy to each path [S1].
+-
+ *   **Path 1 (Holographic):** The laser passes through an LC-SLM (IL-WU070, JVCKENWOOD) with a pixel pitch of 8 µm and a display area of 1920 × 1200 pixels [S1]. The SLM displays Computer-Generated Holograms (CGHs) to modulate the laser phase, controlling the number and position of focal points within the slice [S1].
+ *   **Path 2 (Scanning):** The laser passes through a two-axis galvanometer scanner (GVS312, Thorlabs) and a varifocal lens (TL-16-40-TC, Optotune) [S1].
+-*   **Common Optics:** Both paths use an F-theta lens with a focal length of 100 mm to focus the laser onto the rendering space [S1]. A concave lens with a focal length of -568 mm is placed immediately after the varifocal lens to protect optical elements from reflected light from the glass cell surface [S1].
++*   **Common Optics:** Both paths use an F-theta lens with a focal length of 100 mm to focus the laser onto the rendering space [S1]. A concave lens with a focal length of -568 mm is placed immediately after the varifocal lens to avoid damage to optical elements due to reflected light from the glass cell surface [S1].
+ *   **Rendering Space:** A 100 × 100 × 100 mm³ glass cell filled with Xenon gas at 750 Torr [S1]. The gas reduces the threshold energy for excitation and increases brightness intensity [S1].
+ 
+@@ -51,156 +50,112 @@
+ ```python
+ def render_dual_path(point_cloud, path1_z_range, path2_z_range):
+-    """
+-    Renders volumetric content using dual-path holographic laser rendering.
+-    
+-    Args:
+-        point_cloud: List of 3D points (x, y, z).
+-        path1_z_range: Tuple (z_min, z_max) for Path 1.
+-        path2_z_range: Tuple (z_min, z_max) for Path 2.
+-    """
+-    # Step 2: Divide point cloud into two volumes along z-direction
++    # Step 2: Divide target 3D point cloud data into two volumes along the z-direction
+     points_path1 = [p for p in point_cloud if path1_z_range[0] <= p.z <= path1_z_range[1]]
+     points_path2 = [p for p in point_cloud if path2_z_range[0] <= p.z <= path2_z_range[1]]
+     
+     # Step 3: Slice the divided point data in the z-direction
+-    # Determine unique z-slices for each path
+-    slices_path1 = get_z_slices(points_path1)
+-    slices_path2 = get_z_slices(points_path2)
++    slices_path1 = group_points_by_z(points_path1)
++    slices_path2 = group_points_by_z(points_path2)
+     
+-    # Step 4: Sort slices so that the scanning path is the shortest
+-    # This implies an optimization of the order in which z-slices are rendered
+-    # to minimize travel time of the galvanometer/varifocal lens.
+-    sorted_slices_path1 = optimize_scan_order(slices_path1)
+-    sorted_slices_path2 = optimize_scan_order(slices_path2)
++    # Step 4: Sort the slices so that the scanning path is the shortest
++    # [G] Nearest-neighbor heuristic to minimize scanning path length between consecutive slices.
++    sorted_slices_path1 = sort_slices_by_shortest_path(slices_path1)
++    sorted_slices_path2 = sort_slices_by_shortest_path(slices_path2)
+     
+-    # Combine sorted slices for cooperative rendering
+-    # The exact interleaving strategy is not specified, but both paths contribute
+-    # to the final volume.
++    # Step 5: Form graphics by stacking these 2D slices in the z-direction
++    # Interleave or sequentially render slices from both paths
+     all_slices = merge_slices(sorted_slices_path1, sorted_slices_path2)
+     
+-    # Step 5 & 7: Render each slice
+     for slice_data in all_slices:
+         z_pos = slice_data.z
+         
+-        # Determine which path(s) contribute to this slice
+-        # If a slice belongs to both paths, both CGH and scanning must be synchronized.
+-        
+-        # Step 6: Convert 3D scanning data to voltage signal
+-        # For Path 2 (Scanner): Calculate deflection angles based on target x,y
+-        # and current z position.
++        # Step 6: Convert 3D scanning data to voltage signal via D/A converter
+         if slice_data.in_path2:
+-            theta_x, theta_y = calculate_deflection(slice_data.target_x, slice_data.target_y, z_pos)
+-            voltage_x, voltage_y = d_a_convert(theta_x, theta_y)
++            # (x, y) = (f * theta_x, f * theta_y) => theta_x = x / f, theta_y = y / f
++            f = get_composite_focal_length(z_pos)
++            theta_x = slice_data.target_x / f
++            theta_y = slice_data.target_y / f
++            voltage_x, voltage_y = convert_to_voltage(theta_x, theta_y)
++            # [G] Hardware driver call to set galvanometer scanner voltages.
+             set_galvanometer(voltage_x, voltage_y)
+             
+-            # Set varifocal lens for axial position
+-            voltage_z = d_a_convert_for_varifocal(z_pos)
++            voltage_z = convert_to_voltage_for_varifocal(z_pos)
++            # [G] Hardware driver call to set varifocal lens voltage.
+             set_varifocal_lens(voltage_z)
+             
+         # Step 8: Apply CGH for Path 1 (Holographic)
+         if slice_data.in_path1:
+-            # Generate CGH for the 2D slice pattern
+-            cgh_pattern = generate_cgh(slice_data.points_in_slice)
++            # [G] Standard CGH algorithm (e.g., Gerchberg-Saxton or direct calculation) to modulate laser phase.
++            cgh_pattern = generate_cgh_from_points(slice_data.points_in_slice)
++            # [G] Send CGH pattern data to LC-SLM.
+             display_cgh_on_slm(cgh_pattern)
+             
+-        # Trigger laser pulse
++        # [G] Trigger femtosecond laser pulse.
+         trigger_laser()
+ 
+-def calculate_deflection(target_x, target_y, z_pos):
+-    """
+-    Calculates deflection angles using (x, y) = (f * theta_x, f * theta_y).
+-    f is the composite focal length.
+-    """
+-    # f is derived from the optical system parameters (F-theta, concave, varifocal)
+-    # Not explicitly given as a single number, but implied by the formula.
+-    # theta_x = x / f
+-    # theta_y = y / f
+-    # Note: The sources state f varies depending on axial position due to the
+-    # varifocal lens and concave lens combination.
+-    f = get_composite_focal_length(z_pos)
+-    theta_x = target_x / f
+-    theta_y = target_y / f
+-    return theta_x, theta_y
++def group_points_by_z(points):
++    # [G] Standard binning of z-coordinates into discrete slices.
++    slices = {}
++    for p in points:
++        z_bin = round(p.z)
++        if z_bin not in slices:
++            slices[z_bin] = []
++        slices[z_bin].append(p)
++    return list(slices.values())
++
++def sort_slices_by_shortest_path(slices):
++    # [G] Nearest-neighbor heuristic to minimize scanning path length between consecutive slices.
++    if not slices:
++        return []
++    ordered = [slices[0]]
++    remaining = slices[1:]
++    while remaining:
++        current_z = ordered[-1].z
++        nearest = min(remaining, key=lambda s: abs(s.z - current_z))
++        ordered.append(nearest)
++        remaining.remove(nearest)
++    return ordered
++
++def merge_slices(slices1, slices2):
++    # [G] Interleaving or sequential rendering strategy not specified in sources.
++    return slices1 + slices2
+ 
+ def get_composite_focal_length(z_pos):
+-    """
+-    Returns the composite focal length f for a given axial position.
+-    This depends on the specific settings of the varifocal lens and concave lens.
+-    Not given in the sources as a closed-form function.
+-    """
+-    # [G] Placeholder for the optical model relating z_pos to f.
+-    # In practice, this is calibrated or computed from lens parameters.
+-    pass
++    # [G] Composite focal length f of F-theta, concave, and varifocal lenses.
++    # Varies depending on axial position. Calibrated or computed from lens parameters.
++    return 100.0 # Placeholder value for implementation; actual f depends on varifocal setting.
+ 
+-def get_z_slices(points):
+-    """
+-    Groups points by their z-coordinate into slices.
+-    """
+-    # [G] Standard binning or clustering of z-coordinates.
+-    pass
++def convert_to_voltage(angle):
++    # [G] Linear or calibrated conversion from angle to voltage for galvanometer.
++    return angle * 10.0
+ 
+-def optimize_scan_order(slices):
+-    """
+-    Sorts slices to minimize scanning path length.
+-    """
+-    # [G] Traveling Salesman Problem heuristic or simple nearest-neighbor sort.
+-    pass
+-
+-def merge_slices(slices1, slices2):
+-    """
+-    Merges slices from both paths into a single render sequence.
+-    """
+-    # [G] Interleaving or sequential rendering strategy.
+-    pass
+-
+-def generate_cgh(points_in_slice):
+-    """
+-    Generates a Computer-Generated Hologram for the given 2D points.
+-    """
+-    # [G] Standard CGH algorithm (e.g., Gerchberg-Saxton or direct calculation).
+-    pass
+-
+-def d_a_convert(angle):
+-    """
+-    Converts angle to voltage.
+-    """
+-    # [G] Linear or calibrated conversion factor.
+-    pass
+-
+-def d_a_convert_for_varifocal(z_pos):
+-    """
+-    Converts z-position to voltage for varifocal lens.
+-    """
+-    # [G] Linear or calibrated conversion factor.
+-    pass
++def convert_to_voltage_for_varifocal(z_pos):
++    # [G] Linear or calibrated conversion from z-position to voltage for varifocal lens.
++    return z_pos * 10.0
+ 
+ def set_galvanometer(voltage_x, voltage_y):
+-    """
+-    Sets the galvanometer scanner.
+-    """
++    # [G] Hardware driver call to set galvanometer scanner voltages.
+     pass
+ 
+ def set_varifocal_lens(voltage_z):
+-    """
+-    Sets the varifocal lens.
+-    """
++    # [G] Hardware driver call to set varifocal lens voltage.
+     pass
+ 
++def generate_cgh_from_points(points):
++    # [G] Standard CGH algorithm (e.g., Gerchberg-Saxton or direct calculation) to modulate laser phase.
++    return "cgh_pattern_data"
++
+ def display_cgh_on_slm(cgh_pattern):
+-    """
+-    Displays the CGH pattern on the LC-SLM.
+-    """
++    # [G] Send CGH pattern data to LC-SLM.
+     pass
+ 
+ def trigger_laser():
+-    """
+-    Triggers the femtosecond laser pulse.
+-    """
++    # [G] Trigger femtosecond laser pulse.
+     pass
+ ```
+ 
+ **Edge Cases and Pitfalls**
+-*   **Reflection Damage:** Reflected light from the glass cell surface can damage optical elements. A concave lens is placed immediately after the varifocal lens to mitigate this [S1].
+-*   **Precision:** The horizontal position $(x, y)$ varies with axial position due to the composite focal length $f$. Accurate calibration of $f$ as a function of $z$ is required [S1].
++*   **Reflection Damage:** Reflected light from the glass cell surface can damage optical elements. A concave lens is placed immediately after the varifocal lens to avoid damage to optical elements due to reflected light from the glass cell surface [S1].
++*   **Precision:** The horizontal position $(x, y)$ varies with axial position due to the composite focal length $f$ [S1].
+ *   **Gas Pressure:** The rendering space requires Xenon gas at 750 Torr to reduce excitation threshold and increase brightness. Deviations may affect voxel formation [S1].
+ 
