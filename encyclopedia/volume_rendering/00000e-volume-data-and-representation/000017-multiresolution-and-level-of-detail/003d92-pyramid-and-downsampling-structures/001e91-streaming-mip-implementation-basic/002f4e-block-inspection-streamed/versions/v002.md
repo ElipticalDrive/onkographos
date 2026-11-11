@@ -1,0 +1,47 @@
+# Block Inspection (Streamed)
+Also called: streamed block picking, vox.block.pick.zarr.html
+## Overview
+Block Inspection (Streamed) enables interactive, high-resolution inspection of a specific region within a streamed, multi-resolution volume dataset [S1, unofficial]. Unlike CPU-resident block picking which extracts voxel data into memory, this method opens a secondary streamed volume instance cropped to the picked brick's bounding box, leveraging the underlying octree to serve the finest available levels for that sub-region [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+- Input: A primary streamed volume object (backed by a Zarr or similar store) and a 2D screen coordinate $(x, y)$ representing the user's pick [S1, unofficial].
+- Output: A secondary volume view displaying the high-resolution content of the picked brick's local coordinate space, allowing the user to inspect details not visible in the main viewport due to LOD selection [S1, unofficial].
+**Data Structures:**
+- `StreamedVolume`: The primary volume object managing chunk loading and LOD selection [S1, unofficial].
+- `Octree`: The hierarchical structure mapping grid coordinates to LOD levels [S1, unofficial].
+- `CommonGridBox`: The axis-aligned bounding box (AABB) in the parent volume's common grid coordinates that defines the extent of the picked brick [S1, unofficial].
+**Steps:**
+1. Perform a primary pick at screen coordinates $(x, y)$ to identify the specific brick currently rendered at that location and determine its bounding box in the parent volume's common grid coordinates [S1, unofficial].
+2. Instantiate a second `StreamedVolume` object pointing to the same underlying data store as the primary volume [S1, unofficial].
+3. Configure the secondary volume's spatial bounds to crop to the picked brick's bounding box [S1, unofficial].
+4. Initialize or query the secondary volume's octree; because the secondary volume is smaller, its octree pulls data from finer LOD levels (closer to level 0) for the cropped region without exceeding memory or bandwidth budgets [S1, unofficial].
+5. Apply the sampling fix: ensure the pick sampling mechanism uses `vol.pickSampler` (mm-space, backed by the coarse floor) instead of sampling the parent's CPU image, preventing the pick from landing on the brick's box face [S1, unofficial].
+6. Render the secondary volume view; the visual detail comes from the crop source's finest levels, not the brick's own texture [S1, unofficial].
+**Formulas:**
+- Let $P_{screen}$ be the pick position [S1, unofficial].
+- Let $M_{RAS}$ be the model-view-projection matrix for the primary volume [S1, unofficial].
+- The brick $B$ is identified such that $P_{screen}$ projects into the screen-space bounds of $B$ [S1, unofficial].
+- The crop region $C$ for the secondary volume is defined by the grid indices $[x_{min}, x_{max}] \times [y_{min}, y_{max}] \times [z_{min}, z_{max}]$ corresponding to $B_{brick}$ [S1, unofficial].
+**Parameters:**
+- Crop Region: Defined by the picked brick's common-grid box [S1, unofficial].
+- LOD Level: Determined by the secondary volume's octree based on the cropped size and available budget [S1, unofficial].
+**Edge Cases and Pitfalls:**
+- **Null Extraction:** `extractSubVolume` returns `null` for streamed volumes because the data is not resident in CPU memory; do not attempt to copy voxel data to a CPU buffer [S1, unofficial].
+- **Pick Accuracy:** If the pick sampler falls back to sampling the parent's CPU image, the pick will land on the brick's box face rather than the actual data; the fix is to use `vol.pickSampler` which handles mm-space sampling correctly [S1, unofficial].
+- **Redundant Fetching:** Re-fetching the brick at its own level buys no detail; the detail gain comes from the secondary volume's ability to access finer levels for the cropped region [S1, unofficial].
+## Subtopics
+
+### Block Inspection (CPU)
+CPU-side block picking for resident NIfTI volumes [S1, unofficial]. It resolves a pointer onto a visible brick by slab-testing each brick's exploded millimeter AABB and inverting the exploded `matRAS` matrix, as GPU depth picking cannot see per-brick translations [S1, unofficial]. It uses `extractSubVolume` or `extractChunkBlock` to copy a voxel box out as a complete NIfTI volume, walking the affine's origin to the box so oblique parents remain oblique [S1, unofficial]. It uses the brick's DATA region (not halo) to tile the parent without overlap [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Dependent on the octree traversal depth for the cropped region; since the region is small, LOD selection is fast [S1, unofficial].
+- **Memory Complexity:** Proportional to the size of the cropped brick's finest available LODs; significantly less than loading the full volume at high resolution [S1, unofficial].
+- **Strengths:** Allows high-resolution inspection of specific regions in large, streamed datasets without loading the entire volume into memory [S1, unofficial].
+- **Limitations:** Requires opening a second volume instance, which may have overhead; dependent on the underlying store's ability to serve fine-grained chunks efficiently [S1, unofficial].
+- **When to use:** Interactive exploration of specific features in large multi-resolution volumes [S1, unofficial].
+- **When not to use:** When CPU-side processing of the voxel data is required, or when the dataset is small enough to fit in memory [S1, unofficial].
+## Background
+This method was introduced as part of streamed multi-LOD rendering fixes in the niivue library [S1, unofficial]. It addresses the limitation that streamed volumes do not have a resident CPU image, making traditional `extractSubVolume` methods ineffective [S1, unofficial]. The approach leverages the streaming infrastructure itself to provide high-resolution crops [S1, unofficial].
+## Sources
+[S1] feat(niivue): streamed multi-LOD rendering fixes, LOD compensation, budget plans, and block inspection, https://github.com/niivue/mono/pull/138, fetched 2026-10-27 (unofficial)

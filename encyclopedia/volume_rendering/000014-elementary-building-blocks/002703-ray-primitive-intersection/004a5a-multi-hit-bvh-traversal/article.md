@@ -1,0 +1,89 @@
+# Multi-Hit BVH Traversal
+
+Also called: Multi-Hit BVH Traversal for Volume Clipping, Multi-hit intersection, Multi-hit query
+
+## Overview
+Multi-Hit BVH Traversal is a technique to determine the $N$ closest intersections of a viewing ray with compound clip objects (geometric primitives organized in a Bounding Volume Hierarchy) to construct clip intervals for volume rendering [S1]. It sets itself apart from all-hit queries by using a preallocated static array to avoid costly dynamic memory reallocation, which is essential for real-time implementation [S1]. Unlike texture-based approaches that require multiple rendering passes or depth peeling, this method calculates intervals directly in on-chip GPU memory [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a set of clip primitives (planes, spheres, triangle meshes) organized in a BVH; an integer $N$ representing the maximum number of intersections to retrieve.
+*   **Output:** An array of $N$ intersection distances (or hit records) sorted by proximity to the ray origin.
+
+**Data Structures**
+*   **Clip Primitives:** Stored as Plain Old Data (POD) objects in a C array. This avoids virtual inheritance and vtable lookups, reducing indirection overhead [S1].
+*   **BVH:** Manages triangle meshes. The BVH is rebuilt completely if the triangle mesh changes, as dynamic updates are not supported in this implementation [S1].
+*   **Result Array:** A static memory array of size $N$. The size $N$ must be decided a priori [S1].
+
+**Parameters**
+*   $N$: The maximum number of intersections to retrieve. This value determines the size of the static result array [S1].
+
+**Algorithm Steps**
+1.  **Preallocation:** Allocate a static array of size $N$ to store the intersection results. This avoids dynamic memory allocation during the traversal loop [S1].
+2.  **Traversal:** Execute the multi-hit query on the BVH. The traversal visits nodes and primitives, collecting hit distances.
+3.  **Sorting/Selection:** The implementation ensures the $N$ closest hits are returned. The specific sorting mechanism within the library is abstracted, but the result is an ordered list of the nearest $N$ intersections [S1].
+4.  **Interval Construction:** Use the resulting hit distances to define clip intervals (e.g., $[t_1, t_2], [t_3, t_4]$) for the volume rendering pass [S1].
+
+**Pseudocode**
+The following pseudocode illustrates the usage pattern, assuming a generic ray-tracing library interface (like Visionaray) that supports multi-hit queries with a fixed-size buffer.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Define the maximum number of hits to retrieve
+MAX_HITS = 10
+
+# Preallocate a static array for the results.
+# In a real implementation, this might be a fixed-size struct array.
+hits = [None] * MAX_HITS
+
+# Define the ray
+ray_origin = (0.0, 0.0, 0.0)
+ray_direction = (0.0, 0.0, 1.0)
+
+# Perform the multi-hit query
+# The library handles the BVH traversal and populates 'hits'
+# with the closest intersections up to MAX_HITS.
+num_hits = multi_hit_query(
+    ray_origin=ray_origin,
+    ray_direction=ray_direction,
+    bvh_root=clip_geometry_bvh,
+    max_hits=MAX_HITS,
+    result_buffer=hits
+)
+
+# Construct clip intervals from the hits
+# Assuming hits are sorted by distance t
+clip_intervals = []
+for i in range(0, num_hits - 1, 2):
+    if i + 1 < num_hits:
+        t_start = hits[i].distance
+        t_end = hits[i+1].distance
+        clip_intervals.append((t_start, t_end))
+
+# Use clip_intervals in the volume rendering kernel
+# to skip empty space or handle occlusion.
+```
+
+**Edge Cases and Pitfalls**
+*   **Dynamic Branching:** Switching over primitive types in the innermost traversal loop causes performance degradation. The implementation avoids this by using generic routines that call specific `intersect()` functions for POD objects [S1].
+*   **Register Pressure:** Storing clip intervals in on-chip GPU memory increases register demand per thread on the shading multi-processor (SM), which may impact kernel performance [S1].
+*   **Static Geometry:** Triangle meshes must be static. Changing them requires a complete BVH rebuild [S1].
+*   **Precision:** The method avoids the need for a tiny epsilon $\Delta$ that varies per query, which can cause artifacts and unnecessary BVH traversals in other methods [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the BVH traversal depth and the number of primitives. The multi-hit query is generally more efficient than an all-hit query for large scenes because it stops after finding $N$ hits.
+*   **Memory Complexity:** $O(N)$ for the result array, where $N$ is the maximum number of hits. The BVH structure itself is $O(P)$ where $P$ is the number of primitives.
+*   **Performance:** Evaluated on a 1024x1024 resolution MRI dataset (MNI152, 0.5mm³ voxel size, 364x436x364 voxels) clipped with Utah teapot models [S1].
+    *   Level 1: 2,464 triangles, 1,559 BVH nodes.
+    *   Level 2: 14,784 triangles, 9,771 BVH nodes.
+    *   Level 3: 59,136 triangles, 39,063 BVH nodes.
+    *   Level 4: 236,544 triangles, 151,637 BVH nodes [S1].
+*   **Strengths:** Real-time capable; avoids dynamic memory allocation; no multiple rendering passes or depth peeling required; on-chip memory access is faster than DDR3.
+*   **Limitations:** Requires a priori knowledge of the maximum number of intersections $N$; increased register pressure on GPU; triangle meshes must be static (BVH rebuild required on change) [S1].
+
+## Background
+The method was proposed in the context of real-time volume rendering for neurosurgical applications [S1]. It builds on the Visionaray ray tracing template library [S1] and the BVH construction scheme from [31] (cited in S1). It is conceptually aligned with the approach by Weiskopf et al. [34] (cited in S1), but differs by using a multi-hit query instead of hardware depth buffers and multiple render passes [S1].
+
+## Sources
+[S1] Ray Traced Volume Clipping Using Multi-Hit BVH Traversal, https://doi.org/10.2352/issn.2470-1173.2017.1.vda-392, fetched 2026-10-24

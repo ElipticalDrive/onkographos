@@ -3,105 +3,62 @@
 Also called: Disabled Splat Detection, Splat Data Encoding
 
 ## Overview
-This method defines the binary encoding scheme for 3D Gaussian splats within the `Gaussian-Splat-Lite` renderer and provides the logic to detect "disabled" splats during spatial queries and sorting. It solves the problem of efficiently filtering out inactive or merged Gaussians without allocating separate boolean flags or requiring complex metadata lookups. It is distinct from standard active/inactive flags by embedding the status directly into the data payload's bit pattern, allowing the renderer to treat disabled splats as invalid data (NaN) during coordinate extraction. This builds on [Splat Data Buffer Layout](5568-splat-data-buffer-layout.md).
+This method defines the binary encoding scheme for 3D Gaussian splats and provides the logic to detect "disabled" splats during spatial queries and sorting [S1, unofficial]. It solves the problem of efficiently filtering out inactive or merged Gaussians without allocating separate boolean flags or requiring complex metadata lookups [S1, unofficial]. It is distinct from standard active/inactive flags by embedding the status directly into the data payload's bit pattern, allowing the renderer to treat disabled splats as invalid data (`NaN`) during coordinate extraction [S1, unofficial]. This builds on [Splat Data Buffer Layout](5568-splat-data-buffer-layout.md) [S1, unofficial].
 
 ## How it works
-**Inputs:** A stream of splat data stored in two `Uint32Array` buffers.
-**Outputs:** A boolean indicating if a splat is disabled; modified coordinates (NaN) if disabled.
+**Inputs:** A stream of splat data stored in two `Uint32Array` buffers [S1, unofficial].
+**Outputs:** A boolean indicating if a splat is disabled; modified coordinates (`NaN`) if disabled [S1, unofficial].
 
 **Data Structure:**
-Each splat occupies 32 bytes (8 words), split across two arrays:
+Each splat occupies 32 bytes (8 words), split across two arrays [S1, unofficial]:
 - `splatA`: Words 0–3 (16 bytes).
 - `splatB`: Words 4–7 (16 bytes).
-- Index `i` in `splatB` corresponds to the $i$-th splat.
+- For splat index $i$, the starting index in `splatB` is $i_4 = i \times 4$ [S1, unofficial].
 
 **Disabled Splat Signature:**
-A splat is considered disabled if the following bit pattern is detected in `splatB`:
-1. The upper 16 bits of `splatB[i + 1]` equal `0xfc00`.
-2. The entire value of `splatB[i + 2]` equals `0xfc00fc00`.
+A splat is considered disabled if the following bit pattern is detected in `splatB` [S1, unofficial]:
+1. The upper 16 bits of `splatB[i_4 + 1]` equal `0xfc00`.
+2. The entire value of `splatB[i_4 + 2]` equals `0xfc00fc00`.
 
 **Algorithm:**
 1. For each splat index $i$:
-   a. Read `word1 = splatB[i + 1]`.
-   b. Read `word2 = splatB[i + 2]`.
-   c. Check if `(word1 >> 16) == 0xfc00` AND `word2 == 0xfc00fc00`.
-   d. If true, the splat is disabled.
+   a. Calculate $i_4 = i \times 4$.
+   b. Read `word1 = splatB[i_4 + 1]`.
+   c. Read `word2 = splatB[i_4 + 2]`.
+   d. Check if `(word1 >> 16) == 0xfc00` AND `word2 == 0xfc00fc00` [S1, unofficial].
+   e. If true, the splat is disabled.
 
 **Coordinate Extraction with Detection:**
 When extracting center coordinates $(x, y, z)$ for sorting or spatial queries:
-1. If the splat is disabled, set $x = \text{NaN}$, $y = \text{NaN}$, $z = \text{NaN}$.
-2. If the splat is enabled, extract coordinates normally from the encoding.
-3. Pass these coordinates to the sorting/spatial query function. Standard NaN-aware sorting or spatial partitioning will exclude these entries.
+1. If the splat is disabled, set $x = \text{NaN}$, $y = \text{NaN}$, $z = \text{NaN}$ [S1, unofficial].
+2. If the splat is enabled, extract coordinates normally from the encoding [G].
+3. Pass these coordinates to the sorting/spatial query function. Standard NaN-aware sorting or spatial partitioning will exclude these entries [G].
 
 **Pitfalls:**
-- **False Positives:** If valid Gaussian data accidentally matches the `0xfc00` pattern, the splat will be incorrectly disabled. This pattern must be reserved exclusively for disabled states.
-- **Processing Artifacts:** If disabled splats are not detected and processed as valid, they may cause rendering artifacts or incorrect sorting behavior because their coordinates are undefined or meaningless.
-- **Boundary Checks:** Ensure array bounds are respected when accessing `splatB[i + 1]` and `splatB[i + 2]`.
+- **False Positives:** If valid Gaussian data accidentally matches the `0xfc00` pattern, the splat will be incorrectly disabled. This pattern must be reserved exclusively for disabled states [S1, unofficial].
+- **Processing Artifacts:** If disabled splats are not detected and processed as valid, they may cause rendering artifacts or incorrect sorting behavior because their coordinates are undefined or meaningless [S1, unofficial].
+- **Boundary Checks:** Ensure array bounds are respected when accessing `splatB[i_4 + 1]` and `splatB[i_4 + 2]` [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def is_splat_disabled(splatB, i):
-    """
-    Check if the splat at index i is disabled based on the specific bit pattern.
-    
-    Args:
-        splatB (list or array): The second Uint32Array containing words 4-7 of each splat.
-        i (int): The index of the splat to check.
-        
-    Returns:
-        bool: True if the splat is disabled, False otherwise.
-    """
-    # Access the specific words in the second array
-    # Note: In the source, splatB[i+1] and splatB[i+2] refer to the 
-    # 2nd and 3rd words of the splat's portion in the second array.
-    # Assuming splatB is indexed by splat index directly for the second half.
-    
-    word1 = splatB[i + 1]
-    word2 = splatB[i + 2]
-    
-    # Check upper 16 bits of word1
-    upper_16_bits = (word1 >> 16) & 0xFFFF
-    
-    # Check if pattern matches
-    if upper_16_bits == 0xfc00 and word2 == 0xfc00fc00:
-        return True
-    return False
+    i4 = i * 4
+    word1 = splatB[i4 + 1]
+    word2 = splatB[i4 + 2]
+    return (word1 >> 16) == 0xfc00 and word2 == 0xfc00fc00
 
 def extract_center_with_disabled_check(splatA, splatB, i):
-    """
-    Extract center coordinates for a splat, returning NaN if disabled.
-    
-    Args:
-        splatA (list or array): The first Uint32Array containing words 0-3.
-        splatB (list or array): The second Uint32Array containing words 4-7.
-        i (int): The index of the splat.
-        
-    Returns:
-        tuple: (x, y, z) coordinates. Returns (NaN, NaN, NaN) if disabled.
-    """
     if is_splat_disabled(splatB, i):
         return (float('nan'), float('nan'), float('nan'))
-    
-    # Extract x, y, z from splatA and splatB according to the standard encoding
-    # This part depends on the specific encoding of words 0-7 for valid splats.
-    # Assuming a standard layout where x, y, z are encoded in the first few words.
-    # For example, if x is in splatA[0], y in splatA[1], z in splatA[2]:
+    # Extract x, y, z from splatA and splatB according to the standard encoding [G]
     x = decode_float(splatA[i * 4 + 0])
     y = decode_float(splatA[i * 4 + 1])
     z = decode_float(splatA[i * 4 + 2])
-    
     return (x, y, z)
 
 def decode_float(word):
-    """
-    Helper to decode a 32-bit word into a float.
-    Implementation depends on the specific bit-packing scheme (e.g., IEEE 754).
-    """
-    # Placeholder for actual float decoding logic
-    # In JavaScript, this might involve Uint32Array and Float32Array views.
-    # Here we assume a standard IEEE 754 conversion.
     import struct
     return struct.unpack('f', struct.pack('I', word))[0]
 ```
@@ -109,14 +66,14 @@ def decode_float(word):
 ## Subtopics
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per splat for detection.
-- **Memory Overhead:** Zero additional memory; the status is encoded within the existing 32-byte splat structure.
-- **Performance:** Extremely fast detection via bitwise operations. Avoids branching penalties if the pattern is rare, but requires checking every splat during sorting/querying.
-- **Strengths:** Efficient, compact, and integrates seamlessly with NaN-based filtering in spatial data structures.
-- **Limitations:** Requires strict adherence to the reserved bit pattern; any corruption of the data could lead to false positives or negatives.
+- **Time Complexity:** $O(1)$ per splat for detection [S1, unofficial].
+- **Memory Overhead:** Zero additional memory; the status is encoded within the existing 32-byte splat structure [S1, unofficial].
+- **Performance:** Extremely fast detection via bitwise operations [S1, unofficial].
+- **Strengths:** Efficient, compact, and integrates seamlessly with NaN-based filtering in spatial data structures [S1, unofficial].
+- **Limitations:** Requires strict adherence to the reserved bit pattern; any corruption of the data could lead to false positives or negatives [S1, unofficial].
 
 ## Background
-This method is part of the `Gaussian-Splat-Lite` renderer, an unofficial implementation of 3D Gaussian Splatting optimized for WebGPU. It was developed to handle large-scale Gaussian datasets efficiently in a browser environment, where memory and performance constraints are significant. The specific encoding and detection mechanism were designed to minimize overhead while ensuring robust handling of merged or inactive Gaussians.
+This method is part of the `Gaussian-Splat-Lite` renderer, an unofficial implementation of 3D Gaussian Splatting optimized for WebGPU [S1, unofficial]. It was developed to handle large-scale Gaussian datasets efficiently in a browser environment, where memory and performance constraints are significant [S1, unofficial]. The specific encoding and detection mechanism were designed to minimize overhead while ensuring robust handling of merged or inactive Gaussians [S1, unofficial].
 
 ## Sources
 [S1] WilliamLiu-1997/Gaussian-Splat-Lite, https://github.com/WilliamLiu-1997/Gaussian-Splat-Lite, fetched 2026-10-27 (unofficial)

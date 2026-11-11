@@ -1,0 +1,148 @@
+# Nearest Camera Pose Selection
+
+Also called: Nearest Neighbor Pose Selection, Pose Selection by Distance
+
+## Overview
+Nearest Camera Pose Selection identifies the most relevant training images for a novel view by finding camera poses with minimal positional and angular distance [S1]. It selects a subset of training poses that maximizes image content overlap with the novel view, serving as a prerequisite for feature reprojection in enhancement pipelines [S1]. Unlike [Random Pose Selection](8187-random-pose-selection.md), which interpolates between random poses to ensure visibility, this method explicitly ranks existing training data by geometric proximity to the query pose [S1].
+
+## How it works
+**Inputs:**
+- Novel camera pose $C_k$, defined by rotation matrix $R_k$ and translation vector $\bm{t}_k$.
+- Set of $M$ training poses $\{C_j\}_{j=1}^M$, where each $C_j$ consists of rotation matrix $R_j$ and translation vector $\bm{t}_j$.
+- Parameter $N_{cand}$: Number of initial candidates (typically 5) [S1].
+- Parameter $n$: Number of final neighbors (typically 2) [S1].
+
+**Outputs:**
+- Set of $n$ nearest neighbor training poses $\{C_i\}_{i=1}^n$.
+
+**Data Structures:**
+- Camera Pose: Tuple $(R, \bm{t})$ where $R \in \mathbb{R}^{3 \times 3}$ and $\bm{t} \in \mathbb{R}^3$.
+- Distance Metrics: Scalar values computed per pose pair.
+
+**Steps:**
+1. Compute the positional distance $dist^{j}_{pos}$ between the novel pose $\bm{t}_k$ and every training pose $\bm{t}_j$ for $j=1 \dots M$.
+2. Select the $N_{cand}$ training poses $\{C_p\}_{p=1}^{N_{cand}}$ with the smallest positional distances.
+3. Compute the angular distance $dist^{p}_{ang}$ between the novel rotation $R_k$ and each candidate rotation $R_p$ for $p=1 \dots N_{cand}$.
+4. Select the $n$ training poses $\{C_i\}_{i=1}^n$ from the candidates with the smallest angular distances.
+
+**Formulas:**
+The angular distance is defined as the mean L1 norm of the difference between Euler angles [S1]:
+$$
+dist^{i}_{ang}(R_{k}, R_{i}) = \frac {1}{3} \lvert \pi(R_{k}) - \pi(R_{i}) \rvert _{1}
+$$
+where $\pi(R_i)$ returns the three Euler angles of rotation matrix $R_i$, and $\lvert \cdot \rvert_1$ is the L1 norm (sum of absolute values) [S1].
+
+The positional distance is defined as the mean L1 norm of the translation difference [S1]:
+$$
+dist^{i}_{pos}(\bm {t}_{k}, \bm {t}_{i}) = \frac {1}{3} \lvert \bm {t}_{k} - \bm {t}_{i} \rvert _{1}
+$$
+where $\bm{t}_k$ and $\bm{t}_i$ are the translation vectors of the novel and training cameras, respectively [S1].
+
+The set of initial candidates is:
+$$
+\{C_{p}\}_{p=1}^{N_{cand}} = \{C_{j}\} \mid \ j \in \text{indices of } N_{cand} \text{ smallest values in } \{dist^{j}_{pos}(\bm {t}_{k}, \bm {t}_j)\}_{j=1}^M
+$$
+
+The final set of neighbors is:
+$$
+\{C_{i}\}_{i=1}^{n} = \{C_{p}\} \mid \ p \in \text{indices of } n \text{ smallest values in } \{dist^{p}_{ang}(R_{k}, R_p)\}_{p=1}^{N_{cand}}
+$$
+
+**Parameters:**
+- $N_{cand} = 5$: Used for LLFF and 360v2 datasets [S1].
+- $n = 2$: Used for DTU dataset [S1].
+
+**Edge Cases and Pitfalls:**
+- **Euler Angle Ambiguity:** The method relies on Euler angles $\pi(R)$. Different Euler angle conventions (e.g., ZYX vs XYZ) or gimbal lock singularities may cause discontinuities in the distance metric [S1]. The source does not specify the convention, which is a critical implementation detail [G].
+- **Precision:** The L1 norm is used rather than L2. This is empirically found to be a strong indicator for image content overlap [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def euler_angles_from_rotation_matrix(R):
+    """
+    Extracts 3 Euler angles from a 3x3 rotation matrix.
+    Note: The specific convention (e.g., ZYX, XYZ) is not specified in [S1].
+    Implementer must choose a consistent convention.
+    """
+    # Placeholder for specific Euler extraction logic [G]
+    # Example for ZYX convention:
+    sy = np.sqrt(R[0,0]**2 + R[1,0]**2)
+    singular = sy < 1e-6
+    if not singular:
+        x = np.arctan2(R[2,1], R[2,2])
+        y = np.arctan2(-R[2,0], sy)
+        z = np.arctan2(R[1,0], R[0,0])
+    else:
+        x = np.arctan2(-R[1,2], R[1,1])
+        y = np.arctan2(-R[2,0], sy)
+        z = 0
+    return np.array([x, y, z])
+
+def nearest_camera_pose_selection(novel_pose, training_poses, n_candidates=5, n_final=2):
+    """
+    Selects nearest camera poses based on positional and angular distance.
+    
+    Args:
+        novel_pose: Tuple (R_k, t_k)
+        training_poses: List of tuples [(R_1, t_1), ..., (R_M, t_M)]
+        n_candidates: Number of initial candidates (default 5)
+        n_final: Number of final neighbors (default 2)
+        
+    Returns:
+        List of n_final training poses closest to novel_pose
+    """
+    R_k, t_k = novel_pose
+    
+    # Step 1: Compute positional distances
+    pos_distances = []
+    for i, (R_j, t_j) in enumerate(training_poses):
+        # dist^i_pos(t_k, t_i) = (1/3) * |t_k - t_i|_1
+        diff = np.abs(t_k - t_j)
+        dist = np.sum(diff) / 3.0
+        pos_distances.append((dist, i))
+    
+    # Step 2: Select n_candidates with smallest positional distances
+    pos_distances.sort(key=lambda x: x[0])
+    candidate_indices = [idx for _, idx in pos_distances[:n_candidates]]
+    
+    # Step 3: Compute angular distances for candidates
+    ang_distances = []
+    R_k_euler = euler_angles_from_rotation_matrix(R_k)
+    
+    for idx in candidate_indices:
+        R_j, _ = training_poses[idx]
+        R_j_euler = euler_angles_from_rotation_matrix(R_j)
+        
+        # dist^i_ang(R_k, R_i) = (1/3) * |pi(R_k) - pi(R_i)|_1
+        diff = np.abs(R_k_euler - R_j_euler)
+        dist = np.sum(diff) / 3.0
+        ang_distances.append((dist, idx))
+        
+    # Step 4: Select n_final with smallest angular distances
+    ang_distances.sort(key=lambda x: x[0])
+    final_indices = [idx for _, idx in ang_distances[:n_final]]
+    
+    return [training_poses[idx] for idx in final_indices]
+```
+
+## Subtopics
+
+### [Random Pose Selection](8187-random-pose-selection.md)
+Selects an intermediate camera pose between two randomly chosen training poses to ensure rendering occurs within observed regions, avoiding failures on unobserved parts.
+
+## Operating characteristics
+- **Time Complexity:** $O(M)$ to compute positional distances for all $M$ training poses, followed by $O(N_{cand} \log N_{cand})$ or $O(N_{cand})$ to sort and select angular neighbors. Since $N_{cand}$ and $n$ are small constants, the complexity is linear with respect to the number of training poses $M$.
+- **Memory Complexity:** $O(M)$ to store distances for all poses during the initial selection phase.
+- **Strengths:** Empirically, positional distance is the strongest indicator for image content overlap, followed by angular distance [S1]. This two-stage selection ensures that selected neighbors are both spatially close and similarly oriented.
+- **Limitations:** Relies on the assumption that geometric proximity correlates with visual similarity, which may fail in scenes with large texture variations or repetitive structures. The method does not account for occlusion or lighting changes.
+- **When to use:** When enhancing NeRF renderings with feature reprojection from neighboring views, particularly in datasets like LLFF, 360v2, and DTU [S1].
+
+## Background
+The method was introduced in the context of RoGUENeRF, a robust geometry-consistent universal enhancer for NeRF [S1]. It addresses the need to leverage relevant information from neighboring training images even when camera poses have slight variations, by explicitly selecting the most geometrically similar views for feature reprojection [S1]. The approach was evaluated on LLFF, 360v2, and DTU datasets, demonstrating its utility in real-world multi-view scenarios [S1].
+
+## Sources
+[S1] RoGUENeRF: A Robust Geometry-Consistent Universal Enhancer for NeRF, https://doi.org/10.1007/978-3-031-73254-6_4, fetched 2026-10-29

@@ -3,99 +3,113 @@
 Also called: EgoNeRF Training
 
 ## Overview
-Photometric Optimization is a training procedure for differentiable volume rendering that minimizes the pixel-wise difference between rendered images and ground-truth observations. It solves the inverse problem of recovering scene geometry, appearance, and lighting parameters by treating the rendering process as a differentiable function [S1, S2, S3]. It sets itself apart from [NeRF Training Loop](970-nerf-training-loop.md) by explicitly defining the loss landscape and optimization targets (such as environment maps or per-vertex deformations) rather than relying on a generic training loop structure, and it differs from [Optimization Configuration (Adam + Exponential Decay + Selective L2)](2133-optimization-configuration-adam-exponential-decay-selective-.md) by focusing on the *what* (the loss and parameters) rather than the *how* (the optimizer hyperparameters) [S1, S2].
+Photometric optimization is a training procedure for differentiable volume rendering that minimizes the pixel-wise difference between rendered images and ground-truth observations [S1, S4, S5]. It serves as the primary loss-driven mechanism for refining scene representations (geometry, appearance, lighting) and camera parameters by backpropagating gradients through the volume rendering equation [S1, S4, S5]. It sets itself apart from [Optimization Configuration](2133-optimization-configuration-adam-exponential-decay-selective-.md) by defining the objective function rather than the solver dynamics, and from [Stage-based Differentiable Volume/Radiance Field Training](4241-stage-based-differentiable-volume-radiance-field-training.md) by focusing on the specific loss formulation (photometric vs. multi-stage constraints) rather than the temporal scheduling of training phases [S1, S4].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** A set of $N$ training images $\{I_n\}$ with known camera poses $\{P_n\}$ (or poses to be optimized), and a scene representation (e.g., feature grids, MLPs, or mesh parameters).
-*   **Outputs:** Optimized scene parameters (density, color, geometry, lighting) that minimize the photometric error.
+**Inputs:** A batch of rays $\mathcal{R}$ sampled from training views; ground-truth colors $C(\mathbf{r})$ for each ray; scene parameters $\theta$ (e.g., density grids, color MLP weights, environment maps, deformation vectors); and optionally camera poses $P$.
+
+**Outputs:** Updated scene parameters $\theta'$ and/or poses $P'$ after one or more gradient descent steps.
 
 **Data Structures:**
-The specific data structures depend on the scene representation being optimized. Common structures include:
-*   **Feature Grids:** 3D or spherical grids storing density ($\sigma$) and albedo/feature ($a$) values [S1].
-*   **MLP:** A multi-layer perceptron decoding latent features to color and density [S1].
-*   **Environment Map:** A spherical harmonic or texture map representing global illumination [S1].
-*   **Mesh Vertices:** Per-vertex positions and deformation vectors $\Delta v$ [S2].
+*   **Ray Batch $\mathcal{R}$:** A set of $N$ rays, where each ray $\mathbf{r}$ is defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+*   **Ground Truth $C(\mathbf{r})$:** RGB color vectors corresponding to the rays in $\mathcal{R}$.
+*   **Scene Parameters $\theta$:** Varies by representation. For grid-based methods (e.g., EgoNeRF, DaReNeRF), this includes feature grids $G_\sigma, G_a$ and decoding MLPs $f_{\text{MLP}}$ [S1, S4]. For inverse rendering methods (e.g., IRCasTRF), this includes per-vertex deformation vectors $\Delta v$ and global movement vectors $\Delta m$ [S2].
 
-**Numbered Steps:**
-1.  **Ray Sampling:** For each training image, cast rays through each pixel. Sample points along the ray within the scene bounds.
-2.  **Volume Rendering:** Compute the rendered color $\hat{C}(\mathbf{r})$ for each ray $\mathbf{r}$ using the emission-absorption model:
+**Core Loss Function:**
+The primary objective is the photometric loss, typically the Mean Squared Error (MSE) between rendered color $\hat{C}(\mathbf{r})$ and ground-truth color $C(\mathbf{r})$ [S1, S4]:
+
+$$
+\mathcal{L}_{photo} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \| \hat{C}(\mathbf{r}) - C(\mathbf{r}) \|_2^2
+$$
+
+where $|\mathcal{R}|$ is the number of rays in the batch [S1, S4].
+
+**Regularization and Auxiliary Losses:**
+Depending on the specific variant, additional terms are added to the total loss $\mathcal{L}$:
+
+1.  **Total Variation (TV) Loss:** Used to enforce spatio-temporal continuity and reduce noise, particularly in real-world datasets with imperfect poses or dynamic scenes [S1, S4].
     $$
-    \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+    \mathcal{L}_{reg} = \text{TV}(G)
     $$
-    where $\sigma_i$ is density, $\delta_i$ is step size, $\mathbf{c}_i$ is color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is transmittance [S1, S5, unofficial].
-3.  **Loss Computation:** Calculate the photometric loss $\mathcal{L}$ between the rendered color $\hat{C}(\mathbf{r})$ and the ground-truth color $C(\mathbf{r})$ for a batch of rays $\mathcal{R}$:
+    where $G$ is the feature grid or direction-aware representation [S1, S4].
+
+2.  **Mask Sparsity Loss:** Used in compressed representations (e.g., DaReNeRF) to encourage sparsity in learned masks $M$ [S4].
     $$
-    \mathcal{L} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \| \hat{C}(\mathbf{r}) - C(\mathbf{r}) \|_2^2
+    \mathcal{L}_m = \sum M
     $$
-    [S1]. Additional losses may be applied, such as Total Variation (TV) loss on feature grids to reduce noise in real-world datasets with imperfect poses [S1].
-4.  **Gradient Computation:** Compute gradients $\nabla_\theta \mathcal{L}$ with respect to the scene parameters $\theta$ (e.g., grid values, MLP weights, deformation vectors) using reverse-mode automatic differentiation or adjoint methods [S1, S3].
-5.  **Parameter Update:** Update parameters $\theta$ using an optimizer (e.g., Adam) [S1, S2].
+    where the sum is over all mask values [S4].
+
+3.  **Deformation/Geometry Loss:** Implicit in the photometric term for methods like IRCasTRF, where the absence of specific parameters (like $\Delta v$) leads to artifacts [S2].
+
+**Total Loss Formulation (General):**
+$$
+\mathcal{L} = \mathcal{L}_{photo} + \lambda_{reg} \mathcal{L}_{reg} + \lambda_m \mathcal{L}_m
+$$
+where $\lambda_{reg}$ and $\lambda_m$ are hyperparameters controlling the weight of regularization and sparsity losses, respectively [S4].
+
+**Optimization Steps:**
+1.  **Ray Sampling:** Randomly sample a batch of rays $\mathcal{R}$ from the training camera poses [S1, S4].
+2.  **Forward Rendering:** For each ray $\mathbf{r} \in \mathcal{R}$, compute the rendered color $\hat{C}(\mathbf{r})$ using the current scene parameters $\theta$ and the standard emission-absorption volume rendering equation [44-radiance-field-optimization.md].
+3.  **Loss Computation:** Calculate $\mathcal{L}_{photo}$ using the formula above. If applicable, compute $\mathcal{L}_{reg}$ and $\mathcal{L}_m$ [S1, S4].
+4.  **Gradient Computation:** Compute gradients $\nabla_\theta \mathcal{L}$ and/or $\nabla_P \mathcal{L}$ using automatic differentiation or analytic inversion [44-radiance-field-optimization.md].
+5.  **Parameter Update:** Update parameters $\theta$ (and poses $P$ if optimized) using an optimizer (e.g., Adam) [S1, S4].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def photometric_optimization_step(scene_params, training_data, optimizer):
+def photometric_optimization_step(scene_params, camera_poses, gt_images, ray_sampler, optimizer):
     """
     Performs one step of photometric optimization.
     
     Args:
-        scene_params: Dictionary containing scene representation parameters 
-                      (e.g., feature grids, MLP weights, environment map, mesh vertices).
-        training_data: List of tuples (image, camera_pose).
-        optimizer: Optimization object with step() method.
+        scene_params: Dictionary containing feature grids, MLPs, or mesh parameters.
+        camera_poses: Current camera poses (optional, if optimizing poses).
+        gt_images: Ground truth images corresponding to camera_poses.
+        ray_sampler: Function to sample rays from camera_poses.
+        optimizer: Optimization object (e.g., Adam).
         
     Returns:
-        loss: Scalar photometric loss value.
+        Updated scene_params and camera_poses.
     """
-    optimizer.zero_grad()
+    # 1. Sample rays
+    rays = ray_sampler(camera_poses)
+    # rays contains origins, directions, and indices to ground truth pixels
     
-    total_loss = 0.0
-    ray_batch = []
-    gt_colors = []
+    # 2. Forward pass: Render images
+    rendered_images = render_volume(scene_params, rays)
     
-    # 1. Sample rays and gather ground truth colors
-    for image, pose in training_data:
-        # Sample rays for this image (implementation depends on ray sampler)
-        rays, gt_c = sample_rays_from_image(image, pose)
-        ray_batch.extend(rays)
-        gt_colors.extend(gt_c)
-        
-    ray_batch = torch.stack(ray_batch)
-    gt_colors = torch.stack(gt_colors)
+    # 3. Compute Photometric Loss
+    # Assuming gt_images are aligned with rays
+    gt_colors = gather_gt_colors(gt_images, rays)
+    l_photo = mean_squared_error(rendered_images, gt_colors)
     
-    # 2. Render images using differentiable volume rendering
-    # This function computes the emission-absorption model and is differentiable
-    rendered_colors = volume_render(ray_batch, scene_params)
-    
-    # 3. Compute photometric loss
-    # L2 loss between rendered and ground truth colors
-    photometric_loss = torch.mean((rendered_colors - gt_colors) ** 2)
-    
-    # 4. Add auxiliary losses if applicable (e.g., TV loss for feature grids)
-    # This is specific to certain representations like EgoNeRF
+    # 4. Compute Regularization Losses (if applicable)
+    l_reg = 0.0
     if 'feature_grid' in scene_params:
-        tv_loss = compute_total_variation_loss(scene_params['feature_grid'])
-        total_loss = photometric_loss + tv_loss
-    else:
-        total_loss = photometric_loss
+        l_reg = total_variation_loss(scene_params['feature_grid'])
         
-    # 5. Backpropagate and update
+    l_mask = 0.0
+    if 'mask' in scene_params:
+        l_mask = sum(scene_params['mask'])
+        
+    # 5. Combine Losses
+    # Hyperparameters lambda_reg and lambda_mask should be defined externally
+    total_loss = l_photo + lambda_reg * l_reg + lambda_mask * l_mask
+    
+    # 6. Backward pass and update
+    optimizer.zero_grad()
     total_loss.backward()
     optimizer.step()
     
-    return total_loss.item()
+    return scene_params, camera_poses
 ```
 
-**Parameters:**
-*   **Learning Rate:** Not given in the sources.
-*   **Batch Size:** Number of rays sampled per optimization step. Not given in the sources.
-*   **TV Loss Weight:** Not given in the sources.
-
 **Edge Cases and Pitfalls:**
-*   **Imperfect Camera Poses:** In real-world datasets, camera poses may be inaccurate. This can lead to noise in the reconstructed scene. Mitigation includes optimizing camera poses jointly or applying TV loss to feature grids [S1].
-*   **Missing Deformation Vectors:** In mesh-based inverse rendering, removing per-vertex deformation vectors $\Delta v$ causes floating noisy points in the reconstructed mesh, degrading lighting quality [S2].
+*   **Imperfect Poses:** In real-world datasets, camera poses are often noisy. Optimizing poses jointly with scene parameters requires additional regularization (e.g., TV loss on feature grids) to prevent noise amplification [S1].
+*   **Empty Regions:** Rendering into empty space can waste computation. Using an "emptiness voxel" to skip points in empty regions accelerates training and improves stability [S4].
+*   **Missing Deformation Vectors:** In inverse rendering methods, removing per-vertex deformation vectors ($\Delta v$) leads to floating noisy points and degraded lighting quality [S2].
 
 ## Subtopics
 
@@ -112,20 +126,28 @@ Joint Optimization of Scene and Renderer is a photometric optimization method th
 Optimization parameters used during the explicit mesh shading pass to refine geometry and scene elements (materials, lighting) [S2]. Removing the per-vertex deformation vector $\Delta v$ causes floating noisy points in the reconstructed mesh, which degrades lighting quality [S2]. Both $\Delta v$ and $\Delta m$ are crucial for high-quality reconstruction. Ablation results show full model PSNR/SSIM/LPIPS significantly outperforms variants without $\Delta v$ or $\Delta m$ on both NeRF-synthetic and RefNeRF-synthetic datasets [S2].
 
 ### NeRFLiX
-NeRFLiX constructs training data $\{I_{gt}, I_{1r}, I_{2r}\}$ from an original image sequence $\{I, I_{1r}, I_{2r} | I_{gt}\}$, where $I_{ir}$ uses high-quality supervised views [S3]. It extracts useful information from two high-quality supervised views $I_{1r}$ and $I_{2r}$ to recover the enhanced view $\hat{I}$ [S3].
+Constructs training data $\{I_{gt}, I_{1r}, I_{2r}\}$ from original image sequence $\{I, I_{1r}, I_{2r} | I_{gt}\}$, where $I_{ir}$ uses high-quality supervised views [S3]. Extracts useful information from two high-quality supervised views $I_{1r}$ and $I_{2r}$ to recover the enhanced view $\hat{I}$ [S3].
+
+### DaReNeRF Training Strategy
+Training process using photometric loss, total variation regularization, coarse-to-fine resolution scheduling, and emptiness voxel skipping [S4]. Steps include: computing photometric loss between rendered colors $C(r)$ and ground-truth colors $\hat{C}(r)$; computing total variation (TV) loss on the direction-aware representation to enforce spatio-temporal continuity; computing mask sparsity loss $L_m$ as the sum of all mask values; combining losses: $L = L_{photo} + \lambda_{reg} L_{reg} + \lambda_m L_m$; using coarse-to-fine training strategy, progressively increasing grid resolution; generating emptiness voxel by evaluating opacities across time steps and aggregating via maximum operation; and skipping points in empty regions using the emptiness voxel during rendering [S4]. Regularization weight is $\lambda_{reg}$ [S4].
+
+### Test-Time Photometric Optimization
+Transforms test views to coordinate system of optimized poses by applying scale/rotation/translation from alignment analysis [S5]. Runs test-time photometric optimization on trained models to factor out pose error from view synthesis quality. This is a gradient-driven camera pose alignment minimizing photometric error on synthesized image while keeping NeRF model fixed [S5]. Used in experiments where poses are refined, and also in experiments with fixed initial noisy poses for fairness [S5].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of rays sampled and the complexity of the scene representation (e.g., MLP depth, grid size). Reverse-mode AD requires storing $O(kn)$ intermediate states, leading to high memory usage [S5, unofficial]. Adjoint methods reduce memory to $O(n)$ [S5, unofficial].
-*   **Memory Complexity:** High for standard backpropagation due to storing intermediate transmittance and density values for every sample on every ray [S5, unofficial].
-*   **Strengths:** Directly optimizes for visual fidelity. Can handle complex scene representations including lighting and materials [S1, S2].
-*   **Limitations:** Sensitive to initialization and camera pose accuracy. May converge to local minima if the scene representation is insufficient [S1].
-*   **When to use:** When the goal is to reconstruct a scene from images with high visual fidelity, and the scene representation is differentiable.
-*   **When not to use:** When computational resources are extremely limited and approximate methods are acceptable, or when the scene representation is not differentiable.
+*   **Time Complexity:** Linear with respect to the number of rays $|\mathcal{R}|$ and samples per ray $N$ for the forward pass and gradient computation [44-radiance-field-optimization.md].
+*   **Memory Complexity:** Depends on the differentiation strategy. Reverse-mode AD requires $O(kn)$ intermediate states, while analytic inversion reduces this to $O(n)$ [44-radiance-field-optimization.md].
+*   **Strengths:** Directly optimizes for visual fidelity (PSNR/SSIM); differentiable; works with various scene representations (grids, MLPs, meshes) [S1, S2, S4].
+*   **Limitations:** Sensitive to initial camera poses; prone to local minima if regularization is insufficient; computationally expensive for high-resolution scenes without acceleration techniques (e.g., emptiness voxels) [S1, S4, S5].
+*   **When to Use:** When ground-truth images are available and the goal is high-fidelity novel view synthesis or inverse rendering [S1, S2, S4].
+*   **When Not to Use:** When ground-truth is unavailable (unsupervised) or when computational resources are severely limited without acceleration [S4, S5].
 
 ## Background
-Photometric optimization is a fundamental technique in differentiable rendering and inverse graphics. It has been widely used in NeRF-based methods for novel view synthesis and scene reconstruction. EgoNeRF, for example, uses this approach to optimize feature grids and environment maps for egocentric view synthesis [S1]. IRCasTRF applies it to inverse rendering by optimizing cascaded tensorial radiance fields, lighting, and materials [S2]. NeRFLiX uses it for image enhancement by leveraging supervised views [S3].
+Photometric optimization is a fundamental technique in differentiable rendering, originating from the need to train neural radiance fields (NeRF) and other implicit scene representations from multi-view images [S1, S3, S4]. The method leverages the differentiability of the volume rendering equation to backpropagate pixel errors to scene parameters [44-radiance-field-optimization.md]. Key developments include the use of feature grids (e.g., EgoNeRF) to ensure uniform ray-grid hitting rates, direction-aware representations for dynamic scenes (DaReNeRF), and inverse rendering frameworks that optimize geometry, materials, and lighting jointly (IRCasTRF) [S1, S2, S4]. Test-time optimization has also been introduced to refine poses post-training [S5].
 
 ## Sources
 [S1] Balanced Spherical Grid for Egocentric View Synthesis, https://doi.org/10.1109/cvpr52729.2023.01592, fetched 2026-10-29
 [S2] IRCasTRF: Inverse Rendering by Optimizing Cascaded Tensorial Radiance Fields, Lighting, and Materials From Multi-view Images, https://doi.org/10.1145/3581783.3612010, fetched 2026-10-27
 [S3] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31
+[S4] DaReNeRF: Direction-aware Representation for Dynamic Scenes, https://doi.org/10.1109/cvpr52733.2024.00481, fetched 2026-10-27
+[S5] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26

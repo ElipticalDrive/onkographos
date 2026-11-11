@@ -3,73 +3,55 @@
 Also called: Hardware-Friendly Compression, Iterative Pruning & VQ Compression
 
 ## Overview
-This method is a compression scheme tailored for hardware deployment that reduces model size and memory bandwidth by iteratively pruning Gaussians, reducing spherical harmonics (SH) degree, and quantizing attributes [S1]. It modifies the LightGaussian approach to achieve significantly higher compression ratios (51.6× vs 15×) by adding iterative pruning, progressive SH reduction, and full vector quantization (VQ) on all coefficients and colors [S1].
+A compression scheme tailored for hardware deployment that reduces model size and bandwidth by iteratively pruning Gaussians, reducing spherical harmonics (SH) degree, and quantizing attributes [S1]. It modifies LightGaussian to achieve significantly higher compression ratios (51.6× vs 15×) by adding iterative pruning, progressive SH reduction, and full vector quantization (VQ) on all coefficients and colors [S1].
 
 ## How it works
-The pipeline consists of three sequential stages: iterative Gaussian pruning, progressive SH degree reduction, and vector quantization [S1].
+The pipeline consists of three sequential stages designed to minimize memory footprint and computational complexity for real-time hardware rendering [S1].
 
-**Inputs:** A trained 3D Gaussian Splatting model (Gaussians with positions, covariances, colors, and SH coefficients).
-**Outputs:** A compressed model with reduced Gaussian count, lower SH degree, and quantized attributes.
+**Inputs:** A trained 3D Gaussian Splatting model (positions, covariances, opacities, SH coefficients, colors) [S1].
+**Outputs:** A compressed model with reduced Gaussian count, lower SH degree, and quantized attributes [S1].
 
 **Data Structures:**
-*   **Gaussian Set:** A list of $N$ Gaussians. Each Gaussian $i$ contains:
-    *   Position $\mathbf{p}_i \in \mathbb{R}^3$
-    *   Scale $\mathbf{s}_i \in \mathbb{R}^3$
-    *   Rotation $\mathbf{q}_i \in \mathbb{R}^4$ (quaternion)
-    *   Opacity $\alpha_i \in \mathbb{R}$
-    *   Color/SH coefficients $\mathbf{c}_i$ (initially high-degree SH)
-*   **Pruning Mask:** A boolean array of size $N$ indicating active Gaussians.
+*   **Gaussian Set:** A list of $N$ Gaussians. Each Gaussian $i$ retains position $\mathbf{p}_i$, covariance $\mathbf{\Sigma}_i$, opacity $\alpha_i$, and reduced SH coefficients $\mathbf{c}_i$ [S1].
+*   **Quantization Map:** A codebook for VQ mapping quantized indices to representative values [S1].
 
 **Steps:**
 
 1.  **Iterative Gaussian Pruning:**
-    *   Initialize the set of Gaussians $\mathcal{G}$ from the trained model.
-    *   Define a target compression ratio or a threshold for Gaussian contribution (e.g., based on opacity or projected area) [S1].
-    *   Loop until the target size is reached:
-        *   Evaluate the contribution of each Gaussian to the scene reconstruction error (e.g., using a metric derived from LightGaussian [S1]).
-        *   Identify the least significant Gaussians.
-        *   Remove them from $\mathcal{G}$.
-        *   *Note:* The specific metric for "significance" is not detailed beyond referencing LightGaussian [S1]. [G] Typically, this involves computing the gradient of the loss with respect to the Gaussian parameters or a heuristic based on opacity and scale.
+    *   Evaluate the contribution of each Gaussian to the rendered image.
+    *   Remove Gaussians with negligible contribution or high redundancy.
+    *   Fine-tune the remaining Gaussians to recover rendering quality [S1].
+    *   *Note:* The specific metric for "negligible contribution" (e.g., gradient magnitude, opacity threshold) is not given in the sources [G].
 
 2.  **Progressive Spherical Harmonics (SH) Degree Reduction:**
-    *   Let $D_{max}$ be the initial SH degree (e.g., 3 for 9 coefficients per channel).
-    *   Let $D_{min}$ be the target SH degree (e.g., 0 for constant color).
-    *   For $d$ from $D_{max}$ down to $D_{min}$:
-        *   Truncate the SH coefficients of all remaining Gaussians to degree $d$.
-        *   Fine-tune the model (positions, scales, opacities, and remaining SH coefficients) to recover rendering quality [S1].
-        *   *Note:* The fine-tuning process is not detailed in the sources [S1]. [G] This typically involves gradient descent on the rendering loss with the fixed, truncated SH basis.
+    *   Reduce the SH degree of the remaining Gaussians.
+    *   This step reduces the dimensionality of the color representation per Gaussian [S1].
+    *   *Note:* The specific schedule for degree reduction (e.g., from degree 3 to degree 1) is not given in the sources [G].
 
 3.  **Vector Quantization (VQ):**
-    *   Apply VQ to all SH coefficients and colors [S1].
-    *   Define a codebook $\mathcal{C}$ for each attribute type (SH coefficients, colors).
-    *   For each Gaussian's SH coefficients $\mathbf{c}_i$ and color $\mathbf{v}_i$:
-        *   Find the closest codeword $\mathbf{q}_i \in \mathcal{C}$ to $\mathbf{c}_i$ (and similarly for $\mathbf{v}_i$).
-        *   Replace $\mathbf{c}_i$ and $\mathbf{v}_i$ with the index of $\mathbf{q}_i$.
-    *   *Note:* The codebook size and training method for VQ are not specified [S1]. [G] Standard VQ involves training the codebook using k-means or a neural network-based VQ-VAE on the attribute distributions.
+    *   Apply VQ to **all** SH coefficients and colors.
+    *   Replace continuous coefficient values with discrete indices from a codebook.
+    *   This step drastically reduces the storage size of the attribute data [S1].
 
 **Parameters:**
-*   Target compression ratio: 51.6× [S1].
-*   PSNR loss: 0.743 dB [S1].
+*   **Target Compression Ratio:** 51.6× model-size reduction [S1].
+*   **Acceptable PSNR Loss:** 0.743 dB [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Over-pruning:** Removing too many Gaussians may lead to visible artifacts or holes in the scene.
-*   **SH Truncation:** Reducing SH degree too aggressively may cause color banding or loss of high-frequency details.
-*   **VQ Codebook Size:** A small codebook increases compression but may introduce quantization noise.
+*   **View-Dependent Culling:** Approximately 42% of Gaussian points are unnecessary via near-plane culling, but this percentage is view-dependent. When zooming out, nearly all Gaussians can become visible, decreasing culling benefits [S1].
+*   **Alpha-Blending Contribution:** Only about 50% of Gaussian points contribute to the final pixel color during $\alpha$-blending [S1].
 
 ## Subtopics
 
-### Mini-Splatting-C
-A storage-compression variant based on Mini-Splatting that applies post-processing compression techniques to the trained model [S2]. It trains a pre-trained Mini-Splatting model, stores Gaussian centers as float32, and processes other attributes (scales, SH coefficients) using transform coding [6] followed by standard zip compression [S2]. Mini-Splatting-C demonstrates superior performance compared to other methods primarily tailored for storage compression (referenced as [20, 27] applied to 3DGS) due to the optimized and simplified Gaussian representation [S2].
-
 ## Operating characteristics
-*   **Compression Ratio:** Achieves a 51.6× model-size reduction [S1].
-*   **Quality Loss:** Results in a 0.743 dB PSNR loss [S1].
-*   **Comparison:** Modifies LightGaussian (which achieves 15× reduction) to reach 51.6× by adding iterative pruning, progressive SH reduction, and full VQ on all coefficients/colors [S1].
-*   **Hardware Efficiency:** The compressed model is designed for a hardware accelerator that skips zero-Jacobian matrix multiplications, reducing processing elements by 63% and computation by 53% [S1]. The accelerator operates at 800 MHz, occupies 0.66 mm², consumes 0.219 W, and delivers 1219 Mpixels/J at 267.5 Mpixels/s, enabling 1080p at 129 FPS [S1].
+*   **Compression Ratio:** 51.6× model-size reduction [S1].
+*   **Quality Loss:** 0.743 dB PSNR loss [S1].
+*   **Comparison:** Modifies LightGaussian (15× reduction) to reach 51.6× by adding iterative pruning, progressive SH reduction, and full VQ on all coefficients/colors [S1].
+*   **Hardware Context:** Designed for a TSMC 28-nm process accelerator at 800 MHz, occupying 0.66 mm² with 1.1438 M gates and 120 kB SRAM, consuming 0.219 W, and delivering 1219 Mpixels/J at 267.5 Mpixels/s, enabling 1080p at 129 FPS [S1].
+*   **Computational Savings:** Skips zero-Jacobian matrix multiplications in the projection path, reducing processing elements by 63% and computation by 53% [S1].
 
 ## Background
-The method originates from a paper proposing a dedicated hardware accelerator for real-time rendering of 3DGS models on portable AR/VR devices, targeting full-HD resolution at 120 FPS per eye [S1]. It addresses the substantial memory usage and unnecessary computation of unbounded 360-degree scenes, which typically require millions of Gaussian points [S1]. The approach builds on LightGaussian [4] but enhances it for higher compression ratios suitable for hardware deployment [S1].
+The method was introduced to overcome the limitations of standard 3DGS, which is not hardware-friendly due to substantial memory usage (gigabyte range for unbounded scenes) and inefficient computation (accessing unnecessary points) [S1]. It builds on LightGaussian [S1].
 
 ## Sources
 [S1] A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3683714, fetched 2026-10-27
-[S2] Mini-Splatting: Representing Scenes with a Constrained Number of Gaussians, https://doi.org/10.1007/978-3-031-72980-5_10, fetched 2026-10-26

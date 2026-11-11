@@ -1,0 +1,97 @@
+# Volume-to-Mesh Conversion
+
+Also called: SDF to Mesh Conversion, vdb2mesh, volumeToMesh
+
+## Overview
+Volume-to-Mesh Conversion extracts a triangle and quad mesh from a narrow-band signed distance field (SDF) grid at a specified isosurface value [S1, unofficial]. It distinguishes itself from standard isosurface methods by supporting adaptive mesh refinement and optional mesh relaxation to improve geometry quality [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A signed distance field grid (typically an OpenVDB `FloatGrid`), an isovalue, an adaptive refinement flag, and a relaxation flag.
+- **Output:** Three vectors: vertices (`std::vector<openvdb::Vec3s>`), triangle faces (`std::vector<openvdb::Vec3I>`), and quad faces (`std::vector<openvdb::Vec4I>`).
+
+**Data Structures:**
+The output consists of three standard C++ vectors:
+1.  `points`: A vector of 3D floating-point coordinates (`Vec3s`).
+2.  `faces`: A vector of 3D integer indices (`Vec3I`) representing triangles.
+3.  `quads`: A vector of 4D integer indices (`Vec4I`) representing quadrilaterals.
+
+**Parameters:**
+-   `iso`: The isosurface value. If not explicitly provided, it defaults to half the minimum voxel size:
+    $$ \text{iso} = \frac{\min(\text{voxelSize}.x(), \text{voxelSize}.y(), \text{voxelSize}.z())}{2.0} $$
+    Default value: $1/128$ [S1, unofficial].
+-   `adapt`: Adaptive mesh refinement threshold, ranging from 0 to 1. Default: 0 [S1, unofficial].
+-   `flag_relax`: Boolean toggle for relaxing disoriented triangles during adaptive meshing. Default: true [S1, unofficial].
+
+**Algorithm Steps:**
+1.  Initialize output vectors `v` (vertices), `f` (triangles), and `q` (quads).
+2.  Determine the isovalue. If the user does not specify one, calculate it as half the minimum voxel dimension of the grid.
+3.  Call the extraction routine with the grid, output vectors, isovalue, adapt flag, and relaxation flag.
+4.  The routine traverses the narrow-band SDF grid, identifying surface intersections.
+5.  If `adapt` is enabled, refine the mesh based on the threshold.
+6.  If `flag_relax` is enabled, apply relaxation to disoriented triangles.
+7.  Return the populated vectors.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_to_mesh(grid, iso=None, adapt=0, flag_relax=True):
+    """
+    Extracts a mesh from a signed distance field grid.
+    
+    Args:
+        grid: OpenVDB FloatGrid containing the SDF.
+        iso: Isosurface value. If None, calculated from voxel size.
+        adapt: Adaptive refinement threshold (0-1).
+        flag_relax: Whether to relax disoriented triangles.
+        
+    Returns:
+        points: List of Vec3s (vertices).
+        faces: List of Vec3I (triangle indices).
+        quads: List of Vec4I (quad indices).
+    """
+    # Initialize output containers
+    points = []
+    faces = []
+    quads = []
+    
+    # Determine isovalue if not provided
+    if iso is None:
+        voxel_size = grid.voxelSize()
+        min_voxel = min(voxel_size.x(), voxel_size.y(), voxel_size.z())
+        iso = min_voxel / 2.0
+    
+    # Call the core extraction function
+    # This function populates points, faces, and quads
+    openvdb_tools_volume_to_mesh(grid, points, faces, quads, iso, adapt, flag_relax)
+    
+    return points, faces, quads
+
+def openvdb_tools_volume_to_mesh(grid, points, faces, quads, iso, adapt, flag_relax):
+    """
+    Simulates the OpenVDB volumeToMesh tool behavior.
+    Note: This is a conceptual representation of the C++ API call.
+    """
+    # The actual implementation is in OpenVDB C++ library
+    # openvdb::tools::volumeToMesh(*grid, points, faces, quads, iso, adapt, flag_relax)
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+-   **Isovalue Selection:** If the isovalue is not explicitly set, it defaults to half the minimum voxel size. This assumes the SDF is normalized such that the surface lies at this distance. If the SDF scale differs, the resulting mesh may be incorrect or empty [S1, unofficial].
+-   **Narrow-Band Requirement:** The method expects a narrow-band SDF. If the grid contains wide-band or non-SDF data, the results may be noisy or incorrect [S1, unofficial].
+-   **Adaptive Refinement:** Setting `adapt` to a non-zero value requires careful tuning of the threshold. Too high a value may result in excessive mesh density; too low may miss details [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity:** Not given in the sources.
+-   **Memory Complexity:** Not given in the sources.
+-   **Performance:** The method is implemented in C++ within OpenVDB and exposed via Python bindings. Performance depends on the grid resolution and the narrow-band width. Adaptive meshing adds computational overhead but reduces polygon count for smooth surfaces [S1, unofficial].
+-   **Strengths:** Supports both triangles and quads; adaptive refinement allows for efficient representation of smooth surfaces; mesh relaxation improves triangle quality.
+-   **Limitations:** Requires a signed distance field input; adaptive refinement parameters need tuning; not suitable for non-SDF volume data [S1, unofficial].
+
+## Background
+The method is part of the OpenVDB library, specifically the `openvdb::tools::volumeToMesh` function. It is used in conjunction with mesh-to-volume conversion tools for bidirectional geometry processing. The specific implementation details are found in the `Mesh2Volume` project, which provides Python bindings for OpenVDB operations [S1, unofficial].
+
+## Sources
+[S1] zzilch/Mesh2Volume, https://github.com/zzilch/Mesh2Volume, fetched 2026-10-26 (unofficial)

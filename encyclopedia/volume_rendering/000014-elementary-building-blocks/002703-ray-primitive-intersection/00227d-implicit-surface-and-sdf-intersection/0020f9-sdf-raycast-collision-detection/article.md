@@ -3,24 +3,24 @@
 Also called: SDF Raycast, SDF Sign Change Check
 
 ## Overview
-This method determines if a line segment intersects a surface defined by a Signed Distance Field (SDF) by evaluating the distance function at the segment's endpoints and checking for a sign change. It serves as a lightweight, broad-phase collision detection primitive. Unlike [Kalra & Barr Implicit Surface Intersection](1278-kalra-barr-implicit-surface-intersection.md) which computes the exact intersection point, or [Ray Tracing Implicit Surfaces](2814-ray-tracing-implicit-surfaces.md) which traces the ray through the field, this method only reports binary existence of an intersection within the segment bounds. It is distinct from [Terrain SDF Collision Detection and Resolution](3049-terrain-sdf-collision-detection-and-resolution.md) in that it performs detection only, without resolving penetration or modifying velocity.
+This method determines if a line segment intersects a surface defined by a Signed Distance Field (SDF) by evaluating the distance function at the segment's endpoints and checking for a sign change [S1, unofficial]. It serves as a lightweight, broad-phase collision detection primitive [G]. Unlike [Kalra & Barr Implicit Surface Intersection](1278-kalra-barr-implicit-surface-intersection.md) which computes the exact intersection point, or [Ray Tracing Implicit Surfaces](2814-ray-tracing-implicit-surfaces.md) which traces the ray through the field, this method only reports binary existence of an intersection within the segment bounds [G]. It is distinct from [Terrain SDF Collision Detection and Resolution](3049-terrain-sdf-collision-detection-and-resolution.md) in that it performs detection only, without resolving penetration or modifying velocity [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-- Input: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (unnormalized), ray distance $t_{max}$, SDF evaluator function $F(\mathbf{p})$.
-- Output: Boolean indicating intersection.
+- Input: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (unnormalized), ray distance $t_{max}$, SDF evaluator function $F(\mathbf{p})$ [S1, unofficial].
+- Output: Boolean indicating intersection [S1, unofficial].
 
 **Data Structures**
-No complex data structures are required beyond the SDF evaluator. The SDF evaluator $F$ maps a 3D position to a scalar distance value.
+No complex data structures are required beyond the SDF evaluator [G]. The SDF evaluator $F$ maps a 3D position to a scalar distance value [G].
 
 **Steps**
-1. Normalize the direction vector: $\mathbf{d}_{norm} = \frac{\mathbf{d}}{\|\mathbf{d}\|}$.
-2. Calculate the end position of the ray segment: $\mathbf{p}_{end} = \mathbf{o} + \mathbf{d}_{norm} \cdot t_{max}$.
-3. Evaluate the SDF at the end position: $d_1 = F(\mathbf{p}_{end})$.
-4. Evaluate the SDF at the origin: $d_2 = F(\mathbf{o})$.
-5. Check for a sign change between $d_1$ and $d_2$. A sign change indicates the ray crossed the zero-level set (the surface).
-   - Condition: $(d_1 > 0 \land d_2 < 0) \lor (d_1 < 0 \land d_2 > 0)$.
-6. Return `true` if the condition is met; otherwise, return `false`.
+1. Normalize the direction vector: $\mathbf{d}_{norm} = \frac{\mathbf{d}}{\|\mathbf{d}\|}$ [S1, unofficial].
+2. Calculate the end position of the ray segment: $\mathbf{p}_{end} = \mathbf{o} + \mathbf{d}_{norm} \cdot t_{max}$ [S1, unofficial].
+3. Evaluate the SDF at the end position: $d_1 = F(\mathbf{p}_{end})$ [S1, unofficial].
+4. Evaluate the SDF at the origin: $d_2 = F(\mathbf{o})$ [S1, unofficial].
+5. Check for a sign change between $d_1$ and $d_2$ [S1, unofficial]. A sign change indicates the ray crossed the zero-level set (the surface) [G].
+   - Condition: $(d_1 > 0 \land d_2 < 0) \lor (d_1 < 0 \land d_2 > 0)$ [S1, unofficial].
+6. Return `true` if the condition is met; otherwise, return `false` [S1, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -65,26 +65,26 @@ def sdf_raycast_collision_detection(origin, direction, distance, evaluate_distan
 ```
 
 **Parameters**
-- `distance`: The maximum length of the ray segment. Typical values depend on the simulation timestep or camera frustum depth.
-- `evaluate_distance`: The specific SDF implementation (e.g., terrain height field, primitive SDF).
+- `distance`: The maximum length of the ray segment. Typical values depend on the simulation timestep or camera frustum depth [G].
+- `evaluate_distance`: The specific SDF implementation (e.g., terrain height field, primitive SDF) [G].
 
 **Edge Cases and Pitfalls**
-- **Tangential Intersection**: If the ray grazes the surface such that both endpoints are on the same side (e.g., both positive or both negative) despite touching the surface, this method returns `false`. This is a known limitation of sign-change checks [S1, unofficial].
+- **Tangential Intersection**: If the ray grazes the surface such that both endpoints are on the same side (e.g., both positive or both negative) despite touching the surface, this method returns `false` [G].
 - **Zero Distance**: If `distance` is 0, the ray is a point. The method should handle this to avoid invalid calculations [G].
-- **Precision**: Floating-point precision errors near the surface ($d \approx 0$) may cause incorrect sign determination if the threshold for "zero" is not handled, though standard strict inequality checks are used here [S1, unofficial].
+- **Precision**: Floating-point precision errors near the surface ($d \approx 0$) may cause incorrect sign determination if the threshold for "zero" is not handled, though standard strict inequality checks are used here [G].
 
 ## Subtopics
 
 ## Operating characteristics
-- **Time Complexity**: $O(1)$ per ray. Requires exactly two SDF evaluations and basic arithmetic operations.
-- **Memory Complexity**: $O(1)$. No additional memory allocation beyond local variables.
-- **Strengths**: Extremely fast; suitable for real-time physics broad-phase or coarse collision checks.
-- **Limitations**: Does not provide the intersection point or normal. Misses tangential intersections. Accuracy depends entirely on the SDF resolution and the ray length relative to surface features.
-- **When to use**: When only binary collision presence is needed, or as a fast pre-filter before more expensive exact intersection methods like [Kalra & Barr Implicit Surface Intersection](1278-kalra-barr-implicit-surface-intersection.md).
-- **When not to use**: When precise contact points, normals, or penetration depth are required.
+- **Time Complexity**: Time complexity is $O(1)$ per ray, requiring exactly two SDF evaluations and basic arithmetic operations [G].
+- **Memory Complexity**: Memory complexity is $O(1)$, with no additional memory allocation beyond local variables [G].
+- **Strengths**: Strengths include extreme speed, making it suitable for real-time physics broad-phase or coarse collision checks [G].
+- **Limitations**: Limitations include the lack of intersection point or normal output, missing tangential intersections, and accuracy that depends entirely on the SDF resolution and the ray length relative to surface features [G].
+- **When to use**: It should be used when only binary collision presence is needed, or as a fast pre-filter before more expensive exact intersection methods like [Kalra & Barr Implicit Surface Intersection](1278-kalra-barr-implicit-surface-intersection.md) [G].
+- **When not to use**: It should not be used when precise contact points, normals, or penetration depth are required [G].
 
 ## Background
-This method is a fundamental technique in procedural terrain physics and implicit surface collision detection. It is widely used in game development for simple terrain collision where the terrain is represented as an SDF or height field. The approach is documented in open-source implementations such as the Marching Cubes Terrain project [S1, unofficial]. It relies on the intermediate value theorem: if a continuous function changes sign over an interval, it must cross zero within that interval.
+This method is a fundamental technique in procedural terrain physics and implicit surface collision detection [G]. It is widely used in game development for simple terrain collision where the terrain is represented as an SDF or height field [S1, unofficial]. The approach relies on the intermediate value theorem: if a continuous function changes sign over an interval, it must cross zero within that interval [G]. It is documented in open-source implementations such as the Marching Cubes Terrain project [S1, unofficial].
 
 ## Sources
 [S1] 2JacT/Marching-Cubes-Terrain, https://github.com/2JacT/Marching-Cubes-Terrain, fetched 2026-10-27 (unofficial)

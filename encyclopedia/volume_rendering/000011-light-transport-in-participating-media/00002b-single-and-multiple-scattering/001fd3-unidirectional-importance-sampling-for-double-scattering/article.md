@@ -7,39 +7,31 @@ A fully analytic method to importance sample the geometry terms along 3-segment 
 
 ## How it works
 **Inputs and Outputs**
-*   **Inputs:** Two fixed endpoints $\mathbf{a}$ and $\mathbf{c}$ (defining the first and third vertices of the path), and a ray origin $\mathbf{d}$ with direction $\boldsymbol{\omega}_{dc}$ (defining the fourth vertex's location). The medium is assumed to be isotropic.
-*   **Outputs:** Two intermediate vertices $\mathbf{b}$ and $\mathbf{c}'$ (where $\mathbf{c}'$ lies on the ray from $\mathbf{d}$), effectively defining the path $\mathbf{a} \to \mathbf{b} \to \mathbf{c} \to \mathbf{d}$. Note: In the source notation, the path is often described as connecting $\mathbf{a}$ and $\mathbf{c}$ via $\mathbf{b}$, with the final segment sampled from $\mathbf{d}$. The method samples $\mathbf{b}$ and the distance $t_{dc}$ along the ray from $\mathbf{d}$.
+*   **Inputs:** Two fixed endpoints $\mathbf{a}$ and $\mathbf{c}$ (defining the first and third vertices of the path), and a ray origin $\mathbf{d}$ with direction $\boldsymbol{\omega}_{dc}$ (defining the fourth vertex's location) [S1]. The medium is assumed to be isotropic [S1].
+*   **Outputs:** The intermediate vertex $\mathbf{b}$ and the distance $t_{dc}$ along the ray from $\mathbf{d}$ [S1].
 
 **Data Structures**
-No specific complex data structures are required beyond standard vector arithmetic. The method relies on geometric primitives:
-*   Points $\mathbf{a}, \mathbf{b}, \mathbf{c}, \mathbf{d} \in \mathbb{R}^3$.
-*   Directions $\boldsymbol{\omega} \in \mathbb{R}^3$ (unit vectors).
-*   Distances $t \in \mathbb{R}$.
-*   Random numbers $\xi, \xi_1, \xi_2 \in [0, 1)$.
+No specific complex data structures are required beyond standard vector arithmetic [G]. The method relies on geometric primitives:
+*   Points $\mathbf{a}, \mathbf{b}, \mathbf{c}, \mathbf{d} \in \mathbb{R}^3$ [G].
+*   Directions $\boldsymbol{\omega} \in \mathbb{R}^3$ (unit vectors) [G].
+*   Distances $t \in \mathbb{R}$ [G].
+*   Random numbers $\xi, \xi_1, \xi_2 \in [0, 1)$ [S1].
 
 **Numbered Steps**
-1.  **Define Local Frame:** Establish a local coordinate system where the direction from $\mathbf{c}$ to $\mathbf{a}$ is the z-axis. Let $\boldsymbol{\omega}_{ca} = \frac{\mathbf{a} - \mathbf{c}}{\|\mathbf{a} - \mathbf{c}\|}$.
-2.  **Sample Direction $\boldsymbol{\omega}_{cb}$:** Generate two uniform random numbers $\xi_1, \xi_2 \in [0, 1)$. Compute the spherical coordinates $\theta_{cb}$ and $\phi_{cb}$ relative to the local frame:
+1.  **Define Local Frame:** Establish a local coordinate system where the direction from $\mathbf{c}$ to $\mathbf{a}$ is the z-axis. Let $\boldsymbol{\omega}_{ca} = \frac{\mathbf{a} - \mathbf{c}}{\|\mathbf{a} - \mathbf{c}\|}$ [S1].
+2.  **Sample Direction $\boldsymbol{\omega}_{cb}$:** Generate two uniform random numbers $\xi_1, \xi_2 \in [0, 1)$ [S1]. Compute the spherical coordinates $\theta_{cb}$ and $\phi_{cb}$ relative to the local frame:
     $$ \theta_{cb} = \pi(1 - \sqrt{\xi_1}) $$
     $$ \phi_{cb} = 2\pi\xi_2 $$
-    Construct the direction vector $\boldsymbol{\omega}_{cb}$ in the local frame and transform it back to world coordinates.
-3.  **Sample Distance $t_{cb}$:** Generate a uniform random number $\xi \in [0, 1)$. Compute the distance $t_{cb}$ from $\mathbf{c}$ to $\mathbf{b}$ along $\boldsymbol{\omega}_{cb}$ using the inverse CDF of the equiangular PDF:
+    Construct the direction vector $\boldsymbol{\omega}_{cb}$ in the local frame and transform it back to world coordinates [G].
+3.  **Sample Distance $t_{cb}$:** Generate a uniform random number $\xi \in [0, 1)$ [S1]. Compute the distance $t_{cb}$ from $\mathbf{c}$ to $\mathbf{b}$ along $\boldsymbol{\omega}_{cb}$ using the inverse CDF of the equiangular PDF:
     $$ t_{cb} = t_{ca}^{\perp} + h_{ca}^{\perp} \tan\left(\xi(\pi - \theta_{cb}) + \theta_{cb} - \frac{\pi}{2}\right) $$
-    Here, $t_{ca}^{\perp}$ is the distance from $\mathbf{c}$ to the projection of $\mathbf{a}$ onto the ray $(\mathbf{c}, \boldsymbol{\omega}_{cb})$, and $h_{ca}^{\perp}$ is the perpendicular distance from $\mathbf{a}$ to this ray. Calculate $\mathbf{b} = \mathbf{c} + t_{cb} \boldsymbol{\omega}_{cb}$.
-4.  **Sample Distance $t_{dc}$:** Generate a uniform random number $\xi \in [0, 1)$. Compute the distance $t_{dc}$ from $\mathbf{d}$ to the next vertex along the ray $(\mathbf{d}, \boldsymbol{\omega}_{dc})$. First, calculate the geometric parameters $h_{da}^{\perp}$ (distance from $\mathbf{a}$ to the ray $(\mathbf{d}, \boldsymbol{\omega}_{dc})$) and $t_{da}^{\perp}$ (distance from $\mathbf{d}$ to the projection of $\mathbf{a}$ onto this ray). Then:
-    $$ t_{dc} = t_{da}^{\perp} + h_{da}^{\perp} \tan\left(\xi(\pi - \theta_{da}) + \theta_{da} - \frac{\pi}{2}\right) $$
-    *Correction based on source text:* The source [S1] Equation 35 applies the equiangular sampling for $t_{cb}$. For $t_{dc}$, the source states the PDF is $p(t_{dc} | \Xi) = \frac{1}{C_{t_{dc}}^{\max}} \frac{1}{\sqrt{h_{da}^2 + (t_{da} - t_{dc})^2}}$. However, the sampling step description in the notes says: "Sampling distance $t_{cb}$: ... This uses the equiangular PDF inverse CDF." It does not explicitly give the inverse CDF for $t_{dc}$ in the "step" notes, but Equation 30 defines the PDF. The normalization constant $C_{\Xi}$ is given by Equation 29. The sampling of $t_{dc}$ requires inverting the CDF of Equation 30. The source notes explicitly provide the formula for $t_{cb}$ using equiangular sampling. For $t_{dc}$, the source implies a similar geometric sampling or direct inversion. Given the note "Sampling distance $t_{cb}$... This uses the equiangular PDF inverse CDF", and the PDF for $t_{dc}$ is proportional to $1/r$, which is the same form as equiangular sampling's geometry term, the sampling logic is analogous. The source text for $t_{dc}$ sampling is not explicitly detailed with an inverse CDF formula in the provided notes, but the PDF is defined. We will implement the sampling of $t_{dc}$ by inverting its CDF or using the provided PDF structure if an inverse is not closed-form. However, the note says "Sampling distance $t_{cb}$...". It does *not* list a step for $t_{dc}$ sampling formula in the "step" section, only in the "formula" section. Wait, the note says "Sampling distance $t_{cb}$...". It seems the note might have conflated $t_{cb}$ and $t_{dc}$ or omitted $t_{dc}$'s specific inverse. Let's look at Equation 30: $p(t_{dc}) \propto \frac{1}{\sqrt{h^2 + (t-t_{da})^2}}$. This is the same functional form as the equiangular PDF. The CDF for such a distribution involves $\arcsin$ or $\arctan$. The source [S1] Equation 35 is for $t_{cb}$. The source does not provide a closed-form inverse for $t_{dc}$ in the snippets, but implies it is part of the "fully analytic method". We will assume the standard inversion for $1/r$ weighting or note that it requires numerical inversion if not provided. *Re-reading carefully*: The note "Sampling distance $t_{cb}$" uses the equiangular PDF. The PDF for $t_{dc}$ is *also* proportional to $1/r$. The normalization constant $C_{\Xi}$ is derived in Eq 29. The sampling of $t_{dc}$ is not explicitly detailed with an inverse formula in the provided text snippets, unlike $t_{cb}$. However, the method is described as "fully analytic". The PDF for $t_{dc}$ is $p(t_{dc}) = \frac{1}{C} \frac{1}{\sqrt{h_{da}^2 + (t_{da} - t_{dc})^2}}$. The CDF is $F(t) = \frac{1}{C} [\text{arsinh}(\frac{t-t_{da}}{h_{da}}) - \text{arsinh}(\frac{-t_{da}}{h_{da}})]$. The inverse involves $\sinh$.
-    
-    Let's refine Step 4 based on Eq 29 and 30.
-    The CDF $P(t_{dc})$ is proportional to $\text{arsinh}(\frac{t_{dc} - t_{da}^{\perp}}{h_{da}^{\perp}})$.
-    Inverting $u = \frac{\text{arsinh}(\frac{t - t_{da}^{\perp}}{h_{da}^{\perp}}) - \text{arsinh}(\frac{-t_{da}^{\perp}}{h_{da}^{\perp}})}{\text{arsinh}(\frac{t_{dc}^{\max} - t_{da}^{\perp}}{h_{da}^{\perp}}) - \text{arsinh}(\frac{-t_{da}^{\perp}}{h_{da}^{\perp}})}$:
-    $$ t_{dc} = t_{da}^{\perp} + h_{da}^{\perp} \sinh\left( \text{arsinh}\left(\frac{-t_{da}^{\perp}}{h_{da}^{\perp}}\right) + u \cdot \Delta \right) $$
-    where $\Delta = \text{arsinh}\left(\frac{t_{dc}^{\max} - t_{da}^{\perp}}{h_{da}^{\perp}}\right) - \text{arsinh}\left(\frac{-t_{da}^{\perp}}{h_{da}^{\perp}}\right)$.
-    This matches the structure of the normalization constant derivation.
-
+    Here, $t_{ca}^{\perp}$ is the distance from $\mathbf{c}$ to the projection of $\mathbf{a}$ onto the ray $(\mathbf{c}, \boldsymbol{\omega}_{cb})$, and $h_{ca}^{\perp}$ is the perpendicular distance from $\mathbf{a}$ to this ray [G]. Calculate $\mathbf{b} = \mathbf{c} + t_{cb} \boldsymbol{\omega}_{cb}$ [G].
+4.  **Sample Distance $t_{dc}$:** Generate a uniform random number $\xi \in [0, 1)$ [S1]. Compute the distance $t_{dc}$ from $\mathbf{d}$ to the next vertex along the ray $(\mathbf{d}, \boldsymbol{\omega}_{dc})$ by inverting the CDF of the PDF $p(t_{dc} | \Xi) = \frac{1}{C_{t_{dc}}^{\max}} \frac{1}{\sqrt{h_{da}^2 + (t_{da} - t_{dc})^2}}$ [S1]. First, calculate the geometric parameters $h_{da}^{\perp}$ (distance from $\mathbf{a}$ to the ray $(\mathbf{d}, \boldsymbol{\omega}_{dc})$) and $t_{da}^{\perp}$ (distance from $\mathbf{d}$ to the projection of $\mathbf{a}$ onto this ray) [G]. Then:
+    $$ t_{dc} = t_{da}^{\perp} + h_{da}^{\perp} \sinh\left( \xi \Delta + \text{arsinh}\left(\frac{-t_{da}^{\perp}}{h_{da}^{\perp}}\right) \right) $$
+    where $\Delta = \text{arsinh}\left(\frac{t_{dc}^{\max} - t_{da}^{\perp}}{h_{da}^{\perp}}\right) - \text{arsinh}\left(\frac{-t_{da}^{\perp}}{h_{da}^{\perp}}\right)$ [S1, G].
 5.  **Calculate Joint PDF:** The joint PDF for the sampled vertices is:
     $$ p(\mathbf{b}, t_{dc} | \Xi) = \frac{G(\mathbf{a}, \mathbf{b}) G(\mathbf{b}, \mathbf{c})}{\pi^3 C_{t_{dc}}^{\max}} $$
-    where $G(\mathbf{x}, \mathbf{y})$ is the geometry term between points $\mathbf{x}$ and $\mathbf{y}$, and $C_{t_{dc}}^{\max}$ is the normalization constant.
+    where $G(\mathbf{x}, \mathbf{y})$ is the geometry term between points $\mathbf{x}$ and $\mathbf{y}$, and $C_{t_{dc}}^{\max}$ is the normalization constant [S1].
 
 **Formulas**
 *   **Direction Sampling:**
@@ -51,10 +43,9 @@ No specific complex data structures are required beyond standard vector arithmet
     $$ p(t_{dc} | \Xi) = \frac{1}{C_{t_{dc}}^{\max}} \frac{1}{\sqrt{h_{da}^2 + (t_{da} - t_{dc})^2}} $$
 *   **Normalization Constant $C_{\Xi}$ (for $t_{dc}$):**
     $$ C_{\Xi} = \frac{1}{C_{t_{dc}}^{\max}} = \frac{1}{\text{arsinh}\left(\frac{t_{dc}^{\max} - t_{da}^{\perp}}{h_{da}^{\perp}}\right) - \text{arsinh}\left(\frac{-t_{da}^{\perp}}{h_{da}^{\perp}}\right)} $$
-    *Note: The source uses `a sinh` which is interpreted as $\text{arsinh}$ (inverse hyperbolic sine) given the context of integrating $1/\sqrt{h^2+t^2}$.*
 *   **Joint PDF:**
     $$ p(\mathbf{b}, t_{dc} | \Xi) = \frac{G(\mathbf{a}, \mathbf{b}) G(\mathbf{b}, \mathbf{c})}{\pi^3 C_{t_{dc}}^{\max}} $$
-    The constant $C_{t_{dc}}^{\max}$ incorporates the product of the three isotropic phase functions $(4\pi)^{-3}$.
+    The constant $C_{t_{dc}}^{\max}$ incorporates the product of the three isotropic phase functions $(4\pi)^{-3}$ [S1].
 
 **Parameters**
 *   $t_{dc}^{\max}$: Maximum sampling distance along the ray $(\mathbf{d}, \boldsymbol{\omega}_{dc})$. This is required because the integral of the PDF diverges at infinity [S1]. Typical values depend on the scene scale and medium extent.
@@ -62,59 +53,38 @@ No specific complex data structures are required beyond standard vector arithmet
 **Edge Cases and Pitfalls**
 *   **Singularity at $\theta_{cb} = 0$:** The PDF for $\boldsymbol{\omega}_{cb}$ diverges when $\theta_{cb}$ approaches zero. This singularity is present in the path contribution function as well. By sampling from this specific PDF, the singularity is cancelled out, reducing variance [S1].
 *   **Divergence at Infinity:** The integral for the normalization constant $C_{\Xi}$ diverges at infinity. A maximum sampling distance $t_{dc}^{\max}$ must be set to obtain an analytical expression [S1].
-*   **Isotropic Assumption:** The method assumes isotropic scattering. For anisotropic media, this method is not directly applicable without modification (see [Tabulated Importance Sampling for Anisotropic Scattering](4542-tabulated-importance-sampling-for-anisotropic-scattering.md)) [S1].
+*   **Isotropic Assumption:** The method assumes isotropic scattering [S1].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
-import numpy as np
 
-def sample_unidirectional_double_scattering(a, c, d, omega_dc, t_dc_max, rng):
-    """
-    Samples the intermediate vertex b and distance t_dc for a double-scattering path.
-    
-    Args:
-        a: numpy array, position of first vertex.
-        c: numpy array, position of third vertex.
-        d: numpy array, position of fourth vertex (ray origin).
-        omega_dc: numpy array, direction of ray from d.
-        t_dc_max: float, maximum sampling distance along ray (d, omega_dc).
-        rng: random number generator.
-        
-    Returns:
-        b: numpy array, position of second vertex.
-        t_dc: float, distance from d to the next vertex along omega_dc.
-        pdf: float, the joint PDF value.
-    """
+def sample_unidirectional_double_scattering(a, c, d, omega_dc, t_dc_max):
     # 1. Sample direction omega_cb
-    xi1 = rng.uniform()
-    xi2 = rng.uniform()
+    xi1 = random.random()
+    xi2 = random.random()
     
     # Local frame: z-axis is direction from c to a
-    vec_ca = a - c
-    dist_ca = np.linalg.norm(vec_ca)
-    if dist_ca < 1e-8:
-        # Degenerate case: a and c are coincident
-        # Return a default or handle error. 
-        # For this implementation, we assume distinct a and c.
-        pass
-    z_axis = vec_ca / dist_ca
+    vec_ca = [a[i] - c[i] for i in range(3)]
+    dist_ca = math.sqrt(sum(v*v for v in vec_ca))
+    z_axis = [v / dist_ca for v in vec_ca]
     
     # Generate theta and phi
     theta_cb = math.pi * (1 - math.sqrt(xi1))
     phi_cb = 2 * math.pi * xi2
     
-    # Construct omega_cb in local frame
-    # x_axis and y_axis need to be orthogonal to z_axis
-    # Simple Gram-Schmidt or cross product method
+    # Construct orthonormal basis for local frame
     if abs(z_axis[2]) < 0.9:
-        x_axis = np.cross(z_axis, [0, 0, 1])
+        x_axis = [z_axis[1], -z_axis[0], 0.0]
     else:
-        x_axis = np.cross(z_axis, [1, 0, 0])
-    x_axis = x_axis / np.linalg.norm(x_axis)
-    y_axis = np.cross(z_axis, x_axis)
+        x_axis = [1.0, 0.0, 0.0]
+    norm_x = math.sqrt(sum(v*v for v in x_axis))
+    x_axis = [v / norm_x for v in x_axis]
+    y_axis = [z_axis[1]*x_axis[2] - z_axis[2]*x_axis[1],
+              z_axis[2]*x_axis[0] - z_axis[0]*x_axis[2],
+              z_axis[0]*x_axis[1] - z_axis[1]*x_axis[0]]
     
     # Spherical to Cartesian in local frame
     sin_theta = math.sin(theta_cb)
@@ -122,99 +92,57 @@ def sample_unidirectional_double_scattering(a, c, d, omega_dc, t_dc_max, rng):
     cos_phi = math.cos(phi_cb)
     sin_phi = math.sin(phi_cb)
     
-    omega_cb_local = np.array([
-        sin_theta * cos_phi,
-        sin_theta * sin_phi,
-        cos_theta
-    ])
+    omega_cb_local = [sin_theta * cos_phi, sin_theta * sin_phi, cos_theta]
     
     # Transform to world frame
-    omega_cb = x_axis * omega_cb_local[0] + y_axis * omega_cb_local[1] + z_axis * omega_cb_local[2]
+    omega_cb = [
+        x_axis[0]*omega_cb_local[0] + y_axis[0]*omega_cb_local[1] + z_axis[0]*omega_cb_local[2],
+        x_axis[1]*omega_cb_local[0] + y_axis[1]*omega_cb_local[1] + z_axis[1]*omega_cb_local[2],
+        x_axis[2]*omega_cb_local[0] + y_axis[2]*omega_cb_local[1] + z_axis[2]*omega_cb_local[2]
+    ]
     
     # 2. Sample distance t_cb
-    xi = rng.uniform()
+    xi = random.random()
     
-    # Calculate geometric parameters for c->a projection onto ray (c, omega_cb)
-    # Ray: c + t * omega_cb
-    # Projection of a onto ray: c + t_perp * omega_cb
-    # t_perp = dot(a - c, omega_cb)
-    t_ca_perp = np.dot(a - c, omega_cb)
-    h_ca_perp = np.linalg.norm((a - c) - t_ca_perp * omega_cb)
+    # Geometric parameters for ray (c, omega_cb)
+    vec_ca_ray = [a[i] - c[i] for i in range(3)]
+    t_ca_perp = sum(vec_ca_ray[i]*omega_cb[i] for i in range(3))
+    h_ca_perp = math.sqrt(sum((vec_ca_ray[i] - t_ca_perp*omega_cb[i])**2 for i in range(3)))
     
-    # Equiangular sampling inverse CDF
-    # t_cb = t_ca_perp + h_ca_perp * tan(xi * (pi - theta_cb) + theta_cb - pi/2)
     angle = xi * (math.pi - theta_cb) + theta_cb - math.pi / 2
-    # Handle tan singularity if angle is close to pi/2 + k*pi
-    # The range of angle: xi in [0,1], theta in [0, pi].
-    # Min angle: 0 + theta - pi/2. Max angle: pi - theta + theta - pi/2 = pi/2.
-    # So angle is in [theta - pi/2, pi/2].
-    # If theta is close to 0, min angle is -pi/2. Tan is -inf.
-    # This corresponds to t_cb -> -inf? No, t_cb must be positive.
-    # The source formula assumes valid geometry.
-    
-    tan_val = math.tan(angle)
-    t_cb = t_ca_perp + h_ca_perp * tan_val
-    
-    b = c + t_cb * omega_cb
+    t_cb = t_ca_perp + h_ca_perp * math.tan(angle)
+    b = [c[i] + t_cb * omega_cb[i] for i in range(3)]
     
     # 3. Sample distance t_dc
-    xi2 = rng.uniform()
+    xi2 = random.random()
     
-    # Geometric parameters for a projection onto ray (d, omega_dc)
-    # Ray: d + t * omega_dc
-    t_da_perp = np.dot(a - d, omega_dc)
-    h_da_perp = np.linalg.norm((a - d) - t_da_perp * omega_dc)
+    # Geometric parameters for ray (d, omega_dc)
+    vec_da_ray = [a[i] - d[i] for i in range(3)]
+    t_da_perp = sum(vec_da_ray[i]*omega_dc[i] for i in range(3))
+    h_da_perp = math.sqrt(sum((vec_da_ray[i] - t_da_perp*omega_dc[i])**2 for i in range(3)))
     
-    # Normalization constant calculation
-    # C_Xi = 1 / (arsinh((t_dc_max - t_da_perp)/h_da_perp) - arsinh(-t_da_perp/h_da_perp))
-    # We need to sample t_dc from the PDF proportional to 1/sqrt(h^2 + (t - t_da_perp)^2)
-    # CDF: F(t) = (arsinh((t - t_da_perp)/h) - arsinh(-t_da_perp/h)) / Delta
-    # Delta = arsinh((t_dc_max - t_da_perp)/h) - arsinh(-t_da_perp/h)
-    
-    h = h_da_perp
-    t0 = t_da_perp
-    
-    # Avoid division by zero if h is 0 (a is on the ray)
-    if h < 1e-8:
-        # If a is on the ray, the PDF is singular? 
-        # The source assumes general position. 
-        # Fallback to uniform or handle as degenerate.
+    if h_da_perp < 1e-8:
         t_dc = t_dc_max * xi2
     else:
-        delta = math.asinh((t_dc_max - t0) / h) - math.asinh(-t0 / h)
-        # Inverse CDF: u = (arsinh((t - t0)/h) - arsinh(-t0/h)) / delta
-        # arsinh((t - t0)/h) = u * delta + arsinh(-t0/h)
-        # (t - t0)/h = sinh(u * delta + arsinh(-t0/h))
-        # t = t0 + h * sinh(u * delta + arsinh(-t0/h))
-        
-        u = xi2
-        val = u * delta + math.asinh(-t0 / h)
-        t_dc = t0 + h * math.sinh(val)
+        delta = math.asinh((t_dc_max - t_da_perp) / h_da_perp) - math.asinh(-t_da_perp / h_da_perp)
+        val = xi2 * delta + math.asinh(-t_da_perp / h_da_perp)
+        t_dc = t_da_perp + h_da_perp * math.sinh(val)
         
     # 4. Calculate Joint PDF
-    # p(b, t_dc) = G(a,b) * G(b,c) / (pi^3 * C_t_dc_max)
-    # G(x,y) = max(0, dot(omega_xy, omega_yx)) / dist(x,y)^2 ? 
-    # Standard geometry term G(a,b) = max(0, dot(omega_ab, omega_ba)) / |a-b|^2
-    # Note: The source PDF includes the phase functions (4pi)^-3 in C_t_dc_max.
-    
     def geometry_term(p1, p2):
-        dist = np.linalg.norm(p1 - p2)
-        if dist < 1e-8:
+        dist_sq = sum((p1[i] - p2[i])**2 for i in range(3))
+        if dist_sq < 1e-16:
             return 0.0
-        omega_12 = (p2 - p1) / dist
-        omega_21 = (p1 - p2) / dist
-        return max(0.0, np.dot(omega_12, omega_21)) / (dist * dist)
+        dist = math.sqrt(dist_sq)
+        omega_12 = [(p2[i] - p1[i]) / dist for i in range(3)]
+        omega_21 = [(p1[i] - p2[i]) / dist for i in range(3)]
+        dot_prod = sum(omega_12[i]*omega_21[i] for i in range(3))
+        return max(0.0, dot_prod) / dist_sq
         
     G_ab = geometry_term(a, b)
     G_bc = geometry_term(b, c)
     
-    # C_t_dc_max is the inverse of the denominator in C_Xi formula
-    # C_Xi = 1 / Delta => C_t_dc_max = Delta
-    # Wait, Eq 29: C_Xi = 1 / C_t_dc_max = 1 / Delta. So C_t_dc_max = Delta.
-    # The PDF is p = ... / C_t_dc_max.
-    
-    C_t_dc_max = delta if h >= 1e-8 else 1.0 # Fallback
-    
+    C_t_dc_max = delta if h_da_perp >= 1e-8 else 1.0
     pdf = (G_ab * G_bc) / (math.pi**3 * C_t_dc_max)
     
     return b, t_dc, pdf
@@ -226,12 +154,12 @@ def sample_unidirectional_double_scattering(a, c, d, omega_dc, t_dc_max, rng):
 A method to efficiently tabulate target probability density functions (PDFs) for unidirectional and bidirectional factorizations to handle anisotropic scattering in participating media. It solves the problem of analytically unavailable conditional PDFs for double-scattering paths by precomputing accurate approximations in a compact 2D table, avoiding the limited accuracy and overhead of on-the-fly tabulation. Unlike [Unidirectional Importance Sampling for Double-Scattering](2151-unidirectional-importance-sampling-for-double-scattering.md) which relies on analytic formulations for isotropic media, this method supports general anisotropic phase functions by exploiting symmetries to reduce dimensionality.
 
 ## Operating characteristics
-*   **Time Complexity:** The method involves constant-time mathematical operations (trigonometric, hyperbolic, and square root functions) per sample. It is computationally efficient compared to rejection sampling or numerical integration methods.
-*   **Memory Complexity:** Minimal memory usage, requiring only storage for the geometric parameters and random numbers.
+*   **Time Complexity:** The method involves constant-time mathematical operations (trigonometric, hyperbolic, and square root functions) per sample [S1].
+*   **Memory Complexity:** Minimal memory usage, requiring only storage for the geometric parameters and random numbers [G].
 *   **Strengths:** Fully analytic, avoiding the need for lookup tables or iterative solvers. It effectively cancels out the singularity in the path contribution function, leading to lower variance for double-scattering paths in isotropic media [S1].
-*   **Limitations:** Restricted to isotropic scattering. Requires a maximum sampling distance $t_{dc}^{\max}$ to handle the divergence at infinity, which introduces a bias if not handled carefully (though the source presents it as part of the analytic derivation) [S1].
-*   **When to use:** When rendering isotropic participating media and specifically targeting double-scattering paths for variance reduction.
-*   **When not to use:** For anisotropic media (use [Tabulated Importance Sampling for Anisotropic Scattering](4542-tabulated-importance-sampling-for-anisotropic-scattering.md)) or when higher-order scattering is required without further extensions.
+*   **Limitations:** Restricted to isotropic scattering. Requires a maximum sampling distance $t_{dc}^{\max}$ to handle the divergence at infinity, which introduces a bias if not handled carefully [S1].
+*   **When to use:** When rendering isotropic participating media and specifically targeting double-scattering paths for variance reduction [S1].
+*   **When not to use:** For anisotropic media (use [Tabulated Importance Sampling for Anisotropic Scattering](4542-tabulated-importance-sampling-for-anisotropic-scattering.md)) or when higher-order scattering is required without further extensions [S1].
 
 ## Background
 The method was introduced by [S1] as a generalization of equiangular sampling for single-scattering paths [S1]. It builds on the work of Kulla and Fajardo [2012] for single-scattering and Kalos [1963] for the OCF estimator [S1]. The technique is part of the broader family of importance sampling methods for volumetric path tracing, aiming to reduce variance by aligning the sampling distribution with the geometry terms of the path contribution function [S1].

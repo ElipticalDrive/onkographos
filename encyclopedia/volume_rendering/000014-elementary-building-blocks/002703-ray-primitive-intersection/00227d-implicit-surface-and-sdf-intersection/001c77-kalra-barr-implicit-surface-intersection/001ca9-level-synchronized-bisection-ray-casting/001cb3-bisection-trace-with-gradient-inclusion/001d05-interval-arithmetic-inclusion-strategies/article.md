@@ -3,43 +3,81 @@
 Also called: InclusionFunction strategies
 
 ## Overview
-Interval Arithmetic Inclusion Strategies are a family of methods used within level-synchronized bisection ray casting to compute valid bounds for an implicit function $f$ over an axis-aligned box. These bounds determine whether a box can contain the zero-level set (surface), enabling the pruning of empty space and the calculation of safe step sizes. They are distinguished from sibling methods by their specific approach to bounding the function's variation: some rely on black-box gradient sampling, while others exploit symbolic analytic formulas for tighter constraints.
+Interval Arithmetic Inclusion Strategies provide the mechanism by which [Bisection Trace with Gradient Inclusion](1320-bisection-trace-with-gradient-inclusion.md) bounds the value of an implicit function $f$ over an axis-aligned box to determine if the zero-level set (surface) can exist within that volume. They solve the problem of safe interval evaluation: ensuring that the computed interval $[f](\mathcal{B})$ strictly contains the range of $f$ over $\mathcal{B}$, i.e., $\{f(\mathbf{x}) \mid \mathbf{x} \in \mathcal{B}\} \subseteq [f](\mathcal{B})$. They differ from their siblings by offering a spectrum of trade-offs between **generality** (black-box compatibility vs. symbolic access) and **tightness** of bounds (performance vs. accuracy). Tighter bounds allow larger bisection steps or earlier pruning, reducing the number of ray samples required.
 
 ## Shared principles
-All inclusion strategies in this family share the goal of computing an interval $[f](\mathcal{B}) = [f_-, f_+]$ such that for all $\mathbf{x} \in \mathcal{B}$, $f(\mathbf{x}) \in [f_-, f_+]$ [S1, unofficial]. This interval is used by the parent [Bisection Trace with Gradient Inclusion](1320-bisection-trace-with-gradient-inclusion.md) to decide if a box $\mathcal{B}$ intersects the surface (i.e., if $0 \in [f_-, f_+]$) and to determine the maximum possible deviation of $f$ from a sample point.
+All inclusion strategies in this family share the following mechanism and mathematical requirements:
 
-The strategies are categorized by their access to the function $f$:
-1.  **Black-box strategies**: Require only point evaluations $f(\mathbf{x})$. They must estimate bounds using auxiliary information like the Lipschitz constant [S1, unofficial].
-2.  **Analytic strategies**: Require access to the symbolic formula of $f$. They apply interval arithmetic directly to the expression tree of $f$ [S1, unofficial].
+1.  **Inclusion Property**: For any box $\mathcal{B} \subset \mathbb{R}^3$, the output interval $[f](\mathcal{B})$ must satisfy:
+    $$
+    \{f(\mathbf{x}) \mid \mathbf{x} \in \mathcal{B}\} \subseteq [f](\mathcal{B})
+    $$
+    If $0 \notin [f](\mathcal{B})$, the surface is guaranteed not to intersect $\mathcal{B}$, and the box can be safely pruned.
 
-The choice of strategy involves a trade-off between generality (black-box compatibility) and the tightness of the resulting bounds, which directly impacts rendering performance [S1, unofficial].
+2.  **Monotonicity with Respect to Box Refinement**: If $\mathcal{B}_1 \subseteq \mathcal{B}_2$, then $[f](\mathcal{B}_1) \subseteq [f](\mathcal{B}_2)$. This ensures that as the bisection trace refines the box, the interval bounds converge to the true function range.
+
+3.  **Dependency on Function Representation**: The choice of strategy is determined by the available information about $f$:
+    -   **Black-box**: Only point evaluations $f(\mathbf{x})$ are available.
+    -   **Analytic**: The symbolic formula of $f$ is available, allowing for derivative-based or algebraic interval arithmetic.
+
+4.  **Role in Bisection**: The inclusion function is called during the [Bisection Trace with Gradient Inclusion](1320-bisection-trace-with-gradient-inclusion.md) step. It computes the bounds for the current ray segment (box). If the interval contains zero, the segment is subdivided; otherwise, it is discarded.
 
 ## Subtopics
 
 ### [Lipschitz Constant Estimation](1572-lipschitz-constant-estimation.md)
-See [Lipschitz Constant Estimation](1572-lipschitz-constant-estimation.md). This method estimates the maximum rate of change $\lambda$ of $f$. It is a prerequisite for black-box inclusion strategies like `SamplingInclusion` and `GradientInclusion` to bound the function's variation over a domain.
+Estimates the global Lipschitz constant $\lambda$ for an implicit function $f$, which represents the maximum magnitude of its gradient. This constant is required by black-box interval inclusion strategies to compute safe bounds over a bounding box, enabling the parent [Bisection Trace with Gradient Inclusion](1320-bisection-trace-with-gradient-inclusion.md) to prune intervals where the surface cannot exist. It differs from analytic strategies by relying on sampling rather than symbolic differentiation, trading bound tightness for black-box compatibility. See [Lipschitz Constant Estimation](1572-lipschitz-constant-estimation.md).
 
 ### [Forward Linear Inclusion Function](1714-forward-linear-inclusion-function.md)
-See [Forward Linear Inclusion Function](1714-forward-linear-inclusion-function.md). This method uses the Lipschitz constant $\lambda$ and the value $v_0 = f(t_0)$ at a query point to define linear bounds $[f](t) = v_0 \pm \lambda(t - t_0)$. It serves as the bounding mechanism for the `SamplingInclusion` and `GradientInclusion` strategies.
+The Forward Linear Inclusion Function computes a valid, linear interval bound for a scalar field function $f$ along a ray, ensuring that the true function value at any point $t > t_0$ lies within the calculated interval. It solves the problem of determining a safe step size for sphere tracing by providing a conservative estimate of the function's growth rate. It sets itself apart from its siblings, such as the [Improved Quadratic Taylor Inclusion Function](1902-improved-quadratic-taylor-inclusion-function.md), by using first-order linear bounds rather than second-order quadratic ones, making it simpler but potentially less tight for functions with significant curvature. See [Forward Linear Inclusion Function](1714-forward-linear-inclusion-function.md).
 
 ### SamplingInclusion
-A black-box baseline strategy that works with any function $f: \mathbb{R}^d \rightarrow \mathbb{R}$ where only point evaluations are available [S1, unofficial]. It requires a Lipschitz constant $\lambda$ to bound the function's variation over the box $\mathcal{B}$ [S1, unofficial]. It is less tight than gradient-based or analytic methods but is the only option when the symbolic formula is unknown [S1, unofficial].
+**Definition**: A black-box baseline strategy that works with any function $f(\mathbf{x}) \to \text{scalar}$ without requiring symbolic formula access [S1, unofficial]. It relies on a pre-computed or estimated Lipschitz constant $\lambda$ to bound the function variation over a box $\mathcal{B}$ [S1, unofficial].
+
+**Mechanism**: Given a box $\mathcal{B}$ and a center point $\mathbf{x}_c$, the inclusion function is defined as:
+$$
+[f](\mathcal{B}) = [f(\mathbf{x}_c) - \lambda \cdot \text{diam}(\mathcal{B}), \quad f(\mathbf{x}_c) + \lambda \cdot \text{diam}(\mathcal{B})]
+$$
+where $\text{diam}(\mathcal{B})$ is the diameter (maximum distance between any two points) of the box $\mathcal{B}$ [S1, unofficial]. This ensures that for any $\mathbf{x} \in \mathcal{B}$, $|f(\mathbf{x}) - f(\mathbf{x}_c)| \leq \lambda \|\mathbf{x} - \mathbf{x}_c\| \leq \lambda \cdot \text{diam}(\mathcal{B})$.
+
+**When to choose**: Use when $f$ is a black-box function (e.g., noise, procedural textures, or external libraries) where gradients or symbolic forms are unavailable [S1, unofficial]. It is the most general but often yields the loosest bounds among the four strategies, potentially leading to more bisection steps.
 
 ### GradientInclusion
-The default strategy for `isoray` [S1, unofficial]. It uses the gradient $\nabla f$ of the implicit function to compute tighter bounds than `SamplingInclusion` [S1, unofficial]. It requires access to the gradient of $f$, typically via automatic differentiation or analytical derivation, allowing it to constrain the function's behavior more tightly than simple Lipschitz sampling [S1, unofficial].
+**Definition**: The default strategy that uses the gradient $\nabla f$ to compute tighter bounds than SamplingInclusion [S1, unofficial]. It requires access to the gradient of $f$ [S1, unofficial].
+
+**Mechanism**: For a box $\mathcal{B}$ centered at $\mathbf{x}_c$, the inclusion function uses the first-order Taylor expansion with a remainder bound based on the gradient norm. A common implementation bounds the variation using the maximum gradient magnitude $\lambda_{\mathcal{B}}$ within the box:
+$$
+[f](\mathcal{B}) = [f(\mathbf{x}_c) - \lambda_{\mathcal{B}} \cdot \text{diam}(\mathcal{B}), \quad f(\mathbf{x}_c) + \lambda_{\mathcal{B}} \cdot \text{diam}(\mathcal{B})]
+$$
+where $\lambda_{\mathcal{B}} = \max_{\mathbf{x} \in \mathcal{B}} \|\nabla f(\mathbf{x})\|$ [S1, unofficial]. This is tighter than SamplingInclusion if $\lambda_{\mathcal{B}} < \lambda_{\text{global}}$, as it adapts to local function behavior.
+
+**When to choose**: Use when $f$ is differentiable and gradients are available (analytically or via automatic differentiation). It offers a good balance between generality and tightness, outperforming SamplingInclusion for smooth functions.
 
 ### NaturalIntervalInclusion
-An analytic strategy that uses Natural Interval Arithmetic (NIA) on the symbolic formula of $f$ [S1, unofficial]. It provides tighter bounds than `SamplingInclusion` and `GradientInclusion` when the analytic formula is known [S1, unofficial]. It cannot be used if only black-box point evaluations are available [S1, unofficial].
+**Definition**: An analytic strategy that uses Natural Interval Arithmetic (NIA) on the symbolic formula of $f$ [S1, unofficial]. It provides tighter bounds than SamplingInclusion and GradientInclusion when the analytic formula is known [S1, unofficial].
+
+**Mechanism**: NIA evaluates the interval extension of $f$ by recursively applying interval arithmetic operations to the symbolic expression. For example, if $f(\mathbf{x}) = x^2 + y^2$, and $\mathcal{B} = [x_{min}, x_{max}] \times [y_{min}, y_{max}] \times [z_{min}, z_{max}]$, then:
+$$
+[f](\mathcal{B}) = [x_{min}, x_{max}]^2 + [y_{min}, y_{max}]^2
+$$
+where interval operations are defined as $[a, b] + [c, d] = [a+c, b+d]$ and $[a, b] \cdot [c, d] = [\min(ac, ad, bc, bd), \max(ac, ad, bc, bd)]$ [S1, unofficial].
+
+**When to choose**: Use when $f$ is given as a symbolic expression (e.g., CSG operations, simple primitives). It is more accurate than gradient-based methods because it avoids the overestimation caused by truncating higher-order terms, but it suffers from the "dependency problem" in interval arithmetic, which can still lead to loose bounds for complex expressions.
 
 ### AffineInclusion
-An analytic strategy that uses Affine Arithmetic (AA) on the symbolic formula of $f$ [S1, unofficial]. It provides the tightest bounds among the four strategies, thereby reducing the number of bisection steps needed for convergence [S1, unofficial]. Like `NaturalIntervalInclusion`, it requires access to the symbolic formula [S1, unofficial].
+**Definition**: An analytic strategy that uses Affine Arithmetic (AA) on the symbolic formula of $f$ [S1, unofficial]. It provides the tightest bounds among the four strategies, reducing the number of bisection steps needed [S1, unofficial].
+
+**Mechanism**: AA represents intervals as affine forms $\hat{x} = x_0 + \sum_{i=1}^n \epsilon_i x_i$, where $\epsilon_i \in [-1, 1]$ are independent noise symbols. This allows AA to track correlations between variables, mitigating the dependency problem inherent in NIA. The inclusion function is computed by evaluating the affine form of $f$ over the box [S1, unofficial].
+
+**When to choose**: Use when $f$ is a complex symbolic expression where NIA produces overly loose bounds due to variable dependencies. It is the most computationally expensive strategy but yields the tightest bounds, maximizing pruning efficiency.
 
 ### Parallel Tape Reduction
-A method that simplifies the SDF expression in specific regions of space by coupling pruning and rendering, using interval arithmetic to evaluate nodes in a construction tree [S2]. It relies on well-defined interval arithmetic queries for each node to determine pruning eligibility [S2]. It differs from Lipschitz pruning by using interval arithmetic instead of 1-Lipschitz bounds, requiring explicit interval queries per node rather than treating primitives as black boxes [S2]. This approach allows for efficient pruning of hard and smooth boolean operators, scaling to scenes with thousands of nodes [S2].
+**Definition**: A method that simplifies the SDF expression in specific regions of space by coupling pruning and rendering, using interval arithmetic to evaluate nodes [S2]. It relies on well-defined interval arithmetic queries for each node in the construction tree to determine pruning eligibility [S2].
+
+**Comparison**: Differs from Lipschitz pruning by using interval arithmetic instead of 1-Lipschitz bounds, requiring explicit interval queries per node rather than treating primitives as black boxes [S2]. It is particularly effective for large scenes with thousands of nodes in construction trees, as it efficiently prunes both hard and smooth boolean operators [S2].
 
 ## Background
-The `isoray` library introduced four specific inclusion strategies (`SamplingInclusion`, `GradientInclusion`, `NaturalIntervalInclusion`, `AffineInclusion`) for robust iso-surface rendering via interval-arithmetic ray casting [S1, unofficial]. The library targets black-box functions but offers analytic optimizations when symbolic formulas are available [S1, unofficial]. Parallel Tape Reduction was introduced in the context of hierarchical simplification of primitive-based SDFs to handle large scenes with thousands of nodes by coupling pruning and rendering [S2].
+The concept of using interval arithmetic for robust ray casting was introduced by [Kalra & Barr Implicit Surface Intersection](52-kalra-barr-implicit-surface-intersection.md) and later formalized for general implicit surfaces. The specific classification of inclusion strategies (Sampling, Gradient, Natural, Affine) and their trade-offs is detailed in the **isoray** library documentation [S1, unofficial]. The library targets black-box functions but provides analytic optimizations for known formulas. The **Parallel Tape Reduction** technique, which applies interval arithmetic to hierarchical SDF trees, was introduced in the paper "Lipschitz Pruning: Hierarchical Simplification of Primitive‐Based SDFs" [S2]. This method extends interval-based pruning to complex CSG trees, enabling real-time rendering of large scenes.
 
 ## Sources
-[S1] GitHub - narnia-ai-mason/iso-surface-rendering: Robust iso-surface ..., https://github.com/narnia-ai-mason/iso-surface-rendering, fetched 2026-10-26 (unofficial)
+[S1] GitHub - narnia-ai-mason/iso-surface-rendering: Robust iso-surface ..., https://github.com/narnia-ai-mason/iso-surface-rendering, fetched 2026-10-26, (unofficial)
 [S2] Lipschitz Pruning: Hierarchical Simplification of Primitive‐Based SDFs, https://doi.org/10.1111/cgf.70057, fetched 2026-10-26

@@ -2,7 +2,7 @@
 Also called: Novel Hybrid Strategy, Object-order projection with restricted ray tracing
 
 ## Overview
-This method enables interactive isosurface rendering on multi-core processors by combining object-order traversal with image-order ray casting [S1, unofficial]. It solves the load-balancing and memory hierarchy overhead problems inherent in static screen partitioning by dynamically allocating ray casting tasks to threads based on spatial locality [S1, unofficial]. Unlike sibling methods that may rely on static grid divisions or pure object-order traversal, this approach uses a two-phase hybrid strategy: first identifying candidate data blocks via projection, then restricting ray casting to those limited lists [S1, unofficial].
+This method enables interactive isosurface rendering on multi-core processors by combining object-order traversal with image-order ray casting [S1, unofficial]. It addresses load-balancing and memory hierarchy overhead inherent in static screen partitioning by dynamically allocating ray casting tasks to threads based on spatial locality [S1, unofficial]. Unlike sibling methods such as [Cell-Based First-Hit Ray Casting](1039-cell-based-first-hit-ray-casting.md), [Interactive High Resolution Isosurface Ray Tracing](4093-interactive-high-resolution-isosurface-ray-tracing.md), and [Coherent Multiresolution Isosurface Ray Tracing](4095-coherent-multiresolution-isosurface-ray-tracing.md) that may rely on static grid divisions or pure object-order traversal, this approach uses a two-phase hybrid strategy: first identifying candidate data blocks via projection, then restricting ray casting to those limited lists [S1, unofficial].
 
 ## How it works
 The method operates in two distinct phases to minimize memory overhead and maximize multi-core utilization [S1, unofficial].
@@ -35,86 +35,45 @@ The method operates in two distinct phases to minimize memory overhead and maxim
 
 ```python
 def hybrid_isosurface_rendering(volume_data, camera, isovalue, num_cores):
-    """
-    Renders isosurface using the hybrid strategy.
-    
-    Args:
-        volume_data: 3D-tiled volumetric dataset.
-        camera: Camera parameters for ray generation.
-        isovalue: The scalar threshold for the isosurface.
-        num_cores: Number of available processor cores.
-        
-    Returns:
-        image: Rendered image buffer.
-    """
-    # Phase I: Object-order projection
-    # 1. Initialize compact indexing structure for volume_data
-    index_structure = build_compact_index(volume_data)
+    # Phase I: Object-order projection and candidate identification
+    # 1. Build compact indexing structure for the 3D-tiled volume
+    index_structure = build_compact_index(volume_data) # Not given in the sources.
     
     # 2. Partition screen into packets of contiguous pixels
-    screen_packets = partition_screen(camera.resolution)
+    screen_packets = partition_screen(camera.resolution) # Not given in the sources.
     
     # 3. Identify candidate blocks for each packet
-    #    This involves projecting 3D blocks to image space
     candidate_lists = {}
     for packet in screen_packets:
-        # Get pixels in this packet
-        pixels = get_pixels_in_packet(packet)
-        
-        # Traverse volume and find visible, isosurface-intersecting blocks
-        # Store as front-to-back list for each pixel
+        pixels = get_pixels_in_packet(packet) # Not given in the sources.
         candidates = []
         for pixel in pixels:
-            ray = camera.generate_ray(pixel)
-            # Use index_structure to efficiently find intersecting blocks
-            # Only blocks that are visible AND intersect the isosurface
-            blocks = find_visible_intersecting_blocks(ray, volume_data, index_structure, isovalue)
+            ray = camera.generate_ray(pixel) # Standard math/vector operation.
+            # Traverse volume using index_structure to find visible, isosurface-intersecting blocks
+            blocks = find_visible_intersecting_blocks(ray, volume_data, index_structure, isovalue) # Not given in the sources.
             # Sort blocks front-to-back relative to viewpoint
-            blocks.sort_front_to_back(ray.origin)
+            blocks.sort_front_to_back(ray.origin) # Not given in the sources.
             candidates.append(blocks)
         candidate_lists[packet] = candidates
 
-    # Phase II: Dynamic Ray Casting
+    # Phase II: Dynamic ray casting with load balancing
     # 4. Create task queue from candidate lists
-    task_queue = create_task_queue(candidate_lists)
+    task_queue = create_task_queue(candidate_lists) # Not given in the sources.
     
     # 5. Dynamic allocation of tasks to cores
-    #    Ensure load balancing and spatial locality
     results = [None] * len(screen_packets)
     
-    # Use a thread pool or dynamic scheduler
     def process_task(packet_index, candidates):
         # Ray cast restricted to the candidate list
-        image_buffer = render_packet(candidates, camera, isovalue)
+        image_buffer = render_packet(candidates, camera, isovalue) # Not given in the sources.
         results[packet_index] = image_buffer
 
     # Dynamic scheduling: assign tasks to available cores
-    # This replaces static screen partitioning
-    dynamic_scheduler(task_queue, process_task, num_cores)
+    dynamic_scheduler(task_queue, process_task, num_cores) # Not given in the sources.
     
     # 6. Assemble final image
-    image = assemble_image(results, camera.resolution)
+    image = assemble_image(results, camera.resolution) # Not given in the sources.
     return image
-
-def find_visible_intersecting_blocks(ray, volume_data, index_structure, isovalue):
-    """
-    Finds data blocks that the ray intersects and which contain the isosurface.
-    Uses the compact indexing structure for efficiency.
-    """
-    # Implementation detail: Traverse the 3D-tiled structure
-    # Check if block is visible (not occluded by closer blocks)
-    # Check if block contains isosurface (scalar values straddle isovalue)
-    # Return list of blocks
-    pass
-
-def render_packet(candidates, camera, isovalue):
-    """
-    Renders a packet of pixels by ray casting through their candidate blocks.
-    """
-    # For each pixel in the packet, cast ray through its candidate list
-    # Stop at first isosurface intersection
-    # Compute color using shading model
-    pass
 ```
 
 ### Parameters
@@ -123,20 +82,18 @@ def render_packet(candidates, camera, isovalue):
 *   **Dataset Size:** Up to the maximum size fitting in main memory [S1, unofficial].
 
 ### Pitfalls
-*   **Memory Access Overhead:** The method pays particular attention to the overhead incurred by moving data across different levels of the memory hierarchy [S1, unofficial]. Inefficient memory access patterns can negate the benefits of multi-core parallelism.
-*   **Load Imbalance:** If dynamic allocation is not carefully managed, some cores may finish early while others are overloaded, reducing scalability. The method aims for "almost equal loads" [S1, unofficial].
-*   **Candidate List Size:** If the candidate list for a pixel is too large, the benefit of restricted ray casting diminishes. The object-order phase must effectively prune non-intersecting or occluded blocks.
+*   **Memory Access Overhead:** The method pays particular attention to the overhead incurred by moving data across different levels of the memory hierarchy [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not explicitly stated, but the method achieves interactive rendering for $1024 \times 1024$ resolution on large datasets [S1, unofficial].
-*   **Memory Complexity:** Depends on the size of the 3D-tiled dataset and the compact indexing structure. Datasets up to the maximum size fitting in main memory are supported [S1, unofficial].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
 *   **Performance:** Achieves interactive isosurface rendering on a $1024 \times 1024$ screen for all tested datasets up to the maximum size fitting in main memory [S1, unofficial].
 *   **Scalability:** The method is described as efficient and scalable, with excellent load balancing and high cache performance [S1, unofficial].
 *   **Strengths:** Superior performance compared to previous algorithms due to dynamic load balancing and memory hierarchy optimization [S1, unofficial].
-*   **Limitations:** Requires careful implementation of the compact indexing structure and dynamic task scheduler. Performance may degrade if the isosurface is extremely complex, leading to large candidate lists.
+*   **Limitations:** Not given in the sources.
 
 ## Background
-The method was presented by Qin Wang and Joseph JaJa in a paper titled "Isosurface Ray Tracing on Multi-Core Processors" [S1, unofficial]. It was developed to address the challenges of rendering increasingly large volumetric datasets on multi-core architectures. The work highlights the limitations of static screen partitioning and proposes a hybrid approach to improve performance and load balancing [S1, unofficial].
+The method was presented by Qin Wang and Joseph JaJa in a paper titled "Isosurface Ray Tracing on Multi-Core Processors" [S1, unofficial]. It was developed to address the challenges of rendering increasingly large volumetric datasets on multi-core architectures [S1, unofficial]. The work highlights the limitations of static screen partitioning and proposes a hybrid approach to improve performance and load balancing [S1, unofficial].
 
 ## Sources
 [S1] Interactive High Resolution Isosurface Ray Tracing on Multi-Core Processors, https://www.umiacs.umd.edu/~joseph/isosurface-paper.pdf, fetched 2026-10-26 (unofficial)

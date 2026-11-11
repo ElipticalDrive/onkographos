@@ -17,7 +17,7 @@ Packed Vertex Attribute Encoding is a compression scheme for vertex attributes i
 **Data Structures:**
 The packed vertex is a `uint32_t`. The bit layout depends on the specific variant (Volume Splatting vs. General Mesh vs. Position/Normal/UV) [S1, S2, S3, unofficial].
 
-*Variant 1: Volume Splatting (S1)*
+*Variant 1: Volume Splatting [S1, unofficial]*
 - Bits 0-7 (8 bits): $ix$ ($tx \mod 256$) [S1, unofficial]
 - Bits 8-14 (7 bits): $mx$ ($\lfloor tx / 256 \rfloor$) [S1, unofficial]
 - Bits 15-22 (8 bits): $iy$ ($ty \mod 256$) [S1, unofficial]
@@ -25,7 +25,7 @@ The packed vertex is a `uint32_t`. The bit layout depends on the specific varian
 - Bit 30 (1 bit): $fx$ [S1, unofficial]
 - Bit 31 (1 bit): $fy$ [S1, unofficial]
 
-*Variant 2: General Mesh with AO/Color (S2)*
+*Variant 2: General Mesh with AO/Color [S2, unofficial]*
 - Bits 0-2 (3 bits): `normal_idx` [S2, unofficial]
 - Bits 3-10 (8 bits): `tex_index` [S2, unofficial]
 - Bits 11-12 (2 bits): `corner_idx` [S2, unofficial]
@@ -36,7 +36,7 @@ The packed vertex is a `uint32_t`. The bit layout depends on the specific varian
 - Bits 26-28 (3 bits): `green` (clamped 0-1, scaled by 7) [S2, unofficial]
 - Bits 29-31 (3 bits): `blue` (clamped 0-1, scaled by 7) [S2, unofficial]
 
-*Variant 3: Position/Normal/UV (S3)*
+*Variant 3: Position/Normal/UV [S3, unofficial]*
 - Bits 0-5 (6 bits): x [S3, unofficial]
 - Bits 6-11 (6 bits): y [S3, unofficial]
 - Bits 12-17 (6 bits): z [S3, unofficial]
@@ -54,7 +54,7 @@ The packed vertex is a `uint32_t`. The bit layout depends on the specific varian
 
 **Steps:**
 
-1. **Encode Volume Splatting Attributes (S1):**
+1. **Encode Volume Splatting Attributes [S1, unofficial]:**
    For each vertex, decompose volume texture coordinates $tx$ and $ty$:
    $$ ix = tx \mod 256 $$
    $$ mx = \lfloor tx / 256 \rfloor $$
@@ -65,7 +65,7 @@ The packed vertex is a `uint32_t`. The bit layout depends on the specific varian
    packed = (fy << 31) | (fx << 30) | (my << 23) | (iy << 15) | (mx << 8) | ix
    ```
 
-2. **Encode General Mesh Attributes (S2):**
+2. **Encode General Mesh Attributes [S2, unofficial]:**
    - `normal_idx`: Mask with `0x7`.
    - `tex_index`: Mask with `0xFF`.
    - `corner_idx`: Mask with `0x3`.
@@ -79,10 +79,10 @@ The packed vertex is a `uint32_t`. The bit layout depends on the specific varian
    ```python
    packed = (b_field << 29) | (g_field << 26) | (r_field << 23) | \
             (ao_field << 21) | (height_field << 17) | (width_field << 13) | \
-            (corner_idx << 11) | (tex_index << 3) | normal_idx
+            (corner_idx << 11) | (tex_index << 3) | normal_idx  # [S2, unofficial]
    ```
 
-3. **Encode Position/Normal/UV (S3):**
+3. **Encode Position/Normal/UV [S3, unofficial]:**
    - Mask x, y, z with `0x3F`.
    - Mask `normalIndex` with `0x7`.
    - Mask `uvIndex` with `0x3`.
@@ -91,7 +91,7 @@ The packed vertex is a `uint32_t`. The bit layout depends on the specific varian
    packed = (uvIndex << 21) | (normalIndex << 18) | (z << 12) | (y << 6) | x
    ```
 
-4. **Decompression (S1, S2, S3):**
+4. **Decompression [S1, S2, S3, unofficial]:**
    - **Volume Splatting:** Extract $mx, my, fx, fy$ using a small lookup table [S1, unofficial]. The lookup table is stored in constant registers and accessed via an address register in the vertex shader [S1, unofficial]. Recover $tx = mx \times 256 + ix$ and $ty = my \times 256 + iy$ [S1, unofficial].
    - **General Mesh:**
    ```python
@@ -117,7 +117,7 @@ The packed vertex is a `uint32_t`. The bit layout depends on the specific varian
 **Edge Cases and Pitfalls:**
 - **Precision Loss:** Color and AO are quantized. 3-bit color allows only 8 levels; 2-bit AO allows 4 levels [S2, unofficial].
 - **Boundary Conditions:** Width and height are stored as `value - 1`. Input width/height must be in [1, 16]. Values outside this range must be saturated/clamped [S2, unofficial].
-- **Lookup Table Dependency:** Volume splatting decompression relies on a lookup table for $mx, my, fx, fy$ [S1, unofficial]. The lookup table is stored in constant registers and accessed via an address register in the vertex shader [S1, unofficial].
+- **Lookup Table Dependency:** Volume splatting decompression relies on a lookup table for $mx, my, fx, fy$ [S1, unofficial]. The lookup table is stored in constant registers and accessed via an address register in the vertex shader [S1, unofficial]. [G] Lookup table contents are not specified in the sources; implementers should map the 32-bit packed value to the corresponding slice and offset indices.
 
 ## Subtopics
 
@@ -125,7 +125,7 @@ The packed vertex is a `uint32_t`. The bit layout depends on the specific varian
 Packed Quad Vertex Format is a GPU-ready vertex structure designed to minimize memory bandwidth and VRAM usage during procedural mesh generation and hardware-accelerated volume splatting. It achieves this by packing vertex normals, texture coordinates, ambient occlusion (AO) data, and color metadata into a single 32-bit integer field per vertex, alongside a 3-component position vector. This method is distinct from floating-point attribute storage by using discrete bit-fields for metadata, allowing four vertices of a quad to share compact AO data within a single byte.
 
 ## Operating characteristics
-- **Memory Usage:** Reduces vertex memory significantly. For a $256^3$ volume dataset, vertex memory is reduced from 2048M bytes to 12M bytes (compression ratio 171:1) [S1, unofficial]. In general mesh contexts, vertex format size is reduced from 40 bytes to 12 bytes per vertex [S4, unofficial].
+- **Memory Usage:** Reduces vertex memory significantly [S1, unofficial]. For a $256^3$ volume dataset, vertex memory is reduced from 2048M bytes to 12M bytes (compression ratio 171:1) [S1, unofficial]. In general mesh contexts, vertex format size is reduced from 40 bytes to 12 bytes per vertex [S4, unofficial].
 - **Performance:** Decompression and recovery of texture coordinates require only a few operations in programmable vertex shaders [S1, unofficial]. The use of lookup tables allows efficient hardware acceleration [S1, unofficial].
 - **Scalability:** Supports volume slices up to $2^{15} \times 2^{15}$ voxels [S1, unofficial].
 - **Limitations:** Low precision for color (3-bit/channel) and AO (2-bit) [S2, unofficial]. Limited width/height range (1-16) in the general mesh variant [S2, unofficial].

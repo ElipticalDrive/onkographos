@@ -3,77 +3,123 @@
 Also called: 8-point frustum test, Box culling
 
 ## Overview
-AABB Culling determines if a box defined by 8 vertices is completely outside a viewing box along any axis, returning false if culled and true otherwise [S1, unofficial].
+AABB Culling determines if a box defined by 8 vertices is completely outside a viewing box along any axis, returning false if culled and true otherwise [S1, unofficial]. It serves as a view-dependent pre-processing step to filter out primitives that do not intersect the camera viewport [S1, unofficial]. Unlike [Ray-box intersection](776-ray-box-intersection.md), which computes precise entry and exit distances for intersection testing, this method performs a binary containment check to reject objects early [S1, unofficial]. It differs from [Bounding Box Culling](1806-bounding-box-culling.md) by operating on static 3D axis-aligned boxes rather than projected 2D Gaussian footprints [S1, unofficial].
 
 ## How it works
 **Inputs:**
 - `points`: An array of 8 vectors `[x, y, z]` representing the vertices of the object box [S1, unofficial].
-- `box`: An array of 6 scalar values defining the viewing volume boundaries, packed as `[min_x, min_y, min_z, max_x, max_y, max_z]` corresponding to indices `[0, 1, 2, 3, 4, 5]` respectively [S1, unofficial].
+- `box`: A viewing box defined by 6 scalar values `[box[0], box[1], box[2], box[3], box[4], box[5]]` [S1, unofficial]. The indices correspond to:
+  - `box[0]`: Minimum X
+  - `box[1]`: Minimum Y
+  - `box[2]`: Minimum Z
+  - `box[3]`: Maximum X
+  - `box[4]`: Maximum Y
+  - `box[5]`: Maximum Z
 
 **Outputs:**
-- Boolean: `true` if the box overlaps the viewing box, `false` if it is completely outside [S1, unofficial].
+- `bool`: True if the box is potentially visible (not completely outside), False if culled [S1, unofficial].
 
 **Data Structures:**
-- `points`: List of 8 elements, each a 3-component vector `[x, y, z]` [S1, unofficial].
-- `box`: List of 6 scalar values defining the axis-aligned viewing volume boundaries [S1, unofficial].
+- The `points` array is indexed 0 to 7. The specific vertex ordering is not defined in the sources [S1, unofficial].
+- The `box` array is indexed 0 to 5.
 
 **Steps:**
 1. Initialize a counter `out = 0` [S1, unofficial].
-2. Loop `i` from 0 to 7: if `points[i][0] > box[3]`, increment `out` [S1, unofficial]. If `out == 8`, return `false` [S1, unofficial].
-3. Reset `out = 0` [S1, unofficial]. Loop `i` from 0 to 7: if `points[i][0] < box[0]`, increment `out` [S1, unofficial]. If `out == 8`, return `false` [S1, unofficial].
-4. Reset `out = 0` [S1, unofficial]. Loop `i` from 0 to 7: if `points[i][1] > box[4]`, increment `out` [S1, unofficial]. If `out == 8`, return `false` [S1, unofficial].
-5. Reset `out = 0` [S1, unofficial]. Loop `i` from 0 to 7: if `points[i][1] < box[1]`, increment `out` [S1, unofficial]. If `out == 8`, return `false` [S1, unofficial].
-6. Reset `out = 0` [S1, unofficial]. Loop `i` from 0 to 7: if `points[i][2] > box[5]`, increment `out` [S1, unofficial]. If `out == 8`, return `false` [S1, unofficial].
-7. Reset `out = 0` [S1, unofficial]. Loop `i` from 0 to 7: if `points[i][2] < box[2]`, increment `out` [S1, unofficial]. If `out == 8`, return `false` [S1, unofficial].
-8. Return `true` [S1, unofficial].
+2. Loop `i` from 0 to 7:
+   - If `points[i][0] > box[3]`, increment `out` [S1, unofficial].
+   - If `out == 8`, return `false` [S1, unofficial].
+3. Repeat the check for the remaining axes:
+   - If `points[i][0] < box[0]`, increment `out` [S1, unofficial].
+   - If `out == 8`, return `false` [S1, unofficial].
+   - If `points[i][1] > box[4]`, increment `out` [S1, unofficial].
+   - If `out == 8`, return `false` [S1, unofficial].
+   - If `points[i][1] < box[1]`, increment `out` [S1, unofficial].
+   - If `out == 8`, return `false` [S1, unofficial].
+   - If `points[i][2] > box[5]`, increment `out` [S1, unofficial].
+   - If `out == 8`, return `false` [S1, unofficial].
+   - If `points[i][2] < box[2]`, increment `out` [S1, unofficial].
+   - If `out == 8`, return `false` [S1, unofficial].
+4. Return `true` [S1, unofficial].
 
-**Parameters:**
-- `points`: Array of 8 vectors `[x, y, z]` representing the vertices of the object box [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-- The source does not specify behavior for non-axis-aligned boxes or boundary precision conditions [S1, unofficial].
-
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def aabb_culling(points, box):
-    """
-    points: list of 8 tuples (x, y, z)
-    box: list of 6 scalars [min_x, min_y, min_z, max_x, max_y, max_z]
-         Indices: 0=min_x, 1=min_y, 2=min_z, 3=max_x, 4=max_y, 5=max_z [S1, unofficial]
-    """
-    # Check each of the 6 half-space bounds sequentially [S1, unofficial]
-    bounds = [
-        (lambda p: p[0] > box[3]),  # x > max_x
-        (lambda p: p[0] < box[0]),  # x < min_x
-        (lambda p: p[1] > box[4]),  # y > max_y
-        (lambda p: p[1] < box[1]),  # y < min_y
-        (lambda p: p[2] > box[5]),  # z > max_z
-        (lambda p: p[2] < box[2])   # z < min_z
-    ]
-    for check in bounds:
-        out = 0
-        for i in range(8):
-            if check(points[i]):
-                out += 1
-        if out == 8:
-            return False
+    # points: list of 8 tuples (x, y, z)
+    # box: list of 6 floats [min_x, min_y, min_z, max_x, max_y, max_z]
+    
+    out = 0
+    
+    # Check against Max X (box[3])
+    for i in range(8):
+        if points[i][0] > box[3]:
+            out += 1
+            if out == 8:
+                return False
+                
+    # Check against Min X (box[0])
+    for i in range(8):
+        if points[i][0] < box[0]:
+            out += 1
+            if out == 8:
+                return False
+                
+    # Check against Max Y (box[4])
+    for i in range(8):
+        if points[i][1] > box[4]:
+            out += 1
+            if out == 8:
+                return False
+                
+    # Check against Min Y (box[1])
+    for i in range(8):
+        if points[i][1] < box[1]:
+            out += 1
+            if out == 8:
+                return False
+                
+    # Check against Max Z (box[5])
+    for i in range(8):
+        if points[i][2] > box[5]:
+            out += 1
+            if out == 8:
+                return False
+                
+    # Check against Min Z (box[2])
+    for i in range(8):
+        if points[i][2] < box[2]:
+            out += 1
+            if out == 8:
+                return False
+                
     return True
 ```
 
+**Parameters:**
+- `points`: Array of 8 vectors [x, y, z] representing the vertices of the object box [S1, unofficial].
+- `box`: Viewing box boundaries [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- The source does not specify the vertex ordering of the 8 points [S1, unofficial].
+- The source does not specify if the box boundaries are inclusive or exclusive [S1, unofficial].
+
 ## Subtopics
 
-### [Bounding Box Culling](1806-bounding-box-culling.md)
-Bounding Box Culling is a view-dependent pre-processing step that filters out 3D Gaussians whose projected 2D footprint does not intersect the camera viewport. It differs from general [AABB Culling](1789-aabb-culling.md) by operating on the projected 2D ellipse of a Gaussian rather than a static 3D axis-aligned box, thereby enabling early rejection of primitives that are off-screen in screen space.
-
 ### Subspace Culling for Ray-Box Intersection
-Subspace Culling reduces false-positive hits in ray-box intersection tests by embedding a binary voxel data structure into the volume, allowing cheap ray-voxel intersection via bitwise AND operations [S2, unofficial]. It represents the ray as a conservative voxel volume and performs intersection checks using bitwise AND between the ray's voxel volume and the embedded voxel data structure [S2, unofficial]. This method is applicable to hierarchical data structures such as Bounding Volume Hierarchies (BVH) to reduce the number of intersections during traversal [S2, unofficial]. It compresses the voxel data using a lookup table to achieve significant false-positive reductions with a small memory footprint [S2, unofficial]. Unlike oriented bounding boxes which reduce false positives but are computationally expensive, this method uses cheap bitwise operations on voxel data [S2, unofficial]. A pitfall of standard AABBs is that they produce extra empty space, leading to false-positive hits for thin and diagonal primitives, which this method aims to reduce [S2, unofficial].
+A culling approach to reduce false-positive hits in ray-box intersection tests by embedding a binary voxel data structure into the volume, allowing cheap ray-voxel intersection via bitwise AND operations [S2, unofficial]. Unlike oriented bounding boxes which reduce false positives but are computationally expensive, this method uses cheap bitwise operations on voxel data [S2, unofficial]. Axis-aligned bounding boxes (AABBs) produce extra empty space, leading to false-positive hits for thin and diagonal primitives, which this method aims to reduce [S2, unofficial]. The method represents the ray as a conservative voxel volume and performs ray-voxel intersection using cheap bitwise AND operations between the ray's voxel volume and the embedded voxel data structure [S2, unofficial]. It applies this culling within hierarchical data structures such as Bounding Volume Hierarchies (BVH) to reduce the number of intersections during traversal [S2, unofficial]. The voxel data can be compressed using a lookup table to achieve significant false-positive reductions with a small memory footprint [S2, unofficial].
 
 ## Operating characteristics
-Not given in the sources.
+Time and memory complexity: Not given in the sources.
+Measured performance: Not given in the sources.
+Scaling: Not given in the sources.
+Strengths and limitations: The 8-point test provides a simple binary rejection criterion [S1, unofficial]. However, AABBs produce extra empty space, leading to false-positive hits for thin and diagonal primitives [S2, unofficial].
+When to use it and when not: Use for simple view-dependent pre-processing [S1, unofficial]. Use subspace culling when false positives from AABBs are a performance bottleneck in BVH traversal [S2, unofficial].
 
 ## Background
-Not given in the sources.
+Origin: Not given in the sources.
+History and development: Not given in the sources.
+Where it is used: Used in view-dependent culling [S1, unofficial] and ray tracing optimization [S2, unofficial].
 
 ## Sources
 [S1] Twinklebear/webgl-marching-cubes, https://github.com/Twinklebear/webgl-marching-cubes, fetched 2026-10-26 (unofficial)

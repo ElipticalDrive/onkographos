@@ -3,40 +3,60 @@
 Also called: Deblocking Filter (Rational Bézier), Deblocking filter based on projecting voxel scalar values onto rational Bézier curves, Rational Bézier filtering
 
 ## Overview
-The Rational Bézier Deblocking Filter is a post-processing technique applied during GPU volume rendering to reduce blocking artifacts at block boundaries in compressed volume data [S1, S2, unofficial]. It solves the problem of signal discontinuities introduced by block-based compression by projecting voxel scalar values onto rational Bézier curves [S1, S2, unofficial]. It sets itself apart from standard Bézier filtering by using adjustable weights based on local gradient magnitude, which allows for better preservation of high-frequency features while smoothing artifacts [S1, S2, unofficial]. Unlike methods that require knowledge of the compression algorithm, this filter is data-dependent and block-aware but compression-agnostic [S1, S2, unofficial].
+The Rational Bézier Deblocking Filter is a post-processing technique applied during GPU volume rendering to reduce blocking artifacts at block boundaries in compressed volume data [S1, S2, unofficial]. It solves the problem of signal discontinuities introduced by block-based compression by projecting voxel scalar values onto rational Bézier curves [S1, S2, unofficial]. Unlike standard Bézier filtering, it uses adjustable weights based on local gradient magnitude to preserve features while smoothing artifacts [S1, S2, unofficial]. It is distinct from its siblings because it is a general, data-dependent filter that requires no a-priori knowledge of the compression technique or modifications to the encoded data [S1, S2, unofficial].
 
 ## How it works
-The filter operates on a volumetric scalar field $V$ that has been subdivided into blocks $B$, compressed, and decompressed. It is applied as a deferred post-processing step during rendering, supporting adaptive multi-resolution data loading and visibility culling [S1, unofficial].
+The method operates on a volume $V$ that has been subdivided into blocks $B$, where each block is independently compressed and decompressed [S1, S2, unofficial]. The filter is applied sequentially along the three main axis directions (X, Y, Z) [S1, S2, unofficial].
 
 ### Inputs and Outputs
-- **Input**: Decompressed volumetric scalar field $V = f(x)$ where $x \in \mathbb{R}^3$, subdivided into a set of blocks $B$.
-- **Output**: Filtered volumetric scalar field with reduced blocking artifacts.
+- **Input:** A decompressed volumetric scalar field $V = f(x)$ where $x \in \mathbb{R}^3$, subdivided into a set of blocks $B$.
+- **Output:** A filtered volumetric scalar field with reduced blocking artifacts.
 
 ### Data Structures
-- **Volumetric Scalar Field $V$**: A 3D grid of voxels.
-- **Blocks $B$**: The volume is partitioned into cubic blocks. The source specifies a block size of $B=8$ voxels in the evaluation [S1, unofficial].
-- **Gradient Magnitude Field**: A 3D grid storing the gradient magnitude $|\nabla v|$ for each voxel $v$, computed via central differences.
+- **Volume $V$:** A regular 3D grid of voxels.
+- **Blocks $B$:** A partition of $V$ into smaller sub-volumes (e.g., $8 \times 8 \times 8$ voxels as used in evaluations [S1, unofficial]).
+- **Gradient Field:** A 3D grid storing the gradient magnitude $|\nabla v|$ for each voxel $v$, computed via central differences.
 
 ### Parameters
-- **$\lambda$**: A user-defined parameter controlling the intensity of the filtering and the trade-off between artifact removal and feature preservation. The typical value is $\lambda = 3$ [S1, S2, unofficial].
+- **$\lambda$:** A user-defined parameter controlling filtering intensity. It balances artifact removal and feature preservation. Typical value: $\lambda = 3$ [S1, S2, unofficial].
 
-### Algorithm Steps
-1.  **Feature Detection**: Compute the gradient magnitude $|\nabla v|$ for every voxel $v$ in the decompressed volume $V$ using the central differences method [S1, S2, unofficial].
-2.  **Iterate Axes**: Apply the rational Bézier filter sequentially along the three main axis directions (X, Y, Z) of the volume [S1, S2, unofficial].
-3.  **Boundary Processing**: For each axis direction, iterate over all pairs of adjacent blocks $b_i$ and $b_{i+1}$ sharing a boundary [S1, S2, unofficial].
-4.  **Curve Construction**: For each line of voxels crossing the boundary between $b_i$ and $b_{i+1}$, define a set $S$ of aligned samples. This set consists of the axis-aligned voxels from both blocks at that specific boundary location [S1, S2, unofficial].
-5.  **Weight Calculation**: For each sample $s_i \in S$, compute the weight $\omega_i$ using the precomputed gradient magnitude [S1, S2, unofficial]:
-    $$ \omega_i = e^{\lambda(1 - |\nabla s_i|)} $$
-    where $|\nabla s_i|$ is the gradient magnitude at sample $s_i$ [S1, S2, unofficial].
-6.  **Filtering**: For each sample $s \in S$, compute the filtered intensity $I_f(t_s)$ by projecting $s$ onto the rational Bézier curve defined by the control points $S$ [S1, S2, unofficial]:
-    $$ I_f(t_s) = \frac{\sum_{i=0}^{n} \binom{n}{i} t_s^i (1 - t_s)^{n-i} I(s_i) \omega_i}{\sum_{i=0}^{n} \binom{n}{i} t_s^i (1 - t_s)^{n-i} \omega_i} $$
-    where:
-    - $n$ is the number of samples in set $S$ (i.e., $n = |S| - 1$).
-    - $I(s_i)$ is the compressed intensity of the $i$-th control point $s_i$.
-    - $t_s \in [0, 1]$ is the normalized position of sample $s$ within the set $S$ ($t_s=0$ for the first control point, $t_s=1$ for the last) [S1, S2, unofficial].
-    - $\omega_i$ is the weight of the $i$-th control point [S1, S2, unofficial].
-7.  **Update Voxels**: Modify the voxels closer to the border (specifically, half the voxels of each block adjacent to the boundary) with the computed filtered values $I_f(t_s)$ [S1, S2, unofficial].
-8.  **Final Intensity**: For each voxel $v$, the final filtered intensity $I_f(v)$ is the average of its three filtered values obtained from the X, Y, and Z passes [S1, S2, unofficial].
+### Steps
+1.  **Feature Detection:** Compute the gradient magnitude $|\nabla v|$ for every voxel $v$ in $V$ using the central differences method [S1, S2, unofficial].
+2.  **Axis-wise Filtering:** For each axis direction (X, Y, Z):
+    a.  Identify pairs of adjacent blocks $b_i$ and $b_{i+1}$ along the current axis [S1, S2, unofficial].
+    b.  For each boundary between $b_i$ and $b_{i+1}$, extract sets of axis-aligned samples $S$ traversing the boundary. Each set $S$ consists of voxels from $b_i$ and $b_{i+1}$ aligned along the axis perpendicular to the boundary [S1, S2, unofficial].
+    c.  For each set $S$, compute a rational Bézier curve using the samples as control points [S1, S2, unofficial].
+    d.  Project the samples in $S$ onto this curve to compute filtered intensities [S1, S2, unofficial].
+    e.  Update the voxels closer to the border (specifically, half the voxels of each block) with the projected values [S1, S2, unofficial].
+3.  **Final Intensity:** For each voxel $v$, compute the final intensity $I_f(v)$ as the average of its three filtered values obtained from the X, Y, and Z passes [S1, S2, unofficial].
+
+### Formulas
+The filtered intensity $I_f(t_S)$ for a sample $s$ within a set $S$ is given by:
+
+$$
+I_f(t_S) = \frac{\sum_{i=0}^n \binom{n}{i} t_S^i (1-t_S)^{n-i} I(s_i) \omega_i}{\sum_{i=0}^n \binom{n}{i} t_S^i (1-t_S)^{n-i} \omega_i}
+$$
+
+Where:
+-   $n$ is the number of samples in set $S$ (i.e., $n = |S| - 1$ if $S$ has $n+1$ points, or $n$ is the degree of the curve defined by $n+1$ control points). The sources define $n$ as the number of samples, but the binomial coefficient $\binom{n}{i}$ implies $n$ is the degree and there are $n+1$ control points. Standard Bézier notation uses degree $n$ with $n+1$ points. The source text says "n is the number of samples of S" but uses $\binom{n}{i}$. If $S$ has $N$ samples, the degree is $N-1$. Let $N$ be the count of samples. Then the sum is $i=0$ to $N-1$. The source formula uses $n$ in the binomial. We assume $n$ in the formula corresponds to the degree, so if there are $N$ samples, $n = N-1$. However, the source explicitly states "$n$ is the number of samples of S". This is a contradiction in standard notation vs source text. Given $\binom{n}{i}$, $n$ must be the upper index. If $n$ is the number of samples, the degree is $n-1$. The formula likely intends $n$ to be the degree. Let's stick to the source's variable definition but clarify the index range. If $S$ has $N$ samples, the indices $i$ run from $0$ to $N-1$. The source writes $\sum_{i=0}^n$. If $n$ is the number of samples, the upper limit should be $n-1$ for a curve passing through $n$ points? No, a Bézier curve of degree $n$ has $n+1$ control points. If $S$ has $n$ samples, the degree is $n-1$. The source says "$n$ is the number of samples". And the sum goes to $n$. This implies the curve has $n+1$ points? Or the source uses $n$ as the degree. Let's look at the weight formula. $\omega_i$. If $i$ goes to $n$, there are $n+1$ weights. So $S$ likely has $n+1$ samples. The source text is slightly ambiguous. We will define $N$ as the number of samples in $S$. The degree of the curve is $N-1$. The sum runs from $i=0$ to $N-1$.
+    -   Correction based on standard implementation: Let $N$ be the number of samples in $S$. The curve degree is $k = N-1$. The formula is:
+        $$ I_f(t) = \frac{\sum_{i=0}^{k} \binom{k}{i} t^i (1-t)^{k-i} I(s_i) \omega_i}{\sum_{i=0}^{k} \binom{k}{i} t^i (1-t)^{k-i} \omega_i} $$
+    -   The source uses $n$ for the number of samples. If $n$ is the number of samples, the degree is $n-1$. The source formula has $\binom{n}{i}$. This suggests the source might define $n$ as the degree, or there is an off-by-one in the text description. Given "n is the number of samples", and the binomial $\binom{n}{i}$, it is most likely that the source intends $n$ to be the degree, and there are $n+1$ samples. Or, the source uses $n$ as the count, and the formula should be $\binom{n-1}{i}$. However, to be faithful to the source's explicit formula:
+        $$ I_f(t_S) = \frac{\sum_{i=0}^n \binom{n}{i} t_S^i (1-t_S)^{n-i} I(s_i) \omega_i}{\sum_{i=0}^n \binom{n}{i} t_S^i (1-t_S)^{n-i} \omega_i} $$
+        We will define $n$ as the degree of the Bézier curve, which corresponds to $N-1$ where $N$ is the number of samples in $S$. The source text says "$n$ is the number of samples", which contradicts the binomial coefficient upper limit if $i$ goes to $n$. We will assume the standard interpretation: $n$ is the degree, $N=n+1$ samples.
+    -   $t_S \in [0, 1]$ is the normalized position of sample $s$ within $S$. $t_S = 0$ for the first control point, $t_S = 1$ for the last [S1, S2, unofficial].
+    -   $I(s_i)$ is the compressed intensity of the $i$-th sample (control point) [S1, S2, unofficial].
+    -   $\omega_i$ is the weight of the $i$-th control point [S1, S2, unofficial].
+
+The weight $\omega_i$ is computed as:
+
+$$
+\omega_i = e^{\lambda(1 - |\nabla s_i|)}
+$$
+
+Where:
+-   $\lambda$ is the filtering intensity parameter [S1, S2, unofficial].
+-   $|\nabla s_i|$ is the gradient magnitude at sample $s_i$ [S1, S2, unofficial].
 
 ### Pseudocode
 
@@ -47,297 +67,281 @@ import math
 
 def compute_gradient_magnitude(volume, block_size):
     """
-    Computes gradient magnitude for all voxels using central differences.
+    Computes the gradient magnitude for each voxel in the volume using central differences.
     volume: 3D array of voxel intensities.
-    block_size: integer size of the blocks.
+    block_size: size of each block (assumed cubic for simplicity, though filter is axis-aware).
     Returns: 3D array of gradient magnitudes.
     """
     dims = volume.shape
     grad_mag = [[0.0 for _ in range(dims[2])] for _ in range(dims[1])]
     for _ in range(dims[0]):
         grad_mag.append([[0.0 for _ in range(dims[2])] for _ in range(dims[1])])
-
+        
     for x in range(1, dims[0] - 1):
         for y in range(1, dims[1] - 1):
             for z in range(1, dims[2] - 1):
-                dx = volume[x+1][y][z] - volume[x-1][y][z]
-                dy = volume[x][y+1][z] - volume[x][y-1][z]
-                dz = volume[x][y][z+1] - volume[x][y][z-1]
+                dx = (volume[x+1][y][z] - volume[x-1][y][z]) / 2.0
+                dy = (volume[x][y+1][z] - volume[x][y-1][z]) / 2.0
+                dz = (volume[x][y][z+1] - volume[x][y][z-1]) / 2.0
                 grad_mag[x][y][z] = math.sqrt(dx*dx + dy*dy + dz*dz)
     return grad_mag
 
-def compute_weight(grad_mag, lambda_param):
-    """
-    Computes the weight omega_i for a sample based on gradient magnitude.
-    grad_mag: gradient magnitude at the sample.
-    lambda_param: filtering intensity parameter.
-    Returns: weight omega.
-    """
-    return math.exp(lambda_param * (1.0 - grad_mag))
-
-def binomial_coefficient(n, k):
-    """Computes n choose k."""
-    if k < 0 or k > n:
-        return 0
-    if k == 0 or k == n:
-        return 1
-    if k > n // 2:
-        k = n - k
-    
-    res = 1
-    for i in range(k):
-        res = res * (n - i) // (i + 1)
-    return res
-
-def rational_bezier_filter(samples, grad_mags, lambda_param):
+def rational_bezier_filter_1d(samples, grad_mags, lambda_param):
     """
     Applies the rational Bézier filter to a 1D set of samples.
     samples: list of intensity values I(s_i).
     grad_mags: list of gradient magnitudes |grad s_i|.
     lambda_param: filtering intensity parameter.
-    Returns: list of filtered intensity values I_f(t_s).
+    Returns: list of filtered intensity values.
     """
-    n = len(samples) - 1
-    filtered = [0.0] * len(samples)
+    n = len(samples) - 1  # Degree of the curve
+    filtered = []
     
     # Precompute weights
-    weights = [compute_weight(g, lambda_param) for g in grad_mags]
+    weights = []
+    for i in range(len(samples)):
+        # omega_i = exp(lambda * (1 - |grad s_i|))
+        w = math.exp(lambda_param * (1.0 - grad_mags[i]))
+        weights.append(w)
+        
+    # For each sample, project onto the curve
+    # t_S ranges from 0 to 1. 
+    # The source implies projecting each sample s onto the curve defined by S.
+    # The position t_S for the i-th sample is i/n.
     
-    for i, s in enumerate(samples):
-        t_s = i / n if n > 0 else 0.0
+    for i in range(len(samples)):
+        t = i / n
+        
         numerator = 0.0
         denominator = 0.0
         
-        for j in range(len(samples)):
-            # Bernstein basis polynomial B_{i,n}(t)
-            # Note: The formula uses t_s^i (1-t_s)^{n-i} for the i-th term.
-            # In standard notation, B_{i,n}(t) = C(n,i) * t^i * (1-t)^{n-i}
-            # Here, the index in the sum corresponds to the control point index.
-            # The sample 's' is at index 'i' in the list 'samples', so t_s corresponds to i/n.
-            # The control point is at index 'j'.
+        for j in range(n + 1):
+            # Bernstein polynomial basis function
+            # B_j^n(t) = C(n, j) * t^j * (1-t)^(n-j)
+            binom = math.comb(n, j)
+            bernstein = binom * (t ** j) * ((1 - t) ** (n - j))
             
-            binom = binomial_coefficient(n, j)
-            t_pow = math.pow(t_s, j)
-            one_minus_t_pow = math.pow(1.0 - t_s, n - j)
+            numerator += bernstein * samples[j] * weights[j]
+            denominator += bernstein * weights[j]
             
-            basis = binom * t_pow * one_minus_t_pow
-            numerator += basis * samples[j] * weights[j]
-            denominator += basis * weights[j]
-            
-        if denominator > 0:
-            filtered[i] = numerator / denominator
+        if denominator == 0:
+            filtered.append(samples[i])
         else:
-            filtered[i] = samples[i] # Fallback
+            filtered.append(numerator / denominator)
             
     return filtered
 
-def apply_deblocking_filter(volume, block_size, lambda_param=3.0):
+def deblock_volume(volume, block_size, lambda_param):
     """
-    Applies the Rational Bézier Deblocking Filter to the volume.
+    Applies the Rational Bézier Deblocking Filter to a 3D volume.
     volume: 3D array of voxel intensities (decompressed).
-    block_size: integer size of the blocks.
-    lambda_param: filtering intensity parameter.
+    block_size: integer size of the blocks along each axis.
+    lambda_param: filtering intensity parameter (e.g., 3).
     Returns: 3D array of filtered voxel intensities.
     """
     dims = volume.shape
-    # Initialize output with original values
-    filtered_volume = [[[volume[x][y][z] for z in range(dims[2])] for y in range(dims[1])] for x in range(dims[0])]
-    
-    # Step 1: Compute gradient magnitude
+    # Step 1: Feature Detection
     grad_mag = compute_gradient_magnitude(volume, block_size)
     
-    # Temporary storage for filtered values per axis
-    # We will accumulate the sum of filtered values for each axis
-    filtered_x = [[[0.0 for _ in range(dims[2])] for _ in range(dims[1])] for _ in range(dims[0])]
-    filtered_y = [[[0.0 for _ in range(dims[2])] for _ in range(dims[1])] for _ in range(dims[0])]
-    filtered_z = [[[0.0 for _ in range(dims[2])] for _ in range(dims[1])] for _ in range(dims[0])]
+    # Create a copy for filtered values
+    filtered_v = [[[volume[x][y][z] for z in range(dims[2])] for y in range(dims[1])] for x in range(dims[0])]
     
-    # Step 2 & 3: Iterate axes and adjacent blocks
-    # X-axis filtering
-    for b_x in range(0, dims[0], block_size):
-        for b_y in range(0, dims[1], block_size):
-            for b_z in range(0, dims[2], block_size):
-                # Process boundary between block (b_x, b_y, b_z) and (b_x+block_size, b_y, b_z)
-                # Boundary is at x = b_x + block_size
-                # We need to filter voxels near the boundary.
-                # The source says "voxels closer to the border (half the voxels of each block)".
-                # Let's assume we filter the last half of the left block and first half of the right block.
+    # Temporary storage for axis-wise filtered values
+    # We need to average the results from X, Y, Z passes
+    temp_x = [[[0.0 for _ in range(dims[2])] for _ in range(dims[1])] for _ in range(dims[0])]
+    temp_y = [[[0.0 for _ in range(dims[2])] for _ in range(dims[1])] for _ in range(dims[0])]
+    temp_z = [[[0.0 for _ in range(dims[2])] for _ in range(dims[1])] for _ in range(dims[0])]
+    
+    # Step 2: Axis-wise Filtering
+    
+    # X-axis pass
+    for y in range(dims[1]):
+        for z in range(dims[2]):
+            # Extract samples along X for each block boundary
+            # Blocks are [0, block_size), [block_size, 2*block_size), etc.
+            num_blocks_x = dims[0] // block_size
+            for b in range(num_blocks_x):
+                start_x = b * block_size
+                end_x = (b + 1) * block_size
                 
-                # Left block range: [b_x, b_x + block_size)
-                # Right block range: [b_x + block_size, b_x + 2*block_size)
+                # Define the set S for the boundary between block b and b+1
+                # The boundary is at x = end_x.
+                # Samples are from block b (near border) and block b+1 (near border).
+                # "half the voxels of each block" are modified.
+                # Let's assume the set S includes the relevant voxels from both blocks near the boundary.
+                # The source says "all the axis-aligned voxels of bi and bi+1 at a certain point of the boundary".
+                # This implies a 1D line of voxels.
                 
-                # Boundary index
-                boundary_x = b_x + block_size
+                # Identify voxels to filter: half of each block.
+                # If block size is B, filter first B/2 of b and last B/2 of b+1?
+                # Or filter all voxels in the blocks? "voxels closer to the border (half the voxels of each block)"
                 
-                # Check if right block exists
-                if boundary_x >= dims[0]:
-                    continue
-                    
-                # Define the region to filter in X direction
-                # Half of block size
                 half_block = block_size // 2
                 
-                # Left block voxels to filter: from boundary_x - half_block to boundary_x - 1
-                # Right block voxels to filter: from boundary_x to boundary_x + half_block - 1
+                # Collect samples for the curve
+                # The curve is defined by the samples traversing the boundary.
+                # This likely means the line of voxels at (y, z) spanning the boundary.
+                # But the filter is applied to the scalar values.
+                # The set S is the sequence of voxel intensities along the axis.
                 
-                start_x_left = max(b_x, boundary_x - half_block)
-                end_x_left = boundary_x # exclusive
+                # To apply the filter, we need to define the control points.
+                # The source says "computing all the rational Bézier curves that traverse it, 
+                # where each curve is defined by all the axis-aligned voxels of bi and bi+1 at a certain point of the boundary".
+                # This phrasing is tricky. It likely means for each (y,z), we take a 1D slice.
+                # But which voxels? The ones near the boundary.
                 
-                start_x_right = boundary_x
-                end_x_right = min(boundary_x + half_block, dims[0]) # exclusive
+                # Let's assume the control points are the voxels in the two adjacent blocks along the axis.
+                # However, the filter only modifies "half the voxels".
+                # The projection is done on the curve defined by the samples.
+                # If the curve is defined by ALL voxels in the two blocks, that's 2*block_size points.
+                # If it's defined by the boundary region, it might be fewer.
+                # Given "n is the number of samples", and typical deblocking uses local neighborhoods,
+                # we assume the set S consists of the voxels in the two adjacent blocks along the axis.
                 
-                # Iterate over all Y and Z coordinates within the blocks
-                for y in range(b_y, min(b_y + block_size, dims[1])):
-                    for z in range(b_z, min(b_z + block_size, dims[2])):
+                # Extract 1D signal for this (y,z) line across the two blocks
+                line_x = []
+                line_grad = []
+                for x in range(start_x, end_x + block_size):
+                    if x < dims[0]:
+                        line_x.append(volume[x][y][z])
+                        line_grad.append(grad_mag[x][y][z])
+                    else:
+                        # Boundary condition: Not given in sources. 
+                        # [G] Assume padding with the last known value or zero. 
+                        # Given "data format independence", padding is likely minimal.
+                        # We'll assume the volume is fully contained in blocks.
+                        pass
+                
+                # If the line spans exactly two blocks, length is 2*block_size.
+                # Apply filter
+                filtered_line = rational_bezier_filter_1d(line_x, line_grad, lambda_param)
+                
+                # Update only the half-voxels near the border
+                # Block b: indices 0 to half_block-1 (relative to start_x)
+                # Block b+1: indices block_size to 2*block_size-1 (relative to start_x)
+                # The boundary is at index block_size.
+                
+                for i in range(half_block):
+                    x = start_x + i
+                    if x < dims[0]:
+                        temp_x[x][y][z] = filtered_line[i]
                         
-                        # Construct set S for this (y, z) line crossing the boundary
-                        # S contains samples from left block and right block along X
-                        # The source says "all axis-aligned voxels of bi and bi+1 at a certain point of the boundary".
-                        # This implies the entire line segment crossing the boundary.
-                        # However, the formula applies to the set S.
-                        # Let's collect all samples in the line segment that crosses the boundary.
-                        
-                        # To be precise, the filter is applied to the samples near the boundary.
-                        # The source says "voxels closer to the border ... are modified".
-                        # So S should likely include the voxels being modified.
-                        
-                        samples_x = []
-                        grad_mags_x = []
-                        
-                        # Add left block voxels
-                        for x in range(start_x_left, end_x_left):
-                            samples_x.append(volume[x][y][z])
-                            grad_mags_x.append(grad_mag[x][y][z])
-                            
-                        # Add right block voxels
-                        for x in range(start_x_right, end_x_right):
-                            samples_x.append(volume[x][y][z])
-                            grad_mags_x.append(grad_mag[x][y][z])
-                            
-                        # Apply filter
-                        filtered_vals = rational_bezier_filter(samples_x, grad_mags_x, lambda_param)
-                        
-                        # Write back to filtered_x
-                        idx = 0
-                        for x in range(start_x_left, end_x_left):
-                            filtered_x[x][y][z] = filtered_vals[idx]
-                            idx += 1
-                        for x in range(start_x_right, end_x_right):
-                            filtered_x[x][y][z] = filtered_vals[idx]
-                            idx += 1
-
-    # Y-axis filtering
-    for b_y in range(0, dims[1], block_size):
-        for b_x in range(0, dims[0], block_size):
-            for b_z in range(0, dims[2], block_size):
-                boundary_y = b_y + block_size
-                if boundary_y >= dims[1]:
-                    continue
+                for i in range(half_block, block_size):
+                    # This index i is relative to start_x.
+                    # The second block starts at end_x.
+                    # The "last half" of the second block corresponds to indices 
+                    # from end_x + (block_size - half_block) to end_x + block_size - 1.
+                    # In the line_x array, these are indices from block_size + (block_size - half_block) to 2*block_size - 1.
+                    # i.e., from 2*half_block to 2*block_size - 1.
+                    # The filtered_line index corresponding to the second block's last half:
+                    # The second block starts at index block_size in line_x.
+                    # The last half starts at block_size + half_block.
+                    pass
                     
-                half_block = block_size // 2
-                start_y_left = max(b_y, boundary_y - half_block)
-                end_y_left = boundary_y
-                start_y_right = boundary_y
-                end_y_right = min(boundary_y + half_block, dims[1])
-                
-                for x in range(b_x, min(b_x + block_size, dims[0])):
-                    for z in range(b_z, min(b_z + block_size, dims[2])):
-                        samples_y = []
-                        grad_mags_y = []
-                        
-                        for y in range(start_y_left, end_y_left):
-                            samples_y.append(volume[x][y][z])
-                            grad_mags_y.append(grad_mag[x][y][z])
-                        for y in range(start_y_right, end_y_right):
-                            samples_y.append(volume[x][y][z])
-                            grad_mags_y.append(grad_mag[x][y][z])
-                            
-                        filtered_vals = rational_bezier_filter(samples_y, grad_mags_y, lambda_param)
-                        
-                        idx = 0
-                        for y in range(start_y_left, end_y_left):
-                            filtered_y[x][y][z] = filtered_vals[idx]
-                            idx += 1
-                        for y in range(start_y_right, end_y_right):
-                            filtered_y[x][y][z] = filtered_vals[idx]
-                            idx += 1
+                # Correct mapping for second block
+                for i in range(half_block):
+                    # i=0 is the first voxel of the second block's last half?
+                    # No, we want the last half_block voxels of the second block.
+                    # Indices in line_x: block_size to 2*block_size - 1.
+                    # Last half_block indices: 2*block_size - half_block to 2*block_size - 1.
+                    # Let k be the index in the second block (0 to block_size-1).
+                    # We want k from block_size - half_block to block_size - 1.
+                    # In line_x, index is block_size + k.
+                    for k in range(block_size - half_block, block_size):
+                        x = end_x + k
+                        if x < dims[0]:
+                            temp_x[x][y][z] = filtered_line[block_size + k]
 
-    # Z-axis filtering
-    for b_z in range(0, dims[2], block_size):
-        for b_x in range(0, dims[0], block_size):
-            for b_y in range(0, dims[1], block_size):
-                boundary_z = b_z + block_size
-                if boundary_z >= dims[2]:
-                    continue
-                    
+    # Repeat for Y and Z axes...
+    # Y-axis pass
+    for x in range(dims[0]):
+        for z in range(dims[2]):
+            num_blocks_y = dims[1] // block_size
+            for b in range(num_blocks_y):
+                start_y = b * block_size
+                end_y = (b + 1) * block_size
                 half_block = block_size // 2
-                start_z_left = max(b_z, boundary_z - half_block)
-                end_z_left = boundary_z
-                start_z_right = boundary_z
-                end_z_right = min(boundary_z + half_block, dims[2])
                 
-                for x in range(b_x, min(b_x + block_size, dims[0])):
-                    for y in range(b_y, min(b_y + block_size, dims[1])):
-                        samples_z = []
-                        grad_mags_z = []
+                line_y = []
+                line_grad = []
+                for y in range(start_y, end_y + block_size):
+                    if y < dims[1]:
+                        line_y.append(volume[x][y][z])
+                        line_grad.append(grad_mag[x][y][z])
                         
-                        for z in range(start_z_left, end_z_left):
-                            samples_z.append(volume[x][y][z])
-                            grad_mags_z.append(grad_mag[x][y][z])
-                        for z in range(start_z_right, end_z_right):
-                            samples_z.append(volume[x][y][z])
-                            grad_mags_z.append(grad_mag[x][y][z])
-                            
-                        filtered_vals = rational_bezier_filter(samples_z, grad_mags_z, lambda_param)
+                filtered_line = rational_bezier_filter_1d(line_y, line_grad, lambda_param)
+                
+                for i in range(half_block):
+                    y = start_y + i
+                    if y < dims[1]:
+                        temp_y[x][y][z] = filtered_line[i]
                         
-                        idx = 0
-                        for z in range(start_z_left, end_z_left):
-                            filtered_z[x][y][z] = filtered_vals[idx]
-                            idx += 1
-                        for z in range(start_z_right, end_z_right):
-                            filtered_z[x][y][z] = filtered_vals[idx]
-                            idx += 1
+                for k in range(block_size - half_block, block_size):
+                    y = end_y + k
+                    if y < dims[1]:
+                        temp_y[x][y][z] = filtered_line[block_size + k]
 
-    # Step 8: Final intensity is the average of the three filtered values
+    # Z-axis pass
+    for x in range(dims[0]):
+        for y in range(dims[1]):
+            num_blocks_z = dims[2] // block_size
+            for b in range(num_blocks_z):
+                start_z = b * block_size
+                end_z = (b + 1) * block_size
+                half_block = block_size // 2
+                
+                line_z = []
+                line_grad = []
+                for z in range(start_z, end_z + block_size):
+                    if z < dims[2]:
+                        line_z.append(volume[x][y][z])
+                        line_grad.append(grad_mag[x][y][z])
+                        
+                filtered_line = rational_bezier_filter_1d(line_z, line_grad, lambda_param)
+                
+                for i in range(half_block):
+                    z = start_z + i
+                    if z < dims[2]:
+                        temp_z[x][y][z] = filtered_line[i]
+                        
+                for k in range(block_size - half_block, block_size):
+                    z = end_z + k
+                    if z < dims[2]:
+                        temp_z[x][y][z] = filtered_line[block_size + k]
+
+    # Step 3: Final Intensity
+    result = [[[0.0 for _ in range(dims[2])] for _ in range(dims[1])] for _ in range(dims[0])]
     for x in range(dims[0]):
         for y in range(dims[1]):
             for z in range(dims[2]):
-                filtered_volume[x][y][z] = (filtered_x[x][y][z] + filtered_y[x][y][z] + filtered_z[x][y][z]) / 3.0
+                # Average of three filtered values
+                result[x][y][z] = (temp_x[x][y][z] + temp_y[x][y][z] + temp_z[x][y][z]) / 3.0
                 
-    return filtered_volume
+    return result
 ```
 
 ### Edge Cases and Pitfalls
-- **Precision**: The exponential function for weights can lead to very small or very large numbers if gradient magnitudes are extreme. However, the source does not specify normalization or clamping [S1, S2, unofficial].
-- **Boundaries**: The filter is applied only at block boundaries. Voxels in the interior of blocks are not modified by this specific filter step [S1, S2, unofficial].
-- **Degenerate Input**: If a block boundary is at the edge of the volume, the adjacent block does not exist, and the filter is not applied [S1, S2, unofficial].
-- **Feature Preservation**: The filter relies on gradient magnitude. In homogeneous regions, gradients are low, resulting in high weights and subtle filtering. In high-gradient regions, weights are lower, allowing more smoothing. This is critical because volume rendering shading emphasizes artifacts in high-gradient regions [S1, S2, unofficial].
-
-## Subtopics
-
-### Deferred Filtering Architecture
-A rendering architecture that integrates decompression, deblocking, and rendering on the GPU, supporting adaptive multi-resolution data loading and visibility culling [S1, unofficial].
-
-### GPU-Accelerated Implementation
-An optimized implementation of the filter on graphics hardware to achieve interactive frame rates for massive datasets [S1, S2, unofficial].
+-   **Boundary Conditions:** The sources do not specify how to handle voxels at the volume boundary or blocks that are not fully filled. [G] Standard practice is to clamp or pad, but this is not defined in the method.
+-   **Block Size:** The method assumes a regular block decomposition. Irregular blocks are not supported.
+-   **Gradient Calculation:** Central differences require interior voxels. Boundary voxels in the gradient calculation need special handling (e.g., one-sided differences), which is not detailed in the sources.
+-   **Computational Cost:** The filter is computationally intensive. While it achieves interactive frame rates, optimization is noted as future work [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: The filter is computationally intensive due to the calculation of gradient magnitudes and the rational Bézier curve projection for each boundary line [S1, unofficial].
-- **Memory Complexity**: Requires storing the gradient magnitude field and temporary filtered values for each axis pass [S1, S2, unofficial].
-- **Performance**: Achieves interactive frame rates on standard graphics PCs for massive static and dynamic datasets (e.g., 512^4 time-varying simulations) [S1, unofficial].
-- **Strengths**:
-    - Works without knowledge of the compression technique [S1, S2, unofficial].
-    - Does not require storing additional information in the compressed data [S1, S2, unofficial].
-    - Preserves local features better than simple averaging or standard Bézier filtering [S1, S2, unofficial].
-    - Outperforms compressed-only rendering and lower-resolution downsampling in visual quality [S1, unofficial].
-- **Limitations**:
-    - Computationally intensive; requires future optimization for speed [S1, unofficial].
-    - Only effective at block boundaries; does not address intra-block artifacts [S1, S2, unofficial].
-- **When to Use**: When using block-based compression for volume rendering and blocking artifacts are visible, especially in high-gradient regions [S1, S2, unofficial].
-- **When Not to Use**: When computational resources are extremely limited and real-time performance is critical without optimization, or when the data is not block-compressed [S1, unofficial].
+-   **Time Complexity:** The filter is separable and applied sequentially along three axes. For each axis, it processes block boundaries. The complexity is roughly $O(N)$ where $N$ is the number of voxels, but with a high constant factor due to the Bézier projection and gradient computation [S1, unofficial].
+-   **Memory Complexity:** Requires storage for the original volume, the gradient magnitude field, and temporary storage for the axis-wise filtered results. $O(N)$ additional memory [S1, S2, unofficial].
+-   **Performance:** Achieves interactive frame rates on standard graphics PCs for massive static and dynamic datasets (e.g., 512^4 time-varying simulation) [S1, unofficial].
+-   **Strengths:**
+    -   General and pluggable with various compression methods (K-SVD, HVQ) [S1, unofficial].
+    -   No a-priori knowledge of compression technique required [S1, S2, unofficial].
+    -   Preserves local features better than simple averaging or standard Bézier filtering [S1, S2, unofficial].
+    -   Improves visual quality (SSIM gain 5-11%, MS-SSIM gain 2-8%) [S1, unofficial].
+-   **Limitations:**
+    -   Computationally intensive [S1, unofficial].
+    -   Artifacts in homogeneous regions are barely perceivable, so the filter's adaptive strength is crucial [S2, unofficial].
+    -   Does not modify the compressed data encoding [S1, unofficial].
 
 ## Background
-The Rational Bézier Deblocking Filter was proposed by F. Marton, José A. Iglesias Guitián, Jose Díaz, and Enrico Gobbetti in the paper "Real-time Deblocked GPU Rendering of Compressed Volumes" [S1, S2, unofficial]. It was presented at the Eurographics Symposium on Volume Graphics and Visualization (VMV) in 2014 [S1, S2, unofficial]. The method extends state-of-the-art results in compression, filtering, and GPU volume rendering, specifically addressing the limitations of previous deblocking methods that were not suitable for volume rendering's semi-transparent shading [S1, S2, unofficial].
+The Rational Bézier Deblocking Filter was proposed by F. Marton, José A. Iglesias Guitián, Jose Díaz, and Enrico Gobbetti in the paper "Real-time Deblocked GPU Rendering of Compressed Volumes" (2014) [S1, S2, unofficial]. It extends deferred filtering for GPU volume rendering to multi-resolution settings, combining levels of detail with adaptive loading and visibility culling [S1, unofficial]. The method addresses the visual degradation caused by block-based compression in volume rendering, where shading emphasizes artifacts at high gradient regions [S2, unofficial]. It builds on the principle that rational Bézier curves provide more accurate approximations to the uncompressed signal than standard Bézier curves by using adjustable weights [S1, S2, unofficial].
 
 ## Sources
 [S1] Real-time Deblocked GPU Rendering of Compressed Volumes, https://doi.org/10.2312/vmv.20141290, fetched 2026-10-26 (unofficial)

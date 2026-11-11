@@ -1,0 +1,176 @@
+# Stackless Traversal
+
+Also called: Algorithme sans pile, Parcours sans pile, Parent-link traversal, Stack-less Tree Traversal
+
+## Overview
+Stackless Traversal is a method for traversing hierarchical volume structures (such as N3-trees or octrees) that eliminates the need for an explicit stack data structure by recalculating Digital Differential Analyzer (DDA) parameters at every descent and ascent [S1, unofficial]. It sets itself apart from sibling methods like [DDA Tree Traversal with Mini-Stack](5244-dda-tree-traversal-with-mini-stack.md) by trading increased computational cost for zero stack memory usage, relying instead on parent pointers stored within the hierarchy to navigate [S1, unofficial]. This approach is particularly advantageous in memory-constrained environments, such as early GPU architectures where dynamic array indexing forced stack data into slow local memory [S1, unofficial].
+
+## How it works
+The algorithm traverses a hierarchical grid by maintaining the current ray state (origin, direction, and DDA parameters) and navigating the tree structure using explicit parent links. Unlike stack-based methods that push/pop nodes, this method recalculates the ray's entry point and DDA deltas whenever it moves between a parent and child node.
+
+### Inputs and Outputs
+*   **Input:** Ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; Hierarchical volume structure where each node stores a pointer to its parent and its spatial bounds; Grid resolution and voxel size.
+*   **Output:** A sequence of visited nodes (bricks) and their corresponding traversal intervals $[t_{entry}, t_{exit}]$ for volume integration.
+
+### Data Structures
+The hierarchical structure must support:
+1.  **Parent Pointer:** Each node contains a reference to its immediate parent node.
+2.  **Child Pointer:** Each node contains references to its children (if not a leaf).
+3.  **Spatial Bounds:** Each node stores its minimum and maximum coordinates (or index ranges) to define its voxel extent.
+4.  **Node Type/Status:** Flags indicating if the node is empty, a leaf (brick), or an internal node.
+
+### DDA Parameters
+For a uniform grid with voxel size $v$ and dimensions $N_x, N_y, N_z$, the traversal relies on three key precomputed values per axis $i \in \{x, y, z\}$ [S2, unofficial][S3, unofficial][S5]:
+
+1.  **Step Direction ($\text{step}_i$):**
+    $$
+    \text{step}_i = \begin{cases} 
+    +1 & \text{if } d_i > 0 \\
+    -1 & \text{if } d_i < 0 \\
+    0 & \text{if } d_i = 0 
+    \end{cases}
+    $$
+    If $d_i = 0$, the ray never crosses a boundary in that dimension, and the corresponding distance is treated as infinity [S5].
+
+2.  **Time/Distance Delta ($\Delta t_i$):**
+    $$
+    \Delta t_i = \frac{v_i}{|d_i|} \cdot \text{step}_i
+    $$
+    where $v_i$ is the voxel size [S2, unofficial][S5].
+
+3.  **Time/Distance to Next Boundary ($t_{max, i}$):**
+    $$
+    t_{max, i} = \frac{\text{boundary}_i - o_i}{d_i}
+    $$
+    The initial boundary is determined by the starting voxel index [S3, unofficial].
+
+### Algorithm Steps
+1.  **Initialization:** Compute initial DDA parameters ($\text{step}$, $\Delta t$, $t_{max}$) for the ray origin within the root node's bounds. Identify the starting leaf node containing the ray origin.
+2.  **Process Current Node:**
+    *   If the current node is **empty**, skip it and proceed to the next step (ascent/descent).
+    *   If the current node is a **leaf (brick)**:
+        *   Perform ray marching within the brick's volume.
+        *   If data is unavailable (e.g., dynamic loading failure), use the stored average color/intensity and accumulate based on the distance traversed in the brick [S1, unofficial].
+    *   If the current node is an **internal node**, proceed to navigation.
+3.  **Navigation (Descent/Ascent):**
+    *   **Ascent:** If the ray exits the current node, use the **parent pointer** stored in the node to move to the parent. Extract the current cell information in the parent's grid from the direct pointer to the exact child node, avoiding full recalculation of the entry point [S1, unofficial].
+    *   **Descent:** If the ray enters a child node, **recalculate all DDA parameters** ($\text{step}$, $\Delta t$, $t_{max}$) relative to the child node's local coordinate system or global bounds [S1, unofficial]. This recalculation is the primary computational cost of the stackless approach.
+4.  **Loop:** Repeat steps 2-3 until the ray exits the entire volume hierarchy.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def stackless_traversal(ray_origin, ray_direction, root_node, voxel_size):
+    # 1. Initialize DDA parameters for the global grid
+    step = sign(ray_direction)
+    t_delta = voxel_size / abs(ray_direction)
+    
+    # Handle zero direction components
+    for i in range(3):
+        if ray_direction[i] == 0:
+            t_delta[i] = 0
+            
+    # Find initial leaf node containing ray_origin
+    current_node = find_leaf(root_node, ray_origin)
+    
+    # Calculate initial t_max based on ray_origin and current_node bounds
+    # This requires mapping ray_origin to the current_node's local or global context
+    t_max = compute_initial_t_max(ray_origin, ray_direction, current_node.bounds, step, t_delta)
+    
+    t_entry = 0.0
+    
+    while current_node is not None:
+        # Determine exit time from current node
+        t_exit = min(t_max) # Assuming t_max tracks next boundary crossing
+        
+        # If ray exits the node, we must navigate
+        if t_exit <= t_entry:
+            # Ascent: Move to parent
+            parent = current_node.parent
+            
+            if parent is None:
+                # Ray has exited the entire volume
+                break
+                
+            # Extract current cell info in parent from child pointer
+            # This avoids full recalculation of entry point for the parent
+            # However, DDA parameters must be recalculated for the new context
+            current_node = parent
+            
+            # Recalculate DDA parameters for the ascent/descent transition
+            # Note: The source emphasizes recalculating ALL DDA params for each step
+            # This is the "stackless" cost
+            t_max = recalculate_dda_for_node(ray_origin, ray_direction, current_node, step, t_delta)
+            t_entry = 0.0 # Reset entry relative to new node start
+            
+            continue
+            
+        # Process the node
+        if current_node.is_empty:
+            # Skip empty nodes
+            t_entry = t_exit
+            # Advance ray to next boundary globally? 
+            # In stackless, we usually re-evaluate node boundaries.
+            # If we are inside a node, we process it. If we exit, we go up.
+            # This logic assumes we are processing the node we just entered.
+            pass 
+        elif current_node.is_leaf:
+            # Process leaf (brick)
+            # Ray march within brick bounds [t_entry, t_exit]
+            process_brick(current_node, ray_origin, ray_direction, t_entry, t_exit)
+        else:
+            # Internal node: usually just a container, but if we are here,
+            # we might need to descend. However, standard DDA traversal
+            # processes leaves. Internal nodes are skipped or used for culling.
+            # If the node is not empty and not a leaf, it might contain children.
+            # But DDA traversal typically visits leaves.
+            # If we are in an internal node, we should descend to children.
+            # But how do we know which child? The DDA t_min tells us the axis.
+            # We need to find the child that contains the ray segment [t_entry, t_exit]
+            child = find_child_containing_ray(current_node, ray_origin, ray_direction, t_entry, t_exit)
+            if child:
+                current_node = child
+                # Recalculate DDA for the child
+                t_max = recalculate_dda_for_node(ray_origin, ray_direction, current_node, step, t_delta)
+                t_entry = 0.0
+                continue
+        
+        # Advance to next boundary
+        t_entry = t_exit
+        # Update t_max for the axis that was crossed
+        # This is standard DDA update
+        min_idx = argmin(t_max)
+        t_max[min_idx] += t_delta[min_idx]
+```
+
+### Parameters and Optimization
+*   **Conditional Block Size:** Limit the size of `if...then...else` bodies to reduce divergent threads on GPU multiprocessors [S1, unofficial].
+*   **Register Usage:** Limit the number of registers used to allow multiprocessors to handle more parallel threads, better covering texture access latency [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **GPU Memory Latency:** On architectures like the NVIDIA G80, dynamically indexed arrays are placed in "local" memory (device memory), which is uncached and up to 50x slower than registers [S1, unofficial]. This negatively impacts performance compared to register-based stack access. Local memory accesses incur maximum latency and transfer cost from graphics memory [S1, unofficial].
+*   **Recalculation Cost:** The necessity to recalculate all DDA parameters at every tree transition increases computational overhead compared to stack-based methods that preserve state [S1, unofficial].
+
+## Subtopics
+
+### [Restart Trail](9459-restart-trail.md)
+A variant for BVHs that uses a bit-array to track processed subtrees, allowing complete stack exhaustion without state loss. Choose this when memory is extremely constrained and restarts are frequent.
+
+### [Stack Culling](9874-stack-culling-parent-node-re-intersection.md)
+A method that trades a small increase in traversal steps for reduced primitive intersections using only 1 bit of extra storage per stack entry. Choose this when intersection cost dominates traversal cost.
+
+## Operating characteristics
+*   **Time Complexity:** Higher per-node computational cost due to DDA recalculation at every ascent/descent. However, it avoids stack push/pop overhead.
+*   **Memory Complexity:** $O(1)$ auxiliary stack space (excluding the tree structure itself). This is its primary advantage.
+*   **Performance:** On the NVIDIA G80 GPU, the stackless algorithm was approximately 50% faster than the mini-stack algorithm [S1, unofficial]. This counter-intuitive result is attributed to the G80's shader compiler placing dynamically indexed arrays (used for the stack) in slow, uncached local memory, whereas the stackless method kept data in registers or faster memory spaces [S1, unofficial].
+*   **Strengths:** No stack overflow risk; minimal memory footprint; efficient on hardware with slow local memory for dynamic arrays.
+*   **Limitations:** Higher arithmetic intensity per node visit; requires parent pointers in the data structure; potentially slower on hardware with fast register-based stack access.
+*   **When to Use:** Memory-constrained environments (e.g., embedded systems, early GPUs); scenarios where stack depth is unpredictable or large.
+*   **When Not to Use:** Hardware with fast, cached local memory and efficient stack operations; scenes with very shallow hierarchies where recalculation overhead outweighs stack costs.
+
+## Background
+The Stackless Traversal algorithm was developed and tested in the context of interactive exploration of procedural volumetric data [S1, unofficial]. It was designed to address the limitations of stack-based methods on early GPU architectures (specifically the G80) where dynamic memory indexing was penalized by the hardware compiler [S1, unofficial]. The method leverages parent pointers stored in the hierarchical structure (N3-tree) to navigate without a stack, recalculating DDA parameters to maintain correctness [S1, unofficial].
+
+## Sources
+[S1] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)

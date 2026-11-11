@@ -3,81 +3,97 @@
 Also called: Piecewise Quadratic Bézier Hermite Interpolation, Quadratic Polynomial Interpolation for SCALIS
 
 ## Overview
-This method interpolates a normalized scalar field within a 1D interval using two piecewise quadratic Bézier curves to satisfy Hermite data (value and derivative) at both endpoints [S1]. It solves the incompatibility of single quadratic interpolation with four constraints (two values, two derivatives) by splitting the interval, providing exact interpolation in specific cases and better stability than cubic interpolation for small subdivision counts [S1].
+A method for interpolating a normalized scalar field within a 1D interval using two piecewise quadratic Bézier curves to satisfy Hermite data (value and derivative) at both endpoints [S1]. It solves the incompatibility of single quadratic interpolation with four constraints (two values, two derivatives) by splitting the interval, providing a $C^1$ continuous interpolant that is more numerically stable and efficient than cubic interpolation, particularly for root isolation in volume rendering [S1].
 
 ## How it works
 **Inputs:**
-- Interval length $L$ [S1].
-- Hermite data at start: value $h_1$, derivative $h'_1$ [S1].
-- Hermite data at end: value $h_2$, derivative $h'_2$ [S1].
+- Interval endpoints $t_{begin}, t_{end}$ with associated Hermite data $h_b = (val_b, prim_b)$ and $h_e = (val_e, prim_e)$ [S1].
+- Interval length $L = t_{end} - t_{begin}$ [S1].
 
 **Outputs:**
-- A continuous, smooth interpolant defined by two quadratic Bézier segments [S1].
+- A continuous, piecewise quadratic function $u(t)$ defined on $[t_{begin}, t_{end}]$.
+- Control points for the Bézier representation.
 
 **Data Structures:**
-- Six control points $Q_0, \dots, Q_5$ for the two Bézier curves [S1].
-- Each control point $Q_i$ has an abscissa (x-coordinate) and an ordinate (y-coordinate, representing the field value) [G].
-- The abscissas are equally spaced across the two sub-intervals [S1].
+- Six control points $Q_0, \dots, Q_5$ in 2D space $(t, u)$, representing two quadratic Bézier curves [S1].
+- $Q_0, Q_1, Q_2$ define the first sub-interval $[t_{begin}, t_{mid}]$.
+- $Q_3, Q_4, Q_5$ define the second sub-interval $[t_{mid}, t_{end}]$.
+- Control points are equally spaced in abscissa (t-coordinate) [S1].
 
 **Steps:**
-1. **Split Interval:** Divide the initial interval of length $L$ into two equal sub-intervals, each of length $L/2$ [S1].
-2. **Define Control Points:** Define two quadratic Bézier curves, one for each sub-interval [S1]. A quadratic Bézier curve is defined by three control points [G]. Thus, we have six control points $Q_0, \dots, Q_5$ [S1].
-3. **Constrain Abscissas:** The control points are constrained to be equally spaced in abscissa [S1]. For the first sub-interval, $Q_0, Q_1, Q_2$ span the first half [G]. For the second, $Q_3, Q_4, Q_5$ span the second half [G].
-4. **Set Boundary Ordinates:** Set the ordinates of $Q_0$ and $Q_1$ based on the Hermite data at the start of the interval ($h_1, h'_1$) [S1]. Set the ordinates of $Q_4$ and $Q_5$ based on the Hermite data at the end of the interval ($h_2, h'_2$) [S1]. The specific mapping uses standard quadratic Bézier Hermite conversion: $Q_0.y = h_1$, $Q_1.y = h_1 + \frac{L}{4}h'_1$, $Q_4.y = h_2 - \frac{L}{4}h'_2$, $Q_5.y = h_2$ [G].
-5. **Enforce Continuity and Smoothness:** The shared control point between the two segments must be equal: $Q_2 = Q_3$ [S1]. The shared point must lie on the line joining $Q_1$ and $Q_4$ to ensure smoothness [S1]. This ensures $C^1$ continuity or smoothness of the derivative [G].
-6. **Calculate Shared Ordinate:** Calculate the ordinate $y_{mid}$ for $Q_2$ and $Q_3$ using the formula:
-   $$ y_{mid} = \frac{1}{2}(h_1 + h_2) + \frac{L}{8}(h'_1 - h'_2) $$
-   where $h_1, h'_1$ are the value and derivative at the start, and $h_2, h'_2$ are the value and derivative at the end [S1].
+1.  **Split Interval:** Divide the interval $[t_{begin}, t_{end}]$ into two equal sub-intervals at $t_{mid} = \frac{t_{begin} + t_{end}}{2}$ [S1].
+2.  **Set Endpoint Constraints:**
+    -   Set $Q_0 = (t_{begin}, val_b)$ and $Q_1$ such that the tangent at $Q_0$ matches $prim_b$. For a quadratic Bézier curve with equally spaced control points in $t$, the derivative at the start is proportional to $Q_1 - Q_0$. Specifically, $Q_1$ is determined by the Hermite derivative constraint [S1].
+    -   Set $Q_5 = (t_{end}, val_e)$ and $Q_4$ such that the tangent at $Q_5$ matches $prim_e$ [S1].
+3.  **Enforce Continuity and Smoothness:**
+    -   Set $Q_2 = Q_3$ to ensure $C^0$ continuity at $t_{mid}$ [S1].
+    -   Require $Q_2$ (and $Q_3$) to lie on the line segment connecting $Q_1$ and $Q_4$ to ensure $C^1$ smoothness [S1].
+4.  **Calculate Shared Control Point:**
+    -   Compute the ordinate (u-coordinate) of $Q_2 = Q_3$ using the formula:
+        $$ u_{shared} = \frac{1}{2}(val_b + val_e) + \frac{L}{8}(prim_b - prim_e) $$
+    -   The abscissa (t-coordinate) is $t_{mid}$ [S1].
+5.  **Construct Curves:**
+    -   Curve 1: Bézier curve through $Q_0, Q_1, Q_2$ on $[t_{begin}, t_{mid}]$.
+    -   Curve 2: Bézier curve through $Q_3, Q_4, Q_5$ on $[t_{mid}, t_{end}]$ [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def piecewise_quadratic_hermite_interpolate(h1, h1_prime, h2, h2_prime, L):
+def piecewise_quadratic_hermite(t_begin, t_end, val_b, prim_b, val_e, prim_e):
     """
-    Computes the control points for two piecewise quadratic Bézier curves
-    that interpolate Hermite data (h1, h1_prime) at start and (h2, h2_prime)
-    at end over an interval of length L.
+    Returns the control points Q0..Q5 for the piecewise quadratic Hermite interpolant.
+    """
+    L = t_end - t_begin
+    t_mid = (t_begin + t_end) / 2.0
     
-    Returns:
-        Q: List of 6 control points, each as a tuple (x, y).
-    """
-    # Step 1: Split interval into two equal sub-intervals of length L/2
-    # Step 2 & 3: Define control points with equally spaced abscissas
-    # Q0, Q1, Q2 span [0, L/2]; Q3, Q4, Q5 span [L/2, L]
-    Q = [
-        (0.0, h1),
-        (L / 4, h1 + (L / 4) * h1_prime),
-        (L / 2, 0.5 * (h1 + h2) + (L / 8) * (h1_prime - h2_prime)),
-        (L / 2, 0.5 * (h1 + h2) + (L / 8) * (h1_prime - h2_prime)),
-        (3 * L / 4, h2 - (L / 4) * h2_prime),
-        (L, h2)
-    ]
-    return Q
+    # Q0 and Q5 are the endpoints
+    Q0 = (t_begin, val_b)
+    Q5 = (t_end, val_e)
+    
+    # For quadratic Bézier with equally spaced t, derivative at endpoint is 2*(P1-P0)/dt
+    # Here dt = L/2 for each sub-curve.
+    # prim_b = 2 * (Q1.t - Q0.t) / (L/2) ? No, derivative is in u-space.
+    # du/dt at t_begin = 2 * (Q1.u - Q0.u) / (t_mid - t_begin) = 2 * (Q1.u - val_b) / (L/2) = 4/L * (Q1.u - val_b)
+    # So Q1.u = val_b + prim_b * L / 4
+    Q1_u = val_b + prim_b * L / 4.0
+    Q1 = (t_begin + L/4.0, Q1_u) # Equally spaced in abscissa: t_begin, t_begin + L/4, t_mid
+    
+    # Similarly for the end point
+    # prim_e = 2 * (Q5.u - Q4.u) / (t_end - t_mid) = 4/L * (val_e - Q4.u)
+    # Q4.u = val_e - prim_e * L / 4
+    Q4_u = val_e - prim_e * L / 4.0
+    Q4 = (t_end - L/4.0, Q4_u) # Equally spaced: t_mid, t_end - L/4, t_end
+    
+    # Shared control point Q2 = Q3
+    # Lies on line between Q1 and Q4
+    # u_shared = 0.5 * (Q1.u + Q4.u) + (L/8) * (prim_b - prim_e)
+    # Note: The source formula uses prim_b and prim_e directly.
+    u_shared = 0.5 * (Q1_u + Q4_u) + (L / 8.0) * (prim_b - prim_e)
+    
+    Q2 = (t_mid, u_shared)
+    Q3 = (t_mid, u_shared)
+    
+    return [Q0, Q1, Q2, Q3, Q4, Q5]
 ```
 
-**Edge Cases and Pitfalls:**
-- **Precision:** The method is noted to be numerically stable [S1].
-- **Boundaries:** The method assumes a 1D interval [S1]. For 3D volume rendering, this is applied along the ray or within grid cells [G].
-- **Degenerate Input:** If $L=0$, the formula for $y_{mid}$ becomes $(h_1+h_2)/2$ [S1]. If $h_1=h_2$ and $h'_1=h'_2$, the interpolation is constant [G].
+**Edge Cases:**
+-   If the Hermite data is compatible with a single quadratic (rare), this method still produces a valid $C^1$ interpolant that coincides with the optimal quadratic solution [S1].
+-   Precision issues may arise if $L$ is very small or derivatives are large; however, the normalization of the field improves stability [S1].
 
 ## Subtopics
 
-### [Grid Cell Collection via Corner Indices](1518-grid-cell-collection-via-corner-indices.md)
-Collects corner indices for grid cells [G].
-
-### [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md)
-Handles periodic boundaries for voxel lookup [G].
+### Rational Bézier Oracle for Root Isolation
+A heuristic used when polynomial interpolation might underestimate normalized field values, potentially missing isosurface crossings [S1]. It replaces the polynomial control points with rational Bézier curves by setting the weight of the middle control point ($Q_2/Q_3$) to 3 [S1]. This makes the curve arbitrarily closer to the control polygon, increasing the probability of detecting an isovalue crossing until a sign change is isolated between interval endpoints [S1]. Root computation remains identical to the polynomial case as long as the pole is outside the range of interest [S1].
 
 ## Operating characteristics
-- **Time Complexity:** Constant time per evaluation after control points are computed [G].
-- **Memory Complexity:** Minimal, storing only 6 control points per interval [G].
-- **Performance:** More efficient and simpler than cubic interpolation [S1]. Provides exact interpolation in specific cases [S1]. For Cauchy kernels, yields better interpolation for small numbers of subdivisions compared to cubic interpolation on the original field [S1].
-- **Strengths:** Numerical stability, exact interpolation in specific cases, efficiency [S1].
-- **Limitations:** Only applicable to 1D intervals [G]. Requires Hermite data (value and derivative) [S1].
+-   **Complexity:** Constant time per interval evaluation. Root finding involves solving quadratic equations, which is $O(1)$ [S1].
+-   **Performance:** More efficient and numerically stable than cubic interpolation [S1]. For Cauchy kernels, it yields better interpolation accuracy for small numbers of subdivisions compared to cubic interpolation on the original field [S1].
+-   **Strengths:** Exact interpolation in specific cases due to field normalization; handles Hermite data constraints that single quadratics cannot [S1].
+-   **Limitations:** Requires derivative information (Hermite data); may still miss roots without the rational Bézier heuristic [S1].
 
 ## Background
-This method is used in the context of ray tracing scale-invariant integral surfaces, specifically within the SCALIS framework [S1]. It was proposed as an alternative to Hermite-Birkhoff interpolation to respect Hermite data at both endpoints without ignoring derivatives [S1].
+Originated in the context of the SCALIS volume rendering system [S1]. The method was developed to address the limitations of cubic interpolation in ray marching, specifically regarding computational cost and numerical stability, while maintaining the ability to handle derivative information for accurate isosurface detection [S1].
 
 ## Sources
 [S1] Fast Ray Tracing of Scale‐Invariant Integral Surfaces, https://doi.org/10.1111/cgf.14208, fetched 2026-10-26

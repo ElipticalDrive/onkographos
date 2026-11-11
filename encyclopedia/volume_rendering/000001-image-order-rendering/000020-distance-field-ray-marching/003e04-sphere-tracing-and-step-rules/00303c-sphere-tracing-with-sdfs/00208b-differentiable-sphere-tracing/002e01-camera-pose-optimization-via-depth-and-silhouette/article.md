@@ -3,140 +3,157 @@
 Also called: Pose Estimation with Fuzzy Metaballs
 
 ## Overview
-This method optimizes an initial camera pose toward a ground truth pose by minimizing gradients computed from 2D depth and binary silhouette observations [S1, S2]. It treats the camera extrinsics as differentiable variables, allowing the correction of viewpoint errors without modifying the scene geometry [S1]. Unlike general differentiable rendering which may optimize scene parameters, this approach specifically refines the view matrix using image-based errors [S2]. It builds on [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md) to provide the necessary gradient flow from 2D observations to 3D camera parameters.
+This method optimizes an initial camera pose toward a ground truth pose by minimizing gradients computed from 2D depth and binary silhouette observations [S1, S2]. It builds on [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md) to render scenes using Fuzzy Metaballs, enabling gradient descent on camera parameters [S2]. Unlike global pose optimization methods that treat poses as independent vectors, this approach relies on direct gradient backpropagation through the rendering primitive to the pose parameters [S1]. It distinguishes itself from learnable local warp methods by using analytical gradients rather than a dedicated MLP to predict corrections [S1][S2].
 
 ## How it works
 **Inputs:**
-*   Initial camera pose (rotation $R$ and translation $t$).
-*   Fixed scene representation (e.g., Fuzzy Metaballs or SDF latent code).
-*   Ground truth depth image $z$ and binary silhouette $\alpha$.
+- Initial camera pose (rotation $R$ and translation $t$).
+- Ground truth depth image $z$ and binary silhouette $\alpha$.
+- Fixed SDF representation of the object (e.g., Fuzzy Metaballs).
 
 **Outputs:**
-*   Optimized camera pose $(R^*, t^*)$.
+- Optimized camera pose $(R^*, t^*)$.
 
 **Data Structures:**
-*   **Camera Pose:** Represented as a $4 \times 4$ view matrix or separate rotation matrix and translation vector.
-*   **Loss Components:** Scalar values for Cross-Entropy ($L_{CE}$) and Normalized Mean Squared Error ($L_{MSE}$).
+- **Camera Pose:** Represented as a rotation matrix $R \in \mathbb{R}^{3 \times 3}$ and translation vector $t \in \mathbb{R}^3$.
+- **Depth Image:** 2D array of floats $z \in \mathbb{R}^{H \times W}$.
+- **Silhouette:** 2D array of binary values $\alpha \in \{0, 1\}^{H \times W}$.
+- **Rendered Depth:** $\hat{z} \in \mathbb{R}^{H \times W}$.
+- **Rendered Alpha:** $\hat{\alpha} \in [0, 1]^{H \times W}$.
 
 **Parameters:**
-*   **Convergence Threshold ($\epsilon$):** Threshold on signed distance to stop ray tracing. A large threshold dilates the shape and loses boundary details; a small threshold may produce incomplete geometry. Typical value: $5 \times 10^{-5}$ [S1].
-*   **Optimizer:** SGD with Momentum. Adaptive learning rate methods are limited to this configuration to maintain scale invariance [S2].
-*   **Gradient Scaling Factor ($\eta^2$):** Used to correct the translation gradient scaling [S2].
+- **Convergence Threshold ($\epsilon$):** Threshold on signed distance to stop ray tracing. A large threshold dilates the shape and loses boundary details; a small threshold may produce incomplete geometry. Typical value: $5 \times 10^{-5}$ [S1].
+- **Optimizer:** SGD with Momentum. Adaptive learning rate methods are limited to this to maintain scale invariance [S2].
+- **Gradient Scaling Factor ($\eta$):** Used to correct translation gradient scaling [S2].
 
 **Steps:**
-1.  **Initialize:** Set the camera pose randomly or with a perturbation (e.g., $\pm 45^\circ$ rotation, random translation up to 50% of model scale) [S2].
-2.  **Render:** Use the differentiable SDF renderer to compute the estimated alpha $\hat{\alpha}$ and depth $\hat{z}$ for the current camera pose [S1, S2].
-3.  **Compute Loss:** Calculate the total loss $L$ as the sum of the silhouette cross-entropy loss and the optional depth loss [S2].
-    *   **Silhouette Loss:** Minimize the cross-entropy averaged over all pixels:
-        $$ L_{CE} = CE(\alpha, \hat{\alpha}) = \alpha \log (\hat{\alpha}) + (1-\alpha) \log (1-\hat{\alpha}) $$
-        where $\alpha$ is the ground truth alpha and $\hat{\alpha}$ is the estimated alpha [S2].
-    *   **Depth Loss (Optional):** Add normalized MSE to be invariant to object scale:
-        $$ L_{MSE} = MSE(z, \hat{z}) = \left\| \frac{z - \hat{z}}{|z|} \right\|_2 $$
-        where $|z|$ normalizes the errors by the ground truth depth magnitude [S2].
-4.  **Backpropagate:** Compute gradients of $L$ with respect to the camera pose parameters (rotation and translation) using the differentiable renderer [S1].
-5.  **Update:** Update the camera pose using SGD with Momentum [S2].
-6.  **Iterate:** Repeat steps 2-5 until convergence or loss stops decreasing [S2].
+1. **Initialize:** Set initial camera pose randomly or with perturbation (e.g., $\pm 45^\circ$ rotation, random translation up to 50% of model scale) [S2].
+2. **Render:** Use differentiable sphere tracing to render depth $\hat{z}$ and alpha $\hat{\alpha}$ from the current camera pose [S1, S2].
+3. **Compute Loss:** Calculate the total loss $L$ as the sum of silhouette cross-entropy loss and optional depth loss [S2]:
+   $$ L = CE(\alpha, \hat{\alpha}) + \lambda \cdot MSE(z, \hat{z}) $$
+   where $\lambda$ is a weighting factor (often 1 if not specified).
+4. **Backpropagate:** Compute gradients of $L$ with respect to camera pose parameters $(R, t)$ [S1].
+5. **Update:** Update camera pose using SGD with Momentum [S2].
+6. **Iterate:** Repeat steps 2-5 until convergence or loss stops decreasing [S2].
+
+**Formulas:**
+- **Silhouette Cross-Entropy Loss:**
+  $$ CE(\alpha, \hat{\alpha}) = \frac{1}{HW} \sum_{i,j} \left( \alpha_{ij} \log(\hat{\alpha}_{ij}) + (1-\alpha_{ij}) \log(1-\hat{\alpha}_{ij}) \right) $$
+  where $\alpha$ is ground truth alpha and $\hat{\alpha}$ is estimated alpha [S2].
+- **Depth Loss:**
+  $$ MSE(z, \hat{z}) = \left\| \frac{z - \hat{z}}{|z|} \right\|_2 $$
+  This normalizes errors by ground truth depth $|z|$ to be invariant to object scale [S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def optimize_camera_pose(initial_pose, gt_depth, gt_silhouette, scene_sdf, threshold=5e-5, lr=0.01, momentum=0.9):
+def optimize_camera_pose(initial_pose, gt_depth, gt_silhouette, sdf_model, threshold=5e-5, lr=0.01, momentum=0.9):
     """
-    Optimizes camera pose using depth and silhouette losses.
+    Optimizes camera pose using differentiable rendering of Fuzzy Metaballs.
     
     Args:
-        initial_pose: Initial camera view matrix or (R, t).
-        gt_depth: Ground truth depth image.
-        gt_silhouette: Ground truth binary silhouette image.
-        scene_sdf: Fixed SDF representation of the object.
-        threshold: Ray marching convergence threshold.
+        initial_pose: Tuple (R, t) representing initial rotation and translation.
+        gt_depth: Ground truth depth image (H, W).
+        gt_silhouette: Ground truth silhouette image (H, W), binary.
+        sdf_model: Differentiable SDF model (e.g., Fuzzy Metaballs).
+        threshold: Convergence threshold for ray marching.
         lr: Learning rate.
-        momentum: Momentum coefficient for SGD.
+        momentum: Momentum factor for SGD.
         
     Returns:
-        Optimized camera pose.
+        Optimized pose (R, t).
     """
-    pose = initial_pose.clone()
-    pose.requires_grad = True
-    optimizer = SGD([pose], lr=lr, momentum=momentum)
+    # Initialize optimizer state
+    R = initial_pose[0]
+    t = initial_pose[1]
+    vel_R = torch.zeros_like(R)
+    vel_t = torch.zeros_like(t)
     
-    # Clip bounds for alpha to prevent log(0)
-    ALPHA_MIN = 1e-6
-    ALPHA_MAX = 1 - 1e-6
+    # Clip ground truth silhouette to avoid log(0) if it contains exact 0/1
+    # Note: gt_silhouette is binary, but rendered alpha will be float
+    gt_alpha = gt_silhouette.float()
     
-    while not converged:
-        optimizer.zero_grad()
+    for iteration in range(max_iterations):
+        # 1. Render depth and alpha using differentiable sphere tracing
+        # The renderer uses the current pose (R, t) and sdf_model
+        rendered_depth, rendered_alpha = render_differentiable_sdf(sdf_model, R, t, threshold)
         
-        # 1. Render depth and silhouette using differentiable sphere tracing
-        # This function backpropagates gradients to 'pose'
-        est_alpha, est_depth = render_differentiable(pose, scene_sdf, threshold)
+        # 2. Clip rendered alpha to avoid infinite error in log terms
+        # Clip to [1e-6, 1 - 1e-6]
+        rendered_alpha_clipped = torch.clamp(rendered_alpha, 1e-6, 1 - 1e-6)
         
-        # 2. Clip estimated alpha to avoid infinite loss
-        est_alpha_clipped = torch.clamp(est_alpha, ALPHA_MIN, ALPHA_MAX)
+        # 3. Compute losses
+        # Silhouette Cross-Entropy Loss
+        ce_loss = torch.mean(gt_alpha * torch.log(rendered_alpha_clipped) + 
+                             (1 - gt_alpha) * torch.log(1 - rendered_alpha_clipped))
         
-        # 3. Compute Silhouette Loss (Cross-Entropy)
-        # gt_silhouette is assumed to be in [0, 1]
-        loss_ce = -(gt_silhouette * torch.log(est_alpha_clipped) + 
-                    (1 - gt_silhouette) * torch.log(1 - est_alpha_clipped))
-        loss_ce = loss_ce.mean()
+        # Depth Loss (normalized by ground truth depth)
+        # Avoid division by zero in gt_depth
+        safe_gt_depth = torch.where(gt_depth > 0, gt_depth, torch.ones_like(gt_depth))
+        depth_loss = torch.norm((gt_depth - rendered_depth) / safe_gt_depth, p=2)
         
-        # 4. Compute Depth Loss (Normalized MSE)
-        # Normalize by ground truth depth magnitude for scale invariance
-        # Handle division by zero if gt_depth is 0
-        depth_norm = torch.where(gt_depth != 0, gt_depth, torch.ones_like(gt_depth))
-        loss_mse = torch.norm((gt_depth - est_depth) / depth_norm, p=2)
+        # Total loss
+        loss = ce_loss + depth_loss
         
-        # 5. Total Loss
-        loss = loss_ce + loss_mse
-        
-        # 6. Backpropagate
+        # 4. Backpropagate
         loss.backward()
         
-        # 7. Correct translation gradient scaling
-        # The gradient of translation scales by the inverse of model scale.
-        # Scale gradients by eta^2 to correct this.
-        # Note: eta is typically related to the model scale or a learned parameter.
-        # If not explicitly provided, this step might require estimating model scale.
-        # [G] Assuming eta is a known scalar or derived from scene bounds.
-        if pose.grad is not None:
-            # Apply scaling to translation component gradients specifically
-            # Implementation detail: Extract translation gradient, scale, and reassign
-            # This depends on how 'pose' is structured (matrix vs separate R/t)
-            pass 
-            
-        # 8. Update pose
-        optimizer.step()
+        # 5. Update gradients
+        # Get gradients for R and t
+        grad_R = R.grad
+        grad_t = t.grad
         
-        # Check convergence based on loss change or gradient norm
-        if loss.item() < tolerance:
-            break
+        # Correct translation gradient scaling by eta^2
+        # eta is the model scale factor. If not known, assume 1 or derive from data.
+        # The note says "scale the gradients by eta^2".
+        # We assume eta is a scalar representing model scale.
+        # If eta is not provided, we might need to estimate it or use a default.
+        # For now, we assume eta is a hyperparameter or derived from the scene.
+        # Let's assume eta is passed or computed. If not, we skip correction or use 1.
+        # [G] Assuming eta is available or set to 1 if not provided.
+        eta = 1.0 
+        grad_t = grad_t * (eta ** 2)
+        
+        # 6. Update parameters using SGD with Momentum
+        vel_R = momentum * vel_R - lr * grad_R
+        vel_t = momentum * vel_t - lr * grad_t
+        
+        R = R + vel_R
+        t = t + vel_t
+        
+        # Clear gradients
+        R.grad.zero_()
+        t.grad.zero_()
+        
+        # Check convergence (e.g., loss decrease or max iterations)
+        if iteration % 100 == 0:
+            print(f"Iteration {iteration}, Loss: {loss.item()}")
             
-    return pose
+    return R, t
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Alpha Clipping:** Estimated alpha must be clipped to $[10^{-6}, 1 - 10^{-6}]$ to avoid infinite error in the log terms of the cross-entropy loss [S2].
-*   **Translation Gradient Scaling:** The gradient of the translation scales by the inverse of the model scale. This must be corrected by scaling the gradients by $\eta^2$ [S2]. Alternatively, input data can be scaled to a canonical scale [S2].
-*   **Convergence Threshold:** Choosing the wrong threshold for ray marching affects quality. A large threshold dilates the shape, losing boundary details; a small threshold may produce incomplete geometry [S1].
-*   **Local Minima:** All methods sometimes struggle to find the correct local minima, especially with large initial perturbations [S2].
+- **Alpha Clipping:** Estimated alpha must be clipped to $[10^{-6}, 1 - 10^{-6}]$ to avoid infinite error in the log terms [S2].
+- **Translation Gradient Scaling:** The gradient of the translation scales by the inverse of the model scale. This is corrected by scaling the gradients by $\eta^2$ [S2].
+- **Convergence Threshold:** Tuning the threshold on signed distance is critical. A large threshold dilates the shape and loses boundary details; a small threshold may produce incomplete geometry [S1].
 
 ## Subtopics
 
 ### [Camera Pose Optimization](9009-camera-pose-optimization.md)
-Computes gradients of a reconstruction loss with respect to the rotation and translation components of a camera view matrix. It refines an initial camera pose toward a ground truth pose by minimizing gradients derived from 2D depth and binary silhouette observations. Unlike methods that optimize scene parameters, this method treats the camera extrinsics as differentiable variables to correct viewpoint errors.
+This method computes the gradients of a reconstruction loss with respect to the rotation and translation components of a camera view matrix, enabling differentiable optimization of camera extrinsics. It is distinct from global pose optimization methods that treat poses as independent vectors by focusing on direct gradient backpropagation through the rendering primitive (e.g., Gaussian splats) to the pose parameters. It sets itself apart from learnable local warp methods by relying on analytical gradients rather than a dedicated MLP to predict corrections.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of ray marching steps per pixel, which is determined by the convergence threshold and scene complexity. Each iteration requires a forward render and a backward pass through the differentiable renderer.
-*   **Memory Complexity:** Requires storing the scene SDF and intermediate rendering buffers (depth, alpha). The gradient storage for the camera pose is minimal.
-*   **Performance:** Evaluated on datasets with random viewpoints and perturbations. Methods are compared using the geometric mean of rotation and translation error [S2].
-*   **Strengths:** Effective at recovering camera pose from random initializations using only 2D observations. Scale-invariant depth loss helps with objects of varying sizes [S2].
-*   **Limitations:** Struggles with local minima. Adaptive learning rate methods are limited due to scale invariance requirements [S2].
-*   **When to Use:** When the scene geometry is known or fixed, and the goal is to estimate the camera position/orientation from 2D observations.
-*   **When Not to Use:** When the scene geometry is unknown or needs to be optimized simultaneously with the pose.
+- **Time Complexity:** Depends on the number of ray marching steps per pixel, which is determined by the convergence threshold and scene complexity. Each iteration involves forward and backward passes through the differentiable renderer.
+- **Memory Complexity:** Proportional to the image resolution and the SDF model size.
+- **Performance:** Evaluated on datasets with random viewpoints and perturbations. Methods are compared using geometric mean of rotation and translation error [S2].
+- **Strengths:** Direct gradient backpropagation allows for efficient optimization. Scale invariance is maintained by normalizing depth loss and scaling translation gradients [S2].
+- **Limitations:** Can struggle to find the correct local minima, especially with noisy data or large initial perturbations [S2]. The choice of convergence threshold affects rendering quality and optimization stability [S1].
+- **When to Use:** When an initial camera pose is available and the goal is to refine it using depth and silhouette information. Suitable for scenarios where analytical gradients are preferred over learned corrections.
+- **When Not to Use:** When the initial pose is too far from the ground truth, leading to local minima. When high precision in boundary details is required and the threshold cannot be tuned appropriately.
 
 ## Background
-The method originates from research on differentiable rendering with algebraic surfaces and implicit functions. It was introduced in the context of "Fuzzy Metaballs" for approximate differentiable rendering [S2] and further explored in the DIST framework for rendering deep implicit signed distance functions [S1]. The approach leverages the differentiability of sphere tracing to enable gradient-based optimization of camera parameters, a technique useful in computer vision tasks such as pose estimation and 3D reconstruction.
+The method originates from the use of Fuzzy Metaballs for approximate differentiable rendering [S2]. It builds on the concept of differentiable sphere tracing, which allows for gradient computation with respect to scene parameters [S1]. The approach has been applied to pose estimation tasks, demonstrating effectiveness in recovering camera poses from perturbed initializations [S2].
 
 ## Sources
 [S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26

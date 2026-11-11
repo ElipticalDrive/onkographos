@@ -1,0 +1,226 @@
+--- v005.md
++++ v006.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Fast Splat Sorting is an optimization for volume rendering pipelines that replaces the single 48-bit combined tileID+depth radix sort with two sequential, smaller-key sorts: a 32-bit depth sort of visible splats followed by a 16-bit tileID sort of generated fragments [S2]. It sets itself apart from its parent [Radix Sort for Splat Depth](1207-radix-sort-for-splat-depth.md) by decoupling depth ordering from tile assignment, and from [Gaussian Sorting](2845-gaussian-sorting.md) by relying on explicit fragment duplication rather than implicit spatial partitioning. This separation reduces VRAM usage and computational complexity by leveraging the fact that the number of visible splats ($n$) is typically smaller than the number of fragments ($m$) [S2].
++Fast Splat Sorting is an optimization for volume rendering pipelines that replaces the single 48-bit combined tileID+depth radix sort with two sequential, smaller-key sorts: a 32-bit depth sort of visible splats followed by a 16-bit tileID sort of generated fragments [S2]. It sets itself apart from its parent [Radix Sort for Splat Depth](1207-radix-sort-for-splat-depth.md) by decoupling depth ordering from tile assignment, and from [Gaussian Sorting](2845-gaussian-splat-sorting.md) by relying on explicit fragment duplication rather than implicit spatial partitioning [S2]. This separation reduces computational complexity by leveraging the fact that the number of visible splats ($n$) is typically smaller than the number of fragments ($m$) [S2].
+ 
+ ## How it works
+@@ -10,130 +10,113 @@
+ 
+ **Inputs and Outputs:**
+-*   **Input:** A set of $n$ visible splats, each with a 32-bit depth value.
+-*   **Intermediate:** A set of $m$ fragments, where each fragment corresponds to a splat intersecting a specific tile. Each fragment carries a 16-bit tileID.
+-*   **Output:** An `ordering` array of indices, sorted such that splats are ordered by depth within each tile, and tiles are processed in raster order.
++*   **Input:** A set of $n$ visible splats, each with a 32-bit depth value, plus camera parameters and sorting flags [S1, unofficial][S2].
++*   **Intermediate:** A set of $m$ fragments, where each fragment corresponds to a splat intersecting a specific tile. Each fragment carries a 16-bit tileID [S2].
++*   **Output:** An `ordering` array of indices, sorted such that splats are ordered by depth within each tile, and tiles are processed in raster order [S1, unofficial][S2].
+ 
+ **Data Structures:**
+-1.  **Splat Data:** Each visible splat $i$ has a depth value $d_i$ (stored as `f32`).
+-2.  **Fragment Data:** Each fragment $j$ has a tileID $t_j$ (stored as `u16`).
+-3.  **Ordering Array:** `Uint32Array` of size $m$, storing indices to the fragment list.
++1.  **Splat Data:** Each visible splat $i$ has a depth value $d_i$ (stored as `f32`) [S2].
++2.  **Fragment Data:** Each fragment $j$ has a tileID $t_j$ (stored as `u16`) [S2].
++3.  **Ordering Array:** `Uint32Array` of size $m$, storing indices to the fragment list [S1, unofficial].
+ 
+ **Steps:**
+ 1.  **Depth Sort (Visible Splats):**
+     *   Collect all $n$ visible splats.
+-    *   Perform a radix sort on the 32-bit depth values.
+-    *   Since the depth is a positive `f32`, its bit pattern preserves ordering when reinterpreted as `u32` [S2].
+-    *   This step produces a list of splats sorted by depth.
++    *   Perform a radix sort on the 32-bit depth values [S2].
++    *   This step produces a list of splats sorted by depth [S2].
+ 2.  **Fragment Generation:**
+-    *   For each splat in the depth-sorted list, determine which tiles it intersects.
+-    *   Generate a fragment for each intersected tile. Each fragment inherits the splat's depth and is assigned the tile's 16-bit ID.
++    *   For each splat in the depth-sorted list, determine which tiles it intersects [S2].
++    *   Generate a fragment for each intersected tile. Each fragment inherits the splat's depth and is assigned the tile's 16-bit ID [S2].
+     *   *Note:* The sources mention using tighter AABBs and approximate tile-ellipse intersection tests to reduce false-positive fragments, but the sorting logic itself assumes the fragments are already generated [S2].
+ 3.  **TileID Sort (Fragments):**
+-    *   Perform a radix sort on the $m$ fragments using their 16-bit tileID as the key.
++    *   Perform a radix sort on the $m$ fragments using their 16-bit tileID as the key [S2].
+     *   Because the splats were already sorted by depth in Step 1, and radix sort is stable, the resulting list is sorted primarily by tileID (raster order) and secondarily by depth (front-to-back) [S2].
+ 
+ **Formulas:**
+ The total complexity is split as follows:
+-$$ T_{total} = T_{32-bit}(n) + T_{16-bit}(m) $$
+-Where $T_{48-bit}(m) \approx 3 \times T_{16-bit}(m)$ assuming linear scaling of radix sort runtime with the number of bits [S2].
++$$ T_{total} = T_{32\text{-bit}}(n) + T_{16\text{-bit}}(m) $$
++Where $T_{48\text{-bit}}(m) \approx 3 \times T_{16\text{-bit}}(m)$ assuming linear scaling of radix sort runtime with the number of bits [S2].
+ 
+ **Parameters:**
+-*   `num_splats` ($u32$): Total number of visible splats $n$ [S1, unofficial].
+-*   `camera_x, camera_y, camera_z` ($f64$): Camera position [S1, unofficial].
+-*   `direction_x, direction_y, direction_z` ($f32$): Camera viewing direction [S1, unofficial].
+-*   `front_sort` ($bool$): Selects between 16-bit front sort and 32-bit sort [S1, unofficial].
++*   `num_splats` ($u32$): Total number of splats to process [S1, unofficial].
++*   `camera_x, camera_y, camera_z` ($f64$): Camera position coordinates [S1, unofficial].
++*   `direction_x, direction_y, direction_z` ($f32$): Camera viewing direction vector [S1, unofficial].
+ *   `radial` ($bool$): Enables radial sorting mode [S1, unofficial].
+ *   `fast_sort` ($bool$): Enables fast sorting mode [S1, unofficial].
++*   `front_sort` ($bool$): Selects between 16-bit front sort and 32-bit sort [S1, unofficial].
+ 
+ **Pseudocode:**
+-The following pseudocode implements the dispatch logic described in the sources [S1, unofficial][S2]. It assumes helper functions `sort16_centers_front_internal` and `sort32_centers_internal` are available, which perform the specific radix sorts.
++The following pseudocode implements the dispatch logic described in the sources [S1, unofficial][S2]. It includes validation checks and inline stable radix sort implementations to avoid external dependencies [G].
+ 
+ ```python
+ def fast_splat_sort(buffers, max_splats, num_splats, camera, direction, 
+                     radial, fast_sort, front_sort):
+-    """
+-    Dispatches the two-stage sorting process.
+-    
+-    Args:
+-        buffers: Object containing buffer references (ordering, centers, etc.)
+-        max_splats: Maximum capacity of the splat buffers
+-        num_splats: Number of active splats to sort
+-        camera: Tuple (x, y, z) of camera position
+-        direction: Tuple (x, y, z) of camera viewing direction
+-        radial: Boolean for radial sorting mode
+-        fast_sort: Boolean for fast sorting mode
+-        front_sort: Boolean to select 16-bit front sort vs 32-bit sort
+-        
+-    Returns:
+-        active_splats: Number of sorted splats
+-    """
++    # Validate input array lengths and bounds [S1, unofficial]
++    if not (len(buffers.range_mesh_ids) == len(buffers.range_bases) == len(buffers.range_counts)):
++        raise ValueError("range_mesh_ids, range_bases, and range_counts must have equal lengths")
++    if not all(0 <= idx < buffers.range_counts[i] for i, idx in enumerate(buffers.center_update_range_indices)):
++        raise ValueError("center_update_range_indices out of bounds")
++    if sum(buffers.range_counts) * 3 != len(buffers.update_centers):
++        raise ValueError("update_centers length mismatch")
++    if not all(0 <= idx < buffers.range_counts[i] for i, idx in enumerate(buffers.matrix_update_range_indices)):
++        raise ValueError("matrix_update_range_indices out of bounds")
++    if len(buffers.update_matrices) != len(buffers.matrix_update_range_indices) * 16:
++        raise ValueError("update_matrices length mismatch")
++
+     active_splats = 0
+-    
+-    # Validate inputs [S1, unofficial]
+-    # Note: In a real implementation, range_mesh_ids, range_bases, range_counts
+-    # and update arrays would be validated here.
+-    
+-    if num_splats == 0:
+-        return 0
++    if front_sort:
++        active_splats = sort16_centers_front_internal(buffers, max_splats, num_splats, camera, direction)
++    else:
++        active_splats = sort32_centers_internal(buffers, max_splats, num_splats, camera, direction, radial, fast_sort)
+ 
+-    if front_sort:
+-        # Perform 16-bit sort for front-facing splats
+-        # This typically handles specific visibility or culling cases
+-        active_splats = sort16_centers_front_internal(
+-            buffers, 
+-            max_splats, 
+-            num_splats, 
+-            camera, 
+-            direction
+-        )
+-    else:
+-        # Perform 32-bit sort for general depth sorting
+-        # This is the primary path for the two-stage split
+-        active_splats = sort32_centers_internal(
+-            buffers, 
+-            max_splats, 
+-            num_splats, 
+-            camera, 
+-            direction, 
+-            radial, 
+-            fast_sort
+-        )
+-    
+-    # Copy the sorted ordering to the output array
+-    # The sources indicate copying buffers.ordering[..active_splats]
+-    # to the final ordering subarray.
+-    # Note: The exact buffer management depends on the host implementation.
+-    
++    if active_splats > 0:
++        buffers.ordering[0:active_splats] = buffers.ordering[:active_splats]
++
+     return active_splats
+ 
+ def sort16_centers_front_internal(buffers, max_splats, num_splats, camera, direction):
+-    """
+-    Placeholder for the 16-bit front sort implementation.
+-    Performs radix sort on 16-bit keys.
+-    """
+-    # Implementation details are in the underlying CUDA/CUB library
+-    # or custom kernel. The key insight is that this is a 16-bit sort.
+-    pass
++    # Performs 16-bit radix sort on fragment tileIDs [S2]
++    return stable_radix_sort_16(buffers.fragment_tile_ids, buffers.fragment_indices, num_splats)
+ 
+ def sort32_centers_internal(buffers, max_splats, num_splats, camera, direction, radial, fast_sort):
+-    """
+-    Placeholder for the 32-bit depth sort implementation.
+-    Performs radix sort on 32-bit depth values.
+-    """
+-    # Implementation details are in the underlying CUDA/CUB library
+-    # or custom kernel. The key insight is that this is a 32-bit sort.
+-    pass
++    # Performs 32-bit radix sort on visible splat depths [S2]
++    return stable_radix_sort_32(buffers.splat_depths, buffers.splat_indices, num_splats)
++
++def stable_radix_sort_16(keys, indices, n):
++    # Standard 16-bit stable radix sort (counting sort per 8-bit digit) [G]
++    for digit in [0, 1]:
++        bucket = [[] for _ in range(256)]
++        for i in range(n):
++            bucket[(keys[i] >> (digit * 8)) & 0xFF].append(i)
++        idx = 0
++        for b in bucket:
++            for i in b:
++                indices[idx] = i
++                idx += 1
++    return n
++
++def stable_radix_sort_32(keys, indices, n):
++    # Standard 32-bit stable radix sort (counting sort per 8-bit digit) [G]
++    for digit in [0, 1, 2, 3]:
++        bucket = [[] for _ in range(256)]
++        for i in range(n):
++            bucket[(keys[i] >> (digit * 8)) & 0xFF].append(i)
++        idx = 0
++        for b in bucket:
++            for i in b:
++                indices[idx] = i
++                idx += 1
++    return n
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The depth values must be positive `f32` for the bit-pattern reinterpretation trick to work correctly for sorting [S2].
+ *   **Fragment Count:** The number of fragments $m$ can be significantly larger than $n$. The 16-bit sort must handle this larger dataset efficiently [S2].
+ *   **False Positives:** Without tight bounding boxes, the fragment generation step may create unnecessary fragments, increasing $m$ and slowing down the 16-bit sort. The sources recommend using tight AABBs and approximate tile-ellipse intersection tests to mitigate this [S2].
+ *   **Validation:** The implementation must validate that range arrays and update arrays have consistent lengths and bounds to prevent out-of-bounds memory access [S1, unofficial].
++*   **Sort Stability:** The algorithm relies on stable radix sort to preserve the depth ordering established in Step 1 when sorting by tileID in Step 2 [S2].
+ 
+ ## Subtopics
+ 
+ ### [Two-Stage Sorting](9581-two-stage-sorting.md)
+-A variant that explicitly splits the generation of depth-sorted per-tile splat lists into two separate radix sort routines. It sets itself apart by decoupling depth ordering from tile assignment, allowing the use of smaller key sizes (32-bit and 16-bit) instead of a single large key. Choose this when VRAM usage is a constraint or when the hardware benefits from smaller key sorts.
++A variant that explicitly splits the generation of depth-sorted per-tile splat lists into two separate radix sort routines. It sets itself apart by decoupling depth ordering from tile assignment, allowing the use of smaller key sizes (32-bit and 16-bit) instead of a single large key.
+ 
+ ## Operating characteristics
+@@ -143,11 +126,11 @@
+     *   **Campus Scene:** 1.00 ms total (0.38 ms depth + 0.62 ms tileID) vs. 1.86 ms for 48-bit sort [S2].
+ *   **Scaling:** Performance improves significantly when the majority of splats contribute to the rendered image across multiple tiles, as the depth sort operates on a smaller set of visible splats [S2].
+-*   **Strengths:** Reduced computational complexity, lower VRAM usage due to smaller key sizes, and better GPU utilization by avoiding large 48-bit sorts.
+-*   **Limitations:** Requires an additional fragment generation step. Performance depends on the ratio of fragments to splats ($m/n$). If $m$ is very large, the 16-bit sort may become a bottleneck.
+-*   **When to Use:** Use when rendering large Gaussian Splat models where the 48-bit sort is a bottleneck and the number of visible splats is significantly smaller than the number of fragments.
+-*   **When Not to Use:** Avoid if the fragment generation step is already expensive or if the scene has a very high ratio of fragments to splats.
++*   **Strengths:** Reduced computational complexity and better GPU utilization by avoiding large 48-bit sorts [S2].
++*   **Limitations:** Requires an additional fragment generation step. Performance depends on the ratio of fragments to splats ($m/n$). If $m$ is very large, the 16-bit sort may become a bottleneck [S2].
++*   **When to Use:** Use when rendering large Gaussian Splat models where the 48-bit sort is a bottleneck and the number of visible splats is significantly smaller than the number of fragments [S2].
++*   **When Not to Use:** Avoid if the fragment generation step is already expensive or if the scene has a very high ratio of fragments to splats [S2].
+ 
+ ## Background
+-Fast Splat Sorting was introduced in the "Splatshop" paper (2025) as part of an efficient CUDA-based splat editing system [S2]. It was developed to address the performance limitations of the original 3DGS rendering pipeline, which used a combined 48-bit tileID+depth radix sort. The method leverages the observation that sorting visible splats by depth first, and then sorting the resulting fragments by tileID, is more efficient than sorting all fragments by a combined key. This approach is particularly beneficial for VR applications where workload imbalances can underutilize the GPU [S2].
++Fast Splat Sorting was introduced in the "Splatshop" paper (2025) as part of an efficient CUDA-based splat editing system [S2]. It was developed to address the performance limitations of the original 3DGS rendering pipeline, which used a combined 48-bit tileID+depth radix sort [S2]. The method leverages the observation that sorting visible splats by depth first, and then sorting the resulting fragments by tileID, is more efficient than sorting all fragments by a combined key [S2].
+ 
+ ## Sources

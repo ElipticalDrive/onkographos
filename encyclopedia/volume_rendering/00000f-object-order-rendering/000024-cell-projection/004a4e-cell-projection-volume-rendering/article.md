@@ -1,0 +1,236 @@
+# Cell-Projection Volume Rendering
+
+Also called: Parallel Cell-Projection Rendering, Ma and Crockett algorithm, Distributed Cell Projection, Asynchronous Cell Projection
+
+## Overview
+Parallel Cell Projection is a distributed-memory object-order volume rendering algorithm for unstructured grids that projects mesh cells into image space to generate ray segments, which are then merged in image space [S1, S2, unofficial][S5]. Unlike ray-casting, it avoids the need for global depth-sorting of cells by having each processor scan-convert its local unstructured cells into ray segments, which are then routed to their final image destinations for merging [S4, unofficial]. It sets itself apart from synchronous cell projection by allowing asynchronous communication and task management to hide data transfer overheads [S1, unofficial].
+
+## How it works
+The algorithm operates on a distributed-memory architecture where each processor holds a subset of the volume data. The process consists of data distribution, space partitioning, view transformation, scan conversion, ray segment merging, and image assembly [S2, unofficial].
+
+### Inputs and Outputs
+*   **Input:** An unstructured grid dataset consisting of $N$ cells. Each cell is defined by four node indices. Each node is defined by three spatial coordinates $(x, y, z)$ and one scalar value $s$.
+*   **Output:** A 2D image composed of pixels, where each pixel contains a final color and opacity value.
+
+### Data Structures
+The data layout is fixed to minimize transfer overhead and simplify indexing [S1, S2, unofficial]:
+
+1.  **Cell Data:** Each cell stores four node indices.
+    *   Size: 16 bytes total (4 indices $\times$ 4 bytes/integer).
+    *   Layout: `[node_idx_0, node_idx_1, node_idx_2, node_idx_3]`
+2.  **Node Data:** Each node stores three coordinates and one scalar value.
+    *   Size: 16 bytes total (3 floats $\times$ 4 bytes + 1 float $\times$ 4 bytes).
+    *   Layout: `[x, y, z, scalar_value]`
+3.  **Ray Segment:** Generated during scan conversion and sent between processors.
+    *   Size: 16 bytes total.
+    *   Fields:
+        *   `sample_value` (float, 4 bytes): The integrated color/opacity contribution.
+        *   `pixel_x` (int, 4 bytes): The x-coordinate in the global image.
+        *   `pixel_y` (int, 4 bytes): The y-coordinate in the global image.
+        *   `depth_start` (float, 4 bytes): The starting depth of the segment in view space.
+        *   `depth_end` (float, 4 bytes): The ending depth of the segment in view space.
+    *   *Note:* Depth values are required because segments arrive in unpredictable order and must be sorted back-to-front for correct compositing [S1, unofficial][S5].
+
+### Algorithm Steps
+
+1.  **Data Distribution:**
+    *   Distribute $N$ cells to $P$ processors using a round-robin assignment policy [S1, S2, unofficial].
+    *   Round-robin disperses connected cells widely to balance load, as connected cells often have similar size and opacity, which would cause imbalance if grouped [S2, unofficial].
+    *   Each processor receives its local cells and the corresponding node data. In the worst case (no node sharing), transferring $n$ cells requires $80n$ bytes (16 bytes per cell + 64 bytes for unique nodes) [S1, S2, unofficial].
+
+2.  **Space Partitioning Tree Construction:**
+    *   Cooperatively construct a global $k$-d tree on all processors to restore spatial coherence and enable efficient zoom-in queries [S1, S2, unofficial].
+    *   The tree must be identical on every processor.
+    *   **Parallel Partitioning Algorithm:**
+        1.  Each processor examines its local cells and establishes a local cutting position to split its sub-region into two parts with approximately equal cell counts. The cut direction (x, y, or z) alternates at each tree level [S1, unofficial].
+        2.  Local cutting positions are sent to a designated host node.
+        3.  The host node averages the local positions to compute a global cutting position and broadcasts it back to all processors, along with the choice of which sub-region to partition next [S1, unofficial].
+        4.  Cells intersecting a cut boundary are assigned to the region containing their centroid.
+        5.  Repeat until the desired number of regions (processors) is generated [S1, unofficial].
+    *   *Pitfall:* The implementation does not guarantee a perfectly balanced tree, but the search overhead is insignificant compared to rendering time [S1, unofficial].
+
+3.  **View Transformation:**
+    *   Apply the view and projection transformations to the 3D vertices of the cells to map them to 2D screen space [S2, unofficial].
+
+4.  **Rendering Loop (Scan Conversion and Merging):**
+    *   Processors follow the same path through the spatial partitioning tree. At each leaf node, the processor processes all cells assigned to that region [S1, unofficial].
+    *   **Scan Conversion:** For each cell, project it onto the image screen. Identify every pixel affected by the projection. Integrate color and opacity for these pixels to generate ray segments [S2, S3, unofficial].
+    *   **Ray Segment Generation:** Each ray segment contains the sample value, pixel coordinates, and depth range [S5].
+    *   **Routing:** Route the generated ray segments to the processor that owns the corresponding image scanline. Image partitioning uses scanline interleaving (round-robin assignment of successive scanlines to processors) to disperse ray-merging operations, handling depth complexity variations [S1, unofficial].
+
+5.  **Task Management with Asynchronous Communication:**
+    *   To hide communication latency, scan conversion and merging are interleaved using a polling strategy [S1, unofficial].
+    *   **Polling Strategy:**
+        1.  Scan convert one or more cells.
+        2.  Check for incoming ray segments from other processors.
+        3.  If segments are available, switch to the merging task: sort the incoming segments by depth and merge them into the local pixel buffers using the Porter-Duff over operator.
+        4.  Repeat [S1, unofficial].
+    *   **Asynchronous Send/Receive:**
+        *   Buffer ray segments locally. Use asynchronous send/receive to overlap computation and communication [S1, unofficial].
+        *   Provide two or more buffers per destination. If a send is pending for a full buffer, place new segments in the companion buffer.
+        *   If both buffers for a destination fill up before the first send completes, switch to the ray merging task to process incoming segments and clear congestion. This prevents deadlock [S1, unofficial].
+    *   **Parameters:**
+        *   *Polling Interval:* The number of cells processed before checking for incoming segments. High frequency prevents buffer clogging but adds overhead; low frequency causes poor asynchronous performance [S1, unofficial].
+        *   *Buffer Depth:* The number of ray segments accumulated before posting an asynchronous send. Small buffers cause excessive overhead; large buffers cause delays for waiting processors and reduce bandwidth spreading effectiveness [S1, unofficial].
+
+6.  **Termination:**
+    *   Use a designated node to coordinate termination. Collect local termination messages and broadcast a global termination signal. Perform a final global synchronization [S1, unofficial].
+
+7.  **Image Assembly:**
+    *   Each processor sends its completed subimage (the pixels it owns) to a host computer, which assembles them for display [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def parallel_cell_projection(cells, nodes, num_processors, image_width, image_height):
+    """
+    Main entry point for Parallel Cell Projection.
+    """
+    processor_id = get_processor_id()
+    
+    # 1. Data Distribution
+    local_cells = distribute_cells_round_robin(cells, num_processors, processor_id)
+    local_nodes = fetch_node_data(local_cells, nodes)
+    
+    # 2. Space Partitioning Tree Construction
+    # All processors participate in building the same k-d tree
+    kdtree = build_global_kdtree(local_cells, num_processors)
+    
+    # 3. Rendering Loop
+    for leaf_node in kdtree.traverse():
+        local_leaf_cells = get_cells_in_leaf(leaf_node, local_cells)
+        
+        for cell in local_leaf_cells:
+            # Scan Convert
+            ray_segments = scan_convert_cell(cell, local_nodes, image_width, image_height)
+            
+            # Route and Send Asynchronously
+            for segment in ray_segments:
+                dest_processor = get_scanline_owner(segment.pixel_y, num_processors)
+                send_asynchronous(segment, dest_processor)
+        
+        # Merge Incoming Segments
+        merge_incoming_segments(processor_id, image_width, image_height)
+
+    # 4. Termination
+    if is_termination_coordinator():
+        wait_for_local_termination_messages()
+        broadcast_global_termination()
+    else:
+        send_local_termination_message()
+    
+    # 5. Image Assembly
+    subimage = get_local_subimage(processor_id, image_width, image_height)
+    send_subimage_to_host(subimage)
+
+def scan_convert_cell(cell, nodes, width, height):
+    """
+    Projects a cell onto the image plane and generates ray segments.
+    """
+    segments = []
+    # Project cell vertices to 2D screen space
+    projected_vertices = project_to_screen(cell.vertices, nodes)
+    
+    # Identify pixels covered by the projection
+    affected_pixels = get_affected_pixels(projected_vertices, width, height)
+    
+    for pixel in affected_pixels:
+        # Integrate color/opacity for this pixel under the cell
+        sample_value = integrate_cell_opacity(cell, nodes, pixel)
+        
+        # Determine depth range in view space
+        depth_start, depth_end = get_depth_range(cell, nodes)
+        
+        segment = RaySegment(
+            sample_value=sample_value,
+            pixel_x=pixel.x,
+            pixel_y=pixel.y,
+            depth_start=depth_start,
+            depth_end=depth_end
+        )
+        segments.append(segment)
+        
+    return segments
+
+def merge_incoming_segments(processor_id, width, height):
+    """
+    Merges incoming ray segments into the local pixel buffers.
+    """
+    # Poll for incoming segments
+    incoming_segments = receive_all_pending_segments()
+    
+    if not incoming_segments:
+        return
+        
+    # Group segments by pixel
+    pixel_buffers = initialize_pixel_buffers(width, height)
+    
+    for segment in incoming_segments:
+        pixel_buffers[segment.pixel_y][segment.pixel_x].append(segment)
+        
+    # Sort and Merge for each pixel
+    for y in range(height):
+        for x in range(width):
+            segments = pixel_buffers[y][x]
+            if not segments:
+                continue
+            
+            # Sort back-to-front by depth
+            segments.sort(key=lambda s: s.depth_end, reverse=True)
+            
+            # Composite using Porter-Duff over
+            final_color, final_opacity = 0.0, 0.0
+            for seg in segments:
+                final_color, final_opacity = porter_duff_over(
+                    final_color, final_opacity, 
+                    seg.sample_value, seg.depth_end - seg.depth_start
+                )
+            
+            # Store in local image buffer
+            store_pixel(processor_id, x, y, final_color, final_opacity)
+
+def porter_duff_over(c1, a1, c2, a2):
+    """
+    Standard Porter-Duff over operator.
+    """
+    a_out = a1 + a2 * (1 - a1)
+    c_out = c1 + c2 * (1 - a1)
+    return c_out, a_out
+```
+
+## Subtopics
+
+### [Parallel Cell Projection](875-parallel-cell-projection.md)
+Parallel Cell Projection is a distributed-memory strategy for object-order volume rendering that decomposes the workload into an object-space projection phase and an image-space composition phase. Unlike ray-casting, it avoids the need for global depth-sorting of cells by having each processor scan-convert its local unstructured cells into ray segments, which are then routed to their final image destinations for merging. It sets itself apart from synchronous cell projection by allowing asynchronous communication and task management to hide data transfer overheads.
+
+## Operating characteristics
+*   **Time Complexity:** The algorithm avoids offline preprocessing, performing low-cost preprocessing (e.g., view-dependent optimization) in parallel [S2, unofficial]. The rendering time is dominated by scan conversion and communication.
+*   **Memory Complexity:** Memory usage is proportional to the local data size and the number of ray segments buffered for asynchronous communication.
+*   **Measured Performance:**
+    *   Rendering 0.5 million tetrahedral cells into a 400x400 pixel image takes 0.5 seconds (2 frames per second) on 128 IBM SP2 nodes (excluding display time) [S1, unofficial].
+    *   On a Cray T3E, the algorithm achieved above 75 percent parallel efficiency when rendering 18 million tetrahedra using up to 512 processors [S2, unofficial].
+*   **Scaling:** The algorithm scales well with the number of processors, provided that communication overheads are managed via asynchronous buffering and polling [S1, S2, unofficial].
+*   **Strengths:**
+    *   Flexibility in data distribution (round-robin) avoids complex load balancing [S1, S2, unofficial].
+    *   No global depth-sorting required [S1, unofficial].
+    *   Higher image quality than point sampling methods due to cell integration [S3, unofficial].
+    *   Suitable for unstructured grids with varying cell sizes and shapes [S2, unofficial].
+*   **Limitations:**
+    *   Requires a tremendous number of calculations to compute an image [S3, unofficial].
+    *   Load imbalance can occur due to variability in cell size/shape and opacity [S2, unofficial].
+    *   Zoom-in viewing can cause severe load imbalance if data is distributed as connected components [S2, unofficial].
+    *   Communication volume is high: $10^6$ to $10^8$ ray segments per image, resulting in $10^7$ to $10^9$ bytes of aggregate communication per frame [S1, unofficial][S5].
+*   **When to Use:** Ideal for parallel architectures (distributed-memory supercomputers) rendering large-scale unstructured grid data where flexibility and accuracy are prioritized over raw speed [S1, S2, unofficial].
+*   **When Not to Use:** Not suitable for systems with limited communication bandwidth or where interactive frame rates are critical for very large datasets without significant optimization [S3, unofficial].
+
+## Background
+Parallel Cell Projection was introduced by Ma and Crockett as a parallel volume rendering technique for unstructured data [S1, S2, unofficial]. It is based on the cell-projection method, which projects mesh cells into image space [S1, unofficial]. The algorithm was designed to handle irregular data cells (varying in size and shape) without offline preprocessing, making it suitable for adaptive mesh refinement (AMR) data [S2, S4, unofficial]. It is used for visualizing unstructured meshes in aerodynamics, accelerator simulations, blast simulations, and bioelectric field simulations [S2, unofficial].
+
+## Sources
+[S1] DTIC ADA329328: A Scalable Parallel Cell-Projection Volume Rendering Algorithm for Three-Dimensional Unstructured Data, https://archive.org/details/DTIC_ADA329328, fetched 2026-10-26 (unofficial)
+[S2] Parallel Software Rendering for Large-Scale Volume Visualization, https://escholarship.org/uc/item/489126f2, fetched 2026-10-27 (unofficial)
+[S3] DTIC ADA215533: Sampling Scattered Data Onto Rectangular Grids for Volume Visualization, https://archive.org/details/DTIC_ADA215533, fetched 2026-10-26 (unofficial)
+[S4] Volume Visualization of AMR Data, https://graphics.cs.ucdavis.edu/~okreylos/Research/AMRVis/MainPage.html, fetched 2026-10-26 (unofficial)
+[S5] PDF A Scalable Parallel Cell-Projection Volume Rendering Algorithm for ..., https://web.cs.ucdavis.edu/~ma/papers/PRS97.pdf, fetched 2026-10-27

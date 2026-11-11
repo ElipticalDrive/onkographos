@@ -3,155 +3,135 @@
 Also called: Adaptive Rendering, HPC Decoding
 
 ## Overview
-Hierarchical Progressive Decoding is the reconstruction phase of a hierarchical volumetric video compression scheme, designed to recover feature grids from a compressed bitstream while supporting adaptive rendering based on available bandwidth or computational resources [S1]. It solves the problem of delivering high-fidelity dynamic volumetric content over fluctuating network conditions by allowing the decoder to selectively process only a subset of resolution levels [S1]. Unlike sibling methods that may require full reconstruction, this approach enables scalable quality adjustments by leveraging the multi-resolution residual structure established during encoding [S1].
+Hierarchical Progressive Decoding is the decoding phase of the Neural Residual Radiance Fields (ReRF) codec, designed to recover feature grids from a compressed bitstream for the real-time rendering of dynamic free-viewpoint videos (FVV) [S1]. It differs from static volume rendering by utilizing temporal redundancy through motion-compensated prediction and residual encoding, allowing adaptive streaming based on available bandwidth [S1]. It builds on [Hierarchical Progressive Encoding](12107-hierarchical-progressive-encoding.md) by interpreting the hierarchical residual structure to reconstruct multi-resolution feature grids.
 
 ## How it works
-The method recovers feature grids $\hat{F}_t$ for frame $t$ from a bitstream $B_t$ and renders the scene using a global Multi-Layer Perceptron (MLP) $\Phi$ [S1]. The process operates on a Group of Features (GoF) structure, where the first frame is a reference (I-frame) and subsequent frames are predicted (P-frames) using residuals relative to the previous frame's reconstructed grid at multiple resolutions $l \in [1, L]$ [S1].
+**Inputs and Outputs:**
+*   **Input:** Compressed bitstream $B_t$ for frame $t$; quantization parameter $q$; entropy decoder $D$; previous frame's reconstructed feature grid buffer $\hat{F}_{l, t-1}$ for all levels $l \in [1, L]$; global MLP $\Phi$.
+*   **Output:** Reconstructed feature grids $\hat{F}_{l, t}$ for all levels $l \in [1, L]$; rendered color $\hat{c}_l(r)$ for each resolution level $l$.
 
-### Inputs and Outputs
-*   **Inputs:** Compressed bitstream $B_t$ containing entropy-coded residuals; previously reconstructed feature grid $\hat{F}_{l, t-1}$ from the buffer; quantization parameter $q$; entropy decoder $D$; global MLP $\Phi$.
-*   **Outputs:** Reconstructed feature grids $\hat{F}_{l, t}$ for all levels $l$; rendered color $\hat{c}(r)$ and density $\sigma$ for rays $r$.
+**Data Structures:**
+*   **Bitstream $B_t$:** Contains entropy-coded residuals for the current frame.
+*   **Feature Grid $\hat{F}_{l, t}$:** A 3D grid of feature vectors at resolution level $l$ for frame $t$.
+*   **Residual $\hat{R}_{l, t}$:** The decoded difference between the current frame's features and the previous frame's features at level $l$.
+*   **Buffer:** Stores $\hat{F}_{l, t-1}$ for temporal prediction.
 
-### Data Structures
-*   **Bitstream $B_t$:** Contains entropy-coded quantized residuals $R_{l, t}$ for each resolution level $l$.
-*   **Feature Grid $\hat{F}_{l, t}$:** A 3D grid storing feature vectors at resolution level $l$ for frame $t$.
-*   **Buffer:** Stores $\hat{F}_{l, t-1}$ for the current GoF to serve as the prediction reference.
+**Steps:**
 
-### Steps
-1.  **Entropy Decoding and Range Reversal:**
-    Decode the bitstream $B_t$ using entropy decoder $D$ to recover quantized residuals. The original data range is restored by reversing the scaling applied during encoding. The recovered residual $\hat{R}_{l, t}$ at level $l$ is calculated as [S1]:
-    $$
-    \hat{R}_{l, t} = \frac{D(B_{l, t}) + Q(q \cdot \min(R_{l, t}))}{q}
-    $$
-    where $Q(\cdot)$ represents the quantization offset adjustment, $q$ is the quantization parameter, and $D(\cdot)$ is the entropy decoding function [S1].
+1.  **Entropy Decoding:** Decode the bitstream $B_t$ using the entropy decoder $D$ to recover the quantized residuals. The decoder must reverse the quantization applied during encoding. The quantization involved multiplying the minimum residual value by $q$ and converting to non-negative values. The recovery formula is [S1]:
+    $$ \hat{R}_{l, t} = \frac{D(B_{l, t}) + q \cdot \min(R_{l, t})}{q} $$
+    where $D(B_{l, t})$ is the decoded integer value, $q$ is the quantization parameter, and $\min(R_{l, t})$ is the minimum residual value transmitted or known from context to shift the data range back to its original scale. Note: The source notation $Q(q \cdot \min(R_t))$ in Eq. (6) implies the quantization operation; the inverse operation recovers the residual.
 
-2.  **Feature Grid Reconstruction:**
-    Reconstruct the feature grid $\hat{F}_{l, t}$ at level $l$ by adding the recovered residual $\hat{R}_{l, t}$ to the previously reconstructed feature grid $\hat{F}_{l, t-1}$ at the same level [S1]:
-    $$
-    \hat{F}_{l, t} = \hat{F}_{l, t-1} + \hat{R}_{l, t}
-    $$
-    This operation is performed recursively for all levels $l \in [1, L]$ [S1]. For the first frame of a GoF (I-frame), $\hat{F}_{l, t-1}$ is initialized to zero or the grid is decoded independently if no previous reference exists [S1].
+2.  **Feature Reconstruction:** Reconstruct the feature grid $\hat{F}_{l, t}$ at level $l$ by adding the recovered residual $\hat{R}_{l, t}$ to the previous frame's reconstructed feature grid $\hat{F}_{l, t-1}$ at the same level. This is performed recursively for all levels $l \in [1, L]$ [S1]:
+    $$ \hat{F}_{l, t} = \hat{F}_{l, t-1} + \hat{R}_{l, t} $$
+    For the first frame of a Group of Features (GoF), $\hat{F}_{l, t-1}$ is initialized to zero or the full reference grid if specified by the encoder.
 
-3.  **Adaptive Selection (Optional):**
-    Based on bandwidth or computational constraints, select a subset of resolution levels $l$ to decode and render. Lower levels $l$ provide coarser details, while higher levels provide fine details [S1].
+3.  **Adaptive Selection:** Select a subset of resolution levels $l \in [1, L_{max}]$ based on available bandwidth or computational constraints. Lower levels $l$ provide coarser details, while higher levels provide finer details.
 
-4.  **Rendering:**
-    Pass the reconstructed feature grids $\hat{F}_{l}$ through the global MLP $\Phi$ to obtain color $c_{l, i}$ and density $\sigma_{i, l}$ for sampled points $i$ along a ray $r$ [S1]. Perform volume rendering by accumulating colors and densities [S1]:
-    $$
-    \hat{c}_l(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_{i, l} \delta_i)) c_{l, i}
-    $$
-    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_{i} \delta_i)$ is the transmittance, and $\delta_i$ is the distance between adjacent samples [S1].
+4.  **Feature to Radiance Conversion:** Pass the reconstructed feature grids $\hat{F}_{l, t}$ through the global MLP $\Phi$ to obtain color $c_{l, i}$ and density $\sigma_{l, i}$ for each sampled point $i$ along a ray $r$.
 
-### Pseudocode
+5.  **Volume Rendering:** Perform standard volume rendering to obtain the predicted color $\hat{c}_l(r)$ at resolution $l$ for each pixel [S1]:
+    $$ \hat{c}_l(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_{l, i} \delta_i)) c_{l, i} $$
+    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_{l, j} \delta_j)$ is the transmittance, $\delta_i$ is the distance between adjacent samples, and $N$ is the number of samples along the ray.
+
+**Parameters:**
+*   $L$: Total number of resolution levels. Not given in the sources.
+*   $q$: Quantization parameter trading off reconstruction quality and model storage. Not given in the sources.
+*   $N$: Number of samples per ray. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Drift:** Errors in $\hat{R}_{l, t}$ accumulate over time if the previous frame $\hat{F}_{l, t-1}$ is incorrect. The GoF structure limits this drift to the group size.
+*   **Boundary Conditions:** The first frame of a GoF requires a full reference grid. If not provided, initialization must be handled (e.g., zero). [G]
+*   **Quantization Precision:** The division by $q$ in the decoding step can introduce floating-point precision errors. [G]
+
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def hierarchical_progressive_decode(bitstream_B_t, previous_grids_F_hat, q, entropy_decoder_D, mlp_Phi):
+def hierarchical_progressive_decode(bitstream_B_t, q, entropy_decoder_D, 
+                                    prev_features_F_hat, global_MLP_Phi, 
+                                    num_levels_L, ray_samples):
     """
-    Reconstructs feature grids and renders a frame using hierarchical progressive decoding.
+    Decodes feature grids and renders a frame using hierarchical progressive decoding.
     
     Args:
-        bitstream_B_t: Dict mapping level l to encoded residual data.
-        previous_grids_F_hat: Dict mapping level l to F_hat_{t-1}.
+        bitstream_B_t: Compressed bitstream for frame t.
         q: Quantization parameter.
         entropy_decoder_D: Function to decode entropy-coded data.
-        mlp_Phi: Global MLP function taking features, returning (color, density).
+        prev_features_F_hat: Dictionary of feature grids {l: F_hat_l_t_minus_1} for all levels.
+        global_MLP_Phi: Neural network mapping features to color and density.
+        num_levels_L: Total number of resolution levels.
+        ray_samples: List of 3D points along rays for volume rendering.
         
     Returns:
-        rendered_color: Rendered image for the selected resolution levels.
+        rendered_colors: Dictionary of rendered colors {l: c_hat_l} for selected levels.
     """
-    current_grids_F_hat = {}
+    current_features_F_hat = {}
+    rendered_colors = {}
     
-    # Determine levels to decode based on bandwidth/compute constraints
-    # Default: decode all levels L
-    levels_to_decode = sorted(bitstream_B_t.keys())
+    # Step 1 & 2: Decode and Reconstruct Feature Grids
+    for l in range(1, num_levels_L + 1):
+        # Extract bitstream segment for level l
+        B_l_t = extract_bitstream_segment(bitstream_B_t, l)
+        
+        # Decode residuals
+        # Note: min_R_l_t must be known from context or transmitted separately
+        # Assuming min_R_l_t is available or zero for first frame
+        min_R_l_t = get_min_residual(l) # [G] Placeholder for context-dependent value
+        quantized_residual = entropy_decoder_D(B_l_t)
+        
+        # Reverse quantization
+        R_hat_l_t = (quantized_residual + q * min_R_l_t) / q
+        
+        # Reconstruct feature grid
+        F_hat_l_t_minus_1 = prev_features_F_hat.get(l, zeros_like_grid()) # [G] Init for first frame
+        F_hat_l_t = F_hat_l_t_minus_1 + R_hat_l_t
+        current_features_F_hat[l] = F_hat_l_t
+        
+    # Step 3: Adaptive Selection (Simplified: use all levels for now)
+    selected_levels = range(1, num_levels_L + 1)
     
-    for l in levels_to_decode:
-        # Step 1: Decode residuals and reverse quantization scaling
-        # Note: Q(min(R)) term implies a stored offset or min-value for range reversal.
-        # Assuming bitstream contains the necessary offset or it is pre-computed.
-        # D(B_t) returns the raw quantized integer values.
-        raw_quantized = entropy_decoder_D(bitstream_B_t[l])
+    # Step 4 & 5: Render
+    for l in selected_levels:
+        F_hat_l_t = current_features_F_hat[l]
+        color_sum = 0.0
+        transmittance = 1.0
         
-        # Reconstruct residual in original range
-        # Formula: R_hat = (D(B_t) + Q(q * min(R))) / q
-        # Implementation detail: Q(q * min(R)) is the quantization offset.
-        # If min(R) is not in bitstream, it must be stored or assumed 0.
-        # Here we assume the bitstream or context provides the offset term.
-        offset = get_quantization_offset(l) # [G] Helper to retrieve stored min-value offset
-        residual_hat = (raw_quantized + offset) / q
-        
-        # Step 2: Reconstruct feature grid
-        if l in previous_grids_F_hat:
-            F_prev = previous_grids_F_hat[l]
-        else:
-            # I-frame or first level initialization
-            F_prev = zeros_like(residual_hat) # [G] Initialize to zero if no previous frame
+        for point in ray_samples:
+            # Get features at point
+            features = sample_feature_grid(F_hat_l_t, point)
             
-        F_hat = F_prev + residual_hat
-        current_grids_F_hat[l] = F_hat
+            # Convert to color and density
+            c_l_i, sigma_l_i = global_MLP_Phi(features)
+            
+            # Volume rendering step
+            delta_i = get_sample_distance(point) # [G] Placeholder
+            alpha = 1.0 - exp(-sigma_l_i * delta_i)
+            color_sum += transmittance * alpha * c_l_i
+            transmittance *= (1.0 - alpha)
+            
+        rendered_colors[l] = color_sum
         
-    # Step 3: Render
-    # Select the highest level decoded for final output, or composite
-    final_level = max(levels_to_decode)
-    F_final = current_grids_F_hat[final_level]
-    
-    # Sample points along rays and query MLP
-    # This is a simplified representation of volume rendering
-    sampled_points = sample_rays_through_grid(F_final)
-    colors = []
-    for point in sampled_points:
-        features = interpolate_features(F_final, point)
-        c, sigma = mlp_Phi(features)
-        colors.append((c, sigma))
-        
-    rendered_color = volume_render_accumulate(colors)
-    return rendered_color
+    return rendered_colors, current_features_F_hat
 ```
-
-### Parameters and Edge Cases
-*   **Quantization Parameter $q$:** Controls the trade-off between reconstruction quality and storage/bandwidth. Higher $q$ increases compression but reduces precision [S1].
-*   **Resolution Levels $L$:** The number of hierarchical levels. More levels allow finer adaptation but increase complexity [S1].
-*   **Edge Cases:**
-    *   **Bandwidth Limitation:** If bandwidth is insufficient, decode only lower levels $l$. The rendering quality will be coarser but real-time [S1].
-    *   **GoF Boundary:** When a new GoF starts, the reference frame $\hat{F}_{t-1}$ is reset or the first frame is decoded as an I-frame without residual addition [S1].
-    *   **Precision:** Reversing the scaling by $q$ requires floating-point arithmetic to avoid quantization artifacts accumulation [S1].
 
 ## Subtopics
 
-### ReRF Player Reconstruction
-A specific implementation of hierarchical progressive decoding for Neural Residual Radiance Fields (ReRF) that incorporates motion compensation and PCA-based feature compression [S2]. It differs from the basic HPC decoding by using a motion field $M_t$ and a PCA matrix $V$ to reconstruct P-feature grids from residuals [S2]. Choose this variant when streaming dynamic radiance fields with significant camera or object motion, as it reduces temporal redundancy more effectively than simple residual addition [S2].
-
-**Steps:**
-1.  **I-Frame Reconstruction:** Decode the I-feature grid $fe_1$ by performing inverse quantization and inverse transform on the quantized transform coefficients [S2].
-2.  **P-Frame Residual Reconstruction:** For subsequent frames $t$, generate the initial reconstructed residual grid $\hat{r}'_t$ by inverse quantization and inverse transform of the quantized transform coefficients [S2].
-3.  **Back-Projection:** Back-project the initial residual to the origin space using the transpose of the PCA matrix $V$ [S2]:
-    $$
-    \hat{r}_t = \hat{r}'_t \cdot V^T
-    $$
-4.  **Motion Compensation:** Deform the previously reconstructed feature grid $\tilde{f}_{t-1}$ using the decoded motion field $M_t$ to obtain the predicted feature grid $\bar{f}_t$ [S2]:
-    $$
-    \bar{f}_t(p) = \tilde{f}_{t-1}(p + M_t(p))
-    $$
-    where $p$ is the index of explicit grids [S2].
-5.  **Final Reconstruction:** Add the predicted feature grid and the reconstructed residual grid to produce the final reconstructed feature grid $\tilde{f}_t$ [S2]:
-    $$
-    \tilde{f}_t = \bar{f}_t + \hat{r}_t
-    $$
-6.  **Rendering:** Output $\tilde{f}_t$ to the renderer to generate photo-realistic Free-Viewpoint Video (FVV) [S2].
-
-**Advantages:** Supports fast seeking by grouping frames into GoFs, where the first frame is an I-feature grid allowing independent decoding [S2].
+### [ReRF Player Reconstruction](12534-rerf-player-reconstruction.md)
+ReRF Player Reconstruction is the decoding phase of the Neural Residual Radiance Fields (ReRF) codec, designed to recover feature grids from a compressed bitstream for the real-time rendering of dynamic free-viewpoint videos (FVV). It differs from static volume rendering by utilizing temporal redundancy through motion-compensated prediction and residual encoding, allowing adaptive streaming based on available bandwidth.
 
 ## Operating characteristics
-*   **Time Complexity:** Decoding time is proportional to the number of bits in the bitstream and the number of resolution levels decoded. Rendering time depends on the number of samples and the complexity of the MLP $\Phi$ [S1].
-*   **Memory Complexity:** Requires storing the previous frame's feature grids $\hat{F}_{t-1}$ in the buffer. Memory usage scales with the number of resolution levels $L$ and the grid resolution [S1].
-*   **Performance:** Allows adaptive rendering, enabling real-time performance on devices with limited computational power by selecting lower resolution levels [S1].
-*   **Strengths:** Scalable quality adjustment; efficient bandwidth usage; supports real-time streaming [S1].
-*   **Limitations:** Requires careful tuning of quantization parameter $q$ and resolution levels $L$ for optimal quality-compression trade-off [S1].
+*   **Time Complexity:** Linear with respect to the number of levels $L$ and the number of samples $N$ per ray. Decoding is $O(L \cdot N)$, rendering is $O(L \cdot N)$.
+*   **Memory Complexity:** $O(L \cdot V)$ where $V$ is the volume of the feature grid. Requires storing the previous frame's feature grids for temporal prediction.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales with bandwidth by selecting fewer levels $L$. Higher levels provide finer detail but require more data.
+*   **Strengths:** Adaptive quality based on bandwidth; efficient temporal compression via residuals.
+*   **Limitations:** Drift over long sequences if not reset; dependency on previous frame accuracy.
+*   **When to use:** Dynamic volumetric video streaming with variable bandwidth.
+*   **When not to use:** Static volumes or scenarios requiring absolute precision without drift tolerance.
 
 ## Background
-Hierarchical Progressive Decoding was introduced in the HPC (Hierarchical Progressive Coding) framework for volumetric video, presented at ACM MM'24 in 2024 [S1]. It builds upon the concept of multi-resolution residual radiance fields to reduce temporal redundancy in extended sequences [S1]. A related implementation, the ReRF Player, was described in the context of Neural Residual Radiance Fields for streamably free-viewpoint videos, presented at CVPR 2023 [S2].
+Hierarchical Progressive Decoding is part of the HPC (Hierarchical Progressive Coding) framework for volumetric video, introduced in the paper "HPC: Hierarchical Progressive Coding Framework for Volumetric Video" [S1]. It addresses the challenge of streaming dynamic free-viewpoint videos by leveraging temporal redundancy and multi-resolution representations.
 
 ## Sources
 [S1] HPC: Hierarchical Progressive Coding Framework for Volumetric Video, https://doi.org/10.1145/3664647.3681107, fetched 2026-10-28
-[S2] Neural Residual Radiance Fields for Streamably Free-Viewpoint Videos, https://doi.org/10.1109/cvpr52729.2023.00016, fetched 2026-10-26

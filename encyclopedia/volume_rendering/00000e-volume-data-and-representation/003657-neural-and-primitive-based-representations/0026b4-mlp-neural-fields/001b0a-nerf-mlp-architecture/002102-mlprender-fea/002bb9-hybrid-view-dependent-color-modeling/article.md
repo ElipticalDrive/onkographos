@@ -16,15 +16,15 @@ Hybrid View-dependent Color Modeling predicts RGB color by combining a sparse fe
 *   RGB color $\mathbf{C}$.
 
 **Data Structures:**
-*   **Feature Voxel Grid:** A sparse 3D grid storing feature vectors. Each voxel contains a feature vector of dimension $D$ [S1]. The grid stores view-independent diffuse color and view-dependent feature vectors [S3].
-*   **Shallow MLP:** A 2-layer MLP. Input dimension is $D + 3$ (features + view direction). Hidden layer size is 128. Output dimension is 3 (RGB residual) [S1].
+*   **Feature Voxel Grid:** A sparse 3D grid storing feature vectors of dimension $D$ and view-independent diffuse color [S1, S3].
+*   **Shallow MLP:** A 2-layer MLP with input dimension $D + 3$ (features + view direction), hidden layer size 128, and output dimension 3 (RGB residual) [S1].
 
 **Steps:**
 1.  Query the feature voxel grid at position $\mathbf{x}$ to retrieve the feature vector $\mathbf{f}$ [S1, S3].
-2.  Retrieve the view-independent diffuse color $\mathbf{C}_{diff}$ from the grid at $\mathbf{x}$ [S3].
+2.  Retrieve the view-independent diffuse color $\mathbf{C}_{\text{diff}}$ from the grid at $\mathbf{x}$ [S3].
 3.  Concatenate $\mathbf{f}$ and the view direction $\mathbf{v}$ to form the input vector $\mathbf{z} = [\mathbf{f}; \mathbf{v}]$ [S3].
 4.  Pass $\mathbf{z}$ through the shallow MLP to compute the view-dependent residual $\mathbf{r}$ [S1, S3].
-5.  Compute the final color $\mathbf{C} = \mathbf{C}_{diff} + \mathbf{r}$ [S3].
+5.  Compute the final color $\mathbf{C} = \mathbf{C}_{\text{diff}} + \mathbf{r}$ [S3].
 
 **Parameters:**
 *   Feature grid dimension $D$: 12 or 24 [S1].
@@ -32,7 +32,7 @@ Hybrid View-dependent Color Modeling predicts RGB color by combining a sparse fe
 *   MLP channels: 128 [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Free Space Skipping:** To avoid out-of-memory (OOM) errors and improve convergence, a free space skipping strategy is used. Points are queried only if they pass density thresholds in coarse and fine stages [S1].
+*   **Free Space Skipping:** To avoid out-of-memory errors and improve convergence, a free space skipping strategy queries points only if they pass density thresholds in coarse and fine stages [S1].
 *   **MLP Depth:** Using only the shallow MLP yields worse quality because it is shallower than the full NeRF MLP (2 layers vs 8 layers) [S1].
 *   **Voxel Grid Only:** Using only the voxel grid converges faster but degrades rendering quality [S1].
 
@@ -40,22 +40,15 @@ Hybrid View-dependent Color Modeling predicts RGB color by combining a sparse fe
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+def concatenate(a, b):
+    return a + b
+
 def hybrid_view_dependent_color(x, v, feature_grid, mlp):
-    # Step 1: Query feature grid for view-dependent features
     f = feature_grid.query(x)
-    
-    # Step 2: Query feature grid for view-independent diffuse color
     C_diff = feature_grid.query_color(x)
-    
-    # Step 3: Concatenate features and view direction
     z = concatenate(f, v)
-    
-    # Step 4: Pass through shallow MLP to get residual
     r = mlp.forward(z)
-    
-    # Step 5: Add residual to diffuse color
     C = C_diff + r
-    
     return C
 ```
 
@@ -69,6 +62,12 @@ Precomputes view-independent diffuse RGB color and view-dependent 4D feature vec
 
 ### View-Independent SH Color (Degree 0)
 Omits view-dependent spherical harmonics (SH) coefficients by setting SH degree to 0, using only view-independent color [S4, unofficial]. On Mip-NeRF360 outdoor scenes (RTX 4090), reduces training time from 5m31s to 2m24s, VRAM from 6.0GiB to 3.2GiB, and PSNR drops from 24.72 to 24.38 [S4, unofficial]. Speeds up training and reduces VRAM but slightly degrades quality [S4, unofficial].
+
+### View-Disparity Color Prediction
+Uses view disparity $\delta v_i$ as a parameter, representing the difference between the relative viewing direction of the target view and input view $i$ [S5]. A smaller difference indicates higher similarity between the target view color and the color corresponding to input view $i$ [S5].
+
+### Sparse Neural Voxel Grid (SNeRG)
+A model storing a precomputed NeRF on a sparse voxel grid, sometimes referred to as 'baking' [S6]. During evaluation, an MLP produces specular color [S6]. The specular color is combined with alpha compositing of the specular color along the ray to yield the final pixel color [S6]. The layout uses a sparse voxel grid storing precomputed diffuse color, density, and feature vectors [S6]. It is approximately 3000 times faster than the original NeRF implementation [S6].
 
 ## Operating characteristics
 *   **Time Complexity:** Faster than full NeRF MLP due to shallow MLP (2 layers) [S1].
@@ -85,3 +84,5 @@ Originated from the need to accelerate NeRF rendering by precomputing view-indep
 [S2] Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting, https://doi.org/10.48550/arXiv.2607.13808, fetched 2026-10-29 (unofficial)
 [S3] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
 [S4] Faster-GS: Analyzing and Improving Gaussian Splatting Optimization, https://arxiv.org/abs/2602.09999v1, fetched 2026-10-26 (unofficial)
+[S5] Rugularizing generalizable neural radiance field with limited-view images, https://link.springer.com/article/10.1007/s40747-024-01696-6, fetched 2026-10-29
+[S6] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

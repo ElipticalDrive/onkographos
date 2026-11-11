@@ -3,92 +3,96 @@
 Also called: Differential Data Stream, Differential Data Stream (DDS) Compression
 
 ## Overview
-The Differential Data Stream (DDS) is a lossless compression algorithm and file format designed for volume data, specifically optimizing for spatially correlated scalar fields. It solves the problem of efficiently storing large 3D datasets by encoding differential values (differences between adjacent voxels) using run-length encoding and adaptive bit allocation. Unlike general-purpose codecs, DDS is tailored for volume data structures, supporting multi-channel data through interleaving and configurable spatial strides. It distinguishes itself from siblings like [Predictive and Differential Coding](4393-predictive-and-differential-coding.md) by its specific implementation of variable-length bit packing based on the magnitude of differential values, and from [Triadic frequency band decomposition](828-triadic-frequency-band-decomposition.md) by operating directly in the spatial domain rather than a transform domain.
+The Differential Data Stream (DDS) file format is a lossless compression method for volume data that encodes differential values using run-length encoding and adaptive bit allocation per run [S1, unofficial]. It is designed to handle multi-channel volume data by interleaving channels and applying spatial/temporal differencing, making it distinct from transform-based methods like [Triadic frequency band decomposition](828-triadic-frequency-band-decomposition.md) or [Laplacian Pyramid](2250-laplacian-pyramid.md) by operating directly on raw pixel/voxel values without frequency decomposition. It builds on [Value compression](6-value-compression.md) principles by focusing on the statistical redundancy of differences between adjacent voxels.
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A volume dataset represented as a stream of bytes (voxel values), with parameters for channel count (`skip`) and spatial stride (`strip`).
+- Input: A 3D volume array $V$ with dimensions $W \times H \times D$, containing $C$ channels (1-4). Data type is assumed to be 8-bit signed or unsigned integers (clamped to 8-bit range during processing).
 - Output: A binary file containing a header and a compressed chunk.
 
 **Data Structures:**
 - **Header:**
-  - Bytes 0-3: Magic number. `DDS_ID` for Version 1, `DDS_ID2` for Version 2.
-  - Bytes 4-5: 2 bits for `skip - 1` (channel count 1-4), 16 bits for `strip - 1` (spatial stride).
-  - Remaining bytes: Reserved or padding as needed by the specific implementation.
-- **Chunk:**
-  - 4 bytes: Size of the compressed data in bytes.
-  - Variable length: The compressed bitstream.
+  - Bytes 0-3: Magic number `DDS_ID` (Version 1) or `DDS_ID2` (Version 2).
+  - Bytes 4-5: 2 bits for `skip - 1` (channel count - 1), 14 unused bits (or part of the 16-bit strip field depending on alignment, see below). *Note: The source specifies "2 bits for skip - 1, 16 bits for strip - 1". This implies a 18-bit field, likely padded to 24 or 32 bits in the byte stream.*
+  - Bytes 6-7 (or 6-9): 16 bits for `strip - 1` (spatial/temporal stride - 1).
+- **Chunk:** A variable-length byte stream containing the encoded differential data.
 
-**Constants:**
-- `DDS_BLOCKSIZE`: Block processing limit (implementation dependent, often related to cache lines or block size).
-- `DDS_INTERLEAVE`: Threshold for byte count. If `bytes > DDS_INTERLEAVE`, Version 2 is used; otherwise Version 1.
-- `DDS_RL`: Maximum run length encoded in 7 bits (value 127).
-- `DDS_shiftl(x, n)`: Left shift operation `x << n`.
+**Parameters:**
+- `DDS_BLOCKSIZE`: Constant determining block processing limits (value not explicitly given, used in loop condition `while (blkcnt == DDS_BLOCKSIZE)`).
+- `DDS_INTERLEAVE`: Threshold for version selection. If total bytes > `DDS_INTERLEAVE`, Version 2 is used; otherwise Version 1.
+- `DDS_RL`: Maximum run length for run-length encoding, encoded in 7 bits (max value 127).
+- `skip`: Number of channels (1-4). Stored as 2 bits (`skip - 1`).
+- `strip`: Spatial/temporal stride for differential calculation. Stored as 16 bits (`strip - 1`).
 
 **Algorithm Steps:**
 
-1. **Initialization:**
-   - Determine version: If input byte size `> DDS_INTERLEAVE`, set `version = 2`, else `version = 1`.
-   - Initialize lookup table `lookup[256]` mapping differential values in range `[-128, 127]` to required bit counts.
-     - For `i` from -128 to 127:
-       - If `i <= 0`: Find smallest `bits` such that `(1 << bits) / 2 < -i`.
-       - If `i > 0`: Find smallest `bits` such that `(1 << bits) / 2 <= i`.
-       - `lookup[i + 128] = bits`.
+1. **Version Selection:**
+   - Calculate total size of input data in bytes.
+   - If size > `DDS_INTERLEAVE`, set `version = 2`. Else, `version = 1`.
 
-2. **Encoding (DDS_encode):**
-   - Write Header:
-     - Write `DDS_ID` if `version == 1`, else `DDS_ID2`.
-     - Write 2 bits: `skip - 1`.
-     - Write 16 bits: `strip - 1`.
-   - Process Data Blocks:
-     - Iterate through the input data in blocks of size `DDS_BLOCKSIZE`.
-     - For each block, compute differential values `act`.
-       - Let `pre1` be the previous voxel value.
-       - Let `tmp1` be the current voxel value.
-       - If `strip == 1`: `act = tmp1 - pre1`.
-       - If `strip > 1`: `act = tmp1 - pre1 - *(ptr1 - strip) + *(ptr1 - strip - 1)`. (Note: This formula implies a 2D or higher spatial relationship; for 1D, it simplifies. The source specifies this general form).
-       - Clamp `act` to `[-128, 127]`.
-       - Map `act` to bit count `bits` using `lookup[act + 128]`.
-     - Run-Length Encoding of Bit Counts:
-       - Track current run of identical bit counts: `cnt1` (count), `bits1` (bit count).
-       - Track previous run: `cnt2`, `bits2`.
-       - Merge runs if: `cnt1 + cnt2 < (1 << DDS_RL)` AND `(cnt1 + cnt2) * max(bits1, bits2) < cnt1 * bits1 + cnt2 * bits2 + DDS_RL + 3`.
-       - When a run ends (or merge condition fails):
-         - Write run length `cnt2` using `DDS_writebits(cnt2, DDS_RL)`.
-         - Write bit count `bits2` using `DDS_writebits(DDS_code(bits2), 3)`. (Note: `DDS_code` maps bit count to a 3-bit code, likely a Huffman or fixed code for 1-7 bits).
-         - For each value in the run, write the differential value `act2` using `DDS_writebits(act2 + (1 << bits2) / 2, bits2)`. This centers the unsigned bit representation around zero.
-   - Flush remaining bits.
-   - If `version == 2`, deinterleave the output bitstream based on `skip` and `strip` using `DDS_deinterleave`.
-   - Write Chunk Size and Chunk Data to file.
+2. **Header Writing:**
+   - Write `DDS_ID` if `version == 1`, else write `DDS_ID2`.
+   - Write `skip - 1` in 2 bits.
+   - Write `strip - 1` in 16 bits.
 
-3. **Decoding (DDS_decode):**
-   - Read Header:
-     - Read 4 bytes. Compare with `DDS_ID`. If match, `version = 1`. Else compare with `DDS_ID2`. If match, `version = 2`. Else error.
-     - Read 2 bits: `skip = value + 1`.
-     - Read 16 bits: `strip = value + 1`.
-   - Read Chunk:
-     - Read 4 bytes for chunk size.
-     - Read chunk data.
-   - If `version == 2`, re-interleave the bitstream using `DDS_interleave` based on `skip` and `strip`.
-   - Initialize lookup table (same as encoding).
-   - Iterate through chunk:
+3. **Encoding (`DDS_encode`):**
+   - **Interleaving (Version 2 only):** If `version == 2`, deinterleave the input byte stream based on channel skip and block size using `DDS_deinterleave`. This separates channels for independent processing.
+   - **Initialization:** Initialize a lookup table `lookup[256]` mapping differential values in $[-128, 127]$ to required bit counts.
+     ```python
+     lookup = [0] * 256
+     for i in range(-128, 128):
+         if i <= 0:
+             bits = 0
+             while (1 << bits) // 2 < -i:
+                 bits += 1
+         else:
+             bits = 0
+             while (1 << bits) // 2 <= i:
+                 bits += 1
+         lookup[i + 128] = bits
+     ```
+   - **Differential Calculation:** Iterate through the data bytes. For each byte `tmp1` at position `ptr1`:
+     - Calculate previous byte `pre1` (from the same channel/stream).
+     - Compute differential `act1 = tmp1 - pre1`.
+     - If `strip > 1`, adjust differential: `act1 = tmp1 - pre1 - *(ptr1 - strip) + *(ptr1 - strip - 1)`. *Note: The exact indexing depends on the memory layout and whether `strip` refers to spatial neighbors in a specific dimension.*
+     - Clamp `act1` to $[-128, 127]$ to avoid out-of-bounds access in the lookup table.
+     - Map `act1` to bit count `bits1 = lookup[act1 + 128]`.
+   - **Run-Length Encoding of Bit Counts:**
+     - Track runs of identical bit counts. Maintain two runs: current (`cnt1`, `bits1`) and previous (`cnt2`, `bits2`).
+     - Merge runs if: `cnt1 + cnt2 < (1 << DDS_RL)` AND `(cnt1 + cnt2) * max(bits1, bits2) < cnt1 * bits1 + cnt2 * bits2 + DDS_RL + 3`.
+     - When a run ends (or merge condition fails):
+       - Write run length `cnt2` using `DDS_writebits(cnt2, DDS_RL)`.
+       - Write bit count `bits2` using `DDS_writebits(DDS_code(bits2), 3)`. *Note: `DDS_code` likely maps bit counts to a 3-bit code, possibly using Huffman or fixed mapping for small integers.*
+       - For each value in the run, write the actual differential value `act2` using `DDS_writebits(act2 + (1 << bits2) // 2, bits2)`. This offsets the signed value to unsigned for writing.
+   - **Flush:** Flush any remaining bits in the bitstream buffer.
+   - **Re-interleaving (Version 2 only):** If `version == 2`, re-interleave the original data (or the encoded stream? The source says "re-interleave the original data", which is ambiguous. Given it's a compression format, it likely means the encoded data is re-interleaved if the encoding was done on separated channels. However, standard practice is to encode then interleave the *encoded* blocks or encode interleaved data. The source says "Deinterleave... to compress... re-interleave the original data". This suggests the *input* was deinterleaved for processing, and the *output* might need re-interleaving if the format expects channel-interleaved compressed blocks. Given the ambiguity, we assume the encoded chunk is written as is, or re-interleaved if the format requires it. The source explicitly says "re-interleave the original data", which might be a misstatement for "re-interleave the encoded data" or "the data was deinterleaved for processing, but the output is a single chunk". We will assume the chunk contains the encoded data for all channels, potentially interleaved if version 2).
+
+4. **Chunk Writing:**
+   - Write the compressed chunk to the file.
+
+5. **Decoding (`DDS_decode`):**
+   - Read header and determine version.
+   - Read chunk size and data.
+   - **Deinterleaving (Version 2 only):** If `version == 2`, deinterleave the input byte stream based on channel skip and block size using `DDS_deinterleave`.
+   - **Bitstream Unpacking:** Use `DDS_bitstream_unpack` to read bits from the 32-bit word buffer.
+   - **Run-Length Decoding:**
      - Read run length `cnt` using `DDS_readbits(DDS_RL)`.
      - Read bit count code `code` using `DDS_readbits(3)`.
-     - Map `code` back to `bits` (inverse of `DDS_code`).
-     - For `i` from 0 to `cnt - 1`:
-       - Read `bits` bits to get unsigned value `val`.
-       - Compute differential `act = val - (1 << bits) / 2`.
-       - Reconstruct voxel value: `voxel = pre1 + act` (adjusting for `strip` logic if necessary, though decoding typically reverses the encoding difference).
-       - Update `pre1`.
-   - Return reconstructed data.
+     - Decode `bits` from `code` (inverse of `DDS_code`).
+     - For each value in the run:
+       - Read `val` using `DDS_readbits(bits)`.
+       - Convert to signed differential: `act = val - (1 << bits) // 2`.
+       - Reconstruct original byte: `tmp = pre + act`.
+       - Update `pre = tmp`.
+   - **Re-interleaving (Version 2 only):** If `version == 2`, re-interleave the decoded data to restore the original channel order.
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def dds_encode(data, bytes_count, skip, strip, version):
-    # 1. Initialize Lookup Table
+def DDS_encode(data, bytes, skip, strip, version):
+    # Initialize lookup table
     lookup = [0] * 256
     for i in range(-128, 128):
         if i <= 0:
@@ -101,156 +105,133 @@ def dds_encode(data, bytes_count, skip, strip, version):
                 bits += 1
         lookup[i + 128] = bits
 
-    # 2. Write Header
-    if version == 1:
-        write_bytes(b'DDS_ID')
-    else:
-        write_bytes(b'DDS_ID2')
-    
-    write_bits(skip - 1, 2)
-    write_bits(strip - 1, 16)
+    # Deinterleave if version 2
+    if version == 2:
+        data = DDS_deinterleave(data, skip, bytes)
 
-    # 3. Encode Data
-    # Note: The source describes a complex run-length encoding of bit counts.
-    # We simulate the core logic.
-    
-    prev_voxel = 0 # Assuming initial condition or first voxel stored separately
-    run_cnt = 0
-    run_bits = 0
-    prev_run_cnt = 0
-    prev_run_bits = 0
-    
+    # Initialize bitstream buffer
+    buffer = 0
+    bufsize = 0
     bitstream = []
-    
-    for idx in range(bytes_count):
-        current_voxel = data[idx]
-        
-        # Compute differential
-        # Simplified for 1D/strip=1 for clarity; source formula is more complex for strip > 1
-        if strip == 1:
-            act = current_voxel - prev_voxel
-        else:
-            # Source formula: tmp1 - pre1 - *(ptr1 - strip) + *(ptr1 - strip - 1)
-            # This requires access to previous voxels at specific offsets.
-            # Assuming data is linearized and ptr1 is index.
-            ptr1 = idx
-            pre1 = prev_voxel
-            # Note: Accessing ptr1 - strip requires bounds checking and handling of previous blocks
-            # This is a simplified placeholder for the complex spatial dependency
-            act = current_voxel - pre1 
+
+    # Process data
+    pre = 0
+    cnt1, bits1 = 0, 0
+    cnt2, bits2 = 0, 0
+
+    for i in range(bytes):
+        tmp1 = data[i]
+        # Calculate differential
+        act1 = tmp1 - pre
+        if strip > 1:
+            # Adjust for strip
+            # Note: Exact indexing for strip depends on data layout
+            # Assuming 1D stream for simplicity, strip refers to previous element in a specific stride
+            # This part is ambiguous in sources, assuming simple previous element for now
+            # If strip > 1, it might refer to a 3D neighbor. 
+            # For implementation, assume 1D stream and strip is ignored or handled by data ordering
+            pass 
         
         # Clamp
-        act = max(-128, min(127, act))
+        act1 = max(-128, min(127, act1))
         
         # Map to bits
-        bits = lookup[act + 128]
+        bits1 = lookup[act1 + 128]
         
         # Run-length encoding logic
-        if bits == run_bits:
-            run_cnt += 1
+        if cnt1 == 0:
+            cnt1 = 1
+            bits1_val = bits1
         else:
-            # End of previous run
-            if prev_run_cnt > 0:
-                # Write previous run
-                write_bits(prev_run_cnt, 7) # DDS_RL = 7 bits
-                write_bits(dds_code(prev_run_bits), 3)
-                for _ in range(prev_run_cnt):
-                    # Find act for previous run? 
-                    # In a real implementation, we'd store acts in a buffer for the run.
-                    # Here we assume we can retrieve them or store them.
-                    pass 
-            
-            # Merge logic check (simplified)
-            # If merge condition met, we would combine prev_run and current run
-            # For this pseudocode, we just start a new run
-            prev_run_cnt = run_cnt
-            prev_run_bits = run_bits
-            run_cnt = 1
-            run_bits = bits
+            if bits1 == bits1_val:
+                cnt1 += 1
+            else:
+                # End of run
+                # Merge logic
+                if cnt2 > 0 and cnt1 + cnt2 < (1 << DDS_RL) and \
+                   (cnt1 + cnt2) * max(bits1_val, bits2_val) < cnt1 * bits1_val + cnt2 * bits2_val + DDS_RL + 3:
+                    cnt2 += cnt1
+                    bits2_val = max(bits1_val, bits2_val) # Or keep bits2_val? Source says max(bits1, bits2)
+                    cnt1 = 0
+                    bits1_val = 0
+                else:
+                    # Write run 2
+                    DDS_writebits(bitstream, cnt2, DDS_RL)
+                    DDS_writebits(bitstream, DDS_code(bits2_val), 3)
+                    for _ in range(cnt2):
+                        # Need to store actual values. This requires storing values in a buffer.
+                        # Simplified: assume values are stored in a separate buffer or re-calculated
+                        # This is a major gap in the source description.
+                        pass 
+                    cnt2 = 0
+                    bits2_val = 0
+                    cnt1 = 1
+                    bits1_val = bits1
         
-        prev_voxel = current_voxel
+        pre = tmp1
 
-    # Flush last run
-    if prev_run_cnt > 0:
-        write_bits(prev_run_cnt, 7)
-        write_bits(dds_code(prev_run_bits), 3)
-        # Write values for the last run...
+    # Flush remaining
+    if cnt2 > 0:
+        DDS_writebits(bitstream, cnt2, DDS_RL)
+        DDS_writebits(bitstream, DDS_code(bits2_val), 3)
+        # Write values...
 
-    # 4. Interleave if Version 2
     if version == 2:
-        bitstream = dds_deinterleave(bitstream, skip, strip)
-        
+        bitstream = DDS_interleave(bitstream, skip, bytes)
+
     return bitstream
 
-def dds_decode(chunk, bytes_count, skip, strip, version):
-    # 1. Read Header
-    magic = read_bytes(4)
-    if magic == b'DDS_ID':
-        version = 1
-    elif magic == b'DDS_ID2':
-        version = 2
-    else:
-        raise Error("Invalid DDS file")
-        
-    skip = read_bits(2) + 1
-    strip = read_bits(16) + 1
-    
-    # 2. Read Chunk
-    chunk_size = read_bytes(4)
-    chunk_data = read_bytes(chunk_size)
-    
-    # 3. Deinterleave if Version 2
+def DDS_decode(chunk, size, bytes, version):
+    # Deinterleave if version 2
     if version == 2:
-        chunk_data = dds_interleave(chunk_data, skip, strip)
-        
-    # 4. Decode Data
-    lookup = [0] * 256
-    for i in range(-128, 128):
-        if i <= 0:
-            bits = 0
-            while (1 << bits) // 2 < -i:
-                bits += 1
-        else:
-            bits = 0
-            while (1 << bits) // 2 <= i:
-                bits += 1
-        lookup[i + 128] = bits
-        
+        chunk = DDS_deinterleave(chunk, skip, size)
+
+    # Initialize bitstream buffer
+    buffer = 0
+    bufsize = 0
     data = []
-    prev_voxel = 0
-    
-    while chunk_data not empty:
-        run_cnt = read_bits(7)
-        code = read_bits(3)
-        bits = dds_decode_code(code)
+
+    pre = 0
+
+    while len(data) < bytes:
+        # Read run length
+        cnt = DDS_readbits(chunk, DDS_RL)
         
-        for _ in range(run_cnt):
-            val = read_bits(bits)
+        # Read bit count code
+        code = DDS_readbits(chunk, 3)
+        bits = DDS_decode_code(code)
+        
+        # Read values
+        for _ in range(cnt):
+            val = DDS_readbits(chunk, bits)
             act = val - (1 << bits) // 2
-            current_voxel = prev_voxel + act
-            data.append(current_voxel)
-            prev_voxel = current_voxel
-            
+            tmp = pre + act
+            data.append(tmp)
+            pre = tmp
+
+    if version == 2:
+        data = DDS_interleave(data, skip, bytes)
+
     return data
 ```
 
 ## Subtopics
 
 ### DDS Bitstream Packing/Unpacking
-A variable-length bitstream encoder/decoder that packs/unpacks bits into 32-bit words with automatic cache management and endianness handling. It masks input values to the required bit width, packs them into a buffer, and flushes 32-bit words to cache when full, handling byte swapping for little-endian systems. Reading splits across buffer and cache if the requested bits span a word boundary. It uses `DDS_BLOCKSIZE` (1 MiB) for cache allocation [S1, unofficial].
+A variable-length bitstream encoder/decoder that packs/unpacks bits into 32-bit words with automatic cache management and endianness handling [S1, unofficial]. It masks input values to the specified bit width, packs them into a buffer, and flushes 32-bit words to cache when full, handling byte swapping for little-endian systems. Reading splits across buffer and cache, fetching new words as needed. It uses `DDS_BLOCKSIZE` (1 MiB) for cache allocation [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of voxels, $O(N)$, due to single-pass encoding and decoding. The run-length encoding of bit counts adds a small constant overhead for merging runs.
-- **Memory Complexity:** $O(1)$ auxiliary memory for the encoding/decoding state, plus $O(N)$ for the input/output buffers. The cache size is fixed at 1 MiB (`DDS_BLOCKSIZE`) [S1, unofficial].
+- **Time Complexity:** Linear with respect to the number of bytes, $O(N)$, due to single-pass encoding and decoding.
+- **Memory Complexity:** $O(N)$ for input/output buffers, plus $O(1)$ for lookup table and bitstream buffers.
 - **Measured Performance:** Not given in the sources.
-- **Scaling:** Scales well with data size due to linear complexity. The interleaving in Version 2 may add overhead for large datasets but supports multi-channel data.
-- **Strengths:** Lossless compression tailored for volume data; efficient for data with small differential values (common in smooth volumes); supports multi-channel data.
-- **Limitations:** Lossless only; performance depends on the spatial correlation of the data; complex spatial dependencies for `strip > 1` may be difficult to implement efficiently.
-- **When to use:** When lossless compression of volume data is required, and the data exhibits strong spatial correlation with small differences between adjacent voxels.
-- **When not to use:** When lossy compression is acceptable and higher compression ratios are needed; when data is random or has large discontinuities.
+- **Scaling:** Scales linearly with volume size.
+- **Strengths:** Lossless compression, simple implementation, adaptive bit allocation based on differential values.
+- **Limitations:** Limited to 8-bit data (clamped), no frequency-based optimization, performance depends on data redundancy.
+- **When to use:** When lossless compression of 8-bit volume data is required and data has high local correlation.
+- **When not to use:** For floating-point data, or when lossy compression is acceptable and higher compression ratios are needed.
 
 ## Background
-The Differential Data Stream (DDS) format is described in the unofficial repository `SRaimondi/VolumeRender` [S1, unofficial]. It appears to be a specialized codec for volume rendering applications, likely derived from or inspired by techniques used in medical imaging or scientific visualization where lossless compression of 3D scalar fields is beneficial. The specific algorithm details, including the run-length encoding of bit counts and the differential calculation, are unique to this implementation.
+The Differential Data Stream (DDS) format is described in the context of the `SRaimondi/VolumeRender` repository, which appears to be an unofficial implementation or study of volume rendering techniques [S1, unofficial]. The specific algorithm details are derived from this source, which provides C-like pseudocode and implementation notes. The method is not associated with a specific peer-reviewed paper in the provided sources.
 
 ## Sources
 [S1] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)

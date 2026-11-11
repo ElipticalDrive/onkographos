@@ -1,125 +1,191 @@
 # Compact3D / C3DGS / EAGLES
 
-Also called: Compressed3D, Compression via Vector Quantization, VQ for 3DGS, Vector Quantization for 3DGS
+Also called: Codebook-based Quantization for SH & Shape Parameters, Compact3D, Compressed3D, Compression via Vector Quantization, VQ for 3DGS, Vector Quantization for 3DGS
 
 ## Overview
-Compact3D (also known as C3DGS or EAGLES) is a lossy compression method for 3D Gaussian Splatting (3DGS) that reduces model storage size by replacing continuous attribute values with discrete indices into a shared codebook [S1, unofficial][S2][S3, unofficial]. It achieves approximately 4× compression without significant rendering quality degradation by applying vector quantization to specific Gaussian parameters [S2]. Unlike methods that quantize all attributes or use complex entropy coding for positions, Compact3D selectively quantizes scale and spherical harmonic (SH) coefficients while preserving the mean position and normal orientation in their original precision [S2][S3, unofficial].
+Compact3D (also referred to as C3DGS or EAGLES in specific implementations) is a lossy compression method for 3D Gaussian Splatting (3DGS) that reduces model storage size by replacing continuous attribute values with discrete indices into shared codebooks [S2, S3][S4, unofficial]. It specifically targets Spherical Harmonic (SH) coefficients and Gaussian shape parameters (such as scale), clustering similar values across all primitives to enable efficient storage [S1, unofficial][S3]. Unlike methods that quantize position or orientation, Compact3D preserves the mean position ($\mu$) and normal/orientation ($n$) in their original precision to maintain high reconstruction quality, achieving roughly 4× compression with negligible impact on average rendering metrics [S2, S3].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A trained set of $N$ 3D Gaussian primitives, where each primitive $i$ has attributes: mean position $\mu_i$, normal $n_i$, scale $s_i$, opacity $\alpha_i$, and spherical harmonic coefficients $c_i$ [S2][S3, unofficial].
-- **Output:** A compressed representation consisting of:
-  - Exact values for $\mu_i$ and $n_i$ [S2].
-  - Indices into shared codebooks for $s_i$, $\alpha_i$, and $c_i$ [S2][S3, unofficial].
-  - The shared codebooks themselves [S2].
+*   **Input:** A trained set of 3D Gaussian primitives, each defined by mean position $\mu$, orientation $n$ (quaternion or axis-angle), scale $s$, opacity $\alpha$, and SH coefficients $c$.
+*   **Output:** A compressed representation consisting of:
+    1.  Exact values for $\mu$ and $n$ for each primitive.
+    2.  Shared codebooks for quantized attributes (typically SH coefficients and scale $s$).
+    3.  Indices pointing to the nearest codeword in the respective codebooks for each primitive and attribute component.
 
 **Data Structures:**
-1.  **Codebook ($C$):** A fixed-size table of $K$ codewords. For vector attributes (e.g., scale $s \in \mathbb{R}^3$), the codebook stores vectors of the same dimension. The note specifies a shared codebook is used for vector attributes, with separate indices for each vector component [S2]. This implies either a single codebook per component dimension or a joint codebook where each entry is a vector. The text "separate indices for each vector component" suggests that for a 3D scale vector, three indices might be stored, or the codebook entries are scalars and the vector is reconstructed by combining them. However, standard VQ for vectors usually stores a vector codeword. The phrase "shared codebook... with separate indices for each vector component" is ambiguous. It likely means: For attribute $s=(s_x, s_y, s_z)$, there is one codebook for $s_x$, one for $s_y$, one for $s_z$, or one codebook where each entry is a 3D vector. Given "separate indices", it most likely means for each component of the vector attribute, an index is looked up. Let's assume the standard interpretation: A codebook $C_s$ of size $K$ contains $K$ vectors of dimension $D$ (e.g., $D=3$ for scale). Each primitive stores one index $idx_i \in [0, K-1]$. The reconstructed value is $C_s[idx_i]$. The text "separate indices for each vector component" might mean that if $s$ is 3D, we store 3 indices, each pointing to a scalar codebook? No, "shared codebook... for vector attributes" usually implies one codebook per attribute type. Let's stick to the most robust interpretation: One codebook per quantized attribute type. For scale $s$, codebook $C_s$ has $K$ entries of size 3. Each Gaussian stores one index. The "separate indices" phrase might refer to the fact that different attributes (scale, SH) have separate codebooks. Or it might mean that for a vector attribute, each component is quantized independently using the same codebook structure? The source [S2] says: "A shared codebook is used for vector attributes (e.g., scaling s), with separate indices for each vector component." This strongly suggests that for $s=(s_x, s_y, s_z)$, we store $idx_x, idx_y, idx_z$. This implies the codebook entries are scalars, or the codebook is per-component. If the codebook is per-component, then $C_{s_x}$, $C_{s_y}$, $C_{s_z}$ are separate. But it says "A shared codebook". This is contradictory. Let's look at [S3, unofficial]: "vector quantize SH and scale parameters". SH coefficients are vectors. Scale is a vector. Standard VQ for vectors uses a vector codebook. The "separate indices" likely means that for the vector attribute $s$, the index points to a vector codeword, and that codeword has components. Or, it means that the codebook is shared across all Gaussians, but indices are stored per component. Let's assume the latter for safety as it matches "separate indices for each vector component". So, for $s \in \mathbb{R}^3$, we have a codebook $C$ of size $K$ containing scalars. We store $idx_x, idx_y, idx_z$. The reconstructed $s = (C[idx_x], C[idx_y], C[idx_z])$. This is a common technique to reduce codebook size.
-2.  **Primitive Data:** For each Gaussian $i$:
-    - $\mu_i$: Exact float (typically FP32 or FP16) [S2][S3, unofficial].
-    - $n_i$: Exact float (typically FP32 or FP16) [S2][S3, unofficial].
-    - $idx_{s,i}$: Index for scale [S2].
-    - $idx_{\alpha,i}$: Index for opacity [S2][S3, unofficial].
-    - $idx_{c,i}$: Index for SH coefficients [S3, unofficial]. Note: SH is a vector. Does it use separate indices per coefficient? [S3, unofficial] just says "vector quantize SH". [S2] says "separate indices for each vector component" for vector attributes. It is safe to assume SH coefficients are treated as vector attributes, so separate indices per coefficient band/component are used, or a joint codebook. Given the ambiguity, we will describe the general VQ step.
+1.  **Codebook:** A fixed-size table of $K$ vectors. For SH coefficients, the codebook stores vectors of dimension equal to the number of SH bands per color channel. For scale, it stores 3D vectors. The size $K$ is a hyperparameter (commonly 1024, 2048, 4096, or 8192) [S3].
+2.  **Primitive Storage:**
+    *   $\mu$: Stored as exact floating-point values (e.g., FP32).
+    *   $n$: Stored as exact floating-point values.
+    *   $s$: Stored as an index (integer) into the scale codebook.
+    *   $c$ (SH): Stored as indices (integers) into the SH codebook. Note that for vector attributes like scale, separate indices are stored for each vector component if the codebook is component-wise, or a single index if the codebook stores full vectors [S2].
+    *   $\alpha$: Stored as exact values or quantized separately (not explicitly detailed in the core Compact3D definition, but often preserved or handled via standard quantization) [S2].
 
-**Steps:**
-1.  **Select Attributes:** Identify attributes to quantize: scale $s$, opacity $\alpha$, and SH coefficients $c$. Exclude mean $\mu$ and normal $n$ [S2][S3, unofficial].
-2.  **Generate Codebooks:** For each quantized attribute type (e.g., scale $s$), use k-means clustering on the values of that attribute across all $N$ Gaussians to generate a codebook $C$ of size $K$ [S2].
-    - If the attribute is a vector (e.g., $s \in \mathbb{R}^3$), and "separate indices" are used, cluster each component independently or cluster the vector as a whole? The text "separate indices for each vector component" implies independent clustering per component or a scalar codebook. Let's assume scalar codebooks per component for vector attributes to minimize codebook size, as this aligns with "separate indices". So for $s$, we have codebooks $C_{s_x}, C_{s_y}, C_{s_z}$.
-    - For SH, which is a vector of coefficients, apply the same logic: separate codebooks for each coefficient index? Or one codebook for the whole SH vector? [S3, unofficial] says "vector quantize SH". [S2] says "separate indices for each vector component". This implies for SH, which has multiple components (bands), we might use separate codebooks or indices. However, SH coefficients are often quantized together. Let's stick to the explicit instruction: "separate indices for each vector component". This means for a vector attribute $v$ of dimension $D$, we store $D$ indices.
-3.  **Quantize:** For each Gaussian $i$ and each quantized attribute component $j$:
-    - Find the index $idx_{i,j}$ in the corresponding codebook $C_j$ that minimizes the distance to the original value $v_{i,j}$ [S2].
-    - $idx_{i,j} = \arg \min_{k} \| v_{i,j} - C_j[k] \|^2$ [G: Standard VQ assignment].
-4.  **Store:** Save $\mu_i, n_i$ exactly. Save $idx_{i,j}$ for all other components. Save codebooks $C_j$ [S2].
+**Algorithm Steps:**
+1.  **Attribute Selection:** Identify attributes suitable for quantization. Typically, SH coefficients and scale parameters $s$ are selected. Mean $\mu$ and orientation $n$ are excluded to prevent significant quality degradation [S2, S3].
+2.  **Sensitivity Thresholding (Optional):** Apply sensitivity thresholds $\beta_c$ (for SH) and $\beta_g$ (for shape parameters) to decide which coefficients/parameters are significant enough to cluster. This trades off quality and compression rate [S3].
+3.  **Codebook Generation:**
+    *   For each selected attribute type (e.g., SH coefficients, scale), collect all values from all Gaussian primitives.
+    *   Apply **k-means clustering** to these values to generate a shared codebook of size $K$ [S2, S3].
+    *   The clustering is performed independently for each attribute type. For vector attributes like scale, the clustering operates on the full vector or per-component depending on implementation, but the source specifies a shared codebook with separate indices for each vector component [S2].
+4.  **Quantization (Index Assignment):**
+    *   For each primitive and each quantized attribute, find the index of the nearest codeword in the generated codebook.
+    *   Replace the original continuous value with this index.
+5.  **Storage:**
+    *   Save exact $\mu$ and $n$.
+    *   Save the codebooks.
+    *   Save the indices for all other attributes.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compact3d_compress(gaussians, codebook_size K):
+def compress_3dgs(gaussians, codebook_size_K, exclude_attrs=['mu', 'n']):
     """
-    gaussians: List of N Gaussian objects.
-    Each Gaussian has attributes: mu (3,), n (3,), s (3,), alpha (1,), sh (D,)
+    Compress 3D Gaussian Splatting using Vector Quantization.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes mu, n, s, alpha, sh_coeffs.
+        codebook_size_K: Integer, size of the codebook (e.g., 1024).
+        exclude_attrs: List of attribute names to keep in original precision.
+        
+    Returns:
+        compressed_data: Dict containing exact_attrs, codebooks, and indices.
     """
-    # 1. Identify attributes to quantize
-    # Exclude mu and n
-    attributes_to_quantize = ['s', 'alpha', 'sh']
+    compressed_data = {}
     
-    codebooks = {}
-    indices = {} # indices[g_idx][attr][comp_idx]
+    # 1. Separate attributes to keep exact
+    exact_attrs = {}
+    quantizable_attrs = {}
     
-    # 2. Generate codebooks using k-means
-    for attr in attributes_to_quantize:
-        # Extract all values for this attribute across all Gaussians
-        # If attr is a vector (like s or sh), we treat each component separately
-        # based on "separate indices for each vector component"
-        
-        if attr == 's':
-            dim = 3
-        elif attr == 'alpha':
-            dim = 1
-        elif attr == 'sh':
-            dim = len(gaussians[0].sh) # D components
-        
-        # Initialize codebooks for each component
-        codebooks[attr] = []
-        
-        for comp in range(dim):
-            # Collect component values
-            values = [g[attr][comp] for g in gaussians]
+    for attr_name in ['mu', 'n', 's', 'alpha', 'sh_coeffs']:
+        if attr_name in exclude_attrs:
+            exact_attrs[attr_name] = [g[attr_name] for g in gaussians]
+        else:
+            quantizable_attrs[attr_name] = [g[attr_name] for g in gaussians]
             
-            # Run k-means clustering with K clusters
-            # Returns K centroids
-            centroids = k_means(values, K)
-            codebooks[attr].append(centroids)
+    compressed_data['exact_attrs'] = exact_attrs
+    
+    # 2. Generate Codebooks and Quantize
+    compressed_data['codebooks'] = {}
+    compressed_data['indices'] = {}
+    
+    for attr_name, values in quantizable_attrs.items():
+        # Flatten values for clustering if necessary (e.g., SH coefficients are vectors)
+        # Note: For vector attributes like scale, k-means is applied to the vectors.
+        # The source [S2] mentions "separate indices for each vector component" for shared codebooks,
+        # implying the codebook might be per-component or the indexing is component-wise.
+        # We assume standard vector k-means for simplicity, or per-component if specified.
+        # Based on [S2]: "shared codebook with separate indices for each vector component"
+        # This suggests the codebook stores scalar values if applied per-component,
+        # or the "separate indices" means we store an index for x, y, z separately.
+        # Let's assume per-component quantization for vector attributes like scale.
+        
+        if isinstance(values[0], (list, tuple)) or hasattr(values[0], '__len__'):
+            # Vector attribute (e.g., scale s, or SH coefficients)
+            # If it's scale (3D), we might quantize each component independently
+            # or the whole vector. [S2] says "separate indices for each vector component".
+            # So we quantize each dimension separately.
+            num_dims = len(values[0])
+            compressed_data['codebooks'][attr_name] = []
+            compressed_data['indices'][attr_name] = []
             
-    # 3. Quantize each Gaussian
-    for i, g in enumerate(gaussians):
-        indices[i] = {}
-        for attr in attributes_to_quantize:
-            indices[i][attr] = []
-            dim = len(codebooks[attr])
-            for comp in range(dim):
-                val = g[attr][comp]
-                cb = codebooks[attr][comp]
-                # Find nearest centroid
-                # Distance metric: Euclidean
-                best_idx = argmin([dist(val, c) for c in cb])
-                indices[i][attr].append(best_idx)
+            for dim in range(num_dims):
+                dim_values = [v[dim] for v in values]
+                # Generate codebook using k-means
+                codebook = kmeans(dim_values, K=codebook_size_K)
+                compressed_data['codebooks'][attr_name].append(codebook)
                 
-    # 4. Return compressed data
-    # Exact mu and n are kept in original format
-    # Indices and codebooks are returned
-    return {
-        'mu': [g.mu for g in gaussians],
-        'n': [g.n for g in gaussians],
-        'indices': indices,
-        'codebooks': codebooks
-    }
+                # Quantize: find nearest neighbor index for each value
+                indices = [find_nearest_index(val, codebook) for val in dim_values]
+                compressed_data['indices'][attr_name].append(indices)
+        else:
+            # Scalar attribute (e.g., alpha)
+            codebook = kmeans(values, K=codebook_size_K)
+            compressed_data['codebooks'][attr_name] = codebook
+            indices = [find_nearest_index(val, codebook) for val in values]
+            compressed_data['indices'][attr_name] = indices
+            
+    return compressed_data
 
-def dist(a, b):
-    return (a - b) ** 2
+def kmeans(data, K):
+    """
+    Simple k-means clustering implementation.
+    Returns a list of K centroids.
+    """
+    # Initialize centroids randomly from data
+    centroids = random.sample(data, K)
+    
+    for _ in range(100): # Max iterations
+        # Assign each point to nearest centroid
+        assignments = [find_nearest_index(point, centroids) for point in data]
+        
+        # Update centroids
+        new_centroids = []
+        for k in range(K):
+            cluster_points = [data[i] for i in range(len(data)) if assignments[i] == k]
+            if cluster_points:
+                new_centroids.append(sum(cluster_points) / len(cluster_points))
+            else:
+                new_centroids.append(centroids[k]) # Keep old if empty
+        centroids = new_centroids
+        
+    return centroids
+
+def find_nearest_index(value, codebook):
+    """
+    Find the index of the codeword closest to the value.
+    """
+    min_dist = float('inf')
+    nearest_idx = 0
+    for idx, codeword in enumerate(codebook):
+        dist = abs(value - codeword) # Euclidean distance for 1D, or norm for vectors
+        if dist < min_dist:
+            min_dist = dist
+            nearest_idx = idx
+    return nearest_idx
 ```
 
 **Parameters:**
-- $K$: Codebook size. Not given in the sources.
-- Compression ratio: Roughly 4× [S2].
+*   **Codebook Size ($K$):** Tested sizes include 1024, 2048, 4096, and 8192 [S3].
+*   **Sensitivity Thresholds ($\beta_c, \beta_g$):** Used to filter SH coefficients and shape parameters before clustering. $\beta_c$ for SH, $\beta_g$ for shape parameters. These offer a trade-off between quality and compression rate [S3].
 
-**Edge Cases:**
-- Quantizing $\mu$ and $n$ decreases reconstruction quality significantly, so they are excluded [S2].
-- Precision: Exact values for $\mu$ and $n$ are stored, likely in FP32 or FP16 [S3, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Quantizing $\mu$ and $n$:** Quantizing mean position and orientation significantly decreases reconstruction quality and is avoided [S2].
+*   **Codebook Size vs. Error:** Codebook size has little effect on *average* reconstruction error, but larger codebooks reduce *maximum* error with minimal memory overhead [S3].
+*   **Precision:** The method relies on the assumption that similar Gaussian parameters can be clustered effectively. Degenerate cases where parameters are highly diverse may require larger codebooks.
+
+## Subtopics
+
+### Fast inference pipeline
+A variant of Compact3D that optimizes rendering speed by precomputing features and indices [S5].
+*   **What it is:** An extension that integrates a neural field (hash grids + MLP) for view-dependent color and uses multi-stage vector quantization (R-VQ) [S5].
+*   **How it differs:** It precomputes grid features and indexes closest codes from multi-stage codebooks *before* testing, eliminating search time during inference [S5].
+*   **When to choose:** When faster rendering speed is prioritized over training time. It extends training time slightly more than standard 3DGS but reduces rendering time [S5].
+*   **Details:**
+    *   **Grid Features:** 2-channel features across 16 resolutions (16 to 4096) from hash grids [S5].
+    *   **MLP:** 2-layer, 64-channel MLP for view-dependent color [S5].
+    *   **R-VQ:** Uses 6 stages with codebook size 64 [S5].
+    *   **Masking:** Uses volume-based masking to reduce the number of Gaussians [S5].
 
 ## Operating characteristics
-- **Compression:** Provides roughly 4× compression without sacrificing rendering quality [S2].
-- **Time Cost:** The time cost of the VQ process is negligible [S2].
-- **Strengths:** Simple implementation, negligible training overhead, good compression ratio for editable Gaussians [S2].
-- **Limitations:** Lossy compression for quantized attributes; not suitable for attributes where precision is critical (position, normal) [S2].
-- **When to use:** When storage size is a concern and slight loss in attribute precision is acceptable, particularly for scale, opacity, and SH coefficients [S2][S3, unofficial].
+*   **Compression Ratio:** Provides roughly 4× compression without sacrificing rendering quality [S2].
+*   **Memory Impact:** On the Mip-Nerf360 dataset, the model size ranges from 28.14 MB to 29.06 MB across codebook sizes 1024-8192 [S3].
+*   **Quality Impact:**
+    *   **Average Error:** Codebook size has little effect on average reconstruction error (PSNR, SSIM, LPIPS), independent of the scene [S3].
+    *   **Maximum Error:** Larger codebooks reduce the maximum error [S3].
+*   **Training Time:** Extends overall training time slightly more than standard 3DGS due to neural field iteration and R-VQ search (in the fast inference variant) [S5]. For the basic VQ method, the time cost of the VQ process is negligible [S2].
+*   **Rendering Time:** The fast inference variant effectively reduces rendering time through precomputation and indexing [S5].
+*   **Strengths:** Simple implementation (k-means), negligible VQ overhead, significant size reduction, stable average quality.
+*   **Limitations:** May increase maximum error if codebook size is small; training time may increase with neural field variants.
 
 ## Background
-Compact3D (also referred to as Compressed3D or C3DGS) was introduced concurrently with other vector quantization methods for 3DGS [S1, unofficial]. It is cited in the context of compressing editable 3D Gaussian Splatting models, such as in iVR-GS, where it is used to reduce the size of basic models before composition [S2]. It is also listed in surveys of Gaussian Splatting variants as a method that vector quantizes SH and scale parameters [S3, unofficial].
+Compact3D (also known as Compressed3D or C3DGS) was introduced concurrently with other vector quantization methods for 3DGS [S1, unofficial]. It was published in CVPR 2024 [S3]. The method addresses the large storage requirements of 3DGS by leveraging the redundancy in Gaussian parameters. It builds on the concept of vector quantization, applying it specifically to the attributes of 3D Gaussians [S1, unofficial][S2].
 
 ## Sources
 [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
 [S2] iVR-GS: Inverse Volume Rendering for Explorable Visualization via Editable 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3567121, fetched 2026-10-26
-[S3] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S3] Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis, https://doi.org/10.1109/cvpr52733.2024.00985, fetched 2026-10-26
+[S4] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S5] Compact 3D Gaussian Representation for Radiance Field, https://doi.org/10.1109/cvpr52733.2024.02052, fetched 2026-10-26
