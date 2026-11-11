@@ -3,149 +3,148 @@
 Also called: PathTracing, Standard Path Tracing Lighting
 
 ## Overview
-Unidirectional Path Tracing is a Monte Carlo method for evaluating visibility and illumination at points within or on the boundary of a volume, tracing rays from the camera into the scene [S1, S2, unofficial]. It handles surface interactions (BSDF sampling) and volumetric scattering within a single loop, terminated by Russian Roulette [S2, unofficial]. Unlike explicit path tracing with Russian Roulette which separates the termination logic into a distinct post-loop phase, this method integrates survival probability checks directly into the main traversal loop to handle path termination dynamically [S2, unofficial].
+Unidirectional Path Tracing is a Monte Carlo method that evaluates light transport by tracing rays from the camera into the scene, accumulating radiance through a sequence of interactions with surfaces and participating media [S2, unofficial]. It solves the problem of computing global illumination by recursively sampling the next event in the light transport path, handling both surface scattering (BSDF) and volumetric scattering (medium sampling) within a single iterative loop [S2, unofficial]. Unlike [Explicit Path Tracing with Russian Roulette](2209-explicit-path-tracing-with-russian-roulette.md), which may separate the path construction logic more rigidly, or [Path Tracing Extension with MIS](3291-path-tracing-extension-with-mis.md), which explicitly combines multiple sampling strategies, standard unidirectional path tracing typically relies on direct light sampling or next-event estimation for direct illumination and simple Russian Roulette for path termination [S2, unofficial]. It differs from [Volumetric Path Tracing](1863-volumetric-path-tracing.md) in that the latter explicitly extends the path tracer to handle complex multiple scattering in participating media using delta tracking, whereas the standard method often treats volumes as secondary interactions or uses simpler approximations unless extended [S4].
 
 ## How it works
 **Inputs:**
-- `maxDepth`: Maximum path length (default 100) [S2, unofficial].
-- `rayBounces`: Parameter controlling bounce limits in scene data [S1, unofficial].
-- Sun direction (`sunDirX`, `sunDirY`, `sunDirZ` as vec3f) and intensity (`sunIntensity` as f32), enabled via `sunEnabled` (u32) [S1, unofficial].
-- Random number generator (Sampler) [S2, unofficial].
-- Standard scene inputs: camera parameters, geometry, materials, volumes, and lights [G].
+*   Camera ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
+*   Scene geometry (primitives, BVH) and material definitions.
+*   Medium stack (for participating media).
+*   Random number generator (sampler).
+*   Parameters: `maxDepth` (default 100) [S2, unofficial], `rayBounces` [S1, unofficial].
 
 **Outputs:**
-- Radiance $L$ for each pixel [S2, unofficial].
+*   Accumulated radiance $L$ for the pixel.
 
 **Data Structures:**
-- **Ray:** Struct containing `origin` (Vec3f), `direction` (Vec3f), `throughput` (Vec3f), and `mediums` (stack of Medium pointers via `pushMedium`/`popMedium`) [S2, unofficial].
-- **Materials:** Defined in a constant array `MATERIALS` of size 5. Each material has `specular` (f32) and `emissive` (bool) fields [S1, unofficial]. Index 0: specular 0.0, not emissive. Index 1: specular 0.0, not emissive. Index 2: specular 0.0, emissive. Index 3: specular 0.9, not emissive. Index 4: specular 1.0, not emissive [S1, unofficial].
+*   **Ray:** Contains `origin` (Vec3f), `direction` (Vec3f), `throughput` (Vec3f, initialized to $(1,1,1)$), and a `mediums` stack [S2, unofficial].
+*   **Medium Stack:** A stack of pointers to medium objects, managed via `pushMedium` and `popMedium` [S2, unofficial].
+*   **Material Definition:** In some implementations, materials are defined in a constant array. For example, `MATERIALS` of size 5, where each entry has `specular` (f32) and `emissive` (bool) [S1, unofficial].
+    *   Index 0: specular 0.0, not emissive.
+    *   Index 1: specular 0.0, not emissive.
+    *   Index 2: specular 0.0, emissive.
+    *   Index 3: specular 0.9, not emissive.
+    *   Index 4: specular 1.0, not emissive [S1, unofficial].
 
 **Algorithm Steps:**
-1. **Initialization:** Set radiance $L = 0$, ray throughput $T = (1, 1, 1)$, and path depth $d = 0$ [S2, unofficial].
-2. **Traversal Loop:** While $d < \text{maxDepth}$:
-   a. **Russian Roulette:** If $d > 0$, calculate survival probability $p = \min\left(\frac{T_r + T_g + T_b}{3}, 1.0\right)$ [S2, unofficial]. If `sampler.getNext1D()` $\ge p$, break the loop [S2, unofficial]. Otherwise, update $T \leftarrow T / p$ [S2, unofficial].
-   b. **Intersection:** Cast ray against scene geometry [S2, unofficial]. If no hit, break loop.
-   c. **Area Light Check:** If the hit primitive is an area light, add $T \cdot L_e$ to $L$ and break loop [S2, unofficial].
-   d. **Surface Interaction:** If the hit primitive has a surface:
-      i. **Shading Normal Check:** Let $\mathbf{n}_g$ be the geometric normal and $\mathbf{n}_s$ be the shading normal [S2, unofficial]. Let $\omega_i$ be the incoming direction ($-\text{ray.direction}$) and $\omega_o$ be the outgoing direction [S2, unofficial]. If $(\omega_i \cdot \mathbf{n}_g) \times (\omega_i \cdot \mathbf{n}_s) \le 0$ or $(\omega_o \cdot \mathbf{n}_g) \times (\omega_o \cdot \mathbf{n}_s) \le 0$, return 0 to prevent light leaks [S2, unofficial].
-      ii. **BSDF Sampling:** Sample the BSDF to get outgoing direction $\omega_o$ and PDF $p(\omega_o)$ [S2, unofficial].
-      iii. **Throughput Update:** Update throughput:
-      $$ T_{new} = T_{old} \cdot \frac{f(\omega_i, \omega_o) \cdot |\cos \theta|}{p(\omega_o)} $$
-      where $\theta$ is the angle between $\mathbf{n}_s$ and $\omega_o$ [S2, unofficial].
-      iv. **Medium Update:** Update the medium stack based on surface crossing using `updateMedium(ray, dir, info)` [S2, unofficial].
-      v.  **Ray Update:** Set ray origin to surface position and direction to $\omega_o$ [S2, unofficial]. Set flag `is_reflected_or_refracted = true` [S2, unofficial].
-   e.  **Depth Increment:** If `is_scattered` or `is_reflected_or_refracted` is true, increment $d$ [S2, unofficial].
-   f.  **Reset Flags:** Reset `is_scattered` and `is_reflected_or_refracted` to false for the next iteration [S2, unofficial].
+1.  Initialize radiance $L = 0$, throughput $T = (1, 1, 1)$, and depth $d = 0$.
+2.  Loop while $d < \text{maxDepth}$:
+    a.  **Russian Roulette:** If $d > 0$, calculate survival probability $p = \min\left(\frac{T_r + T_g + T_b}{3}, 1.0\right)$ [S2, unofficial]. If `sampler.getNext1D()` $\ge p$, break loop. Otherwise, update $T \leftarrow T / p$.
+    b.  **Intersection:** Intersect the current ray with the scene. If no intersection, break loop (or add sky/emission if applicable).
+    c.  **Area Light Check:** If the hit primitive is an area light, add $T \cdot L_e$ to $L$ and break loop [S2, unofficial].
+    d.  **Surface Interaction:** If the hit primitive has a surface:
+        i.  **Shading Normal Check:** To prevent light leaks, check asymmetry of BSDF using shading normals ($\mathbf{n}_s$) and geometric normals ($\mathbf{n}_g$). If $\mathbf{w}_i \cdot \mathbf{n}_g \le 0$ or $\mathbf{w}_o \cdot \mathbf{n}_g \le 0$, return 0 [S2, unofficial].
+        ii. **BSDF Sampling:** Sample the BSDF: $\mathbf{f} = \text{sampleBxDF}(-\mathbf{d}, \text{surfaceInfo}, \text{FROM\_CAMERA}, \text{sampler}, \mathbf{d}_{new}, \text{pdf}_{dir})$ [S2, unofficial].
+        iii. **Throughput Update:** Update throughput:
+        $$ T_{new} = T_{old} \cdot \frac{f(\omega_i, \omega_o) \cdot |\cos \theta|}{p(\omega_o)} $$
+        where $f$ is the BSDF, $\theta$ is the angle between the normal and outgoing direction, and $p$ is the PDF [S2, unofficial].
+        iv. Set `is_reflected_or_refracted` = true.
+    e.  **Medium Update:** Update the medium stack based on surface crossing using `updateMedium(ray, dir, info)` [S2, unofficial].
+    f.  **Ray Update:** Update ray origin to `surfaceInfo.position` and direction to $\mathbf{d}_{new}$.
+    g.  **Depth Increment:** If `is_scattered` or `is_reflected_or_refracted`, increment $d$.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def unidirectional_path_tracing(camera, scene, sampler, max_depth=100):
-    radiance = [0.0, 0.0, 0.0]
-    throughput = [1.0, 1.0, 1.0]
+    # Initialize state
+    radiance = Vec3f(0, 0, 0)
+    throughput = Vec3f(1, 1, 1)
     depth = 0
-    ray_origin = camera.origin
-    ray_direction = camera.direction
-    medium_stack = []
-    is_scattered = False  # Set to True when a volumetric scattering event occurs [S2, unofficial]
-    is_reflected_or_refracted = False
-    
+    ray = Ray(camera.get_origin(), camera.get_direction())
+    medium_stack = Stack() # Empty stack of Medium pointers
+
     while depth < max_depth:
-        # Russian Roulette
+        # Russian Roulette for path termination
         if depth > 0:
-            survival_prob = min((throughput[0] + throughput[1] + throughput[2]) / 3.0, 1.0)
+            survival_prob = min((throughput.r + throughput.g + throughput.b) / 3.0, 1.0)
             if sampler.get_next_1d() >= survival_prob:
                 break
-            throughput = [t / survival_prob for t in throughput]
-        
-        # Intersection
-        hit = scene.intersect(ray_origin, ray_direction)
-        if not hit:
-            break
-        
-        # Area Light
-        if hit.is_area_light:
-            radiance = [radiance[i] + throughput[i] * hit.emitted_radiance[i] for i in range(3)]
-            break
-        
-        # Surface Interaction
-        if hit.has_surface:
-            # Shading Normal Check
-            wi = [-ray_direction[i] for i in range(3)]
-            wo, pdf = hit.sample_bsdf(wi, sampler)  # Sample BSDF to get outgoing direction and PDF [S2, unofficial]
-            
-            ng = hit.geometric_normal
-            ns = hit.shading_normal
-            
-            if (dot(wi, ng) * dot(wi, ns) <= 0) or (dot(wo, ng) * dot(wo, ns) <= 0):
-                break  # Light leak prevention [S2, unofficial]
-            
-            f = hit.bsdf(wi, wo)  # Evaluate BSDF [S2, unofficial]
-            cos_theta = abs(dot(wo, ns))
-            throughput = [throughput[i] * (f[i] * cos_theta) / pdf for i in range(3)]
-            
-            # Medium Update based on surface crossing
-            # Implementation details not provided in sources.
-            
-            # Ray Update
-            ray_origin = hit.position
-            ray_direction = wo
-            is_reflected_or_refracted = True
-        else:
-            is_reflected_or_refracted = False
-            
-        if is_reflected_or_refracted or is_scattered:
-            depth += 1
-            
-        is_scattered = False
-        is_reflected_or_refracted = False
-        
-    return radiance
+            throughput = throughput / survival_prob
 
-def dot(v1, v2):
-    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+        # Intersect ray with scene
+        hit = scene.intersect(ray)
+        
+        if hit is None:
+            # No intersection, add sky/emission if applicable
+            break
+        
+        # Check for area light emission
+        if hit.is_area_light():
+            radiance += throughput * hit.emission
+            break
+        
+        # Surface interaction
+        if hit.has_surface():
+            # Light leak prevention: check normal consistency
+            wi = -ray.direction
+            wo = hit.normal # Simplified, actual wo comes from BSDF sample
+            # Assuming shading normal ns and geometric normal ng are available
+            # if dot(wi, ng) <= 0 or dot(wo, ng) <= 0: continue 
+            
+            # Sample BSDF
+            # Returns: f, wo, pdf, is_delta
+            f, wo, pdf, is_delta = hit.bsdf.sample(wi, sampler)
+            
+            # Update throughput
+            cos_theta = abs(dot(wo, hit.normal))
+            if pdf > 0:
+                throughput = throughput * (f * cos_theta) / pdf
+            
+            # Update ray
+            ray.origin = hit.position + wo * EPS # Offset to avoid self-intersection
+            ray.direction = wo
+            ray.throughput = throughput
+            
+            # Update medium stack if crossing surface
+            medium_stack = update_medium_stack(medium_stack, ray, hit)
+            
+            depth += 1
+        else:
+            # Volumetric interaction or other logic
+            # For standard unidirectional path tracing, volume scattering 
+            # might be handled via delta tracking or specific volume shaders
+            # This step depends on specific implementation details not fully 
+            # detailed in [S2, unofficial] for volumes, but typically involves sampling 
+            # distance to next scattering event.
+            break # Placeholder for volume logic if not surface-based
+
+    return radiance
 ```
 
 **Parameters:**
-- `maxDepth`: Maximum path length. Default value is 100 [S2, unofficial].
-- `rayBounces`: Controls the number of ray bounces in `SceneData` [S1, unofficial].
-- Sun direction: Defined by `sunDirX`, `sunDirY`, `sunDirZ` (vec3f) [S1, unofficial].
-- Sun intensity: Defined by `sunIntensity` (f32) [S1, unofficial].
-- Sun enabled: Defined by `sunEnabled` (u32) [S1, unofficial].
+*   `maxDepth`: Maximum path length. Default value is 100 [S2, unofficial].
+*   `rayBounces`: Controls the number of ray bounces in `SceneData` [S1, unofficial].
+*   Sun direction: Defined by `sunDirX`, `sunDirY`, `sunDirZ` (vec3f) and intensity by `sunIntensity` (f32). Sun can be enabled/disabled via `sunEnabled` (u32) [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Light Leaks:** Prevented by checking the asymmetry of the BSDF using shading normals ($\mathbf{n}_s$) and geometric normals ($\mathbf{n}_g$) [S2, unofficial]. If $(\omega_i \cdot \mathbf{n}_g) \times (\omega_i \cdot \mathbf{n}_s) \le 0$ or $(\omega_o \cdot \mathbf{n}_g) \times (\omega_o \cdot \mathbf{n}_s) \le 0$, the contribution is zeroed out [S2, unofficial].
-- **Precision:** Throughput division by survival probability can lead to variance explosion if probability is very low. Clamping probability to a minimum value is recommended [G].
-- **Boundary Conditions:** When crossing surface boundaries, the medium stack must be updated correctly to ensure the correct extinction coefficient is used for subsequent volume interactions [S2, unofficial].
+*   **Light Leaks:** Prevented by checking the asymmetry of the BSDF using shading normals ($\mathbf{n}_s$) and geometric normals ($\mathbf{n}_g$). If $\mathbf{w}_i \cdot \mathbf{n}_g \le 0$ or $\mathbf{w}_o \cdot \mathbf{n}_g \le 0$, the contribution is zeroed out [S2, unofficial].
+*   **Precision:** Floating-point precision issues can cause self-intersection artifacts; ray origin offsetting is required [G].
+*   **Degenerate Input:** Zero PDF values in BSDF sampling must be handled to avoid division by zero [G].
 
 ## Subtopics
 
-### [Volumetric Path Tracing](1863-volumetric-path-tracing.md)
-Volumetric Path Tracing is a Monte Carlo method for simulating light transport in participating media by extending classical path tracing to allow rays to enter volumetric regions, sample scattering events, and continue random walks. It solves the problem of computing radiance in scenes with fog, smoke, or clouds by modeling absorption, emission, and scattering within the medium. Unlike its sibling [Volumetric Radiance Estimators](818-volumetric-radiance-estimators.md), which may use deterministic or semi-analytic approaches, this method relies on stochastic sampling. It differs from [Multiple Scattering Volume Path Tracing with Phase Function Sampling](1043-multiple-scattering-volume-path-tracing-with-phase-function-.md) by lacking explicit light sampling (Next-Event Estimation) and surface scattering support, relying instead on delta tracking for distance selection and phase function sampling for direction. It is often used as a ground-truth baseline for debugging more sophisticated algorithms due to its simplicity.
+### CPU-based Volumetric Path Tracing with MIS
+A rendering technique using a CPU-based volumetric path tracer with Multiple Importance Sampling (MIS) to render generated volumetric data across different Levels of Detail (LoDs) [S3]. It uses Woodcock’s Delta Tracking technique for transmittance estimation during the path tracing process [S3].
 
-### [Unidirectional Volume Boundary Estimator](3538-unidirectional-volume-boundary-estimator.md)
-The Unidirectional Volume Boundary Estimator is a Monte Carlo method for estimating radiance from volume boundary paths in participating media. It solves the problem of efficiently sampling paths where a scattering event occurs exactly on a volume boundary (interface) by building a main path from the camera and attaching side paths to the boundary. It sets itself apart from its sibling, the [Bidirectional Volume Boundary Estimator](4773-bidirectional-volume-boundary-estimator.md), by constructing the path unidirectionally: it samples the main path first and then the boundary vertex, whereas the bidirectional variant samples the boundary vertex first and connects it to both light and camera.
-
-### [Volumetric-Primitives Path Tracer](4107-volumetric-primitives-path-tracer.md)
-A forward rendering method for scattering and emissive media that models the scene as a collection of 3D kernel-based volumetric primitives and uses ray tracing to compute light transport, supporting multiple scattering via Next-Event Estimation. Unlike [Volumetric Path Tracing](1863-volumetric-path-tracing.md) which typically relies on voxel grids or implicit fields requiring numerical integration, VPPT provides closed-form analytical solutions for transmittance and free-flight sampling, eliminating Monte Carlo noise for single-scattering events and enabling efficient hardware-accelerated traversal. It maintains 3D volumetric density and integrates physically, preserving reciprocity and avoiding the view-dependent ordering artifacts and popping seen in delta-function approximations like [3D Gaussian Splatting](https://nvlabs.github.io/3dgs/).
-
-### [Unidirectional Differentiable Path Tracing](7780-unidirectional-differentiable-path-tracing.md)
-An algorithm to estimate the interior integral of the differential path integral using unidirectional path tracing, computing both radiometric measurement $L$ and its scene derivative $\dot{L}$.
+### Path-Space Correlated Rendering
+A technique to introduce correlation in path space by evaluating two states of the scene (current and previous) simultaneously during a single trace pass, enabling the use of control variates for variance reduction [S4]. It initializes radiance accumulators $L_{old}, L_{new}$ to 0 and beta weights $\beta_{old}, \beta_{new}$ to 1. It sets a flag $prev_{bsdf\_delta}$ to True. The BSDF must be augmented to keep track of the previous parameter state, queryable via `bsdf.eval_old` [S4].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot D)$, where $N$ is the number of pixels and $D$ is the average path depth. Each bounce involves a scene intersection and a BSDF/volume sampling [G].
-- **Memory Complexity:** $O(D)$ for the path stack and medium stack. No need to store multiple paths as in bidirectional methods [G].
-- **Measured Performance:** On an RTX 3090, a related voxel raymarching implementation achieves around 120fps at 4K, dipping to 60fps or lower depending on scene complexity [S1, unofficial].
-- **Strengths:** Handles surface reflections and volumetric scattering within a single loop, terminated by Russian Roulette [S2, unofficial].
-- **Limitations:** High variance in scenes with complex lighting or deep shadows due to the unidirectional nature. Requires many samples for convergence [S2, unofficial].
-- **When to Use:** Standard offline rendering and real-time applications with hardware acceleration [G].
-- **When Not to Use:** Scenes requiring efficient bidirectional light transport or complex caustics where path space exploration would be more efficient [G].
+*   **Time Complexity:** Linear with respect to the number of bounces and samples per pixel. The cost is dominated by ray-scene intersection tests [S2, unofficial].
+*   **Memory Complexity:** Low, primarily storing the scene structure and the current path state. The medium stack depth is limited by `maxDepth` [S2, unofficial].
+*   **Performance:** Requires a powerful GPU for real-time or near-real-time framerates. An RTX 3090 can run related voxel raymarching at 4K averaging around 120fps, but performance dips with scene complexity [S1, unofficial].
+*   **Strengths:** Physically accurate global illumination, handles complex lighting scenarios, easy to implement [S2, unofficial].
+*   **Limitations:** High noise levels in early samples, slow convergence for indirect illumination, sensitive to scene complexity [S2, unofficial].
+*   **When to use:** Offline rendering, high-quality still images, or when physical accuracy is paramount.
+*   **When not to use:** Real-time applications with strict performance constraints without optimization techniques like denoising or adaptive sampling.
 
 ## Background
-Not given in the sources.
+Unidirectional path tracing is a foundational technique in computer graphics, originating from the work of Kajiya (1986) on the rendering equation [S2, unofficial]. It has been widely adopted in production rendering pipelines for its ability to handle complex light transport phenomena. Recent developments include extensions for volumetric rendering [S1, unofficial] and differentiable rendering [S4].
 
 ## Sources
 [S1] jamestkiernan/webgpu-voxel-raymarching, https://github.com/jamestkiernan/webgpu-voxel-raymarching, fetched 2026-10-24 (unofficial)
 [S2] GitHub - yumcyaWiz/volpt: Volumetric path tracer written in C++, https://github.com/yumcyaWiz/volpt, fetched 2026-10-27 (unofficial)
 [S3] Fast Voxelization and Level of Detail for Microgeometry Rendering, https://doi.org/10.48550/arxiv.2604.13191, fetched 2026-10-26
+[S4] Recursive Control Variates for Inverse Rendering, https://research.nvidia.com/labs/rtr/publication/nicolet2023recursive/, fetched 2026-11-08

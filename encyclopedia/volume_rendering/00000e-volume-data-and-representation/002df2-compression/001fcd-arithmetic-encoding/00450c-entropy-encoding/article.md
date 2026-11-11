@@ -1,0 +1,104 @@
+# Entropy Encoding
+
+Also called: Arithmetic Coding, Data Compression and Encoding, Huffman Coding, Lossless Compression, 熵编码
+
+## Overview
+Entropy encoding is a lossless compression method that minimizes storage or transmission costs for a discrete dataset by mapping each data point to a variable-length bit string, allowing a receiver to invert the mapping and recover the exact original data [S2]. It solves the problem of inefficient fixed-width storage by assigning shorter codewords to frequent voxel values and longer codewords to infrequent ones, thereby reducing the average bits per element [S3]. Unlike its parent [Arithmetic Encoding](2127-arithmetic-encoding.md), which uses a context model to estimate probabilities for a single stream, entropy encoding generally refers to the broader class of techniques that map symbols to bit lengths based on frequency or numerical range [S2, S3].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A discrete dataset $X = (x_1, \dots, x_N)$ of voxel values or coefficients, and a probability model $p_x(x)$ representing the underlying distribution of $x$ [S2].
+- Output: A compressed bitstream consisting of variable-length bit strings, and typically the probability model or codebook parameters required for decoding [S2].
+
+**Data Structures:**
+- **Codebook/Table:** A mapping from symbol values (voxel values or coefficients) to variable-length bit strings (codewords) [S2, S3].
+- **Probability Model:** A set of probabilities $p_x(x)$ for each symbol $x$, typically estimated from the data histogram [G].
+
+**Steps:**
+1. **Analyze Distribution:** Determine the frequency or probability $p_x(x)$ of each symbol $x$ in the dataset $X$ [S2, S3].
+2. **Assign Codewords:** Assign variable-length bit strings to each symbol such that frequent symbols get shorter codewords and infrequent symbols get longer codewords [S2, S3].
+   - *Note:* The ideal length for symbol $x$ is $-\log_2 p_x(x)$ bits [S2].
+   - *Note:* In practice, integer lengths are used [G].
+   - *Note:* Arithmetic coding can achieve lengths arbitrarily close to $-\log_2 p_x(x)$ even if non-integer, by encoding the entire sequence into a single interval [S2].
+3. **Encode Data Stream:** Replace each $x_i$ in $X$ with its assigned codeword to form the bitstream [S2].
+   - *Note:* If using arithmetic coding, the encoder maintains a current interval and narrows it based on the cumulative probabilities of the input symbols [G].
+   - *Note:* If using fixed-length Huffman combined with RLE, encode runs of identical values as (count, symbol) pairs, where count and symbol are encoded using fixed-length Huffman codes to accelerate decoding [S3, S4].
+4. **Output Bitstream:** Write the concatenated codewords to the output stream [S2].
+
+**Formulas:**
+- **Shannon Entropy Lower Bound:**
+  $$H = - \sum_{x} p_x(x) \log_2 p_x(x)$$
+  where $p_x(x)$ is the underlying distribution of $x$ [S2]. This provides the minimum expected number of bits per element [S2].
+- **Bit Rate for Dataset X:**
+  $$R(X) = -\frac{1}{N} \sum_{i=1}^{N} \log_2 p_x(x_i)$$
+  This is the average number of bits per element for the dataset [S2].
+
+**Parameters:**
+- **Probability Model:** Typically estimated from the data histogram [G].
+- **Codebook Size:** Depends on the number of unique symbols [G]. For 8-bit voxels, this is up to 256 entries [S1].
+
+**Edge Cases and Pitfalls:**
+- **Random Access:** Variable-length encoding hinders quick random access reconstruction, which is critical in massively parallel GPU settings [S3, S4].
+- **Computational Cost:** Entropy encoding implies more work during decoding compared to fixed-length encoding [S3, S4].
+- **Precision:** Arithmetic coding provides better compression than Huffman coding but is more computationally expensive [S5, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def entropy_encode(dataset, symbol_probabilities):
+    # Step 1: Analyze Distribution
+    freq = {}
+    for symbol in dataset:
+        freq[symbol] = freq.get(symbol, 0) + 1
+
+    # Step 2: Assign Codewords (Huffman construction [G])
+    import heapq
+    heap = [[weight, [symbol, ""]] for symbol, weight in freq.items()]
+    heapq.heapify(heap)
+    while len(heap) > 1:
+        lo = heapq.heappop(heap)
+        hi = heapq.heappop(heap)
+        for pair in lo[1:]:
+            pair[1] = '0' + pair[1]
+        for pair in hi[1:]:
+            pair[1] = '1' + pair[1]
+        heapq.heappush(heap, [lo[0] + hi[0]] + lo[1:] + hi[1:])
+    codebook = dict(heapq.heappop(heap)[1:])
+
+    # Step 3: Encode Data Stream
+    bitstream = []
+    for symbol in dataset:
+        bitstream.extend(codebook[symbol])
+
+    # Step 4: Output Bitstream
+    return bitstream, codebook
+```
+
+## Subtopics
+
+### [Variable-Length Coding](7012-variable-length-coding.md)
+Variable-Length Coding (VLC) is a lossless compression technique for volume data that reduces storage by encoding voxel values relative to a base value within a data block (brick). It solves the problem of inefficient fixed-width storage when data values in a local region have a small dynamic range. Unlike its parent [Entropy Encoding](5360-entropy-encoding.md), which determines a single bit depth $n$ for the entire brick based on the global range, VLC typically employs a hierarchical structure (such as a quadtree) to determine bit lengths locally, allowing finer granularity in compression. Choose it when local data coherence allows hierarchical bit-length assignment to outperform global frequency-based encoding.
+
+### Golomb-Rice Encoding
+Golomb-Rice encoding is an entropy encoder favored over arithmetic and Huffman coding for volume rendering because it has better random access capabilities and lower computational complexity [S3, S4]. It is particularly effective for data with a geometric distribution, such as wavelet coefficients or prediction errors [S3]. Choose it when fast random access and low decoding complexity are prioritized over maximum compression ratio.
+
+## Operating characteristics
+- **Time Complexity:** Encoding and decoding complexity depends on the specific method [S2, S3]. Huffman coding is $O(N)$ for both encoding and decoding if a codebook is used [S3]. Arithmetic coding is also $O(N)$ but with a higher constant factor due to interval arithmetic [S5, unofficial]. Golomb-Rice encoding is $O(N)$ and generally faster than arithmetic coding [S3].
+- **Memory Complexity:** Requires storage for the codebook or probability model [S2, S3].
+- **Measured Performance:** Arithmetic coding provides better compression ratios than Huffman coding but is more computationally expensive [S5, unofficial]. Golomb-Rice offers a good balance between compression ratio and speed, with better random access than Huffman or arithmetic coding [S3].
+- **Scaling:** Compression ratio improves with larger datasets where the probability distribution is more stable [S1].
+- **Strengths:** High compression ratios for data with skewed distributions; lossless reconstruction [S2, S3].
+- **Limitations:** Poor random access support due to variable-length codewords; higher decoding computational cost compared to fixed-length encoding [S3, S4].
+- **When to use:** When storage or transmission bandwidth is the primary constraint, and random access is not critical or can be handled by pre-decoding [S3].
+- **When not to use:** When fast random access is required for interactive rendering on GPUs [S3, S4].
+
+## Background
+Entropy encoding has its roots in information theory, specifically Shannon's work on entropy [S2]. In the context of volume rendering, it has been widely used since the early applications of compressed DVR, often in conjunction with RLE or DPCM [S3][S5, unofficial]. Key surveys and benchmarks, such as those by Komma et al. [S3, S4], have analyzed its effectiveness for compressed volume data [S3, S4]. The method is commonly used in compressed volume rendering, often combined with RLE or prediction methods [S3][S5, unofficial].
+
+## Sources
+[S1] Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis, https://doi.org/10.1109/cvpr52733.2024.00985, fetched 2026-10-26
+[S2] Deep Implicit Volume Compression, https://doi.org/10.1109/cvpr42600.2020.00137, fetched 2026-10-26
+[S3] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S4] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S5] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)

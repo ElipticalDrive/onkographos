@@ -3,51 +3,37 @@
 Also called: Softplus Quality Regularizer
 
 ## Overview
-Tetrahedral Regularization is a penalty term added to the optimization loss to prevent tetrahedral elements from becoming inverted (negative volume) or degenerate (volume approaching zero) during the optimization of vertex positions and colors [S1, unofficial]. It operates by computing a smooth quality metric for each element and applying a differentiable softplus penalty, distinguishing it from topology-modifying methods like [Adaptive Subdivision in DiffTetVR](807-adaptive-subdivision-in-difftetvr.md) [S1, unofficial].
+Tetrahedral Regularization is a loss term added to the optimization of tetrahedral mesh vertex positions to prevent elements from becoming inverted (negative volume) or degenerate (volume approaching zero) [S1, unofficial]. It solves the problem of mesh validity during differentiable rendering optimization, where high learning rates or discontinuous fields can cause geometric collapse [S1, unofficial]. It sets itself apart from standard surface-only reconstruction methods by explicitly penalizing volumetric degeneracy and enforcing orientation consistency, thereby preserving thin geometric features that are often lost in voxel-to-mesh pipelines [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- Set of tetrahedra $T$.
-- For each tetrahedron $t \in T$, the positions of its four vertices $p_0, p_1, p_2, p_3 \in \mathbb{R}^3$ [S1, unofficial].
-- Hyperparameters: $\lambda$ (regularization weight), $\beta$ (softplus steepness) [S1, unofficial].
-
-**Outputs:**
-- Scalar regularization loss value.
-- Gradients of the loss with respect to vertex positions $p_i$ [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A set of tetrahedra $T$, where each tetrahedron $t$ is defined by four vertex positions $p_0, p_1, p_2, p_3 \in \mathbb{R}^3$.
+*   **Output:** A scalar regularization loss value and its gradient with respect to the vertex positions.
 
 **Data Structures:**
-- Vertices are stored as 3D vectors.
-- Edge lengths are computed on-the-fly from vertex positions [S1, unofficial].
-
-**Steps:**
-1. For each tetrahedron $t \in T$:
-   a. Compute the signed volume $V$ using the scalar triple product of the edges originating from $p_0$:
-      $$V = \langle (p_3 - p_0), (p_1 - p_0) \times (p_2 - p_0) \rangle$$ [S1, unofficial].
-   b. Compute the six edge lengths $l_i$ for $i=0..5$ corresponding to the pairs $(p_0,p_1), (p_0,p_2), (p_0,p_3), (p_1,p_2), (p_1,p_3), (p_2,p_3)$ [S1, unofficial].
-   c. Compute the root-mean-square edge length $l_{rms}$:
-      $$l_{rms} = \sqrt{\frac{1}{6} \sum_{i=0}^5 l_i^2}$$ [S1, unofficial].
-   d. Compute the smooth quality measure $Q$:
-      $$Q = 6\sqrt{2} \frac{V}{l_{rms}^3}$$ [S1, unofficial].
-   e. Compute the softplus penalty:
-      $$\text{Softplus}(Q) = \frac{1}{\beta} \log(1 + \exp(\beta Q))$$ [S1, unofficial].
-   f. Accumulate the penalty to the total loss [S1, unofficial].
-2. Multiply the accumulated sum by $\lambda$ and add to the image loss $\text{loss}_{\text{img}}$ [S1, unofficial].
-
-**Formulas:**
-- **Signed Volume:** $V = \langle (p_3 - p_0), (p_1 - p_0) \times (p_2 - p_0) \rangle$ [S1, unofficial].
-- **RMS Edge Length:** $l_{rms} = \sqrt{\frac{1}{6} \sum_{i=0}^5 l_i^2}$ [S1, unofficial].
-- **Quality Metric:** $Q = 6\sqrt{2} \frac{V}{l_{rms}^3}$ [S1, unofficial]. This metric is derived from Shewchuk and Parthasarathy et al. [S1, unofficial].
-- **Softplus Function:** $\text{Softplus}(x) = \frac{1}{\beta} \log(1 + \exp(\beta x))$ [S1, unofficial].
-- **Softplus Derivative:** $\frac{\partial \text{Softplus}(x)}{\partial x} = \frac{1}{1 + \exp(-\beta x)}$ [S1, unofficial].
-- **Total Loss:** $\text{loss} = \text{loss}_{\text{img}} + \lambda \sum_{t \in T} \text{Softplus}(Q(t))$ [S1, unofficial].
+The method operates on the geometric properties of individual tetrahedra. No complex data structures are required beyond the vertex position arrays.
 
 **Parameters:**
-- $\beta$: Controls the steepness of the penalty. Typical values are 10 or 100. Higher values penalize slightly deformed tetrahedra less [S1, unofficial].
-- $\lambda$: Weight of the regularization term. Typical value is 10 [S1, unofficial].
+*   $\lambda$: Weight assigned to the regularization term in the complete loss function. Typical value: 10 [S1, unofficial].
+*   $\beta$: Softplus parameter controlling the penalty shape. Typical values: 10 or 100. Higher values penalize slightly deformed tetrahedra less [S1, unofficial].
 
-**Pitfalls:**
-- Tetrahedra may invert or degenerate due to $C^0$-continuity of the color field and high learning rates [S1, unofficial].
-- The derivative of $Q$ with respect to vertex positions is complex; it is recommended to use automatic differentiation tools (e.g., SymPy) to generate the GLSL implementation, as provided in the DiffTetVR source code [S1, unofficial].
+**Steps:**
+1.  For each tetrahedron $t \in T$ with vertices $p_0, p_1, p_2, p_3$:
+    a.  Compute the signed volume $V$ using the scalar triple product:
+        $$V = \langle (p_3 - p_0), (p_1 - p_0) \times (p_2 - p_0) \rangle$$
+        If $V \le 0$, the tetrahedron is inverted [S1, unofficial].
+    b.  Compute the six edge lengths $l_i$ for $i=0..5$ between all pairs of vertices.
+    c.  Compute the root-mean-square edge length $l_{rms}$:
+        $$l_{rms} = \sqrt{\frac{1}{6} \sum_{i=0}^5 l_i^2}$$
+    d.  Compute the quality measure $Q$:
+        $$Q = 6\sqrt{2} \frac{V}{l_{rms}^3}$$
+        This measure is smooth and approaches $-\infty$ for inverted tetrahedra and $0$ for degenerate ones [S1, unofficial].
+    e.  Compute the Softplus penalty:
+        $$\text{Softplus}(Q) = \frac{1}{\beta} \log(1 + \exp(\beta Q))$$
+2.  Sum the penalties over all tetrahedra and scale by $\lambda$:
+    $$\text{loss}_{\text{reg}} = \lambda \sum_{t \in T} \text{Softplus}(Q(t))$$
+3.  The total loss is:
+    $$\text{loss} = \text{loss}_{\text{img}} + \text{loss}_{\text{reg}}$$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -55,95 +41,243 @@ Tetrahedral Regularization is a penalty term added to the optimization loss to p
 ```python
 import math
 
-def tetrahedral_regularization(vertices, tet_indices, lambda_reg=10.0, beta=10.0):
+def tetrahedral_regularization(vertices, tetrahedra_indices, lambda_reg=10.0, beta=10.0):
     """
-    Computes tetrahedral regularization loss and gradients w.r.t. vertex positions.
-    vertices: list of [x, y, z] tuples for all vertices.
-    tet_indices: list of 4-tuples of vertex indices.
+    Computes the tetrahedral regularization loss and its gradient.
+    
+    Args:
+        vertices: Array of shape (N, 3) containing vertex positions.
+        tetrahedra_indices: Array of shape (M, 4) containing vertex indices for each tetrahedron.
+        lambda_reg: Weight for the regularization term.
+        beta: Softplus steepness parameter.
+        
+    Returns:
+        loss: Scalar regularization loss.
+        grad_vertices: Gradient of the loss with respect to vertex positions.
     """
-    def cross(a, b):
-        return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
-    def dot(a, b):
-        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
-
-    total_loss = 0.0
-    grad_vertices = [[0.0, 0.0, 0.0] for _ in vertices]
-
-    for idx in tet_indices:
-        p = [vertices[i] for i in idx]
-        p0, p1, p2, p3 = p
-
-        v1, v2, v3 = [p1[j]-p0[j] for j in range(3)], [p2[j]-p0[j] for j in range(3)], [p3[j]-p0[j] for j in range(3)]
-        cross_v1_v2 = cross(v1, v2)
-        V = dot(v3, cross_v1_v2)
-
-        edges_sq = [
-            sum((p[i][j]-p[k][j])**2 for j in range(3))
-            for i, k in [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
+    loss = 0.0
+    grad_vertices = np.zeros_like(vertices)
+    
+    for i in range(len(tetrahedra_indices)):
+        idx = tetrahedra_indices[i]
+        p0 = vertices[idx[0]]
+        p1 = vertices[idx[1]]
+        p2 = vertices[idx[2]]
+        p3 = vertices[idx[3]]
+        
+        # 1. Compute Signed Volume V
+        # V = <(p3 - p0), (p1 - p0) x (p2 - p0)>
+        v1 = p1 - p0
+        v2 = p2 - p0
+        v3 = p3 - p0
+        cross_v1_v2 = np.cross(v1, v2)
+        V = np.dot(v3, cross_v1_v2)
+        
+        # 2. Compute RMS Edge Length l_rms
+        # Edges: (0,1), (0,2), (0,3), (1,2), (1,3), (2,3)
+        edges = [
+            p1 - p0,
+            p2 - p0,
+            p3 - p0,
+            p2 - p1,
+            p3 - p1,
+            p3 - p2
         ]
-        l_rms = math.sqrt(sum(edges_sq) / 6.0)
-        if l_rms < 1e-9: continue
-
-        Q = 6.0 * math.sqrt(2.0) * V / (l_rms ** 3)
-        exp_bQ = math.exp(beta * Q)
-        softplus_Q = (1.0 / beta) * math.log(1.0 + exp_bQ)
-        total_loss += softplus_Q
-
-        d_softplus_dQ = 1.0 / (1.0 + math.exp(-beta * Q))
-        dQ_dV = 6.0 * math.sqrt(2.0) / (l_rms ** 3)
-        dQ_dl_rms = -18.0 * math.sqrt(2.0) * V / (l_rms ** 4)
-
-        cross_v3_v2 = cross(v3, v2)
-        cross_v3_v1 = cross(v3, v1)
-
-        dV_dp0 = [-cross_v1_v2[j] - cross_v3_v2[j] - cross_v3_v1[j] for j in range(3)]
-        dV_dp1 = cross_v3_v2
-        dV_dp2 = cross_v3_v1
-        dV_dp3 = cross_v1_v2
-
-        dl_rms_dS = 1.0 / (12.0 * l_rms)
-        dl_rms_dp = [[0.0, 0.0, 0.0] for _ in range(4)]
-        for i, k in [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]:
-            dl2_dpi = [2.0 * (p[i][m] - p[k][m]) for m in range(3)]
-            dl2_dpk = [-x for x in dl2_dpi]
-            for m in range(3):
-                dl_rms_dp[i][m] += dl_rms_dS * dl2_dpi[m]
-                dl_rms_dp[k][m] += dl_rms_dS * dl2_dpk[m]
-
-        for i in range(4):
-            for m in range(3):
-                grad_vertices[idx[i]][m] += d_softplus_dQ * (dQ_dV * dV_dp[i][m] + dQ_dl_rms * dl_rms_dp[i][m])
-
-    total_loss *= lambda_reg
-    return total_loss, grad_vertices
+        l_sq_sum = sum(np.dot(e, e) for e in edges)
+        l_rms = math.sqrt(l_sq_sum / 6.0)
+        
+        # 3. Compute Quality Q
+        # Avoid division by zero for degenerate tets with zero volume initially
+        if l_rms < 1e-8:
+            Q = -1e8 # Large negative penalty for zero-size elements
+        else:
+            Q = 6.0 * math.sqrt(2.0) * V / (l_rms ** 3)
+            
+        # 4. Compute Softplus(Q)
+        # Softplus(x) = (1/beta) * log(1 + exp(beta * x))
+        # For numerical stability, use log1p(exp(beta*x)) if beta*x is large negative,
+        # but standard log(1+exp) is stable for negative x.
+        # Note: The source defines Softplus(x) = 1/beta * log(1 + exp(beta x)).
+        # Standard Softplus is usually log(1+exp(x)). The source includes beta in the exponent
+        # and divides by beta.
+        
+        exponent = beta * Q
+        # Numerical stability for exp(exponent)
+        if exponent > 20:
+            softplus_val = exponent / beta
+        else:
+            softplus_val = (1.0 / beta) * math.log1p(math.exp(exponent))
+            
+        loss += softplus_val
+        
+        # 5. Compute Gradient d(Softplus)/dQ
+        # d(Softplus)/dQ = 1 / (1 + exp(-beta * Q))
+        # This is the sigmoid function sigma(beta * Q)
+        grad_softplus_dQ = 1.0 / (1.0 + math.exp(-exponent))
+        
+        # 6. Compute Gradient dQ/dVertices
+        # Q = C * V / l_rms^3, where C = 6*sqrt(2)
+        # dQ/dV = C / l_rms^3
+        # dQ/d(l_rms) = -3 * C * V / l_rms^4
+        # We need dQ/dp_k.
+        # V depends on p0, p1, p2, p3.
+        # l_rms depends on all pairwise distances.
+        
+        # Gradient of V w.r.t vertices:
+        # V = (p3-p0) . ((p1-p0)x(p2-p0))
+        # dV/dp0 = -((p1-p0)x(p2-p0)) - (p3-p0)x(p2-p0) + (p3-p0)x(p1-p0)
+        #        = -(v1 x v2) - (v3 x v2) + (v3 x v1)
+        #        = -(v1 x v2) + (v2 x v3) + (v3 x v1)
+        # dV/dp1 = (p3-p0) x (p2-p0) = v3 x v2
+        # dV/dp2 = -(p3-p0) x (p1-p0) = -(v3 x v1) = v1 x v3
+        # dV/dp3 = (p1-p0) x (p2-p0) = v1 x v2
+        
+        # Note: The source states analytic derivatives are computed using SymPy [S1, unofficial].
+        # Implementing the full symbolic gradient manually is error-prone.
+        # For implementation, one should use automatic differentiation or the provided GLSL code.
+        # Here we outline the structure.
+        
+        # dQ/dp_k = (dQ/dV) * (dV/dp_k) + (dQ/d(l_rms)) * (d(l_rms)/dV) ... wait, l_rms does not depend on V.
+        # dQ/dp_k = (dQ/dV) * (dV/dp_k) + (dQ/d(l_rms)) * (sum_j (d(l_rms)/d(l_j)) * (d(l_j)/dp_k))
+        
+        # Let's compute dQ/dV and dQ/d(l_rms)
+        C = 6.0 * math.sqrt(2.0)
+        if l_rms < 1e-8:
+            # Skip gradient for degenerate tets to avoid NaN
+            continue
+            
+        dQ_dV = C / (l_rms ** 3)
+        dQ_d_l_rms = -3.0 * C * V / (l_rms ** 4)
+        
+        # Gradient of V
+        grad_V_p0 = -np.cross(v1, v2) - np.cross(v3, v2) + np.cross(v3, v1)
+        grad_V_p1 = np.cross(v3, v2)
+        grad_V_p2 = -np.cross(v3, v1)
+        grad_V_p3 = np.cross(v1, v2)
+        
+        # Gradient of l_rms w.r.t vertices
+        # l_rms = sqrt(1/6 sum l_i^2)
+        # d(l_rms)/d(l_i) = (1/2) * (1/l_rms) * 2 * l_i = l_i / l_rms
+        # d(l_i)/dp_k depends on the edge.
+        # Edge j connects u, v. l_j = |p_u - p_v|.
+        # d(l_j)/dp_u = (p_u - p_v) / l_j
+        # d(l_j)/dp_v = (p_v - p_u) / l_j
+        
+        grad_l_rms_p0 = np.zeros(3)
+        grad_l_rms_p1 = np.zeros(3)
+        grad_l_rms_p2 = np.zeros(3)
+        grad_l_rms_p3 = np.zeros(3)
+        
+        # Edge 0: p0-p1
+        l0 = np.linalg.norm(v1)
+        if l0 > 1e-8:
+            e0 = v1 / l0
+            grad_l_rms_p0 -= e0 * (l0 / l_rms) / 6.0 # Wait, l_rms formula has 1/6 inside sqrt.
+            # Let's re-derive carefully.
+            # l_rms = sqrt( S / 6 ) where S = sum l_i^2
+            # d(l_rms)/dS = 1 / (2 * sqrt(S/6)) * 1/6 = 1 / (12 * l_rms)
+            # d(l_rms)/d(l_i) = d(l_rms)/dS * dS/d(l_i) = (1 / (12 * l_rms)) * 2 * l_i = l_i / (6 * l_rms)
+            
+            # Correction:
+            factor = 1.0 / (6.0 * l_rms)
+            
+            # Edge 0: p0-p1, vector v1
+            if l0 > 1e-8:
+                e0 = v1 / l0
+                grad_l_rms_p0 -= e0 * l0 * factor
+                grad_l_rms_p1 += e0 * l0 * factor
+                
+        # Edge 1: p0-p2, vector v2
+        l1 = np.linalg.norm(v2)
+        if l1 > 1e-8:
+            e1 = v2 / l1
+            grad_l_rms_p0 -= e1 * l1 * factor
+            grad_l_rms_p2 += e1 * l1 * factor
+            
+        # Edge 2: p0-p3, vector v3
+        l2 = np.linalg.norm(v3)
+        if l2 > 1e-8:
+            e2 = v3 / l2
+            grad_l_rms_p0 -= e2 * l2 * factor
+            grad_l_rms_p3 += e2 * l2 * factor
+            
+        # Edge 3: p1-p2, vector p2-p1 = v2-v1
+        v12 = p2 - p1
+        l3 = np.linalg.norm(v12)
+        if l3 > 1e-8:
+            e3 = v12 / l3
+            grad_l_rms_p1 -= e3 * l3 * factor
+            grad_l_rms_p2 += e3 * l3 * factor
+            
+        # Edge 4: p1-p3, vector p3-p1 = v3-v1
+        v13 = p3 - p1
+        l4 = np.linalg.norm(v13)
+        if l4 > 1e-8:
+            e4 = v13 / l4
+            grad_l_rms_p1 -= e4 * l4 * factor
+            grad_l_rms_p3 += e4 * l4 * factor
+            
+        # Edge 5: p2-p3, vector p3-p2 = v3-v2
+        v23 = p3 - p2
+        l5 = np.linalg.norm(v23)
+        if l5 > 1e-8:
+            e5 = v23 / l5
+            grad_l_rms_p2 -= e5 * l5 * factor
+            grad_l_rms_p3 += e5 * l5 * factor
+            
+        # Total gradient of Q w.r.t vertices
+        grad_Q_p0 = dQ_dV * grad_V_p0 + dQ_d_l_rms * grad_l_rms_p0
+        grad_Q_p1 = dQ_dV * grad_V_p1 + dQ_d_l_rms * grad_l_rms_p1
+        grad_Q_p2 = dQ_dV * grad_V_p2 + dQ_d_l_rms * grad_l_rms_p2
+        grad_Q_p3 = dQ_dV * grad_V_p3 + dQ_d_l_rms * grad_l_rms_p3
+        
+        # Chain rule: dLoss/dp_k = lambda * grad_softplus_dQ * grad_Q_p_k
+        scale = lambda_reg * grad_softplus_dQ
+        
+        grad_vertices[idx[0]] += scale * grad_Q_p0
+        grad_vertices[idx[1]] += scale * grad_Q_p1
+        grad_vertices[idx[2]] += scale * grad_Q_p2
+        grad_vertices[idx[3]] += scale * grad_Q_p3
+        
+    return loss, grad_vertices
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Inverted Tetrahedra:** If $V < 0$, the quality $Q$ becomes negative, triggering the Softplus penalty. This prevents self-intersections [S1, unofficial].
+*   **Degenerate Tetrahedra:** If $V \to 0$ or $l_{rms} \to 0$, $Q \to 0$ or $-\infty$. The Softplus function provides a smooth penalty for these states [S1, unofficial].
+*   **Numerical Stability:** Division by zero in $l_{rms}$ must be guarded. The source notes that analytic derivatives are typically computed via SymPy and implemented in GLSL for GPU acceleration [S1, unofficial].
+*   **Learning Rate:** High learning rates can cause rapid degeneration, requiring careful tuning of $\lambda$ and $\beta$ [S1, unofficial].
 
 ## Subtopics
 
 ### Shape Operator
-The Shape Operator is a variant that weights a tetrahedron's contribution based on its deviation from a regular tetrahedron to suppress degenerated elements, primarily used in smoke volume rendering [S2, unofficial]. It differs from the standard Softplus Regularizer by modifying the effective density rather than just penalizing the loss, and by using an exponent $s$ to control the strength of the suppression [S2, unofficial].
+The Shape Operator is a variant used in smoke volume rendering to suppress degenerated tetrahedra by weighting their contribution based on deviation from a regular tetrahedron [S2, unofficial]. It sets itself apart by modifying the effective density rather than just adding a loss term, making it suitable for advection-based simulations [S2, unofficial]. Choose it when rendering dynamic volumetric effects like smoke where mesh distortion occurs during advection [S2, unofficial].
 
-- **Definition:** Compares the volume of tetrahedron $T$ with the volume of a regular tetrahedron $T_R$ having the same longest edge length $a$ [S2, unofficial].
-- **Formula:**
-  $$\text{shape}(T) = \left( \frac{12}{\sqrt{2}} \frac{\text{vol}(T)}{a^3} \right)^s$$
-  where $\text{vol}(T_R) = \frac{\sqrt{2}}{12} a^3$ [S2, unofficial].
-- **Effective Density:**
-  $$\sigma(T) = \frac{1}{|\text{vol}(T)|} \cdot T_s \cdot k \cdot \text{shape}(T)$$
-  where $T_s$ is a correction factor for initial volume differences and $k$ is a density multiplier [S2, unofficial].
-- **Parameter:** $s$ is the exponent design parameter, typically around 0.5 [S2, unofficial].
-- **Usage:** Used to limit artifacts caused by distortion during advection in smoke volumes [S2, unofficial].
+**Definition:**
+The shape operator compares the volume of a tetrahedron $T$ with the volume of a regular tetrahedron $T_R$ having the same longest edge length $a$ [S2, unofficial].
+
+**Formula:**
+$$\text{shape}(T) = \left( \frac{12}{\sqrt{2}} \frac{\text{vol}(T)}{a^3} \right)^s$$
+where $\text{vol}(T_R) = \frac{\sqrt{2}}{12} a^3$ [S2, unofficial]. The term $\frac{T_s}{T_s}$ in the source notes appears to be a typo or normalization factor for initial volume correction, effectively equal to 1 in the shape definition itself, but applied to the density [S2, unofficial].
+
+**Effective Density:**
+$$\sigma(T) = \frac{1}{|\text{vol}(T)|} \cdot T_s \cdot k \cdot \text{shape}(T)$$
+where $k$ is a quality multiplier and $T_s$ is a correction factor for initial volume [S2, unofficial].
+
+**Parameter:**
+*   $s$: Exponent design parameter controlling the strength of the shape operation. Typical value: 0.5 [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N$ is the number of tetrahedra, as each tetrahedron's quality is computed independently [G].
-- **Memory Complexity:** $O(1)$ auxiliary memory per tetrahedron during evaluation [G].
-- **Performance:** The smoothness of the Softplus function allows for efficient gradient-based optimization without the discontinuities of hard constraints [S1, unofficial].
-- **Strengths:** Prevents inversion and degeneration effectively; differentiable; smooth penalties allow for stable convergence [S1, unofficial].
-- **Limitations:** High learning rates or low $\lambda$ can still cause instability if the penalization factor is insufficient [S1, unofficial].
-- **When to use:** When optimizing vertex positions in differentiable tetrahedral volume rendering where mesh quality degrades over iterations [S1, unofficial].
-- **When not to use:** When topology changes are preferred over vertex deformation (e.g., [Adaptive Subdivision in DiffTetVR](807-adaptive-subdivision-in-difftetvr.md)) [S1, unofficial].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of tetrahedra, as each tetrahedron's quality is computed independently.
+*   **Memory Complexity:** $O(1)$ auxiliary memory per tetrahedron.
+*   **Performance:** The method is computationally lightweight compared to full remeshing. However, computing gradients for optimization can be expensive if not implemented with automatic differentiation or optimized shaders [S1, unofficial].
+*   **Strengths:** Prevents mesh inversion and degeneracy during optimization; smooth differentiable penalty; preserves thin features better than voxel-based methods [S1, unofficial].
+*   **Limitations:** Requires careful tuning of $\lambda$ and $\beta$; does not fix severely inverted meshes, only penalizes them; relies on the optimizer to correct the geometry [S1, unofficial].
+*   **When to Use:** Differentiable tetrahedral volume rendering where mesh validity is critical for ray-element intersection [S1, unofficial].
+*   **When Not to Use:** Static meshes where optimization is not performed; real-time applications without GPU-accelerated gradient computation [S1, unofficial].
 
 ## Background
-Tetrahedral Regularization was introduced in the context of Differentiable Tetrahedral Volume Rendering (DiffTetVR) [S1, unofficial]. The quality metric $Q$ is attributed to Shewchuk and Parthasarathy et al., who derived smooth quality measures for tetrahedra based on interpolation errors and stiffness matrix conditioning [S1, unofficial]. The specific application of Softplus regularization to prevent inversion in differentiable rendering was pioneered by Mile et al. in 2026 [S1, unofficial]. The Shape Operator variant was developed earlier for real-time smoke volume rendering by Sowinski in 2012 [S2, unofficial].
+Tetrahedral Regularization was introduced in the context of Differentiable Tetrahedral Volume Rendering (DiffTetVR) [S1, unofficial]. The quality measure $Q$ is attributed to Parthasarathy et al. [48] and discussed by Shewchuk [46, 47] for tetrahedral mesh quality assessment [S1, unofficial]. The method was developed to address the instability of vertex optimization in differentiable rendering pipelines [S1, unofficial].
 
 ## Sources
 [S1] DiffTetVR: Differentiable Tetrahedral Volume Rendering, https://doi.org/10.48550/arxiv.2601.00114, fetched 2026-10-26 (unofficial)

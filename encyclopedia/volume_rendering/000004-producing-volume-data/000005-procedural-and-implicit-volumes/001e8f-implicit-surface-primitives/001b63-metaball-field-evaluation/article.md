@@ -3,208 +3,117 @@
 Also called: Dynamic Metaball Volume Update Pipeline, GPU Field Generation, GPU volume generation, Implicit Metaball Field, Metaball Density Function, Metaball Field Computation, Metaball density field update
 
 ## Overview
-Metaball Field Evaluation is a CPU-GPU pipeline that generates and updates a 3D density volume representing dynamic metaballs using compute shaders, often accompanied by an optional flag volume for empty space skipping [S1, unofficial]. It solves the problem of evaluating a dynamic scalar field composed of moving spheres to calculate density at query points $(x,y,z)$ for subsequent volume rendering or isosurface extraction [S2, unofficial]. Unlike static implicit primitives, this method explicitly handles temporal animation of ball positions and powers, optimizing the field update stage for parallel dispatch across voxel grids [S1, unofficial].
+Metaball Field Evaluation generates and updates a 3D scalar density volume representing dynamic metaballs (spheres) using a CPU-GPU pipeline, typically via compute or fragment shaders [S1, S3, unofficial]. It solves the problem of converting discrete, moving atomic positions into a continuous volumetric representation suitable for surface extraction or raymarching [S1, unofficial]. Unlike [Implicit Field Composition](2652-implicit-field-composition.md), which composes general implicit primitives, this method specifically sums inverse-distance or Gaussian contributions from moving spheres to create organic, merging blob shapes [S1, S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A list of metaball parameters (position, radius/power, speed, phase, color) updated per frame; volume resolution parameters (voxel size, grid dimensions); time step.
-*   **Output:** A 3D texture (volume) where each voxel stores density (and optionally color); an optional binary flag volume indicating active/non-empty regions.
+*   **Inputs:** A set of $N$ metaballs, each defined by position $\vec{p}_i$, radius $r_i$, and strength $s_i$; a 3D grid domain of resolution $W \times H \times D$; and a time parameter $t$ [S1, S2, unofficial].
+*   **Outputs:** A 3D texture (volume) where each voxel stores the summed scalar field value (density) and optionally color/normal data [S1, S3, unofficial].
 
 **Data Structures:**
-1.  **Constant Buffer (`CB_Balls`):** Stores metaball data for the GPU.
-    *   `fBalls[150]`: Array of `XMFLOAT4`. Each element stores $(x, y, z, \text{power})$. Max balls: 150 [S1, unofficial].
-    *   `fBallsCol[150]`: Array of `XMFLOAT4`. Each element stores color $(r, g, b, \text{unused})$.
-    *   `iNumBalls`: Integer count of active balls.
-    *   `dummy0`, `dummy1`, `dummy2`: Padding integers [S1, unofficial].
-2.  **Volume Texture (`m_pVolTex`):**
-    *   Format: `DXGI_FORMAT_R32G32B32A32_FLOAT` [S1, unofficial].
-    *   Dimensions: $(W, H, D)$ where $W=2 \times \text{halfReso}_x$, etc.
-    *   Layout: $(x, y, z) = \text{color}$, $w = \text{density}$ [S1, unofficial].
-    *   Bindings: Shader Resource View (SRV) and Unordered Access View (UAV) [S1, unofficial].
-3.  **Flag Volume Texture (`m_pBrickVolTex`):**
-    *   Format: `DXGI_FORMAT_R8_SINT` [S1, unofficial].
-    *   Dimensions: Downsampled by `VOXEL_BRICK_RATIO` relative to the main volume [S1, unofficial].
-    *   Purpose: Empty space skipping flag [S1, unofficial].
-4.  **Uniforms (Fragment Shader Variant):**
-    *   `u_time` (float), `u_numBlobs` (int).
-    *   `u_blobParams[100]`: Array of `vec4` where $xyz=$ position, $w=$ strength [S3, unofficial].
-    *   `u_tilesX`, `u_tilesY`, `u_gridSize` (int) [S3, unofficial].
+*   **Ball Buffer (Constant Buffer):** Stores ball parameters. In DirectX 11 implementations, this is a structured buffer or constant buffer `CB_Balls` containing:
+    *   `fBalls[150]`: Array of `XMFLOAT4` (x,y,z = position, w = power/radius squared) [S1, unofficial].
+    *   `fBallsCol[150]`: Array of `XMFLOAT4` (color) [S1, unofficial].
+    *   `iNumBalls`: Integer count of active balls [S1, unofficial].
+    *   Max balls supported is typically 150 [S1, unofficial].
+*   **Volume Texture:** `ID3D11Texture3D` with format `DXGI_FORMAT_R32G32B32A32_FLOAT` [S1, unofficial].
+    *   Dimensions: $(W, H, D)$, often derived from half-resolution bounds [S1, unofficial].
+    *   Layout: XYZ channels store color/intensity, W channel stores density [S1, unofficial].
+*   **Flag Volume (Optional):** `ID3D11Texture3D` with format `DXGI_FORMAT_R8_SINT` [S1, unofficial].
+    *   Dimensions: Downsampled by `VOXEL_BRICK_RATIO` [S1, unofficial].
+    *   Purpose: Marks empty space for skipping during raymarching [S1, unofficial].
 
-**Numbered Steps:**
-
+**Steps:**
 1.  **Initialization (CPU):**
-    *   Create `m_pVolTex` with dimensions derived from `halfReso` and `voxelSize` [S1, unofficial].
-    *   Create `m_pBrickVolTex` with dimensions divided by `VOXEL_BRICK_RATIO` [S1, unofficial].
-    *   Initialize `CB_Balls` with random parameters:
-        *   Radius $r = (0.6 \times \text{frand}() + 0.7) \times \text{halfReso} \times \text{voxelSize} \times 0.1$ [S1, unofficial].
-        *   Power $fPower = r^2$ [S1, unofficial].
-        *   Orbit Radius $fOrbitRadius = \text{halfReso} \times \text{voxelSize} \times (0.6 + (\text{frand}()-0.3) \times 0.4)$ [S1, unofficial].
-        *   Speed $speedF = 6.0 \times (\text{frand}()-0.5)$, clamped to $[-1, 1]$ [S1, unofficial].
-        *   Orbit Speed $fOrbitSpeed = (1.0 / fPower) \times 0.0005 \times speedF$ [S1, unofficial].
-        *   Phase $= \text{frand}() \times 2\pi$ [S1, unofficial].
-        *   Color: Random rotation of $(1,0,0)$ with clamped positive components [S1, unofficial].
-        *   Clamp orbit radius if $fOrbitRadius + r > 0.45 \times \text{halfReso} \times \text{voxelSize} \times 2$ [S1, unofficial].
+    *   Create volume textures with specified resolutions [S1, unofficial].
+    *   Initialize ball parameters:
+        *   Radius $r$: Randomized, e.g., $r = (0.6 \cdot \text{rand}() + 0.7) \cdot \text{halfReso} \cdot \text{voxelSize} \cdot 0.1$ [S1, unofficial].
+        *   Power $w = r^2$ [S1, unofficial].
+        *   Orbit Radius: Randomized within bounds, clamped so $r + \text{orbitRadius} < 0.45 \cdot \text{fullReso}$ [S1, unofficial].
+        *   Speed: Randomized, clamped to $\pm 1.0$, scaled by $1/w$ [S1, unofficial].
+        *   Phase: Random angle $[0, 2\pi)$ [S1, unofficial].
+    *   Upload initial ball data to GPU constant buffers [S1, unofficial].
 
-2.  **Time Update (CPU):**
-    *   Increment simulation time $t$ [S1, unofficial].
-    *   For each ball $i$:
-        *   $pos.x_i = r_i \cos(t \cdot speed_i + phase_i)$
-        *   $pos.y_i = r_i \sin(t \cdot speed_i + phase_i)$
-        *   $pos.z_i = 0.3 \cdot r_i \sin(2 \cdot t \cdot speed_i + phase_i)$
-        *   Update `CB_Balls.fBalls[i]` with $(pos.x_i, pos.y_i, pos.z_i, power_i)$ [S1, unofficial].
+2.  **Dynamic Update (CPU):**
+    *   For each frame, update ball positions based on time $t$:
+        *   $x_i(t) = r_i \cos(t \cdot \text{speed}_i + \text{phase}_i)$
+        *   $y_i(t) = r_i \sin(t \cdot \text{speed}_i + \text{phase}_i)$
+        *   $z_i(t) = 0.3 \cdot r_i \sin(2 \cdot t \cdot \text{speed}_i + \text{phase}_i)$ [S1, unofficial].
+    *   Update the `CB_Balls` buffer on the GPU [S1, unofficial].
 
-3.  **GPU Reset (Optional):**
-    *   Dispatch compute shader `m_pResetVolumeCS` to zero out volume and flag textures.
-    *   Dimensions: $(\text{VOXEL\_NUM\_X}/\text{THREAD\_X}, \dots)$ [S1, unofficial].
-
-4.  **Field Evaluation (GPU Compute Shader Variant):**
-    *   Dispatch `m_pVolumeUpdateCS` or `m_pVolumeUpdatewithFlagUpdateCS` [S1, unofficial].
-    *   Each thread processes a voxel.
-    *   **Pitfall:** Avoid UINT to float conversion latency by storing volume resolutions as floats in `CB_VolumeInfo` [S1, unofficial].
-
-5.  **Field Evaluation (GPU Fragment Shader Variant):**
-    *   Determine voxel coordinates $(x,y,z)$ from fragment coordinates:
-        *   $tileX = \lfloor fragXY.x / \text{tileW} \rfloor, tileY = \lfloor fragXY.y / \text{tileH} \rfloor$
-        *   $z = tileY \times \text{u\_tilesX} + tileX$
-        *   $x = fragXY.x \% \text{tileW}, y = fragXY.y \% \text{tileH}$
-        *   $\text{tileW} = \text{tileH} = \text{u\_gridSize}$ [S3, unofficial].
-    *   Discard if $x \ge \text{u\_gridSize}$ or $y \ge \text{u\_gridSize}$ or $z \ge \text{u\_gridSize}$ [S3, unofficial].
-    *   Normalize to $[0,1]$: $fx = x/(\text{size}-1), fy = y/(\text{size}-1), fz = z/(\text{size}-1)$ [S3, unofficial].
-    *   Initialize field value $V = 0.0$ [S3, unofficial].
-    *   For each blob $j$ (up to 100):
-        *   $dx = fx - \text{blobPos}_j.x, dy = fy - \text{blobPos}_j.y, dz = fz - \text{blobPos}_j.z$
-        *   $distSq = dx^2 + dy^2 + dz^2$
-        *   $val = \frac{\text{strength}_j}{\epsilon + distSq} - \text{threshold}$
-        *   If $val > 0.0$, $V += val$ [S3, unofficial].
-    *   Add floor contribution:
-        *   $floorVal = \frac{2.0}{\epsilon_{floor} + fy^2} - \text{threshold}$
-        *   If $floorVal > 0.0$, $V += floorVal$ [S3, unofficial].
-    *   Store $V$ in volume texture [S3, unofficial].
+3.  **Field Evaluation (GPU):**
+    *   Dispatch a compute shader or fragment shader to evaluate the field for each voxel [S1, S3, unofficial].
+    *   **Voxel Coordinate Mapping:**
+        *   Map fragment/pixel coordinates to 3D grid indices $(x, y, z)$ [S3, unofficial].
+        *   Normalize to $[0, 1]$: $fx = x/(W-1), fy = y/(H-1), fz = z/(D-1)$ [S3, unofficial].
+    *   **Field Calculation:**
+        *   Initialize field value $V = 0.0$ [S3, unofficial].
+        *   For each ball $i$ (up to $N$):
+            *   Calculate squared distance: $d_i^2 = (fx - p_{ix})^2 + (fy - p_{iy})^2 + (fz - p_{iz})^2$ [S2, S3, unofficial].
+            *   Calculate contribution: $c_i = \frac{s_i}{d_i^2 + \epsilon}$ [S2, S3, unofficial].
+            *   Apply threshold (optional): If $c_i - \text{threshold} > 0$, add to $V$ [S3, unofficial].
+        *   Add background/floor contributions if defined (e.g., floor plane at $y=0$) [S3, unofficial].
+    *   **Write Output:** Store $V$ (and color) in the volume texture [S1, S3, unofficial].
 
 **Formulas:**
-*   **Density Contribution (Inverse Square):**
-    $$ D(\mathbf{x}) = \sum_{i=1}^{N} \frac{strength_i}{d_i^2 + \epsilon} - \text{threshold} \cdot \mathbb{I}(val > 0) $$
-    Where $d_i^2$ is squared distance to orb $i$, $strength_i$ is orb strength, $\epsilon = 0.001$ (or $0.000001$ in fragment variant), and threshold $= 12.0$ [S2, unofficial][S3, unofficial].
-*   **Floor Contribution:**
-    $$ V_{floor} = \frac{2.0}{\epsilon_{floor} + fy^2} - \text{threshold} $$
-    Where $\epsilon_{floor} = 0.0001$ [S3, unofficial].
-*   **Welland Weight (Minor Variant):**
-    $$ w = \left( (4 \frac{r}{h} + 1) (1 - \frac{r}{h}) \right)^4 $$
-    Where $r$ is distance from point to $P(i)$, $h$ is height scaling factor [S4, unofficial].
+The density $D$ at point $\vec{x}$ is the sum of contributions from $N$ metaballs:
+$$ D(\vec{x}) = \sum_{i=1}^{N} \frac{s_i}{\|\vec{x} - \vec{p}_i\|^2 + \epsilon} $$
+where:
+*   $s_i$ is the strength of ball $i$ [S2, S3, unofficial].
+*   $\vec{p}_i$ is the position of ball $i$ [S2, S3, unofficial].
+*   $\epsilon$ is a small constant to prevent division by zero (e.g., $0.001$ or $0.000001$) [S2, S3, unofficial].
+*   $\|\cdot\|$ denotes Euclidean distance [S2, unofficial].
+
+Some implementations subtract a threshold $T$ before accumulation:
+$$ V(\vec{x}) = \sum_{i=1}^{N} \max\left(0, \frac{s_i}{\|\vec{x} - \vec{p}_i\|^2 + \epsilon} - T\right) $$
+where $T$ is typically $12.0$ [S3, unofficial].
 
 **Parameters:**
-*   `VOXEL_BRICK_RATIO`: Downsampling factor for flag volume [S1, unofficial].
-*   `MAX_BALLS`: 150 [S1, unofficial].
-*   `THREAD_X`, `THREAD_Y`, `THREAD_Z`: Compute shader group dimensions [S1, unofficial].
-*   `epsilon`: Regularization constant for distance denominator (0.001 or 0.000001) [S2, unofficial][S3, unofficial].
-*   `threshold`: Subtraction constant for isosurface thresholding (12.0) [S3, unofficial].
+*   $\epsilon$: Epsilon for stability. Values: $0.001$ [S2, unofficial], $0.000001$ [S3, unofficial].
+*   Threshold $T$: Isosurface cutoff. Value: $12.0$ [S3, unofficial].
+*   Grid Size: e.g., $384 \times 384 \times 384$ [S1, unofficial].
+*   Max Balls: 150 [S1, unofficial].
 
-**Pseudocode (Compute Shader Style):**
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-# Struct definitions
-struct BallData:
-    pos: float4  # xyz position, w power
-    color: float4 # xyz color, w unused
-
-struct CB_Balls:
-    balls: array[BallData, 150]
-    num_balls: int
-
-# Compute Shader Entry
-kernel MetaballFieldCompute(thread_id: int3, dispatch_id: int3, 
-                            vol_tex: RWTexture3D<float4>, 
-                            flag_tex: RWTexture3D<int>,
-                            cb_balls: CB_Balls,
-                            vol_size: float3,
-                            brick_ratio: int):
-    
-    # 1. Calculate voxel coordinates
-    x = dispatch_id.x
-    y = dispatch_id.y
-    z = dispatch_id.z
-    
-    # Check bounds
-    if x >= vol_size.x or y >= vol_size.y or z >= vol_size.z:
-        return
-
-    # 2. Normalize to [0, 1]
-    fx = x / (vol_size.x - 1)
-    fy = y / (vol_size.y - 1)
-    fz = z / (vol_size.z - 1)
-
-    # 3. Initialize density
-    density = 0.0
-    threshold = 12.0
-    epsilon = 0.000001
-
-    # 4. Sum contributions from all balls
-    for i in range(cb_balls.num_balls):
-        ball = cb_balls.balls[i]
-        
-        # Calculate squared distance
-        dx = fx - ball.pos.x
-        dy = fy - ball.pos.y
-        dz = fz - ball.pos.z
-        dist_sq = dx*dx + dy*dy + dz*dz
-        
-        # Calculate contribution
-        # Note: Source uses strength/power. In CB_Balls, power is stored in pos.w
-        strength = ball.pos.w 
-        
-        val = strength / (epsilon + dist_sq) - threshold
-        
-        if val > 0.0:
-            density += val
-
-    # 5. Add floor contribution (if applicable, based on fragment shader variant logic)
-    # Assuming floor is at fy=0 or similar, adapted from S3
-    floor_epsilon = 0.0001
-    floor_val = 2.0 / (floor_epsilon + fy*fy) - threshold
-    if floor_val > 0.0:
-        density += floor_val
-
-    # 6. Write to volume texture (Color=0, Density=density)
-    vol_tex[x, y, z] = float4(0.0, 0.0, 0.0, density)
-
-    # 7. Update flag volume (if enabled)
-    # Simple heuristic: if density > 0, it's active
-    if density > 0.0:
-        flag_tex[x, y, z] = 1
-    else:
-        flag_tex[x, y, z] = 0
-```
+**Edge Cases and Pitfalls:**
+*   **Precision:** Avoid converting large integer voxel indices to floats in shaders if latency is a concern; store resolutions as floats in constant buffers [S1, unofficial].
+*   **Boundary Conditions:** Discard fragments outside the valid grid bounds $[0, W-1] \times [0, H-1] \times [0, D-1]$ [S3, unofficial].
+*   **Clamping:** Ensure ball orbits do not exceed the volume bounds to prevent artifacts [S1, unofficial].
 
 ## Subtopics
 
 ### [Radial Gaussian Density Field Generation](2081-radial-gaussian-density-field-generation.md)
-Generates a 3D scalar density field by summing normalized radial Gaussian functions centered at predefined atomic positions, scaling and clamping to $[0,1]$. It converts discrete atomic coordinates into a continuous volumetric representation. Unlike Metaball Field Evaluation, which uses dynamic inverse-square or Gaussian falloffs for moving metaballs, this method uses static, smooth Gaussian falloffs on fixed points.
+Generates a 3D scalar density field by summing normalized radial Gaussian functions centered at predefined atomic positions, then scaling and clamping the result to a $[0,1]$ range. It solves the problem of converting discrete atomic coordinates into a continuous volumetric representation suitable for surface extraction. Unlike [Metaball Field Evaluation](1017-metaball-field-evaluation.md), which evaluates a dynamic scalar field composed of moving metaballs, this method uses static, smooth Gaussian falloffs centered on fixed points.
 
 ### [Blob Field Generation](2487-blob-field-generation.md)
-Constructs a 3D scalar field by summing inverse-squared Euclidean distance contributions ($1/r^2$) from source points. It is distinguished by its specific use of inverse square falloff rather than Gaussian decay, resulting in sharper, more defined "blob" interactions suitable for Marching Cubes.
+Blob Field Generation is a procedural method for constructing a 3D scalar field by summing inverse-squared Euclidean distance contributions from a set of source points (metaballs). It solves the problem of defining smooth, organic implicit surfaces for isosurface extraction algorithms like Marching Cubes. It is distinguished from sibling methods by its specific use of the inverse square falloff ($1/r^2$) rather than Gaussian decay or fuzzy hyper-parameter blending, resulting in sharper, more defined "blob" interactions.
 
 ### [Fuzzy Metaballs Hyper-parameters](8382-fuzzy-metaballs-hyper-parameters.md)
-Defines five scalar hyper-parameters used to tune algebraic intersection and alpha-mask generation for gradient-based pose optimization. These parameters are optimization targets for the rendering pipeline's differentiability, not intrinsic volume geometry properties, setting them apart from density generation methods.
+This family defines the five scalar hyper-parameters used to tune the algebraic intersection and alpha-mask generation stages of the Fuzzy Metaballs rendering method. It solves the problem of converting raw implicit field evaluations into differentiable depth and alpha masks suitable for gradient-based pose optimization. What sets this apart from sibling methods like [Radial Gaussian Density Field Generation](2081-radial-gaussian-density-field-generation.md) or [Blob Field Generation](2487-blob-field-generation.md) is that these parameters are not intrinsic properties of the volume geometry itself, but rather optimization targets for the *rendering pipeline's* differentiability and silhouette accuracy, specifically tuned for algebraic surface approximation.
 
 ### Welland Weight Matrix Generation
-Initializes a diagonal weight matrix $W$ for point $P(i)$ by calculating distance $r = ||P(i) - X||$ and setting $W(i,i) = ((4 \frac{r}{h} + 1)(1 - \frac{r}{h}))^4$, where $h$ is the Welland function height [S4, unofficial].
+Generates a diagonal weight matrix for point cloud processing based on Welland functions [S4, unofficial].
+*   **Step:** Initialize diagonal matrix $W$ of size $P \times P$ with zeros. For each point $P(i)$, calculate distance $r = \|P(i) - X\|$. Set $W(i,i) = w$.
+*   **Formula:** $w = \left(\left(\frac{4r}{h} + 1\right)\left(1 - \frac{r}{h}\right)\right)^4$ [S4, unofficial].
+*   **Parameter:** $h$ is the height of the Welland function, used as a scaling factor for radius $r$ [S4, unofficial].
+
+### LerpedSpheres
+Generates a 3D density field by blending signed distances of multiple spheres using a smooth minimum function, optionally perturbed by noise [S5, unofficial].
+*   **Step:** Calculate bounding box. Initialize density field. Iterate voxels. Compute signed distance for each sphere. If `blend_factor < 0.01`, use simple minimum. Otherwise, iteratively blend distances using `SmoothUnion(min_dist, signed_dist, blend_factor)` [S5, unofficial].
+*   **Parameter:** `blend_factor` controls smoothness; `noise_amplitude` controls perturbation [S5, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(V \cdot N)$, where $V$ is the number of voxels and $N$ is the number of metaballs. Each voxel evaluates contributions from all balls.
-*   **Memory Complexity:** $O(V)$ for the density volume and $O(V/8)$ or similar for the flag volume (depending on `VOXEL_BRICK_RATIO`) [S1, unofficial].
-*   **Performance:** Optimized for GPU parallelism via compute shaders. The flag volume allows for empty space skipping during subsequent ray marching, significantly reducing shading cost [S1, unofficial].
-*   **Strengths:** Handles dynamic animation efficiently; supports large numbers of balls (up to 150 in cited implementation); enables efficient ray marching via flag volumes.
-*   **Limitations:** Fixed maximum ball count (150) in cited implementation; inverse-square falloff can produce sharp gradients requiring careful threshold tuning; precision issues with UINT-to-float conversions if not handled [S1, unofficial].
-*   **When to use:** Real-time volume rendering of dynamic, organic shapes (e.g., fluids, soft bodies) where isosurface extraction or ray marching is required.
-*   **When not to use:** Static scenes with complex geometry better suited for mesh-based representations; scenes requiring exact distance fields (SDFs) rather than density fields.
+*   **Time Complexity:** $O(V \cdot N)$, where $V$ is the number of voxels and $N$ is the number of metaballs [S1, S3, unofficial]. Each voxel evaluates contributions from all balls.
+*   **Memory Complexity:** $O(V)$ for the volume texture, plus $O(N)$ for ball parameters [S1, unofficial].
+*   **Performance:** Highly parallelizable on GPU via compute shaders [S1, unofficial]. Performance scales with grid resolution and ball count. Using a flag volume for empty space skipping can reduce raymarching costs but adds overhead to field generation [S1, unofficial].
+*   **Strengths:** Real-time dynamic updates; organic merging shapes; simple implementation [S1, S3, unofficial].
+*   **Limitations:** $O(N)$ per voxel is expensive for large $N$; fixed grid resolution limits detail; inverse-square falloff can cause high values near centers requiring careful thresholding [S2, S3, unofficial].
 
 ## Background
-Originating from GPU-based volume rendering pipelines, this method was implemented in projects such as `DynamicVolumeRayCasting` (2026) and `marching-cubes-wgsl` (2026) [S1, unofficial][S2, unofficial]. It builds on the principles of implicit surface definition, specifically adapting the metaball concept for real-time, animated volumetric data generation on the GPU [Implicit Surface Definition](2798-implicit-surface-definition.md).
+Originated in the context of GPU-accelerated volume rendering and implicit surface generation [S1, S3, unofficial]. Early implementations used CPU updates with GPU texture uploads [S1, unofficial]. Modern approaches use compute shaders for direct GPU-side field generation [S1, S3, unofficial]. The method is widely used in real-time visualization of fluid-like dynamics and organic modeling [S1, S2, unofficial].
 
 ## Sources
-[S1] DynamicVolumeRayCasting, https://github.com/pengliu916/DynamicVolumeRayCasting, fetched 2026-10-26 (unofficial)
-[S2] marching-cubes-wgsl, https://github.com/nff747/marching-cubes-wgsl, fetched 2026-10-27 (unofficial)
-[S3] WebGL2-GPU-Marching-Cubes, https://github.com/3merillon/WebGL2-GPU-Marching-Cubes, fetched 2026-10-28 (unofficial)
-[S4] marchingtets-reconstruction, https://github.com/mwrazam/marchingtets-reconstruction, fetched 2026-10-27 (unofficial)
+[S1] pengliu916/DynamicVolumeRayCasting, https://github.com/pengliu916/DynamicVolumeRayCasting, fetched 2026-10-26 (unofficial)
+[S2] nff747/marching-cubes-wgsl, https://github.com/nff747/marching-cubes-wgsl, fetched 2026-10-27 (unofficial)
+[S3] 3merillon/WebGL2-GPU-Marching-Cubes, https://github.com/3merillon/WebGL2-GPU-Marching-Cubes, fetched 2026-10-28 (unofficial)
+[S4] mwrazam/marchingtets-reconstruction, https://github.com/mwrazam/marchingtets-reconstruction, fetched 2026-10-27 (unofficial)
+[S5] lijiemark/floating-islands-generator, https://github.com/lijiemark/floating-islands-generator, fetched 2026-10-27 (unofficial)

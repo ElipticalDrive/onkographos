@@ -1,0 +1,113 @@
+# Fourier Feature Networks
+
+Also called: FFN, Four Feature Networks, Fourier Features, Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains
+
+## Overview
+Fourier Feature Networks (FFN) address the problem of neural networks struggling to model complex, high-frequency signals from low-frequency inputs by introducing Fourier features as a preprocessing step to encode low-frequency inputs, thereby introducing higher-frequency information [S1, unofficial]. This technique remedies the spectral bias of neural networks with ReLU activations, which are biased towards learning low-frequency features first [S2, unofficial]. Unlike standard MLPs that must learn the featurizer or kernel themselves, FFNs replace this learning burden with a fixed, high-dimensional Fourier embedding, allowing the network to predict signals (1D, 2D, or 3D radiance fields) more effectively [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A low-dimensional coordinate vector $\mathbf{x} \in \mathbb{R}^d$ (e.g., 1D time, 2D image pixel position, or 3D spatial position + view direction).
+*   **Output:** A high-dimensional feature vector $\mathbf{z} \in \mathbb{R}^{2B}$, where $B$ is the number of frequency bands. This vector is fed into a standard Multi-Layer Perceptron (MLP).
+
+**Data Structures:**
+*   **Frequency Matrix ($\mathbf{B}$):** A matrix of shape $(d, B)$ containing the random frequency parameters.
+    *   Layout: Each column $b$ corresponds to a frequency band.
+    *   Values: Drawn from a Gaussian distribution $\mathcal{N}(0, \sigma^2)$ or a uniform distribution. The source notes do not specify the exact distribution or variance $\sigma$ in the provided text, though standard practice often uses $\sigma=1$ or scales with the input domain [G].
+    *   Note: The source text does not explicitly define the initialization distribution, only that it is a preprocessing step [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Generate Frequency Matrix:** Construct a matrix $\mathbf{B} \in \mathbb{R}^{d \times B}$ where each element $B_{i,j}$ is sampled from a probability distribution (typically Gaussian) [G].
+2.  **Scale Input:** Multiply the input coordinate vector $\mathbf{x}$ by the frequency matrix $\mathbf{B}$ to obtain the scaled coordinates $\mathbf{y} = \mathbf{x} \mathbf{B}$. The result $\mathbf{y}$ has shape $(B,)$.
+3.  **Apply Fourier Basis:** Compute the sine and cosine of the scaled coordinates.
+    $$ \mathbf{z} = [\cos(2\pi \mathbf{y}), \sin(2\pi \mathbf{y})] $$
+    The resulting vector $\mathbf{z}$ has shape $(2B,)$. This step maps the low-dimensional input into a higher-dimensional space where high-frequency variations in the input correspond to linear variations in the feature space.
+4.  **MLP Forward Pass:** Feed $\mathbf{z}$ into a standard MLP (e.g., with ReLU activations) to predict the target value (e.g., color, opacity, or signal amplitude).
+
+**Formulas:**
+The Fourier feature embedding $\Gamma(\mathbf{x})$ is defined as:
+$$ \Gamma(\mathbf{x}) = [\cos(2\pi \mathbf{B}\mathbf{x}), \sin(2\pi \mathbf{B}\mathbf{x})] $$
+Where:
+*   $\mathbf{x}$ is the input coordinate vector.
+*   $\mathbf{B}$ is the random frequency matrix.
+*   The output is concatenated cosine and sine terms.
+
+**Parameters:**
+*   **$B$ (Number of Frequencies):** Not given in the sources. Typical values in literature range from 16 to 256, but must be determined by the implementer based on the complexity of the signal [G].
+*   **$\sigma$ (Frequency Scale):** Not given in the sources. Controls the bandwidth of the Gaussian distribution for $\mathbf{B}$ [G].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Using standard floating-point arithmetic for high-frequency sines/cosines may lead to precision loss if frequencies are extremely high.
+*   **Boundary Conditions:** The method assumes the input domain is well-defined. If inputs fall outside the range used to determine the frequency scale, interpolation artifacts may occur.
+*   **Spectral Bias:** While FFNs mitigate spectral bias, the MLP itself still suffers from it. The choice of $B$ and the MLP architecture depth/width are critical [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def fourier_features(x, B):
+    """
+    Compute Fourier features for input x using frequency matrix B.
+    
+    Args:
+        x: numpy array of shape (d,) or (N, d), input coordinates.
+        B: numpy array of shape (d, B), random frequency matrix.
+        
+    Returns:
+        z: numpy array of shape (2*B,) or (N, 2*B), Fourier features.
+    """
+    # Step 1: Scale input by frequency matrix
+    # y shape: (B,) if x is (d,), or (N, B) if x is (N, d)
+    y = np.dot(x, B)
+    
+    # Step 2: Apply 2*pi factor
+    y = 2 * np.pi * y
+    
+    # Step 3: Compute cosine and sine
+    cos_y = np.cos(y)
+    sin_y = np.sin(y)
+    
+    # Step 4: Concatenate
+    z = np.concatenate([cos_y, sin_y], axis=-1)
+    
+    return z
+
+# Example usage for a single 3D point
+# d = 3, B = 16
+# B_matrix = np.random.normal(0, 1, (3, 16)) # [G] Initialization
+# x_point = np.array([0.1, 0.2, 0.3])
+# features = fourier_features(x_point, B_matrix)
+```
+
+## Subtopics
+
+### Off-Axis Positional Encoding
+An alternative encoding scheme that rotates the frequency axes to better align with the data structure. Choose when the data has strong directional biases that standard Fourier features might alias. [Off-Axis Positional Encoding](3503-off-axis-positional-encoding.md)
+
+### Coordinate-Time Encoding
+Extends Fourier features to include time as a dimension, useful for dynamic scenes. Choose when modeling temporal changes in addition to spatial coordinates. [Coordinate-Time Encoding](5105-coordinate-time-encoding.md)
+
+### Integrated Positional Encoding
+Integrates the positional encoding over the volume element to reduce aliasing and improve rendering quality. Choose when high-frequency artifacts are visible in the rendered output. [Integrated Positional Encoding](5255-integrated-positional-encoding.md)
+
+### Positional Encoding Frequency Annealing
+Gradually increases the frequencies used in the encoding during training to help the network converge. Choose when the network struggles to learn high-frequency details early in training. [Positional Encoding Frequency Annealing](8902-positional-encoding-frequency-annealing.md)
+
+## Operating characteristics
+*   **Time Complexity:** The preprocessing step is $O(d \cdot B)$ per sample, where $d$ is input dimension and $B$ is the number of frequencies. This is negligible compared to the MLP forward pass.
+*   **Memory Complexity:** Requires storing the frequency matrix $\mathbf{B}$ of size $d \times B$. This is constant memory per model instance.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** The method scales linearly with the number of frequencies $B$. Increasing $B$ allows the network to represent higher frequencies but increases the MLP input size and computational cost.
+*   **Strengths:** Effectively mitigates spectral bias, allowing MLPs to learn high-frequency details. Simple to implement and integrate into existing MLP architectures.
+*   **Limitations:** Requires careful tuning of the frequency scale and number of bands. Random initialization can lead to suboptimal performance if not repeated or averaged.
+*   **When to Use:** When training neural networks to represent high-frequency signals (e.g., neural radiance fields, audio, images) and standard MLPs fail to converge or produce blurry results.
+*   **When Not to Use:** When the signal is inherently low-frequency and the overhead of high-dimensional embedding is unnecessary. When computational resources are extremely limited and $B$ must be very small.
+
+## Background
+Fourier Feature Networks were introduced by Tancik et al. in 2020 [S2, unofficial]. The work was motivated by the observation that neural networks with ReLU activations exhibit spectral bias, preferring to learn low-frequency functions first [S2, unofficial]. The authors used the Neural Tangent Kernel (NTK) [Jacot et al. 2018] as a theoretical tool to analyze this behavior in the infinite width limit [S2, unofficial]. The technique has been widely adopted in neural rendering, including in NeRF and its variants, to model radiance fields for novel view synthesis and neural avatars [S1, unofficial].
+
+## Sources
+[S1] Fourier Feature Networks and Neural Volume Rendering, https://github.com/matajoh/fourier_feature_nets, fetched 2026-10-26 (unofficial)
+[S2] Introduction to Neural Fields - inovex GmbH, https://www.inovex.de/de/blog/introduction-to-neural-fields/, fetched 2026-10-29 (unofficial)

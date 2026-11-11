@@ -3,40 +3,40 @@
 Also called: PSNR Calculation, PSNR Metric, Peak Signal-to-Noise Ratio
 
 ## Overview
-Peak Signal-to-Noise Ratio (PSNR) is a standard benchmark metric used to evaluate the photometric fidelity of reconstructed or rendered images against ground-truth references in differentiable volume rendering pipelines [S1, S2, S3, unofficial][S4]. It quantifies the mean squared error (MSE) between predicted and target pixel values, converting this error into a logarithmic decibel (dB) scale where higher values indicate better quality [S2, S3, unofficial]. Unlike structural metrics such as SSIM, PSNR focuses strictly on pixel-wise intensity differences, making it sensitive to large smooth regions but less responsive to small, high-frequency features like specular highlights [S1, unofficial].
+Peak Signal-to-Noise Ratio (PSNR) is a standard benchmark metric used to evaluate the photometric fidelity of reconstructed or rendered images against ground-truth references in differentiable volume rendering pipelines [S1, S2, unofficial][S3, unofficial][S4]. It quantifies the mean squared error (MSE) between predicted and target pixel values, converting this error into a logarithmic decibel (dB) scale where higher values indicate better quality [S2, S3, unofficial]. Unlike structural metrics such as SSIM, PSNR focuses strictly on pixel-wise intensity differences, making it sensitive to large smooth regions but less responsive to small, high-frequency features like specular highlights [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `target`: Ground-truth image tensor of shape $(H, W, C)$ or $(N, H, W, C)$, where $H$ is height, $W$ is width, and $C$ is channels (typically 3 for RGB). Values are typically normalized to $[0, 1]$ or scaled to integer ranges.
-- `pred`: Predicted image tensor of identical shape and data type to `target`.
-- `max_val`: The maximum possible pixel value. Default is $1.0$ if inputs are normalized floats, or $255$ for 8-bit integers [S2, unofficial][S4][S8, unofficial].
-- `eps`: A small constant added to MSE to prevent division by zero or $\log(0)$ [S3, unofficial].
+- `target`: Ground-truth image tensor of shape $(H, W, C)$ or $(N, H, W, C)$, where $H$ is height, $W$ is width, and $C$ is channels [S5, unofficial].
+- `pred`: Predicted image tensor of identical shape and data type to `target` [S6, unofficial].
+- `max_val`: Maximum possible pixel value of the image [S4]. Default is $1.0$ [S2, S8, unofficial].
+- `eps`: A small constant added to MSE to prevent $\log(0)$ [S3, unofficial].
 
 **Data Structures:**
-- No complex data structures are required. The method operates on dense arrays/tensors of pixel values.
+- Not given in the sources.
 
 **Steps:**
-1. **Validation:** Verify that `target` and `pred` have identical dimensions $(H, W, C)$. If dimensions mismatch, the metric is undefined or returns an error/maximum float value [S5, unofficial].
-2. **Error Calculation:** Compute the squared difference between corresponding pixels for all channels.
+1. **Validation:** Verify that `target` and `pred` have identical dimensions [S6, unofficial]. If dimensions mismatch, return an error or maximum float value [S6, unofficial].
+2. **Error Calculation:** Compute the squared difference between corresponding pixels for all channels [S5, unofficial].
    $$ \text{diff}_{i,j,c} = (\text{target}_{i,j,c} - \text{pred}_{i,j,c})^2 $$
-3. **MSE Computation:** Average the squared differences over all pixels and channels.
+3. **MSE Computation:** Average the squared differences over all pixels and channels [S4].
    $$ \text{MSE} = \frac{1}{N \cdot C} \sum_{i=0}^{H-1} \sum_{j=0}^{W-1} \sum_{c=0}^{C-1} (\text{target}_{i,j,c} - \text{pred}_{i,j,c})^2 $$
-   where $N = H \times W$ is the total number of pixels [S1, unofficial][S4].
-4. **PSNR Conversion:** Convert MSE to PSNR using the logarithmic formula.
+   where $N = H \times W$ is the total number of pixels [S1, unofficial].
+4. **PSNR Conversion:** Convert MSE to PSNR using the logarithmic formula [S1, unofficial][S4].
    $$ \text{PSNR} = 10 \log_{10} \left( \frac{\text{max\_val}^2}{\text{MSE} + \text{eps}} \right) $$
    Alternatively, using the RMSE form:
    $$ \text{PSNR} = 20 \log_{10} \left( \frac{\text{max\_val}}{\sqrt{\text{MSE} + \text{eps}}} \right) $$
-   [S1, S2, S3, unofficial][S4][S8, unofficial].
+   [S2, S5, S9, unofficial].
 
 **Parameters:**
-- `max_val`: Default $1.0$ for normalized $[0,1]$ data [S2, S8, unofficial]. Must match the dynamic range of the input images.
+- `max_val`: Default $1.0$ for normalized $[0,1]$ data [S2, S8, unofficial].
 - `eps`: Default $10^{-10}$ to ensure numerical stability when MSE is zero [S3, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Zero MSE:** If `pred` perfectly matches `target`, MSE is 0. Without `eps`, $\log(0)$ is undefined. With `eps`, PSNR becomes very large but finite [S2, S3, unofficial].
-- **Dimension Mismatch:** Inputs must have identical width and height. Mismatched dimensions should trigger an error or return `float('inf')` [S5, unofficial].
-- **Weighting Bias:** PSNR averages over all pixels, heavily weighting large smooth regions. It ignores small bright features (e.g., specular highlights, grass blades) which occupy few pixels [S1, unofficial].
-- **Interpretation:** The scale is logarithmic. A difference of 3 dB corresponds to a halving of the squared error; 6 dB corresponds to a quartering [S1, unofficial].
+- **Zero MSE:** If `pred` perfectly matches `target`, MSE is $0$ [S2, unofficial]. Without `eps`, $\log(0)$ is undefined; with `eps`, PSNR becomes very large but finite [S2, S3, unofficial].
+- **Dimension Mismatch:** Inputs must have identical width and height [S6, unofficial].
+- **Weighting Bias:** PSNR averages over all pixels, heavily weighting large smooth regions and ignoring small bright features (e.g., specular highlights, grass blades) which occupy few pixels [S1, unofficial].
+- **Interpretation:** The scale is logarithmic; a difference of $3$ dB corresponds to a halving of the squared error, and $6$ dB corresponds to a quartering [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -61,19 +61,14 @@ def calculate_psnr(target, pred, max_val=1.0, eps=1e-10):
     if target.shape != pred.shape:
         raise ValueError("Target and prediction must have identical dimensions.")
     
-    # Compute squared differences
-    # Using element-wise subtraction and squaring
+    # Compute squared differences for all channels
     squared_diff = (target - pred) ** 2
     
-    # Compute MSE: mean of all squared differences
-    # Flatten to handle arbitrary batch/channel dimensions uniformly
+    # Compute MSE: mean of all squared differences across all dimensions
     mse = float(squared_diff.mean())
     
-    # Compute PSNR
+    # Compute PSNR using the standard logarithmic formula
     # Formula: 10 * log10(max_val^2 / (MSE + eps))
-    if mse + eps <= 0:
-        return float('inf')
-        
     psnr = 10.0 * math.log10((max_val ** 2) / (mse + eps))
     
     return psnr
@@ -82,50 +77,51 @@ def calculate_psnr(target, pred, max_val=1.0, eps=1e-10):
 ## Subtopics
 
 ### [3D Evaluation Metrics](2903-3d-evaluation-metrics.md)
-3D Evaluation Metrics quantify the fidelity of reconstructed volumetric or surface data against ground-truth references, extending beyond pixel-wise photometric error. While PSNR focuses on image-space consistency, this approach provides metrics for volumetric reconstruction quality (PSNR/SSIM on 3D grids) and surface geometry (Chamfer Distance, Normal Consistency), addressing the limitations of image-space metrics when assessing underlying 3D structure.
+3D Evaluation Metrics quantify the fidelity of reconstructed volumetric or surface data against ground-truth references. While [PSNR Metric Calculation](2742-psnr-metric-calculation.md) focuses on pixel-wise photometric error in rendered images, this method extends evaluation to volumetric consistency and geometric accuracy. It distinguishes itself by providing metrics for both volumetric reconstruction quality (PSNR, SSIM on 3D grids) and surface geometry (Chamfer Distance, Normal Consistency).
 
 ### [PSNR Difference Metric for Ablation](5656-psnr-difference-metric-for-ablation.md)
-The PSNR Difference Metric for Ablation quantifies performance degradation by comparing the PSNR of a reduced configuration against a full baseline. It isolates the error ratio independent of bit depth (MAX), as MAX cancels out in the logarithmic difference. This provides a relative measure of loss, distinct from absolute metrics like [PSNR Metric Calculation](2742-psnr-metric-calculation.md) and from [3D Evaluation Metrics](2903-3d-evaluation-metrics.md) by focusing on the delta between specific configurations.
+The PSNR Difference Metric for Ablation isolates the error ratio between two configurations independent of the bit depth (MAX), as MAX cancels out in the logarithmic difference. It sets itself apart from absolute metrics like [PSNR Metric Calculation](2742-psnr-metric-calculation.md) by providing a relative measure of loss, and from [3D Evaluation Metrics](2903-3d-evaluation-metrics.md) by focusing specifically on the delta between two specific configurations rather than a global scene score.
 
 ### Noise Floor Estimation via MAD
-Noise Floor Estimation via MAD estimates the noise standard deviation $\sigma$ using Median Absolute Deviation (MAD) estimators to determine the theoretical maximum PSNR (noise floor) [S6, unofficial].
-- **Laplacian MAD:** Applies a D-dimensional discrete Laplacian kernel with norm $\sqrt{2D(2D+1)}$. Scales the MAD of the response by $1/(0.6745 \cdot \sqrt{2D(2D+1)})$ [S6, unofficial].
-- **Haar Finite-Difference MAD:** Computes diagonal second differences $d = I(y,x) - I(y,x+1) - I(y+1,x) + I(y+1,x+1)$. Scales the median of $|d|$ by $1/(0.6745 \cdot \sqrt{2})$ [S6, unofficial].
-- **Noise Floor PSNR:** Calculated as $10 \log_{10}(1/\sigma^2)$ [S6, unofficial].
-- **Pitfall:** MAD estimators may return exactly zero for signal-limited volumes (e.g., Mouse heart nuclei), bounding nothing and indicating the model is not noise-limited [S6, unofficial].
+Noise Floor Estimation via MAD estimates the noise standard deviation $\sigma$ using Median Absolute Deviation (MAD) estimators to determine the theoretical maximum PSNR (noise floor) [S7, unofficial].
+- **Laplacian MAD:** Applies a D-dimensional discrete Laplacian kernel with norm $\sqrt{2D(2D+1)}$. Scales the MAD of the response by $1/(0.6745 \cdot \sqrt{2D(2D+1)})$ [S7, unofficial].
+- **Haar Finite-Difference MAD:** Computes diagonal second differences $d = I(y,x) - I(y,x+1) - I(y+1,x) + I(y+1,x+1)$. Scales the median of $|d|$ by $1/(0.6745 \cdot \sqrt{2})$ [S7, unofficial].
+- **Noise Floor PSNR:** Calculated as $10 \log_{10}(1/\sigma^2)$ [S7, unofficial].
+- **Pitfall:** MAD estimators may return exactly zero for signal-limited volumes (e.g., Mouse heart nuclei), bounding nothing and indicating the model is not noise-limited [S7, unofficial].
 
 ### Benchmark Performance Numbers
-Benchmark Performance Numbers provide reference PSNR values for various 3D Gaussian Splatting variants on the Mip-NeRF 360 dataset (room scale, average PSNR / LPIPS) [S7, unofficial]:
-- Vanilla 3DGS: 27.4 / 0.18 [S7, unofficial].
-- Mip-Splatting: 27.7 / 0.17 [S7, unofficial].
-- Scaffold-GS: 27.9 / 0.18 [S7, unofficial].
-- 2DGS: ~27.0 PSNR (similar LPIPS, better geometry) [S7, unofficial].
-- GES: Comparable PSNR with ~30% fewer primitives [S7, unofficial].
-- Hierarchical 3DGS: Comparable performance with LoD streaming [S7, unofficial].
+Benchmark Performance Numbers provide reference PSNR values for various 3D Gaussian Splatting variants on the Mip-NeRF 360 dataset (room scale, average PSNR / LPIPS) [S8, unofficial]:
+- Vanilla 3DGS: 27.4 / 0.18 [S8, unofficial].
+- Mip-Splatting: 27.7 / 0.17 [S8, unofficial].
+- Scaffold-GS: 27.9 / 0.18 [S8, unofficial].
+- 2DGS: ~27.0 PSNR (similar LPIPS, better geometry) [S8, unofficial].
+- GES: Comparable PSNR with ~30% fewer primitives [S8, unofficial].
+- Hierarchical 3DGS: Comparable performance with LoD streaming [S8, unofficial].
 
 ### PSNR Loss
-PSNR Loss computes the PSNR between predicted and target images during training as a regression metric [S8, unofficial].
-- **Formula:** $\text{PSNR} = 20 \log_{10}\left(\frac{\text{max\_val}}{\sqrt{\text{MSE}}}\right)$ [S8, unofficial].
-- **Parameter:** `max_val` (default 1.0) [S8, unofficial].
+PSNR Loss computes the PSNR between predicted and target images during training as a regression metric [S9, unofficial].
+- **Formula:** $\text{PSNR} = 20 \log_{10}\left(\frac{\text{max\_val}}{\sqrt{\text{MSE}}}\right)$ [S9, unofficial].
+- **Parameter:** `max_val` (default 1.0) [S9, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$, where $N$ is the number of pixels, as it requires a single pass to compute MSE.
-- **Memory Complexity:** $O(N)$ to store the squared differences, or $O(1)$ if computed incrementally/streaming.
-- **Performance:** Computationally inexpensive compared to SSIM or LPIPS.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Computationally inexpensive compared to SSIM or LPIPS [S1, S2, S3, unofficial][S4].
 - **Strengths:** Simple to implement, differentiable (useful for training losses), and widely understood [S1, S2, S3, unofficial][S4].
-- **Limitations:** Does not correlate well with human perception for structural details; sensitive to global brightness shifts; averages out local errors [S1, unofficial].
-- **When to Use:** Standard benchmarking for novel view synthesis, training regression losses, and quick quality checks [S1, S2, S3, unofficial][S4].
-- **When Not to Use:** When structural fidelity or perceptual quality is more important than pixel-wise accuracy; use SSIM or LPIPS instead [S1, unofficial].
+- **Limitations:** Averages over every pixel, heavily weighting large smooth regions and ignoring small bright features [S1, unofficial].
+- **When to Use:** Standard benchmarking for novel view synthesis and training regression losses [S1, S2, S3, unofficial][S4].
+- **When Not to Use:** Not given in the sources.
 
 ## Background
-PSNR originated as a standard metric for image and video compression quality assessment [S4]. In the context of differentiable volume rendering and NeRFs, it has become a primary benchmark for evaluating novel view synthesis quality [S1, S2, S3, unofficial]. The metric is widely reported in papers such as Mip-NeRF 360 and 3D Gaussian Splatting to compare rendering fidelity [S1, S7, unofficial].
+In the context of differentiable volume rendering and NeRFs, PSNR has become a primary benchmark for evaluating novel view synthesis quality [S1, S2, S3, unofficial]. The metric is widely reported in papers such as Mip-NeRF 360 and 3D Gaussian Splatting to compare rendering fidelity [S1, S7, unofficial]. Target PSNR for NeRF paper Blender scenes is 31–33 dB [S2, unofficial].
 
 ## Sources
 [S1] An Architectural Review of the 3D Gaussian Splatting Rendering Pipeline, https://doi.org/10.5281/zenodo.21739653, fetched 2026-10-26 (unofficial)
 [S2] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)
 [S3] yashtmy/nerf-3d-vision, https://github.com/yashtmy/nerf-3d-vision, fetched 2026-10-26 (unofficial)
 [S4] Discretized Gaussian Representation for Tomographic Reconstruction, https://doi.org/10.1109/ICCV51701.2025.02325, fetched 2026-10-27
-[S5] andersblomqvist/unity-nanovdb-renderer, https://github.com/andersblomqvist/unity-nanovdb-renderer, fetched 2026-10-27 (unofficial)
-[S6] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)
-[S7] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
-[S8] suvadityamuk/NeRF-Experiments, https://github.com/suvadityamuk/NeRF-Experiments, fetched 2026-10-27 (unofficial)
+[S5] ayush-chauhan-1202/physics-aware-ct-reconstruction, https://github.com/ayush-chauhan-1202/physics-aware-ct-reconstruction, fetched 2026-10-27 (unofficial)
+[S6] andersblomqvist/unity-nanovdb-renderer, https://github.com/andersblomqvist/unity-nanovdb-renderer, fetched 2026-10-27 (unofficial)
+[S7] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)
+[S8] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S9] suvadityamuk/NeRF-Experiments, https://github.com/suvadityamuk/NeRF-Experiments, fetched 2026-10-27 (unofficial)

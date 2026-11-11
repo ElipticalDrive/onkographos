@@ -3,192 +3,158 @@
 Also called: Bottom-up Blockwise Wavelet Transform and Compression, Bottom-up blockwise wavelet transform, Multiresolution wavelet tree construction, Wavelet Tree Construction
 
 ## Overview
-Hierarchical Wavelet Tree Construction is a bottom-up blockwise wavelet transform and compression scheme used to construct a multiresolution wavelet tree for 3D volume data [S1, S2]. It solves the problem of managing large volumetric datasets by enabling parallel rendering of selected data blocks at various levels of detail [S1]. Unlike standard subdivision hierarchies which may produce topological inaccuracies, this method ensures correct topological information and smaller root-mean-square errors by reorganizing data into wavelet coefficients without requiring additional memory for the hierarchy structure itself [S1]. It builds on [Wavelet Tree](5390-wavelet-tree.md) by providing the specific algorithmic steps for generating the tree structure and coefficients.
+Hierarchical Wavelet Tree Construction is a bottom-up blockwise wavelet transform and compression scheme used to construct a multiresolution wavelet tree for 3D volume data [S1, S2]. It solves the problem of managing large volumetric datasets by enabling parallel rendering of selected data blocks at various levels of detail [S1]. It builds on [Wavelet Tree](5390-wavelet-tree.md) by providing the specific algorithmic steps for generating the tree structure and coefficients.
 
 ## How it works
 **Inputs and Outputs:**
 *   **Input:** A 3D volume dataset.
-*   **Output:** A hierarchical wavelet tree structure where each node contains a low-pass filtered subblock (approximation) and compressed wavelet coefficients (detail), along with an associated error metric.
+*   **Output:** A hierarchical wavelet tree structure where each node contains a low-pass filtered subblock, compressed wavelet coefficients, and an associated error metric [S1, S2].
 
 **Data Structures:**
-The wavelet tree is a binary tree (conceptually octree in 3D space, but represented as a hierarchy of blocks). Each node $S$ in the tree stores:
-1.  **Low-pass subblock:** A 3D array of size $n/8$ voxels.
-2.  **Wavelet coefficients:** A 3D array of size $7n/8$ voxels.
-3.  **Error metric:** A scalar value representing the Mean Square Error (MSE) between the reconstructed block and the original raw data [S1, S2].
-4.  **Compression stream:** A bit stream containing the compressed wavelet coefficients [S1, S2].
+Each node $S$ in the tree stores:
+1.  **Low-pass subblock:** A 3D array of size $n/8$ voxels [S1, S2].
+2.  **Wavelet coefficients:** A 3D array of size $7n/8$ voxels [S1, S2].
+3.  **Compression stream:** A bit stream containing the compressed wavelet coefficients [S1, S2].
+4.  **Error metric:** A scalar value representing the Mean Square Error (MSE) between the low-resolution data block $B$ and the corresponding raw data in subvolume $V$ [S1, S2].
 
 **Parameters:**
 *   $n$: The number of voxels in a raw volume block. Assumed to be $n = 2^i \times 2^j \times 2^k$ for integers $i, j, k > 0$ [S1, S2].
 *   Threshold: A user-provided scalar value used to prune insignificant wavelet coefficients [S1, S2].
 
 **Steps:**
-
 1.  **Block Subdivision:** Subdivide the original 3D data into raw volume blocks. Each block contains $n$ voxels. These blocks form the leaf nodes of the wavelet tree [S1, S2].
-
-2.  **Leaf Transform:** Perform a 3D wavelet transform on each leaf block. This produces:
-    *   A low-pass filtered subblock of size $n/8$.
-    *   Wavelet coefficients of size $7n/8$ [S1, S2].
-
+2.  **Leaf Transform:** Perform a 3D wavelet transform on each leaf block. This produces a low-pass filtered subblock of size $n/8$ and wavelet coefficients of size $7n/8$ [S1, S2].
 3.  **Parent Aggregation:** Collect the low-pass filtered subblocks from eight adjacent leaf nodes in the wavelet tree. Group these eight subblocks into a single block of $n$ voxels. This new block becomes the low-resolution data block associated with the parent node in the next level of the wavelet hierarchy [S1, S2].
-
 4.  **Recursive Construction:** Recursively apply steps 2 and 3 (3D wavelet transform on the aggregated block, then aggregation of its low-pass subblocks) until the root is reached. At the root, a single block of size $n$ represents the entire volume. No 3D wavelet transform is performed at the root because it has no parent [S1, S2].
-
-5.  **Uniformity Check (Optimization):** Before performing the 3D wavelet transform on any data block, check if the block is uniform. If the data block is uniform:
-    *   Skip the 3D wavelet transform computation.
-    *   Set the low-pass filtered subblock to that uniform value.
-    *   Set all corresponding wavelet coefficients to zero [S1, S2].
-
+5.  **Uniformity Check (Optimization):** Before performing the 3D wavelet transform on any data block, check if the block is uniform. If the data block is uniform, skip the 3D wavelet transform computation, set the low-pass filtered subblock to that uniform value, and set all corresponding wavelet coefficients to zero [S1, S2].
 6.  **Thresholding:** Compare the wavelet coefficients associated with a tree node against the user-provided threshold. Set coefficients smaller than the threshold to zero to reduce storage size [S1, S2].
-
-7.  **Compression:** Compress the thresholded wavelet coefficients using run-length encoding combined with a fixed Huffman encoder. Save the compressed bit stream into an individual file or data structure [S1, S2].
-
+7.  **Compression:** Compress the thresholded wavelet coefficients using run-length encoding combined with a fixed Huffman encoder. Save the compressed bit stream into an individual file [S1, S2].
 8.  **Error Calculation:** Calculate an error value at every tree node based on the Mean Square Error (MSE). Let $S$ be the current wavelet tree node, $S_i$ ($i \in [0, 7]$) be its child nodes, and $B$ be the data block of $n$ voxels associated with $S$ that approximates the original subvolume $V$. The error metric is computed as the MSE between the low-resolution data block $B$ and the corresponding raw data in the subvolume [S1, S2].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def construct_wavelet_tree(volume_data, block_size_n, threshold):
+class Node:
+    def __init__(self, low_pass, coefficients, compressed_stream, error):
+        self.low_pass = low_pass
+        self.coefficients = coefficients
+        self.compressed_stream = compressed_stream
+        self.error = error
+
+def is_uniform(block):
+    """Check if all voxels in a block have the same value [G]."""
+    return all(v == block[0] for v in block)
+
+def wavelet_transform_3d(block):
+    """Apply standard 3D discrete wavelet transform [G]. Returns (low_pass, coefficients)."""
+    # Standard 3D DWT implementation [G]
+    ...
+
+def inverse_wavelet_transform_3d(low_pass, coefficients):
+    """Apply standard inverse 3D discrete wavelet transform [G]."""
+    # Standard 3D IDWT implementation [G]
+    ...
+
+def group_subblocks(subblocks):
+    """Concatenate eight n/8 subblocks into a single n-voxel block [G]."""
+    return [voxel for sub in subblocks for voxel in sub]
+
+def compress_coefficients(coefficients, threshold):
+    """Threshold, run-length encode, and apply fixed Huffman coding [S1, S2]."""
+    thresholded = [0 if abs(c) < threshold else c for c in coefficients]
+    # Bit-level run-length encoding
+    rle_data = []
+    count = 1
+    for i in range(1, len(thresholded)):
+        if thresholded[i] == thresholded[i-1]:
+            count += 1
+        else:
+            rle_data.append((thresholded[i-1], count))
+            count = 1
+    rle_data.append((thresholded[-1], count))
+    # Fixed Huffman encoding
+    huffman_stream = [symbol for symbol, _ in rle_data]  # Simplified representation [G]
+    return huffman_stream
+
+def calculate_mse(original, reconstructed):
+    """Compute Mean Square Error between two data blocks [G]."""
+    return sum((a - b) ** 2 for a, b in zip(original, reconstructed)) / len(original)
+
+def construct_wavelet_tree(volume_data, block_dims, threshold):
     """
     Constructs a hierarchical wavelet tree from 3D volume data.
-    
-    Args:
-        volume_data: 3D array of voxel values.
-        block_size_n: Number of voxels per block (n = 2^i * 2^j * 2^k).
-        threshold: Scalar threshold for coefficient pruning.
-        
-    Returns:
-        root_node: The root of the constructed wavelet tree.
+    Assumes volume_data is ordered spatially to match octree traversal [G].
     """
-    # Determine block dimensions based on n
-    # Assuming n = 2^i * 2^j * 2^k, we need to find i, j, k
-    # For simplicity, assume cubic blocks where n = L^3, so L = n^(1/3)
-    # In general, dimensions d_x, d_y, d_z such that d_x*d_y*d_z = n
-    dim = int(round(n ** (1/3)))
+    n = block_dims[0] * block_dims[1] * block_dims[2]
     
-    # Subdivide volume into leaf blocks
-    leaf_blocks = divide_volume_into_blocks(volume_data, dim)
-    
-    # Process leaves
-    leaf_nodes = []
+    # 1. Subdivide into leaf blocks
+    leaf_blocks = []
+    for i in range(0, volume_data.shape[0], block_dims[0]):
+        for j in range(0, volume_data.shape[1], block_dims[1]):
+            for k in range(0, volume_data.shape[2], block_dims[2]):
+                leaf_blocks.append(volume_data[i:i+block_dims[0], j:j+block_dims[1], k:k+block_dims[2]])
+                
+    # 2. Process leaves
+    current_level = []
     for block in leaf_blocks:
-        node = process_block(block, threshold)
-        leaf_nodes.append(node)
+        if is_uniform(block):
+            val = block[0]
+            lp = [val] * (n // 8)
+            coeffs = [0] * (7 * n // 8)
+            compressed = compress_coefficients(coeffs, threshold)
+            error = 0.0
+        else:
+            lp, coeffs = wavelet_transform_3d(block)
+            compressed = compress_coefficients(coeffs, threshold)
+            reconstructed = inverse_wavelet_transform_3d(lp, coeffs)
+            error = calculate_mse(block, reconstructed)
+        current_level.append(Node(lp, coeffs, compressed, error))
         
-    # Build tree bottom-up
-    current_level_nodes = leaf_nodes
-    while len(current_level_nodes) > 1:
-        next_level_nodes = []
-        # Group 8 adjacent nodes into a parent
-        for i in range(0, len(current_level_nodes), 8):
-            children = current_level_nodes[i:i+8]
-            parent_node = create_parent_node(children, threshold)
-            next_level_nodes.append(parent_node)
-        current_level_nodes = next_level_nodes
+    # 3-4. Bottom-up recursion
+    while len(current_level) > 1:
+        next_level = []
+        for i in range(0, len(current_level), 8):
+            children = current_level[i:i+8]
+            parent_block = group_subblocks([c.low_pass for c in children])
+            
+            if is_uniform(parent_block):
+                val = parent_block[0]
+                lp = [val] * (n // 8)
+                coeffs = [0] * (7 * n // 8)
+                compressed = compress_coefficients(coeffs, threshold)
+                error = 0.0
+            else:
+                lp, coeffs = wavelet_transform_3d(parent_block)
+                compressed = compress_coefficients(coeffs, threshold)
+                reconstructed = inverse_wavelet_transform_3d(lp, coeffs)
+                error = calculate_mse(parent_block, reconstructed)
+            next_level.append(Node(lp, coeffs, compressed, error))
+        current_level = next_level
         
-    root_node = current_level_nodes[0]
-    return root_node
-
-def process_block(block_data, threshold):
-    """
-    Applies wavelet transform, thresholding, and compression to a single block.
-    """
-    # Check for uniformity
-    if is_uniform(block_data):
-        uniform_val = block_data[0]
-        low_pass = create_block(uniform_val, size_n_over_8)
-        coefficients = create_block(0, size_7n_over_8)
-        compressed_stream = compress_coefficients(coefficients)
-        error = 0.0 # Uniform block has zero error relative to itself
-        return Node(low_pass=low_pass, coefficients=coefficients, 
-                    compressed_stream=compressed_stream, error=error)
-    
-    # Perform 3D Wavelet Transform
-    low_pass, coefficients = apply_3d_wavelet_transform(block_data)
-    
-    # Thresholding
-    coefficients = threshold_coefficients(coefficients, threshold)
-    
-    # Compression
-    compressed_stream = compress_coefficients(coefficients)
-    
-    # Error Calculation (MSE between reconstructed block and original)
-    # Note: Reconstruction requires inverse transform, which is done at runtime
-    # For construction, we might store the original block or compute MSE later
-    # The source implies MSE is calculated between low-res block B and raw data V
-    # Here B is the low_pass subblock upsampled? Or the block itself?
-    # Source says: "B is the low resolution data block associated with S"
-    # and "approximates the original subvolume V".
-    # In the leaf node, the "low resolution data block" is the low_pass subblock?
-    # Actually, the error metric is calculated for the node S, comparing its 
-    # approximation (derived from its children or its own low-pass) to the raw data.
-    # For a leaf, the approximation is the low-pass subblock? 
-    # Let's assume the error is computed based on the loss from the original block 
-    # to the low-pass subblock (if we consider the low-pass as the approximation).
-    # However, the source says "B is the low resolution data block associated with S".
-    # For a leaf, the low-res block is the low-pass subblock of size n/8.
-    # The raw data is the leaf block of size n.
-    # So we upsample the low-pass subblock to size n and compare to original block.
-    reconstructed = inverse_3d_wavelet_transform(low_pass, coefficients) # Using original coefficients for error calc?
-    # No, the error metric is for the *compressed* representation.
-    # So we should use the thresholded coefficients.
-    reconstructed_compressed = inverse_3d_wavelet_transform(low_pass, coefficients)
-    error = mean_square_error(block_data, reconstructed_compressed)
-    
-    return Node(low_pass=low_pass, coefficients=coefficients, 
-                compressed_stream=compressed_stream, error=error)
-
-def create_parent_node(children, threshold):
-    """
-    Creates a parent node from 8 child nodes.
-    """
-    # Collect low-pass filtered subblocks from 8 children
-    low_pass_subblocks = [child.low_pass for child in children]
-    
-    # Group them into a single block of n voxels
-    parent_block_data = group_subblocks(low_pass_subblocks)
-    
-    # Process this parent block
-    return process_block(parent_block_data, threshold)
-
-def compress_coefficients(coefficients):
-    """
-    Compresses coefficients using run-length encoding and fixed Huffman coding.
-    """
-    # Flatten coefficients to 1D array
-    flat_coeffs = flatten(coefficients)
-    
-    # Apply thresholding (already done in process_block, but ensure zeros are present)
-    # Run-length encoding
-    rle_data = run_length_encode(flat_coeffs)
-    
-    # Huffman coding
-    huffman_stream = huffman_encode(rle_data)
-    
-    return huffman_stream
+    return current_level[0]
 ```
 
 **Reconstruction (Runtime):**
 1.  Retrieve the low-pass filtered subblock of size $n/8$ from the parent node. This may entail recursive requests of low-resolution data blocks from ancestor nodes [S1, S2].
 2.  Obtain the wavelet coefficients of size $7n/8$ by decoding the corresponding bit stream [S1, S2].
-3.  Group the low-pass filtered subblock and the wavelet coefficients.
+3.  Group the low-pass filtered subblock and the wavelet coefficients [S1, S2].
 4.  Apply an inverse 3D wavelet transform to reconstruct the data block [S1, S2].
 
 ## Subtopics
 
 ### [Trilinear B-spline Wavelet Encoding](7390-trilinear-b-spline-wavelet-encoding.md)
-Trilinear B-spline Wavelet Encoding is a multiresolution data representation technique for 3D volume data that combines $3\sqrt{2}$ subdivision with trilinear B-spline wavelets to improve approximation quality on coarser levels of detail. It solves the problem of topological inaccuracies and poor approximation in standard subdivision hierarchies by reorganizing data into wavelet coefficients without requiring additional memory. Unlike standard subdivision which may produce unconnected isosurface components at low resolutions, this method ensures correct topological information and smaller root-mean-square errors by using narrow lifting masks. It builds on [Hierarchical Wavelet Tree Construction](6598-hierarchical-wavelet-tree-construction.md) by providing the specific encoding/decoding masks for the 3D case.
+Trilinear B-spline Wavelet Encoding is a multiresolution data representation technique for 3D volume data that combines $3\sqrt{2}$ subdivision with trilinear B-spline wavelets to improve approximation quality on coarser levels of detail. It solves the problem of topological inaccuracies and poor approximation in standard subdivision hierarchies by reorganizing data into wavelet coefficients without requiring additional memory. Unlike standard subdivision which may produce unconnected isosurface components at low resolutions, this method ensures correct topological information and smaller root-mean-square errors by using narrow lifting masks. It builds on [Hierarchical Wavelet Tree Construction](6598-hierarchical-wavelet-tree-construction.md) by providing the specific encoding and decoding masks for the 3D case.
 
 ## Operating characteristics
-*   **Time Complexity:** The construction is $O(N)$ where $N$ is the total number of voxels, as each voxel is processed a constant number of times in the bottom-up hierarchy. The recursive application of the 3D wavelet transform ensures linear scaling with respect to the volume size.
-*   **Memory Complexity:** The wavelet tree structure itself does not require additional memory for the hierarchy links beyond the coefficients and low-pass subblocks, which together sum to the original data size $N$ (before compression). Compression reduces the storage size significantly, especially for smooth volumes where many coefficients are zeroed out [S1, S2].
+*   **Time Complexity:** The construction is $O(N)$ where $N$ is the total number of voxels, as each voxel is processed a constant number of times in the bottom-up hierarchy [S1, S2].
+*   **Memory Complexity:** The wavelet tree structure stores coefficients and low-pass subblocks that together sum to the original data size $N$ before compression [S1, S2]. Compression reduces the storage size significantly, especially for smooth volumes where many coefficients are zeroed out [S1, S2].
 *   **Performance:** The method exhibits good compression ratios when many consecutive zero subsequences are present in the wavelet coefficient sequence, and it is very fast to decompress due to the bit-level run-length encoding scheme [S1, S2].
-*   **Strengths:** Enables parallel rendering of selected data blocks at various levels of detail [S1]. Avoids unnecessary computation for uniform data blocks [S1, S2]. Ensures correct topological information [S1].
+*   **Strengths:** Enables parallel rendering of selected data blocks at various levels of detail [S1]. Avoids unnecessary computation for uniform data blocks [S1, S2].
 *   **Limitations:** Requires the volume to be divisible into blocks of size $n = 2^i \times 2^j \times 2^k$ [S1, S2]. The error metric calculation requires comparing the reconstructed block to the original data, which may be costly if done during construction for every node [S1, S2].
 
 ## Background
-The hierarchical wavelet tree construction algorithm is similar to methods described in [9,26] (referenced in [S1]) and [GWGS02, WS04] (referenced in [S2]), which use a bottom-up blockwise wavelet transform and compression scheme [S1, S2]. It was developed for parallel multiresolution volume rendering of large data sets [S1, S2]. The method allows for efficient storage and retrieval of volumetric data at multiple resolutions, facilitating interactive rendering of large datasets [S1, S2].
+The hierarchical wavelet tree construction algorithm is similar to methods described in [9,26] (referenced in [S1]) and [GWGS02, WS04] (referenced in [S2]), which use a bottom-up blockwise wavelet transform and compression scheme [S1, S2]. It is used for efficient storage and retrieval of volumetric data at multiple resolutions, facilitating interactive rendering of large datasets [S1, S2].
 
 ## Sources
 [S1] A Parallel Multiresolution Volume Rendering Algorithm for Large Data ..., https://academicweb.nd.edu/~cwang11/papers/pc05-pmvr.pdf, fetched 2026-10-26

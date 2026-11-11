@@ -1,0 +1,104 @@
+# Smooth Vertex Lighting with Ambient Occlusion Effect
+Also called: Smooth Lighting Calculation
+## Overview
+A lighting calculation method for voxel meshes that computes vertex lighting by averaging light values from surrounding voxel cells to ensure smooth transitions, while naturally darkening concave areas to simulate ambient occlusion [S1, unofficial]. It differs from standard ambient occlusion, which simulates self-shadowing by casting rays from a surface and darkening areas based on distance to other surfaces, by achieving a similar darkening effect in concave areas as a side effect of averaging surrounding voxel light values, without ray casting [S1, unofficial].
+## How it works
+**Inputs and Outputs**
+- Input: A polygon mesh generated from voxel data, where each voxel cell has a pre-calculated light value.
+- Output: A vertex color attribute for each vertex in the polygon mesh.
+
+**Data Structures**
+- Voxel Grid: A 3D array or hash map storing light values for each voxel cell. The light value is a scalar representing the amount of light hitting the voxel face from surrounding cells.
+- Polygon Mesh: A collection of vertices and faces. Each vertex corresponds to a corner of a voxel face.
+
+**Parameters**
+- Sampling count: 4 voxel cells are sampled per vertex [S1, unofficial].
+
+**Steps**
+1. For each vertex of the polygon mesh, identify the four voxel cells surrounding the vertex in the direction of the voxel face normal.
+2. Retrieve the pre-calculated light value for each of the four surrounding voxel cells.
+3. Calculate the final vertex light value by taking the average of the four sampled light values.
+4. Apply the calculated light value to the vertex of the polygon mesh.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_smooth_vertex_lighting(mesh, voxel_light_values):
+    """
+    Computes smooth vertex lighting with ambient occlusion effect for a voxel mesh.
+    
+    Args:
+        mesh: A polygon mesh object with vertices and faces.
+        voxel_light_values: A 3D array or hash map storing light values for each voxel cell.
+        
+    Returns:
+        A dictionary mapping vertex indices to their computed light values.
+    """
+    vertex_light_values = {}
+    
+    for vertex in mesh.vertices:
+        # Identify the four voxel cells surrounding the vertex in the direction of the voxel face normal.
+        # Note: The exact method for identifying these cells depends on the mesh generation algorithm.
+        # Assuming the vertex normal direction indicates the primary face orientation.
+        surrounding_cells = get_surrounding_voxel_cells(vertex, voxel_light_values)
+        
+        # Retrieve the pre-calculated light value for each of the four surrounding voxel cells.
+        light_values = []
+        for cell in surrounding_cells:
+            light_values.append(voxel_light_values[cell])
+            
+        # Calculate the final vertex light value by taking the average of the four sampled light values.
+        if len(light_values) == 4:
+            vertex_light_value = sum(light_values) / 4.0
+        else:
+            # Edge case: If fewer than 4 cells are found (e.g., at boundaries), handle appropriately.
+            # For now, assume all 4 cells are always available for valid vertices.
+            vertex_light_value = 0.0
+            
+        # Apply the calculated light value to the vertex of the polygon mesh.
+        vertex_light_values[vertex.index] = vertex_light_value
+        
+    return vertex_light_values
+
+def get_surrounding_voxel_cells(vertex, voxel_light_values):
+    """
+    Identifies the four voxel cells surrounding a vertex in the direction of the voxel face normal.
+    
+    Args:
+        vertex: A vertex object with position and normal.
+        voxel_light_values: A 3D array or hash map storing light values for each voxel cell.
+        
+    Returns:
+        A list of four voxel cell identifiers.
+    """
+    # This function's implementation depends on the specific mesh generation algorithm.
+    # It should return the four voxel cells that are adjacent to the vertex in the direction of the vertex normal.
+    # For example, if the vertex is at the corner of a voxel face, the four surrounding cells might be the ones
+    # sharing that corner in the direction of the normal.
+    # Note: The exact logic for this is not provided in the sources and must be derived from the mesh generation process.
+    # [G] Placeholder for implementation detail based on mesh generation.
+    pass
+```
+
+**Edge Cases and Pitfalls**
+- Applying the voxel cell's light value directly to the vertex generates incorrect lighting because most voxels block light, resulting in a value of zero for blocked faces. The method avoids this by sampling surrounding cells rather than the cell itself [S1, unofficial].
+- Boundary conditions: If a vertex is at the edge of the voxel grid, fewer than four surrounding cells may be available. The pseudocode assumes all four cells are always available, but in practice, this needs to be handled (e.g., by clamping, mirroring, or using fewer samples).
+
+## Operating characteristics
+- Time Complexity: O(V), where V is the number of vertices in the mesh. Each vertex requires a constant number of lookups and an average calculation.
+- Memory Complexity: O(V) for storing the vertex light values.
+- Measured Performance: The method is described as "cheap to calculate" and only needs to be computed when the mesh is created [S1, unofficial].
+- Scaling: The method scales linearly with the number of vertices.
+- Strengths: Provides smooth lighting transitions and a subtle ambient occlusion effect without the computational cost of ray casting.
+- Limitations: The ambient occlusion effect is a side effect and may not be as accurate or controllable as traditional ambient occlusion methods. Boundary conditions need careful handling.
+- When to use: When a cheap, visually pleasing lighting effect is desired for voxel meshes, and the mesh is static or changes infrequently.
+- When not to use: When accurate self-shadowing is required, or when the mesh is dynamic and lighting needs to be updated frequently.
+
+## Background
+- Origin: The method is described in the context of procedural generation of voxel worlds with castles [S1, unofficial].
+- History and Development: The method was developed to address lighting anomalies in voxel meshes, such as incorrect shadows on castle walls [S1, unofficial].
+- Where it is used: In procedural generation of voxel worlds, particularly for static meshes where lighting is computed once during mesh creation.
+
+## Sources
+[S1] Procedural Generation of Voxel Worlds with Castles, https://researchcommons.waikato.ac.nz/entities/publication/70d98783-1629-43df-9d01-b973ddbb5d75, fetched 2026-10-28 (unofficial)

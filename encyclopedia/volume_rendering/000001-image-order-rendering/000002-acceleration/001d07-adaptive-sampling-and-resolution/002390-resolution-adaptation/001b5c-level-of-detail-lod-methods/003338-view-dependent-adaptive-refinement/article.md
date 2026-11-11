@@ -3,88 +3,81 @@
 Also called: Distance-dependent Mesh Refinement, Error-based Adaptive Refinement
 
 ## Overview
-View-Dependent Adaptive Refinement is a method for rendering large-volume datasets at interactive frame rates by dynamically adjusting mesh resolution based on the viewer's position. It solves the trade-off between rendering quality and performance by maintaining high resolution in regions of interest (close to the viewpoint or line of sight) while using lower resolution for distant regions. It differs from [Frustum-based LOD Selection](2986-frustum-based-lod-selection.md) by using a continuous distance-dependent error threshold rather than discrete frustum culling or fixed level selection, and builds on the general principles of [Level-of-detail (LOD) methods](1007-level-of-detail-lod-methods.md).
+View-Dependent Adaptive Refinement is a technique for displaying large-volume data at interactive frame rates by adaptively refining meshes in regions of interest (close to the viewpoint or line of sight) while using lower resolution for distant regions [S1]. It solves the problem of rendering high-fidelity volume data in real-time by balancing approximation error against distance from the viewer. It differs from [Frustum-based LOD Selection](2986-frustum-based-lod-selection.md) by using a continuous, error-driven subdivision criterion based on distance rather than discrete frustum culling or static LOD levels.
 
 ## How it works
-**Inputs:**
-- A tetrahedral mesh hierarchy representing the volume data.
-- The current viewpoint position $V$.
-- The maximum viewing distance $d_{max}$.
-- The maximum allowed approximation error $E_{max}$.
-- The distance-decay parameter $\alpha$.
-
-**Outputs:**
-- A refined tetrahedral mesh where each tetrahedron $T$ is either kept at its current resolution or subdivided.
+**Inputs and Outputs:**
+*   **Input:** A multiresolution mesh hierarchy (typically tetrahedral), a viewpoint position, a maximum sight distance $d_{max}$, a maximum approximation error $E_{max}$, and a decline rate parameter $\alpha$.
+*   **Output:** A refined mesh where tetrahedra are subdivided or kept coarse based on their distance-dependent error threshold.
 
 **Data Structures:**
-- **Mesh Hierarchy:** A tree of tetrahedra created via longest-edge bisection. The structure supports both regular and irregular tetrahedral meshes. The hierarchy must ensure topological consistency, specifically avoiding hanging nodes (edges or faces shared by a tetrahedron that are not shared by its neighbor).
-- **Error Metric:** A function $E(T)$ that computes the approximation error for a specific tetrahedron $T$. The specific implementation of $E(T)$ depends on the underlying scalar field metrics (e.g., linear interpolation error), but the refinement logic relies only on the scalar value $E(T)$.
+*   **Mesh Hierarchy:** The method uses a hierarchy of tetrahedra created via longest-edge bisection [S1]. This structure supports both regular and irregular tetrahedral meshes [S1].
+*   **Constraint:** The subdivision process must not generate mesh inconsistencies such as hanging nodes [S1]. The method is independent of the specific subdivision method used to create the hierarchy, provided continuity is maintained [S1].
 
 **Parameters:**
-- $\alpha$: Determines the rate at which resolution decreases with distance. Typical values correspond to linear or quadratic decline. [S1]
-- $d_{max}$: Maximum distance from the viewpoint (range of sight). Application-specific and user-controlled. [S1]
-- $E_{max}$: Maximum approximation error threshold. Application-specific and user-controlled. [S1]
+*   $E_{max}$: Maximum approximation error. Application-specific and user-controlled [S1].
+*   $d_{max}$: Maximum distance from the viewpoint (range of sight). Application-specific and user-controlled [S1].
+*   $\alpha$: Parameter determining how quickly resolution decreases with distance. Typical values correspond to linear or quadratic decline [S1].
 
-**Steps:**
-1. For each tetrahedron $T$ in the current mesh:
-2. Calculate the distance $d(T)$ from the centroid (or representative point) of $T$ to the viewpoint $V$.
-3. Calculate the approximation error $E(T)$ for the tetrahedron.
-4. Compute the distance-dependent threshold $\tau(T)$:
-   $$ \tau(T) = \frac{d(T)}{d_{max}} \alpha E_{max} $$
-5. If $E(T) > \tau(T)$, subdivide $T$ using the mesh hierarchy's subdivision method (e.g., longest-edge bisection).
-6. Repeat until the mesh satisfies the error constraints or a maximum subdivision depth is reached.
+**Algorithm Steps:**
+1.  For each tetrahedron $T$ in the visible region (optionally restricted to a view frustum defined by $d_{max}$ and a maximum deviation angle from the line of sight [S1]):
+2.  Calculate the distance $d(T)$ from the tetrahedron $T$ to the viewpoint [S1].
+3.  Calculate the approximation error $E(T)$ for the tetrahedron $T$ using an appropriate error metric for the scalar field [S1].
+4.  Calculate the distance-dependent threshold:
+    $$ \text{Threshold} = \frac{d(T)}{d_{max}} \alpha E_{max} $$
+5.  If $E(T) > \text{Threshold}$, subdivide tetrahedron $T$ [S1].
+6.  Repeat until no further subdivisions are required or a maximum depth is reached.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def refine_mesh(mesh, viewpoint, d_max, E_max, alpha):
+def view_dependent_adaptive_refinement(tetrahedra, viewpoint, d_max, E_max, alpha):
     """
-    Refine a tetrahedral mesh based on view-dependent error thresholds.
+    Refines a tetrahedral mesh based on view-dependent error.
     
     Args:
-        mesh: List of tetrahedra, each with attributes:
-              - error: float, E(T)
-              - distance: float, d(T)
-              - subdivide(): method to split the tetrahedron
-        viewpoint: 3D vector, position of the camera
-        d_max: float, maximum viewing distance
-        E_max: float, maximum allowed error
-        alpha: float, distance-decay parameter
+        tetrahedra: List of tetrahedron objects, each with attributes:
+            - error: Pre-calculated or calculable approximation error E(T)
+            - center: Center point of the tetrahedron
+            - subdivide(): Method to perform longest-edge bisection
+        viewpoint: 3D vector representing the camera position
+        d_max: Maximum distance from viewpoint (range of sight)
+        E_max: Maximum approximation error threshold
+        alpha: Rate of resolution decline with distance (e.g., 1.0 for linear)
         
     Returns:
         Refined list of tetrahedra
     """
-    refined_mesh = []
+    refined_tetrahedra = []
     
-    for tet in mesh:
+    for T in tetrahedra:
         # Calculate distance from tetrahedron to viewpoint
-        # Assuming tet has a centroid or representative point
-        d_t = distance(tet.centroid, viewpoint)
+        # [G] Assuming T.center is the representative point for distance
+        d_T = distance(T.center, viewpoint)
         
-        # Get precomputed or computed error
-        E_t = tet.error
-        
-        # Calculate threshold
-        # Note: If d_t > d_max, the tetrahedron is outside the view range.
-        # The formula yields a threshold > alpha * E_max.
-        # If E_t is bounded by E_max, and alpha <= 1, it might not subdivide.
-        # However, typically d_max is the range of sight, so we clamp or handle
-        # out-of-range separately. For this method, we assume d_t <= d_max
-        # for relevant tetrahedra, or the threshold scales accordingly.
-        
-        threshold = (d_t / d_max) * alpha * E_max
-        
-        if E_t > threshold:
-            # Subdivide the tetrahedron
-            children = tet.subdivide()
-            # Add children to the queue for further processing or return them
-            # In a recursive hierarchy, this might trigger further checks
-            refined_mesh.extend(children)
-        else:
-            refined_mesh.append(tet)
+        # Skip if outside range of sight
+        if d_T > d_max:
+            refined_tetrahedra.append(T)
+            continue
             
-    return refined_mesh
+        # Get approximation error E(T)
+        # [G] E(T) is assumed to be available or calculable from T's data
+        E_T = T.error
+        
+        # Calculate distance-dependent threshold
+        threshold = (d_T / d_max) * alpha * E_max
+        
+        # Subdivide if error exceeds threshold
+        if E_T > threshold:
+            # Subdivide T using longest-edge bisection
+            # [G] This operation must maintain mesh continuity (no hanging nodes)
+            children = T.subdivide()
+            refined_tetrahedra.extend(children)
+        else:
+            refined_tetrahedra.append(T)
+            
+    return refined_tetrahedra
 
 def distance(p1, p2):
     """Euclidean distance between two 3D points."""
@@ -92,26 +85,22 @@ def distance(p1, p2):
 ```
 
 **Edge Cases and Pitfalls:**
-- **Hanging Nodes:** The subdivision method (longest-edge bisection) must be implemented carefully to avoid hanging nodes, which would break the mesh topology. [S1]
-- **Precision:** Floating-point precision in distance and error calculations can affect the threshold comparison. [G]
-- **Out-of-Range:** Tetrahedra with $d(T) > d_{max}$ are typically outside the view frustum and may be culled or rendered at minimal resolution. The formula still applies, but the threshold becomes large, potentially preventing subdivision. [S1]
+*   **Hanging Nodes:** The subdivision method must ensure that adjacent tetrahedra do not create hanging nodes, which would break mesh continuity [S1].
+*   **Frustum Restriction:** To optimize performance, subdivision can be restricted to regions within a view frustum defined by $d_{max}$ and a maximum deviation angle from the line of sight [S1].
+*   **Error Metric Dependency:** The accuracy of the refinement depends on the quality of the error metric $E(T)$ used [S1].
 
 ## Subtopics
 
-### Frustum-based LOD Selection
-Uses view frustum culling to select discrete levels of detail. Choose when computational resources are limited and continuous refinement is not required. [2986-frustum-based-lod-selection.md]
-
 ## Operating characteristics
-- **Time Complexity:** Depends on the number of tetrahedra and the depth of subdivision. In the worst case, all tetrahedra may be subdivided, leading to $O(N \cdot 2^k)$ where $k$ is the max subdivision depth. Typically, only a fraction of the mesh is refined.
-- **Memory Complexity:** Increases with the number of subdivisions. The mesh hierarchy must store all levels of detail.
-- **Performance:** Enables interactive frame rates for large datasets by reducing the number of triangles rendered in distant regions. [S1]
-- **Strengths:** Continuous resolution adaptation; high quality in regions of interest; independent of the specific subdivision method. [S1]
-- **Limitations:** Requires precomputation or efficient calculation of error metrics; mesh consistency must be maintained. [S1]
-- **When to Use:** Fly-through exploration of large volume datasets where view-dependent quality is critical. [S1]
-- **When Not to Use:** Static views where a single LOD level suffices; real-time applications with extremely strict memory constraints.
+*   **Time Complexity:** Depends on the number of tetrahedra and the depth of subdivision. Each subdivision increases the number of elements, potentially requiring recursive checks.
+*   **Memory Complexity:** Increases with the number of refined tetrahedra. The hierarchy structure (e.g., longest-edge bisection) requires storage for parent-child relationships.
+*   **Strengths:** Provides high resolution where it matters (near the viewpoint) while maintaining performance in distant regions. Adapts continuously to viewpoint changes.
+*   **Limitations:** Requires pre-computation or efficient calculation of error metrics. Subdivision overhead can be significant if many tetrahedra exceed the threshold.
+*   **When to use:** Interactive fly-through exploration of large volume datasets where visual fidelity near the viewer is critical [S1].
+*   **When not to use:** Static views where uniform resolution is acceptable, or when error metrics are too expensive to compute.
 
 ## Background
-The method was introduced in the context of adaptive multi-valued volume data visualization. It builds on earlier work in error-based adaptive refinement [30] (cited in [S1]). The approach is designed for fly-through exploration of 3D datasets, where regions close to the viewpoint and line of sight are represented at higher resolution. [S1]
+The method originates from research on adaptive multi-valued volume data visualization [S1]. It builds on the concept of using error metrics and viewing parameters to automatically determine resolution levels [S1]. The approach is based on earlier work referenced as [30] in the source [S1]. It is particularly relevant for 3D fly-through-like navigation through datasets [S1].
 
 ## Sources
 [S1] Adaptive Multi-Valued Volume Data Visualization using Data-Dependent Error Metrics, https://doi.org/10.2316/journal.205.2005.2.205-4291, fetched 2026-10-26

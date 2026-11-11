@@ -1,99 +1,97 @@
 # Levenberg-Marquardt Pose Optimization
+
 Also called: LM Pose Estimation, Pose Optimization via Levenberg-Marquardt
+
 ## Overview
-Levenberg-Marquardt Pose Optimization is an iterative method that minimizes the squared error between features extracted from a reference image and features rendered from a current pose guess, using a numerically estimated Jacobian to compute pose updates [S1]. It differs from its siblings by relying on finite-difference Jacobian approximation via pose perturbation rather than analytical gradients or derivative-free search, making it suitable for differentiable rendering pipelines where explicit gradient computation is unavailable or expensive [S1].
+Levenberg-Marquardt (LM) Pose Optimization is an iterative numerical method that estimates the 6-DoF camera pose by minimizing the squared error between features extracted from a reference image and features rendered from a current pose guess [S1]. It distinguishes itself from gradient-based differentiable rendering approaches by relying on a numerically estimated Jacobian via finite-difference pose perturbations rather than analytical gradients, making it robust to complex lens and illumination dependencies [S1].
+
 ## How it works
-**Inputs:** Reference image $s_{ref}$, initial pose guess $\hat{p}_0$, Levenberg-Marquardt damping parameter $\lambda$, convergence threshold $\epsilon$.
-**Outputs:** Converged pose estimate $\hat{p}_{final}$.
+**Inputs:** Reference image $s_{ref}$, initial pose guess $\hat{p}_0$, Levenberg-Marquardt damping parameter $\lambda$, convergence threshold $\epsilon$, number of pose samples $N_s$.
+**Outputs:** Converged pose $\hat{p}_{final}$.
 
 **Data Structures:**
-*   Pose vector $\hat{p}$: 6-dimensional vector representing the camera pose (rotation and translation) in the $SE(3)$ group.
-*   Feature vector $\tilde{x}$: Extracted feature coordinates from the reference image.
-*   Rendered feature vector $h(s_i, \hat{p})$: Features extracted from the rendered image $s_i$ at pose $\hat{p}$, matched to reference features.
+*   Pose vector $\hat{p}$: 6-dimensional vector representing rotation and translation.
+*   Feature vector $\tilde{x}$: Extracted features from $s_{ref}$.
+*   Jacobian $J_f$: Numerically estimated Jacobian of feature errors with respect to pose parameters.
 
 **Steps:**
-1.  **Initialization:** Extract reference features $\tilde{x}$ from $s_{ref}$. Set current pose $\hat{p}_i = \hat{p}_0$.
+1.  **Initialization:** Extract reference features $\tilde{x}$ from $s_{ref}$ [S1].
 2.  **Iteration:** While the norm of the pose update $\|\delta p\| > \epsilon$:
-    a.  **Render and Match:** Render an image at the current pose guess $\hat{p}_i$. Extract features from this rendered image and match them with the reference features $\tilde{x}$ to obtain the observed feature vector $h(s_i, \hat{p}_i)$ [S1].
-    b.  **Pose Sampling:** Sample $N_s$ perturbed pose parameters around the current guess $\hat{p}_i$. The sampling biases random pose samples (rotation axis distributed uniformly on a spherical surface, and translation) to be within a $\delta$-neighborhood of the reference pose [S1].
-    c.  **Jacobian Estimation:** Render images at each of the sampled pose values. Extract and match features for each sampled pose. Calculate the Jacobian matrix $J_f$ using the finite differences between the feature errors and the pose perturbations, as defined in Eq. (13) of the source [S1].
-    d.  **Update Calculation:** Compute the least-squares pose update $\delta p$ using the Levenberg-Marquardt formulation (Eq. (16) in the source) [S1].
-    e.  **Pose Update:** Update the pose: $\hat{p}_{i+1} = \hat{p}_i + \delta p$.
-3.  **Termination:** Return $\hat{p}_{final} = \hat{p}_i$ when convergence is reached [S1].
+    a.  **Render and Match:** Render the scene at the current pose guess $\hat{p}_i$. Extract features $h(s_i, \hat{p}_i)$ and match them with $\tilde{x}$ [S1].
+    b.  **Pose Sampling:** Sample $N_s$ pose parameters around the current guess $\hat{p}_i$. The rotation axis for perturbations is sampled uniformly on a spherical surface, biasing samples to a $\delta$-neighborhood of the reference pose [S1].
+    c.  **Jacobian Estimation:** Render images at the sampled pose values. Match reference features in each rendered image. Calculate the Jacobian $J_f$ using the perturbation method (Eq. 13 in [S1]), which approximates the derivative of the feature error with respect to the pose [S1].
+    d.  **Update:** Calculate the least-squares pose update $\hat{p}_{i+1}$ using the Levenberg-Marquardt update rule (Eq. 16 in [S1]). The update $\delta p$ is applied to $\hat{p}_i$ to get $\hat{p}_{i+1}$ [S1].
+3.  **Termination:** Return $\hat{p}_{final}$ when $\|\delta p\| \le \epsilon$ [S1].
 
 **Formulas:**
-*   **Jacobian Approximation ($J_f$):** Calculated via finite differences. If $f(p)$ is the feature error function, $J_f \approx \frac{\Delta f}{\Delta p}$ based on the sampled poses [S1].
-*   **Pose Update ($\delta p$):** Solved via the Levenberg-Marquardt equation:
-    $$ (J_f^T J_f + \lambda I) \delta p = -J_f^T f(\hat{p}_i) $$
-    where $I$ is the identity matrix and $\lambda$ is the damping parameter [S1].
+*   **Jacobian Approximation:** The Jacobian $J_f$ is computed via finite differences. For each sampled pose perturbation $\Delta p_k$, the feature error change $\Delta e_k$ is measured. $J_f$ is derived from the relationship between $\Delta p_k$ and $\Delta e_k$ [S1].
+*   **LM Update:** The pose update $\delta p$ is calculated by solving the regularized normal equations:
+    $$ (J_f^T J_f + \lambda I) \delta p = -J_f^T e $$
+    where $e$ is the feature error vector, $J_f$ is the Jacobian, $\lambda$ is the damping parameter, and $I$ is the identity matrix [S1].
 
 **Parameters:**
-*   $\lambda$: LM update parameter. Value not specified in sources [S1].
-*   $\epsilon$: Convergence threshold for $\|\delta p\|$. Value not specified in sources [S1].
-*   $\delta$: Neighborhood size for pose sampling. Value not specified in sources [S1].
+*   $\lambda$: LM update parameter. Typical values are not specified in the sources.
+*   $\epsilon$: Convergence threshold. Not given in the sources.
+*   $N_s$: Number of pose samples. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Jacobian Singularity:** If $J_f^T J_f$ is ill-conditioned, the damping parameter $\lambda$ must be adjusted to ensure stability [S1].
-*   **Feature Matching Errors:** Incorrect matching between rendered and reference features will lead to erroneous Jacobian estimates and pose drift [S1].
-*   **Large Perturbations:** If the $\delta$-neighborhood is too large, the linear approximation of the Jacobian becomes invalid [S1].
+*   **Precision:** The method relies on numerical stability of the finite difference approximation. Small perturbations may lead to noise in $J_f$ [S1].
+*   **Boundaries:** The pose sampling is biased to a $\delta$-neighborhood. If the initial guess is far from the true pose, the local approximation may fail [S1].
+*   **Degenerate Input:** Feature matching must be robust. If features cannot be matched, the error vector $e$ is undefined [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def levenberg_marquardt_pose_optimization(s_ref, p_hat_0, lambda_param, epsilon):
+def lm_pose_optimization(s_ref, p_hat_0, lambda_param, epsilon, N_s):
     # Extract reference features
     x_tilde = extract_features(s_ref)
     
-    p_hat_i = p_hat_0
+    p_hat = p_hat_0
+    delta_p = infinity
     
-    while True:
-        # Render image at current pose
-        s_i = render_image(p_hat_i)
+    while norm(delta_p) > epsilon:
+        # Render and match at current pose
+        rendered_img = render(scene, p_hat)
+        h_current = extract_and_match_features(rendered_img, x_tilde)
         
-        # Extract and match features
-        h_current = extract_and_match_features(s_i, x_tilde)
+        # Sample pose perturbations
+        pose_samples = sample_pose_around(p_hat, N_s)
         
-        # Calculate feature error
-        f_error = h_current - x_tilde
+        # Calculate Jacobian via finite differences
+        J_f = calculate_jacobian_numerical(pose_samples, x_tilde, lambda_param)
         
-        # Check convergence
-        # Note: delta_p is calculated in the update step, 
-        # so we check convergence after update or use a dummy initial delta_p
-        if 'delta_p' in locals() and norm(delta_p) <= epsilon:
-            break
-            
-        # Sample poses around current guess
-        sampled_poses = sample_poses_around(p_hat_i, num_samples=N_s)
+        # Calculate error
+        e = h_current - x_tilde
         
-        # Render and match for sampled poses to estimate Jacobian
-        J_f = estimate_jacobian_finite_difference(p_hat_i, sampled_poses, x_tilde)
-        
-        # Calculate least squares pose update
-        # (J_f^T J_f + lambda * I) * delta_p = -J_f^T * f_error
+        # Solve LM update
+        # (J_f^T J_f + lambda * I) * delta_p = -J_f^T * e
         A = transpose(J_f) @ J_f + lambda_param * identity_matrix(6)
-        b = -transpose(J_f) @ f_error
+        b = -transpose(J_f) @ e
         delta_p = solve_linear_system(A, b)
         
         # Update pose
-        p_hat_i = p_hat_i + delta_p
+        p_hat = p_hat + delta_p
         
-    return p_hat_i
+    return p_hat
 ```
+
 ## Subtopics
 
 ### [Derivative-free Pose Estimation via Feature Matching](11310-derivative-free-pose-estimation-via-feature-matching.md)
-A pipeline to estimate the 6-DoF pose of a target from a single image by rendering multiple images at sampled pose perturbations, extracting feature correspondences between the reference and rendered images, and computing a least-squares estimate for the pose using differential corrections to an initial guess.
+This method estimates the 6-DoF pose of a target from a single reference image by rendering multiple images at sampled pose perturbations, extracting feature correspondences, and computing a least-squares estimate for the pose using differential corrections to an initial guess. Unlike its sibling [Differentiable Rendering for Pose Estimation](11554-differentiable-rendering-for-pose-estimation.md), which explicitly constructs a numerical Jacobian of the image with respect to pose perturbations to drive gradient-based optimization, this method relies on differential corrections to an initial guess via feature matching. It bypasses the analytical description of the image formation model, which is complex due to lens and illumination dependencies, by seeking a local numerical solution in the feature space.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of samples $N_s$ for Jacobian estimation and the cost of rendering and feature extraction per sample. Each iteration requires $N_s + 1$ renders and feature extractions [S1].
-*   **Memory Complexity:** Stores reference features, current pose, and intermediate rendered features. Not given in the sources [S1].
-*   **Performance:** Demonstrated in simulation for spacecraft approach maneuvers toward the ISS and asteroid relative navigation [S1].
-*   **Strengths:** Avoids the need for analytical Jacobian derivation; robust to non-linearities via damping parameter [S1].
-*   **Limitations:** Computationally expensive due to multiple renders per iteration; sensitive to feature matching quality [S1].
-*   **When to use:** When analytical gradients are unavailable or difficult to derive, and feature-based alignment is the primary constraint [S1].
-*   **When not to use:** When real-time performance is critical and $N_s$ renders per iteration are too costly [S1].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Demonstrated in simulation for spacecraft approach maneuvers toward the ISS and asteroid relative navigation [S1].
+*   **Strengths:** Robust to complex lens and illumination dependencies; avoids analytical gradient computation [S1].
+*   **Limitations:** Relies on numerical Jacobian estimation, which may be sensitive to noise and perturbation size [S1].
+*   **When to Use:** When analytical gradients are difficult to derive or when the image formation model is complex [S1].
+*   **When Not to Use:** When high precision and speed are required and analytical gradients are available [S1].
+
 ## Background
-Originated in the context of differentiable rendering for pose estimation in proximity operations, specifically for spacecraft navigation scenarios [S1]. The method leverages the concept of finite difference schemes for pose parameter correction, building on previous studies that highlighted the benefits of numerically estimated Jacobians over direct inversion [S1].
+The method originates from the work on differentiable rendering for pose estimation in proximity operations, specifically applied to spacecraft navigation scenarios [S1]. It builds on the idea that finite difference schemes can effectively correct pose parameters by minimizing feature errors [S1].
+
 ## Sources
 [S1] Differentiable Rendering for Pose Estimation in Proximity Operations, https://core.ac.uk/download/552738213.pdf, fetched 2026-10-30

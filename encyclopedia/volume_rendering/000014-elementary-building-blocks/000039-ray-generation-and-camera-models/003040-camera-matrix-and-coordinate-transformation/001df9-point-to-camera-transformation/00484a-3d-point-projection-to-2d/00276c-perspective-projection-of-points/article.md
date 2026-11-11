@@ -96,8 +96,6 @@ def project_point(P, point_3d):
     point_2d_h = P @ point_3d_h
     
     # Perspective division by the third component (z/w)
-    # Note: In the standard pinhole model, the third component of the result
-    # corresponds to the depth in camera coordinates, which acts as the divisor.
     w = point_2d_h[2]
     
     if w == 0:
@@ -107,14 +105,6 @@ def project_point(P, point_3d):
     y = point_2d_h[1] / w
     
     return np.array([x, y])
-
-# Example usage:
-# R = ... # 3x3 rotation matrix
-# t = ... # 3x1 translation vector
-# fx, fy, s, alpha, u0, v0 = ... # Intrinsic parameters
-# P = compute_camera_matrix(R, t, fx, fy, s, alpha, u0, v0)
-# point_3d = np.array([X, Y, Z])
-# point_2d = project_point(P, point_3d)
 ```
 
 **Parameters:**
@@ -124,8 +114,7 @@ def project_point(P, point_3d):
 - $(u_0, v_0)$: Principal point coordinates. Typically at the image center [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- If the depth $w$ (or $z$ in camera coordinates) is zero or negative, the point is on or behind the camera plane, leading to division by zero or invalid projection [S2, unofficial].
-- Numerical precision issues may arise if $w$ is very small.
+- If the depth $w$ (or $z$ in camera coordinates) is zero, the point lies on the camera plane, leading to division by zero [G].
 
 ## Subtopics
 
@@ -136,12 +125,8 @@ Stereo projection is a technique that applies perspective projection twice with 
 MCOP Projection Geometry is a projection method for light field displays that uses two distinct viewpoints to map 3D world points to projector screen coordinates: an emitter $E$ for horizontal coordinates and a virtual viewer $V$ for vertical coordinates. It solves the problem of perspective-correct rendering on holographic screens that are sharply transmissive horizontally but scatter widely vertically, ensuring view separation is maintained horizontally while allowing vertical viewing flexibility. It differs from standard perspective projection by decoupling the horizontal and vertical projection centers, and from stereo projection by supporting a continuous light field rather than just two views.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per point, involving a matrix-vector multiplication and a division.
-- **Memory Complexity:** $O(1)$ for storing the camera matrix and point coordinates.
 - **Strengths:** Simple, computationally efficient, and widely applicable for standard camera models [S1, unofficial].
 - **Limitations:** Assumes a pinhole model; does not account for lens distortion or non-pinhole effects without modification [S1, unofficial].
-- **When to use:** When mapping 3D points to 2D image coordinates for standard cameras with known intrinsic and extrinsic parameters.
-- **When not to use:** For cameras with significant distortion, non-pinhole optics, or when orthographic projection is sufficient.
 
 ## Background
 The pinhole camera model is one of the most widely used models in computer vision to describe the imaging process [S1, unofficial]. It is based on projective geometry and epipolar geometry concepts [S1, unofficial]. The model relates world coordinates to image coordinates via a projective camera matrix [S1, unofficial].

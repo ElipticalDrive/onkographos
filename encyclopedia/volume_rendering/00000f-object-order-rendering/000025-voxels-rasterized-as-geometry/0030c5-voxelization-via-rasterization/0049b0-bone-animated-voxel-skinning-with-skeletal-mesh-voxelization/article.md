@@ -1,0 +1,125 @@
+# Bone-Animated Voxel Skinning with Skeletal Mesh Voxelization
+
+Also called: Bone-driven voxel chunks, SkeletalMesh voxelization
+
+## Overview
+This method enables real-time rendering of bone-animated voxel characters by converting a skeletal mesh into voxel data at editor time and switching between static and bone-driven voxel chunks at runtime based on asset data [S1, unofficial]. It differs from standard voxelization by baking bone weights and grouping voxels per bone to allow rigid-body animation of voxel chunks, avoiding per-vertex skinning costs in the voxel shader [S1, unofficial].
+
+## How it works
+**Inputs:** A SkeletalMesh (LOD0 reference pose) with skin weights.
+**Outputs:** Sparse voxels (for static mode) or BoneGroups (per-bone voxel clusters with reference pose positions for animated mode) [S1, unofficial].
+
+**Data Structures:**
+*   `VoxelGrid`: A 32³ uniform voxel grid, fitted to the mesh AABB with a 1-voxel margin [S1, unofficial].
+*   `BoneGroup`: A cluster of voxels assigned to a single bone, stored with reference pose positions [S1, unofficial].
+*   `BoneChunks`: A map of bone name to chunk component, attached to a hidden skeleton [S1, unofficial].
+
+**Steps:**
+
+1.  **Extract Triangles:** Extract triangles from the LOD0 reference pose of the SkeletalMesh [S1, unofficial].
+2.  **Conservative Rasterization:** Determine which voxels are covered by each triangle using SAT-based triangle-AABB intersection [S1, unofficial].
+3.  **Solid Fill:** Fill the interior of the mesh using a Z-slice scanline parity algorithm to create solid voxels [S1, unofficial].
+4.  **Bone Weight Propagation:** Propagate bone weights to interior voxels using a Breadth-First Search (BFS) starting from surface voxels [S1, unofficial].
+5.  **Bone Assignment:** Assign the dominant bone (highest accumulated weight) to each voxel for bone group assignment [S1, unofficial].
+6.  **Output Generation:** Output sparse voxels for static mode and bone groups for animated mode [S1, unofficial].
+
+**Runtime Steps:**
+
+1.  **Mode Detection:** Detect if any layer has bone data using `HasAnyBoneData()` [S1, unofficial].
+2.  **Mode Switching:** If bone data is present, switch to Bone-Animated Mode; otherwise, use Static Mode [S1, unofficial].
+3.  **Hidden Skeleton:** In Bone-Animated Mode, create a HiddenSkeleton (invisible SkeletalMeshComponent) to drive bone transforms [S1, unofficial].
+4.  **Chunk Creation:** Create BoneChunks, a map of bone name to chunk component, attached to the hidden skeleton [S1, unofficial].
+5.  **Assembly:** Assemble per-bone chunks from BoneGroups using `AssembleBoned()` [S1, unofficial].
+6.  **Coordinate Assignment:** Assign unique coordinates to bone chunks in the shared render cache using `(BoneIndex+1, 0, 0)` [S1, unofficial].
+7.  **Position Adjustment:** Adjust voxel origin by the reference pose bone position for correct placement [S1, unofficial].
+
+**Animation Integration:**
+Synchronize `UHktAnimInstance` in `ApplyPresentation()` by forwarding movement speed, stance, attack rate, and CP ratio. Propagate gameplay tags and animation triggers, enabled only in bone-animated mode [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxelize_skeletal_mesh(skeletal_mesh):
+    # Step 1: Extract triangles from LOD0 reference pose
+    triangles = extract_triangles(skeletal_mesh.lod0, skeletal_mesh.reference_pose)
+    
+    # Initialize 32^3 grid with 1-voxel margin around AABB
+    grid_size = 32
+    margin = 1
+    voxel_grid = create_voxel_grid(grid_size, margin, skeletal_mesh.aabb)
+    
+    # Step 2: Conservative rasterization
+    for triangle in triangles:
+        voxels_covered = sat_triangle_aabb_intersection(triangle, voxel_grid.bounds)
+        for voxel in voxels_covered:
+            voxel_grid.mark_surface(voxel)
+            # Accumulate bone weights from triangle skin weights
+            voxel_grid.accumulate_bone_weights(voxel, triangle.skin_weights)
+            
+    # Step 3: Solid fill via Z-slice scanline parity
+    for z in range(voxel_grid.depth):
+        scanline_parity_fill(voxel_grid, z)
+        
+    # Step 4: Propagate bone weights to interior voxels via BFS
+    queue = voxel_grid.get_surface_voxels()
+    while queue:
+        current_voxel = queue.pop()
+        for neighbor in current_voxel.neighbors:
+            if not neighbor.has_weights:
+                neighbor.weights = current_voxel.weights
+                queue.push(neighbor)
+                
+    # Step 5: Assign dominant bone
+    bone_groups = {}
+    for voxel in voxel_grid.all_voxels:
+        dominant_bone = get_dominant_bone(voxel.weights)
+        if dominant_bone not in bone_groups:
+            bone_groups[dominant_bone] = []
+        bone_groups[dominant_bone].append(voxel)
+        
+    return bone_groups
+
+def runtime_bone_animation(bone_groups, hidden_skeleton):
+    # Step 3: Create hidden skeleton
+    hidden_skeleton = create_hidden_skeletal_mesh_component()
+    
+    # Step 4 & 5: Create and assemble bone chunks
+    bone_chunks = {}
+    for bone_name, voxels in bone_groups.items():
+        chunk = assemble_boned(voxels)
+        bone_chunks[bone_name] = chunk
+        chunk.attach_to(hidden_skeleton, bone_name)
+        
+    # Step 6 & 7: Assign coordinates and adjust origin
+    for bone_index, (bone_name, chunk) in enumerate(bone_chunks.items()):
+        chunk.render_cache_coordinate = (bone_index + 1, 0, 0)
+        chunk.origin_offset = hidden_skeleton.get_bone_reference_pose(bone_name)
+        
+    return bone_chunks, hidden_skeleton
+```
+
+**Parameters:**
+*   Grid Size: 32³ uniform voxel grid [S1, unofficial].
+*   Mesh Scheduling: In bone mode, the mesh scheduling is increased to 4 meshes/frame; in static mode, it reverts to 1 [S1, unofficial].
+
+**Pitfalls:**
+*   Transform Order: Component space transform multiplication order must be Local * Parent [S1, unofficial].
+*   Null Check: `GetSkinWeightVertexBuffer()` must have a null check added [S1, unofficial].
+*   Unused Data: `PaletteRow` is unused in `WriteToChunk`/`WriteBoneGroupToChunk` and should be marked as such [S1, unofficial].
+*   Cleanup: Remove unused `AssembleBoned` results in `OnSkinSetChanged` [S1, unofficial].
+*   Initialization: `AssembleBoned` chunk initialization must be based on `Contains()` [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Voxelization is performed at editor time, so runtime cost is low. Runtime involves assembling chunks and updating transforms.
+*   **Memory Complexity:** Depends on the number of bones and voxel density. Bone groups store voxel indices and weights.
+*   **Performance:** Mesh scheduling increases to 4 meshes/frame in bone mode, which may impact performance on lower-end hardware [S1, unofficial].
+*   **Strengths:** Efficient animation of voxel characters without per-vertex skinning. Dual-mode support allows fallback to static rendering.
+*   **Limitations:** Requires pre-baking of voxel data. Limited to rigid bone animation; no soft deformation.
+
+## Background
+This method was introduced in a pull request to the HktGameplay repository by dkwkekzz on April 6, 2026 [S1, unofficial]. It extends the existing voxel rendering system to support skeletal animation by baking bone weights and grouping voxels per bone.
+
+## Sources
+[S1] Add bone-animated voxel skinning with skeletal mesh voxelization, https://github.com/dkwkekzz/HktGameplay/pull/114, fetched 2026-10-27 (unofficial)

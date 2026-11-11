@@ -1,0 +1,154 @@
+--- v002.md
++++ v003.md
+@@ -4,91 +4,100 @@
+ 
+ ## Overview
+-Light Sampling for NEE estimates direct illumination in participating media by explicitly sampling light sources and their surfaces to generate connection points for path tracing [S1, unofficial]. It reduces noise in direct lighting estimates by concentrating samples on bright emitters rather than relying solely on unidirectional shadow rays [G]. It differs from [Shadow Ray Casting](2796-shadow-ray-casting.md) by using probabilistic sampling with importance weighting, and from [Direct Light Sampling](3337-direct-light-sampling.md) by explicitly computing the geometry and probability density functions (PDFs) required for unbiased Nearest Energy Estimation (NEE) in media [G].
++Light Sampling for NEE is a technique within Next Event Estimation (NEE) that reduces variance in direct illumination estimation by explicitly sampling light sources and their surfaces, rather than relying on random walk termination or indirect visibility [S1, unofficial]. It differs from its sibling [Direct Illumination Sampling with Mesh Intersection](4450-direct-illumination-sampling-with-mesh-intersection.md) by decoupling the light source selection from the path vertex generation, ensuring emitters are sampled directly [S1, unofficial]. It differs from [Light Ray Sampling](4885-light-ray-sampling.md) by typically sampling a point on the light surface and casting a shadow ray towards the path vertex, whereas light ray sampling often casts rays from the vertex towards the light [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `pos`: Current interaction point in the medium (Vec3) [S1, unofficial].
+-- `ns`: Surface normal at the interaction point (Vec3) [S1, unofficial].
+-- `sampler`: Random number generator state [S1, unofficial].
+-- `scene`: Scene object containing light sources [S1, unofficial].
++- `pos`: The 3D position of the path vertex in the participating medium or on the surface.
++- `sampler`: A random number generator instance.
++- `scene`: The scene graph containing light sources.
+ 
+ **Outputs:**
+-- `radiance`: Sampled light radiance (Vec3) [S1, unofficial].
+-- `dir`: Direction to the sampled light point (Vec3) [S1, unofficial].
+-- `pdf`: Directional probability density (float) [S1, unofficial].
++- `light_surf`: The sampled point on the light surface, including position, normal, and radiance.
++- `pdf`: The probability density function (PDF) of the sampled direction.
++- `Le`: The radiance emitted from the light at the sampled point towards the vertex.
+ 
+ **Data Structures:**
+-- Light object: Contains methods `samplePoint` and `Le`, and properties `position` and `ns` [S1, unofficial].
++- `Light`: An abstract base class or struct representing a light source.
++  - `samplePoint(sampler, pdf)`: Returns a point on the light surface and the PDF of that point relative to the light's local distribution.
++  - `Le(point, direction)`: Returns the emitted radiance.
++  - `importance`: A scalar value estimating the light's contribution to the scene (used in variants).
+ 
+ **Steps:**
+-1. **Select Light Source:** Choose a light source from the scene using a probability distribution $p_{light}$ [S1, unofficial].
+-   $$ light, p_{light} = scene.sampleLight(sampler) $$
+-2. **Sample Light Surface:** Generate a point on the selected light's emitting surface [S1, unofficial].
+-   $$ light\_surf, p_{pos} = light.samplePoint(sampler) $$
+-3. **Calculate Direction:** Compute the vector from the interaction point to the sampled light point [S1, unofficial].
+-   $$ dir = normalize(light\_surf.position - pos) $$
+-4. **Calculate Distance:** Compute the Euclidean distance to the light [S1, unofficial].
+-   $$ dist\_to\_light = length(light\_surf.position - pos) $$
+-5. **Calculate Cosine Term:** Compute the cosine of the angle between the surface normal and the direction to the light [S1, unofficial].
+-   $$ cos = |dot(-dir, light\_surf.ns)| $$
+-6. **Calculate Directional PDF:** Combine the light selection probability, the position PDF, and geometric terms to form the total PDF for the direction [S1, unofficial].
+-   $$ pdf = p_{light} \cdot \frac{dist\_to\_light^2}{cos} \cdot p_{pos} $$
+-   This formula accounts for the solid angle subtended by the light source as seen from $pos$ [G].
+-7. **Return Radiance:** Evaluate the light's emitted radiance in the direction towards the interaction point [S1, unofficial].
+-   $$ radiance = light.Le(light\_surf, -dir) $$
++1. **Select Light Source:** Choose a light source from the scene. In the basic case, this is often done uniformly or proportional to the light's power. Let $p_{light}$ be the probability of selecting this specific light source.
++   $$ \text{light} = \text{scene.sampleLight}(\text{sampler}, p_{light}) $$
++2. **Sample Light Surface:** Sample a point on the selected light's surface. Let $p_{surf}$ be the PDF of this point on the light's surface area.
++   $$ \text{light\_surf} = \text{light.samplePoint}(\text{sampler}, p_{surf}) $$
++3. **Calculate Direction:** Compute the vector from the path vertex to the sampled light point.
++   $$ \vec{d} = \text{normalize}(\text{light\_surf.position} - \text{pos}) $$
++4. **Calculate Distance:** Compute the Euclidean distance between the vertex and the light point.
++   $$ d = \|\text{light\_surf.position} - \text{pos}\| $$
++5. **Calculate Cosine:** Compute the cosine of the angle between the light surface normal and the direction to the vertex. Note that the normal points outward from the light surface.
++   $$ \cos\theta = |\text{dot}(-\vec{d}, \text{light\_surf.normal})| $$
++6. **Calculate Directional PDF:** The total PDF for the direction $\vec{d}$ from position `pos` is the product of the light selection probability, the surface sampling PDF, and the geometric term. The geometric term accounts for the solid angle subtended by the light surface area element.
++   $$ p(\vec{d}) = p_{light} \cdot \frac{d^2}{\cos\theta} \cdot p_{surf} $$
++   *Note: If the light is an area light, $p_{surf}$ is the PDF per unit area. The term $\frac{d^2}{\cos\theta}$ converts area PDF to solid angle PDF.*
++7. **Return Radiance:** Retrieve the emitted radiance from the light surface towards the vertex.
++   $$ L_e = \text{light.Le}(\text{light\_surf}, -\vec{d}) $$
+ 
+ **Pseudocode:**
+ ```python
+-def sample_direction_to_light(pos, ns, sampler, scene):
+-    # Step 1: Select light source
+-    light, light_choose_prob = scene.sample_light(sampler)
++def sample_direction_to_light(pos, sampler, scene):
++    # Step 1: Select a light source
++    # p_light is the probability of choosing this light
++    light, p_light = scene.sample_light(sampler)
+     
+-    # Step 2: Sample point on light surface
+-    light_surf, light_pos_pdf = light.sample_point(sampler)
++    # Step 2: Sample a point on the light surface
++    # p_surf is the PDF of the point on the light's surface area
++    light_surf, p_surf = light.sample_point(sampler)
+     
+-    # Step 3: Calculate direction
++    # Step 3: Calculate direction from vertex to light
+     dir_vec = normalize(light_surf.position - pos)
+     
+     # Step 4: Calculate distance
+-    dist_to_light = length(light_surf.position - pos)
++    dist = length(light_surf.position - pos)
+     
+-    # Step 5: Calculate cosine
+-    cos = abs(dot(-dir_vec, light_surf.ns))
++    # Step 5: Calculate cosine of the angle between light normal and direction
++    # The direction from light to vertex is -dir_vec
++    cos_theta = abs(dot(-dir_vec, light_surf.normal))
+     
+-    # Step 6: Calculate PDF
+-    pdf = light_choose_prob * (dist_to_light ** 2 / cos) * light_pos_pdf
++    # Step 6: Calculate the directional PDF
++    # p(d) = p_light * p_surf * (dist^2 / cos_theta)
++    # This converts the area PDF to a solid angle PDF
++    pdf = p_light * p_surf * (dist * dist / cos_theta)
+     
+-    # Step 7: Return radiance
+-    radiance = light.Le(light_surf, -dir_vec)
++    # Step 7: Return radiance and PDF
++    # Le is the radiance emitted from the light surface towards the vertex
++    Le = light.get_radiance(light_surf, -dir_vec)
+     
+-    return radiance, dir_vec, pdf
++    return Le, pdf, dir_vec, dist
+ ```
+ 
+ **Parameters:**
+-- $p_{light}$: Probability of selecting a specific light source [S1, unofficial].
+-- $p_{pos}$: Probability density of the sampled point on the light surface [S1, unofficial].
++- `p_light`: Probability of selecting a specific light. Typically $1/N$ for uniform sampling over $N$ lights, or proportional to light power/importance.
++- `p_surf`: PDF of the sampled point on the light surface. Depends on the light type (e.g., uniform over area for area lights).
+ 
+ **Edge Cases and Pitfalls:**
+-- **Zero Cosine:** If $cos \approx 0$, the PDF becomes undefined [G]. Guard against grazing angles or ensure normals are well-defined [G].
+-- **Distance Zero:** If $pos$ is on the light surface, $dist\_to\_light \approx 0$ [G]. Handle self-intersection or use a small epsilon [G].
+-- **PDF Consistency:** The PDF must match the sampling strategy exactly for unbiased results [G]. Mismatched PDFs cause bias [G].
++- **Zero Cosine:** If $\cos\theta \approx 0$, the geometric term explodes. This occurs when the light surface is viewed edge-on from the vertex. In practice, clamp $\cos\theta$ to a small epsilon or handle grazing angles carefully.
++- **Zero Distance:** If the vertex is on the light surface, $dist \approx 0$. This can cause numerical instability. Check for this condition and handle it (e.g., by sampling the hemisphere or using a different strategy).
++- **PDF Mismatch:** Ensure that the PDF calculation matches the sampling strategy. If the light source is sampled non-uniformly, $p_{light}$ must reflect that.
+ 
+ ## Subtopics
+ 
+ ### Importance-Weighted Light Sampling with MIS
+-Selects per-vertex lights proportional to each light's estimated contribution plus a 15% uniform floor [S2, unofficial]. Reuses the same probability mass function (PMF) for Multiple Importance Sampling (MIS) when a BSDF ray hits an emitter [S2, unofficial]. Maps hit shapes to light indices for O(1) emitter PDF calculation, removing the need for dynamic_cast scans over all lights [S2, unofficial]. The uniform floor weight is 15% of the total probability mass [S2, unofficial].
++This variant selects per-vertex lights proportional to each light's estimated contribution (`Light::importance`) plus a 15% uniform floor [S2, unofficial]. The same probability mass function (PMF) is reused for Multiple Importance Sampling (MIS) when a BSDF ray hits an emitter [S2, unofficial]. To optimize performance, the scene maps hit shapes to light indices, allowing O(1) emitter PDF calculation via `Light::pdfLiHit`, removing the need for dynamic casts over all lights [S2, unofficial]. The uniform floor weight is 15% of the total probability mass [S2, unofficial].
+ 
+ ### Importance Sampling of Multiple Light Sources
+-An attempt to use importance sampling to choose which light source to sample (e.g., sun vs. sky) to reduce noise [S3, unofficial]. Tested with 16 and 64 samples per light [S3, unofficial]. However, importance sampling increased visual noise because most of the time the darker sky was not sampled, but when it was it was very strongly weighted, causing bright blue pixels amidst unaffected ones [S3, unofficial].
++This approach attempts to use importance sampling to choose which light source to sample (e.g., sun vs. sky) to reduce noise [S3, unofficial]. However, it was found that importance sampling increased visual noise in some cases because the darker sky was rarely sampled but had a high weight when sampled, causing bright blue pixels amidst unaffected ones [S3, unofficial]. This was tested with 16 and 64 samples per light [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
+-- **Performance:** Importance-weighted sampling reduces variance for scenes with dominant lights [S2, unofficial]. However, poor importance estimates (e.g., for the darker sky) can increase visual noise because the sky is rarely sampled but carries a high weight when selected [S3, unofficial].
+-- **Strengths:** Unbiased, handles complex light geometries, integrates well with MIS [G].
+-- **Limitations:** Requires accurate PDFs, sensitive to light selection strategy, can be noisy if importance weights are poor [G].
++- **Time Complexity:** $O(1)$ per light sample if light selection and surface sampling are $O(1)$. If light selection requires iterating over all lights, it is $O(N)$ where $N$ is the number of lights. With the optimization in [S2, unofficial], light selection can be $O(1)$ using precomputed importance weights and a cumulative distribution function (CDF).
++- **Memory Complexity:** $O(N)$ to store light importance weights and CDFs if using importance-weighted selection [S2, unofficial].
++- **Strengths:** Reduces variance by ensuring light sources are sampled directly [S1, unofficial]. Can be combined with MIS for further variance reduction [S2, unofficial].
++- **Limitations:** Can increase noise if importance sampling is poorly calibrated (e.g., sampling dark lights with high weights) [S3, unofficial]. Requires efficient light selection and PDF calculation.
++- **When to Use:** When direct illumination is a significant component of the lighting and variance reduction is needed. Especially useful in scenes with many light sources or large area lights.
++- **When Not to Use:** In scenes with very few light sources where uniform sampling is sufficient, or when the cost of importance weighting outweighs the variance reduction.
+ 
+ ## Background
+-The technique is implemented in volumetric path tracers such as volpt [S1, unofficial] and photon-engine [S2, unofficial]. The exact historical origin of the method is not specified in the sources. It is fundamental to unbiased rendering in participating media, allowing for accurate direct lighting estimation [G].
++Light Sampling for NEE is a fundamental technique in Monte Carlo rendering, particularly in path tracing and volumetric path tracing [S1, unofficial]. It was popularized by the introduction of Next Event Estimation (NEE) as a way to reduce the variance associated with estimating direct illumination through random walks [S1, unofficial]. The technique is widely used in modern rendering engines and research projects, such as the volumetric path tracer described in [S1, unofficial] and the photon engine described in [S2, unofficial].
+ 
+ ## Sources
