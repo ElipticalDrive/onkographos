@@ -1,0 +1,111 @@
+--- v001.md
++++ v002.md
+@@ -4,23 +4,19 @@
+ 
+ ## Overview
+-Proxy Mesh Rendering for Page Visibility determines which virtual memory pages are visible in a scene by rendering a simplified proxy mesh to a visibility buffer and reducing that buffer to a list of active page IDs [S1]. It differs from standard visibility buffers by encoding depth information to support Level of Detail (LOD) selection and by utilizing a compute shader reduction step to minimize memory bandwidth, addressing the performance bottlenecks of atomic operations in concurrent thread updates [S1].
++Proxy Mesh Rendering for Page Visibility determines which virtual memory pages are visible in a scene by rendering a simplified proxy mesh to a visibility buffer and reducing that buffer to a list of active page IDs [S1]. The method encodes depth information to support Level of Detail (LOD) selection and uses a compute shader reduction step to minimize memory bandwidth [S1].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A proxy mesh representing the geometry of the scene, where each face is associated with a specific virtual memory page ID.
+-*   **Output:** A CPU-accessible array of page IDs. Entries are zero for invisible pages and contain integer depth values for visible pages.
++*   **Input:** A proxy mesh representing the geometry of the scene, where each face is associated with a specific virtual memory page ID [S1].
++*   **Output:** A CPU-accessible array of page IDs. Entries are zero for invisible pages and contain integer depth values for visible pages [S1].
+ 
+ **Data Structures**
+-*   **Visibility Buffer:** A single-channel, 32-bit unsigned integer image. The resolution is intentionally low to enhance performance [S1].
++*   **Visibility Buffer:** A single-channel, 32-bit unsigned integer image rendered at low resolution to enhance performance [S1].
+ *   **Page ID Buffer:** A buffer passed to the fragment shader containing the page ID for each face, indexed by the face index [S1].
+ 
+ **Steps**
+ 1.  **Vertex Shader Execution:** The vertex shader receives vertex positions and applies model and camera transformations [S1].
+-2.  **Fragment Shader Execution:** For each rasterized fragment, the fragment shader retrieves the page ID corresponding to the input face index. If the face is background or unassigned, it outputs a zero page ID [S1].
+-3.  **Visibility Buffer Reduction:** A compute shader processes the visibility buffer to generate a list of required page IDs.
+-    *   The shader updates each pixel's list entry in parallel.
+-    *   Depth is encoded as integers that decrease with greater depth (i.e., closer objects have higher integer values).
+-    *   `atomicMax()` is used to ensure that only the closest depth value (maximum integer) is written to the buffer for each pixel [S1].
+-    *   The shader iterates through linked pages per pixel to set buffer entries, connecting nearby pages to mitigate the effects of low resolution [S1].
++2.  **Fragment Shader Execution:** For each rasterized fragment, the fragment shader retrieves the page ID corresponding to the input face index. Background and unassigned faces output a zero page ID, which is ignored in later steps [S1].
++3.  **Visibility Buffer Reduction:** A compute shader processes the visibility buffer to generate a list of required page IDs. It updates each pixel's list entry in parallel, encoding depth as integers that decrease with greater depth. The `atomicMax()` function ensures only the closest depth value is written to the buffer. The shader iterates through linked pages per pixel to set buffer entries, connecting nearby pages to mitigate the effects of low resolution [S1].
+ 4.  **Data Transfer:** The buffer is transferred to CPU memory. The resulting array contains zeroes for unneeded pages and depth values for needed pages [S1].
+ 
+@@ -28,9 +24,11 @@
+ 
+ ```python
++# Constants
++WORKGROUP_SIZE = 256  # Workgroup size for shared memory optimization [G]
++
+ # Vertex Shader
+ def vertex_shader(position, model_matrix, camera_matrix):
+     # Apply model and camera transformations
+-    transformed_position = camera_matrix * (model_matrix * position)
+-    return transformed_position
++    return camera_matrix @ (model_matrix @ position)
+ 
+ # Fragment Shader
+@@ -38,5 +36,4 @@
+     # Retrieve page ID for the current face
+     page_id = page_id_buffer[face_index]
+-    
+     # Background and unassigned faces result in zero page
+     if page_id is None or is_background(face_index):
+@@ -44,35 +41,41 @@
+     return page_id
+ 
++def is_background(face_index):
++    # Returns True if the face is background or unassigned [G]
++    return face_index < 0
++
+ # Compute Shader (Reduction)
+-def compute_shader_reduction(visibility_buffer, linked_pages):
+-    # Shared memory for workgroup optimization to avoid atomic contention
++def compute_shader_reduction(visibility_buffer, linked_pages, depth_values):
++    # Shared memory for workgroup optimization to avoid atomic contention [G]
+     shared_depth = [0] * WORKGROUP_SIZE
+-    
++
+     # Parallel update of pixel list entries
+-    for pixel in visibility_buffer:
+-        # Encode depth as integers decreasing with greater depth
+-        # Use atomicMax to ensure only the closest (max integer) depth is kept
+-        current_depth = atomicMax(pixel.depth, pixel.depth)
+-        
++    for pixel_idx in range(len(visibility_buffer)):
++        # Encode depth as integers that decrease with greater depth
++        # Use atomicMax to ensure only the closest (maximum integer) depth is kept
++        new_depth = depth_values[pixel_idx]
++        visibility_buffer[pixel_idx] = atomic_max(visibility_buffer[pixel_idx], new_depth)
++
+         # Iterate through linked pages per pixel to set buffer entries
+-        for linked_page in linked_pages[pixel.id]:
+-            set_buffer_entry(pixel.id, linked_page)
++        for linked_page in linked_pages[pixel_idx]:
++            visibility_buffer[linked_page] = atomic_max(visibility_buffer[linked_page], new_depth)
++
++def atomic_max(current, new):
++    # Simulates hardware atomicMax operation [G]
++    return new if new > current else current
+ 
+ # CPU Side
+ def transfer_to_cpu(visibility_buffer):
+     # Transfer buffer to CPU memory
+-    cpu_array = copy_to_cpu(visibility_buffer)
+-    
+-    # Zeroes indicate unneeded pages; depth values indicate needed pages
+-    return cpu_array
++    return list(visibility_buffer)
+ ```
+ 
+ **Parameters**
+-*   **Resolution:** The visibility buffer is rendered at low resolution. This enhances performance by allowing atomic operations to be avoided in favor of shared memory in workgroups [S1].
++*   **Resolution:** The visibility buffer is rendered at low resolution to enhance performance, as atomic operations are avoided in favor of shared memory in workgroups [S1].
+ 
+ **Edge Cases and Pitfalls**
+-*   **Race Conditions:** Finding the minimum depth for LOD communication can lead to race conditions. While `atomicMax()` is employed, it has an adverse performance impact on concurrent thread updates [S1].
++*   **Race Conditions:** Finding the minimum depth for LOD communication can lead to race conditions. `atomicMax()` is employed but has an adverse performance impact on concurrent thread updates [S1].
+ *   **Primitive ID Performance:** Using `gl_PrimitiveID` has a negative performance impact [S1]. The implementation uses the leading vertex to determine triangle primitive IDs instead [S1].
+-*   **Distant Page Misses:** Low resolution can cause distant pages to be missed in virtual texturing [S1]. However, in this renderer, overlapping Gaussians cause nearby pages to remain memory-bound, making the trade-off acceptable [S1].
++*   **Distant Page Misses:** Low resolution can cause distant pages to be missed in virtual texturing [S1]. However, overlapping Gaussians cause nearby pages to remain memory-bound, making the trade-off acceptable [S1].
+ 
+ ## Operating characteristics

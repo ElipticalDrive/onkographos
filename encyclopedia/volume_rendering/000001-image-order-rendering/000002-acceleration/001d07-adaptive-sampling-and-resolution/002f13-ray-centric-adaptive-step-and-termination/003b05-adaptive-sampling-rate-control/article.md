@@ -1,92 +1,59 @@
 # Adaptive Sampling Rate Control
 
-Also called: Viewport Adaptive Resolution, dt_scale control
+Also called: Sampling Rate Control, Viewport Adaptive Resolution, dt_scale control
 
 ## Overview
-Adaptive Sampling Rate Control modulates the ray step size in volume rendering by mapping a user-defined sampling rate to an inverse scale factor (`dt_scale`) passed to the shader [S1, unofficial]. It differs from error-driven siblings by relying on a discrete, user-selected rate rather than a computed metric, offering a deterministic trade-off between performance and fidelity [S1, unofficial]. It builds on [Ray-Centric Adaptive Step and Termination](5938-ray-centric-adaptive-step-and-termination.md) by providing the specific parameterization for rate-based adaptation.
+Adaptive Sampling Rate Control modulates the number of samples or slices used to render volumetric geometry to balance image quality and performance [S2]. It solves the problem of undersampling artifacts during zoom or anisotropic data distortion by dynamically adjusting the sampling density based on view direction and data characteristics [S2]. Unlike fixed-rate methods, it allows for non-uniform sampling along data dimensions to compensate for anisotropy [S2].
 
 ## How it works
-**Inputs:**
-- `rate_index`: Integer slider value $0 \dots 5$.
-- `is_adaptive`: Boolean toggle for viewport resolution.
-
-**Outputs:**
-- `dt_scale`: Uniform float passed to the rendering shader.
-- `max_resolution`: Viewport resolution limit.
+**Inputs and Outputs:**
+*   **Input:** Volumetric texture data, view direction, current sampling rate parameters.
+*   **Output:** Adjusted sampling rate vector or scalar step size parameter (`dt_scale`) passed to the rendering shader.
 
 **Data Structures:**
-- `rate_map`: Array mapping indices to sampling rates.
-  - Index 0: 0.25
-  - Index 1: 0.5
-  - Index 2: 1.0
-  - Index 3: 2.0
-  - Index 4: 4.0
-  - Index 5: 8.0
+*   **Sampling Rate:** A vector $(r_x, r_y, r_z)$ representing the sampling density along each data dimension. Default is $(1, 1, 1)$, implying one slice per voxel [S2].
+*   **dt_scale:** A uniform float representing the inverse of the sampling rate, used to control ray step size in shaders [S1, unofficial].
 
 **Steps:**
-1. Retrieve the current `rate_index` from the UI slider.
-2. Look up the corresponding sampling rate $R$ from `rate_map`.
-3. Compute `dt_scale` as the inverse of the sampling rate:
-   $$ \text{dt\_scale} = \frac{1}{R} $$
-4. Pass `dt_scale` to the volume rendering shader as a uniform float. The shader uses this to modulate the ray step size $\Delta t$, effectively scaling the sampling density [S1, unofficial].
-5. If `is_adaptive` is true, enable viewport adaptive resolution and set the maximum resolution limit via `viewport.setMaxResolution()` [S1, unofficial].
+1.  **Metric Evaluation:** Determine the required sampling density.
+    *   For general polygonization, compute the minimum data slice spacing by finding the longest ray cast through the volume in the view direction and identifying the highest frequency component of the texel values. The minimum number of data slices is double this frequency component [S2].
+    *   Alternatively, use a heuristic where the number of data slices equals the volume's dimensions measured in texels [S2].
+    *   For anisotropic data, calculate varying rates for each dimension to compensate for differences in sampling requirements [S2].
+2.  **Adaptation:** Set the sampling rate using `setSamplingRate(r_x, r_y, r_z)` [S2].
+    *   If using a slider-based UI (indices 0-5), map to rates: 0.25, 0.5, 1.0, 2.0, 4.0, 8.0 [S1, unofficial].
+    *   Compute `dt_scale` as $1 / \text{rate}$ [S1, unofficial].
+3.  **Rendering:** Pass `dt_scale` to the shader to control the ray step size [S1, unofficial].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+**Formulas:**
+*   Minimum Slices: $N_{min} = 2 \cdot f_{max}$, where $f_{max}$ is the highest frequency component of texel values along the longest view ray [S2].
+*   dt_scale: $dt\_scale = \frac{1}{\text{sampling\_rate}}$ [S1, unofficial].
 
-```python
-# Mapping defined in source [S1, unofficial]
-RATE_MAP = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
+**Parameters:**
+*   **Default Sampling Rate:** $(1, 1, 1)$ [S2].
+*   **Anisotropic Example:** For `Phantom/CT.Head.char.tif`, a rate of $(1, 1, 3.32)$ improves quality [S2].
 
-def compute_dt_scale(rate_index: int) -> float:
-    """
-    Computes the dt_scale parameter for the shader based on the UI slider index.
-    """
-    if rate_index < 0 or rate_index >= len(RATE_MAP):
-        raise ValueError("Invalid rate index")
-    
-    sampling_rate = RATE_MAP[rate_index]
-    # dt_scale is the inverse of the sampling rate [S1, unofficial]
-    dt_scale = 1.0 / sampling_rate
-    return dt_scale
-
-def apply_adaptive_settings(rate_index: int, is_adaptive: bool):
-    """
-    Applies the sampling rate control and viewport resolution settings.
-    """
-    dt_scale = compute_dt_scale(rate_index)
-    
-    # Pass dt_scale to the shader uniform
-    # shader.set_uniform("dt_scale", dt_scale)
-    
-    if is_adaptive:
-        # Enable adaptive resolution and set max limit [S1, unofficial]
-        # viewport.setAdaptiveResolution(True)
-        # viewport.setMaxResolution(...)
-        pass
-```
-
-**Edge Cases:**
-- `rate_index` out of bounds: Must be clamped or rejected.
-- Zero sampling rate: The map ensures $R \ge 0.25$, preventing division by zero.
+**Edge Cases and Pitfalls:**
+*   **Undersampling:** Zooming into volume data causes artifacts if the sampling rate is not increased [S2].
+*   **Anisotropy:** Fixed isotropic rates fail on anisotropic data; varying rates are required [S2].
+*   **Performance:** High sampling rates significantly increase frame time [S3].
 
 ## Subtopics
 
 ### Dense Sampling for Multidimensional Transfer Functions
-A rendering strategy requiring dense sampling of voxel data to ensure smooth boundaries when using multidimensional transfer functions, as neighboring voxels may differ in additional dimensions [S2]. It sets apart by mandating high sample counts (3-6 per voxel) specifically for frozen high-quality renders to handle complex transfer function boundaries [S2]. Choose this when visual fidelity of multidimensional data is critical and interaction latency is not a concern [S2].
+A strategy requiring dense sampling (3–6 samples per voxel) to ensure smooth boundaries when using multidimensional transfer functions, as neighboring voxels may differ in additional dimensions [S3]. It is chosen for high-quality frozen renderings but is too slow for interaction, where the rate is lowered and rerendered after actions [S3]. For a 256x256x128 volume, frame updates can take nearly a second at this rate [S3].
 
 ## Operating characteristics
-- **Time Complexity:** Frame updates can take nearly a second for a moderately sized volume (256x256x128) with shading and shadows at 3-6 samples per voxel [S2].
-- **Memory:** Not given in the sources.
-- **Scaling:** Performance degrades linearly with sample rate and volume size [S2].
-- **Strengths:** Ensures smooth boundaries for multidimensional transfer functions [S2].
-- **Limitations:** High computational cost for interactive frame rates [S2].
-- **When to use:** High-quality frozen renderings with multidimensional transfer functions [S2].
-- **When not:** Interactive exploration where lower sample rates are acceptable during interaction [S2].
+*   **Time Complexity:** Increases linearly with sampling rate. High rates (3-6 samples/voxel) can result in frame times of nearly one second for moderate volumes (256x256x128) [S3].
+*   **Memory Complexity:** Not specified.
+*   **Strengths:** Removes undersampling artifacts during zoom; handles anisotropic data effectively [S2].
+*   **Limitations:** High computational cost at high sampling rates; requires manual tuning for anisotropic datasets [S2][S3].
+*   **When to use:** When zooming into data or rendering anisotropic volumes with multidimensional transfer functions [S2][S3].
+*   **When not to use:** During interactive exploration where frame rate is critical, unless combined with interaction-specific lowering [S3].
 
 ## Background
-The concept of adaptive sampling rates in the context of multidimensional transfer functions was discussed in relation to interactive volume rendering, noting the need to lower sample rates during interaction and rerender at higher rates after actions are completed [S2]. The specific implementation of `dt_scale` control via a slider is documented in a WebGL volume rendering repository [S1, unofficial].
+The concept of controlling sampling rate for polygonization of volumetric geometry is described in the SGI Texture Mapping Render Action documentation [S2]. The specific application of dense sampling for multidimensional transfer functions was discussed in research on interactive volume rendering to handle complex classification boundaries [S3]. The `dt_scale` parameter approach is found in WebGL volume rendering implementations [S1, unofficial].
 
 ## Sources
 [S1] termijn/webgl-volumerendering, https://github.com/termijn/webgl-volumerendering, fetched 2026-10-27 (unofficial)
-[S2] Multidimensional Transfer Functions for Interactive Volume ..., https://www.academia.edu/5403340/Multidimensional_Transfer_Functions_for_Interactive_Volume_Rendering, fetched 2026-11-01
+[S2] Chapter 4. Texture Mapping Render Action, https://techpubs.jurassic.nl/library/manuals/4000/007-4389-010/sgi_html/ch04.html, fetched 2026-10-27
+[S3] Multidimensional Transfer Functions for Interactive Volume ..., https://www.academia.edu/5403340/Multidimensional_Transfer_Functions_for_Interactive_Volume_Rendering, fetched 2026-11-01

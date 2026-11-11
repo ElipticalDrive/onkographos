@@ -32,7 +32,7 @@ The reflectance map is a lookup table (LUT) organized as six separate $n \times 
 *   **Table Size ($n$):** Determined by the bit precision. For 5 bits, $n=32$ [S2].
 
 **Edge Cases and Pitfalls**
-*   **Zero Gradient:** Gradient-based surface shading is not robust for homogeneous regions where the gradient magnitude is very low or zero, as the measurement is sensitive to noise [S1, book].
+*   **Zero Gradient:** Gradient-based surface shading is not robust for homogeneous regions where the gradient magnitude is very low or zero, as the measurement is sensitive to noise [S1, book][S2].
 *   **Performance:** Per-pixel cube map evaluation is significantly slower (up to three times) than evaluating dot products for a limited number of light sources in the fragment shader stage [S1, book].
 *   **Interpolation Artifacts:** Surface-based shading methods can suffer from artifacts caused by denormalization during interpolation if not handled correctly [S1, book].
 

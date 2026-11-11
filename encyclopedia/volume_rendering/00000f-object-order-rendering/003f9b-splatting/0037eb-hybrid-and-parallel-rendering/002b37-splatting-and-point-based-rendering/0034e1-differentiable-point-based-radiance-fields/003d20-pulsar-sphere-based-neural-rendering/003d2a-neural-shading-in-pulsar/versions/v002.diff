@@ -1,0 +1,118 @@
+--- v001.md
++++ v002.md
+@@ -12,6 +12,6 @@
+ 
+ **Data Structures:**
+-*   **Sphere Representation:** A set of spheres defined by position, radius, color, and opacity, as defined in [Pulsar Sphere-based Neural Rendering](9397-pulsar-sphere-based-neural-rendering.md).
+-*   **Neural Shading Network:** A fully-connected neural network (MLP). The source cites a design similar to Pix2PixHD with 15 feature channels [S1]. The exact input dimension is not specified, but it conditions on the view direction.
++*   **Sphere Representation:** A set of spheres defined by position, radius, color, and opacity, as defined in [Pulsar Sphere-based Neural Rendering](9397-pulsar-sphere-based-neural-rendering.md) [G].
++*   **Neural Shading Network:** A fully-connected neural network (MLP) with a design similar to Pix2PixHD featuring 15 feature channels [S1]. The exact input dimension is not specified, but it conditions on the view direction [S1].
+ 
+ **Algorithm Steps:**
+@@ -31,51 +31,39 @@
+ **Pseudocode:**
+ ```python
+-def neural_shading_in_pulsar(spheres, camera_params, view_directions, network):
+-    """
+-    spheres: List of sphere objects with attributes (position, radius, color, opacity)
+-    camera_params: Dict containing rotation R, translation t, intrinsic K
+-    view_directions: Tensor of shape (H, W, 3) containing normalized view vectors for each pixel
+-    network: Neural network instance (MLP)
+-    """
+-    # 1. Project spheres to screen space (Implementation details from parent article)
+-    screen_splats = project_spheres(spheres, camera_params)
+-    
+-    # 2. Initialize output image
+-    output_image = zeros_like(view_directions)
+-    
+-    # 3. Render and Shade
++def project_spheres(spheres, R, t, K, H, W):
++    screen_splats = []
++    for s in spheres:
++        center_cam = R @ s.position + t
++        ndc_x = (K[0][0] * center_cam[0] / center_cam[2]) + K[0][2]
++        ndc_y = (K[1][1] * center_cam[1] / center_cam[2]) + K[1][2]
++        px = ndc_x * W / 2
++        py = ndc_y * H / 2
++        screen_splats.append({'px': px, 'py': py, 'color': s.color, 'opacity': s.opacity, 'radius': s.radius})
++    return screen_splats
++
++def neural_shading_in_pulsar(spheres, R, t, K, H, W, network):
++    screen_splats = project_spheres(spheres, R, t, K, H, W)
++    output_image = [[0.0, 0.0, 0.0] for _ in range(H * W)]
+     for splat in screen_splats:
+-        # Get the base color/feature from the sphere
+-        base_color = splat.color
+-        
+-        # Get view direction for the pixels covered by this splat
+-        # Note: In a real implementation, this requires mapping screen coordinates to view vectors
+-        local_view_dirs = get_view_directions_for_splat(splat, camera_params)
+-        
+-        # Condition the network on view direction
+-        # The network takes view direction and potentially sphere features as input
+-        shaded_color = network(local_view_dirs, base_color)
+-        
+-        # Blend shaded color into output image using Pulsar's order-independent blending
+-        output_image = blend(output_image, shaded_color, splat.opacity, splat.screen_coords)
+-        
++        for dy in range(-int(splat['radius']), int(splat['radius']) + 1):
++            for dx in range(-int(splat['radius']), int(splat['radius']) + 1):
++                px = int(splat['px'] + dx)
++                py = int(splat['py'] + dy)
++                if 0 <= px < W and 0 <= py < H:
++                    view_dir = normalize([(px - K[0][2]) / K[0][0], (py - K[1][2]) / K[1][1], 1.0])
++                    shaded_color = network(view_dir, splat['color'])
++                    idx = py * W + px
++                    output_image[idx][0] += shaded_color[0] * splat['opacity']
++                    output_image[idx][1] += shaded_color[1] * splat['opacity']
++                    output_image[idx][2] += shaded_color[2] * splat['opacity']
+     return output_image
+ 
+-def train_neural_shading(spheres, images, network, optimizer):
+-    """
+-    Optimizes sphere colors and network weights.
+-    """
+-    for iteration in range(num_iterations):
+-        # Forward pass
+-        rendered_image = neural_shading_in_pulsar(spheres, camera_params, view_directions, network)
+-        
+-        # Compute Losses
+-        l1_loss = L1Loss(rendered_image, ground_truth_image)
+-        perceptual_loss = PerceptualLoss(rendered_image, ground_truth_image)
+-        adversarial_loss = AdversarialLoss(rendered_image, discriminator)
+-        
++def train_neural_shading(spheres, images, network, optimizer, num_iterations):
++    for i in range(num_iterations):
++        rendered_image = neural_shading_in_pulsar(spheres, R, t, K, H, W, network)
++        l1_loss = sum(abs(rendered_image[p] - images[i][p]) for p in range(H*W)) / (H*W)
++        perceptual_loss = compute_perceptual_distance(rendered_image, images[i])
++        adversarial_loss = compute_adversarial_loss(rendered_image, discriminator(rendered_image))
+         total_loss = l1_loss + perceptual_loss + adversarial_loss
+-        
+-        # Back-propagate gradients through the shading model to optimize channel info
+         total_loss.backward()
+         optimizer.step()
+@@ -84,5 +72,5 @@
+ 
+ **Parameters:**
+-*   **Network Architecture:** Fully-connected network. Source cites a design with 15 feature channels [S1].
++*   **Network Architecture:** Fully-connected network with 15 feature channels [S1].
+ *   **Optimization:** Adam optimizer [S1].
+ *   **Training Data:** Synthetic scenes (e.g., 'chair' scene from NeRF dataset with 200 views) [S1].
+@@ -98,12 +86,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The neural shading step adds a forward pass through an MLP per pixel/splat. The source notes that Pulsar enables real-time rendering and optimization of representations with millions of spheres by limiting complexity in the projection step [S1].
+-*   **Memory Complexity:** Depends on the number of spheres and the size of the neural network. The source mentions models with up to 1.6 million spheres temporarily during refinement [S1].
+-*   **Performance:** Optimization of a coarse head model with 400k spheres took 73 seconds [S1]. Optimization of a scene with 2.1M spheres took 20 minutes on an NVIDIA V100 GPU [S1].
++*   **Time Complexity:** The neural shading step adds a forward pass through an MLP per pixel/splat [G].
++*   **Memory Complexity:** Depends on the number of spheres and the size of the neural network [G]. The source mentions models with up to 1.6 million spheres temporarily during refinement [S1].
++*   **Performance:** Optimization of a coarse head model with 400k spheres took 73 seconds [S1]. Optimization of a scene with 2.1M spheres took 20 minutes on an NVIDIA V100 GPU [S1]. Refinement of a 130k sphere model took 37 minutes [S1].
+ *   **Strengths:** Enables realistic modeling of view-dependent appearance (e.g., satin covers, hair, eyes) at high resolution [S1]. Decouples geometry and appearance [S1].
+ *   **Limitations:** Requires training with adversarial and perceptual losses, which can be complex to tune [S1].
+ 
+ ## Background
+-The method was introduced in the paper "Pulsar: Efficient Sphere-based Neural Rendering" [S1]. It was developed to showcase the potential of the Pulsar pipeline by combining sphere-based geometry projection with neural shading. The authors demonstrated the method on synthetic scenes like 'chair' (from the NeRF dataset) and real-world objects like hair and eyes, using datasets of 100 images at 800x1280 resolution [S1]. The approach allows for the separation of geometry projection and neural shading under challenging conditions [S1].
++The method was introduced in the paper "Pulsar: Efficient Sphere-based Neural Rendering" [S1]. It was developed to showcase the potential of the Pulsar pipeline by combining sphere-based geometry projection with neural shading [S1]. The authors demonstrated the method on synthetic scenes like 'chair' (from the NeRF dataset) and real-world objects like hair and eyes, using datasets of 100 images at 800x1280 resolution [S1]. The approach allows for the separation of geometry projection and neural shading under challenging conditions [S1].
+ 
+ ## Sources

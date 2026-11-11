@@ -1,0 +1,150 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This article details the specific hyperparameters, data preprocessing, and hardware configurations required to train neural volume rendering models, focusing on the implicit neural representation (INR) approach for medical volume data [S1]. It establishes the baseline training loop for reconstructing high-resolution volumes from downsampled inputs using an L1 loss and Adam optimizer [S1]. A minor variant, Mobile-GS, adapts this setup for 3D Gaussian Splatting with distillation and quantization [S2, unofficial].
++This article details the hyperparameters, data preprocessing, and hardware configurations required to train neural volume rendering models, focusing on the implicit neural representation (INR) approach for medical volume data [S1]. It establishes the baseline training loop for reconstructing high-resolution volumes from downsampled inputs using an L1 loss and Adam optimizer [S1]. A minor variant, Mobile-GS, adapts this setup for 3D Gaussian Splatting with distillation and quantization [S2, unofficial].
+ 
+ ## How it works
+@@ -12,7 +12,7 @@
+ 
+ **Data Structures and Preprocessing:**
+-1.  **Normalization:** Scale voxel values of $x$ to the range $[0, 1]$ [S1].
+-2.  **Patch Segmentation:** Segment the normalized volume into non-overlapping patches of size $64 \times 64 \times 64$ [S1].
+-3.  **HR Patch Selection:** Calculate the ratio of non-zero voxels in each patch. Classify a patch as High-Resolution (HR) if $\ge 70\%$ of its voxels are non-zero [S1]. Select one HR patch as the input for the training pipeline [S1].
++1. **Normalization:** Scale voxel values of $x$ to the range $[0, 1]$ [S1].
++2. **Patch Segmentation:** Segment the normalized volume into non-overlapping patches of size $64 \times 64 \times 64$ [S1].
++3. **HR Patch Selection:** Calculate the ratio of non-zero voxels in each patch. Classify a patch as High-Resolution (HR) if $\ge 70\%$ of its voxels are non-zero [S1]. Select one HR patch as the input for the training pipeline [S1].
+ 
+ **Training Loop Parameters:**
+@@ -26,4 +26,9 @@
+ *   **Framework:** PyTorch [S1].
+ 
++**Edge Cases and Pitfalls:**
++*   If the input volume has uniform voxel values, normalization requires a zero-division guard [G].
++*   Volume dimensions (e.g., $155 \times 240 \times 240$) may not be divisible by the patch size ($64$), requiring boundary handling during segmentation [S1].
++*   If no patch meets the $70\%$ non-zero threshold, the pipeline fails to select an input [G].
++
+ **Pseudocode:**
+ ```python
+@@ -32,73 +37,45 @@
+ import torch.optim as optim
+ 
+-def preprocess_volume(volume):
+-    """
+-    Preprocesses a 3D medical volume for training.
+-    Args:
+-        volume (torch.Tensor): Input volume of shape (D, H, W).
+-    Returns:
+-        torch.Tensor: Selected high-resolution patch.
+-    """
+-    # Normalize to [0, 1]
++def preprocess_and_select_patch(volume: torch.Tensor) -> torch.Tensor:
++    # 1. Normalize to [0, 1]
+     min_val = volume.min()
+     max_val = volume.max()
+     if max_val == min_val:
+-        return volume # Avoid division by zero
+-    normalized = (volume - min_val) / (max_val - min_val)
+-    
+-    # Segment into 64x64x64 patches
+-    # Assuming volume dimensions are divisible by 64 for simplicity
++        normalized = torch.zeros_like(volume)  # Guard for constant volume [G]
++    else:
++        normalized = (volume - min_val) / (max_val - min_val)
++
++    # 2. Segment into 64x64x64 patches
++    patch_size = 64
+     D, H, W = normalized.shape
+-    patch_size = 64
+     patches = []
+-    
+     for d in range(0, D, patch_size):
+         for h in range(0, H, patch_size):
+             for w in range(0, W, patch_size):
+-                patch = normalized[d:d+patch_size, h:h+patch_size, w:w+patch_size]
+-                # Check if patch is HR (>= 70% non-zero)
++                d_end = min(d + patch_size, D)
++                h_end = min(h + patch_size, H)
++                w_end = min(w + patch_size, W)
++                patch = normalized[d:d_end, h:h_end, w:w_end]
++                # 3. HR Patch Selection: >= 70% non-zero
+                 non_zero_ratio = (patch != 0).sum() / patch.numel()
+                 if non_zero_ratio >= 0.7:
+                     patches.append(patch)
+-    
+-    # Select one HR patch
++
+     if not patches:
+-        raise ValueError("No High-Resolution patches found")
+-    selected_patch = patches[0]
+-    return selected_patch
++        raise ValueError("No High-Resolution patches found")  # Guard [G]
++    return patches[0]
+ 
+-def train_neural_volume_model(model, input_patch, epochs=5000, lr=0.0015):
+-    """
+-    Trains the neural volume model using L1 loss.
+-    """
++def train_loop(model, x: torch.Tensor, epochs: int = 5000, lr: float = 0.0015):
+     optimizer = optim.Adam(model.parameters(), lr=lr)
+     criterion = nn.L1Loss()
+-    
+-    # Move to device (e.g., CUDA)
+     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+-    model.to(device)
+-    input_patch = input_patch.to(device)
+-    
++    model, x = model.to(device), x.to(device)
++
+     for epoch in range(epochs):
+         optimizer.zero_grad()
+-        # Forward pass: input_patch -> reconstructed volume y
+-        # Note: The specific architecture (CNN/Attention) is defined in the parent model
+-        reconstructed_volume = model(input_patch)
+-        
+-        # Loss calculation
+-        loss = criterion(reconstructed_volume, input_patch)
+-        
+-        # Backward pass
++        y = model(x)  # Forward pass
++        loss = criterion(y, x)  # L1 loss between y and x
+         loss.backward()
+         optimizer.step()
+-        
+-        if (epoch + 1) % 1000 == 0:
+-            print(f"Epoch {epoch+1}, Loss: {loss.item():.4f}")
+-
+-# Example Usage
+-# volume_data = load_medical_scan("patient_flair.nii")
+-# hr_patch = preprocess_volume(volume_data)
+-# model = NeuralVolumeArchitecture()
+-# train_neural_volume_model(model, hr_patch)
+ ```
+ 
+@@ -106,17 +83,16 @@
+ 
+ ### Mobile-GS Training Setup
+-A variant for 3D Gaussian Splatting on mobile devices [S2, unofficial]. It initializes the MLP $\phi$ to output 1 to stabilize training [S2, unofficial]. It uses Mini-Splatting as a teacher model for distillation [S2, unofficial]. Neural vector quantization is launched at iteration 35,000 [S2, unofficial]. It adopts multi-view training for stronger constraints [S2, unofficial]. Training runs for 60,000 iterations on an RTX 3090 GPU using PyTorch [S2, unofficial].
++A variant for 3D Gaussian Splatting on mobile devices [S2, unofficial]. It initializes the MLP $\phi$ to output $1$ to stabilize training [S2, unofficial]. It uses Mini-Splatting as a teacher model for distillation [S2, unofficial]. Neural vector quantization is launched at iteration $35,000$ [S2, unofficial]. It adopts multi-view training for stronger constraints [S2, unofficial]. Training runs for $60,000$ iterations on an RTX 3090 GPU using PyTorch [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Performance:** The method is designed to reduce data size while preserving essential information for medical imaging [S1].
+-*   **Strengths:** Normalization and patching streamline computations [S1]. L1 loss is robust for reconstruction quality assessment [S1].
+-*   **Limitations:** The downsampling scale is fixed (1/2, 1/4, 1/8) and not learned, which may limit adaptability [S1].
++*   **Time Complexity:** Not given in the sources. [S1]
++*   **Memory Complexity:** Not given in the sources. [S1]
++*   **Performance:** The method reduces data size while preserving essential information for medical imaging [S1].
++*   **Strengths:** Normalization and patching streamline computations [S1].
++*   **Limitations:** The downsampling scale is fixed ($1/2$, $1/4$, and $1/8$) and not learned, which limits adaptability [S1].
+ *   **When to use:** When training INR-based volume reconstruction on medical data with limited computational resources (e.g., single GPU) [S1].
+-*   **When not to use:** When dynamic resolution scaling or learned downsampling is required [S1].
+ 
+ ## Background
+-The method originates from research on end-to-end implicit neural representation architectures for medical volume data [S1]. It addresses the challenge of compressing and reconstructing high-resolution 3D medical scans (like FLAIR MRI) efficiently [S1]. The approach combines Fourier-based downsampling with CNN-based upsampling and attention mechanisms [S1]. The Mobile-GS variant extends these principles to real-time Gaussian Splatting for mobile deployment [S2, unofficial].
++The method is based on an end-to-end implicit neural representation architecture for medical volume data [S1]. It addresses the challenge of compressing and reconstructing high-resolution 3D medical scans (like FLAIR MRI) efficiently [S1]. The pipeline combines a non-trainable 3D downsampling module (Fourier Transform, low-pass filter, Inverse Fourier Transform) with a CNN and attention mechanism for super-resolution [S1]. The Mobile-GS variant extends these principles to real-time Gaussian Splatting for mobile deployment [S2, unofficial].
+ 
+ ## Sources

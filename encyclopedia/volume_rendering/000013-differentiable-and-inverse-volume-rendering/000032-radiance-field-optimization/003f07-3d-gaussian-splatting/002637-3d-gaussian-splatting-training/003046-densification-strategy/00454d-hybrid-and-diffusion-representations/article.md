@@ -1,135 +1,30 @@
 # Hybrid and Diffusion Representations
 
-Also called: TriplaneGaussian, GaussianDiffusion, Text2Immersion
+Also called: Generative 3D Gaussian Splatting, Gaussian Diffusion, Triplane Gaussian
 
 ## Overview
-This family addresses the problem of generating 3D Gaussian Splatting (3DGS) representations from limited input data, such as a single image or text prompt, where traditional inverse rendering is ill-posed or computationally prohibitive [S1]. It sets itself apart from sibling methods like [Score-based Densification](4705-score-based-densification.md) by replacing iterative gradient-based densification with learned generative priors (diffusion or feed-forward transformers) to synthesize the initial Gaussian set directly [S1].
+Hybrid and Diffusion Representations extend 3D Gaussian Splatting (3DGS) from a discriminative reconstruction technique to a generative framework, enabling scene synthesis from single images or text prompts without iterative per-scene optimization. Unlike standard differentiable training loops that optimize Gaussian parameters via gradient descent to fit observed views, these methods employ feed-forward networks or diffusion models to directly predict Gaussian attributes [S1]. This approach solves the latency bottleneck of inverse rendering while addressing generation-specific artifacts such as the "Janus problem" (geometric inconsistency across viewpoints) and "floaters" (spurious low-opacity primitives) [S1].
 
 ## Shared principles
-All methods in this family operate within the differentiable training loop of 3D Gaussian Splatting. They share the following core mechanisms:
-
-1.  **Trigger Condition:** Densification is not performed at every optimization step. It is triggered periodically (e.g., every `refineEvery` steps) after a warm-up period and before a stopping threshold (e.g., `stopSplitAt`) to allow the optimizer to stabilize [Parent][S5].
-2.  **Metric Computation:** A score is computed for each Gaussian $\mathcal{G}_i$ to determine its contribution to the reconstruction error. Common metrics include:
-    *   **Gradient Norm:** The magnitude of the gradient of the loss with respect to the Gaussian's 2D mean position ($\nabla_{\mu_{2D}}$) [Parent][S5].
-    *   **Screen Size:** The projected area of the Gaussian in pixel space. Gaussians that are too small may not capture detail, while those that are too large may oversmooth [Parent].
-    *   **Opacity:** The current opacity $\alpha_i$ of the Gaussian. Low opacity often indicates redundancy or "floaters" [Parent].
-    *   **Saliency/Loss Contribution:** Aggregated loss or gradient magnitude over the pixels covered by the Gaussian [S1].
-3.  **Action (Split/Clone/Prune):**
-    *   **Split:** A Gaussian is replaced by two new Gaussians. The new means are derived from the original mean plus/minus a perturbation along the principal axes of the covariance matrix. The new scales are typically reduced by a factor (e.g., 1.6) [Parent][S1].
-    *   **Clone:** A copy of the Gaussian is created with a small random perturbation to its mean to fill gaps without reducing scale [Parent][S1].
-    *   **Prune:** Gaussians failing specific criteria (e.g., low opacity, low significance) are removed from the active set [Parent].
-4.  **Opacity Management:** To prevent over-densification and stabilize training, opacities of newly created Gaussians are initialized to a low value (e.g., logit -1.386) [Parent][S1]. Some methods use opacity splitting formulas to maintain transmittance consistency during cloning [S5].
-5.  **Data Structure Management:** The set of Gaussians is stored in GPU buffers. Densification requires managing buffer capacity (often pre-allocated to be at least 3x the initial count) and performing compaction to remove pruned primitives [Parent][S4].
+The family shares a departure from the iterative densification loop described in [Densification Strategy](6234-densification-strategy.md). Instead of computing gradient norms or opacity metrics to trigger split/clone actions, these methods rely on learned priors:
+1.  **Generative Prior:** A neural network (e.g., transformer, U-Net, or diffusion model) is trained to map input conditions (image features, text embeddings) to Gaussian parameters or a structured latent representation (e.g., Tri-planes, GaussianCube).
+2.  **Direct Prediction:** The output is a complete set of Gaussians $\mathcal{G} = \{ \mu_i, \Sigma_i, \alpha_i, c_i \}$ predicted in a single forward pass, bypassing the need for per-scene gradient descent [S1].
+3.  **Artifact Mitigation:** Specific architectural choices (structured noise, variational objectives) are employed to enforce multi-view consistency and suppress spurious geometry, which are common failure modes in naive generative 3DGS [S1].
 
 ## Subtopics
 
 ### [TriplaneGaussian](7558-triplanegaussian.md)
-TriplaneGaussian is a feed-forward method for generating 3D Gaussian Splatting (3DGS) representations from a single input image. It solves the problem of single-image 3D reconstruction by proposing a hybrid representation that combines a point cloud with a tri-plane encoding of Gaussian attributes. It sets itself apart from sibling methods like [GaussianDiffusion](9190-gaussiandiffusion.md) by using a deterministic transformer-based decoder and tri-plane feature querying rather than a diffusion process, and from [Hybrid and Diffusion Representations](11473-hybrid-and-diffusion-representations.md) generally by explicitly decoupling geometry (point cloud) and attributes (tri-plane) before merging them.
-
-**Inputs and Outputs:**
-*   **Input:** A single RGB image $I$.
-*   **Output:** A set of 3D Gaussians $\mathcal{G} = \{g_i\}$, where each Gaussian $g_i$ is defined by center $\mathbf{c}_i$, covariance $\mathbf{\Sigma}_i$, opacity $\alpha_i$, and spherical harmonic coefficients $\mathbf{c}_{SH}$.
-
-**Data Structures:**
-1.  **Point Cloud:** A set of 3D points $\mathbf{P} = \{\mathbf{p}_j\}$ representing the initial geometry.
-2.  **Tri-Plane:** Three 2D feature planes $\mathcal{T} = \{T_x, T_y, T_z\}$, each of size $H_T \times W_T \times C_T$, encoding attribute information.
-3.  **Image Features:** Intermediate features extracted from the input image $I$ via a backbone network (e.g., ViT or ResNet), denoted as $F_{img}$.
-
-**Parameters:**
-*   $N_{coarse}$: Number of initial Gaussians generated by the coarse stage.
-*   $N_{final}$: Number of Gaussians after upsampling.
-*   $H_T, W_T$: Resolution of the tri-planes.
-*   $C_T$: Channel dimension of the tri-planes.
-*   Typical values are not given in the sources.
-
-**Steps:**
-1.  **Feature Extraction:** Extract image features $F_{img}$ from the input image $I$ using a backbone network.
-2.  **Coarse Generation:**
-    a.  Generate a coarse point cloud $\mathbf{P}_{coarse}$ and a coarse tri-plane $\mathcal{T}_{coarse}$ from $F_{img}$ using a transformer-based point cloud decoder and a tri-plane decoder, respectively.
-    b.  The point cloud $\mathbf{P}_{coarse}$ is densified through an upsampling method to increase point density.
-    c.  Project the densified points $\mathbf{P}_{coarse}$ onto the tri-plane $\mathcal{T}_{coarse}$ to query features. For each point $\mathbf{p}_j = (x_j, y_j, z_j)$, sample features from $T_x, T_y, T_z$ at coordinates $(x_j, y_j), (x_j, z_j), (y_j, z_j)$.
-    d.  Augment the queried tri-plane features with the projected image features $F_{img}$.
-    e.  Translate the augmented features into 3D Gaussian attributes (center, covariance, opacity, SH) using a Multi-Layer Perceptron (MLP). This produces a coarse 3DGS representation $\mathcal{G}_{coarse}$.
-3.  **Super-Resolution:**
-    a.  Upsample the coarse 3DGS $\mathcal{G}_{coarse}$ through a U-Net-based super-resolution module to improve fidelity.
-    b.  The output is the final 3DGS representation $\mathcal{G}_{final}$.
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def triplane_gaussian_generate(image: Tensor) -> List[Gaussian]:
-    # 1. Extract image features
-    # Backbone is not specified, assumed to return features F_img
-    F_img = extract_image_features(image)
-    
-    # 2. Coarse Generation
-    # Decoders are not specified in detail, assumed to return point cloud and tri-plane
-    P_coarse, T_coarse = generate_coarse_representation(F_img)
-    
-    # Densify point cloud
-    P_densified = upsample_point_cloud(P_coarse)
-    
-    # Query tri-plane features for each point
-    # For each point p in P_densified, sample from Tx, Ty, Tz
-    T_features = query_triplane_features(P_densified, T_coarse)
-    
-    # Augment with image features
-    # Projection of image features to match T_features dimensionality is implied
-    F_augmented = augment_features(T_features, F_img)
-    
-    # Translate to Gaussian attributes
-    G_coarse = attributes_mlp(F_augmented)
-    
-    # 3. Super-Resolution
-    G_final = super_resolution_module(G_coarse)
-    
-    return G_final
-```
-
-**Edge Cases and Pitfalls:**
-*   The sources do not specify handling for degenerate input images or occlusions.
-*   Precision of the tri-plane sampling coordinates is not detailed.
+TriplaneGaussian is a feed-forward method for generating 3D Gaussian Splatting representations from a single input image. It solves the problem of single-image 3D reconstruction by combining a transformer-based point cloud decoder with a tri-plane feature encoding scheme. Unlike standard differentiable training loops that optimize Gaussian parameters via gradient descent, TriplaneGaussian directly predicts Gaussian attributes through a hybrid generative network, enabling fast inference without iterative optimization. It is distinguished from sibling methods like AGG by its specific architecture of projecting a densified point cloud onto tri-plane features to query and augment attributes, whereas AGG generates a coarse 3DGS first and upsamples it via a U-Net. See [TriplaneGaussian](7558-triplanegaussian.md) for implementation details.
 
 ### [GaussianDiffusion](9190-gaussiandiffusion.md)
-GaussianDiffusion is a method that trains a 3D diffusion model based on a GaussianCube representation. It addresses the "Janus problem" (inconsistent geometry from different viewpoints) by incorporating structured noises from multiple viewpoints and mitigates "floaters" (spurious artifacts) by using variational 3D Gaussian Splatting (3DGS). It differs from standard 3DGS generation by replacing the direct Gaussian parameterization with a voxelized, constant-size representation derived via optimal transport.
-
-**Inputs:** A set of 2D images or a text prompt (for text-to-3D), and a target number of Gaussians $N$.
-**Outputs:** A set of 3D Gaussians $\{G_i\}_{i=1}^N$ defined by position $\mathbf{t}_i$, covariance $\mathbf{\Sigma}_i$, opacity $\alpha_i$, and spherical harmonics coefficients $\mathbf{c}_i$.
-
-**Data Structures:**
-1.  **GaussianCube:** A voxel grid representation. The sources do not specify the exact voxel resolution or the bit-packing layout of the Gaussian attributes within the voxels.
-2.  **Diffusion Model:** A standard 3D diffusion model (e.g., U-Net) conditioned on the GaussianCube.
-
-**Steps:**
-1.  **Initialization:** Start with a constant number of Gaussians $N$.
-2.  **Voxelization via Optimal Transport:** Convert the $N$ Gaussians into the GaussianCube representation. This involves mapping the continuous Gaussian parameters to a discrete voxel grid using optimal transport to minimize reconstruction error. The exact cost function and transport algorithm are not specified in the sources.
-3.  **Diffusion Training:** Train the 3D diffusion model to predict the GaussianCube.
-    *   **Structured Noise:** During the diffusion process, add structured noise derived from multiple viewpoints to the latent space. This encourages consistency across views.
-    *   **Variational 3DGS:** Use a variational formulation of 3DGS during the denoising or reconstruction phase to regularize the output and reduce floaters.
-4.  **Inversion/Generation:** Use DDIM inversion (replacing DDPM) to invert the diffusion process. Supervision is applied from interval steps of the diffusion process to avoid high error in one-step reconstruction.
-5.  **Reconstruction:** Convert the denoised GaussianCube back to a set of 3D Gaussians. The exact inverse mapping (de-voxelization) is not specified in the sources.
-
-**Parameters:**
-*   Number of Gaussians $N$: Not given in the sources.
-*   Diffusion steps: Not given in the sources.
-*   Guidance scale: Not given in the sources.
-
-**Edge Cases and Pitfalls:**
-*   **Janus Problem:** Without structured noise, the model may generate inconsistent geometry from different viewpoints.
-*   **Floaters:** Without variational 3DGS, the generated scene may contain spurious, low-opacity artifacts.
-*   **Optimal Transport Complexity:** The computational cost of optimal transport for voxelization is not quantified but is a potential bottleneck.
+GaussianDiffusion is a method that trains a 3D diffusion model based on a **GaussianCube** representation. It addresses the "Janus problem" (inconsistent geometry across viewpoints) and the generation of "floaters" (spurious, low-opacity primitives) common in 3D Gaussian Splatting (3DGS) generation. It sets itself apart from standard 3DGS training by incorporating structured multi-view noise into the diffusion process and using variational 3DGS principles to mitigate floaters. See [GaussianDiffusion](9190-gaussiandiffusion.md) for implementation details.
 
 #### Text2Immersion
-**definition**
-- [S1] A scene generation method similar to LucidDreamer but with outlier removal and two-stage optimization.
-
-**step**
-- [S1] A process removes outliers in the point cloud.
-- [S1] 3DGS optimization has two stages: training coarse 3DGS and refinement.
+*   **Definition:** A scene generation method similar to LucidDreamer but with outlier removal and two-stage optimization [S1].
+*   **Process:** A process removes outliers in the point cloud [S1]. 3DGS optimization has two stages: training coarse 3DGS and refinement [S1].
 
 ## Background
-The methods in this family emerged as solutions to the limitations of traditional inverse volume rendering for novel view synthesis from single images or text prompts. Traditional 3DGS requires multiple input views to optimize geometry and appearance, which is not always available. Hybrid representations like TriplaneGaussian leverage feed-forward neural networks to predict Gaussian attributes directly from image features, bypassing the need for iterative optimization [S1]. Diffusion-based approaches like GaussianDiffusion utilize the power of generative models to synthesize plausible 3D structures, addressing issues like the Janus problem through structured noise and variational formulations [S1]. Text2Immersion represents an earlier approach in this lineage, focusing on outlier removal and staged optimization to refine generated point clouds into 3DGS representations [S1]. These methods are primarily used in text-to-3D and image-to-3D generation pipelines where rapid synthesis or single-view reconstruction is required.
+The integration of generative models with 3D Gaussian Splatting emerged as a solution to the high computational cost of per-scene optimization. Early works like TriplaneGaussian [26] and AGG [278] introduced hybrid architectures that predict Gaussian attributes from image features, enabling single-image 3D reconstruction [S1]. Subsequent research, such as GaussianDiffusion, applied diffusion models to structured Gaussian representations (GaussianCube) to improve geometric consistency and reduce artifacts like floaters [S1]. The field has expanded to include text-to-3D methods (e.g., Text2Immersion, GALA3D, DreamScene) that leverage diffusion priors for scene composition and generation [S1].
 
 ## Sources
 [S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

@@ -1,0 +1,195 @@
+# Camera Preconditioning
+
+Also called: Camera Preconditioning for Neural Radiance Fields
+
+## Overview
+Camera Preconditioning (CamP) is a technique that normalizes and decorrelates camera parameters during Neural Radiance Field (NeRF) optimization by transforming the optimization problem from direct camera parameters to latent preconditioned parameters [S1]. It addresses the ill-conditioning caused by mixed units (e.g., translation in world units vs. focal length in pixels) and spurious correlations between parameters, which cause naive optimization to converge slowly or inaccurately [S1]. Unlike per-parameter scaling or adaptive optimizers like Adam, which may ignore sensitivity differences or fail to decouple correlated coefficients, CamP uses a preconditioner derived from the covariance of projection derivatives to ensure uniform sensitivity across all parameter dimensions [S1].
+
+## How it works
+### Inputs and Outputs
+*   **Inputs:**
+    *   A set of $N$ cameras, each defined by a parameter vector $\boldsymbol{\phi}_i \in \mathbb{R}^k$ (e.g., SE3 screw-axis plus focal length bias) [S1].
+    *   A set of $m$ proxy 3D points $\{\mathbf{x}_j\}_{j=1}^m$ sampled within the frustum of each camera [S1].
+    *   Hyperparameters $\lambda$ and $\mu$ for matrix dampening [S1].
+*   **Outputs:**
+    *   Preconditioned camera parameters $\tilde{\boldsymbol{\phi}}_i$ optimized during training [S1].
+    *   The mapping from $\tilde{\boldsymbol{\phi}}_i$ to the actual camera parameters $\boldsymbol{\phi}_i$ used in the NeRF [S1].
+
+### Data Structures
+*   **Camera Parameter Vector $\boldsymbol{\phi}_i$:** A vector of size $k$. For an SE3 screw-axis representation augmented with additive focal length bias, $k=7$ (6 for pose, 1 for focal length) [S1].
+*   **Preconditioner Matrix $P_i^{-1}$:** A $k \times k$ matrix derived from the covariance of projection derivatives [S1].
+*   **Covariance Matrix $\Sigma_{\Pi}$:** A $k \times k$ symmetric positive semi-definite matrix representing the covariance of the derivatives of projected points with respect to camera parameters [S1].
+
+### Numbered Steps
+
+1.  **Proxy Point Sampling:** For each camera $i$, randomly sample $m$ 3D points $\{\mathbf{x}_j\}_{j=1}^m$ within the camera's frustum. These points serve as a proxy for the scene content [S1].
+2.  **Projection Derivative Computation:** Compute the projection of these points using the current camera parameters $\boldsymbol{\phi}_i$. Let $\Pi(\mathbf{x}; \boldsymbol{\phi}_i)$ be the projection function mapping a 3D point to 2D image coordinates. Compute the Jacobian matrix $J_{\Pi}$ of size $2m \times k$, where each row corresponds to the gradient of the 2D projection of a point with respect to the $k$ camera parameters [S1].
+    $$ J_{\Pi} = \begin{pmatrix} \frac{\partial \Pi(\mathbf{x}_1)}{\partial \boldsymbol{\phi}_i} \\ \vdots \\ \frac{\partial \Pi(\mathbf{x}_m)}{\partial \boldsymbol{\phi}_i} \end{pmatrix} $$
+3.  **Covariance Matrix Estimation:** Compute the covariance matrix $\Sigma_{\Pi}$ of the projection derivatives:
+    $$ \Sigma_{\Pi} = J_{\Pi}^\top J_{\Pi} $$
+    This matrix captures how perturbations in each camera parameter affect the projected points, including correlations between parameters [S1].
+4.  **Preconditioner Derivation:** Compute the preconditioner matrix $P_i^{-1}$ using the Zero Component Analysis (ZCA) whitening transform, with dampening for numerical stability:
+    $$ P_i^{-1} = (\Sigma_{\Pi} + \lambda \text{diag}(\Sigma_{\Pi}) + \mu I)^{-1/2} $$
+    where $\lambda$ and $\mu$ are small hyperparameters, and $I$ is the identity matrix [S1]. The term $(\cdot)^{-1/2}$ denotes the inverse matrix square root.
+5.  **Latent Parameter Initialization:** Initialize the latent preconditioned parameters $\tilde{\boldsymbol{\phi}}_i$ for each camera. These are the parameters actually optimized by the optimizer (e.g., Adam) [S1].
+6.  **Optimization Loop:**
+    a. For each training step, retrieve the current latent parameters $\tilde{\boldsymbol{\phi}}_i$.
+    b. Transform them to the actual camera parameters $\boldsymbol{\phi}_i$ used by the NeRF:
+    $$ \boldsymbol{\phi}_i = P_i^{-1} \tilde{\boldsymbol{\phi}}_i $$
+    c. Render the image using $\boldsymbol{\phi}_i$ and compute the loss $\mathcal{L}$ [S1].
+    d. Compute gradients $\nabla_{\tilde{\boldsymbol{\phi}}_i} \mathcal{L}$ with respect to the latent parameters.
+    e. Update $\tilde{\boldsymbol{\phi}}_i$ using the optimizer [S1].
+
+### Formulas
+*   **Preconditioner (ZCA Whitening):**
+    $$ P^{-1} = \Sigma_{\Pi}^{-1/2} = (J_{\Pi}^\top J_{\Pi})^{-1/2} $$
+    This ensures that the transformed covariance $\Sigma_{\tilde{\Pi}} = I_k$ [S1].
+*   **Dampened Preconditioner:**
+    $$ P^{-1} = (\Sigma_{\Pi} + \lambda \text{diag}(\Sigma_{\Pi}) + \mu I)^{-1/2} $$
+    This improves conditioning, especially for parameters like lens distortion [S1].
+*   **Parameter Transformation:**
+    $$ \boldsymbol{\phi} = P^{-1} \tilde{\boldsymbol{\phi}} $$
+    Substituting this into the projection function $\Pi(P^{-1}\tilde{\boldsymbol{\phi}})$ results in a transformed Jacobian $\tilde{J}_{\Pi} = J_{\Pi} P^{-1}$ with identity covariance [S1].
+
+### Parameters
+*   $\lambda$: Hyperparameter for dampening the diagonal of $\Sigma_{\Pi}$. Not given in the sources.
+*   $\mu$: Hyperparameter for dampening $\Sigma_{\Pi}$ with the identity matrix. Not given in the sources.
+*   Learning Rate for Camera Parameters: Logarithmically decays from $10^{-3}$ to $10^{-4}$ over training [S1].
+
+### Edge Cases and Pitfalls
+*   **Dynamic Reparameterization:** Dynamically updating the preconditioner during optimization is avoided because it renders the running averages of gradient moments used in optimizers like Adam inaccurate [S1]. The preconditioner is typically computed once at initialization [S1].
+*   **Lens Distortion:** Lens distortion parameters can cause very small changes to dramatically affect point projection, making $\Sigma_{\Pi}$ ill-conditioned. Dampening parameters $\lambda$ and $\mu$ are especially important in this case [S1].
+*   **Local Minima:** Bad camera poses can cause the model to block parts of the scene (e.g., white floaters in synthetic datasets). Using feature points from Structure-from-Motion (SfM) to compute the preconditioner may improve results [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_preconditioner(camera_params, proxy_points, lambda_damp, mu_damp):
+    """
+    Computes the preconditioner matrix P_inv for a single camera.
+    
+    Args:
+        camera_params: Array of shape (k,), current camera parameters.
+        proxy_points: Array of shape (m, 3), 3D points in camera space.
+        lambda_damp: Scalar, diagonal dampening factor.
+        mu_damp: Scalar, identity dampening factor.
+        
+    Returns:
+        P_inv: Array of shape (k, k), the preconditioner matrix.
+    """
+    m, _ = proxy_points.shape
+    k = len(camera_params)
+    
+    # Compute projections and Jacobians
+    # Note: In practice, this requires the specific projection function and its gradient.
+    # Here we assume a function `project_and_jacobian` exists.
+    projections, jacobian = project_and_jacobian(camera_params, proxy_points)
+    
+    # jacobian shape: (m, 2, k) -> flatten to (2m, k)
+    jacobian_flat = jacobian.reshape(-1, k)
+    
+    # Compute covariance matrix Sigma_Pi = J^T J
+    sigma_pi = jacobian_flat.T @ jacobian_flat
+    
+    # Apply dampening
+    diag_sigma = np.diag(sigma_pi)
+    dampened_sigma = sigma_pi + lambda_damp * np.diag(diag_sigma) + mu_damp * np.eye(k)
+    
+    # Compute inverse square root (ZCA whitening)
+    # P_inv = (Sigma + dampening)^(-1/2)
+    # This can be computed via eigendecomposition: U D U^T = Sigma
+    # P_inv = U D^(-1/2) U^T
+    eigenvalues, eigenvectors = np.linalg.eigh(dampened_sigma)
+    
+    # Avoid division by zero
+    eigenvalues = np.maximum(eigenvalues, 1e-8)
+    
+    d_inv_sqrt = np.diag(1.0 / np.sqrt(eigenvalues))
+    p_inv = eigenvectors @ d_inv_sqrt @ eigenvectors.T
+    
+    return p_inv
+
+def optimize_cameras(cameras, proxy_points_per_camera, lambda_damp, mu_damp, optimizer, num_steps):
+    """
+    Optimizes camera parameters using Camera Preconditioning.
+    
+    Args:
+        cameras: List of initial camera parameter vectors.
+        proxy_points_per_camera: List of proxy point sets for each camera.
+        lambda_damp: Scalar, diagonal dampening factor.
+        mu_damp: Scalar, identity dampening factor.
+        optimizer: Optimizer instance (e.g., Adam).
+        num_steps: Number of optimization steps.
+        
+    Returns:
+        optimized_cameras: List of optimized latent camera parameters.
+    """
+    k = len(cameras[0])
+    n_cameras = len(cameras)
+    
+    # Initialize latent parameters
+    latent_cameras = [cam.copy() for cam in cameras]
+    
+    # Compute preconditioners once at initialization
+    preconditioners = []
+    for i in range(n_cameras):
+        p_inv = compute_preconditioner(cameras[i], proxy_points_per_camera[i], lambda_damp, mu_damp)
+        preconditioners.append(p_inv)
+        
+    # Optimization loop
+    for step in range(num_steps):
+        # Compute loss and gradients
+        loss = 0.0
+        gradients = [np.zeros(k) for _ in range(n_cameras)]
+        
+        for i in range(n_cameras):
+            # Transform latent parameters to actual camera parameters
+            actual_params = preconditioners[i] @ latent_cameras[i]
+            
+            # Render image and compute loss
+            # Note: This requires the NeRF rendering function
+            rendered_image = render_nerf(actual_params, scene_model)
+            gt_image = get_ground_truth(i)
+            loss += compute_loss(rendered_image, gt_image)
+            
+            # Compute gradient w.r.t. actual parameters
+            grad_actual = compute_gradient(rendered_image, gt_image, actual_params)
+            
+            # Transform gradient back to latent space
+            # grad_latent = P_inv^T @ grad_actual
+            # Since P_inv is symmetric, P_inv^T = P_inv
+            gradients[i] = preconditioners[i] @ grad_actual
+            
+        # Update latent parameters
+        for i in range(n_cameras):
+            latent_cameras[i] = optimizer.step(latent_cameras[i], gradients[i])
+            
+    return latent_cameras
+```
+
+## Subtopics
+
+### SE3 Screw-Axis Parameterization
+A method to represent camera pose using a 6D vector (rotation axis and translation) augmented with focal length bias. It is chosen for its compactness and differentiability. [Link to SE3 Screw-Axis Parameterization](link)
+
+### ZipNeRF
+A high-performance NeRF implementation using Hash Grids. CamP is implemented on top of ZipNeRF with a coarse-to-fine strategy. [Link to ZipNeRF](link)
+
+## Operating characteristics
+*   **Time Complexity:** The preconditioner computation involves Jacobian evaluation and matrix square root inversion, which is $O(m k^2)$ for $m$ points and $k$ parameters. This is done once at initialization. The per-step cost is dominated by rendering and gradient computation, with an additional $O(k^2)$ matrix-vector multiplication per camera per step.
+*   **Memory Complexity:** Requires storing the preconditioner matrix $P_i^{-1}$ for each camera, which is $O(N k^2)$ for $N$ cameras.
+*   **Measured Performance:** Improves convergence and accuracy in camera-optimizing NeRFs compared to naive optimization. It handles mixed units and correlations effectively. [S1]
+*   **Strengths:** Decorrelates parameters, normalizes scale, handles mixed units, improves convergence. [S1]
+*   **Limitations:** Preconditioner is static (computed at initialization), which may become suboptimal as camera estimates deviate. Dynamic updates are avoided to preserve Adam's gradient moment estimates. [S1]
+*   **When to Use:** When optimizing camera poses in NeRFs, especially with mixed units (e.g., focal length in pixels, translation in world units) or correlated parameters. [S1]
+*   **When Not to Use:** When computational resources are extremely limited and the overhead of computing the preconditioner is prohibitive, or when camera poses are known with high accuracy and do not require optimization. [S1]
+
+## Background
+Camera Preconditioning was proposed by Kevin Park et al. in 2023, published in ACM Transactions on Graphics [S1]. It addresses issues in NeRF optimization where camera parameters are ill-conditioned due to different units and correlations. The method draws inspiration from numerical methods and ZCA whitening. It is implemented on top of ZipNeRF [Barron et al. 2023] and uses a coarse-to-fine strategy. [S1]
+
+## Sources
+[S1] CamP: Camera Preconditioning for Neural Radiance Fields, https://doi.org/10.1145/3618321, fetched 2026-10-30

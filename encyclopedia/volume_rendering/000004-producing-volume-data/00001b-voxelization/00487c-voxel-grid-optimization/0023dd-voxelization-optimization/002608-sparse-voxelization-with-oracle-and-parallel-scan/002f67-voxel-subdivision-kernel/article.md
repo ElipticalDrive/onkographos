@@ -1,42 +1,45 @@
 # Voxel Subdivision Kernel
 
-Also called: Subdivide Kernel, Subdivision Step
 
 ## Overview
-The Voxel Subdivision Kernel is a parallel GPU kernel used within the Sparse Voxelization with Oracle and Parallel Scan pipeline to increase the resolution of the voxel grid. It takes a list of active voxels and generates eight child sub-voxels for each, effectively refining the spatial representation. It is distinguished from the Voxel Compactify Kernel by its expansion factor (8:1) and is invoked during intermediate iterations of the adaptive voxelization process, whereas compactification occurs only at the final stage to remove culled voxels.
+The Voxel Subdivision Kernel refines a list of active voxels by generating eight child sub-voxels for each retained voxel, increasing the spatial resolution of the voxel grid [S1]. It is distinguished from the Voxel Compactify Kernel by its 8:1 expansion factor and is invoked during intermediate iterations of the adaptive voxelization process, whereas compactification occurs only at the final stage [S1].
 
 ## How it works
-The kernel refines the voxel list by subdividing each retained voxel into eight octants. It relies on the output of the parallel prefix sum (scan) from the previous oracle/culling step to determine the write positions in the output list, ensuring that the output list remains compact and contiguous without gaps.
+The kernel refines the voxel list by subdividing each retained voxel into eight octants [S1]. It relies on the output of the parallel prefix sum (scan) from the previous oracle/culling step to determine the write positions in the output list, ensuring that the output list remains compact and contiguous without gaps [S1].
 
 **Inputs and Outputs:**
-*   **Input:** `VoxelListIn` (list of voxels to subdivide), `oracleOutput` (boolean/int mask indicating which voxels to keep), `scanOutput` (prefix sum results indicating write offsets).
-*   **Output:** `VoxelListOut` (list of refined sub-voxels).
-*   **Voxel Structure:** Each voxel contains integer indices `ix`, `iy`, `iz` representing its position in the 3D grid.
+*   **Input:** `VoxelListIn` (list of voxels to subdivide), `oracleOutput` (mask indicating which voxels to keep), `scanOutput` (prefix sum results indicating write offsets) [S1].
+*   **Output:** `VoxelListOut` (list of refined sub-voxels) [S1].
+*   **Voxel Structure:** Each voxel contains integer indices `ix`, `iy`, `iz` representing its position in the 3D grid [S1].
 
 **Data Structures:**
-*   `VoxelListIn`: Array of `voxel` structs.
-*   `VoxelListOut`: Array of `voxel` structs, sized to hold up to $8 \times N$ elements where $N$ is the input size.
-*   `oracleOutput`: Array of integers/booleans, same length as `VoxelListIn`.
-*   `scanOutput`: Array of integers, same length as `VoxelListIn`, containing the cumulative count of active voxels preceding the current thread's index.
+*   `VoxelListIn`: Array of `voxel` structs [S1].
+*   `VoxelListOut`: Array of `voxel` structs, sized to hold up to $8 \times N$ elements where $N$ is the input size [S1].
+*   `oracleOutput`: Array of integers/booleans, same length as `VoxelListIn` [S1].
+*   `scanOutput`: Array of integers, same length as `VoxelListIn`, containing the cumulative count of active voxels preceding the current thread's index [S1].
 
 **Algorithm Steps:**
-1.  Each thread $t$ corresponds to an index in `VoxelListIn`.
-2.  Check if the voxel at $t$ is active: `if oracleOutput[t] != 0`.
-3.  If active, read the input voxel $v_{in} = \text{VoxelListIn}[t]$.
-4.  Calculate the base write index in the output list: $baseIdx = 8 \times \text{scanOutput}[t]$. This maps the single input voxel to a block of 8 slots in the output.
-5.  Loop $i$ from 0 to 7 to generate the 8 children:
-    *   Calculate child indices based on the parent's indices and the octant index $i$.
-    *   The mapping uses bitwise-like arithmetic to distribute children across the 3D space:
-        *   $v_{out}.ix = 2 \cdot v_{in}.ix + \lfloor i / 4 \rfloor$
-        *   $v_{out}.iy = 2 \cdot v_{in}.iy + \lfloor (i / 2) \rfloor \pmod 2$
-        *   $v_{out}.iz = 2 \cdot v_{in}.iz + i \pmod 2$
-    *   Write $v_{out}$ to `VoxelListOut[baseIdx + i]`.
+1. Each thread $t$ corresponds to an index in `VoxelListIn` [S1].
+2. Check if the voxel at $t$ is active: `if oracleOutput[t] != 0` [S1].
+3. If active, read the input voxel $v_{in} = \text{VoxelListIn}[t]$ [S1].
+4. Calculate the base write index in the output list: $baseIdx = 8 \times \text{scanOutput}[t]$ [S1].
+5. Loop $i$ from 0 to 7 to generate the 8 children:
+    * Calculate child indices based on the parent's indices and the octant index $i$:
+        * $v_{out}.ix = 2 \cdot v_{in}.ix + \lfloor i / 4 \rfloor$
+        * $v_{out}.iy = 2 \cdot v_{in}.iy + \lfloor (i / 2) \rfloor \pmod 2$
+        * $v_{out}.iz = 2 \cdot v_{in}.iz + i \pmod 2$ [S1]
+    * Write $v_{out}$ to `VoxelListOut[baseIdx + i]` [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def voxel_subdivision_kernel(thread_id, VoxelListIn, oracleOutput, scanOutput, VoxelListOut):
+class Voxel:
+    ix: int
+    iy: int
+    iz: int
+
+def voxel_subdivision_kernel(thread_id: int, VoxelListIn: list[Voxel], oracleOutput: list[int], scanOutput: list[int], VoxelListOut: list[Voxel]) -> None:
     # Check if the current voxel is marked for subdivision by the oracle
     if oracleOutput[thread_id] != 0:
         # Read the parent voxel
@@ -52,8 +55,8 @@ def voxel_subdivision_kernel(thread_id, VoxelListIn, oracleOutput, scanOutput, V
             v_out = Voxel()
             
             # Calculate new integer indices for the 8 octants
-            # i/4 gives the high bit (x-axis subdivision)
-            # (i/2)%2 gives the middle bit (y-axis subdivision)
+            # i//4 gives the high bit (x-axis subdivision)
+            # (i//2)%2 gives the middle bit (y-axis subdivision)
             # i%2 gives the low bit (z-axis subdivision)
             v_out.ix = 2 * v_in.ix + (i // 4)
             v_out.iy = 2 * v_in.iy + ((i // 2) % 2)
@@ -64,24 +67,25 @@ def voxel_subdivision_kernel(thread_id, VoxelListIn, oracleOutput, scanOutput, V
 ```
 
 **Parameters and Edge Cases:**
-*   **Iteration Limit:** The kernel is invoked only if the user-defined maximum number of subdivision iterations has not been reached. If the limit is reached, the Voxel Compactify Kernel is used instead [S1].
-*   **Precision:** Indices are integers. The multiplication by 2 and addition of 0 or 1 ensures no overlap and full coverage of the parent's volume.
-*   **Boundaries:** The output list must be pre-allocated or sized dynamically to accommodate the expansion. The scan output ensures no race conditions or overwrites occur between threads.
+*   **Iteration Limit:** The kernel is invoked only if the user-defined maximum number of subdivision iterations has not been reached [S1].
+*   **Precision:** Indices are integers; the multiplication by 2 and addition of 0 or 1 ensures no overlap and full coverage of the parent's volume [S1].
+*   **Boundaries:** The output list must be pre-allocated or sized dynamically to accommodate the expansion; the scan output ensures no race conditions or overwrites occur between threads [S1].
 
 ## Subtopics
 
 ### Voxel Compactify Kernel
-The Voxel Compactify Kernel is invoked when the maximum number of subdivision iterations is reached. Unlike the subdivision kernel, it does not expand the voxel count. Instead, it compacts the list by removing voxels that were marked as inactive (culled) by the oracle. For each active voxel, it writes the voxel directly to `VoxelListOut` at the index specified by `scanOutput[thread_id]`. This results in a final, dense list of voxels that intersect the desired surface, ready for rendering as splats [S1].
+The Voxel Compactify Kernel is invoked when the maximum number of subdivision iterations is reached [S1]. Unlike the subdivision kernel, it does not expand the voxel count; instead, it compacts the list by removing voxels that were marked as inactive (culled) by the oracle [S1]. For each thread ID, it checks if `oracleOutput[threadID] != 0`; if true, it reads the input voxel $v = \text{VoxelListIn}[threadID]$, calculates $baseIdx = \text{scanOutput}[threadID]$, and writes $v$ to `VoxelListOut[baseIdx]` [S1]. This produces the final list of voxels that intersect the desired surface, which are subsequently rendered as splats corresponding to their axis-aligned, screen space bounding rectangles [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ per iteration, where $N$ is the number of voxels in the input list. The work is embarrassingly parallel with no synchronization barriers within the kernel.
-*   **Memory Complexity:** Requires an output buffer of size up to $8 \times N$ for subdivision. The scan output array is $O(N)$.
-*   **Performance:** Performance is limited by memory bandwidth due to the high expansion ratio (8x) and the need to read/write large voxel lists. The parallel scan step is often the bottleneck in the overall pipeline [S1].
-*   **Strengths:** Efficiently generates high-resolution voxel grids from sparse inputs. Adaptive resolution allows focusing detail where needed.
-*   **Limitations:** Memory usage can spike significantly during subdivision steps. Not suitable for scenes requiring uniform high resolution without sparsity.
+*   **Time Complexity:** $O(N)$ per iteration, where $N$ is the number of voxels in the input list, as each thread performs constant work [S1].
+*   **Memory Complexity:** Requires an output buffer of size up to $8 \times N$ for subdivision, or $N$ for compactification; auxiliary arrays (`oracleOutput`, `scanOutput`) are $O(N)$ [S1].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales linearly with the number of active voxels per iteration; memory bandwidth is the primary constraint due to the 8:1 expansion ratio during subdivision [S1].
+*   **Strengths:** Efficiently generates high-resolution voxel grids from sparse inputs through adaptive refinement [S1].
+*   **Limitations:** Memory usage spikes significantly during subdivision steps; not suitable for scenes requiring uniform high resolution without sparsity [S1].
 
 ## Background
-The Voxel Subdivision Kernel is part of the "Real-time high-resolution sparse voxelization" method proposed by [S1]. It is designed for image-based modeling and smooth visual hull reconstruction, where pixel-sized voxels are rendered as splats textured by weighted input color images. The method iteratively refines the voxel grid using an oracle to decide retention and a parallel scan to manage memory layout.
+The Voxel Subdivision Kernel originates from the "Real-time high-resolution sparse voxelization" method [S1]. It is designed for image-based modeling and smooth visual hull reconstruction, where the iterative refinement process uses an oracle to decide voxel retention and a parallel scan to manage memory layout [S1]. After sufficient iterations, the final voxel list is rendered using the graphics pipeline as splats textured by weighted input color images [S1].
 
 ## Sources
 [S1] Real-time high-resolution sparse voxelization with application to image-based modeling, https://doi.org/10.1145/2492045.2492053, fetched 2026-11-01

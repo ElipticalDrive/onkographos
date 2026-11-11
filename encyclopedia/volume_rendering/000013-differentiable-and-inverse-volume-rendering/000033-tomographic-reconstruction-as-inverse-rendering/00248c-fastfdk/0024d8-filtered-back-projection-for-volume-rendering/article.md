@@ -3,172 +3,135 @@
 Also called: D2VR, Projection-based Volume Rendering
 
 ## Overview
-Filtered Back-Projection (FBP) for Volume Rendering, also known as D2VR, is a technique that reconstructs density values and gradients at arbitrary sample points along a ray directly from 2D projections, avoiding the intermediate step of creating a 3D rectilinear grid [S1]. It sets itself apart from grid-based Direct Volume Rendering (DVR) by eliminating interpolation errors associated with voxel sampling, thereby producing higher visual quality for thin structures [S1]. It builds on [FastFDK](3315-fastfdk.md) by utilizing the FBP reconstruction formula not just for grid generation, but as a direct resampling scheme for arbitrary ray positions.
+Filtered Back-Projection (FBP) for Volume Rendering, also known as D2VR, is a technique that reconstructs density values and gradients at arbitrary sample points along a ray directly from 2D projections, avoiding the intermediate step of creating a 3D rectilinear grid [S1]. It sets itself apart from grid-based Direct Volume Rendering (DVR) by eliminating interpolation errors associated with voxel sampling, thereby producing higher visual quality for thin structures [S1]. It applies the FBP reconstruction formula as a direct resampling scheme for arbitrary ray positions [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of $K$ filtered 2D projection images $Q_{\theta_i}$, where $i \in \{1, \dots, K\}$, corresponding to projection angles $\theta_i$. Camera parameters for ray casting.
-*   **Outputs:** A rendered image with color and opacity values for each pixel.
+*   **Inputs:** A set of $K$ filtered 2D projection images $Q_{\theta_i}$, where $i \in \{1, \dots, K\}$, corresponding to projection angles $\theta_i$ [S1]. Camera parameters defining ray origins and directions [G].
+*   **Outputs:** A rendered image with color and opacity values for each pixel [S1].
 
 **Data Structures:**
-*   **Projections:** A list of 2D arrays. Each array $Q_{\theta_i}$ has dimensions $W_i \times H_i$. The values are the result of high-pass filtering the measured projection data [S1].
-*   **Ray State:** For each pixel, a ray origin and direction. Sample points $P$ along the ray are defined by $P(s) = O + s \cdot D$.
+*   **Projections:** A list of 1D arrays representing the filtered projection data $Q_{\theta_i}$ for each angle [S1]. The values are obtained by high-pass filtering the measured projection data [S1].
+*   **Ray State:** For each pixel, a ray origin $O$ and direction $D$. Sample points $P$ along the ray are defined by $P(s) = O + s \cdot D$ [G].
 
 **Parameters:**
-*   **Number of Projections ($K$):** The total number of available views.
+*   **Number of Projections ($K$):** The total number of available views [S1].
 *   **Step Size ($\Delta s$):** The distance between sample points along the ray. It must be less than half the voxel size of the equivalent grid to ensure accuracy [S1].
+*   **Finite Difference Step ($\Delta t$):** A small finite value used to approximate the limit in the gradient formula [S1].
 
 **Algorithm Steps:**
 
-1.  **Ray Casting:** For each pixel in the output image, cast a ray through the volumetric space.
-2.  **Sampling:** Generate sample points $P_j$ along the ray.
-3.  **Density Reconstruction:** For each sample point $P_j = (x, y, z)$, compute the density $\tilde{f}(x, y, z)$ using the discrete FBP formula [S1]:
-    $$ \tilde{f}(x, y, z) = \frac{\pi}{K} \sum_{i=1}^K Q_{\theta_i}(t_i) $$
-    where $t_i$ is the projected coordinate of the point onto the $i$-th projection plane:
-    $$ t_i = x \cos \theta_i + y \sin \theta_i $$
-    *(Note: The source formula uses 2D coordinates $(x,y)$ relative to the projection geometry. In a 3D raycasting context, $x$ and $y$ represent the coordinates in the local plane of the projection for angle $\theta_i$.)*
+1.  **Ray Casting:** For each pixel of the image plane, cast a ray through the volumetric space enclosed by the filtered projections [S1].
+2.  **Sampling:** Generate sample points $P_j$ along the ray at intervals of $\Delta s$ [S1].
+3.  **Density Reconstruction:** At each resample location, reconstruct the underlying 3D density value using the discrete FBP formula [S1]:
+    $$ \tilde{f}(x, y) = \frac{\pi}{K} \sum_{i=1}^K Q_{\theta_i}(t_i) $$
+    where $t_i = x \cos \theta_i + y \sin \theta_i$ is the projected coordinate of the point onto the $i$-th projection plane [S1].
 4.  **Gradient Estimation:** Compute the partial derivatives $\tilde{f}_x$ and $\tilde{f}_y$ directly from the projections using Newton's difference quotient [S1]:
     $$ \tilde{f}_x = \frac{\pi}{K} \sum_{i=1}^K \lim_{\Delta x \rightarrow 0} \frac{1}{\Delta x} (Q_{\theta_i}(t_i + \Delta x \cos \theta_i) - Q_{\theta_i}(t_i)) $$
     $$ \tilde{f}_y = \frac{\pi}{K} \sum_{i=1}^K \lim_{\Delta y \rightarrow 0} \frac{1}{\Delta y} (Q_{\theta_i}(t_i + \Delta y \sin \theta_i) - Q_{\theta_i}(t_i)) $$
-    In practice, $\Delta x$ and $\Delta y$ are small finite values. The terms $\cos \theta_i$ and $\sin \theta_i$ scale the derivative of the projection data.
-5.  **Shading:** Use the estimated gradients as surface normals for shading calculations.
-6.  **Compositing:** Accumulate color and opacity using the front-to-back over-operator [PD84] for all sample points along the ray.
+    In practice, $\Delta x$ and $\Delta y$ are replaced by a small finite value $\Delta t$ [S1]. The terms $\cos \theta_i$ and $\sin \theta_i$ scale the derivative of the projection data [S1].
+5.  **Shading:** Perform shading by estimating gradients directly on the projections and using them as surface normals [S1].
+6.  **Compositing:** Determine the final color and opacity of the pixel using the over-operator in front-to-back order [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_pixel(ray_origin, ray_direction, projections, angles, num_projections):
+import math
+
+def normalize(v):
+    length = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+    if length == 0.0:
+        return (0.0, 0.0, 1.0)
+    return (v[0]/length, v[1]/length, v[2]/length)
+
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def render_pixel(ray_origin, ray_direction, projections, angles, s_start, s_end, step_size):
     """
     Renders a single pixel using Filtered Back-Projection for Volume Rendering.
     
     Args:
         ray_origin: (x, y, z) tuple
         ray_direction: (dx, dy, dz) tuple, normalized
-        projections: List of 2D arrays Q_theta_i
+        projections: List of 1D arrays Q_theta_i
         angles: List of float angles theta_i in radians
-        num_projections: Integer K
+        s_start, s_end: Float bounds along the ray
+        step_size: Float distance between samples
         
     Returns:
         (color, opacity) tuple
     """
-    # Initialize accumulation variables
-    accumulated_color = (0.0, 0.0, 0.0)
-    accumulated_opacity = 0.0
+    accumulated_color = [0.0, 0.0, 0.0]
     transmittance = 1.0
+    num_proj = len(angles)
+    scale = math.pi / num_proj
+    delta_t = 1.0  # Finite difference step approximating the limit [S1]
     
-    # Step size must be less than half the voxel size [S1]
-    step_size = 0.4 # Example value, must be determined by scene scale
-    
-    # Define ray bounds (s_min to s_max)
-    s_min, s_max = get_ray_bounds(ray_origin, ray_direction)
-    
-    s = s_min
-    while s <= s_max:
-        # Current sample point in 3D space
-        x = ray_origin.x + s * ray_direction.x
-        y = ray_origin.y + s * ray_direction.y
-        z = ray_origin.z + s * ray_direction.z
+    s = s_start
+    while s <= s_end:
+        x = ray_origin[0] + s * ray_direction[0]
+        y = ray_origin[1] + s * ray_direction[1]
+        z = ray_origin[2] + s * ray_direction[2]
         
-        # 1. Reconstruct Density
         density = 0.0
         grad_x = 0.0
         grad_y = 0.0
         
-        # Small epsilon for finite difference approximation of limit
-        delta = 1e-5 
-        
-        for i in range(num_projections):
+        for i in range(num_proj):
             theta = angles[i]
-            proj_data = projections[i]
+            proj = projections[i]
+            width = len(proj)
             
-            # Project point (x, y, z) to 1D coordinate t_i on the projection plane
-            # Note: The source formula assumes a specific 2D projection geometry.
-            # Assuming standard parallel projection where t is the coordinate along the detector.
-            # For a general 3D point, we need the specific projection geometry.
-            # Based on the source formula t_i = x cos(theta) + y sin(theta),
-            # this implies a specific coordinate system alignment.
-            # We assume x, y here are the coordinates in the plane perpendicular to the ray direction
-            # projected onto the detector plane for angle theta.
-            # For simplicity in this generic pseudocode, we assume a helper function
-            # that maps 3D point to 1D detector coordinate for a given angle.
-            t_i = project_to_detector(x, y, z, theta)
+            # Project 3D point to 1D detector coordinate per source formula [S1]
+            t_i = x * math.cos(theta) + y * math.sin(theta)
+            idx = int(t_i)
             
-            # Check if t_i is within bounds of the projection image
-            if is_within_bounds(t_i, proj_data):
-                # Density contribution
-                density += proj_data.sample(t_i)
+            if 0 <= idx < width:
+                density += proj[idx]
                 
-                # Gradient contribution: derivative of projection scaled by cos/sin
-                # Approximate limit using finite difference
-                t_plus_dx = t_i + delta * math.cos(theta)
-                t_plus_dy = t_i + delta * math.sin(theta)
+                # Approximate limit using finite difference [S1]
+                t_plus_x = t_i + delta_t * math.cos(theta)
+                t_plus_y = t_i + delta_t * math.sin(theta)
                 
-                # Derivative w.r.t x component (scaled by cos)
-                if is_within_bounds(t_plus_dx, proj_data):
-                    diff_x = (proj_data.sample(t_plus_dx) - proj_data.sample(t_i)) / delta
-                    grad_x += diff_x * math.cos(theta)
+                idx_x = int(t_plus_x)
+                idx_y = int(t_plus_y)
                 
-                # Derivative w.r.t y component (scaled by sin)
-                if is_within_bounds(t_plus_dy, proj_data):
-                    diff_y = (proj_data.sample(t_plus_dy) - proj_data.sample(t_i)) / delta
-                    grad_y += diff_y * math.sin(theta)
+                if 0 <= idx_x < width:
+                    grad_x += (proj[idx_x] - proj[idx]) / delta_t * math.cos(theta)
+                if 0 <= idx_y < width:
+                    grad_y += (proj[idx_y] - proj[idx]) / delta_t * math.sin(theta)
         
-        # Scale by pi / K
-        density = (math.pi / num_projections) * density
-        grad_x = (math.pi / num_projections) * grad_x
-        grad_y = (math.pi / num_projections) * grad_y
+        # Scale by pi / K [S1]
+        density *= scale
+        grad_x *= scale
+        grad_y *= scale
         
-        # 2. Shading
-        # Estimate normal from gradients. 
-        # Note: The source provides fx and fy. In 3D, we might need fz or assume a 2D slice context.
-        # Assuming the gradient vector in the relevant plane is (grad_x, grad_y).
-        # For shading, we might combine with ray direction or assume z-gradient is negligible/zero in this specific 2D-projection model.
-        # [G] Assuming a simple diffuse shading model using the estimated gradient as normal.
-        normal = normalize((grad_x, grad_y, 0.0)) # Placeholder for 3D normal construction
-        lighting = compute_lighting(normal, ray_direction)
+        # Shading: compute normal from gradients [S1]
+        # [G] Assuming gradient vector in the projection plane corresponds to surface normal components.
+        normal = normalize((grad_x, grad_y, 0.0))
         
-        # 3. Volume Properties
-        # [G] Typical volume rendering setup: density maps to opacity.
-        opacity_sample = 1.0 - math.exp(-density * absorption_coefficient)
-        color_sample = lighting * emission_coefficient
+        # [G] Simple diffuse lighting model
+        light_dir = normalize((0.0, 0.0, 1.0))
+        diffuse = max(dot(normal, light_dir), 0.0)
+        shading = 0.2 + 0.8 * diffuse
         
-        # 4. Front-to-Back Compositing
+        # [G] Standard transfer function: density -> color, opacity
+        opacity_sample = 1.0 - math.exp(-density * 0.1)
+        color_sample = [shading * density, shading * density, shading * density]
+        
+        # Front-to-back compositing [S1]
         alpha = opacity_sample * transmittance
-        accumulated_color += color_sample * alpha
-        accumulated_opacity += alpha * (1.0 - accumulated_opacity) # Or standard front-to-back: acc += C * alpha, T *= (1-alpha)
-        
-        # Standard front-to-back over operator:
-        # C_out = C_in + C_sample * alpha_sample * T_in
-        # T_out = T_in * (1 - alpha_sample)
-        accumulated_color = accumulated_color + color_sample * opacity_sample * transmittance
-        transmittance = transmittance * (1.0 - opacity_sample)
+        accumulated_color[0] += color_sample[0] * alpha
+        accumulated_color[1] += color_sample[1] * alpha
+        accumulated_color[2] += color_sample[2] * alpha
+        transmittance *= (1.0 - opacity_sample)
         
         s += step_size
         
-    return (accumulated_color, 1.0 - transmittance)
-
-def project_to_detector(x, y, z, theta):
-    """
-    Projects a 3D point to the 1D detector coordinate for a given angle.
-    Based on source formula: t_i = x cos(theta) + y sin(theta)
-    """
-    return x * math.cos(theta) + y * math.sin(theta)
-
-def is_within_bounds(t, proj_data):
-    """Check if t is within the valid range of the projection array."""
-    # Implementation depends on specific coordinate system of proj_data
-    return 0 <= t < len(proj_data)
-
-def proj_data_sample(t):
-    """Interpolate value at float coordinate t in projection data."""
-    # Linear interpolation or nearest neighbor
-    idx = int(t)
-    frac = t - idx
-    if idx + 1 < len(proj_data):
-        return proj_data[idx] * (1 - frac) + proj_data[idx + 1] * frac
-    return proj_data[idx]
+    return accumulated_color, 1.0 - transmittance
 ```
 
 ## Subtopics
@@ -177,16 +140,16 @@ def proj_data_sample(t):
 A method to estimate derivatives of the volumetric density function directly from filtered projections, avoiding the computational cost and interpolation errors of grid-based finite difference methods [S1]. It applies Newton's difference quotient to the filtered projection data $Q_{\theta_i}$ instead of the reconstructed density function [S1]. The partial derivative $\tilde{f}_x$ is calculated as the sum of scaled derivatives of the projection data: $\lim_{\Delta x \rightarrow 0} \frac{1}{\Delta x} (Q_{\theta_i}(t_i + \Delta x \cos \theta_i) - Q_{\theta_i}(t_i))$ [S1]. This approach is superior to grid-based central differences, which require 6 additional interpolated samples for a gradient, accumulating interpolation errors, whereas FBP-based estimation uses density values as accurate as grid points, introducing no interpolation error [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(K \cdot N \cdot S)$, where $K$ is the number of projections, $N$ is the number of pixels, and $S$ is the number of samples per ray. Each sample requires iterating over all $K$ projections.
-*   **Memory Complexity:** $O(K \cdot W \cdot H)$ to store the projection images. No 3D volume grid is stored in memory.
+*   **Time Complexity:** $O(K \cdot N \cdot S)$, where $K$ is the number of projections, $N$ is the number of pixels, and $S$ is the number of samples per ray [G]. Each sample requires iterating over all $K$ projections [G].
+*   **Memory Complexity:** $O(K \cdot W \cdot H)$ to store the projection images [G]. No 3D volume grid is stored in memory [G].
 *   **Measured Performance:** Tested on Marschner & Lobb function (64 projections, 64x64 resolution) and Carp dataset (128 projections, 128x256 resolution) [S1].
 *   **Strengths:** Higher visual quality than grid-based DVR using the same amount of pixels on all projections as voxels on the regular grid, particularly reducing holes in thin structures [S1]. Avoids interpolation errors inherent in grid-based gradient estimation [S1].
-*   **Limitations:** Computationally intensive per sample due to the summation over all projections. Requires pre-filtered projections.
-*   **When to use:** When high-quality rendering of thin structures is required and memory for a high-resolution 3D grid is prohibitive.
-*   **When not to use:** When real-time performance is critical and the number of projections is large, as the per-sample cost is high.
+*   **Limitations:** Computationally intensive per sample due to the summation over all projections [G]. Requires pre-filtered projections [S1].
+*   **When to use:** When high-quality rendering of thin structures is required and memory for a high-resolution 3D grid is prohibitive [G].
+*   **When not to use:** When real-time performance is critical and the number of projections is large, as the per-sample cost is high [G].
 
 ## Background
-The method was introduced in the paper "D2VR: High-Quality Volume Rendering of Projection-based Volumetric Data" [S1]. It was developed to address the limitations of grid-based volume rendering, specifically interpolation errors and memory usage. The technique leverages the mathematical properties of Filtered Back-Projection, traditionally used for tomographic reconstruction, to perform direct volume rendering.
+The method was introduced in the paper "D2VR: High-Quality Volume Rendering of Projection-based Volumetric Data" [S1]. It was developed to address the limitations of grid-based volume rendering, specifically interpolation errors and memory usage [S1]. The technique leverages the mathematical properties of Filtered Back-Projection, traditionally used for tomographic reconstruction, to perform direct volume rendering [S1].
 
 ## Sources
 [S1] D2VR: High-Quality Volume Rendering of Projection-based Volumetric Data, https://doi.org/10.2312/vissym/eurovis06/211-218, fetched 2026-10-26

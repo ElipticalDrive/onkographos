@@ -1,0 +1,242 @@
+--- v001.md
++++ v002.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-Adaptive Beam Generation is a method for generating caustic beams by rasterizing specular surfaces from the light's perspective into a G-buffer, projecting a planar grid onto these surfaces, and adaptively refining the resulting grid triangles based on geometric discontinuities, beam energy, and camera parameters [S1]. It sets itself apart from standard caustic mapping by using the G-buffer parameterization to project a regular grid rather than emitting photons, and from static beam tracing by employing a recursive geometry shader to dynamically subdivide beams based on visual importance [S1].
++Adaptive Beam Generation is a method for generating caustic beams by rasterizing specular surfaces from the light's perspective into a G-buffer, projecting a planar grid onto these surfaces, and adaptively refining the resulting grid triangles based on geometric discontinuities, beam energy, and camera parameters [S1]. It differs from standard caustic mapping by projecting a regular grid onto the G-buffer parameterization instead of emitting photons, and relies on a geometry shader with stream-out feedback for adaptive subdivision [S1].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** Specular geometry (surfaces), light source parameters, camera parameters, and a coarse regular planar grid.
+-*   **Output:** A set of refined caustic beam primitives (triangles) ready for extrusion and rasterization.
++*   **Input:** Specular geometry, light source parameters, camera position, and a coarse regular planar grid.
++*   **Output:** A set of refined caustic beam base triangles ready for extrusion and rasterization [S1].
+ 
+ **Data Structures**
+-*   **G-buffer:** An off-screen geometry buffer storing per-pixel data for the specular surfaces as seen from the light source. Fields include:
++*   **G-buffer:** An off-screen geometry buffer storing per-pixel data for the specular surfaces as seen from the light source [S1]. Fields include:
+     *   Position (3D)
+     *   Normal (3D)
+@@ -18,105 +18,128 @@
+ 
+ **Steps**
+-1.  **Rasterize Specular Surfaces:** Render the specular surfaces from the light source's viewpoint into the G-buffer. This creates a 2D parameterization of the directly lit surfaces [S1].
+-2.  **Project Planar Grid:** Take a coarse, regular planar grid. For each vertex of this grid, sample the corresponding location in the G-buffer and move the vertex to the sampled 3D position on the surface. This effectively maps the regular grid onto the curved specular surfaces [S1].
+-3.  **Form Base Triangles:** Treat each cell of the initial regular grid as two triangles. These form the bases of the caustic beams. Omit any triangles that cross surface silhouettes or lie outside the visible specular surfaces [S1].
++1.  **Rasterize Specular Surfaces:** Render the specular surfaces from the light source's viewpoint into the G-buffer. This creates a 2D parameterization over the directly lit surfaces [S1].
++2.  **Project Planar Grid:** Take a coarse, regular planar grid. For each vertex, sample the corresponding location in the G-buffer and move the vertex to the sampled 3D position on the surface [S1].
++3.  **Form Base Triangles:** Treat each cell of the initial regular grid as two triangles to form caustic beams with triangular bases. Omit invalid triangles crossing the silhouettes of specular objects or lying outside [S1].
+ 4.  **Adaptive Refinement:** Iteratively refine the beam triangles using a geometry shader. The decision to split, keep, or discard a triangle is based on three heuristics:
+-    *   **Geometric Discontinuities:** Compare surface parameters (normal and depth) at the start of the beam edges. If the difference is significant, split the triangle to capture the discontinuity [S1].
+-    *   **Beam Energy:** Assess if the beam is convergent or divergent. Convergent beams focus light and are refined with higher priority. Divergent beams are typically unproblematic unless their energy is very high. For non-isotropic lights (e.g., spotlights), lighting discontinuities can also be accounted for here [S1].
+-    *   **Camera Proximity:** Estimate the beam's importance to the camera. Find the closest point to the camera on the beam's central ray (calculated as the average of the three beam edges). Refine beams closer to the camera more aggressively than those far away or pointing away [S1].
+-5.  **Repeat:** Repeat the refinement step for a fixed number of iterations.
++    *   **Geometric Discontinuities:** Compare the sampled surface parameters (normal and depth) at the location where the beam edges start. Split the triangles if they differ significantly [S1].
++    *   **Beam Energy:** Assess the beams' energy and contribution. Divergent beams are typically unproblematic unless their energy is very high. Convergent beams focus light and are refined with higher priority. For non-isotropic light sources, lighting discontinuities can also be accounted for here [S1].
++    *   **Camera Proximity:** Estimate the beam's importance to the camera. Find the closest point to the camera on the beam's central ray (average of the three beam edges) and base the decision on the distance of this point to the camera [S1].
++5.  **Repeat:** Repeat the refinement step for a fixed number of iterations [S1].
++
++**Formulas**
++*   Central ray direction: $\vec{d} = \frac{\vec{e}_0 + \vec{e}_1 + \vec{e}_2}{3}$, where $\vec{e}_0, \vec{e}_1, \vec{e}_2$ are the three beam edge vectors [S1].
++*   Closest point on ray to camera: $\vec{p} = \vec{o} + t\vec{d}$, where $\vec{o}$ is the ray origin, $\vec{d}$ is the normalized central ray direction, and $t = (\vec{c} - \vec{o}) \cdot \vec{d}$ with $\vec{c}$ being the camera position [S1].
+ 
+ **Parameters**
+ *   **Refinement Steps:** 3 to 4 steps are sufficient for most cases [S1].
+ 
+-**Pitfalls**
+-*   **Boundary Mismatch:** The boundaries of the generated beams typically do not match the silhouettes (discontinuities) of the surfaces. This is suppressed using adaptive subdivision, but at the expense of generating more beams [S1].
+-*   **Precision:** Comparing normal and depth values for discontinuity detection requires careful thresholding to avoid over-subdivision in smooth areas or under-subdivision in sharp areas [S1].
++**Edge Cases and Pitfalls**
++*   **Boundary Mismatch:** Projected grid boundaries typically do not match the silhouettes (discontinuities) of the surfaces. This is suppressed using adaptive subdivision, at the expense of generating more beams [S1].
++*   **Precision:** Comparing normal and depth values for discontinuity detection requires thresholding to avoid over-subdivision in smooth areas or under-subdivision in sharp areas [G].
+ 
+ **Pseudocode**
+ ```python
+-# Pseudocode for Adaptive Beam Generation
+-# Assumes G-buffer is accessible via texture lookup G(u, v)
+-# Returns list of refined beam base triangles
++def adaptive_beam_generation(specular_mesh, light_view_matrix, camera_position, coarse_grid):
++    # Step 1: Rasterize specular surfaces to G-buffer from light's perspective.
++    # Standard rasterization pass storing positions, normals, and material properties.
++    # rasterize_to_gbuffer(specular_mesh, light_view_matrix) # Comment: Standard graphics pipeline pass.
+ 
+-def adaptive_beam_generation(specular_mesh, light_view_matrix, camera, coarse_grid):
+-    # Step 1: Rasterize specular surfaces to G-buffer
+-    # This is typically done via a standard rasterization pass
+-    # G-buffer stores: position, normal, material properties
+-    rasterize_to_gbuffer(specular_mesh, light_view_matrix)
++    # Step 2: Project coarse regular planar grid to lit surfaces.
++    projected_vertices = {}
++    for vertex in coarse_grid.vertices:
++        uv = vertex.uv
++        g_data = sample_gbuffer(uv)
++        if g_data is not None:
++            projected_vertices[vertex.id] = g_data.position
++        else:
++            projected_vertices[vertex.id] = None
+ 
+-    # Step 2: Project coarse grid to surfaces
+-    projected_vertices = []
+-    for vertex in coarse_grid.vertices:
+-        # Sample G-buffer at vertex's texture coordinates (u, v)
+-        # Assuming coarse_grid has associated UVs
+-        g_data = sample_gbuffer(vertex.u, vertex.v)
+-        if g_data is valid:
+-            projected_vertices.append(g_data.position)
+-        else:
+-            projected_vertices.append(None) # Mark invalid
+-
+-    # Step 3: Form initial triangles
++    # Step 3: Form base triangles. Each cell becomes two triangles.
+     initial_triangles = []
+     for cell in coarse_grid.cells:
+-        v0, v1, v2, v3 = cell.vertices
+-        # Create two triangles per cell
+-        tri1 = [projected_vertices[v0], projected_vertices[v1], projected_vertices[v2]]
+-        tri2 = [projected_vertices[v0], projected_vertices[v2], projected_vertices[v3]]
+-        
+-        # Check validity (not crossing silhouette, not outside)
+-        if is_valid_triangle(tri1):
+-            initial_triangles.append(tri1)
+-        if is_valid_triangle(tri2):
+-            initial_triangles.append(tri2)
++        v_ids = cell.vertex_ids
++        p0 = projected_vertices[v_ids[0]]
++        p1 = projected_vertices[v_ids[1]]
++        p2 = projected_vertices[v_ids[2]]
++        p3 = projected_vertices[v_ids[3]]
+ 
+-    # Step 4 & 5: Adaptive Refinement
++        # Omit invalid triangles crossing silhouettes or lying outside
++        if p0 is not None and p1 is not None and p2 is not None:
++            initial_triangles.append([p0, p1, p2])
++        if p0 is not None and p2 is not None and p3 is not None:
++            initial_triangles.append([p0, p2, p3])
++
++    # Step 4 & 5: Adaptive refinement loop
+     current_triangles = initial_triangles
+-    for step in range(3, 5): # 3 to 4 steps
++    for step in range(3, 5): # 3 to 4 steps sufficient
+         next_triangles = []
+         for tri in current_triangles:
+-            # Check heuristics
+             should_split = False
+-            
+-            # Heuristic 1: Geometric Discontinuities
+-            if has_discontinuity(tri):
++
++            # Heuristic 1: Geometric discontinuities
++            if check_discontinuity(tri):
+                 should_split = True
+-            
+-            # Heuristic 2: Beam Energy
+-            if is_convergent_and_high_energy(tri):
++
++            # Heuristic 2: Beam energy
++            # Sources do not provide exact convergence formula; typically assessed from light direction and surface normals [G]
++            if is_convergent_beam(tri):
+                 should_split = True
+-            
+-            # Heuristic 3: Camera Proximity
+-            if is_close_to_camera(tri, camera):
++
++            # Heuristic 3: Camera proximity
++            if check_camera_proximity(tri, camera_position):
+                 should_split = True
+-            
++
+             if should_split:
+                 # Split triangle into smaller ones
+-                # Implementation detail: split into 4 sub-triangles or similar
+                 sub_tris = split_triangle(tri)
+                 next_triangles.extend(sub_tris)
+             else:
+                 next_triangles.append(tri)
+-        
+         current_triangles = next_triangles
+ 
+     return current_triangles
+ 
+-def has_discontinuity(tri):
+-    # Compare normal and depth at beam edge starts
+-    # If difference > threshold, return True
+-    pass
++def sample_gbuffer(uv):
++    # Standard texture lookup returning position, normal, material or None
++    return None # Comment: Standard graphics API call.
+ 
+-def is_convergent_and_high_energy(tri):
+-    # Assess beam energy based on light source and geometry
+-    pass
++def check_discontinuity(tri):
++    # Compare sampled surface parameters (normal and depth) at beam edge starts
++    # Split if they differ significantly
++    n0, n1, n2 = tri[0].normal, tri[1].normal, tri[2].normal
++    d0, d1, d2 = tri[0].depth, tri[1].depth, tri[2].depth
++    threshold = 0.1 # Not given in sources [G]
++    if abs(n0 - n1) > threshold or abs(n1 - n2) > threshold or abs(n0 - n2) > threshold:
++        return True
++    if abs(d0 - d1) > threshold or abs(d1 - d2) > threshold or abs(d0 - d2) > threshold:
++        return True
++    return False
+ 
+-def is_close_to_camera(tri, camera):
+-    # Find closest point to camera on beam's central ray
+-    # Central ray = average of three beam edges
+-    central_ray = compute_central_ray(tri)
+-    closest_point = ray_closest_point(central_ray, camera.position)
+-    distance = length(closest_point - camera.position)
+-    return distance < threshold
++def is_convergent_beam(tri):
++    # Assess beam energy: convergent beams focus light and are refined with higher priority
++    # Divergent beams are unproblematic unless energy is very high
++    return False # Comment: Sources do not provide exact energy calculation [G]
++
++def check_camera_proximity(tri, camera_pos):
++    # Find closest point to camera on beam's central ray (average of three beam edges)
++    e0 = tri[1].pos - tri[0].pos
++    e1 = tri[2].pos - tri[1].pos
++    e2 = tri[0].pos - tri[2].pos
++    ray_dir = (e0 + e1 + e2) / 3.0
++    ray_dir = normalize(ray_dir)
++    ray_origin = tri[0].pos
++    v = camera_pos - ray_origin
++    t = dot(v, ray_dir)
++    closest_point = ray_origin + ray_dir * t
++    distance = length(closest_point - camera_pos)
++    # Refine beams closer to camera more aggressively
++    return distance < 10.0 # Threshold not given in sources [G]
++
++def split_triangle(tri):
++    # Split into smaller triangles
++    m0 = (tri[0].pos + tri[1].pos) / 2.0
++    m1 = (tri[1].pos + tri[2].pos) / 2.0
++    m2 = (tri[2].pos + tri[0].pos) / 2.0
++    return [[tri[0], m0, m2], [m0, tri[1], m1], [m2, m1, tri[2]], [m0, m1, m2]]
+ ```
+ 
+@@ -124,16 +147,16 @@
+ 
+ ### Recursive Geometry Shader Beam Generation
+-The parent method that executes the adaptive beam generation using a geometry shader with stream-out feedback. It handles the recursive subdivision and beam extrusion. [Recursive Geometry Shader Beam Generation](8395-recursive-geometry-shader-beam-generation.md)
++Executes the adaptive beam generation using a geometry shader with stream-out feedback. It handles the recursive subdivision and beam extrusion. [Recursive Geometry Shader Beam Generation](8395-recursive-geometry-shader-beam-generation.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of refinement steps and the complexity of the specular surfaces. Each refinement step increases the number of triangles, potentially leading to exponential growth in the worst case, but limited by the 3-4 step constraint [S1].
+-*   **Memory Complexity:** Proportional to the number of generated beam primitives. The G-buffer size is determined by the light's view frustum resolution [S1].
+-*   **Strengths:** Decouples geometric complexity from caustic generation; adapts to light emission characteristics and camera position; handles complex specular surfaces efficiently [S1].
+-*   **Limitations:** Generates more beams than necessary in some cases due to boundary mismatch suppression; requires G-buffer rasterization from light's perspective [S1].
++*   **Time Complexity:** Not given in the sources. Each refinement step increases the number of triangles, limited by the 3-4 step constraint [S1].
++*   **Memory Complexity:** Not given in the sources. Proportional to the number of generated beam primitives. The G-buffer size is determined by the light's view frustum resolution [S1].
++*   **Strengths:** Decouples geometric complexity from the actual caustic generation process; adapts to light emission characteristics and camera position; handles complex specular surfaces efficiently [S1].
++*   **Limitations:** Generates more beams than necessary in some cases due to boundary mismatch suppression; requires G-buffer rasterization from the light's perspective [S1].
+ *   **When to use:** Real-time volume caustics with dynamic specular surfaces and camera movement [S1].
+-*   **When not to use:** Static scenes with simple specular surfaces where precomputed caustics might be more efficient; scenes with highly transparent objects requiring multiple bounces (though the method can be extended, it is primarily designed for first interaction) [S1].
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-Adaptive Beam Generation, also known as Hierarchical Projected Grid, was introduced in the paper "Real-time volume caustics with adaptive beam tracing" by [S1]. It builds upon standard caustic mapping techniques but replaces photon emission with a projected grid approach, leveraging the G-buffer for surface parameterization. The method was developed to address the limitations of static caustic maps and the computational cost of full beam tracing in real-time applications [S1].
++Adaptive Beam Generation, also known as Hierarchical Projected Grid, was introduced in the paper "Real-time volume caustics with adaptive beam tracing" [S1]. It builds upon standard caustic mapping by replacing photon emission with a projected grid approach that uses a G-buffer for surface parameterization [S1].
+ 
+ ## Sources

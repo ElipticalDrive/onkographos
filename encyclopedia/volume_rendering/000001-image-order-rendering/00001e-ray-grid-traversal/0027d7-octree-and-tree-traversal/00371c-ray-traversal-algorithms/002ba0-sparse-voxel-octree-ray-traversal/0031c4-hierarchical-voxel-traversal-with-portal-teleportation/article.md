@@ -35,7 +35,7 @@ A ray traversal algorithm that navigates a hierarchical voxel structure (octree)
     $$ dir = r.dir + dir\_mask \times 0.000001 $$
     [S1, unofficial]
 
-3.  **Bounding Box Check:** If `pos` is out of bounds, compute distance to octree bounding box $[-1, 1]^3$ using `ray_box_dist`. If distance is 0, return miss. Otherwise, advance ray:
+3.  **Bounding Box Check:** If `pos` is out of bounds, compute distance to octree bounding box $[-1, 1]^3$ using `ray_box_dist`. If distance is 0, return miss or intersect scene. Otherwise, advance ray:
     $$ pos = pos + dir \times dist $$
     $$ distance = distance + dist $$
     [S1, unofficial]
@@ -48,8 +48,8 @@ A ray traversal algorithm that navigates a hierarchical voxel structure (octree)
     [S1, unofficial]
 
 5.  **Traversal Loop:** Iterate while `steps < 1000`:
-    a.  **Fetch Voxel:** Retrieve voxel data at `tcpotr` using `get_value(tcpotr)`.
-    b.  **Hit Check:** If `(voxel.data & 0xFF) != 0` AND `!should_portal_skip` AND `((voxel.data >> 8) & flags) > 0` (or `flags == 0`), break loop.
+    a.  **Fetch Voxel:** Retrieve voxel data at `tcpotr` using `get_value(tcpotr)` [S1, unofficial].
+    b.  **Hit Check:** If `(voxel.data & 0xFF) != 0` AND `!should_portal_skip` AND `((voxel.data >> 8) & flags) > 0` (or `flags == 0`), break loop [S1, unofficial].
     c.  **Step Size:** Compute voxel size:
         $$ voxel\_size = \frac{2.0}{voxel.grid\_size} $$
         Compute exit times for each axis:
@@ -74,8 +74,8 @@ A ray traversal algorithm that navigates a hierarchical voxel structure (octree)
             $$ tcpotr = pos $$
             $$ portal\_mat = portal.transformation \times portal\_mat $$
         [S1, unofficial]
-    g.  **Physics Limit:** If `t_current + distance > physics_distance \times wtr` AND `physics_distance > 0.0`, return miss.
-    h.  **Bounds Check:** If `!in_bounds(tcpotr)`, return miss or intersect scene based on `physics_distance`.
+    g.  **Physics Limit:** If `t_current + distance > physics_distance \times wtr` AND `physics_distance > 0.0`, return miss [S1, unofficial].
+    h.  **Bounds Check:** If `!in_bounds(tcpotr)`, return miss or intersect scene based on `physics_distance` [S1, unofficial].
     i.  **Increment:** `steps = steps + 1`.
 
 6.  **Return Hit:** On loop break, return:
@@ -97,11 +97,11 @@ def traverse_voxel_portal(ray_origin, ray_dir, voxel_uniforms, physics_distance,
     dir_mask = [1.0 if ray_dir[i] == 0.0 else 0.0 for i in range(3)]
     dir = [ray_dir[i] + dir_mask[i] * 0.000001 for i in range(3)]
 
-    # 3. Bounding Box Check
+    # 3. Bounding Box Check [-1, 1]^3
     if not in_bounds(pos):
-        dist = ray_box_dist(pos, dir)
-        if dist == 0:
-            return HitInfo(False, 0, None, [0.0]*3, [0.0]*3, [0.0]*3, [[1.0]*4 for _ in range(4)], 0)
+        dist = ray_box_dist(pos, dir, [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
+        if dist == 0.0:
+            return HitInfo(False, 0, None, [0.0]*3, [0.0]*3, [0.0]*3, identity_matrix(), 0)
         pos = [pos[i] + dir[i] * dist for i in range(3)]
         distance = dist
     else:
@@ -111,16 +111,17 @@ def traverse_voxel_portal(ray_origin, ray_dir, voxel_uniforms, physics_distance,
     r_sign = [1.0 if dir[i] > 0 else -1.0 if dir[i] < 0 else 0.0 for i in range(3)]
     tcpotr = pos[:]
     steps = 0
-    normal = [float(int(pos[i] * 1.00001)) for i in range(3)]
-    portal_mat = [[1.0 if i==j else 0.0 for j in range(4)] for i in range(4)]
+    normal = [int(pos[i] * 1.00001) for i in range(3)]
+    portal_mat = identity_matrix()
 
     # 5. Traversal Loop
     while steps < 1000:
-        voxel = get_value(tcpotr)
+        # Fetch voxel data at tcpotr
+        voxel = get_value(tcpotr)  # Sources do not specify implementation
 
         # 5b. Hit Check
         material_id = voxel.data & 0xFF
-        is_portal = should_portal_skip(voxel)
+        is_portal = should_portal_skip(voxel)  # Sources do not specify implementation
         voxel_flags = voxel.data >> 8
 
         if material_id != 0 and not is_portal and ((voxel_flags & flags) > 0 or flags == 0):
@@ -144,7 +145,7 @@ def traverse_voxel_portal(ray_origin, ray_dir, voxel_uniforms, physics_distance,
 
         # 5f. Portal Teleportation
         if is_portal:
-            portal = get_portal_for_voxel(voxel)
+            portal = get_portal_for_voxel(voxel)  # Sources do not specify implementation
             ray_world_origin = [pos[i] * rtw for i in range(3)]
             plane_pos = [portal.position[i] + portal.normal[i] * 0.00002 for i in range(3)]
             intersection = ray_plane(ray_world_origin, dir, plane_pos, portal.normal)
@@ -159,11 +160,11 @@ def traverse_voxel_portal(ray_origin, ray_dir, voxel_uniforms, physics_distance,
 
         # 5g. Physics Limit
         if t_current + distance > physics_distance * wtr and physics_distance > 0.0:
-            return HitInfo(False, 0, None, [0.0]*3, [0.0]*3, [0.0]*3, [[1.0]*4 for _ in range(4)], steps)
+            return HitInfo(False, 0, None, [0.0]*3, [0.0]*3, [0.0]*3, identity_matrix(), steps)
 
         # 5h. Bounds Check
         if not in_bounds(tcpotr):
-            return HitInfo(False, 0, None, [0.0]*3, [0.0]*3, [0.0]*3, [[1.0]*4 for _ in range(4)], steps)
+            return HitInfo(False, 0, None, [0.0]*3, [0.0]*3, [0.0]*3, identity_matrix(), steps)
 
         # 5i. Increment
         steps += 1
@@ -179,6 +180,25 @@ def traverse_voxel_portal(ray_origin, ray_dir, voxel_uniforms, physics_distance,
         portal_mat,
         steps
     )
+
+def in_bounds(v):
+    return all(-1.0 <= v[i] <= 1.0 for i in range(3))
+
+def ray_box_dist(origin, dir, min_b, max_b):
+    t_min = max((min_b[i] - origin[i]) / dir[i] for i in range(3))
+    t_max = min((max_b[i] - origin[i]) / dir[i] for i in range(3))
+    return max(t_min, 0.0) if t_min <= t_max else -1.0
+
+def ray_plane(origin, dir, point, normal):
+    denom = sum(dir[i] * normal[i] for i in range(3))
+    if abs(denom) < 1e-8:
+        return type('Vec4', (), {'xyz': [0.0]*3, 'w': 0.0})()
+    t = sum((point[i] - origin[i]) * normal[i] for i in range(3)) / denom
+    hit = [origin[i] + dir[i] * t for i in range(3)]
+    return type('Vec4', (), {'xyz': hit, 'w': t})()
+
+def identity_matrix():
+    return [[1.0 if i==j else 0.0 for j in range(4)] for i in range(4)]
 ```
 
 **Edge Cases and Pitfalls:**

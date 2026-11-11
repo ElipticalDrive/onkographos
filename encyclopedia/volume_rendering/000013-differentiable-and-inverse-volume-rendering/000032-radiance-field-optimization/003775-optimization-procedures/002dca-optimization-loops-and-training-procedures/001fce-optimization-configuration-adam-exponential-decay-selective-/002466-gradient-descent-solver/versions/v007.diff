@@ -1,0 +1,235 @@
+--- v006.md
++++ v007.md
+@@ -1,136 +1,144 @@
+ # Gradient Descent Solver
++
+ Also called: Adam Optimizer, Adam Optimizer Solver, L1/L2 Norm Solver
+ 
+ ## Overview
+-The Gradient Descent Solver is a matrix-free optimization method used to update voxel grid parameters or transfer function coefficients in differentiable volume rendering [S2, unofficial]. It solves the problem of finding optimal scalar field values by minimizing a loss function via iterative gradient updates, offering stable behavior for ill-conditioned systems [S1, unofficial]. It sets itself apart from direct linear solvers (like CGLS) by avoiding the explicit formation of normal equations ($A^T A$), making it suitable for large-scale or rank-deficient problems where memory or numerical stability is a concern [S1, unofficial].
++The Gradient Descent Solver is a matrix-free optimization method used to update voxel grid parameters in differentiable volume rendering, specifically for computing optimal transfer functions or reconstructing volumes [S1, S2, unofficial]. It supports both constant update rates and the Adam optimizer, offering stable behavior for ill-conditioned systems [S1, unofficial]. It distinguishes itself from sibling solvers like CGLS by supporting both $l_2$-norm (least squares) and $l_1$-norm (least absolute deviations) loss functions, allowing tolerance for outliers in the $l_1$ case [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- **Input:** Current parameter vector $\mathbf{x}$ (e.g., voxel densities or transfer function weights), gradient vector $\mathbf{g}$ computed via backpropagation through the differentiable renderer, and solver hyperparameters.
+-- **Output:** Updated parameter vector $\mathbf{x}'$.
++**Inputs:**
++- Current parameter tensor (e.g., voxel grid values or transfer function coefficients) $x$.
++- Gradient tensor $\nabla L$ with respect to the loss $L$.
++- Optimizer type: `constant` or `adam`.
++- Learning rate $\alpha$ (for constant mode).
++- Adam hyperparameters: $\beta_1, \beta_2, \epsilon$ (typically $0.9, 0.999, 10^{-8}$) [S1, KB15, unofficial].
++- Loss norm: $l_2$ or $l_1$ [S1, unofficial].
++
++**Outputs:**
++- Updated parameter tensor $x_{new}$.
+ 
+ **Data Structures:**
+-- **Parameters:** A dense array of floating-point values representing the voxel grid or TF coefficients.
+-- **Moments (Adam only):** Two auxiliary arrays of the same shape as $\mathbf{x}$:
+-  - $\mathbf{m}$: First moment estimate (mean of gradients).
+-  - $\mathbf{v}$: Second moment estimate (uncentered variance of gradients).
+-- **State:** Iteration counter $t$ (initially 1).
++- For Adam: First moment estimate $m$ (same shape as $x$, initialized to 0), Second moment estimate $v$ (same shape as $x$, initialized to 0), and iteration counter $t$ (scalar, initialized to 0) [KB15].
++- For Constant: No auxiliary state required.
+ 
+-**Loss Functions:**
+-The solver supports two norm-based objectives [S1, unofficial]:
+-1.  **$L_2$-norm (Least Squares):** Penalizes larger residuals more strongly due to the quadratic term.
+-2.  **$L_1$-norm (Least Absolute Deviations):** Tolerates larger outliers in favor of minimizing many lower deviations.
+-
+-**Algorithm Steps:**
+-The implementation is matrix-free, accumulating gradients via atomic additions to handle parallel ray contributions [S1, unofficial].
+-
+-1.  **Compute Gradient:** Calculate the gradient $\mathbf{g}$ of the loss function with respect to the parameters $\mathbf{x}$ using automatic differentiation through the volume rendering pipeline.
+-2.  **Update Moments (if using Adam):**
+-    -   Update biased first moment estimate:
+-        $$ \mathbf{m}_t = \beta_1 \mathbf{m}_{t-1} + (1 - \beta_1) \mathbf{g}_t $$
+-    -   Update biased second raw moment estimate:
+-        $$ \mathbf{v}_t = \beta_2 \mathbf{v}_{t-1} + (1 - \beta_2) \mathbf{g}_t^2 $$
+-    -   Apply bias correction:
+-        $$ \hat{\mathbf{m}}_t = \frac{\mathbf{m}_t}{1 - \beta_1^t} $$
+-        $$ \hat{\mathbf{v}}_t = \frac{\mathbf{v}_t}{1 - \beta_2^t} $$
+-    -   *Note:* If using constant update rate $\alpha$, skip this step and set effective step size to $\alpha$.
+-3.  **Compute Update Direction:**
+-    -   For Adam: $\mathbf{d}_t = \frac{\hat{\mathbf{m}}_t}{\sqrt{\hat{\mathbf{v}}_t} + \epsilon}$
+-    -   For Constant Rate: $\mathbf{d}_t = \mathbf{g}_t$
+-4.  **Update Parameters:**
+-    $$ \mathbf{x}_{t} = \mathbf{x}_{t-1} - \alpha \cdot \mathbf{d}_t $$
+-    Where $\alpha$ is the learning rate.
+-
+-**Parameters:**
+--   **$\alpha$ (Learning Rate):** Step size. Typical values range from $10^{-4}$ to $10^{-2}$ depending on the problem scale [S1, unofficial].
+--   **$\beta_1$ (Adam):** Exponential decay rate for the first moment estimates. Default: 0.9.
+--   **$\beta_2$ (Adam):** Exponential decay rate for the second moment estimates. Default: 0.999.
+--   **$\epsilon$ (Adam):** Small constant for numerical stability. Default: $10^{-8}$.
+-
+-**Edge Cases and Pitfalls:**
+--   **Ill-conditioning:** While more stable than direct solvers for ill-conditioned systems, poor choice of $\alpha$ can still lead to divergence [S1, unofficial].
+--   **Atomic Additions:** In parallel implementations, gradient accumulation must use atomic operations to prevent race conditions when multiple rays contribute to the same voxel [S1, unofficial].
+--   **$L_1$ vs $L_2$:** The choice of norm affects robustness to outliers. $L_2$ is sensitive to large errors, while $L_1$ is more robust but may converge slower near the optimum [S1, unofficial].
++**Steps:**
++1. **Compute Gradients:** Calculate the gradient $\nabla L$ of the loss function with respect to the parameters. The solver is implemented in a matrix-free manner, accumulating gradients via atomic additions to handle parallel updates [S1, unofficial].
++2. **Select Norm:**
++   - If $l_2$-norm: The loss penalizes larger residuals more strongly due to the quadratic term [S1, unofficial].
++   - If $l_1$-norm: The loss tolerates larger outliers in favor of minimizing many lower deviations [S1, unofficial].
++3. **Update Parameters:**
++   - **Constant Mode:**
++     $$ x_{new} = x - \alpha \nabla L $$
++   - **Adam Mode:**
++     1. Increment $t \leftarrow t + 1$.
++     2. Update biased first moment estimate:
++        $$ m \leftarrow \beta_1 m + (1 - \beta_1) \nabla L $$
++     3. Update biased second raw moment estimate:
++        $$ v \leftarrow \beta_2 v + (1 - \beta_2) (\nabla L)^2 $$
++        (Note: $(\nabla L)^2$ denotes element-wise squaring) [KB15].
++     4. Compute bias-corrected estimates:
++        $$ \hat{m} = \frac{m}{1 - \beta_1^t} $$
++        $$ \hat{v} = \frac{v}{1 - \beta_2^t} $$
++     5. Update parameters:
++        $$ x_{new} = x - \alpha \frac{\hat{m}}{\sqrt{\hat{v}} + \epsilon} $$
+ 
+ **Pseudocode:**
+ ```python
+-def gradient_descent_step(x, g, alpha, beta1=0.9, beta2=0.999, eps=1e-8, use_adam=True):
++def gradient_descent_solver(x, grad, optimizer_type='adam', alpha=0.01, 
++                            beta1=0.9, beta2=0.999, epsilon=1e-8, 
++                            norm_type='l2', m=None, v=None, t=0):
+     """
+     Performs one step of gradient descent or Adam optimization.
+     
+     Args:
+-        x: Current parameter array.
+-        g: Gradient array (computed via backprop).
++        x: Current parameter tensor.
++        grad: Gradient tensor.
++        optimizer_type: 'constant' or 'adam'.
+         alpha: Learning rate.
+-        beta1: Adam first moment decay.
+-        beta2: Adam second moment decay.
+-        eps: Adam numerical stability constant.
+-        use_adam: Boolean flag to switch between constant rate and Adam.
++        beta1, beta2: Adam momentum coefficients.
++        epsilon: Adam numerical stability constant.
++        norm_type: 'l2' or 'l1'. Note: The norm choice affects the gradient calculation 
++                   upstream; this solver applies the update rule. The gradient passed 
++                   here is assumed to be the final gradient of the chosen loss.
++        m: Adam first moment estimate (None if not using Adam or first step).
++        v: Adam second moment estimate (None if not using Adam or first step).
++        t: Adam iteration counter.
+         
+     Returns:
+-        Updated parameter array x_new.
++        x_new: Updated parameters.
++        m: Updated first moment (if Adam).
++        v: Updated second moment (if Adam).
++        t: Updated iteration counter (if Adam).
+     """
+-    if use_adam:
+-        # Initialize moments if not present (handled by solver state)
+-        # m and v are assumed to be maintained in solver state
+-        m = solver_state.m
+-        v = solver_state.v
+-        t = solver_state.t
++    if optimizer_type == 'constant':
++        x_new = x - alpha * grad
++        return x_new, None, None, 0
+         
+-        # Update biased first moment
+-        m = beta1 * m + (1 - beta1) * g
+-        # Update biased second raw moment
+-        v = beta2 * v + (1 - beta2) * (g * g)
++    elif optimizer_type == 'adam':
++        if m is None or v is None:
++            # Initialize moments on first step [G]
++            m = torch.zeros_like(x)
++            v = torch.zeros_like(x)
++            t = 0
++            
++        t += 1
+         
+-        # Bias correction
++        # Update biased first moment estimate
++        m = beta1 * m + (1 - beta1) * grad
++        
++        # Update biased second raw moment estimate
++        v = beta2 * v + (1 - beta2) * (grad * grad)
++        
++        # Compute bias-corrected estimates
+         m_hat = m / (1 - beta1 ** t)
+         v_hat = v / (1 - beta2 ** t)
+         
+-        # Compute update direction
+-        update = m_hat / (sqrt(v_hat) + eps)
++        # Update parameters
++        x_new = x - alpha * (m_hat / (torch.sqrt(v_hat) + epsilon))
+         
+-        # Update state
+-        solver_state.m = m
+-        solver_state.v = v
+-        solver_state.t = t + 1
++        return x_new, m, v, t
+     else:
+-        # Constant update rate
+-        update = g
+-        
+-    # Apply update
+-    x_new = x - alpha * update
+-    return x_new
++        raise ValueError("Unknown optimizer type")
+ ```
++
++**Edge Cases and Pitfalls:**
++- **Ill-conditioning:** While stable for ill-conditioned systems, convergence may be slow without adaptive learning rates like Adam [S1, unofficial].
++- **Atomic Additions:** When implementing in parallel (e.g., on GPU), gradient accumulation must use atomic operations to avoid race conditions [S1, unofficial].
++- **Norm Selection:** The choice between $l_1$ and $l_2$ affects robustness to outliers. $l_2$ is sensitive to large residuals, while $l_1$ is more robust [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [CGLS Solver (Conjugate Gradient Least Squares)](3285-cgls-solver-conjugate-gradient-least-squares.md)
+-A sparse linear least squares solver that avoids ill-conditioning of normal equations, providing numerically stable results for large or rank-deficient problems. Choose when direct linear system solving is preferred over iterative gradient steps.
++The CGLS solver is a sparse linear least squares solver used to avoid the ill-conditioning of normal equations ($A^T A$), providing numerically stable results for large or rank-deficient problems.
+ 
+ ### [Partially Learned Gradient Descent](3771-partially-learned-gradient-descent.md)
+-Unrolls optimization steps into a neural network, combining fixed physics-based gradients with learnable updates. Choose when data-driven adaptation of step size and momentum is needed while retaining physical interpretability.
++Partially Learned Gradient Descent (PLGD) is an iterative reconstruction method that unrolls a fixed number of optimization steps into a neural network, combining a fixed physics-based gradient step with a learnable neural network update. It initializes the reconstruction with a filtered backprojection (FBP) estimate and iteratively refines it by passing the current estimate, gradients, and a momentum memory state through a convolutional network to compute the next update. Unlike standard gradient descent which uses a fixed or manually tuned step size, PLGD learns the optimization dynamics (step size and momentum) directly from data, while retaining the explicit physical forward model (e.g., RayTransform) to ensure interpretability and robustness to distribution shifts. It differs from fully learned end-to-end CNNs by preserving the gradient structure of the inverse problem.
+ 
+ ### [SGD with Positive t-Distribution](5809-sgd-with-positive-t-distribution.md)
+-Replaces Gaussian noise assumptions with a positive Student's t-distribution to model gradient uncertainty. Choose as a baseline to isolate the impact of heavy-tailed noise modeling.
++An ablation study variant of differentiable volume rendering optimization that replaces Gaussian noise assumptions with a positive Student's t-distribution to model gradient uncertainty. It serves as a controlled baseline to isolate the impact of heavy-tailed noise modeling from other components like MCMC sampling, ensuring fair comparison with methods using low-pass filtering.
+ 
+ ### [Newton's Method](6442-newton-s-method.md)
+-A second-order algorithm using Hessian curvature information for faster convergence near optima. Choose when computational overhead is acceptable and faster local convergence is critical.
++Newton's method is a second-order optimization algorithm that approximates the objective function $f$ using a second-order Taylor expansion to determine an update step that targets the stationary point where the gradient is zero. It sets itself apart from first-order solvers like Gradient Descent by incorporating local curvature information via the Hessian matrix, allowing for faster convergence near optima, though at the cost of significant computational overhead for high-dimensional problems.
+ 
+ ### [Inexact Line Search Optimization](7741-inexact-line-search-optimization.md)
+-Adapts step size dynamically to ensure sufficient reduction in the objective function. Choose when standard gradient descent converges too slowly due to fixed step sizes.
++Inexact Line Search Optimization is an iterative method that adapts the step size in gradient descent to achieve a reduction in the objective function while ensuring sufficiently fast progress. It solves the problem of slow convergence in standard gradient descent by dynamically selecting a step size that guarantees descent without the computational cost of finding the exact minimum along the search direction. Unlike exact line search, which may suffer from convergence deterioration, this inexact strategy yields reasonable results and descends much faster. It builds on [Gradient Descent Solver](3280-gradient-descent-solver.md).
++
++### PDHG Solver (Primal-Dual Hybrid Gradient)
++A solver that keeps the main solver state on the selected NVIDIA GPU during the PDHG loop, including volume, extrapolated volume, previous volume, gradient buffer, TV duals, projection data duals, measured projections, and projection batches [S3, unofficial]. Default resident projector backend is `matched_voxel`. ASTRA is rejected for production resident PDHG because its 3-D CUDA FP/BP pair failed strict matched-adjoint checks. LEAP/PyTorch support is experimental and should only be used when its adjointness guard passes. Current resident multi-GPU support is not a pooled-memory solver; full memory pooling across two GPUs requires volume-sharded resident PDHG implementation. If resident PDHG runs out of VRAM, do not raise GPU PDHG memory safety to force a run; that only weakens the safety check [S3, unofficial].
+ 
+ ## Operating characteristics
+--   **Time Complexity:** $O(N)$ per iteration, where $N$ is the number of parameters. Each iteration requires a forward and backward pass through the renderer.
+--   **Memory Complexity:** $O(N)$ for parameters. If using Adam, an additional $2N$ for moment estimates. Matrix-free implementation avoids $O(N^2)$ storage for Hessian or normal equations.
+--   **Measured Performance:** Stable for ill-conditioned systems, comparable to CGLS in stability but potentially slower in convergence speed for well-conditioned problems [S1, unofficial].
+--   **Strengths:** Robust to ill-conditioning, low memory footprint (matrix-free), supports both $L_1$ and $L_2$ norms.
+--   **Limitations:** Slower convergence than second-order methods for well-conditioned problems; sensitive to learning rate selection.
+--   **When to Use:** Large-scale volume rendering, ill-conditioned inverse problems, or when memory constraints prevent forming normal equations.
+--   **When Not to Use:** When fast convergence is critical and the problem is well-conditioned (consider Newton's method or CGLS).
++- **Time Complexity:** Per-iteration complexity is linear with respect to the number of parameters, as it involves element-wise operations and gradient accumulation [S1, unofficial].
++- **Memory Complexity:** $O(N)$ for parameters and gradients. For Adam, an additional $O(N)$ for first and second moment estimates [KB15].
++- **Stability:** Shows stable behavior for ill-conditioned systems, similar to CGLS [S1, unofficial].
++- **Strengths:** Matrix-free implementation allows handling large-scale problems without forming explicit matrices. Supports both $l_1$ and $l_2$ norms for flexible loss modeling [S1, unofficial].
++- **Limitations:** Slower than direct methods (like solving $A^T A x = A^T b$) for small, well-conditioned systems [S1, unofficial]. Convergence can be slow for ill-conditioned problems without adaptive learning rates.
++- **When to Use:** Suitable for large-scale differentiable volume rendering where matrix formation is prohibitive, or when robustness to outliers ($l_1$) is desired.
++- **When Not to Use:** For small, well-conditioned linear systems where direct solvers are faster.
+ 
+ ## Background
+-The Adam optimizer, a variant of gradient descent, was introduced by Kingma and Ba in 2015 [S2, unofficial]. It has been widely adopted in differentiable volume rendering for optimizing voxel grid parameters and transfer functions due to its adaptive learning rate capabilities [S2, unofficial]. The specific implementation described here supports both constant update rates and Adam, and is noted for its stability in ill-conditioned systems [S1, unofficial].
++The Adam optimizer, a key variant of this solver, was introduced by Kingma and Ba in 2015 [S2, KB15, unofficial]. The Gradient Descent Solver has been implemented in various contexts, including DiffDVR for transfer function optimization [S1, unofficial] and DiffVox for voxel grid parameter updates [S2, unofficial]. It is used in differentiable volume rendering to optimize transfer functions and reconstruct volumes from projection data.
+ 
+ ## Sources
+ [S1] Transfer Function Optimization for Comparative Volume Rendering, https://doi.org/10.48550/arxiv.2306.05885, fetched 2026-10-26 (unofficial)
+-[S2] Differentiable Voxel-based X-ray Rendering Improves Sparse-View 3D CBCT Reconstruction, https://doi.org/10.48550/arxiv.2411.19224, fetched 2026-10-26 (unofficial)+[S2] Differentiable Voxel-based X-ray Rendering Improves Sparse-View 3D CBCT Reconstruction, https://doi.org/10.48550/arxiv.2411.19224, fetched 2026-10-26 (unofficial)
++[S3] alidarbandi/TomoAnchor-V3, https://github.com/alidarbandi/TomoAnchor-V3, fetched 2026-10-27 (unofficial)

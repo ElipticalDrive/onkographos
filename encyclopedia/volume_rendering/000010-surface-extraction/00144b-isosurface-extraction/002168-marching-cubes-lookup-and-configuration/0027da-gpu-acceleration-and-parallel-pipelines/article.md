@@ -1,59 +1,74 @@
 # GPU Acceleration and Parallel Pipelines
 
-Also called: GPU Marching Cubes, Compute Shader MC, Parallel Isosurface Extraction
+Also called: GPU Marching Cubes, Compute Shader Marching Cubes, Parallel Isosurface Extraction
 
 ## Overview
-GPU Acceleration and Parallel Pipelines refers to the family of techniques that offload the voxel classification, edge intersection calculation, and triangle generation stages of Marching Cubes to the GPU, leveraging massive parallelism to achieve real-time performance on large scalar volumes [S1, S2, unofficial]. Unlike CPU-based immediate mode or fixed-buffer approaches, GPU variants typically employ parallel dispatch (compute shaders or OpenCL kernels) and handle the variable output size of each voxel using either atomic counters with append buffers, hierarchical histogram pyramids for exact allocation, or slab-based prefix sums to prevent buffer overflow and ensure topological consistency [S1, S2, S1, unofficial]. This family builds on [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) by mapping the 256-case lookup logic directly into parallel thread execution.
+GPU Acceleration and Parallel Pipelines refers to the family of techniques that map the voxel-wise operations of Marching Cubes onto Graphics Processing Units (GPUs) to achieve real-time or high-performance surface reconstruction from discrete 3D scalar fields [S1, S2, unofficial]. It solves the performance bottleneck of CPU-based immediate-mode implementations by leveraging massive parallelism, where each thread or thread group processes one or more voxels [S1, S2, unofficial]. What sets this family apart from CPU-based methods is the use of parallel dispatch and GPU-specific memory management (such as atomic counters, append buffers, or hierarchical histograms) to handle the variable and unpredictable number of output triangles per voxel [S1, S2, unofficial]. It differs from slab-based variants by often processing the entire volume grid directly without explicit spatial partitioning for memory locality, although slab-based approaches exist within this family to manage buffer capacity [S1, S4, unofficial].
 
 ## Shared principles
-The family shares the following core mechanisms and constraints:
+The family relies on the precomputed data structures defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md):
 
-1.  **Parallel Dispatch**: The 3D volume grid of size $N_x \times N_y \times N_z$ is mapped to a 3D grid of threads. Each thread (or thread group) is responsible for processing one voxel (cube) defined by grid coordinates $(i, j, k)$. The global thread ID determines the voxel index [S1, S2, unofficial].
-2.  **Lookup Table Access**: Each thread accesses the precomputed `edgeTable` and `triangleTable` (defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md)) to determine the topology of the isosurface intersection for the current voxel's case index $C$ [S1, S2, unofficial].
-3.  **Variable Output Handling**: Since the number of triangles generated per voxel varies (0 to 5), a simple fixed-size output buffer is insufficient for dynamic scenes without excessive padding. The family resolves this via:
-    *   **Atomic Counters/Append Buffers**: Threads atomically increment a global counter to claim a slot in a pre-allocated output buffer [S1, S2, unofficial].
-    *   **Two-Pass Allocation**: A first pass counts triangles per voxel (often using a Histogram Pyramid or Prefix Sum), and a second pass writes geometry to exact offsets [S1, S2, unofficial].
-    *   **Slab Partitioning**: The volume is split into slabs along one axis to manage memory locality and ensure boundary consistency, preventing cracks at slab interfaces [S1, unofficial].
-4.  **Boundary Checks**: Threads processing voxels at the grid boundary must verify that all 8 corner vertices exist within the volume bounds to avoid out-of-bounds memory access when sampling the scalar field [S1, S2, unofficial].
+1.  **Edge Intersection Table (`edgeTable`)**: An array of 256 integers (or shorts). Each entry is a 12-bit bitmask. Bit $k$ ($0 \le k \le 11$) is set to 1 if the isosurface intersects the $k$-th edge of the cube, and 0 otherwise. The standard edge numbering convention is:
+    *   Bottom face ($z=0$): $e_0=(0,1), e_1=(1,2), e_2=(2,3), e_3=(3,0)$
+    *   Top face ($z=1$): $e_4=(4,5), e_5=(5,6), e_6=(6,7), e_7=(7,4)$
+    *   Vertical edges: $e_8=(0,4), e_9=(1,5), e_{10}=(2,6), e_{11}=(3,7)$ [10327-lookup-table-and-ambiguity-handling]
+
+2.  **Triangle Connection Table (`triangleTable`)**: A 2D array of size $256 \times 16$.
+    *   Rows are indexed by the case index $C \in [0, 255]$.
+    *   Columns store integer indices. Indices $0–11$ refer to the 12 cube edges.
+    *   Indices are grouped in triplets $(a, b, c)$ to form triangles.
+    *   The sequence is terminated by the value `-1`.
+    *   The maximum number of triangles per voxel is 5, requiring 15 indices plus 1 terminator [10327-lookup-table-and-ambiguity-handling].
+
+**Case Index Calculation**: For each voxel, the 8-bit case index $C$ is determined by the scalar field values $V$ at the 8 vertices $v_i$ ($i=0..7$). If $V(v_i) < I$ (or $> I$, depending on convention), bit $i$ of $C$ is set to 1; otherwise 0. The bit assignment must strictly match the vertex ordering assumed by the LUT generation [10327-lookup-table-and-ambiguity-handling].
+
+**Ambiguity**: Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points where the topology is ambiguous (the isosurface passes through the cube center). The standard LUT uses a fixed triangulation for these, which can cause cracks or holes if adjacent voxels resolve the ambiguity differently [10327-lookup-table-and-ambiguity-handling].
 
 ## Subtopics
 
 ### [Primal Grid Marching Cubes](1211-primal-grid-marching-cubes.md)
-A GPU-accelerated technique that maps the primal grid directly to parallel thread groups, using a fixed-size output buffer managed by a global atomic counter and a subsequent cleanup pass. It differs from other GPU variants by relying on a static buffer capacity and clearing unused slots, rather than hierarchical reduction or exact allocation.
+Primal Grid Marching Cubes is a GPU-accelerated isosurface extraction technique that processes a 3D scalar volume grid using compute shaders to output a triangle mesh. It solves the problem of real-time or high-performance surface reconstruction from discrete 3D array data by mapping each voxel to a parallel thread, utilizing precalculated lookup tables for topology and atomic counters for dynamic buffer management. It sets itself apart from CPU-based immediate mode implementations by leveraging massive parallelism and fixed-size buffers with cleanup passes, and from slab-based variants by processing the entire volume grid directly without explicit spatial partitioning for memory locality.
 
 ### [GPU Marching Cubes with Histogram Pyramid](2317-gpu-marching-cubes-with-histogram-pyramid.md)
-This method uses a Histogram Pyramid (HP) to count triangles per voxel and compactly store vertex data in a Vertex Buffer Object (VBO) without atomic operations or sorting. It builds on the lookup tables and parallel dispatch principles defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) and [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md). It requires power-of-two dimensions and handles NVIDIA GPU limitations via buffer-based fallbacks.
+GPU Marching Cubes with Histogram Pyramid is a parallel isosurface extraction method that uses a Histogram Pyramid (HP) to count triangles per voxel and compactly store vertex data in a Vertex Buffer Object (VBO) without atomic operations or sorting. It differs from sibling methods like [GPU Marching Cubes (Compute Shader)](4687-gpu-marching-cubes-compute-shader.md) by replacing atomic counters with a hierarchical reduction structure, and from [Capacity-Safe Marching Cubes Pipeline](4596-capacity-safe-marching-cubes-pipeline.md) by using a top-down traversal of the HP to write geometry directly, avoiding a separate prefix-sum allocation pass.
 
 ### [CPU Immediate Mode Marching Cubes](2463-cpu-immediate-mode-marching-cubes.md)
-A classic CPU-based method that generates mesh vertices and normals in immediate mode, rendering them directly via WebGL draw calls without storing a persistent mesh buffer. It processes voxels sequentially and batches geometry, serving as a reference implementation but limited by CPU bottlenecks at high resolutions.
+CPU Immediate Mode Marching Cubes is a classic CPU-based surface extraction method that generates mesh vertices and normals in immediate mode, rendering them directly via WebGL draw calls without storing a persistent mesh buffer. It differs from sibling methods like [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md) by performing all field generation and geometry computation on the CPU, bypassing GPU parallel dispatch and atomic buffer management. This approach serves as a reference implementation for correctness but is limited in performance at high resolutions or high blob counts due to CPU bottlenecks.
 
 ### [Capacity-safe slab-based Marching Cubes](4595-capacity-safe-slab-based-marching-cubes.md)
-This method partitions the z-axis into slabs and uses a two-pass counting/exact allocation strategy to prevent output-buffer overflow and eliminate boundary cracks in large scalar grids. It differs from standard Marching Cubes by resolving topological discontinuities via boundary-consistent inclusive slab indexing.
+This method is a GPU-accelerated isosurface extraction pipeline that partitions the z-axis into slabs and uses a two-pass counting/exact allocation strategy to prevent output-buffer overflow and eliminate boundary cracks in large scalar grids. It differs from standard Marching Cubes by resolving topological discontinuities via boundary-consistent inclusive slab indexing, and differs from [GPU Marching Cubes with Histogram Pyramid](2317-gpu-marching-cubes-with-histogram-pyramid.md) and [Primal Grid Marching Cubes](1211-primal-grid-marching-cubes.md) by specializing counting and compaction for tightly coupled extraction and rendering.
 
 ### [Capacity-Safe Marching Cubes Pipeline](4596-capacity-safe-marching-cubes-pipeline.md)
-A GPU-based isosurface extraction method that avoids buffer overflow by determining the exact vertex count before geometry generation, using a two-pass approach: first computing counts/offsets, then allocating exact buffers and generating triangles. It builds on [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md) by adding a precise memory management layer to the parallel voxel processing [G].
+A GPU-based isosurface extraction method that avoids buffer overflow by determining the exact vertex count before geometry generation, using a two-pass approach: first computing counts/offsets, then allocating exact buffers and generating triangles. Unlike fixed-capacity baselines that reserve static buffers, this method determines the exact vertex count before generation, ensuring stability and preventing buffer overflow without excessive static reservation. It builds on [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md) by adding a precise memory management layer to the parallel voxel processing [G].
 
 ### [GPU Marching Cubes (Compute Shader)](4687-gpu-marching-cubes-compute-shader.md)
-This method implements the Marching Cubes isosurface extraction algorithm using a GPU compute shader, typically within a graphics framework like Unity. It solves the problem of real-time surface extraction from volumetric data by parallelizing the voxel processing across the GPU. It differs from CPU-based approaches by leveraging massive parallelism for voxel evaluation and uses hardware-supported append buffers or atomic counters to handle the variable number of triangles generated per voxel without pre-allocation of fixed-size buffers.
+This method implements the Marching Cubes isosurface extraction algorithm using a GPU compute shader, specifically designed for integration within the Unity engine environment. It addresses the performance bottleneck of CPU-based surface extraction by parallelizing the voxel processing across the GPU, while handling the variable number of output triangles per voxel through an append buffer mechanism. Unlike [GPU Marching Cubes with Histogram Pyramid](2317-gpu-marching-cubes-with-histogram-pyramid.md), which uses a two-pass allocation for precise memory placement, this approach relies on atomic appends, accepting potential buffer over-allocation or fragmentation in exchange for implementation simplicity.
 
-### GPU Scalar Field Generation (Tiled Texture)
-- **Definition**: Computes the scalar field values on the GPU using a fragment shader over a full-screen quad, outputting to a tiled 2D texture [S1, unofficial].
-- **Step**: Determine tiling based on `gridSize`: 16->4x4, 32->8x4, 64->8x8, 128->8x16. Calculate `texWidth = tilesX * gridSize`, `texHeight = tilesY * gridSize`. Create R32F texture with `CLAMP_TO_EDGE` wrapping and `NEAREST` filtering. Bind framebuffer with `tiledTexture` as `COLOR_ATTACHMENT0`. Set viewport to `texWidth`, `texHeight`. Pass blob parameters as `Float32Array` of size `numBlobs * 4`. Compute blob params on CPU: `pos.x = sin(i + 1.26 * time * (1.03 + 0.5*cos(0.21*i))) * 0.27 + 0.5`, `pos.y = abs(cos(i + 1.12 * time * cos(1.22 + 0.1424*i))) * 0.77`, `pos.z = cos(i + 1.32 * time * 0.1*sin((0.92 + 0.53 * i))) * 0.27 + 0.5`, `strength = 1.2 / ((sqrt(numBlobs)- 1) / 4 + 1)` [S1, unofficial].
-- **Parameter**: `tilesX`, `tilesY`: number of tiles in X and Y directions, determined by `gridSize`. `texWidth`, `texHeight`: dimensions of the tiled texture [S1, unofficial].
-- **Usage**: Implemented in `GpuFieldGenerator` class [S1, unofficial].
+#### GPU Scalar Field Generation (Tiled Texture)
+- [S1, unofficial] Computes the scalar field values on the GPU using a fragment shader over a full-screen quad, outputting to a tiled 2D texture.
+- [S1, unofficial] Determine tiling based on gridSize: 16->4x4, 32->8x4, 64->8x8, 128->8x16.
+- [S1, unofficial] Calculate texWidth = tilesX * gridSize, texHeight = tilesY * gridSize.
+- [S1, unofficial] Create R32F texture with CLAMP_TO_EDGE wrapping and NEAREST filtering.
+- [S1, unofficial] Bind framebuffer with tiledTexture as COLOR_ATTACHMENT0. Set viewport to texWidth, texHeight.
+- [S1, unofficial] Pass blob parameters as Float32Array of size numBlobs * 4. Compute blob params on CPU: pos.x = sin(i + 1.26 * time * (1.03 + 0.5*cos(0.21*i))) * 0.27 + 0.5, pos.y = abs(cos(i + 1.12 * time * cos(1.22 + 0.1424*i))) * 0.77, pos.z = cos(i + 1.32 * time * 0.1*sin((0.92 + 0.53 * i))) * 0.27 + 0.5, strength = 1.2 / ((sqrt(numBlobs)- 1) / 4 + 1).
+- [S1, unofficial] Implemented in GpuFieldGenerator class.
 
-### Incremental Chunk Re-meshing
-- **Definition**: A technique to keep deformation fast and seamless by only re-meshing chunks affected by edits, rather than the entire world [S2, unofficial].
-- **Step**: Divide the world into chunks. When a dig or build operation modifies the density field, mark only the affected chunks as 'dirty'. In the `LateUpdate` phase of the frame, iterate through dirty chunks and re-mesh them using Marching Cubes [S2, unofficial].
+#### Incremental Chunk Re-meshing
+- [S2, unofficial] A technique to keep deformation fast and seamless by only re-meshing chunks affected by edits, rather than the entire world.
+- [S2, unofficial] Divide the world into chunks.
+- [S2, unofficial] When a dig or build operation modifies the density field, mark only the affected chunks as 'dirty'.
+- [S2, unofficial] In the `LateUpdate` phase of the frame, iterate through dirty chunks and re-mesh them using Marching Cubes.
 
-### Adaptive Hull Subdivision for Linearization Error
-- **Step**: Approximate the error $E_T$ for a given triangle $T$ via numerical integration over its surface. Subdivide $T$ based on the magnitude of $E_T$ to ensure error stays below a given threshold. This is done via hardware tessellation when rendering the hull mesh [S3].
-- **Formula**: The linearization error at a point $p$ on the deformed surface is $E(p) = \|p - D(\widetilde{D^{-1}}(p))\|$, where $\widetilde{D^{-1}}$ is the approximate inverse from the hull. The error over the surface of a deformed space triangle $T$ is the integral of $E(p)$ over $T$: $E_T = \int_T E(\mathbf{p}) \, d\mathbf{p}$ [S3].
-- **Pitfall**: Increasing grid resolution in Marching Cubes to reduce triangle size scales poorly (8x more cells for double resolution) and requires regenerating the hull every frame [S3].
-- **Comparison**: Unlike methods that linearize deformation over volumetric space, this method only linearizes on a 2D manifold (the hull surface), allowing easier quantification of error [S3].
+#### Adaptive Hull Subdivision for Linearization Error
+- [S3] Approximate the error $E_T$ for a given triangle $T$ via numerical integration over its surface.
+- [S3] Subdivide $T$ based on the magnitude of $E_T$ to ensure error stays below a given threshold. This is done via hardware tessellation when rendering the hull mesh.
+- [S3] The linearization error at a point $\mathbf{p}$ on the deformed surface is $E(\mathbf{p}) = \|\mathbf{p} - D(\widetilde{D^{-1}}(\mathbf{p}))\|$, where $\widetilde{D^{-1}}$ is the approximate inverse from the hull.
+- [S3] The error over the surface of a deformed space triangle $T$ is the integral of $E(\mathbf{p})$ over $T$: $E_T = \int_T E(\mathbf{p}) \, d\mathbf{p}$.
+- [S3] Increasing grid resolution in Marching Cubes to reduce triangle size scales poorly (8x more cells for double resolution) and requires regenerating the hull every frame.
+- [S3] Unlike methods that linearize deformation over volumetric space, this method only linearizes on a 2D manifold (the hull surface), allowing easier quantification of error.
 
 ## Background
-GPU acceleration for Marching Cubes emerged as scalar volumes grew beyond the processing capabilities of single-threaded CPUs, particularly for real-time applications like medical imaging and scientific visualization. Early implementations utilized OpenGL fragment shaders to compute scalar fields and render geometry directly, bypassing the need for explicit mesh generation on the CPU [S1, unofficial]. Later, the advent of compute shaders (DirectX 11, OpenGL 4.3) and OpenCL allowed for more flexible parallel processing, enabling the use of atomic counters and append buffers to handle the variable output size of the algorithm [S1, S2, unofficial]. The family has evolved to include sophisticated memory management techniques like Histogram Pyramids and Slab-based partitioning to address issues of buffer overflow and topological consistency at boundaries [S1, S2, unofficial].
+The application of GPU acceleration to Marching Cubes emerged as a response to the computational demands of real-time volume visualization and voxel-based terrain generation. Early implementations relied on CPU-based immediate mode rendering, which became a bottleneck as grid resolutions increased [S1, unofficial]. The shift to GPU compute shaders allowed for the parallel processing of voxels, significantly improving performance [S1, unofficial]. Techniques such as the Histogram Pyramid were introduced to manage the variable output size of Marching Cubes without the overhead of atomic operations [S1, S2, unofficial]. Slab-based approaches were developed to handle large volumes by partitioning the grid, ensuring memory safety and topological consistency at slab boundaries [S1, unofficial]. These methods are widely used in real-time graphics, voxel terrain engines, and scientific visualization where high-performance surface extraction is required [S1, S2, unofficial][S3].
 
 ## Sources
 [S1] 3merillon/WebGL2-GPU-Marching-Cubes, https://github.com/3merillon/WebGL2-GPU-Marching-Cubes, fetched 2026-10-28 (unofficial)

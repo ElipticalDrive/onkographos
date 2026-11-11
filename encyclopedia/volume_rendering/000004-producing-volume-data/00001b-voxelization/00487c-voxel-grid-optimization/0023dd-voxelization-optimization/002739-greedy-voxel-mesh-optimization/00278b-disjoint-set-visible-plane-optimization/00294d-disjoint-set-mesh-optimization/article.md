@@ -1,6 +1,4 @@
 # Disjoint Set Mesh Optimization
-
-
 ## Overview
 Disjoint Set Mesh Optimization is a voxel meshing pipeline that combines voxel-based occlusion culling with plane-wise quad merging to produce a compact mesh from a voxel chunk [S1, unofficial]. It solves the problem of excessive face count in naive voxel rendering by removing occluded geometry and merging adjacent coplanar quads into larger primitives [S1, unofficial]. It differs from its parent [Disjoint Set Visible Plane Optimization](4045-disjoint-set-visible-plane-optimization.md) by operating on the full 3D chunk level, adding an initial occlusion culling step before invoking the plane-wise optimizer [S1, unofficial].
 
@@ -12,6 +10,8 @@ Disjoint Set Mesh Optimization is a voxel meshing pipeline that combines voxel-b
 **Data Structures:**
 - `Chunk<Voxel>`: A 3D grid of voxel data [S1, unofficial].
 - `MeshQuad`: A structure representing a quadrilateral face with four vertices (`Vertex0` to `Vertex3`) [S1, unofficial].
+- `VoxelFace`: A record containing position coordinates, the face axis, and the axis order (ascending/descending) [S1, unofficial].
+- `DisjointSet`: A standard union-find structure that tracks merged quad regions [G].
 
 **Steps:**
 1. Initialize a voxel occlusion optimizer with the input `Chunk<Voxel>` [S1, unofficial].
@@ -25,6 +25,22 @@ Disjoint Set Mesh Optimization is a voxel meshing pipeline that combines voxel-b
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+class DisjointSet:
+    def __init__(self, n: int):
+        self.parent = list(range(n))
+        self.rank = [0] * n
+    def find(self, i: int) -> int:
+        while self.parent[i] != i:
+            self.parent[i] = self.parent[self.parent[i]]
+            i = self.parent[i]
+        return i
+    def union(self, i: int, j: int) -> None:
+        ri, rj = self.find(i), self.find(j)
+        if ri == rj: return
+        if self.rank[ri] < self.rank[rj]: ri, rj = rj, ri
+        self.parent[rj] = ri
+        if self.rank[ri] == self.rank[rj]: self.rank[ri] += 1
+
 def optimize_mesh(chunk: Chunk[Voxel]) -> List[MeshQuad]:
     # Step 1 & 2: Compute visible faces using occlusion culling
     visible_faces = compute_visible_faces(chunk)
@@ -40,30 +56,55 @@ def optimize_mesh(chunk: Chunk[Voxel]) -> List[MeshQuad]:
     # Step 4 & 5: Process each plane, merge quads, convert to MeshQuad
     for (axis, plane_index), plane_faces in planes.items():
         merged_quads = merge_quads_on_plane(plane_faces)
-        quads = [MeshQuad(v0, v1, v2, v3) for v0, v1, v2, v3 in merged_quads]
-        
-        # Step 6: Append to result
-        optimized_quads.extend(quads)
-        
+        for v0, v1, v2, v3 in merged_quads:
+            optimized_quads.append(MeshQuad(v0, v1, v2, v3))
+            
+    # Step 6: Append to result (handled by returning the list)
     return optimized_quads
 
 def compute_visible_faces(chunk: Chunk[Voxel]) -> List[VoxelFace]:
     faces = []
     for x, y, z in chunk.voxels:
-        if chunk.is_solid(x, y, z):
-            if not chunk.is_solid(x + 1, y, z): faces.append(VoxelFace(x, y, z, Axis.X, AxisOrder.Ascending))
-            if not chunk.is_solid(x - 1, y, z): faces.append(VoxelFace(x, y, z, Axis.X, AxisOrder.Descending))
-            if not chunk.is_solid(x, y + 1, z): faces.append(VoxelFace(x, y, z, Axis.Y, AxisOrder.Ascending))
-            if not chunk.is_solid(x, y - 1, z): faces.append(VoxelFace(x, y, z, Axis.Y, AxisOrder.Descending))
-            if not chunk.is_solid(x, y, z + 1): faces.append(VoxelFace(x, y, z, Axis.Z, AxisOrder.Ascending))
-            if not chunk.is_solid(x, y, z - 1): faces.append(VoxelFace(x, y, z, Axis.Z, AxisOrder.Descending))
+        if not chunk.is_solid(x, y, z): continue
+        if not chunk.is_solid(x + 1, y, z): faces.append(VoxelFace(x, y, z, Axis.X, AxisOrder.Ascending))
+        if not chunk.is_solid(x - 1, y, z): faces.append(VoxelFace(x, y, z, Axis.X, AxisOrder.Descending))
+        if not chunk.is_solid(x, y + 1, z): faces.append(VoxelFace(x, y, z, Axis.Y, AxisOrder.Ascending))
+        if not chunk.is_solid(x, y - 1, z): faces.append(VoxelFace(x, y, z, Axis.Y, AxisOrder.Descending))
+        if not chunk.is_solid(x, y, z + 1): faces.append(VoxelFace(x, y, z, Axis.Z, AxisOrder.Ascending))
+        if not chunk.is_solid(x, y, z - 1): faces.append(VoxelFace(x, y, z, Axis.Z, AxisOrder.Descending))
     return faces
 
 def merge_quads_on_plane(plane_faces: List[VoxelFace]) -> List[Tuple]:
-    # Standard Disjoint Set Union merge for coplanar quads [G]
-    # Groups adjacent faces by coordinate, unions sets, and extracts merged quads
-    # The sources do not provide the internal DSU implementation details [G]
-    return [] 
+    if not plane_faces: return []
+    n = len(plane_faces)
+    dsu = DisjointSet(n)
+    face_map = {}
+    for i, face in enumerate(plane_faces):
+        if face.axis == Axis.X: u, v = face.y, face.z
+        elif face.axis == Axis.Y: u, v = face.x, face.z
+        else: u, v = face.x, face.y
+        face_map[(u, v)] = i
+    for (u, v), idx in face_map.items():
+        for du, dv in [(1, 0), (0, 1)]:
+            neighbor = face_map.get((u + du, v + dv))
+            if neighbor is not None:
+                dsu.union(idx, neighbor)
+    groups = {}
+    for i in range(n):
+        root = dsu.find(i)
+        groups.setdefault(root, []).append(plane_faces[i])
+    merged = []
+    for group in groups.values():
+        min_u, max_u, min_v, max_v = float('inf'), float('-inf'), float('inf'), float('inf')
+        for f in group:
+            if f.axis == Axis.X: u, v = f.y, f.z
+            elif f.axis == Axis.Y: u, v = f.x, f.z
+            else: u, v = f.x, f.y
+            min_u, max_u = min(min_u, u), max(max_u, u)
+            min_v, max_v = min(min_v, v), max(max_v, v)
+        # Reconstruct merged quad vertices from bounding box [G]
+        merged.append((min_u, min_v, max_u, max_v))
+    return merged
 ```
 
 **Parameters:** Not given in the sources.

@@ -1,0 +1,64 @@
+# Camera Pose and Extrinsic/Intrinsic Optimization
+
+Also called: Camera Pose Optimization, Extrinsic/Intrinsic Optimization, NeRF Self-Calibration, Bundle-Adjusted NeRF
+
+## Overview
+This family of methods solves the problem of reconstructing 3D scenes when camera parameters (extrinsics and intrinsics) are unknown, inaccurate, or require online estimation, unlike baseline NeRF which relies on pre-estimated poses from Structure-from-Motion (SfM) pipelines like COLMAP. It treats camera parameters as learnable variables updated via gradient descent alongside the NeRF weights [S2, unofficial]. This approach enables joint optimization of scene geometry and camera motion, addressing scenarios ranging from static scenes with unknown poses to dynamic scenes with continuous camera motion.
+
+## Shared principles
+All methods in this family share the core mechanism of differentiable rendering, where the rendered pixel color $\hat{C}(r)$ is a differentiable function of the camera pose $P$ and the NeRF parameters $\Theta$. The optimization problem is typically formulated as minimizing a loss function $\mathcal{L}$ with respect to both $\Theta$ and $P$:
+$$ \min_{\Theta, P} \mathcal{L}(\hat{C}(r; \Theta, P), C(r)) $$
+where $C(r)$ is the ground-truth pixel color. The gradient $\nabla_P \mathcal{L}$ allows the camera pose to be updated via an optimizer (e.g., Adam, SGD) in lockstep with the NeRF weights. Key shared components include:
+1.  **Ray Casting:** Computing ray origins $\hat{o}$ and directions $\hat{d}$ from pixel coordinates using current camera estimates. For a pinhole camera model with focal length $f$ and rotation $R$ and translation $t$:
+    $$ \hat{o} = t $$
+    $$ \hat{d} = R \begin{pmatrix} (u - W/2)/f \\ -(v - H/2)/f \\ -1 \end{pmatrix} $$
+2.  **Differentiable Rendering:** The volume rendering integral is computed via discrete summation, allowing backpropagation through the ray marching process to the pose parameters [S2, unofficial].
+3.  **Joint Optimization:** Separate optimizers or a combined optimizer are used to update NeRF weights and pose parameters, often with different learning rates to stabilize convergence [S2, unofficial].
+
+## Subtopics
+
+### [Camera Pose and Parameter Optimization](7611-camera-pose-and-parameter-optimization.md)
+Camera Pose and Parameter Optimization refers to the family of methods that jointly optimize the parameters of a Neural Radiance Field (NeRF) and the camera poses (extrinsics) and/or intrinsics (e.g., focal length) from a set of input images. It solves the problem of reconstructing 3D scenes when camera parameters are unknown, inaccurate, or when the system requires online pose estimation for navigation. Unlike baseline NeRF, which relies on pre-estimated poses from Structure-from-Motion (SfM) pipelines like COLMAP, these methods treat camera parameters as learnable variables updated via gradient descent alongside the NeRF weights. This family encompasses static scene reconstruction with unknown poses, hybrid 2D/3D registration, and online robot navigation filters.
+
+### [Time-dependent NeRF with Continuous Camera Motion](12399-time-dependent-nerf-with-continuous-camera-motion.md)
+This method jointly optimizes a time-dependent Neural Radiance Field (NeRF) and continuous camera motion from monocular video, representing scene geometry as local Signed Distance Fields (SDFs) and appearance at each time step. Unlike prior approaches that train a single global NeRF mapped via noisy initial transformations, this method uses local time-dependent representations constrained by consistency losses to avoid local minima and accurately reconstruct full scene geometry.
+
+### [Camera Preconditioning](12545-camera-preconditioning.md)
+Camera Preconditioning (CamP) is a technique to normalize and decorrelate camera parameters during Neural Radiance Field (NeRF) optimization by transforming the optimization problem from direct camera parameters $\boldsymbol{\phi}_i$ to latent preconditioned parameters $\tilde{\boldsymbol{\phi}}_i$. It addresses ill-conditioning caused by mixed units (e.g., translation in world units vs. focal length in pixels) and spurious correlations between parameters, which naive optimization or simple per-parameter scaling fails to resolve. Unlike [Adam](12051-camera-pose-and-extrinsic-intrinsic-optimization.md) which normalizes update magnitudes but ignores parameter sensitivity differences, CamP explicitly scales parameters based on their projected impact on the image plane.
+
+### RoDynRF
+- [S1] Enables dynamic scene reconstruction from monocular videos without known camera poses by jointly optimizing intrinsics, extrinsics, and both static and dynamic radiance fields.
+- [S1] Introduce a two-branch architecture separating background and moving regions.
+- [S1] Use motion masks to exclude dynamic pixels during pose estimation.
+- [S1] Employ a coarse-to-fine voxel optimization scheme for stability.
+- [S1] Use a time-conditioned deformation network to model non-rigid motion.
+
+### NeRF Pose Optimization
+- [S1] Formulates pose reconstruction as an inverse problem by optimizing the pose instead of network parameters given a pre-trained NeRF.
+- [S1] Use the photo-metric loss Eq. 6 to optimize the pose.
+- [S1] Use an interest-point detector and perform interest region-based sampling.
+
+### Bundle-Adjusted Neural Radiance Field (BARF)
+- [S1] Jointly estimates poses alongside the training of the neural radiance field using coarse-to-fine registration by adaptively masking the positional encoding.
+- [S1] Use coarse-to-fine registration by adaptively masking the positional encoding.
+- [S1] Use naive dense ray sampling for simplicity.
+
+### NeRF Self-Calibration and Pose Optimization
+- [S1] Self-calibrating joint optimization model for NeRF that optimizes unknown poses and camera intrinsic parameters for non-linear camera models such as fish-eye lens models.
+- [S1] Use curriculum learning to gradually introduce the nonlinear camera/noise parameters to the joint optimization.
+
+## Background
+The problem of pose estimation in the context of Neural Radiance Fields emerged shortly after the introduction of NeRF. Early methods like NeRF– (February 2021) [101] jointly estimated NeRF model parameters and camera parameters, allowing for end-to-end construction of radiance fields and novel view synthesis. However, due to limitations with pose initialization, NeRF– was most suited for front-facing scenes and struggled with rotational motion and object tracking movements [S1].
+
+Concurrent to NeRF– was the Bundle-Adjusted Neural Radiance Field (BARF) (April 2021) [102], which also jointly estimated poses alongside the training of the neural radiance field. BARF used a coarse-to-fine registration by adaptively masking the positional encoding, similar to the technique used in Nerfies [61]. BARF results exceeded those of NeRF– on the LLFF forward-facing scenes dataset with unknown camera poses by 1.49 PSNR averaged over the eight scenes, and outperformed COLMAP registered baseline NeRF by 0.45 PSNR [S1]. Both BARF and NeRF– used naive dense ray sampling for simplicity [S1].
+
+Jeong et al. introduced a self-calibrating joint optimization model for NeRF (SCNeRF) (August 2021) [103]. Their camera calibration model could optimize unknown poses and camera intrinsic parameters for non-linear camera models such as fish-eye lens models. By using curriculum learning, they gradually introduced the nonlinear camera/noise parameters to the joint optimization. This camera optimization model was modular and could be easily used with different NeRF models. The method outperformed BARF [102] on LLFF scenes [6] [S1].
+
+iNeRF (December 2020) [166] formulated pose reconstruction as an inverse problem. Given a pre-trained NeRF, using the photo-metric loss Eq. 6, Yen-Chen et al. optimized the pose instead of the network parameters. The authors used an interest-point detector and performed interest region-based sampling. They also performed semi-supervised experiments, where they used iNeRF pose estimation on unposed training images to augment the NeRF training set, and further train the forward NeRF. This semi-supervision was shown by the author to reduce the requirement of posed photos from the forward NeRF by 25% [S1].
+
+GNeRF (March 2021) [82], a different type of approach by Meng et al., used pose as a generative latent code. GNeRF first obtains coarse camera poses and a radiance field with adversarial training. This is done by using a generator that takes a randomly sampled pose and synthesizes a view using NeRF-style rendering. Then, a discriminator compares the rendered view with the training image. An inversion network then takes the rendered view and predicts the pose [S1].
+
+Robust Dynamic Radiance Fields (RoDynRF) (January 2023) [160] enables dynamic scene reconstruction from monocular videos without known camera poses by jointly optimizing intrinsics, extrinsics, and both static and dynamic radiance fields. It introduces a two-branch architecture separating background and moving regions, uses motion masks to exclude dynamic pixels during pose estimation, and employs a coarse-to-fine voxel optimization scheme for stability. A time-conditioned deformation network models non-rigid motion, allowing robust recovery of dynamic geometry and appearance from unposed, in-the-wild video data [S1].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

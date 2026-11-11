@@ -60,8 +60,6 @@ The method relies on the outputs of two neural networks (static and dynamic) and
 *   **Static Radiance Time Dependence:** Equation (16) includes $\alpha^{\text{stat}}(\mathbf{x}_k, \tau)$, implying the static opacity might depend on time, which contradicts the "static" label. This may be a notation artifact in the source [S1, unofficial]. Implementers should verify if the static network is truly time-independent.
 
 **Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
 def dynamic_field_blending(ray_origin, ray_direction, time, num_samples, step_size, 
                            static_net, dynamic_net, blending_net):
