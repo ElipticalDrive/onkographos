@@ -1,0 +1,153 @@
+# Progressive Refinement Zonal Method
+
+Also called: Bhate and Tokuta's progressive refinement, Bhate's method, Progressive Refinement Approach (Bhate's method)
+
+## Overview
+The Progressive Refinement Zonal Method is a hierarchical acceleration technique for the Zonal Method [12221-zonal-method-bhate-and-tokuta.md] that reduces the computational cost of computing form factors between volumes and surfaces [S1][S2, book]. It establishes a fixed hierarchy during preprocessing and employs a shooting strategy during rendering, avoiding the iterative refinement of the hierarchy itself [S1][S2, book]. Unlike standard zonal methods that compute interactions between all elements, this method determines interaction levels dynamically based on heuristics, skipping unnecessary refinements when transmittance is high or form factors are negligible [S1][S2, book].
+
+## How it works
+### Inputs and Outputs
+*   **Inputs**: Scene geometry consisting of volumes (participating media) and surfaces (ideal diffuse emitters/reflectors); optical properties (absorption coefficient, scattering coefficient, phase function); light source definitions.
+*   **Outputs**: Radiosity (radiance) values for all volume elements and surface patches at their respective hierarchy levels.
+
+### Data Structures
+The method relies on a hierarchical tree structure for volumes and surfaces.
+*   **Hierarchy Node**: Represents a volume or surface element.
+    *   `level`: Integer indicating the depth in the hierarchy (0 = global, higher = finer).
+    *   `children`: List of child nodes (if not a leaf).
+    *   `links`: List of links to other nodes (volumes or surfaces) at specific levels.
+*   **Link**: Represents an interaction between two elements.
+    *   `target_node`: The node being linked to.
+    *   `interaction_level`: The hierarchy level at which the interaction is computed.
+    *   `form_factor`: Precomputed or estimated form factor between the source and target at the specified level.
+    *   `transmittance`: Estimated transmittance between the elements.
+
+### Steps
+1.  **Preprocessing Step 1: Subdivision**
+    *   Subdivide global volumes and surfaces into a hierarchy. The subdivision strategy is not explicitly detailed in the sources, but typically involves spatial partitioning (e.g., octrees for volumes) [S1][S2, book].
+    *   [G] Initialize the root node for each global volume/surface. Recursively subdivide until a minimum size or maximum depth is reached.
+
+2.  **Preprocessing Step 2: Link Creation**
+    *   Create links between volume-volume pairs and surface-volume pairs.
+    *   Determine the `interaction_level` for each pair using heuristics.
+    *   **Volume-Volume Heuristics**:
+        *   Compute a rough estimate of the total form factor. If it is below a specified threshold, the elements can interact at the current level without further refinement [S1][S2, book].
+        *   Estimate visibility between the volumes.
+        *   Compute the optical depth of the intervening medium.
+        *   **Condition**: If the transmittance between two elements is too high (i.e., low optical depth/high visibility), no further refinement is needed [S1][S2, book].
+    *   **Volume-Surface Heuristics**:
+        *   Use a brightness factor heuristic for light sources. If the source brightness is negligible, lower levels of refinement may be skipped [S1][S2, book].
+    *   [G] For each pair of elements, calculate the bounding volume intersection and approximate form factor. Set the interaction level to the coarsest level satisfying the heuristics.
+
+3.  **Rendering Phase: Shooting Strategy**
+    *   Iterate through the hierarchy from coarse to fine levels.
+    *   For each node, shoot energy to its linked targets at their determined `interaction_level`.
+    *   Accumulate radiosity contributions.
+    *   [G] Propagate radiosity from parent to children or vice versa? The sources state there is **no** Push-Pull procedure. This implies radiosity is computed locally at each level and accumulated, but not corrected across levels during the shooting phase [S1][S2, book].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def progressive_refinement_zonal_method(scene):
+    # Preprocessing Step 1: Subdivision
+    volume_hierarchy = build_hierarchy(scene.volumes)
+    surface_hierarchy = build_hierarchy(scene.surfaces)
+    
+    # Preprocessing Step 2: Link Creation
+    links = []
+    
+    # Volume-Volume Links
+    for vol_a in volume_hierarchy:
+        for vol_b in volume_hierarchy:
+            if vol_a is vol_b:
+                # Self-refinement issue: links must be set between smallest elements
+                # within a global volume for self-illumination
+                links.extend(create_self_links(vol_a))
+                continue
+            
+            # Heuristics for volume-volume refinement
+            form_factor = estimate_form_factor(vol_a, vol_b)
+            transmittance = estimate_transmittance(vol_a, vol_b)
+            
+            if form_factor < FORM_FACTOR_THRESHOLD and transmittance > TRANSMITTANCE_THRESHOLD:
+                # Elements can interact at current level
+                level = vol_a.level
+                links.append(Link(vol_a, vol_b, level, form_factor, transmittance))
+            else:
+                # Refine to finer level
+                # [G] Recursively check children or increase level
+                links.extend(create_refined_links(vol_a, vol_b))
+                
+    # Volume-Surface Links
+    for vol in volume_hierarchy:
+        for surf in surface_hierarchy:
+            # Brightness factor heuristic for light sources
+            if is_light_source(surf) and surf.brightness < BRIGHTNESS_THRESHOLD:
+                continue
+                
+            form_factor = estimate_form_factor(vol, surf)
+            transmittance = estimate_transmittance(vol, surf)
+            
+            if form_factor < FORM_FACTOR_THRESHOLD and transmittance > TRANSMITTANCE_THRESHOLD:
+                level = vol.level
+                links.append(Link(vol, surf, level, form_factor, transmittance))
+            else:
+                links.extend(create_refined_links(vol, surf))
+
+    # Rendering Phase: Shooting Strategy
+    radiosity = initialize_radiosity(scene)
+    
+    for link in links:
+        source = link.source
+        target = link.target
+        level = link.interaction_level
+        
+        # Compute energy transfer at the specified level
+        energy = compute_energy_transfer(source, target, link.form_factor, link.transmittance)
+        
+        # Accumulate radiosity
+        radiosity[target] += energy
+        
+    # Note: No Push-Pull procedure is performed to correct radiosity values
+    # across hierarchy levels [S1][S2, book].
+    
+    return radiosity
+
+def create_self_links(volume):
+    """
+    Creates links between the smallest volume elements within a global volume
+    to correctly compute self-illumination, as self-refinement is not performed.
+    """
+    links = []
+    smallest_elements = get_leaf_nodes(volume)
+    for i, elem_a in enumerate(smallest_elements):
+        for j, elem_b in enumerate(smallest_elements):
+            if i != j:
+                links.append(Link(elem_a, elem_b, elem_a.level, 1.0, 1.0)) # Placeholder for form factor
+    return links
+```
+
+### Parameters
+*   `FORM_FACTOR_THRESHOLD`: Threshold for rough estimate of form factor. Not given in the sources.
+*   `TRANSMITTANCE_THRESHOLD`: Threshold for transmittance. Not given in the sources.
+*   `BRIGHTNESS_THRESHOLD`: Threshold for light source brightness. Not given in the sources.
+
+### Edge Cases and Pitfalls
+*   **Self-Refinement Issue**: Participating media are modeled by a set of global volumes. Each global volume is refined against each other, but not against itself (no self-refinement) [S1][S2, book]. Therefore, links must be set between each pair of the smallest volume element considered within a given global volume, otherwise its self-illumination won’t be correctly computed [S2, book]. A self-refinement strategy would be better as it would reduce the number of interactions [S2, book].
+*   **Push-Pull Issue**: There is no Push-Pull procedure to set correctly the values of the radiosity at all levels of the hierarchies [S1][S2, book]. Such a procedure would be needed after each shooting iteration to obtain a correct solution [S2, book]. This is a significant limitation of the method.
+
+## Operating characteristics
+*   **Time Complexity**: The computation of all form factors in a naive zonal method takes $O(n^7)$ where $n$ is the number of intervening voxels [S1]. The progressive refinement method reduces this cost by using hierarchies and heuristics to skip unnecessary interactions [S1][S2, book]. The exact complexity is not given, but it is significantly lower than the naive approach.
+*   **Memory Complexity**: Depends on the size of the hierarchy and the number of links. The sources do not provide specific memory complexity figures.
+*   **Strengths**: Reduces computational cost by avoiding unnecessary refinements; uses heuristics to determine interaction levels efficiently [S1][S2, book].
+*   **Limitations**: No Push-Pull procedure leads to potentially incorrect radiosity values at different hierarchy levels [S1][S2, book]; lack of self-refinement requires explicit handling of self-illumination [S2, book].
+*   **When to use**: When computational cost is a concern and the scene has large volumes with low interaction between distant parts.
+*   **When not to use**: When high accuracy is required for self-illumination or when the scene has complex interactions that require fine-grained refinement across all levels.
+
+## Background
+The Progressive Refinement Zonal Method, also known as Bhate's method, is a progressive refinement version of the zonal method [S1][S2, book]. It was proposed by Bhate and Tokuta [S1][S2, book]. The method builds on the Zonal Method [12221-zonal-method-bhate-and-tokuta.md] by introducing hierarchies to reduce computational cost [S1][S2, book]. It is part of the family of deterministic multiple scattering methods for participating media rendering [S1].
+
+## Sources
+[S1] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26
+[S2] Global Illumination Techniques for the Simulation of Participating Media, https://inria.hal.science/inria-00510096v1, fetched 2026-10-26 (book)

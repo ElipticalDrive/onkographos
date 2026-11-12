@@ -1,33 +1,32 @@
 # Active Set Method for OIT-based 3DGS
 
-Also called: SparseOIT, SparseOIT Active Set, SparseOIT acceleration
+Also called: Active Set OIT 3DGS, SparseOIT, SparseOIT Active Set, SparseOIT acceleration
 
 ## Overview
-The Active Set Method for OIT-based 3DGS (SparseOIT) is an optimization strategy that accelerates the training of Order-Independent Transparency (OIT) based 3D Gaussian Splatting by exploiting the sparsity of variable dependencies among Gaussian splats [S1, unofficial]. Unlike standard 3DGS which sorts all Gaussians per pixel, SparseOIT removes the depth sorting step entirely and freezes Gaussians that have converged or contribute negligibly to the gradient, optimizing only a subset of "active" variables [S1, unofficial]. This approach achieves comparable novel-view quality to volumetric rendering methods while significantly outperforming existing OIT-based methods in training speed [S1, unofficial].
+The Active Set Method for OIT-based 3DGS (SparseOIT) is an optimization strategy that accelerates the training of Order-Independent Transparency (OIT) based 3D Gaussian Splatting by exploiting the sparsity of variable dependencies among Gaussian splats [S1, unofficial]. Unlike standard 3DGS which requires per-pixel depth sorting, SparseOIT removes the sorting step entirely and freezes Gaussians that have converged or contribute negligibly to the gradient, optimizing only a subset of "active" variables [S1, unofficial]. This approach achieves comparable novel-view quality to volumetric rendering methods while significantly outperforming existing OIT-based methods in training speed [S1, unofficial].
 
 ## How it works
 ### Inputs and Outputs
 **Inputs:**
-*   Training views: A set of images $I$ with corresponding camera poses.
+*   Training views: A set of images $I$ with corresponding camera poses [S1, unofficial].
 *   Initial Gaussian parameters $G = \{\bm{\mu}, \bm{q}, \bm{s}, o, \bm{h}, w\}$, where $\bm{\mu}$ is position, $\bm{q}$ is quaternion, $\bm{s}$ is scale, $o$ is opacity, $\bm{h}$ is spherical harmonics coefficients, and $w$ is weight [S1, unofficial].
 *   Pre-rendered images $I^{pre}$ for each training view, initialized to zero or background color [S1, unofficial].
 
 **Outputs:**
-*   Optimized Gaussian parameters $G$.
-*   Final rendered images.
+*   Optimized Gaussian parameters $G$ [S1, unofficial].
+*   Final rendered images [S1, unofficial].
 
 ### Data Structures
-*   **Active Set ($A$):** A boolean mask or index list identifying which Gaussians are currently being optimized.
-*   **Non-Active Set ($\bar{A}$):** The complement of $A$, containing Gaussians that are frozen.
+*   **Active Set ($A$):** A boolean mask or index list identifying which Gaussians are currently being optimized [S1, unofficial].
+*   **Non-Active Set ($\bar{A}$):** The complement of $A$, containing Gaussians that are frozen [S1, unofficial].
 *   **Pre-rendered Images ($I^{pre}$):** A buffer storing the rendered contribution of the non-active set $\bar{A}$ for each training view. These images are updated lazily [S1, unofficial].
 *   **Gradient Thresholds ($\epsilon_v$):** A scalar threshold for each attribute type $v \in \{\bm{\mu}, \bm{q}, \bm{s}, o, \bm{h}, w\}$ used to determine activeness [S1, unofficial].
 
 ### Algorithm Steps
-1.  **Initialization:** Initialize the active set $A$ to include all Gaussians. Initialize pre-rendered images $I^{pre}$ for all training views. Set iteration counter $k=0$.
+1.  **Initialization:** Initialize the active set $A$ to include all Gaussians. Initialize pre-rendered images $I^{pre}$ for all training views. Set iteration counter $k=0$ [S1, unofficial].
 2.  **Iteration Loop:** While not converged:
     3.  **Sample View:** Select a training view $i$ and retrieve its ground truth image $I_i$ and pre-rendered image $I_i^{pre}$ [S1, unofficial].
-    4.  **Rasterize Active Gaussians:** Render only the Gaussians in the active set $G_A$ using the pre-rendered image $I_i^{pre}$ as the background/base. This yields the output image $I_i^{out}$ [S1, unofficial].
-        *   Note: Since OIT does not require sorting, the rendering of $G_A$ is added to $I_i^{pre}$ (which represents $\bar{A}$) to form the final composite [S1, unofficial].
+    4.  **Rasterize Active Gaussians:** Render only the Gaussians in the active set $G_A$ using the pre-rendered image $I_i^{pre}$ as the background/base. This yields the output image $I_i^{out}$ [S1, unofficial]. Since OIT does not require sorting, the rendering of $G_A$ is added to $I_i^{pre}$ (which represents $\bar{A}$) to form the final composite [S1, unofficial].
     5.  **Compute Loss:** Calculate the photometric loss $L$ between the ground truth $I_i$ and the rendered output $I_i^{out}$ [S1, unofficial].
     6.  **Update Active Gaussians:** Compute gradients $\nabla L$ and update only the parameters of Gaussians in $G_A$ using an optimizer (e.g., Adam) [S1, unofficial].
     7.  **Active Set Update Check:** If the current iteration $k$ is a multiple of the update interval (or specifically at $K=15,000$ for the first update), perform an active set update:
@@ -40,7 +39,7 @@ The Active Set Method for OIT-based 3DGS (SparseOIT) is an optimization strategy
             $$
             \bm{1}_{\textup{active}}(i) = \bigvee_{v \in \{\bm{\mu}_i, \bm{q}_i, \bm{s}_i, o_i, \bm{h}_i, w_i\}} (\|\nabla_v\| > \epsilon_v)
             $$
-            If $\bm{1}_{\textup{active}}(i)$ is true, Gaussian $i$ is added to $A$; otherwise, it is moved to $\bar{A}$ [S1, unofficial].
+            If $\bm{1}_{\textup{active}}(i)$ is true, Gaussian $i$ is added to $A$; otherwise, it is moved to $\bar{A}$ [S1, unofficial]. (Note: The source notation uses $\forall$ but explicitly clarifies that the Gaussian is active if *at least one* attribute variable has a non-zero gradient above the threshold.)
         11. **Lazy Pre-rendered Image Update:** When a Gaussian $i$ moves from $A$ to $\bar{A}$ (becomes inactive), its contribution must be added to the pre-rendered images. To avoid poor GPU parallelism from sparse updates, this update is delayed until the specific pre-rendered image $I^{pre}$ is accessed for training [S1, unofficial]. When $I^{pre}$ is accessed, the contributions of newly inactive Gaussians are rendered and accumulated into $I^{pre}$ [S1, unofficial].
     12. Increment $k$.
 
@@ -62,123 +61,113 @@ def active_set_oit_3dgs(training_views, initial_gaussians, K_activate=15000, M_s
     Returns:
         Optimized Gaussian parameters G.
     """
-    # Initialize data structures
     G = initial_gaussians
     N = len(G)
-    active_mask = np.ones(N, dtype=bool)  # All Gaussians active initially
-    pre_rendered_images = {view_id: np.zeros_like(view.image) for view_id, view in enumerate(training_views)}
-    
-    # Helper: Render active Gaussians + Pre-rendered background
-    def render_active(view_id):
-        view = training_views[view_id]
-        # Lazy update: If any Gaussian moved to inactive, update pre_rendered_images for this view
-        # This is handled implicitly by checking if pre_rendered_images needs refresh
-        # For simplicity, assume pre_rendered_images is up-to-date for inactive Gaussians
-        # Render only active Gaussians and add to pre_rendered_images
-        active_indices = np.where(active_mask)[0]
-        G_active = [G[i] for i in active_indices]
-        
-        # OIT Rendering: Additive accumulation without sorting
-        # Rasterize G_active onto the background pre_rendered_images[view_id]
-        # Returns the composite image
-        return rasterize_oit(G_active, pre_rendered_images[view_id])
-
-    # Helper: Compute gradients for all Gaussians on subsampled views
-    def estimate_gradients(subsampled_view_indices):
-        all_gradients = {i: {v: np.zeros_like(get_attr(G[i], v)) for v in ['mu', 'q', 's', 'o', 'h', 'w']} for i in range(N)}
-        
-        for view_idx in subsampled_view_indices:
-            view = training_views[view_idx]
-            # Render ALL Gaussians to get accurate loss for gradient estimation
-            # Note: This uses the current pre_rendered_images which reflects inactive set
-            rendered_image = rasterize_oit(G, pre_rendered_images[view_idx])
-            
-            # Compute loss
-            loss = compute_loss(rendered_image, view.image)
-            
-            # Backpropagate to get gradients for all Gaussians
-            # Since OIT is differentiable, we can compute gradients for all G
-            grads = compute_gradients(loss, G, view)
-            
-            # Accumulate gradients (or average, depending on implementation)
-            for i in range(N):
-                for v in ['mu', 'q', 's', 'o', 'h', 'w']:
-                    all_gradients[i][v] += grads[i][v]
-        
-        return all_gradients
-
-    # Helper: Update pre-rendered images for inactive Gaussians
-    def update_pre_rendered_images():
-        # Identify Gaussians that just became inactive
-        newly_inactive = np.where(~active_mask & prev_active_mask)[0]
-        if len(newly_inactive) == 0:
-            return
-            
-        # For each training view, render the newly inactive Gaussians and add to pre_rendered_images
-        # To improve GPU parallelism, batch these updates
-        for view_id, view in enumerate(training_views):
-            G_inactive_subset = [G[i] for i in newly_inactive]
-            # Render inactive subset onto the existing pre_rendered image
-            contribution = rasterize_oit(G_inactive_subset, np.zeros_like(view.image))
-            pre_rendered_images[view_id] += contribution
-
+    active_mask = [True] * N
+    pre_rendered = [zeros_like(view.image) for view in training_views]
     prev_active_mask = active_mask.copy()
-    
-    for k in range(100000): # Arbitrary large number, check convergence
-        # Sample a training view
-        view_id = sample_view(training_views)
+    learning_rate = 0.01
+    update_interval = 1000
+
+    for k in range(100000):
+        # 1. Sample view (round-robin for determinism)
+        view_id = k % len(training_views)
         view = training_views[view_id]
-        
-        # Render active Gaussians
-        rendered_image = render_active(view_id)
-        
-        # Compute loss and update active Gaussians
-        loss = compute_loss(rendered_image, view.image)
+
+        # 2. Render active Gaussians + Pre-rendered background
+        active_indices = [i for i in range(N) if active_mask[i]]
+        rendered = render_oit_additive(G[active_indices], pre_rendered[view_id])
+
+        # 3. Compute loss & gradients
+        loss = l2_loss(rendered, view.image)
         grads = compute_gradients(loss, G, view)
-        
-        # Update only active Gaussians
-        active_indices = np.where(active_mask)[0]
+
+        # 4. Update active Gaussians
         for i in active_indices:
             for v in ['mu', 'q', 's', 'o', 'h', 'w']:
                 G[i][v] -= learning_rate * grads[i][v]
-        
-        # Active Set Update
+
+        # 5. Active Set Update
         if k == K_activate or (k > K_activate and k % update_interval == 0):
             # Subsample views
-            subsampled_indices = farthest_point_sampling(training_views, M_subsample)
-            
+            subsampled_ids = farthest_point_sampling(training_views, M_subsample)
+
             # Estimate gradients on subsampled views
-            estimated_grads = estimate_gradients(subsampled_indices)
-            
-            # Update active set
+            all_grads = {i: {v: zeros_like(get_attr(G[i], v)) for v in ['mu', 'q', 's', 'o', 'h', 'w']} for i in range(N)}
+            for j in subsampled_ids:
+                j_view = training_views[j]
+                # Render ALL Gaussians for accurate gradient estimation
+                full_rendered = render_oit_additive(G, pre_rendered[j])
+                full_loss = l2_loss(full_rendered, j_view.image)
+                full_grads = compute_gradients(full_loss, G, j_view)
+                for i in range(N):
+                    for v in ['mu', 'q', 's', 'o', 'h', 'w']:
+                        all_grads[i][v] += full_grads[i][v]
+
+            # Update active set based on estimated gradients
             for i in range(N):
-                is_active = False
-                for v in ['mu', 'q', 's', 'o', 'h', 'w']:
-                    if np.linalg.norm(estimated_grads[i][v]) > epsilon_v:
-                        is_active = True
-                        break
+                is_active = any(norm(all_grads[i][v]) > epsilon_v for v in ['mu', 'q', 's', 'o', 'h', 'w'])
                 active_mask[i] = is_active
-            
-            # Update pre-rendered images for newly inactive Gaussians
-            update_pre_rendered_images()
-            
+
+            # Lazy update of pre-rendered images for newly inactive Gaussians
+            newly_inactive = [i for i in range(N) if not active_mask[i] and prev_active_mask[i]]
+            if newly_inactive:
+                for j in range(len(training_views)):
+                    j_view = training_views[j]
+                    inactive_contrib = render_oit_additive(G[newly_inactive], zeros_like(j_view.image))
+                    pre_rendered[j] += inactive_contrib
+
             prev_active_mask = active_mask.copy()
-            
+
         if check_convergence(G):
             break
-            
     return G
+
+# Helper definitions
+def render_oit_additive(gaussians, background):
+    # OIT rendering: additive accumulation without depth sorting
+    result = background.copy()
+    for g in gaussians:
+        result += project_and_accumulate(g)
+    return result
+
+def l2_loss(rendered, target):
+    return sum((rendered[p] - target[p])**2 for p in range(len(rendered)))
+
+def compute_gradients(loss, G, view):
+    # Standard backpropagation through the differentiable OIT rendering operator
+    return backprop(loss, G, view)
+
+def farthest_point_sampling(views, k):
+    # Select k views maximizing minimum pairwise distance
+    selected = [views[0]]
+    for _ in range(k-1):
+        max_min_dist = -1
+        best_view = None
+        for v in views:
+            if v in selected: continue
+            min_dist = min(distance(v, s) for s in selected)
+            if min_dist > max_min_dist:
+                max_min_dist = min_dist
+                best_view = v
+        selected.append(best_view)
+    return selected
+
+def norm(vec): return (sum(x**2 for x in vec))**0.5
+def zeros_like(tensor): return [[0.0 for _ in row] for row in tensor]
+def get_attr(g, attr): return g[attr]
+def check_convergence(G): return False # Placeholder for convergence check
 ```
 
 ### Parameters
 *   **$\epsilon_v$**: Threshold for gradient norm to determine activeness. Empirically set to balance efficiency and performance [S1, unofficial].
-*   **$K$**: Iteration count after which the active set method is activated. Value: 15,000 iterations [S1, unofficial]. This allows the initial densification phase of 3DGS to complete before sparsity optimization begins.
+*   **$K$**: Iteration count after which the active set method is activated. Value: 15,000 iterations [S1, unofficial]. This allows the initial densification phase of 3DGS to complete before sparsity optimization begins [S1, unofficial].
 *   **$M$**: Number of subsampled views for active set update. Value: 30 [S1, unofficial]. Selected using farthest point sampling with random initialization [S1, unofficial].
 
 ### Edge Cases and Pitfalls
 *   **Pre-rendered Image Update Cost:** Directly updating all pre-rendered images after each active set update is prohibitive due to sparsity and poor GPU parallelism. The solution is to delay the update until the pre-rendered image is used for training [S1, unofficial].
 *   **Active Set Update Complexity:** Naively updating the active set by re-evaluating gradients of all Gaussians for all views has complexity comparable to a full-variable update, negating acceleration. The solution is to approximate Gaussian gradients via subsampling [S1, unofficial].
-*   **Variance:** The method exhibits noticeable variance across different runs due to the stochastic nature of subsampling and farthest point sampling. Reported values are often averaged over multiple runs [S1, unofficial].
+*   **Variance:** The method exhibits noticeable variance across different runs due to the stochastic nature of subsampling and farthest point sampling. Reported values are averaged over multiple runs to provide a more reliable evaluation [S1, unofficial].
 
 ## Operating characteristics
 *   **Time Complexity:** The training time is reduced by a factor proportional to the sparsity of the active set. The active set update step has sublinear complexity $O(M \cdot N)$ where $M$ is the number of subsampled views and $N$ is the number of Gaussians, compared to $O(V \cdot N)$ for full updates where $V$ is the total number of views [S1, unofficial].
@@ -188,7 +177,7 @@ def active_set_oit_3dgs(training_views, initial_gaussians, K_activate=15000, M_s
 *   **Limitations:** Introduces variance in results. Requires careful tuning of the activation threshold $\epsilon_v$ and the update interval. The initial 15,000 iterations are identical to standard 3DGS, so acceleration only occurs after this point [S1, unofficial].
 
 ## Background
-The Active Set Method for OIT-based 3DGS, also known as SparseOIT, was proposed to address the computational inefficiencies of Order-Independent Transparency (OIT) based 3D Gaussian Splatting. Standard 3DGS relies on depth sorting, which is expensive. OIT-based methods remove sorting but suffer from slower convergence and higher computational cost due to the lack of sparsity exploitation. SparseOIT leverages the observation that Gaussian splats have sparse variable dependencies, allowing an active set optimization strategy to accelerate training [S1, unofficial]. The method was introduced in the paper "SparseOIT: Improving Order-Independent Transparency 3DGS via Active Set Method" [S1, unofficial].
+The Active Set Method for OIT-based 3DGS, also known as SparseOIT, was proposed to address the computational inefficiencies of Order-Independent Transparency (OIT) based 3D Gaussian Splatting [S1, unofficial]. Standard 3DGS relies on depth sorting, which is expensive. OIT-based methods remove sorting but suffer from slower convergence and higher computational cost due to the lack of sparsity exploitation [S1, unofficial]. SparseOIT leverages the observation that Gaussian splats have sparse variable dependencies, allowing an active set optimization strategy to accelerate training [S1, unofficial]. The method was introduced in the paper "SparseOIT: Improving Order-Independent Transparency 3DGS via Active Set Method" [S1, unofficial].
 
 ## Sources
 [S1] SparseOIT: Improving Order-Independent Transparency 3DGS via Active Set Method, https://doi.org/10.48550/arXiv.2605.13855, fetched 2026-10-29 (unofficial)

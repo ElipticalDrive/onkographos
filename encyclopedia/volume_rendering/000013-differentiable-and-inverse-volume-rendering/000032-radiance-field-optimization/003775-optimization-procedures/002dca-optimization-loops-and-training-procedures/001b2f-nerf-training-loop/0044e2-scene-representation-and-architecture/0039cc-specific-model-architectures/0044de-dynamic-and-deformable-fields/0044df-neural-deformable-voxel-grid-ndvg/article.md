@@ -1,140 +1,260 @@
 # Neural Deformable Voxel Grid (NDVG)
 
 ## Overview
-Neural Deformable Voxel Grid (NDVG) is a fast deformable radiance field method for dynamic scene view synthesis that integrates voxel-grid optimization with a deformable radiance field [S1]. It replaces heavy Multi-Layer Perceptron (MLP) computations with fast voxel-grid feature interpolation to enable space-time view synthesis for dynamic scenes captured by a monocular camera [S1]. Unlike static scene applications where occlusion is determined solely by viewing direction, NDVG explicitly models occlusion in dynamic scenes, which is determined by both view direction and motion (time) [S1]. It achieves comparable performance to D-NeRF but trains more than 70× faster [S1].
+Neural Deformable Voxel Grid (NDVG) is a fast optimization method for dynamic scene view synthesis that integrates voxel-grid optimization with a deformable radiance field [S1]. It replaces heavy Multi-Layer Perceptron (MLP) computations with fast voxel-grid feature interpolation to enable space-time view synthesis for dynamic scenes captured by a monocular camera [S1]. The method consists of two main modules: a deformation module that maps 3D points from observation space to a canonical space, and a canonical module that models the static geometry and density using explicit voxel grids [S1]. Unlike static scene applications where occlusion is determined solely by viewing direction, NDVG explicitly models occlusion in dynamic scenes, which is determined by both view direction and motion (time) [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** An image sequence $\{I_t\}_{t=1}^T$ with corresponding camera poses $\{T_t\}_{t=1}^T$ of a dynamic scene captured by a monocular camera. A query 3D point $p$, view direction $d$, and time instance $t$.
-*   **Outputs:** Estimated density $\sigma$ and color $c$ for the query point, which are used to render the pixel color $C(r)$ via volume rendering [S1].
+*   **Input:** An image sequence $\{I_t\}_{t=1}^T$ with corresponding camera poses $\{T_t\}_{t=1}^T$ of a dynamic scene captured by a monocular camera [S1].
+*   **Query:** A 3D point $p$ in observation space, a viewing direction $d$, and a time instance $t$ [S1].
+*   **Output:** Density $\sigma$ and color $\mathbf{c}$ at the queried location and time [S1].
 
 **Data Structures:**
-The method uses a hybrid explicit-implicit representation consisting of three 3D feature grids and two light-weight MLPs [S1].
+The method uses three primary 3D feature grids and two light-weight MLPs [S1].
 
 1.  **Deformation Feature Grid ($G_d$):**
-    *   **Layout:** Tensor of shape $(N_x, N_y, N_z, N_c)$.
-    *   **Content:** Stores 3D dynamic features. Each voxel contains a feature vector of dimension $N_c$ [S1].
-    *   **Access:** Trilinear interpolation $\text{interp}(p, G_d)$ returns a vector in $\mathbb{R}^{N_c}$ [S1].
-
+    *   Layout: Tensor of shape $(N_x, N_y, N_z, N_c)$ [S1].
+    *   Content: Stores 3D dynamic features for deformation estimation [S1].
+    *   Resolution: Varies by stage (e.g., $190^3$ in fine stage) [S1].
 2.  **Density Grid ($G_\sigma$):**
-    *   **Layout:** Tensor of shape $(N'_x, N'_y, N'_z)$.
-    *   **Content:** Stores density values for the canonical scene geometry [S1].
-    *   **Access:** Trilinear interpolation $\text{interp}(p', G_\sigma)$ returns a scalar [S1].
-
+    *   Layout: Tensor of shape $(N'_x, N'_y, N'_z)$ [S1].
+    *   Content: Stores density values [S1].
+    *   Resolution: Varies by stage (e.g., $160^3$ in fine stage) [S1].
 3.  **Color Feature Grid ($G_c$):**
-    *   **Layout:** Tensor of shape $(H', W', D', N'_c)$.
-    *   **Content:** Stores view-dependent color features. Each voxel contains a feature vector of dimension $N'_c$ [S1].
-    *   **Access:** Trilinear interpolation $\text{interp}(p', G_c)$ returns a vector in $\mathbb{R}^{N'_c}$ [S1].
+    *   Layout: Tensor of shape $(H', W', D', N'_c)$ [S1].
+    *   Content: Stores view-dependent color features [S1].
+    *   Resolution: Matches density grid dimensions in the canonical space [S1].
+4.  **Deformation MLP ($F_{\theta^{d1}}$):**
+    *   Architecture: 4 layers, width 64 [S1].
+    *   Input: Positional encoded $p$, $t$, and interpolated feature $f^d$.
+    *   Output: Deformation offset $\Delta p$ and occlusion weight $w^{occ}$ [S1].
+5.  **Canonical MLP ($F_{\theta^{c2}}$):**
+    *   Architecture: 3 layers, width 128 [S1].
+    *   Input: Positional encoded $p'$, $d$, and interpolated feature $f^c$.
+    *   Output: Color $\mathbf{c}$ [S1].
 
-4.  **Deformation MLP ($F_{\theta^d_1}$):**
-    *   **Architecture:** 4 layers, width 64 [S1].
-    *   **Input:** Concatenation of positional encoding of $p$, positional encoding of $t$, and deformation feature $f^d$.
-    *   **Output:** Deformation offset $\Delta p$ and occlusion weight $w^{occ}$ [S1].
-
-5.  **Canonical MLP ($F_{\theta^c_2}$):**
-    *   **Architecture:** 3 layers, width 128 [S1].
-    *   **Input:** Concatenation of positional encoding of $p'$, positional encoding of $d$, and color feature $f^c$.
-    *   **Output:** Color $c$ [S1].
-
-**Parameters:**
-*   **Positional Encoding:** Frequency 5 for position and time, 4 for direction [S1].
-*   **Coarse Stage Grid Voxel Count:** Deformation module 1,664k voxels; Canonical module 1,024k voxels [S1].
-*   **Fine Stage Grid Voxel Count:** Deformation module $190^3$ voxels; Canonical module $160^3$ voxels [S1].
-*   **Coarse Stage Color Grid Dimension:** 3 (RGB) [S1].
-*   **Training Iterations:** 10k coarse / 20k fine (full res); 5k coarse / 10k fine (half res) [S1].
-*   **Optimizer:** Adam [S1].
-*   **Rays per Iteration:** 8,192 [S1].
+**Positional Encoding:**
+Positional encoding $\gamma(\cdot)$ is applied to coordinates $p$ and $t$ (frequency 5) and viewing direction $d$ (frequency 4) [S1].
+$$
+\gamma(\mathbf{x}) = (\sin(2^0 \pi \mathbf{x}), \cos(2^0 \pi \mathbf{x}), \dots, \sin(2^{L-1} \pi \mathbf{x}), \cos(2^{L-1} \pi \mathbf{x}))
+$$
+where $L$ is the number of frequency bands [S1].
 
 **Algorithm Steps:**
 
 1.  **Deformation Query:**
-    For a query point $p$ at time $t$:
-    a. Perform trilinear interpolation on $G_d$ to get feature $f^d = \text{interp}(p, G_d)$ [S1].
-    b. If $t = t_{can}$ (canonical time), set $\Delta p = 0$ [S1].
-    c. If $t \neq t_{can}$, input $p$, $t$, and $f^d$ into $F_{\theta^d_1}$ to regress $\Delta p$ and $w^{occ}$ [S1].
+    For a query point $p$ at time $t$, perform trilinear interpolation on $G_d$ to obtain feature $f^d$ [S1]:
     $$
-    \begin{cases}
-    \Delta p = F_{\theta^d_1}(p, t, f^d) \\
-    w^{occ} = \text{output}_2(F_{\theta^d_1}(p, t, f^d))
-    \end{cases}
+    f^d = \text{interp}(p, G_d)
     $$
-    [S1]
+    Input $p$, $t$, and $f^d$ into the deformation MLP $F_{\theta^{d1}}$ to regress the offset $\Delta p$ and occlusion weight $w^{occ}$ [S1]:
+    $$
+    (\Delta p, w^{occ}) = F_{\theta^{d1}}(\gamma(p), \gamma(t), f^d)
+    $$
+    If $t = t_{can}$ (canonical time), set $\Delta p = 0$ [S1].
 
 2.  **Canonical Position:**
     Compute the canonical position $p'$:
-    $$ p' = p + \Delta p $$
-    [S1]
+    $$
+    p' = p + \Delta p
+    $$
 
 3.  **Density Query:**
-    For canonical point $p'$:
-    a. Perform trilinear interpolation on $G_\sigma$: $v_\sigma = \text{interp}(p', G_\sigma)$ [S1].
-    b. Apply softplus activation:
-    $$ \sigma = \text{softplus}(v_\sigma) $$
-    [S1]
+    Perform trilinear interpolation on $G_\sigma$ at $p'$ and apply softplus activation to get density $\sigma$ [S1]:
+    $$
+    \sigma = \text{softplus}(\text{interp}(p', G_\sigma))
+    $$
 
 4.  **Color Query:**
-    For canonical point $p'$ and view direction $d$:
-    a. Perform trilinear interpolation on $G_c$: $f^c = \text{interp}(p', G_c)$ [S1].
-    b. Input $p'$, $d$, and $f^c$ into $F_{\theta^c_2}$ to get color $c$:
-    $$ c = F_{\theta^c_2}(p', d, f^c) $$
-    [S1]
+    Perform trilinear interpolation on $G_c$ at $p'$ to get feature $f^c$ [S1]:
+    $$
+    f^c = \text{interp}(p', G_c)
+    $$
+    Input $p'$, $d$, and $f^c$ into the canonical MLP $F_{\theta^{c2}}$ to get color $\mathbf{c}$ [S1]:
+    $$
+    \mathbf{c} = F_{\theta^{c2}}(\gamma(p'), \gamma(d), f^c)
+    $$
+    *Note: In the coarse stage, the color grid dimension is 3 (RGB), and the MLP is bypassed or simplified to directly output RGB [S1].*
 
 5.  **Occlusion Filtering:**
-    Filter density and color using the occlusion mask $w^{occ}$:
-    $$ \sigma' = \sigma \times w^{occ} $$
-    $$ c' = c \times w^{occ} $$
-    [S1]
-    *Note:* If a point is empty in observation space but occupied in canonical space, $w^{occ}$ should be 0 to prevent artifacts [S1].
+    Filter density and color using the occlusion weight $w^{occ}$ to handle artifacts where empty points in observation space map to occupied points in canonical space [S1]:
+    $$
+    \sigma' = \sigma \times w^{occ}
+    $$
+    $$
+    \mathbf{c}' = \mathbf{c} \times w^{occ}
+    $$
 
 6.  **Volume Rendering:**
-    Render ray color $C(r)$ using the standard volume rendering equation with filtered density $\sigma'$ and color $c'$ [S1]:
-    $$ C(r) = \sum_{k=1}^{K} T(w_k) \alpha(w_k) c'(w_k) $$
-    $$ T(w_k) = \exp \left( -\sum_{j=1}^{k-1} \sigma'(t_j) \delta_j \right) $$
-    $$ \alpha(w_k) = 1 - \exp(-\sigma'(w_k) \delta_k) $$
-    where $K$ is the number of sampled points, $\delta_k$ is the distance between adjacent samples, and $t_j$ are the sample points [S1].
+    Render the ray color $C(\mathbf{r})$ using standard volumetric rendering with the filtered density $\sigma'$ and color $\mathbf{c}'$ [S1]:
+    $$
+    C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}'_i, \quad \text{where } \alpha_i = 1 - \exp(-\sigma'_i \delta_i), \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)
+    $$
+    where $\delta_i$ is the distance between samples [S1].
 
-**Loss Functions:**
-The total loss $L$ is a weighted sum of the following components [S1]:
+**Pseudocode:**
 
-1.  **Photometric Loss ($L_{photo}$):** Mean squared error between estimated ray color $\hat{C}(r)$ and ground truth $C(r)$:
-    $$ L_{photo} = \frac{1}{|\mathcal{R}|} \sum_{r \in \mathcal{R}} \| \hat{C}(r) - C(r) \|_2^2 $$
-    where $\mathcal{R}$ is the set of rays sampled in one batch [S1].
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-2.  **Deformation L1 Regularization ($L_{d\_norm}$):** Encourages most points to be static:
-    $$ L_{d\_norm} = \frac{1}{|\mathcal{R}|} \sum_{r \in \mathcal{R}} \sum_{i=1}^{K} \| \Delta p_i \|_1 $$
-    where $i$ indexes sampled points $K$ on ray $r$ [S1].
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-3.  **Total Variation Loss on Deformation Grid ($L_{d\_tv}$):** Smooths voxel features:
-    $$ L_{d\_tv} = \frac{1}{|\mathcal{V}|} \sum_{v \in \mathcal{V}} \sum_{c \in [N_c]} \sqrt{\Delta_x^2(v,c) + \Delta_y^2(v,c) + \Delta_z^2(v,c)} $$
-    where $\Delta_x^2(v,c)$ is the squared difference between the $c$-th element in voxel $v(i,j,k)$ and $v(i+1,j,k)$ [S1].
+class NDVG:
+    def __init__(self, grid_dims, feature_dims, mlp_configs):
+        """
+        grid_dims: tuple (Nx, Ny, Nz) for deformation grid, (Nx', Ny', Nz') for density/color grids
+        feature_dims: tuple (Nc for deformation, Nc' for color)
+        mlp_configs: dict with 'deform' (layers, width) and 'canonical' (layers, width)
+        """
+        # Initialize grids
+        self.G_d = nn.Parameter(torch.randn(*grid_dims['deform'], feature_dims['deform']))
+        self.G_sigma = nn.Parameter(torch.randn(*grid_dims['density']))
+        self.G_c = nn.Parameter(torch.randn(*grid_dims['color'], feature_dims['color']))
+        
+        # Initialize MLPs
+        self.deform_mlp = LightMLP(mlp_configs['deform'])
+        self.canonical_mlp = LightMLP(mlp_configs['canonical'])
+        
+        # Hyperparameters
+        self.freq_pos_time = 5
+        self.freq_dir = 4
+        self.t_can = 0.0 # Canonical time instance
 
-4.  **Point Color Supervision ($L_{ptc}$) and Background Entropy Loss ($L_{bg}$):** Used as in [48] (not detailed in source text, but included in total loss) [S1].
+    def positional_encoding(self, x, freq_bands):
+        """Standard sinusoidal positional encoding."""
+        # x shape: (..., D)
+        # Output shape: (..., D * 2 * freq_bands)
+        scales = torch.tensor([2**i for i in range(freq_bands)], dtype=x.dtype, device=x.device)
+        scaled_x = x.unsqueeze(-1) * scales * torch.pi
+        encoding = torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
+        return encoding.view(x.shape[:-1] + (-1,))
 
-**Total Loss:**
-$$ L = L_{photo} + w_{ptc} L_{ptc} + w_{bg} L_{bg} + w_{d\_norm} L_{d\_norm} + w_{d\_tv} L_{d\_tv} $$
-where $w$ terms are balancing weights [S1].
+    def trilinear_interpolate(self, grid, points):
+        """
+        Trilinear interpolation.
+        grid: (Nx, Ny, Nz, ...)
+        points: (..., 3) normalized to [0, 1]
+        """
+        # Normalize points to [-1, 1] for grid_sample if needed, 
+        # but assuming standard interpolation logic for dense grids.
+        # Using PyTorch grid_sample requires specific formatting.
+        # For simplicity, assuming a helper that handles the interpolation.
+        # In practice, this maps points to grid coordinates and samples.
+        pass 
+
+    def forward(self, p, d, t):
+        """
+        p: (..., 3) observation space position
+        d: (..., 3) viewing direction
+        t: (..., 1) time instance
+        """
+        # 1. Deformation Query
+        # Interpolate deformation features
+        f_d = self.trilinear_interpolate(self.G_d, p)
+        
+        # Encode inputs
+        p_enc = self.positional_encoding(p, self.freq_pos_time)
+        t_enc = self.positional_encoding(t, self.freq_pos_time)
+        f_d_enc = f_d # Features are already learned
+        
+        # Regress offset and occlusion
+        # Note: If t == t_can, delta_p should be 0. 
+        # The MLP might learn this, or we enforce it.
+        # The source says: if t == t_can, delta_p = 0.
+        if torch.allclose(t, torch.tensor(self.t_can)):
+            delta_p = torch.zeros_like(p)
+            w_occ = torch.ones_like(p[..., :1])
+        else:
+            deform_input = torch.cat([p_enc, t_enc, f_d], dim=-1)
+            delta_p, w_occ = self.deform_mlp(deform_input).chunk(2, dim=-1)
+            # w_occ is typically a single scalar or per-feature weight, 
+            # source implies it filters sigma and c. Assuming scalar per point or broadcastable.
+            # Source eq 5: (Delta p, w_occ) = DNet(...). 
+            # Source eq 6: sigma' = sigma * w_occ.
+            # We assume w_occ is shape (..., 1) or scalar.
+        
+        # 2. Canonical Position
+        p_prime = p + delta_p
+        
+        # 3. Density Query
+        f_sigma = self.trilinear_interpolate(self.G_sigma, p_prime)
+        sigma = F.softplus(f_sigma)
+        
+        # 4. Color Query
+        f_c = self.trilinear_interpolate(self.G_c, p_prime)
+        p_prime_enc = self.positional_encoding(p_prime, self.freq_pos_time)
+        d_enc = self.positional_encoding(d, self.freq_dir)
+        
+        color_input = torch.cat([p_prime_enc, d_enc, f_c], dim=-1)
+        c = self.canonical_mlp(color_input)
+        
+        # 5. Occlusion Filtering
+        sigma_prime = sigma * w_occ
+        c_prime = c * w_occ
+        
+        return sigma_prime, c_prime
+
+class LightMLP(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        layers = []
+        in_dim = config['in_dim']
+        width = config['width']
+        num_layers = config['num_layers']
+        
+        for _ in range(num_layers):
+            layers.append(nn.Linear(in_dim, width))
+            layers.append(nn.ReLU())
+            in_dim = width
+        self.net = nn.Sequential(*layers)
+        
+    def forward(self, x):
+        return self.net(x)
+```
 
 **Training Procedure:**
-1.  **Progressive Training:** Start training with images close to the canonical time $t_{can}$, then progressively add images with further time steps to reduce learning difficulty as deformation magnitude increases [S1].
-2.  **Coarse-to-Fine Optimization:**
-    a. **Coarse Stage:** Optimize a coarse model without view-dependence (color grid dimension 3) to roughly recover deformation and geometry. This locates object regions and filters empty space [S1].
-    b. **Fine Stage:** Optimize a fine model with higher resolution, initialized with coarse weights. Apply empty space filtering strategies (bounding box, empty point filtering) to speed up training [S1].
+*   **Loss Function:**
+    $$
+    \mathcal{L} = \mathcal{L}_{photo} + w_{ptc} \mathcal{L}_{ptc} + w_{bg} \mathcal{L}_{bg} + w_{d\_norm} \mathcal{L}_{d\_norm} + w_{d\_tv} \mathcal{L}_{d\_tv}
+    $$
+    *   $\mathcal{L}_{photo}$: Mean squared error between rendered color $\hat{C}(\mathbf{r})$ and ground truth $C(\mathbf{r})$ [S1].
+    *   $\mathcal{L}_{ptc}$: Sampled point color supervision for top $N$ contributing points [S1].
+    *   $\mathcal{L}_{bg}$: Background entropy loss [S1].
+    *   $\mathcal{L}_{d\_norm}$: L1 regularization on deformation offset $\Delta p$ (prior: most points are static) [S1]:
+        $$
+        \mathcal{L}_{d\_norm} = \frac{1}{|\mathcal{R}|} \sum_{r \in \mathcal{R}} \sum_{i=1}^K \|\Delta p_i\|_1
+        $$
+    *   $\mathcal{L}_{d\_tv}$: Total variation loss on deformation feature grid to smooth voxel features [S1]:
+        $$
+        \mathcal{L}_{d\_tv} = \frac{1}{|\mathcal{V}|} \sum_{v \in \mathcal{V}} \sum_{c \in [N_c]} \sqrt{\Delta_x^2(v,c) + \Delta_y^2(v,c) + \Delta_z^2(v,c)}
+        $$
+        where $\Delta_x^2(v,c)$ is the squared difference between the $c$-th element in voxel $v(i,j,k)$ and $v(i+1,j,k)$ [S1].
 
-**Pitfalls and Edge Cases:**
-*   **Occlusion Artifacts:** If an empty point in observation space is static ($\Delta p=0$) but maps to an occupied location in canonical space, it retrieves non-zero density/color, causing artifacts. This is solved by the occlusion mask $w^{occ}$ [S1].
-*   **Inefficient Storage:** Directly storing offsets in a 4D feature grid (3 for $p$, 1 for $t$) is inefficient. NDVG uses a 3D feature grid and a light-weight MLP instead [S1].
-*   **Resolution Sensitivity:** Deformation is more sensitive to resolution than radiance; thus, the deformation module grid resolution is set higher than the canonical module [S1].
+*   **Optimization Strategy:**
+    *   **Progressive Training:** Start with images close to canonical time, progressively adding images with further time steps [S1].
+    *   **Coarse-to-Fine Optimization:**
+        1.  **Coarse Stage:** Optimize a coarse model with no view-dependence (color grid dim 3) and lower resolution (e.g., 1,664k voxels for deformation, 1,024k for canonical) [S1].
+        2.  **Filtering:** Use coarse model to locate object region and filter empty space [S1].
+        3.  **Fine Stage:** Optimize fine model with higher resolution (e.g., $190^3$ for deformation, $160^3$ for canonical), initialized with coarse weights [S1].
+    *   **Parameters:** Adam optimizer, 8,192 rays per iteration [S1].
+    *   **Iterations:** 10k coarse + 20k fine (full res); 5k coarse + 10k fine (half res) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Occlusion Artifacts:** If an empty point in observation space is static ($\Delta p=0$) but maps to an occupied location in canonical space, it retrieves non-zero density/color, causing artifacts [S1]. Solved by the occlusion mask $w^{occ}$ [S1].
+*   **4D Grid Inefficiency:** Directly storing offsets in a 4D feature grid (3D pos + 1D time) is inefficient [S1]. NDVG uses a 3D deformation grid + MLP instead [S1].
 
 ## Operating characteristics
 *   **Speed:** NDVG achieves comparable performance to D-NeRF using only 20 minutes for training, which is more than 70× faster than D-NeRF [S1].
-*   **Memory/Complexity:** Uses voxel-grid representation which is generally more memory efficient and faster to query than dense MLPs for high-dimensional mappings [S1].
-*   **Strengths:** Fast optimization, suitable for monocular dynamic scenes, explicit occlusion handling [S1].
-*   **Limitations:** Relies on monocular input, which can be challenging for motion/geometry learning compared to multi-view setups (e.g., DeVRF) [S1]. Performance depends on grid resolution trade-offs [S1].
-*   **When to use:** When fast training of dynamic scenes from monocular video is required.
-*   **When not to use:** When multi-view data is available and higher geometric robustness is needed (consider DeVRF) or when image quality refinement via look-up tables is prioritized over training speed (consider V4D) [S1].
+*   **Memory:** Uses explicit voxel grids. Coarse stage uses ~1.6M voxels for deformation and ~1M for canonical. Fine stage uses $190^3$ and $160^3$ voxels respectively [S1].
+*   **Strengths:** Fast training speed, efficient voxel-grid interpolation, explicit occlusion handling for dynamic scenes [S1].
+*   **Limitations:** Monocular input requires careful occlusion modeling; resolution trade-off between quality and computation [S1].
+*   **When to use:** Dynamic scene view synthesis from monocular video where training speed is critical [S1].
+*   **When not to use:** Static scenes (use standard NeRF/VoxNeRF), or multi-view dynamic scenes where DeVRF might be more suitable [S1].
 
 ## Background
-NDVG was proposed by X. Guo et al. in the paper "Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis" [S1]. It is based on the canonical scene framework [39,52,36] and voxel-grid optimization for static radiance fields [48,63]. It addresses the challenge of designing a compact deformation model with enough capacity while speeding up training [S1].
+NDVG was proposed by X. Guo et al. in 2022 [S1]. It is the first method to integrate voxel-grid optimization with a deformable radiance field for dynamic scenes [S1]. It builds on the canonical scene framework [39,52,36] and voxel-grid optimization for static fields [48,63]. It compares favorably to D-NeRF [39], TiNeuVox [9], V4D [12], and DeVRF [25] in terms of training speed and efficiency [S1].
 
 ## Sources
 [S1] Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis, https://doi.org/10.1007/978-3-031-26319-4_27, fetched 2026-10-26

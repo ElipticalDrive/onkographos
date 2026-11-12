@@ -17,10 +17,10 @@ A strategy to manage communication costs in parallel volume rendering by allowin
 
 **Parameters:**
 *   **Polling Interval:** The number of cells processed before checking for incoming ray segments [S1].
-    *   **Typical Values:** Not given in the sources.
+    *   **Typical Values:** Not given in the sources. [S1]
     *   **Guidance:** Should be selected in accordance with buffer size; polling should be performed more frequently with smaller buffer sizes or larger numbers of processors [S1].
 *   **Buffer Depth:** The number of ray segments accumulated before an asynchronous send is posted [S1].
-    *   **Typical Values:** Not given in the sources.
+    *   **Typical Values:** Not given in the sources. [S1]
     *   **Guidance:** Depends on the number of processors, number of ray segments, and target architecture characteristics [S1].
 
 **Steps:**
@@ -42,77 +42,69 @@ A strategy to manage communication costs in parallel volume rendering by allowin
 def run_asynchronous_rendering(num_destinations, polling_interval, buffer_depth, total_cells):
     # Data structures
     # buffers[dest][0] and buffers[dest][1] are the two buffers for each destination
-    # current_buffer_index[dest] tracks which buffer is currently being filled (0 or 1)
+    # current_buf[dest] tracks which buffer is actively being filled when no send is pending
     # send_pending[dest] tracks if an asynchronous send is active for the current buffer
     buffers = [[[], []] for _ in range(num_destinations)]
-    current_buffer_index = [0] * num_destinations
+    current_buf = [0] * num_destinations
     send_pending = [False] * num_destinations
 
     cells_processed = 0
     while cells_processed < total_cells:
         # Step 2a: Scan Conversion
         batch_size = min(polling_interval, total_cells - cells_processed)
-        new_segments = process_cells(batch_size)  # [G] standard scan conversion
+        new_segments = generate_ray_segments(batch_size)  # [G] standard scan conversion
         cells_processed += batch_size
 
-        # Step 2b: Buffering
-        for segment in new_segments:
-            dest = get_destination(segment)  # [G] standard routing
-            if send_pending[dest]:
-                # Step 2c: Check Buffer Fullness
-                # If send is pending, switch to companion buffer
-                current_buffer_index[dest] = 1 - current_buffer_index[dest]
-                send_pending[dest] = False
+        # Step 2b & 2c: Buffering & Asynchronous Send
+        for seg in new_segments:
+            dest = route_segment(seg)  # [G] standard routing
+            # Use companion buffer if current one has a pending send
+            buf_idx = 1 - current_buf[dest] if send_pending[dest] else current_buf[dest]
+            buffers[dest][buf_idx].append(seg)
 
-            buffers[dest][current_buffer_index[dest]].append(segment)
-
-            # Check if buffer is now full
-            if len(buffers[dest][current_buffer_index[dest]]) >= buffer_depth:
-                # Post asynchronous send for the full buffer
-                async_send(buffers[dest][current_buffer_index[dest]], dest)  # [G] standard non-blocking send
+            # Post async send when buffer reaches depth and not already pending
+            if len(buffers[dest][buf_idx]) >= buffer_depth and not send_pending[dest]:
+                post_async_send(buffers[dest][buf_idx], dest)  # [G] non-blocking send
                 send_pending[dest] = True
-                # Switch to companion buffer for subsequent segments
-                current_buffer_index[dest] = 1 - current_buffer_index[dest]
 
         # Step 2d: Polling
-        incoming_segments = check_incoming_segments()  # [G] standard non-blocking receive check
+        incoming = check_incoming_segments()  # [G] non-blocking receive check
 
         # Step 2e: Ray Merging
-        if incoming_segments:
-            merge_segments(incoming_segments)  # [G] standard compositing
+        if incoming:
+            merge_segments(incoming)  # [G] standard compositing
 
         # Step 2f: Deadlock Prevention
-        # If both buffers for a destination fill up before the first send completes,
-        # switch to ray merging task to process incoming segments while waiting
-        deadlock_risk = False
+        # If both buffers for any destination fill up before send completes,
+        # switch to processing incoming segments until congestion clears.
+        deadlock = False
         for dest in range(num_destinations):
             if send_pending[dest]:
-                companion_index = 1 - current_buffer_index[dest]
-                if len(buffers[dest][companion_index]) >= buffer_depth:
-                    deadlock_risk = True
+                companion_idx = 1 - current_buf[dest]
+                if len(buffers[dest][companion_idx]) >= buffer_depth:
+                    deadlock = True
                     break
 
-        if deadlock_risk:
-            # Process incoming segments until outbound congestion clears
+        if deadlock:
             while True:
-                incoming = check_incoming_segments()
+                incoming = check_incoming_segments()  # [G] non-blocking receive check
                 if incoming:
-                    merge_segments(incoming)
-                # Check if congestion cleared (simplified send completion check)
-                if not any(send_pending[d] and len(buffers[d][1 - current_buffer_index[d]]) >= buffer_depth for d in range(num_destinations)):
+                    merge_segments(incoming)  # [G] standard compositing
+                # Check if pending send completed (simplified)
+                if not any(send_pending[d] and len(buffers[d][1 - current_buf[d]]) >= buffer_depth for d in range(num_destinations)):
                     break
             # Reset states after clearing congestion
             for dest in range(num_destinations):
                 if send_pending[dest]:
                     send_pending[dest] = False
-                    current_buffer_index[dest] = 1 - current_buffer_index[dest]
+                    current_buf[dest] = 1 - current_buf[dest]
 
     # Step 3: Termination
-    local_termination = cells_processed >= total_cells
-    collect_local_termination(local_termination)  # [G] standard reduction
+    local_done = cells_processed >= total_cells
+    collect_local_termination(local_done)  # [G] standard reduction
     if is_designated_node():
-        global_termination = check_all_terminations()  # [G] standard barrier/allreduce
-        if global_termination:
+        global_done = check_all_terminations()  # [G] standard barrier/allreduce
+        if global_done:
             broadcast_termination()  # [G] standard broadcast
     global_sync()  # [G] standard barrier
 ```
@@ -128,8 +120,8 @@ def run_asynchronous_rendering(num_destinations, polling_interval, buffer_depth,
 A communication strategy that uses double-buffering in conjunction with asynchronous send and receive operations to reduce overheads and overlap communication of ray segments with rendering calculations. It sets itself apart from synchronous alternatives by allowing processors to proceed independently, multiplexing object-space cell computations with image-space ray merging, and overlapping computation with communication using end buffering.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources. [S1]
+*   **Memory Complexity:** Not given in the sources. [S1]
 *   **Measured Performance:** Tested on a small unstructured grid dataset containing about 0.5 million tetrahedral cells, rendering into a 400x400 pixel image for six different views [S1].
 *   **Scaling:** The effectiveness depends on the number of processors, number of ray segments, and target architecture characteristics [S1].
 *   **Strengths:** Overlaps computation and communication, hides data transfer overheads, spreads communication load over time, reduces data copying overheads in message-passing systems, and decouples sending and receiving tasks [S1].

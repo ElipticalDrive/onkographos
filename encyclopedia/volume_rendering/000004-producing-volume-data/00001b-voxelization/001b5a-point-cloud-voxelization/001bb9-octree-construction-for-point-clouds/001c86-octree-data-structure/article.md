@@ -3,135 +3,71 @@
 Also called: CGAL::Octree, CGAL::Orthtree, RFVoxelOctree, RFVoxelOctreeNode, Voxel Octree Data Structure
 
 ## Overview
-The octree partitions 3D space into a hierarchical grid of voxels to organize point cloud data for volume rendering and surface extraction [S1, unofficial][S2]. It recursively subdivides space into eight octants, distinguishing it from flat voxel grids [S1, unofficial].
+The Octree Data Structure partitions 3D space into a hierarchical grid of voxels to organize point cloud objects for rendering [S1, unofficial][S2]. It recursively subdivides a bounding volume into eight octants until a leaf condition is met, where leaf nodes represent occupied voxels or empty space with surface distance metrics [S1, unofficial]. It differs from its siblings by providing the foundational spatial indexing for voxelization and isosurfacing, whereas [Octree Construction for Point Clouds](1070-octree-construction-for-point-clouds.md) describes the build process and [Octree-based Level of Detail and Culling](1079-octree-based-level-of-detail-and-culling.md) describes traversal optimizations.
 
 ## How it works
-**Inputs:** A set of 3D points (point cloud) and a bounding volume defining the spatial extent [S2].
-**Outputs:** A tree structure where internal nodes represent partially filled space, leaf nodes represent occupied voxels, and empty leaf nodes retain a surface distance metric [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A point cloud or implicit function domain, defined by a bounding box (e.g., $[-1, 1]^3$) and a voxel resolution parameter [S2].
+*   **Output:** A tree structure where internal nodes branch into 8 children, and leaf nodes store occupancy status and geometric data (e.g., surface distance) [S1, unofficial][S2].
 
-### Data Structures
-Two primary implementations are cited: the RFVoxelOctree [S1, unofficial] and CGAL::Orthtree [S2].
+**Data Structures:**
+Two primary implementations are cited:
 
-**RFVoxelOctreeNode Layout [S1, unofficial]:**
-*   `m_pkChildren[8]`: Array of 8 pointers to child nodes.
-*   `m_kBuildAabb`: Axis-aligned bounding box in build space.
-*   `m_kWorldAabb`: Axis-aligned bounding box in world space.
-*   `m_eNodeType`: Enum indicating state: `NT_INTERNAL`, `NT_EMPTY_LEAF`, or `NT_LEAF`.
-*   `m_fDistanceToSurface`: Double-precision distance to the nearest surface (for empty leaves).
+1.  **RFVoxelOctree (Custom Implementation):**
+    *   `RFVoxelOctreeNode` fields [S1, unofficial]:
+        *   `m_pkChildren[8]`: Array of 8 pointers to child nodes.
+        *   `m_kBuildAabb`: `RFAABB3i` (integer axis-aligned bounding box).
+        *   `m_kWorldAabb`: `RFAABB3d` (double axis-aligned bounding box).
+        *   `m_eNodeType`: Enum (`NT_INTERNAL`, `NT_EMPTY_LEAF`, `NT_LEAF`).
+        *   `m_fDistanceToSurface`: `double` (surface distance metric for empty leaves).
+    *   `RFVoxelOctree` fields [S1, unofficial]:
+        *   `m_pkRoot`: Pointer to root node.
+        *   `m_kDataDimension`: `RFVector3i`.
+        *   `m_kOctreeOrigin`: `RFVector3d`.
+        *   `m_fVoxelSize`: `double` (physical size of a single voxel unit, default 1.0f).
+        *   `m_uiOctreeDim`: `unsigned int` (total dimension of the cubic voxel grid).
+        *   `m_uiOctreeDepth`: `unsigned int` (derived as $\log_2(m\_uiOctreeDim)$).
+        *   `m_uiNumberOfNodes`, `m_uiNumberOfLeafs`, `m_uiNumberOfEmptyLeafs`, `m_uiNumberOfInternalNodes`: Counters.
 
-**RFVoxelOctree Layout [S1, unofficial]:**
-*   `m_pkRoot`: Pointer to the root node.
-*   `m_kDataDimension`: 3D integer vector defining the grid dimensions.
-*   `m_kOctreeOrigin`: 3D double vector for the octree origin.
-*   `m_fVoxelSize`: Physical size of a single voxel unit (default 1.0f).
-*   `m_uiOctreeDim`: Total dimension of the cubic voxel grid. Depth is derived as $\log_2(m\_uiOctreeDim)$ [S1, unofficial].
-*   `m_uiOctreeDepth`: Calculated depth.
-*   `m_uiNumberOfNodes`, `m_uiNumberOfLeafs`, `m_uiNumberOfEmptyLeafs`, `m_uiNumberOfInternalNodes`: Counters for statistics [S1, unofficial].
+2.  **CGAL::Orthtree (CGAL Library):**
+    *   Defined as `CGAL::Orthtree< Orthtree_traits_point< GeomTraits, PointRange, PointMap, cubic_nodes, 3 > >` [S2].
+    *   Supports `CGAL::Orthtrees::Leaves_traversal` for iterating over leaf nodes [S2].
+    *   Supports `dump_to_polylines` for exporting structure [S2].
 
-**CGAL::Orthtree Definition [S2]:**
-Defined as `CGAL::Orthtree< Orthtree_traits_point< GeomTraits, PointRange, PointMap, cubic_nodes, 3 > >` [S2]. This template specialization uses cubic nodes in 3 dimensions [S2].
+**Algorithm Steps:**
+1.  **Initialization:** Define the global bounding box and initial voxel size/dimensions [S1, unofficial][S2].
+2.  **Subdivision:** Recursively divide the current node's bounding volume into 8 equal octants [S1, unofficial].
+3.  **Leaf Condition:** Stop subdivision when a node meets the leaf criteria (e.g., contains a single point, or depth limit reached) [S1, unofficial][S2].
+4.  **Storage:**
+    *   If `NT_LEAF`: Store point data or surface distance metric [S1, unofficial].
+    *   If `NT_EMPTY_LEAF`: Store surface distance metric for potential extraction [S1, unofficial].
+    *   If `NT_INTERNAL`: Initialize 8 child pointers [S1, unofficial].
+5.  **Traversal:** Use `Leaves_traversal` to access leaf nodes for rendering or meshing [S2].
 
-### Algorithm Steps
-1.  **Initialization:** Define the bounding box and point range [S2]. Set `m_fVoxelSize` (default 1.0f) and `m_uiOctreeDim` [S1, unofficial].
-2.  **Construction:** Recursively subdivide the bounding volume into 8 octants [S1, unofficial]. CGAL supports specific refinement splitters, such as `Refine_one_eighth` or `Refine_around_isovalue`, to control refinement density around the isosurface [S2].
-3.  **Leaf Classification:** Leaf nodes represent occupied voxels [S1, unofficial]. Empty leaf nodes represent empty space but retain `m_fDistanceToSurface` for potential surface extraction [S1, unofficial].
-4.  **Traversal:** Supports iteration over leaf nodes via `CGAL::Orthtrees::Leaves_traversal` [S2].
-5.  **Output:** Nodes can be dumped to polylines via `octree.dump_to_polylines(oo)` or used for Marching Cubes (MC), Topologically Correct Marching Cubes (TMC), or Dual Contouring (DC) [S2].
-
-### Pseudocode
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-from math import log2
-from enum import Enum
-
-class NodeType(Enum):
-    NT_INTERNAL = 0
-    NT_EMPTY_LEAF = 1
-    NT_LEAF = 2
-
-class RFAABB3i:
-    def __init__(self, min_val, max_val):
-        self.min = min_val
-        self.max = max_val
-
-class RFAABB3d:
-    def __init__(self, min_val, max_val):
-        self.min = min_val
-        self.max = max_val
-
-class RFVector3i:
-    def __init__(self, x, y, z):
-        self.x, self.y, self.z = x, y, z
-
-class RFVector3d:
-    def __init__(self, x, y, z):
-        self.x, self.y, self.z = x, y, z
-
-class RFVoxelOctreeNode:
-    def __init__(self):
-        self.m_pkChildren = [None] * 8
-        self.m_kBuildAabb = RFAABB3i((0, 0, 0), (1, 1, 1))
-        self.m_kWorldAabb = RFAABB3d((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
-        self.m_eNodeType = NodeType.NT_INTERNAL
-        self.m_fDistanceToSurface = 0.0
-
-class RFVoxelOctree:
-    def __init__(self, origin, voxel_size, dim):
-        self.m_pkRoot = RFVoxelOctreeNode()
-        self.m_kDataDimension = RFVector3i(dim, dim, dim)
-        self.m_kOctreeOrigin = RFVector3d(*origin)
-        self.m_fVoxelSize = voxel_size
-        self.m_uiOctreeDim = dim
-        self.m_uiOctreeDepth = int(log2(dim))
-        self.m_uiNumberOfNodes = 1
-        self.m_uiNumberOfLeafs = 0
-        self.m_uiNumberOfEmptyLeafs = 0
-        self.m_uiNumberOfInternalNodes = 0
-
-    def insert_point(self, point):
-        # Not given in the sources.
-        pass
-
-# CGAL::Orthtree Usage [S2]
-# Defined as:
-# CGAL::Orthtree< Orthtree_traits_point< GeomTraits, PointRange, PointMap, cubic_nodes, 3 > > Octree;
-# Traversal:
-# for leaf in Octree.Leaves_traversal():
-#     # Process leaf
-#     pass
-# Output:
-# Octree.dump_to_polylines(output_stream)
-```
-
-### Parameters
+**Parameters:**
 *   `m_fVoxelSize`: Physical size of a voxel. Default: 1.0f [S1, unofficial].
-*   `m_uiOctreeDim`: Total dimension of the voxel grid. Depth = $\log_2(m\_uiOctreeDim)$ [S1, unofficial].
-*   `isovalue`: Threshold for isosurfacing (e.g., 0.3 in CGAL examples) [S2].
+*   `m_uiOctreeDim`: Total grid dimension. Depth = $\log_2(m\_uiOctreeDim)$ [S1, unofficial].
+*   `isovalue`: Threshold for surface extraction (e.g., 0.3) [S2].
 
-### Edge Cases and Pitfalls
-*   **Cracks:** If nodes are split with uniform size around the surface but varying depths exist around the isosurface, cracks (boundaries) will appear in the resulting mesh [S2].
-*   **Refinement Strategy:** Dense refinement around the isosurface ensures a manifold surface, whereas arbitrary refinement can lead to non-manifold surfaces [S2].
-*   **Precision:** CGAL examples use `oo.precision(17)` for output polylines [S2].
+**Edge Cases and Pitfalls:**
+*   **Cracks:** Varying depths around an isosurface produce cracks at boundaries where octree levels are discontinuous [S2].
+*   **Uniformity:** The structure behaves well if nodes are split with uniform size around the surface; non-uniform refinement requires careful handling to maintain manifold surfaces [S2].
 
 ## Subtopics
 
-### [Octree Construction for Point Clouds](1070-octree-construction-for-point-clouds.md)
-The parent method describing the hierarchical subdivision process.
-
-### [Octree-based Level of Detail and Culling](1079-octree-based-level-of-detail-and-culling.md)
-A sibling method using the octree for rendering optimization rather than spatial indexing for surface extraction.
+### [Structured Point Cloud Octree](13087-structured-point-cloud-octree.md)
+Encodes a sparse octree in a compact, batch-friendly tensor format optimized for GPU execution, specifically designed for high-throughput queries in neural radiance fields (NeRF).
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources [S1, unofficial][S2].
-*   **Memory Complexity:** Not given in the sources [S1, unofficial][S2].
-*   **Strengths:** Integrates with CGAL isosurfacing algorithms (MC, TMC, DC) [S2].
-*   **Limitations:** Varying depths can cause mesh cracks if not handled by adaptive refinement strategies [S2].
-*   **When to use:** When organizing point clouds for surface extraction or spatial queries requiring hierarchical access [S1, unofficial][S2].
-*   **When not to use:** Not given in the sources [S1, unofficial][S2].
+*   **Time Complexity:** Construction depends on the number of points and depth $D = \log_2(\text{Dim})$. Traversal is proportional to the number of leaves.
+*   **Memory Complexity:** Proportional to the number of nodes. Each internal node stores 8 pointers and bounding boxes [S1, unofficial].
+*   **Strengths:** Hierarchical culling; efficient spatial queries; supports surface distance metrics for empty space [S1, unofficial].
+*   **Limitations:** Non-uniform refinement can cause mesh cracks during isosurfacing [S2].
+*   **When to use:** When organizing point clouds for voxelization or accelerating ray marching in neural fields [S1, unofficial][S2].
+*   **When not to use:** When uniform grid performance is sufficient and overhead of tree structure is unjustified.
 
 ## Background
-The CGAL::Orthtree implementation originated from the 2022 Google Summer of Code, contributed by Julian Stahl, mentored by Daniel Zint and Pierre Alliez [S2]. It provides first implementations of Marching Cubes, Topologically Correct Marching Cubes, and Dual Contouring using octrees [S2].
+The CGAL implementation originated from the 2022 Google Summer of Code, contributed by Julian Stahl, mentored by Daniel Zint and Pierre Alliez, providing initial Marching Cubes, Topologically Correct Marching Cubes, and Dual Contouring support [S2]. The RFVoxelOctree structure is part of the Voxelizer project [S1, unofficial].
 
 ## Sources
 [S1] itsyouyi/Voxelizer, https://github.com/itsyouyi/Voxelizer, fetched 2026-10-27 (unofficial)

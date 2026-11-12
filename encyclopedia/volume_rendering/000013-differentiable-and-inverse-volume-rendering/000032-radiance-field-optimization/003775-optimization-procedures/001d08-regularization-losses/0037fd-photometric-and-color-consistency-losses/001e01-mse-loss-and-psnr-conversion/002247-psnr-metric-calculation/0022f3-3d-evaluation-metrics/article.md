@@ -1,46 +1,137 @@
 # 3D Evaluation Metrics
+
+
 ## Overview
-3D Evaluation Metrics quantify the fidelity of reconstructed volumetric or surface data against ground-truth references [S1, S2, unofficial][S3]. While [PSNR Metric Calculation](2742-psnr-metric-calculation.md) focuses on pixel-wise photometric error in rendered images, this method extends evaluation to volumetric consistency and geometric accuracy [S1, S2, unofficial][S3]. It distinguishes itself by providing metrics for both volumetric reconstruction quality (PSNR, SSIM on 3D grids) and surface geometry (Chamfer Distance, Normal Consistency) [S1, S2, unofficial][S3].
+3D Evaluation Metrics quantify the fidelity of reconstructed volumetric or surface data against ground-truth references, addressing the problem of assessing geometric and photometric accuracy in 3D reconstruction pipelines [S1, unofficial][S3]. Unlike [PSNR Metric Calculation](2742-psnr-metric-calculation.md) which focuses on pixel-level photometric error in 2D projections, this method encompasses both volumetric image quality (PSNR, SSIM) and surface geometric accuracy (Normal Consistency, Chamfer Distance) [S1, unofficial][S3]. It is distinguished from [Benchmark Performance Numbers](3471-benchmark-performance-numbers.md) by providing the specific mathematical definitions and implementation details for these quality scores rather than just reporting aggregate results.
 
 ## How it works
-The method comprises two distinct evaluation pathways: volumetric reconstruction metrics and surface geometry metrics [S1, S2, unofficial][S3].
+The evaluation process involves computing specific metrics depending on whether the reconstruction is represented as a volume or a mesh.
 
-**Inputs and Outputs:**
-- Input: Reconstructed volume $V_{rec}$ and ground-truth volume $V_{gt}$ [G].
-- Output: Mean PSNR (dB), mean SSIM, Chamfer Distance (CD), and Normal Consistency (NC) [S1, S2, unofficial][S3].
+### Inputs and Outputs
+- **Inputs**: Reconstructed data (volume or mesh) and corresponding ground-truth data.
+- **Outputs**: Scalar metric values (PSNR, SSIM, NC, CD).
 
-**Data Structures:**
-- Reconstructed volume $V_{rec}$: A 3D grid of values (e.g., density, color, or intensity) [G].
-- Ground-truth volume $V_{gt}$: A 3D grid of reference values [G].
-- Both volumes must be aligned spatially and normalized to $[0, 1]$ [S1, unofficial].
-- Estimated surface $\chi_1$: A set of points (point cloud) or mesh vertices [S3, G].
-- Ground-truth surface $\chi_2$: A set of points or mesh vertices [S3, G].
+### Data Structures
+- **Volume**: 3D array of voxels, normalized to $[0, 1]$.
+- **Mesh**: Set of points with associated surface normals.
 
-**Numbered Steps:**
-1. **Normalization:** Ensure $V_{rec}$ and $V_{gt}$ are normalized to $[0, 1]$ [S1, unofficial].
-2. **MSE Calculation:** Compute the Mean Squared Error averaged over all voxels, including background (zero-valued) voxels [S1, unofficial]:
-   $$MSE = \frac{1}{N} \sum_{i=1}^{N} (V_{rec,i} - V_{gt,i})^2$$
-   where $N$ is the total number of voxels in the grid [S1, unofficial].
-3. **PSNR Calculation:**
-   $$PSNR = 10 \log_{10}\left(\frac{1}{MSE}\right)$$
-   This is equivalent to $10 \log_{10}(MAX^2 / MSE)$ with $MAX=1$ [S1, unofficial].
-4. **SSIM Calculation:** Compute SSIM50 using a window size of 11 and Gaussian weighting ($\sigma = 1.5$) [S1, unofficial]. Average the windowed SSIM values to obtain the final score [G].
-5. **Aggregation:** Compute metrics for axial, coronal, and sagittal views by iterating over the respective dimensions of the volumes, then print or return the mean PSNR and SSIM for each view [S2, unofficial].
-6. **Chamfer Distance (CD):** Compute the symmetric distance between point sets $\chi_1$ and $\chi_2$ [S3]:
-   $$CD(\chi_1, \chi_2) = \frac{1}{|\chi_1|} \sum_{x \in \chi_1} \min_{y \in \chi_2} ||x - y||_2 + \frac{1}{|\chi_2|} \sum_{y \in \chi_2} \min_{x \in \chi_1} ||y - x||_2$$
-   Lower values indicate better geometric alignment [S3].
-7. **Normal Consistency (NC):** For each point $i$ on the surface, obtain the estimated normal $N_i$ and ground-truth normal $N_i^*$ [S3]. Compute the cosine similarity $\cos(N_i, N_i^*)$ [S3]. Calculate the mean angular error:
-   $$NC = \frac{1}{N} \sum_{i=1}^{N} (1 - \cos(N_i, N_i^*)) \times 100\%$$
-   where $N$ is the number of points on the surface [S3].
+### Formulas
 
-**Parameters:**
-- SSIM50: Computed with window size 11 and Gaussian weighting ($\sigma = 1.5$) [S1, unofficial].
+**1. Peak Signal-to-Noise Ratio (PSNR)**
+Computed on volumes normalized to $[0, 1]$. The Mean Squared Error (MSE) is averaged over all voxels, including background [S1, unofficial].
+$$ \text{PSNR} = 10 \log_{10} \left( \frac{1}{\text{MSE}} \right) $$
+Where:
+- $\text{MSE} = \frac{1}{V} \sum_{v \in V} (R_v - G_v)^2$
+- $R_v$ is the reconstructed voxel value.
+- $G_v$ is the ground-truth voxel value.
+- $V$ is the total number of voxels.
+- $\text{MAX} = 1$ (implicit in normalization) [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-- **Background Inclusion:** MSE must include background voxels [S1, unofficial].
-- **Held-out Voxels:** For fair comparison, metrics may be computed on a held-out subset of voxels (e.g., 5% randomly selected) rather than the entire volume [S1, unofficial].
-- **Point Cloud Sampling:** CD is sensitive to the density of points in $\chi_1$ and $\chi_2$ [G].
-- **Normal Orientation:** Normals must be consistently oriented (e.g., outward-facing) for NC to be meaningful [G].
+**2. Structural Similarity Index (SSIM)**
+Computed using a sliding window approach [S1, unofficial].
+- Window size: 11.
+- Gaussian weighting: $\sigma = 1.5$ [S1, unofficial].
+- The final SSIM score is the mean over all windows [S1, unofficial].
+
+**3. Normal Consistency (NC)**
+Measures the angular difference between estimated and ground-truth surface normals [S3].
+$$ \text{NC} = \frac{1}{N} \sum_{i=1}^{N} (1 - \cos(N_i, N_i^*)) \times 100\% $$
+Where:
+- $N_i$ is the estimated surface normal for the $i$-th point.
+- $N_i^*$ is the ground-truth surface normal for the $i$-th point.
+- $\cos(N_i, N_i^*)$ is the cosine similarity between the two vectors.
+- $N$ is the number of points on the surface [S3].
+
+**4. Chamfer Distance (CD)**
+Calculates a symmetric distance between two point clouds $\chi_1$ (estimated) and $\chi_2$ (ground truth) [S3].
+$$ \text{CD}(\chi_1, \chi_2) = \frac{1}{|\chi_1|} \sum_{x \in \chi_1} \min_{y \in \chi_2} ||x - y||_2 + \frac{1}{|\chi_2|} \sum_{y \in \chi_2} \min_{x \in \chi_1} ||y - x||_2 $$
+Where $||\cdot||_2$ is the Euclidean distance [S3].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def compute_psnr(recon_vol: np.ndarray, gt_vol: np.ndarray) -> float:
+    """
+    Compute PSNR for 3D volumes normalized to [0, 1].
+    MSE is averaged over all voxels including background.
+    """
+    # Ensure inputs are float32/float64
+    recon = recon_vol.astype(np.float64)
+    gt = gt_vol.astype(np.float64)
+    
+    # Calculate MSE over all voxels
+    mse = np.mean((recon - gt) ** 2)
+    
+    # Avoid division by zero
+    if mse == 0:
+        return float('inf')
+        
+    # PSNR formula: 10 * log10(1 / MSE)
+    # Equivalent to 10 * log10(MAX^2 / MSE) with MAX=1
+    psnr = 10 * math.log10(1.0 / mse)
+    return psnr
+
+def compute_normal_consistency(normals_est: np.ndarray, normals_gt: np.ndarray) -> float:
+    """
+    Compute Normal Consistency (NC) percentage.
+    normals_est, normals_gt: (N, 3) arrays of unit vectors.
+    """
+    # Compute cosine similarity
+    # Dot product of unit vectors is the cosine of the angle
+    cos_sim = np.sum(normals_est * normals_gt, axis=1)
+    
+    # Clip to [-1, 1] to handle floating point errors
+    cos_sim = np.clip(cos_sim, -1.0, 1.0)
+    
+    # NC formula: 1/N * sum(1 - cos(Ni, Ni*)) * 100%
+    nc = np.mean(1.0 - cos_sim) * 100.0
+    return nc
+
+def compute_chamfer_distance(points_est: np.ndarray, points_gt: np.ndarray) -> float:
+    """
+    Compute symmetric Chamfer Distance between two point clouds.
+    points_est, points_gt: (N, 3) and (M, 3) arrays.
+    """
+    n_est = points_est.shape[0]
+    n_gt = points_gt.shape[0]
+    
+    if n_est == 0 or n_gt == 0:
+        return float('inf')
+
+    # Efficiently compute min distances using broadcasting or KDTree
+    # Here using broadcasting for clarity (O(N*M) memory)
+    # dists[i, j] = ||p_est[i] - p_gt[j]||_2
+    dists = np.sqrt(np.sum((points_est[:, np.newaxis, :] - points_gt[np.newaxis, :, :]) ** 2, axis=2))
+    
+    # Min distance from each est point to any gt point
+    min_dist_est_to_gt = np.min(dists, axis=1)
+    
+    # Min distance from each gt point to any est point
+    min_dist_gt_to_est = np.min(dists, axis=0)
+    
+    # Average distances
+    avg_dist_est = np.mean(min_dist_est_to_gt)
+    avg_dist_gt = np.mean(min_dist_gt_to_est)
+    
+    cd = avg_dist_est + avg_dist_gt
+    return cd
+```
+
+### Parameters and Settings
+- **SSIM Window**: Size 11, Gaussian $\sigma = 1.5$ [S1, unofficial].
+- **Volume Normalization**: Inputs must be normalized to $[0, 1]$ for the standard PSNR formula used in [S1, unofficial] [S1, unofficial].
+- **Point Cloud Sampling**: For mesh evaluation, points are sampled from the surface [S3].
+
+### Edge Cases and Pitfalls
+- **Background Voxels**: MSE must include background voxels in the average, not just foreground [S1, unofficial].
+- **Zero MSE**: If reconstruction is identical to ground truth, PSNR is infinite; handle division by zero [G].
+- **Normal Orientation**: Normal Consistency assumes normals are consistently oriented (e.g., outward-facing). If orientations are flipped, $\cos(N_i, N_i^*)$ will be negative, inflating the error [G].
+- **Point Cloud Size**: Chamfer Distance is sensitive to point cloud density; ensure comparable sampling densities or use uniform sampling [S3].
 
 ## Subtopics
 
@@ -48,32 +139,33 @@ The method comprises two distinct evaluation pathways: volumetric reconstruction
 Mesh Reconstruction Evaluation quantifies the geometric fidelity of a reconstructed triangular mesh against a ground-truth reference mesh. It solves the problem of assessing how well a surface reconstruction method captures the true shape, topology, and detail of the underlying scene. Unlike radiance-field metrics that evaluate visual appearance, this method focuses strictly on spatial accuracy, distinguishing it from [PSNR Metric Calculation](2903-psnr-metric-calculation.md) which measures pixel-level photometric error.
 
 ### [Standard Rendering Metrics](3473-standard-rendering-metrics.md)
-Standard rendering metrics quantify pixel-wise reconstruction error and perceptual fidelity to evaluate radiance-field optimizations. PSNR provides a cheap, decibel-based error measurement, while SSIM and MS-SSIM serve as structural companions, LPIPS offers learned perceptual similarity, and FID and KID evaluate generative distributional quality on rendered crops. These metrics focus on image-space fidelity, distinct from geometry metrics like Chamfer distance.
+Standard Rendering Metrics provide an objective, numerical assessment of image fidelity for 3D reconstructions and novel view synthesis. The primary metric is the Peak Signal-to-Noise Ratio (PSNR), which quantifies pixel-wise reconstruction error in decibels by comparing rendered images against ground-truth references. While PSNR is the standard baseline due to its computational cheapness, it is widely recognized as insensitive to perceptual quality, often necessitating companion metrics like SSIM or LPIPS for a complete evaluation.
 
 ### Normal Consistency
-Metric for 3D surface reconstruction measuring consistency between estimated and ground truth surface normals [S3]. Formula: $\text{NC} = \frac{1}{N} \sum_{i=1}^N (1 - \cos(N_i, N_i^*)) \times 100\%,$ where $N_i, N_i^*$ are estimated and ground truth surface normals for the $i$-th point, $\cos(N_i, N_i^*)$ is cosine similarity, and $N$ is the number of points [S3]. Parameters: $N_i, N_i^*$ are the normals; $N$ is the point count [S3].
+Normal Consistency is a metric for 3D surface reconstruction measuring consistency between estimated and ground truth surface normals [S3]. It is defined as $\text{NC} = \frac{1}{N} \sum_{i=1}^N (1 - \cos(N_i, N_i^*)) \times 100\%,$ where $N_i, N_i^*$ are estimated and ground truth surface normals for the $i$-th point, $\cos(N_i, N_i^*)$ is cosine similarity, and $N$ is the number of points [S3]. It is typically used alongside Chamfer Distance to evaluate surface quality [S3].
 
 ## Operating characteristics
-- **Time Complexity:**
-  - PSNR/SSIM: $O(N)$ for MSE, where $N$ is the number of voxels [S1, S2, unofficial].
-  - Chamfer Distance: $O(|\chi_1| \cdot |\chi_2|)$ for naive nearest-neighbor search [S3].
-  - Normal Consistency: $O(N)$, where $N$ is the number of points [S3].
-- **Memory Complexity:**
-  - Requires storage of the full volume or point clouds [S1, S2, unofficial][S3].
-- **Measured Performance:**
-  - In microscopy applications, PSNR and SSIM are computed on volumes normalized to $[0, 1]$ [S1, unofficial]. Typical fitting settings include 20,000 max iterations and early stopping patience of 500 iterations [S1, unofficial].
-  - Splat counts for evaluation can range from 1K to 2M, with geometric spacing (doubling) from 1K to 512K [S1, unofficial].
-- **Strengths:**
-  - Provides a comprehensive view of reconstruction quality, covering both photometric and geometric aspects [S1, S2, unofficial][S3].
-- **Limitations:**
-  - Background voxels significantly impact PSNR if not handled correctly (must be included) [S1, unofficial].
-  - Chamfer Distance is sensitive to point cloud density and sampling uniformity [S3].
-- **When to Use:**
-  - Use volumetric metrics (PSNR/SSIM) when evaluating radiance fields or voxel grids [S1, S2, unofficial].
-  - Use geometric metrics (CD/NC) when evaluating mesh or point cloud reconstructions [S3].
+- **Time Complexity**: 
+  - PSNR/SSIM: $O(V)$ where $V$ is the number of voxels. SSIM involves a sliding window, increasing constant factors but remaining linear in voxel count.
+  - Normal Consistency: $O(N)$ where $N$ is the number of surface points.
+  - Chamfer Distance: $O(N \cdot M)$ for naive implementation, where $N, M$ are point counts. Can be optimized to $O((N+M) \log N)$ with spatial indexing [S3].
+- **Memory Complexity**: 
+  - PSNR/SSIM: $O(V)$ for storing volumes.
+  - Chamfer Distance: $O(N \cdot M)$ for distance matrix in naive implementation [S3].
+- **Strengths**: 
+  - PSNR/SSIM are computationally cheap and standard for volumetric data [S1, unofficial].
+  - NC and CD provide direct geometric feedback for mesh reconstruction [S3].
+- **Limitations**: 
+  - PSNR is insensitive to perceptual quality [S6, unofficial].
+  - Chamfer Distance is sensitive to point cloud density and sampling [S3].
+  - SSIM computation on large 3D volumes can be memory-intensive due to windowing [S1, unofficial].
+- **When to Use**: 
+  - Use PSNR/SSIM for volumetric reconstruction evaluation [S1, unofficial].
+  - Use NC/CD for mesh-based reconstruction evaluation [S3].
+  - Avoid PSNR alone for perceptual quality assessment [S6, unofficial].
 
 ## Background
-In scientific imaging, these metrics are applied to large-scale volumetric data with specific protocols like held-out voxel sampling and background inclusion [S1, unofficial]. Early methods relied heavily on image-space metrics like PSNR and SSIM [S2, unofficial]. As the field moved towards explicit 3D representations, geometric metrics like Chamfer Distance and Normal Consistency became standard for assessing surface fidelity [S3].
+3D Evaluation Metrics have evolved alongside 3D reconstruction techniques. PSNR and SSIM, originally developed for 2D image quality assessment, were adapted for volumetric data [S1, unofficial]. Normal Consistency and Chamfer Distance are standard metrics in computer vision for surface reconstruction, as seen in works like Self-Supervised Dual Contouring [S3]. The specific application of these metrics to Gaussian splatting for microscopy data highlights their versatility in scientific visualization [S1, unofficial].
 
 ## Sources
 [S1] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,155 @@
+# Access Path Predictor
+
+Also called: APP
+
+## Overview
+The Access Path Predictor (APP) is a knowledge-based out-of-core data management algorithm designed to reduce disk I/O latency in volume rendering by predicting and pre-caching the next octree node required for sampling [S1]. It solves the problem of inefficient random access patterns in large datasets by learning local access traffic, specifically the frequent appearance of predecessor-current-successor node sequences [S1]. Unlike the Ray Driven Predictor (RDP), which assumes spatial continuity along a ray, APP does not require nodes to be on the same line or in the same neighborhood, allowing it to accommodate diverse rendering features such as refraction and space leaping [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A new sample point $s$; two recent octree nodes: $N_{last}$ (the node accessed before $N_{cur}$) and $N_{cur}$ (the node currently being accessed).
+*   **Output:** The predicted next node $N_{new}$ to be accessed, and instructions to the cache manager to precache subsequent nodes.
+
+**Data Structures:**
+*   **Octree Node Metadata:** Each octree node stores up to four pairs of predecessor-successor records. Each record consists of a predecessor node identifier ($N_{p,i}$) and a successor node identifier ($N_{s,i}$) [S1].
+*   **Storage Constraint:** Knowledge acquisition and storage are limited to **leaf nodes** only. This reduces computational costs and utilizes the eight unused child addresses in each leaf node [S1].
+*   **Record Limit:** Each leaf node maintains exactly four such pairs. When a new pattern is recorded and the limit is reached, the oldest pair is replaced [S1].
+
+**Algorithm Steps:**
+1.  **Initialization:** Set $N_{new} \leftarrow \text{NULL}$.
+2.  **Check Current Node:** If the new sample point $s$ is contained within $N_{cur}$, set $N_{new} \leftarrow N_{cur}$ and terminate prediction (no new node required) [S1].
+3.  **Phase I: Access Path Prediction:** If $N_{new}$ is still NULL, iterate through each recorded predecessor $N_{p,i}$ of $N_{cur}$. If $N_{last} == N_{p,i}$ AND $s$ is contained within $N_{p,i}$, set $N_{new} \leftarrow N_{p,i}$ [S1].
+    *   *Logic:* This checks if the current access follows a learned historical path where the predecessor of the current node was also the location of the new sample point.
+4.  **Phase II: Historical Successor Prediction:** If $N_{new}$ is still NULL, iterate through each recorded successor $N_{s,i}$ of $N_{cur}$. If $s$ is contained within $N_{s,i}$, set $N_{new} \leftarrow N_{s,i}$ and return $N_{new}$ [S1].
+    *   *Logic:* If the specific predecessor pattern didn't match, check if the new sample point falls into any node that has historically followed the current node.
+5.  **Phase III: Fallback Navigation:** If $N_{new}$ is still NULL, perform standard octree navigation from $N_{cur}$ to find the leaf node containing $s$. Set $N_{new} \leftarrow \text{OctreeNavigation}(N_{cur}, s)$ [S1].
+6.  **Update Knowledge:** Update the knowledge base of $N_{cur}$. Replace the oldest recorded pair $(N_{p,i}, N_{s,i})$ in $N_{cur}$ with the new observed pattern $(N_{last}, N_{new})$ [S1].
+7.  **Precaching:**
+    *   If $N_{cur}$ is a recorded predecessor of $N_{new}$ (i.e., the prediction was based on a known path), identify the corresponding successor $N_{next}$ in $N_{new}$'s records and precache $N_{next}$ with **high priority** [S1].
+    *   Otherwise, precache all four successors of $N_{new}$ with **low priority** [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def AccessPathPredictor(s, N_last, N_cur):
+    """
+    Predicts the next octree node to access based on learned access patterns.
+    
+    Args:
+        s: The new sample point (3D coordinate).
+        N_last: The octree node accessed immediately before N_cur.
+        N_cur: The current octree node being accessed.
+        
+    Returns:
+        N_new: The predicted next octree node.
+    """
+    N_new = None
+    
+    # Check if sample point is already in the current node
+    if contains(N_cur, s):
+        N_new = N_cur
+        return N_new
+        
+    # Phase I: Prediction using Access Path (Predecessor-Current-Successor)
+    if N_new is None:
+        for i in range(4): # Iterate over recorded predecessors
+            N_p_i = N_cur.predecessors[i]
+            if N_p_i is not None:
+                if N_last == N_p_i and contains(N_p_i, s):
+                    N_new = N_p_i
+                    break
+                    
+    # Phase II: Prediction using Historical Successors
+    if N_new is None:
+        for i in range(4): # Iterate over recorded successors
+            N_s_i = N_cur.successors[i]
+            if N_s_i is not None:
+                if contains(N_s_i, s):
+                    N_new = N_s_i
+                    return N_new
+                    
+    # Phase III: Fallback to standard octree navigation
+    if N_new is None:
+        N_new = OctreeNavigation(N_cur, s)
+        
+    # Update Knowledge in N_cur
+    # Replace the oldest (predecessor, successor) pair with (N_last, N_new)
+    N_cur.update_knowledge(N_last, N_new)
+    
+    # Precaching Logic
+    if N_cur.is_predecessor_of(N_new):
+        # Find the successor of N_new that corresponds to the path from N_cur
+        N_next = N_new.get_successor_from_predecessor(N_cur)
+        Precache(N_next, priority="high")
+    else:
+        # Precache all potential successors of the new node with low priority
+        for child in N_new.children:
+            Precache(child, priority="low")
+            
+    return N_new
+
+def contains(node, point):
+    """Returns True if point is within the spatial bounds of the node."""
+    return node.min <= point <= node.max
+
+def OctreeNavigation(current_node, target_point):
+    """
+    Standard octree traversal to find the leaf node containing target_point.
+    Assumes a standard octree structure where each node has up to 8 children.
+    """
+    if current_node.is_leaf():
+        return current_node
+    
+    # Determine which child contains the point
+    child_index = get_child_index(current_node, target_point)
+    if current_node.children[child_index] is not None:
+        return OctreeNavigation(current_node.children[child_index], target_point)
+    else:
+        # Fallback if child doesn't exist (sparse octree)
+        # In a real implementation, this might traverse up or handle sparse gaps.
+        # For this algorithm's context, we assume valid paths exist or 
+        # the caller handles sparse navigation.
+        return current_node # Or raise error / handle sparse logic [G]
+
+def get_child_index(node, point):
+    """Determines the index (0-7) of the child containing the point."""
+    # Implementation depends on specific octree coordinate system.
+    # Generic logic: compare point coordinates against node center.
+    mid = node.center
+    index = 0
+    if point.x >= mid.x: index |= 1
+    if point.y >= mid.y: index |= 2
+    if point.z >= mid.z: index |= 4
+    return index
+```
+
+**Parameters:**
+*   **History Depth:** Each node stores 4 predecessor-successor pairs [S1].
+*   **Storage Scope:** Leaf nodes only [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Sparse Octrees:** The algorithm assumes valid navigation paths. If the octree is sparse, `OctreeNavigation` must handle gaps [G].
+*   **Cache Thrashing:** If the access pattern changes rapidly, the fixed-size history (4 pairs) may evict useful patterns, leading to frequent fallbacks to Phase III [S1].
+*   **Leaf Node Limitation:** By restricting knowledge to leaf nodes, the algorithm may miss opportunities to predict paths at higher levels of the octree, though this is a trade-off for reduced computational cost [S1].
+
+## Subtopics
+
+### History-based Access Predictor
+A knowledge-based algorithm that removes the assumption of specific predecessor-current-successor patterns, relying entirely on historic records of nodes required immediately after a visit [S1]. It utilizes the eight unused child addresses in each leaf node to store up to eight potential successors [S1]. When visiting a node, it pre-caches all known potential successors [S1]. If more than eight successors are identified, the oldest is replaced [S1]. A key pitfall is that pre-caching up to eight nodes to load one may generate excessive disk traffic [S1].
+
+### Ray Driven Predictor
+A prediction-based algorithm closely coupled with a discrete ray-tracing engine [S1]. It assumes that octree nodes following the ray and along its path will likely be accessed subsequently [S1]. Given a ray and current sampling position $s_c$, it determines a predicted sampling point $s_p$ on the ray just outside the current octree node [S1]. It then navigates the octree to reach the node containing $s_p$, instructing the lower layer to prefetch any nodes not already in the cache during this navigation [S1]. This process repeats for each sampling point [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Prediction is $O(1)$ with respect to the history size (fixed at 4 pairs) for Phases I and II. Phase III requires $O(\log N)$ for octree navigation, where $N$ is the number of nodes [S1].
+*   **Memory Overhead:** Minimal per-node overhead: 4 predecessor-successor pairs stored in leaf nodes [S1].
+*   **Performance:** Effective for applications with regular access patterns such as ray tracing, marching cubes, and feature tracking [S1]. It reduces disk I/O by pre-caching nodes before they are explicitly requested [S1].
+*   **Limitations:** Less effective for highly irregular or random access patterns where historical patterns do not repeat [S1]. The limitation to leaf nodes may reduce prediction accuracy for coarse-grained navigation [S1].
+*   **Comparison:** Unlike RDP, APP does not assume spatial continuity (same line/neighborhood), making it more robust for refraction and space leaping [S1]. Unlike HAP, APP uses specific path patterns rather than just immediate successors, potentially reducing unnecessary pre-caching [S1].
+
+## Background
+The Access Path Predictor was introduced by D. Chisnall, M. Chen, and C. Hansen in 2006 as part of their work on knowledge-based out-of-core algorithms for data management in visualization [S1]. It was developed to address the bottlenecks of out-of-core rendering of large volume datasets, where disk I/O latency dominates rendering time [S1]. The algorithm is part of a suite of predictors including the Ray Driven Predictor and History-based Access Predictor, designed to work within a discrete ray-tracing engine [S1].
+
+## Sources
+[S1] Knowledge-Based Out-of-Core Algorithms for Data Management in Visualization, https://doi.org/10.2312/vissym/eurovis06/107-114, fetched 2026-10-26

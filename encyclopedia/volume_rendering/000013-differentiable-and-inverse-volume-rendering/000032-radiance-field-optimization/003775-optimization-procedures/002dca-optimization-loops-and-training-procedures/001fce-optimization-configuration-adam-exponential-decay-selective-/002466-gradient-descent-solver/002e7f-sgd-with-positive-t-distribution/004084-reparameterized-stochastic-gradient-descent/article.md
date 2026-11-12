@@ -3,110 +3,164 @@
 Also called: Reparameterized SGD, Reparameterized Stochastic Gradient Descent for Parameter Optimization
 
 ## Overview
-Reparameterized Stochastic Gradient Descent (Reparameterized SGD) is an optimization technique for inverse volume rendering that minimizes the error between a rendered image and a target image by altering scattering parameters ($g, \sigma_s$) [S1]. It solves the problem of optimization getting trapped in local minima under low-frequency lighting by reparameterizing the search space to regularize the error surface [S1]. Unlike standard SGD on original parameters, which fails to generalize to high-frequency lighting due to ambiguity-induced flat regions, this method uses a non-linear warp to ensure the solution matches ground truth under varying lighting conditions [S1].
+Reparameterized Stochastic Gradient Descent is an optimization technique for inverse rendering that finds altered scattering parameters by minimizing an error function between a rendered image and a target image [S1]. It addresses the problem where standard SGD gets trapped in local minima with small gradients under low-frequency lighting, which leads to solutions that generalize poorly to high-frequency lighting [S1]. It sets itself apart from its parent [SGD with Positive t-Distribution](5809-sgd-with-positive-t-distribution.md) by explicitly reparameterizing the search space to regularize the error surface, rather than relying solely on the statistical properties of the gradient noise distribution.
 
 ## How it works
-**Inputs:**
-- Target image $I_0$ [S1].
-- Initial guess for scattering parameters: asymmetry factor $g$ and scattering coefficient $\sigma_s$ [S1].
-- Error function $d(g, \sigma_s)$ measuring difference between rendered image and $I_0$ [S1].
-
-**Outputs:**
-- Optimized parameters $g^*, \sigma_s^*$ that minimize $d$ [S1].
+**Inputs and Outputs:**
+*   **Input:** Target image $I_0$, initial guess for scattering parameters $(g, \sigma_s)$, error function $d(g, \sigma_s)$ [S1].
+*   **Output:** Optimized scattering parameters $(g, \sigma_s)$ that minimize $d$ [S1].
 
 **Data Structures:**
-- Parameter vector $\mathbf{p} = [g, \sigma_s]$ [S1].
-- Reparameterized vector $\tilde{\mathbf{p}} = [\tilde{\sigma}_s, \sigma_s]$ where $\tilde{\sigma}_s$ is the reduced scattering coefficient [S1].
+*   Parameters: $g$ (anisotropy factor), $\sigma_s$ (scattering coefficient).
+*   Reparameterized variable: $\tilde{\sigma}_s$ (reduced scattering coefficient).
 
 **Formulas:**
-The reparameterization replaces the horizontal axis with the reduced scattering coefficient:
+The reparameterization replaces the horizontal axis with the reduced scattering coefficient [S1]:
 $$ \tilde{\sigma}_s := (1 - g)\sigma_s $$
-This ensures both axes ($\tilde{\sigma}_s$ and $\sigma_s$) have the same units [S1].
+This ensures both axes ($g$ and $\tilde{\sigma}_s$) have the same units and regularizes the error surface [S1].
 
 **Steps:**
-1. **Reparameterize:** Transform the search space from $(g, \sigma_s)$ to $(\tilde{\sigma}_s, \sigma_s)$ using the formula above [S1].
-2. **First 1D SGD (Class Selection):**
-   - Fix $\sigma_s$.
-   - Perform stochastic gradient descent on $\tilde{\sigma}_s$ to minimize $d(\tilde{\sigma}_s, \sigma_s)$ [S1].
-   - This step selects an equivalence class based on the order-1 similarity relation [S1].
-3. **Second 1D SGD (Refinement):**
-   - Fix the optimized $\tilde{\sigma}_s$ from the previous step.
-   - Perform stochastic gradient descent on $\sigma_s$ to minimize $d(\tilde{\sigma}_s, \sigma_s)$ [S1].
-   - This finds the best parameter point within the selected equivalence class [S1].
+1.  **Reparameterize:** Transform the search space from $(g, \sigma_s)$ to $(g, \tilde{\sigma}_s)$ using the formula above [S1].
+2.  **First 1D SGD (Class Selection):** Fix $\sigma_s$ and perform a one-dimensional SGD search to find $\tilde{\sigma}_s$ that minimizes the error $d$ [S1]. This step selects an equivalence class based on the order-1 similarity relation [S1].
+3.  **Second 1D SGD (Intra-class Optimization):** Keep $\tilde{\sigma}_s$ fixed and perform another one-dimensional SGD search to find the best $\sigma_s$ within the selected class [S1].
+
+**Pitfalls:**
+*   **Low-frequency lighting:** Creates large regions where the error function $d(g, \sigma_s)$ is close to zero with very small gradients. These gradients can be dominated by Monte Carlo or measurement noise, causing SGD to get trapped in local minima that generalize poorly to high-frequency lighting [S1].
+*   **Initial Guess:** Starting far from the solution may lead to convergence in a suboptimal equivalence class if the reparameterization does not fully resolve the ambiguity [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def reparameterized_sgd(target_image, initial_g, initial_sigma_s, learning_rate, num_iterations):
-    # Step 1: Initialize parameters
+def reparameterized_sgd(target_image, initial_g, initial_sigma_s, error_function, learning_rate, num_iterations):
+    """
+    Performs reparameterized SGD to find optimal scattering parameters.
+    
+    Args:
+        target_image: The input image I0.
+        initial_g: Initial guess for anisotropy factor g.
+        initial_sigma_s: Initial guess for scattering coefficient sigma_s.
+        error_function: Function d(g, sigma_s) computing error between rendered and target image.
+        learning_rate: Step size for SGD.
+        num_iterations: Number of iterations for each 1D search.
+        
+    Returns:
+        g_opt: Optimized anisotropy factor.
+        sigma_s_opt: Optimized scattering coefficient.
+    """
+    # Step 1: Reparameterization is implicit in the variable definitions below.
+    # We work in the space (g, sigma_tilde_s) where sigma_tilde_s = (1 - g) * sigma_s.
+    
     g = initial_g
     sigma_s = initial_sigma_s
     
-    # Step 2: First 1D SGD - Optimize reduced scattering coefficient
-    # Fix sigma_s, search for optimal sigma_tilde_s
-    # Note: sigma_tilde_s is not stored directly as a variable in the final output,
-    # but is the optimization variable in this phase.
+    # Calculate initial reduced scattering coefficient
     sigma_tilde_s = (1 - g) * sigma_s
     
-    for i in range(num_iterations):
-        # Compute gradient of error d with respect to sigma_tilde_s
-        # d is computed by rendering with current g and sigma_s derived from sigma_tilde_s and fixed sigma_s
-        current_sigma_s = sigma_s
-        current_g = 1 - (sigma_tilde_s / current_sigma_s) if current_sigma_s != 0 else 0
-        
-        grad_sigma_tilde_s = compute_gradient(target_image, current_g, current_sigma_s, variable='sigma_tilde_s')
-        
-        # Update sigma_tilde_s
-        sigma_tilde_s = sigma_tilde_s - learning_rate * grad_sigma_tilde_s
-        
-        # Guard against division by zero or invalid g
-        if current_sigma_s == 0:
-            sigma_tilde_s = 0
-            
-    # Step 3: Second 1D SGD - Optimize scattering coefficient
-    # Fix sigma_tilde_s, search for optimal sigma_s
-    for i in range(num_iterations):
-        # Compute gradient of error d with respect to sigma_s
-        # d is computed by rendering with current sigma_tilde_s and variable sigma_s
-        current_sigma_tilde_s = sigma_tilde_s
-        current_g = 1 - (current_sigma_tilde_s / sigma_s) if sigma_s != 0 else 0
-        
-        grad_sigma_s = compute_gradient(target_image, current_g, sigma_s, variable='sigma_s')
-        
-        # Update sigma_s
-        sigma_s = sigma_s - learning_rate * grad_sigma_s
-        
-        # Guard against division by zero or invalid g
-        if sigma_s == 0:
-            sigma_s = 1e-6 # [G] Small epsilon to prevent division by zero in g calculation
-            
-    # Final parameter extraction
-    final_g = 1 - (sigma_tilde_s / sigma_s) if sigma_s != 0 else 0
+    # Step 2: First 1D SGD - Fix sigma_s, optimize sigma_tilde_s
+    # Note: In the source, sigma_s is fixed during this phase.
+    # However, sigma_tilde_s depends on g. The source states "fix sigma_s and look for sigma_tilde_s".
+    # This implies we treat sigma_s as constant for the gradient update of sigma_tilde_s,
+    # but since sigma_tilde_s is the variable, we update it directly.
+    # To maintain consistency with the definition sigma_tilde_s = (1-g)*sigma_s,
+    # if we update sigma_tilde_s, we must later recover sigma_s or g.
+    # The source says: "First, we fix sigma_s and look for sigma_tilde_s... Then, we search for the best parameter point
+    # within this class by keeping sigma_tilde_s fixed and performing another 1D search to find the best sigma_s."
+    # This implies a sequential update where the variables are decoupled during their respective phases.
     
-    return final_g, sigma_s
-```
+    # Phase 1: Optimize sigma_tilde_s with sigma_s fixed
+    current_sigma_tilde_s = sigma_tilde_s
+    current_sigma_s = sigma_s # Fixed
+    
+    for i in range(num_iterations):
+        # Compute gradient of error with respect to sigma_tilde_s
+        # d/d(sigma_tilde_s) d(g, sigma_s)
+        # Note: The error function is defined on physical parameters.
+        # We need to map current variables back to physical space to compute error.
+        # In this phase, g is not explicitly fixed in the text, but sigma_s is.
+        # The text says "fix sigma_s". It does not explicitly say fix g.
+        # However, sigma_tilde_s = (1-g)*sigma_s. If sigma_s is fixed, changing sigma_tilde_s
+        # effectively changes g.
+        # Let's assume we update sigma_tilde_s directly.
+        
+        grad_sigma_tilde = compute_gradient(current_sigma_tilde_s, current_sigma_s, target_image, error_function)
+        current_sigma_tilde_s -= learning_rate * grad_sigma_tilde
+        
+    # After Phase 1, we have an optimized sigma_tilde_s and fixed sigma_s.
+    # We need to determine the corresponding g to proceed to Phase 2?
+    # The text says: "Then, we search for the best parameter point within this class by keeping sigma_tilde_s fixed
+    # and performing another 1D search to find the best sigma_s."
+    # This implies we keep the NEW sigma_tilde_s fixed, and optimize sigma_s.
+    # But sigma_tilde_s = (1-g)*sigma_s. If we fix sigma_tilde_s and optimize sigma_s, g must change.
+    
+    g_opt = None
+    sigma_s_opt = None
+    
+    # Phase 2: Optimize sigma_s with sigma_tilde_s fixed
+    # We use the sigma_tilde_s from the end of Phase 1.
+    final_sigma_tilde_s = current_sigma_tilde_s
+    current_sigma_s = sigma_s # Start from initial or previous? Source implies sequential.
+    
+    # We need an initial g for the second phase?
+    # The source says "keeping sigma_tilde_s fixed".
+    # We can derive g from sigma_tilde_s and current sigma_s: g = 1 - sigma_tilde_s / sigma_s.
+    
+    for i in range(num_iterations):
+        # Compute gradient of error with respect to sigma_s
+        # d/d(sigma_s) d(g, sigma_s)
+        # Note: g is dependent on sigma_s here because sigma_tilde_s is fixed.
+        # g = 1 - sigma_tilde_s / sigma_s
+        
+        grad_sigma_s = compute_gradient(final_sigma_tilde_s, current_sigma_s, target_image, error_function)
+        current_sigma_s -= learning_rate * grad_sigma_s
+        
+    # Final parameters
+    sigma_s_opt = current_sigma_s
+    # Recover g from the fixed sigma_tilde_s and optimized sigma_s
+    # g = 1 - sigma_tilde_s / sigma_s
+    if sigma_s_opt != 0:
+        g_opt = 1 - (final_sigma_tilde_s / sigma_s_opt)
+    else:
+        g_opt = 0 # Guard against division by zero
+        
+    return g_opt, sigma_s_opt
 
-**Edge Cases and Pitfalls:**
-- Low-frequency lighting creates large regions where the error function is close to zero with very small gradients, causing SGD to get trapped in local minima that generalize poorly to high-frequency lighting [S1].
-- Division by zero when calculating $g$ from $\tilde{\sigma}_s$ and $\sigma_s$ if $\sigma_s$ is zero [S1].
+def compute_gradient(sigma_tilde_s, sigma_s, target_image, error_function):
+    """
+    Computes the gradient of the error function with respect to the variable.
+    This is a placeholder for the actual Monte Carlo gradient estimation.
+    """
+    # Calculate g from sigma_tilde_s and sigma_s
+    if sigma_s == 0:
+        g = 0
+    else:
+        g = 1 - (sigma_tilde_s / sigma_s)
+        
+    # Compute error
+    error = error_function(g, sigma_s, target_image)
+    
+    # Compute gradient numerically or via adjoint method
+    # This is a placeholder for the actual gradient computation
+    # In practice, this would involve rendering and backpropagation
+    return 0.0 # Placeholder
+```
 
 ## Subtopics
 
-### Similarity-Based Inverse Rendering
-A proof-of-concept optimization technique that warps the non-linear parameter space of translucent materials to resolve ambiguities caused by similarity equivalence classes, making gradient descent more effective [S1]. It identifies ambiguity locations using similarity theory, applies a non-linear warp to the search space, and runs gradient descent in the warped space [S1]. Inverse rendering is ill-conditioned because different parameters in the same equivalence class produce very similar appearances, creating ambiguities that stall standard optimization [S1].
+### [Similarity-Based Inverse Rendering](10272-similarity-based-inverse-rendering.md)
+A proof-of-concept technique that warps the non-linear parameter space of translucent materials to resolve ambiguities caused by similarity equivalence classes. Unlike Reparameterized SGD, which uses a specific algebraic reparameterization ($\tilde{\sigma}_s$), this method leverages similarity theory to identify and warp ambiguous regions in the scattering parameter space.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** The method finds solutions that generalize better to high-frequency lighting compared to standard SGD, which gets trapped in local minima under low-frequency lighting [S1].
-- **Strengths:** Regularizes the error surface by ensuring both axes have the same units; avoids local minima associated with similarity equivalence classes [S1].
-- **Limitations:** Requires two sequential 1D searches; sensitive to noise in gradient estimation from Monte Carlo simulations [S1].
-- **When to use:** When optimizing scattering parameters for translucent media under low-frequency lighting conditions where standard SGD fails to generalize [S1].
-- **When not to use:** When high-frequency lighting is not a concern and standard SGD converges sufficiently [S1].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Under low-frequency lighting, standard SGD gets trapped in local minima, while Reparameterized SGD finds solutions that generalize better to high-frequency lighting [S1].
+*   **Strengths:** Regularizes the error surface, making it easier for SGD to escape local minima associated with low-frequency lighting [S1].
+*   **Limitations:** Still susceptible to noise in gradient estimation due to Monte Carlo simulations [S1].
+*   **When to use:** When optimizing scattering parameters for translucent materials under low-frequency lighting conditions where standard SGD fails to generalize [S1].
+*   **When not to use:** When high-frequency lighting is the primary concern and standard SGD performs adequately, or when computational resources are extremely limited and the overhead of reparameterization is prohibitive (though the overhead is minimal).
 
 ## Background
-Originated in the paper "High-order similarity relations in radiative transfer" by Gkioulekas et al. (2014) [S1]. The work focuses on forward rendering of translucent media and proposes an inverse rendering approach that exploits similarity relations to improve gradient descent efficiency [S1]. The method addresses the ill-conditioned nature of inverse rendering caused by equivalence classes in the parameter space [S1].
+The method originates from the work on high-order similarity relations in radiative transfer [S1]. It was developed to address the ill-conditioned nature of inverse rendering, where different parameters in the same equivalence class produce very similar appearances, creating ambiguities that stall standard optimization [S1]. The technique is applied in the context of forward rendering for optically dense and forward-scattering materials, which are common in the real world but challenging to render [S1].
 
 ## Sources
 [S1] High-order similarity relations in radiative transfer, https://doi.org/10.1145/2601097.2601104, fetched 2026-10-26

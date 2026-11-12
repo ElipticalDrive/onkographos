@@ -1,0 +1,343 @@
+# Part-based MHE-augmented NeRF
+
+Also called: Instant NVR, Learning Neural Volumetric Representations of Dynamic Humans in Minutes, Part-based voxelized human representation
+
+## Overview
+Part-based MHE-augmented NeRF is a method for learning neural volumetric videos of dynamic humans from sparse view videos in minutes with competitive visual quality [S1]. It addresses the challenge of quickly reconstructing free-viewpoint videos of dynamic humans by decomposing the canonical human body into multiple anatomical parts, assigning each part its own Multiresolution Hash Encoding (MHE)-augmented NeRF network to efficiently distribute representational power [S1]. Unlike a single-resolution representation that treats all body parts as equally complex, this method adapts the hash table size per part based on local geometric and texture complexity, accelerating convergence while maintaining high fidelity [S1].
+
+## How it works
+The method represents a dynamic human as a canonical neural radiance field and a motion field, learned from videos through differentiable rendering [S1]. The core innovation is the part-based voxelized human representation and a 2D motion parameterization scheme [S1].
+
+### Inputs and Outputs
+*   **Inputs:** Sparse multi-view video frames of a human performer; SMPL parametric human model parameters (pose $\rho$, shape $\beta$); camera intrinsics and extrinsics.
+*   **Outputs:** Photorealistic novel view renderings of the dynamic human for any frame $t$ and camera pose.
+
+### Data Structures
+
+**1. SMPL Model and Part Decomposition**
+The human body is decomposed into $K$ parts based on the SMPL template mesh $M=(V, E)$, where $V$ represents vertices and $E$ represents edges [S1].
+*   **Blend Weights:** Each vertex $v_i$ has a blend weight vector $w_i$ indicating influence of $J$ bones [S1].
+*   **Part Definition:** For each part $k \in \{1, \dots, K\}$, a set of bones $\Omega_k$ is defined. The mesh for part $k$ is $M_k = (V_k, E_k)$, where:
+    $$ V_k = \{v_i \mid \arg\max w_i \in \Omega_k\} $$
+    $$ E_k = \{(v_i, v_j) \mid v_i \in V_k, v_j \in V_k\} $$
+    [S1]
+
+**2. Multiresolution Hash Encoding (MHE) Tables**
+Each part $k$ has its own MHE table $\psi_k$ [S1].
+*   **Layout:** A hash table mapping input coordinates to trainable feature vectors.
+*   **Size:** The size of the hash table for part $k$ is adapted based on the complexity of that part (e.g., face vs. torso) [S1]. Uniformly large tables (e.g., $2^{20}$) across all parts are avoided to prevent memory waste and slower iteration times [S1].
+
+**3. Network Architectures**
+*   **Density Network ($MLP_{\sigma_k}$):** Takes encoded canonical point $\psi_k(x)$ as input. Outputs density $\sigma_k$ and feature vector $z$ [S1].
+*   **Color Network ($MLP_{c_k}$):** Takes feature vector $z$, viewing direction $d$, and latent embedding $l_t$ (for frame $t$) as input. Outputs color $c_k$ [S1].
+
+### Numbered Steps
+
+1.  **Query Point Processing:** For a query point $x$ at frame $t$ and a specific human part $k$:
+    a. Find the nearest surface point $p_k$ on the posed SMPL mesh part $M_k$ [S1].
+    b. Obtain the blend weight $w_k$ and UV coordinate $(u_k, v_k)$ of surface point $p_k$ from the SMPL model [S1].
+
+2.  **Motion Parameterization (Inverse LBS + Residual Deformation):**
+    a. **Inverse LBS:** Transform the query point $x$ to the unposed space using the inverse Linear Blend Skinning (LBS) module. Given human pose $\rho$, blend weight $w_k$, and query point $x$, the transformed point $x_0$ is:
+        $$ x_0 = \Phi_{LBS}(x, w_k, \rho) = \left( \sum_{j=1}^{J} w_{k,j} G_j \right)^{-1} x $$
+        where $\{G_j\}_{j=1}^J$ are the transformation matrices for the bones [S1].
+    b. **Residual Deformation:** Apply Multiresolution Hash Encoding (MHE) $\psi_k$ to the 2D UV coordinates and time $(u_k, v_k, t)$ [S1].
+    c. Feed the encoded point into an MLP network ($MLP_{res}$) to regress the residual translation $\Delta x$ [S1].
+    d. Compute the canonical point $x_{can}$ by adding the residual translation to the inverse LBS output:
+        $$ x_{can} = x_0 + \Delta x $$
+        [S1]
+
+3.  **Radiance Field Evaluation:**
+    a. Feed the canonical point $x_{can}$ into the density network of part $k$:
+        $$ (\sigma_k, z) = MLP_{\sigma_k}(\psi_k(x_{can})) $$
+        [S1]
+    b. Feed the feature vector $z$, viewing direction $d$, and latent embedding $l_t$ into the color network of part $k$:
+        $$ c_k = MLP_{c_k}(z, d, l_t) $$
+        [S1]
+
+4.  **Part Selection:**
+    Repeat steps 1-3 for all $K$ parts to obtain a set of predictions $\{(\sigma_k, c_k)\}_{k=1}^K$. Select the prediction from the part $k^*$ with the maximum density as the final density and color for the query point:
+    $$ (\sigma, c) = (\sigma_{k^*}, c_{k^*}) \quad \text{where} \quad k^* = \arg\max_k \sigma_k $$
+    [S1]
+
+5.  **Rendering:**
+    Use the standard emission-absorption volume rendering equation (as defined in the parent article [44-radiance-field-optimization.md]) to compute the pixel color $\hat{C}(\mathbf{r})$ for each ray $\mathbf{r}$ by integrating the sampled densities $\sigma$ and colors $c$ along the ray [S1, 44-radiance-field-optimization.md].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class PartBasedMHENeRF:
+    def __init__(self, num_parts, smpl_model, hash_table_sizes):
+        """
+        Initialize the Part-based MHE-augmented NeRF.
+        
+        Args:
+            num_parts (int): Number of anatomical parts K.
+            smpl_model: SMPL model instance providing mesh vertices, edges, 
+                         blend weights, and transformation matrices G_j.
+            hash_table_sizes (list[int]): Size of the MHE hash table for each part k.
+        """
+        self.K = num_parts
+        self.smpl = smpl_model
+        self.parts = []
+        
+        # Initialize MHE-augmented NeRF for each part
+        for k in range(self.K):
+            # Create MHE encoder for part k with specific size
+            mhe_encoder = MultiresolutionHashEncoding(hash_table_sizes[k])
+            
+            # Density network: Input -> (sigma, z)
+            density_net = MLP_Density(input_dim=mhe_encoder.output_dim)
+            
+            # Color network: (z, d, l_t) -> c
+            color_net = MLP_Color(input_dim_z=density_net.output_dim_z)
+            
+            # Residual deformation network: (u, v, t) encoded -> delta_x
+            # Note: MHE is applied to (u, v, t) before MLP
+            residual_net = MLP_Residual(input_dim=mhe_encoder.output_dim)
+            
+            self.parts.append({
+                'mhe': mhe_encoder,
+                'density_net': density_net,
+                'color_net': color_net,
+                'residual_net': residual_net
+            })
+
+    def get_nearest_surface_point_and_uv(self, query_point, part_mesh, smpl_model):
+        """
+        Find the nearest surface point on the posed SMPL mesh part and get blend weight/UV.
+        """
+        # 1. Pose the SMPL mesh for the current frame using smpl_model.pose
+        posed_mesh = smpl_model.get_posed_mesh(part_mesh)
+        
+        # 2. Find nearest point p_k on posed_mesh to query_point
+        p_k, distance = posed_mesh.find_nearest_surface_point(query_point)
+        
+        # 3. Get blend weight w_k and UV coordinate (u_k, v_k) from SMPL model
+        # SMPL model provides mapping from surface point to blend weights and UV
+        w_k = smpl_model.get_blend_weight(p_k)
+        u_k, v_k = smpl_model.get_uv_coordinate(p_k)
+        
+        return p_k, w_k, u_k, v_k
+
+    def inverse_lbs(self, x, w, pose):
+        """
+        Compute x_0 = (sum w_j G_j)^-1 x
+        """
+        # Get transformation matrices G_j for the bones influenced by w
+        G_matrices = self.smpl.get_bone_transforms(pose)
+        
+        # Compute weighted sum of transformations
+        # w is a vector of weights for J bones
+        weighted_transform = torch.zeros_like(x)
+        for j in range(len(w)):
+            if w[j] > 0:
+                weighted_transform += w[j] * G_matrices[j] @ x
+        
+        # Invert the transformation matrix
+        # Note: In practice, this might be solved via linear system or precomputed
+        # Here we assume a generic inverse operation
+        inv_transform = torch.inverse(weighted_transform)
+        x_0 = inv_transform @ x
+        return x_0
+
+    def forward(self, query_points, frame_indices, poses, camera_intrinsics, camera_extrinsics):
+        """
+        Render a batch of rays.
+        
+        Args:
+            query_points: Tensor of shape (N, 3) representing points along rays.
+            frame_indices: Tensor of shape (N,) indicating the frame t for each point.
+            poses: Tensor of shape (T, J, 4, 4) or similar, pose parameters for each frame.
+            camera_intrinsics, camera_extrinsics: Camera parameters.
+            
+        Returns:
+            rendered_colors: Tensor of shape (N, 3)
+        """
+        # Sample points along rays (standard NeRF sampling)
+        # This part is handled by the parent method's sampling strategy
+        # We assume query_points are already sampled along rays in world space
+        
+        all_densities = []
+        all_colors = []
+        
+        for i, x in enumerate(query_points):
+            t = frame_indices[i]
+            pose = poses[t]
+            
+            # Latent embedding for frame t
+            l_t = self.get_latent_embedding(t)
+            
+            # Viewing direction d for this ray
+            d = self.get_viewing_direction(x, camera_intrinsics, camera_extrinsics)
+            
+            densities_part = []
+            colors_part = []
+            
+            for k in range(self.K):
+                part = self.parts[k]
+                part_mesh = self.smpl.get_part_mesh(k)
+                
+                # Step 1: Get nearest surface point and UV
+                p_k, w_k, u_k, v_k = self.get_nearest_surface_point_and_uv(x, part_mesh, self.smpl)
+                
+                # Step 2: Motion Parameterization
+                # 2a. Inverse LBS
+                x_0 = self.inverse_lbs(x, w_k, pose)
+                
+                # 2b. Residual Deformation
+                # Encode (u, v, t)
+                uv_t = torch.cat([u_k, v_k, t.float()], dim=-1)
+                encoded_uv_t = part['mhe'](uv_t)
+                
+                # Regress residual translation
+                delta_x = part['residual_net'](encoded_uv_t)
+                
+                # Canonical point
+                x_can = x_0 + delta_x
+                
+                # Step 3: Radiance Field Evaluation
+                # Encode canonical point
+                encoded_x_can = part['mhe'](x_can)
+                
+                # Predict density and feature
+                sigma_k, z = part['density_net'](encoded_x_can)
+                
+                # Predict color
+                c_k = part['color_net'](z, d, l_t)
+                
+                densities_part.append(sigma_k)
+                colors_part.append(c_k)
+            
+            # Step 4: Part Selection
+            # Select part with max density
+            densities_tensor = torch.stack(densities_part)
+            k_star = torch.argmax(densities_tensor)
+            
+            sigma = densities_tensor[k_star]
+            c = colors_part[k_star]
+            
+            all_densities.append(sigma)
+            all_colors.append(c)
+            
+        # Step 5: Volume Rendering
+        # Use the standard volume rendering equation from the parent article
+        rendered_colors = volume_rendering(all_densities, all_colors, ray_samples)
+        
+        return rendered_colors
+
+    def get_latent_embedding(self, t):
+        # Retrieve or learn latent embedding for frame t
+        pass
+
+    def get_viewing_direction(self, x, K, E):
+        # Compute viewing direction from camera parameters
+        pass
+
+class MultiresolutionHashEncoding(nn.Module):
+    def __init__(self, table_size):
+        super().__init__()
+        # Initialize hash table with trainable features
+        self.table = nn.Embedding(table_size, feature_dim)
+        
+    def forward(self, x):
+        # Hash input coordinates to indices
+        indices = hash_function(x)
+        # Lookup features
+        features = self.table(indices)
+        # Concatenate features from multiple resolutions (if applicable)
+        return features
+
+class MLP_Density(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256 + 1) # Output: z (256 dims) + sigma (1 dim)
+        )
+        
+    def forward(self, x):
+        out = self.net(x)
+        z = out[:, :-1]
+        sigma = out[:, -1:]
+        return sigma, z
+
+class MLP_Color(nn.Module):
+    def __init__(self, input_dim_z):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim_z + 3 + 1, 256), # z, d (3), l_t (1)
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 3) # Output: color (RGB)
+        )
+        
+    def forward(self, z, d, l_t):
+        input_vec = torch.cat([z, d, l_t], dim=-1)
+        return self.net(input_vec)
+
+class MLP_Residual(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 3) # Output: delta_x (3D translation)
+        )
+        
+    def forward(self, x):
+        return self.net(x)
+```
+
+### Parameters
+*   **Training Time:** Approximately 5 minutes on a single RTX 3090 GPU for a 512x512 video with 100 frames [S1].
+*   **Optimizer:** Adam with a learning rate of $5 \times 10^{-4}$ [S1].
+*   **Hash Table Size:** Varies per part based on complexity. Uniformly large tables (e.g., $2^{20}$) are discouraged [S1].
+*   **Number of Parts:** Manually defined based on SMPL bones (e.g., face, torso, arms, legs) [S1].
+
+### Edge Cases and Pitfalls
+*   **Uniform Hash Table Size:** Using a uniformly large hash table across all parts increases memory consumption and per-iteration training time without guaranteed quality gains [S1].
+*   **Equal Complexity Assumption:** Treating all parts as equally complex wastes representational power on simple regions and degrades PSNR (e.g., by 1.98dB) [S1].
+*   **Motion Parameterization:** Human motion typically occurs around a surface rather than in a volume; points near the surface projected to neighboring regions on a parametric model have similar motion behavior. The 2D UV parameterization exploits this [S1].
+
+## Subtopics
+
+### Multiresolution Hash Encoding (MHE)
+A technique to embed input coordinates to a high-dimensional space using trainable hash tables, allowing for efficient and high-resolution representation [S1]. It sets itself apart by enabling spatially varying resolution and faster training compared to dense voxel grids. Choose it when memory efficiency and high-frequency detail are needed. [S1]
+
+### Inverse Linear Blend Skinning (LBS)
+A method to transform points from world space to unposed space using the inverse of the weighted sum of bone transformations. It is used as the base motion field before residual deformation. [S1]
+
+### SMPL Model
+A parametric human model used to define the body shape, pose, and part decomposition. It provides the mesh, blend weights, and UV coordinates necessary for the part-based representation. [S1]
+
+## Operating characteristics
+*   **Time Complexity:** Training time is significantly reduced compared to prior methods. It is 100 times faster than Neural Body, which typically requires more than 10 hours of training [S1].
+*   **Memory Complexity:** Memory consumption is reduced by adapting the hash table size per part. Uniformly large tables are avoided to prevent excessive memory usage [S1].
+*   **Measured Performance:** On the ZJU-MoCap dataset, the method achieves competitive PSNR. Ablation studies show that the part-based approach (286M params) converges faster and yields higher PSNR than a single MHE-augmented NeRF for the whole body (302M params) [S1].
+*   **Strengths:** Fast training (minutes vs. hours), competitive visual quality, efficient distribution of representational power.
+*   **Limitations:** Requires a parametric human model (SMPL) for part decomposition and motion parameterization. Performance may degrade if the SMPL fit is poor. [S1]
+*   **When to use:** When rapid reconstruction of dynamic humans from sparse views is required, and a parametric model is available.
+*   **When not to use:** When high-fidelity reconstruction of non-human subjects or subjects without a good parametric model is needed.
+
+## Background
+*   **Origin:** Proposed by Zhen Xu, Hujun Bao, and Xiaowei Zhou from the State Key Laboratory of CAD&CG, Zhejiang University [S1].
+*   **Paper:** "Learning Neural Volumetric Representations of Dynamic Humans in Minutes" (CVPR 2023) [S1].
+*   **History:** The method builds on prior work in neural radiance fields for humans (e.g., Neural Body [58]) and multiresolution hash encoding [48]. It addresses the slow convergence of per-scene optimization methods by introducing a part-based representation and 2D motion parameterization [S1].
+*   **Usage:** Used for creating volumetric videos of human performers for applications such as immersive telepresence, video games, and movie production [S1].
+
+## Sources
+[S1] Learning Neural Volumetric Representations of Dynamic Humans in Minutes, https://doi.org/10.1109/cvpr52729.2023.00846, fetched 2026-10-30

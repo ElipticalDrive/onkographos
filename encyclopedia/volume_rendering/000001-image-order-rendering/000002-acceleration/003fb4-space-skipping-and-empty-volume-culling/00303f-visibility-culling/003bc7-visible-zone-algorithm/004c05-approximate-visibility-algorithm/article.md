@@ -1,0 +1,127 @@
+# Approximate Visibility Algorithm
+Also called: Stride-based Visibility Sampling
+## Overview
+A method to compute approximate visibility for line drawings from volume data by reducing the number of vertices checked for occlusion, trading accuracy for performance [S1]. It sets itself apart from the exact visibility algorithm [Visible Zone Algorithm](9086-visible-zone-algorithm.md) by sacrificing worst-case correctness for a predictable speedup factor, making it suitable for large datasets where interactive frame rates are prioritized over perfect occlusion handling [S1].
+## How it works
+### Inputs and outputs
+- **Input**: A loop of vertices $V = \{v_0, v_1, \dots, v_{N-1}\}$ representing a contour or cutting plane intersection, and a stride parameter $k$.
+- **Output**: A visibility mask $M$ for each vertex in the loop, where $M[i]$ indicates whether vertex $v_i$ is visible or occluded.
+
+### Data structures
+- **Visibility Array**: An array of boolean values or flags, size $N$, corresponding to the vertices in the loop.
+- **Stride Parameter**: Integer $k \ge 1$.
+
+### Steps
+1. Initialize the visibility status for all vertices in the loop as "unknown" or inherit from a previous frame if incremental updates are supported [G].
+2. Iterate through the loop indices $i$ with a step size of $k$ (i.e., $i = 0, k, 2k, \dots$).
+3. For each sampled vertex $v_i$:
+   - Perform the exact visibility test (e.g., ray casting or z-buffer comparison) to determine if $v_i$ is visible.
+   - Store the result in $M[i]$.
+4. For each interval between two consecutive sampled vertices $v_i$ and $v_{i+k}$:
+   - If $M[i] \neq M[i+k]$ (a transition is detected):
+     - Iterate through all intervening vertices $j$ where $i < j < i+k$.
+     - Perform the exact visibility test for each $v_j$.
+     - Store the results in $M[j]$.
+   - If $M[i] == M[i+k]$ (no transition detected):
+     - Assume all intervening vertices $j$ where $i < j < i+k$ have the same visibility as $M[i]$.
+     - Set $M[j] = M[i]$ for all such $j$.
+5. Return the visibility mask $M$.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def approximate_visibility(vertices, k, visibility_test_func):
+    """
+    Compute approximate visibility for a loop of vertices.
+    
+    Args:
+        vertices: List of vertex objects or indices.
+        k: Stride length for sampling.
+        visibility_test_func: Function that returns True if vertex is visible, False otherwise.
+        
+    Returns:
+        List of booleans representing visibility status for each vertex.
+    """
+    n = len(vertices)
+    visibility = [None] * n
+    
+    # Step 1: Sample every k-th vertex
+    for i in range(0, n, k):
+        visibility[i] = visibility_test_func(vertices[i])
+        
+    # Step 2: Check intervals between sampled vertices
+    for i in range(0, n - k, k):
+        start_idx = i
+        end_idx = i + k
+        
+        # If visibility differs between sampled endpoints, check intervening vertices
+        if visibility[start_idx] != visibility[end_idx]:
+            for j in range(start_idx + 1, end_idx):
+                visibility[j] = visibility_test_func(vertices[j])
+        else:
+            # No transition: assume same visibility for all intervening vertices
+            for j in range(start_idx + 1, end_idx):
+                visibility[j] = visibility[start_idx]
+                
+    # Handle the last segment if n is not a multiple of k
+    # The loop above covers up to n-k. If n % k != 0, the last sampled vertex
+    # might not have a subsequent sampled vertex in the range.
+    # However, the problem statement implies a closed loop or linear traversal.
+    # Assuming linear traversal for simplicity as per "traverse the loop".
+    # If it's a closed loop, we need to check the wrap-around segment.
+    # Based on [S1], it describes traversing a loop. Let's assume standard linear
+    # indexing for the description, but note that for a closed loop, the last
+    # segment connects n-1 to 0.
+    
+    # Re-evaluating based on "traverse the loop":
+    # If it is a closed loop, we must check the segment from the last sampled index
+    # to the first sampled index (0).
+    
+    last_sampled = (n - 1) // k * k
+    first_sampled = 0
+    
+    if last_sampled != first_sampled:
+        # Check wrap-around segment
+        if visibility[last_sampled] != visibility[first_sampled]:
+            # Intervening vertices are from last_sampled+1 to n-1, and 0 to first_sampled-1
+            # But first_sampled is 0, so only last_sampled+1 to n-1
+            for j in range(last_sampled + 1, n):
+                visibility[j] = visibility_test_func(vertices[j])
+        else:
+            for j in range(last_sampled + 1, n):
+                visibility[j] = visibility[last_sampled]
+                
+    return visibility
+```
+*Note: The pseudocode above assumes a linear array. If the loop is topologically closed, the wrap-around logic is included. The source [S1] mentions "traverse the loop", implying a cyclic structure. The standard interpretation of "intervening vertices" between $i$ and $i+k$ in a linear array is straightforward. In a closed loop, the segment from the last sampled vertex to the first must also be handled.*
+
+### Parameters
+- **$k$**: The stride length for sampling vertices. Typical values tested: 1, 2, 4, 8 [S1].
+  - $k=1$ corresponds to the exact visibility algorithm.
+
+### Edge cases and pitfalls
+- **Narrow occluders**: If the stride $k$ is too large, narrow occluders may be missed, causing visible artifacts (mislabeled vertices) [S1].
+- **Guarantee**: The method guarantees that no details larger than $k$ voxels are missed [S1].
+- **Precision**: The method relies on the visibility test function being consistent. Inconsistent tests may lead to false transitions.
+
+## Operating characteristics
+- **Time Complexity**: Reduces the algorithm's running time by a factor of at most $k$ compared to checking every vertex [S1]. The exact visibility algorithm is $O(n^2)$ for a volume of size $n^3$ [S1]. The approximate method is therefore roughly $O(n^2/k)$ in the best case (no transitions), but can degrade to $O(n^2)$ if every interval requires full checking.
+- **Memory Complexity**: $O(n)$ to store the visibility mask, where $n$ is the number of vertices in the loop [S1].
+- **Measured Performance**: On the aneurysm dataset:
+  - Stride 1: 590 msec/frame
+  - Stride 2: 370 msec/frame
+  - Stride 4: 280 msec/frame
+  - Stride 8: 244 msec/frame [S1]
+- **Strengths**: Significant speedup for large datasets where many vertices share the same visibility status [S1].
+- **Limitations**: May mislabel vertices if narrow occluders are present and $k$ is large [S1]. Not suitable for real-time rendering if high accuracy is required for narrow features [S1].
+- **When to use**: Large datasets where interactive frame rates are needed and narrow occluders are not critical [S1].
+- **When not to use**: When exact visibility is required, or when the dataset contains many narrow occluders and $k$ must be small [S1].
+
+## Background
+- **Origin**: Developed by Hall-Holt and Rusinkiewicz [S1].
+- **History**: Introduced in the context of line drawings from volume data, specifically for handling visibility of contours and cutting planes [S1].
+- **Usage**: Used in the aneurysm dataset rendering to handle narrow occluders, though video sequences were created without it [S1]. It is part of a system that provides user control over line styles based on visibility [S1].
+
+## Sources
+[S1] Line drawings from volume data, https://doi.org/10.1145/1073204.1073222, fetched 2026-10-28

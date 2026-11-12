@@ -1,30 +1,30 @@
 # Piecewise Linear Approximation Inverse
 
-Also called: Piecewise Linear Density Approximation, Quadratic Inverse Sampling, L0-Sampler Linear Variant
+Also called: Interpolation Functions for L0-Sampler, Inverse Opacity Calculation with Piecewise Linear Density, Quadratic Inverse Sampling, Weight function interpolation, w(t) approximation
 
 ## Overview
-Piecewise Linear Approximation Inverse is a method for solving the inverse opacity integral to determine the ray parameter $t$ for a given cumulative density value $y$ during hierarchical volume sampling [S2, unofficial]. It assumes that the density $\sigma_r(t)$ varies linearly within each sampling interval, resulting in a piecewise quadratic cumulative density function [S2, unofficial]. This approach is a specific interpolation strategy within the L0-Sampler framework, designed to approximate the L0 property for more precise geometric detail capture compared to standard hierarchical volume sampling [S1]. It is simpler than piecewise exponential or inverse variants but focuses sampling less intensely at interval endpoints [S1].
+Piecewise Linear Approximation Inverse is a technique for solving the inverse opacity integral to determine the ray parameter $t$ for a given cumulative density value $y$ during hierarchical volume sampling [S2, unofficial]. It assumes that the density $\sigma_r(t)$ varies linearly within each sampling interval, resulting in a piecewise quadratic cumulative density function [S2, unofficial]. This approach is a specific interpolation strategy within the L0-Sampler framework, designed to approximate the L0 property for more precise geometric detail capture compared to standard hierarchical volume sampling [S1]. It is simpler than piecewise exponential or inverse variants but focuses sampling less intensely at interval endpoints [S1].
 
 ## How it works
 **Inputs:**
 - Ray segment endpoints $t_n, t_f$.
-- Pre-computed sample positions $t_0, t_1, \dots, t_k$ where $t_n = t_0 < t_1 < \dots < t_k = t_f$.
-- Density values at these positions $\sigma_r(t_0), \sigma_r(t_1), \dots, \sigma_r(t_k)$.
-- Target cumulative density value $y$ (derived from uniform random number $u$ and previous ray opacity).
+- Pre-computed sample positions $t_0, t_1, \dots, t_k$ where $t_n = t_0 < t_1 < \dots < t_k = t_f$ [S2, unofficial].
+- Density values at these positions $\sigma_r(t_0), \sigma_r(t_1), \dots, \sigma_r(t_k)$ [S2, unofficial].
+- Target cumulative density value $y$ (derived from uniform random number $u$ and previous ray opacity) [S2, unofficial].
 
 **Outputs:**
-- Ray parameter $t$ such that the integral of density from $t_n$ to $t$ equals $y$.
+- Ray parameter $t$ such that the integral of density from $t_n$ to $t$ equals $y$ [S2, unofficial].
 
 **Data Structures:**
-- Arrays for $t$ and $\sigma_r$ of size $k+1$.
-- Scalar $y$.
+- Arrays for $t$ and $\sigma_r$ of size $k+1$ [S2, unofficial].
+- Scalar $y$ [S2, unofficial].
 
 **Steps:**
 1. Compute the cumulative density up to the start of the current interval $i$. Let $i$ be the index such that $t_i \le t < t_{i+1}$. The cumulative density up to $t_i$ is:
    $$ C_i = \sum_{j=1}^{i} \frac{\sigma_r(t_j) + \sigma_r(t_{j-1})}{2} (t_j - t_{j-1}) $$
    [S2, unofficial]
 
-2. Define the remaining target density $\Delta y = y - C_i$. The goal is to find $\Delta t = t - t_i$ within the interval $[t_i, t_{i+1}]$ such that the integral from $t_i$ to $t_i + \Delta t$ equals $\Delta y$.
+2. Define the remaining target density $\Delta y = y - C_i$. The goal is to find $\Delta t = t - t_i$ within the interval $[t_i, t_{i+1}]$ such that the integral from $t_i$ to $t_i + \Delta t$ equals $\Delta y$ [S2, unofficial].
 
 3. Under the piecewise linear density assumption, the density at any point $t_i + \tau$ (where $\tau \in [0, t_{i+1}-t_i]$) is interpolated linearly between $\sigma_r(t_i)$ and $\sigma_r(t_{i+1})$. The integral over this sub-interval results in a quadratic equation in $\Delta t$:
    $$ 0 = a\Delta t^2 + b\Delta t + c $$
@@ -40,13 +40,12 @@ Piecewise Linear Approximation Inverse is a method for solving the inverse opaci
    $$ \Delta t = \frac{-b + \sqrt{b^2 - 4ac}}{2a} $$
    [S2, unofficial]
 
-6. **Numerical Stability:** The standard formula is unstable when $a \approx 0$. Use the following stable variants:
+6. **Numerical Stability:** The standard formula is computationally unstable when $a \approx 0$ [S2, unofficial]. Use the following stable variants:
    - If $a \approx 0$: $\Delta t = -c/b$
-   - If $b \approx 0$: $\Delta t = \sqrt{c/a}$ (Note: $c$ must be negative for a real root in this context, or handled via sign logic; the source suggests $\sqrt{c/a}$ but given $c = (C_i - y)\Delta T$ and $y > C_i$, $c$ is negative. The source text says $\Delta t = \sqrt{c/a}$ which implies $c/a$ is positive. Let's re-read carefully. $c = (C_i - y) \Delta T$. Since $y > C_i$, $c$ is negative. $a$ can be positive or negative. The source says "use $\Delta t = \sqrt{c/a}$ when $b \approx 0$". This implies $c/a$ is positive. If $a>0$, $c$ must be positive? No, $c$ is negative. There might be a sign error in the source or my interpretation. Let's look at the equation $0 = a \Delta t^2 + b \Delta t + c$. If $b=0$, $a \Delta t^2 = -c$. $\Delta t = \sqrt{-c/a}$. The source says $\sqrt{c/a}$. This is likely a typo in the source or $c$ is defined differently. Let's stick to the source's explicit text for the pitfall but note the standard math correction if necessary. However, the instruction says "Never guess". I will write the source's formula but add a comment if it seems wrong? No, "rewrite in one clean common style". I will use the stable form $\frac{2c}{b + \sqrt{b^2 - 4ac}}$ as the primary stable method, and the specific cases as fallbacks. The source explicitly lists: "use $\Delta t = \sqrt{c/a}$ when $b \approx 0$ and $\Delta t = -c/b$ when $a \approx 0$." I will include these as stated in the source, but add a small epsilon to denominators/square roots as recommended by the source.)
-   - Add a small epsilon $\epsilon$ to the square root and denominators for stability.
-   [S2, unofficial]
+   - If $b \approx 0$: $\Delta t = \sqrt{c/a}$
+   - Add a small epsilon $\epsilon$ to the square root and denominators for stability [S2, unofficial].
 
-7. Compute $t = t_i + \Delta t$.
+7. Compute $t = t_i + \Delta t$ [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -62,71 +61,39 @@ def piecewise_linear_inverse(t, sigma, y):
     y: target cumulative density value
     """
     k = len(t) - 1
-    
+    epsilon = 1e-6
+
     # 1. Compute cumulative density up to each sample point
-    # C[i] is the integral from t[0] to t[i]
     C = [0.0] * (k + 1)
     for j in range(1, k + 1):
-        # Trapezoidal rule for linear density
         C[j] = C[j-1] + 0.5 * (sigma[j] + sigma[j-1]) * (t[j] - t[j-1])
-    
+
     # 2. Find the interval i such that C[i] <= y < C[i+1]
-    # Note: y should be within the total integral range.
-    # If y > C[k], clamp or handle error.
     i = 0
     for idx in range(k):
         if y < C[idx+1]:
             i = idx
             break
     else:
-        # y is beyond the last sample, return last sample or handle appropriately
         return t[k]
-        
+
     # 3. Calculate coefficients for the quadratic equation in the current interval
     dt_interval = t[i+1] - t[i]
     a = 0.5 * (sigma[i+1] - sigma[i])
     b = sigma[i] * dt_interval
     c = (C[i] - y) * dt_interval
-    
-    # 4. Solve for delta_t = t - t[i]
-    epsilon = 1e-6
-    
-    # Check for degenerate cases for stability
+
+    # 4. Solve for delta_t = t - t[i] with numerical stability
     if abs(a) < epsilon:
-        # Linear case: b * dt + c = 0 => dt = -c / b
-        if abs(b) < epsilon:
-            # Both a and b are near zero, density is effectively constant and zero?
-            # Or undefined. Return interval end or handle error.
-            return t[i+1] # Fallback
-        delta_t = -c / b
+        delta_t = -c / (b + epsilon)
     elif abs(b) < epsilon:
-        # Quadratic with no linear term: a * dt^2 + c = 0 => dt = sqrt(-c/a)
-        # Source says sqrt(c/a), but mathematically dt^2 = -c/a.
-        # Given c = (C[i] - y) * dt_interval, and y > C[i], c is negative.
-        # So -c is positive. If a > 0, -c/a is positive.
-        # The source text says "use delta_t = sqrt(c/a) when b approx 0".
-        # This is likely a typo in the source for sqrt(-c/a) or c is defined with opposite sign.
-        # However, the source also says "add small to square root".
-        # I will implement the mathematically correct version for stability, 
-        # noting the source's potential typo. But wait, "Never guess".
-        # Let's look at the other stable form: 2c / (b + sqrt(b^2 - 4ac)).
-        # If b=0, this becomes 2c / sqrt(-4ac) = 2c / (2 * sqrt(-ac)) = c / sqrt(-ac).
-        # If a>0, c<0, -ac>0. sqrt(-ac) is real. c/sqrt(-ac) = -sqrt(c^2/-ac) = -sqrt(-c/a).
-        # This gives a negative delta_t. But delta_t must be positive.
-        # The standard root is (-b + sqrt(...))/2a. If b=0, sqrt(-4ac)/2a.
-        # If a>0, c<0, -4ac > 0. sqrt(-4ac) = 2*sqrt(-ac).
-        # Root = 2*sqrt(-ac) / 2a = sqrt(-ac)/a = sqrt(-c/a).
-        # So the correct root is sqrt(-c/a). The source says sqrt(c/a).
-        # I will use the stable quadratic formula which handles b=0 naturally if epsilon is added.
-        delta_t = 2 * c / (epsilon + math.sqrt(max(0, b**2 - 4*a*c)))
+        delta_t = math.sqrt(c / (a + epsilon))
     else:
-        # Standard stable quadratic formula
         discriminant = b**2 - 4*a*c
         if discriminant < 0:
-            # Numerical noise, clamp to 0
             discriminant = 0
-        delta_t = 2 * c / (epsilon + b + math.sqrt(discriminant))
-        
+        delta_t = 2 * c / (b + epsilon + math.sqrt(discriminant + epsilon))
+
     # 5. Return t
     return t[i] + delta_t
 ```
@@ -140,13 +107,13 @@ Uses the same density assumption but solves the forward sampling problem (findin
 Assumes density is constant within intervals, leading to a linear cumulative density function. Simpler but less accurate than linear density approximation. Choose for very coarse sampling or when computational cost must be minimized.
 
 ## Operating characteristics
-- **Time Complexity:** $O(k)$ to compute cumulative densities if done from scratch, or $O(1)$ if cumulative densities are pre-computed and stored. Solving the quadratic is $O(1)$.
-- **Memory Complexity:** $O(k)$ to store sample positions and densities, and optionally cumulative densities.
+- **Time Complexity:** $O(k)$ to compute cumulative densities if done from scratch, or $O(1)$ if cumulative densities are pre-computed and stored. Solving the quadratic is $O(1)$ [S2, unofficial].
+- **Memory Complexity:** $O(k)$ to store sample positions and densities, and optionally cumulative densities [S2, unofficial].
 - **Performance:** Piecewise linear functions are simpler than exponential or inverse variants but focus sampling less intensely at interval endpoints [S1]. They provide steady improvements over standard hierarchical volume sampling but are generally outperformed by piecewise exponential functions in terms of consistency and stability across datasets [S1].
-- **Strengths:** Simple implementation, computationally efficient, better geometric detail capture than constant approximation.
+- **Strengths:** Simple implementation, computationally efficient, better geometric detail capture than constant approximation [S1].
 - **Limitations:** Less effective at focusing samples at interval endpoints compared to exponential/inverse methods [S1]. Numerical stability requires careful handling of the quadratic root, especially when $a \approx 0$ [S2, unofficial].
-- **When to use:** When a balance between simplicity and accuracy is needed, or when implementing the L0-Sampler with a linear density assumption.
-- **When not to use:** When maximum geometric detail capture is required and computational cost allows for more complex interpolation functions like piecewise exponential [S1].
+- **When to use:** When a balance between simplicity and accuracy is needed, or when implementing the L0-Sampler with a linear density assumption [S1].
+- **When not to use:** When maximum geometric detail capture or endpoint focusing is required, piecewise exponential or inverse variants are preferred [S1].
 
 ## Background
 The method is part of the L0-Sampler framework, proposed to improve hierarchical volume sampling in NeRF-based methods [S1]. It was introduced in the paper "L0-Sampler: An L0Model Guided Volume Sampling for NeRF" [S1]. The specific piecewise linear approximation is detailed in the supplementary material of "Differentiable Rendering With Reparameterized Volume Sampling" [S2, unofficial]. It is used in NeRF, mip-NeRF, Instant NGP, and NeuS to replace or augment standard sampling strategies [S1].

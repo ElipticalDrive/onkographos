@@ -3,170 +3,187 @@
 Also called: Aspect Ratio Optimization Partitioning, Recursive CDF Partitioning
 
 ## Overview
-Spatial Partitioning for Distributed NeRF is a method to divide 3D space into non-overlapping tiles for distributed training, optimizing for cubic aspect ratios to balance computational load across multiple GPUs [S1]. Unlike Block-NeRF, which partitions based on training camera locations, this method partitions space directly using a Probability Density Function (PDF) derived from scene geometry, allowing for finer bounding boxes in regions with higher content density [S1].
+This method partitions 3D space into non-overlapping tiles to enable distributed NeRF training across multiple GPUs [S1]. It solves the problem of imbalanced workload distribution, which is a primary bottleneck in multi-GPU systems, by ensuring each partition contains a similar amount of spatial content [S1]. Unlike Block-NeRF, which partitions based on training camera positions, this method partitions space directly using a Probability Density Function (PDF) derived from scene geometry, allowing for finer bounding boxes in regions with more content or frequent capture [S1].
 
 ## How it works
-**Inputs:**
-*   A set of 3D points representing the scene geometry. This is obtained either from Structure from Motion (SfM) sparse points or by discretizing training rays into samples [S1].
-*   The number of recursive splitting iterations $n$, resulting in $2^n$ partitions [S1].
-
-**Outputs:**
-*   A set of $2^n$ non-overlapping axis-aligned bounding boxes (tiles) that partition the scene space [S1].
+**Inputs and Outputs:**
+*   **Input:** A set of 3D points representing the scene geometry. This is obtained either from Structure from Motion (SfM) sparse points or by discretizing training rays into samples [S1].
+*   **Output:** A set of $2^n$ non-overlapping axis-aligned bounding boxes (tiles) that partition the scene space, where $n$ is the number of recursive splitting iterations [S1].
 
 **Data Structures:**
-*   **Point Cloud:** A list of 3D coordinates $\mathbf{p}_k = (x_k, y_k, z_k)$ [S1].
-*   **Histogram/Bin:** A 1D array representing the density of points along an axis, used to compute the PDF and CDF [S1].
-*   **Partition Tree:** A binary tree structure where each node represents a bounding box and its children represent the split sub-regions [S1].
+*   **Point Cloud:** A list of 3D coordinates $\mathbf{p}_i = (x_i, y_i, z_i)$.
+*   **Histogram/Bin:** A 1D array representing the distribution of points along a specific axis. The number of bins is not specified in the sources [G].
+*   **CDF Array:** A 1D array storing the cumulative sum of the histogram values, normalized to $[0, 1]$.
 
 **Algorithm Steps:**
+1.  **Generate Point Cloud:** Create a point cloud from SfM data. If SfM data is unavailable (e.g., building captures), discretize training rays into samples to form the point cloud [S1].
+2.  **Construct PDF:** Compute the Probability Density Function (PDF) for the point cloud distribution along each axis ($x, y, z$) [S1].
+3.  **Compute CDF:** Calculate the Cumulative Distribution Function (CDF) along each axis [S1].
+4.  **Identify Candidate Planes:** For each axis, identify candidate splitting planes where the CDF equals 0.5. These planes represent optimal separations that evenly divide the points in that dimension [S1].
+5.  **Select Optimal Plane:** Evaluate the aspect ratio ($AR_i$) of the resulting partitions for each candidate plane. Select the plane (from $x, y,$ or $z$ candidates) that yields partitions with aspect ratios closest to 1 (i.e., most cubic) [S1].
+6.  **Split:** Divide the current space into two sub-spaces using the selected plane.
+7.  **Recursion:** Recursively apply steps 2-6 to each sub-space for $n$ iterations to achieve $2^n$ partitions [S1].
 
-1.  **Generate Point Cloud:**
-    *   If SfM data is available, use the sparse reconstruction points [S1].
-    *   If SfM data is unavailable (e.g., Building capture), discretize training rays into samples to form the point cloud [S1].
-
-2.  **Construct PDF and CDF:**
-    *   For a given axis (x, y, or z), create a histogram of the point cloud coordinates [S1].
-    *   Normalize the histogram to form the Probability Density Function (PDF) [S1].
-    *   Compute the Cumulative Distribution Function (CDF) along that axis [S1].
-
-3.  **Identify Candidate Split Planes:**
-    *   Find the coordinate value $v$ along the axis where the CDF equals 0.5. This plane divides the points into two equal halves [S1].
-
-4.  **Select Optimal Axis and Plane:**
-    *   Repeat steps 2-3 for all three axes (x, y, z) to find candidate split planes [S1].
-    *   For each candidate plane, calculate the aspect ratios (AR) of the resulting two partitions [S1].
-    *   Select the axis and plane that yield partitions with aspect ratios closest to 1 (i.e., most cubic) [S1].
-
-5.  **Recursive Splitting:**
-    *   Split the current partition using the selected plane [S1].
-    *   Recursively apply steps 2-4 to each new sub-partition [S1].
-    *   Repeat for $n$ iterations to achieve $2^n$ final partitions [S1].
+**Formulas:**
+*   **Aspect Ratio ($AR_i$):** The metric used to evaluate partition quality. The sources define $AR_i$ as the aspect ratio for each partition but do not provide the explicit geometric formula (e.g., ratio of longest to shortest side) [S1]. The goal is to minimize the deviation of $AR_i$ from 1.
+*   **CDF Condition:** A candidate plane $P$ along axis $A$ is selected if:
+    $$ \text{CDF}_A(P) = 0.5 $$
+    where $\text{CDF}_A$ is the cumulative distribution function along axis $A$ [S1].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def spatial_partition(points, num_iterations):
     """
-    Recursively partition 3D space into 2^num_iterations cubic tiles.
+    Recursively partition 3D space into 2^num_iterations tiles.
     
     Args:
         points: List of 3D points (x, y, z).
-        num_iterations: Number of recursive splits.
+        num_iterations: Number of recursive splits (results in 2^n tiles).
         
     Returns:
         List of bounding boxes (min_x, min_y, min_z, max_x, max_y, max_z).
     """
-    # Initial bounding box covering all points
-    bounds = compute_bounds(points)
-    partitions = [bounds]
-    
-    for iteration in range(num_iterations):
-        new_partitions = []
-        for partition in partitions:
-            # Extract points within current partition
-            subset = filter_points(points, partition)
-            
-            # Find best split axis and plane
-            best_axis, best_plane = find_best_split(subset, partition)
-            
-            # Split partition
-            left_box, right_box = split_box(partition, best_axis, best_plane)
-            
-            new_partitions.append(left_box)
-            new_partitions.append(right_box)
-        
-        partitions = new_partitions
-        
-    return partitions
+    # Base case: if no more iterations, return the current bounding box
+    if num_iterations == 0:
+        return [compute_bounding_box(points)]
 
-def find_best_split(points, box):
-    """
-    Find the axis and plane that minimizes aspect ratio deviation from 1.
-    """
-    best_score = infinity
+    # Step 1: Compute PDF and CDF for each axis
+    cdfs = {}
+    for axis in ['x', 'y', 'z']:
+        cdfs[axis] = compute_cdf(points, axis)
+
+    # Step 2: Identify candidate planes where CDF == 0.5
+    candidates = {}
+    for axis in ['x', 'y', 'z']:
+        # Find the coordinate value where CDF crosses 0.5
+        # Interpolation may be needed if exact 0.5 is not present
+        candidates[axis] = find_cdf_zero_point(cdfs[axis])
+
+    # Step 3: Select the plane that minimizes aspect ratio deviation from 1
     best_axis = None
     best_plane = None
+    min_aspect_ratio_diff = float('inf')
+
+    current_bbox = compute_bounding_box(points)
     
-    for axis in ['x', 'y', 'z']:
-        # Compute CDF along axis
-        cdf = compute_cdf(points, axis)
+    for axis, plane_val in candidates.items():
+        # Split points into two groups based on the plane
+        left_points, right_points = split_points(points, axis, plane_val)
         
-        # Find plane where CDF is 0.5
-        plane = find_median(cdf)
+        # Compute bounding boxes for the two resulting partitions
+        bbox_left = compute_bounding_box(left_points)
+        bbox_right = compute_bounding_box(right_points)
         
-        # Calculate aspect ratios of resulting sub-boxes
-        left_box = get_sub_box(box, axis, plane, 'min')
-        right_box = get_sub_box(box, axis, plane, 'max')
+        # Calculate aspect ratios for both partitions
+        ar_left = compute_aspect_ratio(bbox_left)
+        ar_right = compute_aspect_ratio(bbox_right)
         
-        ar_left = compute_aspect_ratio(left_box)
-        ar_right = compute_aspect_ratio(right_box)
+        # Measure deviation from cubic (AR = 1)
+        # Note: The specific formula for AR is not given in sources [G]
+        # Assuming AR is max(dimension)/min(dimension) or similar
+        diff_left = abs(ar_left - 1.0)
+        diff_right = abs(ar_right - 1.0)
         
-        # Score: sum of deviations from 1
-        score = abs(ar_left - 1.0) + abs(ar_right - 1.0)
+        # Select the split that results in the most cubic partitions
+        # The source implies choosing the plane yielding partitions whose ARs are closest to 1
+        current_diff = max(diff_left, diff_right)
         
-        if score < best_score:
-            best_score = score
+        if current_diff < min_aspect_ratio_diff:
+            min_aspect_ratio_diff = current_diff
             best_axis = axis
-            best_plane = plane
-            
-    return best_axis, best_plane
+            best_plane = plane_val
+
+    # Step 4: Split the space
+    left_points, right_points = split_points(points, best_axis, best_plane)
+    
+    # Step 5: Recurse
+    left_tiles = spatial_partition(left_points, num_iterations - 1)
+    right_tiles = spatial_partition(right_points, num_iterations - 1)
+    
+    return left_tiles + right_tiles
 
 def compute_cdf(points, axis):
-    """
-    Compute normalized cumulative distribution function for points along an axis.
-    """
-    coords = [p[axis] for p in points]
-    coords.sort()
+    """Compute normalized CDF along a specific axis."""
+    coords = sorted([p[axis] for p in points])
     n = len(coords)
     cdf = []
     for i, coord in enumerate(coords):
         cdf.append((i + 1) / n)
-    return coords, cdf
+    return list(zip(coords, cdf))
 
-def find_median(cdf_coords, cdf_values):
-    """
-    Find the coordinate value where CDF is closest to 0.5.
-    """
-    target = 0.5
-    for i in range(len(cdf_values) - 1):
-        if cdf_values[i] <= target <= cdf_values[i+1]:
-            # Linear interpolation for precision
-            t = (target - cdf_values[i]) / (cdf_values[i+1] - cdf_values[i])
-            return cdf_coords[i] + t * (cdf_coords[i+1] - cdf_coords[i])
-    return cdf_coords[len(cdf_coords)//2]
+def find_cdf_zero_point(cdf_data):
+    """Find the coordinate where CDF is closest to 0.5."""
+    for coord, cdf_val in cdf_data:
+        if cdf_val >= 0.5:
+            return coord
+    return cdf_data[-1][0]
 
-def compute_aspect_ratio(box):
-    """
-    Compute aspect ratio of a bounding box.
-    Defined as max(dimension) / min(dimension).
-    """
-    dx = box.max_x - box.min_x
-    dy = box.max_y - box.min_y
-    dz = box.max_z - box.min_z
-    dims = [dx, dy, dz]
-    return max(dims) / min(dims)
+def compute_bounding_box(points):
+    """Compute min/max for each axis."""
+    if not points:
+        return None
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    zs = [p[2] for p in points]
+    return {
+        'min': (min(xs), min(ys), min(zs)),
+        'max': (max(xs), max(ys), max(zs))
+    }
+
+def compute_aspect_ratio(bbox):
+    """Compute aspect ratio (max dimension / min dimension). [G]"""
+    dims = [
+        bbox['max'][0] - bbox['min'][0],
+        bbox['max'][1] - bbox['min'][1],
+        bbox['max'][2] - bbox['min'][2]
+    ]
+    min_dim = min(dims)
+    if min_dim == 0:
+        return float('inf')
+    return max(dims) / min_dim
+
+def split_points(points, axis, plane_val):
+    """Split points into two lists based on a plane value."""
+    left = []
+    right = []
+    for p in points:
+        if p[axis] < plane_val:
+            left.append(p)
+        else:
+            right.append(p)
+    return left, right
 ```
 
+**Parameters:**
+*   **num_iterations ($n$):** The number of recursive splitting steps. The total number of partitions is $2^n$ [S1]. Typical values are not specified in the sources [G].
+
 **Edge Cases and Pitfalls:**
-*   **Missing SfM Data:** For captures lacking point cloud data (e.g., Building capture), SfM cannot be used. The method must fall back to discretizing training rays into samples to form the PDF [S1].
-*   **Imbalanced Workload:** Despite spatial partitioning, imbalanced workload distribution across GPUs remains a bottleneck, potentially requiring better spatial partitioning algorithms or dynamic load balancing [S1].
+*   **Missing SfM Data:** For captures lacking point cloud data (e.g., building captures), SfM cannot be used. The method falls back to discretizing training rays into samples to form the PDF [S1].
+*   **Imbalanced Workload:** Despite the partitioning strategy, imbalanced workload distribution across GPUs remains a bottleneck, potentially due to variations in scene complexity or rendering time per tile [S1].
 
 ## Subtopics
 
 ### NeRF-XL Spatial Partitioning
-A strategy to partition 3D space into non-overlapping bounding boxes for multi-GPU assignment, aiming to balance compute by ensuring each region contains a similar amount of spatial content [S1]. It generates a point cloud via SfM or ray discretization, constructs a PDF, and recursively partitions space by selecting the axis that results in partitions closest to cubic (minimizing aspect ratio $AR_i$) for $n$ iterations to achieve $2^n$ partitions [S1]. Imbalanced workload distribution across GPUs remains a bottleneck [S1].
+A strategy to partition 3D space into non-overlapping bounding boxes for multi-GPU assignment, aiming to balance compute by ensuring each region contains a similar amount of spatial content [S1]. It generates a point cloud via SfM or ray discretization, constructs a PDF, and recursively partitions space by selecting axes that minimize aspect ratio deviation from 1 [S1]. It is chosen when distributed training of large-scale NeRFs is required to mitigate communication bottlenecks [S1]. Pitfall: Imbalanced workload distribution across GPUs remains a bottleneck [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** The partitioning process involves sorting points and computing CDFs for each axis at each recursion level. With $N$ points and $n$ iterations, the complexity is roughly $O(n \cdot N \log N)$ due to sorting at each step [S1].
-*   **Memory Complexity:** Requires storing the point cloud and the partition tree structure [S1].
-*   **Performance:** Reduces communication costs by over 2× through partition-based volume rendering (tile-based vs. sample-based synchronization) [S1]. However, multi-GPU communication remains the primary bottleneck due to imbalanced workload distribution [S1].
-*   **Strengths:** Provides a level-of-detail property where regions with more content or frequent capture have finer bounding boxes [S1]. Versatile for various captures including drone footage, street capture, and object-centric capture [S1].
-*   **Limitations:** Imbalanced workload distribution across GPUs persists [S1]. SfM data may not be available for all scenes [S1].
+*   **Time Complexity:** Not given in the sources. The recursive splitting process involves computing CDFs and aspect ratios at each step, which scales with the number of points and iterations.
+*   **Memory Complexity:** Not given in the sources. Requires storage for the point cloud and intermediate partition structures.
+*   **Measured Performance:** The method reduces communication costs by over 2× through partition-based volume rendering (tile-based vs. sample-based synchronization) [S1]. However, multi-GPU communication remains the primary bottleneck due to imbalanced workload distribution [S1].
+*   **Strengths:**
+    *   Partitions space directly rather than based on camera positions, allowing for finer bounding boxes in regions with more content or frequent capture (level-of-detail property) [S1].
+    *   Versatile and applicable to various capture types (drone footage, street capture, 360-degree object-centric) [S1].
+    *   Ensures an even distribution of points across tiles [S1].
+*   **Limitations:**
+    *   Imbalanced workload distribution across GPUs persists, limiting scalability [S1].
+    *   Requires either SfM data or ray discretization, which may be computationally expensive or unavailable [S1].
+*   **When to Use:** When training large-scale NeRFs on multiple GPUs and scene geometry is available or can be approximated via ray sampling.
+*   **When Not to Use:** When SfM data is unavailable and ray discretization is too costly, or when workload balance is critical and cannot be addressed by better partitioning algorithms [S1].
 
 ## Background
-Originated in the NeRF-XL paper, which revisited existing approaches of decomposing large-scale scenes into independently trained NeRFs and identified issues impeding effective utilization of additional computational resources (GPUs) [S1]. The method was introduced to efficiently harness multi-GPU setups for large-scale NeRF performance [S1]. It contrasts with Block-NeRF (which partitions based on cameras) and Mega-NeRF (which originally used uniform spatial partitioning) [S1].
+The method was introduced in **NeRF-XL: Scaling NeRFs with Multiple GPUs** [S1]. It addresses limitations in existing approaches like Block-NeRF and Mega-NeRF, which either partition based on cameras or use uniform spatial partitioning, potentially leading to suboptimal resource utilization [S1]. The authors identified that imbalanced workload distribution across GPUs was a significant impediment to effective multi-GPU scaling [S1]. The method is part of the NeRF-XL system, which also includes techniques for background modeling and global composition using parallel prefix scans [S1].
 
 ## Sources
 [S1] NeRF-XL: Scaling NeRFs with Multiple GPUs, https://doi.org/10.1007/978-3-031-73195-2_6, fetched 2026-10-26
