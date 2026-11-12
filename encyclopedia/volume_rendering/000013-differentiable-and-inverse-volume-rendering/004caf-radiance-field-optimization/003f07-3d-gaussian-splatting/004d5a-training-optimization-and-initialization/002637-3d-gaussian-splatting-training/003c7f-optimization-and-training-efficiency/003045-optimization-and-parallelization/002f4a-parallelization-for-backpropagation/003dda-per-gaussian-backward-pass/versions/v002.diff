@@ -1,0 +1,137 @@
+--- v001.md
++++ v002.md
+@@ -4,93 +4,66 @@
+ 
+ ## Overview
+-The Per-Gaussian Backward Pass is a parallelization strategy for the backward pass of 3D Gaussian Splatting that computes gradients by iterating over Gaussians rather than pixels [S1, unofficial]. It solves the high atomic contention and false sharing inherent in standard pixel-parallel backpropagation, where thousands of threads atomically update the same Gaussian parameters [S1, unofficial]. By reducing the number of required atomic operations by a factor equal to the number of pixels in a tile (typically 256 for 16×16 tiles), it significantly accelerates training time at the cost of increased VRAM usage [S1, unofficial].
++The Per-Gaussian Backward Pass is a parallelization strategy for the backward pass of 3D Gaussian Splatting that computes gradients by iterating over Gaussians rather than pixels [S1, unofficial]. It solves the high atomic contention and false sharing inherent in standard pixel-parallel backpropagation [S1, unofficial]. By reducing the number of required atomic operations by a factor equal to the number of pixels in a tile (typically 256 for 16×16 tiles), it significantly accelerates training time at the cost of increased VRAM usage [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: The forward pass state (sorted Gaussians per tile, alpha blending states), scene parameters (Gaussian positions, covariances, colors, opacities), and the loss gradient with respect to the rendered image.
+-- Output: Gradients for all Gaussian parameters (position, scale, rotation, color, opacity).
++- Input: The forward pass state (sorted Gaussians per tile, alpha blending states), scene parameters (Gaussian positions, covariances, colors, opacities), and the loss gradient with respect to the rendered image [G].
++- Output: Gradients for all Gaussian parameters (position, scale, rotation, color, opacity) [G].
+ 
+ **Data Structures:**
+-- **Alpha Blending State Buffer:** During the forward pass, for each non-empty pixel in a tile, the intermediate alpha blending state (transmittance and accumulated color) is stored after every 32nd splat in the tile's Gaussian list [S1, unofficial]. This creates a checkpoint history required to replay the blending process during the backward pass.
++- **Alpha Blending State Buffer:** During the forward pass, for each non-empty pixel in a tile, the intermediate alpha blending state (transmittance and accumulated color) is stored after every 32nd splat in the tile's Gaussian list [S1, unofficial]. This creates a checkpoint history required to replay the blending process during the backward pass [G].
+ - **Tile List:** A list of Gaussians sorted by depth (z-order) for each tile [S1, unofficial].
+ 
+ **Steps:**
+-1. **Forward Pass Checkpointing:** As Gaussians are rasterized into a tile, maintain the alpha blending state for each pixel. Store this state in a buffer after processing every 32nd Gaussian in the tile's sorted list [S1, unofficial]. This value of 32 corresponds to one GPU warp, allowing warp-level parallelism during the backward replay [S1, unofficial].
+-2. **Backward Pass Initialization:** For each tile, identify the Gaussians that contributed to the rendered pixels.
+-3. **Gradient Accumulation via Replay:** Instead of computing gradients pixel-by-pixel, iterate over the Gaussians in the tile. For each Gaussian, retrieve the stored alpha blending states from the checkpoints [S1, unofficial].
+-4. **Warp-Level Replay:** Threads within a warp collaboratively replay the alpha blending process using the stored states to compute the derivative of the loss with respect to the current Gaussian's parameters [S1, unofficial]. This avoids global memory latency stalls associated with atomic operations [S1, unofficial].
++1. **Forward Pass Checkpointing:** As Gaussians are rasterized into a tile, maintain the alpha blending state for each pixel. Store this state in a buffer after processing every 32nd Gaussian in the tile's sorted list [S1, unofficial].
++2. **Backward Pass Initialization:** For each tile, identify the Gaussians that contributed to the rendered pixels [G].
++3. **Gradient Accumulation via Replay:** Instead of computing gradients pixel-by-pixel, iterate over the Gaussians in the tile [G].
++4. **Warp-Level Replay:** Threads within a warp collaboratively replay the alpha blending process using the stored states to compute the derivative of the loss with respect to the current Gaussian's parameters [G].
+ 5. **Shared Memory Optimization:** To mitigate the increased VRAM usage from storing blending states, exploit shared memory to cache frequently accessed data and reduce global memory allocations [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def per_gaussian_backward(tile_gaussians, tile_pixels, loss_grad):
++def per_gaussian_backward(tile_gaussians, tile_pixels, loss_grad, blending_states, checkpoint_interval=32):
+     """
+     tile_gaussians: List of Gaussian objects sorted by depth for the tile.
+     tile_pixels: List of pixel coordinates in the tile.
+     loss_grad: Gradient of loss w.r.t. rendered image for these pixels.
++    blending_states: Dict mapping pixel p to a list of (transmittance, accumulated_color) tuples stored every checkpoint_interval Gaussians.
++    checkpoint_interval: Number of Gaussians between stored states (typically 32) [S1, unofficial].
+     """
+-    # Step 1: Retrieve stored alpha blending states from forward pass
+-    # These are stored after every 32nd splat (warp size)
+-    blending_states = get_checkpointed_states(tile_gaussians)
+-    
+-    gradients = {}
+-    
+-    # Step 2: Iterate over Gaussians in the tile
+-    for i, gaussian in enumerate(tile_gaussians):
+-        grad = compute_gaussian_gradient(gaussian, blending_states, loss_grad)
+-        gradients[gaussian.id] = grad
+-        
++    # Initialize gradient accumulators for each Gaussian
++    gradients = {g.id: {'pos': 0.0, 'scale': 0.0, 'rot': 0.0, 'color': 0.0, 'opacity': 0.0} for g in tile_gaussians}
++
++    # Iterate over Gaussians in the tile to accumulate gradients
++    for i, g in enumerate(tile_gaussians):
++        grad_accum = {'pos': 0.0, 'scale': 0.0, 'rot': 0.0, 'color': 0.0, 'opacity': 0.0}
++        for p in g.projected_pixels:
++            # Retrieve the most recent checkpointed state for this pixel
++            state_idx = min(len(blending_states[p]) - 1, i // checkpoint_interval)
++            T_prev, C_acc = blending_states[p][state_idx]
++
++            # Compute Gaussian contribution to the pixel
++            alpha = g.compute_alpha(p)
++            color = g.compute_color(p)
++
++            # Standard differentiable alpha blending gradient computation [G]
++            dL_dI = loss_grad[p]
++            d_alpha = T_prev * dL_dI - C_acc * dL_dI
++            d_color = alpha * T_prev * dL_dI
++            d_T = alpha * dL_dI
++
++            # Accumulate gradients for Gaussian parameters [G]
++            grad_accum['opacity'] += d_alpha * g.d_alpha_d_opacity(p)
++            grad_accum['color'] += d_color * g.d_color_d_color(p)
++            grad_accum['pos'] += d_alpha * g.d_alpha_d_pos(p) + d_T * g.d_T_d_pos(p)
++            grad_accum['scale'] += d_alpha * g.d_alpha_d_scale(p) + d_T * g.d_T_d_scale(p)
++            grad_accum['rot'] += d_alpha * g.d_alpha_d_rot(p) + d_T * g.d_T_d_rot(p)
++
++        gradients[g.id] = grad_accum
+     return gradients
+-
+-def compute_gaussian_gradient(gaussian, blending_states, loss_grad):
+-    """
+-    Replays alpha blending for the specific Gaussian using checkpoints
+-    to compute its gradient without atomic contention.
+-    """
+-    # Find relevant checkpoints for this Gaussian's depth range
+-    relevant_states = get_relevant_checkpoints(gaussian, blending_states)
+-    
+-    # Initialize gradient accumulator
+-    grad_pos = zeros(3)
+-    grad_scale = zeros(3)
+-    grad_rot = zeros(4)
+-    grad_color = zeros(3)
+-    grad_opacity = 0.0
+-    
+-    # Replay blending process for affected pixels
+-    for pixel in gaussian.projected_pixels:
+-        # Get transmittance and accumulated color from checkpoints
+-        T_prev, C_acc = get_state_at_pixel(pixel, relevant_states)
+-        
+-        # Compute contribution of this Gaussian to the pixel
+-        alpha = gaussian.compute_alpha(pixel)
+-        color = gaussian.compute_color(pixel)
+-        
+-        # Derivative of pixel color w.r.t Gaussian parameters
+-        # dL/dG = dL/dI * dI/dG
+-        # dI/dG involves alpha, T_prev, and color
+-        dL_dI = loss_grad[pixel]
+-        
+-        # Compute partial derivatives
+-        # ... (standard differentiable rendering chain rules) ...
+-        
+-        # Accumulate gradients
+-        grad_pos += ...
+-        grad_scale += ...
+-        grad_rot += ...
+-        grad_color += ...
+-        grad_opacity += ...
+-        
+-    return {
+-        'pos': grad_pos,
+-        'scale': grad_scale,
+-        'rot': grad_rot,
+-        'color': grad_color,
+-        'opacity': grad_opacity
+-    }
+ ```
+ 
+ **Parameters:**
+-- **Checkpoint Interval:** 32 Gaussians (one warp) [S1, unofficial].
++- **Checkpoint Interval:** 32 Gaussians [S1, unofficial].
+ - **Tile Size:** Typically 16×16 pixels (256 pixels) [S1, unofficial].
+ 

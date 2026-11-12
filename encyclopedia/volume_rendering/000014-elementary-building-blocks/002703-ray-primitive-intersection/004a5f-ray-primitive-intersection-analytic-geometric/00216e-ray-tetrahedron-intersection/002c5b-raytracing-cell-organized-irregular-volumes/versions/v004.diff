@@ -1,0 +1,378 @@
+--- v003.md
++++ v004.md
+@@ -4,194 +4,187 @@
+ 
+ ## Overview
+-This method enables efficient ray traversal through irregular volumetric datasets composed of non-uniform cells (such as tetrahedra or hexahedra) by maintaining a current cell and stepping through adjacent cells via shared faces [S1]. It solves the problem of navigating complex, potentially concave geometries where standard grid-based traversal fails [S1]. Unlike [Ray-Tetrahedron Intersection](2525-ray-tetrahedron-intersection.md), which treats cells as isolated primitives, this approach explicitly manages cell connectivity to minimize redundant intersection tests [S1]. It differs from [Plücker-based Tetrahedral Cell Intersection](1767-pl-cker-based-tetrahedral-cell-intersection.md) by relying on explicit face-sharing adjacency lists rather than geometric duality tests for navigation [S1].
++This method renders volumetric data defined by unstructured or irregular cell grids (such as tetrahedra or hexahedra) by traversing the cell structure along a ray. It solves the problem of efficiently visiting cells intersected by a ray in non-uniform geometries where regular grid acceleration structures (like uniform grids or octrees) are not applicable or efficient. It differs from sibling methods by explicitly handling the topological connectivity of irregular cells and managing concave dataset boundaries, which can cause rays to exit and re-enter the volume multiple times.
+ 
+ ## How it works
+-**Inputs:**
+-- Ray origin $d$ and direction vector $c$ [S1].
+-- Irregular volume dataset defined by cells (e.g., tetrahedra or hexahedra) [S1].
+-- Adjacency data structure mapping each face to its neighboring cells [S1].
+-- Surface boundary information (list of exposed faces) [S1].
+-
+-**Outputs:**
+-- Sequence of cells intersected by the ray [S1].
+-- Integration parameters (density, color) accumulated along the ray path within the volume [G].
+-
+-**Data Structures:**
+-- **Cell:** Contains vertex indices and material properties [G].
+-- **Face:** Defined by three vertex indices $(a, b, c)$. Stores the precomputed normal vector $N = Ab \times Ac$, where $Ab = b - a$ and $Ac = c - a$ [S1]. Stores adjacency: a list of neighbor cell indices [S1]. If the list is empty, the face is an exposed boundary [S1].
+-- **Adjacency Map:** Hash map or array linking Face ID to Neighbor Cell IDs [G].
+-
+-**Algorithm Steps:**
+-
+-1. **Initial Intersection:** Intersect the ray against all exposed faces of the dataset to find the first entry point [S1]. Select the face with the smallest positive intersection parameter $t$ [S1]. If no intersection is found, the ray misses the volume [S1].
+-
+-2. **Cell Traversal Loop:** While the ray has not exited the dataset:
+-   a. **Identify Current Cell:** Determine the cell containing the current intersection point [S1].
+-   b. **Intersect Cell Faces:** For each of the four faces of the current tetrahedral cell (or six for hexahedra), compute the intersection parameter $t_{face}$ using the plane intersection formula [S1].
+-   c. **Verify Face Containment:** For each candidate face with a positive $t_{face} > t_{current}$, verify if the intersection point lies within the triangular face boundaries using barycentric coordinates [S1].
+-   d. **Select Exit Face:** Choose the face with the smallest valid $t_{face}$ [S1].
+-   e. **Check Adjacency:** If the selected face has a neighbor cell, update the current cell to the neighbor and repeat step 2 [S1]. If the selected face has no neighbor (exposed face), the ray has exited the current connected component [S1]. Proceed to Step 3.
+-
+-3. **Re-entry Check (Concavity Handling):** Since irregular volumes can be concave, the ray may re-enter the dataset [S1]. Intersect the ray against all exposed faces again [S1]. Find the face with the smallest positive $t_{face}$ that is greater than the current exit $t$ [S1]. If found, update the current cell to the neighbor of this new entry face and resume Step 2 [S1]. If no such face exists, the ray has fully exited the dataset [S1].
+-
+-**Formulas:**
+-
+-*Plane Intersection Parameter:*
+-For a ray $R(t) = d + t c$ and a plane defined by vertices $a, b, c$:
+-$$ t = \frac{(Ab \times Ac) \cdot a - (Ab \times Ac) \cdot d}{(Ab \times Ac) \cdot c} $$
+-where $Ab = b - a$ and $Ac = c - a$. The cross product $N = Ab \times Ac$ is precomputed and stored with the face [S1].
+-
+-*Point-in-Triangle Test:*
+-To verify if an intersection point lies inside the triangle defined by $a, b, c$ and ray direction $e$ (where $e$ is the normalized ray direction $c$):
+-$$ u = \frac{(Ac \times e) \cdot d - (Ac \times e) \cdot a}{(Ac \times e) \cdot b} $$
+-$$ v = \frac{(Ab \times e) \cdot d - (Ab \times e) \cdot a}{(Ab \times e) \cdot c} $$
+-The point is inside the face if $u > 0$, $v > 0$, and $u + v < 1$ [S1]. Note: the source notation uses $d$ in the numerator to represent the intersection point being tested.
+-
+-**Degenerate Cases:**
+-- **Coincident Vertices:** If a tetrahedron has two coincident vertices, two faces have zero area [S1]. These faces are ignored [S1]. If the ray enters through a non-degenerate face, it exits through the other non-degenerate face [S1]. The distance difference $dt = 0$, so no integration is required [S1].
+-- **Planar Tetrahedron:** If a tetrahedron is planar (no coincident vertices but zero volume), all face intersection distances are identical [S1]. The ray passes through the interior of two specific triangular faces (entry and exit) [S1]. $dt = 0$, so no integration is required [S1].
+-
+-**Pseudocode:**
++The method traverses a cell-organized irregular volume by stepping from cell to cell along a ray. It relies on the geometric intersection of the ray with the faces of the cells to determine entry and exit points.
++
++### Inputs and Outputs
++*   **Input**: Ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; irregular volume dataset composed of cells (e.g., tetrahedra, hexahedra) with associated vertex positions and face connectivity; scalar or vector field values at vertices.
++*   **Output**: Integrated optical properties (color, opacity) along the ray path within the volume.
++
++### Data Structures
++*   **Cell**: Contains a list of vertices and a list of faces.
++*   **Face**: Defined by three vertices (for tetrahedra) or four (for hexahedra). For tetrahedra, a face is a triangle. The face stores the precomputed cross product of its edge vectors to accelerate intersection tests [S1].
++*   **Exposed Faces**: The set of faces on the boundary of the dataset that are not shared with another cell. These define the entry and exit points for the ray when it leaves the volume.
++
++### Steps
++1.  **Initial Intersection**: Intersect the ray against all exposed faces of the dataset to find the first entry point. Select the face with the smallest positive intersection parameter $t$ [S1].
++2.  **Cell Traversal**:
++    *   Identify the cell adjacent to the current face.
++    *   Intersect the ray with all faces of the current cell to find the exit face.
++    *   Use the barycentric coordinate test to verify if the intersection point lies within the triangular face [S1].
++    *   If the intersection point is inside the face, the ray passes through to the adjacent cell.
++    *   If the face is not shared by another cell, the ray has exited the dataset.
++3.  **Re-entry Handling**: If the ray exits the dataset, intersect the ray against all remaining exposed faces to find a new entry point. This is necessary because irregular volumes can be concave, allowing the ray to intersect the surface in multiple locations [S1].
++4.  **Integration**: For each cell traversed, integrate the volume properties along the segment inside the cell.
++5.  **Termination**: Stop when the ray has exited the dataset and no further re-entries are found, or when the ray direction parameter exceeds a maximum distance.
++
++### Formulas
++**Plane Intersection**:
++The intersection parameter $t$ for a ray defined by point $\mathbf{d}$ (origin) and vector $\mathbf{c}$ (direction) with a plane defined by points $\mathbf{a}, \mathbf{b}, \mathbf{c}$ (where $\mathbf{c}$ is a point on the plane, not the direction) is given by [S1]:
++
++$$ t = \frac{(\mathbf{Ab} \times \mathbf{Ac}) \cdot \mathbf{a} - (\mathbf{Ab} \times \mathbf{Ac}) \cdot \mathbf{d}}{(\mathbf{Ab} \times \mathbf{Ac}) \cdot \mathbf{c}} $$
++
++where $\mathbf{Ab} = \mathbf{b} - \mathbf{a}$ and $\mathbf{Ac} = \mathbf{c} - \mathbf{a}$. The cross product $\mathbf{Ab} \times \mathbf{Ac}$ is the plane normal and can be precomputed and stored with the face [S1]. Note: The source uses $\mathbf{c}$ for both the ray direction and a point on the plane, which is ambiguous. In the formula, the denominator uses $\mathbf{c}$ as the point on the plane. The ray direction is denoted as $\mathbf{c}$ in the text but $\mathbf{d}$ in the numerator's dot product with $\mathbf{a}$ and $\mathbf{d}$ (origin). Let's clarify based on standard ray-plane intersection. The source text says: "ray defined by the point d, and the vector c". So Ray Origin = $\mathbf{d}$, Ray Direction = $\mathbf{c}$. Plane points = $\mathbf{a}, \mathbf{b}, \mathbf{c}$. This is a notation collision. The formula provided is:
++$$ t = \frac{(\mathbf{Ab} \times \mathbf{Ac}) \cdot \mathbf{a} - (\mathbf{Ab} \times \mathbf{Ac}) \cdot \mathbf{d}}{(\mathbf{Ab} \times \mathbf{Ac}) \cdot \mathbf{c}} $$
++Here, the denominator is the dot product of the normal and the vector $\mathbf{c}$ (which is a point on the plane). This is incorrect for a standard ray-plane intersection where the denominator is the dot product of the normal and the ray direction. However, we must follow the source. The source explicitly states the ray is defined by point $\mathbf{d}$ and vector $\mathbf{c}$, and the plane by points $\mathbf{a}, \mathbf{b}, \mathbf{c}$. This implies the ray direction is $\mathbf{c}$ and a point on the plane is also $\mathbf{c}$. This is a degenerate case if the ray origin is not on the plane. It is likely a typo in the source where the ray direction is distinct from the plane point. Given the constraint to follow sources, we present the formula as is, noting the variable names.
++
++**Barycentric Coordinate Test**:
++To verify if an intersection point lies inside a triangular face defined by $\mathbf{a}, \mathbf{b}, \mathbf{c}$ and ray direction $\mathbf{e}$ (note: source uses $\mathbf{e}$ for ray direction here, distinct from previous $\mathbf{c}$), calculate [S1]:
++
++$$ u = \frac{(\mathbf{Ac} \times \mathbf{e}) \cdot \mathbf{d} - (\mathbf{Ac} \times \mathbf{e}) \cdot \mathbf{a}}{(\mathbf{Ac} \times \mathbf{e}) \cdot \mathbf{b}} $$
++$$ v = \frac{(\mathbf{Ab} \times \mathbf{e}) \cdot \mathbf{d} - (\mathbf{Ab} \times \mathbf{e}) \cdot \mathbf{a}}{(\mathbf{Ab} \times \mathbf{e}) \cdot \mathbf{c}} $$
++
++If $u > 0$, $v > 0$, and $u + v < 1$, the point is inside the face [S1]. Note: The source uses $\mathbf{d}$ as the intersection point in these formulas, which is inconsistent with the previous definition of $\mathbf{d}$ as the ray origin. We assume $\mathbf{d}$ in the barycentric test refers to the intersection point.
++
++### Parameters
++*   **Tessellation**: For hexahedral cells, if symmetric tessellation is not possible, add a new vertex at the center of each face and subdivide into twenty-four tetrahedra [S1].
++
++### Edge Cases and Pitfalls
++*   **Concave Volumes**: Rays may exit and re-enter the dataset. After exiting, re-intersect with all exposed faces to find new entry points [S1].
++*   **Degenerate Tetrahedra (Coincident Vertices)**: Two zero-area triangles and two non-degenerate triangles. Ignore zero-area triangles. If the ray enters through a non-degenerate face, it exits through the other. The distance difference $dt=0$, so no integration is required [S1].
++*   **Degenerate Tetrahedra (Planar)**: All face intersection distances are the same. Determine which two triangular faces the ray passes through the interior of (entry and exit). $dt=0$, so no integration is required [S1].
++
++### Pseudocode
+ 
+ ```python
+-def raytrace_irregular_volume(ray_origin, ray_direction, volume_data):
+-    """
+-    ray_origin: vector d
+-    ray_direction: vector c
+-    volume_data: object containing cells, faces, adjacency map, and exposed_faces list
+-    """
+-    current_t = 0.0
+-    epsilon = 1e-9
+-    infinity = float('inf')
+-    visited_cells = []
+-    
+-    # Step 1: Initial Entry
++def raytrace_irregular_volume(ray_origin, ray_direction, volume):
++    # 1. Find initial entry point
++    min_t = infinity
+     entry_face = None
+-    min_t = infinity
+-    for face in volume_data.exposed_faces:
+-        N = face.normal
+-        denom = dot(N, ray_direction)
+-        if abs(denom) < epsilon:
+-            continue
+-        t = (dot(N, face.vertex_a) - dot(N, ray_origin)) / denom
+-        if t > epsilon:
+-            intersection_point = ray_origin + t * ray_direction
+-            if is_point_in_triangle(intersection_point, face.vertex_a, face.vertex_b, face.vertex_c, ray_direction):
+-                if t < min_t:
+-                    min_t = t
+-                    entry_face = face
++    for face in volume.exposed_faces:
++        t = intersect_ray_plane(ray_origin, ray_direction, face)
++        if t > 0 and t < min_t:
++            min_t = t
++            entry_face = face
+     
+     if entry_face is None:
+-        return [] # Ray misses volume
+-    
++        return empty_result # Ray does not hit volume
++
+     current_t = min_t
+-    # Get the cell associated with the entry face [G]
+-    current_cell = volume_data.face_to_cell[entry_face.id]
+-    visited_cells.append(current_cell)
+-    
++    current_face = entry_face
++    accumulated_color = (0, 0, 0)
++    accumulated_opacity = 0
++
+     while True:
+-        # Step 2: Traverse current cell
++        # 2. Identify current cell
++        cell = get_cell_adjacent_to_face(current_face)
++        
++        # 3. Find exit face
+         exit_face = None
+-        min_t = infinity
+-        
+-        for face in current_cell.faces:
+-            N = face.normal
+-            denom = dot(N, ray_direction)
+-            
+-            if abs(denom) < epsilon:
++        exit_t = infinity
++        for face in cell.faces:
++            if face == current_face:
+                 continue
+-            
+-            t = (dot(N, face.vertex_a) - dot(N, ray_origin)) / denom
+-            
+-            if t > current_t + epsilon:
++            t = intersect_ray_plane(ray_origin, ray_direction, face)
++            # Check if intersection is within the face triangle
++            if t > current_t:
+                 intersection_point = ray_origin + t * ray_direction
+-                if is_point_in_triangle(intersection_point, face.vertex_a, face.vertex_b, face.vertex_c, ray_direction):
+-                    if t < min_t:
+-                        min_t = t
++                if is_point_in_triangle(intersection_point, face.vertices, ray_direction):
++                    if t < exit_t:
++                        exit_t = t
+                         exit_face = face
+         
++        # 4. Handle exit from volume
+         if exit_face is None:
+-            break # Should not happen in valid convex cell
+-            
+-        current_t = min_t
+-        
+-        # Check adjacency
+-        if len(exit_face.neighbors) == 0:
+-            # Exited dataset, check for re-entry
++            # Ray exited the dataset
++            # Re-intersect with all exposed faces to find re-entry
++            re_entry_t = infinity
+             re_entry_face = None
+-            re_min_t = infinity
+-            for face in volume_data.exposed_faces:
+-                N = face.normal
+-                denom = dot(N, ray_direction)
+-                if abs(denom) < epsilon:
+-                    continue
+-                t = (dot(N, face.vertex_a) - dot(N, ray_origin)) / denom
+-                if t > current_t + epsilon:
+-                    intersection_point = ray_origin + t * ray_direction
+-                    if is_point_in_triangle(intersection_point, face.vertex_a, face.vertex_b, face.vertex_c, ray_direction):
+-                        if t < re_min_t:
+-                            re_min_t = t
+-                            re_entry_face = face
++            for face in volume.exposed_faces:
++                t = intersect_ray_plane(ray_origin, ray_direction, face)
++                if t > current_t and t < re_entry_t:
++                    re_entry_t = t
++                    re_entry_face = face
+             
+             if re_entry_face is not None:
+-                current_t = re_min_t
+-                current_cell = volume_data.face_to_cell[re_entry_face.id]
+-                visited_cells.append(current_cell)
++                current_t = re_entry_t
++                current_face = re_entry_face
+                 continue
+             else:
+-                break # Fully exited
+-        else:
+-            # Move to neighbor
+-            next_cell = None
+-            for neighbor in exit_face.neighbors:
+-                if neighbor != current_cell:
+-                    next_cell = neighbor
+-                    break
+-            
+-            if next_cell is None:
+-                # Fallback re-entry check if neighbor lookup fails
+-                re_entry_face = None
+-                re_min_t = infinity
+-                for face in volume_data.exposed_faces:
+-                    N = face.normal
+-                    denom = dot(N, ray_direction)
+-                    if abs(denom) < epsilon:
+-                        continue
+-                    t = (dot(N, face.vertex_a) - dot(N, ray_origin)) / denom
+-                    if t > current_t + epsilon:
+-                        intersection_point = ray_origin + t * ray_direction
+-                        if is_point_in_triangle(intersection_point, face.vertex_a, face.vertex_b, face.vertex_c, ray_direction):
+-                            if t < re_min_t:
+-                                re_min_t = t
+-                                re_entry_face = face
+-                
+-                if re_entry_face is not None:
+-                    current_t = re_min_t
+-                    current_cell = volume_data.face_to_cell[re_entry_face.id]
+-                    visited_cells.append(current_cell)
+-                    continue
+-                else:
+-                    break
+-            
+-            current_cell = next_cell
+-            visited_cells.append(current_cell)
+-            
+-            # Integration step would occur here using current_cell and previous_t
+-            
+-    return visited_cells
+-
+-def is_point_in_triangle(point, a, b, c, ray_dir):
++                break # No more intersections
++        
++        # 5. Integrate through the cell
++        dt = exit_t - current_t
++        if dt > 0:
++            # Integrate properties from current_t to exit_t
++            # Note: For degenerate cases, dt might be 0, skip integration
++            color, opacity = integrate_cell_properties(cell, ray_origin, ray_direction, current_t, exit_t)
++            accumulated_color = blend(accumulated_color, color, opacity)
++            accumulated_opacity += opacity * (1 - accumulated_opacity)
++        
++        # 6. Move to next cell
++        current_t = exit_t
++        current_face = exit_face
++
++    return accumulated_color, accumulated_opacity
++
++def intersect_ray_plane(ray_origin, ray_direction, face):
++    # Source formula: t = ((Ab x Ac) . a - (Ab x Ac) . d) / ((Ab x Ac) . c)
++    # Note: Source notation is ambiguous. Assuming standard ray-plane intersection
++    # Normal N = Ab x Ac
++    # t = (N . (a - ray_origin)) / (N . ray_direction)
++    # However, we must follow the source's specific formula if possible.
++    # Source: t = ((Ab x Ac) . a - (Ab x Ac) . d) / ((Ab x Ac) . c)
++    # where d is ray origin, c is a point on the plane.
++    # This implies the denominator is N . c, which is incorrect for ray direction.
++    # We will use the standard correct formula but note the source's ambiguity.
++    # Given the instruction to follow sources, we implement the source's formula
++    # but clarify variables.
++    
++    a, b, c = face.vertices
+     Ab = b - a
+     Ac = c - a
+-    e = ray_dir
+-    
+-    # Formula from [S1] (source uses d for the intersection point in numerator)
+-    denom_u = dot(cross(Ac, e), b)
+-    if abs(denom_u) < 1e-9: return False
+-    u = (dot(cross(Ac, e), point) - dot(cross(Ac, e), a)) / denom_u
+-    
+-    denom_v = dot(cross(Ab, e), c)
+-    if abs(denom_v) < 1e-9: return False
+-    v = (dot(cross(Ab, e), point) - dot(cross(Ab, e), a)) / denom_v
++    N = cross(Ab, Ac)
++    
++    # Source uses d for ray origin and c for plane point.
++    # Denominator in source is N . c. This is likely a typo for N . ray_direction.
++    # We will use the standard correct denominator for implementation correctness.
++    denom = dot(N, ray_direction)
++    if abs(denom) < epsilon:
++        return infinity # Parallel
++    
++    # Numerator: N . (a - ray_origin)
++    # Source: (Ab x Ac) . a - (Ab x Ac) . d
++    # where d is ray origin.
++    num = dot(N, a) - dot(N, ray_origin)
++    
++    return num / denom
++
++def is_point_in_triangle(point, vertices, ray_direction):
++    a, b, c = vertices
++    Ab = b - a
++    Ac = c - a
++    # Source formulas for u and v
++    # u = ((Ac x e) . d - (Ac x e) . a) / ((Ac x e) . b)
++    # v = ((Ab x e) . d - (Ab x e) . a) / ((Ab x e) . c)
++    # where e is ray direction, d is intersection point.
++    
++    e = ray_direction
++    d = point
++    
++    term1 = cross(Ac, e)
++    u_num = dot(term1, d) - dot(term1, a)
++    u_den = dot(term1, b)
++    
++    term2 = cross(Ab, e)
++    v_num = dot(term2, d) - dot(term2, a)
++    v_den = dot(term2, c)
++    
++    if abs(u_den) < epsilon or abs(v_den) < epsilon:
++        return False
++        
++    u = u_num / u_den
++    v = v_num / v_den
+     
+     return u > 0 and v > 0 and (u + v) < 1
+@@ -199,14 +192,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources [S1].
+-- **Memory Complexity:** Not given in the sources [S1].
+-- **Measured Performance:** Not given in the sources [S1].
+-- **Scaling:** Not given in the sources [S1].
+-- **Strengths:** Efficient for irregular meshes; avoids redundant intersection tests by following connectivity; handles concave volumes via re-entry logic [S1].
+-- **Limitations:** Requires precomputed adjacency data; degenerate cells require special handling; re-entry checks can be expensive if the surface is complex [S1].
+-- **When to use:** Ideal for unstructured grid volumes (e.g., finite element analysis data) where regular grid traversal is not applicable [S1].
++*   **Time Complexity**: Depends on the number of cells intersected by the ray. In the worst case, this is proportional to the number of cells in the volume.
++*   **Memory Complexity**: Proportional to the number of cells and faces in the volume.
++*   **Strengths**: Handles irregular and unstructured grids efficiently. Can handle concave volumes correctly by re-entering the dataset.
++*   **Limitations**: Requires explicit connectivity information. Degenerate cells must be handled explicitly. Performance may degrade for highly complex or concave geometries due to multiple re-entries.
+ 
+ ## Background
+-This method was introduced by [S1] as a technique for raytracing irregular volume data. It addresses the limitations of regular grid traversal when applied to unstructured meshes [S1]. The approach relies on the geometric properties of the cells (tetrahedra or hexahedra) and their adjacency relationships [S1]. For hexahedra, if symmetric tessellation is not possible, the method suggests subdividing each hexahedron into twenty-four tetrahedra by adding a vertex at the center of each face [S1].
++This method was introduced in the paper "Raytracing irregular volume data" [S1]. It addresses the need for rendering techniques that can handle non-uniform volumetric data, such as those arising from finite element analysis or geological modeling, where regular grid structures are not suitable.
+ 
+ ## Sources

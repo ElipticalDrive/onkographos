@@ -1,55 +1,60 @@
 # Compressive Gradient Rendering
 
-Also called: CS-Gradient
+Also called: CS-Gradient, Compressed Sensing Gradient, Gradient Recovery via CS, Gradient-based Compressive Rendering
 
 ## Overview
-Compressive Gradient Rendering is a compressive sensing technique that renders discrete gradient components instead of pixel values to exploit sparsity in the Fourier domain, then reconstructs the image using a Poisson solver [S1, unofficial]. It differs from standard volume rendering by optimizing for gradient coefficients in the frequency domain rather than direct pixel intensities, allowing for reconstruction from fewer samples than the Nyquist rate [S1, unofficial].
+Compressive Gradient Rendering is a compressive volume rendering method that recovers high-quality images from sparse pixel samples by exploiting the sparsity of image gradients in the Discrete Fourier Transform (DFT) domain [S1][S2, unofficial]. Unlike sibling methods such as [CS-Wavelet](1915-compressive-volume-rendering-recovery-methods.md) which suffer from coherence issues with random sampling, this approach renders discrete gradient components ($x_1, x_2$) instead of pixel values, solving an $l_1$-minimization problem to recover the gradient's DFT, and finally reconstructing the image using a Poisson solver [S1][S2, unofficial]. It is distinguished by its use of the Fourier basis, which is inherently incoherent with point sampling, allowing for robust recovery when the fraction of missing pixels is moderate, though performance deteriorates significantly when missing pixels are high [S1].
 
 ## How it works
 **Inputs:**
-- A set of $m$ random pixel locations defined by a sampling matrix $\mathbf{S}$.
-- A volume scene to render.
-- A pixel reconstruction kernel (e.g., bilinear B-spline or Mitchell-Netravali cubic kernel) [S1, unofficial].
-- A noise tolerance parameter $\epsilon$ [S1, unofficial].
+- A set of $m$ sampled pixel locations $\Omega$ in an image of size $N \times N$ (where $m \ll N^2$).
+- The measured horizontal gradient values $y_1$ at these locations.
+- The measured vertical gradient values $y_2$ at these locations.
+- A reconstruction kernel basis (e.g., bilinear B-spline or Mitchell-Netravali cubic) [S1][S2, unofficial].
 
 **Outputs:**
-- The reconstructed image $\mathbf{x}$.
+- The reconstructed image $\mathbf{x}$ of size $N \times N$.
 
 **Data Structures:**
-- $\mathbf{y}_1$: An $m \times 1$ column vector containing the measured horizontal gradient components at the $m$ sampled locations.
-- $\mathbf{y}_2$: An $m \times 1$ column vector containing the measured vertical gradient components at the $m$ sampled locations.
-- $\hat{\mathbf{x}}_1$: The 2D Discrete Fourier Transform (DFT) of the horizontal gradient component.
-- $\hat{\mathbf{x}}_2$: The 2D DFT of the vertical gradient component.
-- $\mathbf{F}^{-1}$: The inverse 2D DFT matrix.
+- $\mathbf{S}$: The sensing matrix of size $m \times N^2$. It selects the $m$ sampled locations. In the context of the DFT formulation, it acts as a subsampling operator.
+- $\mathbf{F}^{-1}$: The inverse 2D Discrete Fourier Transform (DFT) matrix of size $N^2 \times N^2$.
+- $\hat{\mathbf{x}}_1, \hat{\mathbf{x}}_2$: The 2D DFT coefficients of the horizontal and vertical gradient components, respectively. These are vectors of size $N^2 \times 1$.
+- $\mathbf{y}_1, \mathbf{y}_2$: Measured gradient vectors of size $m \times 1$.
+
+**Parameters:**
+- $\epsilon$: Tolerance for the $l_1$-minimization solver. A typical value is $10^{-2}$, providing a tradeoff between recovery quality and runtime [S1][S2, unofficial].
+- Kernel type: Bilinear B-spline or Mitchell-Netravali cubic [S1][S2, unofficial].
 
 **Steps:**
 
-1. **Render Horizontal Gradient Component ($x_1$):**
-   Compute the horizontal gradient measurements $\mathbf{y}_1$. This is achieved by weighting incoming rays with the derivative of the pixel reconstruction kernel (e.g., the derivative of a bilinear B-spline or Mitchell-Netravali cubic kernel) [S1, unofficial]. Alternatively, one can use a box filter for rendering and apply a finite differencing scheme to obtain the gradient [S1, unofficial]. The sensing mechanism is formulated as:
-   $$
-   \mathbf{y}_1 = \mathbf{S}\mathbf{F}^{-1}\hat{\mathbf{x}}_1
-   $$
-   where $\mathbf{y}_1$ is the measured gradient vector, $\mathbf{S}$ is the sampling matrix, $\mathbf{F}^{-1}$ is the inverse 2D DFT matrix, and $\hat{\mathbf{x}}_1$ is the 2D DFT of the horizontal gradient [S1, unofficial].
+1.  **Gradient Rendering:**
+    Render the horizontal gradient component $x_1$ and vertical gradient component $x_2$ from the volume data. This is achieved by differentiating the pixel reconstruction kernel used during ray casting.
+    -   *Method A (Kernel Differentiation):* Instead of weighting incoming rays with the standard pixel reconstruction filter $K(u)$, weight them with the derivative of the kernel $K'(u)$ [S1][S2, unofficial].
+    -   *Method B (Finite Differencing):* Render the image using a box filter and apply a finite differencing scheme to the resulting pixel values to obtain gradients [S1][S2, unofficial].
+    Let the resulting rendered gradient images be $x_1$ and $x_2$.
 
-2. **Recover Horizontal Gradient DFT ($\hat{\mathbf{x}}_1$):**
-   Solve the $l_1$ minimization problem to approximate $\hat{\mathbf{x}}_1$:
-   $$
-   \min \|\hat{\mathbf{x}}_1\|_1 \quad \text{subject to} \quad \|\mathbf{S}\mathbf{F}^{-1}\hat{\mathbf{x}}_1 - \mathbf{y}_1\|_2 \leq \epsilon
-   $$
-   This step exploits the sparsity of the gradient in the Fourier domain [S1, unofficial].
+2.  **Sampling Gradients:**
+    Measure the horizontal gradient values at the $m$ sampled locations $\Omega$ to form the vector $\mathbf{y}_1$. Similarly, measure the vertical gradient values to form $\mathbf{y}_2$ [S1][S2, unofficial].
 
-3. **Render Vertical Gradient Component ($x_2$):**
-   Compute the vertical gradient measurements $\mathbf{y}_2$ using the same method as step 1 (weighting by the kernel derivative or finite differencing after box filtering) [S1, unofficial].
+3.  **Formulate Sensing Model:**
+    The relationship between the measured gradients and the DFT of the gradients is given by:
+    $$ \mathbf{y}_1 = \mathbf{S}\mathbf{F}^{-1}\hat{\mathbf{x}}_1 $$
+    $$ \mathbf{y}_2 = \mathbf{S}\mathbf{F}^{-1}\hat{\mathbf{x}}_2 $$
+    where $\mathbf{S}$ is the sampling matrix (subsample operator), $\mathbf{F}^{-1}$ is the inverse 2D DFT matrix, and $\hat{\mathbf{x}}_1, \hat{\mathbf{x}}_2$ are the DFTs of the horizontal and vertical gradients [S1][S2, unofficial]. Note that $\mathbf{A} = \mathbf{S}\mathbf{F}^{-1}$ is a partial Fourier matrix, which possesses the Restricted Isometry Property (RIC) and low coherence with point sampling [S1].
 
-4. **Recover Vertical Gradient DFT ($\hat{\mathbf{x}}_2$):**
-   Solve the analogous $l_1$ minimization problem for the vertical component:
-   $$
-   \min \|\hat{\mathbf{x}}_2\|_1 \quad \text{subject to} \quad \|\mathbf{S}\mathbf{F}^{-1}\hat{\mathbf{x}}_2 - \mathbf{y}_2\|_2 \leq \epsilon
-   $$
-   [S1, unofficial].
+4.  **Recover Horizontal Gradient DFT ($\hat{\mathbf{x}}_1$):**
+    Solve the $l_1$-minimization problem to find the sparsest approximation of the horizontal gradient's DFT:
+    $$ \min \|\hat{\mathbf{x}}_1\|_1 \quad \text{subject to} \quad \|\mathbf{S}\mathbf{F}^{-1}\hat{\mathbf{x}}_1 - \mathbf{y}_1\|_2 \leq \epsilon $$
+    This problem is typically solved using an iterative solver such as NESTA [S1][S2, unofficial].
 
-5. **Reconstruct Image ($\mathbf{x}$):**
-   Recover the pixel values from the gradient components by applying a Poisson solver with Dirichlet boundary conditions to the divergence of the gradient [S1, unofficial].
+5.  **Recover Vertical Gradient DFT ($\hat{\mathbf{x}}_2$):**
+    Solve the analogous $l_1$-minimization problem for the vertical gradient:
+    $$ \min \|\hat{\mathbf{x}}_2\|_1 \quad \text{subject to} \quad \|\mathbf{S}\mathbf{F}^{-1}\hat{\mathbf{x}}_2 - \mathbf{y}_2\|_2 \leq \epsilon $$
+
+6.  **Reconstruct Image via Poisson Solver:**
+    Recover the pixel values $\mathbf{x}$ from the gradient components $\hat{\mathbf{x}}_1$ and $\hat{\mathbf{x}}_2$.
+    -   Compute the inverse DFT of $\hat{\mathbf{x}}_1$ and $\hat{\mathbf{x}}_2$ to obtain the spatial gradient fields $g_x$ and $g_y$.
+    -   Apply a Poisson solver with Dirichlet boundary conditions to the divergence of the gradient field $\nabla \cdot \mathbf{g} = \frac{\partial g_x}{\partial x} + \frac{\partial g_y}{\partial y}$ to solve for $\mathbf{x}$ [S1][S2, unofficial]. The approach follows Pérez et al. [PGB03].
 
 **Pseudocode:**
 
@@ -57,248 +62,224 @@ Compressive Gradient Rendering is a compressive sensing technique that renders d
 
 ```python
 import numpy as np
-from scipy.fft import fft2, ifft2, fftshift, ifftshift
+from scipy.fft import fft2, ifft2, ifftshift
 from scipy.sparse.linalg import spsolve
-from scipy.sparse import diags, kron
+from scipy.sparse import diags, kron, eye
 
-def compressive_gradient_rendering(volume, sampling_indices, epsilon, kernel_derivative_func):
+def compressive_gradient_rendering(volume_data, sampled_indices, m, epsilon=1e-2):
     """
-    Reconstructs an image from compressive gradient measurements.
+    Reconstructs an image from sampled gradient measurements using Compressive Gradient Rendering.
     
     Args:
-        volume: 3D array representing the volume density.
-        sampling_indices: List of (row, col) tuples for the m sampled pixels.
-        epsilon: Noise tolerance for the l1 minimization constraint.
-        kernel_derivative_func: Function that returns the derivative of the 
-                                reconstruction kernel at a given offset.
-    
+        volume_data: 3D volume data (not directly used in reconstruction step, 
+                     assumed gradients y1, y2 are pre-rendered).
+        sampled_indices: Array of shape (m, 2) containing (row, col) indices of sampled pixels.
+        m: Number of samples.
+        epsilon: Tolerance for l1 minimization.
+        
     Returns:
-        x: Reconstructed 2D image.
+        x: Reconstructed image of shape (N, N).
     """
-    # 1. Render Horizontal Gradient Measurements (y1)
-    # Weight incoming rays with the derivative of the pixel reconstruction kernel.
-    # For a specific sample location (r, c), the gradient is computed by integrating
-    # the volume along the ray, weighted by the kernel derivative.
-    # Note: The exact ray marching integration depends on the volume representation.
-    # Here we assume a helper `render_gradient_component` exists that performs
-    # the weighted integration for a specific direction.
-    y1 = np.zeros(len(sampling_indices))
-    y2 = np.zeros(len(sampling_indices))
+    # Assume N is derived from volume_data or known context. 
+    # For the sake of this self-contained example, we assume N is passed or inferred.
+    # In practice, N is the image resolution.
+    N = 256 # Placeholder for image dimension
     
-    for i, (r, c) in enumerate(sampling_indices):
-        # Render horizontal gradient component
-        y1[i] = render_gradient_component(volume, r, c, direction='horizontal', 
-                                          kernel_derivative=kernel_derivative_func)
-        # Render vertical gradient component
-        y2[i] = render_gradient_component(volume, r, c, direction='vertical', 
-                                          kernel_derivative=kernel_derivative_func)
-
-    # 2. Recover DFT of Horizontal Gradient (x_hat_1)
-    # Solve: min ||x_hat_1||_1 s.t. ||S * F^-1 * x_hat_1 - y1||_2 <= epsilon
-    # This is a Compressed Sensing problem. We use an iterative solver (e.g., ISTA or FISTA).
-    # Let A = S * F^-1. We want to solve A * x_hat_1 approx y1.
+    # 1. Render Gradients (Pre-processing step described in text)
+    # Method A: Differentiate kernel during ray casting.
+    # Method B: Render with box filter, then finite difference.
+    # Here we assume y1 and y2 are the measured gradient values at sampled_indices.
+    # y1: horizontal gradient values at sampled locations
+    # y2: vertical gradient values at sampled locations
+    y1 = render_gradient(volume_data, sampled_indices, direction='horizontal')
+    y2 = render_gradient(volume_data, sampled_indices, direction='vertical')
     
-    # Define the forward operator A for horizontal gradient
-    # A is a partial Fourier matrix if sampling locations are random.
-    # We construct the matrix A explicitly for small problems or use an operator for large ones.
-    # For implementation clarity, we assume a solver function `solve_l1_minimization`
-    # that handles the optimization.
+    # 2. Construct Sensing Matrix S
+    # S is a subsampling matrix of shape (m, N*N)
+    # It selects the rows corresponding to sampled_indices
+    flat_indices = sampled_indices[:, 0] * N + sampled_indices[:, 1]
+    S = np.zeros((m, N * N))
+    for i in range(m):
+        S[i, flat_indices[i]] = 1.0
+        
+    # 3. Define Inverse DFT Matrix F_inv
+    # We do not construct the full N^2 x N^2 matrix explicitly for efficiency,
+    # but the operation S @ F_inv @ x_hat is equivalent to:
+    # 1. Compute FFT of x_hat (which is F_inv @ x_hat in frequency domain? No.)
+    # Let's clarify: y = S * F_inv * x_hat.
+    # F_inv is the inverse DFT matrix. 
+    # If x_hat is the DFT coefficients, then F_inv @ x_hat gives the spatial gradient image.
+    # S selects pixels from that spatial image.
+    # So, y = S @ (spatial_gradient).
+    # The optimization variable is x_hat (DFT coefficients).
     
-    x_hat_1 = solve_l1_minimization(y1, sampling_indices, epsilon, is_horizontal=True)
-    x_hat_2 = solve_l1_minimization(y2, sampling_indices, epsilon, is_horizontal=False)
-
-    # 3. Reconstruct Image from Gradients
-    # Apply Poisson solver with Dirichlet boundary conditions to the divergence of the gradient.
-    # Divergence in spatial domain corresponds to multiplication by ik in frequency domain,
-    # but we have gradients in frequency domain.
-    # We need to convert x_hat_1 and x_hat_2 back to spatial gradients, then solve Poisson.
+    # 4. Solve l1 minimization for Horizontal Gradient
+    # min ||x_hat_1||_1 subject to ||S @ F_inv @ x_hat_1 - y1||_2 <= epsilon
     
-    # Inverse DFT to get spatial gradients
-    grad_x = np.real(ifft2(x_hat_1))
-    grad_y = np.real(ifft2(x_hat_2))
+    # We use a simple iterative soft-thresholding algorithm (ISTA) or similar for demonstration.
+    # Note: The source specifies NESTA. We implement a basic proximal gradient step.
     
-    # Divergence of gradient (Laplacian of the image)
-    # div(grad) = d(grad_x)/dx + d(grad_y)/dy
-    # We approximate derivatives using finite differences or spectral methods.
-    # Using spectral method for consistency with DFT approach:
-    # d/dx corresponds to multiplication by i*k_x, d/dy by i*k_y.
+    x_hat_1 = solve_l1_minimization(S, N, y1, epsilon)
+    x_hat_2 = solve_l1_minimization(S, N, y2, epsilon)
     
-    H, W = grad_x.shape
-    kx = np.fft.fftfreq(W) * 2 * np.pi
-    ky = np.fft.fftfreq(H) * 2 * np.pi
-    KX, KY = np.meshgrid(kx, ky)
+    # 5. Reconstruct Image from Gradients
+    # Convert DFT coefficients back to spatial gradients
+    grad_x = np.real(ifft2(x_hat_1.reshape(N, N)))
+    grad_y = np.real(ifft2(x_hat_2.reshape(N, N)))
     
-    # Gradient in frequency domain: G_x = i*k_x * X, G_y = i*k_y * X
-    # We have G_x and G_y (which are grad_x and grad_y in spatial domain, so their DFTs are x_hat_1, x_hat_2)
-    # So X = G_x / (i*k_x) and X = G_y / (i*k_y)
-    # To avoid division by zero at DC component, we use a Poisson solver in spatial domain.
+    # 6. Poisson Solver
+    # Solve div(grad) = Laplacian(x)
+    # We need to compute the divergence of the gradient field.
+    # However, the gradients are derived from the DFT of the *rendered* gradients.
+    # The Poisson solver recovers x such that dx = grad_x and dy = grad_y.
+    # This is equivalent to solving Laplacian(x) = div(grad_field).
+    # But wait, the gradients x1, x2 ARE the derivatives of x.
+    # So we have dx = x1, dy = x2.
+    # The Poisson solver solves for x given dx and dy.
     
-    # Construct Laplacian matrix for Poisson equation: div(grad) = Laplacian(x)
-    # Using 5-point stencil for Laplacian
-    N = H * W
-    main_diag = np.full(N, -4.0)
-    off_diag_1 = np.full(N - 1, 1.0) # horizontal neighbors
-    off_diag_2 = np.full(N - H, 1.0) # vertical neighbors
-    
-    # Remove connections across boundaries
-    for r in range(H):
-        for c in range(1, W):
-            idx = r * W + c
-            off_diag_1[idx - 1] = 0 # Break horizontal link at left boundary
-            
-    # Actually, simpler to build sparse matrix directly
-    rows = []
-    cols = []
-    vals = []
-    
-    for r in range(H):
-        for c in range(W):
-            idx = r * W + c
-            # Center
-            rows.append(idx)
-            cols.append(idx)
-            vals.append(-4.0)
-            
-            # Neighbors
-            if c > 0:
-                rows.append(idx)
-                cols.append(idx - 1)
-                vals.append(1.0)
-            if c < W - 1:
-                rows.append(idx)
-                cols.append(idx + 1)
-                vals.append(1.0)
-            if r > 0:
-                rows.append(idx)
-                cols.append(idx - W)
-                vals.append(1.0)
-            if r < H - 1:
-                rows.append(idx)
-                cols.append(idx + W)
-                vals.append(1.0)
-                
-    A_laplacian = sps.csr_matrix((vals, (rows, cols)), shape=(N, N))
-    
-    # Right hand side: divergence of gradient
-    # div(grad) = d(grad_x)/dx + d(grad_y)/dy
-    # Approximate derivatives using finite differences on the spatial gradients
-    rhs = np.zeros(N)
-    for r in range(H):
-        for c in range(W):
-            idx = r * W + c
-            # d(grad_x)/dx
-            if c > 0 and c < W - 1:
-                rhs[idx] += (grad_x[r, c+1] - grad_x[r, c-1]) / 2.0
-            elif c == 0:
-                rhs[idx] += (grad_x[r, 1] - grad_x[r, 0]) # Forward diff
-            elif c == W - 1:
-                rhs[idx] += (grad_x[r, c] - grad_x[r, c-1]) # Backward diff
-                
-            # d(grad_y)/dy
-            if r > 0 and r < H - 1:
-                rhs[idx] += (grad_y[r+1, c] - grad_y[r-1, c]) / 2.0
-            elif r == 0:
-                rhs[idx] += (grad_y[1, c] - grad_y[0, c])
-            elif r == H - 1:
-                rhs[idx] += (grad_y[r, c] - grad_y[r-1, c])
-                
-    # Solve A * x = rhs
-    # Dirichlet boundary conditions: assume boundary pixels are 0 or known.
-    # For simplicity, we solve for interior points and set boundaries to 0.
-    # This is a simplification [G].
-    
-    interior_mask = np.zeros((H, W), dtype=bool)
-    interior_mask[1:-1, 1:-1] = True
-    interior_indices = np.where(interior_mask)
-    interior_flat_indices = interior_indices[0] * W + interior_indices[1]
-    
-    A_sub = A_laplacian[np.ix_(interior_flat_indices, interior_flat_indices)]
-    rhs_sub = rhs[interior_flat_indices]
-    
-    x_interior = spsolve(A_sub, rhs_sub)
-    
-    x = np.zeros((H, W))
-    x[interior_mask] = x_interior
+    x = poisson_solver(grad_x, grad_y, N)
     
     return x
 
-def solve_l1_minimization(y, sampling_indices, epsilon, is_horizontal):
+def solve_l1_minimization(S, N, y, epsilon):
     """
-    Solves the l1 minimization problem for gradient recovery.
-    min ||x_hat||_1 s.t. ||S * F^-1 * x_hat - y||_2 <= epsilon
+    Solves min ||x_hat||_1 s.t. ||S @ F_inv @ x_hat - y||_2 <= epsilon
+    Using a simplified ISTA approach for demonstration.
     """
-    # This is a compressed sensing problem.
-    # We use a standard solver like ISTA or FISTA.
-    # For brevity, we assume a library function or implementation exists.
-    # Note: The matrix A = S * F^-1 is a partial Fourier matrix.
+    # Initialize x_hat
+    x_hat = np.zeros(N * N)
     
-    # Construct the measurement matrix A
-    # F^-1 is the inverse DFT matrix. S selects rows.
-    # We can compute A * v = S * ifft2(v)
+    # Parameters for ISTA
+    L = 1.0 # Lipschitz constant approximation, needs tuning
+    max_iter = 1000
     
-    # Using a simple ISTA implementation
-    H, W = 256, 256 # Assume fixed size for example, or infer from volume
-    N = H * W
-    
-    # Create sampling mask
-    mask = np.zeros((H, W))
-    for r, c in sampling_indices:
-        mask[r, c] = 1
+    for i in range(max_iter):
+        # Compute spatial gradient from DFT coefficients
+        # F_inv @ x_hat
+        spatial_grad = np.real(ifft2(x_hat.reshape(N, N)))
         
-    # Define the forward operator
-    def forward_op(v):
-        v_img = v.reshape(H, W)
-        v_ifft = ifft2(v_img)
-        v_sampled = v_ifft * mask
-        return v_sampled.flatten()
+        # Compute residual
+        residual = S @ spatial_grad.flatten() - y
         
-    # Define the adjoint operator
-    def adjoint_op(y_vec):
-        y_img = y_vec.reshape(H, W)
-        y_full = y_img / mask # This is dangerous if mask is 0. 
-        # Correct adjoint for S * F^-1 is F^-H * S^H
-        # S^H expands the vector to full size with zeros
-        y_expanded = np.zeros((H, W))
-        y_expanded[sampling_indices] = y_vec
-        # F^-H is the conjugate transpose of F^-1, which is F (forward DFT)
-        y_ifft2 = fft2(y_expanded)
-        return y_ifft2.flatten()
+        # Check constraint (approximate)
+        if np.linalg.norm(residual) <= epsilon:
+            break
+            
+        # Gradient of data fidelity term: (S @ F_inv)^T @ (S @ F_inv @ x_hat - y)
+        # This is complex to compute directly without large matrices.
+        # We use the property that adjoint of S @ F_inv is F @ S^T.
+        # So gradient is F @ S^T @ residual.
         
-    # ISTA Iteration
-    x_hat = np.zeros(N)
-    step_size = 1.0 / (np.linalg.norm(forward_op(np.eye(N)[:, 0]), 2)**2) # Approximate Lipschitz constant
-    
-    for iteration in range(100):
-        residual = forward_op(x_hat) - y
-        grad = adjoint_op(residual)
-        x_hat_new = x_hat - step_size * grad
-        # Soft thresholding
-        threshold = epsilon * step_size # Heuristic, exact threshold depends on formulation
-        x_hat_new = np.sign(x_hat_new) * np.maximum(np.abs(x_hat_new) - threshold, 0)
-        x_hat = x_hat_new
+        # 1. S^T @ residual: maps m-dim residual to N^2-dim spatial gradient error
+        error_spatial = S.T @ residual # Shape (N*N,)
+        
+        # 2. Reshape to 2D and apply FFT (which is F, the forward DFT)
+        error_spatial_2d = error_spatial.reshape(N, N)
+        error_freq = fft2(error_spatial_2d)
+        
+        # 3. Update x_hat
+        x_hat_new = x_hat - (1.0/L) * error_freq
+        
+        # 4. Soft thresholding (proximal operator for l1 norm)
+        # Threshold value lambda. In NESTA, this is adaptive.
+        # For simplicity, we use a fixed small lambda or derive from epsilon.
+        # The source uses NESTA which handles this automatically.
+        # Here we apply a simple soft threshold.
+        lambda_val = epsilon * 0.1 # Heuristic
+        x_hat = np.sign(x_hat_new) * np.maximum(np.abs(x_hat_new) - lambda_val, 0)
         
     return x_hat
+
+def poisson_solver(grad_x, grad_y, N):
+    """
+    Solves for x given horizontal gradient grad_x and vertical gradient grad_y.
+    Uses Dirichlet boundary conditions (x=0 on boundary).
+    """
+    # Compute divergence of the gradient field
+    # div(g) = d(gx)/dx + d(gy)/dy
+    # Using finite differences for the Laplacian system
+    # Laplacian(x) = div(g)
+    
+    # Create divergence source term
+    # Using central differences for interior, forward/backward for boundaries
+    div_g = np.zeros((N, N))
+    
+    # d(gx)/dx
+    div_g[:, 1:-1] += (grad_x[:, 2:] - grad_x[:, :-2]) / 2.0
+    div_g[:, 0] = grad_x[:, 1] - grad_x[:, 0]
+    div_g[:, -1] = grad_x[:, -1] - grad_x[:, -2]
+    
+    # d(gy)/dy
+    div_g[1:-1, :] += (grad_y[2:, :] - grad_y[:-2, :]) / 2.0
+    div_g[0, :] = grad_y[1, :] - grad_y[0, :]
+    div_g[-1, :] = grad_y[-1, :] - grad_y[-2, :]
+    
+    # Solve Laplacian(x) = div_g with Dirichlet BCs (x=0 on boundary)
+    # Discrete Laplacian matrix A
+    # A is sparse, size N^2 x N^2
+    # We use a simple iterative solver or sparse direct solver
+    
+    # Construct Laplacian matrix for 2D grid
+    # Standard 5-point stencil
+    e = np.ones(N)
+    T = diags([-1, 2, -1], [-1, 0, 1], shape=(N, N), format='csr')
+    A = kron(eye(N), T) + kron(T, eye(N))
+    
+    # Flatten div_g
+    b = div_g.flatten()
+    
+    # Apply Dirichlet BCs: x=0 on boundary.
+    # The equations for boundary nodes are removed or modified.
+    # Here we simply solve for interior nodes and set boundary to 0.
+    # Indices of interior nodes
+    interior_indices = []
+    for i in range(1, N-1):
+        for j in range(1, N-1):
+            interior_indices.append(i * N + j)
+            
+    A_interior = A[np.ix_(interior_indices, interior_indices)]
+    b_interior = b[interior_indices]
+    
+    # Solve
+    x_interior = spsolve(A_interior, b_interior)
+    
+    # Reconstruct full image
+    x = np.zeros((N, N))
+    for idx, flat_idx in enumerate(interior_indices):
+        x[flat_idx // N, flat_idx % N] = x_interior[idx]
+        
+    return x
+
+def render_gradient(volume_data, sampled_indices, direction):
+    """
+    Placeholder for the actual volume rendering step.
+    Returns gradient values at sampled_indices.
+    """
+    # Implementation depends on volume renderer.
+    # If using kernel differentiation:
+    # Weight rays with derivative of kernel.
+    # If using finite difference:
+    # Render image with box filter, then compute differences.
+    return np.zeros(len(sampled_indices))
 ```
 
-**Parameters:**
-- $\epsilon$: Noise tolerance. Typical values depend on the noise level of the rendering process. Not given in the sources.
-- Sampling matrix $\mathbf{S}$: Should contain random pixel locations to ensure $\mathbf{A} = \mathbf{S}\mathbf{F}^{-1}$ is a partial Fourier matrix [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-- **Boundary Conditions:** The Poisson solver requires Dirichlet boundary conditions. The choice of boundary values affects the reconstruction [S1, unofficial].
-- **DC Component:** The Fourier transform of the gradient at the DC component (0,0) is zero. This does not affect the gradient recovery but must be handled when reconstructing the image from gradients (the Poisson solver handles this implicitly by solving for the image relative to boundaries) [S1, unofficial].
-- **Precision:** The $l_1$ minimization is sensitive to the choice of solver and parameters. Inaccurate recovery of $\hat{\mathbf{x}}_1$ and $\hat{\mathbf{x}}_2$ will lead to artifacts in the final image [S1, unofficial].
+-   **High Missing Pixel Fraction:** Performance deteriorates quickly when the fraction of missing pixels is high. The method is sensitive to the distribution of pixels and can break down under extreme sparsity [S1].
+-   **Boundary Conditions:** The Poisson solver requires boundary conditions. Dirichlet conditions (typically zero) are used, which may introduce artifacts if the image boundaries are not zero [S1][S2, unofficial].
+-   **Solver Tolerance:** The tolerance $\epsilon$ must be chosen carefully. A value of $10^{-2}$ is recommended as a tradeoff between quality and runtime [S1][S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** The method involves rendering $m$ samples, solving two $l_1$ minimization problems (which are iterative and computationally expensive), and solving a Poisson equation. The complexity is dominated by the $l_1$ minimization, which is typically $O(k \cdot N \log N)$ or worse depending on the solver, where $k$ is the number of iterations and $N$ is the number of pixels [S1, unofficial].
-- **Memory Complexity:** Requires storing the volume, the gradient measurements, and the intermediate Fourier coefficients. The Poisson solver requires a sparse matrix of size $N \times N$.
-- **Strengths:** Exploits sparsity in the gradient domain, allowing for reconstruction from fewer samples than the Nyquist rate. This can lead to significant computational savings in rendering [S1, unofficial].
-- **Limitations:** The $l_1$ minimization is computationally intensive. The method assumes the gradient is sparse in the Fourier domain, which may not hold for all images [S1, unofficial].
-- **When to Use:** Suitable for applications where rendering is expensive and the image is known to be sparse in the gradient domain (e.g., MRI, certain types of volume data) [S1, unofficial].
-- **When Not to Use:** Not suitable for real-time rendering or when the image is not sparse in the gradient domain [S1, unofficial].
+-   **Time Complexity:** Dominated by the $l_1$-minimization solver (e.g., NESTA) and the Poisson solver. The $l_1$ minimization is iterative and scales with the number of samples $m$ and image size $N$. The Poisson solver scales with $N^2$.
+-   **Memory Complexity:** Requires storage for the DFT coefficients ($O(N^2)$) and the sensing matrix operations. The full sensing matrix $\mathbf{S}$ is sparse, but operations involving $\mathbf{F}^{-1}$ are dense in the frequency domain.
+-   **Measured Performance:** The method shows improvement over CS-Wavelet and Sen and Darabi's approach [SD11] in terms of recovery quality for moderate missing pixel fractions [S1].
+-   **Strengths:** Exploits sparsity in the Fourier domain, which is inherently incoherent with point sampling, avoiding the coherence issues of wavelet-based methods [S1]. Gradient components are often sparser in the Fourier domain than the image itself [S1].
+-   **Limitations:** Deteriorates significantly with high percentages of missing pixels [S1]. Requires solving two $l_1$-minimization problems and a Poisson solver, which can be computationally expensive.
+-   **When to Use:** Suitable for compressive volume rendering when the fraction of missing pixels is moderate and high coherence with the sampling basis is a concern.
+-   **When Not to Use:** When the fraction of missing pixels is very high, or when computational resources are limited and iterative solvers are prohibitive.
 
 ## Background
-Compressive Gradient Rendering was introduced in the thesis "Compressive Volume Rendering" [S1, unofficial]. It builds on the principles of Compressive Sensing (CS), which suggests that signals sparse in some domain can be reconstructed from a small number of measurements. The method adapts CS to volume rendering by rendering gradient components instead of pixel values, leveraging the sparsity of gradients in the Fourier domain [S1, unofficial]. The approach is inspired by work in Magnetic Resonance Imaging (MRI) where point measurements in the DFT domain are feasible [S1, unofficial]. The image reconstruction from gradients uses a Poisson solver as described by Pérez et al. [S1, unofficial].
+Compressive Gradient Rendering was introduced as part of the broader field of Compressive Volume Rendering. It extends the idea of Sen and Darabi [SD11] by rendering gradient components instead of the image itself [S1]. The method leverages the Restricted Isometry Property (RIC) of random partial Fourier matrices, which are known to have low coherence with point sampling [S1]. The approach was developed to address coherence issues found in CS-Wavelet methods and to exploit the natural sparsity of gradients in the Fourier domain [S1]. The Poisson solver step follows the approach of Pérez et al. [PGB03]. The method is discussed in the context of tomographic reconstruction as inverse rendering and is a key component of Compressive Volume Rendering Recovery Methods [S1][S2, unofficial].
 
 ## Sources
-[S1] Compressive Volume Rendering, https://doi.org/10.11575/prism/25391, fetched 2026-10-27 (unofficial)
+[S1] Compressive Volume Rendering, https://doi.org/10.1111/cgf.12622, fetched 2026-10-26
+[S2] Compressive Volume Rendering, https://doi.org/10.11575/prism/25391, fetched 2026-10-27 (unofficial)

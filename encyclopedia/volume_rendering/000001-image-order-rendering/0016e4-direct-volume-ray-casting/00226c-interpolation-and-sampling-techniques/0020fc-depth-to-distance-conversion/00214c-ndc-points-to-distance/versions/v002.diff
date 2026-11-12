@@ -1,0 +1,124 @@
+--- v001.md
++++ v002.md
+@@ -1,59 +1,45 @@
+ # NDC Points to Distance
+ 
+-Also called: NDC to Distance, ndc2dist, ndc_pts to dists
++Also called: NDC to Distance, NDC to Distance Conversion, ndc2dist, ndc_pts to dists
+ 
+ ## Overview
+-Computes the Euclidean segment distances between consecutive points sampled in Normalized Device Coordinates (NDC) space along a ray. It solves the problem of converting discrete NDC depth samples into physical distances required for volume rendering integration, specifically handling the perspective projection geometry where uniform NDC steps do not correspond to uniform physical distances. It differs from linear depth-to-distance conversion by accounting for the non-linear nature of NDC space, which is compressed near the near plane and expanded near the far plane.
++Converts sampled Normalized Device Coordinates (NDC) points to segment distances between consecutive samples along a ray, accounting for the cosine of the viewing angle [S1, S2, S3, unofficial]. It operates directly in NDC space, where uniform sampling steps do not correspond to uniform physical distances, unlike linear depth-to-distance methods [S1, S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: `ndc_pts`, a tensor of shape $(N, 3)$ containing $N$ 3D points in NDC space, ordered along the ray from near to far.
+-- Input: `cos_angle`, a scalar or tensor representing the cosine of the angle between the ray direction and the view direction (used for perspective correction).
+-- Output: `dists`, a tensor of shape $(N)$ containing the Euclidean distances between consecutive points, with the last element being a large placeholder value.
++- Input: `ndc_pts`, a tensor of shape `[N_ray, N_sample, 3]` containing 3D points in NDC space, ordered along the ray [S1, unofficial].
++- Input: `cos_angle`, a tensor of shape `[N_ray]` representing the cosine of the angle between the ray direction and the view direction [S1, S2, unofficial].
++- Output: `dists`, a tensor of shape `[N_rays, N_samples]` containing the segment distances [S1, unofficial].
+ 
+ **Data Structures:**
+-- `ndc_pts`: Float tensor. Coordinates are in $[-1, 1]$ range for NDC space.
++- `ndc_pts`: Float tensor. Coordinates are in NDC space [S1, unofficial].
+ - `dists`: Float tensor.
+ 
+ **Steps:**
+-1. Compute the difference vector between consecutive points: $\Delta \mathbf{p}_i = \mathbf{p}_{i+1} - \mathbf{p}_i$ for $i = 0 \dots N-2$.
+-2. Compute the Euclidean norm of these difference vectors to get the segment lengths: $d_i = \|\Delta \mathbf{p}_i\|_2$.
+-3. Append a large value to the end of the distance array to serve as a sentinel for the final segment or to handle boundary conditions in integration. This value is scaled by the cosine of the viewing angle.
++1. Compute the Euclidean distance between consecutive NDC points along the ray: `dists = torch.norm(ndc_pts[:, 1:] - ndc_pts[:, :-1], dim=-1)` [S1, S2, S3, unofficial].
++2. Append a large value scaled by `cos_angle` to the end of the distance array: `dists = torch.cat([dists, 1e10 * cos_angle.unsqueeze(-1)], -1)` [S1, S2, S3, unofficial].
+ 
+ **Formulas:**
+-Let $\mathbf{p}_i$ be the $i$-th point in `ndc_pts`.
+-$$ d_i = \sqrt{(x_{i+1}-x_i)^2 + (y_{i+1}-y_i)^2 + (z_{i+1}-z_i)^2} \quad \text{for } i = 0, \dots, N-2 $$
+-The final distance $d_{N-1}$ is set to:
++Let $\mathbf{p}_i$ be the $i$-th point in `ndc_pts` for a given ray. The segment distance for $i = 0, \dots, N-2$ is:
++$$ d_i = \|\mathbf{p}_{i+1} - \mathbf{p}_i\|_2 $$
++The final distance is:
+ $$ d_{N-1} = 10^{10} \cdot \cos(\theta) $$
+-where $\theta$ is the angle between the ray and the view direction.
++where $\theta$ is the angle between the ray and the view direction [S1, S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ import torch
+-import math
+ 
+ def ndc_pts_to_dists(ndc_pts, cos_angle):
+-    """
+-    Compute distances between NDC points along the ray.
++    # ndc_pts: [N_ray, N_sample, 3]
++    # cos_angle: [N_ray]
++    # Step 1: Compute Euclidean distances between consecutive points
++    diffs = ndc_pts[:, 1:] - ndc_pts[:, :-1]
++    dists = torch.norm(diffs, dim=-1)  # Shape: [N_ray, N_sample - 1]
+     
+-    Args:
+-        ndc_pts: Tensor of shape (N, 3) containing NDC coordinates of points along the ray.
+-        cos_angle: Scalar or tensor representing cos(angle) between ray and view direction.
+-        
+-    Returns:
+-        dists: Tensor of shape (N) containing segment distances.
+-    """
+-    # Step 1 & 2: Compute Euclidean distance between consecutive points
+-    # ndc_pts[:, 1:] are points 1 to N-1
+-    # ndc_pts[:, :-1] are points 0 to N-2
+-    diffs = ndc_pts[:, 1:] - ndc_pts[:, :-1]
+-    dists = torch.norm(diffs, dim=-1)
+-    
+-    # Step 3: Append a large value scaled by cos_angle
+-    # The large value acts as a sentinel for the last segment
+-    large_value = 1e10 * cos_angle.unsqueeze(-1) if cos_angle.dim() > 0 else 1e10 * cos_angle
+-    
+-    # Concatenate the computed distances with the sentinel value
+-    dists = torch.cat([dists, large_value], dim=-1)
++    # Step 2: Append large value scaled by cos_angle
++    # cos_angle.unsqueeze(-1) makes it [N_ray, 1] for broadcasting
++    sentinel = 1e10 * cos_angle.unsqueeze(-1)
++    dists = torch.cat([dists, sentinel], dim=-1)  # Shape: [N_ray, N_sample]
+     
+     return dists
+@@ -61,32 +47,19 @@
+ 
+ **Parameters:**
+-- `1e10`: A sufficiently large constant to ensure the last segment does not contribute significantly to the volume rendering integral if the ray extends beyond the defined NDC bounds. [S1, S2, unofficial]
++- `1e10`: A large constant appended to the distance array [S1, S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** NDC space compression near the near plane can lead to small differences. Standard float32 precision is generally sufficient, but float64 may be needed for extreme aspect ratios or very large scenes.
+-- **Boundary Conditions:** The last distance is a sentinel. In volume rendering, this large value ensures that the alpha accumulation saturates or that the ray is considered "closed" at the far plane.
+-- **Cosine Angle:** If `cos_angle` is zero (ray perpendicular to view direction, rare in standard camera setups), the sentinel becomes zero. This might cause issues if the integration logic expects a non-zero sentinel. [G] Ensure `cos_angle` is clamped to a small positive value if necessary, though standard forward-facing cameras have `cos_angle > 0`.
+-
+-## Subtopics
+-
+-### [Linear Depth to Distance](2429-linear-depth-to-distance.md)
+-Converts linear depth values to distances. Simpler, assumes uniform spacing in depth, not NDC. Choose when using linear depth sampling.
+-
+-### [Perspective Depth to Distance](2430-perspective-depth-to-distance.md)
+-Converts perspective depth values to distances. Accounts for perspective projection but uses linear depth, not NDC. Choose when using perspective depth sampling.
++- **Cosine Angle:** If `cos_angle` is zero, the sentinel becomes zero, which may affect integration logic [G]. Standard forward-facing camera setups typically yield `cos_angle > 0` [G].
++- **Batch Dimensions:** The pseudocode assumes batched inputs `[N_ray, ...]`. For a single ray, unsqueeze dimensions appropriately before calling, or adjust slicing [G].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$, where $N$ is the number of sampled points per ray. The operation involves a single pass over the points to compute differences and norms.
+-- **Memory Complexity:** $O(N)$ for storing the output distance tensor.
+-- **Performance:** Very fast, dominated by vectorized tensor operations. On a single 2080 Ti, training with this method takes ~4-8 hours for standard NeRF scenes, indicating the sampling and distance computation are not the bottleneck. [S1, S2, unofficial]
+-- **Strengths:** Accurately models the non-linear spacing of points in NDC space, which is crucial for forward-facing scenes where NDC sampling is common.
+-- **Limitations:** Requires points to be in NDC space. Not applicable to linear depth or world-space sampling without conversion.
+-- **When to use:** When using NDC space for ray sampling, particularly in forward-facing scene reconstruction (e.g., NeRF, TensoRF).
+-- **When not to use:** When using linear depth sampling or world-space sampling.
++- **Time and Memory Complexity:** $O(N)$ time and memory per ray, where $N$ is the number of samples, dominated by vectorized tensor operations [G].
++- **Strengths and Limitations:** Accurately computes physical distances from NDC samples for forward-facing scenes [S1, S3, unofficial]. Requires points to be in NDC space and does not apply to linear depth or world-space sampling without prior conversion [G].
+ 
+ ## Background
+-Originated in the context of Neural Radiance Fields (NeRF) and its tensor-based variants like TensoRF. The use of NDC space for forward-facing scenes was introduced to handle the infinite depth range more effectively by compressing the scene into a unit cube. The conversion from NDC points to distances is a necessary step in the volume rendering pipeline to compute the correct weights for alpha compositing. [S1, S2, unofficial]
++Originated in Neural Radiance Fields (NeRF) and tensor-based variants for forward-facing scene reconstruction, where NDC space compresses the infinite depth range into a unit cube [S1, S2, S3, unofficial]. The conversion is a standard step in the volume rendering pipeline to compute correct weights for alpha compositing [S1, S2, S3, unofficial].
+ 
+ ## Sources
+-[S1] TensoRF: Tensorial Radiance Fields, https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
+-[S2] Collaborative Neural Radiance Fields for Novel View Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)+[S1] CNC, https://github.com/YihangChen-ee/CNC, fetched 2026-10-27 (unofficial)
++[S2] TensoRF: Tensorial Radiance Fields, https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
++[S3] Collaborative Neural Radiance Fields for Novel View Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)

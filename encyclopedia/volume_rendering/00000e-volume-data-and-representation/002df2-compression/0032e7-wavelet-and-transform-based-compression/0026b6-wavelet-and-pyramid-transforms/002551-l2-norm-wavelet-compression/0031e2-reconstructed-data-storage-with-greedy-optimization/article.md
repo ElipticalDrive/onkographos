@@ -41,7 +41,7 @@ The specific time operations are [S1]:
 *   $T_2(i)$: Load the compressed file stream of the wavelet coefficients from disk and perform decoding.
 *   $T_3(i)$: Retrieve the low-pass filtered subblock from ancestor nodes recursively. This depends on the status of the parent node $j$ of node $i$:
     $$ T_3(i) = \begin{cases} T(j) + T_5(i) & \text{if } j \in \Omega \\ T'(j) + T_5(i) & \text{if } j \notin \Omega \end{cases} $$
-*   $T_4(i)$: Compose the low-pass filtered subblock and wavelet coefficients into one block, and perform a 3D inverse wavelet transform.
+*   $T_4(i)$: Compose the low-pass filtered subblock and wavelet coefficients into one block, and perform a 3D inverse wavelet transform [S1].
 *   $T_5(i)$: Extract the low-pass filtered subblock from a data block.
 
 Storage components are defined as [S1]:
@@ -54,14 +54,14 @@ Storage components are defined as [S1]:
 *   $p$: Penalty heuristic, $p \in (0.0, 1.0)$ [S1].
 
 **Algorithm Steps:**
-1.  Initialize $\Omega = \emptyset$.
-2.  Calculate $B(i)$ for all nodes $i$ in the wavelet tree.
+1.  Initialize $\Omega = \emptyset$ [S1].
+2.  Calculate $B(i)$ for all nodes $i$ in the wavelet tree [S1].
 3.  While there is remaining storage space in any processor ($\sum_{\omega \in \Omega} \text{Cost}(\omega) < \Delta$):
-    a. Traverse all wavelet tree nodes in all distribution units assigned to a processor.
-    b. Identify the unselected node $i$ with the highest benefit $B(i)$.
+    a. Traverse all wavelet tree nodes in all distribution units assigned to a processor [S1].
+    b. Identify the unselected node $i$ with the highest benefit $B(i)$ [S1].
     c. If $\text{Cost}(i)$ fits within the remaining budget for that processor: add $i$ to $\Omega$ and update the benefit values for all remaining nodes in node $i$'s distribution unit (specifically, update $\lambda$ for nodes in the same unit, which affects $P(i)$) [S1].
-    d. If no node fits or no nodes remain, break.
-4.  Return $\Omega$.
+    d. If no node fits or no nodes remain, break [S1].
+4.  Return $\Omega$ [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -93,8 +93,9 @@ def greedy_optimization(wavelet_tree, delta_per_processor, penalty_p):
     
     def get_processor(unit_id):
         """Map distribution unit ID to processor ID [G]."""
-        return unit_id  # Assumes 1:1 mapping; in practice, a lookup table is used.
-    
+        # Implementation depends on system topology; assumes a lookup table.
+        return unit_id  
+
     def calc_T3(node):
         """Calculate T3(i) based on parent status [S1]."""
         parent_id = node.parent_id
@@ -104,14 +105,14 @@ def greedy_optimization(wavelet_tree, delta_per_processor, penalty_p):
         if parent.id in selected_nodes:
             return parent.T1 + node.T5
         else:
-            return (parent.T2 + calc_T3(parent) + parent.T4) + node.T5
-    
+            return calc_T_prime(parent) + node.T5
+
     def calc_T_prime(node):
         """Calculate T'(i) [S1]."""
         if node.id in selected_nodes:
             return node.T1
         return node.T2 + calc_T3(node) + node.T4
-    
+
     def calc_benefit(node):
         """Calculate B(i) [S1]."""
         if node.id in selected_nodes:
@@ -127,7 +128,7 @@ def greedy_optimization(wavelet_tree, delta_per_processor, penalty_p):
             return 0.0
         R = (T_prime_i - T_i) / cost_storage
         return L * P * R
-    
+
     while True:
         best_node = None
         max_benefit = -1.0

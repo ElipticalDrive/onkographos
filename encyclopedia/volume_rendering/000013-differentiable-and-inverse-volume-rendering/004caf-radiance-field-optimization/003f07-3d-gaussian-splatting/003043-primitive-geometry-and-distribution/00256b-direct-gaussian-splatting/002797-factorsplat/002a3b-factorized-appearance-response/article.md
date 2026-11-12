@@ -7,12 +7,12 @@ Factorized Appearance Response is the mechanism within FactorSplat that maps a t
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Base Gaussian parameters (opacity $o_i$, base color $\mathbf{C}_i^{\text{base}}$), TF $T$, region visibility flags $v_T(m)$, and learned factors.
-*   **Outputs:** Final color $\mathbf{C}_i(T)$ and final opacity $\alpha_i(\pi, T)$ for each Gaussian $i$.
+*   **Inputs:** Base Gaussian parameters (opacity $o_i$, base color $\mathbf{C}_i^{\text{base}}$), TF $T$, region visibility flags $v_T(m)$, and learned factors [S1, unofficial].
+*   **Outputs:** Final color $\mathbf{C}_i(T)$ and final opacity $\alpha_i(\pi, T)$ for each Gaussian $i$ [S1, unofficial].
 
 **Data Structures:**
-*   **Color Factors:** $\mathbf{A}_c^i \in \mathbb{R}^{3 \times r}$ for each Gaussian $i$.
-*   **Opacity Factors:** $\mathbf{a}_\alpha^i \in \mathbb{R}^r$ for each Gaussian $i$.
+*   **Color Factors:** $\mathbf{A}_c^i \in \mathbb{R}^{3 \times r}$ for each Gaussian $i$ [S1, unofficial].
+*   **Opacity Factors:** $\mathbf{a}_\alpha^i \in \mathbb{R}^r$ for each Gaussian $i$ [S1, unofficial].
 *   **Stacked Factors:** All color and opacity factors are stacked into a single $4N \times r$ matrix, where $N$ is the number of Gaussians and $r$ is the latent dimension [S1, unofficial].
 *   **Global Gains:** $\mathbf{g}^c \in \mathbb{R}^3$ and $g^\alpha \in \mathbb{R}$ [S1, unofficial].
 *   **Constants:** $\mathbf{e}_0 = (1, 0, 0, 0)^\top \in \mathbb{R}^{Q_b}$ selects the DC SH row; $C_0 = 1/(2\sqrt{\pi})$ converts RGB offsets to DC-SH coefficients [S1, unofficial].
@@ -26,7 +26,7 @@ Factorized Appearance Response is the mechanism within FactorSplat that maps a t
 
 **Steps:**
 
-1.  **Compute Local Code:** Determine the local code $\mathbf{z}_{i,T}$ for Gaussian $i$ and TF $T$. This code is derived from the region-specific descriptors associated with the Gaussian [S1, unofficial].
+1.  **Compute Local Code:** Determine the local code $\mathbf{z}_{i,T}$ for Gaussian $i$ and TF $T$ [S1, unofficial].
 2.  **Compute Alpha-Change Indicator:** Determine if the TF changes the alpha channel relative to the base TF $T_0$:
     $$q^\alpha(T) = \mathbf{1} \left[ \left\| \mathbf{R}_T^{(B)}[:,:,\alpha] - \mathbf{R}_{T_0}^{(B)}[:,:,\alpha] \right\|_\infty > 0 \right]$$
     where $\mathbf{R}_T^{(B)}$ is the transfer function response matrix [S1, unofficial].
@@ -39,19 +39,16 @@ Factorized Appearance Response is the mechanism within FactorSplat that maps a t
     $$l_i^\alpha(T) = g^\alpha d_i^\alpha(T)$$
 5.  **Combine Branches:** Compute the intermediate TF-conditioned opacity $\bar{\alpha}_i(T)$ and the DC-SH offset for color:
     $$\bar{\alpha}_i(T) = \sigma\left(o_i + b_L \lambda_\alpha^L l_i^\alpha(T) + b_R r_i^\alpha(T)\right)$$
-    $$\mathbf{offset}_i(T) = b_L \frac{\lambda_c^L}{C_0} \mathbf{l}_i^c(T) + b_R \mathbf{r}_i^c(T)$$
-    where $\sigma$ is the sigmoid function [S1, unofficial].
+    $$\mathbf{offset}_i(T) = b_L \frac{\lambda_c^L}{C_0} \mathbf{l}_i^c(T) + b_R \mathbf{r}_i^c(T)$$ [S1, unofficial].
 6.  **Compute Final Color:** Add the offset to the base color, selecting only the DC component:
-    $$\mathbf{C}_i(T) = \mathbf{C}_i^{\text{base}} + \mathbf{e}_0 \mathbf{offset}_i(T)^T$$
-    Note: $\mathbf{e}_0 \mathbf{offset}_i(T)^T$ effectively adds the scalar offset to the red channel if $\mathbf{offset}$ is treated as a vector, but given $\mathbf{e}_0$ is a column vector and $\mathbf{offset}$ is a row vector in the formula context, it projects the offset onto the DC basis. Specifically, $\mathbf{C}_i(T)$ is the base color plus the DC-SH coefficient adjustment [S1, unofficial].
+    $$\mathbf{C}_i(T) = \mathbf{C}_i^{\text{base}} + \mathbf{e}_0 \mathbf{offset}_i(T)^T$$ [S1, unofficial].
 7.  **Apply Visibility Gate:** Compute the removed material mass $\eta_i(T)$ based on region visibility flags $v_T(m)$ and base flags $v_{T_0}(m)$:
     $$r_T(m) = v_{T_0}(m)[1 - v_T(m)]$$
     $$\eta_i(T) = \sum_{m,b} p_i(m,b)r_T(m)$$
     $$\gamma_i(T) = \mathbf{1}[\eta_i(T) < \tau]$$
     where $p_i(m,b)$ is the probability mass of Gaussian $i$ in region $m$ and band $b$ [S1, unofficial].
 8.  **Compute Final Opacity:** Apply the visibility gate and view-dependent scaling $s_i^{\text{view}}(\pi)$:
-    $$\alpha_i(\pi, T) = \gamma_i(T) \bar{\alpha}_i(T) s_i^{\text{view}}(\pi)$$
-    where $\pi$ is the view direction [S1, unofficial].
+    $$\alpha_i(\pi, T) = \gamma_i(T) \bar{\alpha}_i(T) s_i^{\text{view}}(\pi)$$ [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 *   **RGB-only edits:** If the TF does not change the alpha channel, $q^\alpha(T) = 0$, which keeps the opacity residual $r_i^\alpha(T)$ at zero, preserving the base opacity behavior [S1, unofficial].
@@ -71,7 +68,7 @@ The Factorized Appearance Model is the broader framework that combines the looku
 *   **When to Use:** When dynamic appearance control is required for a fixed geometric proxy, such as in medical volume rendering with multiple tissue segmentations [S1, unofficial].
 
 ## Background
-Factorized Appearance Response was introduced in the FactorSplat paper by [Authors] in 2026 [S1, unofficial]. It builds on the N-DGS framework and aims to provide appearance-controllable Gaussian proxies for medical volume rendering [S1, unofficial].
+Factorized Appearance Response was introduced in the FactorSplat paper in 2026 [S1, unofficial]. It builds on the N-DGS framework and aims to provide appearance-controllable Gaussian proxies for medical volume rendering [S1, unofficial].
 
 ## Sources
 [S1] FactorSplat: Appearance-Controllable Gaussian Proxies for Medical Volume Rendering, https://doi.org/10.48550/arxiv.2610.02382, fetched 2026-10-26 (unofficial)

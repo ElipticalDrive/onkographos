@@ -1,0 +1,124 @@
+# Global-Local Contrastive Learning
+
+Also called: Global-Local Contrastive Loss Strategy, Glocal Contrastive Loss
+
+## Overview
+Global-Local Contrastive Learning is a regularization strategy for text-driven NeRF stylization that controls stylization strength by combining global and local contrastive terms in CLIP space [S1]. It addresses the limitation of directional CLIP losses, which enforce relative style trajectories but fail to ensure sufficient stylization magnitude and uniformity across the entire scene [S1]. By simultaneously pushing rendered features toward the target text (global) and ensuring local regions match the style (local), it prevents the non-uniform stylization artifacts common in standard CLIP-based methods [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Rendered view image $I_{tgt}$, target text prompt $t_{tgt}$, a set of negative text prompts $T_{neg}$, and the CLIP image encoder $E_I$ and text encoder $E_T$.
+*   **Outputs:** A scalar loss value $\mathcal{L}_{glocal}$ combining global and local contrastive losses.
+
+**Data Structures:**
+*   **Embeddings:** Vectors $\mathbf{v}$ in the shared CLIP embedding space.
+*   **Negative Samples:** A manually curated set of $\approx 200$ text descriptions semantically irrelevant to the target style (e.g., "Zombie", "Tolkien elf") [S1].
+*   **Patches:** Local regions of the rendered image $I_{tgt}$ with size $1/10$ of the original input dimensions [S1].
+
+**Parameters:**
+*   **Temperature ($\tau$):** Set to $0.07$ for all experiments [S1].
+*   **Patch Size:** $1/10$ of the original input image width and height [S1].
+
+**Steps:**
+1.  **Global Embedding Extraction:** Encode the full rendered image $I_{tgt}$ using the CLIP image encoder to obtain $\mathbf{v}_{img} = E_I(I_{tgt})$. Encode the target text $t_{tgt}$ to obtain $\mathbf{v}_{pos} = E_T(t_{tgt})$.
+2.  **Negative Sample Encoding:** Encode each text prompt $t_{neg} \in T_{neg}$ to obtain negative vectors $\mathbf{v}_{neg}^{(k)} = E_T(t_{neg}^{(k)})$.
+3.  **Global Contrastive Loss Calculation:** Compute $\mathcal{L}_{gc}$ using the InfoNCE-like formulation [S1]:
+    $$ \mathcal{L}_{gc} = -\log \frac{\exp(\mathbf{v}_{img} \cdot \mathbf{v}_{pos} / \tau)}{\exp(\mathbf{v}_{img} \cdot \mathbf{v}_{pos} / \tau) + \sum_{k} \exp(\mathbf{v}_{img} \cdot \mathbf{v}_{neg}^{(k)} / \tau)} $$
+    This term ensures the overall stylization magnitude is sufficient by pushing the image embedding close to the target text embedding [S1].
+4.  **Local Patch Extraction:** Divide the rendered image $I_{tgt}$ into local patches of size $1/10$ of the original dimensions [S1].
+5.  **Local Embedding Extraction:** Encode each local patch $P_i$ using the CLIP image encoder to obtain $\mathbf{v}_{patch}^{(i)} = E_I(P_i)$ [S1].
+6.  **Local Contrastive Loss Calculation:** Compute $\mathcal{L}_{lc}$ for each patch by comparing it against the target text embedding $\mathbf{v}_{pos}$ and the negative embeddings $\mathbf{v}_{neg}^{(k)}$, similar to the global term but applied per patch [S1]. The total local loss is the mean over all patches:
+    $$ \mathcal{L}_{lc} = \frac{1}{N} \sum_{i=1}^{N} \left( -\log \frac{\exp(\mathbf{v}_{patch}^{(i)} \cdot \mathbf{v}_{pos} / \tau)}{\exp(\mathbf{v}_{patch}^{(i)} \cdot \mathbf{v}_{pos} / \tau) + \sum_{k} \exp(\mathbf{v}_{patch}^{(i)} \cdot \mathbf{v}_{neg}^{(k)} / \tau)} \right) $$
+    This term ensures uniform stylization across local regions, preventing CLIP from ignoring parts of the scene with less distinguishable features [S1].
+7.  **Final Loss:** Combine the global and local losses (typically with equal weighting or as specified by the implementation, though the source emphasizes their complementary nature) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def global_local_contrastive_loss(rendered_image, target_text, negative_texts, clip_image_encoder, clip_text_encoder, tau=0.07):
+    """
+    Computes the Global-Local Contrastive Loss for NeRF stylization.
+    
+    Args:
+        rendered_image: Tensor of shape (H, W, 3) or (1, H, W, 3).
+        target_text: String, the desired style prompt.
+        negative_texts: List of strings, semantically irrelevant style prompts.
+        clip_image_encoder: Function mapping image tensor to CLIP embedding vector.
+        clip_text_encoder: Function mapping text string to CLIP embedding vector.
+        tau: Float, temperature parameter.
+        
+    Returns:
+        Float, the combined loss value.
+    """
+    # 1. Global Embeddings
+    v_img = clip_image_encoder(rendered_image)
+    v_pos = clip_text_encoder(target_text)
+    
+    # 2. Negative Embeddings
+    v_negs = [clip_text_encoder(t) for t in negative_texts]
+    
+    # 3. Global Contrastive Loss (InfoNCE)
+    # Numerator: similarity with positive sample
+    pos_sim = torch.dot(v_img, v_pos) / tau
+    # Denominator: sum of similarities with all samples (positive + negatives)
+    neg_sims = [torch.dot(v_img, v_neg) / tau for v_neg in v_negs]
+    
+    # Log-sum-exp for numerical stability
+    max_sim = max(pos_sim, max(neg_sims))
+    exp_pos = torch.exp(pos_sim - max_sim)
+    exp_negs = [torch.exp(sim - max_sim) for sim in neg_sims]
+    sum_exp = exp_pos + sum(exp_negs)
+    
+    l_gc = -torch.log(exp_pos / sum_exp)
+    
+    # 4. Local Contrastive Loss
+    # Extract patches (size 1/10 of original dimensions)
+    h, w = rendered_image.shape[0], rendered_image.shape[1]
+    patch_h, patch_w = h // 10, w // 10
+    
+    l_lc_sum = 0.0
+    num_patches = 0
+    
+    for y in range(0, h - patch_h + 1, patch_h): # Stride equal to patch size for non-overlapping
+        for x in range(0, w - patch_w + 1, patch_w):
+            patch = rendered_image[y:y+patch_h, x:x+patch_w]
+            v_patch = clip_image_encoder(patch)
+            
+            # Local InfoNCE
+            local_pos_sim = torch.dot(v_patch, v_pos) / tau
+            local_neg_sims = [torch.dot(v_patch, v_neg) / tau for v_neg in v_negs]
+            
+            local_max_sim = max(local_pos_sim, max(local_neg_sims))
+            local_exp_pos = torch.exp(local_pos_sim - local_max_sim)
+            local_exp_negs = [torch.exp(sim - local_max_sim) for sim in local_neg_sims]
+            local_sum_exp = local_exp_pos + sum(local_exp_negs)
+            
+            l_lc_sum += -torch.log(local_exp_pos / local_sum_exp)
+            num_patches += 1
+            
+    l_lc = l_lc_sum / num_patches if num_patches > 0 else 0.0
+    
+    # 5. Combine
+    # The source describes combining both to achieve uniform stylization with correct direction and magnitude.
+    # Specific weighting is not detailed in the provided text, but they are used together.
+    return l_gc + l_lc
+```
+
+**Edge Cases and Pitfalls:**
+*   **Global Loss Alone:** Leads to excessive stylization on parts with distinguishable features and insufficient stylization elsewhere, as CLIP focuses attention on these regions [S1].
+*   **Local Loss Alone:** May produce excessive or hallucinated attributes (e.g., generating extra eyes or ears) because local patches lack sufficient semantic context [S1].
+*   **Precision:** The temperature $\tau$ is critical; the source specifies $0.07$ [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Increases training time due to the additional forward passes through the CLIP encoder for the global image and all local patches, as well as the text encoders for negative samples.
+*   **Memory Complexity:** Requires storing embeddings for the target text, negative texts, and all local patches during the loss computation.
+*   **Strengths:** Ensures both sufficient stylization magnitude (global) and uniform distribution across the scene (local) [S1].
+*   **Limitations:** Relies on a manually curated set of negative text prompts (approx. 200) [S1].
+*   **When to use:** When text-driven NeRF stylization suffers from non-uniform results or insufficient style transfer strength despite using directional CLIP losses [S1].
+
+## Background
+The method was introduced in "NeRF-Art: Text-Driven Neural Radiance Fields Stylization" [S1]. It builds upon the observation that standard directional CLIP losses preserve style trajectories but fail to control magnitude and uniformity [S1]. The local component is inspired by the PatchNCE loss [Park et al. 2020] [S1]. The approach was evaluated on self-portrait datasets captured under in-the-wild conditions [S1].
+
+## Sources
+[S1] NeRF-Art: Text-Driven Neural Radiance Fields Stylization, https://doi.org/10.1109/tvcg.2023.3283400, fetched 2026-10-26

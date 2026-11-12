@@ -3,38 +3,38 @@
 Also called: Dithered Penumbra Shadow Visibility
 
 ## Overview
-Calculates soft shadow visibility (0..1) towards a directional light (e.g., the sun) by marching along the light direction, using a dithered rotation of the light vector per pixel to create a penumbra that averages out with supersampling [S1, unofficial]. It sets itself apart from standard soft shadow ray marching by normalizing the penumbra calculation by $t \cdot \text{sunY}$ rather than distance alone, preventing false heavy shadows on flat ground where clearance is proportional to distance [S1, unofficial].
+Calculates soft shadow visibility (0..1) towards the sun by marching along the sun direction [S1, unofficial]. It sets itself apart from standard soft shadow ray marching by normalizing the penumbra calculation by $t \cdot \text{sunY}$ rather than distance alone, preventing false heavy shadows on flat ground where clearance is proportional to distance [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Height field function `heightAtExtended(x, z)`, sun direction vector $\vec{S} = (dx, dy, dz)$, pixel coordinates $(ox, oz)$, camera origin $oy$, and parameters `shadowMaxDistance`, `shadowSoftness`, `shadowMinStep`, `shadowSteps`.
-*   **Output:** A single float value in $[0, 1]$ representing shadow visibility.
+*   **Inputs:** Height field function `heightAtExtended(x, z)`, sun direction vector $\vec{S} = (dx, dy, dz)$, pixel coordinates $(ox, oz)$, camera origin $oy$, and parameters `shadowMaxDistance`, `shadowSoftness`, `shadowMinStep`, `shadowSteps` [S1, unofficial].
+*   **Output:** A single float value in $[0, 1]$ representing shadow visibility [S1, unofficial].
 
 **Data Structures:**
-No complex data structures are required beyond the height field access function. The algorithm maintains scalar state variables for the ray march.
+No complex data structures are required beyond the height field access function [G]. The algorithm maintains scalar state variables for the ray march [G].
 
 **Parameters:**
-*   `shadowMaxDistance`: Maximum distance to check for shadows.
-*   `shadowSoftness`: Parameter controlling shadow softness.
-*   `shadowMinStep`: Minimum step size for shadow ray marching.
-*   `shadowSteps`: Number of shadow ray march iterations.
+*   `shadowMaxDistance`: Maximum distance to check for shadows [S1, unofficial].
+*   `shadowSoftness`: Parameter controlling shadow softness [S1, unofficial].
+*   `shadowMinStep`: Minimum step size for shadow ray marching [S1, unofficial].
+*   `shadowSteps`: Number of shadow ray march iterations [S1, unofficial].
 *   `softness`: Derived parameter, calculated as $6 \times \text{shadowSoftness} + 2$ [S1, unofficial].
 *   `sunY`: Vertical component of the sun direction, clamped to $\ge 0.12$ [S1, unofficial].
 
 **Steps:**
-1.  Initialize ray distance $t = 0$, clearance $h = 0$, and visibility $V = 1$.
+1.  Initialize ray distance $t = 0$, clearance $h = 0$, and visibility $V = 1$ [S1, unofficial].
 2.  Loop $i$ from $0$ to `shadowSteps` - 1:
-    a. Calculate distance-based step: $d_{step} = t \times 0.15$.
-    b. Calculate gap-based step: $g_{step} = h > 0 ? h \times 0.5 : \text{shadowMinStep}$.
-    c. Determine step size: $\Delta t = \min(d_{step}, g_{step})$.
-    d. Advance ray: $t \leftarrow t + \max(\Delta t, \text{shadowMinStep})$.
-    e. If $t > \text{shadowMaxDistance}$, break loop.
-    f. Calculate new clearance: $h = oy + dy \times t - \text{heightAtExtended}(ox + dx \times t, oz + dz \times t)$.
+    a. Calculate distance-based step: $d_{\text{step}} = t \times 0.15$ [S1, unofficial].
+    b. Calculate gap-based step: $g_{\text{step}} = h > 0 \ ? \ h \times 0.5 \ : \ \text{shadowMinStep}$ [S1, unofficial].
+    c. Determine step size: $\Delta t = \min(d_{\text{step}}, g_{\text{step}})$ [S1, unofficial].
+    d. Advance ray: $t \leftarrow t + \max(\Delta t, \text{shadowMinStep})$ [S1, unofficial].
+    e. If $t > \text{shadowMaxDistance}$, break loop [S1, unofficial].
+    f. Calculate new clearance: $h = oy + dy \times t - \text{heightAtExtended}(ox + dx \times t, oz + dz \times t)$ [S1, unofficial].
     g. If $h < 0$ (terrain hit):
-        i. Return $\text{clamp01}(V \times \max(0, 1 + h / (\text{shadowMinStep} \times 1.5)))$.
-    h. Calculate visibility ratio: $R = (\text{softness} \times h) / (t \times \text{sunY})$.
-    i. Update visibility: $V = \min(V, R)$.
-3.  Return $\text{clamp01}(V)$.
+        i. Return $\text{clamp01}(V \times \max(0, 1 + h / (\text{shadowMinStep} \times 1.5)))$ [S1, unofficial].
+    h. Calculate visibility ratio: $R = (\text{softness} \times h) / (t \times \text{sunY})$ [S1, unofficial].
+    i. Update visibility: $V = \min(V, R)$ [S1, unofficial].
+3.  Return $\text{clamp01}(V)$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -66,10 +66,6 @@ def soft_shadow_visibility(ox, oz, oy, dx, dy, dz,
             break
             
         # Calculate clearance
-        # Note: ox, oz are horizontal offsets from origin; 
-        # assuming ox, oz represent the horizontal position of the ray origin
-        # and dx, dz are horizontal components of sun direction.
-        # The height field is queried at the projected horizontal position.
         hx = ox + dx * t
         hz = oz + dz * t
         terrain_height = height_at_extended(hx, hz)
@@ -95,11 +91,11 @@ def soft_shadow_visibility(ox, oz, oy, dx, dy, dz,
 *   **Sun Direction:** The sun's vertical component (`sunY`) must be clamped to a minimum value (0.12) to prevent division by zero or extreme values when the sun is near the horizon [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is `shadowSteps`. The number of steps is fixed per pixel.
-*   **Memory Complexity:** $O(1)$ auxiliary space.
+*   **Time Complexity:** $O(N)$ where $N$ is `shadowSteps` [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary space [G].
 *   **Performance:** In the source implementation (M-series Mac, 6 workers, 1536² heightfield), rendering time scales with resolution. For 1920×1080 high quality, 18.7M rays were processed in 34.0 seconds [S1, unofficial]. Generation is a fixed cost and does not scale with image size [S1, unofficial].
-*   **Strengths:** Efficient soft shadow calculation without expensive supersampling or kernel sampling. Handles flat terrain correctly.
-*   **Limitations:** Fixed number of steps may not adapt to complex terrain features at varying distances. Dithering requires multiple samples or temporal accumulation to fully average out artifacts.
+*   **Strengths:** Efficient soft shadow calculation without expensive supersampling or kernel sampling. Handles flat terrain correctly [S1, unofficial].
+*   **Limitations:** Fixed number of steps may not adapt to complex terrain features at varying distances [G].
 
 ## Background
 This method is part of a procedural terrain rendering pipeline described in the `theme1` repository by mingderwang [S1, unofficial]. It is designed for real-time or near-real-time rendering of large-scale terrain with volumetric clouds and water, leveraging distance-proportional ray marching for terrain intersection [S1, unofficial].

@@ -13,8 +13,8 @@ RLE4 Compression converts a dense 3D voxel grid into a sparse, column-oriented s
 **Data Structures:**
 1. **Map4 Header**: `map[x + z*sx]` stores the index into the `slabs` array for each column $(x,z)$ [S1, unofficial].
 2. **Slab Layout** (per column $x,z$): `[slab_len: ushort][tex_len: ushort][RLE entries: ushort...][Texture entries: ushort...]` [S1, unofficial]. `slab_len` is the count of RLE entries. `tex_len` is the count of texture entries [S1, unofficial].
-3. **RLE Entry** (`ushort`, 16 bits): Bits 0-9 (10 bits) store skip run length ($0 \dots 1023$). Bits 10-15 (6 bits) store solid run length ($0 \dots 63$). Format: `(solid << 10) | skip`. If `solid==0`, it is a skip run. If `skip==0`, it is a solid run [S1, unofficial].
-4. **Texture Entry** (`ushort`, 16 bits): Bits 0-7 (8 bits) store intensity. Bits 8-9 (2 bits) store color index ($0 \dots 3$). Bits 10-15 are unused/padding. Packed as: `intensity | (color << 8)` [S1, unofficial].
+3. **RLE Entry** (`ushort`, 16 bits): Bits 0-9 (10 bits) store skip run length ($0 \dots 1023$) [S1, unofficial]. Bits 10-15 (6 bits) store solid run length ($0 \dots 63$) [S1, unofficial]. Format: `(solid << 10) | skip`. If `solid==0`, it is a skip run. If `skip==0`, it is a solid run [S1, unofficial].
+4. **Texture Entry** (`ushort`, 16 bits): Bits 0-7 (8 bits) store intensity [S1, unofficial]. Bits 8-9 (2 bits) store color index ($0 \dots 3$) [S1, unofficial]. Bits 10-15 are unused/padding. Packed as: `intensity | (color << 8)` [S1, unofficial].
 
 **Numbered Steps:**
 1. Initialize `map` array of size $sx \cdot sz$ [S1, unofficial].
@@ -24,19 +24,19 @@ RLE4 Compression converts a dense 3D voxel grid into a sparse, column-oriented s
    c. Initialize counters: `solid = 0`, `skip = 0`, `store = false` [S1, unofficial].
    d. Clear `texture` buffer [S1, unofficial].
    e. Iterate $j$ from $0$ to $sy$ (inclusive, to flush final run) [S1, unofficial]:
-      i. Check if voxel $(i, j, k)$ is set in `mem`. If $j < sy$: `f = (mem[(i + j*sx + k*sxy) >> 3] >> (i & 7)) & 1`. If $j == sy$: `f = 0` [S1, unofficial].
+      i. Check if voxel $(i, j, k)$ is set in `mem` [S1, unofficial]. If $j < sy$: `f = (mem[(i + j*sx + k*sxy) >> 3] >> (i & 7)) & 1` [S1, unofficial]. If $j == sy$: `f = 0` [S1, unofficial].
       ii. If `f` is true (voxel is solid):
-          - Compute perturbed normal: Initialize `mx=0, my=0, mz=0, cnt=0`. Loop $a, b, c$ from $-1$ to $1$. If neighbor $(i+a, j+b, k+c)$ is within bounds and set in `mem`: `mx += a`, `my += b`, `mz += c`, `cnt++` [S1, unofficial].
-          - If `cnt < 27` (not fully surrounded): `centroid = (-mx, my, -mz)`. Normalize `centroid`. Quantize to 8-bit: `nx = clamp(int(127.0 * centroid.x + 128.0), 0, 255)`, same for `ny, nz` [S1, unofficial].
+          - Compute perturbed normal: Initialize `mx=0, my=0, mz=0, cnt=0` [S1, unofficial]. Loop $a, b, c$ from $-1$ to $1$. If neighbor $(i+a, j+b, k+c)$ is within bounds and set in `mem`: `mx += a`, `my += b`, `mz += c`, `cnt++` [S1, unofficial].
+          - If `cnt < 27` (not fully surrounded): `centroid = (-mx, my, -mz)` [S1, unofficial]. Normalize `centroid`. Quantize to 8-bit: `nx = clamp(int(127.0 * centroid.x + 128.0), 0, 255)`, same for `ny, nz` [S1, unofficial].
       iii. Extract material bits: `bit1 = (col1[...] & (1<<(i&7))) ? 256 : 0`. `bit2 = (col2[...] & (1<<(i&7))) ? 512 : 0`. `mat = (bit1 | bit2) >> 8` [S1, unofficial].
       iv. Calculate noise: `rnd1, rnd2, rnd3` using sine/cosine of coordinates scaled by `scale` and dimensions. `rnd4 = rnd1 + rnd2 + rnd3 + 3` [S1, unofficial].
-      v. Perturb `ny` based on `mat`: If `mat == 0`: `ny = (ny * (((((i*scale) ^ (k*scale)) >> 4) & 15) + 15)) >> 5`. If `mat == 3`: `ny = (ny * (((((i*scale) ^ (k*scale)) >> 3) & 15) + 25)) >> 5`. Clamp `ny` to $0 \dots 255$ [S1, unofficial].
-      vi. Store in texture: `texture.push_back(ny | bit1 | bit2)`. Set `store = true` [S1, unofficial].
+      v. Perturb `ny` based on `mat`: If `mat == 0`: `ny = (ny * (((((i*scale) ^ (k*scale)) >> 4) & 15) + 15)) >> 5` [S1, unofficial]. If `mat == 3`: `ny = (ny * (((((i*scale) ^ (k*scale)) >> 3) & 15) + 25)) >> 5` [S1, unofficial]. Clamp `ny` to $0 \dots 255$ [S1, unofficial].
+      vi. Store in texture: `texture.push_back(ny | bit1 | bit2)` [S1, unofficial]. Set `store = true` [S1, unofficial].
       vii. If `f` is false (voxel is empty): Set `store = false` [S1, unofficial].
-      viii. Flush runs if state changed or end of column: If `solid > 0` and `!store`: While `skip > 1023`: `slabs.push_back(1023)`; `skip -= 1023`. While `solid > 63`: `slabs.push_back((63 << 10) | (skip & 1023))`; `solid -= 63`; `skip = 0`. `slabs.push_back((solid & 63) << 10 | (skip & 1023))`. `solid = 0`; `skip = 0` [S1, unofficial].
-      ix. Update counters: If `store` is true: `solid++`. Else: `skip++` [S1, unofficial].
-   f. Finalize slab: `slabs[slab_len_pos] = slabs.size() - (slab_len_pos + 2)`. `slabs[tex_len_pos] = texture.size()`. Append `texture` entries to `slabs` [S1, unofficial].
-3. Allocate `map4.map` of size $sx \cdot sz$. Copy `map` data [S1, unofficial].
+      viii. Flush runs if state changed or end of column: If `solid > 0` and `!store`: While `skip > 1023`: `slabs.push_back(1023)`; `skip -= 1023` [S1, unofficial]. While `solid > 63`: `slabs.push_back((63 << 10) | (skip & 1023))`; `solid -= 63`; `skip = 0`. `slabs.push_back((solid & 63) << 10 | (skip & 1023))`. `solid = 0`; `skip = 0` [S1, unofficial].
+      ix. Update counters: If `store` is true: `solid++` [S1, unofficial]. Else: `skip++` [S1, unofficial].
+   f. Finalize slab: `slabs[slab_len_pos] = slabs.size() - (slab_len_pos + 2)` [S1, unofficial]. `slabs[tex_len_pos] = texture.size()` [S1, unofficial]. Append `texture` entries to `slabs` [S1, unofficial].
+3. Allocate `map4.map` of size $sx \cdot sz$ [S1, unofficial]. Copy `map` data [S1, unofficial].
 4. Set `map4.slabs` to `slabs` data, `map4.slabs_size` to `slabs.size() * 2` [S1, unofficial].
 
 **Formulas:**
@@ -193,16 +193,16 @@ General bit-packing. Choose for dense storage without run-length optimization.
 Packing for GPU textures. Choose when targeting texture-based rendering rather than splatting.
 
 ## Operating characteristics
-- **Time Complexity**: $O(sx \cdot sy \cdot sz)$ for compression, as each voxel is visited once per column. Normal computation adds a constant factor (27 neighbors) [S1, unofficial].
-- **Memory Complexity**: $O(N_{solid} \cdot C + N_{runs})$, where $N_{solid}$ is the number of solid voxels, $C$ is color bits, and $N_{runs}$ is the number of RLE entries. Significantly less than dense $O(sx \cdot sy \cdot sz)$ for sparse volumes [S1, unofficial].
-- **Performance**: Efficient for sparse volumes with large empty regions. Performance degrades if the volume is fully dense, as overhead of headers and RLE splitting adds complexity [S1, unofficial].
+- **Time Complexity**: Not given in the sources.
+- **Memory Complexity**: Not given in the sources.
+- **Performance**: Not given in the sources.
 - **Strengths**: Preserves per-voxel color/intensity. Fast decoding for splatting. Compact for sparse data [S1, unofficial].
 - **Limitations**: Fixed run lengths (6/10 bits) may waste space if runs are very long or very short. Normal perturbation is heuristic [S1, unofficial].
 - **When to use**: Real-time voxel splatting with sparse data [S1, unofficial].
 - **When not to use**: Dense volumes, or when exact geometric normals are required without perturbation [S1, unofficial].
 
 ## Background
-RLE4 Compression was introduced in the OpenGL Voxel Splatting project by sp4cerat [S1, unofficial]. It is designed for real-time rendering of voxel data using OpenGL, specifically targeting the `GLX` and `GL` extensions for texture mapping. The method is part of a pipeline that includes voxelization and binary RLE encoding, optimizing the data for GPU splatting [S1, unofficial].
+RLE4 Compression was introduced in the OpenGL Voxel Splatting project by sp4cerat [S1, unofficial]. It is designed for real-time rendering of voxel data using OpenGL, specifically targeting the `GLX` and `GL` extensions for texture mapping [S1, unofficial]. The method is part of a pipeline that includes voxelization and binary RLE encoding, optimizing the data for GPU splatting [S1, unofficial].
 
 ## Sources
 [S1] sp4cerat/OpenGL-Voxel-Splatting, https://github.com/sp4cerat/OpenGL-Voxel-Splatting, fetched 2026-10-27 (unofficial)

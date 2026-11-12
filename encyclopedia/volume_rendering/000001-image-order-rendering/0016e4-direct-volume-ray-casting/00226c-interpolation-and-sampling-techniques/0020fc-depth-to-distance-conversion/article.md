@@ -3,28 +3,28 @@
 Also called: Depth to Distance, depth2dist, z_vals to dists
 
 ## Overview
-Depth to Distance Conversion transforms discrete depth samples ($z\_vals$) along a ray into physical segment lengths ($dists$) required for volume rendering integration. It solves the problem that raw depth differences do not represent true Euclidean distances when the ray is not aligned with the viewing direction. It differs from [NDC Points to Distance](2500-ndc-points-to-distance.md) by operating in camera-space depth coordinates rather than Normalized Device Coordinates, making it suitable for standard perspective projection pipelines where depth is linear in camera space but non-linear in screen space.
+Depth to Distance Conversion transforms discrete depth samples ($z\_vals$) along a ray into physical segment lengths ($dists$) required for volume rendering integration [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial]. It accounts for the cosine of the angle between the ray and the viewing direction to convert axial depth differences into true Euclidean distances along the ray [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial].
 
 ## How it works
 **Inputs:**
-- $z\_vals$: Array of shape $(N, K)$ or $(N,)$ containing $K$ depth samples along $N$ rays. Values are in camera-space units (distance from camera center along the optical axis).
-- $cos\_angle$: Array of shape $(N,)$ or $(N, 1)$ containing the cosine of the angle between each ray's direction vector $\mathbf{d}$ and the camera's viewing direction (optical axis, typically $[0, 0, 1]$ in camera space).
+- $z\_vals$: Array of shape $(N, K)$ containing $K$ depth samples along $N$ rays [S2, unofficial]. Values are in camera-space units (distance from camera center along the optical axis) [G].
+- $cos\_angle$: Array of shape $(N,)$ or $(N, 1)$ containing the cosine of the angle between each ray's direction vector and the camera's viewing direction [S1, unofficial][S3, unofficial].
 
 **Outputs:**
-- $dists$: Array of shape $(N, K-1)$ or $(N, K)$ containing the physical Euclidean distance of each segment along the ray.
+- $dists$: Array of shape $(N, K)$ containing the physical distance of each segment along the ray [S2, unofficial].
 
 **Data Structures:**
-- $z\_vals$: Floating-point array.
-- $cos\_angle$: Floating-point array, values in $[0, 1]$.
+- $z\_vals$: Floating-point array [G].
+- $cos\_angle$: Floating-point array, values in $[0, 1]$ [G].
 
 **Steps:**
-1. **Compute Raw Depth Differences:** Calculate the difference between consecutive depth samples.
+1. **Compute Raw Depth Differences:** Calculate the difference between consecutive depth samples [S2, unofficial][S3, unofficial][S4, unofficial].
    $$ \Delta z_i = z_{i+1} - z_i $$
-   For an array $z\_vals$ of length $K$, this produces $K-1$ differences.
-2. **Handle Boundary Segment:** Append a large constant value to the end of the differences array to represent the distance from the last sample to infinity (or the far clipping plane). This ensures the output array has the same length as the input depth samples, facilitating element-wise operations with density/alpha values at each sample point.
+   For an array $z\_vals$ of length $K$, this produces $K-1$ differences [G].
+2. **Handle Boundary Segment:** Append a large constant value to the end of the differences array to represent the distance from the last sample to the far clipping plane or infinity [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial]. This ensures the output array has the same length as the input depth samples, facilitating element-wise operations with density or alpha values at each sample point [G].
    $$ dists_{raw} = [\Delta z_0, \Delta z_1, \dots, \Delta z_{K-2}, C] $$
-   where $C$ is a large constant (e.g., $10^{10}$).
-3. **Scale by Cosine:** Multiply the raw distances by the cosine of the angle between the ray and the viewing direction. This corrects for the oblique angle, converting axial depth differences into true Euclidean distances along the ray.
+   where $C$ is a large constant [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial].
+3. **Scale by Cosine:** Multiply the raw distances by the cosine of the angle between the ray and the viewing direction [S1, unofficial][S3, unofficial][S4, unofficial].
    $$ dists_i = dists_{raw, i} \cdot \cos(\theta_i) $$
 
 **Pseudocode:**
@@ -32,64 +32,53 @@ Depth to Distance Conversion transforms discrete depth samples ($z\_vals$) along
 
 ```python
 import torch
-import math
 
 def depth_to_distance(z_vals, cos_angle):
     """
     Convert depth samples to physical distances along the ray.
     
     Args:
-        z_vals: Tensor of shape (..., K) or (K,) containing depth values.
+        z_vals: Tensor of shape (..., K) containing depth values.
         cos_angle: Tensor of shape (..., 1) or (...) containing cos(theta) for each ray.
         
     Returns:
         dists: Tensor of shape (..., K) containing segment distances.
     """
     # Step 1: Compute raw differences between consecutive z_vals
-    # z_vals[..., 1:] - z_vals[..., :-1] results in shape (..., K-1)
     raw_dists = z_vals[..., 1:] - z_vals[..., :-1]
     
     # Step 2: Append a large constant for the last segment
-    # The last segment extends to infinity or far plane.
-    # We expand the constant to match the batch dimensions.
     large_constant = torch.tensor(1e10, dtype=z_vals.dtype, device=z_vals.device)
-    
-    # Create a tensor of shape (..., 1) filled with the large constant
-    last_segment = large_constant.expand_as(raw_dists[..., :1])
-    
-    # Concatenate along the last dimension
+    last_segment = large_constant.expand(raw_dists[..., :1].shape)
     dists = torch.cat([raw_dists, last_segment], dim=-1)
     
     # Step 3: Scale by the cosine of the angle between ray and viewing direction
-    # cos_angle should be broadcastable to dists shape.
-    # If cos_angle is (..., 1), it broadcasts correctly over the K dimension.
-    dists = dists * cos_angle.unsqueeze(-1) if cos_angle.dim() == z_vals.dim() - 1 else dists * cos_angle
+    dists = dists * cos_angle.unsqueeze(-1)
     
     return dists
 ```
 
 **Parameters:**
-- $C$ (large constant): $10^{10}$. This value is sufficiently large to approximate infinity for practical rendering purposes without causing overflow in standard float32 arithmetic.
+- $C$ (large constant): $10^{10}$ [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Zero Cosine:** If the ray is perpendicular to the viewing direction ($\cos(\theta) = 0$), the distance becomes zero. This is physically correct for the projection but may cause division by zero if used in inverse calculations. [G] In practice, rays in volume rendering are rarely exactly perpendicular to the viewing direction unless the camera is looking sideways at a plane, but this should be guarded against if used in shading calculations.
-- **Negative Depth:** If $z\_vals$ are not sorted or contain negative values (behind the camera), the difference calculation will produce negative distances. The method assumes $z\_vals$ are sorted in increasing order away from the camera.
-- **Precision:** For very large depth ranges, floating-point precision errors in $z\_vals$ may lead to inaccurate distance estimates. Using float64 for $z\_vals$ can mitigate this if necessary.
+Not given in the sources.
 
 ## Subtopics
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot K)$, where $N$ is the number of rays and $K$ is the number of samples per ray. The operation involves simple subtraction, concatenation, and multiplication.
-- **Memory Complexity:** $O(N \cdot K)$ for storing the output $dists$.
-- **Strengths:** Simple, computationally inexpensive, and analytically correct for perspective projection in camera space.
-- **Limitations:** Only valid for camera-space depth. Does not account for non-linear depth buffers (NDC) directly. Requires pre-computed $cos\_angle$.
-- **When to use:** Standard NeRF and volume rendering pipelines where depth is sampled linearly in camera space.
-- **When not to use:** When working directly with NDC coordinates (use [NDC Points to Distance](2500-ndc-points-to-distance.md)) or when the ray direction is not known relative to the camera.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Not given in the sources.
+- **Limitations:** Not given in the sources.
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
 
 ## Background
-Depth to Distance Conversion is a fundamental step in direct volume ray casting, particularly in neural radiance fields (NeRF) and traditional ray marching. It ensures that the integration of volume density and color along the ray is weighted by the true physical distance traversed, rather than the projected depth difference. This correction is critical for maintaining correct lighting and shading properties when rays are oblique to the camera plane. The method is widely implemented in open-source NeRF repositories such as [pointnerf](https://github.com/Xharlie/pointnerf) [S1, unofficial], [TensoRF](https://github.com/apchenstu/TensoRF) [S2, unofficial], and [Collaborative-Neural-Radiance-Fields](https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis) [S3, unofficial].
+Depth to Distance Conversion is a fundamental step in direct volume ray casting and neural radiance fields (NeRF) [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial]. It ensures that the integration of volume density and color along the ray is weighted by the true physical distance traversed, rather than the projected depth difference [G]. Not given in the sources.
 
 ## Sources
 [S1] Xharlie/pointnerf, https://github.com/Xharlie/pointnerf, fetched 2026-10-26 (unofficial)
-[S2] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
-[S3] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
+[S2] YihangChen-ee/CNC, https://github.com/YihangChen-ee/CNC, fetched 2026-10-27 (unofficial)
+[S3] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
+[S4] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)

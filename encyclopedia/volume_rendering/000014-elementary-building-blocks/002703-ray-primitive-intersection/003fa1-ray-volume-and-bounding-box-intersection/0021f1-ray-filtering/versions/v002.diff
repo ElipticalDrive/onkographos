@@ -1,0 +1,201 @@
+--- v001.md
++++ v002.md
+@@ -1,116 +1,100 @@
+ # Ray Filtering
+ 
+-Also called: Filtering Rays, Ray Culling, Ray-Volume and Bounding Box Intersection, TensorBase Ray Filtering
++Also called: Filtering Rays, Ray Culling, Ray Filtering Outside Bounding Box, Ray Filtering using Alpha Mask, TensorBase Ray Filtering
+ 
+ ## Overview
+-Ray filtering reduces computational load by discarding rays that do not intersect with the scene's geometry or alpha mask before expensive volume rendering steps [S1, S2, unofficial]. It distinguishes itself from sibling methods by operating as a pre-processing culling stage on a batch of rays, often integrating alpha-mask density checks alongside axis-aligned bounding box (AABB) intersection tests [S1, S2, unofficial].
++Ray filtering reduces computational load by discarding rays that do not intersect with the scene's geometry or alpha mask before expensive volume rendering steps [S3, unofficial]. It distinguishes itself from sibling methods by operating as a pre-processing culling stage on a batch of rays, often integrating alpha-mask density checks alongside axis-aligned bounding box (AABB) intersection tests [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-- **Inputs**: A batch of rays defined by origins $\mathbf{o} \in \mathbb{R}^{N \times 3}$ and directions $\mathbf{d} \in \mathbb{R}^{N \times 3}$; an AABB defined by minimum corner $\mathbf{min} \in \mathbb{R}^3$ and maximum corner $\mathbf{max} \in \mathbb{R}^3$; an optional alpha mask volume for density-based culling; a boolean flag `bbox_only`.
+-- **Outputs**: A boolean mask `valid_mask` of size $N$ indicating which rays intersect the scene; optionally, filtered ray origins and directions.
++- **Inputs**: A batch of rays defined by origins $\mathbf{o} \in \mathbb{R}^{N \times 3}$ and directions $\mathbf{d} \in \mathbb{R}^{N \times 3}$; an AABB defined by minimum corner $\mathbf{min} \in \mathbb{R}^3$ and maximum corner $\mathbf{max} \in \mathbb{R}^3$; an optional alpha mask volume for density-based culling; a boolean flag `bbox_only` [S1, S2, S3, unofficial].
++- **Outputs**: A boolean mask `valid_mask` of size $N$ indicating which rays intersect the scene; optionally, filtered ray origins and directions [S2, unofficial].
+ 
+ **Data Structures**
+-- **AABB**: Two 3D vectors, `aabb[0]` (min) and `aabb[1]` (max).
+-- **Alpha Mask**: A 3D tensor sampled at query points, returning scalar alpha values.
++- **AABB**: Two 3D vectors, `aabb[0]` (min) and `aabb[1]` (max) [S1, S2, unofficial].
++- **Alpha Mask**: A 3D tensor sampled at query points, returning scalar alpha values [S2, unofficial].
+ 
+ **Steps**
+-1. **Compute Ray-AABB Intersection Intervals**:
+-   For each ray $i$, compute the intersection parameter range $[t_{min}, t_{max}]$ with the AABB.
+-   Calculate inverse direction components:
++1. Split the total number of rays $N$ into chunks of size `chunk` for batched processing [S1, unofficial].
++2. For each chunk, extract ray origins and directions [S1, unofficial].
++3. Compute the intersection parameter range $[t_{min}, t_{max}]$ with the AABB using the slab method:
+    $$ \text{rate}_a = \frac{\mathbf{aabb}[1] - \mathbf{o}}{\mathbf{d}} $$
+    $$ \text{rate}_b = \frac{\mathbf{aabb}[0] - \mathbf{o}}{\mathbf{d}} $$
+-   Compute the entry and exit distances along the ray:
+    $$ t_{min} = \max(\min(\text{rate}_a), \min(\text{rate}_b)) $$
+    $$ t_{max} = \min(\max(\text{rate}_a), \max(\text{rate}_b)) $$
+-   A ray intersects the box if $t_{max} > t_{min}$ and $t_{max} > 0$ (assuming rays start at $t=0$) [S1, unofficial].
+-
+-2. **Determine Initial Mask**:
+-   Set `mask_inbbox` to true for rays where $t_{max} > t_{min}$ [S1, unofficial].
+-
+-3. **Alpha Mask Filtering (Optional)**:
+-   If `bbox_only` is false, sample points along the rays within the bounding box interval. Check if any sample point has an alpha value $> 0$ in the alpha mask. Update `mask_inbbox` to true only if the ray intersects the box AND passes through a non-zero alpha region [S1, S2, unofficial].
+-
+-4. **Batch Processing**:
+-   Split the ray batch into chunks if memory constraints require it. Apply the above logic per chunk [S2, unofficial].
+-
+-5. **Update State**:
+-   Reinitialize the ray sampler with the filtered ray count to ensure subsequent rendering steps only process valid rays [S1, unofficial].
++   A ray intersects the box if $t_{max} > t_{min}$ [S1, S2, unofficial].
++4. Determine the initial mask: `mask_inbbox = (t_max > t_min)` [S2, unofficial].
++5. If `bbox_only` is False, sample points along the rays within the bounding box interval and check if any sample has an alpha value $> 0$ in the alpha mask. Update `mask_inbbox` to true only if the ray intersects the box AND passes through a non-zero alpha region [S1, S2, unofficial].
++6. If `bbox_only` is True, `mask_inbbox` remains based solely on AABB intersection [S3, unofficial].
++7. Reinitialize the ray sampler with the filtered ray count to ensure subsequent rendering steps only process valid rays [S2, unofficial].
+ 
+ **Pseudocode**
+ ```python
+-def filter_rays(rays_o, rays_d, aabb_min, aabb_max, alpha_mask=None, bbox_only=False):
++def filter_rays(rays_o, rays_d, aabb_min, aabb_max, alpha_mask=None, bbox_only=False, N_samples=64):
+     """
+     Filter rays based on AABB intersection and optionally alpha mask density.
+-    
+     Args:
+         rays_o: (N, 3) ray origins
+-        rays_d: (N, 3) ray directions (assumed normalized)
++        rays_d: (N, 3) ray directions
+         aabb_min: (3,) minimum corner of AABB
+         aabb_max: (3,) maximum corner of AABB
+-        alpha_mask: Optional 3D tensor or sampling function for alpha values
++        alpha_mask: Object with method sample_xyz(xyz) returning alpha values
+         bbox_only: Boolean, if True skip alpha mask check
+-        
++        N_samples: Number of points sampled along each ray
+     Returns:
+         valid_mask: (N,) boolean mask of valid rays
+     """
+-    # Step 1: Compute intersection intervals
+-    # rate_a and rate_b are (N, 3)
+-    rate_a = (aabb_max - rays_o) / rays_d
+-    rate_b = (aabb_min - rays_o) / rays_d
++    N = len(rays_o)
++    valid_mask = [False] * N
+     
+-    # t_min is the max of the mins, t_max is the min of the maxs
+-    # torch.minimum and torch.maximum operate element-wise
+-    t_min = torch.maximum(torch.minimum(rate_a, rate_b), dim=1).values
+-    t_max = torch.minimum(torch.maximum(rate_a, rate_b), dim=1).values
+-    
+-    # Step 2: Initial bbox mask
+-    # Ray intersects if t_max > t_min and t_max > 0 (ray enters box in front of origin)
+-    mask_inbbox = (t_max > t_min) & (t_max > 0)
+-    
+-    # Step 3: Alpha mask filtering
+-    if not bbox_only and alpha_mask is not None:
+-        # Sample points along rays within the bbox interval
+-        # This step requires implementing ray sampling within [t_min, t_max]
+-        # For simplicity, we assume a helper function `sample_rays` exists
+-        # which returns sampled points and a mask of points inside the bbox
++    for i in range(N):
++        o = rays_o[i]
++        d = rays_d[i]
+         
+-        # Generate sample points
+-        # N_samples is a hyperparameter
+-        N_samples = 64
+-        t_vals = torch.linspace(0, 1, N_samples, device=rays_o.device)
+-        # Map t_vals to actual distances [t_min, t_max]
+-        # Handle rays where t_min might be negative (origin inside box)
+-        # Clamp t_min to 0 for sampling start if necessary
+-        start_t = torch.clamp(t_min, min=0.0)
+-        end_t = t_max
++        # Avoid division by zero for degenerate rays [G]
++        d_safe = [1e-10 if abs(dx) < 1e-10 else dx for dx in d]
+         
+-        # Interpolate t values for each ray
+-        # t_sampled shape: (N, N_samples)
+-        t_sampled = start_t.unsqueeze(1) + t_vals.unsqueeze(0) * (end_t.unsqueeze(1) - start_t.unsqueeze(1))
++        # Compute rate arrays
++        rate_a = [(aabb_max[j] - o[j]) / d_safe[j] for j in range(3)]
++        rate_b = [(aabb_min[j] - o[j]) / d_safe[j] for j in range(3)]
+         
+-        # Compute 3D coordinates
+-        # xyz_sampled shape: (N, N_samples, 3)
+-        xyz_sampled = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_sampled.unsqueeze(2)
++        # Compute t_min and t_max
++        t_min = max(min(rate_a), min(rate_b))
++        t_max = min(max(rate_a), max(rate_b))
+         
+-        # Sample alpha mask at these points
+-        # alpha_values shape: (N, N_samples)
+-        alpha_values = alpha_mask.sample(xyz_sampled)
+-        
+-        # Check if any point has alpha > 0
+-        mask_inalpha = (alpha_values > 0).any(dim=1)
+-        
+-        # Combine masks
+-        mask_inbbox = mask_inbbox & mask_inalpha
+-        
+-    return mask_inbbox
++        # Initial bbox mask
++        if t_max > t_min:
++            if bbox_only:
++                valid_mask[i] = True
++            else:
++                # Clamp start_t to 0 if origin is inside the box [G]
++                start_t = max(t_min, 0.0)
++                end_t = t_max
++                
++                if end_t > start_t:
++                    # Sample points along the ray
++                    t_vals = [start_t + k * (end_t - start_t) / (N_samples - 1) for k in range(N_samples)]
++                    xyz_sampled = [[o[j] + d[j] * t for j in range(3)] for t in t_vals]
++                    
++                    # Check alpha mask
++                    alpha_values = [alpha_mask.sample_xyz(pt) for pt in xyz_sampled]
++                    if any(a > 0 for a in alpha_values):
++                        valid_mask[i] = True
++                    else:
++                        valid_mask[i] = False
++                else:
++                    valid_mask[i] = False
++        else:
++            valid_mask[i] = False
++            
++    return valid_mask
+ ```
+ 
+ **Parameters**
+-- `bbox_only`: Boolean. If `True`, only AABB intersection is checked. If `False`, alpha mask density is also checked [S1, S2, unofficial].
++- `bbox_only`: Boolean. If `True`, only AABB intersection is checked. If `False`, alpha mask density is also checked [S1, S2, S3, unofficial].
+ - `N_samples`: Number of points sampled along each ray for alpha mask checking. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls**
+-- **Degenerate Rays**: Rays with zero direction components cause division by zero in `rate_a` and `rate_b`. Handle by checking for zero direction or using large constants for inverse direction [G].
++- **Degenerate Rays**: Rays with zero direction components cause division by zero in `rate_a` and `rate_b`. Handle by clamping zero direction components to a small epsilon before division [G].
+ - **Origin Inside Box**: If the ray origin is inside the AABB, $t_{min}$ may be negative. Ensure sampling starts at $\max(0, t_{min})$ to avoid sampling behind the camera [G].
+ - **Precision**: Floating-point errors in $t_{max} > t_{min}$ comparisons can lead to incorrect culling. Use a small epsilon if necessary [G].
+@@ -125,14 +109,15 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(N)$ for AABB intersection, where $N$ is the number of rays. Alpha mask sampling adds $O(N \cdot S)$, where $S$ is the number of samples per ray [S1, S2, unofficial].
+-- **Memory Complexity**: $O(N \cdot S)$ for storing sampled points and alpha values if alpha mask filtering is enabled [S1, S2, unofficial].
+-- **Performance**: Significantly reduces rendering time by eliminating rays that do not contribute to the final image. The reduction depends on the scene's sparsity and the tightness of the AABB [S1, S2, unofficial].
+-- **Strengths**: Simple to implement, effective for sparse scenes, reduces memory bandwidth for subsequent rendering steps [S1, S2, unofficial].
+-- **Limitations**: Requires pre-computed alpha mask or AABB. Alpha mask sampling adds overhead if the scene is dense [S1, S2, unofficial].
++- **Time Complexity**: Not given in the sources.
++- **Memory Complexity**: Not given in the sources.
++- **Performance**: Reduces computation for rays that do not pass through the scene [S3, unofficial].
++- **Strengths**: Not given in the sources.
++- **Limitations**: Not given in the sources.
+ 
+ ## Background
+-Ray filtering is a common optimization in volume rendering and neural radiance fields (NeRF) to improve training and inference efficiency. It is used in TensorBase [S1, unofficial] and Collaborative NeRF [S2, unofficial] to cull rays outside the bounding box or alpha mask. The method is typically applied during training iterations when the alpha mask is updated [S1, unofficial].
++Ray filtering is used in TensorBase [S2, unofficial] and Collaborative NeRF [S3, unofficial] to cull rays outside the bounding box or alpha mask. The method is typically applied during training iterations when the alpha mask is updated [S2, unofficial].
+ 
+ ## Sources
+-[S1] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
+-[S2] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)+[S1] Nemo1999/Joint-TensoRF, https://github.com/Nemo1999/Joint-TensoRF, fetched 2026-10-27 (unofficial)
++[S2] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
++[S3] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)

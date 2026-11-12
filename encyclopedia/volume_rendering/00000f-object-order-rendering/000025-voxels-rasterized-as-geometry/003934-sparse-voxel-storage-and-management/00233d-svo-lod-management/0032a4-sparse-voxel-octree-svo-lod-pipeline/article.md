@@ -51,74 +51,40 @@ The core data structure is the Sparse Voxel Octree (SVO) [S1].
 
 ```python
 def prepare_asset(asset):
-    """
-    Offline phase: Convert source geometry to SVO and blend shapes.
-    """
-    # 1. Generate LODs
-    lod_proxies = generate_light_proxy(asset)
-    lod_binary = generate_simplified_binary(asset)
-    lod_partial = generate_partial_voxel(asset)
-    
-    # 2. Construct Full SVO
-    svo = sample_geometry_into_octree(asset)
-    
-    # 3. Bake Materials
-    svo.channels.color = bake_material_channel(asset, "color")
-    svo.channels.specular = bake_material_channel(asset, "specular")
-    svo.channels.roughness = bake_material_channel(asset, "roughness")
-    svo.channels.control_signals = bake_control_signals(asset)
-    
-    # 4. Store Local Vectors for World-Space Dependencies
-    # Required for features like wing-side coloring
-    svo.local_vectors = compute_local_space_vectors(asset)
-    
-    # 5. Optimize for Animation (Splay Overlaps)
-    # Regenerate with optimal posing to separate overlapping feathers
-    svo = regenerate_svo_with_optimal_posing(svo, asset)
-    
-    # 6. Generate Blend Shapes
-    # Consolidate deformations to avoid rig emulation
-    blend_shapes = generate_blend_shapes_from_rig(asset)
-    
-    return {
-        "lod_proxies": lod_proxies,
-        "lod_binary": lod_binary,
-        "lod_partial": lod_partial,
-        "svo": svo,
-        "blend_shapes": blend_shapes
-    }
+    # Generate LOD representations: light proxy, simplified binary, partial voxel, full SVO [S1]
+    lod_proxies = []  # [G] Standard LOD generation
+    lod_binary = []   # [G] Standard binary export
+    lod_partial = []  # [G] Standard partial voxelization
+    # Construct SVO: sample geometry into stored octree, containing positions, normals, UVs, local offsets [S1]
+    svo = {"nodes": [], "channels": {"color": [], "specular": [], "roughness": [], "control_signals": [], "alternate_materials": []}}
+    # Store local-space vectors for world-space dependencies (e.g., wing sides) [S1]
+    svo["local_vectors"] = []  # [G] Compute local-space vectors from asset geometry
+    # Optimize for animation: regenerate SVOs with high resolution and optimal posing, splaying overlapping elements [S1]
+    # [G] Regenerate with high res and optimal posing
+    # Consolidate deformations into blend shapes procedurally selected and triggered [S1]
+    blend_shapes = []  # [G] Generate blend shapes from rig to avoid emulating thousands of joints
+    return {"lod_proxies": lod_proxies, "lod_binary": lod_binary, "lod_partial": lod_partial, "svo": svo, "blend_shapes": blend_shapes}
 
 def render_asset(asset_data, camera, lod_level, group_id=None):
-    """
-    Online phase: Animate and voxelize SVO for rendering.
-    """
     svo = asset_data["svo"]
     blend_shapes = asset_data["blend_shapes"]
-    
-    # 1. Select LOD
-    # lod_level is determined by screen size or artist choice
-    current_svo = select_lod_level(svo, lod_level)
-    
-    # 2. Animate using Blend Shapes
-    # Procedurally select and trigger blend shapes based on animation state
-    posed_svo = apply_blend_shapes(current_svo, blend_shapes, animation_state)
-    
-    # 3. Transpose Local Vectors
-    # Convert local-space vectors to world-space for correct material encoding
-    posed_svo.world_vectors = transpose_local_to_world(posed_svo.local_vectors, camera.transform)
-    
-    # 4. Voxelize into Frustum-Aligned Grid
-    voxel_grid = sample_svo_to_grid(posed_svo, camera.frustum, lod_level)
-    
-    # 5. Purge Geometry
-    # Original geometry and rig data are no longer needed
-    purge_memory(asset_data["original_geometry"])
-    
-    # 6. Handle Grouping
+    # Select LOD based on screen size or artist choice [S1]
+    # [G] Traverse octree to chosen depth
+    current_svo = svo
+    # Animate using blend shapes to deform the static SVO [S1]
+    # [G] Apply blend shape weights to SVO samples
+    posed_svo = current_svo
+    # Transpose local-space vectors to world-space for materials requiring world orientation [S1]
+    posed_svo["world_vectors"] = [transform(v, camera.transform) for v in posed_svo["local_vectors"]]
+    # Voxelize: sample SVO at chosen octree level into frustum-aligned voxel grid [S1]
+    # [G] Rasterize octree samples into grid
+    voxel_grid = posed_svo
+    # Purge original geometry and rig data from memory [S1]
+    del asset_data["original_geometry"]
+    # Handle grouping: combine dense asset groups into fewer, larger voxel spaces [S1]
     if group_id is not None:
-        # Combine with other assets in the same group
-        return merge_voxel_grids(voxel_grid, get_group_voxels(group_id))
-    
+        # [G] Combine grids for ray-tracing efficiency
+        voxel_grid = merge_voxel_grids(voxel_grid, get_group_voxels(group_id))
     return voxel_grid
 ```
 
@@ -141,8 +107,8 @@ def render_asset(asset_data, camera, lod_level, group_id=None):
     *   400 assets: 82% reduction (15262 MB to 2816 MB) [S1].
 *   **Voxelization Time:** Grouped SVOs reduced voxelization times by up to 99% (416 min to 10 min) compared to full geometry assets [S1].
 *   **Render Time:** Grouped SVOs reduced render times by 95% (264 min to 12 min) compared to full geometry assets [S1].
-*   **Strengths:** Consistent input to the renderer, reduced memory footprint, faster voxelization, efficient handling of thousands of assets.
-*   **Limitations:** Requires offline preparation; static SVOs may suffer from overlap artifacts if not carefully posed; blend shapes may not capture all rig nuances.
+*   **Strengths:** Consistent input to the renderer, reduced memory footprint, faster voxelization, efficient handling of thousands of assets [S1].
+*   **Limitations:** Requires offline preparation; static SVOs may suffer from overlap artifacts if not carefully posed; blend shapes may not capture all rig nuances [S1].
 
 ## Background
 This pipeline was developed for the production of *Rio 2* at Blue Sky Studios [S1]. It was created to handle the complexity of characters, props, and vegetation in elaborate scenes, such as a choreographed flying dance and a macaw soccer match [S1]. The pipeline consolidates tools from Set Dressing, Animation, Crowds, and Fur departments into a shared library, enabling flexible shot design and efficient ray-tracing [S1]. It is analogous to SVO data structures used in real-time ray-tracing applications but adapted for a high-end offline rendering workflow [S1].

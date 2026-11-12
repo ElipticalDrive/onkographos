@@ -3,14 +3,14 @@
 Also called: ReadPackedSplat, readPackedArray
 
 ## Overview
-Packed Splat Reading is a method to decode a single 3D Gaussian Splat from a packed texture representation, extracting its geometric and color properties into a `Gsplat` struct [S1, unofficial]. It serves as the primary accessor for the standard Gaussian Splatting texture layout, distinguishing itself from extended variants by utilizing a single texture array and a specific unpacking routine for standard spherical harmonics or color data [S1, unofficial].
+Packed Splat Reading is a method to read a single 3D Gaussian Splat from a packed texture representation, decoding its geometric and color properties into a `Gsplat` struct [S1, unofficial]. It distinguishes itself from extended variants by utilizing a single `usampler2DArray` texture and a standard unpacking routine for the packed data [S1, unofficial].
 
 ## How it works
 **Inputs:**
 - `packedSplats`: A struct containing:
   - `textureArray`: `usampler2DArray` holding the packed splat data.
   - `numSplats`: `int` total number of splats.
-  - `rgbMinMaxLnScaleMinMax`: `vec4` parameters used during decoding (specific usage defined in `unpackSplatEncoding`).
+  - `rgbMinMaxLnScaleMinMax`: `vec4` parameters used during decoding.
   - `lodOpacity`: `bool` flag to adjust alpha for level-of-detail rendering.
 - `index`: `int` the index of the splat to read.
 
@@ -24,11 +24,11 @@ Packed Splat Reading is a method to decode a single 3D Gaussian Splat from a pac
   - `rgba`: `vec4`
 
 **Constants:**
-- `GSPLAT_FLAG_ACTIVE`: Defined as `1u << 0u` [S1, unofficial].
+- `GSPLAT_FLAG_ACTIVE`: Defined as `1 << 0` [S1, unofficial].
 
 **Steps:**
-1. Initialize `gsplat.flags` to `0u` [S1, unofficial].
-2. Validate the input `index`. If `index < 0` or `index >= numSplats`, the method returns the initialized `gsplat` with `flags = 0u` and no data read [S1, unofficial].
+1. Initialize `gsplat.flags` to `0` [S1, unofficial].
+2. Validate the input `index`. If `index < 0` or `index >= numSplats`, the method returns the initialized `gsplat` with `flags = 0` and no data read [S1, unofficial].
 3. Calculate the texture coordinate using `splatTexCoord(index)` [S1, unofficial].
 4. Fetch the packed data from `textureArray` at the calculated coordinate and mip level 0:
    $$ \text{packedData} = \text{texelFetch}(\text{textureArray}, \text{splatTexCoord(index)}, 0) $$
@@ -43,7 +43,7 @@ Packed Splat Reading is a method to decode a single 3D Gaussian Splat from a pac
    $$ \text{zeroSize} = \text{all}(\text{equal}(\text{gsplat.scales}, \text{vec3}(0.0, 0.0, 0.0))) $$
    [S1, unofficial].
 8. Set `gsplat.flags`:
-   - If `zeroSize` is true, `gsplat.flags = 0u`.
+   - If `zeroSize` is true, `gsplat.flags = 0`.
    - Otherwise, `gsplat.flags = GSPLAT_FLAG_ACTIVE` [S1, unofficial].
 9. Set `gsplat.index` to the input `index` [S1, unofficial].
 
@@ -54,55 +54,52 @@ Packed Splat Reading is a method to decode a single 3D Gaussian Splat from a pac
 def read_packed_splat(packed_splats, index):
     # Initialize output struct
     gsplat = Gsplat()
-    gsplat.flags = 0u
-    gsplat.index = index
+    gsplat.flags = 0
 
     # Boundary check
     if index < 0 or index >= packed_splats.numSplats:
         return gsplat
 
-    # Fetch packed data
-    coord = splatTexCoord(index)
-    packed_data = texelFetch(packed_splats.textureArray, coord, 0)
+    # Calculate texture coordinate for index
+    # coord = splatTexCoord(index)  # Not given in the sources [S1, unofficial]
 
-    # Decode fields
-    unpack_splat_encoding(
-        packed_data,
-        gsplat.center,
-        gsplat.scales,
-        gsplat.quaternion,
-        gsplat.rgba,
-        packed_splats.rgbMinMaxLnScaleMinMax
-    )
+    # Fetch packed data from texture at coordinate and mip level 0
+    # packed_data = texelFetch(packed_splats.textureArray, coord, 0)  # Standard GLSL texture fetch [G]
+
+    # Decode packed data into gsplat fields
+    # unpackSplatEncoding(packed_data, gsplat.center, gsplat.scales, gsplat.quaternion, gsplat.rgba, packed_splats.rgbMinMaxLnScaleMinMax)  # Not given in the sources [S1, unofficial]
 
     # LOD opacity adjustment
     if packed_splats.lodOpacity:
         gsplat.rgba.a = 2.0 * gsplat.rgba.a
 
     # Determine active flag based on scale
-    zero_size = all_equal(gsplat.scales, vec3(0.0, 0.0, 0.0))
-    if zero_size:
-        gsplat.flags = 0u
-    else:
-        gsplat.flags = 1u << 0u  # GSPLAT_FLAG_ACTIVE
+    # zero_size = all_equal(gsplat.scales, (0.0, 0.0, 0.0))  # Not given in the sources [S1, unofficial]
+    # if zero_size:
+    #     gsplat.flags = 0
+    # else:
+    #     gsplat.flags = 1 << 0  # GSPLAT_FLAG_ACTIVE
+
+    # Set index
+    gsplat.index = index
 
     return gsplat
 ```
 
 **Edge Cases and Pitfalls:**
-- If `index` is out of bounds, `flags` are set to `0u` and no data is read [S1, unofficial].
-- If `packedSplats` inputs are missing or invalid, `flags` are set to `0u` and no data is read [S1, unofficial].
+- If `index` is out of bounds, `flags` are set to `0` and no data is read [S1, unofficial].
+- If `packedSplats` inputs are missing or invalid, `flags` are set to `0` and no data is read [S1, unofficial].
 
 ## Subtopics
 
 ### Extended Splat Reading
-A variant that reads a single 3D Gaussian Splat from two extended texture arrays, decoding properties into a `Gsplat` struct [S1, unofficial]. It differs from the standard method by using `textureArray1` and `textureArray2` and the `unpackSplatExt` helper function [S1, unofficial]. It is chosen when the splat data requires more bits than the standard packing allows, typically for higher-order spherical harmonics or extended color representations [S1, unofficial]. Input struct `ExtSplats` contains `usampler2DArray textureArray1`, `usampler2DArray textureArray2`, and `int numSplats` [S1, unofficial]. Pitfalls include returning `flags = 0u` if `index` is out of bounds or inputs are missing [S1, unofficial].
+A variant that reads a single 3D Gaussian Splat from two extended texture arrays, decoding properties into a `Gsplat` struct [S1, unofficial]. It differs from the standard method by using `textureArray1` and `textureArray2` and the `unpackSplatExt` helper function [S1, unofficial]. Input struct `ExtSplats` contains `usampler2DArray textureArray1`, `usampler2DArray textureArray2`, and `int numSplats` [S1, unofficial]. Pitfalls include returning `flags = 0` if `index` is out of bounds or inputs are missing [S1, unofficial].
 
 ## Operating characteristics
-Time complexity is $O(1)$ per splat read, dominated by texture fetch and unpacking operations [S1, unofficial]. Memory complexity is determined by the packed texture size, which is optimized for cache locality in GPU rendering pipelines [S1, unofficial]. Strengths include efficient random access to splat data in fragment shaders [S1, unofficial]. Limitations include the fixed bit-depth of the packing scheme, which may not support all extended attributes without the extended variant [S1, unofficial]. Use when rendering standard 3D Gaussian Splatting scenes; do not use when extended spherical harmonics or custom attributes require the extended layout [S1, unofficial].
+Not given in the sources.
 
 ## Background
-Originating from the implementation details of the Spark 3D viewer and related Gaussian Splatting libraries, this method provides the runtime accessor for texture-packed splat data [S1, unofficial]. It is used in real-time rendering engines to decode splat attributes for rasterization or ray marching [S1, unofficial].
+Not given in the sources.
 
 ## Sources
 [S1] sparkjsdev/spark, https://github.com/sparkjsdev/spark, fetched 2026-10-27 (unofficial)

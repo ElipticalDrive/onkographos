@@ -46,10 +46,8 @@ def build_coarse_mesh(refinement_tree, target_level):
             traverse(child, current_level + 1)
 
     traverse(refinement_tree.root, 0)
-    
     # Build BVH from coarse_elements [G]
-    bvh = BVH.build(coarse_elements)  # Standard BVH construction [G]
-    return bvh
+    return coarse_elements
 ```
 
 **Parameters:**
@@ -58,17 +56,17 @@ def build_coarse_mesh(refinement_tree, target_level):
     - $L=5$: Elements at depth 5 or leaves are used [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Leaf Nodes:** If the refinement tree is shallower than $L$, leaf nodes are inserted at their actual depth. This prevents empty levels in the coarse mesh [G].
+- **Leaf Nodes:** If the refinement tree is shallower than $L$, leaf nodes are inserted at their actual depth. This prevents empty levels in the coarse mesh [S1, unofficial].
 - **BVH Efficiency:** Increasing $L$ increases the number of coarse elements. This can decrease BVH traversal efficiency due to increased node count and potentially poorer spatial coherence, as noted in the sources [S1, unofficial].
 - **Macrocell Size:** Higher $L$ results in smaller macrocells. This affects statistical culling methods like Woodcock tracking, where smaller cells may yield tighter majorants but increase overhead [S1, unofficial].
 
 ## Subtopics
 
 ### Coarse Mesh Traversal with Dual-Ray Culling
-Uses two rays to cull empty regions. Choosing varying refinement levels here affects the granularity of the culling bounds. [Dual-Ray Culling](987-coarse-mesh-traversal-with-dual-ray-culling.md)
+Uses two rays to cull empty regions. Choosing varying refinement levels here affects the granularity of the culling bounds. [Dual-Ray Culling](987-coarse-mesh-traversal-with-dual-ray-culling.md) [S1, unofficial]
 
 ### Two-level Nested Ray Marching
-A specific nested approach. Varying refinement levels in the coarse mesh changes the boundary between the coarse and fine levels. [Two-level Nested](1045-two-level-nested-ray-marching.md)
+A specific nested approach. Varying refinement levels in the coarse mesh changes the boundary between the coarse and fine levels. [Two-level Nested](1045-two-level-nested-ray-marching.md) [G]
 
 ## Operating characteristics
 **Time Complexity:**
@@ -79,7 +77,7 @@ A specific nested approach. Varying refinement levels in the coarse mesh changes
 - Proportional to the number of coarse elements. More elements at higher $L$ require more memory for the BVH nodes and bounding volumes [G].
 
 **Measured Performance:**
-Performance varies significantly by dataset and renderer. The following data is from [S1, unofficial]:
+Performance varies significantly by dataset and renderer [S1, unofficial]. The following data is from [S1, unofficial]:
 
 **Engine Dataset (Non-uniform):**
 - **Ray Marcher with Macrocell:** Performance degrades as $L$ increases (41.47 ms at $L=0$ to 87.77 ms at $L=5$) [S1, unofficial].

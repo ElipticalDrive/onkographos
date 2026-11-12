@@ -3,204 +3,146 @@
 Also called: AST-3DGS
 
 ## Overview
-Adaptive Spatio-Temporal 3D Gaussian Splatting (AST-3DGS) is a method for reconstructing dynamic scenes from monocular video using an explicit representation of 3D Gaussians [S1]. It solves the problem of memory inefficiency and slow optimization in dynamic scene reconstruction by maintaining a compact set of primitives through adaptive spatio-temporal densification and using modified Adam optimization with image-based ARAP self-supervision [S1]. It distinguishes itself from sibling methods like [3D Gaussian Splatting with Normal Information for Mesh Extraction](12069-3d-gaussian-splatting-with-normal-information-for-mesh-extra.md) by focusing on temporal attribute evolution and error-driven splitting rather than surface-aligned geometry or frosting layers [S1].
+Adaptive Spatio-Temporal 3D Gaussian Splatting (AST-3DGS) is a method for reconstructing dynamic scenes from monocular video using an explicit representation of 3D Gaussians that maintains memory efficiency through adaptive spatio-temporal densification [S1]. It solves the problem of representing complex, non-rigid motion (e.g., foliage oscillating in wind) without requiring manual segmentation of dynamic elements or prior-based supervision [S1]. It sets itself apart from sibling methods like [3D Gaussian Splatting with Normal Information for Mesh Extraction](12069-3d-gaussian-splatting-with-normal-information-for-mesh-extra.md) by focusing on temporal attribute evolution and error-driven densification rather than surface-aligned geometry, and from [Gaussian Frosting Layer Creation](12579-gaussian-frosting-layer-creation.md) by modeling volumetric motion rather than static fuzzy layers.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A monocular video sequence $\mathcal{I}$ of $N$ calibrated images, where each image $I$ has a unique timestamp $t_I \in [0,1]$ [S1]. Calibration is typically performed using Structure-from-Motion (SfM) [S1].
-*   **Output:** A set of 3D Gaussian primitives representing the dynamic scene, optimized for rendering and motion reconstruction [S1].
+*   **Input:** A monocular video sequence $\mathcal{I}$ of $N$ calibrated images, each with a unique timestamp $t_I \in [0,1]$ [S1]. Calibration is typically performed using Structure-from-Motion (SfM) [S1].
+*   **Output:** A set of 3D Gaussian primitives with parameters optimized to reconstruct the dynamic scene, including canonical positions, covariances, opacities, spherical harmonics coefficients, and temporal keyframes [S1].
 
 **Data Structures:**
-Each Gaussian primitive $g$ stores the following parameters [S1]:
-*   **Canonical Space Parameters:**
-    *   Center: $\mu_g \in \mathbb{R}^3$
-    *   Covariance: $\Sigma_g \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite)
-    *   Opacity: $o_g \in \mathbb{R}$
-    *   Spherical Harmonics coefficients: per-color-channel
-*   **Temporal Motion Parameters:**
-    *   A sequence of $n_g$ keyframes $t^i_g$ for $0 \le i < n_g$, serving as nodes of a spline [S1].
-    *   For each keyframe $i$:
-        *   Translation: $\Delta\mu^i_g \in \mathbb{R}^3$
-        *   Rotation: $q^i_g \in \mathbb{R}^4$ (quaternion)
+Each Gaussian primitive $g$ stores:
+*   **Canonical Parameters:** Center $\mu_g$, covariance $\Sigma_g$, opacity $o_g$, and per-color-channel spherical harmonics coefficients [S1].
+*   **Temporal Parameters:** A sequence of $n_g$ keyframes $t^i_g$ ($0 \le i < n_g$) and, for each keyframe, a translation $\Delta\mu^i_g$ and a rotation quaternion $q^i_g$ [S1].
+*   **Error Moments:** First moment $r_g$ and second moment $S_g$ used for densification decisions [S1].
 
-**Initialization:**
-1.  Initialize Gaussians from SfM points [S1].
-2.  Assign 1 keyframe to each Gaussian, where $t^0_g = 0$ [S1].
+**Numbered Steps:**
 
-**Rendering and Error Computation:**
-1.  **Transform to Viewspace:** For a given image $I$ at time $t_I$, compute the world-to-view rotation $W_I$ and the Jacobian of the perspective projection $J_{g,I}$ at the Gaussian's center [S1].
-2.  **Apply Temporal Displacement:**
-    *   Compute translation $\Delta\mu_g(t_I)$ using linear interpolation (lerp) between keyframe translations [S1]:
-        $$
-        \Delta\mu_g(t) = \begin{cases} 
-        \Delta\mu_g^0, & t < t_g^0 \\
-        \operatorname{lerp}\left(\Delta\mu_g^i, \Delta\mu_g^{i+1}, \frac{t-t_g^i}{t_g^{i+1}-t_g^i}\right), & \exists i: t_g^i \le t < t_g^{i+1} \\
-        \Delta\mu_g^{n_g}, & t > t_g^{n_g}
-        \end{cases}
-        $$
-    *   Compute rotation $q_g(t_I)$ using spherical linear interpolation (slerp) between keyframe quaternions, following the same interval logic [S1].
-    *   Convert $q_g(t_I)$ to rotation matrix $R_g(t_I)$ [S1].
-3.  **Compute Transformed Covariance:**
-    *   Compute the combined transformation matrix $A_{g,I} = J_{g,I} W_I R_g(t_I)$ [S1].
-    *   Compute the viewspace covariance: $\Sigma'_{g,I} = A_{g,I} \Sigma_g A_{g,I}^T$ [S1].
-4.  **Project and Sort:** Project centers to screen space and sort Gaussians by z-depth [S1].
-5.  **Rasterize:** Compute pixel colors using alpha blending [S1].
-6.  **Compute Pixel Error:** Calculate the pixel error $e_p$ using the L1 loss between the rendered and ground truth colors [S1].
-7.  **Distribute Error to Gaussians:**
-    *   Compute weight for pixel $p$ and Gaussian $g$: $w_{g,p} = a_{g,p} T_{g,p}$, where $a_{g,p}$ is opacity and $T_{g,p}$ is transmittance [S1].
-    *   Distribute error: $e_{g,p} = e_p w_{g,p}$ [S1].
-8.  **Compute Gaussian View Errors:**
-    *   Sum weights and errors over all pixels $p$ in image $I$:
-        $$w_{g,I} = \sum_{p \in I} w_{g,p}, \quad e_{g,I} = \sum_{p \in I} e_{g,p}$$
-    *   Combine errors over all relevant views $\mathcal{I}$ using weighted average:
-        $$e_g = \frac{\sum_{I \in \mathcal{I}} e_{g,I} w_{g,I}}{\sum_{I \in \mathcal{I}} w_{g,I}}$$
-        This avoids redundant densification from outlier view errors compared to taking the maximum error [S1].
-9.  **Compute Error Moments:**
-    *   For each view $I$, compute the 2D first moment $\mathbf{r}_{g,I}$ and second moment $\mathbf{S}_{g,I}$ of the projected error distribution [S1]:
-        $$\mathbf{r}_{g,I} = \frac{\sum_{p \in I} \mathbf{r}_p e_{g,p}}{e_{g,I}}, \quad \mathbf{S}_{g,I} = \frac{\sum_{p \in I} \mathbf{r}_p \mathbf{r}_p^T e_{g,p}}{e_{g,I}}$$
-        where $\mathbf{r}_p$ is the pixel coordinate [S1].
-    *   Combine moments over views $\mathcal{I}$ to get global moments $\mathbf{r}_g$ and $\mathbf{S}_g$ [S1].
-    *   Compute the centered second moment: $\mathbf{S}_g^c = \mathbf{S}_g - \mathbf{r}_g \mathbf{r}_g^T$ [S1].
-    *   **Clamp:** Clamp the computed error moments based on the shape of the Gaussian to make the process more robust [S1].
-
-**Optimization:**
-*   Use modified Adam optimization to update canonical positions, quaternions, and keyframe translations/rotations [S1].
-*   Loss function:
-    $$\mathcal{L} = \mathcal{L}_{\text{photo}} + \lambda_{\text{geo}} \mathcal{L}_{\text{geo}} + \lambda_{\text{vel}} \mathcal{L}_{\text{vel}}$$
-    where $\mathcal{L}_{\text{photo}}$ is photometric reconstruction loss, $\mathcal{L}_{\text{geo}}$ is geometric loss, and $\mathcal{L}_{\text{vel}}$ is total velocity distortion loss averaged over all pixels [S1].
-*   Parameters: $\lambda_{\text{geo}} = \lambda_{\text{vel}} = 15$ [S1].
-
-**Adaptive Spatio-Temporal Densification:**
-1.  **Spatial Splitting:**
-    *   If Gaussian error $e_g > \tau_{\text{space}}$, split the Gaussian [S1].
-    *   Use a plane passing through the Gaussian center [S1].
-    *   Determine plane normal using error moments:
-        $$\mathbf{n} = \frac{(\mathbf{S}_g^c)^{-1} \mathbf{r}_g}{\left\| (\mathbf{S}_g^c)^{-1} \mathbf{r}_g \right\|}$$
-        This differs from methods using the Gaussian's longest axis [S1].
-    *   Place new Gaussians on either side of the plane to minimize difference with the original [S1].
-2.  **Temporal Densification:**
-    *   Analyze motion to add more keyframes to existing Gaussians [S1].
-    *   The keyframe times $t^i_g$ are not optimized but determined by motion analysis [S1].
-
-**Evaluation Setup:**
-*   Hold out every 8th segment (each segment consists of four consecutive frames) for the test set [S1].
-*   Metrics: PSNR, SSIM, LPIPS, and VMAF [S1].
+1.  **Initialization:** Initialize Gaussians from SfM points with 1 keyframe each, where $t^0_g = 0$ [S1].
+2.  **Temporal Interpolation:** For a given time $t$, compute the translation $\Delta\mu_g(t)$ and rotation $q_g(t)$:
+    *   If $t < t^0_g$, use $\Delta\mu^0_g$ and $q^0_g$ [S1].
+    *   If $t > t^{n_g}_g$, use $\Delta\mu^{n_g}_g$ and $q^{n_g}_g$ [S1].
+    *   Otherwise, find $i$ such that $t^i_g \le t < t^{i+1}_g$ and compute:
+        $$ \Delta\mu_g(t) = \operatorname{lerp}\left(\Delta\mu^i_g, \Delta\mu^{i+1}_g, \frac{t-t^i_g}{t^{i+1}_g-t^i_g}\right) $$
+        $$ q_g(t) = \operatorname{slerp}\left(q^i_g, q^{i+1}_g, \frac{t-t^i_g}{t^{i+1}_g-t^i_g}\right) $$
+    [S1]
+3.  **Position and Covariance Update:** Compute the position and covariance at time $t$:
+    $$ \mu_g(t) = \mu_g + \Delta\mu_g(t) $$
+    $$ \Sigma_g(t) = R_g(t)\Sigma_g R_g^T(t) $$
+    where $R_g(t)$ is the rotation matrix corresponding to $q_g(t)$ [S1].
+4.  **Projection:** Transform to viewspace using camera rotation $W_I$ and Jacobian $J_{g,I}$:
+    $$ A_{g,I} = J_{g,I}W_I R_g(t_I) $$
+    $$ \Sigma'_{g,I} = A_{g,I}\Sigma_g A_{g,I}^T $$
+    [S1]
+5.  **Rendering and Loss:** Render the image and compute the pixel error $e_p$ using L1 loss (not total photometric loss) for consistency across views [S1].
+6.  **Error Distribution:** Distribute pixel error $e_p$ to Gaussian $g$ using weight $w_{g,p} = a_{g,p}T_{g,p}$:
+    $$ e_{g,p} = e_p w_{g,p} $$
+    [S1]
+7.  **Moment Computation:** Compute the 0-order, 1st-order, and 2nd-order error moments for each Gaussian across views:
+    *   Weighted view error: $e_g = \frac{\sum_{I \in \mathcal{I}} e_{g,I} w_{g,I}}{\sum_{I \in \mathcal{I}} w_{g,I}}$ where $w_{g,I} = \sum_{p \in I} w_{g,p}$ and $e_{g,I} = \sum_{p \in I} e_{g,p}$ [S1].
+    *   Combined 3D first moment $r_g$ and second moment $S_g$ are computed by un-projecting 2D moments from relevant views [S1]. The solution for $S_g$ is:
+        $$ \operatorname{vech}(S_g) = \left(\sum_{l \in \mathcal{I}} w_{g,l} D_3^T B_{g,l}^T B_{g,l} D_3\right)^{-1} \sum_{l \in \mathcal{I}} w_{g,l} D_3^T B_{g,l}^T \operatorname{vec}(S_{g,l}) $$
+        Then, $S_g^c = S_g - r_g r_g^T$ [S1].
+8.  **Clamping:** Clamp the computed error moments ($r_g$ and $S_g$) based on the shape of the Gaussian to make the process more robust [S1].
+9.  **Spatial Densification:** If error $e_g > \tau_{space}$, split the Gaussian using a plane passing through its center. The plane's normal is:
+    $$ \frac{(S_g^c)^{-1} r_g}{\|(S_g^c)^{-1} r_g\|} $$
+    [S1]
+10. **Temporal Densification:** Analyze motion to add keyframes to existing Gaussians if necessary [S1].
+11. **Optimization:** Use modified Adam optimization with loss:
+    $$ \mathcal{L} = \mathcal{L}_{\text{photo}} + \lambda_{\text{geo}} \mathcal{L}_{\text{geo}} + \lambda_{\text{vel}} \mathcal{L}_{\text{vel}} $$
+    where $\lambda_{\text{geo}} = \lambda_{\text{vel}} = 15$ [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
-from scipy.spatial.transform import Rotation
-
-def lerp(a, b, t):
-    return a + t * (b - a)
-
-def slerp(q1, q2, t):
-    # Simplified slerp for unit quaternions
-    dot = np.dot(q1, q2)
-    if dot < 0:
-        q2 = -q2
-        dot = -dot
-    if dot > 0.9995:
-        return lerp(q1, q2, t)
-    theta_0 = np.arccos(dot)
-    theta = theta_0 * t
-    sin_theta_0 = np.sin(theta_0)
-    s0 = np.cos(theta) - dot * np.sin(theta) / sin_theta_0
-    s1 = np.sin(theta) / sin_theta_0
-    return s0 * q1 + s1 * q2
-
-def compute_keyframe_displacement(keyframes, t):
+def compute_temporal_displacement(keyframe_times, keyframe_translations, keyframe_quaternions, t):
     """
-    keyframes: list of dicts with keys 't', 'delta_mu', 'q'
-    t: current time
-    Returns: (delta_mu, q)
+    Computes translation and rotation at time t using piecewise splines.
     """
-    if not keyframes:
-        return np.zeros(3), np.array([1, 0, 0, 0])
+    n = len(keyframe_times)
+    if t <= keyframe_times[0]:
+        return keyframe_translations[0], keyframe_quaternions[0]
+    if t >= keyframe_times[n-1]:
+        return keyframe_translations[n-1], keyframe_quaternions[n-1]
     
-    # Find interval
-    if t <= keyframes[0]['t']:
-        return keyframes[0]['delta_mu'], keyframes[0]['q']
-    if t >= keyframes[-1]['t']:
-        return keyframes[-1]['delta_mu'], keyframes[-1]['q']
-    
-    for i in range(len(keyframes) - 1):
-        t_i = keyframes[i]['t']
-        t_i1 = keyframes[i+1]['t']
-        if t_i <= t < t_i1:
-            frac = (t - t_i) / (t_i1 - t_i)
-            delta_mu = lerp(keyframes[i]['delta_mu'], keyframes[i+1]['delta_mu'], frac)
-            q = slerp(keyframes[i]['q'], keyframes[i+1]['q'], frac)
-            return delta_mu, q
-
-def render_gaussian(gaussian, camera, time):
-    # 1. Get temporal displacement
-    delta_mu, q = compute_keyframe_displacement(gaussian['keyframes'], time)
-    
-    # 2. Compute world position and rotation
-    mu_world = gaussian['mu'] + delta_mu
-    R_world = Rotation.from_quat(q).as_matrix()
-    
-    # 3. Transform to viewspace
-    # W_I is camera rotation matrix, J_g,I is Jacobian of perspective projection
-    # A_g,I = J_g,I * W_I * R_world
-    A = camera.jacobian * camera.rotation_matrix @ R_world
-    
-    # 4. Compute viewspace covariance
-    Sigma_viewspace = A @ gaussian['Sigma'] @ A.T
-    
-    # 5. Project and rasterize (simplified)
-    # ... standard 3DGS rasterization ...
-    return rendered_color
-
-def compute_error_moments(gaussians, images, ground_truth):
-    """
-    Computes error moments for all Gaussians across all images.
-    """
-    moments = {}
-    for g in gaussians:
-        moments[g['id']] = {'r': np.zeros(2), 'S': np.zeros((2,2)), 'w_sum': 0, 'e_sum': 0}
-        
-    for I, gt_image in enumerate(ground_truth):
-        rendered_image = render_scene(gaussians, images[I])
-        # Compute L1 loss per pixel
-        l1_loss = np.abs(rendered_image - gt_image)
-        
-        for g in gaussians:
-            # Get weights and errors for this Gaussian in this image
-            # w_g,p = a_g,p * T_g,p
-            # e_g,p = e_p * w_g,p
-            # ... compute pixel-wise contributions ...
+    # Find interval i such that t_i <= t < t_{i+1}
+    i = 0
+    for k in range(n - 1):
+        if keyframe_times[k] <= t < keyframe_times[k+1]:
+            i = k
+            break
             
-            # Accumulate moments
-            # r_g,I = sum(r_p * e_g,p) / e_g,I
-            # S_g,I = sum(r_p * r_p^T * e_g,p) / e_g,I
-            pass
-            
-    # Combine moments over views
-    for g in gaussians:
-        # e_g = sum(e_g,I * w_g,I) / sum(w_g,I)
-        # r_g = sum(r_g,I * w_g,I) / sum(w_g,I)
-        # S_g = sum(S_g,I * w_g,I) / sum(w_g,I)
-        # S_g_c = S_g - r_g * r_g^T
-        pass
-    return moments
+    tau = (t - keyframe_times[i]) / (keyframe_times[i+1] - keyframe_times[i])
+    
+    # Linear interpolation for translation
+    delta_mu = lerp(keyframe_translations[i], keyframe_translations[i+1], tau)
+    
+    # Spherical linear interpolation for rotation
+    q = slerp(keyframe_quaternions[i], keyframe_quaternions[i+1], tau)
+    
+    return delta_mu, q
 
-def split_gaussian(gaussian, moments, threshold):
-    if gaussian['error'] > threshold:
+def compute_error_moments(gaussians, images, weights):
+    """
+    Computes 3D error moments for spatial densification.
+    """
+    for g in gaussians:
+        total_weight = 0
+        total_error_weighted = 0
+        moments_2d = []
+        
+        for I in images:
+            # Compute 2D moments for this view
+            r_2d, S_2d = compute_2d_error_moments(g, I)
+            w_I = compute_view_weight(g, I)
+            e_I = compute_view_error(g, I)
+            
+            # Accumulate for 3D moments
+            # Note: Un-projecting 2D moments to 3D is required here
+            # This is a simplified representation of Eq 20-22
+            moments_2d.append((r_2d, S_2d, w_I, e_I))
+            
+        # Solve for 3D moments using the online formula
+        # vech(S_g) = (sum w D^T B^T B D)^-1 sum w D^T B^T vec(S_l)
+        S_g = solve_3d_second_moment(moments_2d)
+        r_g = solve_3d_first_moment(moments_2d)
+        
+        # Clamp moments based on Gaussian shape [G]
+        r_g = clamp_moment(r_g, g.shape)
+        S_g = clamp_moment(S_g, g.shape)
+        
+        g.r = r_g
+        g.S = S_g
+        g.S_c = S_g - outer_product(r_g, r_g)
+
+def spatial_split(gaussian, threshold):
+    """
+    Splits a Gaussian if error exceeds threshold.
+    """
+    if gaussian.error > threshold:
         # Compute plane normal from error moments
-        r = moments['r']
-        S_c = moments['S_c']
-        normal = np.linalg.solve(S_c, r)
-        normal = normal / np.linalg.norm(normal)
+        normal = gaussian.S_c @ gaussian.r
+        normal = normalize(normal)
         
         # Split Gaussian using plane through center with normal
-        # ... place new Gaussians ...
-        pass
+        new_gaussians = split_gaussian_by_plane(gaussian, normal)
+        return new_gaussians
+    return [gaussian]
 ```
+
+**Parameters:**
+*   $\tau_{space}$: Spatial densification threshold. Value not given in the sources.
+*   $\lambda_{\text{geo}}$: Geometric loss weight. Value: 15 [S1].
+*   $\lambda_{\text{vel}}$: Velocity distortion loss weight. Value: 15 [S1].
+*   $N$: Total number of calibrated images in the input sequence [S1].
+*   $t_I$: Unique timestamp for each image $I$, normalized to $[0,1]$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method uses L1 loss for error distribution to ensure consistency across views, avoiding the issues of total photometric loss [S1].
+*   **Boundaries:** Temporal interpolation clamps to the first/last keyframe if $t$ is outside the range [S1].
+*   **Degenerate Input:** The method assumes calibrated images from SfM [S1].
 
 ## Subtopics
 
@@ -213,18 +155,23 @@ Gaussian Frosting Layer Creation is a method for defining a volumetric "frosting
 ### [Dual-Domain Deformation Model](12804-dual-domain-deformation-model.md)
 The Dual-Domain Deformation Model (DDDM) is a method for explicitly modeling the time-dependent dynamics of 3D Gaussian particles in 4D scene reconstruction. It solves the problem of representing complex scene deformations across long video footage without requiring separate 3D Gaussian Splatting (3DGS) models per frame or an additional implicit neural field. Unlike its siblings, which may rely on normal information for mesh extraction [12069-3d-gaussian-splatting-with-normal-information-for-mesh-extra.md] or frosting layers for surface refinement [12579-gaussian-frosting-layer-creation.md], DDDM focuses on temporal attribute evolution by combining polynomial fitting in the time domain with Fourier series fitting in the frequency domain.
 
+### [DN-Splatter](13430-dn-splatter.md)
+DN-Splatter is a regularization and initialization strategy for 3D Gaussian Splatting (3DGS) that incorporates depth and normal priors to improve photorealism and geometric accuracy in challenging indoor scenes, enabling direct mesh extraction. It distinguishes itself from standard 3DGS by using an edge-aware depth loss and normal alignment to resolve ambiguities in textureless regions, whereas its sibling [3D Gaussian Splatting with Normal Information for Mesh Extraction](12069-3d-gaussian-splatting-with-normal-information-for-mesh-extra.md) focuses primarily on normal extraction without the specific adaptive depth regularization and sensor-based initialization detailed here.
+
 ### Dynamic Gaussian Deformation with Local Linearity
 This variant uses an MLP that takes time $t$ and canonical 3D position $\mathbf{x}_k$ as input to output position offsets $\delta\mathbf{x}_k$, deforming Gaussians from a canonical space [S2]. It deforms Gaussians only to integer time steps and ensures local linearity at intermediate fractional time steps by linearly interpolating positions from the two nearest integer timesteps [S2]. For an integer timestep $i$ and intermediate fractional timestep $j$ between integer steps $i_1$ and $i_2$, the position $\mathbf{x}_j$ is linearly interpolated: $\mathbf{x}_j = (i_2 - j)\mathbf{x}_{i_1} + (j - i_1)\mathbf{x}_{i_2}$ [S2].
 
 ## Operating characteristics
 *   **Time and Memory Complexity:** Memory efficiency is maintained through adaptive spatio-temporal densification, adding Gaussians and keyframes only where needed [S1]. The method allows for fast optimization and rendering [S1].
-*   **Measured Performance:** Evaluated on the AmbientGaussians dataset [S1]. For example, on Forest Scene #5, it achieved a PSNR of 25.25, SSIM of 0.83, LPIPS of 0.18, and VMAF of 70.97, with 1.04M Gaussians and a training time of 1h 56m on an NVIDIA A100 GPU with 40GB VRAM [S1].
-*   **Scaling:** 4D-GS densification threshold tuning fails to increase primitive count or quality in large scenes due to sparse gradients and suboptimal Gaussian placement under complex visibility [S1].
-*   **Strengths:** Memory efficient, fast optimization, handles large scenes with oscillatory motion (e.g., foliage) without user interaction [S1].
-*   **Limitations:** Relies on calibrated images from SfM [S1].
+*   **Measured Performance:** Evaluated on the AmbientGaussians dataset [S1]. Metrics include PSNR, SSIM, LPIPS, and VMAF [S1]. For example, on Forest Scene #1, it achieves a PSNR of 24.24, SSIM of 0.82, LPIPS of 0.19, and VMAF of 70.36 [S1].
+*   **Hardware:** Experiments were conducted on an NVIDIA A100 GPU with 40GB of VRAM [S1].
+*   **Strengths:** Memory efficient, fast optimization, no user interaction or prior-based supervision required [S1].
+*   **Limitations:** Tuning 4D-GS densification thresholds fails to increase primitive count or quality in large scenes due to sparse gradients and suboptimal Gaussian placement under complex visibility [S1].
+*   **When to Use:** Suitable for reconstructing dynamic scenes with spatially variable non-rigid motion (e.g., foliage) from monocular video [S1].
+*   **When Not to Use:** Not suitable for scenes requiring manual segmentation of dynamic elements or where prior-based supervision is available and preferred [S1].
 
 ## Background
-AST-3DGS was introduced in "Adaptive Spatio‐Temporal 3D Gaussian Splatting for Scenes with Oscillatory Motion" [S1]. It addresses the limitations of previous explicit methods for monocular videos that required manual clicking on dynamic elements for segmentation, which is impractical for scenes with many moving objects like leaves [S1]. It builds on the 3D Gaussian Splatting framework [KKLD23] and adapts gradient-based densification strategies to a spatiotemporal context using error moments [S1].
+AST-3DGS was introduced in the paper "Adaptive Spatio‐Temporal 3D Gaussian Splatting for Scenes with Oscillatory Motion" [S1]. It builds on the background of 3D Gaussian Splatting [KKLD23] and addresses limitations of previous explicit methods for monocular videos [SHU∗ 24, PBB∗ 25] which require manual clicking on dynamic elements [S1]. It draws inspiration from VET [FRF∗ 23] and NeAT [RWL∗ 22] for error distribution [S1].
 
 ## Sources
 [S1] Adaptive Spatio‐Temporal 3D Gaussian Splatting for Scenes with Oscillatory Motion, https://doi.org/10.1111/cgf.70410, fetched 2026-10-26

@@ -3,88 +3,99 @@
 Also called: LOD-based Spawning
 
 ## Overview
-Block LOD Instancing is a voxel terrain instancing strategy where the spatial resolution of the spawning grid is determined by the terrain's Level of Detail (LOD) index. It solves the performance bottleneck of generating high-frequency instances (like grass or rocks) across large, detailed terrains by deferring precise placement to lower-resolution meshes at distance. It differs from [Voxel Instancing](9449-voxel-instancing.md) by explicitly tying instance density and precision to the terrain's LOD hierarchy rather than a fixed voxel grid, and from [Surface-based Instancing with Noise Modulation](1582-surface-based-instancing-with-noise-modulation.md) by relying on geometric mesh resolution rather than procedural noise for placement distribution.
+Block LOD Instancing is a procedural placement method for voxel terrains that determines instance spawn locations based on the terrain's Level of Detail (LOD) hierarchy rather than fixed world coordinates. It solves the performance bottleneck of generating high-density instances (e.g., grass, rocks) across large terrains by restricting detailed placement to high-resolution chunks and coarse placement to low-resolution chunks. It differs from standard voxel instancing by decoupling instance density from geometric resolution, allowing distant, low-LOD chunks to host simplified or sparse instances while maintaining visual continuity.
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** Voxel terrain data with multiple LOD levels; `VoxelInstanceLibraryItem` configuration containing `lod_index`; instance assets (meshes).
-*   **Output:** Transformed instance matrices positioned on the terrain surface.
+The method relies on a configuration object, `VoxelInstanceLibraryItem`, which defines the procedural rules for spawning. The core logic maps an integer `lod_index` to specific terrain chunks, ensuring that instances are generated only on chunks matching that resolution level.
 
-**Data Structures:**
-*   `VoxelInstanceLibraryItem`: Contains `lod_index` (integer).
-    *   `lod_index = 0`: Spawns on highest-resolution chunks (LOD0).
-    *   `lod_index > 0`: Spawns on progressively lower-resolution chunks (larger cell size).
+### Inputs and Outputs
+*   **Input**: `VoxelInstanceLibraryItem` configuration, terrain LOD mesh data, and optionally a `VoxelGenerator` for SDF queries.
+*   **Output**: A set of instance transforms (position, rotation, scale) placed on the terrain surface.
 
-**Steps:**
-1.  **Determine Spawn Resolution:** The instancer selects the terrain mesh resolution based on the item's `lod_index`. Higher indices correspond to coarser meshes covering larger spatial ranges.
-2.  **Grid Generation:** Instances are placed on the grid points of the selected LOD mesh. This allows for rapid generation at large distances where full-precision geometry is not yet loaded or is too expensive to process.
-3.  **Position Assignment:** The instance position is set to the vertex or grid point of the coarse LOD mesh.
-4.  **Orientation:** The instance is aligned to the surface normal of the coarse mesh. If the terrain is spherical, the `up_mode` is set to `Sphere` to align items with the local origin [S1].
-5.  **Refinement (Optional):** If `snap_to_generator_sdf_enabled` is active, the position is refined by querying the `VoxelGenerator`'s Signed Distance Field (SDF) at the coarse position to find the true surface, assuming the coarse mesh is a good starting point. This requires at least 2 nearby SDF samples [S1].
+### Data Structures
+The `VoxelInstanceLibraryItem` contains the following fields:
+*   `lod_index` (int): Determines the chunk resolution for spawning.
+*   `offset_along_normal` (float): Adjusts position along the surface normal.
+*   `snap_to_generator_sdf_enabled` (bool): Toggles SDF-based surface snapping.
+*   `persistent` (bool): Indicates if position is saved to the voxel stream.
+*   `generator` (object): The procedural logic defining spawn conditions.
 
-**Parameters:**
-*   `lod_index`: Integer. Determines the chunk resolution.
-    *   Typical values: `0` for close-range/high-precision; `1, 2, ...` for far-range/low-precision.
-    *   Strategy: Use high `lod_index` for large items visible from afar; use low `lod_index` for small items [S1].
-*   `offset_along_normal`: Float. Offsets the instance along the surface normal to correct for floating/sinking. Depends on asset design (e.g., sinking the bottom into the ground) [S1].
-*   `snap_to_generator_sdf_enabled`: Boolean. Enables SDF-based snapping. Slows generation but improves accuracy for `lod_index > 0` [S1].
+### Algorithm Steps
+1.  **Chunk Selection**: The system iterates through active terrain chunks. It selects only those chunks whose resolution level matches the item's `lod_index`.
+    *   `lod_index = 0` selects LOD0 chunks (closest range, highest resolution).
+    *   Higher `lod_index` values select larger, lower-resolution chunks covering a wider range.
+2.  **Position Sampling**: For each selected chunk, the system samples the chunk's mesh geometry to determine candidate spawn positions.
+3.  **Surface Snapping (Optional)**: If `snap_to_generator_sdf_enabled` is true:
+    *   The system queries the `VoxelGenerator` for Signed Distance Field (SDF) values at the candidate position and nearby points.
+    *   It requires at least 2 nearby samples to interpolate the surface distance.
+    *   The instance position is adjusted to minimize the SDF value, snapping it to the approximate surface. This is an approximation, not exact ray-casting.
+4.  **Normal Offset**: The instance position is adjusted by `offset_along_normal` along the surface normal vector. This compensates for floating or sinking caused by mesh imprecision.
+5.  **Persistence Check**: If `persistent` is true, the instance ID and position are saved to the voxel stream (e.g., `VoxelStreamSQLite`). If the terrain is edited, persistent instances in modified blocks are retained; non-persistent instances are regenerated.
+6.  **Rendering**: Instances are rendered using GPU-instanced `MultiMesh` buffers for performance or standard scene nodes for flexibility. `MultiMesh` items support LOD switching based on distance ratios relative to the terrain LOD view distance.
 
-**Pitfalls:**
-*   **Placement Imprecision:** Larger `lod_index` values result in lower precision. Instances may float above or sink into the ground near sharp terrain features (ridges, crevices, caves) because they are placed on a simplified mesh [S1].
-*   **Abrupt Disappearance:** Instances may vanish abruptly at LOD boundaries. Mitigation: Use custom shaders to fade meshes based on distance and use ground textures similar to the instance color [S1].
-
-**Pseudocode:**
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def spawn_instances(terrain, item_config):
-    lod_idx = item_config.lod_index
-    # Select mesh resolution based on LOD index
-    # Higher lod_idx -> coarser mesh
-    mesh = terrain.get_lod_mesh(lod_idx)
+def spawn_instances(item_config, terrain_chunks):
+    instances = []
+    target_lod = item_config.lod_index
     
-    for vertex in mesh.vertices:
-        # Base position from coarse mesh
-        pos = vertex.position
-        normal = vertex.normal
+    # Select chunks matching the target LOD
+    relevant_chunks = [c for c in terrain_chunks if c.lod_level == target_lod]
+    
+    for chunk in relevant_chunks:
+        # Sample mesh vertices or grid points within the chunk
+        candidates = chunk.get_surface_samples()
         
-        # Apply offset to mitigate floating/sinking
-        pos += normal * item_config.offset_along_normal
-        
-        # Optional: Refine position using SDF if enabled
-        if item_config.snap_to_generator_sdf_enabled:
-            # Query VoxelGenerator SDF at pos
-            # Approximate surface by finding zero-crossing or closest point
-            # Requires at least 2 nearby samples
-            refined_pos = snap_to_sdf(terrain.generator, pos)
-            pos = refined_pos
+        for pos in candidates:
+            # Check procedural conditions (density, noise) defined in item_config.generator
+            if not item_config.generator.is_valid(pos):
+                continue
             
-        # Orientation alignment
-        if terrain.mode == "Sphere":
-            # Align with local origin
-            up_vector = normalize(pos)
-        else:
-            up_vector = normal
+            # Apply SDF snapping if enabled
+            if item_config.snap_to_generator_sdf_enabled:
+                # Query SDF at pos and neighbors
+                sdf_val = item_config.generator.query_sdf(pos)
+                # Interpolate using at least 2 nearby samples to find surface
+                pos = snap_to_sdf(pos, item_config.generator)
             
-        matrix = build_transform_matrix(pos, up_vector, vertex.tangent)
-        render_instance(item_config.asset, matrix)
+            # Apply normal offset
+            normal = chunk.get_normal_at(pos)
+            pos = pos + normal * item_config.offset_along_normal
+            
+            # Create instance transform
+            instance = create_instance(pos, item_config)
+            
+            # Handle persistence
+            if item_config.persistent:
+                save_to_stream(instance.id, instance.position)
+            
+            instances.append(instance)
+            
+    return instances
 ```
+
+### Parameters and Edge Cases
+*   **`lod_index`**: Value 0 spawns on LOD0 chunks (closest range). Higher indexes spawn on bigger chunks. Larger indexes are less precise because they operate on lower-resolution meshes, potentially causing instances to float above or sink into the ground near sharp terrain changes (ridges, crevices, caves) [S1].
+*   **`offset_along_normal`**: Depends on the asset. Designing assets with part of their bottom sunk into the ground provides a margin of error for placement imprecision [S1].
+*   **`snap_to_generator_sdf_enabled`**: Preferably used when `lod_index > 0`, as LOD0 already has maximum precision. It incurs a performance cost due to SDF queries [S1].
+*   **Persistence Constraint**: Only specific streams (e.g., `VoxelStreamSQLite`) support saving persistent instances. Manual editing of instance positions is not supported; locations are defined solely by procedural rules [S1].
+*   **Terrain Modification**: Snapping does not work correctly if the terrain is modified; instances in edited areas will not regenerate unless set to `persistent` [S1].
 
 ## Subtopics
 
 ### Offset Along Normal Placement
-Adjusts instance placement by offsetting along the surface normal to correct for floating or sinking caused by low-resolution mesh imprecision. It depends on the asset design, where sinking part of the asset's bottom into the ground provides a margin of error. The parameter `offset_along_normal` is used in the generator [S1].
+A variant that adjusts instance placement by offsetting along the surface normal to correct for floating or sinking caused by low-resolution mesh imprecision. It uses the `offset_along_normal` parameter, which depends on the asset design. Designing assets with part of their bottom sunk into the ground provides a margin of error. It is a lightweight alternative to SDF snapping [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Faster than full-precision instancing for large areas because it operates on lower-resolution meshes for distant instances. SDF snapping adds computational cost [S1].
-*   **Memory Complexity:** Depends on the terrain LOD storage. No additional instance buffers beyond standard instancing.
-*   **Strengths:** Efficiently handles large terrains by reducing instance generation cost at distance; leverages existing terrain LOD system.
-*   **Limitations:** Placement precision decreases with higher LOD indices; instances may misalign with sharp terrain features; requires careful asset design (offsets) to avoid visual artifacts.
-*   **When to Use:** Large-scale terrain with many small instances (grass, rocks) where perfect precision at distance is not critical.
-*   **When Not to Use:** Scenes requiring high-precision placement across all distances or near sharp geometric features without SDF snapping.
+*   **Performance**: Significantly faster than full-precision placement for distant objects because it operates on lower-resolution meshes for higher `lod_index` values [S1].
+*   **Precision**: Decreases as `lod_index` increases. Larger indexes are less precise, leading to potential visual artifacts (floating/sinking) near sharp terrain features [S1].
+*   **Memory**: Persistent instances require storage in the voxel stream, increasing memory usage. Non-persistent instances are regenerated each frame or chunk update, consuming CPU/GPU time but less storage [S1].
+*   **Use Case**: Ideal for large-scale terrain with high-density vegetation or debris where performance is critical and minor placement inaccuracies are acceptable at a distance. Not suitable for precise architectural placement or areas with frequent terrain modification unless persistence is used [S1].
 
 ## Background
-Block LOD Instancing is part of the Voxel Tools ecosystem, specifically designed for voxel-based terrain rendering. It integrates with the terrain's LOD system to balance performance and visual fidelity. The method is documented in the Voxel Tools documentation [S1].
+Block LOD Instancing is part of the Voxel Tools ecosystem, specifically designed for procedural terrain generation in real-time applications. It leverages the inherent LOD structure of voxel terrains to optimize instance generation. The method was developed to address the scalability issues of traditional instancing systems when applied to vast, dynamically generated voxel worlds.
 
 ## Sources
 [S1] Instancing - Voxel Tools documentation, https://voxel-tools.readthedocs.io/en/latest/instancing/, fetched 2026-10-27

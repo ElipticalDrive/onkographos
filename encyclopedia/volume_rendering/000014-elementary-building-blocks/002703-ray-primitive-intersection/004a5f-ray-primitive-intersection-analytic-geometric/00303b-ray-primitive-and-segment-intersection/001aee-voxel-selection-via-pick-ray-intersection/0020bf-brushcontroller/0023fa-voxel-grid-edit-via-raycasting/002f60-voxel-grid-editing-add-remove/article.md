@@ -1,0 +1,116 @@
+# Voxel Grid Editing (Add/Remove)
+
+Also called: Interactive voxel manipulation, Raycast-based Voxel Interaction, Screen-to-Voxel Mapping, Voxel Click Handling
+
+## Overview
+This method enables the dynamic modification of a voxel grid by adding or removing individual voxels at specific positions determined by raycasting from screen-space mouse input [S1, S2, unofficial]. It solves the problem of translating 2D user interaction into 3D spatial edits within a discrete volumetric representation. Unlike static voxelization, this approach supports real-time editing where the user selects a target face on an existing voxel, and the system computes the adjacent empty voxel position for addition or the current voxel position for removal [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Screen-space mouse coordinates (click or hover), camera projection matrix, current voxel grid state, and edit mode flag (add/remove) [S1, S2, unofficial].
+*   **Output:** Modified voxel grid (voxel added/removed/toggled) and regenerated mesh geometry [S1, S2, unofficial].
+
+**Data Structures:**
+The method relies on a `RaycastHit` structure provided by the physics engine or a custom intersection result. In custom implementations, a `HoverInfo` structure is used to track interaction state [S2, unofficial]:
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```cpp
+struct HoverInfo {
+    bool hasHit;          // True if ray intersected a voxel
+    OctreeNode* node;     // Pointer to the octree node hit (nullptr if no hit)
+    glm::vec3 position;   // 3D world position of the hit point
+    glm::vec3 normal;     // Face normal of the hit voxel at the hit point
+    int depth;            // Octree depth of the hit node
+};
+```
+Default constructor sets `hasHit=false`, `node=nullptr`, and `depth=0` [S2, unofficial].
+
+**Numbered Steps:**
+1.  **Ray Generation:** Convert the screen-space mouse click position $(u, v)$ into a 3D ray originating from the camera. This is achieved using the inverse of the camera's projection and view matrices, or via engine-specific functions like `Camera.ScreenPointToRay()` [S1, unofficial]. Let the ray be defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [S1, S2, unofficial].
+2.  **Raycasting:** Cast the ray into the scene to detect intersections with the voxel grid. The ray must intersect the bounding volume of the voxel structure. The result provides the hit position $\mathbf{p}$ and the face normal $\mathbf{n}$ at the intersection point [S1, S2, unofficial]. If no hit occurs, the operation terminates [S2, unofficial].
+3.  **Hit Voxel Identification:** Convert the 3D hit position $\mathbf{p}$ into voxel grid coordinates $(x, y, z)$. This is typically done by dividing $\mathbf{p}$ by the voxel size and applying floor or truncation, depending on the coordinate system origin [S1, unofficial]. Let this be the hit voxel position $\mathbf{v}_{hit}$ [S1, unofficial].
+4.  **Target Position Calculation:** Determine the target voxel position $\mathbf{v}_{target}$ based on the edit mode and the hit face normal $\mathbf{n}$ [S1, S2, unofficial]:
+    *   **Add Mode:** The new voxel is placed adjacent to the hit face. The target position is calculated as $\mathbf{v}_{target} = \mathbf{v}_{hit} + \mathbf{n}$ [S1, unofficial]. The normal $\mathbf{n}$ points outward from the hit voxel, indicating the direction of the empty adjacent voxel [S1, unofficial].
+    *   **Remove Mode:** The target position is the hit voxel itself, $\mathbf{v}_{target} = \mathbf{v}_{hit}$ [S2, unofficial].
+5.  **Grid Update:** Modify the voxel grid at $\mathbf{v}_{target}$:
+    *   If **Add**: Set the voxel type/material at $\mathbf{v}_{target}$ to the current material and mark it as active [S1, unofficial].
+    *   If **Remove**: Mark the voxel at $\mathbf{v}_{target}$ as inactive or delete it from the data structure [S2, unofficial].
+6.  **Mesh Regeneration:** Trigger the mesh builder function to regenerate the visual representation of the voxel grid, reflecting the changes made in step 5 [S1, S2, unofficial].
+
+**Pseudocode:**
+The following pseudocode combines the logic from both sources, handling both add and remove modes. It assumes a `Grid` class with methods `GetVoxel`, `SetVoxel`, and `RegenerateMesh`, and a `Raycaster` class for intersection.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def handle_voxel_edit(mouse_screen_pos, camera, grid, edit_mode, current_material):
+    """
+    mouse_screen_pos: (u, v) tuple
+    camera: Camera object with ScreenPointToRay method
+    grid: VoxelGrid object
+    edit_mode: 'add' or 'remove'
+    current_material: Material object or ID
+    """
+    # Step 1: Generate Ray
+    ray = camera.ScreenPointToRay(mouse_screen_pos)
+    
+    # Step 2: Raycast
+    hit_result = Physics.Raycast(ray)
+    
+    if not hit_result.has_hit:
+        return  # No voxel hit, no edit performed
+    
+    hit_position = hit_result.position
+    hit_normal = hit_result.normal
+    
+    # Step 3: Identify Hit Voxel
+    # Convert world position to voxel grid coordinates
+    hit_voxel = grid.GetVoxelFromWorldPosition(hit_position)
+    
+    # Step 4 & 5: Determine Target and Update
+    if edit_mode == 'add':
+        # Add voxel on the side indicated by the normal
+        target_voxel = hit_voxel + hit_normal
+        grid.SetVoxel(target_voxel, current_material)
+    elif edit_mode == 'remove':
+        # Remove the hit voxel
+        target_voxel = hit_voxel
+        grid.SetVoxel(target_voxel, None)  # Or mark as empty
+    
+    # Step 6: Regenerate Mesh
+    grid.RegenerateMesh()
+```
+
+**Parameters:**
+*   **Edit Mode:** Boolean or enum (`add`/`remove`). In the referenced implementation, 'E' toggles edit mode, Left Click removes, Right Click adds [S2, unofficial].
+*   **Voxel Size:** Implicit in the coordinate conversion. Not given in the sources.
+*   **Raycast Distance:** Engine-dependent. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point errors in converting hit position to voxel coordinates may cause off-by-one errors. Using consistent floor/truncation logic is critical [S1, unofficial].
+*   **Boundary Conditions:** Adding a voxel outside the grid bounds must be handled to prevent array index out-of-bounds errors. Not given in the sources.
+*   **Degenerate Input:** Clicking on empty space or non-voxel geometry should be ignored. The `hasHit` flag handles this [S2, unofficial].
+*   **Normal Direction:** The normal must be correctly interpreted as pointing outward from the hit voxel. If the normal is inverted, the add operation will place the voxel inside the existing one or in the wrong direction [S1, unofficial].
+
+## Subtopics
+
+### Raycast-based Voxel Editing
+A broader category that may include brush-based editing or multi-voxel operations. This method focuses on single-voxel interaction via raycasting [S2, unofficial].
+
+### Voxel Grid Edit via Raycasting
+The parent method that describes the general framework of using raycasting for grid modification. This article details the specific add/remove logic [Parent](3190-voxel-grid-edit-via-raycasting.md).
+
+## Operating characteristics
+*   **Time Complexity:** Raycasting is $O(\log N)$ for octree-based structures or $O(1)$ for uniform grids with spatial hashing, where $N$ is the number of voxels. Mesh regeneration is $O(V)$ where $V$ is the number of visible voxels [S1, S2, unofficial].
+*   **Memory Complexity:** Depends on the voxel grid storage. The `HoverInfo` structure is $O(1)$ [S2, unofficial].
+*   **Performance:** Real-time interaction is achievable on modern hardware. Mesh regeneration is the most expensive operation and should be optimized (e.g., incremental updates) for large grids. Not given in the sources.
+*   **Strengths:** Intuitive user interaction, precise voxel placement, supports both addition and removal [S1, S2, unofficial].
+*   **Limitations:** Single-voxel operations only; not suitable for large-scale edits without additional brush logic. Mesh regeneration can cause frame drops if not optimized [S1, unofficial].
+
+## Background
+This method is commonly used in voxel-based games and modeling tools (e.g., Minecraft, Voxel Shop) to allow users to sculpt or build voxel worlds interactively. The technique of converting screen clicks to 3D rays is a standard computer graphics primitive, adapted here for discrete voxel grids [S1, S2, unofficial]. The specific implementation details are drawn from tutorial content and open-source voxelization tools [S1, S2, unofficial].
+
+## Sources
+[S1] Voxels #5 - A Procedural Mesh of Voxels, https://www.youtube.com/watch?v=014EbVkuHSM, fetched 2026-10-27 (unofficial)
+[S2] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)

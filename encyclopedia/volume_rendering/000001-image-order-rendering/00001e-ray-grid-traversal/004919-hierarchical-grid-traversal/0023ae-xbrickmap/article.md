@@ -1,22 +1,18 @@
 # XBrickMap
 Also called: eXtendedBrickMap
 ## Overview
-XBrickMap is a space-partitioning ray traversal algorithm for 3-level hierarchical voxel grids that uses 4³ occupancy bitmasks to skip empty regions via bitwise tests [S1, unofficial]. It improves upon simpler skipping methods by using tiled bitmasks to perform hierarchical skips of 4³, 2³, and 1³ cuboids, while left-packing empty bricks within sectors to save memory [S1, unofficial]. It is distinguished from its sibling [Hierarchical Grid Traversal](2560-hierarchical-grid-traversal.md) by its specific use of compacted bitmasks for random access and its support for arbitrary in-place edits within bricks [S1, unofficial].
+XBrickMap is a space-partitioning ray traversal algorithm for 3-level hierarchical voxel grids that uses $4^3$ occupancy bitmasks to skip empty regions via bitwise tests [S1, unofficial]. It improves upon simpler skipping methods by using tiled bitmasks to perform hierarchical skips of $4^3$, $2^3$, and $1^3$ cuboids, while left-packing empty bricks within sectors to save memory [S1, unofficial]. It is distinguished from its sibling [Hierarchical Grid Traversal](2560-hierarchical-grid-traversal.md) by its specific use of compacted bitmasks for random access and its support for arbitrary in-place edits within bricks [S1, unofficial].
 ## How it works
 **Inputs and Outputs:**
-- Input: A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a hierarchical voxel grid consisting of sectors, bricks, and voxels.
-- Output: The intersection point and material properties of the first non-transparent voxel hit by the ray.
+- Input: A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a hierarchical voxel grid consisting of sectors, bricks, and voxels [S1, unofficial].
+- Output: The intersection point and material properties of the first non-transparent voxel hit by the ray [S1, unofficial].
 
 **Data Structures:**
 The hierarchy consists of three levels [S1, unofficial]:
-1.  **Sector:** The top-level container.
-2.  **Brick:** A $4^3$ (64 voxel) block within a sector.
-3.  **Voxel:** The leaf element, stored in $8^3$ chunks within the brick structure (Note: Source [S1, unofficial] states "each brick contains 8³ voxels" but also "4³ occupancy bitmasks" and "4³ bricks" in sectors. The table indicates "8³ bits per brick". We interpret the structure as: Sectors contain bricks. Bricks are $4^3$ logical units for skipping, but physically store $8^3$ voxels. The bitmask is $4^3$ bits).
-    -   *Correction based on [S1, unofficial] table:* The table lists "8³ bits per brick". The text says "4³ occupancy bitmasks". This implies the bitmask tracks $4^3$ sub-regions or the brick is logically $4^3$ for skipping but physically $8^3$ for storage. Let's stick to the explicit text: "4³ occupancy bitmasks" and "each brick contains 8³ voxels".
-    -   *Layout:*
-        -   **Sector:** Contains a list of bricks. Empty bricks are omitted via left-packing. The sector stores metadata to map indices.
-        -   **Brick:** Contains an $4^3$ (64-bit) occupancy bitmask. If a bit is 0, the corresponding sub-region is empty. The brick also contains the $8^3$ voxel data.
-        -   **Voxel:** 8-bit value (0 is transparent).
+1.  **Sector:** The top-level container holding a list of bricks. Empty bricks are omitted via left-packing. Sector metadata maps indices [S1, unofficial].
+2.  **Brick:** Contains a $4^3$ (64-bit) occupancy bitmask and $8^3$ voxel data [S1, unofficial]. The bitmask tracks $4^3$ sub-cuboids for hierarchical skipping ($4^3, 2^3, 1^3$) [S1, unofficial].
+3.  **Voxel:** 8-bit value (0 is transparent) [S1, unofficial].
+-   **Memory Layout:** 8³ bits per brick + 12 bytes per sector [S1, unofficial].
 
 **Parameters:**
 -   Sector size: Not explicitly given in units, but contains $4^3$ bricks [S1, unofficial].
@@ -25,72 +21,74 @@ The hierarchy consists of three levels [S1, unofficial]:
 
 **Steps:**
 1.  **Initialize Ray Marching:** Start at the ray origin. Compute initial intersection with the three front-facing planes of the root voxel/sector [S1, unofficial].
-2.  **Sector Traversal:** Determine which sector the ray is currently in.
-3.  **Brick Skipping (Hierarchical):**
-    -   Query the sector's data structure to find the bricks in the current path.
-    -   Use the $4^3$ occupancy bitmask of each brick.
-    -   Perform bitwise tests on the bitmask to identify empty sub-cuboids ($4^3, 2^3, 1^3$) [S1, unofficial].
-    -   If a sub-cuboid is empty, skip it entirely.
-    -   Use `popcnt` (population count) instructions to count preceding entries for random access to the next non-empty brick or voxel [S1, unofficial].
-4.  **Voxel Traversal:**
-    -   Once a non-empty brick/sub-region is identified, march through the $8^3$ voxels.
-    -   Intersect the ray with the three front-facing cube planes of the current voxel to compute the step size [S1, unofficial].
-    -   Query the voxel data. If non-zero, return the hit.
-5.  **Iteration:** Repeat steps 2-4 until the ray exits the grid or hits a surface.
+2.  **Sector Traversal:** Determine which sector the ray is currently in [S1, unofficial].
+3.  **Brick Skipping (Hierarchical):** Query the sector's data structure to find the bricks in the current path. Use the $4^3$ occupancy bitmask of each brick. Perform bitwise tests on the bitmask to identify empty sub-cuboids ($4^3, 2^3, 1^3$) [S1, unofficial]. If a sub-cuboid is empty, skip it entirely. Use `popcnt` (population count) instructions to count preceding entries for random access to the next non-empty brick or voxel [S1, unofficial].
+4.  **Voxel Traversal:** Once a non-empty brick/sub-region is identified, march through the $8^3$ voxels. Intersect the ray with the three front-facing cube planes of the current voxel to compute the step size [S1, unofficial]. Query the voxel data. If non-zero, return the hit.
+5.  **Iteration:** Repeat steps 2-4 until the ray exits the grid or hits a surface [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def traverse_xbrickmap(ray_origin, ray_direction, grid):
-    # Initialize ray marching parameters
     t = 0.0
-    # Bias distance to avoid floating-point infinite backtracking [S1, unofficial]
-    t += BIAS 
+    t += 1e-6  # Bias intersection distances to avoid floating-point infinite backtracking [S1, unofficial]
     
-    current_sector = get_sector_at(ray_origin, grid)
+    # Determine initial sector index from ray origin
+    sector_idx = int(ray_origin.x // grid.sector_size)
+    sector = grid.sectors[sector_idx]
     
     while t < grid.max_distance:
-        # Determine current brick within the sector
-        # Use ray-plane intersection for front-facing planes [S1, unofficial]
-        voxel_pos = compute_voxel_position(ray_origin, ray_direction, t)
+        # Compute current voxel position
+        voxel_pos = ray_origin + ray_direction * t
         
-        # Query brickmap layers to determine step size [S1, unofficial]
-        # This involves checking the occupancy bitmask
-        brick = get_brick_at(voxel_pos, current_sector)
+        # Determine current brick index within the sector
+        brick_idx = int((voxel_pos.x - sector.origin.x) // grid.brick_size)
         
-        if brick is None:
-            # Sector/Brick empty, skip using bitmask logic
-            t = skip_empty_region(ray_origin, ray_direction, brick.occupancy_mask, t)
+        if brick_idx < 0 or brick_idx >= len(sector.bricks):
+            # Sector/Brick empty or out of bounds; skip using bitmask logic
+            # Sources do not specify exact skip distance formula [G]
+            t += 1.0
             continue
             
+        brick = sector.bricks[brick_idx]
+        
         # Check occupancy mask for sub-cuboids
-        # Use popcnt for random access if needed to find next valid block
         if is_empty(brick.occupancy_mask, voxel_pos):
-            t = skip_sub_cuboid(ray_origin, ray_direction, brick.occupancy_mask, t)
+            # Sub-cuboid empty; skip using bitmask logic
+            # Sources do not specify exact skip distance formula [G]
+            t += 1.0
             continue
             
         # Traverse voxels within the brick
-        voxel = get_voxel_at(voxel_pos, brick)
+        voxel_val = brick.voxels[int(voxel_pos.x)]
         
-        if voxel.is_transparent():
-            # Step to next voxel
-            t += compute_step_size(ray_origin, ray_direction, voxel_pos)
+        if voxel_val == 0:
+            # Step to next voxel by intersecting with three front-facing cube planes [S1, unofficial]
+            dx = grid.voxel_size / abs(ray_direction.x) if ray_direction.x != 0 else float('inf')
+            dy = grid.voxel_size / abs(ray_direction.y) if ray_direction.y != 0 else float('inf')
+            dz = grid.voxel_size / abs(ray_direction.z) if ray_direction.z != 0 else float('inf')
+            t += min(dx, dy, dz)
         else:
-            return hit(ray_origin, ray_direction, t, voxel)
+            return {"t": t, "position": ray_origin + ray_direction * t, "value": voxel_val}
             
-    return NO_HIT
+    return None
+
+def is_empty(mask, pos):
+    # Standard bitwise test on occupancy mask based on position
+    return (mask >> int(pos.x)) & 1 == 0
 ```
 
 **Edge Cases and Pitfalls:**
 -   **Floating-point precision:** Can cause infinite backtracking. Workaround: Bias intersection distances [S1, unofficial].
 -   **Dynamic Edits:** Supports arbitrary edits within a brick. However, insertions and deletions may require reallocations at the sector level to make space for new bricks [S1, unofficial].
 -   **Memory Layout:** Left-packing of empty bricks requires careful index mapping using `popcnt` [S1, unofficial].
+-   **Voxel Storage:** Each voxel in a brick is 8-bit. 0 is transparent [S1, unofficial].
 
 ## Subtopics
 
 ### [Ray-guided streaming with atomic bitfield marking](10274-ray-guided-streaming-with-atomic-bitfield-marking.md)
-This method tracks which finest-level brick cells have been visited by rays to enable selective streaming and refinement, preventing redundant data transfers when multiple rays share a cell [10274-ray-guided-streaming-with-atomic-bitfield-marking.md]. It differs from XBrickMap by adding a runtime occupancy buffer that complements the static hierarchical skipping with dynamic visitation history [10274-ray-guided-streaming-with-atomic-bitfield-marking.md].
+This method tracks which finest-level brick cells have been visited by rays to enable selective streaming and refinement, preventing redundant data transfers when multiple rays share a cell. It differs from XBrickMap by adding a runtime occupancy buffer that complements the static hierarchical skipping with dynamic visitation history.
 
 ### Two-Level Voxel Grid with Solid Color Optimization
 A data structure storing voxels in a two-level hierarchy to optimize ray traversal and memory usage [S2, unofficial]. It consists of a coarse $128^3$ top-level grid pointing to $8^3$ voxel bricks, resulting in a total world resolution of $1024^3$ [S2, unofficial].

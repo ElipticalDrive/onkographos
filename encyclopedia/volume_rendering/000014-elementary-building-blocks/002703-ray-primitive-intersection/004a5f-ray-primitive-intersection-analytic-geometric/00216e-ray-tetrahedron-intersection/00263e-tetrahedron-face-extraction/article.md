@@ -1,109 +1,142 @@
 # Tetrahedron Face Extraction
+
+
 ## Overview
-Computes the four planar faces (unit normals and distances to the origin) from a four-vertex description of a tetrahedron [S1, unofficial]. It serves as a geometric preprocessing step for [Ray-Tetrahedron Intersection](2525-ray-tetrahedron-intersection.md), converting vertex-based topology into half-space representations [S1, unofficial].
+Computes the four planar faces (unit normals and distances to the origin) from a four-vertex description of a tetrahedron [S1, unofficial]. It serves as the geometric preprocessing step for [Ray-Tetrahedron Intersection](2525-ray-tetrahedron-intersection.md), converting vertex-based topology into plane-based primitives suitable for analytic ray intersection tests. Unlike sibling methods that optimize traversal or use Plücker coordinates, this method focuses strictly on the algebraic derivation of face planes from vertex coordinates [S1, unofficial].
+
 ## How it works
-**Inputs:**
-- `verts`: Array of four `r3d_rvec3` vectors ($v_0, v_1, v_2, v_3$) defining the tetrahedron vertices [S1, unofficial].
+**Inputs and Outputs**
+- Input: `verts`, an array of four `r3d_rvec3` vectors representing the tetrahedron vertices $V_0, V_1, V_2, V_3$.
+- Output: `faces`, an array of four `r3d_plane` structures. Each `r3d_plane` contains a normal vector $\mathbf{n}$ and a scalar distance $d$ defining the plane equation $\mathbf{n} \cdot \mathbf{x} + d = 0$.
 
-**Outputs:**
-- `faces`: Output array of four `r3d_plane` structures [S1, unofficial].
+**Data Structures**
+The `r3d_rvec3` structure holds three floating-point components $(x, y, z)$ [S1, unofficial]. The `r3d_plane` structure holds a normal vector and a scalar distance [S1, unofficial].
 
-**Data Structures:**
-- `r3d_rvec3`: A 3D vector structure containing `x`, `y`, `z` components [S1, unofficial].
-- `r3d_plane`: A structure containing a normal vector `n` (`r3d_rvec3`) and a scalar `d` [S1, unofficial].
+**Algorithm**
+For each face $i$ (where $i \in \{0, 1, 2, 3\}$), the face is defined by the three vertices excluding $V_i$. Let the vertices of face $i$ be $A, B, C$.
 
-**Algorithm:**
-For each of the four faces, identified by the vertex opposite to the face, the normal is computed via the cross product of two edge vectors lying on the face [S1, unofficial]. The distance is computed by projecting the origin onto the normal relative to a point on the plane [G].
+1. **Compute Edge Vectors**:
+   Calculate two edge vectors from the face vertices:
+   $$ \mathbf{e}_1 = B - A $$
+   $$ \mathbf{e}_2 = C - A $$
+   [S1, unofficial]
 
-1. Define the four faces by their opposite vertices [S1, unofficial]:
-   - Face 0: Opposite $v_0$, defined by vertices $v_1, v_2, v_3$.
-   - Face 1: Opposite $v_1$, defined by vertices $v_0, v_2, v_3$.
-   - Face 2: Opposite $v_2$, defined by vertices $v_0, v_1, v_3$.
-   - Face 3: Opposite $v_3$, defined by vertices $v_0, v_1, v_2$.
+2. **Compute Normal**:
+   Calculate the unnormalized normal vector using the cross product:
+   $$ \mathbf{n}_{raw} = \mathbf{e}_1 \times \mathbf{e}_2 $$
+   [S1, unofficial]
 
-2. For each face $i$ (where $i \in \{0, 1, 2, 3\}$) [G]:
-   a. Identify the three vertices forming the face. Let these be $\mathbf{a}, \mathbf{b}, \mathbf{c}$ [G].
-   b. Compute two edge vectors: $\mathbf{e}_1 = \mathbf{b} - \mathbf{a}$ and $\mathbf{e}_2 = \mathbf{c} - \mathbf{a}$ [G].
-   c. Compute the unnormalized normal: $\mathbf{n}_{\text{raw}} = \mathbf{e}_1 \times \mathbf{e}_2$ [G].
-   d. Normalize the normal: $\mathbf{n} = \frac{\mathbf{n}_{\text{raw}}}{\|\mathbf{n}_{\text{raw}}\|}$ [G].
-   e. Compute the distance to the origin: $d = -\mathbf{n} \cdot \mathbf{a}$ [G].
-   f. Store $(\mathbf{n}, d)$ in `faces[i]` [S1, unofficial].
+3. **Normalize**:
+   Compute the magnitude $|\mathbf{n}_{raw}|$ and normalize:
+   $$ \mathbf{n} = \frac{\mathbf{n}_{raw}}{|\mathbf{n}_{raw}|} $$
+   [S1, unofficial]
 
-**Pseudocode:**
+4. **Compute Distance**:
+   The distance $d$ to the origin is derived from the plane equation $\mathbf{n} \cdot \mathbf{x} + d = 0$. Using any vertex $A$ on the plane:
+   $$ d = -(\mathbf{n} \cdot A) $$
+   [S1, unofficial]
+
+5. **Store**:
+   Assign $\mathbf{n}$ and $d$ to `faces[i]`.
+
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def tetrahedron_face_extraction(verts):
     """
-    verts: list of 4 vectors [v0, v1, v2, v3]
-    returns: list of 4 planes [p0, p1, p2, p3]
+    verts: list of 4 r3d_rvec3 objects (V0, V1, V2, V3)
+    returns: list of 4 r3d_plane objects
     """
     faces = []
     
-    # Mapping: face index i corresponds to the face NOT containing verts[i]
+    # Define the indices for the 4 faces. 
+    # Face 0 excludes V0, Face 1 excludes V1, etc.
     face_indices = [
-        [1, 2, 3],
-        [0, 2, 3],
-        [0, 1, 3],
-        [0, 1, 2]
+        [1, 2, 3], # Face opposite V0
+        [0, 2, 3], # Face opposite V1
+        [0, 1, 3], # Face opposite V2
+        [0, 1, 2]  # Face opposite V3
     ]
     
-    for i in range(4):
-        idx = face_indices[i]
-        a = verts[idx[0]]
-        b = verts[idx[1]]
-        c = verts[idx[2]]
+    for indices in face_indices:
+        A = verts[indices[0]]
+        B = verts[indices[1]]
+        C = verts[indices[2]]
         
-        # Edge vectors
-        e1 = [b[0]-a[0], b[1]-a[1], b[2]-a[2]]
-        e2 = [c[0]-a[0], c[1]-a[1], c[2]-a[2]]
+        # 1. Edge vectors
+        e1 = vector_sub(B, A)
+        e2 = vector_sub(C, A)
         
-        # Cross product e1 x e2
-        nx = e1[1]*e2[2] - e1[2]*e2[1]
-        ny = e1[2]*e2[0] - e1[0]*e2[2]
-        nz = e1[0]*e2[1] - e1[1]*e2[0]
+        # 2. Raw normal (cross product)
+        n_raw = vector_cross(e1, e2)
         
-        # Magnitude squared
-        mag_sq = nx*nx + ny*ny + nz*nz
-        
-        # Guard against degenerate face (zero area)
-        if mag_sq == 0:
-            # [G] Source does not specify a fallback; standard implementations return zero normal or raise
-            nx, ny, nz = 0.0, 0.0, 0.0
+        # 3. Normalize
+        mag = vector_length(n_raw)
+        if mag == 0:
+            # Degenerate tetrahedron (coplanar vertices)
+            # [G] Return a zero normal or handle error appropriately.
+            n = vector_zero()
         else:
-            mag = mag_sq ** 0.5
-            nx /= mag
-            ny /= mag
-            nz /= mag
+            n = vector_scale(n_raw, 1.0 / mag)
             
-        # Distance to origin: d = -n . a
-        d = -(nx*a[0] + ny*a[1] + nz*a[2])
+        # 4. Distance to origin
+        # Plane equation: n . x + d = 0 => d = -(n . A)
+        dot_product = vector_dot(n, A)
+        d = -dot_product
         
-        faces.append({'n': [nx, ny, nz], 'd': d})
+        # 5. Store
+        faces.append(r3d_plane(normal=n, distance=d))
         
     return faces
+
+def vector_sub(a, b):
+    return r3d_rvec3(a.x - b.x, a.y - b.y, a.z - b.z)
+
+def vector_cross(a, b):
+    return r3d_rvec3(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x
+    )
+
+def vector_length(v):
+    return math.sqrt(v.x**2 + v.y**2 + v.z**2)
+
+def vector_scale(v, s):
+    return r3d_rvec3(v.x * s, v.y * s, v.z * s)
+
+def vector_dot(a, b):
+    return a.x * b.x + a.y * b.y + a.z * b.z
+
+def vector_zero():
+    return r3d_rvec3(0.0, 0.0, 0.0)
 ```
 
-**Edge Cases and Pitfalls:**
-- **Degenerate Tetrahedron:** If vertices are coplanar, the cross product magnitude is zero [G]. The source does not specify a fallback for this condition [S1, unofficial].
-- **Winding Order:** The direction of the normal depends on the order of vertices $\mathbf{a}, \mathbf{b}, \mathbf{c}$ [G].
+**Parameters and Edge Cases**
+- **Degenerate Input**: If the four vertices are coplanar, the volume is zero, and at least one face will have a zero-length normal vector. The implementation must guard against division by zero during normalization [S1, unofficial].
+- **Winding Order**: The direction of the normal depends on the winding order of the vertices $A, B, C$. Consistent winding is required for correct inside/outside tests in subsequent intersection steps [S1, unofficial].
 
 ## Subtopics
 
 ### Tetrahedron Signed Volume Calculation
-Calculates the signed volume of a tetrahedron defined by four input vertices [S1, unofficial]. The return value is the signed volume; a positive volume indicates a specific winding order, while a negative volume indicates the opposite [S1, unofficial]. If the volume is negative, vertices may be swapped to ensure positive volume [S1, unofficial].
-- **Inputs:** Four vertices $p_a, p_b, p_c, p_d$ [S1, unofficial].
-- **Output:** Scalar signed volume [S1, unofficial].
-- **Formula:** $V = \frac{1}{6} (p_d - p_a) \cdot ((p_b - p_a) \times (p_c - p_a))$ [G]. The sign indicates orientation relative to the vertex order [G].
+Calculates the signed volume of a tetrahedron defined by four input vertices $P_a, P_b, P_c, P_d$ [S1, unofficial]. The return value is the signed volume; a positive value indicates a specific winding order, while a negative value indicates the opposite [S1, unofficial]. This is often used to verify vertex ordering or to correct winding by swapping vertices if the volume is negative [S1, unofficial]. The volume is typically computed as $\frac{1}{6} |(\mathbf{b}-\mathbf{a}) \cdot ((\mathbf{c}-\mathbf{a}) \times (\mathbf{d}-\mathbf{a}))|$ [G].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$, as it performs a fixed number of arithmetic operations for four faces [G].
-- **Memory Complexity:** $O(1)$, requiring storage for four plane structures [G].
-- **Strengths:** Provides explicit plane equations suitable for standard ray-plane intersection tests [S1, unofficial].
-- **Limitations:** Requires non-degenerate input for stable normalization [G].
+**Time and Memory Complexity**
+- Time: $O(1)$ per tetrahedron. It involves a constant number of vector operations (3 subtractions, 2 cross products, 1 dot product, 1 normalization).
+- Memory: $O(1)$ auxiliary space. The output size is fixed at 4 planes.
+
+**Strengths and Limitations**
+- **Strengths**: Simple, deterministic, and numerically stable for non-degenerate tetrahedra. It provides the exact plane representation needed for analytic ray intersection.
+- **Limitations**: Does not handle degenerate tetrahedra (zero volume) gracefully without explicit checks. The normal direction depends on vertex winding, which must be consistent across the mesh.
+
+**When to Use**
+- Use when you have a static tetrahedral mesh and need to perform ray-tetrahedron intersection tests using analytic plane equations.
+- Do not use if the mesh contains degenerate cells or if winding order is inconsistent.
 
 ## Background
-Part of the `r3d` geometric primitives suite [S1, unofficial]. It is used in applications linking against `libr3d` [S1, unofficial].
+This method is part of the `r3d` library, a C-based ray tracing library developed by Devon Powell [S1, unofficial]. The library provides low-level geometric primitives for ray tracing, including tetrahedral intersection support. The specific function `r3du_tet_faces_from_verts` is documented in the library's source code and headers [S1, unofficial].
 
 ## Sources
 [S1] devonmpowell/r3d, https://github.com/devonmpowell/r3d, fetched 2026-10-27 (unofficial)

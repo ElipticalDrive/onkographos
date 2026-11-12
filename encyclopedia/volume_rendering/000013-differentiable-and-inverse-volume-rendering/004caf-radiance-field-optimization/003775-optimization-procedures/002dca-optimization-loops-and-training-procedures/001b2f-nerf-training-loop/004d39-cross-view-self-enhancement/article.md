@@ -1,0 +1,143 @@
+# Cross-view Self-enhancement
+
+
+## Overview
+Cross-view Self-enhancement (CSE) is a training strategy for semantic NeRFs that replaces view-inconsistent 2D semantic labels (e.g., from CLIP) with 3D-consistent pseudo-maps rendered from the model itself [S1]. It addresses the ambiguity where 2D vision-language models fail to maintain consistent object identities across diverse perspectives, which degrades multi-view consistent rendering [S1]. Unlike methods that rely solely on external supervision, CSE leverages the inherent 3D consistency of NeRFs to iteratively refine and synthesize semantic supervision, ensuring that the semantic field learns coherent structures across all views [S1].
+
+## How it works
+CSE operates by generating and refining semantic relevancy maps using two complementary mechanisms: iterative pseudo map update for training views and novel pseudo map synthesis for unseen viewpoints [S1]. Both mechanisms utilize a Regularization Strategy (RSR) to ensure the pseudo-maps have fine edges and integral objects [S1].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   $I = \{I_i \in \mathbb{R}^{H \times W \times 3} \mid i \in \{1, \dots, N\}\}$: The poses of the $N$ training views [S1].
+    *   $\mathcal{F}_{sem}$: The learned semantic field (NeRF) [S1].
+    *   $\Phi(\cdot)$: The RSR regularization function [S1].
+*   **Outputs:**
+    *   Refined pseudo relevancy maps $\{\bar{S}_i\}_{i=1}^N$ for training views [S1].
+    *   Novel pseudo relevancy maps $\{S^+_i\}_{i=1}^{N^+}$ for unseen views [S1].
+    *   CSE Loss $L_{CSE}$ used to update $\mathcal{F}_{sem}$ [S1].
+
+### Data Structures
+*   **Relevancy Map:** A 2D image of size $H \times W$ where each pixel represents the semantic class probability or relevancy score for the ray passing through that pixel [S1].
+*   **Ray Set:** A collection of rays $r$ sampled from the pseudo maps for loss computation [S1].
+
+### Steps
+1.  **Iterative Pseudo Map Update:**
+    1.  After training the semantic field for a few iterations, render semantic relevancy maps $\hat{S}_i$ for each training view pose $I_i$ using $\mathcal{F}_{sem}$ [S1].
+    2.  Regularize the rendered maps $\hat{S}_i$ using the RSR strategy to generate refined pseudo relevancy maps $\bar{S}_i$ [S1].
+        $$ \bar{S}_i = \Phi(\hat{S}_i) $$
+        where $\hat{S}_i$ is the prediction from the learned semantic field [S1].
+    3.  Sample random rays $r$ from all updated pseudo relevancy maps $\bar{S}$ [S1].
+    4.  Compute the Pseudo Map Update Loss $L_{PMU}$ by minimizing the cross-entropy between the rendered prediction $\hat{S}(r)$ and the updated pseudo map $\bar{S}(r)$ [S1]:
+        $$ L_{PMU} = \sum_{r} L_{ce}(\hat{S}(r), \bar{S}(r)) $$
+    5.  Update the pseudo maps at a regular interval $N$ as training progresses to provide increasingly view-consistent supervision [S1].
+
+2.  **Novel Pseudo Map Synthesis:**
+    1.  Generate novel viewpoints (unseen poses) distinct from the training set $I$ [S1]. The number of novel views $N^+$ is set to 60 in the source implementation [S1].
+    2.  Render semantic relevancy maps $\hat{S}^+_i$ for these novel viewpoints using $\mathcal{F}_{sem}$ [S1].
+    3.  Regularize these novel maps with RSR to obtain fine edges and integral objects, producing novel pseudo relevancy maps $S^+_i$ [S1].
+    4.  Sample rays $r^+$ from the novel pseudo maps [S1].
+    5.  Compute the Pseudo Map Synthesis Loss $L_{PMS}$ by supervising the novel rendered relevancy maps $\hat{S}^+_i$ using the novel pseudo maps $S^+_i$ in a per-ray manner [S1]:
+        $$ L_{PMS} = \sum_{r^+} L_{ce}(\hat{S}^+(r^+), S^+(r^+)) $$
+
+3.  **Loss Aggregation:**
+    1.  Calculate the total CSE loss:
+        $$ L_{CSE} = L_{PMU} + L_{PMS} $$
+    2.  Backpropagate $L_{CSE}$ to update the semantic field $\mathcal{F}_{sem}$ [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cross_view_self_enhancement(semantic_field, training_views, rsr_function, update_interval=10, num_novel_views=60):
+    """
+    Implements the Cross-view Self-enhancement (CSE) strategy.
+    
+    Args:
+        semantic_field: The neural radiance field model for semantic prediction.
+        training_views: List of camera poses for training images.
+        rsr_function: The regularization function (RSR) that refines relevancy maps.
+        update_interval: Number of iterations between pseudo map updates.
+        num_novel_views: Number of novel viewpoints to synthesize.
+        
+    Returns:
+        loss: The CSE loss value.
+    """
+    # 1. Iterative Pseudo Map Update
+    # Render initial semantic maps for training views
+    rendered_maps = []
+    for pose in training_views:
+        # Render semantic relevancy map from the current semantic field
+        map_hat = semantic_field.render(pose)
+        rendered_maps.append(map_hat)
+        
+    # Regularize maps to get refined pseudo maps
+    pseudo_maps = []
+    for map_hat in rendered_maps:
+        # Apply RSR to enhance consistency and edge quality
+        map_bar = rsr_function(map_hat)
+        pseudo_maps.append(map_bar)
+        
+    # Compute L_PMU: Cross-entropy between rendered prediction and refined pseudo map
+    l_pmu = 0.0
+    for map_hat, map_bar in zip(rendered_maps, pseudo_maps):
+        # Sample rays from the map
+        rays = sample_rays(map_bar)
+        for r in rays:
+            pred_val = map_hat[r]
+            target_val = map_bar[r]
+            l_pmu += cross_entropy(pred_val, target_val)
+            
+    # 2. Novel Pseudo Map Synthesis
+    # Generate novel viewpoints (unseen poses)
+    novel_poses = generate_novel_poses(num_novel_views, training_views)
+    
+    # Render semantic maps for novel views
+    novel_rendered_maps = []
+    for pose in novel_poses:
+        map_hat_plus = semantic_field.render(pose)
+        novel_rendered_maps.append(map_hat_plus)
+        
+    # Regularize novel maps
+    novel_pseudo_maps = []
+    for map_hat_plus in novel_rendered_maps:
+        map_plus = rsr_function(map_hat_plus)
+        novel_pseudo_maps.append(map_plus)
+        
+    # Compute L_PMS: Cross-entropy between novel rendered prediction and novel pseudo map
+    l_pms = 0.0
+    for map_hat_plus, map_plus in zip(novel_rendered_maps, novel_pseudo_maps):
+        # Sample rays from the novel pseudo map
+        rays_plus = sample_rays(map_plus)
+        for r_plus in rays_plus:
+            pred_val_plus = map_hat_plus[r_plus]
+            target_val_plus = map_plus[r_plus]
+            l_pms += cross_entropy(pred_val_plus, target_val_plus)
+            
+    # 3. Aggregate Loss
+    l_cse = l_pmu + l_pms
+    
+    return l_cse
+```
+
+### Parameters
+*   **Update Interval ($N$):** The frequency at which pseudo maps are regenerated. Not given in the sources.
+*   **Number of Novel Views ($N^+$):** Set to 60 in the source implementation [S1].
+
+### Edge Cases and Pitfalls
+*   **View Inconsistency:** 2D CLIP models inherently struggle to maintain consistent object identities across diverse perspectives, leading to view-inconsistent relevancy maps that challenge multi-view consistent rendering [S1]. CSE mitigates this by using 3D-consistent rendered outputs [S1].
+*   **Ambiguity:** Relying on view-inconsistent relevance maps for training poses a challenge to achieving multi-view consistent semantic understanding [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Adds overhead to each training step due to rendering additional novel views and applying RSR regularization. The cost scales with the number of novel views ($N^+=60$) and the frequency of pseudo map updates [S1].
+*   **Memory Complexity:** Requires storing rendered maps for training and novel views during the loss computation step [S1].
+*   **Strengths:** Significantly improves multi-view semantic consistency and reduces ambiguity caused by 2D foundation models [S1]. It leverages the inherent 3D consistency of NeRFs to correct 2D errors [S1].
+*   **Limitations:** Dependent on the quality of the RSR regularization; if RSR fails to produce clean maps, the pseudo-supervision may propagate errors [S1].
+*   **When to use:** When training semantic NeRFs with open-vocabulary labels (e.g., CLIP) that exhibit view inconsistency [S1].
+*   **When not to use:** When ground-truth 3D semantic labels are available, as CSE is designed to replace inconsistent 2D labels [S1].
+
+## Background
+CSE was proposed in the context of Open-Vocabulary Neural Radiance Fields (OV-NeRF) for 3D semantic understanding [S1]. It addresses the specific problem of view-inconsistent relevancy maps that arise when using 2D vision-language models like CLIP for semantic supervision in NeRFs [S1]. The method was introduced by Guibiao Liao, Zhenyu Bao, Kaichen Zhou, Kanglin Liu, and Qing Li [S1]. It was evaluated on indoor scene datasets Replica and ScanNet [S1].
+
+## Sources
+[S1] OV-NeRF: Open-Vocabulary Neural Radiance Fields With Vision and Language Foundation Models for 3D Semantic Understanding, https://doi.org/10.1109/tcsvt.2024.3439737, fetched 2026-10-26

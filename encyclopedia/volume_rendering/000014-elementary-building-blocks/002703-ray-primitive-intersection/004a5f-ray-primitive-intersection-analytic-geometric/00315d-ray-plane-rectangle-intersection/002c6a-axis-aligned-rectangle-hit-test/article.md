@@ -1,0 +1,118 @@
+# Axis-Aligned Rectangle Hit Test
+
+Also called: Plane-Rectangle Intersection, XYRect/XZRect/YZRect Hit
+
+## Overview
+The Axis-Aligned Rectangle Hit Test determines whether a ray intersects a finite, axis-aligned rectangular surface patch. It solves the problem of intersecting a ray with a bounded planar primitive, returning the intersection point, distance, and surface normal if a hit occurs. It is distinguished from infinite plane intersection by its additional bounds checking on the two free axes, and from general rectangle intersection by its strict alignment with the coordinate axes, which allows for a simplified, branch-minimized implementation using a single fixed-axis formula [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, a bounding box $[t_{min}, t_{max}]$ for valid intersection distances, and a rectangle definition specifying bounds on two axes and a constant value for the third.
+- **Output**: A boolean indicating hit status, and a `HitRecord` structure populated with intersection distance $t$, intersection point $\mathbf{p}$, surface normal $\mathbf{n}$, and material reference.
+
+**Data Structures**
+The rectangle is defined by a struct containing bounds for two axes and a constant $K$ for the third axis. For an XY-aligned rectangle:
+- `X0, X1`: Minimum and maximum X coordinates.
+- `Y0, Y1`: Minimum and maximum Y coordinates.
+- `K`: The constant Z coordinate of the plane.
+- `Mat`: Material reference.
+Similar structures exist for XZ and YZ orientations.
+
+**Steps**
+1. **Compute Intersection Distance ($t$)**: Solve the plane equation for the fixed axis. For an XYRect (fixed Z), the plane equation is $z = K$. The ray equation is $z(t) = o_z + t \cdot d_z$. Solving for $t$:
+   $$ t = \frac{K - o_z}{d_z} $$
+   [S1, unofficial]
+
+2. **Check Distance Bounds**: Verify that $t$ lies within the valid range $[t_{min}, t_{max}]$. If not, the intersection is outside the desired segment.
+   $$ \text{if } t < t_{min} \text{ or } t > t_{max}, \text{ return false} $$
+   [S1, unofficial]
+
+3. **Compute Free Coordinates**: Calculate the coordinates on the two free axes at the computed $t$. For an XYRect:
+   $$ x = o_x + t \cdot d_x $$
+   $$ y = o_y + t \cdot d_y $$
+   [S1, unofficial]
+
+4. **Check Spatial Bounds**: Verify that the computed coordinates lie within the rectangle's bounds:
+   $$ \text{if } x < X_0 \text{ or } x > X_1 \text{ or } y < Y_0 \text{ or } y > Y_1, \text{ return false} $$
+   [S1, unofficial]
+
+5. **Populate Hit Record**: If bounds checks pass, the ray hits the rectangle.
+   - Set intersection distance: $t_{hit} = t$.
+   - Compute intersection point: $\mathbf{p} = \mathbf{o} + t_{hit} \cdot \mathbf{d}$.
+   - Determine outward normal. For an XYRect, the normal is $\mathbf{n}_{out} = (0, 0, 1)$.
+   - Orient the normal: If the ray direction dot the outward normal is positive ($\mathbf{d} \cdot \mathbf{n}_{out} > 0$), the ray is hitting the back face. Flip the normal: $\mathbf{n} = -\mathbf{n}_{out}$. Otherwise, $\mathbf{n} = \mathbf{n}_{out}$.
+   - Assign material.
+   [S1, unofficial]
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hit_xy_rect(rect, ray, t_min, t_max):
+    # Step 1: Compute t for the fixed axis (Z)
+    # rect.K is the constant Z value
+    # ray.origin.z is o_z, ray.direction.z is d_z
+    denom = ray.direction.z
+    if denom == 0:
+        # Division by zero; ray is parallel to the plane.
+        # In floating point, this results in Inf or NaN,
+        # which will fail the t_min/t_max check below.
+        # Explicit check omitted in source [S1, unofficial].
+        pass
+    
+    t = (rect.K - ray.origin.z) / denom
+
+    # Step 2: Check distance bounds
+    if t < t_min or t > t_max:
+        return False
+
+    # Step 3: Compute free coordinates (X, Y)
+    x = ray.origin.x + t * ray.direction.x
+    y = ray.origin.y + t * ray.direction.y
+
+    # Step 4: Check spatial bounds
+    if x < rect.X0 or x > rect.X1 or y < rect.Y0 or y > rect.Y1:
+        return False
+
+    # Step 5: Populate HitRecord
+    hit_record.t = t
+    hit_record.p = ray.at(t)
+    
+    # Outward normal for XYRect is +Z
+    outward_normal = Vector(0.0, 0.0, 1.0)
+    
+    # Orient normal based on ray direction
+    # If dot product is positive, ray is hitting the back face
+    if dot(ray.direction, outward_normal) > 0:
+        hit_record.normal = -outward_normal
+    else:
+        hit_record.normal = outward_normal
+        
+    hit_record.mat = rect.Mat
+    return True
+```
+[G] `ray.at(t)` is assumed to be a standard ray evaluation function: `origin + t * direction`.
+
+**Parameters**
+- `t_min`, `t_max`: Typically $[0.001, \infty)$ or scene-specific near/far planes.
+- `X0, X1, Y0, Y1`: Rectangle dimensions.
+
+**Edge Cases and Pitfalls**
+- **Division by Zero**: If the ray direction component along the fixed axis is zero, division by zero occurs. The source code relies on floating-point behavior (producing `Inf` or `NaN`) which fails the subsequent bounds check. Explicit checks are omitted in the reference implementation [S1, unofficial].
+- **Precision**: Floating-point precision issues may cause boundary hits to be missed or double-counted. [G] Using a small epsilon for bounds checks can mitigate this.
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ constant time. Involves a few arithmetic operations and comparisons.
+- **Memory Complexity**: $O(1)$ auxiliary space.
+- **Strengths**: Extremely fast due to minimal branching and simple arithmetic. Ideal for bounding boxes and simple planar surfaces.
+- **Limitations**: Only works for axis-aligned rectangles. Not suitable for rotated or arbitrary polygons.
+- **When to use**: When intersecting with axis-aligned bounding boxes (AABBs) or simple planar primitives aligned with the coordinate system.
+- **When not to use**: For rotated objects or non-axis-aligned surfaces.
+
+## Background
+The method is a standard technique in ray tracing, often found in introductory ray tracers and educational resources. It is a specific case of ray-plane intersection with additional bounds checking. The implementation details provided are from an unofficial Go-based ray tracer [S1, unofficial].
+
+## Sources
+[S1] hexhowells/GoTracer, https://github.com/hexhowells/GoTracer, fetched 2026-10-26 (unofficial)

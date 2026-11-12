@@ -1,0 +1,169 @@
+# Axis-Aligned Plane Intersection
+
+
+## Overview
+Intersects a ray with an axis-aligned plane defined by an anchor point, spatial extent, and a direction index `d`. It returns the intersection distance `t` and barycentric-like coordinates `u, v` relative to the plane's local axes. It is distinguished from general ray-plane intersection by its use of a direction index to permute coordinate axes, allowing a single implementation to handle all six faces of an axis-aligned bounding box (AABB) or voxel grid without branching on face normal. This method serves as the geometric core for [Axis-Aligned Rectangle Hit Test](5279-axis-aligned-rectangle-hit-test.md).
+
+## How it works
+**Inputs:**
+- `ray`: A ray defined by origin `O` and direction `D` (vectors).
+- `anchor`: The corner of the plane/rectangle (vector).
+- `extent`: The size of the plane/rectangle along its local axes (vector).
+- `d`: An integer direction index (0–5) selecting the plane orientation.
+- `frame`: A context object providing `eye_near` (near clip plane distance `w` and origin `xyz`).
+
+**Outputs:**
+- `t`: Intersection distance along the ray.
+- `u, v`: Local coordinates on the plane, normalized to `[0, 1]`.
+- Boolean success flag.
+
+**Data Structures:**
+- Vectors are 3D floats.
+- `d` is an integer index mapping to specific axis permutations.
+
+**Steps:**
+1. **Axis Permutation:** Select the eye, origin, and ray components based on `d` to align the plane normal with the X-axis of the permuted space.
+   - If `d < 2`: Use axes `(x, y, z)`.
+   - If `2 <= d < 4`: Use axes `(y, x, z)`.
+   - If `d >= 4`: Use axes `(z, x, y)`.
+   Specifically, extract components:
+   - `eye_x = frame.eye_near.xyz[perm[0]]`
+   - `origin_x = anchor[perm[0]]`
+   - `delta_x = ray.d[perm[0]]`
+   - `eye_y = frame.eye_near.xyz[perm[1]]`
+   - `origin_y = anchor[perm[1]]`
+   - `delta_y = ray.d[perm[1]]`
+   - `eye_z = frame.eye_near.xyz[perm[2]]`
+   - `origin_z = anchor[perm[2]]`
+   - `delta_z = ray.d[perm[2]]`
+   Where `perm` is `(0,1,2)` for `d<2`, `(1,0,2)` for `2<=d<4`, and `(2,0,1)` for `d>=4`. Note: The source code implies specific permutations for `u` and `v` calculation as well.
+
+2. **Plane Constant:** Compute the signed distance from the origin to the plane along the normal.
+   $$ plane = origin_x + (1.0 \text{ if } (d \& 1) \text{ else } 0.0) $$
+   This adjusts for the fact that the anchor might represent the minimum or maximum corner depending on the face.
+
+3. **Distance Numerator:**
+   $$ distance = plane - eye_x $$
+
+4. **Parallel Check:** If `delta_x` is zero, the ray is parallel to the plane. Return false.
+
+5. **Intersection Distance:**
+   $$ t = \frac{distance}{delta_x} $$
+
+6. **Validity Checks:**
+   - If `t` is NaN or Infinity, return false.
+   - If `t < frame.eye_near.w` (near clip), return false.
+
+7. **Local Coordinates:**
+   Compute the unnormalized local coordinates `uNumerator` and `vNumerator` using the Y and Z components of the permuted space.
+   $$ uNumerator = eye_y + t \cdot delta_y - origin_y $$
+   $$ vNumerator = eye_z + t \cdot delta_z - origin_z $$
+   
+   Normalize to `[0, 1]`:
+   $$ u = \frac{uNumerator}{extent_x} $$
+   $$ v = \frac{vNumerator}{extent_y} $$
+
+8. **Rectangle Bounds Check:**
+   If `u < 0` or `u > 1` or `v < 0` or `v > 1`, the intersection is outside the rectangle. Return false.
+
+9. **Return:** Return `t, u, v`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def axis_aligned_plane_intersection(ray_origin, ray_dir, anchor, extent, d, eye_near_w):
+    # Permutation mapping based on d
+    if d < 2:
+        perm = (0, 1, 2)
+    elif d < 4:
+        perm = (1, 0, 2)
+    else:
+        perm = (2, 0, 1)
+    
+    # Extract components in permuted order
+    # Index 0 is the normal axis (X in permuted space)
+    # Index 1 is the U axis (Y in permuted space)
+    # Index 2 is the V axis (Z in permuted space)
+    
+    eye_x = ray_origin[perm[0]]
+    eye_y = ray_origin[perm[1]]
+    eye_z = ray_origin[perm[2]]
+    
+    delta_x = ray_dir[perm[0]]
+    delta_y = ray_dir[perm[1]]
+    delta_z = ray_dir[perm[2]]
+    
+    origin_x = anchor[perm[0]]
+    origin_y = anchor[perm[1]]
+    origin_z = anchor[perm[2]]
+    
+    extent_x = extent[perm[0]]
+    extent_y = extent[perm[1]]
+    extent_z = extent[perm[2]] # Not used for u,v normalization but part of extent
+    
+    # Plane constant
+    # The source uses: plane = origin.x + ((d & 1) != 0 ? 1.0 : 0.0)
+    # This implies the anchor is the min corner, and if d&1 is set, we are at the max face?
+    # Or anchor is the corner on the plane.
+    # Let's follow the source exactly.
+    plane = origin_x + (1.0 if (d & 1) else 0.0)
+    
+    distance = plane - eye_x
+    
+    # Parallel check
+    if delta_x == 0.0:
+        return False, None, None, None
+    
+    t = distance / delta_x
+    
+    # Validity checks
+    if t != t or t == float('inf') or t == float('-inf'):
+        return False, None, None, None
+    
+    if t < eye_near_w:
+        return False, None, None, None
+    
+    # Local coordinates
+    # uNumerator = eye.y + t * delta.y - origin.y
+    # vNumerator = eye.z + t * delta.z - origin.z
+    uNumerator = eye_y + t * delta_y - origin_y
+    vNumerator = eye_z + t * delta_z - origin_z
+    
+    # Normalize
+    u = uNumerator / extent_x
+    v = vNumerator / extent_y
+    
+    # Bounds check
+    if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
+        return False, None, None, None
+        
+    return True, t, u, v
+```
+
+## Subtopics
+
+### Voxel Cell Lookup
+Determines the 3D integer voxel cell coordinate and the 3D intersection point given the ray intersection with an axis-aligned plane. It builds on `axis_aligned_plane_intersection`.
+1. Call `axis_aligned_plane_intersection` to get `t, u, v`. If it fails, return false.
+2. Compute local coordinates in world units: `localU = u * extent.x`, `localV = v * extent.y`.
+3. Compute cell offset: `offset = clamp(floor(vec2(localU, localV)), vec2(0.0), extent.xy - 1.0)`.
+4. Initialize cell with anchor: `cell = uvec3(anchor)`.
+5. Add offset to cell based on direction `d`:
+   - If `d < 2`: Add `offset.x` to `cell.y`, `offset.y` to `cell.z`.
+   - If `2 <= d < 4`: Add `offset.x` to `cell.x`, `offset.y` to `cell.z`.
+   - If `d >= 4`: Add `offset.x` to `cell.x`, `offset.y` to `cell.y`.
+6. Compute 3D point: `point = frame.eye_near.xyz + ray * t`.
+
+## Operating characteristics
+- **Time Complexity:** O(1). Fixed number of arithmetic operations and comparisons.
+- **Memory Complexity:** O(1). No dynamic allocation.
+- **Strengths:** Extremely fast; avoids branching on face normal by using a direction index; handles all 6 faces of an AABB uniformly.
+- **Limitations:** Only works for axis-aligned planes; requires pre-computed direction index `d`; precision issues may occur if `t` is very large or `delta_x` is very small (though parallel check handles exact zero).
+- **When to use:** Ray casting against voxel grids, AABBs, or any set of axis-aligned planes where the face index is known or easily derived.
+
+## Background
+Originated in the context of efficient voxel rendering and ray marching, specifically in the `bend-voxel` project [S1, unofficial]. The method leverages axis-aligned properties to simplify intersection tests, a common optimization in volume rendering and voxel-based games.
+
+## Sources
+[S1] aivv73/bend-voxel, https://github.com/aivv73/bend-voxel, fetched 2026-10-28 (unofficial)

@@ -1,76 +1,89 @@
 # Reverse Index Map for Voxel Location
+
 Also called: P->V Mapping
+
 ## Overview
-The Reverse Index Map for Voxel Location is a technique used to determine the voxel location in volume coordinates ($V$) from the fragment location in the framebuffer plus the current slice z-offset, using a reverse index map ($P \rightarrow V$) [S1, unofficial].
+The Reverse Index Map (P->V) is a technique used to determine the 3D voxel location in volume coordinates ($V$) from a 2D fragment location in the framebuffer and a current slice z-offset [S1, unofficial]. It serves as the inverse of the forward mapping used during texture sampling, enabling direct manipulation and segmentation by linking screen pixels to volumetric data [S1, unofficial]. It differs from [MIP Depth Buffer Lookup](893-voxel-selection-via-pick-ray-intersection.md) by relying on a pre-computed index texture rather than a runtime depth buffer, and from [Ray-Box Intersection for Interaction](2638-ray-box-intersection-for-interaction.md) by using a direct lookup rather than geometric ray casting for coordinate conversion.
+
 ## How it works
-**Inputs:** Fragment location in the framebuffer, current slice z-offset [S1, unofficial].
-**Outputs:** Voxel location in volume coordinates ($V$) [S1, unofficial].
+**Inputs:**
+1. Fragment location in the framebuffer ($x_{fb}, y_{fb}$).
+2. Current slice z-offset ($z_{slice}$).
+
+**Outputs:**
+1. Voxel location in volume coordinates ($V = (x_v, y_v, z_v)$).
+
 **Data Structures:**
-*   **Reverse Index Texture:** Maps packed coordinates ($P$) to volume coordinates ($V$) [S1, unofficial]. The texture stores the volume coordinate corresponding to each packed index [S1, unofficial].
+*   **Reverse Index Texture:** A 2D texture mapping packed coordinates ($P$) to volume coordinates ($V$). The texture stores the 3D voxel coordinates corresponding to each 2D screen position. The layout typically stores $x_v, y_v, z_v$ as components (e.g., RGBA or RGB with one component unused or packed) in the texture units.
 
 **Steps:**
-1.  Retrieve the fragment location in the framebuffer and the current slice z-offset [S1, unofficial].
-2.  Use the reverse index map ($P \rightarrow V$) to determine the voxel location in volume coordinates [S1, unofficial].
+1.  Retrieve the fragment's 2D coordinates $(x_{fb}, y_{fb})$ from the framebuffer.
+2.  Combine these coordinates with the current slice z-offset to form the packed coordinate $P$. In the context of slice-based rendering, $P$ often represents the 2D screen position $(x_{fb}, y_{fb})$ which indexes into the Reverse Index Texture.
+3.  Sample the Reverse Index Texture at $P$ to retrieve the volume coordinates $V$.
+    $$ V = \text{TextureLookup}(\text{ReverseIndexTexture}, P) $$
+4.  Use $V$ as the seed voxel for subsequent ray integration or segmentation operations.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def get_voxel_location(fragment_pos, slice_z_offset, reverse_index_texture):
+def get_voxel_location(fragment_x, fragment_y, slice_z_offset, reverse_index_texture):
     """
-    Determines voxel location in volume coordinates from framebuffer fragment.
+    Determines the 3D voxel location from 2D framebuffer coordinates.
     
     Args:
-        fragment_pos: Tuple (x, y) representing the fragment location in the framebuffer.
-        slice_z_offset: Integer or float representing the current slice z-offset.
-        reverse_index_texture: A lookup structure (texture) mapping packed coordinates P to volume coordinates V.
+        fragment_x (int): X coordinate in the framebuffer.
+        fragment_y (int): Y coordinate in the framebuffer.
+        slice_z_offset (float): The current z-offset for the slice being rendered.
+        reverse_index_texture (Texture): A 2D texture mapping 2D screen coords to 3D volume coords.
         
     Returns:
-        V: The voxel location in volume coordinates.
+        tuple: (x_v, y_v, z_v) volume coordinates.
     """
-    # The source does not specify how fragment_pos and slice_z_offset are packed into P.
-    # [G] Implementation detail: P must be constructed such that it uniquely identifies the voxel
-    # corresponding to the fragment and slice. A common approach is P = (x, y, z_offset).
-    packed_coord = (fragment_pos[0], fragment_pos[1], slice_z_offset)
+    # Packed coordinates P are derived from the fragment location.
+    # In slice-based rendering, P typically corresponds to (fragment_x, fragment_y).
+    # The slice_z_offset is used to determine which slice's reverse map is active,
+    # or is incorporated into the lookup if the texture is 3D (though sources imply 2D lookup).
     
-    # Clamp packed coordinate to valid texture bounds to prevent out-of-bounds access.
-    # [G] Standard guard for texture lookups.
-    packed_coord = tuple(max(0, min(c, dim - 1)) for c, dim in zip(packed_coord, reverse_index_texture.dimensions))
+    # Note: The exact packing of P depends on the implementation. 
+    # Based on [S1, unofficial], the reverse index map P->V is used to determine voxel location.
+    # We assume P is the 2D index into the texture.
+    p_x = fragment_x
+    p_y = fragment_y
     
-    # Use reverse index map to determine voxel location.
-    voxel_location = reverse_index_texture[packed_coord]
+    # Sample the reverse index texture to get volume coordinates V
+    # The texture stores (x_v, y_v, z_v) for each 2D position.
+    v = reverse_index_texture.sample(p_x, p_y)
     
-    return voxel_location
+    # v is expected to be a vector (x_v, y_v, z_v)
+    return v
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The source does not specify precision issues. [G] Ensure that the packed coordinate $P$ does not suffer from integer overflow if coordinates are large.
-*   **Boundaries:** If the fragment location is outside the valid framebuffer range or the slice offset is invalid, the lookup may fail. [G] Clamp inputs to valid ranges before packing.
-*   **Degenerate Input:** If the volume is empty or the slice is out of bounds, the reverse index map may return undefined values. [G] Handle null or invalid volume coordinates.
+*   **Precision:** The accuracy of the voxel location depends on the resolution of the Reverse Index Texture. If the texture resolution is lower than the volume resolution, aliasing may occur.
+*   **Boundaries:** Fragments outside the volume bounds will return invalid or undefined coordinates. A guard should check if $(x_{fb}, y_{fb})$ is within the volume's projected bounds.
+*   **Slice Offset:** The slice z-offset must be consistent with the data used to generate the Reverse Index Texture. If the volume is sliced or cropped, the mapping must reflect the current view.
 
 ## Subtopics
 
 ### Forward Index Map for Texture Indirection
-A technique used during ray integration to map volume coordinates to packed texture coordinates via a forward mapping index texture ($V \rightarrow P$) [S1, unofficial]. It is used in the integration step where each sample requires a texture indirection from volume coordinates to packed texture coordinates [S1, unofficial]. The Forward Index Texture maps volume coordinates ($V$) to packed texture coordinates ($P$) [S1, unofficial]. It is chosen when ray integration requires accessing scalar data from a packed volume representation, complementing the Reverse Index Map which is used for initial voxel selection [S1, unofficial].
+A technique used during ray integration to map volume coordinates to packed texture coordinates via a forward mapping index texture ($V \to P$) [S1, unofficial]. It is the inverse of the Reverse Index Map. While the Reverse Index Map is used for interaction (screen to volume), the Forward Index Map is used for sampling (volume to texture) [S1, unofficial]. It is chosen when ray casting requires accessing data from a packed or compressed volume representation. The layout is a texture mapping volume coordinates ($V$) to packed texture coordinates ($P$) [S1, unofficial].
+
+### MIP Depth Buffer Lookup
+A method to map 2D mouse clicks on a Maximum Intensity Projection (MIP) image to 3D voxel coordinates by maintaining a depth buffer of the current projection [S2, unofficial]. Unlike the Reverse Index Map which uses a pre-computed texture, this method maintains a 2D buffer $Z(i, j) = (x, y, z)$ that records the voxel position for each projected MIP value or surface color [S2, unofficial]. When a user selects a point $[i, j]$ in the MIP, the appropriate voxel address $(x, y, z)$ is looked up from the buffer [S2, unofficial]. This is used to redefine slice positions in orthogonal viewers or provide initial points for analysis [S2, unofficial]. To prevent depth ambiguity (where the projected value comes from brighter values in front of or behind the vessel of interest), a limited MIP is used where only voxels between two planes $z_{min}$ and $z_{max}$ parallel to the view plane are projected [S2, unofficial]. The depth range ($z_{max} - z_{min}$) should be reduced to about the size of the voxel dimensionality (e.g., 1mm) to generate oblique slices [S2, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-*   **Time:** Not given in the sources.
-*   **Memory:** Not given in the sources.
-
-**Measured Performance:**
-*   The source mentions that rendering is interleaved with intensity texture updates, allowing user interaction, although all ray directions may require several frames to complete [S1, unofficial].
-*   The technique uses adaptive sampling, which achieves a speedup of the order of the cube root of the data reduction ratio [S1, unofficial].
-
-**Strengths and Limitations:**
-*   **Strengths:** Enables interactive manipulation by quickly mapping screen coordinates to volume coordinates [S1, unofficial].
-*   **Limitations:** Requires additional memory for the index textures [S1, unofficial]. The source does not specify performance bottlenecks beyond the multi-frame completion for all ray directions [S1, unofficial].
-
-**When to Use:**
-*   Use when direct manipulation segmentation requires fast mapping from framebuffer fragments to volume voxels [S1, unofficial].
+*   **Time Complexity:** $O(1)$ for the lookup operation, assuming constant-time texture sampling.
+*   **Memory Complexity:** $O(W \times H)$ for the Reverse Index Texture, where $W$ and $H$ are the framebuffer dimensions. Each entry stores 3 coordinates (typically 3-4 floats).
+*   **Performance:** The lookup is very fast, suitable for interactive applications [S1, unofficial]. The cost is incurred during the generation of the Reverse Index Texture, which must be updated when the volume or view changes.
+*   **Strengths:** Direct mapping from screen to volume; efficient for slice-based interaction; decouples interaction logic from ray casting.
+*   **Limitations:** Requires additional memory for the index texture; must be regenerated if the volume or camera changes; limited to the current slice or projection.
+*   **When to use:** When interactive segmentation or slice navigation is required in direct volume rendering.
+*   **When not to use:** When the volume is not slice-based or when the overhead of maintaining the index texture is prohibitive.
 
 ## Background
-The technique is described in the context of Local Ambient Occlusion in Direct Volume Rendering [S1, unofficial]. It is used in a rendering pass that is interleaved with intensity texture updates to allow user interaction [S1, unofficial]. The rendering uses raycasting with adaptive sampling [S1, unofficial].
+The Reverse Index Map was introduced in the context of Local Ambient Occlusion in Direct Volume Rendering by Hernell et al. [S1, unofficial]. It was developed to support interactive rendering by allowing rapid determination of voxel locations from fragment positions. The technique is part of a broader approach to interleaving rendering and interaction, where the rendering is updated incrementally to allow user interaction [S1, unofficial]. The Forward Index Map is used in conjunction with the Reverse Index Map to handle texture indirection during ray integration [S1, unofficial]. The MIP Depth Buffer Lookup method was developed in the context of the Angiotool for interactive visualization of MRI vector and tensor fields [S2, unofficial].
 
 ## Sources
 [S1] Local Ambient Occlusion in Direct Volume Rendering, https://www.researchgate.net/publication/44596498_Local_Ambient_Occlusion_in_Direct_Volume_Rendering, fetched 2026-10-28 (unofficial)
+[S2] Angiotool : a tool for interactive visualization of MRI vector and tensor fields, https://doi.org/10.82444/warw.33642268, fetched 2026-10-26 (unofficial)
