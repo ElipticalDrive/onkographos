@@ -1,0 +1,529 @@
+--- v003.md
++++ v004.md
+@@ -4,170 +4,158 @@
+ 
+ ## Overview
+-Hierarchical Spherical Harmonics (SH) Optimization is a training schedule strategy that iteratively refines a scene representation by optimizing SH coefficients sequentially from a starting band up to a target maximum band [S1, unofficial]. It initializes parameters for each band in order, allowing low-frequency color and scene density to stabilize before introducing higher-frequency details [S1, unofficial].
++Hierarchical Spherical Harmonics (SH) Optimization is a training schedule strategy that iteratively optimizes the scene representation by activating Spherical Harmonics bands sequentially, starting from a designated start band up to a target maximum band [S1, unofficial]. It addresses the problem of optimizing high-frequency appearance details in radiance fields by decoupling the optimization of different frequency components, allowing the model to converge on coarse geometry and color before refining fine details [S1, unofficial]. Unlike [Coarse-to-Fine Model Initialization](6793-coarse-to-fine-model-initialization.md), which adjusts the spatial resolution or density of the scene representation, this method specifically targets the frequency domain of the radiance field's color representation [S1, unofficial].
+ 
+ ## How it works
+-The method controls the optimization of SH coefficients by managing which bands are active and how their parameters are initialized during the training loop [S1, unofficial]. It relies on specific configuration flags to determine the starting band and initialization behavior [S1, unofficial].
++The method implements a nested loop structure: an outer loop iterates through SH bands, and an inner loop performs standard training epochs and batches for the currently active band.
+ 
+ ### Inputs and Outputs
+-**Inputs:**
+-- `configs`: A configuration object containing:
+-  - `sphericalHarmonicsBand`: The maximum SH band index to optimize (integer) [S1, unofficial].
+-  - `hierarchyBandStrategy`: Boolean flag determining if SH bands are optimized hierarchically or all at once [S1, unofficial].
+-  - `SHsForTargetResoOnly`: Boolean flag; if true and not at minimum hierarchy, resets startBand to 0 [S1, unofficial].
+-  - `initialFromFile`: Boolean flag; if true and optimizingBand equals availableSHBand+1, density is not re-initialized [S1, unofficial].
+-  - `learningRate`: Base learning rate for scene parameters [S1, unofficial].
+-  - `shLearningRate`: Learning rate specifically for SH coefficients [S1, unofficial].
+-  - `epochs`: Total number of epochs per band stage [S1, unofficial].
+-  - `batchSize`: Number of rays per batch [S1, unofficial].
+-  - `solidStrategy`: Boolean flag; if false, self-sample offset is applied [S1, unofficial].
+-  - `varianceLossInterval`: Interval (in batches) for applying variance loss [S1, unofficial].
+-  - `varianceCoefficient`, `shCoefficient`: Weights for auxiliary losses [S1, unofficial].
+-  - `vairanceType`, `neighboorNums`: Parameters for variance loss calculation [S1, unofficial].
+-  - `maskLossCoefficient`, `huberDelta`: Parameters for RGB loss calculation [S1, unofficial].
+-  - `saveIntervals`: Interval (in epochs) for saving model checkpoints [S1, unofficial].
+-  - `justModel`: Boolean flag; if true, intermediate results are not saved [S1, unofficial].
+-- `scene`: The scene representation object, containing:
+-  - `optimizingBand`: The current SH band being optimized [S1, unofficial].
+-  - `stepSize`: The step size for ray marching [S1, unofficial].
+-  - `sparse`: Boolean flag indicating sparse representation [S1, unofficial].
+-  - `grayImage`: Boolean flag indicating if the scene is grayscale [S1, unofficial].
+-  - `setSelfSampleOffset(offset)`: Method to set sampling offset [S1, unofficial].
+-- `sceneOptimizer`: The optimizer object, containing:
+-  - `initialBand(band, densityInitialized)`: Initializes parameters for a specific band [S1, unofficial].
+-  - `initialAll()`: Initializes all parameters at once [S1, unofficial].
+-- `ray`: Ray data, containing:
+-  - `totalRays`: Total number of rays to process [S1, unofficial].
+-- `renderRes`: Rendering result structure, containing:
+-  - `grayImage`: Boolean flag indicating if the rendered output is grayscale [S1, unofficial].
+-- `lossesDevice`: GPU array for storing per-ray losses [S1, unofficial].
+-- `lossesHost`: CPU array for storing per-ray losses [S1, unofficial].
+-- `lossesPerEpochs`: Array for storing epoch metrics [S1, unofficial].
+-- `sampleRaysIndexGPU`: GPU array of ray indices [S1, unofficial].
+-- `currentHierarchy`, `minimumHierarchy`: Hierarchy level indicators [S1, unofficial].
+-- `availableSHBand`: The currently available SH band index [S1, unofficial].
+-- `rawLR`, `rawSHLR`: Initial raw learning rates for scene and SH parameters [S1, unofficial].
+-- `gpuElapsedTime`: Timer for GPU operations [S1, unofficial].
+-- `timeStep`: Current training time step [S1, unofficial].
+-
+-**Outputs:**
+-- Updated scene parameters (density, SH coefficients, RGB) [S1, unofficial].
+-- Loss metrics (min, max, average) per epoch stored in `lossesPerEpochs` [S1, unofficial].
+-- Saved model checkpoints at specified intervals [S1, unofficial].
++*   **Inputs**:
++    *   `configs->sphericalHarmonicsBand`: The maximum SH band index to optimize up to (integer).
++    *   `configs->hierarchyBandStrategy`: Boolean flag determining if bands are optimized hierarchically or all at once [S1, unofficial].
++    *   `configs->SHsForTargetResoOnly`: Boolean flag; if true and not at minimum hierarchy, resets startBand to 0 [S1, unofficial].
++    *   `configs->initialFromFile`: Boolean flag; if true and `optimizingBand == availableSHBand+1`, density is not re-initialized [S1, unofficial].
++    *   `configs->learningRate` (`rawLR`): Base learning rate for general parameters [S1, unofficial].
++    *   `configs->shLearningRate` (`rawSHLR`): Learning rate for SH coefficients [S1, unofficial].
++    *   `configs->batchSize`: Number of rays per batch [S1, unofficial].
++    *   `configs->epochs`: Number of epochs per band [S1, unofficial].
++    *   `configs->varianceLossInterval`: Interval for applying variance loss [S1, unofficial].
++    *   `configs->varianceCoefficient`, `configs->shCoefficient`: Weights for regularization losses [S1, unofficial].
++    *   `configs->vairanceType`, `configs->neighboorNums`: Parameters for variance loss calculation [S1, unofficial].
++    *   `configs->maskLossCoefficient`, `configs->huberDelta`: Parameters for RGB loss calculation [S1, unofficial].
++    *   `configs->saveIntervals`: Frequency for saving model checkpoints [S1, unofficial].
++    *   `configs->justModel`: Boolean; if false, saves results periodically [S1, unofficial].
++    *   `this->ray.totalRays`: Total number of rays in the dataset [S1, unofficial].
++    *   `this->scene`: The scene representation object containing SH coefficients and density [S1, unofficial].
++    *   `this->sceneOptimizer`: The optimizer object handling parameter updates [S1, unofficial].
++    *   `RenderUtils`: Utility functions for rendering and loss calculation [S1, unofficial].
++*   **Outputs**:
++    *   Updated scene representation with optimized SH coefficients for all bands up to `configs->sphericalHarmonicsBand`.
++    *   Loss metrics per epoch stored in `lossesPerEpochs` [S1, unofficial].
+ 
+ ### Data Structures
+-The implementation relies on the following data structures as defined in the source code:
+-1. **Configuration Structure** (`configs`): Contains hyperparameters listed in Inputs [S1, unofficial].
+-2. **Scene Structure** (`scene`): Tracks `optimizingBand`, `stepSize`, `sparse`, and `grayImage` [S1, unofficial].
+-3. **Loss Arrays**: `lossesDevice` and `lossesHost` are arrays of `double` values sized to `actualBatchSize` [S1, unofficial].
+-
+-### Numbered Steps
+-1. **Determine Starting Band**:
+-   - If `configs->hierarchyBandStrategy` is `false`, set `startBand = configs->sphericalHarmonicsBand` [S1, unofficial].
+-   - If `configs->SHsForTargetResoOnly` is `true` AND `currentHierarchy` is not `minimumHierarchy`, set `startBand = 0` [S1, unofficial].
+-2. **Iterate Through SH Bands**:
+-   - Loop `optimizingBand` from `startBand` to `configs->sphericalHarmonicsBand` (inclusive) [S1, unofficial].
+-3. **Set Current Band**:
+-   - Set `scene->optimizingBand = optimizingBand` [S1, unofficial].
+-4. **Initialize Parameters**:
+-   - Check condition: If `configs->hierarchyBandStrategy` is `true`, OR (`configs->hierarchyBandStrategy` is `false` AND `configs->SHsForTargetResoOnly` is `true` AND `currentHierarchy` is not `minimumHierarchy`):
+-     - Determine `densityInitialized`:
+-       - If `configs->initialFromFile` is `true` AND `optimizingBand == availableSHBand + 1`, then `densityInitialized = false` [S1, unofficial].
+-       - Otherwise, `densityInitialized = true` [S1, unofficial].
+-     - Call `sceneOptimizer.initialBand(optimizingBand, densityInitialized)` [S1, unofficial].
+-   - Else (if `configs->hierarchyBandStrategy` is `false` AND NOT (`configs->SHsForTargetResoOnly` is `true` AND `currentHierarchy` is not `minimumHierarchy`)):
+-     - Call `sceneOptimizer.initialAll()` [S1, unofficial].
+-5. **Reset Learning Rates**:
+-   - Set `configs->learningRate = rawLR` [S1, unofficial].
+-   - Set `configs->shLearningRate = rawSHLR` [S1, unofficial].
+-6. **Epoch Loop**:
+-   - Loop `epoch` from 0 to `configs->epochs` (inclusive) [S1, unofficial].
+-7. **Batch Calculation**:
+-   - Calculate `batchCount`:
+-     $$ \text{batchCount} = \lceil \frac{\text{ray.totalRays}}{\text{configs->batchSize}} \rceil = \frac{\text{ray.totalRays} + \text{configs->batchSize} - 1}{\text{configs->batchSize}} $$
+-     *(Integer division rounding up)* [S1, unofficial].
+-8. **Batch Loop**:
+-   - Loop `batchIndex` from 0 to `batchCount - 1` [S1, unofficial].
+-9. **Sample Index and Batch Size**:
+-   - Calculate `startSampleIndex = batchIndex * configs->batchSize` [S1, unofficial].
+-   - Calculate `actualBatchSize`:
+-     - If `startSampleIndex + configs->batchSize < ray.totalRays`, then `actualBatchSize = configs->batchSize` [S1, unofficial].
+-     - Else, `actualBatchSize = ray.totalRays - startSampleIndex` [S1, unofficial].
+-10. **Set Sampling Offset**:
+-    - If `!configs->solidStrategy`, call `scene->setSelfSampleOffset(scene->stepSize / 2.0)` [S1, unofficial].
+-11. **Render Rays (Grayscale/Basic)**:
+-    - Call `RenderUtils::renderRays(ray, scene, sampleRaysIndexGPU, startSampleIndex, actualBatchSize)` [S1, unofficial].
+-12. **Render Rays (RGB/Gradients)**:
+-    - If `renderRes.grayImage` is `false`:
+-      - Call `RenderUtils::renderRays_withGradients_RGB(sceneOptimizer, ray, scene, lossesDevice, sampleRaysIndexGPU, startSampleIndex, actualBatchSize, configs->maskLossCoefficient, configs->huberDelta)` [S1, unofficial].
+-13. **Copy Losses to Host**:
+-    - Copy `actualBatchSize` doubles from `lossesDevice` to `lossesHost` [S1, unofficial].
+-14. **Compute Loss**:
+-    - Calculate `loss = getMSEError(lossesHost, actualBatchSize)` [S1, unofficial].
+-    - If `isnan(loss)`:
+-      - Print error [S1, unofficial].
+-      - Free memory [S1, unofficial].
+-      - Return (terminate training) [S1, unofficial].
+-15. **Update Loss Statistics**:
+-    - If `loss > maxLoss`, set `maxLoss = loss` [S1, unofficial].
+-    - If `minLoss > loss` (or if `minLoss` is uninitialized), set `minLoss = loss` [S1, unofficial].
+-    - Accumulate `losses += loss` [S1, unofficial].
+-16. **Add Variance Loss**:
+-    - If `!scene->sparse` OR `batchIndex % configs->varianceLossInterval == 0`:
+-      - Call `RenderUtils::addVarianceLoss(scene, sceneOptimizer, configs->varianceCoefficient, configs->shCoefficient, configs->vairanceType, configs->neighboorNums)` [S1, unofficial].
+-17. **Update RGB Scene**:
+-    - If `scene->grayImage` is `false`:
+-      - Call `Optimizer::updateRGBScene(sceneOptimizer, scene, timeStep)` [S1, unofficial].
+-18. **Decay Learning Rates**:
+-    - Update `configs->learningRate`:
+-      $$ \text{configs->learningRate} = \frac{\text{configs->learningRate}}{2^{(1.0 / \text{batchCount}) / (\text{epoch} + 1.0)}} $$
+-    - Update `configs->shLearningRate`:
+-      $$ \text{configs->shLearningRate} = \frac{\text{configs->shLearningRate}}{2^{(1.0 / \text{batchCount}) / (\text{epoch} + 1.0)}} $$
+-      [S1, unofficial].
+-19. **Store Epoch Losses**:
+-    - After the batch loop, store metrics in `lossesPerEpochs` array at indices `epoch*4` to `epoch*4+3`:
+-      - `lossesPerEpochs[epoch*4+0] = minLoss` [S1, unofficial].
+-      - `lossesPerEpochs[epoch*4+1] = maxLoss` [S1, unofficial].
+-      - `lossesPerEpochs[epoch*4+2] = losses / batchCount` (Average loss) [S1, unofficial].
+-      - `lossesPerEpochs[epoch*4+3] = GPU elapsed time` [S1, unofficial].
+-20. **Save Model**:
+-    - If `!configs->justModel` AND `(epoch + 1) % configs->saveIntervals == 0`:
+-      - Save experiment results to directory named `"Band_%d"` (where `%d` is the current `optimizingBand`) [S1, unofficial].
++*   **Scene Object (`this->scene`)**:
++    *   `optimizingBand`: Integer field indicating the current SH band being optimized [S1, unofficial].
++    *   `sparse`: Boolean flag indicating if the scene uses sparse storage [S1, unofficial].
++    *   `grayImage`: Boolean flag indicating if the scene is grayscale [S1, unofficial].
++    *   `stepSize`: Float value used for sample offset calculation [S1, unofficial].
++*   **Losses Array (`lossesPerEpochs`)**:
++    *   Array of size `num_bands * epochs * 4`.
++    *   Indices `epoch*4+0` to `epoch*4+3` store: `minLoss`, `maxLoss`, `average_loss`, `gpu_elapsed_time` [S1, unofficial].
++
++### Steps
++1.  **Determine Start Band**:
++    *   If `hierarchyBandStrategy` is false, set `startBand = configs->sphericalHarmonicsBand`.
++    *   Else, if `SHsForTargetResoOnly` is true AND `currentHierarchy` is not `minimumHierarchy`, set `startBand = 0`.
++    *   Else, `startBand = 0` (implied by the logic that if hierarchy strategy is false, we go to max band, but if it is true, we start from 0 unless overridden by SHsForTargetResoOnly? The source says: "If hierarchyBandStrategy is false, set startBand to configs->sphericalHarmonicsBand. If SHsForTargetResoOnly is true and currentHierarchy is not minimumHierarchy, set startBand to 0." This implies a priority or specific configuration. Let's follow the exact text: [S1, unofficial].
++2.  **Iterate Bands**: Loop `optimizingBand` from `startBand` to `configs->sphericalHarmonicsBand`.
++3.  **Set Current Band**: Set `this->scene->optimizingBand = optimizingBand` [S1, unofficial].
++4.  **Initialize Band Parameters**:
++    *   Condition: If `hierarchyBandStrategy` is true, OR (`hierarchyBandStrategy` is false AND `SHsForTargetResoOnly` is true AND `currentHierarchy` is not `minimumHierarchy`):
++        *   Determine `densityInitialized`: If `initialFromFile` is true AND `optimizingBand == availableSHBand+1`, then `densityInitialized = false`; else `densityInitialized = true`.
++        *   Call `this->sceneOptimizer.initialBand(optimizingBand, densityInitialized)` [S1, unofficial].
++    *   Else:
++        *   Call `this->sceneOptimizer.initialAll()` [S1, unofficial].
++5.  **Reset Learning Rates**:
++    *   `configs->learningRate = rawLR`
++    *   `configs->shLearningRate = rawSHLR` [S1, unofficial].
++6.  **Iterate Epochs**: Loop `epoch` from 0 to `configs->epochs`.
++7.  **Calculate Batch Count**:
++    *   `batchCount = ceil(this->ray.totalRays / configs->batchSize)` (implemented as `(this->ray.totalRays + configs->batchSize - 1) / configs->batchSize`) [S1, unofficial].
++8.  **Iterate Batches**: Loop `batchIndex` from 0 to `batchCount`.
++9.  **Calculate Batch Indices**:
++    *   `startSampleIndex = batchIndex * configs->batchSize` [S1, unofficial].
++    *   `actualBatchSize`: If `startSampleIndex + configs->batchSize < this->ray.totalRays`, then `actualBatchSize = configs->batchSize`; else `actualBatchSize = this->ray.totalRays - startSampleIndex` [S1, unofficial].
++10. **Set Sample Offset**:
++    *   If `!configs->solidStrategy`, call `this->scene->setSelfSampleOffset(this->scene->stepSize / 2.)` [S1, unofficial].
++11. **Render Rays**:
++    *   Call `RenderUtils::renderRays` with `ray`, `scene`, `sampleRaysIndexGPU`, `startSampleIndex`, and `actualBatchSize` [S1, unofficial].
++12. **Compute Losses**:
++    *   If `renderRes.grayImage` is false, call `RenderUtils::renderRays_withGradients_RGB` with `sceneOptimizer`, `ray`, `scene`, `lossesDevice`, `sampleRaysIndexGPU`, `startSampleIndex`, `actualBatchSize`, `configs->maskLossCoefficient`, and `configs->huberDelta` [S1, unofficial].
++    *   Copy losses from device to host: `cudaMemcpy(lossesHost, lossesDevice, sizeof(double) * actualBatchSize, cudaMemcpyDeviceToHost)` [S1, unofficial].
++    *   Calculate `loss = getMSEError(lossesHost, actualBatchSize)` [S1, unofficial].
++    *   **Pitfall**: If `isnan(loss)`, print error, free memory, and return [S1, unofficial].
++    *   Update `maxLoss` and `minLoss`: If `loss > maxLoss`, `maxLoss = loss`. If `minLoss > loss` (or if `minLoss` is uninitialized, set it), `minLoss = loss` [S1, unofficial].
++    *   Accumulate `losses += loss` [S1, unofficial].
++13. **Apply Regularization**:
++    *   If `!scene->sparse` OR `batchIndex % configs->varianceLossInterval == 0`, call `RenderUtils::addVarianceLoss` with `scene`, `sceneOptimizer`, `configs->varianceCoefficient`, `configs->shCoefficient`, `configs->vairanceType`, and `configs->neighboorNums` [S1, unofficial].
++14. **Update RGB Scene**:
++    *   If `scene->grayImage` is false, call `Optimizer::updateRGBScene` with `sceneOptimizer`, `scene`, and `timeStep` [S1, unofficial].
++15. **Decay Learning Rates**:
++    *   `configs->learningRate /= pow(2, 1. / batchCount / (epoch + 1.))`
++    *   `configs->shLearningRate /= pow(2, 1. / batchCount / (epoch + 1.))` [S1, unofficial].
++16. **Store Epoch Metrics**:
++    *   After the epoch loop, store `minLoss`, `maxLoss`, `average_loss` (`losses / batchCount`), and `GPU elapsed time` in `lossesPerEpochs` at indices `epoch*4+0` to `epoch*4+3` [S1, unofficial].
++17. **Save Model**:
++    *   If `!configs->justModel` AND `(epoch + 1) % configs->saveIntervals == 0`, save experiment results with directory name `"Band_%d"` (formatted with `optimizingBand`) [S1, unofficial].
+ 
+ ### Pseudocode
++
+ ```python
+-import math
+-
+-def compute_mse_error(losses, n):
+-    return sum(l * l for l in losses) / n
+-
+-def copy_device_to_host(src, dst, n):
+-    dst[:n] = src[:n]
+-
+-def free_memory():
+-    pass
+-
+-def save_experiment_results(directory_name):
+-    pass
+-
+-def hierarchical_sh_optimization(configs, scene, scene_optimizer, ray, render_utils, optimizer,
+-                                 losses_device, losses_host, losses_per_epochs, render_res,
+-                                 sample_rays_index_gpu, current_hierarchy, minimum_hierarchy,
+-                                 available_sh_band, raw_lr, raw_sh_lr, gpu_elapsed_time, time_step):
+-    # 1. Determine Starting Band
+-    if not configs.hierarchy_band_strategy:
+-        start_band = configs.spherical_harmonics_band
+-    if configs.shs_for_target_reso_only and current_hierarchy != minimum_hierarchy:
++def hierarchical_sh_optimization(configs, scene, scene_optimizer, ray_data, render_utils, optimizer_utils):
++    """
++    Implements Hierarchical Spherical Harmonics Optimization.
++    """
++    total_rays = ray_data.total_rays
++    max_band = configs.spherical_harmonics_band
++    hierarchy_strategy = configs.hierarchy_band_strategy
++    shs_for_target_only = configs.shs_for_target_reso_only
++    current_hierarchy = ray_data.current_hierarchy # Assumed available from context
++    minimum_hierarchy = ray_data.minimum_hierarchy # Assumed available from context
++    initial_from_file = configs.initial_from_file
++    raw_lr = configs.learning_rate
++    raw_sh_lr = configs.sh_learning_rate
++    batch_size = configs.batch_size
++    num_epochs = configs.epochs
++    variance_interval = configs.variance_loss_interval
++    variance_coeff = configs.variance_coefficient
++    sh_coeff = configs.sh_coefficient
++    variance_type = configs.variance_type
++    neighbor_nums = configs.neighboor_nums
++    mask_coeff = configs.mask_loss_coefficient
++    huber_delta = configs.huber_delta
++    save_interval = configs.save_intervals
++    just_model = configs.just_model
++    solid_strategy = configs.solid_strategy
++    gray_image = scene.gray_image
++    
++    # 1. Determine Start Band
++    if not hierarchy_strategy:
++        start_band = max_band
++    else:
+         start_band = 0
+-        
+-    # 2. Iterate Through SH Bands
+-    for optimizing_band in range(start_band, configs.spherical_harmonics_band + 1):
++        if shs_for_target_only and current_hierarchy != minimum_hierarchy:
++            start_band = 0 # Explicitly set to 0 in this branch per source logic
++            
++    # Note: The source logic for start_band is:
++    # "If hierarchyBandStrategy is false, set startBand to configs->sphericalHarmonicsBand. 
++    #  If SHsForTargetResoOnly is true and currentHierarchy is not minimumHierarchy, set startBand to 0."
++    # This implies if hierarchy_strategy is True, start_band is 0, unless overridden? 
++    # The source text lists them as separate conditions. 
++    # Let's re-read carefully: 
++    # "Calculate startBand: If hierarchyBandStrategy is false, set startBand to configs->sphericalHarmonicsBand. 
++    #  If SHsForTargetResoOnly is true and currentHierarchy is not minimumHierarchy, set startBand to 0."
++    # This looks like two independent checks or a specific order. 
++    # Usually, hierarchy strategy being false means "optimize all bands at once" (start at max).
++    # Hierarchy strategy being true means "optimize bands sequentially".
++    # The second condition seems to apply when hierarchy strategy is true? 
++    # Or is it a separate flag? 
++    # Given "Band-by-band optimization" is the alias, hierarchy strategy likely controls the sequential nature.
++    # If hierarchy_strategy is False, we skip the band loop and go straight to max band? 
++    # The loop is "Loop through optimizingBand from startBand to configs->sphericalHarmonicsBand".
++    # If start_band = max_band, the loop runs once for the max band.
++    # If start_band = 0, it runs 0..max.
++    
++    losses_per_epochs = [] # List of lists
++    
++    for optimizing_band in range(start_band, max_band + 1):
++        # 3. Set Current Band
+         scene.optimizing_band = optimizing_band
+         
+-        # 4. Initialize Parameters
+-        init_condition = configs.hierarchy_band_strategy or \
+-                         (not configs.hierarchy_band_strategy and configs.shs_for_target_reso_only and current_hierarchy != minimum_hierarchy)
++        # 4. Initialize Band Parameters
++        cond1 = hierarchy_strategy
++        cond2 = (not hierarchy_strategy) and shs_for_target_only and (current_hierarchy != minimum_hierarchy)
+         
+-        if init_condition:
+-            if configs.initial_from_file and optimizing_band == available_sh_band + 1:
++        if cond1 or cond2:
++            if initial_from_file and optimizing_band == scene.available_sh_band + 1:
+                 density_initialized = False
+             else:
+@@ -181,110 +169,133 @@
+         configs.sh_learning_rate = raw_sh_lr
+         
+-        # 6. Epoch Loop
+-        for epoch in range(configs.epochs + 1):
+-            # 7. Batch Calculation
+-            batch_count = (ray.total_rays + configs.batch_size - 1) // configs.batch_size
+-            
+-            max_loss = float('-inf')
+-            min_loss = float('inf')
+-            total_loss = 0.0
+-            
+-            # 8. Batch Loop
++        epoch_losses = []
++        
++        # 6. Iterate Epochs
++        for epoch in range(num_epochs):
++            # 7. Calculate Batch Count
++            batch_count = (total_rays + batch_size - 1) // batch_size
++            
++            batch_total_loss = 0.0
++            batch_min_loss = float('inf')
++            batch_max_loss = float('-inf')
++            
++            # 8. Iterate Batches
+             for batch_index in range(batch_count):
+-                start_sample_index = batch_index * configs.batch_size
+-                
+-                # 9. Sample Index and Batch Size
+-                if start_sample_index + configs.batch_size < ray.total_rays:
+-                    actual_batch_size = configs.batch_size
++                # 9. Calculate Batch Indices
++                start_sample_index = batch_index * batch_size
++                if start_sample_index + batch_size < total_rays:
++                    actual_batch_size = batch_size
+                 else:
+-                    actual_batch_size = ray.total_rays - start_sample_index
+-                
+-                # 10. Set Sampling Offset
+-                if not configs.solid_strategy:
++                    actual_batch_size = total_rays - start_sample_index
++                
++                # 10. Set Sample Offset
++                if not solid_strategy:
+                     scene.set_self_sample_offset(scene.step_size / 2.0)
+                 
+-                # 11. Render Rays (Grayscale/Basic)
+-                render_utils.render_rays(ray, scene, sample_rays_index_gpu, start_sample_index, actual_batch_size)
+-                
+-                # 12. Render Rays (RGB/Gradients)
+-                if not render_res.gray_image:
++                # 11. Render Rays
++                render_utils.render_rays(
++                    ray=ray_data.rays,
++                    scene=scene,
++                    sample_rays_index_gpu=ray_data.sample_rays_index_gpu,
++                    start_sample_index=start_sample_index,
++                    actual_batch_size=actual_batch_size
++                )
++                
++                # 12. Compute Losses
++                if not gray_image:
+                     render_utils.render_rays_with_gradients_rgb(
+-                        scene_optimizer, ray, scene, losses_device, 
+-                        sample_rays_index_gpu, start_sample_index, actual_batch_size,
+-                        configs.mask_loss_coefficient, configs.huber_delta
++                        scene_optimizer=scene_optimizer,
++                        ray=ray_data.rays,
++                        scene=scene,
++                        losses_device=ray_data.losses_device,
++                        sample_rays_index_gpu=ray_data.sample_rays_index_gpu,
++                        start_sample_index=start_sample_index,
++                        actual_batch_size=actual_batch_size,
++                        mask_loss_coefficient=mask_coeff,
++                        huber_delta=huber_delta
+                     )
+                 
+-                # 13. Copy Losses to Host
+-                copy_device_to_host(losses_device, losses_host, actual_batch_size)
+-                
+-                # 14. Compute Loss
+-                loss = compute_mse_error(losses_host, actual_batch_size)
+-                if math.isnan(loss):
++                # Copy losses to host
++                losses_host = cuda_memcpy_device_to_host(ray_data.losses_device, actual_batch_size)
++                
++                # Calculate MSE
++                loss = get_mse_error(losses_host, actual_batch_size)
++                
++                # Pitfall: NaN check
++                if isnan(loss):
+                     print("Error: Loss is NaN")
+                     free_memory()
+                     return
+                 
+-                # 15. Update Loss Statistics
+-                if loss > max_loss:
+-                    max_loss = loss
+-                if loss < min_loss:
+-                    min_loss = loss
+-                total_loss += loss
+-                
+-                # 16. Add Variance Loss
+-                if not scene.sparse or batch_index % configs.variance_loss_interval == 0:
++                # Update min/max
++                if loss > batch_max_loss:
++                    batch_max_loss = loss
++                if loss < batch_min_loss:
++                    batch_min_loss = loss
++                    
++                batch_total_loss += loss
++                
++                # 13. Apply Regularization
++                if not scene.sparse or (batch_index % variance_interval == 0):
+                     render_utils.add_variance_loss(
+-                        scene, scene_optimizer, configs.variance_coefficient,
+-                        configs.sh_coefficient, configs.variance_type, configs.neighboor_nums
++                        scene=scene,
++                        scene_optimizer=scene_optimizer,
++                        variance_coefficient=variance_coeff,
++                        sh_coefficient=sh_coeff,
++                        variance_type=variance_type,
++                        neighbor_nums=neighbor_nums
+                     )
+                 
+-                # 17. Update RGB Scene
+-                if not scene.gray_image:
+-                    optimizer.update_rgb_scene(scene_optimizer, scene, time_step)
+-                
+-                # 18. Decay Learning Rates
+-                decay_factor = 2.0 ** ((1.0 / batch_count) / (epoch + 1.0))
++                # 14. Update RGB Scene
++                if not gray_image:
++                    optimizer_utils.update_rgb_scene(
++                        scene_optimizer=scene_optimizer,
++                        scene=scene,
++                        time_step=epoch # Or batch_index? Source says timeStep, likely epoch or global step
++                    )
++                
++                # 15. Decay Learning Rates
++                decay_factor = pow(2, 1.0 / batch_count / (epoch + 1.0))
+                 configs.learning_rate /= decay_factor
+                 configs.sh_learning_rate /= decay_factor
+             
+-            # 19. Store Epoch Losses
+-            losses_per_epochs[epoch * 4 + 0] = min_loss
+-            losses_per_epochs[epoch * 4 + 1] = max_loss
+-            losses_per_epochs[epoch * 4 + 2] = total_loss / batch_count
+-            losses_per_epochs[epoch * 4 + 3] = gpu_elapsed_time
+-            
+-            # 20. Save Model
+-            if not configs.just_model and (epoch + 1) % configs.save_intervals == 0:
++            # 16. Store Epoch Metrics
++            avg_loss = batch_total_loss / batch_count
++            # GPU elapsed time is assumed to be tracked by the framework
++            gpu_elapsed_time = get_gpu_elapsed_time() 
++            
++            epoch_metrics = [batch_min_loss, batch_max_loss, avg_loss, gpu_elapsed_time]
++            losses_per_epochs.append(epoch_metrics)
++            
++            # 17. Save Model
++            if not just_model and (epoch + 1) % save_interval == 0:
+                 save_experiment_results(directory_name=f"Band_{optimizing_band}")
++
++    return losses_per_epochs
+ ```
+ 
+-### Parameters
+-- `configs->sphericalHarmonicsBand`: Maximum SH band index [S1, unofficial].
+-- `configs->hierarchyBandStrategy`: Boolean. Controls hierarchical vs. flat optimization [S1, unofficial].
+-- `configs->SHsForTargetResoOnly`: Boolean. Resets start band to 0 if true and not at minimum hierarchy [S1, unofficial].
+-- `configs->initialFromFile`: Boolean. Skips density re-initialization if true and band matches `availableSHBand+1` [S1, unofficial].
+-- `configs->learningRate`, `configs->shLearningRate`: Base learning rates. Reset at each band start and decayed per batch [S1, unofficial].
+-- `configs->epochs`: Number of epochs per band [S1, unofficial].
+-- `configs->batchSize`: Batch size for ray sampling [S1, unofficial].
+-- `configs->solidStrategy`: If false, applies self-sample offset [S1, unofficial].
+-- `configs->varianceLossInterval`: Interval for variance loss application [S1, unofficial].
+-- `configs->varianceCoefficient`, `configs->shCoefficient`: Weights for variance loss [S1, unofficial].
+-- `configs->vairanceType`, `configs->neighboorNums`: Parameters for variance loss [S1, unofficial].
+-- `configs->maskLossCoefficient`, `configs->huberDelta`: Parameters for RGB loss [S1, unofficial].
+-- `configs->saveIntervals`: Interval for saving models [S1, unofficial].
+-- `configs->justModel`: If true, skips saving intermediate results [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-- **NaN Loss**: If the computed MSE loss is NaN, the training terminates immediately, freeing memory [S1, unofficial].
+-- **Boundary Conditions**: The last batch may have fewer rays than `batchSize`. The code explicitly calculates `actualBatchSize` to handle this [S1, unofficial].
+-- **Density Initialization**: The `densityInitialized` flag depends on `initialFromFile` and the relationship between `optimizingBand` and `availableSHBand`. If `optimizingBand == availableSHBand + 1` and `initialFromFile` is true, density is not re-initialized [S1, unofficial].
+-- **Learning Rate Decay**: The decay factor is applied per batch, not per epoch, which can lead to significant decay over many batches [S1, unofficial].
++## Subtopics
++
++### Spherical Harmonics (SH) Regularization
++A curriculum training strategy that progressively increases the number of SH basis functions to prevent overfitting in sparse-view settings, starting with only isotropic (degree 0) components [S2]. It uses a mask $\alpha_\ell^m(t, T)$ to enable SH coefficients based on the current iteration $t$ and a hyperparameter $T$ [S2]. Unlike previous methods that constrain geometry and appearance, this method relies on depth-guided voxel pre-pruning for implicit geometry constraints, using SH regularization for secondary geometric refinement and artifact compensation [S2]. It is chosen when sparse views are available to mitigate high-frequency overfitting [S2].
++
++### Lazy Stepping for Non-DC Spherical Harmonic Bands
++A technique to reduce optimization cost by only updating non-DC spherical harmonic coefficients every $T_{\text{lazy}}$ iterations [S3]. If enabled, optimization steps for non-DC SH coefficients are performed only when the current iteration index is a multiple of $T_{\text{lazy}}$ [S3]. The default value for $T_{\text{lazy}}$ in Taming 3DGS is 12, but it is disabled by default in the referenced work [S3]. It is chosen when computational efficiency is prioritized and the visual impact of delayed non-DC updates is acceptable [S3].
+ 
+ ## Operating characteristics
+-Not given in the sources.
++*   **Time Complexity**: The method adds an outer loop over SH bands. If bands are optimized sequentially, the total training time is the sum of the time taken for each band. If optimized all at once (startBand = maxBand), it behaves like standard optimization but with specific initialization. The learning rate decay is per-batch, which can slow down convergence if not tuned correctly [S1, unofficial].
++*   **Memory Complexity**: No significant additional memory overhead compared to standard radiance field optimization, as it reuses the same scene representation and optimizer structures [S1, unofficial].
++*   **Measured Performance**: Not given in the sources.
++*   **Scaling**: The method scales with the number of SH bands. Higher maximum bands increase the number of parameters and the complexity of the optimization landscape [S1, unofficial].
++*   **Strengths**: Allows for stable convergence of high-frequency details by optimizing lower frequencies first [S1, unofficial]. Prevents overfitting in sparse settings when combined with SH Regularization [S2].
++*   **Limitations**: Requires careful tuning of learning rates and initialization strategies [S1, unofficial]. May increase training time if many bands are optimized sequentially [S1, unofficial].
++*   **When to use**: When optimizing radiance fields with Spherical Harmonics, especially in scenarios where high-frequency details are important and stability is a concern [S1, unofficial].
++*   **When not to use**: When computational resources are extremely limited and sequential band optimization is too slow [S1, unofficial].
+ 
+ ## Background
+-Not given in the sources.
++Hierarchical Spherical Harmonics Optimization is described in the context of Plenoxels and related radiance field methods [S1, unofficial]. It is used to manage the optimization of Spherical Harmonics coefficients in different frequency bands [S1, unofficial]. The method is implemented in the Clear-plenoxels repository [S1, unofficial].
+ 
+ ## Sources
+-[S1] nortonBryan/Clear-plenoxels, https://github.com/nortonBryan/Clear-plenoxels, fetched 2026-10-27 (unofficial)+[S1] nortonBryan/Clear-plenoxels, https://github.com/nortonBryan/Clear-plenoxels, fetched 2026-10-27 (unofficial)
++[S2] F2Plenoxels: fast voxel radiance fields without neural networks for few-shot view synthesis, https://doi.org/10.1007/s44443-026-00491-2, fetched 2026-10-26
++[S3] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29

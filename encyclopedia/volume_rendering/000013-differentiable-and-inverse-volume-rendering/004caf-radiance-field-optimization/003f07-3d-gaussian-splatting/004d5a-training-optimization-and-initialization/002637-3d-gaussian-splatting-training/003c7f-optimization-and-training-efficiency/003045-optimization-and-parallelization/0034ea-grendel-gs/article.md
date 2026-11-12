@@ -1,86 +1,84 @@
 # Grendel-GS
-Also called: Distributed Out-of-Core Optimization for 3DGS
 ## Overview
-Grendel-GS is a distributed optimization framework for 3D Gaussian Splatting that partitions the global set of Gaussian primitives across multiple GPUs to overcome single-device memory limits [S1, unofficial]. It enables the training of scenes with billions of Gaussians by allowing each GPU to render its local subset and combining results via inter-GPU communication at partition boundaries [S1, unofficial]. Unlike [TideGS](7350-tidegs.md), which streams data from disk on a single GPU, Grendel-GS distributes the parameter store across a multi-GPU cluster [S1, unofficial].
+Grendel-GS is a distributed optimization framework for 3D Gaussian Splatting that partitions the global set of Gaussian primitives across multiple GPUs to overcome single-device memory limits [S1, unofficial]. It enables the training of large scenes by allowing each GPU to render its local subset and combining results via inter-GPU communication at partition boundaries [S1, unofficial]. Unlike [TideGS](7350-tidegs.md), which streams data from disk on a single GPU, Grendel-GS distributes the parameter store across a multi-GPU cluster [S1, unofficial].
 ## How it works
 **Inputs and Outputs:**
-- Input: A global list of $N$ 3D Gaussians, each defined by position $\mathbf{p}_i$, covariance $\mathbf{\Sigma}_i$, opacity $\alpha_i$, spherical harmonic coefficients $\mathbf{c}_i$, and scaling $\mathbf{s}_i$.
-- Input: A set of training views (cameras).
-- Input: A partitioning strategy mapping Gaussians to $K$ GPUs.
-- Output: Optimized Gaussian parameters stored distributedly across $K$ GPUs.
+- Input: A global list of $N$ 3D Gaussians with parameters $\theta$ (position, covariance, opacity, color, SH coefficients) [G].
+- Input: A set of training views (cameras) and ground truth images [G].
+- Input: A partitioning strategy mapping Gaussians to $K$ GPUs [S1, unofficial].
+- Output: Optimized Gaussian parameters distributed across $K$ GPUs [S1, unofficial].
 
 **Data Structures:**
-The global Gaussian list is partitioned into $K$ subsets $\mathcal{G}_0, \dots, \mathcal{G}_{K-1}$, where $\mathcal{G}_k$ resides on GPU $k$. Each subset contains a contiguous block of Gaussian attributes. The partitioning is static or dynamic based on scene geometry or load balancing.
+The global Gaussian list is partitioned into $K$ subsets $\mathcal{G}_0, \dots, \mathcal{G}_{K-1}$, where $\mathcal{G}_k$ resides on GPU $k$ [S1, unofficial]. The exact layout of each subset and the partitioning strategy (static vs. dynamic) are not specified in the sources [S1, unofficial].
 
 **Steps:**
-1. **Partitioning:** Divide the $N$ Gaussians into $K$ disjoint sets $\mathcal{G}_k$ assigned to GPU $k$.
-2. **Local Rendering:** Each GPU $k$ renders the scene using only Gaussians in $\mathcal{G}_k$. This produces a partial color image $\mathbf{I}_k$ and partial transmittance/depth information.
-3. **Inter-GPU Communication:** At partition boundaries, GPUs exchange necessary intermediate data (e.g., transmittance $T$ or accumulated color contributions) to ensure correct alpha-blending across the global scene. This step resolves dependencies where a Gaussian on GPU $j$ occludes or is occluded by a Gaussian on GPU $k$.
-4. **Global Composite:** The partial images are combined to form the final rendered image $\mathbf{I}$ for each training view.
-5. **Loss Computation:** Compute the loss $\mathcal{L}$ between $\mathbf{I}$ and the ground truth image.
-6. **Gradient Distribution:** Gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ are computed and distributed back to the respective GPUs based on which Gaussian contributed to the loss.
-7. **Parameter Update:** Each GPU updates its local subset of Gaussian parameters using the received gradients.
+1. **Partitioning:** Divide the $N$ Gaussians into $K$ disjoint sets $\mathcal{G}_k$ assigned to GPU $k$ [S1, unofficial].
+2. **Local Rendering:** Each GPU $k$ renders the scene using only Gaussians in $\mathcal{G}_k$ [S1, unofficial].
+3. **Inter-GPU Communication:** GPUs exchange intermediate data at partition boundaries to combine rendering results [S1, unofficial].
+4. **Global Composite:** Partial images are combined to form the final rendered image $\mathbf{I}$ [S1, unofficial].
+5. **Loss Computation & Backpropagation:** Compute the loss $\mathcal{L}$ between $\mathbf{I}$ and the ground truth, then propagate gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ back to the respective GPUs [G].
+6. **Parameter Update:** Each GPU updates its local subset of Gaussian parameters using the received gradients [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Assume K GPUs, each with rank k
-# Global Gaussian list G is partitioned into G_k on GPU k
+def forward_pass(gaussians, cameras):
+    # Project each Gaussian to 2D, compute 2D covariance, opacity, and color
+    # Sort Gaussians by depth, then alpha-blend contributions into pixel colors
+    # Returns: rendered_image, transmittance_map, gaussian_contributions
+    pass # Standard differentiable rasterization forward pass [G]
 
-def forward_pass(k, G_k, cameras):
-    # Render local subset
-    I_k, T_k, depth_k = render(G_k, cameras)
-    return I_k, T_k, depth_k
+def backward_pass(gaussians, cameras, grad_colors):
+    # Backpropagate gradients through the alpha-blending chain
+    # Compute gradients for position, covariance, opacity, color, and SH coefficients
+    # Returns: gradients_for_gaussians
+    pass # Standard differentiable rasterization backward pass [G]
 
-def backward_pass(k, G_k, grad_I, cameras):
-    # Compute local gradients
-    grad_G_k = compute_gradients(G_k, grad_I, cameras)
-    return grad_G_k
-
-def optimize(G, cameras, K):
-    # Partition G across K GPUs
-    G_partitions = partition(G, K)
+def optimize(gaussians, cameras, ground_truth, num_gpus, num_iterations):
+    # Partition Gaussians across GPUs
+    partitions = [gaussians[i::num_gpus] for i in range(num_gpus)]
     
-    for iteration in range(num_iterations):
-        # Forward pass on each GPU
-        results = [forward_pass(k, G_partitions[k], cameras) for k in range(K)]
+    for step in range(num_iterations):
+        # Local rendering on each GPU
+        local_outputs = [forward_pass(partitions[k], cameras) for k in range(num_gpus)]
         
-        # Combine results (simplified: assumes no cross-Gaussian occlusion dependency 
-        # or that communication handles it)
-        # In practice, this requires exchanging T or color contributions at boundaries
-        I_global = combine(results)
+        # Combine results via inter-GPU communication at boundaries
+        # Exact communication protocol is not specified in the sources [S1, unofficial]
+        global_image = combine_results(local_outputs)
         
-        # Compute loss
-        L = loss(I_global, ground_truth)
+        # Compute loss and gradients
+        loss = compute_loss(global_image, ground_truth)
+        grad_colors = compute_loss_gradient(loss, global_image)
         
-        # Backward pass
-        grad_I = compute_loss_gradient(L, I_global)
-        grad_G_partitions = [backward_pass(k, G_partitions[k], grad_I, cameras) for k in range(K)]
-        
-        # Update parameters
-        for k in range(K):
-            G_partitions[k] = update(G_partitions[k], grad_G_partitions[k])
+        # Backward pass and parameter update on each GPU
+        for k in range(num_gpus):
+            grad_gaussians = backward_pass(partitions[k], cameras, grad_colors)
+            partitions[k] = update_parameters(partitions[k], grad_gaussians)
             
-    return G_partitions
+    return partitions
 ```
 
 **Edge Cases:**
-- **Occlusion Across Partitions:** If a Gaussian on GPU $j$ occludes a Gaussian on GPU $k$, the alpha-blending order must be respected. This requires communication of transmittance or depth information between GPUs [S1, unofficial].
-- **Load Imbalance:** Uneven distribution of Gaussians or complex geometry on specific GPUs can lead to bottlenecks. Dynamic partitioning may be required.
-- **Communication Overhead:** Inter-GPU communication latency can dominate computation time if not optimized.
+- **Occlusion Across Partitions:** Gaussians on different GPUs may occlude each other, requiring careful handling of the alpha-blending order during the combination step [G].
+- **Communication Overhead:** Inter-GPU communication latency can dominate computation time if not optimized [G].
+- **Load Imbalance:** Uneven distribution of Gaussians or complex geometry on specific GPUs can lead to bottlenecks [G].
 
 ## Subtopics
+
+### [TideGS](7350-tidegs.md)
+A fully out-of-core optimization framework for training 3D Gaussian Splatting that enables training with over one billion primitives on a single GPU with limited VRAM. It solves the VRAM bottleneck by decoupling memory usage from the total scene size, keeping the full parameter table on SSD and materializing only the per-iteration working set in GPU memory. Unlike Grendel-GS, which distributes Gaussians across multiple GPUs, TideGS operates on a single machine, treating GPU VRAM as a high-bandwidth working-set cache rather than a persistent parameter store.
+
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot V)$ per iteration, where $N$ is the number of Gaussians and $V$ is the number of views, distributed across $K$ GPUs. Communication overhead adds $O(K \cdot B)$, where $B$ is the boundary size.
-- **Memory Complexity:** $O(N/K)$ per GPU, enabling training of scenes with $N \gg \text{VRAM}_{\text{GPU}}$.
-- **Strengths:** Scales to billions of Gaussians; utilizes multiple GPUs efficiently.
-- **Limitations:** Communication overhead; complex implementation; requires high-bandwidth interconnects (e.g., NVLink) for optimal performance.
-- **When to Use:** Large-scale scenes (e.g., urban environments, large indoor spaces) that exceed single-GPU memory.
-- **When Not to Use:** Small scenes; single-GPU setups; scenarios where communication latency is high.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** $O(N/K)$ per GPU, enabling training of scenes with $N \gg \text{VRAM}_{\text{GPU}}$ [G].
+- **Strengths:** Scales to large scenes by distributing memory and computation across multiple GPUs [S1, unofficial].
+- **Limitations:** Communication overhead; complex implementation; requires high-bandwidth interconnects for optimal performance [G].
+- **When to Use:** Large-scale scenes that exceed single-GPU memory capacity [S1, unofficial].
+- **When Not to Use:** Small scenes or single-GPU setups where communication overhead outweighs benefits [G].
 
 ## Background
-Grendel-GS was introduced as part of the effort to scale 3D Gaussian Splatting to massive scenes. It addresses the memory bottleneck of standard 3DGS by distributing the Gaussian list across multiple GPUs [S1, unofficial]. It is related to other out-of-core methods like [CLM](link) and [TideGS](7350-tidegs.md) [S1, unofficial].
+Grendel-GS was introduced as part of the effort to scale 3D Gaussian Splatting to massive scenes [S1, unofficial]. It addresses the memory bottleneck of standard 3DGS by distributing the Gaussian list across multiple GPUs [S1, unofficial]. It is related to other out-of-core methods like [CLM](link) and [TideGS](7350-tidegs.md) [S1, unofficial].
 
 ## Sources
 [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)

@@ -3,216 +3,218 @@
 Also called: SNS Gradient Computation, Skew-Normal 2D Gradient Computation
 
 ## Overview
-This method computes the exact gradients of the 3D Skew-Normal Splatting (SNS) parameters with respect to a rendering loss, enabling differentiable training of 3D Gaussians with skewness. It solves the problem of high computational complexity and intricate coupling between rotation and scale parameters in standard 3DGS gradient computation by introducing an intermediate variable $Q = ARS$ [S1, unofficial]. Unlike standard 3DGS, which computes gradients w.r.t. 2D image-space variables first, SNS directly evaluates shared auxiliary algebraic terms during the rendering stage and uses them in a preprocessing stage to compute closed-form gradients for 3D learnable parameters [S1, unofficial].
+The SNS Backward Pass with Intermediate Variable Q computes the gradients of the loss $L$ with respect to the 3D Gaussian parameters (mean $\mu$, opacity $o$, color $c$, rotation $R$, scale $S$, and skew $k$) for the Skew-Normal Splatting (SNS) rendering model [S1, unofficial]. It solves the problem of efficiently differentiating the complex Skew-Normal 2D density function, which couples rotation and scale intricately, by introducing an intermediate variable $Q = ARS$ to decouple these dependencies [S1, unofficial]. Unlike standard 3D Gaussian Splatting (3DGS) which computes gradients with respect to the inverse covariance matrix $\Omega^{-1}$ first, this method directly evaluates shared auxiliary algebraic terms during the rendering stage to enable closed-form gradient computation for the 3D parameters in the preprocessing stage [S1, unofficial].
 
 ## How it works
-The backward pass follows the standard 3DGS architecture, consisting of a **rendering stage** and a **preprocessing stage** [S1, unofficial].
+The backward pass follows the standard 3DGS architecture, consisting of a rendering stage and a preprocessing stage [S1, unofficial].
 
 ### Inputs and Outputs
 **Inputs:**
-*   Loss gradient w.r.t. rendered color: $\frac{\partial L}{\partial C}$ [S1, unofficial].
-*   2D pixel coordinate: $u \in \mathbb{R}^2$ [S1, unofficial].
-*   2D mean of the Gaussian: $\mu^{2D} \in \mathbb{R}^2$ [S1, unofficial].
-*   Intermediate variable: $Q = ARS \in \mathbb{R}^{2 \times 2}$, where $A$ is the projection matrix, $R$ is rotation, and $S$ is scale [S1, unofficial].
+*   Loss gradient with respect to rendered color: $\frac{\partial L}{\partial C} \in \mathbb{R}^{3 \times N_{pixels}}$ (or per-pixel vector).
+*   Rendered pixel coordinates: $u \in \mathbb{R}^2$.
+*   2D Gaussian mean: $\mu^{2D} \in \mathbb{R}^2$.
+*   Intermediate variable: $Q \in \mathbb{R}^{2 \times 2}$, where $Q = ARS$ ($A$ is projection, $R$ is rotation, $S$ is scale) [S1, unofficial].
 *   Skew parameter: $k \in \mathbb{R}^2$ [S1, unofficial].
 *   Opacity: $o \in \mathbb{R}$ [S1, unofficial].
 *   Color: $c \in \mathbb{R}^3$ [S1, unofficial].
-*   Transmittance from preceding Gaussians: $T_k$ [S1, unofficial].
+*   Transmittance: $T_k$ and opacity contribution $\alpha_k$ (or $a(u)$) from the forward pass [S1, unofficial].
 
 **Outputs:**
-*   Gradients: $\frac{\partial L}{\partial c}$, $\frac{\partial L}{\partial o}$, $\frac{\partial L}{\partial \mu}$, $\frac{\partial L}{\partial Q}$, $\frac{\partial L}{\partial k}$ [S1, unofficial].
+*   Gradients: $\frac{\partial L}{\partial \mu}$, $\frac{\partial L}{\partial o}$, $\frac{\partial L}{\partial c}$, $\frac{\partial L}{\partial Q}$, $\frac{\partial L}{\partial k}$ [S1, unofficial].
 
-### Data Structures and Definitions
-Let $\Delta = u - \mu^{2D}$ be the displacement vector [S1, unofficial].
-Let $\Omega^{2D} = Q Q^\top$ be the 2D covariance matrix [S1, unofficial].
-Let $G_2$ be the 2D Gaussian density component:
-$$ G_2 = \frac{1}{2\pi \sqrt{\det(\Omega^{2D})}} \exp \left( -\frac{1}{2} \Delta^\top (\Omega^{2D})^{-1} \Delta \right) $$
-Let $\Phi$ be the skewness modulation term:
-$$ \Phi = 1 + \text{erf} \left( \frac{m^\top \Delta}{\sqrt{2}} \right) $$
-where $m$ is the skew direction vector:
-$$ m = \frac{(\Omega^{2D})^{-1} Q k}{\sqrt{1 + k^\top k - k^\top Q^\top (\Omega^{2D})^{-1} Q k}} $$
-Let $D$ be the denominator scalar:
-$$ D = \sqrt{1 + k^\top k - k^\top Q^\top (\Omega^{2D})^{-1} Q k} $$
-Thus, $m = \frac{(\Omega^{2D})^{-1} Q k}{D}$ [S1, unofficial].
+### Data Structures
+*   **Auxiliary Variables:**
+    *   $c_\Delta \in \mathbb{R}^2$
+    *   $M_\Delta \in \mathbb{R}^{2 \times 2}$
+    *   $s_\Delta \in \mathbb{R}$
+    *   $p_\Delta \in \mathbb{R}^2$
+    *   $D \in \mathbb{R}$ (scalar denominator)
+    *   $m \in \mathbb{R}^2$ (normalized skew vector)
+    *   $\Delta \in \mathbb{R}^2$ (displacement vector $u - \mu^{2D}$)
+    *   $\Omega^{2D} \in \mathbb{R}^{2 \times 2}$ (2D covariance matrix, derived from $Q$) [S1, unofficial].
 
-The rendered opacity is $a(u) = o \cdot SN^{2D}(u)$, where $SN^{2D}(u) = G_2 \cdot \Phi$ [S1, unofficial].
+### Steps
 
-### Auxiliary Variables
-The rendering stage computes four auxiliary variables to simplify gradient expressions [S1, unofficial]:
+1.  **Compute Displacement and Normalization:**
+    Calculate $\Delta = u - \mu^{2D}$ [S1, unofficial].
+    Calculate the denominator $D$:
+    $$ D = \sqrt{1 + k^\top k - k^\top Q^\top (\Omega^{2D})^{-1} Q k} $$
+    [S1, unofficial]
 
-1.  $c_\Delta = \Phi \cdot G_2 \cdot (\Omega^{2D})^{-1} \Delta \in \mathbb{R}^2$
-2.  $M_\Delta = \Phi \cdot G_2 \cdot ((\Omega^{2D})^{-1} \Delta) ((\Omega^{2D})^{-1} \Delta)^\top \in \mathbb{R}^{2 \times 2}$
-3.  $s_\Delta = \frac{G_2}{\sqrt{2\pi}} \exp \left( -\frac{1}{2} (m^\top \Delta)^2 \right) \in \mathbb{R}$
-4.  $p_\Delta = \frac{G_2}{\sqrt{2\pi}} \exp \left( -\frac{1}{2} (m^\top \Delta)^2 \right) \cdot (\Omega^{2D})^{-1} \Delta \in \mathbb{R}^2$
+2.  **Compute Skew Vector $m$:**
+    $$ m = \frac{(\Omega^{2D})^{-1} Q k}{D} $$
+    [S1, unofficial]
 
-### Numbered Steps
+3.  **Compute Auxiliary Terms (Rendering Stage):**
+    Let $G_2$ be the standard 2D Gaussian density value and $\Phi$ be the skew-normal activation function value (typically $\Phi(x) = 1 + \text{erf}(x/\sqrt{2})$ or similar, though the exact form is absorbed into the derivatives below) [S1, unofficial].
+    
+    *   $c_\Delta = \Phi \cdot G_2 \cdot (\Omega^{2D})^{-1} \Delta$
+    *   $M_\Delta = \Phi \cdot G_2 \cdot ((\Omega^{2D})^{-1} \Delta) ((\Omega^{2D})^{-1} \Delta)^\top$
+    *   $s_\Delta = \frac{G_2}{\sqrt{2\pi}} \exp \left( -\frac{1}{2} (m^\top \Delta)^2 \right)$
+    *   $p_\Delta = \frac{G_2}{\sqrt{2\pi}} \exp \left( -\frac{1}{2} (m^\top \Delta)^2 \right) \cdot (\Omega^{2D})^{-1} \Delta$
+    [S1, unofficial]
 
-1.  **Compute Auxiliary Terms:** Calculate $c_\Delta, M_\Delta, s_\Delta, p_\Delta$ using the definitions above.
-2.  **Compute Gradient w.r.t. 2D Mean ($\mu^{2D}$):**
-    $$ \frac{\partial SN^{2D}}{\partial \mu^{2D}} = c_\Delta - s_\Delta \cdot m \quad \text{(Eq. 25)} $$
-    The gradient w.r.t. 3D mean $\mu$ is obtained via chain rule: $\frac{\partial L}{\partial \mu} = \frac{\partial L}{\partial C} \frac{\partial C}{\partial a} \frac{\partial a}{\partial SN^{2D}} \frac{\partial SN^{2D}}{\partial \mu^{2D}} \frac{\partial \mu^{2D}}{\partial \mu}$ [S1, unofficial].
-3.  **Compute Gradient w.r.t. Skew Parameter ($k$):**
-    $$ \frac{\partial SN^{2D}}{\partial k} = \frac{1}{D} Q^\top \left( p_\Delta + (p_\Delta^\top \Omega^{2D} m) \cdot m \right) - \frac{1}{D^2} (p_\Delta^\top \Omega^{2D} m) \cdot k \quad \text{(Eq. 28)} $$
-4.  **Compute Gradient w.r.t. Intermediate Variable ($Q$):**
-    $$ \frac{\partial SN^{2D}}{\partial Q} = \left( M_\Delta - p_\Delta m^\top - m p_\Delta^\top - (p_\Delta^\top \Omega^{2D} m) \cdot m m^\top \right) Q + \frac{1}{D} \left( p_\Delta + (p_\Delta^\top \Omega^{2D} m) \cdot m \right) k^\top \quad \text{(Eq. 38)} $$
-5.  **Compute Gradients w.r.t. Color and Opacity:**
-    Using the standard alpha compositing gradient $\frac{\partial L}{\partial C}$:
-    $$ \frac{\partial L}{\partial c} = \frac{\partial L}{\partial C} \cdot \alpha_k T_k $$
-    $$ \frac{\partial L}{\partial o} = \frac{\partial L}{\partial C} \cdot SN^{2D} \alpha_k T_k $$
-    where $\alpha_k$ is the opacity contribution of the current Gaussian [S1, unofficial].
-6.  **Backpropagate to 3D Parameters:**
-    Use $\frac{\partial L}{\partial Q}$ and $\frac{\partial L}{\partial k}$ to compute gradients for $R$ and $S$ via the chain rule, leveraging the definition $Q = ARS$ [S1, unofficial].
+4.  **Compute Gradients of $SN^{2D}$ (Preprocessing Stage):**
+    
+    *   **Gradient w.r.t $\mu^{2D}$:**
+        $$ \frac{\partial SN^{2D}}{\partial \mu^{2D}} = c_\Delta - s_\Delta \cdot m $$
+        [S1, unofficial]
+        
+    *   **Gradient w.r.t $k$:**
+        $$ \frac{\partial SN^{2D}}{\partial k} = \frac{1}{D} Q^\top (p_\Delta + (p_\Delta^\top \Omega^{2D} m) \cdot m) - \frac{1}{D^2} \cdot (p_\Delta^\top \Omega^{2D} m) \cdot k $$
+        [S1, unofficial]
+        
+    *   **Gradient w.r.t $Q$:**
+        $$ \frac{\partial SN^{2D}}{\partial Q} = (M_\Delta - p_\Delta m^\top - m p_\Delta^\top - (p_\Delta^\top \Omega^{2D} m) \cdot m m^\top) Q + \frac{1}{D} (p_\Delta + (p_\Delta^\top \Omega^{2D} m) \cdot m) k^\top $$
+        [S1, unofficial]
+
+5.  **Chain Rule to Loss:**
+    The rendered opacity is $a(u) = o \cdot SN^{2D}(u)$ [S1, unofficial].
+    
+    *   **Gradient w.r.t Color $c$:**
+        $$ \frac{\partial L}{\partial c} = \frac{\partial L}{\partial C} \cdot a(u) $$
+        [S1, unofficial]
+        
+    *   **Gradient w.r.t Opacity $o$:**
+        $$ \frac{\partial L}{\partial o} = \frac{\partial L}{\partial C} \cdot SN^{2D}(u) $$
+        [S1, unofficial]
+        
+    *   **Gradient w.r.t Mean $\mu$:**
+        $$ \frac{\partial L}{\partial \mu} = \frac{\partial L}{\partial C} \cdot o \cdot \frac{\partial SN^{2D}}{\partial \mu^{2D}} $$
+        [S1, unofficial]
+        
+    *   **Gradient w.r.t Skew $k$:**
+        $$ \frac{\partial L}{\partial k} = \frac{\partial L}{\partial C} \cdot o \cdot \frac{\partial SN^{2D}}{\partial k} $$
+        [S1, unofficial]
+        
+    *   **Gradient w.r.t $Q$:**
+        $$ \frac{\partial L}{\partial Q} = \frac{\partial L}{\partial C} \cdot o \cdot \frac{\partial SN^{2D}}{\partial Q} $$
+        [S1, unofficial]
+
+    *Note: Gradients for $R$ and $S$ are obtained by backpropagating through $Q = ARS$ [S1, unofficial].*
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_sns_gradients(loss_grad_C, u, mu_2d, Q, k, opacity_o, transmittance_T, color_c):
+import numpy as np
+
+def sns_backward_pass(
+    dL_dC,       # Gradient of loss w.r.t rendered color, shape (3,) or (N, 3)
+    u,           # Pixel coordinate, shape (2,)
+    mu_2d,       # 2D mean, shape (2,)
+    Q,           # Intermediate variable, shape (2, 2)
+    k,           # Skew parameter, shape (2,)
+    o,           # Opacity scalar
+    G2,          # 2D Gaussian density value
+    Phi,         # Skew-normal activation value
+    T_k,         # Transmittance from forward pass (used if needed for alpha compositing gradients)
+    alpha_k      # Opacity contribution a(u) = o * SN2D
+):
     """
     Computes gradients for SNS backward pass.
-    
-    Args:
-        loss_grad_C: Gradient of loss w.r.t. rendered color C.
-        u: 2D pixel coordinate (2,).
-        mu_2d: 2D mean of Gaussian (2,).
-        Q: Intermediate variable matrix (2, 2).
-        k: Skew parameter vector (2,).
-        opacity_o: Scalar opacity.
-        transmittance_T: Transmittance from preceding Gaussians.
-        color_c: Color vector (3,).
-        
-    Returns:
-        grads: Dictionary containing gradients for c, o, mu, Q, k.
+    Returns: dL_dmu, dL_do, dL_dc, dL_dQ, dL_dk
     """
-    import numpy as np
     
-    # 1. Basic quantities
-    Delta = u - mu_2d  # (2,)
-    Omega_2D = Q @ Q.T  # (2, 2)
-    Omega_inv = np.linalg.inv(Omega_2D)  # (2, 2)
+    # 1. Compute Displacement
+    Delta = u - mu_2d  # shape (2,)
     
-    # 2. Compute m and D
-    # D = sqrt(1 + k^T k - k^T Q^T Omega_inv Q k)
+    # 2. Compute Omega_inv and D
+    # Note: Omega_2D is derived from Q. Assuming Q = A*R*S, Omega_2D = Q @ Q.T (or similar depending on projection)
+    # The source defines Omega_2D in the context of Q. 
+    # We need Omega_2D inverse. Let's assume it's passed or computed from Q.
+    # Based on Eq 19, Omega_2D is related to Q Q^T.
+    # Let's compute Omega_2D_inv explicitly if not provided.
+    # However, the formulas use Omega_2D^-1 directly.
+    # We will assume Omega_2D_inv is available or computed as np.linalg.inv(Q @ Q.T) 
+    # if A=I. For general projection, it's more complex. 
+    # The source uses Omega_2D in the auxiliary definitions.
+    
+    # To be safe and self-contained, we compute Omega_2D_inv from Q if not provided.
+    # But the source says "Omega_2D is the 2D covariance matrix".
+    # In SNS, Omega_2D is typically Q @ Q.T.
+    Omega_2D = Q @ Q.T
+    Omega_2D_inv = np.linalg.inv(Omega_2D)
+    
+    # 3. Compute D
+    # D = sqrt(1 + k^T k - k^T Q^T Omega_2D^-1 Q k)
     term1 = k.T @ k
-    term2 = k.T @ Q.T @ Omega_inv @ Q @ k
+    term2 = k.T @ Q.T @ Omega_2D_inv @ Q @ k
     D = np.sqrt(1 + term1 - term2)
     
-    # m = (Omega_inv @ Q @ k) / D
-    m = (Omega_inv @ Q @ k) / D  # (2,)
+    # 4. Compute m
+    # m = (Omega_2D^-1 Q k) / D
+    m_num = Omega_2D_inv @ Q @ k
+    m = m_num / D
     
-    # 3. Compute Gaussian component G2
-    # G2 = 1 / (2 * pi * sqrt(det(Omega_2D))) * exp(-0.5 * Delta^T Omega_inv Delta)
-    det_Omega = np.linalg.det(Omega_2D)
-    exponent = -0.5 * Delta.T @ Omega_inv @ Delta
-    G2 = (1.0 / (2.0 * np.pi * np.sqrt(det_Omega))) * np.exp(exponent)
+    # 5. Compute Auxiliary Terms
+    # c_delta = Phi * G2 * Omega_2D^-1 Delta
+    c_delta = Phi * G2 * (Omega_2D_inv @ Delta)
     
-    # 4. Compute Phi
-    # Phi = 1 + erf(m^T Delta / sqrt(2))
-    # Note: scipy.special.erf is assumed available or implemented
-    from scipy.special import erf
-    Phi = 1.0 + erf((m.T @ Delta) / np.sqrt(2))
-    
-    # 5. Compute Auxiliary Variables
-    # c_delta = Phi * G2 * Omega_inv @ Delta
-    c_delta = Phi * G2 * (Omega_inv @ Delta)
-    
-    # M_delta = Phi * G2 * (Omega_inv @ Delta) @ (Omega_inv @ Delta).T
-    v = Omega_inv @ Delta
+    # M_delta = Phi * G2 * (Omega_2D^-1 Delta) (Omega_2D^-1 Delta)^T
+    v = Omega_2D_inv @ Delta
     M_delta = Phi * G2 * np.outer(v, v)
     
-    # s_delta = (G2 / sqrt(2*pi)) * exp(-0.5 * (m^T Delta)^2)
+    # s_delta = (G2 / sqrt(2pi)) * exp(-0.5 * (m^T Delta)^2)
     m_dot_Delta = m.T @ Delta
     s_delta = (G2 / np.sqrt(2 * np.pi)) * np.exp(-0.5 * m_dot_Delta**2)
     
-    # p_delta = s_delta * Omega_inv @ Delta
+    # p_delta = s_delta * Omega_2D^-1 Delta
     p_delta = s_delta * v
     
     # 6. Compute Gradients of SN^2D
+    # dSN_dmu = c_delta - s_delta * m
+    dSN_dmu = c_delta - s_delta * m
     
-    # dSN_d_mu_2d = c_delta - s_delta * m
-    dSN_d_mu_2d = c_delta - s_delta * m
+    # dSN_dk = (1/D) Q^T (p_delta + (p_delta^T Omega_2D m) * m) - (1/D^2) * (p_delta^T Omega_2D m) * k
+    p_dot_Omega_m = p_delta.T @ Omega_2D @ m
+    term1_dk = (1.0 / D) * (Q.T @ (p_delta + p_dot_Omega_m * m))
+    term2_dk = (1.0 / D**2) * p_dot_Omega_m * k
+    dSN_dk = term1_dk - term2_dk
     
-    # dSN_d_k
-    # term_A = p_delta + (p_delta^T Omega_2D m) * m
-    p_Omega_m = p_delta.T @ Omega_2D @ m
-    term_A = p_delta + p_Omega_m * m
-    
-    # dSN_d_k = (1/D) * Q.T @ term_A - (1/D^2) * p_Omega_m * k
-    dSN_d_k = (1.0 / D) * (Q.T @ term_A) - (1.0 / (D**2)) * p_Omega_m * k
-    
-    # dSN_d_Q
-    # term_B = p_delta + (p_delta^T Omega_2D m) * m  (Same as term_A)
-    # term_C = p_delta^T Omega_2D m
-    term_C = p_Omega_m
-    
-    # Matrix part: (M_delta - p_delta @ m.T - m @ p_delta.T - term_C * np.outer(m, m)) @ Q
-    matrix_part = M_delta - np.outer(p_delta, m) - np.outer(m, p_delta) - term_C * np.outer(m, m)
-    
-    # Vector part: (1/D) * (p_delta + term_C * m) @ k.T
-    vector_part = (1.0 / D) * np.outer(term_A, k)
-    
-    dSN_d_Q = matrix_part @ Q + vector_part
+    # dSN_dQ = (M_delta - p_delta m^T - m p_delta^T - (p_delta^T Omega_2D m) m m^T) Q + (1/D) (p_delta + (p_delta^T Omega_2D m) m) k^T
+    # Note: p_delta^T Omega_2D m is a scalar, same as p_dot_Omega_m
+    outer_mm = np.outer(m, m)
+    term1_dQ = M_delta - np.outer(p_delta, m) - np.outer(m, p_delta) - (p_dot_Omega_m * outer_mm)
+    term2_dQ = (1.0 / D) * np.outer((p_delta + p_dot_Omega_m * m), k)
+    dSN_dQ = term1_dQ @ Q + term2_dQ
     
     # 7. Chain Rule to Loss
-    # Opacity a = o * SN^2D
-    # dL/dC is given.
-    # dC/da for current Gaussian k is alpha_k * T_k (where alpha_k = o * SN^2D)
-    # Actually, standard 3DGS gradient for opacity/color is:
-    # dL/dc = dL/dC * alpha_k * T_k
-    # dL/do = dL/dC * SN^2D * alpha_k * T_k
+    # dL/dC is input. 
+    # dL/dc = dL/dC * a(u)
+    dL_dc = dL_dC * alpha_k
     
-    alpha_k = opacity_o * G2 * Phi
-    weight = loss_grad_C * alpha_k * transmittance_T
+    # dL/do = dL/dC * SN^2D
+    # SN^2D = alpha_k / o (if o != 0)
+    SN_2D = alpha_k / o if o != 0 else 0.0
+    dL_do = dL_dC * SN_2D
     
-    grad_c = weight * color_c # Element-wise or vector depending on loss_grad_C shape. 
-                              # Assuming loss_grad_C is scalar per pixel or vector per channel.
-                              # If loss_grad_C is (3,), grad_c is (3,).
+    # dL/dmu = dL/dC * o * dSN/dmu
+    dL_dmu = dL_dC * o * dSN_dmu
     
-    grad_o = weight * G2 * Phi
+    # dL/dk = dL/dC * o * dSN/dk
+    dL_dk = dL_dC * o * dSN_dk
     
-    # Gradient w.r.t mu (3D) requires mapping from 2D mu_2d to 3D mu.
-    # Assuming standard projection Jacobian J_mu_2d_mu_3d exists.
-    # grad_mu_3d = J_mu_2d_mu_3d.T @ (dL/dC * dC/da * da/dSN * dSN/dmu_2d)
-    # dL/dC * dC/da = loss_grad_C * alpha_k * T_k
-    # da/dSN = o
-    grad_SN_d_mu_2d = loss_grad_C * alpha_k * transmittance_T * o * dSN_d_mu_2d
+    # dL/dQ = dL/dC * o * dSN/dQ
+    dL_dQ = dL_dC * o * dSN_dQ
     
-    # Gradient w.r.t Q and k
-    grad_Q = loss_grad_C * alpha_k * transmittance_T * o * dSN_d_Q
-    grad_k = loss_grad_C * alpha_k * transmittance_T * o * dSN_d_k
-    
-    return {
-        'c': grad_c,
-        'o': grad_o,
-        'mu_2d': grad_SN_d_mu_2d,
-        'Q': grad_Q,
-        'k': grad_k
-    }
+    return dL_dmu, dL_do, dL_dc, dL_dQ, dL_dk
 ```
 
 ### Edge Cases and Pitfalls
-*   **Precision:** The calculation of $D$ involves a square root of a term that can be close to zero if $k$ is large or $Q$ is ill-conditioned. Guard against negative values inside the square root due to floating-point errors [S1, unofficial].
-*   **Matrix Inversion:** Computing $(\Omega^{2D})^{-1}$ directly can be unstable if the Gaussian is degenerate (e.g., very small scale). Use a Cholesky decomposition or add a small regularization term $\epsilon I$ to $\Omega^{2D}$ before inversion [G].
-*   **Coupling:** The method avoids the complex coupling of $R$ and $S$ by working with $Q$. However, gradients for $R$ and $S$ must be recovered from $Q$ and $k$ in the preprocessing stage, which requires careful application of the chain rule [S1, unofficial].
-
-## Subtopics
-
-### ToF Gradient Computation for Gaussian Splatting
-Handles time-of-flight signals with squared transmittance terms. Choose when depth/intensity non-linearity is critical. [ToF Gradient Computation for Gaussian Splatting](9733-tof-gradient-computation-for-gaussian-splatting.md)
-
-### Gradient-Weighted Feature Back-Projection
-Aggregates 2D features into 3D Gaussians using gradients as weights. Choose when feature learning is required. [Gradient-Weighted Feature Back-Projection](9769-gradient-weighted-feature-back-projection.md)
+*   **Division by Zero:** If $o=0$, $SN^{2D}$ is undefined via division. Handle with a guard or small epsilon [G].
+*   **Singular Matrices:** If $\Omega^{2D}$ is singular, inversion fails. Ensure $Q$ is full rank [G].
+*   **Numerical Stability:** The term $D$ involves a square root. Ensure the argument is non-negative [G].
 
 ## Operating characteristics
-*   **Time Complexity:** The auxiliary variable computation is $O(1)$ per Gaussian per pixel. The gradient formulas are closed-form and involve constant-size matrix operations ($2 \times 2$), making them $O(1)$ per Gaussian. This is comparable to standard 3DGS but avoids iterative or numerical differentiation.
-*   **Memory Complexity:** Requires storing auxiliary variables $c_\Delta, M_\Delta, s_\Delta, p_\Delta$ during the forward pass, adding minimal overhead.
-*   **Strengths:** Provides exact analytical gradients, avoiding approximation errors. The intermediate variable $Q$ simplifies the differentiation of skew parameters, which are otherwise coupled with rotation and scale.
-*   **Limitations:** The complexity of the closed-form expressions (Eq. 38) is higher than standard 3DGS gradients, potentially increasing constant-factor overhead. Requires careful implementation to avoid numerical instability in $D$ and matrix inversion.
-*   **When to use:** When training 3D Gaussians with skewness (SNS) is required for better representation of anisotropic structures or non-Gaussian shapes. Not suitable for standard isotropic Gaussian Splatting where simpler gradients suffice.
+*   **Time Complexity:** The auxiliary terms computation is $O(1)$ per pixel per Gaussian (matrix-vector multiplications). The gradient computation is also $O(1)$ per pixel per Gaussian. This is comparable to standard 3DGS but avoids the iterative or complex chain rule through $R$ and $S$ separately [S1, unofficial].
+*   **Memory Complexity:** Requires storing auxiliary variables $c_\Delta, M_\Delta, s_\Delta, p_\Delta, D, m$ per pixel per Gaussian during the backward pass [S1, unofficial].
+*   **Strengths:** Decouples rotation and scale gradients via $Q$, simplifying the analytical derivation and improving computational efficiency [S1, unofficial].
+*   **Limitations:** Requires careful implementation of the matrix calculus identities. The introduction of $Q$ adds an intermediate step that must be correctly differentiated back to $R$ and $S$ [S1, unofficial].
 
 ## Background
-The SNS (3D Skew-Normal Splatting) method was introduced to extend 3D Gaussian Splatting with skewness parameters to better model complex geometry. The backward pass with intermediate variable $Q$ was proposed to solve the computational complexity issues arising from the coupling of rotation and scale in the gradient computation of skew-normal distributions [S1, unofficial]. The paper "3D Skew-Normal Splatting" presents the full derivation and integration into the 3DGS training pipeline [S1, unofficial].
+The SNS Backward Pass with Intermediate Variable Q was introduced in the paper "3D Skew-Normal Splatting" [S1, unofficial]. It addresses the limitations of standard 3DGS and SSS in handling skew parameters by providing a closed-form gradient solution that avoids the complexity of directly differentiating through the coupled rotation and scale parameters [S1, unofficial].
 
 ## Sources
 [S1] 3D Skew-Normal Splatting, https://doi.org/10.48550/arxiv.2605.15010, fetched 2026-10-26 (unofficial)

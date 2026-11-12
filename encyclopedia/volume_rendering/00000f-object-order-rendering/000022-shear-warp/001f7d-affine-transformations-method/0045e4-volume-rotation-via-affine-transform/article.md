@@ -1,0 +1,132 @@
+# Volume Rotation via Affine Transform
+Also called: Affine Grid Rotation, Affine Volume Rotation, Volume Rotation (Affine Grid)
+
+## Overview
+This method rotates a 3D volume or 2D slice by applying an affine transformation to the sampling grid, enabling pixel-aligned rendering within the broader [Affine-Transformations Method](2038-affine-transformations-method.md) framework. It differs from sibling methods like [Warp-Space Affine Mixture](4115-warp-space-affine-mixture.md) by explicitly constructing a rotation matrix and offset to warp the volume coordinates, rather than mixing warp-space representations.
+
+## How it works
+**Inputs:**
+- `volume`: 3D array of shape $(D_x, D_y, D_z)$ or 2D slice.
+- `theta`: Rotation angle in radians.
+- `device`: Computation device (CPU/GPU).
+
+**Outputs:**
+- `rotated_volume`: The affine-transformed volume.
+
+**Data Structures:**
+- `rotation_matrix`: A $2 \times 3$ matrix (for 2D slice rotation) or extended for 3D. The 2D core is:
+  $$
+  R = \begin{bmatrix} \cos(\theta) & -\sin(\theta) & 0 \\ \sin(\theta) & \cos(\theta) & 0 \end{bmatrix}
+  $$
+- `center`: The geometric center of the volume, calculated as `volume.shape / 2`.
+- `offset`: Translation vector to preserve the center of rotation: `offset = center - R @ center`.
+- `grid`: Sampling grid generated via `affine_grid` or equivalent, mapping output coordinates to input coordinates.
+
+**Steps:**
+1. Calculate the center of the volume: $c = \text{volume.shape} / 2$.
+2. Construct the rotation matrix $R$ for angle $\theta$. For 2D slices, $R$ is $2 \times 3$. For 3D volumes, this extends to a $3 \times 4$ matrix or a $4 \times 4$ homogeneous matrix, though the source notes specifically detail the 2D rotation matrix structure [S1, unofficial].
+3. Calculate the offset: $o = c - R \cdot c$. This ensures the volume rotates around its center rather than the origin [S1, unofficial].
+4. Generate a sampling grid using the affine transformation parameters (matrix $R$ and offset $o$) and the target volume shape [S2, unofficial].
+5. Apply the affine transformation to the volume data using the grid. This involves sampling the original volume at the transformed coordinates. Linear interpolation (order 1) is used by default [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.ndimage import affine_transform
+import torch
+
+def rotate_volume(volume, theta, device='cpu'):
+    """
+    Rotate a volume or slice using affine transformation.
+    
+    Args:
+        volume: numpy array or torch tensor of shape (D, H, W) or (H, W).
+        theta: Rotation angle in radians.
+        device: 'cpu' or 'cuda'.
+        
+    Returns:
+        rotated_volume: Transformed volume.
+    """
+    # Convert to numpy if tensor for scipy, or handle via torch if preferred
+    # Note: Source [S1, unofficial] uses scipy.ndimage.affine_transform for the core rotation
+    # Source [S2, unofficial] uses torch.nn.functional.grid_sample
+    
+    # Determine if 2D or 3D
+    is_3d = volume.ndim == 3
+    
+    if is_3d:
+        # For 3D, a full 3D rotation matrix is needed. 
+        # The notes specifically detail 2D rotation matrix construction [S1, unofficial].
+        # Implementing a generic 3D rotation around Z-axis as an example:
+        cos_t = np.cos(theta)
+        sin_t = np.sin(theta)
+        # 3x4 affine matrix for 3D volume (Z-rotation)
+        # [[cos, -sin, 0, 0],
+        #  [sin,  cos, 0, 0],
+        #  [0,    0,   1, 0]]
+        rotation_matrix = np.array([
+            [cos_t, -sin_t, 0, 0],
+            [sin_t,  cos_t, 0, 0],
+            [0,     0,     1, 0]
+        ])
+    else:
+        # 2D slice rotation as per source notes [S1, unofficial]
+        cos_t = np.cos(theta)
+        sin_t = np.sin(theta)
+        # 2x3 affine matrix
+        rotation_matrix = np.array([
+            [cos_t, -sin_t, 0],
+            [sin_t,  cos_t, 0]
+        ])
+
+    # Calculate center
+    center = np.array(volume.shape) / 2.0
+    
+    # Calculate offset: offset = center - R @ center
+    # Note: For 2D, R is 2x3, center is 2. R @ center requires center to be padded or R to be applied correctly.
+    # In affine_transform, the matrix is applied to the coordinates.
+    # The offset is added to the result of the matrix multiplication.
+    # Standard affine transform: y = R @ x + offset
+    # To rotate around center c: y - c = R @ (x - c) => y = R @ x + (c - R @ c)
+    
+    # Ensure center dimensions match the matrix rows
+    if is_3d:
+        offset = center - rotation_matrix[:3, :3] @ center
+    else:
+        # For 2D, rotation_matrix is 2x3. The linear part is 2x2.
+        linear_part = rotation_matrix[:, :2]
+        offset = center - linear_part @ center
+
+    # Apply transformation
+    # scipy.ndimage.affine_transform(input, matrix, offset=offset, order=1)
+    # Note: scipy's affine_transform applies the matrix to the input coordinates.
+    # The formula used internally is output[i] = input(matrix @ i + offset)
+    rotated_volume = affine_transform(volume, rotation_matrix, offset=offset, order=1)
+    
+    return rotated_volume
+```
+
+**Parameters:**
+- `theta`: Rotation angle. Typical values depend on the application (e.g., incremental steps in tomography).
+- `order`: Interpolation order. 1 (linear) is used in the source [S1, unofficial]. 0 (nearest) or 3 (cubic) are alternatives.
+
+**Edge Cases:**
+- **Boundary Conditions:** The affine transformation may map output pixels to coordinates outside the original volume bounds. `affine_transform` typically handles this by returning 0 or a specified `cval` for out-of-bounds samples.
+- **Precision:** Floating-point precision in matrix multiplication and coordinate mapping can introduce artifacts, especially at high rotation angles or large volumes.
+- **Degenerate Input:** Empty volumes or volumes with zero dimensions will fail.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels/pixels, as each output voxel requires one interpolation lookup.
+- **Memory Complexity:** $O(N)$ for the output volume and intermediate grid.
+- **Performance:** Efficient on GPU when using `grid_sample` (PyTorch) [S2, unofficial]. CPU performance depends on `scipy.ndimage` implementation [S1, unofficial].
+- **Strengths:** Simple to implement; preserves volume topology; exact rotation around center.
+- **Limitations:** Only supports rigid body rotation (in the context of this specific rotation method); does not handle non-rigid deformations.
+
+## Background
+This method is part of the implementation details found in direct volume rendering repositories, specifically those dealing with FDK reconstruction and iterative SIRT reconstruction [S2, unofficial]. It is used to align volumes for projection or visualization within the [Affine-Transformations Method](2038-affine-transformations-method.md) pipeline [S1, unofficial].
+
+## Sources
+[S1] asheibanifard/Direct_Volume_Rendering-DVR-, https://github.com/asheibanifard/Direct_Volume_Rendering-DVR-, fetched 2026-10-26 (unofficial)
+[S2] ayush-chauhan-1202/physics-aware-ct-reconstruction, https://github.com/ayush-chauhan-1202/physics-aware-ct-reconstruction, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,252 @@
+# Primary Shading
+
+
+## Overview
+Primary Shading evaluates the final radiance of a voxel material at a specific hit point by combining direct lighting, indirect lighting (Global Illumination or Ambient), environment lighting, and subsurface translucency [S1, unofficial]. It serves as the core shading kernel for traced voxel materials, distinguishing itself from simpler methods like [Basic Gas Rendering Algorithm](12423-basic-gas-rendering-algorithm.md) by supporting complex surface-like shading models (e.g., clear coat, foliage) and advanced lighting effects such as subsurface scattering and image-based lighting [S1, unofficial]. Unlike [Two-Pass Shadow Casting](2196-two-pass-shadow-casting-kajiya-and-von-herzen.md) which focuses on shadow generation, Primary Shading integrates visibility results into a comprehensive BRDF-based appearance model.
+
+## How it works
+**Inputs and Outputs:**
+The method operates on a per-pixel basis using structured buffers.
+*   **Inputs:**
+    *   `gPrimaryResults`: `StructuredBuffer<TraceResult>` containing hit information (material ID, normal, voxel position).
+    *   `gPrimaryRays`: `StructuredBuffer<TraceRay>` containing ray origins and directions.
+    *   `gAmbientOcclusion`: `StructuredBuffer<float>` containing precomputed AO values.
+    *   `gShadowVisibility`: `StructuredBuffer<float>` containing shadow visibility factors.
+    *   `gIndirectDiffuse`: `StructuredBuffer<float4>` containing precomputed indirect diffuse lighting.
+    *   `gDiffuseIrradiance`: `TextureCube<float4>` for environment irradiance.
+    *   `gSpecularPrefilter`: `TextureCube<float4>` for environment specular prefiltering.
+    *   `gEnvironmentBrdfLut`: `Texture2D<float2>` for environment BRDF lookup.
+    *   `gEnvironmentSampler`: `SamplerState` for texture sampling.
+    *   Constants: `gEnvironmentLightingEnabled`, `gEnvironmentMaximumSpecularLod`, `gEnvironmentIntensity`, `gEnvironmentRotationRadians`.
+*   **Output:**
+    *   `gRadiance`: `RWStructuredBuffer<float4>` storing the final radiance and alpha.
+
+**Data Structures:**
+The implementation relies on specific material records and shading models.
+*   `MaterialRecord`: Contains `baseColorRGB`, `baseColorA`, `roughness`, `metallic`, `specular`, `emissiveRGB`, `shadingModel` (enum), and subsurface parameters (`subsurfaceScatterDistanceMeters`, `subsurfaceColorRGB`).
+*   `TraceResult`: Contains `hit` (boolean), `material` (ID), `normal`, `voxel` (position), and `hitPosition`.
+*   `TraceRay`: Contains `direction`.
+
+**Parameters:**
+*   `kMpcTimeOfDayTint`: Material global vector for time-of-day color tint.
+*   `kMpcWetness`: Material global scalar for wetness factor (0.0 to 1.0).
+*   `gSunColor`, `gSunIntensity`, `gSunDirection`: Global light source properties.
+*   `gShadowMode`: Enum (`kShadowOff`, etc.).
+*   `gGlobalIlluminationMode`: Enum (`kGlobalIlluminationAmbientHemisphere`, `kGlobalIlluminationVoxelOneBounce`).
+*   `gSkyColor`, `gGroundColor`: Hemisphere lighting colors.
+*   `gSubsurfaceMaxDistanceMeters`: Maximum distance for subsurface scattering calculation.
+*   `gShadowBiasMeters`, `gShadowStrength`, `gShadowMaxDistanceMeters`: Shadow tuning parameters.
+
+**Steps:**
+
+1.  **Miss Handling:** If the ray misses (`hit.hit == 0`), compute the background color based on the ray's upwardness.
+    $$ \text{upness} = 0.5 + 0.5 \cdot \text{normalize}(\mathbf{rayDirection}).y $$
+    $$ \text{radiance} = \text{lerp}(\text{gGroundColor}, \text{gSkyColor}, \text{upness}) $$
+    Store `float4(radiance, 0.0)` in `gRadiance` and return.
+
+2.  **Material Loading:** Load the material record using `hit.material`.
+    *   Compute `timeOfDayTint` from global constants.
+    *   Compute `wetness` from global constants, clamped to [0, 1].
+    *   Compute `baseColor`:
+        $$ \text{baseColor} = \text{MaterialBaseColorRGB} \cdot \text{timeOfDayTint} \cdot \text{lerp}(1.0, 0.76, \text{wetness}) $$
+    *   Compute `roughness`:
+        $$ \text{roughness} = \text{lerp}(\text{material.roughness}, 0.08, \text{wetness}) $$
+    *   Get `emissive` from material.
+
+3.  **Simple Shading Models:**
+    *   If `shadingModel == kShadingModelUnlit`:
+        $$ \text{radiance} = \text{baseColor} $$
+        Store `float4(baseColor, material.baseColorA)` and return.
+    *   If `shadingModel == kShadingModelEmissive`:
+        $$ \text{radiance} = \text{emissive} $$
+        Store `float4(emissive, material.baseColorA)` and return.
+
+4.  **Normal Computation:**
+    *   Compute `geometricNormal` from `hit.normal`.
+    *   Compute `viewDirection` as `-normalize(rayDirection)`.
+    *   If `shadingModel == kShadingModelTwoSidedFoliage`, apply wind deformation to `geometricNormal` to get `normal`. Otherwise, `normal = geometricNormal`.
+
+5.  **Lighting Visibility:**
+    *   Load `ao` from `gAmbientOcclusion`.
+    *   Compute `shadowVisibility`:
+        $$ \text{shadowVisibility} = \begin{cases} 1.0 & \text{if } gShadowMode == kShadowOff \\ \text{saturate}(gShadowVisibility) & \text{otherwise} \end{cases} $$
+    *   Compute `sunRadiance`:
+        $$ \text{sunRadiance} = \text{gSunColor} \cdot \text{gSunIntensity} \cdot \text{shadowVisibility} $$
+
+6.  **Direct Lighting:**
+    *   Call the appropriate direct lighting function based on `shadingModel`:
+        *   `kShadingModelClearCoat`: `ShadeClearCoatDirect`
+        *   `kShadingModelTwoSidedFoliage`: `ShadeTwoSidedFoliageDirect`
+        *   Others: `ShadeDirectLight`
+    *   Inputs to these functions include `normal`, `viewDirection`, `gSunDirection`, `sunRadiance`, `baseColor`, `material.metallic`, `roughness`, and `material.specular`.
+    *   Let the result be `direct`.
+
+7.  **Indirect Lighting:**
+    *   Initialize `indirect = 0`.
+    *   If `gGlobalIlluminationMode == kGlobalIlluminationAmbientHemisphere` and `gEnvironmentLightingEnabled == 0`:
+        $$ \text{indirect} = \text{ShadeAmbient}(\text{ambientNormal}, \text{gSkyColor}, \text{gGroundColor}, \text{ao}) \cdot \text{baseColor} \cdot (1.0 - \text{material.metallic}) \cdot \text{gGlobalIlluminationIntensity} $$
+    *   If `gGlobalIlluminationMode == kGlobalIlluminationVoxelOneBounce`:
+        $$ \text{indirect} = \text{gIndirectDiffuse} \cdot \text{baseColor} \cdot (1.0 - \text{material.metallic}) $$
+    *   If `gEnvironmentLightingEnabled != 0`:
+        Add image-based lighting contribution using `EvaluateImageBasedLighting` with inputs: irradiance (`gDiffuseIrradiance`), prefilter (`gSpecularPrefilter`), BRDF LUT (`gEnvironmentBrdfLut`), sampler, `ambientNormal`, `viewDirection`, `baseColor`, `material.metallic`, `roughness`, `material.specular`, `ao`, `gEnvironmentMaximumSpecularLod`, `gEnvironmentRotationRadians`.
+        $$ \text{indirect} += \text{EvaluateImageBasedLighting}(\dots) \cdot \max(\text{gEnvironmentIntensity}, 0.0) $$
+
+8.  **Subsurface Scattering (Conditional):**
+    *   Condition: `shadingModel == kShadingModelSubsurface` AND `material.subsurfaceScatterDistanceMeters > 0` AND `gSubsurfaceMaxDistanceMeters > 0` AND $\text{dot}(\text{geometricNormal}, \text{gSunDirection}) < 0$.
+    *   Compute `interiorBiasVoxels`:
+        $$ \text{interiorBiasVoxels} = \max(1.0 \times 10^{-3}, \text{MetersToVoxelUnits}(0.001)) $$
+    *   Compute `hitPoint`:
+        $$ \text{hitPoint} = \text{TraceHitPosition}(\text{ray}, \text{hit}) - \text{geometricNormal} \cdot \text{interiorBiasVoxels} $$
+    *   March subsurface thickness:
+        $$ \text{march} = \text{MarchSubsurfaceThicknessVoxels}(\text{hitPoint}, \text{gSunDirection}, \text{hit.material}, \text{MetersToVoxelUnits}(\text{gSubsurfaceMaxDistanceMeters}), 64) $$
+    *   If `march.exited`:
+        *   Compute `farVisibility`:
+            *   If `gShadowMode != kShadowOff`:
+                *   Trace a far ray from `march.exitPoint + march.exitNormal * \max(1.0 \times 10^{-3}, \text{MetersToVoxelUnits}(gShadowBiasMeters))` in direction `gSunDirection` with max distance `MetersToVoxelUnits(gShadowMaxDistanceMeters)`.
+                *   If hit: `farVisibility = \text{saturate}(1.0 - gShadowStrength)`.
+                *   Else: `farVisibility = 1.0`.
+            *   Else: `farVisibility = 1.0`.
+        *   Add subsurface transmission:
+            $$ \text{radiance} += \text{ShadeSubsurfaceTransmission}(\text{thickness}, \text{scatterDistance}, \text{subsurfaceColor}, \text{exitNormal}, \text{sunDirection}, \text{sunRadiance} \cdot \text{farVisibility}) $$
+
+9.  **Final Computation:**
+    $$ \text{radiance} = \text{direct} + \text{indirect} + \text{emissive} $$
+    Store `float4(radiance, material.baseColorA)` in `gRadiance`.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ShadePrimaryPixel(pixel_index: int) -> float4:
+    # 1. Miss Handling
+    if gPrimaryResults[pixel_index].hit == 0:
+        ray_dir = normalize(gPrimaryRays[pixel_index].direction)
+        upness = 0.5 + 0.5 * ray_dir.y
+        gRadiance[pixel_index] = float4(lerp(gGroundColor, gSkyColor, upness), 0.0)
+        return
+
+    # 2. Material Loading
+    hit = gPrimaryResults[pixel_index]
+    material = LoadMaterialRecord(hit.material)
+    
+    time_of_day_tint = max(MaterialGlobalVector(kMpcTimeOfDayTint).rgb, 0.0)
+    wetness = saturate(MaterialGlobalScalar(kMpcWetness))
+    
+    base_color = MaterialBaseColorRGB(material) * time_of_day_tint * lerp(1.0, 0.76, wetness)
+    roughness = lerp(material.roughness, 0.08, wetness)
+    emissive = MaterialEmissiveRGB(material)
+
+    # 3. Simple Shading Models
+    if material.shading_model == kShadingModelUnlit:
+        gRadiance[pixel_index] = float4(base_color, material.base_color_a)
+        return
+    if material.shading_model == kShadingModelEmissive:
+        gRadiance[pixel_index] = float4(emissive, material.base_color_a)
+        return
+
+    # 4. Normal Computation
+    geometric_normal = normalize(float3(hit.normal))
+    view_direction = normalize(-gPrimaryRays[pixel_index].direction)
+    
+    if material.shading_model == kShadingModelTwoSidedFoliage:
+        normal = ApplyFoliageWindNormal(geometric_normal, float3(hit.voxel) + 0.5)
+    else:
+        normal = geometric_normal
+
+    # 5. Lighting Visibility
+    ao = gAmbientOcclusion[pixel_index]
+    if gShadowMode == kShadowOff:
+        shadow_visibility = 1.0
+    else:
+        shadow_visibility = saturate(gShadowVisibility[pixel_index])
+        
+    sun_radiance = gSunColor * gSunIntensity * shadow_visibility
+
+    # 6. Direct Lighting
+    if material.shading_model == kShadingModelClearCoat:
+        direct = ShadeClearCoatDirect(normal, view_direction, gSunDirection, sun_radiance, base_color, material.metallic, roughness, material.specular)
+    elif material.shading_model == kShadingModelTwoSidedFoliage:
+        direct = ShadeTwoSidedFoliageDirect(normal, view_direction, gSunDirection, sun_radiance, base_color, material.metallic, roughness, material.specular)
+    else:
+        direct = ShadeDirectLight(normal, view_direction, gSunDirection, sun_radiance, base_color, material.metallic, roughness, material.specular)
+
+    # 7. Indirect Lighting
+    indirect = float3(0.0)
+    
+    if gGlobalIlluminationMode == kGlobalIlluminationAmbientHemisphere and gEnvironmentLightingEnabled == 0:
+        ambient_normal = geometric_normal # Assumed from context of ShadeAmbient
+        indirect = ShadeAmbient(ambient_normal, gSkyColor, gGroundColor, ao) * base_color * (1.0 - material.metallic) * gGlobalIlluminationIntensity
+    elif gGlobalIlluminationMode == kGlobalIlluminationVoxelOneBounce:
+        indirect = gIndirectDiffuse[pixel_index].rgb * base_color * (1.0 - material.metallic)
+        
+    if gEnvironmentLightingEnabled != 0:
+        indirect += EvaluateImageBasedLighting(
+            gDiffuseIrradiance, gSpecularPrefilter, gEnvironmentBrdfLut, gEnvironmentSampler,
+            geometric_normal, view_direction, base_color, material.metallic, roughness, material.specular,
+            ao, gEnvironmentMaximumSpecularLod, gEnvironmentRotationRadians
+        ) * max(gEnvironmentIntensity, 0.0)
+
+    # 8. Subsurface Scattering
+    radiance = direct + indirect + emissive
+    
+    if (material.shading_model == kShadingModelSubsurface and 
+        material.subsurface_scatter_distance_meters > 0.0 and 
+        gSubsurfaceMaxDistanceMeters > 0.0 and 
+        dot(geometric_normal, gSunDirection) < 0.0):
+        
+        interior_bias_voxels = max(1.0e-3, MetersToVoxelUnits(0.001))
+        hit_point = TraceHitPosition(gPrimaryRays[pixel_index], hit) - geometric_normal * interior_bias_voxels
+        
+        march = MarchSubsurfaceThicknessVoxels(
+            hit_point, gSunDirection, hit.material, 
+            MetersToVoxelUnits(gSubsurfaceMaxDistanceMeters), 64
+        )
+        
+        if march.exited:
+            if gShadowMode != kShadowOff:
+                shadow_bias_voxels = max(1.0e-3, MetersToVoxelUnits(gShadowBiasMeters))
+                far_hit = TraceRay(
+                    origin=march.exit_point + march.exit_normal * shadow_bias_voxels,
+                    direction=gSunDirection,
+                    max_distance=MetersToVoxelUnits(gShadowMaxDistanceMeters)
+                )
+                if far_hit.hit:
+                    far_visibility = saturate(1.0 - gShadowStrength)
+                else:
+                    far_visibility = 1.0
+            else:
+                far_visibility = 1.0
+                
+            radiance += ShadeSubsurfaceTransmission(
+                march.thickness_meters, material.subsurface_scatter_distance_meters,
+                MaterialSubsurfaceColorRGB(material), march.exit_normal, gSunDirection,
+                sun_radiance * far_visibility
+            )
+
+    # 9. Final Output
+    gRadiance[pixel_index] = float4(radiance, material.base_color_a)
+```
+
+## Subtopics
+
+### [Ray Casting and Fragment Shading](12415-ray-casting-and-fragment-shading.md)
+Uses traditional rasterization fragment shaders for voxel shading, differing from the ray-traced approach of the main method by relying on depth buffers and screen-space techniques.
+
+### [Basic Gas Rendering Algorithm](12423-basic-gas-rendering-algorithm.md)
+A simpler volumetric shading method that typically lacks the complex BRDF, subsurface scattering, and environment lighting integration found in Primary Shading, suitable for less detailed volumetric effects.
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the cost of the shading model evaluation (e.g., `ShadeClearCoatDirect`) and the subsurface scattering march. Subsurface scattering adds a linear cost proportional to the scattering distance and sample count (64 samples in the reference). Environment lighting involves cube map sampling.
+*   **Memory Complexity:** Requires storage for multiple structured buffers (`gPrimaryResults`, `gPrimaryRays`, `gAmbientOcclusion`, `gShadowVisibility`, `gIndirectDiffuse`) and environment textures (`gDiffuseIrradiance`, `gSpecularPrefilter`, `gEnvironmentBrdfLut`).
+*   **Performance:** The reference implementation reports metrics for solid and textured wall scenes, including cook, write, and read times in milliseconds, and voxel byte sizes [S1, unofficial]. Performance scales with the number of unique materials and the complexity of the shading model.
+*   **Strengths:** Supports a wide range of material types (unlit, emissive, foliage, clear coat, subsurface) and lighting conditions (direct, indirect, environment).
+*   **Limitations:** Computationally expensive due to multiple lighting passes and potential subsurface marching. Requires precomputed lighting buffers (AO, Indirect Diffuse) which add to the pipeline complexity.
+*   **When to Use:** When high-quality, physically-based shading for voxel materials is required, including complex effects like subsurface scattering and environment reflections.
+*   **When Not to Use:** For simple volumetric effects where performance is critical and complex material properties are not needed.
+
+## Background
+Primary Shading is part of a destructible voxel engine implementation, specifically from the `destructible-voxel-engine` repository [S1, unofficial]. It is designed to handle shading for traced voxel materials, integrating various lighting components to achieve realistic appearances. The method reflects modern real-time rendering techniques adapted for voxel-based geometry, including image-based lighting and subsurface scattering.
+
+## Sources
+[S1] HiroSakuraba/destructible-voxel-engine, https://github.com/HiroSakuraba/destructible-voxel-engine, fetched 2026-10-28 (unofficial)

@@ -2,124 +2,69 @@
 
 
 ## Overview
-Sequential Point Trees (SPTs) are a data structure originally developed for point cloud rendering [S1, unofficial], adapted here for efficient, view-dependent Level-of-Detail (LoD) selection in 3D Gaussian Splatting without requiring full tree traversal [S1, unofficial]. Unlike sibling methods that may rely on static spatial partitioning or post-training hierarchy construction, SPTs enable dynamic LoD hierarchies that evolve continuously during optimization, supporting stable refinement and restructuring [S1, unofficial]. They are primarily used within the Hierarchical SPT (HSPT) framework to compute the correct LoD cut efficiently for individual views and camera paths [S1, unofficial].
+Sequential Point Trees (SPTs) are a hierarchical data structure originally developed for point cloud rendering [S1, unofficial], adapted here for efficient, view-dependent Level-of-Detail (LoD) selection in 3D Gaussian Splatting without requiring full tree traversal [S2, unofficial]. Unlike sibling methods that rely on static spatial partitioning or post-training hierarchy construction, SPTs enable dynamic LoD hierarchies that evolve continuously during optimization [S2, unofficial]. They are primarily used within the Hierarchical SPT (HSPT) framework to compute the correct LoD cut efficiently for individual views and camera paths [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A Gaussian hierarchy $\mathcal{H}$ (structured as a tree) and a specific cut condition, such as a distance threshold $d^j$ for a single SPT [S1, unofficial].
-*   **Output:** A set of nodes representing the "cut" at the specified condition, which determines which Gaussians are included in the rendering for a given view or LoD level [S1, unofficial].
+*   **Input:** A Gaussian hierarchy $\mathcal{H}$ (structured as a tree) and a specific cut condition, such as a distance threshold $d^j$ for a single SPT [S2, unofficial].
+*   **Output:** A set of nodes representing the "cut" at the specified condition, which determines which Gaussians are included in the rendering for a given view or LoD level [S2, unofficial].
 
 **Data Structures:**
-The SPT is a binary tree hierarchy where each node represents a group of Gaussians. The structure supports efficient traversal and cutting. The specific internal layout of the Gaussian attributes (position, covariance, opacity, spherical harmonics) is inherited from the base 3D Gaussian Splatting representation, but the SPT organizes these into a hierarchical tree structure [S1, unofficial].
+The SPT is a binary tree hierarchy where each node represents a group of Gaussians [S2, unofficial]. Each node stores bounding information (e.g., minimum distance to the camera) and references to left and right children [G]. The structure supports efficient traversal and cutting [S2, unofficial].
 
-**Algorithm: SPT Cut:**
-To cut a single SPT at a particular distance $d^j$, the algorithm finds the highest index (or node) where the minimum distance of the contained Gaussians is less than the cut distance [S1, unofficial]. This is achieved via a Breadth-First Search (BFS) traversal that prunes branches exceeding the condition.
+**Algorithm Steps:**
+1.  The CPU performs an initial efficient pre-culling to provide a large chunk of points [S1, unofficial].
+2.  The GPU performs fine-granularity culling in a simple vertex program, reporting a percentage of culled points going from 10% to 40% [S1, unofficial].
+3.  Back-face culling is performed by splitting the initial SPT list into an array of point lists with equal quantized normals, using 128 quantized normals [S1, unofficial].
+4.  For large complex scenes, normal clustering is replaced with position clustering to perform more accurate high-level view frustum and occlusion culling using a small bounding box hierarchy instead of a single large bounding box per object [S1, unofficial].
+5.  The SPT is cut at a particular distance $d^j$ by finding the highest index where the minimum distance is less than the cut distance [S2, unofficial].
 
 **Pseudocode:**
-The following pseudocode implements the BFS Hierarchy Cut, adapted from the source for cutting a single SPT at a distance $d^j$ [S1, unofficial].
+The following pseudocode implements the BFS Hierarchy Cut, adapted from the source for cutting a single SPT at a distance $d^j$ [S2, unofficial]. The condition evaluates whether a node's minimum distance is within the threshold.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def cut_spt(hierarchy, cut_distance):
-    """
-    Cuts a single Sequential Point Tree (SPT) at a specific distance.
-    
-    Args:
-        hierarchy: The root node of the SPT hierarchy.
-        cut_distance: The distance threshold d^j.
-        
-    Returns:
-        cut: A list of nodes that satisfy the cut condition.
-    """
+def cut_hierarchy(hierarchy_root, condition):
     cut = []
-    queue = [hierarchy]
-    
+    queue = [hierarchy_root]
     while queue:
-        node = queue.pop(0)  # Dequeue from front (BFS)
-        
-        # Condition: Check if the node's minimum distance is less than cut_distance
-        # Note: The source implies checking if the node should be included in the cut
-        # or if its children should be explored. Based on Algorithm 1 logic:
-        if node.min_distance < cut_distance:
+        node = queue.pop(0)
+        if condition(node):
             cut.append(node)
         else:
-            # If the condition is not met (distance too large), 
-            # we do not cut here, but typically in LoD, we might traverse deeper
-            # or stop. The source Algorithm 1 enqueues children if condition is NOT met.
-            # However, for SPT cut at distance d^j, the goal is to find the boundary.
-            # Re-interpreting Algorithm 1: 
-            # "if condition(node) then cut else enqueue children"
-            # Here, condition(node) likely means "node is relevant for this LoD".
-            # If the node's min_distance >= cut_distance, it is likely too far, 
-            # so we might not include it, but the source says "enqueue children" if NOT condition.
-            # Let's stick strictly to the provided Algorithm 1 structure:
-            # condition(node) -> if true, add to cut. If false, expand.
-            
-            # For SPT cut at distance d^j, the condition is typically:
-            # Is this node's bounding volume or min distance within the view frustum/LOD range?
-            # The source states: "cut a single SPT at a particular distance d^j by finding 
-            # the highest index where the minimum distance is less than the cut distance."
-            
-            # Assuming 'condition' is: node.min_distance < cut_distance
-            # If true, we keep this node (and potentially its children if we want finer detail? 
-            # No, usually cut means we stop going deeper if we are "close enough" or 
-            # we stop if we are "too far". 
-            # Let's follow the exact logic of Algorithm 1 provided:
-            pass 
-            
-            # Re-reading Algorithm 1:
-            # if condition(node) then cut else enqueue children
-            # This implies that if the condition is met, we stop and take the node.
-            # If not met, we go deeper.
-            # For distance-based LoD, if a node is "close" (min_distance < d^j), 
-            # we might want to use it. If it is "far", we might want to use a coarser parent?
-            # Or vice versa. 
-            # The source says: "finding the highest index where the minimum distance is less than the cut distance."
-            # This suggests we are looking for the boundary.
-            
-            # Let's implement the generic BFS cut as described in Algorithm 1:
             if node.left is not None:
                 queue.append(node.left)
             if node.right is not None:
                 queue.append(node.right)
-                
     return cut
-
-# Note: The specific condition for SPT cut at distance d^j is:
-# condition(node) = (node.min_distance < cut_distance)
-# If this is true, the node is added to the cut set.
-# If false, its children are enqueued for further inspection.
-# This effectively finds the nodes that are "close enough" to be rendered at the current LoD,
-# while potentially drilling down if the condition was not met (though for distance, 
-# usually closer nodes are higher priority).
-# The source emphasizes "efficient, parallelizable LoD selection".
 ```
 
 **Parameters:**
-*   $d^j$: The cut distance threshold for the $j$-th view or LoD level [S1, unofficial].
+*   $d^j$: The cut distance threshold for the $j$-th view or LoD level [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Hierarchy Updates:** The SPT must remain robust to hierarchy updates during training, as the LoD structure evolves continuously [S1, unofficial].
-*   **Precision:** Efficient computation is critical for large models; full tree traversal is avoided to maintain performance [S1, unofficial].
+*   **Hierarchy Updates:** The SPT must remain robust to hierarchy updates during training, as the LoD structure evolves continuously [S2, unofficial].
+*   **Precision:** Efficient computation is critical for large models; full tree traversal is avoided to maintain performance [S2, unofficial].
 
 ## Subtopics
 
 ### Hierarchical Sequential Point Trees (HSPT)
-A hybrid data structure adapting SPTs to Gaussian splatting [S1, unofficial]. It enables efficient, parallelizable LoD selection while remaining robust to hierarchy updates during training [S1, unofficial]. It is chosen when dynamic, view-dependent LoD is required for ultra-large scenes without spatial partitioning [S1, unofficial].
+A hybrid data structure adapting SPTs to Gaussian splatting [S2, unofficial]. It enables efficient, parallelizable LoD selection while remaining robust to hierarchy updates during training [S2, unofficial]. It is chosen when dynamic, view-dependent LoD is required for ultra-large scenes without spatial partitioning [S2, unofficial].
 
 ### SPT Cut Algorithm
-An algorithm to cut a single SPT at a particular distance $d^j$ by finding the highest index where the minimum distance is less than the cut distance [S1, unofficial]. It is used to determine the specific subset of Gaussians to render for a given view-dependent LoD level [S1, unofficial].
+An algorithm to cut a single SPT at a particular distance $d^j$ by finding the highest index where the minimum distance is less than the cut distance [S2, unofficial]. It is used to determine the specific subset of Gaussians to render for a given view-dependent LoD level [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Efficient, avoiding full tree traversal [S1, unofficial]. The BFS cut allows for parallelizable selection [S1, unofficial].
-*   **Memory Complexity:** Supports out-of-core memory usage, enabling training and rendering of city-scale scenes on a single consumer GPU [S1, unofficial].
-*   **Strengths:** Seamless, non-partitioned training of ultra-large Gaussian scenes; dynamic LoD evolution during optimization; reduced CPU-GPU data transfer via caching [S1, unofficial].
-*   **Limitations:** Requires careful implementation of the cut condition to handle dynamic hierarchy updates [S1, unofficial].
-*   **When to use:** For ultra-large scale reconstruction (e.g., city-scale) where view-dependent LoD is critical and spatial partitioning is undesirable [S1, unofficial].
+*   **Time Complexity:** Efficient, avoiding full tree traversal [S2, unofficial]. The BFS cut allows for parallelizable selection [S2, unofficial].
+*   **Memory Complexity:** Supports out-of-core memory usage, enabling training and rendering of city-scale scenes on a single consumer GPU [S2, unofficial].
+*   **Strengths:** Seamless, non-partitioned training of ultra-large Gaussian scenes; dynamic LoD evolution during optimization; reduced CPU-GPU data transfer via caching [S2, unofficial].
+*   **Limitations:** When used with a pure high-quality point-based rendering system, SPT is inefficient because much unnecessary data is processed by complex vertex programs [S1, unofficial].
+*   **When to use:** For ultra-large scale reconstruction (e.g., city-scale) where view-dependent LoD is critical and spatial partitioning is undesirable [S2, unofficial]. When used with Deferred Splatting, it becomes very efficient because it is only used during pass 2 with a very simple vertex program [S1, unofficial].
 
 ## Background
-Sequential Point Trees were originally developed for point cloud rendering by Dachsbacher et al. in 2003 [S1, unofficial]. They have been adapted for 3D Gaussian Splatting in the context of "A LoD of Gaussians" (2025) to support stable and progressive refinement in ultra-large scenes [S1, unofficial]. The adaptation addresses the challenge of efficient view-dependent selection when the hierarchy structure changes during optimization [S1, unofficial].
+Sequential Point Trees were originally developed for point cloud rendering by Dachsbacher et al. in 2003 [S1, unofficial]. They have been adapted for 3D Gaussian Splatting in the context of "A LoD of Gaussians" (2025) to support stable and progressive refinement in ultra-large scenes [S2, unofficial]. The adaptation addresses the challenge of efficient view-dependent selection when the hierarchy structure changes during optimization [S2, unofficial].
 
 ## Sources
-[S1] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28 (unofficial)
+[S1] Deferred Splatting, https://inria.hal.science/inria-00355034v1, fetched 2026-10-29 (unofficial)
+[S2] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28 (unofficial)

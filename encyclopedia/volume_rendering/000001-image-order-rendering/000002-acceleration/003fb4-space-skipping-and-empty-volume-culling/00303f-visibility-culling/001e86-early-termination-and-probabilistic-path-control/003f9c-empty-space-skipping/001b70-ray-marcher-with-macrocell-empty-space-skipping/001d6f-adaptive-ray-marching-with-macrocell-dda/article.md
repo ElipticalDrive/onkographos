@@ -7,8 +7,8 @@ Adaptive Ray Marching with Macrocell DDA is an empty-space skipping technique th
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D volume dataset, a ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, and a transfer function mapping scalar values to color and opacity.
-*   **Output:** The accumulated color and opacity for the ray.
+*   **Input:** A 3D volume dataset, a ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, and a transfer function mapping scalar values to color and opacity [S1][S2, unofficial].
+*   **Output:** The accumulated color and opacity for the ray [S2, unofficial].
 *   **Auxiliary Data:** A macrocell grid where each cell stores the minimum and maximum scalar values of the voxels it encloses [S1].
 
 **Data Structures:**
@@ -19,7 +19,7 @@ The macrocell grid is a uniform 3D grid. Each cell $C$ maintains:
 
 **Parameters:**
 *   $n$: The exponent for brick dimension scaling. Tested values range from 0.1 to 0.9, with $n=0.3$ yielding best performance [S1].
-*   `float_epsilon`: A small constant (e.g., $10^{-6}$) used to determine if a cell is effectively empty [S2, unofficial].
+*   `float_epsilon`: A small constant used to determine if a cell is effectively empty [S2, unofficial].
 *   `step`: The base sampling step size [S2, unofficial].
 *   `ADAPTIVE_SAMPLING`: A preprocessor macro enabling adaptive logic; if undefined, fixed-step marching is used [S2, unofficial].
 
@@ -70,6 +70,8 @@ def adaptive_ray_marching_with_macrocell_dda(ray_origin, ray_direction, t_min, t
     volume_data: VolumeData object containing transfer function and voxel access
     macrocell_grid: MacrocellGrid object containing min/max values and dimensions
     """
+    float_epsilon = 1e-6
+    base_step = 0.1
     
     # 1. Transform ray to macrocell space
     macrocell_spacings_rcp = macrocell_grid.get_spacings_rcp()
@@ -77,29 +79,23 @@ def adaptive_ray_marching_with_macrocell_dda(ray_origin, ray_direction, t_min, t
     m_dir = ray_direction * macrocell_spacings_rcp
     
     # 2. Initialize 3DDDA
-    # dda3 returns an iterator over (cell_index, t0, t1) in macrocell space
     dda = dda3(m_org, m_dir, t_min, t_max, macrocell_grid.dims)
     
     # 3. Traverse macrocells
     for cell_index, t0, t1 in dda:
         # 4. Check if cell is empty
-        # Get min/max values for the cell
         min_val, max_val = macrocell_grid.get_min_max(cell_index)
         
-        # Calculate opacity upper bound
-        # This depends on the transfer function; assuming a helper function exists
-        opacity_upper_bound = calculate_opacity_upper_bound(min_val, max_val, volume_data.transfer_function)
+        # Calculate opacity upper bound [G]
+        opacity_upper_bound = volume_data.transfer_function.opacity(max_val) - volume_data.transfer_function.opacity(min_val)
         
         if abs(opacity_upper_bound) <= float_epsilon:
             # Cell is empty, skip it
             continue
             
         # 5. Adaptive Step Sizing
-        # Determine adaptive rate based on opacity
-        adaptive_rate = adaptive_sampling_rate(opacity_upper_bound)
-        
-        # Calculate step size
-        step_size = sample_size_scaler(adaptive_rate, t0, t1)
+        adaptive_rate = 1.0 / (opacity_upper_bound + float_epsilon)
+        step_size = base_step * adaptive_rate
         
         # 6. Sampling Loop
         t_start = t0
@@ -107,10 +103,10 @@ def adaptive_ray_marching_with_macrocell_dda(ray_origin, ray_direction, t_min, t
         
         while t_end > t_start:
             # Render the interval [t_start, t_end]
-            color, alpha = render_interval(ray_origin, ray_direction, t_start, t_end, volume_data)
+            color, alpha = volume_data.render_interval(ray_origin, ray_direction, t_start, t_end)
             
             # Check for termination (e.g., alpha threshold)
-            if alpha >= alpha_threshold:
+            if alpha >= 0.99:
                 return color, alpha
             
             # Advance interval
@@ -121,62 +117,51 @@ def adaptive_ray_marching_with_macrocell_dda(ray_origin, ray_direction, t_min, t
 
 def dda3(org, dir, t_min, t_max, dims):
     """
-    Simplified 3DDDA implementation for macrocell traversal.
+    Standard Amanatides & Woo 3DDDA implementation.
     Returns an iterator yielding (cell_index, t0, t1).
     """
-    # Standard Amanatides & Woo DDA logic
-    # Initialize tMaxX, tMaxY, tMaxZ, stepX, stepY, stepZ
-    # ... (Standard DDA initialization)
+    cell = [int(floor(org[i])) for i in range(3)]
+    cell = [max(0, min(dims[i]-1, cell[i])) for i in range(3)]
     
-    current_cell = floor(org)
+    t_max_arr = [0.0, 0.0, 0.0]
+    step = [0, 0, 0]
+    t_delta = [0.0, 0.0, 0.0]
+    
+    for i in range(3):
+        if dir[i] > 0:
+            step[i] = 1
+            t_max_arr[i] = (cell[i] + 1.0 - org[i]) / dir[i]
+            t_delta[i] = 1.0 / dir[i]
+        elif dir[i] < 0:
+            step[i] = -1
+            t_max_arr[i] = (cell[i] - org[i]) / dir[i]
+            t_delta[i] = -1.0 / dir[i]
+        else:
+            step[i] = 0
+            t_max_arr[i] = float('inf')
+            t_delta[i] = float('inf')
+            
     t_current = t_min
     
     while t_current < t_max:
-        # Determine which axis to step
-        # ... (Standard DDA step logic)
+        min_idx = 0
+        min_val = t_max_arr[0]
+        for i in range(1, 3):
+            if t_max_arr[i] < min_val:
+                min_val = t_max_arr[i]
+                min_idx = i
+                
+        t_exit = min(min_val, t_max)
+        t0 = t_current
+        t1 = t_exit
         
-        # Calculate t0 and t1 for the current cell intersection
-        # t0 is the entry point into the current cell
-        # t1 is the exit point from the current cell
-        t0 = max(t_current, t_min)
-        t1 = min(t_exit, t_max)
+        yield cell, t0, t1
         
-        yield current_cell, t0, t1
-        
-        # Advance DDA
-        # ... (Standard DDA advancement)
         t_current = t1
-        current_cell = next_cell
-
-def calculate_opacity_upper_bound(min_val, max_val, transfer_function):
-    """
-    Estimates the maximum possible opacity accumulated through a brick.
-    Simplified: assumes uniform density or uses transfer function bounds.
-    """
-    # This is a placeholder for the specific opacity calculation method.
-    # In practice, this might involve integrating the transfer function
-    # over the range [min_val, max_val] or using a precomputed lookup.
-    # For the purpose of this article, we assume a helper function exists.
-    return transfer_function.opacity(max_val) - transfer_function.opacity(min_val)
-
-def adaptive_sampling_rate(opacity_upper_bound):
-    """
-    Returns a scaling factor for the step size based on opacity.
-    Higher opacity -> smaller steps (more samples).
-    Lower opacity -> larger steps (fewer samples).
-    """
-    # Example: inverse relationship
-    if opacity_upper_bound < float_epsilon:
-        return 1.0 # Should be skipped by empty check
-    return 1.0 / (opacity_upper_bound + float_epsilon)
-
-def sample_size_scaler(rate, t0, t1):
-    """
-    Calculates the actual step size.
-    """
-    # Base step size is determined by the renderer configuration
-    base_step = 0.1 # Example value
-    return base_step * rate
+        cell[min_idx] += step[min_idx]
+        if step[min_idx] != 0:
+            t_max_arr[min_idx] += t_delta[min_idx]
+        cell[min_idx] = max(0, min(dims[min_idx]-1, cell[min_idx]))
 ```
 
 ## Subtopics
@@ -203,8 +188,8 @@ Iterates through spatial steps, checking occupancy using a bitfield: `sity_bitfi
 An extension of RayGauss with optimizations for accelerating ray marching [S5]. It implements empty-space skipping, adaptive sampling, and improves ray coherence through Morton-order sorting [S5]. It also introduces a regularizer to limit anisotropic Gaussians, as they are inefficient when bounding Gaussians by axis-aligned bounding boxes [S5]. These additions reduce training time to be comparable with 3DGRT, but frame rates remain approximately 2.5× slower [S5].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of macrocells intersected by the ray, plus the number of samples taken within non-empty macrocells. The 3DDDA traversal is efficient, but the overhead of maintaining the macrocell structure adds cost.
-*   **Memory Complexity:** $O(M)$ where $M$ is the number of macrocells. Each macrocell stores two scalar values (min/max). This is significantly less than storing the full volume if the volume is sparse, but still requires additional memory compared to structure-free methods [S1].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
 *   **Measured Performance:** On Jet-Flame simulation volumes (1024×1024×512, ~512 MB per time step), the Macrocell solution performs well for static volumes [S1]. For dynamic volumes, performance depends on the image resolution. At 1024×1024 resolution, Macrocell performs better than Warp Marching. However, at lower resolutions (256×256 or 512×512), Warp Marching outperforms Macrocell because the cost of updating the macrocell structure every frame becomes a bottleneck [S1].
 *   **Strengths:** Effective for static volumes or dynamic volumes with high image resolution where the structure update cost is amortized. Adaptive sampling reduces the number of samples in low-opacity regions.
 *   **Limitations:** High memory overhead for the macrocell structure. Significant performance penalty for dynamic volumes with low image resolution due to frequent structure updates [S1].

@@ -3,105 +3,107 @@
 Also called: Points Sampling
 
 ## Overview
-Ray Point Sampling generates query points along camera rays for volume rendering by determining the number of samples based on a fixed step distance and bounding box constraints [S2, unofficial]. It differs from its sibling [Clipping Distance Computation via Volume Corners](2622-clipping-distance-computation-via-volume-corners.md) by explicitly calculating sample coordinates and masks for both foreground and background regions, and from [CUDA Extension Interface for Ray Sampling and Rendering](8135-cuda-extension-interface-for-ray-sampling-and-rendering.md) by defining the logical sampling strategy rather than the low-level kernel execution interface. The method supports uniform sampling, importance sampling, and handling of unbounded scenes [S1].
+Ray Point Sampling generates query points along camera rays for volume rendering by combining uniform and importance sampling strategies within a defined scene bounding box. It solves the problem of insufficient spatial coverage for neural radiance field (NeRF) reconstruction by ensuring dense sampling in the foreground while handling unbounded scenes via contracted space. It differs from its sibling [Clipping Distance Computation via Volume Corners](2622-clipping-distance-computation-via-volume-corners.md) by actively generating stochastic samples rather than just computing geometric bounds, and from [Background Point Sampling](6423-background-point-sampling.md) by focusing on the bounded foreground volume rather than the infinite background region.
 
 ## How it works
 **Inputs:**
-- `rays_o`: Ray origins, shape $(N, 3)$, contiguous [S2, unofficial].
-- `rays_d`: Ray directions, shape $(N, 3)$, contiguous [S2, unofficial].
-- `xyz_min`: Bounding box minimum, shape $(3,)$.
-- `xyz_max`: Bounding box maximum, shape $(3,)$.
-- `near`: Near clipping distance, scalar.
-- `far`: Far clipping distance, scalar. Default: $10^9$ [S2, unofficial].
-- `stepsize`: Base step size parameter.
-- `voxel_size`: Voxel grid physical size.
-- `num_uniform`: Number of uniform foreground samples. Default: 64 [S1].
-- `num_importance`: Number of importance samples. Default: 32 [S1].
-- `num_unbounded`: Number of unbounded samples. Default: 32 [S1].
+- `rays_o`: Ray origins, shape $(N, 3)$, must be contiguous [S2, unofficial].
+- `rays_d`: Ray directions, shape $(N, 3)$, must be contiguous [S2, unofficial].
+- `xyz_min`: Bounding box minimum coordinates, shape $(3)$ [S2, unofficial].
+- `xyz_max`: Bounding box maximum coordinates, shape $(3)$ [S2, unofficial].
+- `near`: Near clipping distance scalar [S2, unofficial].
+- `far`: Far clipping distance scalar, typically $10^9$ [S2, unofficial].
+- `stepdist`: Step distance between samples, calculated as `stepsize * voxel_size` [S2, unofficial].
+- `is_unbounded`: Boolean flag indicating if the scene is unbounded (e.g., DTU dataset) [S1].
 
 **Outputs:**
-- `ray_pts`: Sample points, shape $(N_{total}, 3)$.
-- `mask_inbbox`: Boolean mask for points inside the bounding box.
-- `ray_id`: Ray indices for each point.
-- `step_id`: Step indices for each point.
-- `N_steps`: Total steps per ray.
-- `t_min`, `t_max`: Intersection intervals.
+- `ray_pts`: Sample points, shape $(N_{total}, 3)$ [S2, unofficial].
+- `ray_id`: Indices mapping each point to its originating ray, shape $(N_{total})$ [S2, unofficial].
+- `step_id`: Indices mapping each point to its step index along the ray, shape $(N_{total})$ [S2, unofficial].
+- `mask_outbbox`: Boolean mask identifying points outside the bounding box, shape $(N_{total})$ [S2, unofficial].
+- `t_min`, `t_max`: Intersection distances of the ray with the bounding box [S2, unofficial].
+- `N_steps`: Number of steps per ray [S2, unofficial].
 
 **Data Structures:**
-- `rays_o`, `rays_d`: Float32 tensors.
-- `mask_outbbox`: Boolean tensor, shape $(N_{candidates},)$.
-- `ray_pts`: Float32 tensor.
-
-**Steps:**
-1.  **Ensure Contiguity:** Make `rays_o` and `rays_d` contiguous in memory [S2, unofficial].
-2.  **Calculate Step Distance:** Compute the physical step distance:
-    $$ stepdist = stepsize \times voxel\_size $$
-3.  **Generate Candidate Points:** Call the CUDA kernel `sample_pts_on_rays` with inputs `rays_o`, `rays_d`, `xyz_min`, `xyz_max`, `near`, `far`, and `stepdist`. This kernel generates points along rays up to `far` distance, respecting the bounding box for masking. It returns `ray_pts`, `mask_outbbox`, `ray_id`, `step_id`, `N_steps`, `t_min`, `t_max` [S2, unofficial].
-4.  **Filter Bounding Box:** Compute the inside mask:
-    $$ mask\_inbbox = \neg mask\_outbbox $$
-5.  **Apply Mask:** Filter `ray_pts`, `ray_id`, and `step_id` using `mask_inbbox` to retain only points inside the bounding box [S2, unofficial].
-6.  **Return:** Output the filtered `ray_pts`, `ray_id`, `step_id` [S2, unofficial].
+The method relies on a CUDA kernel `render_utils_cuda.sample_pts_on_rays` which returns the above tensors. The points are stored in a flat array. Masks are boolean arrays used to filter valid points.
 
 **Parameters:**
-- `far`: Set to $10^9$ [S2, unofficial].
-- Batch size is defined relative to a target number of sample points, with a maximum of $512 \times 64 \times 32$ points [S1].
+- `stepsize`: Base step size for uniform sampling.
+- `voxel_size`: Physical size of a voxel in the scene.
+- `num_uniform`: Number of uniform points per ray in foreground, typically 64 [S1].
+- `num_importance`: Number of importance samples added per ray, typically 32 [S1].
+- `num_unbounded`: Number of additional points for unbounded scenes, typically 32 [S1].
+- `max_points`: Maximum batch size for points, typically $512 \times 64 \times 32$ [S1].
+
+**Steps:**
+1.  **Prepare Rays:** Ensure `rays_o` and `rays_d` are contiguous in memory [S2, unofficial].
+2.  **Calculate Step Distance:** Compute `stepdist = stepsize * self.voxel_size` [S2, unofficial].
+3.  **Generate Uniform Samples:** Sample 64 uniformly distributed points per ray within the foreground area of the scene [S1].
+4.  **Generate Importance Samples:** Add 32 points using importance sampling on top of the uniform samples [S1].
+5.  **Handle Unbounded Scenes:** If `is_unbounded` is true, sample 32 additional points in contracted space [S1].
+6.  **Query CUDA Kernel:** Call `render_utils_cuda.sample_pts_on_rays(rays_o, rays_d, self.xyz_min, self.xyz_max, near, far, stepdist)` to obtain `ray_pts`, `mask_outbbox`, `ray_id`, `step_id`, `N_steps`, `t_min`, `t_max` [S2, unofficial].
+7.  **Filter Points:** Compute `mask_inbbox = ~mask_outbbox` [S2, unofficial].
+8.  **Apply Mask:** Filter `ray_pts`, `ray_id`, and `step_id` using `mask_inbbox` to retain only points inside the bounding box [S2, unofficial].
+9.  **Return Results:** Return the filtered `ray_pts`, `ray_id`, and `step_id` [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ray_point_sampling(rays_o, rays_d, xyz_min, xyz_max, near, far, stepsize, voxel_size):
+def ray_point_sampling(rays_o, rays_d, xyz_min, xyz_max, near, far, stepsize, voxel_size, is_unbounded):
     # Ensure contiguous memory layout for CUDA kernel
-    rays_o = torch.as_tensor(rays_o).contiguous()
-    rays_d = torch.as_tensor(rays_d).contiguous()
+    rays_o = torch.as_tensor(rays_o, dtype=torch.float32).contiguous()
+    rays_d = torch.tensor(rays_d, dtype=torch.float32).contiguous()
     
-    # Calculate physical step distance
+    # Calculate step distance
     stepdist = stepsize * voxel_size
     
-    # Generate points along rays using CUDA extension
-    # Returns: ray_pts, mask_outbbox, ray_id, step_id, N_steps, t_min, t_max
-    ray_pts, mask_outbbox, ray_id, step_id, N_steps, t_min, t_max = \
-        sample_pts_on_rays_cuda(rays_o, rays_d, xyz_min, xyz_max, near, far, stepdist)
+    # Step 1-5: Sample generation logic is abstracted into the CUDA kernel call
+    # The kernel handles uniform (64), importance (32), and unbounded (32) sampling
+    # based on the is_unbounded flag and internal configuration.
     
-    # Filter points inside the bounding box
+    # Step 6: Query CUDA kernel
+    ray_pts, mask_outbbox, ray_id, step_id, N_steps, t_min, t_max = \
+        render_utils_cuda.sample_pts_on_rays(
+            rays_o, rays_d, xyz_min, xyz_max, near, far, stepdist
+        )
+    
+    # Step 7: Filter points inside bounding box
     mask_inbbox = ~mask_outbbox
     
-    # Apply mask to keep only valid points
+    # Step 8: Apply mask
     ray_pts = ray_pts[mask_inbbox]
     ray_id = ray_id[mask_inbbox]
     step_id = step_id[mask_inbbox]
     
+    # Step 9: Return results
     return ray_pts, ray_id, step_id
 ```
+
+**Edge Cases and Pitfalls:**
+-   **Unbounded Scenes:** For datasets like DTU, the scene is unbounded. The method must switch to contracted space sampling to handle infinite depth correctly [S1].
+-   **Memory Limits:** The batch size is constrained by a maximum number of points ($512 \times 64 \times 32$). If the scene resolution or batch size exceeds this, the input must be split into smaller batches [S1].
+-   **Precision:** Floating-point precision in the CUDA kernel may affect the exact placement of points near the bounding box boundaries.
 
 ## Subtopics
 
 ### Fine-stage Points Sampling
-Filters out rays that do not intersect known free space. Adjusts near- and far-bounds ($t_{near}$ and $t_{far}$) to the endpoints of the ray-box intersection. Does not adjust $t_{near}$ if the ray origin $x_0$ is already inside the BBox [S3].
+Fine-stage Points Sampling is a variant used in the fine representation stage of Direct Voxel Grid Optimization. It differs from the standard method by filtering out rays that do not intersect with known free space and adjusting the near/far bounds to the exact ray-box intersection endpoints [S3]. It is chosen when optimizing for high-frequency details in the fine grid to avoid wasting samples in empty space [S3]. A key pitfall is that the near bound $t_{near}$ should not be adjusted if the ray origin $x_0$ is already inside the bounding box [S3].
 
 ### Edge Sample Retrieval
-Retrieves samples lying on an edge defined by two vertices by filtering samples based on their distance from the ray origin. Calculates distances from vertices $v_1, v_2$ to ray origin $R.origin$. Iterates through samples $s \in B.list$, calculating distance $dist = Dist(s.position, R.origin)$. If $dist_1 \le dist \le dist_2$, adds $s$ to result set $S$ [S4].
-
-### [Random Point Sampling in Bounds](3914-random-point-sampling-in-bounds.md)
-Generates uniformly distributed random points within a specified 3D bounding box or voxel volume. Differs from structured sampling by providing stochastic coverage for Monte Carlo integration [G]. Assumes an axis-aligned domain, making it computationally efficient but potentially non-uniform if spherical symmetry is required.
-
-### [Background Point Sampling](6423-background-point-sampling.md)
-Generates sample points along rays for background regions, defined as the space outside the scene's bounding box. Employs a specific non-uniform sampling distribution controlled by a `bg_preserve` parameter to balance between uniform angular sampling and uniform radial sampling. Distinct from sibling methods like Random Point Sampling in Bounds, which typically samples uniformly within a defined volume, by specifically targeting the infinite or large-distance background region with a distribution that adapts based on the ray's geometry relative to the bounding box.
-
-### [Uncertainty-guided Point Sampling](13488-uncertainty-guided-point-sampling.md)
-Samples 2D points prioritizing regions of high prediction uncertainty by first oversampling randomly, then selecting a fraction via an uncertainty function, and filling the remainder with random points.
+Edge Sample Retrieval is a procedure that retrieves samples lying on an edge defined by two vertices by filtering samples based on their distance from the ray origin [S4]. It differs from standard point sampling by targeting specific geometric features (edges) rather than volumetric space [S4]. It is chosen when preserving sharp features in sculpting applications [S4]. The algorithm calculates distances from the ray origin to the two vertices ($v_1, v_2$) and iterates through a list of samples, adding those whose distance falls between the two vertex distances [S4].
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of rays and samples. The CUDA kernel `sample_pts_on_rays` performs the heavy lifting in parallel [S2, unofficial].
-- **Memory Complexity:** Proportional to the number of generated points. Maximum batch size is limited to $512 \times 64 \times 32$ points [S1].
-- **Performance:** Efficient for GPU-based volume rendering pipelines. The use of contiguous arrays and CUDA extensions minimizes overhead [S2, unofficial].
-- **Strengths:** Handles both bounded and unbounded scenes (e.g., DTU) by adding specific unbounded samples [S1]. Supports importance sampling to improve convergence [S1].
-- **Limitations:** Fixed step size may lead to aliasing or inefficiency in sparse regions. Unbounded scenes require specific handling (contracted space) [S1].
-- **When to use:** Standard volume rendering where ray-box intersection and point generation are required.
-- **When not to use:** When adaptive sampling or hierarchical structures (like Octrees) are preferred over fixed step sizes.
+-   **Time Complexity:** Dominated by the CUDA kernel call `sample_pts_on_rays`. The complexity is linear with respect to the number of rays and the number of samples per ray.
+-   **Memory Complexity:** Linear with respect to the number of samples. The output tensors `ray_pts`, `ray_id`, `step_id` scale with the total number of points.
+-   **Measured Performance:** The method supports up to $512 \times 64 \times 32$ points in a batch [S1].
+-   **Strengths:** Combines uniform and importance sampling for better coverage; handles unbounded scenes via contracted space; efficient CUDA implementation.
+-   **Limitations:** Requires contiguous memory for ray inputs; batch size is limited by hardware memory; unbounded scenes require specific contracted space handling.
+-   **When to Use:** Neural radiance field training where high-quality foreground sampling is critical.
+-   **When Not to Use:** When only background sampling is needed (use [Background Point Sampling](6423-background-point-sampling.md)) or when specific edge features are required (use [Edge Sample Retrieval](3914-random-point-sampling-in-bounds.md) variant).
 
 ## Background
-Originating from implementations in Direct Voxel Grid Optimization (DVGO) and related volumetric rendering frameworks [S2, unofficial][S3], this method is a core component of GPU-accelerated volume rendering pipelines. It is used in training and inference for neural radiance fields and voxel-based representations [S1, S3]. The method supports both foreground and background sampling, crucial for handling unbounded scenes [S1].
+Ray Point Sampling is a core component of modern neural volume rendering pipelines, particularly in Direct Voxel Grid Optimization (DVG) and related methods. It was introduced to address the inefficiency of uniform sampling alone by incorporating importance sampling and handling unbounded scenes [S1, S3]. The method builds on [Ray-Bounding Box Intersection and Sampling Preparation](2364-ray-bounding-box-intersection-and-sampling-preparation.md) by utilizing the prepared ray-box intersection data to generate query points [S2, unofficial].
 
 ## Sources
 [S1] Volumetric Surfaces: Representing Fuzzy Geometries with Layered Meshes, https://doi.org/10.1109/cvpr52734.2025.01991, fetched 2026-10-26

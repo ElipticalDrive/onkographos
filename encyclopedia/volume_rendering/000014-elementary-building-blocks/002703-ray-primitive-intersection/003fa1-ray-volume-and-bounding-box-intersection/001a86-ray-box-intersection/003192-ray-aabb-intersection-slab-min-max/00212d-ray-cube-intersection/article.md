@@ -1,181 +1,201 @@
 # Ray-Cube Intersection
-
 Also called: box initialization
 
 ## Overview
-Ray-Cube Intersection calculates the precise entry ($t_0$) and exit ($t_1$) points of a ray intersecting an axis-aligned cube defined by lower and upper bounds. It solves the problem of determining the exact boundary face and intersection parameter for ray-casting into voxel grids, serving as the foundational primitive for traversal algorithms. Unlike the parent [Ray-AABB Intersection (Slab/Min-Max)](6548-ray-aabb-intersection-slab-min-max.md), which computes the overlapping interval $[t_{min}, t_{max}]$ for traversal logic, this method returns the specific 3D position and face normal of the first and last intersection points, enabling precise boundary clamping and face-based traversal state updates.
+This method calculates the precise entry ($t_0$) and exit ($t_1$) intersection points of a ray with an axis-aligned cube defined by lower and upper bounds. It solves the problem of determining the exact boundary hit for ray-casting or ray-marching within voxel grids, providing the entry position and the exit face normal required for subsequent traversal or shading. Unlike [Ray-AABB Intersection (Slab/Min-Max)](6548-ray-aabb-intersection-slab-min-max.md), which computes the interval $[t_{min}, t_{max}]$ for traversal logic, this method explicitly returns the 3D intersection coordinates and the specific face index exited, which is critical for hardware-accelerated voxel rendering where the first solid voxel must be identified [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Ray origin: $\mathbf{p} = (p_x, p_y, p_z)$
-- Ray direction: $\mathbf{d} = (d_x, d_y, d_z)$ (assumed non-zero; if zero, no intersection)
-- Cube lower bound: $\mathbf{b}_{min} = (b_{min,x}, b_{min,y}, b_{min,z})$
-- Cube upper bound: $\mathbf{b}_{max} = (b_{max,x}, b_{max,y}, b_{max,z})$
+- Ray origin: $\mathbf{r}_{pos}$ (3D vector)
+- Ray direction: $\mathbf{r}_{dir}$ (3D vector, assumed normalized or consistent with distance units)
+- Cube lower bound: $\mathbf{d}_{lower}$ (3D vector)
+- Cube upper bound: $\mathbf{d}_{upper}$ (3D vector)
 
 **Outputs:**
-- Entry hit: position $\mathbf{t}_0$ and entry face index/direction.
-- Exit hit: position $\mathbf{t}_1$ and exit face index/direction.
+- Entry hit: Structure containing position $\mathbf{t}_0$ and entry face index $\mathbf{inface}$.
+- Exit hit: Structure containing position $\mathbf{t}_1$ and exit face index $\mathbf{outface}$.
 
 **Data Structures:**
-The implementation uses 3D vectors for positions and directions. Face determination relies on lookup tables mapping the axis index and direction sign to a face identifier.
+- `Hit`: A structure containing:
+  - `pos`: 3D vector ($\mathbf{t}_0$ or $\mathbf{t}_1$)
+  - `face`: Integer index representing the face normal direction.
 
-**Steps for Exit Intersection ($t_1$):**
+**Lookup Tables:**
+Two $2 \times 3$ integer lookup tables map the axis index and ray direction sign to a face normal index.
+- `outfaces[axis][direction]`: Returns the exit face index. `direction` is 0 if $\mathbf{r}_{dir}[axis] < 0$, else 1.
+- `infaces[axis][direction]`: Returns the entry face index. `direction` is 0 if $\mathbf{r}_{dir}[axis] < 0$, else 1.
+
+**Steps for Exit Point ($t_1$):**
 1. Compute the intersection parameter vector $\mathbf{Q}_v$ for the upper bound:
-   $$ \mathbf{Q}_v = \frac{\mathbf{b}_{max} - \mathbf{p}}{\mathbf{d}} $$
-   Component-wise: $Q_{v,i} = \frac{b_{max,i} - p_i}{d_i}$ for $i \in \{x, y, z\}$.
-2. Identify the axis index $i$ corresponding to the minimum component of $\mathbf{Q}_v$. This axis determines the first face the ray exits.
-   $$ i = \operatorname{argmin}(\mathbf{Q}_v) $$
-3. Retrieve the scalar intersection distance $Q = Q_{v,i}$.
+   $$ \mathbf{Q}_v = \frac{\mathbf{d}_{upper} - \mathbf{r}_{pos}}{\mathbf{r}_{dir}} $$
+   Component-wise: $Q_v[i] = \frac{d_{upper}[i] - r_{pos}[i]}{r_{dir}[i]}$ for $i \in \{0, 1, 2\}$.
+2. Identify the axis index $i$ corresponding to the minimum component of $\mathbf{Q}_v$:
+   $$ i = \text{argmin}(\mathbf{Q}_v) $$
+3. Retrieve the scalar intersection distance $Q = Q_v[i]$.
 4. Calculate the 3D intersection point:
-   $$ \mathbf{t}_1 = \mathbf{p} + \mathbf{d} \cdot Q $$
-5. Determine the exit face `outface` using a lookup table `outfaces[i][direction]`, where `direction` is $0$ if $d_i < 0$ (negative face) and $1$ otherwise (positive face).
-6. Clamp the intersection point $\mathbf{t}_1$ to the exact boundary of the cube by setting the $i$-th component of $\mathbf{t}_1$ to $b_{max,i}$. This corrects for floating-point inaccuracies.
-7. Return the hit structure containing position $\mathbf{t}_1$ and face `outface`.
+   $$ \mathbf{t}_1 = \mathbf{r}_{pos} + \mathbf{r}_{dir} \cdot Q $$
+5. Determine the exit face $\mathbf{outface}$ using the lookup table `outfaces[i][direction]`, where `direction` is 0 if $\mathbf{r}_{dir}[i] < 0$ and 1 otherwise.
+6. Clamp the intersection point $\mathbf{t}_1$ to the exact boundary of the cube by setting the $i$-th component of $\mathbf{t}_1$ to $\mathbf{d}_{upper}[i]$. This ensures the point lies exactly on the cube surface.
+7. Return the hit structure containing $\mathbf{t}_1$ and $\mathbf{outface}$.
 
-**Steps for Entry Intersection ($t_0$):**
+**Steps for Entry Point ($t_0$):**
 1. Compute the intersection parameter vector $\mathbf{Q}_v$ for the lower bound:
-   $$ \mathbf{Q}_v = \frac{\mathbf{b}_{min} - \mathbf{p}}{\mathbf{d}} $$
-   Component-wise: $Q_{v,i} = \frac{b_{min,i} - p_i}{d_i}$.
+   $$ \mathbf{Q}_v = \frac{\mathbf{d}_{lower} - \mathbf{r}_{pos}}{\mathbf{r}_{dir}} $$
 2. Coalesce NaN values in $\mathbf{Q}_v$ to negative infinity to handle division by zero or invalid inputs.
-3. Identify the axis index $i$ corresponding to the maximum component of $\mathbf{Q}_v$. This axis determines the last face the ray enters (or first if traversing backwards, but logically the "entry" into the box volume from the ray's perspective relative to the lower bound).
-   $$ i = \operatorname{argmax}(\mathbf{Q}_v) $$
-4. Retrieve the scalar intersection distance $Q = Q_{v,i}$.
+3. Identify the axis index $i$ corresponding to the maximum component of $\mathbf{Q}_v$:
+   $$ i = \text{argmax}(\mathbf{Q}_v) $$
+4. Retrieve the scalar intersection distance $Q = Q_v[i]$.
 5. Calculate the 3D intersection point:
-   $$ \mathbf{t}_0 = \mathbf{p} + \mathbf{d} \cdot Q $$
-6. Determine the entry face `inface` using a lookup table `infaces[i][direction]`, where `direction` is $0$ if $d_i < 0$ (positive face relative to the normal, i.e., entering from the negative side) and $1$ otherwise (negative face).
-7. Clamp the intersection point $\mathbf{t}_0$ to the exact boundary of the cube by setting the $i$-th component of $\mathbf{t}_0$ to $b_{min,i}$.
-8. Return the hit structure containing position $\mathbf{t}_0$ and face `inface`.
+   $$ \mathbf{t}_0 = \mathbf{r}_{pos} + \mathbf{r}_{dir} \cdot Q $$
+6. Determine the entry face $\mathbf{inface}$ using the lookup table `infaces[i][direction]`, where `direction` is 0 if $\mathbf{r}_{dir}[i] < 0$ and 1 otherwise.
+7. Clamp the intersection point $\mathbf{t}_0$ to the exact boundary of the cube by setting the $i$-th component of $\mathbf{t}_0$ to $\mathbf{d}_{lower}[i]$.
+8. Return the hit structure containing $\mathbf{t}_0$ and $\mathbf{inface}$.
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ray_cube_exit(p, d, b_max):
+import math
+
+def min_component_index(v):
+    """Returns the index of the minimum component in a 3D vector."""
+    min_val = v[0]
+    min_idx = 0
+    if v[1] < min_val:
+        min_val = v[1]
+        min_idx = 1
+    if v[2] < min_val:
+        min_idx = 2
+    return min_idx
+
+def max_component_index(v):
+    """Returns the index of the maximum component in a 3D vector."""
+    max_val = v[0]
+    max_idx = 0
+    if v[1] > max_val:
+        max_val = v[1]
+        max_idx = 1
+    if v[2] > max_val:
+        max_idx = 2
+    return max_idx
+
+def ray_cube_intersection_exit(ray_pos, ray_dir, d_upper):
     """
-    Calculates the exit point (t1) of a ray into a cube.
-    p: (px, py, pz) ray origin
-    d: (dx, dy, dz) ray direction
-    b_max: (bmax_x, bmax_y, bmax_z) cube upper bound
-    Returns: (t1_pos, outface) or None if no intersection
+    Calculates the exit point (t1) of a ray into a cube defined by upper bound.
+    Returns (position, outface_index).
     """
     # Step 1: Compute Qv
-    # Handle division by zero by treating 0/0 as inf or handling separately if d_i is 0
-    # If d_i is 0, the ray is parallel to the slab. 
-    # If p_i > b_max_i, no intersection. If p_i <= b_max_i, intersection is at infinity or valid.
-    # The source logic implies standard division. We assume d_i != 0 for the primary path or handle via NaN coalescing if needed.
-    # However, for t1 (max Qv), if d_i=0, Qv_i is inf or nan. 
-    # Standard robust implementation:
-    Qv = [(b_max[i] - p[i]) / d[i] if d[i] != 0 else (float('inf') if p[i] <= b_max[i] else float('-inf')) for i in range(3)]
+    # Handle division by zero by treating it as infinity if ray_dir is 0
+    # Note: Standard division in Python raises ZeroDivisionError. 
+    # In C++ float division by zero yields inf. We simulate inf behavior.
+    qv = [0.0, 0.0, 0.0]
+    for i in range(3):
+        if ray_dir[i] == 0.0:
+            if d_upper[i] - ray_pos[i] > 0:
+                qv[i] = float('inf')
+            else:
+                qv[i] = float('-inf')
+        else:
+            qv[i] = (d_upper[i] - ray_pos[i]) / ray_dir[i]
+            
+    # Step 2: Identify axis index i for minimum component
+    i = min_component_index(qv)
     
-    # Step 2: Find index of minimum component
-    # Note: Source says "minimum component of Qv" for t1 (exit). 
-    # Geometrically, the ray exits through the face with the smallest positive t.
-    # If all Qv are negative, the ray is behind the cube relative to the bounds?
-    # Actually, for exit, we look for the smallest t that is > 0.
-    # The source logic: "Identify the axis index i corresponding to the minimum component of Qv"
-    # This assumes valid intersection range.
+    # Step 3: Retrieve scalar Q
+    Q = qv[i]
     
-    min_val = min(Qv)
-    i = Qv.index(min_val)
-    
-    # Step 3: Retrieve Q
-    Q = Qv[i]
-    
-    # Pitfall check: If Q < 0, the intersection is behind the ray origin.
-    if Q < 0:
-        return None
+    # Check for no intersection (Q is negative or inf)
+    if Q < 0.0 or math.isinf(Q):
+        return None, None
         
-    # Step 4: Calculate t1
-    t1 = [p[j] + d[j] * Q for j in range(3)]
+    # Step 4: Calculate 3D intersection point
+    t1 = [ray_pos[j] + ray_dir[j] * Q for j in range(3)]
     
-    # Step 5: Determine outface
-    # direction: 0 if d[i] < 0, else 1
-    direction = 0 if d[i] < 0 else 1
+    # Step 5: Determine exit face
+    direction = 0 if ray_dir[i] < 0 else 1
     # Lookup table outfaces[i][direction]
-    # Assuming a standard mapping: 
-    # i=0 (x): 0->-x face, 1->+x face
-    # i=1 (y): 0->-y face, 1->+y face
-    # i=2 (z): 0->-z face, 1->+z face
-    outface = get_face_index(i, direction) 
+    # Assuming standard face indices: 0=x-, 1=x+, 2=y-, 3=y+, 4=z-, 5=z+
+    # The exact mapping depends on the implementation's face numbering.
+    # We define a generic mapping here based on axis and sign.
+    if i == 0:
+        outface = 0 if direction == 0 else 1 # x- or x+
+    elif i == 1:
+        outface = 2 if direction == 0 else 3 # y- or y+
+    else:
+        outface = 4 if direction == 0 else 5 # z- or z+
+        
+    # Step 6: Clamp t1 to exact boundary
+    t1[i] = d_upper[i]
     
-    # Step 6: Clamp t1
-    t1[i] = b_max[i]
-    
-    return (t1, outface)
+    return t1, outface
 
-def ray_cube_entry(p, d, b_min):
+def ray_cube_intersection_entry(ray_pos, ray_dir, d_lower):
     """
-    Calculates the entry point (t0) of a ray into a cube.
-    p: (px, py, pz) ray origin
-    d: (dx, dy, dz) ray direction
-    b_min: (bmin_x, bmin_y, bmin_z) cube lower bound
-    Returns: (t0_pos, inface) or None if no intersection
+    Calculates the entry point (t0) of a ray into a cube defined by lower bound.
+    Returns (position, inface_index).
     """
     # Step 1: Compute Qv
-    Qv = [(b_min[i] - p[i]) / d[i] if d[i] != 0 else (float('inf') if p[i] >= b_min[i] else float('-inf')) for i in range(3)]
+    qv = [0.0, 0.0, 0.0]
+    for i in range(3):
+        if ray_dir[i] == 0.0:
+            if d_lower[i] - ray_pos[i] > 0:
+                qv[i] = float('inf')
+            else:
+                qv[i] = float('-inf')
+        else:
+            qv[i] = (d_lower[i] - ray_pos[i]) / ray_dir[i]
+            
+    # Step 2: Coalesce NaN to -inf (already handled by inf logic above if inputs are valid floats)
+    # If NaNs exist from other sources, replace with -inf
+    for i in range(3):
+        if math.isnan(qv[i]):
+            qv[i] = float('-inf')
+            
+    # Step 3: Identify axis index i for maximum component
+    i = max_component_index(qv)
     
-    # Step 2: Coalesce NaN to -inf (already handled in division logic above, but explicit if needed)
-    Qv = [float('-inf') if x != x else x for x in Qv]
+    # Step 4: Retrieve scalar Q
+    Q = qv[i]
     
-    # Step 3: Find index of maximum component
-    # Source says "maximum component of Qv" for t0 (entry).
-    # Geometrically, the ray enters through the face with the largest t that is < the exit t.
-    # Or simply the last face entered.
-    max_val = max(Qv)
-    i = Qv.index(max_val)
-    
-    # Pitfall check: If all components are negative, ray does not intersect in forward direction.
-    if max_val < 0:
-        return None
+    # Check for no intersection (Q is negative or inf)
+    if Q < 0.0 or math.isinf(Q):
+        return None, None
         
-    # Step 4: Retrieve Q
-    Q = Qv[i]
+    # Step 5: Calculate 3D intersection point
+    t0 = [ray_pos[j] + ray_dir[j] * Q for j in range(3)]
     
-    # Step 5: Calculate t0
-    t0 = [p[j] + d[j] * Q for j in range(3)]
-    
-    # Step 6: Determine inface
-    # direction: 0 if d[i] < 0, else 1
-    direction = 0 if d[i] < 0 else 1
+    # Step 6: Determine entry face
+    direction = 0 if ray_dir[i] < 0 else 1
     # Lookup table infaces[i][direction]
-    inface = get_face_index(i, direction)
+    if i == 0:
+        inface = 1 if direction == 0 else 0 # x+ or x- (reverse of exit for entry face normal)
+    elif i == 1:
+        inface = 3 if direction == 0 else 2 # y+ or y-
+    else:
+        inface = 5 if direction == 0 else 4 # z+ or z-
+        
+    # Step 7: Clamp t0 to exact boundary
+    t0[i] = d_lower[i]
     
-    # Step 7: Clamp t0
-    t0[i] = b_min[i]
-    
-    return (t0, inface)
-
-def get_face_index(axis, direction):
-    """
-    Helper to map axis and direction to a face identifier.
-    The exact values depend on the specific implementation's lookup table.
-    Common convention:
-    Face 0: -X, Face 1: +X, Face 2: -Y, Face 3: +Y, Face 4: -Z, Face 5: +Z
-    """
-    if axis == 0:
-        return 0 if direction == 0 else 1
-    elif axis == 1:
-        return 2 if direction == 0 else 3
-    elif axis == 2:
-        return 4 if direction == 0 else 5
+    return t0, inface
 ```
 
 ## Subtopics
 
 ### [Ray-Cube Intersection (Brick/Slab)](3620-ray-cube-intersection-brick-slab.md)
-This method performs the primary hit resolution for a ray entering a 4×4×4 voxel brick, finding the entry point of the first solid voxel the ray crosses within a specified time interval $[t_{lo}, t_{hi}]$. It builds on [Ray-Cube Intersection](2466-ray-cube-intersection.md) by extending the boundary check into a full traversal of the brick's interior voxels using the Amanatides-Woo Digital Differential Analyzer (DDA). Unlike the parent method which only identifies the cube entry face, this method returns the time of the entry face of the first solid voxel found, or -1 if the ray misses all solid voxels in the brick.
+This method performs a Digital Differential Analyzer (DDA) traversal within a single $4 \times 4 \times 4$ voxel brick to locate the first solid voxel intersected by a ray. It solves the problem of primary hit resolution in hardware-accelerated voxel rendering, where a coarse bounding volume intersection identifies a candidate brick, but the exact first solid voxel must be determined to handle transparency and fringe cases correctly. Unlike [In-Brick DDA for Occlusion](3623-in-brick-dda-for-occlusion.md), which visits all solid voxels to determine shadowing, this method stops at the first valid hit. It builds on [Ray-Cube Intersection](2466-ray-cube-intersection.md) by refining the entry point into a specific voxel index and material check.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per intersection query. It involves a constant number of arithmetic operations and comparisons.
-- **Memory Complexity:** $O(1)$ auxiliary space.
-- **Strengths:** Provides exact boundary positions and face normals, which are critical for precise voxel traversal and avoiding self-intersection artifacts in DDA.
-- **Limitations:** Requires careful handling of division by zero (ray parallel to axis) and NaN propagation. The logic for $t_0$ and $t_1$ relies on min/max component selection, which can be sensitive to floating-point precision near cube boundaries.
-- **When to use:** When exact intersection points and face identifiers are needed, such as in voxel traversal algorithms or when initializing ray-box structures for further processing.
-- **When not to use:** When only a boolean hit test or the $[t_{min}, t_{max}]$ interval is sufficient, in which case the parent [Ray-AABB Intersection (Slab/Min-Max)](6548-ray-aabb-intersection-slab-min-max.md) is more efficient.
+- **Time Complexity:** $O(1)$ per intersection, involving a fixed number of arithmetic operations and comparisons.
+- **Memory Complexity:** $O(1)$, requiring only a few temporary vectors and lookup tables.
+- **Strengths:** Provides exact boundary positions and face normals, which are necessary for precise voxel traversal and shading. Handles degenerate cases (ray parallel to axes) via NaN/Infinity coalescing.
+- **Limitations:** Assumes the ray intersects the cube. If the ray originates inside or misses, the logic must be checked (negative $Q$). The method does not perform traversal, only intersection.
+- **When to use:** When the exact entry/exit points and face normals are required, such as in voxel rendering pipelines or precise ray-casting.
+- **When not to use:** When only the interval $[t_{min}, t_{max}]$ is needed for traversal logic; use [Ray-AABB Intersection (Slab/Min-Max)](6548-ray-aabb-intersection-slab-min-max.md) instead.
 
 ## Background
-The method originates from implementations in voxel rendering and ray-tracing libraries, specifically referenced in the `landscapes` and `r3d` repositories. It is a specialized form of ray-box intersection tailored for axis-aligned cubes, often used as a building block for more complex traversal algorithms like the Amanatides-Woo DDA. The specific naming conventions (`calculate_t0_f3`, `r3du_init_box`) suggest its use in C/C++ based graphics engines where performance and explicit memory layout are prioritized.
+The method originates from implementations in voxel rendering engines, specifically those dealing with brick-based traversal. The specific terminology and lookup table approach are found in the `landscapes` repository [S1, unofficial] and the `r3d` library [S2, unofficial]. It is used in hardware-accelerated voxel rendering to resolve the first solid voxel within a coarse bounding volume.
 
 ## Sources
 [S1] realazthat/landscapes, https://github.com/realazthat/landscapes, fetched 2026-10-26 (unofficial)

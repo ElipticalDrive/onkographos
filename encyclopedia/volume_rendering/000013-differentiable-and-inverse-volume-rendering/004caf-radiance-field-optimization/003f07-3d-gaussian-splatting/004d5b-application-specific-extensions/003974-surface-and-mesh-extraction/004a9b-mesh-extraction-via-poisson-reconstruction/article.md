@@ -3,132 +3,111 @@
 Also called: Poisson Mesh Extraction, Poisson Surface Reconstruction
 
 ## Overview
-This method extracts a textured triangular mesh from an optimized 3D Gaussian Splatting (3DGS) scene by converting rendered 2D depth and normal maps into an oriented 3D point cloud, which is then reconstructed into a manifold surface using Poisson surface reconstruction [S1][S2, unofficial]. It differs from voxel-based approaches like Gaussian Opacity Fields (GOF) [3692-gaussian-opacity-fields-gof-mesh-extraction.md] by operating directly on the sparse geometric cues of the splats rather than accumulating density into a grid, and from distance-based methods [7411-distance-based-gaussian-splatting.md] by relying on multi-view consistency of rendered normals rather than explicit signed distance field optimization [S1][S2, unofficial].
+This method extracts a textured 3D mesh from an optimized 3D Gaussian Splatting scene by converting rendered 2D depth and normal maps into a 3D oriented point cloud, which is then reconstructed into a manifold mesh using Poisson surface reconstruction. It differs from direct Gaussian-to-mesh approaches (like [Gaussian Opacity Fields (GOF) Mesh Extraction](3692-gaussian-opacity-fields-gof-mesh-extraction.md)) by relying on explicit geometric priors derived from rendered views rather than implicit density fields or signed distance functions. It is chosen when high-fidelity surface topology is required from a radiance field that lacks explicit geometric regularization.
 
 ## How it works
 **Inputs:**
-- Optimized set of $N$ 3D Gaussians $\mathcal{G} = \{g_i\}_{i=1}^N$, where each $g_i$ has center $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $o_i$, and spherical harmonics coefficients $\mathbf{c}_i$ [S1][S2, unofficial].
-- Camera poses and intrinsics for the training views.
+*   Optimized set of $M$ 3D Gaussians $\mathcal{G} = \{G_i\}_{i=1}^M$, where each $G_i$ has position $\mathbf{p}_i$, rotation $\mathbf{R}_i$, scale $\mathbf{S}_i$, and color/feature attributes.
+*   Camera poses and intrinsics for the training views.
+*   Pre-trained normal estimation model (e.g., Omnidata) if explicit normal regularization was not used during training [S1].
 
 **Outputs:**
-- A textured triangular mesh (vertices, faces, and UV coordinates or vertex colors).
+*   A textured triangular mesh $\mathcal{M}$.
 
 **Data Structures:**
-- **Rendered Depth Map:** A 2D array $D \in \mathbb{R}^{H \times W}$ storing depth values per pixel.
-- **Rendered Normal Map:** A 2D array $N \in \mathbb{R}^{H \times W \times 3}$ storing surface normal vectors per pixel in camera space.
-- **RGB Image:** A 2D array $C \in \mathbb{R}^{H \times W \times 3}$ storing color values.
-- **Oriented Point Cloud:** A list of points $P = \{(\mathbf{p}_j, \mathbf{n}_j, \mathbf{c}_j)\}_{j=1}^M$, where $\mathbf{p}_j$ is the 3D position, $\mathbf{n}_j$ is the surface normal, and $\mathbf{c}_j$ is the color.
-
-**Parameters:**
-- **Depth Level:** The depth of the octree used in Poisson reconstruction. Typical value: 9 [S1].
-- **Point Count:** The number of points sampled for reconstruction. Typical value: 2 million [S1].
-- **Median Depth:** Used to resolve depth from splats [S2, unofficial].
+*   **Rendered Depth Map:** A 2D array $D \in \mathbb{R}^{H \times W}$ storing depth values per pixel.
+*   **Rendered Normal Map:** A 2D array $N \in \mathbb{R}^{H \times W \times 3}$ storing surface normals in camera space.
+*   **Oriented Point Cloud:** A list of points $P = \{(\mathbf{x}_k, \mathbf{n}_k, \mathbf{c}_k)\}$, where $\mathbf{x}_k$ is the 3D position, $\mathbf{n}_k$ is the surface normal, and $\mathbf{c}_k$ is the color.
 
 **Steps:**
 
-1. **Render Depth Maps:** For each training view, project the 3D Gaussians onto the 2D image plane. The projected 2D covariance $\boldsymbol{\Sigma}'$ is computed as $\boldsymbol{\Sigma}' = J W \boldsymbol{\Sigma} W^\top J^\top$, where $W$ is the viewing transformation and $J$ is the Jacobian of the perspective projection [S2, unofficial]. Render the depth map $D$ by accumulating splats and selecting the **median** depth value among all splats covering each pixel [S2, unofficial].
+1.  **Render Depth Maps:**
+    For each training view, render a depth map using the median depth of the splats projected onto each pixel. This avoids bias from large Gaussians [S2, unofficial].
+    *   Project each Gaussian $G_i$ to 2D using the projected covariance $\mathbf{\hat{\Sigma}}_i = J W \mathbf{\Sigma}_i W^T J^T$ [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md).
+    *   For each pixel, collect depths of overlapping splats and compute the median.
 
-2. **Derive Normal Maps:** Convert the rendered depth map $D$ into a normal map $N$ in camera space. This is done by computing the spatial gradients of the depth map and transforming them into surface normals [S2, unofficial].
+2.  **Derive Normal Maps:**
+    Convert the rendered depth maps into 3D space to compute corresponding normal maps.
+    *   Back-project pixel coordinates using the depth values to obtain 3D points in camera space.
+    *   Compute normals via finite differences or by using a pre-trained normal estimator (e.g., Omnidata) on the rendered RGB images to provide monocular normal cues [S1].
 
-3. **Back-Project to 3D:** For each pixel $(u, v)$ in the training views:
-   - Retrieve the color $\mathbf{c}$, depth $d$, and normal $\mathbf{n}_{cam}$ from the rendered maps.
-   - Convert the camera-space normal $\mathbf{n}_{cam}$ to world-space normal $\mathbf{n}_{world}$ using the camera rotation matrix $R_{cam}$: $\mathbf{n}_{world} = R_{cam} \mathbf{n}_{cam}$.
-   - Compute the 3D point position $\mathbf{p}_{world}$ by back-projecting the pixel coordinates using the depth $d$ and camera intrinsics/extrinsics [S1][S2, unofficial].
+3.  **Generate Oriented Point Cloud:**
+    Create a dense set of 3D points with orientation and color.
+    *   For each pixel in the training views, back-project the depth value to 3D space to get position $\mathbf{x}$.
+    *   Assign the corresponding normal $\mathbf{n}$ from the normal map.
+    *   Assign the color $\mathbf{c}$ from the rendered RGB image.
+    *   Filter or sample points to ensure uniform density. The sources specify extracting a total of 2 million points for the reconstruction [S1].
 
-4. **Construct Oriented Point Cloud:** Collect all back-projected points $\mathbf{p}_{world}$, their corresponding world-space normals $\mathbf{n}_{world}$, and colors $\mathbf{c}$ from all training views into a single set. If multiple views provide points for the same surface location, they are merged (e.g., via averaging or sampling) to form the final oriented point cloud $P$ [S1][S2, unofficial].
-
-5. **Poisson Surface Reconstruction:** Input the oriented point cloud $P$ into the Poisson surface reconstruction algorithm [S1][S2, unofficial]. The algorithm solves for a scalar function $f$ such that its gradient field approximates the normal field of $P$, and the mesh is extracted as the zero-level set of $f$.
-   - Set the octree depth level to 9 [S1].
-   - Ensure the point cloud contains approximately 2 million points [S1].
+4.  **Poisson Surface Reconstruction:**
+    Input the oriented point cloud into the Poisson surface reconstruction algorithm.
+    *   The algorithm solves for a scalar function whose gradient field best fits the oriented points.
+    *   Extract the mesh as the zero-level set of this function.
+    *   **Parameters:**
+        *   Depth level: 9 [S1].
+        *   Number of points: 2 million [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def extract_mesh_poisson(gaussians, training_views, depth_level=9, target_points=2_000_000):
+def extract_mesh(gaussians, cameras, num_points_target=2_000_000, depth_level=9):
     """
-    Extract mesh from 3DGS using Poisson Reconstruction.
-    
-    Args:
-        gaussians: List of Gaussian primitives with mu, sigma, opacity, SH.
-        training_views: List of camera poses and intrinsics.
-        depth_level: Octree depth for Poisson solver.
-        target_points: Number of points for reconstruction.
-        
-    Returns:
-        mesh: Triangular mesh with texture.
+    Extracts a mesh from 3D Gaussians using Poisson Reconstruction.
     """
-    all_points = []
-    all_normals = []
-    all_colors = []
+    oriented_points = []
     
-    for view in training_views:
-        # 1. Render Depth and Normal Maps
-        # Project Gaussians to 2D using Sigma' = J * W * Sigma * W^T * J^T
-        depth_map = render_median_depth(gaussians, view)
-        normal_map_cam = compute_normals_from_depth(depth_map, view)
-        color_map = render_color(gaussians, view)
+    # Step 1 & 2: Render and derive depth/normal maps
+    for camera in cameras:
+        # Render depth map using median depth of splats
+        depth_map = render_median_depth(gaussians, camera)
         
-        # 2. Back-project to 3D
-        for u, v in pixels(depth_map):
-            d = depth_map[u, v]
-            n_cam = normal_map_cam[u, v]
-            c = color_map[u, v]
-            
-            # Transform normal to world space
-            n_world = view.rotation @ n_cam
-            
-            # Back-project pixel to 3D point using depth d
-            p_world = back_project_pixel(u, v, d, view)
-            
-            all_points.append(p_world)
-            all_normals.append(n_world)
-            all_colors.append(c)
-            
-    # 3. Sample/Downsample to target points if necessary
-    # [G] Implementation detail: Use uniform sampling or farthest point sampling
-    # to ensure ~target_points while maintaining density.
-    points, normals, colors = sample_points(all_points, all_normals, all_colors, target_points)
+        # Render RGB image for color and normal estimation
+        rgb_image = render_rgb(gaussians, camera)
+        
+        # Derive normal map from depth or pre-trained model
+        # Option A: From depth (finite differences)
+        normal_map = compute_normals_from_depth(depth_map, camera.intrinsics)
+        
+        # Option B: From pre-trained model (e.g., Omnidata) [S1]
+        # normal_map = pretrained_normal_estimator(rgb_image)
+        
+        # Step 3: Back-project to 3D point cloud
+        for y in range(height):
+            for x in range(width):
+                depth_val = depth_map[y, x]
+                if depth_val is valid:
+                    # Back-project pixel (x,y) with depth to 3D
+                    point_3d = back_project(camera, x, y, depth_val)
+                    normal_3d = normal_map[y, x]
+                    color = rgb_image[y, x]
+                    oriented_points.append((point_3d, normal_3d, color))
     
-    # 4. Poisson Reconstruction
-    # Solve for implicit function f where grad(f) approximates normals
-    # Extract mesh at f=0
-    mesh = poisson_reconstruct(points, normals, depth_level)
+    # Sample points to target count if necessary
+    if len(oriented_points) > num_points_target:
+        oriented_points = sample_points(oriented_points, num_points_target)
     
-    # 5. Assign colors to mesh vertices
-    mesh.colors = interpolate_colors(mesh.vertices, points, colors)
+    # Step 4: Poisson Reconstruction
+    mesh = poisson_reconstruction(oriented_points, depth_level=depth_level)
     
     return mesh
 ```
 
 **Edge Cases and Pitfalls:**
-- **Median Depth Ambiguity:** Using median depth can fail in transparent or highly occluded regions where the median does not correspond to the surface [S2, unofficial].
-- **Normal Consistency:** Inconsistent normals across views can lead to holes or artifacts in the Poisson reconstruction [S1].
-- **Point Density:** Insufficient points (e.g., < 1 million) may result in low-resolution meshes, while excessive points increase memory and computation time [S1].
-
-## Subtopics
-
-### Gaussian Opacity Fields (GOF) Mesh Extraction
-Extracts mesh from a voxelized density field derived from Gaussians. Choose when a dense, volumetric representation is preferred over sparse point-based reconstruction [3692-gaussian-opacity-fields-gof-mesh-extraction.md].
-
-### Distance-based Gaussian Splatting
-Optimizes Gaussians to minimize distance to a ground-truth or estimated SDF. Choose when explicit geometric priors are available and high fidelity is required [7411-distance-based-gaussian-splatting.md].
-
-### 2D-Lift-3D Scene Segmentation
-Uses 2D segmentation masks to guide 3D geometry. Choose when semantic information is needed alongside geometry [11513-2d-lift-3d-scene-segmentation.md].
+*   **Depth Ambiguity:** Using mean depth can bias the surface towards the center of large Gaussians. Median depth is preferred [S2, unofficial].
+*   **Normal Consistency:** If normals are estimated from RGB (monocular), they may be inconsistent across views. Explicit depth-derived normals or regularization during training (e.g., DN-Splatter) improve consistency [S1].
+*   **Point Density:** Insufficient points lead to noisy meshes; excessive points increase reconstruction time. 2 million points is a typical target [S1].
 
 ## Operating characteristics
-- **Time Complexity:** Dominated by rendering depth/normal maps for all training views ($O(N \cdot V \cdot H \cdot W)$) and the Poisson reconstruction step ($O(M \log M)$ for $M$ points) [S1][S2, unofficial].
-- **Memory Complexity:** $O(N)$ for Gaussians, $O(V \cdot H \cdot W)$ for rendered maps, and $O(M)$ for the point cloud [S1][S2, unofficial].
-- **Performance:** On a single NVIDIA GeForce RTX 4090 GPU, reconstruction is efficient for scenes with up to 2 million points [S2, unofficial].
-- **Strengths:** Produces watertight, textured meshes; leverages existing 3DGS rendering pipeline; no need for explicit SDF optimization [S1][S2, unofficial].
-- **Limitations:** Relies on the quality of rendered normals; median depth may be inaccurate in complex occlusions; requires multiple training views for robust coverage [S1][S2, unofficial].
-- **When to use:** When a textured mesh is needed from a standard 3DGS model without additional geometric regularization [S1].
-- **When not to use:** When high-fidelity signed distance fields are required or when training views are sparse [S1][S2, unofficial].
+*   **Time Complexity:** Dominated by rendering $V$ views and the Poisson reconstruction step, which is $O(N \log N)$ for $N$ points. Rendering is $O(M \cdot V \cdot \text{pixels})$.
+*   **Memory Complexity:** $O(M + V \cdot H \cdot W)$ for storing Gaussians and intermediate maps. The point cloud is $O(N)$.
+*   **Strengths:** Produces watertight, manifold meshes with texture. Works well with regularized Gaussians (e.g., DN-Splatter) where positions are aligned to the surface [S1].
+*   **Limitations:** Requires multiple views for dense point clouds. Sensitive to noise in depth/normal maps. Does not preserve internal structures or transparency.
+*   **When to use:** When a textured, watertight mesh is needed from a 3DGS scene, especially if the Gaussians have been regularized to lie on the surface.
+*   **When not to use:** For scenes with significant transparency, internal structures, or when real-time extraction is required.
 
 ## Background
-Poisson surface reconstruction was originally introduced by Kazhdan et al. [S1]. In the context of 3D Gaussian Splatting, it has been adopted as a post-processing step to extract meshes from optimized Gaussian scenes, particularly in methods like DN-Splatter and AtomGS [S1][S2, unofficial]. DN-Splatter uses depth and normal priors to regularize Gaussians before applying Poisson reconstruction [S1]. AtomGS uses median depth rendering and Poisson reconstruction for high-fidelity meshing [S2, unofficial].
+Poisson surface reconstruction was originally introduced by Kazhdan, Bolitho, and Hoppe [S1, ref 18]. In the context of 3D Gaussian Splatting, it is used as a post-processing step to extract explicit geometry from the implicit representation. Methods like DN-Splatter [S1] and AtomGS [S2, unofficial] utilize this approach to evaluate mesh quality. DN-Splatter specifically uses depth and normal priors during training to ensure the Gaussians are well-distributed and aligned with the surface, facilitating better Poisson reconstruction [S1].
 
 ## Sources
 [S1] DN-Splatter: Depth and Normal Priors for Gaussian Splatting and Meshing, https://doi.org/10.1109/wacv61041.2025.00241, fetched 2026-10-26

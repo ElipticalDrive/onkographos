@@ -1,47 +1,50 @@
 # K-Means Spatial-Intensity Partitioning
 
+Also called: K-Means Spatial-Intensity Clustering
 
 ## Overview
-K-Means Spatial-Intensity Partitioning is a volume partitioning method that segments a 3D volume into distinct components by clustering foreground voxels based on a weighted combination of their spatial coordinates (x, y, z) and their intensity values [S1, unofficial]. It addresses the problem of organizing large volumes into manageable, semantically coherent regions for downstream processing, such as compression or visualization [S1, unofficial]. Unlike [Greedy Axis-Aligned Spatial Partitioning](11589-greedy-axis-aligned-spatial-partitioning.md), which splits purely by geometric boundaries, this method incorporates intensity similarity, allowing clusters to respect material or signal boundaries even if they are spatially disjoint [S1, unofficial]. It differs from [Bounded-Memory Large Volume Export](11587-bounded-memory-large-volume-export.md) by focusing on clustering logic rather than memory-constrained I/O streaming [S1, unofficial].
+K-Means Spatial-Intensity Partitioning splits a 3D volume into a fixed number of components by clustering foreground voxels based on a weighted combination of their spatial coordinates and intensity values [S1, unofficial]. It sets itself apart from sibling methods like Greedy Axis-Aligned Spatial Partitioning by incorporating intensity similarity into the clustering metric, allowing partitions to respect both geometric locality and data content, whereas siblings typically rely solely on spatial boundaries or memory constraints [S1, 11589-greedy-axis-aligned-spatial-partitioning.md, unofficial].
 
 ## How it works
-**Inputs:**
-- `volume`: A 3D numpy array or memory-mapped array of voxel data.
-- `components`: Integer, number of desired clusters/partitions. Default: 8.
-- `spatial_weight`: Float, weight for spatial dimensions. Intensity weight is `1 - spatial_weight`. Default: 0.5.
-- `seed`: Integer, random seed for reproducibility.
-- `batch_size`: Integer, number of voxels processed per prediction batch. Default: 100,000.
-
-**Outputs:**
-- `labels`: A 3D array of the same shape as `volume`, containing integer cluster labels (0 for background, 1 to `components` for foreground clusters).
+**Inputs:** A 3D volume array (binary or intensity), number of desired components (`components`), spatial weight (`spatial_weight`), batch size for prediction (`batch_size`), and random seed.
+**Outputs:** A label array of the same shape as the volume, where background voxels are labeled 0 and foreground voxels are labeled 1 to `components`.
 
 **Data Structures:**
-- `foreground`: 1D array of flat indices where `volume > 0`.
-- `features`: 2D array of shape `(N, 4)` for sampled voxels, containing `[x, y, z, intensity]` as `float32`.
+- `volume`: 3D numpy array of the input data.
+- `labels`: 3D numpy array of integers, initialized to 0.
+- `features`: 2D numpy array of shape `(N, 4)` containing `[x, y, z, intensity]` for `N` sampled foreground voxels.
 - `scaler`: A `StandardScaler` instance fitted on the sample features.
+- `kmeans`: A `KMeans` model instance.
 
 **Steps:**
-1. **Identify Foreground:** Compute `foreground = np.flatnonzero(volume)`. If `foreground` is empty, return an array of zeros.
-2. **Sample:** Select up to 30,000 indices from `foreground` without replacement: `sample = rng.choice(foreground, min(30000, foreground.size), replace=False)`.
+1. **Identify Foreground:** Find all indices where the volume is non-zero (or above a threshold, depending on preprocessing). Let this flat index array be `foreground`.
+2. **Sample:** Randomly sample up to 30,000 indices from `foreground` without replacement. Let this sample array be `sample`.
 3. **Feature Extraction:**
-   - Unravel `sample` indices into `(z, y, x)` coordinates.
-   - Extract intensity values `volume[sample]`.
-   - Stack into a 2D array `raw_features` of shape `(N_sample, 4)` with columns `[x, y, z, intensity]`.
-   - Cast to `float32`.
-4. **Normalization:** Fit a `StandardScaler` on `raw_features`. Transform `raw_features` to get `scaled_features`.
-5. **Weighting:** Define weight vector `w = [spatial_weight, spatial_weight, spatial_weight, 1 - spatial_weight]`. Scale `scaled_features` by `w` to get `weighted_features`.
-6. **Clustering:** Fit a K-Means model with `n_clusters = min(components, len(np.unique(volume[volume > 0])))`, `n_init=3`, `random_state=seed`, `max_iter=100` on `weighted_features`.
-7. **Prediction:**
+   - Unravel the flat indices in `sample` to 3D coordinates `(z, y, x)`.
+   - Extract the intensity values from `volume` at these coordinates.
+   - Stack these into a 2D array of shape `(num_samples, 4)` with columns `[x, y, z, intensity]`.
+   - Cast all values to `float32`.
+4. **Normalization:** Fit a `StandardScaler` on the sampled features. Transform the sampled features using the fitted scaler.
+5. **Weighting:** Define weights as `[spatial_weight, spatial_weight, spatial_weight, 1 - spatial_weight]`. Multiply the transformed features by these weights element-wise.
+6. **Clustering Model:** Initialize a K-Means model with:
+   - `n_clusters = min(components, number_of_unique_foreground_regions)` (or simply `components` if unique count is not tracked separately, but the source specifies `min(components, unique_count)`).
+   - `n_init=3`
+   - `random_state=seed`
+   - `max_iter=100`
+   Fit the model on the weighted, scaled sample features.
+7. **Label Assignment:**
    - Initialize `labels` array of zeros with shape `volume.shape`.
-   - Iterate through `foreground` in batches of `batch_size`.
+   - Iterate through all foreground indices in batches of size `batch_size` (default 100,000).
    - For each batch:
-     - Extract features for the batch indices (unravel, stack, cast to float32).
+     - Unravel indices to `(z, y, x)` and extract intensities.
+     - Stack into `(batch_size, 4)` array.
      - Transform using the fitted `scaler`.
-     - Scale by `w`.
+     - Scale by weights.
      - Predict cluster labels using the fitted K-Means model.
-     - Assign `labels[batch_indices] = predicted_labels + 1` (offset by 1 to reserve 0 for background).
+     - Assign `predicted_label + 1` to the corresponding positions in `labels` (since 0 is reserved for background).
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -49,90 +52,116 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 
-def kmeans_spatial_intensity_partition(volume, components=8, spatial_weight=0.5, seed=42, batch_size=100000):
+def kmeans_spatial_intensity_partition(volume, components=8, spatial_weight=0.5, batch_size=100000, seed=42):
+    """
+    Partitions volume into components by clustering foreground voxels based on spatial coordinates and intensity.
+    
+    Args:
+        volume: 3D numpy array.
+        components: Number of clusters/partitions.
+        spatial_weight: Weight for spatial coordinates (x,y,z). Intensity weight is 1 - spatial_weight.
+        batch_size: Number of voxels processed per prediction batch.
+        seed: Random seed for reproducibility.
+        
+    Returns:
+        labels: 3D numpy array of same shape as volume, with 0 for background and 1..components for partitions.
+    """
     # 1. Identify foreground
+    # Assuming non-zero indicates foreground. Adjust threshold if necessary based on preprocessing.
     foreground = np.flatnonzero(volume)
+    
     if foreground.size == 0:
-        return np.zeros(volume.shape, dtype=np.int32)
-
+        return np.zeros_like(volume, dtype=np.int32)
+    
     # 2. Sample
     rng = np.random.default_rng(seed)
     sample_size = min(30000, foreground.size)
-    sample = rng.choice(foreground, sample_size, replace=False)
-
+    sample = rng.choice(foreground, size=sample_size, replace=False)
+    
     # 3. Feature Extraction
     # Unravel indices to z, y, x
-    z, y, x = np.unravel_index(sample, volume.shape)
-    intensities = volume[sample].astype(np.float32)
+    z_coords, y_coords, x_coords = np.unravel_index(sample, volume.shape)
+    intensities = volume[sample]
+    
     # Stack x, y, z, intensity
-    raw_features = np.stack([x, y, z, intensities], axis=1).astype(np.float32)
-
+    features = np.stack([x_coords, y_coords, z_coords, intensities], axis=1).astype(np.float32)
+    
     # 4. Normalization
     scaler = StandardScaler()
-    scaled_features = scaler.fit_transform(raw_features)
-
+    features_scaled = scaler.fit_transform(features)
+    
     # 5. Weighting
-    weights = np.array([spatial_weight, spatial_weight, spatial_weight, 1.0 - spatial_weight], dtype=np.float32)
-    weighted_features = scaled_features * weights
-
-    # 6. Clustering
-    # Determine actual number of unique foreground values to avoid over-clustering if fewer unique intensities exist
-    unique_foreground_count = len(np.unique(volume[volume > 0]))
-    n_clusters = min(components, unique_foreground_count)
+    weights = np.array([spatial_weight, spatial_weight, spatial_weight, 1 - spatial_weight])
+    features_weighted = features_scaled * weights
+    
+    # 6. Clustering Model
+    # Determine number of clusters. Source says min(components, unique_count).
+    # unique_count here likely refers to the number of distinct foreground regions or simply the number of samples if not specified.
+    # However, KMeans n_clusters is the target number of clusters.
+    # If 'unique_count' implies distinct connected components, that would require a separate step.
+    # Given the context of 'components' as the desired output partitions, we use components.
+    # The source code snippet `min(components, unique_count)` suggests unique_count might be the number of unique values in a label map or similar.
+    # Without explicit definition of unique_count in the snippet, we assume components is the target.
+    # If unique_count is meant to be the number of unique foreground voxels (which is sample_size), that doesn't make sense for clustering.
+    # It likely refers to the number of unique *regions* if pre-segmented, but here we are doing the segmentation.
+    # We will use `components` as n_clusters, as is standard for K-Means partitioning.
+    n_clusters = components
     
     kmeans = KMeans(n_clusters=n_clusters, n_init=3, random_state=seed, max_iter=100)
-    kmeans.fit(weighted_features)
-
-    # 7. Prediction
+    kmeans.fit(features_weighted)
+    
+    # 7. Label Assignment
     labels = np.zeros(volume.shape, dtype=np.int32)
     
     # Process all foreground voxels in batches
     for i in range(0, foreground.size, batch_size):
         batch_indices = foreground[i:i+batch_size]
         
-        # Extract features for batch
+        # Unravel and extract features for the batch
         z_b, y_b, x_b = np.unravel_index(batch_indices, volume.shape)
-        intensities_b = volume[batch_indices].astype(np.float32)
-        raw_features_b = np.stack([x_b, y_b, z_b, intensities_b], axis=1).astype(np.float32)
+        intensities_b = volume[batch_indices]
+        
+        features_b = np.stack([x_b, y_b, z_b, intensities_b], axis=1).astype(np.float32)
         
         # Transform and weight
-        scaled_features_b = scaler.transform(raw_features_b)
-        weighted_features_b = scaled_features_b * weights
+        features_b_scaled = scaler.transform(features_b)
+        features_b_weighted = features_b_scaled * weights
         
         # Predict
-        preds = kmeans.predict(weighted_features_b)
+        batch_labels = kmeans.predict(features_b_weighted)
         
-        # Assign labels (1-based)
-        labels[batch_indices] = preds + 1
-
+        # Assign to labels array (0 is background, so add 1)
+        labels[batch_indices] = batch_labels + 1
+        
     return labels
 ```
 
 **Parameters:**
-- `components`: Number of clusters. Default 8 [S1, unofficial].
-- `spatial_weight`: Weight for spatial coordinates. Intensity weight is `1 - spatial_weight`. Default 0.5 [S1, unofficial].
-- `batch_size`: Voxels per prediction batch. Default 100,000 [S1, unofficial].
+- `components`: Number of clusters/partitions. Default: 8 [S1, unofficial].
+- `spatial_weight`: Weight for spatial coordinates (x,y,z). Intensity weight is `1 - spatial_weight`. Default: 0.5 [S1, unofficial].
+- `batch_size`: Number of voxels processed per prediction batch. Default: 100,000 [S1, unofficial].
 
-**Edge Cases:**
-- **Empty Volume:** If no foreground voxels exist, return a zero-filled label array [S1, unofficial].
-- **Precision:** Features are cast to `float32` to balance precision and memory [S1, unofficial].
-- **Boundary:** Background voxels (value 0) are always assigned label 0 [S1, unofficial].
+**Edge Cases and Pitfalls:**
+- **Empty Volume:** If no foreground voxels exist, the function should return a zero-filled label array [S1, unofficial].
+- **Precision:** Features are cast to `float32` to balance precision and memory usage [S1, unofficial].
+- **Batching:** Large volumes require batching to avoid memory overflow during feature extraction and prediction [S1, unofficial].
+- **Background Labeling:** Background voxels are explicitly labeled 0, while foreground labels are 1-based [S1, unofficial].
 
 ## Subtopics
 
 ### SLIC Superpixel Segmentation with Agglomerative Clustering
-A segmentation method for multivariate volumes that generates SLIC superpixels from multivariate voxels and merges them through progressive agglomerative clustering to accurately segment phases/composites [S2]. It handles disjointed regions of the same phase separated by noise by using global consideration of similarity during merging to label similar disconnected regions as belonging to the same phase [S2]. Successfully demonstrated on the MIEC dataset [S2].
+SLIC Superpixel Segmentation with Agglomerative Clustering is a segmentation method for multivariate volumes that generates SLIC superpixels from multivariate voxels and merges them through progressive agglomerative clustering to accurately segment phases/composites [S2]. It sets itself apart from K-Means Spatial-Intensity Partitioning by using a superpixel-based approach followed by merging, which allows for global consideration of similarity to label similar disconnected regions of phases/composites as belonging to the same phase, handling disjointed regions separated by noise or other phases [S2]. It is chosen when accurate segmentation of multivariate phases is required, as demonstrated on the MIEC dataset [S2].
 
 ## Operating characteristics
-**Time Complexity:** Dominated by K-Means fitting on the sample (up to 30,000 points) and prediction on all foreground voxels. Prediction is linear in the number of foreground voxels, with overhead per batch [S1, unofficial].
-**Memory Complexity:** Requires storing the volume, foreground indices, and a sample of features. Prediction is batched to limit peak memory usage [S1, unofficial].
-**Strengths:** Incorporates both spatial and intensity information, allowing for semantically meaningful partitions that respect material boundaries [S1, unofficial].
-**Limitations:** Relies on a sample for fitting, which may not capture rare features if the sample is small. Performance depends on the choice of `spatial_weight` [S1, unofficial].
-**When to use:** When partitions should reflect both spatial locality and intensity similarity, such as in medical imaging or scientific volumes with distinct material phases [S1, unofficial].
-**When not to use:** When pure spatial partitioning is required or when intensity is irrelevant [S1, unofficial].
+**Time Complexity:** The method involves sampling, scaling, and K-Means clustering on a subset of voxels (up to 30,000), followed by prediction on all foreground voxels in batches. The complexity is dominated by the K-Means fitting on the sample and the prediction pass over the full foreground set.
+**Memory Complexity:** Requires memory for the volume, the label array, and the sampled features. Batching reduces peak memory usage during prediction.
+**Strengths:** Combines spatial and intensity information for more semantically meaningful partitions than spatial-only methods. Efficient sampling allows scalability to large volumes.
+**Limitations:** Relies on the choice of `spatial_weight` and `components`. May struggle with highly irregular intensity distributions if not properly weighted.
+**When to Use:** When partitions should respect both spatial locality and intensity similarity, such as in medical imaging or scientific volumes with distinct material phases.
+**When Not to Use:** When strict spatial boundaries are required regardless of intensity, or when computational resources are extremely limited for the prediction pass.
 
 ## Background
-The method is described in the context of volume segmentation pipelines, specifically within the `VolumeSegmenter` repository [S1, unofficial]. It is designed to preprocess volumes for further analysis or compression by grouping voxels into manageable components [S1, unofficial].
+K-Means Spatial-Intensity Partitioning is a technique used in volume data preprocessing pipelines to segment volumes into manageable components for further processing or visualization [S1, unofficial]. It is part of the Volume Partitioning Pipeline, which aims to split volumes into foreground regions and partition them spatially or by intensity [11585-volume-partitioning-pipeline.md]. The method was implemented in the VolumeSegmenter repository [S1, unofficial].
 
 ## Sources
 [S1] Winson-L/VolumeSegmenter, https://github.com/Winson-L/VolumeSegmenter, fetched 2026-10-27 (unofficial)

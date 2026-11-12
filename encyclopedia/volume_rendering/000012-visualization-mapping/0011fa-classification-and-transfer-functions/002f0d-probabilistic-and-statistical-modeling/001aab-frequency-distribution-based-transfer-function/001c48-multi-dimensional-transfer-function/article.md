@@ -3,129 +3,144 @@
 Also called: 2D Histogram Analysis for Transfer Functions, 2D Volume Histogram, 2D histogram transfer functions, Effect Control via Transfer Functions, Hierarchical Transfer Functions
 
 ## Overview
-Multi-dimensional transfer functions (MTF) extend traditional volume rendering classification by mapping voxel values to color, opacity, and illustrative effect parameters using more than one scalar input, typically density and gradient magnitude [S2][S3, unofficial]. Unlike 1D transfer functions which often fail to separate features with identical scalar values but different structural properties, MTFs resolve these ambiguities by utilizing a 2D histogram of feature space pairs to distinguish homogeneous materials (spots) and material boundaries (arcs) [S2][S3, unofficial]. This approach enables not only standard visual appearance control but also the hierarchical assignment of specific illustrative effects, such as sketching or illumination, to different identified materials [S2][S3, unofficial].
+Multi-dimensional transfer functions (MTFs) map voxel data to visual properties using more than one feature dimension, typically scalar density and gradient magnitude, to resolve ambiguities inherent in 1D transfer functions [S2][S3, unofficial]. Unlike standard methods that rely solely on scalar value, MTFs utilize 2D histograms to identify homogeneous materials as distinct spots and material boundaries as arcs, allowing for the interactive assignment of color, opacity, and illustrative effects (e.g., sketch, illumination) to specific materials [S1, unofficial][S2][S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D volume dataset $V$ with scalar values (e.g., density/intensity) and computed feature values (e.g., gradient magnitude) for each voxel.
-*   **Output:** A rendered image where each voxel's contribution is determined by a multi-dimensional mapping defined by the user or algorithm on a 2D histogram.
+*   **Input:** A volume dataset where each voxel has at least two feature values, typically scalar density ($d$) and gradient magnitude ($g$) [S2][S3, unofficial].
+*   **Output:** A visualization where voxels are colored and rendered with opacity and illustrative effects based on their position in the 2D feature space [S3, unofficial].
 
 **Data Structures:**
-The core data structure is a 2D histogram $H$.
-*   **Dimensions:** The histogram is defined over two feature dimensions. Commonly, the X-axis represents scalar density $d$ and the Y-axis represents gradient magnitude $g$ [S2][S3, unofficial].
-*   **Layout:** $H$ is a 2D array where each bin $(i, j)$ corresponds to a range of density values and a range of gradient magnitude values.
-*   **Content:** Each entry $H[i, j]$ stores the count of voxels falling into that bin [S1, S3, unofficial]. The brightness or intensity of the bin in a visual representation corresponds to this sample frequency [S2][S3, unofficial].
+*   **2D Histogram:** A 2D array where the X-axis represents density ($d$) and the Y-axis represents gradient magnitude ($g$) [S2][S3, unofficial]. Each entry $(i, j)$ stores the count of voxels falling into the bin defined by density range $i$ and gradient range $j$ [S1, unofficial]. The brightness or intensity of the histogram entry represents the sample frequency (voxel count) [S2][S3, unofficial].
+*   **Transfer Function Map:** A mapping from histogram bins (or continuous feature pairs) to RGBA values and effect parameters [S1, S3, unofficial].
 
 **Steps:**
-1.  **Feature Computation:** Compute the feature space pairs for all voxels in the volume. For each voxel $v$, calculate the scalar density $d(v)$ and the gradient magnitude $g(v)$ [S1, unofficial][S2][S3, unofficial].
-2.  **Histogram Construction:** Construct the 2D histogram $H$. For each voxel $v$, increment the bin corresponding to its $(d(v), g(v))$ pair [S1, S3, unofficial].
-3.  **Material Identification (Interactive):** Use a probe tool to sample points in the dataset and observe their location in the histogram [S2][S3, unofficial].
-    *   Identify homogeneous materials as distinct spots (clusters) in the histogram [S2][S3, unofficial].
-    *   Identify material boundaries as arcs or connecting regions between spots [S2][S3, unofficial].
-4.  **Transfer Function Definition:** Assign color, opacity, and illustrative effect parameters to specific regions of the 2D histogram [S1, S3, unofficial].
-    *   The user interactively assigns these properties to histogram entries or regions until the desired visualization is achieved [S1, unofficial].
-    *   This step may involve defining multiple transfer functions: one for standard appearance (color/opacity) and others for illustrative effects [S2][S3, unofficial].
-5.  **Effect Assignment:** Design separate transfer functions to control specific illustrative effects (e.g., Sketch, Illumination) based on the materials identified in the histogram [S2][S3, unofficial].
-6.  **Rendering:** Apply the defined transfer functions during volume rendering. Different combinations of effects are applied to different materials based on their mapped positions in the 2D histogram [S2][S3, unofficial].
+1.  **Feature Computation:** Compute the feature space pairs for all voxels. For each voxel $v$, calculate the scalar density $d_v$ and the gradient magnitude $g_v = \|\nabla d_v\|$ [S1, unofficial][S2].
+2.  **Histogram Construction:** Construct the 2D histogram. For each voxel, increment the counter in the bin corresponding to its $(d_v, g_v)$ pair [S1, unofficial][S2].
+3.  **Material Identification:** Analyze the histogram to identify materials:
+    *   **Homogeneous Materials:** Identified as dense spots (clusters) in the histogram where many voxels share similar density and gradient values [S2][S3, unofficial].
+    *   **Material Boundaries:** Identified as arcs or ridges in the histogram connecting different material spots, representing transitions between materials [S2][S3, unofficial].
+    *   **Probing:** Use a probe tool to sample specific points in the dataset and observe their location in the histogram to verify material identity [S2][S3, unofficial].
+4.  **Transfer Function Assignment:** Interactively assign visual properties to histogram regions:
+    *   Assign color and opacity to bins corresponding to identified materials [S1, unofficial].
+    *   Assign illustrative effect parameters (e.g., sketch strength, illumination intensity) to specific materials [S3, unofficial].
+5.  **Rendering:** For each voxel, determine its feature pair $(d, g)$, look up the corresponding transfer function values, and apply the assigned color, opacity, and effects during volume rendering [S3, unofficial].
 
 **Formulas:**
-*   **Gradient Magnitude:** $g(v) = \|\nabla d(v)\|$ [S2][S3, unofficial].
-*   **Histogram Bin Index:** For a voxel with density $d$ and gradient $g$, the bin indices $(i, j)$ are determined by quantizing $d$ and $g$ into the respective histogram axes [S1, S3, unofficial].
-*   **Rendering Contribution:** The final color $C$ and opacity $\alpha$ for a ray sample are determined by evaluating the transfer functions $T_{color}(d, g)$, $T_{opacity}(d, g)$, and potentially $T_{effect}(d, g)$ [S2][S3, unofficial].
+*   Gradient Magnitude: $g = \sqrt{\left(\frac{\partial d}{\partial x}\right)^2 + \left(\frac{\partial d}{\partial y}\right)^2 + \left(\frac{\partial d}{\partial z}\right)^2}$ [S2][S3, unofficial].
+*   Histogram Bin Index: For a voxel with features $(d, g)$, the bin indices $(i, j)$ are determined by quantizing $d$ and $g$ into discrete ranges [S1, unofficial][S2].
 
 **Parameters:**
-*   **Feature Dimensions:** Typically 2 (e.g., intensity and gradient magnitude, or first/second derivatives) [S1, unofficial].
-*   **Input Domain:** At least two values: scalar density and gradient magnitude [S3, unofficial].
+*   **Feature Dimensions:** 2 (e.g., intensity and gradient magnitude) [S1, S3, unofficial].
 *   **Histogram Resolution:** Not given in the sources.
 
-**Edge Cases and Pitfalls:**
-*   **Manual Tuning:** The method requires manual trial-and-error tuning by the user to assign color and opacity, which can be time-consuming [S1, unofficial].
-*   **Ambiguity Resolution:** While MTFs resolve ambiguities present in 1D domains, improper binning or insufficient feature separation can still lead to overlapping material representations [S2].
-*   **Computational Cost:** Computing gradients and constructing the histogram adds preprocessing overhead [S1, unofficial].
+**Pitfalls:**
+*   **Manual Tuning:** Requires manual trial-and-error tuning by the user to assign color and opacity, which can be time-consuming [S1, unofficial].
+*   **Ambiguity Resolution:** While it resolves 1D ambiguities, overlapping spots in the 2D histogram may still require careful interpretation [S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_multi_dimensional_transfer_function(volume, density_bins, gradient_bins):
-    """
-    Constructs a 2D histogram from volume data and prepares for interactive TF definition.
+def compute_gradient_magnitude(volume):
+    """Compute gradient magnitude for each voxel."""
+    # Assuming volume is a 3D array
+    # Compute partial derivatives using finite differences
+    grad_x = volume[1:, :, :] - volume[:-1, :, :]
+    grad_y = volume[:, 1:, :] - volume[:, :-1, :]
+    grad_z = volume[:, :, 1:] - volume[:, :, :-1]
     
-    Args:
-        volume: 3D array of scalar values (density).
-        density_bins: Number of bins for the density axis.
-        gradient_bins: Number of bins for the gradient magnitude axis.
-        
-    Returns:
-        histogram: 2D array of voxel counts.
-        gradients: 3D array of gradient magnitudes.
-    """
-    # Step 1: Compute gradient magnitude for all voxels
-    # [G] Assuming a standard central difference scheme for gradient computation
-    gradients = np.zeros_like(volume)
-    # Compute gradient magnitude (simplified for illustration)
-    # In practice, this involves computing partial derivatives in x, y, z
-    # and taking the norm.
-    # gradients = np.sqrt(dx**2 + dy**2 + dz**2)
+    # Pad gradients to match volume size (simple zero-padding for edges)
+    grad_x = np.pad(grad_x, ((0, 1), (0, 0), (0, 0)))
+    grad_y = np.pad(grad_y, ((0, 0), (0, 1), (0, 0)))
+    grad_z = np.pad(grad_z, ((0, 0), (0, 0), (0, 1)))
     
-    # Step 2: Construct 2D histogram
-    # Initialize histogram
-    histogram = np.zeros((density_bins, gradient_bins))
-    
-    # Iterate over all voxels and increment histogram bins
-    for x in range(volume.shape[0]):
-        for y in range(volume.shape[1]):
-            for z in range(volume.shape[2]):
-                d = volume[x, y, z]
-                g = gradients[x, y, z]
-                
-                # Quantize density and gradient to bin indices
-                # [G] Assuming linear mapping from value range to bin index
-                # Bin indices must be clamped to valid range [0, bins-1]
-                i = int((d - min_density) / (max_density - min_density) * density_bins)
-                j = int((g - min_gradient) / (max_gradient - min_gradient) * gradient_bins)
-                
-                # Clamp indices
-                i = max(0, min(i, density_bins - 1))
-                j = max(0, min(j, gradient_bins - 1))
-                
-                histogram[i, j] += 1
-                
-    return histogram, gradients
+    gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2 + grad_z**2)
+    return gradient_magnitude
 
-def apply_transfer_function(histogram, tf_color, tf_opacity, tf_effects, density_bins, gradient_bins):
+def build_2d_histogram(volume, gradient_magnitude, num_bins_d, num_bins_g):
+    """Construct a 2D histogram of density vs gradient magnitude."""
+    histogram = np.zeros((num_bins_d, num_bins_g))
+    
+    # Normalize features to bin indices
+    min_d, max_d = np.min(volume), np.max(volume)
+    min_g, max_g = np.min(gradient_magnitude), np.max(gradient_magnitude)
+    
+    # Avoid division by zero
+    if max_d == min_d: max_d = min_d + 1e-6
+    if max_g == min_g: max_g = min_g + 1e-6
+    
+    for i in range(volume.shape[0]):
+        for j in range(volume.shape[1]):
+            for k in range(volume.shape[2]):
+                d = volume[i, j, k]
+                g = gradient_magnitude[i, j, k]
+                
+                # Map to bin indices
+                bin_d = int((d - min_d) / (max_d - min_d) * (num_bins_d - 1))
+                bin_g = int((g - min_g) / (max_g - min_g) * (num_bins_g - 1))
+                
+                # Clamp to valid range
+                bin_d = max(0, min(bin_d, num_bins_d - 1))
+                bin_g = max(0, min(bin_g, num_bins_g - 1))
+                
+                histogram[bin_d, bin_g] += 1
+                
+    return histogram
+
+def assign_transfer_function(histogram, user_interactions):
     """
-    Applies the user-defined transfer functions to the volume data for rendering.
-    
-    Args:
-        histogram: The 2D histogram (used for reference/visualization).
-        tf_color: Function mapping (density, gradient) -> RGBA color.
-        tf_opacity: Function mapping (density, gradient) -> opacity.
-        tf_effects: Dictionary mapping (density, gradient) -> effect parameters.
-        density_bins: Number of density bins.
-        gradient_bins: Number of gradient bins.
-        
-    Returns:
-        rendered_image: The final rendered image.
+    Assign color and opacity based on user interactions with the histogram.
+    user_interactions: list of tuples (bin_d, bin_g, color, opacity, effect_params)
     """
-    # [G] This function assumes a volume rendering engine is available.
-    # The core logic is to look up the transfer function values for each voxel.
+    tf_map = {}
+    for bin_d, bin_g, color, opacity, effect_params in user_interactions:
+        tf_map[(bin_d, bin_g)] = {
+            'color': color,
+            'opacity': opacity,
+            'effect_params': effect_params
+        }
+    return tf_map
+
+def render_volume(volume, gradient_magnitude, tf_map, num_bins_d, num_bins_g):
+    """Render volume using the multi-dimensional transfer function."""
+    min_d, max_d = np.min(volume), np.max(volume)
+    min_g, max_g = np.min(gradient_magnitude), np.max(gradient_magnitude)
     
-    # For each voxel in the volume:
-    #   1. Get density d and gradient g.
-    #   2. Map d, g to histogram bin indices i, j.
-    #   3. Retrieve color, opacity, and effect parameters from tf_color, tf_opacity, tf_effects.
-    #   4. Use these parameters in the volume rendering integration loop.
+    if max_d == min_d: max_d = min_d + 1e-6
+    if max_g == min_g: max_g = min_g + 1e-6
     
-    # Note: The actual rendering implementation depends on the specific volume renderer.
-    # The key aspect is that the transfer function is evaluated in the 2D feature space.
-    pass
+    rendered_image = np.zeros_like(volume, dtype=float)
+    
+    for i in range(volume.shape[0]):
+        for j in range(volume.shape[1]):
+            for k in range(volume.shape[2]):
+                d = volume[i, j, k]
+                g = gradient_magnitude[i, j, k]
+                
+                bin_d = int((d - min_d) / (max_d - min_d) * (num_bins_d - 1))
+                bin_g = int((g - min_g) / (max_g - min_g) * (num_bins_g - 1))
+                
+                bin_d = max(0, min(bin_d, num_bins_d - 1))
+                bin_g = max(0, min(bin_g, num_bins_g - 1))
+                
+                if (bin_d, bin_g) in tf_map:
+                    tf_entry = tf_map[(bin_d, bin_g)]
+                    color = tf_entry['color']
+                    opacity = tf_entry['opacity']
+                    # Apply effects based on effect_params
+                    # ... (effect application logic)
+                    rendered_image[i, j, k] = color * opacity
+                else:
+                    rendered_image[i, j, k] = 0
+                    
+    return rendered_image
 ```
 
 ## Subtopics
 
 ### [2D Histogram Visualization](2863-2d-histogram-visualization.md)
-A precomputed 2D histogram used as a visual aid to convey sparse regions of the range space, colored by the number of voxels in each bin. It sets itself apart from continuous scatterplots by using discrete bins for ease of implementation and better conveyance of sparse data.
+2D Histogram Visualization is a precomputed visual aid used to convey the distribution of voxel counts across sparse regions of a two-dimensional feature space, such as scalar value pairs. It differs from continuous scatterplots by using discrete bins, which simplifies implementation and better highlights sparse data regions. It serves as an exploratory tool for designing transfer functions or analyzing multi-field correlations, distinct from sibling methods like Spatialized Transfer Functions which focus on spatial context [5387-spatialized-transfer-functions.md] or Gray-Gradient Mode Histogram Clustering which focuses on clustering [5459-gray-gradient-mode-histogram-clustering-transfer-function.md].
 
 ### [Spatialized Transfer Functions](5387-spatialized-transfer-functions.md)
 Spatialized Transfer Functions (STF) is a technique that performs segmentation on the domain of the transfer function (histogram) rather than the volume domain, using spatial information (feature radius) to group scalar values into uniquely colored regions corresponding to materials. It solves the problem that standard transfer functions cannot separate features with identical statistical properties but different spatial positions. Unlike explicit segmentation which is time-consuming and not suitable for quick first impressions, STF performs segmentation on the transfer function domain automatically and fast, allowing interactive exploration.
@@ -134,17 +149,15 @@ Spatialized Transfer Functions (STF) is a technique that performs segmentation o
 This method automatically generates a volume rendering transfer function (TF) by embedding volume data attributes (gray value and gradient mode) into a two-dimensional histogram, performing hierarchical clustering to identify tissue boundaries, and mapping the results to color, opacity, and gradient-based opacity multipliers. It solves the problem of manual TF specification by distinguishing tissues based on gray ranges and enhancing boundary visibility through clustering analysis of the gray-gradient mode histogram. Unlike standard piecewise-linear interpolation which may cause blurring at tissue edges, this method assigns constant color and opacity within identified tissue ranges defined by histogram valleys, ensuring uniform appearance for specific tissues. It builds on the principles of [Multi-dimensional Transfer Function](1217-multi-dimensional-transfer-function.md) by utilizing a 2D histogram, but differs from siblings like [2D Histogram Visualization](2863-2d-histogram-visualization.md) by explicitly using hierarchical clustering to extract curve peaks for automatic TF generation rather than direct visual inspection.
 
 ## Operating characteristics
-*   **Time Complexity:** The construction of the 2D histogram is $O(N)$ where $N$ is the number of voxels, as each voxel is processed once to compute features and increment a bin [S1, S3, unofficial]. The interactive definition phase depends on user interaction time.
-*   **Memory Complexity:** The histogram requires $O(B_d \times B_g)$ memory, where $B_d$ and $B_g$ are the number of bins for density and gradient, respectively [S1, S3, unofficial]. This is typically small compared to the volume data.
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** The method scales linearly with the number of voxels for histogram construction. The interactive definition phase is independent of volume size but depends on the complexity of the feature space.
-*   **Strengths:** Resolves ambiguities present in 1D transfer functions by using multiple features [S2][S3, unofficial]. Allows for the hierarchical assignment of illustrative effects [S2][S3, unofficial]. Provides a clear visual representation of material distributions via the 2D histogram [S2][S3, unofficial].
-*   **Limitations:** Requires manual trial-and-error tuning by the user [S1, unofficial]. The choice of features and binning can significantly impact the effectiveness of the transfer function.
-*   **When to Use:** When 1D transfer functions fail to separate features with similar scalar values but different structural properties, or when complex illustrative effects need to be applied to different materials [S2][S3, unofficial].
-*   **When Not to Use:** When automatic transfer function generation is required without user interaction, or when computational resources are extremely limited for preprocessing [S1, unofficial].
+*   **Time Complexity:** Constructing the 2D histogram is $O(N)$ where $N$ is the number of voxels. Rendering is $O(N)$ per frame.
+*   **Memory Complexity:** The histogram requires $O(B_d \times B_g)$ memory where $B_d$ and $B_g$ are the number of bins in density and gradient dimensions, respectively. This is typically small compared to the volume data.
+*   **Strengths:** Resolves ambiguities present in 1D transfer functions by using additional feature dimensions [S2]. Allows for the control of illustrative effects beyond color and opacity [S3, unofficial].
+*   **Limitations:** Requires manual trial-and-error tuning by the user [S1, unofficial]. Interactive exploration can be slow if the histogram is not precomputed or optimized.
+*   **When to Use:** When 1D transfer functions fail to separate materials with similar scalar values but different gradients, or when illustrative effects need to be applied selectively to different materials [S2][S3, unofficial].
+*   **When Not to Use:** When automatic transfer function generation is required without user interaction, or when computational resources are extremely limited and precomputation is not feasible.
 
 ## Background
-Multi-dimensional transfer functions were developed to address the limitations of 1D transfer functions in conveying complex volume data features [S1, unofficial]. Early work by Kindlmann, Kniss, and Lum explored the use of 2D histograms to better convey boundaries and features in volume data [S1, unofficial]. Maciejewski et al. proposed non-parametric clustering within the transfer function feature space to guide transfer function generation and avoid trial-and-error [S1, unofficial]. Roettger et al. introduced spatialized transfer functions as a special variant of local transfer functions [S1, unofficial]. The application of MTFs to medical illustration, including the control of illustrative effects like sketching and illumination, was demonstrated by Kniss et al. in systems for surgical simulation and medical visualization [S2][S3, unofficial].
+Multi-dimensional transfer functions were introduced to address the limitations of 1D transfer functions in conveying complex features and boundaries in volume data [S1, unofficial]. Early work by Kindlmann, Kniss, and Lum explored 2D histograms for feature space analysis [S1, unofficial]. Maciejewski et al. proposed non-parametric clustering to automate the process [S1, unofficial]. Roettger et al. introduced spatialized transfer functions as a variant [S1, unofficial]. The method is widely used in medical illustration and visualization systems to enhance the clarity of anatomical structures [S2][S3, unofficial].
 
 ## Sources
 [S1] Advanced illumination and view-selection techniques for volume rendering and its application to medical imaging, http://hdl.handle.net/10803/371154, fetched 2026-10-27 (unofficial)

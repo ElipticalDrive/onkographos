@@ -3,7 +3,7 @@
 Also called: OptiX-based Gaussian Intersection, Proxy Geometry Intersection
 
 ## Overview
-IRIS Ray-Geometry Intersection is an intersection-aware ray-based sampling method for implicit editable scenes that determines samples as the maximum response points of Gaussians intersected by each ray [S1]. It solves the problem of efficiently sampling 3D Gaussians in large-scale or bounded scenes by leveraging hardware-accelerated ray-triangle intersection tests via proxy geometry [S1]. Unlike direct Gaussian intersection methods, it maps each Gaussian to a convex polyhedral proxy (an affine-transformed icosahedron) to utilize RT cores, setting it apart from siblings like [Ray-Splat Intersection](6816-ray-splat-intersection.md) which may use different primitive approximations or software-based tests [S1].
+IRIS Ray-Geometry Intersection is an intersection-aware ray-based sampling method for implicit editable scenes that determines samples as the maximum response points of Gaussians intersected by each ray [S1]. It solves the problem of efficiently sampling 3D Gaussians in large-scale or bounded scenes by leveraging hardware-accelerated ray-triangle intersection tests via proxy geometry [S1]. It sets itself apart by bounding each Gaussian with a regular, affine-transformed icosahedron to utilize dedicated RT cores, avoiding direct Gaussian intersection calculations [S1].
 
 ## How it works
 **Inputs and Outputs**
@@ -11,13 +11,13 @@ IRIS Ray-Geometry Intersection is an intersection-aware ray-based sampling metho
 *   **Outputs**: A list of samples, where each sample consists of an intersection parameter $t_{\text{sample}}$ and the index of the intersected Gaussian [S1].
 
 **Data Structures**
-1.  **Canonical Proxy Geometry**: A single regular icosahedron defined by its vertex positions and triangle indices. This geometry is stored once to minimize memory footprint [S1].
-2.  **Instance Buffer**: A buffer storing affine transformation matrices. Each entry maps the canonical icosahedron to the specific Gaussian's confidence ellipsoid [S1].
-3.  **Hit Buffer**: A fixed-size buffer storing 2-tuples of $(t_{\text{sample}}, \text{Gaussian Index})$. The size is typically 16 entries during the accumulation phase [S1].
-4.  **Output Buffer**: The final collection of samples for the ray, sized according to the target quota (e.g., 128 for bounded scenes, 256 for unbounded) [S1].
+1.  **Canonical Proxy Geometry**: A single regular icosahedron defined by its vertex positions and triangle indices, stored once to minimize memory footprint [S1].
+2.  **Instance Buffer**: A buffer storing affine transformation matrices that map the canonical icosahedron to each Gaussian's confidence ellipsoid [S1].
+3.  **Hit Buffer**: A fixed-size buffer storing 2-tuples of $(t_{\text{sample}}, \text{Gaussian Index})$, typically 16 entries during accumulation [S1].
+4.  **Output Buffer**: The final collection of samples for the ray, sized according to the target quota (128 for bounded scenes, 256 for unbounded) [S1].
 
 **Parameters**
-*   **Mahalanobis Threshold ($\lambda$)**: Defines the size of the proxy geometry.
+*   **Mahalanobis Threshold ($\lambda$)**: Defines the size of the proxy geometry [S1].
     *   Bounded scenes (e.g., NeRF Synthetic): $\lambda = 6.25$, covering ~90% of Gaussian probability mass [S1].
     *   Unbounded scenes (e.g., Mip-NeRF 360): $\lambda = 11.3449$, covering ~99% of Gaussian probability mass [S1].
 *   **Hit Buffer Capacity**: 16 entries [S1].
@@ -71,19 +71,16 @@ def iris_ray_geometry_intersection(ray_origin, ray_direction, instance_matrices,
     # The RT core invokes the Any-hit shader for each intersected triangle.
     # The following loop represents the shader execution flow per hit.
     while len(output_samples) < target_quota:
-        # Abstract hardware traversal step. In practice, this is a single optixTrace call.
-        # For implementation completeness, we simulate the hit collection.
-        hits = hardware_traversal(ray_origin, ray_direction, instance_matrices)
-        if not hits:
-            break
-
-        for hit in hits:
-            instance_idx = hit.instance_index
+        # The sources do not specify the exact traversal loop; hardware handles it via optixTrace [S1]
+        # We simulate processing a batch of hardware hits to demonstrate buffer management.
+        hits = []  # Placeholder for hardware traversal results
+        for instance_idx in range(len(instance_matrices)):
             o_obj, v_obj = transform_to_object_space(ray_origin, ray_direction, instance_matrices[instance_idx])
             t_sample = compute_t_sample(o_obj, v_obj)
-            if t_sample is None:
-                continue
+            if t_sample is not None:
+                hits.append((t_sample, instance_idx))
 
+        for t_sample, instance_idx in hits:
             hit_buffer.append((t_sample, instance_idx))
             hit_buffer.sort(key=lambda x: x[0])
 
@@ -100,7 +97,7 @@ def iris_ray_geometry_intersection(ray_origin, ray_direction, instance_matrices,
 ## Operating characteristics
 *   **Time Complexity**: Dominated by the hardware-accelerated ray-triangle intersection tests. The number of `optixTrace` calls is reduced by aggregating samples in the Any-hit shader [S1].
 *   **Memory Complexity**: Low memory footprint due to geometry instancing (storing only one canonical icosahedron) [S1]. The instance buffer size scales linearly with the number of Gaussians [S1].
-*   **Performance**: On an NVIDIA RTX 5090 GPU, increasing the intersection quota from 16 to 128 IPR improves Avg. PSNR from 29.87 to 32.65 on the NeRF Synthetic dataset [S1].
+*   **Performance**: On an NVIDIA RTX 5090 GPU, increasing the intersection quota from 16 to 128 IPR improves Avg. PSNR from 29.87 to 32.65 on the NeRF Synthetic dataset [S1]. Using Hash Grid initialization instead of random initialization yields a slight performance gain (32.65 vs 32.54 Avg PSNR) [S1].
 *   **Strengths**: Leverages dedicated RT cores for high-performance intersection testing; reduces software overhead by offloading logic to shaders; conservatively bounds Gaussians to ensure coverage [S1].
 *   **Limitations**: The proxy geometry (icosahedron) is a conservative approximation; the Mahalanobis threshold $\lambda$ must be tuned for scene type (bounded vs. unbounded) [S1].
 *   **When to use**: Suitable for implicit editable scenes requiring efficient sampling of 3D Gaussians, particularly in large-scale or bounded environments where hardware acceleration is beneficial [S1].

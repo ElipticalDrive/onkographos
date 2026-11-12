@@ -3,116 +3,99 @@
 Also called: Octree-based Empty Space Skipping, Min-Max Octree Empty Space Skipping, Empty space leaping
 
 ## Overview
-Empty Space Skipping with Octree is an acceleration technique for semi-transparent volume rendering that reduces the number of reconstruction samples by skipping regions of the volume that are completely transparent [S1]. It employs hierarchical data structures to precompute minimum and maximum scalar values within volume segments, allowing rays to leap over intervals where the maximum value is less than the specified isovalue or opacity threshold [S2]. Unlike sibling methods that may rely on brick-level classifications or view-dependent working sets, this method embeds the acceleration structure directly within the volume data container, allowing for interactive transfer function changes by recomputing classification based on stored scalar ranges [S1][S4, unofficial]. It builds on [Empty-space skipping](1002-empty-space-skipping.md).
+Empty Space Skipping with Octree is an acceleration technique for semi-transparent volume rendering that skips empty regions using an octree spatial data structure to reduce reconstruction samples [S1][S4, unofficial]. It solves the problem of wasted computation on transparent voxels by precomputing scalar value ranges (min/max) at each node, allowing rays to leap over intervals where the maximum value is below the opacity threshold [S2]. Unlike sibling methods that may rely on brick-level classifications or view-dependent working sets, this method embeds the acceleration structure directly within the volume data container, allowing for efficient traversal of coherent empty regions [S1][S4, unofficial].
 
 ## How it works
 **Inputs:**
-*   Scalar volume data $V$.
-*   Transfer function $T(v)$ mapping scalar values to color and opacity.
-*   Ray origin $O$ and direction $D$.
-*   Octree structure storing min/max bounds for each node.
+- Volume dataset $V$ (scalar values).
+- Transfer function $T(v)$ mapping scalar values to color and opacity.
+- Ray $R(t) = O + tD$ defined by origin $O$ and direction $D$.
+- Opacity threshold $\tau$ for early termination or skipping.
 
 **Outputs:**
-*   Final pixel color and accumulated opacity.
+- Updated ray parameter $t_{exit}$ (or $t_{entry}$) skipping empty segments.
+- Rendered color/opacity for the visible segment.
 
 **Data Structures:**
-The volume is recursively subdivided into an octree where each node stores the scalar range of its subtree [S2].
-*   **Node Structure:** Each node contains `min_val` and `max_val` representing the conservative estimate of the minimum and maximum scalar values appearing in its subtree [S3].
-*   **Leaf Nodes:** Each leaf corresponds to a group of $b^3$ adjacent polynomials (or voxels), where $b$ is a trade-off factor between efficient empty space skipping and memory requirement [S3].
-*   **Histograms (Pre-classification):** For pre-classification applications, quantized binary histograms are used to avoid false classification [S1]. The histogram is a list of size $s$ (e.g., 255 for 8-bit voxels). To save memory, this list is quantized into buckets of size 32 [S1]. A similar histogram is built for opacity values [S1].
+The volume is recursively subdivided into an octree. Each node stores the scalar range of its subtree [S2].
+- **Node Layout:**
+  - `min_val`: Minimum scalar value in the subtree.
+  - `max_val`: Maximum scalar value in the subtree.
+  - `children`: Array of 8 child nodes (or null for leaves).
+  - `is_leaf`: Boolean flag.
+- **Leaf Node:**
+  - Corresponds to a group of $b^3$ adjacent polynomials/voxels, where $b$ is a trade-off factor between skipping efficiency and memory [S3].
+  - Stores the min/max of the contained data.
 
-**Algorithm Steps:**
+**Preprocessing (Building the Octree):**
+1. **Leaf Estimation:** For each leaf node, estimate min/max values. If using B-splines, use the convex combination property of the basis functions to estimate bounds [S3]. For voxel data, compute the min/max of the $b^3$ voxels.
+2. **Propagation:** Propagate min/max values from leaves to the root. For an internal node, `min_val = min(children.min_val)` and `max_val = max(children.max_val)` [S2][S3].
+3. **Histogram Construction (Pre-classification):** For pre-classification transfer functions, build quantized binary histograms to avoid false classification [S1].
+   - Create a histogram list of size $s$ (e.g., 255 for 8-bit voxels).
+   - Iterate over brick voxels; set flag `hist[v] = 1` for each voxel value $v$.
+   - Quantize into buckets of size 32 to save memory [S1].
+   - Build a similar histogram for opacity values.
+   - A region is classified as transparent only if all buckets in both value and opacity histograms are transparent [S1].
 
-1.  **Pre-processing (Octree Construction):**
-    *   For each cubic cell (leaf), estimate min/max values. If using B-splines, use the convex combination property of the basis functions [S3]. If using polynomial pieces, construct Bernstein-Bézier (BB) forms of the tetrahedral pieces and set the cell's min/max to the min/max of those BB-coefficients [S5].
-    *   Propagate min/max values from leaves towards the root of the tree [S3].
-    *   For pre-classification: Iterate over each brick's voxels. Set a flag in the histogram list at index $v$ for every voxel value $v$. Quantize the histogram into buckets of size 32 [S1].
-
-2.  **Ray Traversal (Empty Space Skipping):**
-    *   Start traversal at the coarsest level of the octree [S4, unofficial].
-    *   Intersect the ray with the current node's bounding box.
-    *   **Pruning Condition:** Check if the node is empty relative to the transfer function.
-        *   For **post-classification**: Look up `min_val` and `max_val` in the Summed Area Table (SAT) of the transfer function's opacity. If the opacity at `min_val` and `max_val` indicates full transparency, the node is empty [S1].
-        *   For **pre-classification**: Iterate over all buckets in the quantized binary histograms for both scalar values and opacity. If all buckets are classified as transparent, the node is empty [S1]. Note: This scheme is conservative; a transparent region may be classified as opaque, but never vice versa [S1].
-    *   **Leap:** If the node is empty, skip it completely. Update the ray's entry and exit points to the exit point of the current node [S2][S4, unofficial].
-    *   **Recurse:** If the node is non-empty and has children, traverse the finer levels [S4, unofficial]. If it is a leaf, perform standard volume rendering (ray marching) within the leaf's bounds [S3].
+**Rendering (Traversal):**
+1. **Intersection:** Intersect the ray with the root of the octree.
+2. **Traversal Loop:**
+   - Let current node be $N$.
+   - If $N$ is empty (checked via histogram or min/max < threshold), skip $N$ completely [S4, unofficial].
+   - If $N$ is a leaf:
+     - Perform ray marching within the leaf's volume segment.
+     - Update ray entry/exit points based on opacity accumulation [S2].
+     - If opacity threshold $\tau$ is reached, terminate ray [S4, unofficial].
+   - If $N$ is internal:
+     - Determine which children the ray intersects.
+     - For each intersected child $C$:
+       - If $C.max\_val < \text{threshold}$ (or histogram indicates transparency), skip $C$ [S2].
+       - Else, recurse into $C$ [S4, unofficial].
+3. **Update Ray:** Update the ray's entry and exit points ($t_{entry}, t_{exit}$) to reflect the skipped segment [S2].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_ray_octree(ray_origin, ray_direction, octree_root, transfer_function):
-    # Initial ray bounds
-    t_min = ray_origin.min_distance_to_volume
-    t_max = ray_origin.max_distance_to_volume
+def traverse_octree(ray, node, threshold):
+    # Check if node is empty based on stored bounds
+    if node.max_val < threshold:
+        return ray  # Skip entire subtree
+
+    if node.is_leaf:
+        # Perform ray marching within this leaf
+        t_start, t_end = ray.intersect_box(node.bounds)
+        color = 0.0
+        alpha = 0.0
+        t = t_start
+        while t < t_end and alpha < 1.0:
+            val = sample_volume(ray, t)
+            opac = transfer_function_opacity(val)
+            col = transfer_function_color(val)
+            # Front-to-back compositing
+            alpha += (1.0 - alpha) * opac
+            color += col * (1.0 - alpha)
+            t += step_size(ray, t)
+        ray.color = color
+        ray.alpha = alpha
+        return ray
+
+    # Internal node: traverse children
+    children = ray.intersect_children(node)
+    for child in children:
+        if child.max_val >= threshold:
+            traverse_octree(ray, child, threshold)
     
-    # Traverse octree to find skip distance
-    current_node = octree_root
-    skip_t = t_max
-    
-    # Stack for traversal if iterative, or recursion
-    stack = [current_node]
-    
-    while stack:
-        node = stack.pop()
-        
-        # 1. Intersect ray with node bounding box
-        if not ray_intersect_box(ray_origin, ray_direction, node.bbox):
-            continue
-            
-        # 2. Check if node is empty
-        is_empty = False
-        
-        if transfer_function.classification_mode == "POST":
-            # Use Summed Area Table (SAT)
-            opacity_min = transfer_function.sat_lookup(node.min_val)
-            opacity_max = transfer_function.sat_lookup(node.max_val)
-            # If both min and max map to zero opacity, the region is transparent
-            if opacity_min == 0 and opacity_max == 0:
-                is_empty = True
-        else:
-            # Use quantized binary histograms
-            # Check scalar histogram buckets
-            scalar_empty = all(bucket_is_transparent(bucket) for bucket in node.scalar_histogram_buckets)
-            # Check opacity histogram buckets
-            opacity_empty = all(bucket_is_transparent(bucket) for bucket in node.opacity_histogram_buckets)
-            
-            if scalar_empty and opacity_empty:
-                is_empty = True
-                
-        if is_empty:
-            # Skip this entire node
-            # Update skip_t to the exit point of this node's intersection
-            t_exit = ray_exit_point(ray_origin, ray_direction, node.bbox)
-            if t_exit < skip_t:
-                skip_t = t_exit
-        else:
-            # Node is non-empty, push children to stack
-            if node.has_children:
-                for child in node.children:
-                    stack.append(child)
-            else:
-                # Leaf node: perform rendering
-                color, opacity = render_leaf(ray_origin, ray_direction, node, transfer_function)
-                # Accumulate color (standard volume compositing)
-                pass
-                
-    # Final rendering step for the remaining segment [t_min, skip_t]
-    # Note: In a full implementation, the ray is marched from t_min to skip_t
-    # skipping the empty regions identified.
-    return final_color
+    return ray
 ```
 
 **Parameters:**
-*   $b$: Trade-off factor for leaf size (group of $b^3$ polynomials/voxels). Not given in the sources.
-*   Bucket size: 32 (for quantized histograms) [S1].
-*   Opacity threshold: Usually close to opaque for early termination, but distinct from skipping [S4, unofficial].
+- $b$: Block size for leaves (trade-off between skipping and memory) [S3]. Not given in the sources.
+- Threshold: Opacity or isovalue threshold for skipping [S2].
 
-**Edge Cases and Pitfalls:**
-*   **Pre-classification False Positives:** In pre-classification, a color value of zero might be computed even if opacities are zero, or a non-zero color might be computed for a voxel with non-zero color. This can lead to false transparent/opaque classification if not handled with conservative histograms [S1].
-*   **Conservatism:** The quantized binary histogram scheme is conservative. A transparent region can be classified as opaque, but not vice versa. This ensures no non-transparent regions are skipped, at the cost of potentially skipping fewer empty regions [S1].
-*   **Precision:** Conservative estimates of min/max values are required to avoid missing the isosurface or opaque regions [S3].
+**Edge Cases:**
+- **Pre-classification False Positives:** In pre-classification, a color value of zero might be computed even if opacities are zero, or non-zero color for zero opacity, leading to false transparent/opaque classification [S1]. Use quantized binary histograms to ensure conservative classification (transparent region classified as opaque is safe; opaque as transparent is not) [S1].
+- **Precision:** Conservative estimates of min/max are required to avoid skipping regions that actually contain the isosurface or opaque data [S3].
 
 ## Subtopics
 
@@ -120,7 +103,7 @@ def render_ray_octree(ray_origin, ray_direction, octree_root, transfer_function)
 Octree Traversal with Min/Max Pruning is an acceleration technique for ray tracing isosurfaces in scalar volumes stored in an octree. It solves the problem of efficiently skipping transparent or empty regions during rendering by using hierarchical min/max scalar value bounds to prune nodes that cannot contain the target isovalue. Unlike sibling methods that may rely on brick-level classifications or view-dependent working sets, this method embeds the acceleration structure directly within the volume data container, allowing for interactive transfer function changes by recomputing classification based on stored scalar ranges. It builds on [Empty Space Skipping with Octree](1610-empty-space-skipping-with-octree.md).
 
 ### [Octree Empty Block Culling](2687-octree-empty-block-culling.md)
-Octree Empty Block Culling recursively traverses an octree to determine if a node contains any non-empty data blocks, returning a status of `EMPTY` or `NONEMPTY` to enable early ray termination or skipping of empty regions.
+Octree Empty Block Culling is a visibility culling technique that recursively traverses an octree to determine if a node contains any non-empty data blocks, returning a status of `EMPTY` or `NONEMPTY` to enable early ray termination or skipping of empty regions. It builds on [Empty Space Skipping with Octree](1610-empty-space-skipping-with-octree.md) by providing the specific recursive logic required to classify node occupancy. It differs from [Octree Traversal with Min/Max Pruning](1739-octree-traversal-with-min-max-pruning.md) by relying on explicit block existence checks rather than bounding volume overlaps, and from [View-Dependent Working Set Generation](4965-view-dependent-working-set-generation.md) by being view-independent and focused on data presence rather than occlusion.
 
 ### [View-Dependent Working Set Generation](4965-view-dependent-working-set-generation.md)
 This method constructs a view-dependent working set of octree nodes for out-of-core volume rendering by incrementally refining a sorted set of visible, non-empty nodes. It solves the problem of GPU stalls caused by out-of-core data access latency by hiding these delays through asynchronous data loading and a hierarchical cache system. Unlike static culling methods, it dynamically adapts the working set based on projected screen-space size and visibility, ensuring that only necessary data is loaded into the GPU texture cache.
@@ -129,19 +112,19 @@ This method constructs a view-dependent working set of octree nodes for out-of-c
 An adaptive slice DVR algorithm based on 3DTM that partitions the volume into transparent and non-transparent regions for efficient empty space skipping [S6]. It partitions the volume into transparent and non-transparent regions, uses axis-aligned bounding boxes to enclose the opaque regions, and uses an octree to encode these boxes for efficient empty space skipping [S6].
 
 ### Hardware Accelerated Space Carving
-A fast hardware-accelerated Space Carving method using texture mapping, optimized with an octree structure and adaptive subdivision [S7, unofficial].
+A fast hardware-accelerated Space Carving method using texture mapping, optimized with an octree structure and adaptive subdivision [S7, unofficial]. It uses an octree structure and adaptive subdivision methods to keep track of the set of consistent voxels throughout the carving process [S7, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the sparsity of the volume and the depth of the octree. In sparse datasets, traversal time is significantly reduced due to skipping.
-*   **Memory Complexity:** Requires storing min/max values for every node in the octree. Leaf size $b$ affects memory usage; smaller $b$ increases memory overhead but improves skipping efficiency [S3]. Quantized histograms add additional memory overhead [S1].
-*   **Measured Performance:** Octree-based ESL provides speedups of up to 10x in sparse datasets like CT scans [S2].
-*   **Strengths:** Effective for semi-transparent rendering where large empty regions exist. Interactive transfer function changes are possible with min/max storage [S1].
-*   **Limitations:** Pre-classification requires conservative histograms to avoid false negatives, potentially reducing skipping efficiency [S1]. Construction of the octree and histograms adds preprocessing time.
-*   **When to use:** Sparse volumes with significant empty space, interactive applications requiring transfer function adjustments.
-*   **When not to use:** Dense volumes with little empty space, where the overhead of traversal outweighs the benefits.
+- **Time Complexity:** Depends on the sparsity of the volume. In sparse datasets, traversal time is proportional to the number of non-empty nodes visited.
+- **Memory Complexity:** $O(N)$ where $N$ is the number of voxels, plus overhead for the octree structure. The block size $b$ affects memory usage [S3].
+- **Measured Performance:** Octree-based ESL provides speedups of up to 10x in sparse datasets like CT scans [S2].
+- **Strengths:** Effective for sparse volumes; reduces reconstruction samples significantly [S1].
+- **Limitations:** Preprocessing time to build the octree; memory overhead for storing min/max values; less effective for dense volumes [S2].
+- **When to Use:** Sparse volumes, isosurface rendering, or semi-transparent rendering with significant empty space [S1][S2].
+- **When Not to Use:** Dense volumes where most voxels are opaque; real-time applications with strict memory constraints if octree overhead is too high.
 
 ## Background
-Empty space skipping with octrees was introduced as an optimization for volume visualization. Levoy proposed an empty-space skipping strategy based on a hierarchical spatial enumeration (an octree) to allow rays to advance more quickly through coherent regions of empty voxels [S4, unofficial]. This technique was further developed for accelerating volume animation and isosurface rendering [S2][S3]. The method exploits ray coherence and the hierarchical nature of octrees to prune empty branches during traversal [S4, unofficial]. It is widely used in medical imaging and scientific visualization applications where volumes often contain substantial empty regions [S2].
+Empty space skipping with octrees was introduced by Levoy, who proposed an empty-space skipping strategy based on a hierarchical spatial enumeration (an octree) that allows rays to advance more quickly through coherent regions of empty voxels [S4, unofficial]. The technique exploits ray coherence between frames to further optimize leaping decisions, resulting in interactive rendering rates for moderately sized volumes [S2]. It is widely used in medical imaging and scientific visualization applications where volumes often contain substantial empty regions [S2].
 
 ## Sources
 [S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24

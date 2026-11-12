@@ -105,14 +105,13 @@ def render_spherical_panorama(splats, W, H, K, c_background):
             nx = normalize(cross(d, up))
             ny = normalize(cross(d, nx))
             
-            # Collect splats that might contribute to this pixel (bounding box culling)
-            candidates = [s for s in splats if in_tile(s, x, y)]
+            # Bounding box culling not detailed in the sources [S1]
+            candidates = [s for s in splats if True]
             
             contributions = []
             
             for s in candidates:
                 # Step 3: Transform planes to splat local space
-                # P' = (T_inv)^T * P. We only need the upper 3x3 rotation part for normals.
                 R_inv = [row[:3] for row in s.T_inv]
                 n_prime_x = [dot(R_inv[0], nx), dot(R_inv[1], nx), dot(R_inv[2], nx)]
                 n_prime_y = [dot(R_inv[0], ny), dot(R_inv[1], ny), dot(R_inv[2], ny)]
@@ -132,8 +131,8 @@ def render_spherical_panorama(splats, W, H, K, c_background):
                 alpha = s.opacity * math.exp(-0.5 * rho_sq)
                 
                 if alpha > 0.0:
-                    # SH color evaluation is standard and not detailed in the source [G]
-                    color = evaluate_sh(s.sh_coeffs, d)
+                    # SH evaluation not detailed in the sources [S1]
+                    color = [0.0, 0.0, 0.0]
                     depth = dot(d_local, s.mu)
                     contributions.append((alpha, color, depth))
             
@@ -163,14 +162,6 @@ def render_spherical_panorama(splats, W, H, K, c_background):
             image[y][x] = final_color
 
     return image
-
-def evaluate_sh(sh_coeffs, direction):
-    # Standard SH evaluation [G]
-    return [0.0, 0.0, 0.0] # Placeholder for SH math
-
-def in_tile(splat, x, y):
-    # Placeholder for bounding box culling [G]
-    return True
 ```
 
 **Parameters**
@@ -178,9 +169,9 @@ def in_tile(splat, x, y):
 *   Degree of Spherical Harmonics: Set to 3 for view-dependent color representation. [S1]
 
 **Edge Cases and Pitfalls**
-*   **Degenerate Gaussians:** Standard covariance-based rasterization can become numerically unstable for degenerate Gaussians (e.g., very thin or flat). SPaGS handles this by using the ray-splat intersection via perpendicular planes, which avoids matrix inversion of the covariance. [S1]
-*   **Wide-Field-of-View Artifacts:** Standard 3DGS uses a first-order affine approximation for projection, leading to residual errors and noticeable rendering artifacts in wide-FoV views. SPaGS avoids this by using exact ray-splat intersection for spherical cameras. [S1]
-*   **Spherical Distortion:** The equirectangular projection causes non-linear distortion. The tangent plane-based bounding box calculation (see Subtopics) is required to efficiently cull splats despite this distortion. [S1]
+*   **Degenerate Gaussians:** Standard covariance-based rasterization can become numerically unstable for degenerate Gaussians (e.g., very thin or flat). [S1]
+*   **Wide-Field-of-View Artifacts:** Standard 3DGS uses a first-order affine approximation for projection, leading to residual errors and noticeable rendering artifacts in wide-FoV views. [S1]
+*   **Spherical Distortion:** The equirectangular projection causes non-linear distortion. [S1]
 
 ## Subtopics
 
@@ -188,16 +179,16 @@ def in_tile(splat, x, y):
 A two-stage method to calculate an axis-aligned screen-space bounding box for 3D Gaussians in spherical panoramas, addressing deformation caused by omnidirectional pixel distribution and non-linear spherical projection. It sets itself apart from standard affine approximations by projecting a tangent-space bounding box onto the equirectangular plane, ensuring validity despite spherical distortion.
 
 ## Operating characteristics
-*   **Time Complexity:** Real-time rendering is achieved. The method replaces the affine approximation with a ray-splat intersection, which is more expensive per splat but allows for efficient culling via the tangent plane-based bounding box [S1].
+*   **Time Complexity:** Real-time rendering is achieved. [S1]
 *   **Memory Complexity:** Similar to standard 3DGS, storing position, rotation, scale, opacity, and SH coefficients [S1].
-*   **Measured Performance:** SPaGS achieves sharper reconstructions on large-scale scenes (e.g., Zip-NeRF) compared to other real-time methods. It is faster than 3DGUT and ODGS while providing better quality [S1].
+*   **Measured Performance:** SPaGS achieves sharper reconstructions on large-scale scenes (e.g., Zip-NeRF) compared to other real-time methods. [S1]
 *   **Strengths:** Numerical stability for degenerate Gaussians; accurate rendering for wide-FoV and distorted panoramic inputs; real-time performance [S1].
 *   **Limitations:** More complex than standard 3DGS due to the ray-splat intersection and plane transformations [S1].
 *   **When to use:** Real-time rendering of 3D Gaussian splats on spherical panoramas, specifically equirectangular images, supporting distorted panoramic inputs [S1].
 *   **When not to use:** Standard perspective cameras without distortion, where standard 3DGS is sufficient and faster [S1].
 
 ## Background
-SPaGS was introduced by Huang et al. (2024) and Bai et al. (2024) in the context of error analysis and optimal projection strategies for 3DGS [S1]. It extends the approach of Hahlbohm et al. [HFW*25] to spherical camera models. The method addresses the limitations of standard 3DGS, which only supports undistorted perspective camera models, by providing a numerically stable ray-splat intersection approach [S1]. It is used for real-time rendering of 3D Gaussian splats on spherical panoramas [S1].
+SPaGS was introduced by Huang et al. (2024) and Bai et al. (2024) in the context of error analysis and optimal projection strategies for 3DGS [S1]. It extends the approach of Hahlbohm et al. [HFW*25] to spherical camera models [S1]. The method addresses the limitations of standard 3DGS, which only supports undistorted perspective camera models, by providing a numerically stable ray-splat intersection approach [S1]. It is used for real-time rendering of 3D Gaussian splats on spherical panoramas [S1].
 
 ## Sources
 [S1] SPaGS: Fast and Accurate 3D Gaussian Splatting for Spherical Panoramas, https://doi.org/10.1111/cgf.70171, fetched 2026-11-01

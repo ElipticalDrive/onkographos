@@ -1,0 +1,212 @@
+# Volume rendering based on PBR and neural implicit surfaces
+
+[Chenyang Lv](https://orcid.org/0000-0002-4131-2719)
+
+School of Media and Design, Hangzhou Dianzi University, Hangzhou, China 211330009@hdu.edu.cn
+
+[Yigang Wang\\*](https://orcid.org/0009-0007-4500-8961)
+
+School of Media and Design, Hangzhou Dianzi University, Hangzhou, China
+
+yigang.wang@hdu.edu.cn
+
+#### ABSTRACT
+
+Neural volume rendering has gained significant popularity recently for its ability to synthesize novel scene views from a limited set of input images; one reason for this is the relatively rudimentary and experiential nature of the fundamental method used to obtain color output. However, the modeling and rendering results based on NeRF exhibit a relatively coarse level of detail. To overcome this challenge, we integrate the neural field's SDF (Signed Distance Function) representation with the PBR (Physically Based Rendering) material model for rendering to attain a more accurate scene representation by utilizing more interpretable parameters. In particular, the SDF is used to derive surface positions and normal for reflection modeling, while the PBR model is applied to regulate the reflection, diffuse, and potential transmission components. We evaluated our method in multiple scenes and found it achieved better reconstruction quality than the prior methods.
+
+## KEYWORDS
+
+signed distance field, NeRF, Physically-Based Rendering, volume rendering
+
+#### ACM Reference Format:
+
+Chenyang Lv and Yigang Wang\*. 2023. Volume rendering based on PBR and neural implicit surfaces. In 2023 7th International Conference on Electronic Information Technology and Computer Engineering (EITCE 2023), October 20–22, 2023, Xiamen, China. ACM, New York, NY, USA, 5 pages. [https:](https://doi.org/10.1145/3650400.3650464) [//doi.org/10.1145/3650400.3650464](https://doi.org/10.1145/3650400.3650464)
+
+# 1 INTRODUCTION
+
+Neural Radiance Fields (NeRF) [1] utilizes a virtual radiance field to represent the scene in a specified 3D environment. By employing a spatial multilayer perceptron (MLP), NeRF can predict the volume density at each coordinate point in the scene. The resultant density is then used to calculate the outgoing radiance in any viewing direction through a directional MLP. This allows for the generation of novel viewpoints. The remarkable results achieved by this technique are indisputable. However, due to the inherent smoothness of MLP, NeRF exhibits certain limitations, particularly when rendering objects with specular reflections that showcase significant variations depending on the viewing angles. NeRF typically optimizes such regions by introducing foggy artifacts or concave structures.
+
+
+
+However, this approach impedes the faithful representation of the actual scene.
+
+Ref-NeRF [2] replaces the parameterization of view-dependent radiance in NeRF with a representation based on reflected radiance to overcome these issues. This function is constructed by incorporating a set of spatially varying scene attributes, which facilitates the interpolation of the reflected angle instead of the viewing angle, thereby accommodating the smoothness of MLP. NeRFReN [3], on the other hand, employs an additional MLP network specifically designed to handle specular reflection. However, despite advancements, NeRF-based methods still face challenges in accurately reconstructing the precise geometric structure of scenes. Simply put, the fundamental NeRF network struggles to produce seamless geometric structures, impairing the accurate rendering of specular reflections. Additionally, employing specular tint to represent reflection colors can be overly simplistic, making it difficult to depict various real-world scenarios.
+
+Our idea is to utilize SDF as an intermediate value to generate volumetric components, achieving a smoother geometric structure. This approach is beneficial for optimizing and enhancing the accuracy of specular reflection tasks. Simultaneously, representing SDF assists in acquiring smooth surface normals, crucial parameters in the reflection process. Additionally, we analyze the spatial characteristics of objects within the scene to obtain attributes including roughness and reflectance. The PBR model enables a more practical expression of reflection properties, building upon these fundamental variables. Finally, we render sample points by employing the volume rendering equation and then optimize the network by utilizing ground truth loss.
+
+The contributions of this paper can be summarized as follows:
+
+- Integrate the geometric representation of SDFs into the neural radiance field for separated reflections.
+- Employ the PBR model to provide a rational interpretation of the variable information within the network.
+- This method achieves smooth geometric representations and produces reconstructed image indicators that are either approximate or superior to those obtained by previous methods.
+
+# 2 RELATED WORK
+
+## 2.1 Neural surface reconstruction
+
+Neural surface reconstruction is a significant problem in computer graphics and computer vision. Classical surface reconstruction methods, such as point cloud-based and triangle mesh-based methods, often face difficulty handling noise, isolated points, edge connectivity, and shape details. To overcome these challenges, more
+
+Permission to make digital or hard copies of all or part of this work for personal or classroom use is granted without fee provided that copies are not made or distributed for profit or commercial advantage and that copies bear this notice and the full citation on the first page. Copyrights for components of this work owned by others than the author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or republish, to post on servers or to redistribute to lists, requires prior specific permission and/or a fee. Request permissions from permissions@acm.org.
+
+EITCE 2023, October 20–22, 2023, Xiamen, China © 2023 Copyright held by the owner/author(s). Publication rights licensed to ACM. ACM ISBN 979-8-4007-0830-5/23/10
+
+
+
+Figure 1: A visualization of our architectures.
+
+and more research has been focused on neural network-based methods. These methods, such as DVR [4] and IDR [5], utilize deep learning models to learn implicit representations or generate meshes for surface reconstruction. However, these methods require accurate object masks and appropriate weight initialization, as gradient propagation can be challenging. Some new approaches like [6, 7], leverage the properties of SDFs to learn appropriate surface representations even without mask supervision.
+
+#### 2.2 Physically Based Rendering
+
+Physically Based Rendering (PBR) is a computer graphics rendering technique that aims to simulate the physical behavior of light and the optical properties of materials in the real world. PBR rendering aims to present lighting and material details more accurately and realistically, making the scene appear more authentic and natural. PBR rendering is based on the principles of physics optics, using physical properties that describe the interaction between light and objects, such as reflectance and roughness. During the rendering process, energy conservation and scattering models are considered to simulate the propagation, reflection, and refraction of light on different material surfaces. The fundamental cornerstone of PBR lies in the rendering equation [8], which was introduced by Kajiya in 1986:
+
+$$L_0(p, \omega_0) = \int_{\Omega} f_r(p, \omega_i, \omega_0) L_i(p, \omega_i) \cos \theta d\omega_i \quad (1)$$
+
+For a point p on the plane, the observed radiance 𝐿𝑜 is obtained by integrating the radiance 𝐿𝑖(𝑝, 𝜔𝑖) received from various directions on the hemisphere where point 𝑝 resides, along with the Bidirectional Reflectance Distribution
+
+Function (BRDF). The BRDF determines how much light scatters in any given direction, given an incident direction. By utilizing diverse BRDF designs, it becomes possible to represent a wide range of materials, including metals, glass, and other substances.
+
+#### 3 METHOD
+
+This chapter describes the network's structure and outputs and the methodology employed for achieving the final results through volume rendering.
+
+The input data for the network is derived from camera poses and pixel information of the images. Each pixel generates a ray represented by the equation 𝑥 = 𝑜 + 𝑡𝑑, where 𝑡 is incrementally adjusted to sample points along the ray path. After undergoing one round of positional encoding (PE), these sampled points are fed into an MLP with N layers, generating perspective-independent intermediate values as output.
+
+#### 3.1 Neural implicit surfaces
+
+We use SDF to represent the geometric information of objects. It can be defined that if Ω is a subset of a metric space 𝑋 with metric 𝑑, then the signed distance function 𝑓 is defined by
+
+$$f(x) = \begin{cases} d(\partial\Omega), & \text{if } x \in \Omega \\ -d(\partial\Omega), & \text{if } x \in \Omega^c \end{cases} \quad (2)$$
+
+where 𝜕Ω denotes the boundary of Ω. For any 𝑥 ∈ 𝑋 ,
+
+$$d(\partial\Omega) := \inf_{y \in \partial\Omega} d(x, y) \quad (3)$$
+
+One essential property of SDFs is that on the boundary 𝑓 satisfies:
+
+$$\text{Normal } (x) = \nabla f (x) \quad (4)$$
+
+Similar to Yariv et al. [6], we define the volume density 𝜏 as:
+
+$$\tau(x) = \alpha \Psi_\beta(f(x)) \quad (5)$$
+
+While Ψ𝛽 is the cumulative distribution function of the zero-mean Laplace distribution with a scale parameter 𝛽 &gt; 0. 𝛼 and 𝛽 are learnable parameters. The parameter 𝛽 is fixed as 𝛼 −1 in VolSDF, this approach provides two possibilities for materials: when 𝛼 approaches 0, it can be interpreted as a homogeneous medium (like fog), and when 𝛼 comes larger, it can be interpreted as a surface with low transmittance, such as metal. Therefore, as shown in Figure 1, the intermediate variable SDF learned by spatial MLP will output the normal vector and volume density 𝜏 at any position.
+
+#### 3.2 Color outputs
+
+
+
+The diffuse color 𝐶𝑑 generally used to simulate irradiance with low angular correlation. It exists in the form of subsurface scattering within objects (such as skin) and in the form of impurities in the air, which affects visibility. Therefore, we can directly obtain it from the spatial MLP.
+
+On the other hand, specular reflection 𝐶𝑠 is much more complex. As mentioned in Ref-NeRF, specular reflection is a highly nonsmooth parameter output concerning the input incident direction and position x. A better approach is to induce the network to have smoother parameter outputs first and then calculate the nonsmooth results using known formulas. In contrast to using only specular tint to represent the reflection color, we utilize the PBR model to explain the reflection. The Cook-Torrance model [9] is the most widely utilized specular BRDF model, which interprets planes as microfacets with a certain distribution. It can be represented as:
+
+$$f_{cook-torrance} = \frac{DFG}{4(\omega_0 \cdot n)(\omega_i \cdot n)} \quad (6)$$
+
+When dealing with a potentially rough surface, the normal distribution function D describes the proportion of light rays that can be reflected toward the viewing angle in microscale conditions. The geometry function G describes the ratio of self-occlusion that occurs during the reflection process. The Fresnel equation F represents the proportion of refraction and reflection. Some of them have various representations as they essentially simulate the roughness of a surface. In the context of offline rendering, materials that strictly conform to the Cook-Torrance BRDF can be considered as a reliable reference. However, this process involves complex calculations due to the varying effects of angles on the hemisphere with respect to the viewing angle.
+
+We employ the split sum approximation method, introduced by Brian Karis [10], to mitigate complexity. It can be expressed as the following equation:
+
+$$L_0(p, \omega_0) \approx \int_{\Omega} L_i(p, \omega_i) \, d\omega_i * \int_{\Omega} f_r(p, \omega_i, \omega_0) \cos \theta d\omega_i \quad (7)$$
+
+The left side of the equation corresponds to sampling in the prefiltering texture. Multiple pre-filtering textures need to be designed based on different surface roughness 𝜌. We can describe this process as follows:
+
+$$f_{prefilteredColor} = f(\rho, p, \omega_i), \text{ where } (8)$$
+
+
+$$\omega_i = 2 (\omega_o \cdot n) n - \omega_o \quad (9)$$
+
+We use directional MLP to express this process. The right side of this equation can be approximated as:
+
+$$\begin{aligned} & \int_{\Omega} fr \left( p, \omega_i, \omega_o \right) \cos\theta d\omega_i = \\ & F_0 \int_{\Omega} fr \left( p, \omega_i, \omega_o \right) \left( 1 - (1 - \omega_o \cdot h)^5 \right) \cos\theta d\omega_i + \\ & \int_{\Omega} fr \left( p, \omega_i, \omega_o \right) (1 - \omega_o \cdot h)^5 \cos\theta d\omega_i \approx \\ & F_0 * f \left( \cos\theta, \rho, \text{brdfLUT}.r \right) + f \left( \cos\theta, \rho, \text{brdfLUT}.g \right) \end{aligned} \quad (10)$$
+
+The precomputed part is obtained through a lookup table for𝑐𝑜𝑠𝜃 and roughness, as Figure 2 presents. 𝐹0 represents the reflectance of the object at a perpendicular angle. Finally, the specular term 𝐶𝑠 can be represented as:
+
+| $C_s = f_{prefilteredColor} * (F_0 * A + B)$ | (11) |
+|----------------------------------------------|------|
+|----------------------------------------------|------|
+
+Figure 2: precomputed BRDF LUT
+
+Finally, as shown in Figure 3, the color's value can be expressed as {𝐶𝑑 + 𝐶𝑠 }.
+
+#### 3.3 Volume rendering
+
+Similar to the original NeRF, we employ the conventional volume rendering method [11] for generating the conclusive outcomes, which can be summarized for discrete scenarios as follows:
+
+$$C(r) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) c_i, \text{ where } T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) \quad (12)$$
+
+In short, as the light progresses, the cumulative transmittance 𝑇𝑖 decreases along the way. The final color of pixel 𝑟 is obtained by multiplying the radiance, volume density, and cumulative transmittance of these sampled points, followed by summation. Our computational loss consists of two parts:
+
+$$\mathcal{L} = \mathcal{L}_{RGB} + \lambda \mathcal{L}_{SDF} \quad (13)$$
+
+That L𝑅𝐺𝐵 is optimized by minimizing photometric loss to improve the network, where 𝑟 represents the ray sampled from the set of viewpoints 𝑅:
+
+$$\mathcal{L}_{RGB} = \sum_{r \in R} \hat{C}(r) - C(r)_1 \quad (14)$$
+
+And L𝑆𝐷𝐹 is the Eikonal loss [12], which encourages 𝑑 to approximate a signed distance function. For each sampled point p in space 3 , we hope that its gradient approach 1 in order for the network to accurately represent the implicit representation of the signed distance field.
+
+$$\mathcal{L}_{SDF} = \sum_{p \in \mathbb{R}^3} (\nabla d(p) - 1)^2 \quad (15)$$
+
+#### 4 EXPERIMENT
+
+The method framework we utilized mainly follows VolSDF. The spatial MLP consists of 8 layers with 256 hidden units and ReLU activations. We conducted testing and evaluation on the blender dataset provided by NeRF. This dataset exhibits a high level of diversity and serves as an excellent testing benchmark. Additionally, we also performed testing on the Real Captured Scenes dataset
+
+
+
+Figure 3: Decomposition results of our method in synthetic scenes and real scenes
+
+Table 1: PSNRs on the dataset of Real Captured Scenes and Blender
+
+
+
+| Model    | sedan | toy car | garden spheres | materials | ficus | hotdog |
+|----------|-------|---------|----------------|-----------|-------|--------|
+| VolSDF   | 21.70 | 20.36   | 20.11          | 29.13     | 22.91 | 35.11  |
+| NeRF     | 20.08 | 20.61   | 19.93          | 29.62     | 30.13 | 36.18  |
+| Ref-NeRF | 25.65 | 24.25   | 23.46          | 35.41     | 33.72 | 37.72  |
+| Ours     | 25.92 | 24.77   | 24.03          | 35.89     | 32.98 | 37.87  |
+
+Table 2: SSIMs on the dataset of Real Captured Scenes and Blender
+
+
+
+| Model    | sedan | toy car | garden spheres | materials | ficus | hotdog |
+|----------|-------|---------|----------------|-----------|-------|--------|
+| VolSDF   | 0.583 | 0.517   | 0.553          | 0.954     | 0.929 | 0.972  |
+| NeRF     | 0.564 | 0.522   | 0.537          | 0.949     | 0.964 | 0.974  |
+| Ref-NeRF | 0.720 | 0.574   | 0.601          | 0.983     | 0.983 | 0.984  |
+| Ours     | 0.722 | 0.656   | 0.598          | 0.977     | 0.979 | 0.986  |
+
+
+
+provided by ReF-NeRF, which includes three outdoor models with solid reflections, which represents a significant challenge. As for quality assessment, we employed the same approach as previous researchers [13, 14], using PSNR and SSIM [15] as rendering evaluation metrics. All experiments were conducted on a computer running Ubuntu 20.04, using a single NVIDIA RTX3060 GPU with 12GB of memory.
+
+## 4.1 Improved normal representation
+
+Obtaining normal from implicit radiance fields is a crucial step toward achieving accurate mirror reflection. Compared to directly getting it from the spatial MLP, it optimizes through gradient loss in [2] and [16]. Our approach involves initial conversion into SDF, followed by obtaining the normal based on the properties of SDF for reference.
+
+Figure 4: The visualization of normal in Ref-NeRF's method (left) and our method (right)
+
+As illustrated in Figure 4, The normal distribution obtained indirectly from the SDF expression is smoother than the one obtained directly through constraints. Such a structure can accurately calculate the normal direction of the therapy's sampling point and obtain the specular reflection direction of that point through equation 9\).
+
+Figure 5: Details of our model at the scene of hotdog
+
+## 4.2 Analysis of experimental results
+
+Based on the experimental data presented in Table 1 and Table 2, our model exhibits superior performance
+
+compared to the baseline across multiple metrics in both realworld shooting scenarios and the Blender dataset. The model demonstrates improvement compared to both VolSDF and Ref-NeRF models in the majority of PSNR evaluations across different scenes. The scene of ficus stands as the sole exception of our experiments, which might be attributed to its abundance of sharp irregularities. In such cases, the geometric representation of SDF poses a disadvantage as it tends to favor learning smoother geometric shapes. Nevertheless, despite this, we still maintain a significant advantage over the baseline model. This advantage stems from the influence of the reflection's BRDF term, which compels the network to optimize for a non-smooth geometric representation. Furthermore, in terms of SSIM evaluation, our model demonstrates comparable performance to the Ref-NeRF model while exhibiting significant improvement over VolSDF.
+
+Additionally, by employing the PBR theory, as illustrated in Figure 5, our model effectively distinguishes between specular reflections and diffuse reflections. Diffuse reflection in the figure exhibits a smooth appearance, and the highlights exhibit strong view-angle dependence.
+
+## 5 CONCLUSION
+
+This paper introduces a method integrating a signed distance function with a physically-based rendering material model to obtain a more accurate scene representation. By utilizing prior knowledge in computer graphics, the SDF is used to derive surface positions and normal for reflection modeling. At the same time, the PBR model is
+
+employed to modulate specular reflections and diffuse components. Experimental results show that this method effectively separates and captures view-dependent reflection components, yielding improved geometric representations in smooth scenes. Additionally, our model does not accurately model refraction and transmission phenomena, potentially stemming from the geometric representation of the SDF, which tends to utilize a single surface layer. That is also the next research direction of our group.
+
+
+
+## REFERENCES
+
+[1] Mildenhall B, Srinivasan P P, Tancik M, et al. 2021. Nerf: Representing scenes as neural radiance fields for view synthesis[J]. Communications of the ACM, 65(1): 99-106. [2] Verbin D, Hedman P, Mildenhall B, et al. 2022. Ref-nerf: Structured viewdependent appearance for neural radiance fields[C]//2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). IEEE, 5481-5490. [3] Guo Y C, Kang D, Bao L, et al. Nerfren: Neural radiance fields with reflections[C]//Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 2022: 18409-18418. [4] Niemeyer M, Mescheder L, Oechsle M, et al. 2020. Differentiable volumetric rendering: Learning implicit 3d representations without 3d supervision[C]//Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 3504-3515. [5] Yariv L, Kasten Y, Moran D, et al. 2020. Multiview neural surface reconstruction by disentangling geometry and appearance[J]. Advances in Neural Information Processing Systems, 33: 2492-2502. [6] Yariv L, Gu J, Kasten Y, et al. 2021. Volume rendering of neural implicit surfaces[J]. Advances in Neural Information Processing Systems, 34: 4805-4815. [7] Wang P, Liu L, Liu Y, et al. 2021. Neus: Learning neural implicit surfaces by volume rendering for multi-view reconstruction[J]. arXiv preprint [arXiv:2106.10689.](arXiv:2106.10689) [8] Kajiya J T. 1986. The rendering equation[C]//Proceedings of the 13th annual conference on Computer graphics and interactive techniques. 143-150. [9] Cook R L, Torrance K E. 1981. A reflectance model for computer graphics[J]. ACM Siggraph Computer Graphics, 15(3): 307-316. [10] Karis B, Games E. 2013. Real shading in unreal engine 4[J]. Proc. Physically Based Shading Theory Practice, 4(3): 1. [11] Kajiya J T, Von Herzen B P. 1984. Ray tracing volume densities[J]. ACM SIG-GRAPH computer graphics, 18(3): 165-174. [12] A. Gropp, L. Yariv, N. Haim, M. Atzmon, and Y. Lipman. 2020. Implicit geometric regularization for learning shapes. arXiv preprint [arXiv:2002.10099.](arXiv:2002.10099) [13] Barron J T, Mildenhall B, Tancik M, et al. 2021. Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields[C]//Proceedings of the IEEE/CVF International Conference on Computer Vision. 5855-5864. [14] Zhang K, Luan F, Wang Q, et al. 2021. Physg: Inverse rendering with spherical gaussians for physics-based material editing and relighting[C]//Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 2021: 5453-5462. [15] Wang Z. 2004. Image Quality Assessment : From Error Visibility to Structural Similarity[D]. DOI:10.1016/j.jvcir.2019.102655. [16] Xiuming Zhang, Pratul P Srinivasan, Boyang Deng, Paul Debevec, William T Freeman, and Jonathan T Barron. 2021. Nerfactor: Neural factorization of shape and reflectance under an unknown illumination. ACM Transactions on Graphics (TOG), 40(6):1–18

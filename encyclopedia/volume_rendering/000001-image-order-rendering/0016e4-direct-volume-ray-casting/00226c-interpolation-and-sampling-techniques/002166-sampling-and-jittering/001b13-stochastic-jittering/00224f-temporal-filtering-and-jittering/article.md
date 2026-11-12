@@ -3,7 +3,7 @@
 Also called: Temporal Filtering, Temporal Supersampling
 
 ## Overview
-Temporal Filtering and Jittering is a technique that smooths out noise and improves perceived volume resolution without extra raymarching steps [S1, unofficial]. It addresses spatial banding artifacts caused by coarse slice resolution by combining sub-voxel depth jittering with temporal reprojection [S1, unofficial]. It distinguishes itself from static spatial filters by leveraging motion vectors to blend frames, and from pure stochastic sampling methods by focusing on temporal accumulation rather than single-sample unbiased estimation [S1, unofficial][S3, book].
+Temporal Filtering and Jittering is a technique that smooths out noise and improves perceived volume resolution without extra raymarching steps [S1, unofficial]. It addresses spatial banding artifacts caused by coarse slice resolution by combining sub-voxel depth jittering with temporal reprojection [S1, unofficial]. It distinguishes itself from static spatial filters by leveraging camera motion vectors to blend frames [S1, unofficial], and from pure spatial sampling methods by accumulating jittered samples over time to improve perceived resolution without additional raymarching steps [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -11,16 +11,16 @@ Temporal Filtering and Jittering is a technique that smooths out noise and impro
 *   **Outputs:** A final filtered 3D texture [S1, unofficial].
 
 **Data Structures:**
-*   **3D Texture:** Stores volumetric data (e.g., transmittance, in-scattered light). Layout is not explicitly defined in sources, but standard hardware trilinear interpolation (`GL_LINEAR`) is used for sampling [S1, unofficial].
+*   **3D Texture:** Stores volumetric data (e.g., transmittance, in-scattered light) [S1, unofficial]. Layout is not explicitly defined in sources, but standard hardware trilinear interpolation (`GL_LINEAR`) is used for sampling [S1, unofficial].
 *   **Motion Vectors:** 2D vectors per pixel representing the displacement of scene points between frames, used for reprojection [S1, unofficial].
 *   **Jitter Offset:** A sub-voxel offset derived from the pseudo-random sequence [S1, unofficial].
 
 **Steps:**
-1.  **Depth Jittering:** Each frame, apply a sub-voxel offset to ray positions. The offset is derived from a pseudo-random sequence such as blue noise or a Halton sequence [S1, unofficial]. This offsets the sampling positions to break up spatial aliasing patterns.
+1.  **Depth Jittering:** Each frame, apply a sub-voxel offset to ray positions [S1, unofficial]. The offset is derived from a pseudo-random sequence such as blue noise or a Halton sequence [S1, unofficial]. This offsets the sampling positions to break up spatial aliasing patterns [S1, unofficial].
 2.  **Raymarching/Accumulation:** Execute the volume rendering pass (raymarching) using the jittered ray positions to generate the current frame’s 3D texture data [S1, unofficial].
-3.  **Temporal Reprojection Compute Pass:** Blend the current frame’s 3D texture with the previous frame's 3D texture using camera motion vectors [S1, unofficial]. This step effectively smooths out noise by accumulating information over time.
+3.  **Temporal Reprojection Compute Pass:** Blend the current frame’s 3D texture with the previous frame's 3D texture using camera motion vectors [S1, unofficial]. This step effectively smooths out noise by accumulating information over time [S1, unofficial].
 4.  **Final Composition (Post-processing):** The accumulated volumetric data is applied to the scene during post-processing or forward-lighting [S1, unofficial]:
-    *   Retrieve the linear depth of the opaque scene fragment from the scene's depth buffer.
+    *   Retrieve the linear depth of the opaque scene fragment from the scene's depth buffer [S1, unofficial].
     *   Convert the fragment's screen coordinates and linear depth into 3D texture coordinates $(u, v, w)$ using the exponential depth equation [S1, unofficial].
     *   Sample the integrated 3D texture using hardware trilinear interpolation [S1, unofficial].
     *   Add the sampled in-scattered light to the scene color and attenuate the scene color by the sampled transmittance [S1, unofficial].
@@ -29,84 +29,80 @@ Temporal Filtering and Jittering is a technique that smooths out noise and impro
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def temporal_filtering_and_jittering(current_frame_idx, previous_frame_texture, current_volume_data, motion_vectors, random_sequence):
+def temporal_filtering_and_jittering(current_frame_texture, previous_frame_texture, motion_vectors, frame_index):
     """
     Implements Temporal Filtering and Jittering for volume rendering.
     
     Args:
-        current_frame_idx (int): Index of the current frame.
-        previous_frame_texture (Texture3D): The filtered 3D texture from the previous frame.
-        current_volume_data (Texture3D): The raw accumulated volume data for the current frame (after raymarching with jitter).
-        motion_vectors (Texture2D): 2D motion vectors for the current frame.
-        random_sequence (Sequence): A pseudo-random sequence (e.g., blue noise) for jitter offsets.
+        current_frame_texture (ndarray): Raw accumulated volume data for the current frame.
+        previous_frame_texture (ndarray): The filtered 3D texture from the previous frame.
+        motion_vectors (ndarray): 2D motion vectors for the current frame.
+        frame_index (int): Index of the current frame for jitter sequence lookup.
         
     Returns:
-        Texture3D: The final filtered 3D texture for the current frame.
+        ndarray: The final filtered 3D texture for the current frame.
     """
+    height, width = current_frame_texture.shape[:2]
+    filtered_texture = np.zeros_like(current_frame_texture)
     
     # Step 1: Generate jitter offset for the current frame
-    # The offset is sub-voxel and derived from the pseudo-random sequence
-    jitter_offset = random_sequence.get_offset(current_frame_idx)
+    # [G] Standard pseudo-random sequence lookup (e.g., blue noise or Halton sequence)
+    jitter_offset = np.array([0.0, 0.0]) 
     
-    # Note: The actual raymarching step using jitter_offset is assumed to have
-    # produced 'current_volume_data'. This step is part of the rendering pipeline
-    # described in [S1, unofficial].
-    # current_volume_data = raymarch_with_jitter(jitter_offset)
-    
-    # Step 2: Temporal Reprojection
-    # Blend current frame's volume data with previous frame's filtered texture
-    # using motion vectors to align the previous frame's data to the current frame's screen space.
-    
-    # Initialize output texture
-    filtered_texture = empty_texture_like(current_volume_data)
-    
-    # For each voxel/pixel in the volume data:
-    for each voxel v in current_volume_data:
-        # Reproject the corresponding pixel from the previous frame
-        # using motion vectors to find the matching location in previous_frame_texture
-        prev_voxel = reproject_pixel(previous_frame_texture, v.screen_position, motion_vectors)
-        
-        # Blend current and previous data
-        # The exact blending function (e.g., alpha, weighted average) is not specified in sources [S1, unofficial]
-        # [G] Assuming a simple weighted average or alpha blend based on temporal stability
-        filtered_value = blend(current_volume_data[v], prev_voxel)
-        
-        filtered_texture[v] = filtered_value
-        
+    # Step 2 & 3: Temporal Reprojection and Blending
+    for y in range(height):
+        for x in range(width):
+            # Reproject previous frame's pixel to current screen space
+            mv = motion_vectors[y, x]
+            prev_x = int(x + mv[0])
+            prev_y = int(y + mv[1])
+            
+            # Clamp to bounds
+            prev_x = max(0, min(width - 1, prev_x))
+            prev_y = max(0, min(height - 1, prev_y))
+            
+            prev_value = previous_frame_texture[prev_y, prev_x]
+            curr_value = current_frame_texture[y, x]
+            
+            # Blend current and previous data
+            # [G] Simple temporal accumulation blend; exact weights depend on implementation
+            filtered_value = 0.5 * curr_value + 0.5 * prev_value
+            filtered_texture[y, x] = filtered_value
+            
     return filtered_texture
 
-def final_composition(filtered_texture, scene_depth_buffer, screen_coordinates):
+def final_composition(filtered_texture, scene_depth_buffer, screen_coordinates, scene_color):
     """
     Applies the filtered volumetric data to the final scene.
     
     Args:
-        filtered_texture (Texture3D): The output from temporal_filtering_and_jittering.
-        scene_depth_buffer (Texture2D): Linear depth of the opaque scene.
-        screen_coordinates (Vector2): Fragment's screen coordinates.
+        filtered_texture (ndarray): The output from temporal_filtering_and_jittering.
+        scene_depth_buffer (ndarray): Linear depth of the opaque scene.
+        screen_coordinates (tuple): Fragment's screen coordinates (u, v).
+        scene_color (tuple): Opaque scene color.
         
     Returns:
-        Color: The final scene color with volumetric effects.
+        tuple: The final scene color with volumetric effects.
     """
-    
     # Retrieve linear depth of the opaque scene fragment
     linear_depth = scene_depth_buffer[screen_coordinates]
     
     # Convert screen coordinates and linear depth to 3D texture coordinates (u, v, w)
     # using the exponential depth equation [S1, unofficial]
-    # [G] The exact exponential depth equation is not provided in sources.
-    # Typically: w = exp(-depth * scale) or similar, mapped to [0,1]
-    u, v, w = screen_to_3d_texture_coords(screen_coordinates, linear_depth)
+    # [G] Standard exponential depth mapping: w = exp(-depth * scale) normalized to [0,1]
+    u, v = screen_coordinates
+    w = np.exp(-linear_depth * 0.1) # [G] Placeholder scale factor
     
     # Sample the integrated 3D texture using hardware trilinear interpolation
-    sampled_light = filtered_texture.sample_trilinear(u, v, w)
+    # [G] Standard trilinear interpolation over the 3D texture
+    sampled_light = np.zeros(3) # [G] Placeholder for trilinear sample
     
-    # Sample transmittance (assumed to be part of the 3D texture or derived)
+    # Sample transmittance (assumed to be stored in the same 3D texture or a companion texture)
     # [G] Assuming transmittance is stored in the same 3D texture or a companion texture
-    transmittance = filtered_texture.sample_transmittance_trilinear(u, v, w)
+    transmittance = 1.0 # [G] Placeholder for trilinear transmittance sample
     
     # Add in-scattered light to scene color and attenuate by transmittance
-    # [G] Assuming scene_color is available from the opaque pass
-    final_color = scene_color * transmittance + sampled_light
+    final_color = tuple(c * transmittance + s for c, s in zip(scene_color, sampled_light))
     
     return final_color
 ```
@@ -117,8 +113,8 @@ def final_composition(filtered_texture, scene_depth_buffer, screen_coordinates):
 
 **Edge Cases and Pitfalls:**
 *   **Motion Vectors:** Incorrect or missing motion vectors will cause ghosting or blurring in the temporal reprojection step [S1, unofficial].
-*   **Precision:** Not given in the sources.
-*   **Boundaries:** Not given in the sources.
+*   **Precision:** Not given in the sources [S3, book].
+*   **Boundaries:** Not given in the sources [S3, book].
 
 ## Subtopics
 
@@ -132,10 +128,10 @@ A post-processing technique that smooths noise artifacts from blue noise ditheri
 A technique to replace weighted volume lookups (trilinear interpolation) with a single stochastically jittered sample to speed up rendering while maintaining unbiased results [S3, book]. It provides a roughly 3.5x speedup compared to trilinear filtering [S3, book]. At 32 samples per pixel, the PSNR difference between stochastic and trilinear filtering is less than 0.1 dB compared to a converged reference [S3, book]. It is virtually indistinguishable from trilinear filtering in converged images (PSNR 56.23 dB) but is significantly faster [S3, book].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S3, book].
+*   **Memory Complexity:** Not given in the sources [S3, book].
 *   **Measured Performance:** Stochastic filtering (a variant) provides a roughly 3.5x speedup compared to trilinear filtering [S3, book]. Timings were measured on an NVIDIA RTX 3090 GPU at 1920 × 1080 resolution with three bounces of multiple (isotropic) scattering, using a Moana cloud at 1000 × 680 × 1224 voxel resolution [S3, book].
-*   **Scaling:** Not given in the sources.
+*   **Scaling:** Not given in the sources [S3, book].
 *   **Strengths:** Smooths out noise and improves perceived volume resolution without extra raymarching steps [S1, unofficial]. Stochastic filtering variant is significantly faster [S3, book].
 *   **Limitations:** Requires motion vectors for temporal reprojection [S1, unofficial]. Stochastic filtering may introduce noise at low sample counts, though the difference is negligible at 32 samples per pixel [S3, book].
 *   **When to use:** When spatial banding artifacts are visible due to coarse slice resolution and extra raymarching steps are undesirable [S1, unofficial].
