@@ -1,0 +1,220 @@
+--- v002.md
++++ v003.md
+@@ -4,25 +4,25 @@
+ 
+ ## Overview
+-This method improves GPU-based ray casting for unstructured grids by combining tile-based screen subdivision with depth peeling to handle non-convex meshes efficiently [S2, S3, unofficial]. It solves the problem of "imaginary cells" caused by mesh non-convexities without requiring convexification, while reducing fragment processing overhead by restricting computation to relevant screen regions [S2, S3, unofficial]. It differs from standard GPU ray casting by explicitly managing visibility layers via depth peeling per tile, and from convexification-based approaches by capturing ray re-entry into the mesh naturally [S2, S3, unofficial].
++This method improves GPU-based ray casting for unstructured grids by combining tile-based screen subdivision with depth peeling to handle non-convex meshes efficiently [S2, unofficial][S3, unofficial]. It solves the problem of "imaginary cells" caused by mesh non-convexities without requiring convexification, while reducing fragment processing overhead by restricting computation to relevant screen regions [S2, unofficial][S3, unofficial]. It differs from standard GPU ray casting by explicitly managing visibility layers via depth peeling per tile, and from convexification-based approaches by capturing ray re-entry into the mesh naturally [S2, unofficial][S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Unstructured mesh data (vertices, connectivity), viewing parameters (camera position, direction) [S2, S3, unofficial].
+-- Output: Rendered image with correct visibility for non-convex geometry [S2, S3, unofficial].
++- Input: Unstructured mesh data (vertices, connectivity), viewing parameters (camera position, direction) [S2, unofficial][S3, unofficial].
++- Output: Rendered image with correct visibility for non-convex geometry [S2, unofficial][S3, unofficial].
+ 
+ **Data Structures:**
+-- **Mesh Representation:** Stored in 2D textures for compactness and efficiency, replacing the 3D textures used in earlier works [S2, S3, unofficial]. The exact layout of the 2D texture is not specified in the sources.
+-- **Screen Tiles:** The screen is subdivided into uniform square tiles to allow computation to proceed only where required [S2, S3, unofficial].
++- **Mesh Representation:** Stored in 2D textures for compactness and efficiency, replacing the 3D textures used in earlier works [S2, unofficial][S3, unofficial]. The exact 2D texture layout is not specified in the sources [S2, unofficial][S3, unofficial].
++- **Screen Tiles:** The screen is subdivided into uniform square tiles to allow computation to proceed only where required [S1][S2, unofficial][S3, unofficial].
+ - **Intersection Data:** For each tile, a list of intersecting primitives (e.g., spheres in metaball contexts, or mesh cells) is maintained [S1].
+ 
+ **Steps:**
+ 1. **Tile Subdivision:** Divide the screen into uniform tiles. Typical tile sizes are 8x8 pixels for a 640x480 resolution and 16x16 pixels for a 1024x768 resolution [S1].
+-2. **Culling/Registration:** For each tile, determine which primitives intersect the tile's view frustum or bounding volume [S1]. Register these primitives for rendering within that tile [S1].
+-3. **Depth Peeling per Tile:** Perform depth peeling for each tile independently [S1].
++2. **Culling/Registration:** Calculate which spheres intersect each tile and register these primitives for rendering within that tile [S1].
++3. **Depth Peeling per Tile:** Perform depth peeling for each tile independently until termination [S1].
+     - **Layer 1:** Render the closest intersection for each ray within the tile [G: Standard depth peeling initialization renders the front-most surface].
+     - **Subsequent Layers:** For each subsequent layer, render only the intersections that are farther away than the previous layer's depth [S1].
+-    - **Termination:** Depth peeling continues until no more intersections are found or a maximum number of layers is reached. Termination can be automatically detected using GPU occlusion queries [S1].
+-4. **Ray Casting:** For each fragment in the active tiles, perform the ray-primitive intersection test in the fragment shader [S1]. Discard fragments with no intersection [S1].
+-5. **Rendering:** Render either front or back faces of the primitives, depending on the depth peeling layer and visibility requirements [S1].
++    - **Termination:** Depth peeling continues until no more intersections are found or a maximum number of layers is reached, with automatic detection using GPU occlusion queries [S1].
++4. **Ray Casting:** For each fragment in the active tiles, perform the ray-primitive intersection test in the fragment shader and discard fragments with no intersection [S1].
++5. **Rendering:** Render either front or back faces of the primitives, selecting the face farther from the previous intersection point [S1].
+ 
+ **Formulas:**
+@@ -33,5 +33,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Non-convex Meshes:** The method avoids introducing imaginary cells that fill space due to non-convexities by using depth peeling to capture ray re-entry [S2, S3, unofficial].
++- **Non-convex Meshes:** The method avoids introducing imaginary cells that fill space due to non-convexities by using depth peeling to capture ray re-entry [S2, unofficial][S3, unofficial].
+ - **Occlusion Query Overhead:** Using occlusion queries for termination detection may introduce CPU-GPU synchronization overhead [S1].
+ - **Precision:** Not given in the sources.
+@@ -41,97 +41,103 @@
+ import math
+ 
+-def render_with_tile_based_depth_peeling(mesh, camera, screen_width, screen_height):
+-    # 1. Determine tile size based on resolution
+-    if screen_width == 640 and screen_height == 480:
++def ray_sphere_intersect(ray_origin, ray_dir, sphere_center, sphere_radius):
++    oc_x = ray_origin[0] - sphere_center[0]
++    oc_y = ray_origin[1] - sphere_center[1]
++    oc_z = ray_origin[2] - sphere_center[2]
++    a = ray_dir[0]**2 + ray_dir[1]**2 + ray_dir[2]**2
++    b = 2.0 * (oc_x * ray_dir[0] + oc_y * ray_dir[1] + oc_z * ray_dir[2])
++    c = oc_x**2 + oc_y**2 + oc_z**2 - sphere_radius**2
++    discriminant = b**2 - 4.0 * a * c
++    if discriminant < 0.0:
++        return None
++    sqrt_d = math.sqrt(discriminant)
++    t1 = (-b - sqrt_d) / (2.0 * a)
++    t2 = (-b + sqrt_d) / (2.0 * a)
++    if t1 > 1e-6:
++        return t1
++    if t2 > 1e-6:
++        return t2
++    return None
++
++def render_tile_based_depth_peeling(mesh_spheres, camera_origin, camera_dir, screen_w, screen_h):
++    # 1. Determine tile size based on resolution [S1]
++    if screen_w == 640 and screen_h == 480:
+         tile_size = 8
+-    elif screen_width == 1024 and screen_height == 768:
++    elif screen_w == 1024 and screen_h == 768:
+         tile_size = 16
+     else:
+-        tile_size = 8  # Default fallback
++        tile_size = 8
+ 
+-    # 2. Subdivide screen into tiles
++    # 2. Subdivide screen into uniform tiles
+     tiles = []
+-    for y in range(0, screen_height, tile_size):
+-        for x in range(0, screen_width, tile_size):
+-            tiles.append({"x": x, "y": y, "w": min(tile_size, screen_width - x), "h": min(tile_size, screen_height - y), "primitives": []})
++    for ty in range(0, screen_h, tile_size):
++        for tx in range(0, screen_w, tile_size):
++            tiles.append({
++                "x": tx, "y": ty,
++                "w": min(tile_size, screen_w - tx),
++                "h": min(tile_size, screen_h - ty),
++                "spheres": []
++            })
+ 
+-    # 3. For each tile, cull and register intersecting primitives
++    # 3. Calculate which spheres intersect each tile and register them [S1]
+     for tile in tiles:
+-        intersecting = []
+-        for primitive in mesh.primitives:
+-            if intersects_frustum(primitive, tile, camera):
+-                intersecting.append(primitive)
+-        tile["primitives"] = intersecting
++        for sphere in mesh_spheres:
++            if sphere_center_in_tile(sphere.center, tile):
++                tile["spheres"].append(sphere)
+ 
+-    # 4. Perform depth peeling for each tile
++    # 4. Perform depth peeling for each tile until termination [S1]
+     for tile in tiles:
+-        if not tile["primitives"]:
++        if not tile["spheres"]:
+             continue
++        prev_depth = -math.inf
++        layer = 0
++        max_layers = 100
++        while layer < max_layers:
++            layer_hits = []
++            # Simulate per-fragment ray casting for the tile
++            for fy in range(tile["y"], tile["y"] + tile["h"]):
++                for fx in range(tile["x"], tile["x"] + tile["w"]):
++                    ray_o = camera_origin
++                    ray_d = normalize_vector(camera_dir)
++                    closest_t = None
++                    for sphere in tile["spheres"]:
++                        t = ray_sphere_intersect(ray_o, ray_d, sphere.center, sphere.radius)
++                        if t is not None and (closest_t is None or t < closest_t):
++                            closest_t = t
++                    if closest_t is not None and closest_t > prev_depth:
++                        layer_hits.append({"fragment": (fx, fy), "depth": closest_t, "sphere": sphere})
+ 
+-        current_depth = -math.inf
+-        layer = 0
+-        max_layers = 100  # Arbitrary limit
++            # Termination check via occlusion query simulation [S1]
++            if not layer_hits:
++                break
+ 
+-        while layer < max_layers:
+-            rendered_primitives = render_depth_peel_layer(tile, current_depth, camera)
+-
+-            if not rendered_primitives:
+-                break  # No more intersections, terminate depth peeling
+-
+-            # Update current_depth to the maximum depth of the current layer
+-            current_depth = max(p["depth"] for p in rendered_primitives)
++            # Render front or back face farther from previous intersection [S1]
++            prev_depth = max(h["depth"] for h in layer_hits)
+             layer += 1
+ 
+-            # Optional: Use occlusion query to detect termination
+-            # if is_occluded(tile):
+-            #     break
++def sphere_center_in_tile(center, tile):
++    return tile["x"] <= center[0] < tile["x"] + tile["w"] and tile["y"] <= center[1] < tile["y"] + tile["h"]
+ 
+-    # 5. Composite layers to produce final image
+-    composite_depth_peeling_layers(tiles)
+-
+-def intersects_frustum(primitive, tile, camera):
+-    # Determine which primitives intersect the tile's view frustum
+-    # Uses bounding volume hierarchy or simple bounding box tests
+-    pass  # Implementation omitted: standard frustum-culling algorithm
+-
+-def render_depth_peel_layer(tile, current_depth, camera):
+-    # Fragment shader logic for a single depth peeling layer
+-    # For each fragment in the tile:
+-    #   1. Generate ray from camera through fragment
+-    #   2. Intersect ray with registered primitives
+-    #   3. Find closest intersection with depth > current_depth
+-    #   4. If found, render primitive; else, discard fragment
+-    # Return list of rendered primitives for this layer
+-    rendered = []
+-    for primitive in tile["primitives"]:
+-        depth = compute_ray_primitive_depth(primitive, camera)
+-        if depth > current_depth:
+-            rendered.append({"primitive": primitive, "depth": depth})
+-    return rendered
+-
+-def compute_ray_primitive_depth(primitive, camera):
+-    # Standard ray-primitive intersection depth calculation
+-    pass  # Implementation omitted: standard ray-mesh/sphere intersection math
+-
+-def composite_depth_peeling_layers(tiles):
+-    # Combine all depth peeling layers from all tiles
+-    # This may involve alpha blending or other compositing techniques
+-    pass  # Implementation omitted: standard depth peeling compositing
++def normalize_vector(v):
++    mag = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++    if mag == 0:
++        return [0, 0, 0]
++    return [v[0]/mag, v[1]/mag, v[2]/mag]
+ ```
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Depends on the number of tiles, primitives per tile, and depth peeling layers. Tile-based subdivision reduces the number of fragments processed by culling empty regions [S2, S3, unofficial].
+-- **Memory Complexity:** 2D texture representation is more compact than 3D textures [S2, S3, unofficial].
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** Scales with screen resolution and mesh complexity. Larger tiles may reduce overhead but increase fragment processing per tile [S1].
+-- **Strengths:** Handles non-convex meshes without convexification; reduces fragment processing via tiling [S2, S3, unofficial].
++- **Time Complexity:** Depends on the number of tiles, primitives per tile, and depth peeling layers; subdivision reduces the number of fragments processed by culling empty regions [S2, unofficial][S3, unofficial].
++- **Memory Complexity:** 2D texture representation is more compact than 3D textures [S2, unofficial][S3, unofficial].
++- **Measured Performance:** Not given in the sources [S2, unofficial][S3, unofficial].
++- **Scaling:** Scales with screen resolution and mesh complexity; larger tiles may reduce overhead but increase fragment processing per tile [S1].
++- **Strengths:** Handles non-convex meshes without convexification; reduces fragment processing via tiling [S2, unofficial][S3, unofficial].
+ - **Limitations:** Depth peeling can be computationally expensive for complex scenes with many layers; occlusion query overhead [S1].
+-- **When to Use:** Suitable for rendering non-convex unstructured grids on GPU where convexification is difficult or undesirable [S2, S3, unofficial].
++- **When to Use:** Suitable for rendering non-convex unstructured grids on GPU where convexification is difficult or undesirable [S2, unofficial][S3, unofficial].
+ - **When Not to Use:** Not suitable for simple convex meshes where standard ray casting suffices; may be inefficient for scenes with very few primitives per tile [G].
+ 
+ ## Background
+-- **Origin:** Proposed by Bernardon et al. [5] and concurrently by Weiler et al. [67] [S2, S3, unofficial].
+-- **History:** Developed as an improvement over earlier GPU-based ray casting methods that used 3D textures and convexification [S2, S3, unofficial].
+-- **Usage:** Used in GPU-based volume rendering of unstructured grids [S2, S3, unofficial].
++- **Origin:** Proposed by Bernardon et al. [5] and concurrently by Weiler et al. [67] [S2, unofficial][S3, unofficial].
++- **History:** Developed as an improvement over earlier GPU-based ray casting methods that used 3D textures and convexification [S2, unofficial][S3, unofficial].
++- **Usage:** Used in GPU-based volume rendering of unstructured grids [S2, unofficial][S3, unofficial].
+ 
+ ## Sources

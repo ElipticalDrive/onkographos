@@ -1,0 +1,101 @@
+# Froxel Assign Lights Compute Shader Parameters
+
+Also called: FFroxelAssignLightsCS::FParameters
+
+## Overview
+This section defines the shader parameter structure for the compute shader that assigns lights to froxels during the volumetric light scattering pass. It serves as the interface between the CPU-side light list buffer creation and the GPU-side light assignment logic, providing access to the froxel grid state, view parameters, and the pre-computed light indices. It differs from the parent [Froxel Light List Buffer Creation](13196-froxel-light-list-buffer-creation.md) by focusing on the read/write resources required for the actual assignment kernel rather than the offset calculation.
+
+## How it works
+The compute shader uses this parameter block to access the froxel grid topology, the list of active lights, and the atomic counters needed to populate the froxel light index buffer.
+
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `FroxelSharedUB`: Shared uniform buffer containing froxel grid dimensions and resolution.
+    *   `View`: View uniform buffer containing camera matrices and projection data.
+    *   `Lights`: Structured buffer of `FFroxelLightData` containing light properties.
+    *   `FroxelLightOffsets`: Structured buffer of `uint` storing the starting index for each froxel's light list.
+    *   `TotalIndices`: Structured buffer of `uint` storing the total number of light-froxel assignments.
+    *   `FroxelHeads`: Unordered Access View (UAV) of `RWStructuredBuffer<uint>` used as atomic counters for light assignment positions.
+*   **Outputs:**
+    *   `FroxelLightIndices`: Unordered Access View (UAV) of `RWStructuredBuffer<uint>` where the assigned light indices are written.
+
+**Data Structures:**
+The parameter structure `FFroxelAssignLightsCS::FParameters` contains the following fields:
+1.  `FroxelSharedUB`: `SHADER_PARAMETER_STRUCT_REF` referencing the froxel shared uniform buffer.
+2.  `View`: `SHADER_PARAMETER_STRUCT_REF` referencing the view uniform buffer.
+3.  `Lights`: `SRV` (Shader Resource View) pointing to `StructuredBuffer<FFroxelLightData>`.
+4.  `FroxelLightOffsets`: `SRV` pointing to `StructuredBuffer<uint>`.
+5.  `TotalIndices`: `SRV` pointing to `StructuredBuffer<uint>`.
+6.  `FroxelHeads`: `UAV` pointing to `RWStructuredBuffer<uint>`.
+7.  `FroxelLightIndices`: `UAV` pointing to `RWStructuredBuffer<uint>`.
+
+**Pseudocode:**
+The compute shader kernel iterates over froxels and lights, using atomic operations to assign lights to froxels. The specific kernel logic is not detailed in the sources, but the parameter binding is as follows:
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for parameter binding setup (CPU-side)
+class FFroxelAssignLightsCS_FParameters:
+    def __init__(self, froxel_shared_ub, view_ub, lights_srv, offsets_srv, total_indices_srv, heads_uav, indices_uav):
+        self.FroxelSharedUB = froxel_shared_ub
+        self.View = view_ub
+        self.Lights = lights_srv
+        self.FroxelLightOffsets = offsets_srv
+        self.TotalIndices = total_indices_srv
+        self.FroxelHeads = heads_uav
+        self.FroxelLightIndices = indices_uav
+
+# Example usage in a render graph
+params = FFroxelAssignLightsCS_FParameters(
+    froxel_shared_ub=shared_ub_ref,
+    view_ub=view_ref,
+    lights_srv=lights_buffer_srv,
+    offsets_srv=offsets_buffer_srv,
+    total_indices_srv=total_indices_buffer_srv,
+    heads_uav=heads_buffer_uav,
+    indices_uav=indices_buffer_uav
+)
+```
+
+**Parameters:**
+*   `FroxelSharedUB`: Contains grid dimensions (e.g., `FroxelGridSize`). [S1, unofficial]
+*   `View`: Contains `ViewMatrices` and `ProjectionMatrix`. [S1, unofficial]
+*   `Lights`: Array of `FFroxelLightData`. [S1, unofficial]
+*   `FroxelLightOffsets`: Array of `uint` with size equal to the number of froxels. [S1, unofficial]
+*   `TotalIndices`: Single `uint` value. [S1, unofficial]
+*   `FroxelHeads`: Array of `uint` with size equal to the number of froxels, initialized to 0. [S1, unofficial]
+*   `FroxelLightIndices`: Array of `uint` with size equal to the total number of light-froxel assignments. [S1, unofficial]
+
+**Edge Cases and Pitfalls:**
+*   **Atomic Contention:** Multiple threads may write to the same froxel's light list, requiring atomic operations on `FroxelHeads`. [G]
+*   **Buffer Sizes:** `FroxelLightIndices` must be sized to accommodate the maximum possible number of light-froxel assignments, which is typically `NumLights * NumFroxels` or determined by `TotalIndices`. [G]
+*   **Initialization:** `FroxelHeads` must be zeroed out before the compute shader dispatch. [G]
+
+## Subtopics
+
+### Froxel Total Indices Compute Shader Parameters
+This variant defines the parameter structure for the compute shader that calculates the total number of light-froxel assignments. It is used in the pre-pass to determine the size of the `FroxelLightIndices` buffer.
+
+**Layout:**
+`FFroxelTotalIndicesCS::FParameters` contains:
+1.  `FroxelSharedUB`: `SHADER_PARAMETER_STRUCT_REF` referencing the froxel shared uniform buffer.
+2.  `FroxelLightCounts`: `SRV` pointing to `StructuredBuffer<uint>`, storing the number of lights per froxel.
+3.  `FroxelLightOffsets`: `SRV` pointing to `StructuredBuffer<uint>`, storing the starting index for each froxel's light list.
+4.  `TotalIndices`: `UAV` pointing to `RWStructuredBuffer<uint>`, where the total count is written.
+
+[S1, unofficial]
+
+## Operating characteristics
+*   **Time Complexity:** The assignment kernel runs in $O(N_{froxels} \times N_{lights})$ if naively iterating, but typically uses spatial partitioning or frustum culling to reduce this. The total indices kernel runs in $O(N_{froxels})$.
+*   **Memory Complexity:** Requires storage for `FroxelHeads` ($O(N_{froxels})$) and `FroxelLightIndices` ($O(N_{assignments})$).
+*   **Strengths:** Efficiently handles dynamic light changes by recomputing assignments per frame.
+*   **Limitations:** High memory bandwidth usage due to atomic writes to `FroxelHeads`. Performance degrades with a large number of lights or froxels.
+*   **When to use:** Real-time volumetric lighting with dynamic lights.
+*   **When not to use:** Static scenes with few lights, or when memory bandwidth is a critical bottleneck.
+
+## Background
+This method is part of the Unreal Engine 5 Froxel Lighting implementation, specifically the compute shader parameter definitions for the light assignment pass. It was developed by Armin Tajik as part of an unofficial implementation of froxel-based volumetric lighting. [S1, unofficial]
+
+## Sources
+[S1] ArminTajik/ue5-froxel-lighting, https://github.com/ArminTajik/ue5-froxel-lighting, fetched 2026-10-27 (unofficial)

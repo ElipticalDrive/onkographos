@@ -1,65 +1,39 @@
 # Monocular Depth Estimation Adaptation and Supervision
 
-Also called: MDE Adaptation, Depth-Guided NeRF, Monocular Depth Regularization
+Also called: MDE-NeRF, Depth-Guided NeRF, Monocular Depth Regularization
 
 ## Overview
-This family of methods integrates pre-trained Monocular Depth Estimation (MDE) networks with Neural Radiance Field (NeRF) optimization to resolve the shape-radiance ambiguity and geometric inaccuracies inherent in sparse-view or ill-posed NeRF training [S2, unofficial]. Unlike standard NeRF which relies solely on photometric consistency, these methods use MDE outputs as geometric priors to guide volume sampling, regularize density fields, or jointly adapt the MDE network to the scene's absolute geometry [S2, unofficial]. They are distinguished from sibling methods like [KNN-NeRF](8672-knn-nerf.md) which use point clouds, or [Aug-NeRF](10294-aug-nerf.md) which uses data augmentation, by explicitly leveraging the semantic and geometric priors of deep learning-based depth estimation to constrain the NeRF's latent space [S2, unofficial].
+This family of methods integrates pre-trained Monocular Depth Estimation (MDE) networks into the NeRF training loop to resolve the shape-radiance ambiguity and scale uncertainty inherent in sparse-view or single-view reconstruction [S2, unofficial]. Unlike standard NeRF which relies solely on photometric consistency, these methods use MDE outputs as geometric priors to guide volume sampling, regularize density distributions, or directly adapt the MDE network to the scene's absolute geometry [S2, unofficial]. They are distinguished from sibling methods like [DäRF](12331-d-rf.md) by their specific strategies for handling the relative nature of monocular depth, ranging from sparse prior fine-tuning [S2, unofficial] to distribution-based Earth Mover’s Distance supervision [11911-depth-guided-nerf-training-via-earth-mover-s-distance.md].
 
 ## Shared principles
 All methods in this family share the following mechanism:
-1.  **MDE Prior Extraction**: A pre-trained MDE network $G_\phi$ takes an input image $I$ and outputs a pseudo-depth map $D^*$ [S2, unofficial]. This map is relative and scale-ambiguous [S2, unofficial].
-2.  **Depth Rendering**: The NeRF model $\mathcal{N}$ renders a depth map $\bar{D}$ for a given camera pose, defined as the expected distance of ray termination:
-    $$ \bar{D}(r) = \sum_i w_i y_i $$
-    where $w_i$ is the transmittance-weighted contribution of sample $i$ at distance $y_i$ [Parent].
-3.  **Alignment**: Because $D^*$ and $\bar{D}$ differ in scale and shift, a local alignment is performed. For a patch $P$ of pixels, scale $w$ and shift $q$ are computed via least squares to minimize:
-    $$ \min_{w, q} \sum_{p \in P} \| (w \cdot D^*(p) + q) - \bar{D}(p) \|^2 $$
-    [S2, unofficial]. This patch-wise approach prevents dominant objects from skewing the alignment [S2, unofficial].
-4.  **Stop-Gradient**: The stop-gradient operator $\text{sg}(\cdot)$ is applied to the MDE output or NeRF depth depending on the direction of supervision to prevent gradient flow into the frozen or separately updated network [S2, unofficial].
-5.  **Regularization/Loss**: A consistency loss is added to the NeRF training objective, typically an L1 or L2 norm between the aligned pseudo-depth and the rendered depth [S2, unofficial].
+1.  **Pseudo-Depth Generation:** A pre-trained MDE network $G_\phi$ (e.g., MiDaS, DiffDP) is applied to input images $I$ to generate relative depth maps $D^*$ [S2, unofficial].
+2.  **Scale and Shift Alignment:** Since $D^*$ is relative and scale-ambiguous, it must be aligned with the absolute depth $\bar{D}$ rendered by the NeRF. This is typically done via a linear transformation $w D^* + q$, where $w$ (scale) and $q$ (shift) are computed per-patch or globally using least squares to minimize $\| (w D^* + q) - \bar{D} \|^2$ [12330-monocular-depth-regularization-on-seen-views.md].
+3.  **Stop-Gradient:** To prevent gradients from flowing into the frozen MDE network during NeRF optimization, the stop-gradient operator $\text{sg}(\cdot)$ is applied to the MDE output or the NeRF depth depending on the direction of supervision [12330-monocular-depth-regularization-on-seen-views.md].
+4.  **Patch-wise Processing:** To avoid global scale bias from dominant objects, alignment and loss computation are often performed on local image patches $P$ rather than the full image [12330-monocular-depth-regularization-on-seen-views.md].
 
 ## Subtopics
 
 ### [NerfingMVS](9518-nerfingmvs.md)
-NerfingMVS integrates conventional sparse Structure-from-Motion (SfM) and Multi-View Stereo (MVS) with learning-based monocular depth priors. It addresses shape-radiance ambiguity in indoor scenes by using depth priors to guide volume sampling, eliminating the need for accurate pixel matching across views during optimization. Unlike standard NeRF, it clamps ray bounds and guides sampling positions using scene-specific depth estimates. It fine-tunes the MDE network on sparse COLMAP points using a scale-invariant loss.
+Optimizes NeRF using sparse SfM priors to fine-tune an MDE network, then uses the resulting dense priors to clamp ray sampling bounds. Chosen when sparse geometric structure is available and volume sampling efficiency is critical.
 
 ### [Depth-Guided NeRF Training via Earth Mover’s Distance](11911-depth-guided-nerf-training-via-earth-mover-s-distance.md)
-This method improves geometric accuracy in sparse-view NeRF by supervising the distribution of ray termination distances using Earth Mover’s Distance (EMD) against a monocular depth prior, rather than enforcing a direct L2 match. It distinguishes itself by utilizing a single depth prior from a diffusion model (DiffDP) and weighting supervision by pixel-wise uncertainty, avoiding the propagation of prior inaccuracies. It constructs a probability distribution from NeRF samples and aligns it with the depth prior via EMD.
+Supervises the distribution of ray termination distances using EMD weighted by diffusion-based uncertainty. Chosen for sparse-view settings where distributional consistency is preferred over point-wise matching.
 
 ### [Monocular Depth Regularization on Seen Views](12330-monocular-depth-regularization-on-seen-views.md)
-This method applies a depth consistency loss between rendered NeRF depth and pseudo-depth maps from a pre-trained MDE network for input views present in the training set. It differs from global scale/shift fitting by computing alignment parameters per image patch, preventing dominant objects from skewing alignment and preserving local geometric details. It mitigates computational cost by operating on localized regions.
+Applies a consistency loss between rendered depth and MDE pseudo-depth only on input views, using patch-wise alignment. Chosen for basic geometric regularization without modifying the sampling strategy.
 
 ### [DäRF](12331-d-rf.md)
-DäRF is a framework for robust few-shot NeRF reconstruction that combines NeRF with MDE through online complementary training. It solves poor generalization in sparse-view NeRF by injecting MDE’s geometric prior into the NeRF representation at both seen and unseen viewpoints. Unlike sibling methods that apply pretrained MDE only to seen views, DäRF jointly optimizes NeRF and MDE at a specific scene to adapt MDE toward multiview-consistent geometry while using the adapted prior to regularize NeRF.
+Jointly optimizes NeRF and MDE to adapt the MDE network to the scene's absolute geometry. Chosen when multiview consistency of the MDE output itself is required, not just the NeRF geometry.
 
 ### [NeRF-guided MDE Adaptation](12333-nerf-guided-mde-adaptation.md)
-This method adapts a pre-trained MDE network to the specific absolute geometry of a target scene using a NeRF as a geometric prior. It resolves ambiguities inherent in monocular priors, such as convexity/concavity confusion, by aligning the MDE output with the NeRF's rendered depth. Unlike sibling methods that primarily use depth to regularize the NeRF, this approach explicitly fine-tunes the MDE network itself to become scene-aware.
+Adapts a pre-trained MDE network to the specific absolute geometry of a scene by using NeRF as a prior. Chosen when the goal is to improve the MDE network's performance on the specific scene domain.
 
 ### [Model Variants](13153-model-variants.md)
-This family defines three specific configurations for the Forward Warping Depth (FWD) framework, distinguished by their depth supervision strategy and the initialization state of the Multi-View Stereo (MVS) module. While the parent article [Monocular Depth Estimation Adaptation and Supervision](12353-monocular-depth-estimation-adaptation-and-supervision.md) establishes the general mechanism of aligning monocular priors with NeRF outputs, these variants specify how the depth prior is generated and updated during training. FWD uses a pre-trained MVS module updated end-to-end; FWD-U uses the same module but randomly initialized and unsupervised; FWD-D bypasses the MVS module entirely, using sensor depths as direct inputs.
-
-#### Depth Completion Network NeRF
-- [S1] Extract sparse point cloud using COLMAP.
-- [S1] Introduce a depth loss based on predicted depth and uncertainty in addition to the standard volumetric loss.
-- [S1] Train on RGB-D data from ScanNet and Matterport3D with Gaussian noise added to the depth.
-
-#### Monocular Depth Regularization on Unseen Views
-- [S2, unofficial] A loss function that supervises NeRF geometry at unseen/novel viewpoints by aligning NeRF-rendered depth with monocular depth estimated from the rendered novel view image.
-- [S2, unofficial] For each unseen view $l$ in the set of unseen views $U$: 1. Sample a patch of the novel viewpoint. 2. Render color $\bar{I}_l$ and depth $\bar{D}_l$ from NeRF. 3. Extract monocular depth $\bar{D}^*_l = G_\phi(\bar{I}_l)$ from the rendered color image. 4. Compute scale $w_l$ and shift $q_l$ via least squares between $\bar{D}^*_l$ and $\bar{D}_l$. 5. Calculate loss $L_{unseen}$.
-- [S2, unofficial] $U$: Set of unseen view images.
-- [S2, unofficial] $P$: Randomly sampled patch of pixels.
-- [S2, unofficial] Monocular depth from noisy NeRF rendering may be affected by fine-grained artifacts. The MDE model's strong geometric prior is robust against these artifacts, filtering them out.
-- [S2, unofficial] Unlike previous methods [14, 41, 61, 50] that only impose priors on input viewpoints (limited by self-occlusion/sparsity), this method applies priors to arbitrary viewpoints, reaching every location.
-
-#### MDE Adaptation Loss
-- [S2, unofficial] A composite loss function for adapting a monocular depth estimator to predict scene-specific absolute geometry by enforcing multi-view consistency and local patch-wise scale-shift fitting.
-- [S2, unofficial] Compute the first addend term (scale-shift loss) to force the MDE to adapt towards multiview consistency, reducing its ill-posed nature and aligning its initial global depth prediction with the absolute geometry captured by NeRF.
-- [S2, unofficial] Compute the second addend term (L1 loss with patch-wise scale-shift fitting) to aid the modeling of fine, detailed, local geometry that the model struggles to capture without local fitting.
-- [S2, unofficial] Optimize the MDE network by minimizing the sum of both terms simultaneously; using only one term performs worse on all metrics than using both in conjunction.
-- [S2, unofficial] Scale-shift loss weight: Balances global alignment with NeRF geometry; value not specified in this section but required for optimization.
-- [S2, unofficial] L1 loss weight: Balances local geometric detail preservation via patch-wise fitting; value not specified in this section but required for optimization.
+Defines three configurations for the Forward Warping Depth (FWD) framework, differing in MDE initialization (pre-trained, random, or sensor-based). Chosen based on the availability of initial depth priors and sensor data.
 
 ## Background
-The integration of monocular depth priors into NeRF optimization emerged as a solution to the "shape-radiance ambiguity" problem, where NeRFs trained on sparse views often produce geometrically incorrect but photometrically accurate results [S2, unofficial]. Early works like NerfingMVS (September 2021) [S2, unofficial] utilized COLMAP sparse point clouds to fine-tune monocular depth networks, using the resulting priors to guide volume sampling [S2, unofficial]. Subsequent developments, such as DäRF (2023) [S2, unofficial], moved towards joint optimization, adapting the MDE network itself to the scene's geometry to provide more robust, multiview-consistent priors [S2, unofficial]. Recent approaches like the EMD-guided method [S1] leverage diffusion-based depth estimators to provide richer uncertainty-aware priors [S1]. These methods are widely used in few-shot NeRF reconstruction, indoor scene modeling, and scenarios where dense SfM fails [S2, unofficial].
+The integration of monocular depth priors into NeRF optimization emerged to address the limitations of sparse-view reconstruction, where photometric loss alone leads to ambiguous geometry [S2, unofficial]. Early works like NerfingMVS (2021) utilized sparse SfM points to fine-tune MDE networks for guided sampling [S1]. Subsequent methods like DäRF (2023) introduced joint optimization to adapt MDE networks to specific scenes, improving multiview consistency [S2, unofficial]. More recent approaches leverage diffusion-based depth estimators (e.g., DiffDP) and distributional losses like Earth Mover’s Distance to handle uncertainty and avoid direct pixel-wise matching errors [11911-depth-guided-nerf-training-via-earth-mover-s-distance.md].
 
 ## Sources
 [S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

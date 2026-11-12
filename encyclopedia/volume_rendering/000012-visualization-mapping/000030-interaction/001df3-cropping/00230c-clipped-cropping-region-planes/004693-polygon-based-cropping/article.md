@@ -1,0 +1,123 @@
+# Polygon-based Cropping
+Also called: CutLineInside, CutLineOutside, CutingImagedata, Voxel-wise 2D Polygon Clipping
+
+## Overview
+Polygon-based cropping is a voxel-level interaction technique that modifies volume data by zeroing out voxels based on a user-drawn 2D polygon in screen space. It solves the problem of free-form, non-planar volume clipping where standard axis-aligned or arbitrary planar cropping is insufficient. Unlike its parent method, Clipped Cropping Region Planes, which restricts cropping to valid rectangular sub-volumes within the data bounds, this method allows arbitrary polygonal shapes projected from the current camera view. It sets apart from sibling methods by operating directly on the scalar data array rather than modifying rendering parameters, effectively "carving" the volume geometry.
+
+## How it works
+The method iterates through every voxel in the volume, projects its 3D world position to 2D screen coordinates, and tests containment against a user-defined polygon. If the containment test matches the specified mode (inside or outside), the voxel's scalar value is set to zero.
+
+**Inputs and Outputs:**
+- **Input:** `vtkImageData` (volume data), `vtkVolume` (rendering object), `vtkRenderer` (scene context), `QPolygonF` (user-drawn polygon in screen coordinates), `int type` (clipping mode: `CutLineInside` or `CutLineOutside`).
+- **Output:** Modified `vtkImageData` with zeroed voxels; updated `vtkVolume` in the renderer.
+
+**Data Structures:**
+- `vtkImageData`: Stores voxel data. The implementation assumes `unsigned char` scalar type. Fields accessed include dimensions, spacing, and origin.
+- `QPolygonF`: A list of `QPointF` defining the 2D polygon boundary in screen space.
+- `vtkCoordinate`: Helper object to map 3D world coordinates to 2D display coordinates.
+
+**Numbered Steps:**
+1. Retrieve volume metadata: dimensions (`img_dims`), spacing (`img_spacing`), and origin (`img_origin`) from the `vtkImageData` object.
+2. Initialize a coordinate transformation object (`coordinate`) associated with the `renderer`.
+3. Iterate over all voxel indices $(i, j, k)$ where $0 \le i < \text{img\_dims}[0]$, $0 \le j < \text{img\_dims}[1]$, and $0 \le k < \text{img\_dims}[2]$.
+4. Compute the world position $(x, y, z)$ of the current voxel:
+   $$
+   \begin{aligned}
+   x &= i \cdot \text{img\_spacing}[0] + \text{img\_origin}[0] \\
+   y &= j \cdot \text{img\_spacing}[1] + \text{img\_origin}[1] \\
+   z &= k \cdot \text{img\_spacing}[2] + \text{img\_origin}[2]
+   \end{aligned}
+   $$
+5. Transform the world position to display coordinates $(dx, dy)$ using the renderer's coordinate system:
+   $$
+   (dx, dy) = \text{coordinate}.\text{GetComputedDoubleDisplayValue}(x, y, z)
+   $$
+6. Check if the display point $(dx, dy)$ lies inside the user-drawn polygon using the Odd-Even fill rule:
+   $$
+   \text{contains\_point} = \text{polygon}.\text{containsPoint}(QPointF(dx, dy), \text{Qt::OddEvenFill})
+   $$
+7. Apply clipping based on `type`:
+   - If `type == CutLineInside` and `contains_point` is true, set the voxel value at $(i, j, k)$ to 0.
+   - If `type == CutLineOutside` and `contains_point` is false, set the voxel value at $(i, j, k)$ to 0.
+8. After processing all voxels, update the volume data and refresh the renderer:
+   - Call `volume->Update()`.
+   - Remove the volume from the renderer: `renderer->RemoveVolume(volume)`.
+   - Re-add the volume to the renderer: `renderer->AddVolume(volume)`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def polygon_based_cropping(image_data, volume, renderer, polygon, clip_type):
+    # 1. Retrieve metadata
+    img_dims = image_data.GetDimensions()
+    img_spacing = image_data.GetSpacing()
+    img_origin = image_data.GetOrigin()
+    
+    # 2. Initialize coordinate helper
+    coordinate = vtkCoordinate()
+    coordinate.SetCoordinateSystemToWorld()
+    coordinate.SetRenderer(renderer)
+    
+    # 3. Get pointer to scalar data (assumes unsigned char)
+    # Note: Direct indexing is required; vtkImageIterator cannot retrieve spatial positions.
+    scalar_data = image_data.GetScalarPointer()
+    
+    # 4. Iterate over all voxels
+    for i in range(img_dims[0]):
+        for j in range(img_dims[1]):
+            for k in range(img_dims[2]):
+                # 5. Compute world position
+                x = i * img_spacing[0] + img_origin[0]
+                y = j * img_spacing[1] + img_origin[1]
+                z = k * img_spacing[2] + img_origin[2]
+                
+                # 6. Transform to display coordinates
+                display_pos = coordinate.GetComputedDoubleDisplayValue(x, y, z)
+                dx = display_pos[0]
+                dy = display_pos[1]
+                
+                # 7. Check containment
+                contains_point = polygon.containsPoint(QPointF(dx, dy), Qt.OddEvenFill)
+                
+                # 8. Apply clipping
+                if clip_type == CutLineInside and contains_point:
+                    # Set voxel to 0
+                    set_voxel_value(image_data, i, j, k, 0)
+                elif clip_type == CutLineOutside and not contains_point:
+                    # Set voxel to 0
+                    set_voxel_value(image_data, i, j, k, 0)
+    
+    # 9. Update renderer
+    volume.Update()
+    renderer.RemoveVolume(volume)
+    renderer.AddVolume(volume)
+
+def set_voxel_value(image_data, i, j, k, value):
+    # Implementation detail: Access scalar pointer at index (i, j, k)
+    # Assuming unsigned char type as per source
+    ptr = image_data.GetScalarPointer(i, j, k)
+    ptr[0] = value
+```
+
+**Parameters:**
+- `clip_type`: Integer enum. `CutLineInside` (0) keeps voxels inside the polygon; `CutLineOutside` (1) keeps voxels outside. Typical values are defined by the application's UI state.
+- `polygon`: `QPolygonF` object. Contains the sequence of 2D points defining the clipping boundary.
+
+**Edge Cases and Pitfalls:**
+- **Scalar Type Assumption:** The source code assumes voxel data is `unsigned char`. If the scalar type differs, the pointer cast and assignment logic must be adjusted [S1, unofficial].
+- **Bounding Box Origin:** The implementation assumes the bounding box origin starts at `(0,0,0)` for internal indexing, but uses actual spacing/origin for world coordinates. Production code must validate actual bounds to ensure coordinate mapping is correct [S1, unofficial].
+- **Iterator Limitation:** Do not use `vtkImageIterator` as it cannot retrieve spatial positions; direct indexing is required to compute world coordinates for each voxel [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the total number of voxels in the volume. Each voxel requires a world-to-display transformation and a point-in-polygon test.
+- **Memory Complexity:** $O(1)$ auxiliary space, excluding the volume data itself. The method modifies the data in-place.
+- **Performance:** The method is computationally expensive for large volumes because it iterates over every voxel and performs coordinate transformations. It is suitable for interactive editing of moderate-sized volumes but may cause frame drops in real-time rendering of high-resolution datasets.
+- **Strengths:** Allows arbitrary, non-convex, and free-form clipping shapes that follow the visual appearance of the volume in the current view.
+- **Limitations:** Modifies the underlying data rather than just the rendering parameters, which may require data backup or undo mechanisms. Performance degrades linearly with volume resolution.
+
+## Background
+Polygon-based cropping is an interaction technique used in medical imaging and scientific visualization software to allow users to "cut" away parts of a volume using a free-hand drawn shape. It is implemented in various VTK-based applications. The specific implementation described in the sources is part of a demo application for volume clipping, demonstrating how to integrate Qt-based UI interactions with VTK rendering pipelines.
+
+## Sources
+[S1] kpengk/VolumeClipping, https://github.com/kpengk/VolumeClipping, fetched 2026-10-26 (unofficial)

@@ -3,57 +3,62 @@
 Also called: Instant Neural Graphics Primitives with Image-Based Rendering Networks
 
 ## Overview
-IBRNet is a feedforward neural network for generalizable view synthesis that bypasses per-scene optimization by learning a data prior from a training set [S1]. It differs from standard NeRF by using a CNN to extract multi-view features and a Ray Transformer to predict density, enabling inference on unseen scenes without iterative training [S1].
+IBRNet is a feedforward neural network method for novel view synthesis that generalizes to unseen scenes without per-scene optimization [S1]. It differs from standard NeRF by replacing iterative volume rendering optimization with a CNN-based feature extraction and a Ray Transformer that predicts density directly from multi-view features [S1]. It builds on [Generalizable Radiance Fields](9480-generalizable-radiance-fields.md) by using a data prior learned from a large dataset to bypass scene-specific training [S2, unofficial].
 
 ## How it works
-**Inputs:** A target view (camera pose $P_{tgt}$) and a set of $N$ source views $\{I_i, P_i\}_{i=1}^N$ selected from the training set.
-**Outputs:** Volume density $\sigma$ and color $C$ along rays from the target view.
+**Inputs and Outputs:**
+- Input: A target camera pose and $N$ source images from the training set with similar viewing directions.
+- Output: Density $\sigma$ and color $c$ for query points along rays from the target camera.
 
 **Data Structures:**
-1.  **Source Views:** $N$ images $I_i$ with known camera matrices $P_i$.
-2.  **CNN Features:** Feature maps $F_i$ extracted from $I_i$.
-3.  **Ray Transformer:** A Transformer encoder-decoder architecture processing ray segments.
+- Feature Volume: Implicitly constructed via feature aggregation. No explicit 3D grid is stored; features are projected from 2D image features.
+- Ray Transformer: A sequence model processing concatenated features along a ray.
 
 **Steps:**
-1.  **View Selection:** Select $N$ views from the training set whose viewing directions are most similar to the target view [S1].
-2.  **Feature Extraction:** Pass each source image $I_i$ through a CNN to extract feature maps $F_i$ [S1].
-3.  **Ray Querying:** For a query point $x$ on a ray from the target camera:
-    a. Project $x$ onto each source image plane using $P_i$ to obtain 2D coordinates.
-    b. Sample color $c_i$ and feature vector $f_i$ from $I_i$ and $F_i$ at these coordinates [S1].
-4.  **Feature Refinement:** Pass the set of pairs $\{(c_i, f_i)\}_{i=1}^N$ through an MLP. This MLP refines features to $f'_i$ (making them multi-view aware) and produces pooling weights $w_i$ [S1].
-5.  **Aggregation:** Compute the aggregated feature $F_{agg}$ for point $x$:
-    $$ F_{agg}(x) = \sum_{i=1}^N w_i f'_i $$
-    This aggregation is used for density prediction [S1].
-6.  **Ray Processing:** Repeat steps 3-5 for all query points along the ray. Concatenate the results (features and/or density estimates) along the ray dimension.
-7.  **Density Prediction:** Feed the concatenated ray representation into a Ray Transformer [S1]. The Transformer outputs the final volume density $\sigma$ (and potentially color) for the ray [S1].
+1. **View Selection:** For a target view, select $N$ source views from the training set with the most similar viewing directions [S1].
+2. **Feature Extraction:** Use a CNN (e.g., ResNet) to extract feature maps $F_i$ from each of the $N$ source images [S1].
+3. **Query Point Projection:** For a query point $x$ along a ray from the target camera, project $x$ onto each source image $i$ using the known camera matrix $K_i$ to obtain pixel coordinates [S1].
+4. **Feature Sampling:** Sample the color $c_i$ and feature vector $f_i$ from the CNN features at the projected coordinates for each view $i$ [S1].
+5. **Feature Refinement and Weighting:** Pass each feature $f_i$ through an MLP to produce a refined multi-view aware feature $f'_i$ and a pooling weight $w_i$ [S1].
+6. **Feature Aggregation:** Compute the aggregated feature $F_{agg}$ for point $x$ by summing the refined features weighted by $w_i$:
+   $$ F_{agg}(x) = \sum_{i=1}^{N} w_i f'_i $$
+   This step is repeated for all query points along the ray [S1].
+7. **Ray Transformer Processing:** Concatenate the aggregated features $F_{agg}(x)$ for all query points along the ray into a sequence [S1]. Feed this sequence into a Ray Transformer [S1].
+8. **Density Prediction:** The Ray Transformer outputs the density $\sigma$ for each query point [S1]. Color $c$ is typically predicted using the sampled colors $c_i$ and weights, or via a separate head, though the source emphasizes density prediction by the transformer [S1].
 
 **Parameters:**
-*   $N$: Number of source views. Typical values are small (e.g., 3-10) [S1].
-*   CNN Backbone: Not specified in sources [G].
-*   MLP: Refines features and computes weights [S1].
-*   Ray Transformer: Processes the aggregated ray features [S1].
+- $N$: Number of source views. Not given in the sources.
+- CNN Backbone: Not specified in the notes, typically ResNet [S1].
+- MLP Dimensions: Not given in the sources.
 
-**Edge Cases:**
-*   **View Selection:** If no similar views exist, performance degrades [S1].
-*   **Occlusion:** The method assumes visibility; occluded points may produce artifacts if not handled by the Transformer [G].
-*   **Precision:** Floating-point precision in projection and sampling affects feature alignment [G].
+**Edge Cases and Pitfalls:**
+- View Selection: If no similar views exist, performance degrades. The method assumes a training set with sufficient coverage [S1].
+- Precision: Projection accuracy depends on camera calibration [S1].
 
 ## Subtopics
 
 ### NaN
-A denoising method built on IBRNet that incorporates inter-view and spatial awareness to enhance noise robustness [S1]. It achieves state-of-the-art results in burst denoising under challenging conditions like large motion and high noise [S1]. It avoids per-scene training by leveraging IBRNet's generalization to unseen scenes with minimal input [S1].
+A denoising method that incorporates inter-view and spatial awareness to enhance noise robustness, achieving state-of-the-art results in burst denoising under challenging conditions like large motion and high noise [S1]. It avoids per-scene training by building on IBRNet, which generalizes to unseen scenes with minimal input [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Inference is feedforward, significantly faster than iterative NeRF optimization [S2, unofficial].
-*   **Memory Complexity:** Depends on the number of source views $N$ and the size of the CNN/Transformer [S1].
-*   **Performance:** Widely used in benchmarks for few-shot or sparse-view reconstruction [S1].
-*   **Strengths:** Generalizes to unseen scenes; no per-scene training required; fast inference [S1].
-*   **Limitations:** Requires a training set of similar scenes; performance depends on the quality of view selection [S1].
-*   **When to use:** Sparse-view synthesis where per-scene optimization is too slow [S1].
-*   **When not to use:** Dense-view scenarios where iterative optimization might yield higher quality [G].
+**Time and Memory Complexity:**
+- Time: Feedforward inference, significantly faster than iterative NeRF optimization [S2, unofficial].
+- Memory: Depends on the number of source views $N$ and the CNN feature size. No explicit 3D volume storage required [S1].
+
+**Measured Performance:**
+- Widely used in benchmarks for view synthesis [S1].
+- Reduces the number of iterations compared to per-scene NeRF [S2, unofficial].
+
+**Strengths and Limitations:**
+- Strengths: Generalizes to unseen scenes without per-scene optimization; fast inference [S1][S2, unofficial].
+- Limitations: Requires a training dataset; performance depends on the availability of similar source views [S1].
+
+**When to Use:**
+- Use for novel view synthesis where per-scene optimization is too slow or unavailable [S2, unofficial].
+- Not suitable for scenes with no similar training views [S1].
 
 ## Background
-IBRNet was published in February 2021 as a NeRF-adjacent method for view synthesis [S1]. It was designed to address the slow training times of NeRF by using a feedforward model to learn a data prior [S2, unofficial]. It is widely used in benchmarks for few-shot or sparse-view reconstruction [S1].
+IBRNet was published in February 2021 as a NeRF-adjacent method for view synthesis [S1]. It was introduced to address the slow training speed of NeRF by using a feedforward model to learn a data prior [S2, unofficial]. It is widely used in benchmarks [S1].
 
 ## Sources
 [S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

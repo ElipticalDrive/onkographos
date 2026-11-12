@@ -1,0 +1,329 @@
+# Cel Shading for Volumes
+
+Also called: Toon Shading for Volume Rendering, Toon Shading for Volumes, XToon, XToon Volume Rendering
+
+## Overview
+Cel Shading for Volumes (XToon) is a direct volume ray casting technique that applies stylized, non-photorealistic shading effects—including tone detail, specular highlights, and backlighting—to volumetric data [S1, unofficial]. It distinguishes itself from standard Phong shading by using discrete transfer function lookups driven by gradient magnitude and lighting dot products to create sharp, cartoon-like boundaries and highlights, rather than smooth continuous intensity variations [S1, unofficial].
+
+## How it works
+The method operates within the standard direct volume ray casting loop defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). It modifies the shading term by estimating normals via a Sobel-like operator and applying XToon-specific transfer functions for tone, specular, and backlight components.
+
+### Inputs and Outputs
+**Inputs:**
+*   **Volume Data:** A 3D scalar field stored in a `sampler3D` texture (`Volume`). The source implementation uses `GL_LUMINANCE` format with `GL_UNSIGNED_BYTE` data [S1, unofficial].
+*   **Ray Geometry:** `RayStart` and `RayStop` positions for each pixel, stored in `sampler2D` textures [S1, unofficial].
+*   **Transfer Functions:** Four `sampler2D` textures (`TransferFunc_01` to `TransferFunc_04`) used for XToon shading lookups [S1, unofficial].
+*   **Uniforms:**
+    *   `StepLength`: Step size along the ray. Typical value: 0.01 [S1, unofficial].
+    *   `Threshold`: Minimum volume value to trigger gradient computation and shading [S1, unofficial].
+    *   `GradientScale`: Multiplier for gradient magnitude before transfer function lookup [S1, unofficial].
+    *   `GradientDelta`: Multiplier for gradient vector to compute lighting vector [S1, unofficial].
+    *   `TransScale`: Multiplier for volume density value before transfer function lookup [S1, unofficial].
+    *   `Alpha`: Mixing factor for alpha in color blending [S1, unofficial].
+    *   `r`: Parameter for tone detail range scaling [S1, unofficial].
+    *   `s`: Specular shininess exponent [S1, unofficial].
+    *   `BacklightDetail`: Backlight exponent [S1, unofficial].
+    *   `xtoonFlag`: Enable flag for XToon rendering (1 = enabled) [S1, unofficial].
+    *   `xtoonTypeTone`, `xtoonTypeSpec`, `xtoonTypeBack`: Enable flags for specific XToon components [S1, unofficial].
+    *   `Jitter`: Enable flag for stochastic jittering (1 = enabled) [S1, unofficial].
+    *   `NoiseDelta`: Parameter for stochastic jittering scale [S1, unofficial].
+    *   `NSamples`: Number of refinement steps for hitpoint [S1, unofficial].
+    *   `LightPosition`: Light source position [S1, unofficial].
+    *   `eyePosition`: Camera position [S1, unofficial].
+    *   `gl_NormalMatrix`: Normal transformation matrix (GLSL built-in) [S1, unofficial].
+
+**Outputs:**
+*   Final fragment color `gl_FragColor` [S1, unofficial].
+
+### Data Structures
+*   **Volume Texture:** 3D texture, `GL_LUMINANCE` format, `GL_UNSIGNED_BYTE` data type, `GL_CLAMP` wrapping, `GL_LINEAR` filtering [S1, unofficial].
+*   **Ray Textures:** 2D textures storing ray start/stop positions per pixel [S1, unofficial].
+*   **Transfer Function Textures:** 2D textures used for XToon transfer function lookups [S1, unofficial].
+*   **Accumulators:**
+    *   `gradient_acc`: `vec4` accumulating gradient magnitude information [S1, unofficial].
+    *   `trans_acc`: `vec4` accumulating transfer function values [S1, unofficial].
+    *   `dst`: `vec4` storing the final composited color [S1, unofficial].
+
+### Algorithm Steps
+
+1.  **Initialization:** For each pixel, compute screen coordinates `coord = (vPosition.xy / vPosition.w + 1.0) / 2.0`. Fetch `rayStart` and `rayStop` from textures. If `rayStart == rayStop`, discard the fragment [S1, unofficial].
+2.  **Ray Setup:** Calculate `ray = rayStop - rayStart`, `rayLength = length(ray)`, and `stepVector = StepLength * ray / rayLength` [S1, unofficial].
+3.  **Jittering:** If `Jitter == 1`, offset `rayStart` by `stepVector * rand(vPosition.xy / NoiseDelta)`, where `rand` is a pseudo-random hash function [S1, unofficial].
+4.  **Ray Casting Loop:** Iterate while `dst.a < 1.0` and `rayLength > 0.0`:
+    a.  **Sample Volume:** Compute `pos` (initially `rayStart`, then incremented by `stepVector`). Sample volume value `V = dot(texture3D(Volume, pos).xyz, texture3D(Volume, pos).xyz)` [S1, unofficial].
+    b.  **Threshold Check:** If `V <= Threshold`, reset accumulators if they exceed `Threshold` (see step 4d) and continue to next step [S1, unofficial].
+    c.  **Gradient Estimation:** If `V > Threshold`, compute gradient components using a Sobel-like operator with offset vector `e = vec4(vec3(-1.0, 1.0, 0.0)/sizes, 0.0)` where `sizes = 256.0` [S1, unofficial].
+        *   Compute `g_x`, `g_y`, `g_z` by summing absolute differences of texture samples at offsets defined by `e` [S1, unofficial].
+        *   Compute `sobelResult = mask.xwww * g_x + mask.wxww * g_y + mask.wwxw * g_z + mask.wwwx` where `mask = vec4(1.0, 0.0, 0.0, 0.0)` [S1, unofficial].
+        *   Accumulate: `gradient_acc += abs(sobelResult)` [S1, unofficial].
+    d.  **Hitpoint Refinement:** Refine `pos` to reduce slicing artifacts:
+        *   Initialize `s = -stepVector * 0.5`, update `pos += s`, re-sample `V` [S1, unofficial].
+        *   Loop `NSamples` times: if `V > Threshold`, `s *= 0.5`, `pos += s`; else `s *= -0.5`, `pos += s`. Re-sample `V` each iteration [S1, unofficial].
+    e.  **Lighting and Shading:** If refined `V > Threshold`:
+        *   Compute gradient vector `vGradient = gradient_acc.rgb * GradientDelta` and normalize to `nGradient` [S1, unofficial].
+        *   Compute `GradientMag = length(vGradient)` [S1, unofficial].
+        *   Compute view direction `viewDir = -normalize(eyePosition - pos)` [S1, unofficial].
+        *   Transform normal: `normal = normalize(gl_NormalMatrix * nGradient)` [S1, unofficial].
+        *   Compute dot products: `NdotL = dot(normal, LightPosition)`, `NdotV = dot(normal, viewDir)` [S1, unofficial].
+        *   Compute reflection `reflection = normalize(((2.0 * normal) * NdotL) - LightPosition)` and `VdotR = max(0.0, dot(viewDir, reflection))` [S1, unofficial].
+        *   **XToon Shading (if `xtoonFlag == 1`):**
+            *   **Tone Detail:** `trans_val = lookupTransferTex(GradientMag * GradientScale, xtoonToneDetail(V * TransScale, texture3D(Volume, pos).z))` [S1, unofficial]. Accumulate: `trans_acc += trans_val` [S1, unofficial].
+            *   **Specular:** `spec_val = lookupTransferTex(NdotL, xtoonSpecular(VdotR))` [S1, unofficial].
+            *   **Backlight:** `backlight_val = lookupTransferTex(NdotL, xtoonBacklight(NdotV))` [S1, unofficial].
+            *   **Mixing:** `color_sample = vec4(mix(mix(mix(backlight_val.rgb, trans_val.rgb, 0.5), spec_val.rgb, 0.5), trans_acc.rgb, 0.5), mix(trans_acc.a, gradient_acc.a, Alpha))` [S1, unofficial].
+        *   **Standard Shading (if `xtoonFlag != 1`):** `trans_val = lookupTransferTex(NdotL, V * TransScale)`, `color_sample = trans_val` [S1, unofficial].
+    f.  **Compositing:** Apply alpha blending: `color_sample.rgb *= color_sample.a`, then `dst = (1.0 - dst.a) * color_sample + dst`. Break ray loop [S1, unofficial].
+    g.  **Reset Accumulators:** If `V <= Threshold` or after blending, reset accumulators if they exceed `Threshold`: if `length(gradient_acc) > Threshold`, `gradient_acc = vec4(0)`. If `length(trans_acc) > Threshold`, `trans_acc = vec4(0)` [S1, unofficial].
+    h.  **Advance Ray:** `pos += stepVector`, `rayLength -= StepLength` [S1, unofficial].
+
+### Formulas
+
+**Tone Detail Calculation:**
+$$ D = 1.0 - \frac{\log(density / densityMin)}{\log(densityMax - densityMin)} $$
+If $density < densityMin_{base}$ or $density > densityMin + densityMin_{base}$, adjustments are made based on $densityC \pm densityMin$ and $densityC \pm densityMax$ [S1, unofficial].
+Where $densityMin_{base} = 0.01$, $densityMax_{base} = densityMin_{base} * r$ [S1, unofficial].
+
+**Specular Intensity:**
+$$ D = VR^s $$
+Where $VR$ is the view-reflection dot product and $s$ is the shine factor [S1, unofficial].
+
+**Backlight Intensity:**
+$$ D = NV^{BacklightDetail} $$
+Where $NV$ is the normal-view dot product [S1, unofficial].
+
+**Lookup Function:**
+$$ V = \text{dot}(\mathbf{V}_{tex}, \mathbf{V}_{tex}) $$
+Where $\mathbf{V}_{tex} = \text{texture3D}(\text{Volume}, \text{pos}).xyz$ [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cel_shading_volume_ray_casting(ray_start, ray_stop, volume_texture, transfer_funcs, uniforms):
+    """
+    Implements Cel Shading for Volumes (XToon) as described in [S1, unofficial].
+    """
+    # Constants
+    sizes = 256.0
+    mask = vec4(1.0, 0.0, 0.0, 0.0)
+    e = vec4(vec3(-1.0, 1.0, 0.0) / sizes, 0.0)
+    
+    # Uniforms
+    step_length = uniforms['StepLength']
+    threshold = uniforms['Threshold']
+    noise_delta = uniforms['NoiseDelta']
+    gradient_scale = uniforms['GradientScale']
+    gradient_delta = uniforms['GradientDelta']
+    trans_scale = uniforms['TransScale']
+    alpha_mix = uniforms['Alpha']
+    r_param = uniforms['r']
+    s_param = uniforms['s']
+    backlight_detail = uniforms['BacklightDetail']
+    xtoon_flag = uniforms['xtoonFlag']
+    xtoon_type_tone = uniforms['xtoonTypeTone']
+    xtoon_type_spec = uniforms['xtoonTypeSpec']
+    xtoon_type_back = uniforms['xtoonTypeBack']
+    jitter_enabled = uniforms['Jitter']
+    nsamples = uniforms['NSamples']
+    light_pos = uniforms['LightPosition']
+    eye_pos = uniforms['eyePosition']
+    normal_matrix = uniforms['gl_NormalMatrix'] # Assumed available in GLSL context
+    
+    # Initialize accumulators
+    gradient_acc = vec4(0.0)
+    trans_acc = vec4(0.0)
+    dst = vec4(0.0)
+    
+    # Ray setup
+    ray = ray_stop - ray_start
+    ray_length = length(ray)
+    step_vector = step_length * normalize(ray)
+    
+    # Jittering
+    if jitter_enabled:
+        ray_start += step_vector * rand(vPosition.xy / noise_delta)
+        
+    pos = ray_start
+    
+    while dst.a < 1.0 and ray_length > 0.0:
+        # Sample volume
+        v_tex = texture3D(volume_texture, pos).xyz
+        V = dot(v_tex, v_tex)
+        
+        if V > threshold:
+            # Gradient estimation
+            g_x = (2.0 * abs(texture3D(volume_texture, pos + e.yww).xyz - texture3D(volume_texture, pos + e.xww).xyz) +
+                   abs(texture3D(volume_texture, pos + e.yxw).xyz - texture3D(volume_texture, pos + e.xxw).xyz) +
+                   abs(texture3D(volume_texture, pos + e.ywx).xyz - texture3D(volume_texture, pos + e.xwx).xyz) +
+                   abs(texture3D(volume_texture, pos + e.ywy).xyz - texture3D(volume_texture, pos + e.xwy).xyz))
+            
+            g_y = (2.0 * abs(texture3D(volume_texture, pos + e.yyw).xyz - texture3D(volume_texture, pos + e.wxw).xyz) +
+                   abs(texture3D(volume_texture, pos + e.xyw).xyz - texture3D(volume_texture, pos + e.xxw).xyz) +
+                   abs(texture3D(volume_texture, pos + e.yyw).xyz - texture3D(volume_texture, pos + e.yxw).xyz) +
+                   abs(texture3D(volume_texture, pos + e.wyx).xyz - texture3D(volume_texture, pos + e.wxx).xyz) +
+                   abs(texture3D(volume_texture, pos + e.wyy).xyz - texture3D(volume_texture, pos + e.wxy).xyz))
+            
+            g_z = (2.0 * abs(texture3D(volume_texture, pos + e.wwy).xyz - texture3D(volume_texture, pos + e.wwx).xyz) +
+                   abs(texture3D(volume_texture, pos + e.xwy).xyz - texture3D(volume_texture, pos + e.xwx).xyz) +
+                   abs(texture3D(volume_texture, pos + e.ywy).xyz - texture3D(volume_texture, pos + e.ywx).xyz) +
+                   abs(texture3D(volume_texture, pos + e.wxy).xyz - texture3D(volume_texture, pos + e.wxx).xyz) +
+                   abs(texture3D(volume_texture, pos + e.wyy).xyz - texture3D(volume_texture, pos + e.wyx).xyz))
+            
+            sobel_result = mask.xwww * g_x + mask.wxww * g_y + mask.wwxw * g_z + mask.wwwx
+            gradient_acc += abs(sobel_result)
+            
+            # Hitpoint refinement
+            s = -step_vector * 0.5
+            pos += s
+            V = dot(texture3D(volume_texture, pos).xyz, texture3D(volume_texture, pos).xyz)
+            
+            for i in range(nsamples):
+                if V > threshold:
+                    s *= 0.5
+                    pos += s
+                    V = dot(texture3D(volume_texture, pos).xyz, texture3D(volume_texture, pos).xyz)
+                else:
+                    s *= -0.5
+                    pos += s
+                    V = dot(texture3D(volume_texture, pos).xyz, texture3D(volume_texture, pos).xyz)
+            
+            if V > threshold:
+                # Lighting calculation
+                v_gradient = gradient_acc.rgb * gradient_delta
+                n_gradient = normalize(v_gradient)
+                gradient_mag = length(v_gradient)
+                
+                view_dir = -normalize(eye_pos - pos)
+                normal = normalize(normal_matrix * n_gradient)
+                ndotl = dot(normal, light_pos)
+                ndotv = dot(normal, view_dir)
+                reflection = normalize(((2.0 * normal) * ndotl) - light_pos)
+                vdotr = max(0.0, dot(view_dir, reflection))
+                
+                if xtoon_flag == 1:
+                    # Tone Detail
+                    if xtoon_type_tone == 1:
+                        density_c = V * trans_scale
+                        temp_density = texture3D(volume_texture, pos).z
+                        trans_val = lookup_transfer_tex(gradient_mag * gradient_scale, xtoon_tone_detail(density_c, temp_density))
+                        trans_acc += trans_val
+                    
+                    # Specular
+                    if xtoon_type_spec == 1:
+                        spec_val = lookup_transfer_tex(ndotl, xtoon_specular(vdotr))
+                    
+                    # Backlight
+                    if xtoon_type_back == 1:
+                        backlight_val = lookup_transfer_tex(ndotl, xtoon_backlight(ndotv))
+                    
+                    # Mixing
+                    color_sample = vec4(
+                        mix(mix(mix(backlight_val.rgb, trans_val.rgb, 0.5), spec_val.rgb, 0.5), trans_acc.rgb, 0.5),
+                        mix(trans_acc.a, gradient_acc.a, alpha_mix)
+                    )
+                else:
+                    trans_val = lookup_transfer_tex(ndotl, V * trans_scale)
+                    color_sample = trans_val
+                
+                # Compositing
+                color_sample.rgb *= color_sample.a
+                dst = (1.0 - dst.a) * color_sample + dst
+                break
+        else:
+            # Reset accumulators if they exceed threshold
+            if length(gradient_acc) > threshold:
+                gradient_acc = vec4(0.0)
+            if length(trans_acc) > threshold:
+                trans_acc = vec4(0.0)
+        
+        # Advance ray
+        pos += step_vector
+        ray_length -= step_length
+        
+    return dst
+
+def xtoon_tone_detail(density_c, temp_density):
+    density_min_base = 0.01
+    density_max_base = density_min_base * r_param
+    density = temp_density
+    
+    density_min_m = density_c - density_min_base
+    density_min_p = density_c + density_min_base
+    density_max_m = density_c - density_max_base
+    density_max_p = density_c + density_max_base
+    
+    D = 1.0 - log(density / density_min_base) / log(density_max_base - density_min_base)
+    
+    if density < density_min_m:
+        density_min = density_c - density_min_base
+        density_max = density_c - r_param * density_min_base
+        D = 1.0 - log(density / density_min_m) / log(density_max_m / density_min_m)
+    elif density > density_min_p:
+        density_min = density_c + density_min_base
+        density_max = density_c + r_param * density_min_base
+        D = log(density / density_max_p) / log(density_min_p / density_max_p)
+        
+    return D
+
+def xtoon_specular(vr):
+    return pow(vr, s_param)
+
+def xtoon_backlight(nv):
+    return pow(nv, backlight_detail)
+
+def lookup_transfer_tex(index_x, index_y):
+    # Simplified lookup; in practice, selects from TransferFunc_01..04 based on index_x
+    return texture2D(transfer_funcs[0], vec2(index_x, index_y))
+
+def rand(num):
+    return fract(sin(dot(num.xy, vec2(12.9898, 78.233))) * 43758.5453)
+```
+
+### Edge Cases and Pitfalls
+*   **Precision:** The gradient calculation involves summing absolute differences of texture samples, which can accumulate noise if the volume data is noisy [S1, unofficial].
+*   **Boundaries:** The Sobel operator uses offsets defined by `e`, which assumes a normalized coordinate space. Incorrect texture wrapping or coordinate scaling can lead to incorrect gradient estimates at boundaries [S1, unofficial].
+*   **Degenerate Input:** If `rayStart == rayStop`, the fragment is discarded to avoid division by zero or infinite loops [S1, unofficial].
+*   **Accumulator Reset:** Accumulators are reset if they exceed the `Threshold` to prevent overflow or incorrect shading contributions from distant samples [S1, unofficial].
+
+## Subtopics
+
+### Hybrid Gradient Volume Raycasting with Lasso Masking
+Uses gradient information for masking rather than just shading. Choose when selective visibility is needed. [Hybrid Gradient Volume Raycasting with Lasso Masking](2059-hybrid-gradient-volume-raycasting-with-lasso-masking.md)
+
+### Next Event Estimation for Emissive Volumes
+Focuses on accurate lighting for emissive volumes. Choose when emissive properties are critical. [Next Event Estimation for Emissive Volumes](3557-next-event-estimation-for-emissive-volumes.md)
+
+### Direct Volume Rendering with Phong Shading
+Uses standard Phong shading without the discrete XToon transfer functions. Choose for more realistic lighting. [Direct Volume Rendering with Phong Shading](3686-direct-volume-rendering-with-phong-shading.md)
+
+### Illumination Caching
+Precomputes lighting to improve performance. Choose for interactive frame rates with complex lighting. [Illumination Caching](7548-illumination-caching.md)
+
+### Direct Volume Rendering with Phong Illumination
+Similar to Phong Shading but may use different illumination models. Choose for standard illumination. [Direct Volume Rendering with Phong Illumination](8307-direct-volume-rendering-with-phong-illumination.md)
+
+### Extinction-based Shading and Illumination
+Uses extinction coefficients for shading. Choose when physical accuracy of light absorption is needed. [Extinction-based Shading and Illumination](9147-extinction-based-shading-and-illumination.md)
+
+### Kaufman's Shaded Volume Rendering
+Early method for shaded volume rendering. Choose for historical context or specific artistic styles. [Kaufman's Shaded Volume Rendering](11206-kaufman-s-shaded-volume-rendering.md)
+
+### Color Bleeding via SH Projection
+Uses spherical harmonics for color bleeding. Choose for global illumination effects. [Color Bleeding via SH Projection](12232-color-bleeding-via-sh-projection.md)
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of samples along the ray, $O(N)$, where $N$ is the number of steps. The gradient computation adds a constant factor overhead per sample [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ per pixel for accumulators, plus the memory for the volume and transfer function textures [S1, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Performance scales with resolution and step length. Higher resolution or smaller step length increases the number of samples [S1, unofficial].
+*   **Strengths:** Provides stylized, cartoon-like visuals with sharp boundaries and highlights. Efficient implementation using texture lookups [S1, unofficial].
+*   **Limitations:** May introduce artifacts if the gradient estimation is inaccurate. The discrete nature of the shading may not be suitable for all applications [S1, unofficial].
+*   **When to use:** When a non-photorealistic, stylized appearance is desired for volumetric data [S1, unofficial].
+*   **When not to use:** When photorealistic lighting and shading are required [S1, unofficial].
+
+## Background
+The method originates from the XToonVolume project, an unofficial implementation of cel shading for volume rendering [S1, unofficial]. It builds on the principles of direct volume ray casting and adapts them for non-photorealistic rendering by using specific transfer functions for tone, specular, and backlight effects [S1, unofficial].
+
+## Sources
+[S1] andrerogers/XToonVolume, https://github.com/andrerogers/XToonVolume, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,103 @@
+# Sparse Texture Binding
+
+Also called: Hardware Page Tables, Hardware-managed page tables for sparse volumes
+
+## Overview
+Sparse Texture Binding is a lossless, hardware-level mechanism in modern graphics APIs (Vulkan, Direct3D 12, OpenGL) that decouples the virtual volume size from the physical memory footprint by using hardware-managed page tables [S1]. Unlike software-managed virtual texturing, it offloads virtual-to-physical address translation to the GPU hardware, allocating physical memory pages only for subregions actively being sampled [S1]. This distinguishes it from its parent method, [Out-of-Core Rendering with Virtual Page Tables](5359-out-of-core-rendering-with-virtual-page-tables.md), by removing the need for explicit software page table management and residency queries in the shader, shifting control to the hardware driver and GPU [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A virtual volume texture defined by its full logical dimensions (e.g., $W \times H \times D$) and a set of physical memory pages containing the actual voxel data bricks.
+*   **Output:** A bound texture resource that behaves like a standard 3D texture to the shader, but transparently handles missing data via hardware page faults.
+
+**Data Structures:**
+The hardware maintains an internal page table structure. The exact layout is opaque to the application, but logically it maps virtual page indices to physical page pointers.
+*   **Virtual Address:** The coordinate $(x, y, z)$ in the virtual volume space.
+*   **Page Size:** The granularity of allocation, typically matching the brick size used in the parent [Out-of-Core Rendering with Virtual Page Tables](5359-out-of-core-rendering-with-virtual-page-tables.md) method (e.g., $64^3$ or $128^3$ voxels).
+*   **Page Table Entry (PTE):** Contains a valid bit, a physical page frame number, and potentially residency status flags.
+
+**Steps:**
+1.  **Texture Creation:** The application creates a sparse texture resource with flags indicating sparse residency (e.g., `VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT` in Vulkan or `GL_ARB_sparse_texture` in OpenGL) [S2, unofficial].
+2.  **Physical Allocation:** The application allocates physical memory pages and binds them to specific regions of the virtual texture using API-specific binding commands (e.g., `vkBindSparseMemory` or `glSparseTextureStorage3D`) [S1]. Only the pages required for the current view or dataset subset are bound.
+3.  **Hardware Translation:** When the fragment shader samples the texture at a virtual coordinate $(x, y, z)$:
+    *   The hardware calculates the virtual page index: $P_{virt} = \lfloor (x, y, z) / \text{PageSize} \rfloor$.
+    *   The hardware looks up $P_{virt}$ in the internal page table.
+    *   If the page is resident (bound), the hardware computes the physical address: $A_{phys} = PTE[P_{virt}].\text{BaseAddress} + ((x, y, z) \pmod{\text{PageSize}}) \times \text{VoxelSize}$.
+    *   If the page is not resident, the hardware triggers a page fault.
+4.  **Page Fault Handling:**
+    *   The hardware pauses the rendering command.
+    *   The driver (or application, depending on API support) is notified of the missing page.
+    *   The application loads the required brick from disk or CPU memory into a physical page and binds it to the virtual page index.
+    *   Rendering resumes. [S1][S2, unofficial]
+
+**Formulas:**
+*   Virtual Page Index: $P_{idx} = \lfloor \frac{V_{coord}}{S_{page}} \rfloor$
+*   Physical Offset: $O_{phys} = P_{base} + (V_{coord} \pmod{S_{page}}) \times S_{voxel}$
+    *   Where $V_{coord}$ is the sample coordinate, $S_{page}$ is the page size in voxels, $P_{base}$ is the base address of the physical page, and $S_{voxel}$ is the size of a single voxel in bytes.
+
+**Parameters:**
+*   **Page Size:** Determined by the hardware and API. Common brick sizes are powers of two (e.g., 64, 128).
+*   **Maximum Dimensions:** Hardware imposes limits on the virtual texture size. For example, 32,000 for 2D and 16,000 for 3D dimensions [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Maximum Size Limitations:** The virtual volume dimensions cannot exceed hardware limits (e.g., 16k for 3D) [S2, unofficial].
+*   **Page Fault Overhead:** Frequent page faults (cache misses) can stall the GPU pipeline. The application must ensure that the working set fits in physical memory or that page loading is asynchronous and overlapped with rendering [S1].
+*   **Precision:** Standard floating-point sampling is used; no special precision handling is required beyond standard texture sampling [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Application-side setup (pseudo-code for clarity, actual implementation uses API calls)
+
+def setup_sparse_volume(virtual_dims, brick_size, data_source):
+    # 1. Create sparse texture resource
+    texture = create_sparse_texture(virtual_dims, format=RGBA32F)
+    
+    # 2. Pre-load initial working set
+    # Identify bricks needed for the current view/frustum
+    required_bricks = get_bricks_in_view(virtual_dims, camera)
+    
+    for brick in required_bricks:
+        # Allocate physical memory for this brick
+        phys_page = allocate_physical_memory(brick_size * voxel_size)
+        
+        # Load data into physical page
+        load_data_from_source(brick, phys_page)
+        
+        # Bind physical page to virtual brick index
+        # The API handles the page table update internally
+        bind_physical_page(texture, brick.virtual_index, phys_page)
+        
+    return texture
+
+def fragment_shader_sample(texture, uv, z):
+    # Hardware handles the page fault if the brick is not resident
+    # If the brick is missing, the GPU stalls until the driver binds it
+    color = texture3D(texture, uv, z)
+    return color
+```
+
+## Subtopics
+
+### Virtual Texturing
+Virtual texturing is a software-managed approach similar to CPU virtual memory but applied in 2D/3D texture space [S2, unofficial]. It defines a virtual image or volume with the extent of the original data, decomposes the space into pages, stores the working set of physical pages in a cache texture, and uses a software page table to map virtual pages to physical pages [S2, unofficial]. Concepts were introduced by Kraus and Ertl in 2002 and Hadwiger et al. in 2005 [S2, unofficial]. It is chosen when hardware sparse textures are not available or when more complex, non-uniform page table structures (like quadtrees/octrees) are needed for adaptive resolution [S2, unofficial].
+
+### Hardware Virtual Textures
+This variant refers to the specific API implementations of sparse textures that provide hardware-managed page tables [S2, unofficial]. It is implemented in OpenGL via `ARB_sparse_texture` and `ARB_sparse_texture2`, in Vulkan via `VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT`, and in CUDA via unified memory (though CUDA's unified memory applies to global memory, not textures, for on-demand page migration) [S2, unofficial]. It is chosen when maximum performance and minimal driver overhead are required, and when the application can tolerate the hardware-imposed limits on texture dimensions [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Address translation is $O(1)$ in hardware. Page fault handling is $O(1)$ per fault but incurs significant latency if the page must be loaded from disk or CPU memory.
+*   **Memory Complexity:** Physical memory usage is proportional to the number of resident pages, not the total volume size. This allows rendering of terabyte-scale volumes on GPUs with limited VRAM [S1].
+*   **Measured Performance:** Performance depends heavily on the spatial coherence of the view. High coherence results in few page faults and high throughput. Incoherent views or random access patterns can lead to thrashing [S1].
+*   **Strengths:** Lossless quality, hardware-managed, simple shader code (no manual page table lookups), supports very large virtual volumes [S1].
+*   **Limitations:** Hardware limits on maximum texture dimensions (e.g., 16k for 3D), potential for GPU stalls on page faults, requires careful management of the working set to avoid thrashing [S2, unofficial].
+*   **When to use:** When rendering large, sparse volumes where only a small fraction of the data is visible at any time, and when using modern GPUs with hardware sparse texture support [S1].
+*   **When not to use:** When the entire volume fits in VRAM, or when the hardware limits on texture size are exceeded [S2, unofficial].
+
+## Background
+Sparse Texture Binding originated from the need to render large-scale scientific and medical datasets that exceed GPU memory capacity [S1]. The concept of virtual texturing was introduced by Kraus and Ertl in 2002 and Hadwiger et al. in 2005 [S2, unofficial]. Hardware support for sparse textures was later introduced in modern graphics APIs like OpenGL (ARB_sparse_texture), Vulkan, and Direct3D 12, allowing the GPU to handle page table management natively [S1][S2, unofficial]. This method is widely used in medical imaging, geospatial visualization, and scientific visualization where high-resolution, large-volume data is common [S1].
+
+## Sources
+[S1] A Hybrid CPU-GPU Approach for Memory-Efficient Volume Rendering of Medical Image Data, https://doi.org/10.24132/csrn.2026-d53, fetched 2026-10-26
+[S2] GPU-Based Large-Scale Scientific Visualization, https://johanna-b.github.io/LargeSciVis2018/slides/LargeScaleVisualization_Architectures.pdf, fetched 2026-10-29 (unofficial)

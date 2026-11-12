@@ -1,0 +1,172 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,5 @@
+ # VS-Splat
+ 
+-Also called: Voxel-Selective feed-forward Gaussian Splatting
++Also called: Voxel-Selective feed-forward Gaussian Splatting [S1, unofficial]
+ 
+ ## Overview
+@@ -13,7 +13,7 @@
+ *   **Voxel Grid:** Predefined in normalized 3D space $[-0.5, 0.5]^3$, centered at the origin, using the center-coordinate system. Dimensions are $H \times W \times D$. All views share this grid [S1, unofficial].
+ *   **3D Gaussian Primitive $G_k$:** Parameterized by:
+-    *   Mean vector $\mu_k \in \mathbb{R}^3$ (position).
+-    *   Covariance matrix $\Sigma_k \in \mathbb{R}^{3 \times 3}$, decomposed into scale vector $s_k \in \mathbb{R}^3$ and rotation quaternion $r_k \in \mathbb{R}^4$.
+-    *   Opacity $o_k \in [0, 1]$.
++    *   Mean vector $\mu_k \in \mathbb{R}^3$ (position) [S1, unofficial].
++    *   Covariance matrix $\Sigma_k \in \mathbb{R}^{3 \times 3}$, decomposed into scale vector $s_k \in \mathbb{R}^3$ and rotation quaternion $r_k \in \mathbb{R}^4$ [S1, unofficial].
++    *   Opacity $o_k \in [0, 1]$ [S1, unofficial].
+     *   Spherical harmonics coefficients $h_k \in \mathbb{R}^{3S}$ (view-dependent color, $S$ basis functions per channel) [S1, unofficial].
+ 
+@@ -37,5 +37,5 @@
+ 
+ 3.  **Coarse Stage (Primitive Prediction):**
+-    *   Decode features from $\tilde{v}$ into coarse Gaussian primitives. For each voxel $(h, w, d)$, use a fully-connected decoder $\mathcal{D}_{\text{crs}}$ to predict parameters $\{\mu_{h,w,d}^{\text{crs}}, s_{h,w,d}^{\text{crs}}, r_{h,w,d}^{\text{crs}}, o_{h,w,d}^{\text{crs}}, h_{h,w,d}^{\text{crs}}\}$ [S1, unofficial].
++    *   Decode features from $\tilde{v}$ into coarse Gaussian primitives [S1, unofficial]. For each voxel $(h, w, d)$, use a fully-connected decoder $\mathcal{D}_{\text{crs}}$ to predict parameters $\{\mu_{h,w,d}^{\text{crs}}, s_{h,w,d}^{\text{crs}}, r_{h,w,d}^{\text{crs}}, o_{h,w,d}^{\text{crs}}, h_{h,w,d}^{\text{crs}}\}$ [S1, unofficial].
+     *   **Position Prediction:** Predict a positional offset $\Delta_k \in [-r, r]^3$ for the $k$-th voxel, where $r > 0$ is the maximum displacement. Compute the final mean:
+         $$ \mu_k = \text{voxel\_center}_k + \Delta_k $$
+@@ -44,5 +44,5 @@
+ 4.  **Voxel Selection Stage:**
+     *   Predict voxel-wise confidence scores $\sigma \in [0, 1]^{H \times W \times D}$ using a fully-connected predictor $\mathcal{P}: \mathbb{R}^{\tilde{C}} \rightarrow \mathbb{R}$ and a Gumbel-Sigmoid operator [S1, unofficial].
+-    *   For each feature vector $\tilde{v}_{h,w,d}$, compute the confidence logit $\mathcal{P}(\tilde{v}_{h,w,d})$.
++    *   For each feature vector $\tilde{v}_{h,w,d}$, compute the confidence logit $\mathcal{P}(\tilde{v}_{h,w,d})$ [S1, unofficial].
+     *   Apply Gumbel-Sigmoid to obtain the score $\sigma_{h,w,d}$:
+         $$ \sigma_{h,w,d} = \frac{1}{1 + \exp\left(-\frac{\mathcal{P}(\tilde{v}_{h,w,d}) + g_0 - g_1}{\tau}\right)} $$
+@@ -56,7 +56,7 @@
+ 
+ 5.  **Fine Stage:**
+-    *   Predict multiple fine-grained Gaussian primitives near each "skeletal" primitive at selected voxels $(h, w, d) \in I$.
++    *   Predict multiple fine-grained Gaussian primitives near each "skeletal" primitive at selected voxels $(h, w, d) \in I$ [S1, unofficial].
+     *   Use a selective feature refinement module to refine coarse global features by integrating fine local geometric features [S1, unofficial].
+-    *   *Note: The specific architecture of the fine stage decoder is not detailed in the provided sources.*
++    *   *Note: The specific architecture of the fine stage decoder is not detailed in the provided sources* [S1, unofficial].
+ 
+ 6.  **Training:**
+@@ -71,43 +71,50 @@
+ 
+ class VSSplat:
+-    def __init__(self, H, W, D, C, C_tilde, r_max):
++    def __init__(self, H, W, D, C, C_tilde, r_max, S=3):
+         self.H, self.W, self.D = H, W, D
+         self.C = C
+         self.C_tilde = C_tilde
+         self.r_max = r_max
++        self.S = S
++        # 3D convolutional compressor C: R^{HxWxDx2C} -> R^{HxWxDxC_tilde}
+         self.compressor = nn.Conv3d(2 * C, C_tilde, kernel_size=3, padding=1)
++        # Lightweight 3D U-Net variant U_light (one encoding, one decoding block)
+         self.unet_light = nn.Sequential(
+             nn.Conv3d(C_tilde, C_tilde, 3, padding=1),
+             nn.Conv3d(C_tilde, C_tilde, 3, padding=1)
+         )
+-        self.coarse_decoder = nn.Linear(C_tilde, 3 + 3 + 4 + 1 + 3 * 3)
++        # Fully-connected decoder D_crs: R^{C_tilde} -> R^{3+3+4+1+3S}
++        self.coarse_decoder = nn.Linear(C_tilde, 3 + 3 + 4 + 1 + 3 * S)
++        # Fully-connected predictor P: R^{C_tilde} -> R
+         self.confidence_predictor = nn.Linear(C_tilde, 1)
+ 
+-    def forward(self, images, camera_poses):
++    def forward(self, images, camera_poses, tau=0.1):
+         N = images.shape[0]
+         view_specific_features = []
+-        
++
+         # 1. View-Specific Volumetric Feature Extraction
+         # [Comment: Source does not specify the exact 2D feature extractor, AdaLN modulation, or backprojection implementation.]
+         for n in range(N):
+-            f_2d = self.feature_extractor(images[n])
+-            f_modulated = self.adaln(f_2d, camera_poses[n])
+-            v_n = self.backproject(f_modulated, camera_poses[n], self.H, self.W, self.D)
++            # [Comment: Placeholder for shared 2D feature extractor, AdaLN with Plücker embedding, and backprojection to voxel grid.]
++            v_n = torch.zeros(1, self.C, self.H, self.W, self.D)
+             view_specific_features.append(v_n)
+-            
++
+         v_stack = torch.stack(view_specific_features, dim=0)
+-        
++
+         # 2. Multi-View Feature Aggregation and Compression
++        # v0 = Mean(v1, ..., vN) concat Var(v1, ..., vN)
+         mean_feat = torch.mean(v_stack, dim=0)
+         var_feat = torch.var(v_stack, dim=0, unbiased=False)
+         v0 = torch.cat([mean_feat, var_feat], dim=0)
++        # v_comp = C(v0)
+         v_comp = self.compressor(v0)
++        # v_tilde = U_light(v_comp)
+         v_tilde = self.unet_light(v_comp)
+-        
++
+         # 3. Coarse Stage
+         B, C_t, H, W, D = v_tilde.shape
+         v_flat = v_tilde.permute(1, 2, 3, 4, 0).reshape(-1, C_tilde)
+         coarse_params = self.coarse_decoder(v_flat)
+-        
++
+         mu_offset = coarse_params[:, :3]
+         s = coarse_params[:, 3:6]
+@@ -115,26 +122,31 @@
+         o_raw = coarse_params[:, 10:11]
+         h = coarse_params[:, 11:]
+-        
++
+         voxel_centers = self.get_voxel_centers()
++        # Position Prediction: mu_k = voxel_center_k + Delta_k, Delta_k in [-r, r]^3
+         mu_offset = torch.clamp(mu_offset, -self.r_max, self.r_max)
+         mu = voxel_centers + mu_offset
+-        
++
+         # 4. Voxel Selection
+         conf_logits = self.confidence_predictor(v_flat).squeeze(-1)
++        # Gumbel-Sigmoid: sigma = 1 / (1 + exp(-(P(v) + g0 - g1)/tau))
+         g0 = -torch.log(-torch.log(torch.rand_like(conf_logits) + 1e-10) + 1e-10)
+         g1 = -torch.log(-torch.log(torch.rand_like(conf_logits) + 1e-10) + 1e-10)
+-        tau = 0.1
+         sigma = 1.0 / (1.0 + torch.exp(-(conf_logits + g0 - g1) / tau))
+-        
++
++        # Opacity Refinement: o_tilde = sigma * o_crs
+         o_refined = sigma * torch.sigmoid(o_raw)
++
++        # Selection: I = {(h,w,d) : sigma > 0.5}
+         threshold = 0.5
+         selected_mask = sigma > threshold
+         selected_indices = torch.nonzero(selected_mask, as_tuple=False).squeeze()
+-        
++
+         # 5. Fine Stage
+         # [Comment: The specific architecture of the fine stage decoder is not detailed in the provided sources.]
+         if selected_indices.numel() > 0:
+             v_selected = v_flat[selected_indices]
+-            fine_params = self.fine_decoder(v_selected)
++            # [Comment: Fine stage decoder call omitted as architecture is not specified in sources.]
++            fine_params = None
+             return mu, s, r, o_refined, h, fine_params
+         else:
+@@ -142,4 +154,5 @@
+ 
+     def get_voxel_centers(self):
++        # Center-coordinate system in [-0.5, 0.5]^3
+         x = torch.linspace(-0.5 + 1/(2*self.H), 0.5 - 1/(2*self.H), self.H)
+         y = torch.linspace(-0.5 + 1/(2*self.W), 0.5 - 1/(2*self.W), self.W)
+@@ -160,19 +173,8 @@
+ *   **Degenerate Input:** If no voxels exceed the 0.5 threshold, the fine stage produces no primitives [S1, unofficial].
+ 
+-## Subtopics
+-
+-### LaRa
+-A feed-forward GS method that predicts Gaussians from features. VS-Splat differs by selecting voxels before fine generation, whereas LaRa selects existing primitives for refinement. [LaRa](52-lara.md)
+-
+-### GenDen
+-Augments LaRa with a densification module using positional gradients. VS-Splat uses voxel-level selection without pseudo-labels, unlike GenDen which uses straight-through estimators. [GenDen](53-genden.md)
+-
+-### SplatWeaver
+-Uses score-based selection with pseudo-labels. VS-Splat is trained solely via rendering objective. [SplatWeaver](54-splatweaver.md)
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial].
+ *   **Memory Complexity:** Uses a lightweight 3D U-Net variant and feature compression ($\tilde{C} \ll 2C$) to reduce memory and computational cost compared to transformer-based approaches [S1, unofficial].
+-*   **Measured Performance:** Not given in the sources.
++*   **Measured Performance:** Not given in the sources [S1, unofficial].
+ *   **Strengths:** End-to-end learnable voxel selection without auxiliary supervision; coarse representation guides fine primitive placement; adaptive density control [S1, unofficial].
+ *   **Limitations:** Relies on a predefined voxel grid; fine stage architecture details are not specified [S1, unofficial].

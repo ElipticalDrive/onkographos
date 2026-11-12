@@ -1,0 +1,194 @@
+--- v003.md
++++ v004.md
+@@ -4,27 +4,27 @@
+ 
+ ## Overview
+-Distance Map Computation (Multi-Stage) is a GPU compute shader dispatch routine that generates a distance map from an occupancy map, using a swap buffer for iterative or multi-pass distance calculation [S1, unofficial]. It serves as the acceleration step following [Occupancy Map Generation](1197-occupancy-map-generation.md), transforming binary occupancy data into distance fields that enable efficient empty space skipping during ray traversal. Unlike [Occupancy Mipmap Generation](2700-occupancy-mipmap-generation.md) which creates hierarchical mipmaps, this method computes explicit distance values in a flat 3D volume, allowing for $O(1)$ lookup during traversal without tree navigation overhead [S2].
++Distance Map Computation (Multi-Stage) is a GPU compute shader dispatch routine that computes a distance map from an occupancy map, using a swap buffer for iterative or multi-pass distance calculation [S1, unofficial]. It follows [Occupancy Map Generation](1197-occupancy-map-generation.md) and transforms occupancy data into distance fields to enable empty space skipping during ray traversal [S1, unofficial]. Unlike [Occupancy Mipmap Generation](2700-occupancy-mipmap-generation.md), which builds hierarchical mipmaps, this method computes explicit distance values in a flat 3D volume [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** `textureOccupancyMap`, a 3D texture representing the occupancy state of the volume, bound to image unit 1 with format `GL_R8UI` and access `GL_READ_WRITE` [S1, unofficial].
+-*   **Output:** `textureDistanceMap`, a 3D texture storing the computed distances, bound to image unit 0 with format `GL_R8UI` and access `GL_READ_WRITE` [S1, unofficial].
+-*   **Uniforms:** A Uniform Buffer Object (UBO) of size 4 bytes, bound to binding point 0, containing a single integer value indicating the current computation stage [S1, unofficial].
+-*   **Swap Buffer:** `textureSwap`, a temporary 3D texture used to store intermediate results between stages, bound to image unit 1 during subsequent passes [S1, unofficial].
++*   **Input:** `textureOccupancyMap`, a 3D texture bound to image unit 1 with `GL_R8UI` format and `GL_READ_WRITE` access [S1, unofficial].
++*   **Output:** `textureDistanceMap`, a 3D texture bound to image unit 0 with `GL_R8UI` format and `GL_READ_WRITE` access [S1, unofficial].
++*   **Uniforms:** A Uniform Buffer Object (UBO) of 4 bytes bound to binding point 0, containing a single integer indicating the current computation stage [S1, unofficial].
++*   **Swap Buffer:** `textureSwap`, a temporary 3D texture bound to image unit 1 during intermediate passes [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **UBO:** 4 bytes, containing `uint stage`.
+-*   **Textures:** 3D textures with `GL_R8UI` format (8-bit unsigned integer per channel). The occupancy map stores binary occupancy (0 or 1). The distance map stores distance values, typically quantized to 8-bit precision.
++*   **UBO:** 4 bytes total, containing `uint stage` [S1, unofficial].
++*   **Textures:** 3D textures with `GL_R8UI` format (8-bit unsigned integer per channel) [S1, unofficial]. The occupancy map stores binary occupancy values [S1, unofficial]. The distance map stores quantized distance values [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 1.  **Initialization:**
+     *   Bind `textureDistanceMap` to image unit 0 and `textureOccupancyMap` to image unit 1, both with `GL_R8UI` format and `GL_READ_WRITE` access [S1, unofficial].
+-    *   Create a Uniform Buffer Object (UBO) of size 4 bytes, bind it to binding point 0, and use `glBindBufferRange` to map the entire buffer [S1, unofficial].
+-    *   Calculate the number of work groups for the 3D grid based on `sizeOccupancyMap` dimensions divided by 8, using ceiling division: `numWorkGroups = ceil(sizeOccupancyMap / 8)` [S1, unofficial].
++    *   Create a Uniform Buffer Object (UBO) of size 4 bytes, bind it to binding point 0, and map the entire buffer using `glBindBufferRange` [S1, unofficial].
++    *   Calculate the number of work groups for the 3D grid by dividing `sizeOccupancyMap` dimensions by 8 and applying ceiling division: `numWorkGroups = ceil(sizeOccupancyMap / 8)` [S1, unofficial].
+ 
+ 2.  **Stage 1 (X-axis propagation):**
+     *   Set UBO stage value to 0 [S1, unofficial].
+-    *   Dispatch compute shader with dimensions `(numWorkGroups[0], numWorkGroups[1], 1)` [S1, unofficial].
+-    *   Issue a memory barrier to ensure completion [S1, unofficial].
++    *   Dispatch compute shader with dimensions `(numWorkGroups[1], numWorkGroups[2], 1)` [S1, unofficial].
++    *   Issue a memory barrier [S1, unofficial].
+ 
+ 3.  **Stage 2 (Y-axis propagation):**
+@@ -44,91 +44,49 @@
+ **Pseudocode:**
+ ```python
+-# Pseudocode for the compute shader kernel executed in each stage
+-# Inputs:
+-#   occupancy_map: RWTexture3D<uint> (image unit 1 in stage 0, or textureSwap in stages 1-2)
+-#   distance_map: RWTexture3D<uint> (image unit 0)
+-#   stage: uint (from UBO)
++def compute_distance_map_multi_stage(occupancy_map, distance_map, swap_buffer, volume_size, workgroup_size=8):
++    # Calculate work groups using ceiling division
++    num_work_groups = [
++        (volume_size[0] + workgroup_size - 1) // workgroup_size,
++        (volume_size[1] + workgroup_size - 1) // workgroup_size,
++        (volume_size[2] + workgroup_size - 1) // workgroup_size
++    ]
+ 
+-# The kernel is dispatched as a 3D grid covering the volume dimensions.
+-# Each thread processes one voxel.
++    # Stage 1: X-axis propagation
++    bind_texture(distance_map, image_unit=0, access="GL_READ_WRITE")
++    bind_texture(occupancy_map, image_unit=1, access="GL_READ_WRITE")
++    bind_ubo(stage=0, binding=0)
++    dispatch_compute(num_work_groups[1], num_work_groups[2], 1)
++    memory_barrier()
+ 
+-uint3 gid = uint3(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y, gl_GlobalInvocationID.z);
+-uint3 dim = uint3(textureSize(occupancy_map, 0));
++    # Stage 2: Y-axis propagation
++    bind_texture(swap_buffer, image_unit=1, access="GL_READ_WRITE")
++    bind_ubo(stage=1, binding=0)
++    dispatch_compute(num_work_groups[0], num_work_groups[2], 1)
++    memory_barrier()
+ 
+-if (all(gid < dim)) {
+-    uint occ = occupancy_map[gid];
+-    
+-    if (stage == 0) {
+-        # Stage 1: Propagate distance along X-axis
+-        # Initialize distance for occupied voxels to 0, empty voxels to a large value
+-        uint dist = (occ == 1) ? 0 : 255; # 255 is max 8-bit value, representing infinity
+-        
+-        # Propagate from left neighbor
+-        if (gid.x > 0) {
+-            uint left_dist = distance_map[uint3(gid.x - 1, gid.y, gid.z)];
+-            dist = min(dist, left_dist + 1);
+-        }
+-        
+-        # Propagate from right neighbor (requires a second pass or careful ordering)
+-        # Note: The source describes a multi-stage approach, implying separate passes for directions.
+-        # This pseudocode assumes a simplified single-pass per stage logic.
+-        # In practice, a full distance transform requires multiple passes or a more complex kernel.
+-        
+-        distance_map[gid] = dist;
+-    }
+-    else if (stage == 1) {
+-        # Stage 2: Propagate distance along Y-axis
+-        # Read current distance from distance_map
+-        uint dist = distance_map[gid];
+-        
+-        # Propagate from bottom neighbor
+-        if (gid.y > 0) {
+-            uint bottom_dist = distance_map[uint3(gid.x, gid.y - 1, gid.z)];
+-            dist = min(dist, bottom_dist + 1);
+-        }
+-        
+-        # Propagate from top neighbor
+-        if (gid.y < dim.y - 1) {
+-            uint top_dist = distance_map[uint3(gid.x, gid.y + 1, gid.z)];
+-            dist = min(dist, top_dist + 1);
+-        }
+-        
+-        distance_map[gid] = dist;
+-    }
+-    else if (stage == 2) {
+-        # Stage 3: Propagate distance along Z-axis
+-        uint dist = distance_map[gid];
+-        
+-        # Propagate from front neighbor
+-        if (gid.z > 0) {
+-            uint front_dist = distance_map[uint3(gid.x, gid.y, gid.z - 1)];
+-            dist = min(dist, front_dist + 1);
+-        }
+-        
+-        # Propagate from back neighbor
+-        if (gid.z < dim.z - 1) {
+-            uint back_dist = distance_map[uint3(gid.x, gid.y, gid.z + 1)];
+-            dist = min(dist, back_dist + 1);
+-        }
+-        
+-        distance_map[gid] = dist;
+-    }
+-}
++    # Stage 3: Z-axis propagation
++    bind_ubo(stage=2, binding=0)
++    dispatch_compute(num_work_groups[0], num_work_groups[1], 1)
++    memory_barrier()
++
++    # Cleanup
++    unbind_ubo(binding=0)
++    delete_buffer_object()
+ ```
+ 
+ **Parameters:**
+-*   **Workgroup Size:** 8x8x8 (implied by division by 8 in work group calculation) [S1, unofficial].
++*   **Workgroup Size:** 8 (implied by division by 8 in work group calculation) [S1, unofficial].
+ *   **Texture Format:** `GL_R8UI` [S1, unofficial].
+ *   **UBO Size:** 4 bytes [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** Neighbors outside the volume bounds must be handled to avoid out-of-bounds access. The pseudocode includes checks for `gid.x > 0`, etc. [G].
+-*   **Precision:** The use of 8-bit unsigned integers limits the maximum representable distance to 255. For larger volumes, this may require a different data type or a multi-scale approach. [G].
+-*   **Synchronization:** Memory barriers are required between stages to ensure that the output of one stage is visible to the next. [S1, unofficial].
++*   **Boundary Conditions:** Neighbors outside the volume bounds must be handled to avoid out-of-bounds access [G].
++*   **Precision:** The use of 8-bit unsigned integers limits the maximum representable distance to 255 [G].
++*   **Synchronization:** Memory barriers are required between stages to ensure that the output of one stage is visible to the next [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Empty Space Map Generation](1771-empty-space-map-generation.md)
+-Empty Space Map Generation is a preprocessing optimization for volume ray marching that creates a boolean map indicating which voxels contain no visible geometry based on a transfer function threshold. It allows the renderer to skip entire empty regions during ray traversal, significantly reducing the number of density samples and transfer function evaluations. The method integrates the transfer function's density criteria directly into the skipping logic, ensuring that only voxels contributing to the final image are processed.
++Empty Space Map Generation is a preprocessing technique that creates a boolean map indicating which voxels in a scalar field contain no visible geometry, allowing ray marching to skip empty regions. It reduces the number of density samples and transfer function evaluations by jumping over contiguous blocks of empty space. Unlike Distance Map Computation (Multi-Stage), which computes distances to occupied blocks, this method uses a binary occupancy check based on a transfer function threshold.
+ 
+ ### [Distance Transformation (Proximity Clouds)](5720-distance-transformation-proximity-clouds.md)
+@@ -136,20 +94,20 @@
+ 
+ ### Distance Field Precomputation
+-Precomputing distance fields for the scalar fields involved in the fiber surface definition to facilitate fast intersection detection via the rule of signs [S2]. The precomputation time is fixed and depends only on the distance field dimensions. In tests, a 64x64 array is accurate enough, taking around 1-2 milliseconds to compute the distance field for 4 FSCP with 4 segments for each polygon [S2].
++Precomputing distance fields for the scalar fields involved in the fiber surface definition to facilitate fast intersection detection via the rule of signs [S2]. The precomputation time is fixed and depends only on the distance field dimensions [S2]. In tests, a 64x64 array is accurate enough, taking around 1-2 milliseconds to compute the distance field for 4 FSCP with 4 segments for each polygon [S2].
+ 
+ ### AADF Exit Plane Calculation
+-Calculates the exit plane of an empty region defined by an Axis-Aligned Distance Field (AADF). The AADF stores distances to the nearest occupied voxel in each of the 6 directions [S3, unofficial]. The shift for each axis is determined by the ray direction: if `ray_dir.x < 0`, use shift 0 (-X), else use shift 5 (+X); similarly for Y (10/15) and Z (20/25) [S3, unofficial]. The bounds (distances) for each axis are extracted from the packed uint, with each distance being 5 bits [S3, unofficial]. The lower and upper bounds of the empty region in voxel coordinates are calculated as `coord - bounds` (clamped to 0) and `coord + 1 + bounds` (clamped to grid_ext), respectively [S3, unofficial]. The exit plane coordinate is returned based on the ray direction: if `ray_dir` is negative, return the lower bound, else return the upper bound [S3, unofficial]. The `cell_ext` parameter defines the size of the cell in voxel units: for chunks, `VX_BRICK_EXT * VX_CHUNK_EXT`; for bricks, `VX_BRICK_EXT`; for voxels, 1 [S3, unofficial].
++Calculates the exit plane of an empty region defined by an Axis-Aligned Distance Field (AADF) [S3, unofficial]. The AADF stores distances to the nearest occupied voxel in each of the 6 directions [S3, unofficial]. The shift for each axis is determined by the ray direction: if `ray_dir.x < 0`, use shift 0 (-X), else use shift 5 (+X); similarly for Y (10/15) and Z (20/25) [S3, unofficial]. The bounds (distances) for each axis are extracted from the packed uint, with each distance being 5 bits [S3, unofficial]. The lower and upper bounds of the empty region in voxel coordinates are calculated as `coord - bounds` (clamped to 0) and `coord + 1 + bounds` (clamped to grid_ext), respectively [S3, unofficial]. The exit plane coordinate is returned based on the ray direction: if `ray_dir` is negative, return the lower bound, else return the upper bound [S3, unofficial]. The `cell_ext` parameter defines the size of the cell in voxel units: for chunks, `VX_BRICK_EXT * VX_CHUNK_EXT`; for bricks, `VX_BRICK_EXT`; for voxels, 1 [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The multi-stage approach requires three separate compute shader dispatches, each processing the entire volume. The complexity is $O(N)$ where $N$ is the number of voxels, but with a constant factor of 3 due to the stages.
+-*   **Memory Complexity:** Requires storage for the occupancy map, distance map, and a swap buffer, all of size $O(N)$.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** Not given in the sources.
+-*   **Strengths:** Simple implementation, efficient use of GPU parallelism, enables fast empty space skipping.
+-*   **Limitations:** Limited by 8-bit precision, requires multiple passes, may not be optimal for very large volumes without tiling or multi-scale approaches.
+-*   **When to Use:** When empty space skipping is a significant performance bottleneck and the volume size is manageable within 8-bit distance precision.
+-*   **When Not to Use:** For very large volumes where 8-bit precision is insufficient, or when hierarchical structures are already in place.
++*   **Strengths:** Not given in the sources.
++*   **Limitations:** Not given in the sources.
++*   **When to Use:** Not given in the sources.
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-Distance Map Computation (Multi-Stage) is part of the DVR_ESS_PDM project, an unofficial implementation of distance-based empty space skipping for volume rendering [S1, unofficial]. It builds on the concept of occupancy maps and distance fields to accelerate ray marching. The multi-stage approach is a common technique for computing distance transforms on GPUs, where each stage handles propagation along one axis.
++Distance Map Computation (Multi-Stage) is implemented in the DVR_ESS_PDM repository [S1, unofficial]. It builds on the concept of occupancy maps and distance fields to accelerate ray marching [S1, unofficial]. The multi-stage approach processes the volume across three separate compute shader dispatches, each handling propagation along one axis [S1, unofficial].
+ 
+ ## Sources

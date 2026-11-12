@@ -1,0 +1,219 @@
+--- v006.md
++++ v007.md
+@@ -4,109 +4,141 @@
+ 
+ ## Overview
+-The GES Optimization Strategy is a training methodology for Generalized Exponential Splats (GES) that controls shape density by selectively pruning splats based on shape attributes, thereby eliminating the need for the variable density mechanisms (splitting/cloning) used in standard 3D Gaussian Splatting [S1]. It optimizes the shape parameter $\beta$, position $x$, opacity $\kappa$, covariance $\Sigma$, and spherical harmonics coefficients using Stochastic Gradient Descent (SGD) [S1]. Unlike its siblings which rely on gradient-based densification triggers, GES uses a fixed iteration schedule with periodic shape resets and pruning to maintain a stable set of primitives [S1].
++The GES Optimization Strategy is a training methodology for Generalized Exponential Splats (GES) that controls shape density by selectively pruning splats based on shape attributes, thereby eliminating the need for a variable density mechanism [S1]. It differs from standard 3D Gaussian Splatting training by optimizing a specific shape parameter $\beta$ alongside position, opacity, and covariance, using a frequency-modulated loss to enhance high-frequency detail reconstruction [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Initial set of GES primitives derived from Structure-from-Motion (SfM) points, including initial positions $x$, covariance matrices $\Sigma$, and shape parameters $\beta$ (initialized to 2 for pure Gaussian splats) [S1].
+-*   **Output:** Optimized set of GES primitives with refined parameters after 40,000 iterations [S1].
++*   **Inputs:** Sparse Structure-from-Motion (SfM) points, input images, and hyperparameters.
++*   **Outputs:** Optimized set of GES primitives, each defined by position $x$, opacity $\kappa$, covariance $\Sigma$, shape parameter $\beta$, and spherical harmonics coefficients.
+ 
+ **Data Structures:**
+-*   **GES Primitive:** Contains position $x$, covariance $\Sigma$, shape parameter $\beta$, opacity $\kappa$, and spherical harmonics coefficients [S1].
+-*   **Buffers:** GPU buffers store these parameters for parallel optimization [S1].
++Each GES primitive stores:
++*   $x \in \mathbb{R}^3$: Position.
++*   $\kappa \in \mathbb{R}$: Opacity.
++*   $\Sigma \in \mathbb{R}^{3 \times 3}$: Covariance matrix (positive definite).
++*   $\beta \in \mathbb{R}$: Shape parameter controlling the exponential decay rate.
++*   $c \in \mathbb{R}^k$: Spherical harmonics coefficients for color.
++
++**Initialization:**
++1.  Initialize position $x$ and covariance $\Sigma$ from SfM points [S1].
++2.  Initialize all shape parameters $\beta = 2$ (representing pure Gaussian splats) [S1].
++3.  Initialize opacity $\kappa$ and spherical harmonics coefficients $c$ (standard initialization, details shared with Gaussian Splatting [S1]).
+ 
+ **Loss Function:**
+ The total loss $\mathcal{L}$ is a weighted sum of L1 loss, Structural Similarity (SSIM) loss, and a frequency-modulated loss $\mathcal{L}_{\omega}$ [S1]:
+-$$ \mathcal{L} = \lambda_{L1}\mathcal{L}_1 + \lambda_{\text{ssim}}\mathcal{L}_{\text{ssim}} + \lambda_{\omega}\mathcal{L}_{\omega} $$
+-where $\lambda_{L1}$, $\lambda_{\text{ssim}}$, and $\lambda_{\omega}$ are weighting coefficients [S1]. The frequency-modulated loss utilizes masks $M_\omega$ to focus on specific frequency bands, with a linear schedule for target normalized frequencies $\omega$ [S1].
++$$
++\mathcal{L} = \lambda_{L1}\mathcal{L}_1 + \lambda_{\text{ssim}}\mathcal{L}_{\text{ssim}} + \lambda_{\omega}\mathcal{L}_{\omega}
++$$
++where $\lambda_{L1}$, $\lambda_{\text{ssim}}$, and $\lambda_{\omega}$ are weighting coefficients [S1]. The frequency-modulated loss $\mathcal{L}_{\omega}$ utilizes masks $M_\omega$ to focus on specific frequency bands, with a linear schedule for target normalized frequencies $\omega$ [S1].
+ 
+-**Parameters:**
+-*   **Total Iterations:** 40,000 [S1].
+-*   **Density Gradient Threshold:** 0.0003 [S1].
+-*   **Learning Rate for $\beta$:** 0.0015 [S1].
+-*   **Shape Reset Interval:** 1000 iterations [S1].
+-*   **Shape Pruning Interval:** 100 iterations [S1].
+-*   **Pruning Threshold:** 0.5 [S1].
+-*   **Shape Strength Parameter:** 0.1 [S1].
+-*   **Image Laplacian Scale Factor:** 0.2 [S1].
+-*   **Frequency Loss Coefficient ($\lambda_\omega$):** 0.5 [S1].
++**Optimization Steps:**
++The optimization runs for a fixed number of iterations using Stochastic Gradient Descent (SGD) [S1].
+ 
+-**Algorithm Steps:**
+-1.  **Initialization:** Initialize all $\beta$ values to 2 (pure Gaussian) [S1]. Initialize $\Sigma$ and $x$ from SfM points [S1].
+-2.  **Iteration Loop:** For each iteration $t$ from 1 to 40,000:
+-    a.  **Render:** Render the current view using the current GES primitives [S1].
+-    b.  **Compute Loss:** Calculate $\mathcal{L}$ using the current rendered image and ground truth [S1].
+-    c.  **Backpropagate:** Compute gradients for $x, \kappa, \Sigma, \beta$, and spherical harmonics coefficients [S1].
+-    d.  **Update:** Perform SGD update for all parameters [S1].
+-    e.  **Shape Reset:** If $t \pmod{1000} == 0$, reset shape parameters [S1].
+-    f.  **Pruning:** If $t \pmod{100} == 0$, prune splats based on shape attributes [S1].
++1.  **Render:** Render the current scene from the camera viewpoint using the current GES primitives.
++2.  **Compute Loss:** Calculate $\mathcal{L}$ using the rendered image and the ground truth image [S1].
++3.  **Backpropagate:** Compute gradients for $x, \kappa, \Sigma, \beta, c$ [S1].
++4.  **Update Parameters:** Update parameters using SGD [S1].
++5.  **Periodic Shape Reset:** Every `shape_reset_interval` iterations, reset the shape parameters $\beta$ to the initial value (2) [S1].
++6.  **Periodic Shape Pruning:** Every `shape_pruning_interval` iterations, prune primitives based on shape attributes [S1].
++    *   Calculate a shape-based metric for each primitive.
++    *   If the metric exceeds the `pruning_threshold`, remove the primitive [S1].
++7.  **Repeat** until `total_iterations` is reached [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def optimize_ges(primitives, images, gt_images, total_iterations=40000):
+-    # Initialize parameters
+-    for p in primitives:
+-        p.beta = 2.0  # Pure Gaussian initialization
+-        p.x, p.Sigma = get_sfm_initialization(p)
+-    
++def optimize_ges(sfm_points, images, total_iterations=40000):
++    # Initialize primitives from SfM
++    primitives = []
++    for point in sfm_points:
++        prim = Primitive(
++            x=point.position,
++            sigma=point.covariance,
++            beta=2.0,  # Pure Gaussian initialization
++            kappa=init_opacity(),
++            sh_coeffs=init_sh()
++        )
++        primitives.append(prim)
++
++    # Hyperparameters
+     lr_beta = 0.0015
++    density_gradient_threshold = 0.0003
+     shape_reset_interval = 1000
+     shape_pruning_interval = 100
+     pruning_threshold = 0.5
+-    density_gradient_threshold = 0.0003
+-    
+-    for t in range(1, total_iterations + 1):
+-        # 1. Forward Pass
+-        rendered_images = []
+-        for image in images:
+-            rendered = render_ges(primitives, image.camera)
+-            rendered_images.append(rendered)
++    shape_strength = 0.1
++    image_laplacian_scale = 0.2
++    lambda_omega = 0.5
++
++    for iter in range(total_iterations):
++        # 1. Render and Compute Loss
++        rendered_image = render(primitives, camera)
++        target_image = images[iter % len(images)]
+         
+-        # 2. Loss Calculation
+-        loss = 0.0
+-        for rendered, gt in zip(rendered_images, gt_images):
+-            l1_loss = compute_l1_loss(rendered, gt)
+-            ssim_loss = compute_ssim_loss(rendered, gt)
+-            # Frequency-modulated loss calculation
+-            omega = t / total_iterations
+-            mask = generate_frequency_mask(omega)
+-            freq_loss = compute_frequency_loss(rendered, gt, mask)
+-            loss += lambda_l1 * l1_loss + lambda_ssim * ssim_loss + lambda_omega * freq_loss
++        # Frequency mask schedule
++        omega = iter / total_iterations
++        mask = compute_frequency_mask(omega)
+         
+-        # 3. Backpropagation
++        loss = compute_loss(rendered_image, target_image, mask, lambda_omega)
++        
++        # 2. Backpropagate
+         gradients = compute_gradients(loss, primitives)
+         
+-        # 4. Parameter Update
+-        for p in primitives:
+-            p.x -= lr_x * gradients[p].x
+-            p.Sigma -= lr_sigma * gradients[p].Sigma
+-            p.kappa -= lr_kappa * gradients[p].kappa
+-            p.beta -= lr_beta * gradients[p].beta
+-            # Update spherical harmonics coefficients
+-            update_sh_coefficients(p, gradients[p].sh)
++        # 3. Update Parameters
++        for prim in primitives:
++            prim.x -= lr * gradients[prim].x
++            prim.kappa -= lr * gradients[prim].kappa
++            prim.sigma -= lr * gradients[prim].sigma
++            prim.beta -= lr_beta * gradients[prim].beta
++            prim.sh_coeffs -= lr * gradients[prim].sh_coeffs
++            
++        # 4. Periodic Shape Reset
++        if iter % shape_reset_interval == 0:
++            for prim in primitives:
++                prim.beta = 2.0
++                
++        # 5. Periodic Shape Pruning
++        if iter % shape_pruning_interval == 0:
++            primitives = prune_by_shape(primitives, pruning_threshold, shape_strength)
++            
++    return primitives
++
++def prune_by_shape(primitives, threshold, strength):
++    active_primitives = []
++    for prim in primitives:
++        # Calculate shape-based metric (e.g., gradient norm or density contribution)
++        # Note: Exact formula for shape metric not provided in sources [S1]
++        shape_metric = compute_shape_metric(prim, strength)
+         
+-        # 5. Shape Reset
+-        if t % shape_reset_interval == 0:
+-            reset_shape_parameters(primitives)
+-        
+-        # 6. Pruning
+-        if t % shape_pruning_interval == 0:
+-            prune_primitives(primitives, pruning_threshold, density_gradient_threshold)
+-    
+-    return primitives
++        if shape_metric < threshold:
++            active_primitives.append(prim)
++        # Else: primitive is pruned
++    return active_primitives
+ ```
++
++**Parameters:**
++*   Total iterations: 40,000 [S1].
++*   Density gradient threshold: 0.0003 [S1].
++*   Learning rate for $\beta$: 0.0015 [S1].
++*   Shape reset interval: 1000 iterations [S1].
++*   Shape pruning interval: 100 iterations [S1].
++*   Pruning threshold: 0.5 [S1].
++*   Shape strength parameter: 0.1 [S1].
++*   Image Laplacian scale factor: 0.2 [S1].
++*   $\lambda_{\omega}$: 0.5 [S1].
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Precision:** GPU-powered computation and specialized CUDA kernels are used to accelerate optimization [S1].
+-*   **Boundaries:** The frequency loss masks $M_\omega$ ensure coverage of all image parts, with a focus on details as optimization progresses [S1].
++*   **Boundaries:** The frequency mask $M_\omega$ ensures coverage of all image parts, with a focus on details as optimization progresses (50% < $\omega \le$ 100%) [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The optimization runs for a fixed 40,000 iterations [S1].
+-*   **Memory Complexity:** Memory requirements are optimized for the parameters [S1].
+-*   **Strengths:** Eliminates the need for variable density mechanisms, simplifying the training process [S1].
+-*   **Limitations:** Relies on a fixed number of iterations and periodic pruning, which may not adapt as dynamically as gradient-based densification [S1].
+-*   **When to Use:** Suitable for novel view synthesis tasks where a balance between high fidelity and efficiency is required [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** Evaluated on an A6000 GPU [S1]. Achieves a balance between high fidelity and efficiency in novel view synthesis [S1].
++*   **Strengths:** Eliminates the need for a variable density mechanism by controlling shape density via pruning [S1]. Enhances edge reconstruction through frequency-modulated loss [S1].
++*   **Limitations:** Not given in the sources.
++*   **When to use:** When high-fidelity novel view synthesis is required with efficient radiance field rendering [S1].
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-The GES Optimization Strategy was introduced in the paper "GES: Generalized Exponential Splatting for Efficient Radiance Field Rendering" [S1]. It builds upon the principles of 3D Gaussian Splatting but introduces a novel approach to shape density control [S1]. The method was evaluated on novel view synthesis tasks, demonstrating competitive performance against state-of-the-art techniques [S1].
++The GES Optimization Strategy was introduced in the paper "GES: Generalized Exponential Splatting for Efficient Radiance Field Rendering" [S1]. It builds on the principles of 3D Gaussian Splatting but introduces generalized exponential splats with a shape parameter $\beta$ [S1]. The method was developed to improve the balance between accuracy and computational load in radiance field optimization [S1].
+ 
+ ## Sources

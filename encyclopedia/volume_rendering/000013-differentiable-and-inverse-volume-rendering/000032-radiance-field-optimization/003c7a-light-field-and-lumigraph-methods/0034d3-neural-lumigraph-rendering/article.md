@@ -3,100 +3,66 @@
 Also called: Neural Radiance Fields with SDF export, SIREN-based Neural Rendering
 
 ## Overview
-Neural Lumigraph Rendering (NLR) is a neural rendering framework that jointly optimizes an implicit signed distance function (SDF) for geometry and a radiance field for appearance, supervised exclusively by posed 2D images [S1]. It enables the export of view-dependent textured meshes for real-time rasterization, achieving rendering speeds two orders of magnitude faster than standard neural volume rendering methods like NeRF while maintaining comparable image quality [S1]. Unlike sibling methods that rely on dense volumetric sampling or local light field fusion, NLR uses sphere tracing on an SDF to find the surface and applies unstructured lumigraph rendering to blend projective textures, preserving view-dependent effects without runtime volumetric integration [S1].
+Neural Lumigraph Rendering (NLR) is a neural rendering framework that jointly optimizes an implicit signed distance function (SDF) for geometry and a radiance field for appearance, supervised exclusively by posed 2D images [S1]. It differs from standard neural volume rendering methods like [NeRF](52-name.md) by explicitly optimizing a surface representation, which allows for the export of a triangular mesh with view-dependent textures, enabling real-time rasterization via OpenGL [S1]. Unlike [Local Light Field Fusion](1124-local-light-field-fusion.md), which relies on local light field approximations, NLR learns a global continuous implicit representation that is later converted into an unstructured lumigraph for efficient rendering [S1].
 
 ## How it works
-### Inputs and Outputs
-**Inputs:**
-- A set of $m$ multi-view 2D images $I \in \mathbb{R}^{m \times w \times h \times 3}$ with known object masks $M \in \mathbb{R}^{m \times w \times h}$ (where 1 marks foreground) [S1].
-- Camera poses (view matrix $V$ and projection matrix $P$) for each image [S1].
+**Inputs and Outputs:**
+*   **Inputs:** A set of $m$ multi-view 2D images $I \in \mathbb{R}^{m \times w \times h \times 3}$ with known object masks $M \in \mathbb{R}^{m \times w \times h}$ (where 1 marks foreground) and corresponding camera poses (view matrix $V$ and projection matrix $P$) [S1].
+*   **Outputs:** Optimized parameters $\theta$ (for SDF) and $\phi$ (for radiance field); optionally, a triangular mesh and projective textures for real-time rendering [S1].
 
-**Outputs:**
-- Optimized SDF parameters $\theta$ and radiance field parameters $\phi$ [S1].
-- A triangular mesh extracted from the SDF [S1].
-- Projective textures $T_i$ for $N$ camera poses [S1].
-- Real-time rendered images via rasterization and texture blending [S1].
+**Data Structures:**
+*   **SDF Network $S$:** A SIREN (Sinusoidal Representation Network) MLP with 5 layers and 256 hidden units each [S1]. Input: $x \in \mathbb{R}^3$. Output: $S(x; \theta) \in \mathbb{R}$ [S1].
+*   **Radiance Field Network $E$:** A SIREN MLP with 5 layers and 256 hidden units each [S1]. Input: Position $x \in \mathbb{R}^3$, view direction $r_d \in \mathbb{R}^3$, and local normal $n \in \mathbb{R}^3$. The view direction $r_d$ is encoded using Fourier features $\{\sin(2k\pi r_d), \cos(2k\pi r_d) \mid k \in 1 \dots 4\}$ [S1]. Output: RGB color $E(x, r_d, n; \theta, \phi) \in \mathbb{R}^3$ [S1].
+*   **Mesh:** Extracted via marching cubes on a voxelized SDF at $512^3$ resolution [S1].
+*   **Projective Textures:** $N$ textures $T_i$ synthesized by resampling $E$ for specific camera poses [S1].
 
-### Data Structures
-1.  **SDF Network ($S$):** A SIREN (Sinusoidal Representation Network) MLP with 5 layers and 256 hidden units each [S1].
-    -   Input: $\mathbf{x} \in \mathbb{R}^3$ (3D location).
-    -   Output: $S(\mathbf{x}; \theta) \in \mathbb{R}$ (signed distance value).
-    -   Parameters: $\theta$ [S1].
-2.  **Radiance Field Network ($E$):** A SIREN MLP with 5 layers and 256 hidden units each [S1].
-    -   Input: Concatenation of $\mathbf{x} \in \mathbb{R}^3$, view direction $\mathbf{r}_d \in \mathbb{R}^3$, and local normal $\mathbf{n} \in \mathbb{R}^3$.
-    -   Preprocessing: $\mathbf{r}_d$ is expanded with Fourier features $\{\sin(2k\pi\mathbf{r}_d), \cos(2k\pi\mathbf{r}_d) \mid k \in 1 \dots 4\}$ [S1].
-    -   Output: $\mathbf{c} \in \mathbb{R}^3$ (RGB color).
-    -   Parameters: $\phi$ (additional learnable parameters, reusing $\theta$ for capacity) [S1].
-3.  **Mesh:** Extracted via marching cubes on $S$ voxelized at $512^3$ resolution [S1].
-4.  **Projective Textures:** $N$ textures $T_i$ synthesized by resampling $E$ at specific camera poses [S1].
+**Numbered Steps:**
 
-### Numbered Steps
+1.  **Ray Generation:** For a pixel at relative projection plane location $u \in [-1, 1]^2$, compute ray origin $r_o$ and direction $r_d$ using the view matrix $V$ and projection matrix $P$ [S1]:
+    $$ r_o = (V^{-1} \cdot [0, 0, 1, 0]^T)_{x,y,z} $$
+    $$ r_d = \nu((P \cdot V)^{-1} \cdot [u_x, u_y, 0, 1]^T) $$
+    where $\nu(\omega) = \omega_{x,y,z} / \|\omega_{x,y,z}\|$ is vector normalization [S1].
 
-#### 1. Initialization
-Initialize the SDF $S$ to a unit sphere of radius 0.5 by pretraining to a procedural shape [S1]. Trace object rays in a larger sphere of radius 1 [S1].
+2.  **Sphere Tracing:** Find the zero-level set $S_0$ closest to the camera origin along $r_d$ using iterative updates [S1]:
+    $$ x_0 = r_o $$
+    $$ x_{i+1} = x_i + S(x_i) r_d $$
+    Iterate for $n=16$ steps [S1]. A small residual $|S(x_n)| < 0.005$ is tolerated for convergence [S1]. Gradients are retained only in the last step to save memory [S1].
 
-#### 2. Ray Generation
-For a pixel at relative projection plane location $\mathbf{u} \in [-1, 1]^2$:
-1.  Compute ray origin $\mathbf{r}_o$:
-    $$ \mathbf{r}_o = (V^{-1} \cdot [0, 0, 1, 0]^T)_{x,y,z} $$
-2.  Compute ray direction $\mathbf{r}_d$:
-    $$ \mathbf{r}_d = \nu((P \cdot V)^{-1} \cdot [\mathbf{u}_x, \mathbf{u}_y, 0, 1]^T) $$
-    where $\nu(\boldsymbol{\omega}) = \boldsymbol{\omega}_{x,y,z} / \|\boldsymbol{\omega}_{x,y,z}\|$ is vector normalization [S1].
+3.  **Appearance Sampling:** Sample the radiance field at the converged surface point $S_0$ and its normal $n = \nabla_x S(S_0)$ [S1]:
+    $$ c = E(S_0, r_d, n; \theta, \phi) $$
 
-#### 3. Sphere Tracing (Geometry)
-Find the zero-level set $S_0$ closest to the camera origin along $\mathbf{r}_d$:
-1.  Initialize $\mathbf{x}_0 = \mathbf{r}_o$.
-2.  Iterate for $n=16$ steps:
-    $$ \mathbf{x}_{i+1} = \mathbf{x}_i + S(\mathbf{x}_i; \theta) \mathbf{r}_d $$
-3.  Converged surface point $\mathbf{x}_n$ is used if $|S(\mathbf{x}_n)| < 0.005$ [S1].
-4.  **Gradient Handling:** Retain gradients only in the last step of the sphere tracer to make it memory efficient [S1].
+4.  **Loss Computation:** Minimize the weighted sum of losses [S1]:
+    $$ \mathcal{L} = \mathcal{L}_R + w_E \mathcal{L}_E + w_M \mathcal{L}_M + w_S \mathcal{L}_S $$
+    *   **Reconstruction Loss ($\mathcal{L}_R$):** L1 error for foreground pixels $U_f = U \cap S_0 \cap \{U \mid M_U = 1\}$ [S1]:
+        $$ \mathcal{L}_R = \frac{1}{|U|} \sum_{c \in I_{U_f}} |E(x, r_d, n; \theta, \phi) - c| $$
+    *   **Eikonal Loss ($\mathcal{L}_E$):** Enforces metric properties for efficient sphere tracing by sampling random points $x_r$ uniformly from a cube encapsulating the object's bounding unit radius sphere [S1]:
+        $$ \mathcal{L}_E = \frac{1}{|U|} \sum_{x_r} (\|\nabla_x S(x_r; \theta)\|_2^2 - 1)^2 $$
+    *   **Mask Loss ($\mathcal{L}_M$):** Soft mask loss for non-foreground pixels $M_U \setminus U_f$ using softness parameter $\alpha$ [S1]:
+        $$ \mathcal{L}_M = \frac{1}{\alpha|U|} \sum_{m \in M_U \setminus U_f} \text{BCE}(\text{sigmoid}(S_{min}/\alpha), m) $$
+        where $S_{min} = \arg \min_t S(r_o + t r_d; \theta)$ is the minimum SDF value along the ray [S1].
+    *   **Smoothness Loss ($\mathcal{L}_S$):** Linearizes angular behavior to prevent overfitting [S1]:
+        $$ \mathcal{L}_S = \frac{1}{|U|} \sum \|\nabla^2_{r_d} E(x, r_d, n; \theta, \phi)\|_2^2 $$
 
-#### 4. Appearance Sampling
-Compute the local normal $\mathbf{n} = \nabla_{\mathbf{x}} S(\mathbf{x}_n; \theta)$ using automatic differentiation [S1]. Sample the radiance field:
-$$ \mathbf{c} = E(\mathbf{x}_n, \mathbf{r}_d, \mathbf{n}; \theta, \phi) $$
+5.  **Optimization:** Optimize $\theta$ and $\phi$ using the Adam solver with initial learning rate $10^{-4}$, decreased by factor of 2 every 40,000 batches for 150,000 batches [S1]. Use a batch size of 50,000 rays sampled uniformly [S1]. Typical weights: $w_E = 0.1$, $w_M = 100$, $w_S = 0.01$ [S1].
 
-#### 5. Loss Computation
-Minimize the weighted sum of losses using mini-batches of 50,000 rays sampled uniformly across the training dataset [S1]:
-$$ \mathcal{L} = \mathcal{L}_R + w_E \mathcal{L}_E + w_M \mathcal{L}_M + w_S \mathcal{L}_S $$
+6.  **Mesh Extraction (Optional for Real-Time):**
+    *   Voxelize $S$ at $512^3$ resolution [S1].
+    *   Apply marching cubes to extract the iso-surface [S1].
+    *   Offset the iso-surface by 0.5% of the object radius in the outside direction to optimize image quality [S1].
 
--   **Reconstruction Loss ($\mathcal{L}_R$):** L1 error for true foreground pixels $U_f = U \cap S_0 \cap \{U \mid M_U = 1\}$:
-    $$ \mathcal{L}_R = \frac{1}{|U|} \sum_{\mathbf{c} \in I_{U_f}} |E(\mathbf{x}, \mathbf{r}_d, \mathbf{n}; \theta, \phi) - \mathbf{c}| $$
-    where $\mathbf{c}$ is the RGB value of a foreground pixel [S1].
+7.  **Texture Synthesis (Optional for Real-Time):**
+    *   Resample $E$ to synthesize projective textures $T_i$ for $N$ camera poses [S1].
 
--   **Eikonal Loss ($\mathcal{L}_E$):** Regularizes $S$ to enforce metric properties (gradient magnitude of 1). Random points $\mathbf{x}_r$ are uniformly sampled from a cube encapsulating the object's bounding unit radius sphere:
-    $$ \mathcal{L}_E = \frac{1}{|U|} \sum_{\mathbf{x}_r} (\|\nabla_{\mathbf{x}} S(\mathbf{x}_r; \theta)\|_2^2 - 1)^2 $$
-    [S1].
+8.  **Real-Time Rendering (Optional):**
+    *   Rasterize the mesh using OpenGL [S1].
+    *   Compute angles $\tau_i$ between the ray to the current camera and rays to each of the $N$ texture viewpoints [S1].
+    *   Select the first $k=5$ textures sorted by $\tau_i$ ascending [S1].
+    *   Blend contributions using unstructured lumigraph rendering weights [S1]:
+        $$ \hat{w}_i = \frac{1}{\tau_i} (1 - \frac{\tau_i}{\tau_k}) $$
+        $$ w_i = \frac{\hat{w}_i}{\sum_{j=1}^k \hat{w}_j} $$
+    *   Discard occluded textures by setting $w_i=0$ if the pre-rendered depth indicates occlusion [S1].
 
--   **Mask Loss ($\mathcal{L}_M$):** Restricts coarse shape to object mask boundaries for non-foreground pixels $M_U \setminus U_f$. Uses softness parameter $\alpha$ and binary cross entropy (BCE):
-    $$ \mathcal{L}_M = \frac{1}{\alpha |U|} \sum_{m \in M_U \setminus U_f} \text{BCE}(\text{sigmoid}(S_{\min}/\alpha), m) $$
-    where $S_{\min} = \arg \min_t S(\mathbf{r}_o + t \mathbf{r}_d; \theta)$ is the minimum S value along the entire ray, approximated by dense sampling of $t$ [S1].
-
--   **Smoothness Loss ($\mathcal{L}_S$):** Regularizes $E$ to avoid overfitting by linearizing angular behavior:
-    $$ \mathcal{L}_S = \frac{1}{|U|} \sum \|\mathbf{r}_2 \cdot \nabla_{\mathbf{r}_d} E(\mathbf{x}, \mathbf{r}_d, \mathbf{n}; \theta, \phi)\|_2^2 $$
-    where $\mathbf{r}_2$ is a weighting factor [S1].
-
-#### 6. Optimization
-Optimize $\theta$ and $\phi$ using the Adam solver with initial learning rate $10^{-4}$, decreased by a factor of 2 every 40,000 batches for 150,000 batches total [S1].
-Typical weights: $w_E = 0.1$, $w_M = 100$, $w_S = 0.01$ [S1].
-
-#### 7. Mesh Extraction and Texture Synthesis (Post-Training)
-1.  **Mesh:** Use marching cubes on $S$ voxelized at $512^3$. Offset the iso-surface by 0.5% of the object radius in the outside direction [S1].
-2.  **Textures:** Resample $E$ to synthesize projective textures $T_i$ for $N$ camera poses and corresponding projection matrices [S1].
-
-#### 8. Real-Time Rendering (Unstructured Lumigraph)
-For a current rendering camera:
-1.  Rasterize the extracted mesh using OpenGL and project vertex positions to each pixel [S1].
-2.  Compute angles $\tau_{1 \dots N}$ between the ray towards the current rendering camera and the rays towards each of the $N$ projective texture map viewpoints [S1].
-3.  Select the first $k=5$ textures sorted by $\tau_i$ in ascending order [S1].
-4.  Compute weights:
-    $$ \hat{w}_i = \frac{1}{\tau_i} \left(1 - \frac{\tau_i}{\tau_k}\right) $$
-    $$ w_i = \frac{\hat{w}_i}{\sum_{j=1}^k \hat{w}_j} $$
-5.  **Occlusion Handling:** Discard samples from occluded textures by setting their $w_i$ to zero. Occlusions are detected by comparing the pre-rendered depth associated with a texture and the distance between the mesh voxel and the texture viewpoint [S1].
-6.  Render:
-    $$ R = \sum_{i=1}^k w_i T_i $$
-    [S1].
-
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -106,283 +72,184 @@ import torch.nn as nn
 import numpy as np
 
 class SIREN(nn.Module):
-    """Sinusoidal Representation Network"""
-    def __init__(self, in_dim, out_dim, hidden_dim=256, num_layers=5):
+    def __init__(self, in_features, out_features, hidden_features=256, num_layers=5):
         super().__init__()
         self.layers = nn.ModuleList()
-        self.layers.append(nn.Linear(in_dim, hidden_dim))
+        self.layers.append(nn.Linear(in_features, hidden_features))
         for _ in range(num_layers - 2):
-            self.layers.append(nn.Linear(hidden_dim, hidden_dim))
-        self.layers.append(nn.Linear(hidden_dim, out_dim))
+            self.layers.append(nn.Linear(hidden_features, hidden_features))
+        self.layers.append(nn.Linear(hidden_features, out_features))
         
     def forward(self, x):
         for i, layer in enumerate(self.layers):
             x = layer(x)
             if i < len(self.layers) - 1:
-                # SINE activation for hidden layers
+                # SIREN uses sin activation for hidden layers
                 x = torch.sin(x)
         return x
 
-class NeuralLumigraphRenderer:
-    def __init__(self, num_layers=5, hidden_dim=256, num_textures=16, k_blend=5):
-        self.S = SIREN(3, 1, hidden_dim, num_layers) # SDF
-        self.E = SIREN(9, 3, hidden_dim, num_layers) # Radiance Field (x, rd, n)
-        self.num_textures = num_textures
-        self.k_blend = k_blend
-        self.w_E = 0.1
-        self.w_M = 100.0
-        self.w_S = 0.01
-        self.alpha = 0.1 # Softness parameter for mask loss
-        
-    def get_ray(self, u, V_inv, P_inv):
-        """Compute ray origin and direction from pixel coordinates u in [-1, 1]^2"""
-        # Ray origin: inverse view transform of (0,0,1)
-        ray_origin_hom = torch.tensor([0.0, 0.0, 1.0, 0.0])
-        ray_origin = (V_inv @ ray_origin_hom)[:3]
-        
-        # Ray direction: inverse projection-view transform of (u_x, u_y, 0, 1)
-        ray_dir_hom = torch.tensor([u[0], u[1], 0.0, 1.0])
-        ray_dir_vec = (P_inv @ V_inv @ ray_dir_hom)[:3]
-        ray_dir = ray_dir_vec / torch.norm(ray_dir_vec)
-        
-        return ray_origin, ray_dir
+def fourier_features(r_d, num_freqs=4):
+    """Encode view direction with Fourier features."""
+    freq_bands = [2 * k * np.pi for k in range(1, num_freqs + 1)]
+    features = []
+    for f in freq_bands:
+        features.append(torch.sin(f * r_d))
+        features.append(torch.cos(f * r_d))
+    return torch.cat(features, dim=-1)
 
-    def sphere_trace(self, ray_origin, ray_dir, max_steps=16):
-        """Sphere trace SDF to find surface. Gradients only retained in last step."""
-        x = ray_origin.clone().detach().requires_grad_(True)
-        
-        for i in range(max_steps):
-            # Evaluate SDF
-            s_val = self.S(x).squeeze()
-            
-            # Check convergence
-            if torch.abs(s_val) < 0.005:
-                break
-            
-            # Update position
-            x = x + s_val * ray_dir
-            
-            # Gradient handling: Detach and re-attach only for the last step to save memory
-            # Note: In practice, this requires careful autograd graph management.
-            # Here we assume standard autograd but only compute loss on final x.
-            if i < max_steps - 1:
-                x = x.detach().requires_grad_(True)
-                
-        return x, self.S(x).squeeze()
+def sphere_trace(S_network, r_o, r_d, num_steps=16):
+    """
+    Sphere trace the SDF to find the zero-level set.
+    Returns the converged point x_n.
+    """
+    x = r_o
+    for i in range(num_steps):
+        s_val = S_network(x)
+        # Gradient retention only in the last step is handled by the optimizer
+        # during backprop, but here we just compute the step
+        x = x + s_val * r_d
+    return x
 
-    def compute_fourier_features(self, rd):
-        """Add Fourier features to view direction"""
-        k = 4
-        freqs = torch.arange(1, k + 1)
-        sin_feats = torch.sin(2 * np.pi * freqs * rd.unsqueeze(-1))
-        cos_feats = torch.cos(2 * np.pi * freqs * rd.unsqueeze(-1))
-        return torch.cat([rd, sin_feats.flatten(), cos_feats.flatten()], dim=-1)
+def compute_losses(S_network, E_network, batch_r_o, batch_r_d, batch_images, batch_masks, w_E=0.1, w_M=100, w_S=0.01, alpha=1.0):
+    """
+    Compute the total loss for a batch of rays.
+    """
+    # 1. Sphere Trace
+    # Note: In practice, gradients are only retained for the last step of sphere tracing
+    # to save memory. We assume S_network is differentiable.
+    surface_points = sphere_trace(S_network, batch_r_o, batch_r_d, num_steps=16)
+    
+    # 2. Compute Normals via Autodiff
+    surface_points.requires_grad_(True)
+    sdf_vals = S_network(surface_points)
+    normals = torch.autograd.grad(
+        sdf_vals.sum(), surface_points, create_graph=True, retain_graph=True
+    )[0]
+    normals = normals / torch.norm(normals, dim=-1, keepdim=True)
+    
+    # 3. Sample Radiance
+    # Encode view direction
+    r_d_encoded = fourier_features(batch_r_d)
+    # Concatenate x, r_d_encoded, n
+    input_E = torch.cat([surface_points, r_d_encoded, normals], dim=-1)
+    colors = E_network(input_E)
+    
+    # 4. Reconstruction Loss (Foreground)
+    # Identify foreground pixels (mask == 1)
+    foreground_mask = batch_masks == 1
+    if foreground_mask.sum() == 0:
+        return torch.tensor(0.0, device=colors.device)
+    
+    l_r = torch.mean(torch.abs(colors[foreground_mask] - batch_images[foreground_mask]))
+    
+    # 5. Eikonal Loss
+    # Sample random points from a cube
+    num_random = batch_r_o.shape[0]
+    random_points = torch.rand(num_random, 3, device=colors.device) * 2 - 1 # Cube [-1, 1]^3
+    sdf_random = S_network(random_points)
+    grad_random = torch.autograd.grad(
+        sdf_random.sum(), random_points, create_graph=True, retain_graph=True
+    )[0]
+    eikonal_term = torch.norm(grad_random, dim=-1, keepdim=True) ** 2 - 1
+    l_e = torch.mean(eikonal_term ** 2)
+    
+    # 6. Mask Loss (Non-foreground)
+    # Find minimum S along the ray for non-foreground pixels
+    non_foreground_mask = batch_masks == 0
+    if non_foreground_mask.sum() == 0:
+        l_m = torch.tensor(0.0, device=colors.device)
+    else:
+        # Dense sampling along ray to find min S
+        t_vals = torch.linspace(0, 10, 100, device=colors.device) # Arbitrary max distance
+        ray_points = batch_r_o.unsqueeze(1) + t_vals.unsqueeze(0) * batch_r_d.unsqueeze(1)
+        sdf_along_ray = S_network(ray_points.reshape(-1, 3)).reshape(batch_r_o.shape[0], -1)
+        s_min = torch.min(sdf_along_ray, dim=1)[0]
+        
+        # Soft mask loss
+        sigmoid_s_min = torch.sigmoid(s_min / alpha)
+        # BCE loss
+        target = torch.zeros_like(sigmoid_s_min) # Background is 0
+        l_m = torch.nn.functional.binary_cross_entropy(sigmoid_s_min, target)
+        
+    # 7. Smoothness Loss
+    # Approximate angular smoothness using finite differences or autodiff on r_d
+    # The paper uses ||r_2 * r_d E||^2. We approximate r_d derivative via autodiff.
+    # Note: This requires re-computing E with perturbed r_d or using autodiff.
+    # For simplicity, we use a numerical approximation or assume E_network supports it.
+    # Here we use a simplified version: variance of color with respect to small perturbations in r_d.
+    # However, the paper specifies ||r_2 * r_d E||^2. Let's use autodiff for accuracy.
+    r_d_perturbed = batch_r_d.clone()
+    r_d_perturbed.requires_grad_(True)
+    r_d_enc_perturbed = fourier_features(r_d_perturbed)
+    input_E_perturbed = torch.cat([surface_points, r_d_enc_perturbed, normals], dim=-1)
+    colors_perturbed = E_network(input_E_perturbed)
+    
+    # Gradient of E w.r.t r_d
+    grad_E_r_d = torch.autograd.grad(
+        colors_perturbed.sum(), r_d_perturbed, create_graph=True, retain_graph=True
+    )[0]
+    l_s = torch.mean(torch.norm(grad_E_r_d, dim=-1) ** 2)
+    
+    total_loss = l_r + w_E * l_e + w_M * l_m + w_S * l_s
+    return total_loss
 
-    def forward_render(self, rays_data):
-        """
-        rays_data: dict with 'u', 'V_inv', 'P_inv', 'images', 'masks'
-        Returns rendered images and losses
-        """
-        rendered_images = []
-        losses = []
-        
-        for batch_idx in range(len(rays_data['u'])):
-            u = rays_data['u'][batch_idx]
-            V_inv = rays_data['V_inv'][batch_idx]
-            P_inv = rays_data['P_inv'][batch_idx]
-            target_img = rays_data['images'][batch_idx]
-            target_mask = rays_data['masks'][batch_idx]
-            
-            # 1. Ray Generation
-            ray_origin, ray_dir = self.get_ray(u, V_inv, P_inv)
-            
-            # 2. Sphere Tracing
-            surface_point, s_val = self.sphere_trace(ray_origin, ray_dir)
-            
-            # 3. Normal Computation (Autodiff)
-            surface_point.requires_grad_(True)
-            normal = torch.autograd.grad(
-                self.S(surface_point).sum(), surface_point, create_graph=True
-            )[0]
-            normal = normal / torch.norm(normal)
-            
-            # 4. Appearance Sampling
-            rd_feat = self.compute_fourier_features(ray_dir)
-            # Input to E: x (3) + rd_feat (3 + 2*4*3 = 27? No, rd is 3, feats are 24. Total 30? 
-            # Source says E: R^9 -> R^3. This implies rd is not expanded with Fourier in the input dim count 
-            # or the Fourier features are handled differently. 
-            # Re-reading source: "Input to E includes Fourier features...". 
-            # Source formula: E(x, rd, n; theta, phi) : R^9 -> R^3.
-            # This suggests the Fourier features are NOT part of the R^9 input, 
-            # but rather rd is processed internally or the R^9 refers to x(3)+rd(3)+n(3).
-            # However, the text says "use Fourier features ... in E". 
-            # Let's assume the network input is [x, rd, n] concatenated, and Fourier features 
-            # are applied to rd *before* concatenation or inside the first layer.
-            # Given R^9, it is strictly x(3) + rd(3) + n(3).
-            
-            input_to_E = torch.cat([surface_point, ray_dir, normal], dim=-1)
-            color = self.E(input_to_E)
-            
-            # 5. Loss Calculation
-            # Foreground mask
-            is_fg = (target_mask > 0.5) & (torch.abs(s_val) < 0.005) # Simplified foreground check
-            
-            # L_R: Reconstruction
-            if is_fg.any():
-                l_r = torch.mean(torch.abs(color[is_fg] - target_img[is_fg]))
-            else:
-                l_r = torch.tensor(0.0)
-            
-            # L_E: Eikonal (Sample random points)
-            # Random points xr from cube encapsulating unit sphere
-            xr = torch.rand(50000, 3) * 2 - 1 # Approximate cube [-1,1]^3
-            xr.requires_grad_(True)
-            s_xr = self.S(xr)
-            grad_s_xr = torch.autograd.grad(
-                s_xr.sum(), xr, create_graph=True
-            )[0]
-            l_e = torch.mean((torch.norm(grad_s_xr, dim=1)**2 - 1)**2)
-            
-            # L_M: Mask Loss (Non-foreground)
-            # S_min along ray
-            # Approximate S_min by sampling t along ray
-            t_vals = torch.linspace(0.0, 2.0, 100) # Dense sampling
-            ray_points = ray_origin.unsqueeze(1) + t_vals.unsqueeze(0) * ray_dir.unsqueeze(1)
-            s_vals_ray = self.S(ray_points).squeeze()
-            s_min = torch.min(s_vals_ray, dim=1).values
-            
-            is_non_fg = ~is_fg
-            if is_non_fg.any():
-                # BCE(sigmoid(S_min / alpha), m)
-                pred_mask = torch.sigmoid(s_min[is_non_fg] / self.alpha)
-                target_m = target_mask[is_non_fg]
-                bce = nn.BCELoss()
-                l_m = bce(pred_mask, target_m)
-            else:
-                l_m = torch.tensor(0.0)
-                
-            # L_S: Smoothness
-            # Gradient of E w.r.t rd
-            rd_feat_smooth = self.compute_fourier_features(ray_dir) # If used
-            # Assuming E takes rd directly for gradient calc if R^9
-            # But source says Fourier features are used. 
-            # If E input is R^9, rd is raw. If Fourier features are used, input is larger.
-            # Source says "E: R^9 -> R^3". This is a contradiction with Fourier features unless 
-            # Fourier features are internal. 
-            # Let's assume standard gradient w.r.t rd for smoothness.
-            ray_dir.requires_grad_(True)
-            color_smooth = self.E(torch.cat([surface_point, ray_dir, normal], dim=-1))
-            grad_rd = torch.autograd.grad(
-                color_smooth.sum(), ray_dir, create_graph=True
-            )[0]
-            l_s = torch.mean(torch.norm(grad_rd, dim=1)**2)
-            
-            total_loss = l_r + self.w_E * l_e + self.w_M * l_m + self.w_S * l_s
-            
-            losses.append(total_loss)
-            rendered_images.append(color)
-            
-        return torch.stack(rendered_images), sum(losses) / len(losses)
+def extract_mesh(S_network, resolution=512):
+    """
+    Extract mesh using marching cubes.
+    """
+    # 1. Voxelize SDF
+    # Create grid
+    x = torch.linspace(-1, 1, resolution)
+    y = torch.linspace(-1, 1, resolution)
+    z = torch.linspace(-1, 1, resolution)
+    xx, yy, zz = torch.meshgrid(x, y, z, indexing='ij')
+    grid_points = torch.stack([xx, yy, zz], dim=-1).reshape(-1, 3)
+    
+    # 2. Evaluate SDF
+    with torch.no_grad():
+        sdf_vals = S_network(grid_points)
+    
+    # 3. Marching Cubes
+    # Use a library like mcubes or trimesh
+    # Note: The paper offsets the iso-surface by 0.5% of object radius
+    # Assuming object is roughly unit sphere, offset is 0.005
+    vertices, faces = mcubes.marching_cubes(sdf_vals.reshape(resolution, resolution, resolution).numpy(), 0.0)
+    
+    # 4. Offset vertices
+    # Normalize vertices to [-1, 1] range if they are in grid coordinates
+    # Then scale by 0.5% radius (approx 0.005)
+    # This step depends on the specific mesh library implementation
+    return vertices, faces
 
-    def export_mesh_and_textures(self, camera_poses):
-        """
-        Extract mesh and projective textures for real-time rendering.
-        """
-        # 1. Marching Cubes
-        # Voxelize S at 512^3
-        # Offset iso-surface by 0.5% of object radius
-        # Return mesh vertices and faces
-        mesh = marching_cubes(self.S, resolution=512, offset=0.005)
-        
-        # 2. Synthesize Projective Textures
-        textures = []
-        for pose in camera_poses:
-            # Resample E for this pose
-            # Render E onto the mesh from this pose
-            T_i = render_projective_texture(mesh, self.E, pose)
-            textures.append(T_i)
-            
-        return mesh, textures
-
-    def real_time_render(self, mesh, textures, current_camera_pose, current_projection):
-        """
-        Unstructured Lumigraph Rendering
-        """
-        # 1. Rasterize Mesh
-        # Project vertex positions to pixels
-        depth_map, pixel_to_vertex = rasterize(mesh, current_camera_pose, current_projection)
-        
-        # 2. Compute Angles
-        # Ray towards current camera (from vertex) vs rays towards texture viewpoints
-        # tau_i = angle between ray to current camera and ray to texture viewpoint i
-        # Note: Source says "angles tau between the ray towards the current rendering camera 
-        # and the rays towards each of the N projective texture map viewpoints."
-        # This implies we are at the vertex, looking at the current camera, and comparing 
-        # to the directions of the texture cameras.
-        
-        # 3. Select Top K Textures
-        sorted_indices = np.argsort(taus)[:self.k_blend]
-        
-        # 4. Compute Weights
-        taus_k = taus[sorted_indices]
-        tau_k = taus_k[-1]
-        w_hat = (1.0 / taus_k) * (1.0 - taus_k / tau_k)
-        w = w_hat / np.sum(w_hat)
-        
-        # 5. Occlusion Culling
-        # Discard samples from occluded textures
-        for i in range(len(w)):
-            if is_occluded(mesh, textures[sorted_indices[i]], current_camera_pose):
-                w[i] = 0.0
-                
-        # Normalize weights again if any were zeroed
-        if np.sum(w) > 0:
-            w = w / np.sum(w)
-            
-        # 6. Blend
-        final_color = np.zeros(3)
-        for i, idx in enumerate(sorted_indices):
-            if w[i] > 0:
-                final_color += w[i] * textures[idx].sample(pixel_to_vertex)
-                
-        return final_color
+def render_lumigraph(mesh, textures, camera_poses, k=5):
+    """
+    Render using unstructured lumigraph technique.
+    """
+    # 1. Rasterize mesh to get depth and texture coordinates
+    # 2. For each pixel, compute angles to texture viewpoints
+    # 3. Select top k textures
+    # 4. Blend
+    pass
 ```
-
-### Parameters
--   **Sphere Tracing Steps:** $n = 16$ [S1].
--   **Loss Weights:** $w_E = 0.1$, $w_M = 100$, $w_S = 0.01$ [S1].
--   **Batch Size:** 50,000 rays [S1].
--   **Optimizer:** Adam, initial LR $10^{-4}$, decay factor 2 every 40,000 batches [S1].
--   **Training Length:** 150,000 batches [S1].
--   **Mesh Resolution:** $512^3$ voxelization [S1].
--   **Iso-surface Offset:** 0.5% of object radius [S1].
--   **Lumigraph Blending:** $k=5$ textures [S1].
-
-### Pitfalls and Edge Cases
--   **SIREN Overfitting:** SIRENs tend to overfit to supervised views. Prevented by using a large batch size (50,000) and uniform ray distribution [S1].
--   **Smoothness Weight:** Large values of $w_S$ cause high-frequency artifacts in $S$ [S1].
--   **Convergence Residual:** A small residual $|S(\mathbf{x}_n)| < 0.005$ is tolerated [S1].
--   **Occlusion:** Must be explicitly handled in lumigraph rendering by setting weights to zero if the texture viewpoint is occluded by the mesh relative to the current camera [S1].
 
 ## Subtopics
 
-### Unstructured Lumigraph Rendering
-A technique for blending multiple projective textures based on viewing angles to preserve view-dependent effects. It sets NLR apart from standard rasterization by allowing view-dependent shading on the exported mesh. Choose it when real-time rendering of view-dependent appearance is required. [S1]
+### Local Light Field Fusion
+Uses local light field approximations for novel view synthesis. Choose when local geometry is sufficient and global implicit modeling is not required. [Link](1124-local-light-field-fusion.md)
 
-### SIREN Initialization
-Initializing the SDF to a procedural shape (unit sphere) helps convergence. Sets NLR apart from random initialization. Choose it for stable training of implicit surfaces. [S1]
+### Instant Neural Opacity Light Fields
+Focuses on instant rendering using opacity light fields. Choose when real-time performance is critical and high-frequency view-dependent effects are less important than speed. [Link](11565-instant-neural-opacity-light-fields.md)
 
 ## Operating characteristics
--   **Time Complexity:** Training is comparable to other neural rendering methods (minutes to hours depending on resolution). Real-time rendering (NLR-RAS) achieves >60 fps at HD resolution (1600x1200) [S1]. Sphere-traced rendering (NLR-ST) takes ~13s per image [S1].
--   **Memory Complexity:** Model size is compact. NLR-RAS model size is 34.68 MB, NLR-ST is 2.07 MB, NeRF is 2.27 MB (on DTU Scan 65) [S1].
--   **Performance:** NLR achieves PSNR of 33.33 dB (RAS) and 34.87 dB (ST) on DTU Scan 65, comparable to NeRF (34.87 dB) and superior to Colmap (32.13 dB) and IDR (33.50 dB) [S1].
--   **Strengths:** Real-time rendering capability, view-dependent texture export, high image quality, compact model size.
--   **Limitations:** Requires posed images and object masks. Sphere tracing is slow for training (mitigated by real-time export). SIREN initialization is critical.
--   **When to use:** When real-time rendering of view-dependent scenes is needed and posed multi-view images are available.
--   **When not to use:** When unposed images are used, or when lighting/shading relighting is required (NLR assumes fixed lighting) [S1].
+*   **Time Complexity:** Training is slow due to SIREN optimization and large batch sizes (50,000 rays) [S1]. Rendering time for the sphere-traced version (NLR-ST) is 13s for 1600x1200 on DTU Scan 65, compared to 150s for NeRF [S1]. The rasterized version (NLR-RAS) achieves real-time performance (>60 fps) [S1].
+*   **Memory Complexity:** Model size is 34.68 MB for NLR-RAS and 2.07 MB for NLR-ST on DTU Scan 65, significantly smaller than NeRF (2.27 MB) and IDR (11.13 MB) in terms of representation compactness, though NLR-RAS includes textures [S1].
+*   **Strengths:** Real-time rendering capability via mesh export; high image quality comparable to NeRF; explicit surface representation allows for standard graphics pipeline integration [S1].
+*   **Limitations:** Training requires careful tuning of loss weights (especially $w_S$) to avoid high-frequency artifacts; SIREN tends to overfit if batch size is not large enough; occlusion handling in lumigraph rendering requires depth comparison [S1].
+*   **When to use:** When real-time rendering of view-dependent textures is required and posed multi-view images are available.
+*   **When not to use:** When unposed images are used (requires SfM first); when lighting changes are needed (NLR assumes fixed lighting) [S1].
 
 ## Background
-Neural Lumigraph Rendering was introduced by Kellnhofer et al. in 2021 [S1]. It builds on the concept of SIRENs (Sinusoidal Representation Networks) for implicit surfaces [S1] and unstructured lumigraph rendering by Buehler et al. [S1]. The method addresses the slow rendering speeds of neural volume rendering (like NeRF) by exporting an explicit mesh with view-dependent textures [S1]. It was implemented in PyTorch and rendered using OpenGL [S1]. The authors also built a custom camera array with 16 GoPro HERO7 and 6 Back-Bone H7PRO cameras for data capture [S1].
+Neural Lumigraph Rendering was introduced by Kellnhofer et al. in 2021 [S1]. It builds on the use of SIREN networks for implicit surface representation [52] and Fourier features for high-frequency encoding [38, 60]. The real-time rendering component utilizes unstructured lumigraph rendering techniques from Buehler et al. [4]. The method was implemented in PyTorch and rendered using OpenGL [S1]. It was evaluated on a custom camera array of 16 GoPro HERO7 and 6 Back-Bone H7PRO cameras [S1].
 
 ## Sources
 [S1] Neural lumigraph rendering, https://openaccess.thecvf.com/content/CVPR2021/html/Kellnhofer_Neural_Lumigraph_Rendering_CVPR_2021_paper.html, fetched 2026-10-31

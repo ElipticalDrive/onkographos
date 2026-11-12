@@ -1,0 +1,260 @@
+# Plenoxels
+
+Also called: Radiance Fields without Neural Networks
+
+## Overview
+Plenoxels is a method for fast radiance field reconstruction that replaces the multilayer perceptron (MLP) used in NeRF with an explicit sparse voxel grid storing density and spherical harmonic (SH) coefficients [S1, S2, S3]. It solves the problem of high computational overhead in neural radiance fields by enabling direct data access and significantly faster optimization and rendering [S2, S3]. Unlike NeRF, which relies on implicit neural networks to map coordinates to density and color, Plenoxels fits these features directly onto the voxel grid, achieving training speeds hundreds of times faster while maintaining comparable image quality [S1, S6].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ calibrated images with known camera poses (intrinsics and extrinsics). Optional: a depth prior from a foundation model (e.g., VGGT) for pre-pruning [S3].
+*   **Outputs:** Optimized sparse voxel grids for density ($V^D$) and SH coefficients ($V^{SH}$), and rendered novel view images.
+
+**Data Structures:**
+The scene is represented by two sparse 3D voxel grids:
+1.  **Density Grid ($V^D$):** Stores a single scalar density value $\sigma$ per voxel [S3, S5].
+2.  **SH Grid ($V^{SH}$):** Stores spherical harmonic coefficients for color. Each voxel stores 9 coefficients per color channel (R, G, B), totaling 27 coefficients, plus the density, for 28 float values per vertex [S2][S10, unofficial].
+    *   The SH coefficients $k_{\ell m}$ correspond to degree $\ell_{max}=2$ [S5][S10, unofficial].
+    *   The grid resolution is typically $128 \times 128 \times 128$ for synthetic scenes (NeRF-Synthetic, TanksAndTemple) and $512 \times 512 \times 128$ for forward-facing scenes (LLFF) [S5].
+    *   The grid bounds are typically defined in world space, e.g., $[-1, 1]^3$ or aligned to the scene bounding box [S10, unofficial].
+
+**Numbered Steps:**
+
+1.  **Initialization:** Initialize the voxel grids $V^D$ and $V^{SH}$ with zeros or small random values. If using depth priors, prune empty voxels first [S3].
+2.  **Ray Generation:** For each pixel in the target image, generate a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the normalized direction vector [S9, S10, unofficial].
+3.  **Ray Marching:** Sample points along the ray within the grid bounds.
+    *   Compute entry ($t_{min}$) and exit ($t_{max}$) distances using the slab method [S10, unofficial].
+    *   Divide the interval $[t_{min}, t_{max}]$ into $N$ steps (e.g., $N=100$) with step size $\delta_i$ [S10, unofficial].
+    *   For each sample point $\mathbf{x}_i$ at distance $t_i$:
+        a. **Density Sampling:** Retrieve $\sigma(\mathbf{x}_i)$ by trilinearly interpolating the 8 neighboring voxels in $V^D$. Apply ReLU to ensure non-negativity:
+           $$ \sigma(\mathbf{x}_i) = \text{ReLU}(\text{interp}(\mathbf{x}_i, V^D)) $$
+           [S3][S8, unofficial]
+        b. **Color Sampling:** Retrieve SH coefficients $\mathbf{k}(\mathbf{x}_i)$ by trilinearly interpolating the 8 neighboring voxels in $V^{SH}$ for each RGB channel [S3]. Compute the color $\mathbf{c}_i$ by evaluating the SH basis functions $\mathbf{Y}(\mathbf{d})$ at the view direction $\mathbf{d}$:
+           $$ \mathbf{c}_i = \text{ReLU}\left( \sum_{\ell=0}^{\ell_{max}} \sum_{m=-\ell}^{\ell} \mathbf{k}_{\ell m}(\mathbf{x}_i) \mathbf{Y}_{\ell}^m(\mathbf{d}) \right) $$
+           [S3, S5, S7]
+           *Note: The SH basis functions for degree 2 are fixed constants [S10, unofficial].*
+4.  **Volume Rendering:** Compute the final color $\hat{C}(\mathbf{r})$ using the standard volume rendering equation [S4][S8, unofficial]:
+    $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+    where transmittance $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ [S4].
+    *   **Early Termination:** If $T_i < \text{stop\_thresh}$ (e.g., 0.01), terminate marching [S8, unofficial][S12].
+    *   **Background:** If no background layers are defined, add $\exp(-\sum \sigma_j \delta_j) \times \text{background\_brightness}$ to the result [S8, unofficial].
+5.  **Optimization:** Minimize the Mean Squared Error (MSE) loss between rendered and ground truth colors:
+    $$ \mathcal{L}_{\text{MSE}} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \| \mathbf{C}(\mathbf{r}) - \hat{C}(\mathbf{r}) \|_2^2 $$
+    [S3]
+    *   **Regularization:** Apply Total Variation (TV) loss to smooth density and SH coefficients [S3][S11, unofficial]:
+        $$ \mathcal{L}_{\text{TV}}(V^D) = \frac{1}{|V|} \sum_{\mathbf{v} \in V} \sqrt{\Delta_x^2(\mathbf{v}) + \Delta_y^2(\mathbf{v}) + \Delta_z^2(\mathbf{v})} $$
+        $$ \mathcal{L}_{\text{TV}}(V^{SH}) = \frac{1}{|V|} \sum_{\mathbf{v} \in V} \sum_{d \in [D]} \sqrt{\Delta_x^2(\mathbf{v}, d) + \Delta_y^2(\mathbf{v}, d) + \Delta_z^2(\mathbf{v}, d)} $$
+        where $\Delta_x(\mathbf{v})$ is the difference between voxel $\mathbf{v}$ and its neighbor in the x-direction [S3].
+    *   **Gradient Scaling:** Use transmittance-based gradient scaling to suppress near-camera floaters [S3].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def evaluate_sh_basis(direction, degree=2):
+    """
+    Evaluate spherical harmonic basis functions for degree 2.
+    direction: (3,) array [x, y, z]
+    Returns: (9,) array of basis values
+    """
+    x, y, z = direction
+    # Basis functions from Mitsuba 3 / standard SH definitions
+    # Y0
+    y0 = 0.28209479177387814
+    # Y1
+    y1z = z * 0.488602511902919923
+    # Y2
+    y2z2 = z**2 * 0.94617469575756008 - 0.315391565252520045
+    # Y3
+    y3x = -0.488602511902919978 * x
+    # Y4
+    y4y = -0.488602511902919978 * y
+    # Y5
+    y5xz = -1.09254843059207896 * z * x
+    # Y6
+    y6yz = -1.09254843059207896 * z * y
+    # Y7
+    y7x2y2 = 0.546274215296039478 * (x**2 - y**2)
+    # Y8
+    y8xy = 0.546274215296039478 * (2 * x * y)
+    
+    return np.array([y0, y1z, y2z2, y3x, y4y, y5xz, y6yz, y7x2y2, y8xy])
+
+def trilinear_interpolate(grid, pos, grid_size, bounds_min, bounds_max):
+    """
+    Trilinearly interpolate value from a 3D grid.
+    grid: (D, H, W) array
+    pos: (3,) continuous position in world space
+    grid_size: (3,) integer dimensions
+    bounds_min, bounds_max: (3,) world space bounds
+    """
+    # Map world pos to grid coordinates [0, grid_size-1]
+    # Assuming linear mapping from bounds to grid indices
+    norm_pos = (pos - bounds_min) / (bounds_max - bounds_min)
+    grid_pos = norm_pos * (grid_size - 1)
+    
+    # Clamp to valid range
+    grid_pos = np.clip(grid_pos, 0, grid_size - 1)
+    
+    # Get integer coordinates
+    ix, iy, iz = np.floor(grid_pos).astype(int)
+    # Get fractional parts
+    fx, fy, fz = grid_pos - ix
+    
+    # Handle boundary cases for indices
+    ix_next = np.minimum(ix + 1, grid_size[2] - 1)
+    iy_next = np.minimum(iy + 1, grid_size[1] - 1)
+    iz_next = np.minimum(iz + 1, grid_size[0] - 1)
+    
+    # Fetch 8 corners
+    v000 = grid[iz, iy, ix]
+    v100 = grid[iz, iy, ix_next]
+    v010 = grid[iz, iy_next, ix]
+    v110 = grid[iz, iy_next, ix_next]
+    v001 = grid[iz_next, iy, ix]
+    v101 = grid[iz_next, iy, ix_next]
+    v011 = grid[iz_next, iy_next, ix]
+    v111 = grid[iz_next, iy_next, ix_next]
+    
+    # Interpolate
+    c00 = v000 * (1 - fx) + v100 * fx
+    c10 = v010 * (1 - fx) + v110 * fx
+    c01 = v001 * (1 - fx) + v101 * fx
+    c11 = v011 * (1 - fx) + v111 * fx
+    
+    c0 = c00 * (1 - fy) + c10 * fy
+    c1 = c01 * (1 - fy) + c11 * fy
+    
+    return c0 * (1 - fz) + c1 * fz
+
+def render_ray(ray_origin, ray_direction, density_grid, sh_grid, grid_size, bounds_min, bounds_max, num_samples=100, stop_thresh=0.01):
+    """
+    Render a single ray using Plenoxels.
+    """
+    # Ray-grid intersection
+    ray_inv = 1.0 / ray_direction
+    t_min = np.max(np.minimum((bounds_min - ray_origin) * ray_inv, (bounds_max - ray_origin) * ray_inv))
+    t_max = np.min(np.maximum((bounds_min - ray_origin) * ray_inv, (bounds_max - ray_origin) * ray_inv))
+    
+    if t_min > t_max:
+        return np.array([0.0, 0.0, 0.0]), 0.0 # Background color, alpha 0
+        
+    # Sample points
+    t_vals = np.linspace(t_min, t_max, num_samples + 1)[1:] # Exclude start
+    positions = ray_origin + ray_direction * t_vals[:, np.newaxis]
+    deltas = np.diff(np.concatenate([[0], t_vals])) # Step sizes
+    
+    # Accumulate
+    accumulated_color = np.zeros(3)
+    accumulated_alpha = 0.0
+    transmittance = 1.0
+    
+    sh_basis = evaluate_sh_basis(ray_direction)
+    
+    for i in range(num_samples):
+        pos = positions[i]
+        sigma = trilinear_interpolate(density_grid, pos, grid_size, bounds_min, bounds_max)
+        sigma = max(sigma, 0.0) # ReLU
+        
+        if sigma < 1e-5: # Skip empty space
+            continue
+            
+        # Color
+        sh_coeffs_r = trilinear_interpolate(sh_grid[:,:,0], pos, grid_size, bounds_min, bounds_max)
+        sh_coeffs_g = trilinear_interpolate(sh_grid[:,:,1], pos, grid_size, bounds_min, bounds_max)
+        sh_coeffs_b = trilinear_interpolate(sh_grid[:,:,2], pos, grid_size, bounds_min, bounds_max)
+        
+        # SH Evaluation: c = ReLU( sum(k * Y) )
+        # Note: sh_coeffs are 9 values per channel
+        color_r = max(np.dot(sh_coeffs_r, sh_basis), 0.0)
+        color_g = max(np.dot(sh_coeffs_g, sh_basis), 0.0)
+        color_b = max(np.dot(sh_coeffs_b, sh_basis), 0.0)
+        color = np.array([color_r, color_g, color_b])
+        
+        # Volume rendering contribution
+        attenuation = sigma * deltas[i]
+        alpha = 1.0 - np.exp(-attenuation)
+        weight = transmittance * alpha
+        
+        accumulated_color += weight * color
+        accumulated_alpha += weight
+        transmittance *= (1.0 - alpha)
+        
+        if transmittance < stop_thresh:
+            break
+            
+    return accumulated_color, accumulated_alpha
+
+def train_plenoxels(images, poses, density_grid, sh_grid, grid_size, bounds_min, bounds_max, lr=0.01, epochs=1000):
+    """
+    Simplified training loop.
+    """
+    optimizer = Adam([density_grid, sh_grid], lr=lr)
+    
+    for epoch in range(epochs):
+        loss = 0.0
+        for img, pose in zip(images, poses):
+            # Generate rays for this image
+            rays = generate_rays(img.shape, pose)
+            
+            rendered_colors = []
+            for ray_o, ray_d in rays:
+                c, _ = render_ray(ray_o, ray_d, density_grid, sh_grid, grid_size, bounds_min, bounds_max)
+                rendered_colors.append(c)
+            
+            rendered_img = np.array(rendered_colors).reshape(img.shape)
+            
+            # MSE Loss
+            mse = np.mean((rendered_img - img)**2)
+            loss += mse
+            
+            # Backpropagation (using AD or analytic gradients)
+            # Note: Analytic gradients for DVR are complex; AD is often used in practice [44-radiance-field-optimization.md]
+            # Here we assume a standard autograd framework handles the grid updates
+            optimizer.zero_grad()
+            mse.backward()
+            optimizer.step()
+            
+        print(f"Epoch {epoch}, Loss: {loss}")
+```
+
+## Subtopics
+
+### [Plenoxels Optimization Configuration](929-plenoxels-optimization-configuration.md)
+Plenoxels Optimization Configuration defines the hyperparameter settings and training protocols required to optimize the voxel opacity ($\sigma$) and spherical harmonic (SH) coefficients of a sparse 3D grid representation. It solves the problem of efficiently converging to high-fidelity radiance fields without neural networks by selecting appropriate gradient-based optimizers and learning rate schedules. It is distinguished from sibling methods like [Explicit Radiance Fields](806-explicit-radiance-fields.md) and [Coarse-to-Fine Optimization with Pruning](1153-coarse-to-fine-optimization-with-pruning.md) by its specific reliance on RMSProp for SH coefficients and its robustness to learning rate schedule variations, while building on the differentiable volume rendering principles of [Hierarchical Grid Optimization](1414-hierarchical-grid-optimization.md).
+
+### [Coarse-to-Fine Optimization with Pruning](1153-coarse-to-fine-optimization-with-pruning.md)
+Coarse-to-Fine Optimization with Pruning is a hierarchical training strategy for 3D radiance fields represented as voxel grids. It solves the problem of efficiently initializing and refining high-resolution scene representations by starting with a coarse dense grid, pruning unoccupied regions, and iteratively subdividing the remaining voxels to higher resolutions. It sets itself apart from static grid methods by dynamically adapting the voxel structure to scene complexity during training, building on the general framework of [Hierarchical Grid Optimization](1414-hierarchical-grid-optimization.md).
+
+### [HDR-Plenoxels](12123-hdr-plenoxels.md)
+HDR-Plenoxels is a voxel-based volume rendering method that reconstructs 3D High Dynamic Range (HDR) radiance fields, scene geometry, and varying camera settings from multi-view Low Dynamic Range (LDR) images. It extends Plenoxels by introducing a differentiable tone-mapping module that models the in-camera imaging pipeline (ISP), including white balance and Camera Response Functions (CRF), allowing for self-calibration and controllable rendering. Unlike NeRF, which uses implicit neural networks, HDR-Plenoxels uses explicit sparse voxel grids with spherical harmonics, achieving rendering speeds two orders of magnitude faster than NeRF.
+
+### Plenoxels Inference Acceleration
+This variant optimizes the rendering kernel for real-time performance. It applies standard early termination on ray marching, stopping when accumulated transmittance is lower than 1% [S12]. It accesses SH coefficients using a data pointer to the first dimension and a fixed stride to prefetch memory addresses for the rest of the dimensions, speeding up the trilinear interpolation kernel [S12]. The sampling step is doubled to decrease overall sample points [S12]. SH coefficients and density information are stored in a sparse 3D array with a full-scale mask, with coefficients stored in contiguous memory space [S12]. Unlike the original Plenoxels which uses one CUDA warp (32 threads) per ray with memory coalescing, this method simplifies to launching one kernel per ray, as the original coalescing incurred large computational cost exceeding its benefits [S12].
+
+## Operating characteristics
+*   **Time Complexity:** Training is significantly faster than NeRF, often by a factor of hundreds, due to the elimination of MLP inference and the use of direct memory access [S1, S2]. Training a single scene takes approximately 10 minutes [S6].
+*   **Memory Complexity:** Memory usage is proportional to the grid resolution and the number of SH coefficients. A $128^3$ grid with 28 floats per voxel requires $\approx 128^3 \times 28 \times 4 \text{ bytes} \approx 188 \text{ MB}$, which is manageable but scales cubically [S2, S5]. Performance depends excessively on spatial resolution, leading to enormous memory footprint if high resolution is required [S5].
+*   **Performance:** On an Intel Core i7-7700HQ and GTX 1060 at 1024x768 resolution, single-threaded CPU rendering took ~7.8s, while OpenMP (4 threads) took ~1.4s [S10, unofficial]. Rendering speeds are two orders of magnitude faster than NeRF [S2].
+*   **Strengths:** Fast training and rendering; no neural network overhead; suitable for consumer devices [S9, unofficial].
+*   **Limitations:** Suffers from densely localized acquisitions, with PSNR drops up to 8 points compared to methods with MLP components (like DVGO or Instant-NGP) [S6]. Lacks the generalization capability of MLPs for unseen regions [S6]. Memory consumption is higher than hash-based methods for very large scenes [S2].
+
+## Background
+Plenoxels was introduced by Alex Yu, Sara Fridovich-Keil, Matthew Tancik, et al. in December 2021 [S8, unofficial]. It was published at CVPR 2022 [S8, unofficial]. The method demonstrated that the primary contribution of NeRF models is the volumetric rendering of new views given point-wise densities and color, rather than the density and color MLPs themselves [S1]. It builds on the explicit representation ideas of Plenoctree [S1].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] RGB-D Mapping and Tracking in a Plenoxel Radiance Field, https://doi.org/10.1109/wacv57701.2024.00331, fetched 2026-10-26
+[S3] F2Plenoxels: fast voxel radiance fields without neural networks for few-shot view synthesis, https://doi.org/10.1007/s44443-026-00491-2, fetched 2026-10-26
+[S4] PeRFception: Perception using Radiance Fields, https://doi.org/10.48550/arxiv.2208.11537, fetched 2026-10-26
+[S5] One Is All: Bridging the Gap between Neural Radiance Fields Architectures with Progressive Volume Distillation, https://doi.org/10.1609/aaai.v37i1.25135, fetched 2026-10-26
+[S6] ScanNeRF: a Scalable Benchmark for Neural Radiance Fields, https://doi.org/10.1109/wacv56688.2023.00088, fetched 2026-10-26
+[S7] Progressive Volume Distillation with Active Learning for Efficient NeRF Architecture Conversion, https://doi.org/10.1007/s11263-026-02815-1, fetched 2026-10-26
+[S8] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)
+[S9] DanJbk/Plenoxels, https://github.com/DanJbk/Plenoxels, fetched 2026-10-27 (unofficial)
+[S10] RevelcoS/Plenoxels, https://github.com/RevelcoS/Plenoxels, fetched 2026-10-27 (unofficial)
+[S11] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)
+[S12] Compact Real-Time Radiance Fields with Neural Codebook, https://doi.org/10.1109/icme55011.2023.00374, fetched 2026-10-26

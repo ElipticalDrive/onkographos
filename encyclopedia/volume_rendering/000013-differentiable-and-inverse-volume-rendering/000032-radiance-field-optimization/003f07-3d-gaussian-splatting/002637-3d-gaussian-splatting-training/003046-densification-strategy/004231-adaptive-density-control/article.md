@@ -3,234 +3,222 @@
 Also called: 3D Gaussian Splatting Adaptive Density Control (ADC), 3DGS ADC, 3DGS density control
 
 ## Overview
-Adaptive Density Control (ADC) is a dynamic optimization strategy used during the training of 3D Gaussian Splatting (3DGS) to adjust the number and spatial distribution of Gaussian primitives [S1][S8]. It solves the problem of under-reconstruction (missing geometry in sparse regions) and over-reconstruction (coarse approximations or artifacts in simple regions) by periodically cloning, splitting, and pruning Gaussians based on gradient magnitudes, screen size, and opacity [S1][S8]. It sets itself apart from static initialization methods by using view-space positional gradient magnitudes to trigger densification operations at regular intervals, ensuring the representation remains compact while capturing fine details [S1][S2].
+Adaptive Density Control (ADC) is a dynamic optimization strategy used during the training of 3D Gaussian Splatting (3DGS) to adjust the number and spatial distribution of Gaussian primitives [S1][S2]. It solves the problem of static initialization by adding, cloning, or removing Gaussians based on gradient magnitude, scale, and opacity, ensuring the representation remains compact while capturing fine details [S1][S2]. It sets itself apart from static initialization methods by using view-space positional gradient magnitudes to trigger cloning, splitting, and pruning operations at regular intervals [S1][S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** The current set of $N$ Gaussians $\mathcal{G} = \{g_1, \dots, g_N\}$, where each $g_k = (\mu_k, \Sigma_k, o_k, c_k)$ consists of a 3D mean $\mu_k$, a covariance $\Sigma_k$ (parameterized by quaternion $q$ and scale $s$), opacity $o_k$, and color features $c_k$ [S8]. The current optimization step $t$, and hyperparameters: `refineEvery` (interval), `warmupLength` (start delay), `stopSplitAt` (end delay, typically half total steps), `resetInterval` (opacity reset interval), `densifyGradThresh` ($T_{grad}$), `densifySizeThresh` ($P_{dense}$), `splitScreenSize`, `o_min` (minimum opacity), and `e_scene` (scene extent) [S8][S5, unofficial].
-*   **Outputs:** The updated set of Gaussians $\mathcal{G}'$ with modified counts, positions, scales, and opacities [S8].
+*   **Input:** A set of $N$ active 3D Gaussians $G = \{g_1, \dots, g_N\}$, where each $g_k$ is defined by mean $\mu_k$, covariance $\Sigma_k$, opacity $\alpha_k$, and spherical harmonic coefficients $c_k$ [S8]. The covariance is parameterized by a 4D quaternion $q_k$ (rotation) and a 3D scaling vector $s_k$ [S8]. A training dataset of camera views $\{v\}$ and ground truth images $\{I_v\}$ [S8].
+*   **Output:** An updated set of Gaussians $G'$ with modified counts, positions, scales, and opacities [S1].
 
 **Data Structures:**
-The Gaussians are stored in GPU buffers. To support densification, the buffer capacity is pre-allocated to be at least 3 times the initial active Gaussian count to accommodate worst-case splitting [S5, unofficial]. Specific flag buffers of size `buf_capacity` are used during the densification kernel: `densify_split_flag`, `densify_dup_flag`, `densify_split_prefix`, `densify_dup_prefix`, `densify_keep_flag`, `densify_keep_prefix` [S5, unofficial]. Scratch buffers include `densify_block_totals` (size `(buf_capacity + 1023) / 1024`) and `densify_compact_scratch` (size `buf_capacity * featuresRest_stride`) [S5, unofficial]. Random samples for split perturbations are generated on CPU using a normal distribution (mean 0, std 1) seeded by the current step, stored in `densify_random_samples` (size `buf_capacity x 3`) [S5, unofficial].
+*   **Gaussian Buffer:** Stores attributes for all active Gaussians.
+*   **Gradient Buffer:** Stores the accumulated 2D positional gradient magnitude $\tau_k$ for each Gaussian [S4][S8].
+*   **Flag Buffers:** Used for compacting the Gaussian list after pruning/splitting. Includes `densify_split_flag`, `densify_dup_flag`, `densify_split_prefix`, `densify_dup_flag`, `densify_keep_flag`, `densify_keep_prefix` [S5, unofficial].
+*   **Scratch Buffers:** `densify_block_totals`, `densify_compact_scratch`, and `densify_random_samples` (size `buf_capacity` x 3) for CPU-generated normal distribution samples [S5, unofficial].
+
+**Parameters:**
+*   $T_{grad}$: Gradient threshold. If $\tau_k \ge T_{grad}$, the Gaussian is a candidate for densification [S8].
+*   $P_{dense}$: Percent dense hyperparameter. Used to determine if a Gaussian should be split or cloned [S8].
+*   $e_{scene}$: Precomputed scene extent (reference for scaling) [S8].
+*   $\alpha_{min}$: Minimum opacity threshold. Gaussians with $\alpha_k < \alpha_{min}$ are pruned [S8].
+*   $N_{children}$: Number of child Gaussians created during splitting (default 2) [S8].
+*   `refineEvery`: Interval (in steps) for densification (default 100) [S8].
+*   `warmupLength`: Initial steps before densification starts [S5, unofficial].
+*   `stopSplitAt`: Step after which splitting stops (e.g., maxSteps / 2) [S5, unofficial].
+*   `resetInterval`: Interval for opacity reset (e.g., 3000 steps) [S8].
+*   `resetLogit`: Opacity reset threshold (default -1.3862943611198906, logit of 0.25) [S5, unofficial].
 
 **Numbered Steps:**
 
-1.  **Initialization:** Initialize Gaussians from sparse Structure-from-Motion (SfM) points [S1]. Alternatively, initialize from a point cloud derived from a trained neural radiance field [S2].
-2.  **Trigger Check:** Densification is triggered every `refineEvery` steps, after a `warmupLength` period, and before `stopSplitAt` (typically maxSteps / 2) [S5, unofficial]. If the current step modulo `resetInterval` (where `resetInterval = resetAlphaEvery * refineEvery`) is within `numCameras + refineEvery` of the start of the interval, densification is skipped [S5, unofficial].
-3.  **Gradient Tracking:** For each Gaussian $g_k$, track the magnitude of the 2D positional gradient $\frac{\partial L_v}{\partial \mu_v^k}$ for each view $v$, where $L_v$ is the loss between ground truth $I_v$ and rendered $I'_v$ [S4][S8]. Average these magnitudes over $N_{views}$ views between densification steps to compute the metric $\tau_k$:
+1.  **Initialization:** Initialize Gaussians from sparse Structure-from-Motion (SfM) points [S1]. Ensure GPU buffer capacity is at least 3x the current active Gaussian count to accommodate worst-case splitting [S5, unofficial].
+2.  **Gradient Tracking:** During training, track the magnitude of the 2D positional gradient $\frac{\partial L_v}{\partial \mu_v^k}$ for each Gaussian $g_k$ across rendered views $v$ [S4][S6, unofficial]. The 2D positional gradient magnitude $\tau_k$ is averaged over $N_{views}$ views:
     $$ \tau_k = \frac{1}{N_{\text{views}}} \sum_{v=1}^{N_{\text{views}}} \left\| \frac{\partial L(I_v, I'_v)}{\partial \mu_v^v} \right\|_2 $$
-    [S8]. Note: In implementations using inversion-free splat evaluation (e.g., [S7]), screen-space gradients are unavailable; instead, the gradient of splat means scaled by half the distance to the camera in view space is used [S7].
-4.  **Candidate Selection:** A Gaussian $g_k$ becomes a candidate for densification if $\tau_k \ge T_{grad}$ [S8].
-5.  **Action (Split/Clone):** For each candidate:
-    *   **Split:** If the maximum scaling factor $\max(s_k) > P_{dense} \cdot e_{scene}$, split the Gaussian. Replace $g_k$ with $N_{children}$ (default 2) child Gaussians. The children's means are derived from the parent mean plus/minus a perturbation along the principal axes of the covariance matrix. The children's scales are the parent's scales downscaled by $\frac{5}{4} \cdot \frac{1}{\sqrt{N_{children}}}$ [S8]. All other properties (color, quaternion) are inherited [S8].
-    *   **Clone:** If $\max(s_k) \le P_{dense} \cdot e_{scene}$, clone the Gaussian. Create an exact copy of $g_k$ and add it to the scene [S8].
-6.  **Pruning:** Pruning is performed directly after densification [S8].
-    *   **Opacity Pruning:** If $o_k < o_{min}$, prune $g_k$ [S8].
-    *   **Size Pruning:** If $\max(s_k) > 0.1 \cdot e_{scene}$, prune $g_k$ [S8].
-7.  **Opacity Reset:** Every `resetInterval` steps (specifically when `step % resetInterval == refineEvery`), perform an opacity reset. Opacities greater than `resetLogit` (default -1.3862943611198906, the logit of 0.25) are clamped to `resetLogit`. The Adam state for opacities (group 5) is zeroed [S5, unofficial]. Additionally, an opacity decay multiplier $\lambda_o = 0.9995$ is applied every 50 iterations during densification to prevent over-densification [S7].
-8.  **Buffer Management:** Update `num_active` to the new count returned by the densification kernel and refresh GPU views [S5, unofficial].
+    where $L$ is the image loss between ground truth $I_v$ and rendered $I'_v$ [S8].
+3.  **Densification Trigger:** Check if the current step satisfies densification conditions:
+    *   Step $\ge$ `warmupLength` [S5, unofficial].
+    *   Step $\le$ `stopSplitAt` [S5, unofficial].
+    *   Step is a multiple of `refineEvery` [S8].
+    *   (Optional) Skip if step modulo `resetInterval` is within `numCameras + refineEvery` of the start of the interval [S5, unofficial].
+4.  **Candidate Selection:** For each Gaussian $g_k$, if $\tau_k \ge T_{grad}$, mark it as a candidate [S8].
+5.  **Split vs. Clone Decision:** For each candidate $g_k$:
+    *   Calculate max scaling factor $\max(s_k)$ [S8].
+    *   If $\max(s_k) > P_{dense} \cdot e_{scene}$, **Split** the Gaussian [S8].
+    *   Else, **Clone** the Gaussian [S8].
+    *   **Splitting:** Replace $g_k$ with $N_{children}$ child Gaussians. Children are positioned within the parent's extent using random sampling from a normal distribution (mean 0, std 1) seeded by the current step [S5, unofficial][S8]. The children's scaling is the parent's scaling downscaled by $\frac{5}{4} \cdot \frac{1}{\sqrt{N_{children}}}$ [S8]. All other properties (color, opacity) are inherited [S8].
+    *   **Cloning:** Create an exact copy of $g_k$ and add it to the scene [S8].
+6.  **Opacity Pruning:** After densification, iterate over all Gaussians. If $\alpha_k < \alpha_{min}$, mark $g_k$ for removal [S8].
+7.  **Size Pruning:** (Optional/Variant) If $\max(s_k) > 0.1 \cdot e_{scene}$, mark $g_k$ for removal [S8].
+8.  **Compaction:** Remove marked Gaussians from the active set. Update `num_active` and refresh GPU views [S5, unofficial].
+9.  **Opacity Reset:** Every `resetInterval` steps (e.g., 3000), perform an opacity reset. Opacities greater than `resetLogit` are clamped to `resetLogit`. Adam state for opacities is zeroed [S5, unofficial][S8].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def adaptive_density_control_step(gaussians, step, config):
+def adaptive_density_control(Gaussians, step, config):
     """
-    Perform one cycle of Adaptive Density Control.
-    gaussians: List of Gaussian objects with attributes:
-        - mean: (3,) float32
-        - cov2d: (2,2) float32 (projected covariance)
-        - opacity: float32
-        - scale: (3,) float32
-        - features: (C,) float32
-        - grad_norm: float32 (accumulated 2D positional gradient magnitude)
-        - view_count: int (number of views contributing to grad_norm)
-    step: int, current optimization step
-    config: dict with keys:
-        - refine_every: int
-        - warmup_length: int
-        - stop_split_at: int
-        - reset_interval: int
-        - reset_alpha_every: int
-        - densify_grad_thresh: float
-        - densify_size_thresh: float (P_dense)
-        - split_screen_size: float
-        - o_min: float
-        - e_scene: float (scene extent)
-        - num_cameras: int
+    Gaussians: List of Gaussian objects with attributes:
+        - grad: accumulated 2D positional gradient magnitude tau_k
+        - opacity: alpha_k
+        - scale: 3D scaling vector s_k
+        - mean: 3D mean mu_k
+        - cov: 3x3 covariance matrix Sigma_k (or q, s params)
+    step: Current training iteration
+    config: Dictionary containing thresholds and intervals
     """
-    # 1. Trigger Check
-    if step < config['warmup_length']:
-        return gaussians
-    if step > config['stop_split_at']:
-        return gaussians
-    if (step % config['refine_every']) != 0:
-        return gaussians
     
-    # Check if within the "no densification" window at the start of the interval
-    interval_start = (step // config['refine_every']) * config['refine_every']
-    if step - interval_start < config['num_cameras'] + config['refine_every']:
-        return gaussians
-
-    # 2. Opacity Reset Check
-    reset_alpha_every = config['reset_alpha_every']
-    if step % config['reset_interval'] == config['refine_every']:
-        for g in gaussians:
-            if g.opacity > -1.3862943611198906: # resetLogit
-                g.opacity = -1.3862943611198906
-        # Note: Adam state zeroing is handled by the optimizer framework, not here
+    # 1. Check if densification should occur
+    if step < config.warmup_length:
+        return Gaussians
+    if step > config.stop_split_at:
+        return Gaussians
+    if step % config.refine_every != 0:
+        return Gaussians
     
-    # 3. Candidate Selection
+    # 2. Identify candidates based on gradient
     candidates = []
-    for g in gaussians:
-        # Average gradient magnitude
-        if g.view_count > 0:
-            tau_k = g.grad_norm / g.view_count
-        else:
-            tau_k = 0.0
-        
-        if tau_k >= config['densify_grad_thresh']:
+    for g in Gaussians:
+        if g.grad >= config.t_grad:
             candidates.append(g)
-
-    # 4. Action (Split/Clone)
+            
+    # 3. Process candidates (Clone or Split)
     new_gaussians = []
     for g in candidates:
         max_scale = max(g.scale)
-        if max_scale > config['densify_size_thresh'] * config['e_scene']:
+        if max_scale > config.p_dense * config.e_scene:
             # Split
-            children = split_gaussian(g)
+            children = split_gaussian(g, config.n_children, step)
             new_gaussians.extend(children)
         else:
             # Clone
             clone = clone_gaussian(g)
             new_gaussians.append(clone)
-    
-    # Add non-candidate Gaussians
-    for g in gaussians:
-        if g not in candidates:
-            new_gaussians.append(g)
-
-    # 5. Pruning
-    pruned_gaussians = []
-    for g in new_gaussians:
+            
+    # 4. Identify non-candidates for pruning
+    pruned_indices = []
+    for i, g in enumerate(Gaussians):
+        if g in candidates:
+            continue # Candidates are handled above (either split or cloned, original removed)
+        
         # Opacity Pruning
-        if g.opacity < config['o_min']:
+        if g.opacity < config.alpha_min:
+            pruned_indices.append(i)
             continue
-        # Size Pruning
-        if max(g.scale) > 0.1 * config['e_scene']:
+            
+        # Size Pruning (if enabled)
+        if max(g.scale) > 0.1 * config.e_scene:
+            pruned_indices.append(i)
+            
+    # 5. Build new list
+    # Note: In implementation, 'split' removes the parent and adds children.
+    # 'clone' adds a child but keeps the parent.
+    # Pruning removes the Gaussian entirely.
+    
+    final_gaussians = []
+    for i, g in enumerate(Gaussians):
+        if i in pruned_indices:
             continue
-        pruned_gaussians.append(g)
+        if g in candidates:
+            # Parent is removed, replaced by children in new_gaussians
+            pass
+        else:
+            final_gaussians.append(g)
+            
+    final_gaussians.extend(new_gaussians)
+    
+    # 6. Opacity Reset
+    if step % config.reset_interval == 0:
+        for g in final_gaussians:
+            if g.opacity > config.reset_logit:
+                g.opacity = config.reset_logit
+                # Zero Adam state for opacity [S5, unofficial]
+                
+    return final_gaussians
 
-    return pruned_gaussians
-
-def split_gaussian(parent):
+def split_gaussian(parent, n_children, step):
     """
-    Split a Gaussian into N_children=2 children.
-    Scales are downscaled by 5/4 * 1/sqrt(2).
-    Means are perturbed along principal axes.
+    Splits a Gaussian into n_children.
+    Scaling is downscaled by 5/4 * 1/sqrt(n_children).
+    Positions are perturbed by random normal distribution.
     """
     import numpy as np
     
-    N_children = 2
-    scale_factor = (5.0 / 4.0) * (1.0 / np.sqrt(N_children))
+    # Calculate new scale
+    scale_factor = (5.0 / 4.0) * (1.0 / np.sqrt(n_children))
+    new_scale = parent.scale * scale_factor
     
-    # Perturbation generation (simplified: using random samples from normal distribution)
-    # In practice, these are pre-generated in densify_random_samples
-    perturbations = np.random.randn(N_children, 3)
+    # Generate random perturbations for positions
+    # Seeded by step for reproducibility
+    rng = np.random.RandomState(step)
+    perturbations = rng.normal(0, 1, (n_children, 3))
     
     children = []
-    for i in range(N_children):
+    for i in range(n_children):
         child = Gaussian()
-        child.mean = parent.mean + perturbations[i] * parent.scale * scale_factor
-        child.scale = parent.scale * scale_factor
-        child.cov2d = parent.cov2d # Inherited
-        child.opacity = parent.opacity # Inherited (or initialized to low value in some variants)
-        child.features = parent.features # Inherited
-        child.grad_norm = 0.0 # Reset gradient tracking for new primitive
-        child.view_count = 0
+        child.mean = parent.mean + perturbations[i]
+        child.scale = new_scale
+        child.opacity = parent.opacity
+        child.color = parent.color
+        child.cov = compute_covariance(child.mean, child.scale, parent.rotation) # Simplified
         children.append(child)
+        
     return children
 
 def clone_gaussian(parent):
     """
-    Clone a Gaussian with a small random perturbation to mean.
+    Creates an exact copy of the parent Gaussian.
     """
-    import numpy as np
-    
-    child = Gaussian()
-    # Small random perturbation
-    perturbation = np.random.randn(3) * 0.01 * max(parent.scale)
-    child.mean = parent.mean + perturbation
-    child.scale = parent.scale
-    child.cov2d = parent.cov2d
-    child.opacity = parent.opacity
-    child.features = parent.features
-    child.grad_norm = 0.0
-    child.view_count = 0
-    return child
+    clone = Gaussian()
+    clone.mean = parent.mean.copy()
+    clone.scale = parent.scale.copy()
+    clone.opacity = parent.opacity
+    clone.color = parent.color
+    clone.cov = parent.cov.copy()
+    return clone
 ```
-
-**Parameters with Typical Values:**
-*   `refineEvery`: 100 steps [S5, unofficial].
-*   `warmupLength`: 0 steps (immediate start after warmup check) [S5, unofficial].
-*   `stopSplitAt`: 30,000 / 2 = 15,000 steps [S8].
-*   `resetInterval`: 3,000 steps [S8].
-*   `densifyGradThresh` ($T_{grad}$): Not given in the sources.
-*   `densifySizeThresh` ($P_{dense}$): Not given in the sources.
-*   `o_min`: Not given in the sources.
-*   `resetLogit`: -1.3862943611198906 [S5, unofficial].
-*   $\lambda_o$ (opacity decay): 0.9995 [S7].
-
-**Edge Cases and Pitfalls:**
-*   **Precision:** Standard ADC can lead to overfitting in simple regions (too many Gaussians) and under-reconstruction in complex regions (e.g., grass) [S8].
-*   **Boundaries:** ADC lacks control over the maximum number of Gaussians, risking out-of-memory issues during training [S4].
-*   **Memory Fragmentation:** The growing set of Gaussians causes memory fragmentation, which slows down optimization in later iterations [S6, unofficial].
-*   **Inversion-Free Splatting:** When using inversion-free splat evaluation, screen-space gradients are unavailable; the gradient of splat means scaled by half the distance to the camera in view space must be used instead [S7].
 
 ## Subtopics
 
 ### [Multi-View Density Control Criterion](5663-multi-view-density-control-criterion.md)
-The Multi-View Density Control Criterion is a heuristic used during the densification phase of 3D Gaussian Splatting training to control the number and distribution of Gaussian primitives. It addresses the problem of over-densification by evaluating gradient magnitudes across multiple views, ensuring that new Gaussians are only spawned in regions with significant multi-view reconstruction error. It sets itself apart from standard positional-gradient rules by requiring consistency across views, which yields higher rendering quality with significantly fewer primitives.
+Evaluates gradient magnitudes across multiple views to ensure consistency, yielding higher quality with fewer primitives.
 
 ### [GaussianDreamer](7763-gaussiandreamer.md)
-GaussianDreamer is a method for text-to-3D generation that combines 2D and 3D diffusion model priors to optimize a 3D Gaussian Splatting (3DGS) representation. It addresses the sparsity of initial geometry and the "Janus" (multi-face) problem by initializing with a 3D diffusion model and refining appearance using 2D Score Distillation Sampling (SDS). Unlike pure 2D SDS approaches, it leverages 3D shape priors for initialization, though it remains susceptible to view-dependent artifacts if not supplemented with multi-view constraints.
+Uses 3D diffusion priors for initialization and 2D SDS for refinement, addressing sparsity and Janus problems.
 
 ### [3DGS Adaptive Density Control](7847-3dgs-adaptive-density-control.md)
-3DGS Adaptive Density Control (ADC) is a dynamic optimization strategy that adjusts the number and distribution of 3D Gaussian primitives during training to prevent under-reconstruction (missing geometry) and over-reconstruction (coarse approximations). It sets itself apart from static initialization methods by using view-space positional gradient magnitudes to trigger cloning, splitting, and pruning operations at regular intervals, ensuring the representation remains compact while capturing fine details.
+The core dynamic optimization strategy using view-space gradients for cloning, splitting, and pruning.
 
 ### [MCMC Densification](9133-mcmc-densification.md)
-MCMC Densification is a Bayesian strategy for adjusting the number and distribution of 3D Gaussians during training, reformulating the densification process as a Stochastic Gradient Langevin Dynamic (SGLD) update rule. Unlike traditional adaptive density control methods that rely on heuristic thresholds for cloning and splitting based on gradient magnitude, MCMC densification treats the set of Gaussians as Markov Chain Monte Carlo (MCMC) samples. It adds noise to the center locations of Gaussians to explore the parameter space, allowing for the specification of the target number of Gaussians prior to optimization and reducing reliance on the initial point cloud.
+Reformulates densification as SGLD, adding noise to centers to explore parameter space and specifying target Gaussian counts.
 
 ### [Importance-Weighted Stochastic Sampling for Gaussian Simplification](9243-importance-weighted-stochastic-sampling-for-gaussian-simplif.md)
-This method simplifies a set of 3D Gaussians by replacing deterministic pruning with stochastic sampling weighted by Gaussian importance, thereby preserving local geometric structure. Unlike deterministic pruning, which removes neighbors with similar importance simultaneously and disrupts geometry, this approach maintains the overall scene structure while reducing the Gaussian count. It serves as a core simplification step within the [Optimization and Densification Strategy](4777-optimization-and-densification-strategy.md) pipeline [G].
+Replaces deterministic pruning with stochastic sampling weighted by importance to preserve geometry.
 
 ### [Density-preserving Gaussian splitting](9290-density-preserving-gaussian-splitting.md)
-Density-preserving Gaussian splitting is a densification strategy for 3D Gaussian Splatting that modifies child parameters during splitting to match the density of the parent Gaussian, thereby preventing loss perturbations and Gaussian clustering. It distinguishes itself from standard 3DGS by discarding cloning operations entirely and relying solely on splitting with learned opacity and size adaptations, unlike [17] which ignores opacity variations.
+Modifies child parameters during splitting to match parent density, preventing clustering and loss perturbations.
 
 ### [Age-Gated Eligibility (AGE)](12511-age-gated-eligibility-age.md)
-Age-Gated Eligibility (AGE) is a densification strategy for 3D Gaussian Splatting that prevents newly created primitives from splitting or cloning immediately, thereby bounding the primitive budget and controlling memory and training time costs. It solves the problem of uncontrolled cascading growth where a Gaussian born at iteration $k$ splits at $k+1$, its child at $k+2$, and so on, which inflates the primitive count and leaves redundant, under-supported primitives in dense regions. Unlike sibling methods that rely on gradient reweighting or relocation, AGE acts as a temporal gate, deferring the first split-or-clone decision until a Gaussian has matured for a fixed number of iterations.
+Prevents newly created primitives from splitting/cloning immediately to bound primitive budget and memory costs.
 
 ### Anisotropy Regularization
-Anisotropy Regularization is a variant that removes needle surgery structural splitting, training calls, and parameters, keeping standard densification and pruning [S9, unofficial]. It applies log-ratio soft regularization parameters: `lambda_aniso` (default 0.001) and `aniso_ratio_max` (default 5) [S9, unofficial].
+Removes needle-surgery structural splitting and training calls, keeping standard densification and pruning. Uses log-ratio soft regularization parameters: `lambda_aniso` (default 0.001) and `aniso_ratio_max` (default 5) [S9, unofficial].
 
 ### Max-Component Adaptive Density Control
-Max-Component Adaptive Density Control is a modified densification strategy for baseline methods that enforces a strict upper bound on component count, allowing densification to resume only if pruning reduces the count below the cap [S10]. It tracks the current component count; if count >= max_setting, cloning and splitting are disabled. If pruning reduces count below max_setting, densification is re-enabled. It continues until the preset densification iteration limit is reached. Without this cap, baselines that lack native component limits will grow unbounded during training, breaking fair comparison [S10].
+Enforces a strict upper bound on component count. Densification is disabled if count $\ge$ max_setting and re-enabled only if pruning reduces the count below the cap [S10]. Prevents unbounded growth during fair comparison [S10].
 
 ### Distortion-based Gaussian Splitting Prioritization
-Distortion-based Gaussian Splitting Prioritization is a criterion for prioritizing which Gaussians to split, based on rate-distortion optimization to maximize PSNR gain [S11]. It associates a reconstruction Squared Error $SE_{c,i}$ to each Gaussian defined as $SE_{c,i} = \sum_{p \in I_c} w_i^{(c)} (R^{(c)}(p) - I^{(c)}(p))^2$, where $I^{(c)}$ is the ground-truth image from camera $c$, $R^{(c)}$ is the rendered image, and $w_i^{(c)}$ is the weight of the Gaussian at pixel $p$ [S11].
+Prioritizes splitting based on rate-distortion optimization to maximize PSNR gain. Associates a reconstruction Squared Error $SE_{c,i}$ to each Gaussian and splits those inducing the highest gain [S11].
 
 ## Operating characteristics
-*   **Time Complexity:** Densification is performed periodically (e.g., every 1000 steps) [S8]. The cost depends on the number of Gaussians and the number of candidates for splitting/cloning. The gradient tracking requires accumulating gradients over $N_{views}$ views [S8].
-*   **Memory Complexity:** The number of Gaussians can grow unbounded without caps, leading to out-of-memory issues [S4]. Memory fragmentation occurs as the set of Gaussians grows, slowing down optimization in later iterations [S6, unofficial]. Buffer capacity must be pre-allocated to at least 3x the initial count [S5, unofficial].
-*   **Measured Performance:** Standard ADC can lead to overfitting in simple regions and under-reconstruction in complex regions like grass [S8]. Improvements such as exponential gradient thresholding and corrected scene extent calculation can improve rendering quality and reduce the number of primitives required [S8].
-*   **Strengths:** Dynamic adjustment allows for efficient representation of complex scenes without manual tuning of initial density.
-*   **Limitations:** Lack of upper bound on Gaussian count can cause memory issues. Standard heuristics may fail in high-frequency regions (e.g., grass) where positional gradients do not trigger sufficient densification [S4].
-*   **When to use:** When training 3D Gaussian Splatting for novel view synthesis and the scene has varying levels of detail.
-*   **When not to use:** When memory is strictly constrained and an upper bound on primitives is required (consider Max-Component ADC [S10] or other simplification methods).
+*   **Time Complexity:** Densification is performed periodically (e.g., every 1000 steps) rather than every step, reducing overhead [S8]. However, buffer compaction and gradient tracking add per-step cost [S6, unofficial].
+*   **Memory Complexity:** The number of Gaussians can grow unbounded, risking out-of-memory issues [S4]. Memory fragmentation occurs as the set of Gaussians grows, slowing optimization in later iterations [S6, unofficial].
+*   **Performance:** Standard ADC can lead to overfitting in simple regions (too many Gaussians) and under-reconstruction in complex regions (e.g., grass) [S8].
+*   **Strengths:** Dynamically balances addition and removal, avoiding suboptimal simplification outcomes of static pruning [S1]. Enables smooth integration into explicit 3D environments [S8].
+*   **Limitations:** Lacks control over maximum Gaussian count [S4]. Struggles in high-frequency regions where positional gradients may not trigger sufficient densification [S4].
 
 ## Background
-Adaptive Density Control (ADC) was introduced by Kerbl et al. in the original 3D Gaussian Splatting paper [S8]. It is a core component of the 3DGS training pipeline, enabling the dynamic adjustment of Gaussian primitives to balance reconstruction quality and computational efficiency. The method has been widely adopted and extended in subsequent research, including methods like LightGaussian [S1], GaussianDreamer [S2], and various simplification and densification strategies [S1][S4][S10].
+Adaptive Density Control was introduced by Kerbl et al. in the original 3D Gaussian Splatting paper [S8]. It manages Gaussian density by introducing or pruning primitives based on gradient statistics and opacity thresholds over a predefined schedule [S4]. It is widely used in 3DGS training to prevent under-reconstruction and over-reconstruction [S1][S2].
 
 ## Sources
 [S1] Mini-Splatting: Representing Scenes with a Constrained Number of Gaussians, https://doi.org/10.1007/978-3-031-72980-5_10, fetched 2026-10-26

@@ -1,29 +1,32 @@
 # TriplaneGaussian
 
-Also called: Triplane-GS
+Also called: Triplane3DGS
 
 ## Overview
-TriplaneGaussian is a feed-forward generative method that synthesizes a complete 3D Gaussian Splatting (3DGS) representation from a single input image [S1]. It solves the problem of single-image 3D reconstruction by decoupling the generation of geometric primitives from attribute encoding, using a hybrid architecture that combines a transformer-based point cloud decoder with a tri-plane feature encoder [S1]. Unlike sibling methods that predict Gaussian attributes directly from image features or use diffusion models, TriplaneGaussian explicitly generates a sparse point cloud and a tri-plane encoding of attributes, then fuses these via projection and augmentation to produce the final Gaussian set [S1].
+TriplaneGaussian is a feed-forward method for generating 3D Gaussian Splatting (3DGS) representations from a single input image [S1]. It solves the problem of single-image 3D reconstruction by decoupling the generation of geometric structure (point cloud) and attribute encoding (tri-plane) [S1]. It sets itself apart from sibling methods like AGG, which generates a coarse 3DGS and upsamples it via a U-Net, by instead projecting a densified point cloud onto a tri-plane to query features that are then decoded into Gaussian attributes [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A single RGB image $I$.
-*   **Output:** A set of 3D Gaussians $\mathcal{G} = \{ \mu_i, \Sigma_i, \alpha_i, c_i \}_{i=1}^N$, where $\mu_i$ is the center, $\Sigma_i$ is the covariance, $\alpha_i$ is the opacity, and $c_i$ is the spherical harmonic coefficient.
+**Inputs:** A single RGB image $I$.
+**Outputs:** A set of 3D Gaussians $\mathcal{G} = \{ \mu_i, \Sigma_i, \alpha_i, c_i \}_{i=1}^{N'}$, where $\mu_i$ is position, $\Sigma_i$ is covariance, $\alpha_i$ is opacity, and $c_i$ is color.
 
 **Data Structures:**
-1.  **Point Cloud:** A set of 3D points $P = \{ p_j \}_{j=1}^{M}$, where $p_j \in \mathbb{R}^3$. Initially sparse, later densified.
-2.  **Tri-Plane:** Three 2D feature planes $T_x, T_y, T_z \in \mathbb{R}^{H \times W \times C}$, representing the 3D space projected onto the XY, YZ, and XZ planes.
-3.  **Gaussian Attributes:** For each point, a vector containing mean, covariance (6 values for symmetric matrix or 7 for quaternion+scale), opacity, and color coefficients.
+1.  **Tri-Plane:** A set of three 2D feature grids $T_x, T_y, T_z \in \mathbb{R}^{H \times W \times C}$, representing the X, Y, and Z orthogonal planes.
+2.  **Point Cloud:** A set of 3D points $P = \{ p_i \}_{i=1}^{N}$, where $p_i \in \mathbb{R}^3$.
+3.  **MLP:** A Multi-Layer Perceptron mapping augmented features to Gaussian parameters.
 
 **Steps:**
-1.  **Image Feature Extraction:** Extract features from the input image $I$ using a backbone network (e.g., ViT or ResNet) to obtain image features $F_{img}$ [S1].
-2.  **Point Cloud Generation:** Pass $F_{img}$ through a transformer-based point cloud decoder to generate an initial sparse point cloud $P_{coarse}$ [S1].
-3.  **Tri-Plane Generation:** Pass $F_{img}$ through a tri-plane decoder to generate the tri-plane feature representation $T = \{ T_x, T_y, T_z \}$ encoding 3DGS attribute information [S1].
-4.  **Point Cloud Densification:** Upsample $P_{coarse}$ using an upsampling method to increase point density $P_{dense}$ [S1].
-5.  **Feature Querying:** Project each point $p \in P_{dense}$ onto the three planes $T_x, T_y, T_z$. Sample features from the tri-planes at the projected coordinates to obtain tri-plane features $F_{tri}$ [S1].
-6.  **Feature Augmentation:** Combine the queried tri-plane features $F_{tri}$ with the projected image features $F_{proj}$ (derived from $F_{img}$ corresponding to the point's view) to form augmented features $F_{aug}$ [S1].
-7.  **Attribute Prediction:** Pass $F_{aug}$ through a Multi-Layer Perceptron (MLP) to predict the 3D Gaussian attributes $\{ \mu_i, \Sigma_i, \alpha_i, c_i \}$ for each point [S1].
-8.  **Super-Resolution (Optional/Variant):** If a coarse 3DGS is generated first, apply a U-Net-based super-resolution module to upsample the Gaussian set and improve fidelity [S1].
+1.  **Image Feature Extraction:** Extract features from the input image $I$ using a backbone network (e.g., ViT or ResNet) to produce image features $F_{img}$ [S1].
+2.  **Parallel Decoding:**
+    *   **Point Cloud Generation:** Pass $F_{img}$ through a transformer-based point cloud decoder to generate an initial point cloud $P_{coarse}$ [S1].
+    *   **Tri-Plane Generation:** Pass $F_{img}$ through a tri-plane decoder to generate the tri-plane feature representation $T$ [S1].
+3.  **Point Cloud Densification:** Apply an upsampling method to $P_{coarse}$ to increase the number of points, resulting in a denser point cloud $P_{dense}$ [S1].
+4.  **Feature Querying:**
+    *   Project each point $p_i \in P_{dense}$ onto the three planes $T_x, T_y, T_z$ [S1].
+    *   Sample the feature values at the projected coordinates from each plane.
+    *   Concatenate or aggregate these sampled features to form a query feature vector $f_{query}$ for each point [S1].
+5.  **Feature Augmentation:** Augment the query features $f_{query}$ with the corresponding projected image features $F_{img}$ (aligned to the point's location) to form augmented features $f_{aug}$ [S1].
+6.  **Attribute Prediction:** Pass $f_{aug}$ through an MLP to predict the full set of 3D Gaussian attributes $\{ \mu_i, \Sigma_i, \alpha_i, c_i \}$ for each point in $P_{dense}$ [S1].
+7.  **Super-Resolution (Optional/Variant):** In some implementations (referred to as AGG in sources), a coarse 3DGS is first generated and then upsampled through a U-Net-based super-resolution module to improve fidelity [S1]. *Note: The primary TriplaneGaussian description emphasizes the point-cloud-to-tri-plane projection path, while AGG emphasizes coarse-3DGS upsampling. Both use hybrid tri-plane/point-cloud generators.*
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -33,63 +36,69 @@ def triplane_gaussian_generate(image: Tensor) -> List[Gaussian]:
     # 1. Extract image features
     F_img = image_backbone(image)
     
-    # 2. Generate initial point cloud
+    # 2. Generate initial structures
     P_coarse = transformer_point_cloud_decoder(F_img)
-    
-    # 3. Generate tri-plane features
     T = tri_plane_decoder(F_img)
     
-    # 4. Densify point cloud
+    # 3. Densify point cloud
     P_dense = upsampling_method(P_coarse)
     
-    # 5. Query tri-plane features for each point
-    F_tri = query_tri_plane(P_dense, T)
-    
-    # 6. Project image features to points (view-dependent)
-    F_proj = project_image_features(P_dense, F_img)
-    
-    # 7. Augment features
-    F_aug = augment(F_tri, F_proj)
-    
-    # 8. Predict Gaussian attributes
-    Gaussians = mlp_predict_attributes(F_aug)
-    
-    # 9. Super-resolution if needed
-    if use_super_resolution:
-        Gaussians = super_resolution_module(Gaussians)
+    # 4. Query tri-plane features
+    features = []
+    for p in P_dense:
+        # Project p onto X, Y, Z planes
+        f_x = sample(T.x, p.x, p.y)
+        f_y = sample(T.y, p.y, p.z)
+        f_z = sample(T.z, p.x, p.z)
         
-    return Gaussians
+        # Aggregate query features
+        f_query = concatenate(f_x, f_y, f_z)
+        
+        # Augment with image features
+        # Note: Exact alignment of F_img to 3D point p depends on camera pose
+        # assumed or estimated. If implicit, F_img features are projected 
+        # based on the point's view direction or position.
+        f_aug = augment(f_query, F_img, p)
+        features.append(f_aug)
+        
+    # 5. Predict Gaussian attributes
+    gaussians = []
+    for f_aug in features:
+        attrs = mlp_predictor(f_aug)
+        gaussians.append(attrs)
+        
+    return gaussians
 ```
 
 **Parameters:**
-*   Tri-plane resolution: Not given in the sources.
-*   Point cloud density: Not given in the sources.
-*   MLP depth/width: Not given in the sources.
+*   Tri-plane resolution ($H \times W$): Not given in the sources.
+*   Tri-plane channel dimension ($C$): Not given in the sources.
+*   Upsampling factor: Not given in the sources.
 
-**Edge Cases and Pitfalls:**
-*   **Occlusion:** Single-image input lacks multi-view consistency, potentially leading to hallucinated geometry in occluded regions [S1].
-*   **Precision:** Tri-plane sampling requires accurate coordinate projection; errors in point position lead to incorrect feature queries [S1].
+**Edge Cases:**
+*   **Occlusion:** The method relies on projecting points to a tri-plane. If the point cloud generation is inaccurate, projection may query irrelevant background features.
+*   **Precision:** Sampling from the tri-plane requires interpolation (e.g., bilinear). [G] Bilinear interpolation is standard for this operation.
 
 ## Subtopics
 
 ### [Hybrid Gaussian Representation with Geometry-Guided Constraints](10609-hybrid-gaussian-representation-with-geometry-guided-constrai.md)
-Uses TensoSDF for geometric consistency, dynamically switching between 2D and 3D Gaussians.
+Uses TensoSDF for geometry guidance instead of just tri-plane initialization.
 
 ### [Volume-Based Densification](10710-volume-based-densification.md)
-Uses ellipsoid volume and covariance condition number for densification, replacing gradient-based ADC.
+Uses volume analysis for densification instead of gradient-based ADC.
 
 ### [Phys3DGS](11050-phys3dgs.md)
-Physically-based inverse rendering with deferred rendering and mesh-3DGS hybrid representation.
+Uses deferred rendering and mesh-hybrid for physical accuracy.
 
 ## Operating characteristics
-*   **Time Complexity:** Feed-forward inference, typically faster than iterative optimization methods. Exact complexity not given in the sources.
-*   **Memory Complexity:** Depends on tri-plane resolution and point cloud density. Not given in the sources.
-*   **Performance:** Generates 3DGS from a single image. Fidelity improved by super-resolution module. Not given in the sources.
-*   **Strengths:** Single-image input, feed-forward generation, hybrid representation for better attribute encoding.
-*   **Limitations:** Single-view input limits geometric accuracy; potential for artifacts in occluded regions.
+*   **Time Complexity:** Feed-forward inference time depends on the backbone, decoders, and MLP size. It is significantly faster than iterative optimization-based 3DGS reconstruction.
+*   **Memory Complexity:** Requires storing the tri-plane features and the generated Gaussian set.
+*   **Strengths:** Enables single-image 3DGS generation without iterative optimization. The hybrid representation helps decouple geometry and appearance.
+*   **Limitations:** Quality depends on the generalization of the trained network. May suffer from the "Janus problem" or floaters if not properly regularized, though the sources do not specify the exact regularization used in TriplaneGaussian itself (only that the family shares challenges).
+*   **When to use:** When fast, single-image 3DGS generation is required and iterative optimization is too slow.
 
 ## Background
-TriplaneGaussian was proposed in [S1] as a method to generate 3D Gaussian Splatting representations directly from a single image using a hybrid tri-plane and point cloud architecture. It builds on the trend of feed-forward 3D generation, contrasting with iterative optimization approaches.
+TriplaneGaussian was proposed in [S1] as a method to generate 3DGS from a single image using a hybrid representation of tri-planes and 3DGS. It builds on the trend of using existing 3D datasets and large models to directly generate 3DGS representations [S1]. It is distinct from AGG, which also uses a hybrid generator but focuses on upsampling a coarse 3DGS via a U-Net [S1].
 
 ## Sources
 [S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

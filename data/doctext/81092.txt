@@ -1,0 +1,1342 @@
+# UE5 Froxel Lighting Plugin
+
+A real-time **clustered (froxel) lighting and volumetrics system** for Unreal Engine 5.  
+Built as a C++/HLSL plugin with Render Graph integration.
+
+
+## Features (Roadmap)
+- [x] Froxel grid builder (frustum voxel partitioning).
+- [x] Compute shader for per-froxel light assignment.
+- [x] GPU light buffer with SoA (structure of arrays) layout.
+- [x] Debug heatmap overlay for froxel occupancy.
+- [ ] Cascaded shadow maps + shadow atlas visualization.
+- [ ] Temporal AA with reactive mask fixes.
+- [ ] Volumetric fog with temporal reprojection.
+- [ ] Screen-space reflections (scalability tiers).
+- [ ] In-engine performance HUD (FPS, draw calls, light count).
+
+### Goal
+- Demonstrate modern real-time rendering techniques in UE5.
+- Benchmark performance across Apple M3 (Metal) and RTX 3060 (DX12).
+
+### Process Overview
+1. **Froxel Grid Construction**: Partition the camera frustum into a 3D grid of froxels (frustum voxels).
+2. **Per Froxel Light Assignment**: For each light in the scene, determine which froxels it affects using compute shaders.
+   1. **Light Counting**: Count the number of visible lights affecting each froxel and store this in a structured buffer. (See `FroxelCount.usf`)
+   2. **Buffer Offsets**: Create a buffer of offsets to index into the light list for each froxel."
+      1. Blelloch scan (prefix sum) to compute offsets in each Z-slice. (See `FroxelOffsetPassA.usf`)
+      2. Blelloch scan across Z-slices to get final offsets. (See `FroxelOffsetPassB.usf`)
+      3. Add a final offset to each froxel to get absolute indices. (See `FroxelOffsetPassC.usf`)
+3. **Light Assignment**: For each froxel, assign the indices of lights affecting it.
+   1. Reduce pass to compute the total number of light assignments. (See `FroxelTotalIndices.usf`)
+   2. Use atomic operations to safely write light indices into the froxel's light list. (See `FroxelAssignLights.usf`)
+4. **Debug Overlay**: Render a heatmap overlay showing froxel occupancy and light counts for debugging purposes. (See `FroxelOverlayHash.usf`, and `FroxelOverlayHeatmap.usf`)
+5. TODO: Implement lighting and volumetric effects using the froxel data.
+
+### Screenshots
+| Froxel Grid Visualization                   | Froxel Light Count Heatmap (WIP)                  |
+|---------------------------------------------|---------------------------------------------------|
+| ![Froxel Grid](Screenshots/froxel_grid.png) | ![Froxel Heatmap](Screenshots/froxel_heatmap.png) |
+
+### Applied Technologies
+- C++20
+- Unreal Engine 5.6+
+- Render Graph API
+- Slate UI Framework for in-engine HUD
+- HLSL Compute and Pixel Shaders
+- GPU Profiling Tools (Unreal Insights, Xcode GPU Frame Capture, RenderDoc)
+- Git for version control
+
+### License
+MIT — free to use, modify, and share.
+
+## Build Instructions
+1. Clone this repo into your UE5 project’s `Plugins/` directory:
+   ```bash
+   git clone https://github.com/ArminTajik/ue5-froxel-lighting Plugins/FroxelLighting
+
+### Source/FroxelLighting/FroxelLighting.Build.cs
+```
+using UnrealBuildTool;
+
+public class FroxelLighting : ModuleRules
+{
+    public FroxelLighting(ReadOnlyTargetRules Target) : base(Target)
+    {
+        
+        PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+
+        PublicDependencyModuleNames.AddRange(new string[]
+        {
+            "Core",
+            "RenderCore",
+            "RHI"
+        });
+
+        PrivateDependencyModuleNames.AddRange(new string[]
+        {
+            "CoreUObject",
+            "Engine",
+            "Projects",
+            "Renderer",
+            "RenderCore",
+            "RHI"
+        });
+
+        // including shader files in the package
+        if (Target.Platform == UnrealTargetPlatform.Mac || Target.Platform == UnrealTargetPlatform.Win64)
+        {
+            RuntimeDependencies.Add("$(PluginDir)/Shaders/**", StagedFileType.NonUFS);
+        }
+    }
+}
+```
+
+### Source/FroxelLighting/Private/FroxelLighting.cpp
+```
+#include "FroxelLighting.h"
+
+#include "FroxelViewExtension.h"
+#include "SceneViewExtension.h"
+#include "Interfaces/IPluginManager.h"
+#include "Misc/Paths.h"
+#include "ShaderCore.h"
+#include "HAL/IConsoleManager.h"
+#include "ProfilingDebugging/RealtimeGPUProfiler.h"
+
+#define LOCTEXT_NAMESPACE "FFroxelLightingModule" // for the sake of convention
+
+DEFINE_LOG_CATEGORY(LogFroxelLighting);
+
+// Console variables and commands for testing ----------------------
+
+TAutoConsoleVariable<int32> CVarFroxelGridX(
+    TEXT("r.Froxel.GridX"),
+    16,
+    TEXT("Froxel grid dimension X."),
+    ECVF_Default);
+
+TAutoConsoleVariable<int32> CVarFroxelGridY(
+    TEXT("r.Froxel.GridY"),
+    16,
+    TEXT("Froxel grid dimension Y."),
+    ECVF_Default);
+
+TAutoConsoleVariable<int32> CVarFroxelGridZ(
+    TEXT("r.Froxel.GridZ"),
+    16,
+    TEXT("Froxel grid dimension Z."),
+    ECVF_Default);
+
+TAutoConsoleVariable<int32> CVarFroxelMaxLightsPerFroxel(
+        TEXT("r.Froxel.MaxLightsPerFroxel"),
+        32,
+        TEXT("Maximum number of lights that can be assigned to a single froxel."),
+        ECVF_Default);
+
+TAutoConsoleVariable<int32> CVarFroxelFarClipCm(
+        TEXT("r.Froxel.FarClipCm"),
+        100000,
+        TEXT("Froxel grid far clipping plane in cm."),
+        ECVF_Default);
+
+TAutoConsoleVariable<int32> CVarFroxelZMode(
+        TEXT("r.Froxel.ZMode"),
+        1,
+        TEXT("Froxel grid Z distribution mode (0: linear, 1: logarithmic)."),
+        ECVF_Default);
+
+//
+TAutoConsoleVariable<int32> CVarFroxelVisualize(
+    TEXT("r.Froxel.Visualize"),
+    0,
+    TEXT("Visualize Froxel grid (0: off, 1: heatmap, 2: hash pattern)."),
+    ECVF_Default);
+
+TAutoConsoleVariable<float> CVarFroxelDebugOpacity(
+        TEXT("r.Froxel.DebugOpacity"),
+        0.5f,
+        TEXT("Overlay opacity when compositing on SceneColor."),
+        ECVF_RenderThreadSafe);
+
+
+
+// Module implementation ---------------------------------------
+
+void FFroxelLightingModule::StartupModule() {
+    // Making sure the shaders' dir is mapped correctly
+    if (const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("FroxelLighting")); Plugin.IsValid()) {
+        const FString ShaderDir = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Shaders"));
+        AddShaderSourceDirectoryMapping(TEXT("/FroxelLighting"), ShaderDir);
+        UE_LOG(LogFroxelLighting, Log, TEXT("Shader dir mapped: %s"), *ShaderDir);
+    } else {
+        UE_LOG(LogFroxelLighting, Warning, TEXT("Plugin not found via IPluginManager."));
+    }
+
+    auto RegisterVE = [this]() {
+        ViewExt = FSceneViewExtensions::NewExtension<FFroxelViewExtension>();
+        UE_LOG(LogFroxelLighting, Log, TEXT("ViewExtension registered (post engine init)"));
+    };
+
+    if (GEngine) {
+        RegisterVE();
+    } else {
+        FCoreDelegates::OnPostEngineInit.AddLambda(RegisterVE);
+    }
+}
+
+void FFroxelLightingModule::ShutdownModule() {
+    ViewExt.Reset();
+    UE_LOG(LogFroxelLighting, Log, TEXT("FroxelLighting module shutdown"));
+}
+
+#undef LOCTEXT_NAMESPACE
+
+IMPLEMENT_MODULE(FFroxelLightingModule, FroxelLighting)
+```
+
+### Source/FroxelLighting/Private/FroxelUtils.cpp
+```
+#include "FroxelUtils.h"
+#include "RenderGraphBuilder.h"
+#include "Shaders/FroxelCommon.h"
+
+
+extern TAutoConsoleVariable<int32> CVarFroxelFarClipCm;
+extern TAutoConsoleVariable<int32> CVarFroxelMaxLightsPerFroxel;
+
+
+uint32 FFroxelUtils::GetFroxelIndex(const uint32 X, const uint32 Y, const uint32 Z, const uint32 GridX,
+                                    const uint32 GridY, const uint32 GridZ) {
+    check(X < GridX && Y < GridY && Z < GridZ);
+    return X + Y * GridX + Z * GridX * GridY;
+}
+
+TUniformBufferRef<FFroxelUniformParameters> FFroxelUtils::CreateSharedUB(
+    FRDGBuilder& GraphBuilder, const FSceneView& InView, const FIntVector GridSize, const int32 NumLights) {
+
+    const int32 GX = GridSize.X;
+    const int32 GY = GridSize.Y;
+    const int32 GZ = GridSize.Z;
+    const int32 GCOUNT = GX * GY * GZ;
+
+    FFroxelUniformParameters* Params = GraphBuilder.AllocParameters<FFroxelUniformParameters>();
+    Params->GridSize = FIntVector4(GX, GY, GZ, GCOUNT);
+    Params->NearCm = InView.NearClippingDistance;
+    Params->FarCm = FMath::Max(1000, CVarFroxelFarClipCm.GetValueOnRenderThread());
+
+    Params->NumLights = NumLights;
+    Params->MaxLightsPerFroxel = FMath::Max(1, CVarFroxelMaxLightsPerFroxel.GetValueOnRenderThread());
+    Params->ViewportSize = InView.UnscaledViewRect.Size();
+    Params->ViewRectMinPx = InView.UnscaledViewRect.Min;
+
+    FVector2f TileSizeF = FVector2f(Params->ViewportSize) / FVector2f(GX, GY);
+    TileSizeF = FVector2f(
+        FMath::Max(TileSizeF.X, 1.0f),
+        FMath::Max(TileSizeF.Y, 1.0f)
+        );
+    const FIntPoint TileSize = FIntPoint(
+        FMath::FloorToInt(TileSizeF.X),
+        FMath::FloorToInt(TileSizeF.Y)
+        );
+    Params->TileSizePx = TileSize;
+    Params->InvTilePx = FVector2f(1.0f) / FVector2f(TileSize);
+    Params->ViewMatrix = FMatrix44f(InView.ViewMatrices.GetViewMatrix());
+    Params->ProjectionMatrix = FMatrix44f(InView.ViewMatrices.GetProjectionMatrix());
+    
+
+    // Create an immediate UB for this **frame**
+    TUniformBufferRef<FFroxelUniformParameters> FroxelUB =
+        TUniformBufferRef<FFroxelUniformParameters>::CreateUniformBufferImmediate(
+            *Params, UniformBuffer_SingleFrame);
+
+    return FroxelUB;
+}
+
+
+FFroxelLists FFroxelUtils::CreateFroxelLists(FRDGBuilder& GraphBuilder, const FIntVector Grid, const int32 MaxLightsPerFroxel) {
+    FFroxelLists Lists;
+
+    const uint32 FroxelCount = Grid.X * Grid.Y * Grid.Z;
+    Lists.FroxelCount = FroxelCount;
+
+    FRDGBufferDesc CountsDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FroxelCount);
+    CountsDesc.Usage |= BUF_ShaderResource | BUF_UnorderedAccess;
+    Lists.Counts = GraphBuilder.CreateBuffer(CountsDesc, TEXT("FroxelLists.Counts"));
+
+    FRDGBufferDesc OffsetsDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FroxelCount);
+    OffsetsDesc.Usage |= BUF_ShaderResource | BUF_UnorderedAccess;
+    Lists.Offsets = GraphBuilder.CreateBuffer(OffsetsDesc, TEXT("FroxelLists.Offsets"));
+
+    FRDGBufferDesc TotalIndicesDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 1);
+    TotalIndicesDesc.Usage |= BUF_ShaderResource | BUF_UnorderedAccess;
+    Lists.TotalIndices = GraphBuilder.CreateBuffer(TotalIndicesDesc, TEXT("FroxelLists.TotalIndices"));
+
+    FRDGBufferDesc LightIndicesDesc = FRDGBufferDesc::CreateStructuredDesc(
+        sizeof(uint32), FroxelCount * MaxLightsPerFroxel);
+    LightIndicesDesc.Usage |= BUF_ShaderResource | BUF_UnorderedAccess;
+    Lists.LightIndices = GraphBuilder.CreateBuffer(LightIndicesDesc, TEXT("FroxelLists.LightIndices"));
+
+    return Lists;
+}
+```
+
+### Source/FroxelLighting/Private/FroxelUtils.h
+```
+#pragma once
+#include "CoreMinimal.h"
+#include "Data/FroxelData.h"
+
+class FFroxelUniformParameters;
+
+class FFroxelUtils {
+public:
+    FORCEINLINE uint32 GetFroxelIndex(const uint32 X, const uint32 Y, const uint32 Z, const uint32 GridX,
+                                      const uint32 GridY, const uint32 GridZ);
+
+    static TUniformBufferRef<FFroxelUniformParameters> CreateSharedUB(FRDGBuilder& GraphBuilder,
+                                                                      const FSceneView& InView,
+                                                                      FIntVector GridSize, int32 NumLights);
+    static FFroxelLists CreateFroxelLists(FRDGBuilder& GraphBuilder, FIntVector Grid, int32 MaxLightsPerFroxel);
+
+};
+```
+
+### Source/FroxelLighting/Private/FroxelViewExtension.cpp
+```
+#include "FroxelViewExtension.h"
+#include "FroxelLighting.h"
+#include "FroxelUtils.h"
+
+// Shaders
+#include "Shaders/FroxelOverlayShaders.h"
+#include "Shaders/FroxelBuildGridCS.h"
+#include "Shaders/FroxelCountCS.h"
+#include "Shaders/FroxelOffsetCS.h"
+#include "Shaders/FroxelAssignLightsCS.h"
+
+// Unreal Engine
+#include "RenderGraphBuilder.h"
+#include "RenderGraphUtils.h"
+#include "GlobalShader.h"
+#include "HAL/IConsoleManager.h"
+#include "PixelShaderUtils.h"
+#include "RHICommandList.h"
+#include "RHIResources.h"
+#include "RHI.h"
+#include "RHIGPUReadback.h"
+#include "SceneRenderTargetParameters.h"
+#include "SceneViewExtension.h"
+#include "Components/LightComponent.h"
+#include "Data/FroxelData.h"
+#include "PostProcess/PostProcessMaterialInputs.h"
+
+
+DEFINE_GPU_STAT(Froxel);
+
+// Console variables --------------------------------------------
+extern TAutoConsoleVariable<int32> CVarFroxelGridX;
+extern TAutoConsoleVariable<int32> CVarFroxelGridY;
+extern TAutoConsoleVariable<int32> CVarFroxelGridZ;
+extern TAutoConsoleVariable<int32> CVarFroxelVisualize;
+extern TAutoConsoleVariable<int32> CVarFroxelMaxLightsPerFroxel;
+extern TAutoConsoleVariable<int32> CVarFroxelFarClipCm;
+extern TAutoConsoleVariable<int32> CVarFroxelZMode;
+extern TAutoConsoleVariable<float> CVarFroxelDebugOpacity;
+
+#pragma region View Extension Implementation
+
+/**
+ * Capture lights from the scene for froxelization.
+ * This is called on the game thread before rendering.
+ */
+void FFroxelViewExtension::SetupViewFamily(FSceneViewFamily& InViewFamily) {
+    FSceneViewExtensionBase::SetupViewFamily(InViewFamily);
+    
+    if (const FSceneInterface* Scene = InViewFamily.Scene; !Scene || !Scene->HasAnyLights())
+        return;
+
+    TArray<FFroxelLightData> FrameLights;
+    GetFrameLights(InViewFamily, FrameLights);
+    
+    {
+        // writer thread (GT)
+        FScopeLock Lock(&LightBufferMutex); // locking to avoid race condition with render thread
+        this->FrameLights_GT = MoveTemp(FrameLights);
+        UE_LOG(LogFroxelLighting, VeryVerbose, TEXT("Captured %d lights for froxelization"), FrameLights_GT.Num());
+    }
+}
+
+/**
+ * Carry over the lights captured on the game thread to the render thread.
+ * This is called on the render thread before rendering the view family.
+ */
+void FFroxelViewExtension::PreRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily) {
+    FSceneViewExtensionBase::PreRenderViewFamily_RenderThread(GraphBuilder, InViewFamily);
+
+    const int32 GX = FMath::Max(1, CVarFroxelGridX.GetValueOnRenderThread());
+    const int32 GY = FMath::Max(1, CVarFroxelGridY.GetValueOnRenderThread());
+    const int32 GZ = FMath::Max(1, CVarFroxelGridZ.GetValueOnRenderThread());
+    GridSize_RT = FIntVector(GX, GY, GZ);
+    GridCount_RT = GX * GY * GZ;
+
+    {
+        // reader thread (RT)
+        FScopeLock Lock(&LightBufferMutex); // locking to avoid race condition with game thread
+        FrameLights_RT = FrameLights_GT;
+        NumLights_RT = FrameLights_RT.Num();
+    }
+}
+
+/**
+ * Main froxelization step.
+ * This is called after the base pass has been rendered, but before post-processing.
+ * The reason for this placement is that we need the view (InView) to be fully initialized.
+ */
+void FFroxelViewExtension::PostRenderBasePassDeferred_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView,
+                                                                   const FRenderTargetBindingSlots& RenderTargets,
+                                                                   TRDGUniformBufferRef<FSceneTextureUniformParameters>
+                                                                   SceneTextures) {
+    FSceneViewExtensionBase::
+        PostRenderBasePassDeferred_RenderThread(GraphBuilder, InView, RenderTargets, SceneTextures);
+
+    if (NumLights_RT == 0) {
+        UE_LOG(LogFroxelLighting, VeryVerbose, TEXT("No lights to froxelize"));
+        return;
+    }
+
+    // Filter lights that are in the current view frustum
+    TArray<FFroxelLightData> LightsInView;
+    LightsInView.Reserve(NumLights_RT);
+    for (const auto& L : FrameLights_RT) {
+        if (InView.ViewFrustum.IntersectSphere(FVector(L.PositionWS), L.Radius)) {
+            LightsInView.Add(L);
+        }
+    }
+    
+    const uint32 NumLightsInView = LightsInView.Num();
+    
+    constexpr uint32 Stride = sizeof(FFroxelLightData);
+    
+    LightsSB = CreateStructuredBuffer(
+        GraphBuilder,
+        TEXT("LightsSB"),
+        Stride,
+        NumLightsInView,
+        LightsInView.GetData(),
+        Stride * NumLightsInView);
+    
+    RDG_GPU_STAT_SCOPE(GraphBuilder, Froxel);
+    RDG_EVENT_SCOPE(GraphBuilder, "FroxelScope");
+    
+    // creating froxel lists and shared uniform buffer
+    FroxelLists = FFroxelUtils::CreateFroxelLists(GraphBuilder, GridSize_RT,
+                                                  CVarFroxelMaxLightsPerFroxel.GetValueOnRenderThread());
+
+    SharedUB = FFroxelUtils::CreateSharedUB(GraphBuilder, InView, GridSize_RT, NumLightsInView);
+    
+    
+    CountLightPerFroxel(GraphBuilder, InView);
+    // ComputeFroxelOffset(GraphBuilder, InView);
+    // ComputeLightIndices(GraphBuilder, InView);
+    
+
+}
+
+/**
+ * Visualize the froxel grid as an overlay on the final image.
+ * This is called as a post-processing pass if enabled. Use the console variable r.Froxel.Visualize to switch modes.
+ */
+void FFroxelViewExtension::SubscribeToPostProcessingPass(EPostProcessingPass Pass, const FSceneView& InView,
+                                                         FPostProcessingPassDelegateArray& InOutPassCallbacks,
+                                                         bool bIsPassEnabled) {
+    FSceneViewExtensionBase::SubscribeToPostProcessingPass(Pass, InView, InOutPassCallbacks, bIsPassEnabled);
+
+    if (CVarFroxelVisualize.GetValueOnRenderThread() == 0) {
+        return;
+    }
+
+    if (Pass == EPostProcessingPass::Tonemap && bIsPassEnabled) {
+        InOutPassCallbacks.Add(
+            FPostProcessingPassDelegate::CreateRaw(this, &FFroxelViewExtension::VisualizeFroxelOverlayPS));
+    }
+
+}
+
+#pragma endregion
+#pragma region Shader Implementations
+
+/**
+ * Count the number of lights affecting each froxel.
+ * The result is stored in FroxelLightCountsUAV buffer and returned as an RDG buffer to pass to the next stage.
+ **/
+void FFroxelViewExtension::CountLightPerFroxel(FRDGBuilder& GraphBuilder, const FSceneView& InView) {
+
+    UE_LOG(LogFroxelLighting, VeryVerbose, TEXT("CountLightPerFroxel called (NumLights = %u)"), NumLights_RT);
+    if (!LightsSB) {
+        UE_LOG(LogFroxelLighting, VeryVerbose, TEXT("Lights is null"));
+        return;
+    }
+    if (!FroxelLists.Counts) {
+        UE_LOG(LogFroxelLighting, VeryVerbose, TEXT("FroxelLightCounts is null"));
+        return;
+    }
+
+    const FRDGBufferUAVRef FroxelLightCountsUAV = GraphBuilder.CreateUAV(FroxelLists.Counts);
+    AddClearUAVPass(GraphBuilder, FroxelLightCountsUAV, 0u);
+
+    auto* Params = GraphBuilder.AllocParameters<FFroxelCountCS::FParameters>();
+
+    if (!InView.ViewUniformBuffer) {
+        UE_LOG(LogFroxelLighting, VeryVerbose, TEXT("ViewUniformBuffer is null"));
+        return;
+    }
+    Params->FroxelSharedUB = SharedUB;
+    Params->View = InView.ViewUniformBuffer;
+    Params->Lights = GraphBuilder.CreateSRV(LightsSB);
+    Params->FroxelLightCounts = FroxelLightCountsUAV;
+
+    const TShaderMapRef<FFroxelCountCS> ComputeShader(GetGlobalShaderMap(InView.GetFeatureLevel()));
+    const FIntVector Groups(FComputeShaderUtils::GetGroupCount(NumLights_RT, 64));
+
+    FComputeShaderUtils::AddPass(
+        GraphBuilder,
+        RDG_EVENT_NAME("Froxel Ligthing Build Grid (NumLights = %u)", NumLights_RT),
+        ERDGPassFlags::Compute,
+        ComputeShader,
+        Params,
+        Groups);
+
+}
+
+/**
+ * Compute the offsets into the global light index list for each froxel.
+ * The result is stored in FroxelLightOffsetsUAV buffer.
+ * This step is divided into 3 passes:
+ * 1. Prefix sum (scan) each group of froxels in a z-slice.
+ * 2. Prefix sum (scan) each z-slice group sums.
+ * 3. Add the z-slice group sums to each froxel in the z-slice.
+ **/
+void FFroxelViewExtension::ComputeFroxelOffset(FRDGBuilder& GraphBuilder,const FSceneView& InView) {
+
+    if (!FroxelLists.Counts) {
+        UE_LOG(LogFroxelLighting, VeryVerbose, TEXT("FroxelLightCounts is null"));
+        return;
+    }
+    if (!FroxelLists.Offsets) {
+        UE_LOG(LogFroxelLighting, VeryVerbose, TEXT("FroxelLightOffsets is null"));
+        return;
+    }
+    const int32 GX = GridSize_RT.X;
+    const int32 GY = GridSize_RT.Y;
+    const int32 GZ = GridSize_RT.Z;
+    const uint32 ZSliceSize = GX * GY;
+
+    FRDGBufferRef ZSliceTotals = GraphBuilder.CreateBuffer(
+        FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), GZ),
+        TEXT("ZSliceTotals")
+        );
+
+    FRDGBufferRef ZSliceOffsets = GraphBuilder.CreateBuffer(
+        FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), GZ),
+        TEXT("ZSliceOffsets")
+        );
+
+    // Pass A: prefix sum (Blelloch scan) each group of froxels in a z-slice.
+    {
+        const FRDGBufferUAVRef ZSliceTotalsUAV = GraphBuilder.CreateUAV(ZSliceTotals);
+        const FRDGBufferUAVRef FroxelLightOffsetsUAV = GraphBuilder.CreateUAV(FroxelLists.Offsets);
+        AddClearUAVPass(GraphBuilder, ZSliceTotalsUAV, 0u);
+        AddClearUAVPass(GraphBuilder, FroxelLightOffsetsUAV, 0u);
+
+        auto* Params = GraphBuilder.AllocParameters<FFroxelOffsetPassACS::FParameters>();
+        Params->FroxelSharedUB = SharedUB;
+        Params->FroxelLightCounts = GraphBuilder.CreateSRV(FroxelLists.Counts);
+        Params->FroxelLightOffsets = FroxelLightOffsetsUAV;
+        Params->ZSliceTotals = ZSliceTotalsUAV;
+        const TShaderMapRef<FFroxelOffsetPassACS> ComputeShader(GetGlobalShaderMap(InView.GetFeatureLevel()));
+        const FIntVector Groups(FComputeShaderUtils::GetGroupCount(ZSliceSize, 256));
+
+        FComputeShaderUtils::AddPass(
+            GraphBuilder,
+            RDG_EVENT_NAME("Froxel Ligthing: Compute Offset Pass A"),
+            ERDGPassFlags::Compute,
+            ComputeShader,
+            Params,
+            Groups
+            );
+    }
+
+    // Pass B: prefix sum (Blelloch scan) each z-slice group sums.
+    {
+        const FRDGBufferUAVRef ZSliceOffsetsUAV = GraphBuilder.CreateUAV(ZSliceOffsets);
+        AddClearUAVPass(GraphBuilder, ZSliceOffsetsUAV, 0u);
+
+        auto* Params = GraphBuilder.AllocParameters<FFroxelOffsetPassBCS::FParameters>();
+        Params->FroxelSharedUB = SharedUB;
+        Params->ZSliceTotals = GraphBuilder.CreateSRV(ZSliceTotals);
+        Params->ZSliceOffsets = ZSliceOffsetsUAV;
+
+        const TShaderMapRef<FFroxelOffsetPassBCS> ComputeShader(GetGlobalShaderMap(InView.GetFeatureLevel()));
+        const FIntVector Groups(FComputeShaderUtils::GetGroupCount(GZ, 1024));
+
+        FComputeShaderUtils::AddPass(
+            GraphBuilder,
+            RDG_EVENT_NAME("Froxel Ligthing: Compute Offset Pass B"),
+            ERDGPassFlags::Compute,
+            ComputeShader,
+            Params,
+            Groups
+            );
+    }
+
+    {
+        // Pass C: Add the z-slice group sums to each froxel in the z-slice.
+        auto* Params = GraphBuilder.AllocParameters<FFroxelOffsetPassCCS::FParameters>();
+        Params->FroxelSharedUB = SharedUB;
+        Params->ZSliceOffsets = GraphBuilder.CreateSRV(ZSliceOffsets);
+        Params->FroxelLightOffsets = GraphBuilder.CreateUAV(FroxelLists.Offsets);
+        TShaderMapRef<FFroxelOffsetPassCCS> ComputeShader(GetGlobalShaderMap(InView.GetFeatureLevel()));
+        const FIntVector Groups(FComputeShaderUtils::GetGroupCount(ZSliceSize, 1024));
+
+        FComputeShaderUtils::AddPass(
+            GraphBuilder,
+            RDG_EVENT_NAME("Froxel Ligthing: Compute Offset Pass C"),
+            ERDGPassFlags::Compute,
+            ComputeShader,
+            Params,
+            Groups
+            );
+    }
+}
+
+/**
+ * Compute the list of light indices for each froxel.
+ * The result is stored in FroxelLists.LightIndices buffer.
+ **/
+void FFroxelViewExtension::ComputeLightIndices(FRDGBuilder& GraphBuilder, const FSceneView& InView) {
+    if (!LightsSB) {
+        UE_LOG(LogFroxelLighting, VeryVerbose, TEXT("Lights is null"));
+        return;
+    }
+    if (!FroxelLists.Counts) {
+        UE_LOG(LogFroxelLighting, VeryVerbose, TEXT("FroxelLightCounts is null"));
+        return;
+    }
+    if (!FroxelLists.Offsets) {
+        UE_LOG(LogFroxelLighting, VeryVerbose, TEXT("FroxelLightOffsets is null"));
+        return;
+    }
+    if (!FroxelLists.LightIndices) {
+        UE_LOG(LogFroxelLighting, VeryVerbose, TEXT("FroxelLightIndices is null"));
+        return;
+    }
+    if (!FroxelLists.TotalIndices) {
+        UE_LOG(LogFroxelLighting, VeryVerbose, TEXT("TotalIndices is null"));
+        return;
+    }
+
+    const int32 GX = GridSize_RT.X;
+    const int32 GY = GridSize_RT.Y;
+    const int32 GZ = GridSize_RT.Z;
+    const uint32 GCOUNT = GridCount_RT;
+
+    // Compute total number of indices
+    {
+        const FRDGBufferUAVRef TotalIndicesUAV = GraphBuilder.CreateUAV(FroxelLists.TotalIndices);
+        AddClearUAVPass(GraphBuilder, TotalIndicesUAV, 0u);
+
+        auto* Params = GraphBuilder.AllocParameters<FFroxelTotalIndicesCS::FParameters>();
+        Params->FroxelSharedUB = SharedUB;
+        Params->FroxelLightCounts = GraphBuilder.CreateSRV(FroxelLists.Counts);
+        Params->FroxelLightOffsets = GraphBuilder.CreateSRV(FroxelLists.Offsets);
+        Params->TotalIndices = TotalIndicesUAV;
+
+        const TShaderMapRef<FFroxelTotalIndicesCS> ComputeShader(GetGlobalShaderMap(InView.GetFeatureLevel()));
+        const FIntVector Groups = FIntVector(1, 1, 1);
+
+        FComputeShaderUtils::AddPass(
+            GraphBuilder,
+            RDG_EVENT_NAME("Froxel Ligthing: Compute Total Indices"),
+            ERDGPassFlags::Compute,
+            ComputeShader,
+            Params,
+            Groups
+            );
+    }
+
+    // compute light indices
+    {
+
+        FRDGBufferUAVRef FroxelLightIndicesUAV = GraphBuilder.CreateUAV(FroxelLists.LightIndices);
+        FRDGBufferUAVRef FroxelHeadsUAV = GraphBuilder.CreateUAV(FroxelLists.Counts); // reusing counts buffer as heads
+        AddClearUAVPass(GraphBuilder, FroxelLightIndicesUAV, 0u);
+        AddClearUAVPass(GraphBuilder, FroxelHeadsUAV, 0u);
+
+        auto* Params = GraphBuilder.AllocParameters<FFroxelAssignLightsCS::FParameters>();
+
+        Params->FroxelSharedUB = SharedUB;
+        Params->View = InView.ViewUniformBuffer;
+        Params->Lights = GraphBuilder.CreateSRV(LightsSB);
+        Params->FroxelLightOffsets = GraphBuilder.CreateSRV(FroxelLists.Offsets);
+        Params->TotalIndices = GraphBuilder.CreateSRV(FroxelLists.TotalIndices);
+        Params->FroxelHeads = FroxelHeadsUAV;
+        Params->FroxelLightIndices = FroxelLightIndicesUAV;
+
+        const TShaderMapRef<FFroxelAssignLightsCS> ComputeShader(GetGlobalShaderMap(InView.GetFeatureLevel()));
+        const FIntVector Groups(FComputeShaderUtils::GetGroupCount(NumLights_RT, 64));
+
+        FComputeShaderUtils::AddPass(
+            GraphBuilder,
+            RDG_EVENT_NAME("Froxel Ligthing: Assign Lights (NumLights = %u)", NumLights_RT),
+            ERDGPassFlags::Compute,
+            ComputeShader,
+            Params,
+            Groups);
+    }
+}
+
+/**
+ * Build a texture overlay visualizing the froxel grid.
+ * Each froxel is shown as a colored box.
+ * The overlay texture is returned as an RDG texture.
+ **/
+FScreenPassTexture FFroxelViewExtension::VisualizeFroxelOverlayPS(
+    FRDGBuilder& GraphBuilder,
+    const FSceneView& View,
+    const FPostProcessMaterialInputs& Inputs) {
+    
+    FScreenPassTexture InputSceneColor(Inputs.GetInput(EPostProcessMaterialInput::SceneColor));
+    
+    const int32 Mode = CVarFroxelVisualize.GetValueOnRenderThread();
+    if (Mode == 0) {
+        return InputSceneColor;
+    }
+
+    SharedUB = FFroxelUtils::CreateSharedUB(GraphBuilder, View, GridSize_RT, NumLights_RT);
+
+    const FIntRect ViewRect = View.UnconstrainedViewRect;
+    const FScreenPassTextureViewport InputViewport(InputSceneColor);
+    const FRDGTextureRef DepthTextureRef = Inputs.SceneTextures.SceneTextures->GetParameters()->SceneDepthTexture;
+    const FRDGTextureSRVRef SceneColorSRV = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::Create(InputSceneColor.Texture));
+    const FRDGTextureSRVRef SceneDepthSRV = GraphBuilder.CreateSRV(DepthTextureRef);
+    const FScreenTransform SvPositionToInputTextureUV = FScreenTransform::ChangeTextureBasisFromTo(
+                                                            InputViewport,
+                                                            FScreenTransform::ETextureBasis::TexelPosition,
+                                                            FScreenTransform::ETextureBasis::ViewportUV) *
+                                                        FScreenTransform::ChangeTextureBasisFromTo(
+                                                            InputViewport, FScreenTransform::ETextureBasis::ViewportUV,
+                                                            FScreenTransform::ETextureBasis::TextureUV);
+    const float OverlayOpacity = CVarFroxelDebugOpacity.GetValueOnRenderThread();
+    FRHISamplerState* SamplerState = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+    FGlobalShaderMap* GlobalShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
+    FScreenPassTextureViewportParameters Input = GetScreenPassTextureViewportParameters(InputViewport);
+    FRenderTargetBinding RenderTargetBinding = FRenderTargetBinding(InputSceneColor.Texture,
+                                                                    ERenderTargetLoadAction::ELoad);
+
+    // hash mode: each froxel is assigned a unique color based on a hash function to show the froxel grid structure
+    if (Mode == 1) {
+
+        auto* Params = GraphBuilder.AllocParameters<FFroxelOverlayHashPS::FParameters>();
+
+        Params->FroxelSharedUB = SharedUB;
+        Params->Input = Input;
+        Params->View = View.ViewUniformBuffer;
+        Params->SceneColorCopy = SceneColorSRV;
+        Params->SceneColorCopySampler = SamplerState;
+        Params->SceneDepthCopy = SceneDepthSRV;
+        Params->SceneDepthCopySampler = SamplerState;
+        Params->SvPositionToInputTextureUV = SvPositionToInputTextureUV;
+        Params->OverlayOpacity = OverlayOpacity;
+        Params->RenderTargets[0] = RenderTargetBinding;
+
+        const TShaderMapRef<FFroxelOverlayHashPS> PixelShader(GlobalShaderMap);
+
+        FPixelShaderUtils::AddFullscreenPass(
+            GraphBuilder,
+            GlobalShaderMap,
+            RDG_EVENT_NAME("FroxelOverlay Hash (FPixelShaderUtils)"),
+            PixelShader,
+            Params,
+            ViewRect);
+
+        return InputSceneColor;
+    }
+
+    // heatmap mode: each froxel is colored based on the number of lights affecting it
+    if (Mode == 2 && NumLights_RT > 0) {
+
+        auto* Params = GraphBuilder.AllocParameters<FFroxelOverlayHeatmapPS::FParameters>();
+
+        if (!FroxelLists.Counts || !FroxelLists.Offsets || !FroxelLists.LightIndices) {
+            UE_LOG(LogFroxelLighting, VeryVerbose, TEXT("Froxel buffers are null"));
+            return InputSceneColor;
+        }
+
+        Params->FroxelLightCounts = GraphBuilder.CreateSRV(FroxelLists.Counts);
+        Params->FroxelLightOffsets = GraphBuilder.CreateSRV(FroxelLists.Offsets);
+        Params->FroxelLightIndices = GraphBuilder.CreateSRV(FroxelLists.LightIndices);
+        Params->FroxelSharedUB = SharedUB;
+        Params->SceneColorCopy = SceneColorSRV;
+        Params->SceneColorCopySampler = SamplerState;
+        Params->SceneDepthCopy = SceneDepthSRV;
+        Params->SceneDepthCopySampler = SamplerState;
+        Params->SvPositionToInputTextureUV = SvPositionToInputTextureUV;
+        Params->OverlayOpacity = OverlayOpacity;
+        Params->Input = Input;
+        Params->View = View.ViewUniformBuffer;
+        Params->RenderTargets[0] = RenderTargetBinding;
+
+        const TShaderMapRef<FFroxelOverlayHeatmapPS> PixelShader(GlobalShaderMap);
+
+        FPixelShaderUtils::AddFullscreenPass(
+            GraphBuilder,
+            GlobalShaderMap,
+            RDG_EVENT_NAME("FroxelOverlay Heatmap (FPixelShaderUtils)"),
+            PixelShader,
+            Params,
+            ViewRect);
+
+        return InputSceneColor;
+    }
+    return InputSceneColor;
+}
+
+#pragma endregion
+#pragma region Helpers
+
+/**
+ * Collect all lights in the scene that affect the world and are visible. No directional lights.
+ **/
+void FFroxelViewExtension::GetFrameLights(FSceneViewFamily& InViewFamily, TArray<FFroxelLightData>& OutLights) {
+    const FSceneInterface* SceneInterface = InViewFamily.Scene;
+
+    if (!SceneInterface)
+        return;
+
+    const UWorld* World = SceneInterface->GetWorld();
+    if (!World)
+        return;
+
+    for (TObjectIterator<ULightComponent> It; It; ++It) {
+        const ULightComponent* LC = *It;
+        if (!LC->IsRegistered()
+            || LC->GetWorld() != World
+            || !LC->bAffectsWorld
+            || !LC->IsVisible()
+        )
+            continue;
+
+        if (LC->GetLightType() == LightType_Directional)
+            continue;
+
+        FSphere BoundingSphere = LC->GetBoundingSphere();
+        if (BoundingSphere.W < KINDA_SMALL_NUMBER)
+            continue;
+
+        FFroxelLightData Ld;
+        Ld.PositionWS = FVector3f(BoundingSphere.Center);
+        Ld.Radius = BoundingSphere.W;
+
+        OutLights.Add(Ld);
+    }
+
+}
+
+#pragma endregion
+```
+
+### Source/FroxelLighting/Private/FroxelViewExtension.h
+```
+#pragma once
+#include "FroxelUtils.h"
+#include "SceneViewExtension.h"
+#include "RHI.h"
+#include "RHIResources.h"
+#include "Data/FroxelData.h"
+
+
+class FFroxelUniformParameters;
+
+class FFroxelViewExtension final : public FSceneViewExtensionBase {
+public:
+    FFroxelViewExtension(const FAutoRegister& AutoReg) :
+        FSceneViewExtensionBase(AutoReg) {
+    }
+
+    virtual void SetupViewFamily(FSceneViewFamily& InViewFamily) override;
+
+    virtual void SetupView(FSceneViewFamily& InViewFamily, FSceneView& InView) override {
+    }
+
+    virtual void BeginRenderViewFamily(FSceneViewFamily& InViewFamily) override {
+    }
+    
+    virtual void PreRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily) override;
+
+
+    virtual void PreRenderView_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView) override {
+    }
+
+    virtual void PostRenderBasePassDeferred_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView,
+                                                         const FRenderTargetBindingSlots& RenderTargets,
+                                                         TRDGUniformBufferRef<FSceneTextureUniformParameters>
+                                                         SceneTextures) override;
+
+    virtual void PostRenderView_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView) override {
+    }
+
+
+    virtual void PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& InView,
+                                                 const FPostProcessingInputs& Inputs) override {
+    }
+
+    virtual void SubscribeToPostProcessingPass(EPostProcessingPass Pass, const FSceneView& InView,
+                                               FPostProcessingPassDelegateArray& InOutPassCallbacks,
+                                               bool bIsPassEnabled) override;
+
+private:
+    static void GetFrameLights(FSceneViewFamily& InViewFamily, TArray<FFroxelLightData>& OutLights);
+    void CountLightPerFroxel(FRDGBuilder& GraphBuilder, const FSceneView& InView);
+    void ComputeFroxelOffset(FRDGBuilder& GraphBuilder, const FSceneView& InView);
+    void ComputeLightIndices(FRDGBuilder& GraphBuilder, const FSceneView& InView);
+
+    void BuildFroxelGrid(FRDGBuilder& GraphBuilder, const FSceneView& InView);
+    FScreenPassTexture VisualizeFroxelOverlayPS(FRDGBuilder& GraphBuilder,
+                                                const FSceneView& View, const FPostProcessMaterialInputs& Inputs);
+
+    void VisualizeFroxelGrid(FRDGBuilder& GraphBuilder, const FSceneView& InView);
+
+
+    // Build light grid data ---------------------------------
+    FCriticalSection LightBufferMutex; // to protect access to light buffers by game thread and render thread
+
+    TArray<FFroxelLightData> FrameLights_GT; // accessed by game thread
+
+    TArray<FFroxelLightData> FrameLights_RT; // accessed by render thread
+    uint32 NumLights_RT = 0;
+
+    FIntVector GridSize_RT = FIntVector(16, 16, 16);
+    uint32 GridCount_RT = 4096;
+
+    FRDGBufferRef LightsSB = nullptr; // structured buffer for light data
+
+    FFroxelLists FroxelLists; // froxel light lists (Counts, Offsets, LightIndices, TotalIndices)
+    TUniformBufferRef<FFroxelUniformParameters> SharedUB; // shared froxel parameters
+
+
+    // Testing -----------------------------------------
+    // TArray<FFroxelReadbackEntry> PendingReadbacks;
+
+};
+```
+
+### Source/FroxelLighting/Public/FroxelLighting.h
+```
+#pragma once
+#include "CoreMinimal.h"
+#include "Modules/ModuleManager.h"
+#include "ProfilingDebugging/RealtimeGPUProfiler.h"
+class FFroxelViewExtension;
+DECLARE_LOG_CATEGORY_EXTERN(LogFroxelLighting, Log, All);
+DECLARE_GPU_STAT_NAMED_EXTERN(Froxel, TEXT("Froxel"));
+
+// Module interface. Loads shaders and sets up mappings on startup.
+class FFroxelLightingModule : public IModuleInterface
+{
+public:
+    virtual void StartupModule() override;
+    virtual void ShutdownModule() override;
+
+private:
+    TSharedPtr<FFroxelViewExtension, ESPMode::ThreadSafe> ViewExt;
+};
+```
+
+### Source/FroxelLighting/Private/Data/FroxelData.cpp
+```
+#include "FroxelData.h"
+```
+
+### Source/FroxelLighting/Private/Data/FroxelData.h
+```
+#pragma once
+
+
+class FRHIGPUBufferReadback;
+
+struct FFroxelReadbackEntry {
+    TUniquePtr<FRHIGPUBufferReadback> Readback;
+    uint32 NumBytes = 0;
+    uint32 GCount = 0;
+    double Timestamp;
+};
+
+struct FFroxelLightData {
+    FVector3f PositionWS;
+    float Radius;
+    // FLinearColor Color;
+    // float Intensity;
+};
+
+struct FFroxelLists {
+
+    FRDGBufferRef Offsets; // uint, size = FroxelCount
+    FRDGBufferRef Counts; // uint, size = FroxelCount
+    FRDGBufferRef TotalIndices; // uint (single uint)
+    FRDGBufferRef LightIndices; // uint SoA, size = FroxelCount
+    uint32 FroxelCount;
+};
+```
+
+### Source/FroxelLighting/Private/Shaders/FroxelAssignLightsCS.cpp
+```
+#include "FroxelAssignLightsCS.h"
+
+IMPLEMENT_GLOBAL_SHADER(FFroxelTotalIndicesCS, "/FroxelLighting/FroxelTotalIndices.usf", "MainCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FFroxelAssignLightsCS, "/FroxelLighting/FroxelAssignLights.usf", "MainCS", SF_Compute);
+```
+
+### Source/FroxelLighting/Private/Shaders/FroxelAssignLightsCS.h
+```
+#pragma once
+#include "GlobalShader.h"
+#include "ShaderParameterStruct.h"
+#include "FroxelCommon.h"
+#include "ScreenPass.h"
+
+
+/**
+ * Wrapper for FroxelAssignLights.usf compute shader that computes the total number of assigned lights.
+**/
+class FFroxelTotalIndicesCS : public FGlobalShader {
+    DECLARE_GLOBAL_SHADER(FFroxelTotalIndicesCS);
+    SHADER_USE_PARAMETER_STRUCT(FFroxelTotalIndicesCS, FGlobalShader);
+
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters,)
+        SHADER_PARAMETER_STRUCT_REF(FFroxelUniformParameters, FroxelSharedUB)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FroxelLightCounts)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FroxelLightOffsets)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, TotalIndices)
+
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters&) {
+        return true;
+    }
+};
+
+/**
+ * Wrapper for FroxelAssignLights.usf compute shader that assigns lights to froxels.
+**/
+class FFroxelAssignLightsCS : public FGlobalShader {
+    DECLARE_GLOBAL_SHADER(FFroxelAssignLightsCS);
+    SHADER_USE_PARAMETER_STRUCT(FFroxelAssignLightsCS, FGlobalShader);
+
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters,)
+        SHADER_PARAMETER_STRUCT_REF(FFroxelUniformParameters, FroxelSharedUB)
+        SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FFroxelLightData>, Lights)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FroxelLightOffsets)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TotalIndices)
+
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, FroxelHeads)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, FroxelLightIndices)
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters&) {
+        return true;
+    }
+};
+```
+
+### Source/FroxelLighting/Private/Shaders/FroxelBuildGridCS.cpp
+```
+#include "FroxelBuildGridCS.h"
+
+IMPLEMENT_GLOBAL_SHADER(FFroxelBuildGridCS, "/FroxelLighting/FroxelBuildGrid.usf", "MainCS", SF_Compute);
+```
+
+### Source/FroxelLighting/Private/Shaders/FroxelBuildGridCS.h
+```
+#pragma once
+#include "GlobalShader.h"
+#include "ShaderParameterStruct.h"
+#include "FroxelCommon.h"
+
+/*
+ * Wrapper for FroxelBuild.usf
+*/
+class FFroxelBuildGridCS : public FGlobalShader {
+    DECLARE_GLOBAL_SHADER(FFroxelBuildGridCS);
+    SHADER_USE_PARAMETER_STRUCT(FFroxelBuildGridCS, FGlobalShader);
+
+
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters,)
+        // SHADER_PARAMETER_STRUCT_REF(FFroxelUniformParameters, FroxelUB)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, FroxelGrid)
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters) {
+        return true; // compile for all RHIs
+    }
+};
+```
+
+### Source/FroxelLighting/Private/Shaders/FroxelCommon.cpp
+```
+#include "FroxelCommon.h"
+
+IMPLEMENT_STATIC_UNIFORM_BUFFER_SLOT(FroxelCommon);
+IMPLEMENT_STATIC_UNIFORM_BUFFER_STRUCT(FFroxelUniformParameters, "FroxelCommon", FroxelCommon);
+```
+
+### Source/FroxelLighting/Private/Shaders/FroxelCommon.h
+```
+#pragma once
+BEGIN_UNIFORM_BUFFER_STRUCT(FFroxelUniformParameters,)
+    SHADER_PARAMETER(FIntVector4, GridSize) // (NumX, NumY, NumZ, NumFroxels)
+
+    SHADER_PARAMETER(FIntPoint, ViewportSize)
+    SHADER_PARAMETER(FIntPoint, ViewRectMinPx)
+    SHADER_PARAMETER(FIntPoint, TileSizePx)
+    SHADER_PARAMETER(FVector2f, InvTilePx)
+    SHADER_PARAMETER(FMatrix44f, ViewMatrix)
+    SHADER_PARAMETER(FMatrix44f, ProjectionMatrix)
+
+
+    SHADER_PARAMETER(float, NearCm) // camera near in cm
+    SHADER_PARAMETER(float, FarCm) // camera far in cm
+
+    SHADER_PARAMETER(uint32, NumLights) // number of lights in the view
+    SHADER_PARAMETER(uint32, MaxLightsPerFroxel)
+
+
+END_UNIFORM_BUFFER_STRUCT();
+```
+
+### Source/FroxelLighting/Private/Shaders/FroxelCountCS.cpp
+```
+#include "FroxelCountCS.h"
+
+IMPLEMENT_GLOBAL_SHADER(FFroxelCountCS, "/FroxelLighting/FroxelCount.usf", "MainCS", SF_Compute);
+```
+
+### Source/FroxelLighting/Private/Shaders/FroxelCountCS.h
+```
+#pragma once
+#include "GlobalShader.h"
+#include "ShaderParameterStruct.h"
+#include "FroxelCommon.h"
+#include "ScreenPass.h"
+
+/**
+ * Wrapper for FroxelCount.usf compute shader that counts the number of lights per froxel.
+**/
+class FFroxelCountCS : public FGlobalShader {
+    DECLARE_GLOBAL_SHADER(FFroxelCountCS);
+    SHADER_USE_PARAMETER_STRUCT(FFroxelCountCS, FGlobalShader);
+
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters,)
+        SHADER_PARAMETER_STRUCT_REF(FFroxelUniformParameters, FroxelSharedUB)
+        SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FFroxelLightData>, Lights)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, FroxelLightCounts)
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters&) {
+        return true;
+    }
+};
+```
+
+### Source/FroxelLighting/Private/Shaders/FroxelOffsetCS.cpp
+```
+#include "FroxelOffsetCS.h"
+
+IMPLEMENT_GLOBAL_SHADER(FFroxelOffsetPassACS, "/FroxelLighting/FroxelOffsetPassA.usf", "MainCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FFroxelOffsetPassBCS, "/FroxelLighting/FroxelOffsetPassB.usf", "MainCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FFroxelOffsetPassCCS, "/FroxelLighting/FroxelOffsetPassC.usf", "MainCS", SF_Compute);
+```
+
+### Source/FroxelLighting/Private/Shaders/FroxelOffsetCS.h
+```
+#pragma once
+#include "GlobalShader.h"
+#include "ShaderParameterStruct.h"
+#include "FroxelCommon.h"
+#include "ScreenPass.h"
+
+/**
+ * Wrapper for Froxel OffsetPassA.usf compute shader that computes the froxel offsets based on the light counts per z-slice.
+**/
+class FFroxelOffsetPassACS : public FGlobalShader {
+    DECLARE_GLOBAL_SHADER(FFroxelOffsetPassACS);
+    SHADER_USE_PARAMETER_STRUCT(FFroxelOffsetPassACS, FGlobalShader);
+
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters,)
+        SHADER_PARAMETER_STRUCT_REF(FFroxelUniformParameters, FroxelSharedUB)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FroxelLightCounts)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, FroxelLightOffsets)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, ZSliceTotals)
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters&) {
+        return true; // compile for all RHIs
+    }
+};
+
+
+/**
+ * Wrapper for Froxel OffsetPassB.usf compute shader that computes the total number of lights of each z-slice.
+**/
+class FFroxelOffsetPassBCS : public FGlobalShader {
+    DECLARE_GLOBAL_SHADER(FFroxelOffsetPassBCS);
+    SHADER_USE_PARAMETER_STRUCT(FFroxelOffsetPassBCS, FGlobalShader);
+
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters,)
+        SHADER_PARAMETER_STRUCT_REF(FFroxelUniformParameters, FroxelSharedUB)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, ZSliceTotals)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, ZSliceOffsets)
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters&) {
+        return true;
+    }
+};
+
+/**
+ * Wrapper for Froxel OffsetPassC.usf compute shader that adds the z-slice offsets to each froxel in the z-slice.
+**/
+class FFroxelOffsetPassCCS : public FGlobalShader {
+    DECLARE_GLOBAL_SHADER(FFroxelOffsetPassCCS);
+    SHADER_USE_PARAMETER_STRUCT(FFroxelOffsetPassCCS, FGlobalShader);
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters,)
+        SHADER_PARAMETER_STRUCT_REF(FFroxelUniformParameters, FroxelSharedUB)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, ZSliceOffsets)
+        SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, FroxelLightOffsets)
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters&) {
+        return true;
+    }
+};
+```
+
+### Source/FroxelLighting/Private/Shaders/FroxelOverlayShaders.cpp
+```
+#include "FroxelOverlayShaders.h"
+
+// IMPLEMENT_STATIC_UNIFORM_BUFFER_SLOT(FroxelOverlay);
+// IMPLEMENT_STATIC_UNIFORM_BUFFER_STRUCT(FFroxelOverlayUniformParameters, "FroxelOverlay", FroxelOverlay);
+
+IMPLEMENT_GLOBAL_SHADER(FFroxelOverlayHashPS, "/FroxelLighting/FroxelOverlayHash.usf", "MainPS", SF_Pixel);
+IMPLEMENT_GLOBAL_SHADER(FFroxelOverlayHeatmapPS, "/FroxelLighting/FroxelOverlayHeatmap.usf", "MainPS", SF_Pixel);
+```
+
+### Source/FroxelLighting/Private/Shaders/FroxelOverlayShaders.h
+```
+#pragma once
+#include "GlobalShader.h"
+#include "ShaderParameterStruct.h"
+#include "FroxelCommon.h"
+#include "ScreenPass.h"
+#include "SceneRenderTargetParameters.h"
+// BEGIN_UNIFORM_BUFFER_STRUCT(FFroxelOverlayUniformParameters,)
+//
+//     SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Input)
+//     SHADER_PARAMETER(FScreenTransform, SvPositionToInputTextureUV)
+//
+//     SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, SceneColorCopy)
+//     SHADER_PARAMETER_SAMPLER(SamplerState, SceneColorCopySampler)
+//
+//     SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, SceneDepthCopy)
+//     SHADER_PARAMETER_SAMPLER(SamplerState, SceneDepthCopySampler)
+//
+//     SHADER_PARAMETER(float, OverlayOpacity)
+// END_UNIFORM_BUFFER_STRUCT();
+
+// /**
+//  * Pixel shader to visualize froxel grid overlay.
+// **/
+// class FFroxelOverlayBasePS : public FGlobalShader {
+//
+//     DECLARE_GLOBAL_SHADER(FFroxelOverlayBasePS);
+//     SHADER_USE_PARAMETER_STRUCT(FFroxelOverlayBasePS, FGlobalShader);
+//
+//    
+// };
+
+/**
+ * Pixel shader to visualize froxel grid overlay with hash pattern.
+ **/
+class FFroxelOverlayHashPS : public FGlobalShader {
+    DECLARE_GLOBAL_SHADER(FFroxelOverlayHashPS);
+    SHADER_USE_PARAMETER_STRUCT(FFroxelOverlayHashPS, FGlobalShader);
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters,)
+        SHADER_PARAMETER_STRUCT_REF(FFroxelUniformParameters, FroxelSharedUB)
+        // SHADER_PARAMETER_STRUCT_REF(FFroxelOverlayUniformParameters, FroxelOverlayUB)
+        SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+        SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Input)
+        SHADER_PARAMETER(FScreenTransform, SvPositionToInputTextureUV)
+
+        SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, SceneColorCopy)
+        SHADER_PARAMETER_SAMPLER(SamplerState, SceneColorCopySampler)
+
+        SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, SceneDepthCopy)
+        SHADER_PARAMETER_SAMPLER(SamplerState, SceneDepthCopySampler)
+
+        SHADER_PARAMETER(float, OverlayOpacity)
+
+
+        RENDER_TARGET_BINDING_SLOTS()
+
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Params) {
+        return true;
+    }
+
+};
+
+/**
+ * Pixel shader to visualize froxel grid overlay with solid color.
+ **/
+class FFroxelOverlayHeatmapPS : public FGlobalShader {
+    DECLARE_GLOBAL_SHADER(FFroxelOverlayHeatmapPS);
+    SHADER_USE_PARAMETER_STRUCT(FFroxelOverlayHeatmapPS, FGlobalShader);
+
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters,)
+        SHADER_PARAMETER_STRUCT_REF(FFroxelUniformParameters, FroxelSharedUB)
+        //         // SHADER_PARAMETER_STRUCT_REF(FFroxelOverlayUniformParameters, FroxelOverlayUB)
+        SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+        SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Input)
+        SHADER_PARAMETER(FScreenTransform, SvPositionToInputTextureUV)
+        
+        SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, SceneColorCopy)
+        SHADER_PARAMETER_SAMPLER(SamplerState, SceneColorCopySampler)
+        
+        SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, SceneDepthCopy)
+        SHADER_PARAMETER_SAMPLER(SamplerState, SceneDepthCopySampler)
+        
+        SHADER_PARAMETER(float, OverlayOpacity)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FroxelLightCounts)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FroxelLightOffsets)
+        SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, FroxelLightIndices)
+        RENDER_TARGET_BINDING_SLOTS()
+        //
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Params) {
+        return true;
+    }
+
+    static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters,
+                                             FShaderCompilerEnvironment& OutEnvironment) {
+        FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+        OutEnvironment.SetDefine(TEXT("USE_FROXEL_COUNTS"), 1);
+    }
+};
+```

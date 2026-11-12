@@ -1,119 +1,216 @@
 # Voxel Instancing
 
-Also called: Voxel Object Generator
+Also called: HISM, Hierarchical Instance Static Meshes, Instancing (Hierarchical Instance Static Meshes), UInstancedStaticMeshComponent Voxel Display, Voxel Mesh Instancing, Voxel Object Generator
 
 ## Overview
-Voxel instancing is a rendering technique that draws a single copy of a voxel-based object (the "class") many times in different locations within a scene by leveraging GPU instancing capabilities [S1, S2, unofficial]. It solves the problem of efficiently populating large voxel worlds with complex, non-uniform objects (such as trees, boulders, or ruins) without the memory overhead of storing full voxel grids for every occurrence [S2, unofficial]. Unlike chunking, which merges adjacent voxels into static meshes, voxel instancing allows for easier dynamic addition and removal of individual objects, though it renders all visible faces of the object regardless of occlusion [S1, unofficial].
+Voxel Instancing renders a voxel grid by instantiating static mesh proxies at voxel coordinates, using per-voxel color indices to select from a mesh array [S1, unofficial]. It solves the problem of rendering large voxel worlds by allowing easier addition and removal of individual instances compared to chunking, where modifying a block requires regenerating the entire chunk mesh [S2, unofficial]. Unlike polygonal instancing which operates at the polygon level, voxel instancing operates on voxel data, offering a constant memory footprint and fast loading times for the instances [S3, unofficial].
 
 ## How it works
-### Inputs and Outputs
-**Inputs:**
-- A voxel "class" definition: A compressed representation of a single object's voxel data. This can be stored in a regular grid, an adaptive grid (e.g., octree), or compressed using Run-Length-Encoding (RLE) [S2, unofficial].
-- Instance metadata: A list of transforms (position and orientation) and class IDs for each occurrence [S2, unofficial].
-- A base geometry primitive: Typically a cube, which serves as the renderable unit for the voxel [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A voxel data structure mapping 3D integer coordinates to color indices (e.g., `TMap<FIntVector, uint8>`), a list of static mesh assets (`TArray<UStaticMesh*>`), and spatial bounds (`CellBounds`).
+*   **Output:** A set of GPU-drawn instances representing the voxel geometry, managed by instanced rendering components (e.g., `UHierarchicalInstancedStaticMeshComponent` or `UInstancedStaticMeshComponent`).
 
-**Outputs:**
-- A rendered scene containing multiple instances of the voxel class at specified locations [S1, S2, unofficial].
+**Data Structures:**
+1.  **Cell:** A map storing voxel occupancy and color. Key: 3D integer grid coordinate (`FIntVector`). Value: 8-bit color palette index (`uint8`) [S1, unofficial].
+2.  **Mesh:** An array of static mesh assets used for voxel proxies, indexed by color value [S1, unofficial].
+3.  **InstancedStaticMeshComponents:** An array of instanced components, one per static mesh variant, indexed by color value [S1, unofficial].
+4.  **CellBounds:** A bounding volume (`FBoxSphereBounds`) defining the world-space extent of the voxel grid. Contains `BoxExtent` (half-size of each voxel cell in world units) and `Origin` (world space center) [S1, unofficial].
 
-### Data Structures
-1.  **Voxel Class:** Stores the voxel values defining the object. In compressed form, this may take 1–2 MB per class [S2, unofficial].
-2.  **Instance Record:** A small data structure containing:
-    -   Position (3 floats or integers).
-    -   Orientation (quaternion or rotation matrix, or identity if rotation is not used) [S2, unofficial].
-    -   Class ID (index into the list of available voxel classes) [S2, unofficial].
-3.  **Instance Buffer:** A GPU buffer (e.g., Instanced Static Mesh component) storing the array of Instance Records [S1, unofficial].
+**Parameters:**
+*   `bHideUnbeheld` (bool): When true, voxels completely surrounded by other voxels (all 6 neighbors present) are hidden to optimize rendering [S1, unofficial].
+*   `CubeSize` (float): The scale of each voxel block. In typical implementations, this is set to 100 world units [S2, unofficial].
+*   `Class size`: Compressed voxel classes may take one or two megabytes each [S3, unofficial].
 
-### Steps
-1.  **Initialize Instancing Component:** Create a Hierarchical Instanced Static Mesh (HISM) component or equivalent GPU instancing structure and attach it to the scene root [S1, unofficial].
-2.  **Set Base Geometry:** Assign a simple cube mesh as the static mesh for the instances [S1, unofficial].
-3.  **Clear Existing Instances:** Remove any previously added instances to prepare for regeneration [S1, unofficial].
-4.  **Generate Instance Data:**
-    -   Iterate through the target spatial grid (e.g., $x$ from $0$ to $X_{max}$, $y$ from $0$ to $Y_{max}$) [S1, unofficial].
-    -   For each grid coordinate, calculate a noise value (e.g., using Perlin noise) [S1, unofficial].
-    -   Normalize the noise value from the range $[-1, 1]$ to $[0, 1]$ using the formula:
-        $$ N_{norm} = \frac{N_{raw} + 1}{2} $$
-    -   Scale the normalized noise to determine the height $H$ in voxels:
-        $$ H = \text{round}(Z_{max} \times N_{norm}) $$
-    -   If $H > 0$, create a transform for the voxel at position $(x \cdot S, y \cdot S, H \cdot S)$, where $S$ is the cube size [S1, unofficial].
-    -   Add the instance to the instancing component with the calculated transform and the appropriate class ID [S1, unofficial].
-5.  **Build/Rebuild Tree:** Enable auto-rebuild of the instance tree and trigger a build if the instance list has changed [S1, unofficial].
+**Steps:**
 
-### Pseudocode
+1.  **Initialization:**
+    *   Create a `UInstancedStaticMeshComponent` (or `UHierarchicalInstancedStaticMeshComponent`) for each unique mesh in the `Mesh` array.
+    *   Attach these components to the owner's root component.
+    *   Store references in `InstancedStaticMeshComponents` [S1, unofficial].
+    *   Set the base static mesh for the component to a cube shape (e.g., a unit cube) [S2, unofficial].
+    *   Clear any existing instances [S2, unofficial].
+
+2.  **Iteration and Transformation:**
+    *   Iterate through each voxel in the `Cell` map. Let the voxel coordinate be $P$ (integer vector) and the color index be $C$ (uint8) [S1, unofficial].
+    *   **Visibility Check:** If `bHideUnbeheld` is true, check if the voxel is "unbeheld". A voxel is unbeheld if it has at least one missing neighbor among its 6 axis-aligned neighbors ($\pm X, \pm Y, \pm Z$) [S1, unofficial]. If the voxel is held (all 6 neighbors exist), skip it [S1, unofficial].
+    *   **Offset Calculation:** Calculate an XY centering offset. If `bXYCenter` is true, $Offset = (Size_X, Size_Y, 0) \times BoxExtent$. Otherwise, $Offset = (0, 0, 0)$ [S1, unofficial].
+    *   **Translation Calculation:** Compute the world-space translation $T$ using the formula:
+        $$ T = (P \times E \times 2 - O) + E - Offset $$
+        Where:
+        *   $P$ is the voxel integer coordinate [S1, unofficial].
+        *   $E$ is `CellBounds.BoxExtent` (FVector) [S1, unofficial].
+        *   $O$ is `CellBounds.Origin` (FVector) [S1, unofficial].
+        *   $Offset$ is the XY centering adjustment [S1, unofficial].
+    *   **Transform Creation:** Create a transform $FTransform$ with identity rotation, translation $T$, and scale $(1, 1, 1)$ [S1, unofficial].
+    *   **Instance Addition:** Add the instance to the component corresponding to color index $C$. Specifically, call `InstancedStaticMeshComponents[C]->AddInstance(Transform)` [S1, unofficial].
+
+3.  **Rebuild:**
+    *   Enable auto-rebuild of the instance tree if supported.
+    *   Explicitly build the tree if it is outdated after all instances are added [S2, unofficial].
+
+**Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def generate_voxel_instances(grid_width, grid_height, max_height, cube_size, noise_generator):
+def render_voxel_instancing(cell_map, mesh_assets, cell_bounds, hide_unbeheld):
     """
-    Generates voxel instances using a noise-driven heightmap.
+    cell_map: Dict[FIntVector, uint8] mapping voxel coords to color indices
+    mesh_assets: List[UStaticMesh] array of mesh assets
+    cell_bounds: Object with BoxExtent (FVector) and Origin (FVector)
+    hide_unbeheld: bool
+    """
+    # 1. Initialization
+    # Ensure InstancedStaticMeshComponents array has one entry per mesh
+    instanced_components = []
+    for mesh in mesh_assets:
+        comp = create_instanced_component(mesh)
+        attach_to_root(comp)
+        instanced_components.append(comp)
     
-    Args:
-        grid_width (int): Maximum X coordinate.
-        grid_height (int): Maximum Y coordinate.
-        max_height (int): Maximum Z height in voxels.
-        cube_size (float): Scale of each voxel block.
-        noise_generator (object): Object with method get_noise_2d(x, y) returning float in [-1, 1].
+    # Clear previous instances
+    for comp in instanced_components:
+        comp.clear_instances()
+
+    # 2. Iterate and Add
+    for voxel_pos, color_index in cell_map.items():
+        # Pitfall: color_index must be valid index into instanced_components
+        if color_index < 0 or color_index >= len(instanced_components):
+            continue
+
+        # Visibility Check
+        if hide_unbeheld:
+            if is_unbeheld(voxel_pos, cell_map):
+                continue
+
+        # Offset Calculation
+        if bXYCenter:
+            offset = (cell_bounds.size_x, cell_bounds.size_y, 0) * cell_bounds.box_extent
+        else:
+            offset = (0, 0, 0)
+
+        # Translation Formula: T = (P * E * 2 - O) + E - Offset
+        p = voxel_pos
+        e = cell_bounds.box_extent
+        o = cell_bounds.origin
         
-    Returns:
-        list[Instance]: List of instance data to be sent to GPU.
+        translation = (p * e * 2 - o) + e - offset
+
+        # Transform Creation
+        transform = FTransform(
+            rotation=Quat.Identity,
+            translation=translation,
+            scale=(1.0, 1.0, 1.0)
+        )
+
+        # Add Instance
+        instanced_components[color_index].add_instance(transform)
+
+    # 3. Rebuild
+    for comp in instanced_components:
+        comp.build_tree_if_outdated()
+
+def is_unbeheld(voxel_pos, cell_map):
     """
-    instances = []
-    
-    # Step 1-3: Initialize and clear (handled by caller or engine)
-    
-    # Step 4: Iterate and generate
-    for x in range(grid_width):
-        for y in range(grid_height):
-            # Calculate normalized noise
-            raw_noise = noise_generator.get_noise_2d(x, y)
-            norm_noise = (raw_noise + 1.0) / 2.0
-            
-            # Calculate height
-            height_voxels = round(max_height * norm_noise)
-            
-            # Step 4d: Add instance if height > 0
-            if height_voxels > 0.0:
-                # Calculate world position
-                pos_x = x * cube_size
-                pos_y = y * cube_size
-                pos_z = height_voxels * cube_size
-                
-                # Create transform (identity rotation for simple placement)
-                transform = Transform(
-                    position=Vector3(pos_x, pos_y, pos_z),
-                    rotation=Quaternion(0, 0, 0, 1),
-                    scale=Vector3(1, 1, 1) # Scale applied via cube_size in position
-                )
-                
-                # Add instance with default class ID 0
-                instances.append(Instance(
-                    transform=transform,
-                    class_id=0
-                ))
-                
-    # Step 5: Build tree (handled by engine/HISM component)
-    return instances
+    Returns True if the voxel is completely surrounded by other voxels.
+    Checks exactly 6 neighbors (+/-X, +/-Y, +/-Z).
+    """
+    neighbors = [
+        voxel_pos + (1, 0, 0),
+        voxel_pos + (-1, 0, 0),
+        voxel_pos + (0, 1, 0),
+        voxel_pos + (0, -1, 0),
+        voxel_pos + (0, 0, 1),
+        voxel_pos + (0, 0, -1)
+    ]
+    for n in neighbors:
+        if n not in cell_map:
+            return False
+    return True
 ```
 
-### Parameters
--   **CubeSize:** The scale of each voxel block. In the reference implementation, this is set to 100 [S1, unofficial].
--   **Noise Parameters:** Frequency, fractal octaves, and interpolation type (e.g., Perlin noise with quintic interpolation, 3 octaves, fractal gain 2.0, lacunarity 0.5) [S1, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Out-of-bounds Access:** If `voxel.Value` (color index) does not have a corresponding entry in `InstancedStaticMeshComponents`, an out-of-bounds access occurs [S1, unofficial].
+*   **Neighbor Connectivity:** `IsUnbeheldVolume` checks exactly 6 neighbors. If the voxel grid is not axis-aligned or uses a different connectivity (e.g., diagonal), the optimization will incorrectly hide boundary voxels [S1, unofficial].
+*   **Performance Freeze:** Adding a large number of HISM instances at once can freeze the game due to overhead. Scaling to large sizes (e.g., 1024x1024x32) causes significant degradation compared to chunking [S2, unofficial].
+*   **Visual Artifacts:** Simple placement logic can result in holes in the generated world [S2, unofficial].
+*   **Environmental Effects:** Modifying instanced voxels based on position (e.g., snow/moss) is not practical as it requires processing time and additional storage to remember changes, negating speed/memory benefits [S3, unofficial].
 
-### Edge Cases and Pitfalls
--   **Performance Freeze:** Adding a large number of instances at once can cause significant overhead and freeze the application. Chunking initializes better at large scales (e.g., $1024 \times 1024 \times 32$ blocks) compared to HISM [S1, unofficial].
--   **Visual Artifacts:** Simple placement logic (e.g., heightmap-based) can result in holes or gaps in the generated world [S1, unofficial].
--   **Modification Difficulty:** Modifying instanced voxels based on position (e.g., adding snow or moss) is impractical because it requires processing time and additional storage to track changes, negating the speed and memory benefits [S2, unofficial].
--   **Volumetric Integrity:** The source model for the class must be properly closed to represent a volumetric object, not just a surface [S2, unofficial].
+## Subtopics
+
+### Surface-based Instancing with Noise Modulation
+*   **What it is:** Uses noise functions to modulate the placement or scale of instanced objects on a surface.
+*   **Difference:** Focuses on surface distribution rather than volumetric grid occupancy.
+*   **When to choose:** For terrain decoration or vegetation where objects sit on a surface rather than filling volume.
+*   **Link:** [Surface-based Instancing with Noise Modulation](1582-surface-based-instancing-with-noise-modulation.md)
+
+### 3D Gaussian Splatting via Instancing
+*   **What it is:** Renders 3D Gaussians as splats using instancing.
+*   **Difference:** Uses continuous volumetric primitives (Gaussians) instead of discrete voxel proxies.
+*   **When to choose:** For neural rendering or smooth volumetric visualization.
+*   **Link:** [3D Gaussian Splatting via Instancing](1586-3d-gaussian-splatting-via-instancing.md)
+
+### GPU Instancing with Indirect Draw Calls
+*   **What it is:** Uses indirect draw commands to batch instance data.
+*   **Difference:** Focuses on the draw call mechanism rather than the voxel data structure.
+*   **When to choose:** When managing millions of instances with minimal CPU overhead.
+*   **Link:** [GPU Instancing with Indirect Draw Calls](2205-gpu-instancing-with-indirect-draw-calls.md)
+
+### Indirect Draw Argument Setting
+*   **What it is:** Dynamically sets draw arguments for indirect calls.
+*   **Difference:** Low-level API detail for controlling instance counts.
+*   **When to choose:** For advanced optimization of indirect rendering pipelines.
+*   **Link:** [Indirect Draw Argument Setting](2418-indirect-draw-argument-setting.md)
+
+### Procedural Particle Rendering
+*   **What it is:** Renders particles using procedural geometry.
+*   **Difference:** Particles are typically transient and point-based, not static voxel proxies.
+*   **When to choose:** For effects like smoke, fire, or dust.
+*   **Link:** [Procedural Particle Rendering](2926-procedural-particle-rendering.md)
+
+### WebGL 2 Hardware Instancing
+*   **What it is:** Uses WebGL 2 instanced attributes.
+*   **Difference:** Platform-specific implementation detail.
+*   **When to choose:** For web-based voxel viewers.
+*   **Link:** [WebGL 2 Hardware Instancing](3152-webgl-2-hardware-instancing.md)
+
+### Geometry Shader Advanced Instancing for Cubes
+*   **What it is:** Uses geometry shaders to generate cubes from points.
+*   **Difference:** Generates geometry on the GPU per instance, whereas voxel instancing typically uses pre-generated static meshes.
+*   **When to choose:** When mesh assets are not available or dynamic geometry is needed.
+*   **Link:** [Geometry Shader Advanced Instancing for Cubes](4576-geometry-shader-advanced-instancing-for-cubes.md)
+
+### Procedural Point Rendering with Billboard Transformation
+*   **What it is:** Renders points as billboards.
+*   **Difference:** Billboards are 2D sprites, not 3D voxel proxies.
+*   **When to choose:** For simple point-based visualization.
+*   **Link:** [Procedural Point Rendering with Billboard Transformation](6422-procedural-point-rendering-with-billboard-transformation.md)
+
+### Buffer-Based Instancing (SSBO/Instance Buffers)
+*   **What it is:** Uses SSBOs to store instance data.
+*   **Difference:** Storage mechanism for instance transforms.
+*   **When to choose:** When instance data is dynamic or large.
+*   **Link:** [Buffer-Based Instancing (SSBO/Instance Buffers)](6501-buffer-based-instancing-ssbo-instance-buffers.md)
+
+### Block LOD Instancing
+*   **What it is:** Uses LODs for instanced blocks.
+*   **Difference:** Adds level-of-detail management to instancing.
+*   **When to choose:** For large worlds where distant objects need lower resolution.
+*   **Link:** [Block LOD Instancing](12572-block-lod-instancing.md)
 
 ## Operating characteristics
--   **Memory Footprint:** Constant and low for instances. The class data is stored once (1–2 MB compressed), and each instance stores only position and orientation [S2, unofficial].
--   **Rendering Speed:** Fast loading and rendering of instances due to reduced draw calls [S2, unofficial]. However, it renders all detail of the object, including faces occluded by other objects, which can be a disadvantage compared to chunking that culls internal faces [S1, unofficial].
--   **Scalability:** Poor at very large scales when using hierarchical instancing components due to tree rebuild overhead. Chunking scales better for massive worlds [S1, unofficial].
--   **Dynamic Updates:** Easier to add/remove individual instances compared to chunking, which requires regenerating entire chunks [S1, unofficial].
--   **Use Cases:** Suitable for sparse populations of complex objects (trees, boulders, ruins) in voxel worlds [S2, unofficial]. Not suitable for dense, uniform terrain or when frequent per-voxel modification is required [S2, unofficial].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, for iteration. However, the GPU overhead for adding instances can cause significant CPU-side latency (freezes) when $N$ is large [S2, unofficial].
+*   **Memory Complexity:** Constant memory footprint for the instance data structure relative to the number of unique classes. Each instance stores only position and class ID [S3, unofficial].
+*   **Measured Performance:** Chunking initializes better at large scales (e.g., 1024x1024x32 blocks) than HISM instancing, which can freeze the game due to overhead [S2, unofficial].
+*   **Strengths:** Easy addition/removal of individual voxels; constant memory footprint for classes; fast loading times [S3, unofficial].
+*   **Limitations:** Draws detail that the player may not see (no face culling per se, only unbeheld optimization); visual artifacts (holes); impractical for environmental modifications [S2, S3, unofficial].
+*   **When to use:** Small to medium voxel worlds; dynamic voxel modification; when chunking is too rigid.
+*   **When not to use:** Very large worlds where performance is critical; when environmental effects on voxels are required.
 
 ## Background
-Voxel instancing was introduced as a method to apply the concept of GPU instancing, traditionally used for polygonal models, to voxel data [S2, unofficial]. The technique was described in a 2013 blog post by the author of "Voxel Studio," highlighting its use for creating trees, boulders, and ruins in procedural worlds [S2, unofficial]. It was later compared to chunking in the context of Unreal Engine 4 development, where Hierarchical Instanced Static Meshes (HISM) were used to implement voxel worlds [S1, unofficial]. The approach leverages the constant memory footprint and fast loading times of instancing, contrasting with polygonal instancing which operates at the polygon level [S2, unofficial].
+Voxel Instancing was proposed as a method to apply the concept of object instancing to voxel data. The source model for identical instances is called a 'class', which stores voxel values defining the object [S3, unofficial]. This technique was highlighted in the context of procedural world generation, allowing for the creation of trees, boulders, and ruins using compressed voxel classes [S3, unofficial]. It is used in the VOX4U Unreal Engine plugin for displaying MagicaVoxel .vox files as instanced static meshes [S1, unofficial].
 
 ## Sources
-[S1] UE4 Voxel: Instancing vs Chunking | Zades Dev Blog, https://zadesio.wordpress.com/2020/07/31/ue4-voxel-instancing-vs-chunking/, fetched 2026-10-27 (unofficial)
-[S2] Voxel Instancing, http://procworld.blogspot.com/2013/09/voxel-instancing.html, fetched 2026-10-27 (unofficial)
+[S1] mik14a/VOX4U, https://github.com/mik14a/VOX4U, fetched 2026-10-26 (unofficial)
+[S2] UE4 Voxel: Instancing vs Chunking | Zades Dev Blog, https://zadesio.wordpress.com/2020/07/31/ue4-voxel-instancing-vs-chunking/, fetched 2026-10-27 (unofficial)
+[S3] Voxel Instancing, http://procworld.blogspot.com/2013/09/voxel-instancing.html, fetched 2026-10-27 (unofficial)

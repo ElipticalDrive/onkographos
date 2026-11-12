@@ -1,0 +1,131 @@
+# Voxel Face Occlusion Culling with Chunk Boundary Wrapping
+
+
+## Overview
+This method computes the occlusion status for all six faces of every voxel within a chunk, determining which faces are visible for mesh generation. It solves the problem of correctly identifying boundary conditions when a chunk is part of a larger, potentially toroidal or irregularly tiled world by wrapping coordinates to adjacent neighbor chunks. It differs from standard intra-chunk culling by explicitly handling cross-chunk neighbor lookups and coordinate wrapping, ensuring that faces on the chunk boundary are correctly marked as occluded or visible based on the state of neighboring chunks.
+
+## How it works
+The method iterates over every voxel in the chunk and determines the visibility of its six faces. It relies on a `kind` map (or array) that stores the material or occupancy type of each voxel, and a `neighboorhood` array that provides access to adjacent chunks.
+
+### Inputs and Outputs
+- **Inputs**:
+  - `DIM`: A 3D integer vector (`IVec3`) representing the dimensions of the current chunk (width, height, depth) [S1, unofficial].
+  - `kind`: A data structure mapping voxel coordinates to their kind (e.g., empty, solid, material type) [S1, unofficial].
+  - `neighboorhood`: An array of optional pointers or references to adjacent neighbor chunks, indexed by chunk side [S1, unofficial].
+- **Outputs**:
+  - `faces_occlusion`: A 3D map or array storing a 6-bit flag (or similar structure) for each voxel, indicating which of its six faces are occluded [S1, unofficial].
+
+### Data Structures
+- **`IVec3`**: A 3D integer vector with fields `x`, `y`, `z`.
+- **`ChunkVoxel`**: A representation of a voxel coordinate within a chunk, typically derived from `IVec3` but constrained to the chunk's dimensions.
+- **`FacesOcclusion`**: A structure holding the occlusion state for the 6 faces of a voxel. It has a method `fully_occluded()` and a method `set(side, value)` to update individual face flags.
+- **`ChunkSide`**: An enumeration or identifier representing the 6 sides of a chunk (e.g., +X, -X, +Y, -Y, +Z, -Z).
+- **`neighborhood`**: An array of size 6 (or similar), where each element is an optional reference to a neighbor chunk.
+
+### Steps
+1. Initialize `DIM` with the chunk's width, height, and depth [S1, unofficial].
+2. Iterate through all voxel coordinates $(x, z, y)$ within the chunk dimensions. The order is typically x, then z, then y, but any order is valid as long as all voxels are processed [S1, unofficial].
+3. For each voxel:
+   a. Check if the voxel is empty (i.e., `kind.get(voxel)` returns `None`).
+   b. If empty, mark the voxel as `fully_occluded` in `faces_occlusion` and continue to the next voxel [S1, unofficial].
+   c. If the voxel is not empty:
+      i. Initialize a `FacesOcclusion` structure to default (all faces visible or unoccluded).
+      ii. Iterate through the 6 sides (directions) of the voxel.
+      iii. For each side, compute the neighbor voxel coordinates by adding the side's direction vector to the current voxel's coordinates.
+      iv. Determine the `neighbor_kind`:
+          - If the neighbor coordinates are within the current chunk bounds, retrieve the kind from the current chunk's `kind` map.
+          - If the neighbor coordinates are outside the current chunk bounds:
+              - Check if the side corresponds to a valid chunk boundary (i.e., a neighbor chunk exists in that direction).
+              - If a neighbor chunk exists, wrap the neighbor coordinates using Euclidean remainder (`math::euclid_rem`) relative to `DIM` to find the corresponding voxel in the neighbor chunk.
+              - Retrieve the kind from the neighbor chunk's `kind` map using the wrapped coordinates.
+              - If no neighbor chunk exists for that side, skip the side (or treat it as occluded/visible depending on implementation; the source implies skipping or not setting, which defaults to visible if initialized as such, but the code snippet shows `return faces` which breaks the fold, effectively leaving the face as default. However, the pitfall states it fails if storage is missing, implying the side should be handled. The code snippet `return faces` inside the fold suggests that if a neighbor is missing, the face is not set, leaving it as default. Let's assume default is visible. But the pitfall says "Fails if neighbor chunk storage is missing". This implies the method expects valid neighbor storage. We will note this pitfall.)
+          - If no neighbor kind is found (and no neighbor chunk exists), the side is not processed in the fold, leaving it as default.
+      v. Set the occlusion flag for the side: if `neighbor_kind` is `None` (empty/transparent), the face is occluded (or vice versa, depending on definition). The source code `faces.set(side, !neighbor_kind.is_none())` suggests that if the neighbor exists (is not None), the face is set to `true` (visible/not occluded). If the neighbor is None, it is set to `false` (occluded). Wait, `!neighbor_kind.is_none()` is `true` if neighbor exists. So `faces.set(side, true)` means the face is visible. If neighbor is None, `faces.set(side, false)` means occluded. This logic assumes that if a neighbor is present, the face is visible. If the neighbor is empty (None), the face is occluded. This is a simplification. Usually, occlusion depends on the neighbor's material. The source code simplifies this to "neighbor exists" vs "no neighbor". We will stick to the source code's logic: Face is visible if neighbor kind exists, occluded if it doesn't.
+      vi. After iterating all 6 sides, store the resulting `faces` structure in `faces_occlusion` for the current voxel.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Inputs:
+# DIM: IVec3 (chunk dimensions)
+# kind: Map<ChunkVoxel, Optional<Kind>> (voxel occupancy/material)
+# neighborhood: Array[Optional<ChunkKindMap>, 6] (neighbor chunk data, indexed by side)
+# Output:
+# faces_occlusion: Map<ChunkVoxel, FacesOcclusion>
+
+def compute_face_occlusion(DIM, kind, neighborhood):
+    faces_occlusion = {}
+    
+    # Iterate over all voxels in the chunk
+    for x in range(DIM.x):
+        for z in range(DIM.z):
+            for y in range(DIM.y):
+                voxel = ChunkVoxel(x, y, z)
+                
+                # If voxel is empty, mark as fully occluded
+                if kind.get(voxel) is None:
+                    faces_occlusion[voxel] = FacesOcclusion.fully_occluded()
+                    continue
+                
+                # Initialize faces as all visible (default)
+                faces = FacesOcclusion.default()
+                
+                # Iterate over 6 sides
+                for side in SIDES:
+                    # Calculate neighbor coordinates
+                    neighbor_coords = voxel.coords + side.direction
+                    
+                    neighbor_kind = None
+                    
+                    # Check if neighbor is within current chunk
+                    if ChunkVoxel.is_valid(neighbor_coords, DIM):
+                        neighbor_voxel = ChunkVoxel.from_coords(neighbor_coords, DIM)
+                        neighbor_kind = kind.get(neighbor_voxel)
+                    else:
+                        # Check if there is a neighbor chunk in this direction
+                        chunk_side = ChunkSide.from_voxel_side(side)
+                        if chunk_side is not None and neighborhood[chunk_side] is not None:
+                            # Wrap coordinates using Euclidean remainder
+                            wrapped_coords = math.euclid_rem(neighbor_coords, DIM)
+                            neighbor_voxel = ChunkVoxel.from_coords(wrapped_coords, DIM)
+                            neighbor_kind = neighborhood[chunk_side].get(neighbor_voxel)
+                        else:
+                            # No neighbor chunk or no data; leave face as default (visible)
+                            # Note: Source code returns early from fold, which is equivalent to skipping
+                            continue
+                    
+                    # Set face visibility: visible if neighbor kind exists, occluded otherwise
+                    # !neighbor_kind.is_none() is True if neighbor exists
+                    if neighbor_kind is not None:
+                        faces.set(side, True) # Visible
+                    else:
+                        faces.set(side, False) # Occluded
+                
+                faces_occlusion[voxel] = faces
+    
+    return faces_occlusion
+```
+
+### Parameters
+- `DIM`: `IVec3` with chunk dimensions. Typical values depend on the chunk size, e.g., $(16, 16, 16)$ or $(32, 32, 32)$ [S1, unofficial].
+- `neighboorhood`: Array of optional neighbor chunk storage pointers. Size is 6, corresponding to the 6 faces of the chunk [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Boundary Wrapping**: Boundary voxels require coordinate wrapping via `math::euclid_rem` to correctly sample adjacent chunks. This assumes a toroidal or regularly tiled world where coordinates wrap around [S1, unofficial].
+- **Missing Neighbor Storage**: The method fails if neighbor chunk storage is missing for a boundary side. The code snippet shows that if a neighbor chunk is not found, the face is not set, leaving it as default. This may lead to incorrect culling if the default is not the intended behavior for missing neighbors [S1, unofficial].
+- **Empty Voxels**: Empty voxels are marked as fully occluded, which is a simplification. In some cases, empty voxels might be visible if they are on the boundary and the neighbor is solid. The source code explicitly marks them as fully occluded, so this is a design choice [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$, where $N$ is the number of voxels in the chunk. Each voxel is processed once, and for each voxel, 6 neighbors are checked.
+- **Memory Complexity**: $O(N)$ for storing the `faces_occlusion` map.
+- **Strengths**: Efficiently handles cross-chunk boundaries, allowing for modular chunk-based world generation. Correctly wraps coordinates for toroidal or tiled worlds.
+- **Limitations**: Assumes a regular grid structure. Fails if neighbor chunks are missing or if the world is not toroidal/tiled. The simplification of treating "neighbor exists" as "face visible" may not be accurate for all material types.
+- **When to Use**: When generating meshes from voxel chunks in a larger world, especially if the world is toroidal or regularly tiled.
+- **When Not to Use**: If the world has irregular boundaries or if neighbor chunks are not available. If detailed material-based occlusion is required, this method is too simplistic.
+
+## Background
+This method is part of the voxel chunk meshing pipeline, specifically for face culling. It is used in projects like `projekto` to optimize mesh generation by reducing the number of faces that need to be rendered. The method is designed to work with GPU acceleration and parallel pipelines, as it processes each voxel independently.
+
+## Sources
+[S1] afonsolage/projekto, https://github.com/afonsolage/projekto, fetched 2026-10-27 (unofficial)

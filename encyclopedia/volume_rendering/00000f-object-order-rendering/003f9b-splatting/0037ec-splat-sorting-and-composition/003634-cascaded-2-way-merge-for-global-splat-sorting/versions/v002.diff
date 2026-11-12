@@ -1,0 +1,157 @@
+--- v001.md
++++ v002.md
+@@ -7,9 +7,9 @@
+ 
+ ## How it works
+-The method assumes $K$ active renderers, each having already produced a locally depth-sorted list of splats. The goal is to produce a single global list sorted by depth (typically front-to-back for alpha compositing).
++The method operates on $K$ active renderers, each having already produced a locally depth-sorted list of splats [S1, unofficial]. The goal is to produce a single global list sorted by depth [S1, unofficial].
+ 
+ **Inputs and Outputs:**
+-- **Inputs:** $K$ active renderers. Renderer $k$ provides a sorted list of splats with count $cnt_k$ and an offset $off_k$ in a global scratch space.
+-- **Outputs:** A single global order buffer ($m\_globalOrderBuffer$) containing the indices of all splats sorted by depth.
++- **Inputs:** $K$ active renderers. Renderer $k$ provides a sorted list of splats with count $cnt_k$ and an offset $off_k$ in a global scratch space [S1, unofficial].
++- **Outputs:** A single global order buffer ($m\_globalOrderBuffer$) containing the indices of all splats sorted by depth [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -39,5 +39,5 @@
+ 
+ 2.  **Initialize Merge State:**
+-    - Set $mergedCount = cnt_0$ (count of the first renderer) [S1, unofficial].
++    - Set $mergedCount = activeGsplats[0].RemainingCount$ [S1, unofficial].
+     - Set $mergedOffset = 0$ [S1, unofficial].
+     - Set $mergedInPack = \text{true}$, indicating the current merged result resides in $m\_packScratch$ buffers [S1, unofficial].
+@@ -61,5 +61,5 @@
+     - **Update State:**
+         - Set $mergedCount = total$ [S1, unofficial].
+-        - If $k < K-1$, update $mergedInPack$ based on which buffer was used as destination [S1, unofficial].
++        - Update $mergedInPack$ based on which buffer was used as destination [S1, unofficial].
+ 
+ 4.  **Finalize:**
+@@ -79,7 +79,8 @@
+     # Step 1: Pack local orders into scratch buffers
+     current_offset = 0
++    renderer_offsets = []
+     for k in range(K):
+-        renderer = active_renderers[k]
+-        cnt_k = renderer.RemainingCount
++        cnt_k = active_renderers[k].RemainingCount
++        renderer_offsets.append(current_offset)
+         
+         if cnt_k == 0:
+@@ -87,10 +88,8 @@
+             
+         # Dispatch m_kernelPackOrders
+-        # Inputs: renderer.OrderBuffer, renderer.InputKeys
+-        # Outputs: m_packScratchOrders[current_offset : current_offset + cnt_k],
+-        #          m_packScratchDepths[current_offset : current_offset + cnt_k]
+-        # Params: k_rendererIdx=k, k_srcCount=cnt_k, k_dstOffset=current_offset
+-        dispatch_kernel_pack_orders(renderer, m_packScratchOrders, m_packScratchDepths, 
+-                                    current_offset, cnt_k, k)
++        # Copies raw orders/depths from active_renderers[k].OrderBuffer and .InputKeys
++        # to scratch buffers at current_offset
++        dispatch_pack_orders(active_renderers[k], m_packScratchOrders, m_packScratchDepths, 
++                             current_offset, cnt_k, k)
+         
+         current_offset += cnt_k
+@@ -101,8 +100,7 @@
+     merged_in_pack = True  # Result is in packScratch buffers
+     
+-    # Step 3: Cascaded merge
++    # Step 3: Cascaded merge loop
+     for k in range(1, K):
+-        renderer_k = active_renderers[k]
+-        cnt_k = renderer_k.RemainingCount
++        cnt_k = active_renderers[k].RemainingCount
+         
+         if cnt_k == 0:
+@@ -111,4 +109,5 @@
+         total = merged_count + cnt_k
+         is_final = (k == K - 1)
++        off_k = renderer_offsets[k]
+         
+         # Select Source A (merged result so far)
+@@ -121,10 +120,4 @@
+             
+         # Select Source B (current renderer's data)
+-        # Always in packScratch at offset off_k
+-        # Note: off_k is the cumulative offset of renderer k's data in packScratch
+-        # This requires tracking offsets during packing. 
+-        # For simplicity, assume we have a list of offsets for each renderer.
+-        off_k = get_offset_for_renderer(k) 
+-        
+         src_b_orders = m_packScratchOrders
+         src_b_depths = m_packScratchDepths
+@@ -146,36 +139,32 @@
+         if is_final:
+             # Final pass: no depth output
+-            # Kernel: m_kernelMergeTwo
+-            dispatch_kernel_merge_two(
+-                src_a_orders, src_a_depths,
+-                src_b_orders, src_b_depths,
+-                dst_orders,
+-                k_offsetA=merged_offset,
+-                k_offsetB=off_k,
+-                k_countA=merged_count,
+-                k_countB=cnt_k,
+-                k_outputOffset=0
+-            )
++            dispatch_merge_two(src_a_orders, src_a_depths, src_b_orders, src_b_depths,
++                               dst_orders, merged_offset, off_k, merged_count, cnt_k, 0)
+         else:
+             # Intermediate pass: depth output
+-            # Kernel: m_kernelMergeTwoWithDepth
+-            dispatch_kernel_merge_two_with_depth(
+-                src_a_orders, src_a_depths,
+-                src_b_orders, src_b_depths,
+-                dst_orders, dst_depths,
+-                k_offsetA=merged_offset,
+-                k_offsetB=off_k,
+-                k_countA=merged_count,
+-                k_countB=cnt_k,
+-                k_outputOffset=0
+-            )
++            dispatch_merge_two_with_depth(src_a_orders, src_a_depths, src_b_orders, src_b_depths,
++                                          dst_orders, dst_depths, merged_offset, off_k, merged_count, cnt_k, 0)
+             
+         # Update state
+         merged_count = total
+         merged_offset = 0  # Output is always written to offset 0 of the destination buffer
+-        merged_in_pack = (dst_orders == m_packScratchOrders)
++        merged_in_pack = (dst_orders is m_packScratchOrders)
+ 
+     # Step 4: Finalize
+     m_totalRemainingCount = merged_count
++
++def dispatch_pack_orders(renderer, dst_orders, dst_depths, offset, count, renderer_idx):
++    # Simulates dispatching m_kernelPackOrders to the GPU
++    pass
++
++def dispatch_merge_two(src_a_orders, src_a_depths, src_b_orders, src_b_depths,
++                       dst_orders, offset_a, offset_b, count_a, count_b, output_offset):
++    # Simulates dispatching m_kernelMergeTwo (no depth output)
++    pass
++
++def dispatch_merge_two_with_depth(src_a_orders, src_a_depths, src_b_orders, src_b_depths,
++                                  dst_orders, dst_depths, offset_a, offset_b, count_a, count_b, output_offset):
++    # Simulates dispatching m_kernelMergeTwoWithDepth (outputs depths)
++    pass
+ ```
+ 
+@@ -186,11 +175,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The merge process is $O(N \log K)$, where $N$ is the total number of splats and $K$ is the number of active renderers, as it performs a binary merge tree of depth $K$ [S1, unofficial]. Each merge step is linear in the number of elements being merged.
+-- **Memory Complexity:** Requires four scratch buffers of size $N$ and one output buffer of size $N$, totaling $5N$ elements (orders and depths) [S1, unofficial].
+-- **Performance:** Relies on GPU hardware acceleration, specifically requiring wave/subgroup operations available in D3D12, Metal, or Vulkan [S1, unofficial]. WebGPU supports subgroups but may not be implemented in all engines (e.g., Unity) [S1, unofficial].
++- **Time Complexity:** The merge process is $O(NK)$, where $N$ is the total number of splats and $K$ is the number of active renderers, as it performs an iterative pairwise merge across $K-1$ stages [S1, unofficial]. Each merge step is linear in the number of elements being merged [S1, unofficial].
++- **Memory Complexity:** Requires four scratch buffers and one output buffer, each of size $N$, totaling $5N$ elements for orders and depths [S1, unofficial].
++- **Performance:** Relies on GPU hardware acceleration, specifically requiring wave/subgroup operations available in D3D12, Metal, or Vulkan [S1, unofficial]. WebGPU supports subgroups but may lack engine implementation (e.g., Unity) [S1, unofficial].
+ - **Strengths:** Reduces overdraw and improves sorting accuracy across scenes by merging multiple renderers into a single globally depth-sorted draw call [S1, unofficial].
+-- **Limitations:** Requires specific graphics APIs (no OpenGL/WebGL support due to subgroup requirements) [S1, unofficial]. Fallback to per-renderer sorting if uncompressed assets are present [S1, unofficial].
+-- **When to use:** When rendering multiple independent Gaussian Splat scenes in a unified view with correct depth compositing.
+-- **When not to use:** When only a single renderer is active, or when uncompressed assets are used and global sorting is required.
++- **Limitations:** Requires specific graphics APIs (no OpenGL/WebGL support due to subgroup requirements) [S1, unofficial]. Falls back to per-renderer sorting if uncompressed assets are present [S1, unofficial].
++- **When to use:** When rendering multiple independent Gaussian Splat scenes in a unified view with correct depth compositing [S1, unofficial].
++- **When not to use:** When only a single renderer is active, or when uncompressed assets are used and global sorting is required [S1, unofficial].
+ 
+ ## Background

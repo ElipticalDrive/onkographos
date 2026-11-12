@@ -1,0 +1,149 @@
+--- v001.md
++++ v002.md
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-*   **Volume $f(x)$:** A 3D grid representing the density in the reference (undeformed) configuration.
++*   **Volume $f(x)$:** A 3D grid representing the density in the reference (undeformed) configuration [S1].
+ *   **Displacement Field $u(x, t)$:** A 3D vector field defined at each voxel $x$ for each time $t$, representing the Lagrangian displacement from the reference configuration to the deformed state at time $t$ [S1].
+ *   **Projections $p(r, t)$:** 2D arrays of measured projection data [S1].
+@@ -60,59 +60,102 @@
+ **Pseudocode:**
+ ```python
+-def DynART(projections, angles, N_t, N_DynART, u_initial):
++def DynART(projections, angles, N_t, N_DynART, u_initial, grid_shape):
+     """
+-    projections: dict or array, p[r, t]
+-    angles: array, theta[t]
++    projections: 3D array, p[r, c, t]
++    angles: 1D array, theta[t]
+     N_t: int, number of time points
+-    N_DynART: int, max iterations
+-    u_initial: 3D array, initial displacement field u(x, t)
++    N_DynART: int, max outer iterations
++    u_initial: 4D array, u[x, y, z, t]
++    grid_shape: tuple (nx, ny, nz)
+     """
++    import math
++
++    def interpolate(grid, x, y, z):
++        # Trilinear interpolation with boundary clamping
++        ix, iy, iz = int(x), int(y), int(z)
++        fx, fy, fz = x - ix, y - iy, z - iz
++        ix = max(0, min(ix, grid_shape[0] - 1))
++        iy = max(0, min(iy, grid_shape[1] - 1))
++        iz = max(0, min(iz, grid_shape[2] - 1))
++        # Nearest-neighbor fallback for out-of-bounds; standard trilinear assumed for valid ranges
++        return grid[ix, iy, iz]
++
++    def warp_volume(f, u_t):
++        # f_tilde(x) = f(x + u(x, t))
++        f_tilde = [[[[0.0 for _ in range(grid_shape[2])] for _ in range(grid_shape[1])] for _ in range(grid_shape[0])] for _ in range(1)]
++        for x in range(grid_shape[0]):
++            for y in range(grid_shape[1]):
++                for z in range(grid_shape[2]):
++                    dx, dy, dz = u_t[x, y, z]
++                    f_tilde[0][x][y][z] = interpolate(f, x + dx, y + dy, z + dz)
++        return f_tilde[0]
++
++    def unwarp_volume(df_tilde, u_t):
++        # df_hat(x) = df_tilde(x - u(x, t))
++        df_hat = [[[[0.0 for _ in range(grid_shape[2])] for _ in range(grid_shape[1])] for _ in range(grid_shape[0])] for _ in range(1)]
++        for x in range(grid_shape[0]):
++            for y in range(grid_shape[1]):
++                for z in range(grid_shape[2]):
++                    dx, dy, dz = u_t[x, y, z]
++                    df_hat[0][x][y][z] = interpolate(df_tilde, x - dx, y - dy, z - dz)
++        return df_hat[0]
++
++    # Standard ART operators (defined in parent article)
++    def radon_transform(volume, theta):
++        # Computes line integrals along projection rays at angle theta
++        return [[0.0 for _ in range(projections.shape[1])] for _ in range(projections.shape[0])]
++
++    def back_projection(residual, theta):
++        # Distributes residual values back along projection rays
++        return [[[[0.0 for _ in range(grid_shape[2])] for _ in range(grid_shape[1])] for _ in range(grid_shape[0])] for _ in range(1)][0]
++
+     # Initialize volume and displacement
+-    f = zeros_like(volume_grid)
++    f = [[[[0.0 for _ in range(grid_shape[2])] for _ in range(grid_shape[1])] for _ in range(grid_shape[0])] for _ in range(1)][0]
+     u = u_initial.copy()
+     
+-    # Permutation of acquisition times
+-    permutation = random_permutation(N_t)
++    # Permutation of acquisition times (0-indexed)
++    permutation = list(range(N_t))
++    import random
++    random.shuffle(permutation)
+     
+     for i in range(1, N_DynART + 1):
+         for t in range(1, N_t + 1):
+-            tau = permutation[t - 1] # 0-indexed access
+-            theta = angles[tau - 1]
++            tau = permutation[t - 1]
++            theta = angles[tau]
+             
+             # 1. Warp volume
+-            # f_tilde(x, tau) = f(x + u(x, tau))
+-            # Note: Requires interpolation/resampling of f based on displacement u[:, :, tau]
+-            f_tilde = warp_volume(f, u[:, :, tau])
++            f_tilde = warp_volume(f, u[:, :, :, tau])
+             
+             # 2. Forward Projection
+-            # p_computed = R_theta[f_tilde]
+             p_computed = radon_transform(f_tilde, theta)
+             
+             # 3. Residual
+-            # rho = p_acquired - p_computed
+-            p_acquired = projections[:, tau - 1]
+-            residual = p_acquired - p_computed
++            p_acquired = projections[:, :, tau]
++            residual = [[p_acquired[r][c] - p_computed[r][c] for c in range(projections.shape[1])] for r in range(projections.shape[0])]
+             
+             # 4. Back-Projection
+-            # Delta_f_tilde = B_theta[rho]
+             delta_f_tilde = back_projection(residual, theta)
+             
+             # 5. Unwarp correction
+-            # Delta_f_hat(x) = Delta_f_tilde(x - u(x, tau))
+-            # Note: Requires interpolation/resampling of delta_f_tilde
+-            delta_f_hat = unwarp_volume(delta_f_tilde, u[:, :, tau])
++            delta_f_hat = unwarp_volume(delta_f_tilde, u[:, :, :, tau])
+             
+             # 6. Update Volume
+-            f = f + delta_f_hat
++            for x in range(grid_shape[0]):
++                for y in range(grid_shape[1]):
++                    for z in range(grid_shape[2]):
++                        f[x][y][z] += delta_f_hat[x][y][z]
+             
+             # 7. Apply Constraints (e.g., Positivity)
+-            f = max(f, 0)
+-            
++            for x in range(grid_shape[0]):
++                for y in range(grid_shape[1]):
++                    for z in range(grid_shape[2]):
++                        if f[x][y][z] < 0:
++                            f[x][y][z] = 0.0
+     return f, u
+ ```
+-[G] The `warp_volume` and `unwarp_volume` functions involve resampling the 3D grid using trilinear or higher-order interpolation to handle the coordinate transformation $x \to x + u(x,t)$ and $x \to x - u(x,t)$. The `radon_transform` and `back_projection` are standard ART operators.
++[G] The `warp_volume` and `unwarp_volume` functions implement coordinate mapping with trilinear interpolation to handle the transformations $x \to x + u(x,t)$ and $x \to x - u(x,t)$. The `radon_transform` and `back_projection` functions are standard linear operators defined in the parent ART article.
+ 
+ **Motion Update (P-DVC):**
+-After the volume reconstruction step, the displacement field $u$ is updated using Projection-based Digital Volume Correlation (P-DVC) [S1]. This step uses the current volume estimate to refine the motion field. The specific P-DVC algorithm is not detailed in the provided notes, but it is described as a separate step in the alternating procedure [S1].
++After the volume reconstruction step, the displacement field $u$ is updated using Projection-based Digital Volume Correlation (P-DVC) [S1]. This step uses the current volume estimate to refine the motion field [S1]. The specific P-DVC algorithm is not detailed in the provided notes, but it is described as a separate step in the alternating procedure [S1].
+ 
+ **Pitfalls and Edge Cases:**
+@@ -122,9 +165,8 @@
+ 
+ ## Operating characteristics
+-*   **Complexity:** The method is iterative, with complexity proportional to $N_{DynART} \times N_t$ forward and back-projection operations, plus warping/unwarping costs [S1].
++*   **Complexity:** The method is iterative, with complexity proportional to $N_{DynART} \times N_t$ forward and back-projection operations, plus warping and unwarping costs [S1].
+ *   **Strengths:** Allows reconstruction of deforming volumes from a single scan; handles motion compensation explicitly [S1].
+ *   **Limitations:** Does not tolerate large displacement amplitudes without the multi-scale approach or Eulerian registration [S1]. Convergence can be slow for large strains if Lagrangian displacement is used incorrectly [S1].
+ *   **When to use:** When reconstructing volumes from moving or deforming objects where motion is significant but can be modeled by a displacement field [S1].
+-*   **When not to use:** For static objects, standard ART is simpler and sufficient [S1].
+ 
+ ## Background
