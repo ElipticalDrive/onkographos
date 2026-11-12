@@ -1,69 +1,47 @@
 # Finest Level Lerp
-
-
 ## Overview
-Finest Level Lerp is a method for computing the value of a coarser-side octant vertex in adaptive mesh refinement (AMR) volume rendering by performing a weighted average of all leaf cells touching that vertex [S1, unofficial]. It solves the problem of generating consistent interpolants at level boundaries where a coarse octant meets finer children [S1, unofficial]. It sets itself apart from [Coarsest-Level Lerp](2770-coarsest-level-lerp.md) by utilizing the finest available resolution rather than the coarsest, and from [Blending Between Levels (Fast)](7871-blending-between-levels-fast.md) by being a deterministic, non-blending average that avoids the computational overhead of transparency-based blending [S1, unofficial].
+Finest Level Lerp computes the value of a coarser-side octant vertex in adaptive mesh refinement volume rendering by calculating the weighted average of all leaf cells touching that vertex [S1, unofficial]. It is used by default for this calculation [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   Input: A coarser-side octant vertex $O_{X'}$ located at position $oct[X'].p$, and its neighboring data structures $D[0]$ and $D[X']$ representing the adjacent octants or cells.
-*   Output: The interpolated value $oct[X'].v$.
+*   Input: A coarser-side octant vertex $O_{X'}$ at position $oct[X'].p$, and neighboring data structures $D[0]$ and $D[X']$ representing adjacent cells [S1, unofficial].
+*   Output: The interpolated vertex value $oct[X'].v$ [S1, unofficial].
 
 **Data Structures:**
-*   $D[i].l$: The refinement level of the $i$-th neighbor.
-*   $D[i].v$: The value associated with the $i$-th neighbor.
-*   $oct[X'].p$: The 3D position of the vertex in question.
-*   $D'$: A logical dual cell structure containing vertices $D'.v$ at the finest level.
+*   $D[i].l$: Refinement level of neighbor $i$ [S1, unofficial].
+*   $D[i].v$: Value of neighbor $i$ [S1, unofficial].
+*   $oct[X'].p$: 3D position of the vertex [S1, unofficial].
+*   $D'$: Logical dual cell structure containing vertices $D'.v$ at the finest level [S1, unofficial].
 
 **Steps:**
-1.  Determine the minimum and maximum refinement levels involved in the boundary:
-    $$ l_{min} = \min(D[0].l, D[X'].l) $$
-    $$ l_{max} = \max(D[0].l, D[X'].l) $$
-2.  If $l_{min} == l_{max}$, the vertex is not on a level boundary. Compute the value as the average of the two neighbors:
-    $$ oct[X'].v = \text{avg}(D[0].v, D[X'].v) $$
-3.  If $l_{min} \neq l_{max}$, the vertex lies on a boundary. Identify the finest level $l_{finest}$ involved (typically the maximum level in the local neighborhood or global finest level).
-4.  Find the logical dual cell $D'$ at the finest level that contains the vertex position $oct[X'].p$. The vertex lies exactly in the center of this finest level logical dual cell [S1, unofficial].
-5.  Compute the value as the weighted average of all leaf cell vertices $D'.v$ that touch this dual cell:
-    $$ oct[X'].v = \text{avg}(\text{all } D'.v) $$
+1. Calculate minimum and maximum refinement levels: $l_{min} = \min(D[0].l, D[X'].l)$ and $l_{max} = \max(D[0].l, D[X'].l)$ [S1, unofficial].
+2. If $l_{min} == l_{max}$, the vertex is not on a level boundary. Compute the value as the average of the two neighbors: $oct[X'].v = \text{avg}(D[0].v, D[X'].v)$ [S1, unofficial].
+3. If $l_{min} \neq l_{max}$, the vertex lies on a boundary. Identify the finest level $l_{finest}$ of the dataset [S1, unofficial].
+4. Find the logical dual cell $D'$ at $l_{finest}$ that contains $oct[X'].p$. The vertex lies exactly in the center of this finest level logical dual cell [S1, unofficial].
+5. Compute the value as the average of all leaf cell vertices $D'.v$ that touch this dual cell: $oct[X'].v = \text{avg}(\text{all } D'.v)$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def finest_level_lerp(octant_index, neighbors, finest_level):
-    """
-    Computes the value for a coarser-side octant vertex using Finest Level Lerp.
-    
-    Args:
-        octant_index: Index of the octant vertex being computed.
-        neighbors: List of neighbor data structures D[0], D[X'], etc.
-                   Each neighbor has .l (level) and .v (value).
-        finest_level: The global or local finest refinement level.
-        
-    Returns:
-        The interpolated vertex value.
-    """
+def finest_level_lerp(D0, DX_prime, finest_level, octant_position):
+    """Computes the value for a coarser-side octant vertex using Finest Level Lerp."""
     # Step 1: Determine min and max levels
-    l_min = min(n.l for n in neighbors)
-    l_max = max(n.l for n in neighbors)
+    l_min = min(D0.l, DX_prime.l)
+    l_max = max(D0.l, DX_prime.l)
     
     # Step 2: Check if it is a boundary
     if l_min == l_max:
         # Not a boundary; average the direct neighbors
-        # Assuming two primary neighbors D[0] and D[X'] for the edge case
-        # In general, average all relevant neighbors at this level
-        values = [n.v for n in neighbors]
-        return sum(values) / len(values)
+        return (D0.v + DX_prime.v) / 2.0
     
     # Step 3 & 4: Find the finest level dual cell
     # The vertex lies exactly in the center of any finest level logical dual cell
-    # find_dual_cell returns the set of leaf vertices touching the cell containing the position
     dual_cell_vertices = find_dual_cell(finest_level, octant_position)
     
     # Step 5: Average all dual cell vertices
     if not dual_cell_vertices:
-        return 0.0 # Guard against empty cell, though geometrically unlikely for valid AMR
-        
+        return 0.0
     return sum(dual_cell_vertices) / len(dual_cell_vertices)
 
 def find_dual_cell(level, position):
@@ -73,37 +51,29 @@ def find_dual_cell(level, position):
     [G] Implementation detail: This typically involves traversing the octree to find
     the leaf nodes at 'level' that share the vertex 'position'.
     """
-    # [G] In a standard octree, a vertex is shared by up to 8 cells.
-    # We collect the values of all leaf cells that have this vertex.
     leaf_values = []
-    # Traverse octree to find leaves at 'level' containing 'position' as a corner
-    # This is a placeholder for the specific tree traversal logic
-    # which depends on the exact grid layout (e.g., Morton order, B-tree).
-    # For a vertex in the center of a dual cell, we sum the values of the 
-    # 8 surrounding finest-level voxels.
+    # [G] The sources do not specify the exact tree traversal logic for locating
+    # the 8 surrounding finest-level voxels at the given position.
     return leaf_values
 ```
 
 **Parameters:**
-*   `finest_level`: The refinement level to use for the dual cell. Typically the maximum level present in the dataset or the local maximum level [S1, unofficial].
+*   `finest_level`: The global finest refinement level of the dataset [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The method relies on accurate identification of the dual cell. Errors in floating-point position comparisons may lead to selecting the wrong set of leaf cells [S1, unofficial].
-*   **Boundaries:** The method is specifically designed for vertices on level boundaries. For internal vertices, standard trilinear interpolation is usually preferred [S1, unofficial].
-*   **Ray-Isosurface Intersection:** While effective for volume rendering, it is unclear how to perform ray-isosurface intersections with this interpolant, as it does not define a continuous scalar field in the same way as standard trilinear interpolation [S1, unofficial].
+*   **Ray-Isosurface Intersection:** While effective for volume rendering, it is unclear how to perform ray-isosurface intersections with this interpolant [S1, unofficial].
 
 ## Subtopics
 
 ### Current-Sample Leaf-Level Interpolation
-A variant that performs interpolation on the leaf level specific to each sample point rather than a fixed finest level [S2, unofficial]. It is adaptive and locally trilinear but discontinuous across level boundaries [S2, unofficial]. It is simpler and faster in non-boundary regions but lacks the continuity of Finest Level Lerp [S2, unofficial].
+A variant that performs interpolation on the leaf level specific to each sample point rather than a fixed finest level [S2, unofficial]. It is adaptive and locally trilinear but discontinuous across level boundaries [S2, unofficial]. It is simple and fast, matching standard trilinear interpolation on the given region's leaf level except at boundaries [S2, unofficial].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   Time: $O(1)$ if the dual cell lookup is $O(1)$, but typically requires tree traversal to find the 8 surrounding leaf cells, making it $O(\log N)$ or $O(1)$ with spatial hashing [S1, unofficial].
-*   Memory: No additional memory beyond the existing octree structure [S1, unofficial].
+*   Time: Described as fast and trivially simple to code [S1, unofficial].
+*   Memory: Not given in the sources.
 
 **Measured Performance:**
-*   Described as "fast and trivially simple to code" [S1, unofficial].
 *   Qualitatively one of the best methods found for calculating coarser side octant values in AMR data [S1, unofficial].
 
 **Strengths and Limitations:**
@@ -116,10 +86,9 @@ A variant that performs interpolation on the leaf level specific to each sample 
 
 **When Not to Use:**
 *   Do not use if ray-isosurface intersection is required, as the interpolant is not suitable for this purpose [S1, unofficial].
-*   Do not use if strict continuity across all level boundaries is required without blending, in which case [Blending Between Levels (Fast)](7871-blending-between-levels-fast.md) may be preferred [S1, unofficial].
 
 ## Background
-Originated in the context of CPU-based isosurface ray tracing of Adaptive Mesh Refinement (AMR) data [S1, unofficial]. Developed by researchers at the Scientific Computing and Imaging Institute (SCI) at the University of Utah, including Feng et al. [S1, unofficial]. It is used in the OSPRay project for volume rendering of AMR data [S1, unofficial].
+Originates from research on CPU-based isosurface ray tracing of Adaptive Mesh Refinement (AMR) data [S1, unofficial].
 
 ## Sources
 [S1] PDF CPU Isosurface Ray Tracing of Adaptive Mesh Refinement Da, https://www.sci.utah.edu/~feng/assets/papers/Fen-AMR-VIS18.pdf, fetched 2026-10-26 (unofficial)

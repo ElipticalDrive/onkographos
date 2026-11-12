@@ -3,30 +3,30 @@
 Also called: Adaptive Scale Filter for 4D Gaussians
 
 ## Overview
-The 4D Scale-adaptive Filter is a post-processing and regularization technique for 4D Gaussian Splatting that prevents the distortion of Gaussian anisotropy and eliminates the rendering of invisible primitives during dynamic scene reconstruction [S1, unofficial]. It distinguishes itself from fixed-scale smoothing filters (e.g., [3D Smoothing Filter](link)) by adaptively adjusting the dilation coefficient based on the primitive's current scale and visibility, thereby preserving high-frequency details while avoiding aliasing artifacts caused by over-dilation [S1, unofficial].
+The 4D Scale-adaptive Filter is a filtering technique for 4D Gaussian Splatting that prevents the distortion of Gaussian anisotropy and eliminates the rendering of invisible primitives during dynamic scene reconstruction [S1, unofficial]. It distinguishes itself from fixed-scale smoothing filters by adaptively adjusting the dilation coefficient based on the primitive's current scale and visibility, thereby preserving high-frequency details while avoiding aliasing artifacts caused by over-dilation [S1, unofficial].
 
 ## How it works
-The method modifies the covariance matrix of 4D Gaussian primitives during the splatting pipeline. It operates by computing an adaptive dilation scale $\sigma_{\text{adapt}}$ that depends on the primitive's intrinsic scale, a minimum dilation ratio, and a visibility threshold.
+The method modifies the covariance matrix of 4D Gaussian primitives during the splatting pipeline [S1, unofficial]. It operates by computing an adaptive dilation scale $\sigma_{\text{adapt}}$ that depends on the primitive's intrinsic scale, a minimum dilation ratio, and a visibility threshold [S1, unofficial].
 
 ### Inputs and Outputs
 *   **Inputs:**
-    *   $\mathbf{G}_k$: The 4D Gaussian primitive $k$, defined by position $\mathbf{p}_k$, covariance $\mathbf{\Sigma}_k(t)$, opacity, and color.
-    *   $s_t$: The current scale of the Gaussian in a specific dimension at time $t$.
-    *   $\hat{\nu}_k$: The estimated maximum sampling frequency for primitive $k$.
-    *   $\sigma_s$: A base scale factor.
-    *   $\rho_{\min}, \rho_{\max}$: Minimum and maximum dilation ratios.
-    *   $\rho_{\text{thre}}$: Threshold for scale-based dilation gating.
-    *   $\epsilon$: Minimal dilation scale for invisible Gaussians.
+    *   $\mathbf{G}_k$: The 4D Gaussian primitive $k$, defined by position $\mathbf{p}_k$, covariance $\mathbf{\Sigma}_k(t)$, opacity, and color [S1, unofficial].
+    *   $s_t$: The current scale of the Gaussian in a specific dimension at time $t$ [S1, unofficial].
+    *   $\hat{\nu}_k$: The estimated maximum sampling frequency for primitive $k$ [S1, unofficial].
+    *   $\sigma_s$: A base scale factor [S1, unofficial].
+    *   $\rho_{\min}, \rho_{\max}$: Minimum and maximum dilation ratios [S1, unofficial].
+    *   $\rho_{\text{thre}}$: Threshold for scale-based dilation gating [S1, unofficial].
+    *   $\epsilon$: Minimal dilation scale for invisible Gaussians [S1, unofficial].
 *   **Outputs:**
-    *   Filtered covariance $\mathbf{\Sigma}'_k(t)$ and amplitude scaling factor.
-    *   Visibility mask $M$ determining if the Gaussian contributes to the image.
+    *   Filtered covariance $\mathbf{\Sigma}'_k(t)$ and amplitude scaling factor [S1, unofficial].
+    *   Visibility mask $M$ determining if the Gaussian contributes to the image [S1, unofficial].
 
 ### Data Structures
 The 4D Gaussian primitive $k$ maintains:
-*   $\mathbf{p}_k \in \mathbb{R}^3$: Position.
-*   $\mathbf{\Sigma}_k(t) \in \mathbb{R}^{4 \times 4}$: Covariance matrix in 4D space (3D space + time).
-*   $\hat{\nu}_k \in \mathbb{R}$: Estimated maximum sampling frequency.
-*   $s_t \in \mathbb{R}$: Current scale magnitude (derived from $\mathbf{\Sigma}_k$).
+*   $\mathbf{p}_k \in \mathbb{R}^3$: Position [S1, unofficial].
+*   $\mathbf{\Sigma}_k(t) \in \mathbb{R}^{4 \times 4}$: Covariance matrix in 4D space (3D space + time) [S1, unofficial].
+*   $\hat{\nu}_k \in \mathbb{R}$: Estimated maximum sampling frequency [S1, unofficial].
+*   $s_t \in \mathbb{R}$: Current scale magnitude (derived from $\mathbf{\Sigma}_k$) [S1, unofficial].
 
 ### Parameters
 *   $\rho_{\min}$: Minimum dilation ratio. Controls the lower bound of adaptive scaling. In ablation studies, a smaller $\rho_{\min}$ is used to mitigate negative impacts on full-resolution reconstruction [S1, unofficial].
@@ -44,36 +44,47 @@ The 4D Gaussian primitive $k$ maintains:
     where $\mathbf{1}_n(\mathbf{p}_k)$ is an indicator function (1 if visible, 0 otherwise) [S1, unofficial].
 
 2.  **Compute Adaptive Dilation Ratio:**
-    Calculate the proportional change in the dilation coefficient $\rho_{\text{adapt}}$ based on the scale variation ratio $s_t / \hat{\nu}_k$. Clip this ratio between $\rho_{\min}$ and $\rho_{\max}$ [S1, unofficial]:
-    $$ \rho_{\text{adapt}} = \text{clip}\left( \frac{s_t}{\hat{\nu}_k}, \rho_{\min}, \rho_{\max} \right) $$
-    *Note: The source notation $\text{clip}_t^2$ in Eq. 11 appears to be a typo for clipping the ratio $s_t/\hat{\nu}_k$ or similar scale-frequency metric. The text confirms $\rho_{\text{adapt}}$ is computed according to the scale variation ratio.*
+    Calculate the proportional change in the dilation coefficient $\rho_{\text{adapt}}$ based on the scale variation ratio [S1, unofficial]:
+    $$ \rho_{\text{adapt}} = \text{clip}\left( \frac{s_t^2}{\hat{\nu}_k^2}, \rho_{\min}, \rho_{\max} \right) $$
+    [S1, unofficial].
 
 3.  **Determine Adaptive Scale $\sigma_{\text{adapt}}$:**
-    Apply the masking operation $M$ to determine the final adaptive dilation scale. If the current scale $s_t$ is above the threshold $\rho_{\text{thre}} \cdot \sigma_s$, use the adaptive ratio; otherwise, use the minimal scale $\epsilon$ to prevent invisible Gaussians from becoming visible [S1, unofficial]:
+    Apply the masking operation $M$ to determine the final adaptive dilation scale [S1, unofficial]. If the current scale $s_t$ is above the threshold $\rho_{\text{thre}} \cdot \sigma_s$, use the adaptive ratio; otherwise, use the minimal scale $\epsilon$ to prevent invisible Gaussians from becoming visible [S1, unofficial]:
     $$ \sigma_{\text{adapt}} = \begin{cases} \rho_{\text{adapt}} \cdot \sigma_s & \text{if } s_t \ge \rho_{\text{thre}} \cdot \sigma_s \\ \epsilon \cdot \sigma_s & \text{otherwise} \end{cases} $$
     This defines the masking operation $M$ (Eq. 12) [S1, unofficial].
 
 4.  **Apply Filter to Covariance:**
-    Update the covariance matrix $\mathbf{\Sigma}_k(t)$ by adding the adaptive dilation term $\sigma_{\text{adapt}}^2 \mathbf{I}$ to the exponent. Simultaneously, scale the amplitude (opacity/color contribution) to preserve energy [S1, unofficial]:
+    Update the covariance matrix $\mathbf{\Sigma}_k(t)$ by adding the adaptive dilation term $\sigma_{\text{adapt}}^2 \mathbf{I}$ to the exponent [S1, unofficial]:
     $$ \mathbf{\Sigma}'_k(t) = \mathbf{\Sigma}_k(t) + \sigma_{\text{adapt}}^2 \mathbf{I} $$
-    $$ \text{Amplitude Scale} = \sqrt{\frac{|\mathbf{\Sigma}_k(t)|}{|\mathbf{\Sigma}_k(t) + \sigma_{\text{adapt}}^2 \mathbf{I}|}} $$
-    Here, $|\cdot|$ denotes the determinant. This step prevents distortion of the scale ratio between dimensions [S1, unofficial].
+    Scale the amplitude by $\sqrt{|\mathbf{\Sigma}_k(t)| / |\mathbf{\Sigma}_k(t) + \sigma_{\text{adapt}}^2 \mathbf{I}|}$ to prevent distortion of the scale ratio between dimensions and avoid dilation when the primitive is invisible [S1, unofficial].
 
 5.  **Integrate Masking into Splatting:**
-    Integrate the masking operation $M$ into the splatting pipeline. Gaussians with $\sigma_{\text{adapt}} = \epsilon \cdot \sigma_s$ (invisible) are excluded from rendering, avoiding unnecessary splatting [S1, unofficial].
+    Integrate the masking operation $M$ into the splatting pipeline to avoid rendering invisible Gaussians [S1, unofficial].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+def identity(n):
+    """Returns an n x n identity matrix."""
+    return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+
+def det(M):
+    """Computes the determinant of a square matrix M recursively."""
+    n = len(M)
+    if n == 1:
+        return M[0][0]
+    if n == 2:
+        return M[0][0] * M[1][1] - M[0][1] * M[1][0]
+    return sum((-1) ** i * M[0][i] * det([row[:i] + row[i+1:] for row in M[1:]]) for i in range(n))
+
 def apply_4d_scale_adaptive_filter(gaussian_k, time_t, params):
     """
     Applies the 4D Scale-adaptive Filter to a single 4D Gaussian primitive.
     
     Args:
-        gaussian_k: Object containing p_k, Sigma_k, s_t (current scale), 
-                    and visibility status.
+        gaussian_k: Object containing p_k, Sigma_k, s_t (current scale).
         time_t: Current time step.
         params: Dictionary containing rho_min, rho_max, rho_thre, 
                 sigma_s, epsilon, and estimated frequency nu_hat_k.
@@ -90,11 +101,11 @@ def apply_4d_scale_adaptive_filter(gaussian_k, time_t, params):
     sigma_s = params['sigma_s']
     epsilon = params['epsilon']
     nu_hat_k = params['nu_hat_k']
-    s_t = gaussian_k.s_t  # Current scale in specific dimension
+    s_t = gaussian_k.s_t
+    Sigma_k = gaussian_k.Sigma_k
     
     # 2. Compute adaptive dilation ratio rho_adapt
-    # Clip the scale-to-frequency ratio
-    ratio = s_t / nu_hat_k
+    ratio = (s_t ** 2) / (nu_hat_k ** 2)
     rho_adapt = max(rho_min, min(rho_max, ratio))
     
     # 3. Determine adaptive scale sigma_adapt based on threshold
@@ -107,21 +118,17 @@ def apply_4d_scale_adaptive_filter(gaussian_k, time_t, params):
         is_visible = False
         
     # 4. Apply filter to covariance
-    # Sigma_k is 4x4 matrix. I is 4x4 identity.
-    Sigma_k = gaussian_k.Sigma_k
-    determinant_original = det(Sigma_k)
+    I_4 = identity(4)
+    Sigma_filtered = [[Sigma_k[i][j] + (sigma_adapt ** 2) * I_4[i][j] for j in range(4)] for i in range(4)]
     
-    # Add dilation term to covariance
-    Sigma_filtered = Sigma_k + (sigma_adapt ** 2) * identity(4)
+    det_original = det(Sigma_k)
+    det_filtered = det(Sigma_filtered)
     
-    # Calculate amplitude scaling factor
-    determinant_filtered = det(Sigma_filtered)
-    
-    # Avoid division by zero or invalid sqrt
-    if determinant_original <= 0 or determinant_filtered <= 0:
+    # Guard against numerical instability
+    if det_original <= 0 or det_filtered <= 0:
         amplitude_scale = 1.0
     else:
-        amplitude_scale = sqrt(determinant_original / determinant_filtered)
+        amplitude_scale = (det_original / det_filtered) ** 0.5
         
     return Sigma_filtered, amplitude_scale, is_visible
 ```
@@ -133,14 +140,14 @@ def apply_4d_scale_adaptive_filter(gaussian_k, time_t, params):
 *   **Anisotropy Distortion:** Fixed-scale dilation distorts the scale ratio between dimensions. The adaptive scaling $\rho_{\text{adapt}}$ preserves the dimensional scale ratio [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The filter adds a constant-time operation per Gaussian per frame (matrix addition, determinant calculation, clipping). It does not increase the asymptotic complexity of the splatting pipeline, which is dominated by rasterization.
-*   **Memory Complexity:** No additional memory is required beyond the existing Gaussian attributes. The frequency estimate $\hat{\nu}_k$ requires one scalar per primitive.
-*   **Performance:** The filter improves anti-aliasing performance, particularly in monocular video reconstruction tasks, outperforming Mip-Splatting at higher resolutions when combined with scale regularization [S1, unofficial]. It reduces unnecessary computation by masking invisible Gaussians.
-*   **Strengths:** Preserves Gaussian anisotropy; prevents dilation of invisible primitives; mitigates aliasing artifacts from scale variations.
+*   **Time Complexity:** The filter adds a constant-time operation per Gaussian per frame (matrix addition, determinant calculation, clipping) [G]. It does not increase the asymptotic complexity of the splatting pipeline, which is dominated by rasterization [G].
+*   **Memory Complexity:** No additional memory is required beyond the existing Gaussian attributes. The frequency estimate $\hat{\nu}_k$ requires one scalar per primitive [S1, unofficial].
+*   **Performance:** The filter improves anti-aliasing performance, particularly in monocular video reconstruction tasks, outperforming Mip-Splatting at higher resolutions when combined with scale regularization [S1, unofficial]. It reduces unnecessary computation by masking invisible Gaussians [S1, unofficial].
+*   **Strengths:** Preserves Gaussian anisotropy; prevents dilation of invisible primitives; mitigates aliasing artifacts from scale variations [S1, unofficial].
 *   **Limitations:** Sensitive to the hyperparameter $\rho_{\text{thre}}$. Requires accurate estimation of $\hat{\nu}_k$, which depends on camera parameters and deformation field stability [S1, unofficial].
 
 ## Background
-The 4D Scale-adaptive Filter was introduced in the context of 4D Gaussian Splatting to address artifacts caused by fixed-scale dilation in dynamic scenes. It builds on the principles of 2D Gaussian Splatting [6068-2d-gaussian-splatting.md] but extends them to 4D space. The method was proposed to overcome limitations of 3D smoothing filters, which do not account for visibility or anisotropy preservation in 4D [S1, unofficial].
+The 4D Scale-adaptive Filter was introduced in the context of 4D Gaussian Splatting to address artifacts caused by fixed-scale dilation in dynamic scenes [S1, unofficial]. It builds on the principles of 2D Gaussian Splatting [6068-2d-gaussian-splatting.md] but extends them to 4D space [S1, unofficial]. The method was proposed to overcome limitations of 3D smoothing filters, which do not account for visibility or anisotropy preservation in 4D [S1, unofficial].
 
 ## Sources
 [S1] Alias-free 4D Gaussian Splatting, https://arxiv.org/abs/2511.18367v1, fetched 2026-10-26 (unofficial)

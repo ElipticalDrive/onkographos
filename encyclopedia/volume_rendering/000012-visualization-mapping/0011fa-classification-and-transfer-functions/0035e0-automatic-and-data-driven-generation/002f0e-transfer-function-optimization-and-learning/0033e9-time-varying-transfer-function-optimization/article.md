@@ -3,98 +3,43 @@
 Also called: Time-Varying Data Optimization
 
 ## Overview
-Time-Varying Transfer Function Optimization extends automatic transfer function optimization to sequences of volume data, addressing the difficulty of manually deriving optimal classification functions for animation where data distributions (histograms) evolve over time [S1]. It solves the problem of maintaining visual consistency and feature visibility across frames by either computing a single global transfer function or adapting the function per frame [S1]. It differs from static optimization methods by explicitly handling temporal data structures and leveraging temporal coherence to accelerate convergence [S1].
+Time-Varying Transfer Function Optimization extends automatic transfer function generation to sequences of volume data, addressing the difficulty of manually tuning classification parameters across animation frames where data distributions change [S1]. It differs from static optimization by explicitly modeling temporal evolution, offering either a single global function for the entire sequence or an adaptive function updated per frame to match local histogram changes [S1].
 
 ## How it works
-The method operates on a sequence of volume datasets $V_t$ for $t = 0, \dots, T-1$. The core mechanism relies on an underlying optimization algorithm (such as the Visibility Weighted Saliency metric described in [S1]) that refines a transfer function to match target conspicuity distributions. The time-varying aspect is implemented through two distinct strategies:
-
-### Inputs and Outputs
-*   **Input:** A sequence of $T$ volume datasets. Each dataset $V_t$ consists of scalar values $v$ and their associated histograms.
-*   **Output:** A set of transfer functions. Either a single global function $TF_{global}$ or a sequence $TF_0, \dots, TF_{T-1}$.
-
-### Data Structures
-*   **Transfer Function:** Represented as a set of control points or a lookup table, consistent with the parent method [5933-transfer-function-optimization-and-learning.md].
-*   **Histogram:** Computed for each frame $V_t$ to represent the data distribution $H_t(v)$ [S1].
+The method operates on a sequence of volume datasets $\{V_0, V_1, \dots, V_{T-1}\}$, where each $V_t$ has an associated scalar field and histogram $H_t$. The output is a sequence of transfer functions $\{TF_0, TF_1, \dots, TF_{T-1}\}$ or a single $TF_{global}$ [S1].
 
 ### Strategies
+Two primary strategies are employed [S1]:
 
-#### 1. Global Optimization
-This strategy computes a single transfer function applied to all frames.
-1.  **Selection:** Select a single representative time-step $t_{rep}$ from the sequence. Common choices are the first frame ($t=0$) or the median frame [S1].
-2.  **Optimization:** Run the underlying transfer function optimization algorithm on $V_{t_{rep}}$ to derive $TF_{global}$ [S1].
-3.  **Application:** Apply $TF_{global}$ to render all frames $V_t$ in the sequence [S1].
-
-#### 2. Adaptive Optimization
-This strategy optimizes a unique transfer function for each frame to account for evolving data distributions [S1].
-1.  **Iteration:** For each frame $t$ from $0$ to $T-1$:
-    a. Compute the histogram $H_t$ for $V_t$ [S1].
-    b. Determine the initialization state for the optimization algorithm (see *Temporal Coherence Initialization*).
-    c. Run the optimization algorithm on $V_t$ to derive $TF_t$ [S1].
-2.  **Result:** A sequence of transfer functions $\{TF_t\}$ that adapts to local data features in each frame [S1].
+1.  **Global Optimization**: A single representative time-step (e.g., the first frame $V_0$ or the median frame $V_{\lfloor T/2 \rfloor}$) is selected. The standard transfer function optimization algorithm (as defined in [Transfer Function Optimization and Learning](5933-transfer-function-optimization-and-learning.md)) is applied to this single frame. The resulting $TF_{global}$ is then applied to all frames $V_t$ in the sequence [S1].
+2.  **Adaptive Optimization**: The optimization algorithm is executed independently for each time-step $t$. This accounts for the evolution of the data distribution (histogram) across the sequence, yielding a distinct $TF_t$ for each frame [S1].
 
 ### Temporal Coherence Initialization
-A specific initialization strategy for the Adaptive Optimization method that exploits similarity between consecutive frames to reduce convergence steps [S1].
+When using Adaptive Optimization, the initialization strategy significantly impacts convergence speed [S1].
 
-**Steps:**
-1.  **Frame 0:** Initialize the transfer function for the first frame using a naive assumption, such as equal opacities for all bins [S1].
-2.  **Optimize Frame 0:** Run the optimization algorithm to convergence to obtain $TF_0$ [S1].
-3.  **Subsequent Frames ($t > 0$):**
-    a. Initialize the transfer function for frame $t$ using the converged transfer function $TF_{t-1}$ from the immediately preceding frame [S1].
-    b. Run the optimization algorithm again [S1].
+**Algorithm: Temporal Coherence Initialization**
+1.  **Initialize Frame 0**: Set the initial transfer function $TF_0^{(0)}$ using a naive assumption, such as equal opacities for all scalar values [S1].
+2.  **Optimize Frame 0**: Run the optimization algorithm (e.g., parallel line search) on $V_0$ starting from $TF_0^{(0)}$ until convergence to obtain $TF_0^*$ [S1].
+3.  **Iterate Frames $t = 1$ to $T-1$**:
+    a.  **Initialize**: Set the initial transfer function for the current frame as the converged result from the previous frame: $TF_t^{(0)} = TF_{t-1}^*$ [S1].
+    b.  **Optimize**: Run the optimization algorithm on $V_t$ starting from $TF_t^{(0)}$ until convergence to obtain $TF_t^*$ [S1].
 
-**Pitfalls:**
-*   This strategy assumes sufficient similarity between consecutive frames [S1].
-*   Significant discontinuities or rapid changes in data distribution may cause the previous frame's transfer function to be a poor starting point, potentially leading to suboptimal convergence or requiring a fallback to naive initialization [S1].
-
-### Pseudocode
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def time_varying_optimization(volumes, strategy='adaptive', use_coherence=True):
-    """
-    volumes: List of Volume objects, each containing scalar data and a method to compute histogram.
-    strategy: 'global' or 'adaptive'.
-    use_coherence: Boolean, applies temporal coherence initialization for adaptive strategy.
-    """
-    if strategy == 'global':
-        # Select representative frame (e.g., median)
-        # Note: Median index calculation depends on T
-        t_rep = len(volumes) // 2
-        tf_global = optimize_transfer_function(volumes[t_rep], initialization='naive')
-        return tf_global
-
-    elif strategy == 'adaptive':
-        tf_sequence = []
-        for t, volume in enumerate(volumes):
-            if t == 0 or not use_coherence:
-                # Naive initialization for first frame or if coherence disabled
-                init_tf = initialize_naive()
-            else:
-                # Temporal coherence: use previous frame's result
-                init_tf = tf_sequence[-1]
-            
-            # Optimize for current frame
-            tf_t = optimize_transfer_function(volume, initialization=init_tf)
-            tf_sequence.append(tf_t)
-        
-        return tf_sequence
-```
+**Pitfalls**: This strategy assumes temporal coherence, i.e., sufficient similarity between consecutive frames. If the data distribution changes discontinuously or rapidly, the previous frame's transfer function may be a poor starting point, potentially leading to suboptimal convergence or requiring fallback to naive initialization or multi-frame aggregation [S1].
 
 ## Subtopics
 
 ### Temporal Coherence Initialization
-An initialization strategy for time-varying transfer function optimization that uses the optimized transfer function from the previous frame as the starting point for the current frame's optimization, exploiting temporal coherence to reduce convergence steps [S1]. It reduces optimization time significantly (e.g., from 13 steps to 3 on vortex data, and halving time on supernova data) [S1]. It is chosen when frames exhibit high temporal similarity; it fails or requires fallback when data distributions change rapidly [S1].
+An initialization strategy for time-varying transfer function optimization that uses the optimized transfer function from the previous frame as the starting point for the current frame's optimization [S1]. It exploits temporal coherence to reduce the number of convergence steps required [S1]. Choose this when consecutive frames exhibit high similarity in data distribution to accelerate optimization [S1]. It is a variant of the Adaptive Optimization strategy.
 
 ## Operating characteristics
-*   **Time Complexity:** For global optimization, the cost is equivalent to a single static optimization run [S1]. For adaptive optimization, the cost is $O(T \times C)$, where $T$ is the number of frames and $C$ is the convergence cost per frame [S1].
-*   **Performance with Coherence:** Using temporal coherence initialization drastically reduces the number of optimization steps. On the vortex dataset, convergence required 3 steps compared to 13 steps with naive initialization, cutting optimization time to one-third [S1]. On the supernova dataset, both iterations and processing time were reduced by half [S1].
-*   **Strengths:** Adaptive optimization yields more optimal results across the full sequence by accounting for evolving data distributions (histograms) [S1]. Global optimization ensures temporal consistency and is computationally cheaper [S1].
-*   **Limitations:** Adaptive optimization is more expensive than global optimization [S1]. Temporal coherence initialization is sensitive to discontinuities in the data sequence [S1].
-*   **When to use:** Use global optimization when a consistent view across the entire animation is required or when computational resources are limited. Use adaptive optimization when features appear or disappear significantly between frames. Use coherence initialization when the time-varying data exhibits smooth temporal evolution.
+**Performance**: Temporal coherence initialization significantly reduces optimization time. On the vortex dataset, it reduced convergence to 3 steps (compared to 13 steps with naive initialization), cutting optimization time to one-third [S1]. On the supernova dataset, it halved both the number of iterations and processing time [S1].
+
+**Strengths**: Provides a reasonable degree of temporal coherence in the resulting visualizations, which is a significant benefit for time-varying visualization [S1]. Adaptive optimization yields more optimal results across the full sequence by accounting for evolving data distributions [S1].
+
+**Limitations**: Global optimization may fail to visualize features optimally in frames where the histogram differs significantly from the representative frame [S1]. Adaptive optimization is computationally more expensive than global optimization as it requires running the optimizer for every frame [S1].
 
 ## Background
-The method was proposed in the context of automatic transfer function optimization using a combined model of visibility and saliency [S1]. It addresses the difficulty end users face in manually deriving optimal transfer functions for time-varying data, where the impact of small changes must be examined across many frames [S1]. The approach builds upon the Visibility Weighted Saliency (VWS) metric, which improves upon Feature Visibility (FV) by adding a measure of visual saliency [S1].
+This method was proposed in the context of transfer function optimization based on a combined model of visibility and saliency [S1]. It addresses the observation that manual derivation of optimal transfer functions is difficult and time-consuming for end users, particularly when examining the impact of changes across many frames of animation [S1]. The approach builds upon the Visibility Weighted Saliency (VWS) metric [S1].
 
 ## Sources
 [S1] Transfer function optimization based on a combined model of visibility and saliency, https://doi.org/10.1145/3154353.3154357, fetched 2026-11-01

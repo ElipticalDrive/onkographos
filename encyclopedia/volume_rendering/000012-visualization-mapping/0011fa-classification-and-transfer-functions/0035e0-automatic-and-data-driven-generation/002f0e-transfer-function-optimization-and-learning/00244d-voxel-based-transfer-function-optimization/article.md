@@ -3,164 +3,192 @@
 Also called: Least Squares Transfer Function Optimization, Linear Transfer Function Optimization
 
 ## Overview
-Voxel-based Transfer Function Optimization automatically computes a transfer function $T_o$ for a scalar field $F_o$ such that its rendered output matches a reference volume $F_r$ rendered with a reference transfer function $T_r$ [S1, unofficial]. It minimizes the difference in voxel colors and opacities after applying the transfer functions to the scalar voxel values, formulating the task as an over-determined linear least squares problem [S1, unofficial]. Unlike image-based approaches that prioritize voxels with larger effects on the final image, this method treats all voxels equally in the linear system [S1, unofficial].
+Voxel-based Transfer Function Optimization automatically computes an optimized transfer function $T_o$ for a scalar field $F_o$ such that its pre-shaded voxel colors and opacities match those of a reference field $F_r$ rendered with a reference transfer function $T_r$ [S1, unofficial]. It differs from image-based approaches by minimizing the difference between pre-shaded voxel values rather than final rendered pixels, treating all voxels equally in the linear system rather than prioritizing those with larger visual impact [S1, unofficial]. Unlike methods that only optimize color, this approach minimizes differences in both color and opacity [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   Reference scalar field $F_r$ defined on a rectangular grid with density values at vertices [S1, unofficial].
-*   Reference transfer function $T_r$ (discretized into bins) [S1, unofficial].
-*   Optimization scalar field $F_o$ defined on the same grid structure [S1, unofficial].
-*   Target number of transfer function bins $n_T$ [S1, unofficial].
+*   Reference scalar field $F_r$ defined on a rectangular grid.
+*   Optimization scalar field $F_o$ defined on the same grid structure.
+*   Reference transfer function $T_r$ (discretized).
+*   Number of transfer function bins $n_T$.
 
 **Outputs:**
-*   Optimized transfer function $T_o$, represented as a vector of $4n_T$ values (R, G, B, $\alpha$ for each bin) [S1, unofficial].
+*   Optimized transfer function $T_o$ (discretized into $n_T$ bins).
 
 **Data Structures:**
-1.  **Transfer Function Bins:** $T$ is discretized into $n_T$ regularly spaced bins with linear interpolation between them. Each bin stores 4 values (RGBA). The total parameter vector $x$ (representing $T_o$) has size $n = 4n_T$ [S1, unofficial].
-2.  **System Matrix ($A$):** A sparse matrix $A \in \mathbb{R}^{m \times n}$ where $m = 4m_V$ ($m_V$ is the number of voxels) and $n = 4n_T$ [S1, unofficial].
-    *   **Layout:** The matrix is very sparse. For linearized RGBA values, there are exactly two non-zero entries per row [S1, unofficial].
-    *   **Stride:** There is a stride of 4 between the two non-zero entries in a row because different color channels (R, G, B, $\alpha$) do not interact with each other in the linear combination [S1, unofficial].
-3.  **Target Vector ($b$):** A vector $b \in \mathbb{R}^m$ containing the linearized RGBA values of the reference field $F_r$ after applying $T_r$ [S1, unofficial].
+*   **Transfer Function Bins:** $n_T$ regularly spaced bins. The transfer function is defined by linear interpolation between these bins. Each bin has 4 components (R, G, B, $\alpha$).
+*   **System Matrix $A$:** Dimensions $m \times n$, where $m = 4m_V$ (rows, one per RGB$\alpha$ entry per voxel) and $n = 4n_T$ (columns, one per RGB$\alpha$ entry per bin) [S1, unofficial].
+*   **Vector $V$:** Dimensions $m \times 1$, containing linearized RGB$\alpha$ values for all voxels [S1, unofficial].
+*   **Vector $T$:** Dimensions $n \times 1$, containing the linearized RGB$\alpha$ values of the transfer function bins [S1, unofficial].
 
 **Steps:**
 
-1.  **Discretize Transfer Functions:**
-    Discretize both $T_r$ and the candidate $T_o$ into $n_T$ regularly spaced bins with linear interpolation between adjacent bins [S1, unofficial].
-
-2.  **Compute Reference Voxel Colors ($V_r$):**
-    For each voxel $i$ in the reference field $F_r$ with density $D_i$:
-    *   Quantize the density to a bin index $j$ based on the transfer function's domain.
-    *   Calculate the interpolation weight $w(i)$ between bin $j$ and $j+1$.
-    *   Compute the linearized RGBA color $V_{r,i}$ as a linear combination of the two adjacent transfer function entries:
-        $$ V_{r,i} = (1 - w(i))T_r[j] + w(i)T_r[j+1] $$
-        Here, $T_r[j]$ and $T_r[j+1]$ are the 4-dimensional RGBA vectors of the respective bins [S1, unofficial].
-
-3.  **Construct System Matrix ($A$):**
-    Construct the matrix $A$ that relates the unknown transfer function entries $T_o$ to the voxel colors. For each voxel $i$, the relationship is:
-    $$ V_{o,i} = (1 - w(i))T_o[j] + w(i)T_o[j+1] $$
-    This equation forms four rows (one per R, G, B, $\alpha$ channel) in the system $A T_o = V_o$. The matrix $A$ encodes the weights $(1-w(i))$ and $w(i)$ at the appropriate column indices corresponding to bins $j$ and $j+1$ [S1, unofficial].
-
-4.  **Formulate Least Squares Problem:**
-    The goal is to find $T_o$ such that $A T_o$ closely matches the reference colors $V_r$. This is formulated as minimizing the energy term:
-    $$ E(x) = \| b - Ax \|_2^2 = (b - Ax)^T (b - Ax) $$
-    where $x = T_o$ and $b = V_r$. The system is over-determined because $m \gg n$ (number of voxels is considerably larger than the number of transfer function entries) [S1, unofficial].
-
-5.  **Solve for Optimized Transfer Function:**
-    Solve the normal equations for the least squares problem:
+1.  **Discretize Transfer Functions:** Discretize $T_r$ and $T_o$ into $n_T$ regularly spaced bins with linear interpolation between them [S1, unofficial].
+2.  **Compute Voxel Colors:** For each voxel $i$ in $F_r$ and $F_o$, calculate the density $D_i$ at the voxel vertex. Apply the respective transfer function to $D_i$ to obtain the color $V_i = (C_i, \alpha_i)$ [S1, unofficial].
+    *   Let $j$ be the bin index quantizing $D_i$.
+    *   Let $w(i)$ be the interpolation weight between bin $j$ and $j+1$.
+    *   The color is computed as:
+        $$ V_i = (1 - w(i))T(D_i)_j + w(i)T(D_i)_{j+1} $$
+        where $T(D_i)_j$ represents the 4-component vector (RGB$\alpha$) of bin $j$ evaluated at density $D_i$ [S1, unofficial].
+3.  **Construct System Matrices:** Formulate the linear system $AT = V$ for all voxels.
+    *   For the reference field, construct $A_r$ and $V_r$.
+    *   For the optimization field, construct $A_o$ and $V_o$.
+    *   The matrix $A$ is sparse. For linearized RGB$\alpha$ values, there are only two non-zero entries per row. There is an additional stride of 4 between the two non-zero row entries because different color channels (R, G, B, $\alpha$) do not interact [S1, unofficial].
+4.  **Formulate Least Squares Problem:** The goal is to find $T_o$ such that $A_o T_o$ closely matches $V_r$. This is an over-determined system ($m \gg n$) [S1, unofficial].
+    *   Define the energy term to minimize:
+        $$ E(T_o) = ||V_r - A_o T_o||_2^2 = (V_r - A_o T_o)^T (V_r - A_o T_o) $$
+    *   Let $A = A_o$, $x = T_o$, and $b = V_r$ [S1, unofficial].
+5.  **Solve Normal Equations:** Solve the least squares problem using the normal equations:
     $$ A^T A x = A^T b $$
-    The solution is:
-    $$ x = (A^T A)^{-1} A^T b $$
-    provided $A$ has full rank. The resulting vector $x$ is the optimized transfer function $T_o$ [S1, unofficial].
+    *   The solution is:
+        $$ x = (A^T A)^{-1} A^T b $$
+        provided $A$ has full rank [S1, unofficial].
+    *   Note: The condition number of $A^T A$ is the square of the condition number of $A$ ($\text{cond}(A^T A) = \text{cond}(A)^2$), which can lead to numerical instability if the matrix is ill-conditioned [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
-
-def voxel_based_tf_optimization(F_r, T_r, n_T, density_range):
+def voxel_based_tf_optimization(F_r, F_o, T_r_bins, n_T):
     """
-    Optimizes transfer function T_o for a field to match reference field F_r
-    using voxel-based least squares optimization.
+    F_r: Reference field density values at vertices (m_V x 1)
+    F_o: Optimization field density values at vertices (m_V x 1)
+    T_r_bins: Reference transfer function bin values (n_T x 4)
+    n_T: Number of transfer function bins
     
-    Args:
-        F_r: Reference scalar field (m_V voxels)
-        T_r: Reference transfer function values (n_T x 4 array, RGBA per bin)
-        n_T: Number of transfer function bins
-        density_range: Tuple (min_val, max_val) for the transfer function domain
-        
     Returns:
-        T_o: Optimized transfer function vector of size 4 * n_T
+    T_o: Optimized transfer function bin values (n_T x 4)
     """
     m_V = len(F_r)
-    m = 4 * m_V  # Number of rows (RGBA per voxel)
-    n = 4 * n_T  # Number of columns (RGBA per bin)
+    m = 4 * m_V
+    n = 4 * n_T
     
-    # 1. Discretize Transfer Function Domain
-    bin_width = (density_range[1] - density_range[0]) / n_T
+    # Step 1 & 2: Compute V_r (Reference Voxel Colors)
+    # V_r is a vector of size m (4 components per voxel)
+    V_r = compute_voxel_colors(F_r, T_r_bins, n_T)
     
-    # 2. Compute Reference Voxel Colors (b) and Build System Matrix (A)
-    rows = []
-    cols = []
-    vals = []
-    b = np.zeros(m)
+    # Step 3: Construct System Matrix A_o for Optimization Field
+    # A_o is sparse matrix of size m x n
+    A_o = construct_system_matrix(F_o, n_T)
+    
+    # Step 4 & 5: Solve Least Squares Problem A_o * T_o = V_r
+    # Using Normal Equations: (A_o^T A_o) T_o = A_o^T V_r
+    
+    # Compute A_o^T A_o
+    ATA = A_o.T @ A_o
+    
+    # Compute A_o^T V_r
+    ATb = A_o.T @ V_r
+    
+    # Solve linear system ATA * T_o = ATb
+    # Check for singularity/ill-conditioning [G]
+    try:
+        T_o_flat = solve_linear_system(ATA, ATb)
+    except SingularMatrixError:
+        # Fallback or regularization if A is not full rank [G]
+        T_o_flat = solve_linear_system(ATA + lambda * I, ATb)
+        
+    # Reshape T_o_flat from (n,) to (n_T, 4)
+    T_o = T_o_flat.reshape(n_T, 4)
+    
+    return T_o
+
+def compute_voxel_colors(densities, T_bins, n_T):
+    """
+    Computes linearized RGBa colors for all voxels given densities and TF bins.
+    Returns vector of size 4 * len(densities)
+    """
+    m_V = len(densities)
+    colors = np.zeros(4 * m_V)
     
     for i in range(m_V):
-        density = F_r[i]
-        
+        d = densities[i]
         # Quantize density to bin index j
-        density_clamped = np.clip(density, density_range[0], density_range[1])
-        j = int((density_clamped - density_range[0]) / bin_width)
-        j = np.clip(j, 0, n_T - 2)  # Ensure j is within bounds for interpolation
+        j = quantize_density(d, n_T)
         
         # Calculate interpolation weight w(i)
-        w = (density_clamped - density_range[0]) / bin_width - j
+        w = interpolation_weight(d, j, n_T)
         
-        # Compute reference voxel color b[i*4 : i*4+4]
-        V_r_i = (1 - w) * T_r[j] + w * T_r[j+1]
-        b[i*4 : i*4+4] = V_r_i
+        # Get TF entries for bin j and j+1
+        # T_bins is (n_T, 4)
+        T_j = T_bins[j]
+        T_j1 = T_bins[min(j+1, n_T-1)] # Handle boundary
         
-        # Construct A rows for this voxel (stride of 4 between channels)
-        # Channel 0 (R)
-        rows.extend([i*4, i*4])
-        cols.extend([j*4, (j+1)*4])
-        vals.extend([1-w, w])
+        # Linear interpolation: V_i = (1-w)*T_j + w*T_j1
+        V_i = (1 - w) * T_j + w * T_j1
         
-        # Channel 1 (G)
-        rows.extend([i*4+1, i*4+1])
-        cols.extend([j*4+1, (j+1)*4+1])
-        vals.extend([1-w, w])
+        # Store in vector (R, G, B, Alpha)
+        colors[4*i : 4*i+4] = V_i
         
-        # Channel 2 (B)
-        rows.extend([i*4+2, i*4+2])
-        cols.extend([j*4+2, (j+1)*4+2])
-        vals.extend([1-w, w])
-        
-        # Channel 3 (A)
-        rows.extend([i*4+3, i*4+3])
-        cols.extend([j*4+3, (j+1)*4+3])
-        vals.extend([1-w, w])
+    return colors
 
-    # Convert to sparse matrix for efficiency
-    A = np.zeros((m, n))
-    for r, c, v in zip(rows, cols, vals):
-        A[r, c] = v
-        
-    # 3. Solve Least Squares via Normal Equations
-    ATA = A.T @ A
-    ATb = A.T @ b
+def construct_system_matrix(densities, n_T):
+    """
+    Constructs the sparse system matrix A for the optimization field.
+    A is size (4*m_V) x (4*n_T).
+    """
+    m_V = len(densities)
+    m = 4 * m_V
+    n = 4 * n_T
+    A = sparse.lil_matrix((m, n))
     
-    # Solve linear system
-    try:
-        x = np.linalg.solve(ATA, ATb)
-    except np.linalg.LinAlgError:
-        # Fallback to pseudo-inverse if singular
-        x = np.linalg.lstsq(A, b, rcond=None)[0]
+    for i in range(m_V):
+        d = densities[i]
+        j = quantize_density(d, n_T)
+        w = interpolation_weight(d, j, n_T)
         
-    return x
+        # The color V_i is a linear combination of T_j and T_j1
+        # V_i = (1-w)*T_j + w*T_j1
+        # This affects 4 rows in A (one for each RGBa component)
+        # and 8 columns (4 for T_j, 4 for T_j1)
+        
+        # Row indices for voxel i
+        row_start = 4 * i
+        
+        # Column indices for bin j
+        col_start_j = 4 * j
+        # Column indices for bin j+1
+        col_start_j1 = 4 * min(j+1, n_T-1)
+        
+        # Fill matrix entries
+        # For each channel c in 0..3
+        for c in range(4):
+            # Entry for T_j
+            A[row_start + c, col_start_j + c] = 1 - w
+            # Entry for T_j1
+            A[row_start + c, col_start_j1 + c] = w
+            
+    return A.tocsr() # Convert to CSR for efficient multiplication
+
+def quantize_density(d, n_T):
+    """
+    Maps density value d to bin index j.
+    Assumes density is normalized or scaled to [0, n_T-1] range for binning.
+    Implementation detail depends on specific density normalization [G]
+    """
+    # Placeholder for specific binning logic based on source [G]
+    # Typically: j = floor(d * (n_T - 1)) if d in [0,1]
+    return int(d * (n_T - 1))
+
+def interpolation_weight(d, j, n_T):
+    """
+    Calculates weight w for linear interpolation between bin j and j+1.
+    """
+    # w = d - j (if d is scaled to [0, n_T-1])
+    return d - j
 ```
 
-**Parameters:**
-*   $n_T$: Number of transfer function bins [S1, unofficial].
-*   $m_V$: Number of voxels [S1, unofficial].
-*   Density range: The domain of the transfer function [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Numerical Instability:** The condition number of the normal equations matrix $A^T A$ is the square of the condition number of $A$ ($\text{cond}(A^T A) = \text{cond}(A)^2$). This can lead to stability issues if $A$ is ill-conditioned [S1, unofficial].
-*   **Rank Deficiency:** If $A$ does not have full rank, the inverse $(A^T A)^{-1}$ does not exist [S1, unofficial].
-*   **Equal Treatment of Voxels:** Unlike image-based methods, this approach treats all voxels equally. Voxels that have little visual impact on the final rendered image contribute equally to the error metric, which may not be desirable for all applications [S1, unofficial].
-
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Strengths:** Fast computation due to linear formulation; closed-form solution available; minimizes both color and opacity differences (unlike some image-based methods that only optimize color) [S1, unofficial].
-*   **Limitations:** Numerical instability due to squaring of condition number; treats all voxels equally, potentially ignoring visually important regions; assumes linear relationship between transfer function entries and voxel colors (valid for pre-shading) [S1, unofficial].
-*   **When to Use:** When a fast, automatic optimization is needed and the reference transfer function is known; when both color and opacity matching are important [S1, unofficial].
-*   **When Not to Use:** When the reference transfer function is unknown; when visual importance weighting is critical (use image-based methods instead); when the system matrix is ill-conditioned [S1, unofficial].
+*   **Time Complexity:** Solving the normal equations involves computing $A^T A$ ($O(mn^2)$ or less due to sparsity) and solving the linear system ($O(n^3)$ or less with sparse solvers). Since $m \gg n$, the dominant cost is often the matrix construction and multiplication.
+*   **Memory Complexity:** Storing $A$ requires $O(m)$ space due to sparsity (2 non-zeros per row). Storing $A^T A$ requires $O(n^2)$ space.
+*   **Strengths:** Fast computation as it reduces to a linear least squares problem. Considers both color and opacity.
+*   **Limitations:** Numerical instability due to squaring of the condition number in normal equations. Treats all voxels equally, ignoring their contribution to the final image (unlike image-based methods). Assumes linear relationship between TF entries and voxel colors, which holds for pre-shading but not for the full volume rendering integral [S1, unofficial].
+*   **When to use:** When a fast, automatic approximation of a transfer function is needed, and the linear assumption is valid. When computational resources are limited.
+*   **When not to use:** When high accuracy in the final rendered image is critical and the non-linear nature of volume rendering (opacity accumulation) significantly affects the result. When the system matrix is ill-conditioned.
 
 ## Background
-The voxel-based transfer function optimization method was proposed by the authors of [S1, unofficial] as part of a comparative study on transfer function optimization for volume rendering. It addresses the problem of automatically computing a transfer function for a scalar field to match a reference volume's appearance. The method formulates the optimization as a least squares problem, minimizing the difference between pre-shaded voxel colors and opacities. It contrasts with image-based approaches that use differentiable volume rendering to minimize pixel-level differences. The work builds upon earlier least squares methods for transfer function optimization, such as those by Günther et al. [GRT13], but extends them to consider both color and opacity in a voxel-based framework [S1, unofficial].
+This method was proposed in the context of comparative volume rendering to automatically optimize transfer functions [S1, unofficial]. It addresses the problem of matching a reference volume's appearance with an optimization volume's transfer function. The approach formulates the problem as a least squares optimization on voxel colors, contrasting with image-based differentiable volume rendering approaches [S1, unofficial]. It builds on earlier work in transfer function optimization using least squares, such as that by Berger et al. [BLL19] and Günther et al. [GRT13], but specifically applies it to voxel-level color residuals for comparative rendering [S1, unofficial].
 
 ## Sources
 [S1] Transfer Function Optimization for Comparative Volume Rendering, https://doi.org/10.48550/arxiv.2306.05885, fetched 2026-10-26 (unofficial)

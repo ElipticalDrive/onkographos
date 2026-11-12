@@ -42,8 +42,6 @@ Relaxed sphere tracing is an acceleration technique for distance-field ray march
 3. Return $t$.
 
 **Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
 def relaxed_sphere_tracing(p, v, f, omega, epsilon, max_steps):
     t = 0.0

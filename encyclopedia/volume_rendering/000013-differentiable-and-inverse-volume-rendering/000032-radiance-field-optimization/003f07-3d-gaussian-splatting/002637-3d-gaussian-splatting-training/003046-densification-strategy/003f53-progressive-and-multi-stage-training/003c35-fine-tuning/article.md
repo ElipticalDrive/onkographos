@@ -1,71 +1,102 @@
 # Fine-tuning
 Also called: 3DGS Fine-tuning, Gaussian Splatting Fine-tuning
-
 ## Overview
-Fine-tuning in 3D Gaussian Splatting (3DGS) refers to the phase where a pre-initialized set of Gaussian primitives—often generated via a feed-forward network or coarse initialization—is optimized to achieve high-fidelity novel view synthesis [S1]. It solves the problem of initializing a dense, accurate scene representation from sparse or noisy inputs by leveraging pretrained priors to accelerate convergence and reduce memory consumption compared to training from scratch [S1]. It sets itself apart from standard training by explicitly enabling growing and pruning of primitives during the optimization process, allowing the model to discard redundant initial Gaussians while refining geometry and color attributes directly [S1].
-
+Fine-tuning in 3D Gaussian Splatting (3DGS) refers to the optimization phase where a pre-initialized set of 3D Gaussian primitives is refined to match target observations, often leveraging pretrained priors or feed-forward initialization to accelerate convergence and improve fidelity [S1]. It distinguishes itself from standard training by typically starting from a dense or structured initial guess (e.g., from a feed-forward network) and explicitly enabling dynamic densification (growing/pruning) during the optimization process to correct redundancy and errors [S1]. Unlike static initialization methods, fine-tuning actively manages the Gaussian population size, often reducing it significantly from the initial state while maintaining or improving photorealism [S1].
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A set of initial 3D Gaussian primitives $\{G_i\}$ with initial geometry (mean $\mu_i$, covariance $\Sigma_i$ or scale/rotation) and color attributes (SH coefficients $c_i$), typically predicted by a feed-forward process [S1]. Initial camera poses and intrinsics from Structure-from-Motion (SfM) [S1].
-*   **Output:** Optimized Gaussian parameters $\{\mu_i, \Sigma_i, c_i, \alpha_i\}$ and a pruned set of active Gaussians [S1].
+**Inputs:**
+- A set of $N$ initial 3D Gaussian primitives $\{G_i\}_{i=1}^N$, where each primitive $i$ is defined by mean position $\mu_i$, covariance matrix $\Sigma_i$ (parameterized as scale $s_i$ and rotation $q_i$), opacity $\alpha_i$, and spherical harmonic coefficients $\mathbf{c}_i$ for color/directionality [S1].
+- A set of training images with known camera poses and intrinsics.
+- A loss function combining photometric, structural, and entropy terms [S1].
+
+**Outputs:**
+- Optimized Gaussian parameters $\{\mu_i, s_i, q_i, \alpha_i, \mathbf{c}_i\}$ that minimize the reconstruction error.
+- A refined set of Gaussians with reduced redundancy compared to the initial feed-forward output [S1].
 
 **Data Structures:**
-*   **Gaussian Primitive:** Defined by mean position $\mu_i \in \mathbb{R}^3$, scale $s_i \in \mathbb{R}^3$, rotation $q_i \in \mathbb{R}^4$ (unit quaternion), opacity $\alpha_i \in [0,1]$, and spherical harmonic coefficients $c_i$ [S1].
-*   **Optimization State:** Maintained by an optimizer (e.g., Adam) [S1].
+- **Gaussian Attributes:** Stored in contiguous arrays or tensors. Each Gaussian $i$ has:
+  - $\mu_i \in \mathbb{R}^3$: Mean position.
+  - $s_i \in \mathbb{R}^3$: Scale (log-space or linear).
+  - $q_i \in \mathbb{R}^4$: Rotation quaternion (normalized).
+  - $\alpha_i \in \mathbb{R}$: Opacity (sigmoid-clamped).
+  - $\mathbf{c}_i \in \mathbb{R}^{3 \times (D+1)^2}$: SH coefficients for color, where $D$ is the degree of SHs used (e.g., $D=3$ for 48 coefficients per color channel) [S1].
+- **Optimization State:** Adam optimizer state (momentum and variance estimates) for each attribute group [S1].
 
 **Steps:**
-1.  **Initialization:** Predict a set of 3D Gaussian primitives for initialization via a direct feed-forward process where both geometry and color attributes are generated [S1].
-2.  **Optimization Setup:** Initialize the optimizer (e.g., Adam) with a learning rate (typically $1 \times 10^{-3}$) [S1].
-3.  **Iterative Optimization:** For each training iteration:
-    a. Render images from random camera viewpoints using differentiable rasterization [S1].
-    b. Compute loss between rendered and ground-truth images. The loss function typically includes photometric loss, SSIM loss, and entropy loss:
-       $$ \mathcal{L} = \mathcal{L}_{\text{photometric}} + \lambda_{\text{ssim}} \mathcal{L}_{\text{ssim}} + \lambda_e \mathcal{L}_{\text{entropy}} $$
-       where $\lambda_{\text{ssim}}$ and $\lambda_e$ are weighting coefficients [S1].
-    c. Backpropagate gradients to update all geometry and color attributes directly, following the vanilla 3DGS optimization scheme [S1].
-4.  **Growing and Pruning:** Enable growing (splitting/cloning) and pruning (removing low-opacity Gaussians) of 3D primitives during fine-tuning [S1]. This step is critical as the initial feed-forward Gaussians are often redundant; pruning significantly reduces the number of Gaussians while maintaining high fidelity [S1].
-5.  **Convergence:** Continue until the model achieves photorealism, leveraging pretrained priors for faster convergence [S1].
-
-**Parameters:**
-*   **Learning Rate:** $1 \times 10^{-3}$ (Adam optimizer) [S1].
-*   **Loss Weights:** $\lambda_{\text{ssim}}$ and $\lambda_e$ are used but specific values are not given in the sources [S1].
-*   **Library:** `gsplat` for Gaussian rasterization [S1].
-
-**Edge Cases and Pitfalls:**
-*   **Redundancy:** The initial feed-forward Gaussians are redundant, leading to high memory consumption if not pruned [S1].
-*   **Convergence Speed:** While pretrained priors accelerate training, improper initialization may lead to suboptimal local minima if fine-tuning is not performed correctly [S1].
+1. **Initialization:** Generate an initial set of 3D Gaussians using a feed-forward process. This process predicts both geometry ($\mu_i, s_i, q_i$) and color attributes ($\alpha_i, \mathbf{c}_i$) directly from input data or a sparse point cloud [S1]. [G] The feed-forward network typically uses a sparse convolutional backbone (e.g., torchsparse) to process 3D points [S1].
+2. **Loss Computation:** Render the current Gaussian set to generate synthetic images. Compute the total loss $\mathcal{L}$ as a weighted sum:
+   $$ \mathcal{L} = \lambda_{ssim} \mathcal{L}_{SSIM} + \lambda_{L1} \mathcal{L}_{L1} + \lambda_e \mathcal{L}_{entropy} $$
+   where $\mathcal{L}_{SSIM}$ is the structural similarity index, $\mathcal{L}_{L1}$ is the L1 photometric loss, and $\mathcal{L}_{entropy}$ encourages opacity to be binary (0 or 1) [S1]. Typical weights are $\lambda_{ssim}=0.2$, $\lambda_{L1}=1.0$, $\lambda_e=0.01$ [S1].
+3. **Gradient Update:** Compute gradients of $\mathcal{L}$ with respect to all Gaussian parameters. Update parameters using the Adam optimizer with a learning rate of $1 \times 10^{-3}$ [S1].
+4. **Densification (Growing/Pruning):** During fine-tuning, dynamically adjust the number of Gaussians.
+   - **Pruning:** Remove Gaussians with low opacity or low contribution to the scene, significantly reducing the count from the initial feed-forward estimate [S1].
+   - **Growing:** Add new Gaussians in regions with high reconstruction error or low density, using standard 3DGS densification heuristics (splitting/cloning based on gradient magnitude) [S1].
+5. **Iteration:** Repeat steps 2–4 for a fixed number of iterations or until convergence. The process leverages pretrained priors to accelerate convergence compared to random initialization [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Initialize Gaussians from feed-forward prediction
-gaussians = feed_forward_predict_geometry_and_color(scene_data)
-
-# Initialize optimizer
-optimizer = Adam(gaussians.parameters(), lr=1e-3)
-
-# Training loop
-for iteration in range(max_iterations):
-    # Sample random camera
-    camera = sample_random_camera()
+def fine_tune_3dgs(initial_gaussians, training_data, num_iterations):
+    """
+    Fine-tune 3D Gaussian Splatting from a feed-forward initialization.
     
-    # Render image
-    rendered_image = render(gaussians, camera)
+    Args:
+        initial_gaussians: List of Gaussian objects with attributes (mu, s, q, alpha, c).
+        training_data: List of (image, camera_pose) pairs.
+        num_iterations: Number of optimization steps.
+        
+    Returns:
+        Optimized list of Gaussian objects.
+    """
+    # Initialize Adam optimizer for all parameters
+    optimizer = Adam([
+        {'params': [g.mu for g in initial_gaussians], 'lr': 1e-3},
+        {'params': [g.s for g in initial_gaussians], 'lr': 1e-3},
+        {'params': [g.q for g in initial_gaussians], 'lr': 1e-3},
+        {'params': [g.alpha for g in initial_gaussians], 'lr': 1e-3},
+        {'params': [g.c for g in initial_gaussians], 'lr': 1e-3}
+    ])
     
-    # Compute loss
-    gt_image = get_ground_truth(camera)
-    loss = compute_loss(rendered_image, gt_image)
-    # Loss components: photometric, SSIM, entropy
-    # L = L_photometric + lambda_ssim * L_ssim + lambda_e * L_entropy
-    
-    # Backpropagate and update
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    
-    # Prune and grow Gaussians
-    gaussians = prune_and_grow(gaussians, threshold=opacity_threshold)
+    for step in range(num_iterations):
+        # Sample a random training view
+        image, camera = random_sample(training_data)
+        
+        # Render the scene using differentiable rasterization
+        rendered_image = render_gaussians(initial_gaussians, camera)
+        
+        # Compute loss
+        loss_ssim = compute_ssim_loss(rendered_image, image)
+        loss_l1 = compute_l1_loss(rendered_image, image)
+        loss_entropy = compute_entropy_loss(initial_gaussians)
+        
+        total_loss = 0.2 * loss_ssim + 1.0 * loss_l1 + 0.01 * loss_entropy
+        
+        # Backpropagate and update
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+        
+        # Densification: Prune low-opacity Gaussians
+        initial_gaussians = prune_gaussians(initial_gaussians, opacity_threshold=0.005)
+        
+        # Densification: Split/Clone high-gradient Gaussians
+        initial_gaussians = densify_gaussians(initial_gaussians, gradient_threshold=0.0002)
+        
+    return initial_gaussians
 ```
+
+**Parameters:**
+- Learning rate: $1 \times 10^{-3}$ [S1].
+- Optimizer: Adam [S1].
+- SH Degree: Typically 3 or 4, depending on desired color fidelity [S1].
+- Pruning Threshold: Opacity threshold for removal (e.g., 0.005) [S1].
+- Densification Threshold: Gradient magnitude threshold for splitting/cloning (e.g., 0.0002) [S1].
+
+**Edge Cases and Pitfalls:**
+- **Redundancy:** Initial feed-forward Gaussians are often redundant; failing to prune them leads to high memory usage and slower rendering [S1].
+- **Overfitting:** Aggressive densification without proper regularization can lead to overfitting to training views [S1].
+- **Precision:** Using mixed-precision training (FP16) may require gradient scaling to maintain stability, especially with small learning rates [G].
+- **Boundary Conditions:** Gaussians near the boundary of the scene may be incorrectly pruned if opacity thresholds are too strict [G].
 
 ## Subtopics
 
@@ -97,16 +128,17 @@ Error-Guided Gaussian Reallocation (EGR) is a training-stage module that redistr
 ACO-EGR is a unified framework that integrates ACO and EGR into a multi-scale 3DGS backbone to jointly address scale-dependent color mismatch and primitive-allocation imbalance [S2]. The framework augments a multi-scale 3DGS backbone with two training-stage modules: ACO and EGR [S2]. Unlike existing methods that keep fixed color and spatial allocation after densification, ACO-EGR adapts both Gaussian color and primitive allocation together [S2]. ACO-EGR improves rendering quality without modifying the inference-stage rendering process itself; it only changes the training/optimization of the Gaussian parameters [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Faster convergence compared to training from scratch due to pretrained priors [S1].
-*   **Memory Complexity:** Significantly reduced memory consumption after pruning redundant initial Gaussians [S1].
-*   **Performance:** Achieves photorealism on par with or surpassing other methods [S1].
-*   **Strengths:** Accelerated training, reduced memory footprint, high fidelity [S1].
-*   **Limitations:** Relies on the quality of the initial feed-forward prediction [S1].
-*   **When to Use:** When high-fidelity synthesis is required with limited training time or memory, and a good initialization method is available [S1].
-*   **When Not to Use:** When no pretrained model or initialization method is available, or when the scene is too complex for the feed-forward predictor to handle [S1].
+- **Time Complexity:** Fine-tuning converges faster than random initialization due to pretrained priors, but the exact speedup depends on the quality of the feed-forward initialization [S1]. The densification process adds overhead proportional to the number of Gaussians and the frequency of splitting/cloning operations [S1].
+- **Memory Complexity:** Memory usage is proportional to the number of active Gaussians. Fine-tuning with pruning can significantly reduce memory consumption compared to the initial feed-forward state, but densification can increase it if not controlled [S1].
+- **Measured Performance:** EVolSplat, which uses fine-tuning, achieves photorealism on par with or surpassing other methods on urban view synthesis tasks [S1]. It maintains high fidelity while reducing memory consumption [S1].
+- **Scaling:** The method scales with the number of training images and the complexity of the scene. Larger scenes require more Gaussians and longer fine-tuning times [S1].
+- **Strengths:** Accelerated convergence, reduced redundancy, high photorealism, and flexibility in handling different initialization strategies [S1].
+- **Limitations:** Dependence on the quality of the initial feed-forward model, potential for overfitting if densification is not properly regulated, and increased implementation complexity due to dynamic densification [S1].
+- **When to Use:** When high-quality initialization is available (e.g., from a feed-forward network) and memory efficiency is a concern. It is suitable for urban view synthesis and large-scale scenes [S1].
+- **When Not to Use:** When computational resources are extremely limited and fast convergence is not critical, or when the initial initialization is poor and requires extensive correction [S1].
 
 ## Background
-Fine-tuning in 3D Gaussian Splatting was introduced in the context of efficient volume-based Gaussian Splatting for urban view synthesis [S1]. It leverages pretrained priors to accelerate network training and enable faster convergence compared to other test-time optimization methods [S1]. The method is implemented using Adam optimizer and libraries like `torchsparse` and `gsplat` [S1].
+Fine-tuning in the context of 3D Gaussian Splatting has emerged as a technique to leverage pretrained models or feed-forward networks for efficient scene representation. The method was notably applied in EVolSplat, which uses a feed-forward process to initialize 3D Gaussians and then fine-tunes them using standard 3DGS optimization with dynamic densification [S1]. This approach addresses the limitations of random initialization, such as slow convergence and high memory usage, by starting from a more informed state [S1]. The technique is part of a broader trend in differentiable rendering to combine learning-based initialization with optimization-based refinement [S1].
 
 ## Sources
 [S1] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03

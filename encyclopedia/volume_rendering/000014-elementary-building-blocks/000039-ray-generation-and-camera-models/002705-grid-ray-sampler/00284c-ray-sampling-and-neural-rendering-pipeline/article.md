@@ -23,24 +23,18 @@ This method generates camera rays from pixel coordinates, passes them through an
    $$ \text{model} \leftarrow \text{Model}(\text{cfg}) $$
    $$ \text{model} \leftarrow \text{model.to}(\text{device}) $$
    $$ \text{model}.\text{eval}() $$
-
 2. **Compute Light Direction (Optional):** If lighting is required, compute the direction from the light source to the scene origin. This assumes the object is centered at the origin [S1, unofficial].
    $$ \mathbf{d}_{\text{light}} = \mathbf{l}_{\text{loc}} - \mathbf{o}_{\text{origin}} $$
    $$ \mathbf{d}_{\text{light}} = \frac{\mathbf{d}_{\text{light}}}{\|\mathbf{d}_{\text{light}}\|} $$
    *Note: The source code flags a potential issue if the object is not at the origin [S1, unofficial].*
-
 3. **Generate Pixel Grid:** Create a grid of pixel coordinates corresponding to the target image resolution [S1, unofficial].
    $$ \mathbf{G}_{\text{xy}} = \text{get\_pixels\_from\_image}(\text{image\_size}, \text{camera}) $$
-
 4. **Generate Ray Bundle:** Convert pixel coordinates into 3D ray origins and directions using the camera parameters [S1, unofficial].
    $$ \mathbf{R}_{\text{bundle}} = \text{get\_rays\_from\_pixels}(\mathbf{G}_{\text{xy}}, \text{image\_size}, \text{camera}) $$
-
 5. **Forward Pass:** Execute the neural model with the ray bundle. If light direction is provided, pass it as an argument [S1, unofficial].
    $$ \mathbf{O} = \text{model}(\mathbf{R}_{\text{bundle}}, \mathbf{d}_{\text{light}}) $$
-
 6. **Reshape Output:** Extract the specified feature tensor and reshape it from `[batch_size, num_rays, 3]` to `[height, width, 3]` [S1, unofficial].
    $$ \mathbf{I} = \mathbf{O}[\text{feat}].\text{view}(\text{height}, \text{width}, 3) $$
-
 7. **Save Image (Optional):** Convert the tensor to a NumPy array and save to disk if requested [S1, unofficial].
 
 **Pseudocode:**
@@ -71,8 +65,7 @@ def render_pipeline(model, cfg, camera, light_location=None, feat='color', save_
     ray_bundle = get_rays_from_pixels(xy_grid, image_size, camera)
 
     # 5. Forward pass
-    with torch.no_grad():
-        out = model(ray_bundle, light_dir)
+    out = model(ray_bundle, light_dir)
 
     # 6. Reshape output
     output_tensor = out[feat].view(image_size[1], image_size[0], 3)
@@ -87,14 +80,11 @@ def render_pipeline(model, cfg, camera, light_location=None, feat='color', save_
     return image
 
 def get_pixels_from_image(image_size, camera):
-    # The sources do not provide the implementation for pixel grid generation.
-    # Typically, this creates a meshgrid of pixel coordinates [width, height] and flattens it.
+    # Not given in the sources.
     pass
 
 def get_rays_from_pixels(xy_grid, image_size, camera):
-    # The sources do not provide the implementation for ray generation.
-    # Typically, this unprojects pixel coordinates using camera intrinsics/extrinsics
-    # to compute origins and directions, returning a RayBundle object.
+    # Not given in the sources.
     pass
 ```
 

@@ -1,0 +1,250 @@
+--- v003.md
++++ v004.md
+@@ -4,88 +4,141 @@
+ 
+ ## Overview
+-This method adapts a pre-trained Monocular Depth Estimation (MDE) network to the specific absolute geometry of a target scene using a NeRF as a geometric prior [S1, unofficial]. It resolves ambiguities inherent in monocular priors, such as convexity/concavity confusion and flat surface orientation errors, by aligning the MDE output with the NeRF's rendered depth [S1, unofficial]. Unlike sibling methods that primarily use depth to regularize the NeRF, this approach explicitly fine-tunes the MDE network itself to become scene-aware [S1, unofficial].
++NeRF-guided MDE Adaptation is a method that adapts a pre-trained Monocular Depth Estimation (MDE) network to the specific absolute geometry of a scene by using a NeRF model as a geometric prior [S1, unofficial]. It solves the ambiguity inherent in monocular depth estimation, such as the inability to distinguish surface convexity/concavity or determine the orientation of flat surfaces, by leveraging the multi-view consistency and absolute scale provided by the NeRF [S1, unofficial]. Unlike sibling methods that primarily use depth to regularize NeRF training, this method explicitly fine-tunes the MDE network itself to align with the NeRF's learned geometry [S1, unofficial].
+ 
+ ## How it works
++The method operates by iteratively aligning the MDE output with the NeRF's rendered depth, while simultaneously updating both networks.
++
+ **Inputs and Outputs:**
+-- **Inputs:** A set of seen views $S$, an initial pre-trained MDE network $G_\phi$, and a NeRF model $\mathcal{N}$ (typically initialized from sparse inputs).
+-- **Outputs:** An adapted MDE network $G_\phi'$ and an optimized NeRF $\mathcal{N}'$.
++*   **Inputs:** A set of seen views $S$ (images $I_i$ with known poses) and optionally unseen views $U$. A pre-trained MDE network $G_\phi$ and a NeRF model $\mathcal{N}$.
++*   **Outputs:** An adapted MDE network $G_\phi$ and a refined NeRF model $\mathcal{N}$.
+ 
+ **Data Structures:**
+-- **NeRF $\mathcal{N}$:** Standard volumetric representation. For a ray $r$, depth $\bar{D}(r)$ is computed as the expected distance: $\bar{D}(r) = \sum_i w_i y_i$, where $w_i$ is the transmittance-weighted contribution of sample $i$ at distance $y_i$ [Parent].
+-- **MDE Output $D^*$:** A pseudo-depth map extracted from the MDE network for an input image $I$.
+-- **Confidence Mask $M(p)$:** A scalar value per pixel $p \in [0, 1]$ indicating reliability. Not given in the sources how this is computed initially, but it is used to weight losses [S1, unofficial].
++*   **NeRF $\mathcal{N}$:** Standard volumetric representation. Renders depth $\bar{D}$ via volume rendering.
++*   **MDE $G_\phi$:** A convolutional neural network taking image $I$ and outputting pseudo-depth $D^*$.
++*   **Confidence Mask $M(p)$:** A scalar value per pixel indicating reliability of the depth estimate [S1, unofficial].
++
++**Numbered Steps:**
++1.  **NeRF Depth Rendering:** For each seen view $I_i$, render the expected depth map $\bar{D}_i$ using the current NeRF $\mathcal{N}$. The depth is defined as the transmittance-weighted sum of sample distances:
++    $$ \bar{D}_i(r) = \sum_j w_j y_j $$
++    where $w_j$ is the weight and $y_j$ is the distance of sample $j$ along ray $r$ [Parent].
++2.  **MDE Extraction:** Pass the input image $I_i$ through the current MDE network $G_\phi$ to obtain the pseudo-depth map $D^*_i$.
++3.  **Local Alignment:** For each patch $P$ of pixels, compute scale $w_i$ and shift $q_i$ via least squares to minimize the difference between the aligned MDE depth and the NeRF depth. This prevents dominant objects from skewing the alignment [Parent].
++    $$ (w_i, q_i) = \arg \min_{w, q} \sum_{p \in P} \| (w \cdot D^*_i(p) + q) - \bar{D}_i(p) \|^2 $$
++    [S1, unofficial].
++4.  **Loss Computation:** Compute the MDE adaptation loss $L_{MDE}$ and the regularization loss $L_{reg}$.
++    *   **MDE Loss ($L_{MDE}$):** Combines an absolute alignment term (without scale/shift) and a patch-wise aligned term. The NeRF depth is passed through a stop-gradient operator $\text{sg}(\cdot)$ to prevent gradients from flowing into the NeRF during MDE update [S1, unofficial].
++        $$ L_{MDE} = \sum_{I_i \in S} \sum_{p \in P} \left( \| \text{sg}(\bar{D}_i(p)) - D^*_i(p) \| + \| (w_i \cdot \text{sg}(\bar{D}_i(p)) + q_i) - D^*_i(p) \| \right) $$
++        [S1, unofficial].
++    *   **Regularization Loss ($L_{reg}$):** Preserves the local smoothness of the MDE adaptation by comparing the aligned *initial* MDE depth (extracted with pre-trained weights $D^*_{i,init}$) to the *current* MDE depth. This prevents the adapted MDE from drifting too far from its initial smoothness properties [S1, unofficial].
++        $$ L_{reg} = \sum_{I_i \in S} \sum_{p \in P} \| (w_i \cdot \text{sg}(D^*_{i,init}(p)) + q_i) - D^*_i(p) \| $$
++        [S1, unofficial].
++5.  **Optimization:** Update the MDE parameters $\phi$ using $L_{MDE}$ and $L_{reg}$. Simultaneously, update the NeRF parameters using its standard photometric loss and potentially depth consistency losses from the aligned MDE output (as seen in variants like DäRF) [S1, unofficial].
+ 
+ **Parameters:**
+-- **Learning Rates:** Adam optimizer. NeRF LR: $1 \cdot 10^{-2}$. MDE LR: $1 \cdot 10^{-5}$ [S1, unofficial].
+-- **Scheduler:** Cosine warmup [S1, unofficial].
+-- **Patch Size $P$:** Local patches are used for fitting to avoid skewing by dominant objects [Parent].
+-
+-**Steps:**
+-1. **Initialization:** Initialize NeRF $\mathcal{N}$ and freeze MDE weights initially. Extract initial monocular depth $D^*_{init}$ from the pre-trained MDE for each seen view $I_i$ [S1, unofficial].
+-2. **NeRF Optimization (Standard):** Render depth $\bar{D}_i$ from NeRF for each seen view $I_i$.
+-3. **Alignment (Scale & Shift):** For each patch $p \in P$ in each seen view $I_i$, compute scale $w_i$ and shift $q_i$ via least squares to align the MDE prior $D^*_i$ with the NeRF depth $\bar{D}_i$:
+-   $$ \min_{w_i, q_i} \sum_{p \in P} \| (w_i \cdot \bar{D}_i(p) + q_i) - D^*_i(p) \|^2 $$
+-   The stop-gradient operator $\text{sg}(\cdot)$ is applied to the NeRF depth $\bar{D}_i$ in the loss terms to prevent gradients from flowing into the NeRF during MDE adaptation steps [S1, unofficial].
+-4. **MDE Adaptation Loss ($L_{MDE}$):** Update MDE weights to minimize the difference between the aligned NeRF depth and the MDE output. The loss includes an absolute alignment term and a patch-wise aligned term [S1, unofficial]:
+-   $$ L_{MDE} = \sum_{I_i \in S} \sum_{p \in P} \left( \| \text{sg}(\bar{D}_i(p)) - D^*_i(p) \| + \| (w_i \cdot \text{sg}(\bar{D}_i(p)) + q_i) - D^*_i(p) \| \right) $$
+-5. **Regularization ($L_{reg}$):** To preserve local smoothness of the adapted MDE and prevent overfitting to noisy NeRF depths, a regularization term is added using the *initial* pre-trained MDE output $D^*_{init}$ [S1, unofficial]:
+-   $$ L_{reg} = \sum_{I_i \in S} \sum_{p \in P} \| (w_i \cdot \text{sg}(D^*_{init}(p)) + q_i) - D^*_i(p) \| $$
+-6. **Confidence-Weighted Joint Training:** In advanced variants (e.g., DäRF), confidence masks $M_i(p)$ are introduced to weight the losses, mitigating error propagation from inaccurate depths [S1, unofficial]. The losses for seen views $L_{seen}$ and unseen views $L_{unseen}$ are redefined as [S1, unofficial]:
+-   $$ L_{seen} = \sum_{I_i \in S} \sum_{p \in P} M_i(p) \| (w_i \cdot \text{sg}(D^*_i(p)) + q_i) - \bar{D}_i(p) \| $$
+-   $$ L_{unseen} = \sum_{I_l \in U} \sum_{p \in P} M_l(p) \| (w_l \cdot \text{sg}(\bar{D}^*_l(p)) + q_l) - \bar{D}_l(p) \| $$
+-   The MDE loss with confidence is [S1, unofficial]:
+-   $$ L_{MDE} = \sum_{I_i \in S} \sum_{p \in P} M_i(p) \left( \| \text{sg}(\bar{D}_i(p)) - \bar{D}^*_i(p) \| + \| (w_i \cdot \text{sg}(\bar{D}_i(p)) + q_i) - \bar{D}^*_i(p) \| \right) $$
+-   Note: In the confidence-weighted formulation, $\bar{D}^*$ denotes the MDE output potentially adapted or refined, while $D^*$ in earlier equations referred to the raw extraction [S1, unofficial].
+-7. **Simultaneous Update:** Train NeRF and MDE simultaneously. MDE provides geometric priors to NeRF; NeRF provides absolute geometry to MDE [S1, unofficial].
++*   **Patch Size $P$:** Not given in the sources.
++*   **Learning Rate:** For DäRF implementation, Adam optimizer is used with LR $1 \cdot 10^{-2}$ for NeRF and $1 \cdot 10^{-5}$ for MDE [S1, unofficial].
++*   **Initial MDE Weights:** $D^*_{i,init}$ refers to the depth map extracted using the MDE's initial pre-trained weights before adaptation begins [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def nerf_guided_mde_adaptation(nerf, mde, seen_views, optimizer_nerf, optimizer_mde, lr_nerf, lr_mde):
+-    # Initialize MDE with pre-trained weights
+-    mde.eval() # Freeze initially or use separate optimizer
++def nerf_guided_mde_adaptation(nerf, mde, seen_views, patches, initial_mde_weights):
++    """
++    nerf: NeRF model instance
++    mde: MDE model instance
++    seen_views: List of (image, pose) tuples
++    patches: List of pixel coordinate patches P
++    initial_mde_weights: Weights used to extract D*_init
++    """
++    # Extract initial depth maps for regularization
++    initial_depth_maps = {}
++    for view in seen_views:
++        img = view.image
++        # Freeze MDE to get initial depth
++        with torch.no_grad():
++            # Temporarily swap weights to initial state
++            old_weights = mde.state_dict()
++            mde.load_state_dict(initial_mde_weights)
++            initial_depth_maps[view.id] = mde(img)
++            mde.load_state_dict(old_weights)
++
++    for iteration in range(num_iterations):
++        for view in seen_views:
++            img = view.image
++            
++            # 1. Render NeRF Depth
++            nerf_depth = nerf.render_depth(view.pose) # Returns D_bar
++            
++            # 2. Extract MDE Depth
++            mde_depth = mde(img) # Returns D*
++            
++            # 3. Compute Losses
++            loss_mde = 0.0
++            loss_reg = 0.0
++            
++            for patch in patches:
++                # Get pixel indices in patch
++                p_indices = patch.get_pixels()
++                
++                # Extract values
++                d_bar_p = nerf_depth[p_indices]
++                d_star_p = mde_depth[p_indices]
++                d_init_p = initial_depth_maps[view.id][p_indices]
++                
++                # Stop gradient on NeRF depth for MDE update
++                d_bar_sg = d_bar_p.detach()
++                d_init_sg = d_init_p.detach()
++                
++                # Least squares alignment for scale w and shift q
++                # Minimize || (w * d_bar_sg + q) - d_star_p ||^2
++                # Closed form solution for least squares:
++                # Let X = d_bar_sg, Y = d_star_p
++                # w = cov(X,Y) / var(X)
++                # q = mean(Y) - w * mean(X)
++                w, q = compute_least_squares(d_bar_sg, d_star_p)
++                
++                # L_MDE term 1: Absolute alignment (no scale/shift)
++                term1 = torch.norm(d_bar_sg - d_star_p, p=1)
++                
++                # L_MDE term 2: Patch-wise alignment
++                aligned_d_bar = w * d_bar_sg + q
++                term2 = torch.norm(aligned_d_bar - d_star_p, p=1)
++                
++                loss_mde += term1 + term2
++                
++                # L_reg: Smoothness preservation
++                # Align initial depth with current depth using same w, q derived from NeRF vs Current
++                # Note: Source formula uses w, q derived from NeRF vs Current MDE
++                aligned_d_init = w * d_init_sg + q
++                loss_reg += torch.norm(aligned_d_init - d_star_p, p=1)
++            
++            # 4. Update MDE
++            loss_mde.backward(retain_graph=True) # Retain graph for NeRF update if joint
++            mde_optimizer.step()
++            mde_optimizer.zero_grad()
++            
++            # 5. Update NeRF (Standard Photometric Loss + optional Depth Consistency)
++            # Note: The specific NeRF loss update is not detailed in the MDE adaptation section,
++            # but typically involves photometric loss and potentially L_seen from variants.
++            # Here we assume a standard NeRF update step.
++            nerf_loss = nerf.compute_photometric_loss(view)
++            nerf_loss.backward()
++            nerf_optimizer.step()
++            nerf_optimizer.zero_grad()
++
++def compute_least_squares(X, Y):
++    """
++    Computes scale w and shift q for Y = w*X + q minimizing L2 norm.
++    """
++    mean_x = torch.mean(X)
++    mean_y = torch.mean(Y)
++    var_x = torch.var(X, unbiased=False)
++    cov_xy = torch.mean((X - mean_x) * (Y - mean_y))
+     
+-    for iteration in range(max_iterations):
+-        for view in seen_views:
+-            # 1. Render NeRF depth
+-            # Assume render_depth returns expected distance D_bar
+-            D_bar = nerf.render_depth(view.image)
+-            
+-            # 2. Extract Monocular Depth
+-            # D_star is the output of the current MDE network
+-            D_star = mde(view.image)
+-            
+-            # 3. Compute Alignment Parameters (w, q) via Least Squares
+-            # Fit D_star to D_bar on patches to handle local geometry
+-            w, q = compute_least_squares_alignment(D_star, D_bar)
+-            
+-            # 4. Compute Losses
+-            # L_MDE: Adapt MDE to NeRF's absolute geometry
+-            # sg() stops gradients from flowing into NeRF
+-            loss_mde = 0
+-            for p in patches:
+-                # Term 1: Absolute alignment (no scale/shift)
+-                term1 = abs(sg(D_bar[p]) - D_star[p])
+-                # Term 2: Patch-wise alignment (with scale/shift)
+-                term2 = abs((w * sg(D_bar[p]) + q) - D_star[p])
+-                loss_mde += term1 + term2
+-            
+-            # L_reg: Regularization using initial MDE output to preserve smoothness
+-            # D_star_init is pre-computed from initial pre-trained MDE
+-            loss_reg = 0
+-            for p in patches:
+-                term_reg = abs((w * sg(D_star_init[p]) + q) - D_star[p])
+-                loss_reg += term_reg
+-                
+-            # 5. Update MDE
+-            optimizer_mde.zero_grad()
+-            (loss_mde + lambda_reg * loss_reg).backward()
+-            optimizer_mde.step()
+-            
+-            # 6. Update NeRF (Standard NeRF Loss + Depth Consistency)
+-            # L_seen uses the adapted MDE output as prior
+-            loss_nerf = compute_nerf_loss(view, D_bar, D_star, w, q)
+-            optimizer_nerf.zero_grad()
+-            loss_nerf.backward()
+-            optimizer_nerf.step()
++    if var_x == 0:
++        return 1.0, mean_y - mean_x
++    
++    w = cov_xy / var_x
++    q = mean_y - w * mean_x
++    return w, q
+ ```
+ 
+@@ -93,15 +146,25 @@
+ 
+ ### Overall Training with Confidence
+-This variant incorporates confidence masks $M(p)$ to weight the depth consistency losses, preventing error propagation from inaccurate depths [S1, unofficial]. It redefines $L_{seen}$, $L_{unseen}$, and $L_{MDE}$ by multiplying the loss terms by $M_i(p)$ or $M_l(p)$ [S1, unofficial]. It is chosen when the NeRF or MDE outputs are noisy, ensuring that unreliable depth estimates do not corrupt the joint optimization [S1, unofficial].
++This variant incorporates confidence masks $M(p)$ to weight the depth consistency losses, preventing error propagation from inaccurate depth estimates [S1, unofficial]. It trains NeRF and MDE simultaneously, where MDE provides geometric priors to NeRF and NeRF provides absolute geometry to MDE [S1, unofficial]. The losses are redefined as:
++*   **Seen View Loss ($L_{seen}$):**
++    $$ L_{seen} = \sum_{I_i \in S} \sum_{p \in P} M_i(p) \| (w_i \cdot \text{sg}(D^*_i(p)) + q_i) - \bar{D}_i(p) \| $$
++    [S1, unofficial].
++*   **Unseen View Loss ($L_{unseen}$):**
++    $$ L_{unseen} = \sum_{I_l \in U} \sum_{p \in P} M_l(p) \| (w_l \cdot \text{sg}(\bar{D}^*_l(p)) + q_l) - \bar{D}_l(p) \| $$
++    [S1, unofficial].
++*   **Adapted MDE Loss ($L_{MDE}$):**
++    $$ L_{MDE} = \sum_{I_i \in S} \sum_{p \in P} M_i(p) \left( \| \text{sg}(\bar{D}_i(p)) - \bar{D}^*_i(p) \| + \| (w_i \cdot \text{sg}(\bar{D}_i(p)) + q_i) - \bar{D}^*_i(p) \| \right) $$
++    [S1, unofficial].
++Here, $M_i(p)$ and $M_l(p)$ are confidence maps for seen and unseen views respectively [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Adds overhead to standard NeRF training due to MDE forward passes and least-squares fitting per patch. The simultaneous training requires balancing two optimizers [S1, unofficial].
+-- **Memory Complexity:** Requires storing the initial MDE output $D^*_{init}$ for regularization and potentially confidence maps [S1, unofficial].
+-- **Performance:** Improves NeRF reconstruction quality (PSNR, SSIM) on sparse inputs by providing better geometric priors [S1, unofficial]. On ScanNet (9-10 views), it achieves higher PSNR than baselines like NerfingMVS [S1, unofficial].
+-- **Strengths:** Resolves monocular ambiguities (concavity/convexity) and aligns scale/shift automatically [S1, unofficial].
+-- **Limitations:** Relies on the quality of the initial MDE and NeRF initialization. If the NeRF is poor, it may mislead the MDE [S1, unofficial].
++*   **Time Complexity:** Depends on the number of views, patches, and iterations. Requires rendering depth from NeRF and forward pass through MDE per iteration.
++*   **Memory Complexity:** Requires storing initial MDE weights and depth maps for regularization.
++*   **Strengths:** Resolves ambiguities in MDE (convexity/concavity, orientation) by leveraging NeRF's multi-view consistency [S1, unofficial]. Improves both NeRF and MDE performance [S1, unofficial].
++*   **Limitations:** Relies on the quality of the initial NeRF and MDE. Errors can propagate if not handled by confidence modeling [S1, unofficial].
++*   **When to use:** When scene-specific absolute geometry is required and initial MDE outputs are ambiguous or inconsistent with multi-view data [S1, unofficial].
+ 
+ ## Background
+-Originated in the DäRF paper (2023) by [S1, unofficial]. It addresses the limitation of monocular depth estimation lacking scene-specific absolute depth priors and multi-view consistency [S1, unofficial]. It builds on the principle of using NeRF as a geometric prior for MDE adaptation [S1, unofficial].
++The method was proposed in the context of boosting radiance fields from sparse inputs, specifically in the DäRF paper [S1, unofficial]. It addresses the limitation that MDE lacks awareness of scene-specific absolute depth priors and multi-view consistency [S1, unofficial]. The approach is inspired by self-training approaches and confidence modeling [S1, unofficial].
+ 
+ ## Sources

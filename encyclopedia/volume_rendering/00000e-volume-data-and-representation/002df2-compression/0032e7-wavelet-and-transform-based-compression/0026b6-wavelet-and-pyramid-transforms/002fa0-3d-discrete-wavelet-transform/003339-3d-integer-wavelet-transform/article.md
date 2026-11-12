@@ -6,8 +6,8 @@ The 3D Integer Wavelet Transform (3D-IWT) is a lossless compression method that 
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3-D volume of integer data (e.g., medical images).
-*   **Output:** A set of 3-D frequency sub-bands containing integer wavelet coefficients.
+*   **Input:** A 3-D volume of integer data (e.g., medical images) [S1].
+*   **Output:** A set of 3-D frequency sub-bands containing integer wavelet coefficients [S1].
 
 **Data Structures:**
 The transform decomposes the input volume into eight 3-D frequency sub-bands at each level $r$: $LLL_r$ (approximation), and seven detail sub-bands ($LLH_r, LHL_r, LHH_r, HLL_r, HLH_r, HHL_r, HHH_r$) [S1]. The $LLL_r$ sub-band is a coarser version of the original image, while the others represent details [S1].
@@ -20,11 +20,9 @@ The transform decomposes the input volume into eight 3-D frequency sub-bands at 
 
 **Formulas:**
 The transform uses a lifting-based scheme where smooth ($s$) and detail ($d$) outputs for an index $n$ are calculated as [S1]:
-
 $$ s(n) = \text{round}\left(\frac{h_0(n) + h_1(n)}{2}\right) $$
 $$ d(n) = \text{round}\left(\frac{h_0(n) - h_1(n)}{2}\right) $$
-
-Where $h_0(n)$ and $h_1(n)$ are intermediate values derived from the filter application. The text notes that while rounding appears to discard information, the transform is reversible [S1]. The inverse transform is defined by equations (3) and (4) in the source, which reconstruct the input from $s(n)$ and $d(n)$ [S1].
+Where $h_0(n)$ and $h_1(n)$ are intermediate values derived from the filter application [S1]. The text notes that while rounding appears to discard information, the transform is reversible [S1]. The inverse transform reconstructs the input from $s(n)$ and $d(n)$ [S1].
 
 **Parameters:**
 *   **VOI (Volume of Interest):** A cuboid defined in the spatial domain with potentially different length, width, and height values, used to prioritize specific regions for transmission or compression [S1].
@@ -40,43 +38,30 @@ Where $h_0(n)$ and $h_1(n)$ are intermediate values derived from the filter appl
 def iwt_3d(volume):
     """
     Performs a 3D Integer Wavelet Transform on an integer volume.
-    volume: 3D numpy array of integers.
-    Returns: Tuple of sub-bands (LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH).
+    volume: 3D list of lists of lists of integers.
+    Returns: Dictionary of sub-bands (LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH).
     """
-    # Step 1: 2D Dyadic Wavelet Decomposition on each slice
-    # Process each slice (z-plane) independently
+    depth = len(volume)
+    height = len(volume[0])
+    width = len(volume[0][0])
+    
+    # Step 1 & 2: 2D Dyadic Wavelet Decomposition on each slice
     slices_2d = []
-    for z in range(volume.shape[2]):
-        slice_data = volume[:, :, z]
-        # Perform 2D IWT on the slice
-        # This produces 4 sub-bands: LL, LH, HL, HH
-        ll, lh, hl, hh = iwt_2d(slice_data)
+    for z in range(depth):
+        slice_data = volume[z]
+        ll, lh, hl, hh = iwt_2d_slice(slice_data)
         slices_2d.append([ll, lh, hl, hh])
     
-    # Step 2: 1D Wavelet Packet Decomposition along the slices
-    # We have 4 arrays of shape (H, W, D) from the 2D step
-    # We need to apply 1D IWT along the depth dimension (axis 2) for each sub-band
-    
-    # Initialize output sub-bands
-    # LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH
+    # Step 3: 1D Wavelet Packet Decomposition along the slices
     sub_bands = {}
-    
-    # For each of the 4 spatial sub-bands from step 1
     spatial_indices = ['LL', 'LH', 'HL', 'HH']
+    
     for idx in spatial_indices:
-        # Get the 3D array for this spatial sub-band
-        # shape: (H, W, D)
-        arr_3d = np.stack([slices_2d[z][spatial_indices.index(idx)] for z in range(volume.shape[2])], axis=2)
+        arr_3d = []
+        for z in range(depth):
+            arr_3d.append(slices_2d[z][spatial_indices.index(idx)])
         
-        # Apply 1D IWT along the last axis (depth)
-        # This splits the depth dimension into low-pass and high-pass
-        low_pass, high_pass = iwt_1d(arr_3d, axis=2)
-        
-        # Map to final 3D sub-bands
-        # The naming convention: LLL, LLH, etc.
-        # LLL comes from LL spatial + L temporal
-        # LLH comes from LL spatial + H temporal
-        # etc.
+        low_pass, high_pass = iwt_1d_depth(arr_3d)
         
         if idx == 'LL':
             sub_bands['LLL'] = low_pass
@@ -91,54 +76,111 @@ def iwt_3d(volume):
             sub_bands['HHL'] = low_pass
             sub_bands['HHH'] = high_pass
             
+    # Step 4: Iterate on LLL (recursive call for multi-level decomposition)
+    if len(sub_bands['LLL']) > 1:
+        sub_bands['LLL'] = iwt_3d(sub_bands['LLL'])
+        
     return sub_bands
 
-def iwt_1d(arr, axis=2):
+def iwt_1d_depth(arr_3d):
     """
-    Performs 1D Integer Wavelet Transform along a specific axis.
-    Uses the lifting scheme: s(n) = round((h0 + h1)/2), d(n) = round((h0 - h1)/2)
+    Performs 1D IWT along the depth axis (first dimension of arr_3d).
+    arr_3d: list of 2D arrays.
+    Returns: (low_pass, high_pass) lists of 2D arrays.
     """
-    # Note: The exact filter coefficients h0, h1 are not specified in the source text
-    # beyond the rounding formula. [G] Assuming a standard lifting step implementation
-    # where h0 and h1 are derived from the input signal and previous lifting steps.
-    # Since the source only provides the final rounding formula for s and d,
-    # we implement the core reversible step described.
+    depth = len(arr_3d)
+    height = len(arr_3d[0])
+    width = len(arr_3d[0][0])
     
-    # This is a placeholder for the specific filter lifting steps
-    # which are not fully detailed in the provided text snippets.
-    # The source states: "smooth (s) and detail (d) outputs... are given in (1) and (2)"
-    # and "The IWT is thus reversible and its inverse is given in equations (3) and (4)."
+    low_pass = []
+    high_pass = []
     
-    # For implementation, one would typically use a known integer wavelet filter
-    # like the 5/3 or 9/7 (lifted) filter. The source mentions approximating
-    # Daubechies 9/7 using lifting [S1, Subtopics].
-    
-    # Simplified representation of the lifting step for the 1D case
-    # along the specified axis.
-    # Let x be the input signal along the axis.
-    # Predict step: d = x[1] - round(x[0]) ... (example)
-    # Update step: s = x[0] + round(d/2) ... (example)
-    # The source formula: s(n) = round((h0(n) + h1(n))/2)
-    # This implies a specific symmetric lifting structure.
-    
-    # Since the exact filter taps are not in the text, we cannot write the
-    # full filter convolution. We note the rounding operation is critical.
-    pass
+    for z in range(0, depth, 2):
+        z_low = z
+        z_high = z + 1 if z + 1 < depth else z # Symmetric extension for boundary [G]
+        
+        lp_slice = []
+        hp_slice = []
+        
+        for y in range(height):
+            row_lp = []
+            row_hp = []
+            for x in range(width):
+                h0 = arr_3d[z_low][y][x]
+                h1 = arr_3d[z_high][y][x]
+                # Apply lifting formula [S1]
+                s = round((h0 + h1) / 2)
+                d = round((h0 - h1) / 2)
+                row_lp.append(s)
+                row_hp.append(d)
+            lp_slice.append(row_lp)
+            hp_slice.append(row_hp)
+        low_pass.append(lp_slice)
+        high_pass.append(hp_slice)
+        
+    return low_pass, high_pass
 
-def iwt_2d(slice_data):
+def iwt_2d_slice(slice_data):
     """
-    Performs 2D IWT by applying 1D IWT along rows then columns.
+    Performs 2D IWT on a single slice (list of lists).
+    Returns: (LL, LH, HL, HH) lists of lists.
     """
-    # Apply 1D IWT along rows (axis 1)
-    # Apply 1D IWT along columns (axis 0)
-    # Return LL, LH, HL, HH sub-bands
-    pass
+    height = len(slice_data)
+    width = len(slice_data[0])
+    
+    # Apply 1D IWT along rows (width)
+    ll_row, lh_row = [], []
+    for y in range(height):
+        lp, hp = iwt_1d_row(slice_data[y])
+        ll_row.append(lp)
+        lh_row.append(hp)
+        
+    # Apply 1D IWT along columns (height) on the results
+    ll_col, lh_col = [], []
+    hl_col, hh_col = [], []
+    
+    for x in range(width):
+        col_lp = [ll_row[y][x] for y in range(height)]
+        col_hp = [lh_row[y][x] for y in range(height)]
+        
+        lp_lp, hp_lp = iwt_1d_row(col_lp)
+        lp_hp, hp_hp = iwt_1d_row(col_hp)
+        
+        for y in range(len(lp_lp)):
+            if len(ll_col) <= y:
+                ll_col.append([])
+                lh_col.append([])
+                hl_col.append([])
+                hh_col.append([])
+            ll_col[y].append(lp_lp[y])
+            lh_col[y].append(lp_hp[y])
+            hl_col[y].append(hp_lp[y])
+            hh_col[y].append(hp_hp[y])
+            
+    return ll_col, lh_col, hl_col, hh_col
+
+def iwt_1d_row(row):
+    """
+    Performs 1D IWT on a 1D list.
+    Returns: (low_pass, high_pass) lists.
+    """
+    n = len(row)
+    lp = []
+    hp = []
+    for i in range(0, n, 2):
+        h0 = row[i]
+        h1 = row[i+1] if i+1 < n else row[i] # Symmetric extension [G]
+        s = round((h0 + h1) / 2)
+        d = round((h0 - h1) / 2)
+        lp.append(s)
+        hp.append(d)
+    return lp, hp
 ```
 
 ## Subtopics
 
 ### [Lifting-Based Integer Wavelet Transform Construction](8255-lifting-based-integer-wavelet-transform-construction.md)
-This method constructs integer-preserving wavelet transforms by approximating traditional non-integer wavelet filters (such as Daubechies 9/7) using the lifting scheme with rounding operations. It solves the problem of perfect reconstruction in lossless compression by ensuring that integer input data remains integer throughout the transform, avoiding the precision loss and infinite precision requirements of floating-point arithmetic. It sets itself apart from standard floating-point wavelet transforms by embedding the rounding steps directly into the filter decomposition, allowing for exact invertibility with finite precision arithmetic.
+This method constructs integer-preserving wavelet transforms by approximating traditional non-integer wavelet filters using the lifting scheme with rounding operations. It solves the problem of perfect reconstruction in lossless compression by ensuring that integer input data remains integer throughout the transform, avoiding the precision loss and infinite precision requirements of floating-point arithmetic. It sets itself apart from standard floating-point wavelet transforms by embedding the rounding steps directly into the filter decomposition, allowing for exact invertibility with finite precision arithmetic.
 
 ### Memory-constrained 3-D Integer Wavelet Transform
 A technique to implement the 3-D integer wavelet transform with limited memory, which eliminates PSNR drops across GOP boundaries [S2]. It addresses the pitfall where PSNR drops occur at GOP boundaries due to the nonorthogonality of the wavelet transform and the symmetric extension method used beyond the last slice when different GOPs are separately transformed [S2]. The memory-constrained transform eliminates these PSNR drops across GOP boundaries, except at the beginning and end of the data volume [S2].
@@ -152,7 +194,7 @@ A technique to implement the 3-D integer wavelet transform with limited memory, 
 *   **When to use:** Interactive telemedicine applications where different remote clients with limited bandwidth may request different VOIs of the same compressed 3-D image [S1].
 
 ## Background
-The 3D-IWT is primarily concerned with interactive telemedicine applications, where efficient compression of 3-D medical images is required [S1]. The method was proposed in the context of scalable compression using EBCOT with Volume of Interest coding [S1]. The lifting-based construction allows for the approximation of filters like Daubechies 9/7 while maintaining integer precision [S1, Subtopics].
+The 3D-IWT is primarily concerned with interactive telemedicine applications, where efficient compression of 3-D medical images is required [S1]. The method was proposed in the context of scalable compression using EBCOT with Volume of Interest coding [S1].
 
 ## Sources
 [S1] Scalable Compression of 3-D Medical Image Data Using EBCOT with Volume of Interest Coding, https://doi.org/10.51983/ajcst-2012.1.1.1673, fetched 2026-10-26

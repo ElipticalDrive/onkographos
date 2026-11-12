@@ -3,30 +3,29 @@
 Also called: Density Field Update, Density Reconstruction, Density Reconstruction via Gradient Scattering
 
 ## Overview
-Density Reconstruction via Differentiable Rendering is the optimization step that updates a volumetric density field $\rho$ by backpropagating image-space errors into the volume grid. It solves the inverse problem of recovering physical density from observed images by computing the gradient of a loss function with respect to voxel values and applying gradient descent. It sets itself apart from naive differentiable rendering by avoiding a separate backward pass or recomputation of the forward ray march; instead, it relies on gradient records stored during the forward pass (provided by [Dual-Pass Differentiable Volume Rendering with Sparse Gradient Recording](3558-dual-pass-differentiable-volume-rendering-with-sparse-gradie.md)) to scatter gradients directly to neighboring voxels.
+Density Reconstruction via Differentiable Rendering is the optimization step that updates a volumetric density field $\rho$ by backpropagating image-space errors into the volume grid [S1]. It solves the inverse problem of recovering physical density from observed images by computing the gradient of a loss function with respect to voxel values and applying gradient descent [S2]. It sets itself apart from naive differentiable rendering by avoiding a separate backward pass or recomputation of the forward ray march; instead, it relies on gradient records stored during the forward pass (provided by [Dual-Pass Differentiable Volume Rendering with Sparse Gradient Recording](3558-dual-pass-differentiable-volume-rendering-with-sparse-gradie.md)) to scatter gradients directly to neighboring voxels [S2].
 
 ## How it works
 **Inputs:**
-*   Target image $L_{tag}$ (ground truth or reference).
-*   Rendered image $L_{out}$ (output of the forward differentiable renderer).
-*   Current density field $\rho$ (volume grid).
+*   Target image $L_{tag}$ (ground truth or reference) [S2].
+*   Rendered image $L_{out}$ (output of the forward differentiable renderer) [S2].
+*   Current density field $\rho$ (volume grid) [S2].
 *   Gradient records $densityADRec$: a structure containing, for each pixel $(i,j)$, a list of sampling positions $x_{u,k}$ visited during ray marching and their corresponding single-scattering gradient contributions $\dot{L}_{out}(x_{u,k}, \omega)$ [S2].
 
 **Outputs:**
-*   Updated density field $\rho$.
-*   Loss value.
+*   Updated density field $\rho$ and loss value [S2].
 
 **Data Structures:**
 *   $densityGrad$: A volume data structure (grid) of the same dimensions as $\rho$, initialized to zero, storing the accumulated gradients $\frac{\partial \text{Loss}}{\partial \rho[v_p]}$ for each voxel $v_p$ [S1, S2].
 
 **Parameters:**
-*   Learning rate $\alpha$ (denoted as $LR$ in [S1], $\alpha$ in [S2]).
+*   Learning rate $\alpha$ (denoted as $LR$ in [S1], $\alpha$ in [S2]) [S1, S2].
 *   Minimum loss threshold $minLoss$ for convergence [S1].
 
 **Algorithm Steps:**
 
 1.  **Initialize Gradient Accumulator:**
-    Set all entries in $densityGrad$ to zero.
+    Set all entries in $densityGrad$ to zero [S2].
 
 2.  **Compute Image-Space Loss Gradient:**
     For each pixel $(i,j)$, compute the difference term:
@@ -40,7 +39,6 @@ Density Reconstruction via Differentiable Rendering is the optimization step tha
     *   Compute the trilinear interpolation weights $w_{v_p}(x_u)$ for the 8 neighboring voxels $v_p$ surrounding $x_u$ [S2].
     *   For each of the 8 neighboring voxels $v_p$:
         $$ densityGrad[v_p] \leftarrow densityGrad[v_p] + diff[i,j] \cdot grad \cdot w_{v_p}(x_u) $$
-    
     This step implements the chain rule, distributing the pixel-space error back to the volume grid using the stored gradients and consistent trilinear weights [S2]. The final gradient for a voxel $v_p$ is formally:
     $$ \frac{\partial \text{Loss}}{\partial \rho[v_p]} = \sum_{(i,j)} \sum_k 2(L_{out}[i,j] - L_{tag}[i,j]) \cdot \dot{L}_{out}(x_{u,k}, \omega) \cdot w_{v_p}(x_{u,k}) \quad (22) $$
     where the summation is over all pixels and all sampling positions $k$ along the rays passing through $v_p$ [S2].
@@ -51,7 +49,7 @@ Density Reconstruction via Differentiable Rendering is the optimization step tha
     where $\alpha$ is the learning rate [S1, S2].
 
 5.  **Convergence Check:**
-    Compute the total MSE loss between $L_{out}$ and $L_{tag}$. If the loss is less than $minLoss$, terminate. Otherwise, repeat from Step 1 (re-rendering $L_{out}$ with the updated $\rho$) [S1].
+    Compute the total MSE loss between $L_{out}$ and $L_{tag}$ [S2]. If the loss is less than $minLoss$, terminate [S1]. Otherwise, repeat from Step 1 (re-rendering $L_{out}$ with the updated $\rho$) [S1].
 
 6.  **Cleanup:**
     Release the memory allocated for $densityADRec$ and $densityGrad$ [S1].
@@ -61,17 +59,17 @@ Density Reconstruction via Differentiable Rendering is the optimization step tha
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def density_reconstruction(L_tag, L_out, rho, densityADRec, alpha, minLoss):
+def density_reconstruction(L_tag, L_out, rho, densityADRec, LR, minLoss):
     """
     Reconstructs the density field rho by backpropagating image-space loss.
     
     Args:
         L_tag: Target image tensor (H, W, C).
         L_out: Rendered image tensor (H, W, C).
-        rho: Current density field volume grid.
+        rho: Current density field volume grid (D, H_v, W_v).
         densityADRec: List of lists of tuples. densityADRec[i][j] contains 
                       [(x_u, grad_out), ...] for pixel (i,j).
-        alpha: Learning rate.
+        LR: Learning rate.
         minLoss: Convergence threshold.
         
     Returns:
@@ -79,64 +77,74 @@ def density_reconstruction(L_tag, L_out, rho, densityADRec, alpha, minLoss):
         loss: Final MSE loss.
     """
     H, W, C = L_tag.shape
-    volume_shape = rho.shape
+    D, Hv, Wv = rho.shape
     
     while True:
-        # Step 1: Initialize gradient accumulator
-        densityGrad = zeros_like(rho)
-        
-        # Step 2 & 3: Compute loss gradient and scatter to voxels
+        # Compute MSE loss
+        loss = 0.0
         for i in range(H):
             for j in range(W):
-                # Compute pixel-wise difference term: 2 * (L_out - L_tag)
-                diff = 2.0 * (L_out[i, j] - L_tag[i, j])
-                
-                # Iterate over recorded gradient contributions for this pixel
-                for x_u, grad_out in densityADRec[i][j]:
-                    # Compute trilinear weights for the 8 neighbors of x_u
-                    # Note: x_u is a continuous 3D coordinate.
-                    # Weights w_vp are computed based on the fractional part of x_u.
-                    weights = compute_trilinear_weights(x_u)
-                    
-                    # Scatter gradient to 8 neighboring voxels
-                    for v_p in get_8_neighbors(x_u):
-                        # Accumulate gradient: diff * grad_out * weight
-                        densityGrad[v_p] += diff * grad_out * weights[v_p]
+                for c in range(C):
+                    diff_val = L_out[i, j, c] - L_tag[i, j, c]
+                    loss += diff_val * diff_val
+        loss /= (H * W * C)
         
-        # Step 4: Update density field using gradient descent
-        rho = rho - alpha * densityGrad
-        
-        # Re-render L_out with updated rho (implementation detail of the forward pass)
-        # This step assumes a function 'render' that uses the differentiable renderer
-        # and returns L_out and updates densityADRec for the next iteration.
-        L_out, densityADRec = render(rho, L_tag) # Placeholder for forward pass integration
-        
-        # Compute loss for convergence check
-        loss = mean_squared_error(L_out, L_tag)
-        
-        # Step 5: Check convergence
         if loss < minLoss:
             break
-            
-    # Step 6: Cleanup is handled by the caller or garbage collection in Python
-    # In C++, explicit deallocation of densityADRec and densityGrad would occur here.
-    
+
+        # Initialize gradient accumulator
+        densityGrad = [[[0.0] * Wv for _ in range(Hv)] for _ in range(D)]
+
+        # Scatter gradients
+        for i in range(H):
+            for j in range(W):
+                diff = 2.0 * (L_out[i, j] - L_tag[i, j])
+                for xu, grad_out in densityADRec[i][j]:
+                    x, y, z = xu
+                    ix, iy, iz = int(x), int(y), int(z)
+                    fx, fy, fz = x - ix, y - iy, z - iz
+                    # Trilinear weights for 8 neighbors
+                    w = [
+                        (1-fx)*(1-fy)*(1-fz), (1-fx)*(1-fy)*fz,
+                        (1-fx)*fy*(1-fz), (1-fx)*fy*fz,
+                        fx*(1-fy)*(1-fz), fx*(1-fy)*fz,
+                        fx*fy*(1-fz), fx*fy*fz
+                    ]
+                    # Neighbor indices
+                    neighbors = [
+                        (ix, iy, iz), (ix, iy, iz+1),
+                        (ix, iy+1, iz), (ix, iy+1, iz+1),
+                        (ix+1, iy, iz), (ix+1, iy, iz+1),
+                        (ix+1, iy+1, iz), (ix+1, iy+1, iz+1)
+                    ]
+                    for idx, (nx, ny, nz) in enumerate(neighbors):
+                        densityGrad[nx][ny][nz] += diff * grad_out * w[idx]
+
+        # Update density field
+        for x in range(D):
+            for y in range(Hv):
+                for z in range(Wv):
+                    rho[x][y][z] -= LR * densityGrad[x][y][z]
+
+    # Cleanup
+    del densityADRec
+    del densityGrad
     return rho, loss
 ```
 
 **Edge Cases and Pitfalls:**
 *   **Trilinear Consistency:** The gradient scattering must use the exact same trilinear interpolation weights as the forward pass to ensure consistency between the forward and backward passes [S2].
 *   **Memory Usage:** Storing $densityADRec$ increases memory usage compared to methods that recompute gradients on-the-fly, as it stores gradient contributions for every sampled position along every ray [S2].
-*   **Single Scattering Limitation:** The method relies on the single scattering approximation. It is limited to scenarios where multiple scattering effects are negligible, such as smoke with relatively low optical density. It is not suitable for denser media like cumulus clouds or highly turbid liquids [S2].
+*   **Single Scattering Limitation:** The method relies on the single scattering approximation [S2]. It is limited to scenarios where multiple scattering effects are negligible, such as smoke with relatively low optical density [S2]. It is not suitable for denser media like cumulus clouds or highly turbid liquids [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** The reconstruction step itself is $O(N_{voxels} + N_{samples})$, where $N_{voxels}$ is the number of voxels updated and $N_{samples}$ is the total number of recorded gradient contributions. However, it is part of an iterative loop, so total time depends on convergence speed.
-*   **Memory Complexity:** $O(N_{samples})$ for storing $densityADRec$ and $O(N_{voxels})$ for $densityGrad$. This trades memory for computational efficiency by avoiding a separate backward pass [S2].
+*   **Time Complexity:** The reconstruction step itself is $O(N_{voxels} + N_{samples})$, where $N_{voxels}$ is the number of voxels updated and $N_{samples}$ is the total number of recorded gradient contributions [S2]. However, it is part of an iterative loop, so total time depends on convergence speed [S1].
+*   **Memory Complexity:** $O(N_{samples})$ for storing $densityADRec$ and $O(N_{voxels})$ for $densityGrad$ [S2]. This trades memory for computational efficiency by avoiding a separate backward pass [S2].
 *   **Strengths:** Efficient reconstruction without recomputing the forward pass; physically meaningful updates via the linear relationship $\kappa_t(x) = \sigma_t \rho(x)$ [S2].
 *   **Limitations:** Limited to single-scattering scenarios; memory-intensive for high-resolution volumes or long rays due to $densityADRec$ storage [S2].
 
 ## Background
-This method is part of a physics-based differentiable rendering framework for fluid and smoke reconstruction. It was introduced in the context of efficient and plausible fluid modeling from monocular video [S1] and high-efficiency smoke reconstruction [S2]. The approach leverages the linear relationship between extinction coefficient and density to compute derivatives directly, enabling efficient optimization. It builds on the sparse gradient recording technique to avoid the computational cost of full backpropagation through the ray marching process [S2].
+This method is part of a physics-based differentiable rendering framework for fluid and smoke reconstruction [S1, S2]. The approach leverages the linear relationship between extinction coefficient and density to compute derivatives directly, enabling efficient optimization [S2]. It builds on the sparse gradient recording technique to avoid the computational cost of full backpropagation through the ray marching process [S2].
 
 ## Sources
 [S1] Physics-Based Differentiable Rendering for Efficient and Plausible Fluid Modeling from Monocular Video, https://doi.org/10.3390/e25091348, fetched 2026-10-26

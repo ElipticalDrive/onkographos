@@ -1,0 +1,138 @@
+--- v001.md
++++ v002.md
+@@ -8,15 +8,14 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** Number of Gaussians $n$ (default 8000), output file path, radius $R$ (default 0.5), target opacity $p$ (default 0.80), target scale $\sigma$ (default 0.012).
+-- **Outputs:** A binary PLY file (`binary_little_endian 1.0`) containing $n$ vertices.
++- **Inputs:** Number of Gaussians $n$ (default 8000), output file path, radius $R$ (default 0.5), target opacity $p$ (default 0.80), target scale $\sigma$ (default 0.012) [S1, unofficial].
++- **Outputs:** A binary PLY file (`binary_little_endian 1.0`) containing $n$ vertices [S1, unofficial].
+ 
+ **Data Structures:**
+ The PLY header defines an element `vertex` with 14 `float32` properties in this exact order:
+ 1. `x`, `y`, `z` (position)
+-2. `f_dc_0`, `f_dc_1`, `f_dc_2` (DC spherical harmonic coefficients)
+-3. `opacity` (logit-encoded)
+-4. `scale_0`, `scale_1`, `scale_2` (log-encoded)
+-5. `rot_0`, `rot_1`, `rot_2`, `rot_3` (quaternion, scalar-first $w,x,y,z$)
+-
++2. `f_dc_0`, `f_dc_1`, `f_dc_2` (DC spherical harmonic coefficients) [S1, unofficial]
++3. `opacity` (logit-encoded) [S1, unofficial]
++4. `scale_0`, `scale_1`, `scale_2` (log-encoded) [S1, unofficial]
++5. `rot_0`, `rot_1`, `rot_2`, `rot_3` (quaternion, scalar-first $w,x,y,z$) [S1, unofficial]
+ The binary record is packed using `struct.Struct("<14f")` (little-endian, 14 floats) [S1, unofficial].
+ 
+@@ -34,5 +33,4 @@
+    $$ z_i = \sin(\theta_i) \times r_i \times R $$
+    $$ y_i = y_i \times R $$
+-
+ 2. **Calculate Color (f_dc):**
+    - Compute azimuth: $\phi = \operatorname{atan2}(z_i, x_i)$ [S1, unofficial].
+@@ -46,18 +44,14 @@
+    - Encode to $f\_dc$:
+      $$ f\_dc_k = \frac{c_{k,lin} - 0.5}{SH\_C0} \quad \text{for } k \in \{r, g, b\} $$
+-
+ 3. **Encode Opacity:**
+    - Clamp target opacity $p$ to $[10^{-4}, 1 - 10^{-4}]$ [S1, unofficial].
+    - Compute logit:
+      $$ \text{opacity}_{stored} = \ln\left(\frac{p}{1 - p}\right) $$
+-
+ 4. **Encode Scale:**
+    - Compute natural log of target scale $\sigma$:
+      $$ \text{scale}_{stored} = \ln(\sigma) $$
+    - Assign to all three axes: $scale\_0 = scale\_1 = scale\_2 = \text{scale}_{stored}$ [S1, unofficial].
+-
+ 5. **Encode Rotation:**
+    - Set identity quaternion in scalar-first order: $rot\_0 = 1.0, rot\_1 = 0.0, rot\_2 = 0.0, rot\_3 = 0.0$ [S1, unofficial].
+-
+ 6. **Write PLY:**
+    - Write header with `ply`, `format binary_little_endian 1.0`, `element vertex n`, and property definitions [S1, unofficial].
+@@ -81,11 +75,12 @@
+     return math.log(p / (1.0 - p))
+ 
+-def generate_gaussian_asset(n: int, out_path: str, radius: float = 0.5, 
++def generate_gaussian_asset(n: int, out_path: str, radius: float = 0.5,
+                             sigma: float = 0.012, opacity: float = 0.80):
++    if n < 2:
++        raise ValueError("n must be at least 2 to avoid division by zero in Fibonacci sphere distribution")
+     ga = math.pi * (3.0 - math.sqrt(5.0))
+     ln_sigma = math.log(sigma)
+     logit_opacity = logit(opacity)
+-    
+-    # PLY Header
++
+     header = (
+         "ply\n"
+@@ -108,35 +103,32 @@
+         "end_header\n"
+     )
+-    
++
+     rec = struct.Struct("<14f")
+     body = b""
+-    
++
+     for i in range(n):
+-        # Fibonacci Sphere
+         y_norm = 1.0 - (i / float(n - 1)) * 2.0
+         r_norm = math.sqrt(max(0.0, 1.0 - y_norm * y_norm))
+         theta = ga * i
+-        
++
+         x = math.cos(theta) * r_norm * radius
+         y = y_norm * radius
+         z = math.sin(theta) * r_norm * radius
+-        
+-        # Color
++
+         azimuth = math.atan2(z, x)
+         hue = (azimuth + math.pi) / (2.0 * math.pi)
+-        elevation = y_norm # y_norm is -1..1, same as y/radius
++        elevation = y_norm
+         val = 0.72 + 0.18 * elevation
+         sat = 0.95
+-        
++
+         sr, sg, sb = colorsys.hsv_to_rgb(hue, sat, val)
+         r_lin = srgb_to_linear(sr)
+         g_lin = srgb_to_linear(sg)
+         b_lin = srgb_to_linear(sb)
+-        
++
+         fdc0 = (r_lin - 0.5) / SH_C0
+         fdc1 = (g_lin - 0.5) / SH_C0
+         fdc2 = (b_lin - 0.5) / SH_C0
+-        
+-        # Pack: x, y, z, f_dc_0, f_dc_1, f_dc_2, opacity, scale_0, scale_1, scale_2, rot_0, rot_1, rot_2, rot_3
++
+         body += rec.pack(
+             x, y, z,
+@@ -146,22 +138,21 @@
+             1.0, 0.0, 0.0, 0.0
+         )
+-        
++
+     with open(out_path, "wb") as f:
+         f.write(header.encode("ascii"))
+         f.write(body)
+-
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Color Space:** Colors must be converted from sRGB to linear RGB before encoding into $f\_dc$ because the renderer applies a linear-to-sRGB display transform [S1, unofficial]. Failure to do so results in incorrect colors [S1, unofficial].
++- **Color Space:** Colors must be converted from sRGB to linear RGB before encoding into $f\_dc$ because the renderer applies a linear-to-sRGB display transform [S1, unofficial].
+ - **Activation Inversion:** The parser expects inverted activations. Scales are stored as $\ln(\sigma)$, $f\_dc$ as $(c_{lin}-0.5)/SH\_C0$, opacity as $\logit(p)$, and rotation as scalar-first $w,x,y,z$ [S1, unofficial].
+-- **Division by Zero:** The Fibonacci sphere formula uses $n-1$ in the denominator. If $n=1$, this causes a division by zero. The method assumes $n > 1$ [S1, unofficial].
++- **Division by Zero:** The Fibonacci sphere formula uses $n-1$ in the denominator. If $n=1$, this causes a division by zero. The method assumes $n > 1$ [S1, G, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(n)$, where $n$ is the number of Gaussians. Each Gaussian requires constant-time mathematical operations [S1, unofficial].
+-- **Memory Complexity:** $O(n)$ for the output PLY file size ($14 \times 4 \times n$ bytes plus header) [S1, unofficial].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Performance:** The generation is instantaneous for typical $n$ (e.g., 8000 points) as it involves no optimization or external data loading [S1, unofficial].
+ - **Strengths:** Deterministic, reproducible, no external dependencies, small file size, easy to debug [S1, unofficial].
+-- **Limitations:** Only generates a synthetic sphere; not suitable for representing real-world scenes [S1, unofficial].
++- **Limitations:** Only generates a synthetic sphere [S1, unofficial].
+ - **When to use:** For testing parsers, validating rendering pipelines, and creating demo assets [S1, unofficial].
+ - **When not to use:** For training or initializing models on real data [S1, unofficial].

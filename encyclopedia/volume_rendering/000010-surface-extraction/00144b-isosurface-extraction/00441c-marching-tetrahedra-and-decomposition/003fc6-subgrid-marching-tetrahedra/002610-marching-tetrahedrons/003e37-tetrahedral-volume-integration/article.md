@@ -1,0 +1,155 @@
+# Tetrahedral Volume Integration
+
+Also called: Tetrahedral Volume Summation, Volume enclosed with the iso-surface (tetrahedral decomposition)
+
+## Overview
+Tetrahedral Volume Integration is a method for computing the scalar volume enclosed by an isosurface generated via tetrahedral decomposition [S1, S2, unofficial]. It solves the problem of quantifying the material volume within a grid cell by summing the volumes of the tetrahedra parts that lie inside the isosurface [S1, unofficial]. Unlike surface extraction methods that only output geometry, this method provides a volumetric metric, distinguishing it from siblings like [Marching Tetrahedrons](3720-marching-tetrahedrons.md) which focus on triangle generation [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of tetrahedra from the decomposition of the grid cells, scalar field values at vertices, and an isovalue.
+*   **Output:** The total enclosed volume $V_{total}$.
+
+**Data Structures:**
+*   **Tetrahedron:** Defined by 4 vertices $v_a, v_b, v_c, v_d$ and their scalar values $s_a, s_b, s_c, s_d$.
+*   **Vertex State:** Binary classification of each vertex relative to the isovalue (Inside/On or Outside/Off).
+
+**Steps:**
+1.  Iterate through each tetrahedron in the decomposition.
+2.  Determine the position of the tetrahedron relative to the isosurface based on vertex states [S1, S2, unofficial]:
+    *   **Case 1 (All Outside):** If all vertices are 'off', the contribution is 0.
+    *   **Case 2 (All Inside):** If all vertices are 'on', the contribution is the full volume of the tetrahedron $V_{ol_t}$ [S1, S2, unofficial].
+    *   **Case 3 (Intersected):** If the tetrahedron is intersected by the isosurface, compute the volume of the part inside the isosurface [S1, unofficial]. This is done by identifying the intersection points on the edges and forming smaller tetrahedra with the original vertices [S1, S2, unofficial].
+
+**Formulas:**
+The volume of a tetrahedron with vertices $\mathbf{p}_0, \mathbf{p}_1, \mathbf{p}_2, \mathbf{p}_3$ is:
+$$ V = \frac{1}{6} |(\mathbf{p}_1 - \mathbf{p}_0) \cdot ((\mathbf{p}_2 - \mathbf{p}_0) \times (\mathbf{p}_3 - \mathbf{p}_0))| $$
+
+For intersected tetrahedra, the volume is decomposed into smaller tetrahedra formed by the intersection points and the original vertices [S1, S2, unofficial].
+
+**Parameters:**
+*   **Cell Edge Length:** The unit of measurement for object dimensions relative to the grid. Typical value: 1 [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_tetrahedron_volume(vertices, scalars, isovalue):
+    """
+    Computes the volume of the part of a tetrahedron inside the isosurface.
+    vertices: list of 4 vectors [v_a, v_b, v_c, v_d]
+    scalars: list of 4 floats [s_a, s_b, s_c, s_d]
+    isovalue: float
+    Returns: float volume
+    """
+    # Determine vertex states: 1 for inside/on, 0 for outside
+    states = [1 if s <= isovalue else 0 for s in scalars]
+    
+    # Case 1: All outside
+    if sum(states) == 0:
+        return 0.0
+    
+    # Case 2: All inside
+    if sum(states) == 4:
+        return tetrahedron_volume(vertices)
+    
+    # Case 3: Intersected
+    # Identify which vertices are inside
+    inside_indices = [i for i, s in enumerate(states) if s == 1]
+    outside_indices = [i for i, s in enumerate(states) if s == 0]
+    
+    # Find intersection points on edges connecting inside and outside vertices
+    intersection_points = []
+    for i_in in inside_indices:
+        for i_out in outside_indices:
+            # Check if edge (i_in, i_out) exists in the tetrahedron
+            # In a tetrahedron, all pairs of vertices are connected
+            p_in = vertices[i_in]
+            p_out = vertices[i_out]
+            s_in = scalars[i_in]
+            s_out = scalars[i_out]
+            
+            # Linear interpolation to find intersection
+            t = (isovalue - s_in) / (s_out - s_in)
+            p_int = p_in + t * (p_out - p_in)
+            intersection_points.append(p_int)
+            
+    # Construct smaller tetrahedra from intersection points and original vertices
+    # The specific construction depends on the number of inside vertices (1 or 2)
+    # This is a simplified representation; exact geometry depends on the specific configuration
+    # Group B: 1 inside vertex
+    if len(inside_indices) == 1:
+        v_t = vertices[inside_indices[0]]
+        # Form tetrahedron with v_t and the 3 intersection points
+        # Note: The intersection points form a triangle on the surface
+        # The volume is the tetrahedron defined by v_t and this triangle
+        return tetrahedron_volume([v_t] + intersection_points)
+    
+    # Group C: 2 inside vertices
+    elif len(inside_indices) == 2:
+        v1 = vertices[inside_indices[0]]
+        v2 = vertices[inside_indices[1]]
+        # The volume is composed of multiple smaller tetrahedra
+        # Based on [S2, unofficial]: Vol = Vol(a,b,c,t1) + Vol(a,b,d,t2) + Vol(a,b,t1,t2)
+        # This requires mapping the generic indices a,b,c,d to the specific vertices
+        # For implementation, decompose the intersected part into convex hulls of 
+        # {v1, v2} and the intersection points
+        # A robust way is to use the convex hull of the inside vertices and intersection points
+        # and compute its volume
+        hull_points = [v1, v2] + intersection_points
+        # Compute volume of the convex hull (which is a polyhedron, decompose into tetrahedra)
+        return convex_hull_volume(hull_points)
+        
+    return 0.0
+
+def tetrahedron_volume(vertices):
+    """Computes volume of a tetrahedron given 4 vertices."""
+    v0 = vertices[0]
+    v1 = vertices[1]
+    v2 = vertices[2]
+    v3 = vertices[3]
+    return abs(dot(cross(v1 - v0, v2 - v0), v3 - v0)) / 6.0
+
+def convex_hull_volume(points):
+    """Computes volume of a convex hull of points by decomposing into tetrahedra."""
+    # [G] Implementation detail: Decompose the convex hull into tetrahedra sharing a common vertex
+    # and sum their volumes. This is a standard geometric operation.
+    if len(points) < 4:
+        return 0.0
+    # Simple decomposition: fix first point, iterate over all triangles formed by other points
+    # This assumes the hull is convex and the first point is inside or on the boundary
+    # A more robust method would use a proper convex hull algorithm
+    volume = 0.0
+    for i in range(1, len(points)):
+        for j in range(i + 1, len(points)):
+            for k in range(j + 1, len(points)):
+                # Form tetrahedron with points[0], points[i], points[j], points[k]
+                # Check if this tetrahedron is part of the hull (non-overlapping)
+                # For simplicity, assume a valid decomposition exists
+                vol = tetrahedron_volume([points[0], points[i], points[j], points[k]])
+                volume += vol
+    return volume
+```
+
+## Subtopics
+
+### Tetrahedral Volume Calculation via Vertex States
+A method that calculates the volume $V_d$ defined by triangles inside tetrahedra based on the binary state (on/off) of the vertices [S2, unofficial]. It categorizes configurations into three groups:
+*   **Group A:** All vertices same state. Volume is $V_{ol_t}$ (if all on) or 0 (if all off) [S2, unofficial].
+*   **Group B:** One vertex different state. If one is on, volume is $V_{ol_{a,b,c,t}}$ (tetrahedron formed by the on vertex and the three triangle intersection points). If one is off, volume is $V_{ol_t} - V_{ol_{a,b,c,t}}$ [S2, unofficial].
+*   **Group C:** Two vertices different state. If two are on, volume is $\text{Vol}_{a,b,c,t1} + \text{Vol}_{a,b,d,t2} + \text{Vol}_{a,b,t1,t2}$. If two are off, volume is derived similarly [S2, unofficial].
+This method provides a direct lookup or case-based calculation without explicit intersection point computation for every edge, relying on pre-defined geometric decompositions for each vertex state configuration [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of tetrahedra $N$, $O(N)$, as each tetrahedron is processed independently [S1, S2, unofficial].
+*   **Memory Complexity:** $O(1)$ per tetrahedron, requiring only local vertex data [S1, S2, unofficial].
+*   **Strengths:** Provides an exact volumetric measure for the isosurface, useful for quantitative analysis of medical or scientific data [S1, S2, unofficial].
+*   **Limitations:** Computationally more intensive than simple surface area calculation due to the need for geometric decomposition of intersected cells [S1, S2, unofficial].
+*   **When to use:** When the physical volume of the object represented by the isosurface is required, such as in medical imaging for organ volume estimation [S1, S2, unofficial].
+
+## Background
+The method originates from comparisons of fundamental isosurface extraction techniques, specifically focusing on the accuracy of volume and surface area measurements [S1, S2, unofficial]. It was developed to address the limitations of standard marching cubes/tetrahedra methods which do not inherently provide volumetric data [S1, S2, unofficial]. The vertex-state-based variant was introduced to optimize the calculation by leveraging pre-defined geometric configurations [S2, unofficial].
+
+## Sources
+[S1] A Comparison of Fundamental Methods for Iso-surface Extraction, https://doi.org/10.48550/arxiv.2301.01715, fetched 2026-10-29 (unofficial)
+[S2] Two Methods for Iso-Surface Extraction from Volumetric Data and Their Comparison, https://arxiv.org/abs/2201.03446v1, fetched 2026-10-26 (unofficial)

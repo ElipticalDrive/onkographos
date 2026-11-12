@@ -3,221 +3,106 @@
 Also called: Adaptive Screen-Resolution Rendering with Palette Textures, Mobile volume visualization using palette textures, Moser et al. approach
 
 ## Overview
-Palette Texture Volume Rendering is an acceleration technique for 2D slicing volume visualization on mobile devices, utilizing adaptive screen-resolution rendering, compressed palette textures, and basic graphics hardware functionality [S1, unofficial]. It solves the problem of limited computational resources and memory on low-end clients by reducing texture memory footprint and fragment count. It sets itself apart from standard 2D texture mapping by replacing RGBA volume slices with 8-bit indexed palette textures to realize the transfer function directly in hardware, and by employing a luminance-based heuristic to estimate opacity for adaptive resolution scaling, avoiding expensive off-screen buffer operations [S1, unofficial].
+Palette Texture Volume Rendering is an acceleration technique for 2D texture-slicing volume visualization designed for resource-constrained mobile devices [S1, unofficial]. It solves the problem of slow rendering and high memory usage on low-end hardware by combining adaptive screen-resolution rendering with compressed palette textures [S1, unofficial]. Unlike standard 2D texture mapping approaches which render at full resolution with uncompressed RGBA textures, this method reduces fragment count by rendering at a lower resolution and scales the result up, while using palette textures to compress volume data and implicitly encode the transfer function [S1, unofficial].
 
 ## How it works
+**Inputs and Outputs:**
+- **Input:** 3D scalar volume dataset, camera parameters, transfer function (mapping scalar values to RGBA).
+- **Output:** 2D color image (framebuffer).
 
-### Inputs and Outputs
-**Inputs:**
-*   Original volume dataset (stored in main memory).
-*   Transfer function (TF).
-*   Viewing direction.
-*   Target display resolution.
+**Data Structures:**
+- **Volume Data:** Stored in main memory as a single copy of the original dataset [S1, unofficial].
+- **Palette Texture:** A compressed texture format where each texel is an 8-bit index. The palette itself maps these indices to RGBA values, effectively realizing the transfer function in hardware during texture sampling [S1, unofficial]. This reduces texture size to approximately one-fourth of standard RGBA textures [S1, unofficial].
+- **Rendering Buffer:** An off-screen buffer (pbuffer) or a texture created from readback data is used for low-resolution rendering [S1, unofficial].
 
-**Outputs:**
-*   Final rendered image at native display resolution.
-
-### Data Structures
-1.  **Original Dataset:** Stored in main memory. Only one copy is kept [S1, unofficial].
-2.  **Palette Texture:** An 8-bit indexed texture. The index maps to an RGBA value defined by the transfer function. This replaces the standard RGBA volume slice texture [S1, unofficial].
-3.  **Low-Resolution Image Buffer:** A buffer storing the intermediate low-resolution render result. This can be implemented as a pbuffer (if supported) or a read-back texture [S1, unofficial].
-4.  **OpenGL Context:** A separate context may be used to share OpenGL state and texture data, avoiding a second representation of data in memory [S1, unofficial].
-
-### Steps
-
-1.  **Data Management:** Copy the whole dataset into the mobile device's main memory. Keep only one copy of the original dataset [S1, unofficial].
-2.  **View Selection:** Select the rendering axis based on the viewing direction. The component of the view vector with the largest absolute value determines the axis [S4, unofficial].
-3.  **Texture Update (Interaction):**
-    *   When the transfer function changes, use the original dataset to update the textures [S1, unofficial].
-    *   Allocate enough memory for only one single texture at a time [S1, unofficial].
-    *   Create a compressed palette texture from the current slice data. The palette provides a direct realization of the transfer function, mapping an 8-bit indexed image to RGBA values, so the transfer function is not applied explicitly within a CPU program [S1, unofficial].
-    *   Upload the texture to graphics memory.
-    *   Proceed to the next slice texture. Note: Creating compressed palette textures is time-consuming because only one texture can be created at a time due to memory size limits [S1, unofficial].
-4.  **Low-Resolution Rendering (Adaptive Resolution):**
-    *   Render the volume at a lower resolution to reduce the number of fragments and render time [S1, unofficial].
-    *   **Method A (Pbuffer - if supported):** Render the low-resolution image in a buffer called pbuffer for off-screen rendering with OpenGL [S1, unofficial].
-    *   **Method B (Read-back - for OpenGL ES 1.0/Hardware without pbuffer support):** Read back the intermediate image and create a new texture with the low-resolution image [S1, unofficial].
-5.  **Opacity Estimation (Heuristic):**
-    *   To avoid rendering the low-resolution volume twice (once for color, once for opacity), estimate the opacity based on the luminance of the low-resolution image [S1, unofficial].
-    *   The heuristic assumes that a pixel with high luminance also has large opacity [S1, unofficial].
-    *   Calculate luminance using the perception-oriented expression:
+**Steps:**
+1.  **Data Management:** Copy the entire volume dataset into main memory for rendering. Keep only one copy of the original data [S1, unofficial].
+2.  **Texture Update Strategy:** When the transfer function changes, use the original dataset to update the 2D textures. To manage limited memory (e.g., 30 MB on Windows Mobile 5.0 devices), allocate memory for only one single texture at a time [S1, unofficial].
+3.  **Texture Upload:** Upload the current slice's texture to graphics memory. Proceed to the next slice only after the upload is complete [S1, unofficial].
+4.  **Low-Resolution Rendering:** Render the volume slices at a resolution lower than the native display resolution to reduce the number of fragments and render time [S1, unofficial].
+    -   *Alternative 1 (Pbuffer):* Render into an OpenGL pbuffer for off-screen rendering. Tests on DELL Axim PDAs showed this is faster than using a portion of the framebuffer [S1, unofficial].
+    -   *Alternative 2 (Readback):* Since OpenGL ES 1.0 and some hardware do not support pbuffers, read back the intermediate image from the framebuffer and create a new texture from it [S1, unofficial].
+5.  **Opacity Estimation (Heuristic):** To avoid rendering the low-resolution volume twice (once for color, once for opacity), estimate opacity based on luminance [S1, unofficial].
+    -   Calculate luminance $L$ for each pixel using the perception-oriented expression:
         $$ L = 0.3R + 0.9G + 0.11B $$
-    *   Use this luminance $L$ as the opacity value for the low-resolution image [S1, unofficial].
-    *   *Alternative (if alpha channel supported):* Use a buffer with an alpha channel to determine the low-resolution opacity image of the volume, then use this image to attenuate RGB values of back lines using alpha blending [S1, unofficial].
-6.  **High-Resolution Rendering:**
-    *   Scale the low-resolution image up to the full native display resolution by fast 2D image rendering [S1, unofficial].
-    *   Render the volume with its regular 2D texture slices at high resolution.
-    *   *Artifact Removal:* If using the scaled low-res image, the scaled image of the bounding box and coordinate axes may contain blurred portions. A separate high-resolution rendering of additional geometric lines may be done to remove artifacts, though this can cause partial occlusion and loss of perceptual depth cues [S1, unofficial].
-7.  **Compositing:**
-    *   Combine the high-resolution color data with the estimated opacity from the low-resolution pass using alpha blending [S1, unofficial].
+    -   Assume a heuristic that a pixel with high luminance has large opacity [S1, unofficial].
+    -   *Note:* An alternative method involves rendering twice (black background and white background) and using the difference to measure transparency, but this is computationally more expensive [S1, unofficial].
+6.  **Upscaling:** Scale the low-resolution rendered image up to the full native display resolution using fast 2D image rendering [S1, unofficial].
+    -   *Pitfall:* This intrinsic low-resolution scaling causes blurred portions in the bounding box and coordinate axes [S1, unofficial].
+7.  **High-Resolution Overlay:** To correct the blur artifacts from upscaling, perform a separate high-resolution rendering of additional geometric lines (bounding box, axes) [S1, unofficial].
+    -   *Pitfall:* This can cause partial occlusion within and behind the volume, potentially leading to a loss of perceptual depth cues [S1, unofficial].
+8.  **Context Sharing:** Use a separate OpenGL context to share OpenGL state and texture data. This avoids creating a second representation of the data in memory, which is critical given the tight memory constraints [S1, unofficial].
 
-### Pseudocode
-
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_palette_texture_volume(volume_data, transfer_function, view_direction, display_width, display_height):
-    """
-    Renders volume using Palette Texture Volume Rendering method.
-    """
-    # 1. Data Management
-    # Ensure volume_data is in main memory. Only one copy kept.
-    
-    # 2. View Selection
-    # Determine axis with largest absolute component in view_direction
-    axis = select_viewing_axis(view_direction)
-    
-    # 3. Texture Update & Low-Res Rendering Setup
-    # Allocate memory for one single texture
-    texture_buffer = allocate_texture_buffer()
-    
-    # Create low-res target dimensions
-    low_res_width = display_width // 2 # Example scaling factor
-    low_res_height = display_height // 2
-    
-    # Method B: Read-back approach for OpenGL ES 1.0 / No Pbuffer support
-    # Render low-res volume to a texture
-    low_res_texture = render_low_res_volume_to_texture(
-        volume_data, 
-        transfer_function, 
-        axis, 
-        low_res_width, 
-        low_res_height,
-        texture_buffer
-    )
-    
-    # 4. Opacity Estimation via Luminance Heuristic
-    # Read pixels from low_res_texture
-    low_res_pixels = read_texture_pixels(low_res_texture)
-    
-    # Calculate opacity based on luminance heuristic
-    # L = 0.3R + 0.9G + 0.11B
-    estimated_opacity_image = []
-    for pixel in low_res_pixels:
-        r, g, b = pixel.rgb
-        luminance = 0.3 * r + 0.9 * g + 0.11 * b
-        # Use luminance as opacity [S1, unofficial]
-        estimated_opacity_image.append((r, g, b, luminance))
-        
-    # 5. High-Res Rendering
-    # Render high-res volume slices
-    high_res_color = render_high_res_volume(
-        volume_data, 
-        transfer_function, 
-        axis, 
-        display_width, 
-        display_height
-    )
-    
-    # 6. Compositing
-    # Scale up the estimated opacity image to display resolution
-    scaled_opacity = scale_image(estimated_opacity_image, display_width, display_height)
-    
-    # Blend high-res color with estimated opacity
-    final_image = []
-    for i in range(display_width * display_height):
-        color = high_res_color[i]
-        opacity = scaled_opacity[i].a
-        # Standard alpha blending with background (assumed black or previous buffer)
-        # C_dest = C_src * A_src + C_dest * (1 - A_src)
-        # Here C_src is the high-res color, A_src is estimated opacity
-        final_pixel = color * opacity + background * (1 - opacity)
-        final_image.append(final_pixel)
-        
-    return final_image
+# Initialization
+volume_data = load_volume_to_main_memory() # Single copy
+palette_texture = create_palette_texture(volume_data, transfer_function)
+low_res_buffer = create_offscreen_buffer() # pbuffer or texture
+high_res_lines = generate_geometry_lines() # Bounding box, axes
 
-def render_low_res_volume_to_texture(volume_data, transfer_function, axis, width, height, texture_buffer):
-    """
-    Renders volume at low resolution using palette textures.
-    """
-    # Select slices along the chosen axis
-    slices = get_slices(volume_data, axis)
+# Rendering Loop
+for slice in volume_slices:
+    # 1. Update Texture if Transfer Function Changed
+    if transfer_function_changed:
+        update_palette_texture(palette_texture, volume_data, transfer_function)
     
-    # Create palette texture for transfer function
-    palette = create_palette_from_tf(transfer_function)
+    # 2. Render Low-Resolution Slice
+    set_viewport(low_res_buffer)
+    clear_color(0.0, 0.0, 0.0, 1.0) # Black background for luminance heuristic
+    render_slice(palette_texture, slice)
     
-    # Render slices back-to-front
-    # Use compressed palette textures to reduce memory footprint
-    # Only one texture is created at a time due to memory limits [S1, unofficial]
-    for slice_data in slices:
-        # Map slice data to 8-bit indices using palette
-        indexed_slice = map_to_palette(slice_data, palette)
-        
-        # Upload indexed slice to texture buffer
-        upload_texture(texture_buffer, indexed_slice)
-        
-        # Render slice to low-res framebuffer/texture
-        render_slice_to_buffer(texture_buffer, width, height)
-        
-    return texture_buffer
+    # 3. Readback (if pbuffer not supported)
+    if not hardware_supports_pbuffer:
+        low_res_image = read_framebuffer_to_memory()
+        low_res_texture = create_texture_from_image(low_res_image)
+    else:
+        low_res_texture = get_pbuffer_texture()
 
-def create_palette_from_tf(transfer_function):
-    """
-    Creates an 8-bit palette mapping indices to RGBA values.
-    """
-    palette = []
-    for i in range(256):
-        # Map scalar value i to RGBA using transfer function
-        rgba = transfer_function.map(i)
-        palette.append(rgba)
-    return palette
+    # 4. Upscale and Composite
+    set_viewport(native_display)
+    clear_color(0.0, 0.0, 0.0, 1.0)
+    
+    # Render upscaled volume
+    render_upscaled_texture(low_res_texture)
+    
+    # 5. Render High-Resolution Geometry
+    render_geometry(high_res_lines)
+
+# Post-Processing / Opacity Handling
+# If using luminance heuristic:
+# opacity = map_luminance_to_opacity(0.3*R + 0.9*G + 0.11*B)
+# If using double render (black/white):
+# transparency = image_white - image_black
 ```
 
-### Parameters and Typical Values
-*   **Palette Size:** 256 entries (8-bit indexed) [S1, unofficial].
-*   **Luminance Weights:** $0.3$ for Red, $0.9$ for Green, $0.11$ for Blue [S1, unofficial].
-*   **Resolution Scaling:** Low-resolution is typically a fraction of the native display resolution (e.g., half) to reduce fragment count [S1, unofficial].
-*   **Memory Limit:** On devices like DELL Axim X50v/X51v, only ~30 MB is free for application software, necessitating single-texture allocation [S1, unofficial].
+**Parameters:**
+-   **Low-Resolution Scale Factor:** Not given in the sources.
+-   **Luminance Weights:** $0.3$ for Red, $0.9$ for Green, $0.11$ for Blue [S1, unofficial].
+-   **Memory Limit:** ~30 MB for application software on tested devices (DELL Axim X50v/X51v) [S1, unofficial].
 
-### Edge Cases and Pitfalls
-*   **Hardware Support:** Hardware and OpenGL ES 1.0 do not support pbuffers or alpha channels [S1, unofficial]. The read-back method must be used in these cases.
-*   **Blurring:** The scaled image of the bounding box and coordinate axes contains blurred portions due to the intrinsic low-resolution image [S1, unofficial].
-*   **Occlusion:** Rendering additional geometric lines at high resolution to fix blurring can cause partial occlusion within and behind the volume, leading to a loss of perceptual depth cues [S1, unofficial].
-*   **Memory Limits:** Creating compressed palette textures is time-consuming because only one texture can be created at a time due to memory size limits [S1, unofficial].
-*   **Model Size Limit:** There is a limit size for models treated with this approximation because the application is totally native in the PDA [S1, unofficial].
-*   **Texture Atlas:** Using a texture atlas requires more main memory during texture creation but allows handling of non-power-of-two slices without wasting too much memory. It has nearly no effect on rendering time (difference of 0.01 fps) [S1, unofficial].
+**Edge Cases and Pitfalls:**
+-   **Hardware Limitations:** OpenGL ES 1.0 and some mobile hardware do not support pbuffers or alpha channels [S1, unofficial].
+-   **Blurring:** Upscaling low-resolution images causes blurred bounding boxes and axes [S1, unofficial].
+-   **Occlusion:** Rendering high-resolution lines separately can cause partial occlusion artifacts [S1, unofficial].
+-   **Memory Constraints:** Creating compressed palette textures is time-consuming because only one texture can be created at a time due to memory size limits [S1, unofficial].
+-   **Model Size Limit:** There is a limit on the size of models that can be treated with this approximation because the application is totally native on the PDA [S1, unofficial].
 
 ## Operating characteristics
-
-### Time and Memory Complexity
-*   **Memory:** The palette format reduces the size of volume textures to almost a fourth of standard RGBA textures [S1, unofficial]. However, creating textures is memory-constrained, requiring only one texture to be in memory at a time during creation [S1, unofficial].
-*   **Time:** Compressed palette textures for volume slices are usually only a few milliseconds slower than RGBA textures for rendering [S1, unofficial]. The reduction in fragment count via low-resolution rendering significantly decreases render time. Using a pbuffer is faster than using a portion of the framebuffer for rendering the low-resolution image [S1, unofficial].
-
-### Measured Performance
-*   Tested on DELL Axim X50v/X51v PDAs [S1, unofficial].
-*   Using pbuffer is faster than using a portion of the framebuffer for rendering the low-resolution image [S1, unofficial].
-*   Texture atlas usage has nearly no effect on rendering time, with a difference of 0.01 fps [S1, unofficial].
-
-### Strengths and Limitations
-*   **Strengths:**
-    *   Reduces texture memory footprint significantly (1/4th size) [S1, unofficial].
-    *   Accelerates rendering on low-end mobile devices by reducing fragment count and leveraging hardware palette mapping [S1, unofficial].
-    *   Transfer function is realized directly in hardware, avoiding CPU overhead [S1, unofficial].
-*   **Limitations:**
-    *   Relies on a heuristic (luminance = opacity) which may not accurately represent true volume opacity, potentially affecting visual quality [S1, unofficial].
-    *   Blurring artifacts in scaled low-resolution images [S1, unofficial].
-    *   Limited by device memory constraints (e.g., 30 MB limit on tested PDAs) [S1, unofficial].
-    *   Not suitable for high-end rendering where precise opacity and depth cues are critical [S1, unofficial].
-
-### When to Use
-*   Use for interactive volume visualization on mobile devices or PDAs with limited computational resources and memory [S1, unofficial].
-*   Use when the transfer function needs to be updated frequently, as palette textures allow fast updates [S1, unofficial].
-
-### When Not to Use
-*   Do not use when high visual fidelity, precise opacity, and accurate depth cues are required [S1, unofficial].
-*   Do not use on hardware that supports advanced features (like pbuffers and alpha channels) if the overhead of the heuristic and low-res scaling outweighs the benefits, or if standard RGBA textures fit within memory limits.
+-   **Time Complexity:** Rendering time is reduced by lowering the resolution and using compressed textures. Compressed palette textures are usually only a few milliseconds slower than RGBA textures for rendering [S1, unofficial].
+-   **Memory Complexity:** Texture size is reduced to almost a fourth of standard RGBA textures [S1, unofficial]. However, using a texture atlas requires more main memory during texture creation [S1, unofficial].
+-   **Measured Performance:** Tested on DELL Axim X50v/X51v PDAs. Using pbuffer is faster than using a portion of the framebuffer for rendering the low-resolution image [S1, unofficial]. Texture atlas usage has nearly no effect on rendering time (difference of 0.01 fps) [S1, unofficial].
+-   **Strengths:** Fast texture updates, reduced memory footprint, suitable for low-end mobile devices.
+-   **Limitations:** Blurred geometry, potential depth cue loss, limited by native application memory constraints, dependency on specific hardware capabilities (pbuffer support).
+-   **When to use:** Mobile devices with limited memory and processing power, interactive visualization requirements.
+-   **When not to use:** High-fidelity visualization requirements, hardware with sufficient memory and pbuffer support where standard techniques might be simpler.
 
 ## Background
-
-### Origin
-The method was proposed by Moser et al. as an approach for accelerating 2D slicing volume visualization on mobile devices [S1, unofficial]. It utilizes adaptive screen-resolution rendering and compressed palette textures with basic graphics hardware functionality such as rasterization and 2D texture mapping [S1, unofficial].
-
-### History and Development
-The approach was developed to address the challenges of running volume visualization on low-end client devices like mobile phones and PDAs, which have limited memory (e.g., 30 MB free for application software on DELL Axim devices) and computational power [S1, unofficial]. The implementation used Windows Mobile 5.0 and OpenGL ES 1.0 [S1, unofficial].
-
-### Usage
-It is primarily used in the context of volumetric medical images visualization on mobile devices [S1, unofficial].
+-   **Origin:** Proposed by Moser et al. [S1, unofficial].
+-   **Context:** Designed for accelerating 2D slicing volume visualization on mobile devices like PDAs (e.g., DELL Axim series) running Windows Mobile 5.0 [S1, unofficial].
+-   **Development:** Addressed the limitations of standard volume rendering on low-end clients by leveraging basic graphics hardware functionality (rasterization, 2D texture mapping) and adaptive screen-resolution rendering [S1, unofficial].
 
 ## Sources
-
 [S1] Volumetric Medical Images Visualization on Mobile Devices, http://hdl.handle.net/2099.1/11308, fetched 2026-10-26 (unofficial)

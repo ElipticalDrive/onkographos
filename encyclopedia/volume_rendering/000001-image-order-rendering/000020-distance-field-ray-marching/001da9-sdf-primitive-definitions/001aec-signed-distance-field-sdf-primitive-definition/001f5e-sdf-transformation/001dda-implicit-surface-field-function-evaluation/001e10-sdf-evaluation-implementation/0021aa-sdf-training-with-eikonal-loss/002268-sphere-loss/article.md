@@ -1,44 +1,42 @@
 # Sphere Loss
 
-Also called: Analytical Sphere Distance Loss, SDF Sphere Pretraining Loss
+Also called: Analytical Sphere Distance Loss, Neural SDF Pretraining with Sphere Loss, SDF Sphere Pretraining Loss
 
 ## Overview
-Sphere Loss is a regularization term used during the pretraining of Signed Distance Field (SDF) networks to initialize the implicit surface representation as a sphere [S1, unofficial][S2, unofficial]. It minimizes the mean squared error between the network's predicted SDF values and the analytical Euclidean distance to a sphere surface of a specified radius [S1, unofficial][S2, unofficial].
+Sphere Loss is a regularization term used during the pretraining phase of a Signed Distance Field (SDF) network to initialize the implicit surface representation as a sphere [S1, S2, unofficial]. It minimizes the mean squared error between the network's predicted SDF values and the analytical SDF of a sphere with a specified radius [S1, S2, unofficial]. This method provides a stable geometric prior, ensuring the network starts with a coherent shape before refining details with point cloud data and Eikonal regularization [S1, unofficial]. It is distinct from sibling methods like [MLP Distillation](4829-mlp-distillation.md) which may use teacher-student frameworks, or [SDF-Instant-NGP Training](10640-sdf-instant-ngp-training.md) which focuses on acceleration structures, by specifically enforcing a simple analytic ground truth for initialization [S1, S2, unofficial].
 
 ## How it works
-Sphere Loss operates by comparing the output of the SDF network against the ground-truth analytical SDF for a sphere [S2, unofficial]. It is typically applied during a pretraining phase before the network is trained on target point cloud data or images [S1, unofficial][S2, unofficial].
+Sphere Loss operates by sampling points within the training bounding box and comparing the neural network's output against the known distance to a sphere surface [S1, S2, unofficial].
 
 **Inputs and Outputs:**
 - **Inputs:**
-  - `points`: A tensor of 3D coordinates, shape $(N, 3)$, representing the query points [S1, unofficial][S2, unofficial].
-  - `signed_distance`: A tensor containing the network's predicted SDF values, indexed at `[..., 0]` [S1, unofficial].
-  - `radius`: The radius $r$ of the target sphere [S1, unofficial][S2, unofficial]. Default value is $1.0$ [S1, unofficial].
-- **Output:**
-  - A scalar loss value $\mathcal{L}_{\text{sphere}}$ [S1, unofficial][S2, unofficial].
+  - `points`: A tensor of 3D coordinates with shape $(N, 3)$, sampled uniformly within the training bounding box [S1, unofficial].
+  - `signed_distance`: A tensor containing the predicted SDF values from the neural network, typically indexed at `[..., 0]` [S1, unofficial].
+  - `radius` ($r$): The radius of the target sphere. Default is $1.0$ [S1, S2, unofficial].
+- **Outputs:**
+  - `loss`: A scalar value representing the mean squared error between predicted and analytical distances [S1, S2, unofficial].
 
 **Data Structures:**
-- Points are stored as floating-point coordinates $(x, y, z)$ [S1, unofficial][S2, unofficial].
-- Predicted SDF values are stored as floating-point scalars [S1, unofficial][S2, unofficial].
+- Points are stored as floating-point tensors $(x, y, z)$ [S1, unofficial].
+- SDF predictions are stored as floating-point tensors, often with an extra dimension for channel indexing [S1, unofficial].
 
-**Steps:**
-1. Extract the predicted SDF values from the input tensor. If the input is multi-channel, select the first channel: $f(x_i) = \text{signed\_distance}[i, 0]$ [S1, unofficial].
-2. Compute the L2 norm (Euclidean distance from the origin) for each point: $\|x_i\|_2 = \sqrt{x_i^2 + y_i^2 + z_i^2}$ [S1, unofficial][S2, unofficial].
-3. Compute the analytical SDF for a sphere centered at the origin with radius $r$: $d_i = \|x_i\|_2 - r$ [S1, unofficial][S2, unofficial].
-4. Calculate the difference between the predicted SDF and the analytical SDF: $\Delta_i = f(x_i) - d_i$ [S1, unofficial][S2, unofficial].
-5. Square the differences and compute the mean over all $N$ points [S1, unofficial][S2, unofficial].
+**Formulas:**
+The analytical signed distance from a point $\mathbf{p}_i$ to a sphere centered at the origin with radius $r$ is:
+$$ d_{\text{analytical}}(\mathbf{p}_i) = \| \mathbf{p}_i \|_2 - r $$
+where $\| \mathbf{p}_i \|_2$ is the L2 norm of the point coordinates [S1, S2, unofficial].
 
-**Formula:**
-The loss is defined as the Mean Squared Error (MSE) between the predicted SDF $\phi(x_i)$ (or $f(x_i)$) and the analytical sphere distance:
+The Sphere Loss is defined as the mean squared error:
+$$ \mathcal{L}_{\text{sphere}} = \frac{1}{N} \sum_{i=1}^{N} \left( \phi(\mathbf{p}_i) - (\| \mathbf{p}_i \|_2 - r) \right)^2 $$
+where:
+- $N$ is the number of sampled points [S1, S2, unofficial].
+- $\phi(\mathbf{p}_i)$ is the predicted SDF value at point $\mathbf{p}_i$ [S1, S2, unofficial].
+- $\| \mathbf{p}_i \|_2$ is the Euclidean norm of $\mathbf{p}_i$ [S1, S2, unofficial].
+- $r$ is the sphere radius [S1, S2, unofficial].
 
-$$
-\mathcal{L}_{\text{sphere}} = \frac{1}{N} \sum_{i=1}^{N} \left( \phi(x_i) - (\|x_i\|_2 - r) \right)^2
-$$
-
-Where:
-- $N$ is the number of points [S1, unofficial][S2, unofficial].
-- $\phi(x_i)$ or $f(x_i)$ is the predicted signed distance at point $x_i$ [S1, unofficial][S2, unofficial].
-- $\|x_i\|_2$ is the L2 norm of the point coordinates $x_i$ [S1, unofficial][S2, unofficial].
-- $r$ is the sphere radius [S1, unofficial][S2, unofficial].
+**Parameters:**
+- `pretrain_iters`: The number of optimization steps performed during this pretraining phase [S1, unofficial].
+- `batch_size`: The number of points sampled per optimization step [S1, unofficial].
+- `bounds`: The bounding box defining the sampling region for points [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -47,36 +45,96 @@ Where:
 import torch
 
 def sphere_loss(signed_distance: torch.Tensor, points: torch.Tensor, radius: float = 1.0) -> torch.Tensor:
-    # Extract predicted SDF values (first channel)
-    predicted_sdf = signed_distance[..., 0]
-    # Compute analytical sphere SDF: ||p|| - r
-    point_norms = torch.norm(points, dim=-1)
-    analytical_sdf = point_norms - radius
-    # Compute MSE
-    loss = torch.square(predicted_sdf - analytical_sdf).mean()
+    """
+    Computes the Sphere Loss between predicted SDF values and analytical sphere distances.
+    
+    Args:
+        signed_distance: Tensor of predicted SDF values, shape (..., 1) or (N,).
+                         If shape is (..., 1), extracts the first channel.
+        points: Tensor of 3D coordinates, shape (N, 3).
+        radius: Radius of the target sphere. Default 1.0.
+        
+    Returns:
+        Scalar loss value.
+    """
+    # Extract SDF values if they have an extra dimension
+    if signed_distance.dim() > 1:
+        sdf_values = signed_distance[..., 0]
+    else:
+        sdf_values = signed_distance
+        
+    # Compute analytical sphere distance: ||p|| - r
+    # torch.norm computes the L2 norm along the last dimension
+    analytical_distances = torch.norm(points, dim=-1) - radius
+    
+    # Compute Mean Squared Error
+    loss = torch.mean((sdf_values - analytical_distances) ** 2)
+    
     return loss
+
+def pretrain_sdf(model, optimizer, cfg):
+    """
+    Pretrains the SDF model using Sphere Loss.
+    
+    Args:
+        model: Neural network model with an implicit function.
+        optimizer: Optimizer for the model parameters.
+        cfg: Configuration object containing training parameters.
+    """
+    # Get configuration parameters
+    batch_size = cfg.training.batch_size
+    bounds = cfg.training.bounds
+    pretrain_iters = cfg.training.pretrain_iters
+    device = cfg.device # Assuming device is defined in cfg
+    
+    # Pretraining loop
+    for i in range(pretrain_iters):
+        # Sample random points uniformly within the bounding box
+        # Implementation detail: get_random_points generates N points in [bounds.min, bounds.max]
+        points = get_random_points(batch_size, bounds, device)
+        
+        # Query the implicit function for distances
+        # model.implicit_fn.get_distance returns tensor of shape (N, 1) or (N,)
+        distances = model.implicit_fn.get_distance(points)
+        
+        # Compute sphere loss against a unit sphere (or specified radius)
+        # Default radius is 1.0 as per source examples
+        loss = sphere_loss(distances, points, radius=1.0)
+        
+        # Optimization step
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 ```
 
-**Parameters:**
-- `radius`: The radius of the sphere. Typical value is $1.0$ [S1, unofficial].
-- `points`: Shape $(N, 3)$ [S1, unofficial][S2, unofficial].
-- `signed_distance`: Tensor of predicted SDF values, indexed at `[..., 0]` [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-- **Center Assumption:** The analytical formula $\|x_i\|_2 - r$ assumes the sphere is centered at the origin $(0,0,0)$ [S1, unofficial][S2, unofficial]. If the target sphere is centered elsewhere, the points must be translated relative to the center before computing the norm [G].
-- **Input Shape:** The implementation assumes the SDF is the first channel [S1, unofficial]. If the network outputs a scalar directly, indexing `[..., 0]` may fail or behave unexpectedly depending on the tensor rank [G].
-- **Precision:** For very large or very small radii, floating-point precision issues may arise in the norm calculation [G].
+- **Center Offset:** The analytical formula $\| \mathbf{p} \|_2 - r$ assumes the sphere is centered at the origin. If the target sphere has a different center $\mathbf{c}$, the formula becomes $\| \mathbf{p} - \mathbf{c} \|_2 - r$ [S1, unofficial]. The source code in [S1, unofficial] shows a `SphereSDF` class that supports a learnable `center` parameter, but the `sphere_loss` function itself typically assumes origin-centered spheres for pretraining simplicity [S1, S2, unofficial].
+- **Precision:** Floating-point precision issues may arise if the bounding box is very large or very small relative to the sphere radius. Normalizing coordinates to a standard range (e.g., $[-1, 1]$) is recommended [S1, unofficial].
+- **Degenerate Input:** If `points` are exactly on the sphere surface, the analytical distance is 0. The loss will penalize any non-zero prediction, which is correct behavior [S1, unofficial].
+
+## Subtopics
+
+### MLP Distillation
+Uses a teacher network to guide a student network, focusing on knowledge transfer rather than analytic ground truth [4829-mlp-distillation.md].
+
+### SDDF with Ellipsoidal Priors and Neural Residuals
+Extends the sphere concept to ellipsoids and uses neural residuals for complex shapes [10638-sddf-with-ellipsoidal-priors-and-neural-residuals.md].
+
+### SDF-Instant-NGP Training
+Focuses on training speed and memory efficiency using hash grids, rather than initialization priors [10640-sdf-instant-ngp-training.md].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources. [G]
-- **Memory Complexity:** Not given in the sources. [G]
-- **Strengths:** Not given in the sources. [G]
-- **Limitations:** Not given in the sources. [G]
-- **When to Use:** During the pretraining phase of an SDF network when initializing with a simple shape like a sphere [S1, unofficial][S2, unofficial].
-- **When Not to Use:** Not given in the sources. [G]
+- **Time Complexity:** $O(N)$ per iteration, where $N$ is the batch size (number of points). The cost is dominated by the forward pass of the neural network and the norm computation [S1, unofficial].
+- **Memory Complexity:** $O(N)$ for storing points and gradients during backpropagation [S1, unofficial].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales linearly with batch size. Larger batches provide more stable gradient estimates but require more memory [S1, unofficial].
+- **Strengths:** Provides a strong, simple prior that prevents the network from converging to trivial solutions (e.g., constant zero) early in training [S1, unofficial].
+- **Limitations:** Only effective for initializing spherical shapes. If the target geometry is not sphere-like, this prior may mislead the network [S1, unofficial].
+- **When to use:** During the pretraining phase before introducing point cloud data or Eikonal regularization [S1, unofficial].
+- **When not to use:** When the target shape is significantly non-spherical or when computational resources are extremely limited and pretraining is skipped [S1, unofficial].
 
 ## Background
-Sphere Loss is used in repositories such as `Neural_Surfaces` and `Neural-Volume-Rendering-and-Surface-Rendering` to pretrain SDF networks [S1, unofficial][S2, unofficial]. It is applied to regularize the predicted SDF to match the analytical SDF of a sphere with a specified radius [S1, unofficial].
+Sphere Loss was introduced in the context of neural surface reconstruction, specifically in the `Neural_Surfaces` repository by omkarchittar [S1, unofficial]. It is used to pretrain the Signed Distance Field (SDF) component of a neural implicit surface representation. The method is part of a pipeline that includes harmonic embedding, MLPs with input skips, and subsequent training with Eikonal loss and image-based losses [S1, unofficial]. The approach is also referenced in other repositories such as `Neural-Volume-Rendering-and-Surface-Rendering` by Fhz2346 [S2, unofficial]. The technique leverages the simplicity of the sphere's analytical SDF to provide a stable initialization for more complex shape learning [S1, S2, unofficial].
 
 ## Sources
 [S1] omkarchittar/Neural_Surfaces, https://github.com/omkarchittar/Neural_Surfaces, fetched 2026-10-26 (unofficial)

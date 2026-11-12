@@ -3,245 +3,244 @@
 Also called: TetWeave implicit surface reconstruction, TetWeave training
 
 ## Overview
-The TetWeave Optimization Pipeline is a differentiable optimization method that reconstructs a target 3D mesh from 2D multi-view images (masks, depth, and normals) by optimizing a set of 3D points, their Signed Distance Field (SDF) values, and spherical harmonic (SH) coefficients [S1, unofficial]. It distinguishes itself from sibling methods by coupling tetrahedralization-based surface extraction with differentiable rendering, allowing for joint optimization of geometry and appearance without explicit mesh parameterization during the early stages [S1, unofficial]. It builds on [TetWeave Late-Stage Optimization](2583-tetweave-late-stage-optimization.md) for the final refinement phase.
+The TetWeave Optimization Pipeline is a differentiable optimization method that reconstructs a target 3D mesh from 2D multi-view images (mask, depth, normals) by optimizing a set of 3D points, their Signed Distance Field (SDF) values, and spherical harmonic (SH) coefficients [S1, unofficial]. It builds on [TetWeave Late-Stage Optimization](2583-tetweave-late-stage-optimization.md) by including the initial phase where point positions and tetrahedral topology are also updated [S1, unofficial]. It is distinguished from sibling methods like [Implicit Surface Optimization](#implicit-surface-optimization) by its explicit use of tetrahedralization and marching tetrahedra for mesh extraction, rather than direct implicit surface parameterization [S3].
 
 ## How it works
-The pipeline operates in two distinct phases: a main stage where the tetrahedral grid topology is updated periodically, and a late stage where the topology is fixed to refine the scalar field and appearance.
+The pipeline optimizes three parameter sets: point positions, SDF values, and SH coefficients. It operates in two stages: a main stage where topology and geometry are updated, and a late stage where only the scalar field and features are refined [S1, unofficial].
 
 ### Inputs and Outputs
-*   **Inputs**: A set of multi-view images providing target masks, depth maps, and surface normals. Camera parameters for these views are also required.
-*   **Outputs**: A reconstructed 3D mesh (vertices and faces) and associated attributes (color/SH coefficients) representing the target object.
+**Inputs:**
+- Target multi-view images: mask, depth, and normal maps [S1, unofficial].
+- Camera parameters for the target views [S1, unofficial].
+- Configuration parameters: `accumulation_delaunay`, `spherical_harmonics.degree`, `resampling_dict`, `sampling_method`, and learning rates [S1, unofficial].
+
+**Outputs:**
+- Optimized point positions `x_nx3` [S1, unofficial].
+- Optimized SDF values `sdf` [S1, unofficial].
+- Optimized SH coefficients `sh_coefficients` [S1, unofficial].
+- Final mesh defined by vertices and faces, extracted via marching tetrahedra [S1, unofficial].
 
 ### Data Structures
-The optimization maintains three primary learnable parameters stored as `torch.nn.Parameter` objects:
-1.  **Point Positions (`x_nx3`)**: Shape $(N, 3)$, where $N$ is the number of points. Stores the 3D coordinates of the optimization points. Initialized randomly within a ball of radius $\sqrt{3}$ [S1, unofficial].
-2.  **SDF Values (`sdf`)**: Shape $(N,)$, scalar field values at each point. Initialized with random values [S1, unofficial].
-3.  **Spherical Harmonic Coefficients (`sh_coefficients`)**: Shape $(N, \text{num\_coeff})$, where $\text{num\_coeff} = (\text{degree} + 1)^2$. Stores the SH coefficients for color or feature encoding at each point. Initialized randomly [S1, unofficial].
-
-Additionally, the method maintains:
-*   **Tetrahedra (`tetrahedra`)**: Shape $(T, 4)$, indices of vertices forming each tetrahedron.
-*   **Mesh Vertices/Faces (`vertices`, `faces`)**: The extracted mesh geometry from marching tetrahedra.
+The parameters are stored as PyTorch `nn.Parameter` tensors [S1, unofficial]:
+- `x_nx3`: Shape `(N, 3)`, stores 3D coordinates of $N$ points. `requires_grad=True` [S1, unofficial].
+- `sdf`: Shape `(N,)`, stores scalar field values at each point. `requires_grad=True` [S1, unofficial].
+- `sh_coefficients`: Shape `(N, num_coeff)`, stores SH coefficients per point. `num_coeff = (degree + 1)**2`. `requires_grad=True` [S1, unofficial].
+- `tetrahedra`: Tensor of shape `(T, 4)`, where $T$ is the number of tetrahedra, defining the mesh topology [S1, unofficial].
 
 ### Parameters
-*   `accumulation_delaunay`: Integer. Frequency (in iterations) to re-tetrahedralize points. Controls how often the mesh topology is updated [S1, unofficial].
-*   `spherical_harmonics.degree`: Integer. Degree of SH used, must be between 0 and 4. Determines `num_coeff` [S1, unofficial].
-*   `resampling_dict`: Dictionary mapping iteration numbers to target point counts. Triggers resampling when the current iteration matches a key [S1, unofficial].
-*   `sampling_method`: String. Resampling strategy, either `"functional_density"` or `"error_density_gt"` [S1, unofficial].
-*   `lr_sdf`, `lr_x_nx3`, `lr_sh`: Learning rates for the AdamW optimizers associated with SDF, points, and SH coefficients, respectively [S1, unofficial].
-*   `mask_reg`, `depth_reg`, `normal_reg`, `sdf_reg`, `ODT_reg`, `triangle_angle_fairness_reg`: Weighting factors for the respective loss terms [S1, unofficial].
+- `accumulation_delaunay`: Integer. Frequency (in iterations) to re-tetrahedralize points. Controls how often the mesh topology is updated [S1, unofficial].
+- `spherical_harmonics.degree`: Integer. Degree of SH used for color/feature encoding. Must be between 0 and 4 [S1, unofficial].
+- `resampling_dict`: Dictionary mapping iteration numbers to target point counts. Triggers resampling when `iter` matches a key [S1, unofficial].
+- `sampling_method`: String. Resampling strategy. Options: `"functional_density"` or `"error_density_gt"` [S1, unofficial].
+- `lr_sdf`, `lr_x_nx3`, `lr_sh`: Learning rates for AdamW optimizers for SDF, points, and SH coefficients respectively [S1, unofficial].
 
-### Numbered Steps
+### Steps
+1. **Initialization**: Initialize `x_nx3` with $N$ points in a ball of radius $\sqrt{3}$. Initialize `sdf` with random values. Initialize `sh_coefficients` with shape `(N, (degree + 1)**2)` [S1, unofficial]. Create AdamW optimizers for each parameter set with specified learning rates [S1, unofficial].
+2. **Main Stage Loop**: Run for `conf.optimization.main_stage.iter` iterations [S1, unofficial].
+    a. Fetch target mask, depth, and normals for the current batch [S1, unofficial].
+    b. If `iter % accumulation_delaunay == 0`, call `tetrahedralize(x_nx3)` to compute new tetrahedra from the current point positions [S1, unofficial].
+    c. Otherwise, use the existing `tetrahedra` [S1, unofficial].
+    d. Call `marching_tetrahedra(x_nx3, tetrahedra, sdf, sh_coefficients, sh_deg)` to extract the mesh vertices and faces [S1, unofficial].
+    e. Render the mesh using `render_mesh` to obtain buffers: mask, depth, and normals [S1, unofficial].
+    f. Compute losses (see Formulas below) [S1, unofficial].
+    g. Perform backward pass to update SDF, SH, and point positions. Note: Point positions are updated every iteration, but topology is only recomputed every `accumulation_delaunay` iterations [S1, unofficial].
+    h. If `iter` is in `resampling_dict`, resample points to increase count using the specified `sampling_method` [S1, unofficial].
+3. **Late Stage Loop**: Run for remaining iterations [S1, unofficial].
+    a. Fix point positions `x_nx3` and tetrahedral grid `tetrahedra` [S1, unofficial].
+    b. Only optimize `sdf` and `sh_coefficients` [S1, unofficial].
+    c. Compute mesh via `marching_tetrahedra` and render for loss computation [S1, unofficial].
 
-1.  **Initialization**:
-    *   Initialize `x_nx3` with shape $(N, 3)$ uniformly in a ball of radius $\sqrt{3}$ [S1, unofficial].
-    *   Initialize `sdf` with shape $(N,)$ with random values [S1, unofficial].
-    *   Initialize `sh_coefficients` with shape $(N, \text{num\_coeff})$ with random values [S1, unofficial].
-    *   Create AdamW optimizers for each parameter set with specified learning rates [S1, unofficial].
-    *   Perform initial tetrahedralization of `x_nx3` to obtain `tetrahedra` [S1, unofficial].
+### Formulas
+Let $t_{iter} = \frac{iter}{total\_iter}$ [S1, unofficial].
 
-2.  **Main Stage Optimization**:
-    *   Iterate for `conf.optimization.main_stage.iter` iterations.
-    *   Fetch target mask, depth, and normals for the current batch of cameras [S1, unofficial].
-    *   **Topology Update Check**: If `iter % accumulation_delaunay == 0`:
-        *   Call `tetrahedralize(x_nx3)` to recompute `tetrahedra` based on current point positions [S1, unofficial].
-        *   *Note*: Point positions are updated in the backward pass of this iteration [S1, unofficial].
-    *   **Surface Extraction**:
-        *   If topology was updated or on every iteration, call `marching_tetrahedra(x_nx3, tetrahedra, sdf, sh_coefficients, sh_deg)` to extract mesh vertices and faces [S1, unofficial].
-    *   **Rendering**:
-        *   Render the extracted mesh using `render_mesh` to obtain buffers: mask, depth, and normals [S1, unofficial].
-    *   **Loss Computation**:
-        *   Compute the following losses:
-            *   **Mask Loss**:
-                $$ \mathcal{L}_{mask} = \left( \frac{1}{H \times W} \sum_{i,j} | \text{buffer}_{mask}[i,j] - \text{target}_{mask}[i,j] | \right) \times \text{mask\_reg} $$
-            *   **Depth Loss**:
-                $$ \mathcal{L}_{depth} = \left( \frac{1}{H \times W} \sum_{i,j} \sqrt{ (\text{buffer}_{depth}[i,j] - \text{target}_{depth}[i,j])^2 \cdot \text{target}_{mask}[i,j] + 10^{-8} } \right) \times \text{depth\_reg} $$
-            *   **Normal Loss**:
-                $$ \mathcal{L}_{normal} = \left( \frac{1}{H \times W} \sum_{i,j} \sqrt{ \| \text{buffer}_{normals}[i,j] - \text{target}_{normals}[i,j] \|^2 \cdot \text{target}_{mask}[i,j] + 10^{-8} } \right) \times \text{normal\_reg} $$
-            *   **SDF Regularization**:
-                *   Compute dynamic weight:
-                    $$ w_{sdf} = \text{sdf\_reg} - \left( \text{sdf\_reg} - \frac{\text{sdf\_reg}}{20} \right) \cdot \min\left(1.0, 4.0 \cdot \frac{\text{iter}}{\text{total\_iter}}\right) $$
-                *   Compute loss:
-                    $$ \mathcal{L}_{sdf\_reg} = \text{loss.sdf\_reg\_loss}(sdf, \text{edges}) \times w_{sdf} $$
-                    where `edges` are derived from `tetrahedra` (reshaped to $(-1, 2)$) [S1, unofficial].
-            *   **ODT Loss**:
-                $$ \mathcal{L}_{ODT} = \text{loss.E\_ODT}(x\_nx3, tetrahedra) \times \text{ODT\_reg} $$
-            *   **Triangle Angle Fairness Loss**:
-                $$ \mathcal{L}_{fairness} = \text{loss.triangle\_angle\_fairness}(vertices, faces) \times \text{triangle\_angle\_fairness\_reg} $$
-        *   Sum all losses to compute the total loss [S1, unofficial].
-    *   **Backward Pass**:
-        *   Perform backpropagation to update `sdf`, `sh_coefficients`, and `x_nx3` (if topology was updated) [S1, unofficial].
-    *   **Resampling**:
-        *   If `iter` is in `resampling_dict`, increase point count $N$ by concatenating new points and reassigning optimizer param groups to avoid stale gradients [S1, unofficial].
-        *   Resampling methods include `"functional_density"` (using a grid-based density function) or `"error_density_gt"` (using error maps from ground truth comparison) [S1, unofficial].
+**Mask Loss:**
+$$ L_{mask} = \text{mean}(|\text{buffers['mask']} - \text{target\_mask}|) \times \text{mask\_reg} $$
 
-3.  **Late Stage Optimization**:
-    *   Iterate for the remaining iterations.
-    *   Fix `x_nx3` and `tetrahedra` topology [S1, unofficial].
-    *   Only optimize `sdf` and `sh_coefficients` [S1, unofficial].
-    *   Compute mesh via `marching_tetrahedra` and render for loss computation as in the main stage, but without topology updates or point position gradients [S1, unofficial].
+**Depth Loss:**
+$$ L_{depth} = \text{mean}\left(\sqrt{\sum_{c} ((\text{buffers['depth']} - \text{target\_depth}) \times \text{target\_mask})^2 + 10^{-8}}\right) \times \text{depth\_reg} $$
+where the sum is over channels $c$ [S1, unofficial].
+
+**Normal Loss:**
+$$ L_{normal} = \text{mean}\left(\sqrt{\sum_{c} ((\text{buffers['normals\_face']} - \text{target\_normals}) \times \text{target\_mask})^2 + 10^{-8}}\right) \times \text{normal\_reg} $$
+where the sum is over channels $c$ [S1, unofficial].
+
+**SDF Regularization Weight:**
+$$ w_{sdf} = \text{sdf\_reg} - \left(\text{sdf\_reg} - \frac{\text{sdf\_reg}}{20}\right) \times \min(1.0, 4.0 \times t_{iter}) $$
+
+**SDF Regularization Loss:**
+$$ L_{sdf\_reg} = \text{mean}(\text{loss.sdf\_reg\_loss}(self.sdf, \text{edges.reshape}(-1, 2))) \times w_{sdf} $$
+where `edges` are derived from the tetrahedra [S1, unofficial].
+
+**ODT Loss:**
+$$ L_{ODT} = \text{loss.E\_ODT}(self.x\_nx3, \text{tetrahedra}) \times \text{ODT\_reg} $$
+
+**Triangle Angle Fairness Loss:**
+$$ L_{angle} = \text{loss.triangle\_angle\_fairness}(\text{vertices}, \text{faces}) \times \text{triangle\_angle\_fairness\_reg} $$
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def tetweave_optimization_pipeline(conf, initial_points, target_views):
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+def tetweave_optimization_pipeline(conf, targets, target_cameras):
     """
     Main optimization loop for TetWeave.
     """
     # 1. Initialization
-    N = initial_points.shape[0]
-    num_coeff = (conf.spherical_harmonics.degree + 1) ** 2
+    N = conf.initialization.num_points
+    degree = conf.spherical_harmonics.degree
+    num_coeff = (degree + 1)**2
     
-    # Initialize parameters
-    x_nx3 = torch.nn.Parameter(initial_points) # Shape (N, 3)
-    sdf = torch.nn.Parameter(torch.randn(N))   # Shape (N,)
-    sh_coefficients = torch.nn.Parameter(torch.randn(N, num_coeff)) # Shape (N, num_coeff)
+    # Initialize points in a ball of radius sqrt(3)
+    x_nx3 = nn.Parameter(torch.randn(N, 3) * (3**0.5))
+    sdf = nn.Parameter(torch.randn(N))
+    sh_coefficients = nn.Parameter(torch.randn(N, num_coeff))
     
     # Create optimizers
-    optimizer_x = torch.optim.AdamW([x_nx3], lr=conf.lr_x_nx3)
-    optimizer_sdf = torch.optim.AdamW([sdf], lr=conf.lr_sdf)
-    optimizer_sh = torch.optim.AdamW([sh_coefficients], lr=conf.lr_sh)
+    optimizer_x = optim.AdamW([x_nx3], lr=conf.optimization.lr_x_nx3)
+    optimizer_sdf = optim.AdamW([sdf], lr=conf.optimization.lr_sdf)
+    optimizer_sh = optim.AdamW([sh_coefficients], lr=conf.optimization.lr_sh)
     
-    # Initial tetrahedralization
-    tetrahedra = tetrahedralize(x_nx3)
+    # Initialize tetrahedra (e.g., via initial Delaunay)
+    tetrahedra = compute_initial_tetrahedra(x_nx3)
     
     total_main_iters = conf.optimization.main_stage.iter
-    total_iters = total_main_iters + conf.optimization.late_stage.iter
+    accumulation_delaunay = conf.optimization.main_stage.accumulation_delaunay
     
-    for iter in range(total_iters):
-        # Fetch target data
-        targets, target_cameras = get_next_batch(target_views)
+    for iter in range(total_main_iters):
+        # Fetch targets
         target_mask = targets["mask"]
         target_depth = targets["depth"]
         target_normals = targets["normals_face"]
         
-        # 2. Main Stage Logic
-        if iter < total_main_iters:
-            # Check if topology update is needed
-            if iter % conf.optimization.main_stage.accumulation_delaunay == 0:
-                # Re-tetrahedralize
-                tetrahedra = tetrahedralize(x_nx3)
-                # Note: x_nx3 gradients are enabled here
-            else:
-                # Use existing tetrahedra
-                pass
+        # Topology update check
+        if iter % accumulation_delaunay == 0:
+            # Re-tetrahedralize
+            tetrahedra = tetrahedralize(x_nx3)
+        
+        # Marching Tetrahedra
+        vertices, faces = marching_tetrahedra(x_nx3, tetrahedra, sdf, sh_coefficients, degree)
+        
+        # Render
+        buffers = render_mesh(vertices, faces, target_cameras)
+        
+        # Compute Losses
+        # Mask Loss
+        mask_loss = torch.abs(buffers['mask'] - target_mask).mean() * conf.loss.mask_reg
+        
+        # Depth Loss
+        depth_diff = (buffers["depth"] - target_depth) * target_mask
+        depth_loss = torch.sqrt((depth_diff**2).sum(dim=-1) + 1e-8).mean() * conf.loss.depth_reg
+        
+        # Normal Loss
+        normal_diff = (buffers['normals_face'] - target_normals) * target_mask
+        normal_loss = torch.sqrt((normal_diff**2).sum(dim=-1) + 1e-8).mean() * conf.loss.normal_reg
+        
+        # SDF Regularization
+        t_iter = iter / total_main_iters
+        sdf_weight = conf.loss.sdf_reg - (conf.loss.sdf_reg - conf.loss.sdf_reg/20) * min(1.0, 4.0 * t_iter)
+        edges = get_edges_from_tetrahedra(tetrahedra)
+        reg_sdf_loss = loss.sdf_reg_loss(sdf, edges.reshape(-1, 2)).mean() * sdf_weight
+        
+        # ODT Loss
+        odt_loss = loss.E_ODT(x_nx3, tetrahedra) * conf.loss.ODT_reg
+        
+        # Triangle Angle Fairness
+        triangle_angle_fairness_loss = loss.triangle_angle_fairness(vertices, faces) * conf.loss.triangle_angle_fairness_reg
+        
+        total_loss = mask_loss + depth_loss + normal_loss + reg_sdf_loss + odt_loss + triangle_angle_fairness_loss
+        
+        # Backward Pass
+        optimizer_x.zero_grad()
+        optimizer_sdf.zero_grad()
+        optimizer_sh.zero_grad()
+        total_loss.backward()
+        
+        optimizer_x.step()
+        optimizer_sdf.step()
+        optimizer_sh.step()
+        
+        # Resampling
+        if iter in conf.optimization.resampling_dict:
+            target_count = conf.optimization.resampling_dict[iter]
+            sampling_method = conf.optimization.sampling_method
+            x_nx3, sdf, sh_coefficients = resample_points(x_nx3, sdf, sh_coefficients, tetrahedra, target_count, sampling_method)
+            # Reassign optimizer param groups if necessary to handle new tensors
+            # [G] Implementation detail: Optimizers need to be updated with new parameter tensors if resampling creates new tensors.
             
-            # Marching Tetrahedra
-            vertices, faces = marching_tetrahedra(x_nx3, tetrahedra, sdf, sh_coefficients, conf.spherical_harmonics.degree)
-            
-            # Render
-            buffers = render_mesh(vertices, faces, target_cameras)
-            
-            # Compute Losses
-            # Mask Loss
-            mask_loss = (buffers['mask'] - target_mask).abs().mean() * conf.mask_reg
-            
-            # Depth Loss
-            depth_diff = buffers["depth"] - target_depth
-            depth_loss = (((depth_diff * target_mask)**2).sum(-1) + 1e-8).sqrt().mean() * conf.depth_reg
-            
-            # Normal Loss
-            normal_diff = buffers['normals_face'] - target_normals
-            normal_loss = (((normal_diff * target_mask)**2).sum(-1) + 1e-8).sqrt().mean() * conf.normal_reg
-            
-            # SDF Regularization
-            t_iter = iter / total_iters
-            sdf_weight = conf.sdf_reg - (conf.sdf_reg - conf.sdf_reg/20) * min(1.0, 4.0 * t_iter)
-            edges = tetrahedra.reshape(-1, 2)
-            reg_sdf_loss = loss.sdf_reg_loss(sdf, edges).mean() * sdf_weight
-            
-            # ODT Loss
-            odt_loss = loss.E_ODT(x_nx3, tetrahedra) * conf.ODT_reg
-            
-            # Triangle Angle Fairness Loss
-            triangle_angle_fairness_loss = loss.triangle_angle_fairness(vertices, faces) * conf.triangle_angle_fairness_reg
-            
-            # Total Loss
-            total_loss = mask_loss + depth_loss + normal_loss + reg_sdf_loss + odt_loss + triangle_angle_fairness_loss
-            
-            # Backward Pass
-            optimizer_x.zero_grad()
-            optimizer_sdf.zero_grad()
-            optimizer_sh.zero_grad()
-            total_loss.backward()
-            
-            optimizer_x.step()
-            optimizer_sdf.step()
-            optimizer_sh.step()
-            
-            # Resampling
-            if iter in conf.resampling_dict:
-                target_count = conf.resampling_dict[iter]
-                x_nx3, sdf, sh_coefficients = resample_points(x_nx3, sdf, sh_coefficients, tetrahedra, conf.sampling_method, target_count)
-                # Reassign optimizer param groups to include new tensors
-                optimizer_x = torch.optim.AdamW([x_nx3], lr=conf.lr_x_nx3)
-                optimizer_sdf = torch.optim.AdamW([sdf], lr=conf.lr_sdf)
-                optimizer_sh = torch.optim.AdamW([sh_coefficients], lr=conf.lr_sh)
-                
-        # 3. Late Stage Logic
-        else:
-            # Fix topology and points
-            with torch.no_grad():
-                # Ensure no gradients for x_nx3
-                x_nx3.requires_grad = False
-            
-            # Marching Tetrahedra (using fixed tetrahedra)
-            vertices, faces = marching_tetrahedra(x_nx3, tetrahedra, sdf, sh_coefficients, conf.spherical_harmonics.degree)
-            
-            # Render
-            buffers = render_mesh(vertices, faces, target_cameras)
-            
-            # Compute Losses (Mask, Depth, Normal, SDF Reg, ODT, Fairness)
-            # Note: ODT and Fairness might still be computed but gradients won't flow to x_nx3
-            mask_loss = (buffers['mask'] - target_mask).abs().mean() * conf.mask_reg
-            depth_diff = buffers["depth"] - target_depth
-            depth_loss = (((depth_diff * target_mask)**2).sum(-1) + 1e-8).sqrt().mean() * conf.depth_reg
-            normal_diff = buffers['normals_face'] - target_normals
-            normal_loss = (((normal_diff * target_mask)**2).sum(-1) + 1e-8).sqrt().mean() * conf.normal_reg
-            
-            t_iter = iter / total_iters
-            sdf_weight = conf.sdf_reg - (conf.sdf_reg - conf.sdf_reg/20) * min(1.0, 4.0 * t_iter)
-            edges = tetrahedra.reshape(-1, 2)
-            reg_sdf_loss = loss.sdf_reg_loss(sdf, edges).mean() * sdf_weight
-            
-            odt_loss = loss.E_ODT(x_nx3, tetrahedra) * conf.ODT_reg
-            triangle_angle_fairness_loss = loss.triangle_angle_fairness(vertices, faces) * conf.triangle_angle_fairness_reg
-            
-            total_loss = mask_loss + depth_loss + normal_loss + reg_sdf_loss + odt_loss + triangle_angle_fairness_loss
-            
-            # Backward Pass (only for sdf and sh)
-            optimizer_sdf.zero_grad()
-            optimizer_sh.zero_grad()
-            total_loss.backward()
-            
-            optimizer_sdf.step()
-            optimizer_sh.step()
-            
-            # Re-enable gradients for x_nx3 if needed for next stage or logging
-            x_nx3.requires_grad = True
-
-    return vertices, faces, sh_coefficients
+    # Late Stage
+    late_stage_iters = conf.optimization.total_iter - total_main_iters
+    for iter in range(late_stage_iters):
+        # Fix x_nx3 and tetrahedra
+        x_nx3.requires_grad = False
+        
+        # Marching Tetrahedra
+        vertices, faces = marching_tetrahedra(x_nx3, tetrahedra, sdf, sh_coefficients, degree)
+        
+        # Render
+        buffers = render_mesh(vertices, faces, target_cameras)
+        
+        # Compute Losses (same as above, but without ODT/Angle fairness if they depend on topology/positions, 
+        # though SDF reg and rendering losses remain)
+        # [G] Assuming ODT and Angle fairness are not computed in late stage as per "Fix point positions and tetrahedral grid"
+        # and "Only optimize SDF and SH coefficients".
+        
+        mask_loss = torch.abs(buffers['mask'] - target_mask).mean() * conf.loss.mask_reg
+        depth_diff = (buffers["depth"] - target_depth) * target_mask
+        depth_loss = torch.sqrt((depth_diff**2).sum(dim=-1) + 1e-8).mean() * conf.loss.depth_reg
+        normal_diff = (buffers['normals_face'] - target_normals) * target_mask
+        normal_loss = torch.sqrt((normal_diff**2).sum(dim=-1) + 1e-8).mean() * conf.loss.normal_reg
+        
+        t_iter = iter / late_stage_iters # Or relative to total? Source says t_iter = iter / total_iter in main stage.
+        # [G] Assuming t_iter continues to be calculated relative to total iterations for consistency, 
+        # or reset. Source formula uses t_iter = iter / total_iter.
+        t_iter_total = (total_main_iters + iter) / conf.optimization.total_iter
+        sdf_weight = conf.loss.sdf_reg - (conf.loss.sdf_reg - conf.loss.sdf_reg/20) * min(1.0, 4.0 * t_iter_total)
+        edges = get_edges_from_tetrahedra(tetrahedra)
+        reg_sdf_loss = loss.sdf_reg_loss(sdf, edges.reshape(-1, 2)).mean() * sdf_weight
+        
+        total_loss = mask_loss + depth_loss + normal_loss + reg_sdf_loss
+        
+        optimizer_sdf.zero_grad()
+        optimizer_sh.zero_grad()
+        total_loss.backward()
+        
+        optimizer_sdf.step()
+        optimizer_sh.step()
+        
+        x_nx3.requires_grad = True # Reset for next potential run or cleanup
+        
+    return x_nx3, sdf, sh_coefficients, vertices, faces
 ```
 
 ### Edge Cases and Pitfalls
-*   **NaN/Inf in Losses**: Depth and normal losses add $10^{-8}$ before the square root to prevent NaN or infinity values when denominators are zero or values are negative [S1, unofficial].
-*   **Resampling Stale Gradients**: When resampling increases the point count, new tensors are concatenated. The optimizer param groups must be reassigned to ensure gradients are computed for the new points [S1, unofficial].
-*   **Boundary Conditions**: Points outside any tetrahedron receive an index of -1 and zero barycentric coordinates, which may affect interpolation if not handled correctly in the rendering step [S1, unofficial].
-*   **SH Degree**: The SH degree must be between 0 and 4; higher degrees are not supported by the current implementation [S1, unofficial].
+- **NaN/Inf in Losses**: Depth and normal losses add $10^{-8}$ before the square root to prevent NaN/inf from zero denominators or negative values [S1, unofficial].
+- **Resampling**: Resampling dynamically increases point count by concatenating new tensors. Optimizer param groups must be updated to avoid stale gradients [S1, unofficial].
+- **Symmetry**: If initialized in a symmetric configuration (e.g., center of a torus), a rotated camera view may be necessary to break symmetry and avoid local minima [S3].
+
+## Subtopics
+
+### Voromesh Co-planarity Prevention
+Applies a very small Centroidal Voronoi Tessellation (CVT) regularization term during mesh extraction to prevent co-planarity of sites [S2]. This is necessary because unconverged SDF representations frequently produce co-planar configurations in the final site distribution, which are not supported by gDel3D [S2]. This increases runtime because Delaunay triangulation must be recomputed at every iteration [S2]. CGAL can be used as an alternative to gDel3D for mesh extraction to handle co-planar configurations [S2].
+
+### Implicit Surface Optimization
+Fits an image of a torus using an implicit surface parameterized by spheres, demonstrating handling of topology changes [S3]. Two parameterizations are shown: Swept Sphere (ring radius $r_2$, sphere radius $r_1$) and Random Spheres (union of 200 spheres with individual radii and 2-D positions) [S3]. The loss is mean-absolute error between rendering and target, optimized with Adam for 400 iterations [S3]. Unlike MeshSDF, this method does not rely on a deep neural network to compute gradients, allowing any implicit surface parameterization that can be evaluated on a grid [S3].
 
 ## Operating characteristics
-*   **Time Complexity**: Dominated by the tetrahedralization step ($O(N \log N)$ or similar depending on the algorithm) and the marching tetrahedra step ($O(T)$ where $T$ is the number of tetrahedra). Rendering is $O(P)$ where $P$ is the number of pixels. The method is iterative, so total time is proportional to the number of iterations.
-*   **Memory Complexity**: $O(N + T + P)$. Stores point positions, SDF, SH coefficients, tetrahedra, and rendered buffers.
-*   **Measured Performance**: Not given in the sources.
-*   **Scaling**: The method scales with the number of points $N$ and views. Resampling allows dynamic adjustment of $N$ to balance detail and performance.
-*   **Strengths**: Joint optimization of geometry and appearance; flexible topology updates; differentiable rendering allows gradient-based optimization from 2D cues.
-*   **Limitations**: Computationally expensive due to repeated tetrahedralization and marching tetrahedra; sensitive to initialization and hyperparameters (e.g., `accumulation_delaunay`); requires multi-view inputs.
-*   **When to use**: When reconstructing 3D meshes from multi-view images with implicit surface representations and differentiable rendering is desired.
-*   **When not to use**: When real-time performance is critical or only single-view input is available.
+- **Time Complexity**: The main stage involves iterative tetrahedralization and marching tetrahedra, which are computationally expensive. Re-tetrahedralization every `accumulation_delaunay` iterations adds significant overhead [S1, unofficial]. Voromesh co-planarity prevention further increases runtime by requiring Delaunay triangulation at every iteration [S2].
+- **Memory Complexity**: Scales with the number of points $N$ and tetrahedra $T$. Resampling increases $N$ dynamically [S1, unofficial].
+- **Strengths**: Handles topology changes effectively [S3]. Uses differentiable rendering for direct image-space supervision [S1, unofficial].
+- **Limitations**: Computationally intensive due to repeated mesh extraction and tetrahedralization [S1, unofficial][S2]. Sensitive to initialization symmetry [S3].
+- **When to use**: When reconstructing complex 3D meshes from multi-view images with varying topology [S1, unofficial][S3].
+- **When not to use**: When real-time performance is critical due to high computational cost [S1, unofficial][S2].
 
 ## Background
-The TetWeave Optimization Pipeline is part of the TetWeave framework, which uses tetrahedralization for implicit surface reconstruction. It was developed by Alexandre Binninger [S1, unofficial]. The method leverages differentiable rendering to optimize a set of points and their associated scalar fields to match 2D image observations.
+The TetWeave Optimization Pipeline is part of the TetWeave framework, which uses tetrahedralization and differentiable rendering for 3D reconstruction [S1, unofficial]. The method was developed by Alexandre Binninger [S1, unofficial]. Implicit surface optimization techniques using differentiable rendering have been explored in earlier work, such as the 2021 paper on differentiable surface rendering via non-differentiable sampling [S3].
 
 ## Sources
 [S1] AlexandreBinninger/TetWeave, https://github.com/AlexandreBinninger/TetWeave, fetched 2026-10-27 (unofficial)
+[S2] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26
+[S3] Differentiable Surface Rendering via Non-Differentiable Sampling, https://doi.org/10.1109/iccv48922.2021.00603, fetched 2026-10-26

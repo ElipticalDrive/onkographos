@@ -3,59 +3,145 @@
 Also called: Slice and Voxel Supervision Curriculum
 
 ## Overview
-This method addresses the instability and structural incompleteness inherent in optimizing 3D Gaussian representations for volumetric data by enforcing a structured curriculum of supervision signals [S1]. It solves the problem where random voxel sampling leads to unstable global approximation and slice-only supervision lacks global spatial guidance [S1]. It sets itself apart from siblings like [Hybrid Coarse-to-Fine Strategy](7173-hybrid-coarse-to-fine-strategy.md) by explicitly alternating between planar (slice) and volumetric (voxel) constraints to align with shear-warp rendering, rather than relying solely on geometric density metrics [S1].
+This method stabilizes the training of Gaussian volumetric representations by decoupling the learning of global spatial structure from local geometric details. It solves the instability caused by random initialization and the lack of global guidance in pure slice-based optimization. Unlike [Hybrid Coarse-to-Fine Strategy](7173-hybrid-coarse-to-fine-strategy.md) which relies on geometric splitting, this approach uses a temporal curriculum of supervision signals: it begins with structured slice constraints to establish local continuity, then transitions to sparse voxel supervision to enforce global volumetric consistency.
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A set of 3D volumetric data (e.g., MRI, Cryosection) and a camera view.
-*   **Output:** Optimized Gaussian kernels $G = \{G_1, G_2, \dots, G_m\}$ representing the volume.
+The method optimizes a set of Gaussian kernels $G = \{G_1, G_2, \dots, G_m\}$ initialized at sampled voxel positions. Each Gaussian $G_i$ has learnable parameters: mean $\mu_i$, covariance $\Sigma_i$, opacity $\alpha_i$, and spherical harmonics coefficients for color [S1].
+
+**Inputs:**
+*   Volumetric dataset (e.g., MRI, Cryosection) represented as a voxel grid.
+*   Camera poses for target views.
+
+**Outputs:**
+*   Optimized Gaussian parameters $\{G_i\}$.
+*   Rendered images via Shear-Warp rendering.
 
 **Data Structures:**
-*   **Gaussian Kernel $G_i$:** Defined by mean $\mu_i \in \mathbb{R}^3$, covariance $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (or rotation/scale parameters), opacity $\alpha_i$, and color $c_i$ [S1].
-*   **Voxel Grid:** The underlying discrete volume from which samples are drawn.
+*   **Gaussian Set:** List of $m$ Gaussians.
+*   **Voxel Grid:** 3D array of original intensity values.
+*   **Sampling State:** Boolean flag indicating current curriculum stage (Slice or Voxel).
 
-**Steps:**
-1.  **Initialization:** Initialize one Gaussian kernel centered at each sampled voxel position [S1].
-2.  **Phase 1: Slice Supervision:**
-    *   In each training iteration, sample a plane with arbitrary orientation [S1].
-    *   Select sparse pixels on the sampled plane [S1].
-    *   Map each selected pixel to a 3D voxel coordinate [S1].
-    *   Render the view using these slice-aligned Gaussians and compute loss against the ground truth image [S1].
-    *   *Note:* This phase incorporates finer structural details through planar constraints [S1].
-3.  **Phase 2: Voxel Supervision:**
-    *   After establishing initial structural continuity, introduce voxel supervision [S1].
-    *   Sample voxels using a dense approximation strategy (e.g., MCE or uniform dense sampling) to provide global spatial guidance [S1].
-    *   Compute loss based on the rendered volume against the ground truth voxel intensities or derived images [S1].
-4.  **Optimization:** Update Gaussian parameters ($\mu, \Sigma, \alpha, c$) using gradient descent [S1].
+**Algorithm Steps:**
 
-**Formulas:**
-The rendering process aligns with shear-warp volume rendering, which generates images from stacks of 2D slices extracted from a 3D volume [S1]. The loss function $\mathcal{L}$ combines reconstruction error:
-$$ \mathcal{L} = \mathcal{L}_{\text{slice}} + \mathcal{L}_{\text{voxel}} $$
-Where $\mathcal{L}_{\text{slice}}$ is computed on the sampled planar pixels and $\mathcal{L}_{\text{voxel}}$ on the sparse voxel samples [S1].
+1.  **Initialization:**
+    *   Sample $m$ voxel positions from the input volume.
+    *   Initialize one Gaussian kernel $G_i$ at each sampled position $p_i$.
+    *   Set initial covariance $\Sigma_i$ based on local voxel spacing or a fixed small value.
+    *   Set initial opacity $\alpha_i$ to a small value (e.g., 0.1).
+    *   Set initial color based on voxel intensity.
+    *   Set curriculum stage $S = \text{Slice}$.
+
+2.  **Training Loop:**
+    *   For each training iteration $t$:
+        *   **Stage 1: Slice Supervision (Global Structure & Local Continuity)**
+            *   Sample a plane with arbitrary orientation $\mathcal{P}$.
+            *   Select sparse pixels on $\mathcal{P}$.
+            *   For each selected pixel $u$:
+                *   Map $u$ to a 3D voxel coordinate $v$ in the volume.
+                *   Render the view through the Gaussian representation using Shear-Warp rendering to get predicted color $C_{pred}$.
+                *   Compute loss $\mathcal{L}_{slice} = \| C_{pred} - C_{target} \|^2$.
+                *   Backpropagate to update Gaussian parameters.
+            *   *Note:* This stage runs until a predefined schedule or convergence criterion is met. It aligns with the Shear-Warp renderer's stack-of-slices nature [S1].
+
+        *   **Stage 2: Sparse Voxel Supervision (Global Spatial Guidance)**
+            *   Switch stage $S = \text{Voxel}$.
+            *   Sample a sparse set of voxels $\mathcal{V}_{sparse}$ from the volume.
+            *   For each voxel $v \in \mathcal{V}_{sparse}$:
+                *   Compute the contribution of Gaussians to the voxel's color/intensity.
+                *   Compute loss $\mathcal{L}_{voxel} = \| I_{pred}(v) - I_{target}(v) \|^2$.
+                *   Backpropagate to update Gaussian parameters.
+            *   *Note:* This provides global spatial guidance that slice supervision alone lacks [S1].
+
+3.  **Optimization:**
+    *   Use an optimizer (e.g., Adam) to minimize the combined loss.
+    *   In Stage 1, loss is primarily $\mathcal{L}_{slice}$.
+    *   In Stage 2, loss is primarily $\mathcal{L}_{voxel}$.
+    *   The transition is abrupt or gradual based on the curriculum schedule [S1].
 
 **Parameters:**
-*   **Sampling Strategy:** Sparse pixels for slices; sparse/dense voxels for volume [S1].
-*   **Curriculum Order:** Slice first, then Voxel [S1].
+*   **Number of Gaussians ($m$):** Not given in the sources.
+*   **Slice Sampling Rate:** Sparse pixels per plane. Not given in the sources.
+*   **Voxel Sampling Rate:** Sparse voxels per iteration. Not given in the sources.
+*   **Curriculum Schedule:** Duration of Stage 1. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Slice-only (A4):** Limits accurate reconstruction of the full volumetric structure due to lack of global spatial guidance [S1].
-*   **Random Voxel First (A2):** Leads to unstable global approximation and destabilizes learning [S1].
-*   **Random Slices then Random Voxel (A3):** Results in unstable learning of volumetric structure because slice supervision is introduced before stable global voxel constraints are established [S1].
+*   **Random Voxel Sampling:** Using random voxel sampling *before* slice supervision (A3) or *with* random slice supervision leads to unstable global approximation and destabilizes learning [S1].
+*   **Slice-Only Training:** Using only slice supervision (A4) limits accurate reconstruction of the full volumetric structure due to lack of global spatial guidance [S1].
+*   **Precision:** Mapping 2D pixels to 3D voxel coordinates requires accurate camera calibration and volume geometry [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_gaussian_volume(volume_data, camera_poses, curriculum_schedule):
+    # Initialize Gaussians from sparse voxel samples
+    voxel_positions = sample_sparse_voxels(volume_data, count=10000) # [G]
+    gaussians = [Gaussian(pos) for pos in voxel_positions]
+    
+    # Curriculum stages
+    stage = "slice"
+    
+    for iteration in range(curriculum_schedule.total_iterations):
+        if iteration < curriculum_schedule.slice_duration:
+            stage = "slice"
+        else:
+            stage = "voxel"
+            
+        if stage == "slice":
+            # Sample arbitrary plane
+            plane = sample_arbitrary_plane()
+            # Select sparse pixels on plane
+            pixels = sample_sparse_pixels(plane)
+            
+            loss = 0
+            for pixel in pixels:
+                # Map pixel to 3D voxel coordinate
+                voxel_coord = map_pixel_to_voxel(pixel, camera_poses)
+                
+                # Render using Shear-Warp
+                pred_color = shear_warp_render(gaussians, camera_poses, voxel_coord)
+                target_color = volume_data[voxel_coord]
+                
+                loss += mse_loss(pred_color, target_color)
+            
+            # Backpropagate
+            update_gaussians(gaussians, loss)
+            
+        elif stage == "voxel":
+            # Sample sparse voxels
+            sparse_voxels = sample_sparse_voxels(volume_data, count=5000) # [G]
+            
+            loss = 0
+            for voxel in sparse_voxels:
+                # Compute voxel intensity from Gaussians
+                pred_intensity = compute_voxel_intensity(gaussians, voxel)
+                target_intensity = volume_data[voxel]
+                
+                loss += mse_loss(pred_intensity, target_intensity)
+            
+            # Backpropagate
+            update_gaussians(gaussians, loss)
+            
+    return gaussians
+```
 
 ## Subtopics
 
 ### Curriculum Learning with Sparse Voxel and Slice Sampling
-This variant explicitly defines the sampling mechanism to align with shear-warp rendering [S1]. It uses sparse voxels for global coverage and slice samples for spatially correlated regions encoding geometric structure and texture continuity [S1]. The procedure involves: (1) sampling a plane with arbitrary orientation in each iteration; (2) selecting sparse pixels on that plane; (3) mapping each pixel to a 3D voxel coordinate [S1]. This ensures the Gaussian representation learns spatial continuity across neighboring regions [S1].
+This variant explicitly defines the sampling strategy. Sparse voxels provide global coverage of the volume, while slice samples capture spatially correlated regions that encode geometric structure and texture continuity. This aligns with shear-warp volume rendering, which generates images from stacks of 2D slices extracted from a 3D volume. In each iteration, a plane with arbitrary orientation is sampled, sparse pixels are selected, and each pixel is mapped to a 3D voxel coordinate [S1].
 
 ## Operating characteristics
-*   **Performance:** Combining both slice and voxel supervision yields higher PSNR and SSIM than using only slice supervision (A4) [S1].
-*   **Stability:** Random voxel sampling alone (A2) or in the wrong order (A3) destabilizes optimization [S1]. MCE-based voxel sampling (A5) stabilizes optimization but lacks the structured planar constraints of slices, resulting in lower performance in rendered views [S1].
-*   **Applicability:** Suitable for multimodal volumetric datasets including MRI and Cryosection volumes [S1].
-*   **Strengths:** Enables efficient learning of both global volumetric consistency and local anatomical details [S1]. Supports real-time selective visualization [S1].
-*   **Limitations:** Requires careful sequencing of supervision signals; incorrect ordering leads to unstable learning [S1].
+*   **Time Complexity:** Depends on the number of Gaussians $m$ and the number of sampled pixels/voxels per iteration. Shear-Warp rendering is $O(m)$ per pixel/voxel.
+*   **Memory Complexity:** $O(m)$ to store Gaussian parameters.
+*   **Performance:** Combining both slice and voxel supervision yields higher PSNR/SSIM than using only slice supervision (A4) or random voxel sampling [S1].
+*   **Strengths:** Stabilizes optimization; aligns with Shear-Warp rendering; captures both global structure and local details.
+*   **Limitations:** Requires careful scheduling of the curriculum; random voxel sampling can destabilize learning if not used correctly [S1].
+*   **When to Use:** When training Gaussian representations for volumetric data (e.g., medical imaging) where global consistency and local detail are both critical.
+*   **When Not to Use:** When computational resources are extremely limited and only local details are needed; or when the rendering pipeline does not support Shear-Warp rendering.
 
 ## Background
-Originating from research on Gaussian Volumetric Representation for Efficient Shear-Warp Visualization [S1], this method leverages the alignment between shear-warp rendering (which operates on stacks of 2D slices) and curriculum learning [S1]. It was developed to enable efficient reconstruction and visualization of volumetric medical data [S1].
+Originated in "Gaussian Volumetric Representation for Efficient Shear-Warp Visualization" (2024) [S1]. The method addresses the challenge of efficiently reconstructing and visualizing volumetric medical data (MRI, Cryosection) using Gaussian kernels. It leverages the curriculum learning framework to progressively train the Gaussian representation, combining sparse voxel sampling with structured slice-based sampling. This approach enables the Gaussian representation to efficiently learn both global volumetric consistency and local anatomical details, supporting real-time selective visualization [S1].
 
 ## Sources
 [S1] Gaussian Volumetric Representation for Efficient Shear-Warp Visualization, https://doi.org/10.1007/978-3-032-37461-5_35, fetched 2026-10-26

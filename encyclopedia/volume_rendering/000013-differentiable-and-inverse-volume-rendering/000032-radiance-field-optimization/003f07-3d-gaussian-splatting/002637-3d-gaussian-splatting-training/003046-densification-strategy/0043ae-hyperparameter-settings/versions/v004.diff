@@ -1,0 +1,225 @@
+--- v003.md
++++ v004.md
+@@ -4,117 +4,124 @@
+ 
+ ## Overview
+-Hyperparameter settings define the numerical configuration for the optimizer, learning rates, and regularization terms used during the training of 3D Gaussian Splatting variants. These settings are critical for stabilizing the optimization process, particularly in physically-based inverse rendering where material-lighting ambiguities and geometric errors can lead to gradient overflow. This article consolidates specific hyperparameter values from [S1] and [S2, unofficial], focusing on the Adam optimizer configuration, per-parameter learning rates, and regularization strengths required to prevent instability caused by erroneous Gaussians.
++Hyperparameter settings define the numerical configuration for the optimizer, learning rates, and regularization terms used during the training of 3D Gaussian Splatting (3DGS) and its variants. These settings are critical for stabilizing the optimization process, preventing gradient overflow, and ensuring convergence to a physically plausible or high-fidelity reconstruction. They differ from sibling methods like [Score-based Densification](4705-score-based-densification.md) by focusing on the *magnitude* and *decay* of updates rather than the *structural* modification of the Gaussian set, though they operate concurrently within the training loop.
+ 
+ ## How it works
+-The training process relies on a differentiable rasterizer and an optimizer (typically Adam) to update Gaussian parameters (position, scale, opacity, color, etc.) and potentially auxiliary networks (MLPs). The stability of this process depends heavily on the balance between learning rates and regularization penalties.
++The method configures the optimization landscape through three primary components: the optimizer algorithm, per-parameter learning rates, and regularization weights.
+ 
+-### Inputs and Outputs
+-*   **Inputs:**
+-    *   Ground truth images (RGB, and optionally depth/ToF).
+-    *   Camera poses and intrinsics.
+-    *   Initial set of 3D Gaussians.
+-    *   Hyperparameter configuration (learning rates, regularization weights, optimizer constants).
+-*   **Outputs:**
+-    *   Optimized Gaussian attributes (means, covariances, opacities, spherical harmonics coefficients).
+-    *   Optimized material properties (base color, metallic, roughness) if performing inverse rendering.
+-    *   Optimized lighting coefficients (direct/indirect SH) if performing inverse rendering.
++**Inputs and Outputs**
++*   **Inputs:** Model parameters (positions, scales, opacities, SH coefficients, material properties), loss functions (reconstruction, smoothness, regularization), and hyperparameter constants.
++*   **Outputs:** Updated model parameters after one or more optimization steps.
+ 
+-### Data Structures
+-The parameters are stored in GPU buffers. The specific layout depends on the variant (standard 3DGS vs. Phys3DGS).
+-*   **Standard 3DGS Parameters:** Position (3), Scale (3), Rotation (4, quaternion), Opacity (1), Color SH (variable, e.g., 45 for deg 2).
+-*   **Phys3DGS Parameters:** Adds Base Color (3), Metallic (1), Roughness (1), Normal Rotation (4, quaternion), Direct Light SH, Indirect Light SH, Visibility SH.
+-*   **MLP Weights:** If a deformation network is used, weights are stored in standard tensor format.
++**Data Structures**
++The hyperparameters are stored as scalar constants or vectors indexed by parameter type.
++*   **Optimizer State:** For Adam, this includes exponential moving averages of gradients ($m$) and squared gradients ($v$) for each parameter tensor [S1][S2, unofficial].
++*   **Learning Rate Vector:** A mapping from parameter name to scalar learning rate $\eta$ [S2, unofficial].
++*   **Regularization Weights:** Scalars $\lambda$ for each regularization term [S2, unofficial].
+ 
+-### Numbered Steps
++**Numbered Steps**
+ 1.  **Initialization:**
+-    *   Initialize Gaussian attributes based on the densification strategy.
+-    *   Initialize auxiliary parameters (e.g., reflectivity, MLP weights) to small values to ensure stable optimization [S1].
+-    *   Set initial learning rates for each parameter group.
+-2.  **Forward Pass:**
+-    *   Render the scene using the differentiable rasterizer to produce predicted images $I'$.
+-    *   Compute the loss $L$ between predicted images and ground truth $I$.
+-3.  **Backward Pass:**
+-    *   Compute gradients $\nabla \theta$ for all learnable parameters $\theta$.
+-4.  **Optimizer Update:**
+-    *   Update parameters using the Adam optimizer with the configured hyperparameters.
+-5.  **Regularization Application:**
+-    *   Apply smoothness regularizers to material properties (base color, metallic, roughness) to prevent high-frequency noise and instability [S2, unofficial].
++    *   Initialize model parameters. For deformable models, layer weights are initialized from a normal distribution with $\sigma = 10^{-5}$ to ensure small initial deformations [S1].
++    *   Initialize reflectivity to $0.1$ [S1].
++2.  **Loss Computation:**
++    *   Compute the primary reconstruction loss (e.g., RGB, C-ToF) and auxiliary losses (smoothness, regularization) [S1][S2, unofficial].
++3.  **Gradient Calculation:**
++    *   Compute gradients $\nabla_\theta L$ for all learnable parameters $\theta$ via backpropagation [S1][S2, unofficial].
++4.  **Regularization Application:**
++    *   Add regularization terms to the loss or gradients. For Phys3DGS, smoothness regularizers are applied to base color, metallic, and roughness [S2, unofficial].
++    *   If a Gaussian behaves abnormally (e.g., extreme scale/opacity), it can cause visibility interference and gradient overflow in SH coefficients or opacity [S2, unofficial]. High regularization weights ($\lambda_o, \lambda_{sc}, \lambda_{sr} = 1.0$) are used to mitigate this instability [S2, unofficial].
++5.  **Parameter Update (Adam):**
++    *   Update the exponential moving averages:
++        $$ m_t = \beta_1 m_{t-1} + (1 - \beta_1) g_t $$
++        $$ v_t = \beta_2 v_{t-1} + (1 - \beta_2) g_t^2 $$
++    *   Apply bias correction and update parameters:
++        $$ \hat{m}_t = \frac{m_t}{1 - \beta_1^t}, \quad \hat{v}_t = \frac{v_t}{1 - \beta_2^t} $$
++        $$ \theta_{t+1} = \theta_t - \eta \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon} $$
++    *   Where $g_t$ is the gradient, $\eta$ is the learning rate for the specific parameter, and $\beta_1, \beta_2, \epsilon$ are optimizer hyperparameters [S1][S2, unofficial].
++6.  **Learning Rate Decay (Optional):**
++    *   For MLP parameters in deformable models, decay the learning rate exponentially from $\gamma_{MLP} = 0.0008$ to $1.6 \times 10^{-6}$ over 60,000 iterations [S1].
+ 
+-### Formulas
+-**Adam Optimizer Update:**
+-For each parameter $\theta_t$ at step $t$:
+-$$ m_t = \beta_1 m_{t-1} + (1 - \beta_1) g_t $$
+-$$ v_t = \beta_2 v_{t-1} + (1 - \beta_2) g_t^2 $$
+-$$ \hat{m}_t = \frac{m_t}{1 - \beta_1^t}, \quad \hat{v}_t = \frac{v_t}{1 - \beta_2^t} $$
+-$$ \theta_{t+1} = \theta_t - \frac{\eta}{\sqrt{\hat{v}_t} + \epsilon} \hat{m}_t $$
+-Where:
+-*   $g_t$ is the gradient.
+-*   $\eta$ is the learning rate for the specific parameter group.
+-*   $\beta_1, \beta_2$ are exponential decay rates for moment estimates.
+-*   $\epsilon$ is a small constant for numerical stability.
++**Formulas and Parameters**
++*   **Optimizer:** Adam with $\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon = 10^{-15}$ [S1][S2, unofficial].
++*   **Loss Weights:** $\alpha = 5$ (1 for synthetic scenes) for C-ToF loss, $\beta = 0.0008$ for color loss [S1].
++*   **Regularization Strengths ($\lambda_{smooth}$):**
++    *   Base Color: $0.06$ [S2, unofficial].
++    *   Roughness: $0.02$ [S2, unofficial].
++    *   Metallic: $0.02$ [S2, unofficial].
++    *   Other regularizers ($\lambda_o, \lambda_{sc}, \lambda_{sr}$): $1.0$ [S2, unofficial].
++*   **Learning Rates ($\eta$):**
++    *   Position: $1.6 \times 10^{-4}$ [S2, unofficial].
++    *   Color SH: $2.5 \times 10^{-3}$ [S2, unofficial].
++    *   Scale: $5 \times 10^{-3}$ [S2, unofficial].
++    *   Opacity: $5 \times 10^{-2}$ [S2, unofficial].
++    *   Base Color: $1 \times 10^{-2}$ [S2, unofficial].
++    *   Metallic: $1 \times 10^{-2}$ [S2, unofficial].
++    *   Roughness: $1 \times 10^{-2}$ [S2, unofficial].
++    *   Normal Rotation: $1 \times 10^{-3}$ [S2, unofficial].
++    *   Direct Light SH (deg=0): $2.5 \times 10^{-3}$ [S2, unofficial].
++    *   Direct Light SH (deg>0): $1 \times 10^{-4}$ [S2, unofficial].
++    *   Indirect Light SH (deg=0): $2.5 \times 10^{-4}$ [S2, unofficial].
++    *   Indirect Light SH (deg>0): $1 \times 10^{-3}$ [S2, unofficial].
++    *   Visibility SH: $0.1$ [S2, unofficial].
++    *   Reflectivity: $\gamma_r = 0.00016$ [S1].
+ 
+-**Smoothness Regularization (Phys3DGS):**
+-The loss includes smoothness terms for material properties:
+-$$ L_{smooth} = \lambda_{smooth} \sum_{i} \text{Smoothness}(\theta_i) $$
+-Where $\theta_i$ represents base color, metallic, or roughness [S2, unofficial].
++**Pseudocode**
++```python
++def update_parameters(params, gradients, optimizer_state, step, hyperparams):
++    """
++    Updates 3DGS parameters using Adam optimizer with specific learning rates and regularization.
++    """
++    beta1 = hyperparams['beta1']  # 0.9
++    beta2 = hyperparams['beta2']  # 0.999
++    epsilon = hyperparams['epsilon']  # 1e-15
++    
++    for param_name, param in params.items():
++        grad = gradients[param_name]
++        
++        # Get specific learning rate for this parameter
++        lr = hyperparams['learning_rates'][param_name]
++        
++        # Handle MLP learning rate decay if applicable
++        if param_name == 'MLP_weights':
++            initial_lr = 0.0008
++            final_lr = 1.6e-6
++            total_steps = 60000
++            # Exponential decay formula
++            lr = initial_lr * (final_lr / initial_lr) ** (step / total_steps)
++            
++        # Update Adam state
++        m = optimizer_state[param_name]['m']
++        v = optimizer_state[param_name]['v']
++        
++        m = beta1 * m + (1 - beta1) * grad
++        v = beta2 * v + (1 - beta2) * grad ** 2
++        
++        # Bias correction
++        m_hat = m / (1 - beta1 ** (step + 1))
++        v_hat = v / (1 - beta2 ** (step + 1))
++        
++        # Parameter update
++        param = param - lr * m_hat / (sqrt(v_hat) + epsilon)
++        
++        # Store updated state
++        optimizer_state[param_name]['m'] = m
++        optimizer_state[param_name]['v'] = v
++        
++    return params, optimizer_state
++```
+ 
+-### Parameters with Typical Values
+-**Optimizer Constants (Common to [S1] and [S2, unofficial]):**
+-*   $\beta_1 = 0.9$
+-*   $\beta_2 = 0.999$
+-*   $\epsilon = 10^{-15}$ [S1][S2, unofficial]
+-
+-**Learning Rates (Phys3DGS [S2, unofficial]):**
+-*   Position: $1.6 \times 10^{-4}$
+-*   Color SH: $2.5 \times 10^{-3}$
+-*   Scale: $5 \times 10^{-3}$
+-*   Opacity: $5 \times 10^{-2}$
+-*   Base Color: $1 \times 10^{-2}$
+-*   Metallic: $1 \times 10^{-2}$
+-*   Roughness: $1 \times 10^{-2}$
+-*   Normal Rotation: $1 \times 10^{-3}$
+-*   Direct Light SH (deg=0): $2.5 \times 10^{-3}$
+-*   Direct Light SH (deg>0): $1 \times 10^{-4}$
+-*   Indirect Light SH (deg=0): $2.5 \times 10^{-4}$
+-*   Indirect Light SH (deg>0): $1 \times 10^{-3}$
+-*   Visibility SH: $0.1$
+-
+-**Learning Rates (ToRF [S1]):**
+-*   MLP Learning Rate: Starts at $\gamma_{MLP} = 0.0008$, decays exponentially to $1.6 \times 10^{-6}$ over 60,000 iterations.
+-*   Reflectivity Learning Rate: $\gamma_r = 0.00016$.
+-*   Reflectivity Initialization: $0.1$.
+-
+-**Regularization Strengths (Phys3DGS [S2, unofficial]):**
+-*   $\lambda_{smooth}$ (Base Color): $0.06$
+-*   $\lambda_{smooth}$ (Metallic): $0.02$
+-*   $\lambda_{smooth}$ (Roughness): $0.02$
+-*   $\lambda_o$ (Other regularizers): $1.0$
+-*   $\lambda_{sc}$ (Other regularizers): $1.0$
+-*   $\lambda_{sr}$ (Other regularizers): $1.0$
+-
+-**Loss Weights (ToRF [S1]):**
+-*   $\alpha = 5$ (for real-world scenes), $\alpha = 1$ (for synthetic scenes).
+-*   $\beta = 0.0008$.
+-
+-### Edge Cases and Pitfalls
+-*   **Gradient Overflow:** If a single Gaussian behaves abnormally (e.g., driven to the opposite side of the surface, large scale, or extreme opacity), it can cause instability. Erroneous Gaussians interfere with visibility, occluding global illumination. The optimizer may compensate by increasing local illumination intensity or decreasing opacity to extreme values, leading to gradient overflow in SH coefficients or opacity values [S2, unofficial].
+-*   **Material-Lighting Ambiguity:** In inverse rendering, optimization of material and lighting is ambiguous. Explicit computation of rescale factors for base color (using median pixel-wise ratios) is recommended for synthetic scenes with ground truth, but omitted for real captures [S2, unofficial].
+-*   **MLP Initialization:** MLP weights should be initialized from a normal distribution with a standard deviation of $10^{-5}$ to ensure stable optimization by starting Gaussian deformations from small values [S1].
++**Edge Cases and Pitfalls**
++*   **Gradient Overflow:** Abnormal Gaussians (e.g., driven to the opposite side of a surface or with extreme opacity) can occlude global illumination, causing the optimizer to compensate with extreme intensity/opacity changes. This leads to gradient overflow in SH coefficients or opacity values [S2, unofficial].
++*   **Instability:** Without sufficient regularization ($\lambda_o, \lambda_{sc}, \lambda_{sr} = 1.0$), a single erroneous Gaussian can destabilize the entire training process [S2, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Conditional 3DGS Optimization and Rendering](11459-conditional-3dgs-optimization-and-rendering.md)
+-Adapts 3DGS training for 7D data (3D spatial, 1D temporal, 3D directional) by converting conditional representations into standard 3DGS formats. Uses temporal cues for adaptive density control and modified pruning thresholds.
+-
+ ## Operating characteristics
+-*   **Time Complexity:** The hyperparameter settings themselves do not change the asymptotic time complexity of the optimization step, which is dominated by the rasterization and gradient computation. However, improper settings (e.g., too high learning rates) can lead to divergence, requiring restarts and increasing effective training time.
+-*   **Memory Complexity:** No additional memory is required for hyperparameters themselves. However, Phys3DGS requires storing additional attributes (base color, metallic, roughness, lighting SH) per Gaussian, increasing memory usage compared to standard 3DGS.
+-*   **Strengths:** Carefully tuned learning rates and regularization prevent instability in complex inverse rendering tasks. The use of Adam with specific $\epsilon$ ensures numerical stability for small gradients.
+-*   **Limitations:** The settings are specific to certain variants (Phys3DGS, ToRF). Generalizing these exact values to other 3DGS variants may require re-tuning. The high learning rate for opacity ($5 \times 10^{-2}$) may require careful monitoring to prevent premature pruning or explosion.
++*   **Time Complexity:** The hyperparameter settings themselves add negligible overhead to the optimization step, dominated by the Adam state update and gradient computation.
++*   **Memory Complexity:** Adam requires storing two additional tensors ($m$ and $v$) per parameter, doubling the memory footprint for optimizer states [S1][S2, unofficial].
++*   **Strengths:** Specific learning rates allow fine-grained control over different aspects of the Gaussian (e.g., high LR for opacity to allow rapid pruning, low LR for position for stability). Regularization prevents divergence from pathological Gaussian configurations [S2, unofficial].
++*   **Limitations:** Poorly chosen learning rates can lead to slow convergence or divergence. The exponential decay for MLPs requires careful tuning of the decay rate and total steps [S1].
+ 
+ ## Background
+-The hyperparameter settings described here originate from recent advancements in 3D Gaussian Splatting, particularly in the context of physically-based inverse rendering and dynamic scenes.
+-*   [S1] (ToRF) introduces settings for optimizing depth indirectly in dynamic radiance fields, using an MLP for deformation and specific learning rate schedules.
+-*   [S2, unofficial] (Phys3DGS) introduces settings for physically-based 3D Gaussian Splatting for inverse rendering, emphasizing regularization to handle material-lighting ambiguity and prevent instability from erroneous Gaussians.
++Hyperparameter tuning for 3DGS and its variants has evolved alongside the complexity of the representations. The original 3DGS paper established baseline Adam settings. Subsequent works like [Time of the Flight of the Gaussians](https://doi.org/10.1109/cvpr52734.2025.01958) introduced specific learning rates for deformable models and C-ToF losses [S1]. [Phys3DGS](https://doi.org/10.48550/arxiv.2409.10335) introduced detailed learning rates for physically-based parameters (base color, metallic, roughness) and strong regularization to handle inverse rendering ambiguities and instability [S2, unofficial].
+ 
+ ## Sources

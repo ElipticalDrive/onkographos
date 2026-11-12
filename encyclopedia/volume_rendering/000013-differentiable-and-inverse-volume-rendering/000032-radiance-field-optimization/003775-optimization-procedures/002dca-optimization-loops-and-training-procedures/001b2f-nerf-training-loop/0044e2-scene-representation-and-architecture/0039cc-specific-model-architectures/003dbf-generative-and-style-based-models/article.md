@@ -1,9 +1,9 @@
 # Generative and Style-based Models
 
-Also called: Generative NeRF, Style-based NeRF, HyperNeRF, Latent-NeRF
+Also called: Generative NeRF, 3D-aware GANs, Style-based NeRF
 
 ## Overview
-Generative and Style-based Models extend the NeRF paradigm from single-scene reconstruction to 3D-aware image synthesis, enabling the generation of novel, photorealistic views from latent codes rather than optimizing for a specific input dataset. Unlike standard NeRF which fits a static radiance field to a fixed set of images, these methods learn a distribution over 3D scenes, allowing for the creation of new instances (e.g., new faces or objects) that are consistent across viewpoints. They distinguish themselves from sibling methods like [AdaNeRF](6195-adanerf.md) and [CLIP-NeRF](8661-clip-nerf.md) by explicitly modeling the generative prior of the scene appearance, often using GANs or diffusion models, rather than conditioning on a single input image or text prompt for a specific instance.
+Generative and Style-based Models extend the NeRF paradigm from deterministic scene reconstruction to probabilistic 3D-aware image synthesis. Instead of optimizing a single radiance field for a specific dataset, these methods learn a distribution over 3D scenes, allowing the generation of novel, view-consistent images from latent codes [S1, S2]. They distinguish themselves from sibling methods like [AdaNeRF](6195-adanerf.md) or [CLIP-NeRF](8661-clip-nerf.md) by treating the radiance field as a generator in a GAN or diffusion framework, prioritizing high-fidelity texture synthesis and 3D consistency over exact reconstruction of input views [S2].
 
 ## Shared principles
 All methods in this family share the mechanism of mapping 6D input coordinates (3D position $\mathbf{x}$ and 2D viewing direction $\mathbf{d}$) to 4D output values (density $\sigma$ and color $\mathbf{c}$) using a differentiable neural network. This allows the radiance field to be optimized through the volumetric rendering integral.
@@ -38,6 +38,12 @@ HyperNeRFGAN is a generative adversarial network (GAN) architecture that employs
 ### [Latent-NeRF](9110-latent-nerf.md)
 Latent-NeRF is a method for optimizing Neural Radiance Fields (NeRF) by mapping the radiance field output to a compact latent space that is subsequently decoded by a pre-trained 2D diffusion model. It solves the problem of low-resolution details and poor generalization in standard NeRF training by leveraging the high-fidelity generative priors of Stable Diffusion. Unlike standard NeRF which predicts RGB colors directly, Latent-NeRF predicts latent features, allowing the use of score distillation from a diffusion model to enforce photorealistic textures and structural consistency. It is distinguished from its sibling [HyperNeRFGAN](8765-hypernerfgan.md) by using a diffusion-based generative prior rather than a GAN-based adversarial loss.
 
+### [pi-GAN](10298-pi-gan.md)
+pi-GAN is a generative adversarial network (GAN) approach to unsupervised 3D representation learning from 2D images. It conditions an implicit radiance field, represented by a SIREN network, on a noise vector to produce a 5D spatio-angular radiance field, which is rendered via volume rendering to synthesize view-consistent images. It is distinguished from its sibling [StyleNeRF](8659-stylenerf.md) and [GRAF](9572-generative-and-style-based-models.md) by using a StyleGAN-inspired mapping network with Feature-wise Linear Modulation (FiLM) to condition the entire SIREN backbone, rather than concatenating latent codes or using separate shape/appearance codes. It outperformed GRAF in image quality and achieved state-of-the-art results on CelebA, Cats, and CARLA datasets.
+
+### [GIRAFFE](11360-giraffe.md)
+GIRAFFE represents scenes as compositions of $N$ entities (objects plus a background), where each entity possesses a separate neural feature field and an affine transformation. This architecture enables explicit control over the pose, shape, and appearance of individual entities within a generated scene. It distinguishes itself from sibling methods like [StyleNeRF](8659-stylenerf.md) and [HyperNeRFGAN](8765-hypernerfgan.md) by decoupling scene composition from the generative process, allowing for variable numbers of objects and independent manipulation of entity attributes via latent codes and transformation parameters.
+
 ### NeRFFaceShop
 - [S1] A 3D-aware generative model that produces animatable and relightable human heads by training on large-scale in-the-wild videos.
 - [S1] Deforms feature maps rather than 3D points so lighting and expression changes stay consistent during motion.
@@ -52,7 +58,7 @@ Latent-NeRF is a method for optimizing Neural Radiance Fields (NeRF) by mapping 
 - [S1] A method capable of single-shot view synthesis of human faces, built similarly to π-GAN but using Generative Latent Optimization instead of adversarial training.
 
 ## Background
-The concept of Generative Latent Optimization (GLO) was introduced as a discriminator-less GAN approach where latent codes are jointly optimized with the generator parameters [S1]. In the context of NeRF, GLO has been used to condition scene aspects such as appearance and transient embeddings (e.g., in NeRF-W) [S1]. LOLNeRF (November 2021) [S1] applied this to single-shot view synthesis of human faces, building similarly to π-GAN [S1]. More recently, NeRFFaceShop (October 2025) [S1] extended 3D-aware generation to animatable and relightable human heads using large-scale in-the-wild videos, deforming feature maps to maintain consistency during motion [S1].
+The family originates from the convergence of Neural Radiance Fields (NeRF) and Generative Adversarial Networks (GANs). Early works like pi-GAN [S2] and StyleNeRF [S1] demonstrated that NeRF architectures could be conditioned on latent variables to generate novel 3D-consistent images, moving beyond single-scene reconstruction. HyperNeRFGAN [S1] further simplified this by using hypernetworks to generate NeRF weights directly. More recently, Latent-NeRF [S2] integrated diffusion models to overcome the resolution and texture limitations of GAN-based approaches. These methods are primarily used in 3D-aware image synthesis, avatar generation, and unsupervised 3D representation learning from 2D datasets [S1, S2].
 
 ## Sources
 [S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

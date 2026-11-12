@@ -1,65 +1,138 @@
 # Transformers and Vision Transformers (ViT)
-
 Also called: Vision Transformer
 
 ## Overview
-Transformers compute pairwise attention over input tokens to capture long-range dependencies that local convolutions miss [S1, unofficial]. In volume rendering, they are primarily used for super-resolution and denoising, where their ability to attend across the full spatial extent of a subvolume helps recover large-scale structures [S1, unofficial].
+Transformers compute pairwise attention over input tokens to capture long-range dependencies that convolutions miss [S1, unofficial]. The Vision Transformer (ViT) adapts this architecture for images by treating fixed-size patches as tokens [S1, unofficial]. In volume rendering, these methods are used for super-resolution and denoising, where their ability to attend across the full spatial extent of a subvolume helps recover large-scale structures that local convolutions miss [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-The standard Vision Transformer (ViT) takes an image (or volume slice) as input and outputs a sequence of feature tokens. For multi-view fusion, it takes concatenated encoded patches from multiple views and outputs fused tokens containing cross-view context.
+- Input: A sequence of image patches (tokens) derived from volume data or projections.
+- Output: A transformed sequence of tokens representing the enhanced or reconstructed volume features.
 
 **Data Structures:**
-1.  **Patches:** The input image of size $H \times W$ is divided into non-overlapping fixed-size patches of size $P \times P$.
-2.  **Tokens:** Each patch is flattened and linearly projected to a latent dimension $d$, forming a token. A learnable class token (or position embeddings) is often added.
-3.  **Positional Encoding:** Sinusoidal or learnable positional embeddings are added to tokens to retain spatial information [S1, unofficial].
+- **Tokens:** Each token is a vector representation of a fixed-size patch. If the input image is $H \times W$ and patch size is $P \times P$, the number of tokens is $N = (H/P) \times (W/P)$.
+- **Embedding Dimension:** $d$ (typically 768 or 1024).
 
 **Steps:**
-1.  **Patch Embedding:** Split input into patches and project to embedding space.
-2.  **Positional Encoding:** Add positional embeddings to the patch embeddings.
-3.  **Transformer Encoder:** Apply $L$ layers of Multi-Head Self-Attention (MSA) and Feed-Forward Networks (FFN).
-    *   **Self-Attention:** Computes attention scores between all pairs of tokens.
-    *   **Residual Connections & Layer Normalization:** Applied after MSA and FFN.
-4.  **Output:** The final token sequence represents the processed features.
-
-**Formulas:**
-For a sequence of tokens $Z_0 = [x_{class}; x^1_p E; \dots; x^N_p E] + E_{pos}$, where $x^i_p$ are patch embeddings and $E$ is the linear projection matrix:
-$$
-Z_l = \text{MSA}(\text{LayerNorm}(Z_{l-1})) + Z_{l-1}
-$$
-$$
-Z'_l = \text{FFN}(\text{LayerNorm}(Z_l)) + Z_l
-$$
-where $l$ is the layer index.
+1. **Patch Embedding:** Split the input image into non-overlapping patches. Flatten each patch and project it to the embedding dimension $d$ using a linear layer [S1, unofficial].
+2. **Add Positional Encoding:** Add learnable or fixed positional encodings to the patch embeddings to inject spatial information, as attention is permutation-invariant [S1, unofficial].
+3. **Self-Attention:** Compute pairwise attention over the tokens. For each token $i$, calculate attention scores with all other tokens $j$:
+   $$ \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V $$
+   where $Q, K, V$ are query, key, and value matrices derived from the tokens [S1, unofficial].
+4. **Multi-Head Attention:** Repeat the attention mechanism $h$ times in parallel with different learned linear projections, then concatenate the outputs and project again [S1, unofficial].
+5. **Feed-Forward Network:** Apply a position-wise fully connected feed-forward network to each token [S1, unofficial].
+6. **Residual Connections and Layer Normalization:** Add residual connections and apply layer normalization after the attention and feed-forward steps [S1, unofficial].
+7. **Stacking:** Repeat steps 3-6 for multiple layers to build hierarchical representations [S1, unofficial].
 
 **Parameters:**
-*   **Patch Size ($P$):** Commonly $16 \times 16$ [S2, unofficial].
-*   **Embedding Dimension ($d$):** Commonly 768 (ViT-B) [S2, unofficial].
-*   **Heads:** Commonly 12 [S2, unofficial].
-*   **Layers:** Varies; Fusion ViT uses 16 layers [S2, unofficial].
+- Patch size $P$: Commonly $16 \times 16$ or $32 \times 32$.
+- Number of layers $L$: Typically 12-24.
+- Number of heads $h$: Typically 12.
+- Embedding dimension $d$: Typically 768 or 1024.
 
-**Edge Cases:**
-*   **Input Size:** Must be divisible by patch size $P$.
-*   **Memory:** Self-attention scales quadratically with the number of tokens ($O(N^2)$), limiting input resolution for large volumes.
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions:** Patches at the image boundary must be handled consistently during splitting.
+- **Precision:** Attention scores can become unstable if not scaled properly; use $\sqrt{d_k}$ scaling [S1, unofficial].
+- **Degenerate Input:** If patches are identical, attention may become uniform, losing discriminative power.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import math
+
+class PatchEmbedding(nn.Module):
+    def __init__(self, img_size=224, patch_size=16, in_channels=3, embed_dim=768):
+        super().__init__()
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.num_patches = (img_size // patch_size) ** 2
+        self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
+
+    def forward(self, x):
+        # x: (B, C, H, W)
+        x = self.proj(x)  # (B, embed_dim, H/P, W/P)
+        x = x.flatten(2)  # (B, embed_dim, N)
+        x = x.transpose(1, 2)  # (B, N, embed_dim)
+        return x
+
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(embed_dim, embed_dim * 3)
+        self.proj = nn.Linear(embed_dim, embed_dim)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # (B, heads, N, head_dim)
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale  # (B, heads, N, N)
+        attn = attn.softmax(dim=-1)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        return x
+
+class TransformerBlock(nn.Module):
+    def __init__(self, embed_dim, num_heads, mlp_ratio=4.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.attn = MultiHeadSelfAttention(embed_dim, num_heads)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        mlp_hidden = int(embed_dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(embed_dim, mlp_hidden),
+            nn.GELU(),
+            nn.Linear(mlp_hidden, embed_dim)
+        )
+
+    def forward(self, x):
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+class ViT(nn.Module):
+    def __init__(self, img_size=224, patch_size=16, in_channels=3, embed_dim=768, depth=12, num_heads=12):
+        super().__init__()
+        self.patch_embed = PatchEmbedding(img_size, patch_size, in_channels, embed_dim)
+        self.num_patches = self.patch_embed.num_patches
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, embed_dim))
+        self.blocks = nn.Sequential(*[TransformerBlock(embed_dim, num_heads) for _ in range(depth)])
+        self.norm = nn.LayerNorm(embed_dim)
+
+        # Initialize weights
+        nn.init.trunc_normal_(self.pos_embed, std=.02)
+
+    def forward(self, x):
+        x = self.patch_embed(x)
+        x = x + self.pos_embed
+        x = self.blocks(x)
+        x = self.norm(x)
+        return x
+```
 
 ## Subtopics
 
-### Fusion ViT
-A variant designed for multi-view fusion. It takes concatenated encoded image patches from $K$ views and performs all-to-all self-attention to fuse features, providing full context from all other views for spatial and context reasoning [S2, unofficial].
-*   **Definition:** A 16-layer transformer similar to ViT-B [S2, unofficial].
-*   **Formula:** $\{F_1, F_2, \dots, F_K\} = \mathcal{F}_{fuse}(\tilde{H}_1, \tilde{H}_2, \dots, \tilde{H}_K)$, where $F_i$ is the fused token of the $i$-th view, $\tilde{H}_i$ are the concatenated encoded image patches, and $\mathcal{F}_{fuse}$ is the fusion transformer [S2, unofficial].
-*   **Parameters:** 16 layers, ViT-B/16 architecture (12 heads, embedding dimension 768, MLP ratio 4.0, 16x16 patch size), initialized from scratch [S2, unofficial].
-*   **When to choose:** When integrating information from multiple sparse views (e.g., X-rays) into a coherent 3D representation [S2, unofficial].
+### [Fusion ViT](13080-fusion-vit.md)
+Fusion ViT is a transformer-based module designed to fuse multi-view features by performing all-to-all self-attention over concatenated encoded image patches from multiple input views. It solves the problem of integrating spatial and contextual information from disparate viewpoints into a unified representation, enabling complete reasoning across views. It differs from pixel-wise fusion methods (like the Fusion Transformer in) by operating on patch-level tokens across the entire image rather than per-pixel vectors, and from standard ViTs by specifically structuring inputs as a concatenation of multi-view features to enable cross-view attention.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N^2)$ for self-attention, where $N$ is the number of tokens. This is higher than convolutions for local operations but more efficient for global context.
-*   **Memory Complexity:** $O(N^2)$ for attention maps.
-*   **Strengths:** Captures long-range dependencies; effective for recovering large-scale structures in volume super-resolution and denoising [S1, unofficial].
-*   **Limitations:** High computational cost for high-resolution volumes; requires significant data for training from scratch (though pre-trained weights like DINO can be used) [S2, unofficial].
+- **Time Complexity:** $O(N^2 \cdot d)$ per layer, where $N$ is the number of tokens and $d$ is the embedding dimension. This is quadratic in the number of patches, making it expensive for high-resolution volumes.
+- **Memory Complexity:** $O(N^2 \cdot d)$ for attention maps.
+- **Performance:** Effective for recovering large-scale structures in volume super-resolution and denoising [S1, unofficial].
+- **Strengths:** Captures global context and long-range dependencies, which is crucial for scientific volume data with large-scale structures.
+- **Limitations:** High computational cost for large volumes; sensitive to patch size and positional encoding choices.
+- **When to Use:** When global context is more important than local details, and computational resources allow for quadratic complexity.
+- **When Not to Use:** For real-time applications or very high-resolution volumes where linear complexity methods are preferred.
 
 ## Background
-The Transformer was introduced to compute pairwise attention over input tokens [S1, unofficial]. The Vision Transformer (ViT) adapted this for images by treating fixed-size patches as tokens [S1, unofficial]. In volume rendering, these architectures have been applied to super-resolution and denoising tasks to leverage their global attention mechanism [S1, unofficial]. Fusion ViT was proposed for sparse-view X-ray to CT reconstruction to fuse multi-view features [S2, unofficial].
+The Transformer was introduced by Vaswani et al. [146] for sequence modeling. The Vision Transformer (ViT) was adapted for images by Dosovitskiy et al. [25]. In volume rendering, these methods have been applied to super-resolution and denoising, leveraging their ability to model long-range dependencies [S1, unofficial].
 
 ## Sources
-[S1] Deep Learning Methods and Neural Representations for Scientific Volume Visualization, https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
-[S2] X-GRM: Large Gaussian Reconstruction Model for Sparse-view X-rays to Computed Tomography, https://doi.org/10.48550/arXiv.2505.15235, fetched 2026-10-27 (unofficial)
+[S1] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
