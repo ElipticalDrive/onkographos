@@ -2,96 +2,87 @@
 Also called: Lgamma Loss, Lp Norm Loss
 
 ## Overview
-Minkowski's metric is a family of distance measures that treats an image as a 2D signal to calculate the dissimilarity between a reference image and a test image [S1, unofficial]. It generalizes the Mean Squared Error (MSE) by allowing the order parameter $\gamma$ to vary, enabling different sensitivities to pixel-wise errors [S1, unofficial]. Unlike its sibling [PSNR](2742-psnr-metric-calculation.md), which normalizes error by signal power to provide a logarithmic decibel scale, Minkowski's metric provides a raw, unnormalized magnitude of error [S1, unofficial].
+Minkowski's Metric is a family of full-reference image quality metrics that treats an image as a 2D signal to calculate the dissimilarity between a reference image and a test image [S1, unofficial]. It generalizes the Mean Squared Error (MSE) by introducing an order parameter $\gamma$, allowing for flexible weighting of pixel-wise errors [S1, unofficial]. Unlike MSE, which is the most common distortion measure, Minkowski's metric offers a broader class of norms where $\gamma$ ranges from 1 to $\infty$ [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Two images, $x$ (reference) and $y$ (test), each containing $N$ samples (pixels).
-- Input: Order parameter $\gamma \in [1, \infty)$.
-- Output: The Minkowski distance $E_{\gamma}$.
+- Input: Reference image $x$, Test image $y$, Order parameter $\gamma$.
+- Output: Scalar dissimilarity score $E_{\gamma}$.
 
 **Data Structures:**
-- Images $x$ and $y$ are treated as vectors of length $N$.
-- $\gamma$ is a scalar float.
-
-**Steps:**
-1. Calculate the absolute difference for each sample $i$: $d_i = |x_i - y_i|$.
-2. Raise each difference to the power of $\gamma$: $d_i^{\gamma}$.
-3. Sum the powered differences: $S = \sum_{i=1}^N d_i^{\gamma}$.
-4. Compute the mean: $\bar{d}^{\gamma} = \frac{1}{N} S$.
-5. Take the $\gamma$-th root: $E_{\gamma} = (\bar{d}^{\gamma})^{\frac{1}{\gamma}}$.
+- Images $x$ and $y$ are treated as arrays of $N$ samples, where each sample corresponds to a pixel (or voxel in volume rendering contexts) value.
+- $N$ is the total number of samples in the image.
 
 **Formula:**
+The dissimilarity $E_{\gamma}$ is calculated as:
 $$E_{\gamma} = \left( \frac{1}{N} \sum_{i=1}^N |x_i - y_i|^{\gamma} \right)^{\frac{1}{\gamma}}$$
+where:
+- $x_i$ and $y_i$ are the $i$-th samples of images $x$ and $y$ respectively.
+- $\gamma$ is the order parameter, with $1 \le \gamma < \infty$ [S1, unofficial].
 
-Where:
-- $N$ is the number of samples in the image.
-- $x_i$ and $y_i$ are the $i$-th samples of images $x$ and $y$.
-- $\gamma$ is the order parameter, where $1 \le \gamma < \infty$.
-
-**Parameters:**
-- $\gamma = 2$: Yields the root-mean-square error (RMSE). Note that the standard Mean Squared Error (MSE) is $E_2^2$ [S1, unofficial].
-- $\gamma = 1$: Yields the Mean Absolute Error (MAE).
-- $\gamma \to \infty$: Approaches the Chebyshev distance (maximum absolute difference).
-
-**Edge Cases and Pitfalls:**
-- When $\gamma=2$, the formula simplifies to $\sqrt{MSE}$ [S1, unofficial]. Implementers should be aware that MSE is often used directly as a loss function without the square root, whereas Minkowski's metric explicitly includes the root for $\gamma > 1$.
-- For large $\gamma$, numerical overflow may occur if differences are large; scaling inputs to $[0, 1]$ is recommended.
+**Special Case (MSE):**
+When $\gamma = 2$, the metric relates to the Mean Squared Error (MSE). Specifically:
+$$E_2 = \left( \frac{1}{N} \sum_{i=1}^N |x_i - y_i|^2 \right)^{\frac{1}{2}} = \sqrt{MSE}$$
+This means $E_2$ is the square root of the MSE [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def minkowski_metric(x, y, gamma):
+def minkowski_metric(reference_image, test_image, gamma):
     """
-    Calculate Minkowski distance between two images x and y.
+    Calculate Minkowski's metric between two images.
     
     Args:
-        x: Reference image (array-like of shape (N,))
-        y: Test image (array-like of shape (N,))
-        gamma: Order parameter (float, >= 1)
+        reference_image (list or array): Flattened list of pixel values for reference image.
+        test_image (list or array): Flattened list of pixel values for test image.
+        gamma (float): Order parameter, must be >= 1.
         
     Returns:
-        E_gamma: Minkowski distance (float)
+        float: The Minkowski distance E_gamma.
     """
-    import numpy as np
+    # Ensure images are of the same length
+    n = len(reference_image)
+    if n != len(test_image):
+        raise ValueError("Images must have the same number of samples.")
     
-    # Ensure inputs are numpy arrays for vectorized operations
-    x = np.asarray(x)
-    y = np.asarray(y)
+    if n == 0:
+        return 0.0
+        
+    # Calculate the sum of absolute differences raised to the power of gamma
+    sum_diff = 0.0
+    for i in range(n):
+        diff = abs(reference_image[i] - test_image[i])
+        sum_diff += diff ** gamma
+        
+    # Average the sum
+    avg_diff = sum_diff / n
     
-    # Number of samples
-    N = x.size
+    # Take the gamma-th root
+    result = avg_diff ** (1.0 / gamma)
     
-    # Calculate absolute differences
-    diff = np.abs(x - y)
-    
-    # Raise to power gamma
-    diff_gamma = np.power(diff, gamma)
-    
-    # Sum and average
-    mean_diff_gamma = np.mean(diff_gamma)
-    
-    # Take gamma-th root
-    E_gamma = np.power(mean_diff_gamma, 1.0 / gamma)
-    
-    return E_gamma
+    return result
 ```
+
+**Edge Cases and Pitfalls:**
+- If $\gamma$ is very large, the metric approaches the Chebyshev distance (maximum absolute difference), which can be sensitive to outliers [S1, unofficial].
+- Precision issues may arise if $\gamma$ is extremely large or small, though standard floating-point arithmetic usually handles typical values (e.g., 1, 2) well.
+- The metric does not account for human visual system characteristics, correlating poorly with perceived image quality [S1, unofficial].
 
 ## Subtopics
 
 ### [Mean Square Error (MSE)](6038-mean-square-error-mse.md)
-Mean Square Error (MSE) is a specific instance of Minkowski's metric where the order parameter $\gamma=2$, used to quantify the dissimilarity between a reference image and a rendered test image by averaging the squared differences of their pixel values. It serves as the foundational photometric loss for differentiable volume rendering optimization, prioritizing pixel-wise accuracy over perceptual similarity. Unlike its sibling [PSNR](52-name.md), which normalizes MSE by signal power to provide a logarithmic decibel scale, MSE provides a raw, unnormalized magnitude of error.
+MSE is a specific case of Minkowski's metric where $\gamma=2$. It is the most commonly used mathematical distortion measure for comparing images but correlates poorly with human visual perception.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$, where $N$ is the number of pixels.
-- **Memory Complexity:** $O(N)$ to store the difference array.
-- **Strengths:** Simple to compute; provides a direct measure of pixel-wise error magnitude.
-- **Limitations:** Does not account for perceptual similarity; sensitive to outliers when $\gamma$ is large.
-- **When to use:** When a raw, unnormalized error metric is needed for optimization or logging, and perceptual metrics are not required.
+- **Time Complexity:** $O(N)$, where $N$ is the number of pixels/samples in the image.
+- **Memory Complexity:** $O(1)$ auxiliary space if images are processed in a streaming fashion, or $O(N)$ if images are stored in memory.
+- **Strengths:** Simple to implement and compute; provides a flexible family of norms by varying $\gamma$.
+- **Limitations:** Poor correlation with human visual perception; sensitive to outliers when $\gamma$ is large; does not account for structural or perceptual similarities [S1, unofficial].
+- **When to use:** When a simple, mathematically grounded dissimilarity measure is needed, or when specific error characteristics (via $\gamma$) are desired. Not recommended when perceptual quality is the primary concern.
 
 ## Background
-Minkowski's metric is a generalization of the $L_p$ norm, named after Hermann Minkowski. In the context of image quality assessment, it is used as a full-reference method to calculate dissimilarities between a reference and a test image [S1, unofficial]. The Mean Squared Error (MSE) is the most commonly used instance of this metric [S1, unofficial].
+Minkowski's metric is a full-reference method used to quantify the dissimilarity between a reference image and a test image [S1, unofficial]. It is part of a broader class of mathematical distortion measures, with MSE being the most common specific instance [S1, unofficial]. The metric is derived from the Minkowski distance in mathematics, generalized to image signals.
 
 ## Sources
 [S1] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)

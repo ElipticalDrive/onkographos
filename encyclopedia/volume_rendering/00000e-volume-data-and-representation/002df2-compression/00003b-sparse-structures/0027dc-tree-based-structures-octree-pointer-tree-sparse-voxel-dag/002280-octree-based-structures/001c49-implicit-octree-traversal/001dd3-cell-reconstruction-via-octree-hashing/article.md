@@ -3,120 +3,184 @@
 Also called: Frisken and Perry hashing scheme, Octree Hashing Scheme
 
 ## Overview
-Cell Reconstruction via Octree Hashing is a method for locating leaf nodes and retrieving adjacent "forward neighbor" voxels in a sparse octree volume representation, enabling the reconstruction of 2x2x2 cells required for isosurface intersection primitives [S1, unofficial][S2]. It solves the problem of needing 8 corner scalar values for a cell intersection when only 1 scalar value is stored per leaf node, by using a bitwise arithmetic hash scheme to map 3D coordinates to integer indices for O(log N) point location and O(1) average-case neighbor finding [S1, unofficial][S2].
+Cell Reconstruction via Octree Hashing is a method for locating leaf nodes and their adjacent neighbors in a sparse octree volume representation using bitwise arithmetic on integer coordinates, enabling the reconstruction of 8-voxel cells for isosurface primitives [S1, unofficial][S2]. It solves the problem of efficiently retrieving the 8 corner values required for cell-based intersection tests (such as Marching Cubes or ray-cell intersection) without explicitly storing the full cell structure, which would cause storage explosion [S1, unofficial][S2]. It differs from [Pointerless Octree for Seed Placement](5280-pointerless-octree-for-seed-placement.md) by focusing on the general point-location and neighbor-finding mechanism rather than specific seed placement logic, and from [Cell Retrieval via Neighbor-Finding](1822-cell-retrieval-via-neighbor-finding.md) by providing the underlying hashing primitives that the latter uses for forward-neighbor retrieval [S1, unofficial][S2].
 
 ## How it works
 **Inputs:**
-- A sparse octree structure where nodes are defined by their spatial extent and subdivision depth [S2].
-- A query point $P = (x, y, z)$ in the global coordinate space, or a reference leaf node for neighbor finding [S1, unofficial][S2].
-- The maximum depth of the octree, $d_{max}$ [S2].
+- Root node of the sparse octree.
+- A 3D coordinate $(x, y, z)$ for point location, or a leaf node identifier for neighbor finding.
+- Maximum depth $d_{max}$ of the octree grid, defining the spatial domain $[0, 2^{d_{max}}]^3$ [S2].
 
 **Outputs:**
-- The leaf node containing the query point $P$ (Point Location) [S1, unofficial][S2].
-- The scalar values or references to the 7 forward neighbors of a given leaf node (Neighbor Finding) [S1, unofficial][S2].
+- The leaf node containing the query point.
+- The set of adjacent leaf nodes (neighbors) for a given leaf.
 
 **Data Structures:**
-The octree nodes are implicitly defined by their Morton codes (Z-order curves) or spatial coordinates [S2]. The hash scheme maps the 3D integer coordinates of a voxel center to a unique integer index [S2].
-- **Morton Code / Hash Index:** An integer formed by interleaving the bits of the x, y, and z coordinates [S2].
-- **Node Types:**
-  - **Interior Node:** Contains pointers to 8 children [S2].
-  - **Cap Node:** At depth $d_{max}-1$, contains 8 finest-level voxels [S2].
-  - **Scalar Leaf:** Stores a single scalar value [S2].
+- **Octree Node:** Each node represents a voxel at a specific resolution.
+  - **Scalar Leaf:** Stores a single scalar value. Represents the finest resolution.
+  - **Cap Node:** Located at depth $d_{max}-1$. Contains pointers to 8 finest-level voxels (children) and min/max bounds for each child [S2].
+  - **Interior Node:** Contains pointers to 8 children and min/max bounds for each child [S2].
+- **Coordinate System:** Integer coordinates mapped to the range $[0, 2^{d_{max}}]$ [S2].
 
-**Steps:**
-1. **Coordinate Mapping (Point Location):**
-   a. Map the query point $P(x, y, z)$ to integer voxel indices within the range $[0, 2^{d_{max}}]^3$ [S2].
-   b. Compute the Morton code $M$ by interleaving the bits of the x, y, and z coordinates [S2].
-   c. Traverse the octree from the root. At each level $d$ from $0$ to $d_{max}-1$, extract the 3-bit octant index $o_d$ from the bits of $M$ corresponding to that level using a bitwise-AND with a left-shifted mask [S2].
-   d. Move to the child at index $o_d$. The traversal ends at the leaf node [S1, unofficial][S2].
-2. **Neighbor Finding:**
-   a. Given an origin leaf and a target direction, compute the target coordinates and its Morton code $M_{target}$ [S2].
-   b. Find the nearest common ancestor (NCA) of the origin and target leaves by comparing their Morton code bits from the most significant bit downwards [S2].
-   c. Perform point location for the target leaf starting from the root (or the NCA) to retrieve it [S2].
-3. **Optimization:**
-   a. Precompute masks and use constant interleaving for interactivity [S2].
+**Algorithm Steps:**
 
-**Formulas:**
-- Morton Code: $M = \text{interleave}(x, y, z)$, where $\text{interleave}$ packs the bits of $x$, $y$, and $z$ into a single integer [S2].
-- Octant Index: $o_d = ((M \gg (3(d_{max} - 1 - d))) \ \& \ 7)$, extracting the 3-bit path at level $d$ [S2].
-- Target Coordinates: $P_{target} = P_{origin} + \vec{d}$, where $\vec{d}$ is the unit direction vector scaled by the voxel size at the target depth [G].
+1.  **Coordinate Mapping:** Map the 3D integer coordinates $(x, y, z)$ to a single integer key using bitwise interleaving (Morton code/Z-order curve). The coordinates are assumed to be within the range $[0, 2^{d_{max}}]$ [S2].
+    - Let $x_i, y_i, z_i$ be the $i$-th bit of $x, y, z$.
+    - The Morton code $M$ is constructed by interleaving bits:
+      $$ M = \sum_{i=0}^{d_{max}-1} (x_i \cdot 4^i + y_i \cdot 2 \cdot 4^i + z_i \cdot 4^{i+1}) $$
+    - In practice, this is implemented using bitwise shifts and OR operations [S1, unofficial][S2].
 
-**Parameters:**
-- $d_{max}$: The maximum depth of the octree. Typical values depend on the resolution of the volume data [S2].
-- Voxel resolution: The size of the voxel at the root level [G].
+2.  **Point Location (Root to Leaf):**
+    - Start at the root node.
+    - For each level $l$ from $0$ to $d_{max}-1$:
+      - Extract the octant index $k$ from the Morton code. The index corresponds to the bits at positions $3l, 3l+1, 3l+2$ of the Morton code (or equivalently, bits of $x, y, z$ at position $l$).
+      - $k = ((M \gg 3l) \& 7)$, where $7$ is the binary mask `111` [S2].
+      - Traverse to the $k$-th child of the current node.
+      - If the child is null or empty, the point is not in the tree (or the value is undefined) [S2].
+    - Return the final leaf node (Scalar Leaf or Cap Node) [S2].
 
-**Edge Cases and Pitfalls:**
-Not given in the sources.
+3.  **Neighbor Finding:**
+    - Given an origin leaf node and a destination direction (e.g., $+x, -y, +z$):
+      - **Find Nearest Common Ancestor (NCA):** Determine the lowest common ancestor of the origin leaf and the hypothetical neighbor leaf. This is done by comparing the Morton codes of the origin and the target neighbor position [S2].
+      - **Traverse from NCA:** Perform point location from the NCA to the target neighbor leaf using the steps in Point Location [S2].
+      - **Optimization:** Precompute bit masks and use constant interleaving to avoid expensive arbitrary shifts during interactivity [S2].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def interleave_bits(x, y, z, max_bits=10):
-    """Interleave bits of x, y, z to form a Morton code [G]."""
+def interleave_bits(x, y, z, d_max):
+    """
+    Interleave bits of x, y, z to form a Morton code.
+    Assumes x, y, z are non-negative integers < 2^d_max.
+    """
     m = 0
-    for i in range(max_bits):
-        m |= (x & (1 << i)) << (2 * i)
-        m |= (y & (1 << i)) << (2 * i + 1)
-        m |= (z & (1 << i)) << (2 * i + 2)
+    for i in range(d_max):
+        # Extract i-th bit of x, y, z
+        bx = (x >> i) & 1
+        by = (y >> i) & 1
+        bz = (z >> i) & 1
+        # Place bits in Morton code
+        # Bit 3i -> x, 3i+1 -> y, 3i+2 -> z
+        m |= (bx << (3 * i))
+        m |= (by << (3 * i + 1))
+        m |= (bz << (3 * i + 2))
     return m
 
-def find_leaf(root, m, d_max):
-    """Find the leaf node for a given Morton code m in the octree."""
-    node = root
-    for d in range(d_max):
-        # Extract 3-bit octant index for level d (MSB first)
-        octant = (m >> (3 * (d_max - 1 - d))) & 7
-        if node is None:
-            return None
-        node = node.children[octant]
-    return node
+def extract_octant(morton_code, level, d_max):
+    """
+    Extract the octant index (0-7) at a specific level of the octree.
+    """
+    # Shift right by 3*level to align the bits for this level
+    shifted = morton_code >> (3 * level)
+    # Mask the lowest 3 bits
+    return shifted & 7
 
-def find_neighbor(root, origin_coords, direction, d_max):
-    """Find the forward neighbor of origin_leaf in the given direction [S2]."""
-    # Compute target coordinates based on direction and origin position
-    target_coords = (origin_coords[0] + direction[0], origin_coords[1] + direction[1], origin_coords[2] + direction[2])
+def point_location(root, x, y, z, d_max):
+    """
+    Find the leaf node containing (x, y, z).
+    Returns the leaf node or None if not found.
+    """
+    # Map coordinates to Morton code
+    m = interleave_bits(x, y, z, d_max)
     
-    # Compute Morton codes
-    m_origin = interleave_bits(*origin_coords)
-    m_target = interleave_bits(*target_coords)
+    current_node = root
+    for level in range(d_max):
+        # Get octant index at this level
+        octant_idx = extract_octant(m, level, d_max)
+        
+        # Traverse to child
+        if current_node is None:
+            return None
+        current_node = current_node.children[octant_idx]
+        
+    return current_node
+
+def find_neighbor(root, origin_leaf, direction, d_max):
+    """
+    Find the neighbor of origin_leaf in the given direction (+x, -x, +y, -y, +z, -z).
+    Returns the neighbor leaf node or None.
+    """
+    # 1. Determine the coordinate of the neighbor
+    # This requires knowing the spatial bounds of the origin leaf.
+    # For simplicity, assume we have a function get_leaf_bounds(leaf) -> (x_min, y_min, z_min, size)
+    # And a function get_leaf_coord(leaf) -> (x, y, z) representing the lower-left corner.
     
-    # Find NCA level by comparing bits from MSB
-    nca_level = -1
-    for d in range(d_max - 1, -1, -1):
-        if ((m_origin >> (3 * d)) & 7) == ((m_target >> (3 * d)) & 7):
-            nca_level = d
-            break
-            
-    # Perform point location for target
-    return find_leaf(root, m_target, d_max)
+    origin_coord = get_leaf_coord(origin_leaf)
+    neighbor_coord = origin_coord + direction * get_leaf_size(origin_leaf)
+    
+    # 2. Find the Nearest Common Ancestor (NCA)
+    # The NCA is the node where the paths from root to origin and neighbor diverge.
+    # This can be found by comparing Morton codes.
+    origin_m = interleave_bits(origin_coord.x, origin_coord.y, origin_coord.z, d_max)
+    neighbor_m = interleave_bits(neighbor_coord.x, neighbor_coord.y, neighbor_coord.z, d_max)
+    
+    # Find the highest bit where they differ
+    xor = origin_m ^ neighbor_m
+    if xor == 0:
+        return origin_leaf # Same leaf
+    
+    # Find the position of the most significant bit
+    msb_pos = xor.bit_length() - 1
+    
+    # The level of the NCA is determined by the bit position
+    # Each level uses 3 bits. Level = msb_pos // 3
+    nca_level = msb_pos // 3
+    
+    # 3. Traverse from NCA to neighbor
+    # We need to find the NCA node first, then traverse down to the neighbor
+    nca_node = point_location(root, origin_coord.x, origin_coord.y, origin_coord.z, d_max)
+    # Note: This is a simplification. In practice, we traverse up from leaves or use parent pointers if available.
+    # Since this is an implicit octree, we must traverse from root to NCA.
+    
+    current_node = root
+    for level in range(nca_level):
+        octant_idx = extract_octant(origin_m, level, d_max)
+        current_node = current_node.children[octant_idx]
+        
+    # Now traverse from NCA to neighbor
+    for level in range(nca_level, d_max):
+        octant_idx = extract_octant(neighbor_m, level, d_max)
+        current_node = current_node.children[octant_idx]
+        
+    return current_node
 ```
+
+**Parameters:**
+- $d_{max}$: Maximum depth of the octree. Typical values depend on the resolution of the input volume (e.g., 10-15 for large scientific datasets) [S2].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Bitwise operations assume integer coordinates. Floating-point coordinates must be quantized to the grid [S2].
+- **Boundaries:** Neighbor finding at the boundary of the domain $[0, 2^{d_{max}}]$ must return `None` or handle wrap-around if applicable [S2].
+- **Empty Nodes:** If a node is empty (null), traversal stops, and the point/neighbor is not found [S2].
+- **Performance:** Precomputing masks and using constant interleaving is critical for interactivity [S2].
 
 ## Subtopics
 
 ### [Cell Retrieval via Neighbor-Finding](1822-cell-retrieval-via-neighbor-finding.md)
-This method enables isosurface reconstruction from sparse octree volumes that store only a single scalar value per leaf voxel, avoiding the 8x storage expansion required to store full 8-voxel cells explicitly. It solves the problem of needing 8 corner values for a cell intersection primitive when only 1 scalar value is stored per leaf node by retrieving the 7 forward neighbors at intersection time. Unlike [Cell Reconstruction via Octree Hashing](1595-cell-reconstruction-via-octree-hashing.md), which uses a bitwise arithmetic hash scheme for point location, this method relies on neighbor-finding techniques to retrieve forward-neighboring voxels, skewing heavily toward O(1) performance when neighbors share a parent node.
+This method enables isosurface reconstruction (e.g., Marching Cubes) on sparse octree volumes that store only a single scalar value per leaf voxel, by logically mapping each voxel to the lower-left corner of an 8-voxel cell and retrieving the 7 forward neighbors at intersection time. It solves the storage explosion problem of explicitly storing full cells (which would require 8x the original data size) by performing neighbor-finding on the octree structure to assemble the required 8 corner values on the fly. It differs from [Cell Reconstruction via Octree Hashing](1595-cell-reconstruction-via-octree-hashing.md) in its specific application to the "forward-neighbor" retrieval pattern for cell-based primitives, and from [Octree Hashing for Point Location and Neighbor Finding](1984-octree-hashing-for-point-location-and-neighbor-finding.md) by focusing on the runtime assembly of the intersection primitive rather than just the point location mechanism itself.
 
 ### [Octree Hashing for Point Location and Neighbor Finding](1984-octree-hashing-for-point-location-and-neighbor-finding.md)
 This method performs point location and neighbor finding in an implicit octree by mapping 3D coordinates to integer indices within a fixed interval $[0, 2^{d_{max}}]$. It locates leaf nodes and their neighbors without storing explicit parent pointers, relying instead on bitwise arithmetic and a traversal stack. It differs from Frisken and Perry [5] by omitting the distinction of "left" or "right" midplane neighbors and by precomputing bit-depth shifts to avoid expensive arbitrary left-shifts.
 
 ### [Min/Max Tree Construction with Forward Neighbors](2020-min-max-tree-construction-with-forward-neighbors.md)
-This method constructs a bounding volume hierarchy on an octree where each node stores the minimum and maximum isosurface values within its spatial extent, specifically accounting for cells defined by forward neighbors. It differs from standard min/max trees by ensuring that a parent node's bounding box considers not only its 8 direct children but also their forward neighbors, effectively evaluating 27 voxel values per parent. This allows for efficient ray traversal rejection without traversing child nodes, reducing cache misses during volume rendering.
+This method constructs a bounding volume hierarchy (min/max tree) on top of a sparse octree to accelerate isosurface ray tracing. It solves the problem of accurately bounding cells defined by forward neighbors, ensuring that the min/max values stored in internal nodes correctly reflect the scalar field extent used for intersection tests. It differs from standard min/max trees by incorporating forward-adjacent voxels into the bounding volume calculation at the leaf level, which is necessary because ray tracing primitives are cells (8 voxels) rather than individual voxels.
 
 ### [Neighbor Cell Access via Hash Table and Morton Code](6715-neighbor-cell-access-via-hash-table-and-morton-code.md)
-This method retrieves face-adjacent cells in an irregular (generalized) octree where subdivision is not uniform across all three axial directions. It solves the problem that standard Morton code arithmetic fails to identify true geometric neighbors in anisotropic structures, where cells close in Morton space may be far apart geometrically. It sets itself apart from sibling methods by explicitly validating adjacency through geometric limits rather than relying solely on bitwise offsets or parent pointers, ensuring correctness despite irregular subdivision.
+A method to find face-adjacent cells in an irregular (generalized) octree using spatial coordinates, Morton codes, and a hash table for constant-time access. It handles anisotropic subdivision by checking geometric limits to ensure true adjacency, distinguishing it from standard octree neighbor traversal which assumes regular subdivision. It builds on [Cell Reconstruction via Octree Hashing](1595-cell-reconstruction-via-octree-hashing.md) by providing the spatial adjacency logic required for surface extraction on generalized grids.
 
 ## Operating characteristics
-- **Time Complexity:** Point location is O(log N) in the worst case, where N is the number of nodes. Neighbor finding is O(log N) in the worst case but O(1) in the best and average cases when neighbors share a parent node [S2].
-- **Memory Complexity:** The method requires storing the octree structure [S2].
-- **Performance:** The method is optimized for interactivity by precomputing masks and using constant interleaving [S2].
-- **Strengths:** Fast point location and neighbor finding; suitable for real-time ray tracing [S1, unofficial][S2].
-- **Limitations:** Not given in the sources.
-- **When to Use:** When rendering large sparse octree volumes and needing efficient access to neighbor voxels for cell reconstruction [S1, unofficial][S2].
-- **When Not to Use:** Not given in the sources.
+- **Time Complexity:** Point location is $O(\log N)$ where $N$ is the number of nodes, or more precisely $O(d_{max})$ [S2]. Neighbor finding worst-case is $O(\log N)$, but best-case and average-case are $O(1)$ [S2].
+- **Memory Complexity:** The method requires storing the octree structure. The hashing scheme itself uses $O(1)$ extra space for bitwise operations [S2].
+- **Performance:** Optimized for interactivity by precomputing masks and using constant interleaving [S2].
+- **Strengths:** Efficient point location and neighbor finding without explicit parent pointers. Suitable for large sparse volumes [S1, unofficial][S2].
+- **Limitations:** Requires integer coordinates. Performance degrades if the octree is very deep or unbalanced [S2].
+- **When to Use:** When ray tracing or isosurface extraction on sparse octree volumes is required, and memory is a constraint [S1, unofficial][S2].
+- **When Not to Use:** When the volume is dense and a regular grid is more efficient, or when floating-point precision is critical without quantization [S2].
 
 ## Background
-Point location and neighbor-finding algorithms were pioneered by Glassner and Samet for use in ray tracing [S1, unofficial]. Frisken and Perry proposed an efficient hashing scheme using binary arithmetic on integer coordinates, which this method builds upon [S1, unofficial]. The approach is used for interactive isosurface ray tracing of large octree volumes [S1, unofficial][S2].
+The method builds upon Frisken and Perry's efficient hashing scheme using binary arithmetic on integer coordinates [S1, unofficial]. Point location and neighbor-finding algorithms were pioneered by Glassner [6] and Samet [17] for use in ray tracing [S1, unofficial]. The application extends beyond ray tracing to the use of any regular binary tree (quadtree, octree, etc.) [S1, unofficial]. The method was proposed to compress scalar data from a 3D grid into an octree for rendering large 3D array volumes on commodity machines with limited memory [S1, unofficial].
 
 ## Sources
 [S1] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.researchgate.net/publication/261082346_Interactive_Isosurface_Ray_Tracing_of_Large_Octree_Volumes, fetched 2026-10-29 (unofficial)

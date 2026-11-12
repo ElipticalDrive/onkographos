@@ -1,0 +1,143 @@
+# Randomized Data Decomposition
+
+Also called: Probabilistic load balancing, Random block assignment
+
+## Overview
+Randomized Data Decomposition is a distributed computing strategy for volume rendering that assigns data blocks to processors uniformly at random to achieve statistical load balance. Unlike [Static Round-Robin Partitioning](2728-static-round-robin-partitioning.md) which relies on deterministic ordering, or [Scattered Assignment](4204-scattered-assignment.md) which may use heuristic-based scattering, this method leverages the Law of Large Numbers to guarantee that no single processor is overloaded with high probability, provided the total workload is sufficiently large relative to the maximum block workload. It is primarily used in out-of-core and parallel isocontouring of massive datasets where static load estimation is difficult or expensive.
+
+## How it works
+**Inputs:**
+- $N$: Total number of data blocks ($N \gg P$).
+- $P$: Number of processors.
+- $w_i$: Workload of block $b_i$ for a specific isovalue $\nu$ (e.g., triangle count or voxel processing cost).
+- $\hat{w} = \max_i(w_i)$: Maximum workload of any single block.
+- $W = \sum_{i=1}^N w_i$: Total workload.
+
+**Outputs:**
+- Assignment map: For each block $b_i$, the destination processor index $j \in \{1, \dots, P\}$.
+- Distributed data: Blocks transmitted to their assigned processors.
+
+**Data Structures:**
+- **Block List**: An array of $N$ block identifiers.
+- **Workload Vector**: An array of $N$ floats/doubles representing $w_i$.
+- **Assignment Array**: An array of $N$ integers representing the destination processor for each block.
+- **Message Buffers**: Per-processor lists of blocks destined for other processors.
+
+**Algorithm Steps:**
+
+1.  **Normalization**: Compute the maximum workload $\hat{w} = \max_{i=1}^N w_i$. Compute normalized workloads $a_i = w_i / \hat{w}$ for all $i$. Note that $a_i \in (0, 1]$.
+2.  **Random Assignment**: For each block $i$ from $1$ to $N$:
+    - Generate a random integer $j$ uniformly distributed in $\{1, \dots, P\}$.
+    - Assign block $b_i$ to processor $p_j$.
+    - Record this assignment in the Assignment Array.
+3.  **Collection**: Each processor $p_k$ iterates through the Assignment Array. If block $b_i$ is assigned to $p_k$, add $b_i$ to $p_k$'s local list of blocks to process.
+4.  **Distribution (if distributed memory)**:
+    - Each processor $p_k$ identifies blocks assigned to other processors $p_m$ ($m \neq k$).
+    - Pack these blocks into messages.
+    - Transmit messages to destination processors $p_m$.
+    - Receive messages from other processors.
+5.  **Indexing**: After data partitioning, build an I/O-optimal interval tree on each processor's local data to support efficient stabbing queries for isosurface extraction [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+
+def randomized_data_decomposition(blocks, workloads, num_processors):
+    """
+    Assigns blocks to processors using randomized decomposition.
+    
+    Args:
+        blocks: List of block identifiers [b1, b2, ..., bN]
+        workloads: List of workload values [w1, w2, ..., wN]
+        num_processors: Integer P
+        
+    Returns:
+        assignments: List of processor indices [j1, j2, ..., jN]
+    """
+    n = len(blocks)
+    if n == 0:
+        return []
+    
+    # Step 1: Normalization
+    max_workload = max(workloads)
+    if max_workload == 0:
+        # Handle degenerate case where all workloads are zero
+        normalized_workloads = [0.0] * n
+    else:
+        normalized_workloads = [w / max_workload for w in workloads]
+    
+    # Step 2: Random Assignment
+    assignments = []
+    for i in range(n):
+        # Uniformly random integer in [0, num_processors - 1]
+        dest_processor = random.randint(0, num_processors - 1)
+        assignments.append(dest_processor)
+        
+    return assignments
+
+def distribute_blocks(blocks, assignments, num_processors):
+    """
+    Distributes blocks to local lists based on assignments.
+    
+    Args:
+        blocks: List of block identifiers
+        assignments: List of processor indices
+        num_processors: Integer P
+        
+    Returns:
+        processor_lists: List of lists, where processor_lists[k] contains
+                         blocks assigned to processor k
+    """
+    n = len(blocks)
+    processor_lists = [[] for _ in range(num_processors)]
+    
+    for i in range(n):
+        dest = assignments[i]
+        processor_lists[dest].append(blocks[i])
+        
+    return processor_lists
+```
+
+**Formulas and Probabilistic Guarantees:**
+
+Let $x_{ij}$ be a binary random variable such that $x_{ij} = 1$ if block $b_i$ is assigned to processor $p_j$, and $0$ otherwise. The variables $x_{1j}, x_{2j}, \dots, x_{Nj}$ are independent Bernoulli trials with $P(x_{ij}=1) = 1/P$.
+
+The expected number of blocks received by processor $p_j$ is:
+$$ E\left(\sum_{i=1}^N x_{ij}\right) = \frac{N}{P} $$
+
+The normalized workload assigned to processor $p_j$ is $\Psi_j = \sum_{i=1}^N a_i x_{ij}$. The expected workload is:
+$$ \hat{w} \times E(\Psi_j) = \sum_{i=1}^N \frac{w_i}{P} = \frac{W}{P} $$
+
+**Theorem 1 (Raghavan and Spencer [45]):**
+Let $a_1, \dots, a_N$ be reals in $(0, 1]$. Let $x_1, \dots, x_N$ be independent Bernoulli trials with $E(x_i) = \rho_i$. Let $\Psi_\beta = \sum_{i=1}^N a_i x_i$. If $E(\Psi_\beta) > 0$, then for any $\nu > 0$:
+$$ \text{prob}(\Psi_\beta > (1+\nu)E(\Psi_\beta)) < \left( \frac{e^\nu}{(1+\nu)^{(1+\nu)}} \right)^{E(\Psi_\beta)} $$
+
+**Theorem 2:**
+If the total workload $W > \alpha \hat{w} P \log r$ for a given isovalue and blocks are randomly allocated among $P$ processors, any processor has a workload $\le \frac{2W}{P}$ with high probability $\ge (1 - \frac{1}{r^c})$, where $\hat{w}$ is the maximum workload of a block and $\alpha > \frac{c+1}{\log(4/e)}$ ($c \le 0$) is a constant.
+
+The probability of any processor having more than twice the average workload is:
+$$ \text{prob}(\Psi > 2\frac{W'}{P}) \le P \times \text{prob}(\Psi_j > 2\frac{W'}{P}) < r^{-c} $$
+where $\Psi = \max_P (\Psi_j)$ is the maximum load of all processors and $W'$ is the normalized total workload [S1].
+
+**Edge Cases and Pitfalls:**
+- **Small Workload**: The probabilistic guarantees hold when $N \gg P$ and the total workload $W$ is sufficiently large. For isosurfaces with very few triangles (low $W$), the load balance may not be optimal [S1].
+- **Precision**: The normalization $a_i = w_i / \hat{w}$ requires floating-point arithmetic. If $w_i$ values vary significantly in magnitude, precision loss may affect the accuracy of the probabilistic bounds, though the assignment itself is integer-based.
+- **Random Seed**: For reproducibility, the random number generator should be seeded deterministically.
+
+## Operating characteristics
+- **Time Complexity**: The assignment phase is $O(N)$ for generating random numbers and assigning blocks. The distribution phase is $O(N)$ for collecting and sending messages.
+- **Memory Complexity**: $O(N)$ to store the assignment map and block lists.
+- **Load Balance**: Achieves good load balance with high probability for large datasets. The deviation from the mean decreases as $N$ increases.
+- **Strengths**: Simple to implement; no need for complex load estimation or static analysis of the data; flexible for dynamic workloads if re-randomization is performed.
+- **Limitations**: Does not preserve spatial locality, which may impact cache performance or I/O efficiency if not managed by subsequent indexing structures (like the interval tree mentioned in the source). Not suitable for small datasets where statistical averages do not hold.
+- **When to Use**: Large-scale parallel isocontouring where static load balancing is too expensive or inaccurate, and the dataset is large enough for statistical laws to apply.
+- **When Not to Use**: Small datasets, or when spatial locality is critical for performance and cannot be mitigated by other means.
+
+## Background
+Randomized Data Decomposition was proposed for scalable isosurface visualization of massive datasets on commodity off-the-shelf clusters. It relies on statistical theorems regarding the weighted sum of Bernoulli trials, specifically citing work by Raghavan and Spencer [45]. The method is designed to handle the load balancing problem in parallel and out-of-core isocontouring, where the workload of individual blocks can vary significantly depending on the isovalue. The approach assumes that the number of blocks $N$ is much larger than the number of processors $P$, which is typical for massive volume datasets.
+
+## Sources
+[S1] Scalable isosurface visualization of massive datasets on commodity off-the-shelf clusters., https://doi.org/10.1016/j.jpdc.2008.07.006, fetched 2026-11-08

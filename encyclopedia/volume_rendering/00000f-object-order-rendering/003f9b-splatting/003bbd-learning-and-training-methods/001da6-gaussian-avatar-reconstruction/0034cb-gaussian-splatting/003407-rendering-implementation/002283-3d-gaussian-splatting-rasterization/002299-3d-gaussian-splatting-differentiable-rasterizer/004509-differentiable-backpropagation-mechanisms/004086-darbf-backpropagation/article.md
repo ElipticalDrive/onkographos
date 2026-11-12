@@ -3,116 +3,139 @@
 Also called: DARBF Gradient Calculation, Differentiable DARBF Rasterizer
 
 ## Overview
-DARBF Backpropagation is the gradient computation mechanism for Decaying Anisotropic Radial Basis Functions (DARBFs) within differentiable splatting frameworks. It solves the problem of computing accurate gradients for non-Gaussian basis functions during the training of 3D Gaussian Splatting variants. It differs from standard 3DGS backpropagation by explicitly replacing the fixed Gaussian derivative formulas with specific gradient terms derived from the DARBF activation function, allowing the rasterizer to support arbitrary DARBF shapes [S1].
+DARBF Backpropagation is the gradient computation mechanism for Decaying Anisotropic Radial Basis Functions (DARBFs) within the 3D Gaussian Splatting pipeline. It solves the problem of differentiating the rendering loss with respect to Gaussian parameters when the alpha splatting function is not a standard Gaussian but a decaying anisotropic function (e.g., half-cosine). It differs from standard 3DGS backpropagation by replacing the fixed Gaussian derivative formulas with specific chain-rule terms derived from the DARBF activation function, while maintaining the same alpha compositing structure defined in [Differentiable Backpropagation Mechanisms](11407-differentiable-backpropagation-mechanisms.md).
 
 ## How it works
-The method modifies the differentiable rasterizer's backward pass to compute gradients for the DARBF weight $w$ with respect to the projected mean $\mu'$ and the inverse covariance matrix $(\Sigma'_{2\times 2})^{-1}$. It relies on the chain rule applied to the distance metric $d_M$ and the activation function $F$.
-
 **Inputs:**
-*   Gradient of the loss with respect to the pixel color/compositing output (provided by the parent mechanism).
-*   Current splat parameters: projected mean $\mu'$, inverse covariance matrix $(\Sigma'_{2\times 2})^{-1}$.
-*   Pixel coordinate $x$ (in 2D projected space).
-*   DARBF parameter $\xi$ (frequency/decay control).
+*   Gradient of the loss with respect to the pixel color: $\frac{\partial L}{\partial C_j}$ for each pixel $j$.
+*   Forward pass data for splat $s$ contributing to pixel $j$:
+    *   Projected mean $\boldsymbol{\mu}'$ (2D vector).
+    *   Inverse projected covariance matrix $(\Sigma'_{2\times 2})^{-1}$ (2x2 matrix).
+    *   Weight $w_s$ (scalar opacity contribution before compositing).
+    *   Distance metric $d_M$ (scalar).
+    *   Parameter $\xi$ (scalar frequency/decay control).
+    *   Accumulated transparency $\alpha_{prev} = \prod_{k < s} (1 - \alpha_k)$.
 
 **Outputs:**
-*   Gradients $\frac{\partial w}{\partial \mu'}$ and $\frac{\partial w}{\partial (\Sigma'_{2\times 2})^{-1}}$ accumulated into the respective parameter buffers.
+*   Gradients with respect to the projected mean difference: $\frac{\partial L}{\partial (x - \boldsymbol{\mu}')}$.
+*   Gradients with respect to the inverse covariance matrix: $\frac{\partial L}{\partial (\Sigma'_{2\times 2})^{-1}}$.
 
 **Data Structures:**
-*   Standard 3DGS attribute buffers for means and covariances are used. The modification is purely in the gradient calculation kernel logic.
+*   $x$: The 2D pixel coordinate vector.
+*   $\boldsymbol{\mu}'$: The 2D projected mean vector.
+*   $\Sigma'_{2\times 2}$: The 2D projected covariance matrix.
+*   $(\Sigma'_{2\times 2})^{-1}$: The inverse of the projected covariance matrix.
+*   $d_M$: The Mahalanobis-like distance metric defined as $d_M = \frac{(x - \boldsymbol{\mu}')^T(\Sigma'_{2\times 2})^{-1}(x - \boldsymbol{\mu}')}{\xi}$.
+*   $F(d_M)$: The DARBF activation function (e.g., half-cosine).
+*   $F'(d_M)$: The derivative of the activation function.
 
-**Formulas:**
-The weight $w$ is a function of the distance metric $d_M$ via an activation function $F$: $w = F(d_M)$.
-The distance metric is defined as:
-$$ d_M = \frac{(x - \boldsymbol{\mu}')^T(\Sigma'_{2\times 2})^{-1}(x - \boldsymbol{\mu}')}{\xi} $$
+**Steps:**
+1.  **Compute Activation Derivative:** Calculate the derivative of the DARBF activation function $F$ with respect to the distance metric $d_M$ using the chain rule. For the half-cosine example, this is:
+    $$ F'(d_M) = -\sin\left(\frac{(x - \boldsymbol{\mu}')^T(\Sigma'_{2\times 2})^{-1}(x - \boldsymbol{\mu}')}{\xi}\right) $$
+    [S1]
 
-The derivative of the activation function $F$ with respect to $d_M$ is:
-$$ F'(d_M) = -\sin\left(\frac{(x - \boldsymbol{\mu}')^T(\Sigma'_{2\times 2})^{-1}(x - \boldsymbol{\mu}')}{\xi}\right) $$
-*Note: This specific form corresponds to the half-cosine function example where $F(d_M) = \cos(d_M)$ or similar, resulting in a sine derivative [S1].*
+2.  **Compute Distance Metric Derivatives:** Calculate the partial derivatives of the distance metric $d_M$ with respect to the inverse covariance matrix and the projected mean difference.
+    *   With respect to the inverse covariance matrix:
+        $$ \frac{\partial d_M}{\partial(\Sigma'_{2 \times 2})^{-1}} = \frac{(x - \boldsymbol{\mu}')(x - \boldsymbol{\mu}')^T}{\xi} $$
+        [S1]
+    *   With respect to the projected mean difference $(x - \boldsymbol{\mu}')$:
+        $$ \frac{\partial d_M}{\partial(x - \boldsymbol{\mu}')} = \frac{2(\Sigma'_{2 \times 2})^{-1}(x - \boldsymbol{\mu}')}{\xi} $$
+        [S1]
 
-The partial derivatives of the distance metric $d_M$ are:
-1.  With respect to the inverse covariance matrix:
-    $$ \frac{\partial d_M}{\partial(\Sigma'_{2 \times 2})^{-1}} = \frac{(x - \boldsymbol{\mu}')(x - \boldsymbol{\mu}')^T}{\xi} $$
-2.  With respect to the projected mean difference $(x - \boldsymbol{\mu}')$:
-    $$ \frac{\partial d_M}{\partial(x - \boldsymbol{\mu}')} = \frac{2(\Sigma'_{2 \times 2})^{-1}(x - \boldsymbol{\mu}')}{\xi} $$
+3.  **Compute Weight Gradients:** Apply the chain rule to compute the gradient of the weight $w$ (which determines the splat's opacity contribution $\alpha_s$) with respect to the Gaussian parameters.
+    *   Gradient with respect to the projected mean difference:
+        $$ \frac{dw}{d(x - \boldsymbol{\mu}')} = F'(d_M) \frac{\partial d_M}{\partial(x - \boldsymbol{\mu}')} $$
+        [S1]
+    *   Gradient with respect to the inverse covariance matrix:
+        $$ \frac{dw}{d((\Sigma'_{2\times 2})^{-1})} = F'(d_M) \frac{\partial d_M}{\partial(\Sigma'_{2 \times 2})^{-1}} $$
+        [S1]
 
-The total gradients for the weight $w$ are computed using the chain rule [S1]:
-$$ \frac{dw}{d(x - \mu')} = F'(d_M) \frac{d(d_M)}{d(x - \mu')} $$
-$$ \frac{dw}{d((\Sigma'_{2\times 2})^{-1})} = F'(d_M) \frac{d(d_M)}{d((\Sigma'_{2\times 2})^{-1})} $$
+4.  **Accumulate Loss Gradients:** Multiply the weight gradients by the gradient flowing from the loss through the alpha compositing equation. If $\frac{\partial L}{\partial \alpha_s}$ is the gradient of the loss with respect to the splat's opacity $\alpha_s$ (derived from the compositing chain rule in the parent article), then:
+    $$ \frac{\partial L}{\partial (x - \boldsymbol{\mu}')} = \frac{\partial L}{\partial \alpha_s} \frac{d\alpha_s}{dw} \frac{dw}{d(x - \boldsymbol{\mu}')} $$
+    $$ \frac{\partial L}{\partial (\Sigma'_{2\times 2})^{-1}} = \frac{\partial L}{\partial \alpha_s} \frac{d\alpha_s}{dw} \frac{dw}{d((\Sigma'_{2\times 2})^{-1})} $$
+    [G] Note: The term $\frac{d\alpha_s}{dw}$ depends on the specific mapping from weight $w$ to opacity $\alpha_s$ (e.g., $\alpha_s = w \cdot \alpha_{prev}$ or similar). The sources provide the derivatives of $w$ with respect to the geometric parameters, which must be scaled by the compositing gradient.
+
+5.  **Map to Parameter Space:** Convert the gradients with respect to $(x - \boldsymbol{\mu}')$ and $(\Sigma'_{2\times 2})^{-1}$ back to the gradients for the learnable parameters (mean $\boldsymbol{\mu}$, covariance $\Sigma$, etc.) using the Jacobian of the projection and parameterization steps. [G] This step is standard in differentiable rasterizers and relies on the forward projection derivatives.
 
 **Parameters:**
-*   $\xi$: Controls the frequency/decay of the DARBF. In the cited half-cosine example, $\xi = 18\pi$ [S1].
+*   $\xi$: A parameter controlling the frequency/decay of the DARBF. In the half-cosine function example, $\xi = 18\pi$. [S1]
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The sine function in $F'(d_M)$ can oscillate rapidly if $\xi$ is small, leading to high-frequency gradients. [S1]
+*   **Boundary Conditions:** The half-cosine function typically has a support limit. Gradients should be zero outside the support. [G]
+*   **Singular Covariance:** If $(\Sigma'_{2\times 2})^{-1}$ is ill-conditioned, the distance metric $d_M$ may become unstable. [G]
 
 **Pseudocode:**
-The following Python-like pseudocode implements the gradient calculation for a single splat-pixel interaction. It assumes `grad_out` is the gradient flowing back from the compositing stage with respect to the weight $w$.
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
-
-def compute_darbf_gradients(
-    grad_out: float,          # dL/dw from compositing
-    x: np.ndarray,            # Pixel coordinate (2,)
-    mu_prime: np.ndarray,     # Projected mean (2,)
-    inv_cov: np.ndarray,      # Inverse covariance matrix (2, 2)
-    xi: float                 # DARBF frequency parameter
-) -> dict:
+def darbf_backprop(x, mu_prime, inv_cov, xi, grad_L_alpha_s, d_alpha_s_dw):
     """
-    Computes gradients for DARBF weight w w.r.t. mu' and inv_cov.
-    Based on DARB-Splatting [S1].
+    Computes gradients for DARBF splatting.
+    
+    Args:
+        x: (2,) pixel coordinate vector.
+        mu_prime: (2,) projected mean vector.
+        inv_cov: (2, 2) inverse projected covariance matrix.
+        xi: scalar decay parameter.
+        grad_L_alpha_s: scalar gradient of loss w.r.t. opacity alpha_s.
+        d_alpha_s_dw: scalar derivative of alpha_s w.r.t. weight w.
+        
+    Returns:
+        grad_mu_diff: (2,) gradient w.r.t. (x - mu_prime).
+        grad_inv_cov: (2, 2) gradient w.r.t. inv_cov.
     """
-    # 1. Compute difference vector
-    diff = x - mu_prime  # (2,)
+    # Step 1: Compute distance metric d_M
+    diff = x - mu_prime
+    d_M = (diff.T @ inv_cov @ diff) / xi
     
-    # 2. Compute distance metric d_M
-    # d_M = (diff^T * inv_cov * diff) / xi
-    quadratic_form = diff.T @ inv_cov @ diff
-    d_M = quadratic_form / xi
+    # Step 2: Compute activation derivative F'(d_M)
+    # For half-cosine: F'(d_M) = -sin(d_M)
+    F_prime = -sin(d_M)
     
-    # 3. Compute F'(d_M)
-    # For the half-cosine example: F'(d_M) = -sin(d_M)
-    # Note: The source [S1] Eq. 10 shows -sin(...)
-    F_prime_dM = -np.sin(d_M)
+    # Step 3: Compute distance metric derivatives
+    # d(d_M) / d(inv_cov) = (diff @ diff.T) / xi
+    grad_dM_d_inv_cov = (diff.reshape(-1, 1) @ diff.reshape(1, -1)) / xi
     
-    # 4. Compute partial derivatives of d_M
-    # d(d_M) / d(inv_cov) = (diff * diff^T) / xi
-    # This results in a (2, 2) matrix
-    d_dM_d_inv_cov = (np.outer(diff, diff)) / xi
+    # d(d_M) / d(diff) = 2 * inv_cov @ diff / xi
+    grad_dM_d_diff = 2.0 * (inv_cov @ diff) / xi
     
-    # d(d_M) / d(diff) = 2 * inv_cov * diff / xi
-    # This results in a (2,) vector
-    d_dM_d_diff = (2.0 * inv_cov @ diff) / xi
+    # Step 4: Compute weight gradients
+    # dw / d(diff) = F'(d_M) * d(d_M) / d(diff)
+    dw_d_diff = F_prime * grad_dM_d_diff
     
-    # 5. Apply Chain Rule to get gradients w.r.t. parameters
-    # dw/dx_diff = F'(d_M) * d(d_M)/d(x_diff)
-    # Note: d(mu')/d(diff) is -1, so d(w)/d(mu') = - dw/d(diff)
-    grad_wrt_diff = F_prime_dM * d_dM_d_diff
-    grad_wrt_mu_prime = -grad_wrt_diff * grad_out
+    # dw / d(inv_cov) = F'(d_M) * d(d_M) / d(inv_cov)
+    dw_d_inv_cov = F_prime * grad_dM_d_inv_cov
     
-    # dw/d(inv_cov) = F'(d_M) * d(d_M)/d(inv_cov)
-    grad_wrt_inv_cov = (F_prime_dM * d_dM_d_inv_cov) * grad_out
+    # Step 5: Scale by loss gradient and compositing derivative
+    # grad_L_d_diff = grad_L_alpha_s * d_alpha_s_dw * dw_d_diff
+    grad_mu_diff = grad_L_alpha_s * d_alpha_s_dw * dw_d_diff
     
-    return {
-        "grad_mu_prime": grad_wrt_mu_prime,
-        "grad_inv_cov": grad_wrt_inv_cov
-    }
+    # grad_L_d_inv_cov = grad_L_alpha_s * d_alpha_s_dw * dw_d_inv_cov
+    grad_inv_cov = grad_L_alpha_s * d_alpha_s_dw * dw_d_inv_cov
+    
+    return grad_mu_diff, grad_inv_cov
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** The quadratic form $(x - \mu')^T \Sigma^{-1} (x - \mu')$ can become large for pixels far from the mean, potentially causing numerical instability in the sine function if $\xi$ is small.
-*   **Matrix Inversion:** The method assumes the inverse covariance $(\Sigma'_{2\times 2})^{-1}$ is pre-computed and valid. Degenerate covariances (singular matrices) must be handled by the parent rasterizer's culling or regularization steps before this backpropagation step is reached.
-*   **Activation Function Specificity:** The formula for $F'(d_M)$ depends on the specific DARBF chosen. The provided sine derivative is specific to the half-cosine example. Implementers must replace $F'(d_M)$ with the derivative of their chosen DARBF activation function [S1].
+## Subtopics
+
+### Backpropagation with Per-Splat Parallelization
+Uses a different parallelization strategy for gradient computation, assigning one thread per splat. Choose when memory bandwidth is the bottleneck and splat counts are high. [Link](3533-backpropagation-with-per-splat-parallelization.md)
+
+### Stochastic Gradient Estimation for Differentiable Rasterization
+Uses stochastic sampling to approximate gradients, reducing memory usage. Choose when memory is constrained or for large-scale scenes. [Link](11381-stochastic-gradient-estimation-for-differentiable-rasterizat.md)
 
 ## Operating characteristics
-*   **Time Complexity:** Identical to standard 3DGS backpropagation per splat-pixel interaction, as it involves the same number of arithmetic operations (matrix-vector multiplications and element-wise functions).
-*   **Memory Complexity:** No additional memory overhead compared to standard 3DGS, as it reuses the same gradient buffers.
-*   **Strengths:** Enables the use of non-Gaussian basis functions (DARBFs) which may offer better representation for certain scene features or faster convergence.
-*   **Limitations:** Requires custom CUDA kernels or modified Python logic to replace the hardcoded Gaussian derivatives. Performance is hardware-dependent but generally matches 3DGS on modern GPUs (e.g., RTX 4090) [S1].
-*   **When to use:** When the scene benefits from the specific decay properties of DARBFs over standard Gaussians.
-*   **When not to use:** For standard 3D Gaussian Splatting where the Gaussian basis is sufficient and standard derivatives are preferred for stability.
+*   **Time Complexity**: Same as standard 3DGS backpropagation, $O(N)$ where $N$ is the number of splats, as the additional trigonometric operations are constant time per splat.
+*   **Memory Complexity**: Same as standard 3DGS, $O(N)$ for storing gradients.
+*   **Performance**: Measured on NVIDIA GeForce RTX 4090. [S1] No specific FPS numbers given for DARBF backpropagation alone, but it is implemented on the 3DGS codebase. [S1]
+*   **Strengths**: Enables the use of non-Gaussian basis functions (DARBFs) which may offer better representation for certain geometries or materials. [S1]
+*   **Limitations**: Requires careful tuning of the $\xi$ parameter. [S1] The oscillatory nature of the derivative may require smaller learning rates. [G]
+*   **When to use**: When the scene benefits from the specific shape properties of DARBFs (e.g., sharper edges, specific decay profiles) compared to Gaussians. [S1]
+*   **When not to use**: When standard Gaussian Splatting performance is sufficient, or when the overhead of tuning $\xi$ is not justified.
 
 ## Background
-DARBF Backpropagation was introduced in the paper "DARB-Splatting: Generalizing Splatting with Decaying Anisotropic Radial Basis Functions" [S1]. It extends the 3D Gaussian Splatting framework by allowing the rasterizer to support a general class of radial basis functions. The implementation anchors on the 3DGS codebase updated as of October 2024 [S1]. The method was developed to provide a more flexible representation than fixed Gaussian kernels, allowing for decaying anisotropic shapes controlled by parameters like $\xi$.
+DARBF Backpropagation was introduced in "DARB-Splatting: Generalizing Splatting with Decaying Anisotropic Radial Basis Functions" (2026). [S1] It extends the 3D Gaussian Splatting framework by replacing the Gaussian basis function with DARBFs, requiring a modification of the differentiable rasterizer's gradient computation. [S1] The implementation is based on the 3DGS codebase updated as of October 2024. [S1]
 
 ## Sources
 [S1] DARB-Splatting: Generalizing Splatting with Decaying Anisotropic Radial Basis Functions, https://doi.org/10.1109/WACV61042.2026.00438, fetched 2026-10-30

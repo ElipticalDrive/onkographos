@@ -1,184 +1,162 @@
 # Residual Block with Shortcut (ReLU MLP Extension)
 Also called: Analytic Marching with TResBlk and Shortcut Connections
 ## Overview
-This method extends the analytic marching algorithm for implicit surface reconstruction to Multi-Layer Perceptrons (MLPs) constructed with residual blocks containing shortcut connections [S1]. It enables the theoretical analysis and exact linear region partitioning of such architectures, allowing for efficient meshing via analytic marching [S1]. It differs from the baseline [MLP Neural Field](1256-mlp-neural-field.md) by explicitly handling the additive shortcut path in the region-wise linear mapping, and from [MLP with Input Skips](1643-mlp-with-input-skips.md) by using a residual summation structure rather than concatenation or direct input reuse [S1].
+This method extends the analytic marching algorithm for implicit surface reconstruction to Multi-Layer Perceptrons (MLPs) constructed with residual blocks containing shortcut connections [S1]. It enables the theoretical analysis and exact linear region partitioning of such architectures, allowing for efficient meshing via analytic marching [S1].
 ## How it works
 **Inputs and Outputs:**
-- Input: An MLP $T$ composed of $L$ residual blocks with shortcut connections, where each block maps $\mathbb{R}^{n_0} \to \mathbb{R}^{n_L}$ (with $n_0 = n_L$ for the primary case).
-- Output: The region-wise linear mapping coefficients $a_{lk}^r$ and the state functional $s_{ResBlk}(r)$ required for analytic marching.
+- Input: An MLP $T$ composed of $L$ residual blocks with shortcut connections, where each block maps $\mathbb{R}^{n_0} \to \mathbb{R}^{n_L}$ (with $n_0 = n_L$ for the primary case) [S1].
+- Output: The region-wise linear mapping coefficients $a_{lk}^r$ and the state functional $s_{\text{ResBlk}}(r)$ required for analytic marching [S1].
 
 **Data Structures:**
-- State functional $s_{ResBlk}(x)$: A vector containing the binary activation states of all neurons in all layers.
-- Region-wise linear mapping $T_{ResBlk}^r$: A matrix representing the linear transformation within a specific linear region $r$.
-- Neuron-wise coefficients $a_{lk}^r$: Scalars defining the contribution of each neuron to the output.
+- State functional $s_{\text{ResBlk}}(\mathbf{x})$: A vector containing the binary activation states of all neurons in all layers [S1].
+- Region-wise linear mapping $T_{\text{ResBlk}}^r$: A matrix representing the linear transformation within a specific linear region $r$ [S1].
+- Neuron-wise coefficients $a_{lk}^r$: Scalars defining the contribution of each neuron to the output [S1].
 
 **Definitions:**
-Let $x \in \mathbb{R}^{n_0}$ be the input. The residual block defines a mapping $T_{ResBlk}$ as:
-$$ T_{ResBlk}x = g(x + T_{PreAct}x) $$
-where $g$ is the ReLU activation function, and $T_{PreAct}$ is a stack of $L$ hidden layers:
-$$ T_{PreAct}x = W_L g(\dots g(W_1 x)) $$
-Here, $W_l \in \mathbb{R}^{n_l \times n_{l-1}}$ are the weight matrices for layer $l$, and $n_0 = n_L$.
+Let $\mathbf{x} \in \mathbb{R}^{n_0}$ be the input [S1]. The residual block defines a mapping $T_{\text{ResBlk}}$ as [S1]:
+$$ T_{\text{ResBlk}}\mathbf{x} = g(\mathbf{x} + T_{\text{PreAct}}\mathbf{x}) $$
+where $g$ is the ReLU activation function, and $T_{\text{PreAct}}$ is a stack of $L$ hidden layers [S1]:
+$$ T_{\text{PreAct}}\mathbf{x} = \mathbf{W}_L g(\dots g(\mathbf{W}_1 \mathbf{x})) $$
+Here, $\mathbf{W}_l \in \mathbb{R}^{n_l \times n_{l-1}}$ are the weight matrices for layer $l$, and $n_0 = n_L$ [S1].
 
 **Step 1: Define State Functional for Final Layer**
-The state functional for the output of the final layer of $T_{PreAct}$, denoted $s_L(x)$, is defined element-wise for $k \in \{1, \dots, n_L\}$ as [S1]:
-$$ s_{Lk}(x) = \begin{cases} 1 & \text{if } \pi_k(x + T_{PreAct}x) > 0 \\ 0 & \text{if } \pi_k(x + T_{PreAct}x) \leq 0 \end{cases} $$
-where $\pi_k(v)$ extracts the $k$-th component of vector $v$. The full state functional for the residual block is $s_{ResBlk}(x) = [s_1(x)^T, \dots, s_L(x)^T]^T$.
+The state functional for the output of the final layer of $T_{\text{PreAct}}$, denoted $s_L(\mathbf{x})$, is defined element-wise for $k \in \{1, \dots, n_L\}$ as [S1]:
+$$ s_{Lk}(\mathbf{x}) = \begin{cases} 1 & \text{if } \pi_k(\mathbf{x} + T_{\text{PreAct}}\mathbf{x}) > 0 \\ 0 & \text{if } \pi_k(\mathbf{x} + T_{\text{PreAct}}\mathbf{x}) \leq 0 \end{cases} $$
+where $\pi_k(\mathbf{v})$ extracts the $k$-th component of vector $\mathbf{v}$ [S1]. The full state functional for the residual block is $s_{\text{ResBlk}}(\mathbf{x}) = [s_1(\mathbf{x})^T, \dots, s_L(\mathbf{x})^T]^T$ [S1].
 
 **Step 2: Define Region-wise Linear Mapping**
-For a linear region $r$ labeled by $s_{ResBlk}(r)$, the region-wise linear mapping $T_{ResBlk}^r$ is defined as [S1]:
-$$ T_{ResBlk}^r = \text{diag}(s_L(r)) \left( I + W_L \prod_{l=1}^{L-1} W_l^r \right) $$
-where $I$ is the identity matrix of size $n_L \times n_L$, and $W_l^r$ is the modified weight matrix for layer $l$ defined as [S1]:
-$$ W_l^r = \text{diag}(s_l(r)) W_l \quad \text{for } l \in \{1, \dots, L-1\} $$
+For a linear region $r$ labeled by $s_{\text{ResBlk}}(r)$, the region-wise linear mapping $T_{\text{ResBlk}}^r$ is defined as [S1]:
+$$ T_{\text{ResBlk}}^r = \text{diag}(s_L(r)) \left( \mathbf{I} + \mathbf{W}_L \prod_{l=1}^{L-1} \mathbf{W}_l^r \right) $$
+where $\mathbf{I}$ is the identity matrix of size $n_L \times n_L$, and $\mathbf{W}_l^r$ is the modified weight matrix for layer $l$ defined as [S1]:
+$$ \mathbf{W}_l^r = \text{diag}(s_l(r)) \mathbf{W}_l \quad \text{for } l \in \{1, \dots, L-1\} $$
 
 **Step 3: Define Neuron-wise Linear Mapping Coefficients**
 The neuron-wise linear mapping coefficients $a_{lk}^r$ for layer $l$ and neuron $k$ are defined as [S1]:
-$$ a_{lk}^r = \begin{cases} \pi_k \left( I + W_L \prod_{i=1}^{L-1} W_i^r \right) & \text{when } l = L \\ \pi_k \left( W_l \prod_{i=1}^{l-1} W_i^r \right) & \text{when } l \in \{2, \dots, L-1\} \\ \pi_k W_l & \text{when } l = 1 \end{cases} $$
-where $\pi_k(M)$ extracts the $k$-th row of matrix $M$.
+$$ a_{lk}^r = \begin{cases} \pi_k \left( \mathbf{I} + \mathbf{W}_L \prod_{i=1}^{L-1} \mathbf{W}_i^r \right) & \text{when } l = L \\ \pi_k \left( \mathbf{W}_l \prod_{i=1}^{l-1} \mathbf{W}_i^r \right) & \text{when } l \in \{2, \dots, L-1\} \\ \pi_k \mathbf{W}_l & \text{when } l = 1 \end{cases} $$
+where $\pi_k(\mathbf{M})$ extracts the $k$-th row of matrix $\mathbf{M}$ [S1].
 
 **Step 4: Alternative Residual Block (Dimension Mismatch)**
-If the input dimension $n_0$ differs from the output dimension $n_L$, the shortcut path is replaced by a linear mapping $Vx$, where $V \in \mathbb{R}^{n_L \times n_0}$. The mapping becomes [S1]:
-$$ T_{ResBlk}x = g(Vx + T_{PreAct}x) $$
-Definitions similar to those above apply, with $I$ replaced by $V$ in the relevant terms.
+If the input dimension $n_0$ differs from the output dimension $n_L$, the shortcut path is replaced by a linear mapping $\mathbf{V}\mathbf{x}$, where $\mathbf{V} \in \mathbb{R}^{n_L \times n_0}$ [S1]. The mapping becomes [S1]:
+$$ T_{\text{ResBlk}}\mathbf{x} = g(\mathbf{V}\mathbf{x} + T_{\text{PreAct}}\mathbf{x}) $$
+Definitions similar to those above apply, with $\mathbf{I}$ replaced by $\mathbf{V}$ in the relevant terms [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import numpy as np
+
 def compute_residual_block_state(x, weights, num_layers):
     """
     Compute the state functional for a residual block with shortcut connections.
-    
     Args:
         x: Input vector of shape (n0,)
         weights: List of weight matrices [W1, W2, ..., WL]
         num_layers: Number of hidden layers L
-        
     Returns:
         s_resblk: State functional vector containing states for all layers
     """
-    n0 = x.shape[0]
-    nL = weights[-1].shape[0]
-    
-    # Compute PreAct path: T_PreAct(x) = W_L * g(...g(W_1 * x))
     current_input = x
     layer_states = []
     
     for l in range(num_layers - 1):
         W_l = weights[l]
-        # Linear transformation
         linear_out = W_l @ current_input
-        # ReLU activation
         current_input = np.maximum(0, linear_out)
-        # Store state for this layer (for W_l^r calculation later)
-        # State is 1 if neuron output > 0, else 0
         state = (current_input > 0).astype(float)
         layer_states.append(state)
         
-    # Final layer of PreAct
     W_L_pre = weights[num_layers - 1]
     linear_out_L = W_L_pre @ current_input
     pre_act_output = linear_out_L
     
-    # Compute shortcut path sum: x + T_PreAct(x)
     shortcut_sum = x + pre_act_output
-    
-    # Compute state for final layer of ResBlk
-    # s_Lk(x) = 1 if shortcut_sum[k] > 0 else 0
     s_L = (shortcut_sum > 0).astype(float)
     
-    # Combine states: s_ResBlk(x) = [s_1, ..., s_L]
-    # Note: s_1...s_{L-1} are from PreAct layers, s_L is from final ResBlk output
     s_resblk = np.concatenate([np.array(layer_states), [s_L]])
-    
     return s_resblk
 
 def compute_region_wise_mapping(s_resblk, weights, num_layers):
     """
     Compute the region-wise linear mapping T_ResBlk^r for a given region r.
-    
     Args:
         s_resblk: State functional vector for region r
         weights: List of weight matrices [W1, ..., WL]
         num_layers: Number of hidden layers L
-        
     Returns:
         T_resblk_r: Region-wise linear mapping matrix
     """
     nL = weights[-1].shape[0]
     I = np.eye(nL)
     
-    # Compute modified weights W_l^r = diag(s_l(r)) * W_l for l in 1..L-1
     modified_weights = []
     for l in range(num_layers - 1):
-        s_l = s_resblk[l] # State for layer l
+        s_l = s_resblk[l]
         W_l = weights[l]
         W_l_r = np.diag(s_l) @ W_l
         modified_weights.append(W_l_r)
         
-    # Compute product: prod_{i=1}^{L-1} W_i^r
-    # Note: The product order in the source is W_1^r * ... * W_{L-1}^r
-    # However, matrix multiplication is associative but not commutative.
-    # The source defines T_PreAct as W_L * g(...g(W_1 x)), implying W_1 is applied first.
-    # The product in Eq 20 is written as prod_{l=1}^{L-1} W_l^r.
-    # In standard matrix notation for function composition f(g(x)), if W_1 is first,
-    # the combined linear map is W_{L-1}^r * ... * W_1^r.
-    # The source Eq 20: W_L * prod_{l=1}^{L-1} W_l^r.
-    # This implies the product is W_1^r * ... * W_{L-1}^r if we follow left-to-right application?
-    # Let's check the neuron-wise mapping Eq 21.
-    # For l=L-1: a_{L-1,k}^r = pi_k(W_{L-1} * prod_{i=1}^{L-2} W_i^r).
-    # This suggests the product is applied from left to right in the notation,
-    # but mathematically, if W_1 acts on x, then W_2 acts on W_1 x, the combined matrix is W_2 * W_1.
-    # The source notation prod_{l=1}^{L-1} W_l^r likely means W_1^r * W_2^r * ... * W_{L-1}^r
-    # if the weights are defined such that W_l maps from l-1 to l.
-    # Let's assume standard matrix multiplication order for function composition:
-    # If y = W_L * g(W_{L-1} * ... * g(W_1 * x)), then the linear part is W_L * W_{L-1}^r * ... * W_1^r.
-    # The source Eq 20 writes prod_{l=1}^{L-1} W_l^r.
-    # If we interpret prod_{l=1}^{L-1} as W_1^r * ... * W_{L-1}^r, this would be incorrect for standard matrix mult.
-    # However, looking at Eq 21 for l=L-1: W_{L-1} * prod_{i=1}^{L-2} W_i^r.
-    # This implies the product is on the right.
-    # Let's stick to the source's explicit formula structure.
-    
-    # Compute product P = W_1^r * W_2^r * ... * W_{L-1}^r
-    # Note: This assumes the source's product notation aligns with the order of application
-    # in the context of the paper's specific matrix definitions.
-    # Given the ambiguity, we implement the product as specified in the source text order.
     P = modified_weights[0]
     for i in range(1, len(modified_weights)):
         P = P @ modified_weights[i]
         
-    # T_ResBlk^r = diag(s_L(r)) * (I + W_L * P)
-    s_L = s_resblk[num_layers - 1] # State for final layer
+    s_L = s_resblk[num_layers - 1]
     W_L = weights[num_layers - 1]
     
     T_resblk_r = np.diag(s_L) @ (I + W_L @ P)
-    
     return T_resblk_r
+
+def compute_neuron_wise_coefficients(s_resblk, weights, num_layers):
+    """
+    Compute neuron-wise linear mapping coefficients a_{lk}^r.
+    Args:
+        s_resblk: State functional vector for region r
+        weights: List of weight matrices [W1, ..., WL]
+        num_layers: Number of hidden layers L
+    Returns:
+        coefficients: Dict mapping (l, k) to row vector a_{lk}^r
+    """
+    coefficients = {}
+    nL = weights[-1].shape[0]
+    I = np.eye(nL)
+    
+    modified_weights = []
+    for l in range(num_layers - 1):
+        s_l = s_resblk[l]
+        W_l = weights[l]
+        modified_weights.append(np.diag(s_l) @ W_l)
+        
+    P_full = modified_weights[0]
+    for i in range(1, len(modified_weights)):
+        P_full = P_full @ modified_weights[i]
+        
+    for l in range(1, num_layers + 1):
+        if l == 1:
+            M = weights[0]
+        elif l == num_layers:
+            M = I + weights[-1] @ P_full
+        else:
+            P_partial = modified_weights[0]
+            for i in range(1, l - 1):
+                P_partial = P_partial @ modified_weights[i]
+            M = weights[l - 1] @ P_partial
+            
+        for k in range(M.shape[0]):
+            coefficients[(l, k)] = M[k, :]
+    return coefficients
 ```
 
 **Parameters:**
-- $L$: Number of hidden layers in the residual block. Typical values depend on the network depth.
-- $n_l$: Number of neurons in layer $l$.
-- $W_l$: Weight matrices.
-- $V$: Linear mapping matrix for dimension mismatch (if used).
+- $L$: Number of hidden layers in the residual block [S1].
+- $n_l$: Number of neurons in layer $l$ [S1].
+- $\mathbf{W}_l$: Weight matrices [S1].
+- $\mathbf{V}$: Linear mapping matrix for dimension mismatch (if used) [S1].
 
 **Edge Cases and Pitfalls:**
-- Precision: The binary state functional $s_{Lk}(x)$ depends on the sign of $\pi_k(x + T_{PreAct}x)$. Numerical precision issues near zero can lead to incorrect region labeling [S1].
-- Boundaries: The analytic marching algorithm relies on the exact partitioning of space into linear regions. Incorrect state functional computation leads to incorrect meshing [S1].
-- Dimension Mismatch: If $n_0 \neq n_L$, the shortcut path must be replaced by a linear mapping $Vx$ [S1].
-
-## Subtopics
-
-### [MLP Neural Field](1256-mlp-neural-field.md)
-The baseline MLP without residual blocks. Use this for simple implicit functions where residual connections are not needed.
-
-### [MLP with Input Skips](1643-mlp-with-input-skips.md)
-Uses input skips (concatenation or addition of input to hidden layers) rather than residual blocks. Use this when preserving low-level features is critical.
+- Dimension Mismatch: If $n_0 \neq n_L$, the shortcut path must be replaced by a linear mapping $\mathbf{V}\mathbf{x}$ [S1].
 
 ## Operating characteristics
-- Time Complexity: The analytic marching algorithm's complexity depends on the number of linear regions, which grows exponentially with the number of layers and neurons in the MLP [S1].
-- Memory Complexity: Requires storing the state functional and region-wise linear mappings for each linear region [S1].
-- Strengths: Enables exact meshing of MLPs with residual blocks, which were previously difficult to analyze analytically [S1].
-- Limitations: The number of linear regions can be very large, leading to high computational cost for complex networks [S1].
+Not given in the sources.
 
 ## Background
 This method was introduced in the paper "Learning and Meshing From Deep Implicit Surface Networks Using an Efficient Implementation of Analytic Marching" [S1]. It extends the analytic marching algorithm, originally developed for standard MLPs, to architectures with residual blocks and shortcut connections [S1].

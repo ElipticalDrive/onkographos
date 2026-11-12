@@ -1,104 +1,138 @@
 # Mesh Transformation
 ## Overview
-Applies a 4x4 transformation matrix to all vertices and normals of a mesh [S1, unofficial]. It differs from its parent [Mesh Transformation via Embree RTC](5669-mesh-transformation-via-embree-rtc.md) by operating directly on the mesh data structure rather than managing Embree's internal buffer state, and from [Mesh Transformation for Printable Volume](6858-mesh-transformation-for-printable-volume.md) by lacking volume-constraint logic or axis alignment [S1, unofficial].
+Applies a 4x4 transformation matrix to all vertices and normals of a mesh, typically to move geometry from a local object frame to a world frame or to apply kinematic transforms to robot links [S1, unofficial][S2, unofficial]. It differs from generic mesh transformations by explicitly handling the preservation of original source data (in Embree buffers) or managing multiple linked meshes in a robotic context [S1, unofficial][S2, unofficial].
 ## How it works
 **Inputs:**
-- `mesh`: A mesh object containing arrays `vertices` (size $N$, type `vec3`) and `normals` (size $N$, type `vec3`, optional).
-- `xf`: A 4x4 transformation matrix.
+- `mesh`: A mesh object containing vertex positions and optional normals.
+- `xf`: A 4x4 transformation matrix (homogeneous coordinates).
 
 **Outputs:**
-- Modified `mesh->vertices` and `mesh->normals`.
-- Invalidated bounding volume (if previously valid).
+- Transformed mesh data (vertices and normals updated in place or returned).
 
 **Data Structures:**
-- `vec3`: 3-component vector $(x, y, z)$.
-- `Matrix4x4`: 4x4 matrix, column-major or row-major (implementation dependent, but multiplication order must match).
+- `mesh->vertices`: Array of 3D vectors (x, y, z).
+- `mesh->normals`: Array of 3D vectors (x, y, z), optional.
+- `xf`: 4x4 matrix, typically represented as a flat array or 2D array.
 
 **Steps:**
-1. Iterate over all vertices $i$ from $0$ to $N-1$.
-2. Transform vertex position:
-   $$ v'_i = xf \cdot \begin{bmatrix} v_i \\ 1 \end{bmatrix} $$
-   where $v_i$ is the original vertex position. Store $v'_i$ in `mesh->vertices[i]`.
-3. If `mesh->normals` exists:
-   a. Compute the normal transformation matrix $nxf$ from $xf$. For affine transformations, this is typically the inverse transpose of the upper-left 3x3 submatrix of $xf$ [G].
-   b. Iterate over all normals $i$ from $0$ to $N-1$.
-   c. Transform normal:
-      $$ n'_i = nxf \cdot n_i $$
-   d. Renormalize:
-      $$ n'_i = \frac{n'_i}{\|n'_i\|} $$
-   e. Store $n'_i$ in `mesh->normals[i]`.
-4. Invalidate any cached bounding box or sphere for the mesh, as vertex positions have changed. Recompute if required by the caller [S1, unofficial].
+1. **Transform Vertices:** Iterate over all vertices $i$ from $0$ to $n_v-1$.
+   - Let $v_i$ be the vertex position as a column vector $\begin{bmatrix} x & y & z & 1 \end{bmatrix}^T$.
+   - Compute the transformed vertex $v'_i = xf \cdot v_i$.
+   - Update the mesh vertex: `mesh->vertices[i] = v'_i`.
+
+2. **Transform Normals (if present):**
+   - Compute the normal transformation matrix $nxf$. This is the inverse transpose of the upper-left 3x3 submatrix of $xf$.
+     - Let $M$ be the 3x3 linear part of $xf$.
+     - $nxf = (M^{-1})^T$.
+   - Iterate over all normals $i$ from $0$ to $n_v-1$.
+   - Let $n_i$ be the normal vector.
+   - Compute the transformed normal $n'_i = nxf \cdot n_i$.
+   - Renormalize: $n_i \leftarrow \frac{n'_i}{\|n'_i\|}$.
+
+3. **Update Bounding Volumes:**
+   - If the mesh has valid bounding boxes or spheres, invalidate them.
+   - Recompute the bounding box/sphere based on the new vertex positions.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def apply_xform(mesh, xf):
-    # Step 1-2: Transform vertices
-    for i in range(mesh.num_vertices):
+def apply_mesh_transformation(mesh, xf):
+    """
+    Applies a 4x4 transformation matrix to a mesh's vertices and normals.
+    
+    Args:
+        mesh: Object with .vertices (list of vec3) and .normals (list of vec3, optional).
+        xf: 4x4 transformation matrix (list of lists or 2D array).
+    """
+    nv = len(mesh.vertices)
+    
+    # 1. Transform Vertices
+    for i in range(nv):
+        # Extract vertex as homogeneous vector [x, y, z, 1]
         v = mesh.vertices[i]
-        # Homogeneous transformation
-        w = xf[3][0]*v.x + xf[3][1]*v.y + xf[3][2]*v.z + xf[3][3]
-        new_x = (xf[0][0]*v.x + xf[0][1]*v.y + xf[0][2]*v.z + xf[0][3]) / w
-        new_y = (xf[1][0]*v.x + xf[1][1]*v.y + xf[1][2]*v.z + xf[1][3]) / w
-        new_z = (xf[2][0]*v.x + xf[2][1]*v.y + xf[2][2]*v.z + xf[2][3]) / w
-        mesh.vertices[i] = vec3(new_x, new_y, new_z)
+        # Perform matrix-vector multiplication
+        # v' = xf * [v.x, v.y, v.z, 1]^T
+        x = xf[0][0]*v.x + xf[0][1]*v.y + xf[0][2]*v.z + xf[0][3]
+        y = xf[1][0]*v.x + xf[1][1]*v.y + xf[1][2]*v.z + xf[1][3]
+        z = xf[2][0]*v.x + xf[2][1]*v.y + xf[2][2]*v.z + xf[2][3]
+        # w is ignored for position update in standard affine transforms
+        mesh.vertices[i] = vec3(x, y, z)
 
-    # Step 3: Transform normals if present
+    # 2. Transform Normals
     if mesh.normals is not None:
-        # Compute normal matrix (inverse transpose of upper-left 3x3) [G]
-        # Assuming xf is column-major stored in 4x4 array
-        m00, m01, m02 = xf[0][0], xf[1][0], xf[2][0]
-        m10, m11, m12 = xf[0][1], xf[1][1], xf[2][1]
-        m20, m21, m22 = xf[0][2], xf[1][2], xf[2][2]
+        # Extract 3x3 linear part of xf
+        M = [
+            [xf[0][0], xf[0][1], xf[0][2]],
+            [xf[1][0], xf[1][1], xf[1][2]],
+            [xf[2][0], xf[2][1], xf[2][2]]
+        ]
+        # Compute inverse transpose of M
+        # Note: For orthogonal matrices (rotation only), inverse transpose is just the transpose.
+        # For general affine, we compute inverse.
+        M_inv = invert_3x3(M)
+        nxf = transpose_3x3(M_inv)
         
-        # Inverse of 3x3 matrix [G]
-        det = m00*(m11*m22 - m12*m21) - m01*(m10*m22 - m12*m20) + m02*(m10*m21 - m11*m20)
-        if det == 0:
-            raise ValueError("Singular matrix")
-        inv_det = 1.0 / det
-        
-        n00 = (m11*m22 - m12*m21) * inv_det
-        n01 = (m02*m21 - m01*m22) * inv_det
-        n02 = (m01*m12 - m02*m11) * inv_det
-        n10 = (m12*m20 - m10*m22) * inv_det
-        n11 = (m00*m22 - m02*m20) * inv_det
-        n12 = (m02*m10 - m00*m12) * inv_det
-        n20 = (m10*m21 - m11*m20) * inv_det
-        n21 = (m01*m20 - m00*m21) * inv_det
-        n22 = (m00*m11 - m01*m10) * inv_det
-        
-        nxf = Matrix4x4(n00, n01, n02, 0,
-                        n10, n11, n12, 0,
-                        n20, n21, n22, 0,
-                        0,   0,   0,   1)
-
-        for i in range(mesh.num_vertices):
+        for i in range(nv):
             n = mesh.normals[i]
-            # Transform normal (no translation)
-            new_nx = n00*n.x + n01*n.y + n02*n.z
-            new_ny = n10*n.x + n11*n.y + n12*n.z
-            new_nz = n20*n.x + n21*n.y + n22*n.z
+            # Transform normal
+            nx = nxf[0][0]*n.x + nxf[0][1]*n.y + nxf[0][2]*n.z
+            ny = nxf[1][0]*n.x + nxf[1][1]*n.y + nxf[1][2]*n.z
+            nz = nxf[2][0]*n.x + nxf[2][1]*n.y + nxf[2][2]*n.z
             
             # Renormalize
-            len_sq = new_nx*new_nx + new_ny*new_ny + new_nz*new_nz
-            if len_sq > 0:
-                inv_len = 1.0 / sqrt(len_sq)
-                mesh.normals[i] = vec3(new_nx*inv_len, new_ny*inv_len, new_nz*inv_len)
+            length = sqrt(nx*nx + ny*ny + nz*nz)
+            if length > 0:
+                mesh.normals[i] = vec3(nx/length, ny/length, nz/length)
             else:
-                mesh.normals[i] = vec3(0, 0, 0) # Handle degenerate normal [G]
+                mesh.normals[i] = vec3(0, 0, 0) # Handle degenerate case
 
-    # Step 4: Invalidate bounding volume [S1, unofficial]
-    mesh.bounding_box_valid = False
+    # 3. Invalidate and Recompute Bounding Volumes
+    # [G] Implementation detail: Bounding box recomputation iterates over all vertices
+    # to find min and max components.
+    if mesh.bounding_box is not None:
+        min_val = vec3(inf, inf, inf)
+        max_val = vec3(-inf, -inf, -inf)
+        for v in mesh.vertices:
+            min_val = min(min_val, v)
+            max_val = max(max_val, v)
+        mesh.bounding_box.min = min_val
+        mesh.bounding_box.max = max_val
+        mesh.bounding_box.valid = True
+
+def invert_3x3(m):
+    """Computes the inverse of a 3x3 matrix."""
+    a, b, c = m[0][0], m[0][1], m[0][2]
+    d, e, f = m[1][0], m[1][1], m[1][2]
+    g, h, i = m[2][0], m[2][1], m[2][2]
+    
+    det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g)
+    if det == 0:
+        raise ValueError("Matrix is singular")
+    
+    inv_det = 1.0 / det
+    return [
+        [(e*i - f*h)*inv_det, (c*h - b*i)*inv_det, (b*f - c*e)*inv_det],
+        [(f*g - d*i)*inv_det, (a*i - c*g)*inv_det, (c*d - a*f)*inv_det],
+        [(d*h - e*g)*inv_det, (b*g - a*h)*inv_det, (a*e - b*d)*inv_det]
+    ]
+
+def transpose_3x3(m):
+    return [
+        [m[0][0], m[1][0], m[2][0]],
+        [m[0][1], m[1][1], m[2][1]],
+        [m[0][2], m[1][2], m[2][2]]
+    ]
 ```
 
 **Parameters:**
-- `xf`: 4x4 transformation matrix [S1, unofficial].
+- `xf`: 4x4 transformation matrix. Typical values depend on the application (e.g., identity for no change, rotation/translation matrices for kinematics).
 
-**Edge Cases:**
-- Singular matrix: If $xf$ is singular, the inverse transpose for normals cannot be computed [G].
-- Degenerate normals: Zero-length normals result in division by zero during renormalization [G].
-- Bounding volume: Failure to invalidate leads to incorrect culling or ray intersection tests [S1, unofficial].
+**Edge Cases and Pitfalls:**
+- **Singular Matrices:** If the 3x3 linear part of `xf` is singular, the inverse transpose cannot be computed. This usually indicates a degenerate transformation (e.g., scaling to zero). [G] Check determinant before inversion.
+- **Non-Affine Transforms:** If `xf` includes perspective components (w != 1), the vertex transformation requires perspective division. The provided pseudocode assumes affine transforms (w=1).
+- **Normal Orientation:** The inverse transpose method is required for non-uniform scaling to preserve orthogonality with the surface. Using just the rotation part (upper-left 3x3) is incorrect if non-uniform scaling is present.
+- **Bounding Volume Recomputation:** Failing to update bounding volumes after transformation leads to incorrect culling or intersection tests.
 
 ## Subtopics
 
@@ -106,17 +140,18 @@ def apply_xform(mesh, xf):
 Computes a 4x4 transformation matrix to scale, rotate, and translate a mesh so it fits within a specified printable volume, typically aligning the largest dimension with the z-axis. It differs from generic mesh transformations by incorporating volume constraints and automatic axis alignment.
 
 ## Operating characteristics
-Time complexity: $O(N)$ where $N$ is the number of vertices [S1, unofficial].
-Memory complexity: $O(1)$ additional space [S1, unofficial].
-Strengths: Simple, direct application of linear algebra [S1, unofficial].
-Limitations: Does not handle Embree-specific buffer synchronization [S1, unofficial].
-When to use: When direct mesh data manipulation is required without Embree buffer management [S1, unofficial].
-When not: When using Embree RTC for dynamic updates [S1, unofficial].
+- **Time Complexity:** $O(n)$ for vertices and normals, where $n$ is the number of vertices. Bounding volume recomputation is also $O(n)$.
+- **Memory Complexity:** $O(1)$ additional memory if done in-place. $O(n)$ if creating a new mesh.
+- **Strengths:** Simple, efficient, and standard approach for applying rigid or affine transforms to mesh geometry.
+- **Limitations:** Does not handle dynamic topology changes. Requires careful handling of normals for non-uniform scaling.
+- **When to Use:** When moving mesh data between coordinate frames (e.g., object to world, link to base).
+- **When Not to Use:** When the transformation involves non-linear deformations (requires vertex shader or CPU-based deformation algorithms).
 
 ## Background
-Origin: [S1, unofficial] prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs.
-History: Part of a sparse voxel DAG implementation [S1, unofficial].
-Usage: Used in advanced computer graphics research for sparse voxel structures [S1, unofficial].
+Originated in computer graphics for applying kinematic transforms to skeletal animation and rigid body dynamics. In the context of volume rendering and SDFs, it is used to position object meshes within a global scene or printable volume.
+- [S1, unofficial] describes the application in the context of sparse voxel DAGs and advanced CG.
+- [S2, unofficial] describes the application in the context of robotic SDFs and chamfer distance computation.
 
 ## Sources
 [S1] prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs, https://github.com/prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs, fetched 2026-10-26 (unofficial)
+[S2] GitHub - UM-ARM-Lab/pytorch_volumetric: Volumetric structures such as ..., https://github.com/UM-ARM-Lab/pytorch_volumetric, fetched 2026-10-30 (unofficial)

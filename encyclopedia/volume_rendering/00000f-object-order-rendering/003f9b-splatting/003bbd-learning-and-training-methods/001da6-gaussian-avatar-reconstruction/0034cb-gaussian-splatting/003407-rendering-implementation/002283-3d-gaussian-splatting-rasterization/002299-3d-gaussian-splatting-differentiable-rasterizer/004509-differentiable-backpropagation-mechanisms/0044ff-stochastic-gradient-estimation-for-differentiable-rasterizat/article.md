@@ -6,175 +6,137 @@ Also called: Per-Pixel Formulation, Per-Pixel Stochastic Gradient Estimation, SG
 This method transforms a non-differentiable rasterizer into a differentiable one by estimating gradients on a per-pixel basis rather than on the whole image, bounding the dimensionality of the optimization problem [S1]. It computes stochastic gradients for differentiable rasterization by summing per-pixel gradient estimates instead of a full-image error, reducing noise in high-dimensional parameter spaces [S1]. Unlike standard Stochastic Gradient Estimation which estimates gradients on the whole image (scaling poorly with dimensionality), this method estimates gradients on a per-pixel basis, bounding the dimensionality to the number of parameters contributing to a single pixel [S1]. Unlike backpropagation which requires a differentiable framework (Pytorch/Tensorflow), this method requires no external dependencies and works with existing non-differentiable rasterizers [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** Scene parameters $\boldsymbol{\theta}$ (e.g., vertex positions, texture values, Gaussian attributes), random sign vector $\boldsymbol{s}$, perturbation magnitude vector $\boldsymbol{\epsilon}$, number of samples $N$.
-*   **Outputs:** Gradient estimates $\frac{\partial f}{\partial \theta_i}$ for each parameter $\theta_i$.
+**Inputs:** Scene parameters $\boldsymbol{\theta}$ (e.g., vertex positions, texture values, Gaussian splat parameters), random sign vector $\boldsymbol{s}$, perturbation magnitude vector $\boldsymbol{\epsilon}$, number of averaging samples $N$.
+**Outputs:** Gradient estimates $\frac{\partial f}{\partial \theta_i}$ for each parameter $\theta_i$.
 
 **Data Structures:**
-The rasterizer must output specific buffers to identify contributing parameters:
+The rasterization pass $R$ is modified to output specific buffers depending on the geometry type:
 1.  **Opaque Geometry:** RGB buffer and an ID buffer containing the index of the rasterized triangle for each pixel [S1].
 2.  **Transparent Geometry:** RGB buffer and a deep ID buffer containing multiple triangle IDs per pixel, representing an ordered list of triangles seen by the pixel [S1].
 3.  **Textures:** RGB buffer, ID buffer, and a UV buffer containing the UV coordinates used to fetch the texture in each pixel [S1].
-4.  **Volumes:** RGB buffer and voxel access structures for ray-marching [S1].
+4.  **Volumes:** RGB buffer and voxel data for ray-marching [S1].
 
-**Numbered Steps:**
-1.  **Initialize Accumulators:** For each parameter $\theta_i$, initialize gradient accumulator $G_i = 0$ and sample counter $n=0$.
-2.  **Loop for Averaging:** While $n < N$:
-    3.  **Generate Random Sign Vector:** Generate a random sign vector $\boldsymbol{s}$ where each component $s_i \in \{-1, +1\}$ with probability $1/2$ [S1].
-    4.  **Perturb Parameters:**
-        *   Create $\boldsymbol{\theta}^+ = \boldsymbol{\theta} + \boldsymbol{s} \odot \boldsymbol{\epsilon}$ [S1].
-        *   Create $\boldsymbol{\theta}^- = \boldsymbol{\theta} - \boldsymbol{s} \odot \boldsymbol{\epsilon}$ [S1].
-    5.  **Rasterize Forward Pass (+):** Rasterize the scene with parameters $\boldsymbol{\theta}^+$ to produce image $I^+$ and auxiliary buffers (ID/UV) [S1].
-    6.  **Rasterize Forward Pass (-):** Rasterize the scene with parameters $\boldsymbol{\theta}^-$ to produce image $I^-$ and auxiliary buffers (ID/UV) [S1].
-    7.  **Compute Per-Pixel Gradients:** For each pixel $(w,h)$ impacted by parameter $\theta_i$:
-        *   Retrieve the error $f_{w,h}(\boldsymbol{\theta})$ for the current unperturbed parameters (or compute it from $I^+$ and $I^-$ relative to a target, though the formula uses the difference of errors directly) [S1]. *Note: The source defines $f_{w,h}$ as the $l_2$ pixel error* [S1].
-        *   Compute the per-pixel gradient contribution for $\theta_i$:
-            $$ \Delta G_i^{(w,h)} = \frac{f_{w,h}(\boldsymbol{\theta}^+) - f_{w,h}(\boldsymbol{\theta}^-)}{2 s_i \epsilon_i} $$
-            [S1]
-        *   Accumulate: $G_i \leftarrow G_i + \Delta G_i^{(w,h)}$ [S1].
-    8.  **Increment Sample Counter:** $n \leftarrow n + 1$ [S1].
-9.  **Average Gradients:** For each parameter $\theta_i$, compute the final gradient estimate:
-    $$ \frac{\partial f}{\partial \theta_i} = \frac{1}{N} \sum_{n=1}^{N} \sum_{(w,h) \text{ impacted by } \theta_i} \frac{f_{w,h}(\boldsymbol{\theta}^+) - f_{w,h}(\boldsymbol{\theta}^-)}{2 s_i \epsilon_i} $$
-    [S1]
-10. **Update Parameters:** Update $\boldsymbol{\theta}$ using an optimizer (e.g., Adam) with the computed gradients [S1].
+**Steps:**
+1.  **Initialize:** Set the current scene parameters to $\boldsymbol{\theta}$. Initialize gradient accumulators for all parameters to zero.
+2.  **Loop for Averaging:** Repeat $N$ times with different random sign vectors $\mathbf{s}^{(n)}$:
+    1.  **Perturb Parameters:** Generate a random sign vector $\boldsymbol{s}$ where each component $s_i \in \{-1, +1\}$ with probability $1/2$ [S1].
+    2.  **Forward Pass (+):** Perturb the scene parameters $\boldsymbol{\theta}$ by adding $\boldsymbol{s} \odot \boldsymbol{\epsilon}$ to obtain $\boldsymbol{\theta}^+ = \boldsymbol{\theta} + \boldsymbol{s} \odot \boldsymbol{\epsilon}$ [S1]. Rasterize the scene using $\boldsymbol{\theta}^+$ to produce image $I^+$ and auxiliary buffers (ID/UV) [S1].
+    3.  **Forward Pass (-):** Perturb the scene parameters $\boldsymbol{\theta}$ by subtracting $\boldsymbol{s} \odot \boldsymbol{\epsilon}$ to obtain $\boldsymbol{\theta}^- = \boldsymbol{\theta} - \boldsymbol{s} \odot \boldsymbol{\epsilon}$ [S1]. Rasterize the scene using $\boldsymbol{\theta}^-$ to produce image $I^-$ and auxiliary buffers (ID/UV) [S1].
+    4.  **Compute Per-Pixel Gradients:** For each parameter $\theta_i$, identify the set of pixels $\mathcal{P}_i$ impacted by $\theta_i$ using the auxiliary buffers (e.g., ID buffer for triangles, UV buffer for textures) [S1]. Estimate the gradient for each parameter $\theta_i$ using the formula:
+        $$ \frac{\partial f}{\partial \theta_i} = \sum_{(w,h) \in \mathcal{P}_i} \frac{f_{w,h}(\boldsymbol{\theta}^+) - f_{w,h}(\boldsymbol{\theta}^-)}{2 s_i \epsilon_i} $$
+        where $f_{w,h}$ is the $l_2$ pixel error for pixel $(w,h)$, $\mathbf{s}$ is the random sign vector, $\boldsymbol{\epsilon}$ is the perturbation magnitude vector, and the sum is over pixels impacted by parameter $\theta_i$ [S1].
+    5.  **Accumulate:** Add the estimated gradient to the accumulator for $\theta_i$ [S1].
+3.  **Average:** Divide the accumulated gradient by $N$ to obtain the final stochastic gradient estimate for each parameter [S1].
+4.  **Update Parameters:** Update parameters using the Adam optimizer in a compute shader launched over $d$ threads, using default $\beta_1=0.9, \beta_2=0.999$ and learning rate equal to perturbation amplitude $\epsilon_i$ [S1]. Note that the division by constants $2, \epsilon_i$ and $N$ in the denominator of Equation (9) can be omitted as Adam is invariant to constant scaling factors [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def stochastic_gradient_estimation(scene_params, epsilon, N, target_image):
+def stochastic_gradient_estimation(scene_params, epsilon, N, rasterizer, error_function):
     """
-    Estimates gradients for scene parameters using per-pixel stochastic gradient estimation.
-    
-    Args:
-        scene_params: Dictionary or array of scene parameters theta.
-        epsilon: Perturbation magnitude vector epsilon.
-        N: Number of stochastic gradient estimates to average.
-        target_image: Target RGB image for error calculation.
-        
-    Returns:
-        gradients: Estimated gradients dL/d_theta.
+    scene_params: dict or array of parameters theta
+    epsilon: float or array of perturbation magnitudes
+    N: int, number of averaging samples
+    rasterizer: function that takes params and returns (image, id_buffer, uv_buffer)
+    error_function: function that takes two images and returns l2 error per pixel
     """
-    num_params = len(scene_params)
-    gradients = np.zeros(num_params)
+    d = len(scene_params)
+    gradients = [0.0] * d
     
     for n in range(N):
-        # Step 3: Generate random sign vector
-        s = np.random.choice([-1, 1], size=num_params)
+        # Step 1: Generate random sign vector
+        s = [1 if random() > 0.5 else -1 for _ in range(d)]
         
-        # Step 4: Perturb parameters
-        theta_plus = scene_params + s * epsilon
-        theta_minus = scene_params - s * epsilon
+        # Step 2: Perturb parameters
+        theta_plus = [scene_params[i] + s[i] * epsilon[i] for i in range(d)]
+        theta_minus = [scene_params[i] - s[i] * epsilon[i] for i in range(d)]
         
-        # Step 5 & 6: Rasterize
-        # rasterize returns (image, id_buffer, uv_buffer)
-        img_plus, id_buf_plus, uv_buf_plus = rasterize(theta_plus)
-        img_minus, id_buf_minus, uv_buf_minus = rasterize(theta_minus)
+        # Step 3: Rasterize
+        img_plus, id_buf_plus, uv_buf_plus = rasterizer(theta_plus)
+        img_minus, id_buf_minus, uv_buf_minus = rasterizer(theta_minus)
         
-        # Step 7: Compute per-pixel gradients
-        # Calculate L2 error for each pixel
-        error_plus = (img_plus - target_image) ** 2
-        error_minus = (img_minus - target_image) ** 2
+        # Step 4: Compute per-pixel errors
+        # error_function returns a 2D array of l2 errors per pixel
+        errors = error_function(img_plus, img_minus)
         
-        # Iterate over pixels and parameters
-        # Optimization: Only iterate over pixels impacted by specific parameters
-        # For simplicity, we assume we can map pixels to parameters via ID/UV buffers
-        
-        for w in range(width):
-            for h in range(height):
-                # Identify parameters impacted by this pixel
-                # This depends on the geometry type (opaque, transparent, texture)
-                impacted_params = get_impacted_params(w, h, id_buf_plus, uv_buf_plus, scene_params)
-                
-                for idx in impacted_params:
-                    theta_i = scene_params[idx]
-                    s_i = s[idx]
-                    eps_i = epsilon[idx]
-                    
-                    # Avoid division by zero if epsilon is 0
-                    if eps_i == 0:
-                        continue
-                        
-                    # Formula: (f(theta+) - f(theta-)) / (2 * s_i * eps_i)
-                    # Note: f is the pixel error. The source uses f(w,h) as the error value.
-                    # The gradient is summed over impacted pixels.
-                    
-                    # We need the error value at this specific pixel for both perturbations
-                    err_p = error_plus[h, w, idx] # Assuming error is computed per param? 
-                    # Correction: The error f(w,h) is the total pixel error or per-param error?
-                    # Source Eq 8: f(w,h)(theta) is the pixel error. 
-                    # The gradient d f / d theta_i is estimated by the difference in pixel error?
-                    # No, Eq 8 says: sum over (w,h) impacted by theta_i of [ f(w,h)(theta+) - f(w,h)(theta-) ] / ...
-                    # This implies f(w,h) is the scalar error at pixel (w,h).
-                    # But the gradient is for theta_i.
-                    # If theta_i affects multiple pixels, we sum the contributions.
-                    
-                    # Let's re-read Eq 8 carefully:
-                    # d f / d theta_i = sum_{(w,h) impacted by theta_i} [ f(w,h)(theta+) - f(w,h)(theta-) ] / (2 s_i eps_i)
-                    # This implies that the change in the TOTAL loss f(theta) due to theta_i is approximated by summing the changes in pixel errors f(w,h) for all pixels where theta_i is visible.
-                    
-                    # So, we calculate the pixel error difference for this pixel
-                    pixel_err_diff = error_plus[h, w] - error_minus[h, w]
-                    
-                    gradients[idx] += pixel_err_diff / (2 * s_i * eps_i)
-
-    # Step 9: Average
-    gradients /= N
+        # Step 5: Accumulate gradients per parameter
+        for i in range(d):
+            # Identify pixels impacted by parameter i
+            # This depends on the geometry type:
+            # - Opaque: pixels where id_buf[i] == triangle_index_of_param_i
+            # - Transparent: pixels where id_buf[i] is in the list of triangles for param_i
+            # - Texture: pixels where uv_buf[i] maps to texel of param_i
+            impacted_pixels = get_impacted_pixels(i, id_buf_plus, uv_buf_plus, scene_params)
+            
+            sum_diff = 0.0
+            for (w, h) in impacted_pixels:
+                sum_diff += errors[w][h]
+            
+            # Formula: sum( (f(theta+) - f(theta-)) / (2 * s_i * epsilon_i) )
+            # Note: The source uses f(theta+) - f(theta-) directly in the numerator
+            # but the standard finite difference is (f_plus - f_minus).
+            # The source formula (8) is: sum( (f_w,h(theta + s*e) - f_w,h(theta - s*e)) / (2 * s_i * epsilon_i) )
+            # Here f_w,h is the l2 error. Wait, the source says f_w,h is the l2 pixel error.
+            # Usually l2 error is (pred - target)^2.
+            # The source equation 8: sum( (f_w,h(theta + s*e) - f_w,h(theta - s*e)) / (2 * s_i * epsilon_i) )
+            # This implies f_w,h is the rendered value or the error value?
+            # "f_w,h is the l2 pixel error" -> This is ambiguous.
+            # In standard SGE, we estimate gradient of the loss.
+            # Loss L = sum(f_w,h). Gradient dL/dtheta_i = sum( df_w,h/dtheta_i ).
+            # df_w,h/dtheta_i approx (f_w,h(theta+) - f_w,h(theta-)) / (2 * s_i * epsilon_i).
+            # So we sum the differences in the error values.
+            
+            if 2 * s[i] * epsilon[i] != 0:
+                gradients[i] += sum_diff / (2 * s[i] * epsilon[i])
     
-    return gradients
+    # Step 6: Average
+    final_gradients = [g / N for g in gradients]
+    return final_gradients
 ```
-*Note: The pseudocode above simplifies the "impacted parameters" lookup. In practice, for opaque geometry, the ID buffer tells you which triangle (and thus which vertices) is visible. For textures, the UV buffer tells you which texel is visible. The loop structure should efficiently map pixels to their contributing parameters to avoid $O(W \times H \times D)$ complexity.*
 
 **Parameters:**
-*   $N$ (averaging samples): Number of stochastic gradient estimates averaged to reduce variance. Typical values in experiments are 8 or 32 [S1]. Another source mentions $N=128$ for performance breakdown [S1].
-*   $\boldsymbol{\epsilon}$ (perturbation magnitude): The learning rate is set equal to the perturbation amplitude $\epsilon_i$ in all experiments [S1].
-*   Adam Optimizer: Default parameters $\beta_1=0.9, \beta_2=0.999$ [S1].
+*   $N$ (averaging samples): Number of stochastic gradient estimates averaged to reduce variance. Typical values in experiments are 8 or 32 [S1]. Another source mentions a typical value of 128 [S1].
+*   $\epsilon_i$ (perturbation magnitude): The learning rate is set equal to $\epsilon_i$ in the Adam optimizer [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Variance:** The estimator is stochastic and exhibits variance. The variance increases with the number of dimensions $d$. This is traded for performance compared to finite differences [S1].
-*   **High Dimensionality:** Full-image error formulation causes high noise in high-dimensional spaces, making optimization impractical for large scenes (e.g., 100K triangles). The per-pixel approach bounds this [S1].
-*   **Texture Resolution:** Texture gradient estimation approximates the elliptical footprint by only updating the closest texel to the center. This is sufficient if resolution is high enough to avoid sub-pixel scale texels [S1].
-*   **Transparent Geometry:** Requires a deep ID buffer to handle depth complexity. The order of triangles must be preserved for correct alpha compositing gradient estimation [S1].
+*   The estimator is stochastic and exhibits variance. The variance increases with the number of dimensions $d$. This is traded for performance compared to finite differences [S1].
+*   Full-image error formulation causes high noise in high-dimensional spaces, making optimization impractical for large scenes (e.g., 100K triangles) [S1].
+*   Texture gradient estimation approximates the elliptical footprint by only updating the closest texel to the center, which is sufficient if resolution is high enough to avoid sub-pixel scale texels [S1].
+*   For subdivision surfaces, the compute shader must associate each tessellated triangle to its original triangle and loop over its neighbors in the control mesh using a subdivision data structure [S1].
+*   For 3D Gaussian Splats, an additional resampling and splat subdivision compute shader is executed after each gradient descent step [S1].
 
 ## Subtopics
 
 ### Gradient Depth Limiting (Limited-BW)
-Limits gradient computation to the $N$ nearest Gaussians per pixel. Parameter: $N=10$ [S2, unofficial]. Pitfall: Restricting gradient depth to a small constant (e.g., 10) severely degrades reconstruction quality, proving that full depth complexity is necessary for high-fidelity rendering [S2, unofficial]. Number: On Average-30K, Full achieves PSNR 26.05. Limited-BW ($N=10$) drops to 19.19 [S2, unofficial]. Comparison: Limiting gradients to $N=10$ causes blurry boundaries and loss of detail (e.g., table edges and tree parts become indistinct). Unlimited depth complexity preserves sharp boundaries [S2, unofficial].
+Limits gradient computation to the $N$ nearest Gaussians per pixel. In experiments, $N=10$ was used [S2, unofficial]. Restricting gradient depth to a small constant (e.g., 10) severely degrades reconstruction quality, proving that full depth complexity is necessary for high-fidelity rendering [S2, unofficial]. On the Average-30K dataset, Full depth achieves PSNR 26.05, while Limited-BW (N=10) drops to 19.19 [S2, unofficial]. Limiting gradients to N=10 causes blurry boundaries and loss of detail (e.g., table edges and tree parts become indistinct), whereas unlimited depth complexity preserves sharp boundaries [S2, unofficial].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   Time complexity per step is proportional to $N \times (\text{Rasterization Time} + \text{Gradient Computation Time})$.
-*   Memory complexity is dominated by storing the auxiliary buffers (ID, UV) and the intermediate images for perturbation passes [S1].
+The method executes faster within a rasterization engine but provides noisy gradients, making gradient descent less efficient compared to backpropagation-based methods like nvDiffRast [S1]. The total time per step includes Perturbation (P), Rasterization (R), Gradient computation (G), and Descent (D) [S1].
 
 **Measured Performance:**
-*   On NVIDIA 4090 GPU for 1K triangles: P=12μs, R=28μs, G=13μs, D=21μs, Sum=6.8ms (with $N=128$) [S1].
-*   On NVIDIA 4090 GPU for 10K triangles: P=14μs, R=38μs, G=14μs, D=21μs, Sum=8.4ms (with $N=128$) [S1].
-*   On NVIDIA 4090 GPU for 100K triangles: P=54μs, R=126μs, G=35μs, D=105μs, Sum=27ms (with $N=128$) [S1].
-*   Performance on Figure 4 experiment (1024x1024, 1748 vertices, 1M+ params): nvDiffRast takes 33ms/step with 8 samples; Ours takes 21ms/step with 8 samples [S1].
-*   Performance on Figure 5 experiment (1024x1024, 1748 vertices, 791K params): nvDiffRast takes 33ms/step with 8 samples; Ours takes 18ms/step with 32 samples [S1].
-*   Optimization of a control mesh of 2K triangles (50K triangles after subdivision) with 1024^2 PBR textures took 130 seconds on an Intel Arc 770 GPU [S1].
-
-**Scaling:**
-*   The method scales well up to 1M+ parameters because the dimensionality of the optimization problem per pixel is bounded [S1].
-*   Compared to nvDiffRast, this method is slower per step due to noisy gradients requiring more iterations, but faster per step execution time within the engine. Overall qualitative results are similar with same optimization time [S1].
+*   **Intel Arc 770:** Optimization of a control mesh of 2K triangles (50K triangles after subdivision) with 1024^2 PBR textures took 130 seconds [S1].
+*   **NVIDIA 4090 (1K Triangles):** P=12μs, R=28μs, G=13μs, D=21μs, Sum=6.8ms (with N=128) [S1].
+*   **NVIDIA 4090 (10K Triangles):** P=14μs, R=38μs, G=14μs, D=21μs, Sum=8.4ms (with N=128) [S1].
+*   **NVIDIA 4090 (100K Triangles):** P=54μs, R=126μs, G=35μs, D=105μs, Sum=27ms (with N=128) [S1].
+*   **Comparison with nvDiffRast (1024x1024, 1748 vertices, 1M+ params):** nvDiffRast takes 33ms/step with 8 samples; Ours takes 21ms/step with 8 samples [S1].
+*   **Comparison with nvDiffRast (1024x1024, 1748 vertices, 791K params):** nvDiffRast takes 33ms/step with 8 samples; Ours takes 18ms/step with 32 samples [S1].
+*   **Mesh with Albedo Map (3072 triangles, 1748 vertices, 1024^2 texture):** Our method takes 2s, 3s, 8s, 16s, 29s for 1, 2, 3, 4, 5 steps shown; nvDiffRast takes 2s, 3s, 9s, 13s, 21s, 27s, 32s [S1].
+*   **Mesh with Normal Map (3072 triangles, 1748 vertices, 512^2 texture):** Our method takes 2s, 3s, 9s, 13s, 21s, 27s; nvDiffRast takes 2s, 3s, 9s, 13s, 21s, 27s [S1].
+*   **Subdivision Surface (1K control vertices, 24K triangles after 2 levels, 1024^2 textures):** Our method takes 3s and 30s [S1].
+*   **3D Gaussian Splats (hierarchical, 1K to 128K splats, 128^2 to 512^2 resolution):** Our method takes 3s (2K splats), 53s (128K splats) [S1].
+*   **3D Volume (128^3 RGBA):** Our method takes 5s and 32s [S1].
 
 **Strengths and Limitations:**
-*   **Strengths:** Simple to implement, no external dependencies (Pytorch/Tensorflow), works with existing non-differentiable rasterizers, scalable to high-dimensional scenes [S1].
-*   **Limitations:** Noisy gradients require more iterations for convergence, scope is limited to raster graphics with direct visibility only (no shadows or multiple-bounce illumination) [S1].
+*   **Strengths:** Simple to implement, no external dependencies (Pytorch/Tensorflow), works with existing non-differentiable rasterizers, scales to 1M+ parameters [S1]. Produces qualitatively similar results to nvDiffRast with the same amount of optimization time [S1].
+*   **Limitations:** Noisy gradients require more iterations for convergence compared to deterministic backpropagation [S1]. Scope is limited to raster graphics with direct visibility only; it does not cover shadows or multiple-bounce illumination [S1].
 
 **When to Use:**
-*   Targeted at game developers and users with existing non-differentiable rasterization engines who cannot use existing differentiable rasterizers due to workflow or platform constraints [S1].
-*   Used to optimize 3D assets including meshes, displacement mapping, Catmull-Clark subdivision surfaces, semi-transparent geometry, physically based materials, 3D volumetric data, and 3D Gaussian Splats [S1].
+Targeted at game developers and users with existing non-differentiable rasterization engines who cannot use existing differentiable rasterizers due to workflow or platform constraints [S1]. Used to optimize 3D assets including meshes, displacement mapping, Catmull-Clark subdivision surfaces, semi-transparent geometry, physically based materials, 3D volumetric data, and 3D Gaussian Splats [S1].
 
 ## Background
-**Origin:**
-The method was proposed by Thomas Deliot, Eric Heitz, and Laurent Belcour from Intel Corporation, France [S1]. It was published in the Proceedings of the ACM Computer Graphics and Interactive Techniques (SIGGRAPH Asia 2024) [S1]. The paper title is "Transforming a Non-Differentiable Rasterizer into a Differentiable One with Stochastic Gradient Estimation" [S1].
-
-**History and Development:**
-The method builds on previous work in differentiable rendering using stochastic gradient estimation, such as Fischer and Ritschel [2023] and Le Lidec et al. [2021], which did not scale to high-dimensional problems [S1]. The key insight was that estimating gradients on a per-pixel basis bounds the dimensionality of the optimization problem, making it scalable [S1].
-
-**Usage:**
-It is used to optimize 3D assets in their engine-specific geometry and material representations, allowing in-engine optimization without switching to external differentiable frameworks [S1].
+Origin: Thomas Deliot, Eric Heitz, and Laurent Belcour from Intel Corporation, France. Published in "Transforming a Non-Differentiable Rasterizer into a Differentiable One with Stochastic Gradient Estimation" (arXiv:2404.09758v2, 17 Apr 2024) [S1]. The method builds on the principle of Stochastic Gradient Estimation, which consists of randomly perturbing the 3D scene parameters such that their gradient can be stochastically estimated and descended [S1]. It addresses the scalability issues of full-image SGE by leveraging the bounded dimensionality of per-pixel contributions [S1].
 
 ## Sources
 [S1] Transforming a Non-Differentiable Rasterizer into a Differentiable One with Stochastic Gradient Estimation, https://doi.org/10.1145/3651298, fetched 2026-10-26

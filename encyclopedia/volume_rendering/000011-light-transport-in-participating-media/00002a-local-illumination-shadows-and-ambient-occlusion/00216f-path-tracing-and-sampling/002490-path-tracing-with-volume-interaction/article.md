@@ -3,12 +3,12 @@
 Also called: Path Tracing for Volume Lighting
 
 ## Overview
-Path Tracing with Volume Interaction is a path tracing algorithm that handles both surface and participating media intersections, using Russian Roulette for termination and power heuristic for light sampling [S1, unofficial]. It evaluates multiple scattering in participating media, where light takes random paths through the medium until reaching a point, analogous to indirect illumination in surface rendering [S2, unofficial]. It builds on [Path Tracing and Sampling](2526-path-tracing-and-sampling.md) by integrating volume intersection logic and isotropic scattering models directly into the path generation loop.
+Path Tracing with Volume Interaction is a path tracing algorithm that handles both surface and participating media intersections, using Russian Roulette for termination and power heuristic for light sampling [S1, unofficial]. It evaluates multiple scattering in participating media, where light takes random paths through the medium until reaching a point, analogous to indirect illumination in surface rendering [S2, unofficial]. It builds on [Path Tracing and Sampling](2526-path-tracing-and-sampling.md) by integrating volume intersection logic and isotropic scattering models directly into the path generation loop [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
 *   **Inputs:** Scene geometry, volume data, light sources, camera parameters, `settings.maxDepth`, `settings.minDepth`, `settings.gradientFactor`, `settings.stepSize`, and a random number sampler [S1, unofficial].
-*   **Outputs:** Final pixel colour (radiance).
+*   **Outputs:** Final pixel colour (radiance) [S1, unofficial].
 
 **Data Structures:**
 *   `ScatterEvent`: Stores intersection position, normal, material ID, index of refraction (`iorI`, `iorO`), and input direction [S1, unofficial].
@@ -22,9 +22,9 @@ Path Tracing with Volume Interaction is a path tracing algorithm that handles bo
 *   `RAY_EPS`: Minimum ray segment length to prevent self-intersection [S1, unofficial].
 
 **Algorithm Steps:**
-1. Initialize `throughput` to $(1.0, 1.0, 1.0)$ and `colour` to $(0, 0, 0)$. Set `interaction.iorI` to $1.0$ (air). Loop from `bounces = 0` to `maxDepth - 1` [S1, unofficial].
-2. Intersect the ray with the scene. If no intersection is found, add `throughput * settings.backgroundLight` to `colour` and break [S1, unofficial].
-3. If the intersection is a Volume type, compute the local position relative to the volume origin. Get the gradient of the volume at that position to determine the surface normal and magnitude. Sample the volume intensity [S1, unofficial].
+1. Initialize `throughput` to $(1.0, 1.0, 1.0)$ and `colour` to $(0, 0, 0)$ [S1, unofficial]. Set `interaction.iorI` to $1.0$ (air) [S1, unofficial]. Loop from `bounces = 0` to `maxDepth - 1` [S1, unofficial].
+2. Intersect the ray with the scene [S1, unofficial]. If no intersection is found, add `throughput * settings.backgroundLight` to `colour` and break [S1, unofficial].
+3. If the intersection is a Volume type, compute the local position relative to the volume origin [S1, unofficial]. Get the gradient of the volume at that position to determine the surface normal and magnitude [S1, unofficial]. Sample the volume intensity [S1, unofficial].
 4. Calculate the probability of treating this as a surface interaction using the formula:
    $$ p_{\text{BRDF}} = 1.0 - \exp(-\text{gradientFactor} \cdot \frac{\|\mathbf{g}\|}{\rho}) $$
    where $\|\mathbf{g}\|$ is the gradient magnitude and $\rho$ is the sampled intensity [S1, unofficial].
@@ -33,11 +33,11 @@ Path Tracing with Volume Interaction is a path tracing algorithm that handles bo
 7. If the intersection is a Surface type, retrieve the material from `scene.materials` using `intersection.materialID` [S1, unofficial].
 8. If the material has a light source and (`bounces == 0` or sampled lobe is Specular), add `throughput * hitLight->getEmittance(interaction)` to `colour` [S1, unofficial].
 9. Add direct lighting contribution: `colour += throughput * SampleOneLight(interaction, scene, material, hitLight, settings, sampler)` [S1, unofficial].
-10. Sample the next direction from the material. If the PDF is not a valid number (e.g., parallel direction), resample until a valid PDF is obtained [S1, unofficial].
+10. Sample the next direction from the material [S1, unofficial]. If the PDF is not a valid number (e.g., parallel direction), resample until a valid PDF is obtained [S1, unofficial].
 11. Update `throughput *= material->evaluate(interaction) / pdf` [S1, unofficial].
 12. If the sampled lobe is SpecularTransmission, update `interaction.iorI = interaction.iorO` [S1, unofficial].
-13. Create the new ray: `origin = interaction.position`, `direction = interaction.inputDir`, `minT = RAY_EPS` [S1, unofficial].
-14. If `bounces >= minDepth - 1`, calculate $p$ as the maximum component of `throughput`. If `sampler.nextFloat() > p`, break the loop. Otherwise, divide `throughput` by $p$ [S1, unofficial].
+13. Create the new ray: `origin = interaction.position`, `direction = next_dir`, `minT = RAY_EPS` [S1, unofficial].
+14. If `bounces >= minDepth - 1`, calculate $p$ as the maximum component of `throughput` [S1, unofficial]. If `sampler.nextFloat() > p`, break the loop [S1, unofficial]. Otherwise, divide `throughput` by $p$ [S1, unofficial].
 15. Return the final `colour` divided by $(1 + \text{bounces})$ [S1, unofficial].
 
 **Pseudocode:**
@@ -81,10 +81,12 @@ def path_trace_volume(scene, camera, settings, sampler):
             material = scene.materials[hit.material_id]
 
         if material.has_emission and (bounces == 0 or material.sampled_lobe == "Specular"):
+            # [G] hitLight sampling logic not detailed in sources
             light_hit = material.get_emittance(interaction)
             colour = [colour[i] + throughput[i] * light_hit.colour[i] for i in range(3)]
 
-        light_hit = sample_one_light(interaction, scene, material, settings, sampler)
+        # [G] Direct lighting integration over scene lights not detailed in sources
+        light_hit = sample_direct_lighting(interaction, scene, material, settings, sampler)
         colour = [colour[i] + throughput[i] * light_hit.colour[i] for i in range(3)]
 
         while True:
@@ -109,8 +111,8 @@ def path_trace_volume(scene, camera, settings, sampler):
 
     return [c / (1 + bounces) for c in colour]
 
-def sample_one_light(interaction, scene, material, settings, sampler):
-    # Standard direct lighting integration over scene lights
+def sample_direct_lighting(interaction, scene, material, settings, sampler):
+    # [G] Standard direct lighting integration over scene lights
     hit_light = scene.sample_light(interaction.position, sampler)
     return hit_light
 ```
@@ -119,11 +121,11 @@ def sample_one_light(interaction, scene, material, settings, sampler):
 *   **Invalid PDF:** If the sampled direction results in a zero or invalid PDF (e.g., parallel to normal), the algorithm must resample [S1, unofficial].
 *   **Self-Intersection:** Use `RAY_EPS` for the minimum ray segment length to prevent the ray from intersecting the surface it just left [S1, unofficial].
 *   **Heterogeneous Media:** Woodcock tracking can be used during integration over the sphere for each step along the ray to get unbiased results for heterogeneous media [S2, unofficial].
-*   **Precision:** Not given in the sources.
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Limitations:** Not given in the sources.
-*   **When to use:** Not given in the sources.
+*   **Precision:** Not given in the sources [G].
+*   **Time Complexity:** Not given in the sources [G].
+*   **Memory Complexity:** Not given in the sources [G].
+*   **Limitations:** Not given in the sources [G].
+*   **When to use:** Not given in the sources [G].
 
 ## Subtopics
 
@@ -137,13 +139,13 @@ A GPU-based path tracing method that estimates direct illumination via standard 
 A technique used during integration over the sphere for each step along the ray to get unbiased results for heterogeneous media [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [G].
+*   **Memory Complexity:** Not given in the sources [G].
 *   **Performance:** Path tracing for volumes is expensive because light can take random paths in the media until it reaches the point, analogous to indirect illumination in surface rendering [S2, unofficial].
-*   **Strengths:** Not given in the sources.
-*   **Limitations:** Not given in the sources.
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+*   **Strengths:** Not given in the sources [G].
+*   **Limitations:** Not given in the sources [G].
+*   **When to use:** Not given in the sources [G].
+*   **When not to use:** Not given in the sources [G].
 
 ## Background
 Path tracing for volume interaction was developed as an extension of surface path tracing to handle participating media [S1, unofficial]. The specific implementation details are derived from the `thewildnath/PathTracer` repository [S1, unofficial]. The concept of using path tracing for volumes to handle multiple scattering is discussed in community resources such as Computer Graphics Stack Exchange [S2, unofficial].

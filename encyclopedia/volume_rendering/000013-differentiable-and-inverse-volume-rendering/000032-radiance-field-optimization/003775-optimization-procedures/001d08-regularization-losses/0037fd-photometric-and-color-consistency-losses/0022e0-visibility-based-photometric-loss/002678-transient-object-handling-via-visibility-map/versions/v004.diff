@@ -1,0 +1,163 @@
+--- v003.md
++++ v004.md
+@@ -4,97 +4,94 @@
+ 
+ ## Overview
+-This method mitigates reconstruction artifacts from transient objects (e.g., moving pedestrians or cars) by using a 2D visibility map to weight the photometric loss, preventing the model from reconstructing transient geometry [S1]. It sets itself apart from standard static scene reconstruction by explicitly segmenting dynamic regions to avoid floating artifacts or depth map inconsistencies [S1, S2]. It builds on [Visibility-Based Photometric Loss](2917-visibility-based-photometric-loss.md) by introducing an explicit visibility mask rather than relying solely on geometric consistency or fixed thresholds [S1].
++This method mitigates artifacts caused by transient objects (e.g., moving people, cars) in static scene reconstruction by using a 2D visibility map to weight the photometric loss [S1]. It prevents the model from attempting to reconstruct transient geometry, which typically leads to floating artifacts or depth map inconsistencies [S1, S2]. Unlike methods that explicitly model transient appearance in 3D space, this approach operates by suppressing the influence of transient regions in the 2D image plane during optimization [S1]. It builds on [Visibility-Based Photometric Loss](2917-visibility-based-photometric-loss.md) by introducing a learnable or pre-computed mask to dynamically exclude unreliable pixels [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** Reference image $I_{gt}$, rendered image $I_r$, and a 2D visibility map $V_M$ [S1, S2].
+-- **Outputs:** A weighted photometric loss value and an updated visibility map $V_M$ [S1].
++*   **Inputs:** Rendered image $I_r$, ground truth reference image $I_{gt}$, and a 2D visibility map $V_M$.
++*   **Outputs:** A weighted photometric loss value and an updated visibility map (if learned).
+ 
+ **Data Structures:**
+-- **Visibility Map ($V_M$):** A 2D tensor of shape $\mathbb{R}^{1 \times H \times W}$, where $H$ and $W$ are the image height and width [S1]. Each element $V_M(h, w) \in [0, 1]$ represents the visibility weight for pixel $(h, w)$ [G]. Values close to 1 indicate static, reconstructible regions; values close to 0 indicate transient or occluded regions [G].
+-- **Reference Image ($I_{gt}$):** The ground-truth input image [S1].
+-- **Rendered Image ($I_r$):** The image rendered by the current model state [S1].
+-- **U-Net Architecture:** Used for generating $V_M$ [S1].
++*   $V_M \in \mathbb{R}^{1 \times H \times W}$: A single-channel float tensor where each element represents the visibility weight for the corresponding pixel. Values typically range from 0 (transient/occluded) to 1 (static/visible).
+ 
+-**Numbered Steps:**
+-1. **Visibility Map Generation:** A U-Net model is employed to generate the 2D visibility map $V_M$, segmenting transient objects (moving people, cars) from static background elements [S1]. Alternatively, an integrated semantic segmentation model can generate masks for moving objects [S2].
+-2. **Loss Weighting:** The photometric loss calculation between $I_r$ and $I_{gt}$ is weighted using the visibility map $V_M$ via Hadamard product ($\odot$) [S1]. Regions with lower visibility contribute less to the total loss, preventing the optimizer from forcing the static scene representation to fit dynamic artifacts [S1].
+-3. **Regularization:** A regularization loss $L_{vm}$ is applied to $V_M$ to prevent the model from trivially setting all pixels to zero (invisible) to minimize the photometric loss [S1].
++**Steps:**
++1.  **Generate Visibility Map:** Obtain $V_M$ from a semantic segmentation model (e.g., a U-Net) or a dedicated transient detection network [S1, S2]. The model identifies regions occupied by moving objects (pedestrians, cars) [S2].
++2.  **Compute Weighted Loss:** Calculate the photometric loss between $I_r$ and $I_{gt}$ using the Hadamard product ($\odot$) with $V_M$ [S1].
++3.  **Apply Regularization:** Compute a regularization loss $L_{vm}$ to prevent the visibility map from collapsing to zero (marking all pixels as transient) [S1].
++4.  **Optimize:** Update network parameters using the combined loss.
+ 
+ **Formulas:**
+-The weighted photometric loss applies the visibility map via Hadamard product to the pixel-wise difference before aggregation [S1]:
+-$$ L_{\text{weighted}} = \text{Loss}\left((I_r - I_{gt}) \odot V_M\right) $$
+-where $\text{Loss}$ denotes the standard photometric norm (e.g., L1 or L2) aggregated over pixels [G].
++The weighted photometric loss is computed as:
++$$ L_{weighted} = V_M \odot \| I_r - I_{gt} \| $$
++*(Note: The specific norm, typically L2, is inherited from the parent photometric loss definition.)*
+ 
+-The regularization loss for the visibility map is defined as [S1]:
+-$$ L_{vm} = L_2(V_M, \mathbf{1}) $$
+-where $L_2(V_M, \mathbf{1})$ denotes the L2 loss between the visibility map $V_M$ and a tensor of ones of the same shape [S1]. This encourages $V_M$ to stay close to 1 for valid static regions [S1].
++The regularization loss $L_{vm}$ ensures the visibility map does not suppress all pixels:
++$$ L_{vm} = L_2(V_M, 1) $$
++where $L_2(V_M, 1)$ denotes the L2 loss between the visibility map $V_M$ and a tensor of ones of the same shape [S1].
+ 
+ **Parameters:**
+-- **U-Net Architecture:** Used for generating $V_M$. Specific hyperparameters (layers, filters) are not detailed in the sources [S1].
+-- **Regularization Weight:** The weight for $L_{vm}$ relative to the photometric loss is not specified in the sources [S1].
++*   Regularization weight for $L_{vm}$: Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Trivial Solution:** Without $L_{vm}$, $V_M$ may converge to all zeros to minimize the photometric loss, effectively ignoring the entire image. The L2 penalty against ones prevents this [S1].
+-- **Segmentation Accuracy:** The effectiveness relies on the U-Net's or segmentation model's ability to accurately segment transient objects. Poor segmentation may lead to artifacts (if transient regions are marked as static) or loss of detail (if static regions are incorrectly masked) [S1, S2].
+-- **Depth Map Gaps:** Transient objects can cause gaps or inconsistencies in depth maps. Excluding these regions via $V_M$ mitigates this impact [S2].
++*   **Collapse to Zero:** Without regularization, the model may learn to set $V_M$ to 0 for all pixels to minimize the photometric error caused by transient objects, resulting in a black or empty scene reconstruction [S1].
++*   **Precision:** The visibility map must be differentiable if it is learned end-to-end; otherwise, it must be pre-computed and treated as a constant mask during the photometric loss calculation [S1, S2].
+ 
+ **Pseudocode:**
+ ```python
+-def transient_object_handling_loss(I_gt, I_r, V_M, reg_weight=1.0):
+-    # I_gt, I_r: list of lists of lists of shape (H, W, C)
+-    # V_M: list of lists of shape (1, H, W)
+-    # reg_weight: scalar weight for regularization loss
+-
+-    # Broadcast V_M to match image channels for Hadamard product
+-    if len(V_M) < len(I_gt):
+-        V_M_expanded = [V_M for _ in range(I_gt[0][0])]
+-    else:
+-        V_M_expanded = V_M
+-
+-    # Compute weighted photometric error (L2 norm over pixels)
+-    weighted_diff = []
+-    for h in range(len(I_gt)):
+-        row_diff = []
+-        for w in range(len(I_gt[0])):
+-            pixel_diff = []
+-            for c in range(len(I_gt[0][0])):
+-                pixel_diff.append((I_gt[h][w][c] - I_r[h][w][c]) * V_M_expanded[h][w])
+-            row_diff.append(pixel_diff)
+-        weighted_diff.append(row_diff)
++def transient_visibility_loss(I_r, I_gt, V_M, reg_weight=1.0):
++    """
++    Computes the transient-aware photometric loss.
+     
+-    L_photometric = sum(val**2 for row in weighted_diff for pixel in row for val in pixel) / len(weighted_diff)
+-
+-    # Compute regularization loss: L2 distance between V_M and ones
+-    ones_tensor = [[1.0 for _ in range(len(V_M[0]))] for _ in range(len(V_M))]
+-    L_vm = sum((V_M[h][w] - 1.0)**2 for h in range(len(V_M)) for w in range(len(V_M[0]))) / len(V_M)
+-
+-    # Combine losses
+-    total_loss = L_photometric + reg_weight * L_vm
+-
+-    return total_loss, L_vm
++    Args:
++        I_r: Rendered image tensor (H, W, 3).
++        I_gt: Ground truth image tensor (H, W, 3).
++        V_M: Visibility map tensor (1, H, W) or (H, W).
++        reg_weight: Weight for the visibility map regularization loss.
++        
++    Returns:
++        total_loss: Scalar loss value.
++    """
++    # Expand V_M to match image channels if necessary
++    if V_M.dim() == 2:
++        V_M = V_M.unsqueeze(0)
++    
++    # Ensure V_M is broadcastable to (1, H, W) -> (H, W, 3)
++    # Assuming standard broadcasting rules apply in the framework
++    # Compute pixel-wise L2 difference
++    diff = I_r - I_gt
++    # Weight the difference by visibility
++    weighted_diff = V_M * diff
++    
++    # Photometric loss (L2 norm)
++    # Note: Summing over H, W, C dimensions
++    photometric_loss = torch.mean(weighted_diff ** 2)
++    
++    # Regularization loss: L2 distance between V_M and ones
++    # Target is a tensor of ones with same shape as V_M
++    ones_tensor = torch.ones_like(V_M)
++    reg_loss = torch.mean((V_M - ones_tensor) ** 2)
++    
++    total_loss = photometric_loss + reg_weight * reg_loss
++    
++    return total_loss
+ ```
+ 
+ ## Subtopics
+ 
+-### Semantic Segmentation for Transient Objects
+-Uses an integrated semantic segmentation model to generate masks for moving objects (pedestrians, cars) [S2]. This approach explicitly excludes these regions from scene training to mitigate depth map gaps [S2]. It is chosen when external segmentation priors are available, differing from the learnable U-Net approach by relying on pre-computed masks [S2].
+-
+-### Learnable Visibility Map
+-Uses a U-Net to learn the visibility map end-to-end during training [S1]. This is chosen for unconstrained collections where pre-defined masks are unavailable, allowing the model to adaptively learn which regions are transient based on photometric consistency [S1].
++### Isolated Transient Network
++A separate network $T_\phi$ operating at the 2D image level to model transient objects (occluders) and their opacity, preventing noisy gradients from flowing into pose parameters [S3, unofficial]. It maps deep features $F_i(r)$ to transient opacity $\alpha^{(\tau)}$ and latent code $z^{(\tau)}$ using a sub-network $T_{\phi1}$ [S3, unofficial]. Another sub-network $T_{\phi2}$ encodes transient color $\hat{C}_i^{(\tau)}$ and uncertainty $\tilde{\beta}_i$ using the latent code and transient embedding $\ell_i^{(\tau)}$ [S3, unofficial]. The final color is alpha-blended: $\hat{C}_i(r) = (1 - \alpha^{(\tau)}(r))\hat{C}_i^{(a)}(r) + \alpha^{(\tau)}(r)\hat{C}_i^{(\tau)}(r)$ [S3, unofficial]. It uses parameters $\beta_{min}=0.1$ (minimum uncertainty) and $\lambda_\alpha=1.0$ (weight to suppress transient opacity) [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Adds the inference time of the U-Net or segmentation model for generating $V_M$ per training step [G]. The loss computation itself is $O(H \times W)$ due to the Hadamard product and L2 norms [G].
+-- **Memory Complexity:** Requires storing the visibility map $V_M$ of size $H \times W$ per image [G]. The U-Net or segmentation model weights are also loaded into memory [G].
+-- **Measured Performance:** The method outperforms previous methods (including 3DGS) on PhotoTourism scenes (Brandenburg, Gate, Sacre Coeur, Trevi, Fountain) in terms of PSNR, SSIM, and LPIPS [S1].
+-- **Strengths:** Effectively reduces artifacts from moving objects (floating points) and improves generalization by preventing the reconstruction of non-static geometry [S1, S2].
+-- **Limitations:** Relies on the accuracy of the visibility map generation (U-Net or semantic segmentation). If the visibility map is inaccurate, it may either retain artifacts or remove valid static details [S1, S2]. The regularization weight is not specified in the sources [S1].
+-- **When to Use:** Suitable for unconstrained image collections with significant transient objects where standard NeRF/Gaussian Splatting methods produce artifacts [S1].
+-- **When Not to Use:** Not necessary for static scenes with no moving objects, as it adds computational overhead without benefit [G].
++*   **Time Complexity:** Adds the inference time of the segmentation model (U-Net) or transient network per frame if computed dynamically. If pre-computed, the overhead is negligible during training [S1, S2][S3, unofficial].
++*   **Memory Complexity:** Requires storing the visibility map $V_M$ ($H \times W$ floats) or the parameters of the transient network [S1][S3, unofficial].
++*   **Strengths:** Effectively removes artifacts from moving objects without requiring explicit 3D modeling of dynamics [S1, S2]. Improves depth map consistency by excluding inconsistent regions [S2].
++*   **Limitations:** Relies on the accuracy of the segmentation/transient detection model. If the model fails to detect a transient object, artifacts may persist [S1, S2]. The regularization term requires careful tuning to prevent visibility collapse [S1].
++*   **When to use:** Unconstrained image collections with significant transient content (e.g., street scenes with pedestrians) [S1, S2].
++*   **When not to use:** Static scenes with no transient objects, where the overhead is unnecessary [S2].
+ 
+ ## Background
+-The method originates from "Gaussian in the Wild: 3D Gaussian Splatting for Unconstrained Image Collections" [S1], which addresses the challenge of reconstructing scenes from unstructured image sets containing dynamic elements. It builds upon the concept of visibility-based photometric loss, extending it to handle transience explicitly [S1]. An alternative approach using semantic segmentation for transient object handling is described in "UE4-NeRF: Neural Radiance Field for Real-Time Rendering of Large-Scale Scene" [S2], highlighting the broader context of handling dynamic objects in radiance field optimization [S2].
++The concept of handling transient objects in NeRF and 3D Gaussian Splatting emerged to address the limitation of these methods in assuming static scenes. Early works like NeRF-W introduced uncertainty modeling to handle transients [S3, unofficial]. Subsequent works integrated semantic segmentation masks to explicitly exclude moving objects [S2]. The visibility map approach, as detailed in "Gaussian in the Wild," applies this concept to 3D Gaussian Splatting for unconstrained image collections, using a U-Net to generate the map [S1]. The Isolated Transient Network variant was proposed in UP-NeRF to decouple transient modeling from pose optimization [S3, unofficial].
+ 
+ ## Sources
+ [S1] Gaussian in the Wild: 3D Gaussian Splatting for Unconstrained Image Collections, https://doi.org/10.1007/978-3-031-73116-7_20, fetched 2026-10-27
+-[S2] UE4-NeRF: Neural Radiance Field for Real-Time Rendering of Large-Scale Scene, https://doi.org/10.48550/arXiv.2310.13263, fetched 2026-10-29+[S2] UE4-NeRF: Neural Radiance Field for Real-Time Rendering of Large-Scale Scene, https://doi.org/10.48550/arXiv.2310.13263, fetched 2026-10-29
++[S3] UP-NeRF: Unconstrained Pose-Prior-Free Neural Radiance Fields, https://arxiv.org/abs/2311.03784v2, fetched 2026-10-26 (unofficial)

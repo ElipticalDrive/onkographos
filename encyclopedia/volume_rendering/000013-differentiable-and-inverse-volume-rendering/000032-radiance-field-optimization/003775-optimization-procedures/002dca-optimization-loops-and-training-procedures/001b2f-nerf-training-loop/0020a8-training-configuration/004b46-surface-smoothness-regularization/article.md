@@ -1,0 +1,338 @@
+# Surface Smoothness Regularization
+
+Also called: Depth Smoothness Regularization, Surface Smoothness on Integrated Unobserved Rays
+
+## Overview
+Surface Smoothness Regularization imposes geometric constraints on rendered depth from unobserved rays to alleviate spatial ambiguity and stabilize the joint optimization of blur kernels and radiance fields in sparse-view Deblurred Neural Radiance Fields (DeRF) [S1]. It distinguishes itself from standard NeRF regularization by integrating "hidden rays" derived from the estimated blur kernel alongside traditional "unseen rays" sampled from constrained camera poses, specifically targeting the coupled optimization problem of deblurring and scene reconstruction [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A set of target camera poses $\{P_i^{target}\}$, an estimated blur kernel $h$, and the current state of the radiance field (density $\sigma$ and color $\hat{C}$).
+*   **Outputs:** A scalar loss value $L_{ss}$ used to update the radiance field and blur kernel parameters.
+
+**Data Structures**
+*   **Camera Pose:** A $4 \times 4$ homogeneous transformation matrix $P = [R | t]$, where $R \in SO(3)$ is the rotation matrix and $t \in \mathbb{R}^3$ is the translation vector.
+*   **Ray:** Defined by origin $o$ and direction $d$.
+*   **Depth Map:** A 2D array where each element corresponds to a pixel, storing the expected depth $\hat{d}$ for the primary ray passing through that pixel.
+
+**Numbered Steps**
+
+1.  **Generate Unseen Rays ($r_{us}$):**
+    *   Define the spatial bounds for camera translation $t$ using the min and max of the target poses' translation components: $t_{min} = \min(\{t_i^{target}\})$ and $t_{max} = \max(\{t_i^{target}\})$ [S1].
+    *   Compute the normalized mean up axis $\bar{p}_u$ from all target poses and the mean focus point $\bar{p}_f$ by solving a least squares problem [S1].
+    *   Sample a jitter value $\epsilon$ from a normal distribution $\mathcal{N}(0, 0.125)$ [S1].
+    *   Construct the sampled rotation set $S_R|t$ using the function $R(\bar{p}_u, \bar{p}_f + \epsilon, t)$, which creates a rotation matrix focusing roughly on the scene center [S1].
+    *   Sample translation $t$ uniformly from the range $[t_{min}, t_{max}]$ [S1].
+    *   Form the set of sampled camera poses $S_P = \{[R|t] \mid R \sim S_R|t, t \sim S_t\}$ [S1].
+    *   Generate unseen rays $r_{us}$ by casting rays from these sampled poses $S_P$ through the image plane [S1].
+
+2.  **Generate Hidden Rays ($r_q$):**
+    *   Apply the estimated blur kernel transformation $h$ to existing training rays $r$ to derive hidden rays $r_q$ [S1].
+    *   The transformation $h(r)$ approximates the color composition process of the blur, providing supplementary information exclusive to blurry inputs [S1].
+    *   Note: Hidden rays change during training as the blur kernel $h$ is updated, whereas unseen rays remain static [S1].
+
+3.  **Form Integrated Unobserved Rays ($r_{iu}$):**
+    *   Combine the two sets: $r_{iu} = \{r_q, r_{us}\}$ [S1].
+
+4.  **Compute Expected Depth ($\hat{d}$):**
+    *   For each ray $r \in r_{iu}$, compute the expected depth $\hat{d}$ by integrating the density $\sigma$ along the ray from near plane $t_n$ to far plane $t_f$ [S1]:
+        $$ \hat{d} = \int_{t_n}^{t_f} \sigma(r(t))t \, dt $$
+    *   [G] In discrete implementation, this is typically approximated as a weighted sum: $\hat{d} = \sum_{i=1}^{N} w_i t_i$, where $w_i = \alpha_i \prod_{j=1}^{i-1} (1-\alpha_j)$ and $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$.
+
+5.  **Calculate Depth Smoothness Loss ($L_{ss}$):**
+    *   Organize the rays in $r_{iu}$ into a grid corresponding to pixel coordinates $(i, j)$ to form patches of size $S_{ptc} \times S_{ptc}$ [S1].
+    *   Compute the horizontal weighted depth difference $\Delta \hat{d}_x$ and vertical weighted depth difference $\Delta \hat{d}_y$ for each pixel $(i, j)$ [S1]:
+        $$ \Delta \hat{d}_x(r_{i,j}) = \omega_{i+1,j} (\hat{d}(r_{i+1,j}) - \hat{d}(r_{i,j}))^2 $$
+        $$ \Delta \hat{d}_y(r_{i,j}) = \omega_{i,j+1} (\hat{d}(r_{i,j+1}) - \hat{d}(r_{i,j}))^2 $$
+    *   Compute the pixel-wise color difference weight $\omega$ using the rendered colors $\hat{C}$:
+        $$ \omega_{i+k,j+l} = \exp(-|\hat{C}(r_{i,j}) - \hat{C}(r_{i+k,j+l})|) $$
+        where $k,l \in \{1,0\}$ corresponding to the horizontal or vertical neighbor [S1].
+    *   Sum the differences over all rays in $r_{iu}$ and all positions in the patch:
+        $$ L_{ss}\{r_{iu}\} = \sum_{r \in r_{iu}} \sum_{i,j=1}^{S_{ptc}-1} (\Delta \hat{d}_x(r_{i,j}) + \Delta \hat{d}_y(r_{i,j})) $$
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_surface_smoothness_loss(
+    radiance_field, 
+    blur_kernel, 
+    target_poses, 
+    patch_size,
+    num_samples_per_ray=64
+):
+    """
+    Computes the Surface Smoothness Regularization loss.
+    
+    Args:
+        radiance_field: Object with method sample_ray(ray_o, ray_d, t_n, t_f) 
+                        returning (sigma, color, depth).
+        blur_kernel: Object with method transform_ray(ray) returning transformed ray.
+        target_poses: List of 4x4 numpy arrays representing target camera poses.
+        patch_size: Integer S_ptc for the smoothness patch dimension.
+        num_samples_per_ray: Number of discrete samples per ray for integration.
+        
+    Returns:
+        float: The scalar loss L_ss.
+    """
+    
+    # 1. Generate Unseen Rays
+    # Compute bounds and statistics from target poses
+    translations = np.array([p[:3, 3] for p in target_poses])
+    t_min = np.min(translations, axis=0)
+    t_max = np.max(translations, axis=0)
+    
+    # Compute mean up axis (assuming Y is up, or normalize first column/row depending on convention)
+    # Simplified: mean of the 'up' vector component of the rotation matrices
+    # Note: Source defines p_u as normalized mean over up axes. 
+    # We assume standard camera convention where up is Y (index 1).
+    up_axes = np.array([p[:3, 1] for p in target_poses])
+    p_u = np.mean(up_axes, axis=0)
+    p_u = p_u / np.linalg.norm(p_u)
+    
+    # Compute mean focus point via least squares (simplified as mean of origins for [G])
+    # Source says "mean focus point by solving a least squares problem".
+    # For implementation simplicity without full LS solver in this snippet, 
+    # we approximate p_f as the mean of the target pose origins.
+    p_f = np.mean(translations, axis=0)
+    
+    unseen_rays = []
+    # Sample a fixed number of unseen poses for the loss calculation
+    num_unseen = 100 
+    for _ in range(num_unseen):
+        # Sample translation t uniformly in bounds
+        t = np.random.uniform(t_min, t_max)
+        
+        # Sample jitter epsilon
+        epsilon = np.random.normal(0, 0.125)
+        
+        # Construct rotation R(p_u, p_f + epsilon, t)
+        # This function creates a rotation matrix looking at p_f + epsilon from t
+        # with up vector p_u.
+        R = look_at_rotation(t, p_f + epsilon * p_u, p_u)
+        
+        pose = np.eye(4)
+        pose[:3, :3] = R
+        pose[:3, 3] = t
+        
+        # Cast rays from this pose through the image grid
+        # Assuming a standard pinhole camera model for the sampled pose
+        rays = cast_rays_from_pose(pose, image_width=256, image_height=256)
+        unseen_rays.extend(rays)
+        
+    # 2. Generate Hidden Rays
+    # Apply blur kernel transformation to a subset of training rays
+    # Source implies deriving from existing rays r. We sample some training rays.
+    hidden_rays = []
+    num_hidden = 100
+    for _ in range(num_hidden):
+        # Pick a random training ray (origin, direction)
+        # In practice, these are rays from the training dataset
+        r_o, r_d = sample_training_ray() 
+        ray = Ray(r_o, r_d)
+        
+        # Transform ray using blur kernel
+        transformed_ray = blur_kernel.transform_ray(ray)
+        hidden_rays.append(transformed_ray)
+        
+    # 3. Integrated Unobserved Rays
+    all_rays = unseen_rays + hidden_rays
+    
+    # 4. Compute Expected Depth for all rays
+    depths = []
+    colors = []
+    
+    for ray in all_rays:
+        # Sample points along the ray
+        t_vals = np.linspace(ray.t_n, ray.t_f, num_samples_per_ray)
+        points = ray.origin + ray.direction * t_vals
+        
+        # Query radiance field for sigma and color
+        # Returns sigma (density) and C (color) for each sample
+        sigma, C = radiance_field.query(points)
+        
+        # Compute weights for depth integration (Alpha Compositing)
+        # delta_t is the distance between samples
+        delta_t = t_vals[1] - t_vals[0]
+        alpha = 1.0 - np.exp(-sigma * delta_t)
+        
+        # Transmittance T_i = product(1 - alpha_j) for j < i
+        T = np.cumprod(1.0 - alpha)
+        T = np.concatenate(([1.0], T[:-1]))
+        
+        # Expected Depth d_hat = sum(w_i * t_i) where w_i = T_i * alpha_i
+        weights = T * alpha
+        d_hat = np.sum(weights * t_vals)
+        
+        # Expected Color C_hat = sum(w_i * C_i)
+        C_hat = np.sum(weights * C, axis=0)
+        
+        depths.append(d_hat)
+        colors.append(C_hat)
+        
+    # 5. Calculate Loss
+    # Reshape depths and colors into a grid to apply patch-based smoothness
+    # Note: The source assumes rays are organized into patches S_ptc x S_ptc.
+    # Unseen rays are naturally grid-structured. Hidden rays are random.
+    # The source formula sums over r in r_iu and i,j in S_ptc.
+    # This implies we only apply the smoothness constraint to rays that can be 
+    # organized into a coherent grid, or we treat the set as a flattened grid.
+    # Given hidden rays are random, they likely don't form a grid.
+    # However, the source states L_ss is calculated over patches of integrated unobserved rays.
+    # We will assume the loss is primarily applied to the unseen rays which form a grid,
+    # or that hidden rays are projected onto the same grid structure.
+    # For this implementation, we apply the loss to the unseen rays which form a clear grid.
+    
+    loss = 0.0
+    n_unseen = len(unseen_rays)
+    
+    # Reshape to grid (assuming square image and sufficient samples)
+    # This is a simplification; in practice, one might only use unseen rays for the grid loss
+    # or interpolate hidden rays onto the grid.
+    # Source Eq 17 sums over r in r_iu. If hidden rays are not grid-aligned, 
+    # the indices i,j are ambiguous. We assume the implementation groups them 
+    # or only applies to the structured unseen rays for the smoothness term.
+    
+    # Let's assume we only apply the grid-based smoothness to unseen rays 
+    # as they are the ones generated from camera poses S_P which map to image pixels.
+    # Hidden rays rq are derived from blur kernel and may not map to a single pixel grid 
+    # in the same way. However, the source explicitly includes r_q in r_iu in the sum.
+    # To resolve this ambiguity [G]: We assume hidden rays are also mapped to the 
+    # nearest pixel grid location or the loss is computed on a per-ray basis 
+    # comparing neighbors in a spatial hash. 
+    # Given the strict formula uses indices i,j, we will restrict the grid loss 
+    # to the unseen rays which form a natural image grid.
+    
+    if n_unseen > 0:
+        # Determine grid dimensions
+        # Assuming square image for simplicity
+        side = int(np.sqrt(n_unseen))
+        if side * side == n_unseen:
+            depth_grid = np.array(depths[:n_unseen]).reshape(side, side)
+            color_grid = np.array(colors[:n_unseen]).reshape(side, side, 3)
+            
+            # Compute weights
+            # Horizontal weight: omega_{i+1,j}
+            # Vertical weight: omega_{i,j+1}
+            
+            # Horizontal differences
+            diff_x = depth_grid[1:, :] - depth_grid[:-1, :]
+            # Color difference for horizontal neighbors
+            color_diff_x = np.abs(color_grid[1:, :] - color_grid[:-1, :])
+            omega_x = np.exp(-np.mean(color_diff_x, axis=2)) # Mean over RGB channels
+            
+            # Vertical differences
+            diff_y = depth_grid[:, 1:] - depth_grid[:, :-1]
+            # Color difference for vertical neighbors
+            color_diff_y = np.abs(color_grid[:, 1:] - color_grid[:, :-1])
+            omega_y = np.exp(-np.mean(color_diff_y, axis=2))
+            
+            # Weighted squared differences
+            term_x = omega_x * (diff_x ** 2)
+            term_y = omega_y * (diff_y ** 2)
+            
+            # Sum over patch (assuming the whole grid is one large patch or multiple)
+            # Source sums i,j from 1 to S_ptc-1.
+            loss = np.sum(term_x) + np.sum(term_y)
+            
+    return loss
+
+def look_at_rotation(camera_pos, target, up_vector):
+    """
+    Computes rotation matrix R such that camera at camera_pos looks at target
+    with up_vector as the camera's up direction.
+    """
+    z_axis = target - camera_pos
+    z_axis = z_axis / np.linalg.norm(z_axis)
+    
+    x_axis = np.cross(up_vector, z_axis)
+    x_axis = x_axis / np.linalg.norm(x_axis)
+    
+    y_axis = np.cross(z_axis, x_axis)
+    
+    R = np.column_stack((x_axis, y_axis, z_axis))
+    return R
+
+def cast_rays_from_pose(pose, image_width, image_height):
+    """
+    Casts rays from a camera pose through a grid of pixels.
+    Returns list of Ray objects.
+    """
+    rays = []
+    # Inverse projection matrix (assuming focal length and principal point are known)
+    # Simplified: assume unit focal length and principal point at center
+    fx = fy = 1.0
+    cx = image_width / 2.0
+    cy = image_height / 2.0
+    
+    inv_K = np.array([
+        [1.0/fx, 0, -cx/fx],
+        [0, 1.0/fy, -cy/fy],
+        [0, 0, 1.0]
+    ])
+    
+    inv_R = pose[:3, :3].T
+    inv_t = -inv_R @ pose[:3, 3]
+    
+    for y in range(image_height):
+        for x in range(image_width):
+            # Pixel coordinates relative to center
+            px = np.array([x - cx, y - cy, 1.0])
+            
+            # Ray direction in camera space
+            dir_cam = inv_K @ px
+            dir_cam = dir_cam / np.linalg.norm(dir_cam)
+            
+            # Ray direction in world space
+            dir_world = inv_R @ dir_cam
+            
+            # Ray origin is camera position
+            origin = pose[:3, 3]
+            
+            rays.append(Ray(origin, dir_world))
+            
+    return rays
+
+class Ray:
+    def __init__(self, origin, direction):
+        self.origin = origin
+        self.direction = direction
+        self.t_n = 0.1
+        self.t_f = 100.0
+```
+
+**Parameters**
+*   **Jitter Standard Deviation:** $0.125$ for the normal distribution $\mathcal{N}(0, 0.125)$ [S1].
+*   **Patch Size ($S_{ptc}$):** Not given in the sources.
+*   **Number of Unseen/Hidden Rays:** Not given in the sources.
+
+**Edge Cases and Pitfalls**
+*   **Hidden Ray Grid Alignment:** The formula uses grid indices $(i,j)$ for all rays in $r_{iu}$, including hidden rays $r_q$. Since hidden rays are derived from a blur kernel transformation and may not align with the pixel grid, their placement in the grid is ambiguous. The pseudocode restricts the grid loss to unseen rays [G].
+*   **Depth Ambiguity:** Without this regularization, sparse views suffer from spatial ambiguity, leading to artifacts like "painted walls" or elongated density artifacts [S1].
+*   **Blur Kernel Coupling:** The hidden rays depend on the blur kernel $h$, which is optimized jointly. If the blur kernel is inaccurate, the hidden rays may provide misleading smoothness constraints [S1].
+
+## Subtopics
+
+### Modulated Gradient Scaling (MGS)
+A complementary geometric constraint that scales gradients based on the distance from the observation, used alongside SS to stabilize optimization [S1]. [Modulated Gradient Scaling](6281-regularization-and-priors.md)
+
+### Perceptual Distillation (PD)
+A perceptual prior used in conjunction with SS and MGS to further refine the DeRF from sparse views [S1]. [Regularization and Priors](6281-regularization-and-priors.md)
+
+## Operating characteristics
+*   **Time Complexity:** The method requires sampling additional rays (unseen and hidden) and rendering depth for them at each optimization step, increasing the per-step computational cost compared to standard NeRF training. The complexity depends on the number of sampled unseen and hidden rays.
+*   **Memory Complexity:** Requires storing the additional rays and their corresponding depth/color values during the loss computation.
+*   **Strengths:** Effectively alleviates spatial ambiguity in sparse-view DeRF by leveraging both geometric priors (unseen rays) and blur-specific information (hidden rays) [S1].
+*   **Limitations:** Relies on the accuracy of the estimated blur kernel for the hidden rays. If the blur kernel is poor, the hidden rays may degrade performance.
+*   **When to use:** Specifically for Deblurred Neural Radiance Fields (DeRF) trained on sparse views where joint optimization of blur and geometry is challenging [S1].
+
+## Background
+*   **Origin:** Introduced in "Sparse-DeRF: Deblurred Neural Radiance Fields From Sparse View" [S1].
+*   **History:** The method builds upon the concept of using unobserved rays for regularization in NeRF, as seen in RegNeRF [S1, Ref 6 in S1]. It extends this by introducing "hidden rays" derived from the blur kernel to handle the specific challenges of deblurring from sparse views.
+*   **Usage:** Used in the Sparse-DeRF framework for joint deblurring and novel view synthesis from sparse input images [S1].
+
+## Sources
+[S1] Sparse-DeRF: Deblurred Neural Radiance Fields From Sparse View, https://doi.org/10.1109/tpami.2025.3563398, fetched 2026-10-27

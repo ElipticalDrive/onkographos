@@ -1,9 +1,9 @@
 # Specific Model Architectures
 
-Also called: NeRF Architectures, Neural Radiance Field Variants
+Also called: NeRF Architectures, Neural Radiance Field Models
 
 ## Overview
-Specific Model Architectures refers to the family of neural network structures designed to represent and optimize radiance fields, extending the canonical Multi-Layer Perceptron (MLP) baseline to address limitations in generalization, efficiency, dynamic scenes, and generative capabilities. While the canonical NeRF [Parent] uses a single global MLP to map 6D coordinates to density and color, this family encompasses methods that replace or augment this structure with sparse grids, transformers, diffusion priors, or multi-branch decoders to solve problems such as slow training, poor generalization to unseen scenes, inability to handle dynamic content, and lack of semantic control. Key distinctions include the shift from per-scene optimization to generalizable learning (e.g., [Transformer-based Architectures](8998-transformer-based-architectures.md)), the decomposition of geometry and appearance for relighting ([Appearance and Lighting Decomposition](11061-appearance-and-lighting-decomposition.md)), and the integration of external priors for single-view or sparse-view reconstruction ([SinNeRF](6199-sinnerf.md), [NeRDi](9112-nerdi.md)).
+Specific Model Architectures refers to the family of neural network topologies and data structures used to represent the radiance field $F_\Theta(\mathbf{x}, \mathbf{d}) = (\sigma, \mathbf{c})$. While the parent article [Scene Representation and Architecture](11368-scene-representation-and-architecture.md) defines the canonical MLP-based mapping, this family encompasses extensions that modify the network topology, input conditioning, or underlying representation (e.g., grids, tensors, transformers) to address specific limitations such as rendering speed, single-view synthesis, dynamic scenes, or generative capabilities. These methods differ from siblings like [AdaNeRF](6195-adanerf.md) (which focuses on sampling efficiency) or [Sparse and Efficient Representations](9326-sparse-and-efficient-representations.md) (which focuses on memory complexity) by primarily altering the *learnable parameters and connectivity* of the scene representation itself.
 
 ## Shared principles
 All methods in this family share the mechanism of mapping 6D input coordinates (3D position $\mathbf{x}$ and 2D viewing direction $\mathbf{d}$) to 4D output values (density $\sigma$ and color $\mathbf{c}$) using a differentiable neural network. This allows the radiance field to be optimized through the volumetric rendering integral.
@@ -48,13 +48,13 @@ RefSR-NeRF is a framework that combines Neural Radiance Fields (NeRF) with a Ref
 AligNeRF is a training strategy and architectural modification for Neural Radiance Fields (NeRF) designed to improve high-frequency detail recovery and mitigate artifacts caused by misalignment from moving objects or camera calibration errors. It sets itself apart from standard NeRF implementations by combining a convolution-augmented architecture with a staged, alignment-aware fine-tuning procedure that utilizes patch-based sampling and optical flow estimation. Unlike sibling methods that primarily focus on sparse representations or differentiable rendering integrals, AligNeRF explicitly addresses the spatial coherence of high-resolution features through local neighborhood encoding and robust alignment matching.
 
 ### [DiffusioNeRF](8703-diffusionerf.md)
-DiffusioNeRF is a method that utilizes a denoising diffusion model to learn priors for scene geometry and color, normalizing the geometry and color of the scene to achieve better quality in reconstructed geometry under sparse input views. It sets itself apart from standard NeRF training by integrating a learned probabilistic prior derived from RGBD data, which regularizes the density and color fields during optimization.
+DiffusioNeRF is a NeRF optimization procedure that incorporates a denoising diffusion model to learn priors for scene geometry and color, thereby improving reconstruction quality under sparse input views. It distinguishes itself from standard NeRF training by backpropagating gradients from a learned log-likelihood of RGBD patches, effectively normalizing the geometry and color fields during optimization.
 
 ### [Pool proposer architecture](8953-pool-proposer-architecture.md)
 The pool proposer is a trainable neural network component used in NeRF-ID to generate fine-grained sampling positions for volume rendering. It processes coarse features from a previous sampling stage to propose new sample locations, addressing the need for adaptive sampling in differentiable volume rendering. It is distinguished from its sibling [MLPMix Proposer](#mlpmix-proposer) by using a bottleneck fully connected layer and sinusoidal positional encoding summation, whereas MLPMix uses a different mixing mechanism.
 
 ### [Transformer-based Architectures](8998-transformer-based-architectures.md)
-Transformer-based architectures replace the local, per-scene Multi-Layer Perceptrons (MLPs) of standard NeRF with global attention mechanisms to aggregate information from multiple source views. This enables generalizable radiance field learning, allowing the model to infer geometry and appearance for unseen scenes without per-scene optimization. Unlike sibling methods that may use transformers for specific tasks (e.g., refinement or editing), this family fundamentally restructures the scene representation to be view-aggregating and dataset-trained.
+This family replaces or augments the standard Multi-Layer Perceptron (MLP) radiance field with Transformer architectures to capture long-range dependencies and enable generalization across scenes. Unlike standard NeRF, which optimizes a single MLP per scene, these methods leverage attention mechanisms to aggregate multi-view information or process spatial tokens, allowing for inference on unseen data or improved super-resolution.
 
 ### [MS-NeRF](9111-ms-nerf.md)
 MS-NeRF (Multi-Space Neural Radiance Field) is a scene representation method that extends standard MLP-based NeRF architectures to handle unbounded virtual scenes containing reflective and refractive surfaces, such as mirrors. It solves the problem of rendering distortion and blurring caused by reflection or refraction, where standard NeRF fails to maintain multi-view consistency due to the geometric complexity of virtual images. Unlike sibling methods like Ref-NeRF, which require manually labeled masks for reflective surfaces and are limited to forward-facing scenes, MS-NeRF automatically handles 360-degree scenes without extra supervision. It sets itself apart by decomposing the radiance field into $K$ parallel sub-spaces, each representing a characteristic field, and integrating them via a learned gating mechanism.
@@ -63,7 +63,7 @@ MS-NeRF (Multi-Space Neural Radiance Field) is a scene representation method tha
 NeRDi is a single-view synthesis method that leverages a pre-trained 2D image diffusion model to provide general image priors, enabling high-quality novel view synthesis from a single input image. Unlike traditional NeRF variants that rely on multi-view consistency or explicit geometric supervision alone, NeRDi minimizes the diffusion loss of rendered arbitrary views under input view constraints. It distinguishes itself by introducing semantic guidance via language embeddings and a geometric loss based on estimated depth maps to regularize the underlying 3D structure.
 
 ### [Neural Light Field Representations](9273-neural-light-field-representations.md)
-Neural Light Field (NeLF) representations approximate a 3D scene by mapping camera ray parameters directly to RGB color values, bypassing the volumetric rendering integral and ray-marching steps required by standard Neural Radiance Fields (NeRF). This family enables single-query rendering, offering significantly higher inference speed at the cost of requiring distillation from a pre-trained teacher model or extensive pseudo-data generation to learn the implicit geometry and appearance.
+Neural Light Field Representations map camera ray parameters directly to final pixel color, bypassing the volumetric ray-marching and alpha-composition steps required by Neural Radiance Fields (NeRF). Unlike NeRF, which predicts density and radiance at sampled points along a ray requiring multiple forward passes per pixel, NeLF performs a single forward pass per ray to output the integrated RGB value directly. This approach enables orders-of-magnitude faster rendering speeds and reduced computational complexity (FLOPs) while maintaining or exceeding the visual quality of NeRF.
 
 ### [RING-NeRF](9323-ring-nerf.md)
 RING-NeRF is a neural field architecture that introduces two primary inductive biases: a continuous multi-scale scene representation and a decoder latent space invariant to spatial translations and scale changes. Unlike sibling methods such as [Zip-NeRF](8663-nerf-rpn.md) or [Mip-NeRF](8875-multiplanenerf.md) which require explicit supervision for Level of Detail (LOD) or modify features based on observation distance, RING-NeRF produces intrinsic continuous LOD without supervision, enabling robust generalization to novel, unseen observation distances. It distinguishes itself from [I-NGP](8953-pool-proposer-architecture.md) by using summation rather than concatenation for multi-resolution features, ensuring the decoder latent space remains invariant to LOD, and supports dynamic resolution extension during training.
@@ -72,7 +72,7 @@ RING-NeRF is a neural field architecture that introduces two primary inductive b
 Sparse and Efficient Representations address the prohibitive memory and computational costs of dense, global neural radiance fields (NeRFs) by decomposing the scene representation into localized, sparse, or low-dimensional structures. This family enables the training and rendering of large-scale scenes or high-resolution details that would otherwise exceed hardware limits. Unlike monolithic NeRFs that use a single global MLP for the entire volume, these methods partition the scene spatially, replace implicit MLPs with explicit sparse grids, or decouple spatial and directional information into 2D planes, thereby reducing memory complexity from $O(N^3)$ to $O(N)$ or $O(N^2)$ and accelerating inference by orders of magnitude.
 
 ### [Edit-NeRF](9388-edit-nerf.md)
-Edit-NeRF is a method for user-controlled scene editing in Neural Radiance Fields (NeRF) by introducing latent codes for shape and appearance, allowing the model to be deformed based on 2D image conditioning. It differs from standard NeRF by formulating editing as a joint optimization problem of network parameters and latent codes, and differs from later text-driven methods like CLIP-NeRF by relying on direct image-based latent conditioning rather than semantic text embeddings.
+Edit-NeRF is a method for scene editing using image conditioning from user input, formulated as a joint optimization problem of both the NeRF network parameters and latent codes. It is the first method to execute user-controlled deformation models on NeRF, proposing a modular network's conditional radiance field to guide model editing. It sets itself apart from standard NeRF by introducing instance-specific latent codes for shape and appearance, allowing the network to learn underlying part features in an unsupervised manner and propagate 2D user guidance to 3D space.
 
 ### [Geometric Priors and Depth Integration](9395-geometric-priors-and-depth-integration.md)
 This family of methods enhances standard Neural Radiance Fields (NeRF) by integrating explicit geometric constraints—such as Structure-from-Motion (SfM) features, monocular depth priors, or signed distance fields (SDF)—into the optimization loop. While standard NeRF relies solely on photometric consistency to infer geometry, these methods solve the ambiguity inherent in sparse-view or ill-posed reconstruction by enforcing structural consistency, depth ordering, or metric surface accuracy. They differ from siblings like [AdaNeRF](6195-adanerf.md) or [SinNeRF](6199-sinnerf.md) by explicitly leveraging external geometric signals (depth maps, epipolar geometry, or cost volumes) rather than relying purely on implicit neural representations or frequency-based positional encoding.
@@ -93,7 +93,7 @@ Instance-NeRF is a learning-based 3D instance segmentation pipeline that extends
 MIMO-NeRF is a neural rendering method that accelerates inference by replacing the standard Single-Input Single-Output (SISO) Multi-Layer Perceptron (MLP) with a Multi-Input Multi-Output (MIMO) MLP. It groups neighboring samples along a ray and processes them simultaneously, reducing the number of MLP evaluations (# Run) required per pixel. Unlike knowledge distillation methods that require training a separate teacher network, MIMO-NeRF can be trained via self-supervised learning using a 3D consistency loss to resolve ambiguities in density and color inherent in grouped predictions. It maintains the original NeRF hyperparameters (sample counts and network width) while achieving superior speed-quality trade-offs compared to methods that reduce sample counts or network width.
 
 ### [Appearance and Lighting Decomposition](11061-appearance-and-lighting-decomposition.md)
-Appearance and Lighting Decomposition refers to a family of neural radiance field methods that explicitly separate scene geometry, material properties (such as diffuse albedo, roughness, and specular tint), and lighting conditions from the raw view-dependent color predictions of standard NeRF. This separation solves the ambiguity where standard MLPs conflate geometry and appearance, leading to "foggy" volumes, noisy normals, and unrealistic specular highlights. It differs from its siblings by structuring the output space into physically plausible components (e.g., diffuse vs. specular, or view-dependent vs. reflection-based) rather than predicting a single monolithic color vector, enabling relighting, material editing, and more robust normal estimation.
+Appearance and Lighting Decomposition refers to a family of neural radiance field architectures that explicitly separate scene geometry, material properties (diffuse/specular), and lighting conditions to enable relighting, appearance editing, and accurate rendering of reflective surfaces. Unlike standard NeRF which maps position and viewing direction directly to color, these methods decompose the rendering equation into distinct components (e.g., diffuse albedo, roughness, specular tint, or reflection directions). This separation resolves the ambiguity between shape and material, allowing for physically plausible interactions with environment maps and improved handling of glossy or specular highlights.
 
 ### [STensoRRF](11359-stensorrf.md)
 STensoRRF is a differentiable volume rendering method that represents a 3D scene using a single 4D tensor to enable high-quality novel view synthesis and relighting. It distinguishes itself from standard NeRF architectures by replacing the multi-network feature grid with a decomposed single tensor and explicitly estimating a BRDF value per point to facilitate relighting via spherical Gaussian environment maps. Unlike sibling methods that rely on complex geometric priors or multiple voxel meshes, STensoRRF achieves a 50% faster convergence rate and 1.5x faster rendering speed by combining tensor decomposition with a simplified reflectance equation.
@@ -113,41 +113,32 @@ Non-baked models refer to scene representations that decouple the learning of ge
 - [S1, unofficial] Adds an Appearance embedding to express different lighting conditions.
 - [S1, unofficial] Adds a Transient embedding to model changing geometry.
 
-### JacobiNeRF
-
-### formula
+#### JacobiNeRF
 - [S2] The model synthesizes a NeRF model based on second-order information (Jacobian matrix) to maximize mutual information between highly correlated entities under random scene perturbations. The rendering equation used is: $\hat{C}(r, z_s, z_c) = \sum_{i=1}^{N_c-1} c_i \alpha_i \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$, where $a_i = 1 - \exp(-\sigma_i \delta_i)$ is consistent with discrete volume rendering.
 
-### RelightingNeRF
-
-### definition
+#### RelightingNeRF
 - [S3] Proposed for handling unstructured photographs and free-viewpoint reconstruction, changing model architecture to output SDF values and latent features.
-
-### step
 - [S3] Input sampling point position into the first MLP, which outputs SDF values and latent features.
 - [S3] Obtain normals, shadow cues, and specular cues from the SDF values.
 - [S3] Provide sampling point positions, lighting positions, and viewing directions, along with latent features from the first MLP, to the second MLP.
 - [S3] Second MLP produces the final color.
 
-### DT-NeRF
-
-### step
+#### DT-NeRF
 - [S4] Both the Diffusion and Transformer models are trained jointly within a unified optimization framework, sharing the same loss function, and are not pretrained but optimized simultaneously during training through backpropagation.
 
-### NeRF-A
-
-### definition
+#### NeRF-A
 - [S5] A NeRF variant using appearance embeddings (NeRF-A) without transient embeddings for handling varying camera conditions.
-
-### step
 - [S5] Train the model with the left half side of the images in the training set and test novel view synthesis on the right half side.
 - [S5] Interpolate between appearance embeddings assigned to brighter and darker images for controllable rendering.
-
-### number
 - [S5] Quantitative results on classroom image: PSNR 23.52, SSIM 0.907, LPIPS 0.247.
 
 ## Background
-The canonical NeRF architecture, introduced by Mildenhall et al. in 2020 [S1, unofficial][S3], established the baseline of using a dense MLP to map 6D coordinates to density and color. Subsequent research rapidly expanded this into a diverse family of architectures to address specific limitations. Early extensions like NeRF in the Wild [S1, unofficial] introduced embeddings to handle unconstrained photo collections with varying lighting and transient objects. Methods like RelightingNeRF [S3] modified the output to Signed Distance Fields (SDF) to enable inverse rendering and relighting. More recent developments have shifted towards efficiency and generalization, with Sparse and Efficient Representations [S1, unofficial] replacing dense grids with sparse structures, and Transformer-based Architectures [S1, unofficial] enabling zero-shot generalization across scenes. Generative models like pi-GAN [S1, unofficial] and GIRAFFE [S1, unofficial] further extended the paradigm to 3D-aware synthesis. The field continues to evolve with integrations of diffusion models [S1, unofficial] and advanced geometric priors [S1, unofficial][S3].
+The canonical NeRF architecture, introduced by Mildenhall et al. in 2020 [S3], established the MLP-based radiance field representation. Subsequent research rapidly expanded this into a diverse family of architectures to address specific challenges:
+*   **Unconstrained Photos:** NeRF in the Wild (NeRF-W) [S1, unofficial] introduced appearance and transient embeddings to handle lighting inconsistencies and moving objects in internet photo collections.
+*   **Single-View Synthesis:** Methods like SinNeRF [S1, unofficial] and NeRDi [S1, unofficial][S2] integrated external priors (warping, diffusion models) to overcome the under-constrained nature of single-image reconstruction.
+*   **Efficiency:** MIMO-NeRF [S1, unofficial] and Transformer-based architectures [S1, unofficial] modified the network topology to reduce computational load or capture long-range dependencies.
+*   **Generative Modeling:** pi-GAN [S1, unofficial] and GIRAFFE [S1, unofficial] extended NeRF to generate novel 3D scenes from latent codes rather than optimizing for specific inputs.
+*   **Inverse Rendering:** IRON [S1, unofficial] and Appearance Decomposition methods [S1, unofficial][S2, S3] modified the output space to predict physical material properties (albedo, roughness) and SDFs for relighting.
 
 ## Sources
 [S1] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)

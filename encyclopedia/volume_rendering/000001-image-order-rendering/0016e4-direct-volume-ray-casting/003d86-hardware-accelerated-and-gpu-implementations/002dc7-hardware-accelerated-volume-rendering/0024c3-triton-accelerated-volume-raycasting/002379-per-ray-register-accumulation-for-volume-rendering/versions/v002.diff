@@ -1,0 +1,118 @@
+--- v001.md
++++ v002.md
+@@ -8,19 +8,20 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Ray origin, ray direction, volume density/opacity samples, transfer function parameters.
++*   **Inputs:** Ray origin, ray direction, volume density/opacity samples, transfer function parameters, bounding box, and step size.
+ *   **Outputs:** `outRGB` (accumulated color), `outDepth` (accumulated depth), `outOpacity` (accumulated opacity).
+ 
+ **Data Structures:**
+-The method utilizes per-thread local storage (registers/stack) to hold intermediate state.
+-*   `accRgb[MAX_VOLUME_RENDER_CHANNELS]`: A stack-allocated array for RGB accumulation. `MAX_VOLUME_RENDER_CHANNELS` is a compile-time constant defining the maximum number of channels (typically 3 for RGB) [S2, unofficial].
++The method uses per-thread local storage to hold intermediate state [S2, unofficial].
++*   `accRgb[MAX_VOLUME_RENDER_CHANNELS]`: A stack-allocated array for RGB accumulation, typically unrolled via `#pragma unroll` [S2, unofficial].
+ *   `depth`: A scalar variable for depth accumulation [S2, unofficial].
+-*   `opacity`: A scalar variable for opacity accumulation [S2, unofficial].
++*   `opacity`: A scalar variable for accumulated alpha/opacity [S2, unofficial].
+ 
+ **Algorithm Steps:**
+ 1.  **Initialization:** For each ray processed by a thread, initialize `accRgb` to zero, `depth` to 0, and `opacity` to 0 [S2, unofficial].
+-2.  **Ray Marching Loop:** Iterate through the volume samples along the ray.
+-    *   Sample the volume density/opacity at the current step.
+-    *   Update the accumulated values in the per-thread registers (`accRgb`, `depth`, `opacity`) using the standard volume rendering compositing equations [S2, unofficial].
+-    *   *Note on Residual Accumulation:* To further optimize arithmetic operations and memory usage for depth, a residual accumulator $s$ can be used. Initialize $s$ on each row $i$ with $z_{i,i-1} - z_{i-1,i-1}$. Update rules are $s \leftarrow s + r_{i,j}$ and $z_j \leftarrow z_j + s$. This allows overwriting $z_{i-1,j}$ with $z_{i,j}$ in the same column, requiring only one row buffer [S1].
++2.  **Ray Marching Loop:** Iterate through the volume samples along the ray [S2, unofficial].
++    *   Sample the volume density and color at the current step [G].
++    *   Compute the step opacity `alpha = 1.0 - exp(-density * step_size)` and transmittance `T = exp(-opacity)` [G].
++    *   Compute the contribution weight `w = alpha * T` and update the registers: `accRgb[c] += w * color[c]`, `depth += w * (t - t_min)`, `opacity += alpha` [G].
++    *   *Residual Accumulation for Depth:* To save arithmetic operations, a residual accumulator $s$ can replace direct depth accumulation. Initialize $s$ on each row $i$ with $z_{i,i-1} - z_{i-1,i-1}$. Update rules are $s \leftarrow s + r_{i,j}$ and $z_j \leftarrow z_j + s$, allowing overwriting of $z_{i-1,j}$ with $z_{i,j}$ in the same column and requiring only one row buffer [S1].
+ 3.  **Final Write:** After the loop completes, write the final accumulated values from the per-thread registers to the global output tensors `outRGB`, `outDepth`, and `outOpacity` exactly once per ray [S2, unofficial].
+ 
+@@ -28,43 +29,34 @@
+ ```python
+ # Pseudocode for a single thread processing one ray
+-# Assumes standard volume rendering compositing logic is available
++MAX_VOLUME_RENDER_CHANNELS = 3  # Compile-time constant [S2, unofficial]
+ 
+-def per_ray_register_accumulation(ray_origin, ray_direction, volume_data):
++def per_ray_register_accumulation(ray_origin, ray_direction, t_min, t_max, step_size, volume_sampler):
+     # 1. Initialize per-thread registers
+-    # accRgb is a stack-allocated array of size MAX_VOLUME_RENDER_CHANNELS
+     acc_rgb = [0.0] * MAX_VOLUME_RENDER_CHANNELS
+     depth = 0.0
+     opacity = 0.0
+-    
+-    # Standard ray marching setup
+-    t_min, t_max = compute_ray_bounds(ray_origin, ray_direction, volume_data.bounding_box)
+-    step_size = compute_step_size(t_max - t_min, volume_data.resolution)
+-    num_steps = int((t_max - t_min) / step_size)
++    transmittance = 1.0
+     
+     # 2. Accumulate in registers
++    num_steps = max(1, int(round((t_max - t_min) / step_size)))
+     for i in range(num_steps):
+-        t = t_min + i * step_size
++        t = t_min + (i + 0.5) * step_size  # Mid-point sampling [G]
+         pos = ray_origin + t * ray_direction
+         
+-        # Sample volume density and color
+-        density = sample_volume(volume_data, pos)
+-        color = sample_color(volume_data, pos)
++        density, color = volume_sampler.sample(pos)
+         
+-        # Compute transmittance and contribution
+-        # alpha = 1.0 - exp(-density * step_size)
+-        # weight = alpha * exp(-opacity) # assuming opacity tracks accumulated alpha
+-        # acc_rgb += weight * color
+-        # depth += weight * t
+-        # opacity += alpha
++        # Standard direct volume rendering compositing [G]
++        alpha = 1.0 - exp(-density * step_size)
++        weight = alpha * transmittance
+         
+-        # [G] Standard direct volume rendering compositing formulas applied here
+-        alpha = 1.0 - exp(-density * step_size)
+-        weight = alpha * exp(-opacity)
+         for c in range(MAX_VOLUME_RENDER_CHANNELS):
+             acc_rgb[c] += weight * color[c]
+-        depth += weight * t
++        depth += weight * (t - t_min)  # Relative depth accumulation [G]
+         opacity += alpha
++        transmittance *= (1.0 - alpha)
+         
+-        # Early termination check could be added here if opacity > threshold
++        # Early termination guard [G]
++        if transmittance < 1e-4:
++            break
+ 
+     # 3. Write final results to global memory exactly once
+@@ -77,20 +69,20 @@
+ 
+ **Parameters:**
+-*   `MAX_VOLUME_RENDER_CHANNELS`: Compile-time constant for the number of RGB channels [S2, unofficial].
++*   `MAX_VOLUME_RENDER_CHANNELS`: Compile-time constant defining the maximum number of RGB channels supported in the accumulation register array [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Accumulating in registers may introduce floating-point precision differences compared to global memory accumulation due to the order of operations and lack of intermediate rounding to global memory [S2, unofficial].
+-*   **Early Termination:** If early termination is used, the final write must still occur, potentially with partial accumulation [S2, unofficial].
+-*   **Backward Pass:** This optimization applies to the forward pass. The backward pass may require different handling, such as storing intermediate weights for gradient computation [S2, unofficial].
++*   **Precision:** Accumulating in registers changes the order of floating-point operations compared to global memory accumulation, which may yield minor precision differences [G].
++*   **Early Termination:** If early termination is triggered, the final write must still occur, outputting the partial accumulation state [G].
++*   **Backward Pass:** This optimization applies strictly to the forward pass; the backward pass is handled separately via a Python `torch.autograd.Function` wrapper to avoid storing per-sample weights [S2, unofficial].
+ 
+ ## Operating characteristics
+ *   **Performance:** In a fire renderer at 256 spp, this optimization reduced the `volume_render` stage time from 8772.5 ms to 6171.4 ms (-29.7%) and reduced end-to-end walltime by 17.8% (saving 2.57 s) [S2, unofficial].
+ *   **Memory Traffic:** Significantly reduces global memory read-modify-write operations on `outRGB`, `outDepth`, and `outOpacity` [S2, unofficial].
+-*   **Scalability:** Performance gains are most significant when global memory bandwidth is a bottleneck [S2, unofficial].
+-*   **Strengths:** Reduced global memory traffic, lower latency per ray, simpler memory access patterns for output tensors.
+-*   **Limitations:** Limited by register pressure; if the number of channels or auxiliary variables is too large, registers may spill to local memory, negating benefits [S2, unofficial]. Requires careful management of early termination logic.
++*   **Scalability:** Performance gains are most significant when global memory bandwidth is the primary bottleneck [S2, unofficial].
++*   **Strengths:** Reduced global memory traffic, lower latency per ray, and simpler memory access patterns for output tensors [S2, unofficial].
++*   **Limitations:** Performance is bounded by hardware register limits; excessive channels or auxiliary variables may cause register spilling to local memory, negating bandwidth benefits [G].
+ 
+ ## Background
+-This optimization was introduced as part of the "Stage 1 optimization" in the `fvdb-core` project, specifically in the pull request "Optimizations for `volume_render` and move its autograd layer to Python" [S2, unofficial]. It was designed to address the performance bottleneck of the `volume_render` stage, which previously accounted for 60.7% of the total runtime [S2, unofficial]. The technique builds on the principles of register accumulation commonly used in GPU programming to minimize global memory accesses [S2, unofficial].
++This optimization was introduced alongside the migration of the autograd layer to Python in the `fvdb-core` pull request "Optimizations for `volume_render` and move its autograd layer to Python" [S2, unofficial]. It was designed to address the performance bottleneck of the `volume_render` stage, which previously accounted for 60.7% of the total runtime [S2, unofficial]. The technique builds on standard GPU programming principles that use per-thread registers to minimize global memory accesses [G].
+ 
+ ## Sources

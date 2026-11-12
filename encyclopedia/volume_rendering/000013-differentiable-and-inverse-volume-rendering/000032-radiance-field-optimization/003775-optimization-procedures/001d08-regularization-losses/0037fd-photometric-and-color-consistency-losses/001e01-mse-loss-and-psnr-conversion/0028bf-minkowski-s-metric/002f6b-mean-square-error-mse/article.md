@@ -2,34 +2,33 @@
 Also called: L2 Loss, Squared Error
 
 ## Overview
-Mean Square Error (MSE) is a specific instance of Minkowski's metric where the order parameter $\gamma=2$, used to quantify the dissimilarity between a reference image and a rendered test image by averaging the squared differences of their pixel values [S1, unofficial]. It serves as the foundational photometric loss for differentiable volume rendering optimization, prioritizing pixel-wise accuracy over perceptual similarity [S1, unofficial]. Unlike its sibling [PSNR](52-name.md), which normalizes MSE by signal power to provide a logarithmic decibel scale, MSE provides a raw, unnormalized magnitude of error [S1, unofficial].
+Mean Square Error (MSE) is a specific case of Minkowski's metric where the order parameter $\gamma=2$, used to quantify the dissimilarity between a reference image and a test image by averaging the squared differences of their corresponding samples [S1, unofficial]. It is the most commonly used mathematical distortion measure for this comparison [S1, unofficial]. The metric correlates poorly with human visual perception because it does not account for the characteristics of the human visual system [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Two images, $x$ and $y$, each containing $N$ samples (pixels or voxels). $x_i$ and $y_i$ represent the scalar or vector intensity values at index $i$.
-*   **Output:** The MSE value, representing the mean of the squared errors.
+*   **Inputs:** Two images, $x$ and $y$, each containing $N$ samples [S1, unofficial]. $x_i$ and $y_i$ represent the samples at index $i$ [S1, unofficial].
+*   **Output:** The MSE value, representing the mean of the squared errors [S1, unofficial].
 
 **Data Structures:**
-*   Images $x$ and $y$ are treated as 1D arrays of length $N$ for the purpose of the summation, regardless of their 2D spatial layout.
+*   Images $x$ and $y$ are treated as 1D arrays of length $N$ for the summation, regardless of their 2D spatial layout [G].
 
 **Formula:**
 The standard definition of MSE is the mean of the squared differences:
 $$ MSE = \frac{1}{N} \sum_{i=1}^N (x_i - y_i)^2 $$
-
-Note that [S1, unofficial] defines the Minkowski metric $E_\gamma$ with a square root, such that $E_2 = \sqrt{MSE}$. However, in the context of optimization losses, the term "MSE" typically refers to the quantity inside the square root (the mean squared error) to avoid the computational cost and gradient complexity of the square root during backpropagation. The source explicitly states: "When $\gamma$ has the value 2 we arrive at the equation for the Mean square error (MSE) if we ignore the square root" [S1, unofficial].
+The source defines the Minkowski metric as $E_\gamma = \left( \frac{1}{N} \sum_{i=1}^N |x_i - y_i|^\gamma \right)^{1/\gamma}$ [S1, unofficial]. For $\gamma=2$, $E_2 = \sqrt{MSE}$, and the source explicitly states that MSE is obtained by ignoring the square root [S1, unofficial].
 
 **Steps:**
-1.  Compute the difference for each sample: $d_i = x_i - y_i$.
-2.  Square each difference: $s_i = d_i^2$.
-3.  Sum all squared differences: $S = \sum_{i=1}^N s_i$.
-4.  Divide by the total number of samples: $MSE = S / N$.
+1.  Compute the difference for each sample: $d_i = x_i - y_i$ [G].
+2.  Square each difference: $s_i = d_i^2$ [G].
+3.  Sum all squared differences: $S = \sum_{i=1}^N s_i$ [G].
+4.  Divide by the total number of samples: $MSE = S / N$ [G].
 
 **Parameters:**
-*   $N$: The total number of samples (pixels/voxels).
+*   $N$: The total number of samples (pixels/voxels) [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Gradient Vanishing/Exploding:** Because the error is squared, large outliers dominate the loss. This can lead to unstable gradients if pixel values are not normalized (e.g., to $[0, 1]$) [S1, unofficial].
-*   **Perceptual Mismatch:** MSE correlates poorly with human visual perception because it does not account for the Human Visual System's (HVS) characteristics, such as contrast sensitivity or masking effects [S1, unofficial].
+*   **Perceptual Mismatch:** MSE correlates poorly with human visual perception because it does not account for the Human Visual System's characteristics [S1, unofficial].
+*   **Outlier Sensitivity:** Because the error is squared, large outliers dominate the loss [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -58,18 +57,18 @@ def mean_square_error(x: list[float], y: list[float]) -> float:
 ## Subtopics
 
 ### Log-Space Weighted L2 Fitting Loss
-A variant used for fitting scattering phase functions, specifically approximating Mie scattering. It operates in log-space to handle the wide dynamic range of scattering angles and applies geometric weighting. The loss is defined as $E_{\text{AS}} = \sum_{\theta} |\cos(\theta)| \sin(\theta) \cdot (\log \phi(\theta) - \log \phi_{\text{Mie}}(\theta))^2$, where $\phi(\theta)$ is the approximated phase function and $\phi_{\text{Mie}}(\theta)$ is the target [S2, unofficial]. The $\sin(\theta)$ term accounts for integration over the sphere, while $|\cos(\theta)|$ increases the influence of backward scattering directions and helps maintain an accurate mean cosine [S2, unofficial].
+A variant used for fitting scattering phase functions, specifically approximating Mie scattering [S2, unofficial]. It operates in log-space to handle the wide dynamic range of scattering angles and applies geometric weighting [S2, unofficial]. The loss is defined as $E_{\text{AS}} = \sum_{\theta} |\cos(\theta)| \sin(\theta) \cdot (\log \phi(\theta) - \log \phi_{\text{Mie}}(\theta))^2$, where $\phi(\theta)$ is the approximated phase function and $\phi_{\text{Mie}}(\theta)$ is the target [S2, unofficial]. The $\sin(\theta)$ term accounts for integration over the sphere, while $|\cos(\theta)|$ increases the influence of backward scattering directions and helps maintain an accurate mean cosine [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$, where $N$ is the number of pixels/voxels. It requires a single pass to compute differences and squares.
-*   **Memory Complexity:** $O(1)$ auxiliary space if computed incrementally, or $O(N)$ if storing intermediate difference arrays.
-*   **Strengths:** Differentiable everywhere; mathematically simple; widely supported in all deep learning frameworks; provides a smooth, convex error surface for small errors.
-*   **Limitations:** Poor correlation with human perception [S1, unofficial]; sensitive to outliers; does not account for structural information (unlike SSIM).
-*   **When to use:** When pixel-perfect accuracy is required and the signal is well-behaved (normalized); as a baseline loss in differentiable rendering.
-*   **When not to use:** When perceptual quality is prioritized over raw pixel accuracy; when images contain significant outliers or noise that should not dominate the gradient.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Not given in the sources.
+*   **Limitations:** Poor correlation with human perception [S1, unofficial].
+*   **When to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources.
 
 ## Background
-MSE is derived from the Minkowski metric family, specifically the case where $\gamma=2$ [S1, unofficial]. It is one of the most commonly used mathematical distortion measures in image processing and computer graphics [S1, unofficial]. Historically, it has been the standard for objective image quality assessment, though its limitations regarding human visual system (HVS) modeling have led to the development of alternatives like PSNR and SSIM [S1, unofficial]. In the context of volume rendering and radiance field optimization, it serves as the primary photometric consistency loss.
+MSE is derived from the Minkowski metric family, specifically the case where $\gamma=2$ [S1, unofficial]. It is one of the most commonly used mathematical distortion measures [S1, unofficial]. Other highlighted mathematical distortion measures include peak signal-to-noise ratio (PSNR), peak mean square error, and the laplacian mean square error [S1, unofficial].
 
 ## Sources
 [S1] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)

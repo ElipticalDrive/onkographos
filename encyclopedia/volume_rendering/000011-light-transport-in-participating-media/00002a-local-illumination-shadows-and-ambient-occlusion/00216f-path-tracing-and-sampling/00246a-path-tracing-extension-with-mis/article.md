@@ -3,7 +3,7 @@
 Also called: voxel path tracing
 
 ## Overview
-This method extends a path tracing kernel by marching rays through sparse voxel data, shading intersections using albedo and geometric normals, and generating new ray directions via Multiple Importance Sampling (MIS) between sun disk and cosine-weighted hemisphere sampling [S1, unofficial]. It differs from standard path tracing by decoupling the accumulation buffer from the pixel grid (via spatial hashing in its wavefront variant) and explicitly handling sparse voxel traversal for volume shading [S1, unofficial].
+This method extends a path tracing kernel by marching rays through sparse voxel data, shading intersections using albedo and geometric normals, and generating new ray directions via Multiple Importance Sampling (MIS) between sun disk and cosine-weighted hemisphere sampling [S1, unofficial]. It differs from standard path tracing by explicitly handling sparse voxel traversal for volume shading and decoupling the accumulation buffer from the pixel grid in its wavefront variant [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -37,6 +37,11 @@ This method extends a path tracing kernel by marching rays through sparse voxel 
 12. **Update Throughput:** `throughput = state.throughput_and_spatial_index.xyz`. `throughput *= albedo * n_dot_l / (VX_PI_F * max(pdf, 1e-6))`. Update state [S1, unofficial].
 13. **Output Ray:** `InterlockedAdd(output_ray_count[0], 1u, output_ray_index)`. `output_ray.origin_and_path_index = float4(offset_ray(position, normal), asfloat(path_index))`. `output_ray.direction = next_ray_dir`. Write to `output_ray_buffer[output_ray_index]` [S1, unofficial].
 
+**Formulas:**
+*   MIS PDF combination: $$ \text{pdf} = 0.5 \cdot \left( \text{pdf\_cone}(\mathbf{s} \cdot \mathbf{d}, \cos\theta_{\max}) + \text{pdf\_cosine\_weighted\_hemisphere}(n \cdot l) \right) $$
+*   Throughput update: $$ \mathbf{T}_{\text{new}} = \mathbf{T}_{\text{old}} \cdot \frac{\text{albedo} \cdot (n \cdot l)}{\pi \cdot \max(\text{pdf}, 10^{-6})} $$
+*   Solar radius parameter: $$ \text{VX\_SKY\_SOLAR\_RADIUS\_RAD} = 1.5 \times 0.0044506 $$
+
 **Parameters:**
 *   `VX_PI_F`: The value of Pi used in PDF calculation. Exact value not given, but used as divisor [S1, unofficial].
 *   `VX_SKY_SOLAR_RADIUS_RAD`: Solar radius in radians. Defined as `1.5f * 0.0044506f` [S1, unofficial].
@@ -44,6 +49,7 @@ This method extends a path tracing kernel by marching rays through sparse voxel 
 **Edge Cases and Pitfalls:**
 *   **Zero PDF:** The PDF calculation includes a `max(pdf, 1e-6)` guard to prevent division by zero [S1, unofficial].
 *   **Miss Handling:** If the ray misses all voxels, sky radiance is added directly to the path state [S1, unofficial].
+*   **Division by Zero:** The intersection distance calculation divides by `dot(ray_dir, axis_mask)`, which requires a guard for zero [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -52,33 +58,44 @@ This method extends a path tracing kernel by marching rays through sparse voxel 
 import math
 
 def path_tracer_extend(thread_id, input_ray_count, input_ray_buffer, output_ray_buffer, output_ray_count, state_buffer, voxels, palette_rgba, uniforms, sample_ordinals):
+    # 1. Dispatch Check
     if thread_id >= input_ray_count[0]:
         return
 
+    # 2. Load Ray
     ray = input_ray_buffer[thread_id]
     ray_origin = ray.origin_and_path_index[:3]
     ray_dir = ray.direction
     path_index = int(ray.origin_and_path_index[3])
 
+    # 3. March Ray
+    # [G] sparse_ray_march: traces ray through sparse voxel grid; returns packed cell index or None on miss
     packed_cell = sparse_ray_march(ray_origin, ray_dir)
 
+    # 4. Handle Miss
     if packed_cell is None:
         state = state_buffer[thread_id]
-        state.radiance += state.throughput * sky_radiance(ray_dir, uniforms.transmitted_sun_color)
+        state.radiance = [state.radiance[i] + state.throughput[i] * sky_radiance(ray_dir, uniforms.transmitted_sun_color)[i] for i in range(3)]
         state_buffer[thread_id] = state
         return
 
+    # 5. Unpack Intersection
     cell = unpack_voxel_cell(packed_cell)
     axis_index = packed_cell >> 30
     axis_mask = [1.0 if axis_index == i else 0.0 for i in range(3)]
     normal = [-math.copysign(1.0, ray_dir[i]) * axis_mask[i] for i in range(3)]
 
+    # 6. Compute Intersection Position
     entry_plane = [cell[i] + (1.0 if ray_dir[i] < 0.0 else 0.0) for i in range(3)]
-    distance = sum((entry_plane[i] - ray_origin[i]) * axis_mask[i] for i in range(3)) / sum(ray_dir[i] * axis_mask[i] for i in range(3))
+    dot_mask_dir = sum(ray_dir[i] * axis_mask[i] for i in range(3))
+    distance = sum((entry_plane[i] - ray_origin[i]) * axis_mask[i] for i in range(3)) / dot_mask_dir if dot_mask_dir != 0.0 else 0.0
     position = [ray_origin[i] + distance * ray_dir[i] for i in range(3)]
 
-    albedo = unpack_albedo(palette_rgba[voxels[(cell[0], cell[1], cell[2], 0)]])
+    # 7. Fetch Albedo
+    voxel_idx = voxels[(cell[0], cell[1], cell[2], 0)]
+    albedo = unpack_albedo(palette_rgba[voxel_idx])
 
+    # 8. Sample Direction
     sample_index = sample_ordinals[path_index] - 1
     samples = halton_sample_3d(sample_index, uniforms.bounce, path_index)
     u = samples[:2]
@@ -91,24 +108,44 @@ def path_tracer_extend(thread_id, input_ray_count, input_ray_buffer, output_ray_
         local_dir = sample_cosine_weighted_hemisphere(u)
         next_ray_dir = orient_axis_aligned_sample_direction(local_dir, normal)
 
+    # 10. Compute Shading
     n_dot_l = max(sum(normal[i] * next_ray_dir[i] for i in range(3)), 0.0)
     if n_dot_l == 0.0:
         return
 
-    pdf = 0.5 * (pdf_cone(sum(uniforms.sun_direction[i] * next_ray_dir[i] for i in range(3)), uniforms.cos_theta_max) + pdf_cosine_weighted_hemisphere(n_dot_l))
+    # 11. Compute PDF
+    sun_dot_dir = sum(uniforms.sun_direction[i] * next_ray_dir[i] for i in range(3))
+    pdf = 0.5 * (pdf_cone(sun_dot_dir, uniforms.cos_theta_max) + pdf_cosine_weighted_hemisphere(n_dot_l))
 
+    # 12. Update Throughput
     state = state_buffer[thread_id]
     throughput = state.throughput
-    throughput *= albedo * n_dot_l / (math.pi * max(pdf, 1e-6))
+    throughput = [throughput[i] * albedo * n_dot_l / (uniforms.VX_PI_F * max(pdf, 1e-6)) for i in range(3)]
     state.throughput = throughput
     state_buffer[thread_id] = state
 
+    # 13. Output Ray
     output_ray_index = output_ray_count[0]
     output_ray_count[0] += 1
     output_ray = PathTracerRay()
-    output_ray.origin_and_path_index = offset_ray(position, normal) + [float(path_index)]
+    offset_pos = offset_ray(position, normal)
+    output_ray.origin_and_path_index = offset_pos + [float(path_index)]
     output_ray.direction = next_ray_dir
     output_ray_buffer[output_ray_index] = output_ray
+
+# Helper stubs for undefined steps [G]
+def sparse_ray_march(origin, direction): pass
+def unpack_voxel_cell(packed): pass
+def unpack_albedo(packed_rgba): return [0.0, 0.0, 0.0]
+def halton_sample_3d(idx, bounce, path): return [0.0, 0.0, 0.0]
+def sample_cone(u, cos_theta_max): return [0.0, 0.0, 0.0]
+def sample_cosine_weighted_hemisphere(u): return [0.0, 0.0, 0.0]
+def orient_sample_direction(local_dir, sun_dir): return [0.0, 0.0, 0.0]
+def orient_axis_aligned_sample_direction(local_dir, normal): return [0.0, 0.0, 0.0]
+def sky_radiance(ray_dir, sun_color): return [0.0, 0.0, 0.0]
+def pdf_cone(dot_val, cos_theta_max): return 0.0
+def pdf_cosine_weighted_hemisphere(n_dot_l): return 0.0
+def offset_ray(position, normal): return [position[i] + normal[i] * 1e-4 for i in range(3)]
 ```
 
 ## Subtopics
@@ -117,9 +154,9 @@ def path_tracer_extend(thread_id, input_ray_count, input_ray_buffer, output_ray_
 A path tracing method that uses spatial hashing to accumulate radiance, allowing for denoising via spatial filtering. It differs from standard path tracing by decoupling the accumulation buffer from the pixel grid, enabling spatial averaging of radiance estimates before final display.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+*   **Measured Performance:** Not given in the sources [S1, unofficial].
 *   **Strengths:** Efficiently handles sparse voxel data and uses MIS between sun disk and cosine-weighted hemisphere sampling to reduce variance in lighting estimates [S1, unofficial].
 *   **Limitations:** Requires a sparse voxel data structure and a palette-based albedo lookup [S1, unofficial].
 *   **When to use:** Rendering scenes with sparse voxel data where efficient lighting estimation is needed [S1, unofficial].

@@ -1,0 +1,127 @@
+# JIT Compilation Pipeline
+
+Also called: Dr.Jit Compilation Pipeline, Dr.Jit IR generation, Dr.Jit JIT compilation, Dr.Jit Tracing and Compilation Pipeline
+
+## Overview
+The JIT Compilation Pipeline is a computational substrate that captures Python or C++ execution into an Intermediate Representation (IR) for later compilation into machine code, supporting asynchronous execution on CPU or GPU [S1]. It is a hybrid system that ingests computation via tracing but generates kernels that preserve the control flow (loops, subroutines) of the original program, resembling source transformation output [S1]. Unlike ML frameworks (PyTorch, TensorFlow, JAX) that rely on rich IR and tensorial optimizations, Dr.Jit avoids them because the large amount of arithmetic in Path-Based Differentiable Rendering (PBDR) workloads makes such optimizations costly for rendering [S1].
+
+## How it works
+The pipeline consists of five main phases: Tracing, Kernel Assembly, Backend Compilation, and Kernel Execution [S1].
+
+**Inputs and Outputs:**
+*   **Input:** Python or C++ code using custom arithmetic types (e.g., `Float`, `UInt32`).
+*   **Output:** Executable machine code (via OptiX for GPU or LLVM for CPU) and asynchronous execution results [S1].
+
+**Data Structures:**
+*   **Types:** `Float` and `UInt32` represent dynamically sized 1D arrays, not scalar variables. They act as scalar variable declarations within a loop `for index in range(..)` where `index` refers to the Monte Carlo sample [S1].
+*   **Graph:** Operations are recorded into a graph data structure during tracing [S1].
+*   **Loop State:** Variables modified in the loop body and accessed in subsequent iterations or after termination are specified via a lambda function [S1].
+
+**Numbered Steps:**
+
+1.  **Tracing:** The system executes the program using custom arithmetic types that record operations into a graph data structure [S1].
+    *   **Local Optimizations:** During tracing, the system performs local value numbering (reusing equivalent variables based on operation type and input dependencies), constant folding/propagation, and basic algebraic simplifications (e.g., $fma(a, b, 0) = a \cdot b$; $a \cdot 1 = a$) [S1].
+    *   **Loop Handling:** Standard Python `for` loops unroll the loop body, producing unnecessarily large traces. Dr.Jit uses a `Loop` object to preserve loop structure [S1]. The loop runs for one iteration to capture the effect of an individual iteration, wiring it into the generated kernel [S1]. The implementation invokes a lambda function before and after the loop to catch redefinitions of Python state variables [S1].
+    *   **Dynamic Dispatch (vcall):** For polymorphic methods, Dr.Jit traces all reachable method implementations (scene objects register themselves). The operation acts as a demultiplexer-multiplexer. During kernel assembly, it produces IR performing an indirect branch to one of multiple subroutines [S1].
+
+2.  **Kernel Assembly:** This phase removes redundancies at a global level and produces a program in the desired intermediate representation (LLVM IR or PTX) [S1].
+    *   **Global Optimizations:** Includes dead code elimination, devirtualization (moving identical computations out of calls), and deduplication (identical sub-traces produce a single function definition) [S1].
+    *   **Loop Optimization:** Optimizes the loop structure captured in Phase 1 [S1].
+    *   **Vcall Optimization:** Optimizes the dynamic dispatch structure [S1].
+
+3.  **Backend Compilation:** Converts the generated IR into executable machine code via OptiX (GPU) or LLVM (CPU) [S1].
+    *   **Caching:** Backend compilation is relatively costly. Dr.Jit consults an in-memory and on-disk kernel cache to see if the computation was previously encountered [S1]. In typical PBDR usage, this step is only necessary during the first gradient descent step [S1].
+
+4.  **Kernel Execution:** Launches the kernel for asynchronous execution on the CPU (via a thread pool) or the GPU (via CUDA/OptiX) [S1]. Tracing and kernel execution can continue in parallel [S1].
+
+5.  **Evaluation (Implicit):** Accessing array contents (e.g., `print`) triggers evaluation via `dr.eval(..)`, which compiles and launches a fused kernel to commit requested variables to device memory. Subsequent references use the stored version, allowing unused trace parts to expire [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# 1. Define Types (Dynamic 1D Arrays)
+from drjit.cuda import Float, UInt32, Loop, PCG32
+
+# 2. Tracing Phase
+# Custom arithmetic types record operations into a graph
+x = Float(...) 
+y = Float(...)
+
+# Local optimizations happen here:
+# - Local value numbering reuses equivalent variables
+# - Constant folding: fma(a, b, 0) -> a*b
+# - Algebraic simplifications: a*1 -> a
+
+# Loop Handling
+# State variables specified via lambda
+rng = PCG32(size=1024 * 1024)
+i, result = UInt32(0), Float(0)
+
+# Loop object preserves structure instead of unrolling
+loop = Loop(state=lambda: (rng, i, result))
+
+# Loop runs for one iteration to capture effects
+while loop(si.is_valid() & (i < 128)):
+    # ... loop body ...
+    i += 1
+
+# Dynamic Dispatch (vcall)
+# Traces all reachable method implementations
+# Produces IR with indirect branch to subroutines
+si = scene.ray_intersect(ray)
+
+# 3. Kernel Assembly Phase
+# Global optimizations:
+# - Dead code elimination
+# - Devirtualization
+# - Deduplication of identical sub-traces
+# Produces LLVM IR or PTX
+
+# 4. Backend Compilation Phase
+# Compiles IR to machine code (OptiX/LLVM)
+# Checks in-memory and on-disk kernel cache first
+# Costly step; typically only needed on first gradient step
+
+# 5. Kernel Execution Phase
+# Asynchronous execution on CPU (thread pool) or GPU (CUDA/OptiX)
+
+# 6. Evaluation (Triggered by access)
+# dr.eval(...) compiles and launches fused kernel
+# Commits variables to device memory
+# Unused trace parts expire
+print(x)
+```
+
+**Parameters:**
+*   **Tracing/Assembly Time:** Highly optimized, taking on the order of 1-15ms in typical cases [S1].
+*   **Backend Compilation Frequency:** Typically only necessary during the first gradient descent step in typical PBDR usage [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Loop Unrolling:** Standard Python `for` loops unroll the loop body, producing unnecessarily large traces. Dr.Jit uses a `Loop` object to preserve loop structure [S1].
+*   **Backend Compilation Cost:** Backend compilation time in OptiX and LLVM grows superlinearly with kernel size. Preserving control flow (loops/polymorphism) avoids creating an immensely large unrolled program that breaks the backend [S1].
+*   **Dynamic Dispatch Boundary:** Dynamic dispatch presents an opaque boundary that breaks interprocedural optimizations in LLVM/OptiX. Dr.Jit handles this by tracing all reachable implementations and preserving the indirection in the generated program [S1].
+
+## Subtopics
+
+### [Dr.Jit Optimizations](11680-dr-jit-optimizations.md)
+A set of global optimizations performed by Dr.Jit during tracing to improve code generation, specifically addressing the opaque boundary of dynamic dispatch that breaks interprocedural optimizations in LLVM/OptiX.
+
+### [Dr.Jit Tracing and Compilation](11682-dr-jit-tracing-and-compilation.md)
+
+## Operating characteristics
+*   **Time Complexity:** Tracing and kernel assembly are highly optimized, taking on the order of 1-15ms in typical cases [S1]. Backend compilation time grows superlinearly with kernel size [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** In typical PBDR usage, backend compilation is only necessary during the first gradient descent step [S1].
+*   **Scaling:** Backend compilation time in OptiX and LLVM tends to grow superlinearly with kernel size [S1].
+*   **Strengths:** Preserves control flow (loops, subroutines) resembling source transformation output; supports asynchronous execution; handles dynamic dispatch via indirect branches; caches compiled kernels to avoid redundant compilation [S1].
+*   **Limitations:** Backend compilation is relatively costly; rich ML-centric IR and tensorial optimizations are costly for rendering workloads due to the large amount of arithmetic [S1].
+*   **When to use:** Path-Based Differentiable Rendering (PBDR) workloads where preserving control flow and avoiding expensive tensorial optimizations is beneficial [S1].
+*   **When not to use:** Workloads that would benefit from rich ML-centric IR and tensorial optimizations, as these are costly for rendering [S1].
+
+## Background
+Dr.Jit is a just-in-time compiler for differentiable rendering [S1]. It was introduced in the paper "DR.JIT: A Just-In-Time Compiler for Differentiable Rendering" [S1]. The system is designed to handle the specific computational patterns of differentiable rendering, combining tracing with dynamic compilation to produce efficient kernels [S1].
+
+## Sources
+[S1] DR.JIT, https://doi.org/10.1145/3528223.3530099, fetched 2026-10-26
