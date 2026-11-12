@@ -1,0 +1,131 @@
+# Gear Assignment Update
+
+Also called: Adaptive Gear Assignment, Gear Level Update
+
+## Overview
+The Gear Assignment Update is an alternating optimization step in adaptive spatio-temporal sampling that identifies regions with high rendering error and increments their "gear" level to increase sampling density [S1]. It distinguishes itself from static LOD methods by using semantic segmentation (via SAM) to guide the upshift mask, ensuring that geometrically complex or highly dynamic regions are prioritized for higher resolution [S1].
+
+## How it works
+**Inputs:**
+- Current radiance field parameters $\Theta$ (including embedding functions $h'_i, k'_i$).
+- Current gear assignment $g(x, t)$, initialized to 1 for all $(x, t)$ [S1].
+- Ground truth RGB images and SAM encoder features $S(r)$ for sampled viewpoints and time steps [S1].
+- Hyperparameters: $\lambda = 0.01$ (SAM loss weight), $k=3$ (top patches), $\alpha = 0.02$ (learning rate) [S1].
+
+**Outputs:**
+- Updated radiance field parameters $\Theta$.
+- Updated gear assignment $g(x, t)$, where specific regions have incremented gear levels [S1].
+
+**Data Structures:**
+- **Rendering Loss Map $L(r)$**: A 2D map per viewpoint/time step, where each pixel value is $L(r) = L_{\text{pho}}(r) + \lambda L_{\text{SAM}}(r)$ [S1].
+- **Upshift Mask $\hat{S}(r)$**: A binary mask indicating regions to upshift, derived from SAM decoder [S1].
+- **Point Sets**:
+  - $S_{\text{upshift}} = \{(x_i, t_i)\}_{i=1}^{N_{\text{upshift}}}$: Points sampled along rays passing through masked regions [S1].
+  - $S_{\text{stay}} = \{(x_i, t_i)\}_{i=1}^{N_{\text{stay}}}$: Points sampled along rays passing through unmasked regions [S1].
+
+**Steps:**
+1. **Sample and Render**: Sample a set of viewpoints and time steps. Render 2D RGB images and SAM features for each [S1].
+2. **Compute Loss Map**: For each rendered map $r$, compute the pixel-wise loss:
+   $$ L(r) := L_{\text{pho}}(r) + \lambda L_{\text{SAM}}(r) $$
+   where $L_{\text{pho}}$ is photometric loss and $L_{\text{SAM}}$ is the mean squared error between predicted and ground truth SAM features [S1].
+3. **Patchify and Select Prompts**: Divide the loss map into patches. Identify the $k$ patches with the largest average loss (positive prompts) and $k$ patches with the smallest average loss (negative prompts) [S1].
+4. **Generate Upshift Mask**: Feed the ground truth RGB image and the positive/negative prompt coordinates into the SAM decoder to estimate an upshift mask $\hat{S}(r)$ [S1].
+5. **Sample Points**:
+   - For each pixel in $\hat{S}(r)$, trace a ray from camera center $o$ in direction $d$. Sample points along these rays to form $S_{\text{upshift}}$ [S1].
+   - Sample points from unmasked regions to form $S_{\text{stay}}$ [S1].
+6. **Compute Upshift Loss**: Calculate the objective function:
+   $$ L_{\text{upshift}} = \frac{1}{N_{\text{upshift}}} \sum_{(x,t) \in S_{\text{upshift}}} \| g(x, t; \Theta) - (p(x, t) + 1) \|^2_2 + \frac{\lambda_{\text{stay}}}{N_{\text{stay}}} \sum_{(x,t) \in S_{\text{stay}}} \| g(x, t; \Theta) - p(x, t) \|^2_2 $$
+   where $p(x, t)$ is the current gear value, and the first term pushes masked points to increment gear, while the second term encourages unmasked points to stay [S1].
+7. **Update Parameters**: Perform one step of gradient descent:
+   $$ \Theta \leftarrow \Theta - \alpha \nabla_\Theta L_{\text{upshift}} $$
+   This updates the embedding functions $h'_i, k'_i$ which define the gear assignment [S1].
+8. **Reassign Gears**: After updating $\Theta$, re-evaluate $g(x, t)$ to increment gear levels for regions identified in $S_{\text{upshift}}$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gear_assignment_update(radiance_field, gt_images, gt_sam_features, lambda_sam=0.01, k=3, alpha=0.02):
+    # 1. Sample viewpoints and time steps
+    samples = sample_viewpoints_and_times()
+    
+    # 2. Render and compute loss maps
+    loss_maps = []
+    for r in samples:
+        rendered_rgb, rendered_sam = radiance_field.render(r)
+        l_pho = photometric_loss(rendered_rgb, gt_images[r])
+        l_sam = mse_loss(rendered_sam, gt_sam_features[r])
+        loss_map = l_pho + lambda_sam * l_sam
+        loss_maps.append((r, loss_map))
+        
+    # 3. Patchify and select prompts
+    upshift_masks = []
+    for r, loss_map in loss_maps:
+        patches = patchify(loss_map)
+        top_k_patches = get_top_k_patches(patches, k=k, metric='max')
+        bottom_k_patches = get_top_k_patches(patches, k=k, metric='min')
+        
+        positive_prompts = [center(patch) for patch in top_k_patches]
+        negative_prompts = [center(patch) for patch in bottom_k_patches]
+        
+        # 4. Generate upshift mask using SAM
+        mask = sam_decoder(gt_images[r], positive_prompts, negative_prompts)
+        upshift_masks.append((r, mask))
+        
+    # 5. Sample points
+    s_upshift = []
+    s_stay = []
+    for r, mask in upshift_masks:
+        for pixel in mask.nonzero():
+            ray = trace_ray(camera_center, pixel)
+            points = sample_along_ray(ray)
+            s_upshift.extend(points)
+            
+        for pixel in mask.zero():
+            ray = trace_ray(camera_center, pixel)
+            points = sample_along_ray(ray)
+            s_stay.extend(points)
+            
+    # 6. Compute upshift loss
+    # Note: g(x,t; Theta) returns current gear value based on embeddings
+    loss_upshift = 0.0
+    for x, t in s_upshift:
+        current_gear = radiance_field.get_gear(x, t)
+        target_gear = current_gear + 1
+        loss_upshift += mse(current_gear, target_gear)
+    loss_upshift /= len(s_upshift)
+    
+    for x, t in s_stay:
+        current_gear = radiance_field.get_gear(x, t)
+        target_gear = current_gear
+        loss_upshift += lambda_stay * mse(current_gear, target_gear)
+    loss_upshift /= len(s_stay)
+    
+    # 7. Update parameters
+    gradients = compute_gradients(loss_upshift, radiance_field.parameters)
+    radiance_field.parameters -= alpha * gradients
+    
+    # 8. Reassign gears
+    radiance_field.reassign_gears()
+    
+    return radiance_field
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision**: The gear assignment is derived from continuous embedding functions, so small changes in $\Theta$ can lead to discrete jumps in gear levels [S1].
+- **Boundaries**: The SAM decoder may produce noisy masks if prompts are ambiguous, leading to incorrect upshift regions [S1].
+- **Degenerate Input**: If no patches have significant loss, the upshift mask may be empty, resulting in no update [S1].
+
+## Operating characteristics
+- **Time Complexity**: Dominated by SAM inference and gradient descent step. Training time is approximately 2.5 hours per 100-frame chunk on a GPU with 24 GB RAM [S1].
+- **Memory Complexity**: Depends on the number of sampled points and the size of the SAM features (M=32 dimensions) [S1].
+- **Strengths**: Effectively handles dynamic scenes by focusing sampling resources on regions with high motion or error [S1].
+- **Limitations**: Requires ground truth SAM features for supervision, which may not be available in all scenarios [S1].
+- **When to Use**: Suitable for free-viewpoint rendering and tracking where dynamic content is present [S1].
+- **When Not to Use**: Not suitable for static scenes where gear assignment would not provide significant benefits [S1].
+
+## Background
+The Gear Assignment Update was introduced in "Gear-NeRF: Free-Viewpoint Rendering and Tracking with Motion-aware Spatio-Temporal Sampling" [S1]. It builds on the concept of adaptive resolution data management by incorporating semantic information to guide the adaptation process [S1].
+
+## Sources
+[S1] Gear-NeRF: Free-Viewpoint Rendering and Tracking with Motion-aware Spatio-Temporal Sampling, https://arxiv.org/abs/2406.03723v1, fetched 2026-10-26

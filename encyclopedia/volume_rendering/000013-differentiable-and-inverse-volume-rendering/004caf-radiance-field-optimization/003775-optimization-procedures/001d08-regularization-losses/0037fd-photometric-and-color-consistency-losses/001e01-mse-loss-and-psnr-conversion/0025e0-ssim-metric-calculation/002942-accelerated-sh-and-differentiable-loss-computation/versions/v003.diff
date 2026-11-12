@@ -1,0 +1,92 @@
+--- v002.md
++++ v003.md
+@@ -20,5 +20,5 @@
+ 
+ 1.  **SH Update Schedule**:
+-    -   The 0th SH band (base color) is updated every iteration using the Adam optimizer.
++    -   The 0th SH band (base color) is updated every iteration using the Adam optimizer [S1].
+     -   All higher SH bands (1st through 5th) are updated using a batched schedule: Adam optimization steps are performed only once every 16 iterations [S1].
+     -   The learning rate for the batched SH updates is increased fourfold to $0.001$ [S1].
+@@ -26,5 +26,5 @@
+ 
+ 2.  **Differentiable SSIM Loss Computation**:
+-    -   **Separable Convolution**: The 11×11 Gaussian kernel used for SSIM is separable. The 2D convolution is performed via two consecutive 1D convolutions using optimized CUDA kernels [S1].
++    -   **Separable Convolution**: The 11×11 Gaussian kernel used for SSIM is separable [S1]. The 2D convolution is performed via two consecutive 1D convolutions using optimized CUDA kernels [S1].
+     -   **Fused Kernel**: A fused CUDA kernel evaluates the SSIM metric from the convolved results, reducing memory traffic and launch overhead [S1].
+     -   **3D Extension (Variant)**: For 3D SSIM loss, a fused CUDA kernel processes the depth dimension using a ring buffer, with each thread operating on a single Z-axis row to avoid excessive shared memory usage [S2].
+@@ -33,6 +33,6 @@
+ 
+ ```python
+-def conv1d_1d(input_tensor, axis=0):
+-    # 1D convolution with 11-tap Gaussian kernel along specified axis
++def conv1d(input_tensor, axis=0):
++    # 1D convolution with 11-tap Gaussian kernel along specified axis [G]
+     kernel = [0.001, 0.005, 0.025, 0.085, 0.200, 0.300, 0.200, 0.085, 0.025, 0.005, 0.001]
+     output = zeros_like(input_tensor)
+@@ -41,8 +41,10 @@
+             idx = i + j
+             if 0 <= idx < input_tensor.shape[axis]:
+-                output[..., i, ...] += input_tensor[..., idx, ...] * kernel[j+5]
++                # Accumulate weighted sum
++                output = output + (input_tensor[..., idx, ...] * kernel[j+5])
+     return output
+ 
+ def compute_ssim_metric(mean_x, mean_y, var_x, var_y, cov_xy):
++    # Standard SSIM constants [G]
+     C1, C2 = 0.01**2, 0.03**2
+     numerator = (2 * mean_x * mean_y + C1) * (2 * cov_xy + C2)
+@@ -53,16 +55,16 @@
+     # 1. Accelerated SSIM Loss via Separable Convolutions
+     # Apply 1D convolution along rows, then columns
+-    local_means_rendered = conv1d_1d(rendered_image, axis=0)
+-    local_means_rendered = conv1d_1d(local_means_rendered, axis=1)
+-    local_means_gt = conv1d_1d(gt_image, axis=0)
+-    local_means_gt = conv1d_1d(local_means_gt, axis=1)
++    local_means_rendered = conv1d(rendered_image, axis=0)
++    local_means_rendered = conv1d(local_means_rendered, axis=1)
++    local_means_gt = conv1d(gt_image, axis=0)
++    local_means_gt = conv1d(local_means_gt, axis=1)
+ 
+     # Compute local statistics (variances and covariance)
+-    local_vars_rendered = conv1d_1d(rendered_image**2, axis=0)
+-    local_vars_rendered = conv1d_1d(local_vars_rendered, axis=1) - local_means_rendered**2
+-    local_vars_gt = conv1d_1d(gt_image**2, axis=0)
+-    local_vars_gt = conv1d_1d(local_vars_gt, axis=1) - local_means_gt**2
+-    local_cov = conv1d_1d(rendered_image * gt_image, axis=0)
+-    local_cov = conv1d_1d(local_cov, axis=1) - local_means_rendered * local_means_gt
++    local_vars_rendered = conv1d(rendered_image**2, axis=0)
++    local_vars_rendered = conv1d(local_vars_rendered, axis=1) - local_means_rendered**2
++    local_vars_gt = conv1d(gt_image**2, axis=0)
++    local_vars_gt = conv1d(local_vars_gt, axis=1) - local_means_gt**2
++    local_cov = conv1d(rendered_image * gt_image, axis=0)
++    local_cov = conv1d(local_cov, axis=1) - local_means_rendered * local_means_gt
+ 
+     # Fused kernel evaluation of SSIM metric
+@@ -79,10 +81,10 @@
+     # 3. Optimizer Step
+     # Base color (0th SH band) and Opacity: Update every iteration
+-    optimizer_state['base_color'].step(gradients['base_color'], lr=0.00025)
+-    optimizer_state['opacity'].step(gradients['opacity'], lr=0.025)
++    optimizer_state['base_color'].step(gradients['base_color'])
++    optimizer_state['opacity'].step(gradients['opacity'])
+ 
+     # Higher SH bands: Update every 16th iteration
+     if iteration % 16 == 0:
+-        optimizer_state['higher_sh'].step(gradients['higher_sh'], lr=0.001)
++        optimizer_state['higher_sh'].step(gradients['higher_sh'])
+     # Else: skip update for higher SH bands
+ 
+@@ -102,5 +104,5 @@
+ 
+ ### Fused Loss Kernels
+-Replaces standard 2D/3D SSIM and Total Variation (TV) loss calculations with custom fused CUDA kernels. For 2D SSIM, it uses the `fused-ssim` implementation, achieving 5–8× acceleration [S2]. For 3D SSIM, it processes the depth dimension with a ring buffer to avoid excessive shared memory, achieving 11× acceleration [S2]. It also implements a custom fused kernel for 3D TV loss, achieving 3× acceleration for a $32^3$ volume [S2].
++Replaces standard 2D/3D SSIM and Total Variation (TV) loss calculations with custom fused CUDA kernels [S2]. For 2D SSIM, it uses the `fused-ssim` implementation, achieving 5–8× acceleration [S2]. For 3D SSIM, it processes the depth dimension with a ring buffer to avoid excessive shared memory, achieving 11× acceleration [S2]. It also implements a custom fused kernel for 3D TV loss, achieving 3× acceleration for a $32^3$ volume [S2].
+ 
+ ## Operating characteristics
+@@ -111,5 +113,5 @@
+ -   **Limitations**: Requires custom CUDA kernels [S1].
+ -   **When to Use**: When training time is a bottleneck, particularly for high-quality radiance fields with limited resources [S1].
+--   **When Not to Use**: Not given in the sources.
++-   **When Not to Use**: Not given in the sources [S1, S2].
+ 
+ ## Background

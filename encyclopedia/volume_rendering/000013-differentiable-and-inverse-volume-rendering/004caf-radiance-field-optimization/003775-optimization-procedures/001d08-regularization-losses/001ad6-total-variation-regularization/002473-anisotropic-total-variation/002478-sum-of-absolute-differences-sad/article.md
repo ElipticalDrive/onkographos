@@ -1,0 +1,97 @@
+# Sum of Absolute Differences (SAD)
+
+Also called: SAD Prior, Sum of Absolute Differences (SAD) Prior
+
+## Overview
+Sum of Absolute Differences (SAD) is a regularization prior used in tomographic reconstruction that extends Anisotropic Total Variation (ATV) by considering a larger local neighborhood [S1, S2, unofficial]. While ATV sums absolute differences along only the three principal axes, SAD sums the absolute differences between a voxel and all voxels in its immediate 3x3 spatial neighborhood (excluding the voxel itself), thereby enforcing smoothness across more edges per voxel [S1, S2, unofficial]. It has been shown to produce excellent results in stochastic tomography reconstruction [S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D voxel grid $\mathbf{x}$ of size $I \times J \times K$, where each element $x_{i,j,k}$ represents the scalar value (e.g., density or radiance) at voxel coordinates $(i,j,k)$ [S1, S2, unofficial].
+*   **Output:** The scalar energy value $h(\mathbf{x})$ representing the regularization cost, or the proximal operator applied to $\mathbf{x}$ to produce a regularized version $\mathbf{x}'$ [S1, S2, unofficial].
+
+**Data Structures**
+*   The voxel grid is stored as a dense 3D array [G].
+*   The neighborhood $N(x_{i,j,k})$ is defined implicitly by coordinate offsets relative to $(i,j,k)$ [S1, unofficial].
+*   No explicit adjacency matrix $D$ is stored; operations are computed on-the-fly [S1, unofficial].
+
+**Numbered Steps**
+1. Initialize the energy accumulator to zero.
+2. Iterate over every voxel $(i,j,k)$ in the grid bounds $[0, I-1] \times [0, J-1] \times [0, K-1]$.
+3. For each voxel, identify the 8 neighbors in its 3x3 neighborhood $N(x_{i,j,k})$ by applying offsets $\delta_i, \delta_j \in \{-1, 0, 1\}$ where $(\delta_i, \delta_j) \neq (0,0)$, while keeping the $k$-index fixed.
+4. For each valid neighbor $(i+\delta_i, j+\delta_j, k)$ within grid boundaries, compute the absolute difference $|x_{i+\delta_i, j+\delta_j, k} - x_{i,j,k}|$.
+5. Accumulate the absolute differences into the energy value.
+6. Return the final energy value $h(\mathbf{x})$ [G].
+
+**Formula**
+The SAD energy function is defined as [S1, S2, unofficial]:
+
+$$
+h(\mathbf{x}) = \sum_{i=0}^{I-1} \sum_{j=0}^{J-1} \sum_{k=0}^{K-1} \sum_{(i',j') \in N(i,j)} |x_{i',j',k} - x_{i,j,k}|
+$$
+
+Where:
+*   $x_{i,j,k}$ is the value of the central voxel at coordinates $(i,j,k)$ [S1, S2, unofficial].
+*   $N(i,j)$ denotes the set of 8 coordinate pairs $\{(i+\delta_i, j+\delta_j) \mid \delta_i, \delta_j \in \{-1, 0, 1\}, (\delta_i, \delta_j) \neq (0,0)\}$ [S1, S2, unofficial].
+*   The summation iterates over the 3x3 neighborhood in the $xy$-plane at a fixed $z$-slice, excluding the center voxel itself [S1, S2, unofficial].
+
+**Parameters**
+*   None. The neighborhood size and structure are fixed by the definition [S1, S2, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Boundaries:** Voxels on the volume boundaries have fewer than 8 neighbors. The algorithm must clamp neighbor coordinates to the valid grid range $[0, I-1] \times [0, J-1] \times [0, K-1]$ before accessing memory [G].
+*   **Precision:** Summing absolute differences across a large volume can accumulate floating-point error. Using double-precision accumulators prevents overflow and maintains numerical stability for large grids [G].
+*   **Degenerate Input:** If the grid dimensions are smaller than $3 \times 3 \times 1$, the neighborhood definition still applies but yields fewer terms per voxel; the algorithm remains valid without modification [G].
+
+**Pseudocode**
+The following computes the SAD energy $h(\mathbf{x})$ for a 3D grid $\mathbf{x}$ of dimensions $I \times J \times K$.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_sad_energy(x, I, J, K):
+    """
+    Computes the Sum of Absolute Differences (SAD) regularization energy.
+    
+    Args:
+        x: 3D numpy array of shape (I, J, K) containing voxel values.
+        I: Width of the volume.
+        J: Height of the volume.
+        K: Depth of the volume.
+        
+    Returns:
+        float: The SAD energy value.
+    """
+    energy = 0.0
+    for i in range(I):
+        for j in range(J):
+            for k in range(K):
+                current_val = x[i, j, k]
+                for di in (-1, 0, 1):
+                    for dj in (-1, 0, 1):
+                        if di == 0 and dj == 0:
+                            continue
+                        ni, nj = i + di, j + dj
+                        if 0 <= ni < I and 0 <= nj < J:
+                            energy += abs(x[ni, nj, k] - current_val)
+    return energy
+```
+
+*Note: The proximal operator for SAD is not explicitly derived in the sources, but is stated to be similar to the ATV proximal operator [S1, S2, unofficial]. Implementers should apply the standard $l_1$ proximal projection onto the extended neighborhood graph, which couples the 8 neighbors per voxel [G].*
+
+## Operating characteristics
+*   **Time Complexity:** Computing the energy is $O(I \cdot J \cdot K)$, as each voxel processes a constant number (8) of neighbors [G].
+*   **Memory Complexity:** $O(1)$ auxiliary space if computed on-the-fly, or $O(I \cdot J \cdot K)$ if storing intermediate neighbor differences [G].
+*   **Strengths:** Produces excellent results in stochastic tomography reconstruction compared to other priors [S2, unofficial]. It enforces smoothness across more edges per voxel than ATV [S1, unofficial].
+*   **Limitations:** Requires more arithmetic operations per voxel than ATV due to the larger neighborhood [G].
+*   **When to use:** When tomographic reconstruction tasks benefit from the extended neighborhood smoothing provided by SAD [S2, unofficial].
+*   **When not to use:** When strict anisotropic smoothing along principal axes is required, or when minimal per-voxel computational overhead is critical [G].
+
+## Background
+*   **Origin:** The SAD prior is discussed in the context of proximal algorithms for industrial computed tomography [S1, unofficial] and space-time tomographic reconstruction [S2, unofficial].
+*   **History:** It is presented as an extension of the Anisotropic Total Variation (ATV) prior [S1, S2, unofficial].
+*   **Usage:** It is applied in stochastic tomography reconstruction [S2, unofficial].
+
+## Sources
+[S1] Industrial Computed Tomography using Proximal Algorithm, https://doi.org/10.25781/kaust-th10i, fetched 2026-10-27 (unofficial)
+[S2] Space-Time Tomographic Reconstruction of Deforming Objects, https://vccimaging.org/Publications/Zang2020Thesis/Zang2020Thesis.pdf, fetched 2026-10-30 (unofficial)

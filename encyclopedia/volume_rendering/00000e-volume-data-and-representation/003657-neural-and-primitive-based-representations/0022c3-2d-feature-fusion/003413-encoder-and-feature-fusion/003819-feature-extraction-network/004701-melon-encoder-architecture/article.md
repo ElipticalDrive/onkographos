@@ -1,0 +1,114 @@
+# MELON Encoder Architecture
+
+Also called: MELON Encoder
+
+## Overview
+The MELON Encoder is a neural network component that maps 2D input images to camera pose parameters (azimuth, elevation, and optionally roll and translation) for use in unposed image NeRF reconstruction [S1]. It distinguishes itself from sibling encoders by using a compact, fixed-depth convolutional stack with group normalization and SiLU activations, optimized for rapid convergence of pose estimates in low-view-count scenarios [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 2D image of resolution $L \times L \times 3$ [S1].
+*   **Outputs:**
+    *   Azimuth angle $\theta$ [S1].
+    *   Elevation angle $\phi$ [S1].
+    *   Camera roll $\alpha$ (optional, predicted only for real datasets) [S1].
+    *   Translation vector $T_i$ (optional, location of the origin in the camera reference frame) [S1].
+
+**Data Structures**
+The encoder is a sequential stack of convolutional layers.
+*   **Layer Layout:**
+    1.  Convolutional Layer (Kernel size $D \times D \times 3 \to F$).
+    2.  Group Normalization (GN) [S1].
+    3.  SiLU Activation [S1].
+    4.  Max Pooling (2x2) [S1].
+    *   This block repeats $d$ times.
+    5.  Fully Connected (FC) layer mapping to output dimensions [S1].
+*   **Parameters:**
+    *   $L$: Encoder input resolution. Typical values: $32 \times 32$ to $128 \times 128$. Chosen per-scene [S1].
+    *   $F$: Number of features. Optimal value: 32 [S1].
+    *   $d$: Encoder depth (number of conv blocks). Optimal value: 4 layers [S1].
+    *   $D$: Input resolution of the first conv layer (often equal to $L$ or derived from it; source notation $D \times D \times 3$ implies kernel size matches input spatial dimensions for the first layer or is a specific hyperparameter) [S1].
+
+**Algorithm**
+1.  Resize input image to $L \times L \times 3$ if necessary [S1].
+2.  Apply initial Convolution layer with kernel size $D \times D \times 3$ producing $F$ channels [S1].
+3.  Apply Group Normalization [S1].
+4.  Apply SiLU activation [S1].
+5.  Apply Max Pooling with 2x2 kernel [S1].
+6.  Repeat steps 2-5 for $d-1$ additional blocks (total $d$ blocks) [S1].
+7.  Flatten the resulting feature map.
+8.  Pass through a Fully Connected layer to produce the output vector [S1].
+9.  Map the first two output dimensions to spherical coordinates $(\theta, \phi)$ [S1].
+10. If configured, map additional outputs to roll $\alpha$ and translation $T_i$ [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def MELON_Encoder(image: Tensor, L: int, F: int, d: int, D: int) -> Tensor:
+    """
+    image: Input tensor of shape (H, W, 3).
+    L: Target input resolution.
+    F: Number of features.
+    d: Depth of encoder.
+    D: Kernel size for first conv layer.
+    """
+    # Step 1: Resize to L x L
+    x = Resize(image, size=(L, L))
+    
+    # Step 2: Initial Convolution
+    # Note: Source specifies D x D kernel. Assuming stride 1 for first layer to preserve resolution before pooling
+    x = Conv2d(x, in_channels=3, out_channels=F, kernel_size=(D, D), stride=1, padding=D//2)
+    
+    # Step 3-5: Encoder Blocks
+    for i in range(d):
+        x = GroupNorm(x)
+        x = SiLU(x)
+        if i < d - 1: # Pooling usually applied between blocks, not after the last one before FC
+            x = MaxPool2d(x, kernel_size=2, stride=2)
+            
+    # Step 7: Flatten
+    x = Flatten(x)
+    
+    # Step 8: Fully Connected
+    # Output dimension depends on optional predictions. 
+    # Base: 2 (theta, phi). Optional: +1 (alpha), +3 (Ti). Total 6 if all optional.
+    # Assuming standard config with optional roll and translation for completeness
+    output = FC(x, out_features=6)
+    
+    # Step 9: Map to spherical coordinates
+    theta = output[0]
+    phi = output[1]
+    
+    # Step 10: Optional outputs
+    alpha = output[2] # Only for real datasets
+    Ti = output[3:6]  # Location of origin in camera reference frame
+    
+    return theta, phi, alpha, Ti
+```
+
+**Edge Cases and Pitfalls**
+*   **Resolution Sensitivity:** Performance varies by dataset; optimal $L$ is chosen per-scene [S1].
+*   **Roll Prediction:** The roll angle $\alpha$ is not predicted for synthetic datasets, only real ones [S1].
+*   **Convergence:** Poses tend to converge quickly (often within 1000 steps), allowing for shorter training runs (10k steps) compared to standard NeRF [S1].
+
+## Subtopics
+
+### [Hybrid Convolutional-Transformer Encoder](13320-hybrid-convolutional-transformer-encoder.md)
+Integrates SegFormer’s patchwise embedding and efficient self-attention to capture long-range dependencies, unlike the purely convolutional MELON encoder.
+
+### [Modified DeepLabV3 Encoder](13321-modified-deeplabv3-encoder.md)
+Uses a modified DeepLabV3 architecture that accepts pixel coordinates and bypasses batch normalization, differing from MELON's fixed-depth conv stack [13321-modified-deeplabv3-encoder.md].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given, but rapid convergence (1000 steps) suggests efficient optimization [S1].
+*   **Memory Complexity:** Compact architecture with $d=4$ and $F=32$ features [S1].
+*   **Performance:** Achieves competitive SSIM, PSNR, and LPIPS on NeRF Synthetic scenes (Lego, Hotdog, Chair, Drums, Mic, Ship) with $N=2$ views [S1].
+*   **Strengths:** Fast convergence, simple architecture, effective for low-view-count scenarios [S1].
+*   **Limitations:** Resolution $L$ must be tuned per scene; roll prediction is limited to real datasets [S1].
+
+## Background
+The MELON Encoder was introduced in the MELON paper (2024) for handling NeRF reconstruction with unposed images in SO(3) [S1]. It builds on the Feature Extraction Network parent architecture [8151-feature-extraction-network.md].
+
+## Sources
+[S1] MELON: NeRF with Unposed Images in SO(3), https://doi.org/10.1109/3dv62453.2024.00084, fetched 2026-10-30

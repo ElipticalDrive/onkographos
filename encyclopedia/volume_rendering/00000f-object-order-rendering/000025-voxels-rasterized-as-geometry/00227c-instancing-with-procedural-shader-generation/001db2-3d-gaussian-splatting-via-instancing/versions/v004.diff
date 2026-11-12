@@ -1,0 +1,128 @@
+--- v003.md
++++ v004.md
+@@ -4,15 +4,15 @@
+ 
+ ## Overview
+-This method renders 3D Gaussian splats by submitting instanced geometry (quads) to the standard hardware vertex/fragment pipeline, avoiding the memory overhead of tile-based rasterization [S1, unofficial]. It solves the problem of efficiently projecting 3D ellipses onto the screen by dynamically sizing quads based on opacity cutoffs and evaluating the Gaussian decay function in the fragment shader [S1, unofficial]. It differs from [Volumetric Spot Noise Rendering](2360-volumetric-spot-noise-rendering.md) by using explicit deterministic paths and geometry instancing for depth/opacity accumulation rather than stochastic noise patterns [S1, S2, unofficial].
++This method renders sorted 2D Gaussians by submitting instanced quads to the standard hardware vertex/fragment pipeline, avoiding the memory overhead of tile-based rasterization [S1, unofficial]. It solves the problem of efficiently projecting these Gaussians onto the screen by dynamically sizing quads based on opacity cutoffs and evaluating the Gaussian decay function in the fragment shader [S1, S2, unofficial]. It differs from [Volumetric Spot Noise Rendering](2360-volumetric-spot-noise-rendering.md) by relying on deterministic instanced geometry and standard blending rather than stochastic noise functions and hybrid OIT pipelines [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A list of $N$ Gaussians, each defined by a center position, peak opacity $\sigma$, color, and variance parameters.
+-*   **Output:** A rendered image or a 3D volume texture containing the accumulated Gaussian contributions [S1, S2, unofficial].
++*   **Input:** A list of $N$ Gaussians, each defined by a center position, peak opacity $\sigma$, color, and variance parameters [S1, S2, unofficial].
++*   **Output:** A rendered 2D image or a 3D volume texture containing the accumulated Gaussian contributions [S1, S2, unofficial].
+ 
+ **Data Structures:**
+ *   **Volume (for 3D texture output):**
+-    *   `FboHandle`: GLuint, the Framebuffer Object handle.
+-    *   `TextureHandle`: GLuint, the 3D Texture handle [S2, unofficial].
++    *   `FboHandle`: `GLuint`, the Framebuffer Object handle [S2, unofficial].
++    *   `TextureHandle`: `GLuint`, the 3D Texture handle [S2, unofficial].
+ *   **3D Texture Layout:**
+     *   Format: `GL_RGB16F`
+@@ -47,5 +47,5 @@
+     *   Map the instance ID to the Z-coordinate in the 3D texture space:
+         $$gPosition.z = 1.0 - 2.0 \cdot vInstance[0] \cdot InverseSize$$
+-        where `InverseSize` is $1/D$ (or similar scaling factor) [S2, unofficial].
++        where `InverseSize` scales the instance ID to the texture depth [S2, unofficial].
+     *   Pass through the XY positions from the vertex shader [S2, unofficial].
+ 
+@@ -62,60 +62,46 @@
+         $$\text{FragColor} = \text{Color} \cdot \text{NormalizationConstant} \cdot e^{r^2 \cdot \text{InverseVariance}}$$
+         where `InverseVariance` controls the spread and `NormalizationConstant` scales the output [S2, unofficial].
+-    *   If rendering to a 2D image, the alpha contribution is implicitly handled by the hardware's blending or the explicit alpha channel if present. The cutoff radius ensures that fragments outside $r$ have negligible contribution [S1, unofficial].
++    *   If rendering to a 2D image, the alpha contribution is accumulated using the standard hardware blending pipeline [G]. The cutoff radius ensures that fragments outside $r$ have negligible contribution [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Vertex Shader Logic (per instance)
+-def vertex_shader(instance_id, gaussian_center, sigma, quad_vertices):
+-    # Compute cutoff radius based on peak opacity
+-    # Threshold is 1/255
+-    if sigma < 1/255:
+-        return None # Cull this instance
+-    
+-    r = sqrt(ln(255 * sigma))
+-    
+-    # Scale quad vertices by r to bound the significant area
+-    scaled_vertices = quad_vertices * r
+-    
+-    # Pass local coordinates and instance ID
+-    return {
+-        'local_coords': scaled_vertices,
+-        'instance_id': instance_id,
+-        'center': gaussian_center
+-    }
++import math
+ 
+-# Geometry Shader Logic (if rendering to 3D texture)
++def dot(a, b):
++    return sum(x * y for x, y in zip(a, b))
++
++def compute_cutoff_radius(sigma):
++    # Cull if below threshold
++    if sigma < 1.0 / 255.0:
++        return None
++    return math.sqrt(math.log(255.0 * sigma))
++
++def vertex_shader(instance_id, sigma, quad_vertices):
++    r = compute_cutoff_radius(sigma)
++    if r is None:
++        return None
++    scaled_vertices = [tuple(v * r for v in vertex) for vertex in quad_vertices]
++    return {'local_coords': scaled_vertices, 'instance_id': instance_id}
++
+ def geometry_shader(vertices, instance_id, inverse_size):
+-    # Set layer for 3D texture slice
+-    gl_Layer = instance_id
+-    
+-    # Map instance ID to Z-coordinate in texture space
+-    # Assuming instance_id ranges from 0 to D-1
++    # Map instance ID to Z-coordinate for 3D texture layering
+     z = 1.0 - 2.0 * instance_id * inverse_size
+-    
+-    # Pass through XY positions and set Z
++    output_vertices = []
+     for v in vertices:
+-        v.position.z = z
+-        emit_vertex(v)
++        v['position'].z = z
++        output_vertices.append(v)
++    return output_vertices
+ 
+-# Fragment Shader Logic
+ def fragment_shader(local_coord_p, color, inverse_variance, normalization_constant):
+-    # Compute squared distance from center
+     r2 = dot(local_coord_p, local_coord_p)
+-    
+-    # Compute Gaussian value
+-    # Note: InverseVariance is typically negative to ensure decay
+-    gaussian_value = exp(r2 * inverse_variance)
+-    
+-    # Output color
+-    frag_color = color * normalization_constant * gaussian_value
+-    return frag_color
++    gaussian_value = math.exp(r2 * inverse_variance)
++    return color * normalization_constant * gaussian_value
+ ```
+ 
+ **Parameters:**
+-*   `InverseSize`: Used in the geometry shader to map instance ID to Z-coordinate in the 3D texture. Value: $1/\text{Depth}$ [S2, unofficial].
+-*   `InverseVariance`: Controls the spread of the Gaussian in the fragment shader. Value: Typically negative, related to the Gaussian's standard deviation [S2, unofficial].
+-*   `NormalizationConstant`: Scaling factor for the Gaussian output. Value: Depends on the desired intensity and format [S2, unofficial].
++*   `InverseSize`: Used in the geometry shader to map instance ID to Z-coordinate in the 3D texture. Not given in the sources.
++*   `InverseVariance`: Controls the spread of the Gaussian in the fragment shader. Typically negative to ensure exponential decay [G].
++*   `NormalizationConstant`: Scaling factor for the Gaussian output. Value depends on the desired intensity and format [G].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -137,7 +123,5 @@
+ *   **Performance:** Avoids the overhead of tile-based rasterizers, which build and sort large buffers of tile-splat pairs. This makes it more scalable on heterogeneous devices like laptops and mobile phones with limited bandwidth [S1, unofficial].
+ *   **Strengths:** Efficient on standard hardware pipelines, scalable on web environments (WebGPU), avoids spin waiting across heterogeneous GPU schedulers [S1, unofficial].
+-*   **Limitations:** Requires careful culling of low-opacity Gaussians. Precision issues may arise with 16-bit floating point textures for extreme values [S2, unofficial].
+-*   **When to Use:** When rendering large numbers of Gaussians on hardware with limited bandwidth or when targeting web environments.
+-*   **When Not to Use:** When high-precision volume rendering is required and 16-bit floats are insufficient, or when complex depth sorting is needed beyond what blending provides.
++*   **Limitations:** Requires careful culling of low-opacity Gaussians. Precision issues may arise with 16-bit floating point textures for extreme values [S1, S2, unofficial].
+ 
+ ## Background

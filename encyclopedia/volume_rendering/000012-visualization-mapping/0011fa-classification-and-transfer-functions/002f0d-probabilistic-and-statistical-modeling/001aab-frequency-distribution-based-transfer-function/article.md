@@ -3,41 +3,49 @@
 Also called: Frequency-based Transfer Function, GPU-based FFT Transfer Function Design, TF considering frequency distribution
 
 ## Overview
-This method designs transfer functions by analyzing the statistical frequency distribution of the volume's scalar field to map voxel values to colors and opacities [S2, unofficial]. It specifically addresses the difficulty of visualizing subtle spatial differences in data with narrow distribution ranges, such as lake water quality models, where conventional methods fail to distinguish fine variations [S2, unofficial]. Unlike sibling methods that rely on probabilistic models or clustering of local neighborhoods, this approach uses global frequency statistics to determine coloring probabilities [S1, unofficial][S2, unofficial].
+This method designs transfer functions by analyzing the statistical frequency distribution of the volume's scalar field to map voxel values to colors and opacities [S2, unofficial]. It specifically addresses the difficulty of visualizing subtle spatial differences in data with narrow distribution ranges, such as lake water quality models, where conventional methods fail to distinguish fine variations [S2, unofficial].
 
 ## How it works
 **Inputs:**
-*   $V$: The input volume dataset, a 3D grid of scalar values $v_{i,j,k}$.
-*   $N$: Total number of voxels in $V$.
+*   $V$: The input volume dataset, a 3D grid of scalar values [G].
+*   $N$: Total number of voxels in $V$ [G].
 
 **Outputs:**
-*   $TF$: A mapping function that assigns color $C(v)$ and opacity $\alpha(v)$ to any scalar value $v$.
+*   $TF$: A mapping function that assigns color $C(v)$ and opacity $\alpha(v)$ to any scalar value $v$ [G].
 
 **Data Structures:**
-*   **Histogram $H$:** A 1D array representing the frequency distribution of scalar values. The bins cover the range $[v_{min}, v_{max}]$ of the volume.
-*   **Probability Map $P$:** A 1D array where $P[i]$ represents the coloring probability for the $i$-th bin of the histogram.
+*   **Histogram $H$:** A 1D array representing the frequency distribution of scalar values [S2, unofficial].
+*   **Probability Map $P$:** A 1D array where $P[i]$ represents the coloring probability for the $i$-th bin [S2, unofficial].
 
 **Steps:**
-1.  **Compute Frequency Distribution:**
-    Calculate the histogram $H$ of the scalar field. For each bin $i$, count the number of voxels $n_i$ whose value falls into that bin.
-    $$ H[i] = \sum_{v \in V} \mathbb{I}(v \in \text{bin}_i) $$
-    where $\mathbb{I}$ is the indicator function.
+1.  **Count Frequency Distribution:** Count the frequency distribution of the scalar field across the volume [S2, unofficial].
+2.  **Calculate Ratios and Probabilities:** Calculate the voxel ratios and the coloring probabilities of the frequency ranges [S2, unofficial]. The exact mathematical transformation from voxel ratios to coloring probabilities is not given in the sources.
+3.  **Map to Optical Properties:** Map the voxel values to colors and transparencies according to the coloring probabilities [S2, unofficial].
 
-2.  **Calculate Voxel Ratios:**
-    Determine the ratio of voxels in each bin relative to the total number of voxels $N$.
-    $$ R[i] = \frac{H[i]}{N} $$
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-3.  **Determine Coloring Probabilities:**
-    Calculate the coloring probability $P[i]$ for each frequency range. The sources describe this as calculating "coloring probabilities of the frequency ranges" based on the voxel ratios [S2, unofficial]. While the exact mathematical transformation from $R[i]$ to $P[i]$ is not explicitly defined in the provided notes, it generally involves normalizing or weighting the ratios to emphasize rare or significant frequency bands to enhance contrast [S2, unofficial]. [G] A common implementation would normalize $R[i]$ to sum to 1, or apply a power law to highlight low-frequency outliers.
-
-4.  **Map Values to Optical Properties:**
-    Construct the transfer function by mapping scalar values to color and opacity based on $P$.
-    *   **Opacity:** $\alpha(v)$ is typically derived from $P[i]$ where $v \in \text{bin}_i$. Higher probability may correspond to higher opacity to emphasize significant features.
-    *   **Color:** $C(v)$ is assigned based on the bin index or the calculated probability, often using a color ramp that highlights differences in the frequency distribution.
+```python
+def compute_frequency_tf(volume, num_bins):
+    # 1. Count frequency distribution
+    histogram = [0] * num_bins
+    for v in volume:
+        bin_idx = map_value_to_bin(v, num_bins)  # Not given in the sources.
+        histogram[bin_idx] += 1
+    # 2. Calculate voxel ratios and coloring probabilities
+    total_voxels = len(volume)
+    ratios = [h / total_voxels for h in histogram]
+    probabilities = calculate_coloring_probabilities(ratios)  # Not given in the sources.
+    # 3. Map values to colors and transparencies
+    tf = {}
+    for v in set(volume):
+        bin_idx = map_value_to_bin(v, num_bins)  # Not given in the sources.
+        tf[v] = map_to_color_opacity(bin_idx, probabilities[bin_idx])  # Not given in the sources.
+    return tf
+```
 
 **Pitfalls:**
-*   **Narrow Distribution:** If the scalar field has a very narrow range and small spatial differences, the histogram may be sparse or concentrated, making it difficult to express subtle differences [S2, unofficial].
-*   **Global vs. Local:** This method uses global statistics. It may not adapt well to local variations in data density compared to local data model methods.
+*   **Narrow Distribution:** Narrow distribution ranges and small spatial differences of the scalar field make perspective expression of subtle differences difficult [S2, unofficial].
 
 ## Subtopics
 
@@ -45,8 +53,8 @@ This method designs transfer functions by analyzing the statistical frequency di
 Extends the concept by using 2D histograms of feature pairs (e.g., intensity and gradient) to visualize joint distributions, allowing isolation of materials indistinguishable in 1D frequency histograms.
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by the histogram computation, which is $O(N)$ where $N$ is the number of voxels. GPU-based FFT acceleration is mentioned for interactive design support, suggesting potential optimization for large datasets [S1, unofficial].
-*   **Memory Complexity:** $O(B)$ for the histogram, where $B$ is the number of bins.
+*   **Time Complexity:** Not given in the sources. GPU-based FFT acceleration is mentioned for interactive design support, suggesting potential optimization for large datasets [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources.
 *   **Strengths:** Effective for enhancing perspective expression of subtle differences in narrow-range data [S2, unofficial]. Interactive design support via GPU acceleration [S1, unofficial].
 *   **Limitations:** Struggles with data where spatial differences are small and distribution ranges are narrow, requiring careful binning or probability calculation [S2, unofficial].
 

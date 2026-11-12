@@ -1,43 +1,35 @@
 # Recursive Subdivision
 
-Also called: Recursive Tetrahedral Subdivision, Step-based Tetrahedral Bisection
 
 ## Overview
-Recursive Subdivision is a method for generating adaptive, conforming tetrahedral meshes from a regular cubic volume domain. It solves the problem of maintaining mesh conformity (crack-free boundaries) during hierarchical refinement by enforcing a deterministic, state-driven bisection sequence [S1]. Unlike octree-based decompositions that require complex stitching to handle resolution discontinuities, this method guarantees that neighboring cells share faces exactly [S1]. It sets itself apart from sibling methods like [Differentiable Mesh Refinement](984-differentiable-mesh-refinement.md) by relying on a fixed geometric subdivision rule rather than gradient-based training, and from [3-root-2 Subdivision](6931-3-root-2-subdivision.md) by using a specific 3-step cyclic bisection pattern rather than a uniform 1-to-8 split.
+Recursive Subdivision is a method for generating hierarchical tetrahedral meshes from a regular cubic volume domain by recursively bisecting tetrahedra [S1]. It solves the problem of maintaining mesh conformity during hierarchical refinement by enforcing a deterministic, state-driven bisection sequence [S1]. It sets itself apart from sibling methods like [Differentiable Mesh Refinement](984-differentiable-mesh-refinement.md) by relying on a fixed geometric subdivision rule rather than gradient-based training, and from [3-root-2 Subdivision](6931-3-root-2-subdivision.md) by using a specific 3-step cyclic bisection pattern rather than a uniform split [G].
 
 ## How it works
-**Inputs:** A regular cubic volume domain of dimensions $(2N + 1) \times (2N + 1) \times (2N + 1)$, where $N$ is a non-negative integer representing the initial resolution level.
-**Outputs:** A hierarchical tetrahedral mesh where each tetrahedron is tagged with a subdivision state (Case 1, 2, or 3) and a depth level.
+**Inputs:** A regular cubic volume domain of dimensions $(2N + 1) \times (2N + 1) \times (2N + 1)$, where $N$ is a non-negative integer representing the initial resolution level [S1].
+**Outputs:** A hierarchical tetrahedral mesh where each tetrahedron is classified into one of three geometric cases [S1].
 
 **Data Structures:**
-*   **Vertex Index:** Each vertex in the grid is assigned a unique integer index to identify the midpoint. For a vertex with grid coordinates $(i, j, k)$, the index is calculated as:
-    $$ \text{Index} = i + j(2N + 1) + k(2N + 1)^2 $$
-    [S1]
-*   **Dividing Point (DP):** The midpoint of an edge, identified by the average of the indices of its two endpoints.
-*   **Tetrahedron State:** Each tetrahedron is classified into one of three cases based on its orientation relative to the coordinate planes.
+*   **Vertex Index:** Each vertex in the grid is assigned a unique integer index to identify midpoints [S1]. For a vertex with grid coordinates $(i, j, k)$, the index is calculated as $\text{Index} = i + j(2N + 1) + k(2N + 1)^2$ [S1].
+*   **Dividing Point (DP):** The midpoint of an edge, identified by the average of the indices of its two endpoints [S1].
+*   **Tetrahedron State:** Each tetrahedron is classified into one of three cases based on its orientation relative to the coordinate planes [S1].
 
 **Subdivision Steps:**
-The method proceeds in an initial subdivision followed by recursive steps. The recursive phase cycles through three specific bisection steps (Step 1, Step 2, Step 3) based on the geometric configuration of the tetrahedron.
+The method proceeds in an initial subdivision followed by recursive steps [S1]. The recursive phase cycles through three specific bisection steps (Step 1, Step 2, Step 3) based on the geometric configuration of the tetrahedron [S1].
 
-1.  **Initial Subdivision:** The cubic domain is divided into 12 initial tetrahedra. All 12 generated tetrahedra fall into **Case 1**.
-    [S1]
-2.  **Recursive Loop:** For each tetrahedron in the current level, determine its Case and apply the corresponding Step:
-    *   **Case 1:** One face is parallel to a coordinate plane. One edge $L$ of that face is *not* parallel to any coordinate axis.
-        *   **Action (Step 1):** Select the midpoint of edge $L$ as the Dividing Point. Bisect the tetrahedron into two by the plane passing through the Dividing Point and the opposite edge.
-        *   **Result:** The newly generated tetrahedra fall into **Case 2**.
-        [S1]
-    *   **Case 2:** One face is parallel to a coordinate plane. One edge $L$ of that face *is* parallel to a coordinate axis.
-        *   **Action (Step 2):** Select the midpoint of edge $L$ as the Dividing Point. Bisect the tetrahedron.
-        *   **Result:** The newly generated tetrahedra fall into **Case 3**.
-        [S1]
-    *   **Case 3:** Two faces are parallel to coordinate planes. Edge $L$ is the edge *not* belonging to these two faces.
-        *   **Action (Step 3):** Select the midpoint of edge $L$ as the Dividing Point. Bisect the tetrahedron.
-        *   **Result:** The newly generated tetrahedra recursively return to **Case 1**.
-        [S1]
+1.  **Initial Subdivision:** The cubic domain is divided into 12 initial tetrahedra [S1]. All 12 generated tetrahedra fall into **Case 1** [S1].
+2.  **Recursive Loop:** For each tetrahedron in the current level, determine its Case and apply the corresponding Step [S1]:
+    *   **Case 1:** One face is parallel to a coordinate plane. One edge $L$ of that face is *not* parallel to any coordinate axis [S1].
+        *   **Action (Step 1):** Select the midpoint of edge $L$ as the Dividing Point. Bisect the tetrahedron into two by the plane passing through the Dividing Point and the opposite edge [S1].
+        *   **Result:** The newly generated tetrahedra fall into **Case 2** [S1].
+    *   **Case 2:** One face is parallel to a coordinate plane. One edge $L$ of that face *is* parallel to a coordinate axis [S1].
+        *   **Action (Step 2):** Select the midpoint of edge $L$ as the Dividing Point. Bisect the tetrahedron [S1].
+        *   **Result:** The newly generated tetrahedra fall into **Case 3** [S1].
+    *   **Case 3:** Two faces are parallel to coordinate planes. Edge $L$ is the edge *not* belonging to these two faces [S1].
+        *   **Action (Step 3):** Select the midpoint of edge $L$ as the Dividing Point. Bisect the tetrahedron [S1].
+        *   **Result:** The newly generated tetrahedra recursively return to **Case 1** [S1].
 
 **Algorithm Logic:**
-The subdivision process is deterministic. After the initial subdivision, all tetrahedra are Case 1. Therefore, Step 1 is performed first. The output of Step 1 is Case 2, triggering Step 2. The output of Step 2 is Case 3, triggering Step 3. The output of Step 3 is Case 1, restarting the cycle. This ensures that the mesh remains conforming across all levels of refinement.
-[S1]
+The subdivision process is deterministic [S1]. After the initial subdivision, all tetrahedra are Case 1, so Step 1 is performed first [S1]. The output of Step 1 is Case 2, triggering Step 2 [S1]. The output of Step 2 is Case 3, triggering Step 3 [S1]. The output of Step 3 is Case 1, restarting the cycle [S1]. This ensures the mesh remains conforming across all levels of refinement [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -46,120 +38,154 @@ The subdivision process is deterministic. After the initial subdivision, all tet
 def recursive_subdivision(tetrahedra, max_depth):
     """
     Recursively subdivides a list of tetrahedra based on their geometric case.
-    
     Args:
         tetrahedra: List of Tetrahedron objects.
         max_depth: Maximum recursion depth.
-        
     Returns:
         List of subdivided Tetrahedron objects.
     """
     next_level_tetrahedra = []
-    
     for tet in tetrahedra:
         if tet.depth >= max_depth:
             next_level_tetrahedra.append(tet)
             continue
-            
         case = determine_case(tet)
-        
         if case == 1:
-            # Step 1: Edge L is not parallel to any coordinate axis
-            edge_L = get_edge_not_parallel_to_axes(tet.face_parallel_to_axis)
+            edge_L = get_edge_not_parallel_to_axes(tet)
             dp = midpoint(edge_L)
             new_tets = bisect(tet, dp)
-            # New tets are Case 2
             for nt in new_tets:
                 nt.case = 2
                 nt.depth = tet.depth + 1
                 next_level_tetrahedra.append(nt)
-                
         elif case == 2:
-            # Step 2: Edge L is parallel to a coordinate axis
-            edge_L = get_edge_parallel_to_axis(tet.face_parallel_to_axis)
+            edge_L = get_edge_parallel_to_axis(tet)
             dp = midpoint(edge_L)
             new_tets = bisect(tet, dp)
-            # New tets are Case 3
             for nt in new_tets:
                 nt.case = 3
                 nt.depth = tet.depth + 1
                 next_level_tetrahedra.append(nt)
-                
         elif case == 3:
-            # Step 3: Edge L is not part of the two coordinate-parallel faces
             edge_L = get_edge_not_in_coordinate_faces(tet)
             dp = midpoint(edge_L)
             new_tets = bisect(tet, dp)
-            # New tets are Case 1
             for nt in new_tets:
                 nt.case = 1
                 nt.depth = tet.depth + 1
                 next_level_tetrahedra.append(nt)
-                
     return next_level_tetrahedra
 
-def determine_case(tet):
-    """
-    Determines if the tetrahedron is Case 1, 2, or 3.
-    """
-    # Check faces parallel to coordinate planes (XY, YZ, XZ)
-    parallel_faces = []
+class Tetrahedron:
+    def __init__(self, vertices, case=1, depth=0):
+        self.vertices = vertices
+        self.case = case
+        self.depth = depth
+    @property
+    def edges(self):
+        return [(self.vertices[0], self.vertices[1]), (self.vertices[0], self.vertices[2]),
+                (self.vertices[0], self.vertices[3]), (self.vertices[1], self.vertices[2]),
+                (self.vertices[1], self.vertices[3]), (self.vertices[2], self.vertices[3])]
+    @property
+    def faces(self):
+        return [(self.vertices[0], self.vertices[1], self.vertices[2]),
+                (self.vertices[0], self.vertices[1], self.vertices[3]),
+                (self.vertices[0], self.vertices[2], self.vertices[3]),
+                (self.vertices[1], self.vertices[2], self.vertices[3])]
+
+def midpoint(edge):
+    return tuple((a + b) / 2.0 for a, b in zip(edge[0], edge[1]))
+
+def get_edge_not_parallel_to_axes(tet):
+    face = get_face_parallel_to_axis(tet)
+    for edge in get_edges_of_face(face):
+        if not is_parallel_to_coordinate_axis(edge):
+            return edge
+    return None
+
+def get_edge_parallel_to_axis(tet):
+    face = get_face_parallel_to_axis(tet)
+    for edge in get_edges_of_face(face):
+        if is_parallel_to_coordinate_axis(edge):
+            return edge
+    return None
+
+def get_edge_not_in_coordinate_faces(tet):
+    coord_faces = [f for f in tet.faces if is_parallel_to_coordinate_plane(f)]
+    coord_edges = set()
+    for f in coord_faces:
+        for edge in get_edges_of_face(f):
+            coord_edges.add(edge)
+    for edge in tet.edges:
+        if edge not in coord_edges:
+            return edge
+    return None
+
+def get_face_parallel_to_axis(tet):
     for face in tet.faces:
         if is_parallel_to_coordinate_plane(face):
-            parallel_faces.append(face)
-            
+            return face
+    return None
+
+def is_parallel_to_coordinate_plane(face):
+    v0, v1, v2 = face
+    normal = cross_product(subtract(v1, v0), subtract(v2, v0))
+    return abs(normal[0]) < 1e-6 or abs(normal[1]) < 1e-6 or abs(normal[2]) < 1e-6
+
+def is_parallel_to_coordinate_axis(edge):
+    vec = subtract(edge[1], edge[0])
+    return (abs(vec[1]) < 1e-6 and abs(vec[2]) < 1e-6) or \
+           (abs(vec[0]) < 1e-6 and abs(vec[2]) < 1e-6) or \
+           (abs(vec[0]) < 1e-6 and abs(vec[1]) < 1e-6)
+
+def get_edges_of_face(face):
+    return [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])]
+
+def bisect(tet, dp):
+    edge_dp = None
+    for edge in tet.edges:
+        if dp in edge or (dp[0] == (edge[0][0]+edge[1][0])/2 and dp[1] == (edge[0][1]+edge[1][1])/2 and dp[2] == (edge[0][2]+edge[1][2])/2):
+            edge_dp = edge
+            break
+    opp_edge = get_opposite_edge(tet, edge_dp)
+    v1, v2 = edge_dp
+    v3, v4 = opp_edge
+    tet1 = Tetrahedron([dp, v3, v4, v1], depth=tet.depth + 1)
+    tet2 = Tetrahedron([dp, v3, v4, v2], depth=tet.depth + 1)
+    return [tet1, tet2]
+
+def get_opposite_edge(tet, edge):
+    verts = set(tet.vertices)
+    edge_verts = set(edge)
+    remaining = verts - edge_verts
+    r_list = list(remaining)
+    return (r_list[0], r_list[1])
+
+def determine_case(tet):
+    parallel_faces = [f for f in tet.faces if is_parallel_to_coordinate_plane(f)]
     if len(parallel_faces) == 0:
-        # Should not happen after initial subdivision in this specific framework
-        return 1 
-        
+        return 1
     if len(parallel_faces) == 1:
         face = parallel_faces[0]
-        # Find edge L in this face
         edge_L = get_edge_in_face(face)
         if is_parallel_to_coordinate_axis(edge_L):
             return 2
         else:
             return 1
     elif len(parallel_faces) == 2:
-        # Edge L is the one not belonging to these two faces
         return 3
     else:
-        # More than 2 faces parallel to coordinate planes is geometrically impossible for a tetrahedron in this context
         return 1
 
-def bisect(tet, dp):
-    """
-    Bisects a tetrahedron using the dividing point and the opposite edge.
-    Returns two new tetrahedra.
-    """
-    # Identify the edge opposite to the vertex connected to dp?
-    # Actually, dp is on an edge. The plane passes through dp and the OPPOSITE edge.
-    # Let the edge containing dp be E_dp. Let the opposite edge be E_opp.
-    # The plane is defined by dp and E_opp.
-    
-    E_dp = tet.edge_containing(dp)
-    E_opp = tet.opposite_edge(E_dp)
-    
-    # The plane cuts the tetrahedron into two.
-    # Vertices of tet: A, B, C, D.
-    # If dp is on AB, E_opp is CD.
-    # The cut separates {A, B} from {C, D}? No, it splits the volume.
-    # The two new tetrahedra share the triangle formed by dp and E_opp?
-    # No, the plane passes through dp and E_opp.
-    # So the new faces are triangles (dp, C, D) and (dp, C, D)?
-    # Wait, the plane contains dp and the entire edge E_opp (C and D).
-    # So the plane is defined by points dp, C, D.
-    # This plane splits the remaining vertices A and B.
-    # One new tetrahedron is (dp, C, D, A).
-    # The other new tetrahedron is (dp, C, D, B).
-    
-    v1, v2 = E_dp.endpoints
-    v3, v4 = E_opp.endpoints
-    
-    tet1 = Tetrahedron([dp, v3, v4, v1])
-    tet2 = Tetrahedron([dp, v3, v4, v2])
-    
-    return [tet1, tet2]
+def get_edge_in_face(face):
+    edges = get_edges_of_face(face)
+    return edges[0]
+
+def cross_product(a, b):
+    return (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
+
+def subtract(a, b):
+    return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
 ```
 
 ## Subtopics
@@ -179,15 +205,15 @@ $$ q = \frac{F}{n} + \frac{2E}{n} + \frac{P(n-3)}{n} $$
 where $q$ is the new calculated vertex, $n$ is the number of vertices (8 for a voxel corner), $F$ is the average of all adjacent face points, $E$ is the average of all adjacent edge points, and $P$ is the original point [S5, unofficial]. Tests on the dragon dataset showed similar RMSE results to adaptive simplification but worse memory compression rates [S5, unofficial]. This is because the initial function is trilinear, while Catmull-Clark approximates higher-order B-splines [S5, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The subdivision process is linear with respect to the number of tetrahedra generated, as each tetrahedron is processed independently in a deterministic cycle. The depth of recursion is limited by the volume dimension $N$.
-*   **Memory Complexity:** The mesh size grows exponentially with depth. Each subdivision step doubles the number of tetrahedra. The storage must include vertex indices and case tags for each tetrahedron.
-*   **Strengths:** Guarantees conforming meshes without cracks. Deterministic and simple to implement. No complex stitching logic required.
-*   **Limitations:** The fixed bisection sequence may not be optimal for all geometric features compared to gradient-based methods. The aspect ratio of tetrahedra may degrade in certain configurations, though the source claims well-shaped tetrahedra are maintained [S1].
-*   **When to use:** When conforming tetrahedral meshes are required from regular volume data without the overhead of octree stitching.
-*   **When not to use:** When adaptive refinement based on data gradients is preferred over fixed geometric rules.
+*   **Time Complexity:** The subdivision process is linear with respect to the number of tetrahedra generated, as each tetrahedron is processed independently in a deterministic cycle [S1]. The depth of recursion is limited by the volume dimension $N$ [S1].
+*   **Memory Complexity:** The mesh size grows exponentially with depth. Each subdivision step doubles the number of tetrahedra. The storage must include vertex indices and case tags for each tetrahedron [S1].
+*   **Strengths:** Guarantees conforming meshes without cracks. Deterministic and simple to implement. No complex stitching logic required [S1].
+*   **Limitations:** The fixed bisection sequence may not be optimal for all geometric features compared to gradient-based methods [S1].
+*   **When to use:** When conforming tetrahedral meshes are required from regular volume data without the overhead of octree stitching [S1].
+*   **When not to use:** When adaptive refinement based on data gradients is preferred over fixed geometric rules [S1].
 
 ## Background
-Recursive Subdivision was introduced in the context of multiresolution tetrahedral frameworks for visualizing regular volume data [S1]. It builds on Hebert's decomposition for finite element meshes [S1]. The method was designed to address the limitations of octree-based approaches in volume rendering, specifically the difficulty of handling discontinuities between cells of different resolutions. By enforcing a strict cyclic bisection pattern (Step 1 -> Step 2 -> Step 3 -> Step 1), it ensures that the mesh remains conforming at all levels of refinement.
+Recursive Subdivision builds on Hebert's decomposition for finite element meshes [S1]. The method was designed to address the limitations of octree-based approaches in volume rendering, specifically the difficulty of handling discontinuities between cells of different resolutions [S1]. By enforcing a strict cyclic bisection pattern (Step 1 -> Step 2 -> Step 3 -> Step 1), it ensures that the mesh remains conforming at all levels of refinement [S1].
 
 ## Sources
 [S1] Multiresolution tetrahedral framework for visualizing regular volume data, https://doi.org/10.5555/266989.267040, fetched 2026-10-30

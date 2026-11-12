@@ -1,0 +1,220 @@
+# HexPlane
+
+
+## Overview
+HexPlane is an explicit representation for dynamic 3D scenes that decomposes a 4D spacetime grid into six learned feature planes spanning pairs of coordinate axes (e.g., XY, ZT) [S2]. It solves the memory and data-sparsity challenges of dynamic novel view synthesis by replacing implicit MLPs with a factorized structure that shares information across timesteps, achieving training speeds over 100× faster than implicit baselines like DyNeRF while matching image quality [S2]. Unlike [TensoRF](3026-tensorf.md) which uses vector-matrix decomposition for static 3D volumes, HexPlane extends this to 4D by pairing spatial planes with spatio-temporal planes to capture entangled space-time dynamics [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of posed images with timestamps $\{(I_k, \mathbf{c}_k, t_k)\}$, where $\mathbf{c}_k$ is the camera pose and $t_k$ is the time.
+*   **Outputs:** A radiance field model capable of rendering novel views at arbitrary poses and times.
+
+**Data Structures:**
+The representation consists of two HexPlanes (one for opacity, one for appearance features) and a small MLP.
+1.  **HexPlane:** Defined by six feature planes (matrices) and three fusion matrices.
+    *   Six planes: $\mathbf{M}^{XY}, \mathbf{M}^{XZ}, \mathbf{M}^{YZ}$ (spatial) and $\mathbf{M}^{XT}, \mathbf{M}^{YT}, \mathbf{M}^{ZT}$ (spatio-temporal).
+    *   Dimensions: $\mathbf{M}^{XY} \in \mathbb{R}^{N_x \times N_y}$, $\mathbf{M}^{XT} \in \mathbb{R}^{N_x \times N_t}$, etc. $N_x, N_y, N_z$ are spatial resolutions; $N_t$ is temporal resolution.
+    *   Fusion Matrices: $\mathbf{V}^{R_1 F}, \mathbf{V}^{R_2 F}, \mathbf{V}^{R_3 F}$ where $R_i$ is the rank and $F$ is the feature dimension.
+2.  **MLP:** A tiny multi-layer perceptron taking appearance features, position, and view direction to output RGB color.
+3.  **Emptiness Voxel:** A tiny 3D voxel grid indicating empty regions, computed by taking the maximum opacity across all time steps.
+
+**Query Function:**
+For a 4D point $(x, y, z, t)$, the feature vector $\mathbf{f} \in \mathbb{R}^F$ is computed by projecting the point onto the six planes, fusing the results, and multiplying by the fusion matrices [S2]. The formula is:
+
+$$
+D(x, y, z, t) = (\mathbf{P}_{xy\bullet}^{XYR_1} \odot \mathbf{P}_{xt\bullet}^{ZTR_1}) \mathbf{V}^{R_1F} + (\mathbf{P}_{xz\bullet}^{XZR_2} \odot \mathbf{P}_{yt\bullet}^{YTR_2}) \mathbf{V}^{R_2F} + (\mathbf{P}_{yz\bullet}^{YZR_3} \odot \mathbf{P}_{zt\bullet}^{XTR_3}) \mathbf{V}^{R_3F}
+$$
+
+Where:
+*   $\mathbf{P}_{xy\bullet}^{XYR_1}$ is a vector of size $R_1$ obtained by bilinearly interpolating the plane $\mathbf{M}^{XY}$ at $(x,y)$.
+*   $\mathbf{P}_{xt\bullet}^{ZTR_1}$ is a vector of size $R_1$ obtained by bilinearly interpolating the plane $\mathbf{M}^{ZT}$ at $(z,t)$.
+*   $\odot$ denotes element-wise multiplication.
+*   $\mathbf{V}^{R_1F}$ is a matrix of size $R_1 \times F$.
+
+**Training Pipeline:**
+1.  **Initialization:** Start with low spatial resolution (e.g., $32^3$ or $64^3$).
+2.  **Coarse-to-Fine:** Gradually upsample the grid resolution at specific iterations (e.g., doubling at 70k, 140k, 210k iterations for Plenoptic Video) [S2].
+3.  **Emptiness Voxel Update:** Periodically compute the emptiness voxel by evaluating opacities across time and taking the maximum [S2].
+4.  **Sampling:** Use importance sampling (e.g., global-median-based or temporal-difference-based) to sample points along rays [S2].
+5.  **Rendering:** Perform differentiable volume rendering using the queried opacity and color.
+6.  **Loss:** Minimize photometric loss plus regularization:
+    $$
+    \mathcal{L} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \|C(\mathbf{r}) - \hat{C}(\mathbf{r})\|_2^2 + \lambda_{reg} \mathcal{L}_{reg}
+    $$
+    Where $\mathcal{L}_{reg}$ includes Total Variation (TV) loss on planes and depth smooth loss [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def bilinear_interpolate(grid, u, v):
+    """
+    Perform bilinear interpolation on a 2D grid.
+    grid: shape (H, W)
+    u, v: float coordinates in [0, 1]
+    Returns: interpolated value
+    """
+    h, w = grid.shape
+    # Map [0,1] to grid indices
+    u_idx = u * (w - 1)
+    v_idx = v * (h - 1)
+    
+    u0 = int(np.floor(u_idx))
+    v0 = int(np.floor(v_idx))
+    u1 = u0 + 1
+    v1 = v0 + 1
+    
+    # Clamp indices
+    u0 = np.clip(u0, 0, w - 2)
+    u1 = np.clip(u1, 0, w - 1)
+    v0 = np.clip(v0, 0, h - 2)
+    v1 = np.clip(v1, 0, h - 1)
+    
+    # Interpolation weights
+    w_u = u_idx - u0
+    w_v = v_idx - v0
+    
+    # Bilinear interpolation
+    val = (1 - w_u) * (1 - w_v) * grid[v0, u0] + \
+          (1 - w_u) * w_v * grid[v1, u0] + \
+          w_u * (1 - w_v) * grid[v0, u1] + \
+          w_u * w_v * grid[v1, u1]
+    return val
+
+def query_hexplane(x, y, z, t, planes, fusion_matrices):
+    """
+    Query the HexPlane representation for a 4D point.
+    x, y, z, t: float coordinates. Note: z and t are swapped in the ZT plane definition in the paper's formula 
+                relative to standard (x,y,z,t) ordering if M_ZT is defined as ZxT. 
+                The paper defines M^{ZT} spanning Z and T axes.
+    planes: dict containing M_XY, M_XZ, M_YZ, M_XT, M_YT, M_ZT
+    fusion_matrices: list of [V1, V2, V3] where Vi is shape (R_i, F)
+    Returns: feature vector of shape (F,)
+    """
+    # Term 1: XY and ZT planes
+    # Interpolate M_XY at (x, y) -> vector of size R1
+    vec_xy = np.array([bilinear_interpolate(planes['M_XY'], x, y) for _ in range(planes['M_XY'].shape[0])]) # Placeholder for rank dimension handling
+    # Actually, M_XY is (Nx, Ny). We need to handle the rank R1.
+    # The paper stacks planes into a tensor P_XY of shape (Nx, Ny, R1).
+    # For implementation, we assume planes are stored as (Nx, Ny, R1) tensors.
+    
+    # Re-defining input structure for clarity based on Eq 5:
+    # P_XY is (Nx, Ny, R1)
+    
+    # Extract vectors via bilinear interpolation
+    # vec_xy: shape (R1,)
+    vec_xy = np.array([bilinear_interpolate(planes['P_XY'][:,:,r], x, y) for r in range(planes['P_XY'].shape[2])])
+    
+    # vec_zt: shape (R1,)
+    vec_zt = np.array([bilinear_interpolate(planes['P_ZT'][:,:,r], z, t) for r in range(planes['P_ZT'].shape[2])])
+    
+    # Element-wise product
+    fused_1 = vec_xy * vec_zt
+    
+    # Multiply by fusion matrix V1 (R1, F)
+    term_1 = fused_1 @ fusion_matrices[0] # Shape (F,)
+    
+    # Term 2: XZ and YT planes
+    vec_xz = np.array([bilinear_interpolate(planes['P_XZ'][:,:,r], x, z) for r in range(planes['P_XZ'].shape[2])])
+    vec_yt = np.array([bilinear_interpolate(planes['P_YT'][:,:,r], y, t) for r in range(planes['P_YT'].shape[2])])
+    
+    fused_2 = vec_xz * vec_yt
+    term_2 = fused_2 @ fusion_matrices[1] # Shape (F,)
+    
+    # Term 3: YZ and XT planes
+    vec_yz = np.array([bilinear_interpolate(planes['P_YZ'][:,:,r], y, z) for r in range(planes['P_YZ'].shape[2])])
+    vec_xt = np.array([bilinear_interpolate(planes['P_XT'][:,:,r], x, t) for r in range(planes['P_XT'].shape[2])])
+    
+    fused_3 = vec_yz * vec_xt
+    term_3 = fused_3 @ fusion_matrices[2] # Shape (F,)
+    
+    return term_1 + term_2 + term_3
+
+def render_ray(ray_origin, ray_direction, t, hexplane_opacity, hexplane_appearance, mlp, emptiness_voxel, n_samples):
+    """
+    Volume render a single ray.
+    """
+    # 1. Check emptiness voxel (simplified)
+    # If the ray passes through empty regions defined by the voxel, skip or assign 0 opacity.
+    
+    # 2. Sample points along the ray
+    points = sample_points_along_ray(ray_origin, ray_direction, n_samples)
+    
+    # 3. Query HexPlane for opacity and appearance
+    opacities = []
+    appearances = []
+    
+    for p in points:
+        x, y, z = p
+        # Query opacity HexPlane
+        op_feat = query_hexplane(x, y, z, t, hexplane_opacity.planes, hexplane_opacity.fusion_matrices)
+        # Opacity is usually the first component or passed through a small linear layer. 
+        # The paper says "query points' opacities directly from one HexPlane". 
+        # We assume the output of query_hexplane for opacity is a scalar or the first dim.
+        # For simplicity, let's assume the last layer of the opacity HexPlane fusion outputs a scalar sigma.
+        # In the pseudocode above, it outputs F dims. We'll assume F=1 for opacity plane or take first dim.
+        sigma = op_feat[0] # Assuming first feature dim is opacity
+        opacities.append(sigma)
+        
+        # Query appearance HexPlane only if opacity is high (optimization)
+        if sigma > 0.1:
+            ap_feat = query_hexplane(x, y, z, t, hexplane_appearance.planes, hexplane_appearance.fusion_matrices)
+            appearances.append(ap_feat)
+        else:
+            appearances.append(np.zeros(3)) # Placeholder
+            
+    # 4. Regress Color using MLP
+    colors = []
+    for i, p in enumerate(points):
+        if len(appearances) > i and np.linalg.norm(appearances[i]) > 0:
+            # MLP input: appearance feature, position, view direction
+            color = mlp(appearances[i], p, ray_direction)
+            colors.append(color)
+        else:
+            colors.append(np.zeros(3))
+            
+    # 5. Volume Rendering (Standard NeRF alpha compositing)
+    # ... standard volume rendering loop ...
+    pass
+```
+
+**Parameters:**
+*   **Spatial Resolution ($N$):** Typically $128^3$ to $512^3$. Higher resolution improves quality [S2].
+*   **Temporal Resolution ($T$):** Typically 32 to 300. Matches the number of frames or time steps [S2].
+*   **Rank ($R$):** Number of basis functions. Typical values: 8, 12, 16, 24, 48, 96. Larger $R$ improves quality but increases memory and computation; too large causes overfitting [S2].
+    *   Plenoptic Video Appearance: $R_1=48, R_2=24, R_3=24$.
+    *   Plenoptic Video Opacity: $R_1=24, R_2=12, R_3=12$.
+    *   D-NeRF Appearance: $R_1=R_2=R_3=48$.
+    *   D-NeRF Opacity: $R_1=R_2=R_3=24$ [S2].
+*   **Learning Rate:** $0.02$ for feature planes, $0.001$ for MLP/VRF [S2].
+*   **Optimizer:** Adam ($\beta_1=0.9, \beta_2=0.99$) [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Unbounded Scenes:** HexPlane is limited to bounded scenes because grid sampling fails for out-of-boundary points. For unbounded scenes, spherical coordinate re-parameterization ($\theta, \phi, r, t$) is required, with $r = 1/\sqrt{x^2+y^2+z^2}$ [S2].
+*   **Fast Motion:** Degraded results occur when objects move too fast or observations are too sparse [S2].
+*   **Color Jittering:** Explicit representations are prone to artifacts; strong regularization (TV loss) is required [S2].
+*   **NDC Artifacts:** Using Normalized Device Coordinates (NDC) assumes bounded $x,y$ and can cause artifacts at extreme views [S2].
+
+## Subtopics
+
+### TensoRF
+Uses vector-matrix decomposition for static 3D volumes. HexPlane extends this by adding temporal planes to handle 4D dynamic scenes. [TensoRF](3026-tensorf.md)
+*   **K*-Planes:** Also employs six feature planes for representation. HexPlane is most closely related to this method. [K*-Planes](link_not_provided)
+*   **DyNeRF:** Uses implicit MLPs and per-frame latent codes. HexPlane is >100× faster and uses less memory (200MB vs implicit models). [DyNeRF](link_not_provided)
+
+## Operating characteristics
+*   **Memory Complexity:** Reduced from $O(N^3 T F)$ to $O(N^2 R + N T R + R F)$ [S2]. For $N=512, T=32, F=3$, a naive 4D volume requires 48GB, while HexPlane requires only ~200MB [S2].
+*   **Time Complexity:** Querying requires six bilinear interpolations and vector-matrix products, making it significantly faster than MLP-based methods [S2].
+*   **Performance:** On the Plenoptic Video dataset, HexPlane achieves 29.47 PSNR in 12 GPU hours (112× speedup over DyNeRF). With fewer iterations (100k), it achieves 29.26 PSNR in 2 GPU hours (672× speedup) [S2]. On D-NeRF, it achieves 31.04 PSNR in 11 minutes [S2].
+*   **Strengths:** High efficiency, low memory footprint, no need for deformation fields, robust to various fusion mechanisms and coordinate systems [S2].
+*   **Limitations:** Limited to bounded scenes (unless spherical coordinates are used), sensitive to sparse observations and fast motion, requires strong regularization to avoid artifacts [S2].
+
+## Background
+HexPlane was introduced by Ang Cao and Justin Johnson from the University of Michigan, Ann Arbor, in January 2023 [S2]. It was developed to address the limitations of implicit representations (like T-NeRF and DyNeRF) which are slow due to numerous MLP evaluations and struggle with memory usage for dynamic scenes [S2]. The method builds on the principles of tensor decomposition used in [TensoRF](3026-tensorf.md) but adapts them for 4D spacetime by using paired spatial and spatio-temporal feature planes [S2].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] HexPlane: A Fast Representation for Dynamic Scenes, https://doi.org/10.1109/cvpr52729.2023.00021, fetched 2026-10-26

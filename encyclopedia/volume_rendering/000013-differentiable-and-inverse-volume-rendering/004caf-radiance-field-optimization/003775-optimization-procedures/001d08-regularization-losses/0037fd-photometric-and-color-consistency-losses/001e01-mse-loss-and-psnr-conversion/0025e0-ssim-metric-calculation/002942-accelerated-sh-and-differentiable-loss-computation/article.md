@@ -1,0 +1,122 @@
+# Accelerated SH and Differentiable Loss Computation
+
+Also called: Batched SH updates, Separable SSIM convolution
+
+## Overview
+This method optimizes the training loop of 3D Gaussian Splatting (3DGS) by reducing the computational bottleneck of Adam optimizer updates for Spherical Harmonic (SH) coefficients and accelerating differentiable SSIM loss computation [S1]. It sets itself apart from standard 3DGS implementations by decoupling SH band updates into separate tensors and fusing loss kernel operations [S1].
+
+## How it works
+The method consists of two primary optimizations: a batched update schedule for SH coefficients and accelerated differentiable loss computation via separable convolutions and fused kernels [S1].
+
+### Inputs and Outputs
+- **Inputs**: Rendered image, ground truth image, Gaussian attributes (position, rotation, scale, opacity, SH coefficients), and Adam optimizer state [S1].
+- **Outputs**: Updated Gaussian attributes and computed loss value [S1].
+
+### Data Structures
+1.  **SH Coefficients**: Stored in separate tensors for the 0th band (base color) and higher bands (1st–5th), rather than a single combined tensor [S1].
+2.  **Adam State**: Separate optimizer states for base color (0th band), higher SH bands, and opacity [S1].
+
+### Steps
+
+1.  **SH Update Schedule**:
+    -   The 0th SH band (base color) is updated every iteration using the Adam optimizer.
+    -   All higher SH bands (1st through 5th) are updated using a batched schedule: Adam optimization steps are performed only once every 16 iterations [S1].
+    -   The learning rate for the batched SH updates is increased fourfold to $0.001$ [S1].
+    -   The opacity learning rate is reduced by half to $0.025$ [S1].
+
+2.  **Differentiable SSIM Loss Computation**:
+    -   **Separable Convolution**: The 11×11 Gaussian kernel used for SSIM is separable. The 2D convolution is performed via two consecutive 1D convolutions using optimized CUDA kernels [S1].
+    -   **Fused Kernel**: A fused CUDA kernel evaluates the SSIM metric from the convolved results, reducing memory traffic and launch overhead [S1].
+    -   **3D Extension (Variant)**: For 3D SSIM loss, a fused CUDA kernel processes the depth dimension using a ring buffer, with each thread operating on a single Z-axis row to avoid excessive shared memory usage [S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def conv1d_1d(input_tensor, axis=0):
+    # 1D convolution with 11-tap Gaussian kernel along specified axis
+    kernel = [0.001, 0.005, 0.025, 0.085, 0.200, 0.300, 0.200, 0.085, 0.025, 0.005, 0.001]
+    output = zeros_like(input_tensor)
+    for i in range(input_tensor.shape[axis]):
+        for j in range(-5, 6):
+            idx = i + j
+            if 0 <= idx < input_tensor.shape[axis]:
+                output[..., i, ...] += input_tensor[..., idx, ...] * kernel[j+5]
+    return output
+
+def compute_ssim_metric(mean_x, mean_y, var_x, var_y, cov_xy):
+    C1, C2 = 0.01**2, 0.03**2
+    numerator = (2 * mean_x * mean_y + C1) * (2 * cov_xy + C2)
+    denominator = (mean_x**2 + mean_y**2 + C1) * (var_x + var_y + C2)
+    return (numerator / denominator).clip(0, 1)
+
+def update_gaussians(gaussians, optimizer_state, rendered_image, gt_image, iteration):
+    # 1. Accelerated SSIM Loss via Separable Convolutions
+    # Apply 1D convolution along rows, then columns
+    local_means_rendered = conv1d_1d(rendered_image, axis=0)
+    local_means_rendered = conv1d_1d(local_means_rendered, axis=1)
+    local_means_gt = conv1d_1d(gt_image, axis=0)
+    local_means_gt = conv1d_1d(local_means_gt, axis=1)
+
+    # Compute local statistics (variances and covariance)
+    local_vars_rendered = conv1d_1d(rendered_image**2, axis=0)
+    local_vars_rendered = conv1d_1d(local_vars_rendered, axis=1) - local_means_rendered**2
+    local_vars_gt = conv1d_1d(gt_image**2, axis=0)
+    local_vars_gt = conv1d_1d(local_vars_gt, axis=1) - local_means_gt**2
+    local_cov = conv1d_1d(rendered_image * gt_image, axis=0)
+    local_cov = conv1d_1d(local_cov, axis=1) - local_means_rendered * local_means_gt
+
+    # Fused kernel evaluation of SSIM metric
+    ssim_map = compute_ssim_metric(local_means_rendered, local_means_gt, local_vars_rendered, local_vars_gt, local_cov)
+    loss_ssim = mean(1.0 - ssim_map)
+
+    # Total loss (MSE + SSIM)
+    loss_mse = mean((rendered_image - gt_image)**2)
+    loss = loss_mse + 0.2 * loss_ssim
+
+    # 2. Backpropagation
+    gradients = backward(loss, gaussians.attributes)
+
+    # 3. Optimizer Step
+    # Base color (0th SH band) and Opacity: Update every iteration
+    optimizer_state['base_color'].step(gradients['base_color'], lr=0.00025)
+    optimizer_state['opacity'].step(gradients['opacity'], lr=0.025)
+
+    # Higher SH bands: Update every 16th iteration
+    if iteration % 16 == 0:
+        optimizer_state['higher_sh'].step(gradients['higher_sh'], lr=0.001)
+    # Else: skip update for higher SH bands
+
+    return loss
+```
+
+### Parameters
+-   **SH Update Interval**: 16 iterations for bands > 0 [S1].
+-   **SH Learning Rate**: 0.001 for batched updates [S1].
+-   **Opacity Learning Rate**: 0.025 [S1].
+-   **SSIM Kernel Size**: 11×11 Gaussian kernel [S1].
+
+### Edge Cases and Pitfalls
+-   **Memory**: The 3D SSIM variant uses a ring buffer to manage shared memory; insufficient buffer size may cause incorrect depth processing [S2].
+
+## Subtopics
+
+### Fused Loss Kernels
+Replaces standard 2D/3D SSIM and Total Variation (TV) loss calculations with custom fused CUDA kernels. For 2D SSIM, it uses the `fused-ssim` implementation, achieving 5–8× acceleration [S2]. For 3D SSIM, it processes the depth dimension with a ring buffer to avoid excessive shared memory, achieving 11× acceleration [S2]. It also implements a custom fused kernel for 3D TV loss, achieving 3× acceleration for a $32^3$ volume [S2].
+
+## Operating characteristics
+-   **Time Complexity**: Reduces the dominant cost of Adam updates for SH coefficients by skipping 15 out of 16 iterations for higher bands [S1]. Accelerates SSIM loss computation by 5–8× (2D) and 11× (3D) [S2].
+-   **Memory Complexity**: Reduces memory traffic by fusing operations and avoiding intermediate tensor allocations for SSIM [S1].
+-   **Performance**: Significant reduction in training time, especially when the number of optimized Gaussians is low compared to image resolution [S1].
+-   **Strengths**: Effective for budget-constrained training scenarios; scalable to large Gaussian counts [S1].
+-   **Limitations**: Requires custom CUDA kernels [S1].
+-   **When to Use**: When training time is a bottleneck, particularly for high-quality radiance fields with limited resources [S1].
+-   **When Not to Use**: Not given in the sources.
+
+## Background
+Originated from the "Taming 3DGS" paper [S1] and "FaCT-GS" [S2], addressing the computational inefficiencies of the original 3DGS implementation [Kerbl et al. 2023]. The original 3DGS implementation combined SH bands into a single tensor and used standard convolution for SSIM, leading to significant overhead [S1]. These optimizations were introduced to make high-quality radiance field reconstruction feasible with limited resources and hardware [S1].
+
+## Sources
+[S1] Taming 3DGS: High-Quality Radiance Fields with Limited Resources, https://doi.org/10.1145/3680528.3687694, fetched 2026-10-30
+[S2] FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting, https://doi.org/10.1007/978-3-032-37464-6_13, fetched 2026-10-26
