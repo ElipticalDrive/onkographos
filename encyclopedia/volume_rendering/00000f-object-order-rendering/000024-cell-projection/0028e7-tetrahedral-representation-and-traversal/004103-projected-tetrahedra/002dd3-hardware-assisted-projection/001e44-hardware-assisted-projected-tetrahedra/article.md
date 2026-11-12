@@ -3,60 +3,52 @@
 Also called: CellFast algorithm, Hardware CellFast
 
 ## Overview
-Hardware-Assisted Projected Tetrahedra (HAPT) is a flexible, highly efficient volume rendering method for unstructured tetrahedral grids that performs the entire rendering pipeline on the GPU in a single pass [S1, unofficial][S2, unofficial][S3, unofficial]. It builds on [Hardware-Assisted Projection](5625-hardware-assisted-projection.md) by streaming sorted tetrahedra as point primitives, decomposing them into triangles in a geometry shader, and evaluating the volume ray integral per fragment during rasterization [S1, unofficial][S2, unofficial]. Unlike its sibling [Hardware-Assisted Polyhedron Projection](1453-hardware-assisted-polyhedron-projection.md) which may require auxiliary structures or multiple passes, HAPT processes each tetrahedron independently, avoiding GPU memory limits and auxiliary data structures [S2, unofficial]. It differs from [Absorption-Only Radiography via Unsorted Hexahedron Projection](10255-absorption-only-radiography-via-unsorted-hexahedron-projecti.md) by supporting general direct and indirect volume rendering with partial pre-integration [S2, unofficial].
+Hardware-Assisted Projected Tetrahedra (HAPT) is a flexible, highly efficient volume rendering method that adapts the original Projected Tetrahedra (PT) algorithm to exploit programmable graphics hardware [S1, S2, S3, unofficial]. It solves the performance bottleneck of software-based cell projection by streaming sorted tetrahedra as point primitives to the GPU, decomposing them into triangles in a geometry shader, and evaluating the volume ray integral per fragment in a fragment shader [S1, S2, unofficial]. Unlike its sibling [Hardware-Assisted Polyhedron Projection](1453-hardware-assisted-polyhedron-projection.md), which handles general convex polyhedra, HAPT is specialized for tetrahedral meshes, allowing it to use a single-pass GPU pipeline that avoids the auxiliary basis graph structure required by methods like GATOR [S2, S3, unofficial]. It builds on [Hardware-Assisted Projection](5625-hardware-assisted-projection.md) by leveraging GPU rasterization for cell projection [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Unstructured tetrahedral mesh (vertices, connectivity, scalar values per vertex), view-projection matrices, transfer function, sorting method.
-*   **Output:** Final 2D image (color and opacity).
+*   **Input:** An unstructured tetrahedral mesh (positions, scalar values per vertex) and a viewpoint.
+*   **Output:** A 2D image with direct volume rendering (DVR) or iso-surface rendering (ISO) colors.
 
 **Data Structures:**
 *   **Tetrahedron Stream:** Each tetrahedron is represented as a single point primitive sent to the GPU.
-    *   **Position:** The coordinates of one vertex of the tetrahedron (e.g., $v_0$).
-    *   **Texture Coordinates:** The coordinates of the other three vertices ($v_1, v_2, v_3$) are passed as texture coordinates.
-    *   **Scalar Value:** The scalar value of the position vertex is passed as the $w$ component of the vertex color/attribute.
-*   **Sorting Indices:** An array of indices defining the visibility order of tetrahedra.
+    *   Vertex Position: The position of one vertex of the tetrahedron.
+    *   Texture Coordinates: The positions of the other three vertices of the tetrahedron.
+    *   Scalar Value: The scalar value of the primary vertex is passed as the `w` coordinate of the vertex attribute [S2, unofficial].
+*   **Sorting Indices:** A buffer of tetrahedron indices sorted by visibility order [S2, unofficial].
 
 **Numbered Steps:**
 
 1.  **Visibility Sorting:**
-    Compute the visibility order of tetrahedra using a CPU or GPU method. Common methods include:
-    *   CPU: STL-based introsort, MPVONC (Meshed Polyhedra Visibility Ordering for Non-Convex meshes).
-    *   GPU (CUDA): Quicksort, Bitonic Sort.
-    *   Approximate: Centroid sorting (sorting by tetrahedron centroid).
-    *   *Note:* Centroid sorting is fast but approximate, potentially inverting adjacent tetrahedra. MPVONC is exact but requires auxiliary data (adjacency list, face normals) and increases CPU memory usage by ~4x [S2, unofficial][S3, unofficial]. Bitonic sort requires power-of-two array sizes [S2, unofficial].
+    Sort the tetrahedra in back-to-front order relative to the viewpoint. This is a prerequisite for correct alpha blending [S1, S4, unofficial]. Methods include:
+    *   CPU-based: STL-based introsort, MPVONC (exact, requires adjacency list and face normals) [S2, S3, unofficial].
+    *   GPU-based: CUDA Quicksort, CUDA Bitonic Sort (requires power-of-two array size) [S2, S3, unofficial].
+    *   Approximate: Centroid sorting (fast, low error) [S2, S3, unofficial].
 
 2.  **Streaming to GPU:**
-    Stream the sorted tetrahedra to the graphics pipeline.
-    *   If the dataset fits in GPU memory, store indices in a Vertex Buffer Object (VBO) or GPU data buffer.
-    *   If the dataset exceeds GPU memory, read back to CPU and stream in chunks [S2, unofficial].
-    *   Send each tetrahedron as a point primitive with the attributes defined above [S2, unofficial].
+    Stream the sorted tetrahedra to the graphics pipeline. To avoid GPU memory limits, tetrahedra are stored in a Vertex Buffer Object (VBO) and streamed in chunks if the volume exceeds VRAM [S1, S2, unofficial]. For time-varying data, frames are streamed as separate static volumes [S2, unofficial].
 
 3.  **Vertex Shader (VS):**
-    *   Receive the point primitive.
-    *   (Optional) Perform early discard test for time-varying data: if all four vertices map to zero opacity via the transfer function, discard the primitive [S2, unofficial].
+    Receive the point primitive. Optionally, perform an early discard test for empty tetrahedra (all vertices map to zero opacity) [S2, unofficial]. Pass the vertex position and the three texture coordinates (other vertices) to the Geometry Shader [S2, unofficial].
 
 4.  **Geometry Shader (GS):**
-    *   **Decomposition:** Decompose the point primitive (representing a tetrahedron) into one to four triangles based on the projection case.
-    *   **Classification:** Determine the correct projection case using PTINT's classification strategy. This involves computing four cross products and performing a table lookup to identify the case [S2, unofficial][S3, unofficial].
+    *   **Decomposition:** Decompose the point primitive into one to four triangles representing the projected tetrahedron [S1, S2, unofficial].
+    *   **Classification:** Determine the correct projection case using PTINT's classification strategy. This involves four cross products and a table lookup to identify vertex types [S2, S3, unofficial].
     *   **Vertex Attribute Computation:** For each generated triangle vertex, compute:
-        *   **Traversal Length ($l$):** The distance the ray travels through the tetrahedron at that vertex.
-        *   **Scalar Front ($s_f$):** The scalar value at the entry of the ray segment.
-        *   **Scalar Back ($s_b$):** The scalar value at the exit of the ray segment.
+        *   **Traversal Length ($l$):** The length of the viewing ray segment within the tetrahedron.
+        *   **Scalar Front ($s_f$) and Scalar Back ($s_b$):** The scalar values at the entry and exit points of the ray.
     *   **Vertex Types:**
-        *   **Thick Vertex:** The entry point where the ray traverses the maximum distance $l$. This vertex may not be one of the original four projected vertices. Its scalar value must be interpolated, and $l$ may need to be computed if it is not an edge length [S2, unofficial].
-        *   **Thin Vertices:** The other projected vertices. For these, $s_f = s_b$ (original scalar value) and $l = 0$ [S2, unofficial].
-    *   **Encoding:** Store $s_f$, $s_b$, and $l$ as RGB color components of the vertex to pass them to the fragment shader. For iso-surface rendering, send face normals instead [S2, unofficial].
+        *   **Thick Vertex:** The entry point where the ray traverses the maximum distance $l$. Its scalar value may need interpolation, and $l$ may need calculation if it is not an edge length. It may not be one of the original four projected vertices [S2, unofficial].
+        *   **Thin Vertices:** All other projected vertices. For these, $s_f = s_b$ (original scalar value) and $l = 0$ [S2, unofficial].
+    *   **Output:** Send the triangle primitives with $s_f$, $s_b$, and $l$ encoded as RGB color attributes (or normals for ISO) to the Fragment Shader [S2, unofficial].
 
 5.  **Rasterization:**
-    *   The hardware rasterizes the triangles generated by the GS.
-    *   Interpolate $s_f$, $s_b$, and $l$ per fragment [S2, unofficial].
+    The hardware rasterizes the triangles. Scalar values ($s_f, s_b$) and traversal length ($l$) are interpolated per fragment [S2, unofficial].
 
 6.  **Fragment Shader (FS):**
-    *   **Partial Pre-Integration:** Evaluate the volume ray integral using the interpolated $s_f$, $s_b$, and $l$.
-    *   Access a pre-computed table using indices derived from $l$ and the front/back colors (extracted from $s_f/s_b$ via the transfer function) [S2, unofficial].
-    *   Compute the depth-integrated opacity and color at the thick vertex based on Euclidean distances, requiring square root computation (often implemented as a lookup table in hardware) and bilinear/linear interpolations [S4, unofficial].
-    *   Output the final color and opacity for the pixel [S1, unofficial].
+    Evaluate the volume ray integral using the interpolated values.
+    *   **Direct Volume Rendering (DVR):** Use partial pre-integration. Access a pre-computed table using indices computed from $l$ and the front/back colors (extracted from $s_f/s_b$ via the transfer function) [S2, unofficial].
+    *   **Iso-Surface Rendering (ISO):** Extract the iso-surface in the GS (as one or two triangles) and render with flat shading (normals restricted to faces) [S2, unofficial].
 
 **Pseudocode:**
 
@@ -64,131 +56,99 @@ Hardware-Assisted Projected Tetrahedra (HAPT) is a flexible, highly efficient vo
 
 ```python
 # Vertex Shader
-def vertex_shader(tetrahedron_point):
-    # tetrahedron_point contains:
-    # pos: vec3 (one vertex)
-    # tex_coords: vec3 (other three vertices)
-    # scalar: float (w component of color)
-    
-    # Optional: Early discard for time-varying data
-    if all_transfer_function_zero(tetrahedron_point.pos, tetrahedron_point.tex_coords):
-        return discard
-    
-    return tetrahedron_point
+def vertex_shader(tetrahedron_point, other_three_vertices, scalar_w):
+    # Pass data to Geometry Shader
+    # tetrahedron_point: position of one vertex
+    # other_three_vertices: positions of the other three vertices (as texture coords)
+    # scalar_w: scalar value of the primary vertex
+    return {
+        'pos': tetrahedron_point,
+        'tex_coords': other_three_vertices,
+        'scalar': scalar_w
+    }
 
 # Geometry Shader
-def geometry_shader(point_primitive):
-    # Extract vertices
-    v0 = point_primitive.pos
-    v1, v2, v3 = point_primitive.tex_coords
-    s0 = point_primitive.scalar # scalar of v0
-    
-    # Determine projection case using PTINT classification
-    # Requires 4 cross products and table lookup
-    case = classify_projection(v0, v1, v2, v3)
+def geometry_shader(input_point):
+    # 1. Decompose into triangles
+    # Determine projection case using PTINT classification (4 cross products + table lookup)
+    # This determines if vertices are 'thick' or 'thin'
     
     triangles = []
     
-    if case == 1:
-        # Class 1: Ray-plane intersection to find one point in interior of back/front face
-        p = ray_plane_intersection(v0, v1, v2, v3)
-        triangles.append([v0, v1, p])
-        triangles.append([v1, v2, p])
-        triangles.append([v2, v0, p])
-    elif case == 2:
-        # Class 2: Two line-line intersections
-        p_front = line_line_intersection(v0, v1, v2, v3)
-        p_back = line_line_intersection(v0, v1, v2, v3)
-        triangles.append([v0, p_front, p_back])
-        # ... additional triangles based on specific case logic
-    elif case == 3:
-        # Class 3: One line-line intersection
-        p = line_line_intersection(v0, v1, v2, v3)
-        triangles.append([v0, v1, p])
-        # ...
-    elif case == 4:
-        # Class 4: Degenerate case, no new vertices
-        triangles.append([v0, v1, v2])
-        # ...
-        
-    for tri in triangles:
-        # Compute attributes for each vertex in the triangle
-        # Identify thick vs thin vertices
-        # Thick vertex: max traversal length l, interpolated scalar
-        # Thin vertex: l=0, sf=sb=original scalar
-        
-        tri_vertices = []
-        for v in tri:
-            if is_thick_vertex(v, case):
-                l = compute_traversal_length(v)
-                sf = interpolate_scalar(v)
-                sb = interpolate_scalar(v)
-            else:
-                l = 0.0
-                sf = get_original_scalar(v)
-                sb = get_original_scalar(v)
+    # 2. For each vertex of the generated triangles:
+    for vertex in projected_vertices:
+        if vertex is 'thick':
+            # Compute traversal length l (may require interpolation of scalar and distance calc)
+            l = compute_traversal_length(vertex, input_point)
+            # Interpolate scalar value if necessary
+            s_f = interpolate_scalar(vertex, input_point)
+            s_b = s_f # Or computed based on exit point
+        else: # 'thin' vertex
+            l = 0.0
+            s_f = input_point['scalar']
+            s_b = input_point['scalar']
             
-            # Encode sf, sb, l as RGB
-            color = vec3(sf, sb, l)
-            tri_vertices.append(Vertex(pos=v, color=color))
-            
-        yield tri_vertices
+        # Encode s_f, s_b, l as RGB color
+        color = encode_rgb(s_f, s_b, l)
+        
+        triangles.append({
+            'vertex': vertex,
+            'color': color
+        })
+        
+    return triangles
 
 # Fragment Shader
 def fragment_shader(interpolated_color):
-    sf = interpolated_color.r
-    sb = interpolated_color.g
-    l = interpolated_color.b
+    # Decode s_f, s_b, l from RGB
+    s_f, s_b, l = decode_rgb(interpolated_color)
     
-    # Extract colors from transfer function
-    color_front = transfer_function(sf)
-    color_back = transfer_function(sb)
+    # Partial Pre-Integration
+    # Map s_f and s_b to colors using transfer function
+    color_f = transfer_function(s_f)
+    color_b = transfer_function(s_b)
     
-    # Partial pre-integration lookup
-    # Indices computed from l and color_front/color_back
-    idx1 = compute_index(l, color_front)
-    idx2 = compute_index(l, color_back)
+    # Compute indices for pre-integration table
+    idx_l = map_to_table_index(l)
+    idx_colors = map_colors_to_table_index(color_f, color_b)
     
-    # Access pre-computed table
-    result = pre_integration_table[idx1][idx2]
+    # Lookup pre-computed ray integral
+    result_color = pre_integration_table[idx_l][idx_colors]
     
-    return result.color, result.opacity
+    return result_color
 ```
 
 **Parameters:**
-*   **Sorting Method:** Quicksort (CUDA), Bitonic Sort (CUDA), Introsort (CPU), MPVONC (CPU), Centroid Sort. Centroid sort is approximate but faster [S1, unofficial][S2, unofficial][S3, unofficial].
+*   **Sorting Method:** Quicksort (CUDA), Bitonic Sort (CUDA), Introsort (CPU), MPVONC (CPU), or Centroid Sort [S2, S3, unofficial].
 *   **Pre-integration Table:** Pre-computed table for partial pre-integration, independent of the transfer function [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Sorting Errors:** Centroid sorting may invert the order of adjacent tetrahedra, introducing visual error. Average error is ~1 RGB unit (0-255 scale), max error ranges from 1.176% to 5.098% depending on dataset [S2, unofficial][S3, unofficial].
-*   **Bitonic Sort Limitation:** Requires power-of-two array sizes, necessitating buffer enlargement and potentially slower performance [S2, unofficial].
-*   **MPVONC Memory:** Requires auxiliary data structures (adjacency list, face normals), increasing CPU memory usage by ~4x [S2, unofficial].
-*   **MPVONC Degeneracy:** May fail to perform correct visibility ordering in some degenerated cases [S2, unofficial][S3, unofficial].
-*   **Early Discard Overhead:** Requires large empty regions to be profitable due to texture fetch overhead in the vertex shader [S2, unofficial].
-*   **Iso-surface Shading:** Normals are restricted to faces (flat shading) unless adjacency info is carried, which impacts memory/performance [S2, unofficial].
+*   **Sorting Error:** Centroid sorting is approximate and can invert the order of adjacent tetrahedra, introducing visual error (avg ~1 RGB unit, max 1.2-5.1% depending on dataset) [S2, S3, unofficial].
+*   **MPVONC Degeneracy:** MPVONC may fail to perform correct visibility ordering in some degenerated cases [S2, S3, unofficial].
+*   **Bitonic Sort Size:** CUDA Bitonic Sort requires power-of-two array sizes, necessitating buffer enlargement and potentially slower performance [S2, unofficial].
+*   **Memory Usage:** MPVONC requires auxiliary data structures (adjacency list, face normals), increasing CPU memory by ~4x the volume size [S2, unofficial].
+*   **Early Discard Overhead:** Early discard in VS requires large empty regions to be profitable due to texture fetch overhead [S2, unofficial].
 
 ## Subtopics
 
 ### [Tetrahedral Projection with Partial Pre-integration](1861-tetrahedral-projection-with-partial-pre-integration.md)
-PTINT is a hybrid method that projects tetrahedra and computes fragment colors using pre-integrated optical depth tables. It solves the performance bottleneck of explicit isosurface extraction by computing isosurfaces per fragment. Unlike full pre-integration, PTINT uses a transfer-function-independent $\psi$ table, allowing interactive transfer function editing. It builds on HAPT by leveraging GPU rasterization for cell projection.
+PTINT is a hybrid method that projects tetrahedra and computes fragment colors using pre-integrated optical depth tables. It solves the performance bottleneck of explicit isosurface extraction by computing isosurfaces per fragment. Unlike full pre-integration, PTINT uses a transfer-function-independent $\psi$ table. It builds on HAPT by leveraging GPU rasterization for cell projection.
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by sorting and rasterization. Sorting can be $O(N \log N)$ or $O(N)$ depending on the method. Rasterization is linear in the number of projected triangles.
-*   **Memory Complexity:** Low GPU memory usage as tetrahedra are streamed. CPU memory usage can be high if using MPVONC (4x volume size) [S2, unofficial].
-*   **Measured Performance:**
-    *   Achieves over 6 M Tet/s for unstructured datasets using CUDA-based visibility ordering [S1, unofficial][S2, unofficial].
-    *   Blunt fin (187K Tet): 19.2 fps [S1, unofficial].
-    *   Oxygen post (513K Tet): 8.1 fps [S1, unofficial].
-    *   Turbulent jet (1M Tet/frame, 150 frames): 17.5 fps [S1, unofficial][S3, unofficial].
-    *   spx2 (828K Tet): 7.4 fps (HAPT Quicksort) [S3, unofficial].
-*   **Scaling:** Scales well with GPU parallelism. Streaming allows rendering of volumes larger than GPU memory [S2, unofficial].
-*   **Strengths:** Single-pass rendering, low GPU memory consumption, supports direct and indirect volume rendering, handles time-varying data, flexible sorting methods [S1, unofficial][S2, unofficial].
-*   **Limitations:** Approximate sorting (if used) introduces error, flat shading for iso-surfaces, dependency on geometry shader support [S2, unofficial][S3, unofficial].
-*   **When to Use:** Interactive visualization of large unstructured tetrahedral volumes, time-varying data, hybrid rendering [S1, unofficial][S2, unofficial].
-*   **When Not to Use:** When exact visibility ordering is critical and sorting overhead is prohibitive, or when smooth iso-surface normals are required without adjacency data [S2, unofficial].
+*   **Time Complexity:** Dominated by sorting and rasterization. Sorting can be $O(N \log N)$ or $O(N)$ depending on the method (e.g., Quicksort vs. Radix/Bitonic). Rasterization is linear in the number of projected triangles.
+*   **Memory Complexity:** Low GPU memory usage as tetrahedra are streamed. CPU memory usage depends on the sorting method (MPVONC uses ~4x volume size) [S2, unofficial].
+*   **Performance:** Achieves over 6 M Tet/s for unstructured datasets using CUDA-based visibility ordering [S1, S2, unofficial].
+    *   Blunt fin (187 K Tet): 19.2 fps [S1, S3, unofficial].
+    *   Oxygen post (513 K Tet): 8.1 fps [S1, S3, unofficial].
+    *   Turbulent jet (1 M Tet/frame): 17.5 fps [S1, S3, unofficial].
+    *   HAPT (Quicksort) on spx2 (828K tet): 7.4 FPS, 6.11 M Tet/s [S3, unofficial].
+*   **Strengths:** Single-pass GPU rendering, low GPU memory consumption, supports direct and indirect rendering, handles time-varying data efficiently [S1, S2, unofficial].
+*   **Limitations:** Requires sorting (visibility ordering is a disadvantage for cell-projection algorithms), centroid sorting introduces error, MPVONC is memory-intensive [S2, S3, unofficial].
+*   **When to use:** When rendering large unstructured tetrahedral meshes on modern GPUs with limited VRAM, and interactive performance is required.
+*   **When not to use:** When exact visibility ordering is critical and sorting overhead is prohibitive, or when the hardware does not support geometry shaders.
 
 ## Background
-HAPT was introduced by A. Maximo, R. Marroquim, and R. Farias in 2010, published in the Journal of Computer Graphics Techniques [S3, unofficial]. It is grounded on the original Projected Tetrahedra (PT) algorithm [ST90] and developed to exploit programmable graphics hardware [S3, unofficial]. It addresses the visibility ordering problem using fast sorting algorithms adapted to CUDA [S3, unofficial]. The method is used for direct volume rendering of datasets such as torso, fighter, and turbjet, and supports iso-surface extraction using the marching tetrahedra method [S3, unofficial].
+HAPT was introduced by A. Maximo, R. Marroquim, and R. Farias in 2010, published in the Journal of Computer Graphics Techniques [S3, unofficial]. It is grounded on the original Projected Tetrahedra (PT) algorithm [ST90] and developed to exploit programmable graphics hardware [S3, unofficial]. It addresses the visibility ordering problem using a fast quicksort algorithm adapted to CUDA [S3, unofficial]. It is used for direct volume rendering of torso, fighter, and turbjet datasets, and supports iso-surface extraction [S3, unofficial].
 
 ## Sources
 [S1] (PDF) Hardware-Assisted Projected Tetrahedra - ResearchGate, https://www.researchgate.net/publication/220507188_Hardware-Assisted_Projected_Tetrahedra, fetched 2026-10-29 (unofficial)

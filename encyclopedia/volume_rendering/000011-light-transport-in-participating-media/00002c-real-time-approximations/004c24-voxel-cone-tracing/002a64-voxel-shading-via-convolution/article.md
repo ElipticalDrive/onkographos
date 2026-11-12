@@ -3,131 +3,102 @@
 Also called: Gaussian Lobe Convolution, Voxel Convolution, Voxel Shading for Indirect Illumination
 
 ## Overview
-Voxel Shading via Convolution is a method for computing indirect illumination in participating media by approximating the integration of light transport over a voxel's volume. It solves the problem of accounting for variations in embedded directions (normals), scalar attributes, and the span of the accumulating view cone during voxel cone tracing. It sets itself apart from sibling methods by explicitly modeling the statistical distribution of surface normals and view directions as Gaussian lobes, allowing the BRDF, Normal Distribution Function (NDF), and view cone span to be convolved analytically rather than sampled discretely.
+Voxel Shading via Convolution computes indirect illumination for a voxel by accounting for variations in embedded directions, scalar attributes, and the span of the accumulating view cone [S1, S2]. It sets itself apart from sibling methods by explicitly modeling the statistical distribution of surface normals and view directions as Gaussian lobes, allowing the BRDF, Normal Distribution Function (NDF), and view cone span to be convolved analytically rather than sampled discretely [S1, S2].
 
 ## How it works
 **Inputs:**
-- Voxel data containing the averaged normal vector $\mathbf{N}$ and its length $|\mathbf{N}|$.
-- The view cone parameters, specifically the aperture angle $\psi$.
-- A BRDF model, specifically the Phong BRDF decomposed into diffuse and specular components.
+- Voxel data containing the averaged normal vector $\mathbf{N}$ and its length $|\mathbf{N}|$ [S1, S2].
+- The view cone parameters, specifically the aperture angle $\psi$ [S1, S2].
+- A BRDF model, specifically the Phong BRDF decomposed into diffuse and specular components [S1, S2].
 
 **Outputs:**
-- The shaded color (radiance) for the voxel, accounting for indirect illumination.
+- The shaded color (radiance) for the voxel, accounting for indirect illumination [S1, S2].
 
 **Data Structures:**
-- **Voxel Normal Storage:** Each voxel stores an averaged normal vector $\mathbf{N}$. The magnitude $|\mathbf{N}|$ represents the coherence of the normals within the voxel volume. $|\mathbf{N}| = 1$ implies all normals are identical; $|\mathbf{N}| = 0$ implies isotropic or random normals.
-- **View Cone:** Defined by its origin and aperture $\psi$.
+- **Voxel Normal Storage:** Each voxel stores an averaged normal vector $\mathbf{N}$ [S1, S2]. The magnitude $|\mathbf{N}|$ represents the coherence of the normals within the voxel volume [S1, S2].
+- **View Cone:** Defined by its origin and aperture $\psi$ [S1, S2].
 
 **Method Steps:**
 
 1.  **Decompose BRDF into Gaussian Lobes:**
-    The Phong BRDF is decomposed into two components:
-    - A large diffuse lobe.
-    - A specular lobe.
-    Both are represented as Gaussian lobes. This allows the BRDF to be treated as a probability distribution of reflected directions.
+    The Phong BRDF is decomposed into two components: a large diffuse lobe and a specular lobe [S1, S2]. Both are represented as Gaussian lobes [S1, S2].
 
 2.  **Compute the Normal Distribution Function (NDF):**
-    The NDF is derived from the length of the averaged normal vector $|\mathbf{N}|$ stored in the voxel. The variance $\sigma_n^2$ of the normal distribution is computed using the approach proposed by [Tok05]. The source text provides the formula as:
+    The NDF is derived from the length of the averaged normal vector $|\mathbf{N}|$ stored in the voxel [S1, S2]. The variance $\sigma_n^2$ of the normal distribution is computed using the approach proposed by [Tok05] [S1, S2]. The source text provides the formula as:
     $$ \sigma_n^2 = 1 - \frac{|N|}{|N|} $$
-    Note: The source text contains a likely typographical error in the denominator or structure, as $|N|/|N|$ equals 1, resulting in $\sigma_n^2 = 0$. However, the source explicitly states this formula [S1, S2]. In standard practice, this is often interpreted as $\sigma_n^2 = 1 - |\mathbf{N}|^2$ or similar, but the implementation must follow the cited source's explicit notation if strictly adhering to the text, or acknowledge the ambiguity. The source text is quoted exactly as: `(σ 2 n = 1−|N| |N| )` [S1, S2].
+    Note: The source text contains a typographical error, as $|N|/|N|$ equals 1, resulting in $\sigma_n^2 = 0$ [S1, S2]. Implementations typically interpret this as $\sigma_n^2 = 1 - |\mathbf{N}|^2$ [G].
 
 3.  **Fit Distribution to View Cone:**
-    The distribution of directions from a filtered voxel towards the origin of a view cone is assumed to be identical to the distribution of directions from the cone origin towards the voxel. This distribution is represented by a Gaussian lobe with standard deviation $\sigma_v$:
+    The distribution of directions from a filtered voxel towards the origin of a view cone is assumed identical to the distribution of directions from the cone origin towards the voxel [S1, S2]. This distribution is represented by a Gaussian lobe with standard deviation $\sigma_v$:
     $$ \sigma_v = \cos(\psi) $$
     where $\psi$ is the view cone's aperture [S1, S2].
 
 4.  **Convolve Components:**
-    The final shading is computed by convolving the three Gaussian lobes:
-    - The BRDF lobes (diffuse and specular).
-    - The NDF (derived from $|\mathbf{N}|$).
-    - The view cone distribution (derived from $\psi$).
-    
-    This convolution accounts for the variations in embedded directions and scalar attributes, as well as the span of the accumulating cone [S1, S2].
+    The final shading accounts for variations in embedded directions and scalar attributes, as well as the span of the accumulating cone, by convolving the BRDF lobes, the NDF, and the view cone span [S1, S2].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def voxel_shading_via_convolution(voxel_normal, cone_aperture, brdf_diffuse_lobe, brdf_specular_lobe):
+import math
+
+def norm(v):
+    return math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+
+def voxel_shading_via_convolution(voxel_normal, cone_aperture, brdf_diffuse_sigma, brdf_specular_sigma):
     """
-    Computes indirect illumination for a voxel by convolving BRDF, NDF, and view cone distributions.
+    Computes the convolved Gaussian lobe parameters for indirect voxel shading.
     
     Args:
-        voxel_normal (Vector): The averaged normal vector N stored in the voxel.
+        voxel_normal (tuple): The averaged normal vector N stored in the voxel.
         cone_aperture (float): The aperture angle psi of the view cone.
-        brdf_diffuse_lobe (GaussianLobe): The diffuse component of the Phong BRDF.
-        brdf_specular_lobe (GaussianLobe): The specular component of the Phong BRDF.
+        brdf_diffuse_sigma (float): Standard deviation of the diffuse BRDF lobe.
+        brdf_specular_sigma (float): Standard deviation of the specular BRDF lobe.
         
     Returns:
-        Color: The shaded color of the voxel.
+        dict: Combined standard deviations for diffuse and specular shading lobes.
     """
     # Step 1: Compute NDF variance from averaged normal length
-    # Source formula: sigma_n^2 = 1 - |N| / |N|
-    # Note: Source text contains a likely typo. Implementation should verify if 
-    # denominator is intended to be |N|^2 or if the formula is 1 - |N|^2.
-    # Strict adherence to source text:
-    norm_length = length(voxel_normal)
-    
-    # Guard against division by zero if norm_length is 0
-    if norm_length == 0:
-        # If normals are isotropic, variance is maximal. 
-        # Source formula yields 0/0. Assuming maximal variance for isotropic case.
-        sigma_n_sq = 1.0 
-    else:
-        # Exact source formula: 1 - |N| / |N|
-        # This evaluates to 0. This is likely incorrect physically.
-        # However, per instructions, we quote source. 
-        # If the source meant 1 - |N|^2, it would be:
-        # sigma_n_sq = 1.0 - norm_length * norm_length
-        # We will use the source's explicit text representation, noting the ambiguity.
-        # For a working implementation, 1 - |N|^2 is the standard interpretation of [Tok05].
-        # [G] Using standard interpretation of Tok05 for functional code, as source formula is degenerate.
-        sigma_n_sq = 1.0 - norm_length * norm_length
+    # Source formula: sigma_n^2 = 1 - |N| / |N| [S1, S2]
+    # Note: Source contains a typo; |N|/|N| = 1. Standard interpretation is 1 - |N|^2 [G]
+    norm_length = norm(voxel_normal)
+    sigma_n_sq = 1.0 - norm_length * norm_length
+    if sigma_n_sq < 0.0:
+        sigma_n_sq = 0.0
         
-    ndf_lobe = GaussianLobe(sigma=sqrt(sigma_n_sq))
-
     # Step 2: Fit view cone distribution
-    # sigma_v = cos(psi)
-    sigma_v = cos(cone_aperture)
-    view_cone_lobe = GaussianLobe(sigma=sigma_v)
-
+    # sigma_v = cos(psi) [S1, S2]
+    sigma_v_sq = math.cos(cone_aperture) ** 2
+    
     # Step 3: Convolve BRDF, NDF, and View Cone
-    # The convolution of Gaussian lobes is another Gaussian lobe with variance equal to the sum of variances.
-    # However, the shading computation involves integrating the product of these distributions.
+    # Convolution of independent Gaussian distributions sums their variances [G]
+    # Diffuse contribution variance
+    diffuse_var = brdf_diffuse_sigma ** 2 + sigma_n_sq + sigma_v_sq
+    # Specular contribution variance
+    specular_var = brdf_specular_sigma ** 2 + sigma_n_sq + sigma_v_sq
     
-    # Convolve NDF and View Cone
-    combined_direction_lobe = convolve_gaussians(ndf_lobe, view_cone_lobe)
-    
-    # Convolve with BRDF lobes
-    # Diffuse contribution
-    diffuse_shade = convolve_gaussians(brdf_diffuse_lobe, combined_direction_lobe)
-    
-    # Specular contribution
-    specular_shade = convolve_gaussians(brdf_specular_lobe, combined_direction_lobe)
-    
-    # Combine contributions
-    # [G] Assuming linear combination of diffuse and specular terms weighted by their respective intensities
-    # The source states "convolve the BRDF... the first already being represented as Gaussian lobes"
-    # It implies the final result is the convolution of all three.
-    
-    return diffuse_shade + specular_shade
+    # Return combined lobe parameters for shading integration
+    return {
+        "diffuse_sigma": math.sqrt(diffuse_var),
+        "specular_sigma": math.sqrt(specular_var)
+    }
 ```
 
 **Edge Cases and Pitfalls:**
-- **Degenerate Normal Length:** If $|\mathbf{N}| = 0$, the source formula $1 - |N|/|N|$ is undefined. In practice, this implies isotropic normals, requiring a maximal variance assumption [G].
-- **Source Formula Ambiguity:** The formula $\sigma_n^2 = 1 - \frac{|N|}{|N|}$ is mathematically degenerate (always 0 for non-zero $N$). Implementers must rely on the context of [Tok05] to interpret this as $\sigma_n^2 = 1 - |\mathbf{N}|^2$ or similar, as the literal source text is likely a typo [S1, S2].
+- **Degenerate Normal Length:** If $|\mathbf{N}| = 0$, the source formula $1 - |N|/|N|$ is undefined [S1, S2]. In practice, this implies isotropic normals, requiring a maximal variance assumption [G].
+- **Source Formula Ambiguity:** The formula $\sigma_n^2 = 1 - \frac{|N|}{|N|}$ is mathematically degenerate (always 0 for non-zero $N$) [S1, S2]. Implementers must rely on the context of [Tok05] to interpret this as $\sigma_n^2 = 1 - |\mathbf{N}|^2$ [G].
 
 ## Operating characteristics
-- **Time Complexity:** The convolution of Gaussian lobes can be computed analytically in constant time relative to the number of samples, as the product/convolution of Gaussians is closed-form. This makes it significantly faster than Monte Carlo sampling for indirect illumination.
-- **Memory Complexity:** Requires storing the averaged normal vector $\mathbf{N}$ in each voxel. No additional large buffers are needed beyond the cone tracing data.
-- **Strengths:** Provides smooth, alias-free indirect illumination by integrating over the voxel volume. Handles glossy reflections via the specular lobe convolution.
-- **Limitations:** Relies on the Gaussian approximation, which may not accurately represent sharp features or highly anisotropic distributions. The accuracy depends on the quality of the averaged normal vector $\mathbf{N}$.
-- **When to use:** Suitable for real-time indirect illumination where smooth shading is acceptable and performance is critical.
-- **When not to use:** Not suitable for highly anisotropic materials or when precise geometric details are required within the voxel.
+- **Time Complexity:** The convolution of Gaussian lobes is computed analytically in constant time relative to the number of samples, as the product/convolution of Gaussians is closed-form [G].
+- **Memory Complexity:** Requires storing the averaged normal vector $\mathbf{N}$ in each voxel [S1, S2].
+- **Strengths:** Provides smooth, alias-free indirect illumination by integrating over the voxel volume [S1, S2]. Handles glossy reflections via the specular lobe convolution [S1, S2].
+- **Limitations:** Relies on the Gaussian approximation, which may not accurately represent sharp features or highly anisotropic distributions [G].
+- **When to use:** Suitable for real-time indirect illumination where smooth shading is acceptable and performance is critical [S1, S2].
+- **When not to use:** Not suitable for highly anisotropic materials or when precise geometric details are required within the voxel [G].
 
 ## Background
-Voxel Shading via Convolution was introduced in the context of Interactive Indirect Illumination Using Voxel Cone Tracing [S1, S2]. It builds on the work of [Fou92] and [HSRG07] regarding the convolution of lobe shapes for shading. The NDF computation is based on the approach by [Tok05]. The method is part of the broader Voxel Cone Tracing pipeline, specifically addressing the shading step after cone tracing has accumulated radiance.
+Voxel Shading via Convolution was introduced in the context of Interactive Indirect Illumination Using Voxel Cone Tracing [S1, S2]. It builds on the work of [Fou92] and [HSRG07] regarding the convolution of lobe shapes for shading [S1, S2]. The NDF computation is based on the approach by [Tok05] [S1, S2]. The method is part of the broader Voxel Cone Tracing pipeline, specifically addressing the shading step after cone tracing has accumulated radiance [S1, S2].
 
 ## Sources
 [S1] Interactive Indirect Illumination Using Voxel Cone Tracing, https://doi.org/10.1111/j.1467-8659.2011.02063.x, fetched 2026-10-26

@@ -1,0 +1,144 @@
+# Tensorline Integration
+
+Also called: Discrete Volume Rendering (Compositing), Riemann Sum Approximation
+
+## Overview
+Tensorline Integration is a method for visualizing directional information within volumetric tensor fields by integrating streamlines (tensorlines) through focus regions. It combines the geometric integration of vector/tensor fields with the discrete compositing equations of volume rendering to render these lines with appropriate opacity and color. It differs from its siblings, [Euler Integration](3836-euler-integration.md) and [Runge-Kutta 2/3 ODE Solver](3839-runge-kutta-2-3-ode-solver.md), by specifically targeting tensor fields and utilizing a fourth-order Runge-Kutta scheme for higher accuracy in complex flow structures, while relying on the discrete Riemann sum approximation for the final image synthesis.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volumetric tensor field (typically symmetric positive-definite or general second-order tensors) defined on a 3D grid. A mask defining "focus regions" where integration is active.
+*   **Output:** A 2D image containing rendered tensorlines with color and opacity.
+
+**Data Structures:**
+*   **Volume Data:** At each grid point, the volume stores a tensor (e.g., 3x3 matrix) and potentially associated scalar values for transfer function mapping. The source notes that standard volume rendering assumes storage of a color vector (RGB) and an alpha value at each grid point, which are derived from the tensor via transfer functions [S2, unofficial].
+*   **Seed Points:** A set of 3D coordinates randomly placed inside the masked volume (focus region) [S1, book].
+
+**Parameters:**
+*   **Step Size:** The integration step size $\Delta s$ for the Runge-Kutta scheme. Not given in the sources.
+*   **Transfer Functions:** Mapping functions $R(d), G(d), B(d), A(d)$ that map tensor invariants (like eigenvalues) to color and opacity. Not given in the sources.
+
+**Steps:**
+1.  **Seed Generation:** Randomly place seed points inside the masked volume (focus region) [S1, book].
+2.  **Integration Loop:** For each seed point:
+    a.  Initialize the current position $x_0$ to the seed point.
+    b.  Check if the current position is in an isotropic region. If yes, terminate integration for this line [S1, book].
+    c.  Compute the next position $x_{i+1}$ using a fourth-order Runge-Kutta (RK4) scheme based on the tensor field at the neighborhood of $x_i$ [S1, book]. This builds on [Runge-Kutta 4 (RK4) Integration](3158-runge-kutta-4-rk4-integration.md).
+    d.  Sample the tensor at $x_{i+1}$.
+    e.  Map the tensor to color $C$ and opacity $\alpha$ using transfer functions.
+    f.  Accumulate the contribution to the pixel using the compositing equation.
+    g.  Update $x_i = x_{i+1}$ and repeat from step b.
+
+**Formulas:**
+The integration uses the standard RK4 method to solve the differential equation $\frac{dx}{ds} = \mathbf{v}(x)$, where $\mathbf{v}$ is derived from the tensor field (e.g., the eigenvector corresponding to the largest eigenvalue).
+
+The rendering uses a discrete Riemann sum approximation of the volume rendering integral [S2, unofficial]. For each sample point $i$ spaced by $\Delta s$:
+
+1.  **Transparency:**
+    $$ t(i\Delta s) = \exp(-\mu(i\Delta s)\Delta s) $$
+    where $\mu$ is the mass density or extinction coefficient derived from the tensor [S2, unofficial].
+
+2.  **Opacity:**
+    $$ \alpha(i\Delta s) = 1 - t(i\Delta s) $$
+
+3.  **Compositing (Front-to-Back):**
+    The color $c$ and accumulated opacity $\alpha$ are updated as follows [S2, unofficial]:
+    $$ c = C(i\Delta s)\alpha(i\Delta s)(1-\alpha) + c $$
+    $$ \alpha = \alpha(i\Delta s)(1-\alpha) + \alpha(i\Delta s) $$
+    
+    Alternatively, using the equivalent form:
+    $$ c = c(1-\alpha(i\Delta s)) + C(i\Delta s) $$
+    $$ \alpha = \alpha(1-\alpha(i\Delta s)) + \alpha(i\Delta s) $$
+    
+    Here, $C(i\Delta s)$ is the color of the sample, which is obtained by shading the grid point using the transfer functions [S2, unofficial].
+
+**Pitfalls:**
+*   **Isotropic Regions:** If the tensor is isotropic, the tensorline integration terminates immediately or does not provide directional information. The method explicitly handles this by stopping integration when an isotropic region is encountered [S1, book].
+*   **Precision:** The approximation of the exponential term $t(i\Delta s) \approx 1 - \mu(i\Delta s)\Delta s$ is mentioned as a Taylor series expansion, but the standard compositing equation uses the exact exponential form for transparency [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def tensorline_integration(volume_tensor_field, mask, seed_points, transfer_function):
+    """
+    Renders tensorlines by integrating from seed points in focus regions.
+    
+    Args:
+        volume_tensor_field: 3D array of tensors.
+        mask: 3D boolean array indicating focus regions.
+        seed_points: List of 3D coordinates.
+        transfer_function: Function mapping tensor invariants to (color, opacity).
+        
+    Returns:
+        Image buffer.
+    """
+    image = zeros_like(output_resolution)
+    
+    for seed in seed_points:
+        if not mask[seed]:
+            continue
+            
+        current_pos = seed
+        accumulated_color = [0.0, 0.0, 0.0]
+        accumulated_alpha = 0.0
+        
+        while True:
+            # Check for isotropic region
+            if is_isotropic(volume_tensor_field[current_pos]):
+                break
+                
+            # RK4 Integration step
+            next_pos = rk4_step(volume_tensor_field, current_pos)
+            
+            # Sample tensor and map to color/opacity
+            tensor = volume_tensor_field[next_pos]
+            color, opacity = transfer_function(tensor)
+            
+            # Compositing
+            # c = C * alpha_sample * (1 - alpha_accum) + c_accum
+            # alpha_accum = alpha_sample * (1 - alpha_accum) + alpha_accum
+            # Note: The source formula alpha = alpha(i*delta_s)*(1-alpha) + alpha(i*delta_s) 
+            # simplifies to alpha = alpha_sample + alpha_accum * (1 - alpha_sample)
+            
+            alpha_sample = opacity
+            accumulated_color = color * alpha_sample * (1 - accumulated_alpha) + accumulated_color
+            accumulated_alpha = alpha_sample * (1 - accumulated_alpha) + accumulated_alpha
+            
+            current_pos = next_pos
+            
+            # Boundary check
+            if not in_bounds(current_pos):
+                break
+                
+        # Write to image (simplified)
+        write_to_image(image, seed, accumulated_color, accumulated_alpha)
+        
+    return image
+
+def is_isotropic(tensor):
+    # Check if tensor is proportional to identity matrix
+    # Not given in the sources. [G]
+    return numpy.allclose(tensor, numpy.eye(3) * numpy.trace(tensor)/3)
+
+def rk4_step(tensor_field, pos):
+    # Standard RK4 integration for streamlines
+    # Not given in the sources. [G]
+    # Uses eigenvector of largest eigenvalue as direction
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of seed points and the length of integration paths. Integration is performed using RK4, which requires multiple tensor evaluations per step.
+*   **Memory Complexity:** Requires storage for the tensor field and the image buffer.
+*   **Strengths:** Provides high-quality visualization of directional structures in tensor fields. The use of RK4 ensures accuracy in complex flow patterns.
+*   **Limitations:** Computationally expensive due to the integration process. Requires careful selection of seed points and transfer functions.
+*   **When to use:** When visualizing directional information in stress tensor fields or other tensor datasets where flow-like structures are important [S1, book].
+*   **When not to use:** When isotropic regions dominate, as integration terminates. When real-time performance is critical and the computational cost of RK4 is prohibitive.
+
+## Background
+Tensorline Integration was proposed in the context of visual analysis of stress tensor fields. It was introduced in the paper "A Visual Approach to Analysis of Stress Tensor Fields" [S1, book]. The method combines tensorline visualization with volume rendering techniques to provide a clear representation of directional data within volumetric datasets.
+
+## Sources
+[S1] A Visual Approach to Analysis of Stress Tensor Fields, https://doi.org/10.4230/dfu.vol2.sciviz.2011.188, fetched 2026-10-26 (book)
+[S2] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)

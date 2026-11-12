@@ -3,35 +3,47 @@
 Also called: Index-based Isosurface Extraction, Range-based Isosurface Extraction
 
 ## Overview
-Search Data Structure Based Isosurface Extraction is a family of methods that accelerates isosurface extraction for multiple queries by constructing external indices to disregard regions containing only non-active cells [S1]. Unlike simple traversal, these methods trade upfront index construction time for faster subsequent queries, making them distinct from single-pass techniques [S1].
+Search Data Structure Based Isosurface Extraction accelerates the identification of active cells for multiple isosurface queries by constructing an external index that allows the algorithm to disregard regions containing only non-active cells [S1]. It sets itself apart from its siblings by classifying methods into range-based (using kd-trees or interval trees on cell value ranges) and domain-based (using octrees for hierarchical spatial partitioning) approaches, whereas alternatives like [Standard Interval Tree for Isosurface Extraction](1230-standard-interval-tree-for-isosurface-extraction.md) focus on specific interval tree implementations and [Span Space Isosurface Extraction](1750-span-space-isosurface-extraction.md) focuses on span-space pruning [S1].
 
 ## Shared principles
-The core mechanism involves building a data structure that maps spatial or value-based ranges to cells (voxels) in the volume. This allows the extraction algorithm to query for active cells (those intersecting the isosurface) without visiting every cell in the domain [S1].
+The core mechanism involves pre-processing the volumetric dataset to build a search structure (index) that maps spatial or value-based properties to cell identities. This index enables efficient range queries: given an isovalue $q$, the structure returns only those cells $c$ where the isosurface might exist, defined by the condition $q \in R(c)$ for range-based methods [S1].
 
-The general workflow is:
-1.  **Index Construction**: Analyze the scalar field $f(p)$ over each cell $c$ (or group of cells) to determine bounds.
-2.  **Query**: Given an isovalue $q$, traverse the search structure to enumerate only cells $c$ where the isovalue falls within the stored bounds.
-3.  **Extraction**: Apply a standard surface extraction algorithm (e.g., Marching Cubes) only to the enumerated active cells [S1].
+**Range-Based Principle:**
+Each cell $c$ is associated with a continuous set of values $R(c)$ defined by the minimum and maximum scalar values found within that cell:
+$$R(c) = [\min_{p \in C} f(p), \max_{p \in C} f(p)]$$
+The query enumerates all cells $c$ such that the isovalue $q$ satisfies $q \in R(c)$ [S1]. Common structures for this include kd-trees and interval trees [S1].
 
-The feasibility of this approach depends on the cost of index creation versus the number of queries. If the dataset is examined only once, the total time (index creation + extraction) typically exceeds simple linear traversal [S1]. Similarly, if the data must be transferred to another resource, the download overhead of the index may negate performance gains [S1].
+**Domain-Based Principle:**
+The domain spanned by the dataset is hierarchically partitioned to disregard parts of the volume not containing active cells. The primary structure for this approach is the octree [S1].
+
+**Contour Propagation Variant:**
+A related technique determines an active 'seed cell' for each connected component of each possible isosurface. These seed cells are grouped by isovalue. The isosurface is traced by a breadth-first traversal through face-adjacencies starting from the seed cells corresponding to the required isovalue [S1].
+
+**Feasibility Constraints:**
+The adoption of search structures is not feasible if the dataset is examined only once (e.g., medical examination results, CFD simulations, or single-protein surface reconstruction), as the time to create the index plus extraction time exceeds simple traversal [S1]. It is also infeasible if the dataset must be transferred to another resource, due to the additional download overhead of the index [S1].
 
 ## Subtopics
 
-### Range-based Techniques
-Range-based techniques associate each cell $c$ with the continuous set of values $R(c) = [\min_{p \in C} f(p), \max_{p \in C} f(p)]$ [S1]. The query enumerates all cells $c$ such that the isovalue $q \in R(c)$ [S1]. Common structures include kd-trees and interval trees [S1].
+### [NOISE (Near Optimal IsoSurface Extraction)](10932-noise-near-optimal-isosurface-extraction.md)
+Uses a K-D tree in span-space to rapidly identify candidate cells for interactive isosurface changes.
 
-### Domain-based Techniques
-Domain-based techniques hierarchically partition the spatial domain to disregard parts of the volume not containing active cells for a given isovalue [S1]. The primary search data structure adopted is the octree [S1].
+### [Fixed-Sized Buckets for Isosurface Extraction](1252-fixed-sized-buckets-for-isosurface-extraction.md)
+Uses fixed-sized buckets for range-based indexing.
 
-### Contour Propagation
-Contour propagation determines an active 'seed cell' for each connected component of each possible isosurface based on the continuity of the scalar field [S1]. Seed cells are grouped by isovalue. The isosurface is traced by breadth-first traversal through face-adjacencies starting from the seed cells corresponding to the required isovalue [S1].
+### [Interval Tree with Cell Grouping](1342-interval-tree-with-cell-grouping.md)
+Groups cells within an interval tree structure.
 
-### NOISE (Near Optimal IsoSurface Extraction)
-NOISE is a rapid isosurface extraction algorithm for structured and unstructured grids that enables interactive, real-time changes to the isosurface threshold without full recalculation [S2, S2, unofficial]. It constructs a multi-dimensional search tree (kd-tree) storing the minimum and maximum scalar values for each voxel [S2, S2, unofficial]. The algorithm searches the resulting "span space" of the kd-tree for a user-specified isosurface threshold [S2, S2, unofficial]. It outputs only those voxels whose stored min/max ranges bracket the threshold, indicating potential intersection [S2, S2, unofficial]. These voxels are then triangulated using the marching cubes algorithm and rendered [S2, S2, unofficial]. A kd-tree node stores two scalar values per voxel: minimum and maximum [S2, S2, unofficial]. A known pitfall is that standard marching cubes ambiguous cases require neighbor data or complex logic, which slows real-time frame rates or bloats file size [S2, S2, unofficial]. It was implemented at Sandia National Laboratories as a baseline for DYNAISOLOD [S2, S2, unofficial].
+### [Span Space Isosurface Extraction](1750-span-space-isosurface-extraction.md)
+Focuses on span-space pruning techniques.
+
+### [Out-of-core Interval Tree Extraction](2146-out-of-core-interval-tree-extraction.md)
+Handles large datasets using out-of-core interval trees.
+
+### [Interval Table for Isosurface Extraction](4357-interval-table-for-isosurface-extraction.md)
+Uses interval tables for indexing.
 
 ## Background
-The use of external search structures to speed up isosurface extraction for multiple queries was widely demonstrated in literature [S1]. The approach allows disregarding large regions containing only non-active cells for a given isovalue [S1]. The classification into range-based, domain-based, and contour propagation methods is attributed to the analysis in [S1]. The NOISE algorithm was proposed by Y. Livnat et al. [S2, S2, unofficial].
+This family of methods was investigated to achieve high performance levels in isosurface extraction, particularly for 3D data analysis workflows [S1]. The approach is based on the demonstration in literature that external search structures speed up extraction when multiple queries are performed on the same dataset [S1]. Specific references for the underlying structures include kd-trees [28], interval trees [29], and octrees [30] as cited in the source [S1].
 
 ## Sources
 [S1] Parallel Isosurface Extraction for 3D Data Analysis Workflows in Distributed Environments, https://doi.org/10.1002/cpe.1710, fetched 2026-10-26
-[S2] Dynamic isosurface extraction and level-of-detail in voxel space, https://digital.library.unt.edu/ark:/67531/metadc707496/?q=marching cubes, fetched 2026-10-28 (unofficial)

@@ -3,181 +3,195 @@
 Also called: NeRF Rendering Equation, Neural Radiance Field rendering, Vanilla NeRF Volume Rendering, Volume Rendering from Voxel Grid, classical volume rendering with MLP
 
 ## Overview
-NeRF Volume Rendering synthesizes novel viewpoint images by sampling points along camera rays and accumulating density and color values predicted by a neural network [S2]. It differs from its parent [DVGO Volume Rendering Forward](8157-dvgo-volume-rendering-forward.md) by using a continuous Multi-Layer Perceptron (MLP) to query volumetric properties rather than a discrete voxel grid with trilinear interpolation [S1, S2].
+NeRF Volume Rendering is a differentiable method for synthesizing photorealistic novel views of a scene by estimating volume density and RGB color along camera rays using a neural network [S3, unofficial]. It solves the problem of continuous 3D scene representation and rendering by parameterizing the scene as an implicit function, typically implemented via Multi-Layer Perceptrons (MLPs) [S2]. Unlike explicit voxel-based methods such as DVGO, which store features in a grid and use interpolation, the classical NeRF approach queries a continuous field directly at sampled points along the ray [S3, unofficial]. This allows for high-fidelity view-dependent effects but incurs significant computational costs due to the large number of MLP queries required [S3, unofficial].
 
 ## How it works
+
+### Inputs and Outputs
 **Inputs:**
-- Camera origin $o$ and viewing direction $d$ for each ray $r$ [S1, S2].
-- Neural network model $H_\Theta$ (MLP) that maps 3D coordinates and viewing direction to density and color [S2].
-- Ray sampling parameters: near plane $t_1$, far plane $t_2$, and number of samples $K$ [S1, S2].
+*   Camera pose: Origin $\mathbf{o} \in \mathbb{R}^3$ and view direction $\mathbf{d} \in \mathbb{R}^3$ (unit vector) [S3, unofficial][S4].
+*   Neural Network Model $\mathcal{F}_\Phi$ (or $\mathcal{H}_\Theta$): An MLP that maps spatial coordinates and view directions to density and color [S2, S4].
+*   Sampling parameters: Number of sample points $K$ (or $N$) and the distribution of samples along the ray [S2][S3, unofficial].
 
 **Outputs:**
-- Pixel color $C(r)$ for each ray $r$ [S2].
+*   Pixel color $C(\mathbf{r}) \in \mathbb{R}^3$ for the ray $\mathbf{r}$ [S2][S3, unofficial].
 
-**Data Structures:**
-- Ray $r(t) = o + td$, where $t$ is the distance from the origin [S2].
-- Sampled points $w_k$ along the ray, where $k \in \{1, \dots, K\}$ [S1].
-- Density $\sigma(w_k)$ and color feature $\mathbf{c}_f$ (or color $\mathbf{c}$) at each sample point [S1, S2].
+### Data Structures
+*   **MLP Network $\mathcal{F}_\Phi$**: A feed-forward neural network.
+    *   **Input**: Concatenated spatial coordinate $\mathbf{x} = (x, y, z)$ and view direction $\mathbf{d} = (\phi, \theta)$ or Cartesian $\mathbf{d}$ [S2, S4]. Note: Some implementations use spherical coordinates for direction [S2], while others use Cartesian [S4].
+    *   **Output**: Density $\sigma \in \mathbb{R}$ and color feature $\mathbf{c} \in \mathbb{R}^3$ [S2][S3, unofficial].
+*   **Sample Points**: A list of $K$ 3D coordinates $\{\mathbf{x}_1, \dots, \mathbf{x}_K\}$ along the ray [S3, unofficial].
 
-**Steps:**
+### Numbered Steps
 
-1.  **Ray Emission:** For each pixel, emit a ray $r(t) = o + td$ from the camera origin $o$ with unit direction vector $d$ [S2].
-2.  **Sampling:** Sample $K$ spatial points $w_k$ along the ray segment $[t_1, t_2]$ [S2]. Let $\delta_k$ be the distance between adjacent samples $w_k$ and $w_{k+1}$ [S1].
-3.  **Neural Query:** Query the MLP $H_\Theta$ for each point $w_k$ to obtain volume density $\sigma(w_k)$ and color feature $\mathbf{c}_f$ [S2].
-    - If the MLP outputs a 3D color vector directly, $\mathbf{c}(w_k) = \mathbf{c}_f$ [S1].
-    - If the MLP outputs a feature vector, apply a small direction-dependent MLP $\text{ViewNet}$ to produce the final color: $\mathbf{c}(w_k) = \text{ViewNet}(\mathbf{c}_f, d)$ [S1].
-4.  **Transmittance Calculation:** Compute the transmittance $T(w_k)$, which represents the probability that the ray travels from $t_1$ to $w_k$ without being absorbed or scattered [S2].
-    $$ T(w_k) = \exp \left( -\sum_{j=1}^{k-1} \sigma(w_j) \delta_j \right) $$
-    where $\sigma(w_j)$ is the density at sample $j$ and $\delta_j$ is the distance between sample $j$ and $j+1$ [S1].
-5.  **Color Accumulation:** Compute the pixel color $C(r)$ by summing the contribution of each sample, weighted by its transmittance and opacity [S1].
-    $$ C(r) = \sum_{k=1}^{K} T(w_k) \left( 1 - \exp(-\sigma(w_k) \delta_k) \right) \mathbf{c}(w_k) $$
-    Here, $\alpha(w_k) = 1 - \exp(-\sigma(w_k) \delta_k)$ is the opacity of the $k$-th sample [S1].
+1.  **Ray Generation**: For a given pixel, generate a camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the viewing direction [S3, unofficial][S4].
+2.  **Sampling**: Sample $K$ points $\mathbf{x}_i$ along the ray within a defined interval $[t_{near}, t_{far}]$ [S3, unofficial][S4]. The points are typically spaced by a distance $\delta_i$ [S3, unofficial].
+3.  **MLP Query**: For each sampled point $\mathbf{x}_i$, query the MLP $\mathcal{F}_\Phi$ with input $(\mathbf{x}_i, \mathbf{d})$ to obtain the volume density $\sigma_i$ and the RGB color $\mathbf{c}_i$ [S2][S3, unofficial][S4].
+    *   *Note*: In some variants (e.g., [S1]), if the feature grid stores color features $\mathbf{c_f}$, the final color $\mathbf{c}$ is computed as $\mathbf{c} = \mathbf{c_f}$ if $\mathbf{c_f} \in \mathbb{R}^3$, or via a small MLP $\text{ViewNet}(\mathbf{c_f}, \mathbf{d})$ otherwise [S1]. However, the standard NeRF formulation [S2][S3, unofficial] outputs $\mathbf{c}$ directly from the main network.
+4.  **Transmittance Calculation**: Compute the accumulated transmittance $T_i$ for each sample point $i$. $T_i$ represents the probability that the ray travels from the camera origin to sample $i$ without being absorbed or scattered [S2, S4].
+    $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
+    where $\delta_j$ is the distance between sample $j$ and $j+1$ [S3, unofficial]. For the first sample, $T_1 = 1$ [S3, unofficial].
+5.  **Alpha Compositing**: Compute the weight $\alpha_i$ for each sample, representing the probability that the ray is absorbed at sample $i$:
+    $$ \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
+    [S3, unofficial][S1].
+6.  **Color Accumulation**: Compute the final pixel color $C(\mathbf{r})$ as a weighted sum of the colors of the sampled points:
+    $$ C(\mathbf{r}) = \sum_{i=1}^{K} T_i \alpha_i \mathbf{c}_i = \sum_{i=1}^{K} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+    [S2][S3, unofficial].
+    *   *Continuous Formulation*: The process can also be viewed as a discretization of the continuous volume rendering integral [S4]:
+        $$ C(\mathbf{r}) = \int_{t_1}^{t_2} T(t) \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t), \mathbf{d}) \, dt $$
+        where $T(t) = \exp\left(-\int_{t_1}^{t} \sigma(\mathbf{r}(u)) \, du\right)$ [S4].
 
-**Pseudocode:**
+### Formulas and Definitions
+
+*   **Ray**: $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ [S2][S3, unofficial][S4].
+*   **Transmittance**: $T_i = \prod_{j=1}^{i-1} \exp(-\sigma_j \delta_j) = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ [S2][S3, unofficial].
+*   **Segment Transmittance**: $\omega_i = \exp(-\sigma_i \delta_i)$ [S2].
+*   **Alpha (Absorption Probability)**: $\alpha_i = 1 - \omega_i = 1 - \exp(-\sigma_i \delta_i)$ [S2][S3, unofficial].
+*   **Final Color**: $C(\mathbf{r}) = \sum_{i=1}^{K} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i$ [S2][S3, unofficial].
+*   **Loss Function**: The model is trained by minimizing the photometric loss (MSE) between rendered color $C(\mathbf{r})$ and ground truth color $C_{gt}(\mathbf{r})$ [S1, S4]:
+    $$ L_{NeRF} = \sum_{\mathbf{r} \in \mathcal{R}} \| C(\mathbf{r}) - C_{gt}(\mathbf{r}) \|^2 $$
+    [S4].
+
+### Parameters
+*   **$K$ (or $N$)**: Number of sample points per ray. A typical value is 192 [S2].
+*   **$\delta_i$**: Distance between adjacent samples $x_i$ and $x_{i+1}$ [S3, unofficial].
+*   **$\mathbf{x}$**: Spatial coordinate $(x, y, z)$ [S2].
+*   **$\mathbf{d}$**: View direction. Can be represented as a 3D Cartesian unit vector [S4] or spherical coordinates $(\phi, \theta)$ [S2].
+*   **$\sigma$**: Volume density (non-negative scalar) [S2][S3, unofficial].
+*   **$\mathbf{c}$**: RGB color (3D vector) [S2][S3, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Precision**: The exponential function in transmittance calculation can lead to underflow if density is high or distances are large, resulting in $T_i \approx 0$. This is handled by the standard formulation [S3, unofficial].
+*   **Boundaries**: The sampling interval $[t_{near}, t_{far}]$ must be chosen to encompass the scene. Points outside this range are ignored [S4].
+*   **Degenerate Input**: If $\sigma_i = 0$ for all samples, the color is black (or background color if explicitly handled) [S3, unofficial].
+*   **Computational Cost**: The method requires a large number of MLP queries, leading to high training and rendering times [S3, unofficial].
+
+### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def nerf_volume_rendering(ray_origin, ray_direction, t_near, t_far, num_samples, mlp_model):
+import math
+
+def nerf_volume_rendering(ray_origin, ray_direction, mlp_network, num_samples, near, far):
     """
     Renders a single pixel color using NeRF volume rendering.
     
     Args:
-        ray_origin: 3D vector (o)
-        ray_direction: 3D unit vector (d)
-        t_near: float, start distance t1
-        t_far: float, end distance t2
-        num_samples: int, K
-        mlp_model: function mapping (position, direction) -> (density, color_feature)
+        ray_origin (tuple): (ox, oy, oz) camera origin.
+        ray_direction (tuple): (dx, dy, dz) unit view direction.
+        mlp_network (function): MLP function F_phi(x, d) -> (sigma, color).
+        num_samples (int): Number of sample points K.
+        near (float): Near clipping plane distance t_near.
+        far (float): Far clipping plane distance t_far.
         
     Returns:
-        pixel_color: 3D vector (C(r))
+        tuple: (r, g, b) final pixel color.
     """
-    # Step 1 & 2: Sample points along the ray
-    # Uniform sampling is standard, but stratified sampling is often used in practice [G]
-    t_vals = torch.linspace(t_near, t_far, num_samples)
-    # Add small jitter for stratified sampling [G]
-    # t_vals = t_vals + torch.rand(num_samples) * (t_far - t_near) / num_samples
     
-    # Calculate distances between adjacent samples
-    # delta_k is distance between w_k and w_{k+1}
-    # For the last sample, delta is not used in the sum for T, but needed for alpha if we consider the segment after the last point.
-    # Standard NeRF uses delta between current and next sample.
-    deltas = torch.diff(t_vals, dim=0)
-    # Pad the last delta to match the number of samples for alpha calculation
-    # The last sample contributes to the color but has no "next" sample in the discrete sum for T.
-    # However, the opacity formula 1 - exp(-sigma * delta) requires a delta.
-    # In discrete approximation, delta_k is the length of the segment centered at or starting at w_k.
-    # Common implementation: delta_k = t_{k+1} - t_k. For the last point, delta is often set to the previous delta or 0.
-    # Based on S1: delta_k is distance between adjacent samples.
-    # T(w_k) sums j=1 to k-1. So for k=1, T=1.
-    # Alpha(w_k) uses delta_k.
+    # Step 1: Sample points along the ray
+    # Uniform sampling is common, but stratified or importance sampling can be used.
+    # Here we assume uniform spacing for simplicity.
+    t_vals = [near + i * (far - near) / num_samples for i in range(num_samples)]
     
-    # To align dimensions:
-    # t_vals shape: (K,)
-    # deltas shape: (K-1,)
-    # We need deltas for alpha calculation for all K points.
-    # Usually, the segment length associated with sample k is (t_{k+1} - t_k).
-    # For the last sample, the segment extends to t_far? Or is it ignored?
-    # S1 formula: sum_{k=1}^K T(w_k) * (1 - exp(-sigma(w_k) delta_k)) * c(w_k)
-    # T(w_k) = exp(-sum_{j=1}^{k-1} sigma(w_j) delta_j)
+    # Calculate distances between samples (delta)
+    # delta_i is distance between x_i and x_{i+1}
+    # For the last sample, delta is not used in the sum for alpha, 
+    # but we need deltas for all segments.
+    deltas = []
+    for i in range(num_samples - 1):
+        delta = t_vals[i+1] - t_vals[i]
+        deltas.append(delta)
+    # The last segment's delta is not strictly needed for the last sample's alpha 
+    # in the sum, but for consistency in some implementations, it might be included.
+    # Standard NeRF sum goes to K, using delta_i for sample i.
+    # Let's align with S3: sum_{i=1}^N T_i (1 - exp(-sigma_i delta_i)) c_i
+    # where delta_i is distance between x_i and x_{i+1}.
+    # So we need N-1 deltas.
     
-    # Let's assume uniform sampling for simplicity as per S2 "sufficient number of spatial points"
-    # If uniform, delta is constant.
+    accumulated_transmittance = 1.0
+    final_color = [0.0, 0.0, 0.0]
     
-    # Query MLP for all points
-    # Positions: ray_origin + t_vals * ray_direction
-    positions = ray_origin + t_vals.unsqueeze(1) * ray_direction.unsqueeze(0) # Shape (K, 3)
-    
-    # Repeat direction for all samples
-    directions = ray_direction.unsqueeze(0).expand(num_samples, -1) # Shape (K, 3)
-    
-    # Query MLP: returns density and color feature
-    # Note: S2 says query sigma and c. S1 says query sigma and c_f, then ViewNet.
-    # We assume mlp_model returns (sigma, c_f)
-    densities, color_features = mlp_model(positions, directions)
-    
-    # Compute Opacity Alpha
-    # delta_k for sample k is t_{k+1} - t_k.
-    # For the last sample, we need a delta. Often the last delta is set to the previous one or the segment to t_far.
-    # Let's use the distance to the next sample. For the last sample, we can use the previous delta or assume it goes to t_far.
-    # Standard implementation often uses:
-    # deltas = t_vals[1:] - t_vals[:-1] # Shape (K-1)
-    # To get K deltas, we can append the last delta or use a constant step.
-    # Let's use the step size if uniform, or pad.
-    if num_samples > 1:
-        step = (t_far - t_near) / (num_samples - 1)
-        deltas_full = torch.full((num_samples,), step)
-        deltas_full[:-1] = t_vals[1:] - t_vals[:-1]
-    else:
-        deltas_full = torch.tensor([t_far - t_near])
+    for i in range(num_samples):
+        # Calculate 3D point position
+        t = t_vals[i]
+        x = ray_origin[0] + t * ray_direction[0]
+        y = ray_origin[1] + t * ray_direction[1]
+        z = ray_origin[2] + t * ray_direction[2]
+        point = (x, y, z)
         
-    alphas = 1.0 - torch.exp(-densities * deltas_full)
-    
-    # Compute Transmittance T
-    # T(w_k) = exp(-sum_{j=1}^{k-1} sigma(w_j) * delta_j)
-    # This is the accumulated transmittance BEFORE sample k.
-    # T(w_1) = 1.0
-    # T(w_2) = exp(-sigma(w_1) * delta_1)
-    
-    # Calculate accumulated density sum
-    # sigma * delta for each sample
-    sigma_deltas = densities * deltas_full
-    
-    # Cumulative sum of sigma_deltas, shifted by 1
-    # T_k = exp(-sum_{j < k} sigma_j * delta_j)
-    cum_sum = torch.cumsum(sigma_deltas, dim=0)
-    # Shift right by 1, fill first element with 0
-    T_cum = torch.cat([torch.zeros(1, device=densities.device), cum_sum[:-1]])
-    transmittances = torch.exp(-T_cum)
-    
-    # Compute Color
-    # If color_feature is 3D, use it directly. Else, apply ViewNet.
-    # Assuming mlp_model handles the ViewNet if needed, or we do it here.
-    # S1 distinguishes: if c_f in R^3, c = c_f. Else c = ViewNet(c_f, d).
-    # We assume the returned color_features are the final colors c for simplicity, 
-    # or we apply ViewNet if the model returns features.
-    # Let's assume mlp_model returns final colors c to keep it self-contained as per S2 "query ... c".
-    # If S1's ViewNet is required, it would be:
-    # colors = view_net(color_features, directions)
-    # But S2 says "query ... c". We will assume c is returned.
-    colors = color_features 
-    
-    # Final color accumulation
-    # C(r) = sum_{k=1}^K T(w_k) * alpha(w_k) * c(w_k)
-    pixel_color = torch.sum(transmittances * alphas * colors, dim=0)
-    
-    return pixel_color
+        # Step 2: Query MLP for density and color
+        # Note: Some implementations use spherical coordinates for direction.
+        # Assuming Cartesian direction as per S4, or standard NeRF which often uses positional encoding.
+        # For this pseudocode, we pass Cartesian direction.
+        sigma, color = mlp_network(point, ray_direction)
+        
+        # Step 3: Compute alpha
+        # delta_i is distance to next sample
+        if i < num_samples - 1:
+            delta = t_vals[i+1] - t_vals[i]
+        else:
+            # For the last sample, delta is often set to a small value or ignored if 
+            # the loop structure accounts for it. 
+            # In the formula C(r) = sum_{i=1}^K T_i (1 - exp(-sigma_i delta_i)) c_i,
+            # delta_i is defined as distance between x_i and x_{i+1}.
+            # If i is the last sample, there is no x_{i+1}. 
+            # However, in practice, the last sample's contribution is often negligible 
+            # or delta is set to the previous delta.
+            # Let's use the previous delta or a small epsilon to avoid division by zero issues if any.
+            # S3 defines delta_i as distance between x_i and x_{i+1}.
+            # If i == K-1 (0-indexed), we can't compute delta. 
+            # Usually, the loop runs for i in 0..K-1, and delta[i] is used.
+            # If K samples, there are K-1 intervals.
+            # The last sample's alpha is often computed with a dummy delta or the loop is structured differently.
+            # Let's assume the standard implementation where the last sample's contribution is small 
+            # or delta is approximated.
+            delta = t_vals[i] - t_vals[i-1] if i > 0 else 0.01 # [G] Fallback for last sample delta
+            
+        alpha = 1.0 - math.exp(-sigma * delta)
+        
+        # Step 4: Accumulate color
+        # Weight = Transmittance * Alpha
+        weight = accumulated_transmittance * alpha
+        
+        final_color[0] += weight * color[0]
+        final_color[1] += weight * color[1]
+        final_color[2] += weight * color[2]
+        
+        # Step 5: Update transmittance for next sample
+        # T_{i+1} = T_i * exp(-sigma_i * delta_i)
+        accumulated_transmittance *= math.exp(-sigma * delta)
+        
+        # Early termination optimization: if transmittance is very low, stop
+        if accumulated_transmittance < 1e-4:
+            break
+            
+    return tuple(final_color)
 ```
 
-**Parameters:**
-- $K$: Number of sampled points along the ray [S1].
-- $t_1, t_2$: Near and far clipping planes defining the ray segment [S2].
-- $\delta_k$: Distance between adjacent samples [S1].
-- $d$: 3D Cartesian unit vector representing viewing direction [S2].
+### Subtopics
 
-**Edge Cases and Pitfalls:**
-- **Precision:** The exponential function in transmittance calculation can lead to underflow if density is high or path is long, resulting in $T(t) \approx 0$. This is handled by the standard formula but requires careful numerical implementation [S2].
-- **Boundaries:** The ray segment $[t_1, t_2]$ must be chosen to encompass the scene geometry. Points outside the scene should have $\sigma \approx 0$ [S2].
-- **Degenerate Input:** If $K=1$, the transmittance sum is empty, $T(w_1)=1$, and the color is simply $\alpha(w_1)c(w_1)$ [S1].
-
-## Subtopics
-
-### NeRF Geometry Extraction
-Uses the transmittance function $T(t)$ to estimate depth and extract point clouds from the density field [S2].
-
-### NeRF Optimization
-Uses a squared error photometric loss $L_{NeRF} = \sum_{r \in R} ||C(r) - C_{gt}(r)||^2$ to train the MLP weights $\Theta$ [S2].
+*   **DVGO Volume Rendering Forward**: Uses a voxel grid to store features and trilinear interpolation, reducing MLP queries. Choose when memory is constrained and high resolution is needed, but view-dependent effects are less critical or approximated. [DVGO](8157-dvgo-volume-rendering-forward.md)
+*   **Instant NGP**: Uses multi-resolution hash encoding to accelerate NeRF training and rendering. Choose when fast training and real-time rendering are required. [Instant NGP](8158-instant-ngp.md)
+*   **TensoRF**: Decomposes the feature grid into low-rank factors for storage efficiency. Choose when memory footprint is a primary concern. [TensoRF](8159-tensorf.md)
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of samples $K$ and the number of rays (pixels) [S1, S2]. Each sample requires an MLP forward pass, which is computationally expensive compared to lookup tables [S2].
-- **Memory Complexity:** Depends on the size of the MLP $H_\Theta$ [S2]. No large voxel grid is stored, unlike [DVGO Volume Rendering Forward](8157-dvgo-volume-rendering-forward.md) [S1, S2].
-- **Strengths:** Continuous representation allows for high-quality novel view synthesis and smooth geometry extraction [S2].
-- **Limitations:** Slow rendering speed due to repeated MLP queries [S2]. Requires significant training time to optimize the MLP weights [S2].
+
+*   **Time Complexity**: Training and rendering times are typically very large due to the infinite and continuous nature of space requiring a multitude of giant MLP queries [S3, unofficial]. Each pixel requires $K$ MLP forward passes.
+*   **Memory Complexity**: The MLP weights are stored in memory. The size depends on the network architecture (depth, width) [S3, unofficial]. No explicit voxel grid is stored in the classical NeRF formulation [S2].
+*   **Measured Performance**: With $K=192$ samples, rendering high-resolution images can be slow without acceleration techniques [S2].
+*   **Strengths**: High-quality view-dependent effects (specularities, reflections) due to direct MLP query of color based on view direction [S2]. Continuous representation allows for arbitrary resolution [S3, unofficial].
+*   **Limitations**: Slow rendering speed. High memory usage for large networks. Requires significant computational resources for training [S3, unofficial].
+*   **When to use**: When photorealism and view-dependent effects are paramount, and computational resources are available.
+*   **When not to use**: When real-time rendering is required, or memory is severely constrained. Consider DVGO or Instant NGP instead.
 
 ## Background
-NeRF (Neural Radiance Fields) was introduced by Mildenhall et al. in 2020 [S2]. It uses a continuous volumetric scene function represented by an MLP to encode 3D geometry and appearance [S2]. The method optimizes the MLP weights using photometric loss between rendered and ground truth images [S2]. It is widely used for novel view synthesis and 3D reconstruction [S2].
+
+NeRF (Neural Radiance Fields) was introduced by Mildenhall et al. in 2020 [S3, unofficial]. It uses MLP networks to learn the radiance field of arbitrary scenes. Once sufficiently optimized, NeRF can estimate both the volume density $\sigma$ and RGB color $\mathbf{c}$ of the continuous function that describes the radiance field. It is then able to reconstruct a photorealistic view from an unseen pose using a differentiable volume rendering method [S3, unofficial]. The method has become a foundational technique in 3D computer vision and graphics, inspiring numerous acceleration methods and applications in novel view synthesis, geometry reconstruction, and stylization [S2, S4].
 
 ## Sources
+
 [S1] Forward Flow for Novel View Synthesis of Dynamic Scenes, https://doi.org/10.1109/iccv51070.2023.01468, fetched 2026-10-26
-[S2] High-fidelity 3D Reconstruction of Plants using Neural Radiance Field, https://arxiv.org/abs/2311.04154v1, fetched 2026-10-27
+[S2] NeRF-Art: Text-Driven Neural Radiance Fields Stylization, https://doi.org/10.1109/tvcg.2023.3283400, fetched 2026-10-26
+[S3] MF-NeRF: Memory Efficient NeRF with Mixed-Feature Hash Table, https://core.ac.uk/download/564091854.pdf, fetched 2026-10-27 (unofficial)
+[S4] High-fidelity 3D Reconstruction of Plants using Neural Radiance Field, https://arxiv.org/abs/2311.04154v1, fetched 2026-10-27

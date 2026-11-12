@@ -1,55 +1,41 @@
 # Image-Aligned Sheet-Buffer Compositing
 
-Also called: Image-Aligned Splatting with Alpha Composition
+Also called: Image-aligned splatting, Image-aligned sheet-buffers
 
 ## Overview
-Image-Aligned Sheet-Buffer Compositing is a volume rendering technique that eliminates visual artifacts known as "popping" by aligning the sheet buffer compositing axis with the image plane. Unlike standard axis-aligned sheet buffers which suffer from discontinuities when the viewing angle crosses 45° relative to the data axes, this method slices interpolation kernels into sections parallel to the image plane [S1, S2, unofficial]. It sets itself apart from its parent method, [Slice-by-Slice (Sheet Buffer) Splatting](2110-slice-by-slice-sheet-buffer-splatting.md), by using image-aligned cutting planes and alpha-compositing kernel sections to ensure smooth color transitions across varying optical properties and resolutions [S2, unofficial].
+Image-aligned sheet-buffer compositing is a volume rendering technique that eliminates popping artifacts and color bleeding by maintaining compositing sheets aligned with the image plane regardless of the viewing direction [S1, unofficial]. Unlike axis-aligned sheet-buffered splatting, which organizes voxels into fixed volume slices, this method advances a slab across the volume, slicing and projecting all intersecting kernels into the sheet buffers [S1, unofficial]. It provides the most accurate reconstruction of the voxel field prior to compositing, making it ideal for post-classified rendering [S1, unofficial].
 
 ## How it works
-**Inputs:** Volume data (density/color), viewing parameters (camera position, orientation), kernel definition (base distribution, scaling factor).
-**Outputs:** Final image buffer.
+**Inputs:** Volume data (e.g., binary cube or density field), viewing parameters (camera position, orientation), sheet buffer resolution.
+**Outputs:** Final composited image.
 
 **Data Structures:**
-*   **Sheet Buffer:** A 2D array aligned with the image plane. Each cell stores accumulated color and opacity. The depth dimension is implicit or managed via a stack of buffers corresponding to the kernel sections.
-*   **Kernel Section:** A footprint rasterized onto the sheet buffer. It has a specific weight distribution derived from the base kernel and a radius scaled by the cutting plane's position.
+*   **Sheet Buffer:** A 2D buffer aligned with the image plane, storing accumulated color and opacity for each pixel.
+*   **Compositing Buffer:** The final image buffer where sheet buffers are composited [S1, unofficial].
 
 **Steps:**
-1.  **Footprint Mapping:** For each volume sample point, compute its projection onto the image plane. Perform standard footprint mapping to determine which pixels are affected [S1, unofficial]. This requires multiple footprint rasterizations per point because the kernel is sliced [S1, unofficial].
-2.  **Kernel Slicing:** Slice the interpolation kernel using a series of cutting planes parallel to the image plane. Each slice creates a "kernel section" [S2, unofficial].
-    *   Calculate the weight distribution for each section using a kernel base distribution and a scaling factor, as defined in [MC98] (cited in [S2, unofficial]).
-    *   The radius of each section's footprint varies depending on the cutting plane's distance from the sample point [S2, unofficial].
-3.  **Sheet Buffer Update:** Add each kernel section into the sheet buffer.
-    *   Unlike the additive accumulation proposed in [MC98], this method uses an **alpha-blend** operator to compose kernel sections that fall within the same sheet bucket [S2, unofficial].
-    *   Formula for alpha-blending a new section $(C_{new}, \alpha_{new})$ into an existing buffer $(C_{old}, \alpha_{old})$:
-        $$ \alpha_{out} = \alpha_{old} + \alpha_{new}(1 - \alpha_{old}) $$
-        $$ C_{out} = \frac{C_{old}\alpha_{old} + C_{new}\alpha_{new}(1 - \alpha_{old})}{\alpha_{out}} $$
-        (If $\alpha_{out} = 0$, $C_{out}$ is undefined or zero).
-4.  **Composite Sheet Buffers:** Composite the accumulated sheet buffers to produce the final image [S1, unofficial].
-
-**Parameters:**
-*   **Kernel Base Distribution:** Typically Gaussian, as referenced in [S2, unofficial].
-*   **Scaling Factor:** Determines the spread of the kernel sections [S2, unofficial].
-*   **Cutting Planes:** Aligned parallel to the image plane. The number of sections determines the granularity of the kernel approximation [S2, unofficial].
+1.  **Slab Advancement:** Advance a slab across the volume. The slab is defined to cut kernels into sections [S1, unofficial].
+2.  **Footprint Mapping:** For each voxel or point within the current slab, perform footprint mapping as usual [S1, unofficial]. This requires multiple footprint rasterizations per point to account for the intersection of the kernel with the image-aligned sheet [S1, unofficial].
+3.  **Kernel Section Addition:** Add the resulting kernel sections into the sheet buffer [S1, unofficial]. This step accumulates the contribution of the sliced kernels into the image-aligned buffers.
+4.  **Compositing:** Composite the sheet buffers into the final image [S1, unofficial]. This involves blending the accumulated values in the sheet buffers to produce the final pixel colors.
 
 **Edge Cases and Pitfalls:**
-*   **Popping:** Standard axis-aligned sheet buffers exhibit popping artifacts when the viewing angle crosses 45° relative to the data axes (e.g., at 44.7° vs 45.2°) [S1, unofficial]. Image-aligned buffers eliminate this by adapting to the view [S1, unofficial].
-*   **Harsh Transitions:** Using an additive operator for composition causes harsh transitions between overlapped kernel sections and different optical properties/resolutions [S2, unofficial]. Alpha-blending is required to avoid this [S2, unofficial].
+*   **Popping Artifacts:** Axis-aligned methods suffer from popping when the viewing angle crosses certain thresholds (e.g., near 45°) [S1, unofficial]. Image-aligned methods eliminate this by aligning with the image plane [S1, unofficial].
+*   **Computational Cost:** Requires multiple footprint rasterizations per point, increasing computational expense [S1, unofficial].
 
 ## Subtopics
 
-### Image-aligned Splatting with Alpha Composition
-This variant specifically refers to the use of alpha-compositing for kernel sections instead of additive accumulation. It is chosen when smooth color transitions between overlapped kernel sections and varying optical properties are critical. It addresses the harsh transitions caused by additive operators in earlier methods like [MC98] [S2, unofficial].
+### [Image-aligned Splatting](13640-image-aligned-splatting.md)
+Eliminates popping artifacts and color bleeding by maintaining compositing sheets aligned with the image plane regardless of the viewing direction. Unlike axis-aligned sheet-buffered splatting, which organizes voxels into fixed volume slices, this method advances a slab across the volume, slicing and projecting all intersecting kernels into the sheet buffers. It provides the most accurate reconstruction of the voxel field prior to compositing, making it ideal for post-classified rendering, at the cost of higher computational expense due to multiple splatting of individual voxels.
 
 ## Operating characteristics
-*   **Time Complexity:** Higher than axis-aligned splatting per point because it requires multiple footprint rasterizations per sample point to handle the sliced kernel sections [S1, unofficial].
-*   **Memory Complexity:** Requires storage for the sheet buffer aligned with the image plane. The number of sections per kernel affects memory usage if sections are stored explicitly, though they are often composited on the fly.
-*   **Performance:** Tested on AMD 64 3200+ with 1MB RAM and NVidia GeForce 6600 256MB [S2, unofficial]. Specific frame rates are not provided in the sources, but the method is noted to work on software platforms like Hipo [S2, unofficial].
-*   **Strengths:** Eliminates popping artifacts associated with axis-aligned slicing; provides smoother color transitions between different material properties and resolutions [S1, S2, unofficial].
-*   **Limitations:** Increased computational cost due to multiple rasterizations per point [S1, unofficial].
+*   **Strengths:** Eliminates popping artifacts and color bleeding [S1, unofficial]. Provides accurate reconstruction of the voxel field prior to compositing [S1, unofficial].
+*   **Limitations:** Higher computational expense due to multiple splatting of individual voxels [S1, unofficial]. Requires multiple footprint rasterizations per point [S1, unofficial].
+*   **When to use:** Ideal for post-classified rendering where accuracy is paramount [S1, unofficial].
+*   **When not to use:** When computational resources are limited and popping artifacts are acceptable [S1, unofficial].
 
 ## Background
-The method was developed to solve the "popping" problem in volume splatting, where visual discontinuities occur when the viewing angle crosses 45° relative to the data axes [S1, unofficial]. The concept of image-aligned sheet buffers was introduced by Mueller in 1998 [S1, unofficial]. The specific use of alpha-compositing for kernel sections, rather than additive accumulation, was proposed in the context of Feature Graph splatting for multiresolution volume data [S2, unofficial]. The kernel scaling approach references Mueller and Cignoni (1998) [S2, unofficial].
+Originated from work by Mueller ('98) on volumetric points and sheet buffers [S1, unofficial]. The method addresses limitations of axis-aligned splatting, such as popping artifacts observed at specific viewing angles (e.g., 44.7° vs 45.2°) [S1, unofficial]. It is part of the broader family of pre-classified and post-classified rendering techniques [S1, unofficial].
 
 ## Sources
 [S1] Volumetric Points - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/teaching/cse616/volPts.pdf, fetched 2026-10-29 (unofficial)
-[S2] Splatting multiresolution volume data using the feature graph, http://hdl.handle.net/2117/86461, fetched 2026-10-26 (unofficial)

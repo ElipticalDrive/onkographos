@@ -3,53 +3,113 @@
 Also called: Laur and Hanrahan Splatting
 
 ## Overview
-Octree-based Splatting is an object-order interactive volume rendering technique that approximates volume contributions using an octree representation to balance rendering speed and image quality [S2, book]. It sets itself apart from standard splatting by dynamically adjusting the size of geometric primitives based on the hierarchical structure of the data, allowing larger regions to be rendered with fewer primitives when the visual error is within a specified tolerance [S1, unofficial][S2, book]. This method builds on [Octree-based Hierarchy](12129-octree-based-hierarchy.md) by utilizing the stored error metrics to prune the traversal depth during the rendering pass.
+Octree-based Splatting is an object-order interactive volume rendering technique that accelerates rendering by approximating volume contributions using an octree hierarchy and geometric splats [S2, book]. It solves the performance bottleneck of voxel-based splatting by culling homogeneous regions and distant details, allowing for real-time interaction [S1, unofficial]. Unlike standard splatting which processes every voxel, this method adapts the resolution of the rendered primitives based on a user-defined error tolerance, trading visual fidelity for speed [S2, book].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** An octree representation of the volume data, where each node contains an approximate scalar value and an error value [S2, book]. A user-defined error tolerance threshold [S2, book].
-*   **Output:** A 2D image composed of splatted geometric primitives [S1, unofficial][S2, book].
+**Inputs and Outputs**
+- **Input:** A 3D scalar volume dataset; an error tolerance threshold $\epsilon$.
+- **Output:** A 2D image composed of splatted primitives.
 
-**Data Structures:**
-The octree node structure is defined as follows [S2, book]:
-*   `approximate_scalar`: The scalar value representing the region (e.g., density or intensity).
-*   `error_value`: A scalar indicating the deviation of the child nodes' scalar values from the parent's approximate scalar value [S2, book].
+**Data Structures**
+The volume is organized into an octree. Each node in the octree stores:
+1.  **Approximate Scalar Value ($V_{approx}$):** A representative scalar value for the region covered by the node [S2, book].
+2.  **Error Value ($E$):** A metric indicating the deviation of the child nodes' scalar values from $V_{approx}$ [S2, book].
 
-**Algorithm Steps:**
-1.  **Initialization:** Start the traversal from the root node of the octree [S2, book].
-2.  **Traversal:** Descend the octree structure [S2, book].
-3.  **Error Check:** At each node, compare the stored `error_value` against the user-defined error tolerance [S2, book].
-4.  **Termination Condition:**
-    *   If `error_value` < `error_tolerance`: Stop descending. Render the region represented by this node using geometric primitives (splats) [S2, book]. The size of the splat is determined by the spatial extent of the cell represented by this octree node [S1, unofficial].
-    *   If `error_value` >= `error_tolerance`: Continue descending to the child nodes [S2, book].
-5.  **Rendering:** For nodes where traversal stops, compute the contribution of the region to the image by rendering the corresponding geometric primitive [S2, book]. The primitive size is scaled based on the cell size in the octree representation [S1, unofficial].
-6.  **Compositing:** Composite the splats into the image buffer, typically using a matting operation or alpha blending in depth order [S1, unofficial].
+**Algorithm Steps**
+1.  **Preprocessing (Octree Construction):**
+    The volume is decomposed into an octree. For each internal node, $V_{approx}$ is computed (typically as an average or representative value of its children), and $E$ is calculated to quantify the approximation error [S2, book]. The specific formula for $E$ is not detailed in the sources, but it represents the deviation of child scalar values from the parent's approximate value [S2, book].
 
-**Parameters:**
-*   `error_tolerance`: A threshold value for the error stored in octree nodes. Increasing this value decreases rendering time by allowing larger regions to be approximated at higher levels in the octree [S2, book].
+2.  **Traversal and Selection:**
+    The algorithm traverses the octree starting from the root [S2, book].
+    - At each node, check if the stored error value $E$ is less than the given error tolerance $\epsilon$ [S2, book].
+    - **If $E < \epsilon$:** Stop descending. The node is selected as a leaf. The region of the volume represented by this node is approximated by rendering a single geometric primitive (splat) [S2, book].
+    - **If $E \ge \epsilon$:** Recurse to the children nodes [S2, book].
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** The accuracy of the error metric directly impacts the visual fidelity. If the error calculation does not accurately reflect visual deviation, artifacts may appear [S2, book].
-*   **Boundary Conditions:** The method relies on the octree being fully constructed and populated with error values. Nodes at the leaves of the octree (voxels) must have defined error values (typically zero or a minimum threshold) to terminate traversal correctly [S2, book].
+3.  **Splat Rendering:**
+    When a node is selected as a leaf, a splat is rendered to approximate the contribution of that volume region [S2, book].
+    - The size of the splat is changed based on the cell the node represents in the octree representation [S1, unofficial]. Larger nodes (higher in the tree) result in larger splats, covering a greater area of the image plane [S1, unofficial].
+    - The splat is composited into the image using standard splatting techniques (e.g., texture-mapped polygons) [S1, unofficial][S2, book].
+
+**Parameters**
+- **Error Tolerance ($\epsilon$):** A threshold value for the error stored in octree nodes [S2, book]. Increasing $\epsilon$ decreases rendering time by allowing larger regions to be approximated at higher levels in the octree [S2, book].
+
+**Edge Cases and Pitfalls**
+- **Precision:** The accuracy of the error metric $E$ directly impacts the visual quality. If $E$ is computed inaccurately, the adaptive traversal may select inappropriate nodes, leading to artifacts [S2, book].
+- **Boundary Conditions:** The size of the splat must be correctly scaled to the octree cell size to ensure proper coverage and blending [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_octree_splat(root_node, epsilon, camera):
+    """
+    Recursively traverse the octree and render splats for leaf nodes.
+    
+    Args:
+        root_node: The root of the octree.
+        epsilon: The error tolerance threshold.
+        camera: Camera object providing projection and view matrices.
+    """
+    traverse(root_node, epsilon, camera)
+
+def traverse(node, epsilon, camera):
+    """
+    Traverse a single octree node.
+    
+    Args:
+        node: Current octree node.
+        epsilon: Error tolerance.
+        camera: Camera object.
+    """
+    # Check if the node's error is within tolerance
+    if node.error < epsilon:
+        # Node is a leaf for rendering purposes
+        # Render a splat for this node
+        render_splat(node, camera)
+    else:
+        # Node is not a leaf, recurse to children
+        for child in node.children:
+            traverse(child, epsilon, camera)
+
+def render_splat(node, camera):
+    """
+    Render a single splat for an octree node.
+    
+    Args:
+        node: The octree node being rendered.
+        camera: Camera object.
+    """
+    # Determine the size of the splat based on the cell the node represents
+    # [S1, unofficial] states that the size is changed based on the octree cell
+    splat_size = compute_splat_size_from_octree_cell(node)
+    
+    # Project the node's position to screen space
+    screen_pos = project_to_screen(node.position, camera)
+    
+    # Render the geometric primitive (splat)
+    # [S2, book] mentions rendering geometric primitives for the splat
+    # [S1, unofficial] mentions using texture-mapped polygons
+    draw_splat(screen_pos, splat_size, node.approximate_scalar_value)
+```
 
 ## Subtopics
 
-### Standard Splatting
-Renders voxels as fixed-size primitives without hierarchical culling. Choose this when the dataset is small or uniform, and hierarchical overhead is unjustified. See [Splatting](52-splatting.md).
+### Hierarchical Splatting
+The general class of methods using tree structures for adaptive resolution. Octree-based Splatting is a specific implementation using octrees [S2, book].
 
-### Hierarchical and Multi-Resolution Splatting
-A broader category including octree-based methods. Choose this when interactive frame rates are required for large datasets. See [Hierarchical and Multi-Resolution Splatting](12128-hierarchical-and-multi-resolution-splatting.md).
+### Standard Splatting
+The base method that processes every voxel. Octree-based Splatting builds on this by adding hierarchical culling [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The rendering time is dependent on the number of voxels in the dataset and the selected error tolerance [S2, book]. Higher error tolerances reduce the number of nodes visited, decreasing rendering time [S2, book].
-*   **Memory Complexity:** Requires storing the octree structure, including approximate scalar and error values for each node [S2, book].
-*   **Strengths:** Significantly faster than ray-casting for interactive applications due to inherent speed advantages of splatting and reduced number of samples/primitives [S1, unofficial][S2, book]. Allows for dynamic resolution selection based on desired frame rate [S2, book].
-*   **Limitations:** Image quality is affected by the size, shape, and type of the reconstruction kernel used [S1, unofficial]. The method assumes the octree structure is precomputed [S2, book].
-*   **When to use:** Interactive volume rendering where frame rate is critical and the data can be effectively approximated by hierarchical error metrics [S2, book].
-*   **When not to use:** When high-fidelity, voxel-accurate rendering is required without approximation artifacts [S2, book].
+- **Time Complexity:** Depends on the number of leaf nodes selected by the error tolerance. Higher error tolerance $\epsilon$ leads to fewer leaf nodes and faster rendering [S2, book].
+- **Memory Complexity:** Requires storing the octree structure, including $V_{approx}$ and $E$ for each node [S2, book].
+- **Strengths:** Significantly faster rendering speeds compared to voxel-based splatting, especially for large datasets with homogeneous regions [S1, unofficial][S2, book]. Enables interactive frame rates [S2, book].
+- **Limitations:** Visual quality degrades as error tolerance increases [S2, book]. The quality is also affected by the size, shape, and type of the reconstruction kernel used [S1, unofficial].
+- **When to Use:** When interactive performance is required for large volume datasets and some loss of fidelity is acceptable [S2, book].
+- **When Not to Use:** When high-fidelity, voxel-accurate rendering is required [S1, unofficial].
 
 ## Background
-Octree-based Splatting, also known as Laur and Hanrahan Splatting, was introduced by Laur in 1991 [S2, book]. It was developed to address the performance limitations of standard splatting and ray-casting for large volume datasets by leveraging hierarchical data structures to cull voxels and approximate contributions [S1, unofficial][S2, book]. The technique is used in interactive visualization systems where rapid feedback is necessary [S2, book].
+Octree-based Splatting was introduced by Laur in 1991 [S2, book]. It is also referred to as Laur and Hanrahan Splatting [S1, unofficial]. The method was developed to address the dependency of rendering speed on the number of voxels in the dataset [S2, book]. It builds on earlier splatting techniques [S2, book] and uses octree structures to cull voxels [S1, unofficial].
 
 ## Sources
 [S1] DTIC ADA606342: An Anti-Aliasing Technique for Splatting, https://archive.org/details/DTIC_ADA606342, fetched 2026-10-26 (unofficial)

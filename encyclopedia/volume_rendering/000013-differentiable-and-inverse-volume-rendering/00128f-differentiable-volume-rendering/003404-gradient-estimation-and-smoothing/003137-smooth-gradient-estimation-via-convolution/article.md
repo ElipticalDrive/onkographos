@@ -3,144 +3,172 @@
 Also called: Combined gradient-smoothing operator, Convolutional Smoothing for Gradients, Gradient Smoothing via Convolution, Leibniz Rule Gradient Estimation via Convolution, Smooth Differentiation via Convolution, Smooth Gradient
 
 ## Overview
-This method enables the computation of non-zero, directed gradients for differentiable volume rendering by smoothing the rendering integrand via convolution, allowing the differential operator to move inside the integral via Leibniz's rule [S1]. It solves the problem of discontinuous integrands where naive automatic differentiation yields zero gradients almost everywhere (plateaus), causing optimization to fail [S1]. It sets itself apart from [Non-local Approximated Gradients](6784-non-local-approximated-gradients.md) and [Axis-Aligned Neighbor Smoothing](7600-axis-aligned-neighbor-smoothing.md) by explicitly enforcing smoothness through convolution with a kernel (typically Gaussian) rather than approximating gradients via differential filters on rendered images or local neighbor averaging [S1, 6449-smooth-gradient-estimation-via-convolution.md, 6784-non-local-approximated-gradients.md].
+Smooth Gradient Estimation via Convolution enables the differentiation of the rendering equation by smoothing the integrand via convolution with a kernel, allowing the differential operator to move inside the integral via Leibniz's rule [S1]. It solves the problem of discontinuous integrands where naive automatic differentiation yields zero gradients almost everywhere (plateaus) except at exact overlaps, causing optimization to fail to converge [S1]. It sets itself apart from its siblings by explicitly enforcing smoothness through convolution to permit the exchange of differentiation and integration, whereas [Non-local Approximated Gradients](6784-non-local-approximated-gradients.md) approximates gradients using differential filters on rendered images and [Axis-Aligned Neighbor Smoothing](7600-axis-aligned-neighbor-smoothing.md) uses local neighbor averaging [6449-smooth-gradient-estimation-via-convolution.md, 6784-non-local-approximated-gradients.md].
 
 ## How it works
-**Inputs:**
-*   Rendering equation integrand $R(\omega_i ; \theta)$, where $\omega_i$ is the incoming light direction and $\theta$ are scene parameters.
-*   Smoothing kernel $\kappa(\tau)$, typically a Gaussian distribution with standard deviation $\sigma$ [S1].
-*   Differential operator $D$ (e.g., gradient $\nabla$) [S1].
-
-**Outputs:**
-*   Smoothed gradient estimate $D \bar{L}(x, \omega_o ; \theta)$ [S1].
+**Inputs and Outputs:**
+- Input: The rendering integrand $R(\omega_i ; \theta)$, where $\omega_i$ represents incoming light directions and $\theta$ represents scene parameters [S1].
+- Output: The gradient of the smoothed rendering equation with respect to $\theta$, denoted $D \bar{L}(x, \omega_o ; \theta)$ [S1].
 
 **Data Structures:**
-*   The method relies on Monte Carlo sampling from the product space of light paths ($\Omega$) and scene parameters ($\Theta$) [S1].
-*   For gradient estimation, a positivized, normalized Cumulative Distribution Function (CDF) $P_G$ is constructed for inverse transform sampling [S1].
+- Smoothing Kernel $\kappa$: A Gaussian distribution is used in this work [S1]. The kernel is defined over the parameter space $\Theta$ [S1].
+- Parameter Space $\Theta$: The domain of scene parameters $\theta$ [S1].
+- Light Path Space $\Omega$: The domain of incoming light directions $\omega_i$ [S1].
 
-**Steps:**
-1.  **Define Smoothed Rendering Equation:** Apply the smoothing linear operator $S$ to the integrand $R$ to create a smooth rendering equation $\bar{L}$ [S1]:
-    $$ \bar{L}(x, \omega_o ; \theta) = \int_{\Omega} S R(\omega_i ; \theta) d\omega_i $$
-    where $S f (\theta) = \int \kappa(\tau )f (\theta - \tau )d\tau$ [S1].
+**Numbered Steps:**
+1. Define the smoothing operator $S$ as a convolution with a kernel $\kappa$ [S1]. For any function $f$ in any dimension:
+   $$ S f (\theta) = \int_{\Theta} \kappa(\tau )f (\theta - \tau )d\tau $$
+   where $\kappa$ is a smoothing kernel, specifically a Gaussian distribution [S1].
 
-2.  **Apply Leibniz's Rule:** Move the differential operator $D$ inside the integral. Since $S R$ is smooth, the exchange is valid [S1]:
-    $$ D \bar{L}(x, \omega_o ; \theta) = \int_{\Omega} D S R(\omega_i ; \theta)d\omega_i $$
+2. Apply the smoothing operator $S$ to the rendering integrand $R$ to obtain the smoothed rendering equation $\bar{L}$:
+   $$ \bar{L}(x, \omega_o ; \theta) = \int_{\Omega} S R(\omega_i ; \theta)d\omega_i $$
+   This smoothed integrand is now smooth, allowing the differential operator to move inside the integral via Leibniz's rule [S1].
 
-3.  **Expand the Integral:** Rearrange the terms to separate the differential operator acting on the kernel from the radiance term, resulting in an integral over the product space $\Omega \times \Theta$ [S1]:
-    $$ D \bar{L}(x, \omega_o ; \theta) = \int_{\Omega} \int_{\Theta} D \kappa(\tau )R(\omega_i ; \theta - \tau )d\tau d\omega_i $$
+3. Compute the gradient of the smoothed loss by moving the differential operator $D$ inside the integral:
+   $$ D \bar{L}(x, \omega_o ; \theta) = \int_{\Omega} D S R(\omega_i ; \theta)d\omega_i $$
+   This step is valid because the convolution enforces the smoothness property that prevents the discontinuities which normally block this exchange [S1].
 
-4.  **Monte Carlo Approximation:** Approximate the integral by sampling random paths from the product space of light paths and scene parameters [S1]. The sampling strategy for the parameter dimension $\tau$ depends on the differential operator used (see Gradient Estimation below) [S1].
+4. Rearrange and expand the expression to yield an integral over the product space of light paths and scene parameters:
+   $$ D \bar{L}(x, \omega_o ; \theta) = \int_{\Omega} \int_{\Theta} D \kappa(\tau )R(\omega_i ; \theta - \tau )d\tau d\omega_i $$
+   Here, $D \kappa(\tau)$ is the derivative of the smoothing kernel with respect to its argument [S1].
+
+5. Approximate the double integral via Monte Carlo (MC) sampling from the product space of light paths ($\omega_i \in \Omega$) and scene parameters ($\tau \in \Theta$) [S1].
+   - Sample $\omega_i$ from $\Omega$ using standard importance sampling strategies for incoming radiance and BRDF terms [S1].
+   - Sample $\tau$ from $\Theta$ using importance sampling for the application of the differential operator to the smoothing kernel $D \kappa(\tau)$ [S1].
+   - The integrand is a product of four terms: incoming radiance, BRDF, the kernel derivative $D \kappa(\tau)$, and the shifted integrand $R(\omega_i ; \theta - \tau)$ [S1].
+
+**Formulas:**
+- Smoothed Rendering Equation:
+  $$ \bar{L}(x, \omega_o ; \theta) = \int_{\Omega} S R(\omega_i ; \theta)d\omega_i $$
+- Smoothing Convolution:
+  $$ S f (\theta) = \int_{\Theta} \kappa(\tau )f (\theta - \tau )d\tau $$
+- Gradient of Smoothed Loss:
+  $$ D \bar{L}(x, \omega_o ; \theta) = \int_{\Omega} \int_{\Theta} D \kappa(\tau )R(\omega_i ; \theta - \tau )d\tau d\omega_i $$
 
 **Parameters:**
-*   $\sigma$: Standard deviation of the Gaussian smoothing kernel. Controls the width of the smoothing. Larger $\sigma$ provides smoother gradients but may reduce precision near the optimum [S1].
+- Smoothing Kernel $\kappa$: A Gaussian distribution is used [S1]. The width of the Gaussian is not specified in the sources [S1].
 
-**Pitfalls:**
-*   **Naive AD Failure:** Naive automatic differentiation computes $\int_{\Omega} D R(\omega_i ; \theta) d\omega_i$, which is incorrect because the integrand is discontinuous in $\theta$, preventing the exchange of integral and derivative operations [S1].
-*   **Step Size:** Smooth gradients point in the right direction but can cause large steps far from the optimum compared to classic gradients at the optimum [S1].
+**Edge Cases and Pitfalls:**
+- Naive automatic differentiation computes $\int_{\Omega} D R(\omega_i ; \theta) d\omega_i$, which is incorrect because the integrand is discontinuous in $\theta$, preventing the exchange of integral and derivative operations [S1].
+- Classic gradients are zero almost everywhere (plateaus) except where overlaps occur, causing non-convergence [S1].
+- Smooth gradients point in the right direction but may make large steps far from the optimum [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def smooth_gradient_estimation(R, kernel_sigma, num_samples):
+import numpy as np
+
+def smooth_gradient_estimation(R, x, omega_o, theta, num_samples):
     """
-    Estimates the gradient of the rendering equation using convolutional smoothing.
+    Computes the gradient of the smoothed rendering equation via Monte Carlo sampling.
     
     Args:
         R: Function representing the rendering integrand R(omega_i; theta).
-        kernel_sigma: Standard deviation sigma for the Gaussian kernel.
+        x: Camera position.
+        omega_o: Outgoing light direction.
+        theta: Current scene parameters.
         num_samples: Number of Monte Carlo samples.
         
     Returns:
-        Gradient estimate.
+        Estimated gradient D L_bar(x, omega_o; theta).
     """
+    # Define Gaussian kernel and its derivative
+    # Note: The specific width (sigma) of the Gaussian is not given in sources [S1]
+    # [G] Assuming a standard normal distribution for demonstration; 
+    # implementer must choose sigma based on scene scale.
+    def gaussian_kernel(tau):
+        return np.exp(-0.5 * tau**2) / np.sqrt(2 * np.pi)
+    
+    def gaussian_kernel_derivative(tau):
+        return -tau * np.exp(-0.5 * tau**2) / np.sqrt(2 * np.pi)
+    
     gradient_sum = 0.0
     
     for _ in range(num_samples):
-        # 1. Sample light path omega_i from the light path space Omega
-        # (Implementation details depend on the specific rendering engine's
-        #  importance sampling for radiance/BRDF, assumed to be handled by R)
-        omega_i = sample_light_path()
+        # Sample light path omega_i from Omega
+        # [G] Standard importance sampling for radiance/BRDF is assumed here.
+        # Implementer must provide specific sampling strategy for R.
+        omega_i = sample_light_path() 
         
-        # 2. Sample parameter perturbation tau from the gradient kernel distribution
-        # The gradient kernel is D_G kappa(tau) = - (tau_i / sigma^2) * N(tau, sigma)
-        # We sample tau using inverse transform sampling on the positivized CDF P_G
-        tau = sample_gradient_kernel(kernel_sigma)
+        # Sample tau from Theta based on importance sampling for D kappa(tau)
+        # The integrand term is D kappa(tau) * R(omega_i; theta - tau)
+        # Importance sampling should target |D kappa(tau)|
+        # [G] For a Gaussian derivative, the distribution is proportional to |tau| * exp(-tau^2/2)
+        # This is a half-normal distribution scaled by tau.
+        # Implementer must provide specific sampling strategy for tau.
+        tau = sample_tau_from_kernel_derivative()
         
-        # 3. Evaluate the radiance at the shifted parameter theta - tau
-        # Note: R must accept the shifted parameter
-        radiance = R(omega_i, theta - tau)
+        # Evaluate the integrand
+        # R(omega_i; theta - tau)
+        shifted_theta = theta - tau
+        radiance = R(omega_i, shifted_theta)
         
-        # 4. The contribution is weighted by the kernel derivative term implicitly
-        # handled by the sampling distribution. In the MC estimator:
-        # E[ (D kappa(tau) / p(tau)) * R(omega_i, theta - tau) ]
-        # For the specific gradient sampler derived from the Gaussian,
-        # the sampling density p(tau) cancels the D kappa(tau) term appropriately
-        # to yield the unbiased estimator.
+        # D kappa(tau)
+        kernel_deriv = gaussian_kernel_derivative(tau)
         
-        # The specific weight for the gradient estimator using the Smirnov transform
-        # is embedded in the sampling process. The term D kappa(tau) is proportional
-        # to -tau_i * N(tau, sigma). The sampling density p_G(tau) is derived from
-        # |D kappa(tau)|. The ratio D kappa(tau) / p_G(tau) simplifies to a sign
-        # and scaling factor.
+        # Combine terms
+        # The integral is over Omega and Theta.
+        # We need to divide by the probability density of our samples.
+        # p(omega_i) is the PDF for light path sampling.
+        # p(tau) is the PDF for tau sampling.
+        # [G] Placeholder for PDF evaluation. Implementer must provide these.
+        pdf_omega = pdf_light_path(omega_i)
+        pdf_tau = pdf_tau_sampling(tau)
         
-        # For the 1D case with the specific sampler:
-        # If we sample tau from p_G, the estimator term is:
-        # sign * (1 / sigma^2) * tau * R(omega_i, theta - tau)
-        # However, the paper states the integral is approximated via MC sampling
-        # from the product space. The exact weight depends on the specific
-        # implementation of the "Gradient Estimation (Our Grad.)" variant.
-        
-        # Generic MC step:
-        contribution = radiance * get_kernel_weight(tau, kernel_sigma)
-        gradient_sum += contribution
+        # Avoid division by zero
+        if pdf_omega == 0 or pdf_tau == 0:
+            continue
+            
+        weight = (kernel_deriv * radiance) / (pdf_omega * pdf_tau)
+        gradient_sum += weight
         
     return gradient_sum / num_samples
 
-def sample_gradient_kernel(sigma):
-    """
-    Samples tau from the distribution proportional to |d/dtau (Gaussian(tau, sigma))|.
-    Uses inverse transform sampling with the Smirnov transform.
-    """
-    xi = random_uniform(0, 1)
-    if xi <= 0.5:
-        tau = -math.sqrt(2 * sigma**2 * math.log(2 * xi))
-    else:
-        tau = math.sqrt(2 * sigma**2 * math.log(1 - xi))
-    return tau
+def sample_light_path():
+    # [G] Placeholder for standard light path sampling (e.g., path tracing)
+    # Returns a sample omega_i from Omega
+    return np.random.uniform(-1, 1, 3) # Example placeholder
 
-def get_kernel_weight(tau, sigma):
-    """
-    Returns the weight for the gradient estimator.
-    Based on D_G kappa(tau) = - (tau / sigma^2) * N(tau, sigma).
-    The sampling density p_G(tau) is proportional to |tau| * N(tau, sigma).
-    The ratio is proportional to 1/sigma^2 * sign(tau).
-    """
-    return -tau / (sigma**2)
+def sample_tau_from_kernel_derivative():
+    # [G] Placeholder for sampling from the distribution proportional to |D kappa(tau)|
+    # For Gaussian derivative, this is related to the half-normal distribution.
+    # Returns a sample tau from Theta
+    return np.random.normal(0, 1) # Example placeholder
+
+def pdf_light_path(omega_i):
+    # [G] Placeholder for PDF of light path sampling
+    return 1.0 # Example placeholder
+
+def pdf_tau_sampling(tau):
+    # [G] Placeholder for PDF of tau sampling
+    # If sampling from standard normal, PDF is Gaussian
+    return np.exp(-0.5 * tau**2) / np.sqrt(2 * np.pi)
 ```
 
 ## Subtopics
 
 ### [Hessian Estimation via Convolution](6469-hessian-estimation-via-convolution.md)
-[Hessian Estimation via Convolution](6469-hessian-estimation-via-convolution.md) computes the second-order derivatives (the Hessian matrix) of a scalar field by convolving the field with a kernel that combines Gaussian smoothing and the Hessian differential operator. It solves the problem of estimating $\nabla^2 f$ in differentiable volume rendering where direct differentiation is unstable or impossible due to stochastic sampling. It sets itself apart from sibling methods like [Smooth Gradient Marginalization](6472-smooth-gradient-marginalization.md) by explicitly constructing the $n \times n$ Hessian field rather than marginalizing gradient uncertainties, and it differs from [Smooth Gradient Estimation via Convolution](6449-smooth-gradient-estimation-via-convolution.md) by operating on second-order derivatives instead of first-order gradients.
+Computes the second-order spatial derivatives (the Hessian matrix) of a scalar volume function by convolving the function with a kernel that combines Gaussian smoothing and second-order differentiation. It is distinguished from its parent method by operating on the second derivative operator $\nabla^2$ rather than the first derivative $\nabla$, and from its sibling, Smooth Gradient Marginalization, by explicitly constructing the $n \times n$ Hessian matrix rather than marginalizing gradient components.
 
 ### [Smooth Gradient Marginalization](6472-smooth-gradient-marginalization.md)
-[Smooth Gradient Marginalization](6472-smooth-gradient-marginalization.md) is a technique to sample an $n$-dimensional Gaussian gradient by marginalizing the probability density function (PDF) over all dimensions except the one being differentiated, allowing individual dimension sampling. It differs from methods that only blur in the direction of differentiation by blurring all dimensions, which is more consistent with higher-order differentials.
+Samples an $n$-dimensional Gaussian gradient by marginalizing the probability density function (PDF) over all dimensions except the one being differentiated, allowing individual dimension sampling. It differs from methods that only blur in the direction of differentiation by blurring all dimensions, which is more consistent with higher-order differentials.
 
-### Gradient Estimation (Our Grad.)
-First-order gradient estimation using the gradient operator $D_G = \nabla = \partial/\partial\tau_i \in (\mathbb{R}^n \to \mathbb{R}) \to (\mathbb{R}^n \to \mathbb{R}^n)$, mapping a scalar function of $n$ dimensions to an $n$-dimensional gradient vector field [S1]. The combination of smoothing and differentiation is $D_G \kappa(\tau) = \nabla_i \mathcal{N}(\tau, \sigma) = -\frac{\tau_i}{\sigma^2} \cdot \mathcal{N}(\tau, \sigma)$ [S1]. Sampling for the dimension being differentiated uses inverse transform sampling via the Smirnov transform on a positivized, normalized CDF $P_G$ [S1]. For multi-dimensional sampling, other dimensions are sampled independently from a Gaussian distribution due to separability [S1]. The inverse CDF $P_G^{-1}(\xi)$ for the gradient sampler is: if $\xi \le 0.5$, $-\sqrt{2\sigma^2 \log(2\xi)}$; else $\sqrt{2\sigma^2 \log(1 - \xi)}$ [S1]. Time complexity is $O(n)$ function evaluations without importance sampling (IS), $O(n)$ with IS, and $O(1)$ with Aggregate IS [S1].
+### [Gradient Estimation (Our Grad.)](6476-gradient-estimation-our-grad.md)
+Computes the first-order gradient vector field of a scalar function with respect to its input dimensions, enabling differentiable volume rendering via stochastic sampling. It sets itself apart from sibling methods by specifically targeting the $\nabla$ operator, mapping a scalar function $f: \mathbb{R}^n \to \mathbb{R}$ to an $n$-dimensional gradient vector field $\nabla f: \mathbb{R}^n \to \mathbb{R}^n$, whereas siblings like [Hessian Estimation via Convolution](6469-hessian-estimation-via-convolution.md) compute second-order derivatives and [Smooth Gradient Marginalization](6472-smooth-gradient-marginalization.md) focuses on marginalizing gradients.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(n)$ function evaluations without importance sampling, $O(n)$ with importance sampling, and $O(1)$ with Aggregate Importance Sampling [S1].
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Classic gradients are zero almost everywhere (plateaus) except where overlaps occur, causing non-convergence. Smooth gradients point in the right direction but make large steps far from the optimum [S1].
-*   **Strengths:** Enables differentiation of discontinuous integrands; provides non-zero gradients for optimization; allows higher-order derivatives (Hessians) [S1].
-*   **Limitations:** Large steps far from the optimum; requires careful sampling of the kernel derivative; smoothing width $\sigma$ affects convergence behavior [S1].
-*   **When to use:** When naive automatic differentiation fails due to discontinuities in the rendering integrand with respect to scene parameters [S1].
-*   **When not to use:** When the integrand is already smooth with respect to the parameters, or when computational cost of additional sampling is prohibitive and simpler methods suffice [S1].
+- **Time Complexity:** The method requires Monte Carlo sampling from the product space of light paths and scene parameters [S1]. The complexity depends on the number of samples required to reduce variance, which is influenced by the smoothness of the kernel and the complexity of the integrand [S1].
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Classic gradients are zero almost everywhere (plateaus) except where overlaps occur, causing non-convergence [S1]. Smooth gradients point in the right direction but make large steps far from the optimum [S1]. An update taking into account the curvature of the loss landscape (via Hessians) lands at a point very close to the target [S1].
+- **Scaling:** Not given in the sources.
+- **Strengths:** Enables differentiation of discontinuous integrands by enforcing smoothness, allowing the use of gradient-based optimization [S1].
+- **Limitations:** Smooth gradients may make large steps far from the optimum, potentially requiring second-order information (Hessians) for efficient convergence [S1].
+- **When to use:** When naive automatic differentiation fails due to discontinuous integrands, and gradient-based optimization is desired [S1].
+- **When not to use:** When the integrand is already smooth, or when second-order information is not needed and first-order gradients are sufficient [S1].
 
 ## Background
-Originated in the context of higher-order differentiable rendering to address the issue that the differential operator cannot be moved inside the integral for discontinuous integrands [S1]. The method leverages Leibniz's rule by enforcing smoothness via convolution [S1]. It is used in inverse rendering problems where parameters such as object positions or material properties need to be optimized based on rendered images [S1].
+The method originates from the work on Stochastic Gradient Estimation for Higher-Order Differentiable Rendering [S1]. It addresses the issue that naive automatic differentiation computes the wrong gradients because the integrand is discontinuous in the scene parameters, preventing the exchange of integral and derivative operations [S1]. The solution involves enforcing smoothness via convolution to allow the application of Leibniz's rule [S1].
 
 ## Sources
 [S1] Stochastic Gradient Estimation for Higher-Order Differentiable Rendering, https://doi.org/10.1109/iccv51701.2025.02618, fetched 2026-10-29

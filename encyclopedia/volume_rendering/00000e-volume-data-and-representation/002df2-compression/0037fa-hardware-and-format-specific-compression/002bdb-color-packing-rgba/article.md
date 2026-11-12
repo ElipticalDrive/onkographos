@@ -2,24 +2,24 @@
 
 
 ## Overview
-Color Packing (RGBA) is a lossless compression method that maps 4-component floating-point color vectors into a compact 4-byte unsigned integer representation with 8-bit precision per channel. It solves the problem of reducing memory bandwidth and storage requirements for volumetric color data by discarding floating-point precision in favor of hardware-friendly integer formats. It differs from [16-bit Floating Point Format for Spectra](1163-16-bit-floating-point-format-for-spectra.md) by using fixed-point integer storage rather than half-precision floats, and from [ELSCINT1/PMSCT_RLE1 Delta Decoding](11897-elscint1-pmsct-rle1-delta-decoding.md) by operating on individual color components rather than applying run-length encoding to delta-encoded spectral data.
+Color Packing (RGBA) is a lossless compression method that maps 4-component floating-point color vectors into a compact 4-byte unsigned integer representation with 8-bit precision per channel [S1, unofficial]. It solves the problem of reducing memory bandwidth and storage requirements for volumetric color data by discarding floating-point precision in favor of hardware-friendly integer formats [S1, unofficial]. Unlike [16-bit Floating Point Format for Spectra](1163-16-bit-floating-point-format-for-spectra.md) which preserves dynamic range for spectral data, or [ELSCINT1/PMSCT_RLE1 Delta Decoding](11897-elscint1-pmsct-rle1-delta-decoding.md) which exploits spatial redundancy, this method relies solely on per-channel quantization [S1, unofficial].
 
 ## How it works
-**Inputs:** A 4-component floating-point color vector $\mathbf{c} = [c_0, c_1, c_2, c_3]$ where each component is a `float`.
-**Outputs:** A 4-byte unsigned integer array (or a single 32-bit unsigned integer) representing the packed color.
+**Inputs:** A 4-component floating-point vector $C = [c_0, c_1, c_2, c_3]$ where each component is a `float` (typically in the range $[0.0, 1.0]$ for standard color, though not strictly enforced by the algorithm).
+**Outputs:** A 4-byte unsigned integer array or packed 32-bit integer $P$ where each byte corresponds to one channel.
 
 **Data Structures:**
-The output is a 32-bit value composed of four 8-bit fields.
-- Byte 0: Red ($c_0$)
-- Byte 1: Green ($c_1$)
-- Byte 2: Blue ($c_2$)
-- Byte 3: Alpha ($c_3$)
+The output is a 32-bit value $P$ with the following bit layout:
+- Bits 0-7: Red channel ($R$)
+- Bits 8-15: Green channel ($G$)
+- Bits 16-23: Blue channel ($B$)
+- Bits 24-31: Alpha channel ($A$)
 
 **Steps:**
-1. For each component $c_i$ where $i \in \{0, 1, 2, 3\}$:
-   a. Multiply the component value by 255.0.
-   b. Cast the result to an 8-bit unsigned integer (`u8`). This truncates any fractional part.
-   c. Store the result in the $i$-th byte of the output.
+1. For each component $c_i$ in $C$ (where $i \in \{0, 1, 2, 3\}$):
+   a. Multiply the component by 255.0: $v_i = c_i \times 255.0$.
+   b. Cast the result to an 8-bit unsigned integer ($u8$): $p_i = \text{cast\_u8}(v_i)$.
+2. Pack the resulting bytes $p_0, p_1, p_2, p_3$ into the 32-bit integer $P$ according to the layout defined above.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -27,100 +27,74 @@ The output is a 32-bit value composed of four 8-bit fields.
 ```python
 def pack_color_rgba(c: list[float]) -> int:
     """
-    Packs a 4-component float color vector into a 32-bit unsigned integer.
+    Packs a 4-component float color vector into a 4-byte unsigned integer.
     
     Args:
         c: List of 4 floats [R, G, B, A].
         
     Returns:
-        32-bit integer with R in bits 0-7, G in 8-15, B in 16-23, A in 24-31.
+        32-bit integer with packed RGBA bytes.
     """
-    # Step 1: Quantize each component to 8-bit unsigned integer
+    # Step 1: Quantize each component
+    # Multiply by 255.0 and cast to uint8
+    # Note: Standard casting truncates towards zero. 
+    # Some implementations may round, but [S1, unofficial] specifies cast.
     r = int(c[0] * 255.0) & 0xFF
     g = int(c[1] * 255.0) & 0xFF
     b = int(c[2] * 255.0) & 0xFF
     a = int(c[3] * 255.0) & 0xFF
     
-    # Step 2: Pack into a single 32-bit integer
+    # Step 2: Pack into 32-bit integer
+    # Layout: R | (G << 8) | (B << 16) | (A << 24)
     packed = r | (g << 8) | (b << 16) | (a << 24)
     
     return packed
 ```
 
 **Parameters:**
-- Scale factor: 255.0.
+- Scaling factor: 255.0.
 - Bit depth: 8 bits per channel.
 
 **Edge Cases and Pitfalls:**
-- **Precision Loss:** Casting to `u8` discards sub-byte precision. Values between 0 and $1/255$ all map to 0.
-- **Clamping:** The sources do not explicitly specify clamping of input values to $[0, 1]$ before multiplication. If input values exceed 1.0, the result may overflow the 8-bit range before masking. The bitwise AND with `0xFF` acts as a wrap-around modulo 256, which may produce incorrect colors for out-of-range inputs. [G] In practice, inputs should be clamped to $[0, 1]$ to ensure correct mapping, but the source definition does not mandate this step.
-- **Negative Values:** Negative inputs will result in negative integers before masking, which wrap around to high positive values (e.g., -1 becomes 255). This is likely unintended for color data.
+- **Precision Loss:** Values between 0.0 and $1/255.0$ all map to 0. Values between $254/255.0$ and 1.0 map to 255. This results in quantization error [S1, unofficial].
+- **Out-of-Range Input:** If input components are outside $[0.0, 1.0]$, the behavior depends on the casting implementation. Negative values may wrap around or clamp depending on the language/runtime. Values $> 1.0$ will wrap modulo 256 if not clamped [G].
+- **Endianness:** The logical bit layout is fixed, but the memory representation of the resulting 32-bit integer depends on the system's endianness. For network or file storage, explicit byte ordering should be used.
 
 ## Subtopics
 
 ### packDCColor
-Packs the DC spherical harmonic coefficient (RGB) and alpha into a single 32-bit unsigned integer for GPU texture storage. It is used when storing the zeroth-order spherical harmonic coefficients, which represent the average color of a volume element. It differs from standard RGBA packing by applying a specific quantization constant derived from the SH basis function $Y_0^0$. Choose this when storing SH-based volumetric representations that require GPU texture compatibility. [S2, unofficial]
-
-**Steps:**
-1. Define quantization lambda $k_{SH0} = 0.28209479177387814$ (the value of $Y_0^0$).
-2. For each color component $sh[j]$ where $j \in \{0, 1, 2\}$:
-   a. Compute $val = k_{SH0} \times sh[j]$.
-   b. Add 0.5 to $val$.
-   c. Clamp $val$ to the range $[0, 1]$.
-   d. Multiply by 255.
-   e. Cast to `uint32` and mask with `0xFF` to get the 8-bit value.
-3. For the alpha component $\alpha$:
-   a. Clamp $\alpha$ to $[0, 1]$.
-   b. Multiply by 255.
-   c. Cast to `uint32` and mask with `0xFF`.
-4. Pack the results: $R | (G \ll 8) | (B \ll 16) | (A \ll 24)$.
-
-**Formula:**
-$$ R = \text{quant}(k_{SH0} \times sh[0] + 0.5) $$
-$$ G = \text{quant}(k_{SH0} \times sh[1] + 0.5) $$
-$$ B = \text{quant}(k_{SH0} \times sh[2] + 0.5) $$
-$$ A = \text{quant}(\alpha + 0.5) $$
-where $\text{quant}(x) = \text{clamp}(x, 0, 1) \times 255$ cast to `uint8`.
-
-**Parameter:**
-- $k_{SH0} = 0.28209479177387814$ [S2, unofficial]
+Packs the DC spherical harmonic coefficient (RGB) and alpha into a single 32-bit unsigned integer for GPU texture storage [S2, unofficial]. It differs from standard RGBA packing by applying a specific quantization constant derived from the spherical harmonic basis function $Y_0^0$ [S2, unofficial].
+- **Definition:** Quantizes SH coefficients and alpha using a specific scaling factor $k_{SH0}$ [S2, unofficial].
+- **Steps:**
+  1. Define quantization lambda: clamp value to $[0, 1]$, multiply by 255, add 0.5, cast to uint32, mask with 0xFF.
+  2. Compute $R = \text{quant}(k_{SH0} \times sh[0] + 0.5)$, $G = \text{quant}(k_{SH0} \times sh[1] + 0.5)$, $B = \text{quant}(k_{SH0} \times sh[2] + 0.5)$, $A = \text{quant}(\alpha)$.
+  3. Pack as $R \mid (G \ll 8) \mid (B \ll 16) \mid (A \ll 24)$.
+- **Formula:** $R = \text{quant}(k_{SH0} \times sh[0] + 0.5)$ [S2, unofficial].
+- **Parameter:** $k_{SH0} = 0.28209479177387814$ (DC SH coefficient $Y_0^0$) [S2, unofficial].
 
 ### RGBE HDR Encoding
-Packs high-dynamic-range (HDR) color values into a 4-byte format using a shared exponent for the RGB channels. It is used to store HDR volumetric colors in a compact format that preserves dynamic range. It differs from standard RGBA packing by using a variable exponent to extend the range of representable values beyond $[0, 1]$. Choose this when storing HDR volumetric data where color intensities can exceed 1.0. [S3, unofficial]
-
-**Steps:**
-1. Compute $d = \max(c.x, c.y, c.z)$.
-2. If $d \le 10^{-32}$, return `HDRPixel(0, 0, 0, 0)`.
-3. Extract exponent $e$ and mantissa $m$ from $d$ using `frexp(d, &e)`, such that $d = m \times 2^e$.
-4. Compute scale factor $s = m \times 256.0 / d$.
-5. Compute packed components:
-   - $r = \text{uint8\_t}(c.x \times s)$
-   - $g = \text{uint8\_t}(c.y \times s)$
-   - $b = \text{uint8\_t}(c.z \times s)$
-   - $e_{packed} = \text{uint8\_t}(e + 128)$
-6. Return `HDRPixel` with fields $r, g, b, e_{packed}$.
-
-**Layout:**
-`HDRPixel`: 4-byte struct with fields `uint8_t r, g, b, e` in that order.
-
-**Parameters:**
-- Threshold: $10^{-32}$ for near-zero values.
-- Exponent bias: 128.
-
-**Pitfalls:**
-- Channel values $c.x, c.y, c.z$ can exceed 1.0 after scaling, causing overflow when cast to `uint8_t`. The code does not clamp them, relying on the HDR format's ability to store values >1 via the exponent. [S3, unofficial]
+Packs High Dynamic Range (HDR) color values into a 4-byte format using a shared exponent for the RGB channels [S3, unofficial]. It allows storing values $> 1.0$ which standard RGBA cannot represent, at the cost of reduced precision for the mantissa [S3, unofficial].
+- **Steps:**
+  1. Compute $d = \max(c.x, c.y, c.z)$.
+  2. If $d \le 10^{-32}$, return `HDRPixel(0, 0, 0, 0)`.
+  3. Extract exponent $e$ and mantissa $m$ from $d$ using `frexp(d, &e)`, so $d = m \times 2^e$.
+  4. Compute scale factor $d = m \times 256.0f / d$.
+  5. Return `HDRPixel` with components: $r = \text{uint8\_t}(c.x \times d)$, $g = \text{uint8\_t}(c.y \times d)$, $b = \text{uint8\_t}(c.z \times d)$, $e = \text{uint8\_t}(e + 128)$.
+- **Parameter:** `1e-32`: threshold for near-zero values to avoid division by zero [S3, unofficial].
+- **Parameter:** `128`: bias added to exponent to keep it positive in 8-bit storage [S3, unofficial].
+- **Layout:** `HDRPixel`: 4-byte struct with fields `uint8_t r, g, b, e` in that order [S3, unofficial].
+- **Pitfall:** Channel values $c.x, c.y, c.z$ can exceed 1.0 after scaling, causing overflow when cast to `uint8_t`. The code does not clamp them, relying on the HDR format's ability to store values $>1$ via the exponent [S3, unofficial].
 
 ## Operating characteristics
-**Time Complexity:** $O(1)$ per color vector. The operation involves a constant number of arithmetic operations and type casts.
-**Memory Complexity:** Reduces storage from 16 bytes (4 floats) to 4 bytes (1 uint32), achieving a 4:1 compression ratio.
-**Measured Performance:** Not given in the sources.
-**Strengths:** Extremely fast, hardware-friendly, and widely supported by graphics APIs.
-**Limitations:** Loss of precision, limited dynamic range (unless using variants like RGBE), and potential for overflow if inputs are not clamped.
-**When to use:** When memory bandwidth is a bottleneck and color precision requirements are low (e.g., display-space colors).
-**When not to use:** When high dynamic range is required (use RGBE), when spectral data is stored (use 16-bit FP), or when delta-encoded data is more efficient (use RLE).
+- **Time Complexity:** $O(1)$ per pixel. The operation involves a constant number of arithmetic operations and bit shifts.
+- **Memory Complexity:** Reduces storage from 16 bytes (4 $\times$ 32-bit floats) to 4 bytes (4 $\times$ 8-bit integers), achieving a 4:1 compression ratio [S1, unofficial].
+- **Strengths:** Extremely fast to encode and decode; native support in many graphics APIs and hardware samplers; minimal memory footprint.
+- **Limitations:** Lossy; significant precision loss for values requiring high dynamic range or fine gradients; not suitable for scientific data where exact values are critical [S1, unofficial].
+- **When to use:** Real-time rendering, texture storage for diffuse/specular maps, scenarios where visual fidelity is more important than numerical accuracy.
+- **When not to use:** Scientific visualization requiring precise quantitative analysis, HDR scenes with extreme dynamic range (use RGBE instead), or when memory bandwidth is not the bottleneck.
 
 ## Background
-Color Packing (RGBA) is a fundamental technique in computer graphics for storing color data in compact formats. It is commonly used in texture storage, framebuffer formats, and volumetric rendering pipelines where memory efficiency is critical. The method is derived from the standard RGBA color model and is supported by virtually all graphics hardware.
+Color Packing (RGBA) is a fundamental technique in computer graphics for storing color data in textures and framebuffers. It originated with the adoption of 32-bit "True Color" displays, which allocated 8 bits per channel for Red, Green, and Blue, plus an Alpha channel [S1, unofficial]. The specific implementation details cited here are derived from modern implementations in volumetric rendering engines and game engines [S1, unofficial].
 
 ## Sources
 [S1] B4rtekk1/Minerust, https://github.com/B4rtekk1/Minerust, fetched 2026-10-27 (unofficial)

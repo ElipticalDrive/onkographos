@@ -1,0 +1,152 @@
+# Pre-integration of Transfer Function Contribution
+
+Also called: Pre-integrated transfer function tables
+
+## Overview
+Pre-integration of transfer function contribution is a technique that replaces on-the-fly interpolation of transfer function values with pre-computed tables to perform fully-shaded semi-transparent and iso-surface volume rendering [S1, unofficial]. It addresses the dichotomy between image quality and performance by smoothing image imperfections caused by low sampling frequencies, effectively decoupling the integration of the transfer function's contribution from the volume sampling process [S2, unofficial]. Unlike standard ray casting where transfer function evaluation happens per sample, this method pre-integrates the optical properties over the segment between samples, guaranteeing that no transfer function detail falling between two interpolated density pairs fails to be considered in the discrete ray integration [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volume dataset $V$, a piecewise linear transfer function defining color $C(d)$ and extinction coefficient $\lambda(d)$ as functions of density $d$, and a ray sampling step size $\Delta s$.
+*   **Output:** A rendered image where each pixel color is computed using pre-integrated optical properties.
+
+**Data Structures:**
+The core data structure is a 2D lookup table (LUT).
+*   **Dimensions:** The table stores values for all possible pairs of density values $(d_f, d_b)$ encountered at the endpoints of a ray segment.
+*   **Fields:** For each pair $(d_f, d_b)$, the table stores the integrated color contribution and the accumulated opacity (or transmittance) over the segment length $\Delta s$.
+*   **Layout:** The table is indexed by the density values of the front sample ($d_f$) and the back sample ($d_b$) of the segment.
+
+**Numbered Steps:**
+1.  **Pre-computation:** Pre-compute the 2D table storing the analytical volume rendering integration for all possible density pairs $(d_f, d_b)$. This assumes the transfer function is piecewise linear within the density pairs [S1, unofficial].
+    *   The integration calculates the color and opacity resulting from a ray segment of length $\Delta s$ where the density varies linearly from $d_f$ at the start to $d_b$ at the end.
+    *   The standard volume rendering integral for color is:
+        $$C_{res} = \int_{l_i}^{l_o} C(V(R(l))) \times \exp \left( - \int_{l_i}^l \lambda(V(R(j))) \times dj \right) \times dl$$
+    *   The standard volume rendering integral for opacity is:
+        $$\alpha = 1 - \exp \left( - \int_{l_i}^{l_o} \lambda(V(R(l))) \times dl \right)$$
+    *   In the pre-integration context, because the ray is decomposed into segments of homogeneous or very similar length, the color transfer function and extinction coefficient transfer function values become absolute values rather than ratios per unit length [S2, unofficial].
+2.  **Rendering (Ray Casting):** For each ray, traverse the volume.
+3.  **Table Lookup:** For each segment between two adjacent samples with densities $d_b$ (back) and $d_f$ (front), index the pre-computed table with the pair $(d_b, d_f)$ [S1, unofficial].
+4.  **Interpolation:** If the exact density pair is not in the table, interpolate the stored color and opacity values at sample locations $\Delta s$ apart [S1, unofficial].
+5.  **Compositing:** Use the retrieved pre-integrated color and opacity to update the frame buffer using standard front-to-back compositing.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pre-computation phase
+def precompute_table(density_range, num_bins, segment_length):
+    """
+    Pre-compute the 2D table for all density pairs.
+    density_range: tuple (min_d, max_d)
+    num_bins: number of discrete density levels
+    segment_length: delta_s, the distance between samples
+    """
+    table = empty_2d_array(num_bins, num_bins)
+    bins = linspace(density_range[0], density_range[1], num_bins)
+    
+    for i in range(num_bins):
+        for j in range(num_bins):
+            d_front = bins[i]
+            d_back = bins[j]
+            
+            # Analytical integration of color and opacity over segment_length
+            # assuming piecewise linear transfer functions between d_front and d_back
+            # C_seg, alpha_seg are the integrated color and opacity for this segment
+            C_seg, alpha_seg = integrate_segment(d_front, d_back, segment_length)
+            
+            table[i, j] = (C_seg, alpha_seg)
+    return table
+
+def integrate_segment(d_front, d_back, delta_s):
+    """
+    Computes the integrated color and opacity for a segment of length delta_s
+    where density varies linearly from d_front to d_back.
+    Assumes piecewise linear transfer functions C(d) and lambda(d).
+    """
+    # This is the core analytical solution.
+    # For linear C(d) and lambda(d), the integrals can be solved in closed form.
+    # Let C(d) = C_f + (C_b - C_f) * (d - d_f) / (d_b - d_f)
+    # Let lambda(d) = lambda_f + (lambda_b - lambda_f) * (d - d_f) / (d_b - d_f)
+    
+    # If d_front == d_back, it reduces to the homogeneous case:
+    if d_front == d_back:
+        c_val = C(d_front)
+        l_val = lambda(d_front)
+        alpha = 1.0 - exp(-l_val * delta_s)
+        color = c_val * (1.0 - exp(-l_val * delta_s)) / l_val if l_val > 0 else c_val * delta_s
+        return color, alpha
+    
+    # General case: linear variation
+    # The exact formula depends on the specific piecewise linear definitions.
+    # The key is that it is pre-computed and stored as an absolute value for the segment.
+    # [G] Implementation note: The integral of exp(-int(lambda)) * C is non-trivial 
+    # for linear lambda and C. Standard references provide the closed-form solution 
+    # involving exponential integrals or specific algebraic manipulations for linear coefficients.
+    # For the purpose of this article, we assume the analytical result is computed correctly.
+    
+    # Simplified representation of the analytical result:
+    alpha = 1.0 - exp(-integral_lambda_over_segment(d_front, d_back, delta_s))
+    color = integral_C_times_transmittance(d_front, d_back, delta_s)
+    
+    return color, alpha
+
+def render_volume(volume, table, segment_length):
+    """
+    Render using the pre-computed table.
+    """
+    for each pixel:
+        ray = cast_ray(pixel)
+        accumulated_color = (0, 0, 0)
+        accumulated_opacity = 0.0
+        
+        for each sample along ray:
+            d_front = volume.sample(ray, current_pos)
+            d_back = volume.sample(ray, current_pos + segment_length)
+            
+            # Index table with (d_back, d_front) or (d_front, d_back) depending on convention
+            # Note: S1 says (db, df). S2 implies front-to-back compositing.
+            # We assume table is indexed by the pair of densities at the segment ends.
+            c_seg, alpha_seg = table.lookup(d_front, d_back)
+            
+            # Front-to-back compositing
+            # C_out = C_in + C_seg * (1 - alpha_in)
+            # alpha_out = alpha_in + alpha_seg * (1 - alpha_in)
+            
+            accumulated_color += c_seg * (1.0 - accumulated_opacity)
+            accumulated_opacity += alpha_seg * (1.0 - accumulated_opacity)
+            
+            if accumulated_opacity > 1.0 - epsilon:
+                break
+                
+        set_pixel_color(accumulated_color)
+```
+
+**Parameters:**
+*   **Segment Length ($\Delta s$):** The distance between samples. This determines the resolution of the pre-integration. Smaller $\Delta s$ increases accuracy but requires more table lookups.
+*   **Table Resolution:** The number of bins for density values. Higher resolution increases memory usage but improves accuracy for complex transfer functions.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The pre-computation assumes piecewise linear transfer functions. If the transfer function has narrow peaks (e.g., at $d_{12}$), standard point sampling might miss them, but pre-integration guarantees they are considered if they fall within the density range of the segment [S1, unofficial].
+*   **Boundaries:** The table must cover the full range of possible density values in the volume.
+*   **Gradient Shading:** To compute gradients for shading, a gradient volume must also be loaded. Interpolation of a gradient volume without subsequent normalization is generally incorrect, though artifacts may not always be visible [S1, unofficial].
+
+## Subtopics
+
+### Pre-integrated Transfer Functions
+A technique to solve transfer function aliasing in post-classified rendering by pre-computing a 2D table storing analytical volume rendering integration for all possible density pairs [S1, unofficial]. It differs from general pre-integration by explicitly focusing on the aliasing problem in post-classified rendering. The method pre-computes a 2D table for all density pairs $(d_f, d_b)$, indexes it during rendering with each ray sample pair, and interpolates values at sample locations $\Delta s$ apart [S1, unofficial]. It assumes the transfer function is piecewise linear within the density pairs, guaranteeing that no transfer function detail falling between two interpolated density pairs fails to be considered in the discrete ray integration [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The rendering time is dominated by table lookups and compositing, which are $O(1)$ per sample. The pre-computation is $O(N^2)$ where $N$ is the number of density bins, but this is done once.
+*   **Memory Complexity:** The table size is $O(N^2)$, where $N$ is the number of density bins. This can be significant for high-resolution tables.
+*   **Measured Performance:** The implementation by Engel et al. can perform fully-shaded semi-transparent and iso-surface volume rendering at 1-4 frames per second for $256^3$ volumes on an NVidia GeForce3 [S1, unofficial].
+*   **Strengths:** Smoothes image imperfections caused by low sampling frequencies; guarantees no transfer function detail is missed between samples; decouples integration from sampling.
+*   **Limitations:** Requires pre-computation; memory usage for the table can be high; assumes piecewise linear transfer functions.
+*   **When to use:** When image quality is critical and sampling rates are low, or when transfer functions have narrow peaks that are easily missed by point sampling.
+*   **When not to use:** When memory is constrained, or when transfer functions are highly non-linear and cannot be well-approximated by piecewise linear functions.
+
+## Background
+Pre-integration of transfer function contribution was proposed by Engel et al. [S1, unofficial][S2, unofficial]. It was introduced to overcome undersampling problems associated with large inter-slice distances at off-angles, which were previously addressed by interpolating intermediate slices on-the-fly using register combiners [S1, unofficial]. The technique replaced this earlier approach by using pre-integrated transfer function tables, allowing for fully-shaded semi-transparent and iso-surface volume rendering [S1, unofficial]. It is used in direct volume ray casting to improve image quality without increasing sampling rates.
+
+## Sources
+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S2] Especificação de funções de transferência unidimensionais e multidimensionais para visualização volumétrica direta, http://hdl.handle.net/10183/12077, fetched 2026-10-30 (unofficial)

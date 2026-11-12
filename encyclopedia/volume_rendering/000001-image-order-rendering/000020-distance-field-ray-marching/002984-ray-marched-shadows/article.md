@@ -3,15 +3,15 @@
 Also called: Hard Shadow Casting, Hard Shadow Ray Marching, Hard Shadows, Hard Shadows via Sphere Tracing, SDF Shadow Ray Marching, SDF Shadows
 
 ## Overview
-Ray-marched shadows determine if a surface point is occluded from a light source by performing a sphere trace (ray march) from the point towards the light [S1, unofficial][S2, unofficial][S3, unofficial]. Unlike rasterization-based shadow maps, this method computes occlusion directly from the Signed Distance Function (SDF) of the scene, producing alias-free hard shadows with a single additional traversal per light [S7, unofficial]. It sets itself apart from [Soft Shadow Ray Marching](1107-soft-shadow-ray-marching.md) by returning a binary occlusion result rather than a continuous penumbra factor, and from [Shadow Casting Algorithm](1657-shadow-casting-algorithm.md) by operating in image-order on surface points rather than projecting light through a volumetric dataset [S1, unofficial][S12, unofficial].
+Ray-marched shadows determine if a surface point is occluded from a light source by performing a sphere trace from the point towards the light [S1, unofficial][S2, unofficial][S3, unofficial]. Unlike rasterization-based shadow maps, this method computes occlusion directly from the Signed Distance Function (SDF) of the scene, producing alias-free hard shadows with a single additional traversal per light [S7, unofficial]. It sets itself apart from [Soft Shadow Ray Marching](1107-soft-shadow-ray-marching.md) by returning a binary occlusion result rather than a continuous penumbra factor, and from [Shadow Casting Algorithm](1657-shadow-casting-algorithm.md) by marching from surface points toward lights rather than projecting light through a volumetric dataset [S1, unofficial][S12, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Surface point $\mathbf{x}$ (from primary ray march), scene SDF $f(\mathbf{p})$, light position $\mathbf{l}$ (or direction for directional lights), maximum traversal distance $D$, and self-shadowing offset $t_{min}$.
+*   **Input:** Surface point $\mathbf{x}$ (from primary ray march), scene SDF $f(\mathbf{p})$, light position $\mathbf{l}$ (or direction for directional lights), maximum traversal distance $D$, and self-shadowing offset $t_{min}$ [S1, unofficial][S7, unofficial][S11, unofficial].
 *   **Output:** Shadow factor $k_d \in \{0, 1\}$, where 0 indicates the point is in shadow and 1 indicates it is fully lit [S7, unofficial][S11, unofficial].
 
 **Data Structures:**
-No complex data structures are required beyond the SDF evaluation function and standard scalar/vector types. The algorithm maintains two scalar variables: current distance along the ray $t$ and the minimum distance to geometry $d$ at the current sample point.
+No complex data structures are required beyond the SDF evaluation function and standard scalar/vector types [G]. The algorithm maintains two scalar variables: current distance along the ray $t$ and the minimum distance to geometry $d$ at the current sample point [S11, unofficial].
 
 **Steps:**
 1.  **Ray Initialization:** Define the shadow ray origin $\mathbf{x}$ and direction $\mathbf{r}_{Ld} = \text{normalize}(\mathbf{l} - \mathbf{x})$ [S7, unofficial][S11, unofficial]. Initialize traversal distance $t = t_{min}$ and distance to surface $d = 0$ [S7, unofficial][S11, unofficial].
@@ -28,7 +28,7 @@ where $\mathbf{x}$ is the surface point, $t$ is the distance along the ray, and 
 
 **Parameters:**
 *   $t_{min}$: Initial traversal distance. Must be $> \epsilon$ to prevent self-shadowing [S7, unofficial][S11, unofficial]. Typical values depend on the SDF's precision but are often around $0.01$ to $0.1$ [S10, unofficial].
-*   $D$: Maximum ray traversal distance. For point lights, this is the distance to the light source. For directional lights, it is an arbitrary large value sufficient to cover the scene [S7, unofficial][S11, unofficial].
+*   $D$: Maximum ray traversal distance. For point lights, this is the distance to the light source [S11, unofficial]. For directional lights, it is an arbitrary large value sufficient to cover the scene [S7, unofficial][S11, unofficial].
 *   $\epsilon$: Intersection threshold. Typical value $10^{-3}$ or $10^{-4}$ [S7, unofficial][S10, unofficial].
 *   $MAX\_MARCH\_STEPS$: Maximum number of iterations to prevent infinite loops in degenerate cases. Typical value 255 [S6, unofficial].
 
@@ -73,7 +73,8 @@ def compute_hard_shadow(x, light_pos, scene_sdf, t_min, max_dist, epsilon=1e-3):
             return 0.0  # In shadow
         
         # Advance along the ray by the distance to the nearest surface
-        t += d
+        # Clamp step to prevent zero/negative steps from precision errors
+        t += max(d, 1e-4)
         steps += 1
         
     return 1.0  # Not in shadow
@@ -96,21 +97,21 @@ The Shadow Casting Algorithm projects light through a volumetric dataset to comp
 This method calculates self-shadowing for volumetric clouds by performing an additional ray march towards the light source at each sample point to compute transmittance. It is a direct, image-order technique that avoids the precision limitations of shadow maps and the approximation errors of transmittance function mapping. See [Volume Cloud Self-Shadowing via Ray Marching](2441-volume-cloud-self-shadowing-via-ray-marching.md).
 
 ### Local Light Shadow Removal
-A technique to fix artifacts where pixels were wrongly shadowed due to depth-buffer ray tracing. Depth-buffer ray tracing caused "phantom wedges" because the depth buffer only stores the nearest surface, resulting in 16% of traceable pixels being wrongly shadowed [S12, unofficial]. Removal of this specific depth-buffer trace is required to fix these artifacts [S12, unofficial].
+A technique to fix artifacts where pixels were wrongly shadowed due to depth-buffer ray tracing. Depth-buffer ray tracing caused "phantom wedges" because the depth buffer only stores the nearest surface, resulting in 16% of traceable pixels being wrongly shadowed [S13, unofficial]. Removal of this specific depth-buffer trace is required to fix these artifacts [S13, unofficial].
 
 ### Brute Force Shadow-Ray Traversal
-A shadow computation technique where a shadow ray is cast for each sample towards the light source [S13]. The shadow ray is sampled until occluding matter with density above a specified threshold is encountered [S13]. The quality of the shadow is controlled by a slider (0-100) determining the number of samples taken during traversal [S13].
+A shadow computation technique where a shadow ray is cast for each sample towards the light source [S14]. The shadow ray is sampled until occluding matter with density above a specified threshold is encountered [S14]. The quality of the shadow is controlled by a slider (0-100) determining the number of samples taken during traversal [S14].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of surface points (pixels) and $M$ is the average number of steps per shadow ray. $M$ depends on scene complexity and $D$.
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of surface points (pixels) and $M$ is the average number of steps per shadow ray. $M$ depends on scene complexity and $D$ [G].
 *   **Memory Complexity:** $O(1)$ auxiliary memory per pixel, as no shadow maps or buffers are required [S7, unofficial].
-*   **Performance:** Hard shadows are straightforward to implement with SDFs compared to rasterization, requiring only one additional sphere trace per light source per pixel [S2, unofficial]. However, they are computationally expensive compared to shadow maps, especially for multiple lights or large $D$ values [S1, unofficial].
+*   **Performance:** Hard shadows are straightforward to implement with SDFs compared to rasterization, requiring only one additional sphere trace per light source per pixel [S2, unofficial].
 *   **Strengths:** Alias-free shadows, no resolution dependence (unlike shadow maps), easy integration with SDF scenes, supports soft shadows with minimal modification [S7, unofficial][S10, unofficial].
-*   **Limitations:** High computational cost for multiple lights or complex scenes; sensitive to $t_{min}$ and $\epsilon$ settings; directional lights require arbitrary large $D$ [S7, unofficial][S11, unofficial].
-*   **When to use:** Ideal for SDF-based rendering, real-time demos, or scenes with simple geometry where alias-free shadows are critical. Not suitable for highly complex scenes with many lights where performance is paramount.
+*   **Limitations:** Sensitive to $t_{min}$ and $\epsilon$ settings to avoid self-shadowing and precision artifacts [S7, unofficial][S11, unofficial].
+*   **When to use:** Ideal for SDF-based rendering, real-time demos, or scenes with simple geometry where alias-free shadows are critical [G]. Not suitable for highly complex scenes with many lights where performance is paramount [G].
 
 ## Background
-Ray-marched shadows originated with the development of Signed Distance Field (SDF) rendering. Charles Bloom popularized the technique in his 2013 blog post "Raymarching Distance Fields," noting that shadows are "fairly easy to implement" by simply checking if the path to the light is obstructed [S1, unofficial]. The specific algorithm for hard shadows (Algorithm 3.2) is attributed to Inigo Quilez [S7, unofficial][S11, unofficial]. The technique is widely used in real-time ray marching engines, such as those built with WebGL, OpenGL, or Vulkan, for rendering implicit surfaces [S2, unofficial][S6, unofficial]. It is also used in volume visualization for self-shadowing [S1, unofficial] and in game engines like Minecraft (via shaders like Iris/Hearthlight) to replace depth-buffer shadows [S12, unofficial].
+Ray-marched shadows originated with the development of Signed Distance Field (SDF) rendering [S10, unofficial]. Charles Bloom popularized the technique in his 2013 blog post "Raymarching Distance Fields," noting that shadows are "fairly easy to implement" by simply checking if the path to the light is obstructed [S1, unofficial]. The specific algorithm for hard shadows (Algorithm 3.2) is attributed to Inigo Quilez [S7, unofficial][S11, unofficial]. It is used in volume visualization for self-shadowing [S1, unofficial] and in game engines like Minecraft (via shaders like Iris/Hearthlight) to replace depth-buffer shadows [S12, unofficial].
 
 ## Sources
 [S1] Raymarching Distance Fields (2013), http://9bitscience.blogspot.com/2013/07/raymarching-distance-fields_14.html, fetched 2026-10-26 (unofficial)
@@ -125,4 +126,4 @@ Ray-marched shadows originated with the development of Signed Distance Field (SD
 [S10] Ray Marching with Signed Distance Fields - Scribd, https://www.scribd.com/document/831412915/1-Ray-Marching-and-Signed-Distance-Fields, fetched 2026-10-27 (unofficial)
 [S11] GPU Ray Marching for Ambient Occlusion, https://www.scribd.com/document/520755804/imm6392, fetched 2026-10-28 (unofficial)
 [S12] Hearthlight: sun/moon shadows, voxel local lights, hand fixed, https://github.com/MeYashverma/Hearthlight/pull/1, fetched 2026-10-26 (unofficial)
-[S13] VStudio - A Framework for Interactive Volume Visualization, https://www.cg.tuwien.ac.at/courses/Visualisierung/2008-2009/Beispiel1/Hausmair/index.html, fetched 2026-10-27
+[S13] VStudio - A Framework for Interactive Volume Visualization, https://www.cg.tuwien.ac.at/courses/Visualisierung/2008-2009/Beispiel1/Hausmair/index.html, fetched 2026-10-27 (unofficial)

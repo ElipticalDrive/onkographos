@@ -2,63 +2,70 @@
 
 
 ## Overview
-Proximity clouds are an acceleration technique for 3D grid traversal that allows a ray to perform long skips through empty space using pre-computed distance values [S1]. It extends adaptive ray traversal by storing the distance to the nearest occupied voxel for each empty voxel, enabling the ray marcher to jump directly to the next potential data interaction [S2, unofficial].
+Proximity clouds are an acceleration technique for 3D grid traversal that assists rays traversing empty space by using pre-computed distance values to perform long skips along the ray direction [S1][S2, S3, unofficial]. Unlike standard empty-space skipping which may step voxel-by-voxel, proximity clouds store distance transform values in empty volume regions where volume densities are irrelevant, effectively replacing density data with distance-to-nearest-voxel information without increasing storage [S3, unofficial]. This method is an extension of adaptive ray traversal [8185-adaptive-ray-traversal.md] that leverages the geometric structure of empty space to leap over large voids.
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A 3D voxel grid where each voxel stores a scalar value (the "proximity value") and potentially occupancy data.
-- Output: A ray traversal path that skips empty regions, reducing the number of samples taken in empty space.
+*   **Input:** A 3D volume grid where empty voxels contain distance transform values (distance to the nearest non-empty/data voxel) instead of density values.
+*   **Output:** A ray traversal path that skips empty regions, reducing the number of sample points evaluated.
 
 **Data Structures:**
-- **Proximity Grid:** A 3D array of integers (or fixed-point numbers). Each cell $(i, j, k)$ stores an integer $n$, representing the number of voxels to skip along the ray direction.
-- **Occupancy Grid:** A binary mask or similar structure indicating which voxels contain data [S2, unofficial].
+The data structure is a 3D grid of voxels. For empty voxels, the stored value is a scalar representing the distance to the nearest occupied voxel. The specific bit-packing or data type (e.g., integer vs. float) is not given in the sources, but the value $n$ represents the number of voxels to skip [S2, unofficial].
 
-**Pre-processing:**
-1. For every empty voxel in the grid, compute the distance to the nearest occupied voxel.
-2. Store this distance (or a quantized version thereof) as the proximity value for that voxel [S2, unofficial].
+**Algorithm Steps:**
+1.  **Pre-processing:** Compute the distance transform of the object. For each empty voxel, calculate the distance to the nearest data voxel [S2, S3, unofficial]. Store this value in the voxel's memory location, replacing the density value [S3, unofficial].
+2.  **Ray Traversal:**
+    a.  Cast a ray through the volume.
+    b.  When the ray enters a voxel with a proximity value $n$ (where $n > 0$), skip the next $n$ voxels along the ray direction [S2, unofficial].
+    c.  Resume traversal at the voxel immediately following the skipped region [S2, unofficial].
+    d.  If the ray encounters a non-empty voxel (or a voxel with value 0), process it normally or continue traversal [S2, unofficial].
 
-**Ray Marching Algorithm:**
-1. Initialize ray origin $O$ and direction $D$.
-2. Determine the starting voxel index $V_{start}$ for the ray.
-3. While the ray has not exited the volume:
-    a. Retrieve the proximity value $n$ from the current voxel $V_{current}$ [S2, unofficial].
-    b. If $V_{current}$ is occupied:
-        i. Perform standard volume rendering steps (sample, composite, etc.) [S2, unofficial].
-        ii. Advance the ray by one voxel step (or a small fixed step) to handle potential transitions or detailed sampling [G].
-    c. If $V_{current}$ is empty:
-        i. Skip $n$ voxels along the ray direction. This is implemented by advancing the voxel index by $n$ steps in the direction of $D$ [S2, unofficial].
-        ii. Update the ray position to the new voxel location.
-    d. Check for exit conditions (end of volume, alpha threshold) [G].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-**Formulas:**
-- Let $n$ be the proximity value of the current voxel.
-- The next voxel index $V_{next}$ is calculated as:
-  $$ V_{next} = V_{current} + n \cdot \text{step}(D) $$
-  where $\text{step}(D)$ is the voxel traversal step vector in the direction of $D$ [S2, unofficial].
+```python
+def traverse_proximity_clouds(ray, volume_grid):
+    """
+    ray: Object with origin, direction, and step_size.
+    volume_grid: 3D array where empty voxels store distance to nearest data voxel.
+    """
+    current_pos = ray.origin
+    while current_pos is within bounds:
+        voxel = volume_grid.get_voxel_at(current_pos)
+        
+        # If voxel is empty and has a proximity value
+        if voxel.is_empty and voxel.value > 0:
+            # Skip 'n' voxels, where n is the stored distance value
+            skip_distance = voxel.value * ray.step_size
+            current_pos = current_pos + (ray.direction * skip_distance)
+        else:
+            # Process the voxel (e.g., sample density, composite color)
+            process_voxel(voxel, ray)
+            # Advance by one step for standard traversal or next check
+            current_pos = current_pos + (ray.direction * ray.step_size)
+            
+        if current_pos is outside bounds or ray is terminated:
+            break
+```
 
 **Parameters:**
-- Proximity value $n$: Integer representing the skip length. Typical values depend on the density of the data [S2, unofficial].
+*   **Distance Transform:** The method relies on the accuracy of the distance transform. Typical values are not specified, but the value $n$ directly dictates the skip length [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Precision:** The proximity value must be quantized to fit in the data structure. If the distance is large, the integer representation may lose precision, leading to overshooting or undershooting the nearest occupied voxel [S2, unofficial].
-- **Boundaries:** Ensure that skipping $n$ voxels does not exceed the volume bounds.
-- **Degenerate Input:** If a voxel is marked as empty but has a proximity value of 0, it may cause an infinite loop if not handled [G].
-
-## Subtopics
-
-### Adaptive Ray Traversal
-The parent method that Proximity Clouds extends. It uses hierarchical grids to skip empty space but does not pre-compute distance values for empty voxels. [Adaptive Ray Traversal](8185-adaptive-ray-traversal.md)
+*   **Missed Rays:** Rays that ultimately miss the object are often still slowed down because proximity clouds are iso-distance layers insensitive to viewing direction [S3, unofficial]. The distance is computed based on object geometry, not the ray's path, so a ray passing through a large empty region far from the object may still encounter proximity voxels that do not offer significant skips relative to the ray's trajectory [S3, unofficial].
+*   **Boundary Precision:** The skip length is discrete (number of voxels). If the ray direction does not align perfectly with the voxel grid axes, the skip might overshoot or undershoot the intended empty region, potentially leading to redundant checks or missing data [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Pre-processing is $O(N)$ where $N$ is the number of voxels. Ray traversal time is reduced in sparse volumes due to skipping, but overhead exists for computing proximity values.
-- **Memory Complexity:** Requires additional storage for the proximity grid, typically one integer per voxel [S2, unofficial].
-- **Strengths:** Effective for sparse volumes with large empty regions. Reduces the number of samples taken in empty space [S1].
-- **Limitations:** Pre-processing cost can be high for large volumes. Quantization errors may affect accuracy [S2, unofficial].
-- **When to Use:** Suitable for sparse volumetric data where empty space skipping is beneficial. Not ideal for dense data where most voxels are occupied [S2, unofficial].
+*   **Time Complexity:** Reduces the number of sample points for rays passing through large empty regions, potentially offering $O(1)$ skip per empty region visited. However, for rays missing the object, performance may degrade compared to view-sensitive methods due to the lack of directional awareness [S3, unofficial].
+*   **Memory Complexity:** Does not increase storage requirements compared to a standard density grid, as distance values replace density values in empty regions [S3, unofficial].
+*   **Strengths:** Simple to implement as an extension of adaptive ray traversal; effective for rays passing near object boundaries; no additional memory overhead for empty space [S3, unofficial].
+*   **Limitations:** Insensitive to viewing direction, leading to inefficiencies for rays that miss the object or pass through empty space far from the object [S3, unofficial].
+*   **When to Use:** Suitable for scenes with large empty regions and when memory is constrained. Less suitable for scenes with many rays missing the object or when view-sensitive acceleration is critical.
 
 ## Background
-Proximity clouds were proposed by Cohen and Sheffer in 1994 [S1]. The method is an extension of adaptive ray traversal techniques, aiming to improve performance by leveraging distance information to skip empty space [S2, unofficial]. It is used in direct volume rendering to optimize ray traversal in sparse datasets [S1].
+Proximity clouds were proposed by Cohen and Sheffer in 1994 [S1][S3, unofficial]. The technique was introduced to accelerate ray traversal in empty space by using distance values to perform long skips [S1]. It is an extension of adaptive ray traversal [8185-adaptive-ray-traversal.md] and has been discussed in various surveys on volume rendering and grid-based ray tracing [S1][S2, S3, unofficial].
 
 ## Sources
 [S1] A Survey on Exploiting Grids for Ray Tracing, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/089-096, fetched 2026-10-24
 [S2] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
+[S3] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)

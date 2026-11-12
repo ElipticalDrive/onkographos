@@ -1,58 +1,57 @@
 # Second Derivative Computation
-Also called: Hessian computation, Laplacian computation, curvature estimation
+Also called: Hessian computation, second-order finite differences, curvature and Laplacian grids
 
 ## Overview
-This family computes second-order spatial derivatives of scalar or vector fields stored in grid structures, extending the gradient computation provided by [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md). While the parent method yields the first derivative (gradient vector), this family calculates quantities derived from the Hessian matrix (second derivatives), such as the Laplacian (trace of the Hessian), mean curvature (divergence of the normalized gradient), or divergence of vector fields. It is distinct from [Analytic Gradient Computation](2167-analytic-gradient-computation.md) by relying on discrete finite difference stencils rather than closed-form derivatives of basis functions, and from [Gradient Estimation from Samples](2180-gradient-estimation-from-samples.md) by operating on dense or sparse grid data structures rather than point samples.
+Second Derivative Computation computes second-order spatial derivatives (the Hessian matrix or its scalar contractions) of a scalar field defined on a grid. It solves the problem of quantifying local curvature, boundary sharpness, and structural homogeneity, which are essential for regularization, surface extraction, and physical simulation. Unlike [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md), which yields the first-order vector field, this family computes the rate of change of that gradient. It differs from [Analytic Gradient Computation](2167-analytic-gradient-computation.md) by relying on discrete stencil approximations rather than closed-form derivatives of basis functions, and from [Gradient Estimation from Samples](2180-gradient-estimation-from-samples.md) by operating on structured grid data rather than unstructured point clouds.
 
 ## Shared principles
-All methods in this family operate on a grid topology (dense or sparse) and utilize a stencil abstraction to access neighbor values relative to a center coordinate. The core mechanism involves applying central difference operators to approximate second-order partial derivatives.
+All methods in this family operate on a scalar field $f$ defined on a grid with coordinates $(x, y, z)$. The core mechanism is the application of finite difference stencils to approximate partial derivatives.
 
-For a scalar field $f$ with unit voxel spacing, the second pure partial derivatives are computed as:
+**Stencils:**
+The second pure partial derivatives are typically computed using the central difference stencil with unit spacing ($\Delta x = \Delta y = \Delta z = 1$):
 $$ f_{xx} = f(x+1, y, z) - 2f(x, y, z) + f(x-1, y, z) $$
 $$ f_{yy} = f(x, y+1, z) - 2f(x, y, z) + f(x, y-1, z) $$
 $$ f_{zz} = f(x, y, z+1) - 2f(x, y, z) + f(x, y, z-1) $$
 
-Mixed second derivatives for a scalar field are computed using cross-stencils:
+Mixed partial derivatives (e.g., $f_{xy}$) use a 4-point stencil:
 $$ f_{xy} = \frac{f(x+1, y+1, z) - f(x-1, y+1, z) - f(x+1, y-1, z) + f(x-1, y-1, z)}{4} $$
-$$ f_{xz} = \frac{f(x+1, y, z+1) - f(x-1, y, z+1) - f(x+1, y, z-1) + f(x-1, y, z-1)}{4} $$
-$$ f_{yz} = \frac{f(x, y+1, z+1) - f(x, y-1, z+1) - f(x, y+1, z-1) + f(x, y-1, z-1)}{4} $$
 
-For non-unit spacing $\Delta x, \Delta y, \Delta z$, the results are scaled by $1/\Delta x^2$, $1/\Delta y^2$, and $1/\Delta z^2$ respectively [G].
+**Scaling:**
+If the grid has non-unit voxel spacing $\Delta x, \Delta y, \Delta z$, the second derivatives must be scaled by the inverse square of the spacing:
+$$ \frac{\partial^2 f}{\partial x^2} \approx \frac{f_{xx}}{\Delta x^2} $$
 
-The Laplacian $\nabla^2 f$ is the sum of the second pure derivatives:
-$$ \nabla^2 f = f_{xx} + f_{yy} + f_{zz} $$
+**Boundary Handling:**
+Stencils require neighbors outside the active domain. Strategies include zero-padding (implicit background value), clamping, or substituting obstacle velocities for fluid boundaries [S2, G]. Inactive voxels are typically set to zero in the output.
 
-The divergence of a vector field $\mathbf{V} = (v_x, v_y, v_z)$ is computed using central differences on the face neighbors:
-$$ \nabla \cdot \mathbf{V} = \frac{v_{R,x} - v_{L,x}}{2\Delta x} + \frac{v_{T,y} - v_{B,y}}{2\Delta y} + \frac{v_{U,z} - v_{D,z}}{2\Delta z} $$
-where $L, R, B, T, D, U$ denote the Left, Right, Bottom, Top, Down, and Up neighbors [S1, S2, unofficial].
-
-Boundary handling is a critical shared concern. Neighbors outside the active domain or at solid boundaries require specific strategies, such as zero-padding, clamping, or substituting obstacle velocities, which vary by child method [S2, G, unofficial].
+**Hessian Matrix:**
+The full Hessian $H$ is a symmetric $3 \times 3$ matrix:
+$$ H = \begin{bmatrix} f_{xx} & f_{xy} & f_{xz} \\ f_{xy} & f_{yy} & f_{yz} \\ f_{xz} & f_{yz} & f_{zz} \end{bmatrix} $$
 
 ## Subtopics
 
 ### [Mean Curvature Grid Computation](3126-mean-curvature-grid-computation.md)
-Computes the mean curvature $\kappa$ of a scalar field by evaluating the divergence of the normalized gradient vector field. It calculates all required first and second derivatives within a single pass, avoiding intermediate grid memory overhead. It is chosen when surface geometry analysis is required.
+Computes the mean curvature $\kappa$ by evaluating the divergence of the normalized gradient. It calculates all required first and second derivatives in a single pass, avoiding intermediate grids. Choose this for surface smoothness analysis.
 
 ### [Divergence Grid Computation](3151-divergence-grid-computation.md)
-Computes the divergence $\nabla \cdot \mathbf{F}$ of a vector field grid. It is distinguished by operating on vector fields (e.g., velocity) rather than scalar fields and explicitly handles solid boundaries by substituting obstacle velocities. It is chosen for fluid dynamics or vector field analysis.
+Computes the divergence $\nabla \cdot \mathbf{F}$ of a vector field. It handles solid boundaries by substituting obstacle velocities. Choose this for fluid simulation and vector field analysis.
 
 ### [Laplacian Grid Computation](3160-laplacian-grid-computation.md)
-Computes the Laplacian $\nabla^2 f$, the trace of the Hessian. It highlights boundaries and structural features while suppressing homogeneous interiors. It is chosen for blob detection, smoothing, or feature enhancement.
+Computes the Laplacian $\nabla^2 f$ as the trace of the Hessian. It highlights boundaries and suppresses homogeneous regions. Choose this for edge detection and diffusion-based smoothing.
 
 ### [Depth and Image Gradient Regularization](6439-depth-and-image-gradient-regularization.md)
-Computes a regularization loss for 2D depth maps by weighting second-order spatial derivatives (curvature) with the local image gradient magnitude. It enforces geometric smoothness while preserving sharp boundaries aligned with image edges. It is chosen for depth estimation optimization.
+Computes a regularization loss for 2D depth maps by weighting second-order depth derivatives with local image gradient magnitudes. Choose this for depth estimation tasks requiring edge-aware smoothness.
 
 ### [Eikonal Omega Term Computation](13240-eikonal-omega-term-computation.md)
-Computes the Eikonal constraint term involving second-order derivatives of hash grid encoding within a tetrahedral framework. It supports double backpropagation and second-order dOmega implementations. It is chosen for training neural implicit representations (e.g., NeRF, SDF) with Eikonal regularization.
+Computes the gradient of the Eikonal constraint term with respect to hash grid features in neural implicit surfaces. It uses double backpropagation or second-order kernels to enforce unit-norm gradients. Choose this for training neural signed distance fields.
 
 ### [Second-order Grid Sampler](13559-second-order-grid-sampler.md)
-Computes the Hessian of a Signed Distance Field (SDF) with respect to 3D query coordinates, feature grid parameters, and geometry network parameters. It avoids higher-order tensor construction by decomposing gradient computation into individual feature dimensions using PyTorch's double backpropagation. It is chosen for differentiable rendering and optimization of neural feature grids.
+Computes the Hessian of an SDF with respect to query coordinates and feature grid parameters analytically for tri-linear interpolation. It enables differentiable regularization without finite differences. Choose this for differentiable rendering and reconstruction pipelines.
 
-#### Laplacian Grid Computation via Finite Differences
-A specific implementation using matrix operators for 2D grids. It applies first derivative operators along rows and columns, followed by their transposes, to compute the Laplacian. The forward derivative along rows is $D_x u = \text{np.diff}(u, \text{axis}=0)$ with a zero row appended. The transpose is $D_x^T u = \text{np.vstack}([-u[0:1, :], -\text{np.diff}(u[:-1, :], \text{axis}=0), u[-2:-1, :]])$. The Laplacian is $D_x^T D_x + D_y^T D_y$. A weighted variant applies $\sqrt{\gamma}$ scaling before and after the operators [S1, unofficial].
+### Laplacian Grid Computation via Finite Differences
+This variant computes the Laplacian on 2D images using matrix operators. It applies forward differences along axes and appends zero rows/columns to maintain dimensions. The transpose of the derivative operator is applied to complete the second derivative. For weighted Laplacians, a gamma matrix is used to scale the derivatives before and after application. The operation is defined as $L = D_x^T D_x + D_y^T D_y$ [S1, unofficial].
 
 ## Background
-The computation of second derivatives via finite differences is a foundational technique in numerical analysis and scientific computing, originating from the discretization of partial differential equations. In computer graphics and volume rendering, it is widely used for surface reconstruction, feature detection (blob detection via Laplacian of Gaussian), and regularization in inverse problems [S1, unofficial]. The specific implementations for mean curvature and divergence in grid-based fluid simulation and implicit surface representation have been developed in various open-source libraries and research repositories [S1, unofficial]. The application to neural hash grids and Eikonal regularization is a recent development in neural implicit representations [S1, unofficial].
+The computation of second derivatives via finite differences is a foundational technique in numerical analysis and scientific computing. In the context of volume rendering and computer graphics, it is used for surface reconstruction, curvature-based shading, and regularization in inverse problems. The specific implementation details for mean curvature and Laplacian grids are found in sparse grid libraries and inverse problem solvers [S1, unofficial]. The use of second derivatives in neural implicit surfaces (Eikonal terms) is a more recent development in differentiable rendering [S1, unofficial].
 
 ## Sources
 [S1] imanfs/inverse-problems-CT-scans - GitHub, https://github.com/imanfs/inverse-problems-CT-scans, fetched 2026-10-27 (unofficial)

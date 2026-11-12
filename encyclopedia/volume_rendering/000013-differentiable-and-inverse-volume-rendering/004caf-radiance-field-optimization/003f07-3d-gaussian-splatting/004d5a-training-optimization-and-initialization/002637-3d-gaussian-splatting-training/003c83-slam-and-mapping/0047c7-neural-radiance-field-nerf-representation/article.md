@@ -1,0 +1,201 @@
+# Neural Radiance Field (NeRF) Representation
+
+Also called: 3D Gaussian Splatting, 3DGS, Gaussian Splatting
+
+## Overview
+3D Gaussian Splatting (3DGS) represents a scene explicitly as millions of tiny, colored, semi-transparent 3D Gaussian blobs in 3D space, rendered by projecting them onto the screen and blending, avoiding neural network evaluation for real-time performance [S1, unofficial]. It differs from its parent [NeRF](12484-scene-nerf.md) and siblings [3D Gaussian Splatting optimization](12052-3d-gaussian-splatting-optimization.md) by replacing the implicit neural field query with explicit differentiable rasterization of Gaussians, trading higher memory usage for significantly faster training and rendering speeds [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ images with known camera poses (typically obtained via Structure from Motion, e.g., COLMAP) [S1, unofficial].
+*   **Outputs:** A set of $M$ 3D Gaussians $\mathcal{G} = \{g_1, \dots, g_M\}$, where each Gaussian is defined by parameters optimized to minimize the difference between rendered images and input photos [S1, unofficial].
+
+**Data Structures:**
+Each Gaussian $i$ stores approximately 59 learnable numbers [S1, unofficial]. The layout is:
+1.  **Position:** $\mu_i \in \mathbb{R}^3$ (center in 3D space) [S1, unofficial].
+2.  **Covariance:** Defined by scale $\mathbf{s}_i \in \mathbb{R}^3$ and rotation $\mathbf{R}_i \in SO(3)$. The covariance matrix $\Sigma_i$ is constructed as $\Sigma_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$, where $\mathbf{S}_i$ is a diagonal matrix with entries $\mathbf{s}_i$. This parameterization ensures the shape remains valid (positive semi-definite) [S1, unofficial].
+3.  **Opacity:** $\alpha_i \in [0, 1]$ (transparency) [S1, unofficial].
+4.  **Color:** Stored as spherical harmonics coefficients to allow view-dependent color [S1, unofficial].
+
+**Numbered Steps:**
+
+1.  **Initialization:** Start with photos and camera poses from Structure from Motion (e.g., COLMAP) to generate a sparse cloud of 3D points. Each point becomes the starting position of one Gaussian [S1, unofficial].
+2.  **Projection:** Project every 3D Gaussian onto the camera image. A projected 3D Gaussian results in a 2D Gaussian (soft ellipse) on the screen. Its 2D covariance is computed using the camera transformation and a local linear approximation of the projection [S1, unofficial].
+3.  **Tiling:** Divide the screen into small tiles of $16 \times 16$ pixels. Assign each Gaussian to the tiles it overlaps [S1, unofficial].
+4.  **Sorting:** Within each tile, sort the Gaussians by depth from front to back using a very fast GPU sort [S1, unofficial].
+5.  **Rasterization/Blending:** For each pixel, blend the colors of the sorted Gaussians front-to-back using alpha compositing. The color $C$ at a pixel is computed as:
+    $$ C = \sum_{i \in \text{sorted}} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+    where $c_i$ is the color of the $i$-th Gaussian and $\alpha_i$ is its opacity [S1, unofficial].
+6.  **Training Loss:** Compare the rendered image with the real training photo using an L1 loss combined with a structural similarity (SSIM) term [S1, unofficial].
+7.  **Optimization:** Because the rasterizer is differentiable, backpropagate the error to update each Gaussian's position, shape, opacity, and color directly via gradient descent [S1, unofficial].
+8.  **Adaptive Density Control:**
+    *   **Cloning:** In regions that are under-reconstructed with missing details, clone small Gaussians [S1, unofficial].
+    *   **Splitting:** Where a single Gaussian is too large and covers too much detail, split it into two smaller ones [S1, unofficial].
+    *   **Pruning:** Prune away Gaussians that become almost transparent [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_gaussians(gaussians, camera_pose, image_width, image_height):
+    """
+    Renders an image from a set of 3D Gaussians using differentiable rasterization.
+    
+    Args:
+        gaussians: List of Gaussian objects, each with:
+            - mu: (3,) position
+            - R: (3,3) rotation matrix
+            - S: (3,) scale vector
+            - alpha: (1,) opacity
+            - sh_coeffs: Spherical Harmonics coefficients
+            - color: (3,) base color (if not using SH)
+        camera_pose: (4,4) camera-to-world transformation matrix
+        image_width: int
+        image_height: int
+        
+    Returns:
+        rendered_image: (H, W, 3) RGB image
+    """
+    # 1. Project Gaussians to 2D
+    projected_gaussians = []
+    for g in gaussians:
+        # Compute 3D covariance in world space
+        S = np.diag(g.S)
+        Sigma = g.R @ S @ S.T @ g.R.T
+        
+        # Project to 2D using camera transformation and local linear approximation
+        # J is the Jacobian of the projection function
+        # Sigma_2D = J @ Sigma @ J.T
+        # This step is simplified here; in practice, it involves camera intrinsics
+        # and the view matrix derived from camera_pose.
+        mu_2d, Sigma_2D = project_3d_gaussian_to_2d(g.mu, Sigma, camera_pose)
+        
+        projected_gaussians.append({
+            'mu_2d': mu_2d,
+            'Sigma_2D': Sigma_2D,
+            'alpha': g.alpha,
+            'sh_coeffs': g.sh_coeffs,
+            'color': g.color,
+            'depth': g.mu[2] # Simplified depth for sorting
+        })
+    
+    # 2. Tiling
+    tile_size = 16
+    tiles = {}
+    for i, pg in enumerate(projected_gaussians):
+        # Determine which tiles this Gaussian overlaps
+        # This involves checking the bounding box of the 2D Gaussian
+        tile_indices = get_overlapping_tiles(pg['mu_2d'], pg['Sigma_2D'], tile_size, image_width, image_height)
+        for idx in tile_indices:
+            if idx not in tiles:
+                tiles[idx] = []
+            tiles[idx].append(i)
+            
+    # 3. Sorting and Rasterization
+    rendered_image = np.zeros((image_height, image_width, 3))
+    
+    for tile_idx, gaussian_indices in tiles.items():
+        # Sort Gaussians by depth (front to back)
+        sorted_indices = sort_by_depth(gaussian_indices, projected_gaussians)
+        
+        # Get tile coordinates
+        y_start, x_start = tile_idx // (image_width // tile_size), tile_idx % (image_width // tile_size)
+        y_start *= tile_size
+        x_start *= tile_size
+        
+        # Rasterize within tile
+        for y in range(y_start, min(y_start + tile_size, image_height)):
+            for x in range(x_start, min(x_start + tile_size, image_width)):
+                accumulated_alpha = 0.0
+                accumulated_color = np.zeros(3)
+                
+                for idx in sorted_indices:
+                    pg = projected_gaussians[idx]
+                    # Compute 2D Gaussian value at (x, y)
+                    # This involves the Mahalanobis distance using Sigma_2D
+                    alpha_at_pixel = compute_2d_gaussian_alpha(pg['mu_2d'], pg['Sigma_2D'], x, y)
+                    alpha_at_pixel *= pg['alpha']
+                    
+                    if alpha_at_pixel > 0:
+                        # Get color from SH or base color
+                        color = get_color_from_sh(pg['sh_coeffs'], pg['color'], camera_pose)
+                        
+                        accumulated_color += color * alpha_at_pixel * (1 - accumulated_alpha)
+                        accumulated_alpha += alpha_at_pixel * (1 - accumulated_alpha)
+                        
+                        if accumulated_alpha > 0.99: # Early ray termination
+                            break
+                
+                rendered_image[y, x] = accumulated_color
+                
+    return rendered_image
+
+def optimize_gaussians(gaussians, images, camera_poses, learning_rate):
+    """
+    Optimizes the Gaussian parameters using gradient descent.
+    """
+    for epoch in range(num_epochs):
+        for image, camera_pose in zip(images, camera_poses):
+            # Render
+            rendered = render_gaussians(gaussians, camera_pose, image.shape[1], image.shape[0])
+            
+            # Compute Loss (L1 + SSIM)
+            loss = compute_l1_ssim_loss(rendered, image)
+            
+            # Backpropagate
+            gradients = compute_gradients(loss, gaussians)
+            
+            # Update parameters
+            for g in gaussians:
+                g.mu -= learning_rate * gradients['mu']
+                g.R -= learning_rate * gradients['R'] # Simplified; requires rotation manifold handling
+                g.S -= learning_rate * gradients['S']
+                g.alpha -= learning_rate * gradients['alpha']
+                g.sh_coeffs -= learning_rate * gradients['sh_coeffs']
+                
+            # Adaptive Density Control
+            gaussians = adaptive_density_control(gaussians, gradients)
+            
+    return gaussians
+```
+
+**Parameters:**
+*   **Tile Size:** $16 \times 16$ pixels [S1, unofficial].
+*   **Loss Function:** L1 loss combined with Structural Similarity (SSIM) [S1, unofficial].
+*   **Learnable Values per Gaussian:** Approximately 59 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Floating Artifacts:** Can occur in regions seen by few cameras [S1, unofficial].
+*   **Needle-like Gaussians:** Degenerate Gaussians can form in under-constrained regions [S1, unofficial].
+*   **Aliasing:** Occurs when zooming in or out [S1, unofficial].
+*   **No Clean Mesh:** The blobs do not directly provide a clean surface or mesh [S1, unofficial].
+
+## Subtopics
+
+### [Scene NeRF](12484-scene-nerf.md)
+Scene NeRF is a method for isolating and rendering the static background of a scene by training a Neural Radiance Field (NeRF) exclusively on pixels identified as background via human segmentation masks. It differs from standard NeRF by explicitly excluding dynamic foreground elements (e.g., humans) from the training data and employing an emptiness regularizer to prevent artifacts in empty space.
+
+### SLAIM
+SLAIM is a SLAM method that introduces a coarse-to-fine tracking pipeline and improves photometric bundle adjustment for NeRF-based mapping [S2]. It maintains NeRF’s original volume density formulation while introducing a KL regularization over the ray termination distribution [S2]. It addresses the challenge of high-frequency renderings in NeRF hindering image alignment [S2].
+
+### SNI-SLAM
+SNI-SLAM is a dense NeRF-based RGB-D SLAM system for accurate real-time 3D semantic mapping [S2]. It introduces a hierarchical semantic encoding and cross-attention mechanism to enable mutual reinforcement between appearance, geometry, and semantics modalities [S2]. It proposes a novel one-way decoder design to enhance inter-modal information flow without reverse interference [S2].
+
+### KN-SLAM
+KN-SLAM is a NeRF-based SLAM method that integrates local feature correspondences for coarse pose initialization and joint optimization [S2]. It uses global image features and local matches for explicit loop detection [S2]. It performs pose graph optimization and global refinement of the neural map to ensure consistency [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Training time drops from many hours (for NeRF) to tens of minutes [S1, unofficial]. Rendering jumps from seconds per image to >100 FPS [S1, unofficial].
+*   **Memory Complexity:** Memory usage increases from a few megabytes (for NeRF) to hundreds of megabytes (for Gaussian Splatting) [S1, unofficial].
+*   **Strengths:** Real-time rendering, fast training, explicit representation allows for easy manipulation [S1, unofficial].
+*   **Limitations:** Floating artifacts, needle-like Gaussians, aliasing, inability to extract a clean mesh [S1, unofficial].
+*   **When to use:** Virtual reality games, film, robotics, mapping, digital humans, ecommerce, and cultural heritage [S1, unofficial].
+*   **When not to use:** When memory is extremely constrained or a clean mesh is required directly from the representation [S1, unofficial].
+
+## Background
+3D Gaussian Splatting was introduced by Kerbal and colleagues at SIGGRAPH 2023 [S1, unofficial]. It was developed to address the computational bottlenecks of Neural Radiance Fields (NeRF), which require evaluating a neural network at hundreds of points along a ray for each pixel [S1, unofficial]. By representing the scene explicitly as Gaussians, it enables real-time rendering and faster training [S1, unofficial].
+
+## Sources
+[S1] Gaussian Splatting Explained: Real-Time 3D from Photos (with a Real Demo), https://www.youtube.com/watch?v=HABVlXlRqOs, fetched 2026-10-27 (unofficial)
+[S2] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

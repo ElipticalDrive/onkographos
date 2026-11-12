@@ -1,0 +1,130 @@
+# Nearest Neighbor Interpolation
+
+Also called: Constant interpolation, Nearest Neighbor Voxel Sampling, Zero-order hold, Zero-order interpolation, griddata nearest interpolation
+
+## Overview
+Nearest Neighbor Interpolation maps a continuous 3D world point to the value of the closest discrete grid point in a volume dataset [S5, book]. It solves the problem of sampling arbitrary locations within a dense grid by assigning the value of the nearest voxel center, effectively treating the volume as a collection of identical rectangular boxes of uniform value [S5, book]. Unlike trilinear interpolation, which blends eight neighboring voxels, this method produces a piecewise-constant field, resulting in faster computation but lower visual fidelity and larger interpolation error margins [S6, S4, unofficial].
+
+## How it works
+**Inputs:**
+- `point_pos`: A 3D vector $(x, y, z)$ representing the sample location in world coordinates.
+- `min_pos`: A 3D vector representing the minimum corner of the volume grid in world coordinates.
+- `max_pos`: A 3D vector representing the maximum corner of the volume grid in world coordinates.
+- `grid_resolution`: A 3D vector $(W, H, D)$ representing the number of voxels along each axis.
+- `volume_data`: A 3D array of shape $(W, H, D)$ containing the scalar values (e.g., density, opacity) at each voxel index.
+
+**Outputs:**
+- `value`: The scalar value at the nearest voxel. Returns $0$ if the point is outside the grid bounds [S2, unofficial].
+
+**Data Structures:**
+- `volume_data`: A contiguous 3D array. Indices are accessed as `volume_data[xi, yi, zi]`. No specific bit-packing is mandated by the method itself, though source implementations often use standard floating-point or integer types [S7].
+
+**Steps:**
+1.  **Normalize Position:** Calculate the local position of the sample point relative to the volume bounds.
+    $$ p_{local} = \frac{point\_pos - min\_pos}{max\_pos - min\_pos} $$
+    Where the division is component-wise. This maps the world coordinates to the range $[0, 1]$.
+
+2.  **Calculate Voxel Coordinates:** Scale the local position by the grid resolution to get continuous voxel coordinates.
+    $$ p_{voxel} = p_{local} \times grid\_resolution $$
+    $$ p_{voxel} = (p_{local}[0] \cdot W, \ p_{local}[1] \cdot H, \ p_{local}[2] \cdot D) $$
+
+3.  **Compute Integer Indices:** Apply the floor function to each component to find the index of the nearest voxel. Note: While some sources describe "rounding to the nearest integer" [S7], the explicit algorithmic definition uses the floor function on the normalized coordinate [S2, unofficial]. This effectively maps the point to the lower-left-back corner of the containing voxel box.
+    $$ xi = \lfloor p_{voxel}[0] \rfloor $$
+    $$ yi = \lfloor p_{voxel}[1] \rfloor $$
+    $$ zi = \lfloor p_{voxel}[2] \rfloor $$
+
+4.  **Boundary Check:** Verify if the computed indices lie within the valid grid range $[0, W-1]$, $[0, H-1]$, and $[0, D-1]$.
+    - If $xi < 0$ or $xi \ge W$ or $yi < 0$ or $yi \ge H$ or $zi < 0$ or $zi \ge D$, return $0$ [S2, unofficial].
+
+5.  **Lookup:** Return the value stored at `volume_data[xi, yi, zi]` [S5, book].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nearest_neighbor_interpolate(point_pos, min_pos, max_pos, grid_resolution, volume_data):
+    """
+    Performs nearest neighbor interpolation on a 3D volume grid.
+    
+    Args:
+        point_pos (tuple): (x, y, z) world coordinates of the sample point.
+        min_pos (tuple): (x_min, y_min, z_min) of the volume bounding box.
+        max_pos (tuple): (x_max, y_max, z_max) of the volume bounding box.
+        grid_resolution (tuple): (W, H, D) number of voxels in each dimension.
+        volume_data (3D array): The volume grid data.
+        
+    Returns:
+        float: The interpolated value, or 0 if out of bounds.
+    """
+    # Step 1: Normalize position to [0, 1]
+    # Handle potential division by zero if bounds are identical (edge case)
+    dx = max_pos[0] - min_pos[0]
+    dy = max_pos[1] - min_pos[1]
+    dz = max_pos[2] - min_pos[2]
+    
+    if dx == 0 or dy == 0 or dz == 0:
+        return 0.0 # Degenerate volume
+
+    p_local_x = (point_pos[0] - min_pos[0]) / dx
+    p_local_y = (point_pos[1] - min_pos[1]) / dy
+    p_local_z = (point_pos[2] - min_pos[2]) / dz
+
+    # Step 2: Calculate voxel coordinates
+    p_voxel_x = p_local_x * grid_resolution[0]
+    p_voxel_y = p_local_y * grid_resolution[1]
+    p_voxel_z = p_local_z * grid_resolution[2]
+
+    # Step 3: Compute integer indices using floor
+    xi = int(p_voxel_x) # floor
+    yi = int(p_voxel_y) # floor
+    zi = int(p_voxel_z) # floor
+
+    # Step 4: Boundary check
+    W, H, D = grid_resolution
+    if xi < 0 or xi >= W or yi < 0 or yi >= H or zi < 0 or zi >= D:
+        return 0.0
+
+    # Step 5: Lookup
+    return volume_data[xi, yi, zi]
+```
+
+**Parameters:**
+- No tunable parameters. The method is deterministic based on the grid geometry and data.
+
+**Edge Cases and Pitfalls:**
+- **Out-of-bounds:** Points outside the volume must be handled explicitly. The standard approach is to return $0$ (or a background value) [S2, unofficial].
+- **Precision:** The method is described as "imprecise" and providing a "rough estimate" compared to higher-order methods [S7, S1].
+- **Discontinuity:** The resulting field is discontinuous at voxel boundaries. This can cause aliasing or blocky artifacts in rendered images [S4, unofficial].
+- **Rounding vs. Floor:** While conceptually "nearest," the implementation using `floor` on normalized coordinates maps to the lower corner. If strict geometric nearest-neighbor (rounding to closest center) is required, `round()` should be used instead of `floor()`, but the cited algorithmic source specifies `floor` [S2, unofficial].
+
+## Subtopics
+
+### Nearest Integer Rounding
+A related technique that rounds coordinates to the nearest integer rather than flooring. It is used when the voxel centers are aligned with integer coordinates and the sample point is already in voxel space. Choose this when avoiding the normalization step is desired and the grid origin is at $(0,0,0)$. See [Nearest Integer Rounding](4233-nearest-integer-rounding.md).
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per sample. It involves a constant number of arithmetic operations and a single array lookup.
+- **Memory Complexity:** $O(1)$ auxiliary space. No additional data structures are required beyond the volume grid itself.
+- **Measured Performance:** It is significantly faster than trilinear interpolation because it avoids calculating weights and blending multiple values [S6, unofficial].
+- **Strengths:**
+    - Extremely fast computation [S6, unofficial].
+    - Simple implementation [S5, book].
+    - Preserves sharp discontinuities in data (e.g., binary masks) without blurring [S5, book].
+- **Limitations:**
+    - Produces extensive interpolation error margins [S6, unofficial].
+    - Results in less sharp renderings and lower visual quality compared to trilinear interpolation, especially when applying multidimensional transfer functions [S4, unofficial].
+    - Can introduce aliasing artifacts due to the piecewise-constant nature [S1].
+- **When to use:** When performance is critical and visual fidelity is secondary, or when the data is inherently discrete/categorical (e.g., segmentation masks) where blending would be semantically incorrect.
+- **When not to use:** When high-quality smooth rendering is required, or when the volume contains smooth scalar fields where blurring artifacts are noticeable [S4, S6, unofficial].
+
+## Background
+Nearest Neighbor Interpolation is the simplest form of interpolation for grid-based data. It is historically referred to as "zero-order hold" or "zero-order interpolation" because it holds the value of the sample point constant until the next grid point [S5, book]. In the context of volume rendering, it is often contrasted with trilinear interpolation, which uses linear interpolation along three axes [S5, book]. The method is widely used in early volume rendering applications and in scenarios requiring rapid, approximate visualization [S7]. It is also used in other graphics tasks, such as forward mapping of optical flow fields where gaps are filled by the nearest available vector [S3, unofficial].
+
+## Sources
+[S1] Direct volume rendering of curvilinear volumes, https://doi.org/10.1145/99308.99318, fetched 2026-10-28
+[S2] Rintarooo/volume_rendering_plot, https://github.com/Rintarooo/volume_rendering_plot, fetched 2026-10-26 (unofficial)
+[S3] YaourtB/GPS_plus, https://github.com/YaourtB/GPS_plus, fetched 2026-10-27 (unofficial)
+[S4] Volume Rendering, Maximum Intensity Projection and ..., https://ryanrossi.com/sv3.php, fetched 2026-10-28 (unofficial)
+[S5] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)
+[S6] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)
+[S7] VOLUME RENDERING Application by Thomas Lidy, https://www.cg.tuwien.ac.at/courses/Visualisierung/2001-2002/Ergebnisse/Beispiel1/LidyT/description.html, fetched 2026-10-29

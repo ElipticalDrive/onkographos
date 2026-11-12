@@ -3,124 +3,117 @@
 Also called: alpha-histogram
 
 ## Overview
-The α-histogram is a histogram enhancement method that amplifies value ranges corresponding to spatially coherent materials by summing local histograms raised to the power of $\alpha$, solving the problem of distinguishing tissue value ranges in global histograms where peaks are obscured by background or overlapping intensities [S2]. It sets itself apart from its sibling [Non-parametric Transfer Function Generation using Spatial Variance](6682-non-parametric-transfer-function-generation-using-spatial-va.md) by explicitly modeling spatial coherence through a parametric exponent $\alpha$ rather than relying solely on variance metrics, and it serves as the primary noise reduction technique within the [Histogram Noise Reduction](5356-histogram-noise-reduction.md) pipeline [S2].
+The α-histogram enhancement is a histogram noise reduction technique that amplifies value ranges corresponding to spatially coherent materials by summing local histograms raised to the power of $\alpha$, solving the problem of distinguishing tissue value ranges in global histograms where peaks are obscured by background or overlapping intensities [S2]. It exploits spatial coherence levels to distinguish minor materials invisible in intensity histograms, defined by low variance [S1, unofficial]. Unlike its sibling [Non-parametric Transfer Function Generation using Spatial Variance](6682-non-parametric-transfer-function-generation-using-spatial-va.md), which focuses on variance as a primary attribute, the α-histogram explicitly constructs a modified histogram distribution that preserves the simple form of a 1D histogram while embedding spatial coherence information [S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A volume dataset $D$ and a set of local neighborhoods $\{N_i\}_{i=1}^k$ covering the data.
-*   **Output:** An unnormalized $\alpha$-histogram $H_\alpha(x)$ and optionally a normalized version with the same area as the original global histogram.
+*   **Input:** A volume dataset $D$ with voxel values, and a coherence exponent parameter $\alpha > 1$.
+*   **Output:** An enhanced histogram $H_\alpha(x)$ where peaks corresponding to spatially coherent regions are amplified relative to incoherent noise or background.
 
 **Data Structures:**
-*   **Local Histogram $H_n(N_i, x)$:** A 1D array (or map) where the index represents the voxel intensity value $x$ and the value represents the count of voxels with intensity $x$ within the local neighborhood $N_i$.
-*   **Global $\alpha$-Histogram $H_\alpha(x)$:** A 1D array indexed by intensity $x$, storing the aggregated coherence-enhanced counts.
-
-**Parameters:**
-*   $\alpha$: The coherence exponent. Must be greater than 1 ($\alpha > 1$) [S2]. Typical values are not specified in the sources, but $\alpha = \infty$ is a special case [S2].
-*   $k$: The number of local neighborhoods.
-*   $N_i$: The set of data values in the $i$-th local neighborhood.
+*   **Local Histogram $H_n(N_i, x)$:** A 1D array representing the frequency count of voxel values $x$ within a specific spatial neighborhood $N_i$. The size of the array corresponds to the number of discrete value bins in the data domain.
+*   **Global Enhanced Histogram $H_\alpha(x)$:** A 1D array of the same size as the local histograms, accumulating the enhanced contributions from all neighborhoods.
 
 **Steps:**
-1.  **Partition Data:** Divide the volume dataset $D$ into $k$ local neighborhoods $N_i$. The source notes that spherical neighborhoods with a radius of 3.0 voxels are used in demonstrated scenarios [S1, unofficial].
+1.  **Define Neighborhoods:** Partition the volume into a set of local neighborhoods $N_i$. The size and shape of $N_i$ (e.g., spherical with a specific radius) determine the scale of spatial coherence considered [S1, unofficial][S2].
 2.  **Compute Local Histograms:** For each neighborhood $N_i$, compute the local histogram $H_n(N_i, x)$, which counts the instances of value $x$ in $N_i$ [S2].
-3.  **Enhance Local Histograms:** For each neighborhood $i$ and each intensity bin $x$, raise the count to the power of $\alpha$:
-    $$ \text{Enhanced Count} = H_n(N_i, x)^\alpha $$
-    If $\alpha = \infty$, this step becomes a maximum operator over the local histograms (see Pitfalls) [S2].
-4.  **Aggregate:** Sum the enhanced local histograms across all $k$ neighborhoods to form the unnormalized $\alpha$-histogram:
-    $$ H_\alpha(x) = \left( \sum_{i=1}^k H_n(N_i, x)^\alpha \right)^{1/\alpha} $$
-    [S2]
-5.  **Normalize (Optional):** To allow comparison with the original histogram, apply a second normalization so that the area under $H_\alpha(x)$ equals the area under the original global histogram. This ensures that displaying the histogram for increasing $\alpha$ results in growing peaks for coherent tissues at the expense of shrinking peaks of low importance [S2].
+3.  **Enhance Local Histograms:** Raise the bin values of each local histogram to the power of $\alpha$. This step amplifies bins with higher counts (indicating coherent materials) and suppresses bins with low counts (indicating noise or incoherent background) [S2].
+4.  **Sum Enhanced Local Histograms:** Sum the enhanced local histograms across all neighborhoods $i=1 \dots k$ to form the unnormalized $\alpha$-histogram [S2]:
+    $$ H_{\alpha}^{un}(x) = \sum_{i=1}^k H_n(N_i, x)^{\alpha} $$
+5.  **Normalize:** Apply the $1/\alpha$ root to the summed histogram to bring the scale back to a comparable level with the original histogram counts [S2]:
+    $$ H_{\alpha}(x) = \left( \sum_{i=1}^k H_n(N_i, x)^{\alpha} \right)^{1/\alpha} $$
+6.  **Optional Area Normalization:** For visualization consistency, a second normalization may be applied to ensure the total area of $H_\alpha$ equals the area of the original global histogram. This ensures that as $\alpha$ increases, coherent peaks grow at the expense of low-importance peaks, without changing the overall display scale [S2].
+
+**Formula:**
+The core definition of the $\alpha$-histogram is:
+$$ H_{\alpha}(x) = \left( \sum_{i=1}^k H_n(N_i, x)^{\alpha} \right)^{1/\alpha} $$
+Where:
+*   $H_{\alpha}(x)$ is the value of the enhanced histogram at bin $x$.
+*   $k$ is the total number of local neighborhoods.
+*   $H_n(N_i, x)$ is the count of value $x$ in neighborhood $N_i$.
+*   $\alpha$ is the coherence exponent, where $\alpha > 1$ [S2].
+
+**Parameters:**
+*   **$\alpha$ (Coherence Exponent):** Must be greater than 1. Typical values are not specified in the sources, but $\alpha = \infty$ is a special case [S2].
+*   **Neighborhood Radius:** Determines the spatial extent of $N_i$. In examples, a spherical neighborhood with a radius of 3.0 voxels was used [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **$\alpha = \infty$:** If $\alpha$ approaches infinity, the summation becomes a maximum operator over the local histograms. This is handled as a special case: $H_{\infty}(x) = \max_i (H_n(N_i, x))$ [S2].
+*   **Precision:** Raising values to a high power $\alpha$ can lead to numerical overflow if local histogram counts are large. Implementation should use logarithms or scaled arithmetic if $\alpha$ is very large [G].
+*   **Boundary Conditions:** Neighborhoods near the volume boundary must be handled, either by padding, reducing neighborhood size, or excluding boundary voxels from the sum [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_alpha_histogram(volume, neighborhoods, alpha):
+def alpha_histogram_enhancement(volume, alpha, neighborhood_radius):
     """
-    Computes the alpha-histogram for a volume given local neighborhoods.
+    Computes the alpha-histogram enhancement of a volume.
     
     Args:
-        volume: 3D array of voxel intensities.
-        neighborhoods: List of sets, where each set contains indices of voxels in a local neighborhood.
-        alpha: Coherence exponent (alpha > 1). Use float('inf') for alpha = infinity.
+        volume: 3D array of voxel values.
+        alpha: Coherence exponent, alpha > 1.
+        neighborhood_radius: Radius of the spherical neighborhood N_i.
         
     Returns:
-        alpha_hist: 1D array representing the alpha-histogram.
+        H_alpha: 1D array representing the enhanced histogram.
     """
-    # Determine the range of intensity values in the volume
+    # Determine value range for histogram bins
     min_val = min(volume.flatten())
     max_val = max(volume.flatten())
-    num_bins = int(max_val - min_val + 1)
+    num_bins = max_val - min_val + 1
+    H_alpha = np.zeros(num_bins)
     
-    # Initialize the alpha-histogram accumulator
-    alpha_hist = np.zeros(num_bins)
+    # Precompute neighborhood offsets for efficiency
+    # This depends on the specific neighborhood shape (e.g., spherical)
+    neighborhood_offsets = get_spherical_offsets(neighborhood_radius)
     
-    for i, neighborhood_indices in enumerate(neighborhoods):
-        # Extract values in the current neighborhood
-        local_values = volume[neighborhood_indices]
+    # Iterate over all voxels to define neighborhoods
+    # Note: In practice, this might be optimized by iterating over unique neighborhoods
+    # or using a sliding window if the volume is regular.
+    # Here we assume a simple iteration over all voxels as centers.
+    
+    for center_voxel in volume.flatten():
+        # Extract local neighborhood values
+        # This requires mapping center_voxel to 3D coordinates and sampling
+        # For simplicity, assume a helper function exists:
+        local_values = get_local_neighborhood_values(volume, center_voxel, neighborhood_radius)
         
-        # Compute local histogram H_n(N_i, x)
-        # Using numpy histogram with fixed bins to ensure alignment
-        local_hist, _ = np.histogram(local_values, bins=num_bins, range=(min_val, max_val))
+        # Compute local histogram H_n
+        H_n = compute_histogram(local_values, min_val, num_bins)
         
+        # Enhance local histogram: raise to power alpha
+        # Handle alpha = infinity case
         if alpha == float('inf'):
-            # Special case: Maximum operator
-            # Note: The formula implies summing max(H_n). 
-            # However, standard Minkowski pooling with p->inf is max.
-            # The source says "set alpha = infinity, this is equal to a maximum operator".
-            # This usually means H_inf(x) = max_i(H_n(N_i, x)).
-            # We accumulate the max of local histograms.
-            # Since we are summing over i in the general formula, for alpha=inf,
-            # the operation becomes element-wise max over the neighborhoods.
-            # But the formula is sum(H^n)^(1/n). As n->inf, (sum(a_i^n))^(1/n) -> max(a_i).
-            # So we need the max over i for each x.
-            # We cannot simply add to alpha_hist here if we want the global max.
-            # We must store local histograms and take max at the end, or update carefully.
-            # Let's store local histograms first.
-            pass 
+            H_n_enhanced = np.max(H_n) # This is a scalar, but we need to align with bin structure
+            # Actually, for alpha=inf, H_alpha(x) = max_i(H_n(N_i, x))
+            # So we update H_alpha directly with the max
+            H_alpha = np.maximum(H_alpha, H_n)
         else:
-            # Raise to power alpha
-            enhanced_local_hist = np.power(local_hist, alpha)
-            # Sum into accumulator
-            alpha_hist += enhanced_local_hist
+            H_n_enhanced = np.power(H_n, alpha)
+            H_alpha += H_n_enhanced
             
-    if alpha == float('inf'):
-        # Recompute for alpha = infinity
-        # We need the max of H_n(N_i, x) over all i for each x.
-        # Re-run loop to collect max
-        alpha_hist = np.zeros(num_bins)
-        for i, neighborhood_indices in enumerate(neighborhoods):
-            local_values = volume[neighborhood_indices]
-            local_hist, _ = np.histogram(local_values, bins=num_bins, range=(min_val, max_val))
-            # Element-wise max
-            alpha_hist = np.maximum(alpha_hist, local_hist)
-    else:
-        # Apply the 1/alpha root
-        alpha_hist = np.power(alpha_hist, 1.0 / alpha)
+    # Final normalization: raise to 1/alpha
+    if alpha != float('inf'):
+        H_alpha = np.power(H_alpha, 1.0 / alpha)
         
-    return alpha_hist
+    return H_alpha
 ```
-
-**Pitfalls:**
-*   **$\alpha = \infty$:** If $\alpha = \infty$, the summation becomes a maximum operator over local histograms. This must be handled as a special case to avoid numerical overflow or division by zero [S2].
-*   **Noise vs. Coherence:** Minor materials are often invisible in the intensity histogram since the background distribution completely covers them. The $\alpha$-histogram exploits spatial coherence levels to distinguish them, as tissues of interest are defined by low variance (high coherence) [S1, unofficial]. However, thin tissues like skin have higher local variance than other elements of similar intensity, which may affect their representation [S1, unofficial].
 
 ## Subtopics
 
-### [Alpha-histogram Peak Analysis Scheme](12652-alpha-histogram-peak-analysis-scheme.md)
-The Alpha-histogram Peak Analysis Scheme is an automatic method for detecting significant peaks in an $\alpha$-histogram to facilitate transfer function design in volume rendering. It addresses the challenge of noise in $\alpha$-histograms by using selective and global smoothing to isolate meaningful material distributions while preserving subtle peaks. It sets itself apart from simple histogram smoothing by incorporating a base-line area calculation for peak importance assessment and a hierarchical simplification process to select the most relevant peaks.
-
 ### Extent Scale
-A method to capture spatial relationships between local distributions $P$ by integrating them over a spatial extent using an aperture function $A$, preserving distribution modes across scales [S3]. For each pixel $x$ and intensity $k$, it computes $H$ by convolving the local probability distribution $P$ with the aperture function $A$ over the spatial domain [S3]. The formula is $H(x, k; \theta, \sigma, \beta, \alpha) = \int_{\mathbb{R}^2} A(x - y; \alpha) P(y, k; \theta, \sigma, \beta) dy$, where $H$ is the blurred histogram, $A$ is the aperture function with spatial scale $\alpha$, and $P$ is the tonal distribution [S3]. The parameter $\alpha$ is the spatial scale parameter for the aperture function $A$, controlling the extent of spatial integration [S3]. Unlike conventional scale-space blurring which operates on radiance values, this method blurs histogram contributions, preserving effective modes of the radiance distribution [S3].
+A method to capture spatial relationships between local distributions $P$ by integrating them over a spatial extent using an aperture function $A$, preserving distribution modes across scales [S3]. It computes the blurred histogram $H(x, k; \theta, \sigma, \beta, \alpha)$ by convolving the local probability distribution $P$ with the aperture function $A$ over the spatial domain [S3]. The formula is $H(x, k; \theta, \sigma, \beta, \alpha) = \int_{\mathbb{R}^2} A(x - y; \alpha) P(y, k; \theta, \sigma, \beta) dy$, where $\alpha$ is the spatial scale parameter for the aperture function $A$ [S3]. Unlike conventional scale-space blurring which operates on radiance values, this method blurs histogram contributions, preserving effective modes of the radiance distribution [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources. Computationally, it requires iterating over all neighborhoods and bins, so it is proportional to $O(k \cdot B)$ where $k$ is the number of neighborhoods and $B$ is the number of histogram bins.
-*   **Memory Complexity:** Not given in the sources. Requires storage for local histograms and the final $\alpha$-histogram.
-*   **Strengths:** Exposes spatial information regarding which value ranges correspond to spatially coherent features, which is valuable for capturing such features in transfer functions [S2]. It demonstrates higher accuracy and robustness than alternative methods for automatic detection of tissue value ranges in medical volumes [S2].
-*   **Limitations:** Features with overlapping value ranges cannot be separated by this technique alone [S2]. It relies on the assumption that materials of interest are spatially coherent.
-*   **When to use:** As the starting point for exploratory visualization sessions, such as for MR bile duct examination [S1, unofficial]. When global histograms obscure tissue value ranges due to background or overlapping intensities [S2].
+*   **Time Complexity:** $O(k \cdot B)$, where $k$ is the number of neighborhoods and $B$ is the number of histogram bins. Computing local histograms for each neighborhood dominates the cost.
+*   **Memory Complexity:** $O(V + B)$, where $V$ is the number of voxels (for storing the volume) and $B$ is the number of histogram bins.
+*   **Strengths:** Effectively separates coherent materials from incoherent noise or background in histograms where peaks overlap [S2]. It retains the simplicity of a 1D histogram while adding spatial information [S2].
+*   **Limitations:** Requires defining a neighborhood size, which may not be optimal for all scales of features. The choice of $\alpha$ affects the degree of enhancement and may require tuning [S2].
+*   **Usage:** Used as a starting point for exploratory visualization sessions, such as for MR bile duct examination [S1, unofficial].
 
 ## Background
-The $\alpha$-histogram was introduced in 2006 by Lysne et al. [S2]. It was developed to address the limitation of standard histograms where all spatial relations in the data set are lost [S2]. The method relates to Minkowski pooling, where the $\alpha$-histogram corresponds to a Minkowski pooling of the local histograms with $\beta = \alpha$ [S2]. It is used in the context of Multi-Dimensional Transfer Function (MDTF) design [S1, unofficial].
+The $\alpha$-histogram was introduced by Lysæther et al. in 2006 [S1, unofficial][S2]. It was developed to address the difficulty of constructing transfer functions for medical volumes where tissue value ranges are obscured in global histograms [S2]. The method relates to Minkowski pooling, where the $\alpha$-histogram corresponds to a Minkowski pooling of local histograms with $\beta = \alpha$ [S2]. It has been used in automatic detection of tissue value ranges in medical volumes, demonstrating higher accuracy and robustness than alternative methods [S2].
 
 ## Sources
 [S1] Multi-Dimensional Transfer Function Design Using Sorted Histograms, https://doi.org/10.2312/vg/vg06/001-008, fetched 2026-10-26 (unofficial)

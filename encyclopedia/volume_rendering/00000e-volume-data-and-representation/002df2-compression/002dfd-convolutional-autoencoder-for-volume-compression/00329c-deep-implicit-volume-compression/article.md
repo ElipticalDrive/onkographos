@@ -8,17 +8,17 @@ Deep Implicit Volume Compression is a block-based neural network architecture tr
 ## How it works
 **Inputs and Outputs:**
 *   **Input:** A sequence of TSDF volumes $V = \{V_t\}_{t=1}^T$, where each volume is a 3D grid of voxels. For a single block, the input is a $k \times k \times k$ voxel grid $x$ containing a zero crossing [S1].
-*   **Output:** Compressed bitstreams for the latent code ($\hat{z}_{bits}$) and signs ($s_{bits}$), and block indices for volume stitching. The receiver reconstructs the TSDF block $\hat{x}$ [S1].
+*   **Output:** Compressed bitstreams for the latent code ($\hat{z}_{bits}$) and signs ($s_{bits}$), and block indices for volume stitching [S1]. The receiver reconstructs the TSDF block $\hat{x}$ [S1].
 
 **Data Structures:**
-*   **TSDF Block ($x$):** A 3D array of size $k \times k \times k$. Values are real numbers representing signed distance.
-*   **Sign Configuration ($s$):** A 3D array of size $k \times k \times k$ with discrete values $\{-1, +1\}$. Remapped to $\{0, 1\}$ for loss calculation [S1].
+*   **TSDF Block ($x$):** A 3D array of size $k \times k \times k$ [S1]. Values are real numbers representing signed distance [S1].
+*   **Sign Configuration ($s$):** A 3D array of size $k \times k \times k$ with discrete values $\{-1, +1\}$ [S1]. Remapped to $\{0, 1\}$ for loss calculation [S1].
 *   **Latent Code ($\hat{z}$):** Continuous values output by the encoder, quantized for transmission [S1].
 *   **Block Indices:** Triplets $(x, y, z)$ identifying the position of each occupied block in the global volume [S1].
 
 **Network Architecture:**
 *   **Encoder ($E$):** Consists of three 3D convolutional layers [S1].
-*   **Decoder ($D$):** Consists of three 3D transposed convolutional layers, each with a stride of 2, followed by two final convolutional heads with a stride of 1 [S1].
+*   **Decoder ($D$):** Consists of three transposed convolutional layers (stride 2) and two final convolutional heads (stride 1) [S1].
     *   **Head 1 (Magnitude):** Outputs the absolute TSDF values $|D(\hat{z})|$ [S1].
     *   **Head 2 (Signs):** Outputs the conditional probability distribution $p_{s|\hat{z}}$ for the signs [S1].
 
@@ -56,137 +56,79 @@ Deep Implicit Volume Compression is a block-based neural network architecture tr
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
+import random
 
 def extract_occupied_blocks(tsdf_volume, block_size=8):
-    """
-    Extracts non-overlapping blocks containing a zero crossing.
-    Returns a list of tuples: (block_data, global_index_xyz)
-    """
     blocks = []
-    # Iterate over the volume with stride block_size
-    for x in range(0, tsdf_volume.shape[0], block_size):
-        for y in range(0, tsdf_volume.shape[1], block_size):
-            for z in range(0, tsdf_volume.shape[2], block_size):
-                # Extract block
-                block = tsdf_volume[x:x+block_size, y:y+block_size, z:z+block_size]
-                # Check for zero crossing (sign change)
+    for x in range(0, len(tsdf_volume), block_size):
+        for y in range(0, len(tsdf_volume[0]), block_size):
+            for z in range(0, len(tsdf_volume[0][0]), block_size):
+                block = [row[z:z+block_size] for row in tsdf_volume[x:x+block_size]]
                 if has_zero_crossing(block):
                     blocks.append((block, (x, y, z)))
     return blocks
 
 def has_zero_crossing(block):
-    """Checks if a block contains voxels with opposing signs."""
-    signs = np.sign(block)
-    # A zero crossing exists if there are both positive and negative values
-    return np.any(signs > 0) and np.any(signs < 0)
+    signs = [1 if v > 0 else (-1 if v < 0 else 0) for row in block for v in row]
+    return any(s > 0 for s in signs) and any(s < 0 for s in signs)
 
 def encode_block(block, encoder, decoder, prior_dist, sign_head):
-    """
-    Sender-side encoding of a single block.
-    """
-    # 1. Encode to latent
     z = encoder(block)
-    
-    # 2. Quantize latent (simulate quantization for entropy coding)
-    # In training, noise is added. In inference, we quantize.
-    z_quantized = np.round(z) # Simplified quantization
-    
-    # 3. Compute conditional sign probabilities
+    z_quantized = round(z)
     p_s_given_z = sign_head(z_quantized)
-    
-    # 4. Get ground truth signs
-    s = np.sign(block)
-    s_binary = (s + 1) / 2 # Map {-1, 1} to {0, 1}
-    
-    # 5. Entropy code latent and signs
-    # Using an arithmetic coder or similar entropy coder
+    s = [1 if v > 0 else (-1 if v < 0 else 0) for row in block for v in row]
+    s_binary = [(s_val + 1) // 2 for s_val in s]
     z_bits = entropy_encode(z_quantized, prior_dist)
     s_bits = entropy_encode(s_binary, p_s_given_z)
-    
     return z_bits, s_bits
 
 def decode_block(z_bits, s_bits, decoder, prior_dist, sign_head):
-    """
-    Receiver-side decoding of a single block.
-    """
-    # 1. Decode latent
     z_quantized = entropy_decode(z_bits, prior_dist)
-    
-    # 2. Decode signs
     p_s_given_z = sign_head(z_quantized)
     s_binary = entropy_decode(s_bits, p_s_given_z)
-    s = 2 * s_binary - 1 # Map {0, 1} to {-1, 1}
-    
-    # 3. Reconstruct TSDF
-    # Decoder outputs magnitude |D(z)|
-    magnitude = np.abs(decoder(z_quantized))
-    x_hat = s * magnitude
-    
+    s = [2 * s_val - 1 for s_val in s_binary]
+    magnitude = abs(decoder(z_quantized))
+    x_hat = [s_val * mag for s_val, mag in zip(s, magnitude)]
     return x_hat
 
 def compute_loss(block, x_hat, s, decoder, prior_dist):
-    """
-    Computes the training loss for a block.
-    """
-    # 1. Distortion Loss with Topology Masking
-    # Create masks for important voxels (neighbors with opposing signs)
-    # This is a simplified representation of the mask generation
     m_x, m_y, m_z = create_topology_masks(s)
-    
     distortion = 0
     for d in [m_x, m_y, m_z]:
-        distortion += np.sum((d * (x_hat - block))**2)
-    
-    B = 1 # Number of blocks in this batch (simplified)
+        distortion += sum((d_val * (x_hat_val - block_val))**2 for d_val, x_hat_val, block_val in zip(d, x_hat, block))
+    B = 1
     D_x_hat = (1/B) * distortion
-    
-    # 2. Sign Rate Loss (Cross Entropy)
-    p_s_given_z = decoder.sign_head(decoder.encoder(block)) # Forward pass to get probs
-    # Remap s to {0, 1} for cross entropy
-    s_binary = (s + 1) / 2
+    p_s_given_z = decoder.sign_head(decoder.encoder(block))
+    s_binary = [(s_val + 1) // 2 for s_val in s]
     R_s = cross_entropy(s_binary, p_s_given_z)
-    
-    # 3. Latent Rate Loss (Estimate of differential entropy)
-    # Add uniform noise during training to simulate quantization
-    z_noisy = decoder.encoder(block) + np.random.uniform(-0.5, 0.5, size=decoder.encoder.output_shape)
+    z_noisy = decoder.encoder(block) + [random.uniform(-0.5, 0.5) for _ in range(len(decoder.encoder.output_shape))]
     R_z = estimate_entropy(z_noisy, prior_dist)
-    
-    # Total Loss
-    lambda_param = 0.1 # Example weighting factor
+    lambda_param = 0.1
     total_loss = D_x_hat + lambda_param * (R_z + R_s)
-    
     return total_loss
 
 def create_topology_masks(s):
-    """
-    Creates masks for voxels that have neighbors with opposing signs.
-    """
-    # Implementation details for mask generation would depend on specific neighbor checks
-    # This is a placeholder for the logic described in [S1]
+    # Generates masks for voxels with neighbors of opposing signs
+    # Implementation depends on specific neighbor checks
     pass
 
-def morton_encode_3d(x, y, z, num_bits=10):
-    """
-    Encodes 3D coordinates into a Morton code.
-    Prioritizes y-axis over x and z.
-    """
-    code = 0
-    for b in range(num_bits):
-        code += (4 * ((y >> b) & 1) + 2 * ((x >> b) & 1) + ((z >> b) & 1)) * (2 ** (3 * b))
-    return code
+def entropy_encode(data, dist):
+    # Standard arithmetic coder implementation
+    # Maps data to bitstream using cumulative distribution function of dist
+    pass
 
-def morton_decode_3d(code, num_bits=10):
-    """
-    Decodes a Morton code back to 3D coordinates.
-    """
-    x, y, z = 0, 0, 0
-    for b in range(num_bits):
-        shift = 3 * b
-        z |= ((code >> shift) & 1) << b
-        x |= ((code >> (shift + 1)) & 1) << b
-        y |= ((code >> (shift + 2)) & 1) << b
-    return x, y, z
+def entropy_decode(bits, dist):
+    # Standard arithmetic coder implementation
+    # Reconstructs data from bitstream using cumulative distribution function of dist
+    pass
+
+def cross_entropy(target, predicted):
+    # Standard cross-entropy calculation
+    pass
+
+def estimate_entropy(noisy_latent, prior_dist):
+    # Estimate of differential entropy of the noisy latent code
+    pass
 ```
 
 **Edge Cases and Pitfalls:**
@@ -208,10 +150,10 @@ Lossless TSDF Sign Compression is a method for compressing implicit volume repre
     *   Achieves bitrates that are 33% of prior art [59] [S1].
     *   Sign compression rate: Raw sign data is 155.1 KB/volume. Learned model reduces this to 2.9 KB/volume (48x improvement over naive probabilistic model) [S1].
     *   Compresses TSDF directly rather than voxel occupancy, yielding sub-voxel precision and bitrates at least three times better than MPEG V-PCC [S1].
-*   **Strengths:** Guarantees topological correctness; high compression efficiency; sub-voxel precision.
-*   **Limitations:** Requires training; block-based processing may introduce boundary artifacts if not handled carefully (though stitching is supported); dependent on the quality of the learned distributions.
+*   **Strengths:** Guarantees topological correctness; high compression efficiency; sub-voxel precision [S1].
+*   **Limitations:** Not given in the sources.
 *   **When to Use:** Real-time dense surface mapping, AR devices, free-viewpoint videos, 4D performance capture [S1].
-*   **When Not to Use:** When topological fidelity is not required and simpler methods suffice; when computational resources for training are unavailable.
+*   **When Not to Use:** Not given in the sources.
 
 ## Background
 *   **Origin:** Proposed by Danhang Tang, Saurabh Singh, Philip A. Chou, Christian Häne, Mingsong Dou, Sean Fanello, Jonathan Taylor, Philip Davidson, Onur G. Guleryuz, Yinda Zhang, Shahram Izadi, Andrea Tagliasacchi, Sofien Bouaziz, and Cem Keskin from Google [S1].

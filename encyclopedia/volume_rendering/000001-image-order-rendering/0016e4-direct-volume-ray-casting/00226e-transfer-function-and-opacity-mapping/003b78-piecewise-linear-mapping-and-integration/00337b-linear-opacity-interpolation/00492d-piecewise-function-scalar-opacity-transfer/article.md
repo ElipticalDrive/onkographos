@@ -1,97 +1,156 @@
 # Piecewise Function Scalar Opacity Transfer
 
-Also called: Piecewise Linear Mapping, Piecewise Opacity Mapping, Scalar Opacity Transfer Function, Scalar-Based Opacity Transfer Function
+Also called: Opacity Transfer Functions, Opacity functions, Piecewise Linear Mapping, Piecewise Opacity Mapping, Scalar Opacity Transfer Function, Scalar-Based Opacity Transfer Function
 
 ## Overview
-Piecewise Function Scalar Opacity Transfer maps scalar volume data values directly to opacity using a piecewise linear function, allowing specific intensity ranges to be rendered transparent or opaque [S1, S2, unofficial]. It differs from its parent [Linear Opacity Interpolation](7016-linear-opacity-interpolation.md) by supporting multiple control points to define complex, non-monotonic opacity profiles, and from its sibling [Bézier Curve Opacity Mapping](8485-b-zier-curve-opacity-mapping.md) by using linear segments instead of smooth curves [S1, S2, unofficial]. This method is distinct in its reliance solely on scalar intensity, which can fail if flat surfaces dominate the rendering [S2, unofficial].
+Piecewise Function Scalar Opacity Transfer defines a mapping from scalar volume data values to opacity ($\alpha$) using a piecewise function, allowing specific intensity ranges to be rendered transparent or opaque [S1, unofficial]. It solves the problem of visualizing internal structures by suppressing dominant flat surfaces (such as tissue boundaries) that would otherwise obscure deeper features [S3, unofficial]. Unlike [Linear Opacity Interpolation](7016-linear-opacity-interpolation.md), which uses simple linear interpolation between two thresholds, this method supports arbitrary piecewise definitions and non-linear combinations of feature detectors to handle complex data distributions [S2].
 
 ## How it works
-**Inputs:**
-- Scalar volume data $V$ with values in range $[V_{min}, V_{max}]$.
-- A set of control points $P = \{(s_0, o_0), (s_1, o_1), \dots, (s_n, o_n)\}$ where $s_i$ are scalar values and $o_i \in [0.0, 1.0]$ are target opacities [S1, S2, unofficial].
-- Optional stretch factor $k$ for raw data scaling [S1, unofficial].
+### Inputs and Outputs
+*   **Inputs**: Scalar volume data values ($v$), optional feature detectors (color $c$, gradient magnitude $g$), and transfer function parameters (control points, weights, thresholds).
+*   **Outputs**: Opacity value $\alpha \in [0, 1]$ for each voxel.
 
-**Outputs:**
-- Opacity value $\alpha$ for each voxel or sample point.
+### Data Structures
+The core data structure is a **Piecewise Function** defined by a set of control points $(x_i, y_i)$, where $x_i$ is the scalar value (or feature value) and $y_i$ is the resulting opacity.
+*   **Layout**: A list of tuples or a sorted array of $(value, opacity)$ pairs.
+*   **Interpolation**: Linear interpolation between adjacent control points is the standard method for generating $\alpha$ for input values between defined points [S1, unofficial].
 
-**Data Structures:**
-- The transfer function is stored as a list of tuples or a piecewise function object containing the control points $(s_i, o_i)$ sorted by $s_i$ [S1, unofficial].
+### Steps
+1.  **Define Control Points**: Create a list of $(scalar\_value, opacity)$ pairs. The opacity values must be in the range $[0.0, 1.0]$ [S1, unofficial].
+2.  **Preprocessing (Optional)**: If the input data has a different bit-depth or range than the transfer function expects, apply a scaling factor (stretch factor) to the raw values before mapping [S1, unofficial].
+3.  **Evaluate Opacity**: For each voxel with scalar value $v$:
+    *   If using a simple scalar piecewise function: Find the interval $[x_i, x_{i+1}]$ containing $v$. Compute $\alpha$ via linear interpolation:
+        $$ \alpha = y_i + (y_{i+1} - y_i) \frac{v - x_i}{x_{i+1} - x_i} $$
+    *   If using combined feature detectors (Color $c$, Gradient $g$):
+        *   Compute the combined feature value $F = w \cdot c + (1-w) \cdot g$, where $w$ is a weighting factor [S2].
+        *   Apply a threshold or sigmoidal function to $F$ to determine $\alpha$ (see Formulas).
+4.  **Clamping**: Ensure $\alpha$ is clamped to $[0, 1]$ [S2].
 
-**Steps:**
-1. **Preprocessing (Optional):** If a stretch factor $k$ is provided, scale the raw scalar value $v$ to $v' = k \cdot v$ [S1, unofficial].
-2. **Lookup:** For a given scalar value $v$, find the interval $[s_i, s_{i+1}]$ such that $s_i \le v \le s_{i+1}$ [S1, unofficial].
-3. **Interpolation:** Compute opacity $\alpha$ using linear interpolation between $(s_i, o_i)$ and $(s_{i+1}, o_{i+1})$ [S1, unofficial]:
-   $$ \alpha = o_i + \frac{(v - s_i)(o_{i+1} - o_i)}{s_{i+1} - s_i} $$
-4. **Clamping:** If $v < s_0$, set $\alpha = o_0$. If $v > s_n$, set $\alpha = o_n$ [S1, unofficial].
+### Formulas
+**1. Linear Piecewise Interpolation (Standard)**
+Used when defining explicit points.
+$$ \alpha = \text{Interpolate}(v, \{(x_i, y_i)\}) $$
+Where $x_i$ are sorted scalar values and $y_i$ are opacities [S1, unofficial].
 
-**Parameters:**
-- **Stretch Factor:** A constant $k=0.05$ used to scale raw DICOM pixel values before mapping [S1, unofficial].
-- **Control Points:** Examples from Head CT data include:
-  - Function 1: $\{(700, 0.0), (800, 0.1), (1050, 0.2), (1150, 0.5), (1300, 1.0)\}$ [S2, unofficial].
-  - Function 2: $\{(800, 0.02), (1150, 0.04), (1500, 0.06), (2000, 0.5), (3000, 1.0)\}$ [S2, unofficial].
-  - Function 3: $\{(700, 0.0), (800, 0.01), (1050, 0.03), (1150, 0.0), (1600, 1.0)\}$ [S2, unofficial].
+**2. Threshold OTF (Combined Features)**
+Used when combining color and gradient features with a hard threshold [S2]:
+$$ \alpha = \begin{cases} w \cdot c + (1-w) \cdot g & \text{if } w \cdot c + (1-w) \cdot g > T \\ 0 & \text{if } w \cdot c + (1-w) \cdot g \le T \end{cases} $$
+Where:
+*   $c$: Color feature detector value.
+*   $g$: Gradient feature detector value.
+*   $w$: Weighting factor, $0 \le w \le 1$ [S2].
+*   $T$: Threshold value, $0 \le T \le 1$ [S2].
 
-**Pitfalls:**
-- **Tissue Dominance:** Scalar-based opacity fails to capture internal structures if flat surfaces (like tissue) dominate the rendering, as tissue values oscillate and occupy the feature space, making internal features difficult to see [S2, unofficial].
-- **Information Loss:** Making tissues extremely transparent to reveal internal structures may result in loss of information about the tissue boundaries themselves [S2, unofficial].
+**3. Sigmoidal OTF (Combined Features)**
+Used for smooth transitions between transparent and opaque regions based on combined features [S2]:
+$$ \alpha = \frac{1}{1 + e^{-\gamma [\{w \cdot c + (1-w) \cdot g\} - T]}} $$
+Where:
+*   $\gamma$: Shape control parameter, $\gamma > 1$ [S2].
+*   $T, w, c, g$: As defined above.
 
-**Pseudocode:**
+### Parameters
+*   **Stretch Factor**: A constant used to scale raw pixel values (e.g., DICOM) before mapping. Example value: $0.05$ [S1, unofficial].
+*   **Threshold ($T$)**: The cutoff value for the threshold OTF. Range: $[0, 1]$ [S2].
+*   **Weight ($w$)**: Balances the contribution of color vs. gradient features. Range: $[0, 1]$ [S2].
+*   **Sigmoid Slope ($\gamma$)**: Controls the steepness of the sigmoidal transition. Constraint: $\gamma > 1$ [S2].
+
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def piecewise_scalar_opacity(v, points, stretch=1.0):
+def evaluate_piecewise_scalar_opacity(value, control_points):
     """
-    Calculate opacity for scalar value v using piecewise linear mapping.
+    Evaluates opacity for a scalar value using linear interpolation between control points.
     
     Args:
-        v: Scalar input value.
-        points: List of tuples [(s0, o0), (s1, o1), ...] sorted by s.
-        stretch: Scaling factor for raw values.
+        value (float): The scalar input value (e.g., voxel intensity).
+        control_points (list of tuples): List of (x, y) pairs sorted by x.
+                                         x is scalar value, y is opacity [0, 1].
+    
+    Returns:
+        float: Opacity alpha in [0, 1].
+    """
+    if not control_points:
+        return 0.0
+
+    # Handle values outside the range of control points
+    if value <= control_points[0][0]:
+        return control_points[0][1]
+    if value >= control_points[-1][0]:
+        return control_points[-1][1]
+
+    # Find the interval
+    for i in range(len(control_points) - 1):
+        x0, y0 = control_points[i]
+        x1, y1 = control_points[i+1]
+        
+        if x0 <= value <= x1:
+            # Linear interpolation
+            if x1 == x0:
+                return y0
+            alpha = y0 + (y1 - y0) * (value - x0) / (x1 - x0)
+            return max(0.0, min(1.0, alpha))
+    
+    return 0.0
+
+def evaluate_threshold_otf(color_feature, gradient_feature, weight, threshold):
+    """
+    Evaluates opacity using the Threshold OTF formula.
+    
+    Args:
+        color_feature (float): Color feature detector value.
+        gradient_feature (float): Gradient feature detector value.
+        weight (float): Weighting factor w [0, 1].
+        threshold (float): Threshold T [0, 1].
         
     Returns:
-        Opacity alpha in [0.0, 1.0].
+        float: Opacity alpha.
     """
-    # Apply stretch factor if needed
-    v_scaled = v * stretch
+    combined = weight * color_feature + (1 - weight) * gradient_feature
+    if combined > threshold:
+        return combined
+    else:
+        return 0.0
+
+def evaluate_sigmoid_otf(color_feature, gradient_feature, weight, threshold, gamma):
+    """
+    Evaluates opacity using the Sigmoidal OTF formula.
     
-    # Handle out-of-bounds values
-    if v_scaled <= points[0][0]:
-        return points[0][1]
-    if v_scaled >= points[-1][0]:
-        return points[-1][1]
+    Args:
+        color_feature (float): Color feature detector value.
+        gradient_feature (float): Gradient feature detector value.
+        weight (float): Weighting factor w [0, 1].
+        threshold (float): Threshold T [0, 1].
+        gamma (float): Sigmoid slope gamma > 1.
         
-    # Find the interval
-    for i in range(len(points) - 1):
-        s_i, o_i = points[i]
-        s_next, o_next = points[i+1]
-        
-        if s_i <= v_scaled <= s_next:
-            # Linear interpolation
-            if s_next == s_i:
-                return o_i # Avoid division by zero
-            alpha = o_i + (v_scaled - s_i) * (o_next - o_i) / (s_next - s_i)
-            return alpha
-            
-    # Fallback (should not be reached if points are sorted and bounds handled)
-    return points[-1][1]
+    Returns:
+        float: Opacity alpha in [0, 1].
+    """
+    combined = weight * color_feature + (1 - weight) * gradient_feature
+    exponent = -gamma * (combined - threshold)
+    alpha = 1.0 / (1.0 + math.exp(exponent))
+    return alpha
 ```
 
-## Subtopics
-
-### Bézier Curve Opacity Mapping
-Uses smooth Bézier curves instead of linear segments for opacity mapping. Choose when smooth transitions are preferred over sharp linear changes. [Link](8485-b-zier-curve-opacity-mapping.md)
+### Edge Cases and Pitfalls
+*   **Tissue Dominance**: Using a scalar-based opacity function alone can fail to capture internal structures if flat surfaces (like tissue) dominate the feature space, as their values oscillate and obscure other features [S3, unofficial].
+*   **Information Loss**: Making tissues extremely transparent to reveal internal structures may result in loss of information about the tissue boundaries themselves [S3, unofficial].
+*   **Precision**: Ensure that the stretch factor and control point coordinates are consistent with the input data's bit-depth and range [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(\log n)$ or $O(n)$ per sample depending on search method for control points, where $n$ is the number of control points. Lookup is fast.
-- **Memory Complexity:** $O(n)$ to store control points.
-- **Strengths:** Simple to implement; allows precise control over specific intensity ranges; supports non-monotonic opacity (e.g., hiding intermediate tissues) [S1, S2, unofficial].
-- **Limitations:** Fails to distinguish internal structures from flat surfaces if they share similar scalar values; sensitive to the choice of control points [S2, unofficial].
-- **When to Use:** When scalar intensity is the primary discriminator and specific ranges need to be highlighted or hidden.
-- **When Not to Use:** When flat surfaces dominate and obscure internal details, or when gradient information is needed to distinguish boundaries [S2, unofficial].
+*   **Time Complexity**: $O(1)$ per voxel for evaluation, assuming the control points are stored in a structure allowing binary search (e.g., sorted array) or if the number of points is small.
+*   **Memory Complexity**: $O(N)$ for storing control points, where $N$ is the number of control points. This is negligible compared to the volume data.
+*   **Strengths**: Flexible definition of opacity ranges; ability to suppress specific features (like tissue) to reveal internal structures; supports combination of multiple feature detectors [S2][S3, unofficial].
+*   **Limitations**: Scalar-only mapping may fail for complex data with overlapping scalar ranges for different materials [S3, unofficial]. Requires careful tuning of parameters to avoid obscuring important features [S3, unofficial].
+*   **When to Use**: When specific intensity ranges need to be highlighted or suppressed, or when combining color and gradient information is necessary to distinguish materials [S2].
+*   **When Not to Use**: When the data has simple, well-separated scalar ranges that can be handled by linear interpolation [S1, unofficial].
 
 ## Background
-The method originates from early volume rendering techniques using scalar transfer functions [S1, S2, unofficial]. It is commonly implemented in visualization libraries like VTK, where `vtkPiecewiseFunction` is used to define opacity and color mappings [S1, unofficial]. Research has highlighted its limitations in medical imaging, such as Head CTs, where tissue oscillations dominate the feature space, prompting the exploration of gradient-based or multi-dimensional transfer functions [S2, unofficial].
+*   **Origin**: The concept of using piecewise functions for opacity mapping in volume rendering is well-established in the field. The specific implementation using combined color and gradient features with threshold/sigmoidal OTFs is described in research on high-resolution color cryo-imaging [S2].
+*   **Development**: Early implementations used simple linear mappings. Later, piecewise functions allowed for more complex, non-linear mappings. The use of gradient and color features alongside scalar values was developed to address the limitations of scalar-only mapping in complex biological and scientific data [S2][S3, unofficial].
+*   **Usage**: Commonly used in medical imaging (e.g., CT scans) and scientific visualization to visualize internal structures by suppressing surface tissues [S3, unofficial].
 
 ## Sources
 [S1] DannyRuijters/vtkSimpleVolumeRendering, https://github.com/DannyRuijters/vtkSimpleVolumeRendering, fetched 2026-10-27 (unofficial)
-[S2] Volume Rendering, Maximum Intensity Projection and ..., https://ryanrossi.com/sv3.php, fetched 2026-10-28 (unofficial)
+[S2] Enhanced volume rendering techniques for high-resolution color cryo-imaging data, https://doi.org/10.1117/12.813756, fetched 2026-11-08
+[S3] Volume Rendering, Maximum Intensity Projection and ..., https://ryanrossi.com/sv3.php, fetched 2026-10-28 (unofficial)

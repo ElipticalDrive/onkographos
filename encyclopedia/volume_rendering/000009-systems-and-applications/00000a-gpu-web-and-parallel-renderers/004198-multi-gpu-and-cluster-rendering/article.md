@@ -1,16 +1,10 @@
 # Multi-GPU and Cluster Rendering
 
-Also called: Distributed Volume Rendering, Cluster-Based Volume Visualization
 
 ## Overview
-Multi-GPU and Cluster Rendering maps volumetric data to a 2D display by distributing the computational load across multiple graphics processing units or networked nodes, enabling the visualization of datasets that exceed the memory or processing capacity of a single machine [S1, S1, unofficial]. It differs from single-node parallel renderers by explicitly managing data partitioning, inter-node communication, and result compositing across distinct hardware contexts, often requiring CPU-mediated data transfer or specialized frameworks like Chromium or Equalizer to synchronize execution [S1, S1, unofficial].
+Multi-GPU and Cluster Rendering distributes volumetric rendering workloads across multiple graphics processing units or networked nodes to visualize datasets that exceed the memory or computational capacity of a single machine [S1, unofficial]. It differs from single-node parallel renderers by explicitly managing data partitioning, inter-node communication, and result compositing across distinct hardware contexts, often requiring CPU-mediated data transfer or specialized frameworks like Chromium or Equalizer to synchronize execution [S1, unofficial].
 
 ## Shared principles
-The articles in this family share the goal of mapping abstract volumetric data to a perceptible output through specific system constraints. Common mechanisms include:
-1. **Hardware Acceleration Mapping**: Offloading computationally intensive tasks (ray casting, splatting, sorting) to parallel execution units (GPUs, multi-core CPUs) to achieve real-time or near-real-time performance [S1, S2][S4, unofficial].
-2. **Data Structure Optimization**: Storing volumetric data in formats optimized for the target hardware, such as 3D/4D textures for coalesced memory access on GPUs or sparse structures for memory efficiency [S1, unofficial][S3, unofficial].
-3. **Depth Management**: Handling the ordering of contributions for alpha-blended rendering, often requiring GPU-based sorting algorithms (radix sort, linked lists) to ensure correct compositing [S1, S2].
-4. **Physical-to-Digital Mapping**: In the case of volumetric displays, transforming 3D voxel coordinates into 2D control signals (pixel buffers, SLM patterns) synchronized with mechanical or optical processes to create a physical 3D light field [S1, unofficial][S3, unofficial].
 
 ## Subtopics
 
@@ -20,21 +14,23 @@ Distributes volumetric rendering workloads across multiple GPUs on a single node
 ### [Single Node Multi-GPU/Server Architecture](5165-single-node-multi-gpu-server-architecture.md)
 Enables interactive visualization of large volumetric datasets on resource-constrained mobile clients by offloading all storage and computation to a server system. It distinguishes itself from distributed cluster approaches by utilizing a single server node equipped with multiple GPUs and CPUs, managed via the Chromium framework to virtualize OpenGL execution across local hardware. Unlike pure client-side renderers that require significant local GPU power, this method transmits compressed image data to lightweight clients.
 
-#### Equalizer
-**Definition**
-An OpenGL-based API framework for developing scalable graphics applications for distributed visualization clusters, taking care of distributed execution, synchronization, and final image compositing for both sort-last and sort-first based applications [S1, unofficial]. It is a flexible and transparent OpenGL-based graphics framework for distributed, high-performance visualization systems that allows OpenGL-based applications to display on multi-tile environments by providing a unified OpenGL rendering context [S1, unofficial].
+### Equalizer
+An OpenGL-based API framework for developing scalable graphics applications for distributed visualization clusters, taking care of distributed execution, synchronization, and final image compositing for both sort-last and sort-first based applications [S1, unofficial]. It is a flexible and transparent OpenGL-based graphics framework for distributed, high-performance visualization systems that allows OpenGL-based applications to display on multi-tile environments by providing a unified OpenGL rendering context [S1, unofficial]. It intercepts and manipulates certain OpenGL directives to provide a unified OpenGL rendering context [S1, unofficial]. It manages the visualization grid without additional implementation requirements to the user [S1, unofficial]. Effectively using these features requires in-depth knowledge of the framework, significant code changes, and application-specific adaptations [S1, unofficial]. Unlike SAGE, CGLX does not impose the pixel read back operation on the system, which can be prohibitively expensive at higher resolutions [S1, unofficial].
 
-**Steps**
-Intercept and manipulate certain OpenGL directives to provide a unified OpenGL rendering context [S1, unofficial]. Manage the visualization grid without additional implementation requirements to the user [S1, unofficial].
+### Cluster Synchronization
+A mechanism to synchronize rendering nodes using a barrier before buffer swap to ensure synchronous switching between wavelet levels and reduce artifacts [S2]. The system must wait for the slowest node in the cluster, which can be a bottleneck [S2].
 
-**Pitfalls**
-Effectively using these features requires in-depth knowledge of the framework, significant code changes, and application-specific adaptations [S1, unofficial].
+### Cloud-based Distributed NeRF Rendering
+A cloud rendering system consisting of a Master Node for task scheduling and Sub-nodes (RenderFarm) for high-performance computing, allowing NeRF rendering on user devices without high-end GPUs [S3, unofficial]. Sub-nodes provide color and depth information for each individual NeRF subject [S3, unofficial]. Rendering results from all sub-nodes are synchronized to the Master Node [S3, unofficial]. The Master Node performs fusion/composition between scenes based on the received depth information [S3, unofficial]. The system streams the final composited rendering results to the user’s multi-display terminal [S3, unofficial].
 
-**Comparison**
-Unlike SAGE, CGLX does not impose the pixel read back operation on the system, which can be prohibitively expensive at higher resolutions [S1, unofficial].
+### Hardware-Level Multi-Computer Synchronization
+Synchronizes multiple volumetric boards (driving different colored lasers) across single or multiple computers using a master/slave clock architecture [S4, unofficial]. One board (e.g., GREEN) is designated as Master, and its 20-MHz crystal oscillator provides the system clock [S4, unofficial]. Slave boards (RED, BLUE, etc.) receive the master's 20-MHz clock via external cables instead of using their own oscillators [S4, unofficial]. For multi-computer setups, slave computers receive a `*SYS_RESET` signal, which clears counter “C” and resets all internal clocks on slave volumetric cards to match the master clock [S4, unofficial]. Synchronization accuracy is within the master board's clock period of 50 nanoseconds (1/20 MHz), assuming short external cables [S4, unofficial]. The J8 Master to Slave cable uses a 1:1 layout: Pin 1=SYS_20MHZ, Pin 2=DGND, Pin 3=N/C, Pin 4=*SYS_RESET, Pin 5=*SYS_0_INDEX, Pin 6=*SYS_180_INDEX [S4, unofficial].
 
 ## Background
-The need for multi-GPU and cluster rendering arises from the exponential growth of volumetric dataset sizes and the resolution requirements of large-scale tiled displays [S1, unofficial]. Early approaches relied on custom solutions based on sort-first or sort-last parallel rendering algorithms, which offered scalability but lacked flexibility [S1, unofficial]. Frameworks like Chromium were introduced to virtualize OpenGL execution, allowing applications to run on distributed hardware by intercepting command streams [S1, unofficial]. Subsequent frameworks such as Equalizer, SAGE, and CGLX provided more specialized abstractions for distributed execution, synchronization, and compositing, addressing the limitations of earlier generic interceptors [S1, unofficial]. These systems are primarily used in scientific visualization, medical imaging, and large-scale display environments where high fidelity and large field-of-view are critical [S1, unofficial].
+Custom solutions for distributed rendering provide greater support and scalability at the price of inherent inflexibility, as they are specifically built for each application based on parallel rendering algorithms [S1, unofficial]. Frameworks like Chromium were introduced to virtualize OpenGL execution, allowing applications to run on distributed hardware by intercepting command streams [S1, unofficial]. Subsequent frameworks such as Equalizer, SAGE, and CGLX provided more specialized abstractions for distributed execution, synchronization, and compositing, addressing the limitations of earlier generic interceptors [S1, unofficial]. Equalizer handles distributed execution and final image compositing for both sort-last and sort-first based applications [S1, unofficial]. CGLX provides a unified OpenGL rendering context by intercepting directives without imposing expensive pixel read-back operations [S1, unofficial].
 
 ## Sources
 [S1] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
+[S2] Giga-Scale Multiresolution Volume Rendering on Distributed Display Clusters, https://doi.org/10.1007/978-3-642-19641-6_10, fetched 2026-10-26
+[S3] NEPHELE: A Neural Platform for Highly Realistic Cloud Radiance Rendering, https://arxiv.org/abs/2303.04086v1, fetched 2026-10-27 (unofficial)
+[S4] DTIC ADA358303: Improved Second-Generation 3-D Volumetric Display System. Revision 2, https://archive.org/details/DTIC_ADA358303, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,112 @@
+--- v005.md
++++ v006.md
+@@ -1,57 +1,73 @@
+ # Absorption-Only Radiography via Unsorted Hexahedron Projection
+ 
++Also called: Unsorted Hexahedron Projection, Absorption-Only Radiography
+ 
+ ## Overview
+-A hardware-accelerated technique to simulate radiographs in the absorption-only regime (emissivity $J=0$) for curvilinear hexahedral meshes [S1, unofficial]. It avoids the need for a global back-to-front visibility sort by accumulating optical thickness additively, leveraging the commutativity of addition [S1, unofficial]. Unlike [Hardware-Assisted Projected Tetrahedra](1729-hardware-assisted-projected-tetrahedra.md), which requires tetrahedral decomposition, this method projects hexahedral cells directly when possible, reducing mesh storage and rendering time [S1, unofficial].
++This method simulates X-ray radiographs for curvilinear hexahedral meshes by accumulating optical thickness additively, thereby eliminating the need for a global back-to-front visibility sort [S1, unofficial]. It differs from standard polyhedron projection methods, which require sorted compositing to handle opacity correctly, by exploiting the absorption-only regime where emissivity is zero [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- A curvilinear hexahedral mesh (or tetrahedral mesh for degenerate cases) [S1, unofficial].
+-- Extinction coefficients $K_\nu$ per vertex [S1, unofficial].
+-- View-projection matrices [S1, unofficial].
+-
+-**Outputs:**
+-- A 2D image representing the accumulated optical thickness (attenuation) per pixel [S1, unofficial].
+-- Final intensity derived from the accumulated attenuation [S1, unofficial].
++**Inputs:** A curvilinear hexahedral mesh (vertices with 3D positions and scalar extinction coefficients $K_\nu$); a view-projection matrix.
++**Outputs:** A 2D radiograph image representing accumulated attenuation.
+ 
+ **Data Structures:**
+-- **P-buffer:** A floating-point off-screen buffer (texture) storing the accumulated attenuation sum, initialized to zero [S1, unofficial].
+-- **Vertex Attributes:** For each vertex, store the attenuation value $A_v = K_\nu \times \text{thickness}$, where thickness is computed in software [S1, unofficial].
+-- **Cell Geometry:** Hexahedral connectivity; degenerate cells or those with non-convex face projections are subdivided into five tetrahedra [S1, unofficial].
++*   **Mesh:** Curvilinear hexahedra. Each vertex $v$ has position $\mathbf{p}_v$ and extinction coefficient $K_{\nu,v}$.
++*   **P-buffer:** A floating-point off-screen buffer (texture) storing the accumulated optical thickness $\tau_{acc}$ per pixel. Initialized to zero.
++*   **Triangle Fans/Strips:** Precomputed or on-the-fly decomposition of hexahedra projections into rasterizable primitives.
+ 
+ **Steps:**
+-1. **Preprocessing:** For each hexahedral cell, test if it can be projected as a whole [S1, unofficial]. A cell is valid if it is non-degenerate (no coinciding vertices) and the projection of each of its six faces is a convex quadrilateral [S1, unofficial]. If valid, mark it for hexahedral projection [S1, unofficial]. If invalid, subdivide the hexahedron into five tetrahedra [S1, unofficial]. Compute the thickness for each vertex of the resulting primitives in software using cell geometry, and calculate vertex attenuation $A_v = K_\nu \times \text{thickness}$ [S1, unofficial].
+-2. **Pass Management:** Form a logically circular list of pointers to all cells [S1, unofficial]. Because copying the P-buffer to a texture is slow, render multiple non-overlapping cells in a single pass before copying [S1, unofficial].
+-3. **Projection & Rasterization:** For each selected cell, project it using the method of Max (triangle fans/strips) if hexahedral, or Shirley and Tuchman (triangle fans) if tetrahedral [S1, unofficial]. Rasterize the primitives to the P-buffer [S1, unofficial].
+-4. **Fragment Accumulation:** In the fragment program, interpolate the attenuation $A$ from the vertex data [S1, unofficial]. Read the current accumulated attenuation $I_{acc}$ from the image-aligned texture [S1, unofficial]. Compute the new sum $I_{new} = I_{acc} + A$ [S1, unofficial]. Write $I_{new}$ back to the P-buffer [S1, unofficial].
+-5. **Buffer Synchronization:** After rendering a batch of cells, copy the P-buffer to a texture to keep it current for the next iteration [S1, unofficial]. This is necessary because writes to output buffers are not guaranteed in polygon order, and the texture caching mechanism does not account for textures changing on the fly [S1, unofficial].
+-6. **Final Compositing:** After all cells are processed, the P-buffer contains the total optical thickness $\tau$ for each pixel [S1, unofficial]. The final intensity is computed from the accumulated attenuation using the recurrence $I_V[i+1] = e^{-\tau[i]} I_V[i]$ [S1, unofficial]. Since addition is commutative, the global product of exponentials simplifies to $I_{final} = I_{source} \cdot e^{-\sum \tau}$, where $\sum \tau$ is the value in the P-buffer [S1, unofficial].
+ 
+-**Formulas:**
+-- Vertex Attenuation: $A_v = K_\nu \times \text{thickness}$ [S1, unofficial].
+-- Accumulation: $I_{acc}^{new} = I_{acc}^{old} + A$ [S1, unofficial].
+-- Recurrence: $I_V[i+1] = e^{-\tau[i]} I_V[i]$ [S1, unofficial].
+-- Final Intensity: $I_{final} = I_{source} \cdot e^{-I_{acc}}$ [S1, unofficial].
++1.  **Mesh Decomposition:**
++    For each hexahedral cell, determine if it can be projected directly. A cell is valid for direct projection if:
++    *   It is non-degenerate (no coinciding vertices).
++    *   The projection of each of its six faces is a convex quadrilateral.
++    
++    If valid, decompose the hexahedron into triangle fans or strips using the method of Max [12, unofficial]. If invalid (degenerate or non-convex face projections), subdivide the hexahedron into tetrahedra. For tetrahedra, use the Shirley and Tuchman method [16, unofficial] to divide the projection into triangle fans.
++
++2.  **Thickness Computation (Software):**
++    For each vertex $v$ of the current cell, compute the geometric thickness $l_v$ along the viewing ray. This is done in software using the cell geometry. The specific geometric formula for $l_v$ depends on the curvilinear mapping but is derived from the cell's shape [S1, unofficial].
++
++3.  **Vertex Attenuation Calculation:**
++    Compute the attenuation value $A_v$ for each vertex:
++    $$ A_v = K_{\nu,v} \cdot l_v $$
++    where $K_{\nu,v}$ is the extinction coefficient at vertex $v$ [S1, unofficial].
++
++4.  **Rasterization and Interpolation:**
++    Rasterize the triangle fans/strips. For each fragment generated by a primitive:
++    *   Interpolate the attenuation values $A_v$ from the vertex data across the primitive using hardware interpolation.
++    *   Let $A_{frag}$ be the interpolated attenuation for the current fragment [S1, unofficial].
++
++5.  **Accumulation:**
++    Read the current accumulated optical thickness $\tau_{curr}$ from the P-buffer texture at the fragment's screen position.
++    Update the accumulated thickness:
++    $$ \tau_{new} = \tau_{curr} + A_{frag} $$
++    Write $\tau_{new}$ back to the P-buffer. This step uses a floating-point fragment program to ensure precision, as standard framebuffer compositing may not support the required 32-bit floating-point accuracy for addition [S1, unofficial].
++
++6.  **Texture Synchronization:**
++    After rendering a batch of cells (to minimize overhead), copy the P-buffer contents to the input texture for the next batch. This is necessary because writes to output buffers are not guaranteed to be in polygon order, and the texture caching mechanism does not account for textures changing on the fly [S1, unofficial].
++
++7.  **Final Image Generation:**
++    After all cells are processed, the P-buffer contains the total optical thickness $\tau_{total}$ per pixel. The final intensity $I$ for each pixel is computed as:
++    $$ I = I_0 \cdot e^{-\tau_{total}} $$
++    where $I_0$ is the incident X-ray intensity (background light) [S1, unofficial].
+ 
+ **Parameters:**
+-- **Parallelism:** Four different X-ray wavelength bands can be accumulated in parallel using the red, green, blue, and alpha channels of the buffer [S1, unofficial].
+-- **Precision:** 32-bit floating point accuracy is required for attenuation computation [S1, unofficial].
++*   **Parallelism:** Four different X-ray wavelength bands can be accumulated in parallel using the red, green, blue, and alpha channels of the P-buffer [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Degenerate Cells:** Hexahedral cells with coinciding vertices must be subdivided into tetrahedra [S1, unofficial].
+-- **Non-Convex Projections:** If the projection of a hexahedral face is non-convex, the cell must be subdivided [S1, unofficial].
+-- **Gaps/Overlaps:** If subdivided tetrahedra share non-planar faces with adjacent non-subdivided cells, gaps or overlaps in viewing ray segments may occur, introducing small errors in total absorption [S1, unofficial].
+-- **Performance:** Copying the P-buffer to a texture is slow. Rendering as many non-overlapping cells as possible per pass minimizes copying [S1, unofficial].
++*   **Degenerate Cells:** Hexahedral cells with coinciding vertices must be subdivided into tetrahedra [S1, unofficial].
++*   **Non-Convex Projections:** If the projection of any face is non-convex, the cell must be subdivided [S1, unofficial].
++*   **Subdivision Errors:** If subdivided tetrahedra share non-planar faces with adjacent non-subdivided cells, gaps or overlaps in viewing ray segments may occur, introducing small errors in total absorption [S1, unofficial].
++*   **Precision:** Standard framebuffer compositing operations may lack the necessary 32-bit floating-point accuracy for attenuation accumulation; a fragment program writing to a P-buffer is required [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources [S1, unofficial]. Subdivision increases the number of primitives [S1, unofficial].
+-- **Memory Complexity:** Not given in the sources [S1, unofficial]. The P-buffer size is fixed by the image resolution [S1, unofficial].
+-- **Strengths:** No global sort required [S1, unofficial]. Direct projection of hexahedra saves storage and rendering time compared to tetrahedral decomposition [S1, unofficial]. Parallel accumulation of multiple wavelength bands [S1, unofficial].
+-- **Limitations:** Requires floating-point P-buffer support [S1, unofficial]. Degenerate or non-convex cells require subdivision, which can introduce small errors [S1, unofficial]. Buffer copying overhead if many overlapping cells exist [S1, unofficial].
+-- **When to use:** Absorption-only radiography (X-ray simulation) where emissivity is negligible [S1, unofficial]. Suitable for curvilinear hexahedral meshes [S1, unofficial].
+-- **When not to use:** Emissive volumes (requires front-to-back compositing) [S1, unofficial]. Scenes with significant self-emission [S1, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of cells, assuming constant-time projection and rasterization. The need for subdivision adds overhead for degenerate cases.
++*   **Memory Complexity:** $O(W \cdot H)$ for the P-buffer, where $W, H$ are image dimensions.
++*   **Strengths:** No global sort required; efficient for large meshes; supports curvilinear hexahedra directly; parallel accumulation of multiple wavelength bands.
++*   **Limitations:** Limited to absorption-only regime (no emissivity); potential errors from subdivision artifacts; texture copying overhead if not batched efficiently.
++*   **When to use:** Industrial and medical X-ray simulation where self-emission is negligible and high performance is needed for complex hexahedral meshes.
++*   **When not to use:** When emissivity is significant, or when strict geometric consistency is required without subdivision artifacts.
+ 
+ ## Background
+-Originated in the context of industrial and medical X-ray simulation [S1, unofficial]. The method builds on the polyhedron projection approach [S1, unofficial]. It utilizes triangle fan/strip definitions for hexahedra from Max and tetrahedra from Shirley and Tuchman [S1, unofficial]. The need for floating-point accuracy in attenuation computation led to the use of fragment programs and P-buffers, as standard framebuffer compositing operations lacked sufficient precision at the time [S1, unofficial].
++This method was developed for industrial and medical settings where X-ray self-emission is negligible [S1, unofficial]. It builds on the polyhedron projection method [S1, unofficial] and uses techniques from Max [12, unofficial] for hexahedron projection and Shirley and Tuchman [16, unofficial] for tetrahedron projection. The approach addresses the computational cost of sorting and the precision limitations of standard graphics hardware for accumulation [S1, unofficial].
+ 
+ ## Sources
