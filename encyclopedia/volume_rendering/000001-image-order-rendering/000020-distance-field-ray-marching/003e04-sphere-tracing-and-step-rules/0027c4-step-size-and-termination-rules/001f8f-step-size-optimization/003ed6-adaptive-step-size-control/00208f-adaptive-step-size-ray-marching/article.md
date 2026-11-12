@@ -3,298 +3,274 @@
 Also called: DDVR, DDVR Raymarching Shader, Ray Marching with Adaptive Step Size and Temporal Accumulation, Adaptive Step Size Volume Rendering
 
 ## Overview
-Adaptive Step Size Ray Marching is a GPU-based direct volume rendering technique that reduces computational cost by varying the ray marching step size based on local volume density and distance from the camera [S1][S2, S3, unofficial]. Unlike fixed-step methods that force a trade-off between quality and efficiency, this method uses fine steps inside dense regions and coarse steps in voids, often combined with temporal accumulation and noise-based jittering to maintain real-time performance [S1][S2, unofficial]. It sets itself apart from siblings like Dynamic Sampling Step Adjustment by explicitly integrating a noise-driven step size modulation and temporal reprojection for handling camera motion [S2, unofficial].
+Adaptive Step Size Ray Marching is a GPU-based direct volume rendering technique that reduces computational cost by dynamically varying the ray marching step size based on local density and distance from the camera, often combined with temporal accumulation and denoising [S1][S2, S3, unofficial]. It solves the trade-off between rendering quality and performance inherent in fixed-step linear sampling by using fine steps in high-density regions (or near the camera) and coarse steps in empty space or at a distance [S1][S3, unofficial]. Unlike its sibling [Dynamic Sampling Step Adjustment](2442-dynamic-sampling-step-adjustment.md), which may rely on static heuristics or gradient estimation, this method explicitly implements a noise-driven step size variation and temporal reprojection to maintain real-time performance on 3D and 4D volumes [S2, unofficial].
 
 ## How it works
 ### Inputs and Outputs
 **Inputs:**
-*   Camera state: Position, view/projection matrices, and a boolean `moved` flag indicating if the camera changed from the previous frame [S2, unofficial].
-*   Volume data: 3D texture (`volumeTexture`) and optionally a 4D next-frame texture (`volumeTexture4DNextFrame`) [S2, unofficial].
-*   Configuration: Bounding box (`bbmin`, `bbmax`), scalar range (`scalarMinMax`), base `stepSize`, and flags for `accumulation`, `bVolume4D`, and `motionVectorCalc` [S2, unofficial].
-*   Previous frame buffers: `outputImage` (color), `positionDepthBufferImage` (depth/position), `motionVectorImage`, and `noiseImage` (per-pixel noise/offset) [S2, unofficial].
+- **Volume Data:** 3D texture (`volumeTexture`) for static volumes, or two 3D textures (`volumeTexture`, `volumeTexture4DNextFrame`) for time-varying 4D volumes [S2, unofficial].
+- **Camera State:** Eye position, view direction, projection matrix, and a flag indicating if the camera has moved (`cam.moved`) [S2, unofficial].
+- **Configuration:** Base step size (`stepSize`), fine/coarse step multipliers, density thresholds, and accumulation flags [S2, S3, unofficial].
+- **Auxiliary Buffers:**
+    - `noiseImage` (rg32f): Stores per-pixel noise value in `.r` (current step size modifier) and step offset in `.g` [S2, unofficial].
+    - `positionDepthBufferImage` (rgba32f): Stores world position of the first hit (xyz) and depth (w) [S2, unofficial].
+    - `motionVectorImage` (rgba8): Stores motion vectors for temporal reprojection (xy) [S2, unofficial].
+    - `outputImage` (rgba8): Final rendered color and alpha [S2, unofficial].
 
 **Outputs:**
-*   `outputImage`: Final rendered RGBA color [S2, unofficial].
-*   `positionDepthBufferImage`: World position and depth of the first hit [S2, unofficial].
-*   `motionVectorImage`: UV-space motion vectors for temporal reprojection [S2, unofficial].
-*   `noiseImage`: Updated noise values and step offsets for the next frame [S2, unofficial].
+- **Final Color:** Accumulated color and alpha in `outputImage` [S2, unofficial].
 
 ### Data Structures
-The implementation relies on specific GPU image buffers and uniform blocks [S2, unofficial]:
+The implementation relies on specific uniform blocks and image buffers.
 
-1.  **Uniform Block (set=0, binding=0):**
-    *   `dimensions` (vec3): Volume resolution.
-    *   `bbmin`, `bbmax` (vec3): World-space bounding box.
-    *   `rotationAngles` (vec2): Rotation for the volume box.
-    *   `scalarMinMax` (vec2): Min/max density values for normalization.
-    *   `stepSize` (float): Base step size.
-    *   `illuminationScale` (float): Lighting multiplier.
-    *   `ellapsedTime` (float): Time for 4D interpolation.
-    *   `accumulation` (int): 1 if temporal accumulation is enabled.
-    *   `motionVectorCalc` (int): 1 if motion vectors are computed.
-    *   `bVolume4D` (int): 1 if 4D volume is used.
-    *   `interpolationFactor` (float): Mix factor for 4D frames.
-    *   `pingpong4D` (int): Flag to swap 4D textures.
+**Uniform Block (General):**
+- `dimensions` (vec3): Volume dimensions.
+- `bbmin`, `bbmax` (vec3): Bounding box minimum and maximum.
+- `rotationAngles` (vec2): Rotation angles for the volume bounding box.
+- `scalarMinMax` (vec2): Min and max scalar values for density normalization.
+- `stepSize` (float): Base step size.
+- `illuminationScale` (float): Final color multiplier.
+- `ellapsedTime` (float): Time for 4D interpolation.
+- `accumulation` (int): 1 if temporal accumulation is enabled, 0 otherwise.
+- `motionVectorCalc` (int): 1 if motion vectors are calculated, 0 otherwise.
+- `bVolume4D` (int): 1 if 4D volume, 0 if 3D.
+- `interpolationFactor` (float): Factor for mixing 4D frames.
+- `pingpong4D` (int): Flag to swap 4D textures.
 
-2.  **Noise Image (set=0, binding=2, format rg32f):**
-    *   Layout: `vec4`.
-    *   `.r`: Current step size multiplier (0.0 if using default base step size).
-    *   `.g`: Ray offset (jitter) for the current frame.
-    *   `.b`, `.a`: Unused (0.0).
+**Camera Block:**
+- `cam.transform[4]`: Model-view matrix.
+- `cam.proj`: Projection matrix.
+- `camView`: View matrix.
+- `cam.moved`: Boolean flag.
 
-3.  **Position Depth Buffer (set=1, binding=3, format rgba32f):**
-    *   Layout: `vec4`.
-    *   `.xyz`: World position of the first hit.
-    *   `.w`: Depth $t$ along the ray.
+**Noise Image Layout (rg32f):**
+- `.r`: Current step size multiplier (0 if using default).
+- `.g`: Ray offset for jittering/accumulation.
+- `.b`, `.a`: Unused (0.0).
 
-4.  **Motion Vector Image (set=1, binding=5, format rgba8):**
-    *   Layout: `vec4`.
-    *   `.xy`: Motion vector in UV space.
-    *   `.z`: Unused (0.0).
-    *   `.w`: Unused (1.0).
+**Position Depth Buffer Layout (rgba32f):**
+- `.xyz`: World position of the first hit.
+- `.w`: Depth $t$ along the ray.
+
+**Motion Vector Image Layout (rgba8):**
+- `.xy`: Motion vector in UV space.
+- `.z`: Unused (0.0).
+- `.w`: Unused (1.0).
 
 ### Algorithm Steps
 
-1.  **Initialization:**
-    *   Construct rays from the eye position using the view/projection matrices and UV coordinates [S1][S2, unofficial].
-    *   Perform ray-box intersection against `bbmin` and `bbmax` to find entry ($t_{entry}$) and exit ($t_{exit}$) distances [S1][S2, unofficial].
-    *   If no intersection, store black color `(0,0,0,1)` in `outputImage`, zero out `positionDepthBufferImage`, and return [S2, unofficial].
-    *   Initialize `transmittance = 1.0`, `accumulatedColor = vec3(0.0)`, `firstHit = false`, and `dstTravelled = 0.0` [S2, S3, unofficial].
-    *   Calculate total distance `totalDst = tExit - tEntry` [S3, unofficial].
-    *   Determine initial step parameters [S3, unofficial]:
-        *   `curFineStepSize = min(STEPSIZE_FINE, totalDst / MIN_NUM_FINE_STEPS)`
-        *   `curCoarseStepSize = curFineStepSize * COARSE_STEPSIZE_MULTIPLIER`
-        *   `curThreshold = MAX_NUM_MISSED_STEPS`
-        *   `dt = curCoarseStepSize`
-    *   Load noise offset from `noiseImage` at the current pixel coordinate [S2, unofficial].
-    *   Determine effective step size `m_stepSize`: if `noiseOffset.r == 0`, use the configured base `stepSize`; otherwise, use `noiseOffset.r` [S2, unofficial].
-    *   Calculate step direction `stepDir = rayDir * m_stepSize` [S2, unofficial].
-    *   Set initial position `pos = rayOrigin + tEntry * rayDir` [S2, unofficial].
-    *   Get initial ray offset `rayOffset = noiseImage[pixelCoord].g` [S2, unofficial].
+1.  **Ray Initialization:**
+    - Construct rays from the eye position.
+    - Perform ray-box intersection against the volume bounding box (`bbmin`, `bbmax`) to find entry ($t_{entry}$) and exit ($t_{exit}$) distances [S1][S2, unofficial].
+    - If no intersection, output black color `(0,0,0,1)` and zero depth, then return [S2, unofficial].
 
-2.  **Ray Marching Loop:**
-    *   Iterate $t$ from $t_{entry} + rayOffset$ to $t_{exit}$ with step $m_{stepSize}$ [S2, unofficial].
-    *   **Coordinate Transformation:**
-        *   Calculate UVW coordinates relative to the bounding box [S2, unofficial].
-        *   Apply rotation angles (`rotationX`, `rotationY`) to the UVW coordinates [S2, unofficial].
-    *   **Density Sampling:**
-        *   If `bVolume4D == 1`:
-            *   Sample `density1` from `volumeTexture` and `density2` from `volumeTexture4DNextFrame` using the `pingpong4D` flag [S2, unofficial].
-            *   Mix densities: `density = mix(density1, density2, interpolationFactor)` [S2, unofficial].
-        *   If `bVolume4D == 0`:
-            *   Sample `density` directly from `volumeTexture` [S2, unofficial].
-    *   **Threshold Check:**
-        *   If `density <= 0.01` (or `<= 0.f` in some implementations), decrement `curThreshold` [S2, S3, unofficial].
-        *   If `curThreshold` reaches 0, switch to coarse stepping (increase `dt` or `m_stepSize`) [S3, unofficial].
-        *   If `density > 0.01`, proceed to compositing [S2, unofficial].
-    *   **Color Mapping:**
-        *   Normalize density: `colorMappingCoord = clamp((density - scalarMinMax.x) / (scalarMinMax.y - scalarMinMax.x), 0.0, 1.0)` [S2, unofficial].
-        *   Sample `colorMapping` texture (1D LUT) at `colorMappingCoord` to get `s` (vec4: RGB color, A extinction) [S2, unofficial].
-    *   **Compositing:**
-        *   Calculate extinction: `extinction = s.a` [S2, unofficial].
-        *   Calculate alpha: `alpha = 1.0 - exp(-extinction * m_stepSize)` [S2, unofficial].
-            *   *Note:* Some implementations use a Taylor approximation for `exp(-density * cloudLightAbsorptionMult * dt)` [S3, unofficial].
-        *   Calculate contribution: `contribution = transmittance * s.rgb * alpha` [S2, unofficial].
-        *   Update accumulated color: `accumulatedColor += contribution` [S2, unofficial].
-        *   Update transmittance: `transmittance *= (1.0 - alpha)` [S2, unofficial].
-    *   **First Hit Storage:**
-        *   If `!firstHit` and `alpha > 0.0`:
-            *   Set `firstHit = true` [S2, unofficial].
-            *   Store `pos` and $t$ in `positionDepthBufferImage` [S2, unofficial].
-    *   **Early Termination:**
-        *   If `1.0 - transmittance > 0.95` (or transmittance drops below `EARLY_STOP_THRESHOLD`), break the loop [S2, S3, unofficial].
-    *   **Advance Position:**
-        *   `pos += stepDir` [S2, unofficial].
+2.  **Parameter Setup:**
+    - Initialize transmittance $T = 1.0$, accumulated color $C = (0,0,0)$, and distance traveled $t = 0$ [S3, unofficial].
+    - Calculate total distance $D_{total} = t_{exit} - t_{entry}$ [S3, unofficial].
+    - Determine fine step size: $S_{fine} = \min(\text{STEPSIZE\_FINE}, D_{total} / \text{MIN\_NUM\_FINE\_STEPS})$ [S3, unofficial].
+    - Determine coarse step size: $S_{coarse} = S_{fine} \times \text{COARSE\_STEPSIZE\_MULTIPLIER}$ [S3, unofficial].
+    - Initialize threshold for missed steps: $N_{missed} = \text{MAX\_NUM\_MISSED\_STEPS}$ [S3, unofficial].
+    - Set initial step size $\Delta t = S_{coarse}$ [S3, unofficial].
+    - Load noise offset from `noiseImage` for the current pixel [S2, unofficial].
 
-3.  **Post-Processing and Output:**
-    *   **Gamma Correction:** Apply gamma 2.2 to `accumulatedColor.rgb`: `pow(accumulatedColor.rgb, vec3(1.0 / 2.2))` [S2, unofficial].
-    *   **Final Color Calculation:**
-        *   `finalAlpha = 1.0 - transmittance` [S2, unofficial].
-        *   `finalColor = vec4(accumulatedColor, finalAlpha) * illuminationScale` [S2, unofficial].
-    *   **Temporal Accumulation (if `accumulation == 1`):**
-        *   If `!cam.moved`:
-            *   Load `lastFrameColor` from `outputImage` [S2, unofficial].
-            *   Blend: `finalColor.rgb = lastFrameColor.rgb * (1.0 - finalAlpha) + finalColor.rgb * finalAlpha` [S2, unofficial].
-            *   Blend Alpha: `finalColor.a = lastFrameColor.a * (1.0 - finalAlpha) + finalColor.a * finalAlpha` [S2, unofficial].
-        *   If `cam.moved`:
-            *   Reset `noiseImage.g` to 0 to prevent accumulation artifacts [S2, unofficial].
-            *   Reset `positionDepthBufferImage` to zero [S2, unofficial].
-    *   **Motion Vector Calculation (if `motionVectorCalc == 1`):**
-        *   Load `position` from `positionDepthBufferImage` [S2, unofficial].
-        *   If `position.xyz == 0`, store zero motion vector and return [S2, unofficial].
-        *   Get depth `t = position.w` [S2, unofficial].
-        *   Calculate previous ray origin and direction from `previousCam` buffer [S2, unofficial].
-        *   Reproject `position` to previous frame UV coordinates using the `reproject` function [S2, unofficial].
-        *   Calculate motion vector difference in UV space, map to `[0, 1]`, and store in `motionVectorImage` [S2, unofficial].
-    *   **Update Noise Image:**
-        *   If `accumulation == 1`, update `noiseImage` offset: `stepOffset += (1 / m_stepSize * 10) * 0.00001` [S2, unofficial].
-        *   If `accumulation == 0`, store `noiseOffset.r` and reset `g` to 0 [S2, unofficial].
-    *   **Store Output:** Write `finalColor` to `outputImage` [S2, unofficial].
+3.  **Ray Marching Loop:**
+    - Iterate $t$ from $t_{entry} + \text{rayOffset}$ to $t_{exit}$ with step $\Delta t$ [S2, unofficial].
+    - **Position Calculation:** Calculate world position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ [S2, unofficial].
+    - **Coordinate Transformation:** Calculate UVW coordinates relative to the bounding box. Apply rotation angles if necessary [S2, unofficial].
+    - **Density Sampling:**
+        - If 3D volume (`bVolume4D == 0`): Sample density $\rho$ from `volumeTexture` [S2, unofficial].
+        - If 4D volume (`bVolume4D == 1`): Sample $\rho_1$ from `volumeTexture` and $\rho_2$ from `volumeTexture4DNextFrame`. Interpolate: $\rho = (1 - \text{interpolationFactor})\rho_1 + \text{interpolationFactor}\rho_2$ [S2, unofficial].
+    - **Density Check:** If $\rho \le 0.01$, decrement $N_{missed}$ by 1 [S3, unofficial].
+    - **Step Size Adaptation:**
+        - If $N_{missed} > 0$ (inside cloud): Set $\Delta t = S_{fine}$ [S3, unofficial].
+        - If $N_{missed} \le 0$ (outside cloud): Set $\Delta t = S_{coarse}$ [S3, unofficial].
+        - *Note:* Some implementations use noise offset `.r` to modulate step size directly; if `.r` is non-zero, use it as $\Delta t$ [S2, unofficial].
+    - **Color Mapping:**
+        - Normalize density: $c = \text{clamp}((\rho - \text{scalarMinMax}.x) / (\text{scalarMinMax}.y - \text{scalarMinMax}.x), 0, 1)$ [S2, unofficial].
+        - Sample color mapping texture at $c$ to get color $\mathbf{s}$ and extinction $\epsilon$ [S2, unofficial].
+    - **Compositing:**
+        - Calculate alpha: $\alpha = 1.0 - \exp(-\epsilon \cdot \Delta t)$ [S2, unofficial].
+        - Calculate contribution: $\mathbf{c}_{contrib} = T \cdot \mathbf{s}.rgb \cdot \alpha$ [S2, unofficial].
+        - Update accumulated color: $C \leftarrow C + \mathbf{c}_{contrib}$ [S2, unofficial].
+        - Update transmittance: $T \leftarrow T \cdot (1.0 - \alpha)$ [S2, unofficial].
+    - **First Hit Storage:**
+        - If this is the first hit ($\alpha > 0$ and not previously recorded):
+            - Set `firstHit = true`.
+            - Store $\mathbf{p}$ and $t$ in `positionDepthBufferImage` [S2, unofficial].
+    - **Early Termination:**
+        - If $1.0 - T > 0.95$ (transmittance is very low), break the loop [S2, unofficial].
+    - **Advance Position:**
+        - $t \leftarrow t + \Delta t$ [S2, unofficial].
+
+4.  **Post-Processing:**
+    - **Gamma Correction:** Apply gamma 2.2 to $C$: $C \leftarrow C^{1/2.2}$ [S2, unofficial].
+    - **Final Color:** Calculate final alpha $A = 1.0 - T$. Final color $\mathbf{C}_{final} = C \cdot \text{illuminationScale}$ [S2, unofficial].
+    - **Temporal Accumulation:**
+        - If `accumulation == 1` and `cam.moved == false`:
+            - Load previous frame color $\mathbf{C}_{prev}$ from `outputImage`.
+            - Blend: $\mathbf{C}_{final}.rgb \leftarrow \mathbf{C}_{prev}.rgb \cdot (1.0 - A) + \mathbf{C}_{final}.rgb \cdot A$ [S2, unofficial].
+            - Blend alpha similarly [S2, unofficial].
+        - If `cam.moved == true` or `accumulation == 0`:
+            - Reset noise offset `.g` to 0 [S2, unofficial].
+    - **Motion Vector Calculation:**
+        - If `motionVectorCalc == 1`:
+            - Load position from `positionDepthBufferImage`.
+            - If position is zero, store zero motion vector [S2, unofficial].
+            - Reproject position to previous frame coordinates using previous camera state [S2, unofficial].
+            - Calculate motion vector in UV space and store in `motionVectorImage` [S2, unofficial].
+    - **Output:** Store $\mathbf{C}_{final}$ in `outputImage` [S2, unofficial].
+
+5.  **Noise Update:**
+    - Update noise offset in `noiseImage`:
+        - If `accumulation == 1`: Increment `.g` by $(1 / \Delta t \cdot 10) \cdot 0.00001$ [S2, unofficial].
+        - If `accumulation == 0`: Reset `.g` to 0 [S2, unofficial].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Constants
-STEPSIZE_FINE = 0.01 # Example value, typically from config
-MIN_NUM_FINE_STEPS = 10 # Example value
-COARSE_STEPSIZE_MULTIPLIER = 4.0 # Example value
-MAX_NUM_MISSED_STEPS = 5 # Example value
-EARLY_STOP_THRESHOLD = 0.05 # 1.0 - transmittance > 0.95
-
-def adaptive_step_size_ray_marching(pixel_coord, cam, volume_textures, config, buffers):
-    # 1. Ray Construction
-    ray_origin = cam.transform[3].xyz
-    ray_dir = normalize(calculate_ray_direction(pixel_coord, cam.proj, cam.view))
+def adaptive_step_size_ray_marching(pixel_coord, camera, volume_data, config, noise_image, depth_buffer, motion_vector_image, output_image):
+    # 1. Ray Initialization
+    ray_origin = camera.transform[3].xyz
+    ray_dir = normalize(calculate_ray_direction(pixel_coord, camera.proj, camera.view))
     
-    # 2. Ray-Box Intersection
-    t_entry, t_exit = ray_box_intersect(ray_origin, ray_dir, config.bbmin, config.bbmax)
-    
+    t_entry, t_exit = ray_box_intersection(ray_origin, ray_dir, volume_data.bbmin, volume_data.bbmax)
     if t_entry is None:
-        buffers.outputImage[pixel_coord] = vec4(0.0, 0.0, 0.0, 1.0)
-        buffers.positionDepthBufferImage[pixel_coord] = vec4(0.0, 0.0, 0.0, 0.0)
+        output_image[pixel_coord] = (0.0, 0.0, 0.0, 1.0)
+        depth_buffer[pixel_coord] = (0.0, 0.0, 0.0, 0.0)
         return
 
-    # 3. Initialization
+    # 2. Parameter Setup
     total_dst = t_exit - t_entry
-    cur_fine_step = min(STEPSIZE_FINE, total_dst / MIN_NUM_FINE_STEPS)
-    cur_coarse_step = cur_fine_step * COARSE_STEPSIZE_MULTIPLIER
-    cur_threshold = MAX_NUM_MISSED_STEPS
+    cur_fine_step = min(config.STEPSIZE_FINE, total_dst / config.MIN_NUM_FINE_STEPS)
+    cur_coarse_step = cur_fine_step * config.COARSE_STEPSIZE_MULTIPLIER
+    cur_threshold = config.MAX_NUM_MISSED_STEPS
     dt = cur_coarse_step
     
-    noise_data = buffers.noiseImage[pixel_coord]
-    m_step_size = noise_data.r if noise_data.r != 0.0 else config.stepSize
-    ray_offset = noise_data.g
+    noise_offset = noise_image[pixel_coord]
+    ray_offset = noise_offset.g
     
-    step_dir = ray_dir * m_step_size
-    pos = ray_origin + t_entry * ray_dir
-    transmittance = 1.0
+    # Initialize variables
+    t = t_entry + ray_offset
     accumulated_color = vec3(0.0)
+    transmittance = 1.0
     first_hit = False
     
-    # 4. Ray Marching Loop
-    t = t_entry + ray_offset
+    # 3. Ray Marching Loop
     while t < t_exit:
-        # Coordinate Transformation
-        uvw = calculate_uvw(pos, config.bbmin, config.bbmax)
-        uvw = apply_rotation(uvw, config.rotationAngles)
+        # Position calculation
+        pos = ray_origin + t * ray_dir
         
-        # Density Sampling
-        if config.bVolume4D:
-            density1 = sample_volume(volume_textures.volumeTexture, uvw)
-            density2 = sample_volume(volume_textures.volumeTexture4DNextFrame, uvw)
+        # Coordinate transformation
+        uvw = calculate_uvw(pos, volume_data.bbmin, volume_data.bbmax, config.rotationAngles)
+        
+        # Density sampling
+        if config.bVolume4D == 1:
+            density1 = sample_volume(volume_data.volumeTexture, uvw)
+            density2 = sample_volume(volume_data.volumeTexture4DNextFrame, uvw)
             density = mix(density1, density2, config.interpolationFactor)
         else:
-            density = sample_volume(volume_textures.volumeTexture, uvw)
+            density = sample_volume(volume_data.volumeTexture, uvw)
             
-        # Threshold Check for Step Adaptation
+        # Density check and step size adaptation
         if density <= 0.01:
             cur_threshold -= 1
-            if cur_threshold <= 0:
-                # Switch to coarse step
-                m_step_size = cur_coarse_step
-                step_dir = ray_dir * m_step_size
-                # Reset threshold for next fine region? Implementation varies.
-                # For this implementation, we assume coarse continues until density > 0.01
+            
+        if cur_threshold > 0:
+            dt = cur_fine_step
         else:
-            # Density found, switch back to fine step if needed
-            if m_step_size != cur_fine_step:
-                 m_step_size = cur_fine_step
-                 step_dir = ray_dir * m_step_size
-                 cur_threshold = MAX_NUM_MISSED_STEPS # Reset counter
+            dt = cur_coarse_step
             
-            # Color Mapping
-            norm_density = clamp((density - config.scalarMinMax.x) / (config.scalarMinMax.y - config.scalarMinMax.x), 0.0, 1.0)
-            s = sample_color_mapping(config.colorMapping, norm_density)
+        # Use noise-based step size if available
+        if noise_offset.r != 0:
+            dt = noise_offset.r
             
-            # Compositing
-            extinction = s.a
-            alpha = 1.0 - exp(-extinction * m_step_size)
-            contribution = transmittance * s.rgb * alpha
-            accumulated_color += contribution
-            transmittance *= (1.0 - alpha)
-            
-            # First Hit Storage
-            if not first_hit and alpha > 0.0:
-                first_hit = True
-                buffers.positionDepthBufferImage[pixel_coord] = vec4(pos, t)
-                
-            # Early Termination
-            if 1.0 - transmittance > 0.95:
-                break
+        # Color mapping
+        color_map_coord = clamp((density - config.scalarMinMax.x) / (config.scalarMinMax.y - config.scalarMinMax.x), 0.0, 1.0)
+        s = sample_color_mapping(config.colorMapping, color_map_coord)
+        extinction = s.a
+        alpha = 1.0 - exp(-extinction * dt)
         
-        # Advance
-        pos += step_dir
-        t += m_step_size # Note: t loop variable might not match pos exactly if step_dir changes, but logic holds
+        # Compositing
+        contribution = transmittance * s.rgb * alpha
+        accumulated_color += contribution
+        transmittance *= (1.0 - alpha)
         
-    # 5. Post-Processing
-    final_color_rgb = pow(accumulated_color, vec3(1.0 / 2.2))
+        # First hit storage
+        if not first_hit and alpha > 0.0:
+            first_hit = True
+            depth_buffer[pixel_coord] = (pos.x, pos.y, pos.z, t)
+            
+        # Early termination
+        if 1.0 - transmittance > 0.95:
+            break
+            
+        # Advance position
+        t += dt
+        
+    # 4. Post-Processing
+    accumulated_color = pow(accumulated_color, vec3(1.0 / 2.2))
     final_alpha = 1.0 - transmittance
-    final_color = vec4(final_color_rgb, final_alpha) * config.illuminationScale
+    final_color = accumulated_color * config.illuminationScale
     
-    # 6. Temporal Accumulation
-    if config.accumulation and not cam.moved:
-        last_frame_color = buffers.outputImage[pixel_coord]
-        final_color.rgb = last_frame_color.rgb * (1.0 - final_alpha) + final_color.rgb * final_alpha
-        final_color.a = last_frame_color.a * (1.0 - final_alpha) + final_color.a * final_alpha
-    elif config.accumulation and cam.moved:
-        buffers.noiseImage[pixel_coord].g = 0.0
-        buffers.positionDepthBufferImage[pixel_coord] = vec4(0.0, 0.0, 0.0, 0.0)
+    # Temporal accumulation
+    if config.accumulation == 1 and not camera.moved:
+        last_frame_color = output_image[pixel_coord]
+        final_color = last_frame_color.rgb * (1.0 - final_alpha) + final_color * final_alpha
+        final_alpha = last_frame_color.a * (1.0 - final_alpha) + final_alpha * final_alpha
         
-    # 7. Motion Vectors
-    if config.motionVectorCalc:
-        pos_hit = buffers.positionDepthBufferImage[pixel_coord]
-        if pos_hit.xyz == vec3(0.0):
-            buffers.motionVectorImage[pixel_coord] = vec4(0.0, 0.0, 0.0, 1.0)
+    # Motion vector calculation
+    if config.motionVectorCalc == 1:
+        pos_data = depth_buffer[pixel_coord]
+        if pos_data.xyz == vec3(0.0):
+            motion_vector_image[pixel_coord] = (0.0, 0.0, 0.0, 1.0)
         else:
-            depth = pos_hit.w
-            prev_pos = reproject_position(pos_hit.xyz, cam.previousCam, cam)
-            motion_uv = calculate_motion_uv(pos_hit.xyz, prev_pos, pixel_coord)
-            buffers.motionVectorImage[pixel_coord] = vec4(motion_uv, 0.0, 1.0)
+            # Reproject position to previous frame
+            prev_pos = reproject_position(pos_data, camera.previous_cam)
+            motion_vec = calculate_motion_vector_uv(prev_pos, pixel_coord)
+            motion_vector_image[pixel_coord] = (motion_vec.x, motion_vec.y, 0.0, 1.0)
             
-    # 8. Update Noise
-    if config.accumulation:
-        step_offset = buffers.noiseImage[pixel_coord].g
-        step_offset += (1.0 / m_step_size * 10.0) * 0.00001
-        buffers.noiseImage[pixel_coord].g = step_offset
+    # Output
+    output_image[pixel_coord] = (final_color.x, final_color.y, final_color.z, final_alpha)
+    
+    # Noise update
+    if config.accumulation == 1:
+        noise_image[pixel_coord].g += (1.0 / dt * 10.0) * 0.00001
     else:
-        buffers.noiseImage[pixel_coord].g = 0.0
-        
-    # 9. Store Output
-    buffers.outputImage[pixel_coord] = final_color
+        noise_image[pixel_coord].g = 0.0
 ```
 
 ### Parameters
-*   `stepSize`: Base step size for ray marching [S2, unofficial].
-*   `STEPSIZE_FINE`: Maximum size of a fine step [S3, unofficial].
-*   `COARSE_STEPSIZE_MULTIPLIER`: Multiplier to determine coarse step size from fine step size [S3, unofficial].
-*   `MAX_NUM_MISSED_STEPS`: Threshold for switching from fine to coarse steps after missing cloud density [S3, unofficial].
-*   `EARLY_STOP_THRESHOLD`: Transmittance value below which the ray march terminates early [S3, unofficial].
-*   `accumulation`: Boolean flag enabling temporal accumulation [S2, unofficial].
-*   `bVolume4D`: Boolean flag indicating if the volume is time-varying [S2, unofficial].
-*   `interpolationFactor`: Float value used to mix between two 4D volume frames [S2, unofficial].
-*   `scalarMinMax`: Vec2 containing min/max scalar values for density normalization [S2, unofficial].
-*   `illuminationScale`: Scalar multiplier applied to the final color [S2, unofficial].
+- **STEPSIZE_FINE:** Maximum size of a fine step [S3, unofficial].
+- **COARSE_STEPSIZE_MULTIPLIER:** Multiplier to determine coarse step size from fine step size [S3, unofficial].
+- **MAX_NUM_MISSED_STEPS:** Threshold for switching from fine to coarse steps after missing cloud density [S3, unofficial].
+- **EARLY_STOP_THRESHOLD:** Transmittance value below which the ray march terminates early (typically 0.95 opacity) [S2, unofficial].
+- **scalarMinMax:** Vec2 containing min and max scalar values for density normalization [S2, unofficial].
+- **illuminationScale:** Scalar multiplier applied to the final color [S2, unofficial].
+- **accumulation:** Boolean flag (1 or 0) enabling temporal accumulation [S2, unofficial].
+- **bVolume4D:** Boolean flag (1 or 0) indicating if the volume is time-varying [S2, unofficial].
+- **interpolationFactor:** Float value used to mix between two 4D volume frames [S2, unofficial].
+- **pingpong4D:** Boolean flag (0 or 1) used to swap between two 4D volume textures [S2, unofficial].
+- **cloudLightAbsorptionMult:** Coefficient used in transmittance update (if using Taylor approximation) [S3, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Camera Movement:** If the camera moves, the depth buffer and noise offset must be reset to zero to prevent incorrect reprojection or accumulation artifacts [S2, unofficial].
-*   **No Intersection:** If ray-box intersection fails, output black and zero depth to indicate no hit [S2, unofficial].
-*   **Zero Position:** If the first hit position is zero (no hit), motion vector calculation must return zero to avoid division by zero or invalid reprojection [S2, unofficial].
-*   **Precision:** Using a Taylor approximation for `exp()` can introduce errors; ensure the approximation is valid for the expected density/step size range [S3, unofficial].
-*   **Banding:** Color banding can be minimized by applying a random offset to the ray start point based on fragment coordinates [S3, unofficial].
+- **Camera Movement:** If `cam.moved` is true, the depth buffer and noise offset must be reset to prevent incorrect reprojection or accumulation artifacts [S2, unofficial].
+- **No Intersection:** If ray-box intersection fails, output black color and zero depth to indicate no hit [S2, unofficial].
+- **Zero Position:** If the first hit position is zero (no hit recorded), motion vector calculation should return zero to avoid division by zero [S2, unofficial].
+- **Precision:** Linear sampling uses a fixed `tstep`, which forces a trade-off between quality and efficiency. Adaptive sampling mitigates this but requires careful handling of step size boundaries [S1].
+- **Color Banding:** Minimized by applying a random offset to the ray start point based on fragment coordinates [S3, unofficial].
+- **Transmittance Approximation:** Some implementations use a Taylor approximation for $\exp(-\text{density} \cdot \text{cloudLightAbsorptionMult} \cdot dt)$ instead of the exponential function for performance [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of samples per ray. However, adaptive stepping reduces the effective $N$ in empty space, leading to significant speedups compared to fixed-step methods [S1].
-*   **Memory Complexity:** $O(1)$ per pixel for buffers (noise, depth, motion vectors) plus the volume texture storage [S2, unofficial].
-*   **Performance:** The method achieves high efficiency in computation while maintaining high-quality images (SSIM ~0.95) [S1]. It is designed for real-time GPU rendering [S2, unofficial].
-*   **Strengths:** Reduces computational cost by skipping empty space and adapting to density gradients. Supports 4D volumes and temporal accumulation for noise reduction [S2, unofficial].
-*   **Limitations:** Requires additional buffers (noise, depth, motion vectors) and logic for temporal reprojection. Step size adaptation can introduce artifacts if not smoothed or if thresholds are poorly chosen [S2, S3, unofficial].
-*   **When to Use:** Real-time direct volume rendering where performance is critical, especially for sparse or large volumes [S1][S2, unofficial].
-*   **When Not to Use:** Offline rendering where maximum quality is required regardless of cost, or when temporal coherence is not desired [S2, unofficial].
+- **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the average number of samples per ray. Adaptive step size reduces $M$ significantly in empty regions compared to fixed-step methods [S1][S3, unofficial].
+- **Memory Complexity:** $O(N)$ for auxiliary buffers (`noiseImage`, `depthBuffer`, `motionVectorImage`) [S2, unofficial].
+- **Performance:** Generates results with SSIM of 0.95 compared to source images, indicating high quality [S1]. Real-time performance is achieved on GPU via parallelizable ray-casting [S1].
+- **Strengths:** Reduces computational cost by varying step size; supports 4D volumes; temporal accumulation reduces noise [S2, unofficial].
+- **Limitations:** Requires additional memory for auxiliary buffers; temporal accumulation can cause ghosting if camera movement is not handled correctly [S2, unofficial].
 
 ## Background
-Adaptive sampling for volume rendering was proposed to tackle the excessive computational cost of GPU-based 3-D volume rendering [S1]. The method reduces the number of sampling points through a non-linear sampling function, making a trade-off between performance and rendering quality [S1]. It is inspired by photography, where far objects are vague and close objects are clear, simulating this with a monotonically decreasing function for step size based on distance [S1]. The specific implementation described in the notes is part of the DDVR (Direct Volume Renderer) project, which supports 3D and 4D volumes, adaptive step sizes via noise, and temporal accumulation [S2, unofficial].
+Adaptive Step Size Ray Marching was proposed to tackle the excessive computational cost of GPU-based 3-D volume rendering [S1]. It was implemented in the DDVR renderer, which supports real-time direct volume rendering with temporal accumulation and denoising [S2, unofficial]. The method is also used in volumetric cloud rendering, where it optimizes performance by using fine steps inside cloud density and coarse steps outside [S3, unofficial].
 
 ## Sources
 [S1] Adaptive Sampling for GPU-based 3-D Volume Rendering, https://doi.org/10.1145/3285996.3286002, fetched 2026-11-02

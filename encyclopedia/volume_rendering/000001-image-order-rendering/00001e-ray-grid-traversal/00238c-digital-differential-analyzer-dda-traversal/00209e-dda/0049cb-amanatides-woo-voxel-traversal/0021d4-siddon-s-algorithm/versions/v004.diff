@@ -1,0 +1,193 @@
+--- v003.md
++++ v004.md
+@@ -18,13 +18,13 @@
+ 
+ **Data Structures:**
+-The volume is represented as a 3D grid. The ray is parameterized by $\alpha \in [0, 1]$. The intersections are stored as a sorted set of parametric values $\{\alpha_1, \dots, \alpha_M\}$ [S3, unofficial][S4].
++The volume is represented as a 3D grid. The ray is parameterized by $\alpha \in [0, 1]$ [S3, unofficial]. The intersections are stored as a sorted set of parametric values $\{\alpha_1, \dots, \alpha_M\}$ [S3, unofficial][S4].
+ 
+ **Steps:**
+ 1.  **Define the Ray:** Define the ray $\vec{r}(\alpha) = \mathbf{s} + \alpha(\mathbf{p} - \mathbf{s})$ for $\alpha \in [0, 1]$, where $\mathbf{s}$ is the X-ray source position and $\mathbf{p}$ is the detector pixel position [S3, unofficial][S4].
+-2.  **Compute Plane Intersections:** Calculate the intersection parameters of the ray with the parallel planes comprising the voxel grid. For a voxel size $\Delta X$ in the x-direction and the location of the 0-th plane $b_x$, the intersection with the $i$-th plane is:
++2.  **Compute Plane Intersections:** Calculate the intersection parameters of the ray with the parallel planes comprising the voxel grid [S4]. For a voxel size $\Delta X$ in the x-direction and the location of the 0-th plane $b_x$, the intersection with the $i$-th plane is:
+     $$ \alpha_x(i) = \frac{b_x + i \Delta X - \mathbf{s}_x}{\mathbf{p}_x - \mathbf{s}_x} $$
+     Analogous expressions are used for $\alpha_y(\cdot)$ and $\alpha_z(\cdot)$ [S4].
+ 3.  **Sort Intersections:** Combine the intersection parameters from all three axes and sort them to form the set $\mathbf{\alpha} = \text{sort}(\mathbf{\alpha}_x, \mathbf{\alpha}_y, \mathbf{\alpha}_z)$, which contains $M$ values parameterizing the intersections [S4].
+-4.  **Iterate and Sum:** Iterate $m$ from 1 to $M-1$. For each segment between $\alpha_m$ and $\alpha_{m+1}$:
++4.  **Iterate and Sum:** Iterate $m$ from 1 to $M-1$ [S3, unofficial]. For each segment between $\alpha_m$ and $\alpha_{m+1}$:
+     a. Calculate the midpoint parameter: $\alpha_{mid} = \frac{\alpha_{m+1} + \alpha_m}{2}$ [S3, unofficial].
+     b. Evaluate the voxel LAC at the midpoint: $\hat{\mu}[\mathbf{s} + \alpha_{mid} (\mathbf{p} - \mathbf{s})]$ [S3, unofficial]. Note: This indexing operation returns the LAC of the intersected voxel [S3, unofficial].
+@@ -38,5 +38,5 @@
+ **Pseudocode:**
+ ```python
+-def siddons_algorithm(source, target, volume, voxel_size, origin_offset):
++def siddons_algorithm(source, target, volume, voxel_size, origin_offset, voxel_shift=0.5):
+     """
+     source: tuple (sx, sy, sz)
+@@ -45,4 +45,5 @@
+     voxel_size: float, size of one voxel in mm
+     origin_offset: tuple (bx, by, bz), location of the 0-th plane in mm
++    voxel_shift: float, 0.0 for corner-aligned, 0.5 for center-aligned voxels
+     """
+     sx, sy, sz = source
+@@ -50,76 +51,51 @@
+     bx, by, bz = origin_offset
+     dx, dy, dz = voxel_size
+-
+-    # 1. Define Ray Direction and Length
++    
+     dir_x = px - sx
+     dir_y = py - sy
+     dir_z = pz - sz
+     ray_length = (dir_x**2 + dir_y**2 + dir_z**2)**0.5
+-
+-    # 2. Compute Intersection Parameters for each axis
+-    # Avoid division by zero if ray is parallel to an axis
++    
++    alphas = set()
+     eps = 1e-08
+     
+-    alphas_x = []
+-    if abs(dir_x) > eps:
+-        # Determine min and max i for the volume bounds
+-        # Assuming volume spans from origin_offset to origin_offset + N*voxel_size
+-        # For simplicity, we compute intersections with all planes within the ray's bounding box
+-        # In practice, one would compute the range of i such that alpha is in [0, 1]
+-        # Here we generate a sufficient range and filter later
+-        min_i = int(((bx - sx) / dir_x) - 1) if dir_x > 0 else int(((bx - sx) / dir_x) + 1)
+-        max_i = int(((bx + len(volume)*dx - sx) / dir_x) + 1) if dir_x > 0 else int(((bx + len(volume)*dx - sx) / dir_x) - 1)
++    # X planes
++    Nx = len(volume)
++    for i in range(Nx):
++        plane_x = bx + i * dx
++        if abs(dir_x) > eps:
++            alpha = (plane_x - sx) / dir_x
++            if 0.0 <= alpha <= 1.0:
++                alphas.add(alpha)
++                
++    # Y planes
++    Ny = len(volume[0])
++    for j in range(Ny):
++        plane_y = by + j * dy
++        if abs(dir_y) > eps:
++            alpha = (plane_y - sy) / dir_y
++            if 0.0 <= alpha <= 1.0:
++                alphas.add(alpha)
++                
++    # Z planes
++    Nz = len(volume[0][0])
++    for k in range(Nz):
++        plane_z = bz + k * dz
++        if abs(dir_z) > eps:
++            alpha = (plane_z - sz) / dir_z
++            if 0.0 <= alpha <= 1.0:
++                alphas.add(alpha)
++                
++    # Add endpoints if not present
++    alphas.add(0.0)
++    alphas.add(1.0)
++    sorted_alphas = sorted(list(alphas))
++    
++    total_integral = 0.0
++    for m in range(len(sorted_alphas) - 1):
++        alpha_m = sorted_alphas[m]
++        alpha_m1 = sorted_alphas[m+1]
++        alpha_mid = (alpha_m + alpha_m1) / 2.0
+         
+-        for i in range(min_i, max_i + 1):
+-            alpha = (bx + i * dx - sx) / dir_x
+-            if 0.0 <= alpha <= 1.0:
+-                alphas_x.append(alpha)
+-    else:
+-        # Ray is parallel to x-planes; no intersections or infinite. 
+-        # If inside the slab, it intersects all planes? 
+-        # Standard Siddon implementation usually handles this by skipping or treating as no intersection 
+-        # if the ray doesn't cross the plane boundaries.
+-        pass
+-
+-    alphas_y = []
+-    if abs(dir_y) > eps:
+-        min_j = int(((by - sy) / dir_y) - 1) if dir_y > 0 else int(((by - sy) / dir_y) + 1)
+-        max_j = int(((by + len(volume[0])*dy - sy) / dir_y) + 1) if dir_y > 0 else int(((by + len(volume[0])*dy - sy) / dir_y) - 1)
+-        for j in range(min_j, max_j + 1):
+-            alpha = (by + j * dy - sy) / dir_y
+-            if 0.0 <= alpha <= 1.0:
+-                alphas_y.append(alpha)
+-
+-    alphas_z = []
+-    if abs(dir_z) > eps:
+-        min_k = int(((bz - sz) / dir_z) - 1) if dir_z > 0 else int(((bz - sz) / dir_z) + 1)
+-        max_k = int(((bz + len(volume[0][0])*dz - sz) / dir_z) + 1) if dir_z > 0 else int(((bz + len(volume[0][0])*dz - sz) / dir_z) - 1)
+-        for k in range(min_k, max_k + 1):
+-            alpha = (bz + k * dz - sz) / dir_z
+-            if 0.0 <= alpha <= 1.0:
+-                alphas_z.append(alpha)
+-
+-    # 3. Sort all intersections
+-    all_alphas = sorted(alphas_x + alphas_y + alphas_z)
+-    
+-    # Ensure start and end are included if not already
+-    if not all_alphas or all_alphas[0] > 0.0:
+-        all_alphas.insert(0, 0.0)
+-    if not all_alphas or all_alphas[-1] < 1.0:
+-        all_alphas.append(1.0)
+-        
+-    # Remove duplicates and sort again
+-    all_alphas = sorted(list(set(all_alphas)))
+-
+-    # 4. Iterate and Sum
+-    total_integral = 0.0
+-    for m in range(len(all_alphas) - 1):
+-        alpha_m = all_alphas[m]
+-        alpha_m1 = all_alphas[m+1]
+-        
+-        # Midpoint parameter
+-        alpha_mid = (alpha_m1 + alpha_m) / 2.0
+-        
+-        # Midpoint position in world coordinates
+         mid_x = sx + alpha_mid * dir_x
+         mid_y = sy + alpha_mid * dir_y
+@@ -127,22 +103,13 @@
+         
+         # Map to voxel indices
+-        # Assuming voxel_shift=0.5 means center of voxel
+-        # Index = (coord - origin) / voxel_size - 0.5
+-        ix = int((mid_x - bx) / dx - 0.5)
+-        iy = int((mid_y - by) / dy - 0.5)
+-        iz = int((mid_z - bz) / dz - 0.5)
++        ix = int((mid_x - bx) / dx - voxel_shift)
++        iy = int((mid_y - by) / dy - voxel_shift)
++        iz = int((mid_z - bz) / dz - voxel_shift)
+         
+-        # Check bounds
+-        if 0 <= ix < len(volume) and 0 <= iy < len(volume[0]) and 0 <= iz < len(volume[0][0]):
++        if 0 <= ix < Nx and 0 <= iy < Ny and 0 <= iz < Nz:
+             mu = volume[ix][iy][iz]
+-            segment_length_param = alpha_m1 - alpha_m
+-            total_integral += mu * segment_length_param
+-        else:
+-            # [G] If the midpoint falls outside the volume bounds, the contribution is 0.
+-            pass
+-
+-    # 5. Final Intensity
+-    intensity = ray_length * total_integral
+-    return intensity
++            total_integral += mu * (alpha_m1 - alpha_m)
++            
++    return ray_length * total_integral
+ ```
+ 
+@@ -161,5 +128,5 @@
+ - **Precision:** Division by zero must be handled if the ray is parallel to a grid plane [S4].
+ - **Boundaries:** Intersections outside the volume should be filtered if `filter_intersections_outside_volume` is True [S4].
+-- **Degenerate Input:** If the ray does not intersect the volume, the sum is zero.
++- **Degenerate Input:** If the ray does not intersect the volume, the sum is zero [G].
+ - **Accuracy:** Nearest-neighbour interpolation is too simplified for most applications; the input voxel volume must be at least double the resolution in each dimension compared to the desired reconstruction resolution to maintain accuracy [S2, unofficial].
+ - **Overfitting:** In sparse-view settings, Siddon's method suffers from overfitting because it does not allow ground truth pixels to provide self-supervision to voxels not directly intersected by the ray [S3, unofficial].
+@@ -167,5 +134,5 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-Computation scales cubically with the resolution of the voxelgrid $\hat{\mu}$ because it requires computing every plane intersection [S3, unofficial]. The number of intersections $M$ is proportional to the number of voxels intersected, which can be up to $N_x + N_y + N_z$ for a grid of size $N_x \times N_y \times N_z$.
++Computation scales cubically with the resolution of the voxelgrid $\hat{\mu}$ because it requires computing every plane intersection [S3, unofficial]. The number of intersections $M$ is proportional to the number of voxels intersected, which can be up to $N_x + N_y + N_z$ for a grid of size $N_x \times N_y \times N_z$ [G].
+ 
+ **Measured Performance:**

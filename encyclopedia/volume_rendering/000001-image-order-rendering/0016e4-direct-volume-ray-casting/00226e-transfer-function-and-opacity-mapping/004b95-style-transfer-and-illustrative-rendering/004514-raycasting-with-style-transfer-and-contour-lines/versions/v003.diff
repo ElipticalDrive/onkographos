@@ -1,0 +1,411 @@
+--- v002.md
++++ v003.md
+@@ -4,191 +4,251 @@
+ 
+ ## Overview
+-This method extends direct volume ray casting by replacing standard photorealistic shading with artistic style transfer and illustrative contour lines [S1, unofficial]. It solves the problem of visual ambiguity in scientific visualization by mapping surface normals and material indices to a 2D array texture of artistic styles, while using curvature and view-angle thresholds to render contour lines that emphasize geometric features [S1, unofficial]. It differs from standard ray casting by decoupling the optical appearance from the physical light transport, instead relying on pre-computed style maps [S1, unofficial].
++This method performs direct volume ray casting to render 3D scalar fields with artistic style transfer and illustrative contour lines. It solves the problem of making volumetric data visually expressive by mapping surface normals and material indices to 2D style textures (such as lit spheres or matcaps) and overlaying curvature-based contour lines. It differs from standard ray casting by replacing the final color accumulation with a style lookup, and differs from pure illustrative rendering by integrating the style transfer directly into the ray marching loop rather than as a post-process.
+ 
+ ## How it works
+-The method operates in a fragment shader, processing each pixel by casting a ray through the volume and applying style-based compositing.
+-
+-### Inputs and Outputs
+-**Inputs:**
+-*   `EntryPoint`: `vec3`, the entry point of the ray into the volume for the current fragment.
+-*   `ExitPoints`: `sampler2D`, a texture storing exit points. Sampled using `gl_FragCoord.st / ScreenSize`.
+-*   `VolumeTex`: `sampler3D`, the 3D volume data (scalar density).
+-*   `transferFunctionTexture`: `sampler1D`, maps density to opacity (green channel) and material index (red channel).
+-*   `indexFunctionTexture`: `sampler1D`, maps material index to a style index.
+-*   `styleTransferTexture`: `sampler2DArray`, contains $N$ 2D style images, where $N$ is `AVAILABLE_STYLE_COUNT`.
+-*   `NormalMatrix`: `mat4`, transforms gradients to world/view space for shading.
+-*   `ScreenSize`: `vec2`, resolution of the output image.
+-*   `StepSize`: `float`, distance between samples. Default: 0.01 [S1, unofficial].
+-*   `Threshold`: `float`, minimum density to process. Default: 0.15 [S1, unofficial].
+-*   `AVAILABLE_STYLE_COUNT`: `int`, number of styles in the array texture. Value: 34 [S1, unofficial].
+-
+-**Outputs:**
+-*   `FragColor`: `vec4`, the final composited color with alpha.
+-
+-### Data Structures
+-*   **Volume Data**: 3D texture of scalar values.
+-*   **Transfer Function**: 1D texture. Channel `r` = material index, Channel `g` = opacity.
+-*   **Index Function**: 1D texture. Channel `r` = normalized style index (0.0 to 1.0).
+-*   **Style Texture**: 2D Array texture. Dimensions $W \times H \times N$. Each slice $k$ corresponds to a style.
+-
+-### Algorithm Steps
+-
+-1.  **Ray Initialization**:
+-    *   Retrieve the exit point from the `ExitPoints` texture using normalized fragment coordinates: $\mathbf{p}_{exit} = \text{texture}(\text{ExitPoints}, \frac{\mathbf{c}_{frag}}{\mathbf{s}_{size}})$.
+-    *   If $\mathbf{p}_{entry} == \mathbf{p}_{exit}$, discard the fragment (background) [S1, unofficial].
+-    *   Compute ray direction $\mathbf{d} = \mathbf{p}_{exit} - \mathbf{p}_{entry}$ and length $L = \|\mathbf{d}\|$ [S1, unofficial].
+-    *   Compute step vector $\mathbf{s} = \text{StepSize} \cdot \frac{\mathbf{d}}{L}$ [S1, unofficial].
+-    *   Initialize ray position $\mathbf{p} = \mathbf{p}_{entry}$. If jittering is enabled, add noise: $\mathbf{p} \leftarrow \mathbf{p} + \mathbf{s} \cdot \text{snoise}(\frac{\mathbf{c}_{frag}}{2.5})$ [S1, unofficial].
+-    *   Initialize accumulators: destination color/alpha $\mathbf{C}_{dst} = (0,0,0,0)$, current normal $\mathbf{n} = (1,0,0)$, previous normal $\mathbf{n}_{prev} = \mathbf{n}$, base style color $\mathbf{C}_{base} = (0,0,0,0)$ [S1, unofficial].
+-
+-2.  **Ray Marching Loop**:
+-    While $\mathbf{C}_{dst}.a < 1.0$ and $L > 0$:
+-    *   Sample density $D = \text{texture}(\text{VolumeTex}, \mathbf{p}).x$ [S1, unofficial].
+-    *   If `USE_THRESHOLD` is defined and $D \le \text{Threshold}$, skip to next step (continue) [S1, unofficial].
+-    *   Sample transfer function: $\alpha = \text{texture}(\text{transferFunctionTexture}, D).g$, $idx = \text{texture}(\text{transferFunctionTexture}, D).r$ [S1, unofficial].
+-    *   Determine style index: $k = \lfloor \text{texture}(\text{indexFunctionTexture}, idx).r \cdot \text{AVAILABLE\_STYLE\_COUNT} \rfloor$ [S1, unofficial].
+-    *   Compute gradient $\mathbf{g}$ at $\mathbf{p}$ using central differences with step $h = \text{StepSize}$:
+-        $$
+-        \mathbf{g} = \begin{bmatrix} \text{texture}(\text{VolumeTex}, \mathbf{p} + (h,0,0)).x - D \\ \text{texture}(\text{VolumeTex}, \mathbf{p} + (0,h,0)).x - D \\ \text{texture}(\text{VolumeTex}, \mathbf{p} + (0,0,h)).x - D \end{bmatrix}
+-        $$
+-        [S1, unofficial].
+-    *   Transform gradient to normal space: $\mathbf{n}_{new} = \text{normalize}(\text{NormalMatrix} \cdot \begin{bmatrix} \mathbf{g} \\ 0 \end{bmatrix})$ [S1, unofficial].
+-    *   **Style Mapping**:
+-        *   Map normal to 2D coordinates for the base style: $\mathbf{u}_{lit} = \begin{bmatrix} n_x \\ -n_y \end{bmatrix} \cdot 0.5 + 0.5$ [S1, unofficial].
+-        *   Sample base style color: $\mathbf{C}_{base} = \text{texture}(\text{styleTransferTexture}, \begin{bmatrix} \mathbf{u}_{lit} \\ k \end{bmatrix})$ [S1, unofficial].
+-    *   **Contour Lines** (if `USE_CONTOUR` is defined):
+-        *   Compute curvature approximation: $\kappa = \arccos\left(\frac{\mathbf{n}_{new} \cdot \mathbf{n}}{\|\mathbf{n}_{new}\| \|\mathbf{n}\|}\right) \cdot \text{StepSize}$ [S1, unofficial].
+-        *   Compute contour condition threshold: $T_{kv} = \text{thickness} \cdot \kappa$ (where `thickness` is 1.0), $C_{cond} = \sqrt{T_{kv}(2 - T_{kv})}$ [S1, unofficial].
+-        *   Compute view dot product: $n_{dotV} = |\mathbf{n}_{new} \cdot \frac{-\mathbf{p}}{\|\mathbf{p}\|}|$ [S1, unofficial].
+-        *   If $n_{dotV} \le C_{cond}$:
+-            *   Calculate lighting delta: $\Delta_{lit} = 1 - \min(1, \frac{C_{cond} - n_{dotV}}{C_{cond}})$ [S1, unofficial].
+-            *   Adjust length: $L_{adj} = \min(1, \frac{\|\mathbf{n}_{new}\|}{\Delta_{lit}})$ [S1, unofficial].
+-            *   Sample matcap style: $\mathbf{C}_{base} = \text{texture}(\text{styleTransferTexture}, \begin{bmatrix} \text{matcap}(\mathbf{p}, \mathbf{n}_{new}) \\ k \end{bmatrix})$ [S1, unofficial].
+-    *   **Compositing**:
+-        *   Set source: $\mathbf{C}_{src} = \begin{bmatrix} \mathbf{C}_{base}.rgb \cdot \alpha \\ \alpha \end{bmatrix}$ [S1, unofficial].
+-        *   Front-to-back compositing: $\mathbf{C}_{dst} \leftarrow (1 - \mathbf{C}_{dst}.a) \mathbf{C}_{src} + \mathbf{C}_{dst}$ [S1, unofficial].
+-    *   Advance: $\mathbf{p} \leftarrow \mathbf{p} + \mathbf{s}$, $L \leftarrow L - \text{StepSize}$, $\mathbf{n} \leftarrow \mathbf{n}_{new}$ [S1, unofficial].
+-
+-3.  **Output**:
+-    *   Write $\mathbf{C}_{dst}$ to `FragColor` [S1, unofficial].
+-
+-### Pseudocode
++**Inputs and Outputs:**
++*   **Inputs:** A 3D volume texture (`VolumeTex`), an `ExitPoints` texture storing back-face coordinates, a 1D transfer function texture, a 1D index function texture, and a 2D array style transfer texture.
++*   **Outputs:** A final color fragment (`FragColor`).
++
++**Data Structures and Layout:**
++*   `VolumeTex`: `sampler3D`. Stores density in the red channel (`x`).
++*   `ExitPoints`: `sampler2D`. Stores the 3D exit point of the ray in the fragment's screen-space coordinate.
++*   `transferFunctionTexture`: `sampler1D`. Maps density to opacity (green channel) and material index (red channel).
++*   `indexFunctionTexture`: `sampler1D`. Maps the material index to a discrete style index.
++*   `styleTransferTexture`: `sampler2DArray`. Contains $N$ 2D style images, where $N$ is `AVAILABLE_STYLE_COUNT`.
++*   **Uniforms:**
++    *   `NormalMatrix`: `mat4`. Transforms normals to view space.
++    *   `StepSize`: `float`. Distance between samples. Default: `0.01f`.
++    *   `Threshold`: `float`. Minimum density to process. Default: `0.15f`.
++    *   `ScreenSize`: `vec2`. Resolution of the output buffer.
++    *   `AVAILABLE_STYLE_COUNT`: `int`. Number of styles in the array texture. Value: `34`.
++*   **Attributes/Inputs:**
++    *   `EntryPoint`: `vec3`. The front-face entry point of the ray.
++    *   `gl_FragCoord`: Built-in fragment coordinate.
++
++**Algorithm Steps:**
++
++1.  **Ray Initialization:**
++    Retrieve the exit point from the `ExitPoints` texture using normalized fragment coordinates:
++    $$ \text{exitPoint} = \text{texture}(\text{ExitPoints}, \frac{\text{gl\_FragCoord.st}}{\text{ScreenSize}}).\text{xyz} $$
++    If the entry point equals the exit point, discard the fragment (background).
++    Calculate the ray direction and length:
++    $$ \text{rayDirection} = \text{exitPoint} - \text{EntryPoint} $$
++    $$ \text{rayLength} = \|\text{rayDirection}\| $$
++    Calculate the step vector:
++    $$ \text{stepVector} = \text{StepSize} \times \frac{\text{rayDirection}}{\text{rayLength}} $$
++    Initialize the ray start position. If `USE_NOISE_JITTER` is defined, add jitter:
++    $$ \text{rayStart} += \text{stepVector} \times \text{snoise}\left(\frac{\text{gl\_FragCoord.xy}}{2.5}\right) $$
++    Initialize accumulators:
++    $$ \text{pos} = \text{rayStart} $$
++    $$ \text{dst} = (0, 0, 0, 0) $$
++    $$ \text{normal} = (1, 0, 0) $$
++    $$ \text{baseColor} = (0, 0, 0, 0) $$
++    $$ \text{src} = (0, 0, 0, 0) $$
++
++2.  **Ray Marching Loop:**
++    While accumulated opacity $\text{dst}.a < 1.0$ and $\text{rayLength} > 0$:
++    
++    a. **Sample Volume:**
++    $$ \text{density} = \text{texture}(\text{VolumeTex}, \text{pos}).x $$
++    If `USE_THRESHOLD` is defined and $\text{density} \le \text{Threshold}$, skip to step 2g.
++
++    b. **Transfer Function Lookup:**
++    $$ \text{opacity} = \text{texture}(\text{transferFunctionTexture}, \text{density}).g $$
++    $$ \text{index} = \text{texture}(\text{transferFunctionTexture}, \text{density}).r $$
++    
++    c. **Style Index Determination:**
++    $$ \text{styleIndex} = \lfloor \text{texture}(\text{indexFunctionTexture}, \text{index}).x \times \text{AVAILABLE\_STYLE\_COUNT} \rfloor $$
++
++    d. **Normal Estimation:**
++    Compute the gradient at `pos` with lookup value `density`:
++    $$ \nabla = \begin{bmatrix} \text{texture}(\text{VolumeTex}, \text{pos} + (L, 0, 0)).x - \text{density} \\ \text{texture}(\text{VolumeTex}, \text{pos} + (0, L, 0)).x - \text{density} \\ \text{texture}(\text{VolumeTex}, \text{pos} + (0, 0, L)).x - \text{density} \end{bmatrix} $$
++    where $L = \text{StepSize}$.
++    Transform the gradient to view space:
++    $$ \text{previousNormal} = \text{normal} $$
++    $$ \text{normal} = \text{mat4}(\text{NormalMatrix}) \times \begin{bmatrix} \nabla \\ 0 \end{bmatrix}.\text{xyz} $$
++
++    e. **Style Transfer:**
++    Map the normal to 2D coordinates for the "litsphere" style:
++    $$ \text{litCoords} = \begin{bmatrix} \text{normal}.x \\ -\text{normal}.y \end{bmatrix} \times 0.5 + 0.5 $$
++    Sample the style texture:
++    $$ \text{baseColor} = \text{texture}(\text{styleTransferTexture}, \begin{bmatrix} \text{litCoords} \\ \text{styleIndex} \end{bmatrix}) $$
++
++    f. **Contour Lines (Optional):**
++    If `USE_CONTOUR` is defined:
++    Calculate curvature approximation:
++    $$ \text{magnitudes} = \|\text{normal}\| \times \|\text{previousNormal}\| $$
++    $$ \text{curvature} = \arccos\left(\frac{\text{normal} \cdot \text{previousNormal}}{\text{magnitudes}}\right) \times \text{StepSize} $$
++    Calculate contour condition:
++    $$ \text{thickness} = 1.0 $$
++    $$ T_{kv} = \text{thickness} \times \text{curvature} $$
++    $$ \text{cond} = \sqrt{T_{kv} \times (2.0 - T_{kv})} $$
++    Calculate view dot product:
++    $$ nDotV = |\text{normal} \cdot \text{normalize}(-\text{pos})| $$
++    If $nDotV \le \text{cond}$, apply matcap style:
++    $$ \text{litDelta} = 1.0 - \min(1.0, \frac{\text{cond} - nDotV}{\text{cond}}) $$
++    $$ \text{adjustedLength} = \min(1.0, \frac{\|\text{normal}\|}{\text{litDelta}}) $$
++    $$ \text{baseColor} = \text{texture}(\text{styleTransferTexture}, \begin{bmatrix} \text{matcap}(\text{pos}.xyz, \text{normal}).xy \\ \text{styleIndex} \end{bmatrix}) $$
++    *(Note: The `matcap` function is not defined in the source code snippets provided; it is assumed to map position and normal to matcap coordinates.)*
++
++    g. **Compositing:**
++    $$ \text{src} = \begin{bmatrix} \text{baseColor}.rgb \\ \text{opacity} \end{bmatrix} $$
++    Pre-multiply alpha:
++    $$ \text{src}.rgb \times= \text{src}.a $$
++    Composite into destination:
++    $$ \text{dst} = (1.0 - \text{dst}.a) \times \text{src} + \text{dst} $$
++    Advance ray:
++    $$ \text{pos} += \text{stepVector} $$
++    $$ \text{rayLength} -= \text{StepSize} $$
++
++3.  **Output:**
++    $$ \text{FragColor} = \text{dst} $$
++
++**Pseudocode:**
+ 
+ ```python
+-def raycast_style_transfer(EntryPoint, ExitPointsTex, VolumeTex, TransferFuncTex, IndexFuncTex, StyleTex, NormalMatrix, ScreenSize, StepSize, Threshold, UseThreshold, UseContour, Thickness):
++def raycast_with_style_transfer_and_contour_lines(
++    volume_tex, exit_points_tex, transfer_func_tex, 
++    index_func_tex, style_tex, normal_matrix,
++    entry_point, screen_size, step_size=0.01, 
++    threshold=0.15, available_style_count=34,
++    use_noise_jitter=False, use_threshold=True, use_contour=False
++):
++    """
++    Renders a single fragment using style transfer and optional contour lines.
++    
++    Args:
++        volume_tex: 3D texture sampler for density.
++        exit_points_tex: 2D texture sampler for exit points.
++        transfer_func_tex: 1D texture sampler for opacity (g) and index (r).
++        index_func_tex: 1D texture sampler for style index mapping.
++        style_tex: 2D array texture for style images.
++        normal_matrix: 4x4 matrix for normal transformation.
++        entry_point: vec3, front face entry point.
++        screen_size: vec2, output resolution.
++        step_size: float, distance between samples.
++        threshold: float, minimum density to process.
++        available_style_count: int, number of styles in style_tex.
++        use_noise_jitter: bool, enable jittered sampling.
++        use_threshold: bool, skip low density.
++        use_contour: bool, enable contour lines.
++        
++    Returns:
++        vec4: Final color.
++    """
+     # 1. Ray Initialization
+-    # Sample exit point from texture using normalized fragment coordinates
+-    # Note: gl_FragCoord.st / ScreenSize is assumed to be available in the shader context
+-    exit_point = ExitPointsTex.sample(gl_FragCoord.st / ScreenSize)
+-    
+-    if EntryPoint == exit_point:
+-        return vec4(0, 0, 0, 0) # Discard background
+-
+-    ray_direction = exit_point - EntryPoint
++    # Retrieve exit point from texture using normalized fragment coordinates
++    # Note: gl_FragCoord.st is assumed to be the x,y of the fragment
++    exit_point = exit_points_tex.sample(screen_size.x, screen_size.y) # Pseudo-code for texture lookup
++    
++    # Discard if background
++    if entry_point == exit_point:
++        return vec4(0, 0, 0, 0)
++    
++    ray_direction = exit_point - entry_point
+     ray_length = length(ray_direction)
+-    step_vector = StepSize * normalize(ray_direction)
+-    
+-    # Initialize position
+-    pos = EntryPoint
+-    # Optional noise jitter [G]
+-    # if USE_NOISE_JITTER:
+-    #     pos += step_vector * snoise(gl_FragCoord.xy / 2.5)
+-
+-    # Accumulators
+-    dst_color = vec4(0.0)
+-    dst_alpha = 0.0
+-    normal = vec3(1.0, 0.0, 0.0)
+-    
+-    while dst_alpha < 1.0 and ray_length > 0.0:
++    step_vector = step_size * normalize(ray_direction)
++    
++    ray_start = entry_point
++    if use_noise_jitter:
++        # snoise is a 2D simplex noise function
++        ray_start += step_vector * snoise(screen_size.x / 2.5, screen_size.y / 2.5)
++        
++    pos = ray_start
++    dst = vec4(0, 0, 0, 0)
++    normal = vec3(1, 0, 0)
++    base_color = vec4(0, 0, 0, 0)
++    src = vec4(0, 0, 0, 0)
++    
++    # 2. Ray Marching Loop
++    while dst.a < 1.0 and ray_length > 0:
+         # Sample density
+-        density = VolumeTex.sample(pos).x
++        density = volume_tex.sample(pos).x
+         
+         # Threshold check
+-        if UseThreshold and density <= Threshold:
++        if use_threshold and density <= threshold:
+             pos += step_vector
+-            ray_length -= StepSize
++            ray_length -= step_size
+             continue
+             
+-        # Transfer Function
+-        tf_sample = TransferFuncTex.sample(density)
++        # Transfer function lookup
++        tf_sample = transfer_func_tex.sample(density)
+         opacity = tf_sample.g
+-        index_val = tf_sample.r
+-        
+-        # Style Index
+-        idx_sample = IndexFuncTex.sample(index_val)
+-        style_index_float = idx_sample.x
+-        style_index = int(style_index_float * 34) # AVAILABLE_STYLE_COUNT = 34
+-        
+-        # Gradient and Normal
+-        h = StepSize
+-        grad_x = VolumeTex.sample(pos + vec3(h, 0, 0)).x - density
+-        grad_y = VolumeTex.sample(pos + vec3(0, h, 0)).x - density
+-        grad_z = VolumeTex.sample(pos + vec3(0, 0, h)).x - density
+-        gradient = vec3(grad_x, grad_y, grad_z)
+-        
+-        # Transform normal
+-        normal_new = normalize((NormalMatrix * vec4(gradient, 0.0)).xyz)
+-        
+-        # Base Style (LitSphere)
+-        lit_coords = vec2(normal_new.x, -normal_new.y) * 0.5 + 0.5
+-        base_color = StyleTex.sample(vec3(lit_coords, float(style_index)))
+-        
+-        # Contour Lines
+-        if UseContour:
+-            # Curvature approximation
+-            magnitudes = length(normal) * length(normal_new)
++        index = tf_sample.r
++        
++        # Style index determination
++        idx_sample = index_func_tex.sample(index)
++        style_index = int(idx_sample.x * available_style_count)
++        
++        # Normal estimation
++        L = step_size
++        look_up = density
++        grad_e = volume_tex.sample(pos + vec3(L, 0, 0)).x - look_up
++        grad_n = volume_tex.sample(pos + vec3(0, L, 0)).x - look_up
++        grad_u = volume_tex.sample(pos + vec3(0, 0, L)).x - look_up
++        gradient = vec3(grad_e, grad_n, grad_u)
++        
++        previous_normal = normal
++        normal = (normal_matrix * vec4(gradient, 0)).xyz
++        
++        # Style transfer (Litsphere)
++        lit_coords = vec2(normal.x, -normal.y) * 0.5 + 0.5
++        base_color = style_tex.sample(vec3(lit_coords, style_index))
++        
++        # Contour lines
++        if use_contour:
++            magnitudes = length(normal) * length(previous_normal)
+             if magnitudes > 0:
+-                curvature = acos(dot(normal, normal_new) / magnitudes) * StepSize
++                curvature = acos(dot(normal, previous_normal) / magnitudes) * step_size
+             else:
+                 curvature = 0.0
+                 
+-            Tkv = Thickness * curvature
+-            cond = sqrt(Tkv * (2.0 - Tkv))
++            thickness = 1.0
++            t_kv = thickness * curvature
++            cond = sqrt(t_kv * (2.0 - t_kv))
+             
+-            # View dot product
+-            view_dir = normalize(-pos)
+-            n_dot_v = abs(dot(normal_new, view_dir))
++            n_dot_v = abs(dot(normal, normalize(-pos)))
+             
+             if n_dot_v <= cond:
+                 lit_delta = 1.0 - min(1.0, (cond - n_dot_v) / cond)
+-                adjusted_length = min(1.0, length(normal_new) / lit_delta)
+-                
+-                # Matcap style for contours [G]
+-                # matcap function maps pos/normal to 2D coords for the style texture
+-                matcap_coords = matcap(pos, normal_new) 
+-                base_color = StyleTex.sample(vec3(matcap_coords, float(style_index)))
++                # matcap function is not defined in source, assuming it returns vec2
++                # matcap_coords = matcap(pos.xyz, normal) 
++                # Placeholder for undefined matcap logic
++                # base_color = style_tex.sample(vec3(matcap_coords, style_index))
++                pass 
+         
+         # Compositing
+-        src_color = base_color.rgb * opacity
+-        src_alpha = opacity
+-        
+-        # Pre-multiply alpha is implicit in the formula: (1 - dst.a) * src + dst
+-        # where src is treated as (rgb * a, a)
+-        dst_color = (1.0 - dst_alpha) * vec4(src_color, src_alpha) + dst_color
+-        dst_alpha = dst_color.a
+-        
+-        # Advance
+-        normal = normal_new
++        src = vec4(base_color.rgb, opacity)
++        src.rgb *= src.a
++        dst = (1.0 - dst.a) * src + dst
++        
+         pos += step_vector
+-        ray_length -= StepSize
+-        
+-    return dst_color
++        ray_length -= step_size
++        
++    return dst
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Division by Zero**: In curvature calculation, if `magnitudes` is zero (degenerate gradient), the dot product normalization fails. Guard against this [S1, unofficial].
+-*   **Curvature Domain**: The term $T_{kv}(2 - T_{kv})$ must be non-negative. If $T_{kv} > 2$, the square root becomes invalid. Clamp $T_{kv}$ or handle the domain error [S1, unofficial].
+-*   **Style Index Bounds**: Ensure `style_index` is clamped to $[0, \text{AVAILABLE\_STYLE\_COUNT}-1]$ to prevent out-of-bounds texture access [S1, unofficial].
+-*   **Precision**: Floating point precision in gradient calculation can cause jitter in normal estimation. Using central differences with `StepSize` may introduce aliasing if `StepSize` is large relative to voxel size [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Precision:** The curvature calculation involves `acos` and division by magnitudes. If the normal or previous normal is zero or near-zero, this results in NaN or infinity. Guard against `magnitudes == 0`.
++*   **Boundaries:** The gradient calculation samples `pos + (L,0,0)`, etc. If `pos` is near the volume boundary, these samples may be out of bounds. The source code mentions `isInBounds` and `sampleGradients` functions, implying boundary checks are required in the implementation, though the specific logic is not detailed in the shader snippets.
++*   **Matcap Function:** The `matcap` function is called in the contour logic but is not defined in the provided source code. Its implementation is required for the contour feature to work.
++
++## Subtopics
++
++### Illustrative Volume Rendering with Style Transfer
++Uses style transfer for volume rendering but may not include the specific contour line logic or the exact FGC_T3 implementation details. [Illustrative Volume Rendering with Style Transfer](11445-illustrative-volume-rendering-with-style-transfer.md)
++
++### Style Transfer and Illustrative Rendering
++The parent category, covering the general concept of applying artistic styles to volume data. [Style Transfer and Illustrative Rendering](13031-style-transfer-and-illustrative-rendering.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the average number of samples per ray (determined by ray length and `StepSize`). The contour calculation adds constant overhead per sample.
+-*   **Memory Complexity**: $O(V + S)$, where $V$ is the volume texture size and $S$ is the size of the style transfer array texture ($W \times H \times 34$).
+-*   **Performance**: The method is computationally intensive due to multiple texture lookups per sample (Volume, Transfer, Index, Style) and gradient computation. It is typically implemented on the GPU using fragment shaders [S1, unofficial].
+-*   **Strengths**: Produces high-quality illustrative results with customizable artistic styles. Contour lines enhance shape perception.
+-*   **Limitations**: Style transfer is view-independent (except for the matcap contour mode which uses position). Performance scales linearly with resolution and ray length. Requires pre-computed style textures [S1, unofficial].
++*   **Time Complexity:** Linear with respect to the number of samples along the ray. Each sample involves texture lookups (volume, transfer function, index function, style texture) and gradient computation.
++*   **Memory Complexity:** Depends on the size of the volume texture, exit points texture, and style transfer textures.
++*   **Performance:** The method is computationally intensive due to multiple texture lookups per sample and the gradient calculation. The use of a 2D array texture for style transfer may have performance implications depending on the GPU driver and texture size.
++*   **Strengths:** Produces visually appealing, artistic results. Integrates style and contours directly into the rendering pipeline.
++*   **Limitations:** Requires pre-computed exit points. The `matcap` function is undefined in the source, making the contour feature incomplete. Gradient calculation is sensitive to noise and boundary conditions.
+ 
+ ## Background
+-The method originates from the "FGC_T3" project, an illustrative volume rendering implementation using OpenGL shaders [S1, unofficial]. It was developed to provide artistic visualization capabilities for scientific data, combining traditional ray casting with style transfer techniques [S1, unofficial]. The approach uses a 2D array texture to store multiple artistic styles, allowing dynamic switching based on material properties derived from the transfer function [S1, unofficial].
++This method is based on the "FGC_T3" implementation found in the GitHub repository `jose-villegas/IllustrativeVolumeRendering` [S1, unofficial]. It represents a specific approach to illustrative volume rendering that combines direct ray casting with style transfer and contour lines.
+ 
+ ## Sources

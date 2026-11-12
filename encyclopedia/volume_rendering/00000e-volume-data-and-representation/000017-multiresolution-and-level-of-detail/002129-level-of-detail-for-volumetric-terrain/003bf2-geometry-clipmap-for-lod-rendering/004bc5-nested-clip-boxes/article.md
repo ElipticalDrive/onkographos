@@ -1,129 +1,170 @@
 # Nested Clip-Boxes
-
-Also called: Clip-Box
+Also called: Clip-Box, Nested Clip-Box Algorithm
 
 ## Overview
-Nested Clip-Boxes is a level-of-detail (LOD) technique for the real-time visualization of massive procedural volumetric terrains [S1, unofficial]. It solves the problem of immense polygon counts arising from direct volume-to-mesh conversion by maintaining a series of nested cubic sampling regions around the viewpoint, converting only the active region's volume data into a triangle mesh [S1, unofficial]. Unlike its sibling Geometry Clipmaps, which use nested regular grids for 2D height-maps, Clip-Boxes handle complex, rapidly changing mesh topologies inherent to 3D iso-surfaces [S1, unofficial].
+Nested Clip-Boxes is a level-of-detail (LOD) rendering technique for massive procedural volumetric terrains that caches polygonal mesh geometry in a set of nested cubic volumes (Clip-Boxes) centered on the viewpoint [S1, unofficial]. It solves the problem of real-time visualization of arbitrary-sized 3D terrain functions by converting sampled volume data into triangle meshes via iso-surface extraction, while maintaining high frame rates through incremental updates and seamless LOD transitions [S1, unofficial]. Unlike its sibling [Geometry Clipmap for LOD Rendering](9126-geometry-clipmap-for-lod-rendering.md), which operates on 2D heightmaps with regular grids, Nested Clip-Boxes handles complex, rapidly changing 3D mesh topologies derived from volumetric data [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
 *   **Input:** A user-defined 3D terrain function $f(x, y, z)$ that generates volumetric terrain shapes [S1, unofficial].
-*   **Output:** A triangle mesh representing the terrain iso-surface, rendered via hardware acceleration [S1, unofficial].
+*   **Output:** A hardware-accelerated triangle mesh representing the terrain iso-surface, rendered with LOD [S1, unofficial].
 
 **Data Structures**
-The method employs a hierarchy of "Clip-Boxes" (CBs). Each CB is a cubic region of space centered on or near the viewpoint.
-*   **Volume Data:** A 3D grid of voxel values sampled from the terrain function within the CB's bounds [S1, unofficial].
-*   **Mesh Data:** A triangle mesh generated from the volume data, representing the iso-surface [S1, unofficial].
-*   **Hierarchy:** Nested CBs of varying resolutions/levels of detail surround the viewer, analogous to geometry clip-maps but in 3D [S1, unofficial].
-
-**Steps**
-1.  **Define Terrain Function:** The user provides a 3D function $f(x, y, z)$ [S1, unofficial].
-2.  **Sample Volume Data:** Sample the function $f$ within a user-defined cubic view-region (Clip-Box) around the viewpoint. Store the result as voxel volume data [S1, unofficial].
-3.  **Convert to Mesh:** Convert the volume data into a triangle mesh. This is achieved using conventional iso-surface extraction algorithms, such as Marching Cubes [S1, unofficial].
-4.  **Apply LOD:** Use the nested Clip-Box strategy to manage the polygon count. Only the mesh corresponding to the active, highest-priority Clip-Box (or a combination of nested boxes) is rendered at any given time to maintain performance [S1, unofficial].
-5.  **Render:** Send the triangle mesh to the GPU for hardware-accelerated visualization [S1, unofficial].
-
-**Formulas**
-*   Terrain Definition: $T(x, y, z) = f(x, y, z)$, where $f$ is user-defined [S1, unofficial].
-*   Iso-surface Extraction: Triangles are generated where the voxel values cross a specific threshold, typically using Marching Cubes [S1, unofficial].
+Each Clip-Box (CB) maintains the following structures [S1, unofficial]:
+1.  **Volume Data:** An 8-bit voxel grid where each voxel is either set (opaque) or unset (transparent). The number of voxels per CB is constant (e.g., $100^3$).
+2.  **Polygon Data:** Triangle strips containing vertices with $(x, y, z)$ coordinates and normal vectors.
+3.  **Adjacency Information:** Pointers or indices linking voxels to surfaces and surfaces to surfaces to speed up extraction and connection [S1, unofficial].
+4.  **Cache:** Previously computed volume data to enable differential updates [S1, unofficial].
 
 **Parameters**
-*   **Terrain Function:** Arbitrary 3D function provided by the user [S1, unofficial].
-*   **View-Region Size:** User-defined cubic region around the viewpoint [S1, unofficial].
-*   **LOD Levels:** Number of nested Clip-Boxes is not explicitly specified, but the strategy implies multiple levels [S1, unofficial].
+*   **Voxel Count ($N_v$):** Constant for all CBs. Example: $100^3$ voxels per CB [S1, unofficial].
+*   **Scale Factor ($S$):** Increases exponentially by powers of two. If CB $i$ has size $L_i$, then $L_{i+1} = 2 \cdot L_i$ [S1, unofficial].
+*   **Voxel Size ($v_i$):** Doubles with each outer level. $v_i = L_i / N_v^{1/3}$. Example: CB 1 voxel size = 1, CB 2 voxel size = 2 [S1, unofficial].
+*   **Iso-surface Threshold:** Implicit in the conversion from volume data to triangles (e.g., Marching Cubes) [S1, unofficial].
 
-**Edge Cases and Pitfalls**
-*   **Polygon Count:** Direct conversion of volume data to polygons results in an immense number of triangles, which is the primary pitfall necessitating the LOD approach [S1, unofficial].
-*   **Topology Complexity:** Unlike 2D clip-maps, 3D Clip-Boxes carry complex, rapidly changing mesh topologies, making LOD management more difficult [S1, unofficial].
-*   **Pre-computation:** The method does not depend on pre-computation, allowing for immediate visualization of arbitrary sized terrains, but this requires efficient runtime sampling and conversion [S1, unofficial].
+**Algorithm Steps**
+
+1.  **Initialization:** Define the initial set of nested Clip-Boxes centered on the viewpoint. The innermost CB is the smallest; outer CBs are larger by powers of two [S1, unofficial].
+
+2.  **Volume Sampling:** Sample the terrain function $f(x, y, z)$ within the cubic region of each CB. Store the result as 8-bit volume data (set/unset) [S1, unofficial].
+
+3.  **Iso-surface Extraction:** Convert the volume data of each CB into a triangle mesh using a conventional algorithm such as Marching Cubes [S1, unofficial].
+    *   *Note:* This step generates immense triangle counts, necessitating the LOD strategy [S1, unofficial].
+
+4.  **Nesting and LOD Culling:** For each CB, omit geometry that would interfere with the next inner CB. This reduces the polygon count for distant/outer layers [S1, unofficial].
+
+5.  **Seamless Connection:** Connect bordering vertices of the current CB to the next outer CB to prevent gaps. This is achieved using adjacency information and pointers stored in the data structure [S1, unofficial].
+
+6.  **Viewpoint Update Strategy:**
+    *   When the viewpoint moves, verify CB positions to preserve the concentric LOD structure [S1, unofficial].
+    *   Update inner CBs frequently.
+    *   Update outer CBs rarely. If the viewpoint moves slightly, only the inner CB is updated; outer CBs remain stationary, covering any gaps arising from the inner CB's movement [S1, unofficial].
+
+7.  **Differential Updates:** To minimize computation, cache previously computed volume data. Only compute differential updates for the portions of the CB that have changed relative to the cache [S1, unofficial].
+
+8.  **Post-Processing:** Apply Laplacian smoothing to the generated mesh to reduce block-like artifacts from the initial volume-to-polygon conversion [S1, unofficial].
+
+9.  **Dynamic Triangle Adjustment:** Optionally skip the innermost CBs to dynamically reduce the number of triangles on screen [S1, unofficial].
 
 **Pseudocode**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for Nested Clip-Boxes rendering loop
-# Note: Specific LOD transition logic and data structure details for the hierarchy
-# are not provided in the source [S1, unofficial]. The following represents the core workflow.
+class ClipBox:
+    def __init__(self, level, voxel_count, terrain_func, cache):
+        self.level = level
+        self.voxel_count = voxel_count
+        self.terrain_func = terrain_func
+        self.cache = cache
+        # Size doubles with each level
+        self.voxel_size = 2 ** level 
+        # Centered on viewpoint
+        self.center = (0, 0, 0) 
+        self.volume_data = None
+        self.mesh = None
+        self.adjacency = None
 
-def render_volumetric_terrain(viewpoint, terrain_function, lod_levels):
-    """
-    Renders a procedural volumetric terrain using Nested Clip-Boxes.
-    
-    Args:
-        viewpoint (Vector3): Current camera position.
-        terrain_function (Callable): User-defined 3D function f(x,y,z).
-        lod_levels (List[ClipBox]): List of Clip-Box objects ordered by LOD priority.
+    def update(self, viewpoint, outer_cb):
+        """
+        Updates the Clip-Box geometry based on the viewpoint.
+        outer_cb: The next inner Clip-Box (if any).
+        """
+        # 1. Determine region to sample
+        half_size = self.voxel_size * self.voxel_count / 2
+        region_min = (self.center.x - half_size, self.center.y - half_size, self.center.z - half_size)
+        region_max = (self.center.x + half_size, self.center.y + half_size, self.center.z + half_size)
+
+        # 2. Sample volume data (differential update if possible)
+        new_volume = self._sample_terrain(region_min, region_max)
         
-    Returns:
-        List[Mesh]: The triangle mesh(es) to be rendered.
-    """
-    active_meshes = []
-    
-    # Iterate through LOD levels (e.g., from highest detail to lowest)
-    # The source [S1, unofficial] does not specify the exact selection criteria
-    # for which CBs are active, only that a nested strategy is used.
-    for cb in lod_levels:
-        if is_cb_active(cb, viewpoint):
-            # Step 1: Sample the terrain function within the Clip-Box's cubic region
-            # The size and resolution of the sampling grid are not specified [S1, unofficial].
-            volume_data = sample_terrain_in_box(terrain_function, cb.bounds)
-            
-            # Step 2: Convert volume data to triangle mesh using Marching Cubes
-            # Marching Cubes is cited as the conventional algorithm [S1, unofficial].
-            mesh = marching_cubes(volume_data)
-            
-            active_meshes.append(mesh)
-            
-            # Note: The source [S1, unofficial] does not specify if multiple CBs are
-            # rendered simultaneously or if only the highest LOD CB is rendered.
-            # Assuming a single active CB for simplicity based on "nested" implication.
-            break 
-            
-    return active_meshes
+        # 3. Convert to mesh (Iso-surface extraction, e.g., Marching Cubes)
+        raw_mesh = self._extract_iso_surface(new_volume)
 
-def is_cb_active(cb, viewpoint):
-    """
-    Determines if a Clip-Box is within the view frustum or relevant for rendering.
-    Implementation details not provided in source [S1, unofficial].
-    """
-    # [G] Placeholder for frustum culling or distance-based activation logic.
-    # The source mentions a "user-defined quadratic view-region" but does not
-    # define the activation logic for the nested structure.
-    return True
+        # 4. Nesting: Cull geometry interfering with inner CB
+        if outer_cb is not None:
+            raw_mesh = self._cull_inner_geometry(raw_mesh, outer_cb)
 
-def sample_terrain_in_box(terrain_function, bounds):
-    """
-    Samples the 3D terrain function within the given cubic bounds.
-    Resolution and grid dimensions are not specified in source [S1, unofficial].
-    """
-    # [G] Placeholder for voxel grid generation and function evaluation.
-    # The source states the function is sampled in a "cubic region" but does
-    # not specify the grid resolution or sampling rate.
-    return None
+        # 5. Seamless Connection: Connect to outer CB
+        if outer_cb is not None:
+            raw_mesh = self._connect_to_outer(raw_mesh, outer_cb)
 
-def marching_cubes(volume_data):
-    """
-    Converts volume data to a triangle mesh using the Marching Cubes algorithm.
-    Standard implementation assumed as per source [S1, unofficial].
-    """
-    # Standard Marching Cubes implementation
-    pass
+        # 6. Post-processing: Smoothing
+        self.mesh = self._smooth_mesh(raw_mesh)
+        
+        # Update cache
+        self.cache.update(new_volume)
+
+    def _sample_terrain(self, min, max):
+        # Sample terrain_func in the cubic region
+        # Returns 8-bit voxel grid
+        pass
+
+    def _extract_iso_surface(self, volume):
+        # Run Marching Cubes or similar
+        # Returns triangle strips with vertices and normals
+        pass
+
+    def _cull_inner_geometry(self, mesh, inner_cb):
+        # Remove triangles that intersect or are inside the inner CB's volume
+        pass
+
+    def _connect_to_outer(self, mesh, outer_cb):
+        # Connect bordering vertices of this mesh to outer_cb's inner border
+        # Uses adjacency pointers
+        pass
+
+    def _smooth_mesh(self, mesh):
+        # Apply Laplacian filtering
+        pass
+
+class NestedClipBoxes:
+    def __init__(self, terrain_func, num_levels):
+        self.terrain_func = terrain_func
+        self.cbs = []
+        self.cache = {}
+        # Create nested CBs
+        for i in range(num_levels):
+            cb = ClipBox(level=i, voxel_count=100**3, terrain_func=terrain_func, cache=self.cache)
+            self.cbs.append(cb)
+        # Inner CBs are at index 0, outer at end
+        self.cbs.reverse() 
+
+    def render(self, viewpoint):
+        # Update strategy: Inner CBs update often, outer rarely
+        # For simplicity, assume full update for demonstration
+        for i, cb in enumerate(self.cbs):
+            outer_cb = self.cbs[i+1] if i+1 < len(self.cbs) else None
+            cb.center = viewpoint
+            cb.update(viewpoint, outer_cb)
+        
+        # Render all meshes
+        for cb in self.cbs:
+            if cb.mesh:
+                render_mesh(cb.mesh)
 ```
 
-## Subtopics
-
-### Geometry Clipmap for LOD Rendering
-The 2D predecessor using nested regular grids for height-maps. Clip-Boxes extend this to 3D volume data with complex iso-surfaces. [Geometry Clipmap for LOD Rendering](9126-geometry-clipmap-for-lod-rendering.md)
+**Edge Cases and Pitfalls**
+*   **LOD Gaps:** Gaps occur if boundaries of nested CBs are not well connected. This is handled by explicitly connecting bordering vertices to the next outer CB [S1, unofficial].
+*   **Complexity Variation:** Unlike clip-maps, CB complexity varies strongly as they shift through volume data, requiring robust adjacency management [S1, unofficial].
+*   **Memory Usage:** Average memory consumption is higher than conventional heightmap-based methods due to volumetric data storage [S1, unofficial].
 
 ## Operating characteristics
-*   **Performance:** Achieves an average of 25 frames per second for a highly detailed landscape [S1, unofficial].
-*   **Complexity:** The method allows for immediate visualization of arbitrary sized volumetric terrains without pre-computation [S1, unofficial].
-*   **Strengths:** High quality rendering, high computational performance via LOD, no pre-computation required, supports arbitrary terrain functions [S1, unofficial].
-*   **Limitations:** The amount of triangles from direct conversion is immense, requiring efficient LOD. The mesh topology is complex and rapidly changing, making LOD management harder than in 2D [S1, unofficial].
-*   **Hardware:** Requires hardware-accelerated GPU rendering [S1, unofficial].
+*   **Time Complexity:** Not explicitly given. However, the method achieves 25 frames per second on average for highly detailed landscapes [S1, unofficial].
+*   **Memory Complexity:** Higher than conventional heightmap-based methods because it stores 3D volume data rather than 2D heightmaps [S1, unofficial].
+*   **Performance:** Achieves real-time visualization (25 FPS average) for arbitrary-sized volumetric terrains without pre-computation [S1, unofficial].
+*   **Strengths:**
+    *   Immediate visualization of arbitrary-sized terrains.
+    *   High quality rendering via iso-surface extraction.
+    *   Efficient LOD via nesting and differential updates.
+*   **Limitations:**
+    *   High memory consumption.
+    *   Geometry updates may be visible at low CB resolutions when the viewpoint moves [S1, unofficial].
+*   **When to Use:** Real-time visualization of procedural volumetric terrains where pre-computation is not feasible or desired.
+*   **When Not to Use:** Memory-constrained environments where heightmap-based methods are sufficient.
 
 ## Background
-The method was proposed by Sven Forstmann and Jun Ohya in the paper "Visualizing Large Procedural Volumetric Terrains Using Nested Clip-Boxes" [S1, unofficial]. It extends the geometry clip-map approach by Lossasso and Hoppe to the third dimension [S1, unofficial]. The work is motivated by the need for real-time visualization of massive procedural terrains in applications like video games, where revenue and popularity were significant factors in 2008 [S1, unofficial].
+Nested Clip-Boxes was proposed by Sven Forstmann and Jun Ohya in the paper "Visualizing Large Procedural Volumetric Terrains Using Nested Clip-Boxes" [S1, unofficial]. It extends the geometry clip-map approach of Losasso and Hoppe [2] from 2D heightmaps to 3D volume data. The method was developed to address the limitations of existing clip-map techniques, which could not handle the complex, rapidly changing mesh topologies of volumetric terrain data [S1, unofficial].
 
 ## Sources
 [S1] Visualizing Large Procedural Volumetric Terrains Using Nested Clip-Boxes, https://waseda.repo.nii.ac.jp/records/19543, fetched 2026-10-26 (unofficial)

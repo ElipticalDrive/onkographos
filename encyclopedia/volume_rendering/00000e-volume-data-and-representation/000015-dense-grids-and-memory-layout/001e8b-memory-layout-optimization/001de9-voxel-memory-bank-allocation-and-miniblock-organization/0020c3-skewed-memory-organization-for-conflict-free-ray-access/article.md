@@ -7,60 +7,49 @@ Skewed memory organization is a hardware-oriented memory layout for Cubic Frame 
 
 ## How it works
 **Inputs and Outputs**
-- **Input**: A 3D voxel grid of resolution $n \times n \times n$ (or $n' \times n' \times n'$ for non-power-of-two schemes).
-- **Output**: A mapping function assigning each voxel $(x, y, z)$ to a memory bank index $k$ and an internal offset $(i, j)$ within that bank.
+- **Input**: A 3D voxel grid of resolution $n \times n \times n$ (or $n' \times n' \times n'$ for non-power-of-two schemes) [S2, book].
+- **Output**: A mapping function assigning each voxel $(x, y, z)$ to a memory bank index $k$ and an internal offset $(i, j)$ within that bank [S1][S2, book].
 
 **Data Structures**
-The memory is divided into $n$ (or $n'$) independent memory modules (banks).
-- Each bank holds $n^2$ (or $n'^2$) voxels.
+The memory is divided into $n$ (or $n'$) independent memory modules (banks) [S1][S2, book].
+- Each bank holds $n^2$ (or $n'^2$) voxels [S1][S2, book].
 - Each bank has its own local addressing unit and local processing unit [S1].
 - Processing units are connected via bi-directional links forming a barrel shifter [S1].
 
 **Mapping Formulas**
-1.  **Orthographic (Primary Axis) Mapping**:
-    For beams parallel to a primary axis (e.g., $\pm x, \pm y, \pm z$), the bank index $k$ is calculated as:
-    $$k = (x + y + z) \pmod n$$
-    where $0 \le x, y, z, k < n$ [S2, book].
-    The internal coordinates $(i, j)$ within the bank are:
-    $$i = x, \quad j = y$$
-    (Note: Source [S1] defines $i=x, j=y$ for the module mapping. Source [S2, book] implies a similar direct mapping for the primary axis case).
+1. **Orthographic (Primary Axis) Mapping**: For beams parallel to a primary axis (e.g., $\pm x, \pm y, \pm z$), the bank index $k$ is calculated as:
+   $$k = (x + y + z) \pmod n$$
+   where $0 \le x, y, z, k < n$ [S2, book].
+   The internal coordinates $(i, j)$ within the bank are:
+   $$i = x, \quad j = y$$
+   [S1].
 
-2.  **Arbitrary Direction Mapping (Linear Skewing)**:
-    For non-orthographic directions, a linear combination is used:
-    $$k = (ax + by + cz) \pmod {n'}$$
-    where $0 \le k, x, y, z < n' - 1$ [S2, book].
-    Parameters $a, b, c, n'$ are selected to guarantee conflict-free access for a set of desired directions [S2, book].
+2. **Arbitrary Direction Mapping (Linear Skewing)**: For non-orthographic directions, a linear combination is used:
+   $$k = (ax + by + cz) \pmod {n'}$$
+   where $0 \le k, x, y, z < n' - 1$ [S2, book].
+   Parameters $a, b, c, n'$ are selected to guarantee conflict-free access for a set of desired directions [S2, book].
 
-3.  **De-mapping (Retrieval)**:
-    To retrieve a beam parallel to the $+x$ axis (where $y=y_0, z=z_0$) from bank $k$, the position index $D_z$ (distance along the beam from the viewing position) is calculated as:
-    $$D_z = [k - (y + z) \pmod n]$$
-    This allows the system to reconstruct the 3D position of the voxel within the beam [S2, book].
+3. **De-mapping (Retrieval)**: To retrieve a beam parallel to the $+x$ axis (where $y=y_0, z=z_0$) from bank $k$, the position index $D_z$ (distance along the beam from the viewing position) is calculated as:
+   $$D_z = [k - (y + z) \bmod n]$$
+   [S2, book]. This allows the system to reconstruct the 3D position of the voxel within the beam [S2, book].
 
 **Algorithm Steps**
-1.  **Initialization**: Divide the $n^3$ voxel volume into $n$ memory banks. Assign each voxel $(x, y, z)$ to bank $k$ using the appropriate skewing formula (Eq. 1 or Eq. 4) [S2, book].
-2.  **Viewing (Ray Casting)**:
-    -   For each beam in the projection, the local address unit of each bank increments or decrements its internal index by 1 modulo $n$ as the beam moves to the next position [S2, book].
-    -   This local increment avoids recalculating the global skewing formula (Eq. 1) for every voxel during the viewing process [S2, book].
-    -   All $n$ processing units fetch one voxel from their respective bank simultaneously [S1].
-3.  **Geometric Transformation (Rotation/Translation)**:
-    -   To rotate a primitive (e.g., about the x-axis), beams are relocated.
-    -   The barrel shifter moves the voxel beam across processing units by a given offset [S1].
-    -   The beam is written back into the CFB memory modules at a new location modulo $n$ [S1].
-    -   The barrel shifter uses immediate neighbor links and hard-wired power-of-2 neighbor skips to minimize shifting time [S1].
+1. **Initialization**: Divide the $n^3$ voxel volume into $n$ memory banks. Assign each voxel $(x, y, z)$ to bank $k$ using the appropriate skewing formula (Eq. 1 or Eq. 4) [S2, book].
+2. **Viewing (Ray Casting)**: For each beam in the projection, the local address unit of each bank increments or decrements its internal index by 1 modulo $n$ as the beam moves to the next position [S2, book]. This local increment avoids recalculating the global skewing formula (Eq. 1) for every voxel during the viewing process [S2, book]. All $n$ processing units fetch one voxel from their respective bank simultaneously [S1].
+3. **Geometric Transformation (Rotation/Translation)**: To rotate a primitive (e.g., about the x-axis), beams are relocated [S1]. The barrel shifter moves the voxel beam across processing units by a given offset [S1]. The beam is written back into the CFB memory modules at a new location modulo $n$ [S1]. The barrel shifter uses immediate neighbor links and hard-wired power-of-2 neighbor skips to minimize shifting time [S1].
 
 **Parameters**
--   $n$: Resolution dimension (typically a power of 2 for hardware efficiency, though not strictly required by the math).
--   $n'$: Modulus for arbitrary direction schemes. Example: $n' = 517$ [S2, book].
--   $a, b, c$: Coefficients for linear skewing. Example: $a=5, b=2, c=1$ [S2, book].
--   Barrel Shifter Configuration: Includes immediate neighbor links and power-of-2 skips (e.g., 8-skip links) [S1].
+- $n$: Resolution dimension [S1][S2, book].
+- $n'$: Modulus for arbitrary direction schemes. Example: $n' = 517$ [S2, book].
+- $a, b, c$: Coefficients for linear skewing. Example: $a=5, b=2, c=1$ [S2, book].
+- Barrel Shifter Configuration: Includes immediate neighbor links and power-of-2 skips (e.g., 8-skip links) [S1].
 
 **Edge Cases and Pitfalls**
--   **Direction Specificity**: The simple scheme $k = (x+y+z) \pmod n$ only guarantees conflict-free access for primary axes ($\pm x, \pm y, \pm z$) [S2, book]. Arbitrary directions require the linear skewing scheme with carefully chosen coefficients [S2, book].
--   **Modulus Selection**: For the linear scheme, $n'$ and coefficients must be chosen such that no two voxels in a beam map to the same bank. The example $k = (5x + 2y + z) \pmod {517}$ supports 26 parallel directions [S2, book].
--   **Precision**: The de-mapping formula relies on modular arithmetic. Incorrect implementation of modulo operations (especially with negative indices in some languages) will break beam retrieval [S2, book].
+- **Direction Specificity**: The simple scheme $k = (x+y+z) \pmod n$ only guarantees conflict-free access for primary axes ($\pm x, \pm y, \pm z$) [S2, book]. Arbitrary directions require the linear skewing scheme with carefully chosen coefficients [S2, book].
+- **Modulus Selection**: For the linear scheme, $n'$ and coefficients must be chosen such that no two voxels in a beam map to the same bank. The example $k = (5x + 2y + z) \pmod {517}$ supports 26 parallel directions [S2, book].
+- **Precision**: The de-mapping formula relies on modular arithmetic [S2, book].
 
 **Pseudocode**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -88,9 +77,7 @@ def demap_orthographic(k, y, z, n):
     given the bank index k and fixed y, z coordinates.
     Returns distance index D_z
     """
-    # Note: Source [S2, book] defines D_z = [k - (y + z) mod n]
-    # This assumes k is the bank index of the voxel.
-    # The result is the offset along the beam from the viewer.
+    # Formula from [S2, book]: D_z = [k - (y + z) mod n]
     d_z = (k - (y + z)) % n
     return d_z
 
@@ -102,9 +89,7 @@ def barrel_shift_beam(beam_data, offset, n):
     n: length of the beam
     Returns shifted beam
     """
-    # Barrel shifting is a cyclic shift
-    # Positive offset shifts right, negative shifts left
-    # Implementation depends on hardware, but logically:
+    # Barrel shifting is a cyclic shift across processing units [S1]
     shifted_beam = [beam_data[(i - offset) % n] for i in range(n)]
     return shifted_beam
 ```
@@ -115,22 +100,14 @@ def barrel_shift_beam(beam_data, offset, n):
 The Ray Projection via Multiple-Write Bus (VMWB) is a hardware-accelerated mechanism for selecting the front-most non-transparent voxel along a ray in a Cubic Frame Buffer (CFB). It solves the conflict resolution problem inherent in parallel volume rendering by using a dedicated bus to race $n$ processing units against each other, identifying the closest voxel in logarithmic time. Unlike software-based ray casting which iterates through voxels, VMWB performs this selection in parallel across the entire beam, leveraging the skewed memory organization of its parent method to ensure conflict-free data fetch.
 
 ## Operating characteristics
--   **Time Complexity**:
-    -   **Ray Access**: $O(1)$ memory cycles per beam for conflict-free access, assuming the mapping is pre-computed or locally incremented [S2, book].
-    -   **Geometric Transformation**: Rotating a primitive of $n^3$ voxels is proportional to $n^2 \log n$, where $n^2$ is the number of beams and $\log n$ is the barrel shifting cost [S1]. This is superior to the conventional $O(n^3)$ for full volume rotations.
--   **Memory Complexity**: $O(n^3)$ for the voxel data, plus overhead for $n$ local processing units and addressing units [S1].
--   **Performance**: In the referenced implementation, rotating a room of $n^3$ voxels took approximately 45 milliseconds using immediate neighbor and 8-skip neighbor links [S1].
--   **Strengths**:
-    -   Enables true parallel access for specific viewing directions without bank conflicts.
-    -   Efficient geometric transformations via barrel shifting.
-    -   Simple arithmetic for primary axis access.
--   **Limitations**:
-    -   Conflict-free access is direction-dependent. Arbitrary directions require complex coefficient selection and may not support all angles with the same modulus [S2, book].
-    -   Hardware-dependent implementation (requires local processing units and barrel shifters) [S1].
-    -   De-mapping requires modular arithmetic which may be costly if not handled by hardware [S2, book].
+- **Time Complexity**: Ray Access requires $O(1)$ memory cycles per beam for conflict-free access, assuming the mapping is pre-computed or locally incremented [S2, book]. Geometric Transformation for rotating a primitive of $n^3$ voxels is proportional to $n^2 \log n$, where $n^2$ is the number of beams and $\log n$ is the barrel shifting cost [S1]. This is superior to the conventional $O(n^3)$ for full volume rotations [S1].
+- **Memory Complexity**: Requires $O(n^3)$ for the voxel data, plus overhead for $n$ local processing units and addressing units [S1].
+- **Performance**: In the referenced implementation, rotating a room of $n^3$ voxels took approximately 45 milliseconds using immediate neighbor and 8-skip neighbor links [S1].
+- **Strengths**: Enables true parallel access for specific viewing directions without bank conflicts [S1][S2, book]. Efficient geometric transformations via barrel shifting [S1]. Simple arithmetic for primary axis access [S2, book].
+- **Limitations**: Conflict-free access is direction-dependent. Arbitrary directions require complex coefficient selection and may not support all angles with the same modulus [S2, book]. Hardware-dependent implementation requires local processing units and barrel shifters [S1]. De-mapping requires modular arithmetic which may be costly if not handled by hardware [S2, book].
 
 ## Background
-The skewed memory organization was developed for the Voxblt Engine, a voxel frame buffer processor [S1]. It was designed to address the memory bandwidth and conflict issues in parallel volume rendering systems. The approach was detailed in papers describing the Voxblt Engine and its viewing/rendering processor, aiming to provide fast geometric transformations and parallel ray casting capabilities [S1][S2, book].
+The skewed memory organization was developed for the Voxblt Engine, a voxel frame buffer processor [S1]. It was designed to address the memory bandwidth and conflict issues in parallel volume rendering systems [S1]. The approach was detailed in papers describing the Voxblt Engine and its viewing/rendering processor, aiming to provide fast geometric transformations and parallel ray casting capabilities [S1][S2, book].
 
 ## Sources
 [S1] The voxblt Engine: A Voxel Frame Buffer Processor, https://doi.org/10.2312/eggh/eggh88/085-102, fetched 2026-10-26

@@ -1,84 +1,97 @@
 # Clipping plane for volume suppression
 
-Also called: Clip Plane, Clipping Plane Widget, Clipping plane, Cut Planes, Cutaway view generation, Frame type widget, Volume Clipping
+Also called: Clip Plane, Clipping Plane, Clipping Plane Widget, Cut Planes, Cutaway view generation, Frame type widget, Volume Clipping, Volume Cropping with Clipping Planes
 
 ## Overview
-A clipping plane for volume suppression is an interaction technique that uses an independently movable planar slice of arbitrary thickness to suppress portions of a volume dataset, generating cutaway views [S1, unofficial][S2, unofficial][S3, unofficial]. Unlike the parent [Cropping](1648-cropping.md), which restricts the view to a rectangular slab defined by axis-aligned planes, this method allows a single plane at an arbitrary angle to cut through the volume [S2, unofficial]. It is distinguished from standard clipping by its specific implementation of a thickness-based transition region and its role as a frame-type widget that also supports slice mapping and position querying [S4].
+A clipping plane for volume suppression is an interaction technique that uses one or more arbitrarily oriented planes to cut away selected portions of a volume dataset, thereby uncovering internal details and generating cutaway views [S1, S5, unofficial]. Unlike [Cropping](1648-cropping.md), which restricts visibility to a rectilinear slab defined by planes parallel to the volume axes, clipping planes operate at arbitrary angles and can define a planar slice of finite thickness [S3, S5, unofficial]. This method is distinct from [Clipping](1444-clipping.md) in its specific application to volumetric data nodes where the interior of the clipped region retains data, often requiring capping of intersected geometry in medical contexts [S2].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** Volume dataset $V$, clipping plane definition (normal vector $\mathbf{n} = (A, B, C)$ and distances $D_{\min}, D_{\max}$), falloff parameter $D_{\text{fallo}}$, and current sample opacity $\alpha_{\text{shade}}$ from the shading stage [S2, unofficial].
-*   **Output:** Final opacity $\alpha_{\text{final}}$ for each sample, and optionally a mapped slice image blended with the volume using a constant opacity value determined by the clip widget’s slider [S2, unofficial][S4].
 
-**Data Structures:**
-The clipping plane is defined by two parallel surfaces [S2, unofficial]. The plane equation is $Ax + By + Cz - D = 0$ [G]. The two faces are defined by:
+### Inputs and Outputs
+**Inputs:**
+*   Volume dataset (scalar or vector field).
+*   Clipping plane definition: A normal vector $\mathbf{n} = (A, B, C)$ and position parameters defining the plane equation(s).
+*   Optional: Falloff parameter ($D_{\text{fallo}}$) for smooth edges [S3, unofficial].
+*   Optional: Region of interest (ROI) mask for superimposed data [S9, unofficial].
+
+**Outputs:**
+*   Rendered image where voxels outside the clipping region have suppressed opacity (typically zero) [S3, unofficial].
+*   Interactive widget state reporting orientation, position, and mouse-click coordinates on the plane surface [S6].
+
+### Data Structures
+
+**Clipping Plane Definition (World Space):**
+A plane is defined by the equation $Ax + By + Cz - D = 0$. For a cut plane of thickness, two parallel planes are used:
+1.  $Ax + By + Cz - D_{\min} = 0$
+2.  $Ax + By + Cz - D_{\max} = 0$
+
+Where $D_{\min}$ and $D_{\max}$ measure the distance from the origin to the respective faces, and $D_{\min} \neq D_{\max}$ [S3, unofficial]. The thickness is $D_{\max} - D_{\min}$ [S3, unofficial].
+
+**Widget State (for Interaction):**
+*   **Orientation:** Represented by a normal vector or rotation matrix derived from the image's index-to-world transformation [S4, unofficial][S6].
+*   **Position:** Defined by the distance from the volume origin along the normal [S2].
+*   **Handles:** Corner balls for orientation modification and edge bars for position modification [S6].
+
+**MPRPlane Node Structure (X3D Standard):**
+*   `enabled` (SFBool, default TRUE)
+*   `metadata` (SFNode, default NULL)
+*   `normal` (SFVec3, default 0 0 1): Defines the plane's normal vector [S2].
+*   `pos` (SFFloat, default 0.0, range [0,1]): Establishes the plane's position from the volume origin in the normal direction [S2].
+
+**ijkPlanes Layout (for Coordinate Conversion):**
+An array or tuple of six values: `[iMin, iMax, jMin, jMax, kMin, kMax]` representing the bounds of a cropping box in voxel indices [S4, unofficial].
+
+### Steps
+
+1.  **Initialization:**
+    *   Copy the image data description to the widget to initialize its coordinate system [S4, unofficial].
+    *   If converting from axis-aligned cropping bounds (`ijkPlanes`) to arbitrary planes:
+        a. Extract `iMin, iMax, jMin, jMax, kMin, kMax` from `ijkPlanes` [S4, unofficial].
+        b. Calculate the origin as `indexToWorld([iMin, jMin, kMin])` and the corner as `indexToWorld([iMax, jMax, kMax])` [S4, unofficial].
+        c. Extract the rotation matrix from the image's index-to-world matrix [S4, unofficial].
+        d. Rotate the standard basis vectors $(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)$ using the extracted rotation [S4, unofficial].
+        e. Create `vtkPlane` (or equivalent) instances for each of the 6 faces (X min/max, Y min/max, Z min/max) using the rotated normals and the corresponding origin or corner [S4, unofficial].
+
+2.  **Interaction Update:**
+    *   Listen for modifications to the widget state's cropping planes [S4, unofficial].
+    *   When modified, retrieve the planes and update the renderer's/mapper's clipping planes [S4, unofficial].
+    *   The widget reports its orientation and position to the volume widget, which handles the actual clipping during drawing [S6].
+
+3.  **Rendering (Sample Evaluation):**
+    For each sample point $\mathbf{p}$ along a ray:
+    a. Calculate the signed distance $d$ from $\mathbf{p}$ to the primary plane defined by normal $\mathbf{n}$ and offset $D$.
+    b. Determine visibility based on the clipping mode:
+        *   **Inside Cut Plane:** If the sample lies between $D_{\min}$ and $D_{\max}$, the opacity $\alpha$ is the value from the shading stage [S3, unofficial].
+        *   **Outside Cut Plane:** If the sample is outside the cut plane, opacity is forced to zero [S3, unofficial].
+        *   **Transition Region:** If the sample is within the falloff distance $D_{\text{fallo}}$ from the plane boundary, multiply the opacity by a correction factor that increases linearly from zero to one [S3, unofficial].
+    c. **Superimposed Data (Optional):** If rendering physiological data within a known ROI (e.g., inside the lung), display the data only within this region and on the surface exposed by the cutting plane, typically as grayscale [S9, unofficial].
+
+4.  **Querying (Optional):**
+    *   Map a slice of the data to the arbitrary plane defined by the clip widget and blend it with the volume by a constant opacity value [S6].
+    *   Report the spatial position of a mouse click on the clipping surface, providing an additional means of querying positions distinct from a 3D data probe [S6].
+
+### Formulas
+
+The two parallel faces of the cut plane are given by [S3, unofficial]:
 $$ Ax + By + Cz - D_{\min} = 0 $$
 $$ Ax + By + Cz - D_{\max} = 0 $$
-where $D_{\min} \neq D_{\max}$ [S2, unofficial]. $D_{\min}$ and $D_{\max}$ measure the signed distance from the origin to the respective faces. The thickness of the cut plane is $D_{\max} - D_{\min}$ [S2, unofficial].
 
-**Steps:**
-1.  **Define Plane:** The user interacts with a frame-type widget to set the orientation and position of the clipping plane [S4]. The widget reports its orientation and position to the volume rendering widget [S4].
-2.  **Calculate Distance:** For each sample point $\mathbf{p} = (x, y, z)$, calculate the signed distance $d$ to the plane origin:
-    $$ d = Ax + By + Cz $$
-3.  **Determine Visibility Region:**
-    *   **Interior:** If $D_{\min} \le d \le D_{\max}$, the sample is inside the cut plane [S2, unofficial].
-    *   **Transition:** If $D_{\min} - D_{\text{fallo}} < d < D_{\min}$ or $D_{\max} < d < D_{\max} + D_{\text{fallo}}$, the sample is in a transition region [S2, unofficial].
-    *   **Exterior:** If $d < D_{\min} - D_{\text{fallo}}$ or $d > D_{\max} + D_{\text{fallo}}$, the sample is outside the cut plane [S2, unofficial].
-    *   *Note:* Alternatively, visibility can be inverted such that samples are visible only if they are outside the cut plane [S2, unofficial].
-4.  **Compute Correction Factor:**
-    *   If in the **Exterior**, the correction factor $f$ is $0$ [S2, unofficial].
-    *   If in the **Transition**, $f$ increases linearly from $0$ to $1$ as the sample moves from the exterior boundary toward the interior face [S2, unofficial].
-        *   For the lower face ($d < D_{\min}$):
-            $$ f = \frac{d - (D_{\min} - D_{\text{fallo}})}{D_{\text{fallo}}} $$
-        *   For the upper face ($d > D_{\max}$):
-            $$ f = \frac{(D_{\max} + D_{\text{fallo}}) - d}{D_{\text{fallo}}} $$
-    *   If in the **Interior**, $f$ is $1$ [S2, unofficial].
-5.  **Apply Opacity:** The final opacity is calculated as:
-    $$ \alpha_{\text{final}} = \alpha_{\text{shade}} \times f $$
-    Outside the cut plane, opacity is forced to zero [S2, unofficial].
-6.  **Optional Slice Mapping:** The volume widget may map a slice of the data to the arbitrary plane defined by the clip widget and blend it with the volume using a constant opacity value determined by the clip widget’s slider [S4].
-7.  **Optional Interaction:** The widget provides a means of querying positions via mouse clicks on its surface, distinct from the 3D Data Probe [S4].
+The thickness of the cut plane is [S3, unofficial]:
+$$ \text{Thickness} = D_{\max} - D_{\min} $$
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+The opacity correction factor in the transition region increases linearly from zero to one [S3, unofficial]. Let $\alpha_{\text{shade}}$ be the opacity from the shading stage. If the sample is within the falloff distance $D_{\text{fallo}}$ from the boundary, the final opacity $\alpha_{\text{final}}$ is adjusted. Outside the cut plane, $\alpha_{\text{final}} = 0$ [S3, unofficial].
 
-```python
-def apply_clipping_plane(x, y, z, A, B, C, D_min, D_max, D_fallo, alpha_shade):
-    # Calculate signed distance from origin to the point along the normal
-    d = A * x + B * y + C * z
-    
-    # Determine region and correction factor f
-    if D_min <= d <= D_max:
-        # Interior: full opacity from shading stage
-        f = 1.0
-    elif d < D_min:
-        # Lower transition region
-        if d < D_min - D_fallo:
-            f = 0.0
-        else:
-            # Linear increase from 0 to 1 as d goes from D_min - D_fallo to D_min
-            f = (d - (D_min - D_fallo)) / D_fallo
-    else: # d > D_max
-        # Upper transition region
-        if d > D_max + D_fallo:
-            f = 0.0
-        else:
-            # Linear decrease from 1 to 0 as d goes from D_max to D_max + D_fallo
-            f = ((D_max + D_fallo) - d) / D_fallo
-    
-    # Apply correction factor
-    alpha_final = alpha_shade * f
-    return alpha_final
-```
+### Parameters
 
-**Parameters:**
-*   $D_{\text{fallo}}$: Falloff parameter specifying the width of the transition from full opacity to none. Typical value: 5 voxels [S2, unofficial].
-*   Single clipping plane: VolumePro supports a single cut plane, which is considered a reasonable compromise between flexibility and usability [S1, unofficial][S2, unofficial].
+*   **Single Clipping Plane:** A reasonable compromise between flexibility and usability [S1, unofficial]. VolumePro supports a single cut plane [S3, unofficial].
+*   **Falloff Parameter ($D_{\text{fallo}}$):** Specifies the width of the transition from full opacity to none. Typical value: 5 voxels [S3, unofficial].
+*   **MPRPlane `pos`:** Range [0, 1], representing normalized distance from origin [S2].
 
-**Pitfalls:**
-*   **Precision:** Ensure $D_{\min} \neq D_{\max}$ to avoid degenerate zero-thickness planes unless intended [S2, unofficial].
-*   **Boundary Conditions:** Samples exactly on the boundary may require consistent handling of the linear interpolation to avoid artifacts [S2, unofficial].
-*   **Visual Clutter:** Without additional aids like bounding boxes or stippled lines, perceiving volume orientation and clipping plane location can be confusing [S1, unofficial].
+### Edge Cases and Pitfalls
+
+*   **Geometry Capping:** In complex scenarios involving both geometry and volume data, clipped volume data always contains data inside the clipped region, whereas clipped polygonal objects could be empty. Medical applications expect intersected 3D geometry to be capped [S2].
+*   **Precision:** Samples can be made visible only if they are outside the cut plane, or opacities near edges can fall off gradually for smooth edges [S3, unofficial].
+*   **Coordinate Systems:** Converting between voxel indices and world space requires accurate extraction of the index-to-world rotation matrix [S4, unofficial].
 
 ## Subtopics
 
@@ -86,41 +99,55 @@ def apply_clipping_plane(x, y, z, A, B, C, D_min, D_max, D_fallo, alpha_shade):
 This method provides interactive, selective suppression of volume data using two complementary geometric primitives: an axis-aligned **Clipping Cube** and an arbitrary **Cutting Plane**. It solves the problem of isolating specific anatomical or structural regions (focus) while maintaining spatial context of the surrounding volume. It is distinguished from standard clipping by its support for non-uniform resizing of the cube via corner widgets and its integration with Non-Photorealistic Rendering (NPR) to render the "context" region as contours rather than transparent geometry, thereby reducing visual clutter.
 
 ### Note Cut
-Cuts the sample after it has been played for x ticks [S5, unofficial].
+Cuts the sample after it has been played for x ticks [S7, unofficial].
 
 ### Spatial Domain Interaction
-An interaction mode where a clipping plane slice is textured with map coordinates to help users understand the relationship between spatial and TF domains [S6].
-**Steps:**
-1.  Rotate and translate the volume and place a clipping plane [S6].
-2.  Sample voxels on the clipping plane and retrieve their map coordinates [S6].
-3.  Map map coordinates to color channels: For Kohonen maps, x and y to Red and Green. For Spherical maps, x, y, and z to Red, Green, and Blue [S6].
-4.  Blend the textured slice with the rendered volume using a user-controlled opacity [S6].
-5.  Allow user to click on the clipping plane to set the Gaussian TF peak to the map coordinates of the pointed voxel [S6].
-6.  Display a white cross in the map representation corresponding to the mouse position on the clipping plane [S6].
+An interaction mode where a clipping plane slice is textured with map coordinates to help users understand the relationship between spatial and Transfer Function (TF) domains [S8].
+*   **Steps:**
+    1.  Rotate and translate the volume and place a clipping plane [S8].
+    2.  Sample voxels on the clipping plane and retrieve their map coordinates [S8].
+    3.  Map map coordinates to color channels: For Kohonen maps, x and y to Red and Green. For Spherical maps, x, y, and z to Red, Green, and Blue [S8].
+    4.  Blend the textured slice with the rendered volume using a user-controlled opacity [S8].
+    5.  Allow user to click on the clipping plane to set the Gaussian TF peak to the map coordinates of the pointed voxel [S8].
+    6.  Display a white cross in the map representation corresponding to the mouse position on the clipping plane [S8].
 
 ### Superimposed Data Visualization with Cutting Planes
-A visualization technique for superimposed anatomical and physiological data, displaying physiological data only within a known region of interest (e.g., inside the lung) and on a user-controlled cutting plane surface [S7, unofficial].
-**Steps:**
-1.  Identify the region of interest (e.g., inside the lung) [S7, unofficial].
-2.  Display physiological data only within this region [S7, unofficial].
-3.  Render the data as grey-scale on the surface exposed by a user-controlled cutting plane [S7, unofficial].
+A visualization technique for superimposed anatomical and physiological data, displaying physiological data only within a known region of interest (e.g., inside the lung) and on a user-controlled cutting plane surface [S9, unofficial].
+*   **Steps:**
+    1.  Identify the region of interest (e.g., inside the lung) [S9, unofficial].
+    2.  Display physiological data only within this region [S9, unofficial].
+    3.  Render the data as grey-scale on the surface exposed by a user-controlled cutting plane [S9, unofficial].
+
+### MPR Volume Rendering Style
+An X3D node definition for Multi-Planar Reconstruction (MPR) volume rendering that allows users to declare arbitrary planes for visualization or filtering of regions in reconstructed planes [S2].
+*   **Layout:**
+    *   `MPRVolumeStyle` node inherits `X3DVolumeRenderStyleNode`. Fields: `SFBool enabled` (default TRUE), `SFNode metadata` (default NULL, type `X3DMetadataObject`), `SFNode transferFunction` (default NULL, types `X3DTexture2DNode` or `X3DTexture3DNode`), `MFNode planes` (default NULL, type `MPRPlane`) [S2].
+    *   `MPRPlane` node inherits `X3DNode`. Fields: `SFBool enabled` (default TRUE), `SFNode metadata` (default NULL, type `X3DMetadataObject`), `SFVec3 normal` (default 0 0 1), `SFFloat pos` (default 0.0, range [0,1]). The normal attribute defines the plane's normal vector; the pos attribute establishes the plane's position from the volume origin in the normal direction [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** The clipping operation adds a constant-time distance check and linear interpolation per sample, resulting in $O(1)$ overhead per sample relative to the base ray-casting cost [G].
-*   **Memory Complexity:** Minimal additional memory required to store plane parameters ($A, B, C, D_{\min}, D_{\max}, D_{\text{fallo}}$) [S2, unofficial].
-*   **Performance:** VolumePro supports a single cut plane in real-time [S2, unofficial].
-*   **Strengths:** Allows arbitrary angle cuts, smooth edges via falloff, and supports cutaway views for examining internal structures [S1, unofficial][S2, unofficial].
-*   **Limitations:** Only one plane is supported in some implementations (e.g., VolumePro), limiting complex multi-region suppression [S1, unofficial][S2, unofficial].
-*   **Use Cases:** Ideal for examining cross-sections of segmented objects or isolating specific regions while maintaining context [S1, unofficial][S6].
+
+*   **Time Complexity:** Rendering time depends on the number of samples per ray and the cost of evaluating the plane equation for each sample. The plane equation evaluation is $O(1)$ per sample.
+*   **Memory Complexity:** Minimal additional memory for storing plane parameters ($O(1)$). Widget state requires storage for orientation and position.
+*   **Performance:** Hardware-accelerated volume rendering can achieve interactive rates [S9, unofficial]. The use of a single clipping plane is a compromise between flexibility and usability [S1, unofficial].
+*   **Strengths:** Uncover internal details, generate cutaway views, support arbitrary angles, smooth edges via falloff [S1, S3, S5, unofficial].
+*   **Limitations:** Clipped volume data always contains data inside the clipped region, which may differ from polygonal clipping expectations [S2]. Complex scenarios may require capping [S2].
+*   **When to use:** When internal structures need to be inspected without removing the entire outer shell, or when generating cross-sections at arbitrary angles [S1, S5, unofficial].
+*   **When not to use:** When a rectilinear region of interest is sufficient (use Cropping) or when arbitrary polygon mesh clipping is required [S5, unofficial].
 
 ## Background
-The concept of an independently movable clipping plane for suppressing portions of a volume dataset was originally mentioned in [GK96] and implemented in systems like SIV [S1, unofficial]. It is used to generate cutaway views and truncate region-growing operations [S1, unofficial]. The VolumePro system supports a single cut plane with a falloff parameter for smooth edges [S2, unofficial]. The clipping plane widget is also used in interactive volume rendering systems to report orientation and position to the volume widget, enabling slice mapping and position querying [S4].
+
+*   **Origin:** The concept of independently movable clipping planes for volume visualization was suggested by Chen et al. in 1988 [CMS88] and explicitly mentioned for volume suppression by Gobbetti and Kobbelt in 1996 [GK96] [S1, unofficial].
+*   **Development:** VolumePro, a real-time ray-casting system, supported a single cut plane with configurable falloff [S3, unofficial]. The X3D standard added support for clipping planes in version 3.2, extending it to volumetric data nodes [S2].
+*   **Usage:** Widely used in medical applications for inspecting anatomical structures, often combined with region-growing operations for segmentation [S1, unofficial][S2]. Also used in physics simulation to correlate visual output with results [S2].
 
 ## Sources
+
 [S1] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)
-[S2] [PDF] The VolumePro Real-Time Ray-Casting System, https://www.merl.com/publications/docs/TR99-19.pdf, fetched 2026-10-26 (unofficial)
-[S3] Hardware-Accelerated Volume Rendering, https://vcg.seas.harvard.edu/publications/20040101-hardware-accelerated-volume-rendering/paper, fetched 2026-10-27 (unofficial)
-[S4] PDF Interactive Volume Rendering Using Multi-Dimensional Transfer Functions ..., https://publications.sci.utah.edu/publications/jmk01/simian-paper.pdf, fetched 2026-10-27
-[S5] AndreasVlcek/Voxel-Space-Engine-Comanche-Terrain-Rendering, https://github.com/AndreasVlcek/Voxel-Space-Engine-Comanche-Terrain-Rendering, fetched 2026-10-27 (unofficial)
-[S6] Design of Multi-dimensional Transfer Functions Using Dimensional Reduction, https://doi.org/10.2312/vissym/eurovis07/131-138, fetched 2026-10-26
-[S7] DTIC ADA208091: Interactive Visualization of 3D Medical Data, https://archive.org/details/DTIC_ADA208091, fetched 2026-10-26 (unofficial)
+[S2] Community-driven extensions to the X3D volume rendering component, https://doi.org/10.1145/3055624.3075945, fetched 2026-11-02
+[S3] The VolumePro Real-Time Ray-Casting System, https://www.merl.com/publications/docs/TR99-19.pdf, fetched 2026-10-26 (unofficial)
+[S4] Muhammed-Magdy-Abdelhady/volume-rendering-web-application, https://github.com/Muhammed-Magdy-Abdelhady/volume-rendering-web-application, fetched 2026-10-27 (unofficial)
+[S5] Hardware-Accelerated Volume Rendering, https://vcg.seas.harvard.edu/publications/20040101-hardware-accelerated-volume-rendering/paper, fetched 2026-10-27 (unofficial)
+[S6] Interactive Volume Rendering Using Multi-Dimensional Transfer Functions, https://publications.sci.utah.edu/publications/jmk01/simian-paper.pdf, fetched 2026-10-27
+[S7] AndreasVlcek/Voxel-Space-Engine-Comanche-Terrain-Rendering, https://github.com/AndreasVlcek/Voxel-Space-Engine-Comanche-Terrain-Rendering, fetched 2026-10-27 (unofficial)
+[S8] Design of Multi-dimensional Transfer Functions Using Dimensional Reduction, https://doi.org/10.2312/vissym/eurovis07/131-138, fetched 2026-10-26
+[S9] DTIC ADA208091: Interactive Visualization of 3D Medical Data, https://archive.org/details/DTIC_ADA208091, fetched 2026-10-26 (unofficial)

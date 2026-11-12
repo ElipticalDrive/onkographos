@@ -1,0 +1,515 @@
+--- v004.md
++++ v005.md
+@@ -1,71 +1,56 @@
+ # DuDoTrans
+ 
+-Also called: DuDoTransModel
+-
++Also called: DuDoTransModel, Dual-Domain Transformer
+ ## Overview
+-DuDoTrans is a dual-domain transformer architecture designed for sparse-view CT reconstruction [S1, unofficial]. It addresses the ill-posed nature of tomographic reconstruction from limited angular views by integrating a differentiable forward projection operator with a deep learning prior [S1, unofficial]. Unlike standard Multi-Head Self-Attention (MHSA) which computes global attention with quadratic complexity, DuDoTrans utilizes Window-based Multi-Head Self-Attention (W-MSA) to restrict attention to local windows, reducing computational complexity from $O(N^2)$ to $O(N \cdot W_s^2)$ where $N$ is the number of tokens and $W_s$ is the window size [S1, unofficial]. It builds on [Deep Learning and Neural Architectures](8282-deep-learning-and-neural-architectures.md) by employing Swin Transformer blocks as the core regularizer $R(x)$ in the inverse rendering optimization loop.
++DuDoTrans is a dual-domain transformer architecture designed for sparse-view Computed Tomography (CT) reconstruction [S1, unofficial]. It addresses the ill-posed nature of reconstructing 3D volumes from limited projection angles by leveraging both spatial and frequency domain representations [S1, unofficial]. Unlike standard Multi-Head Self-Attention (MHSA) which computes global attention with $O(N^2)$ complexity, DuDoTrans utilizes Window-based Multi-Head Self-Attention (W-MSA) to restrict attention to local windows, reducing complexity to $O(N \cdot W_s^2)$ while maintaining long-range dependency modeling through shifted windows [S1, unofficial]. It builds on [Transformer-based Architectures](13148-transformer-based-architectures.md).
+ 
+ ## How it works
+-DuDoTrans operates within the iterative optimization framework defined by the parent article [Deep Learning and Neural Architectures](8282-deep-learning-and-neural-architectures.md). The method minimizes the loss $\mathcal{L}$ between the measured sinogram $p$ and the rendered projection $\hat{p} = \mathcal{P}(x)$, where the regularizer $R(x)$ is implemented via the DuDoTrans neural network. The core innovation lies in the internal attention mechanism of the transformer blocks, which processes the volume features (or sinogram features, depending on the specific dual-domain implementation stage) using windowed attention with relative position biases.
+-
+ ### Inputs and Outputs
+-*   **Input:** A batch of 2D feature maps (representing either the sinogram domain or the image domain) with shape $(B, H, W, C)$, where $B$ is batch size, $H$ and $W$ are spatial dimensions, and $C$ is the channel dimension (embedding dimension).
+-*   **Output:** A processed feature map of the same shape $(B, H, W, C)$.
++- **Input**: A tensor $x$ of shape $(B, H, W, C)$, where $B$ is batch size, $H$ and $W$ are spatial dimensions (height and width), and $C$ is the channel dimension (embedding dimension).
++- **Output**: A reconstructed tensor of the same shape $(B, H, W, C)$.
+ 
+ ### Data Structures
+-The method relies on specific tensor layouts for efficient windowed attention:
+-
+-1.  **Window Partitioned Tensor:**
+-    *   Shape: $(num\_windows \cdot B, W_s, W_s, C)$
+-    *   Derived from reshaping and permuting the input tensor to isolate local windows of size $W_s \times W_s$.
+-2.  **Relative Position Bias Table:**
+-    *   Shape: $((2 W_h - 1)(2 W_w - 1), num\_heads)$
+-    *   Parameter tensor storing learnable bias values for relative spatial positions. Initialized with zeros and truncated normal distribution (std=0.02) [S1, unofficial].
+-3.  **Relative Position Index:**
+-    *   Shape: $(W_h W_w, W_h W_w)$
+-    *   Buffer tensor containing integer indices mapping spatial pairs to the `relative_position_bias_table`. Computed deterministically from window dimensions [S1, unofficial].
++- **`relative_position_bias_table`**: A learnable parameter tensor of shape $((2W_h - 1)(2W_w - 1), \text{num\_heads})$. Initialized with zeros and truncated normal distribution (std=0.02) [S1, unofficial].
++- **`relative_position_index`**: A buffer tensor of shape $(W_h W_w, W_h W_w)$ containing integer indices into `relative_position_bias_table` [S1, unofficial].
++- **`window_size`**: A tuple $(W_h, W_w)$ defining the height and width of the attention windows. Default: $(7, 7)$ [S1, unofficial].
++- **`shift_size`**: An integer defining the shift size for Swin-MSA. Default: $0$ [S1, unofficial].
+ 
+ ### Parameters
+-*   **window_size:** Tuple $(W_h, W_w)$ defining the height and width of the attention window. Default: $(7, 7)$ [S1, unofficial].
+-*   **shift_size:** Integer defining the shift amount for shifted window partitioning. If 0, non-shifted windows are used. Default: $0$ [S1, unofficial].
+-*   **mlp_ratio:** Float ratio of the MLP hidden dimension to the embedding dimension. Default: $4.0$ [S1, unofficial].
+-*   **qk_scale:** Float overriding the default QK scaling factor. If `None`, defaults to $head\_dim^{-0.5}$ [S1, unofficial].
+-*   **num_heads:** Integer number of attention heads. Implicitly derived from embedding dimension $C$ and head dimension $head\_dim = C / num\_heads$.
++- **`mlp_ratio`**: Ratio of MLP hidden dimension to embedding dimension. Default: $4.0$ [S1, unofficial].
++- **`qk_scale`**: Override for QK scale. If `None`, defaults to $head\_dim^{-0.5}$ [S1, unofficial].
++- **`head_dim`**: Dimension of each attention head, calculated as $C / \text{num\_heads}$ [S1, unofficial].
+ 
+ ### Algorithm Steps
+ 
+ #### 1. Window Partitioning
+-Reshape the input tensor $x$ of shape $(B, H, W, C)$ into local windows.
+-1.  Reshape $x$ to $(B, H/W_s, W_s, W/W_s, W_s, C)$.
++Reshape the input tensor $x$ into non-overlapping windows to enable local attention.
++1.  Reshape $x$ from $(B, H, W, C)$ to $(B, H/W_s, W_s, W/W_s, W_s, C)$.
+ 2.  Permute dimensions to $(B, H/W_s, W/W_s, W_s, W_s, C)$.
+-3.  Flatten the first three dimensions and the last two spatial dimensions to obtain shape $(num\_windows \cdot B, W_s, W_s, C)$, where $num\_windows = (H/W_s) \cdot (W/W_s)$ [S1, unofficial].
++3.  Flatten the first and third spatial dimensions to produce $(num\_windows \cdot B, W_s, W_s, C)$, where $num\_windows = (H/W_s) \cdot (W/W_s)$ [S1, unofficial].
+ 
+ #### 2. Relative Position Bias Calculation
+-Compute the indices for the relative position bias table.
++Compute indices to map relative spatial positions within a window to the bias table.
+ 1.  Generate coordinates: $coords_h = \text{arange}(W_h)$, $coords_w = \text{arange}(W_w)$.
+-2.  Create meshgrid from $coords_h$ and $coords_w$, flatten to shape $(2, W_h W_w)$. Let this be $coords\_flatten$.
++2.  Create meshgrid and flatten to shape $(2, W_h W_w)$. Let this be $coords\_flatten$.
+ 3.  Compute relative coordinates: $relative\_coords = coords\_flatten[:, :, None] - coords\_flatten[:, None, :]$. Shape: $(2, W_h W_w, W_h W_w)$.
+ 4.  Permute to $(W_h W_w, W_h W_w, 2)$.
+-5.  Shift indices to ensure non-negative values:
+-    *   $relative\_coords[:, :, 0] += W_h - 1$
+-    *   $relative\_coords[:, :, 1] += W_w - 1$
+-6.  Map 2D relative coordinates to 1D index space:
+-    *   $relative\_coords[:, :, 0] *= 2 W_w - 1$
+-7.  Sum the coordinates to get the final linear index:
+-    *   $relative\_position\_index = relative\_coords.sum(-1)$
+-    *   Result shape: $(W_h W_w, W_h W_w)$ [S1, unofficial].
+-
+-#### 3. Window Attention Forward
+-Process each window using Multi-Head Self-Attention with relative position bias.
+-1.  **Linear Projection:** Compute $qkv = \text{Linear}(x_{window})$. Reshape to $(B_, N, 3, num\_heads, C/num\_heads)$, where $B_ = num\_windows \cdot B$ and $N = W_s^2$. Permute to $(3, B_, num\_heads, N, C/num\_heads)$ to separate Q, K, V.
+-2.  **Scale Q:** $q = q \cdot scale$, where $scale = qk\_scale$ if provided, else $head\_dim^{-0.5}$.
+-3.  **Attention Scores:** $attn = q @ k^T$. Shape: $(B_, num\_heads, N, N)$.
+-4.  **Add Bias:** Retrieve bias from table: $bias = \text{table}[relative\_position\_index]$. Reshape bias to $(W_h W_w, W_h W_w, num\_heads)$, permute to $(num\_heads, W_h W_w, W_h W_w)$. Add $bias$ to $attn$.
+-5.  **Softmax:** Apply softmax along the last dimension (key dimension).
+-6.  **Dropout:** Apply attention dropout.
+-7.  **Output Projection:** Compute $out = attn @ v$. Transpose and reshape to $(B_, N, C)$. Apply linear projection and projection dropout [S1, unofficial].
+-
+-#### 4. Window Reverse (Merge)
+-Reconstruct the full image from the processed windows.
++5.  Shift indices to make them non-negative:
++    - $relative\_coords[:, :, 0] += W_h - 1$
++    - $relative\_coords[:, :, 1] += W_w - 1$
++6.  Map to 1D index: $relative\_coords[:, :, 0] *= 2 W_w - 1$.
++7.  Sum to get final index: $relative\_position\_index = relative\_coords.sum(-1)$. Shape: $(W_h W_w, W_h W_w)$ [S1, unofficial].
++
++#### 3. Window Attention Forward (W-MSA)
++Compute attention within each window.
++1.  **Linear Projection**: Compute $qkv = \text{Linear}(x)$. Reshape to $(B_, N, 3, \text{num\_heads}, C/\text{num\_heads})$ where $B_ = num\_windows \cdot B$ and $N = W_s^2$. Permute to $(3, B_, \text{num\_heads}, N, head\_dim)$.
++2.  **Scale Q**: Extract $q, k, v$ from $qkv$. Scale $q$ by $scale = qk\_scale$ if provided, else $head\_dim^{-0.5}$.
++3.  **Attention Scores**: Compute $attn = q \cdot k^T$. Shape: $(B_, \text{num\_heads}, N, N)$.
++4.  **Add Bias**: Retrieve bias $bias = \text{table}[relative\_position\_index]$. Reshape bias to $(W_h W_w, W_h W_w, \text{num\_heads})$. Permute to $(\text{num\_heads}, W_h W_w, W_h W_w)$. Add to $attn$.
++5.  **Softmax**: Apply softmax along the last dimension: $attn = \text{softmax}(attn)$.
++6.  **Dropout**: Apply attention dropout.
++7.  **Output**: Compute $out = attn \cdot v$. Transpose and reshape to $(B_, N, C)$. Apply linear projection and projection dropout [S1, unofficial].
++
++#### 4. Window Reverse
++Reconstruct the full image tensor from the processed windows.
+ 1.  Reshape windows from $(num\_windows \cdot B, W_s, W_s, C)$ to $(B, H/W_s, W/W_s, W_s, W_s, C)$.
+ 2.  Permute to $(B, H/W_s, W_s, W/W_s, W_s, C)$.
+@@ -73,120 +58,85 @@
+ 
+ ### Pseudocode
+-The following Python-like pseudocode implements the core Window Attention mechanism of DuDoTrans. It assumes standard tensor operations (reshape, permute, matmul, add, softmax).
+ 
+ ```python
+ import torch
++import torch.nn as nn
+ import torch.nn.functional as F
+-
+-def window_partition(x, window_size):
+-    """
+-    Reshape (B, H, W, C) into windows.
+-    """
+-    B, H, W, C = x.shape
+-    # Reshape to (B, H//Ws, Ws, W//Ws, Ws, C)
+-    x = x.view(B, H // window_size[0], window_size[0], 
+-              W // window_size[1], window_size[1], C)
+-    # Permute to (B, H//Ws, W//Ws, Ws, Ws, C)
+-    x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
+-    # Flatten to (num_windows * B, Ws, Ws, C)
+-    num_windows = (H // window_size[0]) * (W // window_size[1])
+-    x = x.view(num_windows * B, window_size[0], window_size[1], C)
+-    return x, num_windows
+-
+-def window_reverse(x_windows, num_windows, window_size, H, W):
+-    """
+-    Reconstruct image from windows.
+-    """
+-    B = int(x_windows.shape[0] / num_windows)
+-    # Reshape to (B, H//Ws, W//Ws, Ws, Ws, C)
+-    x = x_windows.view(B, H // window_size[0], W // window_size[1], 
+-                       window_size[0], window_size[1], -1)
+-    # Permute to (B, H//Ws, Ws, W//Ws, Ws, C)
+-    x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
+-    # Flatten to (B, H, W, C)
+-    x = x.view(B, H, W, -1)
+-    return x
+-
+-def relative_position_bias_table(relative_position_index, relative_position_bias_table_tensor):
+-    """
+-    Retrieve bias values using precomputed indices.
+-    """
+-    # relative_position_index shape: (Wh*Ww, Wh*Ww)
+-    # relative_position_bias_table_tensor shape: ((2Wh-1)*(2Ww-1), num_heads)
+-    # Output shape: (num_heads, Wh*Ww, Wh*Ww)
+-    bias = relative_position_bias_table_tensor[relative_position_index]
+-    # bias shape: (Wh*Ww, Wh*Ww, num_heads)
+-    bias = bias.permute(2, 0, 1).contiguous()
+-    return bias
+-
+-def window_attn(x, num_heads, window_size, relative_position_bias_table_tensor, 
+-                qkv_linear, proj_linear, qk_scale=None, dropout_p=0.0):
+-    """
+-    Core Window Attention block.
+-    """
+-    B_, N, C = x.shape
+-    head_dim = C // num_heads
+-    scale = qk_scale if qk_scale is not None else (head_dim ** -0.5)
+-    
+-    # 1. Linear Projection: (B_, N, C) -> (B_, N, 3 * C)
+-    qkv = qkv_linear(x)
+-    # Reshape to (B_, N, 3, num_heads, head_dim)
+-    qkv = qkv.view(B_, N, 3, num_heads, head_dim)
+-    # Permute to (3, B_, num_heads, N, head_dim)
+-    qkv = qkv.permute(2, 0, 3, 1, 4).contiguous()
+-    q, k, v = qkv[0], qkv[1], qkv[2]
+-    
+-    # 2. Scale Q
+-    q = q * scale
+-    
+-    # 3. Attention Scores: (B_, num_heads, N, N)
+-    attn = q @ k.transpose(-2, -1)
+-    
+-    # 4. Add Relative Position Bias
+-    # Compute relative position index if not cached, or use cached buffer
+-    # Assuming relative_position_index is a buffer computed once per window size
+-    # For implementation completeness, we assume it's available or computed here:
+-    Wh, Ww = window_size
+-    coords_h = torch.arange(Wh)
+-    coords_w = torch.arange(Ww)
+-    coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing='ij')) # (2, Wh, Ww)
+-    coords_flatten = coords.reshape(2, -1) # (2, Wh*Ww)
+-    relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :] # (2, Wh*Ww, Wh*Ww)
+-    relative_coords = relative_coords.permute(1, 2, 0).contiguous() # (Wh*Ww, Wh*Ww, 2)
+-    
+-    # Shift indices
+-    relative_coords[:, :, 0] += Wh - 1
+-    relative_coords[:, :, 1] += Ww - 1
+-    # Map to 1D
+-    relative_coords[:, :, 0] *= 2 * Ww - 1
+-    relative_position_index = relative_coords.sum(-1) # (Wh*Ww, Wh*Ww)
+-    
+-    # Retrieve bias
+-    # relative_position_bias_table_tensor shape: ((2Wh-1)*(2Ww-1), num_heads)
+-    bias = relative_position_bias_table_tensor[relative_position_index] # (Wh*Ww, Wh*Ww, num_heads)
+-    bias = bias.permute(2, 0, 1).contiguous() # (num_heads, Wh*Ww, Wh*Ww)
+-    
+-    # Add bias to attention scores
+-    # attn shape: (B_, num_heads, N, N) where N = Wh*Ww
+-    attn = attn + bias
+-    
+-    # 5. Softmax
+-    attn = F.softmax(attn, dim=-1)
+-    
+-    # 6. Dropout
+-    attn = F.dropout(attn, p=dropout_p, training=False) # Training mode handled externally
+-    
+-    # 7. Output
+-    # (B_, num_heads, N, head_dim)
+-    x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+-    
+-    # 8. Projection
+-    x = proj_linear(x)
+-    
+-    return x
+-
+-class DuDoTransBlock(torch.nn.Module):
+-    def __init__(self, dim, num_heads, window_size=(7, 7), shift_size=0, 
+-                 mlp_ratio=4.0, qk_scale=None):
++import math
++
++class WindowAttention(nn.Module):
++    def __init__(self, dim, window_size, num_heads, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
++        super().__init__()
++        self.dim = dim
++        self.window_size = window_size  # Wh, Ww
++        self.num_heads = num_heads
++        head_dim = dim // num_heads
++        self.scale = qk_scale or head_dim ** -0.5
++
++        # Relative position bias table
++        self.relative_position_bias_table = nn.Parameter(
++            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads)
++        )
++        
++        # Get relative_coords_table
++        coords_h = torch.arange(self.window_size[0])
++        coords_w = torch.arange(self.window_size[1])
++        coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
++        coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
++        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
++        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
++        relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
++        relative_coords[:, :, 1] += self.window_size[1] - 1
++        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
++        relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
++        self.register_buffer("relative_position_index", relative_position_index)
++
++        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
++        self.attn_drop = nn.Dropout(attn_drop)
++        self.proj = nn.Linear(dim, dim)
++        self.proj_drop = nn.Dropout(proj_drop)
++
++        nn.init.trunc_normal_(self.relative_position_bias_table, std=.02)
++
++    def forward(self, x, mask=None):
++        """
++        x: shape (B_, N, C) where N = window_size[0] * window_size[1]
++        mask: shape (B_, num_heads, N, N) or None
++        """
++        B_, N, C = x.shape
++        num_heads = self.num_heads
++        head_dim = C // num_heads
++        
++        # QKV projection
++        qkv = self.qkv(x).reshape(B_, N, 3, num_heads, head_dim).permute(2, 0, 3, 1, 4)
++        q, k, v = qkv[0], qkv[1], qkv[2]  # B_, num_heads, N, head_dim
++        
++        # Scale Q
++        q = q * self.scale
++        
++        # Attention scores
++        attn = (q @ k.transpose(-2, -1))
++        
++        # Relative Position Bias
++        relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
++            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)  # Wh*Ww, Wh*Ww, nH
++        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
++        attn = attn + relative_position_bias.unsqueeze(0)
++        
++        if mask is not None:
++            nW = mask.shape[0]
++            attn = attn.view(B_ // nW, nW, num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
++            attn = attn.view(-1, num_heads, N, N)
++            
++        attn = self.attn_drop(attn.softmax(dim=-1))
++        
++        # Output
++        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
++        x = self.proj(x)
++        x = self.proj_drop(x)
++        return x
++
++class SwinTransformerBlock(nn.Module):
++    def __init__(self, dim, num_heads, window_size=7, shift_size=0, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+         super().__init__()
+         self.dim = dim
+@@ -196,78 +146,143 @@
+         self.mlp_ratio = mlp_ratio
+         
+-        # Linear layers for QKV and Output
+-        self.qkv = torch.nn.Linear(dim, dim * 3)
+-        self.proj = torch.nn.Linear(dim, dim)
+-        
+-        # Relative Position Bias Table
+-        Wh, Ww = window_size
+-        num_relative_positions = (2 * Wh - 1) * (2 * Ww - 1)
+-        self.relative_position_bias_table = torch.nn.Parameter(
+-            torch.zeros(num_relative_positions, num_heads)
+-        )
+-        # Truncated normal initialization (std=0.02)
+-        torch.nn.init.trunc_normal_(self.relative_position_bias_table, std=0.02)
+-        
+-        # Precompute relative position index buffer
+-        coords_h = torch.arange(Wh)
+-        coords_w = torch.arange(Ww)
+-        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing='ij'))
+-        coords_flatten = coords.reshape(2, -1)
+-        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+-        relative_coords = relative_coords.permute(1, 2, 0).contiguous()
+-        relative_coords[:, :, 0] += Wh - 1
+-        relative_coords[:, :, 1] += Ww - 1
+-        relative_coords[:, :, 0] *= 2 * Ww - 1
+-        self.register_buffer("relative_position_index", relative_coords.sum(-1))
+-        
+-        self.qk_scale = qk_scale
+-        self.dropout = torch.nn.Dropout(0.0) # Placeholder for actual dropout rate
++        self.norm1 = norm_layer(dim)
++        self.attn = WindowAttention(
++            dim, window_size=window_size, num_heads=num_heads,
++            qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
++        
++        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
++        self.norm2 = norm_layer(dim)
++        mlp_hidden_dim = int(dim * mlp_ratio)
++        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
++
++    def forward(self, x, mask_matrix):
++        H, W = self.H, self.W
++        B, L, C = x.shape
++        shortcut = x
++        x = self.norm1(x)
++        x = x.view(B, H, W, C)
++
++        # Pad feature maps to multiples of window size
++        pad_l = pad_t = (0, 0)
++        pad_b = (self.window_size[0] - H % self.window_size[0]) % self.window_size[0]
++        pad_r = (self.window_size[1] - W % self.window_size[1]) % self.window_size[1]
++        x = F.pad(x, (0, 0, pad_l, pad_r, pad_t, pad_b))
++        _, Hp, Wp, _ = x.shape
++
++        # cyclic shift
++        if self.shift_size > 0:
++            shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
++            attn_mask = mask_matrix
++        else:
++            shifted_x = x
++            attn_mask = None
++
++        # Partition windows
++        x_windows = window_partition(shifted_x, self.window_size)  # nW*B, Wh, Ww, C
++        x_windows = x_windows.view(-1, self.window_size[0] * self.window_size[1], C)  # nW*B, Wh*Ww, C
++
++        # W-MSA/SW-MSA
++        attn_windows = self.attn(x_windows, mask=attn_mask)
++
++        # Merge windows
++        attn_windows = attn_windows.view(-1, self.window_size[0], self.window_size[1], C)
++        shifted_x = window_reverse(attn_windows, self.window_size, Hp, Wp)  # B H' W' C
++
++        # Reverse cyclic shift
++        if self.shift_size > 0:
++            x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
++        else:
++            x = shifted_x
++
++        if pad_b > 0 or pad_r > 0:
++            x = x[:, :H, :W, :].contiguous()
++
++        x = x.view(B, H * W, C)
++
++        # FFN
++        x = shortcut + self.drop_path(x)
++        x = x + self.drop_path(self.mlp(self.norm2(x)))
++        return x
++
++def window_partition(x, window_size):
++    """
++    Args:
++        x: (B, H, W, C)
++        window_size (tuple[int]): window size
++    Returns:
++        windows: (num_windows*B, window_size, window_size, C)
++    """
++    B, H, W, C = x.shape
++    x = x.view(B, H // window_size[0], window_size[0], W // window_size[1], window_size[1], C)
++    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size[0], window_size[1], C)
++    return windows
++
++def window_reverse(windows, window_size, H, W):
++    """
++    Args:
++        windows: (num_windows*B, window_size, window_size, C)
++        window_size (tuple[int]): Window size
++        H (int): Height of image
++        W (int): Width of image
++    Returns:
++        x: (B, H, W, C)
++    """
++    B = int(windows.shape[0] / (H * W / window_size[0] / window_size[1]))
++    x = windows.view(B, H // window_size[0], W // window_size[1], window_size[0], window_size[1], -1)
++    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
++    return x
++
++class Mlp(nn.Module):
++    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
++        super().__init__()
++        out_features = out_features or in_features
++        hidden_features = hidden_features or in_features
++        self.fc1 = nn.Linear(in_features, hidden_features)
++        self.act = act_layer()
++        self.fc2 = nn.Linear(hidden_features, out_features)
++        self.drop = nn.Dropout(drop)
+ 
+     def forward(self, x):
+-        B, H, W, C = x.shape
+-        
+-        # Handle edge case: input smaller than window size
+-        if H <= self.window_size[0] or W <= self.window_size[1]:
+-            self.shift_size = 0
+-            # Window size reduction logic would be needed here if strictly enforced,
+-            # but typically padding or resizing is applied upstream.
+-            # For this implementation, we assume valid input dimensions.
+-            pass
+-
+-        # Window Partitioning
+-        x_windows, num_windows = window_partition(x, self.window_size)
+-        
+-        # Window Attention
+-        x_windows_attn = window_attn(
+-            x_windows, 
+-            self.num_heads, 
+-            self.window_size, 
+-            self.relative_position_bias_table,
+-            self.qkv, 
+-            self.proj, 
+-            self.qk_scale,
+-            self.dropout.p
+-        )
+-        
+-        # Window Reverse
+-        x = window_reverse(x_windows_attn, num_windows, self.window_size, H, W)
+-        
+-        return x
++        x = self.fc1(x)
++        x = self.act(x)
++        x = self.drop(x)
++        x = self.fc2(x)
++        x = self.drop(x)
++        return x
++
++class DropPath(nn.Module):
++    def __init__(self, drop_prob=None):
++        super().__init__()
++        self.drop_prob = drop_prob
++
++    def forward(self, x):
++        return drop_path(x, self.drop_prob, self.training)
++
++def drop_path(x, drop_prob: float = 0., training: bool = False):
++    if drop_prob == 0. or not training:
++        return x
++    keep_prob = 1 - drop_prob
++    shape = (x.shape[0],) + (1,) * (x.ndim - 1)
++    random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
++    random_tensor.floor_()
++    output = x.div(keep_prob) * random_tensor
++    return output
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Input Resolution vs. Window Size:** If the input resolution $(H, W)$ is smaller than or equal to the window size $(W_h, W_w)$, the shift size is forced to $0$ and the window size is reduced to the minimum input dimension to avoid invalid partitioning [S1, unofficial].
+-*   **Precision:** The ray marching implementation in the parent context uses `float` (32-bit) precision. Care must be taken with boundary conditions in the forward projection operator $\mathcal{P}$ to avoid artifacts in the gradient $\frac{\partial \mathcal{L}}{\partial x}$ [S1, unofficial].
+-*   **Memory:** The relative position bias table size grows quadratically with window size. For large windows, this can consume significant memory.
++- **Input Resolution vs Window Size**: If the input resolution ($H$ or $W$) is smaller than or equal to the window size, the shift size is forced to $0$ and the window size is reduced to the minimum input dimension to avoid invalid partitioning [S1, unofficial].
++- **Padding**: Feature maps must be padded to multiples of the window size before partitioning to ensure all pixels are covered by windows [S1, unofficial].
++- **Shifted Windows**: The cyclic shift mechanism requires careful handling of boundary conditions to maintain continuity across window boundaries [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The windowed attention reduces complexity from $O(N^2)$ to $O(N \cdot W_s^2)$, where $N$ is the total number of tokens (pixels/voxels) and $W_s$ is the window size [S1, unofficial]. This makes it significantly faster than global self-attention for high-resolution volumes.
+-*   **Memory Complexity:** Linear in the number of tokens $N$, plus the constant overhead of the relative position bias table $O(W_h W_w \cdot num\_heads)$ [S1, unofficial].
+-*   **Performance:** Designed for sparse-view CT reconstruction, where traditional methods suffer from streak artifacts. DuDoTrans provides high-quality reconstructions by leveraging the dual-domain (sinogram and image) processing capabilities of the transformer [S1, unofficial].
+-*   **Strengths:** Efficient local attention, ability to capture long-range dependencies via shifted windows, differentiable integration with tomographic reconstruction.
+-*   **Limitations:** Performance depends on the quality of the differentiable forward/backward projection operators. Computational cost is higher than non-learning-based iterative methods (e.g., SIRT, SART) per iteration, though convergence may be faster.
++- **Time Complexity**: $O(N \cdot W_s^2)$ per window, where $N$ is the number of tokens and $W_s$ is the window size. This is significantly faster than global attention $O(N^2)$ for large images [S1, unofficial].
++- **Memory Complexity**: Proportional to the number of parameters and the intermediate activations within windows. The relative position bias table size is $O(W_s^2 \cdot \text{num\_heads})$ [S1, unofficial].
++- **Strengths**: Efficiently handles large images by limiting attention to local windows while capturing long-range dependencies through shifted windows. Effective for sparse-view CT reconstruction where global context is crucial but computational resources are limited [S1, unofficial].
++- **Limitations**: Performance may degrade if the window size is not well-tuned for the specific image resolution or feature scale. The cyclic shift operation adds implementation complexity [S1, unofficial].
++- **When to Use**: Suitable for sparse-view CT reconstruction tasks where high-quality 3D volume reconstruction is required from limited projection data [S1, unofficial].
++- **When Not to Use**: Not ideal for real-time applications with strict latency constraints due to the overhead of window partitioning and shifting. Also less effective if the input resolution is very small, as the window size must be reduced [S1, unofficial].
+ 
+ ## Background
+-DuDoTrans was introduced by Ce Wang, Kun Shang, Haimiao Zhang, Qian Li, and S. Kevin Zhou in the paper "DuDoTrans: Dual-Domain Transformer for Sparse-View CT Reconstruction" [S1, unofficial]. It was published in the International Workshop on Machine Learning for Medical Image Reconstruction in 2022. The method adapts the Swin Transformer architecture, originally designed for natural image processing, to the domain of tomographic reconstruction by incorporating differentiable projection operators [S1, unofficial].
++DuDoTrans was introduced by Ce Wang, Kun Shang, Haimiao Zhang, Qian Li, and S. Kevin Zhou in the paper "DuDoTrans: Dual-Domain Transformer for Sparse-View CT Reconstruction," published in the International Workshop on Machine Learning for Medical Image Reconstruction in 2022 [S1, unofficial]. It is part of the broader effort to apply deep learning, specifically transformer architectures, to inverse problems in medical imaging [S1, unofficial].
+ 
+ ## Sources

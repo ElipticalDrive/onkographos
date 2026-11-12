@@ -1,0 +1,42 @@
+# Transformer-based Tomographic Reconstruction
+
+Also called: SSTrans-3D, Slice-by-slice transformer network
+
+## Overview
+Transformer-based Tomographic Reconstruction is a deep learning technique that reconstructs 3D single-photon emission computed tomography (SPECT) images using a slice-by-slice transformer architecture [S1][S2, unofficial]. It addresses the problem of considerable artefacts caused by incomplete projection data in image reconstruction [S1][S2, unofficial]. It differs from sibling methods like [DuDoTrans](1409-dudotrans.md) and alternatives like Deep Iterative Optimization-based Residual-learning (DIOR) by relying entirely on transformer attention mechanisms rather than combining deep learning with iterative optimization [S1][S2, unofficial].
+
+## How it works
+The method reconstructs 3D volumes by processing image slices sequentially or in parallel using transformer blocks, leveraging self-attention to capture long-range dependencies that convolutional neural networks (CNNs) miss due to their local receptive fields [S1][S2, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** Incomplete projection data or low-quality reconstructed slices from SPECT imaging [S1][S2, unofficial].
+*   **Output:** A high-quality 3D SPECT image volume [S1][S2, unofficial].
+
+**Data Structures:**
+The specific internal data structures, bit-packing, or tensor layouts are not given in the sources. The architecture is described conceptually as a "slice-by-slice transformer network" [S1][S2, unofficial].
+
+**Steps:**
+1.  **Input Preparation:** Incomplete projection data is processed to generate initial image slices [S1][S2, unofficial].
+2.  **Slice Processing:** The transformer network processes the image data slice-by-slice [S1][S2, unofficial].
+3.  **Attention Mechanism:** Vision transformers are applied to remove the restrictions of CNNs, allowing the model to understand the whole image rather than being limited by local receptive fields [S1][S2, unofficial].
+4.  **Reconstruction:** The network outputs the reconstructed 3D SPECT image, mitigating artefacts caused by incomplete data [S1][S2, unofficial].
+
+**Formulas:**
+No specific mathematical formulas are provided in the sources [S1][S2, unofficial].
+
+**Parameters:**
+Typical parameter values are not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Incomplete Data:** The method is specifically designed to handle incomplete projection data, which causes considerable artefacts [S1][S2, unofficial].
+*   **CNN Limitations:** Standard CNNs suffer from gradient-vanishing issues when using huge amounts of stacked layers and cannot understand the whole image if the receptive field is smaller than the image size [S1][S2, unofficial].
+
+## Operating characteristics
+Time and memory complexity are not given in the sources. Measured performance, scaling, strengths, and limitations are not given in the sources.
+
+## Background
+The method was proposed to address the limitations of CNNs in image reconstruction, specifically their inability to capture global context when the receptive field is smaller than the image size [S1][S2, unofficial]. It builds on the suggestion to use vision transformers to remove these restrictions [S1][S2, unofficial]. It is compared against Deep Iterative Optimization-based Residual-learning (DIOR), which combines deep learning and iterative optimization to reconstruct limited-angle CT and improve generalization [S1][S2, unofficial].
+
+## Sources
+[S1] A Novel Implicit Neural Representation for Volume Data, https://doi.org/10.3390/app13053242, fetched 2026-10-26
+[S2] Bournemouth University Research Online [BURO] - A Novel Implicit Neural Representation for Volume Data., https://eprints.bournemouth.ac.uk/38355/, fetched 2026-10-29 (unofficial)

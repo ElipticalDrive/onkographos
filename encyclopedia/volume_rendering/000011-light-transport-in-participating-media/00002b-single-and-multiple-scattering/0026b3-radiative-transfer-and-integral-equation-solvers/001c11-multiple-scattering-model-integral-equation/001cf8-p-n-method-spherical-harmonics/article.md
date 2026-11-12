@@ -1,102 +1,179 @@
 # P-N Method (Spherical Harmonics)
-Also called: SH expansion, Spherical Harmonics Expansion for Scattering Equation, Spherical harmonic method, Spherical harmonics expansion
+Also called: SH expansion, Spherical Harmonics Method, Spherical harmonics expansion
 
 ## Overview
-The P-N method solves the multiple scattering integral equation by expanding the directional intensity $I(X, \omega)$ into spherical harmonics over the unit sphere direction $\omega$, converting the integral equation into a coupled system of partial differential equations for the harmonic coefficients [S1, unofficial][S2, unofficial][S4, unofficial]. It is mathematically equivalent to the discrete ordinates method with $M$ properly placed directions, which specify the directional intensity distribution to the same detail as $M$ spherical harmonic coefficients [S2, unofficial][S4, unofficial].
+The P-N method solves the radiative transfer equation for participating media by expanding the directional radiance $I(X, \omega)$ into a truncated spherical harmonics basis, converting the integral transport equation into a coupled system of partial differential equations (PDEs) for the expansion coefficients [S1, S4, S6, unofficial]. It is distinguished from the Diffusion Approximation by retaining higher-order angular moments to handle anisotropic scattering more accurately, and from the Discrete Ordinates Method by its continuous angular basis which avoids ray effects [S2, S5][S6, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** The scattering source term $Z(z, s)$ (or $Z(X, \omega)$), representing emission and single-scattering contributions [S1, unofficial][S2, unofficial][S4, unofficial].
-*   **Output:** The spherical harmonic coefficients $I_l^m(z)$, which reconstruct the directional intensity [S1, unofficial][S2, unofficial][S4, unofficial].
+**Inputs:**
+*   Spatial domain (typically 1D slab geometry $z$ or 3D volume) [S1, S4, unofficial].
+*   Extinction coefficient $\sigma_t(z)$ [S1, unofficial].
+*   Albedo $w_0$ (scattering albedo) [S1, unofficial].
+*   Phase function $p(\omega, \omega')$ [S1, unofficial][S2].
+*   Boundary conditions (incident radiance) [S1, unofficial].
+
+**Outputs:**
+*   Spherical harmonic coefficients $I_l^m(z)$ (or $I_l^m(X)$ in 3D) [S1, S4, unofficial].
+*   Reconstructed radiance $I(X, \omega)$ via inverse expansion [S1, unofficial].
 
 **Data Structures:**
-*   **Spherical Harmonic Coefficients:** A set of coefficients $I_l^m$ for $0 \le l \le N$ and $-l \le m \le l$ [S1, unofficial][S2, unofficial][S4, unofficial].
-*   **Phase Function Matrix:** A diagonal matrix in the spherical harmonic basis, derived from the phase function $p(\Omega \cdot \Omega')$ [S1, unofficial].
+*   **Harmonic Coefficients:** A 2D array or list of tuples storing $I_l^m$ for $0 \le l \le L_{max}$ and $-l \le m \le l$.
+*   **Matrix Elements:** Precomputed coupling matrices for the phase function and direction operators. For the phase function, the matrix is diagonal in the spherical harmonic basis [S1, unofficial].
 
-**Steps:**
-1.  **Expansion:** Expand the source term $Z(z, s)$ into spherical harmonics in direction $s$:
-    $$ Z(z, s) = \sum_{l=0}^{\infty} \sum_{m=-l}^{l} I_l^m(z) Y_l^m(s) $$
-    where $Y_l^m$ are the normalized spherical harmonics of degree $l$ and order $m$ [S1, unofficial].
-2.  **Projection:** Multiply the scattering equation by $Y_{l'}^{m'}(s)$ and integrate over the sphere to isolate the coefficients, obtaining a coupled set of first-order PDEs for $I_l^m(z)$ [S1, unofficial].
-3.  **Direction Operator Matrix Elements:** Calculate the matrix elements for the direction operator $\mathbf{s}$ using Legendre polynomial recursion relations:
-    $$ P_{l,m+1}(\mu)(1-\mu^2)^{1/2} = k_0 P_{l+1,m} - k_1 P_{l-1,m} $$
-    $$ P_{l,m}(\mu) = k_2 P_{l+1,m} - k_3 P_{l-1,m} $$
-    where $k_0 = \frac{(l-m+1)(l-m+2)}{2l+1}$, $k_1 = \frac{(l+m-1)(l+m)}{2l+1}$, $k_2 = \frac{l+m}{2l+1}$, and $k_3 = \frac{l-m+1}{2l+1}$ [S1, unofficial].
-4.  **Phase Operator Matrix Elements:** Use Laplace's formula for the product of Legendre polynomials to show that the phase function matrix is diagonal with respect to spherical harmonics, meaning no scattering occurs between different spherical harmonics [S1, unofficial].
-5.  **Truncation:** Truncate the expansion after the $l=N$ term. For graphics applications, truncation at $l=1$ (p-wave) is used [S1, unofficial].
-6.  **Solution:** Solve the coupled PDE system using finite difference methods [S2, unofficial][S3].
+**Definitions:**
+*   Spherical Harmonics $Y_l^m(\omega)$: Normalized spherical harmonics of degree $l$ and order $m$ [S1, unofficial].
+*   Associated Legendre Polynomials $P_l^m(\mu)$: Where $\mu = \cos \theta$ [S1, unofficial].
+*   Truncation Level $L_{max}$: The maximum degree of the expansion. Graphics applications typically use $L_{max}=1$ (p-wave) [S1, unofficial]. Other sources mention truncation after the fourth coefficient [S2][S3, book].
+
+**Step-by-Step Method:**
+
+1.  **Expansion:** Express the source term (or radiance) $Z(z, \omega)$ as a sum of spherical harmonics:
+    $$ Z(z, \omega) = \sum_{l=0}^{L_{max}} \sum_{m=-l}^{l} I_l^m(z) Y_l^m(\omega) $$
+    [S1, S4, unofficial]
+
+2.  **Projection:** Multiply the radiative transfer equation by $Y_{l'}^{m'}(\omega)$ and integrate over the unit sphere to isolate the coefficients. This yields a coupled system of first-order PDEs for $I_l^m(z)$ [S1, S4, unofficial].
+    The general form derived is:
+    $$ \sum_{l,m} I_l^m(z) \langle Y_{l'}^{m'}, \mathbf{s} \cdot \nabla Y_l^m \rangle - I_{l'}^{m'}(z) \sigma_t + \sum_{l,m} I_l^m(z) \langle Y_{l'}^{m'}, p \cdot Y_l^m \rangle = 0 $$
+    [S1, unofficial]
+
+3.  **Matrix Element Calculation:**
+    *   **Phase Function Matrix:** Use Laplace's formula for the product of Legendre polynomials to show the phase function matrix is diagonal with respect to spherical harmonics [S1, unofficial].
+        $$ \langle Y_{l'}^{m'}, p \cdot Y_l^m \rangle = \delta_{l l'} \delta_{m m'} \frac{4\pi}{2l+1} \tilde{p}_l $$
+        where $\tilde{p}_l$ are the Legendre coefficients of the phase function [S1, unofficial].
+    *   **Direction Operator Matrix:** Calculate matrix elements for the direction operator $\mathbf{s} \cdot \nabla$ (or $\mathbf{s}$ in 1D slab). This involves recursion relations for associated Legendre polynomials:
+        $$ P_{l, m+1}(\mu)(1-\mu^2)^{1/2} = k_0 P_{l+1, m} - k_1 P_{l-1, m} $$
+        $$ P_{l, m}(\mu) = k_2 P_{l+1, m} - k_3 P_{l-1, m} $$
+        with coefficients:
+        $$ k_0 = \frac{(l-m+1)(l-m+2)}{2l+1}, \quad k_1 = \frac{(l+m-1)(l+m)}{2l+1} $$
+        $$ k_2 = \frac{l+m}{2l+1}, \quad k_3 = \frac{l-m+1}{2l+1} $$
+        [S1, unofficial]
+
+4.  **System Assembly:** Assemble the coupled linear system of PDEs for the coefficients $I_l^m$. For 1D slab geometry, these become ODEs in $z$ [S1, unofficial].
+
+5.  **Solution:** Solve the system of PDEs/ODEs.
+    *   **Relaxation:** The system can be solved by relaxation methods [S2][S3, book].
+    *   **Finite Difference:** In 3D or general geometries, finite difference methods are used [S4, unofficial][S5].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_pn_coefficients(source_Z, truncation_N, phase_p, spatial_grid):
-    # Initialize coefficients I[l][m] for 0 <= l <= N, -l <= m <= l
-    I = [[0.0] * (2 * N + 1) for _ in range(N + 1)]
+def solve_pn_method(sigma_t, albedo_w0, phase_function_legendre_coeffs, domain_size, num_points, L_max):
+    """
+    Solves the P-N method for a 1D slab geometry.
+    
+    Args:
+        sigma_t: Array of extinction coefficients [num_points].
+        albedo_w0: Scattering albedo (scalar or array).
+        phase_function_legendre_coeffs: Array of Legendre coefficients for the phase function.
+        domain_size: Length of the slab.
+        num_points: Number of spatial discretization points.
+        L_max: Truncation level (e.g., 1 for p-wave).
+        
+    Returns:
+        I_lm: Array of spherical harmonic coefficients [num_points, num_coeffs].
+    """
+    # 1. Define spherical harmonic basis and coupling matrices
+    # Number of coefficients for truncation L_max is (L_max + 1)^2
+    num_coeffs = (L_max + 1) ** 2
+    
+    # Precompute direction operator matrices (coupling between l,m and l',m')
+    # This involves the recursion relations for associated Legendre polynomials
+    direction_matrix = compute_direction_operator_matrix(L_max)
+    
+    # Precompute phase function matrix (diagonal in SH basis)
+    phase_matrix = compute_phase_function_matrix(L_max, phase_function_legendre_coeffs)
+    
+    # 2. Discretize spatial domain
+    dz = domain_size / num_points
+    z = np.linspace(0, domain_size, num_points)
+    
+    # 3. Initialize coefficient arrays
+    # I_lm[i, k] stores the coefficient for the k-th harmonic at point i
+    I_lm = np.zeros((num_points, num_coeffs))
+    
+    # 4. Set up boundary conditions
+    # Example: Incident radiance at z=0
+    # This requires projecting incident radiance onto SH basis
+    I_lm[0, :] = project_boundary_radiance(L_max) 
+    
+    # 5. Solve the coupled system of ODEs
+    # The system is of the form: A * dI/dz + B * I = 0
+    # Construct matrices A and B for each spatial point or globally
+    
+    # For simplicity, using a relaxation or iterative solver as suggested in sources
+    # In practice, this is a boundary value problem often solved via shooting or matrix inversion
+    
+    for iteration in range(max_iterations):
+        for i in range(1, num_points): # Sweep from boundary
+            # Update coefficients based on neighbors and source
+            # This step implements the relaxation of the PDE system
+            I_lm[i, :] = solve_local_system(I_lm[i-1, :], sigma_t[i], albedo_w0, 
+                                            direction_matrix, phase_matrix, dz)
+            
+    return I_lm
 
-    # Precompute phase function moments (diagonal elements)
-    # a_l = (2l+1)/(4pi) * integral_{-1}^{1} p(mu) P_l(mu) dmu
-    phase_moments = []
-    for l in range(N + 1):
-        integral = 0.0
-        for i in range(100):
-            mu = -1.0 + 2.0 * i / 99.0
-            d_mu = 2.0 / 99.0
-            integral += phase_p(mu) * legendre_P(l, mu) * d_mu
-        phase_moments.append((2 * l + 1) / (4.0 * 3.14159265358979) * integral)
+def compute_direction_operator_matrix(L_max):
+    """
+    Computes the matrix elements for the direction operator s using 
+    recursion relations for associated Legendre polynomials.
+    """
+    # Implementation of the recursion relations:
+    # P_{l, m+1}(mu)(1-mu^2)^{1/2} = k0 P_{l+1, m} - k1 P_{l-1, m}
+    # P_{l, m}(mu) = k2 P_{l+1, m} - k3 P_{l-1, m}
+    # And Laplace's formula for the product of Legendre polynomials
+    pass
 
-    # Precompute direction operator coupling coefficients using Legendre recursion
-    direction_couplings = []
-    for l in range(N):
-        for m in range(-l, l + 1):
-            k0 = ((l - m + 1) * (l - m + 2)) / (2 * l + 1)
-            k1 = ((l + m - 1) * (l + m)) / (2 * l + 1)
-            k2 = (l + m) / (2 * l + 1)
-            k3 = (l - m + 1) / (2 * l + 1)
-            direction_couplings.append((l, m, k0, k1, k2, k3))
-
-    # Solve the coupled PDE system for I[l][m] using finite difference methods [S2, unofficial][S3]
-    # The system couples adjacent l orders via direction operator matrix elements
-    # and diagonal phase moments. Boundary conditions must be applied at domain edges.
-    for point in spatial_grid:
-        # Finite difference iteration to solve s . grad I - I + phase_coupling = 0
-        # Implementation depends on spatial discretization scheme
-        pass
-
-    return I
-
-def legendre_P(l, mu):
-    # Standard recursive evaluation of Legendre polynomial P_l^0(mu)
-    if l == 0: return 1.0
-    if l == 1: return mu
-    P_prev2, P_prev1 = 1.0, mu
-    for k in range(2, l + 1):
-        P_curr = ((2 * k - 1) * mu * P_prev1 - (k - 1) * P_prev2) / k
-        P_prev2, P_prev1 = P_prev1, P_curr
-    return P_curr
+def compute_phase_function_matrix(L_max, phase_coeffs):
+    """
+    Computes the diagonal phase function matrix.
+    The phase function matrix is diagonal with respect to spherical harmonics.
+    """
+    matrix = np.zeros(((L_max + 1)**2, (L_max + 1)**2))
+    for l in range(L_max + 1):
+        # Diagonal element for degree l
+        # Value depends on the Legendre coefficient of the phase function
+        idx = l**2 # Index mapping for m=0, assuming diagonal dominance or specific ordering
+        # Note: Full matrix requires mapping (l,m) to index
+        matrix[idx, idx] = phase_coeffs[l]
+    return matrix
 ```
 
 **Parameters:**
-*   **Truncation Level ($N$):** The maximum degree of spherical harmonics. $N=1$ (p-wave) is used for graphics applications [S1, unofficial].
+*   **Truncation Level ($L_{max}$):** Graphics applications typically use $L_{max}=1$ (p-wave) [S1, unofficial]. Other implementations truncate after the fourth coefficient [S2][S3, book].
+*   **Phase Function:** Only constant and Rayleigh phase functions are considered in the original Kajiya/Von Herzen work [S2][S3, book].
 
 **Edge Cases and Pitfalls:**
-*   **High Albedo:** The method may require many terms to converge if the albedo $w_0$ is close to one, as the series is geometric in $w_0$ [S1, unofficial].
-*   **Boundary Conditions:** Proper boundary conditions must be applied to the PDE system, which can be non-trivial in complex geometries [G].
-*   **Ray Effects:** While equivalent to the discrete ordinates method, the latter can suffer from ray effects if directions are not properly placed [S2, unofficial][S4, unofficial].
+*   **Surface-Volume Interaction:** The original method does not take into account effects between surfaces and volumes [S2][S3, book]. Extensions by Bhate and Tokuta address this by extending the zonal method [S2][S3, book].
+*   **High Albedo:** The Neumann expansion approach (related to P-N) may require many terms if albedo $w_0$ is close to one [S1, unofficial].
+*   **Ray Effects:** Unlike discrete ordinates, P-N avoids ray effects due to its continuous basis [S5][S6, unofficial].
+
+## Subtopics
+
+### Discrete Ordinates Method
+Uses a collection of $M$ discrete directions for optimal Gaussian quadrature. Equivalent to P-N with $M$ properly placed directions but suffers from ray effects if not modified. [Discrete Ordinates Method](1298-discrete-ordinates-method.md)
+
+### Diffusion Approximation
+A lower-order approximation suitable for highly scattering media, neglecting angular detail compared to P-N. [Diffusion Approximation](2372-diffusion-approximation.md)
+
+### Monte Carlo Method for Multiple Scattering
+Stochastic approach, computationally expensive but accurate, unlike the deterministic P-N. [Monte Carlo Method for Multiple Scattering](1940-monte-carlo-method-for-multiple-scattering.md)
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the truncation level $N$. Solving the coupled PDE system scales with the number of coefficients and the spatial discretization [S2, unofficial][S4, unofficial].
-*   **Memory Complexity:** Proportional to $(N+1)^2$ coefficients per spatial point [S2, unofficial][S4, unofficial].
-*   **Strengths:** Provides a smooth angular representation. Mathematically equivalent to discrete ordinates with optimal direction placement [S2, unofficial][S4, unofficial].
-*   **Limitations:** High-albedo media require high $N$, increasing computational cost [S1, unofficial]. Solving coupled PDEs is complex to implement compared to simpler approximations [G].
-*   **When to Use:** Suitable for graphics applications where $N=1$ provides a convincing image with low computational cost [S1, unofficial]. Also used in thermal engineering and neutron transport [S2, unofficial][S4, unofficial].
-*   **When Not to Use:** Not suitable for very high-albedo media without high $N$, which may be computationally prohibitive [S1, unofficial].
+*   **Time Complexity:** Depends on the number of spherical harmonic coefficients $N_{SH} = (L_{max}+1)^2$. Solving the coupled PDE system scales with $N_{SH}^2$ or $N_{SH}^3$ depending on the solver.
+*   **Memory Complexity:** Proportional to the number of spatial points times $N_{SH}$.
+*   **Strengths:** Handles anisotropic scattering better than diffusion; avoids ray effects of discrete ordinates; deterministic.
+*   **Limitations:** Computationally expensive for high $L_{max}$; original formulation ignores surface-volume interactions; complex to implement for general 3D geometries compared to simpler approximations.
+*   **When to use:** When anisotropic scattering is important and ray effects are unacceptable, and computational resources allow for solving coupled PDEs.
 
 ## Background
-The method was originally developed by Chandrasekhar for stellar atmospheres and applied to computer graphics by Kajiya and Von Herzen [S2, unofficial][S3]. In thermal engineering, it is called the P-N method [S4, unofficial]. It is detailed in Kajiya's 1984 paper "Ray Tracing for Volume Densities" [S1, unofficial]. It serves as an alternative to the Diffusion Approximation and the Discrete Ordinates Method [S2, unofficial].
+The P-N method was originally developed by Chandrasekhar for stellar atmospheres and applied to computer graphics by Kajiya and Von Herzen [S4, unofficial][S5]. In thermal engineering, it is known as the P-N method [S6, unofficial]. It is a deterministic method that deals with anisotropy by expanding radiance in a truncated spherical harmonic basis [S2].
 
 ## Sources
 [S1] Ray Tracing for Volume Densities, https://www.scribd.com/document/746685923/ray-tracking-volume-densities, fetched 2026-10-25 (unofficial)
-[S2] Optical Models for Direct Volume Rendering, https://courses.cs.duke.edu/spring03/cps296.8/papers/max95opticalModelsForDirectVolumeRendering.pdf, fetched 2026-10-26 (unofficial)
-[S3] Optical models for direct volume rendering, https://www.academia.edu/49467168/Optical_models_for_direct_volume_rendering, fetched 2026-10-27
-[S4] Mathematical models for volume rendering and neutron transport, https://digital.library.unt.edu/ark:/67531/metadc1274949/?q=volume rendering equation, fetched 2026-10-28 (unofficial)
+[S2] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26
+[S3] Global Illumination Techniques for the Simulation of Participating Media, https://inria.hal.science/inria-00510096v1, fetched 2026-10-26 (book)
+[S4] [PDF] Optical Models for Direct Volume Rendering - Duke Computer Science, https://courses.cs.duke.edu/spring03/cps296.8/papers/max95opticalModelsForDirectVolumeRendering.pdf, fetched 2026-10-26 (unofficial)
+[S5] Optical models for direct volume rendering (PDF) - Academia.edu, https://www.academia.edu/49467168/Optical_models_for_direct_volume_rendering, fetched 2026-10-27
+[S6] Mathematical models for volume rendering and neutron transport, https://digital.library.unt.edu/ark:/67531/metadc1274949/?q=volume rendering equation, fetched 2026-10-28 (unofficial)
