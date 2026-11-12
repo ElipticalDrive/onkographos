@@ -1,0 +1,557 @@
+--- v004.md
++++ v005.md
+@@ -3,322 +3,266 @@
+ 
+ ## Overview
+-Volume Utility Functions provide a collection of low-level, domain-specific operations for preparing, validating, and transforming volumetric data prior to rendering or analysis. Unlike [Volume Normalization](1823-volume-normalization.md), which focuses on standardizing intensity distributions for visualization, these functions handle structural adjustments (dimensionality, voxel scale), format conversions (half-precision, normal encoding), and data integrity checks (NIfTI analysis, region validation). They serve as the foundational preprocessing layer described in [Data Preprocessing and Normalization](6880-data-preprocessing-and-normalization.md).
++Volume Utility Functions provide a collection of low-level operations for tensor manipulation, data validation, and format conversion required before or after volume rendering pipelines. They solve the problem of ensuring data consistency across heterogeneous sources (e.g., NIfTI, raw binary, web viewers) by handling dimensionality expansion, intensity normalization, voxel resampling, and memory alignment. Unlike [Volume Normalization](1823-volume-normalization.md) which focuses on statistical scaling, these functions handle structural integrity and format compatibility. They differ from [Image Resizing Utilities](11843-image-resizing-utilities.md) by including specific medical intensity handling (Hounsfield units) and 3D tensor-aware operations.
+ 
+ ## How it works
+-The module comprises several distinct utility functions, each addressing a specific data transformation or validation need.
+-
+-### make_nd
+-Ensures a tensor has a specific number of dimensions by prepending singleton dimensions.
+-
+-**Inputs:**
+-- `t`: Input tensor (PyTorch or NumPy).
+-- `n`: Target number of dimensions (integer).
+-
+-**Outputs:**
+-- Tensor with shape `(1, 1, ..., t.shape)` such that `len(output.shape) == n`.
+-
+-**Steps:**
+-1. Check if `n < t.ndim`. If true, raise an exception [S1, unofficial].
+-2. While `t.ndim < n`, prepend a dimension of size 1 to `t` [S1, unofficial].
+-
+-**Pseudocode:**
++The module comprises several distinct utility functions. The core methods are `make_nd`, `normalize_hounsfield`, and `normalize_voxel_scale`. Additional variants handle region validation, vector encoding, and memory alignment.
++
++### Inputs and Outputs
++- **`make_nd`**: Input is a tensor `t` of arbitrary dimensionality `t.ndim`. Output is a tensor of dimensionality `n`.
++- **`normalize_hounsfield`**: Input is a volume `vol` (torch tensor or numpy array). Output is a volume with values clamped to $[0, 1]$.
++- **`normalize_voxel_scale`**: Input is a volume `vol` and a voxel scale tensor `vox_scl` of shape $[3]$. Output is a resampled volume with new dimensions derived from `vox_scl`.
++- **`vpNormalIndex` / `vpNormal`**: Input is a normalized 3D vector $(n_x, n_y, n_z)$ or a 16-bit integer. Output is a 16-bit integer or a 3D vector, respectively.
++- **`AlignUp`**: Input is `byteCount` and `wordSize`. Output is the aligned byte count.
++- **`Scale Unpacking`**: Input is a buffer of bytes `src`. Output is an array of floats `out`.
++
++### Data Structures
++- **Tensor**: A multi-dimensional array (e.g., PyTorch `torch.Tensor` or NumPy `ndarray`).
++- **Voxel Scale**: A 1D tensor/array of length 3, representing scaling factors for X, Y, and Z axes.
++- **Region Coordinates**: A tuple or array containing minimum and maximum coordinates for X, Y, and Z axes.
++- **Encoded Normal**: A 16-bit integer (`int16` or `uint16`) representing a quantized 3D vector.
++
++### Numbered Steps and Formulas
++
++#### 1. Dimensionality Expansion (`make_nd`)
++1. Check if $n < t.ndim$. If true, raise an exception.
++2. While $t.ndim < n$:
++   - Prepend a singleton dimension to `t`.
++   - Update `t.ndim`.
++3. Return `t`.
++
++#### 2. Hounsfield Normalization (`normalize_hounsfield`)
++1. If `dtype` is provided, cast `vol` to `dtype`.
++2. Divide all voxel values in `vol` by 4095.
++3. Clamp the resulting values to the range $[0, 1]$.
++   - Formula: $v_{out} = \text{clamp}\left(\frac{v_{in}}{4095}, 0, 1\right)$.
++4. Return the normalized volume.
++
++#### 3. Voxel Scale Resampling (`normalize_voxel_scale`)
++1. Calculate the new shape of the volume based on the original shape and `vox_scl`.
++   - Let $S_{old} = [W, H, D]$ be the original dimensions.
++   - Let $S_{new} = [W', H', D']$ be the target dimensions.
++   - The relationship is determined by the voxel scale: $W' = W \times \frac{s_x}{s_{target}}$, etc. (Note: The source [S1, unofficial] states it resamples based on voxel scale using trilinear interpolation, implying a change in physical extent or resolution).
++2. Perform trilinear interpolation to resample `vol` from $S_{old}$ to $S_{new}$.
++3. Return the resampled volume.
++
++#### 4. Normal Vector Encoding/Decoding (`vpNormalIndex` / `vpNormal`)
++1. **Encoding**:
++   - Input: Normalized vector $(n_x, n_y, n_z)$ such that $n_x^2 + n_y^2 + n_z^2 = 1$.
++   - Compute a 16-bit integer index using the VolPack encoding scheme [S4].
++2. **Decoding**:
++   - Input: 16-bit integer `n`.
++   - Decode `n` back into components $(n_x, n_y, n_z)$ stored at provided pointers [S4].
++
++#### 5. Region Normalization and Validation
++1. Extract minimum coordinates $(min_x, min_y, min_z)$ and maximum coordinates $(max_x, max_y, max_z)$ from the region.
++2. Clamp minimum coordinates:
++   - $min_x, min_z \leftarrow \text{clamp}(min, \text{FIRST\_INDEX}, \text{CHUNK\_SIZE})$
++   - $min_y \leftarrow \text{clamp}(min, \text{FIRST\_INDEX}, \text{height})$
++3. Clamp maximum coordinates:
++   - $max_x, max_z \leftarrow \text{clamp}(max, min_x, \text{CHUNK\_SIZE})$
++   - $max_y \leftarrow \text{clamp}(max, min_y, \text{height})$
++4. Check if the region is empty:
++   - If $min_i \ge max_i$ for any axis $i \in \{x, y, z\}$, the region is empty.
++5. Return the clamped region or an empty indicator.
++
++#### 6. Memory Alignment (`AlignUp`)
++1. Input: `byteCount` (uint64), `wordSize` (uint64).
++2. Calculate aligned size:
++   - Formula: $\text{aligned} = \left\lceil \frac{\text{byteCount}}{\text{wordSize}} \right\rceil \times \text{wordSize}$.
++   - Implementation: `(byteCount + wordSize - 1) // wordSize * wordSize` using integer division.
++3. Return `aligned`.
++
++#### 7. Scale Unpacking
++1. Input: Byte buffer `src`, integer `coordCount` (where `coordCount = pointCount * 3`).
++2. Initialize output array `out` of size `coordCount`.
++3. For each index $i$ from 0 to `coordCount - 1`:
++   - $out[i] = \frac{src[i]}{16.0} - 10.0$.
++4. Return `out`.
++
++### Pseudocode
++
+ ```python
+-def make_nd(t, n):
++import torch
++import numpy as np
++
++def make_nd(t: torch.Tensor, n: int) -> torch.Tensor:
+     """
+     Prepends singleton dimensions to tensor t until it is n-dimensional.
++    Raises exception if n < t.ndim.
+     """
+     if n < t.ndim:
+-        raise ValueError(f"Target dimensions {n} less than current dimensions {t.ndim}")
+-    
+-    # Prepend (n - t.ndim) singleton dimensions
+-    for _ in range(n - t.ndim):
++        raise ValueError(f"Target dimension {n} is less than current dimension {t.ndim}")
++    
++    while t.ndim < n:
+         t = t.unsqueeze(0)
++    return t
++
++def normalize_hounsfield(vol, dtype=None):
++    """
++    Normalizes volume by 4095 and clamps to [0, 1].
++    Handles torch tensors and numpy arrays.
++    """
++    if dtype is not None:
++        if isinstance(vol, torch.Tensor):
++            vol = vol.to(dtype)
++        else:
++            vol = vol.astype(dtype)
++            
++    # Normalize
++    vol = vol / 4095.0
++    
++    # Clamp to [0, 1]
++    if isinstance(vol, torch.Tensor):
++        vol = torch.clamp(vol, min=0.0, max=1.0)
++    else:
++        vol = np.clip(vol, 0.0, 1.0)
+         
+-    return t
++    return vol
++
++def normalize_voxel_scale(vol, vox_scl):
++    """
++    Resamples volume to new shape based on voxel scale using trilinear interpolation.
++    vox_scl: Tensor of shape [3].
++    """
++    # Note: Exact resampling logic depends on the definition of vox_scl relative to target resolution.
++    # Assuming vox_scl defines the new voxel sizes, and we want to preserve physical extent.
++    # This is a placeholder for the specific interpolation logic provided by the library.
++    # In practice, this involves calculating new grid dimensions and using scipy.ndimage.zoom or similar.
++    # For the purpose of this article, we assume a library function handles the trilinear interpolation.
++    # [G] Implementation detail: Calculate new_shape = old_shape * (old_voxel_size / vox_scl).
++    # Then apply trilinear interpolation.
++    raise NotImplementedError("Specific interpolation implementation depends on the underlying library (e.g., scipy, torch.nn.functional.interpolate)")
++
++def align_up(byte_count: int, word_size: int) -> int:
++    """
++    Rounds up byteCount to the nearest wordSize.
++    """
++    return (byte_count + word_size - 1) // word_size * word_size
++
++def unpack_scale(src: list, coord_count: int) -> list:
++    """
++    Decodes packed scale data from a buffer into floating-point log-scale values.
++    """
++    out = [0.0] * coord_count
++    for i in range(coord_count):
++        out[i] = src[i] / 16.0 - 10.0
++    return out
++
++def clamp_region(region_min, region_max, chunk_size, height, first_index=0):
++    """
++    Clamps region coordinates to valid chunk bounds.
++    """
++    min_x, min_y, min_z = region_min
++    max_x, max_y, max_z = region_max
++    
++    # Clamp min
++    min_x = max(first_index, min_x)
++    min_y = max(first_index, min_y)
++    min_z = max(first_index, min_z)
++    
++    # Clamp max
++    max_x = min(chunk_size, max_x)
++    max_y = min(height, max_y)
++    max_z = min(chunk_size, max_z)
++    
++    # Ensure min <= max
++    if min_x >= max_x or min_y >= max_y or min_z >= max_z:
++        return None # Empty region
++        
++    return (min_x, min_y, min_z), (max_x, max_y, max_z)
+ ```
+ 
+-### normalize_hounsfield
+-Normalizes a medical volume (Hounsfield Units) to the range $[0, 1]$.
+-
+-**Inputs:**
+-- `vol`: Input volume (NumPy array or PyTorch tensor).
+-- `dtype`: Optional output data type.
+-
+-**Outputs:**
+-- Volume with values in $[0, 1]$.
+-
+-**Steps:**
+-1. Divide all voxel values by 4095 [S1, unofficial].
+-2. Clamp the result to the range $[0, 1]$ [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def normalize_hounsfield(vol, dtype=None):
+-    """
+-    Normalizes Hounsfield Unit volume by 4095 and clamps to [0, 1].
+-    """
+-    # Divide by max HU range
+-    normalized = vol / 4095.0
+-    
+-    # Clamp to [0, 1]
+-    normalized = torch.clamp(normalized, 0.0, 1.0) if isinstance(normalized, torch.Tensor) else np.clip(normalized, 0.0, 1.0)
+-    
+-    if dtype is not None:
+-        normalized = normalized.to(dtype)
+-        
+-    return normalized
+-```
+-
+-### normalize_voxel_scale
+-Resamples a volume to a new shape based on a target voxel scale.
+-
+-**Inputs:**
+-- `vol`: Input volume.
+-- `vox_scl`: Target voxel scale as a tensor/array of shape `[3]` (sx, sy, sz) [S1, unofficial].
+-
+-**Outputs:**
+-- Resampled volume with shape adjusted to match the new voxel scale.
+-
+-**Steps:**
+-1. Calculate the new shape based on the original physical size and `vox_scl` [S1, unofficial].
+-2. Resample the volume using trilinear interpolation to the new shape [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def normalize_voxel_scale(vol, vox_scl):
+-    """
+-    Resamples volume to new shape based on voxel scale using trilinear interpolation.
+-    """
+-    # Assuming vol is a tensor/array with shape (D, H, W) or (C, D, H, W)
+-    # Calculate new dimensions based on physical size / new voxel size
+-    # Note: Exact implementation depends on library (e.g., torch.nn.functional.interpolate)
+-    # This is a conceptual representation of the trilinear resampling step.
+-    
+-    # 1. Determine new shape
+-    # original_spacing = get_original_spacing(vol) # Helper not defined in sources
+-    # new_shape = calculate_new_shape(original_spacing, vox_scl, vol.shape)
+-    
+-    # 2. Resample
+-    # resampled = interpolate_trilinear(vol, new_shape)
+-    
+-    # Placeholder for library-specific resampling logic
+-    raise NotImplementedError("Trilinear resampling implementation depends on specific tensor library (e.g., PyTorch, NumPy)")
+-```
+-
+-### Vector Normalization
+-Converts a 3D vector into a unit vector.
+-
+-**Inputs:**
+-- `v`: Input 3D vector.
+-
+-**Outputs:**
+-- Unit vector $\hat{v} = \frac{v}{\|v\|}$.
+-- Zero vector if $\|v\| < \epsilon$ (precision threshold) [S3, unofficial].
+-
+-**Steps:**
+-1. Compute magnitude $\|v\|$ [S3, unofficial].
+-2. If $\|v\| < \epsilon$, return zero vector [S3, unofficial].
+-3. Otherwise, return $v / \|v\|$ [S3, unofficial].
+-4. Some implementations modify the input vector in place [S2, unofficial].
+-
+-### Half-Precision Float Conversion
+-Converts between IEEE 754 single-precision (32-bit) and half-precision (16-bit) formats.
+-
+-**Inputs:**
+-- 32-bit float or 16-bit half-precision value.
+-
+-**Outputs:**
+-- Converted value.
+-- Packed 32-bit integer containing two half-precision values [S2, unofficial].
+-
+-**Steps:**
+-1. Use explicit bit manipulation and `memcpy` to avoid undefined behavior from type punning (e.g., pointer casting) [S2, unofficial].
+-2. For packing: combine two 16-bit halves into a 32-bit integer [S2, unofficial].
+-
+-**Pseudocode:**
+-```python
+-import struct
+-
+-def float_to_half(f):
+-    """Converts a 32-bit float to a 16-bit half-precision float using struct."""
+-    # Pack as 32-bit float, unpack as 2 16-bit integers (little-endian)
+-    packed = struct.pack('<f', f)
+-    # Note: Direct bit manipulation is preferred in C++, but struct is safe in Python
+-    # This is a simplified representation; actual IEEE 754 conversion requires bit shifting
+-    # to handle exponent bias and mantissa truncation.
+-    # For strict implementation, use a library or explicit bit logic.
+-    raise NotImplementedError("Explicit IEEE 754 bit manipulation required for accurate float16 conversion")
+-
+-def half_to_float(h):
+-    """Converts a 16-bit half-precision float to a 32-bit float."""
+-    raise NotImplementedError("Explicit IEEE 754 bit manipulation required")
+-
+-def pack_two_halves(h1, h2):
+-    """Packs two half-precision values into a 32-bit integer."""
+-    # h1 and h2 are 16-bit integers
+-    return (h1 & 0xFFFF) | ((h2 & 0xFFFF) << 16)
+-```
+-
+-### Volume Resize and Save
+-Resizes a volume, normalizes it, and optionally saves slices as images.
+-
+-**Inputs:**
+-- Volume data.
+-- Target size.
+-- `save_root`: Optional directory path.
+-
+-**Steps:**
+-1. Resize volume using bilinear interpolation to specified size [S2, unofficial].
+-2. Normalize values to $[0, 1]$ range [S2, unofficial].
+-3. Rotate 90 degrees around axes (1, 2) [S2, unofficial].
+-4. If `save_root` is provided:
+-   - Create directory.
+-   - Save each slice as a PNG image scaled to $0-255$ uint8 [S2, unofficial].
++### Parameters with Typical Values
++- **`n`** (in `make_nd`): Typically 3, 4, or 5 for volume data (e.g., batch, channel, depth, height, width).
++- **`vox_scl`**: Shape $[3]$. Values depend on the desired physical voxel size (e.g., $[1.0, 1.0, 1.0]$ mm).
++- **`wordSize`**: Typically 4, 8, or 16 bytes, depending on the architecture.
++- **`FIRST_INDEX`**: Typically 0.
++- **`CHUNK_SIZE`**: Varies by implementation, often a power of 2 (e.g., 64, 128).
++
++### Edge Cases and Pitfalls
++- **`make_nd`**: If $n < t.ndim$, an exception is raised. Implementers must check dimensions before calling.
++- **`normalize_hounsfield`**: Division by 4095 assumes the input data is in Hounsfield Units (HU) with a range of approximately -1000 to 3000. If the data is not HU, the normalization is incorrect.
++- **`normalize_voxel_scale`**: Trilinear interpolation may introduce artifacts if the volume contains sharp edges or non-continuous data.
++- **Region Validation**: If the original file's `image_size[2]` is incorrect, the calculated `realFrameCount` may differ from the stored size, requiring correction [S2, unofficial].
++- **Scale Unpacking**: The formula $out[i] = src[i] / 16.0 - 10.0$ assumes a specific quantization scheme. Deviations will result in incorrect scale values.
++
++## Subtopics
++
++### [Volume Resize and Save](2904-volume-resize-and-save.md)
++This method performs post-processing on a reconstructed 3D volume by resizing it to a target dimension, normalizing intensity values, and optionally saving the data as image slices or raw binary files. It solves the problem of converting raw reconstruction outputs into standardized formats for visualization or downstream analysis. It differs from [Image Resizing Utilities](11843-image-resizing-utilities.md) by including specific normalization and rotation steps, and from [Vector Normalization](3145-vector-normalization.md) by handling 3D tensor structures and file I/O.
++
++### [Vector Normalization](3145-vector-normalization.md)
++Vector Normalization converts a 3D vector into a unit vector, or returns a zero vector if the input magnitude is below a precision threshold. Some implementations modify the input vector in place rather than returning a new instance. It is used to process direction data such as sun vectors.
++
++### [Half-Precision Float Conversion](3267-half-precision-float-conversion.md)
++This method converts between 32-bit IEEE 754 single-precision floats and 16-bit binary16 half-precision floats, and vice versa. It solves the problem of reducing memory bandwidth and storage for volume data while maintaining sufficient precision for rendering, avoiding undefined behavior associated with direct type punning. Unlike sibling utilities that normalize vectors or resize images, this method performs strict numerical format conversion with specific handling for subnormal numbers, overflow, and NaN preservation.
++
++### [Image Resizing Utilities](11843-image-resizing-utilities.md)
++Image Resizing Utilities provide a suite of deterministic functions for manipulating image tensors, including resizing (downsampling, upsampling, rescaling), type conversion, and geometric adjustments. They solve the problem of preparing image data for downstream volume rendering or NeRF training pipelines by ensuring consistent data types and dimensions. What sets this implementation apart from general-purpose libraries is its strict adherence to integer-scale operations where possible to avoid interpolation artifacts, and its integration with camera parameter scaling to maintain geometric consistency between resized images and their corresponding camera intrinsics.
+ 
+ ### Volume Size Fixing
+-Corrects the Z dimension (frame count) of a volume based on actual data byte length.
+-
+-**Inputs:**
+-- Volume data buffer.
+-- `volumeSize`: Array `[X, Y, Z]`.
+-
+-**Outputs:**
+-- Corrected `volumeSizeFixed`.
+-
+-**Steps:**
+-1. Calculate `realFrameCount` as `data.byteLength / (volumeSize[0] * volumeSize[1])` [S3, unofficial].
+-2. If `realFrameCount != volumeSize[2]`:
+-   - Log a warning [S3, unofficial].
+-   - Update `volumeSizeFixed[2]` to `realFrameCount` [S3, unofficial].
+-3. Return `volumeSizeFixed` [S3, unofficial].
+-
+-**Pitfall:** The original file's `image_size[2]` attribute may be incorrect, requiring correction based on actual data size [S3, unofficial].
++Corrects the volume size's Z dimension (frame count) based on the actual data byte length and X/Y dimensions, handling cases where the stored image_size[2] is incorrect.
++- **Step**: Calculate `realFrameCount` as `data.byteLength` divided by `(volumeSize[0] * volumeSize[1])`. If `realFrameCount` does not equal `volumeSize[2]`, log a warning and update `volumeSizeFixed[2]` to `realFrameCount`. Return `volumeSizeFixed`.
++- **Pitfall**: The original file's `image_size[2]` attribute may be wrong, requiring correction based on actual data size [S2, unofficial].
+ 
+ ### Region Normalization and Validation
+-Clamps region coordinates to valid chunk bounds and checks for empty regions.
+-
+-**Inputs:**
+-- Region coordinates (min, max).
+-- `CHUNK_SIZE`: Maximum chunk dimension.
+-- `height`: Y-dimension height.
+-- `FIRST_INDEX`: Minimum valid index [S4, unofficial].
+-
+-**Steps:**
+-1. Extract min and max coordinates from the region [S4, unofficial].
+-2. Clamp min coordinates:
+-   - X and Z to $[FIRST\_INDEX, CHUNK\_SIZE]$ [S4, unofficial].
+-   - Y to $[FIRST\_INDEX, height]$ [S4, unofficial].
+-3. Clamp max coordinates:
+-   - X and Z to $[minX, CHUNK\_SIZE]$ [S4, unofficial].
+-   - Y to $[minY, height]$ [S4, unofficial].
+-4. Check if region is empty: if `min >= max` in any axis, the region is empty [S4, unofficial].
++Utility functions to clamp region coordinates to valid chunk bounds and check if a region is empty.
++- **Step**: Extract min and max coordinates from the region. Clamp min coordinates: X and Z to `[FIRST_INDEX, CHUNK_SIZE]`, Y to `[FIRST_INDEX, height]`. Clamp max coordinates: X and Z to `[minX, CHUNK_SIZE]`, Y to `[minY, height]`. Check if region is empty by comparing min and max coordinates; if `min >= max` in any axis, the region is empty.
++- **Parameter**: `FIRST_INDEX`: The minimum valid index for chunk coordinates [S3, unofficial].
+ 
+ ### VolPack Normal Vector Encoding/Decoding
+-Encodes/decodes normalized 3D vectors into 16-bit integer format for VolPack shaders.
+-
+-**Inputs:**
+-- Normal vector $(nx, ny, nz)$ where $nx^2 + ny^2 + nz^2 = 1$ [S5].
+-- Encoded 16-bit integer `n` [S5].
+-
+-**Outputs:**
+-- Encoded 16-bit integer [S5].
+-- Decoded components $(nx, ny, nz)$ [S5].
+-
+-**Steps:**
+-1. **Encode:** Call `vpNormalIndex(nx, ny, nz)` to return a 16-bit encoded normal [S5].
+-2. **Decode:** Call `vpNormal(n, &nx, &ny, &nz)` to decode `n` into components stored at pointers [S5].
++A function to encode a normalized 3D vector into a 16-bit integer format expected by VolPack shaders, and a function to decode a 16-bit encoded normal back into its vector components.
++- **Step**: Call `int vpNormalIndex(double nx, double ny, double nz)` where `nx, ny, nz` are normalized components (`nx*nx + ny*ny + nz*nz == 1`). Returns a 16-bit encoded normal. Call `vpResult vpNormal(int n, double *nx, double *ny, double *nz)` to decode the encoded normal `n` into the components stored at the provided pointers [S4].
+ 
+ ### Memory Alignment / Word Alignment
+-Rounds up a byte count to the nearest word size.
+-
+-**Inputs:**
+-- `byteCount`: Input byte count.
+-- `wordSize`: Alignment size in bytes [S6].
+-
+-**Outputs:**
+-- Aligned byte count.
+-
+-**Steps:**
+-1. Compute `aligned = ((byteCount + wordSize - 1) / wordSize) * wordSize` [S6].
+-
+-**Pseudocode:**
+-```python
+-def align_up(byteCount, wordSize):
+-    """
+-    Rounds up byteCount to the nearest wordSize.
+-    """
+-    return ((byteCount + wordSize - 1) // wordSize) * wordSize
+-```
++Rounds up `byteCount` to the nearest `wordSize`.
++- **Parameter**: `wordSize`: Alignment size in bytes. `byteCount`: Input byte count [S5].
+ 
+ ### Scale Unpacking
+ Decodes packed scale data from a buffer into floating-point log-scale values.
+-
+-**Inputs:**
+-- Buffer `src` of bytes.
+-- `coordCount`: Number of scale values (pointCount * 3) [S7, unofficial].
+-
+-**Outputs:**
+-- Array `out` of floating-point values.
+-
+-**Steps:**
+-1. Iterate `i` from 0 to `coordCount - 1` [S7, unofficial].
+-2. Compute `out[i] = src[i] / 16.0f - 10.0f` [S7, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def scale_unpack(src, coordCount):
+-    """
+-    Decodes packed scale data from a buffer into floating-point log-scale values.
+-    """
+-    out = [0.0] * coordCount
+-    for i in range(coordCount):
+-        out[i] = src[i] / 16.0 - 10.0
+-    return out
+-```
++- **Step**: Iterate `coordCount` (`pointCount * 3`). For each byte `src[i]`, compute `out[i] = src[i] / 16.0f - 10.0f` [S6, unofficial].
+ 
+ ### NIfTI Analysis and Multi-Channel Debugging
+-Inspects NIfTI files, displaying metadata, voxel statistics, and multi-channel analysis.
+-
+-**Inputs:**
+-- Path to NIfTI file.
+-
+-**Outputs:**
+-- Printed metadata and statistics.
+-
+-**Steps:**
+-1. **Load:** Load NIfTI file using `nibabel`, get data as `np.float32` [S8, unofficial].
+-2. **Describe:** Print file path, dtype, shape, num dimensions, voxel size (mm), affine 4x4 matrix, axis orientation, and finite voxel statistics (min, max, mean, std, non-zero count) [S8, unofficial].
+-3. **Header Fields:** Print header keys: `descrip`, `datatype`, `bitpix`, `scl_slope`, `scl_inter`, `qform_code`, `sform_code`, `xyzt_units`, `toffset`, `intent_name`, `intent_code`, `cal_min`, `cal_max` [S8, unofficial].
+-4. **Multi-Channel:** If 4D:
+-   - Print central voxel values across all channels [S8, unofficial].
+-   - Compute `winner_channel = np.argmax(data, axis=3)` and `winner_value = np.max(data, axis=3)` [S8, unofficial].
+-   - Create `hard_labels`: if `winner_value > 0`, label is `winner_channel + 1`, else 0 [S8, unofficial].
+-   - Print histogram of winning labels with counts and percentages [S8, unofficial].
+-
+-## Subtopics
+-
+-### [Vector Normalization](3145-vector-normalization.md)
+-Converts a 3D vector into a unit vector, or returns a zero vector if the input magnitude is below a precision threshold. Used to process direction data such as sun vectors.
+-
+-### [Half-Precision Float Conversion](3267-half-precision-float-conversion.md)
+-Converts between IEEE 754 single-precision (32-bit) and half-precision (16-bit) floating-point formats, enabling efficient storage and transmission of volume data using reduced precision formats.
++A Python script `analyze.py` for inspecting NIfTI files, displaying metadata, voxel statistics, multi-channel analysis, and winner-takes-all (argmax) labelmap simulation.
++- **Step**: `load_nifti(path)`: Load NIfTI file using nibabel, get `fdata` as `np.float32`. `describe_nifti(img, data, name)`: Print file path, dtype, shape, num dimensions, voxel size (mm), affine 4x4 matrix, axis orientation, finite voxel statistics (min, max, mean, std, non-zero count), and header key fields (descrip, datatype, bitpix, scl_slope, scl_inter, qform_code, sform_code, xyzt_units, toffset, intent_name, intent_code, cal_min, cal_max). `describe_multichannel(data, name)`: If data is 4D, print central voxel values across all channels, argmax channel, and per-channel statistics (min, max, mean, std, non-zero voxels, percentage, value at center, distinct values sample). `describe_multichannel_as_winner_map(data, name)`: If data is 4D, compute `winner_channel = np.argmax(data, axis=3)` and `winner_value = np.max(data, axis=3)`. Create `hard_labels`: if `winner_value > 0`, label is `winner_channel + 1`, else 0. Print histogram of winning labels with counts and percentages [S7, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Depends on the operation. `make_nd` is $O(1)$ (dimension adjustment). `normalize_hounsfield` and `normalize_voxel_scale` are $O(N)$ where $N$ is the number of voxels. `scale_unpack` is $O(N)$ where $N$ is the number of scale values.
+-- **Memory Complexity:** Generally $O(N)$ for resampling and normalization operations. `make_nd` adds minimal overhead.
+-- **Strengths:** Provides essential, low-level utilities for data integrity and format compatibility. Handles edge cases like incorrect metadata (Volume Size Fixing) and empty regions.
+-- **Limitations:** Some functions (e.g., `normalize_voxel_scale`) rely on external interpolation libraries, making implementation details variable. Half-precision conversion requires careful bit manipulation to avoid undefined behavior.
+-- **When to Use:** Use for preprocessing volumes before rendering or analysis, especially when dealing with medical data (Hounsfield units), multi-channel data, or specific hardware requirements (half-precision, VolPack shaders).
++- **Time Complexity**:
++  - `make_nd`: $O(1)$ (dimensionality check and unsqueeze operations are constant time relative to data size).
++  - `normalize_hounsfield`: $O(N)$ where $N$ is the number of voxels.
++  - `normalize_voxel_scale`: $O(N \cdot M)$ where $N$ is the number of output voxels and $M$ is the number of neighbors for interpolation (typically 8 for trilinear).
++  - `AlignUp`: $O(1)$.
++  - `Scale Unpacking`: $O(N)$ where $N$ is the number of scale values.
++- **Memory Complexity**:
++  - `make_nd`: $O(1)$ additional memory (in-place or shallow copy).
++  - `normalize_hounsfield`: $O(N)$ if a new array is created, $O(1)$ if in-place.
++  - `normalize_voxel_scale`: $O(N_{new})$ for the output volume.
++  - `AlignUp`: $O(1)$.
++  - `Scale Unpacking`: $O(N)$ for the output array.
++- **Strengths**:
++  - Handles diverse input formats (torch, numpy, raw bytes).
++  - Provides essential validation and correction for corrupted or inconsistent data.
++  - Efficient memory alignment and scale unpacking for high-performance rendering.
++- **Limitations**:
++  - `normalize_voxel_scale` may introduce interpolation artifacts.
++  - `normalize_hounsfield` is specific to medical imaging data (HU).
++  - `Scale Unpacking` assumes a specific quantization scheme.
++- **When to Use**:
++  - Before rendering: Normalize intensities, align memory, and ensure correct dimensions.
++  - After reconstruction: Resize, save, and validate output volumes.
++  - When dealing with heterogeneous data sources requiring standardization.
++- **When Not to Use**:
++  - For general-purpose image processing where specific volume rendering constraints do not apply.
++  - When high-precision interpolation is required and trilinear is insufficient (consider higher-order interpolation).
+ 
+ ## Background
+-Volume Utility Functions are a collection of utilities found in various open-source volume rendering and medical imaging projects. They address common preprocessing needs such as dimensionality adjustment, intensity normalization, voxel resampling, and data validation. Key implementations are found in [flashdrr](https://github.com/pcarnah/flashdrr) [S1, unofficial], [DGR](https://github.com/wskingdom/DGR) [S2, unofficial], [web-vol-viewer](https://github.com/JaneliaSciComp/web-vol-viewer) [S3, unofficial], [mc-meshing](https://github.com/nerima-games/mc-meshing) [S4, unofficial], [VolPack](http://www-graphics.stanford.edu/software/volpack/vp_userguide.html) [S5], [OpenVDB](https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html) [S6], [spz](https://github.com/nianticlabs/spz) [S7, unofficial], and [vrdf-sdk](https://github.com/guillaume-schneider/vrdf-sdk) [S8, unofficial].
++Volume Utility Functions are a collection of utilities found in various open-source volume rendering and medical imaging libraries. The `make_nd` and `normalize_hounsfield` functions are part of the `flashdrr` library [S1, unofficial]. The `Volume Size Fixing` and `Region Normalization` utilities are from the `web-vol-viewer` [S2, unofficial] and `mc-meshing` [S3, unofficial] projects, respectively. The VolPack normal vector encoding/decoding is documented in the VolPack User's Guide [S4]. Memory alignment utilities are part of the OpenVDB library [S5]. Scale unpacking is used in the `spz` library [S6, unofficial]. NIfTI analysis tools are part of the `vrdf-sdk` [S7, unofficial]. These utilities address common pain points in volume data handling, such as dimensionality mismatches, intensity scaling, and memory alignment.
+ 
+ ## Sources
+ [S1] pcarnah/flashdrr, https://github.com/pcarnah/flashdrr, fetched 2026-10-26 (unofficial)
+-[S2] wskingdom/DGR, https://github.com/wskingdom/DGR, fetched 2026-10-26 (unofficial)
+-[S3] JaneliaSciComp/web-vol-viewer, https://github.com/JaneliaSciComp/web-vol-viewer, fetched 2026-10-26 (unofficial)
+-[S4] nerima-games/mc-meshing, https://github.com/nerima-games/mc-meshing, fetched 2026-10-28 (unofficial)
+-[S5] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
+-[S6] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24
+-[S7] nianticlabs/spz, https://github.com/nianticlabs/spz, fetched 2026-10-27 (unofficial)
+-[S8] guillaume-schneider/vrdf-sdk, https://github.com/guillaume-schneider/vrdf-sdk, fetched 2026-10-26 (unofficial)+[S2] JaneliaSciComp/web-vol-viewer, https://github.com/JaneliaSciComp/web-vol-viewer, fetched 2026-10-26 (unofficial)
++[S3] nerima-games/mc-meshing, https://github.com/nerima-games/mc-meshing, fetched 2026-10-28 (unofficial)
++[S4] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
++[S5] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24
++[S6] nianticlabs/spz, https://github.com/nianticlabs/spz, fetched 2026-10-27 (unofficial)
++[S7] guillaume-schneider/vrdf-sdk, https://github.com/guillaume-schneider/vrdf-sdk, fetched 2026-10-26 (unofficial)

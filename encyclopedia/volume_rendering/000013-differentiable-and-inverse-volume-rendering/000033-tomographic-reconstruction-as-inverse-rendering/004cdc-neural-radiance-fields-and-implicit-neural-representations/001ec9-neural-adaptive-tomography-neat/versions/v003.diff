@@ -1,0 +1,519 @@
+--- v002.md
++++ v003.md
+@@ -1,251 +1,288 @@
+ # Neural Adaptive Tomography (NeAT)
+ 
+-## Also called
+-NeAT
+ 
+ ## Overview
+-Neural Adaptive Tomography (NeAT) is an adaptive, hierarchical neural rendering pipeline for multi-view inverse rendering, designed specifically for the tomographic reconstruction of semi-transparent volumetric scenes from X-ray images [S1]. It combines an adaptive explicit octree representation with neural features stored in leaf nodes to achieve efficient reconstruction and simultaneous self-calibration of geometric and photometric parameters [S1]. Unlike purely implicit neural representations, NeAT uses a hybrid explicit-implicit structure optimized via differentiable volume rendering, which outperforms alternatives in both quality and compute time for tomographic tasks where samples are widely scattered [S1].
++Neural Adaptive Tomography (NeAT) is an adaptive, hierarchical neural rendering pipeline for multi-view inverse rendering, designed specifically for the tomographic reconstruction of semi-transparent volumetric scenes from X-ray images [S1]. It solves the problem of reconstructing 3D density fields from 2D projections by combining an explicit sparse octree representation with implicit neural features stored in leaf nodes [S1]. Unlike purely implicit representations or hybrid methods like ACORN, NeAT uses a purely explicit hierarchical structure where geometry is defined by the octree and material properties by neural features, achieving superior reconstruction quality and compute times for tomographic tasks [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ X-ray projection images $I(p)$, where $p$ denotes pixel coordinates [S1]. Initial estimates of camera poses (source and detector positions/orientations) and a reference image $I_0$ (empty scan) are required but can be refined [S1].
+-*   **Outputs:** A reconstructed 3D volume represented by the optimized octree structure, neural feature grids, decoder weights, and calibrated camera parameters [S1].
+-
+-**Data Structures:**
+-The scene is represented as a sparse octree [S1]. Each node in the octree has the following layout:
+-*   `is_leaf`: Boolean flag indicating if the node is a leaf [S1].
+-*   `children`: Array of 8 child node references (if not a leaf) [G].
+-*   `features`: A uniform 3D grid of neural feature vectors (only if `is_leaf` is true) [S1].
+-*   `empty`: Boolean flag indicating if the node contains no density; empty leaf nodes are pruned during optimization [S1].
++
++### Inputs and Outputs
++**Inputs:**
++*   A set of $N$ X-ray projection images $I(p)$, where $p$ indexes pixels.
++*   Initial estimates of camera poses (source and detector positions/orientations) and photometric parameters (reference image $I_0$, exposure multipliers) [S1].
++*   Initial octree structure (typically a root node) [S1].
++
++**Outputs:**
++*   Optimized neural feature vectors for each leaf node in the octree.
++*   Optimized parameters for the neural decoder network.
++*   Refined camera poses and photometric calibration parameters.
++*   The final 3D density field $\mu(x)$ reconstructed from the optimized features.
++
++### Data Structures
++
++**Octree:**
++A sparse hierarchical tree structure. Each node has up to 8 children.
++*   **Internal Nodes:** Do not store data; only define spatial subdivision.
++*   **Leaf Nodes:** Represent a voxel in the spatial domain. Each leaf node contains:
++    *   A uniform grid of neural feature vectors. The grid resolution is fixed per node (e.g., $k \times k \times k$).
++    *   A bounding box defining the spatial extent of the leaf.
++
++**Neural Features:**
++*   Stored in leaf nodes.
++*   Each feature vector $f_n$ has dimension $D$ (e.g., 16 or 32).
++*   Features are optimized parameters.
+ 
+ **Neural Decoder:**
+-A small multi-layer perceptron (MLP) decoder $\Phi$ maps a feature vector $f$ to a scalar density $\mu$:
+-$$ \mu = \Phi(f) $$
+-The decoder is shared across all leaf nodes and is optimized during training [S1].
+-
+-**Numbered Steps:**
+-1.  **Initialization:** Initialize an octree with a single root node containing a coarse grid of neural features [S1]. Initialize the neural decoder $\Phi$ with random weights [G]. Initialize camera parameters (poses) and photometric parameters (reference image $I_0$, per-view exposure multipliers) [S1].
+-2.  **Ray Generation:** For each training image and each pixel $p$, generate a ray $r_p(t) = o_p + t \cdot d_p$, where $o_p$ is the X-ray source position and $d_p$ is the direction towards the detector pixel [S1].
+-3.  **Ray-Octree Intersection:** Trace ray $r_p$ through the octree [S1]. Identify the sequence of leaf nodes intersected by the ray [S1]. For each intersected leaf node, compute the entry and exit points $t_n, t_f$ within the node's local space [S1].
+-4.  **Neural Volume Sampling:** Sample points $t_i$ along the ray segment within each leaf node [S1]. For each sample point $x$, determine its local coordinates within the leaf node's feature grid [S1]. Perform trilinear interpolation of the feature vectors from the grid to obtain the feature vector $f(x)$ at $x$ [S1].
+-5.  **Density Decoding:** Compute the density $\mu(x) = \Phi(f(x))$ using the shared decoder network [S1].
+-6.  **Volume Rendering Integration:** Integrate the density along the ray using a weighted sum to compute the estimated ray integral $\hat{I}'_p(p)$:
+-    $$ \hat{I}'_p(p) = \sum_{i} w_i \mu(x_i) $$
+-    where $w_i$ are the integration weights determined by the sampling strategy and node boundaries [G].
+-7.  **Photometric Calibration:** Apply the Beer-Lambert law to compute the final estimated pixel intensity $\hat{I}(p)$:
+-    $$ \hat{I}(p) = \hat{I}_0(p) \exp \left( - \hat{I}'_p(p) \right) $$
+-    where $\hat{I}_0(p)$ is the spatially varying source intensity (reference image) possibly modulated by per-view exposure multipliers [S1].
+-8.  **Loss Computation:** Compute the total loss $L_{total}$:
+-    $$ L_{total} = \sum_p ||I(p) - \hat{I}(p)||^2 + \lambda_{tv} L_{tv} + \lambda_{bc} L_{bc} $$
+-    where $I(p)$ is the measured intensity, and $\lambda_{tv}$ and $\lambda_{bc}$ are hyperparameters [S1].
+-    *   **Total Variation (TV) Loss:** Compute on feature vectors (preferred for speed/quality):
+-        $$ L_{tv} = \sum_n \|\nabla f_n\|_1 $$
+-        where the gradient is computed over the feature vectors of each leaf node [S1].
+-    *   **Boundary Consistency (BC) Loss:** Minimize feature discontinuities between neighboring nodes $n$ and $m$ on their shared boundary surface $\Lambda_{bc}$:
+-        $$ L_{bc} = \sum_{(n,m) \in N} \sum_{x \in \Lambda_{bc}} |f_n(x) - f_m(x)| $$
+-        where $N$ is the set of neighboring node pairs, and $f_n(x), f_m(x)$ are the interpolated features at boundary point $x$ from both nodes [S1].
+-9.  **Optimization:** Perform gradient descent to update: neural feature grids in all leaf nodes, decoder weights $\Phi$, camera poses (geometric self-calibration), and reference image $I_0$ and exposure multipliers (photometric self-calibration) [S1].
+-10. **Octree Update (Adaptive Refinement):** Compute volumetric error for each node $n$:
+-    $$ E(n) = \rho_{max}(n) \cdot \sum_{(p,t_n,t_f) \in \Omega_n} ||I(p) - \hat{I}(p)||^2 $$
+-    where $\Omega_n$ is the set of samples passing through node $n$, and $\rho_{max}(n)$ is the maximum density in node $n$ [S1]. Solve a mixed-integer program (MIP) to determine the optimal tree structure (splitting nodes with high error, pruning empty nodes) based on $E(n)$ [S1]. Re-initialize features in newly split nodes and transfer/interpolate features from parent to children [G].
+-11. **Iteration:** Repeat steps 2-10 until convergence or maximum iterations [S1].
+-
+-**Pseudocode:**
++*   A small multi-layer perceptron (MLP) $\Phi$.
++*   Input: Trilinearly interpolated feature vector $f$.
++*   Output: Scalar density value $\mu = \Phi(f)$.
++
++**Photometric Calibration:**
++*   Reference image $I_0(p)$: A 2D image representing the source intensity distribution without the object. Optimized per-pixel or via a low-resolution grid.
++*   Per-view exposure multiplier $E_i$: A scalar for each view $i$.
++
++### Numbered Steps
++
++1.  **Ray Generation:** For each pixel $p$ in each input image $i$, generate a ray $r_p(t)$ originating from the X-ray source position and passing through the detector pixel $p$. Determine the near ($t_n$) and far ($t_f$) intersection points with the global scene bounding box [S1].
++
++2.  **Ray-Octree Intersection:** Compute the intersection of ray $r_p$ with the octree. Identify the sequence of leaf nodes traversed by the ray. If a node is empty or not present, skip it [S1].
++
++3.  **Neural Volume Sampling:** For each leaf node $n$ intersected by the ray:
++    *   Determine the entry and exit points of the ray within the node's bounding box.
++    *   Sample the neural features at these points. To query a point $x$ inside a leaf node:
++        *   Identify the grid cell containing $x$.
++        *   Retrieve the 8 corner feature vectors of the grid cell.
++        *   Perform trilinear interpolation to obtain the feature vector $f(x)$ [S1].
++
++4.  **Density Decoding:** Pass the interpolated feature vector $f(x)$ through the neural decoder $\Phi$ to obtain the local density $\mu(x) = \Phi(f(x))$ [S1].
++
++5.  **Volume Rendering (Integration):** Compute the estimated pixel intensity $\hat{I}'(p)$ by integrating the density along the ray segment within the scene. The integration follows the Beer-Lambert law:
++    $$
++    \hat{I}'(p) = \int_{t_n}^{t_f} \mu(r_p(t)) \, dt
++    $$
++    In practice, this is approximated by a weighted sum over $K$ samples along the ray:
++    $$
++    \hat{I}'(p) \approx \sum_{k=1}^{K} \mu(r_p(t_k)) \Delta t_k
++    $$
++    where $\Delta t_k$ is the step size [S1].
++
++6.  **Photometric Calibration:** Apply the photometric model to produce the final estimated pixel intensity $\hat{I}(p)$:
++    $$
++    \hat{I}(p) = \hat{I}_0(p) \exp \left( - \hat{I}'(p) \right)
++    $$
++    where $\hat{I}_0(p)$ is the calibrated reference intensity at pixel $p$ [S1].
++
++7.  **Loss Computation:** Calculate the total loss $L_{total}$ (see Formulas below).
++
++8.  **Backpropagation:** Compute gradients of $L_{total}$ with respect to:
++    *   Neural feature vectors $f_n$.
++    *   Neural decoder parameters.
++    *   Camera poses (source/detector positions and rotations).
++    *   Photometric parameters ($I_0$, exposure multipliers) [S1].
++
++9.  **Optimization Step:** Update all parameters using an optimizer (e.g., Adam) [S1].
++
++10. **Octree Update:**
++    *   Compute the volumetric error $E(n)$ for each leaf node $n$ (see Formulas below).
++    *   Solve a mixed-integer program (MIP) to determine the optimal octree structure (splitting or merging nodes) based on $E(n)$ [S1].
++    *   Refine the octree: Split nodes with high error, remove empty nodes [S1].
++    *   Reinitialize features in newly created nodes (e.g., from parent features or zeros) [G].
++
++### Formulas
++
++**Image Formation Model:**
++$$
++\hat{I}(p) = \hat{I}_0(p) \exp \left( - \int_{t_n}^{t_f} \mu(r_p(t)) dt \right)
++$$
++*   $\hat{I}(p)$: Estimated pixel intensity.
++*   $\hat{I}_0(p)$: Spatially varying X-ray source intensity (reference image).
++*   $r_p(t)$: Ray for pixel $p$.
++*   $t_n, t_f$: Near and far bounds of the scene bounding box.
++*   $\mu(x)$: Density (attenuation cross-section) at position $x$ [S1].
++
++**Total Loss:**
++$$
++L_{total} = \sum_p ||I(p) - \hat{I}(p)||^2 + \lambda_{tv} L_{tv} + \lambda_{bc} L_{bc}
++$$
++*   $I(p)$: Measured image intensity.
++*   $\hat{I}(p)$: Estimated pixel intensity.
++*   $\lambda_{tv}$: TV regularizer strength. Typical value: 0.00002 for sparse views, 0.00010 for limited angle [S1].
++*   $\lambda_{bc}$: Boundary Consistency regularizer strength. Typical value: 0.01 [S1].
++
++**Total Variation (TV) Loss:**
++Computed on feature vectors (preferred for speed and quality):
++$$
++L_{tv} = L^{(1)}_{tv} = \sum_n \|\nabla f_n\|_1
++$$
++*   $f_n$: Feature vector at grid position $n$.
++*   $\nabla f_n$: Gradient of features across the grid [S1].
++
++*Alternative (on decoded densities):*
++$$
++L^{(2)}_{tv} = \sum_n \|\nabla \Phi(f_n)\|_1
++$$
++
++**Boundary Consistency (BC) Loss:**
++$$
++L_{bc} = \sum_{(n,m) \in N} \sum_{x \in \Lambda_{bc}} |f_n(x) - f_m(x)|
++$$
++*   $N$: Set of all pairs of neighboring octree nodes.
++*   $\Lambda_{bc}$: Boundary surface between neighboring nodes $n$ and $m$.
++*   $f_n(x), f_m(x)$: Feature vectors at boundary point $x$ from nodes $n$ and $m$ [S1].
++
++**Volumetric Error for Octree Update:**
++$$
++E(n) = \rho_{max}(n) \cdot \sum_{(p,t_n,t_f) \in \Omega_n} ||I(p) - \hat{I}(p)||^2
++$$
++*   $\Omega_n$: Set of all samples $(p, t_n, t_f)$ from any ray passing through node $n$, paired with pixel coordinates $p$.
++*   $\rho_{max}(n)$: Maximum density in node $n$, defined as $\max_{(p,t_n,t_f) \in \Omega_n} \mu(r_p(t))$ [S1].
++
++### Pseudocode
++
+ ```python
+ import numpy as np
+ 
+-def trilinear_interpolate(grid, local_coords):
+-    """Trilinear interpolation of a 3D feature grid at local_coords (0-1 range)."""
+-    x, y, z = local_coords
+-    ix, iy, iz = np.floor([x, y, z]).astype(int)
+-    fx, fy, fz = [c - i for c, i in zip([x, y, z], [ix, iy, iz])]
+-    # Clamp indices to grid bounds
+-    ix, iy, iz = np.clip([ix, iy, iz], 0, np.array(grid.shape) - 1)
+-    c000 = grid[ix[0], iy[0], iz[0]]
+-    c100 = grid[ix[0]+1, iy[0], iz[0]]
+-    c010 = grid[ix[0], iy[0]+1, iz[0]]
+-    c110 = grid[ix[0]+1, iy[0]+1, iz[0]]
+-    c001 = grid[ix[0], iy[0], iz[0]+1]
+-    c101 = grid[ix[0]+1, iy[0], iz[0]+1]
+-    c011 = grid[ix[0], iy[0]+1, iz[0]+1]
+-    c111 = grid[ix[0]+1, iy[0]+1, iz[0]+1]
+-    w000 = (1-fx[0])*(1-fy[0])*(1-fz[0])
+-    w100 = fx[0]*(1-fy[0])*(1-fz[0])
+-    w010 = (1-fx[0])*fy[0]*(1-fz[0])
+-    w110 = fx[0]*fy[0]*(1-fz[0])
+-    w001 = (1-fx[0])*(1-fy[0])*fz[0]
+-    w101 = fx[0]*(1-fy[0])*fz[0]
+-    w011 = (1-fx[0])*fy[0]*fz[0]
+-    w111 = fx[0]*fy[0]*fz[0]
+-    return (w000*c000 + w100*c100 + w010*c010 + w110*c110 +
+-            w001*c001 + w101*c101 + w011*c011 + w111*c111)
+-
+-def mlp_decode(feature_vector, w1, b1, w2, b2):
+-    """Simple decoder network mapping feature vector to density."""
+-    h = np.maximum(0, feature_vector @ w1 + b1)
+-    return np.maximum(0, h @ w2 + b2)
+-
+-class OctreeNode:
+-    def __init__(self, features=None):
+-        self.features = features  # 3D grid of feature vectors
+-        self.children = [None] * 8
+-        self.is_leaf = features is not None
+-        self.empty = False
+-
+-    def trace_ray(self, ray_origin, ray_dir, t_min, t_max):
+-        """Returns list of (node, t_start, t_end) for intersected leaves."""
+-        samples = []
+-        if self.is_leaf:
+-            samples.append((self, t_min, t_max))
+-        else:
+-            for child in self.children:
+-                if child is not None:
+-                    child_samples = child.trace_ray(ray_origin, ray_dir, t_min, t_max)
+-                    samples.extend(child_samples)
+-        return samples
+-
+-def compute_tv_loss(octree):
+-    """Compute Total Variation loss on feature grids."""
+-    tv = 0.0
+-    stack = [octree]
+-    while stack:
+-        node = stack.pop()
+-        if node.is_leaf and node.features is not None:
+-            grad_x = np.diff(node.features, axis=0)
+-            grad_y = np.diff(node.features, axis=1)
+-            grad_z = np.diff(node.features, axis=2)
+-            tv += np.sum(np.abs(grad_x)) + np.sum(np.abs(grad_y)) + np.sum(np.abs(grad_z))
+-        else:
+-            stack.extend(node.children)
+-    return tv
+-
+-def compute_bc_loss(octree):
+-    """Compute Boundary Consistency loss between neighboring nodes."""
+-    bc = 0.0
+-    leaves = []
+-    stack = [octree]
+-    while stack:
+-        node = stack.pop()
+-        if node.is_leaf:
+-            leaves.append(node)
+-        else:
+-            stack.extend(node.children)
+-    # Sum feature differences across adjacent leaf pairs
+-    for i in range(len(leaves) - 1):
+-        bc += np.sum(np.abs(leaves[i].features - leaves[i+1].features))
+-    return bc
+-
+-def train_neat(X_ray_images, initial_poses, initial_I0, num_iterations, lambda_tv, lambda_bc):
+-    """
+-    X_ray_images: List of 2D arrays, shape (H, W), measured intensities.
+-    initial_poses: List of camera parameters (source, detector).
+-    initial_I0: 2D array, reference image (empty scan).
+-    """
+-    # Initialize Octree
+-    octree = OctreeNode(features=np.random.randn(4, 4, 4, 32))
+-    
+-    # Initialize Decoder weights
+-    decoder_w1 = np.random.randn(32, 16)
+-    decoder_b1 = np.random.randn(16)
+-    decoder_w2 = np.random.randn(16, 1)
+-    decoder_b2 = np.random.randn(1)
+-    
+-    # Initialize Calibration Parameters
+-    poses = [p.copy() for p in initial_poses]
+-    I0 = initial_I0.copy()
+-    exposures = np.ones(len(X_ray_images))
+-    
+-    for iteration in range(num_iterations):
+-        total_loss = 0.0
+-        
+-        # Accumulate gradients for all pixels
+-        for view_idx, I_measured in enumerate(X_ray_images):
+-            pose = poses[view_idx]
+-            exposure = exposures[view_idx]
+-            
+-            H, W = I_measured.shape
+-            for y in range(H):
+-                for x in range(W):
+-                    p = (x, y)
+-                    # 1. Generate Ray
+-                    ray_origin = pose['source']
+-                    ray_dir = pose['detector_center'] - ray_origin
+-                    ray_dir = ray_dir / np.linalg.norm(ray_dir)
+-                    
+-                    # 2. Intersect Octree
+-                    samples = octree.trace_ray(ray_origin, ray_dir, 0.0, 10.0)
+-                    
+-                    # 3. Sample and Decode
+-                    ray_integral = 0.0
+-                    for node, t_start, t_end in samples:
+-                        if node.features is not None:
+-                            num_samples = 10
+-                            for i in range(num_samples):
+-                                t = t_start + (t_end - t_start) * (i + 0.5) / num_samples
+-                                local_pos = (t - ray_origin) / ray_dir
+-                                local_coords = np.clip(local_pos, 0, 1)
+-                                f = trilinear_interpolate(node.features, local_coords)
+-                                mu = mlp_decode(f, decoder_w1, decoder_b1, decoder_w2, decoder_b2)
+-                                w = (t_end - t_start) / num_samples
+-                                ray_integral += w * mu
+-                    
+-                    # 4. Photometric Model
+-                    I0_val = I0[p] * exposure
+-                    I_estimated = I0_val * np.exp(-ray_integral)
+-                    
+-                    # 5. Loss Components
+-                    mse_loss = (I_measured[p] - I_estimated) ** 2
+-                    tv_loss = compute_tv_loss(octree)
+-                    bc_loss = compute_bc_loss(octree)
+-                    
+-                    pixel_loss = mse_loss + lambda_tv * tv_loss + lambda_bc * bc_loss
+-                    total_loss += pixel_loss
+-        
+-        # Update Parameters (conceptual gradient step)
+-        # In practice, use an autograd framework. Here we simulate a step.
+-        # decoder_w1 -= lr * grad_w1
+-        # octree.features -= lr * grad_features
+-        # poses -= lr * grad_poses
+-        # I0 -= lr * grad_I0
+-        # exposures -= lr * grad_exposures
+-        
+-        # Octree Refinement (every 10 iterations)
+-        if iteration % 10 == 0:
+-            # Compute E(n) and solve MIP to split/prune
+-            # Re-initialize features in newly split nodes
+-            pass
+-
+-    return octree, decoder_w1, decoder_b1, decoder_w2, decoder_b2, poses, I0, exposures
++def render_pixel(ray_origin, ray_direction, octree, decoder, I0, t_near, t_far):
++    """
++    Renders a single pixel using the NeAT pipeline.
++    """
++    # 1. Ray-Octree Intersection
++    traversed_nodes = octree.traverse(ray_origin, ray_direction, t_near, t_far)
++    
++    # 2. Neural Volume Sampling and Integration
++    density_integral = 0.0
++    num_samples = 100
++    step_size = (t_far - t_near) / num_samples
++    
++    for t in np.linspace(t_near, t_far, num_samples):
++        point = ray_origin + ray_direction * t
++        
++        # Find leaf node containing point
++        node = octree.find_leaf(point)
++        
++        if node is not None:
++            # 3. Query Neural Features
++            # Trilinear interpolation of features in the leaf node's grid
++            f = node.query_features(point)
++            
++            # 4. Density Decoding
++            mu = decoder(f)
++            
++            density_integral += mu * step_size
++            
++    # 5. Photometric Calibration
++    # Apply Beer-Lambert law
++    I0_val = I0[ray.pixel_index]
++    estimated_intensity = I0_val * np.exp(-density_integral)
++    
++    return estimated_intensity
++
++def compute_loss(measured_images, octree, decoder, I0, poses, lambda_tv, lambda_bc):
++    """
++    Computes the total loss for optimization.
++    """
++    total_loss = 0.0
++    tv_loss = 0.0
++    bc_loss = 0.0
++    
++    # Render all views
++    rendered_images = []
++    for view_idx, (image, pose) in enumerate(zip(measured_images, poses)):
++        rendered_view = np.zeros_like(image)
++        for p in image.pixels:
++            ray = generate_ray(pose, p)
++            rendered_view[p] = render_pixel(
++                ray.origin, ray.direction, octree, decoder, I0, 
++                ray.t_near, ray.t_far
++            )
++        rendered_images.append(rendered_view)
++        
++        # Reprojection Error
++        error = (image - rendered_view) ** 2
++        total_loss += np.sum(error)
++        
++        # Store error for octree update
++        store_node_errors(error, octree)
++        
++    # Total Variation Loss
++    for node in octree.leaves:
++        features = node.get_feature_grid()
++        # Compute L1 norm of gradients in feature grid
++        tv_loss += np.sum(np.abs(np.gradient(features)))
++        
++    # Boundary Consistency Loss
++    for n, m in octree.get_neighbor_pairs():
++        boundary_points = n.get_boundary_surface(m)
++        for x in boundary_points:
++            f_n = n.query_features(x)
++            f_m = m.query_features(x)
++            bc_loss += np.sum(np.abs(f_n - f_m))
++            
++    total_loss += lambda_tv * tv_loss + lambda_bc * bc_loss
++    
++    return total_loss, rendered_images
++
++def update_octree(octree, node_errors, rho_max):
++    """
++    Updates the octree structure based on volumetric error.
++    """
++    for node in octree.leaves:
++        # Compute volumetric error E(n)
++        # E(n) = rho_max(n) * sum(reprojection_error for rays through node)
++        error = node_errors[node] * rho_max[node]
++        
++        if error > split_threshold:
++            octree.split(node)
++        elif error < merge_threshold and node.has_siblings:
++            octree.merge(node)
++            
++    # Remove empty nodes
++    octree.remove_empty_leaves()
+ ```
+ 
+-**Parameters:**
++### Parameters
++*   $\lambda_{tv}$: Total Variation regularizer strength. Typical values: 0.00002 for sparse view problems, 0.00010 for limited angle problems [S1].
+ *   $\lambda_{bc}$: Boundary Consistency regularizer strength. Typical value: 0.01 [S1].
+-*   $\lambda_{tv}$: Total Variation regularizer strength. Typical value: 0.00002 for sparse view problems, 0.00010 for limited angle problems [S1].
+-
+-**Edge Cases and Pitfalls:**
++*   $D$: Dimension of neural feature vectors. Not given in the sources.
++*   Grid resolution per leaf node: Not given in the sources.
++
++### Edge Cases and Pitfalls
+ *   **Block-like Artifacts:** If the Boundary Consistency regularizer is disabled, block-like artifacts appear at boundaries between neighboring octree nodes, especially with few images [S1].
+ *   **Reference Image Validity:** Adding or removing the object from the setup can disturb the validity of the reference image $I_0$, causing reconstruction artifacts. NeAT mitigates this by optimizing $I_0$ during training [S1].
+-*   **Computational Cost:** While NeAT is faster than other neural inverse rendering methods, it is still computationally intensive compared to traditional methods like SIRT or FDK. It is designed to handle high-resolution datasets and full 3D cone beam data better than previous neural methods [S1].
+-*   **Sparse Views:** The method is specifically designed to handle ill-posed geometric configurations (sparse views or limited angular coverage) where traditional methods fail [S1].
++*   **Computing Time:** Existing neural inverse rendering frameworks suffer from long computing times. NeAT addresses this by using an explicit hierarchical representation, achieving superior reconstruction times compared to purely implicit methods [S1].
++*   **Sparse Views/Limited Angle:** These are ill-posed problems. NeAT handles them using TV regularization and self-calibration [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Exact time complexity formulas are not given in the sources. NeAT achieves reconstruction times far superior to existing neural inverse rendering methods [S1].
+-*   **Memory Complexity:** Exact memory complexity formulas are not given in the sources. Memory usage is proportional to the number of leaf nodes in the octree and the size of the feature grids [S1].
+-*   **Scaling:** NeAT scales well with resolution due to the adaptive octree structure, which only refines regions with detail [S1]. It handles full 3D cone beam data effectively [S1].
+-*   **Strengths:**
+-    *   High-quality reconstruction for ill-posed configurations (sparse views, limited angles) [S1].
+-    *   Simultaneous geometric and photometric self-calibration [S1].
+-    *   Faster than other neural inverse rendering methods [S1].
+-    *   Outperforms purely implicit and hybrid explicit-implicit representations (like ACORN) in tomographic settings [S1].
+-*   **Limitations:**
+-    *   Still slower than traditional analytical methods (e.g., FDK, SIRT) [S1].
+-    *   Requires careful tuning of hyperparameters ($\lambda_{tv}, \lambda_{bc}$) [S1].
+-    *   Sensitive to initial calibration; however, self-calibration mitigates this [S1].
+-*   **When to Use:** Use NeAT when dealing with sparse view or limited angle tomography, when high-quality reconstruction is needed despite ill-posed geometry, and when simultaneous calibration is beneficial. It is suitable when computational resources allow for iterative optimization [S1].
+-*   **When Not to Use:** Use traditional methods (e.g., [Back-projection](2450-back-projection.md), [FastFDK](3315-fastfdk.md)) when computational speed is critical and the geometry is well-posed (full angular coverage) [S1].
++
++**Time and Memory Complexity:**
++*   **Time:** NeAT achieves reconstruction times far superior to existing neural inverse rendering methods [S1]. The explicit octree structure allows for efficient ray traversal and sampling, avoiding the dense sampling required by purely implicit representations [S1].
++*   **Memory:** Memory usage is proportional to the number of leaf nodes and the size of the feature grids. The sparse octree structure ensures that only occupied regions are stored [S1].
++
++**Measured Performance:**
++*   NeAT outperforms purely implicit representations and hybrid explicit-implicit representations (like ACORN) in both quality and compute time for tomographic settings [S1].
++*   NeAT matches the performance of state-of-the-art tomographic reconstruction methods while providing superior quality for ill-posed configurations (sparse views, limited angle) [S1].
++
++**Strengths and Limitations:**
++*   **Strengths:** Adaptive resolution, efficient computation, self-calibration of geometry and photometry, robustness to sparse/limited angle data [S1].
++*   **Limitations:** Requires careful tuning of regularization parameters ($\lambda_{tv}, \lambda_{bc}$). Performance depends on the initial octree structure and calibration [S1].
++
++**When to Use:**
++*   Use NeAT for tomographic reconstruction of semi-transparent volumetric scenes from X-ray images, especially when dealing with sparse views, limited angle coverage, or when self-calibration is needed [S1].
++
++**When Not to Use:**
++*   Not suitable for opaque scenes where surface rendering is sufficient, as NeAT is designed for volumetric density reconstruction [S1].
+ 
+ ## Background
+-Neural Adaptive Tomography (NeAT) was introduced by Darius Rückert, Yuanhao Wang, Rui Li, Ramzi Idoughi, and Wolfgang Heidrich from KAUST and the University of Erlangen-Nuremberg [S1]. It was presented in 2022 [S1]. The method addresses the limitations of existing neural inverse rendering frameworks, which suffer from long computing times, by introducing an adaptive, hierarchical neural representation specifically tuned for tomographic reconstruction [S1]. It builds on the concept of neural rendering [Mildenhall et al. 2020] and adaptive representations like ACORN [Martel et al. 2021], but adapts them for the specific challenges of X-ray tomography, such as scattered samples and the need for self-calibration [S1].
++
++**Origin:**
++Neural Adaptive Tomography (NeAT) was introduced by Darius Rückert, Yuanhao Wang, Rui Li, Ramzi Idoughi, and Wolfgang Heidrich from KAUST and the University of Erlangen-Nuremberg [S1].
++
++**History and Development:**
++NeAT is the first adaptive, hierarchical neural rendering pipeline for multi-view inverse rendering [S1]. It builds on the principles of neural radiance fields (NeRF) and implicit neural representations but adapts them for tomographic reconstruction by using an explicit octree structure with neural features in leaf nodes [S1]. It addresses the limitations of existing neural inverse rendering frameworks, which suffer from long computing times and are not well-suited for the scattered samples typical of tomography [S1].
++
++**Where it is used:**
++NeAT is used for 3D scene reconstruction from X-ray images, particularly in computed tomography (CT) applications where high-quality reconstruction from limited or sparse data is required [S1].
+ 
+ ## Sources
++
+ [S1] NeAT: Neural Adaptive Tomography, https://doi.org/10.48550/arxiv.2202.02171, fetched 2026-10-26

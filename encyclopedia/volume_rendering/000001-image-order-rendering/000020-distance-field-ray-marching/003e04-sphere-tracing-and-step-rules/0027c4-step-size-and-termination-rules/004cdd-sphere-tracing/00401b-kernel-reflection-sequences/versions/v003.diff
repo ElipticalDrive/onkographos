@@ -1,0 +1,194 @@
+--- v002.md
++++ v003.md
+@@ -3,116 +3,112 @@
+ 
+ ## Overview
+-Kernel-Reflection Sequences (KRS) are a procedural modeling technique for generating complex, fractal-like geometries using Signed Distance Functions (SDFs) and reflection transformations [S1]. Unlike standard Iterated Function Systems (IFS) that require recursive traversal and cause divergent control flow on GPUs, KRS evaluates a global distance function without recursion, enabling real-time sphere tracing on parallel hardware [S1]. It builds on [Sphere Tracing with SDFs](6223-sphere-tracing-with-sdfs.md) by providing a non-recursive, fixed-operation-count algorithm for distance evaluation [S1].
++Kernel-Reflection Sequences (KRS) are a procedural modeling technique for generating complex, fractal-like geometries using Signed Distance Functions (SDFs) and reflection transformations. It solves the problem of evaluating global distance functions for recursive structures without recursion, enabling real-time sphere tracing on parallel hardware like GPUs. Unlike standard Iterated Function Systems (IFS) which require recursive traversal and cause divergent control flow, KRS uses a fixed operation count logarithmic time algorithm, allowing efficient parallelization [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A world-space point $\mathbf{x}_w$, a sequence of $n+1$ kernel SDFs $K_0, \dots, K_n$, and a sequence of $n$ reflection operators $\mathcal{R}_0, \dots, \mathcal{R}_{n-1}$. Each reflection operator $\mathcal{R}_i$ is defined by a plane equation $\mathbf{u}_i \cdot \mathbf{x} - w_i = 0$, where $\mathbf{u}_i$ is the unit normal and $w_i$ is the distance from the origin [S1].
+-*   **Output:** The signed distance $d$ from $\mathbf{x}_w$ to the KRS geometry [S1].
++**Inputs:**
++- A world-space point $\mathbf{x}_w$.
++- A KRS defined by two finite sequences:
++  - Kernel sets: $K_0, \dots, K_n$, where each $K_i$ is defined by a distance function $k_i(\mathbf{x})$.
++  - Reflection operators: $\mathcal{R}_0, \dots, \mathcal{R}_{n-1}$. Each $\mathcal{R}_i$ corresponds to a reflection plane defined by $\mathbf{u}_i \cdot \mathbf{x} - w_i = 0$, where $\mathbf{u}_i$ is the unit normal and $w_i$ is the distance from the origin.
++
++**Outputs:**
++- The signed distance $d$ from $\mathbf{x}_w$ to the KRS geometry.
+ 
+ **Data Structures:**
+-*   **KRS Definition:** Formally an ordered pair of two finite sequences: $(K_0, \dots, K_n; \mathcal{R}_0, \dots, \mathcal{R}_{n-1})$ [S1].
+-*   **Kernel SDFs:** Each $k_i(\mathbf{x})$ returns the distance to the $i$-th kernel geometry [S1].
+-*   **Reflection Plane:** Defined by normal $\mathbf{u}_i$ and scalar $w_i$ [S1].
++- The KRS is stored as two arrays of length $n+1$ and $n$ respectively:
++  - `kernels`: Array of functions or data structures representing $k_0, \dots, k_n$.
++  - `reflections`: Array of structures representing $\mathcal{R}_0, \dots, \mathcal{R}_{n-1}$. Each structure contains the plane normal $\mathbf{u}_i$ and plane offset $w_i$.
+ 
+-**Algorithm Steps:**
+-The distance evaluation proceeds iteratively from the top-level kernel down to the base level [S1].
+-
+-1.  Initialize the working point $\mathbf{x} \leftarrow \mathbf{x}_w$ [S1].
+-2.  Initialize the distance accumulator $d \leftarrow k_n(\mathbf{x})$, representing the distance to the top-level kernel $K_n$ [S1].
+-3.  Loop for $i$ from $n-1$ down to $0$:
+-    a.  Evaluate the plane test: $val = \mathbf{u}_i \cdot \mathbf{x} - w_i$ [S1].
+-    b.  If $val > 0$ (the point is behind the mirror plane):
+-        i.  Transform the point: $\mathbf{x} \leftarrow \mathcal{R}_i \mathbf{x}$ [S1].
+-        ii. The reflection $\mathcal{R}_i$ maps $\mathbf{x}$ to the reflected space. For a plane with normal $\mathbf{u}_i$ and offset $w_i$, the reflection is $\mathcal{R}_i \mathbf{x} = \mathbf{x} - 2(\mathbf{u}_i \cdot \mathbf{x} - w_i)\mathbf{u}_i$ [G].
+-    c.  Update the distance: $d \leftarrow \min(d, k_i(\mathbf{x}))$ [S1].
+-4.  Return $d$ [S1].
+-
+-**Formulas:**
+-The recursive definition of expansion levels is $L_{i+1} = K_{i+1} \cup L_i \cup \mathcal{R}_i L_i$, with base case $L_0 = K_0$ [S1]. The distance function $l_{i+1}(\mathbf{x})$ is computed iteratively as [S1]:
+-
+-$$
+-l_{i+1}(\mathbf{x}) = \begin{cases} 
+-\min(k_{i+1}(\mathbf{x}), l_i(\mathbf{x})) & \text{if } \mathbf{u}_i \cdot \mathbf{x} - w_i \leq 0, \\
+-\min(k_{i+1}(\mathbf{x}), l_i(\mathcal{R}_i(\mathbf{x}))) & \text{if } \mathbf{u}_i \cdot \mathbf{x} - w_i > 0.
+-\end{cases}
+-$$
+-
+-where $\mathbf{u}_i \cdot \mathbf{x} - w_i = 0$ is the reflection plane equation [S1].
+-
+-**Parameters:**
+-*   **Termination Threshold:** In sphere tracing, the search terminates when the distance $d < \epsilon$. The threshold $\epsilon$ is inversely proportional to camera depth, set to ensure the final unbounding sphere projected onto the viewport is smaller than a pixel [S1]. A higher threshold makes kernel geometries appear thicker [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Intersection with Mirror Plane:** If a previous level geometry $A_i$ intersects the mirror plane (i.e., is not entirely on the negative side), the formula still applies [S1]. This is equivalent to discarding the part of the geometry on the positive side, providing an underestimation for the distance to the mirrored geometry, which remains suitable for sphere tracing [S1].
+-*   **Symmetry:** Single KRS constructions exhibit conspicuous symmetries. This is mitigated by adding non-symmetric kernel elements at each iteration or combining multiple KRSs [S1].
++**Algorithm:**
++The distance function $l_i(\mathbf{x})$ for the expansion level $L_i$ is computed iteratively. The recursive definition of the geometry is:
++$$L_{i+1} = K_{i+1} \cup L_i \cup \mathcal{R}_i L_i, \quad L_0 = K_0$$
++The distance function $l_{i+1}(\mathbf{x})$ is:
++$$l_{i+1}(\mathbf{x}) = \begin{cases} \min(k_{i+1}(\mathbf{x}), l_i(\mathbf{x})) & \text{if } \mathbf{u}_i \cdot \mathbf{x} - w_i \leq 0 \\ \min(k_{i+1}(\mathbf{x}), l_i(\mathcal{R}_i(\mathbf{x}))) & \text{if } \mathbf{u}_i \cdot \mathbf{x} - w_i > 0 \end{cases}$$
++This can be evaluated in a single pass from the top level down to the base level without recursion [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def reflect_point(x, u, w):
++def distance_to_krs(x_w, kernels, reflections):
+     """
+-    Reflect point x across plane defined by normal u and offset w.
+-    Plane equation: u . x - w = 0
+-    """
+-    # Dot product u . x
+-    dot_ux = sum(u[j] * x[j] for j in range(3))
+-    # Distance from point to plane
+-    dist = dot_ux - w
+-    # Reflection: x' = x - 2 * dist * u
+-    return [x[j] - 2 * dist * u[j] for j in range(3)]
+-
+-def evaluate_krs_distance(x_w, kernels, reflections):
+-    """
+-    Evaluate distance to Kernel-Reflection Sequence at world point x_w.
++    Computes the distance from x_w to the KRS.
+     
+     Args:
+-        x_w: list of 3 floats, world space point.
+-        kernels: list of functions [k_0, ..., k_n], where k_i(x) returns distance.
+-        reflections: list of tuples [(u_0, w_0), ..., (u_{n-1}, w_{n-1})].
+-                     u_i is list of 3 floats (normal), w_i is float (offset).
+-    
++        x_w: World space point (vector).
++        kernels: List of distance functions [k_0, ..., k_n].
++        reflections: List of reflection plane definitions [(u_0, w_0), ..., (u_{n-1}, w_{n-1})].
++        
+     Returns:
+-        float: distance to the KRS geometry.
++        d: Distance to the KRS geometry.
+     """
+     n = len(kernels) - 1
+-    x = list(x_w)
++    x = x_w
+     
+-    # Step 2: Initialize distance to top-level kernel
++    # Initialize distance to the top-level kernel K_n
+     d = kernels[n](x)
+     
+-    # Step 3: Loop from n-1 down to 0
++    # Iterate from level n-1 down to 0
+     for i in range(n - 1, -1, -1):
+-        u, w = reflections[i]
++        u_i, w_i = reflections[i]
+         
+-        # Plane test: u_i . x - w_i
+-        dot_ux = sum(u[j] * x[j] for j in range(3))
+-        val = dot_ux - w
++        # Check if point is behind the mirror plane
++        # Plane equation: u_i . x - w_i = 0
++        # If > 0, point is on the positive side (behind the mirror relative to the normal)
++        if dot(u_i, x) - w_i > 0:
++            # Transform point to the reflected space
++            x = reflect_point(x, u_i, w_i)
+         
+-        # If point is behind the mirror (val > 0)
+-        if val > 0:
+-            # Transform x to reflected space
+-            x = reflect_point(x, u, w)
++        # Update distance with the current level's kernel and the previous level's distance
++        # Note: kernels[i] is k_i. The previous level distance is implicitly handled by the 
++        # iterative update of d, but we must compare with k_i(x) and the transformed previous distance.
++        # However, the algorithm in [S1] updates d by taking min(d, k_i(x)) after transformation.
++        # Let's trace carefully:
++        # l_{i+1}(x) = min(k_{i+1}(x), l_i(transformed_x))
++        # In the loop, d currently holds l_{i+1}(original_x) before transformation? 
++        # No, the algorithm in [S1] Algorithm 1 is:
++        # 1. x <- x_w
++        # 2. d <- k_n(x)
++        # 3. for i from n-1 down to 0:
++        # 4.   if x . u_i - w_i > 0: x <- R_i x
++        # 5.   d <- min(d, k_i(x))
+         
+-        # Update distance with current kernel
++        # This implies d accumulates the minimum of the current kernel and the "propagated" distance from higher levels.
++        # The transformation of x ensures that when we evaluate k_i(x), x is in the correct local coordinate space 
++        # for the reflection logic to hold for the recursive structure.
++        
+         d = min(d, kernels[i](x))
+         
+     return d
++
++def reflect_point(x, u, w):
++    """
++    Reflects point x across the plane defined by normal u and offset w.
++    Plane: u . x - w = 0
++    Reflection: x' = x - 2 * (u . x - w) * u
++    """
++    dist = dot(u, x) - w
++    return x - 2.0 * dist * u
+ ```
++
++**Parameters:**
++- **Sphere tracing termination threshold:** Inversely proportional to camera depth. Set to assure that the final unbounding sphere projected onto the viewport is smaller than a pixel. A higher threshold makes kernel geometries appear thicker [S1].
++
++**Edge Cases and Pitfalls:**
++- **Intersection with Mirror Plane:** If a previous level geometry $A_i$ is not entirely on the negative side of the mirror plane but intersects it, the formula still applies. This is equivalent to discarding the part of the geometry on the positive side. This provides an underestimation for the distance to the mirrored geometry, which remains suitable for sphere tracing [S1].
++- **Lipschitz Constant:** Standard KRS transformations have a Lipschitz constant of unity. If non-isometric transformations (Lipschitz constant $\neq 1$) are used, the distance evaluation may be inaccurate unless corrected (e.g., using Hart's method) [S1].
+ 
+ ## Subtopics
+ 
+ ### Multiple KRS Union Sphere Tracing
+-A technique to combine multiple KRSs to produce natural disorder and hide symmetry by taking the union of their geometries [S1]. It maintains the free distance along the ray for all KRS components, always choosing the minimal one, and advances the ray with the radius of the unbounding sphere of the respective component [S1]. The search ends when the step size for the minimal component meets the error threshold [S1]. Performance does not depend on the number of KRS components, but rather on the number of sphere tracing steps required, with a slight overhead for maintaining a small sorted index of free distances [S1].
++A technique to combine multiple KRSs to produce natural disorder and hide symmetry by taking the union of their geometries. It maintains the free distance along the ray for all KRS components, always choosing the minimal one, and advancing the ray with the radius of the unbounding sphere of the respective component. The search ends when the step size for the minimal component meets the error threshold. Performance does not depend on the number of KRS components, but rather on the number of sphere tracing steps required, with a slight overhead for maintaining a small sorted index of free distances [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The distance evaluation requires a fixed number of operations proportional to the number of levels $n$, independent of recursion depth [S1]. Sphere tracing performance depends on the number of steps required, not the number of KRS components in the union case [S1].
+-*   **Memory Complexity:** Requires only a few registers of read-write memory, independent of the number of levels [S1].
+-*   **Strengths:** Enables real-time rendering on parallel hardware (GPUs) due to non-recursive, fixed-operation-count algorithm [S1]. Provides continuous level-of-detail and minification filtering automatically [S1].
+-*   **Limitations:** Single KRS constructions exhibit conspicuous symmetries, requiring additional techniques (multiple KRSs, non-symmetric kernels, distortion) to appear natural [S1]. Higher thresholds reduce sub-pixel detail [S1].
+-*   **When to use:** When real-time rendering of complex, fractal-like procedural geometry is required on GPUs, and symmetry can be mitigated.
+-*   **When not to use:** When exact geometric precision is required at very small scales without aliasing, as higher thresholds may cause merging of distant geometries [S1].
++- **Time Complexity:** Logarithmic time with respect to the number of levels $n$, due to the fixed operation count per level and non-recursive evaluation [S1].
++- **Memory Complexity:** Independent of the number of levels, requiring only a few registers of read-write memory for the iterative evaluation [S1].
++- **Performance:** Efficient for GPU sphere tracing due to the lack of recursion and divergent control flow. Performance depends on the number of sphere tracing steps required, not the number of KRS components in the union case [S1].
++- **Strengths:** Real-time rendering capability, continuous level-of-detail, automatic minification filtering, and suitability for parallel hardware [S1].
++- **Limitations:** Symmetry may be visible if only a single KRS is used; requires multiple KRSs or other techniques to hide symmetry [S1]. Higher thresholds can cause distant geometries to merge, losing sub-pixel details [S1].
+ 
+ ## Background
+-Kernel-Reflection Sequences were proposed in a paper by the authors of [S1] to allow for real-time rendering of procedural models without concessions in visible detail. The approach is inspired by iterated function systems (IFS) but avoids their recursive nature [S1]. It allows evaluation of a global distance function without recursion, enabling real-time sphere tracing on parallel hardware [S1]. The method also extends sphere tracing to conformally transformed geometries and includes a GPU load balancing scheme [S1].
++Kernel-Reflection Sequences were proposed in a paper titled "Kernel-Reflection Sequences" (2016) [S1]. The approach is inspired by Iterated Function Systems (IFS) but modifies them to allow for real-time rendering without concessions in visible detail. It was developed to model natural phenomena in uncompromising detail and extents without obvious clues of symmetry. The method extends sphere tracing to conformally transformed geometries and includes a GPU load balancing scheme [S1].
+ 
+ ## Sources

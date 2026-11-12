@@ -3,173 +3,127 @@
 Also called: Opacity Modulation via Spatial Importance, Saliency-guided Enhancement
 
 ## Overview
-Saliency-based Opacity Modulation is a technique within the Importance-Driven Visualization Model that enhances volume visualization by dynamically adjusting voxel opacity based on computed saliency values to guide viewer attention [S1][S2, unofficial]. It solves the problem of occlusion and visual clutter by de-emphasizing less important regions (making them transparent) and emphasizing salient features (preserving or increasing opacity) [S1]. Unlike standard volume rendering which relies on fixed transfer functions, this method modulates the alpha channel during compositing based on spatial importance, distinguishing itself from siblings like [Semantic Shader Augmentation](7401-semantic-shader-augmentation.md) by focusing specifically on opacity scaling rather than semantic shader injection [S1][S2, unofficial].
+Saliency-based Opacity Modulation is a technique that enhances volume visualization by dynamically adjusting voxel opacity according to computed saliency values, thereby guiding viewer attention to the most structurally significant parts of the dataset [S1][S2, unofficial]. It solves the problem of visual clutter and occlusion by making less important regions transparent while preserving or enhancing the visibility of salient boundaries [S1][S2, unofficial]. Unlike static transfer functions, this method is data-driven, relying on spatial importance maps to determine which features deserve visual prominence [S1][S2, unofficial]. It builds on the [Importance-Driven Visualization Model](8438-importance-driven-visualization-model.md) by implementing the compositing stage where importance values directly modulate the optical density of samples [S1][S2, unofficial].
 
 ## How it works
-The method operates by computing a saliency or spatial importance value for each voxel and using it to modulate the original opacity defined by the transfer function.
+The method operates by computing a spatial importance map for the volume data and using these values to scale the original opacity of each voxel during rendering [S1][S2, unofficial].
 
 **Inputs and Outputs:**
-*   **Input:** Original volume dataset $V$, original opacity transfer function $A(z)$, computed spatial importance map $\Delta D(z)$ or saliency values $S(p)$.
-*   **Output:** Modulated opacity $A'(z)$ used in raycasting.
+*   **Input:** Original volume dataset $V$, original opacity transfer function $A(z)$, spatial importance map $\Delta D(z)$, and modulation parameters (thresholds $t_l, t_h$ and factors $k_l, k_h$) [S2, unofficial].
+*   **Output:** Rendered image with modulated opacity $A'(z)$ [S2, unofficial].
 
 **Data Structures:**
-*   **Spatial Importance Map:** A 3D grid of scalar values, same dimensions as the volume data. Values can be raw (positive/negative) or absolute (non-negative).
-*   **Saliency Map:** A 3D grid of scalar values in range $[0, 1]$ or normalized $[0, \text{max}]$.
+*   **Spatial Importance Map:** A 3D grid of the same dimensions as the volume data. Each voxel $z$ stores a scalar value $\Delta D(z)$ representing the local intensity variation. In the implementation by Ruiz et al., this is computed as the absolute difference between the original intensity and a low-pass filtered version (unsharp masking), normalized to $[0, 1]$ [S2, unofficial].
+*   **Opacity Map:** A 3D grid storing the final modulated opacity $A'(z)$ for each voxel [S2, unofficial].
 
 **Parameters:**
-*   **Thresholds:** Low threshold $t_l$ and high threshold $t_h$ for spatial importance [S2, unofficial]. Saliency threshold (e.g., 0.2) for binary masking [S1].
-*   **Factors:** $k_l$ (modulation factor for low importance), $k_h$ (modulation factor for high importance) [S2, unofficial]. $\lambda$ (color modulation factor, if color is also modulated) [S2, unofficial].
-*   **Style Function:** $S(t)$ used in radial opacity change [S3, unofficial].
+*   $t_l$: Low threshold for absolute spatial importance. Voxels with $|\Delta D(z)| < t_l$ are considered low-saliency [S2, unofficial].
+*   $t_h$: High threshold for absolute spatial importance. Voxels with $|\Delta D(z)| > t_h$ are considered high-saliency [S2, unofficial].
+*   $k_l$: Modulation factor for low-saliency voxels ($|\Delta D(z)| < t_l$) [S2, unofficial].
+*   $k_h$: Modulation factor for high-saliency voxels ($|\Delta D(z)| > t_h$) [S2, unofficial].
+*   Typical values for $t_l$ and $t_h$ depend on the normalization of $\Delta D$. In [S2, unofficial], thresholds are set to 1 when the map is not normalized to $[0,1]$ or when using raw intensity differences, but the formula assumes normalized $|\Delta D(z)| \in [0, 1]$ [S2, unofficial]. In [S1], a single threshold of 0.2 is used on a normalized saliency scale [S1].
 
 **Steps:**
+1.  **Compute Spatial Importance:** Calculate the spatial importance map $\Delta D(z)$ for the volume. This is typically done by subtracting a blurred version of the volume from the original, then taking the absolute value $|\Delta D(z)|$ to capture boundaries regardless of edge direction [S2, unofficial].
+2.  **Normalize:** Normalize $|\Delta D(z)|$ to the range $[0, 1]$ [S2, unofficial].
+3.  **Modulate Opacity:** For each voxel $z$, compute the new opacity $A'(z)$ based on the original opacity $A(z)$ and the importance value $|\Delta D(z)|$ using the following piecewise function [S2, unofficial]:
 
-1.  **Compute Importance/Saliency:** Calculate the spatial importance map $\Delta D(z)$ or saliency values $S(p)$ for all voxels. This is typically done via unsharp masking (subtracting a low-pass filtered version from the original) [S1][S2, unofficial].
-2.  **Normalize:** Normalize the importance values to the range $[0, 1]$ if using absolute values $|\Delta D(z)|$ [S2, unofficial].
-3.  **Modulate Opacity:** Apply one of the following strategies to compute the final opacity $A'(z)$ for each voxel $z$:
+    $$
+    A'(z) = 
+    \begin{cases} 
+    A(z) \cdot k_l \cdot |\Delta D(z)| & \text{if } |\Delta D(z)| < t_l \\
+    A(z) \cdot k_h \cdot |\Delta D(z)| & \text{if } |\Delta D(z)| > t_h \\
+    A(z) & \text{otherwise}
+    \end{cases}
+    $$
 
-    *   **Strategy A: Linear Scaling with Thresholds (Continuous)**
-        Use low and high thresholds $t_l$ and $t_h$ and factors $k_l$ and $k_h$ [S2, unofficial]:
-        $$
-        A'(z) = \begin{cases} 
-        A(z) \cdot k_l \cdot |\Delta D(z)| & \text{if } |\Delta D(z)| < t_l \\
-        A(z) \cdot k_h \cdot |\Delta D(z)| & \text{if } |\Delta D(z)| > t_h \\
-        A(z) & \text{otherwise}
-        \end{cases}
-        $$
-        Here, $|\Delta D(z)|$ is the absolute spatial importance value normalized to $[0, 1]$ [S2, unofficial].
+    Alternatively, a simpler binary thresholding approach can be used [S1]:
+    *   If $|\Delta D(z)| < t_{thresh}$ (e.g., 0.2), set $A'(z) = 0$ (transparent).
+    *   If $|\Delta D(z)| \ge t_{thresh}$, set $A'(z) = A(z)$ (preserve) or $A'(z) = 2 \cdot A(z)$ (enhance) [S1].
 
-    *   **Strategy B: Binary Masking with Preservation (Discrete)**
-        Use a single saliency threshold $T$ (e.g., 0.2) [S1]:
-        $$
-        A'(z) = \begin{cases} 
-        0 & \text{if } S(z) < T \\
-        A(z) & \text{if } S(z) \ge T \text{ and preserving original} \\
-        2 \cdot A(z) & \text{if } S(z) \ge T \text{ and doubling most salient}
-        \end{cases}
-        $$
-        Note: The "doubling" case applies to the "most salient" voxels above the threshold [S1].
-
-    *   **Strategy C: Global Multiplication**
-        Multiply original opacity by saliency value [S1]:
-        $$
-        A'(z) = A(z) \cdot S(z)
-        $$
-        This emphasizes salient voxels and de-emphasizes less salient ones proportionally [S1].
-
-4.  **Render:** Perform standard volume raycasting using the modulated opacity $A'(z)$ [S1][S2, unofficial].
+4.  **Render:** Perform standard volume raycasting using the modulated opacity values $A'(z)$ [S1][S2, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def modulate_opacity(original_opacity, importance_map, method="continuous", 
-                     t_l=0.0, t_h=1.0, k_l=1.0, k_h=1.0, 
-                     saliency_threshold=0.2, double_salient=False):
+def compute_modulated_opacity(volume_data, original_opacity, t_l, t_h, k_l, k_h):
     """
-    Modulates voxel opacity based on spatial importance/saliency.
+    Computes modulated opacity based on spatial importance.
     
     Args:
-        original_opacity: 3D array of original alpha values.
-        importance_map: 3D array of spatial importance values (raw or absolute).
-        method: "continuous", "binary", or "multiplicative".
-        t_l: Low threshold for continuous method.
-        t_h: High threshold for continuous method.
-        k_l: Modulation factor for low importance.
-        k_h: Modulation factor for high importance.
-        saliency_threshold: Threshold for binary method.
-        double_salient: If True, double opacity for salient voxels in binary method.
+        volume_data: 3D array of intensity values.
+        original_opacity: 3D array of original opacity values.
+        t_l: Low threshold for importance.
+        t_h: High threshold for importance.
+        k_l: Factor for low importance.
+        k_h: Factor for high importance.
         
     Returns:
-        modulated_opacity: 3D array of new alpha values.
+        modulated_opacity: 3D array of new opacity values.
     """
+    # Step 1: Compute spatial importance (unsharp masking)
+    # Blur the volume data (e.g., using Gaussian blur)
+    blurred_volume = gaussian_blur(volume_data, sigma=1.0)
+    
+    # Calculate difference
+    diff = volume_data - blurred_volume
+    
+    # Take absolute value and normalize to [0, 1]
+    abs_diff = abs(diff)
+    max_val = np.max(abs_diff)
+    if max_val > 0:
+        importance_map = abs_diff / max_val
+    else:
+        importance_map = abs_diff
+        
+    # Step 2: Modulate opacity
     modulated_opacity = np.zeros_like(original_opacity)
     
-    # Ensure importance map is absolute for continuous method if needed
-    # Note: The source [S2, unofficial] uses absolute values |Delta D| for continuous modulation
-    abs_importance = np.abs(importance_map)
+    # Low importance region
+    low_mask = importance_map < t_l
+    modulated_opacity[low_mask] = original_opacity[low_mask] * k_l * importance_map[low_mask]
     
-    if method == "continuous":
-        # Strategy A: Linear Scaling with Thresholds [S2, unofficial]
-        # Condition 1: Low importance
-        low_mask = abs_importance < t_l
-        modulated_opacity[low_mask] = original_opacity[low_mask] * k_l * abs_importance[low_mask]
-        
-        # Condition 2: High importance
-        high_mask = abs_importance > t_h
-        modulated_opacity[high_mask] = original_opacity[high_mask] * k_h * abs_importance[high_mask]
-        
-        # Condition 3: Otherwise
-        mid_mask = ~low_mask & ~high_mask
-        modulated_opacity[mid_mask] = original_opacity[mid_mask]
-        
-    elif method == "binary":
-        # Strategy B: Binary Masking [S1]
-        # Note: Saliency values are assumed to be in [0, 1] or normalized
-        # If importance_map is raw spatial importance, it needs normalization to [0,1] for this specific threshold logic
-        # Assuming input saliency is already normalized [0,1] as per [S1] description
-        saliency = importance_map # Assuming this is the normalized saliency S(p)
-        
-        transparent_mask = saliency < saliency_threshold
-        modulated_opacity[transparent_mask] = 0.0
-        
-        salient_mask = ~transparent_mask
-        if double_salient:
-            modulated_opacity[salient_mask] = 2.0 * original_opacity[salient_mask]
-        else:
-            modulated_opacity[salient_mask] = original_opacity[salient_mask]
-            
-    elif method == "multiplicative":
-        # Strategy C: Global Multiplication [S1]
-        modulated_opacity = original_opacity * importance_map
-        
-    else:
-        raise ValueError("Unknown method")
-        
+    # High importance region
+    high_mask = importance_map > t_h
+    modulated_opacity[high_mask] = original_opacity[high_mask] * k_h * importance_map[high_mask]
+    
+    # Medium importance region (unchanged)
+    medium_mask = ~low_mask & ~high_mask
+    modulated_opacity[medium_mask] = original_opacity[medium_mask]
+    
     return modulated_opacity
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** Clamping opacity values to $[0, 1]$ is necessary to prevent invalid alpha values during compositing [G].
-*   **Threshold Selection:** Choosing inappropriate thresholds ($t_l, t_h$) can lead to over-transparency (loss of detail) or under-transparency (no benefit) [S2, unofficial].
-*   **Raw vs Absolute Values:** When using raw importance values for color modulation (see Subtopics), positive $\lambda$ darkens the image because most importance values are negative [S2, unofficial]. This pitfall applies to color, but opacity modulation in [S2, unofficial] explicitly uses absolute values to detect boundaries regardless of sign [S2, unofficial].
-
 ## Subtopics
 
+### [Radial Opacity Change](7140-radial-opacity-change.md)
+A dynamic focus+context technique that modulates voxel opacity based on the distance from a central reference point, inspired by the angular velocity of a viscous fluid rotating around its center. It solves the problem of occlusion in volume rendering by making voxels further from the center more transparent, thereby revealing inner structures during rotation or zooming interactions. Unlike static saliency methods, it adapts opacity in real-time to user interaction, specifically distinguishing between global rotation (center-based) and local zooming (focus-based). See [Radial Opacity Change](7140-radial-opacity-change.md).
+
 ### [Spatial Importance Map via Unsharp Masking](7928-spatial-importance-map-via-unsharp-masking.md)
-This method computes the 3D spatial importance map by subtracting the original volume intensity values from a low-pass filtered (blurred) version of itself, effectively creating an unsharp mask. It captures salient boundary and separability information to modulate color and opacity in illustrative volume rendering, distinguishing itself from radiance-based saliency methods by relying solely on input intensity, which allows it to be computed as a preprocessing step independent of lighting and transfer functions.
+This method computes a 3D spatial importance map by subtracting the original volume intensity values from a low-pass filtered (blurred) version of itself, effectively creating an unsharp mask. It captures salient boundary and separability information to modulate color and opacity in illustrative volume rendering, distinguishing itself from radiance-based saliency methods by relying solely on input intensity, which allows it to be computed as a preprocessing step independent of lighting and transfer functions. See [Spatial Importance Map via Unsharp Masking](7928-spatial-importance-map-via-unsharp-masking.md).
 
 ### [Sparseness-based Color and Opacity Modulation](7932-sparseness-based-color-and-opacity-modulation.md)
-A technique to modify visual prominence by controlling optical properties (color and opacity) based on the level of sparseness. It sets itself apart from siblings like [Spatial Importance Map via Unsharp Masking](7928-spatial-importance-map-via-unsharp-masking.md) by directly altering the saturation and transparency of ray samples rather than just the opacity or spatial weighting, ensuring that sparse objects recede visually while dense objects remain prominent.
+A technique to modify visual prominence by controlling optical properties (color and opacity) based on the level of sparseness. It sets itself apart from siblings like [Spatial Importance Map via Unsharp Masking](7928-spatial-importance-map-via-unsharp-masking.md) by directly altering the saturation and transparency of ray samples rather than just the opacity or spatial weighting, ensuring that sparse objects recede visually while dense objects remain prominent. See [Sparseness-based Color and Opacity Modulation](7932-sparseness-based-color-and-opacity-modulation.md).
 
 ### [Smart Visibility](8437-smart-visibility.md)
-Smart Visibility is a category of illustrative visualization techniques that extends traditional light-propagation-based visibility by incorporating high-level abstractions of human cognition, such as object relevance and viewer pre-knowledge. Unlike standard volume rendering which relies solely on optical depth and occlusion, Smart Visibility explicitly handles semantic importance to ensure relevant data remains visible even when geometrically occluded by less important structures.
+Smart Visibility is a category of illustrative visualization techniques that extends traditional light-propagation-based visibility by incorporating high-level abstractions of human cognition, such as object relevance and viewer pre-knowledge. Unlike standard volume rendering which relies solely on optical depth and occlusion, Smart Visibility explicitly handles semantic importance to ensure relevant data remains visible even when geometrically occluded by less important structures. See [Smart Visibility](8437-smart-visibility.md).
 
-#### Radial Opacity Change
-A visual representation technique based on the angular velocity metaphor, making voxels further from the center more transparent to reveal inner parts during rotation [S3, unofficial]. For zooming, a focus point term makes inner parts of the object better visible close to the focus point, leaving the context around untouched [S3, unofficial].
-*   **Formula (Rotation):** $\alpha_{voxel} = e^{-S(t) \cdot \rho(\vec{P}_{voxel}, \vec{P}_{center})}$, where $\alpha_{voxel}$ is opacity, $S(t)$ is the style function, and $\rho(\vec{P}_{voxel}, \vec{P}_{center})$ is the distance from the voxel to the center of the object [S3, unofficial].
-*   **Formula (Zooming):** $\alpha_{voxel} = e^{-S(t) \cdot \max(0, \rho(\vec{P}_{voxel}, \vec{P}_{center}) - \rho(\vec{P}_{voxel}, \vec{P}_{focus}))}$, where $\vec{P}_{focus}$ denotes the initial point of interaction on the object [S3, unofficial].
-
-#### Saliency-based Color Modulation
-Modulation of voxel color based on the spatial importance map to emphasize boundaries, using either raw importance values or absolute importance values [S2, unofficial].
-*   **Formula (Raw):** $I' = I + \Delta D \cdot \lambda$, where $I$ is the original color, $\Delta D$ is the raw spatial importance value, and $\lambda$ is a modulation factor [S2, unofficial].
-*   **Formula (Absolute):** $I' = I + |\Delta D| \cdot \lambda$, where $|\Delta D|$ is the absolute spatial importance value [S2, unofficial].
-*   **Parameters:** $\lambda$ values shown are -10, 0, 10, 20 for raw values and -5, 0, 5, 10 for absolute values [S2, unofficial].
-*   **Pitfall:** With raw values and positive $\lambda$, the image becomes darker because most importance values are negative. With absolute values, darkening and brightening effects are reversed because all values are positive [S2, unofficial].
+### Saliency-based Color Modulation
+Modulation of voxel color based on the spatial importance map to emphasize boundaries, using either raw importance values or absolute importance values [S2, unofficial]. The color $I'$ is computed as $I' = I + \Delta D \cdot \lambda$ for raw values or $I' = I + |\Delta D| \cdot \lambda$ for absolute values, where $I$ is the original color, $\Delta D$ is the importance value, and $\lambda$ is a modulation factor [S2, unofficial]. Typical $\lambda$ values are -10, 0, 10, 20 for raw values and -5, 0, 5, 10 for absolute values [S2, unofficial]. A pitfall is that with raw values and positive $\lambda$, the image becomes darker because most importance values are negative; with absolute values, darkening and brightening effects are reversed because all values are positive [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The modulation step is $O(N)$ where $N$ is the number of voxels, as it involves a simple per-voxel operation after the importance map is computed [S1][S2, unofficial]. The cost of computing the importance map (e.g., via unsharp masking) depends on the filter size but is generally $O(N \cdot K)$ where $K$ is the kernel size [S2, unofficial].
-*   **Memory Complexity:** Requires storing the original volume, the importance map (same size as volume), and the modulated opacity (same size) [S1][S2, unofficial].
-*   **Performance:** Improves perceptual clarity by reducing visual clutter from less important regions [S1].
-*   **Strengths:** Automated attention guidance; effective for highlighting boundaries and salient features [S1][S2, unofficial].
-*   **Limitations:** Requires pre-computation of importance/saliency; effectiveness depends on the quality of the importance map and parameter tuning (thresholds) [S1][S2, unofficial].
-*   **When to use:** When the goal is to highlight specific features (e.g., boundaries, edges) and reduce occlusion from less relevant data [S1][S2, unofficial].
-*   **When not to use:** When quantitative accuracy of all regions is required, or when the importance map is difficult to compute accurately [S1].
+*   **Time Complexity:** The preprocessing step (computing the spatial importance map) requires a blur operation, typically $O(N)$ where $N$ is the number of voxels, assuming a separable filter. The modulation step is $O(N)$. Rendering remains $O(R)$ where $R$ is the number of rays.
+*   **Memory Complexity:** Requires storing the original volume, the importance map, and the modulated opacity map, totaling $3 \times N$ voxels of memory [S2, unofficial].
+*   **Measured Performance:** In [S2, unofficial], the method was applied to CT head and body models. The modulation allows for interactive adjustment of parameters like $k_l$ and $k_h$ [S2, unofficial].
+*   **Strengths:** Effectively emphasizes boundaries and structural details. Reduces visual clutter by hiding low-saliency regions. Computationally efficient as it can be precomputed [S1][S2, unofficial].
+*   **Limitations:** Relies on the quality of the spatial importance map. May hide important but low-contrast features if the thresholding is too aggressive [S1][S2, unofficial].
+*   **When to use:** When the goal is to highlight internal structures or boundaries in dense volumes.
+*   **When not to use:** When all regions are equally important or when the importance map fails to capture the relevant features (e.g., smooth gradients without boundaries) [S1][S2, unofficial].
 
 ## Background
-The method originates from the field of illustrative and non-photorealistic volume rendering, specifically within importance-driven visualization frameworks [S1][S2, unofficial]. It builds on the principle that visual clarity is improved when less important features are made transparent [S1]. The specific techniques for opacity modulation using spatial importance maps were detailed in works such as "Obscurance-based Volume Rendering Framework" [S1] and "Interactive Volume Illustration Using Intensity Filtering" [S2, unofficial]. The radial opacity change variant was introduced in "Dynamic Focus+Context for Volume Rendering" [S3, unofficial].
+The concept of saliency-based modulation in volume rendering was introduced in the context of obscurance-based rendering frameworks [S1]. The specific implementation using spatial importance maps derived from intensity filtering was proposed by Ruiz, Boada, Feixas, and Sbert in 2010 [S2, unofficial]. The work builds on earlier ideas of importance-driven visualization and interactive volume illustration [S1][S2, unofficial].
 
 ## Sources
 [S1] Obscurance-based Volume Rendering Framework, https://doi.org/10.2312/vg/vg-pbg08/113-120, fetched 2026-10-26
 [S2] Interactive Volume Illustration Using Intensity Filtering, https://doi.org/10.2312/compaesth/compaesth10/051-058, fetched 2026-10-26 (unofficial)
-[S3] (PDF) Dynamic Focus+Context for Volume Rendering - ResearchGate, https://www.researchgate.net/publication/220839241_Dynamic_FocusContext_for_Volume_Rendering, fetched 2026-10-27 (unofficial)

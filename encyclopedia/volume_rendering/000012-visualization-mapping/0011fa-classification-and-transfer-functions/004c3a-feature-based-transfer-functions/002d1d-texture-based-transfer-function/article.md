@@ -3,161 +3,158 @@
 Also called: Texture-based TF, tbTF
 
 ## Overview
-The Texture-based Transfer Function (tbTF) is a feature-based classification method that maps voxel data to color and opacity using 20 computed texture metrics in addition to the raw data value [S1]. It distinguishes features based on their textural properties rather than intensity or geometric shape alone [S1]. Unlike simpler methods, tbTF is computationally expensive during preprocessing and generally lacks real-time capability, but it can automatically or semi-automatically separate structures with similar intensities but different textures [S1].
+The Texture-based Transfer Function (tbTF) is a feature-based classification method that maps volume data to color and opacity using the scalar data value and 20 computed texture metrics [S1]. It distinguishes features based on local statistical properties of intensity distributions rather than just magnitude or gradient [S1]. Unlike simpler scalar-based TFs, tbTF requires significant preprocessing to compute neighborhood statistics, making it computationally expensive but capable of distinguishing structures with similar intensities but different textures [S1].
 
 ## How it works
-### Inputs and Outputs
-*   **Input:** A scalar volume dataset $V$.
-*   **Output:** A 2D Look-Up Table (LUT) mapping input metrics to RGBA color and opacity values [S1].
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset $V$.
+*   **Output:** A classification result (color and opacity) for each voxel, typically derived from a 2D Lookup Table (LUT) [S1].
 
-### Data Structures
-The method requires significant auxiliary storage during the preprocessing phase:
-1.  **Metric Volumes:** 20 separate 3D volumes, each storing one of the 20 texture metrics for every voxel [S1].
-2.  **GLCM Volume:** One volume storing Gray Level Co-occurrence Matrix data [S1].
-3.  **Run-Length Volume:** One volume storing Run-Length Matrix data [S1].
-4.  **Label Volume:** During rendering, a label volume is used to store cluster assignments (for automatic mode) or specific feature IDs [S1].
+**Data Structures:**
+The method requires extensive auxiliary data structures computed during preprocessing [S1]:
+1.  **Metric Volumes:** 20 separate 3D volumes, one for each texture metric [S1].
+2.  **GLCM Volume:** 1 volume storing Gray Level Co-occurrence Matrix statistics [S1].
+3.  **Run-Length Volume:** 1 volume storing Run-Length Matrix statistics [S1].
+4.  **Label Volume:** 1 volume storing cluster labels (used during rendering for automatic mode) [S1].
 
-### Metrics
-The 20 texture metrics are categorized as follows [S1]:
-*   **6 First-order statistics:** Derived from the histogram of voxel intensities within a local neighborhood.
-*   **7 Second-order statistics:** Typically derived from Gray Level Co-occurrence Matrices (GLCM).
-*   **7 Run-length matrices:** Derived from Run-Length matrices (RLM).
+**Feature Extraction:**
+The 20 texture metrics are categorized into three groups [S1]:
+1.  **6 First-order statistics:** Measures of intensity distribution (e.g., mean, variance) without considering spatial relationships.
+2.  **7 Second-order statistics:** Derived from Gray Level Co-occurrence Matrices (GLCM), capturing spatial relationships between voxel intensities.
+3.  **7 Run-length matrices:** Measures based on the length of consecutive voxels with the same intensity value.
 
-### Specification Methods
-The tbTF supports three specification modes [S1]:
+**Specification Methods:**
+Due to the high dimensionality (21 inputs: 1 data value + 20 metrics), manual specification is impractical. The method offers three specification modes [S1]:
+1.  **Fully Automatic:** Uses clustering algorithms to recognize structures. The user provides only the number of expected structures. The system automatically computes metrics and clusters them to define the TF [S1].
+2.  **Semi-Automatic (Manual Weighting):** The user manually weights specific statistics to influence the classification [S1].
+3.  **Semi-Automatic (Structure Distinction):** The user specifies two structures to be distinguished, or marks a single structure to be separated from the rest [S1].
 
-1.  **Fully Automatic:**
-    *   Uses clustering algorithms to identify structures.
-    *   **Input:** Only the number of expected structures.
-    *   **Process:** The system computes metrics, clusters voxels, and generates the TF automatically.
-    *   **Risk:** Barely controllable; poor ability to emphasize specific features; high risk of misinterpretation [S1].
+**Rendering:**
+During rendering, the precomputed metric volumes are sampled [S1].
+*   In **Automatic Mode:** The renderer performs lookups in the data volume and the label volume (2 lookups) [S1].
+*   In **Semi-Automatic Mode:** The renderer performs lookups in the data volume and all 20 metric volumes (21 lookups) [S1].
 
-2.  **Semi-Automatic (Manual Weighting):**
-    *   The user manually weights specific statistics.
-    *   Requires deep understanding of the metrics; time-consuming [S1].
-
-3.  **Semi-Automatic (Structure Distinguishing):**
-    *   The user specifies two distinct structures to be distinguished.
-    *   The system computes the TF to separate these two classes based on texture differences [S1].
-
-4.  **Semi-Automatic (Single Structure Separation):**
-    *   The user marks a single structure.
-    *   The system attempts to separate this marked structure from the rest of the volume based on texture [S1].
-
-### Algorithm Steps
-1.  **Preprocessing (Metric Computation):**
-    *   For each voxel in the input volume $V$, compute the 20 texture metrics.
-    *   Store results in 20 separate 3D volumes.
-    *   Compute GLCM and Run-Length matrices for the relevant neighborhoods.
-    *   *Note:* This step is very expensive in time and memory [S1].
-
-2.  **Specification (Clustering or Weighting):**
-    *   *If Automatic:* Perform clustering on the 20-dimensional metric space of all voxels. Assign a cluster label to each voxel.
-    *   *If Semi-Automatic:* Apply user-defined weights to the metric dimensions or define separation boundaries based on user-specified structures.
-
-3.  **LUT Generation:**
-    *   Map the resulting cluster labels or weighted metric combinations to color and opacity values in a 2D LUT.
-
-4.  **Rendering:**
-    *   For each ray sample:
-        *   Retrieve the data value and the precomputed metric values (or label) for the current voxel.
-        *   Perform texture lookups in the LUT.
-        *   Composite the color and opacity.
-
-### Pseudocode
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Preprocessing Phase
+def texture_based_transfer_function(volume, mode, num_structures=None, weights=None, reference_structures=None):
+    """
+    Computes and applies the Texture-based Transfer Function.
+    
+    Args:
+        volume: 3D numpy array of input data.
+        mode: 'automatic', 'manual_weighting', or 'structure_distinction'.
+        num_structures: int, required if mode is 'automatic'.
+        weights: list of floats, required if mode is 'manual_weighting'.
+        reference_structures: list of voxel coordinates or masks, required if mode is 'structure_distinction'.
+        
+    Returns:
+        color_volume: 3D array of RGB colors.
+        opacity_volume: 3D array of opacities.
+    """
+    
+    # Step 1: Preprocessing - Compute Texture Metrics
+    # Compute 20 metric volumes. This is expensive.
+    # Metrics include 6 first-order, 7 GLCM-based, 7 Run-Length based.
+    metric_volumes = compute_texture_metrics(volume)
+    
+    # Compute auxiliary volumes for GLCM and Run-Length if not included in metric_volumes
+    glcm_volume = compute_glcm_statistics(volume)
+    runlength_volume = compute_runlength_statistics(volume)
+    
+    label_volume = None
+    
+    # Step 2: Specification
+    if mode == 'automatic':
+        if num_structures is None:
+            raise ValueError("num_structures required for automatic mode")
+        # Cluster the 20 metric volumes to identify structures
+        # This is barely controllable and risks misinterpretation [S1]
+        label_volume = cluster_metrics(metric_volumes, num_clusters=num_structures)
+        # Map labels to colors/opacities automatically
+        tf_map = generate_auto_tf_from_labels(label_volume)
+    elif mode == 'manual_weighting':
+        if weights is None:
+            raise ValueError("weights required for manual weighting mode")
+        # Combine metrics using user-defined weights
+        # Requires high understanding of metrics [S1]
+        combined_score = weighted_sum_metrics(metric_volumes, weights)
+        tf_map = generate_tf_from_score(combined_score)
+    elif mode == 'structure_distinction':
+        if reference_structures is None:
+            raise ValueError("reference_structures required for structure distinction mode")
+        # Compute distance or similarity to reference structures
+        # Separates marked structure from rest [S1]
+        tf_map = generate_tf_for_distinction(volume, metric_volumes, reference_structures)
+    else:
+        raise ValueError("Unknown mode")
+
+    # Step 3: Rendering
+    # Apply TF map to volume data
+    # In automatic mode: lookup data + label (2 lookups) [S1]
+    # In semi-automatic mode: lookup data + 20 metrics (21 lookups) [S1]
+    
+    color_volume = apply_tf_map(volume, metric_volumes, label_volume, tf_map)
+    opacity_volume = compute_opacity(color_volume, tf_map)
+    
+    return color_volume, opacity_volume
+
 def compute_texture_metrics(volume):
     """
-    Computes 20 texture metrics for every voxel.
-    Returns a dictionary of 20 3D volumes.
+    Computes 20 texture metrics for each voxel.
+    Returns a list of 20 3D volumes.
     """
-    metrics = {}
-    # 6 First-order statistics
-    metrics['mean'] = compute_local_mean(volume)
-    metrics['variance'] = compute_local_variance(volume)
-    metrics['skewness'] = compute_local_skewness(volume)
-    metrics['kurtosis'] = compute_local_kurtosis(volume)
-    metrics['energy'] = compute_local_energy(volume)
-    metrics['entropy'] = compute_local_entropy(volume)
+    # First-order statistics (6 metrics)
+    # e.g., mean, variance, skewness, kurtosis, energy, entropy
+    first_order = compute_first_order_stats(volume)
     
-    # 7 Second-order statistics (GLCM-based)
-    glcm = compute_glcm(volume)
-    metrics['contrast'] = compute_glcm_contrast(glcm)
-    metrics['dissimilarity'] = compute_glcm_dissimilarity(glcm)
-    metrics['homogeneity'] = compute_glcm_homogeneity(glcm)
-    metrics['ASM'] = compute_glcm_asm(glcm)
-    metrics['energy'] = compute_glcm_energy(glcm)
-    metrics['correlation'] = compute_glcm_correlation(glcm)
-    metrics['idm'] = compute_glcm_idm(glcm)
+    # Second-order statistics from GLCM (7 metrics)
+    # e.g., contrast, correlation, energy, homogeneity, ASM, entropy, variance
+    glcm_stats = compute_glcm_stats(volume)
     
-    # 7 Run-length matrices (RLM-based)
-    rlm = compute_run_length_matrix(volume)
-    metrics['rlm_mean'] = compute_rlm_mean(rlm)
-    metrics['rlm_variance'] = compute_rlm_variance(rlm)
-    metrics['rlm_short_run_emphasis'] = compute_rlm_short_run_emphasis(rlm)
-    metrics['rlm_long_run_emphasis'] = compute_rlm_long_run_emphasis(rlm)
-    metrics['rlm_gray_level_variance'] = compute_rlm_gray_level_variance(rlm)
-    metrics['rlm_run_percentage'] = compute_rlm_run_percentage(rlm)
-    metrics['rlm_run_length_variance'] = compute_rlm_run_length_variance(rlm)
+    # Run-length statistics (7 metrics)
+    # e.g., Short Run Emphasis, Long Run Emphasis, Run Length, Run Percentage, etc.
+    runlength_stats = compute_runlength_stats(volume)
     
-    return metrics
+    return first_order + glcm_stats + runlength_stats
 
-def generate_tbtf_automatic(volume, num_clusters):
+def cluster_metrics(metric_volumes, num_clusters):
     """
-    Fully automatic tbTF generation using clustering.
+    Clusters the flattened metric volumes to assign labels.
     """
-    metrics = compute_texture_metrics(volume)
-    # Flatten metrics to a list of feature vectors
-    feature_vectors = []
-    for voxel in volume.voxels:
-        feature_vectors.append([metrics[m][voxel] for m in metrics])
-    
-    # Perform clustering (e.g., K-Means)
-    labels = cluster(feature_vectors, num_clusters)
-    
-    # Map labels to colors/opacity
-    lut = map_labels_to_rgba(labels)
-    return lut, labels
-
-def render_tbtf(volume, lut, labels):
-    """
-    Rendering loop for tbTF.
-    """
-    for ray in rays:
-        color = (0, 0, 0, 0)
-        for sample in ray.samples:
-            # In automatic mode, we use the precomputed label
-            # In semi-automatic mode using metrics, we would lookup based on metric values
-            label = labels[sample.voxel]
-            
-            rgba = lut[label]
-            
-            # Standard volume rendering compositing
-            alpha = rgba.a
-            color = color + rgba.rgb * alpha * (1 - color.a)
-            color.a += alpha * (1 - color.a)
-            
-        yield color
+    # Flatten volumes to 2D array (N_voxels x 20_metrics)
+    data_matrix = np.vstack([m.flatten() for m in metric_volumes]).T
+    # Apply clustering algorithm (e.g., K-Means)
+    labels = kmeans(data_matrix, n_clusters=num_clusters)
+    # Reshape labels back to 3D volume
+    label_volume = labels.reshape(metric_volumes[0].shape)
+    return label_volume
 ```
 
-### Parameters and Edge Cases
-*   **Resolution Trade-off:** Texture analysis does not require full volume resolution. Lower resolution can be used to trade precision for speed, making the method applicable to larger datasets [S1].
-*   **Noise Sensitivity:** The method requires very clean datasets. Noise significantly degrades texture analysis, making it difficult to distinguish features [S1].
-*   **Pitfalls:** The fully automatic mode carries a high risk of wrong results and critical misinterpretation due to poor controllability [S1].
+**Parameters:**
+*   **Number of Structures:** Integer, used in automatic mode [S1].
+*   **Weights:** Array of 20 floats, used in manual weighting mode [S1].
+*   **Reference Structures:** Voxel coordinates or masks, used in structure distinction mode [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Noise:** Texture analysis is highly sensitive to noise. The dataset must be very clean, or preprocessing denoising is required [S1].
+*   **Automatic Mode Risks:** The fully automatic method is barely controllable, has poor ability to emphasize determined features, and carries a high risk of wrong results/misinterpretation [S1].
+*   **Resolution Trade-off:** Texture analysis does not necessarily require full volume resolution. Lower resolution can be used to trade time for precision [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Very high preprocessing time due to the computation of 20 metrics and clustering [S1].
-*   **Memory Complexity:** Very high memory consumption during preprocessing. Requires up to 20 metric volumes, 1 GLCM volume, and 1 run-length volume [S1].
-*   **Real-time Capability:** No. It requires 2 3D texture lookups per sample if using labels (data + label) or 21 lookups if using raw metrics (data + metrics) [S1].
-*   **Rendering Memory:** Except for the fully automatic method, the memory amount and number of texture look-ups during rendering is the same as other TFs. One additional label volume is needed during rendering, which does not necessarily need to be full size [S1].
-*   **Strengths:** Can distinguish features based on texture, which is useful when intensity-based separation fails (e.g., distinguishing left and right features with similar intensity but different texture) [S1].
-*   **Limitations:** High computational cost, poor real-time performance, high sensitivity to noise, and low controllability in automatic mode [S1].
+*   **Preprocessing Time:** Very expensive. Computing 20 metrics and clustering is time-consuming [S1].
+*   **Memory Consumption:** High. Requires up to 20 metric volumes, 1 GLCM volume, and 1 run-length volume during preprocessing [S1]. During rendering, only 1 additional volume (label volume) is needed if using automatic mode, or 20 metric volumes if using semi-automatic mode [S1].
+*   **Rendering Performance:**
+    *   **Automatic Mode:** Real-time capable? No. Requires 2 3D texture lookups per sample (data + label) [S1].
+    *   **Semi-Automatic Mode:** Real-time capable? No. Requires 21 3D texture lookups per sample (data + 20 metrics) [S1].
+*   **Strengths:** Can distinguish features with similar intensities but different textures [S1].
+*   **Limitations:** High computational cost, sensitivity to noise, poor controllability in automatic mode [S1].
+*   **When to Use:** When texture is a distinguishing feature and real-time performance is not critical.
+*   **When Not to Use:** When data is noisy, when real-time rendering is required, or when manual control over feature emphasis is needed (automatic mode is unsuitable).
 
 ## Background
-The Texture-based Transfer Function was introduced by [CR08] and is compared against other TF types (1D, gradient-based, curvature-based, size-based, distance-based) in a survey of transfer functions suitable for volume rendering [S1]. It is particularly relevant in medical visualization where tissue texture provides diagnostic information [S1].
+The Texture-based Transfer Function was introduced by [CR08] and is compared against other TF types (1D, gradient-based, curvature-based, size-based, distance-based) in a survey by [S1]. It is particularly relevant in medical visualization where tissue texture can indicate pathology [S1].
 
 ## Sources
 [S1] A Survey of Transfer Functions Suitable for Volume Rendering, https://doi.org/10.2312/vg/vg10/077-083, fetched 2026-10-26

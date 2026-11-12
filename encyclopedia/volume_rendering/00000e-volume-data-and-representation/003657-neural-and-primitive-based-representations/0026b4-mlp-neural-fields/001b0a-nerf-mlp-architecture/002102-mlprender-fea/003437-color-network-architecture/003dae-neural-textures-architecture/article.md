@@ -1,67 +1,129 @@
 # Neural Textures Architecture
 
-Also called: Neural Texture Models, Per-Mesh Neural Textures
+Also called: Neural Texture Rendering
 
 ## Overview
-Neural Textures Architecture is a method for encoding view-dependent appearance onto 3D mesh surfaces using small, per-mesh neural networks. It solves the problem of representing high-frequency, view-dependent lighting effects (such as specularities and subsurface scattering) that cannot be captured by static albedo textures. It differs from its parent, the Color Network Architecture, by explicitly decoupling the representation into separate models for RGB and transparency per mesh, and by outputting spherical harmonics (SH) coefficients rather than direct color values, allowing for efficient view-dependent decoding via the view direction vector.
+Neural Textures is a view synthesis method that extends traditional 2D RGB texture maps into high-dimensional Neural Feature Maps associated with an explicit 3D mesh model [S1]. It solves the problem of view-dependent appearance rendering by decoupling geometry (stored as a mesh) from appearance (stored as learnable features), allowing for real-time rendering and efficient training compared to implicit neural fields [S1]. It differs from its parent, the Color Network Architecture, by explicitly utilizing UV-parameterized feature maps on a mesh rather than querying a continuous MLP at arbitrary 3D coordinates [S1, S2].
 
 ## How it works
-The architecture operates during the mesh texturing phase. It maps 2D surface coordinates to view-dependent appearance properties.
-
 **Inputs and Outputs:**
-*   **Input:** 2D UV coordinates $(u, v)$ representing the position on the mesh surface.
-*   **Output:** Per-channel spherical harmonics (SH) coefficients of degree 3. These coefficients are subsequently decoded using the view direction $v$ to produce RGB color and transparency.
+*   **Input:** A triangular mesh model with UV parameterization, camera poses, and viewing directions.
+*   **Output:** Final RGB color $c$ for each pixel.
 
-**Data Structures and Layout:**
-The neural model is a Multi-Layer Perceptron (MLP) with the following specific layout:
-1.  **Positional Encoding:** The input UV coordinates are encoded using a trainable positional encoding scheme [S1]. This maps the 2D coordinates into a higher-dimensional space to capture high-frequency details.
-2.  **MLP Structure:** The network consists of two hidden layers.
-    *   Each hidden layer contains 64 features (neurons).
-    *   Hidden layers use ReLU activations.
-    *   The final layer uses a linear activation function.
-3.  **Output Dimension:** The final layer outputs a vector of SH coefficients. For degree 3 SH, there are $2 \times 3 + 1 = 7$ coefficients per channel. Assuming RGB (3 channels), the output vector size is $3 \times 7 = 21$ values.
+**Data Structures:**
+1.  **Neural Feature Map:** A 2D texture map associated with the mesh. Each pixel stores a $k$-dimensional feature vector $f \in \mathbb{R}^K$. Typical values for $K$ are 16 or 32 [S1].
+2.  **Coloring Network (MLP):** A lightweight multi-layer perceptron that decodes features into colors.
+    *   **Structure:** Two hidden layers, each with 64 features [S2].
+    *   **Activations:** Hidden layers use ReLU; the final layer uses linear activation [S2].
+    *   **Output:** Per-channel spherical harmonics (SH) coefficients of degree 3 [S2].
 
-**Steps:**
-1.  **Encode UV:** Take the 2D UV coordinate $(u, v)$ for a point on the mesh.
-2.  **Apply Positional Encoding:** Pass $(u, v)$ through the trainable positional encoding function $\gamma(u, v)$ [S1].
-3.  **Forward Pass:** Pass the encoded vector through the two-layer MLP:
-    $$ h_1 = \text{ReLU}(W_1 \gamma(u, v) + b_1) $$
-    $$ c = W_2 h_1 + b_2 $$
-    Where $W_1, W_2$ are weight matrices and $b_1, b_2$ are bias vectors. The output $c$ is the vector of SH coefficients.
-4.  **Decode View Dependence:** The SH coefficients $c$ are combined with the view direction vector $v$ to compute the final color and transparency. The specific decoding formula for SH is not detailed in the source, but it involves projecting the view direction onto the SH basis functions defined by the coefficients [S1].
+**Numbered Steps:**
+1.  **Feature Map Creation:** Given the triangular mesh and its UV parameterization, initialize a neural feature map where each pixel corresponds to a UV coordinate $(u, v)$ and stores a trainable $K$-dimensional feature vector [S1].
+2.  **Ray Intersection:** For each camera ray, determine the intersection point with the mesh surface using differentiable rasterization [S1].
+3.  **Feature Query:** Retrieve the UV coordinates $(u, v)$ of the intersection point. Obtain the feature vector $f$ by performing bilinear interpolation from the neural feature map at $(u, v)$ [S1].
+4.  **Context Collection:** Gather the surface normal $n$ at the intersection point, the viewing direction $d$, and illumination information $l$ (if applicable) [S1].
+5.  **Color Decoding:** Feed the queried feature vector $f$, normal $n$, viewing direction $d$, and illumination $l$ into the lightweight MLP (coloring network) [S1].
+    *   *Note:* In specific implementations (e.g., [S2]), the input to the MLP may be the UV coordinates themselves encoded via trainable positional encoding [Muller et al.], followed by the MLP outputting SH coefficients which are then decoded using the view direction $v$ [S2].
+6.  **Output:** The coloring network outputs the final RGB color $c$ [S1]. The entire "feature query-coloring" process is differentiable, allowing gradients to flow back to the feature map and MLP weights [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_neural_texture(mesh, feature_map, camera_ray):
+    """
+    Renders a single ray using Neural Textures.
+    
+    Args:
+        mesh: Triangular mesh with UV parameterization.
+        feature_map: 2D array of shape (H, W, K) storing feature vectors.
+        camera_ray: Ray origin and direction.
+        
+    Returns:
+        color: RGB color value.
+    """
+    # Step 2: Determine intersection with mesh
+    intersection = differentiable_rasterize(mesh, camera_ray)
+    if intersection is None:
+        return background_color # Handle no intersection
+
+    uv_coords = intersection.uv_coordinates # (u, v) in [0, 1]
+    normal = intersection.normal
+    view_dir = camera_ray.direction
+
+    # Step 3: Query feature vector via bilinear interpolation
+    # feature_map is indexed by integer UV coordinates scaled to texture resolution
+    u_idx, v_idx = uv_to_texture_indices(uv_coords, feature_map.shape)
+    f = bilinear_interpolate(feature_map, u_idx, v_idx) # f is vector of size K
+
+    # Step 5: Decode color using Coloring Network (MLP)
+    # Inputs: feature vector f, normal n, view direction d
+    color = coloring_network(f, normal, view_dir)
+
+    return color
+
+def coloring_network(feature_vector, normal, view_direction):
+    """
+    Lightweight MLP to decode features into color.
+    Architecture: 2 hidden layers, 64 features each.
+    Activations: ReLU (hidden), Linear (output).
+    """
+    # Concatenate inputs if required by specific variant, 
+    # or pass feature vector as primary input.
+    # Note: Some variants [S2] take UV coords + positional encoding.
+    # Here we assume the standard Neural Texture flow [S1] where f is the input.
+    
+    x = feature_vector
+    
+    # Layer 1
+    x = linear_layer_1(x)
+    x = relu(x)
+    
+    # Layer 2
+    x = linear_layer_2(x)
+    x = relu(x)
+    
+    # Output Layer
+    color = linear_output_layer(x)
+    
+    return color
+```
 
 **Parameters:**
-*   **Hidden Units:** 64 per layer [S1].
-*   **SH Degree:** 3 [S1].
-*   **Activation:** ReLU for hidden layers, Linear for output [S1].
+*   $K$ (Feature dimension): Typically 16 or 32 [S1].
+*   MLP Hidden Units: 64 per layer [S2].
+*   SH Degree: 3 [S2].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The source notes that gradients of SDFs (used in the broader context of the method) are computed with finite differences using $\epsilon = 10^{-4}$ [S1]. This precision setting is critical for the stability of the geometry optimization that precedes texturing.
-*   **Boundary Conditions:** The method assumes valid UV coordinates. Degenerate UV mappings (e.g., severe stretching or overlapping) may lead to artifacts, though specific mitigation strategies are not detailed in the provided text [S1].
+*   **UV Seams:** Discontinuities at UV seams can cause visible artifacts. Differentiable rasterization helps but requires careful handling of interpolation across boundaries [S1].
+*   **Precision:** Bilinear interpolation assumes smooth feature variation; high-frequency details may require higher resolution feature maps or additional encoding [S1].
 
 ## Subtopics
 
 ### SIREN Optimization for Neural Lumigraph
-This variant uses SIREN (Sinusoidal Representation Networks) architectures for the SDF $S$ and emissivity $E$ to enable smooth, high-frequency interpolation. It is chosen when favorable angular interpolation behavior is required for neural lumigraph rendering. It differs from the standard ReLU-based Neural Textures by using Fourier features and sinusoidal activations to support angular resolution.
-*   **Implementation:** MLPs for $S$ and $E$ have 5 layers with 256 hidden units each [S2].
-*   **Features:** Fourier features $\{\sin(2k\pi r_d), \cos(2k\pi r_d) \mid k \in 1 \dots 4\}$ are used in $E$ to support angular resolution [S2].
-*   **Initialization:** $S$ is initialized to a unit sphere of radius 0.5 by pretraining to a procedural shape [S2].
-*   **Optimization:** Loss is optimized in mini-batches of 50,000 rays sampled uniformly. Adam solver with initial learning rate $10^{-4}$, decreased by a factor of 2 every 40,000 batches for 150,000 batches total [S2].
-*   **Loss Function:** The total loss is $\arg \min_{\theta, \phi} L_R + w_E L_E + w_M L_M + w_S L_S$ [S2].
-*   **Angular Smoothness:** The angular smoothness loss is $L_S = \frac{1}{|U|} \sum ||\nabla^2_{r_d} E(x, r_d, n; \theta, \phi)||^2_2$ [S2].
-*   **Parameters:** $w_E = 0.1$, $w_M = 100$, $w_S = 0.01$ [S2].
-*   **Pitfalls:** Local overfitting of SIREN, especially for high-frequency function $E$, is prevented by using large batch sizes and uniform ray distribution [S2]. Large values of $w_S$ cause high-frequency artifacts in $S$ [S2].
+A training procedure for Neural Textures using SIREN (Sinusoidal Representation Networks) architectures to optimize Signed Distance Functions (SDF) $S$ and emissivity $E$ [S3]. It incorporates a smoothness term to restrict angular behavior for favorable interpolation [S3].
+*   **Implementation:** MLPs for $S$ and $E$ are implemented as SIRENs with 5 layers and 256 hidden units each [S3]. Fourier features $\{\sin(2k\pi r_d), \cos(2k\pi r_d) \mid k \in 1 \dots 4\}$ are used in $E$ to support angular resolution [S3].
+*   **Initialization:** $S$ is initialized to a unit sphere of radius 0.5 by pretraining to a procedural shape [S3].
+*   **Optimization:** Loss is optimized in mini-batches of 50,000 individual rays sampled uniformly across the training dataset [S3]. The Adam solver is used with an initial learning rate of $10^{-4}$, decreased by a factor of 2 every 40,000 batches for 150,000 batches total [S3].
+*   **Loss Function:** The total loss is $\arg \min_{\theta, \phi} L_R + w_E L_E + w_M L_M + w_S L_S$ [S3]. The angular smoothness loss is $L_S = \frac{1}{|U|} \sum ||\nabla^2_{r_d} E(x, r_d, n; \theta, \phi)||^2_2$ [S3].
+*   **Parameters:** $w_E = 0.1$ [S3].
+*   **Pitfalls:** Local overfitting of SIREN, especially for high-frequency function $E$, is prevented by using large batch sizes and uniform ray distribution [S3]. Large values of $w_S$ cause high-frequency artifacts in $S$ [S3].
+
+### Neural Texture for Virtual Digital Humans
+A technique for real-time animation and actuation of virtual digital humans, combining a parametric face model (such as 3DMM) with neural textures [S1]. It renders high-fidelity facial animation in real time by driving a limited number of expression parameters [S1]. Referenced in [15] [S1].
 
 ## Operating characteristics
-*   **Complexity:** The MLP is small (2 layers, 64 units), making inference computationally cheap per pixel. However, the positional encoding is trainable, requiring gradient updates during training.
-*   **Memory:** Memory usage is proportional to the number of meshes and the size of the SH coefficient vectors. For degree 3 SH, this is 21 floats per point per mesh.
-*   **Performance:** The method allows for compact representation of view-dependent effects. The use of SH coefficients allows for efficient view-dependent rendering without storing full view-dependent textures.
-*   **Strengths:** Compact representation, view-dependent, compatible with standard mesh rendering pipelines.
-*   **Limitations:** Limited to mesh-based representations. Requires UV unwrapping. The source does not provide specific frame rates or memory benchmarks for this specific architecture [S1].
+*   **Time Complexity:** Training throughput is accelerated by three orders of magnitude compared to vanilla NeRF due to efficient hash-table lookups and interpolation operations [S1]. Rendering is real-time capable, suitable for virtual anchors and video conferencing [S1].
+*   **Memory Complexity:** Depends on the resolution of the neural feature map and the size of $K$. Explicit mesh storage adds overhead compared to implicit fields but allows for efficient culling and rasterization [S1].
+*   **Strengths:** Real-time rendering capability; efficient training; explicit geometry allows for easy integration with standard graphics pipelines (e.g., differentiable rasterization) [S1].
+*   **Limitations:** Requires an explicit mesh and UV parameterization; quality depends on the accuracy of the mesh and the expressiveness of the feature map [S1].
+*   **When to Use:** Real-time applications, virtual production, and scenarios requiring explicit geometry control [S1].
+*   **When Not to Use:** Scenes with complex, unstructured geometry where meshing is difficult or expensive [S1].
 
 ## Background
-The Neural Textures Architecture was introduced in the context of "Volumetric Surfaces: Representing Fuzzy Geometries with Layered Meshes" [S1]. It builds upon the concept of neural textures [35] (Muller et al.) and adapts it for volumetric rendering of fuzzy geometries. The method separates the representation of RGB and transparency per mesh to handle the complexities of volumetric data. The SIREN variant was introduced in "Neural Lumigraph Rendering" [S2] to improve angular interpolation for novel view synthesis.
+Neural Textures was introduced as a method to extend traditional 2D texture maps into high-dimensional feature spaces associated with explicit 3D meshes [S1]. It emerged from the need for real-time neural rendering, bridging the gap between traditional rasterization and implicit neural fields [S1]. The approach leverages differentiable rasterization to make the feature query and coloring process end-to-end differentiable [S1]. Variants using SIRENs have been explored for neural lumigraph rendering to handle view-dependent effects and angular smoothness [S3]. Applications include virtual digital humans, virtual production (e.g., LED Volumes), and special effects [S1].
 
 ## Sources
-[S1] Volumetric Surfaces: Representing Fuzzy Geometries with Layered Meshes, https://doi.org/10.1109/cvpr52734.2025.01991, fetched 2026-10-26
-[S2] Neural Lumigraph Rendering, https://doi.org/10.1109/cvpr46437.2021.00427, fetched 2026-10-26
+[S1] Review of Key Technologies and Application Scenarios of Neural Rendering, https://doi.org/10.54254/2755-2721/2026.36116, fetched 2026-10-26
+[S2] Volumetric Surfaces: Representing Fuzzy Geometries with Layered Meshes, https://doi.org/10.1109/cvpr52734.2025.01991, fetched 2026-10-26
+[S3] Neural Lumigraph Rendering, https://doi.org/10.1109/cvpr46437.2021.00427, fetched 2026-10-26

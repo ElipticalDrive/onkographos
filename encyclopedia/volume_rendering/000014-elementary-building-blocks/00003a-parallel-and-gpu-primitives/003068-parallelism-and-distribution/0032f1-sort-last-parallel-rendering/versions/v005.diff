@@ -1,0 +1,221 @@
+--- v004.md
++++ v005.md
+@@ -1,45 +1,127 @@
+ # Sort-last Parallel Rendering
+ 
+-Also called: CompleX Middleware, Distributed Volume Rendering with Post-rendering Compositing, Multi-GPU Distributed Rendering, Object-order distribution, Sort-last rendering
++Also called: Sort-last rendering, Distributed Volume Rendering with Post-rendering Compositing
+ 
+ ## Overview
+-Sort-last parallel rendering is a distributed volume rendering strategy that partitions the volume dataset into sub-volumes, distributes them across independent processors, and composites the resulting partial images in a final step [S1, S2, S3, unofficial]. It solves the problem of rendering large datasets on distributed memory clusters by keeping data stationary, thereby reducing network traffic compared to sort-first methods [S1, unofficial]. Unlike [Parallel Image Compositing with Overlapping](3554-parallel-image-compositing-with-overlapping.md) which focuses on compositing algorithms, or [Ray Compaction](4039-ray-compaction.md) which optimizes ray traversal, sort-last rendering is defined by its object-order distribution and post-rendering composition phase [S1, S4, unofficial].
++Sort-last parallel rendering is a distributed volume rendering strategy where the dataset is partitioned into sub-volumes and assigned to independent processors, each of which renders its portion into a full-resolution partial image regardless of visibility [S1][S2, S3, unofficial]. These partial images are subsequently composited in a specific order (typically back-to-front) to produce the final image [S2, S3, unofficial]. Unlike [Sort-first Parallel Rendering](6265-parallelism-and-distribution.md), which partitions the screen space and requires complex load balancing based on view-dependent geometry density, sort-last keeps the data distribution fixed in object space, making it a natural choice for distributed-memory clusters where data movement is expensive [S2, unofficial]. It differs from [Sort-middle Parallel Rendering](6893-sort-middle-parallel-rendering.md) by deferring all visibility sorting to the final compositing stage, thereby avoiding the intermediate geometry transfer overhead of sort-middle [S5, unofficial].
+ 
+ ## How it works
+-**Inputs:** A volume dataset $V$, a set of $N$ rendering processors (or GPUs) $\{P_0, \dots, P_{N-1}\}$, and a camera view.
+-**Outputs:** A final composite image $I_{final}$.
++**Inputs:** A large volume dataset $V$ (potentially distributed across storage nodes), a camera configuration (view matrix, projection matrix), and a set of $P$ rendering processors.
++**Outputs:** A single final 2D image $I_{final}$ of resolution $W \times H$.
+ 
+ **Data Structures:**
+-*   **Sub-volume:** A contiguous portion of the volume dataset assigned to a processor.
+-*   **Partial Image:** A full-resolution image buffer (color and depth) rendered by a single processor for its assigned sub-volume.
+-*   **Compositing Order:** A sequence or tree structure defining the order in which partial images are blended to respect occlusion [S1, unofficial].
++1.  **Volume Partition:** The dataset $V$ is divided into $P$ disjoint sub-volumes $V_0, V_1, \dots, V_{P-1}$. Each processor $p$ holds $V_p$ in its local memory (RAM or VRAM) [S1][S2, unofficial].
++2.  **Partial Image Buffer:** Each processor $p$ allocates a full-resolution frame buffer $I_p$ of size $W \times H$, storing color $(C)$ and depth $(D)$ or alpha $(\alpha)$ values for every pixel [S2, S5, unofficial].
++3.  **Compositing State:** A global or hierarchical structure defining the compositing order. For volume rendering, this is typically a back-to-front sort of the processors based on their spatial distance to the camera [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Data Partitioning:** The volume dataset is divided into $N$ sub-volumes. This division can be static (e.g., block-splitting) or dynamic (e.g., based on k-d trees) [S1, S2, unofficial].
+-2.  **Distribution:** Each sub-volume is transferred to or accessed by a specific rendering processor $P_i$ [S2, unofficial].
+-3.  **Local Rendering:** Each processor $P_i$ renders its assigned sub-volume into a full-resolution partial image $I_i$. This rendering is performed regardless of the visibility of the sub-volume relative to others; depth and color values are computed for all pixels [S1, S4, unofficial].
+-    *   *Note:* If using a parallel brick renderer, the sub-volume is further subdivided into bricks processed by threads, with a main thread performing sort-last alpha compositing of the bricks [S5, unofficial].
+-4.  **Pixel Transfer:** The partial images $I_i$ (containing color and depth buffers) are transferred from the rendering processors to a compositing unit (which may be one of the processors or a dedicated node) [S4, unofficial].
+-5.  **Compositing:** The compositing unit blends the partial images $I_i$ in a specific order to produce the final image $I_{final}$. The blending must respect the depth/visibility order of the volume pieces to ensure correct occlusion [S1, unofficial].
+-    *   For translucent volumes, the Porter-Duff 'over' operator is used, leveraging its associativity to allow flexible parallel composition [S2, unofficial].
+-    *   Common compositing strategies include hierarchical tree-based compositing (e.g., binary swap) or direct send [S1, S9377-direct-send-compositing.md, unofficial].
+-
+-**Formulas:**
+-The final color $C_{final}(x,y)$ at pixel $(x,y)$ is computed by compositing the partial images. If $I_i$ provides color $C_i$ and opacity $\alpha_i$, and the compositing order is defined by a permutation $\pi$, then:
+-$$ C_{final} = \bigoplus_{k=1}^{N} C_{\pi(k)} $$
+-where $\oplus$ is the alpha blending operator:
+-$$ C_{out} = C_1 + (1 - \alpha_1)C_2 $$
+-$$ \alpha_{out} = \alpha_1 + (1 - \alpha_1)\alpha_2 $$
+-[S2, unofficial]
++1.  **Data Distribution:** The volume dataset is split into blocks. In static approaches, the split is fixed based on spatial coordinates (e.g., grid blocks) [S1][S3, unofficial]. In dynamic approaches (e.g., using k-d trees or work queues), blocks may be redistributed to balance load, though this incurs communication costs [S1].
++2.  **Local Rendering:** Each processor $p$ independently renders its sub-volume $V_p$.
++    *   For each pixel $(u, v)$ in the image, a ray is cast through the volume.
++    *   The ray is sampled through the cells of $V_p$.
++    *   A volume rendering integral (e.g., ray casting with transfer functions) is computed to produce a color $C_p(u,v)$ and opacity $\alpha_p(u,v)$ (or depth $D_p(u,v)$) for that pixel [S2, S5, unofficial].
++    *   The result is stored in $I_p[u,v]$. Note that this step ignores occlusion from other processors' data; it renders "as if" it were the only data source [S2, unofficial].
++3.  **Image Transfer:** Each processor sends its full-resolution partial image $I_p$ to the compositing stage. This typically involves an all-to-all or hierarchical reduction communication pattern [S2, S5, unofficial].
++4.  **Compositing:** The partial images are blended to form $I_{final}$.
++    *   The processors are sorted by their distance to the camera (back-to-front) [S2, unofficial].
++    *   Let the sorted order be $p_1, p_2, \dots, p_P$.
++    *   The final color $C_{final}(u,v)$ and opacity $\alpha_{final}(u,v)$ are computed using the Porter-Duff 'over' operator:
++        $$
++        \alpha_{final}(u,v) = \alpha_{p_1}(u,v) + (1 - \alpha_{p_1}(u,v)) \alpha_{p_2}(u,v) + \dots
++        $$
++        $$
++        C_{final}(u,v) = C_{p_1}(u,v) + (1 - \alpha_{p_1}(u,v)) C_{p_2}(u,v) + \dots
++        $$
++    *   This can be implemented iteratively:
++        $$
++        \alpha_{out} = \alpha_{in} + (1 - \alpha_{in}) \alpha_{src}
++        $$
++        $$
++        C_{out} = C_{in} + (1 - \alpha_{in}) C_{src}
++        $$
++        where $(\alpha_{in}, C_{in})$ is the accumulated result so far, and $(\alpha_{src}, C_{src})$ is the contribution from the next processor in the sorted list [S2, S8788].
+ 
+ **Parameters:**
+-*   **Network Bandwidth:** Critical for performance. Higher resolutions increase bandwidth requirements [S1, unofficial].
+-*   **Brick Size:** If using brick rendering, the size is determined by available GPU video memory [S5, unofficial].
++*   **Number of Processors ($P$):** Determines the granularity of the volume split.
++*   **Compositing Order:** Critical for correctness. Must respect the depth order of the volume data relative to the camera [S2, unofficial].
++*   **Network Bandwidth:** The primary constraint. Higher image resolutions ($W \times H$) linearly increase the data volume transferred ($W \times H \times 4$ bytes for RGBA) [S2, S5, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Load Imbalance:** If the volume density is uneven, some processors may render more complex geometry, causing bottlenecks [S4, unofficial].
+-*   **Network Bottleneck:** The method requires high bandwidth to transfer all pixel data. It does not scale well with increasing screen resolution due to the volume of pixel data transferred [S1, S4, unofficial].
+-*   **Depth Uncertainty:** Final depth is determined only during composition, making it difficult to use algorithms like anti-aliasing or transparency that require early depth testing [S4, unofficial].
+-*   **Initialization Overhead:** In MPI-based implementations, initialization time increases with the number of processors [S6, unofficial].
++*   **Load Imbalance:** If the volume density or camera view causes some processors to render significantly more complex geometry (e.g., zooming into a dense region), the frame rate is limited by the slowest processor [S1]. Dynamic load balancing techniques (e.g., work queues) can mitigate this but add communication overhead [S1].
++*   **Network Bottleneck:** The requirement to transfer full-resolution images for every frame can saturate the network, especially at high resolutions [S2, S5, unofficial].
++*   **Depth/Transparency Limitations:** Because final depth is only determined during compositing, early-z culling and standard anti-aliasing techniques that rely on per-pixel depth testing during rasterization are difficult or impossible to apply effectively [S5, unofficial].
++*   **Initialization Overhead:** In MPI-based implementations (e.g., using Mpi4py), initialization time increases with the number of processors, limiting scalability for small tasks [S6, unofficial].
++
++**Pseudocode:**
++```python
++def sort_last_parallel_rendering(volume_data, camera, num_processors, image_width, image_height):
++    """
++    Simulates the sort-last parallel rendering pipeline.
++    volume_data: List of sub-volumes, one per processor.
++    camera: Object containing view and projection matrices.
++    num_processors: Total number of rendering nodes.
++    image_width, image_height: Resolution of the output image.
++    """
++    # Step 1: Local Rendering
++    # Each processor renders its sub-volume independently.
++    # In a real distributed system, this happens concurrently on different nodes.
++    partial_images = []
++    for p in range(num_processors):
++        sub_volume = volume_data[p]
++        # Render sub-volume to a full-resolution buffer
++        # Returns a 2D array of (color, alpha) tuples
++        img = render_sub_volume(sub_volume, camera, image_width, image_height)
++        partial_images.append(img)
++
++    # Step 2: Determine Compositing Order
++    # Sort processors based on their sub-volume's distance to the camera.
++    # For simplicity, assume we have a function to get the average depth of a sub-volume.
++    processor_depths = [get_average_depth(sub_volume, camera) for sub_volume in volume_data]
++    sorted_indices = sorted(range(num_processors), key=lambda k: processor_depths[k], reverse=True) # Back-to-front
++
++    # Step 3: Compositing
++    # Initialize the accumulated image with the first processor's result (or transparent)
++    # Using a single accumulated buffer for the final result
++    acc_color = np.zeros((image_height, image_width, 3))
++    acc_alpha = np.zeros((image_height, image_width))
++
++    for idx in sorted_indices:
++        img = partial_images[idx]
++        # img is a 2D array of (R, G, B, A)
++        c_src = img[:, :, :3]
++        a_src = img[:, :, 3]
++
++        # Porter-Duff 'over' operator
++        # C_out = C_in + (1 - A_in) * C_src
++        # A_out = A_in + (1 - A_in) * A_src
++        
++        # Vectorized operation for all pixels
++        one_minus_acc_alpha = 1.0 - acc_alpha
++        acc_color = acc_color + one_minus_acc_alpha[:, :, np.newaxis] * c_src
++        acc_alpha = acc_alpha + one_minus_acc_alpha * a_src
++
++    return acc_color, acc_alpha
++
++def render_sub_volume(sub_volume, camera, width, height):
++    """
++    Renders a single sub-volume into a full-resolution image.
++    Ignores occlusion from other volumes.
++    """
++    # Placeholder for actual ray-casting logic
++    # Cast rays for each pixel (u, v)
++    # Sample sub_volume along the ray
++    # Compute color and alpha using transfer function
++    # Return image buffer
++    pass
++
++def get_average_depth(sub_volume, camera):
++    """
++    Estimates the distance of the sub-volume from the camera.
++    """
++    # Calculate bounding box of sub_volume
++    # Transform to camera space
++    # Return average depth
++    pass
++```
+ 
+ ## Subtopics
+@@ -51,4 +133,7 @@
+ The Distributed Volume Rendering Pipeline is a parallel software architecture that structures distributed direct volume rendering as a loosely coupled pipeline of sequential and parallel stages to hide I/O costs and achieve interactive framerates on heterogeneous High-Performance Computing (HPC) systems. It solves the problem of limited local hardware performance and data locality by decoupling elementary renderers from parallelism and resource management, allowing the system to scale across distributed memory clusters and Multi-GPU nodes. Unlike sibling methods that focus primarily on data distribution algorithms or compositing optimizations, this architecture emphasizes a modular pipeline design with a dedicated display phase and Zero Configuration Networking (ZCN) for dynamic resource allocation, enabling seamless integration of new resources without system restarts.
+ 
++### [Parallel Brick Renderer](8184-parallel-brick-renderer.md)
++The Parallel Brick Renderer is a sort-last parallel volume rendering method that subdivides a large dataset into convex objects (bricks) small enough to fit into GPU video memory, renders these bricks concurrently using multiple threads, and composites the results via sort-last alpha blending. It differs from the serial brick renderer by processing leaf nodes concurrently rather than sequentially, enabling efficient utilization of multi-core or GPU architectures for datasets exceeding single-device memory capacity.
++
+ ### [Parallel Sort-Last Image Compositing for Volumes](8788-parallel-sort-last-image-compositing-for-volumes.md)
+ This method extends parallel sort-last image compositing, traditionally used for opaque surfaces via libraries like IceT, to translucent volumes by leveraging the associativity of the Porter-Duff 'over' operator. Unlike [Data Distribution via k-d Trees and Multicast](7162-data-distribution-via-k-d-trees-and-multicast.md) which may involve complex data movement, or [Block-Splitting (BS) method](9229-block-splitting-bs-method.md) which splits the volume geometry, this approach partitions the dataset into blocks accessible by single processes, renders them locally, and composites the resulting sub-images. It is chosen when the volume data is large and distributed, requiring high-quality translucent rendering where the associativity of alpha blending allows for flexible parallel composition.
+@@ -58,37 +143,27 @@
+ 
+ ### [Direct Send Compositing](9377-direct-send-compositing.md)
+-Direct send compositing is a parallel image compositing method used in sort-last rendering to combine partial images rendered by multiple processors into a final composite. It solves the problem of efficiently aggregating screen-space data by dividing the final image into $n$ tiles, where each processor is responsible for compositing one specific tile. Unlike hierarchical methods such as Binary Swap or Tree-like algorithms that use multi-stage communication to reduce message counts, Direct Send relies on a single all-to-all communication stage, making it simpler to implement and robust even with expensive synchronization mechanisms.
+-
+-### Parallel Brick Renderer
+-A renderer that subdivides a volume dataset into convex objects (bricks) that fit into GPU video memory, processes them in parallel using threads, and composites results via sort-last alpha blending [S5, unofficial].
+-**Steps:**
+-1.  Subdivide volume into convex bricks that fit into video memory.
+-2.  Assign bricks to rendering threads.
+-3.  Each thread renders its brick using an elementary renderer.
+-4.  Main thread performs sort-last alpha compositing using a visitor invoked during k-d tree traversal [S5, unofficial].
+-**Parameters:** Brick size is determined by available GPU video memory; must be small enough to fit entirely in VRAM [S5, unofficial].
+-**Comparison:** Differs from the serial brick renderer by using multiple threads to render bricks concurrently instead of processing leaf nodes sequentially [S5, unofficial].
++Direct send compositing is a parallel image compositing method for sort-last rendering that divides the final image into $n$ screen-space tiles to avoid exchanging full-size images. Each processor is associated with compositing one tile and sends all other tiles from the full-size image it rendered to the respective processors. It sets itself apart from hierarchical methods like [Binary swap](7162-binary-swap.md) by using a single all-to-all communication stage rather than a multi-step tree, making it robust even with expensive synchronization mechanisms.
+ 
+ ### MPI4py Parallelization
+-Parallelization using the Mpi4py library (Python bindings of MPI) with a 'sort last' strategy to distribute data among processing units for parallel I/O [S6, unofficial].
+-**Pitfall:** Increasing initialization time with the number of processors used; no interest in using too many processors unless computing many independent images [S6, unofficial].
++Parallelization using the Mpi4py library (Python bindings of MPI) with a 'sort last' strategy to distribute data among processing units for parallel I/O [S6, unofficial]. Increasing initialization time with the number of processors used is a pitfall; there is no interest in using too many processors unless computing many independent images [S6, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering time is dominated by the slowest processor (load imbalance) and the compositing phase. Compositing time depends on the network bandwidth and the number of partial images [S1, S4, unofficial].
+-*   **Memory Complexity:** Each processor stores its assigned sub-volume and a full-resolution partial image. The compositing unit stores all partial images during the blending phase [S1, S4, unofficial].
+-*   **Scalability:** Scalability is heavily bound to network bandwidth. Higher resolutions increase bandwidth requirements, so sort-last methods do not scale well with increasing screen resolution [S1, unofficial]. However, they scale well with volume data size because data can remain stationary, avoiding the redistribution overhead of sort-first methods [S1, unofficial].
+-*   **Strengths:** Natural fit for distributed memory systems; reduces network communication for data loading; allows use of commodity clusters [S1, S2, unofficial].
+-*   **Limitations:** High network bandwidth requirement; load imbalance due to uneven data distribution; difficulty in using algorithms requiring early depth testing (e.g., anti-aliasing) [S1, S4, unofficial].
+-*   **When to Use:** Large datasets on distributed memory clusters where data loading is a bottleneck and network bandwidth is sufficient for pixel transfer [S1, S2, unofficial].
+-*   **When Not to Use:** When screen resolution is very high and network bandwidth is limited; when early depth testing is required for correct rendering [S1, S4, unofficial].
++**Time Complexity:** The rendering time is dominated by the slowest processor in the cluster, as all partial images must be available before compositing can begin. Load balancing is critical; if the volume density is uneven, some processors will take significantly longer [S1].
++**Memory Complexity:** Each processor must store its assigned sub-volume in memory. This allows sort-last to handle datasets much larger than the memory of a single machine, as data can remain stationary on disk or distributed storage [S2, unofficial].
++**Network Bandwidth:** The primary bottleneck. The amount of data transferred is proportional to the image resolution ($W \times H$) and the number of processors. Higher resolutions do not scale well with sort-last due to increased bandwidth requirements [S2, S5, unofficial].
++**Scalability:** Sort-last scales well with volume data size because data does not need to be moved between processors for rendering (unlike sort-first) [S2, unofficial]. However, it scales poorly with screen resolution due to the compositing communication overhead [S2, unofficial].
++**Strengths:** Simple implementation; no need for complex view-dependent load balancing; data locality is preserved; suitable for distributed memory systems where moving data is expensive [S2, unofficial].
++**Limitations:** High network bandwidth requirement; final depth is unknown until compositing, preventing early-z culling and standard anti-aliasing; load imbalance can occur if the view zooms into a dense region [S1][S5, unofficial].
++**When to use:** Large datasets on distributed memory clusters where data movement is costly; interactive visualization where network bandwidth is sufficient for the target resolution [S2, S3, unofficial].
++**When not to use:** Very high-resolution displays where network bandwidth is insufficient; scenes requiring early-z culling or complex depth-based effects [S5, unofficial].
+ 
+ ## Background
+-Sort-last rendering originated as a solution for parallelizing volume rendering on distributed memory systems. It was notably used by Cavin, Mion, and Filbois to visualize large datasets on COTS clusters, adopting parallel compositing techniques to reduce overhead [S2, unofficial]. The approach is also implemented in the CompleX Middleware, part of the Nvidia Application Acceleration Engine (AXE), which provides APIs for volume/polygonal data distribution across multi-GPU systems and composition with depth or alpha [S3, unofficial]. The method is often compared with sort-first and sort-middle approaches, with sort-last being preferred when data locality is more critical than pixel-level load balancing [S1, S4, unofficial].
++Sort-last rendering originated as a solution for parallelizing volume rendering on distributed memory systems where data partitioning in object space is preferred to avoid the communication overhead of redistributing geometry [S2, unofficial]. It was adopted by systems like STARVolume for spatial parallel rendering on COTS clusters [S3, unofficial]. The technique is also used in multi-GPU setups, such as the Nvidia Application Acceleration Engine (AXE) via the CompleX Middleware, which supports OpenGL-based volume and polygonal data distribution across multiple GPUs [S4, unofficial]. Dynamic load balancing techniques, such as work package pulling mechanisms in the Equalizer framework, have been developed to address load imbalances inherent in static sort-last distributions [S1].
+ 
+ ## Sources
+-[S1] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
+-[S2] Volume visualization of time-varying data using parallel, multiresolution and adaptive-resolution techniques, https://scholars.unh.edu/cgi/viewcontent.cgi?article=1245&context=thesis, fetched 2026-10-27 (unofficial)
+-[S3] PDF Slide 1, https://www.nvidia.com/content/GTC/documents/1102_GTC09.pdf, fetched 2026-10-29 (unofficial)
+-[S4] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)
+-[S5] A SOFTWARE ARCHITECTURE FOR DISTRIBUTED VOLUME RENDERING ON ... - Actapress, https://actapress.com/Abstract.aspx?paperId=454770, fetched 2026-10-27 (unofficial)
++[S1] A Scalable Hybrid Scheme for Ray-Casting of Unstructured Volume Data, https://doi.org/10.1109/tvcg.2018.2833113, fetched 2026-10-24
++[S2] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
++[S3] Volume visualization of time-varying data using parallel, multiresolution and adaptive-resolution techniques, https://scholars.unh.edu/cgi/viewcontent.cgi?article=1245&context=thesis, fetched 2026-10-27 (unofficial)
++[S4] PDF Slide 1, https://www.nvidia.com/content/GTC/documents/1102_GTC09.pdf, fetched 2026-10-29 (unofficial)
++[S5] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)
+ [S6] Volume Rendering of AMR Simulations, https://doi.org/10.48550/arxiv.1210.8014, fetched 2026-10-26 (unofficial)

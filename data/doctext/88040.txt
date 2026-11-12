@@ -1,0 +1,1436 @@
+Highlights
+Adaptive Time-step Training for Enhancing Spike-Based Neural Radiance Fields
+Ranxi Lin, Canming Yao, Jiayi Li, Weihang Liu, Xin Lou, Pingqiang Zhou
+• PATA learns scene-wise temporal budgets for spike-based NeRF rendering.
+• A two-stage objective optimizes rendering quality and inference time steps.
+• PATA generalizes across hash-grid and tensor-factorized NeRF backbones.
+arXiv:2507.23033v2 [cs.CV] 6 Jul 2026
+• PATA reduces estimated inference energy by up to 68.90% on evaluated benchmarks.
+Adaptive Time-step Training for Enhancing Spike-Based Neural
+Radiance Fields
+Ranxi Lina , Canming Yaob , Jiayi Lia , Weihang Liua , Xin Loua and Pingqiang Zhoua,∗
+a School of Information Science and Technology, ShanghaiTech University, Shanghai, China
+b Guangdong Institute of Intelligence Science and Technology, Zhuhai, China
+ARTICLE INFO
+ABSTRACT
+Keywords:
+Spiking neural networks
+Neural rendering
+Dynamic time step
+Low latency
+Spiking Neural Networks (SNNs) provide an energy-efficient computing paradigm for neural rendering, but existing spike-based Neural Radiance Field (NeRF) models usually use a fixed inference time
+step for all scenes. This fixed temporal budget is inefficient because NeRF follows a scene-specific
+training paradigm, and different scenes require different temporal capacities to preserve rendering
+quality. This paper proposes Pretraining-based Adaptive Time-step Adjustment (PATA), a scene-wise
+adaptive time-step training framework for spike-based NeRF. PATA parameterizes the target inference
+time step as a trainable variable and optimizes it through a two-stage training process. A hybrid input
+mode strengthens early time-step outputs, while full-step soft supervision, smoothed rendering loss,
+and temporal-budget loss jointly maintain rendering fidelity and reduce temporal computation. The
+learned target time step is shared by all ray samples within a scene, preserving the parallel rendering
+structure of NeRF. Experiments on INGP-NeRF and TensoRF backbones across Synthetic-NeRF,
+Mip-NeRF 360, and LLFF show that PATA consistently reduces inference cost while maintaining
+competitive rendering quality. PATA reduces the estimated inference energy by up to 57.57% on
+INGP-NeRF and 68.90% on TensoRF, demonstrating its effectiveness across different neural rendering
+representations.
+1. INTRODUCTION
+Neural Radiance Fields (NeRF) [33] has been widely
+used in various 3D reconstruction and rendering tasks with
+superior performance. By encoding scene geometry and
+appearance implicitly through a neural network, NeRF maps
+3D coordinates and viewing directions to volumetric density and view-dependent radiance. This representation enables high-fidelity image synthesis from arbitrary viewpoints. However, training NeRF requires dense sampling of
+points along rays cast from multiple camera poses, leading
+to extensive computational demands. The predominant use
+of Multi-Layer Perceptrons (MLPs) [63] further exacerbates
+this issue, as the network must process a massive number of
+multiply-accumulate (MAC) operations per sample, resulting in substantial computational load and energy consumption [1, 30, 52].
+While prior work has explored pruning [49, 60] and
+quantization [19, 62] to reduce computational demand during inference, these methods still rely primarily on multiplyaccumulate (MAC)-based computation. In contrast, Spiking
+Neural Networks (SNNs) offer a paradigm shift by leveraging event-driven computation and binary spike communication. Unlike conventional Artificial Neural Networks
+(ANNs), SNNs replace MAC operations with sparse accumulations (AC), and their spiking neurons activate only
+when membrane potentials exceed a threshold, naturally enforcing activation sparsity. This biologically inspired architecture not only enhances computation and energy efficiency
+∗ Corresponding author
+linrx2024@shanghaitech.edu.cn (R. Lin); yaocanming@gdiist.cn (C.
+Yao); lijy22023@shanghaitech.edu.cn (J. Li);
+liuwh2023@shanghaitech.edu.cn (W. Liu); louxin@shanghaitech.edu.cn (X.
+Lou); zhoupq@shanghaitech.edu.cn (P. Zhou)
+Lin et al.: Preprint submitted to Elsevier
+but also enables native processing of spatiotemporal data
+[37, 45]. Building on these advantages, recent studies have
+successfully integrated SNNs with NeRF for 3D rendering
+tasks, demonstrating both high rendering quality and significantly reduced energy consumption [17, 18, 26, 28, 47, 52].
+However, spike-based NeRF models introduce a temporal dimension that is absent from conventional ANN-based
+NeRF. Prior SNN studies have shown that increasing the
+time step 𝑇 improves temporal information capacity [8, 22],
+while NeRF itself follows a scene-specific training paradigm
+in which the required model capacity varies with geometry
+and texture complexity [16, 30, 42, 51]. These two properties
+make a fixed inference time step inefficient for spike-based
+NeRF. As shown in Figure 1, representative scenes reach
+comparable rendering quality at different temporal budgets.
+This temporal-budget problem differs from adaptive
+time-step learning in conventional SNN tasks. Existing
+dynamic inference strategies usually make decisions at the
+sample level or layer level, such as confidence-based early
+stopping [23, 25, 61] or layer-wise temporal allocation [24].
+These designs are not well matched to neural rendering,
+where a scene is rendered by processing massive ray samples
+in a dense and highly parallel manner. If different samples or
+layers terminate at different time steps, the resulting irregular
+execution can weaken the parallel rendering pattern. This
+motivates a scene-wise temporal-budget strategy: each scene
+learns one target time step, and all ray samples within that
+scene share the same temporal budget during inference.
+A practical temporal-budget strategy should also avoid
+being tied to a single NeRF backbone. Modern neural rendering systems use diverse scene representations, including
+hash-grid encodings [34] and tensor-factorized fields [5].
+Therefore, an adaptive time-step method for spike-based
+Page 1 of 14
+Adaptive Time-step Training for Spike-Based NeRF
+(a) Ficus
+(b) Chair
+(c) Mic
+Figure 1: PSNR increases with the inference time step across representative scenes, while different scenes reach comparable
+quality at different temporal budgets.
+NeRF should answer two questions: how to learn a scenespecific temporal budget without manual search, and whether
+the learned strategy remains effective when the underlying
+neural rendering representation changes.
+To address these questions, we propose Pretrainingbased Adaptive Time-step Adjustment (PATA), a dynamic
+time-step training strategy for spike-based NeRF models.
+PATA parameterizes the target inference time step and optimizes it jointly with rendering quality through a two-stage
+training procedure. To strengthen early time-step predictions, we introduce a hybrid input mode that uses different
+input attenuation strategies across time steps. We further
+use the full-step output as soft supervision for the targetstep prediction and apply a smoothing strategy to stabilize
+training when the target time step changes. During inference,
+the trained model renders each scene using its learned target
+time step, reducing temporal computation while preserving
+visual fidelity.
+Our main contributions are summarized as follows:
+∙ Scene-wise Temporal-Budget Learning: We formulate time-step selection in spike-based NeRF as a
+learnable scene-wise temporal budget, avoiding manual time-step search while preserving the parallel rendering pattern required by dense ray sampling.
+∙ Stable Adaptive Time-Step Training: We introduce
+PATA, a two-stage training strategy that combines
+hybrid input dynamics, target-step parameterization,
+full-step soft supervision, and smoothing regularization to jointly optimize rendering quality and inference time steps.
+∙ Backbone-General Validation: We validate PATA
+on both INGP-NeRF and TensoRF backbones, showing that the proposed temporal-budget learning strategy transfers across hash-grid and tensor-factorized
+neural rendering representations while maintaining a
+controllable quality-efficiency trade-off.
+Lin et al.: Preprint submitted to Elsevier
+2. RELATED WORK
+2.1. Neural Radiance Fields
+Since the introduction of Neural Radiance Fields (NeRF),
+significant research efforts have been devoted to enhancing its capabilities from multiple perspectives [1, 6, 20,
+34, 38, 40]. The original NeRF framework revolutionized
+novel view synthesis by employing a neural network to
+implicitly encode scene properties, mapping 3D coordinates
+and viewing directions to volumetric density and viewdependent radiance. This approach achieves photorealistic
+rendering through differentiable volume rendering. Several
+notable improvements have been made to the original NeRF
+architecture. Mip-NeRF [1] addresses aliasing artifacts by
+introducing multiscale scene representation and conical
+frustum sampling, significantly improving rendering quality.
+TensoRF [5] adopts a tensor-factorized representation of
+radiance fields, decomposing scene information into lowrank tensor components to reduce memory and computation
+while preserving rendering quality. For computational efficiency, Instant-NGP [34] proposes a hash-based feature grid
+representation combined with two compact MLPs, dramatically accelerating rendering while maintaining quality. In
+the domain of model compression, BiRF [40] implements
+a binary-encoded feature grid through binarization-aware
+training, achieving substantial memory savings without
+reducing computational complexity during inference.
+2.2. Direct Training of SNNs
+SNNs typically process information through multiple
+time steps, requiring efficient information flow across both
+spatial (layers) and temporal (time steps) dimensions during
+training and inference. The non-differentiable nature of spiking operations poses a fundamental challenge for gradientbased optimization. To address this, Wu et al.[48] proposed
+Spatio-Temporal Backpropagation (STBP) with surrogate
+gradients, which has become a standard training approach
+for SNNs [35]. Recent advances have focused on two main
+Page 2 of 14
+Adaptive Time-step Training for Spike-Based NeRF
+directions: (1) enhancing neuronal dynamics through modified computational processes [27, 28, 54, 55, 59], often at
+the cost of increased computational overhead; (2) developing
+specialized loss functions that leverage SNN characteristics
+to improve training efficiency [12, 29, 50, 56, 64], which can
+optimize network sparsity and architecture [50, 64] without
+additional computational complexity.
+sample points, linear interpolation is performed based on
+their relative positions within different hierarchical grids to
+obtain the feature vectors of the sample points, which are
+then fed into the density network. For the viewing direction,
+it is encoded using the Spherical Harmonics (SH) encoder
+before being fed to the color network:
+2.3. Spike-based Neural Rendering
+Recent advances have demonstrated successful integration of SNNs with NeRF [17, 18, 26, 28, 47, 52]. Liao et al.
+[28] developed a hybrid ANN-SNN architecture with novel
+spiking neuron dynamics to enable continuous geometric
+representation. For geometric reconstruction tasks, Gu et al.
+[17] introduced an innovative polling strategy and designed
+specialized surrogate gradients. Yao et al. [52] addressed
+novel view synthesis by mapping ray sampling points to
+SNN time steps and proposing a TCP scheme to handle variable sampling densities across rays. SAH-NeRF [4] explores
+an SNN-ANN hybrid framework for improving NeRF-based
+novel-view synthesis. Wang et al. [47] further enhanced the
+framework through a grouped spiking neuron mechanism for
+improved cross-region communication. Compared to these
+approaches, our solution offers distinct advantages: (1) it
+maintains the original neuron computational model without
+introducing additional neuronal operations, (2) it learns a
+scene-specific temporal budget during training instead of
+relying on a fixed or manually selected inference time step,
+and (3) it preserves the input/output dimensionality of the
+underlying NeRF backbone, making it compatible with existing spike-based neural rendering architectures.
+2.4. Dynamic Time Step
+Dynamic time-step adaptation has been widely studied
+to boost the efficiency of SNNs [9, 23–25, 53, 61]. Representative methods include confidence-based early stopping [23, 25, 61], reinforcement-learning-based per-sample
+adjustment [24], and mask-based layer-wise optimization
+for Spiking Transformers [9]. These methods mainly target
+classification or sequence tasks, where the adaptive unit is
+typically an input sample, token, or layer.
+Neural rendering has a different computational structure.
+A NeRF model is trained separately for each scene and renders images by processing massive ray samples in parallel.
+Under this workload, sample-wise or layer-wise temporal
+decisions may introduce irregular execution and weaken the
+parallel rendering pattern. Therefore, we adopt the scene as
+the adaptation unit: each scene learns a target time step that
+reflects its rendering complexity, while all ray samples in the
+scene share a consistent temporal budget during inference.
+3. PRELIMINARIES
+3.1. Grid-based Neural Radiance Field
+The INGP-NeRF model divides space into multiple grids
+of different resolutions, assigning indices 𝐱 and feature vectors Φ𝜃 to the corners of each voxel within these grids, which
+are then stored in a hash table. For the coordinates of input
+Lin et al.: Preprint submitted to Elsevier
+𝐟 = interp(𝐱, Φ𝜃 )
+(1)
+ℎ, 𝜎 = 𝑀𝐿𝑃𝑑𝑒𝑛𝑠𝑖𝑡𝑦 (𝐟 ), 𝐜 = 𝑀𝐿𝑃𝑐𝑜𝑙𝑜𝑟 (𝐝, ℎ)
+(2)
+INGP-NeRF employs multiscale occupancy grids to expedite the sampling process. During training, it dynamically
+labels whether each grid cell is nonempty. At the time of
+sampling, only nonempty grid cells are sampled, markedly
+enhancing sampling efficiency. After the aforementioned
+process has taken place, for the sampled points lying on the
+same ray 𝐫(𝑡) = 𝐨+𝑡𝐝, the RGB value of the ray is calculated
+using the volume rendering method proposed in [33]:
+𝛼𝑖 = 1 − 𝑒𝑥𝑝(−𝜎𝑖 𝛿𝑖 ), 𝑇𝑖 =
+𝑖−1
+∏
+(1 − 𝛼𝑗 )
+(3)
+𝑗=1
+̂
+𝐶(𝐫) =
+𝑁
+∑
+𝑇𝑖 𝛼𝑖 𝐜𝑖
+(4)
+𝑖=1
+where 𝑇𝑖 represents the transmittance and 𝛿𝑖 = 𝑡𝑖+1 − 𝑡𝑖
+denotes the distance between adjacent sampled points. We
+use INGP-NeRF as the main backbone to describe the spikebased rendering pipeline in Figure 2. This choice provides
+a clear instantiation of the feature encoding, density prediction, color prediction, and volume rendering process. It
+should be noted that PATA does not rely on the hash-grid
+representation itself. Instead, it operates on the temporal
+outputs of the density and color prediction modules before
+volume rendering. Therefore, other NeRF backbones with
+the same density-color rendering interface can also be combined with PATA, as further evaluated with TensoRF in the
+experiments.
+3.2. Spiking Neuron Model
+The most widely used neuron model in SNNs is currently
+the Leaky Integrate-and-Fire (LIF) model [58]. The membrane potential update equation is as follows [13]:
+{
+𝑙
+𝑣 (𝑡) =
+(1 − 𝜏1 )𝑣𝑙 (𝑡 − 1) + 𝜏1 𝑖(𝑡),
+(1 − 𝜏1 )𝑣𝑙 (𝑡 − 1) + 𝑖(𝑡),
+𝑖𝑓 𝑑𝑒𝑐𝑎𝑦 𝑖𝑛𝑝𝑢𝑡;
+𝑖𝑓 𝑛𝑜𝑡 𝑑𝑒𝑐𝑎𝑦 𝑖𝑛𝑝𝑢𝑡;
+(5)
+where 𝑖(𝑡) = 𝑊 𝑙 𝑠𝑙−1 (𝑡), with 𝑠𝑙−1 (𝑡) representing the output
+spikes of neurons in the preceding layer at time t, 𝑣𝑙 (𝑡)
+denotes the membrane potential of neurons in the l-th layer
+at time t, 𝜏 is the decay factor, which governs the decay
+amplitude of the membrane potential at each time step. If the
+decaying input mode is employed, a fraction of the input will
+undergo decay before accumulating; otherwise, the input
+will be directly added to the membrane potential. When the
+membrane potential exceeds the threshold, the LIF neuron
+Page 3 of 14
+Adaptive Time-step Training for Spike-Based NeRF
+Figure 2: Overview of the proposed PATA framework with INGP-NeRF as the illustrative backbone. (a) Spike-based neural
+rendering replaces the nonlinear activations in the density and color MLPs with spiking neurons, producing time-indexed density
+𝜎 and color 𝐜 for volume rendering. (b) PATA first trains a full-step renderer at the maximum time step 𝑇 , then optimizes a
+learnable target time step 𝑡∗ using smoothed rendering, distillation, and temporal-budget losses. PATA operates on temporal
+density/color outputs before volume rendering, allowing the same mechanism to be applied to other NeRF backbones.
+will emit a spike and reset. We opt for the soft reset with the
+calculation carried out as follows:
+𝑣𝑙 (𝑡) = 𝑣𝑙 (𝑡) − 𝑠𝑙 (𝑡)𝜃 𝑙
+(6)
+where 𝑠𝑙 (𝑡) = 𝐻(𝑣𝑙 (𝑡) − 𝜃 𝑙 ), with 𝐻(⋅) denoting the Heaviside function. Due to the non-differentiability of the Heaviside function, the most widely used solution to enable parameter updating in SNNs using backpropagation algorithms
+is the surrogate gradient. In our experiments, the surrogate
+gradient used is as follows:
+𝜕𝐻(𝑥)
+≈ 𝛼𝜎(𝛼𝑥) (1 − 𝜎(𝛼𝑥)) ,
+𝜕𝑥
+1
+𝜎(𝛼𝑥) =
+1 + exp(−𝛼𝑥)
+(7)
+where 𝛼 is a predefined hyperparameter and defaults to 4.
+4. THE PROPOSED METHOD
+In this section, we introduce the proposed Pretrainingbased Adaptive Time-step Adjustment (PATA) strategy,
+which effectively reduces the inference time steps and
+temporal computation required for rendering. The complete
+framework, including both the radiance field reconstruction
+and training procedure, is depicted in Figure 2.
+4.1. Spike-based Neural Rendering
+Figure 2(a) illustrates the spike-based neural rendering
+pipeline used by PATA. Given the scene features produced
+by an underlying NeRF backbone, we replace the nonlinear
+Lin et al.: Preprint submitted to Elsevier
+activations in the density and color prediction networks with
+Parametric Leaky Integrate-and-Fire (PLIF) neurons [14].
+The PLIF neurons share a trainable decay factor 𝜏 within
+each spiking layer. To make rendering available at different time steps, the output layers accumulate membrane
+potentials without spike emission, producing time-indexed
+estimates of density 𝜎 and color 𝐜. These estimates are then
+passed to the differentiable volume rendering module. This
+design preserves the input-output interface of the underlying neural rendering backbone while exposing intermediate
+temporal outputs, which enables PATA to learn a scene-wise
+inference time step.
+4.2. Hybrid Input Mode
+The effectiveness of temporal-budget learning depends
+on whether early time-step outputs already contain sufficient
+rendering information. In standard input modes, the accumulated membrane potential is often dominated by later time
+steps, which makes the rendered output sensitive to temporal truncation. We therefore analyze how different input
+modes distribute the output contribution across time steps
+and design a hybrid input mode that increases early-step
+contribution while retaining stable accumulation. Given that
+our output layer accumulates membrane potentials without
+spike generation, we formulate the output at time step 𝑇 as:
+𝑂𝑇 =
+𝑇∑
+−1
+𝑤(𝑡, 𝜏) ⋅ f unc(𝑖𝑡 )
+(8)
+𝑡=0
+where 𝑤(𝑡, 𝜏) represents the contribution weight of time step
+𝑡 to the final output, and f unc(⋅) denotes the exponential
+Page 4 of 14
+Adaptive Time-step Training for Spike-Based NeRF
+(a) Per-step weight
+(b) Cumulative weight
+Figure 3: Contribution distribution over time steps under the hybrid input mode. (a) Per-step contribution weight. (b) Cumulative
+contribution up to each time step. The hybrid mode assigns a larger contribution to the first time step and reduces the dominance
+of late time steps.
+function for the density network and sigmoid activation for
+the color network. For the density branch, the activation is
+applied to the density output, while the remaining hidden
+features 𝐡 are passed to the color branch together with the
+viewing direction 𝐝. The weight function 𝑤(𝑡, 𝜏) follows
+distinct formulations depending on the input mode:
+{
+(1 − 𝜏1 )𝑇 −𝑡−1 𝜏1 , if decay input mode
+𝑤(𝑡, 𝜏) =
+(9)
+if non-decay input mode
+(1 − 𝜏1 )𝑇 −𝑡−1 ,
+This design follows the training and rendering structure of
+NeRF, where each scene has its own model and complexity,
+and all ray samples within the scene share a consistent time
+step to preserve parallel rendering. We therefore parameterize the target time step 𝑡∗ as a learnable variable, distinct
+from the fixed maximum time step 𝑇 :
+We observe that both modes exhibit monotonically increasing weights toward later time steps, making the model performance sensitive to time step reduction. To address this,
+we propose a hybrid input scheme that strategically combines both modes:
+{
+𝑖(𝑡),
+if 𝑡 = 0
+𝑙
+𝑣 (𝑡) =
+(10)
+(1 − 𝜏1 )𝑣𝑙 (𝑡 − 1) + 𝜏1 𝑖(𝑡), if 𝑡 > 0
+where 𝑡̂∗ denotes the constrained continuous training variable, while 𝑡∗𝑟 denotes the discrete target time step used for
+inference. Round(⋅) performs nearest-integer rounding and
+Clamp(⋅) maintains valid time-step bounds. To preserve gradient propagation, we apply the straight-through estimator
+(STE) to the non-differentiable rounding operation, where
+𝜕 Round(𝑥)
+is approximated as 1 during backpropagation.
+𝜕𝑥
+Directly optimizing 𝑡∗ from scratch couples two difficult
+processes: learning a reliable radiance field and reducing
+its temporal budget. This coupling makes the optimization
+prone to unstable early truncation. Our PATA framework
+separates these processes into two stages. The first stage
+learns a strong full-step spike-based renderer at the maximum time step 𝑇 . The second stage activates the learnable
+target time step and compresses the temporal budget while
+keeping the target-step output aligned with the full-step
+prediction.
+This hybrid approach modifies the weight function as:
+{
+(1 − 𝜏1 )𝑇 −𝑡−1 ,
+if 𝑡 = 0
+𝑤(𝑡, 𝜏) =
+(11)
+1 𝑇 −𝑡−1 1
+(1 − 𝜏 )
+, if 𝑡 > 0
+𝜏
+∑ −1
+Crucially, this formulation maintains 𝑇𝑡=0
+𝑤(𝑡, 𝜏) = 1
+for all 𝜏 > 1. As demonstrated in Figure 3, our hybrid
+mode significantly boosts the contribution of the initial time
+step while suppressing later time steps through appropriate
+𝜏 selection. This mechanism enables effective time step
+reduction while reducing the sensitivity of rendering quality
+to temporal truncation.
+4.3. Pretraining-based Adaptive Time-step
+Adjustment
+4.3.1. Overall Framework
+PATA treats the inference time step as a scene-wise temporal budget rather than a manually selected hyperparameter.
+Lin et al.: Preprint submitted to Elsevier
+𝑡̂∗ = Clamp(𝑡∗ , min = 1, max = 𝑇 ),
+𝑡∗𝑟 = Round(𝑡̂∗ )
+(12)
+4.3.2. Initial Stage Training
+The initial training phase establishes a robust pre-trained
+model for subsequent time-step optimization. We employ a
+composite loss function comprising three key components:
+(13)
+Render (𝑇 ) = 𝑀𝑇 + consis (𝑇 ) + Cauchy
+consis (𝑇 ) = 𝛾0 ‖𝐶𝑇 − gt‖2
+(
+)
+𝐶𝑇 ⋅ gt
++ 𝛾1 1 −
+‖𝐶𝑇 ‖‖gt‖ + 𝜖
+(14)
+Page 5 of 14
+Adaptive Time-step Training for Spike-Based NeRF
+Cauchy = 𝛾2
+∑
+(15)
+log(1 + 2𝜎𝑖 )
+𝑖
+where 𝑀𝑇 denotes the mean squared error (MSE) between
+the rendered color 𝐶𝑇 (computed via Equation 4) and ground
+truth gt. The consistency loss consis (𝑇 ) combines L2 distance and cosine similarity to enforce both magnitude and
+directional alignment between rendered and ground truth
+images. Following [40], the Cauchy regularization term
+Cauchy promotes sparsity in the density predictions 𝜎𝑖 . The
+coefficients 𝛾0 , 𝛾1 , and 𝛾2 balance these loss components
+during optimization, which we set to 5 × 10−5 , 5 × 10−2 ,
+and 1 × 10−6 , respectively.
+4.3.3. Temporal Budget Loss
+Following the initial training phase, we activate the
+trainable target time step 𝑡∗ as defined in Equation (12).
+While our hybrid input mode enables control over time-step
+contributions through the decay parameter 𝜏, excessive 𝜏
+values hinder effective training by limiting input information
+propagation (Equation (10)). To address this, we introduce a
+temporal budget loss:
+(16)
+budg = 𝛼extra + 𝛽penalty
+Here 𝛼 and 𝛽 are hyperparameters. The temporal budget
+loss creates a quality-aware competition between preserving
+necessary rendering information and reducing unnecessary
+late-step computation. The first component extra regulates
+both 𝜏 and 𝑡∗ through:
+extra =
+‖𝑤𝑖,𝑡>𝑡∗ ‖2
+𝑟
+‖𝑊points ‖2
++
+‖𝑐𝑡>𝑡∗ ‖2
+𝑟
+‖𝐶𝑇 ‖2
++ 𝑒𝜏
+(17)
+where 𝑤𝑖,𝑡>𝑡∗ represents weights for time steps beyond 𝑡∗𝑟 ,
+𝑟
+𝑊points denotes sampling point weights from Equation (3),
+𝑐𝑡>𝑡∗ is the weighted output for excess time steps, and 𝐶𝑇
+𝑟
+is the final rendered color from Equation (4). The first
+two terms in (extra ) penalize the remaining temporal contribution beyond 𝑡∗𝑟 from both the sampling weights and
+the rendered color output. If substantial information is still
+accumulated after 𝑡∗𝑟 , directly truncating the inference at 𝑡∗𝑟
+would cause noticeable rendering degradation. Therefore,
+extra encourages the model to shift effective temporal contributions toward earlier time steps and preserves rendering
+quality under a reduced temporal budget. The exponential
+term 𝑒𝜏 prevents excessive growth of the decay factor 𝜏,
+avoiding degenerate solutions where the temporal weighting
+is dominated by an overly large membrane time constant. To
+counterbalance extra ’s tendency to increase 𝑡∗ , we introduce
+a penalty term:
+(
+)
+𝑀𝑇
+∗
+penalty = sg
+𝑒𝑡̂
+(18)
+∗
+𝑀smooth (𝑡̂ )
+The penalty term supplies the compression force. Here
+𝑀𝑇 is the full-step rendering error, and 𝑀smooth (𝑡̂∗ ) is the
+continuous surrogate of the target-step error defined in Equation (19). The ratio 𝑀𝑇 ∕𝑀smooth (𝑡̂∗ ) measures how close the
+Lin et al.: Preprint submitted to Elsevier
+target-step output is to the full-step output. When the targetstep output approaches the full-step output, the penalty on
+∗
+𝑒𝑡̂ becomes stronger and pushes the model toward a smaller
+time step. When the target-step output is still inferior, the
+compression pressure is automatically weakened. Thus, the
+learned temporal budget is reduced only when the rendering
+quality can support the reduction. The hyperparameter 𝛽
+in Equation (16) controls the strength of this compression
+preference under different application requirements, and 𝛼
+is set to 1 × 10−6 in our experiments.
+4.3.4. Dynamic Time-step Training
+While Equation (18) effectively links model performance to 𝑡∗ , the rounding operation required to obtain 𝑡∗𝑟 introduces training instability. When 𝑡∗ fluctuates near integer
+midpoints, 𝑡∗𝑟 exhibits discontinuous jumps, causing abrupt
+changes in the target-step rendering error. To provide a
+continuous optimization signal for 𝑡∗ , we linearly interpolate
+the rendering errors at the two adjacent integer time steps
+and apply the resulting smoothed error to both Equation (13)
+and Equation (18):
+𝑀smooth (𝑡̂∗ ) = (1 − 𝛿) 𝑀𝑡∗ + 𝛿𝑀𝑡∗ ,
+𝑓
+𝑐
+(19)
+where 𝑡∗𝑓 = ⌊𝑡̂∗ ⌋, 𝑡∗𝑐 = ⌈𝑡̂∗ ⌉, and 𝛿 = 𝑡̂∗ − 𝑡∗𝑓 denotes the
+fractional part of 𝑡̂∗ . The smoothed loss 𝑀smooth (𝑡̂∗ ) serves as
+a continuous surrogate for the discrete target-step rendering
+error. Instead of optimizing only the rounded output 𝐶𝑡∗ ,
+𝑟
+PATA evaluates the local quality landscape between the two
+adjacent integer time steps. This gives 𝑡∗ a stable optimization signal and prevents the training objective from changing
+abruptly when 𝑡∗ crosses a rounding boundary.
+Since higher time steps typically provide more reliable
+SNN outputs [36, 64], we employ temporal distillation from
+the full-step prediction. Specifically, we compute the MSE
+between outputs at 𝑇 and 𝑡∗𝑟 :
+distill = ‖𝐶𝑇 − 𝐶𝑡∗ ‖22
+𝑟
+(20)
+At the beginning of the second training phase, the targetstep output 𝐶𝑡∗ is weaker than the full-step output 𝐶𝑇 ,
+𝑟
+since the model has been pretrained with the maximum
+time step 𝑇 . Thus, distill uses 𝐶𝑇 as a temporal teacher
+signal to guide the lower-step output. This distillation does
+not require an external teacher model; the full-step output
+of the same network provides the supervision. Together
+with extra , it ensures that the information shifted to earlier
+time steps is aligned with the full-step rendering behavior.
+These objectives form a balanced optimization dynamic.
+Render (𝑡̂∗ ) maintains direct supervision at the learned target
+step, extra reduces the information tail after the inference
+cutoff, penalty supplies quality-aware compression pressure,
+and distill aligns the target-step output with the full-step
+prediction. As a result, the target time step is not reduced by
+an isolated regularizer; it is reduced only when the network
+has learned to render accurately within the shorter temporal
+budget.
+Page 6 of 14
+Adaptive Time-step Training for Spike-Based NeRF
+Algorithm 1 Pretraining-based Adaptive Time-step Adjustment (PATA)
+Require: Training rays and ground-truth colors , maximum time step 𝑇 , first-stage iterations 𝑁1 , second-stage
+iterations 𝑁2 , and loss weights 𝛼 and 𝛽.
+Ensure: Optimized network parameters Θ, PLIF decay factors 𝜏, and scene-wise target time step 𝑡∗𝑟 .
+1: Initialize SNN-NeRF parameters Θ and PLIF decay
+factors 𝜏.
+2: for 𝑘 = 1 to 𝑁1 do
+3:
+Sample a mini-batch  from .
+4:
+Unroll the spike-based NeRF for 𝑇 time steps and
+render the full-step output 𝐶𝑇 .
+5:
+Compute the first-stage rendering loss Render (𝑇 ).
+6:
+Update Θ and 𝜏 by backpropagation.
+7: end for
+8: Initialize the learnable target time step 𝑡∗ ← 𝑇 − 1.
+9: for 𝑘 = 1 to 𝑁2 do
+10:
+Sample a mini-batch  from .
+11:
+Compute 𝑡̂∗ = Clamp(𝑡∗ , 1, 𝑇 ) and 𝑡∗𝑟 = Round(𝑡̂∗ ).
+12:
+Compute 𝑡∗𝑓 = ⌊𝑡̂∗ ⌋, 𝑡∗𝑐 = ⌈𝑡̂∗ ⌉, and 𝛿 = 𝑡̂∗ − 𝑡∗𝑓 .
+13:
+Unroll the spike-based NeRF for 𝑇 time steps and
+obtain 𝐶𝑡∗ , 𝐶𝑡∗ , 𝐶𝑡∗ , and 𝐶𝑇 .
+𝑐
+𝑟
+𝑓
+14:
+Compute 𝑀smooth (𝑡̂∗ ) = (1 − 𝛿)𝑀𝑡∗ + 𝛿𝑀𝑡∗ .
+𝑓
+𝑐
+Compute the smoothed rendering loss Render (𝑡̂∗ ) by
+replacing 𝑀𝑇 in Equation (13) with 𝑀smooth (𝑡̂∗ ).
+(
+) ∗
+16:
+Compute penalty = sg 𝑀𝑇 ∕𝑀smooth (𝑡̂∗ ) 𝑒𝑡̂ .
+17:
+Compute the temporal budget loss budg = 𝛼extra +
+𝛽penalty .
+18:
+Compute the temporal distillation loss distill =
+|𝐶𝑇 − 𝐶𝑡∗ |22 .
+𝑟
+19:
+Compute the second-stage objective 
+=
+Render (𝑡̂∗ ) + budg + distill .
+20:
+Update Θ, 𝜏, and 𝑡∗ by backpropagation.
+21: end for
+22: Fix the learned 𝑡∗𝑟 as the scene-wise inference time step.
+23: During inference, unroll the spike-based NeRF only for
+𝑡∗𝑟 time steps and render 𝐶𝑡∗ .
+15:
+𝑟
+The complete second-phase loss combines these components:
+ = Render (𝑡̂∗ ) + budg + distill
+(21)
+The whole training process is summarized in Algorithm 1.
+As a result, PATA converts time-step selection from a manually tuned hyperparameter into a learned scene-wise budget.
+At inference time, the model is unrolled only to 𝑡∗𝑟 , directly
+reducing temporal computation while preserving the rendering behavior learned from the full-step model.
+4.4. Max Time-Step Scaling
+Although PATA reduces the inference time step to the
+learned 𝑡∗𝑟 , the second training stage still unrolls the network
+Lin et al.: Preprint submitted to Elsevier
+to the maximum time step 𝑇 . This full unrolling is necessary for computing the full-step teacher output, adjacentstep rendering errors, and temporal budget loss. However,
+early NeRF training often contains many unfiltered sampling
+points before the occupancy or importance sampling mechanism becomes stable, which amplifies the memory cost of
+full-time-step unrolling.
+To keep training stable under large 𝑇 , we adopt a max
+time-step scaling strategy. At the beginning of training, the
+model is optimized with a reduced maximum time step,
+which avoids the peak memory cost caused by dense early
+samples. Once the sampling process becomes stable and
+irrelevant points are filtered out, we restore the maximum
+time step to 𝑇 and train the full PATA objective. This
+strategy preserves the full temporal capacity required by
+PATA while removing the initial memory bottleneck.
+5. RESULTS
+5.1. Experimental Setup
+Datasets and metrics. We evaluate PATA on standard
+novel-view synthesis benchmarks. For the INGP-NeRF
+backbone, we use the Synthetic-NeRF dataset [33] and the
+Mip-NeRF 360 dataset [2]. For the TensoRF backbone,
+we use the Synthetic-NeRF dataset and the LLFF forwardfacing scenes [32], following the common evaluation setting of tensor-factorized NeRF models. Rendering quality
+is measured by PSNR and SSIM. Efficiency is reported
+by the learned inference time step and estimated energy
+consumption.
+Backbones. We instantiate PATA on two efficient NeRF
+backbones with different scene representations. INGP-NeRF
+uses a multiresolution hash-grid representation followed by
+lightweight density and color networks. TensoRF represents
+the radiance field with tensor-factorized density and appearance components, and decodes the appearance feature into
+RGB values through a color network. These two backbones
+provide complementary validation settings: one based on
+hash-grid encoding and one based on tensor factorization.
+INGP-NeRF implementation. For INGP-NeRF, our
+implementation is built upon the 𝑡𝑜𝑟𝑐ℎ–𝑛𝑔𝑝 framework [44].
+The density network contains one hidden layer and the color
+network contains two hidden layers, both with 128 hidden
+units. We replace the nonlinear activations in both prediction
+networks with PLIF neurons and use output PLIF layers to
+accumulate temporal estimates of density 𝜎 and color 𝐜. The
+maximum time step is set to 𝑇 = 8, and the target time step
+is initialized as 𝑡∗ = 7 after the pretraining phase.
+TensoRF implementation. For TensoRF, we keep the
+tensor-factorized density field, appearance field, sampling
+procedure, and volume rendering process unchanged. Different from INGP-NeRF, TensoRF does not use an MLP
+density network; density is computed from the factorized
+density components, while the appearance feature is decoded
+by a color network. Therefore, PATA is applied to the color
+decoder of TensoRF. Specifically, we replace the original
+MLP color decoder with a spike-based feature MLP color
+Page 7 of 14
+Adaptive Time-step Training for Spike-Based NeRF
+Table 1
+Quality-efficiency trade-off of PATA on the INGP-NeRF backbone. The values in parentheses denote the energy reduction relative
+to the original INGP-NeRF model, and the best result is highlighted in bold.
+Dataset
+Synthetic-NeRF
+Mip-NeRF 360
+Method
+PSNR↑
+SSIM↑
+Time Step↓
+Energy(mJ)↓
+PSNR↑
+SSIM↑
+Time Step↓
+Energy(mJ) ↓
+ANN-INGP-NeRF
+32.14
+0.959
+_
+955.27
+25.48
+0.668
+_
+1.898 × 104
+𝛽 = 1 × 10−7
+𝛽 = 5 × 10−7
+𝛽 = 1 × 10−6
+32.45
+32.21
+32.04
+0.959
+0.957
+0.956
+5.125
+3.625
+2.875
+643.39(32.65%)
+492.25(48.47%)
+405.33(57.57%)
+25.30
+25.09
+25.01
+0.667
+0.646
+0.641
+6.000
+4.857
+4.000
+1.560 × 104 (17.85%)
+1.366 × 104 (28.02%)
+1.187 × 104 (37.46%)
+Ours
+decoder. The decoder has two hidden layers with 128 channels and PLIF neurons between linear layers, followed by a
+linear RGB output layer. The maximum time step is set to
+𝑇 = 8, the initial membrane time constant is 𝜏 = 2.0, and
+the firing threshold is set to 0.5.
+For both Synthetic-NeRF and LLFF, we follow the original TensoRF configuration for the tensor-factorized field
+and rendering pipeline. Under these settings, the spikebased color decoder receives a 150-dimensional input on
+Synthetic-NeRF and a 30-dimensional input on LLFF.
+Training details. All experiments are implemented in
+PyTorch. The spike-based modules are built with SpikingJelly [13], and all models are trained on a single NVIDIA
+RTX 5880 GPU with mixed precision. Unless otherwise
+specified, PATA follows the same two-stage training protocol for both INGP-NeRF and TensoRF. The first stage
+trains a fixed full-time-step spike-based renderer with the
+maximum time step 𝑇 = 8 for 10,000 iterations. The second
+stage starts from the first-stage checkpoint and optimizes
+the learnable target time step together with the rendering
+objective for 30,000 iterations.
+At the beginning of each training stage, the maximum
+time step is set to 2 for the initial epoch and then restored
+to 8, following the max time-step scaling strategy. We report only the adaptive second-stage results for the TensoRF
+experiments.
+5.2. Quantitative Comparison
+5.2.1. Quality-Efficiency Trade-off on INGP-NeRF
+Table 1 reports the quality-efficiency trade-off of PATA
+on the INGP-NeRF backbone. By varying the temporal
+budget weight 𝛽 in Equation (16), PATA learns different
+scene-wise inference time steps while preserving competitive rendering quality. On Synthetic-NeRF, PATA reduces
+the average time step from the full budget of 𝑇 = 8 to
+5.125, 3.625, and 2.875 under increasing 𝛽, corresponding
+to 32.65%, 48.47%, and 57.57% estimated energy reduction,
+respectively. On Mip-NeRF 360, the same trend is observed:
+the learned time step decreases from 6.000 to 4.000, yielding
+up to 37.46% estimated energy reduction.
+The three 𝛽 settings separate high-fidelity and efficiencyoriented regimes. At 𝛽 = 1 × 10−7 , PATA reaches 32.45
+dB PSNR on Synthetic-NeRF with 32.65% estimated energy
+reduction. Increasing 𝛽 to 1 × 10−6 reduces the average
+time step to 2.875 and the estimated energy to 405.33mJ,
+Lin et al.: Preprint submitted to Elsevier
+with PSNR remaining at 32.04 dB. The same setting also
+gives the largest Mip-NeRF 360 energy reduction in this
+table, reducing the estimated energy from 1.898 × 104 mJ to
+1.187 × 104 mJ.
+5.2.2. Backbone Generalization on TensoRF
+We further instantiate PATA on TensoRF to evaluate
+temporal-budget learning beyond the hash-grid backbone.
+This setting differs structurally from INGP-NeRF, as TensoRF computes density from tensor-factorized components
+and uses a color decoder only for appearance prediction.
+PATA is therefore applied to the TensoRF color decoder
+while preserving the tensor-factorized radiance-field representation and the original volume rendering pipeline.
+Table 2 reports the quality-efficiency trade-off on the
+TensoRF backbone. On Synthetic-NeRF, the high-fidelity
+setting with 𝛽 = 5×10−9 achieves 33.10 dB PSNR and 0.961
+SSIM, closely matching ANN-TensoRF while reducing the
+estimated energy by 29.81%. As 𝛽 increases, the learned
+time step decreases from 5.625 to 2.000, and the estimated
+energy reduction increases to 40.66%, with PSNR changing
+from 33.10 dB to 32.91 dB. On LLFF, the estimated energy
+reduction reaches 46.76% at the high-fidelity setting and
+68.90% under the efficiency-oriented setting, with PSNR
+ranging from 26.50 dB to 26.62 dB.
+The larger energy reduction on LLFF comes from the
+different TensoRF decoder configuration. For SyntheticNeRF, the TensoRF color decoder uses a 150-dimensional
+input, so the dense decoder projection and the remaining tensor-factorized rendering computation retain a larger
+FLOP contribution in the overall energy estimate. For LLFF,
+the decoder input dimension is only 30; under this configuration, the MLP portion replaced by the spike-based color
+decoder occupies a larger share of the reducible computation
+relative to the remaining rendering pipeline. Reducing the
+learned color-decoder time step therefore changes a larger
+portion of the total estimated energy on LLFF.
+5.2.3. Comparison with Spike-based NeRF Models
+We compare PATA with existing spike-based NeRF
+methods on the Synthetic-NeRF dataset, where most prior
+spike-based neural rendering models report their results.
+Since PATA can be instantiated on different rendering backbones, Table 3 reports representative INGP-NeRF and TensoRF variants selected from the quality-efficiency trade-offs
+above.
+Page 8 of 14
+Adaptive Time-step Training for Spike-Based NeRF
+Table 2
+Quality-efficiency trade-off of PATA on the TensoRF backbone. The values in parentheses denote the energy reduction relative
+to the ANN-TensoRF baseline, and the best result is highlighted in bold.
+Dataset
+Method
+ANN-TensoRF
+Ours
+𝛽 = 5 × 10−9
+𝛽 = 5 × 10−8
+𝛽 = 5 × 10−7
+Synthetic-NeRF
+PSNR↑
+SSIM↑
+LLFF
+Time Step↓
+Energy(mJ)↓
+PSNR↑
+SSIM↑
+Time Step↓
+Energy(mJ)↓
+26.73
+0.839
+–
+1.191 × 104
+26.62
+26.58
+26.50
+0.832
+0.831
+0.828
+5.625
+4.125
+1.875
+6.341 × 103 (46.76%)
+5.314 × 103 (55.39%)
+3.704 × 103 (68.90%)
+33.14
+0.963
+–
+1.261 × 103
+33.10
+33.04
+32.91
+0.961
+0.960
+0.959
+5.625
+3.875
+2.000
+885.2 (29.81%)
+815.2(35.36%)
+748.4(40.66%)
+Table 3
+Comparison with spike-based NeRF models on the SyntheticNeRF dataset. The best result is highlighted in bold.
+Method
+PSNR↑
+SSIM↑
+Time Step↓
+Spiking-NeRF [26]
+Mixed Spiking-NeRF [47]
+SpikingNeRF-D [52]
+SpikingNeRF-T [52]
+Spik-NeRF-Wan [46]
+Ours-INGP-NeRF
+Ours-TensoRF
+30.41
+31.61
+31.64
+32.45
+30.23
+32.21
+32.91
+_
+0.949
+0.952
+0.956
+0.942
+0.957
+0.959
+256
+4
+4
+1
+2
+3.625
+2
+Table 3 shows that PATA achieves the strongest rendering quality among the compared spike-based NeRF models.
+The INGP-NeRF variant reaches 32.21 dB PSNR and 0.957
+SSIM with an adaptive average time step of 3.625. The
+TensoRF variant further improves the average PSNR to
+32.91 dB and SSIM to 0.959, surpassing SpikingNeRF-T in
+rendering quality while using an average time step of 2.
+5.2.4. Comparison with ANN-based NeRF Models
+We further compare PATA with representative ANNbased NeRF methods under standard neural rendering benchmarks. Table 4 reports the corresponding PATA variants
+according to the evaluated backbone and dataset.
+Table 4 shows that PATA preserves competitive rendering quality compared with ANN-based NeRF models.
+On Synthetic-NeRF, the high-fidelity Ours-TensoRF setting reaches 33.10 dB PSNR and 0.961 SSIM, closely approaching the ANN TensoRF result while using adaptive
+spike-based temporal computation. Ours-INGP-NeRF also
+remains close to the original INGP-NeRF backbone, with
+the energy reduction shown in Table 1. On LLFF, OursTensoRF achieves 26.62 dB PSNR and 0.832 SSIM, matching the quality range of representative forward-facing NeRF
+renderers while reducing the estimated energy by 46.76%
+as reported in Table 2. On Mip-NeRF 360, Ours-INGPNeRF achieves comparable quality to several conventional
+ANN baselines, while high-capacity ANN renderers such as
+ZipNeRF still achieve higher reconstruction accuracy.
+5.2.5. Energy Efficiency Analysis
+Following the standard operation-level energy estimation protocol used in SNN studies [39, 52], we estimate
+Lin et al.: Preprint submitted to Elsevier
+inference energy from floating-point operations and spikebased operations under 45nm technology:
+𝑆𝑂𝑃 𝑠 = 𝑓 𝑟 × 𝑇 × 𝐹 𝐿𝑂𝑃 𝑠,
+(22)
+𝐸𝑛𝑒𝑟𝑔𝑦𝑆𝑂𝑃 𝑠 = 0.9𝑝𝐽 × 𝑆𝑂𝑃 𝑠,
+(23)
+𝐸𝑛𝑒𝑟𝑔𝑦𝐹 𝐿𝑂𝑃 𝑠 = 4.6𝑝𝐽 × 𝐹 𝐿𝑂𝑃 𝑠,
+𝐸𝑛𝑒𝑟𝑔𝑦𝑡𝑜𝑡𝑎𝑙 = 𝐸𝑛𝑒𝑟𝑔𝑦𝑆𝑂𝑃 𝑠 + 𝐸𝑛𝑒𝑟𝑔𝑦𝐹 𝐿𝑂𝑃 𝑠 ,
+(24)
+(25)
+where 𝑓 𝑟 denotes the average firing rate, 𝑇 denotes the
+inference time step, 𝑆𝑂𝑃 𝑠 denotes spike-based operations,
+and 𝐹 𝐿𝑂𝑃 𝑠 denotes floating-point operations. The energy
+costs of one spike-based operation and one floating-point
+operation are set to 0.9𝑝𝐽 and 4.6𝑝𝐽 , respectively. This
+protocol follows the common evaluation practice of prior
+SNN and spike-based NeRF work and reports the operationlevel energy of spike-based inference.
+Tables 1 and 2 summarize the estimated energy results
+across the two evaluated backbones. On INGP-NeRF, PATA
+reduces the average time step from the full budget of 𝑇 = 8
+and achieves up to 57.57% energy reduction on SyntheticNeRF and 37.46% energy reduction on Mip-NeRF 360 while
+maintaining competitive PSNR and SSIM. On TensoRF, the
+estimated energy reduction reaches 40.66% on SyntheticNeRF and 68.90% on LLFF, with the tensor-factorized density field, appearance field, sampling procedure, and volume
+rendering pipeline kept unchanged. The stronger reduction
+on LLFF is consistent with the smaller 30-dimensional TensoRF color-decoder input in this setting, where the spikebased decoder accounts for a larger share of the reducible
+computation.
+The reported energy values follow an operation-level
+estimate for neuromorphic or customized low-power accelerators, where sparse spike operations can be exploited, such
+as FPGA- and ASIC-based accelerators [11, 21, 31]. This
+metric quantifies the inference-energy effect of temporalbudget learning under the same assumptions used in prior
+SNN evaluations.
+5.3. Qualitative Results
+Figure 4 presents qualitative results on the INGP-NeRF
+backbone. Under reduced target time steps, PATA preserves
+the main object geometry, texture appearance, and background structure across representative Synthetic-NeRF and
+Mip-NeRF 360 scenes. These visual results are aligned with
+the quantitative trends in Table 1, where the learned temporal
+Page 9 of 14
+Adaptive Time-step Training for Spike-Based NeRF
+Table 4
+Comparison with ANN-based NeRF methods on Synthetic-NeRF, Mip-NeRF 360, and LLFF. The best results on each dataset
+are shown in bold.
+Synthetic-NeRF
+Mip-NeRF 360
+LLFF
+Method
+PSNR↑ SSIM↑ Method
+PSNR↑ SSIM↑ Method
+PSNR↑ SSIM↑
+JaxNeRF[10]
+MipNeRF[1]
+TensoRF[5]
+INGP[34]
+SRes[7]
+BiRF[40]
+31.65
+33.09
+33.14
+32.14
+32.52
+32.64
+0.952
+0.961
+0.963
+0.959
+0.959
+0.958
+NeRF[33]
+NeRF++[57]
+MipNeRF[1]
+INGP[34]
+Nerfacto[43]
+ZipNeRF[3]
+23.85
+25.11
+24.04
+25.48
+26.39
+28.54
+0.605
+0.676
+0.616
+0.668
+0.731
+0.828
+SRN[41]
+LLFF[32]
+NeRF[33]
+MipNeRF[1]
+Plenoxels[15]
+TensoRF[5]
+22.84
+24.13
+26.50
+26.60
+26.29
+26.73
+0.668
+0.798
+0.811
+0.817
+0.839
+0.839
+Ours-INGP-NeRF
+Ours-TensoRF
+32.21
+33.10
+0.957
+0.961
+Ours-INGP-NeRF
+–
+25.09
+–
+0.646
+–
+–
+Ours-TensoRF
+–
+26.62
+–
+0.832
+budgets reduce inference cost while maintaining rendering
+quality.
+Figure 4: Qualitative results on representative SyntheticNeRF and Mip-NeRF 360 scenes using the INGP-NeRF
+backbone.
+Figure 5 further compares GT images, ANN-TensoRF
+renderings, and PATA-TensoRF renderings on LLFF. In this
+setting, PATA replaces only the TensoRF color decoder
+with the spike-based adaptive decoder, while the tensorfactorized density field, appearance field, sampling process,
+and volume rendering pipeline remain unchanged. With 𝛽 =
+5 × 10−7 , PATA-TensoRF preserves the scene layout and
+local visual details across real forward-facing scenes, matching the small PSNR/SSIM changes reported in Table 2. This
+comparison provides qualitative evidence that the proposed
+temporal-budget learning can be applied beyond the hashgrid INGP-NeRF backbone.
+Lin et al.: Preprint submitted to Elsevier
+Figure 5: Qualitative comparison on LLFF using the
+TensoRF backbone. Columns show GT, ANN-TensoRF,
+and PATA-TensoRF (𝛽 = 5 × 10−7 ), respectively.
+Figure 6 analyzes the learned time-step allocation across
+scenes using the INGP-NeRF backbone under the same
+parameter setting as Figure 5. Scenes with simpler textures,
+such as chair, hotdog, and room, use fewer time steps, while
+scenes with more complex geometry or texture, such as
+drums and bicycle, receive larger temporal budgets. Since
+all sampling points within a scene share the same target time
+step, this scene-level allocation preserves parallel inference
+while adapting computation to scene complexity.
+Page 10 of 14
+Adaptive Time-step Training for Spike-Based NeRF
+Table 5
+Ablation study of input modes on Synthetic-NeRF using the
+INGP-NeRF backbone. The best result is highlighted in bold.
+Method
+PSNR↑
+SSIM↑
+Time Step↓
+Decay
+No-Decay
+Hybrid
+31.82
+32.09
+32.12
+0.955
+0.956
+0.957
+8.000
+8.000
+8.000
+Table 6
+Ablation study of two-stage training. The best result is
+highlighted in bold.
+Method
+PSNR↑
+SSIM↑
+Time Step↓
+Hybrid
+w/o pretrain
+Ours
+32.12
+31.59
+32.21
+0.957
+0.954
+0.957
+8.000
+3.625
+3.625
+Table 7
+Ablation study of temporal budget loss components. The best
+result is highlighted in bold.
+(a) Synthetic-NeRF
+Method
+PSNR↑
+SSIM↑
+Time Step↓
+w/o 𝑒𝑥𝑡𝑟𝑎
+w/o 𝑝𝑒𝑛𝑎𝑙𝑡𝑦
+w/o 𝑏𝑢𝑑𝑔
+Ours
+31.69
+32.61
+32.02
+32.21
+0.953
+0.960
+0.957
+0.957
+1.625
+6.625
+5.875
+3.625
+Table 8
+Comparison of different fixed target time-step settings.
+Method
+PATA
+Fixed-𝑡
+Fixed-(𝑡 + 1)
+Fixed-(𝑡 − 1)
+(b) Mip-NeRF 360
+Figure 6: Relationship between PSNR and target time steps
+for different scenes.
+5.4. Ablation Study
+We conduct ablation studies on the Synthetic-NeRF
+dataset using the INGP-NeRF backbone under the efficiencyoriented setting with 𝛽 = 5 × 10−7 , unless otherwise
+specified. These experiments examine four design choices
+in PATA: the hybrid input mode, the two-stage training
+strategy, the temporal budget loss, and the learned target time
+step.
+Table 5 evaluates the input mode used in the spike-based
+renderer. The decay mode scales the input contribution at
+each time step by 1∕𝜏, which weakens membrane accumulation and leads to the lowest PSNR. The no-decay mode
+avoids this attenuation and improves PSNR, but it does not
+provide explicit control over the temporal contribution of
+different steps. The hybrid mode combines stable accumulation with controllable temporal weighting and achieves the
+best PSNR and SSIM among the three settings. We therefore
+use the hybrid mode as the default input mechanism before
+optimizing the temporal budget in the second stage.
+Table 6 evaluates the two-stage training strategy. The
+hybrid baseline trains a fixed full-step spike-based renderer
+with 𝑇 = 8, while the w/o pretrain setting directly optimizes the adaptive target time step from initialization. Direct
+Lin et al.: Preprint submitted to Elsevier
+Time Step ↓
+PSNR ↑
+SSIM ↑
+Energy (mJ) ↓
+3.625
+3.625
+4.625
+2.625
+32.21
+32.11
+32.29
+31.69
+0.957
+0.956
+0.958
+0.954
+492.25
+491.70
+623.01
+398.37
+adaptation reaches the same average time step as PATA
+but reduces PSNR by 0.62 dB. Starting from a full-step
+pretrained model provides a stronger rendering initialization,
+allowing the second stage to reduce the temporal budget
+while preserving higher reconstruction quality.
+Table 7 analyzes the components of the temporal budget
+loss. Removing 𝑒𝑥𝑡𝑟𝑎 drives the learned time step to 1.625,
+but the aggressive reduction causes a clear PSNR drop. Removing 𝑝𝑒𝑛𝑎𝑙𝑡𝑦 gives the highest PSNR, while the average
+time step increases to 6.625, leaving limited room for energy
+reduction. Removing the complete 𝑏𝑢𝑑𝑔 also weakens timestep control and results in a larger temporal budget than
+PATA. The full objective reaches 32.21 dB PSNR with an
+average time step of 3.625, showing a balanced qualityefficiency trade-off under the 𝛽 = 5 × 10−7 setting.
+Table 8 compares PATA with fixed target-step settings
+in the second training stage. After obtaining the scene-wise
+target step 𝑡∗𝑟 learned by PATA, we fix the target step to 𝑡∗𝑟 ,
+𝑡∗𝑟 +1, and 𝑡∗𝑟 −1 while keeping the other settings unchanged.
+Fixed-𝑡 achieves nearly the same PSNR and SSIM as PATA,
+showing that the learned target step is a stable temporal
+budget. Increasing the target step gives only a small quality
+gain but raises the estimated energy, while decreasing it
+reduces energy at the cost of visible quality degradation.
+Since the fixed-𝑡 setting uses the target step discovered by
+PATA, it serves as an oracle reference rather than a practical
+alternative.
+Page 11 of 14
+Adaptive Time-step Training for Spike-Based NeRF
+6. CONCLUSION
+In this work, we presented PATA, a two-stage adaptive time-step training framework for spike-based neural
+radiance fields. PATA learns a scene-wise temporal budget
+during training and applies a shared target time step to all
+sampling points within a scene, preserving parallel inference
+while adapting computation to scene complexity. The framework combines hybrid input dynamics, full-step pretraining,
+temporal-budget optimization, and smoothing regularization
+to reduce the inference time-step budget while maintaining
+rendering quality.
+Experiments on INGP-NeRF and TensoRF show that
+PATA provides a controllable quality-efficiency trade-off
+across hash-grid and tensor-factorized neural rendering
+backbones. On INGP-NeRF, PATA reduces the estimated
+inference energy by up to 57.57% on Synthetic-NeRF and
+37.46% on Mip-NeRF 360. On TensoRF, PATA is applied
+only to the color decoder while keeping the tensor-factorized
+representation and volume rendering pipeline unchanged,
+achieving up to 40.66% estimated energy reduction on
+Synthetic-NeRF and 68.90% on LLFF. These results show
+that scene-wise temporal-budget learning provides a practical route toward efficient spike-based neural rendering
+across different radiance-field representations.
+CRediT authorship contribution statement
+Ranxi Lin: Conceptualization, Methodology, Software,
+Validation, Formal analysis, Investigation, Visualization,
+Writing – original draft. Canming Yao: Validation, Formal
+analysis, Data curation, Writing – review & editing. Jiayi Li:
+Software, Validation, Investigation, Data curation. Weihang
+Liu: Software, Validation, Investigation, Data curation.
+Xin Lou: Supervision, Project administration, Writing –
+review & editing. Pingqiang Zhou: Supervision, Project
+administration, Writing – review & editing.
+Declaration of competing interest
+The authors declare that they have no known competing
+financial interests or personal relationships that could have
+appeared to influence the work reported in this paper.
+Acknowledgments
+References
+[1] Barron, J.T., Mildenhall, B., Tancik, M., Hedman, P., Martin-Brualla,
+R., Srinivasan, P.P., 2021. Mip-nerf: A multiscale representation for
+anti-aliasing neural radiance fields, in: Proceedings of the IEEE/CVF
+international conference on computer vision, pp. 5855–5864.
+[2] Barron, J.T., Mildenhall, B., Verbin, D., Srinivasan, P.P., Hedman, P.,
+2022. Mip-nerf 360: Unbounded anti-aliased neural radiance fields,
+in: Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition, pp. 5470–5479.
+[3] Barron, J.T., Mildenhall, B., Verbin, D., Srinivasan, P.P., Hedman,
+P., 2023. Zip-nerf: Anti-aliased grid-based neural radiance fields, in:
+Proceedings of the IEEE/CVF International Conference on Computer
+Vision, pp. 19697–19705.
+Lin et al.: Preprint submitted to Elsevier
+[4] Chang, Y., Peng, P., Zhou, Z., Wang, X., Tian, Y., 2026. Sahnerf: Enhancing nerf on novel view synthesis with an snn-ann hybrid
+framework. IEEE Transactions on Circuits and Systems for Video
+Technology .
+[5] Chen, A., Xu, Z., Geiger, A., Yu, J., Su, H., 2022. Tensorf: Tensorial radiance fields, in: European conference on computer vision,
+Springer. pp. 333–350.
+[6] Chen, Y., Wu, Q., Harandi, M., Cai, J., 2024. How far can we
+compress instant-ngp-based nerf?, in: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pp. 20321–
+20330.
+[7] Dai, S., Cao, Y., Duan, P., Chen, X., 2023. Sres-nerf: improved
+neural radiance fields for realism and accuracy of specular reflections,
+in: International Conference on Multimedia Modeling, Springer. pp.
+306–317.
+[8] Datta, G., Beerel, P.A., 2022. Can deep neural networks be converted
+to ultra low-latency spiking neural networks?, in: 2022 Design, Automation & Test in Europe Conference & Exhibition (DATE), IEEE.
+pp. 718–723.
+[9] Datta, G., Liu, Z., Li, A., Beerel, P.A., 2025. Dynamic spikformer:
+Low-latency & energy-efficient spiking neural networks with dynamic time steps for vision transformers, in: ICASSP 2025-2025
+IEEE International Conference on Acoustics, Speech and Signal
+Processing (ICASSP), IEEE. pp. 1–5.
+[10] Deng, B., Barron, J.T., Srinivasan, P.P., 2020. JaxNeRF: an efficient JAX implementation of NeRF. URL: https://github.com/
+google-research/google-research/tree/master/jaxnerf.
+[11] Deng, B., Fan, Y., Wang, J., Yang, S., 2023. Auditory perception
+architecture with spiking neural network and implementation on fpga.
+Neural Networks 165, 31–42. doi:10.1016/j.neunet.2023.05.026.
+[12] Deng, S., Li, Y., Zhang, S., Gu, S., 2022. Temporal efficient training
+of spiking neural network via gradient re-weighting. arXiv preprint
+arXiv:2202.11946 .
+[13] Fang, W., Chen, Y., Ding, J., Yu, Z., Masquelier, T., Chen, D., Huang,
+L., Zhou, H., Li, G., Tian, Y., 2023. Spikingjelly: An open-source
+machine learning infrastructure platform for spike-based intelligence.
+Science Advances 9, eadi1480.
+[14] Fang, W., Yu, Z., Chen, Y., Masquelier, T., Huang, T., Tian, Y.,
+2021. Incorporating learnable membrane time constant to enhance
+learning of spiking neural networks, in: Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV), pp. 2661–
+2671.
+[15] Fridovich-Keil, S., Yu, A., Tancik, M., Chen, Q., Recht, B.,
+Kanazawa, A., 2022. Plenoxels: Radiance fields without neural
+networks, in: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pp. 5501–5510.
+[16] Girish, S., Shrivastava, A., Gupta, K., 2023. Shacira: Scalable hashgrid compression for implicit neural representations, in: Proceedings
+of the IEEE/CVF International Conference on Computer Vision, pp.
+17513–17524.
+[17] Gu, Y., Wang, Z., Ye, D., Xu, R., 2024. Sharpening your density
+fields: Spiking neuron aided fast geometry learning. arXiv preprint
+arXiv:2412.09881 .
+[18] Guo, Y., Bai, Y., Hu, L., Liu, M., Guo, Z., Ma, L., Huang, T., 2024.
+Spike-nerf: Neural radiance field based on spike camera, in: 2024
+IEEE International Conference on Multimedia and Expo (ICME),
+IEEE. pp. 1–6.
+[19] Hasssan, A., Anupreetham, A., Meng, J., Seo, J.s., 2025. Quant-nerf:
+Efficient end-to-end quantization of neural radiance fields with lowprecision 3d gaussian representation, in: ICASSP 2025-2025 IEEE
+International Conference on Acoustics, Speech and Signal Processing
+(ICASSP), IEEE. pp. 1–5.
+[20] Jiang, L., Wang, L., 2024. G-nelf: Memory-and data-efficient hybrid neural light field for novel view synthesis. arXiv preprint
+arXiv:2409.05617 .
+[21] Karamimanesh, M., Abiri, E., Shahsavari, M., Hassanli, K., van
+Schaik, A., Eshraghian, J., 2025. Spiking neural networks on fpga: A
+survey of methodologies and recent advancements. Neural Networks
+Page 12 of 14
+Adaptive Time-step Training for Spike-Based NeRF
+186, 107256. doi:10.1016/j.neunet.2025.107256.
+[22] Kim, Y., Li, Y., Park, H., Venkatesha, Y., Hambitzer, A., Panda, P.,
+2023. Exploring temporal information dynamics in spiking neural
+networks, in: Proceedings of the AAAI Conference on Artificial
+Intelligence, pp. 8308–8316.
+[23] Li, C., Jones, E.G., Furber, S., 2023a. Unleashing the potential of
+spiking neural networks with dynamic confidence, in: Proceedings
+of the IEEE/CVF International Conference on Computer Vision, pp.
+13350–13360.
+[24] Li, Y., Geller, T., Kim, Y., Panda, P., 2023b. Seenn: towards temporal
+spiking early exit neural networks. Advances in Neural Information
+Processing Systems 36, 63327–63342.
+[25] Li, Y., Moitra, A., Geller, T., Panda, P., 2023c. Input-aware dynamic
+timestep spiking neural networks for efficient in-memory computing,
+in: 2023 60th ACM/IEEE Design Automation Conference (DAC),
+IEEE. pp. 1–6.
+[26] Li, Z., Ma, Y., Zhou, J., Zhou, P., 2025. Spiking-nerf: Spiking
+neural network for energy-efficient neural rendering. ACM Journal
+on Emerging Technologies in Computing Systems 20, 1–23.
+[27] Lian, S., Shen, J., Wang, Z., Tang, H., 2024. Im-lif: Improved
+neuronal dynamics with attention mechanism for direct training deep
+spiking neural network. IEEE Transactions on Emerging Topics in
+Computational Intelligence 8, 2075–2085.
+[28] Liao, Z., Liu, Y., Zheng, Q., Pan, G., 2024. Spiking nerf: Representing the real-world geometry by a discontinuous representation,
+in: Proceedings of the AAAI Conference on Artificial Intelligence,
+pp. 13790–13798.
+[29] Liu, F., Li, H., Yang, N., Wang, Z., Yang, T., Jiang, L., 2024a. Teas:
+Exploiting spiking activity for temporal-wise adaptive spiking neural
+networks, in: 2024 29th Asia and South Pacific Design Automation
+Conference (ASP-DAC), IEEE. pp. 842–847.
+[30] Liu, W., Zheng, X.X., Yu, J., Lou, X., 2024b. Content-aware radiance fields: Aligning model complexity with scene intricacy through
+learned bitwidth quantization, in: European Conference on Computer
+Vision, Springer. pp. 239–256.
+[31] Longchar, I., Kapoor, H.K., 2024. Spalen: Sp arsity a ware l oad
+balancing inference e ngine for neural network. ACM Journal on
+Emerging Technologies in Computing Systems .
+[32] Mildenhall, B., Srinivasan, P.P., Ortiz-Cayon, R., Kalantari, N.K.,
+Ramamoorthi, R., Ng, R., Kar, A., 2019. Local light field fusion:
+Practical view synthesis with prescriptive sampling guidelines. ACM
+Transactions on Graphics 38. doi:10.1145/3306346.3322980.
+[33] Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng, R., 2021. Nerf: Representing scenes as neural radiance
+fields for view synthesis. Communications of the ACM 65, 99–106.
+[34] Müller, T., Evans, A., Schied, C., Keller, A., 2022. Instant neural
+graphics primitives with a multiresolution hash encoding. ACM
+transactions on graphics (TOG) 41, 1–15.
+[35] Neftci, E.O., Mostafa, H., Zenke, F., 2019. Surrogate gradient learning in spiking neural networks: Bringing the power of gradient-based
+optimization to spiking neural networks. IEEE Signal Processing
+Magazine 36, 51–63.
+[36] Qiu, H., Ning, M., Song, Z., Fang, W., Chen, Y., Sun, T., Ma, Z.,
+Yuan, L., Tian, Y., 2024. Self-architectural knowledge distillation for
+spiking neural networks. Neural Networks 178, 106475. doi:10.1016/
+j.neunet.2024.106475.
+[37] Rathi, N., Chakraborty, I., Kosta, A., Sengupta, A., Ankit, A., Panda,
+P., Roy, K., 2023. Exploring neuromorphic computing based on
+spiking neural networks: Algorithms to hardware. ACM Computing
+Surveys 55, 1–49.
+[38] Reiser, C., Garbin, S., Srinivasan, P., Verbin, D., Szeliski, R., Mildenhall, B., Barron, J., Hedman, P., Geiger, A., 2024. Binary opacity
+grids: Capturing fine geometric detail for mesh-based view synthesis.
+ACM Transactions on Graphics (TOG) 43, 1–14.
+[39] Shi, X., Hao, Z., Yu, Z., 2024. Spikingresformer: bridging resnet and
+vision transformer in spiking neural networks, in: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+pp. 5610–5619.
+Lin et al.: Preprint submitted to Elsevier
+[40] Shin, S., Park, J., 2023. Binary radiance fields. Advances in neural
+information processing systems 36, 55919–55931.
+[41] Sitzmann, V., Zollhoefer, M., Wetzstein, G., 2019. Scene representation networks: Continuous 3d-structure-aware neural scene representations, in: Advances in Neural Information Processing Systems.
+[42] Takikawa, T., Evans, A., Tremblay, J., Müller, T., McGuire, M.,
+Jacobson, A., Fidler, S., 2022. Variable bitrate neural fields, in: ACM
+SIGGRAPH 2022 Conference Proceedings, pp. 1–9.
+[43] Tancik, M., Weber, E., Ng, E., Li, R., Yi, B., Wang, T., Kristoffersen,
+A., Austin, J., Salahi, K., Ahuja, A., et al., 2023. Nerfstudio: A
+modular framework for neural radiance field development, in: ACM
+SIGGRAPH 2023 conference proceedings, pp. 1–12.
+[44] Tang, J., 2022. Torch-ngp: a pytorch implementation of instant-ngp.
+Https://github.com/ashawkey/torch-ngp.
+[45] Tavanaei, A., Ghodrati, M., Kheradpisheh, S.R., Masquelier, T.,
+Maida, A., 2019. Deep learning in spiking neural networks. Neural
+networks 111, 47–63.
+[46] Wan, G., Lan, Q., Li, Z., Wang, H., Yitian, W., Li, W., Guo, Y.,
+et al., 2026. Spik-nerf: Spiking neural networks for neural radiance
+fields. Advances in Neural Information Processing Systems 38,
+47316–47335.
+[47] Wang, K., Zou, L., 2025. Mixed spiking nerf: Towards a more efficient
+neural radiance fields, in: ICASSP 2025-2025 IEEE International
+Conference on Acoustics, Speech and Signal Processing (ICASSP),
+IEEE. pp. 1–5.
+[48] Wu, Y., Deng, L., Li, G., Zhu, J., Shi, L., 2018. Spatio-temporal backpropagation for training high-performance spiking neural networks.
+Frontiers in neuroscience 12, 331.
+[49] Xie, X., Gherardi, R., Pan, Z., Huang, S., 2023. Hollownerf: Pruning
+hashgrid-based nerfs with trainable collision mitigation, in: Proceedings of the IEEE/CVF International Conference on Computer Vision,
+pp. 3480–3490.
+[50] Yan, Y., Chu, H., Jin, Y., Huan, Y., Zou, Z., Zheng, L., 2022. Backpropagation with sparsity regularization for spiking neural network
+learning. Frontiers in Neuroscience 16, 760298.
+[51] Yang, G.W., Zhou, W.Y., Peng, H.Y., Liang, D., Mu, T.J., Hu, S.M.,
+2022. Recursive-nerf: An efficient and dynamically growing nerf.
+IEEE Transactions on Visualization and Computer Graphics 29,
+5124–5136.
+[52] Yao, X., Hu, Q., Liu, T., Mo, Z., Zhu, Z., Zhuge, Z., Cheng, J., 2023.
+Spikingnerf: Making bio-inspired neural networks see through the
+real world. arXiv preprint arXiv:2309.10987 .
+[53] Yao, X., Hu, Q., Zhou, F., Liu, T., Li, G., Wang, P., Cheng, J., 2026.
+Towards efficient and accurate spiking neural networks via adaptive
+bit allocation. Neural Networks 196, 108350. doi:10.1016/j.neunet.
+2025.108350.
+[54] Yao, X., Li, F., Mo, Z., Cheng, J., 2022. Glif: A unified gated leaky
+integrate-and-fire neuron for spiking neural networks. Advances in
+Neural Information Processing Systems 35, 32160–32171.
+[55] Yin, B., Corradi, F., Bohté, S.M., 2021. Accurate and efficient
+time-domain classification with adaptive spiking recurrent neural
+networks. Nature Machine Intelligence 3, 905–913.
+[56] Yu, C., Zhao, X., Liu, L., Yang, S., Wang, G., Li, E., Wang, A., 2025.
+Efficient distillation of deep spiking neural networks for full-range
+timestep deployment. arXiv preprint arXiv:2501.15925 .
+[57] Zhang, K., Riegler, G., Snavely, N., Koltun, V., 2020. Nerf++:
+Analyzing and improving neural radiance fields. arXiv preprint
+arXiv:2010.07492 .
+[58] Zhang, S., Yang, Q., Ma, C., Wu, J., Li, H., Tan, K.C., 2024. Tc-lif:
+A two-compartment spiking neuron model for long-term sequential
+modelling, in: Proceedings of the AAAI conference on artificial
+intelligence, pp. 16838–16847.
+[59] Zhang, T., Yu, K., Zhang, J., Wang, H., 2025a. Da-lif: Dual adaptive
+leaky integrate-and-fire model for deep spiking neural networks, in:
+ICASSP 2025-2025 IEEE International Conference on Acoustics,
+Speech and Signal Processing (ICASSP), IEEE. pp. 1–5.
+Page 13 of 14
+Adaptive Time-step Training for Spike-Based NeRF
+[60] Zhang, X., Wang, Y., Fang, S., Wang, Z., Zhang, H., Qi, D., Ding, W.,
+2025b. Asfc-nerf: Large-scale scene rendering with adaptive sampling and feature-aware compression, in: ICASSP 2025-2025 IEEE
+International Conference on Acoustics, Speech and Signal Processing
+(ICASSP), IEEE. pp. 1–5.
+[61] Zhong, X., Hu, S., Liu, W., Huang, W., Ding, J., Yu, Z., Huang,
+T., 2024. Towards low-latency event-based visual recognition with
+hybrid step-wise distillation spiking neural networks, in: Proceedings
+of the 32nd ACM International Conference on Multimedia, pp. 9828–
+9836.
+[62] Zhou, K., Qiu, Y., Li, Y., Zhao, Q., Zhou, G., 2025. Gradient aware
+adaptive quantization: Locally uniform quantization with learnable
+clipping thresholds for globally non-uniform weights. Neural Networks , 107778.
+[63] Zhu, H., He, T., Li, X., Li, B., Chen, Z., 2024. Is vanilla mlp
+in neural radiance field enough for few-shot view synthesis?, in:
+Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pp. 20288–20298.
+[64] Zuo, L., Ding, Y., Jing, M., Yang, K., Yu, Y., 2024. Self-distillation
+learning based on temporal-spatial consistency for spiking neural
+networks. arXiv preprint arXiv:2406.07862 .
+Lin et al.: Preprint submitted to Elsevier
+Page 14 of 14

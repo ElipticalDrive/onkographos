@@ -1,0 +1,203 @@
+# Menger Sponge Raymarching
+
+Also called: Menger Journey, Menger Tower, Menger sponge
+
+## Overview
+A raymarching technique that renders a Menger sponge fractal using a Signed Distance Function (SDF) combined with a floor plane, utilizing GLSL 120 [S1, unofficial]. It builds on [Sphere Tracing](2326-sphere-tracing.md) by implementing a specific recursive SDF for the Menger sponge geometry and a fixed-step iteration loop with early termination based on distance thresholds [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Camera position `cam_pos` (vec3), resolution `resolution` (vec2), mouse position `mouse` (vec2), time `time` (float).
+*   **Outputs:** Fragment color `gl_FragColor` (vec4).
+
+**Data Structures:**
+*   `vec2` SDF return type: `{ distance: float, material_id: float }`. `material_id` distinguishes the floor (0) from the sponge (1) [S1, unofficial].
+*   `vec3` point coordinates.
+
+**Parameters:**
+*   Box size `b`: `vec3(4.0, 4.0, 4.0)` [S1, unofficial].
+*   Menger iterations: 3 [S1, unofficial].
+*   Epsilon for normal calculation `e`: `vec3(0.02, 0, 0)` [S1, unofficial].
+*   Max depth `maxd`: `100.0` [S1, unofficial].
+*   Initial step size `d.x`: `0.02` [S1, unofficial].
+*   Loop limit: 256 iterations [S1, unofficial].
+*   Hit threshold: `0.001` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+PI = 3.14159265
+MAX_DEPTH = 100.0
+ITERATION_LIMIT = 256
+EPSILON = vec3(0.02, 0.0, 0.0)
+BOX_SIZE = vec3(4.0, 4.0, 4.0)
+
+def maxcomp(p):
+    """Returns the maximum component of a vec3."""
+    m1 = max(p.x, p.y)
+    return max(m1, p.z)
+
+def obj_box_s(p, b):
+    """SDF for a box centered at origin with half-extents b.
+    Returns vec2(distance, material_id)."""
+    di = abs(p) - b
+    mc = maxcomp(di)
+    d = min(mc, length(max(di, vec3(0.0))))
+    return vec2(d, 1.0)
+
+def obj_box(p):
+    """SDF for the base Menger box."""
+    return obj_box_s(p, BOX_SIZE)
+
+def obj_cross(p):
+    """SDF for the cross-shaped voids in the Menger sponge.
+    Returns vec2(distance, material_id)."""
+    inf_val = 100.0
+    # Three orthogonal boxes forming the cross
+    da = obj_box_s(p, vec3(inf_val, 2.0, 2.0))
+    db = obj_box_s(p.yzx, vec3(2.0, inf_val, 2.0))
+    dc = obj_box_s(p.zxy, vec3(2.0, 2.0, inf_val))
+    # Union of the three boxes
+    min_dist = min(da.x, min(db.x, dc.x))
+    return vec2(min_dist, 1.0)
+
+def obj_menger(p):
+    """SDF for the Menger sponge fractal.
+    Returns vec2(distance, material_id)."""
+    # Base box
+    d2 = obj_box(p)
+    s = 1.0
+    # 3 iterations of the Menger sponge construction
+    for m in range(3):
+        # Map p into [-1, 1] range based on current scale s
+        a = mod(p * s, 2.0) - 1.0
+        s *= 3.0
+        # Calculate distance to the cross voids at this scale
+        r = 1.0 - 4.0 * abs(a)
+        c = obj_cross(r) / s
+        # Union with existing distance field
+        d2.x = max(d2.x, c.x)
+    return d2
+
+def obj_floor(p):
+    """SDF for the floor plane at y = -10.
+    Returns vec2(distance, material_id)."""
+    return vec2(p.y + 10.0, 0.0)
+
+def obj_union(obj0, obj1):
+    """Union of two SDFs.
+    Returns vec2(distance, material_id)."""
+    if obj0.x < obj1.x:
+        return obj0
+    else:
+        return obj1
+
+def distance_to_obj(p):
+    """Union of floor and Menger sponge.
+    Returns vec2(distance, material_id)."""
+    return obj_union(obj_floor(p), obj_menger(p))
+
+def floor_color(p):
+    """Checkerboard pattern for the floor."""
+    if fract(p.x * 0.2) > 0.2:
+        if fract(p.z * 0.2) > 0.2:
+            return vec3(0.0, 0.1, 0.2)
+        else:
+            return vec3(1.0, 1.0, 1.0)
+    else:
+        if fract(p.z * 0.2) > 0.2:
+            return vec3(1.0, 1.0, 1.0)
+        else:
+            return vec3(0.3, 0.0, 0.0)
+
+def prim_c(p):
+    """Primitive color for the Menger sponge."""
+    return vec3(0.6, 0.6, 0.8)
+
+def main():
+    # 1. Camera Setup
+    # vPos is normalized screen coordinate [-1, 1]
+    # Assuming vPos is passed as input or derived from texture coordinates
+    # vPos = -1.0 + 2.0 * q; where q is texture coord
+    
+    vuv = vec3(0.0, 1.0, 0.0)
+    vrp = vec3(0.0, 0.0, 0.0)
+    prp = cam_pos # From uniform
+    
+    vpn = normalize(vrp - prp)
+    u = normalize(cross(vuv, vpn))
+    v = cross(vpn, u)
+    vcv = prp + vpn
+    
+    aspect = resolution.x / resolution.y
+    scrCoord = vcv + vPos.x * u * aspect + vPos.y * v
+    scp = normalize(scrCoord - prp)
+    
+    # 2. Raymarching Initialization
+    d = vec2(0.02, 0.0) # Initial step size and dummy material ID
+    f = 1.0 # Accumulated distance
+    
+    # 3. Raymarching Loop
+    for i in range(ITERATION_LIMIT):
+        if abs(d.x) < 0.001 or f > MAX_DEPTH:
+            break
+        
+        f += d.x
+        p = prp + scp * f
+        d = distance_to_obj(p)
+    
+    # 4. Coloring and Lighting
+    if f < MAX_DEPTH:
+        if d.y == 0.0: # Floor
+            c = floor_color(p)
+        else: # Menger Sponge
+            c = prim_c(p)
+        
+        # Compute normal using central differences
+        n = normalize(vec3(
+            d.x - distance_to_obj(p - EPSILON.xyy).x,
+            d.x - distance_to_obj(p - EPSILON.yxy).x,
+            d.x - distance_to_obj(p - EPSILON.yyx).x
+        ))
+        
+        # Diffuse lighting
+        b = dot(n, normalize(prp - p))
+        
+        # Specular-like term and fog
+        final_color = (b * c + pow(b, 60.0)) * (1.0 - f * 0.01)
+        gl_FragColor = vec4(final_color, 1.0)
+    else:
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0) # Background
+```
+
+**Formulas:**
+*   **Box SDF:** $d = \min(mc, \text{length}(\max(di, 0.0)))$ where $di = |p| - b$ and $mc = \max(di.x, \max(di.y, di.z))$ [S1, unofficial].
+*   **Menger Iteration:**
+    *   $a = \text{mod}(p \cdot s, 2.0) - 1.0$
+    *   $r = 1.0 - 4.0|a|$
+    *   $c = \text{obj\_cross}(r)/s$
+    *   $d.x = \max(d.x, c.x)$
+    *   $s$ scales by 3.0 each iteration [S1, unofficial].
+*   **Lighting:** $C = (b \cdot c + b^{60.0}) \cdot (1.0 - f \cdot 0.01)$ where $b = \text{dot}(n, \text{normalize}(prp - p))$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Driver Crashes:** NVIDIA OpenGL drivers may crash with 'lost connection' messages on Windows with certain hardware (e.g., GeForce GTX 660, driver R334.67) [S1, unofficial]. AMD hardware (Radeon R7) tested without issues [S1, unofficial].
+*   **Precision:** The normal calculation uses a fixed epsilon `e = vec3(0.02, 0, 0)` [S1, unofficial]. This may be insufficient for very small features or too large for coarse geometry, potentially leading to inaccurate normals.
+*   **Termination:** The loop breaks if `abs(d.x) < 0.001` or `f > maxd` [S1, unofficial]. If the ray misses the object but `d.x` does not drop below the threshold before `maxd`, the ray is considered missed.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of raymarching iterations (max 256) and the number of Menger iterations (3) per step. Each step involves evaluating the Menger SDF, which includes 3 iterations of modulo and vector operations.
+*   **Memory Complexity:** Constant, $O(1)$, as it only stores a few vectors and scalars per pixel.
+*   **Performance:** Performance is limited by the fixed iteration count and the complexity of the Menger SDF evaluation. The use of `mod` and `abs` in the Menger iteration can be costly on some hardware.
+*   **Strengths:** Simple implementation, no need for complex data structures like BVHs or grids. The fractal nature allows for high detail at small scales without increasing memory usage.
+*   **Limitations:** Fixed step size initialization (`0.02`) may lead to slow convergence or aliasing if not tuned. The normal calculation is approximate and uses a fixed epsilon. Driver stability issues on some NVIDIA hardware [S1, unofficial].
+*   **When to use:** For educational purposes, simple fractal rendering, or when memory is constrained. Not suitable for production-grade rendering requiring high precision or complex lighting.
+
+## Background
+Originated from a GLSL code sample updated by Geeks3D, based on iq’s article about the Menger sponge [S1, unofficial]. The code was updated to be compatible with GLSL Hacker v0.6.3.11 DEV and GLSL 120 [S1, unofficial]. The technique demonstrates the use of SDFs for rendering complex fractal geometry via raymarching.
+
+## Sources
+[S1] (GLSL) Menger Sponge, Raymarching Code Samples Updated (GLSL) Menger Sponge, Raymarching Code Samples Updated, https://www.geeks3d.com/20140201/glsl-menger-sponge-raymarching-code-samples-updated/, fetched 2026-10-26 (unofficial)

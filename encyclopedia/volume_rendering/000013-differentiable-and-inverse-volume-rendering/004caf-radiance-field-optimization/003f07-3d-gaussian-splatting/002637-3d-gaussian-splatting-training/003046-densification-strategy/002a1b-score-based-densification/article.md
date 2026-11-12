@@ -3,116 +3,108 @@
 Also called: Budget-constrained Optimization, Guided Densification
 
 ## Overview
-Score-based Densification is a constructive densification strategy for 3D Gaussian Splatting that controls model size by adding new Gaussians only to those primitives that maximize a specific quality score, steering the population toward an exact user-defined budget without requiring pruning or culling during training [S1]. It differs from standard 3DGS densification, which relies on gradient magnitude thresholds and often results in unpredictable final sizes and redundant primitives, by using a scoring function that combines gradient, saliency, and primitive properties to ensure a predictable growth curve [S1].
+Score-based Densification is a constructive densification strategy for 3D Gaussian Splatting that controls model size by adding new Gaussians only to those primitives that maximize a specific quality score, adhering to a pre-defined budget [S1]. Unlike standard 3DGS which relies on gradient magnitude thresholds and subsequent pruning, this method avoids culling entirely, ensuring the primitive count increases monotonically and predictably toward a target size [S1]. It solves the problem of unpredictable storage demands and training duration inherent in standard 3DGS by steering densification toward regions that raise reconstruction quality [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** Current set of Gaussians $\mathcal{G}$, training views, a target final model size (budget) $B$, and a growth schedule function $N(t)$ defining the number of Gaussians at iteration $t$.
-*   **Outputs:** Updated set of Gaussians $\mathcal{G}'$ with increased count, adhering to the budget constraint.
+**Inputs:** Training views, current Gaussian population $\mathcal{G}$, target budget $B$ (final number of Gaussians), current iteration $t$, and total training iterations $T$.
+**Outputs:** Updated Gaussian population $\mathcal{G}'$ with new primitives added.
 
 **Data Structures:**
-*   **Gaussian Primitive:** Standard 3DGS structure containing mean $\mu$, covariance $\Sigma$ (or scale/rotation), opacity $\alpha$, and spherical harmonics coefficients for color.
-*   **Score Buffer:** A scalar value $S_g$ stored per Gaussian, initialized to zero.
-*   **Saliency Map:** A per-pixel or per-region saliency tensor derived from rendering error or gradient magnitude, computed for sampled training views.
-
-**Numbered Steps:**
-1.  **Sample Views:** Select a batch of training views for the current optimization step.
-2.  **Compute Saliency:** Render the current Gaussians and compute per-pixel saliency. Saliency is typically derived from the magnitude of the gradient of the loss with respect to the pixel colors or the rendering error itself [S1].
-3.  **Compute Per-Gaussian Score ($S_g$):** For each Gaussian $g_k$, aggregate the saliency and gradient information. The score $S_g$ is computed by a scoring function $F$ that combines:
-    *   The magnitude of the 2D positional gradient $\tau_k = \sum_{v} \| \frac{\partial L}{\partial \mu_v^k} \|_2$ [S1, S4].
-    *   The accumulated saliency of pixels covered by the Gaussian's projection [S1].
-    *   Primitive properties such as opacity or scale [S1].
-    The exact formula for $F$ is not explicitly detailed in the sources, but it is described as a combination of these loss-relevant components collected across sampled views [S1].
-4.  **Select Top-Scoring Gaussians:** Identify the Gaussians with the highest $S_g$ values. The number of Gaussians to densify is determined by the growth schedule $N(t)$, which mimics the behavior of standard 3DGS but is fitted to yield the desired budget $B$ [S1].
-5.  **Densify:** For each selected Gaussian, spawn new child Gaussians in its vicinity. This is typically done by sampling new means from a normal distribution scaled by the parent's covariance, or by cloning the parent [S1, Parent]. The new Gaussians inherit attributes from the parent, potentially with slight perturbations.
-6.  **Update Schedule:** Increment the iteration counter and check if the current number of Gaussians has reached the budget $B$. If so, stop densification.
+*   $\mathcal{G}$: List of Gaussians. Each Gaussian $g_k$ contains mean $\mu_k$, covariance $\Sigma_k$, opacity $\alpha_k$, spherical harmonics coefficients, and a computed score $S_g$.
+*   $S_{pixel}$: Per-pixel saliency map for the current batch of views.
+*   $S_g$: Per-Gaussian score, a scalar value.
 
 **Parameters:**
-*   **Budget ($B$):** The target final number of Gaussians. Not given in the sources.
-*   **Growth Schedule ($N(t)$):** A function mapping iteration $t$ to the number of Gaussians. It is fitted to match the desired budget. Not given in the sources.
-*   **Sampling Rate:** The frequency of densification steps. Not given in the sources, but implied to be periodic like standard 3DGS [S1].
+*   $B$: Target final number of Gaussians. Not given in the sources.
+*   $N_{views}$: Number of training views sampled per densification step. Not given in the sources.
+*   $F$: Scoring function combining gradient, saliency, and primitive properties. Not given in the sources.
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** Gradient computation must be numerically stable to ensure accurate scoring. The source mentions deriving faster, numerically equivalent solutions for gradient computation [S1].
-*   **Boundaries:** The method assumes a continuous growth curve; abrupt changes in the schedule may lead to suboptimal distributions.
-*   **Degenerate Input:** If the scene is simple, the score-based method may still add Gaussians if the schedule dictates, potentially leading to over-smoothing.
+**Steps:**
+1.  **Sample Views:** Select $N_{views}$ training views for the current densification step [S1].
+2.  **Compute Saliency:** Render the current $\mathcal{G}$ and compute per-pixel saliency $S_{pixel}$ to identify important regions in the image plane [S1].
+3.  **Compute Scores:** For each Gaussian $g_k \in \mathcal{G}$, compute a per-Gaussian score $S_g$ using the scoring function $F$. This function combines:
+    *   Gradient information (e.g., magnitude of positional gradients).
+    *   Saliency information (from $S_{pixel}$).
+    *   Primitive properties (e.g., size, opacity) [S1].
+4.  **Determine Growth Schedule:** Calculate the number of new Gaussians to add, $N_{add}$, based on a growth curve that mimics standard 3DGS behavior but is fitted to reach exactly $B$ Gaussians at iteration $T$ [S1].
+5.  **Select Top Gaussians:** Identify the top-scoring Gaussians from $\mathcal{G}$ based on $S_g$ [S1].
+6.  **Densify:** Add new Gaussians in the vicinity of the top-scoring Gaussians. The number of new Gaussians added is $N_{add}$ [S1].
+7.  **Update:** Replace or augment the population $\mathcal{G}$ with the new Gaussians. No pruning is performed [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def score_based_densification(Gaussians, Views, Budget, GrowthSchedule, Iteration):
-    # Determine how many Gaussians to add based on the growth schedule
-    target_count = GrowthSchedule(Iteration)
-    current_count = len(Gaussians)
-    num_to_add = target_count - current_count
+def score_based_densification(G, views, target_budget, current_iter, total_iters):
+    # 1. Sample views
+    sampled_views = sample_views(views, N_views)
     
-    if num_to_add <= 0:
-        return Gaussians
-
-    # Sample views
-    sampled_views = SampleViews(Views, batch_size=1)
+    # 2. Compute per-pixel saliency
+    # Render current Gaussians and compute saliency map
+    saliency_map = compute_saliency(G, sampled_views)
     
-    # Compute saliency and gradients for all Gaussians
-    scores = []
-    for g in Gaussians:
-        # Compute gradient magnitude
-        grad_mag = 0.0
-        saliency_sum = 0.0
-        for view in sampled_views:
-            # Render and compute loss
-            loss, gradient, saliency_map = RenderAndComputeLoss(g, view)
-            grad_mag += norm(gradient)
-            # Accumulate saliency for pixels covered by g
-            saliency_sum += SumSaliency(g.projection, saliency_map)
+    # 3. Compute per-Gaussian scores
+    for g in G:
+        # F combines gradient, saliency, and primitive properties
+        # Gradient is accumulated over sampled views
+        grad = compute_gradient(g, sampled_views)
+        # Saliency is aggregated based on the Gaussian's projected area/coverage
+        sal = aggregate_saliency(g, saliency_map)
+        # Primitive properties might include size, opacity, etc.
+        props = get_primitive_properties(g)
+        g.score = F(grad, sal, props)
+    
+    # 4. Determine number of Gaussians to add based on growth curve
+    # The curve is fitted to reach target_budget at total_iters
+    n_add = calculate_growth_step(current_iter, total_iters, target_budget, len(G))
+    
+    if n_add == 0:
+        return G
         
-        # Compute score F (exact formula not specified, combining components)
-        score = grad_mag + saliency_sum + g.opacity
-        scores.append((score, g))
+    # 5. Select top-scoring Gaussians
+    # Sort G by score descending
+    sorted_G = sort_by_score(G, descending=True)
+    top_indices = get_top_indices(sorted_G, n_add)
     
-    # Sort by score descending
-    scores.sort(key=lambda x: x[0], reverse=True)
-    
-    # Select top-scoring Gaussians
-    top_gaussians = [g for _, g in scores[:num_to_add]]
-    
-    # Densify
-    new_gaussians = []
-    for g in top_gaussians:
-        # Spawn children (e.g., clone or sample from covariance)
-        child1 = Clone(g)
-        child2 = SampleFromCovariance(g)
-        new_gaussians.append(child1)
-        new_gaussians.append(child2)
+    # 6. Densify new Gaussians in vicinity of top-scoring ones
+    new_Gaussians = []
+    for idx in top_indices:
+        parent = sorted_G[idx]
+        # Generate new Gaussians near the parent
+        # Exact sampling distribution is not given in sources [G]
+        child = sample_new_gaussian(parent)
+        new_Gaussians.append(child)
         
-    # Add new Gaussians to the set
-    Gaussians.extend(new_gaussians)
-    
-    return Gaussians
+    # 7. Update population (purely constructive, no pruning)
+    G.extend(new_Gaussians)
+    return G
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Budget Violation:** If the growth curve is not fitted correctly, the final model size may deviate from $B$ [S1].
+*   **Saliency Computation Cost:** Computing per-pixel saliency for every densification step can be expensive [S1].
+*   **Score Function Design:** The specific components of $F$ and their weights are critical for quality but are not explicitly defined in the sources [S1].
 
 ## Subtopics
 
 ### [Pixel-GS](9189-pixel-gs.md)
-Pixel-GS is a variant that prioritizes splitting Gaussians based on their spatial impact on the rendered image by scaling the densification gradient by the number of pixels a Gaussian influences. Unlike standard score-based densification which may use average gradients, Pixel-GS accounts for projected area and depth, yielding state-of-the-art rendering quality at the cost of a higher total number of Gaussian primitives. It is chosen when high fidelity in complex regions is prioritized over strict budget adherence.
+Pixel-GS is a variant that prioritizes splitting Gaussians based on their spatial impact on the rendered image. It scales the densification gradient by the number of pixels a Gaussian influences, ensuring that primitives causing errors across many pixels are split first. Unlike standard 3DGS which uses average positional gradients, Pixel-GS accounts for the projected area and depth, yielding state-of-the-art rendering quality at the cost of a higher total number of Gaussian primitives.
 
 ### Perceptual-GS
-Perceptual-GS replaces the simple gradient or score threshold with a scene-adaptive perceptual signal to improve detail in visually salient areas [S2, unofficial]. It computes a local perceptual error map using a lightweight vision-transformer head and densifies Gaussians only in regions where the Structural Similarity Index Measure (SSIM) falls below a dynamic threshold [S2, unofficial]. It is chosen when perceptual quality is more important than geometric accuracy.
+Perceptual-GS replaces the simple gradient threshold densification heuristic with a scene-adaptive perceptual signal to improve detail in visually salient areas [S2, unofficial]. It computes a local perceptual error map using a lightweight vision-transformer head and densifies Gaussians only in regions where Structural Similarity Index Measure (SSIM) falls below a dynamic threshold [S2, unofficial].
 
 ### Late Densification
-Late Densification is a strategy that enables densification in a later phase of training, specifically between iterations 20K to 20.5K, every 100 iterations, to help the model recover loss from the pruning of false-positive Gaussians [S3]. It is used in conjunction with pruning strategies to refine the model after the initial coarse structure is established.
+Late Densification is a technique where densification is enabled back between iterations 20K to 20.5K for every 100 iterations to help the model recover loss from pruning of false-positive Gaussians [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** The scoring step requires rendering and gradient computation for all Gaussians, which is $O(N \cdot V \cdot P)$ where $N$ is the number of Gaussians, $V$ is the number of views, and $P$ is the number of pixels. However, the source mentions deriving faster, numerically equivalent solutions for gradient computation [S1].
-*   **Memory Complexity:** $O(N)$ for storing Gaussians and scores. Since no pruning is required, memory usage grows monotonically to the budget $B$.
-*   **Measured Performance:** The source does not provide specific FPS or PSNR numbers for Score-based Densification alone, but notes that it avoids unnecessary peaks in optimization [S1].
-*   **Strengths:** Predictable model size, no need for pruning, controlled growth towards a budget.
-*   **Limitations:** Requires careful tuning of the growth schedule; may be slower than standard 3DGS if the scoring function is expensive.
-*   **When to Use:** When a fixed model size is required for downstream tasks or hardware constraints.
-*   **When Not to Use:** When maximum possible quality is needed regardless of size, or when computational resources for the scoring step are limited.
+*   **Time Complexity:** The scoring function $F$ and saliency computation add overhead per densification step compared to standard 3DGS [S1]. However, the method proposes faster, numerically equivalent solutions for gradient computation and attribute updates to reduce training time [S1].
+*   **Memory Complexity:** Memory usage is strictly bounded by the target budget $B$, avoiding the peaks associated with pruning-heavy methods [S1].
+*   **Performance:** The method ensures a controlled model size and predictable training duration [S1]. It avoids unnecessary peaks in optimization that could violate hardware or budget constraints [S1].
+*   **Strengths:** Purely constructive schedule, no pruning required, predictable final model size, high quality at a budget [S1].
+*   **Limitations:** Requires careful fitting of the growth curve, potentially higher computational cost for saliency/scoring [S1].
 
 ## Background
-Score-based Densification was introduced in "Taming 3DGS: High-Quality Radiance Fields with Limited Resources" [S1]. It addresses the challenges of unpredictable size and training duration in standard 3DGS by providing a guided, purely constructive densification process. The method was developed to enable 3DGS usage in downstream tasks that expect fixed-size inputs.
+Score-based Densification was introduced in "Taming 3DGS: High-Quality Radiance Fields with Limited Resources" [S1]. It addresses the challenges of unpredictable size and training duration in standard 3D Gaussian Splatting [S1]. The method is designed for scenarios where fixed-size inputs are required for downstream tasks [S1].
 
 ## Sources
 [S1] Taming 3DGS: High-Quality Radiance Fields with Limited Resources, https://doi.org/10.1145/3680528.3687694, fetched 2026-10-30

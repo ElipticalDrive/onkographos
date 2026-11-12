@@ -3,64 +3,62 @@
 Also called: 3D Gaussian Splatting (3DGS), Gao et al. BRDF Embedding, Gao et al. BRDF Method
 
 ## Overview
-This method extends standard 3D Gaussian Splatting by embedding physically based rendering (PBR) parameters into each Gaussian primitive, enabling per-point BRDF evaluation and relighting [S1][S2, unofficial]. Unlike standard 3DGS, which bakes lighting into spherical harmonics (SH) coefficients and assumes an emission-absorption model, this approach decouples material properties from lighting, allowing for specular highlights and diffuse reflections [S1][S2, unofficial]. It distinguishes itself from siblings like [3DGS-DR](1471-3dgs-dr.md) and [Relightable 3D Gaussian](6001-relightable-3d-gaussian.md) by explicitly storing incident lighting and BRDF parameters per Gaussian, facilitating direct lighting reconstruction via environment maps and indirect lighting via SH [S1][S2, unofficial].
+This method extends standard 3D Gaussian Splatting by embedding physically based rendering parameters into each Gaussian primitive, enabling per-point BRDF evaluation and relighting [S1][S2, unofficial]. Unlike standard 3DGS, which relies only on primary rays, this approach incorporates secondary rays and decouples material properties from lighting to model interreflections [S1][S2, unofficial]. It distinguishes itself from siblings like [3DGS-DR](1471-3dgs-dr.md) and [Relightable 3D Gaussian](6001-relightable-3d-gaussian.md) by explicitly storing incident lighting and BRDF parameters per Gaussian, facilitating direct lighting reconstruction via environment maps and indirect lighting via spherical harmonics [S1][S2, unofficial].
 
 ## How it works
 **Inputs:**
-- A set of 3D Gaussians $\mathcal{G} = \{G_i\}$, where each $G_i$ is defined by position $\mathbf{t}_i$, covariance matrix $\mathbf{\Sigma}_i$ (or rotation $\mathbf{R}_i$ and scale $\mathbf{s}_i$), opacity $\alpha_i$, and view-dependent color coefficients.
-- An environment map $\mathcal{E}$ for direct lighting.
-- Camera parameters (view and projection matrices).
+- A set of 3D Gaussians $\mathcal{G} = \{G_i\}$, where each $G_i$ is defined by position $\mathbf{t}_i$, covariance matrix $\mathbf{\Sigma}_i$ (or rotation $\mathbf{R}_i$ and scale $\mathbf{s}_i$), opacity $\alpha_i$, and view-dependent color coefficients [G].
+- An environment map $\mathcal{E}$ for direct lighting [S2, unofficial].
+- Camera parameters (view and projection matrices) [G].
 
 **Outputs:**
-- A 2D rendered image with physically based shading.
+- A 2D rendered image with physically based shading [G].
 
 **Data Structures:**
 Each Gaussian $G_i$ stores the following fields in addition to standard 3DGS attributes:
-1.  **Albedo** ($\rho_i$): A 3-channel vector representing diffuse reflectance.
-2.  **Roughness** ($\alpha_{rough, i}$): A scalar representing surface microfacet roughness.
-3.  **Surface Normal** ($\mathbf{n}_i$): A 3D unit vector representing the local surface orientation.
-4.  **Incident Lighting Coefficients** ($\mathbf{c}_{light, i}$): Coefficients for modeling indirect lighting, typically using Spherical Harmonics (SH).
+1. **Albedo** ($\rho_i$): A 3-channel vector representing diffuse reflectance [S1][S2, unofficial].
+2. **Roughness** ($\alpha_{rough, i}$): A scalar representing surface microfacet roughness [S1][S2, unofficial].
+3. **Surface Normal** ($\mathbf{n}_i$): A 3D unit vector representing the local surface orientation [S1][S2, unofficial].
+4. **Incident Lighting Coefficients** ($\mathbf{c}_{light, i}$): Coefficients for modeling indirect lighting, typically using Spherical Harmonics (SH) [S1][S2, unofficial].
 
-*Note: The exact bit-packing or memory layout of these fields is not specified in the sources [S1][S2, unofficial].*
+*Note: The exact bit-packing or memory layout of these fields is not specified in the sources.*
 
 **Steps:**
-1.  **Gaussian Initialization:** Initialize Gaussians with standard 3DGS attributes (position, scale, rotation, opacity) and PBR attributes (albedo, roughness, normal, lighting coefficients) from input data or reconstruction [S1][S2, unofficial].
-2.  **Projection:** Transform each Gaussian from world space to camera space [G]. Project the 3D covariance matrix to 2D screen space using the Jacobian of the affine approximation of the projection [G].
-3.  **Rasterization:** Assign Gaussians to screen tiles based on their projected bounding boxes [G].
-4.  **Sorting:** Sort Gaussians within each tile by depth to ensure correct front-to-back compositing [G].
-5.  **Shading Evaluation:** For each pixel covered by a Gaussian, evaluate the BRDF:
-    -   Compute the direct lighting contribution using the environment map $\mathcal{E}$ and the Gaussian's surface normal $\mathbf{n}_i$ [S1][S2, unofficial].
-    -   Compute the indirect lighting contribution using the stored SH coefficients $\mathbf{c}_{light, i}$ [S1][S2, unofficial].
-    -   Combine direct and indirect lighting with the albedo $\rho_i$ and roughness $\alpha_{rough, i}$ to compute the final color $C_i$ [S1][S2, unofficial].
-6.  **Compositing:** Accumulate colors using front-to-back alpha blending:
-    $$ C_{out} = \sum_{i \in \text{sorted}} C_i \alpha_i \prod_{j < i} (1 - \alpha_j) $$
-    where $C_i$ is the shaded color of Gaussian $i$, and $\alpha_i$ is its opacity [G].
+1. **Gaussian Initialization:** Initialize Gaussians with standard 3DGS attributes and PBR attributes (albedo, roughness, normal, lighting coefficients) from input data or reconstruction [S1][S2, unofficial].
+2. **Projection:** Transform each Gaussian from world space to camera space [G]. Project the 3D covariance matrix to 2D screen space using the Jacobian of the affine approximation of the projection [G].
+3. **Rasterization:** Assign Gaussians to screen tiles based on their projected bounding boxes [G].
+4. **Sorting:** Sort Gaussians within each tile by depth to ensure correct front-to-back compositing [G].
+5. **Shading Evaluation:** For each pixel covered by a Gaussian, evaluate the BRDF:
+   - Compute the direct lighting contribution using the environment map $\mathcal{E}$ [S1][S2, unofficial].
+   - Compute the indirect lighting contribution using the stored SH coefficients $\mathbf{c}_{light, i}$ [S1][S2, unofficial].
+   - Combine direct and indirect lighting with the albedo $\rho_i$ and roughness $\alpha_{rough, i}$ to compute the final color $C_i$ [G].
+6. **Compositing:** Accumulate colors using front-to-back alpha blending:
+   $$ C_{out} = \sum_{i \in \text{sorted}} C_i \alpha_i \prod_{j < i} (1 - \alpha_j) $$
+   where $C_i$ is the shaded color of Gaussian $i$, and $\alpha_i$ is its opacity [G].
 
 **Parameters:**
--   **SH Degree:** Not specified in the sources [S1][S2, unofficial].
--   **Environment Map Resolution:** Not specified in the sources [S1][S2, unofficial].
+- **SH Degree:** Not given in the sources.
+- **Environment Map Resolution:** Not given in the sources.
 
 **Edge Cases and Pitfalls:**
--   **Precision:** Storing multiple parameters per Gaussian increases memory usage significantly compared to standard 3DGS [S1][S2, unofficial].
--   **Boundaries:** The method assumes well-defined surface normals; degenerate or noisy normal estimates may lead to incorrect shading [S1][S2, unofficial].
--   **Lighting:** Direct lighting relies on environment maps; if the environment map does not match the scene's lighting, artifacts may occur [S1][S2, unofficial].
+- Not given in the sources.
 
 ## Subtopics
 
 ### [3DGS-DR](1471-3dgs-dr.md)
-Incorporates classical reflection and shading into 3DGS, addressing the limitation of baked lighting in standard 3DGS. It enables specular highlights and diffuse reflections, distinguishing it from this method by potentially differing in BRDF parameterization or optimization strategies.
+3DGS-DR incorporates classical reflection and shading concepts into the 3D Gaussian Splatting framework. It addresses the limitation of standard 3DGS, which uses an emission-absorption model that bakes lighting conditions into spherical harmonics coefficients, thereby limiting performance on highly reflective surfaces and preventing relighting. It sets itself apart from siblings by potentially differing in BRDF parameterization or optimization strategies, and should be chosen when classical shading integration is preferred over explicit environment map reconstruction.
 
 ## Operating characteristics
--   **Time Complexity:** Not specified in the sources [S1][S2, unofficial].
--   **Memory Complexity:** Increased compared to standard 3DGS due to the storage of albedo, roughness, normals, and lighting coefficients per Gaussian [S1][S2, unofficial].
--   **Measured Performance:** Not specified in the sources [S1][S2, unofficial].
--   **Strengths:** Enables physically based rendering and relighting; captures specular highlights and diffuse reflections [S1][S2, unofficial].
--   **Limitations:** Higher memory usage; reliance on environment maps for direct lighting; potential artifacts from noisy normals [S1][S2, unofficial].
--   **When to Use:** When physically based shading and relighting are required [S1][S2, unofficial].
--   **When Not to Use:** When memory is constrained or when baked lighting is sufficient [S1][S2, unofficial].
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Enables physically based rendering and relighting; captures specular highlights and diffuse reflections [S1][S2, unofficial].
+- **Limitations:** Relies on environment maps for direct lighting [S1][S2, unofficial].
+- **When to Use:** When physically based shading and relighting are required [S1][S2, unofficial].
+- **When Not to Use:** Not given in the sources.
 
 ## Background
-This method was introduced by Gao et al. [S1][S2, unofficial]. It addresses the limitations of standard 3DGS, which uses an emission-absorption model that bakes lighting conditions into spherical harmonics coefficients, thereby limiting performance on highly reflective surfaces and preventing relighting [S1][S2, unofficial]. The method is part of a broader trend of integrating classical rendering concepts into differentiable rendering frameworks [S1][S2, unofficial].
+This method was introduced by Gao et al. [S1][S2, unofficial]. It addresses the limitations of standard 3DGS, which relies only on primary rays and lacks explicit material-lighting separation, thereby limiting performance on highly reflective surfaces and preventing relighting [S1][S2, unofficial]. The method is part of a broader trend of integrating classical rendering concepts into differentiable rendering frameworks [S1][S2, unofficial].
 
 ## Sources
 [S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26

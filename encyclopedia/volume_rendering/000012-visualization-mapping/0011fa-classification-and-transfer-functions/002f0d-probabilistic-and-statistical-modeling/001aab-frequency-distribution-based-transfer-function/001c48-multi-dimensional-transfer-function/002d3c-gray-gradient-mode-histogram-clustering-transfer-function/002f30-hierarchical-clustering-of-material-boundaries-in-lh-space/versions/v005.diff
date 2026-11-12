@@ -1,0 +1,258 @@
+--- v004.md
++++ v005.md
+@@ -4,99 +4,184 @@
+ 
+ ## Overview
+-This method automates the design of volume rendering transfer functions (TF) by clustering material boundaries defined in the Lower-Higher (LH) intensity space, a 2D domain where boundaries appear as distinct blobs rather than overlapping arches [S1]. It solves the problem of manual TF specification by identifying initial clustering elements from histogram peaks, grouping them via hierarchical clustering (using Bhattacharyya similarity) or mean-shift clustering, and mapping the resulting clusters to color and opacity [S1][S2, unofficial]. It sets itself apart from standard scalar-gradient clustering by utilizing the LH transformation to simplify cluster shapes and reduce classification ambiguities [S1], and from pure statistical methods by incorporating spatial connectivity and boundary path integration [S2, unofficial].
++This method automates the design of volume rendering transfer functions (TF) by clustering material boundaries defined in the Lightness-Hue (LH) space, a 2D histogram domain where boundaries appear as distinct blobs rather than overlapping arches [S1][S2, unofficial]. It solves the problem of manual TF specification by identifying initial clustering elements from histogram peaks and grouping them via hierarchical clustering, allowing users to interact with cluster hierarchies without predefined thresholds [S1]. Unlike standard scalar-value vs. gradient-magnitude spaces, the LH space simplifies cluster shapes and reduces classification ambiguities [S1].
+ 
+ ## How it works
+-The method operates in two primary variants described in the sources: a hierarchical approach based on peak detection and Bhattacharyya similarity [S1], and a mean-shift approach based on gradient integration and convex hulls [S2, unofficial]. Both variants share the goal of mapping volumetric data to visual properties by clustering voxels based on their scalar values and spatial locations to reduce occlusions [S2, unofficial].
++The method operates in two primary variants: the original hierarchical clustering approach using Bhattacharyya similarity [S1], and a variant using Mean Shift clustering followed by region growing [S2, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Input:** Volumetric dataset (scalar field), optional user interaction parameters (e.g., hierarchy level, opacity scaling factor $k_s$) [S1][S2, unofficial].
+-*   **Output:** A 2D transfer function mapping LH coordinates to color and opacity, and/or a segmented volume where each voxel is assigned a cluster label [S2, unofficial].
++**Inputs:**
++- Volumetric dataset $V$.
++- Histogram resolution: $256 \times 256$ bins [S1] or $512 \times 512$ pixels [S2, unofficial].
++- Parameters: Small cluster threshold (e.g., 10 voxels) [S1]; Mean shift bandwidth $B_w$ (3%-12% of max LH value) [S2, unofficial]; Convergence threshold $\rho = 0.001$ [S2, unofficial].
++
++**Outputs:**
++- A hierarchy of clusters (dendrogram) [S1] or a set of labeled clusters [S2, unofficial].
++- Transfer function mapping color, opacity, and gradient multiplier to clusters.
+ 
+ ### Data Structures
+-1.  **LH Histogram:** Stored as an $N \times N$ pixel image (typically $512 \times 512$) [S2, unofficial]. Each bin $(x, y)$ corresponds to a specific Lower ($L$) and Higher ($H$) intensity pair [S2, unofficial]. The value in the bin is the weighted sum of contributions, scaled by logarithm and mapped to a color band (e.g., cold-to-hot) [S2, unofficial].
+-2.  **Clustering Elements ($e_i$):** In the hierarchical method, each element is a set of histogram bins belonging to a local peak [S1]. The size $|e_i|$ is the sum of contributions in its bins:
+-    $$ |e_i| = \sum_{b_{xy} \in e_i} |b_{xy}| $$
+-    where $|b_{xy}|$ is the number of contributions in bin $b_{xy}$ [S1].
+-3.  **Cluster Bounding Polygons:** In the mean-shift method, each cluster $C_i$ is represented by a convex hull $H_i$ computed using Andrew’s monotone chain algorithm [S2, unofficial].
++1.  **LH Histogram:** A 2D array $H$ of size $N \times N$ (where $N=256$ or $512$). Each bin $b_{xy}$ stores the count of voxels with lower intensity $L=x$ and higher intensity $H=y$ [S1][S2, unofficial].
++2.  **Clustering Element $e_i$:** A set of histogram bins $\{b_{xy}\}$ belonging to a single local peak.
++    -   Size: $|e_i| = \sum_{b_{xy} \in e_i} |b_{xy}|$, where $|b_{xy}|$ is the bin count [S1].
++    -   Mean vector: $\mu_i = (\mu_{ix}, \mu_{iy}) = \frac{1}{|e_i|} \sum_{b_{xy} \in e_i} (x|b_{xy}|, y|b_{xy}|)$ [S1].
++    -   Covariance matrix: $\Sigma_i$ computed from the weighted distribution of bins in $e_i$ [S1].
++3.  **Cluster Hierarchy:** A binary tree (dendrogram) representing agglomerative joins [S1].
+ 
+-### Steps
++### Pre-processing
++1.  **Gradient Calculation:** Compute gradient vectors $\nabla f$ for each voxel. Use a second-degree polynomial approximation of the density function in a local neighborhood to determine first partial derivatives. This accounts for anisotropic voxel spacing without expensive interpolation [S2, unofficial].
++2.  **LH Value Integration:** For each voxel, determine its lower ($L$) and higher ($H$) intensity values by tracking boundary paths using gradient integration in both directions.
++    -   Use Heun’s method with step size $d=1$ voxel [S2, unofficial].
++    -   Update rule:
++        $$ u_{i+1} = u_i + \frac{1}{2}d(\nabla f(u_i) + \nabla f(u_i + d\nabla f(u_i))) $$
++        where $\nabla f$ is the normalized gradient vector (or its inverse for $L$ tracking) [S2, unofficial].
++    -   Terminate integration at local extrema or inflection points [S2, unofficial].
++3.  **Histogram Construction:**
++    -   Accumulate $[L, H]$ pairs into the histogram.
++    -   Apply weight factor $w = 1 - \frac{|d_L - d_H|}{d_L + d_H}$, where $d_L, d_H$ are accumulated distances from the current voxel to the $L$ and $H$ sampling voxels [S2, unofficial].
++    -   Scale the sum of weights by taking the logarithm and map to a color band (e.g., cold-to-hot) [S2, unofficial].
++4.  **Smoothing:** Blur the histogram with a 2D Gaussian kernel with $\sigma$ equal to the bin size to remove noisy local maxima [S1].
+ 
+-#### 1. Pre-processing: Gradient and LH Value Computation
+-For each voxel, compute the gradient vector and LH values [S2, unofficial].
+-*   **Gradient Approximation:** Use a second-degree polynomial approximation of the density function in a local neighborhood to determine first partial derivatives [S2, unofficial]. This accounts for differences between pixel spacing and slice spacing and avoids expensive interpolation [S2, unofficial].
+-*   **Gradient Integration (L and H Tracking):** Determine the lower intensity $L$ and higher intensity $H$ for each voxel by tracking boundary paths in both directions using Heun’s method (a modified Euler’s method) [S2, unofficial].
+-    *   Update rule:
+-        $$ u_{i+1} = u_i + \frac{1}{2}d(\nabla f(u_i) + \nabla f(u_i + d\nabla f(u_i))) $$
+-        where $u_i$ is the current voxel position, $\nabla f$ is the normalized gradient vector (or its inverse for L tracking), and $d$ is the step size (typically 1 voxel) [S2, unofficial].
+-    *   Termination: Stop integration when a local extremum or an inflexion point is reached [S2, unofficial].
+-*   **Weighting:** Accumulate $[L, H]$ pairs into the histogram with a weight factor $w$:
+-    $$ w = 1 - \frac{|d_L - d_H|}{d_L + d_H} $$
+-    where $d_L$ and $d_H$ are the accumulated distances along the boundary path from the current voxel to the sampling voxels corresponding to $L$ and $H$ [S2, unofficial].
++### Method 1: Agglomerative Hierarchical Clustering [S1]
++1.  **Initial Element Generation:** Identify local maxima (peaks) in the smoothed 2D LH histogram. Each peak becomes an initial clustering element $e_i$. All histogram bins belonging to the same peak form one element [S1].
++2.  **Small Cluster Removal:** Join any cluster consisting of fewer than 10 voxels with its direct neighbors to reduce $n$ to several hundreds for interactive performance [S1].
++3.  **Similarity Calculation:** Compute similarity $s(e_i, e_j)$ between all pairs of elements using the Bhattacharyya bound [S1]:
++    $$ s(e_i, e_j) = 2 \sqrt{P(e_i)P(e_j)} e^{-k} $$
++    where priors are $P(e_i) = \frac{|e_i|}{|e_i| + |e_j|}$ and $P(e_j) = \frac{|e_j|}{|e_i| + |e_j|}$ [S1].
++    The exponent $k$ is:
++    $$ k = \frac{1}{8}(\mu_j - \mu_i)^T \left(\frac{\Sigma_i + \Sigma_j}{2}\right)^{-1}(\mu_j - \mu_i) + \frac{1}{2} \ln \frac{\left|\frac{\Sigma_i + \Sigma_j}{2}\right|}{\sqrt{|\Sigma_i||\Sigma_j|}} $$
++    where $\mu$ and $\Sigma$ are the mean vector and covariance matrix of the bivariate normal approximation of the element [S1].
++4.  **Hierarchy Construction:**
++    -   Initialize $n$ clusters $C_i = \{e_i\}$.
++    -   For level $k = 1$ to $n-1$:
++        -   Find the pair of clusters $(C_i, C_j)$ with maximal similarity $s_k = \max \{s(C_i, C_j)\}$ [S1].
++        -   Join $C_i$ and $C_j$ into a new cluster.
++    -   Result is a dendrogram [S1].
+ 
+-#### 2. Initial Element Generation
+-*   **Histogram Blurring:** Blur the LH histogram with a 2D Gaussian kernel with $\sigma$ equal to the bin size [S1]. This removes small noisy local maxima and establishes neighborhood relations [S1].
+-*   **Peak Detection:** Identify local maxima (peaks) in the 2D LH histogram [S1]. Each peak becomes an initial clustering element $e_i$ [S1]. All histogram bins belonging to the same peak form one element [S1].
+-*   **Small Cluster Merging (Hierarchical Variant):** Join any cluster consisting of fewer than 10 voxels with its direct neighbors to reduce the number of initial elements $n$ to several hundreds for interactive performance [S1].
++### Method 2: Mean Shift and Region Growing [S2, unofficial]
++1.  **Mean Shift Clustering:**
++    -   Set bandwidth $B_w$ (3%-12% of $\max(\max L, \max H)$) [S2, unofficial].
++    -   For each point in the LH histogram:
++        -   Find neighbors within $B_w$.
++        -   Calculate mean $\mu_n$ of neighbors weighted by voxel frequency.
++        -   Shift window center to $\mu_n$.
++        -   Repeat until convergence (distance between successive means $< \rho B_w$, $\rho=0.001$) [S2, unofficial].
++    -   Group points converging to the same mode into a cluster. Merge clusters with modes within $B_w/2$ of each other [S2, unofficial].
++2.  **Non-Boundary Removal:**
++    -   Compute convex hull $H_i$ for each cluster $C_i$ using Andrew’s monotone chain algorithm [S2, unofficial].
++    -   Define diagonal window $H_{diag}$ with vertices $[0,0], [0,0.01 \times \max H], [0.99 \times \max L, \max H], [\max L, \max H], [\max L, 0.99 \times \max H], [0.01 \times \max L, \max H]$ [S2, unofficial].
++    -   Discard clusters where any vertex of $H_i$ lies within $H_{diag}$ [S2, unofficial].
++3.  **Overlap Disambiguation:**
++    -   For intersecting convex hulls $H_a, H_b$, compute intersections $I_a, I_b$.
++    -   Draw a dividing line between intersections. Assign partitioned areas to the nearest cluster [S2, unofficial].
++4.  **Region Growing:**
++    -   Use clusters from Mean Shift as seed points.
++    -   Apply region growing to incorporate spatial information, filling discontinuities and merging overlapping clusters based on spatial connectivity [S2, unofficial].
+ 
+-#### 3. Clustering
+-Two distinct clustering strategies are described:
++### Pseudocode (Method 1 Core)
+ 
+-**Variant A: Hierarchical Clustering with Bhattacharyya Similarity [S1]**
+-1.  **Initialization:** Each element $e_i$ starts in its own cluster $C_i$ [S1]. The hierarchy has $n$ levels $k = 1, \dots, n$ [S1]. Level $k=1$ has $n$ clusters [S1].
+-2.  **Similarity Calculation:** Compute the similarity $s(e_i, e_j)$ between every pair of elements using the Bhattacharyya bound, treating elements as bivariate normal distributions with mean $\mu$ and covariance $\Sigma$:
+-    $$ s(e_i, e_j) = 2 \sqrt{P(e_i)P(e_j)} e^{-k} $$
+-    where priors are $P(e_i) = \frac{|e_i|}{|e_i| + |e_j|}$ and $P(e_j) = \frac{|e_j|}{|e_i| + |e_j|}$ [S1], and $k$ is the Mahalanobis-like distance term:
+-    $$ k = \frac{1}{8}(\mu_j - \mu_i)^T \left(\frac{\Sigma_i + \Sigma_j}{2}\right)^{-1} (\mu_j - \mu_i) + \frac{1}{2} \ln \frac{\left|\frac{\Sigma_i + \Sigma_j}{2}\right|}{\sqrt{|\Sigma_i||\Sigma_j|}} $$
+-3.  **Agglomeration:** At each level $k$, find the maximal similarity $s_k$ between any two distinct clusters $C_i, C_j$:
+-    $$ s_k = \max \{ s(C_i, C_j) \}; \quad i, j = 1, \dots, n - k + 1; \quad i \neq j $$
+-    Join the two most similar clusters. Repeat until one cluster remains [S1].
++```python
++def compute_bhattacharyya_similarity(elem_i, elem_j):
++    """
++    Computes similarity between two clustering elements using Bhattacharyya bound.
++    elem_i, elem_j: dicts with keys 'bins' (list of (x, y, count)), 'size', 'mean', 'cov'
++    """
++    # Priors
++    p_i = elem_i['size'] / (elem_i['size'] + elem_j['size'])
++    p_j = elem_j['size'] / (elem_i['size'] + elem_j['size'])
++    
++    # Means and Covariances
++    mu_i = elem_i['mean']
++    mu_j = elem_j['mean']
++    sigma_i = elem_i['cov']
++    sigma_j = elem_j['cov']
++    
++    # Mahalanobis-like term
++    diff = mu_j - mu_i
++    avg_sigma = (sigma_i + sigma_j) / 2.0
++    avg_sigma_inv = inverse(avg_sigma)
++    
++    term1 = 0.25 * dot_product(diff, dot_product(avg_sigma_inv, diff))
++    
++    # Determinant term
++    det_avg = determinant(avg_sigma)
++    det_i = determinant(sigma_i)
++    det_j = determinant(sigma_j)
++    
++    term2 = 0.5 * log(det_avg / sqrt(det_i * det_j))
++    
++    k = term1 + term2
++    
++    similarity = 2.0 * sqrt(p_i * p_j) * exp(-k)
++    return similarity
+ 
+-**Variant B: Mean-Shift Clustering [S2, unofficial]**
+-1.  **Setup:** Set window bandwidth $B_w$ (typically 3%-12% of $maxLH = \max(\max L, \max H)$) [S2, unofficial].
+-2.  **Iteration:** For each point in the LH histogram, find neighbors within $B_w$ [S2, unofficial]. Calculate the weighted mean $\mu_n$ of neighbors (weighted by voxel frequency) [S2, unofficial]. Shift the window center to $\mu_n$ [S2, unofficial]. Repeat until convergence (distance between successive means $< \rho B_w$, where $\rho = 0.001$) [S2, unofficial].
+-3.  **Grouping:** Group points converging to the same mode into a single cluster [S2, unofficial]. Merge clusters whose modes are within $B_w/2$ of each other [S2, unofficial].
+-
+-#### 4. Post-processing and TF Generation
+-*   **Bounding Polygon Generation (Mean-Shift Variant):** Compute the convex hull $H_i$ for each cluster $C_i$ [S2, unofficial].
+-*   **Non-Boundary Removal:** Define a diagonal window $H_{diag}$ with vertices $[0,0], [0, 0.01 \times maxH], [0.99 \times maxL, maxH], [maxL, maxH], [maxL, 0.99 \times maxH], [0.01 \times maxL, maxH]$ [S2, unofficial]. Discard clusters where any vertex of $H_i$ lies within $H_{diag}$ (width 2% of LH range) [S2, unofficial].
+-*   **Overlap Disambiguation:** For intersecting convex hulls $H_a$ and $H_b$, compute intersections $I_a$ and $I_b$ [S2, unofficial]. Draw a dividing line between intersections and assign partitioned areas to the nearest cluster [S2, unofficial].
+-*   **Region Growing (Mean-Shift Variant):** Apply region growing to incorporate spatial information, filling discontinuities and merging overlapping clusters based on seed points from mean shift clusters [S2, unofficial].
+-*   **TF Assignment:** Assign color and opacity to clusters [S2, unofficial]. Opacity can be controlled by a parameter $k_s$ (e.g., decreasing skin opacity in the Feet dataset) [S2, unofficial].
+-
+-### Parameters
+-*   **Histogram Resolution:** 256x256 bins (Hierarchical) [S1] or 512x512 pixels (Mean-Shift) [S2, unofficial].
+-*   **Small Cluster Threshold:** < 10 voxels (Hierarchical) [S1].
+-*   **Integration Step Size $d$:** 1 voxel [S2, unofficial].
+-*   **Mean-Shift Bandwidth $B_w$:** 3%-12% of $maxLH$ [S2, unofficial].
+-*   **Convergence Threshold $\rho$:** 0.001 [S2, unofficial].
+-*   **Diagonal Window Width:** 2% of LH range [S2, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Performance:** Too many initial clusters (thousands of peaks) lead to $O(n^2)$ complexity issues. Mitigated by blurring and merging small clusters [S1].
+-*   **Anisotropy:** The polynomial approximation method accounts for differences between pixel spacing and slice spacing in medical datasets [S2, unofficial].
+-*   **Noise:** The method is robust to noise because it does not interpolate the curve passing through all data points [S2, unofficial].
++def hierarchical_clustering(elements):
++    """
++    Agglomerative hierarchical clustering of LH histogram peaks.
++    elements: list of initial clustering elements e_i
++    """
++    n = len(elements)
++    clusters = [{'id': i, 'members': [i], 'similarity': None} for i in range(n)]
++    hierarchy = []
++    
++    for k in range(1, n):
++        max_sim = -1
++        merge_idx_i = -1
++        merge_idx_j = -1
++        
++        # Find most similar pair
++        for i in range(len(clusters)):
++            for j in range(i + 1, len(clusters)):
++                # Compute similarity between cluster i and j
++                # Simplified: use representative elements or merge stats
++                # In practice, compute stats for the union of members
++                sim = compute_bhattacharyya_similarity(clusters[i], clusters[j])
++                if sim > max_sim:
++                    max_sim = sim
++                    merge_idx_i = i
++                    merge_idx_j = j
++        
++        # Join clusters
++        new_cluster = {
++            'id': k,
++            'members': clusters[merge_idx_i]['members'] + clusters[merge_idx_j]['members'],
++            'left': clusters[merge_idx_i],
++            'right': clusters[merge_idx_j],
++            'similarity': max_sim
++        }
++        
++        # Update stats for new cluster (mean, cov, size)
++        update_cluster_stats(new_cluster)
++        
++        hierarchy.append(new_cluster)
++        
++        # Remove old clusters and add new one
++        clusters.pop(merge_idx_j)
++        clusters.pop(merge_idx_i)
++        clusters.append(new_cluster)
++        
++    return hierarchy
++```
+ 
+ ## Subtopics
+ 
+ ### [Bhattacharyya Similarity for Material Boundaries](6020-bhattacharyya-similarity-for-material-boundaries.md)
+-Computes similarity between clustering elements by measuring the overlap of their bivariate normal PDFs in LH space, serving as the primary metric for hierarchical clustering without predefined thresholds.
++This method computes the similarity between two clustering elements (material boundaries) in the LH space by measuring the overlap of their bivariate normal probability density functions (PDFs). It serves as the primary metric for hierarchical clustering, allowing the system to group visually similar material boundaries without predefined thresholds. Unlike spatial similarity, which relies on voxel connectivity, this method relies solely on the statistical distribution of boundary intensities and hues.
+ 
+ ### [Transfer Function Generation from Clustering](6023-transfer-function-generation-from-clustering.md)
+-Generates a 2D transfer function by assigning color and opacity values to clusters identified in LH space, leveraging the hierarchical structure to allow user selection of hierarchy levels for material boundary definition.
++This method generates a transfer function (TF) by clustering material boundaries in the LH space and assigning visual properties to the resulting clusters. It solves the problem of manual TF design by automatically grouping similar voxel regions based on hierarchical clustering, allowing users to interact with cluster hierarchies to define color and opacity mappings. It differs from its parent method by explicitly defining the final mapping as a label-based assignment where clusters inherit visual properties upon merging, and from its sibling by focusing on the generation of the TF from the clustering result rather than just measuring similarity.
+ 
+ ### LH Histogram Clustering TF
+-A method building on previous LH histogram work, proposing a clustering-based approach for LH histograms [S3, unofficial]. Described in reference [26] [S3, unofficial].
++A method building on previous LH histogram work, proposing a clustering-based approach for LH histograms [S3, unofficial]. It is described in reference [26] and utilizes clustering criteria such as distance, separation, and direction of cluster elongation to group clusters together, interpreting them as bivariate 2D PDFs using Bayesian decision theory [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The hierarchical clustering step has complexity $O(n^2)$, where $n$ is the number of initial clustering elements [S1]. Mean-shift clustering complexity depends on the number of histogram points and iterations but is optimized by computing over discrete LH values weighted by voxel frequency [S2, unofficial].
+-*   **Memory Complexity:** Dominated by the storage of the LH histogram ($N \times N$ image) and the volume data. The histogram is stored as a $512 \times 512$ pixel image [S2, unofficial].
+-*   **Performance:** Reducing initial clusters to several hundreds allows for interactive generation of the hierarchy [S1].
+-*   **Strengths:** Reduces occlusions, automates TF specification, intuitive user interaction with cluster hierarchies, robust to noise, handles anisotropic data [S1][S2, unofficial].
+-*   **Limitations:** Sensitivity to clustering parameters (e.g., $B_w$) in mean-shift variant; requires post-processing (region growing) for spatial coherence in mean-shift variant [S2, unofficial].
+-*   **When to Use:** Medical image visualization where automatic TF design is needed to reduce occlusions and improve efficiency [S2, unofficial].
+-*   **When Not to Use:** When real-time performance is critical and $n$ is very large without pre-filtering; when spatial coherence is not required and simple scalar clustering suffices [S2, unofficial].
++-   **Time Complexity:** The complexity of generating the hierarchy is $O(n^2)$, where $n$ is the number of initial clustering elements $e_i$ [S1].
++-   **Memory Complexity:** The LH histogram is stored as an image of $512 \times 512$ pixels [S2, unofficial].
++-   **Performance:** Reducing the number of initial clusters to several hundreds (via blurring and small cluster merging) allows for interactive generation of the hierarchy [S1].
++-   **Strengths:** Reduces occlusions and maximizes boundary discrimination [S2, unofficial]. The LH space facilitates clustering by making boundaries appear as blobs rather than overlapping arches [S1]. Robust to noise because it does not interpolate curves through all data points [S2, unofficial].
++-   **Limitations:** Sensitive to the number of initial peaks if not pre-processed; too many peaks lead to poor performance [S1]. Requires tuning of bandwidth $B_w$ in Mean Shift variant [S2, unofficial].
++-   **When to Use:** Suitable for medical images and volumetric data where automatic TF design is needed to reduce occlusions [S2, unofficial].
++-   **When Not to Use:** When real-time interaction with thousands of fine-grained clusters is required without pre-processing [S1].
+ 
+ ## Background
+-The method originates from research by Šereda, Vilanova, and Gerritsen (2006) on automating TF design using hierarchical clustering of material boundaries [S1]. It builds on the concept of LH space, where boundaries appear as blobs, reducing overlap compared to scalar-gradient space [S1]. A later variant by Nguyen et al. (2012) introduced mean-shift clustering and region growing for automatic TF design [S2, unofficial]. The LH space approach was previously explored by Lundström et al. (2006) [S1][S2, unofficial].
++The method was developed by P. Šereda, A. Vilanova, and F. A. Gerritsen at Philips Medical Systems Nederland BV [S1]. It was presented at the Eurographics Symposium on Visualization in 2006 [S1]. The approach builds on previous research showing that material boundaries form blob-like clusters in LH space [S1]. A related variant using Mean Shift clustering was introduced by Binh P. Nguyen et al. in 2012 [S2, unofficial].
+ 
+ ## Sources

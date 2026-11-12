@@ -1,0 +1,192 @@
+--- v006.md
++++ v007.md
+@@ -4,111 +4,107 @@
+ 
+ ## Overview
+-Locality-preserving densification addresses the memory layout bottleneck in 3D Gaussian Splatting training, where adding new primitives at the end of parameter buffers causes spatially close Gaussians to be stored far apart in memory [S1, unofficial]. By reordering Gaussians in parameter buffers based on their 3D spatial proximity using Z-ordering (Morton order), it improves memory access coalescing, reduces warp divergence, and decreases cache misses [S1, unofficial]. It sets itself apart from sibling methods like Score-based Densification by focusing on the *storage layout* of existing primitives rather than the *selection criteria* for creating or removing them.
++Locality-preserving densification addresses the memory access throttling caused by standard Gaussian densification, where newly added primitives are appended to the end of parameter buffers, causing spatially close Gaussians to be stored far apart in memory [S1, unofficial]. By reordering the Gaussian population based on 3D spatial proximity using Z-ordering (Morton order), it ensures that neighboring Gaussians in space are also adjacent in memory, thereby improving memory access coalescing [S1, unofficial]. This method sets itself apart from sibling strategies like Score-based Densification by focusing on the memory layout and hardware efficiency rather than the geometric criteria for splitting or cloning primitives [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- The current set of $N$ Gaussians $\mathcal{G} = \{g_1, \dots, g_N\}$, where each $g_k$ has a mean position $\mu_k \in \mathbb{R}^3$.
+-- The current parameter buffers storing Gaussian attributes (means, covariances, opacities, spherical harmonics coefficients).
+-
+-**Outputs:**
+-- A permutation of the parameter buffers such that Gaussians with spatially close means are stored in contiguous memory locations.
++**Inputs and Outputs:**
++*   **Input:** The current set of $N$ Gaussians $\mathcal{G} = \{g_1, \dots, g_N\}$, where each Gaussian $g_k$ has a 3D mean position $\mu_k \in \mathbb{R}^3$. The method operates on the indices of the parameter buffers.
++*   **Output:** A permutation of the Gaussian indices such that the spatial locality of the Gaussians is preserved in the linear memory layout.
+ 
+ **Data Structures:**
+-- **Z-order Key:** For a Gaussian mean $\mu_k = (x, y, z)$, the Z-order key $Z_k$ is computed by interleaving the bits of the integer representations of the normalized coordinates.
+-  - Let $x, y, z$ be mapped to integers in $[0, 2^b - 1]$ (typically $b=10$ or $11$ for sufficient precision).
+-  - $Z_k = \sum_{i=0}^{b-1} (x_i \cdot 4^i + y_i \cdot 2 \cdot 4^i + z_i \cdot 4^i)$, where $x_i, y_i, z_i$ are the $i$-th bits of $x, y, z$.
+-- **Sorting Index:** An array of indices $P$ of size $N$, initially $P[i] = i$.
++*   **Gaussian Buffer:** A contiguous array of Gaussian parameters. The method only reorders the indices or pointers to these buffers; it does not modify the internal structure of the Gaussian primitives themselves.
++*   **Z-order Index:** A scalar value derived from the 3D position of each Gaussian, used for sorting.
++
++**Steps:**
++1.  **Trigger Check:** Determine if the current training iteration $t$ is a multiple of the Z-ordering frequency $T_{\text{zorder}}$. If not, skip this step [S1, unofficial].
++2.  **Compute Z-order Keys:** For each Gaussian $g_k$ with mean $\mu_k = (x, y, z)$, compute its Z-order (Morton) code $z_k$. This involves interleaving the bits of the quantized integer coordinates of $\mu_k$ [S1, unofficial].
++    *   Let $x', y', z'$ be the integer coordinates of $\mu_k$ after quantization and offsetting to non-negative values.
++    *   $z_k = \text{interleave}(x', y', z')$.
++3.  **Sort:** Sort the Gaussians based on their Z-order keys $z_k$ in ascending order. This produces a new permutation $\pi$ of the indices $\{1, \dots, N\}$ [S1, unofficial].
++4.  **Reorder Buffers:** Reorder all parameter buffers (means, covariances, opacities, spherical harmonics coefficients) according to the permutation $\pi$. This ensures that Gaussians with similar Z-order codes (and thus similar 3D locations) are stored contiguously in memory [S1, unofficial].
+ 
+ **Parameters:**
+-- **Frequency:** Z-ordering is applied every 5000 training iterations [S1, unofficial].
+-- **Precision:** Bit depth for coordinate quantization is not explicitly specified in the source, but standard Morton order implementations use 10-11 bits per dimension for typical scene scales [G].
+-
+-**Steps:**
+-1. **Check Frequency:** If the current training iteration $t$ is not a multiple of 5000, skip this procedure [S1, unofficial].
+-2. **Compute Keys:** For each Gaussian $g_k$ with mean $\mu_k = (x_k, y_k, z_k)$:
+-   - Normalize coordinates to a fixed bounding box (e.g., $[-1, 1]$ or scene-specific bounds).
+-   - Quantize to integers $X_k, Y_k, Z_k$.
+-   - Compute Morton code $M_k = \text{Morton3D}(X_k, Y_k, Z_k)$.
+-3. **Sort:** Sort the indices $P$ based on the values $M_{P[i]}$ in ascending order.
+-4. **Reorder Buffers:** Permute all parameter buffers (means, covariances, etc.) according to the sorted index array $P$.
+-   - For each buffer $B$, create a new buffer $B'$ where $B'[i] = B[P[i]]$.
+-   - Replace $B$ with $B'$.
++*   **Z-ordering Frequency ($T_{\text{zorder}}$):** The number of iterations between Z-ordering applications. The recommended value is 5000 iterations [S1, unofficial].
++*   **Quantization Range:** The range of coordinates to be quantized for Z-ordering. Not given in the sources.
+ 
+ **Pseudocode:**
+ ```python
+-def apply_z_ordering(gaussians, iteration, frequency=5000):
++def apply_z_ordering(gaussians, current_iteration, z_order_interval):
+     """
+-    Reorders Gaussian parameter buffers based on 3D spatial locality using Z-ordering.
++    Reorders the Gaussian buffers based on 3D spatial locality using Z-ordering.
+     
+     Args:
+-        gaussians: Object containing arrays for means, covariances, opacities, etc.
+-                   Each array has shape (N, D) where N is number of Gaussians.
+-        iteration: Current training iteration number.
+-        frequency: Interval (in iterations) to apply Z-ordering.
++        gaussians: A list or array of Gaussian objects, each containing a mean position 'mean' (vec3).
++        current_iteration: The current training iteration number.
++        z_order_interval: The frequency (in iterations) at which to apply Z-ordering.
+         
+     Returns:
+-        None (modifies gaussians in place)
++        None (modifies gaussians in place or returns reordered buffers).
+     """
+-    # Step 1: Check frequency
+-    if iteration % frequency != 0:
++    # Step 1: Check if Z-ordering should be applied
++    if current_iteration % z_order_interval != 0:
+         return
+ 
+-    means = gaussians.means  # Shape (N, 3)
+-    N = means.shape[0]
++    n = len(gaussians)
++    if n == 0:
++        return
++
++    # Step 2: Compute Z-order keys for each Gaussian
++    # Note: Quantization details are not specified in the source [G]
++    # Assuming a standard Morton order implementation for 3D coordinates
++    z_keys = []
++    for g in gaussians:
++        # Quantize and offset coordinates to non-negative integers
++        # This step depends on the specific coordinate space and precision used
++        x, y, z = g.mean
++        # Placeholder for quantization logic [G]
++        # x_int, y_int, z_int = quantize(x), quantize(y), quantize(z)
++        # Compute Morton code by interleaving bits
++        # z_key = morton_interleave(x_int, y_int, z_int)
++        # For the purpose of this pseudocode, we assume a function 'compute_z_order' exists
++        z_key = compute_z_order(g.mean)
++        z_keys.append(z_key)
++
++    # Step 3: Sort Gaussians based on Z-order keys
++    # Create a list of indices and sort them based on z_keys
++    indices = list(range(n))
++    indices.sort(key=lambda i: z_keys[i])
++
++    # Step 4: Reorder all Gaussian parameters according to the sorted indices
++    # This ensures spatially close Gaussians are adjacent in memory
++    reordered_gaussians = [gaussians[i] for i in indices]
+     
+-    # Step 2: Compute Z-order keys
+-    # Normalize coordinates to [0, 1] range for Morton encoding
+-    # Assuming means are already in a normalized space or need scaling
+-    # [G] Typical normalization: (mean - min) / (max - min)
+-    min_coords = means.min(axis=0)
+-    max_coords = means.max(axis=0)
+-    range_coords = max_coords - min_coords
+-    # Avoid division by zero
+-    range_coords[range_coords == 0] = 1.0
+-    
+-    normalized = (means - min_coords) / range_coords
+-    
+-    # Quantize to integers (e.g., 10 bits -> 1024 levels)
+-    bits = 10
+-    scale = 2**bits - 1
+-    int_coords = (normalized * scale).astype(np.int32)
+-    
+-    # Clamp to valid range
+-    int_coords = np.clip(int_coords, 0, 2**bits - 1)
+-    
+-    # Compute Morton codes
+-    # Morton3D interleaves bits of x, y, z
+-    m_codes = np.zeros(N, dtype=np.int64)
+-    for i in range(bits):
+-        m_codes |= (int_coords[:, 0] & (1 << i)) << (2 * i)
+-        m_codes |= (int_coords[:, 1] & (1 << i)) << (2 * i + 1)
+-        m_codes |= (int_coords[:, 2] & (1 << i)) << (2 * i + 2)
+-        
+-    # Step 3: Sort indices based on Morton codes
+-    sorted_indices = np.argsort(m_codes)
+-    
+-    # Step 4: Reorder all parameter buffers
+-    for attr_name in gaussians.attribute_names:
+-        attr = getattr(gaussians, attr_name)
+-        setattr(gaussians, attr_name, attr[sorted_indices])
++    # Update the global Gaussian buffer with the reordered list
++    # In a real implementation, this would involve moving memory or updating pointers
++    gaussians = reordered_gaussians
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Atomic Contention:** Z-ordering is effective only when used with the per-Gaussian backward pass. If the original backward pass (with numerous atomic operations) is used, Z-ordering heightens atomic contention [S1, unofficial].
+-- **Small Scene Size:** Repeated Z-ordering slows down training when the number of Gaussians is small due to a massive increase in atomic contention in the alpha blending backward pass (false sharing) [S1, unofficial].
+-- **Precision:** The quality of Z-ordering depends on the normalization and quantization of coordinates. Poor normalization can lead to incorrect spatial locality assumptions [G].
++*   **Atomic Contention:** Z-ordering performs effectively only when used with the per-Gaussian backward pass. If used with the original backward pass, numerous atomic operations heighten atomic contention, negating the benefits [S1, unofficial].
++*   **Small Gaussian Counts:** Repeated Z-ordering slows down training when the number of Gaussians is small due to a massive increase in atomic contention in the alpha blending backward pass (false sharing) [S1, unofficial].
++*   **Computational Cost:** The computational cost of Z-ordering is approximately 4 ms per million Gaussians [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \log N)$ for sorting, where $N$ is the number of Gaussians. The Morton code computation is $O(N \cdot b)$ where $b$ is the bit depth.
+-- **Memory Complexity:** $O(N)$ for storing the sorted indices and temporary Morton codes.
+-- **Performance:** Computational cost is approximately 4 ms per million Gaussians [S1, unofficial].
+-- **Scaling:** Reduces warp divergence and cache misses, leading to faster training when scenes contain many Gaussians [S1, unofficial]. However, it can slow down training for small numbers of Gaussians due to false sharing [S1, unofficial].
+-- **Strengths:** Improves memory access coalescing, reduces cache misses, and accelerates training for large-scale scenes.
+-- **Limitations:** Ineffective or detrimental for small scenes; requires per-Gaussian backward pass to avoid atomic contention issues.
+-- **When to Use:** Large scenes with millions of Gaussians where memory bandwidth is a bottleneck.
+-- **When Not to Use:** Small scenes, or when using the original backward pass with atomic operations.
++**Time and Memory Complexity:**
++*   **Time Complexity:** The sorting step dominates the complexity, typically $O(N \log N)$ where $N$ is the number of Gaussians. The Z-order computation is $O(N)$. The source reports a fixed cost of approximately 4 ms per million Gaussians [S1, unofficial].
++*   **Memory Complexity:** $O(N)$ for storing the Z-order keys and the permutation indices. No additional memory is required for the Gaussian parameters themselves as they are reordered in place or via pointer swapping.
++
++**Measured Performance:**
++*   The method reduces warp divergence and cache misses, resulting in faster training when scenes contain many Gaussians [S1, unofficial].
++*   It is most beneficial in scenes with a high number of Gaussians (e.g., >1.3M for indoor, >3.8M for outdoor scenes in Mip-NeRF360) [S1, unofficial].
++
++**Strengths and Limitations:**
++*   **Strengths:** Improves memory access coalescing, reduces warp divergence, and decreases cache misses. It is computationally efficient relative to the training time savings in large scenes.
++*   **Limitations:** Not beneficial for small scenes or early training stages due to overhead and atomic contention. Requires the use of a per-Gaussian backward pass to avoid increased atomic contention [S1, unofficial].
++
++**When to Use:**
++*   Use when training large scenes with millions of Gaussians and using a per-Gaussian backward pass.
++*   Apply every 5000 iterations to balance the overhead with the benefits of improved memory locality [S1, unofficial].
++
++**When Not to Use:**
++*   Do not use with the original backward pass due to atomic contention issues [S1, unofficial].
++*   Avoid frequent application (e.g., every iteration) as it yields diminishing returns and slows down training, especially with fewer Gaussians [S1, unofficial].
+ 
+ ## Background
+-Locality-preserving densification was introduced in the "Faster-GS" paper, which analyzes and improves Gaussian Splatting optimization [S1, unofficial]. It addresses the observation that memory layout becomes a throttling factor during densification, as new Gaussians are added at the end of parameter buffers, causing spatially close Gaussians to be far apart in memory [S1, unofficial]. The method leverages Z-ordering (Morton order), a well-known space-filling curve technique, to align Gaussians in memory with their 3D spatial proximity [S1, unofficial].
++Locality-preserving densification, also known as Z-ordering for Gaussians, was introduced in the context of optimizing 3D Gaussian Splatting training. It addresses the memory layout issues that arise during the densification process, where new Gaussians are added to the end of parameter buffers, leading to uncoalesced memory accesses [S1, unofficial]. The method leverages Z-ordering (Morton order) to spatially sort Gaussians, ensuring that neighboring Gaussians in 3D space are also close in memory [S1, unofficial]. This approach was presented as part of the Faster-GS framework, which aims to improve the optimization speed of 3D Gaussian Splatting [S1, unofficial].
+ 
+ ## Sources

@@ -2,7 +2,7 @@
 
 
 ## Overview
-The Infinite Volume Forward Scattering Propagator ($G_f$) is an analytical approximation of the radiative transfer propagator for participating media that exhibit strong forward scattering. It solves the problem of accurately modeling light transport in optically dense media where standard diffusion approximations fail due to the directional nature of scattering [S1]. Unlike the Bounded Forward Scattering Propagator, which handles finite boundaries, $G_f$ assumes an infinite medium, serving as the foundational kernel for subsurface scattering calculations before boundary corrections are applied [S1]. It is distinguished from isotropic diffusion models by explicitly encoding the anisotropy of the phase function through a single scaling parameter, allowing it to capture the transition from ballistic to diffusive transport [S1].
+The Infinite Volume Forward Scattering Propagator ($G_f$) is an analytical approximation of the radiative transfer propagator for participating media that exhibit strong forward scattering [S1]. It solves the problem of accurately modeling light transport in optically dense media where standard diffusion approximations fail due to the directional nature of scattering [S1]. Unlike the Bounded Forward Scattering Propagator, which handles finite boundaries, $G_f$ assumes an infinite medium, serving as the foundational kernel for subsurface scattering calculations before boundary corrections are applied [S1]. It is distinguished from isotropic diffusion models by explicitly encoding the anisotropy of the phase function through a single scaling parameter, allowing it to capture the transition from ballistic to diffusive transport [S1].
 
 ## How it works
 The propagator is derived from a functional integral formulation of radiative transport, utilizing a connection to polymer physics (specifically the worm-like chain model) and a modified length constraint [S1]. It approximates the probability density of a photon traveling a path length $s$ from position $\vec{x}'$ with direction $\hat{\omega}'$ to position $\vec{x}$ with direction $\hat{\omega}$ [S1].
@@ -19,10 +19,10 @@ The propagator is derived from a functional integral formulation of radiative tr
     *   $G_f$: Propagator value (scalar, probability density).
 
 ### Data Structures
-No complex data structures are required. The computation relies on scalar arithmetic and vector dot products.
+The computation relies on scalar arithmetic and vector dot products [S1].
 
 ### Parameters and Intermediate Values
-The method relies on a scaling factor $p$ and several intermediate coefficients $A, B, C, D, E, F$ and normalization $N$. All intermediate coefficients are positive and dimensionless, depending solely on the product $ps$ [S1].
+The method relies on a scaling factor $p$ and several intermediate coefficients $A, B, C, D, E, F$ and normalization $N$ [S1]. All intermediate coefficients are positive and dimensionless, depending solely on the product $ps$ [S1].
 
 1.  **Scaling Factor**:
     $$ p = \frac{\sigma_s'}{2} = \frac{(1-g)\sigma_s}{2} $$
@@ -52,25 +52,11 @@ $$ G_f(s, \vec{x}, \hat{\omega}, \vec{x}', \hat{\omega}') = N \exp\left(-C - D \
 
 ```python
 import math
-import numpy as np
+
+def dot(v1, v2):
+    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
 
 def infinite_volume_forward_scattering_propagator(s, x, omega, x_prime, omega_prime, sigma_s, g, sigma_a):
-    """
-    Computes the Infinite Volume Forward Scattering Propagator Gf.
-    
-    Args:
-        s: Path length (float)
-        x: Final position (numpy array, shape (3,))
-        omega: Final direction (numpy array, shape (3,)), must be unit length
-        x_prime: Initial position (numpy array, shape (3,))
-        omega_prime: Initial direction (numpy array, shape (3,)), must be unit length
-        sigma_s: Scattering coefficient (float)
-        g: Anisotropy factor (float, 0 <= g < 1)
-        sigma_a: Absorption coefficient (float)
-        
-    Returns:
-        Gf: Propagator value (float)
-    """
     # 1. Calculate scaling factor p
     sigma_s_prime = (1 - g) * sigma_s
     p = sigma_s_prime / 2.0
@@ -78,9 +64,7 @@ def infinite_volume_forward_scattering_propagator(s, x, omega, x_prime, omega_pr
     # 2. Calculate product ps
     u = p * s
     
-    # 3. Handle small u for numerical stability if necessary, 
-    # though the formula with C handles the divergence of N.
-    # Compute intermediate coefficients
+    # 3. Compute intermediate coefficients
     tanh_u = math.tanh(u)
     sinh_2u = math.sinh(2 * u)
     
@@ -89,7 +73,6 @@ def infinite_volume_forward_scattering_propagator(s, x, omega, x_prime, omega_pr
     # though mathematically u - tanh(u) ~ u^3/3.
     denom_A = u - tanh_u
     if abs(denom_A) < 1e-15:
-        # Limit as u->0: u - tanh(u) approx u^3/3. A approx 3/u^2.
         A = 3.0 / (u * u)
     else:
         A = 1.0 / denom_A
@@ -105,12 +88,10 @@ def infinite_volume_forward_scattering_propagator(s, x, omega, x_prime, omega_pr
     F = 1.5 * A
     
     # 4. Calculate displacement vector r
-    r_vec = p * (x - x_prime)
-    r_norm_sq = np.dot(r_vec, r_vec)
+    r_vec = [p * (x[i] - x_prime[i]) for i in range(3)]
+    r_norm_sq = dot(r_vec, r_vec)
     
     # 5. Calculate Normalization N
-    # N = p^3 * sqrt(F) * (E^2 - 2DF) / (4 * pi^(5/2) * (exp(E^2/F - D) - exp(D))) * exp(C)
-    
     numerator_N = (p ** 3) * math.sqrt(F) * (E**2 - 2 * D * F)
     
     exp_term_1 = math.exp((E**2 / F) - D)
@@ -119,16 +100,14 @@ def infinite_volume_forward_scattering_propagator(s, x, omega, x_prime, omega_pr
     
     # Guard against division by zero in denominator if exp terms are equal
     if abs(exp_term_1 - exp_term_2) < 1e-15:
-        # This case corresponds to specific limits, but generally E^2/F - D != D
-        # If it happens, return 0 or handle as edge case.
         return 0.0
         
     N = (numerator_N / denominator_N) * math.exp(C)
     
     # 6. Calculate Exponent terms
-    dot_omega_omega_prime = np.dot(omega, omega_prime)
-    sum_omega = omega + omega_prime
-    dot_r_sum_omega = np.dot(r_vec, sum_omega)
+    dot_omega_omega_prime = dot(omega, omega_prime)
+    sum_omega = [omega[i] + omega_prime[i] for i in range(3)]
+    dot_r_sum_omega = dot(r_vec, sum_omega)
     
     exponent = -C - D * dot_omega_omega_prime + E * dot_r_sum_omega - F * r_norm_sq - sigma_a * s
     
@@ -139,7 +118,7 @@ def infinite_volume_forward_scattering_propagator(s, x, omega, x_prime, omega_pr
 ```
 
 ### Edge Cases and Pitfalls
-*   **Small Path Lengths ($s \to 0$)**: As $s \to 0$, the normalization factor $N$ diverges exponentially. The term $-C$ in the exponent is explicitly included to cancel this divergence for numerical stability [S1]. Implementers must ensure that the calculation of $C$ and the multiplication by $\exp(C)$ in $N$ are performed with sufficient precision to avoid overflow/underflow.
+*   **Small Path Lengths ($s \to 0$)**: As $s \to 0$, the normalization factor $N$ diverges exponentially. The term $-C$ in the exponent is explicitly included to cancel this divergence for numerical stability [S1].
 *   **Short Path Limit ($ps \ll 1$)**: The propagator approaches an unscattered delta distribution. The term $-D \hat{\omega} \cdot \hat{\omega}'$ might appear to force directions apart, but it is counteracted by the displacement weight forcing $\vec{R}/s$ to align with $(\hat{\omega} + \hat{\omega}')/2$ [S1].
 *   **Long Path Limit ($ps \gg 1$)**: The fluence approaches the classical time-dependent diffusion equation result, provided $s \gg |\vec{x} - \vec{x}'|$ [S1].
 
@@ -149,21 +128,19 @@ def infinite_volume_forward_scattering_propagator(s, x, omega, x_prime, omega_pr
 Extends $G_f$ to finite volumes using a virtual source to satisfy absorbing boundary conditions. Chosen when the medium is confined within a bounded geometry rather than an infinite space.
 
 ## Operating characteristics
-*   **Time Complexity**: $O(1)$ per evaluation. The calculation involves a fixed number of arithmetic operations, trigonometric functions, and exponentials. It is significantly faster than Monte Carlo path tracing for dense media but requires evaluating the propagator for each scattering event or path segment.
-*   **Memory Complexity**: $O(1)$. No large data structures are required.
+*   **Time Complexity**: Not given in the sources.
+*   **Memory Complexity**: Not given in the sources.
 *   **Strengths**:
     *   Captures the correct qualitative behavior from ballistic (straight-line) to diffusive limits [S1].
-    *   Computationally efficient compared to full radiative transfer solvers.
     *   Analytically derived, ensuring consistency with the underlying physics of forward scattering [S1].
 *   **Limitations**:
-    *   Assumes strong forward scattering ($g$ close to 1). Performance degrades if $g$ is small or negative.
-    *   Infinite volume assumption makes it unsuitable for bounded media without modification (see Bounded Forward Scattering Propagator) [S1].
-    *   The evaluation was noted as "too costly to incorporate into a practical rendering system" in the original context due to the complexity of the exponential terms, though it remains faster than full RTE solvers [S1].
-*   **When to Use**: Use when simulating subsurface scattering in materials with high anisotropy (e.g., skin, wax, marble) where the medium can be approximated as infinite locally, or as a component in a bounded model.
-*   **When Not to Use**: Do not use for media with isotropic or backward scattering, or when precise boundary conditions in a small, confined volume are required without the bounded extension.
+    *   Assumes strong forward scattering ($g$ close to 1) [Parent].
+    *   The evaluation was noted as "too costly to incorporate into a practical rendering system" [S1].
+*   **When to Use**: Not given in the sources.
+*   **When Not to Use**: Not given in the sources.
 
 ## Background
-The Infinite Volume Forward Scattering Propagator was introduced in the paper "A forward scattering dipole model from a functional integral approximation" [S1]. The work derives the model from a functional integral formulation of radiative transport, drawing an analogy to the partition function of a worm-like chain in polymer physics [S1]. It was developed to address the inaccuracies of isotropic diffusion models in optically dense media with strong forward scattering. The model relies on a result by Winkler et al. [1994] regarding modified length constraints in polymer physics [S1].
+The Infinite Volume Forward Scattering Propagator was introduced in the paper "A forward scattering dipole model from a functional integral approximation" [S1]. The work derives the model from a functional integral formulation of radiative transport, drawing an analogy to the partition function of a worm-like chain in polymer physics [S1]. It was developed to address the inaccuracies of isotropic diffusion models in optically dense media with strong forward scattering [Parent]. The model relies on a result by Winkler et al. [1994] regarding modified length constraints in polymer physics [S1].
 
 ## Sources
 [S1] A forward scattering dipole model from a functional integral approximation, https://doi.org/10.1145/3072959.3073681, fetched 2026-10-26

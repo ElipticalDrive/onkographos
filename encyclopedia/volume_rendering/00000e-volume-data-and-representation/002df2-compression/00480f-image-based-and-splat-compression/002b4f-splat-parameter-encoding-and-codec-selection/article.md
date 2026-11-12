@@ -3,113 +3,123 @@
 Also called: Luxar store compression, quantised splat encoding
 
 ## Overview
-This method defines the binary layout and compression pipeline for 3D Gaussian Splat parameters to minimize storage size while maintaining rendering fidelity. It solves the problem of excessive file sizes in raw Gaussian Splat formats (typically 30–37 bytes/splat) by applying targeted quantization and a width-aware codec policy. It differs from generic image compression [PngCompression](11785-pngcompression.md) by operating on structured, heterogeneous vector fields (position, scale, rotation, amplitude) rather than uniform pixel grids, and by using spatial bucketing and delta encoding specific to splat distributions.
+This method defines the storage format and compression pipeline for 3D Gaussian Splat parameters, reducing file size from 30–37 bytes/splat to 8.8–12.7 bytes/splat while maintaining high rendering fidelity [S1, unofficial]. It differs from raw PLY or `.splat` formats by applying specific quantization grids and a width-aware codec policy (Blosc-zstd) to achieve faster loading times and smaller footprints [S2, unofficial].
 
 ## How it works
-**Inputs:** Float32 Gaussian Splat parameters (centres, Cholesky factors for rotation/scale, amplitudes).
-**Outputs:** Compressed `.ksplat` byte stream.
+**Inputs:** Float32 Gaussian parameters (centres, scales, rotations, opacities, spherical harmonics coefficients).
+**Outputs:** Compressed `.ksplat` binary stream.
 
 **Data Structures and Layout:**
-The store consists of four parameter arrays, encoded as follows [S1, unofficial]:
-1.  **Centres:** `uint16` integers.
-2.  **Cholesky Factors:** `uint8` integers, certified for validity.
-3.  **Amplitudes:** Selected based on the array's dynamic range:
-    *   Bounded-linear `uint8` or `uint16`.
-    *   Geometric-log `uint16` grid.
+The store consists of four primary parameter arrays, encoded as follows [S1, unofficial]:
+1.  **Centres:** `uint16` quantized positions.
+2.  **Cholesky Factors:** `uint8` (certified range).
+3.  **Amplitudes (Opacity):** Bounded-linear `uint8`/`uint16` or geometric-log `uint16`, selected based on the array's dynamic range.
+4.  **Spherical Harmonics (SH):** Compressed alongside other parameters using the same codec policy.
 
-**Algorithm Steps:**
-1.  **Quantization:** Convert float32 parameters to the target integer types. The quantization fidelity is bounded: PSNR loss vs. original is at most $-0.679$ dB (median $-0.012$ dB) [S1, unofficial].
-2.  **Preprocessing (Centres):** Apply columnar delta prefiltering to the centre coordinates to improve compressibility [S1, unofficial].
-3.  **Chunking:** Divide each parameter array into chunks aligned to atom boundaries (to mitigate specific codec anomalies) [S1, unofficial].
-4.  **Codec Selection:** Apply the "shipped rule" policy using **Blosc-zstd level 9** [S1, unofficial]:
-    *   **Byte Shuffle:** Apply to multi-byte integer codes.
-    *   **No Byte Shuffle:** Skip for single-byte codes (`uint8`) and floating-point arrays.
-    *   **Amplitude Optimization:** In the optimized configuration, leave log-companded amplitude codes unshuffled to reduce size by 1.44% [S1, unofficial].
-5.  **Compression:** Compress each chunk using the selected Blosc configuration.
-
-**Parameters:**
-*   **Codec:** Blosc-zstd level 9 [S1, unofficial].
-*   **Chunk Size:** Atom-aligned (default mitigates 64 KiB shuffle anomaly); standard 64 KiB chunks used for baseline comparison [S1, unofficial].
-
-**Pitfalls:**
-*   **Shuffle Anomaly:** Level-dependent Blosc shuffle anomalies occur on 64 KiB chunks. Mitigation requires atom-aligned chunks and columnar delta prefiltering on centres [S1, unofficial].
-*   **Precision:** Quantised render PSNR vs. float32 render ranges from 59–88 dB [S1, unofficial].
+**Compression Pipeline:**
+1.  **Quantization:** Float32 values are mapped to the discrete grids above. The amplitude grid type is chosen per array to minimize dynamic range waste [S1, unofficial].
+2.  **Chunking:** Data is split into atom-aligned chunks. A columnar delta prefilter is applied to the centres array to exploit spatial coherence [S1, unofficial].
+3.  **Codec Selection:** The shipped policy uses **Blosc-zstd level 9** [S1, unofficial].
+4.  **Byte Shuffle:**
+    *   Applied to multi-byte integer codes.
+    *   Skipped for single-byte codes and floating-point arrays.
+    *   *Optimization:* Log-companded amplitude codes are left unshuffled to reduce size by 1.44% [S1, unofficial].
+5.  **Storage:** The resulting bitstream is written to disk.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def encode_splats(centres_f32, cholesky_f32, amplitudes_f32):
+def encode_splats(float32_centres, float32_chol_factors, float32_amplitudes, float32_sh_coeffs):
     # 1. Quantization
-    centres_u16 = quantize_uint16(centres_f32)
-    cholesky_u8 = quantize_uint8(cholesky_f32)
+    # Centres: uint16 grid
+    q_centres = quantize_uint16(float32_centres)
     
-    # Determine amplitude encoding based on dynamic range
-    if dynamic_range(amplitudes_f32) < threshold_linear:
-        amps_u8 = quantize_bounded_linear_uint8(amplitudes_f32)
+    # Cholesky: uint8, range certified
+    q_chol = quantize_uint8_certified(float32_chol_factors)
+    
+    # Amplitudes: Select grid based on dynamic range
+    amp_range = max(float32_amplitudes) - min(float32_amplitudes)
+    if amp_range < threshold:
+        q_amps = quantize_bounded_linear_uint8(float32_amplitudes)
     else:
-        amps_u16 = quantize_geometric_log_uint16(amplitudes_f32)
+        q_amps = quantize_geometric_log_uint16(float32_amplitudes)
+        
+    # SH coefficients are also quantized/encoded similarly
+    
+    # 2. Pre-filtering
+    # Columnar delta prefilter on centres
+    delta_centres = apply_columnar_delta_prefilter(q_centres)
+    
+    # 3. Chunking
+    # Atom-aligned chunks
+    chunks_centres = create_atom_aligned_chunks(delta_centres)
+    chunks_chol = create_atom_aligned_chunks(q_chol)
+    chunks_amps = create_atom_aligned_chunks(q_amps)
+    chunks_sh = create_atom_aligned_chunks(q_sh)
+    
+    # 4. Codec Application (Blosc-zstd level 9)
+    # Byte shuffle logic
+    def compress_array(chunk_array, dtype):
+        if dtype == 'float32':
+            # No shuffle for float
+            return blosc_compress(chunk_array, level=9, shuffle=False)
+        elif dtype == 'uint8':
+            # No shuffle for single-byte
+            return blosc_compress(chunk_array, level=9, shuffle=False)
+        elif dtype == 'uint16':
+            # Shuffle for multi-byte integer
+            return blosc_compress(chunk_array, level=9, shuffle=True)
+        else:
+            raise ValueError("Unsupported dtype")
 
-    # 2. Preprocessing
-    # Columnar delta prefiltering on centres
-    centres_delta = columnar_delta_encode(centres_u16)
-
-    # 3. Chunking and Compression Configuration
-    # Atom-aligned chunks to avoid 64 KiB shuffle anomaly
-    chunk_size = get_atom_aligned_chunk_size() 
-    
-    # Codec policy: Blosc-zstd level 9
-    config = {
-        'codec': 'zstd',
-        'level': 9,
-        'shuffle': 'multi_byte_int' # Apply to multi-byte, skip single-byte/float
-    }
-
-    # 4. Compress Arrays
-    # Centres: Delta encoded, multi-byte (uint16), so shuffle ON
-    centres_compressed = blosc_compress(centres_delta, config)
-    
-    # Cholesky: Single-byte (uint8), so shuffle OFF
-    config['shuffle'] = 'none'
-    cholesky_compressed = blosc_compress(cholesky_u8, config)
-    
-    # Amplitudes: Optimized config leaves log-companded codes unshuffled
-    # If using geometric-log uint16, it is multi-byte, but optimized config skips shuffle
-    if use_optimized_config:
-        config['shuffle'] = 'none'
-    
-    if is_geometric_log(amps_u16):
-        amps_compressed = blosc_compress(amps_u16, config)
+    # Special case for amplitudes if log-companded
+    if q_amps is geometric_log_uint16:
+        # Leave unshuffled to save 1.44%
+        compressed_amps = blosc_compress(q_amps, level=9, shuffle=False)
     else:
-        # Bounded linear uint8, already no shuffle
-        amps_compressed = blosc_compress(amps_u8, config)
-
-    return pack_store(centres_compressed, cholesky_compressed, amps_compressed)
+        compressed_amps = compress_array(q_amps, 'uint16')
+        
+    compressed_centres = compress_array(chunks_centres, 'uint16')
+    compressed_chol = compress_array(chunks_chol, 'uint8')
+    compressed_sh = compress_array(chunks_sh, 'float32') # Assuming SH remains float or is quantized to uint16
+    
+    # 5. Write Stream
+    write_stream(compressed_centres)
+    write_stream(compressed_chol)
+    write_stream(compressed_amps)
+    write_stream(compressed_sh)
 ```
+
+**Parameters:**
+*   **Codec:** Blosc-zstd level 9 [S1, unofficial].
+*   **Chunk Size:** Atom-aligned (default 64 KiB, but prefilter mitigates anomalies) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Blosc Shuffle Anomaly:** A level-dependent anomaly occurs on 64 KiB chunks. Mitigated by using atom-aligned chunks and columnar delta prefiltering on centres [S1, unofficial].
+*   **Precision Loss:** Quantization introduces PSNR loss. Median loss vs original is −0.012 dB, max −0.679 dB [S1, unofficial].
 
 ## Subtopics
 
 ### [Ksplat Decompression](6899-ksplat-decompression.md)
-Ksplat Decompression reads and decompresses `.ksplat` files, which contain spatially bucketed and quantized 3D Gaussian Splat data, into a structured `DataTable` format suitable for rendering. It handles position quantization, scale/rotation compression, and spherical harmonics decoding. Unlike raw PLY formats, it supports three distinct compression modes (Float32, Float16, Uint8) to balance file size and precision, and uses spatial bucketing to optimize position storage.
+Reads and decompresses `.ksplat` files into a structured `DataTable` for rendering. It handles position quantization, scale/rotation decompression, and SH decoding. Supports three compression modes (Float32, Float16, Uint8) to balance size and precision.
 
 ## Operating characteristics
 **Time and Memory Complexity:**
 *   **Store Size:** 8.8–12.7 bytes/splat (down from 30–37 bytes/splat) [S1, unofficial].
-*   **Shipped Rule Storage:** 9.63 bytes/splat. If re-chunked to 64 KiB without prefilter, 10.09 bytes/splat (14.3% below uniform Blosc-zstd level-3 bit-shuffle baseline) [S1, unofficial].
-*   **Optimized Unshuffled Config:** 9.50 bytes/splat (15.6% below baseline at 64 KiB) [S1, unofficial].
+*   **Shipped Rule Storage:** 9.63 bytes/splat (10.09 bytes/splat if re-chunked to 64 KiB without prefilter) [S1, unofficial].
+*   **Optimized Config:** 9.50 bytes/splat (15.6% below baseline at 64 KiB) [S1, unofficial].
 
 **Measured Performance:**
-*   **Hardware:** Benchmark workstation (identical chunk sets) [S1, unofficial].
-*   **Decoding Throughput:**
-    *   In-browser (WebAssembly): 138–215 MB/s [S1, unofficial].
-    *   Native: 326–592 MB/s [S1, unofficial].
+*   **Rendering Quality:** Quantised render PSNR vs float32 render is 59–88 dB [S1, unofficial].
+*   **Decoding Throughput:** 138–215 MB/s in-browser (WebAssembly), 326–592 MB/s natively on identical chunk sets [S1, unofficial].
 
 **Strengths and Limitations:**
-*   **Strengths:** Significant size reduction with minimal PSNR loss (median $-0.012$ dB). Fast loading times when converted to `.ksplat` due to cache-optimized ordering [S2, unofficial].
-*   **Limitations:** Requires specific chunk alignment to avoid codec anomalies. Progressive loading of `.ply`/`.splat` skips these optimizations [S2, unofficial].
+*   **Strengths:** Significant size reduction, fast loading times, cache-optimized ordering [S2, unofficial].
+*   **Limitations:** Quantization introduces minor PSNR loss; requires specific codec implementation (Blosc-zstd) [S1, unofficial].
 
 ## Background
-This method originates from the Luxar project's work on scalable interactive web visualization of multidimensional scientific data, specifically focusing on Gaussian Splatting for microscopy [S1, unofficial]. The `.ksplat` format was introduced by mkkellogg in the GaussianSplats3D library as a trimmed-down, compressed version of original `.ply` files to match internal splat data formats for fastest loading [S2, unofficial].
+Originated in the Luxar project for scalable interactive web visualization of multidimensional scientific data [S1, unofficial]. The `.ksplat` format was developed as a trimmed-down, compressed version of `.ply` files to match internal splat data formats for fastest loading [S2, unofficial].
 
 ## Sources
 [S1] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)

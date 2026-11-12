@@ -3,118 +3,118 @@
 Also called: Lines and points, Particle systems, Particle systems / Point-based rendering
 
 ## Overview
-Point-based rendering approximates an implicit or dense discrete surface using a set of nonpolygonal proxy geometry, typically points or billboards, rather than triangles [S2, unofficial]. It solves the problem of rendering large, unstructured point clouds or dense meshes by rasterizing these proxies directly, avoiding the overhead of mesh generation and complex topology management. Unlike its sibling [Deferred Surface Splatting](1072-deferred-surface-splatting.md), which focuses on deferred shading of splatted points, point-based rendering is a broader category that includes early procedural particle systems and modern GPU-accelerated splatting, often relying on distance adaptation to maintain frame rates [S1].
+Point-Based Rendering (PBR) is a rendering technique that approximates continuous surfaces or dense volumetric distributions using a set of discrete points (splats) rather than explicit polygonal meshes [S1][S2, unofficial]. It solves the problem of rendering large, unstructured point clouds or implicit surfaces efficiently by rasterizing these points as disc-like primitives [S2, unofficial]. Unlike its sibling [Deferred Surface Splatting](1072-deferred-surface-splatting.md), which focuses on deferred shading pipelines for surface normals and depth, standard PBR often relies on opaque primitives to avoid sorting costs, though this introduces specific aliasing trade-offs [S1]. It builds on the concept of particle systems introduced by Reeves [S1] and was formalized for large point-set data by Rusinkiewicz and Levoy [S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A dense set of points $\{p_i\}$ sampled from a surface or implicit function, where each point $p_i$ has position $\mathbf{x}_i$, normal $\mathbf{n}_i$, and potentially color/weight attributes.
-*   **Output:** A rasterized image of the approximated surface.
+**Inputs:** A set of 3D points $P = \{p_i\}$, where each point $p_i$ typically includes position $\mathbf{x}_i$, normal $\mathbf{n}_i$, and color/weight attributes. These points are usually generated via an offline sampling process of an implicit surface or mesh [S2, unofficial].
+
+**Outputs:** A 2D image frame buffer.
 
 **Data Structures:**
-*   **Point Cloud:** An array of points. Each point typically stores 3D position, normal vector, and scalar attributes (color, opacity).
-*   **Acceleration Structure:** Not strictly required for basic splatting, but often used for culling or adaptive sampling. The sources do not specify a particular structure (e.g., BVH, Grid) for the rendering pass itself, noting that sparse geometry behaves like a globally transparent volume [S1].
+*   **Point Buffer:** An array of structures containing:
+    *   `position`: 3D vector $(x, y, z)$.
+    *   `normal`: 3D vector $(n_x, n_y, n_z)$.
+    *   `color`: 3D vector $(r, g, b)$ or scalar weight.
+    *   `size`: Scalar defining the splat radius in screen space or world space.
 
 **Steps:**
-1.  **Sampling (Offline):** Sample the underlying surface or implicit function into a dense point set. This can be done using uniform sampling, adaptive particle-based sampling, or curvature-guided energy redistribution [S2, unofficial].
-2.  **Projection:** Transform each point from world/object space to screen space. This involves standard vertex transformation (model-view-projection matrix multiplication) [S1].
-3.  **Splatting:** Rasterize each point as a disc splat or billboard primitive. The size of the splat is adapted to the distance from the camera to ensure the point covers roughly one pixel or a fixed screen area [S1].
-4.  **Shading/Blending:** Shade the splats. Techniques may employ ray casting to blend between splats or compute shading, effectively approximating the surface normal and lighting at the splat center [S2, unofficial].
-
-**Formulas:**
-*   **Splat Size:** The radius $r$ of a splat is often proportional to the distance $d$ from the camera to the point:
-    $$ r = k \cdot d $$
-    where $k$ is a constant determined by the desired pixel coverage and projection parameters [S1].
-*   **Distance Adaptation:** To maintain interactive frame rates, the number of primitives is adapted to distance. Points beyond a certain threshold may be suppressed or merged [S1].
-
-**Parameters:**
-*   **Target Frame Rate:** Typically 60 Hz [S1].
-*   **Resolution:** Examples given are 1280x1024 [S1].
-*   **Splat Size Factor:** Not explicitly defined, but linked to pixel coverage [S1].
-
-**Edge Cases and Pitfalls:**
-*   **Popping:** Distance adaptation is often implemented by suppressing elements (removing points) at greater distances, which can cause visual popping artifacts [S1].
-*   **Antialiasing:** Primitives are generally made opaque to avoid the cost of sorting and blending, which prevents proper antialiasing [S1].
-*   **Performance Bottleneck:** Vertex transform cost is significant. Sparse geometry behaves like a globally transparent volume with lots of data projecting to the same pixel, making culling difficult [S1].
+1.  **Sampling (Offline):** Sample the target geometry (implicit surface or mesh) into a dense point cloud. Adaptive sampling may be used, guided by curvature or energy redistribution to ensure point density correlates with surface detail [S2, unofficial].
+2.  **Projection:** Transform each point from world space to clip space using the view and projection matrices.
+3.  **Rasterization:** Project each point onto the screen as a disc (splat). The radius of the disc is adapted to the distance from the camera to maintain roughly pixel-sized coverage [S1].
+4.  **Shading/Blending:** Shade the splats. To avoid the cost of sorting transparent splats, primitives are often rendered as opaque [S1]. If blending is required, ray-casting techniques may be employed to blend between splats or compute shading based on the underlying implicit function [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Point-Based Rendering Core Loop
-# Assumes point cloud P with positions, normals, and attributes
-# Assumes camera parameters: projection matrix M, view matrix V, model matrix W
+# Offline Sampling Step
+def sample_surface(implicit_function, bounds, resolution):
+    points = []
+    # Grid sampling or adaptive sampling
+    for x in range(bounds.min_x, bounds.max_x, resolution):
+        for y in range(bounds.min_y, bounds.max_y, resolution):
+            for z in range(bounds.min_z, bounds.max_z, resolution):
+                p = Vector3(x, y, z)
+                # Check if point is near the implicit surface
+                if abs(implicit_function(p)) < threshold:
+                    # Compute normal via gradient
+                    n = compute_gradient(implicit_function, p)
+                    points.append(Point(p, n, color=0.5))
+    return points
 
-def render_point_based(P, camera):
-    # 1. Transform points to screen space
-    screen_points = []
-    for p in P:
-        # Transform position
-        world_pos = W @ p.position
-        view_pos = V @ world_pos
-        clip_pos = camera.projection_matrix @ view_pos
-        
-        # Perspective divide
-        if clip_pos.w <= 0:
-            continue # Behind camera or invalid
+# Rendering Step
+def render_points(points, view_matrix, proj_matrix, screen_width, screen_height):
+    # Clear frame buffer
+    frame_buffer = zeros(screen_height, screen_width, 4)
+    
+    # Transform and project points
+    projected_points = []
+    for p in points:
+        # World to Clip
+        clip_pos = proj_matrix * view_matrix * p.position
+        if clip_pos.w > 0: # Front of camera
+            # Perspective divide
+            ndc_pos = clip_pos.xyz / clip_pos.w
+            # Screen coordinates
+            screen_x = (ndc_pos.x + 1) * screen_width / 2
+            screen_y = (1 - (ndc_pos.y + 1) / 2) * screen_height # Flip Y
             
-        screen_pos = clip_pos.xyz / clip_pos.w
-        
-        # Check if in viewport
-        if not is_in_viewport(screen_pos):
-            continue
+            # Adaptive size: roughly pixel-sized
+            # Simplified: size based on distance or fixed pixel radius
+            radius = compute_splat_radius(p.position, view_matrix)
             
-        # 2. Adaptive sizing based on distance
-        # Distance from camera center (approximate)
-        dist = length(view_pos.xyz)
-        
-        # Calculate splat radius to cover ~1 pixel (simplified)
-        # In practice, this depends on FOV and resolution
-        pixel_size = calculate_pixel_size_at_distance(dist, camera)
-        radius = pixel_size * scaling_factor # scaling_factor for overlap/anti-aliasing
-        
-        screen_points.append({
-            'screen_pos': screen_pos.xy,
-            'radius': radius,
-            'normal': p.normal,
-            'color': p.color,
-            'depth': clip_pos.z / clip_pos.w
-        })
-        
-    # 3. Rasterize splats
-    # Note: Sorting is often skipped for performance, leading to transparency issues
-    # [G] In a full implementation, one might sort by depth or use alpha blending
-    # if transparency is required, but sources note opaque primitives are common
-    for sp in screen_points:
-        draw_disc_splat(sp.screen_pos, sp.radius, sp.color, sp.normal)
+            projected_points.append({
+                'screen_x': screen_x,
+                'screen_y': screen_y,
+                'radius': radius,
+                'normal': p.normal,
+                'color': p.color
+            })
+            
+    # Rasterize splats (Simplified Opaque Rasterization)
+    # Note: True PBR often uses GPU shaders for this. 
+    # Here we simulate the logic of drawing opaque discs.
+    for splat in projected_points:
+        # Draw disc at (screen_x, screen_y) with radius
+        # To avoid sorting, we might just overwrite or use a depth buffer
+        draw_disc(frame_buffer, splat['screen_x'], splat['screen_y'], 
+                  splat['radius'], splat['color'])
+                  
+    return frame_buffer
 
-def draw_disc_splat(center, radius, color, normal):
-    # Render a disc at 'center' with 'radius' in screen space
-    # Shade using 'normal' and 'color'
-    # [G] Standard rasterization of a circle or square bounding box
-    pass
+def compute_splat_radius(position, view_matrix):
+    # Estimate screen space radius based on distance
+    # This is a placeholder for the specific adaptation formula
+    # [G] Typically involves the tangent of the view angle or fixed pixel count
+    dist = length(position - view_matrix.origin)
+    return dist * constant_factor
 ```
+
+**Parameters:**
+*   **Sampling Density:** Determines the number of points. Higher density yields smoother surfaces but increases vertex transform costs [S1][S2, unofficial].
+*   **Splat Radius:** Controls the visual size of points. Must be adapted to distance to maintain resolution [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Popping:** Distance adaptation is often implemented by suppressing (culling) points, which can cause visual "popping" artifacts as points appear/disappear [S1].
+*   **Performance Bottleneck:** Vertex transform costs are significant. On hardware where vertex transform rate is ~20x slower than fill rate, sparse geometry (like forests) behaves like a transparent volume, causing many vertices to project to the same pixel without easy occlusion culling [S1].
+*   **Antialiasing:** Primitives are generally made opaque to avoid sorting and blending costs, which prevents proper antialiasing [S1].
 
 ## Subtopics
 
-### QSplat
-An early implementation by Rusinkiewicz and Levoy that proved point-based rendering for large point-set data using hierarchical point structures [S2, unofficial].
-
-### Adaptive Particle Sampling
-Techniques like curvature-guided energy redistribution to densify points in high-curvature areas, improving surface approximation quality [S2, unofficial].
-
-### Hybrid Rendering
-Combining point-based rendering with other techniques, such as view-dependent marching cubes, to handle large datasets interactively [S2, unofficial].
+### [Iso-splatting](12054-iso-splatting.md)
+A variant that generates point samples per cell and projects them onto the isosurface, allowing efficient rendering of multiple isovalue surfaces from a single point set.
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by vertex transformation. The vertex transform rate is about 20 times slower than the fill rate on recent graphics boards [S1]. At 60 Hz and 1280x1024 resolution, textured polygons allow redrawing each pixel 20 times, while points allow only once [S1].
-*   **Memory Complexity:** Linear in the number of points. No complex mesh topology storage is required.
-*   **Strengths:** Efficient for rendering dense, unstructured point clouds; avoids mesh generation overhead; suitable for large-scale scenes like forests [S1].
-*   **Limitations:** Popping artifacts due to distance-based culling; poor antialiasing if opaque primitives are used; performance limited by vertex transform throughput rather than fill rate [S1].
-*   **When to Use:** Rendering dense vegetation, particle effects, or large point clouds where mesh generation is prohibitive [S1].
-*   **When Not to Use:** When high-quality antialiasing is required, or when the geometry is sparse and can be efficiently represented by triangles [S1].
+*   **Time Complexity:** Dominated by vertex transformation and rasterization. Performance is limited by the vertex transform rate, which is significantly slower than fill rate on many GPUs [S1].
+*   **Memory Complexity:** Linear in the number of points $N$. Storage is efficient compared to dense voxel grids but can be high for very dense point clouds [S2, unofficial].
+*   **Measured Performance:** At 60Hz and 1280x1024 resolution, textured polygons allow redrawing each pixel ~20 times, whereas points allow only once due to the vertex transform bottleneck [S1].
+*   **Strengths:** Efficient for rendering large, unstructured point clouds; avoids the overhead of mesh generation and sorting for transparent objects; suitable for implicit surfaces [S2, unofficial].
+*   **Limitations:** Poor antialiasing if opaque; popping artifacts from distance-based culling; expensive offline sampling process [S1][S2, unofficial].
+*   **When to Use:** Rendering dense point clouds, vegetation (forests), or implicit surfaces where mesh generation is prohibitive [S1][S2, unofficial].
+*   **When Not to Use:** When high-quality antialiasing is required without sorting, or when the geometry is sparse and occlusion culling is critical [S1].
 
 ## Background
-Point-based rendering was conceived by Levoy and Whitted [68] and proven for large point-set data by Rusinkiewicz and Levoy [104] with their QSplat software [S2, unofficial]. The concept of procedurally drawing simple primitives (particle systems) was introduced by Reeves in 1983 [S1]. The method has been used in video games and simulators for isolated trees and dense forests, leveraging the GPU's ability to rasterize many simple primitives [S1].
+Point-based rendering was conceived by Levoy and Whitted [S2, unofficial]. It was proven for large point-set data by Rusinkiewicz and Levoy with their QSplat software [S2, unofficial]. The concept of procedurally drawing simple primitives (particle systems) was introduced by Reeves in 1983 [S1]. The method was further developed for real-time rendering of vegetation and dense scenes by researchers such as Pfister et al. [PZvBG00] and others [S1].
 
 ## Sources
 [S1] Rendering Forest Scenes in Real-Time, https://doi.org/10.2312/egwr/egsr04/093-102, fetched 2026-10-26

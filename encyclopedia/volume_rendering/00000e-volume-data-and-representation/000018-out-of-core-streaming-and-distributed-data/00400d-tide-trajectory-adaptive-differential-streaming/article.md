@@ -3,7 +3,7 @@
 Also called: Differential Streaming, Residency scoring, Set-difference streaming, Tide
 
 ## Overview
-Tide is a residency-aware data transfer policy for out-of-core volume rendering and training that reuses resident blocks across iterations, transferring only incoming resident deltas to reduce PCIe volume under smooth camera motion [S1, unofficial]. It sets itself apart from siblings like [Chunk-based World Streaming](2369-chunk-based-world-streaming.md) by explicitly maintaining a capacity-bounded resident set and using a scoring function to select which blocks to keep in VRAM, rather than simply streaming all visible blocks or using a fixed eviction policy.
+Tide is a residency-aware data transfer policy for out-of-core volume rendering that reuses resident blocks across iterations, transferring only incoming resident deltas to reduce PCIe volume under smooth camera motion [S1, unofficial]. It explicitly maintains a capacity-bounded resident set and uses a scoring function to select which blocks to keep in VRAM, rather than streaming all visible blocks or using a fixed eviction policy [S1, unofficial].
 
 ## How it works
 **Inputs and outputs:**
@@ -11,7 +11,7 @@ Tide is a residency-aware data transfer policy for out-of-core volume rendering 
 *   **Outputs:** Next resident set $\mathcal{R}_{t+1}$, stream-in blocks $\mathcal{S}_t^+$, and evict blocks $\mathcal{S}_t^-$ [S1, unofficial].
 
 **Data structures:**
-*   **Resident Set $\mathcal{R}_t$:** A set of block identifiers currently in VRAM.
+*   **Resident Set $\mathcal{R}_t$:** A set of block identifiers currently in VRAM [S1, unofficial].
 *   **Candidate Pool $C_t$:** A set of block identifiers formed by the union of the current resident set and the next visible set: $C_t = \mathcal{R}_t \cup \mathcal{K}_{t+1}$ [S1, unofficial].
 *   **Recency Score:** An LRU-style score for each block, updated on access (reset on access, aged otherwise) [S1, unofficial].
 
@@ -24,14 +24,8 @@ Tide is a residency-aware data transfer policy for out-of-core volume rendering 
     s(k) = \lambda \cdot \mathbf{1}[k \in \mathcal{K}_{t+1}] + (1 - \lambda) \cdot \text{Recency}(k)
     $$
     where $\mathbf{1}[\cdot]$ is the indicator function [S1, unofficial].
-5.  Select the next resident set $\mathcal{R}_{t+1}$ using a **Camera-Balanced Top-C** policy:
-    *   Assign a small quota of slots to cover visible blocks from each camera in the next batch.
-    *   Fill the remaining slots by selecting blocks with the highest global score $s(k)$ from $C_t$ [S1, unofficial].
-6.  Compute the set differences to determine data transfer needs:
-    *   Retain: $\Omega_t^R = \mathcal{R}_t \cap \mathcal{R}_{t+1}$
-    *   Stream-in: $\mathcal{S}_t^+ = \mathcal{R}_{t+1} \setminus \mathcal{R}_t$
-    *   Evict: $\mathcal{S}_t^- = \mathcal{R}_t \setminus \mathcal{R}_{t+1}$
-    [S1, unofficial]
+5.  Select the next resident set $\mathcal{R}_{t+1}$ using a **Camera-Balanced Top-C** policy: if $|\mathcal{K}_{t+1}| > C$, a pure global Top-C selection may leave some views in a mini-batch under-covered, so a small quota of slots is first assigned to cover visible blocks from each camera in the next batch, and the remaining slots are filled by the global score $s(k)$ over $C_t$ [S1, unofficial].
+6.  Compute the set differences to determine data transfer needs: retain $\Omega_t^R = \mathcal{R}_t \cap \mathcal{R}_{t+1}$, stream-in $\mathcal{S}_t^+ = \mathcal{R}_{t+1} \setminus \mathcal{R}_t$, and evict $\mathcal{S}_t^- = \mathcal{R}_t \setminus \mathcal{R}_{t+1}$ [S1, unofficial].
 7.  Transmit only blocks in $\mathcal{S}_t^+$ and evict blocks in $\mathcal{S}_t^-$, retaining $\Omega_t^R$ in VRAM [S1, unofficial].
 
 **Pseudocode:**
@@ -58,21 +52,14 @@ def tide_residency_selection(K_t, K_next_camera_sets, R_t, C, lambda_val, recenc
         K_next.update(camera_set)
     
     # Step 2: Update Recency scores for accessed blocks
-    # Blocks in R_t that are also in K_t are considered "accessed"
     accessed_blocks = R_t.intersection(K_t)
     for block_id in accessed_blocks:
-        if block_id in recency_scores:
-            recency_scores[block_id] = 0.0  # Reset on access
-        else:
-            recency_scores[block_id] = 0.0  # [G] Initialize if not present
+        recency_scores[block_id] = 0.0  # [G] Reset on access
     
     # Age other resident blocks (not accessed)
     for block_id in R_t:
         if block_id not in accessed_blocks:
-            if block_id in recency_scores:
-                recency_scores[block_id] += 1.0  # [G] Simple aging increment
-            else:
-                recency_scores[block_id] = 1.0  # [G] Initialize if not present
+            recency_scores[block_id] = recency_scores.get(block_id, 0.0) + 1.0  # [G] Simple aging increment
 
     # Step 3: Form candidate pool
     C_t = R_t.union(K_next)
@@ -81,46 +68,26 @@ def tide_residency_selection(K_t, K_next_camera_sets, R_t, C, lambda_val, recenc
     scores = {}
     for k in C_t:
         indicator = 1.0 if k in K_next else 0.0
-        recency = recency_scores.get(k, 0.0)  # [G] Default to 0 if not in recency_scores
+        recency = recency_scores.get(k, 0.0)
         scores[k] = lambda_val * indicator + (1.0 - lambda_val) * recency
     
     # Step 5: Camera-Balanced Top-C selection
-    # First, assign quota to cover each camera's next blocks
-    # Assume equal quota distribution for simplicity if not specified
-    num_cameras = len(K_next_camera_sets)
-    if num_cameras > 0:
-        quota_per_camera = max(1, C // (num_cameras + 1))  # [G] Heuristic for quota
-    else:
-        quota_per_camera = 0
-        
     R_next = set()
     remaining_capacity = C
     
-    # Cover each camera's blocks
+    # Assign a small quota of slots to cover visible blocks from each camera
+    # [G] Exact quota size not specified in sources; using a fixed small value
+    quota_per_camera = 1  
     for camera_set in K_next_camera_sets:
-        # Select up to quota_per_camera blocks from this camera's set
-        # Prefer blocks with higher scores if there's contention
-        camera_candidates = []
-        for block_id in camera_set:
-            if block_id in scores:
-                camera_candidates.append((scores[block_id], block_id))
-        
-        # Sort by score descending
+        camera_candidates = [(scores.get(b, 0.0), b) for b in camera_set if b in scores]
         camera_candidates.sort(key=lambda x: x[0], reverse=True)
-        
-        # Add top quota_per_camera blocks
         for i in range(min(quota_per_camera, len(camera_candidates))):
             block_id = camera_candidates[i][1]
             R_next.add(block_id)
             remaining_capacity -= 1
             
     # Fill remaining capacity with highest scoring blocks from C_t
-    # Exclude already selected blocks
-    remaining_candidates = []
-    for k in C_t:
-        if k not in R_next and k in scores:
-            remaining_candidates.append((scores[k], k))
-            
+    remaining_candidates = [(scores[k], k) for k in C_t if k not in R_next and k in scores]
     remaining_candidates.sort(key=lambda x: x[0], reverse=True)
     
     for i in range(min(remaining_capacity, len(remaining_candidates))):
@@ -139,21 +106,20 @@ def tide_residency_selection(K_t, K_next_camera_sets, R_t, C, lambda_val, recenc
 *   $\lambda \in [0, 1]$: Controls the trade-off between prioritizing the next working set and retaining recently used blocks [S1, unofficial].
 
 **Edge cases and pitfalls:**
-*   If $|\mathcal{K}_{t+1}| > C$, a pure global Top-C selection may leave some views in a mini-batch under-covered. The Camera-Balanced Top-C policy mitigates this [S1, unofficial].
+*   If $|\mathcal{K}_{t+1}| > C$, a pure global Top-C selection may leave some views in a mini-batch under-covered, necessitating the camera-balanced quota allocation [S1, unofficial].
 *   Recency scores must be initialized and updated correctly to avoid biasing the selection [G].
 
 ## Subtopics
 
 ### Camera-Balanced Top-C
-A selection policy that ensures coverage for all cameras in a batch before filling remaining slots with globally high-scoring blocks. Choose when multi-view consistency is critical and VRAM is limited. See [Tide](52-tide-trajectory-adaptive-differential-streaming.md).
+A selection policy that ensures coverage for all cameras in a batch before filling remaining slots with globally high-scoring blocks [S1, unofficial]. Choose when multi-view consistency is critical and VRAM is limited [S1, unofficial].
 
 ## Operating characteristics
-*   **Time and memory complexity:** The residency selection involves computing scores for the candidate pool $C_t$, which is bounded by $|\mathcal{R}_t| + |\mathcal{K}_{t+1}|$. Sorting and selection are $O(|C_t| \log |C_t|)$ or $O(|C_t|)$ with efficient selection algorithms. Memory usage is bounded by the capacity $C$ plus the candidate pool [S1, unofficial].
+*   **Time and memory complexity:** The residency selection involves computing scores for the candidate pool $C_t$, which is bounded by $|\mathcal{R}_t| + |\mathcal{K}_{t+1}|$ [S1, unofficial]. Sorting and selection are $O(|C_t| \log |C_t|)$ or $O(|C_t|)$ with efficient selection algorithms [G]. Memory usage is bounded by the capacity $C$ plus the candidate pool [S1, unofficial].
 *   **Measured performance:** On MatrixCity (~102M Gaussians), disabling differential streaming increases PCIe traffic from 0.10 GB/iter to 0.85 GB/iter (8.5× increase) and raises iteration latency to 145.3 ms [S1, unofficial].
 *   **Strengths:** Significantly reduces PCIe traffic and iteration latency under smooth camera motion by reusing resident blocks [S1, unofficial].
-*   **Limitations:** Requires maintaining recency scores and performing residency scoring, adding computational overhead. Performance may degrade if camera motion is erratic, leading to low overlap between consecutive batches [S1, unofficial].
+*   **Limitations:** Requires maintaining recency scores and performing residency scoring, adding computational overhead [S1, unofficial].
 *   **When to use:** When VRAM is limited and camera motion is smooth, leading to high overlap between consecutive visible block sets [S1, unofficial].
-*   **When not to use:** When camera motion is erratic, reducing the benefit of reusing resident blocks, or when VRAM is sufficient to hold all visible blocks [S1, unofficial].
 
 ## Background
 Tide was introduced in TideGS: Scalable Training of Over One Billion 3D Gaussian Splatting Primitives via Out-of-Core Optimization [S1, unofficial]. It addresses the challenge of out-of-core optimization for large-scale 3D Gaussian Splatting, where VRAM limitations necessitate efficient data transfer between CPU/GPU and storage [S1, unofficial].
