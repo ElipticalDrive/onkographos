@@ -1,13 +1,13 @@
 # Self-Organizing Map Dimensional Reduction for Transfer Functions
 
-Also called: Dimensional reduction for TF design, Multi-dimensional Transfer Function Design using Self-Organizing Maps, SOM-based TF design, Voxel Signature Mapping
+Also called: Dimensional reduction for TF design, Kohonen's maps, Multi-dimensional Transfer Function Design using Self-Organizing Maps, SOM-based TF design, Self-Organizing Maps (SOM) for Transfer Function Design, Voxel Signature Mapping
 
 ## Overview
 This method simplifies the design of multi-dimensional (nD) transfer functions by reducing the dimensionality of voxel signatures using Self-Organizing Maps (SOMs) [S1]. It maps nD voxel signatures to a 2D map space, allowing the user to define optical properties in the 2D space, which is then composed with the dimensional reduction function to form the actual nD transfer function [S1]. Unlike explicit nD TF definition, this method uses a simplified 2D interaction space via SOMs, making exploration and visualization of the TF domain easier as dimensionality increases [S1]. Unlike volume segmentation techniques, this method performs non-discrete classification, which can represent uncertainty [S1].
 
 ## How it works
 **Inputs:**
-*   Volume data $V$ with dimensions $D_x \times D_y \times D_z$.
+*   Volume data $V$ with dimensions $D_x \times D_y \times D_z$ [S1].
 *   Voxel signature attributes: A set of $k$ attributes per voxel (e.g., scalar value, gradient magnitude, directional second derivative, or statistical measures like mean, standard deviation, cubic root of third-order moment from a subvolume) [S1].
 *   Attribute weights: A vector $\mathbf{w}_{attr}$ of size $k$ defining the importance of each attribute [S1].
 *   SOM parameters: Map topology (Kohonen grid or Spherical), map size (e.g., $32 \times 32$ cells for Kohonen, 10 subdivisions for Spherical), learning rates $\eta_1=0.3$ and $\eta_2=0.5$, and training steps [S1].
@@ -40,7 +40,7 @@ This method simplifies the design of multi-dimensional (nD) transfer functions b
         $$ \vec{W}_{t+1}(C_i) = (1-a) \times \vec{W}_t(C_i) + a \times \vec{T} $$
         where $td$ is the topological distance (Euclidean distance between integer 2D coordinates for Kohonen, or number of edges for Spherical) [S1].
         $$ nf1(td) = \exp\left(-\frac{td^2}{3}\right) $$
-    *   Repeat for the specified number of steps (e.g., 3,000,000 steps for a $32 \times 32$ map) [S1].
+    *   Repeat for the specified number of steps [S1].
 
 4.  **SOM Training Stage 2 (Refinement):**
     *   Continue presenting non-background signatures in random order.
@@ -50,7 +50,7 @@ This method simplifies the design of multi-dimensional (nD) transfer functions b
         where $d$ is the distance between the training case $\vec{T}$ and the winner cell's weight vector $\vec{W}(C_{BMU})$ [S1].
         $$ nf2(td, d) = \min(d, 1) \times \exp\left(-\frac{td^2}{3}\right) $$
     *   This allows signatures far from their winner cell to have more influence, preventing large homogeneous regions from dominating [S1].
-    *   Repeat for the specified number of steps (e.g., 4,500,000 steps for Kohonen) [S1].
+    *   Repeat for the specified number of steps [S1].
 
 5.  **Dimensional Reduction:**
     *   Map all voxels (including background) to the 2D map space. For each voxel $i$ with signature $\vec{S}_i$, find its BMU $C_{BMU}$ in the trained SOM [S1].
@@ -75,7 +75,6 @@ This method simplifies the design of multi-dimensional (nD) transfer functions b
 
 ```python
 import numpy as np
-from scipy.spatial.distance import cdist
 
 def weighted_euclidean_distance(v1, v2, weights):
     """Calculate weighted Euclidean distance."""
@@ -93,18 +92,6 @@ def modified_neighborhood(td, d):
 def train_som(signatures, map_size, num_steps_stage1, num_steps_stage2, eta1=0.3, eta2=0.5, attr_weights=None):
     """
     Train SOM on non-background voxel signatures.
-    
-    Args:
-        signatures: Array of shape (N, k) containing normalized voxel signatures.
-        map_size: Tuple (rows, cols) for Kohonen map.
-        num_steps_stage1: Number of training steps for Stage 1.
-        num_steps_stage2: Number of training steps for Stage 2.
-        eta1: Learning rate for Stage 1.
-        eta2: Learning rate for Stage 2.
-        attr_weights: Array of shape (k,) with weights for each attribute.
-    
-    Returns:
-        weights: Array of shape (map_size[0]*map_size[1], k) with trained weight vectors.
     """
     if attr_weights is None:
         attr_weights = np.ones(signatures.shape[1])
@@ -126,15 +113,12 @@ def train_som(signatures, map_size, num_steps_stage1, num_steps_stage2, eta1=0.3
     
     # Stage 1: Global Structure
     for step in range(num_steps_stage1):
-        # Present signatures in random order
         idx = np.random.randint(0, signatures.shape[0])
         T = signatures[idx]
         
-        # Find BMU
         distances = np.array([weighted_euclidean_distance(T, weights[i], attr_weights) for i in range(n_cells)])
         bmu_idx = np.argmin(distances)
         
-        # Update weights
         for i in range(n_cells):
             td = get_topological_distance(bmu_idx, i)
             nf = gaussian_neighborhood(td)
@@ -146,12 +130,10 @@ def train_som(signatures, map_size, num_steps_stage1, num_steps_stage2, eta1=0.3
         idx = np.random.randint(0, signatures.shape[0])
         T = signatures[idx]
         
-        # Find BMU
         distances = np.array([weighted_euclidean_distance(T, weights[i], attr_weights) for i in range(n_cells)])
         bmu_idx = np.argmin(distances)
-        d = distances[bmu_idx] # Distance to winner
+        d = distances[bmu_idx]
         
-        # Update weights
         for i in range(n_cells):
             td = get_topological_distance(bmu_idx, i)
             nf = modified_neighborhood(td, d)
@@ -163,15 +145,6 @@ def train_som(signatures, map_size, num_steps_stage1, num_steps_stage2, eta1=0.3
 def dimensional_reduction(signatures, weights, map_size, attr_weights=None):
     """
     Map voxel signatures to 2D map coordinates.
-    
-    Args:
-        signatures: Array of shape (N, k) containing voxel signatures.
-        weights: Array of shape (map_size[0]*map_size[1], k) with trained weight vectors.
-        map_size: Tuple (rows, cols) for Kohonen map.
-        attr_weights: Array of shape (k,) with weights for each attribute.
-        
-    Returns:
-        map_coords: Array of shape (N, 2) with 2D coordinates for each voxel.
     """
     if attr_weights is None:
         attr_weights = np.ones(signatures.shape[1])
@@ -182,46 +155,25 @@ def dimensional_reduction(signatures, weights, map_size, attr_weights=None):
     
     for i in range(N):
         T = signatures[i]
-        # Find BMU
         distances = np.array([weighted_euclidean_distance(T, weights[j], attr_weights) for j in range(n_cells)])
         bmu_idx = np.argmin(distances)
         
-        # Get 2D coordinates of BMU
         row = bmu_idx // map_size[1]
         col = bmu_idx % map_size[1]
         map_coords[i] = [row, col]
         
     return map_coords
 
-def render_volume(volume_data, map_coords, tf_2d_func, attr_weights=None):
+def evaluate_rbf_and_render(map_coords, weights, tf_2d_func):
     """
-    Render volume using the 2D transfer function and map coordinates.
-    
-    Args:
-        volume_data: 3D array of voxel intensities (for ray casting).
-        map_coords: Array of shape (N, 2) with 2D coordinates for each voxel.
-        tf_2d_func: Function that takes 2D coordinates and returns (r, g, b, alpha).
-        attr_weights: Not directly used here, but assumed used in map_coords calculation.
-        
-    Returns:
-        image: Rendered 2D image.
+    Evaluate RBF for each voxel and compute optical properties.
+    Note: The exact RBF system solving is handled by external libraries like Lapack [S1].
     """
-    # This is a simplified representation of the rendering process.
-    # In practice, this involves ray casting through the volume.
-    # For each sample point along the ray, the voxel's map coordinates are retrieved.
-    # The 2D TF is evaluated at these coordinates to get optical properties.
-    # These properties are used in the volume rendering integral.
-    
-    # Example: Precompute optical properties for all voxels
     N = map_coords.shape[0]
     optical_properties = np.zeros((N, 4))
     for i in range(N):
         optical_properties[i] = tf_2d_func(map_coords[i])
-        
-    # Ray casting loop would go here, using optical_properties for shading
-    # ...
-    
-    return image
+    return optical_properties
 ```
 
 **Parameters with Typical Values:**
@@ -238,6 +190,11 @@ def render_volume(volume_data, map_coords, tf_2d_func, attr_weights=None):
 *   **Homogeneous Region Dominance:** Without the modified neighborhood function (Equation 4), large homogeneous regions of the volume would dominate the map, while important regions with fewer voxels (signatures far from their winner cells) would be badly represented [S1].
 *   **Dimensional Reduction Loss:** Dimensional reduction causes loss and distortion of information, making accurate quantitative analysis impossible. The method is suitable only for qualitative aspects like shape and dissimilarity [S1].
 *   **Normals for Multivariate Data:** Precomputed normals cannot be used for multivariate data sets (e.g., Hurricane) because the attributes lack a clear physical meaning for normal orientation [S1].
+
+## Subtopics
+
+### Multi-dimensional Transfer Function Design using Dimensional Reduction
+A method for specifying multi-dimensional (nD) transfer functions by reducing the dimensionality of nD voxel signatures into a 2D map using Self-Organizing Maps (SOMs) and Radial Basis Functions (RBFs), allowing TF design in a simplified 2D space [S2, unofficial]. It calculates nD voxel signatures from volume data (scalar values, gradient magnitude, directional second derivative, curvature, statistical measures), uses SOMs to create a two-dimensional map and define map coordinates for all voxels, and performs transfer function design in the two-dimensional map space [S2, unofficial]. The method explores two types of SOMs: Kohonen maps and spherical self-organizing maps [S2, unofficial]. Unlike 1D TFs which only use scalar values, this nD TF approach uses multi-dimensional voxel signatures to distinguish volume regions that have the same scalar value range [S2, unofficial].
 
 ## Operating characteristics
 *   **Time Complexity:**
@@ -269,3 +226,4 @@ def render_volume(volume_data, map_coords, tf_2d_func, attr_weights=None):
 
 ## Sources
 [S1] Design of Multi-dimensional Transfer Functions Using Dimensional Reduction, https://doi.org/10.2312/vissym/eurovis07/131-138, fetched 2026-10-26
+[S2] Especificação de funções de transferência unidimensionais e multidimensionais para visualização volumétrica direta, http://hdl.handle.net/10183/12077, fetched 2026-10-30 (unofficial)

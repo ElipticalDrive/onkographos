@@ -1,0 +1,155 @@
+# Marching Neurons
+
+Also called: Edge Subdivision, ReLU-induced polyhedral complex construction
+
+## Overview
+Marching Neurons is an analytical isosurface extraction method that constructs the exact zero-level set of a ReLU-based neural implicit function by traversing its decision boundaries directly, rather than sampling a spatial grid [S2]. Unlike grid-based methods such as Marching Cubes or Dual Contouring, which introduce discretization errors and aliasing artifacts unless resolution is excessively high, Marching Neurons eliminates these artifacts by exploiting the piecewise-linear structure of the network to extract a high-fidelity mesh that faithfully captures the geometry encoded by the weights [S2].
+
+## How it works
+Marching Neurons incrementally constructs the 1-skeleton (vertices and edges) of the ReLU-induced polyhedral complex in the input space by sequentially processing neuron boundaries [S1]. The algorithm maintains a set of vertices $V$ and edges $E$, initially representing the boundary of the domain or a coarse mesh. It iterates through neurons $(m, k)$ in a specific order, subdividing existing edges that cross the neuron's decision boundary $H^{(m)}_k$ and connecting the resulting intersection points [S1].
+
+**Inputs:**
+*   Current vertex set $V$ and edge set $E$.
+*   Neuron $(m, k)$ defined by its pre-activation function $\nu^{(m)}_k(\cdot)$.
+*   Numerical stability threshold $\epsilon_s$.
+
+**Outputs:**
+*   Updated vertex set $V$ and edge set $E$.
+*   Intersection set $S$ containing points on the boundary with their sign vectors.
+
+**Data Structures:**
+*   **Sign:** $\gamma^{(m)}_k(x) \in \{-1, 0, +1\}$, representing the sign of the pre-activation $\nu^{(m)}_k(x)$, computed with threshold $\epsilon_s$ for stability [S1].
+*   **Sign Vector:** $s^{(m)}_k(x) = [\gamma^{(1)}_1(x), \dots, \gamma^{(m)}_k(x)]$, tracking the linear region state of point $x$ up to neuron $(m, k)$ [S1].
+*   **Intersection Set:** $S$, a set of tuples $(\hat{x}, s^{(m)}_k(\hat{x}))$ where $\hat{x}$ is an intersection point on $H^{(m)}_k$ [S1].
+
+**Algorithm Steps:**
+1.  Initialize $S \leftarrow \emptyset$ and snapshot current edges $E_{old} \leftarrow E$ [S1].
+2.  Iterate over all edges $(x_0, x_1) \in E_{old}$:
+    a. Compute signs $\gamma_0 = \gamma^{(m)}_k(x_0)$ and $\gamma_1 = \gamma^{(m)}_k(x_1)$ [S1].
+    b. If $\gamma_0 \gamma_1 < 0$ (the edge crosses the boundary):
+        i. Compute pre-activations $d_0 = \nu^{(m)}_k(x_0)$ and $d_1 = \nu^{(m)}_k(x_1)$ [S1].
+        ii. Calculate interpolation weight $w = |d_0| / |d_0 - d_1|$ [S1].
+        iii. Compute intersection point $\hat{x} = (1 - w)x_0 + w x_1$ [S1].
+        iv. Update vertices: $V \leftarrow V \cup \{\hat{x}\}$ [S1].
+        v. Update edges: $E \leftarrow (E \setminus \{(x_0, x_1)\}) \cup \{(x_0, \hat{x}), (\hat{x}, x_1)\}$ [S1].
+        vi. Add to intersection set: $S \leftarrow S \cup \{(\hat{x}, s^{(m)}_k(\hat{x}))\}$ [S1].
+3.  Connect intersections: $E \leftarrow E \cup \text{ConnectIntersections}(S)$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def marching_neurons_step(V, E, neuron_m_k, epsilon_s):
+    """
+    Performs one step of edge subdivision for neuron (m, k).
+    
+    Args:
+        V: List of vertices (3D coordinates).
+        E: List of edges (pairs of vertex indices).
+        neuron_m_k: Object with method pre_activation(x) returning nu^(m)_k(x).
+        epsilon_s: Threshold for sign stability.
+        
+    Returns:
+        V: Updated vertex list.
+        E: Updated edge list.
+        S: List of tuples (intersection_point, sign_vector).
+    """
+    S = []
+    E_old = list(E) # Snapshot of edges
+    
+    # Helper to compute sign
+    def get_sign(x):
+        val = neuron_m_k.pre_activation(x)
+        if val > epsilon_s:
+            return 1
+        elif val < -epsilon_s:
+            return -1
+        else:
+            return 0
+            
+    # Helper to compute sign vector (simplified for this step; 
+    # in practice, s^(m)_k(x) aggregates signs from all previous neurons)
+    def get_sign_vector(x):
+        # This assumes the caller maintains the full history or 
+        # that s^(m)_k is derived from the current state.
+        # For the purpose of this atomic step, we return the current neuron's sign
+        # as part of the vector context. In the full algorithm, 
+        # s^(m)_k(x) is a cumulative vector.
+        return [get_sign(x)] 
+
+    for (idx0, idx1) in E_old:
+        x0 = V[idx0]
+        x1 = V[idx1]
+        
+        gamma0 = get_sign(x0)
+        gamma1 = get_sign(x1)
+        
+        if gamma0 * gamma1 < 0:
+            d0 = neuron_m_k.pre_activation(x0)
+            d1 = neuron_m_k.pre_activation(x1)
+            
+            # Avoid division by zero if d0 == d1, though gamma check implies crossing
+            if abs(d0 - d1) < 1e-9:
+                continue
+                
+            w = abs(d0) / abs(d0 - d1)
+            x_hat = (1 - w) * x0 + w * x1
+            
+            # Add new vertex
+            new_idx = len(V)
+            V.append(x_hat)
+            
+            # Update edges: remove old, add two new
+            E.remove((idx0, idx1))
+            E.append((idx0, new_idx))
+            E.append((new_idx, idx1))
+            
+            # Record intersection and its sign context
+            # Note: s^(m)_k(x_hat) requires computing signs for all neurons up to (m,k)
+            # at point x_hat. This is computationally expensive and usually optimized.
+            s_hat = get_sign_vector(x_hat) 
+            S.append((x_hat, s_hat))
+            
+    # Connect intersections on the same face/region
+    # ConnectIntersections uses sign-vector perturbation to determine adjacency
+    E = connect_intersections(E, S)
+    
+    return V, E, S
+
+def connect_intersections(E, S):
+    """
+    Connects intersection points on H^(m)_k into edges by tracking adjacent 
+    regions via sign-vector perturbation.
+    
+    This step is implementation-specific and relies on the logic described 
+    in Secs. 3.2 and 3.3 of [S1]. It determines which intersection points 
+    lie on the same face of a linear region and adds edges between them.
+    """
+    # Not given in the sources. 
+    # Implementation requires analyzing the sign vectors in S to identify 
+    # which intersections share a common linear region boundary and 
+    # connecting them accordingly.
+    return E
+```
+
+**Parameters:**
+*   $\epsilon_s$: Numerical stability threshold for sign determination. Value not given in the sources.
+*   Neuron Order: The sequence in which neurons $(m, k)$ are processed. Value not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **TetraSDF Integration:** In TetraSDF, region tracking must account for both ReLU MLP linear regions and encoder-induced polyhedral cells. The pure sign-vector test is replaced with an augmented indicator $r(x) \oplus s^{(m)}_k(x)$ to specify the region, and barycentric masks $m(x)$ are used to check if a point lies on a cell boundary [S1].
+*   **Sign Vector Computation:** Computing the full sign vector $s^{(m)}_k(x)$ for every intersection point requires evaluating all previous neurons, which can be costly. The sources note that `ConnectIntersections` relies on this vector for adjacency determination [S1].
+
+## Operating characteristics
+*   **Accuracy:** Eliminates grid aliasing and discretization artifacts, preserving sharp features without requiring infinite resolution sampling [S2].
+*   **Complexity:** Not given in the sources.
+*   **Memory:** Memory usage is constant with respect to spatial resolution, as it does not rely on a dense voxel grid [S1].
+*   **Strengths:** Extracts exact zero-level sets; differentiable integration into learning pipelines is possible (though not inherent to the extraction itself) [S2].
+*   **Limitations:** Requires the network to be ReLU-based to exploit piecewise-linearity [S2].
+
+## Background
+Marching Neurons was introduced by Stippel et al. in 2025 [S2]. It addresses the limitations of post-processing mesh extraction methods like Marching Cubes [LC87], Dual Contouring [JLSW02], and Marching Tetrahedra [DK91], which introduce discretization errors and cannot preserve sharp features without excessive grid resolution [S2]. While some works integrated differentiable contouring layers into the learning pipeline [LDG18, GCX*20, CZ21, GSF22], they often incurred high memory footprints due to underlying grid resolutions [S2]. Marching Neurons overcomes these precision limits by traversing decision boundaries directly [S2]. The method is closely related to TetraSDF, which adapts the edge subdivision scheme for multi-resolution tetrahedral grids [S1].
+
+## Sources
+[S1] TetraSDF: Analytic Isosurface Extraction with Multi-resolution Tetrahedral Grid, https://arxiv.org/abs/2511.16273v4, fetched 2026-10-26
+[S2] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26

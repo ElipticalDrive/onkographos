@@ -1,89 +1,88 @@
 # Spacetime Gaussians (STG)
 ## Overview
-Spacetime Gaussians (STG) is a 4D Gaussian Splatting method that models dynamic scenes using native 4D primitives, enabling real-time rendering of any arbitrary time slice without per-frame optimization [S1, unofficial]. It distinguishes itself from MLP-based deformation approaches like DGS [S1, unofficial] by explicitly parameterizing temporal opacity envelopes and polynomial trajectories for each Gaussian, allowing for smooth interpolation of geometry and appearance between discrete keyframes.
+Spacetime Gaussians (STG) is a 4D Gaussian Splatting method that models dynamic scenes using native 4D primitives, enabling real-time rendering of any arbitrary time slice without per-frame optimization [S1, unofficial]. It distinguishes itself from MLP-based deformation approaches like DGS [S1, unofficial] by explicitly parameterizing temporal opacity envelopes and polynomial trajectories for each Gaussian, allowing for smooth interpolation of geometry and appearance between discrete keyframes [S1, unofficial].
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A set of 3D Gaussians $\{G_i\}$ captured from multiple views at discrete keyframes.
-- **Output:** A rendered image for any query time $t$.
+- **Input:** A set of 3D Gaussians $\{G_i\}$ captured from multiple views at discrete keyframes [S1, unofficial].
+- **Output:** A rendered image for any query time $t$ [S1, unofficial].
 
 **Data Structures:**
-Each Gaussian $i$ is defined by the following fields:
-1.  **Spatial State:** Mean position $\mu_i \in \mathbb{R}^3$, covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (or rotation/scale parameters), and opacity $\alpha_i$.
-2.  **Temporal Envelope:** Parameters defining a temporal opacity function $e_i(t)$, specifying birth, death, and peak times [S1, unofficial].
-3.  **Trajectory:** Coefficients for a polynomial trajectory $p_i(t) \in \mathbb{R}^3$ describing the mean position over time [S1, unofficial].
-4.  **Appearance:** Spherical Harmonic (SH) coefficients $c_{i, l, m}$ for each band $l$ and order $m$, representing color/intensity [S1, unofficial].
+Each Gaussian $i$ stores the following fields:
+1. **Spatial State:** Mean position $\mu_i \in \mathbb{R}^3$, covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (or rotation/scale parameters), and base opacity $\alpha_i$ [G].
+2. **Temporal Envelope:** Parameters defining a temporal opacity function $e_i(t)$, specifying birth, death, and peak times [S1, unofficial].
+3. **Trajectory:** Coefficients for a polynomial trajectory $p_i(t) \in \mathbb{R}^3$ describing the mean position over time [S1, unofficial].
+4. **Appearance:** Spherical Harmonic (SH) coefficients $c_{i, l, m}$ for each band $l$ and order $m$, representing color/intensity [S1, unofficial].
 
 **Method Steps:**
-1.  **Initialization:** Initialize Gaussians from keyframe reconstructions. Assign initial spatial parameters $\mu_i, \Sigma_i, \alpha_i$ and SH coefficients $c_{i, l, m}$ [S1, unofficial].
-2.  **Temporal Parameterization:** For each Gaussian, learn or assign parameters for the temporal opacity envelope $e_i(t)$ and the polynomial trajectory coefficients for $p_i(t)$ [S1, unofficial].
-3.  **Query Processing:** For a target time $t$:
-    a. Compute the current mean position: $\mu_i(t) = p_i(t)$.
-    b. Compute the current opacity: $\alpha_i(t) = \alpha_i \cdot e_i(t)$.
-    c. Retrieve SH coefficients $c_{i, l, m}$ (static or interpolated if time-varying SH is used, though STG primarily emphasizes static SH per Gaussian with temporal opacity/position) [S1, unofficial].
+1. **Initialization:** Initialize Gaussians from keyframe reconstructions, assigning initial spatial parameters $\mu_i, \Sigma_i, \alpha_i$ and SH coefficients $c_{i, l, m}$ [G].
+2. **Temporal Parameterization:** Learn or assign parameters for the temporal opacity envelope $e_i(t)$ and the polynomial trajectory coefficients for $p_i(t)$ [S1, unofficial].
+3. **Query Processing:** For a target time $t$:
+    a. Compute the current mean position: $\mu_i(t) = p_i(t)$ [S1, unofficial].
+    b. Compute the current opacity: $\alpha_i(t) = \alpha_i \cdot e_i(t)$ [S1, unofficial].
+    c. Retrieve SH coefficients $c_{i, l, m}$ (static per Gaussian, as STG emphasizes temporal opacity/position over time-varying SH) [S1, unofficial].
     d. Project the Gaussian $\{\mu_i(t), \Sigma_i(t), \alpha_i(t), c_{i, l, m}\}$ to 2D screen space using standard differentiable rasterization [S1, unofficial].
-4.  **Rasterization:** Sort Gaussians by depth and composite them using alpha blending to produce the final image [S1, unofficial].
+4. **Rasterization:** Sort Gaussians by depth and composite them using alpha blending to produce the final image [S1, unofficial].
 
 **Formulas:**
--   **Trajectory:** $p_i(t) = \sum_{k=0}^{d} a_{i,k} t^k$, where $a_{i,k}$ are polynomial coefficients [S1, unofficial].
--   **Opacity:** $\alpha_i(t) = \alpha_i \cdot e_i(t)$, where $e_i(t)$ is the temporal envelope [S1, unofficial].
+- **Trajectory:** $p_i(t) = \sum_{k=0}^{d} a_{i,k} t^k$, where $a_{i,k}$ are polynomial coefficients [S1, unofficial].
+- **Opacity:** $\alpha_i(t) = \alpha_i \cdot e_i(t)$, where $e_i(t)$ is the temporal envelope [S1, unofficial].
 
 **Parameters:**
--   Polynomial degree $d$: Not given in the sources.
--   Temporal envelope shape: Not given in the sources.
+- Polynomial degree $d$: Not given in the sources.
+- Temporal envelope shape: Not given in the sources.
 
 **Edge Cases:**
--   **Out-of-bounds Time:** If $t$ is outside the range of the temporal envelope, opacity should be clamped to 0 [G].
--   **Precision:** Polynomial evaluation can suffer from numerical instability for high degrees or large time ranges [G].
+- **Out-of-bounds Time:** If $t$ is outside the range of the temporal envelope, opacity should be clamped to 0 [G].
+- **Precision:** Polynomial evaluation can suffer from numerical instability for high degrees or large time ranges; Horner's method is recommended [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def render_stg(gaussians, time_t, camera):
-    """
-    Render a scene at time_t using Spacetime Gaussians.
-    gaussians: List of Gaussian objects.
-    time_t: Float, query time.
-    camera: Camera object with projection matrix.
-    """
-    projected_gaussians = []
+    projected = []
     for g in gaussians:
-        # 1. Compute temporal position
         pos_t = evaluate_polynomial(g.poly_coeffs, time_t)
-        
-        # 2. Compute temporal opacity
         alpha_t = g.alpha * evaluate_envelope(g.envelope_params, time_t)
-        
-        # 3. Skip if invisible
         if alpha_t < 1e-4:
             continue
-            
-        # 4. Project to screen
-        screen_pos = project_to_screen(pos_t, camera)
-        screen_cov = project_covariance(g.covariance, camera) # Simplified
-        
-        projected_gaussians.append({
-            'pos': screen_pos,
-            'cov': screen_cov,
-            'alpha': alpha_t,
-            'sh_coeffs': g.sh_coeffs
-        })
-        
-    # 5. Rasterize
-    return rasterize(projected_gaussians, camera.image_width, camera.image_height)
+        cam_pos = project_point(pos_t, camera)
+        J = compute_projection_jacobian(pos_t, camera)
+        cov_2d = J @ g.cov @ J.T
+        projected.append({'pos': cam_pos, 'cov': cov_2d, 'alpha': alpha_t, 'sh': g.sh})
+    projected.sort(key=lambda x: x['pos'][2])
+    return rasterize(projected, camera.width, camera.height)
 
 def evaluate_polynomial(coeffs, t):
-    """Evaluate polynomial trajectory."""
     pos = [0.0, 0.0, 0.0]
-    for k, coeff in enumerate(coeffs):
-        pos += coeff * (t ** k)
+    for k, c in enumerate(coeffs):
+        pos = [pos[j] + c[j] * (t ** k) for j in range(3)]
     return pos
 
 def evaluate_envelope(params, t):
-    """Evaluate temporal opacity envelope."""
-    # Placeholder for specific envelope function (e.g., Gaussian, Sigmoid)
-    # Not given in the sources.
+    # Envelope shape not specified in sources [G]
     return 1.0
+
+def project_point(p, camera):
+    # Standard perspective projection
+    x, y, z = p
+    fx, fy = camera.fx, camera.fy
+    cx, cy = camera.cx, camera.cy
+    return [fx * (x / z) + cx, fy * (y / z) + cy, z]
+
+def compute_projection_jacobian(p, camera):
+    # Jacobian of perspective projection w.r.t 3D point
+    x, y, z = p
+    fx, fy = camera.fx, camera.fy
+    return [[fx / z, 0, -fx * x / (z ** 2)],
+            [0, fy / z, -fy * y / (z ** 2)]]
+
+def rasterize(projected, width, height):
+    image = np.zeros((height, width, 3))
+    for g in projected:
+        # Standard 2D Gaussian splatting rasterization
+        pass
+    return image
 ```
 ## Subtopics
 
@@ -96,7 +95,7 @@ Spacetime is a method that adds a temporal dimension to the feature field, enabl
 - **Strengths:** Real-time rendering of arbitrary time slices; no per-frame optimization required; smooth interpolation [S1, unofficial].
 - **Limitations:** Relies on polynomial trajectories which may not capture complex non-linear motion as well as flow-based methods; limited to the temporal range of the envelope [S1, unofficial].
 - **When to use:** When real-time rendering of dynamic scenes from multiple viewpoints is required, and the motion can be approximated by polynomials [S1, unofficial].
-- **When not to use:** For highly complex, non-polynomial motion where flow-based methods (e.g., GaussianFlow) might be more accurate [S1, unofficial].
+- **When not to use:** For highly complex, non-polynomial motion where flow-based methods may provide better temporal regularization [S1, unofficial].
 ## Background
 Spacetime Gaussians (STG) was introduced by Li et al. in CVPR'24 [S1, unofficial]. It is part of the evolution of 4D Gaussian Splatting, aiming to provide native 4D primitives for dynamic scene representation, contrasting with deformation-based approaches like DGS [S1, unofficial].
 ## Sources

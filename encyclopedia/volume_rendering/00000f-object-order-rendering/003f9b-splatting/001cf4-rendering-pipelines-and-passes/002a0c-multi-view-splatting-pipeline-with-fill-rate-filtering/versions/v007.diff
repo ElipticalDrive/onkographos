@@ -1,0 +1,305 @@
+--- v006.md
++++ v007.md
+@@ -4,31 +4,30 @@
+ 
+ ## Overview
+-This method generates multi-view 2D images from a 3D point cloud by splatting points onto image planes and filtering out sparse views based on fill rate to ensure structured, high-quality outputs [S1, unofficial]. It differs from standard splatting by integrating a post-rendering quality control step that discards views with insufficient pixel coverage, making it suitable for dataset generation where consistent view density is required [S1, unofficial].
++This method generates multi-view 2D images from a 3D point cloud by rasterizing points as splats, then filters the resulting views based on pixel coverage density [S1, unofficial]. It distinguishes itself from standard splatting by explicitly discarding views with insufficient fill rate, ensuring structured output quality for downstream tasks like dataset generation [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Point cloud data: A tuple of $(xyz, rgb, label)$ loaded from a `.pt` file using `torch.load` [S1, unofficial].
+-- Camera configuration: Trajectory generation parameters and intrinsic/extrinsic matrices [S1, unofficial].
+-- Rendering parameters: `splat_radius` (default 2, covering a $5 \times 5$ pixel disk) and `min_fill_rate` (default 0.30) [S1, unofficial].
++- Point cloud data: tuple $(\mathbf{xyz}, \mathbf{rgb}, \mathbf{label})$ loaded from a `.pt` file [S1, unofficial].
++- Camera configuration: trajectory parameters and intrinsic/extrinsic matrices [S1, unofficial].
++- Parameters: `splat_radius` (default 2, covering a $5 \times 5$ disk), `min_fill_rate` (default 0.30), viewport width $W$, height $H$ [S1, unofficial].
+ 
+ **Outputs:**
+-- For each kept view: JPEG color image, 16-bit PNG label, PNG color-mapped label, `.npy` index map, and camera pose/intrinsics [S1, unofficial].
++- For each kept view: camera pose, color image (JPEG), label image (16-bit PNG), color-mapped label (PNG), and index map (`.npy`) [S1, unofficial].
++- Intrinsics from the first kept view saved to `intrinsic.txt` [S1, unofficial].
+ 
+ **Data Structures:**
+-- `CameraPose`: Contains `extrinsics` (torch.Tensor $[4,4]$), `intrinsics` (torch.Tensor $[4]$), `position` (tuple), `target` (tuple), and `pitch_deg` (float) [S1, unofficial].
+-- `SplattingRenderer`: Manages the point cloud and rendering state [S1, unofficial].
++- `CameraPose`: Dataclass containing `extrinsics` (Tensor $[4,4]$), `intrinsics` (Tensor $[4]$), `position` (tuple), `target` (tuple), `pitch_deg` (float) [S1, unofficial].
++- `SplattingRenderer`: Holds the point cloud and rendering state [S1, unofficial].
+ 
+-**Algorithm:**
+-1. Load point cloud data as a tuple $(xyz, rgb, label)$ from a `.pt` file using `torch.load` [S1, unofficial].
+-2. Generate camera poses using `generate_trajectory(xyz, config, device=torch.device("cpu"))` [S1, unofficial].
+-3. Extract intrinsics and extrinsics into batches via `poses_to_batch(poses)` [S1, unofficial].
+-4. Initialize `SplattingRenderer` with `cam_batch`, `splat_radius`, and device [S1, unofficial].
+-5. Load point cloud into renderer via `renderer.load_pointcloud(xyz, rgb, label)` [S1, unofficial].
+-6. Render all views: `color_list, label_list, index_list = renderer.render_all(intr_batch, extr_batch, width, height)` [S1, unofficial].
+-7. Compute fill rates for each view: `fill_rates = [(idxm >= 0).mean() for idxm in index_list]` [S1, unofficial].
+-8. Filter views keeping only those with fill rate $\ge$ `min_fill_rate`: `kept_indices = [i for i, f in enumerate(fill_rates) if f >= min_fill_rate]` [S1, unofficial].
+-9. Save intrinsics from the first kept view to `intrinsic.txt` [S1, unofficial].
+-10. For each kept view, save pose, color (JPEG), label (16-bit PNG), color-mapped label (PNG), and index map (.npy) [S1, unofficial].
+-11. If no views meet the threshold, print a warning and skip saving [S1, unofficial].
++**Steps:**
++1. **Load Data:** Load point cloud $(\mathbf{xyz}, \mathbf{rgb}, \mathbf{label})$ using `torch.load` [S1, unofficial].
++2. **Generate Poses:** Compute camera poses using `generate_trajectory(xyz, config, device)` [S1, unofficial].
++3. **Batch Poses:** Extract intrinsics and extrinsics into batches via `poses_to_batch(poses)` [S1, unofficial].
++4. **Initialize Renderer:** Create `SplattingRenderer` with `cam_batch`, `splat_radius`, and device [S1, unofficial].
++5. **Load Point Cloud:** Pass $(\mathbf{xyz}, \mathbf{rgb}, \mathbf{label})$ to `renderer.load_pointcloud()` [S1, unofficial].
++6. **Render Views:** Call `renderer.render_all(intr_batch, extr_batch, W, H)` to get `color_list`, `label_list`, `index_list` [S1, unofficial].
++7. **Compute Fill Rates:** For each view $i$, calculate fill rate $f_i = \frac{1}{H \cdot W} \sum_{x,y} \mathbb{I}(\text{index}_i[x,y] \ge 0)$ [S1, unofficial].
++8. **Filter Views:** Keep indices $i$ where $f_i \ge \text{min\_fill\_rate}$ [S1, unofficial].
++9. **Save Outputs:** For each kept view, save pose, color, label, mapped label, and index map [S1, unofficial]. If no views meet the threshold, print a warning and skip saving [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -38,162 +37,104 @@
+ from typing import List, Tuple
+ 
+-class SplattingRenderer:
+-    def __init__(self, cam_batch: int = 10, splat_radius: int = 2, device: str = "cuda"):
+-        self.cam_batch = cam_batch
+-        self.splat_radius = splat_radius
+-        self.device = device
+-        self.xyz = None
+-        self.rgb = None
+-        self.label = None
++def multi_view_splatting_pipeline(
++    point_cloud_path: str,
++    config: dict,
++    W: int,
++    H: int,
++    splat_radius: int = 2,
++    min_fill_rate: float = 0.30,
++    device: str = "cpu"
++) -> None:
++    # 1. Load point cloud
++    data = torch.load(point_cloud_path)
++    xyz, rgb, label = data['xyz'], data['rgb'], data['label']
++    
++    # 2. Generate camera poses
++    poses = generate_trajectory(xyz, config, device=torch.device(device))
++    
++    # 3. Extract intrinsics and extrinsics
++    intr_batch, extr_batch = poses_to_batch(poses)
++    
++    # 4. Initialize renderer
++    renderer = SplattingRenderer(
++        cam_batch=1, # Adjust based on memory
++        splat_radius=splat_radius,
++        device=device
++    )
++    
++    # 5. Load point cloud into renderer
++    renderer.load_pointcloud(xyz, rgb, label)
++    
++    # 6. Render all views
++    color_list, label_list, index_list = renderer.render_all(
++        intr_batch, extr_batch, W, H
++    )
++    
++    # 7. Compute fill rates
++    fill_rates = []
++    for idx_map in index_list:
++        # idx_map is [H, W] int32; valid pixels have idx >= 0
++        valid_pixels = (idx_map >= 0).sum()
++        total_pixels = H * W
++        fill_rates.append(valid_pixels / total_pixels)
++    
++    # 8. Filter views
++    kept_indices = [i for i, f in enumerate(fill_rates) if f >= min_fill_rate]
++    
++    if not kept_indices:
++        print("Warning: No views meet the minimum fill rate threshold.")
++        return
++    
++    # 9. Save outputs
++    # Save intrinsics from the first kept view
++    first_kept = kept_indices[0]
++    # Assuming intrinsics are accessible via renderer or poses
++    # This step depends on specific API access to pose data
++    save_intrinsics(intr_batch[first_kept], "intrinsic.txt")
++    
++    for i in kept_indices:
++        save_pose(poses[i], f"pose_{i}.txt")
++        save_image(color_list[i], f"color_{i}.jpg", format="JPEG")
++        save_image(label_list[i], f"label_{i}.png", format="PNG-16")
++        save_image(color_map_label(label_list[i]), f"label_mapped_{i}.png")
++        save_array(index_list[i], f"index_{i}.npy")
+ 
+-    def load_pointcloud(self, xyz: torch.Tensor, rgb: torch.Tensor, label: torch.Tensor):
+-        """Load point cloud data."""
+-        self.xyz = xyz.to(self.device)
+-        self.rgb = rgb.to(self.device)
+-        self.label = label.to(self.device)
++def save_intrinsics(intrinsics: torch.Tensor, filename: str):
++    np.savetxt(filename, intrinsics.cpu().numpy())
+ 
+-    def _project_batch(self, intrinsics: torch.Tensor, extrinsics: torch.Tensor, W: int, H: int):
+-        """Project points to screen space.
+-        
+-        Args:
+-            intrinsics: [N, 4] or [4]
+-            extrinsics: [N, 4, 4] or [4, 4]
+-            W, H: Viewport dimensions
+-            
+-        Returns:
+-            uv: [N, 2, M] (screen coordinates)
+-            depths: [N, 1, M]
+-            visible: [N, 1, M]
+-        """
+-        # Sources do not provide the GPU kernel implementation for _project_batch;
+-        # it performs perspective projection of xyz to uv, depths, and visibility masks.
+-        pass
++def save_pose(pose, filename: str):
++    # Implementation depends on pose structure
++    pass
+ 
+-    def _assemble_view(self, uv: torch.Tensor, depths: torch.Tensor, visible: torch.Tensor, 
+-                       W: int, H: int, point_ids: torch.Tensor) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+-        """Assemble image from projected points, resolving occlusions by min-depth.
+-        
+-        Args:
+-            uv: [N, 2] screen coordinates
+-            depths: [N, 1]
+-            visible: [N, 1]
+-            W, H: Image dimensions
+-            point_ids: [N] original point indices
+-            
+-        Returns:
+-            color_img: [H, W, 3] uint8
+-            label_img: [H, W] uint8
+-            index_map: [H, W] int32
+-        """
+-        # Flatten and filter visible points
+-        flat_uv = uv.reshape(-1, 2)
+-        flat_depths = depths.squeeze(-1)
+-        flat_visible = visible.squeeze(-1)
+-        valid_mask = flat_visible > 0
+-        flat_uv = flat_uv[valid_mask]
+-        flat_depths = flat_depths[valid_mask]
+-        flat_point_ids = point_ids[valid_mask]
+-        
+-        if flat_uv.numel() == 0:
+-            return np.zeros((H, W, 3), dtype=np.uint8), np.zeros((H, W), dtype=np.uint8), np.full((H, W), -1, dtype=np.int32)
+-        
+-        # Convert to integer pixel coordinates
+-        pixel_x = torch.clamp(flat_uv[:, 0].long(), 0, W - 1)
+-        pixel_y = torch.clamp(flat_uv[:, 1].long(), 0, H - 1)
+-        flat_pixel_idx = pixel_y * W + pixel_x
+-        
+-        # Sort by pixel index, then by depth (ascending) to find closest point
+-        sort_key = flat_pixel_idx.float() * (flat_depths.max().item() + 1.0) + flat_depths
+-        _, order = torch.sort(sort_key)
+-        
+-        sorted_pixel_idx = flat_pixel_idx[order]
+-        sorted_depths = flat_depths[order]
+-        sorted_point_ids = flat_point_ids[order]
+-        
+-        # Keep only the first point for each unique pixel (the one with min depth)
+-        keep = torch.ones(len(order), dtype=torch.bool, device=self.device)
+-        if len(order) > 1:
+-            keep[1:] = sorted_pixel_idx[1:] != sorted_pixel_idx[:-1]
+-        
+-        final_pixel_idx = sorted_pixel_idx[keep]
+-        final_point_ids = sorted_point_ids[keep]
+-        
+-        # Initialize canvases
+-        color_img = np.zeros((H, W, 3), dtype=np.uint8)
+-        label_img = np.zeros((H, W), dtype=np.uint8)
+-        index_map = np.full((H, W), -1, dtype=np.int32)
+-        
+-        # Map back to image coordinates
+-        final_x = final_pixel_idx % W
+-        final_y = final_pixel_idx // W
+-        
+-        # Assign colors and labels
+-        final_rgb = self.rgb[final_point_ids].cpu().numpy()
+-        final_labels = self.label[final_point_ids].cpu().numpy()
+-        
+-        color_img[final_y.numpy(), final_x.numpy()] = (final_rgb * 255).astype(np.uint8)
+-        label_img[final_y.numpy(), final_x.numpy()] = final_labels.astype(np.uint8)
+-        index_map[final_y.numpy(), final_x.numpy()] = final_point_ids.cpu().numpy()
+-        
+-        return color_img, label_img, index_map
++def save_image(img: np.ndarray, filename: str, format: str):
++    # Implementation depends on image library
++    pass
+ 
+-    def render_all(self, intr_batch: torch.Tensor, extr_batch: torch.Tensor, W: int, H: int) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
+-        """Render all views and filter by fill rate."""
+-        M = intr_batch.shape[0]
+-        color_list: List[np.ndarray] = []
+-        label_list: List[np.ndarray] = []
+-        index_list: List[np.ndarray] = []
+-        point_ids = torch.arange(self.xyz.shape[0], device=self.device, dtype=torch.int32)
+-        
+-        for start in range(0, M, self.cam_batch):
+-            end = min(start + self.cam_batch, M)
+-            sub_intr = intr_batch[start:end].to(self.device)
+-            sub_extr = extr_batch[start:end].to(self.device)
+-            uv, depths, visible = self._project_batch(sub_intr, sub_extr, W, H)
+-            Mb = end - start
+-            for j in range(Mb):
+-                color_img, label_img, index_map = self._assemble_view(
+-                    uv[:, :, j], depths[:, :, j], visible[:, :, j], W, H, point_ids
+-                )
+-                color_list.append(color_img)
+-                label_list.append(label_img)
+-                index_list.append(index_map)
+-        return color_list, label_list, index_list
+-
+-def run_pipeline(xyz, rgb, label, config, min_fill_rate=0.30):
+-    """Main pipeline function."""
+-    # 1. Load data
+-    # xyz, rgb, label = torch.load('data.pt')
+-    # 2. Generate poses
+-    # poses = generate_trajectory(xyz, config)
+-    # 3. Batch poses
+-    # intr_batch, extr_batch = poses_to_batch(poses)
+-    # 4. Initialize renderer
+-    renderer = SplattingRenderer(cam_batch=10, splat_radius=2, device="cuda")
+-    renderer.load_pointcloud(xyz, rgb, label)
+-    # 5. Render all views
+-    # W, H = 1024, 1024
+-    # color_list, label_list, index_list = renderer.render_all(intr_batch, extr_batch, W, H)
+-    # 6. Compute fill rates
+-    # fill_rates = [(idxm >= 0).mean() for idxm in index_list]
+-    # 7. Filter views
+-    # kept_indices = [i for i, f in enumerate(fill_rates) if f >= min_fill_rate]
+-    # 8. Save outputs
+-    # if not kept_indices:
+-    #     print("Warning: No views meet fill rate threshold.")
+-    # else:
+-    #     for i in kept_indices:
+-    #         save_view(...)
++def color_map_label(label: np.ndarray) -> np.ndarray:
++    # Map label values to colors
+     pass
+ ```
+ 
++**Edge Cases and Pitfalls:**
++- If all views fall below `min_fill_rate`, no output is saved and a warning is printed [S1, unofficial].
++- Precision issues in depth sorting may affect which point wins in overlapping splats; the implementation uses a sort-unique strategy on CUDA to ensure deterministic results [S1, unofficial].
++
++## Subtopics
++
++### EWA Splatting
++Uses elliptical weighted average splatting with per-point 3D covariance estimated from k-nearest neighbours for denser coverage [S1, unofficial]. More expensive, intended for high-quality offline rendering.
++
++### Standard Splatting
++Uses a fixed `splat_radius` for pixel expansion. Faster, suitable for real-time or large-scale batch processing [S1, unofficial].
++
+ ## Operating characteristics
+-- Performance: The method is designed for GPU acceleration, leveraging CUDA for efficient projection and compositing [S1, unofficial].
+-- EWA variant: The EWA path is more expensive due to kNN search and covariance estimation [S1, unofficial].
+-- Strengths: Ensures high-quality, dense views by filtering out sparse ones, making it suitable for dataset generation [S1, unofficial].
+-- Limitations: Dependent on the `min_fill_rate` threshold; setting it too high may result in no views being saved [S1, unofficial].
++- **Time Complexity:** Dominated by the kNN search in EWA mode ($O(N \log N)$ for tree construction, $O(N \cdot k)$ for query) and rasterization ($O(N)$ for splatting, $O(W \cdot H)$ for assembly) [S1, unofficial].
++- **Memory Complexity:** $O(N)$ for point cloud storage, $O(W \cdot H)$ for intermediate buffers per view [S1, unofficial].
++- **Performance:** EWA is significantly more expensive than standard splatting due to covariance estimation [S1, unofficial].
++- **Strengths:** Ensures high-quality, dense coverage in output views by filtering sparse ones [S1, unofficial].
++- **Limitations:** Computationally intensive for EWA; may discard useful views if `min_fill_rate` is set too high [S1, unofficial].
+ 
+ ## Background
+-This pipeline is used in the DALA-CitywallV3 dataset generation process [S1, unofficial]. It builds on the principles of splatting, treating points as geometric primitives that are rasterized and composited [S1, unofficial].
++This pipeline is used in the DALA-CitywallV3 dataset generation process [S1, unofficial]. It leverages PyTorch and CUDA for efficient point cloud processing and rendering [S1, unofficial].
+ 
+ ## Sources

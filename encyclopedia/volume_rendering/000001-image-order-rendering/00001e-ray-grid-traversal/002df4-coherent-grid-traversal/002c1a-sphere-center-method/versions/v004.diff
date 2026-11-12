@@ -1,0 +1,201 @@
+--- v003.md
++++ v004.md
+@@ -11,15 +11,15 @@
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Particle dataset: A collection of spheres defined by center coordinates $(x, y, z)$ and radius $r$.
+-    *   Ray packet frustum $F$: Defined by bounding planes and near/far clipping planes.
+-    *   Grid resolution: Determines the cell size in world units.
++    *   Particle dataset: A collection of spheres defined by center coordinates $(x, y, z)$ and radius $r$ [S2].
++    *   Ray packet frustum $F$: Defined by bounding planes and near/far clipping planes [S1, S2].
++    *   Grid resolution: Determines the cell size in world units [G].
+ *   **Outputs:**
+-    *   A grid structure where each sphere is stored in exactly one cell.
+-    *   An enlarged frustum $F_r$ used for traversal.
++    *   A grid structure where each sphere is stored in exactly one cell [S2].
++    *   An enlarged frustum $F_r$ used for traversal [S1, S2].
+ 
+ ### Data Structures
+ *   **Grid:** A multi-level grid structure (as defined in [Coherent Grid Traversal](2987-coherent-grid-traversal.md)).
+-*   **Cell Content:** Each cell stores a list of particle indices or direct particle data. Unlike standard grids, no duplicate entries or mailbox structures are required [S1, S2].
+-*   **Particle Storage:** Particles are stored directly in the finest level of the grid. The conversion from floating-point center coordinates to grid cell indices is performed via truncation [S1].
++*   **Cell Content:** Each cell stores a list of particle indices or direct particle data [S1]. Unlike standard grids, no duplicate entries or mailbox structures are required [S1, S2].
++*   **Particle Storage:** Particles are stored directly in the finest level of the grid [S1]. The conversion from floating-point center coordinates to grid cell indices is performed via truncation [S1].
+ 
+ ### Parameters
+@@ -39,7 +39,7 @@
+ 
+ 3.  **Frustum Enlargement:**
+-    *   Compute the shift distance $s$ for the side bounding planes of the frustum. The distance $s$ is calculated based on $r_{max}$ and the plane normal direction $dU$ [S2]:
++    *   Compute the shift distance $s$ for the side bounding planes of the frustum [S2]. The distance $s$ is calculated based on $r_{max}$ and the plane normal direction $dU$:
+         $$s = r_{max} \sqrt{1 + dU^2}$$
+-    *   Derivation: The condition that a sphere of radius $r_{max}$ intersects a bounding plane defined by normal direction $dU$ is equivalent to the sphere's center being within distance $r_{max}$ of the plane. Geometrically, this requires shifting the plane by $s$ such that the projection of the shift vector onto the normal equals $r_{max}$. The scalar projection formula yields $r_{max} = \frac{\langle -dU, 1 \rangle \cdot \langle 0, s \rangle}{|\langle -dU, 1 \rangle|}$, which solves to $s = r_{max} \sqrt{1 + dU^2}$ [S1, S2].
++    *   Derivation: The condition that a sphere of radius $r_{max}$ intersects a bounding plane defined by normal direction $dU$ is equivalent to the sphere's center being within distance $r_{max}$ of the plane [S1, S2]. Geometrically, this requires shifting the plane by $s$ such that the projection of the shift vector onto the normal equals $r_{max}$ [S1]. The scalar projection formula yields $r_{max} = \frac{\langle -dU, 1 \rangle \cdot \langle 0, s \rangle}{|\langle -dU, 1 \rangle|}$, which solves to $s = r_{max} \sqrt{1 + dU^2}$ [S1, S2].
+     *   Adjust the bounding planes: Add $s$ to the $u_0$ parameter for the maximum bounding plane and subtract $s$ for the minimum bounding plane [S1, S2].
+     *   Adjust the near and far planes: Shift the near plane by $r_{max}$ in the $-\mathbf{K}$ direction and the far plane by $r_{max}$ in the $+\mathbf{K}$ direction, where $\mathbf{K}$ is the viewing direction [S1, S2].
+@@ -49,5 +49,5 @@
+     *   Traverse the grid using the enlarged frustum $F_r$ instead of the original frustum $F$ [S1, S2].
+     *   For each cell visited, intersect the rays in the packet against all spheres stored in that cell [S1, S2].
+-    *   Because the frustum is enlarged by $r_{max}$, any sphere intersecting the original frustum $F$ is guaranteed to have its center inside $F_r$. Thus, intersecting only spheres whose centers are in the visited cells covers all potential intersections [S1, S2].
++    *   Because the frustum is enlarged by $r_{max}$, any sphere intersecting the original frustum $F$ is guaranteed to have its center inside $F_r$ [S1, S2]. Thus, intersecting only spheres whose centers are in the visited cells covers all potential intersections [S1, S2].
+ 
+ 5.  **Early Ray Termination:**
+@@ -57,91 +57,64 @@
+ 
+ ```python
+-def sphere_center_method(particles, ray_packet_frustum, grid_resolution):
+-    """
+-    Implements the Sphere-Center Method for particle visualization.
+-    
+-    Args:
+-        particles: List of objects with attributes .center (vec3) and .radius (float).
+-        ray_packet_frustum: Object defining the frustum with planes and near/far bounds.
+-        grid_resolution: Float representing the size of one grid cell.
+-        
+-    Returns:
+-        grid: A dictionary or array mapping cell coordinates to lists of particle indices.
+-        enlarged_frustum: The modified frustum for traversal.
+-    """
+-    
+-    # Step 1: Initialization
+-    # Find the maximum radius across all particles
+-    r_max = 0.0
+-    for p in particles:
+-        if p.radius > r_max:
+-            r_max = p.radius
+-            
+-    # Step 2: Grid Construction
+-    # Initialize empty grid structure
++import math
++
++def ray_sphere_intersect(ray_o, ray_d, sphere_c, radius):
++    """Standard ray-sphere intersection check."""
++    oc = [ray_o[i] - sphere_c[i] for i in range(3)]
++    a = sum(ray_d[i] * ray_d[i] for i in range(3))
++    b = sum(oc[i] * ray_d[i] for i in range(3))
++    c = sum(oc[i] * oc[i] for i in range(3)) - radius * radius
++    return b * b - a * c >= 0
++
++def sphere_center_build(particles, frustum_planes, frustum_near, frustum_far, view_dir, cell_size):
++    r_max = max(p.radius for p in particles)
+     grid = {}
+-    
+     for i, p in enumerate(particles):
+-        # Convert center to grid coordinates by truncation
+-        # Note: Assumes grid origin is at (0,0,0) and axes are aligned.
+-        # In a general case, transform center to grid space first.
+-        gx = int(p.center.x / grid_resolution)
+-        gy = int(p.center.y / grid_resolution)
+-        gz = int(p.center.z / grid_resolution)
+-        
+-        cell_key = (gx, gy, gz)
+-        
+-        # Store particle index in the cell
+-        if cell_key not in grid:
+-            grid[cell_key] = []
+-        grid[cell_key].append(i)
+-        
+-    # Step 3: Frustum Enlargement
+-    # Compute shift distance s for side planes
+-    # dU is the direction vector component of the normal to the bounding plane
+-    # Assuming dU is normalized or defined as per the source's coordinate system
+-    # The source defines dU as the direction vector of the given plane's normal.
+-    # For a plane normal n = (nx, ny, nz), if the plane is defined by u = u0 + k*dU,
+-    # dU represents the lateral direction.
+-    # The formula s = r_max * sqrt(1 + dU^2) applies to the lateral shift.
+-    
+-    # Example: For a plane with normal having lateral component dU
+-    dU = ray_packet_frustum.plane_normal_lateral_component 
+-    s = r_max * math.sqrt(1.0 + dU * dU)
+-    
+-    # Adjust bounding planes
+-    # Add s to u0 for max plane, subtract s for min plane
+-    enlarged_frustum = copy(ray_packet_frustum)
+-    enlarged_frustum.max_plane_u0 += s
+-    enlarged_frustum.min_plane_u0 -= s
+-    
+-    # Shift near and far planes
+-    # Shift near plane by r_max in -K direction
+-    # Shift far plane by r_max in +K direction
+-    # K is the viewing direction vector
+-    K = ray_packet_frustum.view_direction
+-    enlarged_frustum.near_plane -= r_max * K
+-    enlarged_frustum.far_plane += r_max * K
+-    
+-    return grid, enlarged_frustum
++        gx = int(p.center[0] / cell_size)
++        gy = int(p.center[1] / cell_size)
++        gz = int(p.center[2] / cell_size)
++        grid.setdefault((gx, gy, gz), []).append(i)
+ 
+-def traverse_enlarged_frustum(grid, enlarged_frustum, ray_packet):
+-    """
+-    Traverses the grid using the enlarged frustum and intersects particles.
+-    """
+-    # Standard CGT traversal logic using enlarged_frustum
+-    # For each cell intersected by enlarged_frustum:
+-    for cell in cells_intersected_by(enlarged_frustum, grid):
+-        # Intersect rays in packet against all particles in this cell
+-        for particle_idx in grid[cell]:
+-            particle = particles[particle_idx]
+-            for ray in ray_packet.rays:
+-                intersect(ray, particle)
++    enlarged_planes = []
++    for plane in frustum_planes:
++        dU = plane['normal'][0]
++        s = r_max * math.sqrt(1.0 + dU * dU)
++        new_u0 = plane['u0'] + (s if plane['is_max'] else -s)
++        enlarged_planes.append({'normal': plane['normal'], 'u0': new_u0, 'is_max': plane['is_max']})
++
++    enlarged_near = frustum_near - r_max
++    enlarged_far = frustum_far + r_max
++    return grid, enlarged_planes, enlarged_near, enlarged_far, view_dir
++
++def traverse(grid, planes, near, far, view_dir, particles, rays):
++    for cell_key, indices in grid.items():
++        cell_min = [c * 1.0 for c in cell_key]
++        cell_max = [m + 1.0 for m in cell_min]
++        if not box_intersects_frustum(cell_min, cell_max, planes, near, far, view_dir):
++            continue
++        for idx in indices:
++            p = particles[idx]
++            for ray in rays:
++                if ray_sphere_intersect(ray.origin, ray.dir, p.center, p.radius):
++                    pass
++
++def box_intersects_frustum(box_min, box_max, planes, near, far, view_dir):
++    """Checks if an axis-aligned box intersects the frustum planes."""
++    for plane in planes:
++        n = plane['normal']
++        u0 = plane['u0']
++        # Check if box is completely outside the plane
++        if (box_min[0] * n[0] + box_min[1] * n[1] + box_min[2] * n[2] < u0 and
++            box_max[0] * n[0] + box_max[1] * n[1] + box_max[2] * n[2] < u0):
++            return False
++    if box_min[2] < near or box_max[2] > far:
++        return False
++    return True
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Wide Radius Range:** If particle radii span several orders of magnitude, using $r_{max}$ causes the enlarged frustum to be excessively large. This results in traversing many empty cells and intersecting many unnecessary spheres, potentially outweighing the benefits of single storage [S1]. Frustum culling is typically required to mitigate this performance loss [S1].
+-*   **Non-Uniform Radii:** The method assumes radii are uniform or within a small range. If this assumption is violated, the performance gain diminishes [S1, S2].
+-*   **Plane Normal Definition:** The calculation of $s$ depends on the definition of $dU$. The sources define $dU$ as the direction vector of the given plane's normal in a reduced 2D context where the normal is $\langle -dU, 1 \rangle$. Implementers must ensure $dU$ is extracted correctly from the frustum plane definitions [S1, S2].
++*   **Wide Radius Range:** If particle radii span several orders of magnitude, using $r_{max}$ causes the enlarged frustum to be excessively large [S1]. This results in traversing many empty cells and intersecting many unnecessary spheres, potentially outweighing the benefits of single storage [S1]. Frustum culling is typically required to mitigate this performance loss [S1].
++*   **Non-Uniform Radii:** The method assumes radii are uniform or within a small range [S2]. If this assumption is violated, the performance gain diminishes [S1, S2].
++*   **Plane Normal Definition:** The calculation of $s$ depends on the definition of $dU$ [S1, S2]. The sources define $dU$ as the direction vector of the given plane's normal in a reduced 2D context where the normal is $\langle -dU, 1 \rangle$ [S1]. Implementers must ensure $dU$ is extracted correctly from the frustum plane definitions [S1, S2].
+ 
+ ## Subtopics
+@@ -160,9 +133,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Grid construction is $O(N)$ where $N$ is the number of particles, due to the simple truncation operation [S1]. Traversal complexity depends on the number of cells visited by the enlarged frustum and the number of spheres per cell.
+-*   **Memory Complexity:** Memory footprint is reduced significantly because each particle is stored exactly once. For the BulletTorso dataset (35M particles), storage dropped from 3.11 GB (with references) to 1.04 GB [S1].
++*   **Time Complexity:** Grid construction is $O(N)$ where $N$ is the number of particles, due to the simple truncation operation [S1]. Traversal complexity depends on the number of cells visited by the enlarged frustum and the number of spheres per cell [G].
++*   **Memory Complexity:** Memory footprint is reduced significantly because each particle is stored exactly once [S1]. For the BulletTorso dataset (35M particles), storage dropped from 3.11 GB (with references) to 1.04 GB [S1].
+ *   **Measured Performance:**
+     *   Speed-up over standard grid: 1.02x to 1.27x on various datasets (Cylinder, JP8, Bullet, Thunder, Foam, BulletTorso) [S1].
+-    *   Grid construction time improvement: Up to 3.07x faster insertion phase (e.g., JP8 dataset: 797.71 ms to 260.13 ms) [S1].
++    *   Grid construction time improvement: Up to 3.07x faster insertion phase (e.g., JP8 dataset: 797.71 ms to 260.13 ms) [S1]. Total construction time improved from 1407.27 ms to 510.96 ms (factor of 2.75) [S1].
+ *   **Strengths:**
+     *   Eliminates data duplication and mailbox overhead [S1, S2].

@@ -1,0 +1,132 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,4 @@
+ # Scalar Value Sensitivity Fields
+ 
+-Also called: SVSF
+ 
+ ## Overview
+@@ -18,20 +17,14 @@
+ 
+ **Data Structures:**
+-*   **Sensitivity Tensor ($\Sigma$):** A 3-dimensional array of size $256 \times r \times r$. The first dimension corresponds to the 256 possible scalar values (assuming 8-bit intensity). The last two dimensions correspond to the spatial grid of the image, divided into $r \times r$ blocks [S1].
+-*   **Image Blocks:** The rendered image is partitioned into $r \times r$ non-overlapping blocks. Each block aggregates the sensitivity of all pixels within it [S1].
++*   **Sensitivity Tensor ($\Sigma$):** A 3-dimensional array of size $256 \times r \times r$ [S1]. The first dimension corresponds to the 256 possible scalar values [S1]. The last two dimensions correspond to the spatial grid of the image, divided into $r \times r$ blocks [S1].
++*   **Image Blocks:** The rendered image is partitioned into $r \times r$ non-overlapping blocks [S1].
+ 
+ **Steps:**
+-1.  **Grid Definition:** Define the grid resolution $r$. Typical values are $r=8$ or $r=16$ to balance computational latency and spatial detail. Setting $r=256$ (pixel-level sensitivity) is computationally prohibitive [S1].
++1.  **Grid Definition:** Define the grid resolution $r$. Typical values are $r=8$ or $r=16$ to balance computational latency and spatial detail [S1]. Setting $r=256$ (pixel-level sensitivity) is computationally prohibitive [S1].
+ 2.  **Image Partitioning:** Divide the rendered image domain into $r \times r$ blocks [S1].
+-3.  **Sensitivity Computation:** For each scalar value index $i \in [0, 255]$:
+-    a. Compute the Transfer Function (TF) sensitivity for each block using the gradient of the rendered image with respect to the TF value at index $i$. This is denoted as Equation 11 in the source [S1].
+-    b. The result for index $i$ is a 2D field $\Sigma(i, \cdot, \cdot) \in \mathbb{R}^{r \times r}$ [S1].
++3.  **Sensitivity Computation:** For each scalar value index $i \in [0, 255]$: Compute the TF sensitivity for each block using backpropagation through the rendering pipeline [S1]. This corresponds to Equation 11 in the source [S1]. The result for index $i$ is a 2D field $\Sigma(i, \cdot, \cdot) \in \mathbb{R}^{r \times r}$ [S1].
+ 4.  **Tensor Assembly:** Assemble all 256 fields into the 3-tensor $\Sigma \in \mathbb{R}^{256 \times r \times r}$ [S1].
+ 5.  **Acceleration:** Perform the backpropagation required for sensitivity calculation in parallel on the GPU using minibatches of size 64 [S1].
+-6.  **Visualization (Optional):**
+-    a. When a user selects a specific scalar value or range, apply a Gaussian filter to the sequence of fields centered at the selected scalar value with a specified bandwidth [S1].
+-    b. Superimpose the filter weight for each field onto the Sensitivity Plot in red [S1].
+-    c. Color-map the sensitivity based on the global range of the field.
+-    d. Encode the range specific to the user's selection via opacity mapping to provide local context against global sensitivity [S1].
++6.  **Visualization:** When a user selects a specific scalar value or range, apply a Gaussian filter to the sequence of fields centered at the selected scalar value with a specified bandwidth [S1]. Superimpose the filter weight for each field onto the Sensitivity Plot in red [S1]. Color-map the sensitivity based on the global range of the field [S1]. Encode the range specific to the user's selection via opacity mapping to provide local context against global sensitivity [S1].
+ 
+ **Pseudocode:**
+@@ -54,41 +47,31 @@
+         sigma: Sensitivity tensor of shape (256, r, r).
+     """
+-    # Assume render function is differentiable and returns image tensor
+-    # Image shape: (H, W, 3) or (H, W)
+-    # We need to compute d(Image) / d(tf_values[i]) for each i
+-    
+     # Initialize output tensor
+     sigma = torch.zeros(256, grid_resolution, grid_resolution)
++    num_scalar_values = 256
+     
+-    # Process in batches to save memory/time
+-    num_scalar_values = 256
++    # Process in batches to save memory/time [S1]
+     for start_idx in range(0, num_scalar_values, batch_size):
+         end_idx = min(start_idx + batch_size, num_scalar_values)
+         current_batch_indices = torch.arange(start_idx, end_idx)
+         
+-        # Compute gradients for the current batch of TF values
+-        # Note: This requires the rendering pipeline to support backpropagation
+-        # through the TF evaluation into the image space.
+-        gradients = compute_tf_gradients(volume_data, tf_values, current_batch_indices)
++        # Compute gradients for the current batch of TF values via backpropagation [S1]
++        # The exact gradient computation follows Equation 11 in the source [S1]
++        # render_fn is the differentiable rendering pipeline [G]
++        image = render_fn(volume_data, tf_values)
++        gradients = torch.autograd.grad(
++            outputs=image, 
++            inputs=tf_values[current_batch_indices], 
++            grad_outputs=torch.ones_like(image), 
++            create_graph=True
++        )[0]
+         
+         # gradients shape: (batch_size, H, W) assuming grayscale or mean opacity
+-        # If color, sum or select appropriate channel (e.g., opacity alpha)
++        img_h, img_w = gradients.shape[1], gradients.shape[2]
++        block_h, img_w // grid_resolution, img_w // grid_resolution
+         
+-        # Aggregate gradients into blocks
+-        # Reshape image to (H, W)
+-        img_h, img_w = gradients.shape[1], gradients.shape[2]
+-        block_h, block_w = img_h // grid_resolution, img_w // grid_resolution
+-        
+-        # Use unfold or manual pooling to average gradients over blocks
+-        # Reshape gradients to (batch_size, 1, img_h, img_w) for pooling
++        # Aggregate gradients into blocks by averaging over each block region [G]
+         gradients_4d = gradients.unsqueeze(1)
+-        
+-        # Average pooling over blocks
+-        # kernel_size = (block_h, block_w)
+-        # stride = (block_h, block_w)
+         block_gradients = F.avg_pool2d(gradients_4d, kernel_size=(block_h, block_w), stride=(block_h, block_w))
+-        
+-        # block_gradients shape: (batch_size, 1, grid_resolution, grid_resolution)
+-        # Squeeze the channel dimension
+         block_gradients = block_gradients.squeeze(1)
+         
+@@ -113,6 +96,5 @@
+     field = sigma[selected_scalar_value, :, :]
+     
+-    # Apply Gaussian filter to smooth the field
+-    # Reshape to 4D for convolution: (1, 1, r, r)
++    # Apply Gaussian filter to smooth the field [S1]
+     field_4d = field.unsqueeze(0).unsqueeze(0)
+     kernel_size = int(2 * bandwidth + 1)
+@@ -124,11 +106,10 @@
+     # Squeeze back to 2D
+     visual_map = smoothed_field.squeeze(0).squeeze(0)
+-    
+     return visual_map
+ 
+-def create_gaussian_kernel(kernel_size, sigma):
++def create_gaussian_kernel(kernel_size, sigma_param):
+     """Creates a 2D Gaussian kernel."""
+     coords = torch.arange(kernel_size).float() - kernel_size // 2
+-    g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
++    g = torch.exp(-(coords ** 2) / (2 * sigma_param ** 2))
+     g /= g.sum()
+     g_2d = torch.outer(g, g)
+@@ -138,9 +119,8 @@
+ **Edge Cases and Pitfalls:**
+ *   **Computational Cost:** Computing sensitivity at pixel-level resolution ($r=256$) is prohibitively expensive because it requires $256^2$ backpropagation passes. Use block aggregation ($r=8$ or $16$) [S1].
+-*   **Gradient Vanishing/Exploding:** The sensitivity values depend on the differentiability of the rendering pipeline. If the renderer is not fully differentiable or uses discrete thresholds, gradients may be zero or unstable [S1].
+-*   **Global vs. Local Context:** High global sensitivity might mask local changes. The visualization should encode user-specific selection ranges via opacity mapping to distinguish local impact from global noise [S1].
++*   **Global vs. Local Context:** High global sensitivity might mask local changes. The visualization encodes user-specific selection ranges via opacity mapping to distinguish local impact from global sensitivity [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(256 \cdot H \cdot W)$ for full pixel-level sensitivity, but reduced to $O(256 \cdot r^2)$ with block aggregation, where $r \ll H, W$. The dominant cost is backpropagation through the rendering pipeline for each scalar value (or batch thereof) [S1].
++*   **Time Complexity:** Not given in the sources. The dominant cost is backpropagation through the rendering pipeline for each scalar value (or batch thereof) [S1].
+ *   **Memory Complexity:** $O(256 \cdot r^2)$ to store the sensitivity tensor $\Sigma$ [S1].
+ *   **Performance:** GPU acceleration with minibatches of size 64 is used to mitigate latency [S1].
+@@ -149,5 +129,5 @@
+ 
+ ## Background
+-Scalar Value Sensitivity Fields were introduced in the context of generative models for volume rendering, specifically in the paper "A Generative Model for Volume Rendering" [S1]. The method leverages the latent space encoding of opacity TFs learned by a generative adversarial network (GAN) to compute sensitivities. It was developed to help users explore the opacity TF latent space and understand the relationship between TF modifications and rendered image changes [S1]. The technique is part of a broader interface that combines Region Sensitivity Plots and Scalar Value Sensitivity Fields for interactive TF design [S1].
++Scalar Value Sensitivity Fields were introduced in the context of generative models for volume rendering, specifically in the paper "A Generative Model for Volume Rendering" [S1]. The method leverages the latent space encoding of opacity TFs learned by a generative adversarial network (GAN) to compute sensitivities [S1]. It was developed to help users explore the opacity TF latent space and understand the relationship between TF modifications and rendered image changes [S1]. The technique is part of a broader interface that combines Region Sensitivity Plots and Scalar Value Sensitivity Fields for interactive TF design [S1].
+ 
+ ## Sources

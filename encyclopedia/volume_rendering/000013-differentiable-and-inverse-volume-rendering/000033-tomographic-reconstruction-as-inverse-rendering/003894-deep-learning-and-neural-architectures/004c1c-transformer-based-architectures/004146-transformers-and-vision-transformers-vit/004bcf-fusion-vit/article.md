@@ -1,0 +1,105 @@
+# Fusion ViT
+Also called: Fusion Transformer (in the context of pixel-wise feature fusion)
+## Overview
+Fusion ViT is a transformer-based module designed to fuse multi-view features by performing all-to-all self-attention over concatenated encoded image patches from multiple input views [S1, unofficial]. It solves the problem of integrating spatial and contextual information from disparate viewpoints into a unified representation, enabling complete reasoning across views [S1, unofficial]. It differs from pixel-wise fusion methods (like the Fusion Transformer in [S2]) by operating on patch-level tokens across the entire image rather than per-pixel vectors, and from standard ViTs by specifically structuring inputs as a concatenation of multi-view features to enable cross-view attention [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+- Input: Concatenated encoded image patches from $K$ views, denoted as $\{\tilde{H}_1, \tilde{H}_2, \dots, \tilde{H}_K\}$ [S1, unofficial].
+- Output: Fused tokens for each view, $\{F_1, F_2, \dots, F_K\}$ [S1, unofficial].
+
+**Data Structures:**
+- The input is a sequence of tokens derived from image patches. Each view $i$ contributes encoded patches $\tilde{H}_i$.
+- The fusion transformer $\mathcal{F}_{fuse}$ processes this concatenated sequence.
+- The architecture follows ViT-B/16 specifications: 12 attention heads, embedding dimension 768, MLP ratio 4.0, and 16x16 patch size [S1, unofficial].
+
+**Steps:**
+1. Concatenate the encoded image patches from all $K$ input views into a single sequence [S1, unofficial].
+2. Pass the concatenated sequence through a 16-layer transformer encoder $\mathcal{F}_{fuse}$ [S1, unofficial].
+3. The transformer performs all-to-all self-attention, allowing each token to attend to tokens from all other views [S1, unofficial].
+4. The output is the set of fused tokens $\{F_1, F_2, \dots, F_K\}$, where each $F_i$ contains context from all views [S1, unofficial].
+
+**Formula:**
+$$ \{F_1, F_2, \dots, F_K\} = \mathcal{F}_{fuse}(\tilde{H}_1, \tilde{H}_2, \dots, \tilde{H}_K) \quad (4) $$
+Where:
+- $F_i$ is the fused token of the $i$-th view [S1, unofficial].
+- $\tilde{H}_i$ are the concatenated encoded image patches for view $i$ [S1, unofficial].
+- $\mathcal{F}_{fuse}$ is the fusion transformer [S1, unofficial].
+
+**Parameters:**
+- Number of layers: 16 [S1, unofficial].
+- Architecture: ViT-B/16 [S1, unofficial].
+- Number of heads: 12 [S1, unofficial].
+- Embedding dimension: 768 [S1, unofficial].
+- MLP ratio: 4.0 [S1, unofficial].
+- Patch size: 16x16 [S1, unofficial].
+- Initialization: From scratch [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- The method assumes the ability to encode patches from multiple views into a consistent feature space before concatenation [S1, unofficial].
+- Precision: bFloat16 is used to improve GPU memory and computational efficiency [S1, unofficial].
+- Gradient checkpointing is leveraged to manage memory during training [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fusion_vit(encoded_patches_views, num_views=K, num_layers=16, num_heads=12, embed_dim=768, mlp_ratio=4.0, patch_size=16):
+    """
+    Fuses features from K views using a 16-layer ViT-B/16 transformer.
+    
+    Args:
+        encoded_patches_views: List of tensors, each of shape (B, N, C), 
+                               where N is the number of patches per view and C is the embedding dim.
+        num_views: Number of input views K.
+        num_layers: Number of transformer layers (16).
+        num_heads: Number of attention heads (12).
+        embed_dim: Embedding dimension (768).
+        mlp_ratio: MLP expansion ratio (4.0).
+        patch_size: Size of patches (16x16).
+        
+    Returns:
+        fused_tokens: List of tensors, each of shape (B, N, C), representing fused tokens for each view.
+    """
+    # Step 1: Concatenate encoded patches from all views
+    # Shape: (B, K*N, C)
+    concatenated_patches = torch.cat(encoded_patches_views, dim=1)
+    
+    # Step 2: Initialize transformer encoder with ViT-B/16 architecture
+    # Note: Initialized from scratch [S1, unofficial]
+    transformer = ViTTransformer(
+        num_layers=num_layers,
+        num_heads=num_heads,
+        embed_dim=embed_dim,
+        mlp_ratio=mlp_ratio,
+        patch_size=patch_size
+    )
+    
+    # Step 3: Perform all-to-all self-attention
+    # The transformer processes the concatenated sequence, allowing cross-view attention
+    fused_sequence = transformer(concatenated_patches)
+    
+    # Step 4: Split the fused sequence back into per-view tokens
+    # Shape: List of K tensors, each (B, N, C)
+    fused_tokens = torch.chunk(fused_sequence, num_views, dim=1)
+    
+    return fused_tokens
+```
+## Subtopics
+
+### Fusion Transformer
+A lightweight pixel-wise Transformer used to fuse rendered feature maps from $N$ input views on each pixel [S2]. It differs from Fusion ViT by operating per-pixel rather than on patch-level tokens across the whole image [S2]. It inputs rendered feature vectors and queries fused results using a learnable "token" [S2]. It utilizes semantics for fusion [S2]. Geometry features as position encoding were explored but found not helpful [S2]. A key pitfall is that rendered results may lose geometry cues for fusion when rendered from 3D to 2D (e.g., depths revealing occlusion, relative view changes relating to importance) [S2].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths:** Provides features of each view with full context from all other views, enabling complete spatial and context reasoning [S1, unofficial].
+- **Limitations:** Not given in the sources.
+- **When to use:** When multi-view feature fusion with global context is required, particularly in sparse-view reconstruction tasks [S1, unofficial].
+- **When not to use:** Not given in the sources.
+## Background
+Fusion ViT was introduced in the X-GRM (Large Gaussian Reconstruction Model for Sparse-view X-rays to Computed Tomography) paper [S1, unofficial]. It is based on the Vision Transformer (ViT-B) architecture [S1, unofficial]. The model was trained on 4 NVIDIA A100 (40G) GPUs using PyTorch [S1, unofficial]. It was optimized with AdamW for 100 epochs, with a batch size of 8, $\beta_1 = 0.9$, $\beta_2 = 0.95$, and an initial learning rate of $1 \times 10^{-4}$ decreasing to $1 \times 10^{-6}$ via cosine annealing [S1, unofficial]. The encoder ViT was initialized from DINO pre-trained weights, while the fusion ViT was initialized from scratch [S1, unofficial].
+## Sources
+[S1] X-GRM: Large Gaussian Reconstruction Model for Sparse-view X-rays to Computed Tomography, https://doi.org/10.48550/arXiv.2505.15235, fetched 2026-10-27 (unofficial)
+[S2] FWD: Real-time Novel View Synthesis with Forward Warping and Depth, https://doi.org/10.1109/cvpr52688.2022.01526, fetched 2026-10-29

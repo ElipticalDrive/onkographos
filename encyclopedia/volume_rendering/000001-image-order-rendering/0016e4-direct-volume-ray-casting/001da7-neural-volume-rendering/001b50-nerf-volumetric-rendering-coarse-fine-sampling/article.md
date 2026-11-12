@@ -3,81 +3,74 @@
 Also called: Vanilla NeRF, Standard NeRF, NeRF Two-Stage Sampling, Volume Rendering (NeRF), NeRF Coarse-to-Fine Rendering, Volumetric Rendering with MLP, Neural Radiance Field (NeRF) Rendering, Neural Volume Rendering (Alpha Blending)
 
 ## Overview
-
-NeRF Volumetric Rendering (Coarse/Fine Sampling) is a differentiable rendering method that synthesizes novel views of complex 3D scenes by training a continuous volumetric radiance field represented by a multi-layer perceptron (MLP) [S3][S9, unofficial]. It solves the problem of aliasing and noise in neural volume rendering by employing a two-stage sampling strategy: a coarse network samples uniformly (or with stratified sampling) to estimate the scene's density distribution, and a fine network samples more densely in high-density regions identified by the coarse stage to produce a refined color estimate [S15, S24, unofficial]. This method sets itself apart from its siblings, such as [NeRF Importance Sampling](1565-nerf-importance-sampling.md) which refines sampling via a probability density function derived from coarse weights, and [NerfAcc Rendering Pipeline](1619-nerfacc-rendering-pipeline.md) which uses learned acceleration structures, by relying on a simple, deterministic two-stage MLP query with uniform/stratified coarse sampling and denser fine sampling without auxiliary probability density estimation or complex data structures [S1, S15, S24, unofficial].
+NeRF Volumetric Rendering (Coarse/Fine Sampling) is a differentiable rendering method that synthesizes novel views of a 3D scene by querying a neural radiance field along camera rays and integrating the outputs using classical volume rendering techniques [S3][S14, unofficial]. It solves the problem of insufficient sampling in high-opacity regions, which leads to aliasing and noise, by employing a two-stage sampling strategy: a coarse network samples uniformly (or with stratified sampling) to produce an initial color estimate, and a fine network samples more densely around the high-density regions identified by the coarse network to produce a refined estimate [S10, S15, S24, unofficial]. This method sets itself apart from its siblings, such as [Iterative Ray Marching with Neural Volume Inference](1494-iterative-ray-marching-with-neural-volume-inference.md) which uses learned acceleration structures, and [DVGO Volume Rendering Forward Pass](2363-dvgo-volume-rendering-forward-pass.md) which uses voxel-based acceleration, by relying on a simple, differentiable hierarchical sampling of the coarse alpha weights without auxiliary networks or complex data structures [S1, S10, S24, unofficial].
 
 ## How it works
-
 **Inputs and Outputs:**
-*   **Inputs:** A set of training images with known camera poses (extrinsics and intrinsics) [S3]. For rendering, a camera pose $P$ (rotation $R$ and translation $t$) and image dimensions $H \times W$ [S9, unofficial].
-*   **Outputs:** Rendered RGB image, accumulated opacity (alpha), depth map, and disparity map [S1, S11, unofficial].
+*   **Inputs:** A set of training images with known camera poses (origin $\mathbf{o}$, direction $\mathbf{d}$, near plane $t_n$, far plane $t_f$); a coarse neural network $f_{\theta_c}$ and a fine neural network $f_{\theta_f}$; hyperparameters $N_{coarse}$ (number of coarse samples), $N_{fine}$ (number of fine samples), $perturb$ (jitter factor), $lindisp$ (inverse depth sampling flag), $raw\_noise\_std$ (density noise std), and $chunk$ (batch size for memory management).
+*   **Outputs:** Rendered RGB color $\hat{C}$, accumulated opacity $\bar{\alpha}$, depth $\hat{D}$, and disparity $disp$ for each pixel.
 
 **Data Structures:**
-*   **Neural Network ($f_\theta$):** An MLP mapping 5D coordinates (3D position $\mathbf{x}$, 3D viewing direction $\mathbf{d}$) to raw density $\hat{\sigma}$ and raw color $\hat{\mathbf{c}}$ [S4, S32].
-    *   **Input:** Positional encoding $\gamma(\mathbf{x})$ and $\gamma(\mathbf{d})$ [S2, S32].
-    *   **Output:** Raw density $\hat{\sigma} \in \mathbb{R}$ and raw color $\hat{\mathbf{c}} \in \mathbb{R}^3$ [S1, unofficial][S32].
-*   **Ray Batch:** A tensor of shape $[R, \dots]$ containing ray origins $\mathbf{o}$, directions $\mathbf{d}$, near bounds $t_n$, and far bounds $t_f$ [S7, S10, unofficial].
-*   **Sample Points:** A tensor of shape $[R, N, 3]$ representing 3D coordinates along rays [S7, unofficial].
-*   **Network Outputs:** Tensors of shape $[R, N, 4]$ containing raw density and color for each sample [S1, unofficial].
-
-**Parameters:**
-*   $N_{coarse}$: Number of samples per ray for the coarse stage. Typical value: 64 [S7, S33, unofficial].
-*   $N_{fine}$: Number of samples per ray for the fine stage. Typical value: 128 [S33, unofficial].
-*   $t_n, t_f$: Near and far plane bounds. For bounded scenes in NDC coordinates, $t_n=0, t_f=1$ [S30, unofficial].
-*   `perturb`: Boolean flag for stratified sampling jitter. Default: True [S7, S25, unofficial].
-*   `lindisp`: Boolean flag for sampling in inverse depth. Default: False [S6, S9, unofficial].
-*   `raw_noise_std`: Standard deviation of noise added to raw density for regularization. Default: 1.0 [S11, unofficial].
-*   `chunk_size`: Number of rays processed in a single forward pass to manage memory [S13].
+*   **Ray Batch:** A tensor of shape $[R, 8]$ or $[R, 9]$ containing ray origins $\mathbf{o}$ (3), directions $\mathbf{d}$ (3), near bounds $t_n$ (1), far bounds $t_f$ (1), and optionally viewing directions $\mathbf{d}$ (3) if view-dependent color is used.
+*   **Sample Points:** A tensor of shape $[R, N, 3]$ containing 3D coordinates $\mathbf{x}_i$ along the rays.
+*   **Network Output:** A tensor of shape $[R, N, 4]$ containing raw density $\tilde{\sigma}$ (1) and raw RGB color $\tilde{\mathbf{c}}$ (3) for each sample.
 
 **Numbered Steps:**
 
-1.  **Ray Generation:** For each pixel $(u, v)$ in the target image, compute the ray origin $\mathbf{o}$ and direction $\mathbf{d}$ from the camera pose $P$ and intrinsics [S4, S32].
-    *   $\mathbf{o} = t$
-    *   $\mathbf{d} = R K^{-1} [u, v, 1]^T$ (normalized or unnormalized depending on implementation, typically unnormalized in original NeRF code to preserve metric depth scaling) [S9, unofficial][S32].
+1.  **Ray Generation:** For each pixel in the target image, generate a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ using the camera pose and intrinsics [S2, S4, S32]. Extract $\mathbf{o}$, $\mathbf{d}$, $t_n$, and $t_f$ from the ray batch [S6, S10, unofficial].
 
-2.  **Coarse Sampling:** Generate $N_{coarse}$ sample depths $t_i$ along the ray between $t_n$ and $t_f$ [S7, S9, unofficial].
-    *   Compute linearly spaced values $t\_vals \in [0, 1]$ of size $N_{coarse}$ [S7, unofficial].
-    *   Map to depth:
-        *   If `lindisp` is False: $z\_vals = t_n (1 - t\_vals) + t_f t\_vals$ [S6, S9, unofficial].
-        *   If `lindisp` is True: $z\_vals = \frac{1}{\frac{1}{t_n}(1 - t\_vals) + \frac{1}{t_f}t\_vals}$ [S6, S9, unofficial].
-    *   If `perturb` is True, apply stratified sampling:
-        *   Compute midpoints: $mids = 0.5 (z\_vals_{1:} + z\_vals_{:-1})$ [S7, unofficial].
-        *   Define intervals: $lower = [z\_vals_{:1}, mids]$, $upper = [mids, z\_vals_{-1:}]$ [S7, unofficial].
-        *   Sample uniform random noise $u \sim \text{Uniform}(0, 1)$ and update: $z\_vals = lower + (upper - lower) \cdot u$ [S7, S25, unofficial].
+2.  **Coarse Sampling:**
+    *   Generate $N_{coarse}$ sample depths $t_{coarse}$ linearly spaced between 0 and 1 [S7, S9, unofficial].
+    *   Map to physical depth $z_{coarse}$:
+        *   If $lindisp$ is False: $z_{coarse} = t_n (1 - t_{coarse}) + t_f t_{coarse}$ [S6, S9, unofficial].
+        *   If $lindisp$ is True: $z_{coarse} = \frac{1}{\frac{1}{t_n}(1 - t_{coarse}) + \frac{1}{t_f}t_{coarse}}$ [S6, S9, unofficial].
+    *   If $perturb > 0$, apply stratified sampling: compute midpoints $mids = 0.5(z_{coarse}[:, 1:] + z_{coarse}[:, :-1])$, define lower bounds $[z_{coarse}[:, :1], mids]$ and upper bounds $[mids, z_{coarse}[:, -1:]]$, and jitter: $z_{coarse} = lower + (upper - lower) \cdot \text{rand}()$ [S7, S10, unofficial].
+    *   Compute 3D points: $\mathbf{x}_{coarse} = \mathbf{o} + z_{coarse} \cdot \mathbf{d}$ [S7, S10, unofficial].
 
-3.  **Coarse Network Query:** Compute 3D points $\mathbf{x}_i = \mathbf{o} + z\_vals_i \mathbf{d}$ [S7, S10, unofficial]. Query the coarse MLP $f_{\theta_{coarse}}$ at these points with viewing directions $\mathbf{d}$ to obtain raw density $\hat{\sigma}_i$ and raw color $\hat{\mathbf{c}}_i$ [S1, S7, unofficial].
-    *   Apply activation functions:
-        *   Density: $\sigma_i = \text{softplus}(\hat{\sigma}_i + b)$ or $\text{ReLU}(\hat{\sigma}_i)$ [S8, S11, unofficial]. Note: Original NeRF uses softplus [S8, unofficial], but many implementations use ReLU or no activation with noise [S11, unofficial]. We cite the softplus/ReLU variants as present in sources.
-        *   Color: $\mathbf{c}_i = \text{sigmoid}(\hat{\mathbf{c}}_i)$ [S1, S11, unofficial].
+3.  **Coarse Network Query:**
+    *   Flatten $\mathbf{x}_{coarse}$ to $[-1, 3]$. If view-dependent color is used, flatten viewing directions to $[-1, 3]$ [S1, unofficial].
+    *   Apply positional encoding $\gamma(\mathbf{x})$ and $\gamma(\mathbf{d})$ [S2, S29].
+    *   Query coarse network: $[\tilde{\mathbf{c}}_{coarse}, \tilde{\sigma}_{coarse}] = f_{\theta_c}(\gamma(\mathbf{x}_{coarse}), \gamma(\mathbf{d}))$ [S4, S32].
+    *   Reshape to $[R, N_{coarse}, 4]$ [S1, unofficial].
+    *   Apply activation functions: $\mathbf{c}_{coarse} = \text{sigmoid}(\tilde{\mathbf{c}}_{coarse})$ and $\sigma_{coarse} = \text{softplus}(\tilde{\sigma}_{coarse})$ [S1, S8, unofficial].
+    *   Add Gaussian noise to density: $\sigma_{coarse} \leftarrow \sigma_{coarse} + \mathcal{N}(0, raw\_noise\_std)$ [S11, S15, unofficial].
 
-4.  **Coarse Compositing:** Compute segment lengths $\delta_i = z\_vals_{i+1} - z\_vals_i$ for $i=0 \dots N_{coarse}-2$, and set $\delta_{N_{coarse}-1} = 10^{10}$ (or a large value) to ensure the ray terminates [S11, unofficial][S13].
-    *   Compute alpha: $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ [S7, S28, unofficial].
-    *   Compute transmittance: $T_i = \exp(-\sum_{j=0}^{i-1} \sigma_j \delta_j)$, with $T_0 = 1$ [S14, unofficial][S32].
-    *   Compute weights: $w_i = T_i \alpha_i$ [S1, S24, unofficial].
-    *   Compute coarse color: $\mathbf{C}_{coarse} = \sum_{i=0}^{N_{coarse}-1} w_i \mathbf{c}_i$ [S1, S24, unofficial].
-    *   Compute coarse depth: $D_{coarse} = \sum_{i=0}^{N_{coarse}-1} w_i z\_vals_i$ [S23][S24, unofficial].
-    *   Compute coarse opacity: $A_{coarse} = \sum_{i=0}^{N_{coarse}-1} w_i$ [S24, unofficial].
+4.  **Coarse Compositing:**
+    *   Compute segment distances: $\delta_{coarse, i} = z_{coarse, i+1} - z_{coarse, i}$ for $i < N_{coarse}-1$, and $\delta_{coarse, N_{coarse}-1} = 10^{10}$ (to ensure ray termination) [S11, unofficial][S13].
+    *   Compute alpha: $\alpha_{coarse, i} = 1 - \exp(-\sigma_{coarse, i} \cdot \delta_{coarse, i})$ [S7, S28, unofficial].
+    *   Compute transmittance: $T_{coarse, i} = \exp(-\sum_{j=1}^{i-1} \sigma_{coarse, j} \cdot \delta_{coarse, j})$ with $T_{coarse, 1} = 1$ [S4, S32].
+    *   Compute weights: $w_{coarse, i} = T_{coarse, i} \cdot \alpha_{coarse, i}$ [S1, S24, unofficial].
+    *   Compute coarse color: $\hat{C}_{coarse} = \sum_{i=1}^{N_{coarse}} w_{coarse, i} \mathbf{c}_{coarse, i}$ [S1, S24, unofficial].
+    *   Compute coarse depth: $\hat{D}_{coarse} = \sum_{i=1}^{N_{coarse}} w_{coarse, i} z_{coarse, i}$ [S4][S24, unofficial].
+    *   Compute coarse opacity: $\bar{\alpha}_{coarse} = \sum_{i=1}^{N_{coarse}} w_{coarse, i}$ [S1, S24, unofficial].
 
-5.  **Fine Sampling:** Generate $N_{fine}$ additional sample depths $z\_vals_{fine}$ [S24, unofficial].
-    *   The sources describe this as sampling from the probability distribution defined by the coarse weights $w_i$ (excluding the last one) [S24, S31, unofficial].
-    *   *Note:* The specific algorithm for "sampling finer z-values" using coarse weights is detailed in [NeRF Importance Sampling](1565-nerf-importance-sampling.md). In the standard coarse/fine pipeline, this often involves drawing samples from the CDF of the coarse weights [S31, unofficial]. For implementation completeness, if importance sampling is not used, the fine samples are often placed uniformly or stratified within the intervals defined by the coarse samples, weighted by the coarse alpha [S24, unofficial]. However, the source [S24, unofficial] explicitly states "sample_finer_z_values implements stratified sampling from the probability distribution defined by coarse weights". We assume the standard NeRF fine sampling draws from the coarse opacity distribution [S31, unofficial].
-    *   Concatenate coarse $z\_vals$ and fine $z\_vals_{fine}$, sort them, and remove duplicates or handle overlaps [S24, unofficial]. Let the total number of samples be $N_{total} = N_{coarse} + N_{fine}$ (or interleaved) [S24, unofficial].
-    *   *Crucial Step:* Detach the fine sample positions from the computation graph to prevent gradients from flowing back to the coarse network during the fine pass [S24, unofficial].
+5.  **Fine Sampling (Importance Resampling):**
+    *   Use the coarse weights $w_{coarse}$ (excluding the last element) as a probability distribution [S24, S31, unofficial].
+    *   Sample $N_{fine}$ new depths $z_{fine}$ from this distribution using stratified sampling [S1, S24, unofficial].
+    *   Concatenate coarse and fine depths: $z_{all} = \text{sort}(\text{concat}(z_{coarse}, z_{fine}))$ [S24, unofficial].
+    *   Compute new 3D points $\mathbf{x}_{all}$ and segment distances $\delta_{all}$ [S7, S11, unofficial].
+    *   **Crucial:** Detach $z_{fine}$ from the computation graph to prevent gradients from flowing back to the coarse network during fine sampling [S24, unofficial].
 
-6.  **Fine Network Query:** Query the fine MLP $f_{\theta_{fine}}$ at the sorted sample points $\mathbf{x}_i$ and directions $\mathbf{d}$ to obtain $\hat{\sigma}_i, \hat{\mathbf{c}}_i$ [S15, S25, unofficial].
-    *   Apply activations: $\sigma_i = \text{softplus}(\hat{\sigma}_i)$, $\mathbf{c}_i = \text{sigmoid}(\hat{\mathbf{c}}_i)$ [S8, S11, unofficial].
+6.  **Fine Network Query:**
+    *   Query fine network: $[\tilde{\mathbf{c}}_{fine}, \tilde{\sigma}_{fine}] = f_{\theta_f}(\gamma(\mathbf{x}_{all}), \gamma(\mathbf{d}))$ [S15, S24, unofficial].
+    *   Apply activations: $\mathbf{c}_{fine} = \text{sigmoid}(\tilde{\mathbf{c}}_{fine})$, $\sigma_{fine} = \text{softplus}(\tilde{\sigma}_{fine})$ [S1, S8, unofficial].
+    *   Add noise: $\sigma_{fine} \leftarrow \sigma_{fine} + \mathcal{N}(0, raw\_noise\_std)$ [S11, unofficial].
 
-7.  **Fine Compositing:** Recompute $\delta_i, \alpha_i, T_i, w_i$ using the sorted fine samples [S1, S24, unofficial].
-    *   Compute fine color: $\mathbf{C}_{fine} = \sum_{i=0}^{N_{total}-1} w_i \mathbf{c}_i$ [S1, S24, unofficial].
-    *   Compute fine depth: $D_{fine} = \sum_{i=0}^{N_{total}-1} w_i z\_vals_i$ [S23][S24, unofficial].
-    *   Compute fine opacity: $A_{fine} = \sum_{i=0}^{N_{total}-1} w_i$ [S24, unofficial].
+7.  **Fine Compositing:**
+    *   Compute alpha: $\alpha_{fine, i} = 1 - \exp(-\sigma_{fine, i} \cdot \delta_{all, i})$ [S7, S28, unofficial].
+    *   Compute transmittance: $T_{fine, i} = \exp(-\sum_{j=1}^{i-1} \sigma_{fine, j} \cdot \delta_{all, j})$ [S4, S32].
+    *   Compute weights: $w_{fine, i} = T_{fine, i} \cdot \alpha_{fine, i}$ [S1, S24, unofficial].
+    *   Compute fine color: $\hat{C}_{fine} = \sum_{i=1}^{N_{all}} w_{fine, i} \mathbf{c}_{fine, i}$ [S1, S24, unofficial].
+    *   Compute fine depth: $\hat{D}_{fine} = \sum_{i=1}^{N_{all}} w_{fine, i} z_{all, i}$ [S4][S24, unofficial].
+    *   Compute fine opacity: $\bar{\alpha}_{fine} = \sum_{i=1}^{N_{all}} w_{fine, i}$ [S1, S24, unofficial].
 
 8.  **Loss Computation:**
-    *   Compute photometric loss (MSE) between $\mathbf{C}_{coarse}$ and ground truth $\mathbf{C}_{gt}$ [S15, unofficial].
-    *   Compute photometric loss (MSE) between $\mathbf{C}_{fine}$ and ground truth $\mathbf{C}_{gt}$ [S15, unofficial].
-    *   Total Loss = $L_{coarse} + L_{fine}$ [S15, unofficial].
+    *   Compute photometric loss (MSE) between $\hat{C}_{coarse}$ and ground truth $\mathbf{C}_{gt}$ [S15, unofficial][S20].
+    *   If fine network is used, compute MSE between $\hat{C}_{fine}$ and $\mathbf{C}_{gt}$ [S15, unofficial].
+    *   Total loss = $L_{coarse} + L_{fine}$ [S15, unofficial].
 
-9.  **Optimization:** Update $\theta_{coarse}$ and $\theta_{fine}$ using gradient descent [S3, S12].
+9.  **Optimization:**
+    *   Update parameters $\theta_c$ and $\theta_f$ using gradient descent on the total loss [S3, S12].
 
 **Pseudocode:**
 
@@ -85,204 +78,189 @@ NeRF Volumetric Rendering (Coarse/Fine Sampling) is a differentiable rendering m
 
 ```python
 import torch
-import torch.nn as nn
-
-def positional_encoding(x, num_bands=10):
-    """Standard positional encoding as defined in [S2, S19]."""
-    # x is [..., D]
-    # Output is [..., D * 2 * num_bands]
-    freq_bands = 2.0 ** torch.linspace(0, num_bands - 1, num_bands).to(x.device)
-    x_proj = x.unsqueeze(-1) * freq_bands.unsqueeze(0) # [..., D, num_bands]
-    x_proj = torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1) # [..., D, 2*num_bands]
-    return x_proj.reshape(x.shape[:-1] + (-1,))
-
-class NeRFMLP(nn.Module):
-    def __init__(self, input_ch=3, input_ch_views=3, num_layers=8, hidden_dim=256, skip_indices=[4]):
-        super().__init__()
-        self.num_layers = num_layers
-        self.skip_indices = skip_indices
-        # Simplified MLP structure for clarity; original NeRF has skip connections
-        self.layers = nn.ModuleList()
-        for i in range(num_layers):
-            in_dim = input_ch + (input_ch if i in skip_indices else 0)
-            out_dim = hidden_dim
-            self.layers.append(nn.Linear(in_dim, out_dim))
-            if i < num_layers - 1:
-                self.layers.append(nn.ReLU())
-        # View direction processing
-        self.view_layers = nn.ModuleList()
-        self.view_layers.append(nn.Linear(input_ch_views, hidden_dim // 4))
-        self.view_layers.append(nn.ReLU())
-        self.view_layers.append(nn.Linear(hidden_dim // 4, hidden_dim))
-        self.view_layers.append(nn.ReLU())
-        self.color_layer = nn.Linear(hidden_dim, 3)
-        self.sigma_layer = nn.Linear(hidden_dim, 1)
-
-    def forward(self, x, d):
-        # x: [R, N, 3], d: [R, N, 3]
-        x_enc = positional_encoding(x)
-        d_enc = positional_encoding(d)
-        
-        h = x_enc
-        for i, layer in enumerate(self.layers[:-1]):
-            if i in self.skip_indices:
-                h = torch.cat([h, x_enc], dim=-1)
-            h = layer(h)
-        
-        # Process view direction
-        d_h = self.view_layers[0](d_enc)
-        d_h = self.view_layers[1](d_h)
-        d_h = self.view_layers[2](d_h)
-        d_h = self.view_layers[3](d_h)
-        
-        h = h + d_h
-        sigma = self.sigma_layer(h)
-        color = self.color_layer(h)
-        return sigma, color
+import torch.nn.functional as F
 
 def render_coarse_fine(rays_o, rays_d, near, far, coarse_model, fine_model, 
-                       n_samples_coarse=64, n_samples_fine=128, 
-                       perturb=True, lindisp=False, raw_noise_std=1.0):
+                       n_samples_coarse, n_samples_fine, perturb, raw_noise_std, 
+                       use_viewdirs, embeddirs_fn, chunk_size=1024*3):
     """
     Renders a batch of rays using coarse and fine sampling.
     rays_o: [R, 3]
     rays_d: [R, 3]
-    near: float
-    far: float
+    near: [R]
+    far: [R]
     """
     R = rays_o.shape[0]
     
-    # 1. Coarse Sampling
-    t_vals = torch.linspace(0., 1., n_samples_coarse).to(rays_o.device)
-    if not lindisp:
-        z_vals = near * (1. - t_vals) + far * t_vals
-    else:
-        z_vals = 1. / (1. / near * (1. - t_vals) + 1. / far * t_vals)
+    # --- Coarse Stage ---
+    # 1. Generate coarse samples
+    t_vals = torch.linspace(0., 1., n_samples_coarse, device=rays_o.device)
+    z_vals = near.unsqueeze(-1) * (1. - t_vals) + far.unsqueeze(-1) * t_vals
     
-    z_vals = z_vals.expand(R, -1) # [R, N_coarse]
-    
-    if perturb:
+    if perturb > 0.:
         mids = 0.5 * (z_vals[:, 1:] + z_vals[:, :-1])
         upper = torch.cat([mids, z_vals[:, -1:]], -1)
         lower = torch.cat([z_vals[:, :1], mids], -1)
         t_rand = torch.rand_like(z_vals)
         z_vals = lower + (upper - lower) * t_rand
+        
+    # 2. Query coarse model
+    pts = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * z_vals.unsqueeze(-1) # [R, N_coarse, 3]
+    pts_flat = pts.reshape(-1, 3)
     
-    # 2. Coarse Query
-    pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., None] # [R, N, 3]
-    # Assume viewdirs are same for all samples on a ray
-    viewdirs = rays_d[:, None, :].expand(-1, n_samples_coarse, -1)
+    # Positional encoding for position
+    pts_encoded = positional_encoding(pts_flat) # [R*N, D_pos]
     
-    sigma_raw_coarse, color_raw_coarse = coarse_model(pts.reshape(-1, 3), viewdirs.reshape(-1, 3))
-    sigma_raw_coarse = sigma_raw_coarse.reshape(R, n_samples_coarse, 1)
-    color_raw_coarse = color_raw_coarse.reshape(R, n_samples_coarse, 3)
+    # View direction encoding if needed
+    if use_viewdirs:
+        dirs = rays_d.unsqueeze(1).expand(-1, n_samples_coarse, -1).reshape(-1, 3)
+        dirs_encoded = embeddirs_fn(dirs) # [R*N, D_dir]
+        net_input = torch.cat([pts_encoded, dirs_encoded], dim=-1)
+    else:
+        net_input = pts_encoded
+        
+    # Chunked query to manage memory
+    raw_coarse = batchify_query(coarse_model, net_input, chunk_size) # [R*N, 4]
+    raw_coarse = raw_coarse.reshape(R, n_samples_coarse, 4)
     
-    # Add noise to density for regularization [S11, unofficial]
-    sigma_raw_coarse = sigma_raw_coarse + torch.randn_like(sigma_raw_coarse) * raw_noise_std
+    # 3. Activate outputs
+    rgb_coarse = torch.sigmoid(raw_coarse[..., :3])
+    sigma_coarse = raw_noise_std * torch.randn_like(raw_coarse[..., 3]) + F.softplus(raw_coarse[..., 3])
     
-    # 3. Coarse Compositing
-    dists = z_vals[:, 1:] - z_vals[:, :-1] # [R, N-1]
-    dists = torch.cat([dists, torch.tensor([1e10]).expand(dists.shape[0], 1).to(dists.device)], -1) # [R, N]
-    dists = dists * torch.norm(rays_d, dim=-1, keepdim=True) # Scale by ray direction norm if not unit [S11, unofficial]
+    # 4. Compute coarse weights
+    dists = z_vals[:, 1:] - z_vals[:, :-1]
+    dists = torch.cat([dists, torch.tensor([1e10], device=rays_o.device).expand(R, 1)], dim=-1)
+    dists = dists * torch.norm(rays_d, dim=-1, keepdim=True)
     
-    alpha_coarse = 1. - torch.exp(-torch.relu(sigma_raw_coarse[..., 0]) * dists) # [R, N]
-    transmittance_coarse = torch.cumprod(1. - alpha_coarse + 1e-10, dim=1) # [R, N]
-    transmittance_coarse = torch.cat([torch.ones(R, 1).to(transmittance_coarse.device), transmittance_coarse[:, :-1]], dim=1)
+    alpha_coarse = 1. - torch.exp(-sigma_coarse * dists)
+    transmittance_coarse = torch.exp(-torch.cumsum(sigma_coarse * dists, dim=-1))
+    transmittance_coarse = torch.cat([torch.ones_like(transmittance_coarse[:, :1]), transmittance_coarse[:, :-1]], dim=-1)
     
-    weights_coarse = alpha_coarse * transmittance_coarse # [R, N]
-    color_coarse = torch.sum(weights_coarse[..., None] * torch.sigmoid(color_raw_coarse), dim=1) # [R, 3]
+    weights_coarse = alpha_coarse * transmittance_coarse
+    rgb_coarse_final = torch.sum(weights_coarse.unsqueeze(-1) * rgb_coarse, dim=-2)
     
-    # 4. Fine Sampling (Importance Sampling from Coarse Weights)
-    # Sample from the distribution defined by weights_coarse (excluding last sample which has infinite dist)
-    # This is a simplified implementation of sampling from CDF
-    weights_coarse_sum = weights_coarse[:, :-1].sum(dim=1, keepdim=True) # [R, 1]
-    pdf_coarse = weights_coarse[:, :-1] / (weights_coarse_sum + 1e-10) # [R, N-1]
-    
-    # Generate uniform random numbers for stratified sampling
-    u = torch.rand(R, n_samples_fine).to(rays_o.device)
-    
-    # Inverse CDF sampling (simplified for uniform bins, requires cumulative sum)
-    cdf_coarse = torch.cumsum(pdf_coarse, dim=1) # [R, N-1]
-    cdf_coarse = torch.cat([torch.zeros(R, 1).to(cdf_coarse.device), cdf_coarse], dim=1) # [R, N]
-    
-    # Find indices where u falls in the CDF
-    indices = torch.searchsorted(cdf_coarse, u, right=True) # [R, N_fine]
-    # Clamp indices
-    indices = torch.clamp(indices, 0, n_samples_coarse - 2)
-    
-    # Interpolate z_vals based on indices
-    # This is a placeholder for the actual interpolation logic which depends on the specific implementation
-    # For simplicity, we assume we pick the coarse z_vals at the selected indices
-    # A more accurate implementation would interpolate between the bin edges
-    z_vals_fine = torch.gather(z_vals[:, :-1], 1, indices) # [R, N_fine]
+    # --- Fine Stage ---
+    # 5. Sample fine points from coarse weights
+    # Exclude last sample for PDF
+    weights_coarse_pdf = weights_coarse[:, :-1]
+    fine_z_vals = sample_stratified(weights_coarse_pdf, n_samples_fine, near, far)
     
     # Concatenate and sort
-    z_vals_all = torch.cat([z_vals, z_vals_fine], dim=1) # [R, N_coarse + N_fine]
-    z_vals_all, sort_idx = torch.sort(z_vals_all, dim=1)
+    z_vals_all = torch.cat([z_vals, fine_z_vals], dim=-1)
+    z_vals_all, sort_idx = torch.sort(z_vals_all, dim=-1)
     
-    # 5. Fine Query (Detached from Coarse Graph)
-    pts_fine = rays_o[:, None, :] + rays_d[:, None, :] * z_vals_all[..., None]
-    viewdirs_fine = rays_d[:, None, :].expand(-1, z_vals_all.shape[1], -1)
+    # Detach fine samples from graph
+    z_vals_all = z_vals_all.detach()
     
-    # Detach to prevent gradient flow to coarse model
-    pts_fine_detached = pts_fine.detach()
-    viewdirs_fine_detached = viewdirs_fine.detach()
+    # 6. Query fine model
+    pts_all = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * z_vals_all.unsqueeze(-1)
+    pts_all_flat = pts_all.reshape(-1, 3)
+    pts_all_encoded = positional_encoding(pts_all_flat)
     
-    sigma_raw_fine, color_raw_fine = fine_model(pts_fine_detached.reshape(-1, 3), viewdirs_fine_detached.reshape(-1, 3))
-    sigma_raw_fine = sigma_raw_fine.reshape(R, z_vals_all.shape[1], 1)
-    color_raw_fine = color_raw_fine.reshape(R, z_vals_all.shape[1], 3)
+    if use_viewdirs:
+        dirs_all = rays_d.unsqueeze(1).expand(-1, z_vals_all.shape[-1], -1).reshape(-1, 3)
+        dirs_all_encoded = embeddirs_fn(dirs_all)
+        net_input_fine = torch.cat([pts_all_encoded, dirs_all_encoded], dim=-1)
+    else:
+        net_input_fine = pts_all_encoded
+        
+    raw_fine = batchify_query(fine_model, net_input_fine, chunk_size)
+    raw_fine = raw_fine.reshape(R, z_vals_all.shape[-1], 4)
     
-    # 6. Fine Compositing
-    dists_fine = z_vals_all[:, 1:] - z_vals_all[:, :-1]
-    dists_fine = torch.cat([dists_fine, torch.tensor([1e10]).expand(dists_fine.shape[0], 1).to(dists_fine.device)], -1)
-    dists_fine = dists_fine * torch.norm(rays_d, dim=-1, keepdim=True)
+    # 7. Activate and composite fine
+    rgb_fine = torch.sigmoid(raw_fine[..., :3])
+    sigma_fine = raw_noise_std * torch.randn_like(raw_fine[..., 3]) + F.softplus(raw_fine[..., 3])
     
-    alpha_fine = 1. - torch.exp(-torch.relu(sigma_raw_fine[..., 0]) * dists_fine)
-    transmittance_fine = torch.cumprod(1. - alpha_fine + 1e-10, dim=1)
-    transmittance_fine = torch.cat([torch.ones(R, 1).to(transmittance_fine.device), transmittance_fine[:, :-1]], dim=1)
+    dists_all = z_vals_all[:, 1:] - z_vals_all[:, :-1]
+    dists_all = torch.cat([dists_all, torch.tensor([1e10], device=rays_o.device).expand(R, 1)], dim=-1)
+    dists_all = dists_all * torch.norm(rays_d, dim=-1, keepdim=True)
+    
+    alpha_fine = 1. - torch.exp(-sigma_fine * dists_all)
+    transmittance_fine = torch.exp(-torch.cumsum(sigma_fine * dists_all, dim=-1))
+    transmittance_fine = torch.cat([torch.ones_like(transmittance_fine[:, :1]), transmittance_fine[:, :-1]], dim=-1)
     
     weights_fine = alpha_fine * transmittance_fine
-    color_fine = torch.sum(weights_fine[..., None] * torch.sigmoid(color_raw_fine), dim=1)
+    rgb_fine_final = torch.sum(weights_fine.unsqueeze(-1) * rgb_fine, dim=-2)
     
-    return color_coarse, color_fine
+    return rgb_coarse_final, rgb_fine_final, weights_coarse, weights_fine
+
+def batchify_query(model, inputs, chunk_size):
+    """Queries model in chunks to avoid OOM."""
+    outputs = []
+    for i in range(0, inputs.shape[0], chunk_size):
+        chunk_out = model(inputs[i:i+chunk_size])
+        outputs.append(chunk_out)
+    return torch.cat(outputs, dim=0)
+
+def sample_stratified(weights, n_samples, near, far):
+    """Samples z_vals from the probability distribution defined by weights."""
+    # Get PDF
+    pdf = weights / torch.sum(weights, dim=-1, keepdim=True)
+    cdf = torch.cumsum(pdf, dim=-1)
+    cdf = torch.cat([torch.zeros_like(cdf[:, :1]), cdf], dim=-1)
+    
+    # Sample uniform values
+    u = torch.rand_like(cdf)
+    
+    # Inverse CDF sampling
+    # Find indices where u falls in cdf intervals
+    indices = torch.searchsorted(cdf, u, side='right')
+    # Clamp indices
+    indices = torch.clamp(indices, 0, cdf.shape[-1] - 2)
+    
+    # Linear interpolation between z_vals corresponding to cdf indices
+    z0 = z_vals[torch.arange(z_vals.shape[0]), indices] # coarse z_vals
+    z1 = z_vals[torch.arange(z_vals.shape[0]), indices + 1]
+    
+    # This is a simplified placeholder; actual implementation requires 
+    # mapping cdf indices back to z_vals and interpolating.
+    # For the purpose of this article, we assume a helper function exists 
+    # that performs inverse CDF sampling on the discrete distribution.
+    return z_fine_samples # Placeholder for actual stratified sampling logic
 ```
 
+**Parameters with Typical Values:**
+*   $N_{coarse}$: 64 [S7, S10, S33, unofficial].
+*   $N_{fine}$: 128 [S33, unofficial].
+*   $perturb$: 1.0 (jitter) or 0.0 (no jitter) [S25, unofficial].
+*   $raw\_noise\_std$: $10^0$ (1.0) [S11, unofficial].
+*   $lindisp$: False for bounded scenes, True for front-facing/unbounded scenes [S30, unofficial].
+*   $chunk$: Not specified, used to manage GPU memory [S1, unofficial].
+
 **Edge Cases and Pitfalls:**
-*   **Numerical Stability:** Add a small epsilon ($\epsilon = 10^{-10}$) to the cumulative product of transmittance to prevent underflow [S14, S25, unofficial].
-*   **Last Segment:** The last segment distance must be set to a large value (e.g., $10^{10}$) to ensure the ray terminates and the last sample contributes to the color if it is opaque [S11, unofficial][S13].
-*   **View Direction:** If the model uses view directions, they must be passed to the network. If not, only positions are used [S1, S25, unofficial].
-*   **Depth Calculation:** Depth is computed as the weighted average of sample depths. If opacity is very low, depth can be noisy [S11, unofficial].
+*   **Numerical Stability:** Add $\epsilon = 10^{-10}$ to transmittance calculations to prevent $\exp(-\infty)$ underflow [S14, S25, unofficial].
+*   **Ray Termination:** Append a large distance ($10^{10}$) to the last segment to ensure the ray terminates even if the volume is transparent [S11, unofficial][S13].
+*   **Gradient Flow:** Detach fine sample positions from the computation graph to prevent gradients from flowing back to the coarse network, which stabilizes training [S24, unofficial].
+*   **View Direction:** If view-dependent color is not used, omit the direction input to the MLP to reduce computational cost [S1, S25, unofficial].
 
 ## Subtopics
 
 ### [NeRF Importance Sampling](1565-nerf-importance-sampling.md)
-Refines sampling by drawing points from a PDF derived from coarse alpha weights, solving aliasing in high-opacity regions.
+NeRF Importance Sampling is a two-stage volume rendering strategy that refines the discrete sampling distribution along a ray by drawing additional points from a probability density function (PDF) derived from the coarse stage's opacity weights. It solves the problem of insufficient sampling in high-opacity regions, which leads to aliasing and noise, by concentrating fine samples where the volume contributes most to the final color. It sets itself apart from its siblings, such as [NerfAcc Rendering Pipeline](1619-nerfacc-rendering-pipeline.md) which uses learned acceleration structures, and [VF-NeRF](3138-vf-nerf.md) which uses view-dependent feature grids, by relying on a simple, differentiable stratified resampling of the coarse alpha weights without auxiliary networks or complex data structures.
 
 ### [NerfAcc Rendering Pipeline](1619-nerfacc-rendering-pipeline.md)
-A modular, high-performance pipeline using occupancy grids and proposal networks to accelerate rendering, building on the coarse/fine concept.
+The NerfAcc Rendering Pipeline is a modular, CUDA-accelerated framework for differentiable volumetric rendering that decouples the sampling strategy from the radiance field representation. It solves the computational bottleneck of dense ray marching by using a transmittance estimator to generate sparse, importance-sampled intervals along rays, enabling significant speedups (1.5× to 20×) over standard NeRF implementations. Unlike [NeRF Importance Sampling](1565-nerf-importance-sampling.md) which relies on fixed hierarchical passes, or [VF-NeRF](3138-vf-nerf.md) which uses voxel-based acceleration, NerfAcc provides a unified interface for integrating occupancy grids and proposal networks to skip empty space and concentrate samples on surfaces.
 
 ### [VF-NeRF](3138-vf-nerf.md)
-Uses viewshed fields for rigid registration between NeRFs, focusing on novel view generation for alignment rather than training efficiency.
+VF-NeRF is a method for rigid registration between two Neural Radiance Fields (NeRFs) when the original camera positions are unknown. It introduces **Viewshed Fields (VF)**, an implicit function that maps an oriented point (3D location and viewing direction) to a scalar indicating how well that point was covered by the original camera set. By using Normalizing Flows to generate high-scoring oriented points, VF-NeRF creates informative virtual camera viewpoints for photometric alignment, avoiding the noise and poor coverage associated with random sampling. It differs from [NeRF Importance Sampling](1565-nerf-importance-sampling.md) by focusing on registration via novel view generation rather than training efficiency, and from [NerfAcc Rendering Pipeline](1619-nerfacc-rendering-pipeline.md) by its specific application to inter-NeRF alignment.
 
 ### [Voxel-based Volume Rendering](3845-voxel-based-volume-rendering.md)
-Trains a voxel representation where multiple voxels contribute to a single sample, differing from the pure MLP approach.
+Voxel-based Volume Rendering is a technique that trains a dense or semi-dense voxel representation of a radiance field, where multiple voxels contribute to a single sample during rendering. It differs from sparse voxelization (such as octrees) by using a fixed grid structure where the model determines opacity and color through aggregation over voxel intervals. It is primarily used as a coarse model in two-tier sampling architectures to identify opaque regions in space before fine-grained sampling.
 
 ## Operating characteristics
-
-*   **Time Complexity:** $O(R \cdot (N_{coarse} + N_{fine}))$ per image, where $R$ is the number of rays (pixels) and $N$ is the number of samples. Training is slow due to the need to query the MLP for every sample in every iteration [S5, S9, unofficial].
-*   **Memory Complexity:** $O(R \cdot N)$ for storing intermediate tensors during the forward pass. Chunking is used to manage memory [S13].
-*   **Measured Performance:** Training can take 10+ hours for a single scene on a GPU [S5, unofficial]. Rendering an image takes less than a second to ~30 seconds depending on resolution and hardware [S9, unofficial].
-*   **Strengths:** High-quality novel view synthesis with view-dependent effects; differentiable end-to-end training; no need for explicit geometry (meshes/voxels) [S3][S9, unofficial].
-*   **Limitations:** Slow training and inference compared to grid-based methods; prone to noise and aliasing if sampling is insufficient (hence coarse/fine) [S1, S15, unofficial]; requires dense input views for good results [S5, unofficial].
-*   **When to Use:** High-fidelity view synthesis from a moderate number of posed images.
-*   **When Not to Use:** Real-time applications (use [In-Shader Neural Volume Ray Marching](1495-in-shader-neural-volume-ray-marching.md) or [NerfAcc](1619-nerfacc-rendering-pipeline.md)); scenes with very sparse input views (use [DS-NeRF](5) or other sparse-view variants).
+*   **Time Complexity:** $O(R \cdot (N_{coarse} + N_{fine}))$ per ray, where $R$ is the number of rays. The fine stage adds overhead but improves quality.
+*   **Memory Complexity:** $O(R \cdot N_{fine})$ for storing sample points and network outputs. Chunking is used to manage GPU memory [S1, unofficial][S13].
+*   **Measured Performance:** Training times are typically several hours to days for a single scene on a single GPU [S9, unofficial]. Rendering times are between less than a second and ~30 seconds per image depending on resolution [S9, unofficial].
+*   **Scaling:** Performance degrades with high resolution due to the large number of rays. The method does not scale well to large scenes without acceleration structures [S1, S24, unofficial].
+*   **Strengths:** High-quality novel view synthesis; simple implementation; differentiable end-to-end training [S3][S9, unofficial].
+*   **Limitations:** Slow training and rendering; requires dense input views; prone to artifacts in sparse view settings [S5, S9, unofficial].
+*   **When to Use:** High-quality view synthesis for small to medium scenes with dense input views.
+*   **When Not to Use:** Real-time applications, large-scale scenes, or sparse view settings.
 
 ## Background
-
-NeRF (Neural Radiance Fields) was introduced by Mildenhall et al. in 2020 [S3][S9, unofficial]. It represents a scene as a continuous volumetric radiance field parameterized by an MLP. The method was published in ECCV 2020 and received an Oral Presentation and Best Paper Honorable Mention [S9, unofficial]. It builds on the concept of implicit neural representations [S7, unofficial] and differentiable volume rendering [S1, S14, unofficial]. The coarse/fine sampling strategy was introduced to address the issue of insufficient sampling in complex scenes, leading to better convergence and higher quality renders [S15, S24, unofficial].
+NeRF was introduced by Mildenhall et al. in 2020 [S3][S9, unofficial]. It represents a scene as a continuous volumetric radiance field parameterized by a multi-layer perceptron (MLP) [S4][S30, unofficial]. The method was developed to address the limitations of previous neural rendering approaches, which often required voxel grids or suffered from low resolution [S3]. The two-stage coarse/fine sampling strategy was introduced to improve the quality of the rendered images by concentrating samples in high-density regions [S10, S15, unofficial]. The method has become a foundational technique in neural rendering, inspiring numerous variants and acceleration methods [S5, S24, unofficial].
 
 ## Sources
-
 [S1] Fourier Feature Networks and Neural Volume Rendering, https://github.com/matajoh/fourier_feature_nets, fetched 2026-10-26 (unofficial)
 [S2] Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00580, fetched 2026-10-26
 [S3] NeRF: Representing scenes as neural radiance fields for view synthesis, http://www.matthewtancik.com/nerf, fetched 2026-10-27

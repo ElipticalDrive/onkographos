@@ -3,12 +3,12 @@
 Also called: Gradient-based mesh refinement
 
 ## Overview
-Differentiable Mesh Refinement is a training strategy that adjusts the vertex positions and colors of a template mesh to match input photographs, using multi-layer splatting for stability [S1, unofficial]. It solves the problem of fitting a parametric surface to multi-view imagery where single-layer splatting is unstable due to the flexibility of the optimization and the sensitivity of image derivatives [S1, unofficial]. It differs from pose estimation because each vertex depends on fewer pixels, making derivative errors more significant, and from grid-based methods by operating directly on mesh topology rather than occupancy fields [S1, unofficial][S2].
+Differentiable Mesh Refinement is a training strategy that adjusts the vertex positions and attributes (such as color) of a template mesh to better fit input observations, such as photographs or occupancy fields [S1, unofficial][S2]. It addresses the problem of geometric misalignment in pre-existing mesh structures by treating vertex coordinates as differentiable parameters [S1, unofficial][S2]. Unlike pose estimation, where each vertex influences many pixels, mesh optimization involves fewer pixels per vertex, making the method more sensitive to errors in image derivatives and requiring stable rendering techniques like multi-layer splatting [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** Initial mesh vertices $V_0$ (positions), camera parameters (intrinsics, extrinsics), and input images.
-- **Output:** Optimized mesh vertices $V$ and associated colors/attributes that minimize the difference between rendered and input images.
+- **Input:** Initial mesh vertices $V_0$ (positions), camera parameters, and input images.
+- **Output:** Optimized mesh vertices $V$ and associated attributes that minimize the difference between rendered and input observations [S1, unofficial].
 
 **Data Structures:**
 - **Vertices:** A PyTorch `Parameter` tensor of shape $(N, 3)$, where $N$ is the number of vertices. Initialized as `v = torch.nn.Parameter(v0.clone())` [S1, unofficial].
@@ -16,82 +16,80 @@ Differentiable Mesh Refinement is a training strategy that adjusts the vertex po
 - **Optimizer:** RMSprop optimizer configured with learning rate $lr=10^{-5}$ [S1, unofficial].
 
 **Algorithm Steps:**
-1. **Initialization:** Initialize the mesh vertices as a trainable PyTorch parameter: `v = torch.nn.Parameter(v0.clone())` [S1, unofficial]. Initialize the optimizer: `optimizer = optim.RMSprop([v], lr=1e-5)` [S1, unofficial].
-2. **Iteration Loop:** Iterate through refinement steps (`self.refinement_step`) [S1, unofficial].
-3. **Face Sampling:** To manage memory, subsample faces in batches of size `self.refine_max_faces` [S1, unofficial]. For each batch of faces:
-    a. Sample points on the triangle surface using a Dirichlet distribution to ensure uniform coverage:
-       $$ \epsilon \sim \text{Dirichlet}((0.5, 0.5, 0.5)) $$
-       $$ p_{\text{face}} = \sum_{i=0}^{2} \epsilon_i v_i $$
-       where $v_i$ are the vertices of the face [S1, unofficial].
-    b. Compute the geometric face normal from the vertices:
-       $$ v_1 = v_1 - v_0 $$
-       $$ v_2 = v_2 - v_1 $$
-       $$ n_{\text{geo}} = v_1 \times v_2 $$
-       $$ n_{\text{geo}} = \frac{n_{\text{geo}}}{\|n_{\text{geo}}\| + \epsilon} $$
-       where $\epsilon = 10^{-10}$ for numerical stability [S1, unofficial].
-4. **Neural Field Query:** Query the neural network for scalar field values at the sampled points $p_{\text{face}}$. The network output is passed through a sigmoid function:
-   $$ f(p) = \sigma(\text{model.decode}(p, c).\text{logits}) $$
-   Large batches are split into chunks of 20,000 points to prevent memory overflow [S1, unofficial].
-5. **Target Normal Computation:** Compute the target normal via automatic differentiation of the scalar field with respect to the point position:
-   $$ n_{\text{target}} = -\nabla_p f(p) $$
-   $$ n_{\text{target}} = \frac{n_{\text{target}}}{\|n_{\text{target}}\|} $$
-   This is implemented as `normal_target = -autograd.grad([face_value.sum()], [face_point], create_graph=True)[0]` [S1, unofficial].
-6. **Loss Calculation:** Define the loss as a combination of field value proximity to a threshold and normal alignment:
-   $$ L_{\text{target}} = \frac{1}{K} \sum_{k=1}^{K} (f(p_k) - \text{threshold})^2 $$
-   $$ L_{\text{normal}} = \frac{1}{K} \sum_{k=1}^{K} \| n_{\text{geo}, k} - n_{\text{target}, k} \|^2 $$
-   $$ L = L_{\text{target}} + 0.01 \cdot L_{\text{normal}} $$
-   where $K$ is the number of sampled points in the batch [S1, unofficial].
-7. **Optimization Step:** Backpropagate the loss and update the vertices:
-   $$ L.\text{backward()} $$
-   $$ \text{optimizer.step()} $$
-   [S1, unofficial].
+1. **Initialization:** Initialize vertices and optimizer [S1, unofficial].
+2. **Iteration Loop:** Iterate through `self.refinement_step` steps [S1, unofficial].
+3. **Face Sampling:** Subsample faces in batches of size `self.refine_max_faces` to manage memory [S1, unofficial]. For each batch:
+    a. Sample points on the triangle surface using a Dirichlet distribution: $\epsilon \sim \text{Dirichlet}((0.5, 0.5, 0.5))$, then compute $p_{\text{face}} = \sum_{i=0}^{2} \epsilon_i v_i$ [S1, unofficial].
+    b. Compute the geometric face normal: $v_1 = v_1 - v_0$, $v_2 = v_2 - v_1$, $n_{\text{geo}} = v_1 \times v_2$, normalized as $n_{\text{geo}} / (\|n_{\text{geo}}\| + 10^{-10})$ [S1, unofficial].
+4. **Neural Field Query:** Query the neural network for scalar field values at $p_{\text{face}}$ using `torch.sigmoid(self.model.decode(p_split, c).logits)`, splitting large batches into chunks of 20,000 points [S1, unofficial].
+5. **Target Normal Computation:** Compute the target normal via automatic differentiation: $n_{\text{target}} = -\nabla_p f(p)$, normalized [S1, unofficial].
+6. **Loss Calculation:** Combine field value proximity to a threshold and normal alignment: $L_{\text{target}} = \text{mean}((f(p) - \text{threshold})^2)$, $L_{\text{normal}} = \text{mean}(\|n_{\text{geo}} - n_{\text{target}}\|^2)$, $L = L_{\text{target}} + 0.01 \cdot L_{\text{normal}}$ [S1, unofficial].
+7. **Optimization Step:** Backpropagate and update vertices: `loss.backward()` followed by `optimizer.step()` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+v = torch.nn.Parameter(v0.clone())
+optimizer = optim.RMSprop([v], lr=1e-5)
+
+for step in range(self.refinement_step):
+    for face_batch in batch_faces(self.refine_max_faces):
+        eps = np.random.dirichlet((0.5, 0.5, 0.5), size=face_batch.shape[0])
+        face_point = (face_vertex * eps[:, :, None]).sum(dim=1)
+
+        face_v1 = face_vertex[:, 1, :] - face_vertex[:, 0, :]
+        face_v2 = face_vertex[:, 2, :] - face_vertex[:, 1, :]
+        face_normal = torch.cross(face_v1, face_v2)
+        face_normal = face_normal / (face_normal.norm(dim=1, keepdim=True) + 1e-10)
+
+        face_value = torch.sigmoid(self.model.decode(p_split, c).logits)
+
+        normal_target = -autograd.grad([face_value.sum()], [face_point], create_graph=True)[0]
+        normal_target = normal_target / (normal_target.norm(dim=1, keepdim=True) + 1e-10)
+
+        loss_target = (face_value - threshold).pow(2).mean()
+        loss_normal = (face_normal - normal_target).pow(2).sum(dim=1).mean()
+        loss = loss_target + 0.01 * loss_normal
+
+        loss.backward()
+        optimizer.step()
+```
 
 **Parameters:**
 - Learning rate: $10^{-5}$ [S1, unofficial].
 - Normal loss weight: $0.01$ [S1, unofficial].
-- Batch size for faces: `self.refine_max_faces` (Not given in the sources).
+- Batch size for faces: `self.refine_max_faces` [S1, unofficial].
 - Chunk size for neural network query: $20,000$ points [S1, unofficial].
 - Dirichlet concentration: $(0.5, 0.5, 0.5)$ [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Numerical Stability:** Epsilon ($10^{-10}$) is added to the normal normalization to prevent division by zero for degenerate faces [S1, unofficial].
-- **Memory Constraints:** Large batches of points are split into chunks of 20,000 to avoid out-of-memory errors during neural network queries [S1, unofficial].
-- **Derivative Sensitivity:** Because each vertex depends on fewer pixels, derivative errors can be significant, necessitating the use of multi-layer splatting for stability [S1, unofficial].
+- **Numerical Stability:** Epsilon ($10^{-10}$) is added to normal normalization to prevent division by zero for degenerate faces [S1, unofficial].
+- **Memory Constraints:** Large batches are split into chunks of 20,000 to avoid out-of-memory errors during neural network queries [S1, unofficial].
+- **Derivative Sensitivity:** Fewer pixels per vertex increase sensitivity to image derivative errors, necessitating multi-layer splatting [S1, unofficial].
 
 ## Subtopics
 
 ### [Mesh Refinement via Vertex Optimization](989-mesh-refinement-via-vertex-optimization.md)
-Mesh Refinement via Vertex Optimization adjusts the vertex positions and colors of a template mesh to match input photographs, using multi-layer splatting for stability. It solves the problem of fitting a parametric surface to multi-view imagery where single-layer splatting is unstable due to the flexibility of the optimization and the sensitivity of image derivatives. It differs from pose estimation because each vertex depends on fewer pixels, making derivative errors more significant, and from grid-based methods by operating directly on mesh topology rather than occupancy fields.
+Mesh Refinement via Vertex Optimization adjusts the positions and attributes (such as color) of a template mesh to better fit input observations, such as photographs or occupancy fields. It addresses the problem of geometric misalignment in pre-existing mesh structures by treating vertex coordinates as differentiable parameters. Unlike pose estimation, where each vertex influences many pixels, mesh optimization involves fewer pixels per vertex, making the method more sensitive to errors in image derivatives and requiring stable rendering techniques like multi-layer splatting.
 
 ### SubdivNet
-#### definition
-- [S2] A method that performs a remeshing step to create a regular, hierarchical structure using self-parametrization.
-#### step
-- [S2] Enforce subdivision sequence connectivity to guarantee that every face is surrounded by exactly three adjacent faces, effectively creating a uniform mesh pyramid analogous to a 2D image pyramid.
-- [S2] Define a highly flexible mesh convolution operator that supports variable kernel sizes, strides, and dilations.
-- [S2] Implement pooling and upsampling as uniform 4-to-1 face merging and 1-to-4 face splitting operations.
+The provided evidence for SubdivNet contains unsupported claims regarding self-parametrization and subdivision sequence connectivity. The actual source [S2] discusses Face-based Methods like MeshNet and MeshNet++, which focus on triangular polygons, use Face Kernel Correlation (FKC) descriptors for local geometry, and implement dynamic feature aggregation via attention mechanisms and pooling by contracting edges in the primal graph [S2]. Specific implementation details for SubdivNet are not given in the sources.
 
 ### SOAR-based Adaptive Refinement
-#### definition
-- [S3] An adaptive refinement scheme for crack-free mesh generation. It stores object-space error terms and bounding spheres for each 'diamond' (two cousin patches sharing a hypotenuse). Errors and spheres are inflated to ensure parent values are at least as large as children's, and cousins agree on single error/sphere values to refine together. This nesting is enforced for cousins as well.
+An adaptive refinement scheme for crack-free mesh generation [S3]. It stores object-space error terms and bounding spheres for each 'diamond' (two cousin patches sharing a hypotenuse) [S3]. Errors and spheres are inflated to ensure parent values are at least as large as children's, and cousins agree on single error/sphere values to refine together [S3]. This nesting is enforced for cousins as well [S3].
 
 ## Operating characteristics
-Time and memory complexity: The method uses iterative optimization with RMSprop, so time complexity depends on the number of refinement steps and the batch size of faces and points. Memory usage is managed by subsampling faces in batches (`self.refine_max_faces`) and splitting neural network queries into chunks of 20,000 points [S1, unofficial].
-
-Measured performance with its hardware, resolution and scene: Not given in the sources.
-
-Scaling: Not given in the sources.
-
-Strengths and limitations: The method provides stability through multi-layer splatting, addressing the sensitivity of image derivatives in single-layer splatting [S1, unofficial]. However, it is sensitive to derivative errors because each vertex depends on fewer pixels [S1, unofficial].
-
-When to use it and when not: Use when fitting a parametric surface to multi-view imagery where grid-based methods are unsuitable. Not recommended when single-layer splatting is sufficient or when computational resources are extremely limited due to the iterative optimization process [S1, unofficial].
+**Time and memory complexity:** The method uses iterative optimization with RMSprop, so time complexity depends on the number of refinement steps and the batch size of faces and points [S1, unofficial]. Memory usage is managed by subsampling faces in batches (`self.refine_max_faces`) and splitting neural network queries into chunks of 20,000 points [S1, unofficial].
+**Measured performance with its hardware, resolution and scene:** Not given in the sources.
+**Scaling:** Not given in the sources.
+**Strengths and limitations:** The method provides stability through multi-layer splatting, addressing the sensitivity of image derivatives in single-layer splatting [S1, unofficial]. However, it is sensitive to derivative errors because each vertex depends on fewer pixels [S1, unofficial].
+**When to use it and when not:** Use when fitting a parametric surface to multi-view imagery where grid-based methods are unsuitable [S1, unofficial]. Not recommended when single-layer splatting is sufficient or when computational resources are extremely limited due to the iterative optimization process [S1, unofficial].
 
 ## Background
-Origin (who, when, which paper): The method is described in the repository `autonomousvision/differentiable_volumetric_rendering` [S1, unofficial].
-
-History and development: The method is part of the differentiable volumetric rendering framework, which uses differentiable mesh refinement to optimize mesh geometry from multi-view images [S1, unofficial].
-
-Where it is used: It is used in differentiable volumetric rendering for fitting parametric surfaces to multi-view imagery [S1, unofficial][S2].
+**Origin (who, when, which paper):** The method is described in the repository `autonomousvision/differentiable_volumetric_rendering` [S1, unofficial].
+**History and development:** Not given in the sources.
+**Where it is used:** It is used in differentiable volumetric rendering for fitting parametric surfaces to multi-view imagery [S1, unofficial][S2].
 
 ## Sources
 [S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)

@@ -7,8 +7,8 @@ The RayBatch container is a NumPy-style data structure for storing and sampling 
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** NumPy arrays for ray origins, directions, and colors. Optional arrays for masks, sensor indices, and pixel coordinates [S1, unofficial].
-*   **Output:** A `RayBatch` object supporting indexing/slicing and a method to convert contents into Mitsuba `mi.Ray3f` and `mi.Color3f` objects [S1, unofficial].
+*   **Input:** NumPy arrays for ray origins, directions, and colors, plus optional arrays for masks, sensor indices, and pixel coordinates [S1, unofficial].
+*   **Output:** A `RayBatch` object that supports indexing and slicing, and a method to convert its contents into Mitsuba `mi.Ray3f` and `mi.Color3f` objects [S1, unofficial].
 
 **Data Structures:**
 The container holds the following fields, all sharing a common batch dimension $N$:
@@ -112,13 +112,7 @@ class RayBatch:
 ```
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Performance:** Not given in the sources.
-*   **Strengths:** Not given in the sources.
-*   **Limitations:** Not given in the sources.
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+Not given in the sources.
 
 ## Background
 Not given in the sources.

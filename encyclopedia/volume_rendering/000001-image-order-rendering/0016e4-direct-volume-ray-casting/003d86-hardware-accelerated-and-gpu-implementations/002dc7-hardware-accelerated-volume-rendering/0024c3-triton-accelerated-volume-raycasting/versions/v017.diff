@@ -1,0 +1,188 @@
+--- v016.md
++++ v017.md
+@@ -4,129 +4,72 @@
+ 
+ ## Overview
+-Triton-accelerated Volume Raycasting is a fused GPU rendering technique that uses the Triton programming language to perform volume raycasting, avoiding the materialization of intermediate ray-sample tensors in High Bandwidth Memory (HBM) to reduce memory footprint and increase speed [S1, unofficial]. It differs from standard PyTorch implementations by fusing CUDA kernels, which reduces iteration time and memory overhead, particularly at high resolutions [S1, unofficial]. While standard PyTorch execution degrades super-linearly beyond 1024x124 resolution due to memory bandwidth limits and cache thrashing, Triton maintains predictable linear scaling proportional to the total number of rays rendered [S1, unofficial].
++Triton-accelerated Volume Raycasting is a fused GPU rendering technique using the Triton programming language to perform volume raycasting, avoiding the materialization of intermediate ray-sample tensors in High Bandwidth Memory (HBM) to reduce memory footprint and increase speed [S1, unofficial]. It differs from standard PyTorch implementations by fusing CUDA kernels, which reduces iteration time and memory overhead, particularly at high resolutions [S1, unofficial]. While standard PyTorch execution degrades super-linearly beyond 1024x1024 resolution due to memory bandwidth limits and cache thrashing, Triton maintains predictable linear scaling proportional to the total number of rays rendered [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs**
+ *   **Inputs**:
+-    *   `mu`: A 5D tensor of shape `(B, C, D, H, W)` representing the volume density/scatter coefficients, where `B` is batch size, `C` is channels, and `D, H, W` are volume dimensions [S1, unofficial].
+-    *   `view_mat`: A 2D tensor (or batched 3D tensor) representing the camera view matrix [S1, unofficial].
++    *   `mu`: A 5D tensor of shape `(B, C, D, H, W)` representing volume density/scatter coefficients, where `B` is batch size, `C` is channels, and `D, H, W` are volume dimensions [S1, unofficial].
++    *   `view_mat`: A camera view matrix [S1, unofficial].
+     *   `ras2ijk`: A transformation matrix mapping raster coordinates to voxel indices [S1, unofficial].
+     *   `triton`: A boolean flag. If `True`, the fused Triton kernel is used; if `False`, the standard PyTorch implementation is used [S1, unofficial].
+-    *   `ray_samples`: Number of samples per ray (e.g., 384 or 512) [S1, unofficial].
+-    *   `resolution`: Output image resolution (e.g., 1024x1024 or 2048x2048) [S1, unofficial].
++    *   `ray_samples`: Number of samples per ray, typically 384 or 512 [S1, unofficial].
++    *   `resolution`: Output image resolution, e.g., 1024x1024 or 2048x2048 [S1, unofficial].
+ *   **Outputs**:
+     *   Rendered image tensor of shape `(B, C, H_out, W_out)` [S1, unofficial].
+ 
+ **Data Structures**
+-The method avoids allocating large intermediate tensors for ray samples. Instead, it uses on-chip memory (shared memory/registers) within the Triton kernel to accumulate results. The standard PyTorch implementation typically allocates tensors of size `Rays × Samples/Ray` in HBM, whereas the Triton version keeps a near-constant footprint below 430 MiB [S1, unofficial].
++The method avoids allocating large intermediate tensors for ray samples, maintaining a near-constant memory footprint below 430 MiB [S1, unofficial]. Standard PyTorch implementations typically allocate tensors of size `Rays × Samples/Ray` in HBM [S1, unofficial].
+ 
+ **Algorithm Steps**
+-1.  **Initialization**: The `VolumeRaycaster` is instantiated with parameters `ray_samples` and `resolution`. The `triton` flag is set to `True` to enable the fused kernel [S1, unofficial].
+-2.  **Ray Generation**: Rays are generated per-pixel based on the `view_mat` and `ras2ijk` transformation, determining entry and exit points into the volume [5616-hardware-accelerated-volume-rendering.md].
+-3.  **Fused Kernel Execution**: The Triton kernel launches a grid of threads. Each thread block handles a tile of the output image.
+-    *   Threads load ray parameters into shared memory.
+-    *   The kernel iterates through the ray samples.
+-    *   **Sampling**: Volume values are sampled using trilinear interpolation (as per standard hardware-accelerated sampling principles [5616-hardware-accelerated-volume-rendering.md]).
+-    *   **Compositing**: Front-to-back compositing is performed using the emission-absorption model:
+-        $$
+-        C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
+-        $$
+-        $$
+-        \alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
+-        $$
+-        Accumulation occurs in thread-local registers or shared memory, avoiding global memory writes for intermediate steps [S1, unofficial].
+-    *   **Atomic Updates**: Final pixel values are written to global memory using `tl.atomic_add` [S1, unofficial].
+-4.  **Early Ray Termination (ERT)**: Rays are terminated when accumulated opacity exceeds a threshold (typically 0.95 or 1.0) to optimize performance [5616-hardware-accelerated-volume-rendering.md].
+-5.  **Output Assembly**: The final accumulated color and opacity tensors are returned [S1, unofficial].
++1.  **Initialization**: The `VolumeRaycaster` is instantiated with parameters `ray_samples` and `resolution`; the `triton` flag is set to `True` to enable the fused kernel [S1, unofficial].
++2.  **Ray Generation**: Rays are generated per-pixel using `view_mat` and `ras2ijk` to determine entry and exit points into the volume [5616-hardware-accelerated-volume-rendering.md].
++3.  **Fused Kernel Execution**: The Triton kernel launches a grid of threads, where each block handles a tile of the output image. Threads load ray parameters. The kernel iterates through `ray_samples`. Volume values are sampled using trilinear interpolation [5616-hardware-accelerated-volume-rendering.md]. Front-to-back compositing updates accumulated color $C'$ and opacity $\alpha'$ using the emission-absorption model:
++    $$
++    C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
++    $$
++    $$
++    \alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
++    $$
++    Accumulation occurs in on-chip memory, avoiding intermediate HBM writes [S1, unofficial]. Final pixel values are written to global memory using atomic addition [S1, unofficial].
++4.  **Early Ray Termination (ERT)**: Rays terminate when accumulated opacity exceeds a threshold (typically 0.95 or 1.0) [5616-hardware-accelerated-volume-rendering.md].
++5.  **Output Assembly**: Final accumulated color and opacity tensors are returned [S1, unofficial].
+ 
+ **Pseudocode**
+ ```python
+ import torch
+-import triton
+-import triton.language as tl
+ 
+-# Note: This is a conceptual representation of the Triton kernel structure
+-# based on the description of fused execution and atomic_add usage.
+-# The actual implementation details of the Triton kernel are not fully
+-# provided in the source, but the usage pattern is clear.
+-
+-def triton_volume_raycast_kernel(
+-    mu_ptr,       # Pointer to volume data
+-    view_mat_ptr, # Pointer to view matrix
+-    ras2ijk_ptr,  # Pointer to ras2ijk matrix
+-    out_ptr,      # Pointer to output image
+-    ray_samples,  # Number of samples per ray
+-    stride_h,     # Stride for height
+-    stride_w,     # Stride for width
+-    BLOCK_SIZE_H: tl.constexpr,
+-    BLOCK_SIZE_W: tl.constexpr,
+-):
+-    # 1. Tile coordinates
+-    pid_h = tl.program_id(0)
+-    pid_w = tl.program_id(1)
++def triton_volume_raycast_kernel(mu, view_mat, ras2ijk, out, ray_samples, stride_h, stride_w, block_h, block_w):
++    # [G] Grid coordinates for the tile
++    pid_h = 0
++    pid_w = 0
+     
+-    # 2. Load ray parameters (view matrix, ras2ijk)
+-    # In a real Triton kernel, these would be loaded into shared memory
+-    # or passed as block arguments.
++    # Initialize accumulators for the tile
++    acc_color = torch.zeros((block_h, block_w), dtype=torch.float32)
++    acc_alpha = torch.zeros((block_h, block_w), dtype=torch.float32)
+     
+-    # 3. Initialize accumulators
+-    acc_color = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_W), dtype=tl.float32)
+-    acc_alpha = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_W), dtype=tl.float32)
+-    
+-    # 4. Ray marching loop
+     for s in range(ray_samples):
+-        # Calculate sample position along ray
+-        # t = entry + s * step_size
+-        # xyz = transform(t, view_mat, ras2ijk)
++        # [G] Compute sample position along ray and transform to voxel coordinates
++        t = entry_point + s * step_size
++        voxel_coords = transform_to_voxel(t, view_mat, ras2ijk)
+         
+-        # Sample volume
+-        # val = trilinear_sample(mu, xyz)
++        # Sample volume density
++        density = mu[voxel_coords]
+         
+         # Compute opacity and color contribution
+-        # alpha = 1.0 - exp(-val * step_size)
+-        # color = val * alpha # Simplified emission model
++        alpha = 1.0 - torch.exp(-density * step_size)
++        color = density * alpha
+         
+-        # Update accumulators
+-        # acc_color = acc_color + (1.0 - acc_alpha) * color
+-        # acc_alpha = acc_alpha + (1.0 - acc_alpha) * alpha
++        # Front-to-back compositing
++        acc_color = acc_color + (1.0 - acc_alpha) * color
++        acc_alpha = acc_alpha + (1.0 - acc_alpha) * alpha
+         
+-        # Early Ray Termination check
+-        # if acc_alpha > 0.95: break
+-
+-    # 5. Write results using atomic_add
+-    # out_ptr offset calculation
+-    # tl.atomic_add(out_ptr + offset, acc_color)
+-    # tl.atomic_add(out_ptr + offset + 1, acc_alpha) # If storing alpha
+-    pass
+-
+-def volume_raycast_triton(mu, view_mat, ras2ijk, ray_samples=384, resolution=(1024, 1024)):
+-    """
+-    Wrapper function to launch the Triton kernel.
+-    """
+-    B, C, D, H, W = mu.shape
+-    out_h, out_w = resolution
+-    
+-    # Initialize output tensor
+-    out = torch.zeros((B, C, out_h, out_w), device=mu.device, dtype=torch.float32)
+-    
+-    # Configure grid and block dimensions
+-    grid = (triton.cdiv(out_h, 16), triton.cdiv(out_w, 16), B)
+-    block_size_h = 16
+-    block_size_w = 16
+-    
+-    # Launch kernel
+-    triton_volume_raycast_kernel[grid](
+-        mu.data_ptr(),
+-        view_mat.data_ptr(),
+-        ras2ijk.data_ptr(),
+-        out.data_ptr(),
+-        ray_samples,
+-        out_h,
+-        out_w,
+-        BLOCK_SIZE_H=block_size_h,
+-        BLOCK_SIZE_W=block_size_w
+-    )
+-    
+-    return out
++        # Early Ray Termination
++        if torch.max(acc_alpha) > 0.95:
++            break
++            
++    # Write results to global memory
++    offset = pid_h * stride_h + pid_w
++    out[offset] += acc_color
++    out[offset + 1] += acc_alpha
+ ```
+ 
+@@ -160,12 +103,4 @@
+ *   **Limitations**: Nondeterministic gradient updates due to atomic operations. Requires Triton support.
+ 
+-**When to Use**
+-*   Use when rendering high-resolution volumes (e.g., 2048x2048) where memory bandwidth is a bottleneck.
+-*   Use when training differentiable volume rendering models where memory efficiency is critical.
+-
+-**When Not to Use**
+-*   Use standard PyTorch if deterministic gradients are strictly required without tolerance adjustments.
+-*   Use standard PyTorch for low-resolution volumes where the overhead of kernel fusion may not justify the complexity.
+-
+ ## Background
+ Triton-accelerated Volume Raycasting is part of the FlashDRR project, which aims to provide fast, differentiable volume rendering for medical imaging applications [S1, unofficial]. The method leverages the Triton programming language to fuse CUDA kernels, addressing the memory bottlenecks of standard PyTorch implementations [S1, unofficial].

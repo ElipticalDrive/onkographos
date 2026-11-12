@@ -1,0 +1,134 @@
+# Constructive Solid Geometry (CSG) Boolean Operations
+
+Also called: BSP Clipping, Mesh Boolean Operations
+
+## Overview
+Computes boolean combinations (union, subtract, intersect, xor, stencil) of two polygonal meshes by partitioning space and clipping polygon sets against each other's BSP trees [S1, unofficial]. Unlike voxel-based methods such as [Solid Voxel CSG](7222-csg-and-inter-object-intersection-solid-voxel-csg.md), this approach operates directly on polygonal meshes using BSP trees, avoiding grid quantization but requiring robust plane tests and exact arithmetic [S1, unofficial].
+
+## How it works
+**Inputs:** Two polygonal meshes, $M_A$ and $M_B$, defined by sets of polygons.
+**Outputs:** A result polygonal mesh $M_R$ representing the boolean operation.
+
+**Data Structures:**
+*   **Polygon:** Defined by vertices and a normal vector.
+*   **BSP Tree:** A binary tree where each node contains a splitting plane. Left children represent space "behind" or "less than" the plane; right children represent space "in front of" or "greater than" the plane.
+
+**Steps:**
+
+1.  **Bounding Volume Test:**
+    Compute the bounding volumes (e.g., AABBs) for $M_A$ and $M_B$. If they do not intersect, return an empty mesh or handle as a degenerate case [S1, unofficial]. If they intersect, proceed.
+
+2.  **Clip $M_A$ against $M_B$'s BSP:**
+    a. Construct a BSP tree from the polygons of $M_B$.
+    b. Clip the polygon set of $M_A$ against this BSP tree.
+    c. Retain only polygons strictly greater than the BSP planes (for Union) or strictly less than (for Subtraction/Intersection, depending on operand order) [S1, unofficial].
+    d. Let the clipped set be $A_{clip}$.
+
+3.  **Clip $M_B$ against $M_A$'s BSP:**
+    a. Construct a BSP tree from the polygons of $M_A$.
+    b. Clip the polygon set of $M_B$ against this BSP tree.
+    c. Retain polygons greater than or equal to the BSP planes for Union, or less than for Subtraction [S1, unofficial].
+    d. Let the clipped set be $B_{clip}$.
+
+4.  **Handle Boundary Polygons:**
+    During the splitting process in steps 2 and 3, polygons that intersect the splitting planes are split into boundary outputs ($A_{out}, B_{out}$). These boundary polygons represent the intersection silhouette and must be included in the final result [S1, unofficial].
+
+5.  **Combine Results:**
+    Concatenate the boundary outputs and the clipped polygons to form the result mesh $M_R = A_{out} \cup B_{out} \cup A_{clip} \cup B_{clip}$ [S1, unofficial].
+
+6.  **Adjust Winding/Normals:**
+    For subtraction ($M_A - M_B$), invert the winding/normal of the clipped polygons from the subtracted mesh ($B_{clip}$) to ensure consistent outward-facing normals [S1, unofficial].
+
+**Pitfalls:**
+*   **Non-intersecting bounds:** Must be handled explicitly to avoid unnecessary BSP tree construction and clipping overhead [S1, unofficial].
+*   **Coplanar polygons:** During plane splitting, coplanar polygons must be assigned to the correct side based on the normal dot product to prevent degenerate geometry or incorrect boolean results [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def csg_boolean(mesh_a, mesh_b, operation):
+    """
+    Performs CSG boolean operation on two meshes using BSP trees.
+    operation: 'union', 'subtract', 'intersect'
+    """
+    # 1. Bounding Volume Test
+    if not bounds_intersect(mesh_a.bounds, mesh_b.bounds):
+        return empty_mesh()
+
+    # 2. Clip mesh_a against mesh_b's BSP
+    bsp_b = build_bsp_tree(mesh_b.polygons)
+    # Clip polygons of mesh_a against bsp_b
+    # For Union: keep polygons strictly greater than planes
+    # For Subtract: keep polygons strictly less than planes (if subtracting B from A, we keep A's parts not in B)
+    # Note: Logic depends on specific implementation of "greater/less" relative to normal direction
+    a_clipped, a_boundary = clip_polygons(mesh_a.polygons, bsp_b, operation)
+
+    # 3. Clip mesh_b against mesh_a's BSP
+    bsp_a = build_bsp_tree(mesh_a.polygons)
+    # Clip polygons of mesh_b against bsp_a
+    # For Union: keep polygons greater than or equal to planes
+    # For Subtract: keep polygons less than planes
+    b_clipped, b_boundary = clip_polygons(mesh_b.polygons, bsp_a, operation)
+
+    # 4. Combine
+    result_polygons = a_boundary + b_boundary + a_clipped + b_clipped
+
+    # 5. Adjust normals for subtraction
+    if operation == 'subtract':
+        # Invert normals of b_clipped (the subtracted part)
+        for poly in b_clipped:
+            poly.normal = -poly.normal
+            poly.vertices.reverse() # Adjust winding
+
+    return create_mesh(result_polygons)
+
+def clip_polygons(polygons, bsp_tree, operation):
+    """
+    Clips a set of polygons against a BSP tree.
+    Returns (clipped_polygons, boundary_polygons)
+    """
+    clipped = []
+    boundary = []
+    
+    for poly in polygons:
+        # Determine position of polygon relative to BSP planes
+        # This involves recursive traversal of the BSP tree
+        # If polygon is entirely in front (greater) or behind (less)
+        # Depending on operation, we keep or discard it.
+        # If it intersects a plane, it is split.
+        
+        # Simplified logic for demonstration:
+        # In reality, this requires robust geometric predicates
+        status = classify_polygon(poly, bsp_tree)
+        
+        if status == 'front':
+            if operation in ['union', 'subtract']: # Keep front for union, keep back for subtract (depending on operand order)
+                # Actually, for A - B, we want A's parts that are NOT in B.
+                # So we clip A against B's BSP, keeping parts strictly outside B.
+                clipped.append(poly)
+        elif status == 'back':
+            if operation == 'intersect': # Keep back for intersection
+                clipped.append(poly)
+        elif status == 'intersecting':
+            # Split polygon along the plane
+            p1, p2 = split_polygon(poly, bsp_tree.current_plane)
+            # Recursively clip the parts
+            # This is a simplified representation of the recursive split
+            pass 
+            
+    return clipped, boundary
+```
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the complexity of the meshes and the balance of the BSP trees. In the worst case, clipping a polygon against a BSP tree is $O(N)$, and clipping all polygons is $O(N \cdot M)$ where $N, M$ are polygon counts. Construction of BSP trees is $O(N \log N)$ on average.
+*   **Memory Complexity:** $O(N + M)$ to store the BSP trees and intermediate polygon sets.
+*   **Strengths:** Produces watertight, manifold meshes with sharp features and no grid quantization artifacts [S1, unofficial]. Suitable for 3D printing and CAD applications where precision is critical [S1, unofficial].
+*   **Limitations:** Requires robust geometric predicates and exact arithmetic to handle coplanar and nearly coplanar cases [S1, unofficial]. Can be slow for highly complex meshes with many polygons. Numerical instability can lead to non-manifold geometry or holes if not handled carefully [S1, unofficial].
+*   **When to use:** When high-fidelity, watertight polygonal meshes are required from boolean operations, and the input meshes are not excessively complex.
+*   **When not to use:** For real-time applications with very high polygon counts, or when approximate results are acceptable and voxel-based methods are preferred for simplicity.
+
+## Background
+The method is based on the principle of Constructive Solid Geometry (CSG) using BSP trees for mesh clipping. It differs from voxel-based marching cubes by operating directly on polygonal meshes [S1, unofficial]. The approach is implemented in the Euclid Swift library for mesh boolean operations [S1, unofficial]. The author of the reference implementation notes the need for an easily understood and implemented solution without complicated maths or third-party libraries [S1, unofficial].
+
+## Sources
+[S1] andygeers/DualMarchingCuboids, https://github.com/andygeers/DualMarchingCuboids, fetched 2026-10-26 (unofficial)

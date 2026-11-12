@@ -1,0 +1,172 @@
+# Marching Lines
+
+Also called: Marching Lines for Volumetric Contour Extraction, Crest Line Extraction, Surface Intersection Tracing
+
+## Overview
+Marching Lines is an algorithm that extracts the 1D intersection curves (contours) formed by two implicit scalar fields within a 3D volume [S1]. It serves as the volumetric counterpart to Marching Cubes, which extracts 2D surfaces, by producing closed loops or open segments representing the crest lines or general surface intersections [S1]. Unlike surface extraction methods that generate meshes, Marching Lines outputs line segments, making it distinct from siblings like [Dual Contouring and Surface Nets](6319-dual-contouring-and-surface-nets.md) or [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) which produce polygonal surfaces.
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Two implicit scalar functions, $f(\mathbf{x})$ and $c(\mathbf{x})$, defined on a regular 3D grid. The grid consists of cubic voxels with scalar values at the 8 vertices.
+- **Output:** A set of 1D line segments in 3D space, which form closed loops or open curves representing the intersection where $f(\mathbf{x}) = 0$ and $c(\mathbf{x}) = 0$.
+
+**Data Structures:**
+- **Grid:** A 3D array storing scalar values for $f$ and $c$ at integer coordinates $(i, j, k)$.
+- **Visited Flags:** A boolean flag per voxel to track whether a contour loop has already been processed to avoid duplication.
+
+**Algorithm Steps:**
+
+1.  **Voxel Classification:** Iterate through all voxels in the volume. Identify "active" voxels where both implicit functions change sign across the voxel boundaries or contain roots. Specifically, a voxel is relevant if it contains zeros of both $f$ and $c$. This can be determined by checking the signs of $f$ and $c$ at the 8 corners. If a voxel is active, it serves as a potential seed for contour segments.
+
+2.  **Face Intersection Calculation:** For each active voxel, determine the intersection points of the zero-level sets of $f$ and $c$ on the 12 faces of the cube.
+    - On a given face, the zero-level set of $f$ is a line segment connecting two edges where $f$ changes sign.
+    - Similarly, the zero-level set of $c$ is a line segment on the same face.
+    - Linear interpolation is used to find the exact coordinates of the endpoints of these segments on the edges of the face. For an edge between vertices $\mathbf{v}_1$ and $\mathbf{v}_2$ with values $v_1$ and $v_2$, the zero-crossing point $\mathbf{p}$ is:
+      $$ \mathbf{p} = \mathbf{v}_1 + \frac{0 - v_1}{v_2 - v_1} (\mathbf{v}_2 - \mathbf{v}_1) $$
+
+3.  **Face-Level Intersection:** On each face of the voxel, find the intersection point between the line segment defined by $f=0$ and the line segment defined by $c=0$.
+    - Let the segment for $f=0$ be defined by endpoints $\mathbf{a}_f, \mathbf{b}_f$.
+    - Let the segment for $c=0$ be defined by endpoints $\mathbf{a}_c, \mathbf{b}_c$.
+    - Compute the intersection point $\mathbf{p}_{face}$ of these two 2D line segments. If they intersect, $\mathbf{p}_{face}$ is a point on the 3D contour curve lying on that face.
+
+4.  **Segment Connection:** Collect all intersection points $\mathbf{p}_{face}$ found on the faces of the voxel. Connect these points to form line segments within the voxel. The connectivity is determined by the topology of the intersection on the faces. Typically, if a voxel contains a single continuous contour passing through it, the points on adjacent faces are connected to form a segment.
+
+5.  **Loop Traversal (Walking):** To ensure complete loops are formed and to handle voxels containing multiple disjoint segments:
+    - Start at a seed voxel that contains an unvisited contour segment.
+    - Identify an intersection point $\mathbf{p}$ on one of the voxel's faces.
+    - Move to the adjacent voxel sharing that face.
+    - In the new voxel, locate the corresponding intersection point (which should be the same geometric point $\mathbf{p}$) and the connected segment.
+    - Repeat the traversal, moving from voxel to voxel via shared faces, until the path returns to the initial seed voxel, closing the loop.
+    - Mark all voxels in the traversed loop as visited.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def marching_lines(grid_f, grid_c, dimensions):
+    """
+    Extracts intersection curves of f=0 and c=0 from volumetric grids.
+    grid_f, grid_c: 3D arrays of scalar values.
+    dimensions: (nx, ny, nz) tuple.
+    Returns: List of line segments [(p1, p2), ...].
+    """
+    visited = [[[False for _ in range(nz)] for _ in range(ny)] for _ in range(nx)]
+    segments = []
+    
+    # Helper to find zero-crossing on an edge
+    def interpolate(v1, p1, v2, p2):
+        if abs(v2 - v1) < 1e-9:
+            return None
+        t = -v1 / (v2 - v1)
+        if 0 <= t <= 1:
+            return p1 + t * (p2 - p1)
+        return None
+
+    # Helper to intersect two line segments on a face
+    def segment_intersection(seg1, seg2):
+        # seg1 = (p1, p2), seg2 = (p3, p4)
+        # Returns intersection point or None
+        # Implementation of 2D line segment intersection
+        # ... (standard geometric intersection logic)
+        pass
+
+    # Iterate over all voxels
+    for i in range(nx - 1):
+        for j in range(ny - 1):
+            for k in range(nz - 1):
+                if visited[i][j][k]:
+                    continue
+                
+                # Check if voxel is active (contains roots for both f and c)
+                # Simplified check: signs at corners
+                corners_f = [grid_f[i][j][k], grid_f[i+1][j][k], ...] # 8 corners
+                corners_c = [grid_c[i][j][k], grid_c[i+1][j][k], ...]
+                
+                if not is_active(corners_f) or not is_active(corners_c):
+                    continue
+                
+                # Find intersection points on faces
+                face_points = []
+                for face in voxel_faces(i, j, k):
+                    # Get values on the 4 corners of the face
+                    # Find f=0 segment endpoints on face edges
+                    f_seg = get_zero_segment(face, corners_f)
+                    # Find c=0 segment endpoints on face edges
+                    c_seg = get_zero_segment(face, corners_c)
+                    
+                    if f_seg and c_seg:
+                        pt = segment_intersection(f_seg, c_seg)
+                        if pt:
+                            face_points.append((face, pt))
+                
+                # Connect points within voxel to form segments
+                voxel_segments = connect_face_points(face_points)
+                
+                if voxel_segments:
+                    # Start traversal from one segment
+                    for seg in voxel_segments:
+                        if not is_visited(seg):
+                            loop = trace_loop(seg, grid_f, grid_c, visited, dimensions)
+                            segments.extend(loop)
+
+    return segments
+
+def trace_loop(start_seg, grid_f, grid_c, visited, dimensions):
+    """
+    Walks through adjacent voxels to form a complete loop.
+    """
+    loop = []
+    current_seg = start_seg
+    current_voxel = start_seg.voxel
+    visited[current_voxel] = True
+    
+    while True:
+        loop.append(current_seg)
+        # Move to adjacent voxel via the shared face of the segment
+        next_voxel = get_adjacent_voxel(current_voxel, current_seg.face)
+        
+        # Find corresponding segment in next voxel
+        # The intersection point on the shared face should match
+        next_seg = find_matching_segment(next_voxel, current_seg.point_on_face)
+        
+        if next_seg is None:
+            break # End of line or error
+            
+        visited[next_voxel] = True
+        current_voxel = next_voxel
+        current_seg = next_seg
+        
+        # Check if we returned to start
+        if current_voxel == start_seg.voxel and current_seg == start_seg:
+            break
+            
+    return loop
+```
+
+**Parameters:**
+- **Threshold:** Implicitly 0 for both functions $f$ and $c$.
+- **Interpolation:** Linear interpolation is standard [S1].
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Cases:** If the intersection lines are parallel or coincident on a face, the intersection point is undefined or infinite. This requires special handling or perturbation [S1].
+- **Precision:** Linear interpolation assumes the implicit functions are well-behaved within the voxel. High-frequency oscillations may lead to incorrect segment counts [S1].
+- **Seed Selection:** The algorithm assumes at least one valid seed cell for every loop. If a loop passes through a voxel that is incorrectly classified as inactive, the loop will be broken [S1].
+
+## Subtopics
+
+### Cutting Plane Intersection
+This variant renders lines for the intersection of a single isosurface ($f=0$) with six axis-aligned cutting planes (two per axis, representing positive and negative bounds) [S1]. It uses the same Marching Lines logic by treating the cutting plane as a second implicit function $c(\mathbf{x})$ defined by the plane equation [S1]. This is useful for visualizing cross-sections or bounding box intersections [S1].
+
+## Operating characteristics
+- **Time Complexity:** Output-sensitive, $O(m)$ where $m$ is the total length of all loops in terms of number of voxels traversed [S1].
+- **Space Complexity:** $O(n^3)$ for the grid storage plus $O(m)$ for the output [S1].
+- **Performance:** Efficient for sparse contours where $m \ll n^3$. In typical cases, $m$ is $O(n)$ in an $n^3$ volume [S1].
+- **Strengths:** Direct extraction of 1D features; output-sensitive; generalizable to any two implicit functions [S1].
+- **Limitations:** Requires finding seed voxels; sensitive to grid resolution and function smoothness; does not produce a mesh [S1].
+
+## Background
+Marching Lines was originally presented by Thirion and Gourdon in 1996 as an adaptation of the Marching Cubes technique for extracting crest lines on surfaces [S1]. It was later generalized to extract the intersection of isosurfaces of any two implicit functions [S1]. The method is widely used in volume rendering for extracting silhouettes, contours, and other 1D features from volumetric data [S1].
+
+## Sources
+[S1] Line drawings from volume data, https://doi.org/10.1145/1073204.1073222, fetched 2026-10-28

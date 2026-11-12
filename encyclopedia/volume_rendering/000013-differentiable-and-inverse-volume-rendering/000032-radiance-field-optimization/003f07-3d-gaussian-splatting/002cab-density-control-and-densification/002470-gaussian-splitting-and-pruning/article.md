@@ -3,11 +3,11 @@
 Also called: Deterministic splitting, Splitting Gaussians
 
 ## Overview
-Gaussian Splitting and Pruning is a deterministic density control method for 3D Gaussian Splatting that modifies the number of Gaussian primitives based on statistical criteria derived from reconstruction loss and weight contributions [S1, unofficial]. It solves the problem of under-reconstruction in high-detail areas and redundant representation in low-detail areas by splitting Gaussians with high reconstruction responsibility and removing those with minimal contribution [S1, unofficial]. Unlike the heuristic gradient-based densification used in the base 3D Gaussian Splatting method, this approach uses a statistical analysis of per-ray losses and weights to make deterministic decisions about splitting and pruning [S1, unofficial].
+Gaussian Splitting and Pruning is a deterministic density control method for 3D Gaussian Splatting that modifies the number of Gaussian primitives based on statistical criteria derived from reconstruction loss and weight contributions [S1, unofficial]. Unlike the heuristic gradient-based densification used in the base 3D Gaussian Splatting method, this approach uses a statistical analysis of per-ray losses and weights to make deterministic decisions about splitting and pruning [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   A set of 3D Gaussians $G = \{G_i\}_{i=1}^N$, where each $G_i$ has mean $\mu_i$, covariance $\Sigma_i$, opacity weight $\lambda_i$, and color $c_i$.
+*   A set of 3D Gaussians $G = \{G_i\}_{i=1}^N$, where each $G_i$ has mean $\mu_i$, covariance $\Sigma_i$, opacity weight $\lambda_i$, and color $c_i$ [S1, unofficial].
 *   A random batch of rays $\mathcal{R}$ (typically ~5% of the training dataset) [S1, unofficial].
 *   Per-ray loss values $L_j$ for each ray $j$ in the batch [S1, unofficial].
 *   Per-ray blending weights $w_{i,j}$ for each Gaussian $i$ contributing to ray $j$ [S1, unofficial].
@@ -18,10 +18,10 @@ Gaussian Splitting and Pruning is a deterministic density control method for 3D 
 
 **Data Structures:**
 *   Gaussian properties are stored in arrays or structures containing:
-    *   $\mu_i \in \mathbb{R}^3$: Mean position.
-    *   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (often stored as eigenvalues $\sigma_k$ and eigenvectors $\vec{v}_k$).
-    *   $\lambda_i \in \mathbb{R}$: Opacity weight (stored as log-weight $\log(\lambda_i)$ for optimization).
-    *   $c_i \in \mathbb{R}^3$: Color (stored as inverse-sigmoid $\sigma^{-1}(c_i)$ for optimization).
+    *   $\mu_i \in \mathbb{R}^3$: Mean position [S1, unofficial].
+    *   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix, represented by eigenvalues $\sigma_k$ and eigenvectors $\vec{v}_k$ [S1, unofficial].
+    *   $\lambda_i \in \mathbb{R}$: Opacity weight, stored as log-weight $\log(\lambda_i)$ for optimization [S1, unofficial].
+    *   $c_i \in \mathbb{R}^3$: Color, stored as inverse-sigmoid $\sigma^{-1}(c_i)$ for optimization [S1, unofficial].
 
 **Steps:**
 
@@ -71,7 +71,15 @@ Gaussian Splitting and Pruning is a deterministic density control method for 3D 
 ```python
 import numpy as np
 
-def gaussian_splitting_and_pruning(gaussians, rays, losses, z_lambda=2.0, z_l_bar=1.0, epsilon_w=0.1, epsilon_c=0.1):
+class Gaussian:
+    def __init__(self, mu, eigvals, eigvecs, log_lambda, inv_sigmoid_c):
+        self.mu = mu
+        self.eigvals = eigvals
+        self.eigvecs = eigvecs
+        self.log_lambda = log_lambda
+        self.inv_sigmoid_c = inv_sigmoid_c
+
+def gaussian_splitting_and_pruning(gaussians, rays, z_lambda=2.0, z_l_bar=1.0, epsilon_w=0.1, epsilon_c=0.1):
     """
     Perform deterministic splitting and pruning of 3D Gaussians based on statistical criteria.
     
@@ -85,7 +93,6 @@ def gaussian_splitting_and_pruning(gaussians, rays, losses, z_lambda=2.0, z_l_ba
         rays: List of ray objects, each with:
             - loss: float per-ray loss
             - weights: dict mapping gaussian_index to float weight w_i,j
-        losses: List of per-ray loss values (redundant if in rays, but kept for clarity)
         z_lambda: Z-score threshold for pruning
         z_l_bar: Z-score threshold for splitting
         epsilon_w: Noise scale for log-weights
@@ -97,12 +104,8 @@ def gaussian_splitting_and_pruning(gaussians, rays, losses, z_lambda=2.0, z_l_ba
     n_gaussians = len(gaussians)
     
     # Step 1: Compute Weight Statistics
-    lambdas = np.array([g.log_lambda for g in gaussians])
-    # Note: The source uses lambda (weight), not log_lambda for the thresholding formula (18)
-    # We must exponentiate to get lambda for the comparison, or adjust the formula.
-    # Formula (18): lambda_i <= mu_lambda - z_lambda * sigma_lambda
-    # So we need actual lambda values.
-    actual_lambdas = np.exp(lambdas)
+    # Source uses actual weights lambda for thresholding, not log_lambda
+    actual_lambdas = np.exp([g.log_lambda for g in gaussians])
     mu_lambda = np.mean(actual_lambdas)
     sigma_lambda = np.std(actual_lambdas)
     
@@ -113,9 +116,7 @@ def gaussian_splitting_and_pruning(gaussians, rays, losses, z_lambda=2.0, z_l_ba
             prune_indices.add(i)
             
     # Step 3: Compute Average Loss per Gaussian
-    # Initialize sums
     loss_sums = np.zeros(n_gaussians)
-    # M is the number of rays
     M = len(rays)
     
     for ray in rays:
@@ -123,7 +124,6 @@ def gaussian_splitting_and_pruning(gaussians, rays, losses, z_lambda=2.0, z_l_ba
         for idx, w in ray.weights.items():
             loss_sums[idx] += ray_loss * w
             
-    # Average loss per Gaussian
     avg_losses = loss_sums / M
     
     # Step 4: Compute Loss Statistics
@@ -131,33 +131,29 @@ def gaussian_splitting_and_pruning(gaussians, rays, losses, z_lambda=2.0, z_l_ba
     sigma_l_bar = np.std(avg_losses)
     
     # Step 5: Identify Gaussians for Splitting
-    split_indices = []
+    split_indices = set()
     for i, l_bar in enumerate(avg_losses):
         if l_bar >= mu_l_bar + z_l_bar * sigma_l_bar:
-            split_indices.append(i)
+            split_indices.add(i)
             
     # Step 6: Split Selected Gaussians
     new_gaussians = []
+    scale_mean = np.sqrt(2.0 / np.pi)
+    scale_cov = np.sqrt(1.0 - 2.0 / np.pi)
+    
     for i, g in enumerate(gaussians):
         if i in prune_indices:
-            continue # Pruned
+            continue
             
         if i in split_indices:
-            # Split this Gaussian into two
             mu = g.mu
             eigvals = g.eigvals
             eigvecs = g.eigvecs
             
-            # Dominant eigenvalue and eigenvector (assuming sorted or index 0 is dominant)
-            # Note: Source says "dominant eigenvalue" and "dominant eigenvector".
-            # We assume eigvals are sorted descending or we pick the max.
+            # Dominant eigenvalue and eigenvector
             dominant_idx = np.argmax(eigvals)
             sigma_1 = eigvals[dominant_idx]
             v_1 = eigvecs[:, dominant_idx]
-            
-            # Scaling factors from half-normal distribution
-            scale_mean = np.sqrt(2.0 / np.pi)
-            scale_cov = np.sqrt(1.0 - 2.0 / np.pi)
             
             # New means
             mu_a = mu + sigma_1 * v_1 * scale_mean
@@ -168,14 +164,13 @@ def gaussian_splitting_and_pruning(gaussians, rays, losses, z_lambda=2.0, z_l_ba
             new_eigvals_a[dominant_idx] = sigma_1 * scale_cov
             new_eigvals_b = new_eigvals_a.copy()
             
-            # New weights and colors with noise
+            # New weights and colors with noise in unconstrained space
             log_lambda_a = g.log_lambda + np.random.normal(0, epsilon_w)
             log_lambda_b = g.log_lambda + np.random.normal(0, epsilon_w)
             
             inv_sigmoid_c_a = g.inv_sigmoid_c + np.random.normal(0, epsilon_c, size=3)
             inv_sigmoid_c_b = g.inv_sigmoid_c + np.random.normal(0, epsilon_c, size=3)
             
-            # Create new Gaussian objects
             g_a = Gaussian(mu=mu_a, eigvals=new_eigvals_a, eigvecs=eigvecs, 
                            log_lambda=log_lambda_a, inv_sigmoid_c=inv_sigmoid_c_a)
             g_b = Gaussian(mu=mu_b, eigvals=new_eigvals_b, eigvecs=eigvecs, 
@@ -184,18 +179,9 @@ def gaussian_splitting_and_pruning(gaussians, rays, losses, z_lambda=2.0, z_l_ba
             new_gaussians.append(g_a)
             new_gaussians.append(g_b)
         else:
-            # Keep Gaussian as is
             new_gaussians.append(g)
             
     return new_gaussians
-
-class Gaussian:
-    def __init__(self, mu, eigvals, eigvecs, log_lambda, inv_sigmoid_c):
-        self.mu = mu
-        self.eigvals = eigvals
-        self.eigvecs = eigvecs
-        self.log_lambda = log_lambda
-        self.inv_sigmoid_c = inv_sigmoid_c
 ```
 
 ## Subtopics
@@ -216,19 +202,19 @@ $$ n = \frac{(\mathbf{S}_g^c)^{-1} \mathbf{r}_g}{\left\| (\mathbf{S}_g^c)^{-1} \
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-The method requires an additional forward pass to compute per-ray losses and weights for a batch of rays, which is $O(M \cdot N)$ where $M$ is the batch size and $N$ is the number of Gaussians. Computing statistics is $O(N)$. Splitting and pruning are $O(N)$. The overall complexity per densification step is dominated by the ray batch processing. Memory usage increases temporarily during the batch processing and when creating new Gaussians.
+Not given in the sources.
 
 **Measured Performance:**
 Not given in the sources.
 
 **Scaling:**
-The method scales with the number of Gaussians and the size of the ray batch. The deterministic nature allows for iterative refinement, potentially requiring multiple passes as the model converges and new high-loss areas are identified [S1, unofficial].
+The method scales with the number of Gaussians and the size of the ray batch [S1, unofficial]. The deterministic nature allows for iterative refinement, potentially requiring multiple passes as the model converges and new high-loss areas are identified [S1, unofficial].
 
 **Strengths and Limitations:**
-Strengths include a deterministic approach that avoids the randomness of heuristic methods, allowing for controlled detail increase [S1, unofficial]. It effectively targets areas of high reconstruction error. Limitations include the need to compute per-ray losses and weights, which adds computational overhead. The method relies on statistical thresholds ($z_\lambda, z_{\bar{l}}$) which may need tuning for different scenes [S1, unofficial].
+Strengths include a deterministic approach that avoids the randomness of heuristic methods, allowing for controlled detail increase [S1, unofficial]. Limitations include the need to compute per-ray losses and weights, which adds computational overhead [S1, unofficial]. The method relies on statistical thresholds ($z_\lambda, z_{\bar{l}}$) which may need tuning for different scenes [S1, unofficial].
 
 **When to use it and when not:**
-Use when a deterministic, statistically grounded approach to density control is preferred over heuristic gradient-based methods, or when gradient-based methods fail to capture fine details in smooth regions [S1, unofficial]. Not given in the sources for when not to use.
+Use when a deterministic, statistically grounded approach to density control is preferred over heuristic methods [S1, unofficial]. Not given in the sources for when not to use.
 
 ## Background
 Origin: The method was introduced in "Flexible Techniques for Differentiable Rendering with 3D Gaussians" [S1, unofficial]. It provides an alternative to the heuristic merging and splitting techniques explored in the original 3D Gaussian Splatting paper [S1, unofficial]. The splitting is based on the properties of the half-normal distribution [S1, unofficial].

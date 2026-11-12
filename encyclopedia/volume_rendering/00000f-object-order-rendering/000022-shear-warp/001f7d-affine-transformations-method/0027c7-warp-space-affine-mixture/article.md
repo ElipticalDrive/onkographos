@@ -3,142 +3,171 @@
 Also called: Affine mixture warp model
 
 ## Overview
-Warp-Space Affine Mixture is a warping method where affine mixture weights are computed in warped space, outperforming models with no warping, convolutional warps, or world-space mixture [S1]. It addresses the limitations of single affine warps and freely-varying template points by using a spatial mixture of affine transformations to produce an inverse warp field, effectively extending linear blend skinning to volumetric space [S1].
+Warp-Space Affine Mixture is a warping technique for neural volume rendering that computes affine mixture weights in the warped coordinate space rather than world space. It solves the problem of modeling complex, non-linear deformations (such as hair swing or smoke) by combining multiple local affine transformations. It sets itself apart from convolutional warp models and world-space mixture models by ensuring that the spatial weighting volumes are evaluated after the point has been transformed, which prevents the warps from getting "stuck" and improves generalization on dynamic scenes [S1].
 
 ## How it works
-The method constructs an inverse warp field $\mathbf{W}^{-1}(\mathbf{x})$ as a weighted sum of individual affine transformations [S1]. The weights are determined by sampling a weight volume *after* the affine transformation has been applied to the coordinate, ensuring the weighting function resides in the warped space [S1].
+The method constructs an inverse warp field $\mathbf{W}^{-1}(\mathbf{x})$ as a spatial mixture of $N$ affine transformations. The core innovation is that the mixture weights $a_i(\mathbf{x})$ are determined by sampling the weight volumes $w_i$ at the *warped* location, not the original location.
 
-**Inputs and Outputs:**
-*   Input: A 3D coordinate $\mathbf{x}$ in the target space [S1].
-*   Output: A transformed coordinate $\mathbf{x}' = \mathbf{W}^{-1}(\mathbf{x})$ in the source space [S1].
-*   Parameters: A set of $N$ affine transformations defined by rotation $R_i$, scale $s_i$, and translation $t_i$, and corresponding weight volumes $w_i$ [S1].
+**Inputs:**
+*   $\mathbf{x}$: A 3D point in the output (warped) space.
+*   $z$: A latent encoding vector (e.g., from an encoder network).
+*   $\{R_i, s_i, t_i\}_{i=1}^N$: Parameters for $N$ affine warps.
+*   $\{w_i\}_{i=1}^N$: Weight volumes for $N$ warps.
+*   $\{R_g, s_g, t_g\}$: Global warp parameters.
+
+**Outputs:**
+*   $\mathbf{x}'$: The corresponding point in the input (source) space, i.e., $\mathbf{x}' = \mathbf{W}^{-1}(\mathbf{x})$.
 
 **Data Structures:**
-*   **Affine Parameters:** For each warp $i \in \{1, \dots, N\}$: $R_i$ is a $3 \times 3$ rotation matrix derived from a normalized quaternion vector, $s_i$ is a 3D vector of element-wise scaling factors, and $t_i$ is a 3D translation vector [S1].
-*   **Weight Volumes:** $w_i(\mathbf{x})$ is a 3D voxel grid storing the unnormalized weight for warp $i$ at coordinate $\mathbf{x}$ [S1]. The resolution is typically $32^3$ to ensure smoothness via trilinear interpolation [S1].
-*   **Global Warp:** An additional affine transformation $\{R_g, s_g, t_g\}$ applied to $\mathbf{x}$ before the mixture [S1].
-
-**Formulas:**
-The inverse warp is defined as [S1]:
-$$
-\mathbf{W}^{-1}(\mathbf{x}) = \sum_{i=1}^{N} \mathbf{A}_i(\mathbf{x}) a_i(\mathbf{x})
-$$
-where $\mathbf{A}_i(\mathbf{x})$ is the $i$-th affine transformation:
-$$
-\mathbf{A}_i(\mathbf{x}) = R_i(s_i \circ (\mathbf{x} - t_i))
-$$
-Here, $\circ$ denotes element-wise multiplication [S1]. The mixture weight $a_i(\mathbf{x})$ is computed as:
-$$
-a_i(\mathbf{x}) = \frac{w_i(\mathbf{A}_i(\mathbf{x}))}{\sum_{j=1}^{N} w_j(\mathbf{A}_j(\mathbf{x}))}
-$$
-Note that $w_i$ is sampled at the transformed location $\mathbf{A}_i(\mathbf{x})$, not at $\mathbf{x}$ [S1].
-
-**Steps:**
-1.  **Global Warp:** Apply the global affine transformation to the input coordinate: $\mathbf{x}_{\text{global}} = R_g(s_g \circ (\mathbf{x} - t_g))$ [S1].
-2.  **Initialize Accumulator:** Set $\mathbf{x}' = \mathbf{0}$ and $Z = 0$ [G].
-3.  **Iterate Warps:** For each warp $i$ from $1$ to $N$:
-    a. Compute the affine transformation of the global coordinate: $\mathbf{x}_i = R_i(s_i \circ (\mathbf{x}_{\text{global}} - t_i))$ [S1].
-    b. Sample the weight volume $w_i$ at $\mathbf{x}_i$. If $\mathbf{x}_i$ is outside the bounds of the weight volume grid, clamp the sample to the surface value to prevent warps from getting "stuck" early in training [S1].
-    c. Add to the weighted sum: $\mathbf{x}' \leftarrow \mathbf{x}' + w_i(\mathbf{x}_i) \cdot \mathbf{x}_i$ [S1].
-    d. Add to the denominator: $Z \leftarrow Z + w_i(\mathbf{x}_i)$ [S1].
-4.  **Normalize:** Compute the final warped coordinate: $\mathbf{W}^{-1}(\mathbf{x}) = \mathbf{x}' / Z$ [S1].
+*   **Weight Volumes ($w_i$):** 3D voxel grids of resolution $32^3$. These are stored as dense arrays. Values are non-negative.
+*   **Affine Parameters:**
+    *   $R_i$: $3 \times 3$ rotation matrix.
+    *   $s_i$: $3 \times 1$ scaling vector.
+    *   $t_i$: $3 \times 1$ translation vector.
+*   **Global Warp Parameters:** $\{R_g, s_g, t_g\}$, produced by an MLP.
 
 **Parameters:**
-*   Number of warps ($N$): 16 provides sufficient expressiveness [S1].
-*   Weight volume resolution: $32^3$ voxel grid [S1].
+*   Number of warps $N$: 16 [S1].
+*   Warp field resolution: $32^3$ voxels [S1].
 
-**Pitfalls:**
-*   **Clamping:** Samples outside the weighting volume $w_i$ must be clamped to the surface; otherwise, warps can get "stuck" early in training if they land outside the volume [S1].
-*   **Weight Normalization:** Weights must be non-negative, which is ensured by applying $\exp(\cdot)$ to the output of the fully-connected layers that generate the weight volume parameters [S1].
+**Steps:**
+
+1.  **Encode:** Obtain latent vector $z$ from the input image sequence or frame index.
+2.  **Compute Local Affine Parameters:**
+    *   Pass $z$ through two fully-connected layers.
+    *   For each warp $i \in \{1, \dots, N\}$:
+        *   Extract rotation quaternion $q_i$. Normalize $q_i$ and convert to rotation matrix $R_i$.
+        *   Extract scaling vector $s_i$ and translation vector $t_i$.
+        *   Extract raw weight values for the volume $w_i$. Apply $\exp(\cdot)$ to ensure non-negative weights.
+3.  **Compute Global Warp:**
+    *   Pass $z$ through an MLP to produce global parameters $\{R_g, s_g, t_g\}$.
+4.  **Apply Global Warp:**
+    *   Transform the input point $\mathbf{x}$ by the global warp to get $\mathbf{x}_{global}$:
+        $$ \mathbf{x}_{global} = R_g (s_g \circ (\mathbf{x} - t_g)) $$
+5.  **Compute Warped Weights:**
+    *   For each warp $i$:
+        *   Apply the local affine transformation $A_i$ to $\mathbf{x}_{global}$ to get the warped coordinate $\mathbf{x}_i$:
+            $$ \mathbf{x}_i = R_i (s_i \circ (\mathbf{x}_{global} - t_i)) $$
+        *   Sample the weight volume $w_i$ at $\mathbf{x}_i$.
+        *   **Pitfall Handling:** If $\mathbf{x}_i$ is outside the bounds of the weight volume $w_i$, clamp the sample to the surface of the volume (or boundary) to prevent gradients from vanishing or warps from getting stuck [S1]. Let this value be $w_i(\mathbf{x}_i)$.
+6.  **Compute Mixture Weights:**
+    *   Calculate the normalized weight $a_i(\mathbf{x})$ for each warp:
+        $$ a_i(\mathbf{x}) = \frac{w_i(\mathbf{x}_i)}{\sum_{j=1}^{N} w_j(\mathbf{x}_j)} $$
+7.  **Compute Final Warped Point:**
+    *   Sum the affine transformations weighted by $a_i(\mathbf{x})$:
+        $$ \mathbf{x}' = \sum_{i=1}^{N} A_i(\mathbf{x}_{global}) a_i(\mathbf{x}) $$
+        Where $A_i(\mathbf{x}_{global}) = R_i (s_i \circ (\mathbf{x}_{global} - t_i))$.
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def warp_space_affine_mixture(x, global_params, warp_params, weight_volumes):
-    """
-    Computes the warp-space affine mixture.
-    Args:
-        x: Input 3D coordinate (list/tuple of 3 floats).
-        global_params: Tuple (R_g, s_g, t_g) for global warp.
-        warp_params: List of N tuples (R_i, s_i, t_i) for each warp.
-        weight_volumes: List of N 3D voxel grids (list of lists of lists).
-    Returns:
-        Transformed coordinate x_prime.
-    """
-    R_g, s_g, t_g = global_params
-    
-    # Step 1: Global Warp
-    x_shifted = [x[k] - t_g[k] for k in range(3)]
-    x_scaled = [s_g[k] * x_shifted[k] for k in range(3)]
-    x_global = [sum(R_g[k][m] * x_scaled[m] for m in range(3)) for k in range(3)]
+import numpy as np
 
-    x_prime = [0.0, 0.0, 0.0]
-    Z = 0.0
-    
-    # Step 2: Iterate over warps
-    for i in range(len(warp_params)):
-        R_i, s_i, t_i = warp_params[i]
-        
-        # Compute affine transform A_i(x_global)
-        x_i_shifted = [x_global[k] - t_i[k] for k in range(3)]
-        x_i_scaled = [s_i[k] * x_i_shifted[k] for k in range(3)]
-        x_i = [sum(R_i[k][m] * x_i_scaled[m] for m in range(3)) for k in range(3)]
-        
-        # Sample weight w_i at x_i
-        w_i = sample_weight_volume(weight_volumes[i], x_i)
-        
-        # Accumulate
-        x_prime = [x_prime[k] + w_i * x_i[k] for k in range(3)]
-        Z += w_i
-        
-    # Step 3: Normalize
-    if Z == 0:
-        return x_global
-        
-    return [x_prime[k] / Z for k in range(3)]
+def quaternion_to_rotation_matrix(q):
+    """Convert a 4D quaternion vector to a 3x3 rotation matrix."""
+    # q is [w, x, y, z]
+    w, x, y, z = q[0], q[1], q[2], q[3]
+    return np.array([
+        [1 - 2*y*y - 2*z*z, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
+        [2*x*y + 2*z*w, 1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
+        [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x*x - 2*y*y]
+    ])
 
-def sample_weight_volume(volume, point):
+def clamp_to_surface(volume, point):
     """
-    Samples a 3D volume at a point, clamping to surface if outside.
-    Implements standard trilinear interpolation and boundary clamping [G].
+    If point is outside volume bounds, clamp to the nearest surface voxel.
+    Assumes volume is defined on grid [0, 1]^3 normalized.
     """
-    bounds = [len(volume), len(volume[0]), len(volume[0][0])]
+    # [G] Implementation detail: In practice, this involves finding the nearest
+    # valid voxel index or interpolating boundary values.
+    # For the purpose of this method description, we assume a function
+    # that returns the value at the clamped coordinate.
+    return volume[point] # Placeholder for actual clamping logic
+
+def warp_space_affine_mixture(x, z, params, weight_volumes):
+    """
+    x: 3D point in warped space (3,)
+    z: latent vector
+    params: dict containing 'local_params' (list of N dicts with R, s, t)
+            and 'global_params' (dict with Rg, sg, tg)
+    weight_volumes: list of N 3D numpy arrays (32, 32, 32)
+    """
+    N = len(params['local_params'])
     
-    # Clamp to surface if outside bounds [G]
-    if any(point[k] < 0 or point[k] >= bounds[k] for k in range(3)):
-        clamped = [max(0, min(bounds[k] - 1, point[k])) for k in range(3)]
-        return volume[int(clamped[0])][int(clamped[1])][int(clamped[2])]
+    # 1. Compute Global Warp
+    Rg = params['global_params']['Rg']
+    sg = params['global_params']['sg']
+    tg = params['global_params']['tg']
     
-    # Trilinear interpolation [G]
-    lower = [int(point[k]) for k in range(3)]
-    upper = [lower[k] + 1 for k in range(3)]
-    frac = [point[k] - lower[k] for k in range(3)]
+    # x_global = Rg * (sg * (x - tg))
+    x_global = Rg @ (sg * (x - tg))
     
-    def lerp(a, b, t): return a + t * (b - a)
+    # 2. Compute Local Warps and Weights
+    warped_points = []
+    raw_weights = []
     
-    v00 = lerp(volume[lower[0]][lower[1]][lower[2]], volume[lower[0]][lower[1]][upper[2]], frac[2])
-    v01 = lerp(volume[lower[0]][upper[1]][lower[2]], volume[lower[0]][upper[1]][upper[2]], frac[2])
-    v10 = lerp(volume[upper[0]][lower[1]][lower[2]], volume[upper[0]][lower[1]][upper[2]], frac[2])
-    v11 = lerp(volume[upper[0]][upper[1]][lower[2]], volume[upper[0]][upper[1]][upper[2]], frac[2])
-    v0 = lerp(v00, v01, frac[1])
-    v1 = lerp(v10, v11, frac[1])
-    return lerp(v0, v1, frac[0])
+    for i in range(N):
+        Ri = params['local_params'][i]['R']
+        si = params['local_params'][i]['s']
+        ti = params['local_params'][i]['t']
+        
+        # Apply local affine to x_global
+        # x_i = Ri * (si * (x_global - ti))
+        x_i = Ri @ (si * (x_global - ti))
+        warped_points.append(x_i)
+        
+        # 3. Sample Weight Volume
+        # [G] Assuming trilinear interpolation is used for sampling
+        # and coordinates are normalized to [0, 1] or similar grid space.
+        # If x_i is out of bounds, clamp to surface.
+        w_i = weight_volumes[i][x_i] # Simplified access; requires interpolation/clamping
+        
+        # Apply exp to ensure non-negative weights (if raw weights were not pre-exp'd)
+        # The source says exp is applied before outputting values, so we assume
+        # weight_volumes[i] already contains exp(raw_weights).
+        raw_weights.append(w_i)
+        
+    # 4. Normalize Weights
+    sum_weights = sum(raw_weights)
+    if sum_weights == 0:
+        # [G] Fallback if all weights are zero
+        a_i = [1.0 / N] * N
+    else:
+        a_i = [w / sum_weights for w in raw_weights]
+        
+    # 5. Compute Final Point
+    x_prime = np.zeros(3)
+    for i in range(N):
+        Ri = params['local_params'][i]['R']
+        si = params['local_params'][i]['s']
+        ti = params['local_params'][i]['t']
+        
+        # A_i(x_global) = Ri * (si * (x_global - ti))
+        A_i_x_global = Ri @ (si * (x_global - ti))
+        
+        x_prime += A_i_x_global * a_i[i]
+        
+    return x_prime
 ```
 
 ## Subtopics
 
 ### Mixture of Affine Warps
-This variant refers to the specific implementation where the warp field decoder uses a spatial mixture of affine warps to avoid overfitting and poor generalization associated with freely-varying template sample points [S1]. It involves computing transformation parameters using 2 fully-connected layers after encoding $z$ [S1]. Rotation is produced as a normalized quaternion vector transformed into a rotation matrix [S1]. Weights are computed by applying $\exp(\cdot)$ to the output of the fully-connected layers for the weighting volume $w_i$ to ensure non-negative weights [S1]. An additional global warp $\{R_g, s_g, t_g\}$ is learned by an MLP and applied to $\mathbf{x}$ before the warping field [S1].
+This variant refers to the specific architectural choice of using a spatial mixture of affine warps as the basic building block of the warp field, as opposed to freely-varying template sample points or convolutional fields. It is chosen to avoid overfitting and poor generalization to novel views [S1]. The implementation uses 2 fully-connected layers after encoding $z$ to produce transformation parameters. Rotation is handled by producing a quaternion vector, normalizing it, and transforming it into a rotation matrix. Weights are computed by applying $\exp(\cdot)$ to the output of the fully-connected layers for the weighting volume $w_i$ to ensure non-negative weights. A global warp $\{R_g, s_g, t_g\}$ is learned via an MLP and applied to $\mathbf{x}$ before the warping field. The number of warps is set to 16, and the warp field resolution is $32^3$ to provide smoothness via trilinear interpolation [S1]. A key pitfall is that samples outside the weighting volume $w_i$ must be clamped to the surface to prevent warps from getting "stuck" early in training [S1].
 
 ## Operating characteristics
-*   **Complexity:** The method requires $N$ affine transformations and $N$ volume samples per query [S1]. With $N=16$ and a $32^3$ grid, the per-ray cost is constant but higher than a single affine warp [S1].
-*   **Performance:** The model outperforms no-warp, convolutional warp (transposed convolutions), convolutional warp (trilinear upsampling + convolution), and no-warp affine mixture models [S1]. It is particularly effective on complex dynamic data like hair swing, where convolutional warps fail [S1].
-*   **Strengths:** Modeling the weighting volume in warp space is better than in world space [S1]. The low-resolution $32^3$ grid provides smoothness from trilinear interpolation, which helps learning [S1].
-*   **Limitations:** Requires learning additional parameters for the global warp and the mixture weights [S1].
+*   **Time Complexity:** The warping step involves $N$ affine transformations and $N$ volume lookups. With $N=16$, this is constant time relative to scene complexity but linear in the number of warps. Trilinear interpolation is used for volume sampling.
+*   **Memory Complexity:** Requires storing $N$ weight volumes of size $32^3$. For $N=16$, this is $16 \times 32^3$ voxels.
+*   **Performance:** Outperforms models with no warping, convolutional warps (transposed convolutions or trilinear upsampling + convolution), and no-warp affine mixture (world-space weighting) [S1]. It is particularly effective on dynamic scenes with complex deformations like hair swing, where convolutional warps fail [S1].
+*   **Strengths:** Better generalization to novel views compared to template-based methods; robust handling of non-linear bending; smooth interpolation due to low-resolution weight volumes.
+*   **Limitations:** Requires learning additional parameters (global warp, local warp parameters, weight volumes); sensitive to initialization (requires clamping to avoid getting stuck).
+*   **When to use:** When rendering dynamic volumetric data with significant non-linear deformations (e.g., hair, smoke) and view-dependent appearance is also modeled.
+*   **When not to use:** For static volumes or simple rigid motions where simpler warping or no warping suffices.
 
 ## Background
-The method originates from "Neural Volumes: Learning Dynamic Renderable Volumes from Images" [S1]. It was developed to address overfitting and poor generalization to novel views in dynamic volume rendering [S1]. The approach extends linear blend skinning to volumetric space by using a spatial mixture of affine warps [S1].
+The Warp-Space Affine Mixture method was introduced in the paper "Neural Volumes: Learning Dynamic Renderable Volumes from Images" [S1]. It is part of the broader Neural Volumes framework, which learns dynamic 3D scenes from a sequence of images. The method was developed to address the limitations of previous warping techniques, such as convolutional warps, which struggled with complex deformations like hair swing. The approach is inspired by linear blend skinning [Lewis et al. 2000], extending it to volumetric space by computing mixture weights in the warped space.
 
 ## Sources
 [S1] Neural Volumes: Learning Dynamic Renderable Volumes from Images, https://arxiv.org/abs/1906.07751, fetched 2026-10-26

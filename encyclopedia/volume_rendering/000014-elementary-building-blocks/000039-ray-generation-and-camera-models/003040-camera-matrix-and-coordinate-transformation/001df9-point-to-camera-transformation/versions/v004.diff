@@ -1,0 +1,210 @@
+--- v003.md
++++ v004.md
+@@ -4,74 +4,79 @@
+ 
+ ## Overview
+-The Point to Camera Transformation converts 3D points from world coordinates into the camera's local coordinate system [S1, unofficial]. It establishes the relative position of scene geometry with respect to the viewer, serving as a foundational step for ray generation and visibility checks [G]. Unlike [NDC Ray Transformation](905-ndc-ray-transformation.md), which maps pixels to rays, or [View Matrix Construction](1644-view-matrix-construction.md), which builds the full affine transform matrix, this method explicitly computes the rotated and translated position of individual points to facilitate downstream operations like depth sampling or projection [G].
++The Point to Camera Transformation maps 3D points from world coordinates into the camera's local coordinate system. It serves as the foundational step for ray generation and visibility checks by establishing the relative position of scene geometry with respect to the viewer. Unlike [NDC Ray Transformation](905-ndc-ray-transformation.md), which focuses on projecting ray directions into normalized device space for sampling, this method operates on absolute point positions to determine their location within the camera's view frustum. It builds on [Camera Matrix and Coordinate Transformation](6231-camera-matrix-and-coordinate-transformation.md) by utilizing the camera pose to define the target frame.
+ 
+ ## How it works
+ **Inputs:**
+-- $\mathbf{P}_{\text{world}}$: A 3D point in world coordinates ($\mathbb{R}^3$).
+-- $\mathbf{C}_{\text{c2w}}$: The camera-to-world transformation matrix (4x4) [G].
++*   $\mathbf{P}_{world}$: A 3D point in world coordinates.
++*   $M_{c2w}$: The $4 \times 4$ Camera-to-World transformation matrix. This matrix transforms vectors from camera space to world space. Its upper-left $3 \times 3$ submatrix $R$ represents rotation, and its upper-right $3 \times 1$ submatrix $T$ represents translation (the camera origin in world space).
+ 
+ **Outputs:**
+-- $\mathbf{P}_{\text{cam}}$: The 3D point in camera coordinates ($\mathbb{R}^3$).
++*   $\mathbf{P}_{cam}$: The 3D point in camera coordinates.
+ 
+ **Data Structures:**
+-- $\mathbf{C}_{\text{c2w}}$ is stored as a 4x4 matrix containing a 3x3 rotation submatrix $\mathbf{R}$ and a 3x1 translation vector $\mathbf{t}$ (the camera origin in world space) [G].
+-  $$
+-  \mathbf{C}_{\text{c2w}} = \begin{bmatrix} \mathbf{R} & \mathbf{t} \\ \mathbf{0}^T & 1 \end{bmatrix}
+-  $$
+-  The columns of $\mathbf{R}$ represent the camera's right, up, and forward basis vectors in world coordinates [G].
++*   $M_{c2w}$: A $4 \times 4$ matrix stored in row-major or column-major order.
++    *   $R = \begin{bmatrix} r_{00} & r_{01} & r_{02} \\ r_{10} & r_{11} & r_{12} \\ r_{20} & r_{21} & r_{22} \end{bmatrix}$
++    *   $T = \begin{bmatrix} t_x \\ t_y \\ t_z \end{bmatrix}$ (Camera origin $\mathbf{o}_{cam}$ in world space).
+ 
+ **Steps:**
+-1. **Extract Camera Origin:** Identify the translation component $\mathbf{t}$ from $\mathbf{C}_{\text{c2w}}$. This represents the camera's eye position $\mathbf{e}$ in world coordinates [G].
+-2. **Compute Relative Vector:** Calculate the vector from the camera origin to the world point:
+-   $$
+-   \mathbf{v} = \mathbf{P}_{\text{world}} - \mathbf{e}
+-   $$
+-   [S1, unofficial]
+-3. **Rotate to Camera Space:** Transform the relative vector $\mathbf{v}$ into the camera's local frame by multiplying by the transpose of the rotation part of $\mathbf{C}_{\text{c2w}}$:
+-   $$
+-   \mathbf{P}_{\text{cam}} = \mathbf{R}^T \mathbf{v}
+-   $$
+-   [S1, unofficial]
+-   Equivalently, using dot products with the basis vectors $\mathbf{r}$ (right), $\mathbf{u}$ (up), and $\mathbf{f}$ (forward) from $\mathbf{R}$:
+-   $$
+-   \begin{aligned}
+-   P_{\text{cam},x} &= \mathbf{r} \cdot \mathbf{v} \\
+-   P_{\text{cam},y} &= \mathbf{u} \cdot \mathbf{v} \\
+-   P_{\text{cam},z} &= \mathbf{f} \cdot \mathbf{v}
+-   \end{aligned}
+-   $$
+-   [G]
++1.  **Translate**: Compute the vector from the camera origin to the world point.
++    $$ \mathbf{v} = \mathbf{P}_{world} - \mathbf{o}_{cam} $$
++    Where $\mathbf{o}_{cam} = T$.
++2.  **Rotate**: Project the translated vector onto the camera's local basis vectors. Since $R$ transforms camera basis vectors to world basis vectors, its transpose $R^T$ transforms world vectors to camera basis vectors.
++    $$ \mathbf{P}_{cam} = R^T \mathbf{v} $$
++    Explicitly:
++    $$
++    \begin{bmatrix} x_{cam} \\ y_{cam} \\ z_{cam} \end{bmatrix} = \begin{bmatrix} r_{00} & r_{10} & r_{20} \\ r_{01} & r_{11} & r_{21} \\ r_{02} & r_{12} & r_{22} \end{bmatrix} \begin{bmatrix} v_x \\ v_y \\ v_z \end{bmatrix}
++    $$
+ 
+ **Pseudocode:**
+ ```python
+-def point_to_camera(P_world: vec3, c2w_matrix: mat4x4) -> vec3:
++def point_to_camera(P_world: vec3, M_c2w: mat4) -> vec3:
++    """
++    Transforms a 3D point from world space to camera space.
++    
++    Args:
++        P_world: World coordinates of the point.
++        M_c2w: 4x4 Camera-to-World matrix.
++        
++    Returns:
++        Camera coordinates of the point.
++    """
+     # Extract camera origin (translation part of c2w matrix)
+-    cam_origin = c2w_matrix[3]
+-    # Compute vector from camera to point
+-    relative_vec = P_world - cam_origin
+-    # Extract rotation matrix columns (top-left 3x3 of c2w)
+-    # Assuming column-major storage where c2w_matrix[i] is the i-th column
+-    R_col0 = c2w_matrix[0][:3]
+-    R_col1 = c2w_matrix[1][:3]
+-    R_col2 = c2w_matrix[2][:3]
+-    # Compute P_cam = R^T * relative_vec using dot products
+-    P_cam_x = dot(R_col0, relative_vec)
+-    P_cam_y = dot(R_col1, relative_vec)
+-    P_cam_z = dot(R_col2, relative_vec)
+-    return vec3(P_cam_x, P_cam_y, P_cam_z)
++    # Assuming standard column-major storage where M_c2w[3][0:3] is the origin
++    cam_origin = vec3(M_c2w[3][0], M_c2w[3][1], M_c2w[3][2])
++    
++    # Extract rotation matrix (upper-left 3x3)
++    # R_c2w transforms camera basis to world basis
++    R_c2w = mat3(
++        M_c2w[0][0], M_c2w[1][0], M_c2w[2][0],
++        M_c2w[0][1], M_c2w[1][1], M_c2w[2][1],
++        M_c2w[0][2], M_c2w[1][2], M_c2w[2][2]
++    )
++    
++    # Step 1: Translate point relative to camera origin
++    # v = P_world - cam_origin
++    v = P_world - cam_origin
++    
++    # Step 2: Rotate into camera space
++    # P_cam = R_c2w^T * v
++    # Since R is orthogonal, R^T is the inverse rotation
++    # R_c2w^T rows are the columns of R_c2w
++    cam_x = dot(vec3(R_c2w[0][0], R_c2w[0][1], R_c2w[0][2]), v)
++    cam_y = dot(vec3(R_c2w[1][0], R_c2w[1][1], R_c2w[1][2]), v)
++    cam_z = dot(vec3(R_c2w[2][0], R_c2w[2][1], R_c2w[2][2]), v)
++    
++    return vec3(cam_x, cam_y, cam_z)
+ ```
+-*Note: `vec3`, `mat4x4`, and `dot` are standard vector and math operations.*
+-
+-**Parameters:**
+-- Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Non-orthonormal Basis:** If $\mathbf{C}_{\text{c2w}}$ contains scaling or shearing, $\mathbf{R}^T$ is not the exact inverse [G].
+-- **Precision:** Subtracting large world coordinates from the camera origin can lead to floating-point precision loss if the scene is very large [G].
++*   **Matrix Convention**: The implementation must match the storage order (row-major vs. column-major) of $M_{c2w}$. If $M_{c2w}$ is row-major, the rotation matrix $R$ is directly accessible as the first three rows, and no transpose is needed for the dot products if iterating correctly, but the logic $R^T$ remains conceptually the inverse rotation.
++*   **Homogeneous Coordinates**: If $\mathbf{P}_{world}$ is provided in homogeneous coordinates $(x, y, z, w)$, it must be converted to Cartesian $(x/w, y/w, z/w)$ before transformation if $w \neq 1$. Directions (vectors) should use $w=0$ and not be translated, but this function specifically handles points.
++*   **Precision**: For large scenes, subtracting large world coordinates from the camera origin may cause floating-point precision loss. Using double precision or centering the world space around the camera origin can mitigate this [G].
+ 
+ ## Subtopics
+ 
+ ### [3D Point Projection to 2D](3148-3d-point-projection-to-2d.md)
+-Projects 3D points into multiple camera views to compute 2D pixel locations and visibility masks. It differs from orthographic projection by introducing depth-dependent scaling (perspective division), which is essential for realistic camera models and visibility computation in volume rendering pipelines.
++Projects 3D points into multiple camera views to compute 2D pixel locations and visibility masks. It differs from [Perspective Projection of Points](4037-perspective-projection-of-points.md) by explicitly handling batched multi-view projection and visibility masking for rendering pipelines, and from [Depth Estimation from Point Cloud](8043-depth-estimation-from-point-cloud.md) by focusing on coordinate mapping rather than depth map generation or occlusion resolution.
+ 
+ ### World to Clip Space Conversion
+@@ -79,51 +84,34 @@
+ 
+ **Steps:**
+-1. **Basis Construction:** Calculate camera basis vectors. Let $\mathbf{f}$ be the forward vector. Calculate $\mathbf{r} = \text{normalize}(\text{cross}(\mathbf{f}, \text{vec3}(0.0, 1.0, 0.0)))$ and $\mathbf{u} = \text{normalize}(\text{cross}(\mathbf{r}, \mathbf{f}))$ [S2, unofficial].
+-2. **View Space Position:** Compute the position relative to the camera: $\mathbf{v} = \mathbf{P}_{\text{world}} - \mathbf{e}$. Then compute view coordinates:
+-   $$
+-   \begin{aligned}
+-   \text{viewX} &= \mathbf{r} \cdot \mathbf{v} \\
+-   \text{viewY} &= \mathbf{u} \cdot \mathbf{v} \\
+-   \text{viewZ} &= \mathbf{f} \cdot \mathbf{v}
+-   \end{aligned}
+-   $$
+-   [S2, unofficial]
+-3. **Perspective Projection:** Apply perspective division factors. Let $\text{scale} = \tan(\text{radians}(\text{fov}) / 2.0)$ [S2, unofficial].
+-   $$
+-   \begin{aligned}
+-   \text{clipX} &= \frac{\text{viewX}}{\text{viewZ} \cdot \text{scale} \cdot \text{aspectRatio}} \\
+-   \text{clipY} &= \frac{\text{viewY}}{\text{viewZ} \cdot \text{scale}}
+-   \end{aligned}
+-   $$
+-   [S2, unofficial]
+-4. **Offset and Scale:** Adjust for pixel coordinates [S2, unofficial].
+-   $$
+-   \begin{aligned}
+-   \text{clipX} &= \text{clipX} \cdot \left(1 - \frac{1.0}{\text{screenWidth}}\right) \\
+-   \text{clipY} &= \text{clipY} \cdot \left(1 - \frac{1.0}{\text{screenHeight}}\right) \\
+-   \text{clipX} &= \frac{\text{clipX}}{2.0} + 0.5 \\
+-   \text{clipY} &= \frac{\text{clipY}}{2.0} + 0.5
+-   \end{aligned}
+-   $$
+-   [S2, unofficial]
+-5. **Pixel Coordinates:**
+-   $$
+-   \begin{aligned}
+-   \text{pixelX} &= \text{clipX} \cdot (\text{screenWidth} - 1) \\
+-   \text{pixelY} &= \text{clipY} \cdot (\text{screenHeight} - 1)
+-   \end{aligned}
+-   $$
+-   Return $\text{vec2}(\text{pixelX}, \text{pixelY})$ [S2, unofficial].
++1.  **Basis Construction**: Calculate camera right and up vectors from the forward vector and world up $(0,1,0)$.
++    $$ \mathbf{camRight} = \text{normalize}(\text{cross}(\mathbf{camForward}, \text{vec3}(0.0, 1.0, 0.0))) $$
++    $$ \mathbf{camUp} = \text{normalize}(\text{cross}(\mathbf{camRight}, \mathbf{camForward})) $$
++2.  **View Space Position**: Compute the position relative to the camera.
++    $$ \mathbf{camToWorldPos} = \mathbf{worldPosition} - \mathbf{camPos} $$
++    $$ \text{viewX} = \text{dot}(\mathbf{camRight}, \mathbf{camToWorldPos}) $$
++    $$ \text{viewY} = \text{dot}(\mathbf{camUp}, \mathbf{camToWorldPos}) $$
++    $$ \text{viewZ} = \text{dot}(\mathbf{camForward}, \mathbf{camToWorldPos}) $$
++3.  **Perspective Projection**:
++    $$ \text{scale} = \tan\left(\frac{\text{radians}(\text{cameraData.fov})}{2.0}\right) $$
++    $$ \text{clipX} = \frac{\text{viewX}}{\text{viewZ} \times \text{scale} \times \text{cameraData.aspectRatio}} $$
++    $$ \text{clipY} = \frac{\text{viewY}}{\text{viewZ} \times \text{scale}} $$
++4.  **Offset and Normalize**:
++    $$ \text{clipX} \times= \left(1 - \frac{1.0}{\text{sceneData.screenWidth}}\right) $$
++    $$ \text{clipY} \times= \left(1 - \frac{1.0}{\text{sceneData.screenHeight}}\right) $$
++    $$ \text{clipX} = \frac{\text{clipX}}{2.0} + 0.5 $$
++    $$ \text{clipY} = \frac{\text{clipY}}{2.0} + 0.5 $$
++5.  **Pixel Coordinates**:
++    $$ \text{pixelX} = \text{clipX} \times (\text{sceneData.screenWidth} - 1) $$
++    $$ \text{pixelY} = \text{clipY} \times (\text{sceneData.screenHeight} - 1) $$
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per point. Requires a few vector subtractions, dot products, and matrix multiplications [G].
+-- **Memory Complexity:** $O(1)$ auxiliary space [G].
+-- **Strengths:** Direct access to camera-relative coordinates is essential for depth-based sampling and occlusion queries [G].
+-- **Limitations:** Does not handle perspective projection or clipping directly; requires additional steps for screen-space mapping [G].
+-- **When to use:** When you need the exact 3D position relative to the camera for volumetric traversal or texture lookups [G].
+-- **When not to use:** When you need screen-space coordinates directly; use [World to Clip Space Conversion](3148-3d-point-projection-to-2d.md) or [NDC Ray Transformation](905-ndc-ray-transformation.md) instead [G].
++*   **Time Complexity**: $O(1)$ per point. It involves a vector subtraction and a matrix-vector multiplication (3 dot products).
++*   **Memory Complexity**: $O(1)$ auxiliary space.
++*   **Strengths**: Computationally inexpensive; essential for early-z culling, visibility checks, and texture lookups in screen-space techniques.
++*   **Limitations**: Does not account for perspective division or clipping planes directly (unless extended to Clip Space Conversion). Requires the camera matrix to be correctly constructed.
++*   **When to use**: When determining if a 3D point is within the camera's view frustum or when mapping world positions to screen-space coordinates for post-processing.
+ 
+ ## Background
+-Not given in the sources.
++The transformation of points between world and camera spaces is a fundamental concept in computer graphics, originating from the standard graphics pipeline defined in early OpenGL and DirectX specifications. In the context of neural radiance fields (NeRF) and modern ray marching, this transformation is critical for aligning sampled points with the camera's viewing direction. The specific implementation using the transpose of the rotation part of the C2W matrix is standard in differentiable rendering frameworks [S1, unofficial]. The variant involving explicit basis construction and clip space conversion is often found in custom GPU raymarching shaders [S2, unofficial].
+ 
+ ## Sources

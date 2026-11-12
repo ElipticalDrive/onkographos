@@ -1,132 +1,124 @@
 # Volume Single Scattering (Monte Carlo with Sphere Light)
-## Overview
-This method computes single-scattering radiance for a participating medium using Monte Carlo integration with a sphere light for background and emission, employing equi-angular sampling [S1, unofficial]. It differs from the point-light variant by evaluating the environment via `getPixelColorWithSphereLight` with importance sampling of solid angles instead of direct geometric point-source evaluation [S1, unofficial].
-## How it works
-**Inputs:**
-- `objects`: List of scene geometry [S1, unofficial].
-- `ray`: View ray defined by origin $O$ and direction $D$ [S1, unofficial].
-- `t_MAX`: Maximum ray distance for background calculation [S1, unofficial].
-- `volume`: Participating medium object with methods `getTransmittanceHomogeneos` and density/scattering coefficients [S1, unofficial].
-- `light`: Light object with method `getLightPosition()` [S1, unofficial].
 
-**Outputs:**
-- `radiance`: The accumulated single-scattering radiance for the pixel [S1, unofficial].
+
+## Overview
+This method computes single scattering radiance in participating media using Monte Carlo integration with uniform sampling along the ray distance, specifically adapted for a sphere light background and emission source [S1, unofficial]. It differs from its parent [Volume Single Scattering (Monte Carlo with Point Light)](2293-volume-single-scattering-monte-carlo-with-point-light.md) by replacing the point light model with a sphere light, requiring equi-angular sampling for the light interaction and specific transmittance calculations from the light position [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Ray origin, ray direction, maximum ray distance ($t_{MAX}$), scene objects, volume properties (density, phase function), light position (for transmittance), and sampling mode.
+*   **Outputs:** Radiance (Color) at the pixel.
 
 **Data Structures:**
-- `sampleMode1D`: Enum for sampling strategy with value `EquiAngular` [S1, unofficial].
-- `hitPoint`: Intersection point on the background or sphere light boundary [S1, unofficial].
+*   `Vector3`: 3D vector with components $x, y, z$ [S1, unofficial].
+*   `Color`: RGB color representation [S1, unofficial].
+*   `Ray`: Defined by origin and direction [S1, unofficial].
+*   `Object`: Base class for scene geometry [S1, unofficial].
+*   `Triangle`: Inherits from `Object`, stores vertices $A, B, C$, normal, distance, and color [S1, unofficial].
+
+**Parameters:**
+*   `sampleMode1D`: Set to `EquiAngular` [S1, unofficial].
+*   `Importance_Solid_Angle`: Flag for importance sampling mode [S1, unofficial].
 
 **Steps:**
-1. **Background Calculation:** Calculate the background radiance $L_{bg}$ by tracing the view ray to the sphere light boundary: $L_{bg} = \text{getPixelColorWithSphereLight}(\text{objects}, \text{id}, t_{\text{MAX}}, \text{ray}, \text{hitPoint}, 1, \text{Importance\_Solid\_Angle})$ [S1, unofficial].
-2. **Set Sampling Mode:** Initialize the 1D sampler mode to `EquiAngular` [S1, unofficial].
-3. **Monte Carlo Integration Loop:** Iterate over samples [S1, unofficial].
-    a. **Sample Distance:** Sample the distance $t_{\text{sample}}$ along the view ray using the `EquiAngular` mode [S1, unofficial].
-    b. **Light Radiance ($L_e$):** Calculate the incident radiance from the sphere light at the scattering point $P = O + t_{\text{sample}} D$: $L_e = \text{getPixelColorWithSphereLight}(\text{objects}, -1, t_{\text{sample}}, \text{ray}, \text{hitPoint}, 1, \text{Importance\_Solid\_Angle})$ [S1, unofficial].
-    c. **Transmittance from Light:** Calculate the transmittance from the scattering point $P$ to the light source: $T_{\text{light}} = \text{volume} \rightarrow \text{getTransmittanceHomogeneos}(P, \text{light.getLightPosition}())$ [S1, unofficial].
-    d. **Accumulate Radiance:** Accumulate the radiance contribution using the computed components [S1, unofficial].
+1.  **Calculate Background Radiance:** Compute the background radiance reaching the camera by tracing the ray to $t_{MAX}$ using the sphere light model.
+    $$ L_{background} = \text{getPixelColorWithSphereLight}(\text{objects}, \text{id}, t_{MAX}, \text{ray}, \text{hitPoint}, 1, \text{Importance\_Solid\_Angle}) $$
+    [S1, unofficial]
+
+2.  **Set Sampling Mode:** Initialize the 1D sampler to `EquiAngular` mode [S1, unofficial].
+
+3.  **Monte Carlo Integration Loop:**
+    For each sample:
+    a.  **Sample Distance:** Sample a distance $t_{sample}$ along the view ray using the `EquiAngular` sampling mode [S1, unofficial].
+    b.  **Calculate Light Radiance ($L_e$):** Compute the radiance arriving at the sample point $x_{sample}$ from the sphere light.
+        $$ L_e = \text{getPixelColorWithSphereLight}(\text{objects}, -1, t_{sample}, \text{ray}, \text{hitPoint}, 1, \text{Importance\_Solid\_Angle}) $$
+        [S1, unofficial]
+    c.  **Calculate Transmittance from Light:** Compute the transmittance from the sample point $x_{sample}$ to the light position.
+        $$ T_{light} = \text{volume} \rightarrow \text{getTransmittanceHomogeneos}(x_{sample}, \text{light.getLightPosition}()) $$
+        [S1, unofficial]
+    d.  **Accumulate Radiance:** Combine $L_e$, $T_{light}$, and the volume's scattering properties to update the total radiance. (Implementation details for the accumulation formula are not explicitly provided in the source snippets, but standard single scattering applies: $L_{scattered} = L_e \cdot T_{light} \cdot \sigma_s \cdot p(\Omega) \cdot \Delta t$) [G].
+
+4.  **Return Result:** Return the accumulated radiance [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-class Vector3:
-    def __init__(self, x=0.0, y=0.0, z=0.0):
-        self.x, self.y, self.z = x, y, z
-    def __add__(self, other): return Vector3(self.x + other.x, self.y + other.y, self.z + other.z)
-    def __mul__(self, s): return Vector3(self.x * s, self.y * s, self.z * s)
-    def __rmul__(self, s): return self.__mul__(s)
-    def __truediv__(self, s): return Vector3(self.x / s, self.y / s, self.z / s)
-    def dot(self, other): return self.x*other.x + self.y*other.y + self.z*other.z
-    def norm(self): return (self.x**2 + self.y**2 + self.z**2)**0.5
-
-EQUANGULAR = "EquiAngular"
-IMPORTANCE_SOLID_ANGLE = "Importance_Solid_Angle"
-
-def sample_equiangular(mode):
-    # [G] Standard equi-angular sampling returns a parameter in [0, 1] for 1D distance sampling.
-    import random
-    return random.random()
-
-def get_sphere_light_intersection(ray_origin, ray_dir, t_max):
-    # Computes the boundary point for background evaluation.
-    return ray_origin + ray_dir * t_max
-
-def get_pixel_color_with_sphere_light(objects, id, t, ray, hit_point, samples, mode):
-    # [G] Standard environment/sphere light evaluation returning radiance.
-    return Vector3(1.0, 1.0, 1.0)
-
-def get_transmittance_homogeneous(point, light_pos, sigma_t):
-    # [G] Homogeneous medium transmittance: exp(-sigma_t * distance).
-    dist = ((point.x - light_pos.x)**2 + (point.y - light_pos.y)**2 + (point.z - light_pos.z)**2)**0.5
-    import math
-    return math.exp(-sigma_t * dist)
-
-def getPixelColor_VolumeSingleScatter_sphere2(objects, ray_origin, ray_dir, t_max, volume, light, num_samples):
-    # 1. Calculate background using sphere light
-    hit_point = get_sphere_light_intersection(ray_origin, ray_dir, t_max)
-    background = get_pixel_color_with_sphere_light(objects, 0, t_max, (ray_origin, ray_dir), hit_point, 1, IMPORTANCE_SOLID_ANGLE)
-
-    # 2. Set sampling mode
-    sample_mode = EQUANGULAR
-
-    # 3. Monte Carlo loop
-    radiance = Vector3(0.0, 0.0, 0.0)
+def getRadiance(ray, objects, volume, light, t_MAX):
+    # Step 1: Calculate background
+    background = getPixelColorWithSphereLight(
+        objects=objects, 
+        id=-1, # Placeholder for camera ID or similar, source uses 'id'
+        t_MAX=t_MAX, 
+        ray=ray, 
+        hitPoint=None, # Placeholder, source uses hitPoint
+        importance=1, 
+        mode=Importance_Solid_Angle
+    )
+    
+    # Step 2: Set sampling mode
+    sampleMode1D = EquiAngular
+    
+    # Step 3: Monte Carlo Loop
+    radiance = background
+    num_samples = 1 # Source implies a loop, but doesn't specify count. Assuming 1 for minimal implementation or loop over samples.
+    
     for _ in range(num_samples):
-        # 3a. Sample distance
-        t_sample = sample_equiangular(sample_mode)
-        scattering_point = ray_origin + ray_dir * t_sample
-
-        # 3b. Calculate Le using sphere light
-        Le = get_pixel_color_with_sphere_light(objects, -1, t_sample, (ray_origin, ray_dir), hit_point, 1, IMPORTANCE_SOLID_ANGLE)
-
-        # 3c. Calculate transmittance from light
-        transmittance_from_light = get_transmittance_homogeneous(scattering_point, light.get_light_position(), volume.sigma_t)
-
-        # 3d. Accumulate radiance
-        # [G] Standard single scattering term: Le * T_light * sigma_s / pdf
-        sigma_s = volume.sigma_s
-        pdf = 1.0 # [G] Uniform sampling pdf for 1D distance
-        radiance += Le * transmittance_from_light * sigma_s / pdf
-
-    return radiance / num_samples
+        # Step 3a: Sample t_sample using EquiAngular mode
+        # Note: EquiAngular sampling for distance usually involves sampling the solid angle or a specific distribution.
+        # The source snippet shows: sample t_sample using EquiAngular mode.
+        t_sample = sampleEquiAngular(ray, volume, sampleMode1D)
+        
+        # Step 3b: Calculate Le using sphere light
+        Le = getPixelColorWithSphereLight(
+            objects=objects, 
+            id=-1, 
+            t_MAX=t_sample, 
+            ray=ray, 
+            hitPoint=None, 
+            importance=1, 
+            mode=Importance_Solid_Angle
+        )
+        
+        # Step 3c: Calculate transmittance from light
+        # Source: volume->getTransmittanceHomogeneos(x_sample, light.getLightPosition())
+        x_sample = ray.origin + ray.direction * t_sample
+        light_position = light.getLightPosition()
+        transmittanceFromLight = volume.getTransmittanceHomogeneos(x_sample, light_position)
+        
+        # Step 3d: Accumulate
+        # Standard single scattering: L = Le * T_light * sigma_s * phase * dt
+        # Source does not provide the exact accumulation formula or sigma_s/phase usage.
+        # [G] Assuming standard single scattering accumulation.
+        scattering_coeff = volume.getScatteringCoefficient()
+        phase = volume.getPhaseFunction() # Placeholder for phase function evaluation
+        dt = t_sample # Or step size if marching, but here it's a single sample point.
+        
+        # Note: The source snippet is incomplete regarding the final accumulation step.
+        # We assume the radiance is updated based on Le, transmittanceFromLight, and volume properties.
+        # Since the source code snippet is truncated, we cannot provide the exact accumulation line.
+        # [G] radiance += Le * transmittanceFromLight * scattering_coeff * phase * dt / num_samples
+        
+    return radiance
 ```
 
-**Parameters:**
-- `sampleMode1D`: `EquiAngular` [S1, unofficial].
-- `Importance_Solid_Angle`: Sampling mode for sphere light [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-- `t_sample` must be within the volume bounds [G].
-- `getTransmittanceHomogeneos` assumes a homogeneous medium for the light-to-point transmittance calculation [S1, unofficial].
-- Precision issues with `getPixelColorWithSphereLight` if the sphere light is very small or very large [S1, unofficial].
+*   **Precision:** Floating point precision issues may arise when calculating transmittance over large distances or very small densities.
+*   **Boundaries:** Ensure $t_{sample}$ is within valid bounds $[0, t_{MAX}]$.
+*   **Degenerate Input:** Handle cases where the light position is inside the volume or the ray does not intersect the light sphere.
+
 ## Subtopics
 
-### Main Ray Marching with Frostbite Integration
-This variant implements a ray marching approach through a volume, accumulating radiance using a physically based integration scheme from the Frostbite engine [S2, unofficial]. It handles transmittance, inscatter, and early termination [S2, unofficial]. It differs from the Monte Carlo sphere light method by using deterministic ray marching and a specific Frostbite integration formula rather than Monte Carlo sampling with a sphere light background [S2, unofficial].
-
-**Steps:**
-1. **Intersection:** Determine ray intersection with the bounding volume. If no intersection, return black [S2, unofficial].
-2. **Initialization:** Initialize `radiance = 0` and `totalTransmittance` (passed by reference) [S2, unofficial]. Calculate phase function: $p(\omega_i, \omega_o) = \text{mix}(\text{HenyeyGreenstein}(-0.3, \cos\theta), \text{HenyeyGreenstein}(0.3, \cos\theta), 0.7)$ [S2, unofficial].
-3. **Density Check:** If `density > 0`:
-    a. Calculate sample scattering coefficient: $\sigma_s = \sigma_s \cdot \text{density}$ [S2, unofficial].
-    b. Calculate sample extinction coefficient: $\sigma_t = \sigma_t \cdot \text{density}$ [S2, unofficial].
-    c. Calculate emission (distance glow) and ambient light [S2, unofficial].
-    d. Calculate inscatter: $L_{\text{inscatter}} = \text{emission} + \text{ambient} + \text{sunLight} \cdot p(\omega_i, \omega_o) \cdot L_{\text{light}}(\text{org}, P, \cos\theta)$ [S2, unofficial].
-    e. Scale inscatter by scattering coefficient and density: $L_{\text{inscatter}} \cdot= \sigma_s$ [S2, unofficial].
-    f. Calculate transmittance for the step: $T_{\text{step}} = \exp(-\sigma_t \cdot \text{stepS})$ [S2, unofficial].
-    g. Integrate radiance using Frostbite method: $\text{radiance} += \text{totalTransmittance} \cdot \frac{L_{\text{inscatter}} - L_{\text{inscatter}} \cdot T_{\text{step}}}{\sigma_t}$ [S2, unofficial].
-    h. Update total transmittance: $\text{totalTransmittance} \cdot= T_{\text{step}}$ [S2, unofficial].
-    i. **Early Termination:** If $\|\text{totalTransmittance}\| \le 10^{-3}$, set $\text{totalTransmittance} = 0$ and return `radiance` [S2, unofficial].
-    j. **Step:** Update position: $P += D \cdot \text{stepS}$ [S2, unofficial].
-
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources [G].
-- **Memory Complexity:** Not given in the sources [G].
-- **Performance:** Not given in the sources [G].
-- **Strengths:** Handles complex environment lighting via sphere light sampling [S1, unofficial].
-- **Limitations:** Requires efficient sphere light sampling; homogeneous assumption for light transmittance may be inaccurate for inhomogeneous media [S1, unofficial].
+*   **Time Complexity:** Depends on the number of Monte Carlo samples and the cost of `getPixelColorWithSphereLight` and transmittance calculations.
+*   **Memory Complexity:** Low, primarily storing scene objects and volume data.
+*   **Strengths:** Physically based handling of sphere lights in volumes.
+*   **Limitations:** Computationally expensive due to Monte Carlo integration and sphere light intersection/transmittance calculations.
+*   **When to Use:** When accurate single scattering from a sphere light source is required.
+*   **When Not to Use:** For real-time applications requiring high performance, or when point lights are sufficient approximations.
+
 ## Background
-This method is derived from implementations in the `VolumeSingleScattering` repository by WangYue, which uses a sphere light for background and emission in single scattering calculations [S1, unofficial]. The Frostbite variant is based on techniques described in the `volumetrics` repository by al-ro, referencing the Frostbite engine's approach to volumetric rendering [S2, unofficial].
+This method is derived from the `VolumeSingleScattering` project by WangYue [S1, unofficial]. It is a variant of Monte Carlo single scattering that specifically addresses the integration of sphere lights in participating media, using equi-angular sampling [S1, unofficial].
+
 ## Sources
 [S1] wangyuehi/VolumeSingleScattering, https://github.com/wangyuehi/VolumeSingleScattering, fetched 2026-10-26 (unofficial)
-[S2] al-ro/volumetrics, https://github.com/al-ro/volumetrics, fetched 2026-10-27 (unofficial)
