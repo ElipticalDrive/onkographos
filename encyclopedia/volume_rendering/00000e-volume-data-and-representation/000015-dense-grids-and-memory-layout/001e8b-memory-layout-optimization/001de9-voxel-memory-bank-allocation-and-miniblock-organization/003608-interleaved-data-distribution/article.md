@@ -1,0 +1,93 @@
+# Interleaved Data Distribution
+
+Also called: Page-based Round-robin Distribution
+
+## Overview
+Interleaved Data Distribution is a memory layout strategy for shared-memory MIMD architectures that distributes pages of a voxel array in a round-robin fashion among local processor memories [S1]. It solves the problem of memory hot spotting and bandwidth saturation that occurs when multiple processors access the same contiguous data blocks during parallel volume rendering [S1]. Unlike [Skewed Memory Organization](2351-skewed-memory-organization-for-conflict-free-ray-access.md) which uses geometric offsets to avoid bank conflicts, or [Cubic Addressing Scheme](7285-cubic-addressing-scheme.md) which maps 3D coordinates to linear indices, Interleaved Data Distribution relies on a strict linearized array structure with page-level interleaving [S1].
+
+## How it works
+**Inputs:** A 3D voxel dataset of size $N_x \times N_y \times N_z$.
+**Outputs:** A mapping of voxel indices to local memory banks in a system with $P$ processors.
+
+**Data Structures:**
+The voxel data is stored in a single linearized array $A$ of size $V = N_x \times N_y \times N_z$. The array is divided into fixed-size pages of $K$ voxels. The total number of pages is $M = \lceil V / K \rceil$.
+
+**Steps:**
+1.  **Linearization:** Map 3D voxel coordinates $(x, y, z)$ to a linear index $i$ using a standard row-major or column-major order. For example, in row-major order:
+    $$ i = x + N_x \cdot y + N_x \cdot N_y \cdot z $$
+2.  **Page Assignment:** Determine the page index $p$ for a given linear index $i$:
+    $$ p = \lfloor i / K \rfloor $$
+3.  **Round-Robin Distribution:** Assign page $p$ to processor $j$ based on the remainder of the page index divided by the number of processors $P$:
+    $$ j = p \pmod P $$
+4.  **Local Offset:** Within processor $j$'s local memory, the page is stored at an offset determined by the number of pages already assigned to that processor. If $c_j$ is the count of pages assigned to processor $j$ prior to this assignment, the local start index is $c_j \cdot K$. The specific voxel offset within the page is $i \pmod K$.
+
+**Parameters:**
+*   $K$: Page size. Not given in the sources.
+*   $P$: Number of processors.
+
+**Edge Cases:**
+*   **Uneven Distribution:** If $M$ is not divisible by $P$, the first $M \pmod P$ processors receive one extra page.
+*   **Precision:** Linearization must handle large $V$ without overflow if $V$ exceeds 32-bit integer limits [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def assign_voxels_to_processors(voxel_data, num_processors, page_size):
+    """
+    Distributes voxel data pages to local memories in round-robin fashion.
+    
+    Args:
+        voxel_data: List of voxel values, length V.
+        num_processors: Integer P.
+        page_size: Integer K.
+        
+    Returns:
+        List of lists, where result[j] contains the local memory content for processor j.
+    """
+    V = len(voxel_data)
+    num_pages = (V + page_size - 1) // page_size
+    
+    # Initialize local memories for each processor
+    # Each processor's memory is a list of pages
+    local_memories = [[] for _ in range(num_processors)]
+    
+    # Track current page count per processor to determine local offset
+    page_counts = [0] * num_processors
+    
+    for p in range(num_pages):
+        # Determine which processor owns this page
+        processor_id = p % num_processors
+        
+        # Extract the page data
+        start_idx = p * page_size
+        end_idx = min(start_idx + page_size, V)
+        page_data = voxel_data[start_idx:end_idx]
+        
+        # Append to the processor's local memory
+        local_memories[processor_id].append(page_data)
+        
+        # Increment count for this processor
+        page_counts[processor_id] += 1
+        
+    return local_memories
+```
+
+## Subtopics
+
+### Grouped vs Interleaved Macro Distribution
+A classification of macro distribution where a node's macros are either a spatially adjacent subset of the data set (grouped) or an interleaved/random subset (interleaved or random) [S2, unofficial]. Grouped distribution implies spatial locality, which can simplify cache coherence and addressing but may require data replication at node boundaries to avoid fetches for neighboring voxels [S2, unofficial]. Interleaved distribution spreads data across nodes, potentially balancing load but increasing the cost of fetching neighboring voxels required for resampling [S2, unofficial].
+
+## Operating characteristics
+**Time Complexity:** Memory access is $O(1)$ for local pages. Remote access (if a ray crosses a page boundary owned by another processor) depends on the interconnect latency.
+**Memory Complexity:** $O(V)$ total, distributed evenly across $P$ processors.
+**Performance:** This scheme avoids hot spotting by ensuring that contiguous memory accesses (which occur during ray traversal) are distributed across different processors' local memories [S1]. It scales well with dataset size because the distribution is static and simple [S1].
+**Strengths:** Simple implementation; effective at balancing memory bandwidth load across processors in shared-memory MIMD systems like DASH [S1].
+**Limitations:** Does not account for the specific geometric path of rays, unlike skewed schemes. May cause unnecessary remote memory accesses if rays traverse many page boundaries owned by different processors [S1].
+
+## Background
+The method was proposed for implementation on the DASH (Directory Architecture for SHared memory) Multiprocessor, a scalable shared-memory MIMD architecture [S1]. It was introduced to eliminate voxel communication associated with ray tracing by distributing data in an interleaved fashion among local memories [S1]. The approach contrasts with replicating the entire dataset, which makes poor utilization of memory resources and does not scale [S1].
+
+## Sources
+[S1] Volume rendering on scalable shared-memory MIMD architectures, https://doi.org/10.1145/147130.147141, fetched 2026-10-25
+[S2] DTIC ADA236632: Taxonomy and Algorithms for Volume Rendering on Multicomputers, https://archive.org/details/DTIC_ADA236632, fetched 2026-10-26 (unofficial)

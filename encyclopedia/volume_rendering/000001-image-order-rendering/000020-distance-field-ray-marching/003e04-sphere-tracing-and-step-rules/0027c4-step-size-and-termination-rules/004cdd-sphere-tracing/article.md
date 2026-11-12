@@ -3,194 +3,173 @@
 Also called: Hart's Sphere Tracing, SDF Sphere Tracing, SDF Tracing
 
 ## Overview
-Sphere Tracing is an iterative ray-marching algorithm for rendering implicit surfaces defined by Signed Distance Functions (SDFs) [S1, unofficial][S2][S3, S4, unofficial]. It solves the problem of finding the intersection between a camera ray and a complex, procedurally defined geometry without explicit polygonal meshes [S16, S17, unofficial]. Unlike standard constant-step ray marching, Sphere Tracing uses the SDF value at the current position as a safe lower bound for the distance to the nearest surface, allowing the ray to "leap" through empty space in large steps [S12, S17, unofficial]. This guarantees that the ray never overshoots or penetrates the surface, provided the function satisfies the Lipschitz condition with constant $\lambda=1$ [S2, S39]. It sets itself apart from siblings like [Interval Raymarching](13020-interval-raymarching.md) by relying on point-wise distance estimates rather than interval arithmetic, and from [Step Size Optimization](2054-step-size-optimization.md) by using the strict geometric bound rather than heuristic or historical approximations for step sizing.
+Sphere Tracing is an iterative ray-marching algorithm for rendering implicit surfaces defined by Signed Distance Functions (SDFs) [S1, unofficial][S2][S3, S4, S16, S17, S18, S19, S20, S21, S22, S23, unofficial][S24][S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, unofficial][S39][S40, unofficial]. It solves the problem of finding the intersection between a camera ray and a complex, procedurally defined geometry without explicit polygonal meshes [S1, S3, S4, S16, S17, S18, S19, S20, S21, S22, S23, unofficial][S24][S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, unofficial][S39][S40, unofficial]. What sets it apart from its siblings, such as [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md), is its use of the SDF value at the current position as a guaranteed lower bound on the distance to the nearest surface, allowing for adaptive, non-uniform step sizes that ensure the ray never overshoots the geometry [S2][S3, S4, S12, unofficial][S13][S16, S17, S19, S20, S21, S27, S30, S32, S33, S38, unofficial][S39]. Unlike [Interval Raymarching](13020-interval-raymarching.md) which handles uncertainty, or [Cone Intersection](1553-cone-intersection.md) which handles antialiasing via cone volumes, standard Sphere Tracing relies on the strict Lipschitz continuity of the SDF to guarantee convergence [S14, unofficial][S39].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Ray origin $\mathbf{o}$, normalized ray direction $\mathbf{d}$, maximum traversal distance $t_{max}$, maximum iteration count $N_{max}$, and convergence threshold $\epsilon$.
-*   **Output:** Intersection distance $t$, hit mask (boolean), and optionally the surface normal and material ID.
+*   **Inputs:** Ray origin $\mathbf{o}$, normalized ray direction $\mathbf{d}$, scene function $f(\mathbf{p})$ returning the signed distance to the nearest surface, maximum traversal distance $t_{max}$, maximum iteration count $N_{max}$, and convergence threshold $\epsilon$ [S2][S4, S8, S9, S10, S11, S12, S18, S19, S20, S21, S22, S29, S31, S34, S36, unofficial][S39].
+*   **Outputs:** Intersection distance $t$, intersection point $\mathbf{p} = \mathbf{o} + t\mathbf{d}$, and a boolean hit mask [S4, S8, S10, S11, S12, S18, S19, S20, S21, S22, S29, S31, S34, S36, unofficial][S39].
 
 **Data Structures:**
-*   **Ray:** Struct or tuple containing $\mathbf{o} \in \mathbb{R}^3$ and $\mathbf{d} \in \mathbb{R}^3$ ($\|\mathbf{d}\|=1$).
-*   **SDF Function:** $f: \mathbb{R}^3 \to \mathbb{R}$, returning the signed distance to the nearest surface. Positive outside, negative inside, zero on the surface [S2][S32, unofficial].
+*   **Ray:** Defined by origin $\mathbf{o} \in \mathbb{R}^3$ and direction $\mathbf{d} \in \mathbb{R}^3$ with $\|\mathbf{d}\|=1$ [S2][S4, S8, S9, S10, S11, S12, S18, S19, S20, S21, S22, S29, S31, S34, S36, unofficial][S39].
+*   **SDF:** A function $f: \mathbb{R}^3 \to \mathbb{R}$ where $f(\mathbf{p})$ is the Euclidean distance to the zero-level set $\{ \mathbf{x} \mid f(\mathbf{x}) = 0 \}$, positive outside, negative inside [S2][S4, S6, S12, S16, S17, S18, S19, S20, S21, S22, S23, unofficial][S24][S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, unofficial][S39][S40, unofficial].
+*   **State Variables:** Accumulated distance $t$ (scalar), current position $\mathbf{p}$ (vector), iteration counter $i$ (integer) [S4, S8, S9, S10, S11, S12, S18, S19, S20, S21, S22, S29, S31, S34, S36, unofficial][S39].
 
-**Algorithm Steps:**
-1.  **Initialization:** Set accumulated distance $t = 0.0$ (or a small epsilon $t_{min}$ to avoid division by zero or immediate termination if the ray starts on the surface) [S4, S18, S34, unofficial]. Set iteration counter $i = 0$.
-2.  **Position Calculation:** Compute the current 3D position on the ray: $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ [S10, S18, unofficial].
-3.  **SDF Evaluation:** Query the scene function to get the distance to the nearest surface: $d = f(\mathbf{p})$ [S6, S21, unofficial].
-4.  **Termination Check (Hit):** If $|d| < \epsilon$ (or $d < \epsilon$ for unsigned distance fields), the ray has converged to the surface. Terminate and return $t$ [S1, S16, S34, unofficial]. Note: Some implementations check if the ray has moved from outside to inside ($d < 0$) to detect penetration [S1, unofficial].
-5.  **Termination Check (Miss):** If $t > t_{max}$, the ray has exited the scene. Terminate and return miss status [S18, S34, unofficial].
-6.  **Termination Check (Limit):** If $i \ge N_{max}$, terminate to prevent infinite loops [S1, S8, unofficial].
-7.  **Step Update:** Advance the ray by the distance estimate: $t \leftarrow t + d$ [S10, S19, S30, unofficial].
-    *   *Safety Note:* If the SDF is not a true SDF but a Lipschitz function with constant $\lambda > 1$, the step must be scaled: $\Delta t = \frac{|d|}{\lambda}$ [S2, S2054].
-8.  **Increment:** $i \leftarrow i + 1$. Repeat from Step 2.
+**Numbered Steps:**
+1.  **Initialization:** Set accumulated distance $t \leftarrow t_{start}$ (typically a small epsilon or 0.0) and iteration counter $i \leftarrow 0$ [S4, S8, S9, S10, S11, S12, S18, S19, S20, S21, S22, S29, S31, S34, S36, unofficial][S39].
+2.  **Position Update:** Calculate current position $\mathbf{p} \leftarrow \mathbf{o} + t\mathbf{d}$ [S4, S8, S9, S10, S11, S12, S18, S19, S20, S21, S22, S29, S31, S34, S36, unofficial][S39].
+3.  **SDF Evaluation:** Query the scene function $d \leftarrow f(\mathbf{p})$ [S4, S6, S8, S9, S10, S11, S12, S18, S19, S20, S21, S22, S29, S30, S31, S32, S33, S34, S36, S37, S38, unofficial][S39].
+4.  **Termination Check (Hit):** If $|d| < \epsilon$ (or $d < \epsilon$ for unsigned), the surface is hit. Return $t$ and $\mathbf{p}$ [S4, S8, S9, S10, S11, S12, S16, S17, S18, S19, S20, S21, S22, S29, S31, S34, S36, unofficial][S39].
+5.  **Termination Check (Miss):** If $t > t_{max}$ or $i \ge N_{max}$, the ray has escaped or exceeded limits. Return miss status [S4, S8, S9, S10, S11, S12, S18, S19, S20, S21, S22, S29, S31, S34, S36, unofficial][S39].
+6.  **Step Advancement:** Update accumulated distance $t \leftarrow t + d$ [S4, S8, S9, S10, S11, S12, S18, S19, S20, S21, S22, S29, S30, S31, S34, S36, S38, unofficial][S39].
+    *   *Note:* If the SDF is not a true distance function but a Lipschitz function with constant $\lambda$, the step is scaled: $t \leftarrow t + \frac{|d|}{\lambda}$ [S2, S2054].
+7.  **Increment:** $i \leftarrow i + 1$.
+8.  **Loop:** Repeat from Step 2 [S4, S8, S9, S10, S11, S12, S18, S19, S20, S21, S22, S29, S31, S34, S36, unofficial][S39].
+
+**Formulas:**
+*   **Ray Equation:** $\mathbf{p}(t) = \mathbf{o} + t\mathbf{d}$ [S2][S4, S8, S9, S10, S11, S12, S18, S19, S20, S21, S22, S29, S31, S34, S36, unofficial][S39].
+*   **Sphere Tracing Step:** $t_{i+1} = t_i + f(\mathbf{o} + t_i\mathbf{d})$ [S2][S4, S8, S9, S10, S11, S12, S18, S19, S20, S21, S22, S29, S30, S31, S34, S36, S38, unofficial][S39].
+*   **Lipschitz Safety Bound:** For a function with Lipschitz constant $\lambda$, the safe step is $\Delta t \le \frac{|f(\mathbf{p})|}{\lambda}$ [S2, S2054].
+*   **Convergence:** The loop terminates when $f(\mathbf{p}_i) \le \epsilon$ [S2][S36, unofficial][S39].
+
+**Parameters with Typical Values:**
+*   $\epsilon$ (Convergence Threshold): $0.00001$ to $0.001$ [S9, S11, S16, S17, S19, S20, S27, S29, S34, unofficial].
+*   $N_{max}$ (Max Iterations): $10$ to $1024$ [S9, S11, S12, S18, S19, S29, S31, S34, unofficial].
+*   $t_{max}$ (Max Distance): $10.0$ to $1000.0$ [S9, S11, S12, S18, S19, S29, S34, unofficial].
+*   $\lambda$ (Lipschitz Constant): $1.0$ for true SDFs [S2, S5].
+
+**Edge Cases and Pitfalls:**
+*   **Overshooting:** If the function is not a true SDF (Lipschitz constant $\lambda > 1$) and the step is not scaled by $1/\lambda$, the ray may jump over the surface [S2, S2054].
+*   **Infinite Loops:** If the ray grazes a surface or encounters noise, $t$ may stagnate. A maximum iteration count $N_{max}$ is required [S4, S8, S9, S10, S11, S12, S18, S19, S20, S21, S22, S29, S31, S34, S36, unofficial][S39].
+*   **Precision:** Near the surface, floating-point precision errors can cause oscillation. Using a relative threshold (e.g., $0.001 \times t$) can help [S19, unofficial].
+*   **Inside Geometry:** If the ray starts inside an object ($f(\mathbf{p}) < 0$), standard sphere tracing steps away from the surface. Some implementations check for sign changes or use absolute values for traversal [S1, S19, unofficial][S39].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sphere_trace(ray_origin, ray_direction, sdf_function, max_dist, max_iters, epsilon):
+def sphere_trace(ray_origin, ray_direction, scene_sdf, max_dist, max_iters, epsilon):
     """
     Performs sphere tracing for a single ray.
     
     Args:
-        ray_origin (vec3): The starting point of the ray.
-        ray_direction (vec3): The normalized direction vector of the ray.
-        sdf_function (callable): A function f(p) returning signed distance to surface.
+        ray_origin (Vector3): The starting point of the ray.
+        ray_direction (Vector3): The normalized direction of the ray.
+        scene_sdf (Function): A function f(p) returning signed distance to surface.
         max_dist (float): Maximum distance the ray can travel.
         max_iters (int): Maximum number of marching steps.
         epsilon (float): Convergence threshold for surface hit.
         
     Returns:
-        tuple: (hit: bool, distance: float, point: vec3, normal: vec3)
+        Tuple: (hit: bool, distance: float, point: Vector3)
     """
     t = 0.0
-    point = ray_origin
-    
     for i in range(max_iters):
-        # 1. Evaluate SDF at current position
-        dist = sdf_function(point)
+        # Calculate current position on the ray
+        current_pos = ray_origin + ray_direction * t
         
-        # 2. Check for surface hit (convergence)
-        # Using absolute value for signed distance, or just dist < epsilon for unsigned
+        # Evaluate the Signed Distance Function
+        dist = scene_sdf(current_pos)
+        
+        # Check for surface hit
         if abs(dist) < epsilon:
-            # Compute normal via central differences if needed
-            normal = compute_normal(sdf_function, point)
-            return True, t, point, normal
+            return True, t, current_pos
         
-        # 3. Check for miss (exceeded max distance)
+        # Check for escape (miss)
         if t > max_dist:
-            return False, t, point, vec3(0, 0, 0)
-        
-        # 4. Step forward by the distance estimate
-        # The SDF value guarantees no surface is closer than 'dist'
+            return False, t, current_pos
+            
+        # Advance the ray by the distance to the nearest surface
+        # This is safe because the unbounding sphere of radius 'dist'
+        # cannot contain any surface points closer than 'dist'.
         t += dist
-        point = ray_origin + ray_direction * t
         
-    # 5. Max iterations reached
-    return False, t, point, vec3(0, 0, 0)
-
-def compute_normal(sdf_function, point, step=0.001):
-    """
-    Computes the surface normal using central finite differences.
-    """
-    dx = vec3(step, 0, 0)
-    dy = vec3(0, step, 0)
-    dz = vec3(0, 0, step)
-    
-    nx = sdf_function(point + dx) - sdf_function(point - dx)
-    ny = sdf_function(point + dy) - sdf_function(point - dy)
-    nz = sdf_function(point + dz) - sdf_function(point - dz)
-    
-    return normalize(vec3(nx, ny, nz))
+    # Max iterations reached
+    return False, t, current_pos
 ```
-
-**Parameters and Typical Values:**
-*   $\epsilon$ (Convergence Threshold): Typically $0.001$ to $0.0001$ [S11, S16, S34, unofficial]. Some implementations use a relative threshold, e.g., $0.001 \times t$ [S19, unofficial].
-*   $N_{max}$ (Max Iterations): Typically $10$ to $255$ for real-time, up to $1024$ for high-quality [S1, S12, S18, S29, S34, unofficial].
-*   $t_{max}$ (Max Distance): Scene-dependent, often $100.0$ or $1000.0$ [S11, S18, S34, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Lipschitz Violation:** If the SDF does not satisfy the Lipschitz condition with $\lambda=1$ (i.e., the gradient magnitude exceeds 1), the step size $d$ is no longer a safe lower bound, and the ray may overshoot the surface [S2, S2054].
-*   **Precision Errors:** Near the surface, floating-point precision can cause oscillation or premature termination. Using a relative epsilon or clamping the minimum step size can mitigate this [S19, S44, unofficial].
-*   **Inside the Surface:** If the ray starts inside an object ($f(\mathbf{o}) < 0$), standard sphere tracing may step away from the surface or fail to converge if not handled. Some implementations check for sign changes (outside to inside) to detect hits [S1, unofficial].
-*   **Gradients:** Normals are typically computed via numerical gradients (finite differences), which adds 6 extra SDF evaluations per hit point [S11, S18, unofficial]. Analytical derivatives are preferred if available [S45, unofficial].
 
 ## Subtopics
 
 ### [Zeno Implementation](1544-zeno-implementation.md)
-A software architecture minimizing the interface for new implicit surfaces, emphasizing the sufficiency of positive distance bounds and built-in gradient approximation.
+A specific software architecture for sphere tracing that minimizes the interface required to define new implicit surfaces. It solves the problem of rapid prototyping for mathematical visualization by allowing new primitives to be added using only a distance bound function, while optionally bypassing explicit normal calculations via numerical gradients. It is distinguished from general sphere tracing implementations by its specific emphasis on the sufficiency of the positive distance bound for visualization and its built-in six-sample gradient approximation.
 
 ### [Cone Intersection](1553-cone-intersection.md)
-An antialiasing technique representing pixels as viewing cones for symbolic prefiltering, differing from standard point-ray sphere tracing.
+Cone intersection is an antialiasing technique for sphere tracing that represents a pixel as a viewing cone rather than a point ray, allowing symbolic prefiltering to eliminate aliasing artifacts at grazing angles. It differs from standard sphere tracing by detecting intersections with an "inner cover" surface and computing the fractional coverage of the pixel by the implicit surface, whereas siblings like [Segment Tracing](1675-segment-tracing.md) or [Quadric Tracing](1866-quadric-tracing.md) focus on varying step sizes or bounding volumes without necessarily computing area-based coverage fractions.
 
 ### [Segment Tracing](1675-segment-tracing.md)
-Computes local Lipschitz bounds on segments for adaptive step sizes, reducing field queries compared to global bounds.
+Segment Tracing is a ray marching algorithm that computes local Lipschitz bounds on candidate segments to determine adaptive step sizes, reducing the number of field function queries compared to global Lipschitz bound methods like Sphere Tracing. It works for a particular class of hierarchical skeletal implicit surfaces, leveraging the composition of distance functions and kernel functions to compute directional Lipschitz bounds. Unlike Sphere Tracing, which uses a global bound that limits step size efficiency, Segment Tracing allows larger, safer steps by adapting to the local gradient and field values.
 
 ### [Quadric Tracing](1866-quadric-tracing.md)
-Accelerates tracing by precomputing augmented distance fields using quadric surfaces to bound geometry.
-
-### [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md)
-Enables gradient back-propagation through the tracing process for neural implicit surfaces.
+Quadric tracing is a method to accelerate sphere tracing by precomputing an augmented distance field using quadric surfaces (second-degree algebraic surfaces) to bound or unbound scene geometry, reducing the number of Signed Distance Function (SDF) evaluations. It solves the slowdown of sphere tracing near surfaces and with increasing scene complexity, where function evaluation time and convergence slow drastically. Unlike relaxed sphere tracing (which uses a scalar to determine step size and reverts if too large) or enhanced sphere tracing (which uses previous two radii to approximate planar surfaces), quadric tracing uses precomputed geometric bounds to accelerate convergence. It stops when the computed distance value dips below a threshold, switching to enhanced sphere tracing for final convergence.
 
 ### [Chamfer-L1 Distance Computation](2752-chamfer-l1-distance-computation.md)
-A post-processing metric for evaluating SDF fidelity against ground-truth meshes.
+Chamfer-L1 Distance Computation evaluates geometric fidelity between a predicted Signed Distance Function (SDF) and a ground-truth mesh by measuring average nearest-neighbor distances between sampled surface points. It serves as a post-processing evaluation metric rather than a ray-marching step-size rule, distinguishing it from sibling methods like [Cone Intersection](1553-cone-intersection.md) that optimize traversal [G].
 
 ### [Raymarched SDF Volume Rendering](3663-raymarched-sdf-volume-rendering.md)
-Renders 3D scenes defined by implicit surfaces without rasterization, focusing on the marching loop and shading.
+Raymarched SDF Volume Rendering is a technique for rendering 3D scenes defined by implicit surfaces (Signed Distance Fields) without rasterizing triangle meshes. It solves the problem of displaying complex, procedural, or fractal geometry by casting rays from the camera and stepping along them using distance estimates provided by the SDF. Unlike traditional rasterization or even standard ray tracing with explicit geometry, this method relies entirely on mathematical functions to define shape, offering infinite sharpness and precision for primitive-based SDFs, which is crucial for CAD and professional graphic design. It differs from its siblings by focusing on the specific implementation of the marching loop and shading within the SDF framework, building on the principles of [Sphere Tracing with SDFs](6223-sphere-tracing-with-sdfs.md).
 
 ### [Pyramid Recursive Ray Marching](3802-pyramid-recursive-ray-marching.md)
-Multi-scale acceleration initializing depth estimates at low resolution and refining recursively.
+Pyramid Recursive Ray Marching is a multi-scale acceleration technique for Signed Distance Field (SDF) ray marching that initializes depth estimates at low resolution and recursively refines them at higher resolutions. It distinguishes itself from standard aggressive ray marching by decoupling the coarse initialization phase from the fine-grained recursive refinement, allowing for larger initial steps in empty space while maintaining precision near surfaces.
 
 ### [Over-relaxation Sphere Tracing](3805-over-relaxation-sphere-tracing.md)
-Steps by a factor $\omega > 1$ times the SDE, falling back to standard tracing if overshoot is detected.
+Over-relaxation sphere tracing accelerates the convergence of standard sphere tracing by stepping along the ray by a factor $\omega > 1$ times the current signed distance estimate (SDE), reducing the total number of distance function evaluations. It differs from standard sphere tracing, which steps by exactly the SDE, by trading safety for speed: if the larger step overshoots the surface (detected by checking if the new unbounding sphere is disjoint from the previous one), the algorithm falls back to standard sphere tracing ($\omega=1$) from a corrected position. Unlike [Enhanced Sphere Tracing](3811-enhanced-sphere-tracing.md), which uses historical step data to approximate surface curvature, over-relaxation uses a constant multiplier and a simple overlap test. It also integrates a screen-space error metric to select the best intersection candidate when the maximum iteration count is exceeded, avoiding artifacts common when simply using the last evaluated point.
 
 ### [Enhanced Sphere Tracing](3811-enhanced-sphere-tracing.md)
-Takes steps larger than the Lipschitz bound or predicts optimal steps based on local geometry to accelerate convergence.
-
-### [Sphere Tracing with Composite SDF and Adaptive Sampling](3867-sphere-tracing-with-composite-sdf-and-adaptive-sampling.md)
-Renders composite scenes (primitives, text, arcs) with specialized distance queries and adaptive sampling.
-
-### [Non-Linear Sphere Tracing](4079-non-linear-sphere-tracing.md)
-Renders deformed SDFs by formulating traversal as an ODE initial value problem.
+Enhanced Sphere Tracing is a family of ray-marching optimizations that accelerate convergence toward implicit surfaces defined by Signed Distance Functions (SDFs) by taking steps larger than the strict Lipschitz bound or by predicting optimal step sizes based on local surface geometry. It solves the performance bottleneck of standard sphere tracing, which becomes prohibitively slow when rays graze surfaces at shallow angles or when the surface is locally planar. Unlike standard sphere tracing, which uses the queried distance value as the step size, enhanced variants either over-relax the step size by a constant factor or infer the next step size from the previous two distance queries to approximate the surface as locally flat.
 
 ### [Uniform Sphere Tracing](4406-uniform-sphere-tracing.md)
-Combines ray marching with optical depth integration for participating media with uniform density.
+Uniform Sphere Tracing is a volume rendering technique that combines ray marching along a Signed Distance Field (SDF) with optical depth integration to render participating media. It solves the problem of rendering volumetric effects like fog, smoke, or clouds by stepping through a volume, accumulating absorption and scattering, and blending the result with the background. It is distinguished from its parent [Sphere Tracing](2326-sphere-tracing.md) by its specific application to volume rendering with uniform density assumptions and its reliance on fixed or clamped step sizes rather than purely adaptive SDF-driven steps for the optical integration phase, though it uses SDF for surface detection. It differs from [Zeno Implementation](1544-zeno-implementation.md) and [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md) by not focusing on differentiability or specific engine integration, but rather on the fundamental algorithmic structure of uniform density volume rendering via ray marching.
 
 ### [Menger Sponge Raymarching](4875-menger-sponge-raymarching.md)
-Renders a Menger sponge fractal using a recursive SDF and fixed-step iteration.
+A raymarching technique that renders a Menger sponge fractal using a Signed Distance Function (SDF) combined with a floor plane, utilizing GLSL 120. It builds on [Sphere Tracing](2326-sphere-tracing.md) by implementing a specific recursive SDF for the Menger sponge geometry and a fixed-step iteration loop with early termination based on distance thresholds.
 
 ### [Synchronized-tracing](8552-synchronized-tracing.md)
-Tile-based pipeline for implicit volumes synchronizing threads for coherent field evaluation.
+Synchronized-tracing is a tile-based rendering pipeline for implicit volumes (blobtrees) that synchronizes threads within a subfrustum to allow coherent field evaluation, using sparse bottom-up tree traversal to prune the blobtree on-the-fly. It is designed for interactive modeling scenarios where no preprocessing is required when primitive parameters are updated. It sets itself apart from standard sphere tracing by introducing a synchronization mechanism via a low-resolution A-buffer to manage thread coherence within workgroups, and by using compact, smooth CSG operators to compute tight bounding volumes for approximate signed distance fields.
 
 ### [Cone-Traced Supersampling](9466-cone-traced-supersampling.md)
-Spatial antialiasing performing supersampling along the traced ray near surfaces with partial visibility.
+Cone-Traced Supersampling (CTSS) is an efficient spatial antialiasing solution for Signed Distance Field (SDF) rendering that performs supersampling along the traced ray near surfaces with partial visibility. It identifies object contours by evaluating cone intersections within a pixel's view frustum, avoiding the need for casting additional rays per pixel or offline prefiltering. Subpixel Edge Reconstruction (SER) extends CTSS to locate and resolve complex pixels with geometric edges in relatively flat regions that are otherwise undetected by cone intersections. Unlike conventional supersampling, CTSS minimizes shading computations, and unlike post-processing filters, it avoids undesirable blurriness and ghosting.
 
 ### [Kernel-Reflection Sequences](10186-kernel-reflection-sequences.md)
-Procedural modeling technique for fractal geometries using reflection transformations, enabling parallel sphere tracing.
+Kernel-Reflection Sequences (KRS) are a procedural modeling technique for generating complex, fractal-like geometries using Signed Distance Functions (SDFs) and reflection transformations. It solves the problem of evaluating global distance functions for recursive structures without recursion, enabling real-time sphere tracing on parallel hardware like GPUs. Unlike standard Iterated Function Systems (IFS) which require recursive traversal and cause divergent control flow, KRS uses a fixed operation count logarithmic time algorithm, allowing efficient parallelization.
+
+### [Analytical and Differentiable Methods](13369-analytical-and-differentiable-methods.md)
 
 ### Cube-tracing
-An algorithm using the chessboard (Manhattan) metric for distance computation, potentially resulting in more efficiently computed distances and ray intersection [S41]. Left as further research.
+An algorithm using the chessboard metric (or Manhattan metric) for distance computation, potentially resulting in more efficiently computed distances and ray intersection. Left as further research [S41].
 
 ### Ray Grouping
-An optimization that improves performance by grouping rays together into blocks to lower the total number of marching steps [S36, unofficial]. Tested on 64x64 and 128x128 displays, group size 2 lowered execution time significantly (e.g., 128k to 84k clock cycles on 64x64), with diminishing returns for sizes 4 and 8 [S36, unofficial].
+An optimization that improves performance by lowering the total number of marching steps by decreasing the total number of initial rays, grouping rays together into blocks [S36, unofficial]. Groups rays together during rendering to reduce total execution time [S36, unofficial]. Split groups of rays into smaller groups, though the implementation was noted to be slightly too eager to split groups [S36, unofficial]. Improvements were more significant for higher resolutions, as the cost at each step for a given group is not dependent on the number of rays in the group [S36, unofficial]. Tested on 64x64 and 128x128 pixel displays with 3 spheres at varying distances. Group size 2 lowered execution time. Sizes 4 and 8 did not decrease significantly further. Relative performance improved slightly more on the 128x128 display. Table 5.2 shows clock cycles: 64x64 display drops from 128k (size 1) to 84k (size 2), then 80k/82k. 128x128 drops from 512k to 328k, then 312k/313k [S36, unofficial]. Ray grouping reduces rays with similar execution flows, making it less effective on traditional lockstepped architectures compared to the custom GPU, though still potentially useful [S36, unofficial]. Implemented in the GLSL shader. Group size 1 is equivalent to no grouping [S36, unofficial].
 
 ### Bounding Sphere Optimization
-An optimization that decreases calculations by enclosing several objects into one bounding sphere [S36, unofficial]. Performance gain increases with the number of enclosed objects (e.g., 25% FPS increase at 10 objects), but decreases if fewer than 4 objects are enclosed [S36, unofficial].
+An optimization that decreases the number of calculations made in each march by enclosing several objects into one bounding sphere [S36, unofficial]. Groups multiple objects within a single bounding sphere to optimize ray-object intersection tests during sphere tracing [S36, unofficial]. Objects should be bound in an adaptive way, enclosing objects depending on how they are grouped per frame, approximating the sphere definition for increased performance rather than computing it exactly [S36, unofficial]. Performance gain increases as the number of objects inside the sphere increases [S36, unofficial]. Performance gain is situational, depending on enclosed object count, spacing, and fit. In the tested scene, a gain occurs when >3 objects are enclosed. At 10 enclosed objects, FPS increases by 25%. Performance decreases if <4 objects are enclosed [S36, unofficial]. Bounding Spheres can work together with Orthogonal Culling by culling bounding spheres instead of single objects, decreasing the number of orthogonal projections made [S36, unofficial]. Implemented and tested in the GLSL shader. Requires measuring FPS against an identical unoptimized scene [S36, unofficial].
 
 ### Hybrid Ray Marching
-Integrates ray marching with distance-based empty space leaping for complex scenes, using coarse SDFs to compute large skips in low-density regions before switching to fine-grained tracing near features [S13].
+Integrates ray marching with distance-based empty space leaping for complex scenes, using coarse SDFs to compute large skips in low-density regions before switching to fine-grained tracing near features [S13]. Balances speed and accuracy in multi-material volumes [S13].
 
 ### Acceleration Structures for SDF Evaluation
-Optimization nodes embedded directly in hierarchical construction trees to reduce computational cost of field function evaluation while preserving Lipschitz properties [S42, abstract only, unofficial]. Speeds up SDF evaluation by up to three orders of magnitude [S42, abstract only, unofficial].
+A set of optimization nodes embedded directly in hierarchical construction trees to reduce the computational cost of field function evaluation while preserving Lipschitz or conservative properties [S42, abstract only, unofficial]. Avoid external accompanying data structures such as octrees by embedding acceleration nodes directly in the construction tree [S42, abstract only, unofficial]. Use proxy and continuous level of detail nodes to reduce the overall evaluation cost [S42, abstract only, unofficial]. Apply a normal warping technique to enhance surface details with negligible computational overhead [S42, abstract only, unofficial]. Speeds up signed distance field evaluation by up to three orders of magnitude compared to standard evaluation [S42, abstract only, unofficial]. Applies to both ray-surface intersection computation in sphere tracing applications and polygonization algorithms [S42, abstract only, unofficial].
 
 ### Harnack Tracing
-A method for visualizing surfaces encoded by harmonic functions using conservative Harnack bounds on growth to determine step sizes, avoiding numerical issues of generic root finding [S32, unofficial].
+A method for visualizing surfaces encoded by harmonic functions (including angle-valued functions and those with singularities) by using conservative Harnack bounds on the growth of harmonic functions to determine step sizes, avoiding numerical issues common to generic root finding methods [S32, unofficial]. Use conservative Harnack bounds on the growth of harmonic functions to determine the step size for each iteration, ensuring the step does not cross a level set boundary [S32, unofficial]. Perform pointwise evaluation of the harmonic function at the current position to check for convergence to the target level set [S32, unofficial]. Unlike sphere tracing which uses distance bounds, Harnack tracing uses bounds on the growth of harmonic functions; it avoids numerical issues common to generic root finding methods and can visualize surfaces directly from point clouds or polygon soup without linear solves or mesh extraction [S32, unofficial].
 
 ### Claybook SDF Construction
-A method for real-time deformable SDF-based worlds using a global dense SDF with mip levels for acceleration [S43, unofficial]. Samples coarser mip levels for larger conservative steps [S43, unofficial].
-
-### Aeva Analytical SDF Rendering
-Avoids discretization by sphere-tracing analytical SDFs at render time, using offline compilation of CSG trees into optimized shaders [S43, unofficial].
+A method for fully real-time deformable SDF-based worlds, using a global dense SDF with mip levels for acceleration [S43, unofficial]. 1. Construct global SDF. 2. Build 5 mip levels, where each level encodes distance values twice as great as the previous. 3. Use sphere-tracing, sampling coarser mip levels to travel greater distances conservatively. 4. Ascend/descend mip levels based on sampled distance magnitude [S43, unofficial]. Modification: Apply pre-defined 'brushes' to the world SDF. Only nearby affected areas are re-evaluated due to brush locality [S43, unofficial]. Global SDF volume of resolution 1024x1024x512. Five mip levels are constructed. The volume is dense (empty and non-empty regions stored alike) [S43, unofficial]. Compact data structures (like SVOs) are incompatible with this modification method because surface-intersecting voxel counts are not static, requiring slow insertions and indirection tables. Dense volumes allow direct spatial indexing [S43, unofficial]. Used in Claybook (Aaltonen, 2018) [S43, unofficial].
 
 ### Conservative Sphere Tracing Step Sizing
-A fix for volumetric cloud rendering where sphere tracing takes overly aggressive step sizes, skipping cloud boundaries [S44, unofficial]. Involves clamping the SDF max value and reducing the step size multiplier (e.g., from 0.8 to 0.4) [S44, unofficial].
-
-### Analytical Derivatives for Normals and Slopes
-A technique using analytical derivatives of noise to compute fast normals and slopes, adjusting step size based on slope [S45, unofficial].
+A fix for volumetric cloud rendering where sphere tracing takes overly aggressive step sizes, skipping cloud boundaries and leaving circular/scalloped density artifacts [S44, unofficial]. Clamp the pre-computed 2D organic cell SDF in `cloud_weather_bake.comp` to a conservative maximum of `30000.0 * uWorldScale` [S44, unofficial]. Reduce the sphere tracing step size multiplier from `0.8` to `0.4` in `atmosphere_lowres.comp` to make the empty space skipping strictly conservative [S44, unofficial]. Clamp the empty space skipping step size to a maximum of `2000.0 * worldScale` to prevent overly aggressive jumps that bypass cloud details or boundaries [S44, unofficial]. SDF Max Clamp: `30000.0 * uWorldScale` [S44, unofficial]. Step Size Multiplier: `0.4` (reduced from `0.8`) [S44, unofficial]. Step Size Max Clamp: `2000.0 * worldScale` [S44, unofficial]. In empty regions of the weather map, the organic cell SDF returned uncapped values (up to 1e14), causing bilinear filtering to interpolate extremely large values near cloud edges [S44, unofficial]. The empty-space skipping sphere tracing loop used an aggressive step multiplier of 0.8 with no upper bound, resulting in rays jumping past the actual cloud surface [S44, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot K)$, where $N$ is the number of pixels and $K$ is the average number of iterations per ray. $K$ depends on the scene complexity and the smoothness of the SDF. In empty space, $K$ is small; near complex surfaces, $K$ increases [S1, S12, unofficial].
-*   **Memory Complexity:** $O(1)$ per ray, as it only stores the current position and distance. The SDF function itself may require significant memory if it involves large textures or neural networks [S1, S10, unofficial].
-*   **Measured Performance:** Performance varies widely. On a 64x64 display, standard sphere tracing took ~128k clock cycles, while ray grouping optimization reduced this to 84k [S36, unofficial]. For complex scenes, the number of iterations can exceed 1000, impacting real-time performance [S1, S12, unofficial].
-*   **Scaling:** Scales well with parallelization (GPU) as each ray is independent [S1, S10, unofficial]. However, divergence in iteration counts across threads can reduce efficiency [S36, unofficial].
-*   **Strengths:** No preprocessing required for simple primitives; infinite sharpness for analytic SDFs; robust handling of complex CSG operations [S3, S16, S23, unofficial].
-*   **Limitations:** Slow convergence near grazing angles or flat surfaces; sensitive to Lipschitz constant violations; requires numerical gradients for normals, adding cost [S1, unofficial][S5][S11, unofficial].
-*   **When to Use:** Ideal for procedural geometry, fractals, and real-time shader-based rendering where explicit mesh storage is undesirable [S16, S23, unofficial].
-*   **When Not to Use:** Not suitable for scenes with highly non-Lipschitz functions or when exact analytical normals are required without numerical approximation [S2][S45, unofficial].
+*   **Time Complexity:** The number of iterations depends on the scene geometry and the Lipschitz constant. In empty space, steps are large, leading to $O(1)$ or $O(\log n)$ behavior relative to distance. Near surfaces, steps shrink, potentially leading to $O(n)$ behavior where $n$ is the number of pixels or rays [S2, S5][S16, S17, S18, S19, S20, S21, S22, S23, unofficial][S24][S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, unofficial][S39][S40, unofficial].
+*   **Memory Complexity:** $O(1)$ per ray, as only the current position and distance need to be stored. No auxiliary data structures are required for the core algorithm, though acceleration structures (like those in [Acceleration Structures for SDF Evaluation](13369-analytical-and-differentiable-methods.md)) can increase memory usage [S2][S4, S8, S9, S10, S11, S12, S18, S19, S20, S21, S22, S29, S31, S34, S36, unofficial][S39].
+*   **Measured Performance:** Performance varies by hardware and resolution. Ray grouping optimizations showed significant speedups on custom GPUs, with 64x64 displays dropping from 128k to 84k clock cycles with group size 2, and 128x128 displays dropping from 512k to 328k clock cycles [S36, unofficial]. Bounding sphere optimizations increased FPS by 25% when enclosing 10 objects [S36, unofficial].
+*   **Scaling:** Sphere Tracing scales well with parallelization (e.g., GPU fragment shaders) because each ray is independent [S1, S4, S16, S17, S18, S19, S20, S21, S22, S23, unofficial][S24][S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, unofficial][S39][S40, unofficial].
+*   **Strengths:** Adaptive step sizes allow for efficient traversal of empty space. No preprocessing of geometry is required. Supports complex, procedural, and fractal geometry [S1, S3, S4, S16, S17, S18, S19, S20, S21, S22, S23, unofficial][S24][S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, unofficial][S39][S40, unofficial].
+*   **Limitations:** Can be slow near surfaces or when rays graze geometry. Requires the scene function to be a valid SDF (or Lipschitz bound). Not suitable for non-implicit geometry without conversion [S2, S5][S16, S17, S18, S19, S20, S21, S22, S23, unofficial][S24][S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, unofficial][S39][S40, unofficial].
+*   **When to Use:** Real-time rendering of procedural geometry, SDF-based effects, and implicit surfaces [S1, S3, S4, S16, S17, S18, S19, S20, S21, S22, S23, unofficial][S24][S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, unofficial][S39][S40, unofficial].
+*   **When Not to Use:** Scenes with explicit triangle meshes (use rasterization or standard ray tracing), or when high-performance rendering of large, sparse scenes is required without acceleration structures [S1, unofficial][S5][S16, S17, S18, S19, S20, S21, S22, S23, unofficial][S24][S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, unofficial][S39][S40, unofficial].
 
 ## Background
-Sphere Tracing was introduced by John Hart in 1996 in the paper "Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces" [S14, unofficial][S39]. It was developed to provide an efficient and antialiased method for rendering implicit surfaces defined by distance functions. The method leverages the geometric property that a sphere of radius $d$ centered at a point $\mathbf{p}$ with SDF value $d$ cannot intersect the surface, allowing for safe step sizes [S14, unofficial][S39]. It has since become a foundational technique in real-time graphics, particularly in shader-based rendering and procedural modeling [S16, S23, unofficial]. Variants and extensions have been developed to address its limitations, such as enhanced sphere tracing, differentiable sphere tracing, and cone tracing [S1, unofficial][S15][S14, unofficial].
+Sphere Tracing was introduced by John Hart in 1996 in the paper "Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces" [S14, unofficial][S39]. It is based on the geometric property that a sphere centered on the ray with a radius equal to the distance to the nearest surface (as given by the SDF) cannot contain any part of the surface, allowing the ray to safely advance by that distance [S2][S14, unofficial][S39]. The method has been widely adopted in real-time graphics for rendering procedural geometry, SDF-based effects, and implicit surfaces [S1, S3, S4, S16, S17, S18, S19, S20, S21, S22, S23, unofficial][S24][S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, unofficial][S39][S40, unofficial]. Variants and optimizations, such as [Enhanced Sphere Tracing](3811-enhanced-sphere-tracing.md) and [Over-relaxation Sphere Tracing](3805-over-relaxation-sphere-tracing.md), have been developed to address performance bottlenecks [S1, unofficial][S5][S7, unofficial][S42, abstract only, unofficial].
 
 ## Sources
 [S1] Ray tracing of signed distance function grids, https://www.jcgt.org/published/0011/03/06/paper-lowres.pdf, fetched 2026-10-25 (unofficial)
@@ -237,4 +216,3 @@ Sphere Tracing was introduced by John Hart in 1996 in the paper "Sphere Tracing:
 [S42] Enhanced Sphere Tracing | Request PDF - ResearchGate, https://www.researchgate.net/publication/265020476_Enhanced_Sphere_Tracing, fetched 2026-11-03 (abstract only, unofficial)
 [S43] PDF Real-time Rendering and Construction of Signed Distance Fields, https://jambuttenshaw.github.io/devportfolio/Dissertation.pdf, fetched 2026-10-28 (unofficial)
 [S44] Fix volumetric cloud SDF sphere march step sizing, https://github.com/ricecake/boidsish/pull/659, fetched 2026-10-26 (unofficial)
-[S45] Raymarching Distance Fields, https://iquilezles.org/articles/raymarchingdf/, fetched 2026-10-27 (unofficial)

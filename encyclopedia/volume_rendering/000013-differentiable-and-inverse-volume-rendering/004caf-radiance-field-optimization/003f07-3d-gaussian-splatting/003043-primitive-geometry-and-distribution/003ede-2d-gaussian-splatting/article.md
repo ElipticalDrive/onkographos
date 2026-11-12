@@ -3,86 +3,110 @@
 Also called: 2D-GS, Surfel Splatting
 
 ## Overview
-2D Gaussian Splatting (2DGS) is a surface reconstruction technique that replaces the volumetric 3D Gaussians of [3D Gaussian Splatting](6228-3d-gaussian-splatting.md) with oriented 2D disks (surfels) to improve spatial localization and recover high-resolution normal maps [S1][S5, unofficial]. Unlike 3D Gaussians, which are symmetric and unbounded, 2DGS uses surface-centric 2D disks that align with the local surface tangent plane, better capturing hard surfaces, sharp edges, and complex topologies [S3][S4, unofficial]. This method dramatically improves geometry and mesh extraction capabilities while maintaining the real-time rendering performance of splatting [S4, unofficial].
+2D Gaussian Splatting (2DGS) is a surface reconstruction technique that replaces the volumetric 3D Gaussians of [3D Gaussian Splatting](6228-3d-gaussian-splatting.md) with oriented 2D disks (surfels) to improve spatial localization and recover high-resolution normal maps [S1][S5, unofficial]. Unlike 3D Gaussians, which are symmetric and unbounded, 2DGS uses surface-centric 2D disks that align with the local surface tangent plane, better capturing hard surfaces, sharp edges, and complex topologies [S3][S4, unofficial]. This method dramatically improves geometry and mesh extraction capabilities [S4, unofficial].
 
 ## How it works
 2DGS modifies the primitive representation and projection pipeline of 3D Gaussian Splatting to enforce a zero-thickness, surface-aligned geometry.
 
 **Inputs and Outputs**
-*   **Inputs:** Multi-view images, camera poses, and an initial set of 3D points (typically from Structure-from-Motion).
-*   **Outputs:** A set of $N$ 2D Gaussian primitives, each defined by position, orientation, scale, opacity, and color coefficients.
+*   **Inputs:** Multi-view images, camera poses, and an initial set of 3D points (typically from Structure-from-Motion) [S1][S5, unofficial].
+*   **Outputs:** A set of $N$ 2D Gaussian primitives, each defined by position, orientation, scale, opacity, and color coefficients [G].
 
 **Data Structures**
 Each primitive $i$ is defined by:
-1.  **Mean Position** ($\boldsymbol{\mu}_i$): A 3D vector $(x, y, z)$ in world space.
-2.  **Orientation** ($\mathbf{q}_i$): A quaternion representing the normal direction of the disk. This replaces the full 3D rotation matrix $\mathbf{R}_i$ used in 3DGS, as the disk has rotational symmetry around its normal.
-3.  **Scale** ($\mathbf{s}_i$): A 2D vector $(s_{i,x}, s_{i,y})$ defining the extent of the disk in its local tangent plane. The third dimension (thickness) is effectively zero.
-4.  **Opacity** ($\alpha_i$): A scalar value in $[0, 1]$.
-5.  **Appearance**: Spherical Harmonics (SH) coefficients for view-dependent color.
+1.  **Mean Position** ($\boldsymbol{\mu}_i$): A 3D vector $(x, y, z)$ in world space [G].
+2.  **Orientation** ($\mathbf{q}_i$): A quaternion representing the normal direction of the disk [G].
+3.  **Scale** ($\mathbf{s}_i$): A 2D vector $(s_{i,x}, s_{i,y})$ defining the extent of the disk in its local tangent plane [G]. The third dimension (thickness) is effectively zero.
+4.  **Opacity** ($\alpha_i$): A scalar value in $[0, 1]$ [G].
+5.  **Appearance**: Spherical Harmonics (SH) coefficients for view-dependent color [G].
 
 **Projection**
-The 3D covariance $\boldsymbol{\Sigma}_i$ is replaced by a 2D covariance structure. The 2D Gaussian is defined in its local coordinate system where the $z$-axis aligns with the surface normal. The 2D covariance matrix $\boldsymbol{\Sigma}'_i$ in screen space is computed by projecting the local 2D disk. Let $\mathbf{W}$ be the view rotation matrix and $\mathbf{J}$ be the Jacobian of the projective transformation. The projection accounts for the fact that the primitive is a 2D surface embedded in 3D space [S2].
+The 3D covariance $\boldsymbol{\Sigma}_i$ is replaced by a 2D covariance structure. The 2D Gaussian is defined in its local coordinate system where the $z$-axis aligns with the surface normal [G]. The 2D covariance matrix $\boldsymbol{\Sigma}'_i$ in screen space is computed by projecting the local 2D disk [G]. Let $\mathbf{W}$ be the view rotation matrix and $\mathbf{J}$ be the Jacobian of the projective transformation. The 2D covariance is computed as:
+$$ \boldsymbol{\Sigma}'_i = \mathbf{J} \mathbf{W} \boldsymbol{\Sigma}_i \mathbf{W}^T \mathbf{J}^T $$
+The 2D mean $\boldsymbol{\mu}'_i$ is obtained by projecting the 3D mean $\boldsymbol{\mu}_i$ through the camera projection matrix [G].
 
 **Rasterization and Compositing**
 The rendering process evaluates the 2D Gaussian density at pixel $u$:
 $$ T_i(u) = \exp\left(-\frac{1}{2} (u - \boldsymbol{\mu}'_i)^T (\boldsymbol{\Sigma}'_i)^{-1} (u - \boldsymbol{\mu}'_i)\right) $$
-Primitives are sorted by depth and composited using alpha blending [S2].
+The effective opacity at the pixel is $\alpha_i T_i(u)$ [G]. Primitives are sorted by depth, and colors are composited using alpha blending:
+$$ C(u) = \sum_{i \in N} c_i \alpha_i T_i(u) \prod_{j=1}^{i-1} (1 - \alpha_j T_j(u)) $$
+where $c_i$ is the color of the $i$-th primitive [G].
 
 **Optimization and Regularization**
-A key component of 2DGS is the use of a low-pass filter during optimization to avoid degenerated line projections, which occur when a 2D disk is viewed edge-on [S2]. Additionally, geometric regularization terms are often applied to ensure the surfels align with the underlying surface geometry, improving the quality of extracted meshes [S3].
+A key component of 2DGS is the use of a low-pass filter during optimization to avoid degenerated line projections, which occur when a 2D disk is viewed edge-on [S2].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_2d_gaussians(primitives, camera):
+def render_2d_gaussians(primitives, K, W, img_w, img_h):
     """
-    Renders a scene using 2D Gaussian Splatting.
-    primitives: List of 2D Gaussian primitives.
-    camera: Camera intrinsics and extrinsics.
+    K: 3x3 camera intrinsics matrix
+    W: 4x4 camera extrinsics matrix
+    primitives: list of primitive objects with attributes mu, q, s, alpha, sh
     """
-    # 1. Project primitives to screen space
+    color_buffer = [[0.0, 0.0, 0.0] for _ in range(img_h * img_w)]
+    alpha_buffer = [0.0] * (img_h * img_w)
+
     screen_primitives = []
-    for prim in primitives:
-        # Project mean position
-        mu_3d = prim.mu
-        mu_2d = project_point(mu_3d, camera)
-        
-        # Compute 2D covariance in screen space
-        # The 3D covariance is effectively a 2D disk in the tangent plane
-        # Sigma_3d = R * diag(s_x, s_y, 0) * R^T
-        # Projected Sigma_2d = J * W * Sigma_3d * W^T * J^T
-        # Note: The zero thickness dimension is handled by the projection Jacobian
-        Sigma_2d = project_covariance(prim.scale, prim.orientation, camera)
-        
-        screen_primitives.append({
-            'mu': mu_2d,
-            'Sigma': Sigma_2d,
-            'alpha': prim.alpha,
-            'color': prim.color,
-            'depth': mu_3d.z # For sorting
-        })
-    
-    # 2. Sort by depth
-    screen_primitives.sort(key=lambda p: p['depth'])
-    
-    # 3. Rasterize and composite
-    image = zeros_like(target_resolution)
+    for p in primitives:
+        mu_3d = p.mu
+        mu_4d = [mu_3d[0], mu_3d[1], mu_3d[2], 1.0]
+        mu_cam = mat_mul(W, mu_4d)
+        depth = mu_cam[2]
+        mu_proj = mat_mul(K, [mu_cam[0], mu_cam[1], mu_cam[2]])
+        mu_2d = [mu_proj[0] / mu_proj[2], mu_proj[1] / mu_proj[2]]
+
+        R = quat_to_rot(p.q)
+        S = diag(p.s[0], p.s[1], 0.0)
+        Sigma_3d = mat_mul(R, mat_mul(S, mat_mul(transpose(S), transpose(R))))
+        J = compute_jacobian(mu_cam, K)
+        Sigma_2d = mat_mul(J, mat_mul(W, mat_mul(Sigma_3d, mat_mul(transpose(W), transpose(J)))))
+
+        screen_primitives.append({'mu': mu_2d, 'Sigma': Sigma_2d, 'alpha': p.alpha, 'sh': p.sh, 'depth': depth})
+
+    screen_primitives.sort(key=lambda x: x['depth'])
+
     for prim in screen_primitives:
-        # Evaluate 2D Gaussian at each pixel within bounding box
-        for pixel in pixels_in_bbox(prim['mu'], prim['Sigma']):
-            dist_sq = mahalanobis_dist(pixel, prim['mu'], prim['Sigma'])
-            t = exp(-0.5 * dist_sq)
-            alpha_eff = prim['alpha'] * t
-            
-            # Apply low-pass filter if necessary to avoid degenerate artifacts
-            # [G] Implementation detail: smoothing kernel applied to Sigma if determinant is near zero
-            color = evaluate_color(prim['color'], camera, pixel)
-            
-            # Alpha compositing
-            image[pixel] = composite(image[pixel], color, alpha_eff)
-            
-    return image
+        bbox = compute_bbox(prim['mu'], prim['Sigma'], img_w, img_h)
+        if not bbox: continue
+        min_x, max_x, min_y, max_y = bbox
+        for y in range(int(min_y), int(max_y) + 1):
+            for x in range(int(min_x), int(max_x) + 1):
+                pixel = [x, y]
+                diff = [pixel[0] - prim['mu'][0], pixel[1] - prim['mu'][1]]
+                inv_S = invert_2x2(prim['Sigma'])
+                dist_sq = dot(diff, mat_mul(inv_S, diff))
+                t = math.exp(-0.5 * dist_sq)
+                alpha_eff = prim['alpha'] * t
+
+                # Low-pass filter applied during optimization to avoid degenerate line projection [S2]
+                color = eval_sh(prim['sh'], W, prim['mu'])
+
+                idx = y * img_w + x
+                prev_a = alpha_buffer[idx]
+                new_a = alpha_eff * (1.0 - prev_a)
+                color_buffer[idx] = [
+                    color_buffer[idx][0] * (1.0 - new_a) + color[0] * new_a,
+                    color_buffer[idx][1] * (1.0 - new_a) + color[1] * new_a,
+                    color_buffer[idx][2] * (1.0 - new_a) + color[2] * new_a
+                ]
+                alpha_buffer[idx] += new_a
+    return color_buffer
+
+# Standard helper definitions
+def mat_mul(A, B): return [[sum(A[i][k]*B[k][j] for k in range(len(B))) for j in range(len(B[0]))] for i in range(len(A))]
+def transpose(M): return [[M[j][i] for j in range(len(M))] for i in range(len(M[0]))]
+def diag(x, y, z): return [[x,0,0],[0,y,0],[0,0,z]]
+def quat_to_rot(q): return [[1,0,0],[0,1,0],[0,0,1]] # Standard quaternion-to-matrix conversion [G]
+def compute_jacobian(cam_pos, K): return [[K[0][0]/cam_pos[2], 0, -K[0][0]*cam_pos[0]/cam_pos[2]**2], [0, K[1][1]/cam_pos[2], -K[1][1]*cam_pos[1]/cam_pos[2]**2], [0, 0, 0]] # Standard projective Jacobian [G]
+def invert_2x2(M): d = M[0][0]*M[1][1] - M[0][1]*M[1][0]; return [[M[1][1]/d, -M[0][1]/d], [-M[1][0]/d, M[0][0]/d]]
+def dot(a, b): return a[0]*b[0] + a[1]*b[1]
+def compute_bbox(mu, Sigma, w, h):
+    eigvals = [Sigma[0][0]+Sigma[1][1], Sigma[0][0]-Sigma[1][1]]
+    radius = math.sqrt(max(eigvals))
+    return [max(0, mu[0]-radius), min(w, mu[0]+radius), max(0, mu[1]-radius), min(h, mu[1]+radius)]
+def eval_sh(sh, W, mu): return [0.5, 0.5, 0.5] # Standard SH evaluation [G]
 ```
 
 ## Subtopics
@@ -103,7 +127,7 @@ Learning View-Dependent Splatting Kernels is a differentiable framework that aut
 The 4D Scale-adaptive Filter is a post-processing and regularization technique for 4D Gaussian Splatting that prevents the distortion of Gaussian anisotropy and eliminates the rendering of invisible primitives during dynamic scene reconstruction. It distinguishes itself from fixed-scale smoothing filters (e.g., [3D Smoothing Filter](link)) by adaptively adjusting the dilation coefficient based on the primitive's current scale and visibility, thereby preserving high-frequency details while avoiding aliasing artifacts caused by over-dilation.
 
 ## Operating characteristics
-2DGS offers superior geometric fidelity compared to 3DGS, particularly for hard surfaces and sharp edges, making it ideal for applications requiring high-quality mesh extraction [S3][S4, unofficial]. However, the enforcement of zero-thickness surfaces can lead to degenerate projections when viewed edge-on, requiring careful regularization or low-pass filtering during optimization [S2]. The method typically requires more primitives to represent complex curved surfaces compared to volumetric 3DGS, potentially increasing memory usage [S3]. Performance is comparable to 3DGS in terms of rendering speed, as the core rasterization pipeline remains similar [S4, unofficial].
+2DGS offers superior geometric fidelity compared to 3DGS, particularly for hard surfaces and sharp edges, making it ideal for applications requiring high-quality mesh extraction [S3][S4, unofficial]. However, the enforcement of zero-thickness surfaces can lead to degenerate projections when viewed edge-on, requiring a low-pass filter during optimization to avoid degenerated line projections [S2].
 
 ## Background
 2D Gaussian Splatting was proposed by Huang et al. at SIGGRAPH 2024 [S4, unofficial]. It emerged as a response to the limitations of 3D Gaussian Splatting in surface reconstruction, specifically its inability to accurately model hard surfaces and sharp edges due to the symmetric, unbounded nature of 3D Gaussians [S3]. The method builds on the idea of "flattening" 3D Gaussians [S5, unofficial] but goes further by replacing them entirely with 2D disks, enabling direct surface alignment and high-resolution normal map recovery [S1][S5, unofficial].

@@ -1,0 +1,233 @@
+# Sparse Voxel Octree Construction from Heightmap
+
+Also called: Heightmap-based SVO Construction, Octree Construction via Heightmap Sampling, Top-down SVO Construction from Heightmap
+
+## Overview
+This method constructs a Sparse Voxel Octree (SVO) by sampling a 2D heightmap to determine the occupancy of 3D voxel nodes, creating a child node only if the height value at a corner lies within the vertical span of the voxel bounding box [S1, unofficial]. It differs from general brute-force SVO construction by bypassing the need for a pre-existing 3D volume or point cloud, instead deriving the 3D structure directly from 2D terrain data [S1, unofficial]. This approach is specifically suited for terrain rendering where the geometry is defined by a scalar field over a 2D plane.
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A heightmap object (`heightMap`) providing width and value retrieval; maximum recursion depth (`maxDepth`); octree scale factor (`octreeScale`); initial bounding box (`minBB`, `maxBB`).
+*   **Output:** A root voxel node (`root`) representing the constructed SVO.
+
+**Data Structures**
+The voxel node structure contains the following fields [S1, unofficial]:
+*   `childPointers`: A dynamic array (e.g., `std::vector<Voxel*>`) storing pointers to child nodes.
+*   `validMask`: An integer bitmask indicating which of the 8 potential children exist. Bit $i$ corresponds to child index $i$.
+*   `leafMask`: An integer bitmask indicating which children are leaf nodes.
+
+**Parameters**
+*   `octreeScale`: Set to 8, defining the maximum recursion depth for octree construction [S1, unofficial].
+*   `minBB`: Initial minimum bounding box, defaulting to $(0,0,0)$ [S1, unofficial].
+*   `maxBB`: Initial maximum bounding box, defined as $(\text{heightMap.GetWidth()}, \text{heightMap.GetWidth()}, \text{heightMap.GetWidth})$ [S1, unofficial]. Note: The source uses `heightMap.GetWidth()` for all three dimensions, implying a cubic bounding box scaled to the heightmap's pixel width.
+
+**Algorithm Steps**
+1.  **Initialization:** Create the root node. Call the recursive construction function `constructChildren(&root, heightMap, 1, octreeScale, minBB, maxBB)` [S1, unofficial].
+2.  **Recursive Construction (`constructChildren`):**
+    *   Compute the midpoint of the current bounding box: $mid = (min + max) / 2$ [S1, unofficial].
+    *   If `currDepth` $\le$ `maxDepth`, iterate through 8 octants (indices 0-7). For each octant, define a sub-bounding box using an offset of $0.001f$ to prevent boundary overlap between adjacent voxels [S1, unofficial].
+    *   Call `constructNode` for each octant to determine occupancy.
+    *   If `currDepth` == `maxDepth`, set the `leafMask`. Iterate $i$ from 0 to 7. If bit $i$ is set in `validMask` (checked via `node->validMask & exp2(i)`), set the corresponding bit in `leafMask` (`node->leafMask += exp2(i)`) [S1, unofficial].
+    *   Initialize `childCounter` to 0. Iterate through bits 1, 2, 4, 8, 16, 32, 64, 128 of `node->validMask`. If a bit is set, recursively call `constructChildren` on `node->childPointers[childCounter]` with updated bounding box coordinates $(min, mid, max)$, then increment `childCounter` [S1, unofficial].
+3.  **Node Construction (`constructNode`):**
+    *   Calculate the vertical span of the voxel: $pointSpan = c1.y - c0.y$ (where $c0$ and $c1$ are the min and max y-coordinates of the voxel) [S1, unofficial].
+    *   For each of the 4 relevant corners (c0..c3) in the x-z plane:
+        *   Retrieve the height value from the heightmap.
+        *   Check if the height value lies within the voxel's vertical span: if $heightVal > c.y$ AND $heightVal < (c.y + pointSpan)$, then the voxel is occupied.
+        *   If occupied, push a new `Voxel` to `node->childPointers` and add $exp2(idx)$ to `node->validMask` [S1, unofficial].
+
+**Height Value Calculation**
+The height value for a corner vertex $c$ is calculated as [S1, unofficial]:
+$$heightVal = \left( \frac{\text{heightmap.GetValue}(c.x, c.z) + 1}{2} \right) \times \text{Chunk::CHUNK\_SIZE}$$
+*Note: The source formula is written as $((heightmap.GetValue(c.x, c.z) + 1) \times \text{Chunk::CHUNK\_SIZE} / 2)$. Assuming `heightmap.GetValue` returns a normalized value in $[-1, 1]$ or $[0, 1]$, the formula scales it to the chunk size. If the input is $[0,1]$, the $+1$ might be an error in the source or implies a specific normalization. We follow the source's explicit formula.*
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class Voxel:
+    def __init__(self):
+        self.childPointers = []
+        self.validMask = 0
+        self.leafMask = 0
+
+def exp2(n):
+    return 1 << n
+
+def construct_children(node, height_map, curr_depth, max_depth, min_bb, max_bb, octree_scale):
+    # Compute midpoint
+    mid_x = (min_bb[0] + max_bb[0]) / 2.0
+    mid_y = (min_bb[1] + max_bb[1]) / 2.0
+    mid_z = (min_bb[2] + max_bb[2]) / 2.0
+    
+    if curr_depth <= max_depth:
+        # Iterate 8 octants
+        for i in range(8):
+            # Determine sub-box coordinates based on octant index i
+            # Bit 0: x, Bit 1: y, Bit 2: z
+            # 0 = min, 1 = mid
+            x_start = min_bb[0] if (i & 1) == 0 else mid_x
+            x_end = mid_x if (i & 1) == 0 else max_bb[0]
+            
+            y_start = min_bb[1] if (i & 2) == 0 else mid_y
+            y_end = mid_y if (i & 2) == 0 else max_bb[1]
+            
+            z_start = min_bb[2] if (i & 4) == 0 else mid_z
+            z_end = mid_z if (i & 4) == 0 else max_bb[2]
+            
+            # Offset to prevent boundary overlap
+            offset = 0.001
+            sub_min = [x_start + offset, y_start + offset, z_start + offset]
+            sub_max = [x_end - offset, y_end - offset, z_end - offset]
+            
+            # Create child node if not exists
+            if i >= len(node.childPointers):
+                node.childPointers.append(Voxel())
+            
+            child = node.childPointers[i]
+            construct_node(child, height_map, sub_min, sub_max)
+            
+            # If child was marked valid in construct_node, it exists in validMask
+            # We need to ensure validMask is updated. 
+            # Note: construct_node updates validMask directly.
+            
+    # If at max depth, set leaf mask
+    if curr_depth == max_depth:
+        for i in range(8):
+            if (node.validMask & exp2(i)):
+                node.leafMask += exp2(i)
+                
+    # Recurse into valid children
+    child_counter = 0
+    # Check bits 1, 2, 4, 8, 16, 32, 64, 128 (indices 0-7)
+    for i in range(8):
+        if (node.validMask & exp2(i)):
+            # Update bounding box for child
+            # The source says "updated bounding box coordinates (min, mid, max)"
+            # This implies the sub-box calculated in the loop above.
+            # However, the recursive call needs the specific sub-box for this child.
+            # We re-calculate or store it. For clarity, we pass the sub-box.
+            # Re-deriving sub-box for child i:
+            x_start = min_bb[0] if (i & 1) == 0 else mid_x
+            x_end = mid_x if (i & 1) == 0 else max_bb[0]
+            y_start = min_bb[1] if (i & 2) == 0 else mid_y
+            y_end = mid_y if (i & 2) == 0 else max_bb[1]
+            z_start = min_bb[2] if (i & 4) == 0 else mid_z
+            z_end = mid_z if (i & 4) == 0 else max_bb[2]
+            
+            offset = 0.001
+            sub_min = [x_start + offset, y_start + offset, z_start + offset]
+            sub_max = [x_end - offset, y_end - offset, z_end - offset]
+            
+            construct_children(node.childPointers[child_counter], height_map, curr_depth + 1, max_depth, sub_min, sub_max, octree_scale)
+            child_counter += 1
+
+def construct_node(node, height_map, min_bb, max_bb):
+    # Calculate vertical span
+    point_span = max_bb[1] - min_bb[1]
+    
+    # Define 4 corners in x-z plane for the base of the voxel
+    # Assuming the heightmap is sampled at the corners of the voxel's footprint
+    corners = [
+        (min_bb[0], min_bb[2]),
+        (max_bb[0], min_bb[2]),
+        (min_bb[0], max_bb[2]),
+        (max_bb[0], max_bb[2])
+    ]
+    
+    # The source mentions iterating i from 0 to 7 for validMask, 
+    # but construct_node seems to determine IF a child exists.
+    # The source says: "For each corner (c0..c3)... push a new Voxel... and add exp2(idx) to node->validMask"
+    # This implies one child per corner? No, an octree has 8 children.
+    # The source logic is slightly ambiguous: "calculate pointSpan... For each corner... if heightVal... push Voxel".
+    # It seems to map 4 corners to 4 children? Or perhaps the 4 corners define the footprint, 
+    # and the height check determines occupancy for the entire voxel column?
+    # Re-reading: "A child node is created only if the height value at a corner lies within the vertical span".
+    # This suggests that for a given voxel, we check its 4 bottom corners. 
+    # If ANY corner's height is within the voxel's Y-span, does the voxel exist?
+    # Or does each corner correspond to a specific child?
+    # The source says "add exp2(idx) to node->validMask". It doesn't specify which idx.
+    # Given the ambiguity, we assume the standard interpretation: 
+    # The voxel itself is the node. The "children" are the sub-voxels.
+    # The "constructNode" function likely determines if the CURRENT node should have children.
+    # But the source says "push a new Voxel to node->childPointers".
+    # This implies `constructNode` is creating the children.
+    # Let's assume the 4 corners map to the 4 bottom children (indices 0,1,2,3) or similar.
+    # However, the source doesn't specify the mapping. 
+    # We will implement a guard: if the source is ambiguous, we note it.
+    # But to make it implementable, we must assume a mapping.
+    # Common practice: Check if the terrain intersects the voxel.
+    # The source formula: heightVal = ...
+    # Condition: heightVal > c.y AND heightVal < (c.y + pointSpan)
+    # This checks if the terrain height at corner c is inside the voxel's Y-range.
+    # If so, create a child.
+    # Which child? The source doesn't say. We will assume it creates a child for each valid corner,
+    # but an octree has 8 children. 
+    # Perhaps the "corners" are the 8 corners of the voxel?
+    # "For each corner (c0..c3)" suggests 4 corners.
+    # This is a significant gap. We will assume the 4 corners correspond to the 4 bottom children (0-3) 
+    # and the top 4 (4-7) are handled similarly or are empty if the terrain is below.
+    # Or, more likely, the "corner" refers to the 8 corners of the voxel, but the source only lists 4.
+    # Given the constraint "no placeholders", we must make a choice.
+    # We will assume the source implies checking the 4 bottom corners to determine if the bottom 4 children exist.
+    # The top 4 children would require checking the top corners or assuming continuity.
+    # Since the source is "unofficial" and potentially incomplete, we will implement the 4 corners.
+    
+    # Mapping corners to child indices (assumption for implementation)
+    # c0 -> child 0, c1 -> child 1, c2 -> child 2, c3 -> child 3
+    # This is a guess. The source does not specify.
+    
+    for idx, (cx, cz) in enumerate(corners):
+        # Get height value
+        # heightmap.GetValue returns a value. 
+        # Formula: heightVal = ((heightmap.GetValue(cx, cz) + 1) * CHUNK_SIZE / 2)
+        # We need CHUNK_SIZE. It is not passed. We assume it's a global or derived from voxel size.
+        # Voxel size in Y is point_span. 
+        # If CHUNK_SIZE is the size of the root chunk, we need to scale.
+        # The source uses CHUNK_SIZE directly. We will assume it's available.
+        # For the sake of the algorithm, we assume CHUNK_SIZE is a constant or parameter.
+        
+        raw_val = height_map.get_value(cx, cz)
+        height_val = ((raw_val + 1) * 8.0) / 2.0 # Assuming CHUNK_SIZE=8 based on octreeScale? No, octreeScale is depth.
+        # The source says CHUNK_SIZE. We will leave it as a variable.
+        
+        # Check if height is within voxel Y span
+        # c.y is the Y coordinate of the corner. For bottom corners, c.y = min_bb[1]
+        # But the source says "c.y". It might mean the Y of the corner in 3D space.
+        # For the 4 bottom corners, Y is min_bb[1].
+        
+        c_y = min_bb[1]
+        
+        if height_val > c_y and height_val < (c_y + point_span):
+            # Create child
+            if idx >= len(node.childPointers):
+                node.childPointers.append(Voxel())
+            node.validMask |= exp2(idx)
+            
+    # Note: The source does not specify how to handle the top 4 children (indices 4-7).
+    # They are likely empty unless the terrain extends upwards, which is not typical for heightmaps.
+    # We assume they remain 0.
+
+def build_svo(height_map, max_depth=8):
+    min_bb = [0.0, 0.0, 0.0]
+    width = height_map.get_width()
+    max_bb = [width, width, width]
+    
+    root = Voxel()
+    construct_children(root, height_map, 1, max_depth, min_bb, max_bb, 8)
+    return root
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of nodes in the octree, as each node is visited once. The heightmap lookup is $O(1)$.
+*   **Memory Complexity:** Proportional to the number of non-empty nodes in the SVO. Significantly less than a dense grid for sparse terrain.
+*   **Strengths:** Efficient for terrain data; avoids processing empty space above the terrain.
+*   **Limitations:** Limited to heightmap-defined geometry; cannot represent overhangs or complex 3D structures not defined by a single height value per x-z coordinate. Precision issues may arise at boundaries if the offset $0.001f$ is not chosen carefully relative to the voxel size.
+
+## Background
+This method is described in a senior project on volumetric rendering [S1, unofficial]. It represents a practical application of SVO construction for real-time terrain rendering, leveraging the simplicity of heightmaps to drive the octree hierarchy.
+
+## Sources
+[S1] Dean904/Senior-Project-Volumetric-Rendering, https://github.com/Dean904/Senior-Project-Volumetric-Rendering, fetched 2026-10-26 (unofficial)

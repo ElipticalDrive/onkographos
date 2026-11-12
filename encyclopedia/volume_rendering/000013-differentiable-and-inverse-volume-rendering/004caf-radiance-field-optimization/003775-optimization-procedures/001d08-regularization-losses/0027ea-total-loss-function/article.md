@@ -1,241 +1,275 @@
 # Total Loss Function
 
-Also called: Combined Loss, Combined Loss Function, Full Training Objective, Total Loss
+Also called: Combined Loss Function, Composite Training Loss, Full Training Objective, Multi-term Loss Function, Total Loss
 
 ## Overview
-The Total Loss Function is the composite objective function used to optimize differentiable volume rendering and radiance field models end-to-end. It aggregates multiple loss terms—such as photometric reconstruction, geometric consistency, and regularization constraints—to guide the learning of scene representations. It differs from sibling methods by serving as the final summation of configured components, where specific implementations vary based on the underlying representation (e.g., Gaussian Splatting vs. Neural Radiance Fields) and the training stage. It builds on [Regularization losses](1413-regularization-losses.md).
+The Total Loss Function is the composite objective function used to optimize radiance fields and Gaussian splatting models end-to-end. It aggregates multiple loss terms—such as photometric reconstruction, geometric consistency, and regularization—to guide network parameters toward a solution that minimizes rendering error while enforcing structural priors [S1, S2, S3, S4, S5][S7, unofficial][S13]. Unlike single-term objectives, it balances competing goals (e.g., pixel accuracy vs. smoothness) via weighted hyperparameters [S1, S2, S3, S4, S5][S7, unofficial][S13]. It builds on [Regularization losses](1413-regularization-losses.md) by combining them with appearance and geometric terms.
 
 ## How it works
-The total loss function $\mathcal{L}$ is generally defined as a weighted sum of individual loss components. The specific terms and weights depend on the radiance field architecture and the desired properties of the reconstructed scene (e.g., photometric fidelity, geometric smoothness, or temporal consistency).
+The total loss is a weighted sum of individual loss components. The specific components and weights vary by method, but the general structure is:
+
+$$
+\mathcal{L}_{\text{total}} = \sum_{k} w_k \mathcal{L}_k
+$$
+
+where $\mathcal{L}_k$ are individual loss terms (e.g., photometric, geometric, regularization) and $w_k$ are their respective scalar weights [S1, S2, S3, S4, S5][S7, unofficial][S13].
 
 ### Inputs and Outputs
-*   **Inputs:**
-    *   Rendered images $\hat{\mathbf{I}}$ (or per-ray colors $\hat{C}(\mathbf{r})$) from the differentiable renderer.
-    *   Ground-truth images $\mathbf{I}^*$ (or reference colors $C(\mathbf{r})$).
-    *   Auxiliary data: Depth maps, normals, masks, or sparse depth estimates if available.
-    *   Scene parameters: Network weights $\theta$ (e.g., MLP parameters, voxel grid values, Gaussian attributes).
-*   **Outputs:**
-    *   A scalar loss value $\mathcal{L}$ used for backpropagation.
+**Inputs:**
+*   Rendered image $\hat{\mathbf{I}}$ (or specific AOVs like throughput, depth, normals) [S1, S2, S3, S4, S5][S7, S8, unofficial][S13].
+*   Ground truth image $\mathbf{I}^*$ (or GT depth, normals, masks) [S1, S2, S3, S4, S5][S7, S8, unofficial][S13].
+*   Scene parameters (e.g., density $\sigma$, color $\mathbf{c}$, opacity $\alpha$, SDF $f$, Gaussian attributes) [S1, S2, S3, S4, S5][S7, unofficial][S13].
+*   Optional auxiliary data: sparse depth, masks, background color [S1, S5][S8, S10, unofficial].
+
+**Outputs:**
+*   Scalar loss value $\mathcal{L}_{\text{total}}$ [S1, S2, S3, S4, S5][S7, unofficial][S13].
 
 ### Data Structures
-The loss function operates on tensors of shape $(H, W)$ for images or $(N, C)$ for batched rays, where $N$ is the number of rays/samples and $C$ is the number of channels (typically 3 for RGB).
+*   **Loss Weights:** Dictionary or array mapping loss term names to float weights [S1, S2, S3, S4, S5][S7, unofficial][S13].
+*   **Rendered AOVs:** Dictionary containing tensors for RGB, throughput, depth, etc. [S8, S10, unofficial].
+*   **Masks:** Binary tensor (0 or 1) for object/background regions [S8, S10, unofficial].
 
-### Formulas and Steps
-The general structure is:
+### Numbered Steps
+1.  **Compute Photometric Loss:** Calculate the difference between rendered and ground truth images. Common metrics include L1, L2, SSIM, or Charbonnier loss [S1, S2, S3, S4, S5, S6][S7, unofficial][S13].
+2.  **Compute Geometric/Regularization Losses:** Calculate terms such as Eikonal loss, curvature loss, sparsity loss, opacity loss, or total variation [S1, S3, S4][S7, unofficial].
+3.  **Compute Auxiliary Losses:** If applicable, calculate losses for distractors, background, or specific AOVs like throughput [S8, unofficial][S13].
+4.  **Apply Weights:** Multiply each loss term by its corresponding weight [S1, S2, S3, S4, S5][S7, unofficial][S13].
+5.  **Sum Losses:** Sum all weighted terms to get the total loss [S1, S2, S3, S4, S5][S7, unofficial][S13].
+6.  **Backpropagate:** Compute gradients of the total loss with respect to all trainable parameters [S1, S2, S3, S4, S5][S7, unofficial][S13].
+
+### Formulas
+The specific formulation depends on the method. Common components include:
+
+**Photometric Loss (L1):**
 $$
-\mathcal{L} = \sum_{k} w_k \mathcal{L}_k
+\mathcal{L}_{\text{rgb}} = \frac{1}{N} \sum_{i=1}^N |C_i - \hat{C}_i|
 $$
-where $w_k$ are scalar weights and $\mathcal{L}_k$ are individual loss terms.
+where $N$ is the number of batch rays, $C_i$ is ground truth color, and $\hat{C}_i$ is rendered color [S7, unofficial].
 
-#### 1. Photometric Reconstruction Loss ($\mathcal{L}_{\text{RGB}}$)
-This is the primary term ensuring visual fidelity. It minimizes the difference between rendered and ground-truth colors.
-*   **L1 Loss:** Commonly used for robustness to outliers.
-    $$
-    \mathcal{L}_{\text{L1}} = \frac{1}{N} \sum_{i=1}^N \| \hat{C}_i - C_i \|_1
-    $$
-    where $N$ is the number of batch rays [S4, unofficial].
-*   **L2 Loss:** Used in some variational formulations.
-    $$
-    \mathcal{L}_{\text{L2}} = \frac{1}{P} \sum_{\mathbf{p}} \| \hat{\mathbf{I}}_{\text{rgb}}(\mathbf{p}) - \mathbf{I}_{\text{rgb}}^*(\mathbf{p}) \|^2
-    $$
-    where $P$ is the number of pixels [S2].
-*   **SSIM:** Structural Similarity Index is often combined with L1/L2 to preserve global structure [S1, S8].
+**Eikonal Loss:**
+$$
+\mathcal{L}_{\text{eik}} = \frac{1}{MN} \sum_{i,j=1}^{MN} \|\nabla f(p_{i,j}) - 1\|^2
+$$
+where $M$ is sampled locations per ray, $N$ is batch rays, and $f$ is the SDF [S7, unofficial].
 
-#### 2. Geometric and Regularization Losses
-These terms enforce physical priors on the scene representation.
-*   **Eikonal Loss ($\mathcal{L}_{\text{eik}}$):** Enforces that the gradient of the Signed Distance Function (SDF) has unit magnitude, ensuring the SDF represents a true distance field.
-    $$
-    \mathcal{L}_{\text{eik}} = \frac{1}{MN} \sum_{i,j=1}^{MN} \| \nabla f(p_{i,j}) - 1 \|^2
-    $$
-    where $M$ is the number of sampled locations on each ray, $N$ is the number of rays, and $f$ is the SDF network [S4, unofficial].
-*   **Curvature Loss ($\mathcal{L}_{\text{curv}}$):** Penalizes high curvature to smooth the surface.
-    $$
-    \mathcal{L}_{\text{curv}} = \frac{1}{N} \sum_{i=1}^N | \nabla^2 f(\mathbf{x}_i) |
-    $$
-    [S3].
-*   **Total Variation (TV) Loss ($J_{\text{tv}}$):** Enforces spatial smoothness in latent volumes or opacity fields.
-    $$
-    J_{\text{tv}}(\mathbf{V}_\alpha)
-    $$
-    [S2].
-*   **Beta Prior ($J_{\text{B}}$):** Regularizes exit opacity [S2].
+**Sparsity Loss:**
+$$
+\mathcal{L}_{\text{sparse}} = \frac{1}{|\mathcal{P}|} \sum_{p_i \in \mathcal{P}} |\alpha_i|
+$$
+where $\mathcal{P}$ is a set of uniformly sampled points and $\alpha_i$ is opacity [S1].
 
-#### 3. Variational and Latent Losses
-*   **KL Divergence:** Used in variational autoencoder (VAE) frameworks to regularize latent encodings $\mathbf{z}$ towards a standard normal distribution.
-    $$
-    D_{\text{KL}}(\mathbf{z} \parallel \mathcal{N}(0, 1))
-    $$
-    [S2].
+**Opacity Loss:**
+$$
+\mathcal{L}_{\text{opacity}} = -\sum_k (\alpha^k \log(\alpha^k) + (1-\alpha^k) \log(1-\alpha^k))
+$$
+Encourages opacity to be 0 or 1 [S1].
 
-#### 4. Auxiliary and Specific Losses
-*   **Optical Flow Loss ($\mathcal{L}_f$):** Used in dynamic scenes to enforce temporal consistency.
+**Total Loss Examples:**
+*   **Neural Volumes [S3]:**
     $$
-    \mathcal{L} = \alpha \mathcal{L}_q + \mathcal{L}_c + \beta \mathcal{L}_f
+    \ell(\theta) = \frac{1}{P} \sum_{\mathbf{p}} \left\| \hat{\mathbf{I}}_{\text{rgb}}(\mathbf{p}) - \mathbf{I}_{\text{rgb}}^*(\mathbf{p}) \right\|^2 + \lambda_{\text{KL}} D_{\text{KL}}(\mathbf{z} \parallel \mathcal{N}(0, 1)) + J_{\text{tv}}(\mathbf{V}_\alpha) + J_{\text{B}}(\mathbf{I}_\alpha)
     $$
-    where $\mathcal{L}_q$ is raw quad reconstruction loss and $\mathcal{L}_c$ is color reconstruction loss [S1].
-*   **Contrastive Loss ($\mathcal{L}_{\text{contrast}}$):** Used in generalizable NeRFs to align features across views.
+*   **FWD [S5]:**
     $$
-    \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{contrast}} + \mathcal{L}_{\text{color}}
+    L = \lambda_{l2} L_{l2} + \lambda_c L_c
     $$
-    [S9].
-*   **Empty Space / Opacity Losses:** AOV losses using binary masks $m_i$ and throughput $T_i$.
-    *   Empty Space: $L = w \cdot \frac{1}{N} \sum_{i=1}^{N} (1 - m_i) \cdot |T_i - 0|$ [S5, unofficial].
-    *   Opacity: $L = w \cdot \frac{1}{N} \sum_{i=1}^{N} m_i \cdot |T_i - 1|$ [S5, unofficial].
-*   **DeSplat Loss:** Combines standard Gaussian Splatting loss ($L_{\text{GS}}$) with distractor ($\alpha_d$) and background ($L_{\text{bg}}$) regularization.
+*   **Neuralangelo [S4]:**
+    $$
+    \mathcal{L} = \mathcal{L}_{\text{RGB}} + w_{\text{eik}} \mathcal{L}_{\text{eik}} + w_{\text{curv}} \mathcal{L}_{\text{curv}}
+    $$
+*   **City-on-Web [S1]:**
+    $$
+    \mathcal{L}_{\text{train}} = \mathcal{L}_{\text{cb}} + \mathcal{L}_{\text{global}} + \lambda_1 \mathcal{L}_{\text{s3im}} + \lambda_2 \mathcal{L}_{\text{prop}} + \lambda_3 \mathcal{L}_{\text{dist}} + \lambda_4 \mathcal{L}_{\text{s}} + \lambda_5 \mathcal{L}_{\text{opacity}}
+    $$
+*   **DeSplat [S13]:**
     $$
     L = L_{\text{GS}} + \lambda_d \alpha_d + \lambda_{\text{bg}} L_{\text{bg}}
     $$
-    [S10].
 
-### Parameters and Typical Values
-*   **Eikonal Weight ($w_{\text{eik}}$):** Typically 0.1 [S4, unofficial].
-*   **Curvature Weight ($w_{\text{curv}}$):** Not specified in sources [S3].
-*   **KL Weight ($\lambda_{\text{KL}}$):** 0.001 [S2].
-*   **TV Weight ($\lambda_{\text{tv}}$):** 0.01 [S2].
-*   **Beta Prior Weight ($\lambda_{\text{B}}$):** 0.1 [S2].
-*   **Dynamic Scene Weights:** $\alpha = 5$ for real-world scenes, $\alpha = 1$ for synthetic; $\beta = 0.0008$ [S1].
-*   **DeSplat Weights:** $\lambda_d = 0.01$, $\lambda_{\text{bg}} = 0.15$ (or 0 for appearance-only ablation) [S10].
-*   **Curriculum Learning ($\beta$):** $-1e5$ in the exponential schedule $\mathcal{L}_{\text{final}} = 2^{\beta \cdot t} (\mathcal{L}_{\text{depth}} + \mathcal{L}_{\text{photo}}) + (1-2^{\beta \cdot t}) \mathcal{L}_{\text{rgb}}$ [S8].
+### Parameters
+*   **Weights:** $\lambda$ or $w$ values are method-specific. Examples: $\lambda_{\text{KL}}=0.001$ [S3], $\lambda_{l2}=5.0$ [S5], $\alpha=5$ (real) or $1$ (synthetic) [S2], $\beta=0.0008$ [S2], $\lambda_d=0.01$, $\lambda_{\text{bg}}=0.15$ [S13].
+*   **Optimizer:** Typically Adam [S3, S5, S13].
+*   **Learning Rate:** Often $10^{-4}$ [S3, S5].
+*   **Batch Size:** e.g., 16 [S3].
+*   **Iterations:** e.g., 500,000 [S3], 30,000 [S13].
+
+### Edge Cases and Pitfalls
+*   **Background Blending:** If the background is not black, loss computation may require blending predicted RGB with GT background color [S10, unofficial].
+*   **Curriculum Learning:** Transitioning from depth/photometric to RGB supervision can be controlled by an exponential schedule [S11].
+*   **Stability:** Volume regularization terms (e.g., from Scaffold-GS) may be kept for stability [S6].
+*   **Precision:** Step sizes in normalized voxel space $[-1, 1]^3$ help with saturation at initialization [S3].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_total_loss(rendered_image, gt_image, scene_params, auxiliary_data=None):
+def compute_total_loss(rendered_outputs, gt_data, weights, config):
     """
-    Computes the total loss for radiance field optimization.
+    Compute the total loss for radiance field optimization.
     
     Args:
-        rendered_image: Tensor of shape (H, W, 3) or (N, 3), rendered RGB.
-        gt_image: Tensor of shape (H, W, 3) or (N, 3), ground truth RGB.
-        scene_params: Dict containing network outputs (e.g., sdf_gradient, opacity, latent_z).
-        auxiliary_data: Dict containing masks, depth, normals, etc.
+        rendered_outputs: Dict containing 'rgb', 'throughput', 'depth', etc.
+        gt_data: Dict containing 'rgb', 'mask', 'depth', etc.
+        weights: Dict of loss weights (e.g., {'l1': 1.0, 'eik': 0.1})
+        config: Config object with hyperparameters
         
     Returns:
-        scalar_loss: Total loss value.
+        total_loss: Scalar tensor
     """
-    # 1. Photometric Loss (L1 + SSIM)
-    l1_loss = mean_absolute_error(rendered_image, gt_image)
-    ssim_loss = compute_ssim(rendered_image, gt_image)
-    l_rgb = l1_loss + ssim_loss
+    total_loss = 0.0
     
-    # 2. Geometric Regularization (if applicable)
-    l_eik = 0.0
-    if 'sdf_gradient' in scene_params:
-        grad = scene_params['sdf_gradient']
-        # Eikonal: ||grad - 1||^2
-        l_eik = mean_squared_error(grad, 1.0)
+    # 1. Photometric Loss
+    if 'l1' in weights:
+        l1_loss = l1_loss_fn(rendered_outputs['rgb'], gt_data['rgb'])
+        total_loss += weights['l1'] * l1_loss
         
-    l_curv = 0.0
-    if 'sdf_hessian' in scene_params:
-        l_curv = mean_absolute_error(scene_params['sdf_hessian'], 0.0)
+    if 'ssim' in weights:
+        ssim_loss = ssim_loss_fn(rendered_outputs['rgb'], gt_data['rgb'])
+        total_loss += weights['ssim'] * ssim_loss
         
-    # 3. Variational/Latent Loss (if applicable)
-    l_kl = 0.0
-    if 'latent_z' in scene_params:
-        z = scene_params['latent_z']
-        # KL divergence to N(0,1)
-        l_kl = mean_squared_error(z, 0.0) + mean_squared_error(log_var(z), 0.0) # Simplified
+    # 2. Geometric/Regularization Losses
+    if 'eik' in weights:
+        # Compute gradient of SDF field
+        sdf_grad = compute_sdf_gradient(rendered_outputs['sdf'])
+        eik_loss = eikonal_loss_fn(sdf_grad)
+        total_loss += weights['eik'] * eik_loss
         
-    # 4. Auxiliary Losses (e.g., Empty Space/Opacity via Masks)
-    l_aux = 0.0
-    if auxiliary_data and 'mask' in auxiliary_data and 'throughput' in scene_params:
-        mask = auxiliary_data['mask']
-        throughput = scene_params['throughput']
-        # Empty space loss: penalize throughput where mask is 0
-        l_empty = mean_absolute_error(throughput, 0.0) * (1.0 - mask)
-        # Opacity loss: penalize deviation from 1 where mask is 1
-        l_opacity = mean_absolute_error(throughput, 1.0) * mask
-        l_aux = l_empty + l_opacity
+    if 'opacity' in weights:
+        opacity = rendered_outputs['opacity']
+        opacity_loss = opacity_loss_fn(opacity)
+        total_loss += weights['opacity'] * opacity_loss
         
-    # 5. Combine with Weights
-    # Note: Weights are hyperparameters defined in configuration
-    w_eik = 0.1
-    w_curv = 0.0 # Example default
-    w_kl = 0.001
-    w_aux = 1.0
-    
-    total_loss = l_rgb + w_eik * l_eik + w_curv * l_curv + w_kl * l_kl + w_aux * l_aux
-    
+    if 'sparse' in weights:
+        # Sample points in bounding box
+        sampled_points = sample_uniform_points(config.bounding_box)
+        sampled_opacity = query_opacity(sampled_points)
+        sparse_loss = sparsity_loss_fn(sampled_opacity)
+        total_loss += weights['sparse'] * sparse_loss
+        
+    # 3. Auxiliary Losses (e.g., AOVs)
+    if 'throughput' in rendered_outputs and 'mask' in gt_data:
+        throughput = rendered_outputs['throughput']
+        mask = gt_data['mask']
+        # Empty Space Loss: encourage throughput=0 where mask=0
+        empty_space_loss = mean((1 - mask) * abs(throughput))
+        total_loss += weights.get('empty_space', 0) * empty_space_loss
+        
+        # Opacity Loss: encourage throughput=1 where mask=1
+        opacity_aov_loss = mean(mask * abs(throughput - 1.0))
+        total_loss += weights.get('opacity_aov', 0) * opacity_aov_loss
+        
+    # 4. Curriculum Learning (optional)
+    if config.use_curriculum:
+        t = config.current_iteration
+        beta = config.curriculum_beta
+        photo_weight = 2 ** (beta * t)
+        rgb_weight = 1 - photo_weight
+        # Adjust weights dynamically if needed
+        pass
+        
     return total_loss
-```
 
-### Edge Cases and Pitfalls
-*   **Precision:** In hash-encoded SDFs, analytical gradients may be restricted to local grid cells due to non-differentiable rounding. Numerical gradients (finite differences) can be used to distribute updates [S1][S4, unofficial].
-*   **Background Blending:** If the background is not black, loss computation must blend the predicted RGB with the ground truth background color to avoid incorrect gradients [S7, unofficial].
-*   **Curriculum Learning:** In early training stages, depth/photometric supervision may dominate. An exponential schedule can transition to RGB supervision to stabilize convergence [S8].
+def l1_loss_fn(rendered, gt):
+    return mean(abs(rendered - gt))
+
+def ssim_loss_fn(rendered, gt):
+    # Use standard SSIM implementation
+    return 1 - ssim(rendered, gt)
+
+def eikonal_loss_fn(sdf_grad):
+    # ||grad(f) - 1||^2
+    return mean((sdf_grad - 1.0)**2)
+
+def opacity_loss_fn(opacity):
+    # -sum(alpha*log(alpha) + (1-alpha)*log(1-alpha))
+    # Add small epsilon to avoid log(0)
+    eps = 1e-7
+    alpha = clamp(opacity, eps, 1-eps)
+    return -mean(alpha * log(alpha) + (1-alpha) * log(1-alpha))
+
+def sparsity_loss_fn(opacity):
+    return mean(abs(opacity))
+```
 
 ## Subtopics
 
 ### [Loss Function Configuration](6782-loss-function-configuration.md)
-Specifies the scalar weights applied to individual loss components. It balances photometric, perceptual, geometric, and regularization terms to stabilize training. It differs from [Sparse Depth Consistency Loss](7294-sparse-depth-consistency-loss.md) and [Photometric and Image Reconstruction Losses](9789-photometric-and-image-reconstruction-losses.md) by focusing on scaling factors rather than mathematical formulations.
+Defines the mathematical structure and hyperparameter weights of the total objective. Focuses on composition and weighting coefficients.
 
 ### [Total Variation Loss](7047-total-variation-loss.md)
-Enforces spatial smoothness in learned color transformations or volume opacity. It penalizes high-frequency noise and discontinuities in the latent representation, often combined with Eikonal loss.
+Regularization constraint enforcing spatial smoothness in latent representations.
 
 ### [Sparse Depth Consistency Loss](7294-sparse-depth-consistency-loss.md)
-Enforces geometric consistency between rendered depth maps and sparse SfM-derived depth estimates. It mitigates floaters and depth discontinuities in sparse-input scenarios by directly penalizing depth discrepancies.
+Enforces geometric consistency between rendered depth and sparse SfM depth estimates.
 
 ### [Discriminator Loss with Gradient Penalty](7695-discriminator-loss-with-gradient-penalty.md)
-A GAN regularization loss that enforces Lipschitz continuity by penalizing large gradients of the discriminator output. It uses an R1 penalty on real data to stabilize training and prevent mode collapse.
+GAN discriminator loss enforcing Lipschitz continuity via R1 penalty.
 
 ### [Loss Weight Configuration](7883-loss-weight-configuration.md)
-Determines the scalar coefficients balancing distinct error terms (photometric, geometric, adversarial). Unlike the Total Loss Function which defines the error terms, this method focuses on hyperparameter selection for relative influence.
+Determines scalar coefficients to balance heterogeneous error terms.
 
 ### [Photometric and Image Reconstruction Losses](9789-photometric-and-image-reconstruction-losses.md)
-Minimizes pixel-wise differences (L1, SSIM) between rendered and ground-truth images. It serves as the primary term in the total loss for visual fidelity.
+Minimizes pixel-wise difference between rendered and GT images (L1, SSIM, perceptual).
 
 ### [Specific Method Implementations](9794-specific-method-implementations.md)
-Concrete loss formulations for specific architectures (NeRF, Gaussian Splatting, Voxel Grids). Details component terms (Eikonal, PBR) and optimization schedules (delayed updates).
+Concrete loss formulations for specific architectures (NeRF, GS, voxels).
 
 ### [Numerical Gradient Eikonal Loss](9954-numerical-gradient-eikonal-loss.md)
-Enforces the eikonal equation $\|\nabla f(\mathbf{x})\|_2 = 1$ using numerical finite differences for hash-encoded SDFs. It addresses the locality problem of analytical gradients by distributing updates beyond immediate local grid cells.
+Enforces eikonal equation via numerical finite differences for hash-encoded SDFs.
 
 ### [Overall Training Loss](10621-overall-training-loss.md)
-The composite objective aggregating photometric, geometric, and regularization terms. It serves as the final summation of configured components, varying by representation (Gaussian Splatting vs. NeRF).
+Composite objective aggregating photometric, geometric, and regularization terms.
 
 ### [Multi-scale Joint Training Loss](13064-multi-scale-joint-training-loss.md)
-Balances low-frequency structural consistency with high-frequency detail fidelity by optimizing outputs from multiple network stages or resolution levels simultaneously.
+Balances low-frequency structure and high-frequency detail across multiple resolution stages.
 
 ### Empty Space Loss
-An AOV loss encouraging rendering throughput to equal 0.0 in regions where a binary object mask is inactive. Formula: $L = w \cdot \frac{1}{N} \sum_{i=1}^{N} (1 - m_i) \cdot |T_i - 0|$ [S5, unofficial].
+An AOV loss encouraging rendering throughput to equal 0.0 in regions where a binary object mask is inactive [S8, unofficial]. Formula: $L = w \cdot \frac{1}{N} \sum_{i=1}^{N} (1 - m_i) \cdot |T_i - 0|$, where $w$ is weight (default 1.0), $N$ is samples, $m_i$ is mask (0/1), $T_i$ is throughput [S8, unofficial].
 
 ### Opacity Loss
-An AOV loss encouraging rendering throughput to equal 1.0 in regions where a binary object mask is active. Formula: $L = w \cdot \frac{1}{N} \sum_{i=1}^{N} m_i \cdot |T_i - 1|$ [S5, unofficial].
+An AOV loss encouraging rendering throughput to equal 1.0 in regions where a binary object mask is active [S8, unofficial]. Formula: $L = w \cdot \frac{1}{N} \sum_{i=1}^{N} m_i \cdot |T_i - 1|$, where $w$ is weight (default 1.0), $N$ is samples, $m_i$ is mask (0/1), $T_i$ is throughput [S8, unofficial].
 
 ### Auxiliary Losses
-Includes per-point RGB loss (supervising color emission directly) and background entropy loss (enforcing concentration on background/foreground). Adding both yields higher PSNR (35.54 vs 35.37) [S6].
+Per-point RGB loss supervises color emission of each query point directly [S9]. Background entropy loss enforces rendered background probability to concentrate on foreground/background [S9]. Adding both yields PSNR 35.54 vs 35.37 (none) or 35.53 (one loss) [S9].
 
 ### Background Blending for Loss Computation
-Blends predicted RGB with ground truth background color for accurate loss computation when the background is not black [S7, unofficial].
+Blends predicted RGB with GT background color for accurate loss computation when background is not black [S10, unofficial].
 
 ### Curriculum Learning Loss
-Transitions from depth/photometric supervision to RGB supervision during training using an exponential schedule: $\mathcal {L}_{\text {final}} = 2^{\beta \cdot t} (\mathcal {L}_{\text {depth}} + \mathcal {L}_{\text {photo}}) + (1-2^{\beta \cdot t}) \mathcal {L}_{\text {rgb}}$ with $\beta = -1e5$ [S8].
+Transitions from depth/photometric supervision to RGB supervision during training [S11]. Formula: $\mathcal{L}_{\text{final}} = 2^{\beta \cdot t} (\mathcal{L}_{\text{depth}} + \mathcal{L}_{\text{photo}}) + (1-2^{\beta \cdot t}) \mathcal{L}_{\text{rgb}}$, where $\beta = -1e5$ and $t$ is iteration [S11].
 
 ### Softmax Weighted Volume Rendering
-Accumulates colors along a ray weighted by densities after applying softmax to speed up convergence. The total loss is the sum of contrastive and color losses [S9].
+Accumulates colors along a ray weighted by densities after applying softmax to speed up convergence [S12]. Total loss is sum of contrastive and color losses [S12].
 
 ### DeSplat Loss Function
-Combines standard Gaussian Splatting loss with distractor and background regularization: $L = L_{\text{GS}} + \lambda_d \alpha_d + \lambda_{\text{bg}} L_{\text{bg}}$. Weights: $\lambda_d = 0.01$, $\lambda_{\text{bg}} = 0.15$ [S10].
+Combines standard GS loss, distractor regularization, and background regularization [S13]. Formula: $L = L_{\text{GS}} + \lambda_d \alpha_d + \lambda_{\text{bg}} L_{\text{bg}}$. Weights: $\lambda_d=0.01$, $\lambda_{\text{bg}}=0.15$ (or 0 for ablation) [S13].
+
+### Energy Function for Optimization
+$E(c) = H(c) + C(c)$, where $H(c)$ is coherence metric and $C(c)$ is context metric [S14]. Optimization ends if $E(c) < 1$ [S14].
 
 ## Operating characteristics
-*   **Complexity:** The computational cost is dominated by the forward rendering pass and the backpropagation through the differentiable volume rendering equation. Memory usage depends on the differentiation strategy: Reverse-Mode AD requires $O(kn)$ storage, while Adjoint or Analytic methods reduce this to $O(n)$ [44-radiance-field-optimization.md].
-*   **Performance:** Training can be resource-intensive. For example, one implementation required 10 days on a single NVIDIA Tesla V100 for 500,000 iterations [S2].
-*   **Strengths:** The modular nature allows combining diverse priors (geometric, photometric, temporal) to handle challenging scenes (e.g., transparent objects, dynamic scenes).
-*   **Limitations:** Balancing multiple loss terms requires careful hyperparameter tuning. Incorrect weights can lead to mode collapse or poor convergence.
-*   **Scaling:** Performance scales with the number of samples and resolution. Random sampling (e.g., 128x128 pixels) is often used to reduce memory usage [S2].
+*   **Complexity:** Depends on the number of loss terms and their computational cost (e.g., SSIM is more expensive than L1). Memory usage is dominated by storing intermediate gradients for backpropagation [44-radiance-field-optimization.md].
+*   **Performance:** Training can take significant time (e.g., 10 days on V100 for 500k iterations [S3], 3 days on 4x2080Ti [S5]).
+*   **Strengths:** Allows flexible combination of appearance, geometry, and regularization priors. Can handle diverse inputs (RGB, depth, masks).
+*   **Limitations:** Requires careful tuning of multiple hyperparameters (weights, learning rates). Can be sensitive to initialization and sampling strategies.
+*   **When to use:** When optimizing radiance fields or Gaussian splatting models end-to-end.
+*   **When not to use:** When only single-term objectives are sufficient or when computational resources are extremely limited.
 
 ## Background
-The concept of a composite loss function in differentiable rendering evolved alongside Neural Radiance Fields (NeRF) and other implicit representations. Early works like [S2] introduced variational objectives with KL divergence and TV priors. Subsequent works integrated geometric priors like Eikonal loss [S3][S4, unofficial] and dynamic constraints like optical flow [S1]. The specific formulations vary significantly across architectures (e.g., Gaussian Splatting [S10] vs. Voxel Grids [S6]).
+The concept of combining multiple loss terms for optimizing neural radiance fields and related representations has evolved from early NeRF works [S3] to more complex formulations involving Gaussian Splatting [S2, S13] and implicit surfaces [S4][S7, unofficial]. Key developments include the introduction of Eikonal loss for SDFs [S4][S7, unofficial], sparsity and opacity regularization [S1], and specialized losses for distractors and background [S13]. The method is widely used in modern differentiable volume rendering pipelines.
 
 ## Sources
-[S1] Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields, https://doi.org/10.1109/cvpr52734.2025.01958, fetched 2026-10-26
-[S2] Neural Volumes: Learning Dynamic Renderable Volumes from Images, https://arxiv.org/abs/1906.07751, fetched 2026-10-26
-[S3] Neuralangelo: High-Fidelity Neural Surface Reconstruction, https://doi.org/10.1109/cvpr52729.2023.00817, fetched 2026-10-26
-[S4] Point-NeuS: Point-Guided Neural Implicit Surface Reconstruction by Volume Rendering, https://doi.org/10.48550/arXiv.2310.07997, fetched 2026-10-30 (unofficial)
-[S5] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)
-[S6] Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00538, fetched 2026-10-26
-[S7] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
-[S8] DBARF: Deep Bundle-Adjusting Generalizable Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00011, fetched 2026-10-29
-[S9] ContraNeRF: Generalizable Neural Radiance Fields for Synthetic-to-real Novel View Synthesis via Contrastive Learning, https://doi.org/10.1109/cvpr52729.2023.01584, fetched 2026-10-29
-[S10] DeSplat: Decomposed Gaussian Splatting for Distractor-Free Rendering, https://doi.org/10.1109/CVPR52734.2025.00076, fetched 2026-11-03
+[S1] City-on-Web: Real-Time Neural Rendering of Large-Scale Scenes on the Web, https://doi.org/10.1007/978-3-031-72970-6_22, fetched 2026-10-26
+[S2] Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields, https://doi.org/10.1109/cvpr52734.2025.01958, fetched 2026-10-26
+[S3] Neural Volumes: Learning Dynamic Renderable Volumes from Images, https://arxiv.org/abs/1906.07751, fetched 2026-10-26
+[S4] Neuralangelo: High-Fidelity Neural Surface Reconstruction, https://doi.org/10.1109/cvpr52729.2023.00817, fetched 2026-10-26
+[S5] FWD: Real-time Novel View Synthesis with Forward Warping and Depth, https://doi.org/10.1109/cvpr52688.2022.01526, fetched 2026-10-29
+[S6] SOGS: Second-Order Anchor for Advanced 3D Gaussian Splatting, https://doi.org/10.1109/cvpr52734.2025.01043, fetched 2026-10-30
+[S7] Point-NeuS: Point-Guided Neural Implicit Surface Reconstruction by Volume Rendering, https://doi.org/10.48550/arXiv.2310.07997, fetched 2026-10-30 (unofficial)
+[S8] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)
+[S9] Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00538, fetched 2026-10-26
+[S10] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
+[S11] DBARF: Deep Bundle-Adjusting Generalizable Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00011, fetched 2026-10-29
+[S12] ContraNeRF: Generalizable Neural Radiance Fields for Synthetic-to-real Novel View Synthesis via Contrastive Learning, https://doi.org/10.1109/cvpr52729.2023.01584, fetched 2026-10-29
+[S13] DeSplat: Decomposed Gaussian Splatting for Distractor-Free Rendering, https://doi.org/10.1109/CVPR52734.2025.00076, fetched 2026-11-03
+[S14] Visibility-Aware Direct Volume Rendering, https://doi.org/10.1007/s11390-011-9428-3, fetched 2026-10-26

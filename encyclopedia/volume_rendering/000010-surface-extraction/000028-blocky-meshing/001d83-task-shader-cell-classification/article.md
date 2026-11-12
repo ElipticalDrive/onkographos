@@ -53,26 +53,25 @@ The task shader workgroup uses shared memory for intermediate storage during cla
 # local_offsets: array[32] of int
 
 # Global memory buffers
-dense_occupancy_index = []  # Up to 256 entries
+dense_occupancy_index = [0] * 256
 occupied_cell_list_offset = [0] * 32
 occupied_list_length = [0] * 32
+gl_TaskCountNV = 0
 
 # Constants
 BLOCK_SIZE = 256
 WORKGROUP_SIZE = 32
 MAX_VERTICES_PER_WORKGROUP = 96
 MAX_CELLS_PER_WORKGROUP = 32
-MIN_CELLS_PER_WORKGROUP = 8
 
-def task_shader(block_index):
+def task_shader():
     thread_id = get_thread_id()
-    
-    # Step 1: Individual Cell Classification
     start_cell = thread_id * 8
-    end_cell = start_cell + 8
     my_occupied_count = 0
     
-    for c in range(start_cell, end_cell):
+    # Step 1: Individual Cell Classification
+    for i in range(8):
+        c = start_cell + i
         voxels = sample_voxels_for_cell(V, c)
         is_occ, num_v = marching_cubes_classify(voxels)
         occupancy_flags[c] = is_occ
@@ -81,7 +80,7 @@ def task_shader(block_index):
             my_occupied_count += 1
             
     # Step 2: Stream Compaction (Reduction)
-    # [G] Standard warp-level prefix sum and reduction primitives are used here.
+    # [G] Standard warp-level reduction and prefix sum primitives are used here.
     # Compute local offset within the thread's group of 32 cells.
     local_offset = warp_prefix_sum(my_occupied_count)
     
@@ -91,13 +90,13 @@ def task_shader(block_index):
     
     # Write occupied cell indices to dense_occupancy_index
     current_dense_idx = global_offset_start
-    for c in range(start_cell, end_cell):
+    for c in range(start_cell, start_cell + 8):
         if occupancy_flags[c]:
-            dense_occupancy_index.append(c)
+            dense_occupancy_index[current_dense_idx] = c
             current_dense_idx += 1
             
     # Store local offset for task generation
-    local_offsets[thread_id] = global_offset_start if my_occupied_count > 0 else global_offset_start + my_occupied_count
+    local_offsets[thread_id] = global_offset_start
 
     # Step 3: Task Generation
     if thread_id == 0:
@@ -160,7 +159,7 @@ Transient isosurface extraction is a rasterization-based method that extracts is
 *   **Limitations**: Requires support for task and mesh shaders (NV/ARB extensions); empirical vertex limit (96) may not be optimal for all hardware or data sets [S1, S2].
 
 ## Background
-The method was introduced in the paper "Efficient Direct Isosurface Rasterization of Scalar Volumes" [S1, S2]. It leverages the task and mesh shader pipeline features introduced in NVIDIA's RTX architecture to optimize isosurface extraction. The approach builds on the principles of [Blocky meshing](31-blocky-meshing.md) but adapts them for transient, GPU-driven extraction [S1, S2].
+The method was introduced in the paper "Efficient Direct Isosurface Rasterization of Scalar Volumes" [S1, S2]. It leverages the task and mesh shader pipeline features introduced in NVIDIA's RTX architecture to optimize isosurface extraction [G]. The approach builds on the principles of [Blocky meshing](31-blocky-meshing.md) but adapts them for transient, GPU-driven extraction [S1, S2].
 
 ## Sources
 [S1] Efficient Direct Isosurface Rasterization of Scalar Volumes, https://doi.org/10.1111/cgf.14670, fetched 2026-10-27

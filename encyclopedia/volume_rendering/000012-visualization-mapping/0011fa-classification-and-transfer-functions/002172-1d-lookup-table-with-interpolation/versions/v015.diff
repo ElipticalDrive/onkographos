@@ -1,0 +1,212 @@
+--- v014.md
++++ v015.md
+@@ -4,135 +4,115 @@
+ 
+ ## Overview
+-This method maps scalar volume data values (typically Hounsfield Units in medical imaging) to optical properties, specifically attenuation coefficients, using a piecewise linear function defined by user-specified keypoints [S1, unofficial]. It solves the problem of converting raw numerical density into meaningful visual objects by allowing selective transparency for irrelevant data and high opacity for structures of interest [S1, unofficial]. Unlike multi-dimensional transfer functions that incorporate gradient magnitude or other derivatives to highlight boundaries [S2, unofficial], this method relies solely on the scalar intensity value, making it the simplest classification tool where mapping is a direct 1-to-1 or many-to-1 function [S8, unofficial]. It differs from [Cubic Spline Transfer Function](1811-cubic-spline-transfer-function.md) by providing linear transitions rather than $C^1$ continuous derivatives, and from [Linear Look-up Table Classification](2636-linear-look-up-table-classification.md) by allowing arbitrary opacity curves rather than enforcing a strict linear ordering of materials [S1, unofficial].
++This method maps scalar voxel intensities, typically Hounsfield Units (HU) in medical imaging, to optical properties such as attenuation coefficients ($\mu$), color, or opacity using a piecewise linear function defined by user-specified keypoints [S1, unofficial]. It solves the problem of visualizing specific anatomical structures by selectively attenuating or coloring data ranges while hiding irrelevant background (e.g., air) [S1, unofficial]. Unlike multi-dimensional transfer functions that incorporate gradient magnitude or texture, this method relies solely on the scalar density value, making it the simplest and most computationally efficient classification tool [S2, unofficial][S12, unofficial]. It builds on [Classification and transfer functions](38-classification-and-transfer-functions.md) by providing a concrete implementation of soft classification via linear interpolation between discrete control points.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume tensor `vol` of scalar values (e.g., HU), and a set of keypoints defining the transfer function.
+-*   **Output:** A 3D volume tensor `mu_tf` containing the mapped attenuation coefficients.
++*   **Input:** A 3D volume tensor $V$ of scalar values (e.g., HU) and a set of $K$ keypoints defining the transfer function.
++*   **Output:** A 3D volume tensor $M$ of mapped values (e.g., attenuation coefficients $\mu$) or RGBA optical properties.
+ 
+ **Data Structures:**
+-*   **Keypoints:** A tensor of shape $(K, 2)$, where $K$ is the number of keypoints. The first column represents the input scalar values (HU), and the second column represents the output attenuation values ($\mu$) [S1, unofficial].
++The transfer function is defined by a tensor of keypoints $P$ with shape $(K, 2)$, where $K$ is the number of keypoints.
++*   Column 0: Input domain values (e.g., HU).
++*   Column 1: Output range values (e.g., attenuation $\mu$, opacity $\alpha$, or color components).
+ 
+ **Steps:**
+-1.  **Define Keypoints:** Create a tensor `K` of shape $(K, 2)$ containing the user-defined control points. Each row $i$ contains $(hu_i, \mu_i)$ [S1, unofficial].
+-2.  **Normalize Input Domain:** Map the raw HU values to the normalized range $[0, 1]$. The standard normalization formula used in the reference implementation is:
+-    $$
+-    x_p = \frac{HU + 3500}{7000}
+-    $$
+-    This maps the typical medical imaging range of $[-3500, 3500]$ (or specifically $[-3500, 3071]$ as cited) to $[0, 1]$ [S1, unofficial]. The offset is $3500$ and the scale is $7000$ [S1, unofficial].
+-3.  **Extract Normalized Keypoints:** Extract the normalized HU values ($x_p$) and the corresponding attenuation values ($y_p$) from the keypoints tensor. These are stored as 1D tensors of shape $(1, K)$ [S1, unofficial].
+-4.  **Apply Piecewise Linear Interpolation:** Evaluate the transfer function for each voxel in the volume. For a normalized voxel value $v \in [0, 1]$, find the interval $[x_{p,i}, x_{p,i+1}]$ such that $x_{p,i} \le v < x_{p,i+1}$. The output attenuation $\mu$ is calculated as:
+-    $$
+-    \mu = y_{p,i} + \frac{(v - x_{p,i})}{(x_{p,i+1} - x_{p,i})} (y_{p,i+1} - y_{p,i})
+-    $$
+-    This is implemented efficiently using a channel-wise piecewise linear interpolation function, e.g., `R.piecewise_linear_channelwise(vol, xp, yp)` [S1, unofficial].
++1.  **Define Keypoints:** Create the tensor $P$ of shape $(K, 2)$. Each row $i$ contains an input value $x_i$ and an output value $y_i$.
++2.  **Normalize Input Domain:** Map the raw input values to a normalized range $[0, 1]$ to facilitate interpolation. For HU values, the standard normalization uses an offset of 3500 and a scale of 7000 [S1, unofficial]:
++    $$ x_p = \frac{x + 3500}{7000} $$
++    where $x$ is the raw HU value. The resulting normalized values $x_p$ form a 1D tensor of shape $(1, K)$ [S1, unofficial].
++3.  **Extract Output Values:** Extract the corresponding output values $y_i$ from the keypoints to form a 1D tensor $y_p$ of shape $(1, K)$ [S1, unofficial].
++4.  **Interpolate:** Apply piecewise linear interpolation to the volume data. For each voxel value $v$ in the volume:
++    *   Normalize $v$ to $v_p$ using the domain normalization formula.
++    *   Find the interval $[x_{p,j}, x_{p,j+1}]$ such that $x_{p,j} \le v_p \le x_{p,j+1}$.
++    *   Compute the interpolated output $m$ using linear interpolation:
++        $$ m = y_{p,j} + \frac{(v_p - x_{p,j})}{(x_{p,j+1} - x_{p,j})} (y_{p,j+1} - y_{p,j}) $$
++    *   If $v_p$ is outside the range $[x_{p,0}, x_{p,K-1}]$, clamp the result to the nearest endpoint value [G].
+ 
+ **Pseudocode:**
+ ```python
+-def apply_hu_to_mu_transfer_function(volume: Tensor, keypoints: Tensor) -> Tensor:
++import torch
++
++def apply_piecewise_linear_tf(volume: torch.Tensor, keypoints: torch.Tensor) -> torch.Tensor:
+     """
+-    Maps volume HU values to attenuation coefficients using piecewise linear interpolation.
++    Applies piecewise linear transfer function to a volume.
+     
+     Args:
+-        volume: 3D Tensor of shape (D, H, W) containing HU values.
+-        keypoints: 2D Tensor of shape (K, 2). Column 0 is HU, Column 1 is Attenuation.
++        volume: 3D tensor of shape (D, H, W) containing HU values.
++        keypoints: 2D tensor of shape (K, 2). Column 0 is HU, Column 1 is output (e.g., mu).
+         
+     Returns:
+-        3D Tensor of shape (D, H, W) containing mapped attenuation values.
++        3D tensor of shape (D, H, W) with mapped values.
+     """
+-    # Step 1: Normalize HU values to [0, 1]
+-    # Offset 3500, Scale 7000 based on standard medical imaging range [-3500, 3500]
+-    offset = 3500.0
+-    scale = 7000.0
++    # 1. Extract input (x) and output (y) values from keypoints
++    # keypoints shape: (K, 2)
++    x_kp = keypoints[:, 0]  # HU values
++    y_kp = keypoints[:, 1]  # Output values (e.g., attenuation)
+     
+-    # Clamp volume to valid range before normalization to avoid NaNs if values exceed bounds
+-    # Note: The source uses a fixed offset/scale regardless of actual min/max
+-    normalized_vol = (volume + offset) / scale
++    # 2. Normalize HU values to [0, 1]
++    # Formula: (HU + 3500) / 7000
++    # [S1, unofficial]
++    x_norm_kp = (x_kp + 3500.0) / 7000.0
+     
+-    # Step 2: Extract normalized HU (xp) and Attenuation (yp) from keypoints
+-    # Keypoints are assumed to be sorted by HU value
+-    hu_values = keypoints[:, 0]
+-    att_values = keypoints[:, 1]
++    # 3. Normalize volume HU values
++    # volume shape: (D, H, W)
++    vol_norm = (volume + 3500.0) / 7000.0
+     
+-    # Normalize keypoints HU values using the same formula
+-    xp = (hu_values + offset) / scale
++    # 4. Perform piecewise linear interpolation
++    # We need to find the segment for each voxel and interpolate.
++    # Using torch.searchsorted to find indices
++    # x_norm_kp must be sorted for searchsorted. If not, sort it and reorder y_kp accordingly.
++    sorted_indices = torch.argsort(x_norm_kp)
++    x_sorted = x_norm_kp[sorted_indices]
++    y_sorted = y_kp[sorted_indices]
+     
+-    # Ensure xp is sorted for interpolation logic
+-    # [G] Standard piecewise linear interpolation requires sorted breakpoints
+-    sorted_indices = torch.argsort(xp)
+-    xp = xp[sorted_indices]
+-    yp = att_values[sorted_indices]
++    # Find indices where vol_norm fits between x_sorted values
++    # searchsorted returns indices i such that x_sorted[i-1] <= vol_norm < x_sorted[i]
++    # We clamp indices to valid range [0, K-2] for interpolation
++    indices = torch.searchsorted(x_sorted, vol_norm, side='right') - 1
++    indices = torch.clamp(indices, 0, len(x_sorted) - 2)
+     
+-    # Step 3: Perform piecewise linear interpolation
+-    # Find the index i such that xp[i] <= normalized_vol < xp[i+1]
+-    # Clip normalized_vol to [0, 1] to handle out-of-bounds keypoints
+-    normalized_vol_clamped = torch.clamp(normalized_vol, 0.0, 1.0)
++    # Get x and y values for the lower and upper bounds of each segment
++    x_low = x_sorted[indices]
++    x_high = x_sorted[indices + 1]
++    y_low = y_sorted[indices]
++    y_high = y_sorted[indices + 1]
+     
+-    # Find indices of the left breakpoint for each voxel
+-    # searchsorted returns the index where the value should be inserted to maintain order
+-    # We use 'right' side insertion to handle exact matches correctly with the next interval
+-    indices = torch.searchsorted(xp, normalized_vol_clamped, side='right') - 1
++    # Avoid division by zero if x_low == x_high (duplicate keypoints)
++    denom = x_high - x_low
++    denom = torch.where(denom == 0, torch.ones_like(denom), denom)
+     
+-    # Handle edge cases: values below min keypoint or above max keypoint
+-    # Clip indices to valid range [0, K-2]
+-    indices = torch.clamp(indices, 0, len(xp) - 2)
++    # Linear interpolation formula
++    # y = y_low + (vol_norm - x_low) / (x_high - x_low) * (y_high - y_low)
++    t = (vol_norm - x_low) / denom
++    result = y_low + t * (y_high - y_low)
+     
+-    # Get the surrounding breakpoints
+-    x0 = xp[indices]
+-    x1 = xp[indices + 1]
+-    y0 = yp[indices]
+-    y1 = yp[indices + 1]
+-    
+-    # Calculate slope and intercept
+-    # Avoid division by zero if duplicate x values exist
+-    denom = x1 - x0
+-    # [G] Guard against division by zero; if denom is 0, use y0
+-    safe_denom = torch.where(denom == 0, torch.ones_like(denom), denom)
+-    slope = (y1 - y0) / safe_denom
+-    
+-    # Linear interpolation formula: y = y0 + slope * (x - x0)
+-    mu_tf = y0 + slope * (normalized_vol_clamped - x0)
+-    
+-    return mu_tf
++    return result
+ ```
+ 
+ **Parameters:**
+-*   **Keypoints:** User-defined. Typical keypoints include air, lung/soft-tissue, soft tissue, cortical bone, and dense bone/metal [S1, unofficial].
+-*   **Normalization Offset:** $3500$ [S1, unofficial].
+-*   **Normalization Scale:** $7000$ [S1, unofficial].
++*   **Keypoints ($K$):** The number of control points. Typical values depend on the complexity of the anatomy; e.g., 5 keypoints for air, lung/soft-tissue, soft tissue, cortical bone, and dense bone/metal [S1, unofficial].
++*   **Normalization Offset/Scale:** For HU, offset is 3500 and scale is 7000, mapping the range $[-3500, 3500]$ to $[0, 1]$ [S1, unofficial]. Note: The source example mentions a range of -3500 to 3071, but the normalization formula uses 7000 as the denominator, implying a target range of 7000 units [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Out-of-Bounds Values:** If a voxel's HU value results in a normalized value outside $[0, 1]$, it must be clamped or extrapolated. The reference implementation clamps to $[0, 1]$ [S1, unofficial].
+-*   **Duplicate Keypoints:** If two keypoints have the same HU value, the denominator in the slope calculation becomes zero. A guard is required to handle this [G].
+-*   **Unsorted Keypoints:** The interpolation logic assumes keypoints are sorted by HU value. Unsorted keypoints will produce incorrect mappings [G].
++*   **Out-of-Bounds Values:** Voxel values outside the range defined by the first and last keypoints must be clamped to the nearest endpoint value to prevent undefined behavior [G].
++*   **Duplicate Keypoints:** If two keypoints have the same input value ($x_i = x_{i+1}$), the denominator in the interpolation formula becomes zero. This should be handled by clamping or skipping the segment [G].
++*   **Unsorted Keypoints:** The interpolation logic assumes keypoints are sorted by input value. If not, they must be sorted before processing [G].
+ 
+ ## Subtopics
+ 
+ ### Label-aware Interpolation Switching
+-Switches volume interpolation type to nearest-neighbor when labels are present to prevent band-crossing artifacts, otherwise uses linear interpolation [S2, unofficial]. It solves the problem of linear interpolation across label band boundaries producing values that fall into incorrect anatomical classes, breaking label-scoped transfer functions [S2, unofficial]. When labels are present, the method calls `volume.getProperty().setInterpolationTypeToNearest()`; otherwise, it calls `volume.getProperty().setInterpolationTypeToLinear()` [S2, unofficial].
++Switches volume interpolation type to nearest-neighbor when labels are present to prevent band-crossing artifacts, otherwise uses linear interpolation [S2, unofficial]. It solves the problem of linear interpolation across label band boundaries producing values that fall into incorrect anatomical classes, which breaks label-scoped transfer functions [S2, unofficial]. Implementation: Check if labels are present via `hasLabels()`. If labels exist, call `volume.getProperty().setInterpolationTypeToNearest()`. Otherwise, call `volume.getProperty().setInterpolationTypeToLinear()` [S2, unofficial].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Time:** $O(N)$ where $N$ is the number of voxels, assuming the number of keypoints $K$ is small and constant. The normalization and interpolation are element-wise operations.
+-*   **Memory:** $O(N)$ for the output volume, plus $O(K)$ for the keypoints.
+-
+-**Measured Performance:**
+-*   The method is implemented in PyTorch and can be accelerated using Triton kernels on CUDA hardware [S1, unofficial].
+-*   Performance benchmarks show that Triton implementations can achieve comparable or faster speeds than standard PyTorch implementations, with fp16 and bf16 precision support [S1, unofficial].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Simple to implement and edit; computationally efficient; effective for separating distinct tissue types based on density [S1, unofficial].
+-*   **Limitations:** Cannot distinguish between materials with similar densities but different boundary characteristics (e.g., soft vs. sharp edges) [S3, unofficial]. Prone to aliasing if post-classification is used without sufficient sampling [S2, unofficial].
+-
+-**When to Use:**
+-*   Use when the volume data has distinct density ranges for different materials and gradient information is not required for classification [S1, unofficial].
+-*   Use when computational efficiency is critical and the visual complexity of the transfer function is low [S1, unofficial].
+-
+-**When Not to Use:**
+-*   Do not use when materials overlap in scalar value space but differ in boundary structure; use [2D Transfer Function with Gradient Magnitude](5491-2d-transfer-function-with-gradient-magnitude.md) instead [S3, unofficial].
+-*   Do not use when smooth, derivative-continuous transitions are required; use [Cubic Spline Transfer Function](1811-cubic-spline-transfer-function.md) instead [S1, unofficial].
++*   **Time Complexity:** $O(N)$ for $N$ voxels, as each voxel requires a constant-time lookup and interpolation operation after normalization. The normalization and sorting of keypoints are $O(K \log K)$ and $O(N)$ respectively, where $K$ is the number of keypoints.
++*   **Memory Complexity:** $O(N)$ for the output volume and $O(K)$ for the keypoints.
++*   **Performance:** Highly efficient and suitable for real-time rendering on GPUs. The method is computationally simple compared to cubic splines or multi-dimensional transfer functions [S1, unofficial].
++*   **Strengths:** Intuitive to edit, computationally efficient, and effective for simple classification tasks where scalar density is sufficient [S5, unofficial][S6, unofficial].
++*   **Limitations:** Cannot disambiguate materials with similar density but different boundary characteristics (e.g., soft vs. hard edges) [S3, unofficial]. Prone to aliasing if post-classification is used without adequate sampling [S2, unofficial].
++*   **When to Use:** When the volume data has distinct density ranges corresponding to different materials and gradient information is not critical.
++*   **When Not to Use:** When materials overlap in density space or when smooth, derivative-continuous transitions are required (use [Cubic Spline Transfer Function](1811-cubic-spline-transfer-function.md) instead).
+ 
+ ## Background
+-The method originates from medical imaging visualization, where Hounsfield Units (HU) are the standard scalar representation of tissue density [S1, unofficial]. The piecewise linear mapping of HU to attenuation coefficients is a foundational technique in volume rendering, allowing radiologists to visualize specific anatomical structures by adjusting opacity and color based on density [S1, unofficial]. It is widely used in clinical software and research frameworks for rapid prototyping and efficient rendering of CT scans [S1, unofficial].
++The method originates from the need to map Hounsfield Units (HU) from CT scans to attenuation coefficients for volume rendering [S1, unofficial]. It is a foundational technique in medical volume visualization, allowing users to define piecewise linear transfer functions to highlight specific tissues [S1, unofficial]. The approach is widely used in frameworks like VTK, which provides `vtkLookupTable` for color mapping and `vtkPiecewiseFunction` for opacity [S3, unofficial]. It is a specific instance of the broader [1D Transfer Function](11719-1d-transfer-function.md) family.
+ 
+ ## Sources

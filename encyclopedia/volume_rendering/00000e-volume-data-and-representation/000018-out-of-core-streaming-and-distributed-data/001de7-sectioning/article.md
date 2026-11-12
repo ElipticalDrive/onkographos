@@ -1,142 +1,106 @@
 # Sectioning
-Also called: Section Memory, External FIFO, VolumePro Sectioning
-
 ## Overview
-Sectioning partitions a volume dataset into smaller segments to constrain the on-chip memory usage of First-In-First-Out (FIFO) buffers within hardware pipelines [S1, unofficial]. It solves the problem of limited on-chip storage for intermediate values required for ray-casting by off-loading these values to external memory between processing sections [S1, unofficial]. Unlike [Hardware-Assisted Volume Streaming](2119-hardware-assisted-volume-streaming.md) which relies on hardware buffers for streaming, or [Chunk-based spatial partitioning](3862-chunk-based-spatial-partitioning.md) which divides space for load balancing, Sectioning specifically manages the recirculation of data within a single rendering pass to maintain exact numerical precision without approximation [S1, unofficial].
-
+Sectioning is a hardware-oriented memory management technique used in real-time ray-casting pipelines to constrain the size of on-chip First-In-First-Out (FIFO) buffers [S1, unofficial]. It solves the problem of limited semiconductor memory by partitioning the volume dataset into smaller spatial sections, off-loading intermediate rendering values to external memory between sections, and then recirculating them [S1, unofficial]. It is distinct from general out-of-core streaming because it operates within a fixed, synchronous hardware pipeline to maintain exact visual fidelity without approximation, whereas siblings like [Chunk-based spatial partitioning](3862-chunk-based-spatial-partitioning.md) often involve software-managed data structures and potential compression or approximation [S1, unofficial].
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A volume dataset, partitioned into sections along the x-direction.
-*   **Output:** A rendered image, identical to a non-sectioned render, with no visual artifacts at section boundaries [S1, unofficial].
+### Inputs and Outputs
+- **Input**: A 3D volume dataset partitioned into sections; specifically, the current section being processed and the Section Memory containing intermediate values from the previous section.
+- **Output**: A rendered image frame; intermediate values (e.g., transmittance, accumulated color) are written to and read from Section Memory.
 
-**Data Structures:**
-*   **Section Memory:** An external memory block acting as a large FIFO. It stores intermediate values (such as accumulated color and opacity, or gradient data) that would normally be passed between pipeline stages.
-    *   **Layout:** The memory organization corresponds to the width of a section. In the VolumePro implementation, each section is 32 voxels wide [S1, unofficial].
-    *   **Content:** Intermediate values needed for rendering near the right boundary of a section.
+### Data Structures
+- **Section Memory**: An external memory block (e.g., SDRAM) acting as a large FIFO. It stores intermediate values that would normally be passed directly between pipeline stages if memory were unlimited [S1, unofficial].
+- **Section**: A spatial partition of the volume. In the reference implementation, sections are 32 voxels wide in the x-direction [S1, unofficial].
 
-**Numbered Steps:**
-1.  **Partitioning:** The volume dataset is partitioned into sections. In the VolumePro implementation, this is done only in the x-direction, with each section being 32 voxels wide [S1, unofficial].
-2.  **Traversal Order Modification:**
-    *   Voxels are read in slice-by-slice order within a single section [S1, unofficial].
-    *   Within slices, voxels are read in beam-by-beam order, but beams span only the width of the current section (32 voxels) [S1, unofficial].
-3.  **Section Processing (Right-Hand Pipeline):**
-    *   The full section is processed front-to-back [S1, unofficial].
-    *   Shift registers in the right-hand pipeline are modified to optionally write intermediate values to Section Memory at the end of a section [S1, unofficial].
-    *   These values are the ones that would have been passed to the next pipeline stage in a continuous stream [S1, unofficial].
-4.  **Section Boundary Handling:**
-    *   At the start of a new section, the left-hand pipeline reads values from Section Memory [S1, unofficial].
-    *   If not reading from Section Memory (e.g., first section), it accepts values from the right-hand pipeline [S1, unofficial].
-    *   Values are passed through multiplexers to the left pipeline [S1, unofficial].
-5.  **Recirculation:**
-    *   Values are read from Section Memory in the exact same order they were written [S1, unofficial].
-    *   This ensures that the left-hand pipeline receives the same data it would have received if the sections were processed as one continuous block [S1, unofficial].
-6.  **Iteration:** The next section is processed, repeating steps 2-5 until the entire volume is rendered [S1, unofficial].
+### Steps
+1.  **Partitioning**: The volume dataset is partitioned into sections. The partitioning direction can be x, y, or z, though specific implementations may restrict this (e.g., x-direction only) [S1, unofficial].
+2.  **Traversal Order Modification**:
+    - Voxels are read in slice-by-slice order within a single section [S1, unofficial].
+    - Within slices, voxels are read in beam-by-beam order, but beams span only the width of the current section [S1, unofficial].
+3.  **Processing a Section**:
+    - The full section is processed front-to-back [S1, unofficial].
+    - As voxels are processed, intermediate values required for rendering near the right boundary of the section are written to Section Memory at the end of the section [S1, unofficial]. This is done by modifying shift registers in the right-hand pipeline to optionally write to Section Memory [S1, unofficial].
+4.  **Boundary Handling**:
+    - When the next section begins processing, the left-hand pipeline reads the intermediate values from Section Memory [S1, unofficial].
+    - These values are passed through multiplexers to the left pipeline [S1, unofficial].
+    - The values are read in the exact same order they were written [S1, unofficial].
+5.  **Continuation**: The pipeline continues processing the next section, using the recirculated values to maintain continuity as if the values had been generated on the previous cycle and passed directly [S1, unofficial].
 
-**Formulas:**
-*   Let $V$ be the volume dataset.
-*   Let $S$ be the set of sections, where $S = \{s_1, s_2, ..., s_n\}$.
-*   Let $W$ be the section width in voxels ($W=32$ in VolumePro) [S1, unofficial].
-*   Let $I_{right}$ be the intermediate values generated by the right-hand pipeline.
-*   Let $I_{left}$ be the intermediate values consumed by the left-hand pipeline.
-*   The condition for correctness is: $I_{left}(s_i) = I_{right}(s_{i-1})$ for $i > 1$, where $I_{right}(s_{i-1})$ is stored in Section Memory and retrieved as $I_{left}(s_i)$ [S1, unofficial].
+### Formulas
+No specific mathematical formulas are provided in the sources for the sectioning mechanism itself, other than the implicit preservation of value equality:
+$$ V_{read} = V_{written} $$
+Where $V_{read}$ is the value read from Section Memory and $V_{written}$ is the value written to it [S1, unofficial].
 
-**Parameters:**
-*   **Section Width:** 32 voxels (VolumePro specific) [S1, unofficial].
-*   **Direction:** X-direction (VolumePro specific; theoretically possible in y- and/or z-directions) [S1, unofficial].
+### Parameters
+- **Section Width**: 32 voxels in the x-direction (in the VolumePro implementation) [S1, unofficial].
+- **Partitioning Direction**: x, y, or z (theoretically); x-direction only (in the cited VolumePro implementation) [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** No approximation is made; the method guarantees no visual artifacts at section boundaries because the exact same values are written and read [S1, unofficial].
-*   **Memory Organization:** The section width must align with the underlying memory organization (e.g., 32 voxels for VolumePro) [S1, unofficial].
-*   **Ordering:** The read order from Section Memory must exactly match the write order to ensure correct pipeline state [S1, unofficial].
+### Edge Cases and Pitfalls
+- **Visual Artifacts**: The method ensures no visual artifacts are introduced at section boundaries because the exact same values are written and read, maintaining the logical continuity of the ray-casting pipeline [S1, unofficial].
+- **Memory Organization**: The section width (32 voxels) corresponds to the specific memory organization of the hardware (e.g., SDRAM datapaths) [S1, unofficial].
 
-**Pseudocode:**
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sectioned_volume_rendering(volume, section_width=32):
+# Pseudocode for Sectioning in a Hardware Pipeline
+# Assumes a pipeline with left and right stages, and external Section Memory
+
+def process_volume_section(section_index, section_width, total_sections):
     """
-    Renders a volume using sectioning to manage on-chip FIFO memory.
-    Assumes VolumePro-style architecture with left and right pipelines.
+    Processes a single section of the volume, handling memory off-loading.
     """
-    # Partition volume into sections along x-direction
-    num_sections = ceil(volume.width / section_width)
+    # 1. Initialize Section Memory for this section if needed
+    # (In hardware, this is managed by control logic)
     
-    # Section Memory acts as an external FIFO
-    section_memory = [] 
+    # 2. Traverse voxels in the modified order
+    for slice in current_section_slices:
+        for beam in current_section_beams:
+            # Beams span only the width of the section
+            for voxel in beam:
+                # Process voxel (ray casting, shading, etc.)
+                intermediate_value = compute_intermediate_value(voxel)
+                
+                # 3. Check if we are at the end of the section
+                if is_last_voxel_in_section(voxel):
+                    # Write intermediate values to Section Memory
+                    # (Modifies shift registers to optionally write)
+                    write_to_section_memory(intermediate_value)
+                else:
+                    # Pass value to next pipeline stage normally
+                    pass_to_next_pipeline(intermediate_value)
+
+def handle_section_boundary(section_index, total_sections):
+    """
+    Handles the transition between sections by reading from Section Memory.
+    """
+    if section_index > 0:
+        # 4. Read values from Section Memory at the beginning of the section
+        # (Left-hand pipeline reads from Section Memory)
+        recirculated_values = read_from_section_memory()
+        
+        # 5. Pass values through multiplexers to the left pipeline
+        # (Ensures values are in the same order they were written)
+        for value in recirculated_values:
+            pass_to_left_pipeline(value)
+
+def main():
+    total_sections = calculate_total_sections(volume_data)
+    section_width = 32  # Example parameter from VolumePro
     
-    for s_idx in range(num_sections):
-        # Define current section bounds
-        x_start = s_idx * section_width
-        x_end = min((s_idx + 1) * section_width, volume.width)
-        section_width_actual = x_end - x_start
-        
-        # Process section front-to-back
-        for z in range(volume.depth):
-            for y in range(volume.height):
-                # Beams span only the width of the section
-                for x in range(x_start, x_end):
-                    # Ray casting logic for voxel (x, y, z)
-                    # ... compute sample, gradient, etc. ...
-                    
-                    # Right-hand pipeline generates intermediate values
-                    intermediate_values = right_pipeline_process(x, y, z, volume)
-                    
-                    # If at end of section, write to Section Memory
-                    if x == x_end - 1:
-                        section_memory.append(intermediate_values)
-        
-        # After processing all slices/beams in the section,
-        # the left pipeline needs to receive the intermediate values
-        # from the previous section (or initial values for first section)
-        
-        if s_idx == 0:
-            # First section: left pipeline gets initial values from right pipeline
-            # (Handled by hardware multiplexers, no external memory read)
-            left_pipeline_receive(initial_values)
-        else:
-            # Subsequent sections: read from Section Memory
-            # Values are read in the same order they were written
-            previous_section_values = section_memory.pop(0)
-            left_pipeline_receive(previous_section_values)
-            
-        # Continue rendering with updated left pipeline state
-        # ...
+    for i in range(total_sections):
+        process_volume_section(i, section_width, total_sections)
+        handle_section_boundary(i, total_sections)
 ```
-
-## Subtopics
-
-### VolumeLoader
-Handles loading volume data into memory; Sectioning operates on already loaded data, partitioning it for processing [Link](2045-volumeloader.md).
-
-### Hardware-Assisted Volume Streaming
-Uses hardware buffers for streaming; Sectioning uses external memory for FIFO recirculation [Link](2119-hardware-assisted-volume-streaming.md).
-
-### Bandwidth-based Streaming Interval Calculation
-Determines streaming intervals based on bandwidth; Sectioning determines section boundaries based on memory limits [Link](3128-bandwidth-based-streaming-interval-calculation.md).
-
-### Chunk-based spatial partitioning
-Divides space for parallel processing; Sectioning divides space for memory management within a single pass [Link](3862-chunk-based-spatial-partitioning.md).
-
-### Distributed computing and load balancing
-Distributes work across nodes; Sectioning manages memory within a single node's pipeline [Link](5624-distributed-computing-and-load-balancing.md).
-
-### MapReduce-based Volume Rendering
-Uses MapReduce for parallel rendering; Sectioning is a hardware pipeline optimization [Link](5963-mapreduce-based-volume-rendering.md).
-
-### Out-of-core brick-based volume rendering
-Loads bricks from disk; Sectioning manages intermediate values in external memory during rendering [Link](6288-out-of-core-brick-based-volume-rendering.md).
-
 ## Operating characteristics
-*   **Time Complexity:** No additional computational complexity; the same values are calculated, just in a different order [S1, unofficial].
-*   **Memory Complexity:** Reduces on-chip FIFO memory requirements by off-loading intermediate values to external memory [S1, unofficial].
-*   **Measured Performance:** Implemented in VolumePro with 32-voxel sections [S1, unofficial].
-*   **Strengths:** Exact numerical precision; no visual artifacts at section boundaries [S1, unofficial].
-*   **Limitations:** Requires external memory access; limited to x-direction in VolumePro [S1, unofficial].
-*   **When to use:** When on-chip FIFO memory is insufficient for the full volume width [S1, unofficial].
-*   **When not to use:** When external memory bandwidth is a bottleneck or when hardware supports sufficient on-chip memory [S1, unofficial].
+- **Time Complexity**: Not explicitly stated, but the method adds overhead for writing to and reading from external memory, which is slower than on-chip FIFOs. However, it allows the pipeline to continue without stalling for memory constraints.
+- **Memory Complexity**: Reduces on-chip memory requirements by off-loading intermediate values to external memory. The size of Section Memory depends on the number of intermediate values that need to be recirculated.
+- **Performance**: The method is designed for real-time rendering on hardware (e.g., VolumePro PCI card) [S1, unofficial]. It maintains visual fidelity without approximation, which is a key advantage over software-based streaming methods that might use compression or lower resolution [S1, unofficial].
+- **Strengths**: Exact visual continuity; no approximation; fits within hardware memory constraints.
+- **Limitations**: Requires specific hardware support (modified shift registers, multiplexers, external memory interface); limited to the memory organization of the hardware (e.g., 32-voxel sections).
+- **When to Use**: When rendering large volumes on hardware with limited on-chip memory and exact visual fidelity is required.
+- **When Not to Use**: When software flexibility is needed, or when the hardware does not support the required memory management features.
 
 ## Background
-Sectioning was introduced in the VolumePro real-time ray-casting system [S1, unofficial]. It was developed to address the limitations of semiconductor processes regarding on-chip memory size [S1, unofficial]. The method is detailed in the VolumePro technical report [S1, unofficial].
+Sectioning was introduced in the VolumePro real-time ray-casting system [S1, unofficial]. It is described in the technical report "The VolumePro Real-Time Ray-Casting System" [S1, unofficial]. The method is part of the hardware architecture of the VolumePro PCI card, which uses a vg500 rendering ASIC and SDRAMs [S1, unofficial]. The technique is cited as building on previous work [9] (not provided in the sources).
 
 ## Sources
 [S1] The VolumePro Real-Time Ray-Casting System, https://www.merl.com/publications/docs/TR99-19.pdf, fetched 2026-10-26 (unofficial)

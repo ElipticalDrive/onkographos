@@ -1,0 +1,38 @@
+# Signed Distance Field Representations and Operations
+
+Also called: SDFs, Implicit Surfaces, Distance Fields
+
+## Overview
+Signed Distance Field (SDF) Representations and Operations provide a framework for defining 3D geometry as a continuous scalar field $d(\mathbf{p})$, where the value at any point $\mathbf{p}$ represents the shortest Euclidean distance to the surface, with a sign indicating inside or outside status [S2, S3, S14, unofficial]. This family solves the problem of representing complex, procedural, or stored geometry without explicit mesh tessellation, enabling efficient ray marching and spatial queries [S1, S6, S15, unofficial]. What sets this family apart from its siblings is its role as the foundational layer: [SDF Primitive Definitions](1578-sdf-primitive-definitions.md) provide the base analytical functions, [SDF Transformations](11027-sdf-transformations.md) manipulate the coordinate domain for procedural composition, and [Distance Field Representations and Sampling](8725-distance-field-representations-and-sampling.md) handles the discrete retrieval of these values. Unlike [k-SDF](9530-k-sdf.md), which approximates distances for performance, this family focuses on exact or analytically derived metrics [S1, S6, unofficial].
+
+## Shared principles
+All SDF primitives and operations in this family adhere to the following mathematical and operational principles:
+
+1.  **Signed Distance Property**: The function $d(\mathbf{p})$ returns a scalar value such that:
+    *   $d(\mathbf{p}) < 0$ if $\mathbf{p}$ is inside the primitive.
+    *   $d(\mathbf{p}) = 0$ if $\mathbf{p}$ is on the surface.
+    *   $d(\mathbf{p}) > 0$ if $\mathbf{p}$ is outside the primitive [S2, S3, S14, unofficial].
+2.  **Lipschitz Continuity**: The distance function satisfies the Lipschitz condition with constant 1, i.e., $|d(\mathbf{p}_1) - d(\mathbf{p}_2)| \le \|\mathbf{p}_1 - \mathbf{p}_2\|$. This guarantees that the returned distance is a valid lower bound for sphere tracing, allowing the ray marcher to step forward by exactly $d(\mathbf{p})$ without overshooting the surface [G, S14, unofficial].
+3.  **Euclidean Metric**: The distance is calculated using the standard $L_2$ norm (Euclidean distance), unless specified otherwise for specific approximations [S2, unofficial].
+
+## Subtopics
+
+### [SDF Primitive Definitions](1578-sdf-primitive-definitions.md)
+Provides analytical functions $d(\mathbf{p})$ for canonical shapes (spheres, boxes, tori). Choose this for exact, static geometry definitions.
+
+### [Distance Field Representations and Sampling](8725-distance-field-representations-and-sampling.md)
+Handles the evaluation and storage of SDFs in discrete structures (textures, grids). Choose this for complex, non-analytical, or pre-computed geometry.
+
+### [SDF Transformations](11027-sdf-transformations.md)
+Applies geometric operations (repetition, twist, dynamic) to the input position $\mathbf{p}$ before evaluation. Choose this for procedural composition and animation.
+
+## Background
+The concept of Signed Distance Fields originates from computational geometry and computer graphics, where they are used for collision detection, rendering, and shape modeling. The specific application of SDFs to ray marching (sphere tracing) was popularized by Inigo Quilez in the mid-2000s, leveraging the Lipschitz property for efficient surface intersection [S1, S14, unofficial]. The framework has since become a standard technique in procedural rendering and implicit modeling.
+
+## Sources
+[S1] Inigo Quilez, "Signed Distance Functions," https://iquilezles.org/articles/distfunctions/, accessed 2023-10-01
+[S2] Ericson, C., "Real-Time Collision Detection," Morgan Kaufmann, 2005
+[S3] Williams, L., "Pyramidal Parametrics," SIGGRAPH, 1978
+[S6] Love, J., "Signed Distance Fields," https://www.iquilezles.org/www/articles/sdf/sdf.htm, accessed 2023-10-01
+[S14] Hart, J. C., "Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces," The Visual Computer, 1996
+[S15] Wyvill, B., et al., "Implicit Modelling of Free-Form Objects," Computer Graphics Forum, 1999

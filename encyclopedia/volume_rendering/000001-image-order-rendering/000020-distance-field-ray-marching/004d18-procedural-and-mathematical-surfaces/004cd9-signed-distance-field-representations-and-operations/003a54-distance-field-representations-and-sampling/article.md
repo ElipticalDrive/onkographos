@@ -1,0 +1,141 @@
+# Distance Field Representations and Sampling
+
+Also called: Distance Field Evaluation, SDF Sampling
+
+## Overview
+Distance Field Representations and Sampling provides the mechanism for evaluating a Signed Distance Function (SDF) at arbitrary query points during ray marching, bridging the gap between implicit surface definitions and discrete storage formats. It solves the problem of efficiently retrieving valid distance values from memory structures (such as 3D textures or sparse grids) while handling boundary conditions, resolution limits, and metric variations. Unlike [SDF Primitive Definitions](1578-sdf-primitive-definitions.md), which define analytic functions for simple shapes, or [SDF Transformations](11027-sdf-transformations.md), which modify coordinates, this family focuses on the *access pattern* and *data layout* required to retrieve $d(\mathbf{p})$ for complex, stored geometries.
+
+## Shared principles
+All distance field sampling methods in this family adhere to the mathematical and operational principles defined in the parent article [Signed Distance Field Representations and Operations](13339-signed-distance-field-representations-and-operations.md):
+
+1.  **Signed Distance Property**: The function $d(\mathbf{p})$ returns a scalar value such that:
+    *   $d(\mathbf{p}) < 0$ if $\mathbf{p}$ is inside the primitive.
+    *   $d(\mathbf{p}) = 0$ if $\mathbf{p}$ is on the surface.
+    *   $d(\mathbf{p}) > 0$ if $\mathbf{p}$ is outside the primitive [S2, S3, S14, unofficial].
+2.  **Lipschitz Continuity**: The distance function satisfies the Lipschitz condition with constant 1, i.e., $|d(\mathbf{p}_1) - d(\mathbf{p}_2)| \le \|\mathbf{p}_1 - \mathbf{p}_2\|$. This guarantees that the returned distance is a valid lower bound for sphere tracing, allowing the ray marcher to step forward by exactly $d(\mathbf{p})$ without overshooting the surface [G, S14, unofficial].
+3.  **Euclidean Metric**: The distance is calculated using the standard $L_2$ norm (Euclidean distance), unless specified otherwise for specific approximations [S2, unofficial].
+
+## Subtopics
+
+### [Bounded 3D Distance Texture Ray Marching](1115-bounded-3d-distance-texture-ray-marching.md)
+Bounded 3D Distance Texture Ray Marching is a method for evaluating a Signed Distance Function (SDF) using a discrete 3D texture to represent an implicit surface, specifically designed to handle boundary conditions and invalid distance values at texture edges. It solves the problem of sampling artifacts that occur when a ray marches outside the valid interior of a distance texture but remains within the texture's physical volume. Unlike standard texture sampling which may return noisy or invalid data near the edges, this method employs two bounding regions (an inner "red" box and an outer "green" box) to ensure that ray marching stops correctly at the texture boundary or uses valid interior data, preventing the "red box" artifact in ambient occlusion calculations. It builds on [Distance Field Representations and Sampling](8725-distance-field-representations-and-sampling.md).
+
+**Inputs and Outputs**
+*   **Input:** A query point $\mathbf{x}$ in local texture space (typically normalized to $[-0.5, 0.5]^3$ or similar, centered at origin), a 3D distance texture, and two parameters: `textureBoundary` and `textureShell`.
+*   **Output:** A scalar distance value $res$. If the point is within the valid interior region, this is the sampled SDF value from the texture. If the point is outside the valid region (but potentially inside the texture volume), it is the distance to the inner boundary, ensuring the ray marcher does not proceed into invalid data.
+
+**Data Structures**
+*   **3D Distance Texture:** A 3D array of floating-point values. In the reference implementation, dimensions are $192 \times 192 \times 192$.
+*   **Parameters:**
+    *   `textureBoundary`: A 3D vector defining the half-dimensions of the inner valid region. Value: $(0.5, 0.5, 0.5)$.
+    *   `textureShell`: A 3D vector defining the thickness of the boundary region surrounding the inner valid region. Value: $(0.05, 0.05, 0.05)$.
+
+**Algorithm Steps**
+1.  **Calculate Distance to Inner Boundary:** Compute the distance from the query point $\mathbf{x}$ to the inner valid region box defined by `textureBoundary`. This calculation assumes the point is outside the inner region.
+    *   Compute component-wise difference: $\mathbf{d_i} = |\mathbf{x}| - \text{textureBoundary} + \text{textureShell}$.
+    *   Compute the Euclidean norm: $res = \|\max(\mathbf{d_i} + \text{textureShell}, 0)\|$. This value represents the distance to the "red box" (the boundary of the valid region) if the point is outside it.
+
+2.  **Check Interior Status:** Determine if the point $\mathbf{x}$ is inside the inner valid region.
+    *   Compute $c = \max(d_{ix}, \max(d_{iy}, d_{iz}))$.
+    *   Here, $d_{ix}, d_{iy}, d_{iz}$ are the components of $\mathbf{d_i}$ from Step 1.
+
+3.  **Sample Texture (If Interior):** If $c < 0$, the point is inside the inner valid region.
+    *   Adjust coordinates to align with texture coordinate space: $\mathbf{x}_{adj} = \mathbf{x} + \text{textureBoundary}$.
+    *   Lookup the distance value from the 3D texture using the adjusted coordinates: $res = \text{lookupTexture}(\text{texture}, \mathbf{x}_{adj})$.
+
+4.  **Return Result:** Return $res$. If the point was outside the inner region, $res$ holds the distance to the boundary calculated in Step 1. If inside, it holds the texture sample.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bounded_3d_distance_texture_ray_marching(x, texture, texture_boundary, texture_shell):
+    """
+    Evaluates the SDF for a bounded 3D distance texture.
+    
+    Args:
+        x: Query point in local space (vector).
+        texture: 3D distance texture array.
+        texture_boundary: Half-dimensions of the inner valid region (vector).
+        texture_shell: Thickness of the boundary shell (vector).
+        
+    Returns:
+        Distance value.
+    """
+    # Step 1: Calculate distance to the inner boundary (red box)
+    # Assumes point is outside the inner region for this calculation
+    di = abs(x) - texture_boundary + texture_shell
+    
+    # Calculate Euclidean norm of the clamped distance vector
+    # max(di + texture_shell, 0) ensures we only consider positive distances
+    # Note: The source formula uses k...k for norm.
+    res = sqrt(max(di.x + texture_shell.x, 0)**2 + 
+               max(di.y + texture_shell.y, 0)**2 + 
+               max(di.z + texture_shell.z, 0)**2)
+    
+    # Step 2: Check if point is inside the inner valid region
+    c = max(di.x, max(di.y, di.z))
+    
+    # Step 3: If inside, sample the texture
+    if c < 0:
+        # Adjust coordinates to align with texture coordinate space
+        x_adj = x + texture_boundary
+        
+        # Lookup distance value from texture
+        # lookupTexture performs trilinear interpolation or nearest neighbor
+        # depending on texture configuration.
+        res = lookup_texture(texture, x_adj)
+        
+    # Step 4: Return result
+    return res
+```
+
+**Parameters and Typical Values**
+*   `textureBoundary`: $(0.5, 0.5, 0.5)$.
+*   `textureShell`: $(0.05, 0.05, 0.05)$. This value is often deduced by trial and error and should be as small as possible to maximize the valid lookup region while preventing sampling of invalid boundary data.
+*   Texture Dimensions: $192 \times 192 \times 192$ with an inner valid region of $128 \times 128 \times 128$ in the reference example.
+
+**Edge Cases and Pitfalls**
+*   **Invalid Boundary Data:** Texture samples outside the "green box" (inner valid region) but inside the "blue box" (total texture volume) may contain invalid distance values. The algorithm remedies this by disregarding that region for texture lookups and returning the distance to the red box instead.
+*   **Scale Mismatch:** The distance returned by the texture lookup must be in accordance with the scale of the scene. If not, an appropriate bound must be applied.
+*   **Normal Estimation Epsilon:** When estimating normals via finite differences, the epsilon value must be adjusted to account for the voxel spacing in the texture. If the value is too small, the representation may exhibit a "grainy" look.
+*   **Mesh Holes:** For accurate distance field generation from meshes (e.g., Stanford Bunny), holes in the mesh must be closed before conversion to a 3D texture, otherwise the distance field will be incorrect.
+
+### Sampler Abstraction
+*   **Definition**: A trait-based abstraction for sampling distance fields defined in terms of specific Distance metrics. It allows samplers to abstract sampling across multiple different Distance metrics [S1, unofficial].
+*   **Implementation**:
+    *   If `S` implements `ScalarSource`, `Sampler` implements `Sample<Signed>`. The sample method calls `self.source.sample_scalar(p)` [S1, unofficial].
+    *   If `S` implements `VectorSource`, `Sampler` implements `Sample<Directed>`. The sample method calls `self.source.sample_vector(p)` [S1, unofficial].
+    *   If `S` implements `HermiteSource`, `Sampler` implements `sample_normal` method which calls `self.source.sample_normal(p)` [S1, unofficial].
+*   **Layout**: The `Sampler` struct contains a reference to the source (`&'a S`). It implements the `Sample<D>` trait for `Signed` and `Directed` distance types based on the source implementing `ScalarSource` or `VectorSource` [S1, unofficial].
+
+### Ray Marching through Distance Fields
+*   **Definition**: A traversal method where ray marching is performed through distance fields. Naive storage of one distance value per voxel is impractical for large grids due to memory and bandwidth costs [S2, unofficial].
+*   **Optimization**: Memory costs are reduced by lowering field resolution to 1:4 scale (one distance value per 64 voxels), combined with occupancy masks. Masks are queried whenever sampled distance values are zero [S2, unofficial].
+*   **Performance**: Pre-processing takes 10x more GPU time than XBrickMap. Traversal is not considerably shorter than space partitioning methods (~8% difference) [S2, unofficial].
+
+### OctantDF
+*   **Definition**: Space skipping traversal using tiled 256³ 8-directional distance fields at 1:4 resolution, combined with 4³ occupancy bitmasks [S2, unofficial]. A distance field implementation that creates 8 separate manhattan fields, each considering only voxels ahead of the associated ray octant direction. Distances are only propagated across rows of opposing axis directions with respect to the octant [S2, unofficial].
+*   **Layout**: Memory cost is 8 bytes per 4³ voxel plus 1 bit per 1³ voxel [S2, unofficial].
+*   **Performance**: Compared to traditional distance fields, it lowers the overall number of iterations by ~20-25% and increases throughput for incoherent rays by ~30-50% [S2, unofficial]. On Sponza 2k, OctantDF achieves 129.0 Mrays/s for primary rays and 84.9 Mrays/s for primary + 1 diffuse bounce [S2, unofficial].
+
+### Distance to Value Function
+*   **Definition**: A ray function that computes the distance along the ray until a specific scalar value $\sigma$ is encountered. Useful to emphasize depth where specific tissue is located [S3, unofficial].
+
+### Probabilistic Directed Distance Fields (PDDFs)
+*   **Definition**: A variant of DDFs that differentiably models the inherent discontinuities in the underlying field [S4]. PDDFs are constructed to handle the discontinuities that make standard DDFs difficult to train with differentiable neural networks [S4].
+
+### Signed Height Indicator
+*   **Definition**: A 2.5D indicator $\tilde{h} = [u, v, \bar{d}]$ combining UV coordinates and signed distance to resolve ambiguity for points perpendicular to the mesh surface [S5, unofficial].
+*   **Calculation**: Calculate signed distance $\bar{d}$: project point $x$ onto mesh surface at $x_0$, obtain direction $\tilde{r} = x - x_0$, get surface normal $\tilde{n}$ at $x_0$, and compute $\bar{d} = \text{sign}(\tilde{r} \cdot \tilde{n}) \|\tilde{r}\|_2$ [S5, unofficial].
+*   **Formula**: Define signed height: $\tilde{h} = [u, v, \bar{d}]$, where $[u, v]$ is the 2D coordinate on the UV map and $\bar{d}$ is the signed distance [S5, unofficial].
+
+## Background
+Distance field sampling has evolved from simple analytic evaluations of primitives to complex, memory-efficient storage schemes for large-scale volumetric data. Early implementations relied on 3D textures for implicit surfaces, necessitating boundary handling techniques like the bounded texture approach to prevent artifacts [S1, S2, unofficial]. As scene complexity increased, sparse data structures such as XBrickMap, Tree64, and OctantDF were developed to reduce memory bandwidth bottlenecks associated with dense grids [S2, unofficial]. These structures optimize traversal by leveraging directional properties (OctantDF) or hierarchical compression (XBrickMap) [S2, unofficial]. In the context of differentiable rendering and neural fields, distance field representations have been extended to handle discontinuities (PDDFs) and 2.5D manifold ambiguities (Signed Height Indicators) to support gradient-based optimization [S4][S5, unofficial]. The Distance to Value function remains a staple in scientific visualization for depth-emphasis in medical imaging [S3, unofficial].
+
+## Sources
+[S1] https://github.com/swiftcoder/isosurface, https://github.com/swiftcoder/isosurface, fetched 2026-10-26 (unofficial)
+[S2] dubiousconst282/VoxelRT, https://github.com/dubiousconst282/VoxelRT, fetched 2026-10-24 (unofficial)
+[S3] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)
+[S4] Probabilistic Directed Distance Fields for Ray-Based Shape Representations, https://doi.org/10.1109/tpami.2025.3594225, fetched 2026-10-29
+[S5] UVA: Towards Unified Volumetric Avatar for View Synthesis, Pose rendering, Geometry and Texture Editing, https://doi.org/10.48550/arXiv.2304.06969, fetched 2026-10-29 (unofficial)

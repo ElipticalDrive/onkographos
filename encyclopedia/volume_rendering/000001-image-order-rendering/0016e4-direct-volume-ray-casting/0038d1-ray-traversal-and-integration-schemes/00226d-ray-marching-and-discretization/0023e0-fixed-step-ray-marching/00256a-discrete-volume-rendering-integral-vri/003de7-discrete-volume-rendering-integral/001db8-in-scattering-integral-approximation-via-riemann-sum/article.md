@@ -3,103 +3,134 @@
 Also called: Discrete In-Scattering Integral, Riemann Sum In-Scattering
 
 ## Overview
-This method approximates the continuous in-scattering integral along a camera ray by discretizing the path into small segments and summing the contributions of rectangular areas defined by the sampled radiance and segment width [S1, unofficial]. It solves the problem of computing the influx of light energy scattered toward the eye for general, non-homogeneous volumes where no analytical solution exists [S1, unofficial]. Unlike [Zero Order Integration (Rectangle Rule)](2082-zero-order-integration-rectangle-rule.md) which focuses on the general volume rendering equation, this specific approach explicitly details the evaluation of the in-scattering term $L_i(x, \omega)$ via auxiliary light rays and Beer's law [S1, unofficial].
+This method approximates the continuous influx of light energy scattered toward the eye (in-scattering) along a camera ray segment by discretizing the integral into a sum of small rectangular areas [S1, unofficial]. It solves the problem that the in-scattering integral has no analytical solution for general volume shapes and lighting scenarios, necessitating numerical approximation [S1, unofficial]. It sets itself apart from its siblings by using a basic rectangle rule (Riemann sum) without the specific physical assumptions of forward scattering [13373-discrete-ray-marching-with-forward-scattering-approximation.md] or the attenuation corrections of [Self-Attenuation Integral Evaluation](1085-self-attenuation-integral-evaluation.md).
 
 ## How it works
 **Inputs:**
-*   Camera ray segment bounds $t_0$ and $t_1$ [S1, unofficial].
-*   Step size $dx$ (width of the rectangles) [S1, unofficial].
-*   Volume density field and lighting configuration [S1, unofficial].
+- Camera ray segment defined by parametric distances $t_0$ (entry) and $t_1$ (exit) [S1, unofficial].
+- Step size $dx$ [S1, unofficial].
+- Volume density field to determine light travel distance [S1, unofficial].
+- Light source direction and intensity [S1, unofficial].
 
 **Outputs:**
-*   Approximated in-scattered radiance for the ray segment [S1, unofficial].
+- Approximated in-scattered radiance $L_i$ accumulated over the segment [S1, unofficial].
 
 **Data Structures:**
-*   Not given in the sources [S1, unofficial].
+- Accumulator variable for total in-scattered light (scalar).
+- Current position $x$ along the ray (scalar/vector).
+- Light travel distance (scalar).
 
 **Steps:**
-1.  **Discretization:** Divide the camera ray segment within the volume boundaries (from $t_0$ to $t_1$) into sub-segments of length $dx$ [S1, unofficial].
-2.  **Sampling Loop:** For each sub-segment, identify the sample point $x$ (typically the middle of the interval) [S1, unofficial].
-3.  **Lighting Evaluation ($L_i(x, \omega)$):**
-    *   Shoot a ray from $x$ in the direction of the light source to determine the distance light traveled through the volume to reach $x$ [S1, unofficial].
-    *   Apply Beer's law to the light travel distance to determine the remaining light energy at point $x$ [S1, unofficial].
-    *   *Note:* The basic Riemann sum description does not account for the scattering phase function, which is required for the full calculation of $L_i(x, \omega)$ [S1, unofficial].
-4.  **Accumulation:** Compute the area of the rectangle for the current segment as $L_i(x, \omega) \cdot dx$ [S1, unofficial].
-5.  **Summation:** Sum the areas of all rectangles to approximate the integral [S1, unofficial].
+1. Initialize the total in-scattered light accumulator to zero.
+2. Divide the camera ray segment contained within the volume boundaries (from $t_0$ to $t_1$) into smaller sub-segments of length $dx$ [S1, unofficial].
+3. For each sub-segment, identify the sample point $x$ (typically the middle of the interval) [S1, unofficial].
+4. Evaluate the incident light radiance $Li(x, \omega)$ at point $x$:
+    a. Shoot a ray from $x$ in the direction of the light source to determine the distance light traveled through the volume [S1, unofficial].
+    b. Apply Beer's law to the light travel distance to determine the remaining light energy at point $x$ [S1, unofficial].
+    c. Note: The basic Riemann sum description does not account for the scattering phase function (the fraction of light scattered in direction $\omega$), which is required for the full calculation of $Li(x, \omega)$ [S1, unofficial].
+5. Compute the area of the rectangle for the current sub-segment as $Li(x, \omega) \times dx$ [S1, unofficial].
+6. Accumulate the contribution of each small segment to the total in-scattered light [S1, unofficial].
+7. Return the accumulated sum as the approximation of the integral [S1, unofficial].
 
 **Formula:**
 The integral to approximate is:
-$$ \int_{x=t_0}^{t_1} L_i(x, \omega) dx $$
-Where:
-*   $L_i(x, \omega)$ is the radiance scattered towards the eye direction $\omega$ at point $x$ [S1, unofficial].
-*   The integral spans the camera ray segment between parametric distances $t_0$ and $t_1$ [S1, unofficial].
-*   $dx$ is the width of the rectangles [S1, unofficial].
+$$ \int_{x=t_0}^{t_1} Li(x, \omega) dx $$
+where $Li(x, \omega)$ is the radiance scattered towards the eye direction $\omega$ at point $x$ on the segment between parametric distances $t_0$ and $t_1$ [S1, unofficial].
+
+The Riemann sum approximation is:
+$$ \sum_{i} Li(x_i, \omega) \cdot dx $$
 
 **Parameters:**
-*   $dx$: The width of the rectangles. Smaller $dx$ yields higher accuracy but increases processing time [S1, unofficial].
+- $dx$: The width of the rectangles in the Riemann sum approximation. Smaller $dx$ yields higher accuracy but increases processing time [S1, unofficial].
 
 **Pitfalls:**
-*   **No Analytical Solution:** The integral has no analytical solution for general volume shapes and lighting scenarios, necessitating numerical approximation [S1, unofficial].
-*   **Missing Phase Function:** The basic description does not account for the scattering phase function [S1, unofficial].
-*   **Approximation Error:** The result is an approximation whose accuracy depends heavily on the choice of $dx$ [S1, unofficial].
+- The integral has no analytical solution for general volume shapes and lighting scenarios [S1, unofficial].
+- The basic Riemann sum description provided does not yet account for the scattering phase function, which is required for the full calculation of $Li(x, \omega)$ [S1, unofficial].
+- Precision issues may arise if $dx$ is too large, leading to significant deviation from the true area under the curve [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def approximate_in_scattering(t0, t1, dx, volume_sampler, light_direction, light_source_radiance):
+def approximate_in_scattering(t0, t1, dx, volume, light_direction, light_intensity):
     """
     Approximates the in-scattering integral using a Riemann sum.
     
     Args:
-        t0: Start parametric distance of the ray segment.
-        t1: End parametric distance of the ray segment.
+        t0: Parametric distance where ray enters volume.
+        t1: Parametric distance where ray exits volume.
         dx: Step size (width of rectangles).
-        volume_sampler: Function that returns density/extinction at a 3D point.
-        light_direction: Normalized direction vector towards the light source.
-        light_source_radiance: Radiance emitted by the light source.
+        volume: Function or data structure to query density for Beer's law.
+        light_direction: Direction vector to the light source.
+        light_intensity: Intensity of the light source.
         
     Returns:
         Approximated in-scattered radiance.
     """
-    total_in_scattering = 0.0
+    total_in_scattered = 0.0
     x = t0
     
+    # Iterate along the ray segment
     while x < t1:
-        current_dx = min(dx, t1 - x)
-        x_center = x + current_dx / 2.0
+        # Evaluate Li(x, omega)
+        # 1. Shoot ray from x in light direction to find light travel distance
+        # This requires intersecting the ray from x with the volume boundary
+        # and integrating density along that path.
+        light_travel_distance = compute_light_travel_distance(x, light_direction, volume)
         
-        # [G] March along light_direction from x_center to find distance inside volume.
-        # Implementation details (step size, boundary checks) are omitted.
-        d_light = 0.0
-        pos = x_center
-        step = 0.01  # [G] Light ray step size is implementation-dependent
-        while volume_sampler(pos) > 0.0:
-            d_light += step
-            pos = pos + light_direction * step
-            
-        # Apply Beer's law to determine remaining light energy at x_center
-        sigma_t = volume_sampler(x_center)
-        li = light_source_radiance * math.exp(-sigma_t * d_light)
+        # 2. Apply Beer's law to determine remaining light energy
+        # Assuming density is available at x or along the light path
+        # Li(x) = light_intensity * exp(-integral_of_density_along_light_path)
+        # Note: Phase function is not included in this basic approximation [S1, unofficial]
+        li_x = compute_light_radiance(light_travel_distance, light_intensity, volume)
         
-        total_in_scattering += li * current_dx
-        x += current_dx
+        # 3. Accumulate contribution: Li(x) * dx
+        total_in_scattered += li_x * dx
         
-    return total_in_scattering
+        # 4. Advance to next sub-segment
+        x += dx
+        
+    return total_in_scattered
+
+def compute_light_travel_distance(start_point, direction, volume):
+    """
+    Computes the distance light travels through the volume from start_point
+    in the given direction. This involves finding the exit point and integrating
+    density along the path.
+    """
+    # Implementation details for ray-volume intersection and density integration
+    # are not provided in the source [S1, unofficial].
+    # This is a placeholder for the actual ray marching logic against the volume.
+    pass
+
+def compute_light_radiance(light_travel_distance, light_intensity, volume):
+    """
+    Applies Beer's law to determine the remaining light energy.
+    L = L0 * exp(-sigma_t * d)
+    """
+    # sigma_t is the extinction coefficient, derived from volume density.
+    # The source mentions applying Beer's law but does not specify the exact
+    # formula or parameters for sigma_t [S1, unofficial].
+    pass
 ```
 
+## Subtopics
+
+### [Discrete Ray-Marching with Forward Scattering Approximation](13373-discrete-ray-marching-with-forward-scattering-approximation.md)
+This method approximates the in-scattering integral for volumetric clouds by discretizing the continuous light propagation equation into a Riemann sum using fixed-step ray marching. It distinguishes itself from general in-scattering approximations by explicitly assuming that 50% of scattered light propagates in the forward direction within a small solid angle (~0.0001 steradians), ignoring the remaining 50% to reduce computational cost. It builds on [In-Scattering Integral Approximation via Riemann Sum](1585-in-scattering-integral-approximation-via-riemann-sum.md) by providing the specific physical assumptions and numerical simplifications (Maclaurin expansion) required for real-time GPU implementation.
+
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N \approx (t_1 - t_0) / dx$ [G]. Processing time increases as $dx$ decreases [S1, unofficial].
-*   **Memory Complexity:** Not given in the sources [S1, unofficial].
-*   **Strengths:** Works for any volume shape and lighting scenario [S1, unofficial].
-*   **Limitations:** Accuracy depends on $dx$; does not inherently handle phase functions [S1, unofficial].
-*   **When to use:** When a simple, general-purpose approximation is needed [S1, unofficial].
-*   **When not to use:** Not given in the sources [S1, unofficial].
+- **Time Complexity:** Linear with respect to the number of sub-segments ($N = (t_1 - t_0) / dx$). Each sub-segment requires a light ray traversal, making the complexity $O(N \cdot M)$ where $M$ is the number of steps for the light ray traversal.
+- **Memory Complexity:** Constant, $O(1)$, as it only requires storing the accumulator and current position.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Accuracy scales inversely with $dx$; smaller $dx$ yields higher accuracy but increases processing time linearly [S1, unofficial].
+- **Strengths:** Simple to implement; provides a foundational approximation for in-scattering [S1, unofficial].
+- **Limitations:** Does not account for the scattering phase function in its basic form [S1, unofficial]; computationally expensive due to the nested ray traversal for light [S1, unofficial].
+- **When to use:** When a basic approximation of in-scattering is sufficient and computational resources allow for nested ray traversals [S1, unofficial].
+- **When not to use:** When real-time performance is critical and the scattering phase function is negligible or can be approximated differently (e.g., using [Discrete Ray-Marching with Forward Scattering Approximation](13373-discrete-ray-marching-with-forward-scattering-approximation.md)) [S1, unofficial].
 
 ## Background
-The method originates from the practical need to compute in-scattering in volume rendering where analytical solutions are unavailable [S1, unofficial]. It is based on the fundamental mathematical concept of the Riemann sum, which approximates integrals by summing rectangular areas [S1, unofficial]. The specific application to volume rendering, including the use of auxiliary light rays and Beer's law, is described in "An Introduction to Volume Rendering" [S1, unofficial].
+The concept of using a Riemann sum to approximate the in-scattering integral is discussed in "An Introduction to Volume Rendering" [S1, unofficial]. The method is presented as a practical solution to the problem that the in-scattering integral has no analytical solution for general volume shapes and lighting scenarios [S1, unofficial]. The source emphasizes that while the result is an approximation, it becomes closer to the true area under the curve as the width of the rectangles ($dx$) decreases [S1, unofficial].
 
 ## Sources
 [S1] An Introduction to Volume Rendering, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/intro-volume-rendering.html, fetched 2026-10-25 (unofficial)

@@ -3,64 +3,56 @@
 Also called: Cumulus and Cumulonimbus Shape Generation
 
 ## Overview
-This method procedurally generates the irregular, multi-lobed 3D shapes characteristic of Cumulus (type 9) and Cumulonimbus (type 10) clouds, creating distinct vertical towers and puffy bases rather than simple spheres [S1, unofficial]. It differs from its parent method, [Finite Layer Cloud Shape Generation](8292-finite-layer-cloud-shape-generation.md), which uses connected ellipsoidal lobes for stratiform layers, by employing a hierarchical particle-based approach to model the turbulent, convective structures of cumuliform clouds [S1, unofficial].
+Cumulonimbus and Cumulus Shape Generation is a procedural method for generating non-spherical, multi-lobed cloud shapes for Cumulus (type 9) and Cumulonimbus (type 10) clouds, creating irregular tops and bases rather than simple spheres [S1, unofficial]. It differs from its parent method, Finite Layer Cloud Shape Generation, which is designed for layer cloud types (Cirrus, Altostratus, Nimbostratus, Stratocumulus, Stratus) using a chain of connected 3D ellipsoidal lobes [8292-finite-layer-cloud-shape-generation.md]. While the parent method ensures clouds do not degenerate into simple cylinders along the Z-axis, this method specifically addresses the vertical development and puffy, irregular structure characteristic of convective clouds.
 
 ## How it works
-**Inputs:** Cloud type identifier (9 for Cumulus, 10 for Cumulonimbus), style offset (integer), and random number generator state.
-**Outputs:** A list of lobe definitions, where each lobe is defined by its center coordinates $(cx, cy, cz)$ and semi-axes $(rx, ry, rz)$.
+**Inputs and Outputs:**
+*   **Inputs:** Cloud type ID (9 for Cumulus, 10 for Cumulonimbus), style offset (31009 for realistic, 41003 for cartoon), and a random number generator (RNG).
+*   **Outputs:** A list of 3D ellipsoidal lobes, each defined by a center position $(cx, cy, cz)$ and radii $(rx, ry, rz)$.
 
 **Data Structures:**
-*   `Lobe`: A struct or tuple containing:
-    *   `cx`, `cy`, `cz`: Float, center coordinates in local space.
-    *   `rx`, `ry`, `rz`: Float, semi-axis lengths (radii) along X, Y, Z axes.
+Each lobe is represented as a tuple or struct containing:
+*   `cx, cy, cz`: Float coordinates of the lobe center.
+*   `rx, ry, rz`: Float radii along the X, Y, and Z axes.
 
-**Algorithm Steps:**
+**Steps:**
 
-1.  **Initialize Random Number Generator (RNG):**
-    Set the seed using the formula:
+1.  **Initialize RNG:**
+    Set the random seed using the formula:
     $$ \text{seed} = \text{base\_seed} + \text{type\_id} \times 1009 + \text{style\_offset} $$
-    Typical `style_offset` values are 31009 for realistic style and 41003 for cartoon style [S1, unofficial].
+    Where `type_id` is 9 for Cumulus and 10 for Cumulonimbus. `style_offset` is 31009 for realistic style and 41003 for cartoon style [S1, unofficial].
 
-2.  **Generate Base Center:**
-    Sample $cx$ and $cy$ from a uniform distribution $U(-0.12, 0.12)$. Set $cz = 0$ as the initial reference point for the cloud base.
+2.  **Generate Center:**
+    Generate the base center coordinates $(center\_x, center\_y)$ from a uniform distribution over the interval $[-0.12, 0.12]$ [S1, unofficial].
 
 3.  **Generate Lobes based on Type:**
 
     *   **If Type 9 (Cumulus):**
         *   **Base Lobes:** Generate 3 to 6 base lobes.
-            *   $cx, cy$: Sample from $U(cx - 0.1, cx + 0.1)$ and $U(cy - 0.1, cy + 0.1)$ (approximate "around center" based on typical implementation variance, though source specifies "uniform around center" without explicit bounds, we assume small perturbation relative to the base center). *Note: The source text says "uniform around center" but does not give explicit bounds for the base lobe offset, unlike the tower lobes. However, standard implementations often use a small radius. Given the strict instruction to not guess, we note the bounds are not explicitly given in the source for the base lobe offset, but the tower lobe offsets are explicit.* [G: Assuming small perturbation, e.g., $U(-0.05, 0.05)$, is a common implementation detail for "around center" when bounds are omitted, but strictly speaking, the source does not specify. We will describe the generation qualitatively as "uniformly distributed around the base center" if bounds are missing, but for implementability, we must define it. Let's look at the tower lobe definition: "offset by radial". The base lobe definition is less precise. We will state the bounds are not given in the source for the base lobe offset, but the radii are.]
-            *   $cz$: Sample from $U(-0.42, -0.16)$.
-            *   $rx$: Sample from $U(0.27, 0.42)$.
-            *   $ry$: Sample from $U(0.23, 0.37)$.
-            *   $rz$: Sample from $U(0.14, 0.25)$.
+            *   $cx, cy$: Generated from a uniform distribution around $center\_x, center\_y$.
+            *   $cz$: Generated from uniform distribution in $[-0.42, -0.16]$.
+            *   $rx$: Generated from uniform distribution in $[0.27, 0.42]$.
+            *   $ry$: Generated from uniform distribution in $[0.23, 0.37]$.
+            *   $rz$: Generated from uniform distribution in $[0.14, 0.25]$.
         *   **Tower Lobes:** Generate 5 to 10 tower lobes.
-            *   $direction$: Sample from $U(-\pi, \pi)$.
-            *   $radial$: Sample from $U(0.06, 0.52)$.
-            *   $cx$: $cx_{base} + radial \times \cos(direction)$.
-            *   $cy$: $cy_{base} + radial \times \sin(direction)$.
-            *   $cz$: Sample from $U(-0.06, 0.54)$.
-            *   $rx$: Sample from $U(0.17, 0.34)$.
-            *   $ry$: Sample from $U(0.16, 0.32)$.
-            *   $rz$: Sample from $U(0.18, 0.36)$.
+            *   $direction$: Generated from uniform distribution in $[-\pi, \pi]$.
+            *   $radial$: Generated from uniform distribution in $[0.06, 0.52]$.
+            *   $cx, cy$: Offset from the center by $radial$ in the direction $direction$.
+            *   $cz$: Generated from uniform distribution in $[-0.06, 0.54]$.
+            *   $rx$: Generated from uniform distribution in $[0.17, 0.34]$.
+            *   $ry$: Generated from uniform distribution in $[0.16, 0.32]$.
+            *   $rz$: Generated from uniform distribution in $[0.18, 0.36]$.
 
     *   **If Type 10 (Cumulonimbus):**
-        *   Generate a variable number of lobes (implied to be more numerous/taller).
-        *   For each lobe at index $i$ out of $N$ total lobes:
-            *   $progress = i / (N - 1)$.
-            *   $cx, cy$: Spread increases with progress. The source states "spread increases with progress (0.13 + progress * 0.08)". This likely refers to the radial offset magnitude.
-                *   $direction$: Sample from $U(-\pi, \pi)$.
-                *   $radial$: Sample from $U(0.13 + progress \times 0.08, 0.13 + progress \times 0.08)$? No, "spread increases" implies a range or a deterministic spread. The source says "cx, cy spread increases with progress (0.13 + progress * 0.08)". This is ambiguous. It likely means the *maximum* radial distance or the *mean* radial distance. Let's assume the radial offset is sampled from a distribution centered at or scaled by this value. A common interpretation is $radial \sim U(0, 0.13 + progress \times 0.08)$ or similar. However, without explicit bounds, we note this ambiguity. [G: Assuming the value given is the maximum radial extent for that progress level, i.e., $radial \sim U(0, 0.13 + progress \times 0.08)$].
-                *   $cz$: Rises from -0.58 to 0.56. Formula: $cz = -0.58 + progress \times 1.14$.
-                *   $rx, ry$: Increase with progress. Formula: $rx, ry \sim U(0.24 + progress \times 0.10, 0.24 + progress \times 0.10)$? Again, "increase with progress" suggests a scaling factor. Let's assume the base radius scales by this factor. Or the range is $U(0.24, 0.24 + progress \times 0.10)$. The source says "rx, ry increase with progress (0.24 + progress * 0.10)". This looks like a deterministic value or a mean. Let's assume the radius is sampled from $U(0.24, 0.24 + progress \times 0.10)$ or similar. *Strictly, the source does not give the distribution type (uniform/normal) for the final radius, only the scaling trend.* [G: Assuming uniform distribution between a base value and the scaled value, or simply that the radius is proportional to this term. Given the previous types used uniform, we assume $rx, ry \sim U(0.24, 0.24 + progress \times 0.10)$ is a reasonable implementation guess, but the source is vague. We will state the trend.]
-                *   $rz$: Not explicitly defined for Cumulonimbus in the snippet, but implied to be part of the lobe structure.
+        *   Generate a variable number of lobes (implied by the use of index).
+        *   Calculate progress: $progress = \frac{index}{lobe\_count - 1}$.
+        *   $cx, cy$: Spread increases with progress. The base spread is $0.13 + progress \times 0.08$.
+        *   $cz$: Rises from $-0.58$ to $0.56$, calculated as $-0.58 + progress \times 1.14$.
+        *   $rx, ry$: Increase with progress, calculated as $0.24 + progress \times 0.10$.
+        *   $rz$: Not explicitly defined in the source for Cumulonimbus, but implied to follow similar scaling or default to a value consistent with the vertical growth [S1, unofficial].
 
-    *   **If Type 1, 7 (Layer Clouds - Fallback/Variant):**
-        *   Generate 3 to 10 lobes.
-        *   $radial$: Sample from $U(0.03, 0.52)$.
-        *   $theta$: Sample from $U(-\pi, \pi)$.
-        *   $cx = cx_{base} + radial \times \cos(theta)$.
-        *   $cy = cy_{base} + radial \times \sin(theta)$.
-        *   $cz$: Sample from $U(-0.20, 0.20)$.
+    *   **Other Layer Clouds (Types 1, 7):**
+        *   Although this article focuses on Cumulus/Cumulonimbus, the source notes that for other layer clouds, 3-10 lobes are generated with $radial$ from uniform $[0.03, 0.52]$, $theta$ from uniform $[-\pi, \pi]$, and $cz$ from uniform $[-0.20, 0.20]$ [S1, unofficial].
 
 **Pseudocode:**
 
@@ -70,117 +62,109 @@ This method procedurally generates the irregular, multi-lobed 3D shapes characte
 import random
 import math
 
-def generate_cumuliform_clouds(type_id, base_seed, style_offset):
+def generate_cumulus_cumulonimbus_lobs(type_id, style_offset, base_seed):
     # 1. Initialize RNG
     seed = base_seed + type_id * 1009 + style_offset
     rng = random.Random(seed)
     
+    # 2. Generate Center
+    center_x = rng.uniform(-0.12, 0.12)
+    center_y = rng.uniform(-0.12, 0.12)
+    
     lobes = []
     
-    # 2. Generate Base Center
-    cx_base = rng.uniform(-0.12, 0.12)
-    cy_base = rng.uniform(-0.12, 0.12)
-    
-    if type_id == 9: # Cumulus
-        # Base Lobes
+    if type_id == 9:  # Cumulus
+        # Base Lobes: 3-6
         num_base = rng.randint(3, 6)
         for _ in range(num_base):
-            # "uniform around center" - bounds not explicitly given in source
-            # Implementation note: Use a small perturbation, e.g., 0.05
-            cx = cx_base + rng.uniform(-0.05, 0.05)
-            cy = cy_base + rng.uniform(-0.05, 0.05)
+            cx = rng.uniform(center_x - 0.12, center_x + 0.12) # Approximation of "around center"
+            cy = rng.uniform(center_y - 0.12, center_y + 0.12)
             cz = rng.uniform(-0.42, -0.16)
             rx = rng.uniform(0.27, 0.42)
             ry = rng.uniform(0.23, 0.37)
             rz = rng.uniform(0.14, 0.25)
             lobes.append({'cx': cx, 'cy': cy, 'cz': cz, 'rx': rx, 'ry': ry, 'rz': rz})
             
-        # Tower Lobes
-        num_towers = rng.randint(5, 10)
-        for _ in range(num_towers):
+        # Tower Lobes: 5-10
+        num_tower = rng.randint(5, 10)
+        for _ in range(num_tower):
             direction = rng.uniform(-math.pi, math.pi)
             radial = rng.uniform(0.06, 0.52)
-            cx = cx_base + radial * math.cos(direction)
-            cy = cy_base + radial * math.sin(direction)
+            cx = center_x + radial * math.cos(direction)
+            cy = center_y + radial * math.sin(direction)
             cz = rng.uniform(-0.06, 0.54)
             rx = rng.uniform(0.17, 0.34)
             ry = rng.uniform(0.16, 0.32)
             rz = rng.uniform(0.18, 0.36)
             lobes.append({'cx': cx, 'cy': cy, 'cz': cz, 'rx': rx, 'ry': ry, 'rz': rz})
             
-    elif type_id == 10: # Cumulonimbus
-        # Number of lobes not explicitly specified, assume a higher count, e.g., 10-20
-        # Source implies a continuous structure from base to top
-        num_lobes = 15 # [G] Assumed count for implementation completeness
-        for i in range(num_lobes):
-            progress = i / (num_lobes - 1)
+    elif type_id == 10:  # Cumulonimbus
+        # Number of lobes not explicitly specified, assume a fixed or derived count.
+        # Using a placeholder count for implementation completeness.
+        lobe_count = 15 
+        for i in range(lobe_count):
+            progress = i / (lobe_count - 1)
             
-            # Radial spread increases with progress
-            max_radial = 0.13 + progress * 0.08
+            # Spread increases with progress
+            spread = 0.13 + progress * 0.08
             direction = rng.uniform(-math.pi, math.pi)
-            radial = rng.uniform(0, max_radial) # [G] Assumed uniform from 0 to max spread
+            radial = rng.uniform(0, spread) # Assuming radial is within the spread
             
-            cx = cx_base + radial * math.cos(direction)
-            cy = cy_base + radial * math.sin(direction)
+            cx = center_x + radial * math.cos(direction)
+            cy = center_y + radial * math.sin(direction)
             
             # CZ rises from -0.58 to 0.56
             cz = -0.58 + progress * 1.14
             
             # RX, RY increase with progress
-            # Source: "rx, ry increase with progress (0.24 + progress * 0.10)"
-            # Assuming this is the upper bound or mean. Let's assume uniform from 0.24 to scaled value
-            max_radius = 0.24 + progress * 0.10
-            rx = rng.uniform(0.24, max_radius)
-            ry = rng.uniform(0.24, max_radius)
+            rx = 0.24 + progress * 0.10
+            ry = 0.24 + progress * 0.10
             
-            # RZ not specified for Cumulonimbus in source
-            rz = rng.uniform(0.2, 0.4) # [G] Assumed similar to Cumulus tower for stability
+            # RZ not specified, using a default or derived value [G]
+            rz = 0.2 + progress * 0.2 
             
-            lobes.append({'cx': cx, 'cy': cy, 'cz': cz, 'rx': rx, 'ry': ry, 'rz': rz})
-            
-    elif type_id in [1, 7]: # Layer Clouds (Fallback)
-        num_lobes = rng.randint(3, 10)
-        for _ in range(num_lobes):
-            radial = rng.uniform(0.03, 0.52)
-            theta = rng.uniform(-math.pi, math.pi)
-            cx = cx_base + radial * math.cos(theta)
-            cy = cy_base + radial * math.sin(theta)
-            cz = rng.uniform(-0.20, 0.20)
-            # Radii not specified for layer fallback in this specific snippet, 
-            # but parent method uses ellipsoids. 
-            # [G] Using default ellipsoid sizes from parent context or similar to base lobes
-            rx = rng.uniform(0.2, 0.4)
-            ry = rng.uniform(0.2, 0.4)
-            rz = rng.uniform(0.1, 0.3)
             lobes.append({'cx': cx, 'cy': cy, 'cz': cz, 'rx': rx, 'ry': ry, 'rz': rz})
             
     return lobes
 ```
 
+**Parameters:**
+*   `style_offset`: 31009 for realistic style, 41003 for cartoon style [S1, unofficial].
+*   `type_id`: 9 for Cumulus, 10 for Cumulonimbus [S1, unofficial].
+
 **Edge Cases and Pitfalls:**
-*   **Precision:** Floating point errors in `progress` calculation for Cumulonimbus can cause the last lobe to have `progress=1.0` exactly, potentially causing division by zero if used in denominators (not applicable here, but good practice).
-*   **Boundary Conditions:** The `cx, cy` offsets for Cumulonimbus lobes can extend beyond the initial cloud bounds if `max_radial` is large. Ensure the rendering volume is large enough to contain all lobes.
-*   **Degenerate Input:** If `num_lobes` is 1 for Cumulonimbus, `progress` is 0/0. Handle `num_lobes < 2` by setting `progress = 0` or generating a single central lobe.
+*   **Division by Zero:** In Cumulonimbus generation, if `lobe_count` is 1, `progress` calculation involves division by zero. Ensure `lobe_count > 1` [G].
+*   **Precision:** The source uses floating-point uniform distributions. Ensure consistent random number generation across platforms if deterministic results are required [S1, unofficial].
+*   **Boundary Conditions:** The coordinates and radii are normalized. Ensure the rendering pipeline handles these normalized coordinates correctly [S1, unofficial].
 
 ## Subtopics
 
 ### [Hierarchical Implicit Blob Cloud Model](13310-hierarchical-implicit-blob-cloud-model.md)
 The Hierarchical Implicit Blob Cloud Model is a procedural method for generating the irregular, multi-lobed shapes of Cumulus and Cumulonimbus clouds by recursively layering quasi-spherical particles. It solves the problem of creating realistic cloud tops and bases with continuous furrows, distinguishing itself from explicit tessellation approaches (like [NND96]) by using a particle system to extract isosurfaces and place subsequent levels.
 
+### [3D Gaussian Cloud Generation](13374-3d-gaussian-cloud-generation.md)
+An algorithm for generating Cumulus (type 9) and Cumulonimbus (type 10) clouds using a sparse set of 3D Gaussian-distributed pseudo-spheroid primitives. It differs from particle-based systems by requiring significantly fewer primitives (typically 35) to achieve realistic results, and from hierarchical implicit blobs by using explicit geometric primitives with pre-processing filters to optimize rendering performance.
+
 ### Superellipsoid Cloud Profiling
-Superellipsoid Cloud Profiling is a vertical profile function that sculpts realistic 'water balloon on a table' puffy clouds using a superellipsoid shape [S2, unofficial]. It is driven by eccentricity, curvature exponent, and center distance, where eccentricity determines the widest point of the cloud and is decoded from the cell ID hash [S2, unofficial]. This method is used inside `getCloud3DProfile` and `getCloud3DSDF` to create voluminous, puffy vertical structures [S2, unofficial].
+A vertical profile function that sculpts realistic 'water balloon on a table' puffy clouds using a superellipsoid shape [S2, unofficial]. It sculpts voluminous, puffy vertical structures inside `getCloud3DProfile` / `getCloud3DSDF` using a superellipsoid profile driven by eccentricity, curvature exponent, and center distance [S2, unofficial]. Eccentricity determines the widest point of the cloud, decoded from the cell ID hash [S2, unofficial]. Curvature exponent is a parameter driving the superellipsoid profile shape [S2, unofficial].
+
+### L-System Cloud Generation
+Uses L-systems (Lindenmayer systems) with grammar rules to generate cloud shapes [S3]. It differs from Kang et al. [8] by including a proportional random factor in sphere radius and distance between primitives in each recursive call [S3]. It uses volumetric rendering and density function from Equation (2) [S3]. The host-side C++ interpreter runs before GLSL rendering, acting as a tiny interpreter for recursive generation of spheres based on an axiom and rules, generating a string of symbols [S3]. A lexical analyser processes the generated string, inserting a sphere with random radius and length for each 'X' or 'Y' item, and applying rotation angles given by '+' and '&' operators [S3]. The BNF Grammar for generation is $X \rightarrow X+YF++YF-FX-XFXF-YF+/$, where '+' means turn left with angle using a rotation matrix, and '&' means pitch down with angle using a different rotation matrix [S3]. Example parameters: Iterations = 7, Angle = 10° produces thin/strange spiral shapes; Angle [50°, 100°] with same grammar produces dense cumulus formations [S3]. The string produced by Equation (18) generates 128 spheres, ready to transfer to OpenGL shader for real-time animation [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of lobes generated. The RNG initialization and lobe sampling are $O(N)$ where $N$ is the number of lobes.
-*   **Memory Complexity:** $O(N)$ to store the lobe definitions.
-*   **Strengths:** Produces highly varied and natural-looking cumuliform shapes without manual tuning. The use of distinct base and tower lobes for Cumulus allows for fine control over the cloud's vertical structure.
-*   **Limitations:** The method relies on random number generation, which can lead to inconsistent results across different platforms if the RNG implementation differs. The source does not specify the exact number of lobes for Cumulonimbus, requiring implementation guesses.
-*   **When to Use:** When generating realistic or stylized 3D cloud volumes for Cumulus and Cumulonimbus types.
-*   **When Not to Use:** When deterministic, identical cloud shapes are required across all instances without seeding, or when performance is critical and the overhead of generating many lobes is prohibitive.
+*   **Time Complexity:** Linear with respect to the number of lobes generated. The initialization and parameter generation are constant time operations per lobe.
+*   **Memory Complexity:** Linear with respect to the number of lobes, as each lobe is stored as a small struct.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** The method scales well with the number of lobes, but the visual complexity increases linearly.
+*   **Strengths:** Simple to implement, provides a good base for convective cloud shapes, supports different styles (realistic/cartoon).
+*   **Limitations:** Does not handle internal density variations or lighting effects; relies on downstream rendering techniques for final appearance.
+*   **When to use:** When generating procedural cloud volumes for Cumulus and Cumulonimbus types where irregular, multi-lobed shapes are required.
+*   **When not to use:** For layer clouds (use Finite Layer Cloud Shape Generation) or when high-fidelity density and lighting are required without additional post-processing.
 
 ## Background
-This method originates from the procedural cloud generation techniques described in the "Noise-Cloud" project [S1, unofficial]. It is designed to complement the finite layer cloud generation methods by providing a distinct shape model for convective clouds. The approach of using multiple ellipsoidal lobes with specific distributions for base and tower structures is a common technique in procedural cloud modeling to simulate the turbulent nature of cumulus clouds.
+The method originates from the "Noise-Cloud" project, an unofficial repository [S1, unofficial]. It is part of a broader effort to create procedural cloud models for real-time rendering. The specific parameters and generation logic for Cumulus and Cumulonimbus clouds are detailed in the source code and documentation of this project [S1, unofficial].
 
 ## Sources
 [S1] mingtu149411/Noise-Cloud, https://github.com/mingtu149411/Noise-Cloud, fetched 2026-10-27 (unofficial)
 [S2] Optimize cloud rendering with eroded Voronoi weather maps and stable linear raymarching, https://github.com/ricecake/boidsish/pull/679, fetched 2026-10-28 (unofficial)
+[S3] Efficient Algorithms for Real-Time GPU Volumetric Cloud Rendering with Enhanced Geometry, https://doi.org/10.3390/sym10040125, fetched 2026-10-26

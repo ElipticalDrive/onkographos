@@ -1,0 +1,134 @@
+# SDF Transformations
+
+Also called: SDF Composition, SDF Modifiers
+
+## Overview
+SDF Transformations are geometric operations applied to the input position $\mathbf{p}$ before evaluating a Signed Distance Field (SDF) primitive, enabling complex procedural geometry through composition. Unlike static primitives, these transformations modify the spatial domain to create effects like repetition, deformation, and dynamic animation. They are distinguished from sibling [SDF Primitive Definitions](1578-sdf-primitive-definitions.md) by operating on the coordinate space rather than defining the base shape, and from [Distance Field Representations and Sampling](8725-distance-field-representations-and-sampling.md) by being analytical function compositions rather than data structures.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D position vector $\mathbf{p}$ (typically in world or local space) and parameters specific to the transformation (e.g., spacing, twist angle, time $t$).
+*   **Output:** A transformed position vector $\mathbf{p}'$ which is then passed to the base SDF function $d(\mathbf{p}')$.
+
+**Data Structures:**
+No persistent data structures are required for standard analytical transformations. State is maintained only if dynamic parameters (like time) are involved, typically stored as a uniform variable or shader input.
+
+**Steps:**
+1.  **Select Transformation:** Identify the required geometric operation (Repetition, Deformation, or Dynamic).
+2.  **Transform Position:** Apply the mathematical mapping to the input position $\mathbf{p}$ to obtain $\mathbf{p}'$.
+3.  **Evaluate SDF:** Compute the distance $d = d_{\text{primitive}}(\mathbf{p}')$.
+4.  **Return:** Return $d$.
+
+**Formulas:**
+
+1.  **Repetition (Tiling):**
+    Creates a periodic instance of the primitive.
+    $$ \mathbf{p}' = \text{mod}(\mathbf{p}, \mathbf{s}) - \frac{\mathbf{s}}{2} $$
+    Where $\mathbf{s}$ is the spacing vector (dimensions of the tile). The `mod` operation returns the remainder of the division. The subtraction centers the tile around the origin [S1, unofficial].
+
+2.  **Deformation (Twist):**
+    Rotates the position around an axis based on its height/position.
+    $$ \mathbf{p}' = \text{twist}(\mathbf{p}) $$
+    Where $\text{twist}(\mathbf{p})$ applies a rotation matrix $R(\theta)$ where $\theta$ is a function of the position (e.g., $\theta = k \cdot y$) [S1, unofficial].
+
+3.  **Dynamic Operators (Holistic Scene Dynamics):**
+    Applies time-varying affine transformations and material animations using a Holistic Scene Dynamics Function (HSD).
+    $$ f_{\text{HSD}}: D \times t \rightarrow V $$
+    Where:
+    *   $D$ is the object input data (e.g., world space position, grid cell vector).
+    *   $t$ is the current simulation time.
+    *   $V$ is the dynamics variation (transformation matrix, material attributes) [S2].
+
+    **Pipeline Steps for Dynamic Operators:**
+    1.  Calculate the grid cell vector independently from the Instancing operator [S2].
+    2.  Apply an additional transformation to the position on the ray from the camera to the SDF component at each ray marching iteration to preserve the correct form of the SDF [S2].
+    3.  Use the HSD function to generate the transformation matrix based on $D$ and $t$ [S2].
+
+**Parameters:**
+*   **Spacing ($\mathbf{s}$):** Vector defining the size of the repeating unit. Typical values depend on scene scale.
+*   **Twist Factor ($k$):** Scalar controlling the rate of rotation per unit length.
+*   **Time ($t$):** Float representing simulation time for dynamic operators.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point precision errors in `mod` operations can cause artifacts at tile boundaries. Using `fract` or careful modulo implementation is recommended [S1, unofficial].
+*   **Lipschitz Continuity:** Transformations must preserve the Lipschitz constant of 1 to ensure valid sphere tracing steps. Non-uniform scaling or aggressive twisting can violate this, causing the ray marcher to overshoot the surface [G, S14, unofficial].
+*   **Dynamic Instancing:** In Dynamic Operators, failing to calculate the grid cell vector independently from the Instancing operator leads to incorrect object placement and form distortion [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def transform_position(p, transform_type, params):
+    """
+    Applies SDF transformations to position p.
+    
+    Args:
+        p: vec3, input position
+        transform_type: str, 'repetition', 'twist', 'dynamic'
+        params: dict, transformation parameters
+        
+    Returns:
+        vec3, transformed position p_prime
+    """
+    if transform_type == 'repetition':
+        spacing = params['spacing']
+        # p_prime = mod(p, spacing) - spacing / 2
+        p_prime = p - spacing * floor(p / spacing) - spacing / 2
+        return p_prime
+        
+    elif transform_type == 'twist':
+        angle_factor = params['angle_factor']
+        # Assuming twist around Y axis based on Y coordinate
+        y = p.y
+        theta = y * angle_factor
+        cos_theta = cos(theta)
+        sin_theta = sin(theta)
+        # Rotate X and Z
+        x_new = p.x * cos_theta - p.z * sin_theta
+        z_new = p.x * sin_theta + p.z * cos_theta
+        p_prime = vec3(x_new, p.y, z_new)
+        return p_prime
+        
+    elif transform_type == 'dynamic':
+        # Dynamic operators require external state (time, object ID)
+        # This is a placeholder for the HSD function call
+        # HSD calculates transformation matrix based on object data and time
+        object_data = params['object_data'] # e.g., grid cell vector
+        time = params['time']
+        
+        # Calculate grid cell vector independently (as per Dynamic Operators spec)
+        grid_cell = calculate_grid_cell_independently(p)
+        
+        # Get transformation matrix from HSD
+        # f_HSD(D, t) -> V (variation matrix)
+        transform_matrix = holistic_scene_dynamics(object_data, time)
+        
+        # Apply transformation to position
+        # Note: In ray marching, this is applied to the ray position
+        p_prime = transform_matrix * p
+        return p_prime
+        
+    else:
+        return p
+```
+
+## Subtopics
+
+### Dynamic Operators
+An extension to the original Global operators collection that applies unique affine transformations and material animations to 3D objects by utilizing the Holistic Scene Dynamics Function. Unlike original Global operators which used the Instancing operator's output (grid cell vector) as input, Dynamic Operators calculate the grid cell vector independently and transform the ray before the Instancing operator. They require an additional processing pass at the beginning of the holistic operator's application pipeline and apply a transformation to the position on the ray from the camera to an SDF component at each iteration of the ray marching algorithm to preserve the correct form of the SDF [S2].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per ray step for analytical transformations. Dynamic operators add overhead for HSD function evaluation (e.g., noise generation) per step.
+*   **Memory Complexity:** $O(1)$ for standard transformations. Dynamic operators may require storage for time and object state.
+*   **Strengths:** Extremely low memory footprint; procedural geometry is expressed as code, not data structures. Volumetrics are naturally integrated as ray marching steps through the transformed space [S1, unofficial].
+*   **Limitations:** Transformations must preserve Lipschitz continuity for stable sphere tracing. Complex deformations can be computationally expensive if the HSD function is heavy (e.g., high-frequency noise) [S2].
+*   **When to use:** Ideal for procedural landscapes, tiling patterns, and animated scenes where memory is constrained or geometry is too complex for meshes.
+*   **When not to use:** When exact analytical distance is not required or when transformations break the Lipschitz condition, leading to ray marching artifacts.
+
+## Background
+SDF transformations originated from the procedural rendering community, popularized by Inigo Quilez's tutorials on ray marching and SDFs [S1, unofficial]. The concept of composing SDFs via position transformation allows for complex scenes without mesh processing. Dynamic Operators were introduced as part of the Holistic UOI rendering pipeline to enable real-time visualization of dynamic unlimited object instancing, utilizing a Holistic Scene Dynamics Function (HSD) parameterized by time and object data [S2].
+
+## Sources
+[S1] ray marching vs ray tracing, https://tutorials.tektite.studio/ray-marching/ray-marching-vs-ray-tracing/, fetched 2026-10-27 (unofficial)
+[S2] Real-time visualization of Dynamic Unlimited Objects Instancing, https://doi.org/10.24132/csrn.2018.2802.4, fetched 2026-10-26

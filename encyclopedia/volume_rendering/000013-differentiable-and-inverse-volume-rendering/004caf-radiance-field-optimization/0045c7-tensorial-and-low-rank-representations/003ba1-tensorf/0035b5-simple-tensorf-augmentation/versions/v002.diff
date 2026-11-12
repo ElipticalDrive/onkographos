@@ -1,0 +1,350 @@
+--- v001.md
++++ v002.md
+@@ -4,14 +4,13 @@
+ 
+ ## Overview
+-Simple-TensoRF Augmentation is a regularization method for [TensoRF](3026-tensorf.md) designed to mitigate overfitting and geometric distortions (such as floaters and incorrect object placement) when training with sparse input views [S2]. It operates by training a secondary, lower-capacity "augmented" model that produces reliable depth priors, which are then used to supervise the main TensoRF model [S2]. Unlike vanilla TensoRF or simple depth-supervised variants (DS-TensoRF), this approach explicitly constrains the model capacity to force simpler solutions, significantly improving depth estimation accuracy and view-synthesis quality in few-shot scenarios [S2].
++Simple-TensoRF Augmentation is a regularization method for [TensoRF](3026-tensorf.md) designed to mitigate overfitting and geometric distortions (such as floaters and incorrect object placement) when training with sparse input views [S2]. The method consists of two coupled models: a **Main Model** (standard TensoRF) and an **Augmented Model** (Simple-TensoRF) [S2]. The Augmented Model is trained with reduced capacity to prevent it from learning complex, noisy artifacts [S2]. Its predicted depth is then used to regularize the Main Model [S2]. Unlike vanilla TensoRF or simple depth-supervised variants (DS-TensoRF), this approach explicitly constrains the model capacity to force simpler solutions, significantly improving depth estimation accuracy and view-synthesis quality in few-shot scenarios [S2].
+ 
+ ## How it works
+-The method consists of two coupled models: a **Main Model** (standard TensoRF) and an **Augmented Model** (Simple-TensoRF). The Augmented Model is trained with reduced capacity to prevent it from learning complex, noisy artifacts. Its predicted depth is then used to regularize the Main Model.
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Sparse set of input images (e.g., 3 views) and their camera poses.
++*   **Inputs:** Sparse set of input images (e.g., 3 views) and their camera poses [S2].
+ *   **Outputs:**
+-    *   Main Model: High-quality rendered images and accurate depth maps.
+-    *   Augmented Model: Regularized depth maps used for supervision.
++    *   Main Model: High-quality rendered images and accurate depth maps [S2].
++    *   Augmented Model: Regularized depth maps used for supervision [S2].
+ 
+ ### Data Structures
+@@ -19,77 +18,99 @@
+ 
+ **Main Model Parameters:**
+-*   Density Tensor Components ($R_\sigma$): Number of rank-1 components for density.
+-*   Color Tensor Components ($R_c$): Number of rank-1 components for color features.
+-*   Grid Resolution ($N_{vox}$): Resolution of the voxel grid for tensor decomposition.
+-*   Bounding Box ($b$): Defined as $b = (b_{x1}, b_{x2}, b_{y1}, b_{y2}, b_{z1}, b_{z2})$.
+-*   MLP Depth ($D$): Depth of the small MLP for color decoding.
+-*   View-dependent layers ($l_v$): Number of view-dependent layers.
++*   Density Tensor Components ($R_\sigma$): Number of rank-1 components for density [S2].
++*   Color Tensor Components ($R_c$): Number of rank-1 components for color features [S2].
++*   Grid Resolution ($N_{vox}$): Resolution of the voxel grid for tensor decomposition [S2].
++*   Bounding Box ($b$): Defined as $b = (b_{x1}, b_{x2}, b_{y1}, b_{y2}, b_{z1}, b_{z2})$ [S2].
++*   MLP Depth ($D$): Depth of the small MLP for color decoding [S2].
++*   View-dependent layers ($l_v$): Number of view-dependent layers [S2].
+ 
+ **Augmented Model Parameters:**
+-*   Density Components ($R_{\sigma s}$): Reduced number of components.
+-*   Grid Resolution ($N_{vox}^s$): Reduced voxel grid resolution.
+-*   Bounding Box Z-min ($b_{zs1}$): Increased (shifted inward) Z-min to exclude near-camera artifacts.
+-*   Mass Concentration Intervals ($N_{mc}$): Number of intervals for entropy loss.
+-*   Depth Supervision Parameters ($k, \epsilon_\tau$): Used to filter reliable depth estimates (details in [S2] Sec 4.1.4, not fully specified in notes, but $k=5, \epsilon_\tau=0.1$ are given).
++*   Density Components ($R_{\sigma s}$): Reduced number of components [S2].
++*   Grid Resolution ($N_{vox}^s$): Reduced voxel grid resolution [S2].
++*   Bounding Box Z-min ($b_{zs1}$): Increased (shifted inward) Z-min to exclude near-camera artifacts [S2].
++*   Mass Concentration Intervals ($N_{mc}$): Number of intervals for entropy loss [S2].
++*   Depth Supervision Parameters ($k, \epsilon_\tau$): Used to filter reliable depth estimates [S2].
+ 
+ ### Numbered Steps
+-
+-1.  **Initialize Models:**
+-    *   Initialize Main TensoRF with full capacity parameters.
+-    *   Initialize Augmented TensoRF with reduced capacity parameters.
+-
+-2.  **Preprocessing:**
+-    *   Downsample training and test datasets by a factor of 4 [S1, unofficial].
+-
+-3.  **Augmented Model Training (First Phase):**
+-    *   Train the Augmented Model for a subset of iterations (e.g., first 5,000 iterations) or concurrently, depending on implementation. The sources indicate $L_{aug}$ is enabled after 5k iterations [S2].
+-    *   Apply the **Mass Concentration Loss** ($L_{mc}$) to encourage hard object surfaces and reduce cloudy volumes [S2].
+-    *   The loss is calculated by grouping ray samples into $N_{mc}$ intervals and minimizing the entropy of the mass within each interval:
+-        $$ L_{mc} = \sum_{j=1}^{N_{mc}} H \left[ \frac{w_i}{N/N_{mc}} \right]_{i=(j-1)(N/N_{mc})+1}^{j(N/N_{mc})} $$
+-        Where $H(w_1, ..., w_n) = \sum_{i=1}^n (-w_i \log w_i)$ is the entropy operator, $N$ is the number of 3D points $p_i$ along a ray, and $w_i$ is the weight corresponding to $p_i$ [S2].
+-
+-4.  **Depth Reliability Filtering:**
+-    *   Compute depth estimates from the Augmented Model.
+-    *   Filter these depths to identify "reliable" estimates. The method uses a consistency check with the closest training view to determine reliability [S2]. Regions visible in only one training view may lack reliable supervision, leading to persistent transparent floaters [S2].
+-
+-5.  **Main Model Training (Joint Phase):**
+-    *   Train the Main Model using the standard photometric loss ($L_m$) and the depth supervision loss ($L_{aug}$) derived from the Augmented Model's reliable depth estimates [S2].
+-    *   Enable the augmentation loss $L_{aug}$ after 5,000 iterations [S2].
+-    *   The total loss for the Main Model includes:
+-        $$ L_{total} = \lambda_m L_m + \lambda_{aug} L_{aug} + \lambda_{sd} L_{sd} + \lambda_{mc} L_{mc} + \lambda_{cfc} L_{cfc} $$
+-        Where $L_{sd}$ is sparse depth loss (if external depth is available), and $L_{cfc}$ is a consistency loss [S2].
+-
+-6.  **Optimization:**
+-    *   Use the Adam Optimizer.
+-    *   Train for a total of 25,000 iterations on a single GPU [S2].
++1.  **Initialize Models:** Initialize Main TensoRF with full capacity parameters and Augmented TensoRF with reduced capacity parameters [S2].
++2.  **Preprocessing:** Downsample training and test datasets by a factor of 4 [S1, unofficial].
++3.  **Augmented Model Training:** Train the Augmented Model concurrently with the Main Model. Apply the **Mass Concentration Loss** ($L_{mc}$) to encourage hard object surfaces and reduce cloudy volumes [S2]. The loss is calculated by grouping ray samples into $N_{mc}$ intervals and minimizing the entropy of the mass within each interval [S2].
++4.  **Depth Reliability Filtering:** Compute depth estimates from the Augmented Model. Filter these depths to identify "reliable" estimates by checking consistency with the closest training view [S2]. Regions visible in only one training view may lack reliable supervision, leading to persistent transparent floaters [S2].
++5.  **Main Model Training:** Train the Main Model using the standard photometric loss ($L_m$) and the depth supervision loss ($L_{aug}$) derived from the Augmented Model's reliable depth estimates [S2]. Enable the augmentation loss $L_{aug}$ after 5,000 iterations [S2]. The total loss for the Main Model includes photometric, depth supervision, sparse depth, mass concentration, and consistency terms [S2].
++6.  **Optimization:** Use the Adam Optimizer. Train for a total of 25,000 iterations on a single GPU [S2].
+ 
+ ### Pseudocode
+-
+ ```python
++import math
++
++class TensoRFModel:
++    """Simplified representation of the TensoRF radiance field."""
++    def __init__(self, R_sigma, R_color, N_vox, b, D, l_v):
++        self.R_sigma = R_sigma
++        self.R_color = R_color
++        self.N_vox = N_vox
++        self.b = b
++        self.D = D
++        self.l_v = l_v
++    def forward(self, rays):
++        # Returns density, color, depth, and weights for each ray.
++        # Implementation details of tensor factorization are in [TensoRF](3026-tensorf.md).
++        return self._query(rays)
++
++class Optimizer:
++    def __init__(self, params, lr):
++        self.params = params
++        self.lr = lr
++    def zero_grad(self):
++        pass # Framework handles gradient clearing
++    def step(self):
++        pass # Framework handles gradient update
++    def update_lr(self, new_lr):
++        self.lr = new_lr
++
++def downsample_data(data, factor):
++    # Standard downsampling by taking every `factor`-th pixel/voxel
++    return data[::factor]
++
++def compute_photometric_loss(predicted_color, target_color):
++    # Mean squared error between predicted and target RGB values [G]
++    return math.mean((predicted_color - target_color) ** 2)
++
++def compute_depth_supervision_loss(predicted_depth, reliable_depth):
++    # Mean squared error between predicted depth and reliable depth estimates [G]
++    return math.mean((predicted_depth - reliable_depth) ** 2)
++
++def check_depth_consistency(depth, rays, k, epsilon_tau):
++    # Filters depth based on consistency with the closest training view [S2]
++    # Returns a mask of valid depths where consistency check passes
++    # Implementation details are in [S2] Sec 4.1.4
++    return depth # Returns depth where valid, NaN otherwise
++
++def adjust_learning_rate(optimizer, iteration, initial_lr, final_lr, total_iterations):
++    # Linear decay from initial_lr to final_lr over total_iterations [G]
++    progress = iteration / total_iterations
++    new_lr = initial_lr + (final_lr - initial_lr) * progress
++    optimizer.update_lr(new_lr)
++
++def sample_rays(images, poses):
++    # Standard ray generation from camera poses and image grid
++    return type('RayBatch', (), {'target_color': None, 'target_depth': None, 'has_target_depth': False})()
++
+ def train_simple_tensorf(input_images, camera_poses, num_iterations=25000):
+     # 1. Initialize Main Model (Full Capacity)
+-    main_model = TensoRF(
+-        R_sigma=24,
+-        R_color=72,
+-        N_vox=640**3,
+-        b=(-1.5, 1.5, -1.67, 1.67, -1.0, 1.0),
+-        D=27,
+-        l_v=0
++    main_model = TensoRFModel(
++        R_sigma=24, R_color=72, N_vox=640**3,
++        b=(-1.5, 1.5, -1.67, 1.67, -1.0, 1.0), D=27, l_v=0
+     )
+-    
+     # 2. Initialize Augmented Model (Reduced Capacity)
+-    aug_model = TensoRF(
+-        R_sigma=12,       # Reduced from 24
+-        R_color=72,       # Same as main
+-        N_vox=160**3,     # Reduced from 640^3
+-        b=(-1.5, 1.5, -1.67, 1.67, -0.5, 1.0), # b_z1 increased to -0.5
+-        D=27,
+-        l_v=0
++    aug_model = TensoRFModel(
++        R_sigma=12, R_color=72, N_vox=160**3,
++        b=(-1.5, 1.5, -1.67, 1.67, -0.5, 1.0), D=27, l_v=0
+     )
+-    
+-    # Optimizers
+-    opt_main = Adam(main_model.parameters(), lr=2e-2) # Tensor params
+-    opt_aug = Adam(aug_model.parameters(), lr=2e-2)
+-    
++
++    # Optimizers (Tensor params LR=2e-2, MLP params LR=1e-3 initially [S2])
++    opt_main = Optimizer(main_model_params, lr=2e-2)
++    opt_aug = Optimizer(aug_model_params, lr=2e-2)
++
+     # Hyperparameters
+     N_mc = 5
+@@ -101,67 +122,60 @@
+     lambda_mc = 0.01
+     lambda_cfc = 0.0
+-    
++
+     # Downsample data by factor of 4 [S1, unofficial]
+-    input_images = downsample(input_images, factor=4)
+-    camera_poses = downsample(camera_poses, factor=4)
++    input_images = downsample_data(input_images, factor=4)
++    camera_poses = downsample_data(camera_poses, factor=4)
+ 
+     for iteration in range(1, num_iterations + 1):
+         # Sample rays from input images
+         rays = sample_rays(input_images, camera_poses)
+-        
++
+         # --- Augmented Model Forward Pass ---
+-        # Render density and color for augmented model
+         aug_density, aug_color, aug_depth, weights = aug_model.forward(rays)
+-        
+-        # Calculate Photometric Loss for Augmented Model
+-        L_m_aug = photometric_loss(aug_color, rays.target_color)
+-        
+-        # Calculate Mass Concentration Loss (L_mc)
+-        # Group samples into N_mc intervals and minimize entropy of mass
++
++        # Photometric Loss for Augmented Model
++        L_m_aug = compute_photometric_loss(aug_color, rays.target_color)
++
++        # Mass Concentration Loss (L_mc)
+         L_mc = compute_mass_concentration_loss(aug_density, weights, N_mc)
+-        
+-        # Total Loss for Augmented Model (used to update aug_model)
+-        # Note: Sources imply aug_model is trained to produce reliable depth.
+-        # The specific loss weighting for the aug model itself isn't fully detailed,
+-        # but L_mc is applied to it.
++
++        # Total Loss for Augmented Model
+         loss_aug = L_m_aug + lambda_mc * L_mc
+-        
++
++        # Update Augmented Model
++        opt_aug.zero_grad()
++        loss_aug.backward()
++        opt_aug.step()
++
+         if iteration > 5000:
+-            # Enable augmentation supervision for Main Model
+             # Filter reliable depths from Augmented Model
+-            reliable_depth = filter_reliable_depth(aug_depth, rays, k, epsilon_tau)
+-            
++            reliable_depth = check_depth_consistency(aug_depth, rays, k, epsilon_tau)
++
+             # --- Main Model Forward Pass ---
+             main_density, main_color, main_depth, main_weights = main_model.forward(rays)
+-            
++
+             # Photometric Loss for Main Model
+-            L_m_main = photometric_loss(main_color, rays.target_color)
+-            
++            L_m_main = compute_photometric_loss(main_color, rays.target_color)
++
+             # Depth Supervision Loss using Augmented Model's reliable depth
+-            # L_aug penalizes deviation from reliable depth estimates
+-            L_aug = depth_supervision_loss(main_depth, reliable_depth)
+-            
++            L_aug = compute_depth_supervision_loss(main_depth, reliable_depth)
++
+             # Sparse Depth Loss (if external depth available)
+-            L_sd = sparse_depth_loss(main_depth, rays.target_depth) if rays.has_target_depth else 0
+-            
++            L_sd = compute_depth_supervision_loss(main_depth, rays.target_depth) if rays.has_target_depth else 0.0
++
+             # Total Loss for Main Model
+-            loss_main = (lambda_m * L_m_main + 
+-                         lambda_aug * L_aug + 
+-                         lambda_sd * L_sd + 
+-                         lambda_cfc * 0) # lambda_cfc is 0
+-            
++            loss_main = (lambda_m * L_m_main +
++                         lambda_aug * L_aug +
++                         lambda_sd * L_sd +
++                         lambda_cfc * 0.0)
++
+             # Update Main Model
+             opt_main.zero_grad()
+             loss_main.backward()
+             opt_main.step()
+-            
+-        # Update Augmented Model
+-        opt_aug.zero_grad()
+-        loss_aug.backward()
+-        opt_aug.step()
+-        
++
+         # Learning Rate Decay
+-        # Decay to 2e-3 for tensor, 1e-4 for MLP parameters (schedule not fully specified, assume linear or step decay)
+-        adjust_learning_rate(opt_main, opt_aug, iteration)
++        adjust_learning_rate(opt_main, iteration, 2e-2, 2e-3, num_iterations)
++        adjust_learning_rate(opt_aug, iteration, 1e-3, 1e-4, num_iterations)
+ 
+ def compute_mass_concentration_loss(density, weights, N_mc):
+@@ -169,45 +183,29 @@
+     Computes the mass concentration loss.
+     Groups N samples along a ray into N_mc intervals.
+-    Minimizes entropy of the normalized mass in each interval.
++    Minimizes entropy of the normalized mass in each interval [S2].
+     """
+-    # N is number of 3D points p_i along a ray
+     N = len(weights)
+     interval_size = N // N_mc
+-    
+-    total_entropy = 0
+-    
++    total_entropy = 0.0
++
+     for j in range(1, N_mc + 1):
+-        start_idx = (j - 1) * interval_size + 1
++        start_idx = (j - 1) * interval_size
+         end_idx = j * interval_size
+-        
++
+         # Get weights in this interval
+         interval_weights = weights[start_idx:end_idx]
+-        
++
+         # Normalize weights by the fraction of total samples in interval
+-        # The formula uses w_i / (N / N_mc)
+-        normalized_weights = interval_weights / (N / N_mc)
+-        
++        normalized_weights = [w / (N / N_mc) for w in interval_weights]
++
+         # Compute Entropy H(w) = sum(-w * log(w))
+-        # Handle log(0) by masking or adding epsilon
+-        entropy = 0
++        interval_entropy = 0.0
+         for w in normalized_weights:
+             if w > 0:
+-                entropy -= w * math.log(w)
+-        
+-        total_entropy += entropy
+-        
++                interval_entropy -= w * math.log(w)
++
++        total_entropy += interval_entropy
++
+     return total_entropy
+-
+-def filter_reliable_depth(depth, rays, k, epsilon_tau):
+-    """
+-    Filters depth estimates based on consistency with closest training view.
+-    Details of the consistency check are in [S2] Sec 4.1.4.
+-    Returns depth where reliable, NaN or large value where unreliable.
+-    """
+-    # Placeholder for the specific consistency logic described in [S2]
+-    # Typically involves checking if the depth is consistent with the 
+-    # projection of the closest training view's geometry.
+-    reliable_mask = check_consistency(depth, rays, k, epsilon_tau)
+-    return depth * reliable_mask
+ ```
+ 
+@@ -237,5 +235,5 @@
+ *   **Time Complexity:** Training time is approximately double that of vanilla TensoRF due to the parallel training of the augmented model [S2].
+ *   **Memory Complexity:** The augmented model uses a smaller grid ($160^3$ vs $640^3$) and fewer components ($12$ vs $24$), but the total memory usage is higher than a single TensoRF model due to the presence of two models [S2].
+-*   **Performance:**
++*   **Measured Performance:**
+     *   On NeRF-LLFF (3 views): LPIPS 0.2461, SSIM 0.6749, PSNR 20.22, Depth MAE 0.17, Depth SROCC 0.83 [S2].
+     *   On RealEstate-10K (3 views): LPIPS 0.0706, SSIM 0.8920, PSNR 32.70, Depth MAE 0.22, Depth SROCC 0.80 [S2].

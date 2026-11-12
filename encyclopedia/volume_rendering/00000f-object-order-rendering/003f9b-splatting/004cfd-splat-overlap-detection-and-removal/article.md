@@ -1,0 +1,138 @@
+# Splat Overlap Detection and Removal
+
+Also called: Splat Overlap Detection, Splat Removal
+
+## Overview
+Splat Overlap Detection and Removal is a post-processing optimization technique designed to reduce the primitive count of dense point cloud representations by identifying and eliminating redundant splats. It solves the performance bottleneck caused by excessive overlapping primitives, which is particularly critical for mobile or real-time rendering where the high number of overlapping splats degrades frame rates [S1]. Unlike [Splat Decimation and Fusion](13387-splat-decimation-and-fusion.md), which merges overlapping primitives into larger ellipses, this method strictly removes redundant splats to minimize the total number of draw calls without altering the geometry of surviving primitives.
+
+## How it works
+The method operates on a set of splats, where each splat $k$ is defined by its center position $\mathbf{s}_0$, normal vector $\mathbf{n}$, and a 2D elliptical footprint in screen space characterized by a major axis vector $\mathbf{u}_0$. The algorithm iterates through pairs of splats to determine if one is redundant due to significant overlap with another.
+
+**Inputs:**
+- A list of splats $S = \{s_1, s_2, \dots, s_N\}$.
+- Each splat $s_i$ contains:
+  - Center position $\mathbf{s}_{0i}$ (3D).
+  - Normal vector $\mathbf{n}_i$ (3D).
+  - Major axis vector $\mathbf{u}_{0i}$ (2D, in screen space).
+  - Minor axis vector $\mathbf{v}_{0i}$ (2D, in screen space, orthogonal to $\mathbf{u}_{0i}$).
+
+**Outputs:**
+- A reduced list of splats $S'$ with redundant entries removed.
+
+**Data Structures:**
+- A boolean array `removed` of size $N$, initialized to `false`.
+
+**Algorithm Steps:**
+1.  **Candidate Selection:** For every pair of distinct splats $(i, j)$ where $i \neq j$:
+    -   Check if splat $j$ is a candidate for removal based on spatial proximity and orientation.
+    -   Calculate the Euclidean distance between centers: $d = \|\mathbf{s}_{0i} - \mathbf{s}_{0j}\|$.
+    -   Calculate the sum of major axis lengths: $L = \|\mathbf{u}_{0i}\| + \|\mathbf{u}_{0j}\|$.
+    -   Check the distance criterion: $d < 0.8 \cdot L$.
+    -   Check the orientation criterion: The angle between normal vectors $\mathbf{n}_i$ and $\mathbf{n}_j$ must be small (i.e., $\mathbf{n}_i \cdot \mathbf{n}_j > \cos(\theta_{max})$, where $\theta_{max}$ is a small threshold, typically implying near-parallel normals). [S1]
+
+2.  **Footprint Sampling:** If both criteria are met, sample points from the contour of splat $j$ to test for overlap with splat $i$:
+    -   Sample 8 uniformly distributed points along the elliptical contour of splat $j$.
+    -   Include the center $\mathbf{s}_{0j}$ as the 9th point.
+    -   Project these 9 points onto the plane defined by splat $i$'s normal $\mathbf{n}_i$. Let the projected points be $p'_1, \dots, p'_9$.
+
+3.  **Overlap Verification:**
+    -   Transform the projected points $p'_k$ into the local 2D coordinate system of splat $i$'s ellipse.
+    -   Check if each point lies inside the ellipse of splat $i$. A point $\mathbf{q} = (u, v)$ in the local frame is inside the ellipse if:
+        $$ \left(\frac{u}{\|\mathbf{u}_{0i}\|}\right)^2 + \left(\frac{v}{\|\mathbf{v}_{0i}\|}\right)^2 \le 1 $$
+    -   Count the number of points $C$ that satisfy this condition.
+
+4.  **Decision:**
+    -   If $C < 2$, the overlap is considered negligible or a boundary case; do not remove splat $j$ to avoid creating visual holes [S1].
+    -   If $2 \le C < 7$, the overlap is significant but not total; no action is taken in this specific removal-only variant (or it may trigger fusion in other variants) [S1].
+    -   If $C \ge 7$, splat $j$ is considered fully redundant and is marked for removal: `removed[j] = true` [S1].
+
+5.  **Finalization:**
+    -   Construct the output list $S'$ containing only splats $s_k$ where `removed[k]` is `false`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def remove_overlapping_splats(splats):
+    N = len(splats)
+    removed = [False] * N
+    
+    # Precompute norms to avoid repeated calculation
+    major_lengths = [len(s.u0) for s in splats]
+    
+    for i in range(N):
+        if removed[i]: continue
+        
+        si = splats[i]
+        dist_threshold = 0.8 * (major_lengths[i] + sum(major_lengths[j] for j in range(N) if not removed[j])) # Note: simplified logic for clarity
+        
+        for j in range(N):
+            if i == j or removed[j]: continue
+            
+            sj = splats[j]
+            
+            # 1. Candidate Selection
+            dist_centers = norm(si.s0 - sj.s0)
+            sum_major = major_lengths[i] + major_lengths[j]
+            
+            if dist_centers >= 0.8 * sum_major:
+                continue
+                
+            # Check normal angle (assuming normalized normals)
+            dot_product = dot(si.n, sj.n)
+            if dot_product < 0.99: # Threshold for "small angle", e.g., ~8 degrees
+                continue
+                
+            # 2. Footprint Sampling
+            # Sample 8 points on contour of j + center
+            contour_points = sample_ellipse_contour(sj.u0, sj.v0, count=8)
+            test_points = contour_points + [sj.s0]
+            
+            footprint_count = 0
+            
+            for pt in test_points:
+                # Project pt onto plane of i
+                projected_pt = project_to_plane(pt, si.s0, si.n)
+                
+                # Transform to local 2D coords of i
+                local_u = dot(projected_pt - si.s0, normalize(si.u0))
+                local_v = dot(projected_pt - si.s0, normalize(si.v0))
+                
+                # Check if inside ellipse i
+                if (local_u / major_lengths[i])**2 + (local_v / len(splats[i].v0))**2 <= 1.0:
+                    footprint_count += 1
+            
+            # 3. Decision
+            if footprint_count >= 7:
+                removed[j] = True
+                
+    return [s for k, s in enumerate(splats) if not removed[k]]
+```
+
+**Parameters:**
+-   **Distance Threshold Factor:** 0.8. This conservative value ensures only significant overlaps are considered, preventing the removal of splats that only partially overlap [S1].
+-   **Footprint Thresholds:** Minimum 2 footprints to consider overlap relevant; 7 or more to remove [S1].
+-   **Normal Angle:** Not given in the sources. A small angle is required, but the exact cosine threshold is implementation-dependent [S1].
+
+**Edge Cases and Pitfalls:**
+-   **Holes:** Removing splats with fewer than 2 footprints prevents visual artifacts (holes) caused by partial overlaps [S1].
+-   **Order Independence:** The algorithm marks splats for removal. If two splats mutually satisfy the removal condition for each other, the order of iteration determines which one survives. The sources do not specify a tie-breaking rule (e.g., based on density or depth) [S1].
+-   **Precision:** Floating-point errors in projection and ellipse containment tests may affect the footprint count. Robust implementation should use a small epsilon for the ellipse inequality check [G].
+
+## Subtopics
+
+### [Splat Decimation and Fusion](13387-splat-decimation-and-fusion.md)
+Extends overlap detection by merging overlapping splats into larger ellipses rather than just removing them, further reducing primitive count for mobile rendering.
+
+## Operating characteristics
+-   **Time Complexity:** $O(N^2)$ in the worst case, as it compares every pair of splats. For large point clouds, this can be prohibitive without spatial indexing (e.g., grid or octree) to limit candidate pairs [G].
+-   **Memory Complexity:** $O(N)$ for the `removed` array and temporary storage.
+-   **Performance:** Significantly reduces the number of primitives rendered, improving frame rates on mobile devices and GPUs with limited fill-rate [S1].
+-   **Strengths:** Simple to implement; effectively removes redundant geometry; preserves sharp details by not merging [S1].
+-   **Limitations:** Does not reduce the geometric complexity of the remaining splats (unlike fusion); may leave some overlapping splats if they don't meet the strict criteria [S1].
+
+## Background
+The method was proposed in the context of rendering textured splat-based point clouds on handheld devices, where the high number of overlapping splats from dense reconstructions (e.g., from Structure-from-Motion) causes performance issues [S1]. It builds on the merging operators of progressive splatting but focuses on removal to minimize holes [S1].
+
+## Sources
+[S1] Textured splat-based point clouds for rendering in handheld devices, https://doi.org/10.1145/2775292.2782779, fetched 2026-11-03

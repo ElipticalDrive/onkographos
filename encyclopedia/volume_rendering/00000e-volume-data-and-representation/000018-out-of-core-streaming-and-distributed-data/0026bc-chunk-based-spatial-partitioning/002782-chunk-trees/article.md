@@ -1,121 +1,144 @@
 # Chunk Trees
+
 Also called: replace span columns
 
 ## Overview
-Chunk Trees are a planet-wide octree-based spatial partitioning method for voxel terrain rendering, designed to replace the legacy "span columns" approach [S2, unofficial]. The method eliminates visible refinement artifacts and memory fragmentation by organizing data into a hierarchical structure of chunk trees, ensuring seamless visual continuity from ground level to orbit [S2, unofficial]. It differs from sibling methods such as [MPI-based Volume Partitioning](1093-mpi-based-volume-partitioning.md), [Chunk-based World Streaming](2369-chunk-based-world-streaming.md), [Chunk-based Training](3168-chunk-based-training.md), [Object-space decomposition with local clustering](4156-object-space-decomposition-with-local-clustering.md), [Uniform Block Partitioning with Acceleration](6098-uniform-block-partitioning-with-acceleration.md), and [Moving Walls Algorithm](9715-moving-walls-algorithm.md) by enforcing a screen-space cut that covers the entire world to prevent checker-hole artifacts, while using motion-aware detail levels to maintain performance during high-speed camera movement [S2, unofficial]. It builds on [Chunk-based spatial partitioning](3862-chunk-based-spatial-partitioning.md).
+Chunk Trees are a planet-scale spatial partitioning structure for voxel terrain rendering, designed to replace the previous 'span columns' approach to eliminate data fragmentation and prevent visible refinement artifacts from ground level to orbit [S2, unofficial]. Unlike sibling methods that may rely on fixed grids or simpler octrees, Chunk Trees organize data into a planet-wide octree where each node contains 64 sub-trees of $4^3$ leaves, stored in shared pages to ensure uniform access and no fragmentation [S2, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-*   **Input:** A planet-wide voxel dataset; camera position and orientation; frame time budget (GPU/CPU availability) [S2, unofficial].
-*   **Output:** A rasterized image with ray-marched voxel terrain; a draw list of chunk boxes [S2, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A voxel terrain dataset (splat data or generated fields) and a camera position/orientation.
+*   **Output:** A rasterized image of the terrain, with rays marching restricted to individual chunks.
 
-**Data Structures**
-The core structure is a planet-wide octree composed of chunk trees [S2, unofficial].
-*   **Node Layout:** Each octree node contains 64 trees [S2, unofficial].
-*   **Tree Layout:** Each tree consists of $4^3 = 64$ leaves [S2, unofficial].
-*   **Storage:** Leaves are stored in shared pages accessible by any chunk, containing surface and subsurface materials [S2, unofficial]. This shared page layout prevents fragmentation [S2, unofficial].
+**Data Structures:**
+The core structure is a planet-wide octree.
+*   **Node Layout:** Each octree node contains 64 trees.
+*   **Tree Layout:** Each tree has $4^3 = 64$ leaves.
+*   **Storage:** Leaves are stored in shared pages accessible by any chunk. These pages contain surface and subsurface materials [S2, unofficial].
 *   **Coordinate System:** The frame's origin snaps to 1,024 m cells to ensure motion vectors remain correct when the origin moves [S2, unofficial].
 
-**Algorithm Steps**
-1.  **Generation (GPU)**
-    *   Evaluate the terrain geometry on the GPU, once per chunk, within the current frame's time budget [S2, unofficial].
-    *   The budget adapts to both GPU and CPU availability, growing into remaining frame time [S2, unofficial].
-    *   Cells that cannot be carved by caves are skipped to save computation [S2, unofficial].
-2.  **Residency and Culling**
-    *   Maintain a screen-space cut of the octree that follows the eye position [S2, unofficial].
-    *   The drawn cut covers the whole world to prevent checker-hole artifacts [S2, unofficial].
-    *   Tiles out of view are rendered at a coarser level [S2, unofficial].
-    *   If a camera drops from orbit, the system refines tiles over a few frames [S2, unofficial].
-    *   Tiles still refining are rendered as ground, not as boxes, to avoid visual popping [S2, unofficial].
-3.  **Motion-Aware Detail**
-    *   Calculate the "flow pixels" swept by the eye's motion per frame [S2, unofficial].
-    *   Determine cell coverage using the formula:
-        $$ \text{Coverage} = \min\left(3, 1 + \frac{\text{flow}}{16}\right) \text{ pixels} $$
-    *   The view center, still camera, and turns maintain a 1-pixel coverage [S2, unofficial].
-4.  **Rendering**
-    *   Rasterize and cull chunk boxes on the GPU into the seed's draw list [S2, unofficial].
-    *   Restrict ray marching to the interior of one chunk [S2, unofficial].
-    *   Use the slope of the chunk's surface to define its bounding box [S2, unofficial].
-    *   Crossfade between different resolution levels [S2, unofficial].
-    *   Allow rays to continue across cube face edges [S2, unofficial].
-    *   **Watertightness:** From level 13 onwards, rays walk the grid's own cells (using planes and spheres about the centre) to ensure tiles and faces are watertight from orbit [S2, unofficial].
-5.  **Camera-Relative Frames**
-    *   Snap the frame's origin to 1,024 m cells [S2, unofficial].
-    *   Ensure motion vectors remain correct when the origin moves [S2, unofficial].
-    *   On a host's shared device, the pass never polls it [G] (implementation detail to prevent blocking).
+**Algorithm Steps:**
 
-**Pseudocode**
+1.  **Construction:**
+    *   Construct the chunk tree for the splat data, starting at index 0.
+    *   Use a log callback for diagnostics during construction [S1, unofficial].
+    *   For generated terrain, evaluate a two-rate field (continent- and range-wide octaves) at lattice nodes and blend them. Column programs run per level [S2, unofficial].
+
+2.  **Generation (GPU):**
+    *   Evaluate the chunk tree on the GPU, once per chunk, within the frame's time budget.
+    *   The budget adapts to both GPU and CPU availability, growing into remaining frame time.
+    *   Cells that cannot be carved by caves are skipped to save computation [S2, unofficial].
+    *   Blasts (destructive edits) regenerate within the frame's budget [S2, unofficial].
+
+3.  **Residency Management:**
+    *   Maintain a screen-space cut of the octree that follows the eye position.
+    *   The drawn cut covers the whole world to prevent "checker-hole" artifacts.
+    *   Tiles out of view are rendered at a coarser level.
+    *   If a camera drops from orbit, refinement occurs over a few frames.
+    *   Tiles still refining render as ground, not as boxes [S2, unofficial].
+
+4.  **Motion-Aware Detail:**
+    *   Calculate the eye's motion sweep in "flow pixels" per frame.
+    *   Determine cell coverage: cells may cover $1 + \frac{\text{flow}}{16}$ pixels, up to a maximum of 3 pixels.
+    *   The view center, a still camera, and turns maintain a 1-pixel coverage [S2, unofficial].
+
+5.  **Rendering:**
+    *   Rasterize and cull chunk boxes on the GPU into the seed's draw list.
+    *   Restrict ray marching to inside one chunk.
+    *   A chunk's box uses the slope of its surface.
+    *   Levels crossfade into each other.
+    *   Rays continue across cube face edges.
+    *   From level 13 onwards, rays walk the grid's own cells (using planes and spheres about the centre) to ensure tiles and faces are watertight from orbit [S2, unofficial].
+
+6.  **Edits (Optional/Destructible Terrain):**
+    *   Edits apply in layers: recent brushes are exact, older small ones are sealed into bricks, and large ones are analytic.
+    *   An edit tree keeps the surfaces edits leave, not their whole history.
+    *   Saves store the layers bit-exact, keeping memory bounded [S2, unofficial].
+
+**Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_chunk_tree(camera, frame_budget, world_data):
-    # 1. Camera-relative frames: snap frame origin to 1024 m cells
-    origin = (camera.position // 1024.0) * 1024.0
-    # Motion vectors remain correct when the origin moves [S2, unofficial]
-
-    # 2. Generation: evaluate terrain on GPU, once per chunk, within frame budget
-    active_chunks = []
-    for chunk in world_data.all_chunks:
-        if frame_budget > 0:
-            # Skip cells that cannot be carved by caves
-            if not chunk.has_cave_carving_capability:
-                chunk.geometry = evaluate_terrain(chunk)
-            active_chunks.append(chunk)
-            frame_budget -= chunk.complexity * 0.1
-
-    # 3. Residency: screen-space cut follows eye, covers whole world
+def render_chunk_tree(camera, frame_budget_ms):
+    # 1. Determine active chunks based on camera position
+    # Snap frame origin to 1024m grid
+    origin = snap_to_grid(camera.position, 1024.0)
+    
+    # 2. Manage Residency
+    # Maintain screen-space cut following eye position
+    active_chunks = get_screen_space_cut(camera, octree)
+    
+    # 3. Generation Phase (GPU)
+    # Evaluate within frame budget
+    start_time = get_gpu_time()
     for chunk in active_chunks:
-        # Tiles out of view are rendered at a coarser level
-        if not chunk.intersects_frustum(camera):
-            chunk.level = max(0, chunk.level - 1)
-        # A camera dropping from orbit refines in a few frames
-        if chunk.is_refining:
-            draw_ground_tile(chunk)
-        else:
-            draw_chunk_tile(chunk)
-
-    # 4. Motion-aware detail
-    flow_pixels = norm(camera.position - camera.previous_position) / frame_time
+        if not can_carve_by_caves(chunk):
+            continue
+        generate_chunk_gpu(chunk)
+        
+        # Check budget
+        if get_gpu_time() - start_time > frame_budget_ms:
+            break
+            
+    # 4. Motion-Aware Detail Calculation
+    flow_pixels = calculate_flow_pixels(camera.previous_position, camera.position)
     for chunk in active_chunks:
-        # Cells may cover 1 + flow / 16 pixels, up to a maximum of 3 pixels
+        # Coverage formula: 1 + flow / 16, max 3
         coverage = min(3.0, 1.0 + flow_pixels / 16.0)
-        if coverage > 1.0:
-            chunk.target_level = max(0, min(chunk.max_level, int(coverage)))
-        # The view center, still camera, and turns maintain a 1-pixel coverage
-
-    # 5. Rendering
+        chunk.set_detail_level(coverage)
+        
+    # 5. Rendering Phase
     draw_list = []
     for chunk in active_chunks:
-        # Chunk boxes are rasterized and culled on the GPU into the seed's draw list
-        if chunk.bounding_box.intersects_frustum(camera):
-            draw_list.append(chunk.bounding_box)
-
-    # Ray marching is restricted to inside one chunk
-    for ray in cast_rays_through_viewport(camera, draw_list):
-        hit_chunk = world_data.find_chunk_at(ray.origin)
-        if hit_chunk:
-            # A chunk's box uses the slope of its surface
-            slope = hit_chunk.surface_normal
-            # Levels crossfade into each other
-            color = blend_colors(hit_chunk.levels, ray)
-            # From level 13 onwards, rays walk the grid's own cells
-            if hit_chunk.level >= 13:
-                color = march_grid_cells(hit_chunk, ray)
-            ray.color = color
+        # Rasterize and cull chunk boxes
+        if is_in_view(chunk):
+            box = rasterize_chunk_box(chunk)
+            draw_list.append(box)
+            
+    # 6. Ray Marching
+    for ray in primary_rays:
+        chunk = get_chunk_containing(ray.origin)
+        if chunk is None:
+            continue
+            
+        # Restrict ray marching to inside one chunk
+        hit = march_ray_in_chunk(ray, chunk)
+        
+        # Handle level 13+ watertightness
+        if chunk.level >= 13:
+            # Walk grid's own cells (planes and spheres about centre)
+            hit = watertight_march(ray, chunk)
+            
+        if hit:
+            color = compute_color(hit)
+            set_pixel(ray.screen_pos, color)
 ```
 
+**Parameters:**
+*   **Chunk Leaf Size:** $4^3$ voxels per tree [S2, unofficial].
+*   **Trees per Node:** 64 [S2, unofficial].
+*   **Grid Snapping:** 1,024 m [S2, unofficial].
+*   **Motion Detail Max Coverage:** 3 pixels [S2, unofficial].
+*   **Watertight Threshold:** Level 13 [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Checker-Hole Artifacts:** Prevented by ensuring the drawn cut covers the whole world [S2, unofficial].
+*   **Refinement Artifacts:** Eliminated by the chunk tree structure, replacing span columns [S2, unofficial].
+*   **Register Regression:** A walk's register regression was identified and removed to improve performance [S2, unofficial].
+*   **Host Shared Device:** The pass never polls the host's shared device [S2, unofficial].
+
 ## Operating characteristics
-*   **Performance:** On an NVIDIA RTX 3060 at 1440p, terrain rendering costs dropped from 9.95 ms to 5.85 ms after removing a register regression in the ray walk [S2, unofficial].
-*   **Performance (1080p):** Ground view primary takes 1.48 ms (sun and sky 2.06 ms); Mountain view primary takes 3.10 ms (sun and sky 2.78 ms) [S2, unofficial].
-*   **Performance (Mountain View):** Total terrain cost is 6.60 ms [S2, unofficial].
-*   **Quality Metrics:** In the Pulsar editor descent at 1440p, the largest cell's p95 error dropped from 7.0 to 2.6 pixels, and the max error from 13.9 to 3.5 pixels [S2, unofficial].
-*   **Strengths:** Eliminates fragmentation; ensures no visible refinement artifacts from ground to orbit; handles planet-scale edits efficiently [S2, unofficial].
-*   **Limitations:** Requires significant GPU compute for generation within frame budgets; complex ray marching logic for watertightness at high levels (level 13+) [S2, unofficial].
-*   **When to use:** Suitable for planet-scale voxel terrain where seamless LOD transitions and memory efficiency are critical [S2, unofficial].
-*   **When not to use:** Not suitable for small-scale, static volumes where the overhead of the octree and chunk management outweighs the benefits [S2, unofficial].
+*   **Time Complexity:** Generation is bounded by the frame budget, adapting to GPU and CPU availability [S2, unofficial].
+*   **Memory Complexity:** Memory is bounded by storing layers bit-exact and using shared pages for leaves, avoiding fragmentation [S2, unofficial].
+*   **Measured Performance (RTX 3060):**
+    *   **1080p:** Ground primary 1.48 ms, sun and sky 2.06 ms; Mountain primary 3.10 ms, sun and sky 2.78 ms. Mountain view terrain total: 6.60 ms [S2, unofficial].
+    *   **1440p:** Terrain costs dropped from 9.95 ms to 5.85 ms after removing a walk's register regression [S2, unofficial].
+*   **Strengths:** Eliminates fragmentation, prevents refinement artifacts, supports planet-scale destructible terrain, and adapts to hardware budgets.
+*   **Limitations:** Complex implementation due to the nested octree/tree structure and motion-aware detail calculations.
 
 ## Background
-Chunk Trees were introduced in the Helio project to replace the previous "span columns" approach [S2, unofficial]. The design is documented in `crates/passes/3d/helio-pass-voxel-planet/docs/chunk-trees.md` [S2, unofficial]. The method was developed to address fragmentation and visible refinement artifacts in large-scale voxel terrain rendering [S2, unofficial].
+Chunk Trees were introduced in the Helio project to replace the 'span columns' approach for voxel terrain rendering [S2, unofficial]. The design aims to provide a fully destructible planet with efficient rendering from ground to orbit. The method was documented in the context of the Pulsar engine and the Helio voxel pass [S2, unofficial].
 
 ## Sources
 [S1] sparkjsdev/spark, https://github.com/sparkjsdev/spark, fetched 2026-10-27 (unofficial)

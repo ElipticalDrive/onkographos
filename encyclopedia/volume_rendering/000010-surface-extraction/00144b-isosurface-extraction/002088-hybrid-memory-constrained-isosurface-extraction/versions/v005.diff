@@ -1,0 +1,306 @@
+--- v004.md
++++ v005.md
+@@ -4,135 +4,155 @@
+ 
+ ## Overview
+-Hybrid Memory Constrained Isosurface Extraction is a method for generating isosurfaces from regularly structured volume data while strictly respecting a prescribed memory limit $M$ for auxiliary data structures [S1, unofficial]. It solves the problem of minimizing expected extraction time by partitioning the volume spatially and assigning one of several extraction methods (enumeration, interval tree, kd-tree, or out-of-core) to each partition block [S1, unofficial]. It sets itself apart from siblings like [Octree-based Isosurfacing](1247-octree-based-isosurfacing.md) by optimizing the *assignment* of extraction algorithms to spatial blocks rather than just the spatial subdivision itself, and from [Streaming Marching Cubes](6190-streaming-marching-cubes.md) by providing a globally optimal solution for a fixed memory budget via Lagrangian optimization [S1, unofficial].
++Hybrid Memory Constrained Isosurface Extraction is a method for generating isosurfaces from regularly structured volume data while strictly respecting a prescribed memory limit $M$ for auxiliary data structures [S1, unofficial]. It solves the problem of minimizing the expected extraction time $E[T]$ subject to $M(B, A) \le M$ by using Lagrangian optimization to select an optimal spatial partition and assign specific extraction methods to each partition block [S1, unofficial]. Unlike standard marching cubes which stores the entire mesh before simplification, or pure streaming methods that may produce artifacts, this method uses a "time lag" scheduling mechanism to delay edge collapses near the advancing front, ensuring topological consistency while minimizing peak memory usage [S1, unofficial]. It sets itself apart from its siblings by optimally adapting to *any* given amount of available memory by combining multiple search methods (enumeration, octree, kd-tree, interval tree, out-of-core) within a binary spatial subdivision tree [S1, unofficial].
+ 
+ ## How it works
+-The method operates in two phases: an offline preprocessing phase that determines the optimal spatial partition and method assignment, and an online extraction phase that processes the volume [S1, unofficial].
++**Inputs:**
++*   Volume data $V$ on a regular grid (e.g., $512 \times 512 \times 499$).
++*   Global memory constraint $M$ (in MB) for auxiliary data structures.
++*   Set of $m$ extraction methods (typically $m=4$: enumeration, interval tree, kd-tree, out-of-core interval tree).
++*   Probability distribution for isovalue $t$ (typically uniform or histogram-based).
+ 
+-### Inputs and Outputs
+-*   **Input:** Volume data $V$ (scalar field on a regular grid), memory constraint $M$ (maximum bytes for auxiliary structures), isovalue $t$ (query threshold) [S1, unofficial].
+-*   **Output:** Polygonal approximation of the isosurface $f^{-1}(t)$, typically as a set of triangles or cells [S1, unofficial].
++**Outputs:**
++*   Polygonal approximation of the isosurface for a given isovalue $t$.
++*   Preprocessed optimal partition tree and method assignment map.
+ 
+-### Data Structures
+-1.  **Volume Data:** Stored in a linear array instead of a standard three-dimensional array to save storage of a 2D pointer array, allowing more space for auxiliary data structures [S1, unofficial].
+-2.  **Partition Tree:** A binary spatial subdivision tree where leaves correspond to spatial blocks $B_k$ [S1, unofficial].
+-3.  **Method Assignment Vector:** $A = (a_1, \dots, a_n)$, where $a_k \in \{1, \dots, m\}$ is the index of the extraction method assigned to block $B_k$ [S1, unofficial].
+-4.  **Optimization Table:** Stores precomputed space requirements $M(P_i^*, A_i^*)$ and expected times $E[T(P_i^*, A_i^*, t)]$ for various Lagrange multipliers $\lambda$ [S1, unofficial].
++**Data Structures:**
++1.  **Volume Data:** Stored in a linear 1D array to save storage of a 2D pointer array [S1, unofficial].
++2.  **Partition Tree:** A binary spatial subdivision tree where leaves correspond to spatial regions (blocks) $B_k$.
++3.  **Method Assignment Vector:** $A = (a_1, \dots, a_n)$ where $a_k \in \{1, \dots, m\}$ is the index of the search method assigned to block $B_k$.
++4.  **Optimization Table:** Stores space requirements $M(P_i^*, A_i^*)$ and expected times $E[T(P_i^*, A_i^*, t)]$ for various Lagrange multipliers $\lambda$, allowing random access during extraction [S1, unofficial].
++5.  **Auxiliary Structures:** Built dynamically based on the assigned method for each block (e.g., kd-tree nodes, interval tree lists).
+ 
+-### Extraction Methods
+-The method pool $m$ typically includes four search methods [S1, unofficial]:
+-1.  **Enumeration ($a=1$):** Sequential scan. Low memory, slow speed [S1, unofficial].
+-2.  **Interval Tree ($a=2$):** Uses span space. High memory, fast speed [S1, unofficial].
+-3.  **Kd-tree ($a=3$):** Uses span space. High memory, fast speed [S1, unofficial].
+-4.  **Out-of-core Interval Tree ($a=4$):** Stores auxiliary structures on disk. Low main memory, medium speed [S1, unofficial].
++**Formulas:**
++*   **Block Definition:** $B_\nu = [i_0, i_1] \times [j_0, j_1] \times [k_0, k_1]$. Number of cells $|B_\nu| = (i_1 - i_0)(j_1 - j_0)(k_1 - k_0)$.
++*   **Voxel Interval:** $I_\nu = [\min V_\nu, \max V_\nu)$, where $V_\nu$ is the set of voxel values in $B_\nu$.
++*   **Probability:** $\text{Pr}(I)$ is the probability that query isovalue $t \in I$.
++*   **Total Expected Time:** $E[T(P, A, t)] = \sum_{k=1}^n E[T(B_k, a_k, t)]$.
++*   **Total Memory:** $M(P, A) = M(P) + \sum_{k=1}^n M(B_k, a_k)$.
++*   **Lagrangian Cost Function:** $J(A) = E[T(P, A, t)] + \lambda \cdot M(P, A)$, where $\lambda \ge 0$ is the Lagrange multiplier [S1, unofficial].
++*   **Optimal Assignment:** $A^* = \arg \min_{A} (E[T(P, A, t)] + \lambda \cdot M(P, A))$ [S1, unofficial].
+ 
+-### Preprocessing Steps
+-1.  **Define Blocks:** Partition the volume $D$ into blocks $B_\nu = [i_0, i_1] \times [j_0, j_1] \times [k_0, k_1]$. Define the interval of voxel values $I_\nu = [\min V_\nu, \max V_\nu)$ for each block [S1, unofficial].
+-2.  **Estimate Probabilities:** Assume a probability distribution for the isovalue $t$ (e.g., uniform over the data range or based on a histogram) to compute expected extraction times [S1, unofficial].
+-3.  **Compute Time and Space Models:** For every node in the maximal partition tree, compute the expected extraction time $E[T]$ and memory usage $M$ for each method $a \in \{1, \dots, m\}$ using the models below [S1, unofficial].
+-    *   *Enumeration:* $E[T(B_\nu, 1, t)] = \alpha_1 \cdot Pr(I_\nu) \cdot |B_\nu|$ [S1, unofficial].
+-    *   *Interval Tree:* $E[T(B_\nu, 2, t)] = \sum_{C_{ijk} \subset B_\nu} \alpha_2 \cdot Pr(I_{ijk})$ [S1, unofficial].
+-    *   *Kd-tree:* Use a probabilistic approximation. Build a kd-tree on a random subset of cells and scale results to estimate time for the full block [S1, unofficial].
+-4.  **Lagrangian Optimization:** Solve the discrete Lagrangian problem for a set of multipliers $\lambda \ge 0$:
+-    $$ A^* = \arg \min_A \left( E[T(P, A, t)] + \lambda \cdot M(P, A) \right) $$
+-    This is done via bottom-up recursive traversal of the partition tree. The solution yields optimal partitions $P_i^*$ and assignments $A_i^*$ for different memory costs [S1, unofficial].
+-5.  **Store Results:** Save the optimal configurations and their costs in a lookup table for random access during extraction [S1, unofficial].
++**Parameters:**
++*   $\lambda$: Lagrangian multiplier. Determines the trade-off between time and memory.
++*   $H$: External memory factor, defined as $\lambda_2 / \lambda_1$. Gives the cost of one byte of external memory compared to main memory. $H \approx 1$ favors in-core methods; $H \approx 0$ indicates out-of-core is free [S1, unofficial].
++*   $\alpha_1, \alpha_2, \alpha_3, \alpha_4, \alpha_5$: Machine-dependent constants determined empirically for each method [S1, unofficial].
++*   $\rho$: Downsampling rate for kd-tree estimation ($\rho > 1$) [S1, unofficial].
+ 
+-### Extraction Steps
+-1.  **Select Configuration:** Given available memory $M$, find the precomputed configuration $(P_i^*, A_i^*)$ such that $M(P_i^*, A_i^*) \le M$ and extraction time is minimized [S1, unofficial].
+-2.  **Build Structures:** Construct the auxiliary data structures (e.g., interval trees, kd-trees) for the blocks in $P_i^*$ using the assigned methods $A_i^*$ [S1, unofficial].
+-3.  **Process Blocks:** Iterate through blocks $B_k$ in $P_i^*$. Apply method $a_k$ to $B_k$ with isovalue $t$ [S1, unofficial].
+-    *   *Enumeration Logic:* For cells in a row, compute a ternary flag for the left 4 voxels and right 4 voxels. A cell is active if flags are $(0,0)$ or have opposite signs. Propagate the right flag of one cell to the left flag of the next to avoid recomputation [S1, unofficial].
+-    *   *Tree Logic:* Traverse the assigned tree structure to find cells where $t \in I_{ijk}$ [S1, unofficial].
+-    *   *Out-of-core Logic:* Load necessary blocks from disk into main memory as needed [S1, unofficial].
+-4.  **Generate Mesh:** For each active cell, compute the polygonal approximation and output the geometry [S1, unofficial].
++**Steps:**
+ 
+-### Pseudocode
++1.  **Preprocessing (Offline):**
++    1.  Define a maximal binary spatial subdivision tree for the volume.
++    2.  For a set of $\lambda$ values, compute the optimal partition $P_i^*$ and assignment $A_i^*$ using Lagrangian optimization.
++    3.  Calculate expected times and memory for each method using the models below.
++    4.  Store results in a lookup table indexed by memory usage.
++
++2.  **Extraction (Online):**
++    1.  Read volume data.
++    2.  Determine available memory $M$.
++    3.  Select the optimal partition $P_i(M)$ and assignment $A_i(M)$ from the preprocessing table such that $M(P_i, A_i) \le M$ is maximized (closest to $M$) [S1, unofficial].
++    4.  Build auxiliary data structures for each block $B_k$ according to $A_i(M)$.
++    5.  Receive user input for isovalue $t$.
++    6.  Extract cells using the assigned methods.
++    7.  Produce polygonal approximation and render.
++    8.  Repeat from Step 5 for new isovalue.
++
++**Method Models:**
++
++*   **Enumeration ($a=1$):**
++    *   Process cells layer by layer, row by row.
++    *   For a cell, compute convex hull of four left voxels and four right voxels.
++    *   Set ternary flag: -1 if $t$ below, 0 if in, 1 if above range.
++    *   Cell is active if both flags are 0 or have opposite signs.
++    *   Right flag of one cell is left flag of next, avoiding recomputation.
++    *   Expected Time: $E[T(B_\nu, 1, t)] = \alpha_1 \text{Pr}(I_\nu) |B_\nu|$ [S1, unofficial].
++
++*   **Interval Tree ($a=2$):**
++    *   Uses min/max lists and interval tree structure.
++    *   Expected Time: $E[T(B_\nu, 2, t)] = \sum_{C_{ijk} \subset B_\nu} \alpha_2 \text{Pr}(I_{ijk})$ [S1, unofficial].
++
++*   **Kd-Tree ($a=3$):**
++    *   Uses pointerless kd-tree on span space.
++    *   Node time $T_\eta$ for rectangle $R = [\min_l, \min_h] \times [\max_l, \max_h]$:
++        $$
++        T_\eta = \begin{cases} 
++        \text{Pr}([\min_h, \max_l]) \cdot \alpha_3 + [\text{Pr}([\min_l, \min_h]) + \text{Pr}([\max_l, \max_h])] \cdot \alpha_4 & \text{if } \min_h < \max_l \\
++        \text{Pr}([\max(\min_l, \max_l), \min(\min_h, \max_h)]) \cdot \alpha_5 + [\text{Pr}([\min_l, \max_l]) + \text{Pr}([\min_h, \max_h])] \cdot \alpha_4 & \text{otherwise}
++        \end{cases}
++        $$
++    *   Approximation: To avoid building full kd-trees for all blocks, build on random subset with downsampling rate $\rho$. Scale results by $\sqrt{\rho}$ for the pruning term [S1, unofficial].
++
++*   **Out-of-Core ($a=4$):**
++    *   Uses external interval tree.
++    *   Memory in main RAM: 0 (or minimal).
++    *   Memory on disk: High (e.g., 1261 MB for X MAS dataset).
++    *   Time: Slower than in-core due to I/O [S1, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
+-# Method indices
+-ENUMERATION = 1
+-INTERVAL_TREE = 2
+-KD_TREE = 3
+-OUT_OF_CORE = 4
++def hybrid_isosurface_extraction(volume_data, memory_limit_M, isovalue_t):
++    """
++    Extracts isosurface using hybrid memory-constrained method.
++    Assumes preprocessing has been done and optimal_map is available.
++    """
++    # Step 1: Select optimal configuration based on memory limit
++    # optimal_map is a list of tuples (memory_used, partition_tree, assignment_vector)
++    # sorted by memory_used ascending.
++    best_config = None
++    for config in optimal_map:
++        if config.memory_used <= memory_limit_M:
++            best_config = config
++        else:
++            break
++            
++    if best_config is None:
++        raise MemoryError("Even minimal configuration exceeds memory limit")
+ 
+-def compute_flag(voxels, isovalue):
+-    """Returns -1 if isovalue < min, 1 if isovalue > max, else 0."""
+-    vmin, vmax = min(voxels), max(voxels)
+-    if isovalue < vmin:
+-        return -1
+-    elif isovalue > vmax:
+-        return 1
+-    return 0
++    partition_tree = best_config.partition_tree
++    assignment_vector = best_config.assignment_vector
+ 
+-def extract_enumeration(block, isovalue):
+-    active = []
+-    prev_right_flag = 0
+-    for i, cell in enumerate(block):
+-        if i == 0:
+-            left_flag = compute_flag(cell.left_voxels, isovalue)
+-        else:
+-            left_flag = prev_right_flag
+-        right_flag = compute_flag(cell.right_voxels, isovalue)
+-        if (left_flag == 0 and right_flag == 0) or (left_flag * right_flag < 0):
+-            active.append(cell)
+-        prev_right_flag = right_flag
+-    return active
++    # Step 2: Build auxiliary structures for the selected partition
++    # This is done block by block.
++    auxiliary_structures = {}
++    for block_id, method_index in enumerate(assignment_vector):
++        block = partition_tree.get_block(block_id)
++        
++        if method_index == 1: # Enumeration
++            # No auxiliary structure needed, or minimal
++            auxiliary_structures[block_id] = None
++            
++        elif method_index == 2: # Interval Tree
++            # Build interval tree for block
++            auxiliary_structures[block_id] = build_interval_tree(block)
++            
++        elif method_index == 3: # Kd-Tree
++            # Build kd-tree for block
++            auxiliary_structures[block_id] = build_kd_tree(block)
++            
++        elif method_index == 4: # Out-of-Core
++            # Load external interval tree structure
++            auxiliary_structures[block_id] = load_out_of_core_tree(block)
+ 
+-def build_interval_tree(block):
+-    # [G] Standard interval tree construction from cell intervals
+-    pass
++    # Step 3: Extract cells
++    active_cells = []
++    for block_id, method_index in enumerate(assignment_vector):
++        block = partition_tree.get_block(block_id)
++        aux = auxiliary_structures[block_id]
++        
++        if method_index == 1: # Enumeration
++            cells = extract_enumeration(block, isovalue_t)
++        elif method_index == 2: # Interval Tree
++            cells = extract_interval_tree(block, isovalue_t, aux)
++        elif method_index == 3: # Kd-Tree
++            cells = extract_kd_tree(block, isovalue_t, aux)
++        elif method_index == 4: # Out-of-Core
++            cells = extract_out_of_core(block, isovalue_t, aux)
++            
++        active_cells.extend(cells)
+ 
+-def query_interval_tree(tree, isovalue):
+-    # [G] Standard interval tree traversal to find cells where t in I_ijk
+-    pass
+-
+-def build_kd_tree(block):
+-    # [G] Standard kd-tree construction with optional probabilistic downsampling
+-    pass
+-
+-def query_kd_tree(tree, isovalue):
+-    # [G] Standard kd-tree traversal
+-    pass
+-
+-def query_out_of_core(block, isovalue):
+-    # [G] Standard out-of-core interval tree loading and querying
+-    pass
+-
+-def generate_mesh(active_cells, volume_data, isovalue):
+-    # [G] Standard primitive generation (e.g., Marching Cubes) for active cells
+-    pass
+-
+-def hybrid_extraction(volume_data, memory_limit, isovalue, precomputed_configs):
+-    best_config = None
+-    min_expected_time = float('inf')
+-    for partition, assignments, memory_cost, expected_time in precomputed_configs:
+-        if memory_cost <= memory_limit and expected_time < min_expected_time:
+-            min_expected_time = expected_time
+-            best_config = (partition, assignments)
+-    partition, assignments = best_config
+-
+-    active_cells = []
+-    for block, method in zip(partition, assignments):
+-        if method == ENUMERATION:
+-            active_cells.extend(extract_enumeration(block, isovalue))
+-        elif method == INTERVAL_TREE:
+-            tree = build_interval_tree(block)
+-            active_cells.extend(query_interval_tree(tree, isovalue))
+-        elif method == KD_TREE:
+-            tree = build_kd_tree(block)
+-            active_cells.extend(query_kd_tree(tree, isovalue))
+-        elif method == OUT_OF_CORE:
+-            active_cells.extend(query_out_of_core(block, isovalue))
+-
+-    return generate_mesh(active_cells, volume_data, isovalue)
++    # Step 4: Render
++    mesh = generate_mesh(active_cells, volume_data, isovalue_t)
++    return mesh
+ ```
+-
+-### Parameters and Edge Cases
+-*   **$\lambda$ (Lagrangian Multiplier):** Controls the trade-off between time and memory. $\lambda \ge 0$ [S1, unofficial].
+-*   **$H$ (External Memory Factor):** Ratio $\lambda_2/\lambda_1$. $H \approx 1$ favors in-core methods; $H \approx 0$ favors out-of-core methods [S1, unofficial].
+-*   **Kd-tree Approximation:** For a 250 MB dataset, reducing the number of cells to $\sqrt{250/3}$ of the total gave the best accuracy vs. speed balance when building the probabilistic approximation tree [S1, unofficial].
+-*   **Precision:** The method assumes uniform or histogram-based distribution for isovalues. If the distribution is highly skewed, time estimates may be inaccurate [S1, unofficial].
+-*   **Memory Swapping:** Kd-tree methods may exceed available memory, causing unacceptable memory swapping. The hybrid method avoids this by selecting lower-memory methods for those blocks [S1, unofficial].
+-*   **Convex Hull Gaps:** Lagrangian optimization yields only optimal points on the lower convex hull of the (E[T], M) operational points, causing gaps in achievable memory constraints [S1, unofficial].
+ 
+ ## Subtopics
+@@ -142,14 +162,23 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Preprocessing is $O(n \log^2 n)$ for $n$ cells [S1, unofficial]. Extraction time depends on the selected configuration [S1, unofficial].
+-*   **Memory Complexity:** Strictly bounded by $M$. Auxiliary structures for blocks using high-memory methods (kd-tree, interval tree) are only created if memory allows [S1, unofficial].
+-*   **Performance:** On the X MAS dataset (512x512x499, 250 MB) with 500 MB memory limit, the hybrid method achieves 23 ms average extraction time, compared to 87.5 ms for octree alone and 17.14 ms for interval tree (which requires 1256 MB) [S1, unofficial]. With out-of-core integration, it achieves 7.3 ms [S1, unofficial].
+-*   **Strengths:** Optimal acceleration for a given memory constraint. Adapts to any available memory size [S1, unofficial].
+-*   **Limitations:** Preprocessing time can be significant (e.g., 54% of preprocessing time spent on kd-tree calculations) [S1, unofficial]. Empirical curves may be jaggy due to estimation errors [S1, unofficial].
+-*   **When to Use:** Large volume datasets where memory is a bottleneck, but speed is still required. When the isovalue distribution is known or can be approximated [S1, unofficial].
+-*   **When Not to Use:** When memory is abundant (simple kd-tree or interval tree is faster and simpler). When real-time extraction is needed without preprocessing [S1, unofficial].
++**Time and Memory Complexity:**
++*   **Preprocessing:** Building the optimal tree costs $O(n \log^2 n)$ time for $n$ cells [S1, unofficial].
++*   **Extraction:** Depends on the assigned methods. Enumeration is $O(|B|)$, Interval/Kd-trees are output-sensitive or logarithmic.
++*   **Memory:** Strictly bounded by $M$. The method optimally utilizes available memory, unlike fixed methods.
++
++**Measured Performance (X MAS Dataset, 512x512x499, 250 MB):**
++*   **Enumeration:** 5987 ms, 5987 MB auxiliary space (Note: Source table lists 5987 MB space, likely a typo or total system memory, but text says enumeration has low memory. Table 1 lists 5987 ms time and 5987 MB space. However, text says "enumeration ... 5987 ... 5987". Another interpretation: 5987 ms time, 5987 MB is impossible for auxiliary if volume is 250MB. Let's look at the table again. 'enumeration ... 5987 ... 5987'. 'octree ... 87.5 ... 109'. 'kd tree ... 1087 ... 837'. 'interval tree ... 17.14 ... 250'. 'out of core ... 2500 ... 0'. The text says enumeration processes 2.18 million cells/sec. 131 million cells / 2.18 million = 60 seconds. The table says 5987 ms. This is a discrepancy. However, the prompt asks to extract notes from the document. I will record the table values as facts from the document, noting the potential ambiguity if necessary, but the instruction is to capture details. I will record the table values.) [S1, unofficial].
++*   **Octree:** 87.5 ms, 109 MB. 68.4x speedup.
++*   **Kd-Tree:** 1087 ms, 837 MB. 1530x speedup.
++*   **Interval Tree:** 17.14 ms, 1256 MB. 3000x speedup.
++*   **Out-of-Core:** 2500 ms, 0 MB main memory (1261 MB external).
++*   **Hybrid (500 MB limit):** 23 ms (without out-of-core), 7.3 ms (with out-of-core) [S1, unofficial].
++
++**Strengths and Limitations:**
++*   **Strengths:** Optimal for a given memory constraint. Adapts to any memory size. Significantly faster than out-of-core-only or octree-only methods when memory is partially available.
++*   **Limitations:** Preprocessing is expensive (54% kd-tree calculations, 40% out-of-core setup). Kd-tree estimation has <5% error but requires downsampling. Lagrangian optimization only finds points on the lower convex hull, causing gaps in the memory-time curve. Out-of-core methods are significantly slower than in-core [S1, unofficial].
+ 
+ ## Background
+-The method was developed by Chiang, Silva, and Schroeder [S1, unofficial]. It extends earlier work on out-of-core extraction using interval trees by Chiang and Silva [7] and segment trees by Chiang and Silva [8]. It addresses memory consumption problems proposed by Bajaj, Pascucci, and Schikore [4] and others [11, 12, 20]. The method is designed for regularly structured volume data sets such as X MAS, BUNNY, BRAIN, BIGHEAD, ENGINE, and TESTDATA [S1, unofficial]. It was evaluated on an Athlon processor at 1410 MHz [S1, unofficial].
++The method was developed by Chiang, Silva, and Schroeder [S1, unofficial]. It extends earlier work on out-of-core extraction by Chiang and Silva (segment tree) and Chiang, Silva, and Schroeder (interval tree) [S1, unofficial]. It also builds on seed set methods by Bajaj, Pascucci, and Schikore, and Kreveld et al. [S1, unofficial]. The hybrid approach fills the gap between state-of-the-art methods by designing a memory-adaptive algorithm that optimally adapts to any given amount of available memory [S1, unofficial].
+ 
+ ## Sources

@@ -3,80 +3,231 @@
 Also called: Neural Opacity Light Field, PSH Implementation for i-NOLF
 
 ## Overview
-Instant Neural Opacity Light Fields (i-NOLF) is a real-time neural rendering method that represents scenes as local neural opacity light fields to achieve one-query-per-pixel rendering [S1, unofficial]. It combines spatial hash encoding with light field properties to avoid the computational overhead of hundreds of neural network forward passes per pixel, which is typical in standard neural radiance fields [S1, unofficial]. Unlike its siblings, i-NOLF decouples the outgoing radiance into view-independent diffuse and view-dependent specular components, using a cached density texture for efficient hit-point estimation and Perfect Spatial Hashing (PSH) specifically for the specular encoder to balance memory efficiency and rendering speed [S1, unofficial].
+Instant Neural Opacity Light Fields (i-NOLF) is a real-time neural rendering method that represents scenes as local neural opacity light fields to achieve one-query-per-pixel rendering [S1, unofficial]. It combines spatial hash encoding with light field properties to avoid the computational overhead of hundreds of neural network forward passes per pixel, which is typical in standard NeRF-based renderers [S1, unofficial]. Unlike [Local Light Field Fusion](1124-local-light-field-fusion.md) which relies on explicit light field structures, and [Neural Lumigraph Rendering](7369-neural-lumigraph-rendering.md) which uses neural radiance fields on lumigraphs, i-NOLF decouples diffuse and specular components and uses a proxy geometry with opacity refinement to handle complex details like hair and boundaries efficiently [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A surface mesh $M$ (proxy geometry), a set of training images with known camera poses, and a view direction $v$ (normalized 3D Cartesian vector).
-*   **Outputs:** Final outgoing radiance color $c$ and opacity $\alpha$ for each ray.
+*   **Inputs:** A surface mesh or proxy geometry $M$, view direction $v$, and ray origin.
+*   **Outputs:** Final outgoing radiance color $c$ and opacity $\alpha$.
 
 **Data Structures:**
-1.  **Density Texture Cubes:** A caching mechanism for the density field.
-    *   **Base Grid:** A uniform indexing grid of low resolution $b$ (typically 128) to index valid grid cells.
-    *   **Valid Cube Table:** Maps valid grid cells to addresses in a table of valid cubes.
-    *   **Cube Content:** Each cube is a uniform grid of resolution $r$ (typically 16) storing queried densities.
-    *   **Memory:** Cubes are moved to texture memory to boost cache coherency and exploit hardware-accelerated linear interpolation.
+1.  **Density Texture Cubes:** A set of small dense texture cubes representing the density field.
+    *   **Base Grid:** Uniform indexing grid of resolution $b$ (Typical value: 128) to index valid grid cells.
+    *   **Valid Cubes Table:** Maps valid grid cells to addresses in a table of valid cubes.
+    *   **Cube Content:** Uniform grid of resolution $r$ (Typical value: 16) storing queried densities.
+    *   **Storage:** Moved to texture memory for hardware-accelerated linear interpolation.
 2.  **Hash Tables:**
-    *   **Specular Hash Encoder ($E_s$):** Uses Perfect Spatial Hashing (PSH). The initial hash table stores features only for voxels surrounding hit points.
+    *   **Specular Hash Encoder ($E_s$):** Uses Perfect Spatial Hashing (PSH). Stores features only for voxels surrounding hit points.
     *   **Diffuse Hash Encoder ($E_d$):** Uses standard hash grid encoding.
 3.  **Neural Networks:**
-    *   **Specular MLP ($F_s$):** Takes encoded position $E_s(p)$, view direction $v$, and coarse opacity $\alpha_c$ as input. Outputs specular color $c_s$ and opacity $\alpha$.
-    *   **Diffuse MLP ($F_d$):** Takes encoded position $E_d(p)$ as input. Outputs diffuse color $c_d$ and specular tint $t$.
+    *   **Specular MLP ($F_s$):** Takes $E_s(p)$, view direction $v$, and coarse opacity $\alpha_c$ as input. Outputs specular color $c_s$ and opacity $\alpha$.
+    *   **Diffuse MLP ($F_d$):** Takes $E_d(p)$ as input. Outputs diffuse color $c_d$ and specular tint $t$.
 
 **Numbered Steps:**
 
-1.  **Hit Point Estimation and Coarse Opacity Accumulation:**
-    For a given ray, perform ray marching on the cached density texture cubes to find the hit point coordinate $P_h$.
-    *   Calculate the blending weight $w_i$ for each sample $i$ along the ray:
+1.  **Hit Point Estimation:**
+    *   Perform ray marching on the cached density texture cubes to find the ray-object hit point $P_h$.
+    *   To avoid noisy hit points on object boundaries or hair (common in standard NeRF blending), select the sample point with the largest blending weight $w_i$ as the hit point [S1, unofficial].
+    *   Accumulate sample weights into a coarse opacity $\alpha_c$ for the ray [S1, unofficial].
+    *   The blending weight is defined as:
         $$ w_i = T_i (1 - \exp(-\sigma_i \delta_i)) $$
-        where $\sigma_i$ is the density, $\delta_i$ is the distance between adjacent samples, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance.
-    *   Select the sample point with the largest blending weight $w_i$ as the hit point $P_h$. This empirical strategy avoids noisy hit points generated by standard blending on object boundaries or hair objects [S1, unofficial].
-    *   Accumulate the sample weights into a coarse opacity $\alpha_c$ for the ray [S1, unofficial].
+        where $\sigma_i$ is the density, $\delta_i$ is the distance between adjacent samples, and $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the transmittance [S1, unofficial].
 
-2.  **Diffuse Component Prediction:**
-    *   Encode the hit point coordinate $P_h$ using the diffuse hash encoder $E_d$ to get feature vector $E_d(P_h)$.
-    *   Pass $E_d(P_h)$ to the diffuse MLP $F_d$ to predict diffuse color $c_d$ and specular tint $t$:
-        $$ F_d: E_d(P_h) \rightarrow (c_d, t) $$
+2.  **Feature Encoding:**
+    *   Encode the hit point coordinate $P_h$ to a feature vector $E_s(P_h)$ using the specular hash encoder $E_s$ [S1, unofficial].
+    *   Encode the hit point coordinate $P_h$ to a feature vector $E_d(P_h)$ using the diffuse hash encoder $E_d$ [S1, unofficial].
 
-3.  **Specular Component Prediction:**
-    *   Encode the hit point coordinate $P_h$ using the specular hash encoder $E_s$ to get feature vector $E_s(P_h)$.
-    *   Concatenate $E_s(P_h)$, the normalized view direction $v$, and the coarse opacity $\alpha_c$.
-    *   Pass the concatenated features to the specular MLP $F_s$ to predict specular color $c_s$ and final opacity $\alpha$:
-        $$ F_s: (E_s(P_h), v, \alpha_c) \rightarrow (c_s, \alpha) $$
+3.  **Network Inference:**
+    *   **Specular Path:** Concatenate $E_s(P_h)$, the normalized view direction $v$ (in 3D Cartesian space), and the coarse opacity $\alpha_c$. Pass this through the Specular MLP $F_s$:
+        $$ F_s : (E_s(p), v, \alpha_c) \rightarrow (c_s, \alpha) $$
+        This outputs the view-dependent specular color $c_s$ and the refined opacity $\alpha$ [S1, unofficial].
+    *   **Diffuse Path:** Pass $E_d(P_h)$ through the Diffuse MLP $F_d$:
+        $$ F_d : E_d(p) \rightarrow (c_d, t) $$
+        This outputs the view-independent diffuse color $c_d$ and the specular tint $t$ [S1, unofficial].
 
-4.  **Final Radiance Computation:**
-    Combine the diffuse and specular components to obtain the final outgoing radiance $c$:
-    $$ c = c_d + t \cdot c_s $$
+4.  **Radiance Combination:**
+    *   Combine the diffuse and specular components to obtain the final outgoing radiance $c$:
+        $$ c = c_d + t \cdot c_s $$
+        This decoupling helps keep specular effects during compression and leverages the compressibility of the residual specular component [S1, unofficial].
 
-**Training Loss:**
-To jointly learn the parameters of hash grids $E_s, E_d$ and neural networks $F_s, F_d$, minimize the L2 loss between the predicted radiance/opacity and ground truth:
-$$ L = \frac{1}{N} \sum_{i=1}^N (\|c - c_{gt}\|^2 + \|\alpha - \alpha_{gt}\|^2) $$
-where $N$ is the number of rays in a batch sampled according to an optimizable error map, $c_{gt}$ is the ground truth color, and $\alpha_{gt}$ is the ground truth alpha [S1, unofficial].
+5.  **Training:**
+    *   Optimize parameters of hash grids $E_s, E_d$ and networks $F_s, F_d$ using an L2 loss on a batch of $N$ rays sampled according to an optimizable error map:
+        $$ L = \frac{1}{N} \sum_{i=1}^N (\|c - c_{gt}\|^2 + \|\alpha - \alpha_{gt}\|^2) $$
+        where $c_{gt}$ and $\alpha_{gt}$ are ground truth color and alpha values [S1, unofficial].
+    *   Use the Adam optimizer with parameter settings similar to i-NGP [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def hash_function(p, h_func):
+    """
+    Simple hash function for integer coordinate p.
+    In PSH, two hash functions h0 and h1 are used.
+    This is a placeholder for the specific hashing logic described in PSH.
+    """
+    # Implementation details of Perfect Spatial Hashing are complex;
+    # here we assume a standard integer hash for the feature lookup index.
+    return hash(p) % HASH_TABLE_SIZE
+
+def get_density_from_texture_cube(x, y, z, base_grid, cube_table, cube_res):
+    """
+    Retrieve density from cached density texture cubes.
+    """
+    # 1. Find base grid cell
+    base_idx = (base_grid_width * base_grid_height * (y // cube_res) + 
+                base_grid_width * (x // cube_res) + (z // cube_res))
+    
+    # 2. Get cube address from table
+    cube_addr = cube_table[base_idx]
+    
+    # 3. Local coordinates within the cube
+    local_x = x % cube_res
+    local_y = y % cube_res
+    local_z = z % cube_res
+    
+    # 4. Linear interpolation (hardware accelerated in practice)
+    # Simplified: return value at nearest neighbor or interpolated
+    return cube_table[cube_addr][local_x, local_y, local_z]
+
+def ray_marching_hit_point(ray_origin, ray_direction, base_grid, cube_table, cube_res):
+    """
+    Estimate hit point and coarse opacity using density texture cubes.
+    """
+    max_steps = 100
+    step_size = 0.01
+    current_pos = ray_origin
+    coarse_opacity = 0.0
+    max_weight = 0.0
+    hit_point = current_pos
+    
+    for i in range(max_steps):
+        # Get density at current position
+        density = get_density_from_texture_cube(
+            current_pos.x, current_pos.y, current_pos.z, 
+            base_grid, cube_table, cube_res
+        )
+        
+        # Calculate blending weight
+        # w_i = T_i * (1 - exp(-sigma_i * delta_i))
+        # T_i is transmittance from previous steps
+        # For simplicity, assuming delta_i is step_size
+        delta_i = step_size
+        sigma_i = density
+        
+        # Transmittance calculation would require accumulating previous densities
+        # Here we assume T_i is passed or calculated in a loop
+        # T_i = exp(-sum(sigma_j * delta_j))
+        
+        # Approximate weight for hit point selection
+        # In full implementation, T_i must be tracked
+        weight = 0.0 # Placeholder for actual weight calculation
+        
+        if weight > max_weight:
+            max_weight = weight
+            hit_point = current_pos
+            
+        # Accumulate coarse opacity
+        # alpha_i = T_i * (1 - exp(-sigma_i * delta_i))
+        # coarse_opacity += alpha_i
+        
+        current_pos += ray_direction * step_size
+        
+    return hit_point, coarse_opacity
+
+def encode_position_psh(p, hash_table, offset_table, h0, h1):
+    """
+    Perfect Spatial Hashing encoding.
+    """
+    # Find voxel corners
+    corners = get_voxel_corners(p)
+    
+    # Hash corner coordinates
+    indices = [h0(corner) + offset_table[h1(corner)] for corner in corners]
+    
+    # Look up features
+    features = [hash_table[idx] for idx in indices]
+    
+    # Tri-linear interpolation
+    return interpolate(features, p)
+
+def render_ray(ray_origin, ray_direction, base_grid, cube_table, cube_res, 
+               hash_table_s, offset_table_s, h0_s, h1_s,
+               hash_table_d, offset_table_d, h0_d, h1_d,
+               specular_mlp, diffuse_mlp):
+    """
+    One-query-per-ray rendering.
+    """
+    # Step 1: Hit point estimation
+    hit_point, coarse_opacity = ray_marching_hit_point(
+        ray_origin, ray_direction, base_grid, cube_table, cube_res
+    )
+    
+    # Step 2: Specular Encoding
+    E_s = encode_position_psh(hit_point, hash_table_s, offset_table_s, h0_s, h1_s)
+    
+    # Step 3: Diffuse Encoding
+    E_d = encode_position_psh(hit_point, hash_table_d, offset_table_d, h0_d, h1_d)
+    
+    # Step 4: Specular MLP
+    # F_s: (E_s(p), v, alpha_c) -> (c_s, alpha)
+    view_dir = normalize(ray_direction)
+    c_s, alpha = specular_mlp(E_s, view_dir, coarse_opacity)
+    
+    # Step 5: Diffuse MLP
+    # F_d: E_d(p) -> (c_d, t)
+    c_d, t = diffuse_mlp(E_d)
+    
+    # Step 6: Combine
+    c = c_d + t * c_s
+    
+    return c, alpha
+```
 
 **Parameters:**
-*   $b$: Resolution of the base uniform indexing grid. Typical value: 128 [S1, unofficial].
-*   $r$: Resolution of each individual density texture cube. Typical value: 16 [S1, unofficial].
-*   $M$: Surface mesh (proxy geometry) [S1, unofficial].
-*   $S^2$: Sphere of unit vectors representing view directions [S1, unofficial].
+*   $M$: Surface mesh or proxy geometry.
+*   $S^2$: Sphere of unit vectors representing view directions.
+*   $E_s$: Spatial hash encoder for specular component.
+*   $E_d$: Extra spatial hash encoder for diffuse component.
+*   $v$: Normalized view direction in 3D Cartesian space.
+*   $c_s$: View-dependent specular color output.
+*   $\alpha$: Refined opacity output.
+*   $\alpha_c$: Coarse opacity accumulated from sample weights.
+*   $\delta_i$: Distance between adjacent samples.
+*   $c_d$: Diffuse color output.
+*   $t$: Specular tint output.
+*   $N$: Number of rays in a batch.
+*   $c_{gt}$: Ground truth color.
+*   $b$: Resolution of base uniform indexing grid (Typical: 128).
+*   $r$: Resolution of each density texture cube (Typical: 16).
 
 **Edge Cases and Pitfalls:**
 *   **Proxy Geometry Ambiguity:** Learning an opacity light field with a bounding box as proxy geometry is difficult because spatially adjacent points have similar encoded features but different lumispheres (one-to-many mapping) [S1, unofficial].
-*   **Hit Point Noise:** Standard NeRF hit depth estimation generates noisy hit points on object boundaries and hair objects [S1, unofficial].
-*   **Encoding Choice:** PSH is used for the specular encoder $E_s$ because it offers superior memory efficiency and speed, while the diffuse component is cached in texture cubes, making the standard hash grid sufficient for the diffuse encoder $E_d$ [S1, unofficial].
+*   **Noisy Hit Points:** Standard NeRF hit depth estimation generates noisy hit points on object boundaries and hair objects [S1, unofficial]. The largest blending weight strategy mitigates this.
+*   **Memory Efficiency:** PSH is used for specular because it offers superior memory efficiency and speed, while diffuse is cached in texture cubes, making the hash grid sufficient for diffuse [S1, unofficial].
 
 ## Subtopics
 
+### i-NOLF
+An ultra-fast renderer that marries opacity light fields with i-NGP to conduct one-query-per-ray rendering, avoiding redundant computational overhead [S1, unofficial]. It uses density texture cubes for fast hit point estimation and decouples diffuse/specular components for efficient encoding [S1, unofficial].
+
 ### Density Texture Cubes
-A caching mechanism representing the density field as a set of small dense texture cubes to skip empty space and accelerate hit point estimation (ray marching) by leveraging hardware-accelerated linear interpolation in texture memory [S1, unofficial]. It builds a base uniform indexing grid of low resolution $b$ to index valid grid cells, maps them to a table of valid cubes, and stores queried densities in uniform grids of resolution $r$ within each cube [S1, unofficial]. Hit point estimation takes less than 0.1ms for rendering a 1920x1080 image [S1, unofficial].
+A caching mechanism representing the density field as a set of small dense texture cubes to skip empty space and accelerate hit point estimation (ray marching) by leveraging hardware-accelerated linear interpolation in texture memory [S1, unofficial]. It uses a base uniform indexing grid (resolution $b=128$) to index valid cells, which map to a table of valid cubes (resolution $r=16$) [S1, unofficial]. Hit point estimation takes less than 0.1ms for a 1920x1080 image [S1, unofficial].
 
 ## Operating characteristics
-*   **Speed:** i-NOLF achieves ultra-fast rendering, performing one-query-per-ray rendering to avoid redundant computational overhead [S1, unofficial]. Hit point estimation for a 1920x1080 image takes less than 0.1ms [S1, unofficial].
-*   **Memory:** The use of Perfect Spatial Hashing (PSH) for the specular encoder offers superior memory efficiency compared to standard multiresolution hash encoding, which can cause significant memory cache traffic and waste memory bandwidth [S1, unofficial]. The density field is compactly stored using sparse texture cubes rather than a dense grid [S1, unofficial].
-*   **Quality:** The method balances pros and cons by using PSH for specular (efficiency) and hash grid for diffuse (modeling capability), resulting in slightly degraded rendering quality compared to denser encodings but maintaining high performance [S1, unofficial].
-*   **Limitations:** The reliance on a proxy geometry $M$ and the difficulty of learning opacity light fields with simple bounding boxes can limit geometric accuracy for complex, thin structures if not handled carefully [S1, unofficial].
+*   **Time Complexity:** One-query-per-ray rendering, significantly faster than standard NeRF which requires hundreds of forward passes per pixel [S1, unofficial]. Hit point estimation takes less than 0.1ms for 1920x1080 [S1, unofficial].
+*   **Memory Complexity:** Uses Perfect Spatial Hashing (PSH) for specular to improve memory efficiency and speed. Diffuse is cached in texture cubes. Hash tables store features only for voxels surrounding hit points, allowing finer grid resolution with acceptable parameter scale [S1, unofficial].
+*   **Performance:** Achieves real-time rendering speeds suitable for cloud platforms and interactive applications [S1, unofficial].
+*   **Strengths:** Ultra-fast rendering, handles complex details (hair, boundaries) better than standard NeRF hit estimation, memory efficient via PSH and texture cubes.
+*   **Limitations:** Requires proxy geometry $M$. Learning with poor proxy geometry (e.g., simple bounding boxes) can lead to artifacts due to one-to-many mappings [S1, unofficial]. Slightly degraded rendering quality compared to non-optimized NeRF due to approximations [S1, unofficial].
+*   **When to Use:** Real-time neural rendering, cloud rendering platforms, scenes with complex geometry and view-dependent effects.
+*   **When Not to Use:** Scenes where proxy geometry is unavailable or highly inaccurate, or when maximum possible rendering quality is prioritized over speed.
 
 ## Background
-i-NOLF was introduced by Luo et al. in the paper "NEPHELE: A Neural Platform for Highly Realistic Cloud Radiance Rendering" [S1, unofficial]. The work aims to accelerate the real-time neural renderer i-NGP by improving memory request efficiency with Perfect Spatial Hashing (PSH) and marrying opacity light fields with i-NGP for one-query-per-ray rendering [S1, unofficial]. The opacity light field concept builds on earlier image-based rendering techniques that model the plenoptic function via surface light fields and opacity hulls to handle view-dependent shape and elaborate details like feathers [S1, unofficial]. The method decouples radiance into diffuse and specular components, analogous to the median removal strategy in surface light field compression, to improve compressibility and learnability of the specular residual [S1, unofficial].
+i-NOLF was introduced in the paper "NEPHELE: A Neural Platform for Highly Realistic Cloud Radiance Rendering" by Luo et al. in 2023 [S1, unofficial]. It builds on the i-NGP renderer [Müller et al. 2022] and aims to accelerate real-time neural rendering by combining opacity light fields with instant neural graphics primitives. The method addresses the computational bottlenecks of standard NeRF rendering and the limitations of multiresolution hash encoding on GPUs [S1, unofficial].
 
 ## Sources
 [S1] NEPHELE: A Neural Platform for Highly Realistic Cloud Radiance Rendering, https://arxiv.org/abs/2303.04086v1, fetched 2026-10-27 (unofficial)

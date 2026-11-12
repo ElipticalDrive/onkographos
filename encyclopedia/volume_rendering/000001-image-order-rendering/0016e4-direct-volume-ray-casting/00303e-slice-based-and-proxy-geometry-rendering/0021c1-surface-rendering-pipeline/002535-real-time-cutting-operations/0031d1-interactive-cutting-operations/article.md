@@ -7,92 +7,73 @@ Interactive Cutting Operations is a method for real-time modification of cutting
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Original volume data $V(x,y,z)$, cutting plane defined by normal $\mathbf{n}=(a,b,c)$ and distance $d$ (equation $ax+by+cz+d=0$), viewing direction, segmentation function for surface extraction $b(i,j,k)$, and optional segmentation function for region of interest $s(i,j,k)$.
-- Output: Rendered image with interactive cutting plane.
+- Input: Original volume data $V(x,y,z)$, cutting plane defined by normal $\mathbf{n}=(a,b,c)$ and distance $d$ (equation $ax+by+cz+d=0$), viewing direction, segmentation function for surface extraction $b(i,j,k)$, and optional segmentation function for region of interest $s(i,j,k)$ [S1, unofficial].
+- Output: Rendered image with interactive cutting plane [S1, unofficial].
 
 **Data Structures:**
-- Volume $V$: 3D array of voxel values, indexed by $(x,y,z)$.
-- Surface Points: List of $(x,y,z)$ coordinates extracted during preprocessing, potentially sorted by $z$ then $y$.
-- Cutting Plane: Parameters $(a,b,c,d)$.
+- Volume $V$: 3D array of voxel values, indexed by $(x,y,z)$ [S1, unofficial].
+- Surface Points: List of $(x,y,z)$ coordinates extracted during preprocessing, potentially sorted by $z$ then $y$ [S1, unofficial].
+- Cutting Plane: Parameters $(a,b,c,d)$ [S1, unofficial].
 
 **Steps:**
-1. **Halfspace Check for Internal Voxels:**
-   For each potentially visible voxel $(x,y,z)$, determine if it lies in the visible halfspace. Substitute coordinates into the plane equation:
+1. **Halfspace Check for Internal Voxels:** For each potentially visible voxel $(x,y,z)$, determine if it lies in the visible halfspace [S1, unofficial]. Substitute coordinates into the plane equation:
    $$r = a \cdot x + b \cdot y + c \cdot z + d$$
-   If the sign of $r$ indicates the voxel is in the halfspace containing the viewpoint, it is rendered; otherwise, it is ignored [S1, unofficial].
+   The sign of the residual $r$ indicates whether the voxel is rendered or ignored [S1, unofficial].
    - Optimization: Since voxels are stored sorted by $z$, evaluate $c \cdot z + d$ once per $z$-slice [S1, unofficial].
    - Further Optimization: Sort surface points within a slice by $y$ coordinates to optimize elimination [S1, unofficial]. This sorting occurs automatically during row-continuous visibility calculation in preprocessing, adding negligible cost [S1, unofficial].
 
-2. **Projection of Intersected Voxels:**
-   Voxels intersected by the cutting plane must be rendered to show the cut surface [S1, unofficial].
-   - Assume the principal component of the plane normal is $z$ (i.e., $|c|$ is largest). If not, rotate the coordinate system or adapt the logic [S1, unofficial].
-   - Iterate over all discrete $(x,y)$ pairs in the volume bounds ($x \in \{0, \dots, X-1\}, y \in \{0, \dots, Y-1\}$).
-   - Substitute $(x,y)$ into the explicit plane equation to solve for $z$:
-     $$z = \frac{-a \cdot x - b \cdot y - d}{c}$$
-   - Use the calculated $z$ to address the original volume $V(x,y,z)$ [S1, unofficial].
-   - Render these voxels using gray-scaled data values [S1, unofficial].
+2. **Projection of Intersected Voxels:** Voxels intersected by the cutting plane must be rendered to show the cut surface [S1, unofficial]. Assume the principal component of the plane normal is $z$ (i.e., $|c|$ is largest) [S1, unofficial]. Iterate over all discrete $(x,y)$ pairs in the volume bounds ($x \in \{0, \dots, X-1\}, y \in \{0, \dots, Y-1\}$) [S1, unofficial]. Substitute $(x,y)$ into the explicit plane equation to solve for $z$:
+   $$z = \frac{-a \cdot x - b \cdot y - d}{c}$$
+   Use the calculated $z$ to address the original volume $V(x,y,z)$ [S1, unofficial]. Render these voxels using gray-scaled data values [S1, unofficial].
 
-3. **Region of Interest Check:**
-   Before projecting intersected voxels, check if they belong to the region of interest using an additional segmentation function $s(i,j,k)$ [S1, unofficial].
-   - This function may differ from the surface extraction function $b(i,j,k)$ [S1, unofficial].
-   - Purpose: Prevent low-density voxels (e.g., surrounding air) from hiding surface points [S1, unofficial]. For example, if rendering the skull surface, a bone threshold segmentation function is not suitable for the cut slice because it may contain low-density voxels below the bone threshold [S1, unofficial].
+3. **Region of Interest Check:** Before projecting intersected voxels, check if they belong to the region of interest using an additional segmentation function $s(i,j,k)$ [S1, unofficial]. This function may differ from the surface extraction function $b(i,j,k)$ [S1, unofficial]. Purpose: Prevent low-density voxels (e.g., surrounding air) from hiding surface points [S1, unofficial]. For example, if rendering the skull surface, a bone threshold segmentation function is not suitable for the cut slice because it may contain low-density voxels below the bone threshold [S1, unofficial].
 
-4. **Rendering Order:**
-   - If surface points are in the halfspace containing the viewpoint, render internal voxels intersected by the cutting plane first, then project surface points [S1, unofficial].
-   - Otherwise, reverse the order [S1, unofficial].
+4. **Rendering Order:** If surface points are in the halfspace containing the viewpoint, render internal voxels intersected by the cutting plane first, then project surface points [S1, unofficial]. Otherwise, reverse the order [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_interactive_cutting(volume, surface_points, plane_normal, plane_dist, view_direction, surface_seg_func, roi_seg_func):
+def render_interactive_cutting(volume, surface_points, plane_normal, plane_dist, camera_pos, surface_seg_func, roi_seg_func):
     a, b, c = plane_normal
     d = plane_dist
-    
-    # Determine if viewpoint is in positive or negative halfspace
-    # Assume viewpoint is at origin or known position; here we check a sample point or use view direction
-    # Simplified: check if view direction dot normal > 0 implies positive halfspace is front
-    # For this example, assume we render positive halfspace voxels
-    # In practice, determine which halfspace contains the camera
-    
-    # 1. Render internal voxels (potentially visible) with halfspace check
-    # Optimization: precompute z-slice terms
-    z_slice_terms = {}
-    for z in range(volume.depth):
-        z_slice_terms[z] = c * z + d
-        
+    # Determine which halfspace contains the camera
+    r_cam = a * camera_pos[0] + b * camera_pos[1] + c * camera_pos[2] + d
+    positive_halfspace = r_cam > 0
+
+    # 1. Halfspace check for internal voxels
+    z_slice_terms = [c * z + d for z in range(volume.depth)]
+    voxels_to_render = []
+
     for z in range(volume.depth):
         z_term = z_slice_terms[z]
         for y in range(volume.height):
             for x in range(volume.width):
-                # Halfspace check
-                r = a * x + b * y + z_term + d
-                if r > 0:  # Assuming positive halfspace is visible
-                    voxel_val = volume[x, y, z]
+                r = a * x + b * y + z_term
+                if (r > 0) == positive_halfspace:
                     if surface_seg_func(x, y, z):
-                        # Render surface point
-                        pass
+                        voxels_to_render.append(('surface', x, y, z, volume[x, y, z]))
                     else:
-                        # Render internal voxel
-                        pass
-                        
-    # 2. Render intersected voxels
-    # Assume principal component is z
+                        voxels_to_render.append(('internal', x, y, z, volume[x, y, z]))
+
+    # 2. Projection of intersected voxels
+    intersected_voxels = []
     for x in range(volume.width):
         for y in range(volume.height):
-            # Solve for z
             if c != 0:
                 z_float = (-a * x - b * y - d) / c
                 z = round(z_float)
                 if 0 <= z < volume.depth:
-                    voxel_val = volume[x, y, z]
-                    # Check region of interest
                     if roi_seg_func(x, y, z):
-                        # Render intersected voxel
-                        pass
-                        
-    # 3. Render remaining surface points if not in visible halfspace
-    # (Order depends on view direction relative to plane)
+                        intersected_voxels.append((x, y, z, volume[x, y, z]))
+
+    # 3. Determine rendering order based on viewpoint
+    if positive_halfspace:
+        render_list = intersected_voxels + voxels_to_render
+    else:
+        render_list = voxels_to_render + intersected_voxels
+
+    return render_list
 ```
 
 ## Operating characteristics

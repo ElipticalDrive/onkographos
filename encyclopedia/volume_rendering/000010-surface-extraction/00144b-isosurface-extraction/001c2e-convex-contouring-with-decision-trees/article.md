@@ -3,299 +3,213 @@
 Also called: Convex Contouring, Convex contouring of volumetric data
 
 ## Overview
-Convex Contouring is a table-driven isosurface extraction technique that generates topologically consistent surfaces with a local convexity property, ensuring that the negative space inside each cell is convex [S1]. Unlike Marching Cubes, which may produce disconnected non-convex negative space, this method preserves convexity, enabling fast collision detection on the triangulated isosurface [S1]. It differs from other cell-based algorithms by using a composite look-up table that associates each sign configuration with a compact decision tree for dynamic triangulation, minimizing errors through algorithmic table construction rather than manual entry [S1].
+Convex Contouring is a table-driven isosurface extraction technique that generates topologically consistent surfaces with a local convexity property, ensuring that the negative space inside each cell is convex [S1]. Unlike Marching Cubes, which may produce disconnected non-convex negative space, this method preserves convexity, enabling fast collision detection on the triangulated isosurface [S1]. It differs from other cell-based algorithms by using pre-computed decision trees to dynamically select triangulations based on corner values, minimizing errors through algorithmic table construction rather than manual entry [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A volumetric dataset defined on a regular grid (cubic cells). Each cell contains scalar values at its 8 corners. An isovalue threshold is used to determine the sign of each corner (positive or negative relative to the isovalue).
-*   **Output:** A triangle mesh representing the isosurface.
+**Inputs and Outputs**
+*   **Input:** A volumetric dataset defined on a regular grid (typically cubic cells). Each cell contains scalar values at its vertices. The underlying implicit function is assumed to be trilinear within each cell [S1].
+*   **Output:** A triangulated isosurface mesh.
 
-**Data Structures:**
-1.  **Sign Configuration:** A 8-bit integer representing the signs of the 8 corners of a cubic cell.
-2.  **Look-up Table (LUT):** A pre-computed table indexed by sign configuration. Each entry contains:
-    *   Patch boundaries: Lists of edge intersections forming the boundary of each convex contour patch.
-    *   Decision Tree: A structure for dynamic triangulation.
-3.  **Decision Tree Node:**
-    *   `test_id`: Identifier for the 4-point test (indices of vertices V1, V2, V3, V4).
-    *   `result_true`: Index of the child node if the test condition is met.
-    *   `result_false`: Index of the child node if the test condition is not met.
-    *   `triangulation_id`: Leaf node identifier pointing to the final set of triangles.
+**Data Structures**
+*   **Look-up Table:** A composite table associating each sign configuration (the signs of the scalar values at the 8 corners of a cell relative to the isovalue) with a compact decision tree [S1].
+*   **Decision Tree:** A pre-computed structure where each node represents a "4-point test" and edges represent the outcome (front-facing or back-facing). The leaves represent the selected triangulation [S1].
+*   **Patch:** A connected component of the convex contour within a cell. Patches may contain holes [S1].
 
-**Algorithm Steps:**
+**Method Steps**
 
-1.  **Assumption:** The underlying implicit function is trilinear inside each cell [S1].
-2.  **Convex Hull Definition:** The convex hull of the negative space in a cell is the convex hull of all negative cell corners and edge intersections [S1]. The convex contour is the part of this convex hull that lies interior to the cell [S1].
-3.  **Boundary Determination:** The convex contour is outlined by linear convex contours on the faces of the cell. Since the linear convex contour in a 2D square is uniquely determined by the signs at the 4 corners, neighboring 3D cells share the same linear contour on common faces, ensuring topological consistency [S1].
-4.  **Patch Identification:** A convex contour may consist of multiple connected components called patches. Each patch may contain holes. Each hole is surrounded by a ring of linear convex contours detectable by the signs at the corners [S1].
-5.  **Triangulation Set Construction:** Construct a set $S$ of all possible triangulations for each patch. The vertices of these triangles are restricted to fixed cell edges, reducing the size of $S$ [S1].
-6.  **Pre-triangulation (Filtering):** Eliminate triangulations containing ineligible triangles. A triangle is ineligible if it lies completely to the back of all non-degenerate border triangles. This reduces the search space for remaining triangulations [S1].
-7.  **Decision Tree Pre-computation:**
-    *   For the remaining triangulations, pre-compute a set of 4-point tests on the vertices of the patch (edge intersections) to distinguish between them [S1].
-    *   Organize these tests into a decision tree structure.
-    *   Use a search algorithm to find the optimal set of tests that produces a decision tree with the smallest depth. The minimal depth is lower bounded by $\log_2 N$, where $N$ is the total number of triangulations [S1].
-    *   Store the resulting decision tree in the LUT entry for the corresponding sign configuration [S1].
-8.  **Runtime Processing (Per Cell):**
-    *   Determine the sign configuration of the cell.
-    *   Retrieve the LUT entry for this configuration.
-    *   Identify the patches and their boundary edge intersections.
-    *   For each patch, traverse the pre-computed decision tree using 4-point tests to select the correct triangulation from the reduced set $S$ [S1].
-    *   Generate triangles for the patch and the faces filling the negative regions on cell faces [S1].
+1.  **Sign Configuration Determination:** For each cell, determine the sign configuration by comparing the scalar values at the 8 vertices to the isovalue. This yields an index into the look-up table [S1].
 
-**The 4-Point Test:**
-Given four distinct edge intersections $V_1, V_2, V_3, V_4$:
-*   If $V_4$ lies on the front-facing side of the triangle $(V_1, V_2, V_3)$, then:
-    *   The inverted triangle $(V_1, V_3, V_2)$ does not belong to the convex contour.
-    *   Triangles $(V_1, V_2, V_4)$, $(V_2, V_3, V_4)$, and $(V_3, V_1, V_4)$ do not satisfy the convex hull property [S1].
-*   If $V_4$ does not lie on the front-facing side of $(V_1, V_2, V_3)$, then:
-    *   Triangles $(V_1, V_2, V_3)$, $(V_1, V_4, V_2)$, $(V_2, V_4, V_3)$, and $(V_1, V_3, V_4)$ do not lie on the convex contour [S1].
-*   If all vertices lie on the same plane, either choice can be made [S1].
+2.  **Boundary Detection:** Identify the linear convex contours on the faces of the cell. In 2D, a linear convex contour on a square face is uniquely determined by the signs at the 4 corners. These 2D contours form the boundary of the 3D convex contour [S1].
+    *   The convex contour inside the cell is the part of the convex hull of the negative space (negative corners and edge intersections) that lies interior to the cell [S1].
+    *   Identify patches (connected components of the contour) and holes. Each hole is surrounded by a ring of linear convex contours [S1].
 
-**Pseudocode:**
+3.  **Pre-triangulation (Filtering):** Construct the set $S$ of all possible triangulations for each patch. The vertices of these triangles are restricted to fixed cell edge intersections.
+    *   Eliminate triangulations containing "ineligible" triangles. A triangle is ineligible if it lies completely to the back of all non-degenerate border triangles formed by the edges [S1].
+    *   This reduces the search space $N$ (the number of remaining triangulations) significantly. For example, for some sign configurations, $N$ is reduced to 1 or 4 [S1].
+
+4.  **Decision Tree Lookup:** Retrieve the pre-computed decision tree from the look-up table corresponding to the sign configuration [S1].
+    *   The decision tree is optimized to have minimal depth. The minimal depth is lower bounded by $\log_2 N$, where $N$ is the number of remaining triangulations after pre-triangulation [S1].
+    *   Walk down the decision tree using 4-point tests to select the correct triangulation from $S$ [S1].
+
+5.  **4-Point Test:** This is the core geometric test used in the decision tree nodes. Given four distinct edge intersections $V_1, V_2, V_3, V_4$:
+    *   Assume triangles on the convex contour face inside the convex hull of the negative space.
+    *   Test if $V_4$ lies on the front-facing side of the triangle $(V_1, V_2, V_3)$.
+    *   **Case A (Front-facing):** If $V_4$ is on the front-facing side of $(V_1, V_2, V_3)$:
+        *   The inverted triangle $(V_1, V_3, V_2)$ does not belong to the convex contour.
+        *   Triangles $(V_1, V_2, V_4)$, $(V_2, V_3, V_4)$, and $(V_3, V_1, V_4)$ do not satisfy the convex hull property.
+        *   These triangulations are eliminated [S1].
+    *   **Case B (Back-facing or Coplanar):** If $V_4$ does not lie on the front-facing side of $(V_1, V_2, V_3)$:
+        *   Triangles $(V_1, V_2, V_3)$, $(V_1, V_4, V_2)$, $(V_2, V_4, V_3)$, and $(V_1, V_3, V_4)$ do not lie on the convex contour.
+        *   These triangulations are eliminated.
+        *   If all vertices lie on the same plane, either choice can be made [S1].
+
+6.  **Mesh Generation:** The leaf of the decision tree reached after the tests specifies the final set of triangles for the patch. Generate the triangles using the edge intersection coordinates [S1].
+
+**Pseudocode**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def compute_convex_contour(cell_values, isovalue):
+def convex_contouring(grid, isovalue):
     """
-    Extracts the convex contour for a single cubic cell.
+    Extracts isosurface using Convex Contouring with Decision Trees.
     
     Args:
-        cell_values: List of 8 scalar values at the cell corners.
+        grid: 3D array of scalar values.
         isovalue: The threshold value for the isosurface.
         
     Returns:
-        List of triangles (each triangle is a tuple of 3 vertices).
-    """
-    # 1. Determine signs
-    # Corner indices: 0-7. Sign is 1 if value > isovalue, else 0.
-    # Note: The paper defines "negative space" as the space where value < isovalue.
-    # We track which corners are "negative" (inside the object) or "positive" (outside).
-    # Let's define sign_bit = 1 if cell_values[i] < isovalue (negative), else 0.
-    # However, standard Marching Cubes often uses 1 for positive. 
-    # The paper states: "convex hull of the negative space... convex hull of all negative cell corners".
-    # Let's assume we identify the set of negative corners.
-    
-    negative_corners = []
-    edge_intersections = {} # Map edge_index -> intersection_point
-    
-    # Define edges of a cube (12 edges)
-    # Edge indices 0-11. Each edge connects two corners.
-    edges = [
-        (0, 1), (1, 3), (3, 2), (2, 0), # Bottom face
-        (4, 5), (5, 7), (7, 6), (6, 4), # Top face
-        (0, 4), (1, 5), (3, 7), (2, 6)  # Vertical edges
-    ]
-    
-    # Identify negative corners and compute edge intersections
-    sign_config = 0
-    for i in range(8):
-        if cell_values[i] < isovalue:
-            negative_corners.append(i)
-            sign_config |= (1 << i)
-        else:
-            sign_config |= (0 << i)
-            
-    # Compute edge intersections
-    for edge_idx, (c1, c2) in enumerate(edges):
-        v1 = cell_values[c1]
-        v2 = cell_values[c2]
-        
-        # Check if the edge crosses the isovalue
-        if (v1 < isovalue) != (v2 < isovalue):
-            # Linear interpolation
-            t = (isovalue - v1) / (v2 - v1)
-            # Assuming unit cube, corners at integer coordinates
-            p1 = get_corner_position(c1)
-            p2 = get_corner_position(c2)
-            intersection = p1 + t * (p2 - p1)
-            edge_intersections[edge_idx] = intersection
-            
-    # 2. Retrieve LUT entry
-    # The LUT is pre-computed. We assume it's available globally.
-    lut_entry = lookup_lut(sign_config)
-    
-    # 3. Identify patches
-    patches = lut_entry['patches']
-    
-    triangles = []
-    
-    # 4. Triangulate each patch
-    for patch in patches:
-        # Patch contains a list of edge indices forming the boundary
-        boundary_edge_indices = patch['boundary_edges']
-        
-        # Get the vertices for this patch (edge intersections)
-        patch_vertices = [edge_intersections[e] for e in boundary_edge_indices]
-        
-        # Get the decision tree for this sign config
-        decision_tree = lut_entry['decision_tree']
-        
-        # Traverse decision tree to find triangulation
-        triangulation_id = traverse_decision_tree(decision_tree, patch_vertices)
-        
-        # Get the triangles for this triangulation
-        patch_triangles = get_triangles_for_triangulation(triangulation_id, patch_vertices)
-        triangles.extend(patch_triangles)
-        
-    # 5. Fill negative regions on cell faces
-    # The convex hull includes triangles filling the negative regions on cell faces.
-    # These are determined by the linear convex contours on the faces.
-    face_triangles = fill_face_negative_regions(cell_values, isovalue, negative_corners)
-    triangles.extend(face_triangles)
-    
-    return triangles
-
-def traverse_decision_tree(node, vertices):
-    """
-    Traverses the decision tree to determine the correct triangulation.
-    
-    Args:
-        node: Current node in the decision tree.
-        vertices: List of vertex positions for the patch.
-        
-    Returns:
-        Triangulation ID.
-    """
-    while not node.is_leaf():
-        # Perform 4-point test
-        # node.test_id contains indices V1, V2, V3, V4
-        v1 = vertices[node.test_id.V1]
-        v2 = vertices[node.test_id.V2]
-        v3 = vertices[node.test_id.V3]
-        v4 = vertices[node.test_id.V4]
-        
-        # Check if V4 is on the front-facing side of (V1, V2, V3)
-        # Front-facing means V4 is on the side of the normal (V2-V1) x (V3-V1)
-        normal = cross_product(v2 - v1, v3 - v1)
-        vector_v1_v4 = v4 - v1
-        dot_product = dot_product(normal, vector_v1_v4)
-        
-        if dot_product > 0: # V4 is on the front-facing side
-            node = node.result_true
-        else:
-            node = node.result_false
-            
-    return node.triangulation_id
-
-def get_corner_position(corner_index):
-    """
-    Returns the 3D position of a corner index in a unit cube.
-    """
-    x = corner_index & 1
-    y = (corner_index >> 1) & 1
-    z = (corner_index >> 2) & 1
-    return Vector3(x, y, z)
-
-def fill_face_negative_regions(cell_values, isovalue, negative_corners):
-    """
-    Fills the negative regions on the cell faces with triangles.
-    This is based on the linear convex contours on the 2D faces.
+        List of triangles (each triangle is a tuple of 3 vertex coordinates).
     """
     triangles = []
-    # There are 6 faces. Each face is a square with 4 corners.
-    faces = [
-        [0, 1, 3, 2], # Bottom (z=0)
-        [4, 5, 7, 6], # Top (z=1)
-        [0, 1, 5, 4], # Front (y=0)
-        [2, 3, 7, 6], # Back (y=1)
-        [0, 2, 6, 4], # Left (x=0)
-        [1, 3, 7, 5]  # Right (x=1)
-    ]
+    # Pre-computed look-up table mapping sign_config -> decision_tree
+    # decision_tree is a list of nodes, each node is (v1, v2, v3, v4, left_child, right_child)
+    # or a leaf index.
+    lookup_table = precompute_lookup_table() 
     
-    for face_corners in faces:
-        # Determine signs of the 4 corners of this face
-        face_signs = [cell_values[c] < isovalue for c in face_corners]
+    for each cell in grid:
+        # 1. Determine sign configuration
+        signs = []
+        for vertex in cell.vertices:
+            if grid[vertex] > isovalue:
+                signs.append(1)
+            else:
+                signs.append(0)
+        sign_config = tuple(signs)
         
-        # Determine the linear convex contour on this 2D square
-        # The linear convex contour is uniquely determined by the signs.
-        # It consists of line segments connecting edge intersections.
-        # We need to identify which edges have intersections.
-        face_edges = [
-            (0, 1), (1, 3), (3, 2), (2, 0)
-        ]
+        # 2. Get decision tree for this configuration
+        decision_tree = lookup_table[sign_config]
         
-        edge_intersections_face = []
-        for i, (c1, c2) in enumerate(face_edges):
-            if face_signs[c1] != face_signs[c2]:
-                # Compute intersection
-                v1 = cell_values[face_corners[c1]]
-                v2 = cell_values[face_corners[c2]]
-                t = (isovalue - v1) / (v2 - v1)
-                p1 = get_corner_position(face_corners[c1])
-                p2 = get_corner_position(face_corners[c2])
-                intersection = p1 + t * (p2 - p1)
-                edge_intersections_face.append((i, intersection))
-                
-        # The linear convex contour on a 2D square is a set of segments.
-        # If there are 2 intersections, they form a segment.
-        # If there are 4 intersections, they form a polygon (usually a quad or two triangles).
-        # The negative space on the face is filled by triangles.
+        # 3. Identify edge intersections and patches
+        # Calculate exact positions of edge intersections using trilinear interpolation
+        edge_intersections = compute_edge_intersections(cell, isovalue)
         
-        # Simplified logic: The negative space on the face is the convex hull of the negative corners and edge intersections.
-        # Since it's 2D, we can just triangulate the polygon formed by the negative region.
+        # Identify patches and their boundary vertices based on signs
+        # This step determines the set of candidate triangulations S
+        patches = identify_patches(cell, signs, edge_intersections)
         
-        # Identify negative points on this face
-        negative_points = []
-        for i, c in enumerate(face_corners):
-            if face_signs[c]:
-                negative_points.append(get_corner_position(c))
-                
-        for idx, pt in edge_intersections_face:
-            # Check if this edge is part of the negative boundary
-            # An edge is part of the negative boundary if one corner is negative and the other is positive
-            c1, c2 = face_edges[idx]
-            if face_signs[c1] != face_signs[c2]:
-                negative_points.append(pt)
-                
-        # Triangulate the polygon of negative points on the face
-        # Since it's convex, we can fan triangulate from the first point
-        if len(negative_points) >= 3:
-            for i in range(1, len(negative_points) - 1):
-                triangles.append((negative_points[0], negative_points[i], negative_points[i+1]))
-                
+        for patch in patches:
+            # 4. Pre-triangulation: Filter set S
+            # Identify ineligible triangles based on border triangles
+            candidate_triangulations = get_all_triangulations(patch)
+            valid_triangulations = []
+            
+            for tri_set in candidate_triangulations:
+                if is_valid_pre_triangulation(tri_set, patch.border_triangles):
+                    valid_triangulations.append(tri_set)
+            
+            # If only one triangulation remains, use it directly
+            if len(valid_triangulations) == 1:
+                triangles.extend(valid_triangulations[0])
+                continue
+            
+            # 5. Use decision tree to select triangulation
+            # The decision tree nodes are 4-point tests
+            selected_tri_set = traverse_decision_tree(
+                decision_tree, 
+                edge_intersections, 
+                valid_triangulations
+            )
+            triangles.extend(selected_tri_set)
+            
     return triangles
+
+def is_valid_pre_triangulation(tri_set, border_triangles):
+    """
+    Checks if any triangle in tri_set lies completely to the back 
+    of all non-degenerate border triangles.
+    """
+    for triangle in tri_set:
+        if is_ineligible(triangle, border_triangles):
+            return False
+    return True
+
+def is_ineligible(triangle, border_triangles):
+    """
+    A triangle is ineligible if it lies completely to the back 
+    of all non-degenerate border triangles.
+    """
+    for border in border_triangles:
+        if not border.is_degenerate():
+            if triangle.is_behind(border):
+                return True
+    return False
+
+def traverse_decision_tree(node, vertices, valid_triangulations):
+    """
+    Walks the decision tree to find the correct triangulation.
+    """
+    if node.is_leaf():
+        return valid_triangulations[node.index]
+    
+    v1, v2, v3, v4 = node.vertices
+    # Perform 4-point test
+    # Check if v4 is on the front-facing side of (v1, v2, v3)
+    if is_front_facing(v1, v2, v3, v4):
+        # Case A: Eliminate triangles containing (v1, v3, v2), (v1, v2, v4), (v2, v3, v4), (v3, v1, v4)
+        filtered = filter_triangulations(valid_triangulations, 
+                                        excluded=[(v1,v3,v2), (v1,v2,v4), (v2,v3,v4), (v3,v1,v4)])
+        return traverse_decision_tree(node.left_child, vertices, filtered)
+    else:
+        # Case B: Eliminate triangles containing (v1, v2, v3), (v1, v4, v2), (v2, v4, v3), (v1, v3, v4)
+        filtered = filter_triangulations(valid_triangulations,
+                                        excluded=[(v1,v2,v3), (v1,v4,v2), (v2,v4,v3), (v1,v3,v4)])
+        return traverse_decision_tree(node.right_child, vertices, filtered)
+
+def is_front_facing(v1, v2, v3, v4):
+    """
+    Returns True if v4 lies on the front-facing side of triangle (v1, v2, v3).
+    Assumes consistent winding order for front-facing.
+    """
+    # Compute normal of triangle (v1, v2, v3)
+    normal = cross_product(subtract(v2, v1), subtract(v3, v1))
+    # Vector from v1 to v4
+    vec = subtract(v4, v1)
+    # Dot product
+    dot = dot_product(normal, vec)
+    # If dot > 0, v4 is on the front side (assuming outward normal)
+    return dot > 0
 ```
 
-**Parameters:**
+**Parameters and Typical Values**
 *   **Maximum Patch Length:** The maximum length of a patch in a cubic cell that cannot be pre-triangulated is 6 [S1].
-*   **Decision Tree Depth:** For a patch of length 4, 5, and 6, the optimized decision tree depths are 1, 3, and 5 respectively [S1].
+*   **Decision Tree Depth:** For patches of length 4, 5, and 6, the optimized decision tree depths are 1, 3, and 5, respectively [S1].
 *   **Average Tests:** On average, 1.88 tests are required to determine the triangulation of a patch [S1].
+*   **Performance:** The implementation performs over 2 million point classifications per second [S1].
 
-**Edge Cases and Pitfalls:**
-*   **Degenerate Input:** If all vertices lie on the same plane in the 4-point test, either choice of triangulation can be made [S1].
-*   **Precision:** The algorithm assumes trilinear interpolation within cells. Precision issues may arise if the isovalue is very close to a corner value, leading to ambiguous signs. [G] A small epsilon should be used when comparing values to the isovalue to handle floating-point inaccuracies.
-*   **Boundary Conditions:** The method relies on topological consistency between neighboring cells. If the grid is not regular or if cells are missing, the shared face contours may not match, leading to cracks. [G] Ensure that the grid traversal handles boundaries correctly, possibly by padding the volume or handling boundary cells specially.
+**Edge Cases and Pitfalls**
+*   **Degenerate Input:** If all vertices in a 4-point test lie on the same plane, either choice of triangulation elimination can be made [S1].
+*   **Precision:** The method assumes trilinear interpolation. Precision errors in edge intersection calculation may affect the "front-facing" test. [G] Ensure robust geometric predicates for the 4-point test to handle near-coplanar cases.
+*   **Boundaries:** The method relies on the uniqueness of linear convex contours on 2D faces to ensure topological consistency between neighboring cells. This holds for regular grids. [S1]
 
 ## Subtopics
 
 ### [4-point test](1224-4-point-test.md)
-The 4-point test is a geometric filtering method used in convex contouring to identify which triangles from a set of candidate triangulations belong to the convex contour of volumetric data. It solves the ambiguity of surface configuration by enforcing the convex hull property, ensuring that all edge intersections and negative corners lie on one side of any triangle in the contour.
+A geometric filtering method used to identify which triangles from a set of candidate triangulations belong to the convex contour. It enforces the convex hull property, ensuring all edge intersections and negative corners lie on one side of any triangle in the contour.
 
 ### [Multi-resolution Convex Contouring](1287-multi-resolution-convex-contouring.md)
-Multi-resolution Convex Contouring is a view-dependent surface extraction method that accelerates rendering by contouring volumetric data at varying grid resolutions based on the viewer's distance. It extends Convex Contouring with Decision Trees by introducing transition cells to maintain topological consistency across resolution boundaries, significantly reducing triangle count and processing time while preserving visual detail. Unlike uniform contouring, it trades off some implementation complexity for performance gains, though its speed is still largely dominated by the processing of regular cells.
+A view-dependent surface extraction method that accelerates rendering by contouring volumetric data at varying grid resolutions based on the viewer's distance. It uses transition cells to maintain topological consistency across resolution boundaries, reducing triangle count and processing time.
 
 ### [Cluster Connection Tree Table](11800-cluster-connection-tree-table.md)
-The Cluster Connection Tree Table is a data structure used in convex contouring to summarize the topological connections between clusters of isosurface points across adjacent slices. It serves as the bridge between 2D slice processing and 3D surface construction, explicitly tracking which clusters in slice $i$ connect to which clusters in slice $i+1$. Unlike methods that infer connectivity implicitly, this table stores explicit bidirectional links (Head and Tail IDs) and a correlation metric, enabling the construction of topologically consistent surfaces with local convexity properties. It distinguishes itself by handling non-convex objects through multiple connection handling, where branching and merging are decomposed into 1:1 connections to prevent surface smoothing or duplication.
+A data structure that summarizes topological connections between clusters of isosurface points across adjacent slices. It explicitly tracks connections (Head and Tail IDs) to enable the construction of topologically consistent surfaces with local convexity, handling non-convex objects through branching and merging decomposition.
 
 ## Operating characteristics
-*   **Time Complexity:** The algorithm is table-driven, with constant-time look-up for sign configurations. The decision tree traversal is logarithmic with respect to the number of triangulations, with a maximum depth of 5 for cubic cells [S1].
-*   **Memory Complexity:** The look-up table size depends on the number of sign configurations (256 for cubic cells) and the complexity of the decision trees. The decision trees are pre-computed and stored, requiring additional memory proportional to the number of patches and their triangulation sets [S1].
+*   **Time Complexity:** The method is table-driven, making the per-cell processing time constant on average. The decision tree depth is logarithmic with respect to the number of triangulations ($\log_2 N$). On average, only 1.88 tests are needed per patch [S1].
+*   **Memory Complexity:** Requires storage for the look-up table containing decision trees for all sign configurations. The size of the table depends on the maximum patch complexity (max length 6) [S1].
 *   **Measured Performance:** The implementation performs over 2 million point classifications per second [S1].
 *   **Strengths:**
-    *   Fast collision detection due to convex negative space [S1].
-    *   Topologically consistent surfaces [S1].
-    *   Algorithmic table construction minimizes errors compared to manual tables [S1].
-    *   Supports multi-resolution contouring without cracks [S1].
+    *   Generates convex negative space inside each cell, enabling fast collision detection [S1].
+    *   Topologically consistent surfaces due to unique 2D face contours [S1].
+    *   Algorithmic table construction minimizes errors compared to manual tables (e.g., Marching Cubes) [S1].
+    *   Fast, crack-free multi-resolution contouring is possible [S1].
 *   **Limitations:**
-    *   Limited to convex cells (cubic, or arbitrary convex space-filling polyhedra) [S1].
-    *   Decision tree pre-computation can be complex for high-dimensional cells [S1].
-*   **When to Use:** Suitable for applications requiring fast collision detection and topologically consistent surfaces, such as real-time visualization and simulation.
-*   **When Not to Use:** Not suitable for non-convex cells or unstructured grids without modification.
+    *   Performance is dominated by the processing of regular cells in multi-resolution modes [S1].
+    *   Requires pre-computation of decision trees, which adds complexity to the implementation [S1].
+*   **When to Use:** When fast collision detection is required, or when convexity of the negative space is important for downstream applications. Also suitable for real-time rendering with multi-resolution grids.
+*   **When Not to Use:** When the underlying data does not support trilinear interpolation assumptions, or when non-convex features within cells are critical and cannot be approximated by the convex hull.
 
 ## Background
-Convex Contouring was introduced in a paper titled "Convex contouring of volumetric data" [S1]. The method addresses the limitations of Marching Cubes, particularly the potential for disconnected non-convex negative space and the susceptibility of manually created look-up tables to errors [S1]. It builds on the principles of isosurface extraction, focusing on generating convex negative space within individual cells [S1]. The technique has been extended to multi-resolution contouring and arbitrary convex polyhedra [S1].
+Convex Contouring was introduced as a fast, table-driven isosurface extraction technique for volumetric data [S1]. It was developed to address the limitations of Marching Cubes, particularly the potential for disconnected non-convex negative space and the susceptibility of manually created look-up tables to errors [S1]. The method was extended to support multi-resolution contouring on nested grids, allowing for view-dependent rendering without surface cracks [S1]. The technique can also be extended to extract isosurfaces on arbitrary convex, space-filling polyhedra [S1].
 
 ## Sources
 [S1] Convex contouring of volumetric data, https://doi.org/10.1007/s00371-003-0216-0, fetched 2026-10-28

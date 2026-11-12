@@ -14,7 +14,7 @@ The method follows the three-stage pipeline of domain-transform methods: Global 
 
 **Data Structures:**
 1.  **Frequency Volume:** A 3D texture storing complex numbers. In GPU implementations, this is typically a two-channel 32-bit floating-point 3D texture (real and imaginary parts) [S1, unofficial]. If the input dimensions are not powers of two, zero-padding is applied in the frequency domain to meet hardware texture dimension constraints [S1, unofficial].
-2.  **Kernel Texture:** A 1D floating-point RGBA texture storing the discretized filter kernel. For a kernel of width four, each channel stores one tile of the kernel. A single texture fetch at position $X$ returns four weight values [S3, unofficial].
+2.  **Kernel Texture:** A 1D floating-point RGBA texture storing the discretized filter kernel [S3, unofficial]. For a kernel of width four, each channel stores one tile of the kernel. A single texture fetch at position $X$ returns four weight values [S3, unofficial].
 3.  **Scramble Lookup Texture:** A texture containing pre-computed bit-reversal indices for the FFT scrambling phase [S1, unofficial].
 4.  **Roots of Unity Texture:** A texture storing the principal $N$-th roots of unity required for butterfly passes [S1, unofficial].
 5.  **Ping-Pong Buffers:** Two 2D textures used as source and destination buffers for iterative passes (scrambling and butterfly) [S1, unofficial].
@@ -64,73 +64,52 @@ The method follows the three-stage pipeline of domain-transform methods: Global 
 ```python
 def frequency_domain_volume_rendering(volume_3d, viewing_direction, output_size):
     # Step 1: Pre-processing (CPU)
-    # Rearrange origin to center
     volume_centered = rearrange_origin_to_center(volume_3d)
-    
-    # 3D FFT
     freq_volume_3d = fft3d(volume_centered)
-    
-    # Center low frequencies
     freq_volume_centered = fftshift(freq_volume_3d)
-    
-    # Upload to GPU as 3D texture (two-channel 32-bit float)
     gpu_freq_texture = upload_to_gpu(freq_volume_centered)
-    
+
     # Step 2 & 3: Slicing (GPU Shader)
-    # Map 3D texture to proxy quad, rotate by viewing_direction
-    # For each pixel (x, y) in output_size x output_size:
-    #   1. Calculate 3D coordinate in frequency space based on rotation
-    #   2. Resample using interpolation scheme (e.g., tri-linear)
-    #   3. Store result in 2D slice texture
-    
     slice_2d = resample_slice(gpu_freq_texture, viewing_direction, output_size)
-    
+
     # Step 4: Inverse 2D FFT (GPU Shader)
     # Transform rows
-    slice_rows_transformed = ifft1d(slice_2d, axis='rows')
-    
+    slice_rows_transformed = ifft1d_rows(slice_2d)
     # Transform columns
-    slice_cols_transformed = ifft1d(slice_rows_transformed, axis='columns')
-    
+    slice_cols_transformed = ifft1d_cols(slice_rows_transformed)
+
     # Scale by N^-1
     final_image = slice_cols_transformed / (output_size[0] * output_size[1])
-    
     return final_image
 
-def ifft1d(data, axis='rows'):
-    # Scrambling
-    scrambled_data = bit_reverse_scramble(data)
-    
+def ifft1d_rows(data_2d):
+    for i in range(data_2d.shape[0]):
+        data_2d[i, :] = _ifft1d_pass(data_2d[i, :], data_2d.shape[1])
+    return data_2d
+
+def ifft1d_cols(data_2d):
+    for i in range(data_2d.shape[1]):
+        data_2d[:, i] = _ifft1d_pass(data_2d[:, i], data_2d.shape[0])
+    return data_2d
+
+def _ifft1d_pass(arr, N):
+    # Scrambling phase
+    scrambled = bit_reverse_scramble(arr)
     # Butterfly passes
-    N = data.shape[0] if axis == 'rows' else data.shape[1]
-    num_passes = log2(N)
-    
-    buffer_a = scrambled_data
-    buffer_b = empty_buffer_like(buffer_a)
-    
+    buffer_a = scrambled
+    buffer_b = [0.0] * N
+    num_passes = int(math.log2(N))
     for i in range(num_passes):
         w = get_root_of_unity(i, N)
-        # Ping-pong swap
-        buffer_a, buffer_b = butterfly_pass(buffer_a, buffer_b, w)
-        
+        for j in range(N):
+            idx_a, idx_b = get_butterfly_indices(j, i, N)
+            val_a = buffer_a[idx_a]
+            val_b = buffer_a[idx_b]
+            prod = complex_multiply(w, val_b)
+            buffer_b[j] = complex_add(val_a, prod)
+            buffer_b[(j + N // 2) % N] = complex_sub(val_a, prod)
+        buffer_a, buffer_b = buffer_b, buffer_a
     return buffer_a
-
-def butterfly_pass(buffer_src, buffer_dst, w):
-    for each fragment:
-        idx_a, idx_b = get_butterfly_indices(fragment, w)
-        val_a = fetch(buffer_src, idx_a)
-        val_b = fetch(buffer_src, idx_b)
-        
-        # Complex multiplication and additions
-        # a' = a + w * b
-        # b' = a - w * b
-        prod = complex_multiply(w, val_b)
-        val_a_new = complex_add(val_a, prod)
-        val_b_new = complex_sub(val_a, prod)
-        
-        write(buffer_dst, fragment, val_a_new)
-        # Note: In ping-pong, the other buffer is written in parallel or subsequent pass
-    return buffer_dst
 ```
 
 **Edge Cases and Pitfalls:**
@@ -155,7 +134,7 @@ A hardware realization of the FVR algorithm consisting of a memory block, a resa
 *   **Measured Performance:** On an ATI Radeon 9800 XT, at $256 \times 256$ resolution: NN=400 fps, TL=1050 fps, TC=180 fps, IFFT 2D=153 fps. At $512 \times 512$ resolution: NN=500 fps, TL=350 fps, TC=45 fps, IFFT 2D=35 fps [S2, unofficial]. The GPU implementation achieves a speed-up factor of approximately 17 compared to a CPU-based approach (17 fps on AMD Athlon XP 2200+) [S2, unofficial].
 *   **Strengths:** High performance for static views; decouples rendering speed from dataset size.
 *   **Limitations:** Limited interactivity for display parameters other than viewing direction; requires significant preprocessing; sensitive to interpolation quality and resolution [S1, S2, unofficial].
-*   **When to use:** When rendering large static volumes with high performance requirements and fixed viewing parameters.
+*   **When to use:** When rendering large static volumes with high performance requirements and fixed viewing parameters [S1, unofficial].
 *   **When not to use:** When interactive modification of opacity, lighting, or other transfer function parameters is required [S1, unofficial].
 
 ## Background

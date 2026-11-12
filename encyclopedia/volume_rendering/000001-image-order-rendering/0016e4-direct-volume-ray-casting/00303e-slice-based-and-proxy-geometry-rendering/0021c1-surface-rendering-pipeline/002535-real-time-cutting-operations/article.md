@@ -3,35 +3,29 @@
 Also called: Cutting Planes via Depth Buffers
 
 ## Overview
-Real Time Cutting Operations is a technique for clipping volume surfaces using cutting planes by maintaining near and far depth buffers per pixel, avoiding full re-rendering when planes change [S1, unofficial]. It differs from static cutting methods by maintaining the full volume dataset and using a halfspace check to dynamically filter voxels per frame, whereas static methods pre-filter and discard cut voxels [S1, unofficial].
+Real Time Cutting Operations is a technique for clipping volume surfaces using cutting planes by maintaining near and far depth buffers per pixel, avoiding full re-rendering when planes change [S1, unofficial]. It differs from static cutting methods by avoiding full re-rendering through per-pixel depth buffer updates, whereas static methods typically pre-filter and discard cut voxels [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of cutting planes $C_i$ defined by normal vectors $N_i$ and implicit equations; a volume dataset; an image plane with resolution $W \times H$.
-*   **Outputs:** A rendered image where surface points are displayed only if they lie within the valid depth range defined by the cutting planes.
+*   **Inputs:** A set of cutting planes $C_i$ defined by normal vectors $N_i$ and implicit equations, a volume dataset, and an image plane with resolution $W \times H$ [S1, unofficial].
+*   **Outputs:** A rendered image where surface points are displayed only if they lie within the valid depth range defined by the cutting planes [S1, unofficial].
 
 **Data Structures:**
-1.  **Near Depth Buffer ($D_{near}$):** A 2D array of size $W \times H$. Elements are initialized to $0$.
-2.  **Far Depth Buffer ($D_{far}$):** A 2D array of size $W \times H$. Elements are initialized to $\text{MAX\_DEPTH}$.
-3.  **Intersection Buffer:** Stores per-pixel data for all surface intersections along the ray. For pixel $(i,j)$, the layout includes:
-    *   $k_{i,j}$: The number of intersections between ray $i$ and the surface.
-    *   $D(i,j)$: An array of depths for the $k_{i,j}$ intersections.
-    *   $I(i,j)$: An array of intensities for the $k_{i,j}$ intersections.
+1.  **Near Depth Buffer ($D_{near}$):** A 2D array of size $W \times H$, initialized to $0$ [S1, unofficial].
+2.  **Far Depth Buffer ($D_{far}$):** A 2D array of size $W \times H$, initialized to $\text{MAX\_DEPTH}$ [S1, unofficial].
+3.  **Intersection Buffer:** Stores per-pixel data for all surface intersections along the ray, including depth $D(i,j)$, intensity $I(i,j)$, and intersection count $k$ for pixel $(i,j)$ [S1, unofficial].
 
 **Algorithm Steps:**
 
 1.  **Initialize Buffers:**
-    Set all elements in $D_{near}$ to $0$ and all elements in $D_{far}$ to $\text{MAX\_DEPTH}$.
+    Set all elements in $D_{near}$ to $0$ and all elements in $D_{far}$ to $\text{MAX\_DEPTH}$ [S1, unofficial].
 
 2.  **Classify Planes per Pixel:**
-    For each pixel $p$ in the image plane, cast a ray $R(p)$. Classify each cutting plane $C_i$ relative to $R(p)$:
-    *   **Parallel:** $R(p) \cdot N_i = 0$.
-    *   **Facing Same Direction:** $R(p) \cdot N_i > 0$.
-    *   **Facing Opposite Direction:** $R(p) \cdot N_i < 0$.
+    For each pixel $p$ in the image plane, classify each cutting plane $C_i$ relative to the ray $R(p)$ as parallel ($R(p)\cdot N_i=0$), facing the same direction ($R(p)\cdot N_i>0$), or facing the opposite direction ($R(p)\cdot N_i<0$) [S1, unofficial].
 
 3.  **Update Depth Buffers:**
     For each pixel $p$ and each cutting plane $C_i$:
-    *   If $C_i$ is **parallel** to $R(p)$ and pixel $p$ is in the negative halfspace defined by the plane (i.e., $C_i(p) < 0$), then:
+    *   If $C_i$ is **parallel** to $R(p)$ and pixel $p$ is in the negative halfspace defined by the plane ($C_i(p)<0$), then:
         $$D_{near}(p) \leftarrow \text{MAX\_DEPTH}$$
         $$D_{far}(p) \leftarrow 0$$
     *   If $C_i$ is **facing the same direction** as $R(p)$:
@@ -42,7 +36,7 @@ Real Time Cutting Operations is a technique for clipping volume surfaces using c
         $$D_{far}(p) \leftarrow \min(D_{far}(p), d)$$
 
 4.  **Ray Casting and Clipping:**
-    Cast rays into the volume, storing all surface intersections in the Intersection Buffer. For each pixel $p$, a surface point with depth $d_{surf}$ is displayed if and only if:
+    Cast rays into the volume, storing all surface intersections in the Intersection Buffer [S1, unofficial]. A surface point with depth $d_{surf}$ is displayed if and only if:
     $$D_{near}(p) \le d_{surf} \le D_{far}(p)$$
     Points with depth in front of $D_{near}(p)$ or behind $D_{far}(p)$ are cut away [S1, unofficial].
 
@@ -51,119 +45,98 @@ Real Time Cutting Operations is a technique for clipping volume surfaces using c
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def real_time_cutting_operations(volume, cutting_planes, image_width, image_height, max_depth):
+def real_time_cutting_operations(volume, cutting_planes, image_width, image_height, max_depth, ray_origin_func, ray_direction_func, step_size, threshold):
     """
     Renders volume with real-time cutting planes using depth buffers.
     
     Args:
-        volume: Volume dataset object with method get_surface_intersections(ray_origin, ray_direction)
-        cutting_planes: List of plane objects, each having normal N and implicit function C(p)
+        volume: Volume dataset object with method sample(point)
+        cutting_planes: List of plane objects, each having normal N, constant D_plane, and implicit(p) method
         image_width: int
         image_height: int
         max_depth: float, maximum possible depth in the scene
+        ray_origin_func: function(x, y) -> [x, y, z]
+        ray_direction_func: function(x, y) -> [dx, dy, dz]
+        step_size: float, marching step along ray
+        threshold: float, volume value threshold for surface detection
         
     Returns:
         image: 2D array of rendered intensities
     """
     # 1. Initialize Depth Buffers
-    # D_near initialized to 0, D_far initialized to MAX_DEPTH
-    D_near = [[0.0 for _ in range(image_width)] for _ in range(image_height)]
-    D_far = [[max_depth for _ in range(image_width)] for _ in range(image_height)]
+    D_near = [[0.0] * image_width for _ in range(image_height)]
+    D_far = [[max_depth] * image_width for _ in range(image_height)]
     
     # 2. Update Depth Buffers based on Cutting Planes
     for y in range(image_height):
         for x in range(image_width):
-            # Ray R(p) for pixel p=(x,y)
-            # Note: Ray origin and direction depend on camera setup, assumed available
-            ray_origin, ray_direction = get_ray_for_pixel(x, y)
+            ray_o = ray_origin_func(x, y)
+            ray_d = ray_direction_func(x, y)
             
             for plane in cutting_planes:
-                # Classify plane relative to ray
-                dot_product = dot(ray_direction, plane.normal)
+                # Dot product of ray direction and plane normal
+                dot_prod = ray_d[0]*plane.normal[0] + ray_d[1]*plane.normal[1] + ray_d[2]*plane.normal[2]
                 
-                if abs(dot_product) < 1e-9:  # Parallel
-                    # Check if pixel is in negative halfspace
-                    if plane.implicit_function([x, y, 0]) < 0:
+                if abs(dot_prod) < 1e-9:  # Parallel
+                    # Check if pixel ray origin is in negative halfspace
+                    if plane.implicit(ray_o) < 0:
                         D_near[y][x] = max_depth
                         D_far[y][x] = 0.0
-                elif dot_product > 0:  # Facing same direction
-                    # Compute intersection depth
-                    depth = compute_intersection_depth(ray_origin, ray_direction, plane)
-                    if depth is not None:
-                        D_near[y][x] = max(D_near[y][x], depth)
+                elif dot_prod > 0:  # Facing same direction
+                    # Intersection t = (plane.D_plane - dot(plane.normal, ray_o)) / dot_prod
+                    t = (plane.D_plane - (plane.normal[0]*ray_o[0] + plane.normal[1]*ray_o[1] + plane.normal[2]*ray_o[2])) / dot_prod
+                    if t > 0:
+                        D_near[y][x] = max(D_near[y][x], t)
                 else:  # Facing opposite direction
-                    # Compute intersection depth
-                    depth = compute_intersection_depth(ray_origin, ray_direction, plane)
-                    if depth is not None:
-                        D_far[y][x] = min(D_far[y][x], depth)
+                    t = (plane.D_plane - (plane.normal[0]*ray_o[0] + plane.normal[1]*ray_o[1] + plane.normal[2]*ray_o[2])) / dot_prod
+                    if t > 0:
+                        D_far[y][x] = min(D_far[y][x], t)
 
     # 3. Ray Casting and Clipping
-    image = [[0.0 for _ in range(image_width)] for _ in range(image_height)]
+    image = [[0.0] * image_width for _ in range(image_height)]
     
     for y in range(image_height):
         for x in range(image_width):
-            ray_origin, ray_direction = get_ray_for_pixel(x, y)
+            ray_o = ray_origin_func(x, y)
+            ray_d = ray_direction_func(x, y)
             
-            # Cast ray and get all intersections
-            # Returns list of (depth, intensity) tuples
-            intersections = volume.get_surface_intersections(ray_origin, ray_direction)
+            # Collect intersections along the ray
+            intersections = []
+            t = 0.0
+            while t < max_depth:
+                pos = [ray_o[0] + t*ray_d[0], ray_o[1] + t*ray_d[1], ray_o[2] + t*ray_d[2]]
+                val = volume.sample(pos)
+                if val > threshold:
+                    intersections.append((t, val))
+                t += step_size
             
-            # Find the first valid intersection within the depth range
-            # Note: The source describes storing ALL intersections in a buffer.
-            # For display, we typically pick the first visible one or composite them.
-            # Here we assume we pick the first intersection within the valid range.
+            # Display first valid intersection within depth range
             for depth, intensity in intersections:
                 if D_near[y][x] <= depth <= D_far[y][x]:
                     image[y][x] = intensity
-                    break # Display the first visible surface point
+                    break
                     
     return image
-
-def compute_intersection_depth(ray_origin, ray_direction, plane):
-    """
-    Computes the depth (distance along ray) of intersection between ray and plane.
-    Plane defined by normal N and a point P0 on plane (or implicit function).
-    Assuming plane equation: N . (X - P0) = 0 => N.X = N.P0 = D
-    Ray: X = O + t*R
-    Intersection: N.(O + t*R) = D => t = (D - N.O) / (N.R)
-    """
-    # Extract plane constant D from implicit function or geometry
-    # Assuming plane has a method or attribute to get the constant term for N.X = D
-    plane_constant = plane.get_constant() 
-    
-    numerator = plane_constant - dot(plane.normal, ray_origin)
-    denominator = dot(plane.normal, ray_direction)
-    
-    if abs(denominator) < 1e-9:
-        return None # Parallel, handled separately
-    
-    t = numerator / denominator
-    
-    if t > 0:
-        return t
-    else:
-        return None
 ```
 
 **Parameters:**
-*   $\text{MAX\_DEPTH}$: The maximum depth value in the scene or camera frustum. Not given in the sources.
+*   $\text{MAX\_DEPTH}$: The maximum depth value in the scene or camera frustum [G].
 
 **Edge Cases and Pitfalls:**
-*   **Parallel Planes:** If a plane is parallel to the ray and the pixel is in the negative halfspace, the valid depth range becomes empty ($D_{near} > D_{far}$), effectively hiding the pixel.
-*   **Precision:** Floating-point precision issues may arise when comparing depths, especially when $D_{near}$ and $D_{far}$ are very close.
-*   **Degenerate Input:** If no cutting planes are provided, $D_{near}$ remains 0 and $D_{far}$ remains $\text{MAX\_DEPTH}$, rendering the full volume.
+*   **Parallel Planes:** If a plane is parallel to the ray and the pixel is in the negative halfspace, the valid depth range becomes empty ($D_{near} > D_{far}$), effectively hiding the pixel [S1, unofficial].
+*   **Degenerate Input:** If no cutting planes are provided, $D_{near}$ remains $0$ and $D_{far}$ remains $\text{MAX\_DEPTH}$, rendering the full volume [G].
 
 ## Subtopics
 
 ## Operating characteristics
-*   **Time Complexity:** The depth buffer update step is $O(W \cdot H \cdot P)$, where $W, H$ are image dimensions and $P$ is the number of cutting planes. Ray casting is $O(W \cdot H \cdot S)$, where $S$ is the average number of surface intersections per ray.
-*   **Memory Complexity:** $O(W \cdot H)$ for the two depth buffers plus $O(W \cdot H \cdot S_{max})$ for the intersection buffer, where $S_{max}$ is the maximum number of intersections per pixel.
+*   **Time Complexity:** The depth buffer update step is $O(W \cdot H \cdot P)$, where $W, H$ are image dimensions and $P$ is the number of cutting planes [G].
+*   **Memory Complexity:** $O(W \cdot H)$ for the two depth buffers plus $O(W \cdot H \cdot S_{max})$ for the intersection buffer, where $S_{max}$ is the maximum number of intersections per pixel [G].
 *   **Performance:** This method avoids re-preprocessing the volume data when cutting planes change, allowing for interactive modification of plane location and orientation [S1, unofficial].
-*   **Strengths:** Real-time performance for dynamic cutting; no need to modify the underlying volume data structure.
-*   **Limitations:** Requires storing all surface intersections for each ray, which can be memory-intensive for complex volumes with many intersections.
+*   **Strengths:** Real-time performance for dynamic cutting without modifying the underlying volume data structure [G].
+*   **Limitations:** Requires storing all surface intersections for each ray, which can be memory-intensive for complex volumes with many intersections [S1, unofficial].
 
 ## Background
-This method was described in the paper "Fast Cutting Operations on Three Dimensional Volume Datasets" [S1, unofficial]. It is used in direct volume ray casting to enable interactive exploration of volume data by revealing internal structures through cutting planes.
+This method was described in the paper "Fast Cutting Operations on Three Dimensional Volume Datasets" [S1, unofficial]. It is used in direct volume ray casting to enable interactive exploration of volume data by revealing internal structures through cutting planes [S1, unofficial].
 
 ## Sources
 [S1] Fast Cutting Operations on Three Dimensional Volume Datasets, https://zenodo.org/records/14173364, fetched 2026-10-26 (unofficial)

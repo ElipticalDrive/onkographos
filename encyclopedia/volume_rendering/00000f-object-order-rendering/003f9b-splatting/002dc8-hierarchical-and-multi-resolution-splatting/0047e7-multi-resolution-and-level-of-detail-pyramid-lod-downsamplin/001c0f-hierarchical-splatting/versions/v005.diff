@@ -1,0 +1,443 @@
+--- v004.md
++++ v005.md
+@@ -4,265 +4,208 @@
+ 
+ ## Overview
+-Hierarchical Splatting is a progressive refinement algorithm for volume rendering that uses a pyramidal volume representation to achieve real-time interactive rendering [S1, unofficial]. It solves the performance bottleneck of rendering high-resolution volumetric data by decomposing the volume into a hierarchy of cells with varying sizes based on homogeneity, approximating each cell with a single large splat projected onto the image plane [S3, unofficial]. Unlike standard splatting which treats all voxels equally, Hierarchical Splatting adapts the resolution of the rendering primitives to the visual complexity of the data, allowing for coarse approximations in homogeneous regions and fine detail in complex areas [S3, unofficial]. It distinguishes itself from sibling methods like Octree-based Splatting by using a fixed-resolution pyramid structure (where each level is 1/8th the resolution of the previous) rather than an adaptive octree, although an octree can be fit to the pyramid for traversal [S1, unofficial][S4, unofficial].
++Hierarchical splatting is a progressive refinement algorithm for volume rendering that uses a pyramidal volume representation to achieve real-time interactive rendering [S1, unofficial]. It solves the performance bottleneck of rendering large, high-resolution volume datasets by decomposing the volume into cubes of varying sizes based on homogeneity, approximating each homogeneous section with a single large splat projected onto the image plane [S3, unofficial]. Unlike standard splatting which treats all voxels equally, hierarchical splatting adapts the resolution of the rendering primitives to the visual complexity of the data, allowing for efficient culling of distant or homogeneous regions while maintaining fidelity in complex areas [S2, unofficial][S4, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset of size $N^3$ samples, a user-specified error threshold $\epsilon$ (measuring desired homogeneity), and a viewing transformation.
+-*   **Output:** A 2D image rendered via alpha compositing of splats approximated as polygons.
++**Inputs:**
++*   A 3D volume dataset of size $N^3$ samples [S2, unofficial][S4, unofficial].
++*   A user-specified error threshold $\epsilon$ (or precision threshold) that measures the desired homogeneity for the volume decomposition [S1, unofficial][S3, unofficial].
++
++**Outputs:**
++*   A rendered image composed of RGBA Gouraud-shaded polygons approximating the splats [S1, unofficial][S3, unofficial].
+ 
+ **Data Structures:**
+-1.  **Pyramid Data Structure:** A sequence of $\log_2 N$ volumes.
+-    *   Level 0: The original $N^3$ dataset.
+-    *   Level $k$ ($k > 0$): A volume with resolution $(N/2^k)^3$. Each voxel at level $k$ is the average of the $2 \times 2 \times 2$ group of voxels from level $k-1$ that it covers [S2, unofficial][S4, unofficial].
+-    *   For binary data, bits can be packed into bytes to accelerate the creation of lower-resolution levels, where a byte represents a $2 \times 2 \times 2$ portion [S2, unofficial].
+-2.  **Node Properties:** Each node (voxel) in the pyramid stores:
+-    *   Average RGB color and alpha value of its children [S3, unofficial].
+-    *   Estimated error $E$, representing the approximation cost if the region is rendered with one average splat instead of the original data [S1, unofficial][S3, unofficial].
+-3.  **Footprint Tables:** Pre-calculated tables for each pyramid level defining the proper-sized footprint (polygon shape and size) used for projecting and compositing cells of that specific level [S3, unofficial].
++The core data structure is a **Volume Pyramid** [S2, unofficial][S4, unofficial].
++*   **Structure:** A sequence of $\log_2 N$ volumes [S2, unofficial][S4, unofficial].
++*   **Level 0:** The original dataset of size $N^3$ [S2, unofficial][S4, unofficial].
++*   **Level $k$ ($k > 0$):** Created from Level $k-1$ by averaging each $2 \times 2 \times 2$ group of samples. This results in a volume with one-eighth the resolution (linear dimensions halved) of the previous level [S2, unofficial][S4, unofficial].
++*   **Node Content:** Each node (voxel) in the pyramid stores:
++    *   Average RGB color [S3, unofficial].
++    *   Average Alpha (opacity) [S3, unofficial].
++    *   Estimated Error ($E$): The approximation cost of representing the node's children with the node's aggregate properties [S1, unofficial][S3, unofficial]. This error quantifies the deviation if the region is rendered with one average splat instead of the original data [S3, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Pyramid Construction:**
+-    *   Construct the pyramid by iteratively averaging $2 \times 2 \times 2$ groups of samples from the previous level to create the next lower-resolution level [S4, unofficial].
+-    *   For each node, compute the aggregate average color/alpha and the error metric $E$. The error metric quantifies the deviation of the children's values from the node's average value [S3, unofficial].
+-    *   *Note: The exact formula for $E$ is not explicitly provided in the sources, but it is described as the "average error" or "approximation cost" [S3, unofficial].*
+-
+-2.  **Octree Fitting (Optional/Implicit):**
+-    *   Fit an octree to the pyramid based on the user-supplied precision threshold $\epsilon$ [S1, unofficial]. This step determines which nodes are "leaves" in the rendering hierarchy. A node is selected as a leaf if its error $E \le \epsilon$ [S3, unofficial].
+-
+-3.  **Traversal and Selection:**
+-    *   Traverse the pyramid from the root to the leaves.
+-    *   For each node, compare its error $E$ to the threshold $\epsilon$.
+-    *   If $E \le \epsilon$, the node is selected as a leaf. The algorithm stops descending into its children for this branch [S3, unofficial].
+-    *   If $E > \epsilon$, the algorithm recurses to the node's children [S3, unofficial].
+-    *   *Note: The sources mention scanning the "appropriate level" of the pyramid [S4, unofficial], but also describe a traversal down the pyramid based on error [S3, unofficial]. The error-based traversal is the defining characteristic of the "progressive refinement" aspect [S1, unofficial].*
+-
+-4.  **Splat Generation:**
+-    *   For each selected leaf node, generate a splat.
+-    *   The splat is a polygon approximating the projection of the volume cell corresponding to the leaf node [S1, unofficial].
+-    *   The size of the splat is scaled to match the size of the projection of the corresponding volume cell [S1, unofficial]. The footprint table for the specific pyramid level of the leaf node provides the base shape and size [S3, unofficial].
+-    *   The color and alpha of the splat are taken from the node's stored average RGB and alpha values [S3, unofficial].
+-
+-5.  **Rasterization:**
+-    *   Approximate the splats as RGBA Gouraud-shaded polygons [S1, unofficial][S3, unofficial].
+-    *   Render the polygons using standard graphics hardware.
+-    *   Composite the splats in back-to-front order to ensure correct alpha blending [S4, unofficial][S2, unofficial].
++    Build the pyramid from the input volume. For each level $k$ from 1 to $\log_2 N$:
++    *   Iterate through all $2 \times 2 \times 2$ blocks of voxels in Level $k-1$.
++    *   Compute the average RGB and Alpha for the block to form the voxel at the corresponding position in Level $k$ [S2, unofficial][S4, unofficial].
++    *   Compute the error $E$ for the new voxel. The error represents the variance or deviation of the 8 child values from the parent's average [S1, unofficial][S3, unofficial].
++
++2.  **Octree Fitting (Traverse and Select):**
++    Traverse the pyramid to determine which nodes are rendered as single splats and which are subdivided.
++    *   Start at the root (Level $\log_2 N$).
++    *   For a given node, compare its error $E$ against the user threshold $\epsilon$ [S1, unofficial][S3, unofficial].
++    *   **If $E \le \epsilon$:** The node is homogeneous enough. It is selected as a leaf node. A single splat is generated for this node, scaled to match the projection of the corresponding volume cell [S1, unofficial][S3, unofficial].
++    *   **If $E > \epsilon$:** The node is too heterogeneous. Recursively traverse its 8 children in Level $k-1$ [S1, unofficial][S3, unofficial].
++    *   *Note:* The traversal stops at the base level (Level 0) if the threshold is not met, ensuring all data is represented [S3, unofficial].
++
++3.  **Footprint Table Generation:**
++    For every level of the pyramid, calculate proper-sized footprint tables [S3, unofficial]. These tables define the screen-space footprint (polygon shape and size) for projecting and compositing cells of that specific level [S3, unofficial]. The footprint size scales with the resolution of the pyramid level; higher levels (coarser resolution) have larger footprints [S1, unofficial].
++
++4.  **Rendering (Splatting):**
++    *   Identify the set of leaf nodes from the traversal step.
++    *   Sort these leaf nodes in back-to-front order based on the viewing direction [S2, unofficial][S4, unofficial].
++    *   For each leaf node:
++        *   Project the volume cell onto the image plane.
++        *   Approximate the splat as an RGBA Gouraud-shaded polygon [S1, unofficial][S3, unofficial].
++        *   Use the pre-calculated footprint table for the node's pyramid level to determine the polygon's geometry [S3, unofficial].
++        *   Rasterize the polygon using standard graphics hardware [S1, unofficial][S2, unofficial][S4, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def hierarchical_splatting(volume_data, epsilon, view_transform):
+-    """
+-    volume_data: 3D array of shape (N, N, N)
+-    epsilon: float, user-specified error threshold
+-    view_transform: function or matrix defining the camera view
+-    """
+-    # Step 1: Construct Pyramid
+-    # pyramid[k] is a 3D array of shape (N/2^k, N/2^k, N/2^k)
++def build_pyramid(volume_data):
++    """
++    Constructs the volume pyramid.
++    volume_data: 3D array of shape (N, N, N) containing RGB and Alpha.
++    Returns: List of pyramid levels, where level 0 is original data.
++    """
+     pyramid = [volume_data]
+-    current_level_data = volume_data
+-    level_errors = [] # List of 3D arrays storing error for each level
+-    
+-    # Pre-calculate footprint tables for each level
+-    footprint_tables = []
+-    for k in range(int(math.log2(len(volume_data))) + 1):
+-        footprint_tables.append(generate_footprint_table(k, view_transform))
+-
+-    # Build pyramid levels and compute errors
+-    while len(current_level_data) > 1:
+-        next_level_shape = (len(current_level_data) // 2, 
+-                            len(current_level_data) // 2, 
+-                            len(current_level_data) // 2)
+-        next_level_data = np.zeros(next_level_shape)
+-        next_level_error = np.zeros(next_level_shape)
+-        
+-        for x in range(0, len(current_level_data), 2):
+-            for y in range(0, len(current_level_data), 2):
+-                for z in range(0, len(current_level_data), 2):
+-                    # Average 2x2x2 group
+-                    group = current_level_data[x:x+2, y:y+2, z:z+2]
+-                    avg_value = np.mean(group)
+-                    next_level_data[x//2, y//2, z//2] = avg_value
++    current_level = volume_data
++    n = current_level.shape[0]
++    
++    # Precompute error for all nodes except the base level
++    # Error is stored alongside RGB/Alpha in a structured format or separate array
++    # For simplicity, we assume a function compute_error returns the variance metric
++    while n > 1:
++        next_n = n // 2
++        next_level = np.zeros((next_n, next_n, next_n, 4)) # 4 channels: R, G, B, A
++        next_error = np.zeros((next_n, next_n, next_n))
++        
++        for x in range(next_n):
++            for y in range(next_n):
++                for z in range(next_n):
++                    # Extract 2x2x2 block from current level
++                    block = current_level[2*x:2*x+2, 2*y:2*y+2, 2*z:2*z+2]
+                     
+-                    # Compute error (approximation cost)
+-                    # Note: Exact formula not given in sources, using variance as proxy for error metric
+-                    # E = sqrt(mean((children - avg)^2))
+-                    error = np.sqrt(np.mean((group - avg_value)**2))
+-                    next_level_error[x//2, y//2, z//2] = error
+-        
+-        pyramid.append(next_level_data)
+-        level_errors.append(next_level_error)
+-        current_level_data = next_level_data
+-
+-    # Step 2 & 3: Traverse and Select Leaves
+-    splats = []
+-    
+-    def traverse_and_select(level_idx, x, y, z, current_error):
+-        # Base case: reached a leaf in the original data or max depth
+-        if level_idx == len(pyramid) - 1:
+-            # Original data, always splat individual voxels if not aggregated
+-            # However, the algorithm typically stops at pyramid leaves
+-            # If epsilon is very small, we might reach here.
+-            # For simplicity, assume we splat the node at this level
+-            add_splat(level_idx, x, y, z, pyramid[level_idx][x, y, z])
+-            return
+-
+-        # Check error threshold
+-        # Note: The error stored in level_errors[level_idx] corresponds to the 
+-        # approximation cost of the node AT level_idx+1 (its children).
+-        # If we are at level_idx, we look at the error of the node we are considering.
+-        # The sources say: "move down the pyramid until the error in a node is less equal than the desired error"
+-        # This implies we check the error of the CURRENT node against epsilon.
+-        # But the error is computed from children. So we check the error of the PARENT 
+-        # to decide whether to split? Or check the error of the CURRENT node 
+-        # (which was computed from ITS children) to decide if we stop?
+-        # Standard interpretation: If the error of the current node (representing the 
+-        # deviation of its children from its average) is <= epsilon, we stop and use 
+-        # the current node's average.
+-        
+-        # In our pyramid structure, level_errors[k] stores the error for nodes at level k+1?
+-        # No, level_errors[k] is computed when creating level k+1 from level k.
+-        # So level_errors[k][x,y,z] is the error of the node at pyramid[k+1][x,y,z]
+-        # based on its children in pyramid[k].
+-        
+-        # If we are traversing, we are at a node in pyramid[level_idx].
+-        # We want to know if we should split it. We split if its error > epsilon.
+-        # The error of pyramid[level_idx][x,y,z] is stored in level_errors[level_idx-1][x,y,z]
+-        # (if level_idx > 0).
+-        
+-        if level_idx > 0:
+-            node_error = level_errors[level_idx-1][x, y, z]
++                    # Compute average RGB and Alpha
++                    avg_rgb_alpha = np.mean(block, axis=(0, 1, 2))
++                    next_level[x, y, z] = avg_rgb_alpha
++                    
++                    # Compute error (variance of children from parent mean)
++                    # [S1, unofficial][S3, unofficial]
++                    error = np.mean((block - avg_rgb_alpha) ** 2)
++                    next_error[x, y, z] = error
++        
++        # Store error with the level for traversal
++        pyramid.append({'data': next_level, 'error': next_error})
++        current_level = next_level
++        n = next_n
++        
++    return pyramid
++
++def traverse_and_select(pyramid, threshold):
++    """
++    Traverses the pyramid to select leaf nodes for splatting.
++    pyramid: List of pyramid levels (from coarse to fine, index 0 is coarsest)
++    threshold: User-specified error threshold epsilon
++    Returns: List of leaf nodes, each containing (level_index, x, y, z, rgb, alpha)
++    """
++    leaves = []
++    num_levels = len(pyramid)
++    
++    # Start traversal from the root (coarsest level, index 0)
++    # Note: The pyramid list in build_pyramid goes from fine to coarse if appended sequentially?
++    # Let's assume pyramid[0] is finest (original) and pyramid[-1] is coarsest (root)
++    # Based on S2/S4: "sequence of log(N) volumes... first volume is original... higher levels created from lower"
++    # So pyramid[0] = Original (Fine), pyramid[-1] = Root (Coarse).
++    # Traversal starts at Root.
++    
++    def recurse(level_idx, x, y, z):
++        node = pyramid[level_idx]
++        error = node['error'][x, y, z]
++        rgb_alpha = node['data'][x, y, z]
++        
++        # If error is below threshold, select this node as a leaf
++        if error <= threshold:
++            leaves.append({
++                'level': level_idx,
++                'x': x, 'y': y, 'z': z,
++                'rgb': rgb_alpha[:3],
++                'alpha': rgb_alpha[3]
++            })
+         else:
+-            # Root node or level 0, error is 0 or undefined? 
+-            # Level 0 is original data. We don't aggregate it further unless we go deeper?
+-            # Actually, the pyramid goes DOWN. Level 0 is finest. Level L is coarsest.
+-            # We start at the coarsest level (root) and go down?
+-            # Or start at finest and aggregate?
+-            # Sources say: "Traverse the pyramid starting from the root... move down"
+-            # Root is the coarsest level (highest index).
+-            pass
+-
+-        # Let's re-orient: Root is highest level (coarsest). Leaves are lowest levels (finest).
+-        # We start at root (level L).
+-        # If error of root <= epsilon, we use root.
+-        # Else, we go to children (level L-1).
+-        
+-        # Corrected traversal logic:
+-        # Start at level = len(pyramid) - 1 (coarsest)
+-        # If error[level] <= epsilon, select this node.
+-        # Else, recurse to children at level-1.
+-        
+-        # But wait, the sources say "move down the pyramid until the error... is less equal"
+-        # This implies we start at root (coarse) and go down (finer) until error is small enough.
+-        # So we start at the coarsest level.
+-        
+-        # Let's assume we start at the coarsest level (max index)
+-        pass
+-
+-    # Corrected Traversal from Coarsest to Finest
+-    max_level = len(pyramid) - 1
+-    
+-    def traverse(level, x, y, z):
+-        # If this is the finest level (original data), we must splat it
+-        if level == 0:
+-            add_splat(level, x, y, z, pyramid[level][x, y, z])
+-            return
+-        
+-        # Get error of this node (computed from its children at level-1)
+-        # The error for pyramid[level][x,y,z] is in level_errors[level-1][x,y,z]
+-        node_error = level_errors[level-1][x, y, z]
+-        
+-        if node_error <= epsilon:
+-            # Error is small enough, use this node as a leaf
+-            add_splat(level, x, y, z, pyramid[level][x, y, z])
+-        else:
+-            # Error is too high, recurse to children
+-            # Children are at level-1
+-            # Coordinates of children: (2x, 2y, 2z), (2x+1, 2y, 2z), etc.
+-            for dx in range(2):
+-                for dy in range(2):
+-                    for dz in range(2):
+-                        traverse(level - 1, 2*x + dx, 2*y + dy, 2*z + dz)
+-
+-    # Start traversal from root (coarsest level)
+-    root_size = len(pyramid[max_level])
++            # Recurse to children (finer level)
++            # Children are at level_idx + 1
++            # Each parent (x,y,z) has 8 children at (2x,2y,2z) to (2x+1, 2y+1, 2z+1)
++            if level_idx + 1 < len(pyramid):
++                base_x = 2 * x
++                base_y = 2 * y
++                base_z = 2 * z
++                for dx in range(2):
++                    for dy in range(2):
++                        for dz in range(2):
++                            recurse(level_idx + 1, base_x + dx, base_y + dy, base_z + dz)
++            else:
++                # Reached base level (original data) but error still high
++                # Force selection of base level voxels
++                leaves.append({
++                    'level': level_idx,
++                    'x': x, 'y': y, 'z': z,
++                    'rgb': rgb_alpha[:3],
++                    'alpha': rgb_alpha[3]
++                })
++
++    # Start at root
++    root_level = len(pyramid) - 1
++    root_size = pyramid[root_level]['data'].shape[0]
+     for x in range(root_size):
+         for y in range(root_size):
+             for z in range(root_size):
+-                traverse(max_level, x, y, z)
+-
+-    # Step 4 & 5: Rasterize
+-    # Sort splats back-to-front based on view transform
+-    splats.sort(key=lambda s: s.depth)
+-    
+-    for splat in splats:
+-        polygon = create_polygon(splat, footprint_tables[splat.level])
+-        rasterize_polygon(polygon, splat.color, splat.alpha)
+-
+-def add_splat(level, x, y, z, value):
+-    # Create a splat object with position, color, alpha, and level
+-    splat = {
+-        'level': level,
+-        'x': x,
+-        'y': y,
+-        'z': z,
+-        'color': value[:3],
+-        'alpha': value[3],
+-        'depth': compute_depth(x, y, z, level) # Placeholder for depth calculation
+-    }
+-    splats.append(splat)
+-
+-def generate_footprint_table(level, view_transform):
+-    # Returns a function or data structure defining the polygon shape/size
+-    # for splats at this pyramid level
+-    # Size scales with 2^level
+-    pass
+-
+-def compute_depth(x, y, z, level):
+-    # Compute depth of the splat in view space
+-    # Not given in sources [G]
+-    pass
+-
+-def rasterize_polygon(polygon, color, alpha):
+-    # Standard hardware rasterization
+-    pass
++                recurse(root_level, x, y, z)
++                
++    return leaves
++
++def render(pyramid, leaves, view_transform, footprint_tables):
++    """
++    Renders the selected leaves using splatting.
++    """
++    # Sort leaves back-to-front based on view transform
++    sorted_leaves = sort_back_to_front(leaves, view_transform)
++    
++    # Initialize image buffer
++    image = np.zeros((height, width, 4))
++    
++    for leaf in sorted_leaves:
++        level_idx = leaf['level']
++        x, y, z = leaf['x'], leaf['y'], leaf['z']
++        rgb = leaf['rgb']
++        alpha = leaf['alpha']
++        
++        # Get footprint polygon for this level
++        # Footprint size depends on the resolution of the pyramid level
++        polygon = footprint_tables[level_idx]
++        
++        # Project polygon to screen space
++        screen_polygon = project_polygon(polygon, view_transform, x, y, z)
++        
++        # Rasterize polygon with Gouraud shading
++        # Color is constant per splat (average of children), but can be interpolated
++        # across the polygon if vertex colors were stored (here simplified to flat/average)
++        rasterize_polygon(screen_polygon, rgb, alpha, image)
++        
++    return image
+ ```
+ 
+ **Parameters:**
+-*   **Error Threshold ($\epsilon$):** A user-specified value that measures the desired homogeneity. Selecting a larger error results in fewer subvolumes (coarser decomposition), while decreasing the error increases the number of subvolumes (finer decomposition) [S3, unofficial].
++*   **Error Threshold ($\epsilon$):** A user-specified value determining the desired homogeneity [S3, unofficial]. Selecting a larger error results in fewer subvolumes (coarser decomposition), while decreasing the error increases the number of subvolumes (finer decomposition) [S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The error metric must be computed accurately to avoid over-segmentation or under-segmentation. The sources do not specify the exact numerical precision required, but note that for binary data, bit-packing can be used for efficiency [S2, unofficial].
+-*   **Boundaries:** The pyramid construction assumes the volume dimensions are powers of 2. If not, padding or truncation may be required [G].
+-*   **Degenerate Input:** If the volume is entirely homogeneous, the entire volume may be represented by a single splat at the root level [S3, unofficial].
+-
+-## Subtopics
+-
+-### Multi-Resolution Points
+-Uses a hierarchy of point clouds with varying densities, optimized for point-based rendering rather than voxel splatting. Choose when dealing with unstructured point data. [Multi-Resolution Points](4784-multi-resolution-points.md)
+-
+-### 3D Gaussian Splatting LOD methods
+-Uses Gaussian primitives with LOD techniques for smooth transitions between resolutions, focusing on neural rendering aesthetics. Choose for novel view synthesis with Gaussian primitives. [3D Gaussian Splatting LOD methods](5439-3d-gaussian-splatting-lod-methods.md)
+-
+-### Splat List (SVL) Generation with Multi-Level Downsampling
+-Focuses on generating a sorted list of splats from multi-level downsampled data, optimizing for rasterization order. Choose when explicit splat list management is required. [Splat List (SVL) Generation with Multi-Level Downsampling](5767-splat-list-svl-generation-with-multi-level-downsampling.md)
+-
+-### Octree-based Splatting
+-Uses an adaptive octree structure for volume decomposition, allowing for non-uniform cell sizes. Choose when the data has irregular structures that a fixed pyramid cannot represent efficiently. [Octree-based Splatting](8067-octree-based-splatting.md)
++*   **Precision:** The error metric computation must be stable. If the volume data has high dynamic range, the error values may require normalization [G].
++*   **Boundary Conditions:** The pyramid construction assumes $N$ is a power of 2. If $N$ is not a power of 2, padding or truncation is required [G].
++*   **Degenerate Input:** If the volume is completely homogeneous, the root node will have zero error, and only one large splat will be rendered [S3, unofficial]. If the volume is completely random, the algorithm will descend to the base level, rendering $N^3$ splats, losing the performance benefit [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The construction of the pyramid takes $O(N^3)$ time, as each level is derived from the previous one in linear time relative to the number of voxels. The traversal and rendering time depends on the error threshold $\epsilon$. In the worst case (very small $\epsilon$), it approaches $O(N^3)$ splats. In the best case (large $\epsilon$), it approaches $O(1)$ splats.
+-*   **Memory Complexity:** The pyramid requires $O(N^3)$ memory, as it stores $\log N$ levels, each with $1/8$ the size of the previous. The total memory is $N^3 (1 + 1/8 + 1/64 + ...) \approx \frac{8}{7} N^3$, which is a constant factor overhead over the original data [S2, unofficial][S4, unofficial].
+-*   **Measured Performance:** For binary data, using bit-packing to generate lower-resolution images can produce an image with half the linear resolution in approximately one-eighth the time [S2, unofficial]. The algorithm is designed for real-time interactive rendering on modern graphics workstations by leveraging hardware-accelerated polygon rasterization [S1, unofficial].
+-*   **Strengths:** Real-time performance, adaptive resolution based on data homogeneity, efficient use of graphics hardware via polygon approximation.
+-*   **Limitations:** Fixed pyramid structure may not be optimal for all data distributions compared to adaptive octrees. The error metric is a simplification and may not always correlate perfectly with visual quality.
+-*   **When to use:** Interactive volume rendering applications where performance is critical and the data has regions of varying homogeneity.
+-*   **When not to use:** When the data has complex, non-homogeneous structures that require fine resolution everywhere, or when the overhead of building the pyramid is prohibitive.
++*   **Time Complexity:** Pyramid construction is $O(N^3)$ [S2, unofficial][S4, unofficial]. Traversal is proportional to the number of leaf nodes, which depends on $\epsilon$. Rendering is proportional to the number of leaf nodes.
++*   **Memory Complexity:** The pyramid stores $\sum_{k=0}^{\log N} (N/2^k)^3 \approx \frac{8}{7} N^3$ samples, so memory usage is roughly $1.14 \times$ the original volume size [S2, unofficial][S4, unofficial].
++*   **Measured Performance:** For binary data, bits can be packed into bytes to produce lower resolution images faster (1/8th time for half linear resolution) [S2, unofficial]. The algorithm enables real-time interactive rendering suitable for applications requiring progressive refinement [S1, unofficial].
++*   **Strengths:** Real-time performance, adaptive resolution, efficient use of graphics hardware via polygon approximation [S1, unofficial][S2, unofficial].
++*   **Limitations:** Visual artifacts at boundaries between different pyramid levels if not blended properly (though Gouraud shading helps) [S1, unofficial]. The quality is dependent on the choice of $\epsilon$ [S3, unofficial].
+ 
+ ## Background
+-Hierarchical Splatting was introduced by David Laur and Pat Hanrahan in 1991 [S1, unofficial]. It was one of the early algorithms to combine hierarchical data structures with splatting for volume rendering, aiming to achieve real-time performance on the graphics workstations of that era. The method builds on the concept of pyramidal data structures, which were previously used in image processing for multi-resolution analysis. The algorithm was notable for its use of Gouraud-shaded polygons to approximate splats, allowing it to leverage the rasterization capabilities of existing graphics hardware [S1, unofficial][S2, unofficial]. It has been cited in subsequent works on volume rendering and multi-resolution visualization [S2, unofficial][S4, unofficial].
++Hierarchical splatting was introduced by David Laur and Pat Hanrahan in 1991 [S1, unofficial]. It was designed as a progressive refinement algorithm for volume rendering, leveraging the pyramidal volume representation to achieve real-time interactive rendering [S1, unofficial]. The method approximates splats with RGBA Gouraud-shaded polygons to enable efficient rasterization on modern graphics workstations of the time [S1, unofficial]. It is a foundational technique in the family of multi-resolution volume rendering methods [S2, unofficial].
+ 
+ ## Sources
+-[S1] EWA volume splatting, https://www.researchgate.net/publication/48546966_EWA_volume_splatting, fetched 2026-10-28 (unofficial)
++[S1] Hierarchical splatting, https://www.researchgate.net/publication/48546966_EWA_volume_splatting, fetched 2026-10-28 (unofficial)
+ [S2] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
+ [S3] Hierarchical Splatting, https://www.cg.tuwien.ac.at/studentwork/VisFoSe98/bernd/hsplat.htm, fetched 2026-10-27 (unofficial)

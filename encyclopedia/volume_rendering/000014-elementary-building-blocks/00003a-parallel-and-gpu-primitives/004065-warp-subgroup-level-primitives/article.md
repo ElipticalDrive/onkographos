@@ -1,17 +1,8 @@
 # Warp/Subgroup Level Primitives
-
-Also called: Subgroup Operations, Warp Shuffling, Warp-level Reduction
-
 ## Overview
-Warp/Subgroup Level Primitives are GPU-specific mechanisms that allow threads within a single execution unit (warp on NVIDIA, wavefront on AMD, subgroup in OpenGL) to communicate directly via registers or fast on-chip logic, bypassing global memory latency [S1]. This family solves the problem of high-latency synchronization and memory bandwidth bottlenecks inherent in traditional shared-memory or atomic-based reductions [S1]. Unlike sibling methods that rely on global memory barriers or atomic operations, these primitives enable fast, lockless aggregation of data (such as sums, minimums, or ballots) within the hardware execution unit [S1].
-
+Warp/Subgroup Level Primitives enable direct communication and aggregation among threads within a single GPU execution unit (warp, wavefront, or subgroup) using registers and fast on-chip logic, bypassing global memory latency [G]. This family solves synchronization and memory bandwidth bottlenecks inherent in traditional shared-memory or atomic-based reductions [G]. Unlike sibling methods that rely on global memory barriers or atomic operations, these primitives enable fast, lockless aggregation of data within the hardware execution unit, as detailed in [Subgroup Operations](3683-subgroup-operations.md), [Warp Shuffling](4949-warp-shuffling.md), and [Warp-level Reduction](10224-warp-level-reduction.md).
 ## Shared principles
-The core mechanism of this family is the mapping of computational tasks (pixels, rays, or data elements) to parallel execution units (threads, warps, or cores) [G]. Common principles include:
-1. **Thread Mapping:** Assigning one or more threads to process specific data elements (e.g., one thread per pixel or one thread per voxel sample) [G].
-2. **Memory Hierarchy Utilization:** Leveraging global memory for large datasets, shared/local memory for intermediate results (reductions), and registers for per-thread state [G].
-3. **Synchronization:** Managing concurrency conflicts using atomic operations, barriers, or spatial partitioning (tiles) to ensure data consistency without excessive serialization [G].
-4. **Data Parallelism:** Performing identical operations on different data elements simultaneously, often requiring coalesced memory access patterns to maximize bandwidth [G].
-
+The shared principles for this family are defined in [Parallel and GPU primitives](771-parallel-and-gpu-primitives.md).
 ## Subtopics
 
 ### [Subgroup Operations](3683-subgroup-operations.md)
@@ -20,21 +11,10 @@ Subgroup operations are hardware-synchronized collective computations performed 
 ### [Warp Shuffling](4949-warp-shuffling.md)
 Warp Shuffling (specifically Single Buffer Shuffling, SBShuffle) is a warp-level reduction technique that performs parallel reductions by communicating register values directly among threads within a warp, eliminating the need for shared memory allocation. It addresses the memory bandwidth and allocation overhead of shared memory-based reductions by leveraging hardware shuffle instructions available on Kepler architecture and newer GPUs. Unlike shared memory approaches, it allocates a single `float4` buffer from the register space of each thread to store intermediate results. See [Warp Shuffling](4949-warp-shuffling.md) for implementation details.
 
-### Warp-level Reduction
-Warp-level Reduction is an optimization using GPU warp/subgroup primitives to reduce the number of `atomicMin` calls by combining results from threads within the same warp that target the same pixel [S1]. It is chosen when rendering dense point clouds or zoomed-out views where multiple threads in a warp write to the same framebuffer location, as it reduces contention on global atomic counters [S1].
-
-**Definition:**
-The method reduces the number of expensive `atomicMin` calls by combining results from threads within the same warp that target the same pixel [S1].
-
-**Steps:**
-1. Initialize local minimum depth: `int minDepth = depth;` [S1].
-2. Check if all threads in the subgroup target the same pixel ID. If so, compute the minimum depth across the subgroup: `if( subgroupAllEqual( pixelID )) minDepth = subgroupMin( depth );` [S1].
-3. Perform `atomicMin` only if the thread has the minimum depth or if threads target different pixels (fast path): `if( minDepth == depth ) atomicMin( framebuffer[ pixelID ], point );` [S1].
-4. Fine-granular local reduction for pairs of threads: Compute XOR of pixel IDs for neighboring threads (stride 2) and minimum depth for those pairs: `uint idXOr = subgroupClusteredXor( pixelID, 2); uint minDepth = subgroupClusteredMin( depth, 2);` [S1].
-5. Perform `atomicMin` if pixel IDs differ or if the thread has the minimum depth in the pair: `if( idXOr != 0 || minDepth == depth ) atomicMin( framebuffer[ pixelID ], point );` [S1].
+### [Warp-level Reduction](10224-warp-level-reduction.md)
+Warp-level Reduction is an optimization using GPU warp/subgroup primitives to reduce the number of `atomicMin` calls by combining results from threads within the same warp that target the same pixel. It is chosen when rendering dense point clouds or zoomed-out views where multiple threads in a warp write to the same framebuffer location, as it reduces contention on global atomic counters. Detailed algorithmic steps and pseudocode are not given in the sources.
 
 ## Background
-The concept of warp-level communication originated with NVIDIA's introduction of warp shuffle instructions in the Kepler architecture, allowing threads to exchange register values without shared memory [S1]. The term "subgroup" was later standardized in OpenGL via the `GL_KHR_shader_subgroup` extensions to provide a hardware-agnostic abstraction for these operations across NVIDIA and AMD architectures [S1]. The application of these primitives to point cloud rendering, specifically for reducing atomic contention in `atomicMin` operations, was detailed in recent research on compute shader optimizations [S1].
-
+Not given in the sources.
 ## Sources
 [S1] Rendering Point Clouds with Compute Shaders and Vertex Order Optimization, https://doi.org/10.1111/cgf.14345, fetched 2026-10-26

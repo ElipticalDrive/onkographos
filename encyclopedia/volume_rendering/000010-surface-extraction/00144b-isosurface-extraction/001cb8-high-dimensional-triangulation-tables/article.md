@@ -3,146 +3,129 @@
 Also called: Bhaniramka et al. triangulation algorithm
 
 ## Overview
-High-Dimensional Triangulation Tables is a method for generating precomputed triangulation tables for isosurface extraction in $n$-dimensional hypercubes [S1, book]. It addresses the excessive simplex count produced by recursive contour-meshing, which requires subdividing 4-cells into 4-simplices before contouring, analogous to breaking a cube into five or six tetrahedra in 3D [S1, book]. Unlike recursive decomposition, this method constructs an $n$-polytope via convex hulls to determine the isosurface directly within the hypercube, ensuring consistent triangulation between adjacent faces [S1, book].
+High-Dimensional Triangulation Tables is a method for generating lookup tables for isosurface extraction in $n$-dimensional hypercubes, addressing the excessive simplex count produced by recursive contour-meshing which requires subdividing 4-cells into 4-simplices [S1, book]. Unlike recursive contour-meshing, which breaks a hypercube into simplices before contouring (analogous to breaking a cube into five or six tetrahedra in 3D) and thereby creating more triangles, this method generates a precomputed triangulation table similar to the Marching Cubes table for any $n$-dimensional hypercube [S1, book]. It builds on [Isosurface extraction](30-isosurface-extraction.md) by providing a direct table-based approach for higher dimensions without intermediate simplicial decomposition.
 
 ## How it works
 **Inputs:**
-*   Scalar field values $V_i$ at the $2^n$ vertices of an $n$-dimensional hypercube cell [S1, book].
-*   A scalar isovalue $I$ [S1, book].
+*   Scalar field values at the vertices of an $n$-dimensional hypercube cell.
+*   An iso-value threshold.
 
 **Outputs:**
-*   A set of simplices representing the isosurface intersection within the cell [S1, book].
-*   A triangulation table mapping vertex configurations to edge intersections and triangulations [S1, book].
+*   A set of triangular faces (simplices) representing the isosurface within the cell, indexed by a configuration key.
 
 **Data Structures:**
-*   **Vertex Configuration Index:** An integer formed by $2^n$ bits [S1, book]. For vertex $i$ (where $i \in [0, 2^n - 1]$), the $i$-th bit is set to 1 if $V_i > I$, and 0 otherwise [S1, book].
-*   **Triangulation Table:** A lookup structure indexed by the Vertex Configuration Index [S1, book]. Each entry contains a list of triangles (triplets of vertex indices or edge intersection points) [S1, book].
+*   **Configuration Key:** An integer formed by $2^n$ bits, where each bit corresponds to a vertex of the hypercube. If the scalar value at vertex $v_i$ is greater than the iso-value, the $i$-th bit is 1; otherwise, it is 0 [S1, book].
+*   **Triangulation Table:** A lookup array indexed by the Configuration Key. Each entry contains a list of triangles (triplets of vertex indices or edge midpoints) that form the isosurface for that specific configuration.
 
 **Algorithm Steps:**
-
-1.  **Label Vertices:** For each vertex $v_i$ of the hypercube with scalar value $V_i$, assign a positive label if $V_i > I$, and a negative label if $V_i < I$ [S1, book].
+1.  **Label Vertices:** Assign a positive label to each vertex of the hypercube if its scalar value is greater than the iso-value, and a negative label if its scalar value is smaller than the iso-value [S1, book].
 2.  **Identify Intersecting Edges:** Collect the midpoints of all edges of the hypercube where one endpoint has a positive label and the other has a negative label [S1, book].
-3.  **Construct Convex Hull:** Create the convex hull of the collected midpoints together with other vertices in the hypercube that share the same label (positive or negative), forming an $n$-polytope within the hypercube [S1, book].
-4.  **Extract Isosurface Faces:** Remove any faces of the polytope that lie on the boundary of the hypercube (faces sharing vertices of the hypercube) [S1, book]. The remaining faces comprise the isosurface [S1, book].
-5.  **Triangulate:** If the remaining faces are not simplices, perform triangulation, ensuring consistent triangulation between adjacent faces of the hypercube [S1, book].
-6.  **Table Generation (Offline):** The above steps are performed for all $2^{2^n}$ possible vertex configurations to build the triangulation table, which is created only once for a given $n$ dimension [S1, book].
-7.  **Runtime Extraction:** For each cell, encode cell vertex values relative to the iso-value using one bit per vertex (1 if value > iso-value, 0 otherwise) to index the triangulation table, then use the table to decide which edges intersect with the isosurface for the given cell configuration [S1, book].
+3.  **Construct Polytope:** Create the convex hull of the collected midpoints together with the vertices of the hypercube that share the same label (positive or negative, used consistently) [S1, book]. This convex hull forms an $n$-polytope lying within the hypercube [S1, book].
+4.  **Extract Boundary Faces:** Remove any faces of the polytope that lie on the boundary of the hypercube (i.e., faces that share vertices with the hypercube boundary) [S1, book].
+5.  **Define Isosurface:** The remaining faces of the polytope comprise the isosurface in $n$ dimensions [S1, book].
+6.  **Triangulate:** If the remaining faces are not simplices, perform triangulation. Care must be taken to ensure consistent triangulation between adjacent faces of the hypercube to maintain manifold continuity [S1, book].
+7.  **Table Generation:** Encode the cell vertex values relative to the iso-value using one bit per vertex to form the index for the triangulation table. The table is created once for a given dimension $n$ [S1, book].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_vertex_index(vertices, isovalue):
-    """
-    Computes the integer index for the triangulation table.
-    vertices: list of scalar values at the 2^n vertices of the hypercube.
-    isovalue: the threshold scalar value.
-    Returns: integer index where bit i is 1 if vertices[i] > isovalue.
-    """
-    index = 0
-    for i, v in enumerate(vertices):
-        if v > isovalue:
-            index |= (1 << i)
-    return index
-
-def generate_triangulation_table(n):
+def generate_high_dimensional_triangulation_table(n):
     """
     Generates the triangulation table for an n-dimensional hypercube.
-    This is an offline process.
+    This is a one-time offline computation step.
     """
     num_vertices = 2 ** n
-    table_size = 2 ** num_vertices
-    table = [None] * table_size
-    
-    # Precompute hypercube edge connectivity: list of (v1_idx, v2_idx)
-    edges = []
-    for i in range(num_vertices):
-        for j in range(i + 1, num_vertices):
-            if bin(i ^ j).count('1') == 1:
-                edges.append((i, j))
-                
-    for config in range(table_size):
-        # Determine vertex labels from config bits
-        labels = [(config >> i) & 1 for i in range(num_vertices)]
+    num_cases = 2 ** num_vertices
+    table = {}
+
+    # Iterate through all possible vertex configurations (2^(2^n) cases)
+    for config in range(num_cases):
+        # Decode configuration into vertex labels
+        # bit i is 1 if vertex i value > iso, 0 otherwise
+        vertex_labels = []
+        for i in range(num_vertices):
+            if (config >> i) & 1:
+                vertex_labels.append(1) # Positive
+            else:
+                vertex_labels.append(0) # Negative
+
+        # Step 1: Identify midpoints of edges with mixed labels
+        midpoints = []
+        # Edges connect vertices differing by exactly one bit
+        for i in range(num_vertices):
+            for j in range(i + 1, num_vertices):
+                # Check if i and j are connected by an edge (Hamming distance 1)
+                if bin(i ^ j).count('1') == 1:
+                    if vertex_labels[i] != vertex_labels[j]:
+                        # Record the edge index or midpoint
+                        midpoints.append((i, j))
+
+        # Step 2: Construct the convex hull of midpoints and same-label vertices
+        # Note: In implementation, 'vertices' here refers to the geometric points
+        # associated with the hypercube vertices and the edge midpoints.
+        # For table generation, we determine which faces of the resulting polytope
+        # are internal to the hypercube.
         
-        # Step 2: Collect midpoints of edges with mixed labels
-        intersecting_midpoints = []
-        for v1, v2 in edges:
-            if labels[v1] != labels[v2]:
-                intersecting_midpoints.append((v1 + v2) / 2.0)
-                
-        # Step 3: Create convex hull of midpoints + consistent vertices
-        consistent_vertices = [i for i, l in enumerate(labels) if l == 1]
-        all_points = intersecting_midpoints + consistent_vertices
-        polytope_faces = compute_n_d_convex_hull(all_points)
+        # Step 3: Remove faces on the boundary of the hypercube
+        # A face is on the boundary if it shares vertices with the hypercube boundary.
+        # The remaining faces constitute the isosurface.
         
-        # Step 4: Remove faces on the hypercube boundary
-        isosurface_faces = [f for f in polytope_faces if not is_on_hypercube_boundary(f, num_vertices)]
+        # Step 4: Triangulate non-simplex faces consistently
+        # This step requires a consistent triangulation strategy for the n-polytope faces.
+        # For n=3, this reduces to the standard Marching Cubes logic.
+        # For n>3, the faces are (n-1)-polytopes.
         
-        # Step 5: Triangulate non-simplex faces consistently
-        triangles = triangulate_polygon_mesh(isosurface_faces)
+        triangles = triangulate_isosurface_faces(midpoints, vertex_labels, n)
         
         table[config] = triangles
 
     return table
 
-def compute_n_d_convex_hull(points):
+def triangulate_isosurface_faces(midpoints, vertex_labels, n):
     """
-    Standard n-dimensional convex hull algorithm (e.g., QuickHull).
-    Returns a list of faces, where each face is a list of point indices.
+    [G] Placeholder for the specific geometric triangulation logic.
+    The source [S1, book] states that care is taken to ensure consistent
+    triangulation between adjacent faces. The exact algorithm for n>3
+    triangulation of the polytope faces is not detailed in the provided text.
     """
-    # Implementation uses standard computational geometry routines
-    # to compute the boundary facets of the convex hull of points.
-    return standard_convex_hull_routine(points)
-
-def is_on_hypercube_boundary(face, num_vertices):
-    """
-    Checks if a face lies on the boundary of the hypercube.
-    A face is on the boundary if all its vertices lie on a single 
-    (n-1)-dimensional facet of the hypercube.
-    """
-    return check_facet_membership(face)
-
-def triangulate_polygon_mesh(faces):
-    """
-    Standard triangulation algorithm for non-simplex faces.
-    Ensures consistent vertex ordering and shared edge handling.
-    """
-    return standard_triangulation_routine(faces)
-
-def extract_isosurface_cell(vertices, isovalue, table):
-    """
-    Extracts the isosurface for a single cell using the precomputed table.
-    """
-    index = compute_vertex_index(vertices, isovalue)
-    return table[index]
+    # Implementation detail: The convex hull of the midpoints and same-label
+    # vertices forms the polytope. Faces sharing hypercube vertices are removed.
+    # The remaining faces are triangulated.
+    return []
 ```
 
 **Parameters:**
-*   $n$: The dimension of the hypercube [S1, book].
-*   Table Size: $2^{2^n}$ [S1, book]. For $n=3$, size is 256. For $n=4$, size is 65,536. For $n=5$, size is over 4 billion [S1, book].
+*   **Dimension ($n$):** The number of dimensions of the hypercube.
+*   **Table Size:** The number of cases in the table is $2^{(2^n)}$ [S1, book].
+    *   For $n=3$ (3D cube): $2^{(2^3)} = 256$ cases [S1, book].
+    *   For $n=4$ (4D hypercube): $2^{(2^4)} = 65,536$ cases [S1, book].
+    *   For $n=5$ (5D cube): $2^{(2^5)} = 4,294,967,296$ cases (over four billion) [S1, book].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** Floating-point comparisons near the isovalue must be consistent to avoid gaps or overlaps [S1, book].
-*   **Boundary Faces:** Correctly identifying and removing faces that lie on the hypercube boundary is critical for mesh coherence across cells [S1, book].
-*   **Triangulation Consistency:** Ensuring that adjacent cells share the same triangulation for shared faces is essential for a watertight mesh [S1, book].
+*   **Exponential Growth:** The table size grows doubly exponentially with dimension. For $n=5$, the table exceeds four billion entries, making storage and lookup impractical without compression or hierarchical methods [S1, book].
+*   **Ambiguity:** The method relies on consistent triangulation of the polytope faces. Ambiguous configurations (where the topology of the isosurface is not uniquely determined by the vertex labels) must be resolved consistently across adjacent cells [S1, book].
+*   **Non-Simplex Faces:** The faces of the extracted polytope may not be simplices, requiring an additional triangulation step [S1, book].
 
 ## Subtopics
 
 ### Recursive n-simplex subdivision
-A technique that uses a recursive method to split $n$-dimensional cells into $n$-simplexes [S2, unofficial]. The resulting surfaces exist in four dimensions and are displayed using stereographic projection or slicing to reduce dimensionality [S2, unofficial]. The centroid division technique used to break cells into simplexes is suboptimal but can be improved using lookup tables similar to those used in marching cubes [S2, unofficial]. It was used to compute swept volumes of time-varying data generated from electromagnetic field simulations, allowing them to be displayed as animations [S2, unofficial].
+A technique where $n$-dimensional cells are recursively split into $n$-simplexes before contouring [S2, unofficial]. Surfaces are computed in four dimensions and displayed using stereographic projection or slicing to reduce dimensionality [S2, unofficial]. The centroid division technique used to break cells into simplexes is suboptimal and can be improved using lookup tables similar to those used in Marching Cubes [S2, unofficial]. It was used to compute swept volumes of time-varying data from electromagnetic field simulations [S2, unofficial].
+
+### Complete Simplex Table
+A lookup table method for $n$-dimensional surface reconstruction that uses a single large array to store all tetrahedra configurations for every possible cell orientation, ensuring correct orientation without additional disambiguation logic [S3]. The table consists of a 65,536 array with $n$ tetrahedra per index. Each tetrahedron is stored in 4 bytes. The total number of tetrahedra for the whole table is 356,817. The memory size is calculated as $(4 \times 356,817) + (5 \times 65,536) = 1.75$ Mbytes [S3]. The advantage is that all data is correctly oriented and can be directly applied to the data; the disadvantage is the larger size, though considered acceptable within four dimensions [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Offline table generation is exponential in $n$ [S1, book]. Runtime extraction is $O(1)$ per cell after table lookup, assuming the table fits in memory [S1, book].
-*   **Memory Complexity:** The table size is $2^{2^n}$ [S1, book]. This becomes prohibitive for $n \ge 5$ (over 4 billion entries) [S1, book].
-*   **Strengths:** Avoids the excessive simplex count of recursive contour-meshing [S1, book]. Provides a direct lookup method similar to Marching Cubes but for higher dimensions [S1, book].
-*   **Limitations:** Memory requirements grow doubly exponentially with dimension [S1, book]. Not practical for $n > 4$ due to table size [S1, book].
-*   **When to Use:** When isosurface extraction in 4D or higher is required and memory allows [S1, book]. Not suitable for standard 3D if Marching Cubes is preferred due to simplicity, but offers an alternative geometric construction [S1, book].
+*   **Time Complexity:** Table lookup is $O(1)$ after precomputation. Precomputation time is exponential in $n$ due to the $2^{(2^n)}$ cases [S1, book].
+*   **Memory Complexity:** The table size is $2^{(2^n)}$ entries. For $n=3$, this is small (256 entries). For $n=4$, it is 65,536 entries. For $n=5$, it is over 4 billion entries, which is prohibitive for standard memory [S1, book]. The Complete Simplex Table variant for 4D requires 1.75 Mbytes [S3].
+*   **Strengths:** Provides a direct, precomputed solution for isosurface extraction in $n$ dimensions without the overhead of recursive simplicial decomposition. Ensures consistent triangulation [S1, book].
+*   **Limitations:** The doubly exponential growth of the table size makes it infeasible for $n \ge 5$. Recursive contour-meshing (the alternative it addresses) produces more triangles than this method [S1, book].
+*   **When to Use:** Suitable for 3D and potentially 4D isosurface extraction where precomputation is acceptable and memory is available. Not suitable for $n \ge 5$ without significant compression or hierarchical decomposition.
 
 ## Background
-The method was proposed by Bhaniramka et al. [14] to address the problem of excessive simplices in recursive contour-meshing for 4D data [S1, book]. It is described in the *Visualization Handbook* (2005) [S1, book]. The approach is analogous to the Marching Cubes algorithm but extends the concept of precomputed triangulation tables to $n$-dimensional hypercubes [S1, book].
+The method was proposed by Bhaniramka et al. [14] to address the excessive simplex count produced by recursive contour-meshing in higher dimensions [S1, book]. Recursive contour-meshing requires subdividing 4-cells into 4-simplices before contouring, which is analogous to breaking a cube into five or six tetrahedra in 3D [S1, book]. This method extends the concept of the Marching Cubes lookup table to $n$-dimensional hypercubes [S1, book]. Early work on computing surfaces in $>3$ dimensions used recursive techniques to split cells into $n$-simplexes, but this was noted as suboptimal [S2, unofficial]. Bhaniramka et al. explored extending Marching Cubes into the fourth dimension, finding that the lookup table required $2^{22}$ separate configurations after removing symmetrical configurations [S2, unofficial].
 
 ## Sources
-[S1] Time-Dependent Isosurface Extraction, HAN-WEI SHEN, in Visualization Handbook, 2005, URL: https://www.sciencedirect.com/science/article/pii/B978012387582250006X, fetched 2026-10-30 (book)
-[S2] Chapter Topological Visualisation Techniques for Volume Multifield Data, URL: https://archive.org/details/oapen-20.500.12657-49310, fetched 2026-10-27 (unofficial)
+[S1] Time-Dependent Isosurface Extraction, HAN-WEI SHEN, Visualization Handbook, 2005, https://www.sciencedirect.com/science/article/pii/B978012387582250006X (book)
+[S2] Chapter Topological Visualisation Techniques for Volume Multifield Data, https://archive.org/details/oapen-20.500.12657-49310 (unofficial)
+[S3] Piecewise linear hypersurfaces using the marching cubes algorithm, https://doi.org/10.1117/12.342833

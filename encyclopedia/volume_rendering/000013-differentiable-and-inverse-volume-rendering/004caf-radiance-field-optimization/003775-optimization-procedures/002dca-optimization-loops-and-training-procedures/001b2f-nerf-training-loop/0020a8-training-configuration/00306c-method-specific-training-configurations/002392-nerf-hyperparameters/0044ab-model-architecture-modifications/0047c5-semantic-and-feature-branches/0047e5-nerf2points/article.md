@@ -1,0 +1,329 @@
+# NeRF2Points
+
+Also called: Layered Perception and Integrated Modeling
+
+## Overview
+NeRF2Points is a method for generating large-scale, geometrically consistent RGBD point clouds from street-view radiance fields by separating the scene into road and street components, modeling them independently, and merging them via rigid transformation [S1, unofficial]. It addresses the "pavement collapse" and floating artifacts common in standard NeRF methods when handling sparse views and weak textures like road surfaces [S1, unofficial]. Unlike its siblings which focus on semantic segmentation or feature distillation within a unified field, NeRF2Points explicitly decouples the geometry of the ground plane from the vertical scene to prevent gradient competition, then enforces spatial and temporal consistency to stabilize the output [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A sequence of RGB images $I$ from a street-view rig (typically 6 cameras), coarse initial camera poses (from GNSS/IMU), and auxiliary depth/normal estimates.
+*   **Outputs:** A merged RGBD point cloud $PC$ and a trained radiance field capable of rendering RGB, depth, and normals.
+
+**Data Structures:**
+*   **Ray Gate Mask $M(I)$:** A binary mask per image indicating road vs. non-road pixels, derived from a segmentation model (e.g., Mask2Former) with morphological dilation [S1, unofficial].
+*   **Ray Bundles:** Sets of rays $\mathbf{Ray}_i$ partitioned into road rays $\mathbf{Ray}^r$ and scene rays $\mathbf{Ray}^s$ [S1, unofficial].
+*   **Point Clouds:** Separate point clouds $PC_r$ ($N_1 \times 3$) and $PC_s$ ($N_2 \times 3$) generated from the respective radiance fields [S1, unofficial].
+
+**Numbered Steps:**
+
+1.  **Data Preparation:**
+    *   Collect street-view images and obtain initial 6-DoF poses using Wheel-IMU-GNSS Odometry (WIGO) [S1, unofficial].
+    *   Refine poses and estimate sparse point clouds using COLMAP with Structure from Motion (SfM) [S1, unofficial].
+    *   Generate depth and normal maps using Omnidata [S1, unofficial].
+    *   Generate road/scene masks $M(I)$ using a segmentation model trained on Cityscapes [S1, unofficial].
+
+2.  **Layered Perception (Ray Partitioning):**
+    *   For each image $I$ and ray $\mathbf{Ray}_i = \{x_i, d_i\}$, compute road rays and scene rays:
+        $$
+        \mathbf{Ray}_{i_{1}}^{r} = \mathbf{Ray}_{i}(M(\mathbf{I})), \quad \mathbf{Ray}_{i_{2}}^{s} = \mathbf{Ray}_{i}(1-M(\mathbf{I}))
+        $$
+    *   Identify intersection rays $\mathbf{Ray}_{i_{3}} = \mathbf{Ray}_{i_{1}}^{r} \cap \mathbf{Ray}_{i_{2}}^{s}$ (facilitated by morphological dilation in $M$) [S1, unofficial].
+    *   Reconstruct the original ray set as the union:
+        $$
+        \mathbf{Ray}_{i} = (\mathbf{Ray}_{i_{1}}^{r} - \mathbf{Ray}_{i_{3}}) \cup (\mathbf{Ray}_{i_{2}}^{s} - \mathbf{Ray}_{i_{3}}) \cup \mathbf{Ray}_{i_{3}}
+        $$
+    *   Train two separate radiance fields (or branches) for road and scene, supervised by ground-truth RGB, depth, and normals [S1, unofficial].
+
+3.  **Geometric-Aware Consistency Regularization (GAC):**
+    *   **Matching Cost Calculation:** For a ray bundle $\mathbf{Ray}_i'$ (from either road or scene), calculate the matching cost $\mathbf{cos}_i$ as a weighted sum of errors between predictions and ground truth:
+        $$
+        \mathbf{cos}_{i} = \lambda _{1} \ell _{depth} + \lambda _{2} \ell _{rgb} + \lambda _{3} \ell _{normal}
+        $$
+        Where:
+        *   $\ell _{depth}(\mathbf{t}_{1}^{'}, \mathbf{t}_{2}^{'}) = \sum \| \textit{norm}(\mathbf{t}_{1}^{'}) - \textit{norm}(\mathbf{t}_{2}^{'}) \|_2^2$ (max-min normalized depth) [S1, unofficial].
+        *   $\ell _{rgb}(\mathbf{c}_{1}^{'}, \mathbf{c}_{2}^{'}) = \sum \| \mathbf{c}_{1}^{'} - \mathbf{c}_{2}^{'} \|_{2}^{2}$ [S1, unofficial].
+        *   $\ell _{normal}(\mathbf{n}_{1}^{'}, \mathbf{n}_{2}^{'}) = \sum \| \mathbf{n}_{1}^{'} - \mathbf{n}_{2}^{'} \|_1 + \| 1 - \mathbf{n}_{1}^{'\top } \mathbf{n}_{2}^{'} \|_1$ [S1, unofficial].
+    *   **Hard Sample Selection:** Rank costs $\mathbf{cos}_i$ and select the top-$n$ rays $\mathbf{Ray}_{i,n}'$ as hard samples [S1, unofficial].
+    *   **Spatial Dynamic Consistency ($\ell_{sdc}$):**
+        *   Construct proposal regions $R$ of size $s \times s$ centered on the pixel indices of hard samples.
+        *   Randomly select consistent matching samples from $R$ for each hard ray (selection varies per optimization step).
+        *   Compute loss:
+            $$
+            \ell _{sdc} = \lambda _{1}^{'} \ell _{jsd} (\phi (\mathbf{r}_{1}^{'}) ,\phi (\mathbf{r}_{2}^{'})) + \lambda _{2}^{'} \ell _{rgb} + \lambda _{3}^{'} \ell _{depth}
+            $$
+            Where $\phi(\mathbf{x}) = \frac {e^{x_{i}}}{\sum _{c=1}^{C} e^{x_c}}$ is softmax, and $\ell_{jsd}$ is Jensen-Shannon Divergence:
+            $$
+            \ell _{jsd} = 0.5 * \frac {\sum \phi (\mathbf{r}_{1}^{'}) \ln(\phi (\mathbf{r}_{2}^{'})) + \sum \phi (\mathbf{r}_{2}^{'}) \ln(\phi (\mathbf{r}_{1}^{'}))}{(\phi (\mathbf{r}_{1}^{'}) + \phi (\mathbf{r}_{2}^{'}))/2}
+            $$
+            Here $\mathbf{r}_1'$ and $\mathbf{r}_2'$ are MLP output features of the hard ray and its neighbor region samples [S1, unofficial].
+    *   **Temporal Invariant Consistency ($\ell_{tic}$):**
+        *   Extract SIFT features from adjacent frames $I_{cur}$ and $I_{next}$ to identify corresponding ray bundles $\mathbf{Ray}_{cur}$ and $\mathbf{Ray}_{next}$.
+        *   Compute loss using JSD on their MLP features:
+            $$
+            \ell _{tic} = \ell _{jsd} (\phi (\mathbf{r}_{cur}^{'}) ,\phi (\mathbf{r}_{next}^{'}))
+            $$
+            [S1, unofficial].
+
+4.  **Integrated Modeling (Merging):**
+    *   Generate separate point clouds $PC_r$ and $PC_s$ from the trained fields.
+    *   Identify intersection points $P \subset PC_r$ and $Q \subset PC_s$ derived from shared rays $\mathbf{Ray}_{i_3}$ [S1, unofficial].
+    *   Compute rigid transformation $(\mathbf{R}, \mathbf{t})$ by minimizing:
+        $$
+        \min _{\mathbf{R}, \mathbf{t}} \sum _{i=1}^{N^{'}} \bigl (\textit {Dis}_i(\mathbf{R}, \mathbf{t}) \bigr )^2 + \textit {I}_{SO} (\mathbf{R})
+        $$
+        Where $\textit {Dis}_i(\mathbf{R}, \mathbf{t}) = \min_{q_j \in Q, p_k \in P} \| \mathbf{R} p_i + \mathbf{t} - q_j \|$ and $\textit {I}_{SO}(\mathbf{R})$ is an indicator function for $SO(3)$ (0 if $\mathbf{R}^T \mathbf{R} = \mathbf{I}$ and $\det(\mathbf{R}) = 1$, else $+\infty$) [S1, unofficial].
+    *   Merge point clouds:
+        $$
+        \mathbf{PC} = \mathbf{PC}_r \mathbf{R} + \mathbf{t} + \mathbf{PC}_s
+        $$
+        [S1, unofficial].
+
+5.  **Training Configuration:**
+    *   **Loss Function:**
+        $$
+        \ell _{total} = \ell _{rec} + \beta \ell _{sdc} + \gamma \ell _{tic}
+        $$
+        Where $\ell _{rec} = \theta _{1} \ell _{rgb} + \theta _{2} \ell _{depth} + \theta _{3} \ell _{normal}$ [S1, unofficial].
+    *   **Parameters:**
+        *   Cost coefficients: $\lambda_1 = 0.1, \lambda_2 = 1.0, \lambda_3 = 0.05$ [S1, unofficial].
+        *   Loss coefficients: $\theta_1 = 1.0, \theta_2 = 0.1, \theta_3 = 0.005, \beta = 0.01, \gamma = 0.01$ [S1, unofficial].
+    *   **Optimization:**
+        *   Base framework: NeRFacto within NeRFSTUDIO [S1, unofficial].
+        *   Optimizer: Adam with gradient clipping (threshold/norm 0.1) [S1, unofficial].
+        *   Schedule: Scene space annealing in initial stages, exponential learning rate decay with warm-up [S1, unofficial].
+        *   Batch size: 2048. Iterations: 20,000. Hardware: Single NVIDIA A6000 GPU [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+
+def softmax(x):
+    """Softmax function along the last dimension."""
+    return torch.exp(x) / torch.sum(torch.exp(x), dim=-1, keepdim=True)
+
+def jsd_loss(p, q):
+    """Jensen-Shannon Divergence loss between two probability distributions."""
+    # p, q are already softmaxed features
+    m = 0.5 * (p + q)
+    # KL divergence approximation or direct calculation
+    # Using the formula provided: 0.5 * sum(p*log(q) + q*log(p)) / mean
+    # Note: The source formula uses sum(p * ln(q)) which implies element-wise multiplication
+    # and summing over all elements.
+    term1 = torch.sum(p * torch.log(q + 1e-8))
+    term2 = torch.sum(q * torch.log(p + 1e-8))
+    denom = torch.sum(m)
+    return 0.5 * (term1 + term2) / denom
+
+def max_min_norm(t):
+    """Max-min normalization for depth maps."""
+    t_min = t.min()
+    t_max = t.max()
+    if t_max == t_min:
+        return t
+    return (t - t_min) / (t_max - t_min)
+
+def compute_depth_loss(t1, t2):
+    """Depth loss using normalized depth maps."""
+    t1_norm = max_min_norm(t1)
+    t2_norm = max_min_norm(t2)
+    return torch.sum((t1_norm - t2_norm) ** 2)
+
+def compute_rgb_loss(c1, c2):
+    """RGB loss using MSE."""
+    return torch.sum((c1 - c2) ** 2)
+
+def compute_normal_loss(n1, n2):
+    """Normal loss using L1 distance and angle penalty."""
+    l1_dist = torch.sum(torch.abs(n1 - n2))
+    angle_penalty = torch.sum(torch.abs(1.0 - torch.sum(n1 * n2, dim=-1)))
+    return l1_dist + angle_penalty
+
+def compute_matching_cost(pred_rgb, gt_rgb, pred_depth, gt_depth, pred_normal, gt_normal):
+    """Compute weighted matching cost for a ray bundle."""
+    l_depth = compute_depth_loss(pred_depth, gt_depth)
+    l_rgb = compute_rgb_loss(pred_rgb, gt_rgb)
+    l_normal = compute_normal_loss(pred_normal, gt_normal)
+    
+    lambda_1 = 0.1
+    lambda_2 = 1.0
+    lambda_3 = 0.05
+    
+    cost = lambda_1 * l_depth + lambda_2 * l_rgb + lambda_3 * l_normal
+    return cost
+
+def compute_sdc_loss(features_hard, features_neighbors):
+    """Spatial Dynamic Consistency Loss."""
+    # features_hard: MLP output features for hard rays
+    # features_neighbors: MLP output features for random samples in proposal region
+    p = softmax(features_hard)
+    q = softmax(features_neighbors)
+    
+    lambda_1_prime = 0.01 # Placeholder, source doesn't specify individual lambda for sdc components, only total beta
+    # Source defines l_sdc = lambda_1' * l_jsd + lambda_2' * l_rgb + lambda_3' * l_depth
+    # However, specific values for lambda_1', lambda_2', lambda_3' are NOT given in sources.
+    # We assume the JSD term is the primary differentiator described.
+    
+    l_jsd = jsd_loss(p, q)
+    
+    # Note: Source does not provide values for lambda_1', lambda_2', lambda_3'.
+    # Returning just the JSD component as the distinct part, or assuming equal weight if needed.
+    # For implementation completeness based on available data:
+    return l_jsd 
+
+def compute_tic_loss(features_cur, features_next):
+    """Temporal Invariant Consistency Loss."""
+    p = softmax(features_cur)
+    q = softmax(features_next)
+    return jsd_loss(p, q)
+
+def rigid_alignment(points_p, points_q):
+    """
+    Compute rigid transformation R, t to align P to Q.
+    Simplified Procrustes analysis.
+    """
+    # Center points
+    mean_p = torch.mean(points_p, dim=0)
+    mean_q = torch.mean(points_q, dim=0)
+    
+    P_centered = points_p - mean_p
+    Q_centered = points_q - mean_q
+    
+    # Covariance matrix
+    H = P_centered.T @ Q_centered
+    
+    # SVD
+    U, S, Vt = torch.linalg.svd(H)
+    
+    # Rotation
+    R = Vt.T @ U.T
+    
+    # Check for reflection
+    if torch.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+        
+    # Translation
+    t = mean_q - R @ mean_p
+    
+    return R, t
+
+def train_nerf2points(images, poses, depth_maps, normal_maps, masks):
+    """
+    Main training loop structure.
+    """
+    # 1. Ray Partitioning
+    road_rays = []
+    scene_rays = []
+    shared_rays = []
+    
+    for i, (img, mask) in enumerate(zip(images, masks)):
+        # M(I) is the mask
+        # Ray_i(M(I)) selects rays where mask is 1
+        # Ray_i(1-M(I)) selects rays where mask is 0
+        # Intersection is handled by dilation, assumed to be in mask overlap
+        
+        r_rays = select_rays(img, mask)
+        s_rays = select_rays(img, 1 - mask)
+        
+        # Intersection logic handled by mask dilation in source
+        shared = intersect_rays(r_rays, s_rays)
+        
+        road_rays.append(r_rays)
+        scene_rays.append(s_rays)
+        shared_rays.append(shared)
+        
+    # 2. Training Loop
+    for iteration in range(20000):
+        # Sample batch
+        batch_rays = sample_rays(road_rays, scene_rays)
+        
+        # Forward pass through NeRF (NeRFacto based)
+        pred_rgb, pred_depth, pred_normal, features = nerf_forward(batch_rays)
+        
+        # Get Ground Truth
+        gt_rgb, gt_depth, gt_normal = get_gt(batch_rays, depth_maps, normal_maps)
+        
+        # Reconstruction Loss
+        l_rgb = compute_rgb_loss(pred_rgb, gt_rgb)
+        l_depth = compute_depth_loss(pred_depth, gt_depth)
+        l_normal = compute_normal_loss(pred_normal, gt_normal)
+        
+        theta_1 = 1.0
+        theta_2 = 0.1
+        theta_3 = 0.005
+        l_rec = theta_1 * l_rgb + theta_2 * l_depth + theta_3 * l_normal
+        
+        # GAC: Hard Sample Selection
+        costs = []
+        for ray_bundle in batch_rays:
+            cost = compute_matching_cost(...) # Compute for bundle
+            costs.append(cost)
+            
+        top_n_indices = torch.topk(costs, k=n).indices
+        hard_rays = [batch_rays[i] for i in top_n_indices]
+        
+        # Spatial Dynamic Consistency
+        # Construct proposal regions R (s x s) around hard ray pixels
+        # Randomly select neighbors
+        neighbor_features = get_neighbor_features(hard_rays, proposal_regions)
+        hard_features = get_hard_features(hard_rays)
+        
+        l_sdc = compute_sdc_loss(hard_features, neighbor_features)
+        
+        # Temporal Invariant Consistency
+        # Find SIFT matches between current and next frame
+        cur_rays, next_rays = get_sift_correspondences(images)
+        cur_features = nerf_forward(cur_rays).features
+        next_features = nerf_forward(next_rays).features
+        
+        l_tic = compute_tic_loss(cur_features, next_features)
+        
+        beta = 0.01
+        gamma = 0.01
+        
+        l_total = l_rec + beta * l_sdc + gamma * l_tic
+        
+        # Backward pass
+        l_total.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+        
+    # 3. Point Cloud Generation
+    pc_r = generate_pointcloud(road_nerf, road_rays)
+    pc_s = generate_pointcloud(scene_nerf, scene_rays)
+    
+    # 4. Merging
+    P = get_intersection_points(pc_r, shared_rays)
+    Q = get_intersection_points(pc_s, shared_rays)
+    
+    R, t = rigid_alignment(P, Q)
+    
+    pc_merged = pc_r @ R.T + t + pc_s
+    
+    return pc_merged
+```
+
+**Edge Cases and Pitfalls:**
+*   **Pavement Collapse:** Standard NeRF methods fail to optimize weak textures like road surfaces, leading to poor depth estimation. The layered perception approach prevents this by isolating road gradients from high-frequency street details [S1, unofficial].
+*   **Floaters:** Sparse views and viewing angle shifts cause inconsistent geometry and floating artifacts. GAC regularization mitigates this [S1, unofficial].
+*   **Matching Overhead:** Without GAC, erroneous optimization of hard samples leads to significant artifacts. The spatial dynamic consistency loss controls error optimization in the neighborhood of hard samples [S1, unofficial].
+*   **Mask Boundaries:** The ray gate $M(I)$ uses morphological dilation to facilitate intersection along edges, ensuring seamless stitching. Incorrect dilation size may lead to gaps or overlaps [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training involves 20,000 iterations with a batch size of 2048 on a single NVIDIA A6000 GPU [S1, unofficial]. The additional overhead of GAC (SIFT extraction, neighbor sampling, JSD computation) increases per-iteration cost compared to standard NeRF.
+*   **Memory Complexity:** Requires storing separate radiance fields (or branches) for road and scene, plus auxiliary data for depth, normals, and masks.
+*   **Performance:** On a proprietary 20km street-view dataset (180k images), NeRF2Points achieves PSNR 29.139, SSIM 0.831, and Chamfer Distance 1.876 [S1, unofficial]. This outperforms NeRFacto (PSNR 19.788, CD 5.617), Instant-NPG (PSNR 24.169, CD 5.035), and others [S1, unofficial].
+*   **Strengths:** Generates clear RGBD point clouds from single-frame images; handles large-scale street views; mitigates pavement collapse.
+*   **Limitations:** Requires auxiliary depth/normal estimation (Omnidata) and segmentation (Mask2Former); relies on SIFT for temporal consistency (may fail in textureless regions); specific hyperparameters for GAC sub-losses ($\lambda_1', \lambda_2', \lambda_3'$) are not provided, potentially requiring tuning [S1, unofficial].
+
+## Background
+NeRF2Points was introduced by Peng Tu et al. in 2024 [S1, unofficial]. It addresses the limitations of existing NeRF-based methods (like NeRFacto and Instant-NPG) in generating geometrically accurate point clouds from street-view data, where standard methods suffer from "matching overhead" artifacts and invisible street details [S1, unofficial]. The method builds on the NeRFacto framework within NeRFSTUDIO [S1, unofficial].
+
+## Sources
+[S1] NeRF2Points: Large-Scale Point Cloud Generation From Street Views' Radiance Field Optimization, https://doi.org/10.48550/arxiv.2404.04875, fetched 2026-10-26 (unofficial)
