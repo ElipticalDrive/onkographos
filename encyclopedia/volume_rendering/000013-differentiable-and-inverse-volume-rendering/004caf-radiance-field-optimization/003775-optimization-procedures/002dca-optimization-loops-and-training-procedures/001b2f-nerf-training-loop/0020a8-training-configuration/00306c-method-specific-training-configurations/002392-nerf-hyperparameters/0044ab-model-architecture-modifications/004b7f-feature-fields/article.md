@@ -1,0 +1,35 @@
+# Feature Fields
+
+Also called: Generalized NeRF, Semantic Fields
+
+## Overview
+Feature Fields generalize the standard NeRF formulation by predicting arbitrary per-point feature signals $\mathbf{f}$ in addition to color $\mathbf{c}$ and density $\sigma$ [S1, unofficial]. This allows the radiance field to encode diverse data types, including semantic labels, physical properties, or embeddings from 2D foundation models, rather than being limited to RGB color [S1, unofficial]. Supervision is achieved by reprojecting these predicted 3D features onto the 2D image plane and comparing them to corresponding 2D feature maps, mirroring the color reconstruction process [S1, unofficial].
+
+## Shared principles
+Feature fields extend the input-output mapping of the radiance field function $F_\Theta$. While standard NeRF maps $(\mathbf{x}, \mathbf{d}) \to (\mathbf{c}, \sigma)$, feature fields map $(\mathbf{x}, \mathbf{d}) \to (\mathbf{f}, \mathbf{c}, \sigma)$ [S1, unofficial]. Here, $\mathbf{f} \in \mathbb{R}^d$ represents a vector encoding any type of data, such as semantic classes, physical properties (e.g., temperature, sound), or latent descriptors [S1, unofficial].
+
+The rendering of these features follows the same volume integration principle as color. The predicted feature $\hat{\mathbf{F}}(r)$ along a ray $r$ is computed using the accumulated transmittance weights $T_i$ and alpha values $\alpha_i$:
+
+$$
+\hat{\mathbf{F}}(r) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{f}(x_i)
+$$
+
+where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ [S1, unofficial].
+
+Supervision is performed by comparing the rendered feature $\hat{\mathbf{F}}(r)$ against ground-truth 2D feature maps projected onto the image plane [S1, unofficial]. This process lifts 2D observations into a consistent 3D representation [S1, unofficial].
+
+## Subtopics
+
+### Semantic-NeRF
+The first method to introduce semantic fields within the NeRF framework, using ground-truth semantic segmentation maps to augment the radiance field with per-point semantic logits [S1, unofficial].
+
+### Foundation Model Feature Fields
+Utilizes embeddings from pre-trained 2D foundation models as the feature signal $\mathbf{f}$, enabling spatially grounded semantics for embodied agents [S1, unofficial].
+
+## Background
+The concept of feature fields was formalized as a generalization of the NeRF formulation, allowing the network to learn any quantity that can be projected and supervised from 2D observations [S1, unofficial]. Semantic-NeRF [207] is cited as the first work to introduce semantic fields, enabling dense 3D semantic understanding [S1, unofficial].
+
+Training feature fields introduces notable challenges. The high dimensionality of feature embeddings substantially increases memory usage and computational cost [S1, unofficial]. Furthermore, the process of lifting 2D features into 3D remains fundamentally 2D-driven and lacks the intrinsic geometric reasoning that explicit 3D encoders could provide [S1, unofficial]. Unlike direct NeRF interpretation methods that infer semantics in a single forward pass, feature fields require per-scene optimization before their semantics can be exploited, limiting scalability for large datasets or real-time use [S1, unofficial]. Despite these limitations, they constitute a powerful middle ground between reconstruction and interpretation, transforming NeRFs into a unified representation where meaning and structure coexist [S1, unofficial].
+
+## Sources
+[S1] From reconstruction to reasoning : neural radiance fields for comprehensive 3D scene understanding, https://theses.hal.science/tel-05693528v1, fetched 2026-10-26 (unofficial)

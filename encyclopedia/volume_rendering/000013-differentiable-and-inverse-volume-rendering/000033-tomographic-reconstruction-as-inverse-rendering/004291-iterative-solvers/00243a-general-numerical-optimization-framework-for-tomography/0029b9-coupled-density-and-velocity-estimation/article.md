@@ -3,184 +3,228 @@
 Also called: Coupled Estimation, Coupled Estimation Strategy, Physics-Based Fluid Reconstruction
 
 ## Overview
-Coupled Density and Velocity Estimation is a method for reconstructing fluid flow fields from sparse multi-view video by simultaneously estimating density and velocity fields while enforcing physical constraints [S1][S2, unofficial]. It solves the ill-posed tomography problem that arises when the number of cameras is reduced, enabling efficient interactive reconstruction of realistic and smooth fluid motion [S1][S2, unofficial]. Unlike standard tomographic reconstruction which treats density as static, this method couples density and velocity updates using transport and incompressibility priors, significantly reducing reconstruction time compared to earlier coupled methods (e.g., from 50–60 minutes per frame to interactive speeds) [S1][S2, unofficial].
+Coupled Density and Velocity Estimation is a strategy for solving the ill-posed tomography problem in fluid reconstruction when the number of cameras (projections) is reduced [S1][S2, unofficial]. It improves reconstruction quality by predicting the current density field based on previous time steps using physical priors, specifically transport and incompressibility constraints [S1]. Unlike the original method by Eckert et al. which required 50–60 minutes per frame, this simplified strategy is highly efficient, enabling interactive reconstruction [S1][S2, unofficial]. It differs from [Chambolle-Pock Algorithm](3282-chambolle-pock-algorithm.md) by specifically coupling the density and velocity updates within a physics-based fluid model rather than applying the algorithm to a generic regularizer [S2, unofficial].
 
 ## How it works
-The method operates on a sequence of time steps $t$. It assumes density fields $\rho_{t-1}$ and $\rho_{t-2}$ are available from previous reconstruction steps [S1][S2, unofficial]. The core process involves estimating the velocity field $u_{t-1}$ from these densities, predicting the next state $(\tilde{u}_t, \tilde{\rho}_t)$ using physical advection, and then refining the density estimate [S1][S2, unofficial].
+The method operates on a sequence of density fields $\rho_t$ at time steps $t$. It estimates the velocity field $u_{t-1}$ from the density fields at $t-1$ and $t-2$, then predicts the density at $t$ by advecting the previous density with the estimated velocity.
 
 ### Inputs and Outputs
-- **Inputs**: Density fields $\rho_{t-1}$ and $\rho_{t-2}$ at time steps $t-1$ and $t-2$; time step size $\Delta t$; regularization parameters $\alpha, \beta$; primal-dual solver parameters $\sigma, \gamma, \theta$ [S2, unofficial].
-- **Outputs**: Predicted density field $\tilde{\rho}_t$ and velocity field $\tilde{u}_t$ for time step $t$ [S1][S2, unofficial].
+*   **Inputs**: Density fields $\rho_{t-2}$ and $\rho_{t-1}$ on a uniform 3D voxel grid. Camera parameters and rendering configuration (for the underlying differentiable renderer, assumed to be provided by the parent framework).
+*   **Outputs**: Predicted density field $\tilde{\rho}_t$ and estimated velocity field $u_{t-1}$.
 
 ### Data Structures
-- **Density Field**: A 3D voxel grid $\rho \in \mathbb{R}^{N_x \times N_y \times N_z}$ [S2, unofficial].
-- **Velocity Field**: A 3D vector field $u \in \mathbb{R}^{3 \times N_x \times N_y \times N_z}$, where each voxel stores $(u_x, u_y, u_z)$ [S2, unofficial].
-- **Helper Variables**: For the primal-dual solver, variables $X, Y$ (same shape as velocity field) and iterates $u^{t-1}_k$ [S2, unofficial].
+*   **Density Field**: A 3D array $\rho \in \mathbb{R}^{N_x \times N_y \times N_z}$ representing density values at voxel centers.
+*   **Velocity Field**: A 3D vector field $u \in \mathbb{R}^{3 \times N_x \times N_y \times N_z}$, where each voxel stores a 3D vector $(u_x, u_y, u_z)$.
+*   **Gradient Field**: A 3D array $\nabla \rho$ storing the spatial gradient of the density.
 
-### Velocity Reconstruction (Algorithm 5)
-The velocity field $u_{t-1}$ is estimated by solving a constrained optimization problem [S2, unofficial].
+### Algorithm Steps
 
-**Objective Function**:
+1.  **Velocity Reconstruction**: Estimate the velocity field $u_{t-1}$ from $\rho_{t-1}$ and $\rho_{t-2}$ by solving the optimization problem defined in Equation (11) and (12) using the Primal-Dual method [S2, unofficial].
+2.  **Velocity Prediction**: Advect the estimated velocity $u_{t-1}$ with itself to predict the velocity at time $t$, denoted $\tilde{u}_t$. Project $\tilde{u}_t$ onto the space of divergence-free velocities $\Pi_{DIV}$ to enforce incompressibility [S1][S2, unofficial].
+3.  **Density Prediction**: Advect the density field $\rho_{t-1}$ forward in time using the predicted velocity $\tilde{u}_t$ (or $\tilde{u}_{t-1}$ as per some descriptions, but logically $\tilde{u}_t$ for step $t$) to create the density guess $\tilde{\rho}_t$ [S1][S2, unofficial].
+
+### Velocity Reconstruction Optimization
+The velocity $u_{t-1}$ is found by minimizing:
+
 $$
 \min_{u_{t-1}} f(u_{t-1}) = \left\| \frac{\rho_{t-1} - \rho_{t-2}}{\Delta t} + u_{t-1} \cdot \nabla \rho_{t-1} \right\|^2 + E_{smooth}(u_{t-1}) + E_{kinetic}(u_{t-1})
 $$
-subject to:
+
+subject to the incompressibility constraint:
+
 $$
 \nabla \cdot u_{t-1} = 0
 $$
-where:
-- The first term enforces the optical flow constraint (continuity equation linearized): $\frac{\partial \rho}{\partial t} + \nabla \cdot (\rho u) \approx 0$ [S2, unofficial].
-- $E_{smooth}(u_{t-1})$ is a smoothness regularizer (Tikhonov) weighted by $\alpha$ [S2, unofficial].
-- $E_{kinetic}(u_{t-1})$ is a kinetic energy regularizer weighted by $\beta$ [S2, unofficial].
-- Depth regularization is explicitly **not** applied to preserve the sparsity of the optimization matrix [S1][S2, unofficial].
 
-**Primal-Dual Solver (Algorithm 5)**:
-The problem is solved using a fast primal-dual method [S2, unofficial]. The updates are:
+Where:
+*   $\Delta t$ is the time step between frames [S2, unofficial].
+*   The first term is the optical flow constraint derived from the continuity equation $\frac{\partial \rho}{\partial t} + \nabla \cdot (\rho u) = 0$ [S2, unofficial].
+*   $E_{smooth}(u_{t-1})$ is a smoothness regularizer (Tikhonov regularization) [S2, unofficial].
+*   $E_{kinetic}(u_{t-1})$ is a kinetic energy regularizer [S2, unofficial].
+*   Relative weights $\alpha$ and $\beta$ balance the smoothness and kinetic energy constraints [S2, unofficial].
+
+**Note**: Depth regularization is explicitly **not** applied because it breaks the sparse property of the matrix, making the optimization inefficient [S1][S2, unofficial].
+
+### Primal-Dual Solver
+The optimization problem is solved using a fast primal-dual method [S2, unofficial]. The updates are:
+
 $$
 X_{k+1} = X_k + \sigma Y_k - \sigma \text{prox}_{f, \sigma}\left(\frac{1}{\sigma} X_k + Y_k\right)
 $$
+
 $$
 u_{k+1}^{t-1} = \text{prox}_{g, \frac{1}{\gamma}}\left(u_{k+1}^{t-1} - \gamma X_{k+1}\right)
 $$
+
 $$
 Y_{k+1} = u_{k+1}^{t-1} + \theta \left(u_{k+1}^{t-1} - u_k^{t-1}\right)
 $$
-where:
-- $k$ is the iteration index [S2, unofficial].
-- $\sigma, \gamma, \theta$ are convergence parameters [S2, unofficial].
-- $\text{prox}_{f, \sigma}(\xi) = \arg \min_{u_{t-1}} f(u_{t-1}) + \frac{\sigma}{2} \| u_{t-1} - \xi \|^2$ [S2, unofficial].
-- $\text{prox}_{g, \frac{1}{\gamma}}$ handles the divergence-free constraint $\nabla \cdot u = 0$ via projection onto the space of divergence-free velocities $\Pi_{DIV}$ [S2, unofficial].
 
-### Coupled Estimation (Algorithm 4)
-1. **Velocity Estimation**: Compute $u_{t-1}$ using the Velocity Reconstruction algorithm above [S1][S2, unofficial].
-2. **Velocity Prediction**: Advect $u_{t-1}$ with itself to create a velocity guess $\tilde{u}_t$, then project onto $\Pi_{DIV}$ to ensure incompressibility [S1][S2, unofficial].
-3. **Density Prediction**: Advect $\rho_{t-1}$ forward using the predicted velocity $\tilde{u}_t$ (or $\tilde{u}_{t-1}$ as per some descriptions, but logically $\tilde{u}_t$ for step $t$) to create the density guess $\tilde{\rho}_t$ [S1][S2, unofficial].
+Where:
+*   $k$ is the iteration number [S2, unofficial].
+*   $X, Y$ are helper variables [S2, unofficial].
+*   $\sigma, \gamma, \theta$ are convergence parameters [S2, unofficial].
+*   $\text{prox}_{f, \sigma}(\xi) = \arg \min_{u_{t-1}} f(u_{t-1}) + \frac{\sigma}{2} \| u_{t-1} - \xi \|^2$ [S2, unofficial].
+*   $\text{prox}_{g, \frac{1}{\gamma}}$ handles the regularization term $g$ (smoothness and kinetic energy) [S2, unofficial].
 
 ### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def coupled_density_velocity_estimation(rho_t_minus_1, rho_t_minus_2, dt, alpha, beta, sigma, gamma, theta, num_iters):
+def coupled_density_velocity_estimation(rho_t_minus_2, rho_t_minus_1, dt, alpha, beta, sigma, gamma, theta, max_iter):
     """
-    Reconstructs velocity and predicts density for time step t.
+    Estimates velocity u_{t-1} and predicts density rho_t.
     
     Args:
-        rho_t_minus_1: Density field at t-1 (3D array)
-        rho_t_minus_2: Density field at t-2 (3D array)
-        dt: Time step size
-        alpha: Smoothness regularization weight
-        beta: Kinetic energy regularization weight
-        sigma, gamma, theta: Primal-dual solver parameters
-        num_iters: Number of iterations for velocity reconstruction
+        rho_t_minus_2: Density field at time t-2 (3D array)
+        rho_t_minus_1: Density field at time t-1 (3D array)
+        dt: Time step
+        alpha: Weight for smoothness regularization
+        beta: Weight for kinetic energy regularization
+        sigma, gamma, theta: Primal-dual parameters
+        max_iter: Maximum iterations for velocity reconstruction
         
     Returns:
-        rho_t_pred: Predicted density field at t
-        u_t_pred: Predicted velocity field at t
+        rho_t_pred: Predicted density at time t
+        u_t_minus_1: Estimated velocity at time t-1
     """
-    # Step 1: Velocity Reconstruction (Algorithm 5)
-    # Initialize velocity estimate and dual variables
-    u_est = zeros_like(rho_t_minus_1, shape=(3, *rho_t_minus_1.shape))
-    X = zeros_like(u_est)
-    Y = zeros_like(u_est)
     
-    for k in range(num_iters):
-        # Compute gradient of data fidelity term f w.r.t u
-        # f(u) = || (rho_{t-1} - rho_{t-2})/dt + u . nabla rho_{t-1} ||^2 + alpha * E_smooth + beta * E_kinetic
+    # Step 1: Velocity Reconstruction
+    # Initialize velocity guess (e.g., zero or previous velocity)
+    u_t_minus_1 = zeros_like(rho_t_minus_1, shape=(3, *rho_t_minus_1.shape))
+    X = zeros_like(u_t_minus_1)
+    Y = zeros_like(u_t_minus_1)
+    
+    # Precompute gradient of rho_{t-1}
+    grad_rho_t_minus_1 = compute_gradient(rho_t_minus_1)
+    
+    # Precompute density difference
+    rho_diff = (rho_t_minus_1 - rho_t_minus_2) / dt
+    
+    for k in range(max_iter):
+        # Compute data fidelity term gradient/proximal input
+        # f(u) = || rho_diff + u . grad_rho ||^2 + alpha * E_smooth(u) + beta * E_kinetic(u)
         # The proximal operator for f involves solving a linear system or iterative step.
-        # For simplicity, we assume a gradient-based proximal step or closed form if sparse.
-        # Note: The exact implementation of prox_{f, sigma} depends on the specific form of E_smooth and E_kinetic.
-        # Typically, this involves solving a sparse linear system due to the Tikhonov terms.
+        # For simplicity, we assume a standard gradient step or closed form if applicable.
+        # Note: The source defines prox_{f, sigma} as argmin. In practice, this often requires
+        # solving a linear system due to the quadratic data term.
         
         # Update X
-        # prox_{f, sigma}(xi) is the minimizer of f(u) + sigma/2 * ||u - xi||^2
-        # This subproblem is solved efficiently because f is convex and smooth parts are quadratic.
-        xi = (1/sigma) * X + Y
-        u_prox_f = solve_prox_f(u_est, xi, sigma, rho_t_minus_1, rho_t_minus_2, dt, alpha, beta)
-        X = X + sigma * Y - sigma * u_prox_f
+        # X_{k+1} = X_k + sigma * Y_k - sigma * prox_{f, sigma}(1/sigma * X_k + Y_k)
+        # Let z = 1/sigma * X_k + Y_k
+        z = (1.0 / sigma) * X + Y
         
-        # Update u
-        # prox_{g, 1/gamma} projects u onto the divergence-free space
-        u_new = u_est - gamma * X
-        u_new = project_divergence_free(u_new) # Projection onto Pi_DIV
+        # Compute prox_{f, sigma}(z)
+        # This minimizes f(u) + sigma/2 * ||u - z||^2
+        # This is a regularized least squares problem.
+        # u_new = argmin_u || rho_diff + u . grad_rho ||^2 + alpha*E_smooth(u) + beta*E_kinetic(u) + sigma/2 * ||u - z||^2
+        # This step typically involves solving a sparse linear system.
+        u_data_step = solve_velocity_proximal(rho_diff, grad_rho_t_minus_1, z, alpha, beta, sigma)
         
-        # Update Y (extrapolation)
-        Y = u_new + theta * (u_new - u_est)
+        X = X + sigma * Y - sigma * u_data_step
         
-        # Update u_est for next iteration
-        u_est = u_new
+        # Update u (Primal variable)
+        # u_{k+1} = prox_{g, 1/gamma}(u_{k+1} - gamma * X_{k+1})
+        # g(u) = alpha * E_smooth(u) + beta * E_kinetic(u)
+        # This is typically a soft-thresholding or projection step depending on the norm.
+        u_temp = u_t_minus_1 - gamma * X
+        u_t_minus_1 = apply_velocity_regularization(u_temp, alpha, beta, gamma)
         
-    u_t_minus_1 = u_est
-    
-    # Step 2: Velocity Prediction (Algorithm 4, lines 3-4)
-    # Advect u_{t-1} with itself to get u_t_pred
+        # Update Y (Dual variable)
+        # Y_{k+1} = u_{k+1} + theta * (u_{k+1} - u_k)
+        Y = u_t_minus_1 + theta * (u_t_minus_1 - u_t_minus_1_prev) # u_t_minus_1_prev needs storage
+        u_t_minus_1_prev = u_t_minus_1 # Store for next iteration
+        
+    # Step 2: Velocity Prediction
+    # Advect velocity with itself
     u_t_pred = advect_velocity(u_t_minus_1, u_t_minus_1)
-    # Ensure incompressibility
+    
+    # Project onto divergence-free space
     u_t_pred = project_divergence_free(u_t_pred)
     
     # Step 3: Density Prediction
-    # Advect rho_{t-1} with u_t_pred to get rho_t_pred
-    rho_t_pred = advect_density(rho_t_minus_1, u_t_pred)
+    # Advect density rho_{t-1} with predicted velocity u_t_pred
+    rho_t_pred = advect_density(rho_t_minus_1, u_t_pred, dt)
     
-    return rho_t_pred, u_t_pred
+    return rho_t_pred, u_t_minus_1
 
-def solve_prox_f(u, xi, sigma, rho_t_minus_1, rho_t_minus_2, dt, alpha, beta):
+def solve_velocity_proximal(rho_diff, grad_rho, z, alpha, beta, sigma):
     """
-    Solves: min_u f(u) + sigma/2 * ||u - xi||^2
-    f(u) = || (rho_{t-1} - rho_{t-2})/dt + u . nabla rho_{t-1} ||^2 + alpha * ||grad u||^2 + beta * ||u||^2
-    This is a quadratic minimization problem, solvable via conjugate gradients or direct sparse solver.
+    Solves: u = argmin_u || rho_diff + u . grad_rho ||^2 + alpha*E_smooth(u) + beta*E_kinetic(u) + sigma/2 * ||u - z||^2
+    This is a quadratic optimization problem.
     """
-    # Construct the linear system A u = b
-    # A = 2 * (Jacobian of optical flow term)^T * (Jacobian) + 2 * sigma * I + 2 * alpha * Laplacian + 2 * beta * I
-    # b = 2 * (Jacobian of optical flow term)^T * (rho_{t-1} - rho_{t-2})/dt + sigma * xi
-    # Note: The exact Jacobian and Laplacian operators depend on the discretization of nabla rho and grad u.
-    # This is a sparse linear system.
-    A, b = build_linear_system(u, xi, sigma, rho_t_minus_1, rho_t_minus_2, dt, alpha, beta)
-    return solve_sparse_linear_system(A, b)
+    # The term || rho_diff + u . grad_rho ||^2 expands to:
+    # sum_voxel ( rho_diff[v] + u[v] . grad_rho[v] )^2
+    # This leads to a linear system A u = b.
+    # A = sigma * I + 2 * (grad_rho . grad_rho^T) + 2 * alpha * Laplacian + 2 * beta * Identity (for kinetic)
+    # b = sigma * z - 2 * rho_diff * grad_rho
+    
+    # Construct sparse matrix A and vector b
+    # Note: Implementing the full sparse matrix construction is complex.
+    # A simpler approach for implementation might be using a few iterations of Conjugate Gradient
+    # or a pre-conditioned solver, leveraging the sparsity of the gradient operator.
+    
+    # Placeholder for the actual linear solver implementation
+    # u = sparse_linear_solver(A, b)
+    # For the purpose of this article, we assume a solver exists for this quadratic form.
+    u = solve_sparse_system(rho_diff, grad_rho, z, alpha, beta, sigma)
+    return u
 
 def project_divergence_free(u):
     """
-    Projects velocity field u onto the space of divergence-free fields Pi_DIV.
-    This is typically done by solving a Poisson equation for a pressure field p:
-    Laplacian(p) = divergence(u)
-    Then u_new = u - grad(p).
+    Projects velocity field u onto the space of divergence-free velocities.
+    Uses Helmholtz-Hodge decomposition or pressure projection.
     """
-    div_u = compute_divergence(u)
-    p = solve_poisson_equation(div_u)
-    grad_p = compute_gradient(p)
-    return u - grad_p
+    # Solve Poisson equation: Laplacian(p) = div(u)
+    p = solve_poisson(divergence(u))
+    
+    # u_new = u - grad(p)
+    u_new = u - gradient(p)
+    return u_new
 
-def advect_velocity(u, u_source):
+def advect_density(rho, u, dt):
     """
-    Advects velocity field u_source by itself using u.
+    Advects density field rho by velocity field u for time dt.
+    Uses semi-Lagrangian method.
     """
-    # Use semi-Lagrangian advection or similar method
-    return semi_lagrangian_advection(u_source, u)
+    # For each voxel, trace back along the velocity field
+    rho_new = zeros_like(rho)
+    for v in voxels:
+        # Backward trace
+        x_back = v - u[v] * dt
+        # Interpolate rho at x_back
+        rho_new[v] = interpolate(rho, x_back)
+    return rho_new
 
-def advect_density(rho, u):
+def advect_velocity(u, u_source, dt=1.0):
     """
-    Advects density field rho by velocity field u.
+    Advects velocity field u by velocity field u_source.
     """
-    return semi_lagrangian_advection(rho, u)
+    u_new = zeros_like(u)
+    for v in voxels:
+        x_back = v - u_source[v] * dt
+        # Interpolate each component of u
+        u_new[v] = interpolate_vector(u, x_back)
+    return u_new
 ```
 
-### Parameters
-- $\Delta t$: Time step size [S2, unofficial].
-- $\alpha, \beta$: Weights for smoothness and kinetic energy regularization [S2, unofficial].
-- $\sigma, \gamma, \theta$: Primal-dual solver parameters [S2, unofficial]. Typical values are not specified in the sources, but $\theta$ is often set to 1 for acceleration [S1].
-
 ### Edge Cases and Pitfalls
-- **Depth Regularization**: Applying depth regularization breaks the sparsity of the optimization matrix, making the problem inefficient to solve. Therefore, it is excluded [S1][S2, unofficial].
-- **Sparse Cameras**: The method is specifically designed to handle the ill-posedness caused by a reduced number of cameras [S1][S2, unofficial].
-- **Incompressibility**: The projection onto $\Pi_{DIV}$ is critical for physical plausibility [S1][S2, unofficial].
+*   **Depth Regularization**: Do not apply depth regularization. It breaks the sparsity of the matrix, rendering the optimization inefficient [S1][S2, unofficial].
+*   **Ill-posedness**: The method is specifically designed for scenarios with few cameras where standard tomography is ill-posed [S1][S2, unofficial].
+*   **Incompressibility**: The velocity field must be projected onto the divergence-free space $\Pi_{DIV}$ to ensure physical plausibility [S1][S2, unofficial].
+*   **Precision**: The primal-dual parameters $\sigma, \gamma, \theta$ must be chosen carefully to ensure convergence [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: The method is highly efficient compared to prior coupled methods (e.g., Eckert et al. [4]), enabling interactive reconstruction [S1][S2, unofficial]. The velocity reconstruction uses a fast primal-dual solver, which is efficient for convex problems [S2, unofficial].
-- **Memory Complexity**: Depends on the size of the 3D voxel grid and the sparsity of the linear systems solved in the proximal operators [S2, unofficial].
-- **Strengths**: Handles sparse camera setups; enforces physical constraints (incompressibility, smoothness); fast enough for interactive use [S1][S2, unofficial].
-- **Limitations**: Relies on accurate previous density estimates; assumes incompressible flow; does not use depth regularization which might limit accuracy in depth for some flows [S1][S2, unofficial].
+*   **Time Complexity**: Significantly faster than the original coupled estimation method by Eckert et al., which took 50–60 minutes per frame [S1][S2, unofficial]. The simplified strategy enables interactive reconstruction [S1][S2, unofficial].
+*   **Memory Complexity**: Requires storage for density fields, velocity fields, and intermediate variables for the primal-dual solver. The sparsity of the projection matrix is preserved by avoiding depth regularization, allowing for efficient matrix-free solvers [S1][S2, unofficial].
+*   **Strengths**: Handles ill-posed problems with few cameras; enforces physical constraints (incompressibility, smoothness); efficient enough for interactive use [S1][S2, unofficial].
+*   **Limitations**: Relies on the accuracy of the physical priors (transport, incompressibility); may struggle with highly turbulent flows if the smoothness/kinetic regularizers are too strong [S2, unofficial].
+*   **When to use**: Fluid reconstruction from monocular or few-view video where physical plausibility is required and computational efficiency is critical [S1][S2, unofficial].
+*   **When not to use**: When high-fidelity depth regularization is necessary and computational cost is not a constraint (use Eckert et al. method) [S1][S2, unofficial].
 
 ## Background
-The method was developed to address the limitations of earlier coupled density and velocity estimation techniques, such as those by Eckert et al. [4], which were too slow (50–60 minutes per frame) for practical use [S1][S2, unofficial]. The simplified strategy proposed in [S1][S2, unofficial] enables interactive reconstruction by removing depth regularization and using a fast primal-dual solver [S1][S2, unofficial]. It builds on the principles of differentiable rendering and tomographic reconstruction as inverse rendering [S2, unofficial].
+The method was developed to address the limitations of the coupled density and velocity updating strategy by Eckert et al. [4], which was too slow for practical use [S1][S2, unofficial]. The simplified strategy was proposed in "Physics-Based Differentiable Rendering for Efficient and Plausible Fluid Modeling from Monocular Video" [S1][S2, unofficial]. It builds on the differentiable rendering framework and the Chambolle-Pock algorithm for convex optimization [S2, unofficial].
 
 ## Sources
 [S1] Physics-Based Differentiable Rendering for Efficient and Plausible Fluid Modeling from Monocular Video, https://doi.org/10.3390/e25091348, fetched 2026-10-26

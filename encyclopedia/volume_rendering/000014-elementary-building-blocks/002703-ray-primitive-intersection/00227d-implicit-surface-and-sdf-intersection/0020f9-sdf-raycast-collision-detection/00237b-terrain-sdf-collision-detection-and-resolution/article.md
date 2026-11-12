@@ -18,7 +18,7 @@ This method performs collision detection and resolution for terrain using a Sign
 
 **Data Structures:**
 - `float`: Signed distance value.
-- 3D vector: Position, normal, and velocity components.
+- 3D vector: Position, normal, and velocity components. [S1, unofficial]
 
 **Parameters:**
 - `beta`: Damping factor for collision resolution. Typical value: 0.1–0.3 [S1, unofficial].
@@ -28,14 +28,14 @@ This method performs collision detection and resolution for terrain using a Sign
 
 **Steps:**
 1. Evaluate the signed distance at the old position:
-   $$ d_{\text{old}} = \text{terrainSFS}.\text{EvaluateDistanceAt}(\text{oldPosition}) $$
+   $$ d_{\text{old}} = \text{terrainSDFS}.\text{EvaluateDistanceAt}(\text{oldPosition}) $$
 2. Evaluate the signed distance at the current position:
-   $$ d_{\text{new}} = \text{terrainSFS}.\text{EvaluateDistanceAt}(\text{currentPosition}) $$
+   $$ d_{\text{new}} = \text{terrainSDFS}.\text{EvaluateDistanceAt}(\text{currentPosition}) $$
 3. Check for collision by detecting a sign change:
    $$ \text{collision} = (d_{\text{old}} > 0 \land d_{\text{new}} < 0) \lor (d_{\text{old}} < 0 \land d_{\text{new}} > 0) $$
 4. If a collision is detected:
    a. Estimate the surface normal at the old position:
-      $$ \mathbf{n} = \text{EstimateGradient}(\text{terrainSFS}, \text{oldPosition}) $$
+      $$ \mathbf{n} = \text{EstimateGradient}(\text{terrainSDFS}, \text{oldPosition}) $$
    b. If the new distance is positive (outside), invert the normal:
       $$ \text{if } d_{\text{new}} > 0: \mathbf{n} = -\mathbf{n} $$
    c. Set `justCollided = true`.
@@ -68,6 +68,7 @@ def terrain_sdf_collision_detection_resolution(terrain_sdfs, old_position, curre
     return resolution, just_collided
 
 def estimate_gradient(sdfs, position):
+    # Standard finite difference approximation [G]
     epsilon = 1e-4
     dx = sdfs.evaluate_distance_at([position[0] + epsilon, position[1], position[2]]) - sdfs.evaluate_distance_at([position[0] - epsilon, position[1], position[2]])
     dy = sdfs.evaluate_distance_at([position[0], position[1] + epsilon, position[2]]) - sdfs.evaluate_distance_at([position[0], position[1] - epsilon, position[2]])
@@ -84,7 +85,7 @@ Not given in the sources.
 ## Subtopics
 
 ### [ERP/Baumgarte Collision Resolution](4385-erp-baumgarte-collision-resolution.md)
-Uses SDF for depth and normal, applies Baumgarte stabilization for penetration correction and inward velocity damping. Choose when smoother resolution is needed.
+ERP/Baumgarte Collision Resolution is a collision resolution method that uses Signed Distance Fields (SDF) to determine depth and normal for correcting object penetration. It removes a fraction of penetration per step via Baumgarte stabilization and kills inward normal velocity. Choose when smoother resolution is needed.
 
 ## Operating characteristics
 Not given in the sources.

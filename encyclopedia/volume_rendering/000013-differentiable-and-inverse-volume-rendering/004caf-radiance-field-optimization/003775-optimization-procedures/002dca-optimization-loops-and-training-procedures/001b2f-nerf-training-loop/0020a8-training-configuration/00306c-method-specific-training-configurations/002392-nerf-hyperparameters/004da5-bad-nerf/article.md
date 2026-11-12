@@ -1,0 +1,210 @@
+# BAD-NeRF
+
+Also called: Bundle Adjusted Deblur Neural Radiance Fields
+
+## Overview
+BAD-NeRF is a method for 3D reconstruction and novel view synthesis from motion-blurred images that jointly optimizes the Neural Radiance Field (NeRF) parameters and the camera motion trajectories during the shutter exposure interval [S2]. Unlike standard NeRF which assumes sharp images with infinitesimal exposure times, BAD-NeRF models the physical image formation process by rendering a sequence of sharp intermediate views along a continuous SE(3) trajectory and averaging them to synthesize the observed blur [S1, S2]. It distinguishes itself from methods like DeblurNeRF, which rely on fixed camera poses (often inaccurate due to blur), by estimating the start and end poses of each image's exposure jointly with the scene representation, making it robust to severe motion blur and inaccurate initial pose estimates [S1, S2].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A set of $M$ motion-blurred images $\{B_m(x)\}_{m=1}^M$, where $x$ is the pixel coordinate. Initial camera poses (e.g., from COLMAP) and camera intrinsic parameters $K$ [S2].
+*   **Outputs:** Optimized NeRF parameters $\theta$, and for each image $m$, the start pose $T_{start}^{(m)} \in SE(3)$ and end pose $T_{end}^{(m)} \in SE(3)$ [S2].
+
+**Data Structures**
+*   **NeRF ($F_\theta$):** Two Multi-Layer Perceptrons (MLPs) parameterized by $\theta$. Input: 3D point $X_w$ and viewing direction $d_w$. Output: Color $c \in \mathbb{R}^3$ and volume density $\sigma \in \mathbb{R}$ [S2].
+*   **Camera Pose:** Represented as a $4 \times 4$ homogeneous transformation matrix in $SE(3)$. Optimized parameters are stored as 6D vectors corresponding to the Lie algebra $\mathfrak{se}(3)$ for $T_{start}$ and $T_{end}$ [S2].
+*   **Ray Sampling:** Points are sampled along rays. Standard NeRF volume rendering is used [S2].
+
+**Numbered Steps**
+
+1.  **Ray Casting:** For each pixel $x$ in a blurred image $B_m$, compute the ray direction $d_c$ in the camera frame using the inverse intrinsic matrix $K^{-1}$ and the initial camera pose $T_c^w$ (from camera to world) [S2]:
+    $$
+    X_w = T_c^w \cdot \lambda \begin{bmatrix} K^{-1} \begin{bmatrix} x \\ 1 \end{bmatrix} \end{bmatrix}
+    $$
+    where $\lambda$ is the depth along the ray [S2].
+
+2.  **Trajectory Parameterization:** For image $m$, define the motion trajectory during exposure time $\tau$ using start pose $T_{start}^{(m)}$ and end pose $T_{end}^{(m)}$. The virtual camera pose $T_t$ at time $t \in [0, \tau]$ is interpolated in the Lie algebra of $SE(3)$ [S2]:
+    $$
+    T_t = T_{start} \cdot \exp\left( \frac{t}{\tau} \log(T_{start}^{-1} \cdot T_{end}) \right)
+    $$
+    where $\exp$ and $\log$ are the exponential and logarithmic maps for $SE(3)$ [S2].
+
+3.  **Discretization:** Sample $n$ discrete time steps $t_i$ within $[0, \tau]$ to generate $n$ virtual sharp poses $T_i$ [S2]. The standard implementation uses $n=7$ samples [S2].
+
+4.  **Sharp Image Rendering:** For each virtual pose $T_i$, render a sharp image $I_i(x)$ using the NeRF $F_\theta$. For a pixel $x$, shoot a ray with direction $d_c$. Transform $d_c$ to world frame: $d_w = R_c^w d_c$, where $R_c^w$ is the rotation part of $T_i$ [S2]. Query $F_\theta$ for $(c_i, \sigma_i)$ at sampled 3D points along the ray [S2]. Compute the pixel intensity $I_i(x)$ using volume rendering [S2]:
+    $$
+    I_i(x) = \sum_{k=1}^{n_{pts}} T_k (1 - \exp(-\sigma_k \delta_k)) c_k
+    $$
+    where $\delta_k$ is the distance between adjacent samples, and transmittance $T_k = \exp(-\sum_{j=1}^{k-1} \sigma_j \delta_j)$ [S2].
+
+5.  **Blur Synthesis:** Synthesize the blurred image $B_{syn}(x)$ by averaging the $n$ sharp images [S2]:
+    $$
+    B_{syn}(x) \approx \frac{1}{n} \sum_{i=0}^{n-1} I_i(x)
+    $$
+
+6.  **Optimization:** Minimize the photometric loss $L$ between the synthesized blurred image $B_{syn}(x)$ and the input blurred image $B_{input}(x)$ [S2]. The loss is typically Mean Squared Error (MSE) or L1 loss [S2].
+
+**Formulas and Gradients**
+The gradients are computed via backpropagation through the blur synthesis and NeRF rendering [S2].
+
+Gradient w.r.t. NeRF parameters $\theta$:
+$$
+\frac{\partial L}{\partial \theta} = \sum_{k=0}^{K-1} \frac{\partial L}{\partial B_k(x)} \cdot \frac{1}{n} \sum_{i=0}^{n-1} \frac{\partial B_k(x)}{\partial I_i(x)} \cdot \frac{\partial I_i(x)}{\partial \theta}
+$$
+where $K$ is the number of pixels (or batch size of pixels) [S2]. Note: $\frac{\partial B_k(x)}{\partial I_i(x)} = \frac{1}{n}$ [S2].
+
+Gradient w.r.t. Start Pose $T_{start}$:
+$$
+\frac{\partial L}{\partial T_{start}} = \sum_{k=0}^{K-1} \frac{\partial L}{\partial B_k(x)} \cdot \frac{1}{n} \sum_{i=0}^{n-1} \frac{\partial B_k(x)}{\partial I_i(x)} \cdot \frac{\partial I_i(x)}{\partial T_{start}}
+$$
+The term $\frac{\partial I_i(x)}{\partial T_{start}}$ is derived via the chain rule through the interpolated pose $T_i$ [S2].
+
+Gradient w.r.t. End Pose $T_{end}$:
+$$
+\frac{\partial L}{\partial T_{end}} = \sum_{k=0}^{K-1} \frac{\partial L}{\partial B_k(x)} \cdot \frac{1}{n} \sum_{i=0}^{n-1} \frac{\partial B_k(x)}{\partial I_i(x)} \cdot \frac{\partial I_i(x)}{\partial T_{end}}
+$$
+[ S2 ]
+
+**Parameters**
+*   $n$: Number of interpolated virtual poses. Typical value: 7 [S2].
+*   $\tau$: Exposure time. Used in interpolation formula. Not given in the sources as a fixed numerical value, but treated as a parameter in the interpolation equation.
+*   Points sampled per ray: 128 [S2].
+*   Learning rate for NeRF optimizer: Exponentially decays from $5 \times 10^{-4}$ to $5 \times 10^{-5}$ [S2].
+*   Learning rate for pose optimizer: Exponentially decays from $1 \times 10^{-3}$ to $1 \times 10^{-5}$ [S2].
+*   Optimizer: Adam [S2]. Separate optimizers for network parameters $\theta$ and poses ($T_{start}, T_{end}$) [S2].
+*   Training iterations: 200,000 [S2].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+
+# Assume NeRF model F_theta is defined elsewhere
+# Assume camera intrinsics K are known
+
+def se3_exp(v):
+    """Exponential map from se3 (6D vector) to SE3 (4x4 matrix).
+    v = [omega, beta] where omega is rotation, beta is translation.
+    Returns 4x4 matrix.
+    """
+    # Implementation details for SE3 exp map are standard in robotics libraries.
+    # For self-containment, we assume a helper function exists.
+    # [G] Standard Rodrigues formula and translation integration.
+    pass
+
+def se3_log(T):
+    """Logarithmic map from SE3 (4x4 matrix) to se3 (6D vector).
+    Returns 6D vector.
+    """
+    # [G] Inverse of se3_exp.
+    pass
+
+def interpolate_pose(T_start, T_end, t, tau):
+    """
+    Interpolate pose in SE3 space.
+    T_t = T_start * exp( (t/tau) * log(T_start^-1 * T_end) )
+    """
+    delta = T_start.inverse() @ T_end
+    log_delta = se3_log(delta)
+    exp_term = se3_exp((t / tau) * log_delta)
+    return T_start @ exp_term
+
+def render_sharp_image(ray_origins, ray_directions, F_theta):
+    """
+    Standard NeRF rendering.
+    ray_origins: (H, W, 3)
+    ray_directions: (H, W, 3)
+    Returns: (H, W, 3) color image.
+    """
+    # Sample points along rays
+    # Query F_theta for sigma and color
+    # Volume render
+    pass
+
+def bad_nerf_step(blurry_images, initial_poses, F_theta, K, n_samples=7, points_per_ray=128, tau=1.0):
+    """
+    One training step for BAD-NeRF.
+    
+    Args:
+        blurry_images: Tensor (B, H, W, 3) - Batch of blurred images
+        initial_poses: Tensor (B, 4, 4) - Initial camera poses (T_c^w)
+        F_theta: NeRF model
+        K: Camera intrinsic matrix
+        n_samples: Number of virtual poses to average for blur
+        points_per_ray: Number of points sampled per ray for NeRF
+        tau: Exposure time duration (normalized)
+        
+    Returns:
+        loss: Scalar loss value
+        gradients: Gradients for F_theta, T_start, T_end
+    """
+    B, H, W, _ = blurry_images.shape
+    
+    # Initialize T_start and T_end from initial poses
+    # [G] In practice, T_start and T_end are learnable parameters initialized 
+    # to the initial poses. Here we assume they are passed or initialized.
+    # For the sake of the algorithm, we assume T_start and T_end are 
+    # torch.nn.Parameter tensors.
+    
+    # 1. Generate virtual poses
+    # Time steps t_i from 0 to tau
+    timesteps = torch.linspace(0, tau, n_samples)
+    
+    # 2. Render sharp images for each virtual pose
+    sharp_images = []
+    for i in range(n_samples):
+        t = timesteps[i]
+        
+        # Interpolate pose
+        # Note: initial_poses are T_c^w. BAD-NeRF optimizes T_start and T_end 
+        # which are also T_c^w (camera to world).
+        T_virtual = interpolate_pose(T_start, T_end, t, tau)
+        
+        # Compute ray origins and directions for this pose
+        # Ray origin is the camera center. 
+        # Camera center in world frame: -T_virtual[:3,3].T
+        # Ray direction in world frame: T_virtual[:3,:3] @ K^-1 @ pixel_coords
+        # [G] Standard ray casting logic from pixel coordinates and pose.
+        origins, directions = cast_rays(T_virtual, K, H, W)
+        
+        # Render sharp image
+        I_i = render_sharp_image(origins, directions, F_theta)
+        sharp_images.append(I_i)
+        
+    # 3. Average to get blurred image
+    sharp_images = torch.stack(sharp_images, dim=0) # (n_samples, B, H, W, 3)
+    B_syn = torch.mean(sharp_images, dim=0) # (B, H, W, 3)
+    
+    # 4. Compute loss
+    loss = torch.mean((B_syn - blurry_images) ** 2)
+    
+    # 5. Backpropagate
+    loss.backward()
+    
+    return loss
+```
+
+**Edge Cases and Pitfalls**
+*   **Severe Blur:** If blur is too severe, initial poses from COLMAP may be inaccurate. BAD-NeRF handles this by jointly optimizing poses, but convergence may be difficult if initialization is poor [S2].
+*   **Exposure Time $\tau$:** The method assumes constant velocity during exposure. If motion is non-linear, linear interpolation in SE(3) may be insufficient, though cubic B-Splines were explored and found comparable for short exposures [S2].
+*   **Computational Cost:** Rendering $n$ sharp images per pixel increases computational cost by a factor of $n$ compared to standard NeRF [S1].
+*   **Direct Pose Optimization:** Directly optimizing $N$ individual camera poses (without trajectory constraints) loses ordering information and performs worse than trajectory-based methods [S2].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N_{iters} \cdot N_{rays} \cdot n \cdot N_{pts})$, where $N_{iters}$ is training iterations, $N_{rays}$ is number of rays per batch, $n$ is number of virtual poses (7), and $N_{pts}$ is points per ray (128). This is significantly slower than standard NeRF due to the factor $n$ [S2].
+*   **Memory Complexity:** Requires storing gradients for $T_{start}$ and $T_{end}$ for each image, in addition to NeRF parameters. The intermediate sharp images are not stored simultaneously if processed sequentially, but memory usage is higher than standard NeRF [S2].
+*   **Performance:** On synthetic datasets (Deblur-NeRF, MBA-VO), BAD-NeRF achieves superior PSNR, SSIM, and lower LPIPS compared to prior works like BARF and DeblurNeRF [S2]. It also provides more accurate camera poses (lower ATE) [S2].
+*   **Hardware:** Tested on NVIDIA RTX 3090 GPU [S2].
+*   **Strengths:** Physically grounded blur model; robust to inaccurate initial poses; recovers sharper results under severe blur [S1, S2].
+*   **Limitations:** Higher computational complexity; assumes constant velocity during exposure (linear interpolation); requires careful tuning of learning rates for poses vs. network [S2].
+
+## Background
+BAD-NeRF was published in November 2022 [S1]. It addresses the challenge of training NeRF on motion-blurred images, which violates the standard assumption of sharp images and accurate poses [S2]. It builds on the idea of bundle adjustment, jointly optimizing scene and camera parameters. It is distinct from DeblurNeRF, which fixes poses, and BARF, which optimizes poses at a single timestamp [S2]. The method uses linear interpolation in SE(3) to model motion trajectories during exposure [S2].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] BAD-NeRF: Bundle Adjusted Deblur Neural Radiance Fields, https://arxiv.org/abs/2211.12853v2, fetched 2026-10-26

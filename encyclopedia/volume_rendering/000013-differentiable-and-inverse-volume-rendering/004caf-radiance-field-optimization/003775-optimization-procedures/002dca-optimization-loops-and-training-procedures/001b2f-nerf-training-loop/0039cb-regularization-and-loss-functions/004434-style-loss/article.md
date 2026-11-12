@@ -1,89 +1,102 @@
 # Style Loss
 Also called: VGG Style Loss
-
 ## Overview
-Style Loss captures feature-level information from a reference image in VGG feature space to improve color and style coherence between a generated object and its surrounding scene [S1]. It addresses the problem of visual inconsistency (e.g., over-saturation or stylistic mismatch) when integrating new 3D objects into existing NeRF environments [S1]. Unlike the saturation loss which only targets statistical saturation values, Style Loss constrains the generated object by matching higher-order feature statistics [S1].
+Style Loss is a regularization term used in differentiable volume rendering to enforce color and style coherence between a generated object (or scene region) and a reference image [S1]. It operates by minimizing the distance between feature representations in a pre-trained VGG feature space [S1]. Unlike [Perceptual Loss](13426-perceptual-loss.md), which minimizes the distance to a fixed reference feature vector, Style Loss captures statistical texture statistics (global) and local contextual similarities (local) to constrain the generated content's appearance [S1]. It is distinct from [Nearest Neighbor Feature Matching Loss](13527-nearest-neighbor-feature-matching-loss.md) in that it explicitly combines global Gram-matrix-like statistics with a contextual nearest-neighbor search, whereas NNFM focuses solely on the latter to preserve high-frequency details like brushstrokes [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Rendered image of the generated object $\hat{S}$, reference image $R$ (typically the original scene image $S$ if not specified [S1]), and a pre-trained VGG network $\psi$ (typically VGG-19 [S1]).
-*   **Outputs:** Scalar loss value $\mathcal{L}_{STY}$ used in the total loss function.
+*   **Input:** Rendered image of the generated object/region $\mathbf{S}$, reference image $\mathbf{R}$ (often the scene image itself or a target style image), and a pre-trained VGG network $F_{vgg}$.
+*   **Output:** Scalar loss value $\mathcal{L}_{STY}$ to be minimized.
 
 **Data Structures:**
-*   Feature maps $G_{vgg}$ and $R_{vgg}$ extracted from the VGG network for the generated and reference images, respectively.
+*   $G_{vgg}$: Feature map of the generated image $\mathbf{S}$ extracted from VGG.
+*   $R_{vgg}$: Feature map of the reference image $\mathbf{R}$ extracted from VGG.
+*   $G_{vgg}(i)$: Feature vector at spatial location $i$ in the generated feature map.
+*   $R_{vgg}(i')$: Feature vector at spatial location $i'$ in the reference feature map.
+*   $\hat{G}_{vgg}, \hat{R}_{vgg}$: Mean and variance statistics of the VGG features (used for global style).
 
-**Formulas:**
-The total Style Loss $\mathcal{L}_{STY}$ is the sum of a global component and a local component [S1]:
-
-$$ \mathcal{L}_{STY} = \mathcal{L}_{STY}^{global} + \mathcal{L}_{STY}^{local} $$
-
-1.  **Global Style Loss:** Matches the mean and variance of the VGG features [S1].
-    $$ \mathcal{L}_{STY}^{global} = \left\| G_{vgg} - R_{vgg} \right\|_2^2 + \left\| \hat{G}_{vgg} - \hat{R}_{vgg} \right\|_2^2 $$
-    Where $G_{vgg}, R_{vgg}$ are the mean values and $\hat{G}_{vgg}, \hat{R}_{vgg}$ are the variance values of the feature maps [S1].
-
-2.  **Local Style Loss:** A contextual loss that searches for the closest matching feature between the generated and reference images [S1]:
-    $$ \mathcal{L}_{STY}^{local} = \frac{1}{N} \sum_{i=1}^{N} \min_{i'} \left( G_{vgg}(i) - R_{vgg}(i') \right)^2 $$
-    Where $N$ is the number of feature elements, $i$ indexes elements in the generated feature map, and $i'$ indexes elements in the reference feature map [S1].
+**Steps:**
+1.  **Feature Extraction:** Pass the generated image $\mathbf{S}$ and reference image $\mathbf{R}$ through a pre-trained VGG network (typically layers like relu3_3 or relu4_3) to obtain feature maps $G_{vgg}$ and $R_{vgg}$ [S1].
+2.  **Global Style Loss:** Compute the difference between the statistical moments (mean and variance) of the generated and reference features [S1].
+    $$ \mathcal{L}_{STY}^{global} = || \hat{G}_{vgg} - \hat{R}_{vgg} ||_2^2 $$
+    Where $\hat{G}_{vgg}$ and $\hat{R}_{vgg}$ represent the mean and variance of the saturation values or feature channels [S1].
+3.  **Local Style Loss:** Compute a contextual loss by finding the nearest neighbor in the reference feature space for each location in the generated feature space [S1].
+    $$ \mathcal{L}_{STY}^{local} = \frac{1}{N} \sum_{i=1}^{N} \min_{i'} || G_{vgg}(i) - R_{vgg}(i') ||_2^2 $$
+    Where $N$ is the number of spatial locations, and $i'$ iterates over all locations in the reference feature map [S1].
+4.  **Aggregation:** Sum the global and local components [S1].
+    $$ \mathcal{L}_{STY} = \mathcal{L}_{STY}^{global} + \mathcal{L}_{STY}^{local} $$
 
 **Parameters:**
-*   $\lambda_{sty}$: Weight for the style loss term in the total loss equation [S1]. Not given in the sources.
+*   Weight $\lambda_{STY}$: Controls the strength of the style loss in the total loss function [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_style_loss(rendered_object, reference_image, vgg_model):
-    # Extract VGG features for both images
-    # Assume vgg_model returns feature maps from specific layers
-    feat_gen = vgg_model(rendered_object)
-    feat_ref = vgg_model(reference_image)
+def style_loss(rendered_image, reference_image, vgg_model):
+    """
+    Computes the combined global and local style loss.
+    """
+    # Extract VGG features
+    # Assuming vgg_model returns feature maps for a specific layer
+    G_vgg = vgg_model(rendered_image)
+    R_vgg = vgg_model(reference_image)
     
-    # Compute global loss (mean and variance matching)
-    # Note: Exact implementation of mean/variance calculation depends on tensor shape
-    # Assuming feat maps are normalized or flattened appropriately
-    mean_gen = torch.mean(feat_gen)
-    var_gen = torch.var(feat_gen)
-    mean_ref = torch.mean(feat_ref)
-    var_ref = torch.var(feat_ref)
+    # Global Style Loss: Difference in mean and variance
+    # Note: Sources specify saturation values for mean/variance in some contexts, 
+    # but generally apply to feature channels.
+    G_mean = torch.mean(G_vgg, dim=(2, 3), keepdim=True)
+    G_var = torch.var(G_vgg, dim=(2, 3), keepdim=True)
+    R_mean = torch.mean(R_vgg, dim=(2, 3), keepdim=True)
+    R_var = torch.var(R_vgg, dim=(2, 3), keepdim=True)
     
-    global_loss = (mean_gen - mean_ref)**2 + (var_gen - var_ref)**2
+    loss_global = torch.mean((G_mean - R_mean)**2) + torch.mean((G_var - R_var)**2)
     
-    # Compute local loss (contextual loss)
-    # Flatten feature maps to 1D vectors
-    flat_gen = feat_gen.flatten()
-    flat_ref = feat_ref.flatten()
+    # Local Style Loss: Contextual loss (nearest neighbor)
+    # Flatten spatial dimensions to get feature vectors
+    # G_vgg shape: (B, C, H, W) -> (B, C, H*W)
+    B, C, H, W = G_vgg.shape
+    G_flat = G_vgg.view(B, C, -1)      # (B, C, N)
+    R_flat = R_vgg.view(B, C, -1)      # (B, C, N)
     
-    n = flat_gen.size(0)
-    local_loss_sum = 0.0
+    N = G_flat.shape[2]
+    loss_local_sum = 0.0
     
-    # For each element in generated features, find min distance to any element in reference
-    # This is computationally expensive O(N^2)
-    for i in range(n):
-        diff = flat_gen[i] - flat_ref
-        min_diff = torch.min(diff**2)
-        local_loss_sum += min_diff
+    for b in range(B):
+        # Compute pairwise distances between all generated features and reference features
+        # dist[i, j] = || G_flat[b, :, i] - R_flat[b, :, j] ||^2
+        # Using broadcasting: (C, N) vs (C, N) -> (N, 1, N) vs (1, N, N)
+        G_vecs = G_flat[b].transpose(0, 1).unsqueeze(2) # (N, C, 1)
+        R_vecs = R_flat[b].transpose(0, 1).unsqueeze(1) # (N, 1, C)
         
-    local_loss = local_loss_sum / n
+        # Euclidean distance squared
+        dists = torch.sum((G_vecs - R_vecs)**2, dim=1) # (N, N)
+        
+        # Find min distance for each generated feature i
+        min_dists = torch.min(dists, dim=1)[0] # (N,)
+        loss_local_sum += torch.mean(min_dists)
+        
+    loss_local = loss_local_sum / B
     
-    return global_loss + local_loss
+    return loss_global + loss_local
 ```
 
 ## Subtopics
 
-### Perceptual Loss
-A VGG-based loss used to preserve content from the original NeRF during stylization [S2]. It is defined as the squared L2 distance between VGG features of the target and source images [S2]:
-$$ \mathcal{L}_{per} = \sum_{\psi \in \Psi} \left\| \psi(I_{tgt}) - \psi(I_{src}) \right\|_2^2 $$
-Where $\Psi$ is a set of pre-defined VGG layers [S2]. It is used in NeRF-Art to maintain content fidelity while applying text-driven style changes [S2].
+### [Perceptual Loss](13426-perceptual-loss.md)
+Minimizes distance to fixed reference features to preserve geometric/semantic integrity.
+
+### [Nearest Neighbor Feature Matching Loss](13527-nearest-neighbor-feature-matching-loss.md)
+Minimizes distance to nearest neighbor features only, focusing on high-frequency detail transfer without global statistics.
 
 ## Operating characteristics
-*   **Complexity:** The local style loss involves a pairwise distance calculation between feature elements, resulting in $O(N^2)$ complexity where $N$ is the number of feature elements [S1]. This is computationally expensive.
-*   **Memory:** Requires storing VGG feature maps for both the rendered object and the reference image [S1].
-*   **Strengths:** Effectively improves color and style coherence [S1].
-*   **Limitations:** High computational cost for the local component [S1].
+*   **Complexity:** The local style loss involves computing pairwise distances between all spatial locations in the feature maps, resulting in $O(N^2)$ complexity per batch item, where $N$ is the number of pixels/locations in the feature map. This can be computationally expensive for high-resolution features.
+*   **Strengths:** Improves color and style coherence effectively [S1]. The local component helps capture contextual similarities that global statistics might miss.
+*   **Limitations:** Computationally intensive due to the nearest-neighbor search. Requires a pre-trained VGG network.
+*   **Usage:** Used when generating objects to seamlessly integrate with a scene's style or when transferring artistic style to rendered content [S1].
 
 ## Background
-Originated in the context of generating objects in Neural Radiance Fields for VR content creation [S1]. It builds on the concept of style transfer using VGG networks [S1].
+Originated in the context of neural rendering for virtual reality content creation, specifically in GO-NeRF [S1]. It adapts style transfer concepts (global statistics and contextual loss) to the domain of 3D object generation within radiance fields.
 
 ## Sources
 [S1] GO-NeRF: Generating Objects in Neural Radiance Fields for Virtual Reality Content Creation, https://doi.org/10.1109/tvcg.2025.3549558, fetched 2026-10-29
-[S2] NeRF-Art: Text-Driven Neural Radiance Fields Stylization, https://doi.org/10.1109/tvcg.2023.3283400, fetched 2026-10-26

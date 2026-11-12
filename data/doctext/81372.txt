@@ -1,0 +1,723 @@
+Neural Rendering — Technologies & Tricks
+Neural Rendering — Technologies & Tricks
+Updated July 2026 with 2025–2026 SOTA additions — new entries marked ★. Algorithm names link to their papers (arXiv / project page).
+July 2026 · Updated Edition
+Contents
+Foundations
+3D Scene Representations
+NeRF Foundations
+NeRF Speed-ups and Variants
+3D Gaussian Splatting (3DGS)
+3DGS Variants
+Feed-Forward 3D from Images
+3D Generation (Text/Image-to-3D)
+Avatars and Humans
+Dynamic / 4D Neural Rendering
+Inverse Rendering and Relighting
+Scene-Scale and Large Reconstruction
+Neural Rendering for Robotics / AV
+Neural SLAM
+Editing and Stylization
+Compression and Storage
+Differentiable Rendering Frameworks
+Neural Rendering for Content Creation
+Frontier 2025–2026
+Evaluation Metrics
+Production Stack 2026
+Appendix A: Twenty-Five Things to Know
+Appendix B: Decision Tree — "Which Neural Rendering?"
+Appendix C: Year-by-Year Milestones
+1. Foundations
+1.1 What is neural rendering?
+The use of neural networks (or differentiable scene representations) to synthesize images from a 3D scene representation, with the rendering process itself being differentiable so that scene parameters can be optimized from images.
+1.2 Forward vs inverse rendering
+Forward rendering: scene + camera \(\to\) image (classical graphics).
+Inverse rendering / scene reconstruction: images \(\to\) scene parameters. Neural rendering is dominated by inverse rendering: optimize a learned scene rep so that re-rendering matches the input photos.
+1.3 Differentiable rendering
+The rendering function \(\mathcal{R}(\theta)\) must be differentiable in \(\theta\) (scene parameters) for gradient-based optimization:
+\[\theta^* = \arg\min_\theta \sum_i \left\| \mathcal{R}_i(\theta) - I_i \right\|_2^2 .\]
+Foundation of every modern neural rendering pipeline.
+1.4 The two paradigms (2026)
+Volumetric / radiance-field (NeRF lineage): scene as a continuous function from 3D coords to (color, density). Render via ray marching + volume integration.
+Splat / primitive (3DGS lineage): scene as a set of explicit primitives (Gaussians). Render via differentiable rasterization.
+1.5 Why neural rendering matters
+Photoreal novel-view synthesis from photos.
+No mesh / texture pipeline required (representation learned).
+Differentiable: integrate with any loss (geometry, semantic, language).
+Foundation for AR/VR worldbuilding, AV simulation, content creation, robotics.
+Key
+The 2024 transition: 3D Gaussian Splatting replaced NeRF as the default for new projects due to real-time rendering and editability. The 2025 transition: feed-forward 3D from images (VGGT, MASt3R) is replacing classical SfM/MVS as the default geometry frontend.
+2. 3D Scene Representations
+2.1 Explicit representations
+Voxel grids: dense 3D grid; memory \(O(n^3)\).
+Sparse voxels / octrees: only allocate occupied space.
+Point clouds: unordered set of 3D points; no connectivity.
+Meshes: vertices + faces; standard graphics asset.
+Hash grids (Instant-NGP): multi-resolution hash table; collisions resolved by neural net.
+2.2 Implicit representations
+Signed Distance Function (SDF): \(f(x) =\) distance to surface; surface where \(f = 0\).
+Occupancy field: \(f(x) \in [0, 1] =\) probability inside.
+Radiance field (NeRF): \(f(x, d) = (c, \sigma) =\) color + density.
+2.3 Hybrid representations
+Triplane: 3 axis-aligned 2D planes; query point projects to each, features concatenated.
+TensoRF: tensor decomposition (CP / VM) of the radiance field grid.
+K-Planes / Hexplane: planes for 4D (space-time) decomposition.
+Hash-grid + MLP: Instant-NGP's combo.
+2.4 3D Gaussian Splatting (3DGS) representation
+Each Gaussian:
+Mean \(\mu \in \mathbb{R}^3\).
+Anisotropic covariance \(\Sigma = R S S^\top R^\top\) with \(R \in SO(3)\) from a quaternion, \(S = \operatorname{diag}(s_x, s_y, s_z)\).
+Opacity \(\alpha \in (0, 1)\).
+Color via spherical harmonics (SH degree 0–3): \(c(d)\) depending on view direction.
+Typical scene: 1M–10M Gaussians.
+2.5 Choosing a representation
+Representation
+Render speed
+Memory
+Edit-friendly
+NeRF (MLP)
+slow
+low
+no
+Instant-NGP (hash)
+fast
+medium
+no
+3D Gaussians
+real-time
+medium-high
+somewhat
+Mesh
+real-time
+low
+yes
+Voxel grid
+fast
+high
+yes
+SDF
+medium
+low
+no
+3. NeRF Foundations
+3.1 The original NeRF (Mildenhall et al. 2020)
+A scene is a function:
+\[F_\Theta:\ (x, y, z, \theta, \phi) \mapsto (c, \sigma),\]
+\(c \in \mathbb{R}^3\) color, \(\sigma \ge 0\) density. Implemented as an MLP. View dependence via direction \((\theta, \phi)\).
+3.2 Volume rendering equation
+Color along a ray \(r(t) = o + td\) from \(t_n\) to \(t_f\):
+Key
+\[C(\mathbf{r}) = \int_{t_n}^{t_f} T(t)\,\sigma(\mathbf{r}(t))\,c(\mathbf{r}(t), \mathbf{d})\,\mathrm{d}t, \quad T(t) = \exp\left( -\int_{t_n}^{t} \sigma(\mathbf{r}(s))\,\mathrm{d}s \right).\]
+3.3 Discretization (alpha compositing)
+Sample \(N\) points along ray; let \(\delta_i = t_{i+1} - t_i\):
+\[\hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i\,(1 - e^{-\sigma_i \delta_i})\,c_i, \quad T_i = \exp\left( -\sum_{j<i} \sigma_j \delta_j \right).\]
+Equivalent to alpha compositing front-to-back with \(\alpha_i = 1 - e^{-\sigma_i \delta_i}\).
+3.4 Loss
+\[\mathcal{L} = \sum_{\mathbf{r}} \left\| \hat{C}(\mathbf{r}) - C(\mathbf{r}) \right\|_2^2 .\]
+Just photometric MSE per ray. The whole pipeline trains end-to-end.
+3.5 Positional encoding
+\[\gamma(p) = \left[ \sin(2^k \pi p),\ \cos(2^k \pi p) \right]_{k=0}^{L-1} .\]
+Without it, the MLP can't fit high-frequency detail (NTK low-frequency bias). Standard \(L = 10\) for spatial coords, \(L = 4\) for view directions.
+3.6 Hierarchical sampling
+Coarse network \(N_c\) samples; produce weights \(w_i = T_i(1 - e^{-\sigma_i \delta_i})\).
+Sample \(N_f\) fine points from PDF \(\propto w_i\).
+Fine network evaluates at fine samples.
+Final color from combined fine samples.
+3.7 View dependence
+View direction \(d\) enters the MLP only at the final color head (after density). Forces density to be view-independent (correct geometry) while color can vary (specular, view-dependent shading).
+3.8 Training and inference cost
+Original NeRF: hours-to-days to train per scene; seconds-to-minutes per rendered image. Made unusable for production until faster methods.
+4. NeRF Speed-ups and Variants
+4.1 Instant-NGP (Müller et al. 2022)
+Multi-resolution hash grid encoding:
+\(L\) levels of hash tables at increasing resolution.
+Each table has \(T\) entries with \(F\)-dim feature.
+Query: hash 3D position at each level; trilinear interpolation; concatenate; small MLP.
+Trains in seconds (5–30s for typical scenes); renders in milliseconds. The first practical NeRF for production.
+4.2 Plenoxels (Yu et al. 2022)
+No MLP; pure sparse voxel grid storing density + SH coefficients. Trillion-parameter scenes possible; trains in minutes.
+4.3 TensoRF (Chen et al. 2022)
+Decompose the radiance field grid into low-rank tensor components (CP or vector-matrix). Memory-efficient; trains in 30 minutes; comparable quality to NeRF.
+4.4 DVGO
+Direct voxel grid optimization with progressive scaling. Fast.
+4.5 Mip-NeRF (Barron et al. 2021)
+Anti-aliased NeRF: instead of sampling rays, integrate over conical frustums. Replaces positional encoding with integrated positional encoding (IPE):
+\[\gamma_{\text{IPE}}(\mu, \Sigma) = \left[ \sin(2^k \pi \mu)\cdot e^{-\frac{1}{2}(2^k\pi)^2 \Sigma},\ \cos(\cdot)\cdot e^{-\frac{1}{2}(\cdot)\Sigma} \right].\]
+High-frequency components attenuated where the frustum is large.
+4.6 Mip-NeRF 360
+Extension to unbounded scenes (360-degree captures). Non-linear scene contraction:
+\[\text{contract}(x) = \begin{cases} x & \|x\| \le 1 \\ \left(2 - 1/\|x\|\right) x/\|x\| & \|x\| > 1 \end{cases} .\]
+Plus distortion regularizer to discourage floaters.
+4.7 Zip-NeRF
+Combines Mip-NeRF anti-aliasing with Instant-NGP hash grids. Best of both worlds: fast + anti-aliased.
+4.8 NeRF in the wild (Martin-Brualla et al.)
+Handles transient objects + appearance variation in unconstrained photo collections (e.g., tourist photos of a landmark) via per-image latent codes.
+4.9 NeRF survey table
+Method
+Train time
+Render speed
+Use
+NeRF (original)
+days
+sec/frame
+legacy
+Instant-NGP
+seconds
+ms/frame
+fast NeRF default
+Plenoxels
+minutes
+fast
+fully explicit
+TensoRF
+minutes
+fast
+memory-efficient
+Mip-NeRF 360
+hours
+sec/frame
+best quality on bounded
+Zip-NeRF
+hours
+ms/frame
+best quality + fast
+5. 3D Gaussian Splatting (3DGS)
+5.1 The breakthrough (Kerbl et al. SIGGRAPH 2023)
+Replace volumetric MLP query + ray marching with explicit 3D Gaussians + differentiable rasterization. Realtime rendering (> 100 fps); training in minutes; competitive quality with Mip-NeRF 360.
+5.2 Representation recap
+Each Gaussian \(i\): \((\mu_i, R_i, S_i, \alpha_i, \text{SH}_i)\). Total 59 floats per Gaussian (with SH degree 3): position 3, quat 4, scale 3, opacity 1, SH 48.
+5.3 Projection to 2D
+Approximate the projected 3D Gaussian as a 2D Gaussian in screen space:
+Key
+\[\Sigma' = J W \Sigma W^\top J^\top,\]
+where \(W\) is the world-to-camera linearization at \(\mu_i\), \(J\) is the Jacobian of the perspective projection. The z-dimension is collapsed.
+5.4 Differentiable rasterization
+Per pixel \(p\), depth-sort Gaussians intersecting the pixel, alpha-composite front-to-back:
+\[C(p) = \sum_{i \in \mathcal{N}(p)} c_i(\mathbf{d})\,\alpha'_i \prod_{j<i}(1 - \alpha'_j), \quad \alpha'_i = \alpha_i \cdot \exp\left( -\tfrac{1}{2}(p - \mu'_i)^\top \Sigma'^{-1}_i (p - \mu'_i) \right).\]
+Tile-based rasterization (\(16 \times 16\) pixel tiles) for parallelism.
+5.5 Training loss
+\[\mathcal{L}_{\text{3DGS}} = (1 - \lambda)\,\mathcal{L}_1 + \lambda\,\mathcal{L}_{\text{D-SSIM}}(\hat{I}, I), \quad \lambda \approx 0.2 .\]
+\(\ell_1\) + structural similarity. Photometric only; no explicit geometry loss.
+5.6 Adaptive density control
+Periodically:
+Clone: small Gaussians with large position gradients (under-reconstruction).
+Split: large Gaussians with large position gradients (over-reconstruction). Replace with 2 Gaussians sampled from itself, smaller scale.
+Prune: \(\alpha < \tau\) or huge screen-space size.
+Opacity reset: periodically reset all \(\alpha\) to a small value to prune redundancies.
+5.7 Initialization
+Typically from SfM point cloud (COLMAP). Random initialization works for object-scale but slower convergence.
+5.8 Properties that made 3DGS dominant
+Real-time rendering (> 100 fps).
+Trains in minutes (vs hours for NeRF).
+Explicit primitives = editable / composable.
+Works with standard rasterization hardware (with custom kernels).
+Compatible with mesh-based pipelines (extraction).
+6. 3DGS Variants
+6.1 Mip-Splatting
+Anti-aliasing for 3DGS:
+2D mip filter: low-pass in screen space (analogous to mipmaps).
+3D smoothing filter: low-pass in world space.
+Resolves aliasing at varying view distances.
+6.2 2D Gaussian Splatting (2D-GS)
+Planar disks (zero-thickness Gaussians) with consistent normals. Better surface reconstruction; natural for mesh extraction.
+6.3 Scaffold-GS
+Anchor points predict "neural" Gaussians on the fly via small MLP. Memory \(\sim 5\times\) less than vanilla 3DGS at same quality. Used in CityGaussian for huge scenes.
+6.4 Octree-GS
+Hierarchical octree structure over Gaussians. Level-of-detail rendering; massive scenes feasible.
+6.5 4D Gaussian Splatting / Deformable 3DGS
+Time-dependent \(\mu(t), \Sigma(t)\) via:
+MLPs \(f_\theta(\mu, t) \to \Delta\mu\).
+Polynomial bases.
+Hexplane decompositions.
+Per-Gaussian temporal trajectories.
+Dynamic scenes (people moving, fluids, etc.).
+6.6 SuGaR / Gaussian Frosting
+Mesh extraction from optimized Gaussians. SuGaR: align Gaussians to a surface; extract via Poisson reconstruction. Frosting: bind Gaussians to mesh surface for hybrid render.
+6.7 Relightable 3D Gaussians / GS-IR
+Estimate per-Gaussian BRDF + lighting decomposition. Supports relighting under novel illumination. Decomposes into:
+Per-Gaussian albedo.
+Per-Gaussian roughness, metallic.
+Per-Gaussian normal (or derived from Gaussian shape).
+Scene lighting (env map or learned).
+6.8 LightGaussian, CompGS, RDOGS
+Compression: prune redundant Gaussians, quantize parameters, learned codebooks. \(\sim 10\times\) smaller storage with minimal quality loss.
+6.9 Hierarchical 3DGS, CityGaussian, Octree-GS
+City-scale / kilometer-scale reconstructions via:
+Spatial hierarchies (LoD).
+Block-based partitioning.
+Background / foreground decomposition.
+Streaming for interactive exploration.
+6.10 PhysGaussian
+Couples 3DGS with continuum mechanics (Material Point Method). Each Gaussian has physical properties; can simulate dynamics (deformation, fracture, fluids).
+6.11 Variant comparison
+Variant
+Highlight
+Use
+3DGS (original)
+real-time + quality
+default
+Mip-Splatting
+anti-aliased
+varying view distance
+2D-GS
+surface-friendly
+mesh extraction
+Scaffold-GS
+memory-efficient
+large scenes
+4D-GS / Deformable
+dynamic
+video reconstruction
+SuGaR / Frosting
+mesh extraction
+graphics pipeline integration
+GS-IR / Relightable
+relighting
+VFX, AR
+LightGaussian / CompGS
+smaller
+deployment
+CityGaussian / Hierarchical
+city-scale
+VR worldbuilding
+PhysGaussian
+physics
+simulation
+7. Feed-Forward 3D from Images
+7.1 The premise
+Skip per-scene optimization: a single transformer forward pass from \(N\) images outputs 3D representation. The 2024–25 phase transition.
+7.2 LRM (Large Reconstruction Model, Adobe 2023)
+Single image \(\to\) triplane neural representation in one transformer pass. Trained on Objaverse + Objaverse-XL.
+7.3 InstantMesh, MeshLRM
+Variants producing meshes directly. Convert triplane to occupancy, marching cubes, refine.
+7.4 TripoSR, CRM, SF3D, SPAR3D
+Various small-model fast image-to-3D. Real-time on a single GPU.
+7.5 GS-LRM, Long-LRM
+Predict 3D Gaussians directly (not triplane \(\to\) Gaussians). Faster downstream rendering.
+7.6 DUSt3R (Naver 2024)
+Breakthrough idea: predict per-pixel 3D pointmaps from 2 images directly.
+\[X_{1,1},\ X_{2,1} \in \mathbb{R}^{H \times W \times 3} \quad \text{(pointmaps in camera 1's frame).}\]
+Camera intrinsics, extrinsics, depth, point cloud all decode from the pointmap predictions; matches between pixels are nearest neighbors in 3D.
+7.7 MASt3R / MASt3R-SfM
+DUSt3R + explicit feature heads for matching. MASt3R-SfM does global SfM via hundreds of pairwise predictions + global optimization. Matches COLMAP quality at \(\sim 100\times\) speed.
+7.8 Spann3R, Splatt3R, NoPoSplat, Fast3R
+Variants:
+Spann3R: incremental, processes one new view at a time.
+Splatt3R: directly predicts 3D Gaussians from image pairs.
+NoPoSplat: no SfM init; pure feed-forward Gaussians.
+Fast3R: optimized for speed.
+7.9 VGGT (Visual Geometry Grounded Transformer, Meta 2025)
+Large transformer mapping unposed \(N\)-image set to depth + camera + per-pixel 3D in one forward pass. By 2025–26 the dominant feed-forward 3D model. Replaces COLMAP entirely for many use cases.
+7.10 MoGe / MoGe-2
+Metric-scale monocular geometry estimator. Removes affine ambiguity that classical mono-depth has. Single-image \(\to\) metric depth + intrinsics.
+Key
+The trend: classical SfM/MVS is being absorbed into feed-forward learned 3D. By 2027, COLMAP will be a fallback / refinement step, not a default. New 3DGS pipelines initialize from VGGT / MASt3R, not COLMAP.
+8. 3D Generation (Text/Image-to-3D)
+8.1 Optimization-based: SDS
+Score Distillation Sampling (DreamFusion, Poole et al.): optimize a parametric scene \(\theta\) (NeRF or 3DGS) by passing renders through a frozen 2D diffusion teacher:
+\[\nabla_\theta \mathcal{L}_{\text{SDS}} = \mathbb{E}_{t, \epsilon}\left[ w(t)\,(\epsilon_\phi(x_t, t, c) - \epsilon)\,\partial x/\partial\theta \right].\]
+Slow (hours per scene). Janus problem (multi-face). Saturated colors.
+8.2 Magic3D, ProlificDreamer (VSD)
+Magic3D: two-stage (low-res NeRF \(\to\) high-res mesh). ProlificDreamer (VSD): replace noise target \(\epsilon\) with learned variational distribution; reduces mode collapse.
+8.3 Multi-view diffusion
+MVDream, ImageDream, Wonder3D, SyncDreamer, Zero123, Zero123++, Stable Zero123: train a 2D diffusion model that generates multiple consistent views of an object from one input image (or text). Use multi-view outputs to optimize 3D representation. Dramatically reduces SDS Janus problem.
+8.4 Native 3D diffusion (the 2025 wave)
+Diffuse directly in a 3D latent space (sparse-voxel + structural latents in Trellis; volumetric in CLAY; etc.). Fast (seconds), high quality, no SDS overhead.
+Trellis (Microsoft): structured 3D latent + flow matching; seconds per asset.
+Hunyuan3D, Hunyuan3D-2 (Tencent): native 3D diffusion, mesh + texture in one pass.
+CLAY: volumetric latent diffusion.
+Direct3D, SF3D, SPAR3D: variants.
+Rodin Gen-1.5: 3D-asset generation product.
+8.5 Mesh generation Transformers
+MeshGPT, MeshXL, MeshAnything, MeshAnything V2, EdgeRunner, BPT: autoregressive face-vertex prediction; native mesh topology output without isosurface extraction.
+8.6 Comparison
+Method
+Time per asset
+Quality
+DreamFusion (SDS)
+hours
+medium; Janus issues
+ProlificDreamer (VSD)
+hours
+better than SDS
+Multi-view diffusion + 3D opt
+10–30 min
+much better
+LRM family (feed-forward)
+seconds
+medium-high
+Trellis / Hunyuan3D-2 (native)
+seconds
+high
+MeshGPT (autoregressive)
+minutes
+native mesh; hard surfaces
+9. Avatars and Humans
+9.1 Photoreal facial avatars
+Codec Avatars 2.0 / 3.0 (Meta): photoreal full-body and face from multi-view captures.
+Apple Persona: 3D head/shoulder from few-second enrollment; FaceTime in Vision Pro.
+Gaussian Avatars / GaussianHead / FlashAvatar / LiveHead: 3DGS-based, lower capture cost, real-time.
+Animatable Gaussians, IMavatar, MonoGaussianAvatar: from monocular video.
+9.2 Body models
+SMPL, SMPL-X, SMPL-H: parametric body models with shape + pose blendshapes.
+PHALP, SMPLer-X, OSX, NLF (Neural Localizer Fields), CLIFF: pose / shape regressors.
+4D-Humans, 4D-DRESS, GauHuman: full-body 4D reconstruction.
+9.3 Audio / image-driven animation
+EMO (Alibaba 2024): audio-driven talking-head.
+Audio2Photoreal (Meta): audio \(\to\) full-body.
+Live Portrait: image + driving video \(\to\) portrait.
+V-Express, Hallo, AniPortrait: similar lines.
+9.4 Pose-driven character animation
+AnimateAnyone, MimicMotion, Champ, MagicAnimate: drive a static character with a pose video. Standard for short-form content creation.
+9.5 Avatar pipeline pattern (2026)
+Capture: short video (or multi-view scan).
+Track: 3D head/body via SMPL-X or template.
+Build: 3DGS avatar bound to template.
+Animate: drive via audio (EMO) or pose sequence.
+Render: real-time.
+10. Dynamic / 4D Neural Rendering
+10.1 Dynamic NeRF lineage
+Nerfies, HyperNeRF: per-frame deformation from a canonical space.
+D-NeRF: time as input; explicit deformation field.
+NSFF (Neural Scene Flow Fields): scene flow + radiance.
+NeRFlow: continuous 4D radiance.
+10.2 4D Gaussian Splatting
+Time-dependent Gaussian parameters:
+4D-GS: per-Gaussian temporal trajectory (polynomial / RBF).
+Dynamic 3D Gaussians: per-Gaussian rigid motion across frames.
+Deformable 3DGS: deformation MLP from canonical \(\mu\) to time-\(t\) position.
+10.3 Plane-based 4D
+K-Planes / Hexplane: tensor decomposition into 2D planes for 4D space-time.
+NeRFPlayer: streaming 4D.
+10.4 Free-viewpoint video
+End-to-end pipelines: Multi-view video \(\to\) 3D scene \(\to\) any new viewpoint. Use cases: sports, concerts, telepresence.
+10.5 Trade-offs
+Per-frame 3DGS: simple, no temporal coherence, large.
+Canonical + deformation: compact, temporal coherence, harder optimization.
+Per-Gaussian trajectory: middle ground.
+11. Inverse Rendering and Relighting
+11.1 The decomposition problem
+From images, recover:
+Geometry (shape, normals).
+Material (albedo, roughness, metallic).
+Lighting (env map or learned).
+Ill-posed; many decompositions explain same images. Strong priors needed.
+11.2 NeRD, NeRF-OSR, NeRO, PhySG
+Methods that decompose NeRF into shape + BRDF + lighting. PhySG uses spherical Gaussians for environment lighting.
+11.3 Relightable 3D Gaussians, GS-IR
+3DGS with per-Gaussian BRDF + scene-level lighting. Render under novel illumination at inference.
+11.4 Material decomposition challenges
+Albedo / shading ambiguity.
+Specular vs diffuse split.
+Indirect lighting (mostly ignored).
+Anisotropic materials.
+11.5 Environment lighting estimation
+Env map: spherical \(360^\circ\) texture.
+Spherical Harmonics: low-frequency lighting.
+Spherical Gaussians: lobed lighting (PhySG).
+11.6 Use cases
+VFX (insert objects with consistent lighting), AR (light virtual objects with real env), product visualization.
+12. Scene-Scale and Large Reconstruction
+12.1 Block-NeRF (Tancik et al.)
+Decompose city-scale scene into blocks; train per-block NeRF; composite at render time. SF / Mission Bay results showed feasibility.
+12.2 Mega-NeRF
+Multi-NeRF for large scenes; spatial partitioning + visibility prediction.
+12.3 CityGaussian, Hierarchical 3DGS, Octree-GS
+3DGS variants for kilometer-scale scenes:
+Spatial partitioning (city blocks).
+Level-of-Detail (coarse Gaussians far, fine close).
+Streaming for interactive exploration.
+Background sky as separate model.
+12.4 Aerial / drone reconstruction
+Specialized pipelines for aerial photography. Photogrammetry replacement using neural rendering.
+12.5 Storage challenges
+Kilometer-scale scenes: GBs to TBs of Gaussian data. Compression (LightGaussian, CompGS) essential. Streaming protocols emerging.
+13. Neural Rendering for Robotics / AV
+13.1 Why neural rendering for AV?
+Closed-loop simulation: re-render real driving log under perturbed trajectories. Train policies in counterfactual scenarios that never occurred.
+13.2 Driving-specific systems
+StreetGaussians, EmerNeRF, S-NeRF: driving-scene reconstruction with dynamic vehicle handling.
+DrivingGaussian, OmniRe: full-driving-scene neural rendering.
+NeuRAD: neural radiance for AV.
+UniSim: NVIDIA's general autonomous-driving neural simulator.
+13.3 Cosmos (NVIDIA 2025)
+General world-model platform combining video diffusion + autoregressive variants for robotics + AV simulation. Action-conditioned video generation as learned simulator.
+13.4 Indoor / robotics
+Object-level neural rendering for manipulation.
+Scene-level for navigation training.
+Sim-to-real bridging via photorealistic neural sims.
+13.5 Replacing classical simulators?
+Classical sims (CARLA, Isaac Sim) still dominate physics; neural simulators win on visual realism. Hybrid systems combine: physics from classical, visuals from neural.
+14. Neural SLAM
+14.1 Why neural SLAM?
+SLAM (Simultaneous Localization And Mapping) traditionally produces sparse maps. Neural SLAM produces dense, photorealistic maps end-to-end with localization.
+14.2 NeRF-based SLAM
+iMAP, NICE-SLAM, Vox-Fusion: voxel-based neural SLAM.
+NeRF-SLAM: NeRF + DROID-SLAM tracker.
+Co-SLAM: hybrid representation.
+Point-SLAM: point-based neural map.
+14.3 Gaussian Splatting SLAM (2024 wave)
+MonoGS: monocular Gaussian Splatting SLAM.
+GS-SLAM: RGB-D Gaussian Splatting SLAM.
+SplaTAM: track + map with 3DGS.
+Photo-SLAM, Splat-SLAM: variants.
+14.4 Pipeline
+Track current frame against existing map.
+Update map with new view: insert new Gaussians where coverage is poor; refine existing.
+Loop closure (optional): detect revisited locations; correct drift.
+Continuously render the photorealistic map.
+14.5 Trade-offs vs classical SLAM
+Pro: dense + photorealistic; supports relighting / rendering downstream.
+Con: heavier compute; less mature for real-time on edge.
+Hybrid: classical front-end (feature tracking) + neural back-end (dense map).
+14.6 Production deployment
+Still emerging; ARKit / ARCore use classical SLAM. Niantic's Lightship VPS uses learned features + classical structure. Neural SLAM mostly research / VFX through 2026.
+15. Editing and Stylization
+15.1 NeRF editing
+Hard because the representation is implicit:
+ED-NeRF, NeRF-Editing: 2D edits propagated to 3D.
+Instruct-NeRF2NeRF: edit via text instructions + InstructPix2Pix.
+15.2 3DGS editing (much easier)
+GaussianEditor, GaussCtrl: text-driven 3DGS editing.
+Gaussian Grouping: per-object segmentation + editing.
+Direct: select Gaussians + transform / recolor / delete.
+15.3 Style transfer
+Per-frame 2D style transfer + average.
+Joint style transfer over the 3D rep \(\to\) consistent across views.
+ARF (Artistic Radiance Fields), StyleRF.
+15.4 Object insertion / removal
+NeRF inpainting: fill removed region using diffusion prior.
+3DGS inpainting: easier; remove Gaussians, splat new ones from generated views.
+SPIn-NeRF: object removal.
+15.5 Text-to-edit
+"Make it winter" / "add a chair".
+Gaussian Editor + 2D diffusion guidance.
+Still rough; production-grade by 2026 only for narrow domains.
+16. Compression and Storage
+16.1 NeRF compression
+VQ-NeRF: vector-quantize MLP weights.
+Re:NeRF: refactor for inference compactness.
+Masked Wavelet Representation: for hash grids.
+16.2 3DGS compression
+LightGaussian: pruning + INT8 + SH coefficient distillation.
+CompGS: codebook-based compression.
+Compact3D, Mini-Splat, RDOGS: \(\sim 10\times\) smaller.
+Per-Gaussian quantization: position FP16, scales FP16, opacity INT8, SH INT8 / codebook.
+16.3 Mesh extraction for storage
+3DGS or NeRF \(\to\) mesh + textures = standard graphics asset, much smaller than primitive data. SuGaR / Gaussian Frosting / NeuS for extraction.
+16.4 Streaming
+For city-scale scenes: stream visible blocks based on viewport. Hierarchical level-of-detail. Web-friendly formats emerging.
+17. Differentiable Rendering Frameworks
+17.1 General-purpose differentiable rendering
+PyTorch3D (Facebook): meshes, point clouds, simple rendering.
+nvdiffrast (NVIDIA): fast differentiable rasterization.
+Mitsuba 3: physically-based, high quality, slower.
+Kaolin (NVIDIA): general 3D deep learning toolkit.
+Theseus: differentiable optimization library.
+17.2 NeRF / radiance-field frameworks
+Nerfstudio: unified framework for NeRF research.
+tiny-cuda-nn (NVIDIA): hash grid + small MLP CUDA kernels.
+instant-ngp (NVIDIA): reference Instant-NGP.
+17.3 3DGS frameworks
+gsplat: open 3DGS rasterization library.
+Splatfacto: Nerfstudio's 3DGS implementation.
+Brush: web-based 3DGS viewer / trainer.
+3DGS.cpp / SuperSplat: viewers and editors.
+17.4 3D generation frameworks
+Threestudio: framework for SDS / multi-view diffusion 3D generation.
+Trellis reference impl.
+Cosmos (NVIDIA): world-model + neural rendering integration.
+17.5 Choosing a stack (2026)
+Research / experiments: Nerfstudio + gsplat.
+Production 3DGS asset: gsplat + custom viewer.
+Mesh-based: PyTorch3D + nvdiffrast.
+Photorealistic: Mitsuba 3.
+Web deployment: Brush / SuperSplat / Three.js + 3DGS viewers.
+Asset generation: Trellis / Hunyuan3D-2 + Threestudio.
+18. Neural Rendering for Content Creation
+18.1 Photogrammetry replacement
+Traditional photogrammetry: photos \(\to\) point cloud \(\to\) mesh. Neural rendering: photos \(\to\) scene \(\to\) render directly. Higher fidelity, faster pipeline, fewer artifacts on reflective / transparent surfaces.
+18.2 VFX / Film
+Set scanning for CGI integration.
+Re-lit virtual sets.
+Hybrid: real footage + neural render of additions.
+Used at studios (ILM, Unity, etc.) experimentally.
+18.3 Game asset generation
+Single-image \(\to\) asset (Trellis, Hunyuan3D-2).
+Mesh + textures + materials in seconds.
+Lowers indie / hobbyist barrier; concerns about IP.
+18.4 AR/VR worldbuilding
+Capture real spaces; render in headset.
+Apple Vision Pro, Quest 3 increasingly support 3DGS.
+Niantic Lightship VPS for AR localization.
+18.5 E-commerce / product viz
+Photoreal product 3D from a few photos.
+Try-on / configurator applications.
+Replaces traditional product photography for many use cases.
+18.6 Real estate / Tourism
+Property walkthroughs from phone capture.
+Museum / cultural heritage digitization.
+Polycam, Luma AI consumer apps.
+19. Frontier 2025–2026
+19.1 Native 3D diffusion mainstream
+Trellis, Hunyuan3D-2, CLAY, Direct3D produce commercial-grade 3D assets in seconds. Replaces SDS for production.
+19.2 VGGT-class feed-forward 3D
+COLMAP being eclipsed; new pipelines initialize 3DGS from VGGT / MASt3R outputs. SfM as a refinement step, not a default.
+19.3 Real-time 4D
+4D Gaussian Splatting at interactive rates. Volumetric video for AR/VR (Apple, Meta).
+19.4 Physics-aware 3DGS
+PhysGaussian, Spring-Gaus, GaussianSplashing: combine 3DGS with continuum mechanics for simulated dynamics.
+19.5 Neural materials
+Beyond simple BRDF: learned per-Gaussian material networks; per-point neural shaders.
+19.6 Generative city-scale
+Combine native 3D diffusion + scene-scale 3DGS for procedurally-generated cities. Early but emerging (CityDreamer, SceneDreamer).
+19.7 Multimodal scene reasoning
+Sa2VA: SAM 2 + LLaVA on 3D Gaussian scenes.
+LangSplat, Feature 3DGS: per-Gaussian language features for query-based selection.
+19.8 Open research questions
+Generalizable 3DGS: feed-forward Gaussians from few images.
+Editing at production quality.
+Relighting / material decomposition reliability.
+Compression to web-friendly sizes.
+Dynamics: long-horizon physical consistency.
+20. Evaluation Metrics
+20.1 Image quality
+PSNR: peak signal-to-noise ratio. Standard but not perceptual.
+SSIM / D-SSIM: structural similarity.
+LPIPS: learned perceptual similarity (VGG / AlexNet features).
+FID / FVD: distributional metrics for generative.
+20.2 Geometry quality
+Chamfer Distance: bidirectional nearest-neighbor distance between point clouds.
+F-Score (point cloud): precision/recall at distance threshold.
+Normal consistency: angle between predicted and GT normals.
+IoU (occupancy): for voxel/SDF.
+20.3 Novel-view synthesis benchmarks
+NeRF Synthetic: 8 synthetic objects; standard.
+LLFF: 8 forward-facing real scenes.
+Tanks and Temples: large real scenes.
+Mip-NeRF 360: 9 unbounded real scenes.
+Deep Blending: dataset for view synthesis.
+20.4 3D reconstruction benchmarks
+DTU: object-level multi-view stereo.
+ScanNet, ScanNet++: indoor 3D.
+ETH3D, Tanks and Temples: outdoor.
+Objaverse / Objaverse-XL: massive 3D asset library.
+20.5 Generation benchmarks
+T3Bench: text-to-3D evaluation.
+ULIP: 3D-text alignment.
+Human eval typically required.
+21. Production Stack 2026
+Use case
+Default approach
+Notes
+Object scan to render
+3DGS via Polycam / Luma / gsplat
+Phone capture viable
+Scene scan to AR/VR
+3DGS + scene compression
+Apple Vision Pro support
+Photoreal asset gen
+Trellis / Hunyuan3D-2
+Seconds per asset
+Mesh game asset
+Trellis → MeshLRM, or MeshGPT
+Game-ready
+Avatar (face)
+Codec Avatars / Gaussian Avatars
+Per-subject scan
+Avatar (audio-driven)
+EMO / Live Portrait / Audio2Photoreal
+2D-aware portrait
+Body avatar
+4D-Humans / GauHuman + SMPL-X
+Full-body
+Dynamic scene
+4D-GS / Deformable 3DGS
+Video reconstruction
+City-scale rendering
+Hierarchical 3DGS / CityGaussian
+Streaming + LoD
+AV simulator
+Cosmos / EmerNeRF / OmniRe
+Closed-loop sim
+Robotics simulator
+Isaac + neural texture / Cosmos
+Hybrid physics + visuals
+Neural SLAM
+MonoGS / SplaTAM (research)
+Classical SLAM still production
+Geometry frontend
+VGGT / MASt3R-SfM (vs COLMAP)
+Faster + better
+Monocular depth
+Depth Anything v2 / Marigold / MoGe-2
+Foundation models
+Compression
+LightGaussian / CompGS
+\(10\times\) smaller
+Web deployment
+gsplat + SuperSplat / Brush
+Browser-friendly
+Key
+★ 2026 SOTA update — feed-forward 3D
+AnySplat: Feed-forward 3D Gaussian Splatting from Unconstrained Views: Pose-free feed-forward network that reconstructs a 3D Gaussian scene plus camera intrinsics/extrinsics from uncalibrated sparse or dense image collections in a single pass, pushing VGGT-style feed-forward reconstruction into direct real-time-renderable Gaussians (SIGGRAPH Asia 2025).
+Key
+★ 2026 SOTA update — gaussian advance
+3DGUT: Enabling Distorted Cameras and Secondary Rays in Gaussian Splatting: Replaces EWA splatting with an Unscented Transform so rasterized Gaussians support nonlinear/distorted (fisheye, rolling-shutter) cameras and secondary rays for reflections and refractions while staying real-time (CVPR 2025 Oral, NVIDIA).
+Key
+★ 2026 SOTA update — real-time
+EVER: Exact Volumetric Ellipsoid Rendering for Real-time View Synthesis: Exact ray-traced volume rendering of ellipsoid primitives that removes the popping and view-dependent-density artifacts of rasterized 3DGS at ~30 FPS 720p, giving sharper large-scale novel-view synthesis (ICCV 2025).
+Key
+★ 2026 SOTA update — relightable/material
+IRGS: Inter-Reflective Gaussian Splatting with 2D Gaussian Ray Tracing: Applies the full (unsimplified) rendering equation to Gaussian inverse rendering via a differentiable 2D Gaussian ray tracer, capturing inter-reflections and indirect light for reliable relightable material/BRDF decomposition (CVPR 2025).
+Key
+★ 2026 SOTA update — 3D generation
+Hunyuan3D 2.1: High-Fidelity 3D Assets with Production-Ready PBR Material: First fully open-source image-to-3D system producing production-ready PBR materials (albedo + metallic-roughness) via mesh-conditioned multi-view diffusion with illumination-invariant training, moving native 3D generation past untextured/baked-lighting output.
+Step1X-3D: High-Fidelity and Controllable Generation of Textured 3D Assets: Two-stage native-3D pipeline (hybrid VAE-DiT TSDF geometry + diffusion texture synthesis) trained on a curated 2M-asset set, notable for transferring 2D control techniques such as LoRA into controllable 3D generation.
+Appendix A: Twenty-Five Things to Know
+Volume rendering equation (Mildenhall NeRF): \(C(\mathbf{r}) = \int_{t_n}^{t_f} T(t)\,\sigma(\mathbf{r}(t))\,c(\mathbf{r}(t), \mathbf{d})\,\mathrm{d}t\).
+Discretization: \(\hat{C} = \sum T_i(1 - e^{-\sigma_i \delta_i})\,c_i\).
+Positional encoding: \(\gamma(p) = [\sin(2^k \pi p),\ \cos(2^k \pi p)]\).
+Hierarchical sampling (coarse + fine).
+Instant-NGP hash grid: trains in seconds.
+Mip-NeRF integrated PE for anti-aliasing.
+Mip-NeRF 360 scene contraction.
+3DGS representation: \((\mu, R, S, \alpha, \text{SH})\) per Gaussian.
+3DGS projection: \(\Sigma' = J W \Sigma W^\top J^\top\).
+3DGS rasterization: alpha-composite front-to-back.
+3DGS loss: \((1 - \lambda)\,L_1 + \lambda\,\text{D-SSIM}\).
+Adaptive density control: clone / split / prune / opacity reset.
+3DGS variants: Mip-Splatting / 2D-GS / Scaffold-GS / 4D-GS / SuGaR / GS-IR / LightGaussian.
+DUSt3R pointmap formulation.
+VGGT: dominant feed-forward 3D in 2025.
+MoGe-2: metric monocular geometry.
+DreamFusion SDS gradient.
+ProlificDreamer VSD reduces Janus.
+Trellis / Hunyuan3D-2 native 3D diffusion (2025 wave).
+MeshGPT autoregressive mesh generation.
+EMO / Live Portrait audio-driven portrait.
+GS-SLAM family: MonoGS, GS-SLAM, SplaTAM.
+Cosmos: NVIDIA neural simulator.
+Nerfstudio + gsplat are the standard research frameworks.
+Eval: PSNR / SSIM / LPIPS for image; Chamfer for geometry.
+Appendix B: Decision Tree — "Which Neural Rendering?"
+Real-time render needed? → 3D Gaussian Splatting (Mip-Splatting variant).
+Best photometric quality, render speed less critical? → Mip-NeRF 360 / Zip-NeRF.
+Few-second training, decent quality? → Instant-NGP.
+Single image to 3D asset? → Trellis / Hunyuan3D-2 (native 3D diffusion).
+Multi-image to 3D, no SfM available? → VGGT / MASt3R-SfM (feed-forward).
+Dynamic scene (people, fluids)? → 4D-GS / Deformable 3DGS.
+Need mesh extraction (graphics pipeline)? → SuGaR / Gaussian Frosting or 2D-GS.
+Relighting needed? → Relightable 3D Gaussians / GS-IR (early).
+Avatar (face)? → Gaussian Avatars / Codec Avatars.
+City / kilometer scale? → CityGaussian / Hierarchical 3DGS.
+AV closed-loop simulation? → Cosmos / EmerNeRF / OmniRe.
+Edit a captured scene with text? → GaussianEditor / Instruct-NeRF2NeRF.
+Appendix C: Year-by-Year Milestones
+2020: NeRF (Mildenhall et al.) — the foundational paper.
+2021: PixelNeRF (generalizable), Mip-NeRF (anti-aliasing), Plenoxels (no MLP), DVGO; Nerfies (dynamic).
+2022: Instant-NGP (hash grids; seconds-to-train); Mip-NeRF 360 (unbounded); TensoRF; Block-NeRF (city-scale); DreamFusion (SDS).
+2023: 3D Gaussian Splatting (Kerbl SIGGRAPH best paper); Zero123 (multi-view diffusion); LRM (feedforward 3D); ProlificDreamer (VSD); MVDream / Wonder3D / SyncDreamer.
+2024: 3DGS variants (Mip-Splatting / 2D-GS / Scaffold-GS / 4D-GS / SuGaR / GS-IR); InstantMesh / MeshLRM; DUSt3R; MASt3R; LCM-3D; Trellis released; MoGe; Gaussian Avatars; GS-SLAM / MonoGS / SplaTAM; AnimateAnyone / EMO.
+2025: VGGT (Meta) — feed-forward 3D dominant; Hunyuan3D-2 / CLAY / Direct3D — native 3D diffusion mainstream; PhysGaussian; Cosmos World Foundation Models (NVIDIA); MeshAnything V2 / EdgeRunner / BPT — autoregressive mesh; long-clip video gen aligned with 3D rendering.
+2026: 3DGS standard for new projects; native 3D diffusion replaces SDS; feed-forward 3D replaces SfM as default; multimodal 3D scene reasoning (LangSplat, Feature 3DGS); web 3DGS deployment (gsplat / Brush); avatars in production (Apple, Meta).

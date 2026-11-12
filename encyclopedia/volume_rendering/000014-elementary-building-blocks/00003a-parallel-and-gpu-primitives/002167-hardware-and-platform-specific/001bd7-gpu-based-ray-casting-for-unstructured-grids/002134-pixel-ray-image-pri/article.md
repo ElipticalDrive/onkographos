@@ -1,70 +1,160 @@
 # Pixel Ray Image (PRI)
 
-Also called: PRI Spline Construction, PRI knot generation, Parametric Ray Integral (PRI) Construction, Ray-cell intersection knot listing
+Also called: Parametric Ray Integral Construction, Ray-cell intersection knot listing, PRI Spline Construction, PRI knot generation
 
 ## Overview
-
-The Pixel Ray Image (PRI) is a semi-regular data structure for volume rendering of unstructured grids that replaces the irregular mesh with a pixelized projection plane and 1D linear splines defined on sampling rays [S1, S2, unofficial]. It solves the difficulty of mapping irregular unstructured grid data efficiently to GPU hardware by leveraging coherent sample placement and 2D texture storage, allowing for efficient rendering utilizing shader programming and a slice-based rendering scheme similar to hardware-accelerated approaches for regular grids [S1, S2, unofficial]. Unlike direct volume rendering approaches that must overcome cell ordering and per-cell processing bottlenecks, the PRI pre-processes the geometry into a texture-friendly format [S1, S2, unofficial].
+The Pixel Ray Image (PRI) is a semi-regular data structure for volume rendering of unstructured grids that replaces the irregular mesh with a pixelized projection plane and 1D linear splines defined on sampling rays [S1, S2, unofficial]. It solves the difficulty of mapping irregular unstructured grid data efficiently to GPU hardware by leveraging coherent sample placement and 2D texture storage, avoiding the cell-ordering bottlenecks of direct ray-casting [S1, S2, unofficial]. Unlike sibling methods like [GPU-based Ray Traversal on Tetrahedral Meshes](3165-gpu-based-ray-traversal-on-tetrahedral-meshes.md) which traverse the mesh directly, PRI pre-computes a texture-based representation [S1, S2, unofficial].
 
 ## How it works
-
-**Inputs and Outputs:**
-*   **Input:** An unstructured grid volume $V$ with scalar values defined at vertices or cells; camera parameters (position, up vector, view direction).
-*   **Output:** A Pixel Ray Image (PRI) stored in 2D texture memory, consisting of a collection of linear splines, one per pixel.
+**Inputs:** Unstructured grid $V$ (e.g., tetrahedral mesh) with scalar values at vertices; camera parameters (position, up vector, view direction).
+**Outputs:** A 2D texture containing packed linear splines (the PRI).
 
 **Data Structures:**
-The PRI consists of two components:
-1.  **Sampling Plane:** A 2D image plane with finite dimensions, pixelized with a regular grid of pixel centers at integer offsets from the origin. The origin is at the lower-left corner.
-2.  **Knot Lists:** For each pixel, a list of knots. Each knot is a pair $(s, t)$, where $s$ is the scalar value and $t$ is the distance from the sampling plane [S1, S2, unofficial].
-    *   The knots for a single pixel are stored in a single list, ordered such that $t_k < t_{k+1}$ [S2, unofficial].
-    *   The spline for a pixel is defined by consecutive knots $(s_k, t_k)$ and $(s_{k+1}, t_{k+1})$, assuming the scalar field changes linearly over the segment [S1, S2, unofficial].
+1.  **Sampling Plane:** A 2D image plane with finite dimensions, pixelized with a regular grid of pixel centers at integer offsets. Origin at lower-left corner.
+2.  **Knot List:** For each pixel, a list of knots $K = [(s_0, t_0), (s_1, t_1), \dots, (s_n, t_n)]$.
+    *   $s$: Scalar value.
+    *   $t$: Distance from the sampling plane along the ray.
+    *   Ordered such that $t_k < t_{k+1}$.
+3.  **PRI Texture:** A 2D texture storing the knot lists. The specific packing format is detailed in [PRI Texture Storage](2493-pri-texture-storage.md).
 
 **Steps:**
 
-1.  **Define Sampling Plane:**
-    *   Define a tight axis-aligned bounding box around the volume $V$ [S2, unofficial].
-    *   Choose one face of the bounding box as the sampling plane.
-    *   Use the associated axial direction as the sampling direction. The view direction must point towards the center of the grid [S2, unofficial].
-    *   Set the pixel resolution. It must be chosen so that multiple rays pierce every cell face to ensure sufficient resampling [S1, S2, unofficial]. Typical resolution used in tests is $256 \times 256$ [S1, S2, unofficial].
+1.  **Define Sampling Geometry:**
+    *   Compute a tight axis-aligned bounding box (AABB) around $V$.
+    *   Select one face of the AABB as the sampling plane.
+    *   The associated axial direction of the box face defines the sampling direction (view direction).
+    *   The view direction must point towards the center of the grid [S1, S2, unofficial].
+    *   Set pixel resolution $R \times R$ (e.g., $256 \times 256$). Resolution must be high enough that multiple rays pierce every cell face to ensure sufficient resampling [S1, S2, unofficial].
 
 2.  **Resample Grid onto Sampling Rays (Knot Generation):**
-    *   For each pixel on the sampling plane, cast a sampling ray into the unstructured grid [S1, S2, unofficial].
-    *   **Convex Grids:** If the grid is convex, the ray enters and exits at two boundary faces. The intersection defines a 1D scalar function for $t_{enter} \le t \le t_{exit}$ [S2, unofficial].
-    *   **Non-Convex Grids:** If the grid is non-convex, a ray may enter and exit multiple times. To define regions outside the volume, an additional knot with value $(0, t_b)$ is inserted for every boundary knot $(s_b, t_b)$ [S1, S2, unofficial]. This creates consecutive pairs of knots with a multiplicity of two to bound portions of the ray outside the grid [S1, S2, unofficial].
-    *   **Knot Placement:**
-        *   If the scalar field is assumed to be linear within grid cells, locate knots at the intersections between the sampling ray and cell faces [S1, S2, unofficial].
-        *   Compute the distance $t$ from the originating pixel to the intersection location.
-        *   Reconstruct the scalar field $s$ across the cell face [S1, S2, unofficial].
-        *   Insert the pair $(s, t)$ into the knot list for the spline associated with that pixel [S1, S2, unofficial].
-        *   *Alternative Implementation:* Use depth peeling to compute knot values on graphics hardware via a multi-pass approach that renders layers of cell faces in depth-sorted order [S2, unofficial].
-    *   **Uniform Sampling Fallback:** If the scalar field is not linear within cells, samples can be located uniformly along the ray, and the scalar field is reconstructed within the cell using an appropriate reconstruction filter [S1, S2, unofficial].
+    *   For each pixel $(u, v)$ on the sampling plane:
+        *   Cast a sampling ray $r$ into the grid.
+        *   Find all intersections between $r$ and the grid cell faces.
+        *   For each intersection, compute:
+            *   $t$: Distance from the pixel to the intersection.
+            *   $s$: Reconstructed scalar value at the intersection location.
+                *   If the scalar field is linear within cells, $s$ is interpolated from vertex values at the intersection point.
+                *   If not linear, samples may be located uniformly along the ray, and $s$ is reconstructed using a filter [S1, S2, unofficial].
+        *   Insert the pair $(s, t)$ into the knot list for this pixel.
+    *   *Alternative Implementation:* Use depth peeling on graphics hardware. Render layers of cell faces in depth-sorted order to compute knot values $(s, t)$ directly on the GPU [S1, S2, unofficial].
 
-3.  **Spline Simplification (Data Reduction):**
-    *   Reduce the knot count per spline using a linear spline simplification algorithm [S1, S2, unofficial].
-    *   This takes advantage of coherence in the sampling direction. Consecutive runs of samples approximating a line in the scalar domain are collected into linear segments [S2, unofficial].
-    *   The algorithm is greedy and may insert new samples into the final linear spline if necessary to maintain fidelity [S1, S2, unofficial].
+3.  **Handle Non-Convexity (Boundary Knots):**
+    *   For non-convex grids, a ray may enter and exit the grid multiple times.
+    *   For every boundary knot $(s_b, t_b)$ (where the ray enters or exits the volume):
+        *   Insert an additional knot $(0, t_b)$ into the knot list immediately following $(s_b, t_b)$.
+    *   This creates consecutive pairs of knots with multiplicity two, bounding portions of the ray outside the grid with a scalar value of 0 [S1, S2, unofficial].
 
-4.  **Texture Packing:**
-    *   Pack the entire collection of splines onto a 2D texture [S1, S2, unofficial].
+4.  **Spline Simplification (Data Reduction):**
+    *   Apply a linear spline simplification algorithm to reduce the knot count per spline.
+    *   The algorithm exploits coherence in the sampling direction.
+    *   Consecutive runs of samples approximating a line in the scalar domain are collected into single linear segments.
+    *   This is a greedy algorithm that may insert new samples into the final linear spline if necessary to maintain fidelity [S1, S2, unofficial].
+
+5.  **Pack and Store:**
+    *   Pack the entire collection of splines (knot lists) onto a 2D texture.
     *   Upload the texture to GPU memory once prior to rendering [S1, S2, unofficial].
-    *   *Note:* The specific packing layout (e.g., how variable-length knot lists are stored in a 2D texture) is detailed in [PRI Texture Storage](2493-pri-texture-storage.md).
 
-5.  **Rendering:**
-    *   Render using a slice-based rendering scheme similar to hardware-accelerated approaches for regular grids [S1, S2, unofficial].
+**Pseudocode:**
 
-**Formulas:**
-*   Knot definition: $(s, t)$, where $s$ is scalar value, $t$ is distance to sampling plane [S1, S2, unofficial].
-*   Linear segment assumption: Scalar field changes linearly between consecutive knots $(s_k, t_k)$ and $(s_{k+1}, t_{k+1})$ where $t_k < t_{k+1}$ [S1, S2, unofficial].
-*   Non-convex boundary handling: If $(s_b, t_b)$ is on the boundary, insert $(0, t_b)$ [S1, S2, unofficial].
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-**Parameters:**
-*   **Pixel Resolution:** Must ensure multiple rays pierce every cell face. Typical value: $256 \times 256$ [S1, S2, unofficial].
-*   **Sampling Direction:** Restricted to point towards the center of the grid [S2, unofficial].
+```python
+def construct_PRI(grid, camera_params):
+    # 1. Define Sampling Plane
+    aabb = compute_aabb(grid)
+    sampling_plane = select_aabb_face(aabb)
+    view_direction = get_axial_direction(sampling_plane)
+    # Ensure view direction points to grid center
+    assert dot(view_direction, center_of_grid - camera_params.position) > 0
+    
+    resolution = 256 # Typical value from sources
+    pixels = generate_pixel_grid(resolution, sampling_plane)
+    
+    pri_knot_lists = {} # Map from pixel_index to list of (s, t) tuples
+    
+    # 2. Resample Grid onto Sampling Rays
+    for pixel in pixels:
+        ray = cast_ray_from_pixel(pixel, view_direction)
+        knots = []
+        
+        # Find intersections with cell faces
+        intersections = find_ray_cell_face_intersections(ray, grid)
+        
+        for intersection in intersections:
+            t = distance(pixel.position, intersection.point)
+            s = reconstruct_scalar_field(intersection.point, grid)
+            knots.append((s, t))
+            
+        # 3. Handle Non-Convexity
+        # Sort knots by t
+        knots.sort(key=lambda k: k[1])
+        
+        processed_knots = []
+        for i, (s, t) in enumerate(knots):
+            processed_knots.append((s, t))
+            # Check if this knot is on the boundary (entry/exit)
+            # Note: The source implies checking if the knot is a boundary knot.
+            # In a convex grid, entry and exit are the first and last.
+            # In non-convex, we need to know if the ray is entering/exiting.
+            # The source states: "If a knot... lies on the boundary... insert (0, tb)"
+            # Implementation detail: Determine if the ray crosses the boundary at this knot.
+            if is_boundary_knot(intersection, ray, grid):
+                processed_knots.append((0, t))
+                
+        pri_knot_lists[pixel.index] = processed_knots
+        
+    # 4. Spline Simplification
+    simplified_knot_lists = {}
+    for pixel_index, knots in pri_knot_lists.items():
+        simplified_knots = simplify_linear_spline(knots)
+        simplified_knot_lists[pixel_index] = simplified_knots
+        
+    # 5. Pack into Texture
+    pri_texture = pack_knots_to_texture(simplified_knot_lists)
+    return pri_texture
+
+def simplify_linear_spline(knots):
+    """
+    Greedy linear spline simplification.
+    Collects consecutive runs of samples approximating a line.
+    """
+    if len(knots) <= 2:
+        return knots
+    
+    simplified = []
+    current_segment = [knots[0]]
+    
+    for i in range(1, len(knots) - 1):
+        s_prev, t_prev = current_segment[-1]
+        s_curr, t_curr = knots[i]
+        s_next, t_next = knots[i+1]
+        
+        # Check if (s_curr, t_curr) lies on the line segment between (s_prev, t_prev) and (s_next, t_next)
+        # Within a tolerance epsilon
+        if is_collinear(s_prev, t_prev, s_curr, t_curr, s_next, t_next):
+            continue # Skip this knot, it's part of the linear segment
+        else:
+            # End of linear segment, start new one
+            current_segment.append(knots[i])
+            simplified.extend(current_segment)
+            current_segment = [knots[i]]
+            
+    current_segment.append(knots[-1])
+    simplified.extend(current_segment)
+    
+    return simplified
+
+def is_collinear(s1, t1, s2, t2, s3, t3):
+    # Check if point (s2, t2) is on the line segment between (s1, t1) and (s3, t3)
+    # Using cross product in 2D (s, t) space
+    cross = (s2 - s1) * (t3 - t1) - (t2 - t1) * (s3 - s1)
+    return abs(cross) < 1e-6 # Tolerance [G]
+```
 
 **Edge Cases and Pitfalls:**
-*   **Non-Convexity:** Rays entering/exiting multiple times require the insertion of zero-value boundary knots to correctly bound outside regions [S1, S2, unofficial].
-*   **Insufficient Resolution:** If pixel resolution is too low, not all cell faces are pierced by multiple rays, leading to insufficient resampling [S1, S2, unofficial].
-*   **Non-Linear Fields:** If the scalar field is not linear within cells, the assumption of linear splines between face intersections is invalid; uniform sampling with reconstruction filters must be used instead [S1, S2, unofficial].
+*   **Non-Convex Grids:** Rays may enter and exit multiple times. Failure to insert the $(0, t_b)$ boundary knots will result in incorrect rendering of regions outside the volume [S1, S2, unofficial].
+*   **Resolution:** If the pixel resolution is too low, multiple rays may not pierce every cell face, leading to insufficient resampling and artifacts [S1, S2, unofficial].
+*   **Scalar Field Linearity:** The method assumes linearity within cells for knot placement at face intersections. If the field is non-linear, uniform sampling and filtering are required, which may increase knot count [S1, S2, unofficial].
 
 ## Subtopics
 
@@ -72,37 +162,39 @@ The PRI consists of two components:
 GPU-friendly data layout for the PRI, focusing on compact, texture-based representation of splines.
 
 ### [PRI Approximation Error Measurement](2893-pri-approximation-error-measurement.md)
-Quantitative error analysis (MSE, PSNR) of the PRI resampling process.
+Quantifies fidelity of the PRI representation relative to the source unstructured grid by evaluating sampling error at grid vertices.
 
 ## Operating characteristics
+**Time Complexity:**
+*   **Construction:** Depends on the number of pixels and intersections. Table 1 in [S1, unofficial] shows construction times for $256 \times 256$ resolution:
+    *   Blunt Fin (187,395 tets): 29.20 seconds.
+    *   Combustor (215,040 tets): 86.04 seconds.
+    *   Liquid Oxygen Post (513,375 tets): 32.84 seconds.
+    *   SPX (12,936 tets): 4.39 seconds.
+*   **Rendering:** Efficient, using slice-based rendering similar to hardware-accelerated regular grid rendering [S1, S2, unofficial].
 
-*   **Time Complexity:** The construction time depends on the number of pixels, the number of cell intersections, and the simplification algorithm. Reported construction times for $256 \times 256$ resolution vary by dataset size (see table below) [S1, S2, unofficial].
-*   **Memory Complexity:** The PRI replaces the original grid. The number of samples (knots) is greater than the original grid size but less than a regular grid resampling. The knot count is further reduced by simplification [S1, S2, unofficial].
-*   **Measured Performance:**
-    | Dataset | Size (tetrahedrons) | Construction Time (s) | Avg Knots/Spline |
-    | :--- | :--- | :--- | :--- |
-    | Blunt Fin | 187,395 | 29.20 | 80 |
-    | Combustor | 215,040 | 86.04 | 63 |
-    | Liquid Oxygen Post | 513,375 | 32.84 | 85 |
-    | SPX | 12,936 | 4.39 | 27 |
-    *(Table 1 from [S1, S2, unofficial])*
-*   **Strengths:**
-    *   Eliminates cell ordering bottlenecks inherent in direct unstructured grid rendering [S1, S2, unofficial].
-    *   Leverages GPU hardware acceleration via 2D texture slicing [S1, S2, unofficial].
-    *   Flexible sample placement; far fewer samples needed than regular resampling [S1, S2, unofficial].
-    *   Handles mixed cell types easily [S1, S2, unofficial].
-*   **Limitations:**
-    *   Requires preprocessing (construction) time [S1, S2, unofficial].
-    *   Sampling direction is restricted to point towards the center of the grid (based on the bounding box face selection) [S2, unofficial].
-    *   Approximation error is introduced by the linear spline assumption and simplification [S2, unofficial].
-*   **When to use:** When rendering unstructured grids on GPUs where direct traversal is too slow due to cell ordering, and the scalar field exhibits coherence allowing for effective spline simplification.
-*   **When not to use:** When dynamic geometry changes require frequent reconstruction, or when the scalar field is highly non-linear and cannot be approximated well by linear splines without excessive knot counts.
+**Memory Complexity:**
+*   Proportional to the number of pixels and the average number of knots per spline.
+*   Average knots per spline for $256 \times 256$ resolution (from [S1, unofficial]):
+    *   Blunt Fin: 80 knots/spline.
+    *   Combustor: 63 knots/spline.
+    *   Liquid Oxygen Post: 85 knots/spline.
+    *   SPX: 27 knots/spline.
+
+**Strengths:**
+*   Avoids cell-ordering bottlenecks of direct ray-casting [S1, S2, unofficial].
+*   Leverages GPU hardware acceleration via 2D textures [S1, S2, unofficial].
+*   Flexible sample placement [S1, unofficial].
+*   Fewer samples needed than regular resampling of the grid [S1, unofficial].
+
+**Limitations:**
+*   Preprocessing time can be significant for large grids [S1, unofficial].
+*   Requires sufficient pixel resolution to ensure multiple rays pierce every cell face [S1, S2, unofficial].
+*   Restricted to sampling directions pointing towards the center of the grid (based on AABB face selection) [S1, S2, unofficial].
 
 ## Background
-
-The Pixel Ray Image (PRI) was introduced by N. Shareef et al. in 2006 in the paper "An Image-Based Modelling Approach To GPU-based Unstructured Grid Volume Rendering" [S1, S2, unofficial]. It was developed to address the computational bottlenecks of rendering unstructured grids on traditional graphics hardware, such as the Projected Tetrahedra (PT) approach which requires sorting and per-cell processing [S1, S2, unofficial]. The method builds on the trend of leveraging hardware performance through image-based approaches and shader programming [S1, S2, unofficial].
+The Pixel Ray Image (PRI) was introduced by Shareef et al. in 2006 [S1, S2, unofficial]. It is an image-based approach designed to allow flexible sample placement and efficient mapping to graphics hardware. It builds on the idea of replacing the unstructured grid with a semi-regular data structure to leverage current trends in hardware performance [S1, S2, unofficial].
 
 ## Sources
-
 [S1] An Image-Based Modelling Approach To GPU-based Unstructured Grid Volume Rendering, https://doi.org/10.2312/vg/vg06/031-038, fetched 2026-10-24 (unofficial)
 [S2] PDF An Image-Based Modelling Approach To GPU-based Unstructured Grid Volume ..., https://www3.cs.stonybrook.edu/~mueller/papers/vg06_ibr.pdf, fetched 2026-10-27 (unofficial)

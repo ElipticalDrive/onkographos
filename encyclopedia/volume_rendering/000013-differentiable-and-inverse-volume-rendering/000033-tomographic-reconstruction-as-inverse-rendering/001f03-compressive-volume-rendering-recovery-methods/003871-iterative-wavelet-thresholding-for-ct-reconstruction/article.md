@@ -3,46 +3,46 @@
 Also called: ISTA, Iterative Soft-Thresholding, Iterative Thresholding, Wavelet Regularized Reconstruction
 
 ## Overview
-Iterative Wavelet Thresholding is a regularized inverse problem solver for Computed Tomography (CT) reconstruction that addresses the challenges of sparse sampling, limited angles, and noise in sinogram data [S1, unofficial]. It solves the linear inverse problem $g = Af + n$ by alternating between a gradient descent step on the data fidelity term and a sparsity-promoting soft-thresholding step in the Haar wavelet domain [S1, unofficial]. Unlike standard Filtered Backprojection (FBP) which produces blurred or aliased results under sparse conditions, or global solvers that may struggle with non-smooth priors, this method explicitly enforces sparsity in the wavelet domain to retain structural edges while suppressing noise [S1, unofficial]. It is a specific instance of the Iterative Soft-Thresholding Algorithm (ISTA) adapted for tomographic geometry [S1, unofficial].
+Iterative Wavelet Thresholding is an iterative reconstruction method that solves the inverse problem $g = Af + n$ by combining a gradient descent step on the data fidelity term with a sparsity-promoting wavelet thresholding step [S1, unofficial]. It is used to reconstruct images from noisy sinograms, particularly in sparse or limited angle scenarios [S1, unofficial]. The method minimizes the discrepancy between measured sinograms and the forward projection of the reconstruction while applying soft-thresholding to wavelet coefficients at each step to reduce noise and retain structural information [S1, unofficial]. It integrates optimization and regularization, iteratively refining the reconstruction until convergence [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- $g$: Observed sinogram data (vector or matrix).
-- $A$: Forward projection operator (Radon transform) mapping image space to sinogram space.
-- $A^T$: Adjoint operator (Back-projection) mapping sinogram space to image space.
-- $f_{true}$: Ground truth image (used only for convergence monitoring in the reference implementation; not required for reconstruction itself).
-- Parameters: $\alpha$ (regularization scaling), $\text{step\_size}$ (learning rate), $tRange$ (wavelet levels for thresholding), $\text{threshold}$ (convergence tolerance), $\text{maxIter}$ (maximum iterations).
+- $g$: Observed sinogram data [S1, unofficial].
+- $A$: Forward projection operator mapping image space to sinogram space [S1, unofficial].
+- $A^T$: Adjoint operator mapping sinogram space to image space [S1, unofficial].
+- $f_{true}$: Ground truth image (used only for convergence monitoring in the reference implementation; not required for reconstruction itself) [S1, unofficial].
+- Parameters: $\alpha$ (regularization scaling), $\text{step\_size}$ (learning rate), $tRange$ (wavelet levels for thresholding), $\text{threshold}$ (convergence tolerance), $\text{maxIter}$ (maximum iterations) [S1, unofficial].
 
 **Outputs:**
-- $f$: Reconstructed image.
+- $f$: Reconstructed image [S1, unofficial].
 
 **Data Structures:**
-- $f_k$: Current image estimate, shape $(v, h)$, where $v$ is height and $h$ is width.
-- $d$: Wavelet decomposition coefficients list, structure: `[cA_n, (cH_n, cV_n, cD_n), ..., (cH_1, cV_1, cD_1)]`, where $cA$ is approximation and $cH/cV/cD$ are horizontal, vertical, and diagonal detail coefficients.
+- $f_k$: Current image estimate, shape $(v, h)$, where $v$ is height and $h$ is width [S1, unofficial].
+- Wavelet coefficients: List structure `[cA_n, (cH_n, cV_n, cD_n), ..., (cH_1, cV_1, cD_1)]`, where $cA$ is approximation and $cH/cV/cD$ are horizontal, vertical, and diagonal detail coefficients [G].
 
 **Numbered Steps:**
 
-1.  **Initialization**: Compute an initial estimate $f_0$ using Filtered Backprojection (FBP) or simple Backprojection (BP) on the observed sinogram $g$. Normalize the result to the range $[0, 1]$ by dividing by the maximum value. Handle NaNs by replacing them with 0. If the maximum value is 0, return a zero array [S1, unofficial].
+1.  **Initialization**: Compute an initial estimate $f_0$ using Backprojection (BP) on the observed sinogram $g$, then normalize the result: $f_0 = \text{normalise}(\text{BP}(g))$ [S1, unofficial]. Replace non-numeric values (NaN) with 0 before normalization [S1, unofficial]. If the maximum value is 0, return a zero array instead of dividing by zero [S1, unofficial].
     $$ f_0 = \text{normalize}(\text{BP}(g)) $$
-    Where $\text{normalize}(x) = x / \max(x)$ if $\max(x) > 0$, else $0$.
+    Where $\text{normalize}(x) = x / \max(x)$ if $\max(x) > 0$, else $0$ [S1, unofficial].
 
 2.  **Iteration Loop** (for $k = 0, 1, \dots, \text{maxIter}-1$):
-    a.  **Forward Projection**: Compute the estimated sinogram from the current estimate:
+    a.  **Forward Projection**: Compute the forward projection of the current estimate:
         $$ \hat{g}_k = A f_k $$
-    b.  **Residual Calculation**: Compute the difference between the estimated and observed sinograms:
-        $$ r_k = \hat{g}_k - g $$
-    c.  **Gradient Step**: Compute the gradient of the data fidelity term $\frac{1}{2} \|Af - g\|^2$, which is $A^T(Af_k - g)$. Apply a gradient descent step with the specified step size:
-        $$ f_{temp} = f_k - \text{step\_size} \cdot A^T r_k $$
+    b.  **Residual & Gradient**: Calculate the residual sinogram $r_k = \hat{g}_k - g$ and compute the gradient term using the adjoint operator:
+        $$ g_k = A^T r_k $$
+    c.  **Gradient Descent Step**: Update the estimate:
+        $$ f_{temp} = f_k - \text{step\_size} \cdot g_k $$
     d.  **Wavelet Thresholding**:
-        i.  Decompose $f_{temp}$ into Haar wavelet coefficients using 2D discrete wavelet transform (DWT) with decomposition level $L=7$:
+        i.  Decompose $f_{temp}$ using a 2D Haar wavelet transform with `level=7`:
             $$ \text{coeffs} = \text{wavedec2}(f_{temp}, \text{'haar'}, 7) $$
-        ii. Apply soft thresholding to the detail coefficients at levels specified by $tRange$ (e.g., $[1, 2, 3, 4, 5, 6]$). The approximation coefficient (level 0) is left unchanged. The threshold value $\mu$ is calculated as:
+        ii. Apply soft thresholding to the detail coefficients at indices specified by $tRange$ with threshold value $\mu = \alpha \cdot \text{step\_size}$:
             $$ \mu = \alpha \cdot \text{step\_size} $$
             For each detail coefficient $c$ in the specified levels:
             $$ c_{new} = \text{sign}(c) \cdot \max(|c| - \mu, 0) $$
-        iii. Reconstruct the image from the modified coefficients:
+        iii. Reconstruct the image from the modified coefficients to obtain $f_{k+1}$:
             $$ f_{k+1} = \text{waverec2}(\text{coeffs}_{new}) $$
-    e.  **Convergence Check**: Calculate the Mean Squared Error (MSE) between the true image $f_{true}$ and the current estimate $f_k$ (if $f_{true}$ is available). If the reduction in MSE is less than or equal to $\text{threshold}$ (e.g., $10^{-4}$), stop. Otherwise, set $f_k = f_{k+1}$ and repeat [S1, unofficial].
+    e.  **Convergence Check**: Calculate the Mean Squared Error (MSE) between the true image $f_{true}$ and the current estimate $f_k$ [S1, unofficial]. If the reduction in MSE is less than or equal to $\text{threshold}$, stop [S1, unofficial]. Otherwise, set $f_k = f_{k+1}$ and repeat [S1, unofficial].
 
 **Pseudocode:**
 
@@ -75,10 +75,6 @@ def iterative_wavelet_thresholding(g, A, AT, v, h, alpha=1e-3, step_size=1e-5,
     """
     
     # Step 1: Initialization
-    # Assume BP_recon is a function that performs backprojection on g
-    # Note: In a pure implementation, A and AT are used. 
-    # The source uses BP_recon for initialization. We assume A is the forward operator
-    # and AT is the adjoint. A simple backprojection is AT applied to g.
     f_k = AT(g).reshape(v, h)
     
     # Normalize
@@ -133,39 +129,25 @@ def iterative_wavelet_thresholding(g, A, AT, v, h, alpha=1e-3, step_size=1e-5,
 ```
 
 **Parameters:**
-- $\alpha$: Regularization parameter. Controls the strength of the sparsity penalty. Typical values range from $10^{-3}$ to $10^4$, often selected via L-curve analysis [S1, unofficial].
-- $\text{step\_size}$: Learning rate. Must be small to ensure stability. Typical values are $10^{-5}$ to $10^{-4}$ [S1, unofficial].
-- $tRange$: List of wavelet decomposition levels to apply thresholding. Typically excludes the approximation coefficient (index 0). Common values are $[1, 2, 3, 4, 5, 6]$ or $[4, 5, 6]$ [S1, unofficial].
-- $\text{threshold}$: Convergence tolerance. Default $10^{-4}$ or $10^{-6}$ [S1, unofficial].
-- $\text{maxIter}$: Maximum iterations. Default 5000 [S1, unofficial].
+- $\alpha$: Regularization parameter scaling the threshold value. Typical values range from $10^{-3}$ to $10^4$, often found via L-curve analysis [S1, unofficial].
+- $\text{step\_size}$: Learning rate for the gradient descent step. Typical values are small, e.g., $10^{-5}$ to $10^{-4}$ [S1, unofficial].
+- $tRange$: List of wavelet decomposition levels to which thresholding is applied. Typically excludes the approximation coefficient (index 0). Common values are `[1, 2, 3, 4, 5, 6]` or `[4, 5, 6]` [S1, unofficial].
+- $\text{threshold}$: Convergence tolerance for the change in MSE. Default value is `0.0001` or `0.000001` [S1, unofficial].
+- $\text{maxIter}$: Maximum number of iterations. Default value is `5000` [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Division by Zero**: If the initial backprojection result has a maximum value of 0, normalization fails. The implementation returns a zero array [S1, unofficial].
-- **NaN Handling**: Input images or sinograms may contain NaNs. These are replaced with 0 before normalization [S1, unofficial].
-- **Precision**: Small step sizes are required to prevent divergence in the gradient descent step. Large step sizes may lead to oscillation or instability [S1, unofficial].
-
-## Subtopics
-
-### [Compressive Gradient Rendering](1948-compressive-gradient-rendering.md)
-Uses gradient information directly in the reconstruction loop. Chosen when edge preservation is critical and gradient sparsity is a stronger prior than wavelet sparsity.
-
-### [Global Solver](4281-global-solver.md)
-Solves the entire optimization problem in one go (e.g., via Tikhonov regularization and GMRES). Chosen for smooth scenes or when iterative methods are too slow, but may blur sharp edges compared to wavelet thresholding.
-
-### [Compressive Volume Rendering](4299-compressive-volume-rendering.md)
-A broader category of methods using compressive sensing principles. This method is a specific implementation within this family focusing on wavelet sparsity.
+- **Division by Zero**: If the maximum value of the initial backprojection result is 0, the normalization function returns a zero array instead of dividing by zero [S1, unofficial].
+- **NaN Handling**: Non-numeric values (NaN) in the input image are replaced with 0 before normalization [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: $O(\text{maxIter} \cdot (N_{proj} + N_{wavelet}))$, where $N_{proj}$ is the cost of forward/backward projection and $N_{wavelet}$ is the cost of 2D DWT/IDWT. Typically slow due to many iterations required for convergence [S1, unofficial].
-- **Memory Complexity**: $O(N)$ for storing the image and sinogram, plus $O(N)$ for wavelet coefficients. Low memory footprint compared to global solvers that may require storing large matrices [S1, unofficial].
-- **Performance**: Effective for sparse and limited-angle CT reconstruction, outperforming FBP in terms of MSE and visual quality in these scenarios [S1, unofficial].
-- **Strengths**: Handles noise and missing data well; preserves edges via wavelet sparsity; simple to implement.
-- **Limitations**: Slow convergence; requires careful tuning of $\alpha$ and step size; sensitive to initialization [S1, unofficial].
-- **When to Use**: Sparse angle CT, limited data, noisy sinograms.
-- **When Not to Use**: Real-time applications requiring fast reconstruction; scenes with no sparsity in the wavelet domain.
+- Time and memory complexity: Not given in the sources.
+- Measured performance: Not given in the sources.
+- Strengths and limitations: The method integrates optimization and regularization, iteratively refining the reconstruction until convergence [S1, unofficial]. Compared to standard Tikhonov regularization solved via GMRES, this method uses an explicit iterative thresholding loop [S1, unofficial].
+- When to use: Sparse or limited angle scenarios with noisy sinograms [S1, unofficial].
+- When not to use: Not given in the sources.
 
 ## Background
-The method originates from the application of Compressive Sensing (CS) to tomographic reconstruction, leveraging the sparsity of medical images in the wavelet domain [S1, unofficial]. It is based on the Iterative Soft-Thresholding Algorithm (ISTA), a standard optimization technique for $\ell_1$-regularized problems [S1, unofficial]. The specific implementation using Haar wavelets and CT geometry is documented in an unofficial GitHub repository [S1, unofficial]. It is compared against Tikhonov regularization and deep learning methods in the context of inverse problems for CT scans [S1, unofficial].
+The method originates from a project investigating CT reconstruction using traditional methods like filtered backprojection (FBP) and wavelet denoising, alongside modern approaches [S1, unofficial]. It addresses challenges such as limited data, missing segments, and noise [S1, unofficial]. The implementation is compared against Tikhonov regularization solved via GMRES and gradient penalties, showing MSE results for sparse and limited angle cases [S1, unofficial].
 
 ## Sources
 [S1] imanfs/inverse-problems-CT-scans, https://github.com/imanfs/inverse-problems-CT-scans, fetched 2026-10-27 (unofficial)

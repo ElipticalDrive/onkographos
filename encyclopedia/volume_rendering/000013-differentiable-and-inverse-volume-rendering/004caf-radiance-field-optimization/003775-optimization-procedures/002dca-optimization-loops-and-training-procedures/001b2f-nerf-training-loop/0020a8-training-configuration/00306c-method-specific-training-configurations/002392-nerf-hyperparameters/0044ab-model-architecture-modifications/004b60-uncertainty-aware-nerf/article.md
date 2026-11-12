@@ -1,0 +1,263 @@
+# Uncertainty-aware NeRF
+
+Also called: U-NeRF
+
+## Overview
+Uncertainty-aware NeRF (U-NeRF) is a NeRF variant that separately predicts uncertainties for rendered color and depth images to reveal data reliability at the pixel level, addressing artifacts and redundancy in synthetic data for Scene Coordinate Regression (SCR) [S1]. It renders pixel color and depth as Gaussian distributions, providing mean and variance estimates for uncertainty-aware visual localization [S1]. Unlike standard NeRF which outputs deterministic values, U-NeRF models the scene as a probabilistic entity, allowing it to identify and filter poorly rendered views during training data generation [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D position $\mathbf{x}$, viewing direction $\mathbf{d}$, positional encoding $\phi(\cdot)$, target color $C(r)$, target depth $z(r)$, and hyperparameters $\zeta, \lambda$.
+*   **Output:** Rendered color $\hat{C}(r)$, color variance $\hat{\sigma}_C^2(r)$, rendered depth $\hat{z}(r)$, depth variance $\hat{\sigma}_z^2(r)$, and gradients for optimization.
+
+**Data Structures:**
+The core data structure is the Multilayer Perceptron (MLP) $F_\Theta$.
+*   **MLP Output:** A tuple $(\tau, \bar{\mathbf{c}}, \bar{\sigma}_c^2)$ where:
+    *   $\tau$: Volume density (scalar).
+    *   $\bar{\mathbf{c}}$: Mean view-dependent RGB color (vector of size 3).
+    *   $\bar{\sigma}_c^2$: Pre-Softplus variance prediction for color (scalar).
+*   **Ray Sampling:** A set of $N$ points $\{t_i\}_{i=1}^N$ along the ray $r(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the camera center. $\delta_i = t_{i+1} - t_i$.
+
+**Numbered Steps:**
+
+1.  **Sample Points:** For a ray $r$, sample $N$ points $t_i$ using hierarchical stratified sampling [S1].
+2.  **MLP Forward Pass:** For each point $t_i$, compute position $\mathbf{x}_i = r(t_i)$. Pass $\phi(\mathbf{x}_i, \mathbf{d})$ through the MLP to obtain:
+    *   Density $\tau_i$
+    *   Mean color $\bar{\mathbf{c}}_i$
+    *   Pre-activation variance $\bar{\sigma}_{c,i}^2$
+3.  **Activate Variance:** Apply Softplus activation to ensure valid variance:
+    $$ \sigma_{c,i}^2 = \text{Softplus}(\bar{\sigma}_{c,i}^2) $$
+    [G] Softplus is defined as $\log(1 + e^x)$.
+4.  **Compute Rendering Weights:** Calculate transmittance $T_i$ and weight $w_i$ for each sample:
+    $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \tau_j \delta_j\right) $$
+    $$ w_i = T_i (1 - \exp(-\tau_i \delta_i)) $$
+5.  **Render Color Mean and Variance:** Compute the expected color $\hat{C}(r)$ and its variance $\hat{\sigma}_C^2(r)$ assuming independent Gaussian distributions for sampled points [S1]:
+    $$ \hat{C}(r) = \sum_{i=1}^{N} w_i \bar{\mathbf{c}}_i $$
+    $$ \hat{\sigma}_C^2(r) = \sum_{i=1}^{N} w_i^2 \sigma_{c,i}^2 $$
+    The rendered color is modeled as $\hat{C} \sim \mathcal{N}(\hat{C}, \hat{\sigma}_C^2)$ [S1].
+6.  **Render Depth Mean and Variance:** Compute expected depth $\hat{z}(r)$ and its variance $\hat{\sigma}_z^2(r)$ [S1]:
+    $$ \hat{z}(r) = \sum_{i=1}^{N} w_i t_i $$
+    $$ \hat{\sigma}_z^2(r) = \sum_{i=1}^{N} w_i (t_i - \hat{z}(r))^2 $$
+7.  **Compute Losses:**
+    *   **Color Loss ($L_{color}$):** Use the $\zeta$-NLL loss to address hard-to-fit regions and prevent premature convergence [S1]:
+        $$ L_{color} = \sum_{r \in R} \lfloor \hat{\sigma}_C(r) \rfloor^{-2\zeta} L(r) $$
+        where $L(r)$ is the standard Negative Log-Likelihood (NLL) for color:
+        $$ L(r) = \frac{\|C(r) - \hat{C}(r)\|_2^2}{2\hat{\sigma}_C^2(r)} + \log \hat{\sigma}_C(r) $$
+        The term $\lfloor \cdot \rfloor$ denotes the stop-gradient operation [S1]. The parameter $\zeta$ interpolates between NLL ($\zeta=0$) and MSE ($\zeta=1$) [S1].
+    *   **Depth Loss ($L_{depth}$):** Use NLL on the output depth [S1]:
+        $$ L_{depth} = \sum_{r \in R} \frac{\|\hat{z}(r) - z(r)\|_2^2}{2\hat{\sigma}_z^2(r)} + \log \hat{\sigma}_z(r) $$
+        where $z(r)$ is the target depth [S1].
+8.  **Optimize:** Minimize the overall objective:
+    $$ L_{overall} = L_{color} + \lambda L_{depth} $$
+    [S1]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def softplus(x):
+    """Standard Softplus activation."""
+    return F.softplus(x)
+
+def render_ray(mlp, t_vals, d, phi):
+    """
+    Renders a single ray using the U-NeRF model.
+    
+    Args:
+        mlp: The U-NeRF MLP model.
+        t_vals: Tensor of shape (N,), sampled depths along the ray.
+        d: Tensor of shape (3,), viewing direction.
+        phi: Positional encoding function.
+        
+    Returns:
+        color_mean: Tensor of shape (3,), mean rendered color.
+        color_var: Tensor of shape (1,), rendered color variance.
+        depth_mean: Tensor of shape (1,), mean rendered depth.
+        depth_var: Tensor of shape (1,), rendered depth variance.
+    """
+    # 1. Sample points and compute positions
+    # t_vals is shape (N,)
+    # x_vals is shape (N, 3)
+    x_vals = t_vals.unsqueeze(-1) * d.unsqueeze(0) # Broadcasting: (N, 3)
+    
+    # 2. MLP Forward Pass
+    # phi(x, d) returns encoded features
+    # mlp(features) returns (tau, c_mean, c_var_pre)
+    # Assume mlp expects concatenated features or handles phi internally.
+    # Here we assume phi is applied to x and d before mlp.
+    features = phi(x_vals, d) 
+    outputs = mlp(features)
+    
+    tau = outputs[..., 0]          # Shape (N,)
+    c_mean = outputs[..., 1:4]     # Shape (N, 3)
+    c_var_pre = outputs[..., 4]    # Shape (N,)
+    
+    # 3. Activate Variance
+    c_var = softplus(c_var_pre)    # Shape (N,)
+    
+    # 4. Compute Weights
+    # delta_i = t_{i+1} - t_i
+    # We need to handle the last point carefully or assume t_vals includes t_{N+1}
+    # Standard NeRF sampling usually provides N bins with N+1 boundaries.
+    # Assuming t_vals are the centers or boundaries? 
+    # The source defines delta_i = t_{i+1} - t_i. 
+    # If t_vals are the sample points, we need the boundaries.
+    # For simplicity, assuming t_vals are the boundaries t_1...t_{N+1} 
+    # and we sample N points in between, or t_vals are the sample points 
+    # and we approximate delta. 
+    # Source Eq 1: delta_i = t_{i+1} - t_i. 
+    # Let's assume t_vals are the boundaries [t_1, ..., t_{N+1}] 
+    # and we have N samples. But the source says "N bins and sampling uniformly".
+    # Let's stick to the source's variable definition: 
+    # w_i = T_i * (1 - exp(-tau_i * delta_i))
+    
+    # Calculate deltas
+    # If t_vals are the sample points, we might need adjacent boundaries.
+    # However, standard implementation often passes t_vals as the sample locations
+    # and computes weights based on the interval. 
+    # To be precise with source: delta_i is the interval length.
+    # Let's assume t_vals are the sample locations and we have a separate 
+    # delta tensor or compute it from boundaries. 
+    # For this pseudocode, we assume `deltas` is passed or computed externally.
+    # If not, we approximate. But to be safe, we assume `deltas` is available.
+    # Actually, let's compute deltas from t_vals if t_vals are boundaries.
+    # But the source says "sampled points". 
+    # Let's assume t_vals are the sample points and `deltas` is the bin width.
+    
+    # Re-reading source: "partition [tn, tf] into N bins and sampling uniformly in each bin."
+    # This implies t_vals are the sample points. delta_i is the bin width.
+    # Usually delta is constant for uniform sampling, but can vary.
+    # We will assume `deltas` is passed to the function or computed from boundaries.
+    # For self-containedness, let's assume t_vals are the sample points 
+    # and we have a `deltas` tensor of shape (N,).
+    
+    # Compute Transmittance T_i
+    # T_i = exp(- sum_{j=1}^{i-1} tau_j * delta_j)
+    # tau_j * delta_j
+    tau_delta = tau * deltas
+    # Cumulative sum
+    # T_1 = exp(0) = 1
+    # T_2 = exp(-tau_1 * delta_1)
+    # T_i = exp(- sum_{j=1}^{i-1} tau_j * delta_j)
+    
+    # Using torch.cumsum
+    # We need sum from j=1 to i-1. 
+    # cumsum gives sum from 1 to i.
+    # So we shift.
+    
+    cumsum_tau_delta = torch.cumsum(tau_delta, dim=0)
+    # T_i corresponds to exp(-cumsum_tau_delta[i-1]) for i>1, and 1 for i=1
+    # Let's create T tensor
+    T = torch.zeros_like(tau)
+    T[0] = 1.0
+    T[1:] = torch.exp(-cumsum_tau_delta[:-1])
+    
+    # Weights w_i
+    w = T * (1 - torch.exp(-tau * deltas))
+    
+    # 5. Render Color Mean and Variance
+    # C_bar = sum(w_i * c_mean_i)
+    color_mean = torch.sum(w.unsqueeze(-1) * c_mean, dim=0) # Shape (3,)
+    
+    # sigma_C^2 = sum(w_i^2 * sigma_c_i^2)
+    color_var = torch.sum(w**2 * c_var, dim=0) # Shape (1,) or scalar
+    
+    # 6. Render Depth Mean and Variance
+    # z_bar = sum(w_i * t_i)
+    depth_mean = torch.sum(w * t_vals, dim=0) # Shape (1,) or scalar
+    
+    # sigma_z^2 = sum(w_i * (t_i - z_bar)^2)
+    depth_var = torch.sum(w * (t_vals - depth_mean)**2, dim=0) # Shape (1,) or scalar
+    
+    return color_mean, color_var, depth_mean, depth_var
+
+def compute_loss(color_mean, color_var, depth_mean, depth_var, 
+                 target_color, target_depth, zeta, lambda_depth):
+    """
+    Computes the U-NeRF loss.
+    
+    Args:
+        color_mean: Tensor (3,)
+        color_var: Tensor (1,) or scalar
+        depth_mean: Tensor (1,) or scalar
+        depth_var: Tensor (1,) or scalar
+        target_color: Tensor (3,)
+        target_depth: Tensor (1,) or scalar
+        zeta: Float, interpolation parameter
+        lambda_depth: Float, depth loss weight
+        
+    Returns:
+        loss: Scalar
+    """
+    # Color NLL term L(r)
+    # L(r) = ||C - C_bar||^2 / (2 * sigma_C^2) + log(sigma_C)
+    # Note: source uses log(sigma_C), not log(sigma_C^2). 
+    # NLL for N(mu, sigma^2) is 0.5 * log(2*pi*sigma^2) + 0.5 * (x-mu)^2/sigma^2
+    # Source Eq 2: ||C - C_bar||^2 / (2*sigma_C^2) + log(sigma_C)
+    # This matches the source exactly.
+    
+    color_diff_sq = torch.sum((target_color - color_mean)**2)
+    # Add small epsilon to avoid division by zero or log(0)
+    eps = 1e-6
+    color_var_safe = torch.clamp(color_var, min=eps)
+    depth_var_safe = torch.clamp(depth_var, min=eps)
+    
+    L_color_term = color_diff_sq / (2 * color_var_safe) + torch.log(torch.sqrt(color_var_safe))
+    
+    # Variance weighting term
+    # sigma_C^{-2*zeta} with stop gradient
+    # source: sigma_C^{-2*zeta}
+    # Note: source uses sigma_C (std dev) in the weighting term? 
+    # Source text: "add a variance-weighting term sigma_C^{-2*zeta}"
+    # But Eq says: "sigma_C^{-2*zeta} L(r)"
+    # And "sigma_C" usually denotes std dev if sigma_C^2 is variance.
+    # Source Fig 3 caption: "C ~ N(C_bar, sigma_C^2)"
+    # Source text: "sigma_C^{-2*zeta}"
+    # If sigma_C^2 is variance, then sigma_C is std dev.
+    # Let's use sqrt(color_var) for sigma_C.
+    
+    sigma_C = torch.sqrt(color_var_safe)
+    weighting = sigma_C ** (-2 * zeta)
+    # Stop gradient
+    weighting = weighting.detach()
+    
+    L_color = weighting * L_color_term
+    
+    # Depth NLL
+    # L_depth = ||z_bar - z||^2 / (2 * sigma_z^2) + log(sigma_z)
+    depth_diff_sq = (target_depth - depth_mean)**2
+    L_depth = depth_diff_sq / (2 * depth_var_safe) + torch.log(torch.sqrt(depth_var_safe))
+    
+    # Overall Loss
+    loss = L_color + lambda_depth * L_depth
+    
+    return loss
+```
+
+**Parameters:**
+*   $\zeta$: Interpolation parameter for the color loss weighting. Value 0 corresponds to standard NLL, value 1 corresponds to MSE. Typical value not explicitly stated, but used to balance uncertainty estimation and fit quality [S1].
+*   $\lambda$: Weight for the depth loss term in the overall objective function [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Premature Convergence:** Standard NLL optimization leads to sub-optimal mean fits and premature convergence because badly-fit regions receive increasingly less weights [S1]. This is addressed by the variance-weighting term $\hat{\sigma}_C^{-2\zeta}$ with stop-gradient [S1].
+*   **Theoretical Grounding:** NeRF-W applies volume rendering over $\sigma_C$ (standard deviation) instead of $\sigma_C^2$ (variance), which is not theoretically grounded [S1]. U-NeRF uses $\sigma_C^2$ [S1].
+*   **Invalid Views:** Views with rendered depth smaller than $z_{min}$ are considered invalid and should be pruned [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of sampled points $N$ per ray and the number of rays $R$. The MLP forward pass is $O(N \cdot D)$ where $D$ is the MLP size. The rendering aggregation is $O(N)$.
+*   **Memory Complexity:** Stores the MLP weights and intermediate tensors for $N$ samples per ray.
+*   **Strengths:** Provides pixel-level uncertainty estimates, allowing for filtering of poorly rendered images and weighting of pixels in downstream tasks like Scene Coordinate Regression [S1]. Improves reconstruction quality by addressing hard-to-fit regions [S1].
+*   **Limitations:** Requires depth supervision for the depth loss term [S1]. The variance-weighting term requires careful tuning of $\zeta$ [S1].
+*   **When to use:** When uncertainty estimation is required for downstream tasks such as visual localization or active view selection [S1].
+*   **When not to use:** When only deterministic rendering is needed and computational overhead of uncertainty estimation is prohibitive.
+
+## Background
+Uncertainty-aware NeRF (U-NeRF) was introduced to address challenges in Scene Coordinate Regression (SCR), specifically the high cost of obtaining 2D-3D ground truth and the inefficiency of learning accurate mappings with large amounts of samples [S1]. It leverages NeRF to synthesize novel views with color and depth uncertainties, which are then used to filter and weight training data for SCR networks [S1]. The method builds on the theoretical grounding of Gaussian distributions for rendered pixel colors, contrasting with NeRF-W which uses standard deviation [S1]. It is similar to ActiveNeRF but adopts a $\zeta$-NLL loss to cope with sub-optimal performance [S1].
+
+## Sources
+[S1] Leveraging Neural Radiance Fields for Uncertainty-Aware Visual Localization, https://doi.org/10.1109/icra57147.2024.10610126, fetched 2026-10-26

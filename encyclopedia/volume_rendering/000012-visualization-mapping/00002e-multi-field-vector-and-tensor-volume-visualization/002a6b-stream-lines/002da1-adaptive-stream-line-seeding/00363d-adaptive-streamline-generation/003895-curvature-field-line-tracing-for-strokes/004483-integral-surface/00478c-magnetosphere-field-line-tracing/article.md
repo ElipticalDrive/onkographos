@@ -1,190 +1,104 @@
 # Magnetosphere Field Line Tracing
 
-Also called: Earth Magnetosphere Field Line Tracing, dipole field line integration
+Also called: Earth Magnetosphere Dataset Generation Pipeline, Earth Magnetosphere Field Line Tracing, Earth data generation, dipole field line integration
 
 ## Overview
-This method traces a single magnetospheric magnetic field line starting from an ionospheric footpoint using a fixed-step Euler integration along the normalized magnetic field vector [S1, unofficial]. It solves the problem of visualizing the topology of the Earth's magnetic field within the magnetosphere by connecting ionospheric regions to the magnetopause boundary. It is distinct from general stream line tracing by its specific reliance on an analytical dipole field model and its geometric termination conditions (ionosphere and magnetopause surfaces) rather than a uniform domain [S1, unofficial]. It builds on [Integral Surface](11268-integral-surface.md) by providing the specific vector field evaluation and boundary logic for magnetospheric contexts.
+This method generates a synthetic dataset of Earth's magnetospheric magnetic field lines by tracing dipole field lines from ionospheric footpoints and magnetosheath draped lines, encoding field intensity to grayscale, and outputting the result as a compact JSON file [S1, unofficial]. It serves as a data preparation step for volumetric visualization, distinct from general stream line tracing by its specific geometric constraints (ionospheric seeding, magnetopause boundaries) and reliance on an analytical dipole model rather than a grid-based vector field [S1, unofficial]. It builds on [Integral Surface](11268-integral-surface.md) by providing the discrete point-cloud input required for surface generation.
 
 ## How it works
-**Inputs and Outputs**
-- **Inputs**:
-  - `theta0`: Co-latitude of the ionospheric footpoint in radians [S1, unofficial].
-  - `phi0`: Azimuth (longitude) of the footpoint in radians [S1, unofficial].
-  - `n_points`: Maximum number of sample points per field line [S1, unofficial].
-  - `r_start`: Initial radial distance, typically $3.0 R_E$ to avoid the inner dipole singularity [S1, unofficial].
-- **Outputs**: A list of records, where each record is a dictionary containing:
-  - `x`, `y`, `z`: Position coordinates (float) [S1, unofficial].
-  - `Bx`, `By`, `Bz`: Magnetic field components at the position (float) [S1, unofficial].
-  - `intensity`: Magnitude of the magnetic field (float) [S1, unofficial].
-  - `source`: String literal `'magnetosphere'` [S1, unofficial].
-
-**Data Structures**
-The output is a sequence of dictionaries. Each dictionary maps string keys to float values (except `source`). The `gray` field is not stored in the input but is recomputed from `intensity` for visualization purposes [S1, unofficial].
-
-**Algorithm Steps**
-1. **Initialization**: Set the starting position $(x, y, z)$ based on spherical coordinates:
-   $$
-   x = r_{start} \sin(\theta_0) \cos(\phi_0)
-   $$
-   $$
-   y = r_{start} \sin(\theta_0) \sin(\phi_0)
-   $$
-   $$
-   z = r_{start} \cos(\theta_0)
-   $$
-   [S1, unofficial].
-
-2. **Iteration Loop**: Repeat for `n_points` iterations:
-   a. Calculate radial distance: $r = \sqrt{x^2 + y^2 + z^2}$ [S1, unofficial].
-   b. **Ionosphere Check**: If $r < 1.1 R_E$, terminate the trace [S1, unofficial].
-   c. Calculate the polar angle from the sunward X-axis:
-      $$
-      \theta_{sun} = \operatorname{atan2}\left(\sqrt{y^2 + z^2}, \max(x, -40.0)\right)
-      $$
-      [S1, unofficial].
-   d. **Magnetopause Check**: Calculate the magnetopause radius $r_{mp} = \text{magnetopause\_radius}(\theta_{sun})$. If $r > r_{mp}$, terminate the trace [S1, unofficial].
-   e. **Field Evaluation**: Evaluate the dipole magnetic field components $(B_x, B_y, B_z)$ at $(x, y, z)$ [S1, unofficial].
-   f. Calculate magnitude: $mag = \sqrt{B_x^2 + B_y^2 + B_z^2}$ [S1, unofficial].
-   g. **Singularity Check**: If $mag < 10^{-9}$, terminate to prevent division by zero [S1, unofficial].
-   h. **Record**: Append the current state to the output list:
-      ```python
-      {
-          'x': x, 'y': y, 'z': z,
-          'Bx': Bx, 'By': By, 'Bz': Bz,
-          'intensity': mag,
-          'source': 'magnetosphere'
-      }
-      ```
-      [S1, unofficial].
-   i. **Euler Step**: Update position using a fixed step size $h$:
-      $$
-      x \leftarrow x + h \frac{B_x}{mag}
-      $$
-      $$
-      y \leftarrow y + h \frac{B_y}{mag}
-      $$
-      $$
-      z \leftarrow z + h \frac{B_z}{mag}
-      $$
-      [S1, unofficial].
-
-**Pseudocode**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-import math
-
-def trace_dipole_field_line(theta0, phi0, n_points, r_start=3.0, step=0.1):
-    """
-    Traces a single magnetospheric field line from an ionospheric footpoint.
-    
-    Args:
-        theta0 (float): Co-latitude of the ionospheric footpoint [radians].
-        phi0 (float): Azimuth (longitude) of the footpoint [radians].
-        n_points (int): Maximum number of sample points per field line.
-        r_start (float): Initial radial distance in R_E. Default 3.0.
-        step (float): Fixed step size for Euler integration. Default 0.1.
-        
-    Returns:
-        list[dict]: List of field line records.
-    """
-    # 1. Initialize position
-    x = r_start * math.sin(theta0) * math.cos(phi0)
-    y = r_start * math.sin(theta0) * math.sin(phi0)
-    z = r_start * math.cos(theta0)
-    
-    records = []
-    
-    for _ in range(n_points):
-        # 2a. Calculate radial distance
-        r = math.sqrt(x**2 + y**2 + z**2)
-        
-        # 2b. Ionosphere boundary check
-        if r < 1.1:
-            break
-            
-        # 2c. Calculate polar angle from sunward X axis
-        # Note: max(x, -40.0) prevents atan2 issues for large negative x
-        theta_sun = math.atan2(math.sqrt(y**2 + z**2), max(x, -40.0))
-        
-        # 2d. Magnetopause boundary check
-        # magnetopause_radius is an external function/model not defined in the core algorithm
-        mp_r = magnetopause_radius(theta_sun)
-        if r > mp_r:
-            break
-            
-        # 2e. Evaluate dipole field
-        Bx, By, Bz = dipole_field(x, y, z)
-        
-        # 2f. Calculate magnitude
-        mag = math.sqrt(Bx**2 + By**2 + Bz**2)
-        
-        # 2g. Singularity/Zero field check
-        if mag < 1e-9:
-            break
-            
-        # 2h. Record current state
-        records.append({
-            'x': x,
-            'y': y,
-            'z': z,
-            'Bx': Bx,
-            'By': By,
-            'Bz': Bz,
-            'intensity': mag,
-            'source': 'magnetosphere'
-        })
-        
-        # 2i. Euler step along normalized B-field
-        x += step * (Bx / mag)
-        y += step * (By / mag)
-        z += step * (Bz / mag)
-        
-    return records
-
-def dipole_field(x, y, z):
-    """
-    Evaluates the magnetic field of a centered dipole.
-    Assumes dipole moment aligned with Z-axis.
-    B = (3(m.r)r - r^2 m) / r^5
-    For m = (0,0,1):
-    Bx = 3xz / r^5
-    By = 3yz / r^5
-    Bz = (3z^2 - r^2) / r^5
-    """
-    r2 = x**2 + y**2 + z**2
-    r5 = r2 * r2 * math.sqrt(r2)
-    
-    if r5 < 1e-20:
-        return (0.0, 0.0, 0.0)
-        
-    Bx = 3 * x * z / r5
-    By = 3 * y * z / r5
-    Bz = (3 * z**2 - r2) / r5
-    
-    return (Bx, By, Bz)
-
-def magnetopause_radius(theta):
-    """
-    Placeholder for the magnetopause surface model.
-    The source notes reference this function but do not provide its implementation.
-    [G] A common empirical model is the Shue et al. (1998) model.
-    """
-    # Not given in the sources. Implementation depends on the specific magnetopause model used.
-    return 10.0 
-```
-
-**Parameters**
-- `theta0`: Co-latitude of the ionospheric footpoint [radians] [S1, unofficial].
-- `phi0`: Azimuth (longitude) of the footpoint [radians] [S1, unofficial].
+**Inputs:**
+- `r_start`: Initial radial distance (default 3.0 $R_E$) [S1, unofficial].
+- `theta0`: Co-latitude of the ionospheric footpoint (radians) [S1, unofficial].
+- `phi0`: Azimuth (longitude) of the footpoint (radians) [S1, unofficial].
 - `n_points`: Maximum number of sample points per field line [S1, unofficial].
-- `r_start`: Initial radial distance, set to $3.0 R_E$ to avoid the inner dipole singularity [S1, unofficial].
-- `step`: Fixed step size for Euler integration. Not explicitly given in the notes, but required for the algorithm. [G] Typical values range from 0.01 to 0.1 $R_E$ depending on desired resolution.
+- `step`: Fixed step size for Euler integration [G] (value not given in sources; typical values for magnetospheric scales are $0.01-0.1 R_E$).
+- `N_FIELD_LINES`, `N_POINTS_PER_LINE`, `N_SHEATH_LINES`, `N_POINTS_SHEATH`: Global dataset parameters [S1, unofficial].
+- `MAX_RECORDS`: Hard cap on total output points (default 5000) [S1, unofficial].
+- `RANDOM_SEED`: Seed for reproducibility [S1, unofficial].
 
-**Edge Cases and Pitfalls**
-- **Singularity**: The dipole field has a singularity at $r=0$. This is avoided by starting the trace at $r=3.0 R_E$ [S1, unofficial].
-- **Zero Field**: If the magnetic field magnitude drops below $10^{-9}$, the trace terminates to prevent division by zero during normalization [S1, unofficial].
-- **Boundary Conditions**: The trace terminates if it crosses the ionosphere ($r < 1.1 R_E$) or the magnetopause surface. The magnetopause radius is a function of the polar angle from the sunward X-axis [S1, unofficial].
+**Outputs:**
+- A JSON array where the first record is metadata (`source='meta'`) and subsequent records are field line points [S1, unofficial].
+- Each point record contains: `x`, `y`, `z` (position in $R_E$), `Bx`, `By`, `Bz` (field vector), `intensity` (field magnitude), `source` ('magnetosphere' or 'magnetosheath'), and `gray` (normalized grayscale intensity) [S1, unofficial].
+
+**Data Structures:**
+- `Record`: Dictionary with keys `x`, `y`, `z`, `Bx`, `By`, `Bz`, `intensity`, `source`, `gray`. All floats are rounded to a specified precision (e.g., 3 decimal places) for compression [S1, unofficial].
+- `Metadata`: Dictionary with keys `source` ('meta'), `source_label`, `date`, `coord_units`, `field_units`, `planetary_ref`, `domain_scale`, `measured`, `data_type`, `mp_model`, `bs_model`, `B_model`, `notes` [S1, unofficial].
+
+**Algorithm:**
+
+1. **Initialize Global State:**
+   - Set random seed: `random.seed(RANDOM_SEED)` [S1, unofficial].
+   - Initialize `all_records` list [S1, unofficial].
+
+2. **Trace Magnetospheric Dipole Field Lines:**
+   - Define angular steps: `phi_steps = 8`, `theta_steps = N_FIELD_LINES // phi_steps` [S1, unofficial].
+   - Loop `i_phi` from 0 to `phi_steps - 1`:
+     - Calculate azimuth: `phi = (i_phi / phi_steps) * 2.0 * pi` [S1, unofficial].
+     - Loop `i_th` from 0 to `theta_steps - 1`:
+       - Calculate co-latitude: `theta = radians(25.0 + i_th * 30.0 / max(theta_steps - 1, 1))` [S1, unofficial].
+       - Call `trace_dipole_field_line(theta, phi, N_POINTS_PER_LINE)` [S1, unofficial].
+       - Append returned points to `all_records` [S1, unofficial].
+
+3. **Trace Magnetosheath Lines:**
+   - Call `generate_magnetosheath_lines(N_SHEATH_LINES, N_POINTS_SHEATH)` [S1, unofficial].
+   - Append returned points to `all_records` [S1, unofficial].
+
+4. **Encode Intensity to Grayscale:**
+   - Extract all intensities: `intensities = [r['intensity'] for r in all_records]` [S1, unofficial].
+   - Calculate range: `i_min = min(intensities)`, `i_max = max(intensities)` [S1, unofficial].
+   - For each record `r` in `all_records`:
+     - Normalize: `norm = (r['intensity'] - i_min) / max(i_max - i_min, 1e-9)` [S1, unofficial].
+     - Apply gamma correction: `norm = max(0.0, min(1.0, norm)) ** 0.7` [S1, unofficial].
+     - Compute gray value: `r['gray'] = int(round(norm * 255))` [S1, unofficial].
+
+5. **Enforce Point Cap:**
+   - If `len(all_records) > MAX_RECORDS`: truncate to `all_records[:MAX_RECORDS]` [S1, unofficial].
+
+6. **Create Metadata:**
+   - Construct `meta` dictionary with standard keys (`source='meta'`, etc.) [S1, unofficial].
+
+7. **Output:**
+   - Combine: `output = [meta] + all_records` [S1, unofficial].
+   - Write to `OUTPUT_FILE` as JSON with compact separators (no whitespace) [S1, unofficial].
+
+**`trace_dipole_field_line(theta0, phi0, n_points)` Function:**
+
+1. **Initialize Position:**
+   - Calculate starting position at `r_start = 3.0`:
+     - `x = r_start * sin(theta0) * cos(phi0)`
+     - `y = r_start * sin(theta0) * sin(phi0)`
+     - `z = r_start * cos(theta0)` [S1, unofficial].
+
+2. **Iterate for `n_points`:**
+   - Calculate radial distance: `r = sqrt(x^2 + y^2 + z^2)` [S1, unofficial].
+   - **Check Ionosphere Boundary:** If `r < 1.1`, break loop [S1, unofficial].
+   - **Check Magnetopause Boundary:**
+     - Calculate polar angle from sunward X axis: `theta_sun = atan2(sqrt(y^2 + z^2), max(x, -40.0))` [S1, unofficial].
+     - Calculate magnetopause radius: `mp_r = magnetopause_radius(theta_sun)` [G] (function not defined in sources; must be implemented based on a chosen magnetopause model, e.g., Shue et al.) [S1, unofficial].
+     - If `r > mp_r`, break loop [S1, unofficial].
+   - **Evaluate Dipole Field:**
+     - Calculate field components: `Bx, By, Bz = dipole_field(x, y, z)` [S1, unofficial].
+     - Calculate magnitude: `mag = sqrt(Bx^2 + By^2 + Bz^2)` [S1, unofficial].
+     - **Check Zero Field:** If `mag < 1e-9`, break loop [S1, unofficial].
+   - **Record Point:**
+     - Append `{'x': x, 'y': y, 'z': z, 'Bx': Bx, 'By': By, 'Bz': Bz, 'intensity': mag, 'source': 'magnetosphere'}` to local list [S1, unofficial].
+   - **Euler Step:**
+     - Update position:
+       - `x += step * Bx / mag`
+       - `y += step * By / mag`
+       - `z += step * Bz / mag` [S1, unofficial].
+
+3. **Return:** Local list of points [S1, unofficial].
+
+**`dipole_field(x, y, z)` Function:**
+- The magnetic field of a centered dipole aligned with the Z-axis is given by:
+  $$ \mathbf{B} = \frac{\mu_0 m}{4\pi r^5} \left( 3z x, 3z y, 3z^2 - r^2 \right) $$
+  where $r = \sqrt{x^2 + y^2 + z^2}$ and $m$ is the dipole moment [G] (standard physics formula; constant factors can be absorbed into `step` or ignored if only direction matters for tracing, but `intensity` requires magnitude) [S1, unofficial].
+- In normalized units ($R_E$, arbitrary field units):
+  $$ B_x = \frac{3xz}{r^5}, \quad B_y = \frac{3yz}{r^5}, \quad B_z = \frac{3z^2 - r^2}{r^5} $$ [G]
+
+**`magnetopause_radius(theta_sun)` Function:**
+- Not given in the sources. Must be implemented using a standard model (e.g., Shue et al. 1998) [G].
 
 ## Subtopics
 
@@ -192,16 +106,17 @@ def magnetopause_radius(theta):
 Generates draped interplanetary magnetic field (IMF) line samples within the magnetosheath region, bounded by the bow shock and the magnetopause. Unlike the parent method which traces single lines from ionospheric footpoints, this method seeds lines randomly in the dayside magnetosheath to capture the draped topology of the solar wind magnetic field. It is distinct from general stream line tracing by its specific geometric constraints (dayside-only seeding) and reliance on external magnetosheath field models.
 
 ## Operating characteristics
-- **Time Complexity**: $O(N)$ per field line, where $N$ is the number of points traced before termination. Each step involves a constant number of arithmetic operations and a dipole field evaluation.
-- **Memory Complexity**: $O(N)$ to store the output records for a single field line.
-- **Performance**: The method is computationally lightweight as it uses an analytical dipole model rather than interpolating from a grid. Performance is limited by the number of points $N$ and the cost of the `magnetopause_radius` function if it is complex.
-- **Strengths**: Simple to implement; provides physically meaningful field lines for the Earth's magnetosphere; handles boundary conditions explicitly.
-- **Limitations**: Fixed-step Euler integration is less accurate than higher-order methods (e.g., Runge-Kutta); accuracy degrades with larger step sizes; relies on an external magnetopause model which may vary.
-- **When to use**: When visualizing individual field lines from ionospheric footpoints in a magnetospheric context.
-- **When not to use**: When high-precision trajectory integration is required (use RK4); when tracing through complex, non-dipole fields (use grid-based interpolation).
+- **Time Complexity:** Linear with respect to the number of field lines and points per line ($O(N_{lines} \times N_{points})$) [S1, unofficial].
+- **Memory Complexity:** Linear with respect to the total number of output points, capped at `MAX_RECORDS` [S1, unofficial].
+- **Measured Performance:** At precision=3, a reduction of 8–15% in file size is observed relative to default 4–5 decimal place output, with negligible visual impact for scene-scale data [S1, unofficial].
+- **Scaling:** The method is designed for offline dataset generation. The visualizer enforces a secondary cap of 5000 records if the generated dataset exceeds `MAX_RECORDS` (default 5000) [S1, unofficial].
+- **Strengths:** Simple, fast generation of synthetic magnetospheric data; compact JSON output; handles boundary conditions (ionosphere, magnetopause) explicitly [S1, unofficial].
+- **Limitations:** Relies on a simplified dipole model; does not account for time-varying solar wind conditions or realistic magnetohydrodynamic effects; requires external implementation of magnetopause and magnetosheath models [S1, unofficial].
+- **When to Use:** When a synthetic, reproducible dataset of magnetospheric field lines is needed for testing visualization pipelines or educational purposes [S1, unofficial].
+- **When Not to Use:** When realistic, time-dependent, or MHD-simulated magnetic field data is required [S1, unofficial].
 
 ## Background
-This method is derived from the `AstroSplat-Browser` project, which provides native volumetric visualization for astrophysical vector fields [S1, unofficial]. The specific implementation traces magnetospheric field lines using a dipole model, reflecting the standard approximation for Earth's magnetic field in the near-Earth environment. The approach is part of a broader family of stream line and field line tracing techniques used in space physics and computational electromagnetics.
+This method originates from the `AstroSplat-Browser` project, which focuses on native volumetric visualization for astrophysical vector fields [S1, unofficial]. It was developed to provide a standardized, compact dataset for testing the rendering of magnetic field lines in a browser-based environment [S1, unofficial]. The method uses a fixed-step Euler integration scheme, a common choice for its simplicity and low computational overhead in synthetic data generation [S1, unofficial].
 
 ## Sources
 [S1] VitorFigueiredoResearch/AstroSplat-Browser-native-volumetric-visualization-for-astrophysical-vector-fields, https://github.com/VitorFigueiredoResearch/AstroSplat-Browser-native-volumetric-visualization-for-astrophysical-vector-fields, fetched 2026-10-26 (unofficial)

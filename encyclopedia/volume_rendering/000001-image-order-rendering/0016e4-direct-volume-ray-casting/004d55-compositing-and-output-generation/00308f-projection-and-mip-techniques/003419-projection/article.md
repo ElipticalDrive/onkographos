@@ -3,84 +3,83 @@
 Also called: Direct Volume Rendering via Projection, Orthographic Projection (Summation), Summation Projection, Summed Reprojection, Summed projection, Total Intensity Projection, Voxel Projection
 
 ## Overview
-Projection is a direct volume rendering technique that visualizes the total accumulated intensity of a 3D volume along a specific axis by summing voxel values [S1, unofficial]. Unlike [Maximum Intensity Projection](902-maximum-intensity-projection.md), which highlights the highest density structures, projection aggregates all data along the ray, effectively creating a "total intensity" map [S3, unofficial]. It is distinct from [Direct volume ray casting](19-direct-volume-ray-casting.md) because it bypasses front-to-back compositing and opacity accumulation, instead using a simple arithmetic sum as the aggregation operator [Parent].
+Projection is a volume rendering technique that visualizes the total accumulated intensity of a 3D volume along a specific axis by summing voxel values [S1, unofficial]. It solves the problem of compressing volumetric data into a 2D representation while preserving the total signal, which effectively decreases image noise compared to raw slice displays [S3, unofficial]. Unlike its siblings [Maximum Intensity Projection](902-maximum-intensity-projection.md) and [Minimum Intensity Projection](5299-minimum-intensity-projection.md), which highlight extreme values, Projection emphasizes cumulative density, making it suitable for structures where total mass or integrated signal is the primary diagnostic feature, though it suffers from reduced contrast due to the superposition of background activity [S3, unofficial].
 
 ## How it works
-**Inputs and Outputs**:
-*   **Input**: A 3D volume $V$ represented as a grid of scalar values. In standard medical imaging contexts, this is often a numpy array where dimensions correspond to spatial axes (e.g., X, Y, Z) [S1, unofficial].
-*   **Output**: A 2D image array $I$ with dimensions corresponding to the two axes orthogonal to the projection direction [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A 3D volume array $V$ of dimensions $D_x \times D_y \times D_z$. The axes correspond to spatial dimensions (e.g., X, Y, Z).
+*   **Output:** A 2D projection array $P$ of dimensions $D_{proj1} \times D_{proj2}$, where the projection axis is collapsed.
 
-**Data Structures**:
-*   The input volume $V$ is stored as a dense 3D array. For an input of shape $(D_x, D_y, D_z)$, the projection along the X-axis results in an output array of shape $(D_y, D_z)$ [S1, unofficial].
-*   The output array is initialized to zeros to accumulate the sum [S1, unofficial].
+**Data Structures:**
+*   $V$: A dense 3D array (e.g., `numpy.ndarray` or `float32`/`float64` matrix).
+*   $P$: A 2D array initialized to zeros, matching the dimensions of the volume perpendicular to the projection axis.
 
-**Steps**:
-1.  **Initialize Output**: Create a 2D output array `vr` with dimensions matching the Y and Z axes of the input volume, initialized to zero [S1, unofficial].
-    $$ \text{vr}[y, z] = 0 \quad \forall y \in [0, D_y), z \in [0, D_z) $$
-2.  **Iterate and Sum**: Iterate through every voxel along the projection axis (e.g., the X-axis). For each slice index $i$ along the projection axis, add the 2D slice values to the corresponding position in the output array [S1, unofficial].
-    $$ \text{vr}[y, z] \leftarrow \text{vr}[y, z] + V[i, y, z] $$
-    This is equivalent to computing the line integral approximation where the step size $\Delta t$ is implicitly 1 (or normalized by the number of samples if density normalization is required, though standard implementations often omit this) [S1, unofficial].
-3.  **Classification**: Map the resulting summed scalar value to a color using a transfer function. Since the output is a single scalar per pixel, a 1D transfer function $T(\cdot)$ is applied [Parent].
+**Algorithm:**
+The method performs an orthographic projection along one of the principal axes (typically the first dimension, X).
 
-**Pseudocode**:
-The following Python-like pseudocode implements the summation projection along the first dimension (X-axis) of a 3D volume `img_np` [S1, unofficial].
+1.  Initialize the output array $P$ with zeros. The shape of $P$ is $(D_y, D_z)$ if projecting along the X-axis.
+    $$ P[y, z] = 0 \quad \forall y \in [0, D_y), z \in [0, D_z) $$
+2.  Iterate through each slice index $i$ along the projection axis (X-axis, $i \in [0, D_x)$).
+3.  Extract the 2D slice $S_i$ at index $i$:
+    $$ S_i[y, z] = V[i, y, z] $$
+4.  Accumulate the slice values into the corresponding pixel in $P$:
+    $$ P[y, z] \leftarrow P[y, z] + S_i[y, z] $$
+5.  Repeat steps 2–4 for all $i$.
 
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
-
-def projection_summation(img_np):
+def projection(volume):
     """
-    Computes the orthographic projection (summation) of a 3D volume
-    along the first axis (X-axis).
+    Computes the summation projection of a 3D volume along the first axis (X).
     
     Args:
-        img_np (np.ndarray): 3D volume array of shape (Dx, Dy, Dz).
+        volume: A 3D numpy array of shape (Dx, Dy, Dz).
         
     Returns:
-        np.ndarray: 2D projection array of shape (Dy, Dz).
+        A 2D numpy array of shape (Dy, Dz) containing the summed intensities.
     """
-    # Initialize output array with zeros, matching the dimensions
-    # of the axes orthogonal to the projection direction (Y and Z)
-    vr = np.zeros((img_np.shape[1], img_np.shape[2]))
+    # Initialize output array with zeros, matching the dimensions of the 
+    # axes perpendicular to the projection axis (Y and Z).
+    projection_map = np.zeros((volume.shape[1], volume.shape[2]))
     
-    # Iterate through each slice index along the projection axis (X)
-    for i in range(img_np.shape[0]):
+    # Iterate through each slice along the first axis (X)
+    for i in range(volume.shape[0]):
         # Extract the 2D slice at index i
-        slice_data = img_np[i, :, :]
+        slice_data = volume[i, :, :]
         
-        # Add the slice values to the accumulated output
-        vr += slice_data
+        # Add the slice values to the projection map
+        projection_map += slice_data
         
-    return vr
+    return projection_map
 ```
 
-**Parameters**:
-*   **Projection Axis**: The axis along which the summation occurs. In the example above, it is the first dimension (X) [S1, unofficial].
-*   **Normalization**: Standard implementations often do not normalize by the number of samples or voxel depth, resulting in values proportional to the total mass/intensity along the ray [S1, unofficial].
+**Parameters:**
+*   **Projection Axis:** The axis along which summation occurs. In the standard implementation described in [S1, unofficial], this is the first dimension (X).
+*   **Data Type:** Floating-point arithmetic is recommended to prevent overflow during summation, especially for large volumes [S1, unofficial].
 
-**Edge Cases and Pitfalls**:
-*   **Contrast Loss**: Because the method sums all values along the ray, background activity accumulates, significantly reducing image contrast compared to slice displays or maximum intensity projections [S3, unofficial].
-*   **Noise**: While summation can decrease high-frequency noise by averaging, it may also amplify low-frequency background noise, making small lesions less perceptible than in other methods [S3, unofficial].
-*   **Depth Ambiguity**: As with all projection techniques, depth information is lost; structures at different depths along the same ray are indistinguishable [Parent].
+**Edge Cases and Pitfalls:**
+*   **Contrast Reduction:** Because background structures accumulate along the ray, they can obscure foreground structures with similar total intensity, leading to inferior contrast compared to slice displays or Maximum Intensity Projection [S3, unofficial].
+*   **Noise vs. Signal:** While summation reduces high-frequency noise (averaging effect), it also reduces the relative contrast of small lesions or thin structures against a noisy background [S3, unofficial].
+*   **Axis Orientation:** The interpretation of the output depends on the coordinate system of the input volume. In medical imaging (NIfTI), the axes often correspond to Sagittal (X), Coronal (Y), and Axial (Z) planes [S1, unofficial].
 
 ## Subtopics
 
 ### [Cylinder Projection](12798-cylinder-projection.md)
-A viewpoint-independent technique for visualizing 3D vector fields on surfaces, specifically designed for generating film loops where the viewpoint rotates about the vertical z-axis. It projects the 3D vector onto the surface along a direction pointing radially away from the rotational axis, preserving the z-component of the vector field.
+A viewpoint-independent technique for visualizing 3D vector fields on surfaces, projecting vectors radially away from a rotational axis to preserve the z-component. It is distinct from scalar volume summation and is used for film loops of rotating data.
 
 ## Operating characteristics
-*   **Time Complexity**: $O(N)$, where $N$ is the total number of voxels in the volume. The operation is a simple reduction along one axis, making it computationally very efficient compared to ray casting [S1, unofficial].
-*   **Memory Complexity**: $O(D_y \times D_z)$ for the output image, plus $O(N)$ for the input volume [S1, unofficial].
-*   **Performance**: Extremely fast, suitable for real-time visualization of large volumes [S1, unofficial].
-*   **Strengths**: Simple to implement; computationally inexpensive; effective for visualizing total mass or integrated density (e.g., in bone scintigraphy where background is low) [S3, unofficial].
-*   **Limitations**: Poor contrast for lesions embedded in high-background structures; inferior contrast compared to slice display and maximum activity projection; noisy images compared to maximum activity projection [S3, unofficial].
-*   **When to use**: When the goal is to visualize the total accumulated intensity or mass, or when computational speed is critical and contrast is secondary [S3, unofficial].
-*   **When not to use**: When high contrast for small, low-intensity structures is required, or when depth discrimination is needed [S3, unofficial].
+*   **Time Complexity:** $O(N)$, where $N$ is the total number of voxels in the volume. Each voxel is visited exactly once.
+*   **Memory Complexity:** $O(D_y \times D_z)$ for the output array, plus $O(N)$ for the input volume.
+*   **Performance:** Extremely fast as it involves only addition operations without interpolation, transfer function evaluation, or alpha blending.
+*   **Strengths:** Noise reduction; simple implementation; preserves total signal intensity; order-independent.
+*   **Limitations:** Poor contrast for small or low-density structures embedded in high-density backgrounds; loss of depth information; "blooming" effect where overlapping structures merge indistinguishably [S3, unofficial].
+*   **When to use:** When the total integrated signal is the metric of interest (e.g., total bone mass, total tracer uptake) and noise reduction is prioritized over local contrast.
+*   **When not to use:** When distinguishing overlapping structures of similar intensity is required, or when high local contrast is needed for small lesions [S3, unofficial].
 
 ## Background
-The projection method, specifically referred to as "summed reprojection" or "total intensity projection," has been used in nuclear medicine and CT imaging for decades. It was notably discussed in the context of SPECT image display, where it was compared against maximum activity projection and raw projections [S3, unofficial]. The technique is a fundamental component of direct volume rendering, often taught alongside Maximum Intensity Projection (MIP) as a basic aggregation strategy [S1, unofficial].
+The method originates from early direct volume rendering techniques that sought to compress 3D data into 2D displays for interpretation [S2, unofficial]. It is widely used in medical imaging, particularly in SPECT and CT, as a preprocessing or alternative visualization step to [Maximum Intensity Projection](902-maximum-intensity-projection.md) [S3, unofficial]. The technique is often referred to as "Summed Reprojection" in nuclear medicine literature, where it is compared against raw projections and maximum activity projections for lesion detectability [S3, unofficial].
 
 ## Sources
 [S1] mneela/Volume-Rendering, https://github.com/mneela/Volume-Rendering, fetched 2026-10-27 (unofficial)

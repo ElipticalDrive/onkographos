@@ -3,84 +3,77 @@
 Also called: Prefix Sum based Compaction, StreamCompaction::CPU::compactWithScan
 
 ## Overview
-CPU Stream Compaction with Scan removes zero-valued elements from an integer array on the CPU by mapping input data to a binary mask, computing an exclusive prefix sum on that mask, and scattering the retained elements to their computed output indices [S1, unofficial][S3]. It sets itself apart from [CPU Stream Compaction without Scan](10532-cpu-stream-compaction-without-scan.md) by using a parallel prefix sum (scan) to determine output positions, which allows for potential parallelization of the scatter phase, whereas the without-scan variant uses a sequential counter [S3]. It differs from [GPU Stream Compaction with Scan](10376-gpu-stream-compaction-with-scan.md) by executing these steps on the CPU, typically resulting in lower performance for large arrays due to the lack of massive parallelism [S2, unofficial].
+CPU Stream Compaction with Scan removes zero-valued elements from an integer array on the CPU by mapping input data to a binary mask, computing an exclusive prefix sum on that mask, and scattering the retained elements to their computed output indices [S1, S2, unofficial][S3]. It sets itself apart from [CPU Stream Compaction without Scan](10532-cpu-stream-compaction-without-scan.md) by using a scan operation to determine output indices rather than a simple sequential counter, making it suitable for scenarios where parallel reduction primitives are available or when preparing data structures for subsequent parallel processing [S3].
 
 ## How it works
 **Inputs and Outputs:**
 - `idata`: Pointer to the constant input array of $n$ integers.
+- `odata`: Pointer to the output buffer for compacted elements.
 - `n`: Number of elements in the input array.
-- `odata`: Pointer to the output buffer for compacted elements. The buffer must be large enough to hold all non-zero elements (size $\ge n$).
-- **Output:** The number of compacted elements (count of non-zero values).
+- Return value: The count of non-zero elements (result count).
 
 **Data Structures:**
 1. `temp`: An integer array of size $n$. Stores the binary mask where `temp[i] = 1` if `idata[i] != 0`, else `0`.
 2. `scanArray`: An integer array of size $n$. Stores the exclusive prefix sum of `temp`.
 
 **Steps:**
-1. **Map:** Convert `idata` into a binary mask `temp`. For each index $i$ from $0$ to $n-1$:
-   $$M[i] = (I[i] == 0 ? 0 : 1)$$
-   Set `temp[i] = 1` if `idata[i]` is non-zero, otherwise `0` [S1, unofficial][S3].
-
-2. **Scan:** Compute the exclusive prefix sum of `temp` into `scanArray`.
-   - Initialize `scanArray[0] = 0` [S1, unofficial].
-   - For $i$ from $1$ to $n-1$:
-     $$S[i] = S[i-1] + M[i-1]$$
-     Set `scanArray[i] = scanArray[i-1] + temp[i-1]` [S1, unofficial][S3].
-
-3. **Scatter:** Iterate through the original input array. For each index $i$ from $0$ to $n-1$:
-   - If `temp[i] == 1` (the element is non-zero):
-     - Place `idata[i]` into `odata` at index `scanArray[i]`.
-     - $$O[S[i]] = I[i] \text{ if } M[i]=1$$ [S1, unofficial].
-
-4. **Count:** Compute the total number of compacted elements.
-   - If $n > 0$: `resultCount = scanArray[n-1] + temp[n-1]`.
-   - If $n = 0$: `resultCount = 0`.
-   - This value represents the exclusive prefix sum of the last element plus its mask value, which equals the total count of ones in `temp` [S1, unofficial].
-
-5. **Cleanup:** Free `temp` and `scanArray` [S1, unofficial].
+1. **Map**: Convert the input integer array into a boolean array (stored as integers 0/1) where non-zero elements map to 1 and zero elements map to 0.
+   - Formula: $M[i] = (I[i] == 0 ? 0 : 1)$ [S1, unofficial][S3].
+2. **Scan**: Compute the exclusive prefix sum of the boolean array $M$.
+   - Formula: $S[0] = 0$, $S[i] = S[i-1] + M[i-1]$ for $i > 0$ [S1, unofficial][S3].
+   - This step relies on the parent method [Exclusive Prefix Sum (Scan)](3007-exclusive-prefix-sum-scan.md).
+3. **Scatter**: Iterate through the original input array. For each element, if it is non-zero (checked against the boolean map), place it into the output array at the index specified by the corresponding value in the scanned array.
+   - Output index for $I[i]$ is $S[i]$ if $M[i]=1$ [S1, unofficial].
+4. **Result Count**: Compute `resultCount = scanArray[n-1] + temp[n-1]` [S1, unofficial].
+5. **Cleanup**: Free `temp` and `scanArray` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def compact_with_scan(idata, n, odata):
-    if n == 0:
-        return 0
-
     # Step 1: Map
     temp = [0] * n
     for i in range(n):
         temp[i] = 1 if idata[i] != 0 else 0
 
     # Step 2: Scan (Exclusive Prefix Sum)
+    # Implementation depends on the specific scan algorithm used.
+    # Here we show the naive sequential version for clarity, 
+    # though a work-efficient scan is preferred for performance.
     scanArray = [0] * n
-    scanArray[0] = 0
-    for i in range(1, n):
-        scanArray[i] = scanArray[i - 1] + temp[i - 1]
+    if n > 0:
+        scanArray[0] = 0
+        for i in range(1, n):
+            scanArray[i] = scanArray[i - 1] + temp[i - 1]
 
     # Step 3: Scatter
     for i in range(n):
         if temp[i] == 1:
             odata[scanArray[i]] = idata[i]
 
-    # Step 4: Count
-    resultCount = scanArray[n - 1] + temp[n - 1]
+    # Step 4: Compute result count
+    if n > 0:
+        result_count = scanArray[n - 1] + temp[n - 1]
+    else:
+        result_count = 0
 
     # Step 5: Cleanup (conceptual, as Python handles memory)
-    # del temp
-    # del scanArray
+    del temp
+    del scanArray
 
-    return resultCount
+    return result_count
 ```
 
 **Parameters:**
-- `n`: Number of elements. Must be $\ge 0$ [S1, unofficial].
+- `n`: Number of elements. Must be $\ge 0$.
+- `odata`: Must have sufficient capacity to hold all non-zero elements (max $n$).
 
 **Edge Cases and Pitfalls:**
-- **Empty Input:** If $n=0$, the algorithm should return 0 immediately to avoid index errors [S1, unofficial].
-- **All Zeros:** If all elements are zero, `temp` is all zeros, `scanArray` is all zeros, and `odata` remains unchanged (or undefined depending on initialization). `resultCount` will be 0 [S3].
-- **No Zeros:** If no elements are zero, `temp` is all ones, `scanArray` is $[0, 1, 2, ..., n-1]$, and `odata` is a copy of `idata`. `resultCount` is $n$ [S3].
-- **Precision:** The algorithm uses integer arithmetic. For very large $n$, the sum in the scan step might overflow if the data type is not sufficiently large (e.g., 32-bit int for $n > 2^{31}$) [G].
+- **Empty Input**: If $n=0$, the algorithm should return 0 and perform no operations. The pseudocode handles this with a check.
+- **All Zeros**: The result count will be 0, and `odata` will remain unchanged or empty.
+- **No Zeros**: The result count will be $n$, and `odata` will be a copy of `idata`.
+- **Precision**: Integer overflow in the scan step is possible if $n$ is very large and the number of non-zero elements exceeds the maximum value of the integer type used for `scanArray`. [G] Use 64-bit integers for `scanArray` if $n > 2^{31}$.
 
 ## Subtopics
 
@@ -88,19 +81,19 @@ def compact_with_scan(idata, n, odata):
 GPU Stream Compaction with Scan efficiently removes elements from a stream that do not satisfy a specific criteria (typically zero values) by mapping input data to a binary mask, computing an exclusive prefix sum on that mask, and scattering the retained elements to their computed output indices. It sets itself apart from CPU-based compaction by leveraging the GPU's parallel architecture and a work-efficient parallel scan algorithm, achieving performance improvements of over 4x for large arrays.
 
 ### [CPU Stream Compaction without Scan](10532-cpu-stream-compaction-without-scan.md)
-Removes zero-valued elements from an array on CPU by iterating through the input and writing non-zero elements sequentially to an output buffer.
+CPU Stream Compaction without Scan removes zero-valued elements from an integer array on the CPU by iterating through the input and writing non-zero elements sequentially to an output buffer. It solves the problem of filtering data in-place or to a new buffer without the overhead of computing an exclusive prefix sum. Unlike its sibling [CPU Stream Compaction with Scan](10375-cpu-stream-compaction-with-scan.md), which requires a scan operation to determine output indices, this method maintains a simple counter, making it suitable for sequential CPU execution where parallel reduction is unnecessary or unavailable.
 
 ## Operating characteristics
-- **Time Complexity:** $O(n)$ for mapping, $O(n)$ for scan, and $O(n)$ for scattering. Total time is $O(n)$ [S1, unofficial].
-- **Memory Complexity:** $O(n)$ auxiliary space for `temp` and `scanArray` [S1, unofficial].
-- **Measured Performance:** In tests on a CPU, stream compaction without scan took approximately 251ms for a power-of-two array size. The CPU scan-based method was not directly timed in the provided snippets, but the CPU scan itself took ~190ms for a similar sized array, suggesting the total time for compaction with scan would be significantly higher than without scan for CPU execution due to the overhead of the scan and scatter phases compared to a single pass [S1, unofficial].
-- **Strengths:** The scan-based approach is a fundamental building block for parallel algorithms and can be easily adapted to GPU implementations where the scatter phase can be fully parallelized [S3]. It provides a deterministic mapping for each element.
-- **Limitations:** On CPU, the sequential nature of the scan (if implemented naively as in the notes) and the scatter phase can be slower than a simple single-pass compaction without scan, especially for small to medium arrays [S1, unofficial][S3]. It requires extra memory for the mask and scan arrays [S1, unofficial].
-- **When to use:** Use when the downstream processing requires the indices provided by the scan or when porting the algorithm to a GPU where the scan and scatter can be parallelized efficiently [S3]. Use when the input size is large enough that the overhead of extra memory and passes is justified by the potential for parallelization (on GPU) or specific algorithmic requirements.
-- **When not to use:** For simple CPU-based compaction of small to medium arrays, [CPU Stream Compaction without Scan](10532-cpu-stream-compaction-without-scan.md) is likely faster due to lower overhead and better cache locality [S1, unofficial][S3].
+- **Time Complexity**: $O(n)$ [S1, unofficial]. The map, scan, and scatter steps each take linear time.
+- **Memory Complexity**: $O(n)$ auxiliary space for `temp` and `scanArray` [S1, unofficial].
+- **Measured Performance**: In tests on a CPU, compaction without scan took ~250ms for a power-of-two array size [S1, unofficial]. The scan-based approach is generally slower on a single CPU thread due to the overhead of the scan operation compared to a simple counter, but it is the necessary precursor for GPU implementations [S1, unofficial][S3].
+- **Strengths**: Provides a structured, parallelizable approach to compaction. The output indices are computed in parallel (on GPU) or sequentially (on CPU), making it easy to extend to multi-threaded CPU implementations or GPU kernels.
+- **Limitations**: Requires $O(n)$ extra memory for the mask and scan arrays. On a single CPU thread, it is slower than the simple counter method due to the additional scan step.
+- **When to Use**: When the output indices are needed for other parallel operations, or when the compaction is part of a larger pipeline that already uses scan operations (e.g., on GPU). Also useful when the compaction criteria are complex and need to be computed in parallel.
+- **When Not to Use**: For simple filtering on a single CPU thread where memory overhead is a concern and performance is critical; use [CPU Stream Compaction without Scan](10532-cpu-stream-compaction-without-scan.md) instead.
 
 ## Background
-The method is part of the `StreamCompaction::CPU` namespace, often used in educational contexts to teach parallel programming concepts before moving to GPU implementations [S3]. It is based on the standard stream compaction algorithm described in resources like GPU Gems [S3]. The technique relies on the exclusive prefix sum (scan) operation, which is a fundamental primitive in parallel computing [S1, unofficial][S3]. The specific implementation details provided in the notes are from student projects and unofficial repositories [S1, S2, unofficial][S3].
+The method is part of the `StreamCompaction::CPU` namespace, as described in educational materials for GPU programming courses [S2, unofficial][S3]. It is a foundational technique for data parallelism, often taught as a precursor to GPU stream compaction [S3]. The approach is derived from standard parallel algorithms for stream compaction, such as those found in GPU Gems [S3].
 
 ## Sources
 [S1] GitHub - jichumao/Stream-Compaction, https://github.com/jichumao/Stream-Compaction, fetched 2026-10-29 (unofficial)

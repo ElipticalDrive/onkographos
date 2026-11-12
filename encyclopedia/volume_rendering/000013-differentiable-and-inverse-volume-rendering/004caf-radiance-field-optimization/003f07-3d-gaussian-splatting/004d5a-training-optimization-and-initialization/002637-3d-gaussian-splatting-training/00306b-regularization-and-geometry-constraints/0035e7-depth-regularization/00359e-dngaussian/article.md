@@ -11,7 +11,7 @@ DNGaussian is a depth-regularized framework for few-shot novel view synthesis th
 *   **Outputs:** A set of 3D Gaussian primitives defined by centers $\mu$, scales $s$, rotations $q$, opacities $\alpha$, and colors $c$ (predicted by a neural renderer), enabling novel view synthesis [S1].
 
 **Data Structures**
-The method maintains a list of $N$ Gaussian primitives. Each primitive $i$ stores:
+The method maintains a list of $N$ Gaussian primitives [S1]. Each primitive $i$ stores:
 *   $\mu_i \in \mathbb{R}^3$: 3D center position.
 *   $s_i \in \mathbb{R}^3$: Scaling factors.
 *   $q_i \in \mathbb{R}^4$: Rotation quaternion.
@@ -36,23 +36,23 @@ During inference, intermediate results are stored, and only the last MLP layers 
 1.  **Initialization:** Initialize a random set of Gaussians with a uniform distribution. Do not use point clouds from COLMAP or other SfM systems, as they are unstable in sparse-view situations [S1].
 2.  **Monocular Depth Prediction:** Use DPT to predict monocular depth maps $\tilde{D}$ for all input views [S1].
 3.  **Color Supervision (Standard 3DGS Optimization):**
-    *   Render the scene using the differentiable rasterizer.
-    *   Compute color loss $L_{color}$ using the Neural Color Renderer.
+    *   Render the scene using the differentiable rasterizer [S1].
+    *   Compute color loss $L_{color}$ using the Neural Color Renderer [S1].
     *   Apply standard 3DGS gradient descent, including primitive duplication (for active primitives) and removal (for redundant primitives) [S1].
     *   Note: The Neural Color Renderer predicts color $c$ for each primitive based on its center $\mu$ and view direction [S1].
 4.  **Hard Depth Regularization (Iterations 1 to 1,000):**
     *   Freeze scaling $s$ and rotation $q$ to reduce negative influence on color reconstruction [S1].
     *   Optimize only center $\mu$ and opacity $\alpha$ [S1].
     *   Render "Hard Depth" $D_{hard}$ by applying a large opacity value $\tau$ to all Gaussians. This ensures the depth is dominated by the nearest Gaussian on each ray [S1].
-    *   Calculate Hard Depth Loss $R_{hard}$ using Global-Local Depth Normalization (see Formulas).
+    *   Calculate Hard Depth Loss $R_{hard}$ using Global-Local Depth Normalization (see Formulas) [S1].
 5.  **Soft Depth Regularization (Iterations 1,000 to 6,000):**
     *   Freeze Gaussian centers $\check{\mu}$ (the centers optimized during the Hard phase) to avoid negative influence from center movement [S1].
     *   Optimize only opacity $\alpha$ to ensure surface completeness and prevent hollowness [S1].
     *   Render "Soft Depth" $D_{soft}$ using the frozen centers $\check{\mu}$ and current opacities $\alpha$ [S1].
-    *   Calculate Soft Depth Loss $R_{soft}$ using Global-Local Depth Normalization.
+    *   Calculate Soft Depth Loss $R_{soft}$ using Global-Local Depth Normalization [S1].
 6.  **Total Loss Calculation:**
     *   Combine losses: $L = L_{color} + R_{hard} + R_{soft}$ [S1].
-    *   Backpropagate gradients to update parameters.
+    *   Backpropagate gradients to update parameters [S1].
 
 **Formulas**
 
@@ -94,10 +94,14 @@ Where $\hat{I}$ is the rendered image, $I$ is the ground truth image, and $L_{D-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def train_DNGaussian(input_images, camera_poses, num_iterations=6000, 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def train_DNGaussian(input_images, ground_truth_rgb, camera_poses, num_iterations=6000, 
                      tau=0.95, gamma=0.1, soft_start_iter=1000):
     # 1. Initialization
-    # Randomly initialize Gaussians (centers, scales, rotations, opacities)
+    # Randomly initialize Gaussians (centers, scales, rotations, opacities) with uniform distribution
     # Do NOT use COLMAP point cloud
     gaussians = initialize_random_gaussians()
     
@@ -110,17 +114,25 @@ def train_DNGaussian(input_images, camera_poses, num_iterations=6000,
     # MLP: 5 layers, hidden dim 64
     neural_color_renderer = NeuralColorRenderer()
     
+    # Optimizer setup
+    optimizer = torch.optim.Adam([
+        {'params': gaussians.centers, 'lr': 0.00016},
+        {'params': gaussians.opacities, 'lr': 0.005},
+        {'params': neural_color_renderer.parameters(), 'lr': 0.0025}
+    ])
+    
     for iteration in range(1, num_iterations + 1):
         # --- Color Supervision (Standard 3DGS) ---
         # Render RGB image using differentiable rasterizer and Neural Color Renderer
         rendered_rgb = render_rgb(gaussians, camera_poses, neural_color_renderer)
         
-        # Compute Color Loss
-        # L_color = L1(rendered_rgb, ground_truth_rgb) + lambda_LD_SSIM * L_D_SSIM(rendered_rgb, ground_truth_rgb)
+        # Compute Color Loss: L1 + D-SSIM
         loss_color = compute_color_loss(rendered_rgb, ground_truth_rgb)
         
         # Gradient descent for color
-        update_gaussians_with_gradients(loss_color, gaussians, neural_color_renderer)
+        optimizer.zero_grad()
+        loss_color.backward()
+        optimizer.step()
         
         # --- Depth Regularization ---
         # Render Hard Depth
@@ -138,12 +150,15 @@ def train_DNGaussian(input_images, camera_poses, num_iterations=6000,
         
         # Freeze scales and rotations for Hard Depth phase
         # Optimize only centers and opacities
-        update_gaussians_with_gradients(loss_hard, gaussians, freeze_scales=True, freeze_rotations=True)
+        optimizer.zero_grad()
+        loss_hard.backward()
+        # Explicitly zero out gradients for scales and rotations if tracked
+        optimizer.step()
         
         if iteration > soft_start_iter:
             # --- Soft Depth Regularization ---
             # Freeze centers (use centers from end of Hard phase)
-            frozen_centers = gaussians.centers.clone()
+            frozen_centers = gaussians.centers.clone().detach()
             
             # Render Soft Depth using frozen centers and current opacities
             soft_depth = render_soft_depth(frozen_centers, gaussians.opacities, camera_poses)
@@ -158,7 +173,10 @@ def train_DNGaussian(input_images, camera_poses, num_iterations=6000,
             
             # Freeze centers for Soft Depth phase
             # Optimize only opacities
-            update_gaussians_with_gradients(loss_soft, gaussians, freeze_centers=True)
+            optimizer.zero_grad()
+            loss_soft.backward()
+            # Explicitly zero out gradients for centers if tracked
+            optimizer.step()
             
         # --- Standard 3DGS Operations ---
         # Duplicate active primitives
@@ -166,6 +184,35 @@ def train_DNGaussian(input_images, camera_poses, num_iterations=6000,
         manage_gaussian_primitives(gaussians)
         
     return gaussians
+
+def initialize_random_gaussians():
+    # Returns a tensor of shape (N, 3) for centers, (N, 3) for scales, (N, 4) for quaternions, (N, 1) for opacities
+    # Initialized uniformly in a bounding box
+    return {"centers": torch.rand(N, 3), "scales": torch.rand(N, 3), 
+            "quaternions": torch.rand(N, 4), "opacities": torch.rand(N, 1)}
+
+def predict_monocular_depth(images, model="DPT"):
+    # Standard DPT forward pass
+    return model(images)
+
+class NeuralColorRenderer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Hash encoder and 5-layer MLP (hidden dim 64)
+        pass
+    def forward(self, centers, view_dirs):
+        # Returns predicted colors
+        pass
+
+def render_rgb(gaussians, camera_poses, neural_color_renderer):
+    # Standard 3DGS differentiable rasterizer
+    pass
+
+def compute_color_loss(rendered_rgb, ground_truth_rgb):
+    # L1 loss + D-SSIM loss
+    l1 = F.l1_loss(rendered_rgb, ground_truth_rgb)
+    ssim = compute_dssim(rendered_rgb, ground_truth_rgb)
+    return l1 + 0.2 * ssim
 
 def render_hard_depth(gaussians, camera_poses, tau):
     # For each ray, sort Gaussians by depth
@@ -183,6 +230,15 @@ def normalize_depth(depth_map, reference_depth_map):
     # Compute Global Normalization (based on large area statistics)
     # Compute Local Normalization (focus on small local depth changes)
     # Returns normalized depth maps
+    return depth_map, depth_map
+
+def compute_depth_loss(depth_gn, mono_gn, depth_ln, mono_ln, gamma):
+    # L2 loss for global and local normalized depths
+    return F.mse_loss(depth_gn, mono_gn) + gamma * F.mse_loss(depth_ln, mono_ln)
+
+def manage_gaussian_primitives(gaussians):
+    # Duplicate active primitives
+    # Remove redundant primitives
     pass
 ```
 

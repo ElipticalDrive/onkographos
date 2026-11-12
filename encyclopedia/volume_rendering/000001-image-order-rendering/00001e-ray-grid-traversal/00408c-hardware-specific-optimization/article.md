@@ -1,55 +1,38 @@
 # Hardware-Specific Optimization
-
-
 ## Overview
-Hardware-Specific Optimization refers to the adaptation of ray-grid traversal and volume rendering algorithms to exploit the unique architectural features of specific processing units, such as GPUs, SIMD-enabled CPUs, or specialized vector processors. It solves the problem where generic traversal code fails to utilize available parallelism, cache hierarchies, or instruction sets, leading to suboptimal performance. It is distinguished from sibling methods by focusing on the *execution environment* (cache layout, SIMD width, memory latency) rather than the *mathematical traversal logic* itself, building on [Ray-grid traversal](17-ray-grid-traversal.md).
+Hardware-Specific Optimization adapts ray-grid traversal and volume rendering algorithms to exploit the unique architectural features of specific processing units, such as GPUs, SIMD-enabled CPUs, or specialized vector processors [G]. It solves the problem where generic traversal code fails to utilize available parallelism, cache hierarchies, or instruction sets, leading to suboptimal performance [G]. It is distinguished from sibling methods by focusing on the *execution environment* (cache layout, SIMD width, memory latency) rather than the *mathematical traversal logic* itself, building on [Ray-grid traversal](17-ray-grid-traversal.md) [G].
 
 ## Shared principles
-The shared principles involve mapping the logical steps of ray traversal (index advancement, boundary crossing, data access) to hardware-specific constraints. Key mechanisms include:
-1.  **Instruction-Level Parallelism (ILP):** Using SIMD (Single Instruction, Multiple Data) instructions to process multiple rays or components of a ray simultaneously [S2, unofficial].
-2.  **Memory Hierarchy Awareness:** Organizing voxel data and traversal state to maximize cache hit ratios and minimize latency, often by altering memory layout or interleaving addresses [S3].
-3.  **Explicit Memory Management:** In architectures lacking hardware caching (e.g., SPU local store), manually managing data movement between main memory and local store [S2, unofficial].
-4.  **Branch Divergence Mitigation:** Structuring traversal loops and data evaluation to minimize conditional branching, which stalls pipelines in SIMD or GPU warp execution [S1].
+The shared principles involve mapping the logical steps of ray traversal (index advancement, boundary crossing, data access) to hardware-specific constraints [G]. Key mechanisms include:
+1. **Instruction-Level Parallelism (ILP):** Using SIMD (Single Instruction, Multiple Data) instructions to process multiple rays or components of a ray simultaneously [S2, unofficial].
+2. **Memory Hierarchy Awareness:** Organizing voxel data and traversal state to maximize cache hit ratios and minimize latency, often by altering memory layout or interleaving addresses [G].
+3. **Explicit Memory Management:** In architectures lacking hardware caching (e.g., SPU local store), manually managing data movement between main memory and local store [S2, unofficial].
+4. **Branch Divergence Mitigation:** Structuring traversal loops and data evaluation to minimize conditional branching, which stalls pipelines in SIMD or GPU warp execution [S1].
 
 ## Subtopics
 
 ### [GPU CSG Ray Tracing with Uniform Grid Index](4098-gpu-csg-ray-tracing-with-uniform-grid-index.md)
-This method optimizes Constructive Solid Geometry (CSG) ray tracing on GPUs by replacing unindexed full-scan traversal with a uniform grid index over the root universe's cells [4098-gpu-csg-ray-tracing-with-uniform-grid-index.md]. It solves the performance bottleneck where rays outside the model traverse infinite CSG extensions, causing redundant full-scans of all surface tokens. By pre-computing voxel-to-cell mappings and constant-folding region expressions, it reduces frame times from hundreds of milliseconds to tens of milliseconds.
-
-**Key Details:**
-*   **Data Structures:** Uses a `flat` buffer containing surfaces, RPN regions, universes, and lattices, and a 3D voxel grid where each voxel stores intersecting cells [4098-gpu-csg-ray-tracing-with-uniform-grid-index.md].
-*   **Grid Construction:** The grid is built over the root universe's bounding box. Cells' region expressions are constant-folded to specific surfaces passing through the voxel. Unbounded cells are bounded via vertex enumeration [4098-gpu-csg-ray-tracing-with-uniform-grid-index.md].
-*   **Indexing Budget:** Universes with token counts above 512 are indexed, within a 16 MB memory budget. The geometry buffer must not exceed 128 MiB [4098-gpu-csg-ray-tracing-with-uniform-grid-index.md].
-*   **Traversal Loop:** Rays jump directly to the grid if outside. Inside the grid, voxel faces act as 'silent steps' (no intersection test). Intersection tests are performed only against pre-computed surfaces for candidate cells. Region evaluation signs complex regions from the surface normal to correct CPU parity bugs. After a silent step, the token is reset to allow ray exit from bores [4098-gpu-csg-ray-tracing-with-uniform-grid-index.md].
-*   **Parameters:** HTR-10 root universe uses a 30x30x47 voxel grid [4098-gpu-csg-ray-tracing-with-uniform-grid-index.md].
+A GPU-based ray tracer for Constructive Solid Geometry (CSG) that accelerates traversal by replacing unindexed full-scans of the root universe with a uniform grid index over the root universe's cells. It renders Solid, Wireframe, and Slice views using a WGSL shader that is an $f32$ transcription of the CPU plotter's logic. It sets itself apart from the unindexed GPU approach by eliminating the cost of rays outside the model stepping through infinite surface extensions, and from the CPU path by leveraging SIMD-like parallelism on the GPU while correcting specific parity bugs in complement handling.
 
 ### WebGPU Renderer Optimization
-This variant optimizes multi-channel volume rendering on WebGPU by reducing branch divergence and optimizing octree traversal start points.
-
-*   **Step:** Evaluate each visible channel at each sample during ray traversal to reduce diverging branches [S1].
-*   **Step:** Start tree traversal at a user-defined subdivision level, or the parent level of the subdivision level where traversal was terminated for the previous sample [S1].
+This variant optimizes multi-channel volume rendering on WebGPU by reducing branch divergence and optimizing octree traversal start points [S1].
+- **Step:** Evaluate each visible channel at each sample during ray traversal to reduce diverging branches [S1].
+- **Step:** Start tree traversal at a user-defined subdivision level, or the parent level of the subdivision level where traversal was terminated for the previous sample [S1].
 
 ### Cell Processor Ray Tracing
-This variant targets the Cell Broadband Engine (SPE/SPU) architecture, leveraging SIMD and explicit memory management.
+This variant targets the Cell Broadband Engine (SPE/SPU) architecture, leveraging SIMD and explicit memory management [S2, unofficial].
+- **Step:** Ray traversal and computations (e.g., ray iso-surface intersection test) are significantly speeded up using SIMD instruction sets similar to AltiVec or SSE [S2, unofficial].
+- **Pitfall:** SPUs have in-order execution, requiring careful manual arrangement of crucial instructions [S2, unofficial].
+- **Pitfall:** The SPU local store has no hardware caching support, requiring software implementation [S2, unofficial].
+- **Pitfall:** High memory latency makes waiting for data costly; hand-tuned virtual multi-threading must be exploited to keep rays or ray bundles busy [S2, unofficial].
 
-*   **Step:** Ray traversal and computations (e.g., ray iso-surface intersection test) are significantly speeded up using SIMD instruction sets similar to AltiVec or SSE [S2, unofficial].
-*   **Pitfall:** SPUs have in-order execution, requiring careful manual arrangement of crucial instructions [S2, unofficial].
-*   **Pitfall:** The SPU local store has no hardware caching support, requiring software implementation [S2, unofficial].
-*   **Pitfall:** High memory latency makes waiting for data costly; hand-tuned virtual multi-threading must be exploited to keep rays or ray bundles busy [S2, unofficial].
-
-### UltraVis Cache Optimization
-This variant targets Intel Pentium III processors, addressing cache thrashing via memory layout and interleaved addressing.
-
-*   **Definition:** A highly optimized ray casting approach for semi-transparent volume rendering targeting Intel Pentium III, addressing cache thrashing via memory layout and interleaved addressing [S3].
-*   **Step:** Alter the order of voxel values via a cubic interleaved address function to reduce cache thrashing [S3].
-*   **Parameter:** Interleaving assumes $n$ is a power of two and $n^3$ is smaller than cache size, occupying $n \times n \times n$ cache locations [S3].
-*   **Number:** Rendered UNC MRI-head (256x256x110) at 1.7 to 7.0 fps on PIII 500MHz with 256x256 image resolution [S3].
+### [UltraVis Cache Optimization](10355-ultravis-cache-optimization.md)
+This variant targets Intel Pentium III processors, addressing cache thrashing via memory layout and interleaved addressing. Specific parameters, algorithmic steps, and performance metrics are Not given in the sources.
 
 ## Background
-Hardware-specific optimizations have evolved alongside rendering hardware. Early CPU optimizations focused on cache-aware memory layouts, such as the UltraVis system for Pentium III processors, which used cubic interleaved addressing to mitigate cache thrashing [S3]. As SIMD capabilities became standard, techniques emerged to vectorize ray traversal and intersection tests, notably on architectures like the Cell Broadband Engine, which required manual instruction scheduling and explicit memory management due to in-order execution and lack of hardware caching [S2, unofficial]. With the rise of GPUs, optimizations shifted towards minimizing branch divergence in shaders and using hierarchical data structures (like octrees) with specific traversal start points to improve coherence [S1]. More recently, GPU-specific optimizations for CSG rendering have introduced uniform grid indexing to avoid redundant full-scans of surface tokens, significantly reducing frame times [4098-gpu-csg-ray-tracing-with-uniform-grid-index.md].
+Hardware-specific optimizations have evolved alongside rendering hardware [G]. Early CPU optimizations focused on cache-aware memory layouts, such as the UltraVis system for Pentium III processors, which used cubic interleaved addressing to mitigate cache thrashing [G]. As SIMD capabilities became standard, techniques emerged to vectorize ray traversal and intersection tests, notably on architectures like the Cell Broadband Engine, which required manual instruction scheduling and explicit memory management due to in-order execution and lack of hardware caching [S2, unofficial]. With the rise of GPUs, optimizations shifted towards minimizing branch divergence in shaders and using hierarchical data structures (like octrees) with specific traversal start points to improve coherence [S1]. More recently, GPU-specific optimizations for CSG rendering have introduced uniform grid indexing to avoid redundant full-scans of surface tokens, significantly reducing frame times [4098-gpu-csg-ray-tracing-with-uniform-grid-index.md].
 
 ## Sources
 
 [S1] Residency Octree: A Hybrid Approach for Scalable Web ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC10840607/, fetched 2026-10-29
 [S2] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)
-[S3] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24

@@ -3,168 +3,133 @@
 Also called: Hardware Supersampling, Multi-sampling, Oversampling
 
 ## Overview
-Supersampling is a technique to minimize aliasing artifacts by casting multiple rays per pixel and averaging the results, effectively sampling the scene at a higher spatial frequency than the displayed resolution [S2, S3, S4, unofficial]. It addresses the coarse granularity of per-pixel sampling, which causes visible artifacts such as jagged edges (staircase artifacts) and moiré patterns, particularly along object silhouettes where intensity changes abruptly [S1, S4, unofficial]. Unlike standard single-sampling, supersampling provides a more accurate color representation for each pixel by integrating the signal over the pixel area [S4, unofficial].
+Supersampling is a technique to minimize aliasing artifacts in volume rendering by casting multiple rays per pixel and averaging the results [S2, S4, unofficial]. It addresses the problem of coarse granularity in per-pixel sampling, which causes visible artifacts along silhouette edges and abrupt intensity changes [S4, unofficial]. Unlike [Stochastic Jittering](924-stochastic-jittering.md) which relies on random distribution to break up regular patterns, standard supersampling often uses structured patterns (e.g., grid-based) or hardware-accelerated interpolation to increase the effective sampling frequency [S3, S4, unofficial]. It builds on [Sampling and Jittering](2516-sampling-and-jittering.md) by increasing the sample density rather than just randomizing positions.
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A volume dataset $V$, a camera projection matrix, and a supersampling factor $k$ (or distribution pattern). [S2, S3, S4, unofficial]
-*   **Output:** A rendered image where each pixel color $C_{pixel}$ is the average of $N$ sub-sample colors. [S2, S4, unofficial]
+**Inputs:**
+- Volume data set $V$ with voxel spacing $\Delta x, \Delta y, \Delta z$.
+- Camera parameters (viewpoint, projection).
+- Supersampling factor $k$ (integer $\ge 1$).
+
+**Outputs:**
+- Final pixel color $C_{pixel}$.
 
 **Data Structures:**
-*   **Pixel Buffer:** Stores the accumulated color values. [G]
-*   **Sample Pattern:** A set of 2D offsets $(\delta x_i, \delta y_i)$ for $i \in [0, N-1]$ relative to the pixel center. [S4, unofficial]
+- Sample pattern $P$: A set of 2D offsets $(\delta_x, \delta_y)$ within the pixel unit square $[0,1)^2$.
+- Ray buffer: Stores $N = k^2$ rays per pixel (for 2D supersampling).
 
-**Numbered Steps:**
-1.  **Initialize Accumulator:** For each pixel $(u, v)$ in the output image, initialize an accumulator $A_{u,v} = 0$ and a counter $C_{u,v} = 0$. [G]
-2.  **Generate Sample Points:** For each pixel $(u, v)$, generate $N$ sample positions in screen space. The position $s_i$ for the $i$-th sample is calculated as:
-    $$ s_i = (u + 0.5 + \delta x_i, v + 0.5 + \delta y_i) $$
-    where $(\delta x_i, \delta y_i)$ are the offsets defined by the chosen distribution pattern [S4, unofficial].
-3.  **Ray Casting:** For each sample point $s_i$, construct a ray originating from the camera center and passing through $s_i$ [S2, unofficial].
-4.  **Volume Integration:** Perform volume ray casting along the ray. Sample the volume data $V$ at the ray's intersection points using the parent method's interpolation scheme [Parent]. Compute the accumulated color $c_i$ and opacity $\alpha_i$ for the sample [S4, unofficial].
-5.  **Accumulate:** Add the sample color $c_i$ to the pixel accumulator:
-    $$ A_{u,v} \leftarrow A_{u,v} + c_i $$
-    $$ C_{u,v} \leftarrow C_{u,v} + 1 $$
-6.  **Finalize:** After all samples for all pixels are processed, compute the final pixel color by dividing the accumulator by the number of samples $N$ (or $C_{u,v}$ if adaptive):
-    $$ C_{pixel}(u,v) = \frac{A_{u,v}}{N} $$
+**Steps:**
+1. **Define Sample Pattern:** For a pixel of size $1 \times 1$, define $k^2$ sample points. A common simple pattern divides the pixel into a $k \times k$ grid [S2, unofficial].
+   - For $k=2$ (4 samples), offsets are $(0.25, 0.25), (0.25, 0.75), (0.75, 0.25), (0.75, 0.75)$ [S2, unofficial].
+   - Some implementations use 5 samples per pixel: 4 corners of the quadrants and the center [S2, unofficial].
+2. **Ray Generation:** For each pixel $(u, v)$ in the image plane:
+   - For each offset $(\delta_x, \delta_y)$ in $P$:
+     - Compute ray origin $O_{sample}$ by shifting the pixel center by sub-pixel offsets.
+     - Compute ray direction $D_{sample}$ based on camera projection.
+3. **Volume Sampling:** For each ray:
+   - Interpolate volume values $V(x,y,z)$ along the ray path.
+   - If hardware supersampling is used in the Z-direction, interpolate additional sample slices between existing voxel slices [S3, unofficial].
+4. **Compositing:** Accumulate color and opacity for each ray using front-to-back or back-to-front compositing [S6, unofficial].
+5. **Averaging:** Compute the final pixel color as the average of the $N$ ray results:
+   $$ C_{pixel} = \frac{1}{N} \sum_{i=1}^{N} C_{ray_i} $$
+   [S4, unofficial].
 
 **Parameters:**
-*   **Sampling Rate ($N$):** The number of samples per pixel. A common value is 5 samples per pixel (e.g., 4 corners + 1 center) [S2, unofficial].
-*   **Supersampling Factor ($k$):** In hardware implementations (e.g., VolumePro), this refers to the number of interpolated slices in the z-direction. The maximum factor is typically 8 [S3, unofficial].
+- **Sampling Rate:** Typically 4, 5, or 9 samples per pixel for 2D [S2, unofficial].
+- **Z-direction Factor:** Maximum supersampling factor in Z is 8 in VolumePro [S3, unofficial].
+- **Adaptive Threshold:** Convolution kernels can identify high-contrast areas to apply supersampling selectively [S4, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Aliasing from Regular Grids:** Using regular spacing for sample points in the x- and y-directions can still result in aliasing artifacts due to periodicity [S4, unofficial]. Uniform or jittered distributions are preferred [S4, unofficial].
-*   **Performance Cost:** Supersampling increases the number of rays linearly with $N$, reducing rendering frame rates. For example, in the VolumePro hardware, supersampling by a factor of $k$ reduces the rendering rate of a $256^3$ dataset to 30 frames per second due to pipeline stalls [S3, unofficial].
-*   **Hardware Limitations:** Hardware supersampling is often restricted to specific dimensions. In VolumePro, hardware support exists only for the z-direction (interpolating slices); x- and y-direction supersampling must be implemented via software re-rendering [S3, unofficial].
+- **Regular Spacing Aliasing:** Regular grid spacing in X and Y can still cause aliasing artifacts if the pattern aligns with scene features; uniform distribution is preferred [S4, unofficial].
+- **Performance Stall:** In hardware pipelines (e.g., VolumePro), supersampling in Z causes voxel memory stages to stall while waiting for additional slices to clear [S3, unofficial].
+- **Precision:** Sub-pixel offsets must be accurate to avoid systematic bias [S3, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def supersample_render(volume, camera, width, height, samples_per_pixel, sample_offsets, voxel_size, ray_max_steps):
+def supersample_volume_rendering(volume, camera, k):
     """
-    Renders a volume using supersampling.
+    Renders a volume using k^2 supersamples per pixel.
+    volume: 3D array of voxel values
+    camera: object with method get_ray(u, v, offset_x, offset_y) -> (origin, direction)
+    k: integer supersampling factor
     """
-    acc_color = [[(0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)]
+    width, height = camera.resolution
+    image = zeros((height, width, 3))
+    
+    # Define sample offsets for a k x k grid within [0, 1)
+    # Offsets are centered in each sub-pixel
+    offsets = []
+    for i in range(k):
+        for j in range(k):
+            dx = (i + 0.5) / k
+            dy = (j + 0.5) / k
+            offsets.append((dx, dy))
+            
+    num_samples = len(offsets)
     
     for y in range(height):
         for x in range(width):
-            pixel_sum = (0.0, 0.0, 0.0)
+            pixel_color = zeros(3)
             
-            for dx, dy in sample_offsets:
-                sample_x = x + 0.5 + dx
-                sample_y = y + 0.5 + dy
+            for dx, dy in offsets:
+                # Get ray for this sub-pixel sample
+                origin, direction = camera.get_ray(x, y, dx, dy)
                 
-                ray_origin, ray_direction = camera.project_ray(sample_x, sample_y)
-                sample_color = volume_ray_cast(ray_origin, ray_direction, volume, voxel_size, ray_max_steps)
+                # Cast ray through volume
+                # This function handles interpolation and compositing
+                ray_color = cast_ray(volume, origin, direction)
                 
-                pixel_sum = (
-                    pixel_sum[0] + sample_color[0],
-                    pixel_sum[1] + sample_color[1],
-                    pixel_sum[2] + sample_color[2]
-                )
+                pixel_color += ray_color
+                
+            # Average the results
+            image[y, x] = pixel_color / num_samples
             
-            if samples_per_pixel > 0:
-                final_color = (
-                    pixel_sum[0] / samples_per_pixel,
-                    pixel_sum[1] / samples_per_pixel,
-                    pixel_sum[2] / samples_per_pixel
-                )
-            else:
-                final_color = (0.0, 0.0, 0.0)
-                
-            acc_color[y][x] = final_color
-            
-    return acc_color
+    return image
 
-def volume_ray_cast(ray_origin, ray_direction, volume, voxel_size, max_steps):
+def cast_ray(volume, origin, direction):
     """
-    Standard front-to-back volume integration [G].
-    Sources do not specify the integration algorithm; standard front-to-back compositing is used [G].
+    Casts a single ray through the volume.
+    Returns the accumulated color.
     """
-    color = (0.0, 0.0, 0.0)
+    # Implementation depends on specific ray casting method (e.g., direct volume ray casting)
+    # This is a placeholder for the core ray casting logic defined in parent articles
+    # [G] Standard front-to-back compositing is assumed here
+    color = zeros(3)
     alpha = 0.0
-    t = 0.0
-    step_size = voxel_size
+    step_size = 1.0 / volume.resolution # Simplified step size
     
-    for _ in range(max_steps):
-        pos = ray_origin + t * ray_direction
-        val = trilinear_interpolate(volume, pos, voxel_size)
-        c = val
-        a = c[3] if len(c) == 4 else 0.5
-        
-        color = color + (1.0 - alpha) * c[:3]
-        alpha = alpha + (1.0 - alpha) * a
-        
-        t += step_size
-        if alpha >= 1.0:
-            break
-            
+    # Trace ray through volume bounds
+    # ... (ray marching loop) ...
+    
     return color
-
-def trilinear_interpolate(volume, pos, voxel_size):
-    """
-    Standard trilinear interpolation [G].
-    """
-    gx = pos[0] / voxel_size
-    gy = pos[1] / voxel_size
-    gz = pos[2] / voxel_size
-    
-    x0, y0, z0 = int(gx), int(gy), int(gz)
-    x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
-    fx, fy, fz = gx - x0, gy - y0, gz - z0
-    
-    x0 = max(0, min(x0, volume.shape[0]-1))
-    x1 = max(0, min(x1, volume.shape[0]-1))
-    y0 = max(0, min(y0, volume.shape[1]-1))
-    y1 = max(0, min(y1, volume.shape[1]-1))
-    z0 = max(0, min(z0, volume.shape[2]-1))
-    z1 = max(0, min(z1, volume.shape[2]-1))
-    
-    v000 = volume[x0, y0, z0]
-    v100 = volume[x1, y0, z0]
-    v010 = volume[x0, y1, z0]
-    v110 = volume[x1, y1, z0]
-    v001 = volume[x0, y0, z1]
-    v101 = volume[x1, y0, z1]
-    v011 = volume[x0, y1, z1]
-    v111 = volume[x1, y1, z1]
-    
-    c00 = v000 + fx * (v100 - v000)
-    c01 = v010 + fx * (v110 - v010)
-    c10 = v001 + fx * (v101 - v001)
-    c11 = v011 + fx * (v111 - v011)
-    
-    c0 = c00 + fy * (c10 - c00)
-    c1 = c01 + fy * (c11 - c01)
-    
-    return c0 + fz * (c1 - c0)
 ```
 
 ## Subtopics
 
 ### Differential Super-Sampling
-A technique to mitigate interpolation artifacts in sliced-based volume rendering by adjusting the supersampling level per slab based on its distance to the viewpoint [S6, unofficial]. Slabs closer to the viewpoint are assigned a higher supersampling level, while farther slabs use a lower level [S6, unofficial]. This balances image quality and rendering speed, unlike uniform supersampling which causes performance degradation across all slabs [S6, unofficial].
+A technique to mitigate interpolation artifacts in sliced-based volume rendering by adjusting the supersampling level per slab based on its distance to the viewpoint [S6, unofficial]. Slabs closer to the viewpoint are assigned a higher supersampling level, while farther slabs use a lower level [S6, unofficial]. This balances image quality and rendering speed, unlike uniform supersampling which degrades performance across all slabs [S6, unofficial].
 
 ### Z-direction Supersampling
-A hardware-accelerated technique to reduce aliasing by increasing the number of sample slices per volume in the z-direction [S3, unofficial]. It interpolates additional sample slices between existing voxel slices, with a maximum supersampling factor of eight [S3, unofficial]. The pipeline stalls to wait for these additional slices, reducing rendering rates (e.g., to 30 fps for a $256^3$ dataset with factor $k$) [S3, unofficial].
+A hardware-accelerated technique to reduce aliasing by increasing the number of sample slices per volume in the Z-direction [S3, unofficial]. It interpolates additional sample slices between existing voxel slices, with a maximum factor of 8 [S3, unofficial]. Samples are processed in slice-by-slice order, requiring multiple interpolations from the same pair of adjacent voxel slices before moving on [S3, unofficial]. This causes pipeline stalls in hardware like VolumePro, reducing the rendering rate of a $256^3$ dataset to 30 fps when supersampled by a factor of $k$ [S3, unofficial].
 
 ### XY-direction Supersampling
-A software-based technique to achieve supersampling in the x and y directions [S3, unofficial]. It involves rendering the volume multiple times with slightly different sub-pixel accurate initial offsets of the base plane in the x and y dimensions, then blending the resulting images in software [S3, unofficial].
+A software-based technique to achieve supersampling in X and Y directions by rendering the volume multiple times with sub-pixel accurate initial offsets of the base plane [S3, unofficial]. The resulting images are blended in software to create a smoother final image [S3, unofficial]. This avoids the hardware limitations of Z-supersampling but requires multiple render passes [S3, unofficial].
 
 ### Supersampling with Reconstruction Filters
-A technique that improves image quality by supersampling a 3D dataset using a high-quality reconstruction filter in a pre-processing step, then rendering the higher-resolution dataset using standard trilinear interpolation [S7]. This yields noticeable quality improvements without necessarily increasing rendering time, addressing the low quality of standard trilinear interpolation [S7].
+A technique to improve image quality by supersampling a 3D data set using a high-quality reconstruction filter in a pre-processing step, then rendering the higher-resolution data set using trilinear interpolation [S7]. This yields noticeable quality improvements without necessarily increasing rendering time, addressing the low quality of standard trilinear interpolation [S7].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot R \cdot S)$, where $N$ is the number of samples per pixel, $R$ is the number of rays (pixels), and $S$ is the number of samples per ray. [G]
-*   **Memory Complexity:** $O(N \cdot W \cdot H)$ for the accumulator buffer if not rendered directly to frame buffer, or $O(1)$ extra if using floating-point frame buffers with accumulation [G].
-*   **Performance:** Significant performance hit. In hardware implementations like VolumePro, supersampling by factor $k$ reduces frame rates substantially due to pipeline stalls [S3, unofficial]. Software-based XY supersampling requires $N$ full render passes, multiplying the cost by $N$ [S3, unofficial].
-*   **Strengths:** Effectively reduces aliasing and jagged edges; improves visual quality of silhouettes and high-frequency details [S2, S4, unofficial].
-*   **Limitations:** High computational cost; regular sampling patterns can still alias; hardware support is often limited to specific dimensions (z-axis) [S3, S4, unofficial].
-*   **When to use:** When visual quality is critical and performance budget allows; for static scenes or offline rendering. [G]
-*   **When not to use:** When real-time performance is required and aliasing can be tolerated or handled by other means; when hardware only supports limited supersampling dimensions [S3, unofficial].
+- **Time Complexity:** $O(N \cdot R)$, where $N$ is the number of supersamples per pixel and $R$ is the number of rays per pixel. Rendering time increases linearly with the supersampling factor $k^2$ [S1, S3, unofficial].
+- **Memory Complexity:** No significant additional memory for the samples themselves, but hardware pipelines may require buffer stalls [S3, unofficial].
+- **Performance:** In VolumePro, supersampling by a factor of $k$ reduces the rendering rate of a $256^3$ dataset to 30 fps [S3, unofficial]. CUDA implementations can achieve 60 fps with high-quality supersampling on modern hardware [S5, unofficial].
+- **Strengths:** Significantly reduces aliasing artifacts, especially along silhouette edges [S4, unofficial]. Simple to implement in software [S3, unofficial].
+- **Limitations:** Computationally expensive; regular grid patterns can still alias if not carefully designed [S4, unofficial]. Hardware Z-supersampling causes pipeline stalls [S3, unofficial].
+- **When to Use:** When high visual quality is required and performance budget allows. Use adaptive supersampling for high-contrast regions to optimize performance [S4, unofficial].
 
 ## Background
-Supersampling originated as a general anti-aliasing technique in computer graphics, applied to volume rendering to combat artifacts caused by coarse sampling [S4, unofficial]. The VolumePro real-time ray-casting system implemented hardware-accelerated supersampling in the z-direction, demonstrating its feasibility for real-time applications but highlighting performance trade-offs [S3, unofficial]. Adaptive approaches using convolution to target high-contrast areas were also explored to optimize the cost [S4, unofficial]. Differential supersampling was later introduced in shear-warp factorization systems to optimize performance based on depth [S6, unofficial]. Pre-processing with reconstruction filters was proposed to leverage hardware trilinear interpolation for higher quality [S7].
+Supersampling originated as a general anti-aliasing technique in computer graphics, applied to volume rendering to combat artifacts from coarse sampling [S4, unofficial]. It was implemented in early hardware volume rendering systems like VolumePro, which supported hardware Z-supersampling and software XY-supersampling [S3, unofficial]. Later, it was adapted for GPU-based implementations using CUDA and GPGPU platforms to achieve real-time frame rates [S5, unofficial]. The technique is often compared with stochastic jittering and hierarchical sampling for its deterministic nature and ease of implementation [S4, unofficial].
 
 ## Sources
 [S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)

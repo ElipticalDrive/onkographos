@@ -1,0 +1,216 @@
+--- v007.md
++++ v008.md
+@@ -1,109 +1,114 @@
+ # 3DGS-MCMC
+ 
+-Also called: MCMC-based Gaussian Lifecycle, Probabilistic Densification
++Also called: MCMC-based Gaussian Lifecycle
+ 
+ ## Overview
+-3DGS-MCMC replaces the noisy positional gradient magnitude heuristic used in standard 3D Gaussian Splatting with a Markov Chain Monte Carlo (MCMC) framework to guide the spawning and pruning of Gaussian primitives [S1, unofficial]. By treating the Gaussian cloud as samples from an underlying probability distribution, it explores regions with unknown gradients more effectively, yielding denser, more efficient, and artifact-free scene representations [S1, unofficial].
++3DGS-MCMC replaces the noisy positional gradient magnitude heuristics of standard 3D Gaussian Splatting with a Markov Chain Monte Carlo (MCMC) framework to guide the life cycle (spawn and prune) of Gaussian primitives [S1, unofficial][S2]. By treating the Gaussian cloud as samples from an underlying probability distribution, it dynamically adds and removes Gaussians based on rendering error and proposal probabilities, yielding more efficient, artifact-free clouds with sharper details compared to the original densification process [S1, unofficial][S2].
+ 
+ ## How it works
+ **Inputs:**
+-- Current set of Gaussians $\mathcal{G}$, each with mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, and spherical harmonics coefficients.
+-- Rendering loss $\mathcal{L}$ computed for the current frame or batch.
+-- Proposal distribution $q(\cdot|\cdot)$ for generating candidate new Gaussian positions.
++*   Current set of Gaussians $\mathcal{G} = \{g_1, \dots, g_N\}$, where each $g_k$ has mean $\mu_k$, covariance $\Sigma_k$, opacity $\alpha_k$, and spherical harmonic coefficients $\mathbf{c}_k$ [Parent].
++*   Current training loss $\mathcal{L}$ computed from rendered images.
++*   Proposal distribution $q(\cdot|\cdot)$ for generating candidate Gaussian positions.
+ 
+ **Outputs:**
+-- Updated set of Gaussians $\mathcal{G}'$ with modified population based on MCMC acceptance/rejection.
++*   Updated set of Gaussians $\mathcal{G}'$ after MCMC sampling steps.
+ 
+ **Data Structures:**
+-- Gaussian population $\mathcal{G}$: List or array of Gaussian objects. Each object contains fields for mean $\boldsymbol{\mu} \in \mathbb{R}^3$, covariance $\boldsymbol{\Sigma} \in \mathbb{R}^{3 \times 3}$ (or rotation/scale parameters), opacity $\alpha \in [0, 1]$, and feature vectors.
+-- Loss buffer: Stores $\mathcal{L}(\boldsymbol{\mu}_k)$ for each Gaussian $k$ or per-pixel loss contributions.
++*   The Gaussian cloud is maintained as a list or array of Gaussian objects.
++*   Each Gaussian object stores: $\mu \in \mathbb{R}^3$, $\Sigma \in \mathbb{R}^{3 \times 3}$ (or parameters $s, q$), $\alpha \in [0, 1]$, $\mathbf{c}$ (SH coefficients).
++*   Buffer management is required to handle dynamic addition/removal, typically via flag-based marking or compaction [Parent].
+ 
+-**Method Steps:**
+-1. **Evaluate Current State:** Compute the rendering loss $\mathcal{L}(\boldsymbol{\mu}_{\text{old}})$ associated with the current Gaussian configuration or specific candidate positions.
+-2. **Proposal Generation:** For each Gaussian or at periodic intervals, generate a candidate new Gaussian position $\boldsymbol{\mu}_{\text{new}}$ using a proposal distribution $q(\boldsymbol{\mu}_{\text{new}}|\boldsymbol{\mu}_{\text{old}})$. This distribution typically centers around the current mean or explores nearby regions.
+-3. **Acceptance Probability Calculation:** Calculate the Metropolis-Hastings acceptance probability $\alpha_{\text{spawn}}$ for spawning a new Gaussian at $\boldsymbol{\mu}_{\text{new}}$ based on the ratio of losses and proposal probabilities [S1, unofficial]:
+-   $$
+-   \alpha_{\text{spawn}} = \min \left( 1, \frac{\mathcal{L}(\boldsymbol{\mu}_{\text{new}})}{\mathcal{L}(\boldsymbol{\mu}_{\text{old}})} \cdot \frac{q(\boldsymbol{\mu}_{\text{old}}|\boldsymbol{\mu}_{\text{new}})}{q(\boldsymbol{\mu}_{\text{new}}|\boldsymbol{\mu}_{\text{old}})} \right)
+-   $$
+-   Here, $\mathcal{L}(\boldsymbol{\mu})$ represents the loss associated with the Gaussian at position $\boldsymbol{\mu}$. The term $\frac{q(\boldsymbol{\mu}_{\text{old}}|\boldsymbol{\mu}_{\text{new}})}{q(\boldsymbol{\mu}_{\text{new}}|\boldsymbol{\mu}_{\text{old}})}$ accounts for asymmetry in the proposal distribution.
+-4. **Spawn Decision:** Draw a random number $r \sim \text{Uniform}(0, 1)$. If $r < \alpha_{\text{spawn}}$, accept the proposal and add the new Gaussian to the population $\mathcal{G}$. Otherwise, reject it.
+-5. **Pruning:** Prune Gaussians with low expected contribution to the rendering, determined by the equilibrium distribution of the Markov chain. Gaussians that consistently fail to reduce loss or have negligible impact are removed [S1, unofficial].
+-6. **Update State:** Replace the old Gaussian with the new one if accepted, or keep the old one if rejected. Update the loss buffer.
++**Steps:**
++1.  **Evaluate Current State:** Compute the current rendering loss $\mathcal{L}_{\text{old}}$ for the existing Gaussian configuration.
++2.  **Propose New Gaussian:** Generate a candidate Gaussian $g_{\text{new}}$ with mean $\mu_{\text{new}}$ sampled from a proposal distribution $q(\mu_{\text{new}}|\mu_{\text{old}})$, where $\mu_{\text{old}}$ is the mean of an existing Gaussian or a scene-wide distribution. The covariance, opacity, and SH coefficients can be initialized based on $\mu_{\text{old}}$ or scene priors.
++3.  **Compute Acceptance Probability:** Calculate the Metropolis-Hastings acceptance probability $\alpha_{\text{spawn}}$ for spawning the new Gaussian:
++    $$
++    \alpha_{\text{spawn}} = \min \left( 1, \frac{\mathcal{L}(\boldsymbol{\mu}_{\text{new}})}{\mathcal{L}(\boldsymbol{\mu}_{\text{old}})} \cdot \frac{q(\boldsymbol{\mu}_{\text{old}}|\boldsymbol{\mu}_{\text{new}})}{q(\boldsymbol{\mu}_{\text{new}}|\boldsymbol{\mu}_{\text{old}})} \right)
++    $$
++    where $\mathcal{L}(\boldsymbol{\mu})$ is the rendering loss if the Gaussian were centered at $\boldsymbol{\mu}$ (or the loss contribution associated with that position) [S1, unofficial].
++4.  **Spawn or Reject:** With probability $\alpha_{\text{spawn}}$, add $g_{\text{new}}$ to the Gaussian cloud. Otherwise, reject the proposal.
++5.  **Prune Low-Contribution Gaussians:** Evaluate the expected contribution of each existing Gaussian. Prune Gaussians that fall below a threshold determined by the Markov chain equilibrium, effectively removing those with low expected contribution to the rendering [S1, unofficial].
++6.  **Update State:** Recompute the loss and repeat for the next densification interval.
+ 
+ **Parameters:**
+-- Proposal distribution $q$: Not specified in sources. Typically a Gaussian centered at $\boldsymbol{\mu}_{\text{old}}$ with a scale related to the current covariance [G].
+-- Loss function $\mathcal{L}$: Standard 3DGS loss (L1 + SSIM) [G].
++*   Proposal distribution $q$: Not given in the sources. Typically involves sampling from a normal distribution centered on existing Gaussians or uniform distribution over the scene extent [Parent, S1].
++*   Loss function $\mathcal{L}$: Standard 3DGS loss (e.g., L1 + SSIM) [Parent, S1].
++*   Densification interval: Periodic evaluation, e.g., every 100 iterations [Parent].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Loss Evaluation Cost:** Computing $\mathcal{L}(\boldsymbol{\mu}_{\text{new}})$ for every proposal can be expensive. Approximations or batched evaluations may be necessary [G].
+-- **Proposal Distribution Design:** Poor choice of $q$ can lead to slow convergence or getting stuck in local minima. Symmetric proposals simplify the acceptance ratio [G].
+-- **Precision:** Numerical stability in loss ratio calculation, especially when losses are close to zero.
++*   **Loss Computation:** Computing $\mathcal{L}(\boldsymbol{\mu}_{\text{new}})$ requires rendering or estimating the loss for the proposed Gaussian, which can be computationally expensive. Approximations or incremental updates may be needed.
++*   **Proposal Distribution:** The choice of $q$ affects the exploration efficiency. Poor proposals may lead to slow convergence or sampling in irrelevant regions.
++*   **Pruning Threshold:** Determining the equilibrium threshold for pruning is non-trivial and may require adaptive mechanisms.
+ 
+ **Pseudocode:**
+ ```python
+-import numpy as np
+-
+-def mcmc_densification_step(gaussians, loss_function, proposal_distribution, rng):
++def mcmc_densification_step(Gaussians, LossFunction, ProposalDistribution, CurrentIteration):
+     """
+     Perform one MCMC-based densification step.
+     
+     Args:
+-        gaussians: List of Gaussian objects with attributes .mu, .cov, .alpha, etc.
+-        loss_function: Function that computes loss given a Gaussian or set of Gaussians.
+-        proposal_distribution: Function that samples new mu given old mu.
+-        rng: Random number generator.
++        Gaussians: List of Gaussian objects.
++        LossFunction: Function to compute rendering loss given Gaussians.
++        ProposalDistribution: Function to sample new Gaussian means.
++        CurrentIteration: Current training iteration number.
+         
+     Returns:
+         Updated list of Gaussians.
+     """
+-    new_gaussians = []
++    # Periodic densification check (e.g., every 100 iterations)
++    if CurrentIteration % 100 != 0:
++        return Gaussians
++
++    new_Gaussians = []
++    current_loss = LossFunction(Gaussians)
+     
+-    for g in gaussians:
+-        mu_old = g.mu
+-        # Compute loss for current Gaussian (or context)
+-        # Note: In practice, loss might be per-pixel or global. 
+-        # Simplified: assume loss_function returns scalar for a single Gaussian's contribution.
+-        loss_old = loss_function(g)
++    # MCMC Sampling Loop
++    # Number of proposals per step is not specified; assume a fixed number or proportional to N
++    num_proposals = len(Gaussians) 
++    
++    for _ in range(num_proposals):
++        # Select a parent Gaussian for proposal
++        parent_idx = random.randint(0, len(Gaussians) - 1)
++        parent_g = Gaussians[parent_idx]
+         
+-        # Generate proposal
+-        mu_new = proposal_distribution(mu_old, rng)
++        # Propose new Gaussian
++        mu_new = ProposalDistribution(parent_g.mu)
++        g_new = Gaussian(mu=mu_new, sigma=parent_g.sigma, alpha=parent_g.alpha, c=parent_g.c)
+         
+-        # Compute loss for proposed position
+-        # Create a temporary Gaussian for loss evaluation
+-        g_proposed = Gaussian(mu=mu_new, cov=g.cov, alpha=g.alpha)
+-        loss_new = loss_function(g_proposed)
++        # Compute loss for proposed Gaussian (approximation or full render)
++        # Note: Full render for each proposal is expensive. 
++        # The source implies using L(mu_new) / L(mu_old). 
++        # L(mu_old) is implicitly the current loss contribution or a baseline.
++        # For implementation, we might approximate L(mu_new) by rendering with g_new added 
++        # or by using a local error metric.
+         
+-        # Calculate proposal probabilities
+-        # Assuming symmetric proposal for simplicity if not specified
+-        # q(mu_old | mu_new) / q(mu_new | mu_old) = 1 if symmetric
+-        # If asymmetric, compute these values.
+-        q_old_given_new = proposal_distribution(mu_new, mu_old, rng) # Placeholder for actual prob density
+-        q_new_given_old = proposal_distribution(mu_old, mu_new, rng) # Placeholder for actual prob density
++        # Simplified: Assume we can compute a local loss metric for the proposal
++        # In practice, this might involve a lightweight render or error estimation.
++        loss_new = LossFunction(Gaussians + [g_new]) # Approximation
+         
+-        # Handle potential division by zero or undefined densities
+-        if q_new_given_old == 0:
+-            acceptance_prob = 0.0
+-        else:
+-            ratio = (loss_new / loss_old) * (q_old_given_new / q_new_given_old)
+-            acceptance_prob = min(1.0, ratio)
++        # Compute acceptance probability
++        # q(mu_old | mu_new) / q(mu_new | mu_old)
++        # If proposal is symmetric (e.g., Gaussian centered on parent), ratio is 1.
++        q_ratio = 1.0 # Assumption: Symmetric proposal
++        
++        alpha_spawn = min(1.0, (loss_new / current_loss) * q_ratio)
++        
++        if random.random() < alpha_spawn:
++            new_Gaussians.append(g_new)
+             
+-        # Accept or reject
+-        if rng.random() < acceptance_prob:
+-            # Accept: Add new Gaussian
+-            g_new = Gaussian(mu=mu_new, cov=g.cov, alpha=g.alpha)
+-            new_gaussians.append(g_new)
+-        else:
+-            # Reject: Keep old Gaussian
+-            new_gaussians.append(g)
++    # Pruning step
++    # Prune Gaussians with low expected contribution
++    # Threshold based on Markov chain equilibrium is not explicitly defined.
++    # Heuristic: Remove Gaussians with opacity below a threshold or low gradient magnitude.
++    pruned_Gaussians = []
++    for g in Gaussians:
++        if g.alpha > alpha_threshold: # alpha_threshold not specified
++            pruned_Gaussians.append(g)
+             
+-    # Pruning step: Remove Gaussians with low expected contribution
+-    # This is based on Markov chain equilibrium, not explicitly defined in sources.
+-    # Heuristic: Remove if loss contribution is below a threshold or opacity is low.
+-    pruned_gaussians = []
+-    for g in new_gaussians:
+-        if g.alpha > 0.01: # Example threshold
+-            pruned_gaussians.append(g)
+-            
+-    return pruned_gaussians
++    # Combine new and pruned Gaussians
++    final_Gaussians = pruned_Gaussians + new_Gaussians
++    
++    return final_Gaussians
+ ```
+ 
+@@ -111,17 +116,17 @@
+ 
+ ### [Optimization and Training Strategy](9157-optimization-and-training-strategy.md)
+-Defines the optimization schedule, loss formulation, and regularization techniques for training radiance fields using 3D Gaussian Splatting with MCMC-based densification. It addresses overfitting to noise and geometric artifacts by incorporating MCMC-derived regularization terms on opacity and scale, using cosine annealing for feature/MLP learning rates, applying Exponential Moving Average (EMA) to MLP weights, and executing a final refinement phase that freezes geometry.
++Defines the optimization schedule, loss formulation, and regularization techniques for training radiance fields using 3D Gaussian Splatting with MCMC-based densification. It addresses overfitting by incorporating MCMC-derived regularization terms on opacity and scale, using cosine annealing for feature/MLP learning rates, applying Exponential Moving Average (EMA) to MLP weights, and executing a final refinement phase that freezes geometry.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Higher per-step cost than gradient-based densification due to loss evaluation for proposals. However, potentially fewer total steps needed for convergence in complex scenes.
+-- **Memory Complexity:** Similar to standard 3DGS, but may require storing additional loss values for proposals.
+-- **Strengths:** More robust to noisy gradients, better exploration of unknown regions, artifact-free clouds [S1, unofficial].
+-- **Limitations:** Computational overhead of loss evaluation for proposals, sensitivity to proposal distribution design.
+-- **When to use:** Scenes with complex geometry or high-frequency details where gradient-based methods struggle.
+-- **When not to use:** Real-time applications requiring minimal overhead, or simple scenes where standard densification suffices.
++*   **Time Complexity:** The MCMC step involves proposing and evaluating new Gaussians, which can be more computationally expensive than the simple gradient thresholding in standard 3DGS, especially if full loss evaluation is performed for each proposal. However, it may reduce the total number of iterations needed for convergence by exploring the space more efficiently.
++*   **Memory Complexity:** Similar to standard 3DGS, memory usage depends on the number of Gaussians. The dynamic addition/removal requires efficient buffer management.
++*   **Performance:** MCMC densification yields sharper details and better performance compared to the original 3DGS densification process, particularly in scenes with high-frequency details, such as underwater scenes [S2]. It produces more efficient and artifact-free clouds by exploring regions with unknown gradients [S1, unofficial].
++*   **Strengths:** Reduces noise and artifacts associated with gradient-based heuristics; better handles high-frequency details; probabilistic framework allows for exploration of unknown regions.
++*   **Limitations:** Computational overhead of MCMC sampling; sensitivity to proposal distribution and pruning thresholds.
+ 
+ ## Background
+-3DGS-MCMC was introduced as a refinement to the original 3D Gaussian Splatting densification heuristic, which relied on noisy positional gradient magnitudes [S1, unofficial]. It reinterprets the Gaussian cloud as samples from an underlying probability distribution and uses MCMC sampling to guide the life cycle of primitives [S1, unofficial]. This approach aims to provide a more principled and stable method for densification and pruning.
++3DGS-MCMC was introduced as an improvement to the densification process in 3D Gaussian Splatting, replacing the original heuristic approach with an MCMC-based method [S2]. It reinterprets the Gaussian cloud as samples from an underlying probability distribution, using Markov Chain Monte Carlo sampling to guide the life cycle of primitives [S1, unofficial]. This approach was notably adopted in research on underwater volumetric rendering to capture high-frequency details [S2].
+ 
+ ## Sources
+-[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
++[S2] Gaussian splashing enables direct volumetric rendering underwater, https://doi.org/10.1038/s41598-026-56917-4, fetched 2026-10-27

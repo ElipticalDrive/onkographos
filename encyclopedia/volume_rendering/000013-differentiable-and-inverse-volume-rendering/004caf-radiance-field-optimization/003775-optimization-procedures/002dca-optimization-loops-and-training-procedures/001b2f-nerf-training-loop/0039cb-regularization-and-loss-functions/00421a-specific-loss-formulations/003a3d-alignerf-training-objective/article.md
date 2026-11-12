@@ -3,98 +3,71 @@
 Also called: Alignment-Aware Patch Matching Loss + High-Frequency Aware Loss
 
 ## Overview
-AligNeRF replaces the standard per-pixel Mean Squared Error (MSE) loss with a combination of a patch-based MSE loss and a high-frequency-aware loss to mitigate artifacts caused by camera motion and misalignment in unbounded real-world scenes [S1]. It sets itself apart from siblings like [NeRF-XL Multi-GPU Distortion Loss](10377-nerf-xl-multi-gpu-distortion-loss.md) by explicitly addressing temporal/spatial misalignment through iterative warping and feature-space constraints rather than geometric distortion penalties [S1].
+AligNeRF replaces the standard per-pixel Mean Squared Error (MSE) loss with a composite objective combining a patch-based MSE loss and a high-frequency aware loss [S1]. It solves the problem of high-frequency detail loss caused by misalignment between rendered images and ground truth in unbounded, dynamic scenes [S1]. Unlike [NeRF-XL Multi-GPU Distortion Loss](10377-nerf-xl-distortion-loss.md) which addresses geometric distortion, or [Adaptive Rendering Loss Regularization](10454-adaptive-rendering-loss-regularization.md) which adapts weights dynamically, AligNeRF explicitly accounts for spatial misalignment via patch matching and frequency-domain consistency [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** Rendered image $\mathbf{C}$, ground truth image $I$, and a flow field $\mathbf{F}$ estimating the displacement between the rendered view and the ground truth view [S1].
-*   **Outputs:** Scalar loss value $\mathcal{L}_{\text{total}}$ used for backpropagation [S1].
+The method operates within the augmented loss structure defined in [Specific Loss Formulations](10636-specific-loss-formulations.md). The total loss $\mathcal{L}_{\text{total}}$ is defined as:
 
-**Data Structures:**
-*   **Flow Field $\mathbf{F}$:** A 2D vector field mapping pixels from the rendered image coordinates to the ground truth image coordinates [S1].
-*   **Feature Maps:** Extracted from the first block of a pre-trained VGG-19 network [S1].
-
-**Method:**
-The total loss is defined as [S1]:
 $$ \mathcal{L}_{\text{total}} = \mathcal{L}_{PM} + w \cdot \mathcal{L}_{HF} $$
 
-1.  **Alignment (Warping):** The ground truth image $I$ is warped using the estimated flow field $\mathbf{F}$ to align it with the rendered image $\mathbf{C}$. Let $I_{\text{warped}}$ be the aligned ground truth [S1].
-2.  **Patch-Based MSE ($\mathcal{L}_{PM}$):** Instead of comparing individual pixels, the loss compares local patches. The sources indicate this accounts for misalignment [S1]. While the exact patch size is not explicitly defined in the provided text, it replaces the standard per-pixel MSE [S1].
-3.  **High-Frequency Loss ($\mathcal{L}_{HF}$):** This term operates in the feature space of a shallow VGG-19 network. Let $\Phi(\cdot)$ denote the feature extraction of the first block of VGG-19. The loss is computed as the MSE between the features of the rendered image and the warped ground truth [S1]:
-    $$ \mathcal{L}_{HF} = || \Phi(\mathbf{C}) - \Phi(I_{\text{warped}}) ||_2^2 $$
-    where $C, W, H$ are the dimensions of the extracted feature maps [S1].
-4.  **Weighting:** The hyperparameter $w$ scales the high-frequency loss.
+where $\mathcal{L}_{PM}$ is the Patch Matching loss and $\mathcal{L}_{HF}$ is the High-Frequency loss [S1]. The weight $w$ is a hyperparameter, typically set to 0.05 [S1].
 
-**Parameters:**
-*   $w$: Weight for the high-frequency loss. Typical value: 0.05 [S1].
+**Inputs and Outputs:**
+*   **Inputs:** Rendered image $\mathbf{C}$, Ground truth image $I$, Pre-trained VGG-19 feature extractor.
+*   **Outputs:** Scalar loss value $\mathcal{L}_{\text{total}}$.
+
+**Data Structures:**
+*   **Feature Maps:** Extracted from VGG-19. Let $C, W, H$ be the channels, width, and height of the feature maps [S1].
+
+**Steps:**
+1.  **Patch Matching Loss ($\mathcal{L}_{PM}$):** Compute the MSE between the rendered image $\mathbf{C}$ and the ground truth $I$ over local patches. This accounts for misalignment by comparing local structures rather than strict pixel-wise correspondence [S1].
+2.  **High-Frequency Loss ($\mathcal{L}_{HF}$):** Extract features from a pre-trained VGG-19 model for both $\mathbf{C}$ and $I$. Compute the MSE between these feature maps [S1]. This preserves real textures and improves high-frequency details [S1].
+3.  **Combine:** Sum $\mathcal{L}_{PM}$ and $w \cdot \mathcal{L}_{HF}$ [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def alignerf_loss(rendered_image, ground_truth_image, flow_field, w=0.05):
-    """
-    Compute AligNeRF training objective.
+def alignerf_loss(rendered_img, gt_img, vgg_extractor, w=0.05):
+    # Patch Matching Loss: Standard MSE on pixel values
+    # Note: Sources describe this as "patch-based MSE" but do not provide
+    # explicit patch extraction logic. Standard MSE is used as the baseline
+    # for the "PM" component in the equation L_PM + w * L_HF [S1].
+    l_pm = mean_squared_error(rendered_img, gt_img)
     
-    Args:
-        rendered_image (Tensor): Rendered color image C.
-        ground_truth_image (Tensor): Ground truth image I.
-        flow_field (Tensor): 2D flow field F for warping.
-        w (float): Weight for high-frequency loss (default 0.05).
-        
-    Returns:
-        Tensor: Total loss scalar.
-    """
-    # Step 1: Warp ground truth to align with rendered image
-    # Note: Exact warping implementation depends on the library (e.g., grid_sample)
-    # [G] Assuming a standard differentiable warping function exists
-    warped_gt = warp(ground_truth_image, flow_field)
+    # High-Frequency Loss: Feature-space MSE using VGG-19
+    # Extract features from the pre-trained VGG-19 model [S1]
+    feat_rendered = vgg_extractor(rendered_img)
+    feat_gt = vgg_extractor(gt_img)
     
-    # Step 2: Compute Patch-Based MSE
-    # [G] The source mentions "patch-based MSE" but does not specify patch size or stride.
-    # A standard implementation would extract patches and compute MSE.
-    # Here we assume a placeholder function `patch_mse` that handles the patching logic.
-    l_pm = patch_mse(rendered_image, warped_gt)
+    # Compute MSE between feature maps
+    # C, W, H are dimensions of the extracted feature maps [S1]
+    l_hf = mean_squared_error(feat_rendered, feat_gt)
     
-    # Step 3: Compute High-Frequency Loss using VGG-19 features
-    # Extract features from the first block of pre-trained VGG-19
-    # [G] `extract_vgg_features` returns the output of the first convolutional block
-    features_rendered = extract_vgg_features(rendered_image)
-    features_warped = extract_vgg_features(warped_gt)
-    
-    l_hf = mean_squared_error(features_rendered, features_warped)
-    
-    # Step 4: Combine losses
+    # Total loss
     total_loss = l_pm + w * l_hf
-    
     return total_loss
 ```
 
+**Parameters:**
+*   $w$: Weight for the high-frequency loss. Typical value: 0.05 [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Misalignment:** If alignment is poor, standard per-pixel MSE fails to recover high-frequency details [S1]. The patch-based approach mitigates this [S1].
+*   **VGG Features:** The choice of VGG layer affects the frequency content captured. The source specifies "first block of a pre-trained VGG-19 model" [S1].
+
 ## Subtopics
 
-### 2D Mask Matching
-*   **Definition:** Aligns 2D instance masks from different views to the same 3D instance detected by NeRF-RCNN to ensure multi-view consistency for instance field training [S2].
-*   **When to choose:** Use when training instance-aware NeRFs (like Instance-NeRF) where consistent semantic labeling across views is required [S2].
-*   **Link:** [Instance Neural Radiance Field](https://doi.org/10.1109/ICCV51070.2023.00079) [S2].
-*   **Details:**
-    1.  Use Mask2Former (pretrained on COCO) to create initial 2D segmentation [S2].
-    2.  Filter out background masks using a COCO-to-dataset class mapping [S2].
-    3.  Project 3D masks from NeRF-RCNN to the corresponding image spaces [S2].
-    4.  Compute Intersection over Union (IoU) between each predicted 2D mask and projected 2D mask [S2].
-    5.  Assign each predicted mask to the instance with the highest IoU [S2].
-    6.  **Pitfall:** Predicted masks with IoU $\le 0.05$ with any projected mask are treated as unlabeled areas and excluded from training [S2].
+### [2D Mask Matching](10596-2d-mask-matching.md)
+Aligns 2D instance masks across views for multi-view consistency.
 
 ## Operating characteristics
-*   **Time Complexity:** Increased due to the iterative alignment process (flow estimation and warping) and the additional VGG feature extraction [S1].
-*   **Memory Complexity:** Requires storing the flow field and potentially intermediate feature maps from the VGG network [S1].
-*   **Strengths:** Recovers high-frequency details that are lost due to misalignment in unbounded scenes; acts as a plug-and-play modification for existing pipelines like mip-NeRF 360 [S1].
-*   **Limitations:** Relies on the accuracy of the flow estimation; if alignment fails, the warping may introduce artifacts [S1].
-*   **When to use:** Outdoor scenes with complex textures and subtle motion (e.g., mip-NeRF 360 dataset) [S1].
-*   **When not:** Scenes with static cameras and no motion blur or misalignment, where standard MSE suffices [S1].
+*   **Strengths:** Improves high-frequency details while preserving real textures [S1]. Effective in challenging unbounded real-world scenes with complex textures and subtle motion [S1].
+*   **Limitations:** Requires a pre-trained VGG-19 model [S1]. Computationally more expensive than pure pixel MSE due to feature extraction [S1].
+*   **Performance:** Demonstrated on outdoor scenes from mip-NeRF 360 (e.g., "bicycle", "flowers", "treehill", "garden", "stump") [S1]. Scaling the MLP channels to 4096 with iterative alignment allows recovery of more detail compared to 1024 channels without warping [S1].
 
 ## Background
-AligNeRF was introduced in 2023 by the authors of the paper "AligNeRF: High-Fidelity Neural Radiance Fields via Alignment-Aware Training" [S1]. It was developed to address the limitations of mip-NeRF 360 in unbounded real-world scenes where camera motion causes misalignment between the rendered views and the ground truth training images [S1]. The method builds on the observation that misalignment prevents the recovery of high-frequency details, even when increasing model capacity [S1].
+AligNeRF was introduced to address the limitations of mip-NeRF 360 in unbounded scenes [S1]. It replaces the standard per-pixel MSE loss with a combination of patch-based MSE and shallow VGG feature-space loss [S1]. The method is designed as a simple plug-and-play modification [S1].
 
 ## Sources
 [S1] AligNeRF: High-Fidelity Neural Radiance Fields via Alignment-Aware Training, https://doi.org/10.1109/cvpr52729.2023.00013, fetched 2026-10-26
-[S2] Instance Neural Radiance Field, https://doi.org/10.1109/ICCV51070.2023.00079, fetched 2026-10-29

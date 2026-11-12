@@ -7,21 +7,21 @@ A queue-based system to batch and process chunk mesh rebuilds asynchronously or 
 
 ## How it works
 **Inputs:**
-- `RebuildQueue`: List of `ChunkIndex` values pending regeneration.
-- `RebuildSet`: Set of `ChunkIndex` values currently queued to prevent duplicates.
-- `ActiveChunks`: Set of `ChunkIndex` values currently loaded.
-- `ChunkCache`: Map from `ChunkIndex` to raw voxel block data.
-- `WorldMesh`: Mesh manager object.
-- `PlayerPosition`: 2D coordinates $(x, z)$ of the player.
+- `RebuildQueue`: List of `ChunkIndex` values pending regeneration [S1, unofficial].
+- `RebuildSet`: Set of `ChunkIndex` values currently queued to prevent duplicates [S1, unofficial].
+- `ActiveChunks`: Set of `ChunkIndex` values currently loaded [S1, unofficial].
+- `ChunkCache`: Map from `ChunkIndex` to raw voxel block data [S1, unofficial].
+- `WorldMesh`: Mesh manager object [S1, unofficial].
+- `PlayerPosition`: 2D coordinates $(x, y)$ of the player [S1, unofficial].
 
 **Outputs:**
 - Updated meshes for processed chunks [S1, unofficial].
 - Collision state updates for chunks near the player [S1, unofficial].
 
 **Data Structures:**
-- `ChunkIndex`: 2D integer coordinate $(x, z)$ or equivalent identifier.
-- `RebuildQueue`: LIFO stack.
-- `RebuildSet`: Hash set for $O(1)$ lookup.
+- `ChunkIndex`: 2D integer coordinate $(x, y)$ or equivalent identifier [S1, unofficial].
+- `RebuildQueue`: LIFO stack [S1, unofficial].
+- `RebuildSet`: Hash set for $O(1)$ lookup [G].
 
 **Steps:**
 1. **Enqueue Modification:** When a chunk is modified, check if its `ChunkIndex` exists in `RebuildSet`. If not, add `ChunkIndex` to both `RebuildSet` and `RebuildQueue` [S1, unofficial].
@@ -52,19 +52,11 @@ def ProcessRebuildQueue(RebuildQueue, RebuildSet, ActiveChunks, ChunkCache, Worl
     if Data is None:
         return
 
-    Mesh = PrepareChunkMesh(Data)
+    Mesh = PrepareChunkMesh(Data)  # [G] Generates mesh geometry from raw block data
     WorldMesh.UpdateChunk(ChunkIndex, Mesh)
 
-    if abs(ChunkIndex.x - PlayerPosition.x) <= 1 and abs(ChunkIndex.z - PlayerPosition.z) <= 1:
-        EnableCollision(ChunkIndex)
-
-def PrepareChunkMesh(Data):
-    # Generates mesh geometry from raw block data [G]
-    return MeshGeometry(vertices=Data.vertices, indices=Data.indices)
-
-def EnableCollision(ChunkIndex):
-    # Enables collision flags for the chunk [G]
-    ChunkCollisionState[ChunkIndex] = True
+    if abs(ChunkIndex.x - PlayerPosition.x) <= 1 and abs(ChunkIndex.y - PlayerPosition.y) <= 1:
+        ChunkCollisionState[ChunkIndex] = True  # [G] Enables collision flags for the chunk
 ```
 
 **Edge Cases:**
@@ -75,16 +67,16 @@ def EnableCollision(ChunkIndex):
 ## Subtopics
 
 ### [Asynchronous Chunk Loading](4216-asynchronous-chunk-loading.md)
-Offloads mesh generation to background threads to prevent frame stutter. Choose when frame rate stability is critical.
+Asynchronous Chunk Loading offloads the computationally expensive process of generating chunk meshes from the main execution thread to a background thread pool, preventing frame stutter and maintaining frame rate in large voxel worlds. It solves the problem of blocking the game loop during mesh generation by using futures and task queues to synchronize data transfer between the generation thread and the rendering or game thread. Unlike synchronous loading, which halts execution until the mesh is ready, this method allows the player to continue interacting with the world while chunks are being generated in the background.
 
 ### [Multithreaded Job Queue (Generation & Remeshing)](6848-multithreaded-job-queue-generation-remeshing.md)
-Distributes tasks across CPU threads using LIFO priority. Choose for high-performance CPU utilization; builds on this method.
+Distributes terrain generation and meshing tasks across multiple CPU threads using a LIFO job queue with priority handling. It solves the bottleneck of synchronous chunk processing by decoupling job submission from execution, allowing the main thread to continue while workers process geometry. Unlike [Asynchronous Chunk Loading](4216-asynchronous-chunk-loading.md) which focuses on data transfer, this method focuses on CPU-intensive computation (generation and meshing). It builds on [Chunk Mesh Rebuild Queue](3911-chunk-mesh-rebuild-queue.md) by providing the actual parallel execution engine.
 
 ## Operating characteristics
-Time and memory complexity are not given in the sources. Measured performance, scaling, strengths, limitations, and usage conditions are not given in the sources.
+Time and memory complexity are not given in the sources [S1, unofficial]. Measured performance, scaling, strengths, limitations, and usage conditions are not given in the sources [S1, unofficial].
 
 ## Background
-Origin and historical development are not given in the sources. Common usage patterns are not given in the sources.
+Origin and historical development are not given in the sources [S1, unofficial]. Common usage patterns are not given in the sources [S1, unofficial].
 
 ## Sources
 [S1] HawkDev15/VoxelWorld, https://github.com/HawkDev15/VoxelWorld, fetched 2026-10-28 (unofficial)

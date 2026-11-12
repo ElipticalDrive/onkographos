@@ -1,0 +1,122 @@
+# Light Evaluation for SDF Faces
+
+
+## Overview
+This method applies lighting (diffuse, specular, and ambient) to a face color based on the surface normal and light direction [S1, unofficial]. It is designed for SDF-based rendering where the "face" represents a discretized surface element. It differs from general volume shading by operating directly on the extracted face geometry's color and alpha, using a simplified analytic lighting model rather than full ray-marched integration [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `faceColor`: A `float4` containing the base RGB color and alpha ($\alpha$) of the surface face.
+- `n`: The surface normal vector ($\mathbf{n}$), typically derived from the SDF gradient [G].
+- `_LightAngle`: A scalar or vector defining the light direction, encoded via sine/cosine parameters.
+- `_Diffuse`: A scalar diffuse intensity factor.
+- `_Ambient`: A scalar ambient intensity factor.
+
+**Outputs:**
+- `color`: A `float4` representing the final lit color and alpha.
+
+**Data Structures:**
+- The normal $\mathbf{n}$ is assumed to be a normalized 3D vector.
+- The light direction $\mathbf{l}$ is derived from `_LightAngle`.
+
+**Steps:**
+1. **Normal Adjustment:** Set the z-component of the normal to its absolute value:
+   $$ n_z = |n_z| $$
+   This ensures the normal points "up" relative to the face orientation, simplifying subsequent lighting calculations [S1, unofficial].
+
+2. **Light Direction Construction:** Construct the light direction vector $\mathbf{l}$ from the sine and cosine of `_LightAngle`. Let $\theta$ be the angle.
+   $$ \mathbf{l} = (\cos(\theta), \sin(\theta), 0) $$
+   (Note: The exact 3D construction depends on the coordinate system, but the source implies a 2D angle mapping to a 3D vector for shading [S1, unofficial]).
+
+3. **Specular Calculation:** Compute the specular component using a helper function `GetSpecular(n, l)`. This function typically computes a Phong or Blinn-Phong specular highlight based on the view and light directions [S1, unofficial].
+   $$ \text{specular} = \text{GetSpecular}(\mathbf{n}, \mathbf{l}) $$
+
+4. **Base Color Clamping:** Ensure the base color is non-negative:
+   $$ \mathbf{c}_{base} = \max(\text{faceColor.rgb}, 0) $$
+
+5. **Specular Addition:** Add the specular contribution modulated by the face's alpha:
+   $$ \mathbf{c}_{lit} = \mathbf{c}_{base} + \text{specular} \times \text{faceColor.a} $$
+
+6. **Diffuse Modulation:** Multiply the result by the diffuse factor, which is modulated by the dot product of the normal and light direction:
+   $$ \mathbf{c}_{lit} = \mathbf{c}_{lit} \times (1 - \mathbf{n} \cdot \mathbf{l}) \times \_Diffuse $$
+   *Note: The source formula `(1 - dot(n, light))` is unusual for standard diffuse lighting (which is typically $\max(0, \mathbf{n} \cdot \mathbf{l})$). This suggests a specific artistic or inverse-lighting model where light intensity decreases as the normal aligns with the light, or it may be a typo in the source for a specific effect [S1, unofficial].*
+
+7. **Ambient/Height Modulation:** Multiply by a term that blends between `_Ambient` and full brightness based on the squared z-component of the normal:
+   $$ \mathbf{c}_{final} = \mathbf{c}_{lit} \times \text{lerp}(\_Ambient, 1, n_z^2) $$
+   This creates a height-based lighting effect where faces pointing more upwards ($n_z \approx 1$) are brighter, and those pointing sideways ($n_z \approx 0$) are darker [S1, unofficial].
+
+8. **Output Assembly:** Set the final color:
+   $$ \text{color} = (\mathbf{c}_{final}, \text{faceColor.a}) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def evaluate_light_face(face_color, normal, light_angle, diffuse, ambient):
+    # 1. Normal Adjustment
+    n = normal.copy()
+    n.z = abs(n.z)
+    
+    # 2. Light Direction Construction
+    # Assuming light_angle provides sin/cos components directly or via a function
+    # The source says "normalize light vector from sin/cos of _LightAngle"
+    # We assume a helper or direct construction.
+    # If _LightAngle is a single angle in XY plane:
+    sin_val = sin(light_angle)
+    cos_val = cos(light_angle)
+    light_dir = normalize(float3(cos_val, sin_val, 0.0))
+    
+    # 3. Specular Calculation
+    # GetSpecular is a black-box helper in the source, typically Blinn-Phong
+    # We assume it takes normal and light direction
+    specular = get_specular(n, light_dir)
+    
+    # 4. Base Color Clamping
+    base_rgb = max(face_color.rgb, 0.0)
+    
+    # 5. Specular Addition
+    lit_color = base_rgb + specular * face_color.a
+    
+    # 6. Diffuse Modulation
+    # Note: Formula is (1 - dot(n, light)) * _Diffuse
+    dot_nl = dot(n, light_dir)
+    lit_color = lit_color * (1.0 - dot_nl) * diffuse
+    
+    # 7. Ambient/Height Modulation
+    # lerp(Ambient, 1, n.z * n.z)
+    height_factor = n.z * n.z
+    ambient_blend = lerp(ambient, 1.0, height_factor)
+    final_color = lit_color * ambient_blend
+    
+    # 8. Output
+    return float4(final_color, face_color.a)
+```
+
+## Subtopics
+
+### Gradient-Based Surface Detection with Lighting
+This variant integrates lighting directly into the SDF gradient evaluation loop [S2, unofficial]. Instead of pre-computing normals, it calculates the gradient at the current ray-marched position to determine the normal dynamically.
+- **Steps:**
+  1. Calculate the gradient at the current position: $\mathbf{g} = \nabla f(\mathbf{p})$.
+  2. Calculate the magnitude: $m = \|\mathbf{g}\|$.
+  3. Normalize to get the normal: $\mathbf{n} = \mathbf{g} / m$.
+  4. Calculate lighting using the color, normal, light direction, and view direction.
+  5. Set alpha to 1.0 and break the marching loop.
+- **Parameters:**
+  - `_MinGradient`: Minimum gradient magnitude threshold to consider a voxel as a surface.
+  - `_MinVal`: Minimum density value threshold for surface detection.
+  - `_MaxVal`: Maximum density value threshold for surface detection.
+- **Pitfalls:** If the gradient magnitude is zero or very small, division by zero occurs during normalization. The code assumes `gradMag > _MinGradient` before normalizing, implying a check or clamp is handled elsewhere or `_MinGradient` prevents zero division [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per face evaluation. The lighting calculation involves basic vector operations and trigonometric functions.
+- **Memory Complexity:** $O(1)$ auxiliary memory.
+- **Strengths:** Simple to implement; provides immediate visual feedback for SDF faces; integrates well with voxel-based rendering pipelines [S1, S2, unofficial].
+- **Limitations:** The diffuse model $(1 - \mathbf{n} \cdot \mathbf{l})$ is non-standard and may produce unintuitive results for general lighting scenarios [S1, unofficial]. Relies on accurate normal estimation, which can be noisy in low-resolution SDFs [S2, unofficial].
+
+## Background
+This method originates from implementations in Unity-based SDF renderers, specifically the `unity-nanovdb-renderer` and `UnityVolumeRendering` projects [S1, S2, unofficial]. It is used in real-time volume rendering contexts where SDFs are used to represent complex geometries, and face-based shading is preferred for performance or stylistic reasons.
+
+## Sources
+[S1] andersblomqvist/unity-nanovdb-renderer, https://github.com/andersblomqvist/unity-nanovdb-renderer, fetched 2026-10-27 (unofficial)
+[S2] GitHub - mlavik1/UnityVolumeRendering: Volume rendering, implemented in ..., https://github.com/mlavik1/UnityVolumeRendering, fetched 2026-10-28 (unofficial)

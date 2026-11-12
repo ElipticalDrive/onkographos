@@ -1,0 +1,163 @@
+# Volume-Augmented NeRF
+
+Also called: Fluid volume augmented NeRF, Volume-Augmented Radiance Field
+
+## Overview
+Volume-Augmented NeRF is a neural radiance field variant designed for dynamic scenes, specifically fluid dynamics, by binding explicit fluid volume values to sample points [S1, unofficial]. Unlike standard NeRF which assumes static scenes, this method allows the renderer to learn density and color based on an explicit fluid distribution provided by a differentiable simulator [S1, unofficial]. It sets itself apart from static NeRF variants by incorporating a third input channel (fluid volume) alongside position and view direction, enabling the network to model temporal changes in density and radiance caused by fluid flow [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+The network $F_\Psi$ takes three inputs:
+1.  Positional encoded 3D point $\gamma(\mathbf{x})$.
+2.  Fluid volume value $v$ at position $\mathbf{x}$.
+3.  Positional encoded viewing direction $\gamma(\mathbf{d})$.
+
+It outputs:
+1.  Volume density $\sigma$.
+2.  RGB color $\mathbf{c}$.
+
+**Data Structures and Layout:**
+The architecture consists of fully connected layers. The specific layout is defined as follows [S1, unofficial]:
+*   **Input Layer:** Concatenation of $\gamma(\mathbf{x})$ and $v$.
+*   **Body Network:** 8 fully connected layers with ReLU activation, each having 256 channels.
+*   **Skip Connection:** The initial input ($\gamma(\mathbf{x})$ and $v$) is concatenated to the activation of the 5th layer.
+*   **Density/Feature Layer:** An additional fully connected layer outputs a 256-dimensional feature vector and the density $\sigma$. Density is rectified using ReLU to ensure non-negativity.
+*   **View-Dependent Layer:** The 256-dimensional feature vector is concatenated with $\gamma(\mathbf{d})$. This combined vector passes through one fully connected ReLU layer with 128 channels.
+*   **Output Layer:** A final fully connected layer with sigmoid activation outputs the RGB color $\mathbf{c}$.
+
+**Numbered Steps:**
+1.  **Fluid Volume Assignment:** Assign the fluid volume field $V$ inferred by a neural Euler simulator into the scene space [S1, unofficial].
+2.  **Volume Interpolation:** For each sampled point $\mathbf{x}_i$ along a ray, perform trilinear interpolation on the volume field $V$ to capture the corresponding fluid volume value $v_i$ [S1, unofficial].
+3.  **Network Forward Pass:** Input $\mathbf{x}_i$, $\mathbf{d}$, and $v_i$ into $F_\Psi$ to regress density $\sigma_i$ and color $\mathbf{c}_i$ [S1, unofficial].
+    *   Concatenate $\gamma(\mathbf{x}_i)$ and $v_i$.
+    *   Pass through 8 FC layers (256 channels, ReLU).
+    *   Concatenate original input to the 5th layer's output.
+    *   Pass through an FC layer to get $\sigma_i$ (ReLU) and a 256-dim feature vector.
+    *   Concatenate feature vector with $\gamma(\mathbf{d})$.
+    *   Pass through an FC layer (128 channels, ReLU).
+    *   Output $\mathbf{c}_i$ via sigmoid layer.
+4.  **Volume Rendering:** Integrate the samples along the ray using the standard volumetric rendering equation [S1, unofficial]:
+    $$
+    \hat{C}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+    $$
+    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance, $\delta_i$ is the distance between adjacent samples, and $\mathbf{c}_i$ is the color [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class VolumeAugmentedNeRF(nn.Module):
+    def __init__(self, pos_enc_dim=15, view_enc_dim=15):
+        """
+        pos_enc_dim: Number of sinusoidal frequencies for positional encoding (D).
+        view_enc_dim: Number of sinusoidal frequencies for view direction encoding (D).
+        """
+        super().__init__()
+        self.pos_enc_dim = pos_enc_dim
+        self.view_enc_dim = view_enc_dim
+        
+        # Input dimension: 2*D (pos) + 1 (volume)
+        input_dim = 2 * pos_enc_dim + 1
+        
+        # Body network: 8 layers of 256 channels
+        self.body_layers = nn.ModuleList([
+            nn.Linear(input_dim if i == 0 else 256, 256)
+            for i in range(8)
+        ])
+        
+        # Density and Feature layer: 256 -> 256 + 1
+        self.df_layer = nn.Linear(256, 257) # 256 features + 1 density
+        
+        # View-dependent layer: (256 + 2*D) -> 128
+        vd_input_dim = 256 + 2 * view_enc_dim
+        self.vd_layer = nn.Linear(vd_input_dim, 128)
+        
+        # Output layer: 128 -> 3 (RGB)
+        self.color_layer = nn.Linear(128, 3)
+
+    def forward(self, x, v, d):
+        """
+        x: (N, 3) 3D positions
+        v: (N,)   Fluid volume values
+        d: (N, 3) View directions
+        """
+        # Positional Encoding for x
+        # Assuming standard NeRF positional encoding function
+        gamma_x = positional_encoding(x, self.pos_enc_dim)
+        
+        # Concatenate pos encoding and volume
+        # v needs to be reshaped to (N, 1)
+        input_body = torch.cat([gamma_x, v.unsqueeze(1)], dim=1)
+        
+        # Body Network
+        h = input_body
+        for i, layer in enumerate(self.body_layers):
+            h = F.relu(layer(h))
+            # Skip connection to 5th layer (index 4)
+            if i == 4:
+                h = torch.cat([h, input_body], dim=1)
+        
+        # Density and Feature Layer
+        df_out = self.df_layer(h)
+        feature_vec = df_out[:, :256]
+        sigma_raw = df_out[:, 256:]
+        # Ensure non-negative density
+        sigma = F.relu(sigma_raw)
+        
+        # View-dependent processing
+        gamma_d = positional_encoding(d, self.view_enc_dim)
+        vd_input = torch.cat([feature_vec, gamma_d], dim=1)
+        vd_out = F.relu(self.vd_layer(vd_input))
+        
+        # Color Output
+        color = torch.sigmoid(self.color_layer(vd_out))
+        
+        return sigma, color
+
+def positional_encoding(x, num_frequencies):
+    """
+    Standard NeRF positional encoding.
+    x: (N, 3)
+    Returns: (N, 2 * 3 * num_frequencies)
+    """
+    # Implementation details of positional_encoding are standard and omitted for brevity
+    # It typically involves sin/cos of x * 2^i for i in range(num_frequencies)
+    pass
+```
+
+**Parameters:**
+*   Hidden layer size for the first 8 layers: 256 channels [S1, unofficial].
+*   Hidden layer size for the view-dependent layer: 128 channels [S1, unofficial].
+*   Density rectification: ReLU [S1, unofficial].
+*   Color activation: Sigmoid [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Fluid Volume Availability:** The method requires a pre-computed or simultaneously simulated fluid volume field $V$. If the simulator is not differentiable or not coupled, the gradient flow from the renderer to the simulator is broken [S1, unofficial].
+*   **Interpolation Artifacts:** Trilinear interpolation of the volume field $V$ may introduce smoothing artifacts if the volume field resolution is low relative to the ray sampling density [S1, unofficial].
+*   **Dynamic Consistency:** The method assumes the fluid volume field accurately represents the physical state at the sampled time step. Mismatches between the simulator's time step and the renderer's sampling can lead to visual inconsistencies [S1, unofficial].
+
+## Subtopics
+
+### Differentiable Fluid Simulation
+A method that couples a neural Euler simulator with the renderer, allowing gradients to flow from the image loss back to the simulator parameters [S1, unofficial]. Choose this when the goal is to infer fluid dynamics from video data rather than just rendering known fluid states.
+
+### Inverse Rendering
+The broader framework where the renderer is used to optimize scene parameters (like fluid properties) based on observed images [S1, unofficial]. Choose this when ground truth geometry or density is unavailable, but image observations are.
+
+## Operating characteristics
+*   **Time Complexity:** The network forward pass is $O(N \cdot L \cdot C)$, where $N$ is the number of samples per ray, $L$ is the number of layers (9 total), and $C$ is the channel size (256/128). The trilinear interpolation adds a constant overhead per sample.
+*   **Memory Complexity:** The model stores weights for the fully connected layers. The fluid volume field $V$ must be stored in memory, typically as a 3D grid or voxel structure, which scales with the spatial resolution of the simulation domain.
+*   **Strengths:** Enables rendering of dynamic fluid scenes that change over time; bridges the gap between physics-based simulation and appearance-based rendering; allows for inverse rendering of fluid properties.
+*   **Limitations:** Restricted to scenes where fluid volume can be explicitly defined and interpolated; requires a differentiable simulator for end-to-end training; computationally expensive due to the coupling of simulation and rendering.
+*   **When to use:** Dynamic fluid scenes (e.g., water, smoke) where physical simulation is available or learnable.
+*   **When not to use:** Static scenes (use standard NeRF); scenes without clear volumetric density changes (e.g., solid objects with complex textures but no internal volume variation).
+
+## Background
+Volume-Augmented NeRF was introduced in the paper "Inferring Fluid Dynamics via Inverse Rendering" [S1, unofficial]. It extends the original NeRF architecture [Mildenhall et al., 2020] to handle dynamic scenes by incorporating fluid volume information. The method is part of a joint differentiable framework that combines a neural Euler simulator with the radiance field renderer, allowing for the inference of fluid dynamics from image sequences [S1, unofficial]. It is particularly relevant in computer graphics and vision applications involving fluid simulation and inverse rendering.
+
+## Sources
+[S1] Inferring Fluid Dynamics via Inverse Rendering, https://doi.org/10.48550/arxiv.2304.04446, fetched 2026-10-26 (unofficial)

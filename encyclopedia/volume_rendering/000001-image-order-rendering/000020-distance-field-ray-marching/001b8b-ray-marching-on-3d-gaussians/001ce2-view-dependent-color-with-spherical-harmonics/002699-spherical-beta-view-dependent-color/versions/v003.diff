@@ -1,0 +1,250 @@
+--- v002.md
++++ v003.md
+@@ -1,118 +1,168 @@
+ # Spherical Beta View-Dependent Color
+ 
+-Also called: Spherical Beta lobes
++Also called: Beta Splatting, Spherical Beta (SB) appearance model, Spherical Beta lobes
+ 
+ ## Overview
+-Spherical Beta (SB) is a specular model that adds explicit specular lobes on top of the base or Spherical Harmonic (SH) color to model view-dependent appearance in 3D Gaussian Splatting [S1, unofficial]. It is derived from Deformable Beta Splatting (Liu et al., SIGGRAPH 2025) [S1, unofficial]. Unlike SH, which represents the full view-dependent function, SB uses a small number of explicit lobes, offering higher PSNR and significantly smaller file sizes than SH degree 3 [S1, unofficial].
++Spherical Beta (SB) is a specular appearance model that adds explicit specular lobes on top of a diffuse base color, used for view-dependent color in 3D Gaussian Splatting [S1, S2, unofficial]. It is distinct from Spherical Harmonics (SH) by using a parametric lobe function rather than a global basis expansion, allowing for sharper highlights with fewer parameters [S2, unofficial]. It is orthogonal to SH, where SH (typically degree 0) supplies the diffuse base and SB adds the specular component [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Gaussian splat parameters including base color or SH coefficients, and optional SB lobe parameters (axis angles, sharpness, color) [S1, unofficial].
+-*   **Output:** Final view-dependent color for the splat [S1, unofficial].
++### Inputs and Outputs
++**Inputs:**
++- Gaussian splat parameters: position, covariance (or scale/rotation), opacity, and base color.
++- SH coefficients (optional, typically degree 0 for SB-only specular, or degree 3 for hybrid) [S2, unofficial].
++- SB lobe parameters: number of lobes ($N_{lobes}$), axis direction, sharpness, and color [S1, S2, unofficial].
+ 
+-**Data Structures:**
+-*   **Lobe Parameters:** Stored as half-floats (16-bit floats) [S1, unofficial].
+-*   **Storage Layout:** One 16-byte texel is stored per lobe per splat [S1, unofficial].
+-*   **Lobe Definition:** Each lobe is defined by an axis (converted from spherical angles to a 3D vector at load time), a sharpness scalar ($\beta$), and a 3D color vector ($rgb$) [S1, unofficial].
++**Outputs:**
++- Final pixel color for each splat during rasterization [S1, unofficial].
+ 
+-**Number of Lobes:**
+-*   Up to 4 lobes are supported [S1, unofficial].
+-*   Trainers default to 2 lobes [S1, unofficial].
+-*   Two lobes require 12 floats per splat [S1, unofficial].
++### Data Structures
++Each SB lobe stores 6 floats in the following order: $[r, g, b, \theta, \phi, \beta]$ [S2, unofficial].
++- $r, g, b$: Color components of the lobe.
++- $\theta, \phi$: Spherical angles defining the lobe axis direction.
++- $\beta$: Sharpness parameter.
+ 
+-**Algorithm Steps:**
+-1.  **Preprocessing (Load Time):** Convert lobe parameters from PLY properties (`sb_params_*`) [S1, unofficial]. Convert axis from spherical angles to a 3D direction vector [S1, unofficial]. Store parameters as half-floats [S1, unofficial]. If a splat has lobes but no SH, mark it for dynamic re-evaluation as the camera moves [S1, unofficial].
+-2.  **Rendering (Shader):** For each splat, compute the view direction vector $dir$ from the camera to the splat center [G]. Initialize $color$ to the base or SH color clamped to zero [S1, unofficial]. For each lobe $i$ (from 0 to $N-1$, where $N \le 4$), compute the dot product $d = \max(dot(dir, axis_i), 0.0)$ [S1, unofficial]. Compute the lobe contribution $L_i = pow(d, 4 \cdot \exp(\beta_i)) \cdot softplus(rgb_i)$ [S1, unofficial]. Add $L_i$ to $color$ [S1, unofficial]. Return $color$.
++During preprocessing (load time), lobe parameters are converted and stored as half floats (16-bit) [S1, unofficial]. One 16-byte texel is stored per lobe per splat [S1, unofficial].
+ 
+-**Formulas:**
+-*   Lobe Contribution:
+-    $$ L = pow(\max(dot(dir, axis), 0), 4 \cdot \exp(\beta)) \cdot softplus(rgb) $$
+-    *   $dir$: View direction vector [S1, unofficial].
+-    *   $axis$: Lobe axis vector [S1, unofficial].
+-    *   $\beta$: Sharpness parameter [S1, unofficial].
+-    *   $rgb$: Lobe color vector [S1, unofficial].
+-    *   $softplus(x) = \ln(1 + \exp(x))$ [G].
++### Numbered Steps
++1. **Preprocessing**: Convert lobe parameters (axis from spherical angles $\theta, \phi$, sharpness $\beta$, and activated color $rgb$) into half-floats [S1, unofficial].
++2. **Densification**: Handle the `sb_number` parameter through densification strategies (DefaultStrategy and MCMCStrategy) [S2, unofficial].
++3. **Rendering**: For each splat, compute the color contribution of each lobe [S1, unofficial].
++4. **Composition**: Add the lobe contributions to the base color (from SH or base color) [S1, unofficial].
++5. **Clamping**: Clamp the base color to zero before adding lobe contributions to prevent negative base colors from absorbing part of the highlight [S1, unofficial].
++6. **Export**: Export SB parameters to PLY files via additive properties named `sb_params_*`, matching the reference implementation's naming convention [S2, unofficial]. Leave standard `f_dc_*` / `f_rest_*` schema untouched [S2, unofficial].
+ 
+-**Parameters:**
+-*   Number of lobes: 2 (default), up to 4 [S1, unofficial].
+-*   Sharpness ($\beta$): Learned parameter [S1, unofficial].
++### Formulas
++The color contribution of each lobe is calculated as [S1, unofficial]:
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Negative Base Color:** The base/SH color is clamped to zero before adding lobes to prevent negative values from absorbing highlights [S1, unofficial].
+-*   **Dynamic Re-evaluation:** Splats with lobes but no SH must re-evaluate color as the camera moves [S1, unofficial].
+-*   **Format Support:** Only uncompressed PLY supports lobe data. Compressed PLY, SOG, and SPZ do not support lobe storage [S1, unofficial].
+-*   **Beta Kernel:** This method only implements the color lobes, not the Beta kernel (opacity falloff) [S1, unofficial].
++$$
++C_{lobe} = \text{softplus}(rgb) \cdot \max(\text{dot}(dir, axis), 0)^{4 \cdot \exp(\beta)}
++$$
+ 
+-**Pseudocode:**
++Where:
++- $dir$: View direction vector.
++- $axis$: Lobe axis direction vector derived from $\theta, \phi$.
++- $rgb$: Color components of the lobe.
++- $\beta$: Sharpness parameter.
++- $\text{softplus}(x) = \ln(1 + e^x)$ [S1, unofficial].
++
++The final color is:
++
++$$
++C_{final} = \max(C_{base}, 0) + \sum_{i=1}^{N_{lobes}} C_{lobe, i}
++$$
++
++Where $C_{base}$ is the color from SH degree 0 or base color [S1, unofficial].
++
++### Parameters
++- **Number of lobes ($N_{lobes}$)**: Up to 4 lobes are rendered. The trainers default to 2 lobes [S1, unofficial].
++- **sh_degree**: The degree of spherical harmonics used for the diffuse base. Typical value: 0 (for SB-only specular) or 3 (default in nerfstudio) [S2, unofficial].
++- **sb_number**: The number of SB lobes to use. Typical values: 0 (purely diffuse), 2 (Beta Splatting setting) [S2, unofficial].
++
++### Edge Cases and Pitfalls
++- **Negative Base Colors**: The base color must be clamped to zero before adding lobe contributions. Many splats have negative base colors, which would otherwise absorb part of the highlight [S1, unofficial].
++- **Format Support**: Compressed PLY, SOG, and SPZ formats currently do not support lobe data storage. Only uncompressed PLY is supported [S1, unofficial].
++- **Beta Kernel**: This implementation only covers the Spherical Beta color lobes, not the Beta kernel. The Beta kernel replaces the Gaussian falloff with opacity * $(1 - r^2)^\beta$ and a hard cutoff, and requires changes to quad extent, bounds/culling, and per-splat values. Files using the kernel will not render correctly with this PR [S1, unofficial].
++- **Splat with Lobes but no SH**: For splats with lobes but no SH, the color is re-evaluated as the camera moves [S1, unofficial].
++- **Rejection of Unsupported Formats**: The splat and ply_compressed formats reject SB lobes rather than dropping them silently [S2, unofficial].
++
++### Pseudocode
+ ```python
+-def evaluate_spherical_beta_color(splat, view_dir):
++def compute_spherical_beta_color(splat, view_dir):
+     """
+-    Evaluates the view-dependent color for a splat using Spherical Beta lobes.
++    Compute the final color for a splat using Spherical Beta lobes.
+     
+     Args:
+         splat: Object containing:
+-            - sh_coeffs: List of SH coefficients (optional)
+-            - base_color: RGB vector (optional)
+-            - lobes: List of lobe dictionaries, each with:
+-                - axis: 3D vector (unit length)
+-                - beta: float (sharpness)
+-                - rgb: 3D vector
+-        view_dir: 3D vector (direction from camera to splat)
++            - base_color: Color from SH degree 0 or base color (3 floats)
++            - lobes: List of lobe parameters, each being [r, g, b, theta, phi, beta]
++            - sb_number: Number of lobes to use
++        view_dir: View direction vector (3 floats)
+         
+     Returns:
+-        RGB color vector
++        Final color (3 floats)
+     """
+-    # Initialize color accumulator
+-    color = vec3(0.0)
++    # Clamp base color to zero to prevent absorption of highlights
++    base_color = max(splat.base_color, 0.0)
+     
+-    # Add base or SH color, clamped to zero
+-    if splat.sh_coeffs is not None:
+-        # Evaluate SH color from coefficients and view_dir [G]
+-        sh_color = vec3(0.0) # Placeholder for standard SH evaluation
+-        color = max(sh_color, vec3(0.0))
+-    elif splat.base_color is not None:
+-        color = max(splat.base_color, vec3(0.0))
++    total_lobe_color = [0.0, 0.0, 0.0]
+     
+-    # Add lobe contributions
+-    for lobe in splat.lobes:
+-        axis = lobe.axis
+-        beta = lobe.beta
+-        rgb = lobe.rgb
++    # Iterate over the specified number of lobes
++    for i in range(splat.sb_number):
++        lobe = splat.lobes[i]
++        r, g, b, theta, phi, beta = lobe
+         
+-        # Compute dot product, clamped to [0, 1]
+-        dot_val = max(dot(view_dir, axis), 0.0)
++        # Convert spherical angles to axis vector
++        axis = spherical_to_cartesian(theta, phi)
+         
+-        # Compute lobe power term: pow(max(dot(dir, axis), 0), 4 * exp(beta))
++        # Compute dot product
++        dot_product = dot(view_dir, axis)
++        
++        # Compute lobe contribution
++        # softplus(rgb)
++        softplus_rgb = [
++            log(1 + exp(r)),
++            log(1 + exp(g)),
++            log(1 + exp(b))
++        ]
++        
++        # max(dot(dir, axis), 0)^(4 * exp(beta))
+         exponent = 4.0 * exp(beta)
+-        lobe_pow = pow(dot_val, exponent)
++        lobe_factor = max(dot_product, 0.0) ** exponent
+         
+-        # Compute softplus of color: softplus(x) = ln(1 + exp(x))
+-        lobe_rgb = vec3(0.0)
+-        for i in range(3):
+-            lobe_rgb[i] = log(1.0 + exp(rgb[i]))
+-            
+-        # Add contribution
+-        color += lobe_pow * lobe_rgb
++        # Add to total lobe color
++        total_lobe_color[0] += softplus_rgb[0] * lobe_factor
++        total_lobe_color[1] += softplus_rgb[1] * lobe_factor
++        total_lobe_color[2] += softplus_rgb[2] * lobe_factor
+         
+-    return color
++    # Final color
++    final_color = [
++        base_color[0] + total_lobe_color[0],
++        base_color[1] + total_lobe_color[1],
++        base_color[2] + total_lobe_color[2]
++    ]
++    
++    return final_color
++
++def spherical_to_cartesian(theta, phi):
++    """
++    Convert spherical angles to Cartesian coordinates.
++    
++    Args:
++        theta: Polar angle (0 to pi)
++        phi: Azimuthal angle (0 to 2*pi)
++        
++    Returns:
++        Cartesian vector (3 floats)
++    """
++    x = sin(theta) * cos(phi)
++    y = sin(theta) * sin(phi)
++    z = cos(theta)
++    return [x, y, z]
+ ```
+ 
+ ## Subtopics
+ 
+-### Progressive View-Dependent Color Baking
+-A method for baking view-dependent appearance using iterative optimization. See [Progressive View-Dependent Color Baking](2834-progressive-view-dependent-color-baking.md).
++### [Progressive View-Dependent Color Baking](2834-progressive-view-dependent-color-baking.md)
++A method for baking view-dependent color into textures, differing from SB's parametric lobe approach by using baked textures for view-dependent effects. Choose when hardware supports texture sampling efficiently and when pre-baking is feasible.
+ 
+ ## Operating characteristics
+-*   **Memory:** Two lobes require 12 floats per splat, compared to 45 floats for SH bands 1-3 [S1, unofficial]. This results in approximately 45% of the PLY file size compared to SH degree 3 [S1, unofficial].
+-*   **Performance:** The shader performs one `pow` operation per lobe [S1, unofficial].
+-*   **Quality:** On the Mip-NeRF 360 benchmark, SH degree 0 + 2 lobes achieves +0.15 to +0.30 dB higher PSNR than SH degree 3 [S1, unofficial].
+-*   **Strengths:** Smaller file size, faster rendering (fewer operations than high-degree SH), higher PSNR than SH degree 3 for specular highlights [S1, unofficial].
+-*   **Limitations:** Only supports uncompressed PLY. Does not include the Beta kernel (falloff). Limited to explicit lobes, may not capture complex view-dependent effects as well as high-degree SH [S1, unofficial].
+-*   **When to use:** When specular highlights are important and file size/performance is a concern, and uncompressed PLY is acceptable [S1, unofficial].
+-*   **When not to use:** When complex view-dependent effects beyond simple lobes are needed, or when compressed PLY/SOG/SPZ formats are required [S1, unofficial].
++- **Time Complexity**: The shader computes one `pow` operation per lobe [S1, unofficial]. With up to 4 lobes, this is a constant number of operations per splat.
++- **Memory Complexity**: Each lobe stores 6 floats. With 2 lobes, this is 12 floats per splat, compared to 45 floats for SH bands 1-3 [S1, unofficial].
++- **Measured Performance**:
++  - On MipNeRF-360 (7 scenes, 30k steps, RTX 4090):
++    - MCMC SH0/SB2: 29.602 dB PSNR, 104 MB PLY size, 0.91 GB Peak VRAM, 52.0 FPS, 487s train time [S2, unofficial].
++    - Default SH0/SB2: 29.465 dB PSNR, 332 MB PLY size, 2.17 GB Peak VRAM, 31.1 FPS, 616s train time [S2, unofficial].
++  - Comparison to SH3/SB0:
++    - MCMC SH0/SB2 vs MCMC SH3/SB0: +0.15 dB PSNR, -56% PLY size, -39% Peak VRAM, +19% Render speed, -5% Train time [S2, unofficial].
++    - Default SH0/SB2 vs Default SH3/SB0: +0.30 dB PSNR, -54% PLY size, -53% Peak VRAM, +5% Render speed, -16% Train time [S2, unofficial].
++- **Strengths**: Higher PSNR, smaller model size (44-46% of SH3), roughly half the peak VRAM, faster render speed, and faster training time compared to SH degree 3 [S2, unofficial].
++- **Limitations**: Only uncompressed PLY is supported for lobe data storage [S1, unofficial]. The Beta kernel is not included, which would require more extensive changes to the renderer [S1, unofficial].
++- **When to Use**: When view-dependent specular highlights are important and computational efficiency is a priority. SB is a strict win over SH3 in terms of PSNR, size, VRAM, and speed [S2, unofficial].
++- **When Not to Use**: When compressed PLY, SOG, or SPZ formats are required, as they do not support lobe data storage [S1, unofficial]. When the Beta kernel is needed for more accurate Gaussian falloff modeling [S1, unofficial].
+ 
+ ## Background
+-Spherical Beta view-dependent color is based on the specular model from Deformable Beta Splatting (Liu et al., SIGGRAPH 2025) [S1, unofficial]. It was implemented in the PlayCanvas engine (Pull Request #9729) for WebGL2 and WebGPU [S1, unofficial]. It is also integrated into SuperSplat and gsplat [S1, unofficial].
++Spherical Beta (SB) is the specular model from Deformable Beta Splatting (Liu et al., SIGGRAPH 2025) [S1, unofficial]. It was integrated into the PlayCanvas engine (Pull Request #9729) for WebGL2 and WebGPU, and into the nerfstudio-project/gsplat (Pull Request #1056) for training and export [S1, S2, unofficial]. The model was designed to provide higher PSNR and faster speed at half the size and memory than SH degree 3 [S1, unofficial].
+ 
+ ## Sources
+-[S1] Add Spherical Beta view-dependent color for PLY gaussian splats, https://github.com/playcanvas/engine/pull/9729, fetched 2026-10-27 (unofficial)+[S1] Add Spherical Beta view-dependent color for PLY gaussian splats, https://github.com/playcanvas/engine/pull/9729, fetched 2026-10-27 (unofficial)
++[S2] Integrate Spherical Beta from Deformable Beta Splatting: higher PSNR and faster speed at half the size and memory than SH degree 3 nerfstudio-project/gsplat#1056, https://github.com/nerfstudio-project/gsplat/pull/1056, fetched 2026-10-29 (unofficial)

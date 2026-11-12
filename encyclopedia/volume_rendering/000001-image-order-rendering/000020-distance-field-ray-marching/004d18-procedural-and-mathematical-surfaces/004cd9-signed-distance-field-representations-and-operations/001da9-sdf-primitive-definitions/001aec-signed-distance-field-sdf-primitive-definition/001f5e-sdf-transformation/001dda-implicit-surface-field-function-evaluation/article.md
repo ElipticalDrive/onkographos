@@ -3,35 +3,35 @@
 Also called: Field Function Evaluation, Implicit Function Evaluation
 
 ## Overview
-Implicit Surface Field Function Evaluation computes the scalar value $d = f(\mathbf{x})$ for an implicit surface at query points $\mathbf{x}$, where $d$ represents the signed distance or density. It solves the problem of determining whether a point lies inside, outside, or on the contour of a volume, which is fundamental for ray marching and isosurface extraction. It differs from [Batched SDF Inference](2329-batched-sdf-inference.md) by operating on arbitrary single points rather than fixed neural network batches, and from [DeepSDF Neural Network](3051-deepsdf-neural-network.md) by using explicit analytical or grid-based storage rather than learned latent codes.
+Implicit Surface Field Function Evaluation computes the scalar value $d = f(\mathbf{x})$ for an implicit surface at query points $\mathbf{x}$, where $d$ represents the signed distance or density [S1, unofficial]. It solves the problem of determining whether a point lies inside, outside, or on the contour of a volume, which is fundamental for ray marching and isosurface extraction [S1, unofficial][G]. It differs from [Batched SDF Inference](2329-batched-sdf-inference.md) by operating on arbitrary single points rather than fixed neural network batches, and from [DeepSDF Neural Network](3051-deepsdf-neural-network.md) by using explicit analytical or grid-based storage rather than learned latent codes [G].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Query point coordinates $(x_0, y_0, z_0)$, step size $dz$, number of points $num\_points$.
-- Output: Array of scalar density/distance values $densities$.
+- Input: Query point coordinates $(x_0, y_0, z_0)$, step size $dz$, number of points $num\_points$ [S1, unofficial].
+- Output: Array of scalar density/distance values $densities$ [S1, unofficial].
 
 **Data Structures:**
-- `Isosurface`: Interface class containing the field function implementation.
-- `densities`: Array of floats of size $num\_points$.
+- `Isosurface`: Interface class containing the field function implementation [S1, unofficial].
+- `densities`: Array of floats of size $num\_points$ [S1, unofficial].
 
 **Steps:**
-1. If the implicit surface has an associated transformation matrix $T$, compute the inverse transformation $T^{-1}$.
-2. Transform the query point $\mathbf{x}_{world} = (x_0, y_0, z_0)$ by $T^{-1}$ to obtain the local coordinate $\mathbf{x}_{local} = (x_t, y_t, z_t)$. If no transformation is applied, $T^{-1}$ is the identity, so $\mathbf{x}_{local} = \mathbf{x}_{world}$.
-3. Evaluate the primitive field function $f(\mathbf{x}_{local})$ to get the signed distance $d$.
+1. If the implicit surface has an associated transformation matrix $T$, compute the inverse transformation $T^{-1}$ [S1, unofficial].
+2. Transform the query point $\mathbf{x}_{world} = (x_0, y_0, z_0)$ by $T^{-1}$ to obtain the local coordinate $\mathbf{x}_{local} = (x_t, y_t, z_t)$ [S1, unofficial]. If no transformation is applied, $T^{-1}$ is the identity, so $\mathbf{x}_{local} = \mathbf{x}_{world}$ [S1, unofficial].
+3. Evaluate the primitive field function $f(\mathbf{x}_{local})$ to get the signed distance $d$ [S1, unofficial].
 4. Store $d$ in the output array.
-5. Increment the query point along the +z axis: $z_0 \leftarrow z_0 + dz$.
-6. Repeat steps 2-5 for $num\_points$.
+5. Increment the query point along the +z axis: $z_0 \leftarrow z_0 + dz$ [S1, unofficial].
+6. Repeat steps 2–5 for $num\_points$ [S1, unofficial].
 
 **Formulas:**
 For a sphere of radius $R$ centered at the origin:
 $$ f(x,y,z) = x^2 + y^2 + z^2 - R^2 $$
 - $d < 0$: Point is inside the volume.
 - $d > 0$: Point is outside the volume.
-- $d = 0$: Point is on the contour.
+- $d = 0$: Point is on the contour [S1, unofficial].
 
 **Parameters:**
-- $dz$: Delta step size along the +z axis for batch evaluation.
-- $num\_points$: Number of points to evaluate in the batch.
+- $dz$: Delta step size along the +z axis for batch evaluation [S1, unofficial].
+- $num\_points$: Number of points to evaluate in the batch [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -56,8 +56,7 @@ def evaluate_field_function(x0, y0, z0, dz, num_points, radius, inverse_transfor
     
     for i in range(num_points):
         # Step 1: Transform query point to local space
-        # Assuming inverse_transform_matrix is a 4x4 matrix
-        # Homogeneous coordinate transformation
+        # Homogeneous coordinate transformation (4x4 matrix)
         x_local = inverse_transform_matrix[0][0] * x0 + inverse_transform_matrix[0][1] * y0 + inverse_transform_matrix[0][2] * z0 + inverse_transform_matrix[0][3]
         y_local = inverse_transform_matrix[1][0] * x0 + inverse_transform_matrix[1][1] * y0 + inverse_transform_matrix[1][2] * z0 + inverse_transform_matrix[1][3]
         z_local = inverse_transform_matrix[2][0] * x0 + inverse_transform_matrix[2][1] * y0 + inverse_transform_matrix[2][2] * z0 + inverse_transform_matrix[2][3]
@@ -76,24 +75,24 @@ def evaluate_field_function(x0, y0, z0, dz, num_points, radius, inverse_transfor
 ```
 
 **Edge Cases and Pitfalls:**
-- Precision: Floating-point errors may cause $d$ to be slightly non-zero for points exactly on the contour.
+- Precision: Floating-point errors may cause $d$ to be slightly non-zero for points exactly on the contour [G].
 - Boundaries: The bounding box of the implicit surface must be computed and reported to optimize culling, as it is not always trivial to derive from the field function alone [S1, unofficial].
 
 ## Subtopics
 
 ### [SDF Evaluation Implementation](1658-sdf-evaluation-implementation.md)
-Implements runtime evaluation of an SDF defined on a 3D voxel grid, supporting configurable interpolation orders. Choose this when using grid-based storage rather than analytical primitives.
+Implements runtime evaluation of an SDF defined on a 3D voxel grid, supporting configurable interpolation orders. Choose this when using grid-based storage rather than analytical primitives [G].
 
 ## Operating characteristics
-- Time Complexity: $O(num\_points)$ per evaluation, assuming constant-time primitive evaluation.
-- Memory Complexity: $O(1)$ auxiliary space for analytical primitives; $O(V)$ for grid-based implementations where $V$ is the number of voxels.
-- Strengths: Compact and precise representation of volumes; efficient for simple primitives.
-- Limitations: Difficult to determine bounding boxes for complex implicit functions; limited to specific geometric shapes or grid-based approximations.
-- When to use: Simple analytical shapes or pre-computed voxel grids.
-- When not to use: Complex, non-analytical surfaces requiring neural network inference or high-resolution grid storage.
+- Time Complexity: $O(num\_points)$ per evaluation, assuming constant-time primitive evaluation [G].
+- Memory Complexity: $O(1)$ auxiliary space for analytical primitives; $O(V)$ for grid-based implementations where $V$ is the number of voxels [G].
+- Strengths: Compact and precise representation of volumes; efficient for simple primitives [S1, unofficial][G].
+- Limitations: Difficult to determine bounding boxes for complex implicit functions; limited to specific geometric shapes or grid-based approximations [S1, unofficial][G].
+- When to use: Simple analytical shapes or pre-computed voxel grids [G].
+- When not to use: Complex, non-analytical surfaces requiring neural network inference or high-resolution grid storage [G].
 
 ## Background
-Implicit surfaces were introduced as a compact and precise way to describe volumes in 3D space, avoiding the need for explicit polygonal approximations. The concept is foundational for contouring algorithms like Marching Cubes and Dual Contouring. The specific implementation details described here, including the `Isosurface` interface and batch evaluation along the +z axis, are documented in an unofficial source by Zukkers [S1, unofficial].
+Implicit surfaces were introduced as a compact and precise way to describe volumes in 3D space, avoiding the need for explicit polygonal approximations [S1, unofficial]. The concept is foundational for contouring algorithms like Marching Cubes and Dual Contouring [S1, unofficial]. The specific implementation details described here, including the `Isosurface` interface and batch evaluation along the +z axis, are documented in an unofficial source by Zukkers [S1, unofficial].
 
 ## Sources
 [S1] Implicit Surfaces, http://www.oocities.org/tzukkers/isosurf/isosurfaces.html, fetched 2026-10-30 (unofficial)

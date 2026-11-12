@@ -21,15 +21,7 @@ The output arrays are flat and interleaved by attribute type, not by vertex [S1,
 - `positions`, `normals`, `colors`: Each stores 3 floats per vertex, totaling 12 floats per quad [S1, unofficial].
 - `indices`: Stores 6 indices per quad (two triangles) [S1, unofficial].
 
-**Material Colors:**
-A lookup table `MATERIAL_COLORS` maps material indices to RGB values [S1, unofficial]:
-- Index 0: `[0.0, 0.0, 0.0]` (Air/Unused)
-- Index 1: `[0.24, 0.72, 0.48]` (1-surface)
-- Index 2: `[0.46, 0.33, 0.23]` (2-dirt)
-- Index 3: `[0.44, 0.47, 0.55]` (3-stone)
-- Index 4: `[0.13, 0.83, 0.93]` (4-crystal) [S1, unofficial].
-
-**Algorithm Steps:**
+**Numbered Steps:**
 1. Calculate `vertexCount = quads.length * 4` [S1, unofficial].
 2. Determine index type: if `vertexCount > 65535`, allocate `indices` as `Uint32Array`; otherwise, allocate as `Uint16Array` [S1, unofficial].
 3. Initialize `positions`, `normals`, and `colors` as `Float32Array` of size `quads.length * 12` [S1, unofficial].
@@ -43,6 +35,20 @@ A lookup table `MATERIAL_COLORS` maps material indices to RGB values [S1, unoffi
    f. Look up `q.material` in `MATERIAL_COLORS` (default to index 3 if out of bounds), write to `colors` [S1, unofficial].
    g. Generate 6 indices using `quadTriangleIndices(q.dir)`, offset by `base`, write to `indices` at `io` [S1, unofficial].
    h. Increment `base` by 4, `po` by 12, `io` by 6 [S1, unofficial].
+
+**Formulas:**
+- Base position: $P_{base} = \begin{cases} (slice, u, v) & \text{axis}=0 \\ (u, slice, v) & \text{axis}=1 \\ (u, v, slice) & \text{axis}=2 \end{cases}$
+- Direction vectors (orthogonal to face): $D_u = \text{sign}(dir) \cdot w \cdot \hat{e}_u$, $D_v = \text{sign}(dir) \cdot h \cdot \hat{e}_v$, where $\hat{e}_u, \hat{e}_v$ are the two axes parallel to the face [S1, unofficial].
+- Vertex positions: $P_{vertex} = (P_{base} + \alpha D_u + \beta D_v) \times scale$, where $\alpha, \beta \in \{0, 1\}$ [S1, unofficial].
+- Normal: $N = \text{sign}(dir) \cdot \hat{e}_{axis}$ [S1, unofficial].
+
+**Parameters:**
+- `scale`: Global multiplier applied to all position coordinates before writing to the position array (default 1) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Index Overflow:** If `vertexCount > 65535`, using `Uint16Array` causes silent wrapping and giant triangle spikes. The method checks this condition and switches to `Uint32Array` [S1, unofficial].
+- **Material Index Bounds:** If `q.material` is out of bounds for `MATERIAL_COLORS`, it defaults to index 3 (stone) to prevent errors [S1, unofficial].
+- **Requires careful index type handling to avoid overflow** [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -83,24 +89,18 @@ def quad_to_geometry(quads, scale=1.0):
         else:
             p = [q.u, q.v, q.slice]
 
-        # 2. Compute direction vectors du and dv
+        # 2. Compute orthogonal direction vectors du and dv
         du = [0.0, 0.0, 0.0]
         dv = [0.0, 0.0, 0.0]
-        if q.axis == 0:
+        if q.axis == 0: # Normal X, face in YZ
             du[1] = q.w if q.dir == 0 else -q.w
-            du[2] = q.h if q.dir == 0 else -q.h
+            dv[2] = q.h if q.dir == 0 else -q.h
+        elif q.axis == 1: # Normal Y, face in XZ
+            du[0] = q.w if q.dir == 0 else -q.w
+            dv[2] = q.h if q.dir == 0 else -q.h
+        else: # Normal Z, face in XY
+            du[0] = q.w if q.dir == 0 else -q.w
             dv[1] = q.h if q.dir == 0 else -q.h
-            dv[2] = q.w if q.dir == 0 else -q.w
-        elif q.axis == 1:
-            du[0] = q.w if q.dir == 0 else -q.w
-            du[2] = q.h if q.dir == 0 else -q.h
-            dv[0] = q.h if q.dir == 0 else -q.h
-            dv[2] = q.w if q.dir == 0 else -q.w
-        else:
-            du[0] = q.w if q.dir == 0 else -q.w
-            du[1] = q.h if q.dir == 0 else -q.h
-            dv[0] = q.h if q.dir == 0 else -q.h
-            dv[1] = q.w if q.dir == 0 else -q.w
 
         # 3. Compute 4 vertices
         v0 = p
@@ -140,10 +140,6 @@ def quad_to_geometry(quads, scale=1.0):
 
     return positions, normals, colors, indices
 ```
-
-**Edge Cases and Pitfalls:**
-- **Index Overflow:** If `vertexCount > 65535`, using `Uint16Array` causes silent wrapping and giant triangle spikes. The method checks this condition and switches to `Uint32Array` [S1, unofficial].
-- **Material Index Bounds:** If `q.material` is out of bounds for `MATERIAL_COLORS`, it defaults to index 3 (stone) to prevent errors [S1, unofficial].
 
 ## Operating characteristics
 - **Time Complexity:** $O(N)$, where $N$ is the number of quads, as the algorithm iterates through the quad list once [S1, unofficial].

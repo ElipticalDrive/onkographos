@@ -1,0 +1,104 @@
+# Interblock Interpolation
+
+Also called: Multiresolution Interblock Interpolation, Interblock e-interpolation
+
+## Overview
+Interblock Interpolation is a data reduction technique used in GPU-based volume ray casting to handle missing samples between spatial blocks, allowing for significantly higher compression ratios than standard replication methods [S1, unofficial]. It sets itself apart from sibling methods like [Nearest Neighbor Sampling](11694-nearest-neighbor-sampling.md) by explicitly reconstructing values in empty regions through interpolation rather than simple replication or discarding, thereby enabling data reductions of up to 80:1 while maintaining visual continuity [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of sparse voxel blocks $\phi_b$ containing valid density or color samples, and a query position $\mathbf{p}$ within the volume space.
+*   **Output:** An interpolated scalar value $\phi$ representing the density or color at $\mathbf{p}$.
+
+**Data Structures:**
+The method operates on a hierarchical block structure. Blocks are self-contained units of voxel data. The specific layout of the blocks (e.g., 1x1, 2x2, 4x4, 8x8) determines the granularity of the reduction [S1, unofficial]. The source notes indicate a multiresolution approach where block sizes vary (e.g., 1x1, 2x2, 8x8) to adapt to the required level of detail [S1, unofficial].
+
+**Algorithm:**
+1.  Identify the block $\phi_b$ containing the query position $\mathbf{p}$ or the nearest available block if $\mathbf{p}$ falls in a gap between blocks.
+2.  Retrieve the bounded sample values $\phi_b$ from the neighboring blocks surrounding the query position.
+3.  Compute the interpolated value $\phi$ as a normalized sum of these bounded block samples.
+
+**Formula:**
+The interpolated value $\phi$ is calculated as:
+$$
+\phi = \frac{\sum \phi_b}{\sum w_b}
+$$
+Where $\phi_b$ are the bounded block samples and $w_b$ are the corresponding weights derived from the distance or kernel [S1, unofficial]. The source describes this as a "normalized sum, $\phi$, of bounded block samples, $\phi_b$" [S1, unofficial].
+
+**Parameters:**
+*   **Block Size:** Varies (1x1, 2x2, 4x4, 8x8) depending on the multiresolution level [S1, unofficial].
+*   **Data Reduction Ratio:** The method achieves data reductions of 40:1 to 50:1 (2% of original data size) or up to 80:1 (1.25% of original data size) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The normalization step requires careful handling of weights to avoid division by zero or numerical instability in sparse regions [G].
+*   **Boundaries:** Blocks are self-contained, which may cause discontinuities at block boundaries if interpolation weights are not carefully managed across block edges [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def interblock_interpolation(query_position, blocks):
+    """
+    Interpolate a value at query_position using neighboring blocks.
+    
+    Args:
+        query_position: 3D vector (x, y, z) in voxel space.
+        blocks: A dictionary or grid mapping block coordinates to sample data.
+                Each block contains a set of bounded samples phi_b.
+    
+    Returns:
+        float: The interpolated value phi.
+    """
+    # Find the relevant neighboring blocks surrounding the query position.
+    # The specific logic for identifying neighbors depends on the block hierarchy
+    # (e.g., 1x1, 2x2, 8x8). This step is implementation-specific based on
+    # the multiresolution structure [S1, unofficial].
+    neighbor_blocks = find_neighbor_blocks(query_position, blocks)
+    
+    numerator = 0.0
+    denominator = 0.0
+    
+    for block in neighbor_blocks:
+        # Retrieve bounded samples from the block.
+        # In a multiresolution scheme, this might involve aggregating samples
+        # from sub-blocks or using a representative value for the block.
+        samples = block.get_samples()
+        
+        for sample in samples:
+            # Calculate weight based on distance or kernel.
+            # The source notes mention "bounded block samples" but do not
+            # specify the exact weighting function. A standard inverse distance
+            # or kernel weight is assumed here [G].
+            weight = compute_weight(query_position, sample.position)
+            
+            numerator += weight * sample.value
+            denominator += weight
+            
+    # Handle edge case where no neighbors are found
+    if denominator == 0:
+        return 0.0
+        
+    # Compute normalized sum
+    interpolated_value = numerator / denominator
+    
+    return interpolated_value
+```
+
+## Subtopics
+
+### Combining Spans
+A technique to limit computation in the distance by stopping interpolation for some rays and using information from neighboring rays instead, drawing spans of $n$ pixels wide [S2, unofficial]. To reduce blockiness, information (texture coordinates, color) can be interpolated across the width of the span if hardware support is available [S2, unofficial]. A pitfall is that voxels become quite blocky in the distance [S2, unofficial]. An alternative to combining spans is discarding every other ray and drawing the frame with interlacing [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given in the sources. The method involves finding neighbors and summing samples, which is generally $O(1)$ per query if block lookup is efficient, but depends on the number of neighbors and samples per block [G].
+*   **Memory Complexity:** Achieves data reductions of 40:1 to 80:1, meaning memory usage is 1.25% to 2% of the original full-density volume [S1, unofficial].
+*   **Measured Performance:** In adaptive volume sampling scenarios, Interblock Interpolation contributed to speed-ups of 2.6-2.8x on hardware such as the ATI X1800 XT and NV GF7800 GTX at 1024x1024 resolution [S1, unofficial].
+*   **Strengths:** Extremely high data reduction, allowing for large volumes to be rendered on limited GPU memory [S1, unofficial].
+*   **Limitations:** Can introduce blockiness, especially in the distance or if block boundaries are not handled smoothly [S1, unofficial][S2, unofficial].
+
+## Background
+Interblock Interpolation was developed by Markus Hadwiger at the VRVIS Research Center in Vienna, Austria, as part of advanced illumination techniques for GPU-based volume ray casting [S1, unofficial]. It builds on earlier work by Weiler et al. (2000) and Guthe et al. (2002) regarding sample replication and interpolation, specifically extending the concept of four-block neighborhoods and double-sided replication to support improved continuity [S1, unofficial]. The technique is often associated with the work of Kraus and Ertl (2002) in the context of multiresolution volume rendering [S1, unofficial].
+
+## Sources
+[S1] GPU-Based Volume Ray-Casting with Advanced Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2008/advanced_illumination.pdf, fetched 2026-10-29 (unofficial)
+[S2] flipcode - Realtime Voxel Landscape Engines, https://www.flipcode.com/archives/Realtime_Voxel_Landscape_Engines-Part_4_Level_of_Detail_and_Optimisation.shtml, fetched 2026-10-30 (unofficial)

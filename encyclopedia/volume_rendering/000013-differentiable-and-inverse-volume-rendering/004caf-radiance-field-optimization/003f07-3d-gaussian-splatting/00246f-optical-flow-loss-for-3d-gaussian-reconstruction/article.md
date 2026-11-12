@@ -3,7 +3,7 @@
 Also called: Flow-guided shape reconstruction, L2 flow loss, Optical Flow Weak Supervision, Optical flow regularization
 
 ## Overview
-This method improves the 3D shape reconstruction of static objects from video sequences by incorporating an optical flow loss term into the optimization objective [S1]. It leverages the temporal prior inherent in video data to resolve concavity/convexity ambiguities that are present when relying solely on silhouette and color loss terms [S1]. Unlike standard photometric approaches, this technique uses optical flow as a local estimator of surface correspondence, which is robust to long-term lighting changes and autoexposure variations common in user-captured videos [S2, unofficial].
+This method improves the 3D shape reconstruction of static objects from video sequences by incorporating an optical flow loss term into the optimization objective [S2, unofficial]. It leverages the temporal prior inherent in video data to resolve concavity/convexity ambiguities that are present when relying solely on silhouette and color loss terms [S2, unofficial]. Unlike standard photometric approaches, this technique uses optical flow as a local estimator of surface correspondence, which is robust to long-term lighting changes and autoexposure variations common in user-captured videos [S2, unofficial].
 
 ## How it works
 The method extends the standard 3D Gaussian Splatting optimization loop by adding a flow consistency term [S2, unofficial]. It assumes that the 3D scene is static and that the camera poses for the input video sequence are known [S2, unofficial].
@@ -25,13 +25,13 @@ The method operates on the standard 3D Gaussian Set [S2, unofficial]. For flow c
 4.  **Compute Rendered Flow ($\hat{f}$)**:
     *   For each ray in the batch, take the 3D world coordinate $\mathbf{P}_{world}$ obtained in Step 3 [S2, unofficial].
     *   Transform $\mathbf{P}_{world}$ into the coordinate system of the adjacent frame $i+1$ using $T_{i+1}^{-1}$: $\mathbf{P}_{cam\_next} = T_{i+1}^{-1} \cdot [\mathbf{P}_{world}, 1]^T$ [S2, unofficial].
-    *   Project $\mathbf{P}_{cam\_next}$ onto the image plane of frame $i+1$ using the inverse focal length $f^{-1}$ and image dimensions. Let the projected pixel coordinates be $(u_{next}, v_{next})$ [S2, unofficial].
+    *   Project $\mathbf{P}_{cam\_next}$ onto the image plane of frame $i+1$ using the inverse focal length $f^{-1}$ and image dimensions [S2, unofficial]. Let the projected pixel coordinates be $(u_{next}, v_{next})$ [S2, unofficial].
     *   Similarly, transform $\mathbf{P}_{world}$ into the coordinate system of the previous frame $i-1$ using $T_{i-1}^{-1}$ and project to get $(u_{prev}, v_{prev})$ [S2, unofficial].
     *   The rendered forward flow estimate for the pixel is $\hat{f}_{forward} = (u_{next} - u_i, v_{next} - v_i)$ [S2, unofficial].
     *   The rendered backward flow estimate is $\hat{f}_{backward} = (u_{prev} - u_i, v_{prev} - v_i)$ [S2, unofficial].
-    *   [G] Note: The projection assumes a pinhole camera model. If the $Z$ component of $\mathbf{P}_{cam\_next}$ is $\le 0$, the point is behind the camera and flow is undefined; these rays should be masked out or handled with a large loss penalty.
+    *   [G] If the $Z$ component of $\mathbf{P}_{cam\_next}$ is $\le 0$, the point is behind the camera and flow is undefined; these rays should be masked out or handled with a large loss penalty.
 5.  **Compute Ground Truth Flow ($f$)**:
-    *   Obtain ground truth optical flow maps between frame $i$ and $i+1$, and between $i$ and $i-1$, using an external optical flow estimator (e.g., Unimatch [S2, unofficial] or classic methods like [13]) [S2, unofficial].
+    *   Obtain ground truth optical flow maps between frame $i$ and $i+1$, and between $i$ and $i-1$, using an external optical flow estimator (e.g., Unimatch [70] or classic methods like [13]) [S2, unofficial].
     *   The ground truth flow $f$ is measured in pixels, scaled to half the shorter image dimension to normalize the loss magnitude [S2, unofficial].
 6.  **Loss Computation**:
     *   Compute the accumulated opacity $\alpha$ for each ray from the volume rendering process [S2, unofficial].
@@ -98,15 +98,8 @@ def compute_flow_loss(gaussians, camera_poses, current_frame_idx,
     hit_points_prev_cam = hit_points_prev_cam_hom[:3, :, :].transpose(1, 2, 0)
     
     # 4. Project to image coordinates
-    # Projection: u = x / z * f_inv * width/2 + width/2 ? 
-    # The source says "single inverse focal length parameter" and "projection is in the center".
-    # Standard pinhole: x_img = x_cam / z_cam * f. 
-    # If inv_focal_length is 1/f, then x_img = x_cam / z_cam / inv_focal_length.
-    # Assuming principal point is center:
+    # Projection assumes pinhole model with centered principal point and square pixels [S2, unofficial]
     # u = (x_cam / z_cam) / inv_focal_length + width/2
-    # v = (y_cam / z_cam) / inv_focal_length + height/2
-    
-    # Avoid division by zero
     eps = 1e-6
     
     # Project to next frame
@@ -132,16 +125,13 @@ def compute_flow_loss(gaussians, camera_poses, current_frame_idx,
     f_hat_backward_u = u_prev - u_curr
     f_hat_backward_v = v_prev - v_curr
     
-    # 6. Mask invalid points (behind camera)
-    # Points behind camera in next or prev frame should not contribute to flow loss
+    # 6. Mask invalid points (behind camera) [G]
     valid_next = hit_points_next_cam[:, :, 2] > eps
     valid_prev = hit_points_prev_cam[:, :, 2] > eps
     valid = valid_next & valid_prev
     
-    # 7. Compute L1 loss with opacity weighting
-    # Ground truth flows are assumed to be scaled to half the shorter image dimension
-    # gt_flow_forward is (H, W, 2)
-    
+    # 7. Compute L1 loss with opacity weighting [S2, unofficial]
+    # Ground truth flows are pre-scaled to half the shorter image dimension [S2, unofficial]
     loss_forward = np.abs(gt_flow_forward[:, :, 0] - f_hat_forward_u) + np.abs(gt_flow_forward[:, :, 1] - f_hat_forward_v)
     loss_backward = np.abs(gt_flow_backward[:, :, 0] - f_hat_backward_u) + np.abs(gt_flow_backward[:, :, 1] - f_hat_backward_v)
     
@@ -168,11 +158,11 @@ def compute_flow_loss(gaussians, camera_poses, current_frame_idx,
 ### Edge Cases and Pitfalls
 *   **Shape Uncertainty Artifacts**: Without flow regularization, rendered flow estimates exhibit artifacts due to shape uncertainty [S2, unofficial].
 *   **Color Fidelity**: Adding flow loss slightly hurts the color fidelity of the reconstructed models [S2, unofficial].
-*   **Camera Intrinsics**: The method assumes a single inverse focal length parameter, no distortion, centered projection, and square pixels [S2, unofficial]. Deviations from this may require modification of the projection step.
-*   **Temporal Consistency**: The method requires adjacent frames. For the first and last frames in a sequence, one adjacent flow direction may be unavailable. The source implies using both forward and backward flow for each ray, so boundary frames might need special handling (e.g., only using the available flow direction).
+*   **Camera Intrinsics**: The method assumes a single inverse focal length parameter, no distortion, centered projection, and square pixels [S2, unofficial]. [G] Deviations from this may require modification of the projection step.
+*   **Temporal Consistency**: The method requires adjacent frames [S2, unofficial]. [G] For the first and last frames in a sequence, one adjacent flow direction may be unavailable. [G] The source implies using both forward and backward flow for each ray, so boundary frames might need special handling (e.g., only using the available flow direction).
 
 ## Operating characteristics
-*   **Time Complexity**: The additional cost is the computation of rendered flow, which involves transforming 3D points and projecting them. This is $O(N)$ where $N$ is the number of rays in the batch. The external optical flow estimation is performed offline or per-frame and is not part of the per-step optimization cost, though it is required for the loss computation [S2, unofficial].
+*   **Time Complexity**: [G] The additional cost is the computation of rendered flow, which involves transforming 3D points and projecting them. [G] This is $O(N)$ where $N$ is the number of rays in the batch. The external optical flow estimation is performed offline or per-frame and is not part of the per-step optimization cost, though it is required for the loss computation [S2, unofficial].
 *   **Memory Complexity**: No significant additional memory beyond storing the ground truth flow maps and intermediate 3D coordinates [S2, unofficial].
 *   **Measured Performance**: On CO3D sequences, using Color & Learned Flow resulted in a Depth Error of 0.155 and a Runtime of 15 seconds, compared to 0.271 and 17 seconds for No Color or Flow [S2, unofficial].
 *   **Strengths**: Resolves concavity/convexity ambiguities; robust to lighting changes; produces smoother depth maps; learned flow methods are real-time on GPU [S2, unofficial].

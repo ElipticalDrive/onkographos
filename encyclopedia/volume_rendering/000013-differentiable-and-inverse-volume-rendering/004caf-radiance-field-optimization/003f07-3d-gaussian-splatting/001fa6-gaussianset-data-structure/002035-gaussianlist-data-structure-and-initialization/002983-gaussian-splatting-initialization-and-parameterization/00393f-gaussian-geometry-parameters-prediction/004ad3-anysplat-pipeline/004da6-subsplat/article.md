@@ -1,0 +1,271 @@
+# SubSplat
+
+Also called: Sub-pixel Gaussian Reparameterization, Sub-pixel Gaussian Reparameterizer
+
+## Overview
+SubSplat is a method for high-resolution novel-view synthesis that resolves the trade-off between network computational cost and rendering fidelity in pixel-aligned 3D Gaussian Splatting. It solves the problem of insufficient Gaussian density and artifacts when using low-resolution backbone inputs by introducing a Sub-pixel Gaussian Reparameterizer (SPGR). Unlike prior methods limited by fixed grids or image-space upsamplers, SubSplat subdivides each grid-anchored primary Gaussian into multiple fine-grained sub-pixel primitives, restoring structural density directly from low-resolution features while maintaining stable network latency [S1].
+
+## How it works
+SubSplat builds on the [AnySplat Pipeline](12847-anysplat-pipeline.md) by refining the Gaussian generation stage. It takes low-resolution multi-view features and primary Gaussian anchors as input, and outputs a set of sub-pixel Gaussians suitable for high-resolution rendering.
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   $N$ primary Gaussians $\mathcal{A} = \{\mathbf{a}_p\}_{p=1}^N$, where $\mathbf{a}_p = [\boldsymbol{\mu}_p, \mathbf{s}_p, q_p, \alpha_p] \in \mathbb{R}^{11}$ [S1].
+    *   Spherical Harmonic (SH) colors $\mathcal{H} = \{\mathbf{h}_p \in \mathbb{R}^{C \times D_{\mathrm{sh}}}\}_{p=1}^N$. Default: $C=3, D_{\mathrm{sh}}=25$ (degree-4 SH) [S1].
+    *   Multi-view feature maps $\mathcal{F} = \{\Phi_{v,\ell}\}_{v=1..V, \ell=1..L}$, where $\Phi_{v,\ell} \in \mathbb{R}^{H_\ell \times W_\ell \times D_\ell}$ [S1].
+    *   Fixed camera intrinsics and extrinsics [S1].
+*   **Outputs:**
+    *   $K$ sub-pixel Gaussians per primary Gaussian, defined by position $\boldsymbol{\mu}_{p,k}$, scale $\mathbf{s}_{p,k}$, quaternion $q_{p,k}$, opacity $\alpha_k$, and SH color $\mathbf{h}_{p,k}$ for $k=1 \dots K$ [S1].
+    *   $K$ is the squared ratio of target to input resolution (e.g., $K=4$ for 2x, $K=16$ for 4x) [S1].
+
+### Data Structures
+*   **Primary Gaussian State:** $\mathbf{a}_p$ contains world-space position $\boldsymbol{\mu}_p$ (3), per-axis scales $\mathbf{s}_p$ (3), unit quaternion $q_p$ (4), and opacity $\alpha_p$ (1) [S1].
+*   **Embeddings:** Geometry and appearance queries are aligned to a shared embedding dimension $E=128$ [S1].
+*   **Feature Maps:** Multi-view features $\Phi_{v,\ell}$ are sampled using bilinear interpolation [S1].
+
+### Steps
+
+1.  **Initialization:** Define $N$ primary Gaussians $\mathcal{A}$ and SH colors $\mathcal{H}$ from the backbone output. Camera metadata is kept separate [S1].
+2.  **Feature Aggregation:**
+    *   **Geometry Query:** Encode primary Gaussian attributes into a 128-dimensional embedding using per-attribute MLPs $\phi_x, \phi_s, \phi_q, \phi_\alpha$, then project with linear $W_g$:
+        $$ \mathbf{z}^g_p = W_g(\phi_x(\boldsymbol{\mu}_p) + \phi_s(\mathbf{s}_p) + \phi_q(q_p) + \phi_\alpha(\alpha_p)) $$
+        [S1]
+    *   **Geometry Aggregation:** Perform 3-stage deformable attention. Initialize $\mathbf{f}^{g,0}_p = \mathbf{0}$. For $t=0,1,2$:
+        $$ \mathbf{f}^{g,t+1}_p = \mathrm{DA}(\mathcal{F}; \mathbf{z}^g_p, \mathbf{f}^{g,t}_p, \mathcal{P}(\boldsymbol{\mu}_p), \mathbf{a}_p) $$
+        Final geometry descriptor $\mathbf{f}^g_p = \mathbf{f}^{g,3}_p$ [S1].
+    *   **Appearance Query:** Encode flattened SH coefficients $\mathrm{vec}(\mathbf{h}_p)$ into a 128-dimensional embedding:
+        $$ \mathbf{z}^a_p = \phi_c(\mathrm{vec}(\mathbf{h}_p)) $$
+        [S1]
+    *   **Appearance Aggregation:** Perform 1-stage deformable attention conditioned on the geometry descriptor:
+        $$ \mathbf{f}^a_p = \mathrm{DA}(\mathcal{F}; \mathbf{z}^a_p, \mathbf{f}^g_p, \mathcal{P}(\boldsymbol{\mu}_p), \mathbf{a}_p) $$
+        [S1]
+3.  **Primary View Selection:** For each anchor $\boldsymbol{\mu}_p$, project into all cameras. Select the primary view $v^*$ with the smallest positive depth $z_v > 0$ [S1].
+4.  **Geometry Reparameterization:**
+    *   Predict offsets using geometry head $g_\theta: \mathbb{R}^E \to \mathbb{R}^{K \times 9}$:
+        $$ [\Delta u_k, \Delta v_k, \Delta z_k, \Delta \log \mathbf{s}_k, \Delta \mathbf{r}_k]_{k=1}^K = g_\theta(\mathbf{f}^g_p) $$
+        [S1]
+    *   **Position:** Back-project sub-pixel offsets $(\Delta u_k, \Delta v_k)$ using selected depth $z_{\mathrm{sel}}$ and focal lengths $f_x, f_y$. Bound depth residual via $\tanh$:
+        $$ \Delta \hat{z}_k = \tanh(\Delta z_k) $$
+        $$ \boldsymbol{\mu}_{p,k} = \boldsymbol{\mu}_p + R_{c2w} \begin{bmatrix} z_{\mathrm{sel}}\Delta u_k / f_x \\ z_{\mathrm{sel}}\Delta v_k / f_y \\ 0 \end{bmatrix} + \Delta \hat{z}_k R_{c2w} \begin{bmatrix} 0 \\ 0 \\ 1 \end{bmatrix} $$
+        where $R_{c2w}$ is the camera-to-world rotation of view $v^*$ [S1].
+    *   **Scale:** Refine scales element-wise:
+        $$ \mathbf{s}_{p,k} = \mathbf{s}_p \odot \exp(\Delta \log \mathbf{s}_k) $$
+        [S1]
+    *   **Rotation:** Convert axis-angle residual $\Delta \mathbf{r}_k$ to quaternion $q(\Delta \mathbf{r}_k)$, compose, and normalize:
+        $$ q_{p,k} = \mathrm{norm}(q_p \otimes q(\Delta \mathbf{r}_k)) $$
+        [S1]
+    *   **Covariance:** Compute covariance matrix:
+        $$ \Sigma_{p,k} = R(q_{p,k}) \mathrm{diag}(\mathbf{s}_{p,k}^2) R(q_{p,k})^\top $$
+        [S1]
+5.  **Appearance Reparameterization:**
+    *   Predict opacity logits $\ell_k$ and color gain $\gamma_k$ using appearance head $h_\phi: \mathbb{R}^E \to \mathbb{R}^{K \times 2}$:
+        $$ [\ell_k, \gamma_k]_{k=1}^K = h_\phi(\mathbf{f}^a_p) $$
+        [S1]
+    *   **Projected Area:** Compute pinhole Jacobian $B$ at $\boldsymbol{\mu}_{p,k}$ in camera coordinates (where $x_c, y_c, z_c$ are camera-frame coords):
+        $$ B = \begin{bmatrix} f_x/z_c & 0 & -f_x x_c/z_c^2 \\ 0 & f_y/z_c & -f_y y_c/z_c^2 \end{bmatrix} $$
+        Compute world-space projection Jacobian $J_{v^*}(\boldsymbol{\mu}_{p,k}) = B R^{v^*}_{\mathrm{w2c}}$. Estimate projected area:
+        $$ A_k \approx \sqrt{\det(J_{v^*}(\boldsymbol{\mu}_{p,k}) \Sigma_{p,k} J_{v^*}(\boldsymbol{\mu}_{p,k})^\top)} $$
+        [S1]
+    *   **Opacity Allocation:** Compute weights to preserve integrated opacity:
+        $$ w_k = \mathrm{softmax}(\ell_k), \quad \tilde{w}_k = \frac{w_k}{A_k + \varepsilon} $$
+        $$ \alpha_k = \alpha_p \cdot \frac{\tilde{w}_k}{\sum_j \tilde{w}_j} $$
+        [S1]
+    *   **Color Modulation:** Scale SH coefficients:
+        $$ \mathbf{h}_{p,k} = \gamma_k \mathbf{h}_p $$
+        [S1]
+    *   **Anti-aliasing:** If $A_k < A_{\mathrm{min}}$, adjust in-plane scales to ensure minimum area, preventing flickering [S1].
+6.  **Training:** Minimize loss $\mathcal{L} = \mathcal{L}_{\ell_2} + \lambda \mathcal{L}_{\mathrm{LPIPS}}$ with $\lambda = 0.05$ [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SubSplatSPGR:
+    def __init__(self, E=128, C=3, D_sh=25, K=4):
+        self.E = E
+        self.K = K
+        # Geometry MLPs
+        self.phi_x = nn.Linear(3, E)
+        self.phi_s = nn.Linear(3, E)
+        self.phi_q = nn.Linear(4, E)
+        self.phi_alpha = nn.Linear(1, E)
+        self.W_g = nn.Linear(E, E)
+        
+        # Appearance MLP
+        self.phi_c = nn.Linear(C * D_sh, E)
+        
+        # Heads
+        self.g_theta = nn.Linear(E, K * 9) # 9: du, dv, dz, dlog_s(3), dr(3)
+        self.h_phi = nn.Linear(E, K * 2)   # 2: l, gamma
+        
+        # Deformable Attention (simplified placeholder for logic)
+        # In implementation, this uses the specific DA operator from GaussianFormer/PixelGaussian
+        self.da = DeformableAttentionModule()
+
+    def encode_geometry(self, mu, s, q, alpha):
+        # mu: (N, 3), s: (N, 3), q: (N, 4), alpha: (N, 1)
+        z_x = self.phi_x(mu)
+        z_s = self.phi_s(s)
+        z_q = self.phi_q(q)
+        z_a = self.phi_alpha(alpha)
+        z_sum = z_x + z_s + z_q + z_a
+        z_g = self.W_g(z_sum)
+        return z_g
+
+    def encode_appearance(self, h):
+        # h: (N, C, D_sh)
+        h_flat = h.view(h.size(0), -1)
+        z_a = self.phi_c(h_flat)
+        return z_a
+
+    def deformable_aggregation(self, features, z_query, f_prev, mu, a_p, num_stages):
+        # features: list of feature maps
+        # z_query: (N, E)
+        # f_prev: (N, E)
+        # mu: (N, 3)
+        # a_p: primary Gaussian state
+        f_curr = f_prev
+        for _ in range(num_stages):
+            f_curr = self.da(features, z_query, f_curr, mu, a_p)
+        return f_curr
+
+    def select_primary_view(self, mu, extrinsics):
+        # Project mu to all views, find view with min positive depth
+        # Returns index v_star
+        pass
+
+    def geometry_reparam(self, f_g, mu, s, q, z_sel, fx, fy, R_c2w):
+        # f_g: (N, E)
+        offsets = self.g_theta(f_g) # (N, K*9)
+        offsets = offsets.view(-1, self.K, 9)
+        
+        du = offsets[:, :, 0]
+        dv = offsets[:, :, 1]
+        dz = offsets[:, :, 2]
+        dlog_s = offsets[:, :, 3:6]
+        dr = offsets[:, :, 6:9]
+        
+        # Depth bound
+        dz_hat = torch.tanh(dz)
+        
+        # Position
+        # Back-project offsets
+        # Assuming z_sel is scalar or broadcastable
+        dx = z_sel * du / fx
+        dy = z_sel * dv / fy
+        
+        # R_c2w is (3,3)
+        offset_vec = torch.stack([dx, dy, torch.zeros_like(dx)], dim=-1) # (N, K, 3)
+        offset_world = torch.bmm(offset_vec, R_c2w.transpose(1, 2)) # (N, K, 3)
+        
+        depth_vec = torch.stack([torch.zeros_like(dz_hat), torch.zeros_like(dz_hat), dz_hat], dim=-1) # (N, K, 3)
+        depth_world = torch.bmm(depth_vec, R_c2w.transpose(1, 2))
+        
+        mu_p = mu.unsqueeze(1).expand(-1, self.K, -1) # (N, K, 3)
+        mu_new = mu_p + offset_world + depth_world
+        
+        # Scale
+        s_new = s.unsqueeze(1) * torch.exp(dlog_s)
+        
+        # Rotation
+        # Convert axis-angle dr to quaternion
+        q_res = axis_angle_to_quaternion(dr)
+        q_new = quaternion_multiply(q.unsqueeze(1), q_res)
+        q_new = quaternion_normalize(q_new)
+        
+        return mu_new, s_new, q_new, dz_hat
+
+    def appearance_reparam(self, f_a, f_g, mu, s, q, alpha, h, R_w2c, fx, fy):
+        # f_a: (N, E)
+        preds = self.h_phi(f_a) # (N, K*2)
+        preds = preds.view(-1, self.K, 2)
+        l = preds[:, :, 0]
+        gamma = preds[:, :, 1]
+        
+        # Compute Covariance for Area Estimation
+        # R(q_new) diag(s_new^2) R(q_new)^T
+        # This requires computing covariance for each primitive
+        # Simplified: assume helper function exists
+        covs = compute_covariance(s, q) # (N, 3, 3)
+        covs_new = compute_covariance(s_new, q_new) # (N, K, 3, 3)
+        
+        # Compute Jacobian at primary position mu (or mu_new?)
+        # Source says "at primary position" for A_k approx, but also "evaluated at mu_p,k" in supplementary
+        # We use mu_p,k as per supplementary details for accuracy
+        # J = B * R_w2c
+        # B depends on camera coords of mu_p,k
+        # This step is complex to implement without full camera projection logic
+        # Placeholder for Jacobian calculation
+        areas = estimate_projected_area(covs_new, mu_new, R_w2c, fx, fy)
+        
+        # Opacity
+        w = torch.softmax(l, dim=-1) # (N, K)
+        eps = 1e-6
+        w_tilde = w / (areas + eps)
+        alpha_new = alpha.unsqueeze(1) * (w_tilde / w_tilde.sum(dim=-1, keepdim=True))
+        
+        # Color
+        h_new = gamma.unsqueeze(-1).unsqueeze(-1) * h.unsqueeze(1)
+        
+        return alpha_new, h_new
+
+    def forward(self, mu, s, q, alpha, h, features, extrinsics, intrinsics):
+        # 1. Encode
+        z_g = self.encode_geometry(mu, s, q, alpha)
+        z_a = self.encode_appearance(h)
+        
+        # 2. Aggregate
+        f_g = self.deformable_aggregation(features, z_g, torch.zeros_like(z_g), mu, (mu,s,q,alpha), 3)
+        f_a = self.deformable_aggregation(features, z_a, f_g, mu, (mu,s,q,alpha), 1)
+        
+        # 3. Select Primary View
+        v_star = self.select_primary_view(mu, extrinsics)
+        # Get R_c2w and R_w2c for v_star
+        R_c2w = extrinsics[v_star][:3, :3]
+        R_w2c = R_c2w.transpose(0, 1)
+        
+        # Get z_sel (depth of mu in v_star)
+        # mu_cam = R_w2c @ (mu - t)
+        # z_sel = mu_cam[:, 2]
+        z_sel = get_depth(mu, extrinsics[v_star])
+        
+        fx, fy = intrinsics[v_star][0, 0], intrinsics[v_star][1, 1]
+        
+        # 4. Geometry Reparam
+        mu_new, s_new, q_new, _ = self.geometry_reparam(f_g, mu, s, q, z_sel, fx, fy, R_c2w)
+        
+        # 5. Appearance Reparam
+        alpha_new, h_new = self.appearance_reparam(f_a, f_g, mu, s, q, alpha, h, R_w2c, fx, fy)
+        
+        return mu_new, s_new, q_new, alpha_new, h_new
+```
+
+### Parameters
+*   **K:** Number of sub-pixel primitives per primary Gaussian. $K = (\text{target\_res} / \text{input\_res})^2$. Typical values: 4 (2x), 16 (4x) [S1].
+*   **$\lambda$:** LPIPS loss weight. Default: 0.05 [S1].
+*   **C, $D_{\mathrm{sh}}$:** SH dimensions. Default: $C=3, D_{\mathrm{sh}}=25$ [S1].
+*   **E:** Embedding dimension. Default: 128 [S1].
+
+### Edge Cases and Pitfalls
+*   **Depth Instability:** Unbounded depth residuals cause instability. Mitigated by bounding $\Delta z_k$ via $\tanh$ [S1].
+*   **Aliasing/Flickering:** Extremely small primitives ($A_k < A_{\mathrm{min}}$) cause flickering. Mitigated by enforcing minimum area $A_{\mathrm{min}}$ and adjusting in-plane scales [S1].
+*   **Opacity Preservation:** Sub-pixel primitives must sum to primary opacity. Mitigated by renormalization $\alpha_k = \alpha_p \cdot (\tilde{w}_k / \sum_j \tilde{w}_j)$ [S1].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** SubSplat maintains stable backbone latency by using low-resolution inputs. The reparameterization stage adds negligible computational overhead compared to the backbone [S1]. It achieves over 3x latency reduction compared to full-resolution baselines [S1].
+*   **Measured Performance:** Evaluated on RealEstate10K and ACID datasets, reconstructing from 256x256 input and rendering at 512x512 (2x) and 1024x1024 (4x) [S1].
+*   **Strengths:** High-fidelity reconstruction at extended scales; superior efficiency; content-aware density scaling; mitigates quadratic cost of high-resolution inputs [S1].
+*   **Limitations:** Relies on the quality of the backbone features; requires deformable attention which can be complex to implement efficiently [S1].
+*   **When to use:** When high-resolution output is required from sparse, low-resolution inputs, and inference latency is a constraint [S1].
+*   **When not to use:** When per-scene optimization is acceptable and latency is not a concern, or when input resolution is already high enough to support direct high-res Gaussian prediction [S1].
+
+## Background
+SubSplat was proposed by Jiun Lee et al. in 2024 [S1]. It addresses the limitations of pixel-aligned Gaussian methods that are constrained by fixed grids or suffer from high computational costs at high resolutions. It builds on the MVSplat backbone and incorporates deformable attention from GaussianFormer and PixelGaussian [S1]. It is used for novel-view synthesis in computer vision, specifically for sparse-view reconstruction [S1].
+
+## Sources
+[S1] SubSplat: High-Resolution Pixel-Aligned 3DGS via Sub-pixel Gaussian Reparameterization, https://doi.org/10.1007/978-3-032-37032-7_25, fetched 2026-10-27
