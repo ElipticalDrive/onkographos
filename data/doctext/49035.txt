@@ -1,0 +1,1082 @@
+# Ray marching demo with Signed distance fields
+
+Realtime compute shader based raymarching with [CSG](https://en.wikipedia.org/wiki/Constructive_solid_geometry) based on [SDF](https://en.wikipedia.org/wiki/Signed_distance_function):
+
+![Ray marching](screenshots/raymarching.png)
+
+Gif:
+
+![Ray marching](screenshots/raymarching.gif)
+
+___
+
+# Setup
+
+Built with Visual Studio 2019 and .Net Core 3.1.
+
+The compute shader implementation is in its [own repository](https://github.com/MarcStan/monogame-framework-computeshader) and referenced via a git submodule. Therefore you must run:
+
+```
+git submodule init && git submodule update
+```
+
+after checkout to build the solution successfully.
+
+# Details
+
+* Uses signed distance fields to define simple geometry
+* Uses CSG based operations to create complex geometry from many simple pieces
+* configuration options (currently limited to file/command line based at startup)
+* player & object movement within the scene
+
+# Known issues
+
+* purple screen when using compute shader on mobile chipsets (Intel Graphics 6xx and the likes). The shader simply doesn't run/output anything resulting in the default texture color (purple) being shown
+* AccessViolationException on linkProgram on mobile chipsets (Intel Graphis 6xx and the likes)
+
+# Sources
+
+* [Alan Zucconi - Signed distance functions](https://www.alanzucconi.com/2016/07/01/signed-distance-functions/)
+* [iq's distance functions](https://www.iquilezles.org/www/articles/distfunctions/distfunctions.htm)
+* [Jamie Wong - Ray marching](http://jamie-wong.com/2016/07/15/ray-marching-signed-distance-functions/)
+* [jasmcole.com - Signed distance fields](https://jasmcole.com/2019/10/03/signed-distance-fields/)
+
+### RayMarching/Program.cs
+```
+﻿using Microsoft.Extensions.Configuration;
+using Microsoft.Xna.Framework.Input;
+using RayMarching.Configuration;
+using System;
+using System.IO;
+using System.Linq;
+
+namespace RayMarching
+{
+    public static class Program
+    {
+        public static void Main(string[] args)
+        {
+            var configuration = LoadConfiguration(args);
+
+            using var g = new RayMarchingGame(configuration);
+            g.Run();
+        }
+
+        private static Settings LoadConfiguration(string[] args)
+        {
+            var builder = new ConfigurationBuilder()
+                .SetBasePath(new FileInfo(typeof(Program).Assembly.Location).DirectoryName)
+                .AddIniFile("raymarching.ini", true)
+                .AddCommandLine(args);
+
+            var config = builder.Build();
+
+            var settings = new Settings();
+            config.Bind(settings);
+            // haven't found a way to add a converter into the builder yet. need to manually call it
+            foreach (var section in config.GetSection("keybindings").GetChildren())
+            {
+                var key = section.Key;
+                var value = section.Value;
+
+                var keyValues = (value.Contains('|') ? value.Split('|') : new[] { value }).Select(k => Enum.Parse<Keys>(k, true)).ToArray();
+                settings.Keybindings.ActionKeyMap[key.ToLowerInvariant()] = keyValues;
+            }
+            return settings;
+        }
+    }
+}
+```
+
+### RayMarching/RayMarching.cs
+```
+﻿using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
+using MonoGame.Framework.ComputeShader;
+using RayMarching.Scene;
+using System;
+using System.Linq;
+
+namespace RayMarching
+{
+    public class RayMarching
+    {
+        private readonly static uint[] _pow = Enumerable.Range(1, 20).Select(x => (uint)Math.Pow(2, x)).ToArray();
+        private readonly ComputeShader _shader;
+        private readonly GraphicsDevice _graphicsDevice;
+
+        public RayMarching(
+            GraphicsDevice graphicsDevice)
+        {
+            _graphicsDevice = graphicsDevice;
+            // spec wants .comp but github only has code highlighting for glsl https://github.com/KhronosGroup/glslang#execution-of-standalone-wrapper
+            _shader = new ComputeShader(graphicsDevice, "Shaders/raymarching.glsl");
+        }
+
+        public RenderTarget2D ChangeSize(int newWidth, int newHeight)
+            => new RenderTarget2D(_graphicsDevice, newWidth, newHeight, false, SurfaceFormat.Rgba64, DepthFormat.None, 0, RenderTargetUsage.DiscardContents, true, 1);
+
+        public void Draw(RenderTarget2D renderTarget, ITracingOptions tracingOptions, GameTime gameTime)
+        {
+            _shader.Begin(renderTarget);
+
+            // compute shader requires batching in power of 2, so must input next power of 2
+            // shader will auto. discard anything outside of texture range
+            var x = _pow.First(x => x >= renderTarget.Width);
+            var y = _pow.First(y => y >= renderTarget.Height);
+
+            var width = renderTarget.Width - 1;
+            var height = renderTarget.Height - 1;
+            // inject parameters
+            _shader.SetParameter("eye", tracingOptions.Camera.Position);
+            _shader.SetParameter("direction", tracingOptions.Camera.Direction);
+            _shader.SetParameter("time", (float)gameTime.TotalGameTime.TotalSeconds);
+
+            // hardcoded to chunks of 8x8 in compute shader
+            _shader.Execute(x / 8, y / 8, 1);
+            _shader.End();
+        }
+    }
+}
+```
+
+### RayMarching/RayMarchingGame.cs
+```
+﻿using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
+using RayMarching.Configuration;
+using RayMarching.Scene;
+using RayMarching.Scene.Camera;
+using System.Collections.Generic;
+
+namespace RayMarching
+{
+    public class RayMarchingGame : Game
+    {
+        private readonly GraphicsDeviceManager _graphicsDeviceManager;
+        private readonly Settings _settings;
+
+        public RayMarchingGame(Settings settings)
+        {
+            _settings = settings;
+            _graphicsDeviceManager = new GraphicsDeviceManager(this)
+            {
+                PreferredBackBufferWidth = _settings.Video.Width,
+                PreferredBackBufferHeight = _settings.Video.Height
+            };
+        }
+
+        protected override void Initialize()
+        {
+            base.Initialize();
+
+            var collection = new ServiceCollection();
+            collection.AddSingleton<Game>(this);
+            collection.AddSingleton(_settings);
+            collection.AddSingleton<ITracingOptions, TracingOptions>();
+            collection.AddSingleton<RayMarching>();
+            collection.AddSingleton(_graphicsDeviceManager);
+            collection.AddSingleton(GraphicsDevice);
+            collection.AddSingleton<IGraphicsDeviceManager>(_graphicsDeviceManager);
+            collection.AddSingleton<IGraphicsDeviceService>(_graphicsDeviceManager);
+            collection.AddSingleton<ICamera>(sp => new FpsCamera(GraphicsDevice, sp.GetRequiredService<Settings>(), new Vector3(0, 0, -8), new Vector3(0, 0, 1)));
+
+            collection.Scan(scan =>
+            {
+                scan
+                .FromAssemblyOf<RayMarchingGame>()
+                .AddClasses(x => x.AssignableTo<GameComponent>())
+                .AsSelfWithInterfaces()
+                .WithSingletonLifetime();
+            });
+
+            using var serviceProvider = collection.BuildServiceProvider();
+
+            foreach (var c in serviceProvider.GetRequiredService<IEnumerable<IGameComponent>>())
+                Components.Add(c);
+        }
+
+        protected override void Draw(GameTime gameTime)
+        {
+            GraphicsDevice.Clear(Color.CornflowerBlue);
+            base.Draw(gameTime);
+        }
+    }
+}
+```
+
+### RayMarching/SceneRenderer.cs
+```
+﻿using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
+using RayMarching.Scene;
+
+namespace RayMarching
+{
+    public class SceneRenderer : DrawableGameComponent
+    {
+        private readonly ITracingOptions _tracingOptions;
+        private readonly SpriteBatch _spriteBatch;
+        private readonly Texture2D _pixel;
+
+        private RenderTarget2D? _renderTarget;
+        private SamplerState _samplerState = SamplerState.PointClamp;
+        private readonly RayMarching _rayMarching;
+
+        public SceneRenderer(
+            Game game,
+            RayMarching rayMarching,
+            ITracingOptions tracingOptions
+            ) : base(game)
+        {
+            _tracingOptions = tracingOptions;
+            _rayMarching = rayMarching;
+
+            _spriteBatch = new SpriteBatch(game.GraphicsDevice);
+            _pixel = new Texture2D(game.GraphicsDevice, 1, 1);
+            _pixel.SetData(new[] { Color.White });
+        }
+
+        public override void Update(GameTime gameTime)
+        {
+            base.Update(gameTime);
+
+            ResizeRenderTarget(GraphicsDevice.Viewport.Width, GraphicsDevice.Viewport.Height);
+        }
+
+        private void ResizeRenderTarget(int w, int h)
+        {
+            if (_renderTarget == null ||
+                _renderTarget.Width != w ||
+                _renderTarget.Height != h)
+            {
+                _renderTarget = _rayMarching.ChangeSize(w, h);
+            }
+        }
+
+        public override void Draw(GameTime gameTime)
+        {
+            base.Draw(gameTime);
+
+            if (_renderTarget == null)
+                return;
+
+            // fill rendertarget so we can see if tracing did not fill entirely
+            GraphicsDevice.SetRenderTarget(_renderTarget);
+            GraphicsDevice.Clear(Color.Purple);
+            GraphicsDevice.SetRenderTarget(null);
+
+            _rayMarching.Draw(_renderTarget, _tracingOptions, gameTime);
+
+            GraphicsDevice.SetRenderTarget(null);
+            // simply upscale rendertarget to screen to draw scene
+            _spriteBatch.Begin(SpriteSortMode.Immediate, null, _samplerState);
+            _spriteBatch.Draw(_renderTarget, GraphicsDevice.Viewport.Bounds, Color.White);
+            _spriteBatch.End();
+        }
+    }
+}
+```
+
+### RayMarching/Components/Exit.cs
+```
+﻿using Microsoft.Xna.Framework;
+using RayMarching.Input;
+
+namespace RayMarching.Components
+{
+    public class Exit : GameComponent
+    {
+        private readonly IActionKeyMap _actionKeyMap;
+
+        public Exit(
+            IActionKeyMap actionKeyMap,
+            Game game)
+            : base(game)
+        {
+            _actionKeyMap = actionKeyMap;
+        }
+
+        public override void Update(GameTime gameTime)
+        {
+            base.Update(gameTime);
+
+            if (_actionKeyMap.IsPressed(nameof(InputAction.Exit)))
+                Game.Exit();
+        }
+    }
+}
+```
+
+### RayMarching/Components/FpsCounter.cs
+```
+﻿using Microsoft.Xna.Framework;
+using System;
+using System.Linq;
+
+namespace RayMarching.Components
+{
+    public class FpsCounter : DrawableGameComponent
+    {
+        private readonly int[] _recentFpsCounts;
+
+        private int _fpsCount;
+        private TimeSpan _elapsedTime;
+        private static readonly TimeSpan _oneSecond = TimeSpan.FromSeconds(1);
+        private int _fpsInsertIndex;
+
+        public FpsCounter(
+            Game game,
+            int lastNSecondsToMonitor = 5
+            ) : base(game)
+        {
+            _recentFpsCounts = new int[lastNSecondsToMonitor];
+        }
+
+        public int CurrentFps { get; private set; }
+
+        public override void Update(GameTime gameTime)
+        {
+            base.Update(gameTime);
+
+            _elapsedTime += gameTime.ElapsedGameTime;
+            if (_elapsedTime >= _oneSecond)
+            {
+                _elapsedTime -= _oneSecond;
+                _recentFpsCounts[_fpsInsertIndex] = _fpsCount;
+                _fpsCount = 0;
+                _fpsInsertIndex = (_fpsInsertIndex + 1) % _recentFpsCounts.Length;
+                // initially values are empty, so don't include in avg
+                CurrentFps = (int)Math.Round(_recentFpsCounts.TakeWhile(x => x > 0).Average());
+            }
+        }
+
+        public override void Draw(GameTime gameTime)
+        {
+            _fpsCount++;
+            base.Draw(gameTime);
+        }
+    }
+}
+```
+
+### RayMarching/Components/Player.cs
+```
+﻿using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Input;
+using RayMarching.Configuration;
+using RayMarching.Input;
+using RayMarching.Scene.Camera;
+
+namespace RayMarching.Components
+{
+    public class Player : GameComponent
+    {
+        private MouseState _previousMouseState, _currentMouseState;
+        private readonly ICamera _camera;
+        private readonly float _movementSpeed;
+        private readonly IActionKeyMap _actionKeyMap;
+        private readonly Settings _settings;
+
+        public Player(
+            Game game,
+            ICamera camera,
+            IActionKeyMap actionKeyMap,
+            Settings settings,
+            float movementSpeed = 1f
+            ) : base(game)
+        {
+            _camera = camera;
+            _movementSpeed = movementSpeed;
+            _actionKeyMap = actionKeyMap;
+            _settings = settings;
+        }
+
+        public override void Initialize()
+        {
+            base.Initialize();
+            CenterMouse();
+            _previousMouseState = _currentMouseState = Mouse.GetState();
+        }
+
+        public override void Update(GameTime gameTime)
+        {
+            base.Update(gameTime);
+
+            if (!Game.IsActive)
+                return;
+
+            _currentMouseState = Mouse.GetState();
+
+            Rotate(gameTime);
+            Move(gameTime);
+        }
+
+        private void Rotate(GameTime gameTime)
+        {
+            var delta = _currentMouseState.Position - _previousMouseState.Position;
+            var x = delta.X * (_settings.Mouse.InvertXAxis ? -1 : 1);
+            var y = delta.Y * (_settings.Mouse.InvertYAxis ? -1 : 1);
+            if (x == 0 && y == 0)
+                return;
+
+            _camera.Rotate(x * _settings.Mouse.SensitivityX * (float)gameTime.ElapsedGameTime.TotalSeconds, y * _settings.Mouse.SensitivityY * (float)gameTime.ElapsedGameTime.TotalSeconds);
+
+            CenterMouse();
+            _previousMouseState = Mouse.GetState();
+        }
+
+        private void CenterMouse()
+            => Mouse.SetPosition(Game.GraphicsDevice.Viewport.Width / 2, Game.GraphicsDevice.Viewport.Height / 2);
+
+        private void Move(GameTime gameTime)
+        {
+            var movement = Vector3.Zero;
+            if (IsPressed(nameof(InputAction.Forward)))
+                movement += Vector3.UnitZ;
+            if (IsPressed(nameof(InputAction.Backward)))
+                movement -= Vector3.UnitZ;
+
+            if (IsPressed(nameof(InputAction.Left)))
+                movement -= Vector3.UnitX;
+            if (IsPressed(nameof(InputAction.Right)))
+                movement += Vector3.UnitX;
+
+            if (IsPressed(nameof(InputAction.Up)))
+                movement += Vector3.UnitY;
+            if (IsPressed(nameof(InputAction.Down)))
+                movement -= Vector3.UnitY;
+
+            var movementSpeed = _movementSpeed * (IsPressed(nameof(InputAction.Sprint)) ? 3 : 1);
+            if (movement != Vector3.Zero)
+                _camera.Move(Vector3.Normalize(movement) * movementSpeed * (float)gameTime.ElapsedGameTime.TotalSeconds);
+        }
+
+        private bool IsPressed(string action)
+            => _actionKeyMap.IsPressed(action);
+    }
+}
+```
+
+### RayMarching/Components/WindowTitle.cs
+```
+﻿using Microsoft.Xna.Framework;
+
+namespace RayMarching.Components
+{
+    public class WindowTitle : GameComponent
+    {
+        private int _lastFps;
+        private FpsCounter _fpsCounter;
+        private int _lastWidth, _lastHeight;
+
+        public WindowTitle(
+            Game game,
+            FpsCounter fpsCounter
+            ) : base(game)
+        {
+            _fpsCounter = fpsCounter;
+            _lastWidth = Game.GraphicsDevice.Viewport.Width;
+            _lastHeight = Game.GraphicsDevice.Viewport.Height;
+        }
+
+        public override void Update(GameTime gameTime)
+        {
+            base.Update(gameTime);
+
+            bool dirty = false;
+            if (_lastFps != _fpsCounter.CurrentFps ||
+                _lastWidth != Game.GraphicsDevice.Viewport.Width ||
+                _lastHeight != Game.GraphicsDevice.Viewport.Height)
+            {
+                _lastFps = _fpsCounter.CurrentFps;
+                _lastWidth = Game.GraphicsDevice.Viewport.Width;
+                _lastHeight = Game.GraphicsDevice.Viewport.Height;
+                dirty = true;
+            }
+            if (dirty)
+            {
+                Game.Window.Title = $"RayMarching - {_lastFps:00} FPS ({_lastWidth}x{_lastHeight})";
+            }
+        }
+    }
+}
+```
+
+### RayMarching/Configuration/KeyboardSettings.cs
+```
+﻿using Microsoft.Xna.Framework.Input;
+using RayMarching.Input;
+using System.Collections.Generic;
+
+namespace RayMarching.Configuration
+{
+    public class KeyboardSettings
+    {
+        /// <summary>
+        /// Action -> set of keys that trigger it.
+        /// </summary>
+        public Dictionary<string, Keys[]> ActionKeyMap { get; set; } = new Dictionary<string, Keys[]>
+        {
+            [nameof(InputAction.Exit).ToLowerInvariant()] = new[] { Keys.Escape },
+            [nameof(InputAction.Forward).ToLowerInvariant()] = new[] { Keys.W, Keys.Up },
+            [nameof(InputAction.Left).ToLowerInvariant()] = new[] { Keys.A, Keys.Left },
+            [nameof(InputAction.Backward).ToLowerInvariant()] = new[] { Keys.S, Keys.Down },
+            [nameof(InputAction.Right).ToLowerInvariant()] = new[] { Keys.D, Keys.Right },
+            [nameof(InputAction.Up).ToLowerInvariant()] = new[] { Keys.Space },
+            [nameof(InputAction.Down).ToLowerInvariant()] = new[] { Keys.LeftControl, Keys.RightControl },
+            [nameof(InputAction.Sprint).ToLowerInvariant()] = new[] { Keys.LeftShift }
+        };
+    }
+}
+```
+
+### RayMarching/Configuration/MouseSettings.cs
+```
+﻿namespace RayMarching.Configuration
+{
+    public class MouseSettings
+    {
+        public bool InvertXAxis { get; set; }
+
+        public bool InvertYAxis { get; set; }
+
+        public float SensitivityX { get; set; } = 0.5f;
+
+        public float SensitivityY { get; set; } = 0.5f;
+    }
+}
+```
+
+### RayMarching/Configuration/Settings.cs
+```
+﻿namespace RayMarching.Configuration
+{
+    public class Settings
+    {
+        public VideoSettings Video { get; set; } = new VideoSettings();
+
+        public KeyboardSettings Keybindings { get; set; } = new KeyboardSettings();
+
+        public MouseSettings Mouse { get; set; } = new MouseSettings();
+    }
+}
+```
+
+### RayMarching/Configuration/VideoSettings.cs
+```
+﻿using System.ComponentModel.DataAnnotations;
+
+namespace RayMarching.Configuration
+{
+    public class VideoSettings
+    {
+        [Range(100, int.MaxValue)]
+        public int Width { get; set; } = 800;
+
+        [Range(100, int.MaxValue)]
+        public int Height { get; set; } = 480;
+    }
+}
+```
+
+### RayMarching/Input/ActionKeyMap.cs
+```
+﻿using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Input;
+using RayMarching.Configuration;
+using System.Linq;
+
+namespace RayMarching.Input
+{
+    public class ActionKeyMap : GameComponent, IActionKeyMap
+    {
+        private KeyboardState _currentState;
+        private readonly Settings _settings;
+
+        public ActionKeyMap(
+            Game game,
+            Settings settings
+            ) : base(game)
+        {
+            _settings = settings;
+        }
+
+        public override void Initialize()
+        {
+            base.Initialize();
+
+            _currentState = Keyboard.GetState();
+        }
+
+        public override void Update(GameTime gameTime)
+        {
+            base.Update(gameTime);
+
+            _currentState = Keyboard.GetState();
+        }
+
+        public bool IsPressed(string action)
+            =>
+                _settings.Keybindings.ActionKeyMap.ContainsKey(action.ToLowerInvariant()) &&
+                _settings.Keybindings.ActionKeyMap[action.ToLowerInvariant()].Any(_currentState.IsKeyDown);
+    }
+}
+```
+
+### RayMarching/Input/IActionKeyMap.cs
+```
+﻿namespace RayMarching.Input
+{
+    public interface IActionKeyMap
+    {
+        bool IsPressed(string action);
+    }
+}
+```
+
+### RayMarching/Input/InputAction.cs
+```
+﻿namespace RayMarching.Input
+{
+    public enum InputAction
+    {
+        None = 0,
+        Exit,
+        Forward,
+        Left,
+        Backward,
+        Right,
+        Up,
+        Down,
+        Sprint
+    }
+}
+```
+
+### RayMarching/Scene/ITracingOptions.cs
+```
+﻿using RayMarching.Scene.Camera;
+
+namespace RayMarching.Scene
+{
+    public interface ITracingOptions
+    {
+        ICamera Camera { get; }
+    }
+}
+```
+
+### RayMarching/Scene/TracingOptions.cs
+```
+﻿using RayMarching.Scene.Camera;
+
+namespace RayMarching.Scene
+{
+    public class TracingOptions : ITracingOptions
+    {
+        public TracingOptions(ICamera camera)
+        {
+            Camera = camera;
+        }
+
+        public ICamera Camera { get; }
+    }
+}
+```
+
+### RayMarching/Shaders/raymarching.glsl
+```
+﻿#version 430 core
+
+layout(binding = 0, rgba32f) uniform writeonly image2D framebuffer;
+
+uniform vec3 eye;
+uniform vec3 direction;
+uniform float time;
+
+#define EPSILON 0.00001
+#define PI 3.1415926
+#define MAX_DEPTH 1000
+
+struct Sphere
+{
+    vec3 pos;
+    float radius;
+    vec3 color;
+};
+struct Box
+{
+    vec3 p;
+    vec3 b;
+    vec3 color;
+};
+
+const Sphere spheres[] =
+{
+    {vec3(-6, 0, 4), 1, vec3(163 / 255.0, 68 / 255.0, 0)},
+    {vec3(-4, 1, 4), 1, vec3(163 / 255.0, 68 / 255.0, 0)},
+    {vec3(-3, 0, 4), 1, vec3(31 / 255.0, 81 / 255.0, 167 / 255.0)}
+};
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// Distance functions
+float sphere(vec3 pos, vec3 center, float r)
+{
+    return length(pos - center) - r;
+}
+
+float torus(vec3 p, vec2 t)
+{
+  vec2 q = vec2(length(p.xy) - t.x,p.z);
+  return length(q) - t.y;
+}
+
+float smin(float a, float b, float k)
+{
+    float h = max(k - abs(a-b), 0);
+    return min(a, b) - h*h/(k*4);
+}
+
+/* row of spheres that are smoothed together */
+float smoothedRow(vec3 pos, float r)
+{
+    return smin(
+            sphere(pos, vec3(3, 0, 4), r),
+            smin(
+                sphere(pos, vec3(4, 0, 4),  r),
+                sphere(pos, vec3(5, 0, 4),  r),
+                0.1
+                ),
+                0.1
+            );
+}
+
+float smoothedSpheres(vec3 pos, float r)
+{
+    float smoothFactor = abs(sin(time));
+    return smin(
+            sphere(pos, vec3(4, 3, 4), r),
+            sphere(pos, vec3(3, 3, 4), r),
+            smoothFactor);
+}
+
+float morphingSpheres(vec3 pos, float r)
+{
+    float off = sin(time);
+    return smin(
+            sphere(pos, vec3(off, 0, 4), r),
+            sphere(pos, vec3(0, 0, 4), r),
+            0.1);
+}
+
+float morphTorus(vec3 p)
+{
+    return smin(torus(p - vec3(0, -3, 4), vec2(1, 0.5)), sphere(p, vec3(0, -3, 4 + cos(time)), 0.5), 0.5);
+}
+
+/* returns distance and material index */
+vec2 sceneSDF(vec3 p)
+{
+    float dist = MAX_DEPTH;
+    float matIndex;
+    // bunch of hardcoded spheres that don't move
+    for (int i = 0; i < spheres.length; i++)
+    {
+        float d = sphere(p, spheres[i].pos, spheres[i].radius);
+        if (d < dist)
+        {
+            dist = d;
+            matIndex = 1.0;
+        }
+    }
+    float d = smoothedRow(p, 1);
+    if (d < dist)
+    {
+        dist = d;
+        matIndex = 2.0;
+    }
+    d = morphingSpheres(p, 1);
+    if (d < dist)
+    {
+        dist = d;
+        matIndex = 3.0;
+    }
+    d = smoothedSpheres(p, 1);
+    if (d < dist)
+    {
+        dist = d;
+        matIndex = 4.0;
+    }
+    d = morphTorus(p);
+    if (d < dist)
+    {
+        dist = d;
+        matIndex = 5.0;
+    }
+    return vec2(dist, matIndex);
+}
+
+vec2 march(vec3 pos, vec3 dir)
+{
+    float depth = 0.0;
+    float matIndex = 0;
+    const int maxMarchingSteps = 100;
+    for (int i = 0; i < maxMarchingSteps; i++)
+    {
+        vec2 res = sceneSDF(pos + depth * dir);
+        float dist = res.x;
+        matIndex = res.y;
+        if (dist < EPSILON)
+        {
+            return vec2(depth, matIndex);
+        }
+        depth += dist;
+        if (depth >= MAX_DEPTH)
+        {
+            return vec2(MAX_DEPTH, -1.0);
+        }
+    }
+    return vec2(depth, matIndex);
+}
+
+/*
+ * given a screenspace position
+ * this will calculate the correct ray based
+ * on the world view direction
+ */
+vec3 getDirection(ivec2 pixel, ivec2 size)
+{
+    float fov = 140;
+    float aspect = size.x / float(size.y);
+    vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), direction)) * aspect;
+    vec3 up = normalize(cross(direction, right));
+    float fovAdjust = 1.0 / tan(fov / 2.0 * (PI / 180.0));
+    float xoff = -1.0 + ((float(pixel.x) / float(size.x - 1.0)) * 2.0);
+    float yoff = 1.0 - ((float(pixel.y) / float(size.y - 1.0)) * 2.0);
+    return direction + (xoff * fovAdjust * right) + (yoff * fovAdjust * up);
+}
+
+vec3 sdfNormal(vec3 pos)
+{
+    // https://iquilezles.org/www/articles/normalsSDF/normalsSDF.htm
+    // uses gradient to estimate surface normal
+    // expensive but works on any kind of surface
+    vec2 e = vec2(1.0, -1.0) * 0.5773 * 0.001;
+    return normalize(e.xyy * sceneSDF(pos + e.xyy).x + 
+                     e.yyx * sceneSDF(pos + e.yyx).x + 
+                     e.yxy * sceneSDF(pos + e.yxy).x + 
+                     e.xxx * sceneSDF(pos + e.xxx).x);
+}
+
+vec3 light(vec3 eye, vec3 sdfPos, vec3 lightPos, vec3 lightPower, float illumination)
+{
+    vec3 n = sdfNormal(sdfPos);
+    vec3 l = normalize(lightPos - sdfPos);
+    vec3 v = normalize(eye - sdfPos);
+    vec3 r = normalize(reflect(-l, n));
+
+    float dotLN = dot(l, n);
+    if (dotLN < 0)
+    {
+        // light not visible
+        return vec3(0);
+    }
+
+    float dotRV = dot(r, v);
+    if (dotRV < 0)
+    {
+        // reflection away from eye -> diffuse only
+        return lightPower * dotLN;
+    }
+    return lightPower * (dotLN + pow(dotRV, illumination));
+}
+
+vec3 phong(vec3 eye, vec3 sdfPos, vec3 dir)
+{
+    const vec3 ambient = vec3(0.2);
+    // hardcode lights
+    
+    float frenel = clamp(1 + dot(dir, sdfNormal(sdfPos)), 0, 1);
+
+    return ambient +
+        light(eye, sdfPos, vec3(0, 2, -2), vec3(0.5), 10) +
+        frenel * light(eye, sdfPos, vec3(0, -2, -2), vec3(0.1), 20);
+}
+
+void main()
+{
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(framebuffer);
+    // discard points outside texture
+    if (pos.x >= size.x || pos.y >= size.y)
+    {
+        return;
+    }
+
+  
+    vec3 dir = getDirection(pos, size);
+
+    vec3 col = vec3(0);
+    vec2 res = march(eye, dir);
+    float distToScene = res.x;
+    float matIndex = res.y;
+    if (distToScene >= MAX_DEPTH)
+    {
+        col = vec3(0,148/255.0,1);
+    }
+    else
+    {
+        if (matIndex < 0.5)
+        {
+            col = vec3(0); // reserved/unused
+        }
+        else if (matIndex < 1.5)
+        {
+            col = vec3(0.4545, 0, 0.2); // individual spheres
+        }
+        else if (matIndex < 2.5)
+        {
+            col = vec3(0.1, 0.2, 0.9); // smoothedRow
+        }
+        else if (matIndex < 3.5)
+        {
+            col = vec3(0.45, 0.1, 0.33); // morphingSpheres
+        }
+        else if (matIndex < 4.5)
+        {
+            col = vec3(0.1, 0.9, 0.1); // smoothedSpheres
+        }
+        else if (matIndex < 5.5)
+        {
+            col = vec3(0.66, 0.33, 0.11); // morphTorus
+        }
+        else
+        {
+            // undefined
+            col = vec3(0);
+        }
+
+        vec3 scenePos = eye + dir * distToScene;
+        col += phong(eye, scenePos, dir);
+
+        col = pow(col, vec3(0.8,0.9,1.0));
+    }
+    imageStore(framebuffer, pos, vec4(col, 1));
+}
+```
+
+### RayMarching/Scene/Camera/FpsCamera.cs
+```
+﻿using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
+using RayMarching.Configuration;
+using System;
+
+namespace RayMarching.Scene.Camera
+{
+    public class FpsCamera : ICamera
+    {
+        private readonly GraphicsDevice _graphicsDevice;
+        private readonly Vector3 _initialDirection;
+        private Vector3 _direction;
+        private float _horizontalRotation, _verticalRotation;
+        private readonly Settings _settings;
+
+        public FpsCamera(
+            GraphicsDevice graphicsDevice,
+            Settings settings,
+            Vector3 pos,
+            Vector3 initialDirection)
+        {
+            _graphicsDevice = graphicsDevice;
+            _settings = settings;
+            Position = pos;
+            _direction = _initialDirection = Vector3.Normalize(initialDirection);
+        }
+
+        public Vector3 Position { get; private set; }
+
+        public Vector3 Direction => _direction;
+
+        public bool IsDirty { get; private set; }
+
+        private Vector3 Up
+            => Vector3.Normalize(Vector3.Cross(_direction, Right));
+
+        private Vector3 Right
+            => Vector3.Normalize(Vector3.Cross(Vector3.Up, _direction)) * _graphicsDevice.Viewport.AspectRatio;
+
+        public Ray GetRayForRasterPosition(int x, int y, int width, int height)
+        {
+            const int fov = 120;
+            // x is in range 0 - width, we need it to be -1 to 1
+            // y is in range 0 - height, we need it to be -1 to 1
+            var scalarOffsetX = -1f + x / (float)width * 2f;
+            // needs to be the inverse of x since x is left to right both in world and raster space
+            // but -1 y is down in world space but up in raster space
+            var scalarOffsetY = 1f - y / (float)height * 2f;
+
+            float fovAdjust = 1f / (float)Math.Tan(fov / 2f * Math.PI / 180f);
+            var dir = _direction + scalarOffsetX * Right * fovAdjust + scalarOffsetY * Up * fovAdjust;
+            dir.Normalize();
+            return new Ray(Position, dir);
+        }
+
+        public void Move(Vector3 direction)
+        {
+            if (direction == Vector3.Zero)
+                return;
+
+            Position += Right * direction.X;
+            Position += Up * direction.Y;
+            Position += _direction * direction.Z;
+            IsDirty = true;
+        }
+
+        public void Rotate(float x, float y)
+        {
+            if (x == 0 && y == 0)
+                return;
+
+            _horizontalRotation += x;
+            _verticalRotation = MathHelper.Clamp(_verticalRotation + y, -MathHelper.PiOver2 + 0.0001f, MathHelper.PiOver2 - 0.0001f);
+
+            _direction = Vector3.Transform(_initialDirection, Matrix.CreateRotationX(_verticalRotation) * Matrix.CreateRotationY(_horizontalRotation));
+            IsDirty = true;
+        }
+    }
+}
+```
+
+### RayMarching/Scene/Camera/ICamera.cs
+```
+﻿using Microsoft.Xna.Framework;
+
+namespace RayMarching.Scene.Camera
+{
+    public interface ICamera
+    {
+        Vector3 Position { get; }
+
+        Vector3 Direction { get; }
+
+        /// <summary>
+        /// Indicates when a camera value has changed.
+        /// This usually requires the scene to be redrawn.
+        /// </summary>
+        bool IsDirty { get; }
+
+        /// <summary>
+        /// Given a screen of size width*height this will return slightly rotated rays for each x/y combination.
+        /// </summary>
+        Ray GetRayForRasterPosition(int x, int y, int width, int height);
+
+        void Move(Vector3 direction);
+
+        void Rotate(float x, float y);
+    }
+}
+```

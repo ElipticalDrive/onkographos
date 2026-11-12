@@ -1,72 +1,55 @@
 # Multi-View Density Control Criterion
 
-Also called: Absolute-gradient split proxy, FastGS criterion
+Also called: Absolute-gradient split proxy, FastGS criterion, Multi-view Adaptive Density Control (ADC)
 
 ## Overview
-The Multi-View Density Control Criterion is a heuristic used during the densification phase of 3D Gaussian Splatting training to control the number and distribution of Gaussian primitives [S1, S2, unofficial]. It addresses the problem of over-densification by evaluating gradient magnitudes across multiple views, ensuring that new Gaussians are only spawned in regions with significant multi-view reconstruction error [S1, unofficial]. It sets itself apart from standard positional-gradient rules by requiring consistency across views, which yields higher rendering quality with significantly fewer primitives [S1, unofficial].
+A densification strategy for multi-view training that resolves invalid vector arithmetic by computing error metrics using norms and sums of norms instead of adding gradient vectors from different view spaces [S1, unofficial]. It sets itself apart from standard Adaptive Density Control (ADC) by ensuring that gradients projected from multiple camera viewpoints into different 2D image planes are aggregated in a space-independent manner, preventing the nullification of gradient signals [S1, unofficial].
 
 ## How it works
-The criterion operates during the teacher training phase to manage primitive count [S1, unofficial]. It evaluates the absolute gradient of the loss with respect to the Gaussian parameters, aggregated across multiple camera views, to decide whether to split or clone a Gaussian [S1, S2, unofficial].
+**Inputs and outputs:**
+*   **Input:** A set of $N$ viewpoints (images) used during training. For each Gaussian $G$, the 2D positional gradients $\nabla_{\pi} L$ at all pixels $\pi$ that project onto $G$ across all viewpoints.
+*   **Output:** A scalar error metric $E_1(G)$ used to decide whether to split or clone the Gaussian.
 
-**Inputs:**
-- Gradient magnitude $|\nabla|$ for a specific Gaussian from each view in the current batch.
-- A threshold parameter $T$ (DSTH) [S2, unofficial].
+**Data structures:**
+*   No new data structures are required beyond the standard Gaussian attributes and gradient buffers. The method modifies the aggregation logic of the existing gradient accumulation step.
 
-**Data Structures:**
-- The gradient magnitude is typically a scalar value derived from the L1 or L2 loss gradient with respect to the Gaussian's position or scale [S2, unofficial].
-
-**Steps:**
-1. For each Gaussian $g$ in the scene, compute the absolute gradient magnitude $|\nabla_i|$ for each view $i$ in the current training batch.
-2. Aggregate these gradients. The standard positional-gradient rule often uses a single view or a simple average [S1, unofficial]. The Multi-View criterion requires the gradient to be significant across multiple views to trigger densification [S1, unofficial].
-3. Compare the aggregated gradient against the threshold $T$ [S2, unofficial].
-4. If the gradient exceeds $T$, initiate split or clone operations [S1, S2, unofficial].
+**Numbered steps:**
+1.  For each Gaussian $G$ in the scene, initialize the error accumulator $E_1(G) = 0$.
+2.  Iterate over all $N$ viewpoints in the current training batch.
+3.  For each viewpoint, identify all pixels $\pi$ that are covered by the projection of Gaussian $G$.
+4.  Retrieve the 2D positional gradient $\nabla_{\pi} L$ for each covered pixel. Note that these gradients exist in different 2D coordinate spaces corresponding to their respective image planes.
+5.  Compute the squared Euclidean norm of each gradient vector: $\|\nabla_{\pi} L\|^2$.
+6.  Sum these squared norms across all pixels and all viewpoints to update the error metric:
+    $$ E_1(G) = \sum_{k=1}^{N} \sum_{\pi_i = k} \|\nabla_{\pi_i} L\|^2 $$
+    where $N$ is the number of viewpoints, $\pi_i$ is a pixel in viewpoint $k$, and $\nabla_{\pi_i} L$ is the gradient at pixel $\pi_i$ [S1, unofficial].
+7.  Compare $E_1(G)$ against the densification thresholds (clone threshold, split threshold) defined in the parent [Adaptive Density Control](9188-adaptive-density-control.md).
 
 **Parameters:**
-- **DSTH (Threshold):** The hyperparameter controlling densification constraints. Default value is 30 [S2, unofficial]. For the playroom scene in the DeepBlending dataset, it is set to 60; other scenes use 30 [S2, unofficial]. Increasing DSTH imposes stricter constraints, reducing the number of Gaussians (NGS), rendering quality, and training time [S2, unofficial].
+*   **DSTH (DS Threshold):** A hyperparameter controlling the strictness of densification constraints.
+    *   Default value: 30 [S3, unofficial].
+    *   Specific scene value: 60 for the "playroom" scene in the DeepBlending dataset [S3, unofficial].
+    *   Effect: Increasing DSTH imposes stricter constraints, reducing the number of Gaussians (NGS), rendering quality, and training time [S3, unofficial].
 
-**Edge Cases:**
-- If the gradient is below the threshold in all views, no densification occurs, potentially leading to under-reconstruction in complex areas if the threshold is too high [S2, unofficial].
-- Precision issues may arise if gradient magnitudes are very small; however, the sources do not specify a minimum epsilon guard [G].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def multi_view_density_control(gaussian, gradients_from_views, threshold):
-    """
-    gaussian: The Gaussian primitive being evaluated.
-    gradients_from_views: List of absolute gradient magnitudes for this Gaussian from each view in the batch.
-    threshold: The DSTH hyperparameter.
-    Returns: Boolean indicating if densification (split/clone) should occur.
-    """
-    # Aggregate gradients across views. 
-    # Note: The exact aggregation function (e.g., max, mean) is not explicitly defined in the sources.
-    # We assume a conservative approach where significant gradient in any view contributes,
-    # but the criterion implies multi-view consistency. 
-    # Based on [S1, unofficial], it contrasts with single-view positional gradients.
-    # A common implementation for "multi-view" criteria is to check if the gradient 
-    # exceeds the threshold in a sufficient number of views or if the max gradient exceeds it.
-    # Given the alias "Absolute-gradient split proxy", we use the max gradient magnitude.
-    
-    max_gradient = max(gradients_from_views)
-    
-    if max_gradient > threshold:
-        return True
-    else:
-        return False
-```
+**Pitfalls:**
+*   **Invalid Vector Addition:** Standard ADC adds 2D positional gradients directly. In multi-view training, a Gaussian is projected to multiple image planes. Adding 2D positional gradients from different image planes (different spaces) is mathematically invalid [S1, unofficial].
+*   **Nullification:** This invalid arithmetic can result in zero vectors even if the underlying 3D gradients are identical and large, leading to a failure to densify where it is needed [S1, unofficial]. The Multi-View Density Control Criterion avoids this by using norms (scalars) which are space-independent.
 
 ## Subtopics
 
 ### DS Threshold (DSTH)
-A hyperparameter threshold that controls the densification constraints of Gaussians; increasing it imposes stricter constraints, reducing NGS, rendering quality, and training time [S2, unofficial]. Default value is 30. Set to 60 for the playroom scene in the DeepBlending dataset. Other scenes use 30 [S2, unofficial].
+A hyperparameter threshold that controls the densification constraints of Gaussians [S3, unofficial]. Increasing it imposes stricter constraints, reducing the number of Gaussians (NGS), rendering quality, and training time [S3, unofficial]. The default value is 30, but it is set to 60 for the playroom scene in the DeepBlending dataset, while other scenes use 30 [S3, unofficial].
 
 ## Operating characteristics
-The Multi-View Density Control Criterion yields 0.67 dB and 0.028 LPIPS improvement on average, while using 28% fewer primitives at the same time [S1, unofficial]. In the garden scene, the standard positional-gradient rule produces 240,075 primitives with a PSNR of 26.83 and LPIPS of 0.1303, whereas the multi-view criterion produces 148,658 primitives with a PSNR of 27.06 and LPIPS of 0.1247 [S1, unofficial]. It is applied during the teacher training phase [S1, unofficial].
+*   **Performance:** Yields an average improvement of 0.67 dB in PSNR and 0.028 in LPIPS compared to standard methods, while using 28% fewer primitives at the same time [S2, unofficial].
+*   **Efficiency:** On the "garden" scene, it produces 148,658 primitives compared to 240,075 with standard positional-gradient rules, achieving a higher PSNR (27.06 vs 26.83) and lower LPIPS (0.1247 vs 0.1303) [S2, unofficial].
+*   **Usage:** Applied during the teacher training phase to control primitive count and distribution [S2, unofficial].
+*   **Strengths:** Resolves the gradient nullification issue in multi-view settings; reduces memory footprint (fewer primitives) while improving or maintaining reconstruction quality.
+*   **Limitations:** Requires careful tuning of DSTH for specific scenes (e.g., DeepBlending playroom) to avoid over-constraining the density [S3, unofficial].
 
 ## Background
-The method is associated with the FastGS approach and is cited in the context of ultrafast spatial texture-atlas splatting [S1, S2, unofficial]. It was developed to improve the efficiency of Gaussian Splatting training by reducing the number of primitives without sacrificing quality [S1, unofficial].
+The method was proposed to address the incompatibility of standard 3D Gaussian Splatting densification with efficient multi-view training [S1, unofficial]. Standard ADC relies on summing 2D gradients, which fails when gradients come from different camera views [S1, unofficial]. The Multi-View Density Control Criterion was introduced in "Efficient multi-view training for 3D Gaussian Splatting" [S1, unofficial] as a space-independent error metric. It has since been utilized in subsequent works such as "Bake It Till You Make It" [S2, unofficial] and "Loss-Guided Density Control" [S3, unofficial].
 
 ## Sources
-[S1] Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting, https://doi.org/10.48550/arXiv.2607.13808, fetched 2026-10-29 (unofficial)
-[S2] Loss-Guided Density Control and Efficient Backward Optimisation for Compact Gaussian Splatting, https://doi.org/10.21203/rs.3.rs-10572680/v1, fetched 2026-10-26 (unofficial)
+[S1] Efficient multi-view training for 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2506.12727, fetched 2026-10-26 (unofficial)
+[S2] Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting, https://doi.org/10.48550/arXiv.2607.13808, fetched 2026-10-29 (unofficial)
+[S3] Loss-Guided Density Control and Efficient Backward Optimisation for Compact Gaussian Splatting, https://doi.org/10.21203/rs.3.rs-10572680/v1, fetched 2026-10-26 (unofficial)

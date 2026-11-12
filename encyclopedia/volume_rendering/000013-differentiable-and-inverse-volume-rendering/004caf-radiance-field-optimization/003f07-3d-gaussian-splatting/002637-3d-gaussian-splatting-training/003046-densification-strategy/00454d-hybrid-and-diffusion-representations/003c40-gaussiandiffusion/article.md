@@ -3,115 +3,49 @@
 Also called: GaussianCube
 
 ## Overview
-GaussianDiffusion is a method that trains a 3D diffusion model based on a GaussianCube representation to generate 3D Gaussian Splatting (3DGS) primitives directly [S1]. It addresses the "Janus problem" (multi-view inconsistency) by incorporating structured noises from multiple viewpoints and mitigates "floaters" (spurious geometry) by using variational 3DGS [S1]. Unlike sibling methods that may rely on iterative optimization or intermediate image sets, GaussianDiffusion maps a compact input to an explicit set of 3D Gaussians via a diffusion process defined on a voxelized Gaussian representation [S1, S3].
+GaussianDiffusion is a method that trains a 3D diffusion model based on a **GaussianCube** representation to synthesize 3D Gaussian fields directly [S1]. It addresses the "Janus problem" (multi-view inconsistency) by incorporating structured noises from multiple viewpoints and mitigates the generation of "floaters" (spurious geometry) through variational 3DGS [S1]. It sets itself apart from standard 3DGS training by bypassing iterative densification loops, instead using a voxelized intermediate representation converted via optimal transport [S1].
 
 ## How it works
-**Inputs and Outputs:**
-- **Input:** Noise tensor and conditioning signal (e.g., text or image embeddings).
-- **Output:** A set of 3D Gaussians $\mathcal{G} = \{ \mu_i, \Sigma_i, \alpha_i, c_i \}$ [S1].
+**Inputs:** A dataset of 3D scenes or images; a target number of Gaussians $N$.
+**Outputs:** A set of 3D Gaussians $\{G_i\}_{i=1}^N$ defined by position $\mathbf{x}_i$, covariance $\Sigma_i$, color $\mathbf{c}_i$, and opacity $\alpha_i$.
 
 **Data Structures:**
-The core data structure is the **GaussianCube**, a voxelized representation of a constant number of Gaussians [S1].
-1.  **Voxelization:** The continuous Gaussian parameters are mapped to a 3D grid.
-2.  **Optimal Transport:** The conversion from the constant number of Gaussians to the voxel grid is performed via optimal transport to ensure structural integrity [S1].
+1.  **GaussianCube:** A voxel grid representation of the Gaussian field. Each voxel stores aggregated Gaussian attributes.
+2.  **Diffusion Model:** A neural network $p_\theta(\mathbf{z}_t | \mathbf{z}_{t-1})$ or $p_\theta(\mathbf{z}_0 | \mathbf{z}_t)$ operating in the latent space of the GaussianCube.
 
-**Algorithm Steps:**
-1.  **Representation Conversion:** Convert the target 3DGS primitive set into a GaussianCube representation using optimal transport voxelization [S1].
-2.  **Diffusion Process:** Train a 3D diffusion model on the GaussianCube representation [S1].
-3.  **Structured Noise Injection:** During training or inference, incorporate structured noises from multiple viewpoints into the diffusion process [S1]. This step is critical for alleviating the Janus problem by enforcing multi-view consistency [S1].
-4.  **Variational Regularization:** Apply variational 3DGS constraints during the generation process to mitigate floaters and improve generation quality [S1].
-5.  **Inversion/Sampling:** Use a diffusion sampler (e.g., DDIM) to denoise the GaussianCube and recover the final set of 3D Gaussians [S1].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def train_gaussian_diffusion(gaussians, conditioning):
-    """
-    Trains a 3D diffusion model on GaussianCube representations.
-    """
-    # 1. Convert Gaussians to GaussianCube via Optimal Transport
-    # Note: Optimal transport details are implementation-specific; 
-    # this step maps constant N Gaussians to a voxel grid.
-    gaussian_cube = voxelize_with_optimal_transport(gaussians)
-    
-    # 2. Define Diffusion Model
-    model = DiffusionModel()
-    
-    # 3. Training Loop
-    for step in num_steps:
-        # Add noise to the GaussianCube
-        noisy_cube = add_noise(gaussian_cube, step)
-        
-        # Incorporate structured noise from multiple viewpoints
-        # This aligns the noise field with camera viewpoints to fix Janus issues
-        structured_noise = get_structured_noise(noisy_cube, conditioning)
-        noisy_cube += structured_noise
-        
-        # Predict noise or parameters
-        predicted_noise = model.predict(noisy_cube, conditioning)
-        
-        # Compute loss (e.g., MSE between predicted and actual noise)
-        loss = compute_loss(predicted_noise, actual_noise)
-        
-        # Update model parameters
-        model.update(loss)
-
-def generate_gaussian_cube(conditioning):
-    """
-    Generates 3D Gaussians from conditioning using the trained model.
-    """
-    # Start with pure noise
-    cube = random_noise()
-    
-    # Denoising steps (e.g., DDIM inversion or sampling)
-    for step in reversed(num_steps):
-        # Predict noise
-        predicted_noise = model.predict(cube, conditioning)
-        
-        # Remove noise component
-        cube = remove_noise_component(cube, predicted_noise, step)
-        
-        # Apply variational 3DGS constraints to mitigate floaters
-        cube = apply_variational_constraints(cube)
-        
-    # 4. Convert GaussianCube back to explicit 3D Gaussians
-    gaussians = unvoxelize_gaussian_cube(cube)
-    return gaussians
-```
+**Steps:**
+1.  **GaussianCube Construction:** Convert a constant number of Gaussians into a voxel grid using optimal transport [S1]. This involves mapping the continuous Gaussian parameters to discrete voxel bins while preserving statistical moments or density mass.
+2.  **Structured Noise Injection:** During the diffusion forward process, incorporate structured noise derived from multiple viewpoints [S1]. This ensures that the noise pattern respects multi-view geometric consistency, reducing the Janus problem.
+3.  **Diffusion Training:** Train the diffusion model to predict the noise or the clean GaussianCube from noisy inputs. The loss function typically includes a variational bound to regularize the generated Gaussians, mitigating floaters [S1].
+4.  **Sampling:** Use the trained diffusion model (e.g., DDIM inversion or iterative denoising) to generate a clean GaussianCube from random noise or a text/image condition.
+5.  **Un-voxelization:** Convert the generated GaussianCube back into a set of explicit 3D Gaussians for rendering [S1].
 
 **Parameters:**
-- Not given in the sources.
+*   Number of Gaussians $N$: Constant, determined by the resolution of the GaussianCube.
+*   Diffusion steps: Standard for the chosen diffusion sampler (e.g., DDIM).
+*   Variational regularization weight: Not given in the sources.
 
-**Edge Cases and Pitfalls:**
-- **Janus Problem:** Without structured multi-view noise, the generated object may have inconsistent features across different viewpoints [S1].
-- **Floaters:** Without variational 3DGS constraints, the generation may produce spurious, low-opacity geometry artifacts [S1].
+**Edge Cases:**
+*   **Precision:** Optimal transport calculations can be computationally expensive and sensitive to the discretization of the voxel grid [S1].
+*   **Boundaries:** The conversion between Gaussian space and voxel space may introduce artifacts at the boundaries of the voxel grid if not handled with smooth aggregation [S1].
 
 ## Subtopics
 
 ### Gaussian Masking
-A technique used to prune Gaussians during the training or densification process to improve efficiency and quality [S2].
-- **Step:** Use Gaussian masks to prune Gaussians at every densification step and for every 500 iterations after densification stops [S2].
-- **Parameters:**
-  - $\lambda_m$: Loss weight for Gaussian masking loss. Value is 0.05 [S2].
-  - $\epsilon_m$: Threshold for Gaussian masks. Value is 0.05 [S2].
-  - Learning rate for Gaussian masks: 0.5 [S2].
+A technique used to prune Gaussians during training. It applies Gaussian masks to prune Gaussians at every densification step and for every 500 iterations after densification stops [S2]. It uses a loss weight $\lambda_m = 0.05$, a threshold $\epsilon_m = 0.05$, and a learning rate of 0.5 for the Gaussian masks [S2]. This helps reduce the number of Gaussians without significantly degrading rendering quality [S2].
 
 ### Direct 3D Generation
-A broader category of methods that learn a feedforward or diffusion model to output Gaussian fields directly from text or images, without an explicit intermediate image set [S3].
-- **Definition:** A method that learns a feedforward or diffusion model to output Gaussian fields directly from text or images, without an explicit intermediate image set, amortizing reconstruction cost [S3].
-- **Characteristics:** These models naturally promote multi-view coherence and enable near-real-time sampling at test time, though they face challenges in the high-dimensional output space and require large 3D training corpora [S3].
+A broader category of methods that learn a feedforward or diffusion model to output Gaussian fields directly from text or images, without an explicit intermediate image set [S3]. These methods amortize reconstruction cost and promote multi-view coherence [S3]. They face challenges in the high-dimensional output space and require large 3D training corpora [S3].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Strengths:** Alleviates the Janus problem through structured multi-view noise [S1]. Mitigates floaters via variational 3DGS [S1]. Provides a compact, voxelized representation (GaussianCube) for diffusion modeling [S1].
-- **Limitations:** Requires optimal transport for voxelization, which may be computationally intensive [S1]. Relies on a 3D diffusion model, which can be complex to train [S1].
-- **When to use:** When generating 3DGS from text or images with a need for multi-view consistency and reduced geometric artifacts [S1].
-- **When not to use:** When iterative optimization is preferred or when the input does not support the conditioning signals required by the diffusion model [S1].
+*   **Time Complexity:** Training time depends on the diffusion model size and the number of diffusion steps. The optimal transport step for GaussianCube construction adds overhead [S1].
+*   **Memory Complexity:** Requires memory for the voxel grid (GaussianCube) and the diffusion model parameters [S1].
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Alleviates the Janus problem and reduces floaters [S1]. Bypasses slow iterative densification [S1].
+*   **Limitations:** Requires complex voxelization and optimal transport steps [S1]. Dependent on the quality of the diffusion prior [S1].
 
 ## Background
-GaussianDiffusion was proposed in the context of 3D Gaussian Splatting generation, specifically addressing issues like the Janus problem and floaters [S1]. It utilizes a GaussianCube representation, which is converted from a constant number of Gaussians with voxelization via optimal transport [S1]. The method is part of the broader family of hybrid and diffusion representations for 3DGS [S1].
+GaussianDiffusion was proposed in the context of recent advances in 3D Gaussian splatting [S1]. It builds on the idea of using diffusion models for 3D generation, adapting them to the specific structure of 3D Gaussians via the GaussianCube representation [S1]. The method aims to improve generation quality by addressing specific issues like multi-view inconsistency and spurious geometry [S1].
 
 ## Sources
 [S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

@@ -1,0 +1,1874 @@
+arXiv:2506.12727v2 [cs.CV] 17 Jun 2025
+Efficient multi-view training for 3D Gaussian Splatting
+Minhyuk Choi1 *
+1
+Korea University
+Injae Kim1 *
+1
+Korea University
+Hyunwoo J. Kim†
+KAIST
+sodlqnf123@korea.ac.kr
+dna9041@korea.ac.kr
+hyunwoojkim@kaist.ac.kr
+Abstract
+gle image per iteration; consequently, ‘single-view’ minibatch training has become the de facto standard for 3DGS.
+However, surprisingly, we found from a series of experiments that multi-view training leads to a smaller variance
+of mini-batch gradients than single-view training, leading to
+more stable optimization. These observations suggest that
+the current single-view learning approach for 3DGS may
+degrade performance, while NeRF implicitly benefits from
+multi-view learning.
+However, adopting multi-view training for 3DGS presents
+several challenges. First, due to the rasterization process,
+3DGS cannot simply gather individual pixels from multiple
+images to form a mini-batch. Instead, it requires rendering every pixel of all images in a single iteration, which
+incurs considerable overhead. Second, the adaptive density control (ADC) mechanism, which modulates the number of Gaussian primitives, is based on the assumption of
+single-view training. Specifically, it assumes that all 2D positional gradients computed during backpropagation reside
+within a single plane, which is necessary for valid arithmetic operations between vectors. Without addressing this
+assumption, multi-view training risks performing arithmetic
+between vectors in different spaces, resulting in a suboptimal densification process.
+3D Gaussian Splatting (3DGS) has emerged as a preferred
+choice alongside Neural Radiance Fields (NeRF) in inverse
+rendering due to its superior rendering speed. Currently,
+the common approach in 3DGS is to utilize “single-view”
+mini-batch training, where only one image is processed per
+iteration, in contrast to NeRF’s “multi-view” mini-batch
+training, which leverages multiple images. We observe that
+such single-view training can lead to suboptimal optimization due to increased variance in mini-batch stochastic gradients, highlighting the necessity for multi-view training.
+However, implementing multi-view training in 3DGS poses
+challenges. Simply rendering multiple images per iteration
+incurs considerable overhead and may result in suboptimal Gaussian densification due to its reliance on singleview assumptions. To address these issues, we modify the
+rasterization process to minimize the overhead associated
+with multi-view training and propose a 3D distance-aware
+D-SSIM loss and multi-view adaptive density control that
+better suits multi-view scenarios. Our experiments demonstrate that the proposed methods significantly enhance the
+performance of 3DGS and its variants, freeing 3DGS from
+the constraints of single-view training.
+In this paper, we address the challenges of efficient
+multi-view training in 3DGS as follows: First, we theoretically analyze the superiority of multi-view training over
+single-view training and provide empirical evidence of the
+performance limitations imposed by single-view training.
+Next, we propose a new rasterization method that enables
+3DGS to adopt multi-view training with mitigated overhead, and we also propose a 3D distance-aware D-SSIM
+loss required for the new method. Lastly, we modify the
+densification process to eliminate the constraints of singleview training, allowing 3DGS to fully benefit from multiview training.
+In summary, our contributions are presented as follows.
+1. Introduction
+Deep learning-based 3D reconstructions [12, 24, 25, 32] are
+recognized as leading approaches in the inverse rendering
+domain. Notably, 3D Gaussian Splatting (3DGS) [12] has
+gained traction across various applications due to its exceptional rendering speed. This speed advantage arises from
+the differences in rendering techniques: NeRF [24] employs
+ray marching, while 3DGS utilizes rasterization. Specifically, NeRF requires evaluating hundreds of points along a
+ray to render each pixel, whereas 3DGS splats 3D Gaussian
+primitives onto the image plane using an efficient CUDAbased rasterization pipeline [50]. The nature of the rasterization pipeline makes it more conducive to rendering a sin-
+• We provide a theoretical and empirical analysis of the
+efficacy of multi-view training compared to single-view
+training.
+• We address the challenges of implementing multi-view
+* Equal contribution
+† Corresponding author
+1
+PSNR
+30
+Mini-batch
+28
+Mini-batch
+26
+(a) Multi-view mini-batch of NeRF
+31
+(b) Single-view mini-batch of 3DGS
+NeRF
+NeRF
+NeRF with
+NeRFSigleview
+(Single-view)
+(Multi-view)
+PSNR
+30
+Mini-batch
+Mini-batch
+29
+28
+1
+3DGS
+(Single-view)
+(c) Naïve multi-view mini-batch of 3DGS
+(d) Efficient multi-view mini-batch of 3DGS (Ours)
+2
+3DGS
+(Multi-view)
+(Ours)
+(e) PSNR comparison
+Figure 1. Comparison between single-view and multi-view training. We observed that single-view training degrades the efficacy of
+mini-batch training compared to multi-view training for both NeRF and 3DGS. However, the naı̈ve adoption of multi-view training has
+limitations in terms of performance boost and considerable overhead. Our method realizes efficient multi-view training with reduced
+overhead, with the same number of Gaussians to the single-view 3DGS.
+training in 3DGS regarding additional overhead and propose solutions to mitigate these challenges.
+• We eliminate the single-view assumption in the densification process, further enhancing the performance of multiview training.
+• In short, our methods enable 3DGS to efficiently process multiple images simultaneously, demonstrating superior performance in extensive experiments across various datasets, which validate the effectiveness of our proposed approach.
+with unconstrained photos [5, 22], editing [7, 15, 38], lightning [19, 21, 37], generation [9] and more. While NeRF
+offers the advantage of good scalability, it also has the drawback of slow training and rendering speeds. Several recent
+works [4, 25, 32], including 3D Gaussian Splatting [12],
+have sought to address these limitations of NeRF.
+3D Gaussian Splatting Recently, 3D Gaussian Splatting
+(3DGS) [12] has gained recognition as a promising alternative to Neural Radiance Fields (NeRF) due to its remarkable
+rendering speed, which significantly outperforms that of
+NeRF. The fundamental difference lies in their approaches
+to rendering. While NeRF relies on ray marching, a technique that requires sampling thousands of points along each
+ray to generate a single pixel, 3DGS utilizes rasterization by
+splatting 3D Gaussian primitives directly onto the 2D image
+plane [50]. This approach bypasses the time-consuming
+point sampling processes of NeRF, substantially reducing
+rendering time and making real-time applications more feasible. The efficiency of 3DGS has made it suitable for many
+tasks previously dominated by NeRF. This versatility has
+led to its adoption across a range of domains and research
+areas that traditionally relied on NeRF like 3D scene generation [1, 17, 23, 27, 44, 48], 4D representation [30, 40, 43]
+and editing [26, 34, 41, 49]. As a result, there has been a
+noticeable shift towards 3DGS, with researchers exploring
+2. Related work
+Neural Radiance Fields Since Neural Radiance Field
+(NeRF) [24] made a breakthrough in inverse rendering,
+NeRF has been the most favorable model for various 3D
+reconstruction and rendering tasks. Compared to prior
+works [10, 31, 42] that require prior 3D representation,
+NeRF shows far superior results without such requirements
+and enables quality rendering only with images. It represents 3D space as a continuous field that outputs color and
+density from 3D coordinates and renders the image with
+volume rendering. The input and output values of the model
+are not restricted to the original ones. Such versatile design
+realizes a myriad of following works, including 4D representation [6, 18, 35], deformable fields [28, 29], training
+2
+its potential in various contexts [11, 16, 36, 40, 43].
+3D Gaussian Splatting Given an image set with extrinsic and intrinsic camera parameters, 3DGS reconstructs the
+scene by optimizing 3D Gaussian primitives {G} in 3D
+space, each defined as mean µ, scale S, rotation R, color
+c and opacity o. From those parameters, we obtain a covariance matrix of Gaussians Σ = RSS TRT . Then, we
+project the 3D mean and covariance matrix onto the 2D
+plane to derive the 2D mean µ′ and covariance Σ′ for rendering [50]. To render the color Ĉ(p) of pixel p, 3DGS
+arranges and sorts M Gaussians by depth that is responsible for the pixel p and performs alpha-blending with sorted
+Gaussians {Gj }M
+j=1 where G is projected 2D Gaussian of
+3D Gaussian G:
+Ĉ(p) =
+M
+X
+ci Ti oi Gi (p), Ti =
+i=1
+i−1
+Y
+0.02
+6000
+0.015
+4000
+2000
+0.01
+0.005
+0
+0
+Single-view
+Multi-view
+Single-view
+(a) NeRF
+Multi-view
+(a) 3DGS
+Figure 2. Variance of mini-batch gradients. The figure indicates
+that multi-view mini-batch has a smaller variance of mini-batch
+gradients than single-view, resulting in more stable and effective
+optimization.
+4.1. Mini-batch strategies of NeRF and 3DGS
+The difference in mini-batch composition between NeRF
+and 3DGS mainly stems from different rendering schemes
+in the two methods and affects the stability and efficacy of
+optimization. Given N images with M pixels, the training
+data D consists of R = N×M rays r and pixel values C,
+D = {(ri , Ci )}i∈[1,R] . NeRF randomly samples data from
+the all training dataset D to form a mini-batch B, as shown
+in Fig. 1 (a). In contrast, 3DGS typically uses a single-view
+image to form a minibatch B, as shown in Fig. 1 (b). We
+also provide a pseudocode that compares two mini-batch
+strategies in the supplement.
+(1 − ok Gk (p)),
+k=1
+8000
+Variance
+Variance
+3. Preliminary
+(1)
+1
+Gi (p) = exp(− (p − µ′i )T (Σ′i )−1 (p − µ′i )),
+2
+where Gi (p) is the density of Gi at pixel p. Then, photometric ℓ1 loss with additional losses like D-SSIM loss can
+be applied to compare the rendered with the ground-truth
+image. The total number of 3D Gaussians varies across
+optimization since adaptive density control and pruning of
+3DGS produce and eliminate Gaussians.
+4.2. Efficacy of multi-view training
+3DGS rasterization The rasterization process of 3DGS is
+divided into two stages: preprocessing and rendering. The
+preprocessing stage includes culling, projection, and organization of 3D Gaussian primitives for rendering. Then,
+each pixel is rendered using preprocessed Gaussians. All
+the steps are performed by the tile-based rasterizer. Specifically, the rasterizer splits the image into several tiles, and
+a group of threads (called block) cooperate to preprocess
+Gaussians and render pixels in their assigned tiles. A single
+block is allocated to a single tile, and a thread is freed when
+all of its peer threads in the same block have completed their
+work.
+This simple difference between constructing a mini-batch
+as a single view or as a multi-view results in a significant
+difference in performance, as shown Fig. 1 (e); The singleview NeRF experiment sampled a mini-batch from only a
+single-view image, and the multi-view 3DGS experiment is
+the result of our proposed method. Then, why is multi-view
+mini-batch more effective than single-view mini-batch? To
+answer this question, we analyze mini-batch training for
+empirical risk minimization. Let w denote the model parameters, then training in NeRF can be formulated as
+R
+min P (w) P (w) :=
+w
+4. Motivation
+In this section, we present the theoretical rationale for why
+3DGS should incorporate a multi-view training strategy
+by comparing NeRF, which trains using multi-view minibatches. To do so, in Sec. 4.1, we will explain how NeRF
+and 3DGS define training mini-batches respectively, and in
+Sec. 4.2, we will prove which one is more helpful for learning in terms of the variance of mini-batch gradients. Finally, in Sec. 4.3, we will present the challenge of multiview training using existing rasterization methods.
+1 X
+ϕi (w),
+R i=1
+(2)
+where ϕi (w) = L(w, ri , ci ) and L is a loss function that
+penalizes the deviation of prediction from the label. With
+mini-batch training, weights at iteration t is updated with
+mini-batch gradient ∇ϕ̄k as
+wt+1 = wt − ηt ∇ϕ̄k (wt ),
+(3)
+1 X
+where ∇ϕ̄k (wt ) =
+∇ϕi (wt ) and Bk ⊂ D. (4)
+|Bk |
+i∈Bk
+3
+(a) Single-view rendering
+(b) Naïve partial rendering
+4
+6
+7
+0
+5
+13 15
+2
+11 13 14
+1
+3
+8
+9
+10
+(c) Thread-efficient partial rendering
+Figure 3. Comparison of naı̈ve partial rendering and thread-efficient partial rendering. While the naı̈ve implementation incurs lots of
+idle threads that do not participate in rendering, our thread-efficient rendering scheme does not generate such idle threads, mitigating the
+substantial overhead of rendering in multi-view training.
+4.3. Obstacle to multi-view training in 3DGS
+Then, it is demonstrated in [47] that mini-batch training is
+more effective as the variance of ∇ϕ̄, which is Vk (∇ϕ̄k ),
+decreases when we define the variance of vectors x as
+E[x] = µ,
+V(x) := E[∥x − µ∥22 ].
+How to apply the efficiency of multi-view mini-batch learning to 3DGS training? The simplest way is that rendering
+multiple images for a single iteration, as in Fig. 1 (c). However, it is not surprising that this implementation, although
+effective, incurs significant overhead, as the rasterizer has
+to render multiple images, which increases training time.
+In conclusion, we present a novel rasterization method to
+address this overhead while also taking advantage of multiview training.
+(5)
+We estimate the variance above using Monte Carlo sampling to compare the variance of single-view and multi-view
+mini-batch gradients. Specifically, we freeze the model
+parameters, randomly sample K mini-batches to compute
+mini-batch gradients with respect to the parameters of density MLP, and then calculate the sample variance as
+5. Method
+VBk ∈S (∇ϕ̄k ) = E[∥∇ϕ̄k − P (wt )∥22 ]
+We present our framework to incorporate efficient multiview training into 3DGS. In Sec. 5.1, we propose threadefficient partial rendering that realizes multi-view training
+with reasonable overhead. Then, we devise a new D-SSIM
+loss that can be computed in 3D space as an alternative to
+the current D-SSIM loss to make it compatible with our new
+rendering mechanism. In Sec. 5.2, we demonstrate the current densification method of 3DGS is not compatible with
+multi-view training and propose a new densification strategy for multi-view training.
+= E[∥∇ϕ̄k ∥22 ] − ∥P (wt )∥22
+2
+1 X
+1 X
+≈
+[∥∇ϕ̄k ∥22 ] −
+[∇ϕ̄k ]
+2
+|S̃|
+|S̃|
+Bk ∈S̃
+Bk ∈S̃
+(6)
+where ∇ϕ̄k = ∇ϕ̄k (wt ), S denotes a set of possible minibatches of D, and S̃ is a set of randomly sampled minibatches.
+Remarks. As shown in Fig. 2, the single-view mini-batch
+in NeRF, as well as in 3DGS, yields a larger variance
+of mini-batch gradients compared to the multi-view minibatch. In general, a larger variance of stochastic gradient
+implies a larger discrepancy between the true (batch) gradient and the stochastic gradient since the expectation of
+stochastic gradient is equivalent to the batch gradient, i.e.,
+E[∇ϕ̄k ] = P (wt ) by definition. Roughly speaking, multiview mini-batch gradient is more accurate than single-view
+mini-batch.
+5.1. Multi-view partial rendering
+As we mentioned in Sec. 4.3, it is obvious that rendering multiple images every iteration causes severe overhead.
+At least, We have to set the rasterizer to render the same
+amount of pixels compared to the single-view training. One
+solution would be partial rendering, which makes the rasterizer only part of the pixels. Thereby, not only can the
+rasterizer render fewer pixels compared to naive multi-view
+4
+training implementation, but also the model can be trained
+with the same number of pixels compared to the single-view
+training. However, if we adopt partial rendering, we need to
+deal with some problems to achieve better performance and
+lower overhead. We demonstrate these as follows.
+Pixel-based
+gaussian kernel
+5.1.1. Thread-efficient partial rendering
+Even though we mentioned that partial rendering can reduce the overhead, naive implementation of partial rendering leads to inefficient parallelization due to the tiled rendering scheme of 3DGS. The problem is that GPU does not
+allocate threads individually; it has a minimum bundle of
+threads called block. Currently, 3DGS divides the image
+into several tiles whose sizes are set to be equal to the size
+of a block, and one block is allocated to one tile. Then,
+each thread in a block renders its designated pixel in a tile.
+If the multi-view training is simply implemented with a binary mask as in Fig. 3 (b), threads allocated to the masked
+pixel must wait until all the other threads in the same block
+finish their job, leading to numerous idle threads and lower
+GPU utilization. In the extreme case, when only a single
+pixel is unmasked in a tile, then all the threads in a block
+except a single thread allocated to the unmasked pixel must
+wait without rendering. We remove such inefficiency as follows. Even though 3DGS aligns the size of tiles and blocks,
+such alignment is not mandatory. Therefore, we can decrease the block size and let multiple blocks render a single
+tile as in Fig. 3 (c). Specifically, for a single tile, we subsample pixels to render in a tile for each viewpoint, and
+pass it together as an index array to the rasterizer. Then, we
+assign multiple blocks that have exactly the same number
+of threads as the number of sub-sampled pixels, with each
+block allocated to each viewpoint. The rendered result is
+similar to the merged images as depicted in Fig. 3. Such
+implementation effectively eliminates idle threads that do
+not participate in rendering and mitigates the overhead of
+multi-view training.
+3D distance-aware
+gaussian kernel
+Figure 4. 3D distance-aware gaussian filter. For 3D distanceaware D-SSIM loss, we lift the points from pixel space to 3D space
+and compute the Gaussian kernel using the 3D distance.
+apply conventional D-SSIM loss. Therefore, we devise 3D
+distance-aware D-SSIM loss that can be computed in the 3D
+space, such that adjacent pixels that are distant in 3D space
+are not forced to have structural similarity. Specifically, the
+original D-SSIM loss of two images is computed as follows.
+D-SSIM(I1 , I2 ) = 1 − SSIM(I1 , I2 )
+(7)
+(2µ1 µ2 + C1 )(2τ12 + C2 )
+SSIM(I1 , I2 ) = 2
+(µ1 + µ22 + C1 )(τ12 + τ22 + C2 )
+(8)
+where C1 and C2 are predefined constants, and µ1 , µ2 , τ12 ,
+τ22 and τ12 are computed with local patches I1 and I2 .
+µ1 =⟨I1 , Kσ ⟩F ,
+µ2 =⟨I2 , Kσ ⟩F ,
+τ12 =⟨I1 ◦ I1 , Kσ ⟩F − µ21 ,
+(9)
+τ22 =⟨I2 ◦ I2 , Kσ ⟩F − µ22 ,
+τ12 =⟨I1 ◦ I2 , Kσ ⟩F − µ1 µ2 ,
+where Kσ is 2D Gaussian kernel, ⟨I, Kσ ⟩F is Frobenius inner product, and ◦ is element wise product.
+ u2 + v 2 
+1
+exp
+−
+,
+(10)
+Kσ (u, v) =
+2πσ 2
+2σ 2
+5.1.2. 3D distance-aware D-SSIM loss
+3DGS uses additional D-SSIM loss for training along with
+the photometric ℓ1 loss. It penalizes low MS-SSIM (Multiscale Structural Similarity Index Measure) [39], which measures the structural similarity between two images by computing the mean and variance of pixel values inside a local window. While the photometric ℓ1 loss is vulnerable
+to blurry reconstruction due to its low sensitivity to outliers (fine details of the image), D-SSIM loss can produce
+sharper reconstruction because it prioritizes preserving local structural information, leading to reconstructions that
+maintain edges and textures [46]. Meanwhile, such a requirement for local information is troublesome when we apply thread-efficient partial rendering. As in Fig. 3, our new
+rendering mechanism makes pixels from multiple viewpoint
+lie in the sample image plane, which makes it impossible to
+where (u, v) is a pixel coordinate where the center of the
+kernel is defined as the origin. To obtain 3D distanceaware D-SSIM loss, we utilize a 3D distance-aware Gaussian kernel Kσ∗ , which is shown in Fig. 4. 3D surface points
+corresponding to each pixel are calculated by using a matrix Mpixel→world which transforms the point from the pixel
+space to the world space, where the coordinate corresponding to the center of the kernel is defined as the origin. Kσ∗ is
+formulated as
+X2 + Y 2 + Z2
+1
+exp(−
+),
+2πσ 2
+2σ 2
+where (X, Y, Z, 1)T = Mpixel→world (u, v, 1)T .
+Kσ∗ (u, v) =
+5
+(11)
+3D Gaussian
+We propose the following method to resolve this problem.
+Space-independent error metric The core of densification is that Gaussians with a large error deserve densification, and the design of such an error is entirely our choice.
+ADC currently computes the error metrics for each Gaussian as
+N X
+X
+(12)
+Eold (G) =
+∇pi L ,
+Gradient
+Gradient sum
+Nullified gradient
+Nullified 2D gradient
+k=1 Vpi =k
+Figure 5. Invalid arithmetic of gradients in different spaces.
+Even though both 2D positional gradients derive the same 3D gradients, the addition of those vectors results in the zero vector. Likewise, adding 2D positional gradients in different spaces is invalid,
+leading to unintended consequences.
+2
+where {pi } are the pixels a Gaussian cover, and each pixel
+pi comes from a viewpoint Vpi among N viewpoints.
+Then, we can remove the invalid vector arithmetic by
+changing add and norm to norm and add. Then, we devise
+two different ways to compute the error metric as follows
+A matrix Mpixel→world can be obtained using the predicted
+depth from the rasterizer. Finally, we obtain the 3D
+distance-aware D-SSIM loss by replacing Kσ in Eq. (9)
+with Kσ∗ . By utilizing the D-SSIM loss in 3D space, the
+issue of two adjacent pixels originating from different viewpoints is mitigated, as they have a low weight for each
+other.
+E1 (G) =
+N X
+X
+∥∇pi L∥2 ,
+(13)
+k=1 Vpi =k
+E2 (G) =
+N
+X
+X
+k=1
+Vpi =k
+∇pi L
+.
+2
+(14)
+Compared to adding vectors, adding norm remains valid
+even though vectors are placed in different spaces. We empirically found that E1 is good at splitting, and E2 is good
+at cloning.
+5.2. Densification in multi-view training
+5.2.1. Incompatability of ADC to multi-view training
+3DGS helps Gaussian primitives that struggle with reconstructing high-frequency regions through the densification
+process called adaptive density control (ADC). To figure
+out such Gaussians, ADC utilizes view-space 2D positional
+gradients to sort out and densify Gaussians with large errors. 2D positional gradients of each Gaussian primitive
+are computed by adding 2D positional gradients from pixels that each Gaussian covers, and the norm of those gradients is accumulated for multiple iterations. For every predefined interval, Gaussians with a larger mean than a predefined threshold are chosen, and ADC splits large Gaussians
+to have smaller sizes and clones small Gaussians.
+Meanwhile, we can not apply ADC directly to multi-view
+training. As we mentioned, ADC involves the addition of
+2D positional gradients, namely vectors. And vectors in different spaces can not be added. In multi-view training, each
+Gaussian can be projected onto image planes of multiple
+viewpoints, which can lead a Gaussian to receive gradients
+from pixels in different image planes. We provide an example situation where this invalid arithmetic operation causes
+a problem in Fig. 5, which depicts an extreme case where
+two 2D positional gradients are nullified even though two
+gradients represent the same 3D space gradient.
+6. Experiments
+We add our methods to two baselines, original 3DGS [12]
+and 3DGS-MCMC [13], with the number of images used
+for each iteration fixed to 4 across experiments. We do
+not apply methods in Sec. 5.2 for experiments on 3DGSMCMC because they do not use an adaptive density control
+process. For a fair comparison, the number of Gaussians
+in all experiments does not exceed the number provided by
+3D-MCMC, and the average of three repeated experiments
+is reported. All experiments were performed on a GeForce
+RTX 3090 GPU.
+Datasets and metrics Datasets include Deep blending [8], Tanks and Temples [14], MipNeRF-360 [3] and
+OMMO [20]. Because 3DGS does not support the radial
+camera in OMMO dataset, we apply undistortion to OMMO
+dataset using COLMAP [33]. We use three standard metrics
+to quantitatively assess the performance: PSNR, SSIM [39],
+and LPIPS [45]. We conduct all the experiments three times
+and report their average to compensate for the randomness
+of 3DGS.
+5.2.2. Multi-view Adaptive density control
+Quantitative and qualitative comparison Tab. 1 shows
+the results of novel view synthesis over four datasets. For
+a fair comparison, we set the final number of Gaussians to
+We discussed the problem of ADC in multi-view training: It
+causes invalid addition of gradients in different view spaces.
+6
+Deep Blending [8]
+Tank & Temples [14]
+PSNR↑ / SSIM↑ / LPIPS↓ PSNR↑ / SSIM↑ / LPIPS↓ PSNR↑ / SSIM↑ / LPIPS↓
+MipNeRF-360 [3]
+OMMO [20]
+PSNR↑ / SSIM↑ / LPIPS↓
+NeRF [25]
+Plenoxels [32]
+INGP-Big [25]
+MipNeRF [2]
+MipNeRF360 [3]
+24.85 / 0.659 / 0.426
+23.63 / 0.670 / 0.443
+26.75 / 0.751 / 0.299
+27.60 / 0.806 / 0.251
+29.23 / 0.845 / 0.207
+23.06 / 0.795 / 0.510
+24.96 / 0.817 / 0.390
+29.40 / 0.902 / 0.245
+21.08 / 0.710 / 0.379
+21.92 / 0.745 / 0.305
+22.22 / 0.759 / 0.257
+3DGS [12]
++ Ours
+29.28 / 0.878 / 0.167 29.24 / 0.901 / 0.162 29.55 / 0.902 / 0.244
+29.74 / 0.886 / 0.154 30.01 / 0.911 / 0.143 29.64 / 0.903 / 0.238
+23.69 / 0.845 / 0.177
+24.02 / 0.856 / 0.158
+3DGS-MCMC [13] 29.83 / 0.895 / 0.145 29.81 / 0.914 / 0.140 29.57 / 0.905 / 0.240
++ Ours†
+30.42 / 0.901 / 0.138 30.85 / 0.923 / 0.128 30.11 / 0.914 / 0.224
+24.59 / 0.869 / 0.145
+25.06 / 0.876 / 0.144
+-
+Table 1. Quantitative results of baselines and our model. Our method improves the performance of not only 3DGS [12], but also its
+state-of-the-art variant 3DGS-MCMC [13] even further. Ours† means that only the multi-view training strategy is applied.
+3DGS [12]
+Loss type
+only ℓ1
+only ℓ2
+ℓ1 + ℓD-SSIM
+ℓ1 + ℓ3D D-SSIM
+3DGS-MCMC [13]
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+29.19
+27.79
+29.55
+29.74
+0.845
+0.770
+0.865
+0.886
+0.219
+0.323
+0.192
+0.154
+29.65
+29.46
+30.02
+30.42
+0.877
+0.861
+0.895
+0.901
+0.149
+0.211
+0.146
+0.138
+Table 2. We verify the efficacy of our masked D-SSIM loss
+for multi-view training. Results are the average values on the
+MipNeRF-360 dataset.
+Multi-view ADC
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+✗
+✓
+29.56
+29.74
+0.880
+0.886
+0.174
+0.154
+3DGS [12]
+Time ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+Full
+Partial
+Ours
+127m
+105m
+50m
+29.74
+29.71
+29.74
+0.882
+0.883
+0.886
+0.154
+0.156
+0.154
+MCMC [13]
+Time ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+Full
+Partial
+Ours
+181m
+135m
+74m
+30.34
+30.36
+30.42
+0.898
+0.899
+0.901
+0.138
+0.140
+0.138
+Table 4. We compare the performance and overhead of our
+thread-efficient rendering with two naı̈vely implemented multiview mini-batch training methods. Results are the average values
+on MipNeRF-360 dataset. MCMC denotes for 3DGS-MCMC.
+Table 3. We report the performance of 3DGS multi-view minibatch training with and without our multi-view ADC. Results are
+the average values on the MipNeRF-360 dataset.
+be the same as the number used in 3DGS-MCMC, which
+is the same number of Gaussians reached when training
+the basic 3DGS. It verifies that our approach consistently
+improves the results over the original 3DGS [12] and its
+state-of-the-art variant 3DGS-MCMC [13]. In particular,
+the performance improvement of the 3DGS-MCMC proves
+that multi-view training itself is effective. It also shows that
+our method is not limited to just the original 3DGS. We
+also provide the qualitative novel-view synthesis results in
+Fig. 6. We highlight the differences within the images with
+a red box. It is observed that the models trained with the
+multi-view training can learn finer details.
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+Time ↓
+3DGS
+Base
+Ours∗
+29.28
+29.43
+0.878
+0.884
+0.167
+0.157
+26m
+26m
+3DGS-MCMC
+Base
+Ours∗
+29.83
+30.25
+0.895
+0.900
+0.145
+0.142
+46m
+37m
+Table 5. Comparison with similar training time. By halving the
+training iterations and the iteration-related hyperparameters, we
+make the training time comparable to that of the baselines. The
+results are averaged over the MipNeRF-360 dataset.
+at all and a model that uses conventional D-SSIM loss, with
+pixels of each viewpoint separated to compute D-SSIM loss
+for each viewpoint. In addition, we try optimization with ℓ2
+loss without D-SSIM loss, which is known to be more sensitive to outliers and has been a standard choice for NeRF. As
+shown in Tab. 2, conventional D-SSIM loss is not compatible with partial rendering, even though we separate pixels
+of each viewpoint. Furthermore, higher sensitivity to outliers of ℓ2 loss is still not enough to be comparable with
+D-SSIM loss, especially in SSIM and LPIPS metrics. Next,
+Ablation & Additional experiments We verify whether
+our methods are really helpful for multi-view training. To
+evaluate our 3D distance-aware D-SSIM loss, we set as
+baselines a model that is optimized without D-SSIM loss
+7
+GT
+Baseline
+Ours
+Baseline
+GT
+Ours
+3DGS
+3DGS-MCMC
+Figure 6. Qualitative results of baselines and our model. We provide comparison of 3DGS [12] and 3DGS-MCMC [13]. Our method
+successfully enhances both models, proving its compatibility with a variety of models.
+we evaluate our modified densification process for multiview training strategies in Tab. 3. It shows that our modified
+multi-view adaptive density control further improves the
+multi-view training performance by rectifying the singleview training assumption of ADC. Finally, we evaluate our
+thread-efficient partial rendering in Tab. 4. For comparison, we set two naı̈vely implemented multi-view training as
+baselines. First, we simply render the full image multiple
+times. Second, we implement partial rendering by passing
+a binary mask for each viewpoint in a mini-batch to the rasterizer. Tab. 4 shows that our thread-efficient partial rendering successfully reduces the overhead of multi-view training without any significant performance drop. We have an
+additional experiment to assure that improved performance
+does not mainly stem from longer training time. We halve
+the training iterations and iteration-related hyperparameters
+in Tab. 5. It clearly shows that even for the similar, or even
+shorter training time, our method shows superior results.
+7. Conclusion
+This paper introduces a novel, efficient multi-view training
+method for 3D Gaussian Splatting (3DGS), overcoming
+the limitations of previous single-view approaches. We
+provide theoretical and empirical evidence supporting
+the benefits of multi-view training and then propose a
+novel partial rendering technique to reduce computational overhead, a new 3D distance-aware D-SSIM loss
+function, and a modified density control mechanism.
+Experiments on various datasets demonstrate significant
+performance improvements over 3DGS and 3DGS-MCMC.
+The most important point is that our method is readily
+adaptable to enhance the performance of any 3DGS method.
+8
+References
+scene: 3d gaussian-based text-to-3d scene generation via formation pattern sampling. arXiv preprint arXiv:2404.03575,
+2024. 2
+[18] Tianye Li, Mira Slavcheva, Michael Zollhoefer, Simon
+Green, Christoph Lassner, Changil Kim, Tanner Schmidt,
+Steven Lovegrove, Michael Goesele, Richard Newcombe,
+et al. Neural 3d video synthesis from multi-view video. In
+CVPR, 2022. 2
+[19] Yuan Liu, Peng Wang, Cheng Lin, Xiaoxiao Long, Jiepeng
+Wang, Lingjie Liu, Taku Komura, and Wenping Wang. Nero:
+Neural geometry and brdf reconstruction of reflective objects
+from multiview images. In SIGGRAPH, 2023. 2
+[20] Chongshan Lu, Fukun Yin, Xin Chen, Tao Chen, Gang YU,
+and Jiayuan Fan. A large-scale outdoor multi-modal dataset
+and benchmark for novel view synthesis and implicit scene
+reconstruction. In arXiv, 2023. 6, 7
+[21] Alexander Mai, Dor Verbin, Falko Kuester, and Sara
+Fridovich-Keil. Neural microfacet fields for inverse rendering. In ICCV, 2023. 2
+[22] Ricardo Martin-Brualla, Noha Radwan, Mehdi S. M. Sajjadi,
+Jonathan T. Barron, Alexey Dosovitskiy, and Daniel Duckworth. NeRF in the Wild: Neural Radiance Fields for Unconstrained Photo Collections. In CVPR, 2021. 2
+[23] Luke Melas-Kyriazi, Iro Laina, Christian Rupprecht, Natalia Neverova, Andrea Vedaldi, Oran Gafni, and Filippos
+Kokkinos. Im-3d: Iterative multiview diffusion and reconstruction for high-quality 3d generation. arXiv preprint
+arXiv:2402.08682, 2024. 2
+[24] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 1, 2
+[25] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph., 2022. 1, 2,
+7
+[26] Francesco Palandra, Andrea Sanchietti, Daniele Baieri, and
+Emanuele Rodolà. Gsedit: Efficient text-guided editing of 3d objects via gaussian splatting. arXiv preprint
+arXiv:2403.05154, 2024. 2
+[27] Zijie Pan, Zeyu Yang, Xiatian Zhu, and Li Zhang. Fast dynamic 3d object generation from a single-view video. arXiv
+preprint arXiv 2401.08742, 2024. 2
+[28] Keunhong Park, Utkarsh Sinha, Jonathan T. Barron, Sofien
+Bouaziz, Dan B Goldman, Steven M. Seitz, and Ricardo
+Martin-Brualla. Nerfies: Deformable neural radiance fields.
+In ICCV, 2021. 2
+[29] Keunhong Park, Utkarsh Sinha, Peter Hedman, Jonathan T.
+Barron, Sofien Bouaziz, Dan B Goldman, Ricardo MartinBrualla, and Steven M. Seitz. Hypernerf: A higherdimensional representation for topologically varying neural
+radiance fields. In TOG, 2021. 2
+[30] Jiawei Ren, Liang Pan, Jiaxiang Tang, Chi Zhang, Ang Cao,
+Gang Zeng, and Ziwei Liu. Dreamgaussian4d: Generative 4d gaussian splatting. arXiv preprint arXiv:2312.17142,
+2023. 2
+[31] Riccardo Roveri, A Cengiz Öztireli, Ioana Pandele, and
+Markus Gross. Pointpronets: Consolidation of point clouds
+[1] Rameen Abdal, Wang Yifan, Zifan Shi, Yinghao Xu, Ryan
+Po, Zhengfei Kuang, Qifeng Chen, Dit-Yan Yeung, and Gordon Wetzstein. Gaussian shell maps for efficient 3d human
+generation. In CVPR, 2024. 2
+[2] Jonathan T. Barron, Ben Mildenhall, Matthew Tancik, Peter
+Hedman, Ricardo Martin-Brualla, and Pratul P. Srinivasan.
+Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields. In ICCV, 2021. 7
+[3] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields. In CVPR, 2022. 6, 7
+[4] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and
+Hao Su. Tensorf: Tensorial radiance fields. In ECCV, 2022.
+2
+[5] Xingyu Chen, Qi Zhang, Xiaoyu Li, Yue Chen, Ying Feng,
+Xuan Wang, and Jue Wang. Hallucinated neural radiance
+fields in the wild. In CVPR, 2022. 2
+[6] Sara Fridovich-Keil, Giacomo Meanti, Frederik Rahbæk
+Warburg, Benjamin Recht, and Angjoo Kanazawa. K-planes:
+Explicit radiance fields in space, time, and appearance. In
+CVPR, 2023. 2
+[7] Ayaan Haque, Matthew Tancik, Alexei Efros, Aleksander
+Holynski, and Angjoo Kanazawa. Instruct-nerf2nerf: Editing 3d scenes with instructions. In ICCV, 2023. 2
+[8] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm,
+George Drettakis, and Gabriel Brostow. Deep blending for
+free-viewpoint image-based rendering. TOG, 2018. 6, 7
+[9] Ajay Jain, Ben Mildenhall, Jonathan T. Barron, Pieter
+Abbeel, and Ben Poole. Zero-shot text-guided object generation with dream fields. In CVPR, 2022. 2
+[10] Yue Jiang, Dantong Ji, Zhizhong Han, and Matthias Zwicker.
+Sdfdiff: Differentiable rendering of signed distance fields for
+3d shape optimization. In CVPR, 2020. 2
+[11] Yingwenqi Jiang, Jiadong Tu, Yuan Liu, Xifeng Gao, Xiaoxiao Long, Wenping Wang, and Yuexin Ma. Gaussianshader:
+3d gaussian splatting with shading functions for reflective
+surfaces. In CVPR, 2024. 3
+[12] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. In TOG, 2023. 1, 2, 6, 7, 8, 15
+[13] Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Weiwei Sun, Jeff Tseng, Hossam Isack, Abhishek Kar, Andrea
+Tagliasacchi, and Kwang Moo Yi. 3d gaussian splatting as
+markov chain monte carlo. In arXiv, 2024. 6, 7, 8, 15
+[14] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen
+Koltun. Tanks and temples: Benchmarking large-scale scene
+reconstruction. TOG, 2017. 6, 7
+[15] Sosuke Kobayashi, Eiichi Matsumoto, and Vincent Sitzmann. Decomposing nerf for editing via feature field distillation. In NeurIPS, 2022. 2
+[16] Jonas Kulhanek, Songyou Peng, Zuzana Kukelova, Marc
+Pollefeys, and Torsten Sattler. WildGaussians: 3D gaussian
+splatting in the wild. arXiv, 2024. 3
+[17] Haoran Li, Haolin Shi, Wenli Zhang, Wenjun Wu, Yong
+Liao, Lin Wang, Lik-hang Lee, and Pengyuan Zhou. Dream-
+9
+with convolutional neural networks. In Computer Graphics
+Forum, 2018. 2
+[32] Sara Fridovich-Keil and Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks. In CVPR, 2022. 1,
+2, 7
+[33] Johannes L Schonberger and Jan-Michael Frahm. Structurefrom-motion revisited. In CVPR, 2016. 6
+[34] Myrna C Silva, Mahtab Dahaghin, Matteo Toso, and Alessio
+Del Bue. Contrastive gaussian clustering: Weakly supervised
+3d scene segmentation. arXiv preprint arXiv:2404.12784,
+2024. 2
+[35] Liangchen Song, Anpei Chen, Zhong Li, Zhang Chen, Lele
+Chen, Junsong Yuan, Yi Xu, and Andreas Geiger. Nerfplayer: A streamable dynamic scene representation with decomposed neural radiance fields. In TVCG, 2023. 2
+[36] Jiaxiang Tang, Jiawei Ren, Hang Zhou, Ziwei Liu, and Gang
+Zeng. Dreamgaussian: Generative gaussian splatting for efficient 3d content creation. In ICLR, 2023. 3
+[37] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler,
+Jonathan T Barron, and Pratul P Srinivasan. Ref-nerf: Structured view-dependent appearance for neural radiance fields.
+In CVPR, 2022. 2
+[38] Can Wang, Menglei Chai, Mingming He, Dongdong Chen,
+and Jing Liao. Clip-nerf: Text-and-image driven manipulation of neural radiance fields. CVPR, 2022. 2
+[39] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P
+Simoncelli. Image quality assessment: from error visibility
+to structural similarity. TIP, 2004. 5, 6
+[40] Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng
+Zhang, Wei Wei, Wenyu Liu, Qi Tian, and Xinggang Wang.
+4d gaussian splatting for real-time dynamic scene rendering.
+In CVPR, 2024. 2, 3
+[41] Jing Wu, Jia-Wang Bian, Xinghui Li, Guangrun Wang, Ian
+Reid, Philip Torr, and Victor Adrian Prisacariu. Gaussctrl:
+multi-view consistent text-driven 3d gaussian splatting editing. arXiv preprint arXiv:2403.08733, 2024. 2
+[42] Xinchen Yan, Jimei Yang, Ersin Yumer, Yijie Guo, and
+Honglak Lee. Perspective transformer nets: Learning
+single-view 3d object reconstruction without 3d supervision.
+NeurIPS, 2016. 2
+[43] Zeyu Yang, Hongye Yang, Zijie Pan, and Li Zhang. Realtime photorealistic dynamic scene representation and rendering with 4d gaussian splatting. In ICLR, 2024. 2, 3
+[44] Taoran Yi, Jiemin Fang, Junjie Wang, Guanjun Wu, Lingxi
+Xie, Xiaopeng Zhang, Wenyu Liu, Qi Tian, and Xinggang
+Wang. Gaussiandreamer: Fast generation from text to 3d
+gaussians by bridging 2d and 3d diffusion models. In CVPR,
+2024. 2
+[45] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman,
+and Oliver Wang. The unreasonable effectiveness of deep
+features as a perceptual metric. In CVPR, 2018. 6
+[46] Hang Zhao, Orazio Gallo, Iuri Frosio, and Jan Kautz. Loss
+functions for image restoration with neural networks. IEEE
+Transactions on computational imaging, 2016. 5
+[47] Peilin Zhao and Tong Zhang. Accelerating minibatch
+stochastic gradient descent using stratified sampling. arXiv,
+2014. 4
+[48] Xiaoyu Zhou, Xingjian Ran, Yajiao Xiong, Jinlin He, Zhiwei Lin, Yongtao Wang, Deqing Sun, and Ming-Hsuan Yang.
+Gala3d: Towards text-to-3d complex scene generation via
+layout-guided generative gaussian splatting. arXiv preprint
+arXiv:2402.07207, 2024. 2
+[49] Jingyu Zhuang, Di Kang, Yan-Pei Cao, Guanbin Li, Liang
+Lin, and Ying Shan. Tip-editor: An accurate 3d editor following both text-prompts and image-prompts. TOG, 2024.
+2
+[50] Matthias Zwicker, Hanspeter Pfister, Jeroen Van Baar, and
+Markus Gross. Ewa volume splatting. In Proceedings
+Visualization, 2001. VIS’01., 2001. 1, 2, 3
+10
+8. Derivations
+The secondPterm is calculated P
+as follows.
+N
+For µS = j∈S µj and µ′ = i=1 µi ,
+
+N −1
+m
+m−1
+ES [µS ] = N  µ′ = µ′
+N
+m
+We provide theoretical derivations of why the multi-view
+mini-batch strategy is superior to the single-view minibatch strategy in NeRF and 3DGS in Sec. 8.1. In addition, we derive the situation where the invalid addition of
+gradients in different image spaces leads to an unintended
+consequence in Sec. 8.2.
+(22)
+VS [µS ] = ES [(µS − ES [µS ])2 ]
+(23)
+(24)
+8.1. Minimize variance of mini-batch gradient
+Let S is a set of all possible S, then
+Lemma 1. There are N distributions Di (µi , σi2 ), i ∈ [1, N ]
+where Di indicates an arbitrary distribution with mean µi
+and variance σi2 , where µi ̸= µj for i ̸= j. For two cases
+which are 1) draw K sample from each Di and 2) choose i
+first, then draw N K i.i.d samples from Di , the former has
+a smaller variance of the sample mean than the latter.
+VS [µS ] =
+1
+X
+
+N
+m
+µ2S −
+S∈S
+
+2m
+m2
+µS µ′ + 2 (µ′ )2 (25)
+N
+N
+Let us compute the first term in advance.
+1 X 2
+µS
+
+N
+m
+Proof. Let random variable Xi ∼ Di , and generalize two
+cases as follows: sample m distributions without replacement, and draw NmK i.i.d samples from each distribution.
+For simplicity, assume that N K is divisible by m. Let S be
+indices of selected distributions where |S| = m and Xi,k
+be the k-th sample from Di where k ∈ [1, NmK ]. Then,the
+sample mean from the selected distributions S is
+(26)
+S∈S
+
+ X
+
+ N
+N
+N −2
+N −1 X 2
+2µi µj }
+= N {
+µi +
+m−2
+m − 1 i=1
+m
+1
+i=1,j̸=i
+(27)
+=
+N
+X
+m
+m−1
+µ2 +
+(
+N i=1 i
+N −1
+N
+X
+2µi µj )
+(28)
+i=1,j̸=i
+NK
+m
+1 XX
+Z̄S =
+Xj,k
+N
+The second and third terms are calculated as
+m2 ′ 2
+1 X 2m
+′
+(−
+µ
+µ
++
+(µ ) )
+(29)
+
+S
+N
+N
+N2
+m S∈S
+  2
+1
+2m ′ X
+N m
+= N  {−
+µ
+µS +
+(µ′ )2 }
+(30)
+2
+N
+m
+N
+m
+S∈S
+
+
+  2
+1
+N m
+N − 1 2m ′ 2
+= N  {−
+(µ ) +
+(µ′ )2 } (31)
+2
+m
+−
+1
+N
+m
+N
+m
+
+
+ 
+(µ′ )2 m2 N
+m2
+2m N − 1
+= N ( 2
+) = − 2 (µ′ )2
+−
+N m
+N m−1
+N
+m
+(32)
+P
+P
+N
+N
+2
+Using the fact that (µ′ )2 =
+i=1 µi +
+i=1,j̸=i 2µi µj ,
+sum of all three terms is calculated as
+(15)
+j∈S k=1
+To calculate the variance of Z̄, we can use the law of total
+variance.
+V(Z̄) = ES [V(Z̄|S)] + VS (E[Z̄|S])
+(16)
+NK
+m
+1 X X
+K X 2
+V(Z̄|S) = 2
+V(
+Xj,k ) =
+σj
+N
+mN
+j∈S
+(17)
+j∈S
+k=1
+NK
+m
+1 X X
+E[
+Xj,k |S]
+E(Z̄|S) =
+N
+(18)
+1 X
+NK
+KX
+µj ·
+=
+µj
+N
+m
+m
+(19)
+j∈S
+=
+k=1
+j∈S
+N
+X
+m(N − m) (µ′ )2
+1
+(
+−
+2µi µj )
+N
+N
+N −1
+j∈S
+Therefore, variance of Z̄ is
+X
+X
+K
+K2
+ES [
+σj2 ] + 2 VS (
+µj )
+mN
+m
+j∈S
+(33)
+i=1,j̸=i
+=
+(20)
+Cm(N − m)
+N
+(34)
+It can be proved that C is positive as follows
+j∈S
+The first term is constant regardless of m as follows
+ N
+N −1 X
+N
+X
+K
+K
+K X 2
+m−1
+2
+E[
+σj ] =
+· N
+σi2 = 2
+σ
+mN
+mN
+N i=1 i
+m
+i=1
+N
+X
+1
+(µ′ )2
+−
+2µi µj
+N
+N −1
+(35)
+N
+X
+(µ′ )2
+1
+−
+{(µ′ )2 −
+µ2i }
+N
+N −1
+i=1
+(36)
+C=
+i=1,j̸=i
+j∈S
+=
+(21)
+11
+We can utilize σµ2 = N1
+µ′ 2
+2
+i=1 µi − ( N ) .
+PN
+N
+X
+(µ′ )2
+1
+′ 2
+−
+{(µ ) −
+µ2i }
+N
+N −1
+i=1
+1
+(µ′ )2
+(µ′ )2
+−
+{(µ′ )2 − (N σµ2 +
+)}
+N
+N −1
+N
+(µ′ )2
+1
+1
+=
+−
+{(1 − )(µ′ )2 − N σµ2 }
+N
+N −1
+N
+N
+2
+σ >0
+=
+N −1 µ
+P
+2
+Then, our original goal K
+j∈S µj ) is
+m2 VS (
+=
+X
+K2
+K 2 Cm(N − m)
+V
+(
+µ
+)
+=
+S
+j
+m2
+m2
+N
+Because we assume that clusters of x are the same as the
+clusters of ψ(x, y), the proposition holds.
+(37)
+Lemma 2. For a single ray r(t) = o + td, the intersection
+point on the ray r(ti ) and weights of NeRF wσ and wc ,
+update of NeRF is mostly contributed by the intersection
+∂L
+∝
+point of the surface on the ray. In other words, ∂w
+c
+(38)
+(39)
+∂σwσ (ti )
+∂cwc (ti )
+∂L
+and ∂w
+∝ ∂w
+.
+∂wc
+σ
+σ
+(40)
+Proof. For a ray r(t) = o + td, the color of the ray is
+rendered through volumetric rendering as follows
+Z tf
+(41)
+Ĉ(r) =
+Twσ (t)σwσ (r(t))cwc (r(t), d)dt
+j∈S
+=
+K 2 σµ2 N
+( − 1)
+N −1 m
+Z t
+(42)
+Twσ (t) = exp(−
+N
+K X
+K 2 σµ2 N K
+σi2 +
+(
+− 1)
+V(Z̄) = 2
+N i=1
+N −1 m
+(48)
+where wσ and wc are weights of a neural network that predicts color and density. For simplicity, we omit d, r, and
+replace the following statements.
+(43)
+r(t) ⇒ t
+1
+Therefore, V(Z̄) ∝ m
+. Case 1 and Case 2 correspond
+to m = N and m = 1, so the variance of Z̄ is larger
+for Case 2. This lemma also holds for the multivariate
+case. For D-dimensional vectors x = (x1 x2 . . . xD ),
+µ = (µ1 µ2 . . . µD )
+V(x) := E[||x − µ||22 ]
+D
+X
+i=1
+i=1
+E[(xi − µi )2 ]
+Twσ ⇒ T
+σwσ ⇒ σ
+cwc ⇒ c
+(49)
+∂L
+∂L
+and ∂w
+are as follows.
+Then, ∂w
+c
+σ
+∂L
+∂L ∂ Ĉ
+=
+∂wc
+∂ Ĉ ∂wc
+Z tf
+∂L
+∂c(t)
+=
+dt
+T (t)σ(t)
+∂wc
+∂ Ĉ tn
+(44)
+D
+X
+(xi − µi )2 ] =
+σwσ (r(s))ds)
+tn
+and V(Z̄) is
+= E[
+(47)
+tn
+(45)
+∂L
+∂L ∂ Ĉ
+=
+∂wσ
+∂ Ĉ ∂wσ
+Z
+∂σ(t)
+∂L tf ∂T (t)
+σ(t)c(t) + T (t)
+c(t)dt
+=
+∂wσ
+∂ Ĉ tn ∂wσ
+Z t
+∂T (t)
+∂σ(s)
+where
+= −T (t)
+ds
+∂wσ
+tn ∂wσ
+Then, we can apply the proof for each dimension, thereby it
+holds for the multivariate case because if variances of each
+dimension are larger, so is the sum of them.
+Proposition 1. To reduce the variance of the mini-batch
+gradient, it is more desirable to design a mini-batch to sample data across clusters than to sample all the data from a
+single cluster.
+(50)
+(51)
+(52)
+(53)
+(54)
+For a 3D point r(ti ) to be an intersection point of the surface, σ(j) ≈ 0 for j < i, T (ti ) ≈ 1 and T (k) ≈ 0 (col(t)
+∂σ(j)
+lorary, ∂T
+∂wσ ≈ 0) for k > i. We can regard ∂wσ ≈ 0
+because NeRF uses ReLU/Softplus functions as an activation function for σ.
+Then, T (t)σ(t) and T (t) ∂σ(t)
+∂wσ can be considered direcdelta function. Then, gradient of wc is,
+Proof. For ψ(x, y) = ∇w L(w, x, y), assume that we have
+a clustering method to separate a group of ψ(x, y), and clusters of x are the same as the clusters of ψ(x, y). For each
+cluster Cj , ψj (x, y) ∈ Cj follow Dψj (µψj , Σψj ) for arbitrary distribution Dψj . For a set S that consists of sampled ψ(x, y), let |S|j be the number of samples that satisfy
+ψ(x, y) ∈ Cj . Let S1 the set of all possible sets that satisfy
+∀j |S|j = K and S2 that satisfy ∃j ∀k̸=j |S|j = N K, |S|k =
+0. Then by Lemma 1,
+Z tf
+T (t)σ(t)
+tn
+Z tf
+VS1 (Eψ(x,y)∈S [ψ(x, y)]) < VS2 (Eψ(x,y)∈S [ψ(x, y)])
+(46)
+=
+tn
+12
+∂c(t)
+dt
+∂wc
+∂c(t)
+∂c(ti )
+δ(t − ti )dt =
+∂wc
+∂wc
+(55)
+(56)
+Similarily, gradient of wσ is,
+∂L
+=
+∂wσ
+Z tf
+∂σ(t)
+c(t)dt +
+T (t)
+∂wσ
+tn
+Z tf
+tn
+∂T (t)
+σ(t)c(t)dt
+∂wσ
+(57)
+Z tf
+∂σ(ti )
+δ(t − ti )dt
+∂wσ
+tn
+∂σ(ti )
+= T (ti )c(i)
+∂wσ
+Z tf
+∂T (t)
+σ(t)c(t)dt
+tn ∂wσ
+Z tf
+Z t
+∂σ(s)
+=
+−T (t)(
+ds)σ(t)c(t)dt
+tn
+tn ∂wσ
+Z tf
+Z t
+∂σ(s)
+ds)σ(ti )c(t)δ(t − ti )dt
+=
+−T (ti )(
+tn
+tn ∂wσ
+Z ti
+∂σ(s)
+= −T (ti )(
+ds)σ(ti )c(ti )
+tn ∂wσ
+Z ti
+∂σ(ti )
+= −T (ti )(
+δ(s − ti )ds)σ(ti )c(ti )
+tn ∂wσ
+∂σ(ti )
+= −T (ti )
+σ(ti )c(ti )
+∂wσ
+=
+T (ti )c(t)
+∂L
+∝
+Therefore, it is proven that ∂w
+c
+∂cwc (ti )
+∂wc
+(58)
+(59)
+(60)
+(a) Draw samples for each set from a single distribution
+(61)
+(62)
+(63)
+(64)
+(65)
+∂L
+and ∂w
+∝
+σ
+(b) Draw samples for each set from every distribution
+∂σwσ (ti )
+∂wσ .
+sample
+We provide an illustration of the two cases in Fig. 7.
+sample mean
+mean of sample means
+Figure 7. Illustration of the two cases in proposition 1. The
+figure demonstrates the situation where we draw five samples for
+each set, composing five sets. Triangles with the same colors indicate samples in the same set. As shown in (a), drawing samples
+from a single distribution for each set causes each sample mean
+to be dispersed, increasing the variance of the sample mean. In
+contrast, (b) suggests drawing a sample from every distribution
+makes the sample means similar, reducing the variance of the sample mean.
+Proposition 2. It is more desirable in terms of NeRF optimization to sample rays from individual pixels than patches,
+and across multiple images than from a single image.
+Proof. By Lemma 2, the dataset of NeRF {rj (t), C(rj )}
+is equivalent to {rj (ti ), C(rj )} where rj (ti ) is an intersection point on rj (t). By Proposition 1, we can infer that
+mini-batch in NeRF should avoid having ray pairs that are
+rj1 (ti ) ≈ rj2 (ti ) to reduce the variance of mini-batch.
+Then, it is evident that rays across multiple images are less
+likely to satisfy such a condition than ones in a single image
+because of the locality of pixel dependencies.
+
+R0
+
+R3
+(µ, 1)[R|t]T = (µ, 1) 
+R6
+t0
+8.2. Adding 2D gradients in different spaces
+R1
+R4
+R7
+t1
+R2
+R5
+R8
+t2
+
+0
+0
+
+0
+1
+= (µcam , 1)
+µ = (x, y, z)
+(66)
+µcam = (xcam , ycam , zcam )
+(67)
+µNDC = (xNDC , yNDC , zNDC )
+(68)
+(70)
+
+For perspective projection matrix P , extrinsic matrix [R|t],
+world space point µ, camera space point µcam , and NDC
+space point µNDC , they have following relationship.
+(µcam , 1)P
+T
+P0
+0
+= (µcam , 1) 
+0
+0
+0
+P1
+0
+0
+= (µ̂NDC , wNDC )
+µNDC =
+13
+(69)
+0
+0
+P2
+P3
+
+0
+0
+
+1
+0
+(71)
+(72)
+1
+wNDC
+µ̂NDC
+(73)
+3DGS
+base
+2
+4
+1. Frustum culling
+2. Computing projected 2D Gaussians
+3. Duplicating projected Gaussians for each tile they cover
+4. Sorting Gaussians by depth for each tile
+For multi-view training, we introduce the following modifications. First, to reduce memory consumption, the rasterizer determines which Gaussians participate in rendering for each viewpoint in a mini-batch before preprocessing. Then, memory is allocated only for these participating
+Gaussians. Since only a subset of Gaussians is used in rendering, this approach significantly reduces memory usage.
+(For B viewpoints in a mini-batch, with P Gaussians in
+total, and N Gaussians remaining after this step, typically
+N ≪ B × P .) After memory allocation, the four preprocessing steps are executed. It is important to note that after
+projection, a single Gaussian can appear multiple times in
+the array of projected Gaussians if it is present in multiple viewpoints. To account for this, we modify the sorting
+step to ensure that projected Gaussians from different viewpoints are handled separately. In the original 3DGS rasterizer, after duplicating projected Gaussians, each duplicated
+Gaussian is assigned a unique 64-bit ID, composed of a 32bit tile index and a 32-bit depth value. This ensures that
+projected Gaussians in each tile are automatically separated
+during sorting. Similarly, we assign each Gaussian an ID
+consisting of a 16-bit tile index, a 16-bit viewpoint index
+(indicating the viewpoint where the Gaussian is projected),
+and a 32-bit depth value. This guarantees that projected
+Gaussians are separated by both tile and viewpoint. The
+rasterizer then allocates multiple blocks per tile—one block
+for each viewpoint—and each block renders its designated
+pixels using the projected Gaussians corresponding to its
+assigned viewpoint.
+3DGS-MCMC
+8
+base
+2
+4
+8
+PSNR ↑ 29.28 29.47 29.74 29.94 29.83 30.19 30.42 30.56
+SSIM ↑ 0.878 0.883 0.886 0.887 0.895 0.900 0.901 0.901
+LPIPS ↓ 0.167 0.156 0.154 0.154 0.145 0.140 0.138 0.138
+Table 6. Comparison by number of viewpoints in each iteration. Results are the average values on the MipNeRF-360 dataset.
+ P0
+
+0
+− xPNDC
+0
+dL T  zcam P1
+dL T
+
+) =(
+)
+(
+0
+− yPNDC
+zcam
+1
+dµcam
+dµNDC
+0
+0
+0
+ P0
+xNDC 
+0
+− P0
+dL
+dL T  zcam P1
+R
+( )T = (
+)
+0
+− yPNDC
+zcam
+1
+dµ
+dµNDC
+0
+0
+0
+(74)
+(75)
+Let us think of a situation where two viewpoints are located exactly opposite each other with respect to the origin with both facing the origin. R1 = diag(1, 1, 1), t1 =
+(0, 0, −1), R1 = diag(−1, 1, −1), t1 = (0, 0, 1), and 3D
+dL
+= (1, 0, 0). Then,
+positional gradient dµ
+
+ zcam
+0
+dL
+dL
+dL dL
+( (1) , (1) ) = ( ,
+) P0 zcam
+(76)
+0
+dx dy
+dxNDC dyNDC
+P1
+
+
+0
+dL
+dL
+dL dL − zPcam
+0
+(77)
+( (2) , (2) ) = ( ,
+)
+zcam
+0
+dx dy
+dx
+dy
+P1
+NDC
+NDC
+Because dL
+dy
+= 0, the sum of two vectors is nullified even
+for the same 3D positional gradient.
+9. Additional experiment
+We compare different numbers of viewpoints in each iteration in Tab. 6. We observe that performance increases if we
+add the number of viewpoints for a mini-batch, but it should
+be noticed that more viewpoints in a minibatch is equivalent
+to more memory consumption and time overhead.
+12. Limitations
+Even though we successfully mitigate the overhead of rendering part in rasterization, the overhead caused by the preprocessing step still remains. It is necessary to eliminate
+the overhead of the preprocessing step to achieve constant
+time complexity concerning the number of images as NeRF.
+In addition, we observe that multi-view mini-batch training
+causes overfitting for a few scenes, including bicycle/stump
+scenes in the MipNeRF-360 dataset and scenes in the DeepBlending dataset. We leave those as intriguing future work.
+10. Experiment details
+When applying multi-view training, we found that the learning pattern changed, so in 3DGS, the threshold hyperparameter for pruning Gaussians was multiplied by the number of
+images, and in 3DGS-MCMC, the mean noise learning rate
+was divided by the number of images. Other hyperparameters are the same as before.
+13. Detailed results
+11. Rasterization in multi-view training
+We provided full results of the main table in Tab. 7.
+We describe the modifications made to the 3DGS rasterizer
+for multi-view training. The 3DGS rasterizer primarily consists of two main components: preprocessing and rendering.
+In the preprocessing stage, the rasterizer performs the following steps:
+14. Algorithms
+We provide detailed pseudocodes of the difference between
+the mini-batch strategy of NeRF and 3DGS in Algorithm 1,
+14
+MipNeRF-360
+Tank &
+Temples
+Deep
+Blending
+OMMO
+3DGS
+3DGS + Ours
+MCMC
+MCMC + Ours
+PSNR↑ / SSIM↑ / LPIPS↓
+PSNR↑ / SSIM↑ / LPIPS↓
+PSNR↑ / SSIM↑ / LPIPS↓
+PSNR↑ / SSIM↑ / LPIPS↓
+Bicycle
+Bonsai
+Counter
+Garden
+Kitchen
+Room
+Stump
+25.62 / 0.775 / 0.204
+32.32 / 0.947 / 0.173
+29.11 / 0.915 / 0.179
+27.75 / 0.872 / 0.102
+31.57 / 0.932 / 0.113
+31.67 / 0.927 / 0.191
+26.88 / 0.780 / 0.209
+25.84 / 0.796 / 0.169
+32.90 / 0.952 / 0.157
+29.63 / 0.920 / 0.167
+28.22 / 0.879 / 0.102
+32.49 / 0.938 / 0.106
+32.44 / 0.932 / 0.179
+26.70 / 0.785 / 0.196
+26.12 / 0.809 / 0.161
+32.81 / 0.953 / 0.160
+29.45 / 0.924 / 0.163
+28.12 / 0.883 / 0.090
+32.24 / 0.938 / 0.108
+32.38 / 0.937 / 0.171
+27.72 / 0.820 / 0.163
+26.27 / 0.816 / 0.156
+33.85 / 0.958 / 0.152
+30.09 / 0.930 / 0.152
+28.70 / 0.893 / 0.081
+33.24 / 0.945 / 0.099
+33.27 / 0.942 / 0.163
+27.50 / 0.819 / 0.163
+Average
+29.28 / 0.878 / 0.167 29.74 / 0.886 / 0.154 29.83 / 0.895 / 0.145 30.42 / 0.901 / 0.138
+Train
+Truck
+21.96 / 0.810 / 0.207 22.20 / 0.824 / 0.189 22.71 / 0.840 / 0.181 23.28 / 0.850 / 0.172
+25.43 / 0.879 / 0.146 25.85 / 0.889 / 0.128 26.46 / 0.898 / 0.109 26.85 / 0.901 / 0.117
+Average
+23.69 / 0.845 / 0.177 24.02 / 0.856 / 0.158 24.59 / 0.869 / 0.145 25.06 / 0.876 / 0.144
+Dr Johnson 29.07 / 0.899 / 0.244 29.40 / 0.901 / 0.238 29.01 / 0.900 / 0.241 29.89 / 0.912 / 0.221
+Playroom 30.03 / 0.906 / 0.243 29.87 / 0.904 / 0.238 30.13 / 0.910 / 0.239 30.34 / 0.916 / 0.227
+Average
+29.55 / 0.902 / 0.244 29.64 / 0.903 / 0.238 29.57 / 0.905 / 0.240 30.11 / 0.914 / 0.224
+01
+03
+05
+06
+10
+13
+14
+15
+25.66 / 0.787 / 0.213
+26.10 / 0.867 / 0.212
+28.75 / 0.882 / 0.224
+26.82 / 0.919 / 0.179
+30.10 / 0.903 / 0.171
+33.61 / 0.957 / 0.110
+31.80 / 0.951 / 0.093
+31.08 / 0.944 / 0.091
+Average
+29.24 / 0.901 / 0.162 30.01 / 0.911 / 0.143 29.81 / 0.914 / 0.140 30.85 / 0.923 / 0.128
+25.93 / 0.803 / 0.196
+27.30 / 0.890 / 0.182
+29.01 / 0.887 / 0.191
+27.36 / 0.925 / 0.162
+31.45 / 0.919 / 0.145
+35.23 / 0.966 / 0.094
+32.28 / 0.956 / 0.085
+31.52 / 0.945 / 0.092
+25.81 / 0.800 / 0.189
+27.61 / 0.895 / 0.177
+29.28 / 0.889 / 0.211
+27.77 / 0.948 / 0.125
+31.86 / 0.920 / 0.142
+33.59 / 0.957 / 0.103
+31.78 / 0.954 / 0.089
+30.78 / 0.947 / 0.087
+26.26 / 0.812 / 0.176
+28.55 / 0.910 / 0.159
+29.84 / 0.896 / 0.201
+28.94 / 0.952 / 0.120
+33.23 / 0.932 / 0.123
+35.56 / 0.968 / 0.081
+32.64 / 0.960 / 0.082
+31.76 / 0.953 / 0.080
+Table 7. We report the full table of 3DGS [12], 3DGS-MCMC [13] and the results of adding our method to them. MCMC is an abbreviation
+of 3DGS-MCMC [13]. We report the average values of three repeated experiments.
+tiled rendering of 3DGS in Algorithm 2 and thread-efficient
+partial rendering in Algorithm 3.
+Algorithm 1 Mini-batch strategy of NeRF and 3DGS
+// Multi-view mini-batch of NeRF
+for i = 1 . . . N do
+M
+{rij }M
+j=1 = generateRay({pij }j=1 , Pi )
+end for
+M
+N
+D = {(rq , Cq )}M
+q=1 = concat({(rij , Cij )}j=1 , dim=i)
+BNeRF = sample(D, count=B)
+// Single-view mini-batch of 3DGS
+for i = 1 . . . N do
+Di = {(pij , Cij )}M
+j=1
+end for
+D = {Di }N
+i=1
+B3DGS = sample(D, count=1)
+15
+Algorithm 3 Thread-efficient partial rendering
+i : index of a thread in a tile
+I : a viewpoint
+DI : sorted array of Gaussian primitives that are projected
+on image plane of I.
+K : the number of participating viewpoints
+P : image pixel
+N : the number of pixels (= threads) in a tile
+A : an array that maps a thread to the pixel index to render
+Vk,i : temporal variable for saving intermediate values of
+alpha blending
+Algorithm 2 Tiled rendering of 3DGS
+i : index of a thread in a tile
+D : sorted array of projected Gaussian primitives for a tile
+Pi : image pixel
+N : The number of pixels (= threads) in a tile
+Vi : temporal variable for saving intermediate values of alpha blending
+offset = 0
+Shmem[N ] // shared memory across i
+for thread i = 1 . . . N in a block do
+isValidi = true
+if Pi is outside the image then
+isValidi ← false
+end if
+while unfetched data left in D do
+Shmem[i] ← D[offset · N + i]
+if isValidi then
+Vi ← alphaBlending(Shmem, Vi )
+end if
+synchronize() // wait for other threads
+offset ← offset + 1
+end while
+Pi ← Vi
+end for
+offset = 0
+for block k = 1 . . . K do
+N
+Shmemk [ K
+] // shared memory across i
+N
+for thread i = 1 . . . K
+in block k do
+isValidk,i = true
+if PA[k,i] is outside the image then
+isValidk,i ← false
+end if
+while unfetched data left in DIk do
+N
+Shmemk [i] ← DIk [offset · K
++ i]
+if isValidk,i then
+Vk,i ← alphaBlending(Shmem[k], Vk,i )
+end if
+synchronize() // wait for other threads
+offset ← offset + 1
+end while
+PA[k,i] ← Vk,i
+end for
+end for
+16

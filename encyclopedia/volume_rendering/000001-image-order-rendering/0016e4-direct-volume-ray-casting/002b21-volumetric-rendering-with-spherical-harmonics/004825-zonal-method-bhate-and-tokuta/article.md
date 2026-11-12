@@ -1,127 +1,56 @@
 # Zonal Method (Bhate and Tokuta)
-Also called: Extended Zonal Method, Zonal Method with Spherical Harmonics for Surface-Volume Interaction
+Also called: Bhate et al. Method, Bhate's method
 
 ## Overview
-The Zonal Method (Bhate and Tokuta) is a deterministic global illumination technique for participating media that extends the classical zonal method by eliminating the assumption of medium isotropy and accounting for interactions between volumes and ideal diffuse surfaces [S1]. It differs from its parent [Volumetric Rendering with Spherical Harmonics](4962-volumetric-rendering-with-spherical-harmonics.md) by explicitly handling surface-volume energy exchange, which the parent method neglects [S1]. Unlike [Spherical Harmonics](5603-spherical-harmonics.md) which may treat volumes in isolation, this method couples volumetric scattering with surface radiosity [S1].
+The Zonal Method (Bhate and Tokuta) is a global illumination technique for participating media that extends the classical zonal method by incorporating spherical harmonics to handle anisotropic scattering and surface-volume interactions [S1][S2, book]. Unlike the standard zonal method which assumes isotropic media and ignores surface effects, this method represents the phase function and radiance using spherical harmonics, allowing for the approximation of Mie scattering while maintaining ideal diffuse surfaces [S1][S2, book]. It is distinguished from its siblings by its specific use of an extended hemicube technique to compute spherical harmonic form factors and a Gauss-Seidel solver for the coupled volume-surface system [S1][S2, book].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** A scene containing $v$ volumetric elements (voxels) and $s$ ideal diffuse surfaces. The medium's phase function is anisotropic (e.g., Mie scattering).
-*   **Outputs:** The radiance (or radiosity) distribution within the volumes and on the surfaces.
+**Inputs:** A scene containing $v$ volume elements (voxels) and $s$ ideal diffuse surfaces. The medium's phase function is assumed to be anisotropic (e.g., Mie scattering).
+**Outputs:** The radiance distribution within the volumes and reflected radiance from the surfaces.
 
 **Data Structures:**
-*   **Volumetric Elements:** Represented as voxels in a regular grid of size $n \times n \times n$, where $v = n^3$.
-*   **Surface Elements:** Ideal diffuse surfaces.
-*   **Spherical Harmonics Coefficients:** The phase function and radiance are represented using the first $M$ terms of their spherical harmonics expansion [S1].
+1.  **Spherical Harmonic Coefficients:** For each volume $i$, a vector of coefficients $\mathbf{L}_i$ of size $M$ representing the radiance expansion. For each surface $j$, a vector of coefficients $\mathbf{R}_j$ of size $M$ representing the reflected radiance.
+2.  **Form Factors:** A tensor or set of matrices $F_{ij}^{(m)}$ representing the form factor between element $i$ and element $j$ for the $m$-th spherical harmonic term.
 
-**Algorithm Steps:**
-1.  **Phase Function Approximation:** Approximate the anisotropic phase function by the first $M$ terms of its spherical harmonics expansion [S1].
-2.  **Form Factor Calculation:** Calculate form factors using the extended hemicube technique. This step accounts for the spherical harmonics coefficients, resulting in a large number of form factors to compute [S1].
-3.  **System Setup:** Set up a system of linear equations. The system consists of $M \cdot v$ equations for the $v$ volumes plus $s$ related equations for the $s$ surfaces [S1].
-4.  **Solution:** Solve the system using a Gauss-Seidel iterative technique [S1].
+**Steps:**
+1.  **Phase Function Approximation:** Approximate the scattering phase function $p(\Omega)$ by the first $M$ terms of its spherical harmonics expansion [S1][S2, book].
+    $$ p(\Omega) \approx \sum_{m=0}^{M-1} a_m Y_m(\Omega) $$
+    where $Y_m$ are the spherical harmonic basis functions and $a_m$ are the expansion coefficients derived from the phase function [S1][S2, book].
 
-**Formulas:**
-*   **Phase Function Expansion:** The phase function $p(\Omega)$ is approximated by the first $M$ spherical harmonics terms [S1].
-*   **System Size:** The linear system has dimensions corresponding to $M \cdot v + s$ unknowns [S1].
+2.  **Form Factor Computation:** Calculate the form factors between all pairs of volume elements and between volumes and surfaces, taking into account the spherical harmonics [S1][S2, book]. This is done using the **extended hemicube technique** [S1][S2, book]. The standard hemicube is extended to compute the coefficients of the spherical harmonic expansion of the geometric visibility/transfer function rather than just scalar form factors [S1][S2, book].
+
+3.  **System Setup:** Set up a system of linear equations. For each volume $i$, the energy balance equation involves the incoming radiance from all other volumes and surfaces, weighted by the computed form factors and the scattering properties [S1][S2, book].
+    The system consists of $M \times v$ equations for the volumes and $M \times s$ equations for the surfaces [S1][S2, book].
+    Let $\mathbf{L}_i$ be the radiance vector for volume $i$ and $\mathbf{R}_j$ be the radiance vector for surface $j$. The equation for volume $i$ can be expressed as:
+    $$ \mathbf{L}_i = \mathbf{E}_i + \sigma_{s,i} \sum_{k=1}^{v} F_{ik} \mathbf{L}_k + \sigma_{s,i} \sum_{j=1}^{s} F_{is_j} \mathbf{R}_j $$
+    where $\mathbf{E}_i$ is the emitted radiance, $\sigma_{s,i}$ is the scattering coefficient, $F_{ik}$ is the form factor matrix between volumes $i$ and $k$, and $F_{is_j}$ is the form factor matrix between volume $i$ and surface $j$ [S1][S2, book].
+    The equation for surface $j$ relates the reflected radiance to the incident radiance from volumes and other surfaces, assuming ideal diffuse reflection [S1][S2, book].
+
+4.  **System Solution:** Solve the resulting large sparse linear system using a **Gauss-Seidel iterative technique** [S1][S2, book]. The iterations continue until convergence or a fixed number of iterations is reached.
 
 **Parameters:**
-*   **$M$:** The number of spherical harmonics terms used for the phase function and radiance approximation. The cost depends heavily on $M$ [S1].
-*   **$n$:** The grid resolution dimension, where total voxels $v = n^3$ [S1].
+*   $M$: The number of spherical harmonic terms. "Only the first few spherical harmonics are necessary for a convincing image" [S1][S2, book]. Typical values are small integers (e.g., 3-5), but the cost scales with $M$ [S1][S2, book].
 
 **Edge Cases and Pitfalls:**
-*   **Computational Cost:** The direct application of this method is impractical for large scenes due to prohibitive cost [S1].
-*   **Precision:** Not given in the sources.
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-# Pseudocode for Zonal Method (Bhate and Tokuta)
-# Note: The sources do not provide a complete step-by-step algorithmic breakdown
-# beyond the high-level steps. The following represents the logical flow.
-
-def zonal_method_bhate_tokuta(voxels, surfaces, M):
-    """
-    voxel: List of volumetric elements (n^3 total)
-    surfaces: List of ideal diffuse surface elements
-    M: Number of spherical harmonics terms
-    """
-    
-    # Step 1: Approximate phase function
-    # The phase function is approximated by the first M terms of its spherical harmonics expansion.
-    phase_function_coeffs = compute_spherical_harmonics_expansion(phase_function, M)
-    
-    # Step 2: Calculate form factors using extended hemicube technique
-    # This accounts for spherical harmonics, resulting in many form factors.
-    # Form factors are computed between all volume-volume, volume-surface, and surface-volume pairs.
-    form_factors = {}
-    for vol in voxels:
-        for other_vol in voxels:
-            if vol != other_vol: # Self-refinement is not performed
-                form_factors[(vol, other_vol)] = compute_extended_hemicube_form_factor(vol, other_vol, phase_function_coeffs)
-        for surf in surfaces:
-            form_factors[(vol, surf)] = compute_extended_hemicube_form_factor(vol, surf, phase_function_coeffs)
-            
-    for surf in surfaces:
-        for vol in voxels:
-            form_factors[(surf, vol)] = compute_extended_hemicube_form_factor(surf, vol, phase_function_coeffs)
-            
-    # Step 3: Set up system of equations
-    # M*v equations for volumes + s equations for surfaces
-    num_volume_eqs = M * len(voxels)
-    num_surface_eqs = len(surfaces)
-    total_eqs = num_volume_eqs + num_surface_eqs
-    
-    # Initialize matrix A and vector b
-    A = create_zero_matrix(total_eqs, total_eqs)
-    b = create_zero_vector(total_eqs)
-    
-    # Fill matrix A and vector b based on radiosity transfer equations
-    # The exact formulation of the matrix entries is not detailed in the sources [G]
-    # but involves the form factors and phase function coefficients.
-    for i, vol in enumerate(voxels):
-        for m in range(M):
-            eq_idx = i * M + m
-            # Add contributions from other volumes and surfaces
-            for other_vol in voxels:
-                if other_vol != vol:
-                    ff = form_factors[(vol, other_vol)]
-                    # Update A[eq_idx, other_vol * M + m] and b[eq_idx]
-                    pass
-            for surf in surfaces:
-                ff = form_factors[(vol, surf)]
-                # Update A[eq_idx, surf] and b[eq_idx]
-                pass
-                
-    for j, surf in enumerate(surfaces):
-        eq_idx = num_volume_eqs + j
-        # Add contributions from volumes
-        for vol in voxels:
-            ff = form_factors[(surf, vol)]
-            # Update A[eq_idx, vol * M + m] and b[eq_idx]
-            pass
-            
-    # Step 4: Solve using Gauss-Seidel iterative technique
-    radiosity = solve_gauss_seidel(A, b, initial_guess=0)
-    
-    return radiosity
-```
+*   **Prohibitive Cost:** The direct application of this method is impractical for large scenes due to the high computational cost of computing form factors [S1][S2, book].
+*   **Precision:** The accuracy depends heavily on the choice of $M$. Too few terms result in inaccurate anisotropic scattering; too many terms increase computational cost significantly [S1][S2, book].
 
 ## Subtopics
 
-### Progressive Refinement Zonal Method
-A progressive refinement version of the zonal method using hierarchies to reduce computational cost [S1]. It establishes a fixed hierarchy in a preprocessing step and uses a shooting strategy in the rendering phase [S1]. The hierarchies are computed in two preprocessing steps: subdivision of volumes and surfaces, and creation of links between volumes/volumes and surfaces/volumes, determining the interaction level [S1]. Each global volume is refined against each other, but not against itself (no self-refinement) [S1]. Heuristics for volume-volume refinement include: total form factor (refine if rough estimate is below threshold), estimated visibility, and optical depth of the intervening medium [S1]. Volume-surface refinement also includes a brightness factor heuristic for light sources [S1]. A pitfall is that no Push-Pull procedure is performed to set correctly the values of the radiosity at all levels of the hierarchies [S1].
+### [Progressive Refinement Zonal Method](12300-progressive-refinement-zonal-method.md)
+A hierarchical acceleration technique for the Zonal Method that reduces computational cost by dynamically determining interaction levels and skipping unnecessary refinements.
 
 ## Operating characteristics
-*   **Time Complexity:** The cost to compute form factors in a regular grid of $v = n^3$ voxels is $O(n^7 + M^2 n^6)$ [S1].
+*   **Time Complexity:** The cost to compute form factors in a regular grid of $v = n^3$ voxels is $O(n^7 + M^2 n^6)$ [S1][S2, book]. This is considered prohibitive for direct application [S1][S2, book].
 *   **Memory Complexity:** Not given in the sources.
-*   **Strengths:** It eliminates the assumption of medium isotropy and accounts for effects between surfaces and volumes, which are missed in other spherical harmonics methods [S1].
-*   **Limitations:** The direct application is impractical due to prohibitive cost [S1]. The lack of a Push-Pull procedure in the progressive refinement variant may lead to incorrect radiosity values at different hierarchy levels [S1].
-*   **When to use:** When anisotropic scattering and surface-volume interactions are critical and computational resources are sufficient for small to medium scenes.
-*   **When not to use:** For large-scale scenes where the $O(n^7)$ cost is prohibitive, or when isotropic scattering is a sufficient approximation.
+*   **Strengths:** Handles anisotropic scattering (Mie approximation) and surface-volume interactions, which standard zonal methods cannot [S1][S2, book].
+*   **Limitations:** Extremely high computational cost for form factor calculation makes it impractical for large-scale scenes without acceleration techniques like progressive refinement [S1][S2, book].
+*   **When to use:** When accurate anisotropic scattering and surface interactions are required and computational resources are sufficient, or as a baseline for accelerated variants.
+*   **When not to use:** For real-time rendering or large scenes where the $O(n^7)$ cost is prohibitive.
 
 ## Background
-The Zonal Method (Bhate and Tokuta) is an extension to the zonal method that deals with effects between surfaces and volumes [S1]. It was proposed by Bhate and Tokuta [S1]. It addresses the limitations of earlier methods that assumed medium isotropy and neglected surface-volume interactions [S1]. The method is part of the family of deterministic multiple scattering methods for participating media [S1].
+The method was proposed by Bhate and Tokuta as an extension to the classical zonal method [S1][S2, book]. It addresses the limitations of previous zonal method implementations which assumed isotropic media and ignored effects between surfaces and volumes [S1][S2, book]. The method is cited in surveys on participating media rendering techniques [S1][S2, book].
 
 ## Sources
 [S1] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26
+[S2] Global Illumination Techniques for the Simulation of Participating Media, https://inria.hal.science/inria-00510096v1, fetched 2026-10-26 (book)

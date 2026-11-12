@@ -1,58 +1,53 @@
 # 3D Student's t Distribution Splatting
 
-Also called: Student Splatting and Scooping, Student's t distribution mixture model with negative components
+Also called: Student Splatting and Scooping, Student's t distribution mixture model with negative components, Student's t splatting
 
 ## Overview
-3D Student's t Distribution Splatting (SSS) is a neural rendering method that replaces the 3D Gaussian primitives of 3D Gaussian Splatting (3DGS) with flexible Student's t distributions and extends the splatting scheme to include both positive (splatting) and negative (scooping) density components [S1]. It solves the expressivity limitations of Gaussian mixtures by utilizing fat-tailed distributions and non-monotonic density modeling, achieving higher parameter efficiency (reducing component counts by up to 82%) while maintaining or improving rendering quality [S1]. Unlike its sibling [Direct Gaussian Splatting](3555-direct-gaussian-splatting.md) which relies on monotonic additive Gaussians, SSS employs a non-monotonic mixture model and requires Stochastic Gradient Hamiltonian Monte Carlo (SGHMC) for optimization to prevent parameter collapse [S1].
+3D Student's t Distribution Splatting (SSS) is a neural rendering method that replaces the 3D Gaussian primitives of 3D Gaussian Splatting (3DGS) with flexible Student's t distributions and extends the splatting scheme to include both positive (splatting) and negative (scooping) density components [S1]. It solves the expressivity limitations of Gaussian mixtures by utilizing fat-tailed distributions and non-monotonic density modeling, achieving higher parameter efficiency (reducing component counts by up to 82%) while maintaining or improving rendering quality [S1]. SSS replaces monotonic Gaussian mixtures with Student's t distributions and employs Stochastic Gradient Hamiltonian Monte Carlo (SGHMC) to prevent the degree of freedom parameter $\nu$ from collapsing to local minima [S1].
 
 ## How it works
-SSS builds on the shared principles of [Primitive Geometry and Distribution](6228-primitive-geometry-and-distribution.md). Each primitive $i$ is defined by a mean position $\boldsymbol{\mu}_i$, a covariance matrix $\boldsymbol{\Sigma}_i$, an opacity $\alpha_i$, and a color $c_i$. The key differences are the introduction of a learnable degree of freedom parameter $\nu_i$ and the support for negative weights.
+SSS builds on the shared principles of [Primitive Geometry and Distribution](6228-primitive-geometry-and-distribution.md) [G]. Each primitive $i$ is defined by a mean position $\boldsymbol{\mu}_i$, a covariance matrix $\boldsymbol{\Sigma}_i$, an opacity $o_i$, and a color $c_i$ [S1]. The key differences are the introduction of a learnable degree of freedom parameter $\nu_i$ and the support for negative weights in the mixture model [S1].
 
 ### Data Structures
 Each primitive $i$ stores:
-1.  **Mean Position** ($\boldsymbol{\mu}_i$): $\mathbb{R}^3$ vector.
-2.  **Covariance Matrix** ($\boldsymbol{\Sigma}_i$): $\mathbb{R}^{3 \times 3}$ symmetric positive-definite matrix, parameterized by rotation $\mathbf{R}_i$ (from quaternion $\mathbf{q}_i$) and scaling $\mathbf{s}_i$: $\boldsymbol{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$ [S1].
-3.  **Degree of Freedom** ($\nu_i$): Scalar, $\nu_i \in [1, 10000]$ during training [S1].
-4.  **Opacity** ($\alpha_i$): Scalar in $[0, 1]$.
-5.  **Color** ($c_i$): $\mathbb{R}^{27}$ vector representing spherical harmonics coefficients [S1].
-6.  **Weight Sign** ($w_i$): Scalar. In the "Full SSS" model, $w_i$ can be negative to enable "scooping" (subtracting density) [S1].
+1. **Mean Position** ($\boldsymbol{\mu}_i$): $\mathbb{R}^3$ vector [S1].
+2. **Covariance Matrix** ($\boldsymbol{\Sigma}_i$): $\mathbb{R}^{3 \times 3}$ symmetric positive-definite matrix, parameterized by rotation $\mathbf{R}_i$ (from quaternion $\mathbf{q}_i$) and scaling $\mathbf{s}_i$: $\boldsymbol{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$ [S1].
+3. **Degree of Freedom** ($\nu_i$): Scalar, constrained to $\nu_i \in [1, 10000]$ during training to prevent numerical instability [S1].
+4. **Opacity** ($o_i$): Scalar in $[0, 1]$ [S1].
+5. **Color** ($c_i$): $\mathbb{R}^{27}$ vector representing spherical harmonics coefficients [S1].
 
 ### Projection
-To render, the 3D distribution is projected to 2D screen space. Let $\mathbf{W}$ be the view rotation/translation matrix and $\mathbf{J}$ be the Jacobian of the projective transformation.
-1.  Compute intermediate matrices: $\mathbf{A} = \mathbf{J}\mathbf{W}$ and $\mathbf{b} = \boldsymbol{\mu} + \mathbf{J}(\mathbf{d} - \mathbf{t})$, where $\mathbf{d}$ is the 3D point and $\mathbf{t}$ is the camera coordinates [S1].
-2.  The 2D mean $\boldsymbol{\mu}^{2D}$ is computed via affine transformation and perspective division:
-    $$ \boldsymbol{\mu}^{2D} = \frac{(\mathbf{W}\boldsymbol{\mu} + \mathbf{t})_{1:2}}{(\mathbf{W}\boldsymbol{\mu} + \mathbf{t})_3} $$
-    where subscripts select the corresponding rows/columns [S1].
-3.  The 2D covariance $\boldsymbol{\Sigma}^{2D}$ is computed by marginalizing the 3D distribution along the ray dimension using the affine transformation $\mathbf{W}_{marg} = \begin{bmatrix} \mathbf{I}_2 & \mathbf{0} \\ \mathbf{0} & \mathbf{0} \end{bmatrix}$:
-    $$ \boldsymbol{\Sigma}^{2D} = (\mathbf{J}\mathbf{W}\boldsymbol{\Sigma}\mathbf{W}^T\mathbf{J}^T)_{1:2, 1:2} $$
-    Note: The low-pass filter used in vanilla 3DGS to ensure a minimum scale of 1 pixel is **removed** because the Student's t distribution does not have an analytical form after convolution with another Student's t [S1]. For settings using only SGD with positive t-distributions, a small value (0.3) is added to $\boldsymbol{\Sigma}^{2D}$ as an engineering low-pass filter to prevent excessive tiny components [S1].
+To render, the 3D distribution is projected to 2D screen space [S1]. Let $\mathbf{W}$ be the view transformation matrix and $\mathbf{J}$ be the Jacobian of the projective transformation [S1].
+1. Compute intermediate matrices: $\mathbf{A} = \mathbf{J}\mathbf{W}$ and $\mathbf{b} = \boldsymbol{\mu} + \mathbf{J}(\mathbf{d} - \mathbf{t})$, where $\mathbf{d}$ is the 3D point and $\mathbf{t}$ is the camera coordinates [S1].
+2. The 2D mean $\boldsymbol{\mu}^{2D}$ is computed via affine transformation and perspective division:
+   $$ \boldsymbol{\mu}^{2D} = \frac{(\mathbf{W}\boldsymbol{\mu} + \mathbf{t})_{1:2}}{(\mathbf{W}\boldsymbol{\mu} + \mathbf{t})_3} $$
+   where subscripts select the corresponding rows/columns [S1].
+3. The 2D covariance $\boldsymbol{\Sigma}^{2D}$ is computed by marginalizing the 3D distribution along the ray dimension using the affine transformation $\mathbf{W}_{marg} = \begin{bmatrix} \mathbf{I}_2 & \mathbf{0} \\ \mathbf{0} & \mathbf{0} \end{bmatrix}$:
+   $$ \boldsymbol{\Sigma}^{2D} = (\mathbf{J}\mathbf{W}\boldsymbol{\Sigma}\mathbf{W}^T\mathbf{J}^T)_{1:2, 1:2} $$
+   The low-pass filter used in vanilla 3DGS to ensure a minimum scale of 1 pixel is removed because the Student's t distribution does not have an analytical form after convolution with another Student's t [S1]. For settings using only SGD with positive t-distributions, a small value (0.3) is added to $\boldsymbol{\Sigma}^{2D}$ as an engineering low-pass filter to prevent excessive tiny components [S1].
 
 ### Rendering (Forward Pass)
 The 2D Student's t density at pixel $u$ is evaluated as:
 $$ T^{2D}(u) = \left[ 1 + \frac{1}{\nu} (u - \boldsymbol{\mu}^{2D})^T (\boldsymbol{\Sigma}^{2D})^{-1} (u - \boldsymbol{\mu}^{2D}) \right]^{-\frac{\nu+2}{2}} $$
 The scalar normalization constant $\frac{\Gamma(\nu+3)/2}{\Gamma(\nu/2)\nu^{3/2}\pi^{3/2}|\boldsymbol{\Sigma}|}$ is dropped to facilitate learning [S1].
-
-The rendered pixel color $C(u)$ uses alpha blending. In the full SSS model, which includes negative components, the mixture is non-monotonic. While the paper proposes a squared form $P(x) = (\sum w_i T_i(x))^2$ to enable negative densities, it notes this introduces pairwise interactions. The final rendering equation provided for the mixture is:
-$$ C(u) = \sum_{i=1}^N c_i \alpha_i T_i^{2D}(u) \prod_{j=1}^{i-1} (1 - \alpha_j T_j^{2D}(u)) $$
-where $w_i$ determines the sign (positive for splatting, negative for scooping) [S1].
+The rendered pixel color $C(u)$ uses alpha blending:
+$$ C(u) = \sum_{i=1}^N c_i o_i T_i^{2D}(u) \prod_{j=1}^{i-1} (1 - o_j T_j^{2D}(u)) $$
+where $N$ is the number of primitives intersecting the ray [S1]. The mixture model combines positive and negative components to splat and scoop densities [S1].
 
 ### Optimization (Backward Pass)
-SSS uses Stochastic Gradient Hamiltonian Monte Carlo (SGHMC) instead of vanilla SGD. The friction term in SGHMC decouples parameters, preventing the collapse of $\nu$ to local minima (typically $\nu \approx 1$) which occurs with SGD [S1].
-
-Gradients are computed via the chain rule. Define the helper function:
+SSS uses Stochastic Gradient Hamiltonian Monte Carlo (SGHMC) instead of vanilla SGD [S1]. The friction term in SGHMC decouples parameters, preventing the collapse of $\nu$ to local minima (typically $\nu \approx 1$) which occurs with SGD [S1].
+Gradients are computed via the chain rule [S1]. Define the helper function:
 $$ h(x) = (x - \boldsymbol{\mu}')^T (\boldsymbol{\Sigma}')^{-1} (x - \boldsymbol{\mu}') $$
 where $\boldsymbol{\mu}'$ and $\boldsymbol{\Sigma}'$ are the projected 2D mean and covariance [S1].
-
 The gradient of $T^{2D}$ with respect to $h(x)$ is:
 $$ \frac{\partial T^{2D}}{\partial h(x)} = -\frac{\nu + 2}{2} \cdot \frac{1}{\nu} \cdot \left[ 1 + \frac{1}{\nu} h(x) \right]^{-\frac{\nu+4}{2}} $$
 This replaces the Gaussian derivative $\frac{\partial G^{2D}}{\partial h(x)} = -\frac{1}{2} \exp(-\frac{1}{2}h(x))$ [S1].
-
 The gradient with respect to $\nu$ is calculated separately:
 $$ \frac{\partial T^{2D}}{\partial \nu} = \frac{\nu+2}{2} \cdot \frac{h(x)}{\nu^2} \left[ 1 + \frac{1}{\nu} h(x) \right]^{-\frac{\nu+4}{2}} $$
-This gradient is added to the optimization step for $\nu$ [S1].
+Gradients for $\boldsymbol{\mu}$, $\boldsymbol{\Sigma}$, and $\nu$ are updated using SGHMC [S1].
 
 ### Component Recycling
-When relocating low-opacity components to high-opacity components, distribution invariance must be preserved. For opacity, the relation is:
+When relocating low-opacity components to high-opacity components, distribution invariance must be preserved [S1]. For opacity, the relation is:
 $$ (1 - O_{new})^N = (1 - O_{old}) $$
 where $N$ is the number of components [S1].
 
@@ -62,158 +57,68 @@ where $N$ is the number of components [S1].
 ```python
 import numpy as np
 
-def project_primitive(mu_3d, sigma_3d, nu, W, J):
-    """
-    Projects a 3D Student's t primitive to 2D screen space.
-    mu_3d: (3,) array
-    sigma_3d: (3,3) array
-    nu: scalar
-    W: (3,3) view rotation matrix
-    J: (3,3) Jacobian of projective transformation
-    Returns: mu_2d, sigma_2d
-    """
-    # Affine transformation
+def project_primitive(mu_3d, sigma_3d, W, J):
     mu_affine = W @ mu_3d
-    
-    # Perspective division for mean
-    # Assuming standard pinhole camera projection where W includes translation
-    # mu_affine is effectively W*mu + t in the paper's notation context
-    # mu_2d = (W*mu + t)[0:2] / (W*mu + t)[2]
     mu_2d = mu_affine[:2] / mu_affine[2]
-    
-    # Covariance projection
-    # Sigma_2d = (J * W * Sigma * W^T * J^T)[0:2, 0:2]
     sigma_proj = J @ W @ sigma_3d @ W.T @ J.T
     sigma_2d = sigma_proj[:2, :2]
-    
     return mu_2d, sigma_2d
 
 def evaluate_t_2d(u, mu_2d, sigma_2d, nu):
-    """
-    Evaluates the 2D Student's t density at pixel u.
-    u: (2,) array
-    mu_2d: (2,) array
-    sigma_2d: (2,2) array
-    nu: scalar
-    Returns: density value
-    """
     diff = u - mu_2d
-    # h(x) = (x - mu')^T Sigma'^-1 (x - mu')
     h = diff @ np.linalg.inv(sigma_2d) @ diff
-    
-    # T^2D(u) = [1 + 1/nu * h] ^ (-(nu+2)/2)
     density = (1.0 + h / nu) ** (-(nu + 2) / 2.0)
-    return density
+    return density, h
 
-def compute_gradients_t_2d(u, mu_2d, sigma_2d, nu, grad_density):
-    """
-    Computes gradients of the loss with respect to h(x) and nu.
-    grad_density: gradient of loss w.r.t density T^2D
-    Returns: grad_h, grad_nu
-    """
-    diff = u - mu_2d
-    h = diff @ np.linalg.inv(sigma_2d) @ diff
-    
-    # dT/dh = -(nu+2)/2 * 1/nu * [1 + h/nu]^(-(nu+4)/2)
+def compute_gradients_t_2d(grad_density, h, nu):
     base = 1.0 + h / nu
     dT_dh = -(nu + 2) / 2.0 * (1.0 / nu) * (base ** (-(nu + 4) / 2.0))
     grad_h = grad_density * dT_dh
-    
-    # dT/dnu = (nu+2)/2 * h/nu^2 * [1 + h/nu]^(-(nu+4)/2)
     dT_dnu = (nu + 2) / 2.0 * (h / (nu ** 2)) * (base ** (-(nu + 4) / 2.0))
     grad_nu = grad_density * dT_dnu
-    
     return grad_h, grad_nu
 
-def render_sss(primitives, camera_params, image_shape):
-    """
-    Renders an image using SSS.
-    primitives: list of dicts with keys 'mu', 'sigma', 'nu', 'alpha', 'color', 'weight_sign'
-    camera_params: dict with 'W', 'J'
-    image_shape: (H, W)
-    Returns: rendered image
-    """
+def check_bbox(u, mu_2d, sigma_2d):
+    diff = u - mu_2d
+    mahal = diff @ np.linalg.inv(sigma_2d) @ diff
+    return mahal <= 9.0
+
+def render_sss(primitives, camera_W, camera_J, image_shape):
     H, W = image_shape
     image = np.zeros((H, W, 3))
-    
-    # Sort primitives by depth (simplified: assume sorted or use z-buffer)
-    # In practice, primitives are sorted by depth for each ray
     for y in range(H):
         for x in range(W):
             u = np.array([x, y])
-            # Cast ray and find intersecting primitives
-            # This step depends on the specific rasterization implementation
-            # Assuming we have a list of primitives intersecting this pixel, sorted by depth
-            intersecting = get_intersecting_primitives(u, primitives, camera_params)
+            intersecting = [p for p in primitives if check_bbox(u, p['mu_2d'], p['sigma_2d'])]
+            intersecting.sort(key=lambda p: p['depth'])
             
-            accumulated_alpha = 0.0
-            accumulated_color = np.zeros(3)
-            
-            for prim in intersecting:
-                mu_2d, sigma_2d = project_primitive(prim['mu'], prim['sigma'], prim['nu'], 
-                                                    camera_params['W'], camera_params['J'])
-                
-                # Check if pixel is within bounding box of primitive
-                if not is_in_bbox(u, mu_2d, sigma_2d):
-                    continue
-                
-                density = evaluate_t_2d(u, mu_2d, sigma_2d, prim['nu'])
-                
-                # Effective opacity
-                alpha_eff = prim['alpha'] * density
-                
-                # Color contribution
-                # Note: weight_sign allows negative components (scooping)
-                color_contrib = prim['color'] * alpha_eff * prim['weight_sign']
-                
-                # Alpha compositing
-                # C(u) = sum c_i alpha_i T_i(u) prod (1 - alpha_j T_j(u))
-                term = color_contrib * (1.0 - accumulated_alpha)
-                accumulated_color += term
-                accumulated_alpha += alpha_eff * (1.0 - accumulated_alpha) # Approximation for non-monotonic?
-                # Standard alpha blending: C = sum c_i alpha_i prod_{j<i} (1 - alpha_j T_j)
-                # The product term is maintained in the loop
-                
-                # Correct standard alpha blending loop:
-                # transmittance = prod_{j<i} (1 - alpha_j T_j)
-                # C += c_i alpha_i T_i * transmittance
-                # transmittance *= (1 - alpha_i T_i)
-                
-            # Re-implementing standard alpha blending loop for clarity
             transmittance = 1.0
             final_color = np.zeros(3)
             for prim in intersecting:
-                mu_2d, sigma_2d = project_primitive(prim['mu'], prim['sigma'], prim['nu'], 
-                                                    camera_params['W'], camera_params['J'])
-                if not is_in_bbox(u, mu_2d, sigma_2d):
-                    continue
-                
-                density = evaluate_t_2d(u, mu_2d, sigma_2d, prim['nu'])
+                mu_2d, sigma_2d = project_primitive(prim['mu'], prim['sigma'], camera_W, camera_J)
+                density, h = evaluate_t_2d(u, mu_2d, sigma_2d, prim['nu'])
                 alpha_eff = prim['alpha'] * density
-                
-                final_color += prim['color'] * alpha_eff * prim['weight_sign'] * transmittance
+                final_color += prim['color'] * alpha_eff * transmittance
                 transmittance *= (1.0 - alpha_eff)
-                
             image[y, x] = final_color
-            
     return image
 ```
 
 ## Subtopics
 
 ### SGHMC with Adam gradient
-A hybrid optimization scheme for training Student's t-splatting that uses SGHMC as the base sampler but injects Adam's adaptive gradient scaling [S1]. It differs from vanilla 3DGS by replacing standard SGD with SGHMC+Adam, and from 3DGS-MCMC by incorporating Adam's gradient scaling and supporting negative components [S1]. Hyperparameters are largely identical to original 3DGS and 3DGS-MCMC, with new parameters introduced due to Student's t distribution, negative components, and SGHMC integration [S1].
+A hybrid optimization scheme for training Student's t-splatting that uses SGHMC as the base sampler but injects Adam's adaptive gradient scaling [S1]. Hyperparameters are largely identical to original 3DGS and 3DGS-MCMC, with new parameters introduced due to Student's t distribution, negative components, and SGHMC integration [S1].
 
 ## Operating characteristics
-- **Time Complexity**: Rendering is real-time (>70fps) on an NVIDIA RTX 4090, but slower than vanilla 3DGS due to the more complex density evaluation and the use of SGHMC for optimization [S1].
+- **Time Complexity**: Rendering achieves real-time performance (>70fps) on an NVIDIA RTX 4090, but is slower than vanilla 3DGS due to the more complex density evaluation and SGHMC optimization [S1].
 - **Memory Complexity**: Parameter efficiency is significantly higher than 3DGS, reducing the number of required components by up to 82% for comparable quality [S1].
-- **Strengths**: Higher expressivity due to fat tails (covering larger areas with higher densities) and non-monotonic modeling (scooping). Better quality with fewer components.
-- **Limitations**: Slower training due to SGHMC. Naive SGD causes $\nu$ to collapse to local minima ($\nu \approx 1$). The low-pass filter from 3DGS cannot be used directly.
-- **When to use**: When parameter efficiency and high-fidelity detail reconstruction with fewer primitives are required.
-- **When not to use**: When training speed is critical and vanilla 3DGS performance is sufficient.
+- **Strengths**: Higher expressivity due to fat tails covering larger areas with higher densities, and non-monotonic modeling via negative components [S1].
+- **Limitations**: Slower training due to SGHMC; naive SGD causes $\nu$ to collapse to local minima ($\nu \approx 1$) [S1].
+- **When to use**: When parameter efficiency and high-fidelity detail reconstruction with fewer primitives are required [S1].
+- **When not to use**: When training speed is critical and vanilla 3DGS performance is sufficient [S1].
 
 ## Background
-SSS was proposed as an improvement on the fundamental paradigm of 3D Gaussian Splatting (3DGS) [14]. It addresses the limitations of Gaussian mixtures by introducing Student's t distributions and a non-monotonic mixture model. The method was evaluated on Mip-NeRF 360, Tanks & Temples, and Deep Blending datasets [S1]. The optimization uses SGHMC to handle parameter coupling in the t-distribution model [S1].
+SSS was proposed as an improvement on the fundamental paradigm of 3D Gaussian Splatting (3DGS) [S1]. It addresses the limitations of Gaussian mixtures by introducing Student's t distributions and a non-monotonic mixture model [S1]. The method was evaluated on Mip-NeRF 360, Tanks & Temples, and Deep Blending datasets [S1]. The optimization uses SGHMC to handle parameter coupling in the t-distribution model [S1].
 
 ## Sources
 [S1] 3D Student Splatting and Scooping, https://doi.org/10.1109/cvpr52734.2025.01960, fetched 2026-10-29

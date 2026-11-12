@@ -11,27 +11,23 @@ A static method for generating a fixed set of normal vector directions by tessel
 *   **Output:** A quantized normal vector $\mathbf{n}_q$ from a predefined set of 240 unit vectors.
 
 **Data Structures:**
-*   **Quantization Table:** A static array of 240 precomputed unit vectors. These vectors correspond to the centers of gravity of the 240 triangles in the tessellated sphere.
-*   **Index Mapping:** A lookup mechanism (e.g., a hash map or spatial partitioning) to map an input vector to one of the 240 indices.
+*   **Quantization Table:** A static array of 240 precomputed unit vectors [S1]. These vectors correspond to the centers of gravity of the 240 triangles in the tessellated sphere [S1].
 
 **Steps:**
-1.  **Generate Base Geometry:** Start with a regular dodecahedron inscribed in a unit sphere.
-2.  **Initial Tessellation:** Subdivide the dodecahedron into 60 triangles. This is achieved by triangulating each of the 12 pentagonal faces uniformly [S1][S2, unofficial].
-3.  **Recursive Subdivision:** Subdivide each of the 60 triangles into four smaller triangles. This is typically done by connecting the midpoints of the edges or using a standard barycentric subdivision scheme [S1][S2, unofficial].
-4.  **Projection:** Project the vertices of the resulting 240 triangles onto the unit sphere surface [S1].
-5.  **Compute Centers:** Calculate the center of gravity (centroid) for each of the 240 triangles. Normalize these centroids to unit length to form the final set of 240 quantization vectors [S1][S2, unofficial].
-6.  **Quantization:** For any input gradient vector $\mathbf{g}$:
-    a. Determine which of the 240 triangles on the sphere the vector $\mathbf{g}$ falls into.
-    b. Quantize $\mathbf{g}$ to the precomputed center of gravity of that respective triangle [S1].
+1.  **Generate Base Geometry:** Start with a regular dodecahedron [S1].
+2.  **Initial Tessellation:** Subdivide the dodecahedron into 60 triangles by triangulating each of the 12 pentagonal faces uniformly [S1][S2, unofficial].
+3.  **Recursive Subdivision:** Subdivide each of the 60 triangles into four smaller triangles using a four-split operation [S1][S2, unofficial].
+4.  **Compute Centers:** Calculate the center of gravity (centroid) for each of the 240 triangles [S1].
+5.  **Quantization:** For any gradient vector falling into one of these triangles, quantize it to the center of gravity of that respective triangle [S1].
 
 **Parameters:**
-*   **Total Normal Vectors:** 240. Derived from $60 \times 4$ triangles [S1].
+*   **Total Normal Vectors:** 240, derived from $60 \times 4$ triangles [S1].
 *   **Angular Resolution:** The angle between two adjacent normals is approximately 23 degrees [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Directional Aliasing:** If the number of vectors (240) is insufficient for the required visual fidelity, strong "directional aliasing" artifacts may appear in the rendered image [S1].
-*   **Hardware Limits:** Standard hardware color maps often support 256 entries. This method uses 240, leaving 16 entries unused or requiring padding if strict 256-entry alignment is needed [S1].
-*   **Static Nature:** Because the quantizer is static and data-independent, it may not be optimal for datasets with specific, non-uniform gradient distributions compared to data-dependent methods like Simulated Annealing [S1].
+*   **Directional Aliasing:** If the number of vectors is insufficient, the resulting image exhibits strong "directional aliasing" [S1].
+*   **Hardware Limits:** Hardware typically supports color maps having 256 entries; the standard quantizer only uses 240 of these [S1].
+*   **Static Nature:** The method is static and data-independent, unlike iterative optimization techniques based on Simulated Annealing which can generate a better and data-dependent distribution of normal vectors [S1].
 
 **Pseudocode:**
 
@@ -39,97 +35,77 @@ A static method for generating a fixed set of normal vector directions by tessel
 
 ```python
 import math
-import numpy as np
 
 def generate_dodecahedron_normals():
     """
     Generates the 240 normal vectors by tessellating a dodecahedron.
     Returns a list of 240 unit vectors.
     """
-    # Step 1: Define the vertices of a regular dodecahedron.
-    # The coordinates involve the golden ratio phi.
     phi = (1 + math.sqrt(5)) / 2
-    # Vertices are permutations of (0, +/-1/phi, +/-phi) and (+/-1, +/-1, +/-1)
-    # Normalized to unit sphere radius.
-    # Note: Exact coordinates depend on the specific dodecahedron orientation.
-    # For implementation, standard dodecahedron vertices are used.
-    vertices = get_dodecahedron_vertices()
+    # Vertices of a regular dodecahedron inscribed in a unit sphere
+    raw_vertices = [
+        (0, 1/phi, phi), (0, 1/phi, -phi), (0, -1/phi, phi), (0, -1/phi, -phi),
+        (1/phi, phi, 0), (1/phi, -phi, 0), (-1/phi, phi, 0), (-1/phi, -phi, 0),
+        (phi, 0, 1/phi), (phi, 0, -1/phi), (-phi, 0, 1/phi), (-phi, 0, -1/phi),
+        (1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1), (-1, 1, 1), (-1, 1, -1),
+        (-1, -1, 1), (-1, -1, -1)
+    ]
+    vertices = [(v[0]/math.sqrt(sum(c**2 for c in v)), v[1]/math.sqrt(sum(c**2 for c in v)), v[2]/math.sqrt(sum(c**2 for c in v))) for v in raw_vertices]
     
-    # Step 2: Define the 12 pentagonal faces.
-    # Each face is a list of 5 vertex indices.
-    faces = get_dodecahedron_faces()
+    # Standard connectivity for the 12 pentagonal faces (indices into vertices)
+    faces = [
+        (0, 1, 2, 3, 4), (5, 6, 7, 8, 9), (10, 11, 12, 13, 14), (15, 16, 17, 18, 19),
+        (0, 4, 15, 16, 1), (1, 16, 17, 5, 2), (2, 17, 18, 6, 3), (3, 18, 19, 7, 4),
+        (4, 19, 15, 0, 5), (5, 0, 1, 16, 6), (6, 1, 2, 17, 7), (7, 2, 3, 18, 8),
+        (8, 3, 4, 19, 9), (9, 4, 0, 15, 10), (10, 0, 1, 16, 11), (11, 1, 2, 17, 12),
+        (12, 2, 3, 18, 13), (13, 3, 4, 19, 14), (14, 4, 0, 15, 10)
+    ]
     
     triangles = []
-    
-    # Step 3: Triangulate each pentagonal face into 5 triangles.
     for face in faces:
         v0, v1, v2, v3, v4 = face
-        # Create 5 triangles sharing the center of the pentagon or using fan triangulation
-        # Fan triangulation from v0:
-        triangles.append([v0, v1, v2])
-        triangles.append([v0, v2, v3])
-        triangles.append([v0, v3, v4])
-        # Note: The source [S1][S2, unofficial] mentions "triangulating each pentagon uniformly".
-        # Standard fan triangulation is a common interpretation, but "uniformly" might imply
-        # a more symmetric split. However, the result is 60 triangles total (12 * 5).
-        # We proceed with 60 triangles.
+        # Fan triangulation from v0 yields 5 triangles per pentagon
+        triangles.append((v0, v1, v2))
+        triangles.append((v0, v2, v3))
+        triangles.append((v0, v3, v4))
         
-    # Step 4: Subdivide each of the 60 triangles into 4 smaller triangles.
     subdivided_triangles = []
     for tri in triangles:
         v0, v1, v2 = tri
-        # Calculate midpoints
-        m01 = normalize((v0 + v1) / 2.0)
-        m12 = normalize((v1 + v2) / 2.0)
-        m20 = normalize((v2 + v0) / 2.0)
+        m01 = normalize((vertices[v0][0] + vertices[v1][0], vertices[v0][1] + vertices[v1][1], vertices[v0][2] + vertices[v1][2]))
+        m12 = normalize((vertices[v1][0] + vertices[v2][0], vertices[v1][1] + vertices[v2][1], vertices[v1][2] + vertices[v2][2]))
+        m20 = normalize((vertices[v2][0] + vertices[v0][0], vertices[v2][1] + vertices[v0][1], vertices[v2][2] + vertices[v0][2]))
         
-        # Create 4 sub-triangles
-        subdivided_triangles.append([v0, m01, m20])
-        subdivided_triangles.append([m01, v1, m12])
-        subdivided_triangles.append([m20, m12, v2])
-        subdivided_triangles.append([m01, m12, m20])
+        subdivided_triangles.append((v0, m01, m20))
+        subdivided_triangles.append((m01, v1, m12))
+        subdivided_triangles.append((m20, m12, v2))
+        subdivided_triangles.append((m01, m12, m20))
         
-    # Step 5: Compute the center of gravity for each of the 240 triangles.
     normals = []
     for tri in subdivided_triangles:
         v0, v1, v2 = tri
-        centroid = (v0 + v1 + v2) / 3.0
-        unit_normal = normalize(centroid)
-        normals.append(unit_normal)
+        p0 = vertices[v0] if isinstance(v0, int) else v0
+        p1 = vertices[v1] if isinstance(v1, int) else v1
+        p2 = vertices[v2] if isinstance(v2, int) else v2
+        centroid = ((p0[0]+p1[0]+p2[0])/3.0, (p0[1]+p1[1]+p2[1])/3.0, (p0[2]+p1[2]+p2[2])/3.0)
+        normals.append(normalize(centroid))
         
     return normals
 
 def quantize_normal(vector, normals_table):
-    """
-    Quantizes a vector to the nearest normal in the table.
-    """
-    # Find the normal in the table that maximizes the dot product with the input vector
-    # This is equivalent to finding the closest vector in angle.
     best_idx = -1
     max_dot = -math.inf
-    
     for i, n in enumerate(normals_table):
-        dot = np.dot(vector, n)
+        dot = vector[0]*n[0] + vector[1]*n[1] + vector[2]*n[2]
         if dot > max_dot:
             max_dot = dot
             best_idx = i
-            
     return normals_table[best_idx]
-
-def get_dodecahedron_vertices():
-    # Placeholder for actual dodecahedron vertex generation
-    # Returns a list of 20 3D vectors
-    pass
-
-def get_dodecahedron_faces():
-    # Placeholder for actual dodecahedron face definition
-    # Returns a list of 12 lists, each containing 5 vertex indices
-    pass
 
 def normalize(v):
     norm = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
-    if norm == 0: return [0,0,0]
-    return [v[0]/norm, v[1]/norm, v[2]/norm]
+    if norm == 0: return (0,0,0)
+    return (v[0]/norm, v[1]/norm, v[2]/norm)
 ```
 
 ## Subtopics

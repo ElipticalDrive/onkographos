@@ -1,0 +1,142 @@
+--- v009.md
++++ v010.md
+@@ -9,5 +9,5 @@
+ **Inputs and Outputs:**
+ *   **Input:** Volume dimensions, brick size, brick resolution levels, isovalue (for active brick determination), texture function (optional, for empty brick detection), file handle to volume data [S2, unofficial].
+-*   **Output:** A resident brick block given a brick coordinate, or `nullptr`/null reference if not resident [S2, unofficial].
++*   **Output:** A resident brick block given a brick coordinate, or `None`/null reference if not resident [S2, unofficial].
+ 
+ **Data Structures:**
+@@ -22,6 +22,5 @@
+ 5.  `blocks`: Array of `Block` structs, size `blk_nums`.
+     *   `Block` layout:
+-        *   `data`: pointer to the voxel data buffer.
+-        *   `last_access`: timestamp or counter (used for LRU).
++        *   `last_access`: `int`, timestamp or counter used for LRU ordering.
+ 6.  `blk_nums`: `int`, total number of blocks in the pool. Calculated as `brick_dims.x * brick_dims.y * brick_dims.z * _brick_num_ratio` [S2, unofficial].
+ 7.  `clock_pos`: `int`, current position in the LRU clock (used for efficient LRU approximation) [S2, unofficial].
+@@ -37,56 +36,70 @@
+ **Pseudocode:**
+ ```python
++import math
++
+ def init_cache(dims, brick_size, _brick_num_ratio):
+-    brick_dims = ceil(dims / brick_size)
+-    blk_nums = brick_dims.x * brick_dims.y * brick_dims.z * _brick_num_ratio
+-    entries = [Entry(valid=False, blk_idx=-1) for _ in range(brick_dims.x * brick_dims.y * brick_dims.z)]
+-    blocks = [Block(data=None, last_access=0) for _ in range(blk_nums)]
+-    data_buffer = allocate_uchar(blk_nums * (brick_size.x+1)*(brick_size.y+1)*(brick_size.z+1))
+-    cnt_buf = load_from_disk(brick_dims.x * brick_dims.y * brick_dims.z * 256)
++    brick_dims = (math.ceil(dims[0]/brick_size[0]), math.ceil(dims[1]/brick_size[1]), math.ceil(dims[2]/brick_size[2]))
++    total_bricks = brick_dims[0] * brick_dims[1] * brick_dims[2]
++    blk_nums = int(total_bricks * _brick_num_ratio)
++    entries = [{'valid': False, 'blk_idx': -1} for _ in range(total_bricks)]
++    blocks = [{'last_access': 0} for _ in range(blk_nums)]
++    brick_vol = (brick_size[0]+1) * (brick_size[1]+1) * (brick_size[2]+1)
++    data_buffer = bytearray(blk_nums * brick_vol)
++    cnt_buf = [0] * (total_bricks * 256)
+     clock_pos = 0
+     blk_used = 0
+-    return entries, blocks, data_buffer, cnt_buf, clock_pos, blk_used
++    return brick_dims, entries, blocks, data_buffer, cnt_buf, clock_pos, blk_used
+ 
+-def get_block(x, y, z, brick_dims, entries, blocks, data_buffer, cnt_buf, clock_pos, blk_used, fin):
+-    if x >= brick_dims.x or y >= brick_dims.y or z >= brick_dims.z:
+-        return None
+-    
++def get_block(x, y, z, brick_dims, entries, blocks, data_buffer, cnt_buf, clock_pos, blk_used, fin, tf1d=None, timestamp=0):
++    if x >= brick_dims[0] or y >= brick_dims[1] or z >= brick_dims[2]:
++        return None, timestamp
++
+     # Empty brick check
+-    cnt_base = (x * brick_dims.y + y) * brick_dims.z + z
+-    empty = True
++    cnt_base = (x * brick_dims[1] + y) * brick_dims[2] + z
++    is_empty = True
+     for idx in range(256):
+         if cnt_buf[cnt_base + idx] != 0:
+-            empty = False
++            if tf1d is not None and tf1d.sample(idx).w == 0:
++                continue
++            is_empty = False
+             break
+-    if empty:
+-        return None
++    if is_empty:
++        return None, timestamp
+ 
+-    entry_idx = x * brick_dims.y * brick_dims.z + y * brick_dims.z + z
++    entry_idx = x * brick_dims[1] * brick_dims[2] + y * brick_dims[2] + z
+     entry = entries[entry_idx]
+-    
+-    if entry.valid:
+-        blocks[entry.blk_idx].last_access = current_time()
+-        return blocks[entry.blk_idx].data
+ 
+-    lock(mutex)
++    if entry['valid']:
++        blocks[entry['blk_idx']]['last_access'] = timestamp
++        timestamp += 1
++        offset = entry['blk_idx'] * (brick_size[0]+1)*(brick_size[1]+1)*(brick_size[2]+1)
++        return data_buffer[offset:offset + (brick_size[0]+1)*(brick_size[1]+1)*(brick_size[2]+1)], timestamp
++
++    # Lock mutex (omitted for brevity, assume thread-safe context)
+     if blk_used < len(blocks):
+         blk_idx = blk_used
+         blk_used += 1
+     else:
+-        # LRU eviction using clock
+-        while not blocks[clock_pos].last_access == 0:
++        # LRU clock eviction: find first block with last_access == 0
++        while blocks[clock_pos]['last_access'] != 0:
+             clock_pos = (clock_pos + 1) % len(blocks)
+-        old_entry_idx = find_entry_for_block(clock_pos, entries)
+-        entries[old_entry_idx].valid = False
+-        blk_idx = clock_pos
++        old_blk_idx = clock_pos
++        # Find and invalidate the entry pointing to this block
++        for i, e in enumerate(entries):
++            if e['valid'] and e['blk_idx'] == old_blk_idx:
++                entries[i]['valid'] = False
++                break
++        blk_idx = old_blk_idx
+         clock_pos = (clock_pos + 1) % len(blocks)
+ 
+-    load_data_from_file(fin, data_buffer, blk_idx, brick_size)
+-    entry.valid = True
+-    entry.blk_idx = blk_idx
+-    blocks[blk_idx].last_access = current_time()
+-    unlock(mutex)
+-    return blocks[blk_idx].data
+-```
++    # Load block from file into data_buffer at blk_idx [S2, unofficial]
++    # Implementation detail: read brick data from fin into data_buffer[offset]
++    entry['valid'] = True
++    entry['blk_idx'] = blk_idx
++    blocks[blk_idx]['last_access'] = timestamp
++    timestamp += 1
++    # unlock mutex
++    offset = blk_idx * (brick_size[0]+1)*(brick_size[1]+1)*(brick_size[2]+1)
++    return data_buffer[offset:offset + (brick_size[0]+1)*(brick_size[1]+1)*(brick_size[2]+1)], timestamp
+ 
+ **Parameters:**
+@@ -122,8 +135,8 @@
+ 
+ ### Brick Cache Updates
+-A variant where cache updates are driven by file server uploads. Each frame, a user-defined number of brick data is uploaded to the GPU. Each brick comprises its global brick ID and either the EMPTY value (if all zeros) or the pre-processed brick [S3, unofficial]. The global brick ID is translated to a local brick ID. If the brick's channel is not represented by the multi-channel page-table hierarchy, the brick is discarded [S3, unofficial]. If the brick is EMPTY, the corresponding page in the multi-channel page-table hierarchy is marked as EMPTY. Otherwise, the page is marked as MAPPED, and the brick's data is added to the brick cache using the LRU buffer to find free or recently unused entries [S3, unofficial]. When a brick is removed from the cache, its corresponding page is marked as UNMAPPED. Two lists of local brick IDs are passed to the residency octree: 1) IDs of bricks marked EMPTY or MAPPED, 2) IDs of bricks marked UNMAPPED [S3, unofficial]. Choose it for web-based or networked rendering systems requiring incremental updates.
++A variant where cache updates are driven by file server uploads [S3, unofficial]. Each frame, a user-defined number of brick data is uploaded to the GPU [S3, unofficial]. Each brick comprises its global brick ID and either the EMPTY value (if all zeros) or the pre-processed brick [S3, unofficial]. The global brick ID is translated to a local brick ID [S3, unofficial]. If the brick's channel is not represented by the multi-channel page-table hierarchy, the brick is discarded [S3, unofficial]. If the brick is EMPTY, the corresponding page in the multi-channel page-table hierarchy is marked as EMPTY [S3, unofficial]. Otherwise, the page is marked as MAPPED, and the brick's data is added to the brick cache using the LRU buffer to find free or recently unused entries [S3, unofficial]. When a brick is removed from the cache, its corresponding page is marked as UNMAPPED [S3, unofficial]. Two lists of local brick IDs are passed to the residency octree: 1) IDs of bricks marked EMPTY or MAPPED, 2) IDs of bricks marked UNMAPPED [S3, unofficial].
+ 
+ ### Two-Step Eviction and Write-Back
+-A variant that decouples GPU residency from SSD write latency using a two-step write-back path: VRAM → CPU → SSD [S4, unofficial]. When a block is evicted from VRAM, it is transferred via D2H and inserted into the CPU cache. Clean blocks are inserted as clean; dirty blocks as dirty [S4, unofficial]. When a dirty block is evicted from the CPU cache, it is asynchronously flushed to SSD patch segments, appending a new version and updating `Index[k]` [S4, unofficial]. On re-admission, blocks are fetched via `Index[k]` to ensure the GPU materializes the most recent version [S4, unofficial]. Choose it for large-scale out-of-core optimization where SSD write latency would otherwise stall rendering.
++A variant that decouples GPU residency from SSD write latency using a two-step write-back path: VRAM → CPU → SSD [S4, unofficial]. When a block is evicted from VRAM, it is transferred via D2H and inserted into the CPU cache [S4, unofficial]. Clean blocks are inserted as clean; dirty blocks as dirty [S4, unofficial]. When a dirty block is evicted from the CPU cache, it is asynchronously flushed to SSD patch segments, appending a new version and updating `Index[k]` [S4, unofficial]. On re-admission, blocks are fetched via `Index[k]` to ensure the GPU materializes the most recent version [S4, unofficial].
+ 
+ ## Operating characteristics
+@@ -148,8 +161,4 @@
+ *   Use when isovalue changes frequently, requiring dynamic active brick determination [S1].
+ 
+-**When Not to Use:**
+-*   Not suitable when hardware-specific features (like hardware LRU caches) are available and sufficient.
+-*   Not suitable when strict real-time performance is required and CPU-GPU synchronization overhead is prohibitive.
+-
+ ## Background
+ **Origin:**

@@ -1,0 +1,3932 @@
+# ShapeFromProjections
+
+This repository provides the official code for the paper [Shape from Projections via Differentiable Forward Projector for Computed Tomography](http://arxiv.org/abs/2006.16120) published in Ultramicroscopy. The method estimates 3D shapes represented by a triangular mesh, directly from tomographic projection data. The basic idea of the method is to view tomographic reconstruction as a rendering process and extend a differentiable rasterizer [2] to optimize 3D shapes. Some parts of codes are ported from [2] with the comments of copyright form.
+
+## Simple examples through Colab notebook
+
+- `ctdr_toy_example.ipynb` [Colab link](https://colab.research.google.com/github/jakeoung/ShapeFromProjections/blob/master/ctdr_toy_example.ipynb) : Simple mesh deformation example
+- `ctdr_simulation.ipynb` [Colab link](https://colab.research.google.com/github/jakeoung/ShapeFromProjections/blob/master/ctdr_simulation.ipynb) : Simulation of generating projections file from an obj file and a given projection geometry
+
+## Install
+
+### Install requirements
+
+The code requires python3 and [Pytorch](https://pytorch.org) using CUDA on Linux. Install other requirements:
+
+```
+pip install trimesh
+pip install h5py
+pip install toml
+```
+
+If you have a problem on `pymeshfix`, try to install a recent version of numpy (e.g., `pip install numpy==1.16.1`).
+
+(Optional) To refine the mesh, `ctdr` requires another package for obtaining watertight. Compile the [watertight manifold code](https://github.com/hjwdzh/Manifold) and copy the running file `manifold` into `run` folder. Lastly, you need to install
+
+```
+pip install pymeshfix
+```
+
+### Install ctdr package
+
+```
+cd $ROOT # go to the root folder of the repository
+pip install -e .
+
+# compile cuda files
+cd ctdr/cuda
+python build.py build_ext --inplace
+```
+
+## Usage
+
+To run the code, go to `run` folder and type:
+
+```
+python ours.py -data 2starA
+```
+
+where we run 2starA data. You can see available data files in `data` folder. You just need to input the directory name after `-data`. You can see all the parameters by typing `python ours.py --help`. For example, if you want to impose Gaussian noise with relative level 0.3, then run `python ours.py -data 2spotA -eta 0.3`.
+
+If you want to refine the mesh (you should first install the required packages), as explained in the paper except for 2starA data, you can run:
+
+```
+python ours.py -data 2bob02A -niter0 -60
+```
+
+then, the method will refine the mesh at iteration 60, 120, 180. After finished, the results will be saved on `result` folder, including estimated projections, residuals and mesh files.
+
+To run your own data, make a new folder in `data` and upload geometry information as `proj_geom.toml` and projection data file as `sinogram.npy` with the size of [angles x height x width]. You can refer to examples.
+
+## Demo for 2spotA data
+
+Example of estimated projection images at iteration 0, 60, 120, 180
+
+![](media/0000_sino_0.png)
+![](media/0060_sino_0.png)
+![](media/0120_sino_0.png)
+![](media/0180_sino_0.png)
+
+and the final estimated mesh from noisy input:
+
+![](media/final.png)
+
+## Reference
+
+- [1] Huang, Jingwei, Hao Su, and Leonidas Guibas. Robust Watertight Manifold Surface Generation Method for ShapeNet Models., arXiv preprint arXiv:1802.01698 (2018).
+- [2] Chen et al. Learning to Predict 3D Objects with an  Interpolation-based Differentiable Renderer. NeurIPS, 2019. https://nv-tlabs.github.io/DIB-R/
+
+## Acknowledgement
+
+This was funded by EU Horizon 2020 MSCA Innovative Training Network [MUMMERING](https://www.mummering.eu) Grant Number 765604.
+
+### setup.py
+```
+from setuptools import setup, find_packages
+
+INSTALL_REQUIREMENTS = ['numpy', 'trimesh', 'torch', 'matplotlib', 'h5py']
+
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+ext_modules=[ CUDAExtension('ctdr.cuda.diff_fp', [
+        'ctdr/cuda/diff_fp.cpp',
+        'ctdr/cuda/diff_fp_for.cu',
+        'ctdr/cuda/diff_fp_back.cu'
+    ]) ]
+
+
+if __name__ == '__main__':
+#   print(find_packages(exclude=( 'test')))
+    
+    setup(
+        description='CTDR"',
+        version='0.9.0',
+        name='ctdrm', # not module name
+        packages=find_packages(include=['ctdr','ctdr.*']),
+        zip_safe=True,
+        install_requires=INSTALL_REQUIREMENTS,
+        ext_modules=ext_modules,
+        cmdclass = {'build_ext': BuildExtension}   
+    )
+```
+
+### ctdr/optimize.py
+```
+from ctdr.utils import util_vis, util_mesh, render_objs
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import time
+# from mesh_intersection.loss import DistanceFieldPenetrationLoss
+
+from ctdr.utils import util_vis, util_mesh
+
+def get_params(model, exclude_mus=False):
+    return model.parameters()
+
+def keep_topology(model, search_tree, displace_prev):
+    vertices = model.get_displaced_vertices()
+    faces = model.faces
+    triangles = vertices[faces].unsqueeze(dim=0)
+    
+    with torch.no_grad():
+        torch.cuda.synchronize()
+        collision_idxs = search_tree(triangles)
+        torch.cuda.synchronize()
+        
+        output = collision_idxs.squeeze()
+        collisions = output[output[:, 0] >= 0, :]
+        #print("@ total number of collisions:", collisions.shape[0])
+        mask_coll_faces = model.labels[collisions[:, 0],:] != model.labels[collisions[:, 1],:]
+        mask_coll_faces = torch.prod(mask_coll_faces, dim=1)==1
+        collisions = collisions[mask_coll_faces, :]
+        
+    if collisions.shape[0] == 0:
+        return None, None
+    else:
+        print("@ collisions: ", collisions.shape[0])
+    
+    all_intr_verts = []
+    all_recv_verts = []
+    
+    # case 2: topology-preserving constraint
+    cnt = 0
+    while collisions.shape[0] > 0 and cnt <= 400:
+        cnt += 1
+        assert cnt <= 300
+        with torch.no_grad():
+            intr_verts_vx3_int = model.faces[collisions[:,0]] # face number
+            recv_verts_vx3_int = model.faces[collisions[:,1]]
+
+            intr_verts = torch.unique(intr_verts_vx3_int)
+            recv_verts = torch.unique(recv_verts_vx3_int)
+            
+            all_intr_verts.append(intr_verts)
+            all_recv_verts.append(recv_verts)
+            
+            #idx_verts = torch.cat([intr_verts-1, intr_verts+1, intr_verts, recv_verts-1, recv_verts+1, recv_verts], dim=0)
+            idx_verts = torch.cat([intr_verts, recv_verts], dim=0)
+            idx_verts = torch.clamp(idx_verts, 0, model.vertices.shape[0]-1)
+            
+            #model.displace.data[idx_verts,:] = (model.displace.data[idx_verts,:]+displace_prev[idx_verts,:]) / 2.0
+            model.displace.data[idx_verts,:] = displace_prev[idx_verts,:]
+            # roll-back
+            #model.displace.data = model.displace.data - args.lr * model.displace.grad.data
+            
+            # double check
+            vertices = model.vertices + model.displace
+            #vertices = model.get_displaced_vertices()
+            triangles = vertices[faces].unsqueeze(dim=0)
+        
+            torch.cuda.synchronize()
+            collision_idxs = search_tree(triangles)
+            torch.cuda.synchronize()
+
+            output = collision_idxs.squeeze()
+            collisions = output[output[:, 0] >= 0, :]
+            #print("@ collisions including self-intersec: ", collisions.shape[0])
+            #print(triangles.shape, collision_idxs.shape)
+
+            mask_coll_faces = model.labels[collisions[:, 0],:] != model.labels[collisions[:, 1],:]
+            #print(mask_coll_faces)
+            mask_coll_faces = torch.prod(mask_coll_faces, dim=1)==1
+            #print(mask_coll_faces)
+            collisions = collisions[mask_coll_faces, :]
+            
+            print("@ collisions: ", collisions.shape[0])
+            nc = collisions.shape[0]
+            #assert(nc == 0)
+            #collisions = collision_idxs
+    
+    all_intr_verts = torch.unique(torch.cat(all_intr_verts, dim=0))
+    all_recv_verts = torch.unique(torch.cat(all_recv_verts, dim=0))
+    
+    vertices = model.get_displaced_vertices()
+    
+    return vertices[all_intr_verts,:], vertices[all_recv_verts,:]
+    
+
+def run(model, ds, niter, args, epoch_start=0, use_adam=True):
+    use_collision = True
+    if args.data[-1]=="A" or ds.nmaterials == 2:
+        use_collision = False
+
+    if use_collision:
+        from mesh_intersection.bvh_search_tree import BVH
+        search_tree = BVH(max_collisions=16)
+        #pen_distance = DistanceFieldPenetrationLoss(sigma=0.5)
+
+    print("@ model.mus", model.mus)
+    
+    params = get_params(model)
+    
+    if use_adam == True:
+        opt = torch.optim.Adam(params, args.lr, betas=(0.9, 0.99))
+    else:
+        opt = torch.optim.SGD(params, lr=args.lr, momentum=0.9, nesterov=True)
+
+#     loop = tqdm.tqdm(list(range(0,args.niter)))
+
+    if epoch_start == 0:
+        f = open(args.dresult+'log.txt', 'w')
+    else:
+        f = open(args.dresult+'log.txt', 'a')
+    
+    log = f"@ statistics of mesh: {model.vertices.shape[0]}, {model.faces.shape[0]}\n"
+    
+    # full-batch case
+    if args.b == 0:
+        idx_angles_full = torch.LongTensor(np.arange(ds.nangles))
+        p_full = ds.p.cuda()
+        ds_loader = [ [ idx_angles_full, p_full ]  ]
+
+    # mini-batch case
+    else:
+        ds_loader = torch.utils.data.DataLoader(ds, batch_size=args.b, shuffle=True,
+        num_workers=0, drop_last=True, pin_memory=True)
+
+    mask_bg = ds.p < 1e-5
+    mask_bg = mask_bg.cuda()
+    use_silhouette = False
+    # if use_silhouette:
+    #     mask_bg = ds.p < 1e-5
+    #     mask_bg = mask_bg.cuda()
+
+#     mask_bg = (p_batch > p_full.min()+0.05)
+    #mask_bg = 1
+    ledge = 0
+    llap = 0.
+    lflat = 0.
+
+    for epoch in range(epoch_start, niter):
+        if epoch+100 == niter and niter > 400:
+           args.lr *= 0.5
+           print("@ args.lr", args.lr)
+        
+        # if epoch % 20 == 0 or epoch == niter-1:
+        start = time.time()
+        
+        for idx_angles, p_batch in ds_loader:
+            displace_prev = model.displace.data.clone()
+            if args.b > 0:
+                p_batch = p_batch.cuda()
+
+            opt.zero_grad()
+            
+            phat, mask_valid, edge_loss, lap_loss, flat_loss = model(idx_angles, args.wedge) # full angles
+            # phat[~mask_valid] = 0.0
+            # mask_valid = mask_valid + mask_bg
+            
+            if 1:
+                # l2 loss
+                data_loss = (p_batch - phat)[mask_valid].pow(2).mean()
+
+                if use_silhouette:
+                    idx_bg = (~mask_valid) * mask_bg[idx_angles]
+                    nbg = torch.sum(idx_bg)
+                    if nbg:
+                        print("sum(idx_bg), min, max", nbg, torch.min(phat[idx_bg]).item(), torch.max(phat[idx_bg]).item())
+                        # print(phat[idx_bg])
+                    
+                        data_loss += (phat[idx_bg]).pow(2).mean()
+                        # data_loss += 10 * torch.abs(phat[idx_bg]).mean()
+
+                # add for the invalid pixels
+                # data_loss += (p_batch)[~mask_valid].pow(2).mean()
+            else:
+                # student t misfit
+                sigma=1
+                data_loss = torch.log(1 + ((p_batch - phat)[mask_valid]/sigma)**2).mean()
+
+            loss = data_loss + args.wedge * edge_loss + args.wlap * lap_loss + args.wflat * flat_loss
+            
+                        
+            loss.backward()
+            opt.step()
+            
+            loss_now = loss.item()
+            model.mus.data.clamp_(min=0.0)
+        
+            if use_collision == False:
+                continue
+
+
+        # if epoch % 20 == 0 or epoch == niter-1:            
+        elpased_time = time.time() - start
+
+        if epoch > epoch_start and args.b == 0:
+            dloss = (loss_prev - loss_now) # should be positive
+            if dloss < 1e-11 and dloss > 0:
+                print('! converged')
+                break
+            
+        loss_prev = loss_now
+        
+
+        if args.wedge > 0.:
+            ledge = edge_loss.item()
+            
+        if args.wlap > 0.:
+            llap = lap_loss.item()
+        
+        if args.wflat > 0.:
+            lflat = flat_loss.item()
+
+        log += f'~ {epoch:03d} l2_loss: {data_loss.item():.8f} edge: {ledge:.6f} lap: {llap:.6f} flat: {lflat:.6f} mus: {str(model.mus.cpu().detach().numpy())} time: {elpased_time:.4f}\n'
+        #log += f'center: {model.center[0,0].item():.6f} {model.center[0,1].item():.6f} {model.center[0,2].item():.6f}'
+        # f.write(log+"\n")
+            
+        if epoch % 60 == 0 or epoch == niter-1:
+            if torch.sum(~mask_valid) > 15000 and epoch > 100:
+                assert 0, "consider increasing regularization"
+
+            print(log)
+
+            if args.b == 0:
+                res_np = ds.p_original - phat.detach().cpu().numpy()                
+                res_scalar = np.mean(res_np**2)
+                f.write(f"~ res_np: {res_scalar}\n")
+                util_vis.save_sino_as_img(args.dresult+f'{epoch:04d}_sino_res.png', res_np, cmap='coolwarm')
+            
+            phat[~mask_valid]=0.
+            print(phat.min(), phat.max())
+            if args.verbose == 0:
+                continue
+				
+            vv = model.vertices.cpu()+model.displace.detach().cpu()
+            ff = model.faces.cpu()
+            
+            labels_v, labels_f = model.labels_v_np, model.labels.cpu().numpy()
+            # util_vis.save_vf_as_img_labels(args.dresult+f'{epoch:04d}_render.png', vv, ff, labels_v, labels_f)
+            util_vis.save_sino_as_img(args.dresult+f'{epoch:04d}_sino.png', phat.detach().cpu().numpy())
+            util_mesh.save_mesh(args.dresult+f'{epoch:04d}.obj', vv.numpy(), ff.numpy(), labels_v, labels_f)
+            if args.data == "3nanoC":
+                import subprocess
+                subprocess.Popen(["python", "../plot/compute_volume.py", args.dresult+f'{epoch:04d}.obj'])
+
+            if epoch == niter-1:
+                util_mesh.save_mesh(args.dresult+'mesh.obj', vv.numpy(), ff.numpy(), labels_v, labels_f)
+                util_vis.save_sino_as_img(args.dresult+f'{epoch:04d}_data.png', ds.p.cuda())
+        
+    f.write(log+"\n")
+
+def update_topology(model):
+    # update topology information
+    mask_coll_faces = model.labels[collisions[:, 0]] != model.labels[collisions[:, 1]]
+    mask_coll_faces = torch.sum(mask_coll_faces, dim=1)
+    fidx_list_intruder = collisions[mask_coll_faces, 0]
+    fidx_list_receiver = collisions[mask_coll_faces, 1]
+    #assert len(mask_coll_faces)==1, 
+
+    ncolls2 = mask_coll_faces.sum().item()
+    if ncolls2 == 0:
+        return
+
+    print("number of collisions2:", ncolls2)
+
+    # swap the outside labels for intruder and receiver
+    labels_coll1 = model.labels[fidx_list_intruder,1]
+    model.labels[fidx_list_intruder,1] = model.labels[fidx_list_receiver,1]
+    model.labels[fidx_list_receiver,1] = labels_coll1
+```
+
+### run/ours.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import torch
+import h5py
+from pymeshfix import _meshfix
+import time
+
+import ctdr
+from parse_args import args, update_args
+from ctdr.model.vanilla import Model
+from ctdr.dataset import init_mesh
+from ctdr.utils import util_mesh
+from ctdr import optimize
+import subprocess
+
+#torch.backends.cudnn.benchmark=True
+
+#------------------------------------------------
+# load data
+#------------------------------------------------
+from ctdr.dataset import dataset
+
+# args.data='3auag'
+# args.niter=3000
+update_args(args)
+
+if args.data.find("tomop") > 0:
+    args.nmaterials = int(args.data[-3:-1])+1
+
+ds = dataset.SinoDataset(args.ddata, args.nmaterials, args.eta)
+width_physical = ds.proj_geom['DetectorSpacingX']*ds.proj_geom['DetectorColCount']
+height_physical = ds.proj_geom['DetectorSpacingY']*ds.proj_geom['DetectorRowCount']
+physical_unit = min(width_physical, height_physical)
+
+finit_obj = args.ddata+'/init.obj'
+
+# if os.path.exists(finit_obj) == False:
+if True:
+    init_mesh.save_init_mesh(finit_obj, args.data, args.nmaterials, physical_unit, args.subdiv)
+else:
+    print(f"Use existing init file {finit_obj}")
+
+use_center_param = False
+
+mus = np.arange(ds.nmaterials) / (ds.nmaterials-1)
+# electorn tomography data
+if args.data == '3nanoC':
+    #pass
+    ds.p -= ds.p.max() * 0.1
+    ds.p[ds.p < 0.0] = 0.0
+    ds.proj_geom["type"] = "parallel3d"    
+    mus = [0, 0.5, 1.2]
+    ds.p_original = ds.p.numpy()
+
+#------------------------------------------------
+# (optional) guess coarse mesh if args.niter0 > 0
+#------------------------------------------------
+# find initial guess
+nrefine = 1
+if args.niter0 < 0:
+    args.niter0 *= -1
+    if args.niter0 >= 100:
+        nrefine = 2
+    else:
+        nrefine = 3
+    
+for i in range(nrefine):
+    if args.niter0 > 0:
+        model = Model(finit_obj, ds.proj_geom, args.nmaterials,
+                    mus, args.nmu0, wlap=args.wlap, wflat=args.wflat,
+                    use_center_param=use_center_param).cuda()
+        
+        
+        if args.nmu0 <= -1:
+            model.estimate_mu(ds.p.cuda())
+        else:
+            model.set_mu0(ds.p.cuda())
+
+        optimize.run(model, ds, (i+1)*args.niter0, args, i*args.niter0)
+
+        v, f, lv, lf = model.get_vf_np()
+        mus = model.mus.detach().cpu().numpy()
+        del model.fp
+        del model
+
+        if i == 0:
+            outresolution = f.shape[0]
+
+        print("@ Save subdivided object and renew")
+        finit_obj = args.dresult+'/init_subd.obj'
+
+        if args.data[-1] == "C":
+            util_mesh.subdivide_save(finit_obj, v, f, lv, lf)
+
+        # else:
+        util_mesh.save_mesh(finit_obj, v, f, lv, lf)
+
+        if args.data[-1] == "A":
+            start = time.time()
+            tin = _meshfix.PyTMesh()
+            tin.load_file(finit_obj)
+            _meshfix.clean_from_file(finit_obj, finit_obj)
+            tin.clean(max_iters=10, inner_loops=3)
+            tin.save_file(finit_obj)
+            
+            # if i == 0:
+            p1 = subprocess.Popen(["./manifold", finit_obj, finit_obj, str(outresolution)])
+            p1.communicate()
+
+            elpased_time = time.time() - start
+            f = open(f"{args.dresult}/log.txt", "a")
+            f.write(f"~ refine_time: {elpased_time:.4f}\n")
+            f.close()
+
+#------------------------------------------------
+# run the method
+#------------------------------------------------
+print(finit_obj)
+# refine
+model = Model(finit_obj, ds.proj_geom, args.nmaterials,
+              mus, args.nmu0, wlap=args.wlap, wflat=args.wflat).cuda()
+phat = optimize.run(model, ds, args.niter, args, args.niter0*nrefine)
+
+# util_mesh.save_mesh(args.dresult+f'{epoch:04d}.obj', vv.numpy(), ff.numpy(), labels_v, labels_f)
+
+#------------------------------------------------
+# save output
+#------------------------------------------------
+hf = h5py.File(args.dresult+"res.h5", "w")
+hf.close()
+
+# for i in range(4):
+#     subprocess.Popen(["convert", f"{args.dresult}/*_sino_{i}.png", "-delay", "1000", "-loop", "0" , f"{args.dresult}ani_sino_{i}.gif"])
+#     subprocess.Popen(["convert", f"{args.dresult}/*_sino_res_{i}.png", "-delay", "1000", "-loop", "0" , f"{args.dresult}ani_sino_res_{i}.gif"])
+#     subprocess.Popen(["convert", f"{args.dresult}/*_render_{i}.png", "-delay", "1000", "-loop", "0" , f"{args.dresult}ani_render_{i}.gif"])
+#     subprocess.Popen(["convert", f"{args.dresult}/*_render_m1_{i}.png", "-delay", "1000", "-loop", "0" , f"{args.dresult}ani_render_m1_{i}.gif"])
+#     subprocess.Popen(["convert", f"{args.dresult}/*_render_m2_{i}.png", "-delay", "1000", "-loop", "0" , f"{args.dresult}ani_render_m2_{i}.gif"])
+```
+
+### run/parse_args.py
+```
+import os
+import time
+import argparse
+import datetime
+
+#try:
+#    fmain = os.path.basename(__file__)
+#except:
+#    fmain = 'jupyter'
+
+parser = argparse.ArgumentParser(add_help=False, fromfile_prefix_chars='@')
+parser.add_argument('-data', type=str, default='2bunny', help='folder naming: data/[nmaterials]dataset')
+parser.add_argument('-niter', type=int, default=500, help='number of iterations')
+parser.add_argument('-niter0', type=int, default=0, help='iter before refinement')
+parser.add_argument('-wlap', type=float, default=10., help='reg. parameter')
+parser.add_argument('-eta', type=float, default=0, help='noise level')
+
+parser.add_argument('-wedge', type=float, default=2., help='reg. parameter')
+parser.add_argument('-wflat', type=float, default=0.01, help='flatten loss parameter')
+parser.add_argument('-b', type=int, default=0, help='batch size')
+parser.add_argument('-lr', type=float, default=0.01, help='step size')
+parser.add_argument('-nmu0', type=int, default=1, help='number of fixed mus. 1 means we dont optimize the background attenuation')
+parser.add_argument('-subdiv', type=int, default=4, help='number of fixed mus. 1 means we dont optimize the background attenuation')
+    
+#parser.add_argument('-eta', type=float, default=0., help='noise std on the sinogram data')
+#parser.add_argument('-K', type=int, default=30, help='number of projection angles')
+
+args_key, unparsed = parser.parse_known_args()
+
+def get_fresult(dic_):
+    #fresult_ = time.strftime('%m%d_')
+    fresult_ = ''
+    key_params = dic_.keys()
+    for key in sorted(key_params):
+        value_str = str(dic_[key])
+        if value_str.find('_') >= 0:
+            value_str = value_str.replace("_", "-")
+
+        if key == 'data':
+            continue
+            
+        fresult_ += '-' + str(key) + '_' + value_str + '_'
+    return fresult_
+
+fresult = get_fresult(vars(args_key))
+
+# args.dataroot = '../data/'
+# args.resroot = '../result/'
+####################################
+## Parsing secondary arguments
+####################################
+parser2 = argparse.ArgumentParser(parents=[parser],  fromfile_prefix_chars='@')
+
+#parser2.add_argument('-init', type=str, default='gtv', help='hist', choices=['a'])
+
+
+parser2.add_argument('-verbose', '-v', type=int, default=1, help='control verbose mode')
+parser2.add_argument('-cuda', type=int, default=-1, help='the number of GPU device')
+parser2.add_argument('-dataroot', type=str, default='../data/', help='data root')
+
+parser2.add_argument('-resroot', type=str, default='../result', help='result root')
+# parser2.add_argument('-init', type=str, default='', help='initialization file of the curve. (npy)')
+
+args, unparsed = parser2.parse_known_args(namespace=args_key) # for jupyter
+
+if args.cuda >= 0:
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.cuda)
+    
+#args = parser2.parse_args(namespace=args_key) 
+
+#####################################
+### Directory structure example:
+### args.dataroot: .../useg/data/dataset-name/
+### args.dresult : .../useg/result/dataset-name/fckpt
+###
+### - .../useg/data/dataset-name/train/img1.png
+### - .../useg/result/dataset-name/.../iter/...
+#####################################
+
+def update_args(args, make_dir=True):
+    # for jupyter lab
+    m = int(args.data[0])
+    try:
+        if m >= 2 and m <= 9:
+            args.nmaterials = m
+        elif m == 1:
+            args.nmaterials = int(args.data[0:2])
+    
+    except:
+        print("args.nmaterials can't be parsed and is set as 2")
+        args.nmaterials = 2
+    
+    if make_dir == False:
+        return
+        
+    # datetime.date(2010, 6, 16).isocalendar()[1]
+    # iso = datetime.datetime.utcnow().isocalendar()
+    # iso[1]:02d
+    
+    args.ddata = os.path.join(args.dataroot, args.data) + '/'
+    args.dresult = os.path.join(args.resroot, args.data) + '/ours_' + fresult + '/'
+    os.makedirs(args.dresult, exist_ok=True)
+    
+    print(args)
+
+update_args(args, make_dir=False)
+```
+
+### run/simulation_cone_beam.py
+```
+import toml
+from ctdr.utils.util_sino import read_proj_info
+
+# Make a data folder 
+# 2testA: the number of materials is 2 and A means the simple type of homogeneous material
+ddata = "../data/2testA/"
+# !mkdir $ddata
+ftoml = f"{ddata}/proj_geom.toml"
+nangles = 30
+
+mode = "parallel"
+
+if mode == "cone": # see cone_geometry.jpg
+    with open(ftoml, "w") as target:
+        target.write('''type = "cone"
+    ProjectionAngles = [
+        0.0, 0.10471975511965978, 0.20943951023931956, 0.3141592653589793, 0.4188790204786391, 0.5235987755982988, 0.6283185307179586, 0.7330382858376184, 0.8377580409572782, 0.9424777960769379, 1.0471975511965976, 1.1519173063162575, 1.2566370614359172, 1.361356816555577, 1.4660765716752369, 1.5707963267948966, 1.6755160819145565, 1.7802358370342162, 1.8849555921538759, 1.9896753472735358, 2.0943951023931953, 2.199114857512855, 2.303834612632515, 2.4085543677521746, 2.5132741228718345, 2.6179938779914944, 2.722713633111154, 2.827433388230814, 2.9321531433504737, 3.036872898470133]
+    DetectorRowCount = 300
+    DetectorColCount = 300
+    DetectorSpacingX = 0.01041666666666667
+    DetectorSpacingY = 0.01041666666666667
+    DistanceOriginSource = 10.0
+    DistanceOriginDetector = 4.0''')
+    
+elif mode == "parallel":
+    with open(ftoml, "w") as target:
+        target.write('''type = "parallel3d"
+    ProjectionAngles = [
+        0.0, 0.10471975511965978, 0.20943951023931956, 0.3141592653589793, 0.4188790204786391, 0.5235987755982988, 0.6283185307179586, 0.7330382858376184, 0.8377580409572782, 0.9424777960769379, 1.0471975511965976, 1.1519173063162575, 1.2566370614359172, 1.361356816555577, 1.4660765716752369, 1.5707963267948966, 1.6755160819145565, 1.7802358370342162, 1.8849555921538759, 1.9896753472735358, 2.0943951023931953, 2.199114857512855, 2.303834612632515, 2.4085543677521746, 2.5132741228718345, 2.6179938779914944, 2.722713633111154, 2.827433388230814, 2.9321531433504737, 3.036872898470133]
+    DetectorRowCount = 300
+    DetectorColCount = 300
+    DetectorSpacingX = 0.01041666666666667
+    DetectorSpacingY = 0.01041666666666667''')
+    
+else:
+    pass
+
+proj_geom = read_proj_info(ftoml, convert_vec=True)
+
+# Download an example watertight obj file
+# Download an example watertight obj file
+# !wget https://groups.csail.mit.edu/graphics/classes/6.837/F03/models/teddy.obj
+# !mv teddy.obj ../data/2testA/init.obj
+
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import torch
+import h5py
+import time
+
+import ctdr
+from ctdr.model.vanilla import Model
+from ctdr.utils import util_mesh
+from ctdr import optimize
+import subprocess
+import toml
+ 
+nmaterials = 2
+finit_obj = ddata+'/init.obj'
+mus = [0.0, 1.0]  # attentuation coefficient
+
+model = Model(finit_obj, proj_geom, nmaterials,
+              mus, 0, 0.0, 0.0).cuda()
+
+# (optional) Since the obj file is not normalized to -1 ~ 1, I normalize
+# Please check the projection geometry above
+
+def normalize(a):
+    a = (a - a.min()) / (a.max() - a.min()) * 1.8 - 0.9
+    return a
+
+model.vertices[:,0] = normalize(model.vertices[:,0])
+model.vertices[:,1] = normalize(model.vertices[:,1])
+model.vertices[:,2] = normalize(model.vertices[:,2])
+# model.vertices = model.vertices.type()
+# model.mus = model.mus.type(torch.float64)
+# print(model.mus.dtype)
+
+# Generate projections
+out = model(torch.arange(nangles), 0.0, backprop=False)
+proj = out[0].detach().cpu().numpy() # [nangles x height x width]
+
+# Show the projection image
+# For non-manifold obj file, there can be some artifacts
+plt.imshow(proj[0,:,:]); plt.colorbar(); plt.show()
+plt.savefig(f"../result/p0_{mode}.png")
+plt.plot()
+plt.imshow(proj[4,:,:]); plt.colorbar(); plt.show()
+plt.savefig(f"../result/p4_{mode}.png")
+plt.imshow(proj[11,:,:]); plt.colorbar(); plt.show()
+plt.savefig(f"../result/p11_{mode}.png")
+
+# p0 = proj[0,:,:]
+# p0[p0 > 1.0] = 0.0
+# plt.imshow(p0); plt.colorbar(); plt.show()
+# plt.savefig("../result/p0_test.png")
+```
+
+### ctdr/cuda/build.py
+```
+from setuptools import setup
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+setup(
+    name='diff_fp',
+    ext_modules=[ CUDAExtension('cuda_diff_fp', [
+        'diff_fp.cpp',
+        'diff_fp_for.cu',
+        'diff_fp_back.cu'
+    ]) ],
+    cmdclass={'build_ext': BuildExtension}
+)
+```
+
+### ctdr/cuda/diff_fp.cpp
+```
+#include <torch/extension.h>
+
+// C++ interface
+#define CHECK_CUDA(x) AT_ASSERTM(x.type().is_cuda(), #x " must be a CUDA tensor")
+#define CHECK_CONTIGUOUS(x) AT_ASSERTM(x.is_contiguous(), #x " must be contiguous")
+#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
+
+#define CHECK_DIM3(x, b, h, w, d) AT_ASSERTM((x.size(0) == b) && (x.size(1) == h) && (x.size(2) == w) && (x.size(3) == d), #x " must be same im size")
+#define CHECK_DIM2(x, b, f, d) AT_ASSERTM((x.size(0) == b) && (x.size(1) == f) && (x.size(2) == d), #x " must be same point size")
+
+////////////////////////////////////////////////////////////
+// CUDA forward declarations
+void dr_cuda_forward_batch(at::Tensor points2d_bxfx6,
+        at::Tensor pointsdirect_bxfx1, at::Tensor pointsbbox_bxfx4,
+        at::Tensor pointslen_bxfx3, at::Tensor labels_fx2, at::Tensor mus_n, 
+        at::Tensor imwei_3vf, at::Tensor imidx_vf,
+        at::Tensor cntvisible_bxhxwx1, at::Tensor firstidx_bxhxwx1,
+        at::Tensor im_bxhxwx1,
+        int flag_cnt_visible, float max_sino_val);
+
+void dr_forward_batch(at::Tensor points2d_bxfx6,
+        at::Tensor pointsdirect_bxfx1, at::Tensor pointsbbox_bxfx4,
+        at::Tensor pointslen_bxfx3, at::Tensor labels_fx2, at::Tensor mus_n, 
+        at::Tensor imwei_3vf, at::Tensor imidx_vf,
+        at::Tensor cntvisible_bxhxwx1, at::Tensor firstidx_bxhxwx1,
+        at::Tensor im_bxhxwx1, int flag_cnt_visible, float max_sino_val) {
+
+    CHECK_INPUT(points2d_bxfx6);
+    CHECK_INPUT(pointsdirect_bxfx1);
+    CHECK_INPUT(pointsbbox_bxfx4);
+    CHECK_INPUT(pointslen_bxfx3);
+    CHECK_INPUT(labels_fx2);
+    CHECK_INPUT(mus_n);
+
+//     CHECK_INPUT(imidx_vf);
+    CHECK_INPUT(cntvisible_bxhxwx1);
+//     CHECK_INPUT(imwei_3vf);
+    CHECK_INPUT(firstidx_bxhxwx1);
+
+    CHECK_INPUT(im_bxhxwx1);
+    
+    int bnum = points2d_bxfx6.size(0);
+    int fnum = points2d_bxfx6.size(1);
+    int height = im_bxhxwx1.size(1);
+    int width = im_bxhxwx1.size(2);
+    int dnum = im_bxhxwx1.size(3);
+
+    CHECK_DIM2(points2d_bxfx6, bnum, fnum, 6);
+    CHECK_DIM2(pointsdirect_bxfx1, bnum, fnum, 1);
+    CHECK_DIM2(pointsbbox_bxfx4, bnum, fnum, 4);
+    CHECK_DIM2(pointslen_bxfx3, bnum, fnum, 3);
+
+//    CHECK_DIM3(imidx_vf, bnum, height, width, mf);
+    CHECK_DIM3(cntvisible_bxhxwx1, bnum, height, width, 1);
+//     CHECK_DIM3(firstidx_bxhxwx1, bnum, height, width, 1);
+//     CHECK_DIM3(imwei_3vf, bnum, height, width, 3*mf);
+
+    CHECK_DIM3(im_bxhxwx1, bnum, height, width, dnum);
+
+    dr_cuda_forward_batch(points2d_bxfx6, pointsdirect_bxfx1,
+            pointsbbox_bxfx4, pointslen_bxfx3, 
+            labels_fx2, mus_n,
+            imwei_3vf, imidx_vf,
+            cntvisible_bxhxwx1, firstidx_bxhxwx1,
+            im_bxhxwx1, flag_cnt_visible, max_sino_val);
+    return;
+}
+
+//////////////////////////////////////////////////////////
+void dr_cuda_backward_batch(at::Tensor grad_sino_bxhxwxd,
+        at::Tensor image_bxhxwxd, at::Tensor imidx_vf,
+        at::Tensor cntvisible_bxhxwx1, at::Tensor firstidx_bxhxwx1,
+        at::Tensor imwei_3vf, at::Tensor points2d_bxfx6, at::Tensor len_bxfx3,
+        at::Tensor labels_fx2, at::Tensor mus_n, at::Tensor front_facing_bxfx1,
+        at::Tensor grad_points2d_bxfx6, at::Tensor grad_len_bxfx3, at::Tensor grad_mus_n);
+
+void dr_backward_batch(at::Tensor grad_sino_bxhxwxd, at::Tensor image_bxhxwxd,
+        at::Tensor imidx_vf, at::Tensor cntvisible_bxhxwx1,
+        at::Tensor firstidx_bxhxwx1,
+        at::Tensor imwei_3vf, at::Tensor points2d_bxfx6, at::Tensor len_bxfx3,
+        at::Tensor labels_fx2, at::Tensor mus_n,at::Tensor front_facing_bxfx1,
+        at::Tensor grad_points2d_bxfx6, at::Tensor grad_len_bxfx3, at::Tensor grad_mus_n) {
+
+    CHECK_INPUT(grad_sino_bxhxwxd);
+    CHECK_INPUT(image_bxhxwxd);
+    CHECK_INPUT(imidx_vf);
+    CHECK_INPUT(cntvisible_bxhxwx1);
+    CHECK_INPUT(firstidx_bxhxwx1);
+    CHECK_INPUT(imwei_3vf);
+
+    CHECK_INPUT(points2d_bxfx6);
+    CHECK_INPUT(len_bxfx3);
+    CHECK_INPUT(labels_fx2);
+    CHECK_INPUT(mus_n);
+    
+    CHECK_INPUT(front_facing_bxfx1);
+    CHECK_INPUT(grad_points2d_bxfx6);
+    CHECK_INPUT(grad_len_bxfx3);
+    CHECK_INPUT(grad_mus_n);
+    
+    int bnum = grad_sino_bxhxwxd.size(0);
+    int height = grad_sino_bxhxwxd.size(1);
+    int width = grad_sino_bxhxwxd.size(2);
+    int dnum = grad_sino_bxhxwxd.size(3);
+    int fnum = points2d_bxfx6.size(1);
+//     int mf = imidx_vf.size(3);
+
+    CHECK_DIM3(grad_sino_bxhxwxd, bnum, height, width, dnum);
+    CHECK_DIM3(image_bxhxwxd, bnum, height, width, dnum);
+    
+//     CHECK_DIM3(imidx_vf, bnum, height, width, mf);
+    CHECK_DIM3(cntvisible_bxhxwx1, bnum, height, width, 1);
+//     CHECK_DIM3(imwei_3vf, bnum, height, width, mf*3);
+
+    CHECK_DIM2(points2d_bxfx6, bnum, fnum, 6);
+    CHECK_DIM2(len_bxfx3, bnum, fnum, 3);
+    CHECK_DIM2(front_facing_bxfx1, bnum, fnum, 1);
+    CHECK_DIM2(grad_points2d_bxfx6, bnum, fnum, 6);
+    CHECK_DIM2(grad_len_bxfx3, bnum, fnum, 3);
+
+    dr_cuda_backward_batch(grad_sino_bxhxwxd,
+            image_bxhxwxd, imidx_vf, cntvisible_bxhxwx1, firstidx_bxhxwx1,
+            imwei_3vf, points2d_bxfx6, len_bxfx3,
+            labels_fx2, mus_n,  front_facing_bxfx1,
+            grad_points2d_bxfx6, grad_len_bxfx3,
+            grad_mus_n);
+
+    return;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("forward", &dr_forward_batch, "dr forward batch (CUDA)");
+    m.def("backward", &dr_backward_batch, "dr backward batch (CUDA)");
+}
+```
+
+### ctdr/cuda/diff_fp_back.cu
+```
+// Some parts of the codes are based on https://github.com/nv-tlabs/DIB-R
+// Copyright (c) 2019, NVIDIA CORPORATION. All rights reserved.
+
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the "Software"),
+// to deal in the Software without restriction, including without limitation
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+// THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+
+#include <ATen/ATen.h>
+
+#include <cuda.h>
+#include <cuda_runtime.h>
+
+#define eps 1e-15
+#define int_t_idx int
+
+// for the older gpus atomicAdd with double arguments does not exist
+#if  __CUDA_ARCH__ < 600 and defined(__CUDA_ARCH__)
+static __inline__ __device__ double atomicAdd(double* address, double val) {
+    unsigned long long int* address_as_ull = (unsigned long long int*)address;
+    unsigned long long int old = *address_as_ull, assumed;
+    do {
+        assumed = old;
+        old = atomicCAS(address_as_ull, assumed,
+                __double_as_longlong(val + __longlong_as_double(assumed)));
+        // Note: uses integer comparison to avoid hang in case of NaN (since NaN != NaN) } while (assumed != old);
+    }while (assumed != old);
+    return __longlong_as_double(old);
+}
+#endif
+
+template<typename scalar_t>
+__global__ void dr_cuda_backward_color_batch (
+    const scalar_t* __restrict__ grad_sino_bxhxwxd, // input dl/ds
+    const scalar_t* __restrict__ im_bxhxwxd,
+    const int_t_idx* __restrict__ imidx_vf,
+    const int_t_idx* __restrict__ cntvisible_bxhxwx1,
+    const int_t_idx* __restrict__ firstidx_bxhxwx1,
+    const scalar_t* __restrict__ imwei_3vf,
+    const scalar_t* __restrict__ points2d_bxfx6,
+    const scalar_t* __restrict__ pointslen_bxfx3,
+    const int_t_idx* __restrict__ labels_fx2,
+    const scalar_t* __restrict__ mus_n,
+    const scalar_t* __restrict__ front_facing_bxfx1,
+    scalar_t* __restrict__ grad_points2d_bxfx6,
+    scalar_t* __restrict__ grad_pointslen_bxfx3,
+    scalar_t* __restrict__ grad_mus_n,
+    int bnum, int height, int width, int fnum,
+    int dnum, int vf, int sanity_check) {
+
+    // bidx * height * width + heiidx * width + wididx
+    int presentthread = blockIdx.x * blockDim.x + threadIdx.x;
+    int wididx = presentthread % width;
+    presentthread = (presentthread - wididx) / width;
+    int heiidx = presentthread % height;
+    int bidx = (presentthread - heiidx) / height;
+
+    if (bidx >= bnum || heiidx >= height || wididx >= width)
+        return;
+
+    // which pixel it belongs to
+    const int totalidx1 = bidx * height * width + heiidx * width + wididx;
+    const int firstidx = firstidx_bxhxwx1[totalidx1];
+    
+    // if the pixel has negative value ignore actually.
+
+    // coordinates
+    //scalar_t x0 = 2.0 * wididx / width - 1.0;
+    //scalar_t y0 = 1.0 - (2.0*heiidx+1.0) / height;
+    scalar_t x0 = wididx;
+    scalar_t y0 = heiidx;
+    
+    // in forward pass, we already checked
+    //if (sanity_check) {
+    //    if (im_bxhxwxd[totalidx1] < -1e-5 || im_bxhxwxd[totalidx1] > MAX_SINO_VAL) 
+    //        return;
+    //}
+    
+    // iterate over visible faces
+    for (int i=0; i < cntvisible_bxhxwx1[totalidx1]; i++)
+    {
+        scalar_t sign = 1.0;
+        int fidxint = imidx_vf[firstidx+i] - 1;
+        if (fidxint < 0) continue;
+        
+        const int shift1 = bidx * fnum + fidxint;
+        const int shift6 = shift1 * 6;
+        const int shift3d = shift1 * 3;
+        
+        if (front_facing_bxfx1[shift1] < 0)
+            sign = -1.0;
+        
+        // See the forward projection
+        if (labels_fx2[fidxint*2] == labels_fx2[fidxint*2+1])
+            sign *= -1.0;
+        
+        for (int is_outward=0; is_outward < 2; is_outward++)
+        {
+            int label = labels_fx2[fidxint*2 + is_outward];
+            
+            scalar_t mu = mus_n[label];
+            
+            if (is_outward)
+                sign *= -1.0;
+
+            // gradient of L-buffer
+            // 3 points in one face
+            scalar_t mu_coeff = 0.0;
+
+            const int base_idx = 3*(firstidx + i);
+            
+            for (int k=0; k < 3; k++) {
+                scalar_t w = imwei_3vf[base_idx + k];
+                mu_coeff += w * pointslen_bxfx3[shift3d + k];
+
+                int pointshift = shift3d + k;
+
+                // this should be atomic operation
+                scalar_t* addr = grad_pointslen_bxfx3 + pointshift;
+                scalar_t val = sign * mu * grad_sino_bxhxwxd[totalidx1] * w; // (3), TOCHECK
+                atomicAdd(addr, val);
+            }
+
+    // gradient of mus
+    // remember im_bxhxwxd[totalidx1] += sign * mu * (w0 * r0 + w1 * r1 + w2 * r2);
+    // so gradient should be sign * (w0r0 + w1r1 + w2r2)
+			
+			// background label has the opposite sign
+			if (label == 0)
+				mu_coeff *= -1.0;
+			
+            scalar_t val_mu = sign * mu_coeff * grad_sino_bxhxwxd[totalidx1];
+            atomicAdd(grad_mus_n + label, val_mu); // we don't save background mu
+
+
+    // gradient of points
+    // here, we calculate dl/dp
+    // dl/dp = dldI * dI/dp
+    // dI/dp = c0 * dw0 / dp + c1 * dw1 / dp + c2 * dw2 / dp
+    // first
+    // 4 coorinates
+            scalar_t ax = points2d_bxfx6[shift6 + 0];
+            scalar_t ay = points2d_bxfx6[shift6 + 1];
+            scalar_t bx = points2d_bxfx6[shift6 + 2];
+            scalar_t by = points2d_bxfx6[shift6 + 3];
+            scalar_t cx = points2d_bxfx6[shift6 + 4];
+            scalar_t cy = points2d_bxfx6[shift6 + 5];
+
+            /*
+             scalar_t aw = imwei_3vf[totalidx3 + 0];
+             scalar_t bw = imwei_3vf[totalidx3 + 1];
+             scalar_t cw = imwei_3vf[totalidx3 + 2];
+
+             // use opengl weights!
+             scalar_t x = aw * ax + bw * bx + cw * cx;
+             scalar_t y = aw * ay + bw * by + cw * cy;
+             */
+
+            ////////////////////////////////////////////////////////////////////////////////
+            // replace with other variables
+            scalar_t m = bx - ax;
+            scalar_t p = by - ay;
+
+            scalar_t n = cx - ax;
+            scalar_t q = cy - ay;
+
+            scalar_t s = x0 - ax;
+            scalar_t t = y0 - ay;
+            ///////////////////////////////////////////////////////////////////////////////
+            // m* w1 + n * w2 = s
+            // p * w1 + q * w2 = t
+            // w1 = (sq - nt) / (mq - np)
+            // w2 = (mt - sp) / (mq - np)
+
+            scalar_t k1 = s * q - n * t;
+            scalar_t k2 = m * t - s * p;
+            scalar_t k3 = m * q - n * p;
+
+            /*
+             // debug
+             // calculate weights
+             scalar_t w1 = k1 / (k3 + eps);
+             scalar_t w2 = k2 / (k3 + eps);
+             scalar_t w0 = 1 - w1 - w2;
+             scalar_t ws[3];
+             ws[0] = w0;
+             ws[1] = w1;
+             ws[2] = w2;
+             */
+
+            //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+            scalar_t dk1dm = 0;
+            scalar_t dk1dn = -t;
+            scalar_t dk1dp = 0;
+            scalar_t dk1dq = s;
+            scalar_t dk1ds = q;
+            scalar_t dk1dt = -n;
+
+            scalar_t dk2dm = t;
+            scalar_t dk2dn = 0;
+            scalar_t dk2dp = -s;
+            scalar_t dk2dq = 0;
+            scalar_t dk2ds = -p;
+            scalar_t dk2dt = m;
+
+            scalar_t dk3dm = q;
+            scalar_t dk3dn = -p;
+            scalar_t dk3dp = -n;
+            scalar_t dk3dq = m;
+            scalar_t dk3ds = 0;
+            scalar_t dk3dt = 0;
+
+            ///////////////////////////////////////////////////////////////////////////////
+            // w1 = k1 / k3
+            // w2 = k2 / k3
+            // remember we need divide k3 ^ 2
+            scalar_t dw1dm = dk1dm * k3 - dk3dm * k1;
+            scalar_t dw1dn = dk1dn * k3 - dk3dn * k1;
+            scalar_t dw1dp = dk1dp * k3 - dk3dp * k1;
+            scalar_t dw1dq = dk1dq * k3 - dk3dq * k1;
+            scalar_t dw1ds = dk1ds * k3 - dk3ds * k1;
+            scalar_t dw1dt = dk1dt * k3 - dk3dt * k1;
+
+            scalar_t dw2dm = dk2dm * k3 - dk3dm * k2;
+            scalar_t dw2dn = dk2dn * k3 - dk3dn * k2;
+            scalar_t dw2dp = dk2dp * k3 - dk3dp * k2;
+            scalar_t dw2dq = dk2dq * k3 - dk3dq * k2;
+            scalar_t dw2ds = dk2ds * k3 - dk3ds * k2;
+            scalar_t dw2dt = dk2dt * k3 - dk3dt * k2;
+
+            //////////////////////////////////////////////////////////////////////////////////////
+            scalar_t dw1dax = -(dw1dm + dw1dn + dw1ds);
+            scalar_t dw1day = -(dw1dp + dw1dq + dw1dt);
+            scalar_t dw1dbx = dw1dm;
+            scalar_t dw1dby = dw1dp;
+            scalar_t dw1dcx = dw1dn;
+            scalar_t dw1dcy = dw1dq;
+
+            scalar_t dw2dax = -(dw2dm + dw2dn + dw2ds);
+            scalar_t dw2day = -(dw2dp + dw2dq + dw2dt);
+            scalar_t dw2dbx = dw2dm;
+            scalar_t dw2dby = dw2dp;
+            scalar_t dw2dcx = dw2dn;
+            scalar_t dw2dcy = dw2dq;
+
+            /*
+             scalar_t dw0dax = -(dw1dax + dw2dax);
+             scalar_t dw0day = -(dw1day + dw2day);
+             scalar_t dw0dbx = -(dw1dbx + dw2dbx);
+             scalar_t dw0dby = -(dw1dby + dw2dby);
+             scalar_t dw0dcx = -(dw1dcx + dw2dcx);
+             scalar_t dw0dcy = -(dw1dcy + dw2dcy);
+             */
+
+            // the same color for 3 points
+            // thus we can simplify it
+            scalar_t c0 = pointslen_bxfx3[shift3d];
+            scalar_t c1 = pointslen_bxfx3[shift3d + 1];
+            scalar_t c2 = pointslen_bxfx3[shift3d + 2];
+
+            scalar_t dIdax = (c1 - c0) * dw1dax + (c2 - c0) * dw2dax;
+            scalar_t dIday = (c1 - c0) * dw1day + (c2 - c0) * dw2day;
+            scalar_t dIdbx = (c1 - c0) * dw1dbx + (c2 - c0) * dw2dbx;
+            scalar_t dIdby = (c1 - c0) * dw1dby + (c2 - c0) * dw2dby;
+            scalar_t dIdcx = (c1 - c0) * dw1dcx + (c2 - c0) * dw2dcx;
+            scalar_t dIdcy = (c1 - c0) * dw1dcy + (c2 - c0) * dw2dcy;
+
+            scalar_t dldI = sign * mu * grad_sino_bxhxwxd[totalidx1]
+                    / (k3 * k3 + eps); // TOCHECK
+
+            atomicAdd(grad_points2d_bxfx6 + shift6 + 0, dldI * dIdax);
+            atomicAdd(grad_points2d_bxfx6 + shift6 + 1, dldI * dIday);
+
+            atomicAdd(grad_points2d_bxfx6 + shift6 + 2, dldI * dIdbx);
+            atomicAdd(grad_points2d_bxfx6 + shift6 + 3, dldI * dIdby);
+
+            atomicAdd(grad_points2d_bxfx6 + shift6 + 4, dldI * dIdcx);
+            atomicAdd(grad_points2d_bxfx6 + shift6 + 5, dldI * dIdcy);
+        }
+    }
+}
+
+void dr_cuda_backward_batch(at::Tensor grad_sino_bxhxwxd,
+        at::Tensor image_bxhxwxd,
+        at::Tensor imidx_vf, at::Tensor cntvisible_bxhxwx1,
+        at::Tensor firstidx_bxhxwx1,
+        at::Tensor imwei_3vf,
+        at::Tensor points2d_bxfx6, at::Tensor pointslen_bxfx3,
+        at::Tensor labels_fx2, at::Tensor mus_n,
+        at::Tensor front_facing_bxfx1,
+        at::Tensor grad_points2d_bxfx6, at::Tensor grad_pointslen_bxfx3,
+        at::Tensor grad_mus_n) {
+
+    int bnum = grad_sino_bxhxwxd.size(0);
+    int height = grad_sino_bxhxwxd.size(1);
+    int width = grad_sino_bxhxwxd.size(2);
+    int dnum = grad_sino_bxhxwxd.size(3);
+    int fnum = grad_points2d_bxfx6.size(1);
+    int vf = imidx_vf.size(0);
+    
+    int sanity_check = 1;
+
+    // for bxhxw image size
+    const int threadnum = 1024;
+    const int totalthread = bnum * height * width;
+    const int blocknum = totalthread / threadnum + 1;
+
+    const dim3 threads(threadnum, 1, 1);
+    const dim3 blocks(blocknum, 1, 1);
+    
+
+    AT_DISPATCH_FLOATING_TYPES(grad_sino_bxhxwxd.type(),
+            "dr_cuda_backward_color_batch", ([&] {
+                dr_cuda_backward_color_batch<scalar_t><<<blocks, threads>>>(
+                        grad_sino_bxhxwxd.data<scalar_t>(),
+                        image_bxhxwxd.data<scalar_t>(),
+                        imidx_vf.data<int_t_idx>(),
+                        cntvisible_bxhxwx1.data<int_t_idx>(),
+                        firstidx_bxhxwx1.data<int_t_idx>(),
+                        
+                        imwei_3vf.data<scalar_t>(),
+                        points2d_bxfx6.data<scalar_t>(),
+                        pointslen_bxfx3.data<scalar_t>(),
+                        
+                        labels_fx2.data<int_t_idx>(),
+                        mus_n.data<scalar_t>(),
+                        
+                        front_facing_bxfx1.data<scalar_t>(),
+                        grad_points2d_bxfx6.data<scalar_t>(),
+                        grad_pointslen_bxfx3.data<scalar_t>(),
+                        grad_mus_n.data<scalar_t>(),
+                        bnum, height, width, fnum, dnum, vf, sanity_check);
+            }));
+
+    return;
+}
+```
+
+### ctdr/cuda/diff_fp_for.cu
+```
+// Some parts of the codes are based on https://github.com/nv-tlabs/DIB-R
+// Copyright (c) 2019, NVIDIA CORPORATION. All rights reserved.
+
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the "Software"),
+// to deal in the Software without restriction, including without limitation
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+// THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+#include <ATen/ATen.h>
+
+#include <cuda.h>
+#include <cuda_runtime.h>
+
+#define eps 1e-15
+#define int_t_idx int
+
+template<typename scalar_t>
+__global__ void dr_cuda_forward_render_batch(
+        const scalar_t* __restrict__ points2d_bxfx6,
+        const scalar_t* __restrict__ pointsdirect_bxfx1,
+        const scalar_t* __restrict__ pointsbbox_bxfx4,
+        const scalar_t* __restrict__ pointslen_bxfx3,
+        
+        const int_t_idx* __restrict__ labels_fx2,
+        const scalar_t* __restrict__ mus_n,
+        
+        scalar_t* __restrict__ imwei_3vf,
+        int_t_idx* __restrict__ imidx_vf,
+        int_t_idx* __restrict__ cntvisible_bxhxwx1,
+        
+        const int_t_idx* __restrict__ firstidx_bxhxwx1,
+        
+        scalar_t* __restrict__ im_bxhxwxd,
+        int bnum, int height, int width, int fnum, int dnum, int vf, int is_the_first_pass,
+        int use_mu_fitting, scalar_t max_sino_val) {
+
+    // bidx * height * width + heiidx * width + wididx
+    int presentthread = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int wididx = presentthread % width;
+    presentthread = (presentthread - wididx) / width;
+
+    int heiidx = presentthread % height;
+    int bidx = (presentthread - heiidx) / height;
+
+    if (bidx >= bnum || heiidx >= height || wididx >= width) {
+        return;
+    }
+    
+    // we consider bnum, wididx, heiidx
+
+    /////////////////////////////////////////////////////////////////
+    // which pixel it belongs to
+    const int totalidx1 = bidx * height * width + heiidx * width + wididx;
+    
+    if (!is_the_first_pass) {
+        if (im_bxhxwxd[totalidx1] < -1e-5 || im_bxhxwxd[totalidx1] > max_sino_val) {
+            return;
+        }
+    }
+    
+    // pixel coordinate
+    scalar_t x0 = wididx;
+    scalar_t y0 = heiidx;
+    
+    int cnt_visible = 0;
+    // we choose one detector pixel
+    // now iterate over all the faces
+    ////////////////////////////////////////////////////////////////////////
+    for (int fidxint = 0; fidxint < fnum; fidxint++) {
+
+        scalar_t sign = 1.0; // front-facing
+        
+        // which face it belongs to
+        const int shift1 = bidx * fnum + fidxint;
+        const int shift4 = shift1 * 4;
+        const int shift6 = shift1 * 6;
+        const int shift3d = shift1 * 3 * dnum;
+
+        // is the face anti front-facing?
+        if (pointsdirect_bxfx1[shift1] < 0) {
+             sign = -1.0;
+        }
+        
+        ///////////////////////////////////////////////////////////////
+        // will this pixel be influenced by this face?
+        scalar_t xmin = pointsbbox_bxfx4[shift4 + 0];
+        scalar_t ymin = pointsbbox_bxfx4[shift4 + 1];
+        scalar_t xmax = pointsbbox_bxfx4[shift4 + 2];
+        scalar_t ymax = pointsbbox_bxfx4[shift4 + 3];
+
+		if (xmin < 0.0 || ymin < 0.0 || xmax > width-1.0 || ymax > height-1.0)
+			continue;
+
+        // not covered by this face!
+        if (x0 < xmin || x0 > xmax || y0 < ymin || y0 > ymax) {
+            continue;
+        }
+
+        //////////////////////////////////////////////////////////
+        ///////////////////////////////////////////////////////////
+        // this pixel is covered by bbox,
+        
+        // forward
+        scalar_t ax = points2d_bxfx6[shift6 + 0];
+        scalar_t ay = points2d_bxfx6[shift6 + 1];
+        scalar_t bx = points2d_bxfx6[shift6 + 2];
+        scalar_t by = points2d_bxfx6[shift6 + 3];
+        scalar_t cx = points2d_bxfx6[shift6 + 4];
+        scalar_t cy = points2d_bxfx6[shift6 + 5];
+
+        // replace with other variables
+        scalar_t m = bx - ax;
+        scalar_t p = by - ay;
+
+        scalar_t n = cx - ax;
+        scalar_t q = cy - ay;
+
+        scalar_t s = x0 - ax;
+        scalar_t t = y0 - ay;
+
+        // m* w1 + n * w2 = s
+        // p * w1 + q * w2 = t
+        // w1 = (sq - nt) / (mq - np)
+        // w2 = (mt - sp) / (mq - np)
+
+        scalar_t k1 = s * q - n * t;
+        scalar_t k2 = m * t - s * p;
+        scalar_t k3 = m * q - n * p;
+
+        scalar_t w1 = k1 / (k3 + eps);
+        scalar_t w2 = k2 / (k3 + eps);
+        scalar_t w0 = 1 - w1 - w2;
+
+        // not lie in the triangle
+        if (w0 < 0 || w1 < 0 || w2 < 0) {
+            continue;
+        }
+        
+        if (is_the_first_pass) {
+            int label_in  = labels_fx2[fidxint*2];
+            int label_out = labels_fx2[fidxint*2+1];
+            scalar_t mu_in  = mus_n[label_in];
+            scalar_t mu_out = mus_n[label_out];
+            
+            // special case: if an inside object is partially outside, we ignore the inside part
+            // we assume that the inside label should be large
+            if (label_in < label_out) {
+                continue;
+            }
+                
+            // if the two labes are the same,
+            // we need to compensate for the intermediate region
+            if (label_in == label_out) {
+                sign *= -1.0;  
+            }
+            
+            // be careful!
+            // the background label has the opposite sign
+            // is it really true?
+            if (label_out == 0)
+				mu_out *= -1.0;
+        
+            // compute sinogram
+            scalar_t r0 = pointslen_bxfx3[shift3d];
+            scalar_t r1 = pointslen_bxfx3[shift3d+1];
+            scalar_t r2 = pointslen_bxfx3[shift3d+2];
+            
+            scalar_t bary = (w0 * r0 + w1 * r1 + w2 * r2);
+            assert(bary>0);
+        
+            // find the mu for the face
+            // inward label
+            im_bxhxwxd[totalidx1] += sign * mu_in * bary;
+
+            // outward label (ignore the background=0) 
+            im_bxhxwxd[totalidx1] -= sign * mu_out * bary;
+        
+            cnt_visible += 1;
+            
+            if (use_mu_fitting) {
+                // phati phatj (3 materials)
+                //pipj[3*label_in  + label_in]  += sign * mu_in  * im_bxhxwxd[totalidx1];
+                //pipj[3*label_out + label_out] -= sign * mu_out * im_bxhxwxd[totalidx1];
+                //pipj[3*label_out + label_in]  +=  mu_in*mu_out* im_bxhxwxd[totalidx1];
+                //ppi[label_in]  += p[totalidx1] * mu_in  * im_bxhxwxd[totalidx1];
+                //ppi[label_out] += p[totalidx1] * mu_out * im_bxhxwxd[totalidx1];
+            }
+            
+            continue;
+        }
+        
+        // be careful when using firstidx.
+        // it is not assigned in the first pass of calculating visible faces
+        const int firstidx = firstidx_bxhxwx1[totalidx1];
+        const int base_idx = firstidx + cnt_visible;
+        
+        // retrieve index
+        imidx_vf[base_idx] = fidxint + 1;
+        
+        imwei_3vf[base_idx*3 + 0] = w0;
+        imwei_3vf[base_idx*3 + 1] = w1;
+        imwei_3vf[base_idx*3 + 2] = w2;
+        
+        cnt_visible += 1;
+    }
+    
+    if (is_the_first_pass) {
+        cntvisible_bxhxwx1[totalidx1] = cnt_visible;
+    }
+}
+
+void dr_cuda_forward_batch(at::Tensor points2d_bxfx6,
+        at::Tensor pointsdirect_bxfx1, at::Tensor pointsbbox_bxfx4,
+        at::Tensor pointslen_bxfx3, at::Tensor labels_fx2, at::Tensor mus_n,
+        at::Tensor imwei_3vf, at::Tensor imidx_vf,
+        at::Tensor cntvisible_bxhxwx1, at::Tensor firstidx_bxhxwx1,
+        at::Tensor im_bxhxwxd,
+        int is_the_first_pass, float max_sino_val) {
+
+    int bnum = points2d_bxfx6.size(0);
+    int fnum = points2d_bxfx6.size(1);
+    int height = im_bxhxwxd.size(1);
+    int width = im_bxhxwxd.size(2);
+    int dnum = im_bxhxwxd.size(3);
+    int vf = imidx_vf.size(0);
+
+    int use_mu_fitting = 0;
+
+    // for fxbxhxw image size
+    const int threadnum = 1024;
+    const int totalthread = bnum * height * width;
+    const int blocknum = totalthread / threadnum + 1;
+
+    const dim3 threads(threadnum, 1, 1);
+    const dim3 blocks(blocknum, 1, 1);
+    
+    AT_DISPATCH_FLOATING_TYPES(points2d_bxfx6.type(),
+            "dr_cuda_forward_render_batch", ([&] {
+                dr_cuda_forward_render_batch<scalar_t><<<blocks, threads>>>(
+                        points2d_bxfx6.data<scalar_t>(),
+                        pointsdirect_bxfx1.data<scalar_t>(),
+                        pointsbbox_bxfx4.data<scalar_t>(),
+                        pointslen_bxfx3.data<scalar_t>(),
+                        
+                        labels_fx2.data<int_t_idx>(),
+                        mus_n.data<scalar_t>(),
+
+                        imwei_3vf.data<scalar_t>(),
+                        
+                        imidx_vf.data<int_t_idx>(),
+                        cntvisible_bxhxwx1.data<int_t_idx>(),
+                        firstidx_bxhxwx1.data<int_t_idx>(),
+                        
+                        im_bxhxwxd.data<scalar_t>(),
+                        bnum, height, width, fnum, dnum, vf, is_the_first_pass,
+                        use_mu_fitting, max_sino_val);
+            }));
+
+    return;
+}
+```
+
+### ctdr/dataset/align_auag.py
+```
+import numpy as np
+
+def read_mrc(fname, cut_sino):
+    import mrcfile
+    # read mrc file for FEI extended header
+    # angles.mat file contains the angle information
+    proj_geom = {}
+    
+    with mrcfile.open(fname, 'r', permissive=True) as mrc:
+        proj = mrc.data[:]
+        
+        if cut_sino:
+            proj = proj[:, cut_sino:-cut_sino, cut_sino:-cut_sino]
+        
+        proj_geom['type'] = 'parallel3d'
+        proj_geom['DetectorColCount'] = proj.shape[2]
+        proj_geom['DetectorRowCount'] = proj.shape[1]
+        proj_geom['DetectorSpacingX'] = 2. / proj.shape[2]
+        proj_geom['DetectorSpacingY'] = 2. / proj.shape[1]
+        proj_geom['DistanceOriginSource'] = 4.0
+    
+    import struct
+    proj_geom['ProjectionAngles'] = np.zeros(proj.shape[0])
+    
+    with open(fname, "rb") as f:
+        for i in range(proj.shape[0]):
+            f.seek(1024 + (i)*128, 0)
+            byte_float = f.read(4)
+            proj_geom['ProjectionAngles'][i] = struct.unpack('f', byte_float)[0]*np.pi/180
+            
+    return proj, proj_geom
+
+import tomopy
+fname = "../../data/3nanoC/align_shift@tilt.mrc"
+p, pg = read_mrc(fname, 10)
+
+prj = np.transpose(p, [0,2,1])
+tomopy.align_joint(prj.copy(), pg["ProjectionAngles"])
+```
+
+### ctdr/dataset/dataset.py
+```
+import torch
+import numpy as np
+import os
+import h5py
+from glob import glob
+
+from torch.utils.data import Dataset, DataLoader
+from ctdr.utils import util_sino
+
+def read_foam(fname):
+    f = h5py.File(fname, 'r')
+    nangles, H, W = f['projs'].shape
+    
+    proj_geom = {}
+    proj_geom['type'] = 'parallel3d'
+    proj_geom['ProjectionAngles'] = np.array(f['angs'])
+    proj_geom['DetectorColCount'] = W
+    proj_geom['DetectorRowCount'] = H
+    proj_geom['DetectorSpacingX'] = 2. / W
+    proj_geom['DetectorSpacingY'] = 2. / H
+    proj_geom['DistanceOriginSource'] = 4.0
+    return np.array(f['projs']), proj_geom
+
+def read_mrc(fname, cut_sino):
+    import mrcfile
+    # read mrc file for FEI extended header
+    # angles.mat file contains the angle information
+    proj_geom = {}
+    
+    with mrcfile.open(fname, 'r', permissive=True) as mrc:
+        proj = mrc.data[:]
+        
+        if cut_sino:
+            proj = proj[:, cut_sino:-cut_sino, cut_sino:-cut_sino]
+        
+        proj_geom['type'] = 'parallel3d'
+        proj_geom['DetectorColCount'] = proj.shape[2]
+        proj_geom['DetectorRowCount'] = proj.shape[1]
+        proj_geom['DetectorSpacingX'] = 2. / proj.shape[2]
+        proj_geom['DetectorSpacingY'] = 2. / proj.shape[1]
+        proj_geom['DistanceOriginSource'] = 4.0
+    
+    import struct
+    proj_geom['ProjectionAngles'] = np.zeros(proj.shape[0])
+    
+    with open(fname, "rb") as f:
+        for i in range(proj.shape[0]):
+            f.seek(1024 + (i)*128, 0)
+            byte_float = f.read(4)
+            proj_geom['ProjectionAngles'][i] = struct.unpack('f', byte_float)[0]*np.pi/180
+            
+    return proj, proj_geom
+
+class SinoDataset(Dataset):
+    def __init__(self, root_dir, nmaterials=2, eta=0, transform=None, dtype=torch.float32):
+        """
+        Args:
+            root_dir (str) : directory name for the dataset containing
+                            .h5 file or (sinogram.npy, proj_geom.toml)
+            mode (str) : 'np' or 'h5'
+        """
+        self.nmaterials=nmaterials
+        self.eta=eta
+        self.p_original = None
+        
+        # h5
+        #h5_list = glob(root_dir+'/*.h5')
+        #if len(h5_list) > 0:
+        #    fname = h5_list[0]
+        #    proj, self.proj_geom = read_foam(fname)
+        #    self.p = torch.tensor(proj)
+        #    print(fname + 'file load successfuly.')
+        #    self.postprocess()
+        #    return
+        
+        # synthetic data
+        if os.path.exists(root_dir+'/proj_geom.toml'):
+            self.proj_geom = util_sino.read_from_toml(root_dir+'/proj_geom.toml')
+            
+            try:
+                self.p = np.load(root_dir+'/sinogram.npy')
+                self.p_original = self.p.copy()
+            except:
+                raise Exception("Projection data not found")
+            
+            if self.eta > 0.0:
+                self.impose_noise()
+
+            self.p = torch.tensor(self.p, dtype=dtype)
+            self.nangles = len(self.proj_geom['ProjectionAngles'])
+            self.postprocess()
+            return
+            
+        # vectors (mainly for cone beam)
+        elif os.path.exists(root_dir+'/proj_geom.pkl'):
+            with open(root_dir+'/proj_geom.pkl', 'rb') as f:
+                self.proj_geom = pickle.load(f)
+                
+            p = np.load(root_dir+'/sinogram.npy')
+            self.p = torch.tensor(p, dtype=dtype)
+            self.postprocess()
+                
+        else:
+            raise Exception('There is no file of proj_geom.toml or proj_geom.pkl')
+
+    def postprocess(self):
+        # self.vol_geom = util_sino.proj2vol(self.proj_geom, V=self.p.shape[1])
+        
+        if len(self.p.shape) == 3:
+            self.nangles = self.p.shape[0]
+        else:
+            self.nangles = self.p.shape[1]
+        
+        
+    def __len__(self):
+        return self.p.shape[0]
+
+    def __getitem__(self, idx):
+        return idx, self.p[idx,:]
+
+    def impose_noise(self):
+        np.random.seed(1)
+        # np.random.randn(self.p_original.shape)
+
+        e_hat = np.random.normal(size=self.p_original.shape)
+        relative = np.sqrt( np.sum( ( self.p_original )**2 ) ) / np.sqrt( np.sum( (e_hat ) **2 ) ) 
+        self.p = self.p_original + self.eta * e_hat *  relative
+        self.p[self.p < 0.0] = 0.0
+
+        print("succesfully impose noise")
+```
+
+### ctdr/dataset/init_mesh.py
+```
+import torch
+import numpy as np
+import os
+from glob import glob
+
+import trimesh
+from ctdr.utils import util_mesh
+
+def make_icosphere(subdivisions, radius):
+    mesh = trimesh.creation.icosphere(subdivisions=subdivisions, radius = radius) 
+    mesh.vertices += 1e-4 # for numerical stability to avoid n.r = 0
+    return mesh
+
+def save_obj_meshes_labels(fname, meshes, lf_list):
+    """
+    meshes: list of meshes
+    lf_list: list of labels_f
+    """
+    nmeshes = len(meshes)
+    assert(nmeshes == len(lf_list))
+
+    vidx_list = np.zeros(nmeshes+1, dtype=np.int32)
+    fidx_list = np.zeros(nmeshes+1, dtype=np.int32)
+    
+    verts = meshes[0].vertices
+    faces = meshes[0].faces
+    for i in range(nmeshes):
+        vidx_list[i+1] = vidx_list[i] + meshes[i].vertices.shape[0]
+        fidx_list[i+1] = fidx_list[i] + meshes[i].faces.shape[0]
+        if i >= 1:
+            verts = np.concatenate([verts, meshes[i].vertices], axis=0)
+            faces = np.concatenate([faces, meshes[i].faces+vidx_list[i]], axis=0)
+        
+    labels_v = np.zeros(vidx_list[-1], dtype=np.int32)
+    labels_f = np.zeros([fidx_list[-1], 2], dtype=np.int32)
+    
+    for i in range(nmeshes):
+        labels_f[fidx_list[i]:fidx_list[i+1],0:2] = np.array(lf_list[i], dtype=np.int32)
+        labels_v[vidx_list[i]:vidx_list[i+1]] = lf_list[i][0] # inside label
+
+    util_mesh.save_mesh(fname, verts, faces, labels_v, labels_f)
+
+
+def save_init_mesh(fname, data, nmaterials, width_physical, subdivision=3, radius=0.4):
+    # 3d object lie between -1 and 1
+    radius_ = width_physical*radius
+    
+    topology_type = 'A'
+    if data[-1] >= 'A' and data[-1] < 'Z':
+        topology_type = data[-1]
+    else:
+        raise NotImplementedError
+        
+    try:
+        ncomponents = int(data[-3:-1])
+    except:
+        ncomponents = 1
+    
+    mus = []
+    
+    cc = 0.5* np.array([
+        [-1,-1,0],[1, 1,0],
+        [0, 0, 1],[0, 0, -1],[0, 0, 0],[1,-1,1],[1, 1, 1],
+        [-1, 1., 1],
+        
+        [1,1,-1],[1,-1,-1]
+        ], dtype=np.float32)
+    
+    if topology_type == 'A':
+        if ncomponents == 1:
+            mesh = make_icosphere(subdivisions=subdivision, radius = radius_*0.5)
+            util_mesh.save_mesh(fname, mesh.vertices+1e-6, mesh.faces)
+        elif ncomponents == 2:
+            if data=="2kitten02A":
+                vv, ff = util_mesh.torus(radius_*0.3, radius_*0.6, 10*subdivision, 10*subdivision, True)
+            else:
+                vv, ff = util_mesh.torus(radius_*0.3, radius_*0.6, 10*subdivision, 10*subdivision, False)
+                # vv[:,2] -= 0.2
+            
+            util_mesh.save_mesh(fname, vv+1e-6, ff)
+        elif ncomponents == 4:
+            vv, ff = util_mesh.torus(radius_*0.4, radius_*0.8, 20, 40)
+            util_mesh.save_mesh(fname, vv+1e-6, ff)
+    
+    elif topology_type == 'B':
+        # there are many independent components which do not share
+        #cc = cc * 0.8
+        meshes = []
+        lf_list = []
+        for i in range(ncomponents):
+            mesh = make_icosphere(subdivisions=subdivision, radius=radius_*0.4)
+            mesh.vertices -= cc[i]
+            meshes.append(mesh)
+            lf_list.append( [1,0] )
+        save_obj_meshes_labels(fname, meshes, lf_list)    
+    
+    elif topology_type == 'C':
+        """
+        Component 1 contains other materials recursively.
+        """
+        print('@ C type topology detected')
+        # outside material
+        meshes = []
+        meshes.append(make_icosphere(subdivisions=subdivision, radius = radius_*0.6))
+        lf_list = []
+        lf_list.append([1, 0])
+        
+        mesh_in1 = make_icosphere(subdivisions=subdivision, radius = radius_*0.3)
+        meshes.append(mesh_in1)
+        lf_list.append([2, 1])
+        
+        if nmaterials == 3:
+            pass
+            
+        elif nmaterials == 4:
+            mesh_in2 = make_icosphere(subdivisions=subdivision, radius = radius_*0.2)
+            meshes.append(mesh_in2)
+            lf_list.append([3, 2])
+            
+        
+        else:
+            raise NotImplementedError
+        
+        save_obj_meshes_labels(fname, meshes, lf_list)
+
+    elif topology_type == 'D':
+        # outside one object and inside is like B
+        meshes = []
+        mesh1 = make_icosphere(subdivisions=subdivision, radius = radius_*0.99)
+        mesh1.vertices += 1e-5
+        meshes.append(mesh1)
+        lf_list = []
+        lf_list.append([1, 0])
+        
+        ncomponents = int(data[-3:-1])
+        
+        if nmaterials <= 3:
+            for i in range(ncomponents-1):
+                mesh = make_icosphere(subdivisions=subdivision-1, radius=radius_*0.2)
+                mesh.vertices -= cc[i]
+                meshes.append(mesh)
+                lf_list.append( [2,1] )
+
+        elif nmaterials >= 4:
+            # in case all the inside objects are different
+            for i in range(ncomponents-1):
+                mesh = make_icosphere(subdivisions=subdivision, radius=radius_*0.1)
+                mesh.vertices -= cc[i]
+                meshes.append(mesh)
+                lf_list.append( [i+2,1] )
+
+            
+        save_obj_meshes_labels(fname, meshes, lf_list)    
+        
+
+# forward(ctx, p_bxfx6, len_bxfx3, front_facing_bxfx1, labels_fx2, mus_n, H, W):
+```
+
+### ctdr/function/rasterizer.py
+```
+from torch.autograd import Function
+import torch
+import sys
+sys.path.append('../ctdr/cuda')
+import cuda_diff_fp
+
+# dtype=torch.float32
+dtype_int=torch.int32
+
+class Rasterizer(Function):
+    
+    @staticmethod
+    def forward(ctx, p_bxfx6, len_bxfx3, front_facing_bxfx1, labels_fx2, mus_n, H, W, max_sino_val, backprop):
+        """
+        p_bxfx6 : projections on 2D plane
+        """
+        dtype = p_bxfx6.dtype
+
+        B = p_bxfx6.shape[0]
+        F = p_bxfx6.shape[1]
+        
+        # compute bounding box
+        p_view_bxfx3x2 = p_bxfx6.view(B, F, 3, 2)
+        p_min = torch.min(p_view_bxfx3x2, dim=2)[0]
+        p_max = torch.max(p_view_bxfx3x2, dim=2)[0]
+        
+        # we don't need to check the outside of detector (we will do in cuda)
+#         p_min[p_min < 0] = 0
+#         p_max[...,0][p_max[...,0] > W-1.] = W-1.
+#         p_max[...,1][p_max[...,1] > H-1.] = H-1.
+
+        p_bbox_bxfx4 = torch.cat([p_min, p_max], dim=2)
+
+        # Here, maybe I can impose edge prior
+
+        im_bxhxwx1 = torch.zeros(B, H, W, 1, dtype=dtype).cuda()
+        
+        cntvisible_bxhxwx1 = torch.zeros(B, H, W, 1, dtype=dtype_int).cuda().contiguous()
+
+        p_bxfx6 = p_bxfx6.contiguous()
+        front_facing_bxfx1 = front_facing_bxfx1.contiguous()
+        p_bbox_bxfx4 = p_bbox_bxfx4.contiguous()
+        len_bxfx3 = len_bxfx3.contiguous()
+        
+        temp = torch.zeros(0, dtype=dtype).cuda()
+        temp_int = torch.zeros(0, dtype=dtype_int).cuda()
+
+        # first compute the number of visible faces for each pixel
+        # and compute the projections
+        
+        cuda_diff_fp.forward(p_bxfx6, front_facing_bxfx1,
+        p_bbox_bxfx4, len_bxfx3, labels_fx2, mus_n,
+        temp, temp_int, cntvisible_bxhxwx1,
+        temp_int,
+        im_bxhxwx1, 1, max_sino_val)
+        
+        if backprop == False:
+            return im_bxhxwx1
+                
+        # -----------------------------------------
+        # compute the total number of visible faces
+        # -----------------------------------------
+        cumsum_vf = torch.cumsum(cntvisible_bxhxwx1.reshape(-1), 0, dtype=dtype_int)
+        vf = cumsum_vf[-1] # total number of visible faces
+        
+        # make the output arrays
+        imwei_3vf = torch.zeros(3*vf, dtype=dtype).cuda().contiguous()
+        idx_vf = torch.zeros(vf, dtype=dtype_int).cuda().contiguous()
+        
+        # firstidx retrives the first index of 1D array
+        firstidx = torch.zeros([B*H*W], dtype=dtype_int).cuda()
+        firstidx[1:] = cumsum_vf[:-1].contiguous()
+        firstidx_bxhxwx1 = firstidx.reshape(B, H, W, 1).contiguous()
+        
+        # compute weights for backpropagation
+        cuda_diff_fp.forward(p_bxfx6, front_facing_bxfx1,
+            p_bbox_bxfx4, len_bxfx3, labels_fx2, mus_n,
+            imwei_3vf, idx_vf, cntvisible_bxhxwx1,
+            firstidx_bxhxwx1,
+            im_bxhxwx1, 0, max_sino_val)
+        
+        ctx.save_for_backward(im_bxhxwx1, imwei_3vf, idx_vf, 
+        cntvisible_bxhxwx1, firstidx_bxhxwx1, p_bxfx6, len_bxfx3, labels_fx2, mus_n, front_facing_bxfx1)
+        
+        
+        return im_bxhxwx1
+    
+    @staticmethod
+    def backward(ctx, dldI_bxhxwx1):
+        """
+        dldI_bxhxwx1 : gradient w.r.t. image
+        dldf         : gradient w.r.t. length feature
+        """
+        
+        im_bxhxwx1, imwei_3vf, imidx_vf, cntvisible_bxhxwx1, firstidx_bxhxwx1, p_bxfx6, len_bxfx3, labels_fx2, mus_n, front_facing_bxfx1 = ctx.saved_tensors
+        
+        dldp = torch.zeros_like(p_bxfx6).contiguous()
+        dldf = torch.zeros_like(len_bxfx3).contiguous()
+        dldmu = torch.zeros_like(mus_n).contiguous()
+        
+        cuda_diff_fp.backward(
+             dldI_bxhxwx1.contiguous(), im_bxhxwx1, imidx_vf, cntvisible_bxhxwx1,
+            firstidx_bxhxwx1,
+            imwei_3vf, p_bxfx6, len_bxfx3, labels_fx2, mus_n, front_facing_bxfx1,
+            dldp, dldf, dldmu)
+
+        return dldp, dldf, None, None, dldmu, None, None, None, None
+```
+
+### ctdr/model/vanilla.py
+```
+import torch
+import numpy as np
+import torch.nn as nn
+import trimesh
+from ctdr.utils import util_vis, util_mesh, util_fun
+from ctdr.nn import softras_loss
+# from ctdr.function.rasterizer import dtype
+
+import torch.nn.functional as F
+
+class Model(nn.Module):
+    """
+
+    Args:
+        labels (int arr, [fx2]) : inward and outward labels for     each face
+        mus ( [nmaterials-1]) : we don't save the background material (assumed to be zero)
+        mus_fixed_no ( int ) : number of fixed mus.
+            if  0, background is 0
+            if -1, initialize mus by matrix inversion and set 1
+    Returns:
+
+
+    Examples:
+        >>> 
+
+    """
+    def __init__(self, ftemplate, proj_geom, nmaterials, mus=None, mus_fixed_no=1, use_disp_param=True, use_center_param=False, wlap=0., wflat=0., dtype=torch.float32):
+        super(Model, self).__init__()
+        
+        self.p_min = 0.
+        self.dtype = dtype
+        
+        self.nmaterials = nmaterials
+        vertices, faces, labels_v, labels_f = util_mesh.load_template(ftemplate)
+        
+#         print(labels_v.max()+1, nmaterials)
+        # assert(labels_v.max()+1 == nmaterials)
+        
+        self.mus_fixed_no = abs(mus_fixed_no)
+        
+        # normalize
+#         if normalize == 'minmax':
+#             vertices = util_mesh.normalize_min_max(vertices)
+        
+        # register template (not variables)
+        self.register_buffer('vertices', torch.tensor(vertices, dtype=self.dtype))
+        self.register_buffer('faces', torch.tensor(faces, dtype=torch.int64))
+        
+        # register label information for each face
+        self.register_buffer('labels', torch.tensor(labels_f, dtype=torch.int32))
+        
+        self.labels_v = labels_v
+        self.labels_v_np = labels_v # for saving later
+
+        
+        # -------------------
+        # loss
+        self.use_lap_loss = True if wlap > 0. else False
+        self.use_flat_loss = True if wflat > 0. else False
+        self.init_register(mus, mus_fixed_no, use_center_param, use_disp_param)
+        
+        if proj_geom['type'] == 'cone':
+            assert 0, print("proj_geom type=cone is not supported. It should be cone_vec")
+
+        
+        if proj_geom['type'][-3:] == 'vec':
+            from ctdr.nn.fp_vecs import FP
+            self.fp = FP(proj_geom, self.labels, self.dtype)
+            self.nangles = proj_geom['Vectors'].shape[0]
+        else:
+            from ctdr.nn.fp_opengl import FP
+            self.fp = FP(proj_geom, self.labels, self.dtype)
+            self.nangles = len(proj_geom['ProjectionAngles'])
+        
+        
+    #-------------------------------------------------------
+    #-------------------------------------------------------
+    def init_register(self, mus, mus_fixed_no, use_center_param, use_disp_param=True):
+        
+        if use_center_param:
+            # center as a parameter (rotation can be added as well)
+            self.register_parameter('center', \
+                nn.Parameter(torch.zeros([1, 3], dtype=self.dtype) ) )
+        else:
+            self.register_buffer('center', torch.zeros([1, 3], dtype=self.dtype))
+
+        # old_code: for each object, use different centers
+#             self.register_parameter('center', nn.Parameter(torch.zeros([1, 3*self.nmaterials], dtype=self.dtype) ) )
+#             self.register_buffer('labels_v', torch.tensor(labels_v))
+        
+        if use_disp_param:
+            self.register_parameter('displace', \
+            nn.Parameter(torch.zeros(self.vertices.shape, dtype=self.dtype)))
+        else:
+            self.register_buffer('displace', \
+                                 torch.zeros_like(self.vertices))
+            
+        if mus_fixed_no == self.nmaterials:
+            # mus is not parameter
+            self.register_buffer('mus', torch.tensor(mus, dtype=self.dtype))
+        else:
+            print('set mu as parameters')
+            self.register_parameter('mus', \
+                nn.Parameter(torch.tensor(mus, dtype=self.dtype)))
+            
+        #------------------------------------------------
+        # register loss
+        #------------------------------------------------    
+        if self.use_lap_loss:
+            self.laplacian_loss = \
+         softras_loss.LaplacianLoss(self.vertices.cpu(), self.faces.cpu())
+        if self.use_flat_loss:
+            self.flat_loss = softras_loss.FlattenLoss(self.faces)
+        
+#         if self.use_flatten_loss:
+#             self.flatten_loss = softras_loss.FlattenLoss(self.faces.cpu())
+    
+    def register_scale(self):
+        self.register_parameter('scale', \
+                nn.Parameter(torch.ones([1, 3], dtype=self.dtype)))
+    
+    def pretransform(self, translation=False, rot=False, ):
+        vert = self.vertices
+        if translation:
+            vert -= self.center
+        
+        if hasattr(self, 'scale'):
+            vert = vert * self.scale
+        
+        return vert
+    
+    def deform(self, verts, disp):
+        if disp is None: # if disp is the parameter
+            vertices = verts + self.displace
+                
+        else: # if disp is known (NN)
+            vertices = verts + disp
+
+        return vertices
+    
+    #-------------------------------------------------------
+    # forward
+    #-------------------------------------------------------
+    def forward(self, idx_angles, wedge=0., backprop=True):
+        vertices = self.pretransform(True)
+        vertices = self.deform(vertices, None)        
+        
+        if self.mus_fixed_no == 1:
+            self.mus.data[0] = self.p_min
+            
+        phat, mask_valid = self.fp.forward(vertices, self.faces, idx_angles, self.mus, backprop)
+        
+        edge_loss = util_fun.compute_edge_length(vertices, self.faces) if wedge > 0. else 0.
+        lap_loss = 0. if self.use_lap_loss==False else self.laplacian_loss(vertices).mean()
+        flat_loss = 0. if self.use_flat_loss==False else self.flat_loss(vertices)
+        
+        return phat, mask_valid, edge_loss, lap_loss, flat_loss
+    
+    def forward_neural(self, disp):
+        raise NotImplemented
+        
+    def render(self):
+        vertices = self.pretransform(True)
+        vertices = self.deform(vertices, None)        
+        
+        idx_angles = torch.LongTensor(np.arange(self.nangles)).cuda()
+            
+        phat, mask_valid = self.fp.forward(vertices, self.faces, idx_angles, self.mus)
+        return phat, mask_valid
+        
+    
+    def show_params(self):
+        out = ""
+        
+        if hasattr(self, 'scale'):
+            out += str(self.scale[0,0].item())
+            out += str(self.scale[0,1].item())
+            out += str(self.scale[0,2].item())
+            
+        print(out)
+    
+    def set_mu0(self, p_cuda):
+        self.p_min = p_cuda.min()
+        
+    
+    def estimate_mu(self, p_cuda):
+        """
+        p_cuda (data) should be in cuda
+        """
+        print("@ estimate mus")
+        self.p_min = p_cuda.min()
+        
+        if self.nmaterials == 3:
+            self.mus.data[0]=self.p_min
+            self.mus.data[1]=0
+            self.mus.data[2]=1
+            out = self.render()
+            p2hat = out[0]
+            p2mask = out[1]
+
+            self.mus.data[1]=1
+            self.mus.data[2]=0
+            out = self.render()
+            p1hat = out[0]
+            p1mask = out[1]
+
+            mask = p2mask * p1mask
+
+            a11 = torch.sum(p1hat*p1hat)
+            a22 = torch.sum(p2hat*p2hat)
+            a12 = torch.sum(p1hat*p2hat)
+
+            b1 = torch.sum(p1hat*p_cuda)
+            b2 = torch.sum(p2hat*p_cuda)
+
+            A = torch.tensor([[a11,a12],[a12,a22]], dtype=self.dtype)
+            b = torch.tensor([b1,b2], dtype=self.dtype)
+
+            mu_est = torch.pinverse(A).matmul(b)
+            self.mus.data[1] = mu_est[0]
+            self.mus.data[2] = mu_est[1]
+        
+        elif self.nmaterials >= 4:
+            self.mus.data[0]=self.p_min
+            
+            for i in range(self.nmaterials-1):
+                self.mus.data[i+1] = 0
+            
+            self.mus.data[-1]=1
+            out = self.render()
+            p3hat = out[0]
+            p3mask = out[1]
+
+            self.mus.data[2]=1
+            self.mus.data[3]=0
+            out = self.render()
+            p2hat = out[0]
+            p2mask = out[1]
+            
+            self.mus.data[1]=1
+            self.mus.data[2]=0
+            out = self.render()
+            p1hat = out[0]
+            p1mask = out[1]
+
+            mask = p2mask * p1mask * p3mask
+
+            a11 = torch.sum(p1hat*p1hat)
+            a22 = torch.sum(p2hat*p2hat)
+            a12 = torch.sum(p1hat*p2hat)
+            a13 = torch.sum(p1hat*p3hat)
+            a23 = torch.sum(p2hat*p3hat)
+            a33 = torch.sum(p3hat*p3hat)
+            
+            b1 = torch.sum(p1hat*p_cuda)
+            b2 = torch.sum(p2hat*p_cuda)
+            b3 = torch.sum(p3hat*p_cuda)
+
+            A = torch.tensor([[a11,a12,a13],[a12,a22,a23],[a13,a23,a33]], dtype=self.dtype)
+            b = torch.tensor([b1,b2,b3], dtype=self.dtype)
+
+            mu_est = torch.pinverse(A).matmul(b)
+            self.mus.data[1] = mu_est[0]
+            self.mus.data[2] = mu_est[1]
+            self.mus.data[3] = mu_est[2]
+            
+            
+#             self.mus[1:3] = mu_est
+
+#         if self.nmaterials == 2:
+#             self.mus[0]=0
+#             self.mus[1]=1
+#             out = self.render()
+#             phat = out[0]
+#             mask = out[1]
+
+#             a11 = torch.sum(p1hat*p1hat)
+#             b1 = torch.sum(p1hat*p_cuda)
+            
+#             mu_est = b1 / a11
+
+#             mu_est = torch.pinverse(A).matmul(b)
+#             self.mus[1:3] = mu_est
+
+    def get_points(self):
+        vertices = self.get_displaced_vertices()
+        lv = torch.LongTensor(self.labels_v_np)
+        
+        if self.nmaterials == 2:
+            return vertices
+        elif self.nmaterials == 3:
+            v1 = vertices[lv == 1, :]
+            v2 = vertices[lv == 2, :]
+            return v1, v2
+
+    def get_displaced_vertices(self):
+        vertices = self.pretransform(True)
+        vertices = self.deform(vertices, None)
+        return vertices
+
+    def get_vf_np(self, return_as_np=True):
+        vertices = self.pretransform(True)
+        vertices = self.deform(vertices, None).detach()
+        
+        labels = self.labels.cpu()
+        faces = self.faces.cpu()
+        
+        if return_as_np:
+            return vertices.cpu().numpy(), faces.cpu().numpy(), self.labels_v_np, labels.cpu().numpy()
+```
+
+### ctdr/nn/fp_opengl.py
+```
+import torch
+import numpy as np
+import torch.nn as nn
+from ctdr.function.rasterizer import Rasterizer
+from ctdr.utils.projection import compute_P, compute_M
+from scipy.spatial.transform import Rotation
+from ctdr.nn.fp_vecs import get_valid_mask
+
+class FP(nn.Module):
+    """Forward projection module
+
+    1. vertex shader
+    
+    PVM v
+    
+    where 
+    
+    P : 
+    V : only depends on dist_src for orthographic projection
+        [1, 4] matrix
+    M : rotate 3D points
+    
+    Args:
+        - proj_geom (dict) : ASTRA-style dictionary
+        - labels (int arr, [fx2]) : outward and inward labels for each face
+
+    Returns:
+
+
+    Examples:
+        >>> 
+    """
+    def __init__(self, proj_geom, labels, dtype=torch.float32):
+        super(FP, self).__init__()
+        
+        self.proj_geom = proj_geom
+        self.labels_fx2 = labels.cuda()
+        
+        # Among PVM, PV part doesn't depend on the viw angle
+        # orthographic matrix
+        #if proj_geom['type'].startswith('parallel3d'):
+        self.max_sino_val = proj_geom["DetectorColCount"]*proj_geom["DetectorSpacingX"]*2
+            
+        P = compute_P(proj_geom)
+        self.P = torch.tensor(P, dtype=dtype).cuda()
+
+        # rotation matrix for view
+        # M_left = Rotation.from_quat([np.sin(np.pi/4), 0, 0, np.cos(np.pi/4)])
+        # self.M_left = torch.tensor(M_left.as_dcm(), dtype=dtype).cuda()
+        self.M_left = torch.tensor([[1.0,0,0],[0,0,-1],[0,1,0]], dtype=dtype).cuda()
+
+        # put the camera enough far away from the origin
+        view_vector = torch.tensor([[0,0,-self.max_sino_val]], dtype=dtype).cuda()
+        self.V_t = view_vector.unsqueeze(2).cuda()
+
+        # to be consistent with OpenGL convention
+        self.vec_ray = torch.tensor([0,0,-1], dtype=dtype).cuda()
+        
+        self.height = self.proj_geom['DetectorRowCount']
+        self.width = self.proj_geom['DetectorColCount']
+        
+        self.rasterize = Rasterizer().apply
+        self.angles = torch.tensor(proj_geom['ProjectionAngles'], dtype=dtype).cuda()
+        
+    def forward(self, verts_vx3, faces_fx3, idx_angles, mus_n, backprop=True):
+        """
+        Args:
+            - verts_vx3 (tensor, float32 [num_pt x 3])
+            - faces_fx3 (tensor, long [num_faces x 3])
+            - idx_angles (tensor, long [B])
+            - mus (tensor, float32 [nmaterials])
+        """
+        #--------- multiply by VM (to be consistent with astra)
+        # rotate with respect to z-axis
+        #  [cos (-t), -sin(-t); sin(-t), cos(-t)]
+        # =[cos t, sin t; -sint, cost]
+        
+        # rotate the object = rotate the source with -angle
+        #B, v = idx_angles.shape[0], verts_v
+
+        #------------ begin
+        # only to make it consistent with ASTRA and OpenGL, 
+        # verts_vx3[:,0] *= -1.0
+        # verts_vx3[:,2] *= -1.0
+        #------------ end
+
+        Mv_bx3xv = verts_vx3.transpose(0,1).unsqueeze(0).repeat([idx_angles.shape[0], 1, 1])
+        
+        ct = torch.cos(self.angles[idx_angles]).unsqueeze(1).unsqueeze(2)
+        st = torch.sin(self.angles[idx_angles]).unsqueeze(1).unsqueeze(2)
+        temp0 = Mv_bx3xv[:,0:1,:]*ct + Mv_bx3xv[:,1:2,:]*st
+        Mv_bx3xv[:,1:2,:] = -Mv_bx3xv[:,0:1,:]*st + Mv_bx3xv[:,1:2,:]*ct
+        Mv_bx3xv[:,0:1,:] = temp0
+        
+        # old version:
+#         idx_np = idx_angles.detach().cpu().numpy()
+#         M_np = compute_M(idx_np, self.proj_geom['ProjectionAngles'])
+#         M_bx3x3 = torch.FloatTensor(M_np).cuda()
+#         M_bx3x3 = torch.tensor(M_np, dtype=dtype).cuda()        
+#         Mv_bx3xv = torch.matmul(M_bx3x3, verts_vx3.transpose(0,1))
+        
+        # view
+        Mv_bx3xv = torch.matmul(self.M_left, Mv_bx3xv)
+        VMv_bx3xv = Mv_bx3xv + self.V_t
+        
+        # save the length of vertices to compute attenuation
+        len_vert_bxp = torch.norm(VMv_bx3xv, dim=1).unsqueeze(2)
+        
+        # multiply by P
+        VMv_bx4xv = nn.functional.pad(VMv_bx3xv, (0, 0, 0, 1), "constant", 1.0)
+        PVMv = torch.matmul(self.P, VMv_bx4xv) # [4 x 4, b x 4 x v], P:[b x ]
+        
+        proj_bx3xv = PVMv[:, 0:3, :] / (PVMv[:, 3:4, :] + 1e-8)
+        proj_bxpx3 = proj_bx3xv.transpose(1,2)
+        
+        # rearange w.r.t. faces for convenience
+        # rearange points
+        VMv_bxvx3 = VMv_bx3xv.transpose(1,2)
+        
+        bvf0 = VMv_bxvx3[:, faces_fx3[:, 0], :] # b f 3
+        bvf1 = VMv_bxvx3[:, faces_fx3[:, 1], :]
+        bvf2 = VMv_bxvx3[:, faces_fx3[:, 2], :]
+#         bverts_bf9 = torch.cat([bvf0, bvf1, bvf2], dim=2)
+    
+        # rearange lengths
+        lf0 = len_vert_bxp[:, faces_fx3[:, 0], :] # shape: [b x f x 3]
+        lf1 = len_vert_bxp[:, faces_fx3[:, 1], :]
+        lf2 = len_vert_bxp[:, faces_fx3[:, 2], :]
+        len_bxfx3 = torch.cat([lf0, lf1, lf2], dim=2)
+        
+        # rearange 2d point
+        xyf0 = proj_bxpx3[:, faces_fx3[:, 0], :2]
+        xyf1 = proj_bxpx3[:, faces_fx3[:, 1], :2]
+        xyf2 = proj_bxpx3[:, faces_fx3[:, 2], :2]
+        proj_bxfx6 = torch.cat([xyf0, xyf1, xyf2], dim=2)
+                
+        bvf10 = bvf1 - bvf0
+        bvf20 = bvf2 - bvf0
+
+        #------------------- compute frontFacing
+        # calculate normal for computing front facing later
+        normal_bxfx3 = torch.cross(bvf10, bvf20, dim=2)
+        
+        if self.proj_geom['type'] == 'parallel3d':
+            # we rotate the object and the direction of ray is fixed as [0,0,-1]
+            # so we only check the z-coordinate
+            # the input faces should be declared in counter-clockwise order
+            front_facing_bxfx1 = - normal_bxfx3[:,:,2:3]
+        else:
+            # in the case of cone beam,
+            # the source is fixed at (0,0,0) ([0, -1, 0] in astra)
+            # we need to compute inner product for all the rays.
+            front_facing_bxfx1 = torch.sum(bvf0 * normal_bxfx3, dim=2).unsqueeze(2)
+        
+        # to be consistent with forward_vecs and avoid numerical errors,
+        # change from normalized coordinates [-1,1] to pixel coordinates [0,W]
+        proj_bxfx6[:,:,0:5:2] = (proj_bxfx6[:,:,0:5:2]+1.) / 2. * self.width
+        proj_bxfx6[:,:,1:6:2] = self.height*(1-proj_bxfx6[:,:,1:6:2]) / 2. - 0.5
+        
+        self.proj, self.len, self.front_facing = proj_bxfx6, len_bxfx3, front_facing_bxfx1
+        
+        phat = self.rasterize(proj_bxfx6, len_bxfx3, front_facing_bxfx1,
+                             self.labels_fx2, mus_n, self.height, self.width, self.max_sino_val, backprop)
+        
+        phat = phat.squeeze()
+        mask_valid = get_valid_mask(phat, self.max_sino_val)
+        
+        return phat, mask_valid
+```
+
+### ctdr/nn/fp_vecs.py
+```
+import torch
+import numpy as np
+import torch.nn as nn
+from ctdr.function.rasterizer import Rasterizer
+from ctdr.utils.projection import compute_P, compute_M
+
+# MAX_SINO_VAL = 10.0
+#MAX_SRC_ORIGIN_PARALLEL = 4.0
+
+def get_valid_mask(phat, max_val):
+    mask_pos = (phat > -1e-6)
+
+    mask_valid = mask_pos * (phat <= max_val - 1e-6)
+    #mask_valid = mask_neg * (phat <= (MAX_SINO_VAL-10.))
+
+    ndead_pixels = (~mask_pos).sum().item()
+
+    if ndead_pixels >= 1:
+        phat_min = phat.min().data.item()
+        # mask_neg = ((~mask_pos) * (phat >= -30.))
+        mask_neg = (~mask_pos)
+        sum_neg = mask_neg.sum().item()
+
+        print("ndead nneg phat.min and max_v:", ndead_pixels, sum_neg, f"{phat_min:.2f}, {phat[mask_valid].max().data.item():.2f}")
+        
+    return mask_valid
+
+
+class FP(nn.Module):
+    """Forward projection module by astra vectors
+
+    1. vertex shader
+    
+    PVM v
+    
+    where 
+    
+    P : 
+    V : only depends on dist_src for orthographic projection
+        [1, 4] matrix
+    M : rotate 3D points
+    
+    Args:
+        - proj_geom (dict) : ASTRA-style dictionary
+        - labels (int arr, [fx2]) : outward and inward labels for each face
+
+    Returns:
+
+
+    Examples:
+        >>> 
+    """
+    def __init__(self, proj_geom, labels, dtype=torch.float32):
+        super(FP, self).__init__()
+        
+        self.proj_geom = proj_geom
+        self.labels_fx2 = labels.cuda()
+        
+        if self.proj_geom['type'] == 'parallel3d_vec':
+            self.max_sino_val = proj_geom["DetectorColCount"]*proj_geom["DetectorSpacingX"]*3
+        else:
+            self.max_sino_val = proj_geom["DetectorColCount"]*proj_geom["DetectorSpacingX"]*100
+
+        self.vecs = torch.tensor(proj_geom['Vectors'], dtype=dtype).cuda()
+#             self.DetS = self.Vectors[:,3:6] - 0.5*proj_geom['DetectorRowCount']*self.Vectors[:,9:12] - 0.5*proj_geom['DetectorColCount']*self.Vectors[:, 6:9]
+        
+        self.height = self.proj_geom['DetectorRowCount']
+        self.width = self.proj_geom['DetectorColCount']
+        
+        self.rasterize = Rasterizer().apply
+        
+        self.det_pos = self.vecs[:,3:6]
+        if self.proj_geom['type'] == 'parallel3d_vec':
+            self.det_pos = - self.max_sino_val * self.vecs[:,0:3]
+
+        self.dtype = dtype
+            
+        # normal vector for the detector plane
+        
+    def forward(self, verts_vx3, faces_fx3, idx_angles, mus_n, backprop=True):
+        # raise NotImplemented()
+        #------------------------------------------------
+        # compute normal vector for each face
+        #------------------------------------------------
+        vf0 = verts_vx3[faces_fx3[:, 0], :] # b f 3
+        vf1 = verts_vx3[faces_fx3[:, 1], :]
+        vf2 = verts_vx3[faces_fx3[:, 2], :]
+        
+        vf10 = vf1 - vf0
+        vf20 = vf2 - vf0
+        normal_fx3 = torch.cross(vf10, vf20, dim=1)
+        
+        #------------------------------------------------
+        # project onto 2d detector plane
+        #------------------------------------------------
+        # input: P, output: p=S+tR
+        # n . x + D = 0, D = - n . (detector center)
+        # ray vector eq: p= S + t(P-S) = S + tR, R=P-S
+        # float t = - (dot(N, S) + D) / dot(N, R);
+        # N: detector normal vector
+        vecs = self.vecs[idx_angles, :]
+        verts_bxvx3 = verts_vx3.unsqueeze(0).repeat(vecs.shape[0],1,1)
+        
+        # compute N of the detector plane
+        # N: towards the origin
+        # we already know that a3=0, b1=0, b2=0
+        # a1:6. b1:9
+        # N_{1} =a_{2}b_{3}-a_{3}b_{2} =  a2b3
+        # N_{2} =a_{3}b_{1}-a_{1}b_{3} = -a1b3
+        # N_{3} =a_{1}b_{2}-a_{2}b_{1} = 0
+        
+        v = verts_bxvx3.shape[1]
+        
+        S_bxvx3 = vecs[:,0:3].unsqueeze(1).expand(-1,v,-1)
+#         if self.proj_geom['type'] == 'cone_vec':
+#             S_bxvx3 = vecs[:,0:3].unsqueeze(1).expand(-1,v,-1)
+#         elif self.proj_geom['type'] == 'parallel3d_vec':
+#             S_bxvx3 = verts_bxvx3 + vecs[:,0:3]
+        
+        N_bx2 = torch.zeros([vecs.shape[0], 2], dtype=self.dtype).cuda() # vecs[:,12]=0
+        N_bx2[:,0] =  vecs[:,7]*vecs[:,11]
+        N_bx2[:,1] = -vecs[:,6]*vecs[:,11]
+        
+        if self.proj_geom['type'] == 'parallel3d_vec':
+            # for the parallel case:
+            # we consider the 3D vertice points as the sources
+            # t = (N . S + dist_to_detector_center)
+            N_bx2 /= torch.sqrt(N_bx2[:,0:1]**2 + N_bx2[:,1:2]**2)
+
+            R_bxvx3_norm = - S_bxvx3.clone()
+            S_bxvx3 = verts_bxvx3
+            NS_bxv = torch.sum(N_bx2.unsqueeze(1).expand(-1,v,-1)*S_bxvx3[:,:,:2], dim=2)
+            t_bxv = NS_bxv + self.max_sino_val
+            
+            NR_bxv = torch.sum(N_bx2.unsqueeze(1).expand(-1,v,-1) * R_bxvx3_norm[:,:,0:2], dim=2)
+            t_bxv = - t_bxv / ( NR_bxv )
+            len_vert_bxvx1 = t_bxv.unsqueeze(2)
+            # assert(len_vert_bxvx1.min() > 0.)
+            
+        else:
+            R_bxvx3 = verts_bxvx3 - S_bxvx3
+            len_vert_bxvx1 = torch.norm(R_bxvx3, dim=2).unsqueeze(2)
+
+            # to avoid numerical issues, it has the effect of increasing t
+            R_bxvx3_norm = R_bxvx3 / torch.norm(R_bxvx3, dim=2, keepdim=True)
+            NS_b   = torch.sum(N_bx2 * vecs[:,0:2], dim=1)
+            D = - torch.sum(N_bx2 * self.det_pos[:,0:2], dim=1)
+            coeff_b = -(NS_b + D)
+            NR_bxv = torch.sum(N_bx2.unsqueeze(1).expand(-1,v,-1) * R_bxvx3_norm[:,:,0:2], dim=2)
+            t_bxv  = coeff_b.unsqueeze(1) / (NR_bxv+1e-10)
+
+        self.t_bxv = t_bxv
+        P_bxvx3 = S_bxvx3 + t_bxv.unsqueeze(2) * R_bxvx3_norm
+        
+        ## compute u,v coordinates
+        # P = detS + u a + v b, where a=vecs[:,6:9], b=vecs[:,9:12]
+        # a1 u = P1 - DetS1
+        # a2 u = P2 - DetS2
+        # b3 v = P3 - DetS3
+        
+        DetS_bx3 = self.det_pos - 0.5*self.height*vecs[:,9:12] - 0.5*self.width*vecs[:, 6:9]
+        P_D_bxvx3 = P_bxvx3 - DetS_bx3.unsqueeze(1).expand(-1,v,-1)
+        
+        # now we need to change to 2D points
+        proj_bxpx2 = torch.zeros([P_D_bxvx3.shape[0],P_D_bxvx3.shape[1], 2], dtype=self.dtype).cuda()
+        
+        # to avoid nonzero division
+        idx1 = torch.abs(vecs[:,6]) > torch.abs(vecs[:,7])
+        idx2 = ~idx1
+        
+        proj_bxpx2[idx1,:,0] = P_D_bxvx3[idx1,:,0] / vecs[idx1,6].unsqueeze(1).expand(-1,v)
+        proj_bxpx2[idx2,:,0] = P_D_bxvx3[idx2,:,1] / vecs[idx2,7].unsqueeze(1).expand(-1,v)
+        proj_bxpx2[:,:,1]    = P_D_bxvx3[:,:,2] / vecs[:,11].unsqueeze(1).expand(-1,v)        
+        
+        # rearange 2d point
+        xyf0 = proj_bxpx2[:, faces_fx3[:, 0], :]
+        xyf1 = proj_bxpx2[:, faces_fx3[:, 1], :]
+        xyf2 = proj_bxpx2[:, faces_fx3[:, 2], :]
+        proj_bxfx6 = torch.cat([xyf0, xyf1, xyf2], dim=2)
+
+        #-------- compute length
+        # rearange lengths
+        lf0 = len_vert_bxvx1[:, faces_fx3[:, 0], :] # shape: [b x f x 3]
+        lf1 = len_vert_bxvx1[:, faces_fx3[:, 1], :]
+        lf2 = len_vert_bxvx1[:, faces_fx3[:, 2], :]
+        len_bxfx3 = torch.cat([lf0, lf1, lf2], dim=2)
+        
+        #-------- compute front_facing
+        # R_bxvx3, normal_fx3
+        
+        if self.proj_geom['type'] == 'cone_vec':
+            rbf0 = R_bxvx3_norm[:, faces_fx3[:, 0], :] #bxfx3    
+        else:
+            rbf0 = vecs[:,0:3].unsqueeze(1).expand(-1,v,-1)[:, faces_fx3[:, 0], :]
+        
+        front_facing_bxfx1 = torch.sum(rbf0 * normal_fx3.unsqueeze(0).expand(vecs.shape[0],-1,-1), dim=2).unsqueeze(2)
+        
+        self.proj, self.len, self.front_facing = proj_bxfx6, len_bxfx3, front_facing_bxfx1    
+        
+        phat = self.rasterize(proj_bxfx6, len_bxfx3, front_facing_bxfx1,
+                             self.labels_fx2, mus_n, self.height, self.width, self.max_sino_val, backprop)
+        
+        phat = phat.squeeze()
+        mask_valid = get_valid_mask(phat, self.max_sino_val)
+        
+        return phat, mask_valid
+```
+
+### ctdr/nn/softras_loss.py
+```
+# Soft Rasterizer (SoftRas)
+# 
+# Copyright (c) 2017 Hiroharu Kato
+# Copyright (c) 2018 Nikos Kolotouros
+# Copyright (c) 2019 Shichen Liu
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+import torch
+import torch.nn as nn
+import numpy as np
+
+# from ctdr.function.rasterizer import dtype
+
+class LaplacianLoss(nn.Module):
+    def __init__(self, vertex, faces, average=False, dtype=torch.float32):
+        super(LaplacianLoss, self).__init__()
+        self.nv = vertex.size(0)
+        self.nf = faces.size(0)
+        self.average = average
+        laplacian = np.zeros([self.nv, self.nv]).astype(np.float32)
+
+        laplacian[faces[:, 0], faces[:, 1]] = -1
+        laplacian[faces[:, 1], faces[:, 0]] = -1
+        laplacian[faces[:, 1], faces[:, 2]] = -1
+        laplacian[faces[:, 2], faces[:, 1]] = -1
+        laplacian[faces[:, 2], faces[:, 0]] = -1
+        laplacian[faces[:, 0], faces[:, 2]] = -1
+
+        r, c = np.diag_indices(laplacian.shape[0])
+        laplacian[r, c] = -laplacian.sum(1)
+
+        for i in range(self.nv):
+            laplacian[i, :] /= (laplacian[i, i]+1e-10)
+
+        self.register_buffer('laplacian', torch.tensor(laplacian, dtype=dtype))
+
+    def forward(self, x):
+        """
+        x [num_points x 3]
+        """
+        x = torch.matmul(self.laplacian, x)
+        dims = tuple(range(x.ndimension())[1:])
+        x = x.pow(2).sum(dims)
+        return x
+
+# normal consistency modified from SoftRas code
+class FlattenLoss(nn.Module):
+    def __init__(self, faces, max_cos_dihedral=0.8):
+        super(FlattenLoss, self).__init__()
+        print("initialize flatten loss")
+        self.nf = faces.size(0)
+        
+        faces = faces.detach().cpu().numpy()
+        vertices = list(set([tuple(v) for v in np.sort(np.concatenate((faces[:, 0:2], faces[:, 1:3]), axis=0))]))
+
+        v0s = np.array([v[0] for v in vertices], 'int32')
+        v1s = np.array([v[1] for v in vertices], 'int32')
+        v2s = []
+        v3s = []
+
+        for v0, v1 in zip(v0s, v1s):
+            # the order might doesn't matter as we do inner product
+            bface = np.sum(faces == v0, axis=1) + np.sum(faces == v1, axis=1)
+            fidxs = np.where(bface == 2)[0]
+            
+            f1 = faces[fidxs[0]] 
+            v2s.append( f1[(f1 != v1) * (f1 != v0)] [0] )
+            
+            f2 = faces[fidxs[1]] 
+            v3s.append( f2[(f2 != v1) * (f2 != v0)] [0] )
+
+        # for v0, v1 in zip(v0s, v1s):
+        #     bface = np.sum(faces == v0, axis=1) + np.sum(faces == v1, axis=1)
+        #     fidxs = np.where(bface == 2)[0]
+            
+        #     f1 = faces[fidxs[0]] 
+        #     if (np.where(f1 == v0)[0][0] + 1) % 3 == ( np.where(f1 == v1)[0][0] ):
+        #         v2s.append( f1[(f1 != v1) * (f1 != v0)] [0] )
+        #         f2 = faces[fidxs[1]] 
+        #         v3s.append( f2[(f2 != v1) * (f2 != v0)] [0] )
+
+        #     else:
+        #         v3s.append( f1[(f1 != v1) * (f1 != v0)] [0] )
+        #         f2 = faces[fidxs[1]] 
+        #         v2s.append( f2[(f2 != v1) * (f2 != v0)] [0] )
+
+        v2s = np.array(v2s, 'int32')
+        v3s = np.array(v3s, 'int32')
+        
+        self.register_buffer('v0s', torch.from_numpy(v0s).long())
+        self.register_buffer('v1s', torch.from_numpy(v1s).long())
+        self.register_buffer('v2s', torch.from_numpy(v2s).long())
+        self.register_buffer('v3s', torch.from_numpy(v3s).long())
+
+        self.max_cos_dihedral = max_cos_dihedral
+
+    def forward(self, vertices, eps=1e-6):
+        # make v0s, v1s, v2s, v3s
+        batch_size = 1
+
+        v0s = vertices[self.v0s, :]
+        v1s = vertices[self.v1s, :]
+        v2s = vertices[self.v2s, :]
+        v3s = vertices[self.v3s, :]
+
+        c10 = v1s - v0s
+        c20 = v2s - v0s
+        c30 = v3s - v0s
+
+        n0 = torch.cross(c10, c20)
+        n1 = -torch.cross(c10, c30)
+
+        n0n = torch.norm(n0, dim=1)
+        n1n = torch.norm(n1, dim=1)
+
+        cos = torch.sum(n0 * n1, dim=1) / ( n0n * n1n )
+        # cos_ = cos[cos < 0.70710678118] # 0.52532198881 = cos(45 deg)
+        loss = (1.0 - cos).mean()
+        return loss
+            
+
+class FlattenLossOriginal(nn.Module):
+    def __init__(self, faces, max_cos_dihedral=0.8):
+        super(FlattenLoss, self).__init__()
+        print("initialize flatten loss")
+        self.nf = faces.size(0)
+        
+        faces = faces.detach().cpu().numpy()
+        vertices = list(set([tuple(v) for v in np.sort(np.concatenate((faces[:, 0:2], faces[:, 1:3]), axis=0))]))
+
+        v0s = np.array([v[0] for v in vertices], 'int32')
+        v1s = np.array([v[1] for v in vertices], 'int32')
+        v2s = []
+        v3s = []
+
+        for v0, v1 in zip(v0s, v1s):
+            bface = np.sum(faces == v0, axis=1) + np.sum(faces == v1, axis=1)
+            fidxs = np.where(bface == 2)[0]
+            
+            f1 = faces[fidxs[0]] 
+            v2s.append( f1[(f1 != v1) * (f1 != v0)] [0] )
+            
+            f2 = faces[fidxs[1]] 
+            v3s.append( f2[(f2 != v1) * (f2 != v0)] [0] )
+
+        v2s = np.array(v2s, 'int32')
+        v3s = np.array(v3s, 'int32')
+        
+        self.register_buffer('v0s', torch.from_numpy(v0s).long())
+        self.register_buffer('v1s', torch.from_numpy(v1s).long())
+        self.register_buffer('v2s', torch.from_numpy(v2s).long())
+        self.register_buffer('v3s', torch.from_numpy(v3s).long())
+
+        self.max_cos_dihedral = max_cos_dihedral
+
+    def forward(self, vertices, eps=1e-6):
+        # make v0s, v1s, v2s, v3s
+        batch_size = 1
+
+        v0s = vertices[self.v0s, :]
+        v1s = vertices[self.v1s, :]
+        v2s = vertices[self.v2s, :]
+        v3s = vertices[self.v3s, :]
+
+        a1 = v1s - v0s
+        b1 = v2s - v0s
+        a1l2 = a1.pow(2).sum(-1)
+        b1l2 = b1.pow(2).sum(-1)
+        a1l1 = (a1l2 + eps).sqrt()
+        b1l1 = (b1l2 + eps).sqrt()
+        ab1 = (a1 * b1).sum(-1)
+        cos1 = ab1 / (a1l1 * b1l1 + eps)
+        sin1 = (1 - cos1.pow(2) + eps).sqrt()
+        c1 = a1 * (ab1 / (a1l2 + eps))[:, None]
+        cb1 = b1 - c1
+        cb1l1 = b1l1 * sin1
+
+        a2 = v1s - v0s
+        b2 = v3s - v0s
+        a2l2 = a2.pow(2).sum(-1)
+        b2l2 = b2.pow(2).sum(-1)
+        a2l1 = (a2l2 + eps).sqrt()
+        b2l1 = (b2l2 + eps).sqrt()
+        ab2 = (a2 * b2).sum(-1)
+        cos2 = ab2 / (a2l1 * b2l1 + eps)
+        sin2 = (1 - cos2.pow(2) + eps).sqrt()
+        c2 = a2 * (ab2 / (a2l2 + eps))[:, None]
+        cb2 = b2 - c2
+        cb2l1 = b2l1 * sin2
+
+        cos = (cb1 * cb2).sum(-1) / (cb1l1 * cb2l1 + eps)
+        
+        # ind = cos > self.max_cos_dihedral
+        # ndegenerate = ind.sum()
+        
+        #loss = (cos[ind] + 1.).pow(2).mean()
+        # loss = cos[ind].pow(2).mean()
+        loss = (1 - cos).mean()
+        
+        # if ndegenerate > 0:
+        #     print("! degenerate dihedral angles", ndegenerate) 
+        
+        return loss
+```
+
+### ctdr/utils/projection.py
+```
+import numpy as np
+from scipy.spatial.transform import Rotation
+
+def project_vertices(vertices, angles, source_origin):
+    # rotation matrix for view
+    M_left = Rotation.from_quat([np.sin(np.pi/4), 0, 0, np.cos(np.pi/4)]).as_dcm()
+    view_vector = np.array([[0,0,-source_origin]])
+
+    M_bx3x3 = compute_M(idangles)
+    Mv_bx3xv = np.matmul(M_bx3x3, verts_vx3.transpose())
+    Mv_bx3xv = np.matmul(M_left, Mv_bx3xv)
+    VMv_bx3xv = Mv_bx3xv + np.expand_dims(view_vector, 2)
+    VMv_bxvx3 = VMv_bx3xv.transpose([0,2,1])
+    return VMv_bxvx3
+
+def ortho_Mat(left, right, bottom, top, near, far):
+#     return np.array(
+#     [
+#         [2.0 / (right - left), 0, 0, 0],
+#         [0, 2.0/(top-bottom), 0, 0 ],
+#         [0,0, 2.0/(near-far), 0],
+#         [ -(right+left)/(right-left),-(top+bottom)/(top-bottom),-(far+near)/(far-near),1]
+#     ], dtype=np.float32)
+    return np.array(
+    [
+        [2.0 / (right - left), 0,0, -(right+left)/(right-left) ],
+        [0, 2.0/(top-bottom), 0, -(top+bottom)/(top-bottom) ],
+        [0,0, 2.0/(near-far) , -(far+near)/(far-near)],
+        [0,0,0,1]
+    ], dtype=np.float32)
+
+def perp_Mat_tb(left, right, bottom, top, near, far):
+    return np.array(
+    [
+        [2.0*near / (right - left), 0, (right+left)/(right-left), 0 ],
+        [0, 2.0*near/(top-bottom), (top+bottom)/(top-bottom),0 ],
+        [0,0, -(far+near)/(far-near) , -2*(far*near)/(far-near)],
+        [0,0,-1,0]
+    ], dtype=np.float32)
+
+def perp_simple(fovy, ratio, near, far):
+    tanfov = np.tan(fovy / 2.0)
+    
+    mtx = [[1.0 / (ratio * tanfov), 0, 0, 0], \
+                [0, 1.0 / tanfov, 0, 0], \
+                [0, 0, -(far + near) / (far - near), -2 * far * near / (far - near)], \
+                [0, 0, -1.0, 0]]
+    
+    return np.array(mtx, dtype=np.float32)
+
+def perp_Mat(fovy, aspect, zNear, zFar):
+    assert(zNear>0)
+    assert(zFar>zNear)
+    assert(fovy>0)
+    top = np.tan(fovy / 2.) * zNear;
+    right = top * aspect
+    
+    return np.array([
+        [zNear / right, 0,0,0],
+        [0, zNear/top, 0,0],
+        [0, 0, -(zFar+zNear) / (zFar - zNear), -2.*zFar*zNear / (zFar-zNear)],
+        [0, 0, -1, 0]
+    ], dtype=np.float32)
+
+def compute_P(proj_geom):
+    if proj_geom['type'] == 'parallel3d':
+        
+        left  = -proj_geom['DetectorSpacingX'] * proj_geom['DetectorColCount'] / 2.0
+        bottom = -proj_geom['DetectorSpacingY'] * proj_geom['DetectorRowCount'] / 2.0
+        
+        halfU = 0.0 * proj_geom['DetectorSpacingX']
+        halfV = 0.5 * proj_geom['DetectorSpacingY']
+        #halfU, halfV = 0.0, 0.0
+        
+        diff_max_min_vertices = -4.0*left
+                
+        P = ortho_Mat(left-halfU, -left-halfU,
+                  bottom+halfV, -bottom+halfV,
+                  -0.5*diff_max_min_vertices,
+                  0.5*diff_max_min_vertices)
+        
+    elif proj_geom['type'] == 'cone':
+        left  = -proj_geom['DetectorSpacingX'] * proj_geom['DetectorColCount'] / 2.0 
+        bottom = -proj_geom['DetectorSpacingY'] * proj_geom['DetectorRowCount'] / 2.0
+        
+        halfU = -0. * proj_geom['DetectorSpacingX']
+        halfV = 0 * proj_geom['DetectorSpacingY']
+        
+        bottom -= 0.5 * proj_geom['DetectorSpacingY']
+        
+        
+        dsum = proj_geom['DistanceOriginSource']+proj_geom['DistanceOriginDetector']
+        
+        zNear = dsum  # TODO
+        zFar  = dsum+3 # it doesn't affect much
+        
+        P = perp_Mat_tb(left-halfU, -left+halfU, #-4+1, 4-1 = -3,3
+                  bottom+halfV, -bottom-halfV,
+                  zNear, zFar)
+        
+        halfV = 0.5 * proj_geom['DetectorSpacingY']
+        
+        dsum = proj_geom['DistanceOriginSource']+proj_geom['DistanceOriginDetector']
+        
+        Vhalf = proj_geom['DetectorSpacingY']*proj_geom['DetectorRowCount'] / 2. ;
+        aspect = proj_geom['DetectorColCount'] / (float(proj_geom['DetectorRowCount']) )
+        zNear = proj_geom['DistanceOriginSource']  # TODO
+        zFar  = dsum # it doesn't affect much
+        zNear = 1e-8
+        zFar = dsum
+        
+        fovy = 2. * np.math.atan2( Vhalf, dsum )
+        #P = perp_Mat(fovy, aspect, zNear, zFar)
+        P = perp_simple(fovy, aspect, zNear, zFar)
+        
+    return P
+    
+def compute_M(idx_angles, angles):
+    """
+    Generate model matrix of [B x 3 x 3]
+    
+    Args:
+        - idx_angles (long np [B]) : 
+        - angles (float np [num_angles])
+    """
+    B = idx_angles.shape[0]
+    quaternions = np.zeros([B, 4])
+    quaternions[:,2] = np.sin(-angles[idx_angles]/2.)
+    quaternions[:,3] = np.cos(-angles[idx_angles]/2.)
+        
+    R_obj_ = Rotation.from_quat(quaternions)
+    R_obj  = R_obj_.as_dcm()
+                
+    return R_obj
+```
+
+### ctdr/utils/render_objs.py
+```
+# import pyrender
+# import os
+# import glob
+# import trimesh
+# import matplotlib.pyplot as plt
+# import numpy as np
+
+# try:
+#     from ctdr.utils import util_mesh
+# except:
+#     import util_mesh
+
+# def render_from_vf(vert, faces, lv, lf, fname=None):
+#     nmaterials = lv.max()
+
+#     base = [[0.3,0.3,0.3,0.2], [0.0, 0.0, 0.9, 0.5], [0.0, 0.9, 0.0, 0.5], [0.9, 0.0, 0.0, 0.7]]
+#     mesh = []
+    
+#     camera = pyrender.PerspectiveCamera( yfov=np.pi / 3.0)
+#     scene = pyrender.Scene(bg_color=[0.0, 0.0, 0.0, 0.3],
+#                            ambient_light=(0.99, 0.99, 0.99))
+    
+#     # Set up the light -- a single spot light in the same spot as the camera
+#     light = pyrender.SpotLight(color=np.ones(3), intensity=3e2,
+#                            innerConeAngle=np.pi/16.0)
+#     c = 2**-0.5
+#     pose=[[1,0,0,0],[0,c,-c,-2],[0,c,c,2],[0,0,0,1]]
+#     scene.add(camera, pose=pose)
+    
+#     scene.add(light, pose=pose)
+    
+#     for i in range(nmaterials):
+        
+#         v = vert[lv==i+1,:]
+#         f = faces[lf[:,0]==i+1,:]
+#         f = f - f.min()
+        
+#         if nmaterials > 2:
+#             material = pyrender.Material(metallicFactor=0.5,
+#             alphaMode='BLEND', is_transparent=True)
+#         else:
+#             material = pyrender.MetallicRoughnessMaterial(metallicFactor=0.5,
+#             #material = None
+#             alphaMode='BLEND', baseColorFactor=base[i])
+            
+#         m = trimesh.Trimesh(v, f)
+#         mesh.append( pyrender.Mesh.from_trimesh(m, material=material))
+#         scene.add(mesh[i])
+        
+#     r = pyrender.OffscreenRenderer(viewport_width=480,
+#                                 viewport_height=480,
+#                                 point_size=2.0)
+#     col, dep = r.render(scene)
+    
+#     if fname is not None:
+#         plt.imsave(fname, col)
+        
+#     return col
+
+# def render_from_obj(fobj):
+#     vert, faces, lv, lf = util_mesh.load_template(fobj)
+#     return render_from_vf(vert, faces, lv, lf)
+
+# def render(dname):
+#     print(f"process {dname}")
+#     list_obj = glob.glob(dname+"/*.obj")
+#     for fobj in list_obj:
+#         print(fobj)
+#         col = render_from_obj(fobj)
+#         plt.imsave(f"{fobj[:-4]}_blending.png", col)
+
+    
+# if __name__ == "__main__":
+#     print(os.sys.argv)
+#     print("Input data name containing obj files")
+#     for d in os.listdir(os.sys.argv[1]):
+#         dname = os.sys.argv[1]+'/'+d
+#         if os.path.isdir(dname):
+#             render(dname)    
+# #render(os.sys.argv[1])
+```
+
+### ctdr/utils/util_fun.py
+```
+import torch
+import torch.nn as nn
+import numpy as np
+
+def compute_edge_length(vertices, faces):
+    p1 = torch.index_select(vertices, 0, faces[:, 0])
+    p2 = torch.index_select(vertices, 0, faces[:, 1])
+    p3 = torch.index_select(vertices, 0, faces[:, 2])
+    # get edge lentgh
+    e1 = p2 - p1
+    e2 = p3 - p1
+    e3 = p2 - p3
+
+    el1 = ((torch.sum(e1**2, 1))).mean()
+    el2 = ((torch.sum(e2**2, 1))).mean()
+    el3 = ((torch.sum(e3**2, 1))).mean()
+
+    edge_length = (el1 + el2 + el3) / 6.
+    return edge_length
+```
+
+### ctdr/utils/util_mesh.py
+```
+import numpy as np
+import pickle
+import trimesh
+
+EPS=1e-10
+
+def normalize_min_max(vertices, min_=-1, max_=1):
+    """Normalize np.ndarray vertices
+    """
+    vertices = (vertices - vertices.min(axis=0))\
+        / (vertices.max(axis=0) - vertices.min(axis=0) + EPS)
+    
+    vertices = vertices*(max_ - min_) + min_
+    return vertices
+
+import trimesh
+def save_subdivide_mesh(fname, fname_out=None):
+    "example:"
+    mesh = trimesh.load_mesh(fname)
+    v_new, f_new = trimesh.remesh.subdivide(mesh.vertices, mesh.faces)
+    mesh_ = trimesh.Trimesh(v_new, f_new)
+    
+    if fname_out is None:
+        obj_binary = trimesh.exchange.export.export_mesh(mesh_, '../template/sphere_642_1280.obj')
+
+        
+def subdivide_mesh_edgesize(fname, fname_out=None, max_edge=2):
+    "example:"
+    mesh = trimesh.load_mesh(fname)
+    v_new, f_new = trimesh.remesh.subdivide_to_size(mesh.vertices, mesh.faces, max_edge)
+    mesh_ = trimesh.Trimesh(v_new, f_new)
+    
+    if fname_out is None:
+        obj_binary = trimesh.exchange.export.export_mesh(mesh_, '../template/sphere_642_1280.obj')
+
+        
+def save_mesh(fname, verts, faces, labels_v=None, labels_f=None):
+    """
+    verts, faces : np array
+    """
+    if faces.min() == 0:
+        faces = faces.copy() + 1
+    
+    # single object
+    if labels_v is None:
+        with open(fname, "w") as f:
+            for v in verts:
+                f.write(f"v {v[0]} {v[1]} {v[2]}\n")
+            for ff in faces:
+                f.write(f"f {ff[0]} {ff[1]} {ff[2]}\n")
+                
+    else:
+        nmaterials = labels_v.max()
+        
+        with open(fname, "w") as f:
+            for m in range(nmaterials):
+                idx_faces = (labels_f[:,0] == m+1)
+                
+                in_label = np.unique(labels_f[idx_faces, 0])[0]
+                out_label = np.unique(labels_f[idx_faces, 1])[0]
+                
+                f.write(f"o object{m} {in_label} {out_label}\n")
+                
+                idx1 = (labels_v == m+1)
+                for v in verts[idx1,:]:
+                    f.write(f"v {v[0]} {v[1]} {v[2]}\n")
+                
+                # check the inward label
+                for ff in faces[idx_faces,:]:
+                    f.write(f"f {ff[0]} {ff[1]} {ff[2]}\n")
+
+def subdivide_save(fname, verts, faces, lv, lf, max_edge=0.1):
+    v_list = []
+    f_list = []
+    labels_v = []
+    labels_f = []
+
+    nmaterials = lv.max()+1
+    
+    prev_size = -1
+    print("before refine: ", verts.shape)
+
+    for i in range(1, nmaterials):
+        vi = verts[lv == i, :]
+        
+#         idxf = np.where(lf[:,0] == i)
+        fi = faces[lf[:,0]==i, :]
+
+        fi = fi - fi.min()
+        
+        # pre-smoothing and subdivide
+        print("filter by taubin")
+        mesh = trimesh.Trimesh(vi, fi)
+        trimesh.smoothing.filter_taubin(mesh, iterations=10)
+        # trimesh.smoothing.filter_taubin(mesh, iterations=10)
+        # trimesh.smoothing.filter_humphrey(mesh)
+        vi, fi = mesh.vertices, mesh.faces
+        v_new, f_new = trimesh.remesh.subdivide(vi, fi)
+
+        # The following seems to have serious erros 
+        # v_new, f_new = trimesh.remesh.subdivide_to_size(vi, fi, max_edge=max_edge)
+        # mesh = trimesh.Trimesh(v_new, f_new)
+        # mesh.fix_normals()
+        # v_new, f_new = mesh.vertices, mesh.faces
+        
+        print("f_new.min", f_new.min())
+        
+        v_list.append(v_new)
+        
+        if i == 1:
+            f_list.append(f_new+1)
+        else:
+            # i-2 is needed because i begins from 1
+            f_list.append(f_new+f_list[i-2].max()+1) 
+
+        #assert vi.shape[0] == fi.max()+1, print(vi.shape[0], fi.max())
+            
+        labels_v.append(np.ones(v_new.shape[0], dtype=np.int32)*i)
+
+        lft = np.zeros([f_new.shape[0], 2], dtype=np.int32)
+        lft[:,0] = i
+        lft[:,1] = lf[lf[:,0]==i,1][0]
+        labels_f.append(lft)
+
+    print("after refine: ", v_new.shape)
+    verts_out = np.concatenate(v_list, 0)
+    faces_out = np.concatenate(f_list, 0)
+    labels_v_out = np.concatenate(labels_v, 0)
+    labels_f_out = np.concatenate(labels_f, 0)
+
+    assert(labels_v_out.max() == labels_f_out.max())
+    
+    save_mesh(fname, verts_out, faces_out, labels_v_out, labels_f_out)
+
+def load_template(fname):
+    """
+    load obj file with 
+    """
+    # example:'o object1 2 3'
+    with open(fname) as f:
+        lines = f.readlines()
+        object_cnt = 0
+
+        labels_v = []
+        labels_f = []
+
+        labels_in = []
+        labels_out = []
+        idx_start_v = [0]
+        idx_start_f = [0]
+        
+        vertices = []
+        faces = []
+
+        for line in lines:
+            components = line.split()
+            if len(components) < 4:
+                continue
+            
+            if line[0:2] == 'v ':
+                vertices.append([float(components[1]), float(components[2]), float(components[3])])
+
+            elif line[0:2] == 'f ':
+                if components[1].find("/") < 0:
+                    faces.append([int(components[1]), int(components[2]), int(components[3])])
+                else:
+                    faces.append([int(components[1].split("/")[0]), int(components[2].split("/")[0]), int(components[3].split("/")[0])])
+
+            elif line[0:2] == 'o ':
+                object_cnt += 1
+                labels_in.append(int(components[2]))
+                labels_out.append(int(components[3]))
+
+                if object_cnt > 1:
+                    idx_start_v.append(len(vertices))
+                    idx_start_f.append(len(faces))
+
+    vertices = np.array(vertices)
+    faces = np.array(faces)
+    
+    idx_start_v.append(vertices.shape[0])
+    idx_start_f.append(faces.shape[0])
+    
+    labels_f = np.zeros([faces.shape[0], 2], dtype=np.int32)
+    labels_v = np.ones(vertices.shape[0], dtype=np.int32)
+
+    if object_cnt == 0:
+        # only single material
+        labels_v[:] = 1
+        labels_f[:, 0] = 1
+
+    else:
+        for i in range(object_cnt):
+            labels_v[idx_start_v[i]:idx_start_v[i+1]] = i+1
+            labels_f[idx_start_f[i]:idx_start_f[i+1], 0] = labels_in[i]
+            labels_f[idx_start_f[i]:idx_start_f[i+1], 1] = labels_out[i]
+
+    faces -= 1 # obj file begins from 0
+    
+    print(f"@statistics of mesh: # of v: {vertices.shape[0]}, f: {faces.shape[0]}")
+    return vertices, faces, labels_v, labels_f
+
+def save_obj_two_mesh(fname, mesh1, mesh2):
+    """
+    mesh1, mesh2: trimesh
+    mesh1: outside
+    mesh2: inside (face begins from index 1)
+    """
+    nv_mesh1 = mesh1.vertices.shape[0]
+    nf_mesh1 = mesh1.faces.shape[0]
+    labels_v = np.zeros(nv_mesh1+mesh2.vertices.shape[0], dtype=np.int32)
+    labels_v[:nv_mesh1] = 1
+
+    labels_f = np.zeros([nf_mesh1+mesh2.faces.shape[0], 2], dtype=np.int32)
+    labels_f[:nf_mesh1,0] = 1
+    labels_f[nf_mesh1:,0] = 2
+    labels_f[nf_mesh1:,1] = 1
+    labels_v[nv_mesh1:] = 2
+    
+    verts = np.concatenate([mesh1.vertices, mesh2.vertices], axis=0)
+    faces = np.concatenate([mesh1.faces, mesh2.faces+nv_mesh1], axis=0)
+    save_mesh(fname, verts, faces, labels_v, labels_f)
+    return mesh1, mesh2
+
+
+def gen_two_sphere(fname, outname, radius=0.3):
+    """
+    from fname sphere.obj, we make generate sphere outside
+    
+    Args
+        - radius (float) : the radius of inside sphere
+    """
+    
+    # load mesh
+    mesh = trimesh.load_mesh(fname)
+    
+    # normalize to lie [-1,1]
+    mesh.vertices = 2*(mesh.vertices -  mesh.vertices.min(0)) / (mesh.vertices.max(0) - mesh.vertices.min(0)) -1
+    
+    # generate the inside sphere with the given radius
+    mesh.vertices *= radius
+
+    nvertices = mesh.vertices.shape[0]
+    nfaces = mesh.faces.shape[0]
+
+    verts_new = np.zeros([nvertices*2, 3], dtype=np.float32)
+    verts_new[0:nvertices,:] = mesh.vertices
+    verts_new[nvertices:,:] = mesh.vertices * 2 # outside sphere
+
+    faces_new = np.zeros([nfaces*2, 3], dtype=np.int32)
+    faces_new[0:nfaces,:] = mesh.faces
+    faces_new[nfaces:,:] = mesh.faces + nvertices
+
+    new_mesh = trimesh.Trimesh(verts_new, faces_new)
+    
+    # inward and outward labels
+    labels_fx2 = np.zeros([nfaces*2, 2], dtype=np.int32)
+    # inside object
+    labels_fx2[:nfaces,0] = 2
+    labels_fx2[:nfaces,1] = 1
+    # outside object
+    labels_fx2[nfaces:,0] = 1
+    
+    labels_v = np.zeros([nvertices*2], dtype=np.int32)
+    labels_v[:nvertices] = 0
+    labels_v[nvertices:] = 1
+    
+    np.save(outname[:-4]+"_labels.npy", [labels_v, labels_fx2])
+    
+    string = new_mesh.export(".obj")
+    with open(outname, "w") as f:
+        f.write(string)
+
+
+# https://pytorch3d.readthedocs.io/en/latest/_modules/pytorch3d/utils/torus.html#torus
+
+# Make an iterator over the adjacent pairs: (-1, 0), (0, 1), ..., (N - 2, N - 1)
+def _make_pair_range(N):
+    from itertools import tee
+    i, j = tee(range(-1, N))
+    next(j, None)
+    return zip(i, j)
+
+def torus(
+    r: float,
+    R: float,
+    sides: int,
+    rings: int, rotate=False):
+    """
+    Create vertices and faces for a torus.
+
+    Args:
+        r: Inner radius of the torus.
+        R: Outer radius of the torus.
+        sides: Number of inner divisions.
+        rings: Number of outer divisions.
+        device: Device on which the outputs will be allocated.
+
+    Returns:
+        Meshes object with the generated vertices and faces.
+    """
+    if not (sides > 0):
+        raise ValueError("sides must be > 0.")
+    if not (rings > 0):
+        raise ValueError("rings must be > 0.")
+
+    verts = []
+    for i in range(rings):
+        # phi ranges from 0 to 2 pi (rings - 1) / rings
+        phi = 2 * np.pi * i / rings
+        for j in range(sides):
+            # theta ranges from 0 to 2 pi (sides - 1) / sides
+            theta = 2 * np.pi * j / sides
+            x = (R + r * np.cos(theta)) * np.cos(phi)
+            y = (R + r * np.cos(theta)) * np.sin(phi)
+            z = r * np.sin(theta)
+            # This vertex has index i * sides + j
+            if rotate:
+                verts.append([x, y, z])
+            else:
+                verts.append([y, z, x])
+
+    faces = []
+    for i0, i1 in _make_pair_range(rings):
+        index0 = (i0 % rings) * sides
+        index1 = (i1 % rings) * sides
+        for j0, j1 in _make_pair_range(sides):
+            index00 = index0 + (j0 % sides)
+            index01 = index0 + (j1 % sides)
+            index10 = index1 + (j0 % sides)
+            index11 = index1 + (j1 % sides)
+            faces.append([index00, index10, index11])
+            faces.append([index11, index01, index00])
+
+    return np.array(verts), np.array(faces)+1
+
+def compute_chamfer(file1, file2):
+    import kaolin
+    mesh1 = kaolin.rep.TriangleMesh.from_obj(file1)
+    mesh2 = kaolin.rep.TriangleMesh.from_obj(file2)
+
+    metric = kaolin.metrics.mesh.chamfer_distance(mesh1, mesh2)
+    print(metric)
+```
+
+### ctdr/utils/util_sino.py
+```
+import numpy as np
+import pickle
+import toml
+
+def sobel_filter(sino):
+    """
+    sino: [nangle x height x width]
+    """
+    from skimage import filters
+    edges = np.zeros(sino.shape)
+    for i in range(sino.shape[0]):
+        edges[i,:,:] = filters.roberts(sino[i,:,:])
+
+    return edges
+
+def read_from_toml(fname_toml, nangles=None):    
+    with open(fname_toml, 'r') as f:
+        dic = toml.load(f)
+    
+    dic['ProjectionAngles'] = np.array(dic['ProjectionAngles'], dtype=np.float32)
+    
+    if nangles is not None:
+        dic['ProjectionAngles'] = np.linspace(0, np.pi, nangles, False)
+        dic['nangles'] = nangles
+    
+    return dic
+
+
+def read_proj_info(fname, nangles=None, convert_vec=False):
+    """
+    fname can be toml (astra proj_geom) or pkl (astra-style vectors)
+    """
+    
+    if fname[-4:] == 'toml':
+        proj_geom = read_from_toml(fname, nangles=nangles)
+        if proj_geom['type'] == 'cone' or convert_vec:
+            proj_geom = geom_2vec(proj_geom)
+
+    elif fname[-3:] == 'pkl':
+        with open(fname, 'rb') as f:
+            proj_geom = pickle.load(f)
+            proj_geom['nangles'] = proj_geom['Vectors'].shape[0]
+            
+    # if toml and cone beam, c
+            
+    return proj_geom
+
+
+# from ASTRA-TOOLBOX
+# https://github.com/astra-toolbox/astra-toolbox/blob/10d87f45bc9311c0408e4cacdec587eff8bc37f8/python/astra/creators.py
+def create_vol_geom(*varargin):
+    """Create a volume geometry structure.
+This method can be called in a number of ways:
+``create_vol_geom(N)``:
+    :returns: A 2D volume geometry of size :math:`N \\times N`.
+``create_vol_geom((Y, X))``:
+    :returns: A 2D volume geometry of size :math:`Y \\times X`.
+``create_vol_geom(Y, X)``:
+    :returns: A 2D volume geometry of size :math:`Y \\times X`.
+``create_vol_geom(Y, X, minx, maxx, miny, maxy)``:
+    :returns: A 2D volume geometry of size :math:`Y \\times X`, windowed as :math:`minx \\leq x \\leq maxx` and :math:`miny \\leq y \\leq maxy`.
+``create_vol_geom((Y, X, Z))``:
+    :returns: A 3D volume geometry of size :math:`Y \\times X \\times Z`.
+``create_vol_geom(Y, X, Z)``:
+    :returns: A 3D volume geometry of size :math:`Y \\times X \\times Z`.
+``create_vol_geom(Y, X, Z, minx, maxx, miny, maxy, minz, maxz)``:
+    :returns: A 3D volume geometry of size :math:`Y \\times X \\times Z`, windowed as :math:`minx \\leq x \\leq maxx` and :math:`miny \\leq y \\leq maxy` and :math:`minz \\leq z \\leq maxz` .
+"""
+    vol_geom = {'option': {}}
+    # astra_create_vol_geom(row_count)
+    if len(varargin) == 1 and isinstance(varargin[0], int) == 1:
+        vol_geom['GridRowCount'] = varargin[0]
+        vol_geom['GridColCount'] = varargin[0]
+    # astra_create_vol_geom([row_count col_count])
+    elif len(varargin) == 1 and len(varargin[0]) == 2:
+        vol_geom['GridRowCount'] = varargin[0][0]
+        vol_geom['GridColCount'] = varargin[0][1]
+    # astra_create_vol_geom([row_count col_count slice_count])
+    elif len(varargin) == 1 and len(varargin[0]) == 3:
+        vol_geom['GridRowCount'] = varargin[0][0]
+        vol_geom['GridColCount'] = varargin[0][1]
+        vol_geom['GridSliceCount'] = varargin[0][2]
+    # astra_create_vol_geom(row_count, col_count)
+    elif len(varargin) == 2:
+        vol_geom['GridRowCount'] = varargin[0]
+        vol_geom['GridColCount'] = varargin[1]
+    # astra_create_vol_geom(row_count, col_count, min_x, max_x, min_y, max_y)
+    elif len(varargin) == 6:
+        vol_geom['GridRowCount'] = varargin[0]
+        vol_geom['GridColCount'] = varargin[1]
+        vol_geom['option']['WindowMinX'] = varargin[2]
+        vol_geom['option']['WindowMaxX'] = varargin[3]
+        vol_geom['option']['WindowMinY'] = varargin[4]
+        vol_geom['option']['WindowMaxY'] = varargin[5]
+    # astra_create_vol_geom(row_count, col_count, slice_count)
+    elif len(varargin) == 3:
+        vol_geom['GridRowCount'] = varargin[0]
+        vol_geom['GridColCount'] = varargin[1]
+        vol_geom['GridSliceCount'] = varargin[2]
+    # astra_create_vol_geom(row_count, col_count, slice_count, min_x, max_x, min_y, max_y, min_z, max_z)
+    elif len(varargin) == 9:
+        vol_geom['GridRowCount'] = varargin[0]
+        vol_geom['GridColCount'] = varargin[1]
+        vol_geom['GridSliceCount'] = varargin[2]
+        vol_geom['option']['WindowMinX'] = varargin[3]
+        vol_geom['option']['WindowMaxX'] = varargin[4]
+        vol_geom['option']['WindowMinY'] = varargin[5]
+        vol_geom['option']['WindowMaxY'] = varargin[6]
+        vol_geom['option']['WindowMinZ'] = varargin[7]
+        vol_geom['option']['WindowMaxZ'] = varargin[8]
+
+    # set the window options, if not set already.
+    if not 'WindowMinX' in vol_geom['option']:
+        vol_geom['option']['WindowMinX'] = -vol_geom['GridColCount'] / 2.
+        vol_geom['option']['WindowMaxX'] =  vol_geom['GridColCount'] / 2.
+        vol_geom['option']['WindowMinY'] = -vol_geom['GridRowCount'] / 2.
+        vol_geom['option']['WindowMaxY'] =  vol_geom['GridRowCount'] / 2.
+        if 'GridSliceCount' in vol_geom:
+            vol_geom['option']['WindowMinZ'] = -vol_geom['GridSliceCount'] / 2.
+            vol_geom['option']['WindowMaxZ'] =  vol_geom['GridSliceCount'] / 2.
+
+    return vol_geom
+
+
+# Modified from ASTRA-TOOLBOX
+# https://github.com/astra-toolbox/astra-toolbox/blob/10d87f45bc9311c0408e4cacdec587eff8bc37f8/python/astra/functions.py
+def geom_2vec(proj_geom):
+    """Returns a vector-based projection geometry from a basic projection geometry.
+    :param proj_geom: Projection geometry to convert
+    :type proj_geom: :class:`dict`
+    """
+    if proj_geom['type'] == 'cone':
+        angles = proj_geom['ProjectionAngles']
+        vectors = np.zeros((len(angles), 12))
+        for i in range(len(angles)):
+            # source
+            vectors[i, 0] = np.sin(angles[i]) * proj_geom['DistanceOriginSource']
+            vectors[i, 1] = -np.cos(angles[i]) * proj_geom['DistanceOriginSource']
+            vectors[i, 2] = 0
+
+            # center of detector
+            vectors[i, 3] = -np.sin(angles[i]) * proj_geom['DistanceOriginDetector']
+            vectors[i, 4] = np.cos(angles[i]) * proj_geom['DistanceOriginDetector']
+            vectors[i, 5] = 0
+
+            # vector from detector pixel (0,0) to (0,1)
+            vectors[i, 6] = np.cos(angles[i]) * proj_geom['DetectorSpacingX']
+            vectors[i, 7] = np.sin(angles[i]) * proj_geom['DetectorSpacingX']
+            vectors[i, 8] = 0
+
+            # vector from detector pixel (0,0) to (1,0)
+            vectors[i, 9] = 0
+            vectors[i, 10] = 0
+            vectors[i, 11] = proj_geom['DetectorSpacingY']
+
+        proj_geom_out = {}
+        proj_geom_out['type'] = 'cone_vec'
+        proj_geom_out['DetectorRowCount'] = proj_geom['DetectorRowCount']
+        proj_geom_out['DetectorColCount'] = proj_geom['DetectorColCount']
+        proj_geom_out['Vectors'] = vectors
+        proj_geom_out['DetectorSpacingY'] = proj_geom['DetectorSpacingY']
+        proj_geom_out['DetectorSpacingX'] = proj_geom['DetectorSpacingX']
+
+    # PARALLEL
+    elif proj_geom['type'] == 'parallel3d':
+        angles = proj_geom['ProjectionAngles']
+        vectors = np.zeros((len(angles), 12))
+        for i in range(len(angles)):
+
+            # ray direction
+            vectors[i, 0] = np.sin(angles[i])
+            vectors[i, 1] = -np.cos(angles[i])
+            vectors[i, 2] = 0
+
+            # center of detector
+            vectors[i, 3] = 0
+            vectors[i, 4] = 0
+            vectors[i, 5] = 0
+
+            # vector from detector pixel (0,0) to (0,1)
+            vectors[i, 6] = np.cos(angles[i]) * proj_geom['DetectorSpacingX']
+            vectors[i, 7] = np.sin(angles[i]) * proj_geom['DetectorSpacingX']
+            vectors[i, 8] = 0
+
+            # vector from detector pixel (0,0) to (1,0)
+            vectors[i, 9] = 0
+            vectors[i, 10] = 0
+            vectors[i, 11] = proj_geom['DetectorSpacingY']
+        
+        proj_geom_out = {}
+        proj_geom_out['type'] = 'parallel3d_vec'
+        proj_geom_out['DetectorRowCount'] = proj_geom['DetectorRowCount']
+        proj_geom_out['DetectorColCount'] = proj_geom['DetectorColCount']
+        proj_geom_out['Vectors'] = vectors
+        proj_geom_out['DetectorSpacingY'] = proj_geom['DetectorSpacingY']
+        proj_geom_out['DetectorSpacingX'] = proj_geom['DetectorSpacingX']
+        
+    else:
+        raise ValueError(
+        'No suitable vector geometry found for type: ' + proj_geom['type'])
+        
+    return proj_geom_out
+
+# def proj2vol(proj_geom, V=256):
+#     import astra
+#     """
+#     for the parallel beam, determine the volume size automatically
+#     """
+#     max_x = 1.4*(proj_geom['DetectorColCount']*proj_geom['DetectorSpacingX']*0.5)
+#     max_z = (proj_geom['DetectorRowCount']*proj_geom['DetectorSpacingY']*0.5)
+#     vol_geom = astra.create_vol_geom(V,V,proj_geom['DetectorRowCount'],-max_x,max_x,-max_x,max_x,-max_z,max_z)
+    
+#     return vol_geom
+
+def proj2vol(proj_geom, V):
+    #import astra
+    """
+    for the parallel beam, determine the volume size automatically
+    """
+    max_x = 1*(proj_geom['DetectorColCount']*proj_geom['DetectorSpacingX']*0.5)
+    max_z = 1*(proj_geom['DetectorRowCount']*proj_geom['DetectorSpacingY']*0.5)
+    
+    max_coord = max(max_x, max_z)
+    
+    #if proj_geom['type'].startswith('parallel'):
+    #    V = proj_geom
+    
+    max_x = max_coord
+    max_y = max_coord
+    max_z = max_coord
+    
+    vol_geom = create_vol_geom(V, V, V, -max_x,max_x,-max_x,max_x,-max_z,max_z)
+
+    return vol_geom
+
+class AstraTools3D:
+    """3D parallel beam projection/backprojection class based on ASTRA toolbox"""
+    def __init__(self, DetRows, DetColumns, AnglesVec, ObjSize):
+        self.ObjSize = ObjSize
+        self.proj_geom = astra.create_proj_geom('parallel3d', 1.0, 1.0, DetRows, DetColumns, AnglesVec)
+        if type(ObjSize) == tuple:
+            N1,N2,N3 = [int(i) for i in ObjSize]
+        else:
+            N1 = N2 = N3 = ObjSize
+        self.vol_geom = astra.create_vol_geom(N3, N2, N1)
+    def forwproj(self, object3D):
+        """Applying forward projection"""
+        proj_id, proj_data = astra.create_sino3d_gpu(object3D, self.proj_geom, self.vol_geom)
+        astra.data3d.delete(proj_id)
+        return proj_data
+    def backproj(self, proj_data):
+        """Applying backprojection"""
+        rec_id, object3D = astra.create_backprojection3d_gpu(proj_data, self.proj_geom, self.vol_geom)
+        astra.data3d.delete(rec_id)
+        return object3D
+
+
+
+def tomophantom2astra(DetRows, DetColumns, AnglesVec, ObjSize):
+    self.proj_geom = astra.create_proj_geom('parallel3d', 1.0, 1.0, DetRows, DetColumns, AnglesVec)
+```
+
+### ctdr/utils/util_vis.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+
+def convert_to_pyvista_format(f_):
+    """
+    in PyVista, face supports polygonal data, so we should specificy 3 for the triangle
+    """
+    f_ = np.array(f_).reshape([-1,3])
+    f = np.insert(f_, 0, 3*np.ones(f.shape[0]), axis=1) # for 
+    return f
+
+import trimesh
+def save_vf_as_img(fname, vertices, faces, nimage=4):
+    trim = trimesh.Trimesh(vertices=vertices.data.numpy()*0.4,
+                               faces=faces.data.numpy())
+    
+    
+    for i in range(nimage):
+        trim.apply_transform(trimesh.transformations.rotation_matrix(0.9*i,[2,1,0]))
+        scene = trim.scene()
+        try:
+            # increment the file name
+            file_name = f"{fname[:-4]}_{str(i)}.png"
+            # save a render of the object as a png
+            png = scene.save_image(resolution=[600, 600], visible=True)
+            
+            with open(file_name, 'wb') as f:
+                f.write(png)
+                f.close()
+        except BaseException as E:
+            print("unable to save image", str(E))
+
+def save_vf_as_img_labels(fname, vertices, faces, labels_v, labels_f):
+    nmaterials = labels_v.max()+1
+    
+    if nmaterials == 2:
+        save_vf_as_img(fname, vertices, faces)
+        return
+        
+    for m in range(1,nmaterials):
+        vv = vertices[labels_v==m, :]
+        l_idx = (labels_f[:, 0] == m)
+        ff = faces[l_idx, :]
+        ff = ff - ff.min() # make it index from 0
+                        
+        save_vf_as_img(f"{fname[:-4]}_m{m}.png", vv, ff, 2)
+            
+
+def save_sino_as_img(fname, proj, cmap='gray', log=None):
+    """
+    proj: [nangles, H, W]
+    """
+    idx1 = proj.shape[0]//4
+    idxs = [0, idx1, idx1*2, idx1*3]
+    for cnt, i in enumerate(idxs):
+        try:
+            file_name = f"{fname[:-4]}_{str(cnt)}.png"
+            if cmap == 'gray' and cnt != 1:
+                plt.imsave(file_name, proj[i,:,:], cmap=cmap)
+            
+            # save residual
+            else:
+                plt.gca().set_axis_off()
+                plt.subplots_adjust(top = 1, bottom = 0, right = 1, left = 0, 
+                            hspace = 0, wspace = 0)
+                plt.margins(0,0)
+                plt.gca().xaxis.set_major_locator(plt.NullLocator())
+                plt.gca().yaxis.set_major_locator(plt.NullLocator())
+                plt.imshow(proj[i,:,:], cmap=cmap)
+                plt.colorbar()
+                # save only one residual (others are left for paper later)
+                # if cnt == 1:
+                #     if log == None:
+                #         log=f"l2 square mean: {(proj**2).mean()}"
+                #     plt.text(30,30,log)
+                
+                plt.savefig(file_name, transparent=False, bbox_inches='tight', pad_inches=-0.01)
+                
+                plt.clf()
+                
+            
+        except BaseException as E:
+            print("unable to save image", str(E))
+```
+
+### ctdr/utils/util_voxel.py
+```
+import time
+import numpy as np
+from trimesh.voxel import ops
+import trimesh
+
+import skimage
+from skimage import measure
+from skimage.filters import threshold_multiotsu, threshold_otsu
+
+def extract_mesh(fname, vol, nmaterials=2, pitch=1.0):
+    """
+    vol (torch.tensor)
+    """
+    vol = (vol - vol.min()) / (vol.max()+ - vol.min() + 1e-12)
+    
+    if nmaterials == 2:
+        thresh = threshold_otsu(vol)
+        voln = skimage.restoration.denoise_tv_chambolle(voln, 0.0001)
+
+        verts, faces, normals, values = measure.marching_cubes_lewiner(voln, level=thresh, allow_degenerate=False)
+        mesh = trimesh.Trimesh(verts, faces)
+        obj_ = trimesh.exchange.obj.export_obj(mesh)
+        with open(fname, "w") as f:
+            f.write(obj_)
+        
+    else:
+        #from sklearn.cluster import KMeans
+        #kmeans = KMeans(n_clusters=3).fit(vol.reshape([-1,1]))
+        #c = sorted(kmeans.cluster_centers_[:,0])
+        #print("centroids of Kmeans:", c)
+        
+        thresholds = threshold_multiotsu(image, nmaterials)
+
+        
+        f = open(fname, 'w')
+        vert_start = 0
+        
+        f.write(f"# attenations by kmeans: {str(c)}")
+
+        for i in range(nmaterials-1):
+            f.write(f"o objecect{i} {i+1} {i}")
+            
+            thresh = (c[i] + c[i+1]) / 2.
+            # extract for each material
+            print(f"extract a material with a threshold {thresh}")
+            new_vol = vol.copy()
+            new_vol[new_vol<c[i]]=0.
+            new_vol[new_vol>=c[i+1]]=1.
+            new_vol = (new_vol - c[i]) / (c[i+1]-c[i] +1e-8)
+            
+            mesh = ops.matrix_to_marching_cubes(matrix=new_vol, pitch=pitch)
+            
+            #mesh.export(fname[:-4]+str(i)+".obj")
+        
+            for vert in mesh.vertices:
+                f.write('v %f %f %f\n' % tuple(vert+vert_start))
+            
+            for face in mesh.faces:
+                f.write('f %d %d %d\n' % tuple(face + 1 + vert_start))
+                
+            vert_start += mesh.vertices.shape[0]
+            print(vert_start)
+        
+        f.close()
+        return
+    
+
+# def rec_vol(proj_geom, sinogram, vol_geom, algo='fbp', niter=50, mesh_name=None):
+    # if algo == 'fbp':
+        # rec = init_FBP(proj_geom, sinogram, vol_geom)
+    
+    # elif algo == 'sirt':
+        # rec = init_SIRT(proj_geom, sinogram, vol_geom, niter)
+        
+    # elif algo == 'tvrdart':
+        # rec = init_TVRDART(proj_geom, sinogram, vol_geom, niter)
+    
+    # elif algo == 'pals':
+        # pass
+    
+    # vol = (rec - rec.min()) / (rec.max() - rec.min())
+    
+    # mesh = kaolin.conversions.voxelgrid_to_trianglemesh(torch.FloatTensor(vol))
+    # tmesh = kaolin.rep.TriangleMesh.from_tensors(mesh[0], mesh[1])
+    
+    # if mesh_name is not None:
+        # tmesh.save_mesh(fname)
+        
+    # return rec, mesh[0], mesh[1]
+```

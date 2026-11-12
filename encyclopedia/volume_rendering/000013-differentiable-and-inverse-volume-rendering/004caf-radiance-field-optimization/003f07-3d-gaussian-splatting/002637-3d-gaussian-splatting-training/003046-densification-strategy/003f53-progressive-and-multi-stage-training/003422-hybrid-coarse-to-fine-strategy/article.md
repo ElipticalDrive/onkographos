@@ -1,72 +1,199 @@
 # Hybrid Coarse-to-Fine Strategy
 
-Also called: Hybrid coarse-to-fine densification, Multi-stage point cloud refinement
+Also called: Hybrid coarse-to-fine densification, multi-stage point cloud refinement
 
 ## Overview
-The Hybrid Coarse-to-Fine Strategy is a training methodology for point-based radiance field representations that divides optimization into distinct phases to manage primitive density and stability [S1]. Unlike single-stage training, which often suffers from instability or suboptimal convergence, this approach initializes a coarse representation and progressively refines it through densification steps [S1]. It sets itself apart from sibling methods like [Curriculum Learning with Slice and Voxel Supervision](12921-curriculum-learning-with-slice-and-voxel-supervision.md) by focusing on the structural evolution of the primitive population (points or meshes) rather than alternating supervision signals [S1, S2].
+A training strategy that improves rendering quality by refining a point cloud representation through multiple sequential stages, rather than optimizing the entire point cloud in a single stage [S1]. It sets itself apart from single-stage training by decoupling the initialization of coarse structures from the fine-grained densification, preventing the optimizer from getting stuck in poor local minima caused by insufficient initial coverage [S1]. This approach builds on the principles of [Progressive and Multi-stage Training](9966-progressive-and-multi-stage-training.md) by ensuring that the geometric representation evolves from sparse to dense in a controlled manner.
 
 ## How it works
-The strategy operates by initializing a sparse geometric structure and iteratively increasing its density based on rendering error metrics, while maintaining differentiability for end-to-end optimization [S1, S2].
+The method operates on a set of 3D points (or mesh vertices) that are optimized to minimize the difference between rendered images and ground truth. The core mechanism involves an initial sparse representation followed by iterative densification steps based on error metrics.
 
-### Inputs and Outputs
-*   **Inputs:** A set of input images (and optionally depth/normal priors), initial camera poses, and hyperparameters for densification frequency and thresholds.
-*   **Outputs:** A refined set of primitives (points or mesh vertices) with optimized attributes (position, color, opacity, spherical harmonics coefficients) and a trained radiance field model.
+**Inputs and Outputs:**
+*   **Input:** A set of camera poses, corresponding target images, and an initial sparse geometric representation (points or mesh).
+*   **Output:** A refined set of points/mesh vertices with optimized attributes (position, color, opacity, etc.).
 
-### Data Structures
-The specific data structure depends on the variant:
-1.  **Point Cloud (Standard):** A list of $N$ points, each with position $\mathbf{p} \in \mathbb{R}^3$, opacity $\alpha$, color $\mathbf{c}$ (encoded via Spherical Harmonics or RGB), and covariance $\Sigma$ (for Gaussian splatting) or radius [S1].
-2.  **Mesh (Coarse-to-Fine Densification Variant):** A set of vertices $V$ and a connectivity list defining triangles $T$. Each vertex stores features (color, etc.) [S2].
+**Data Structures:**
+*   **Point Cloud/Mesh:** A list of vertices $V$. For mesh-based variants, this includes a connectivity structure (triangles) defined by vertex indices.
+*   **Attributes:** Per-vertex attributes such as position $\mathbf{p}$, color $\mathbf{c}$, opacity $\alpha$, and potentially spherical harmonic coefficients for directional appearance.
+*   **Error Map:** A per-pixel or per-triangle metric (e.g., DSSIM) used to guide densification.
 
-### Numbered Steps
+**Numbered Steps:**
 
-#### 1. Initialization
-Initialize the primitive population sparsely.
-*   **For Point Clouds:** Randomly sample points or use a coarse grid [S1].
-*   **For Meshes:** Compute Sobel gradient magnitudes on a downsampled target image. Sample initial vertex positions proportionally to edge strength, applying a small uniform floor to ensure coverage. Create a Delaunay triangulation of these points, adding boundary vertices to ensure full image coverage [S2].
+1.  **Initialization:**
+    *   Generate an initial sparse representation. For mesh-based approaches, this involves computing Sobel gradient magnitudes on a downsampled target image.
+    *   Sample initial vertex positions proportionally to edge strength, applying a small uniform floor to ensure coverage.
+    *   Create a Delaunay triangulation of the sampled points, adding boundary vertices to ensure full image coverage [S2].
+    *   For point-based approaches, initialize a sparse set of points [S1].
 
-#### 2. Coarse Training
-Optimize the initial sparse representation using standard differentiable rendering losses (e.g., L1 color loss, SSIM) for a predefined number of iterations or until convergence [S1, S2].
+2.  **Single-Stage Baseline (Optional/Contextual):**
+    *   In ablation studies, training can be performed in a single stage without refinement to establish a baseline [S1]. However, the hybrid strategy explicitly avoids this.
 
-#### 3. Iterative Densification
-Repeat the following cycle until the target iteration count or density is reached:
-
-1.  **Scoring:** Evaluate the error of each primitive.
-    *   For mesh variants, score each triangle $t$ using:
+3.  **Iterative Densification (Hybrid Strategy):**
+    *   The training proceeds in stages. The densification step occurs periodically (e.g., every 500 iterations) within a specified range (e.g., iterations 1,500 to 15,000) [S2].
+    *   **Scoring:** For each triangle $t$ (in mesh variants) or region, compute a score based on rendering error and area:
         $$ \text{score}_t = \overline{\text{DSSIM}}_t \cdot |\text{pixels}_t|^\alpha $$
-        where $\overline{\text{DSSIM}}_t$ is the mean per-pixel structural dissimilarity of triangle $t$, $|\text{pixels}_t|$ is the number of pixels covered by the triangle, and $\alpha = 0.75$ is an area-weighting exponent [S2].
-    *   Exclude primitives covering fewer than 3 pixels from scoring [S2].
-2.  **Selection:** Identify the top-scoring primitives that require refinement.
-3.  **Insertion:**
-    *   **Mesh Variant:** Insert centroid vertices for the top-scoring triangles. The number of new vertices is limited to $0.35 \times V$, where $V$ is the current vertex count. Initialize new vertex features by averaging the parent triangle's vertex features. Re-run Delaunay triangulation on the full vertex set [S2].
-    *   **Point Cloud Variant:** Split or clone high-error points, initializing new attributes based on the parent (e.g., averaging colors, copying positions with small jitter) [S1, G].
-4.  **Re-optimization:** Continue training the expanded primitive set with the rendering loss [S1, S2].
+        where:
+        *   $\overline{\text{DSSIM}}_t$ is the mean DSSIM (per-pixel structural dissimilarity) of triangle $t$.
+        *   $|\text{pixels}_t|$ is the number of pixels covered by triangle $t$.
+        *   $\alpha = 0.75$ is an area-weighting exponent [S2].
+    *   **Filtering:** Exclude triangles with fewer than 3 pixels from scoring [S2].
+    *   **Vertex Insertion:** Identify the top-scoring triangles. Insert centroid vertices for these triangles. The number of new vertices is limited to $0.35 \times V$, where $V$ is the current vertex count [S2].
+    *   **Feature Initialization:** Initialize the attributes of new vertices by averaging the attributes of the parent triangle's vertices [S2].
+    *   **Re-triangulation:** Re-run Delaunay triangulation on the full set of vertices to update connectivity [S2].
+    *   **Degeneracy Check:** Detect if the mesh becomes degenerate (e.g., colinear vertices) and re-mesh if necessary, though this is rare [S2].
 
-### Parameters
-*   **Densification Frequency:** Every 500 iterations (typical for mesh variants) [S2].
-*   **Start/End Iterations:** Densification starts at iteration 1,500 and ends at 15,000 (typical for mesh variants) [S2].
-*   **Area-weighting exponent ($\alpha$):** 0.75 [S2].
-*   **Max New Vertices/Points:** 35% of current count ($0.35 \times V$) [S2].
-*   **Minimum Pixel Coverage:** 3 pixels [S2].
+4.  **Optimization:**
+    *   Between densification steps, optimize the attributes (position, color, etc.) of all vertices using gradient descent to minimize the rendering loss [S1, S2].
 
-### Edge Cases and Pitfalls
-*   **Degeneracy:** Meshes may become degenerate (e.g., colinear vertices) during densification. A remeshing step should be triggered if degeneracy is detected, though this is rare in practice [S2].
-*   **Tiny High-Error Triangles:** Without area weighting ($\alpha$), tiny triangles with high error may be repeatedly split, leading to uneven distribution. The exponent $\alpha=0.75$ mitigates this [S2].
-*   **Precision:** Ensure gradient computation remains stable during the insertion phase, as the topology changes [S1, S2].
+**Parameters:**
+*   $\alpha = 0.75$: Area-weighting exponent [S2].
+*   Densification frequency: Every 500 iterations [S2].
+*   Densification range: Iterations 1,500 to 15,000 [S2].
+*   Vertex insertion limit: $0.35 \times V$ new vertices per step [S2].
+*   Minimum pixel coverage: 3 pixels [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Degeneracy:** Meshes can become degenerate if vertices become colinear. A re-meshing step is required, though it rarely occurs in practice [S2].
+*   **Tiny Triangles:** Without area weighting ($\alpha$), tiny high-error triangles might be repeatedly split, leading to uneven vertex distribution. The exponent $\alpha$ mitigates this [S2].
+*   **Insufficient Coverage:** A uniform floor in initial sampling prevents gaps in the initial representation [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_coarse_to_fine_training(initial_vertices, initial_triangles, images, poses, num_iterations=15000):
+    """
+    Performs hybrid coarse-to-fine training for a point cloud/mesh representation.
+    
+    Args:
+        initial_vertices: List of initial vertex positions.
+        initial_triangles: List of initial triangle indices.
+        images: List of target images.
+        poses: List of camera poses.
+        num_iterations: Total number of training iterations.
+        
+    Returns:
+        Final set of vertices and triangles.
+    """
+    vertices = initial_vertices
+    triangles = initial_triangles
+    
+    # Densification parameters
+    densify_start = 1500
+    densify_end = 15000
+    densify_freq = 500
+    alpha = 0.75
+    max_new_vertices_ratio = 0.35
+    min_pixels = 3
+    
+    for iteration in range(1, num_iterations + 1):
+        # 1. Optimization Step
+        # Render current view and compute loss against target image
+        # Backpropagate to update vertex attributes (position, color, etc.)
+        optimize_vertices(vertices, triangles, images, poses)
+        
+        # 2. Densification Step
+        if densify_start <= iteration <= densify_end and iteration % densify_freq == 0:
+            # Score triangles based on DSSIM and area
+            triangle_scores = []
+            for t in triangles:
+                # Calculate mean DSSIM for triangle t
+                dssim_t = compute_mean_dssim(t, vertices, images, poses)
+                # Calculate number of pixels covered by triangle t
+                pixels_t = count_pixels_covered(t, vertices, images, poses)
+                
+                # Exclude triangles with fewer than min_pixels
+                if pixels_t < min_pixels:
+                    continue
+                
+                # Compute score
+                score = dssim_t * (pixels_t ** alpha)
+                triangle_scores.append((score, t))
+            
+            # Sort triangles by score descending
+            triangle_scores.sort(key=lambda x: x[0], reverse=True)
+            
+            # Determine number of new vertices to insert
+            current_v_count = len(vertices)
+            num_new_vertices = int(max_new_vertices_ratio * current_v_count)
+            
+            # Select top-scoring triangles
+            top_triangles = [t for _, t in triangle_scores[:num_new_vertices]]
+            
+            # Insert centroid vertices
+            new_vertices = []
+            for t in top_triangles:
+                # Calculate centroid of the triangle
+                centroid = compute_centroid(vertices[t[0]], vertices[t[1]], vertices[t[2]])
+                new_vertices.append(centroid)
+                
+                # Initialize attributes by averaging parent vertex attributes
+                # (Assuming attributes are stored in a separate structure aligned with vertices)
+                init_attributes = average_attributes(vertices[t[0]], vertices[t[1]], vertices[t[2]])
+                # Store attributes for new vertex
+                
+            # Add new vertices to the vertex list
+            vertices.extend(new_vertices)
+            
+            # Re-run Delaunay triangulation
+            triangles = run_delaunay_triangulation(vertices)
+            
+            # Check for degeneracy and re-mesh if necessary
+            if is_degenerate(triangles):
+                triangles = re_mesh(vertices)
+                
+    return vertices, triangles
+
+def compute_mean_dssim(triangle, vertices, images, poses):
+    # Render the triangle's contribution to the image
+    # Compute per-pixel DSSIM between rendered and target
+    # Return mean DSSIM
+    pass
+
+def count_pixels_covered(triangle, vertices, images, poses):
+    # Project triangle to image plane
+    # Count pixels covered by the projected triangle
+    pass
+
+def compute_centroid(v0, v1, v2):
+    return (v0 + v1 + v2) / 3.0
+
+def average_attributes(v0, v1, v2):
+    # Average all relevant attributes (color, opacity, etc.)
+    pass
+
+def run_delaunay_triangulation(vertices):
+    # Perform Delaunay triangulation on the set of vertices
+    pass
+
+def is_degenerate(triangles):
+    # Check for colinear vertices or zero-area triangles
+    pass
+
+def re_mesh(vertices):
+    # Re-initialize mesh from scratch or using a robust re-meshing algorithm
+    pass
+
+def optimize_vertices(vertices, triangles, images, poses):
+    # Standard optimization loop: render, compute loss, backprop
+    pass
+```
 
 ## Subtopics
 
 ### Coarse-to-Fine Densification
-A variant specifically using mesh-based initialization and refinement. It initializes a sparse mesh via edge-aware sampling and refines it by inserting centroid vertices for high-scoring triangles based on DSSIM and area weighting [S2]. Choose this when the scene benefits from explicit geometric surface representation during initialization, or when dealing with HDR data where shadow detail preservation is critical [S2].
+A specific variant of the hybrid strategy that uses a mesh representation. It initializes a sparse mesh via edge-aware sampling and progressively refines it by inserting centroid vertices for high-scoring triangles and re-running Delaunay triangulation [S2]. It is chosen when a mesh-based representation is preferred over a point cloud, offering structured connectivity. The key differentiator is the use of DSSIM and area-weighted scoring for triangle splitting [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Higher than single-stage training due to iterative densification and re-triangulation (for mesh variants) or re-initialization (for point variants). Mesh variants require $O(V \log V)$ for Delaunay triangulation at each step [S2].
-*   **Memory Complexity:** Increases linearly with the number of primitives as densification proceeds.
-*   **Performance:** Significantly improves rendering quality. On the Blender dataset, removing the hybrid strategy reduces PSNR from 30.3 dB to 26.6 dB, SSIM from 0.945 to 0.925, and increases LPIPS from 0.078 to 0.163 [S1].
-*   **Strengths:** Prevents local minima associated with dense initialization; ensures stable convergence; distributes primitives evenly based on error [S1, S2].
-*   **Limitations:** Requires careful tuning of densification schedules and thresholds; computationally more expensive per iteration due to topology updates [S1, S2].
+*   **Time Complexity:** The densification step involves scoring all triangles and re-running Delaunay triangulation, which is computationally expensive ($O(V \log V)$ or worse depending on implementation). However, it occurs only periodically (every 500 iterations) [S2]. The overall training time is reported to be between 1-3 minutes on an RTX A6000 for typical scenes [S2].
+*   **Memory Complexity:** Memory usage scales with the number of vertices $V$. The densification step increases $V$ by up to 35% per step, leading to a significant increase in memory requirements compared to single-stage training [S2].
+*   **Performance:** On the Blender dataset, the hybrid strategy achieves a PSNR of 30.3 dB, SSIM of 0.945, and LPIPS of 0.078, significantly outperforming single-stage training (26.6 dB PSNR, 0.925 SSIM, 0.163 LPIPS) [S1].
+*   **Strengths:** Improves rendering quality by ensuring a well-distributed initial coverage and gradual refinement. Prevents local minima associated with sparse initialization [S1].
+*   **Limitations:** More complex to implement than single-stage training. Requires careful tuning of densification parameters (frequency, ratio, scoring function) [S2].
 
 ## Background
-The Hybrid Coarse-to-Fine Strategy originates from differentiable point-based radiance field research, which seeks to provide an alternative to volumetric neural rendering by using points without sacrificing end-to-end differentiability [S1]. It was introduced to address the instability and poor convergence of single-stage training for sparse point clouds [S1]. The mesh-based variant (Coarse-to-Fine Densification) was later developed to leverage explicit geometric priors for high-quality primitive-based neural reconstruction, particularly in HDR contexts [S2].
+The hybrid coarse-to-fine strategy originates from research into differentiable point-based radiance fields. It was introduced as a component of a method that investigates point-based representations as an alternative to volumetric and coordinate-network approaches [S1]. The strategy was validated through ablation studies showing its contribution to view synthesis performance [S1]. A related mesh-based variant, "Coarse-to-Fine Densification," was proposed in the context of Neural Harmonic Textures, emphasizing edge-aware initialization and DSSIM-based refinement [S2].
 
 ## Sources
 [S1] Differentiable Point-Based Radiance Fields for Efficient View Synthesis, https://doi.org/10.1145/3550469.3555413, fetched 2026-10-26

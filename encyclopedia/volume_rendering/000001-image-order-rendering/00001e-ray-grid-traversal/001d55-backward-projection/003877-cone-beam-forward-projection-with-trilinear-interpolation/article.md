@@ -3,150 +3,116 @@
 Also called: Cone Beam Forward Projection, ConeBeam Projector (General 3D)
 
 ## Overview
-Computes the projection of a 3D volume onto a 2D detector array for cone beam geometry by ray-casting through the volume [S1, unofficial]. It uses trilinear interpolation to sample the volume along rays defined by source and detector positions [S1, unofficial]. It simulates cone-beam projections by reading volumes in a specific bricked layout with a 1-voxel zero border [S1, unofficial].
+Computes the projection of a 3D volume onto a 2D detector array for cone-beam geometry by integrating voxel values along explicit source-to-detector segments [S1, unofficial]. It differs from its parent [Backward Projection](1491-backward-projection.md) by performing the forward integral using trilinear interpolation on a bricked volume layout, and from [GPU Backprojection](5843-gpu-backprojection.md) by operating on the forward ray-casting direction rather than distributing values back to the volume.
 
 ## How it works
 **Inputs:**
-- Volume tensor in standard layout $[B, 1, Z, Y, X]$ [S1, unofficial].
-- Source positions tensor of shape `[views, 3]` [S1, unofficial].
-- Detector positions tensor of shape `[views, rows, columns, 3]` [S1, unofficial].
-- Bounding box parameters `box` defining volume dimensions and scaling factors [S1, unofficial].
-- Number of samples per ray $n$ (e.g., 192) [S1, unofficial].
-- Number of channels $C$ (template parameter, typically 1, 2, or 4) [S1, unofficial].
+- `volume`: 3D volume data. Must be converted to a bricked layout with a 1-voxel zero border on all sides. Standard input is `[B, 1, Z, Y, X]` [S1, unofficial].
+- `source_positions`: Tensor of shape `[views, 3]` [S1, unofficial].
+- `detector_positions`: Tensor of shape `[views, rows, columns, 3]` [S1, unofficial].
+- `volume_shape`: Tuple `(z, y, x)` defining the logical dimensions of the volume [S1, unofficial].
+- `n_samples`: Integer, number of samples per ray (e.g., 192) [S1, unofficial].
 
 **Outputs:**
-- Projection tensor of shape $[B, C, \text{views}, \text{rows}, \text{columns}]$ [S1, unofficial].
+- `projections`: Tensor of shape `[B, 1, views, rows, columns]` [S1, unofficial].
 
 **Data Structures:**
-- **Layout:** Defined by volume dimensions $X, Y, Z$, detector plane stride `plane`, and `bricks_x` [S1, unofficial].
-- **Volume Storage:** Padded with a 1-voxel zero border on all sides [S1, unofficial]. Stored in bricks of $4 \times 4 \times 4$ voxels [S1, unofficial]. The Python wrapper `_brick` converts standard tensors to this layout $[\text{bricks} \times 64, \text{group}]$ [S1, unofficial].
-- **ConeRay:** Contains entry/exit distances, direction components, initial position, step size, and weight [S1, unofficial].
+- **Layout**: Defined by fields `X`, `Y`, `Z` (volume dimensions), `plane` (stride for detector plane), and `bricks_x` (number of bricks in X direction) [S1, unofficial].
+- **Brick Storage**: Volumes are stored in bricks of $4 \times 4 \times 4$ voxels. The Python wrapper `_brick` converts standard tensors to this layout `[bricks * 64, group]` [S1, unofficial].
+- **ConeRay**: Struct containing ray origin (`px, py, pz`), direction (`sx, sy, sz`), entry/exit fractions, weight, and axis information for boundary clipping [S1, unofficial].
 
-**Steps:**
-1. **Brick Conversion:** Convert the input volume from standard layout $[B, 1, Z, Y, X]$ to the bricked layout $[\text{bricks} \times 64, C]$ using the `_brick` function [S1, unofficial].
-2. **Kernel Launch:** Launch a CUDA kernel with grid size derived from the projection shape and block size $(8, 16, 1)$ [S1, unofficial]. The kernel is specialized for $C \in \{1, 2, 4\}$ [S1, unofficial].
-3. **Thread Indexing:** Each thread handles one detector pixel for one view [S1, unofficial].
-   - `column = blockIdx.x * blockDim.x + threadIdx.x`
-   - `row = blockIdx.y * blockDim.y + threadIdx.y`
-   - `view = blockIdx.z`
-   - `ray_index = ((size_t)view * R + row) * W + column` where $R$ is detector height, $W$ is detector width [S1, unofficial].
-4. **Initialization:** Initialize accumulator `acc[C]` to $0.0f$ and `weight` to $0.0f$ [S1, unofficial].
-5. **Ray Construction:** Construct `ConeRay` from source, detector, and bounding box [S1, unofficial].
-   - Calculate ray direction and length [S1, unofficial].
-   - Clip ray against bounding box to find entry and exit distances [S1, unofficial].
-   - If the ray misses or has non-positive span, set `missed = true` [S1, unofficial].
-   - If valid, set `weight = ray.weight` where `ray.weight = span / n` [S1, unofficial].
-   - Calculate initial sample position at half-step: `first = ray.entry + 0.5f * ray.weight` [S1, unofficial].
-   - Compute initial position `px, py, pz` and step components `sx, sy, sz` [S1, unofficial].
-6. **Sampling Loop:** Loop $k$ from $0$ to $n-1$ [S1, unofficial].
-   - Calculate sample position:
-     $$px = \text{ray.px} + k \cdot \text{ray.sx}$$
-     $$py = \text{ray.py} + k \cdot \text{ray.sy}$$
-     $$pz = \text{ray.pz} + k \cdot \text{ray.sz}$$
-     (Using fused multiply-add `__fmaf_rn` for precision) [S1, unofficial].
-   - Compute integer voxel coordinates:
-     $$ix = \lfloor px \rfloor, \quad iy = \lfloor py \rfloor, \quad iz = \lfloor pz \rfloor$$
-     (Using `__float2int_rd`) [S1, unofficial].
-   - If voxel coordinates changed from previous step ($ix \neq x_0$ or $iy \neq y_0$ or $iz \neq z_0$):
-     - Compute cell index and offsets $(ox, oy, oz)$ using a `cell` function [S1, unofficial].
-     - Fetch 8 voxel values $v[8][C]$ from the bricked volume [S1, unofficial].
-     - Update $x_0, y_0, z_0$ to current $ix, iy, iz$ [S1, unofficial].
-   - Compute fractional offsets:
-     $$dx = px - ix, \quad dy = py - iy, \quad dz = pz - iz$$ [S1, unofficial].
-   - Perform trilinear interpolation:
-     - For $C=1$:
-       $$acc[0] += (1-dx)(1-dy)(1-dz)v[0] + dx(1-dy)(1-dz)v[1] + (1-dx)dy(1-dz)v[2] + dx dy (1-dz)v[3] + (1-dx)(1-dy)dz v[4] + dx(1-dy)dz v[5] + (1-dx)dy dz v[6] + dx dy dz v[7]$$
-       (Implemented using nested `__fmaf_rn` calls) [S1, unofficial].
-     - For $C>1$:
-       $$wx[2] = \{1-dx, dx\}, \quad wy[2] = \{1-dy, dy\}, \quad wz[2] = \{1-dz, dz\}$$
-       Loop $q=0..7$:
-       $$w = (wz[q>>2] \cdot wy[(q>>1)\&1]) \cdot wx[q\&1]$$
-       $$acc[c] += w \cdot v[q][c] \quad \forall c \in [0, C)$$ [S1, unofficial].
-7. **Write Results:**
-   $$out[(size_t)c \cdot \text{plane} + \text{ray\_index}] = acc[c] \cdot \text{weight} \quad \forall c < C$$ [S1, unofficial].
-
-**Parameters:**
-- $C$: Number of channels (1, 2, or 4) [S1, unofficial].
-- $n$: Number of samples per ray (e.g., 192) [S1, unofficial].
-- `source_positions`: Shape `[views, 3]` [S1, unofficial].
-- `detector_positions`: Shape `[views, rows, columns, 3]` [S1, unofficial].
-- `volume_shape`: Tuple `(z, y, x)` [S1, unofficial].
-
-**Pitfalls:**
-- Memory access is guarded by clamping in the `cell` function: $x = \min(\max(x_0, 0), L.X)$, etc., to prevent out-of-bounds access [S1, unofficial].
-- The volume must be padded with a 1-voxel zero border; failure to do so may cause incorrect sampling at boundaries [S1, unofficial].
-- Rays that miss the bounding box or have non-positive span must be skipped to avoid division by zero or invalid memory access [S1, unofficial].
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def cone_forward_kernel(projections, sources, detectors, box, volume, n_samples, C):
+**Algorithm Steps:**
+1.  **Preprocessing**: Convert the input volume to the bricked layout with a 1-voxel zero border using `_brick` [S1, unofficial].
+2.  **Kernel Launch**: Launch a CUDA kernel with grid size derived from the projection shape `(views, rows, columns)` and block size `(8, 16, 1)` [S1, unofficial]. The kernel is templated on the number of channels `C` (1, 2, or 4) [S1, unofficial].
+3.  **Thread Indexing**: Each thread handles one detector pixel for one view:
+    ```python
     column = blockIdx.x * blockDim.x + threadIdx.x
     row = blockIdx.y * blockDim.y + threadIdx.y
     view = blockIdx.z
     ray_index = ((size_t)view * R + row) * W + column
-    acc = [0.0] * C
-    weight = 0.0
-    x0, y0, z0 = -1, -1, -1
-    v = [[0.0] * C for _ in range(8)]
+    ```
+    where `R` is rows and `W` is columns [S1, unofficial].
+4.  **Initialization**: Initialize accumulator array `acc[C]` to `0.0f` and `weight` to `0.0f` [S1, unofficial].
+5.  **Ray Construction**: Construct `ConeRay` from source and detector positions and the volume bounding box. If the ray misses the box, it is invalid. If valid, set `weight = ray.weight` [S1, unofficial].
+6.  **Sampling Loop**: Loop `k` from `0` to `n_samples - 1`:
+    a. Calculate sample position:
+    $$
+    \begin{aligned}
+    px &= \text{fma}(k \cdot \text{weight}, ray.sx, ray.px) \\
+    py &= \text{fma}(k \cdot \text{weight}, ray.sy, ray.py) \\
+    pz &= \text{fma}(k \cdot \text{weight}, ray.sz, ray.pz)
+    \end{aligned}
+    $$
+    b. Compute integer voxel coordinates:
+    $$
+    ix = \lfloor px \rfloor, \quad iy = \lfloor py \rfloor, \quad iz = \lfloor pz \rfloor
+    $$
+    c. If voxel coordinates changed from previous step (`ix != x0 || iy != y0 || iz != z0`):
+    i. Compute cell index and fractional offsets `ox, oy, oz` using a cell function [S1, unofficial].
+    ii. Fetch 8 voxel values `v[8][C]` from the bricked volume storage [S1, unofficial].
+    d. Compute fractional offsets for interpolation:
+    $$
+    dx = px - ix, \quad dy = py - iy, \quad dz = pz - iz
+    $$
+    e. Perform trilinear interpolation:
+    - For `C=1`:
+    $$
+    acc[0] += \text{trilinear}(v, dx, dy, dz)
+    $$
+    - For `C>1`:
+    $$
+    \begin{aligned}
+    wx &= [1-dx, dx] \\
+    wy &= [1-dy, dy] \\
+    wz &= [1-dz, dz]
+    \end{aligned}
+    $$
+    Loop `q` from 0 to 7:
+    $$
+    w = (wz[q >> 2] \cdot wy[(q >> 1) \& 1]) \cdot wx[q \& 1]
+    $$
+    $$
+    acc[c] += w \cdot v[q][c] \quad \text{for all } c \in [0, C-1]
+    $$
+7.  **Accumulation**: After the loop, write results:
+    $$
+    out[(size_t)c \cdot plane + ray\_index] = acc[c] \cdot weight
+    $$
+    for `c < nb` (number of output channels) [S1, unofficial].
 
-    ray = construct_cone_ray(sources[view], detectors[view, row, column], box)
-    if ray.valid:
-        weight = ray.weight  # span / n_samples
-        first = ray.entry + 0.5 * ray.weight
-        ux, uy, uz = ray.direction
-        px = first * ux * box[6] + box[9]
-        py = first * uy * box[7] + box[10]
-        pz = first * uz * box[8] + box[11]
-        sx = ray.weight * ux * box[6]
-        sy = ray.weight * uy * box[7]
-        sz = ray.weight * uz * box[8]
-
-        for k in range(n_samples):
-            px = ray.px + k * sx
-            py = ray.py + k * sy
-            pz = ray.pz + k * sz
-            ix = floor(px)
-            iy = floor(py)
-            iz = floor(pz)
-
-            if ix != x0 or iy != y0 or iz != z0:
-                ox, oy, oz = cell_index(ix, iy, iz, box)
-                ox = clamp(ox, 0, box.X)
-                oy = clamp(oy, 0, box.Y)
-                oz = clamp(oz, 0, box.Z)
-                v = fetch_8_voxels(volume, ox, oy, oz)
-                x0, y0, z0 = ix, iy, iz
-
-            dx = px - ix
-            dy = py - iy
-            dz = pz - iz
-            wx = [1.0 - dx, dx]
-            wy = [1.0 - dy, dy]
-            wz = [1.0 - dz, dz]
-            for q in range(8):
-                w = wz[q >> 2] * wy[(q >> 1) & 1] * wx[q & 1]
-                for c in range(C):
-                    acc[c] += w * v[q][c]
-
-    for c in range(C):
-        projections[c, view, row, column] = acc[c] * weight
-```
+**Pitfalls:**
+- Memory access is guarded by clamping in the cell function: `x = min(max(x0, 0), l.X)`, etc., to prevent out-of-bounds access [S1, unofficial].
+- The volume must have a 1-voxel zero border; otherwise, boundary samples may read uninitialized or incorrect data [S1, unofficial].
 
 ## Subtopics
 
+### [Differentiable Forward Projection (Mesh)](13343-differentiable-forward-projection-mesh.md)
+This method computes the differentiable forward projection of 3D triangle meshes onto 2D detector arrays for both parallel and cone-beam geometries. It differs from volume-based approaches (like its parent [Cone Beam Forward Projection with Trilinear Interpolation](8247-cone-beam-forward-projection-with-trilinear-interpolation.md)) by operating directly on mesh topology (vertices and faces) and utilizing a custom CUDA rasterizer to integrate attenuation coefficients along rays, enabling gradient backpropagation through the projection process.
+
 ### Image Scanning for Tomography
-A method to generate tomographic projections (scans) from a source image by integrating pixel values along lines at various angles and offsets [S2, unofficial]. It calculates sampling steps $y\_step = 2.0 / \text{base\_width}$ and $x\_step = 2.0 / \text{base\_height}$, and pixel center offsets $y\_offset = (\text{image.height} - 1.0) / 2.0$ and $x\_offset = (\text{image.width} - 1.0) / 2.0$ [S2, unofficial]. It iterates over image pixels, computes normalized coordinates $y = (y\_idx - y\_offset) \cdot y\_step$ and $x = (x\_idx - x\_offset) \cdot x\_step$, and calls a value function `value_fn(x, y, pixel_value)` [S2, unofficial]. Typical parameters are `rays` (samples per angle, typically 35) and `angles` (typically 40) [S2, unofficial].
+A method to generate tomographic projections (scans) from a source image by integrating pixel values along lines at various angles and offsets [S2, unofficial].
+- **Steps**:
+    1. Calculate sampling steps: `y_step = 2.0 / base_width`, `x_step = 2.0 / base_height`.
+    2. Calculate pixel center offsets: `y_offset = (image.height - 1.0) / 2.0`, `x_offset = (image.width - 1.0) / 2.0`.
+    3. Iterate over image pixels: for `y_idx` in `0..height`, for `x_idx` in `0..width`:
+       $$
+       \begin{aligned}
+       y &= (y\_idx - y\_offset) \cdot y\_step \\
+       x &= (x\_idx - x\_offset) \cdot x\_step
+       \end{aligned}
+       $$
+       Call `value_fn(x, y, pixel_value)` [S2, unofficial].
+- **Parameters**: `rays` (number of projection rays, typically 35), `angles` (number of projection angles, typically 40) [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N_{rays} \cdot n)$, where $N_{rays}$ is the number of detector pixels times views, and $n$ is samples per ray [S1, unofficial].
-- **Memory Complexity:** $O(V)$ for volume storage, where $V$ is the number of voxels including padding and brick overhead [S1, unofficial].
-- **Performance:** Measured on RTX 2080 Ti with 256³ phantom, 360 views, 384×384 detectors: forward projection 0.26 s, adjoint 0.33 s, forward with geometry gradient 0.40 s [S1, unofficial]. The PyTorch path takes 207 s (forward), 232 s (adjoint), and OOMs on larger scenes [S1, unofficial].
-- **Strengths:** Exact discrete adjoint consistency when paired with Backward Projection; efficient GPU implementation using bricked layout and runtime-compiled CUDA kernels for float32 [S1, unofficial].
-- **Limitations:** Requires specific volume layout (bricked, padded); limited to float32 on CUDA backend; PyTorch path retains interpolation stencils for autograd but fits only small scans [S1, unofficial].
+- **Time Complexity**: Linear with respect to the number of voxels sampled per ray and the number of rays.
+- **Memory Complexity**: Linear with respect to the volume size (bricked layout) and output projection size.
+- **Performance**: On an RTX 2080 Ti with a $256^3$ phantom, 360 views, and $384 \times 384$ detectors: Forward projection takes 0.26s, Adjoint 0.33s, Forward with geometry gradient 0.40s [S1, unofficial]. The PyTorch path takes 207s (forward) and 232s (adjoint), and runs out of memory for larger scenes [S1, unofficial].
+- **Strengths**: The CUDA backend uses runtime-compiled kernels for float32, storing nothing per sample, and is significantly faster than the PyTorch path [S1, unofficial].
+- **Limitations**: The PyTorch path retains interpolation stencils for autograd but fits only small scans [S1, unofficial].
 
 ## Background
-Developed by BIAI Lab as part of the TorchTomo library [S1, unofficial]. It is designed to provide differentiable forward projection for cone beam CT reconstruction, supporting exact adjoint consistency with the backward projection operator [S1, unofficial]. It supports circular and helical trajectories, flat and curved detectors, and per-view source offsets [S1, unofficial].
+Developed as part of the TorchTomo library by the BIAI Lab, this method is part of a differentiable tomography framework supporting parallel, fan, and cone-beam geometries [S1, unofficial]. It provides exact discrete adjoints for use in gradient-based optimization and reconstruction algorithms [S1, unofficial].
 
 ## Sources
 [S1] itu-biai/torchtomo, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)

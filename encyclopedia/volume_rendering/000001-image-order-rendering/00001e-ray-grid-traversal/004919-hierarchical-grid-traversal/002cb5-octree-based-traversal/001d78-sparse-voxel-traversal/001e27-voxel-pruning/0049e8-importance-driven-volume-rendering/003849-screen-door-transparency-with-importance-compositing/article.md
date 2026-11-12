@@ -1,61 +1,136 @@
 # Screen-Door Transparency with Importance Compositing
 
-Also called: Screen-Door Transparency, Importance Compositing
+Also called: Smart Visibility via Screen-Door Transparency
 
 ## Overview
-Screen-Door Transparency with Importance Compositing is a rendering technique that connects feature importance to spatial sampling density using screen-door transparency [S1, unofficial]. It solves the problem of occluding important features by less important ones by dynamically adjusting sampling density and opacity based on feature importance and occlusion relationships, rather than using a fixed global transfer function [S1, unofficial]. Unlike Maximum Importance Projection (MImP), which renders only the feature with the highest importance along the ray, this method composites multiple features to preserve context while suppressing occluding less important structures [S1, unofficial].
+Screen-Door Transparency with Importance Compositing is a rendering technique that resolves occlusion in volumetric data by linking feature importance to spatial sampling density using screen-door transparency [S1, unofficial]. It solves the problem where interesting features are hidden by less important ones by dynamically adjusting sampling density and opacity based on occlusion relationships, rather than using a fixed global transfer function [S1, unofficial]. Unlike Maximum Importance Projection (MImP), which renders only the single most important feature along a ray, this method composites multiple features, suppressing occluding context information while preserving non-occluding context [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- Input: Volumetric dataset, feature importance values for each voxel/feature, viewing ray.
-- Output: Rendered image with varying density and transparency based on importance.
+**Inputs:** Volumetric dataset with associated feature importance values; camera position and view direction.
+**Outputs:** 2D image with transparency effects.
 
 **Data Structures:**
-- Importance map: Scalar field where each voxel has an importance value $I \in [0, 1]$.
-- Grid spacing: Variable step size along rays, inversely proportional to importance.
-
-**Steps:**
-1. **Determine Importance:** For each ray, determine the importance of intersected features. High importance features are opaque and color saturated; low importance features are transparent and desaturated [S1, unofficial].
-2. **Assign Grid Spacing:** Assign grid spacing inversely proportional to importance. High importance uses small grid spacing (dense sampling); low importance uses big grid spacing (sparse sampling) [S1, unofficial].
-3. **Render Focus Features:** Render focus features (high importance) with dense sampling to ensure they are clearly visible [S1, unofficial].
-4. **Render Context Features:** Render context features (lower importance) with adaptive sampling:
-   - If context features occlude focus features, use sparse sampling to suppress them [S1, unofficial].
-   - Otherwise, use dense sampling to preserve context [S1, unofficial].
-
-**Screen-Door Transparency Strategy:**
-- Determine the distribution of visible voxels such that it is uniform [S2, unofficial].
-- Form a wireframe-like structure with the visible voxels, simulating transparency by distributing visible voxels uniformly [S2, unofficial].
-
-**Formulas:**
-- Grid spacing $s$ for a voxel with importance $I$: $s \propto \frac{1}{I}$ [S1, unofficial].
-- Opacity $\alpha$ for a voxel with importance $I$: $\alpha$ is high for high $I$, low for low $I$ [S1, unofficial].
+*   **Voxel Grid:** Stores scalar values and importance values $I$.
+*   **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
 
 **Parameters:**
-- Importance threshold: Not given in the sources.
-- Sparseness factor: Not given in the sources.
+*   **Importance Thresholds:** Not explicitly defined in sources, but importance ranges from 0 to 1.
+*   **Grid Spacing:** Inversely proportional to importance.
 
-**Edge Cases and Pitfalls:**
-- Degenerate input: If importance values are uniform, the technique degrades to standard volume rendering.
-- Precision: Sparse sampling may miss thin structures if the grid spacing is too large.
+**Steps:**
+1.  **Ray Casting:** For each pixel, cast a ray through the volume.
+2.  **Intersection & Importance Sampling:** Determine intersected features along the ray. Assign grid spacing $\Delta$ inversely proportional to feature importance $I$:
+    $$ \Delta \propto \frac{1}{I} $$
+    High importance ($I \approx 1$) uses small grid spacing (dense sampling). Low importance ($I \approx 0$) uses large grid spacing (sparse sampling) [S1, unofficial].
+3.  **Feature Classification:**
+    *   **Focus Features:** Rendered with dense sampling regardless of occlusion [S1, unofficial].
+    *   **Context Features:**
+        *   If a context feature occludes a focus feature, it is rendered with sparse sampling (screen-door transparency) [S1, unofficial].
+        *   If a context feature does not occlude a focus feature, it is rendered with dense sampling [S1, unofficial].
+4.  **Compositing:**
+    *   **Importance Compositing:** Accumulate contributions from intersected features. The visual representation (opacity/color) is tied to importance: opaque/saturated for high importance, transparent/desaturated for low importance [S1, unofficial].
+    *   **Occlusion Handling:** Occluding context information is suppressed but not entirely removed. The sum of importance of intersected features along the ray is considered [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_screen_door_transparency(volume, camera):
+    image = empty_image(camera.resolution)
+    for y, x in camera.pixel_grid():
+        ray = camera.cast_ray(x, y)
+        intersections = volume.intersect(ray)
+        
+        # Sort intersections by distance
+        intersections.sort(key=lambda hit: hit.distance)
+        
+        focus_features = []
+        context_features = []
+        
+        for hit in intersections:
+            if hit.feature.is_focus:
+                focus_features.append(hit)
+            else:
+                context_features.append(hit)
+        
+        # Determine sampling density for context features
+        rendered_context = []
+        for ctx in context_features:
+            # Check if this context feature occludes any focus feature
+            occludes_focus = False
+            for focus in focus_features:
+                if ctx.distance < focus.distance:
+                    occludes_focus = True
+                    break
+            
+            if occludes_focus:
+                # Sparse sampling for occluding context
+                sampled_hits = sparse_sample(ctx, volume)
+            else:
+                # Dense sampling for non-occluding context
+                sampled_hits = dense_sample(ctx, volume)
+            
+            rendered_context.extend(sampled_hits)
+        
+        # Composite all features
+        color = background_color
+        alpha = 0.0
+        
+        # Combine focus and context
+        all_features = focus_features + rendered_context
+        # Sort by distance for proper compositing
+        all_features.sort(key=lambda hit: hit.distance)
+        
+        for hit in all_features:
+            # Importance-based opacity
+            # High importance: opaque, color saturated
+            # Low importance: transparent, desaturated
+            opacity = map_importance_to_opacity(hit.importance)
+            color = composite_color(color, hit.color, opacity, alpha)
+            alpha = composite_alpha(alpha, opacity)
+            
+            # Early exit if fully opaque? Not specified, but standard in volume rendering
+            if alpha >= 1.0:
+                break
+        
+        image[y, x] = color
+    return image
+
+def sparse_sample(feature, volume):
+    # Return a subset of voxels based on large grid spacing
+    # Implementation detail: skip voxels based on importance
+    return [voxel for voxel in feature.voxels if voxel.sampled]
+
+def dense_sample(feature, volume):
+    # Return all voxels or high-density subset
+    return feature.voxels
+
+def map_importance_to_opacity(importance):
+    # Linear mapping or transfer function
+    # Not given in sources. Assume linear for simplicity.
+    return importance
+```
+
+**Edge Cases:**
+*   **Degenerate Input:** If all features have equal importance, the method degrades to standard volume rendering with uniform sampling [S1, unofficial].
+*   **Precision:** Sparse sampling may introduce aliasing artifacts if the grid spacing is too large relative to the feature size [G].
 
 ## Subtopics
 
-### Screen-Door Transparency
-A strategy to simulate transparency by distributing visible voxels uniformly to form a wireframe-like structure, determining which voxels are rendered based on the level of sparseness [S2, unofficial]. The distribution of visible voxels is uniform, and the impact of increasing sparseness is shown by reducing the volume to fewer strong iso-surfaces based on gradient and curvature magnitude [S2, unofficial].
+### [Screen-Door Transparency](8930-screen-door-transparency.md)
+A voxel pruning technique that simulates optical transparency by spatially subsampling the voxel grid into a uniform, wireframe-like pattern. It solves the problem of rendering dense volumetric data efficiently by reducing visual clutter and computational load, allowing context features to be rendered sparsely while maintaining the structural integrity of focus features. Unlike standard alpha blending which requires sorting and accumulation, this method achieves transparency through geometric sparseness, where the "holes" in the voxel mesh allow background elements to show through, mimicking a semi-transparent view from a distance.
 
 ## Operating characteristics
-- **Time Complexity:** Depends on the number of voxels sampled, which varies based on importance. High importance regions require more samples, increasing time complexity.
-- **Memory Complexity:** Requires storage for importance map and volumetric data.
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Scales with the resolution of the volumetric data and the complexity of the importance map.
-- **Strengths:** Effectively resolves occlusion of important features while preserving context.
-- **Limitations:** May miss thin structures if sparse sampling is too aggressive.
-- **When to Use:** When it is critical to highlight important features without completely removing less important context.
-- **When Not to Use:** When uniform detail is required across all features.
+*   **Time Complexity:** Depends on the sampling density. Focus features are rendered densely ($O(N)$), while occluding context features are rendered sparsely ($O(N/k)$ where $k$ is the sparseness factor). Non-occluding context features are rendered densely. Overall complexity is between dense and sparse volume rendering.
+*   **Memory Complexity:** Standard volumetric data structures. No additional memory for importance compositing beyond storing importance values per voxel.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Dynamically adjusts sampling density and opacity based on feature importance and occlusion relationships. Reduces visual clutter by suppressing occluding context information.
+*   **Limitations:** Requires pre-computed or real-time importance values. Occluding context is suppressed but not entirely removed, which may still cause some visual clutter.
+*   **When to Use:** When the goal is to highlight specific important features in a complex volumetric dataset while providing some context.
+*   **When Not to Use:** When all features are equally important or when occlusion is not a primary concern.
 
 ## Background
-Originated by Ivan Viola and M. Eduard Gröller in the context of illustrative visualization for medicine and science [S1, unofficial]. It builds on techniques used in technical and medical illustrations, such as cutaway views and ghosted views, to resolve occlusion of prominent information [S1, unofficial].
+Originated by Ivan Viola and M. Eduard Gröller in the context of "Smart Visibility" in visualization [S1, unofficial]. The technique is part of a broader effort to apply illustration techniques (cutaway views, ghosted views) to volumetric data visualization [S1, unofficial]. It was presented in the Eurographics conference proceedings [S1, unofficial].
 
 ## Sources
 [S1] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)
-[S2] (PDF) Importance-Driven Volume Rendering, https://www.researchgate.net/publication/220943935_Importance-Driven_Volume_Rendering, fetched 2026-11-03 (unofficial)

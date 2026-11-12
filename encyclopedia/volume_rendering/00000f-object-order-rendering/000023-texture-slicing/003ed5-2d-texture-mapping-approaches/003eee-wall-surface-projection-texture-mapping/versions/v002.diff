@@ -1,0 +1,217 @@
+--- v001.md
++++ v002.md
+@@ -4,117 +4,133 @@
+ 
+ ## Overview
+-Wall Surface Projection & Texture Mapping renders 3D volumetric data by projecting individual visible block faces onto the 2D screen plane, applying perspective-correct UV mapping, and compositing the resulting pixels directly. Unlike standard texture slicing which composites semi-transparent slices back-to-front, this method treats opaque block surfaces as discrete geometric primitives, shading them per-face and handling clipping against the view frustum [S1, unofficial]. It is distinct from sibling methods like Cabral Texture Mapping by relying on explicit screen-space projection of block faces rather than ray-casting through texture volumes [S1, unofficial][S7257-cabral-texture-mapping.md].
++Wall Surface Projection & Texture Mapping renders a 3D volume by projecting individual axis-aligned block faces onto 2D screen coordinates, handling clipping, perspective-correct UV mapping, and per-face shading to draw pixels directly. It differs from standard texture slicing by operating on discrete, visible block faces (often in voxel engines) rather than continuous slicing planes, relying on manual pixel iteration for rasterization instead of hardware fragment shaders.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D voxel grid (chunk) where each block has an associated texture ID and visibility flags for its six faces. The current camera position and orientation.
+-*   **Output:** A 2D screen buffer with pixels colored by the projected texture, modulated by per-face shading.
++- Input: A 3D voxel grid (chunk) containing block data, a camera position (player), and a 2D texture map (RGB data).
++- Output: A 2D screen buffer with rendered pixels.
+ 
+ **Data Structures:**
+-*   **Block:** Contains `visibleFaces` (boolean flags for XPos, XNeg, YPos, YNeg, ZPos, ZNeg) and `textureMap` (RGB data).
+-*   **Texture:** Contains `width`, `height`, and `textureMap` (array of RGB values).
+-*   **Screen Coordinates:** Pixel positions $(x, y)$ on the screen.
++- `Block`: Contains `visibleFaces` (boolean flags for 6 faces: XPos, XNeg, YPos, YNeg, ZPos, ZNeg) and active state.
++- `Texture`: Contains `textureMap` (flat array of RGB integers), `width`, and `height`.
++- `Renderer`: Manages screen dimensions (`SCR_WIDTH`, `SCR_HEIGHT`) and pixel drawing.
+ 
+-**Algorithm Steps:**
+-1.  **Visibility Culling:** Iterate through all blocks in the chunk. For each block, determine which faces are visible by checking if adjacent blocks are inactive or out of bounds [S1, unofficial].
+-2.  **Projection and Clipping:** For each visible face, project its 3D corners to 2D screen coordinates. Clip edges that lie behind the player (specifically checking $y < 1$ in the source implementation) to prevent division by zero and invalid geometry [S1, unofficial].
+-3.  **UV Mapping Calculation:**
+-    *   Calculate the horizontal step size:
+-        $$ \text{horizontalStep} = \frac{\text{texture.width} \cdot uvU}{x_{pos2} - x_{pos1}} $$
+-    *   Clamp $x_{pos1}$ and $x_{pos2}$ to $[0, \text{SCR\_WIDTH}]$. Adjust `horizontalStart` accordingly.
+-    *   Compute distance in X:
+-        $$ \text{distX} = \max(1, x_{pos2} - x_{pos1}) $$
+-    *   For each screen column $x$, compute the top and bottom Y coordinates of the face:
+-        $$ y_1 = \text{bottomPos1} + \text{distBottom} \cdot \frac{x - \text{originalX1} + 0.5}{\text{distX}} $$
+-        $$ y_2 = \text{topPos1} + \text{distTop} \cdot \frac{x - \text{originalX1} + 0.5}{\text{distX}} $$
+-    *   Calculate the vertical step size:
+-        $$ \text{verticalStep} = \frac{\text{texture.height} \cdot uvV}{y_2 - y_1} $$
+-    *   Clamp $y_1$ and $y_2$ to $[0, \text{SCR\_HEIGHT}]$. Adjust `verticalStart` accordingly.
+-4.  **Pixel Rendering:**
+-    *   Iterate through each row $y$ from $y_1$ to $y_2$.
+-    *   Compute the texture index $p$ using modulo wrapping to handle texture repetition:
+-        $$ p = \left( (\text{texture.height} - (\text{verticalStart} \pmod{\text{texture.height}}) - 1) \cdot 3 \cdot \text{texture.width} + (\text{horizontalStart} \pmod{\text{texture.width}}) \cdot 3 \right) $$
+-    *   Apply per-face shading to the red component (assuming grayscale or single-channel shading for simplicity in the source):
+-        $$ r = \max(\text{textureMap}[p + 0] - \text{shade}/2, 0) $$
+-    *   Draw the pixel at $(x, y)$ with color $(r, g, b)$ and depth `distanceToPlayer` [S1, unofficial].
+-    *   Increment `verticalStart` by `verticalStep` and `horizontalStart` by `horizontalStep` for the next iteration.
++**Steps:**
++1. **Visibility Culling:** For each block in the chunk, determine which faces are visible by checking if adjacent blocks are inactive or out of bounds [S1, unofficial].
++2. **Projection & Clipping:** Project the 3D coordinates of a visible face's corners to screen space. Clip edges that are behind the player or outside the screen bounds [S1, unofficial].
++3. **UV Calculation:** Compute texture coordinates (U, V) for the projected face vertices.
++4. **Rasterization:** Iterate over the screen pixels covered by the projected face. For each pixel, calculate the corresponding texture index using modulo wrapping for tiling.
++5. **Shading & Drawing:** Apply per-face shading to the sampled color and draw the pixel, potentially using distance to the player for depth sorting or fog [S1, unofficial].
++
++**Formulas:**
++- **Horizontal Step:**
++  $$ \text{horizontalStep} = \frac{\text{texture.width} \times uvU}{xPos2 - xPos1} $$
++  Where $xPos1, xPos2$ are the screen X-coordinates of the face's left and right edges.
++- **Vertical Position:**
++  $$ y1 = bottomPos1 + distBottom \times \frac{x - originalX1 + 0.5}{distX} $$
++  $$ y2 = topPos1 + distTop \times \frac{x - originalX1 + 0.5}{distX} $$
++  Where $distX = \max(1, xPos2 - xPos1)$ prevents division by zero [S1, unofficial].
++- **Vertical Step:**
++  $$ \text{verticalStep} = \frac{\text{texture.height} \times uvV}{y2 - y1} $$
++- **Texture Index:**
++  $$ p = (\text{texture.height} - (\text{verticalStart} \pmod{\text{texture.height}}) - 1) \times 3 \times \text{texture.width} + (\text{horizontalStart} \pmod{\text{texture.width}}) \times 3 $$
++  This formula maps screen coordinates to the flat RGB texture array [S1, unofficial].
++- **Shading:**
++  $$ \text{color} = \max(\text{textureMap}[p + c] - \frac{\text{shade}}{2}, 0) $$
++  Where $c$ is the color channel index (0 for R, 1 for G, 2 for B) [S1, unofficial].
+ 
+ **Pitfalls:**
+-*   **Division by Zero:** If $x_{pos2} - x_{pos1} = 0$, the horizontal step is undefined. The source handles this by forcing $\text{distX} = 1$ [S1, unofficial].
+-*   **Clipping:** Faces entirely behind the player must be clipped or discarded to avoid rendering artifacts [S1, unofficial].
++- **Division by Zero:** If $xPos2 - xPos1 = 0$, the horizontal step is undefined. The source handles this by forcing $distX = 1$ [S1, unofficial].
++- **Clipping:** Edges behind the player ($y < 1$) must be clipped to avoid rendering artifacts [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def render_wall_surface(block, camera, screen_width, screen_height):
+-    # 1. Check visibility of faces
+-    if not is_face_visible(block, Face.XPos):
++def render_wall_surface(renderer, block, texture, player):
++    # 1. Get visible face corners in 3D
++    corners = get_face_corners(block)
++    
++    # 2. Project to screen space
++    screen_corners = []
++    for corner in corners:
++        screen_corners.append(project_to_screen(corner, player))
++        
++    # 3. Clip behind player and screen bounds
++    clipped_corners = clip_screen_edges(screen_corners, player, renderer.SCR_WIDTH, renderer.SCR_HEIGHT)
++    
++    if not clipped_corners:
+         return
+-    
+-    # 2. Project face corners to screen space
+-    # Assume get_screen_coords returns (x1, y1, z1), (x2, y2, z2) for the face
+-    x1, y1, z1 = get_screen_coords(block, Face.XPos, Corner.Min)
+-    x2, y2, z2 = get_screen_coords(block, Face.XPos, Corner.Max)
+-    
+-    # 3. Clip behind player
+-    clip_behind_player(x1, y1, z1, x2, y2, z2)
+-    
+-    # 4. Calculate UV mapping parameters
+-    # Clamp x positions to screen bounds
+-    x1 = clamp(x1, 0, screen_width)
+-    x2 = clamp(x2, 0, screen_width)
++
++    # 4. Calculate UVs and steps
++    # Assuming a quad face with corners [0,1,2,3]
++    x1, y1 = clipped_corners[0].x, clipped_corners[0].y
++    x2, y2 = clipped_corners[1].x, clipped_corners[1].y
+     
+     dist_x = max(1, x2 - x1)
+-    horizontal_step = (block.texture.width * uv_u) / dist_x
+-    
+-    # Adjust start based on clamping
+-    horizontal_start = block.texture.width * uv_u * (x1 / dist_x) # Approximation based on source logic
++    horizontal_step = (texture.width * uv_u) / dist_x
+     
+     # Calculate y bounds for each x
+-    # Note: Source uses specific geometric formulas for y1 and y2 based on perspective
+-    for x in range(int(x1), int(x2)):
+-        # Compute y1 and y2 for this x column
+-        y1_col = bottom_pos1 + dist_bottom * (x - original_x1 + 0.5) / dist_x
+-        y2_col = top_pos1 + dist_top * (x - original_x1 + 0.5) / dist_x
++    for x in range(int(x1), int(x2) + 1):
++        # Interpolate y1 and y2 for current x
++        y_top = y1 + (y2 - y1) * (x - x1) / dist_x
++        y_bottom = y1 + (y2 - y1) * (x - x1) / dist_x # Simplified for quad
+         
+-        # Clamp y bounds
+-        y1_col = clamp(y1_col, 0, screen_height)
+-        y2_col = clamp(y2_col, 0, screen_height)
++        # Clamp y to screen
++        y_start = max(0, int(y_top))
++        y_end = min(renderer.SCR_HEIGHT, int(y_bottom))
+         
+-        if y2_col <= y1_col:
++        if y_start >= y_end:
+             continue
+             
+-        vertical_step = (block.texture.height * uv_v) / (y2_col - y1_col)
+-        vertical_start = block.texture.height * uv_v * (y1_col / (y2_col - y1_col)) # Approximation
++        dist_y = max(1, y_end - y_start)
++        vertical_step = (texture.height * uv_v) / dist_y
+         
+-        for y in range(int(y1_col), int(y2_col)):
+-            # Calculate texture index with modulo wrapping
+-            tex_h = block.texture.height
+-            tex_w = block.texture.width
+-            p = ((tex_h - (int(vertical_start) % tex_h) - 1) * 3 * tex_w + 
+-                 (int(horizontal_start) % tex_w) * 3)
++        horizontal_start = x * horizontal_step
++        vertical_start = 0
++        
++        for y in range(y_start, y_end):
++            # Calculate texture index
++            p = ((texture.height - (int(vertical_start) % texture.height) - 1) * 3 * texture.width + 
++                 (int(horizontal_start) % texture.width) * 3)
+             
+             # Apply shading
+-            r = max(block.texture.texture_map[p + 0] - shade / 2, 0)
+-            g = block.texture.texture_map[p + 1]
+-            b = block.texture.texture_map[p + 2]
++            r = max(texture.textureMap[p + 0] - renderer.shade / 2, 0)
++            g = max(texture.textureMap[p + 1] - renderer.shade / 2, 0)
++            b = max(texture.textureMap[p + 2] - renderer.shade / 2, 0)
+             
+             # Draw pixel
+-            screen.draw_pixel(x, y, RgbColor(r, g, b), distance_to_player)
++            renderer.draw_pixel(x, y, RgbColor(r, g, b), distance_to_player)
+             
+             vertical_start += vertical_step
+-            
+-        horizontal_start += horizontal_step
++            horizontal_start += horizontal_step
+ ```
+ 
++## Subtopics
++
++### 2D Texture-Based Volume Rendering
++A broader category that includes this method. It uses 2D textures to store volume data and maps them to proxy geometry. This method is a specific implementation within that category, often used in voxel engines for performance. [2D Texture-Based Volume Rendering](916-2d-texture-based-volume-rendering.md)
++
++### Palette Texture Volume Rendering
++Uses a palette of colors indexed by the volume data. This method typically uses direct RGB textures. Palette mapping is less common in modern real-time voxel rendering due to color depth limitations. [Palette Texture Volume Rendering](6502-palette-texture-volume-rendering.md)
++
++### Cabral Texture Mapping
++Uses normal vectors to compute lighting on the texture-mapped surfaces. This method may or may not use normal mapping, but Cabral's approach specifically integrates normals into the projection. [Cabral Texture Mapping](7257-cabral-texture-mapping.md)
++
++### Multi-constraints-based projective texture mapping
++Uses multiple constraints to optimize the projection of textures onto complex surfaces. This method is simpler and relies on axis-aligned faces, making it less flexible for curved surfaces but faster for voxel grids. [Multi-constraints-based projective texture mapping](12075-multi-constraints-based-projective-texture-mapping.md)
++
++### Projective Space Texture Mapping with Multi-Resolution Templates
++Uses multi-resolution templates to handle texture mapping in projective space. This method is more complex and designed for high-quality rendering, whereas wall surface projection is optimized for simple, discrete blocks. [Projective Space Texture Mapping with Multi-Resolution Templates](13236-projective-space-texture-mapping-with-multi-resolution-templ.md)
++
+ ## Operating characteristics
+-*   **Time Complexity:** Proportional to the number of visible faces and the screen area they cover. Each visible face requires projection, clipping, and pixel iteration.
+-*   **Memory Complexity:** Low, as it processes faces individually and does not require storing large intermediate buffers for compositing.
+-*   **Strengths:** Simple implementation for opaque voxel worlds; efficient culling of hidden faces; direct screen-space rendering.
+-*   **Limitations:** No support for semi-transparency or volume integration; aliasing at oblique angles due to lack of 3D interpolation; performance degrades with high face counts on screen.
+-*   **When to Use:** Opaque voxel rendering (e.g., Minecraft-style games) where performance is critical and transparency is not required.
+-*   **When Not to Use:** Medical imaging, scientific visualization, or any application requiring semi-transparent volume rendering.
++- **Time Complexity:** $O(N)$ where $N$ is the number of visible pixels on the screen. The complexity is linear with respect to the screen area covered by visible faces.
++- **Memory Complexity:** $O(V)$ where $V$ is the number of voxels in the chunk, for storing block data. Texture memory is $O(T)$ where $T$ is the texture size.
++- **Performance:** Very fast for simple voxel grids due to minimal overhead and no complex geometry processing. However, it lacks hardware acceleration for blending and shading, relying on CPU-side pixel iteration.
++- **Strengths:** Simple implementation, low memory footprint, suitable for real-time voxel engines.
++- **Limitations:** No hardware blending, limited to axis-aligned faces, no support for curved surfaces or complex lighting without additional CPU work.
++- **When to Use:** Real-time voxel rendering, simple 3D environments, educational purposes.
++- **When Not to Use:** High-fidelity rendering, complex geometry, curved surfaces, or when hardware acceleration is required.
+ 
+ ## Background
+-This method originates from early 3D engine implementations, specifically those mimicking the style of 1990s first-person shooters with voxel-based environments. The specific implementation details are derived from a 2026 GitHub repository [S1, unofficial]. It represents a geometric approach to volume rendering, contrasting with the optical/compositing approaches of texture slicing.
++Originated in early 3D engines and voxel games, this method is a practical approach to rendering 3D volumes using 2D textures. It is commonly found in indie voxel games and educational 3D engines. The method is documented in the source [S1, unofficial], which provides a complete implementation in C++.
+ 
+ ## Sources

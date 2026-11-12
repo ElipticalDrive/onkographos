@@ -1,47 +1,44 @@
 # BSSRDF Model
 
-Also called: Practical Model for Subsurface Light Transport
+Also called: BSSRDF Appearance Model, Jensen et al. model, Practical Model for Subsurface Light Transport, diffusion-based BSSRDF
 
 ## Overview
-The BSSRDF Model approximates subsurface light transport by modeling the medium as a collection of point light sources (virtual sources) to compute the diffuse reflectance. It solves the problem of efficiently rendering translucent materials by replacing complex volumetric integration with an analytical solution based on diffusion theory, specifically using the dipole approximation for homogeneous media [S1, unofficial]. It is distinguished from pure volume rendering methods by its surface-based evaluation and from the full BSSRDF Approximation by its specific reliance on the dipole source configuration for single-scattering dominant or low-absorption regimes [S1, unofficial].
+The BSSRDF Model approximates subsurface light transport by formulating the problem as a surface integral, avoiding expensive volumetric path tracing in participating media under rough dielectric surfaces [S1]. It replaces volumetric integration with an analytical diffusion-based solution using a dipole configuration of real and virtual light sources [S2, unofficial]. It builds on [BSSRDF Approximation with Dipole and Single Scattering](4750-bssrdf-approximation-with-dipole-and-single-scattering.md) by evaluating the transport at the surface boundary.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Surface point $x$, incident light direction $\omega_i$, outgoing view direction $\omega_o$, material properties (absorption coefficient $\sigma_a$, scattering coefficient $\sigma_s'$, anisotropy $g$, refractive index $n$), and geometry (surface normal $\vec{n}$).
-*   **Outputs:** Bidirectional Scattering Distribution Function (BSDF) value or diffuse reflectance $R_d$.
+*   **Inputs:** Surface point $x_o$, incident position $x_i$, incident direction $\omega_i$, outgoing direction $\omega_o$, material properties (absorption coefficient $\sigma_a$, scattering coefficient $\sigma_s$, anisotropy $g$, refractive index $\eta$), and surface roughness $\beta$ [S1].
+*   **Outputs:** Outgoing radiance $L_o(x_o, \omega_o)$ [S1].
 
 **Data Structures:**
-The method relies on analytical formulas rather than complex data structures. Key parameters include:
-*   Reduced scattering coefficient: $\sigma_s' = \sigma_s(1-g)$.
-*   Transport mean free path: $l_t = 1/(\sigma_a + \sigma_s')$.
-*   Diffusion coefficient: $D = 1/(3(\sigma_a + \sigma_s'))$.
-*   Albedo: $\alpha_0 = \sigma_s' / (\sigma_a + \sigma_s')$.
+*   Material parameters ($\sigma_a, \sigma_s, g, \eta, \beta$) are stored as uniform values or texture maps on the surface [S1].
 
 **Steps:**
-1.  **Calculate Transport Parameters:** Compute $\sigma_s'$, $D$, and $\alpha_0$ from the input material properties.
-2.  **Position Virtual Sources:**
-    *   Place a real light source at distance $z_r$ beneath the surface. A common choice is $z_r = 1/\sigma_t$ (one mean free path) [S1, unofficial].
-    *   Place a negative virtual light source at distance $z_v = z_r + 4AD$ above the surface, where $A$ is a factor related to the refractive index mismatch [S1, unofficial].
-3.  **Compute Fluence:** Calculate the fluence $\phi(x)$ at the surface point $x$ using the superposition of the real and virtual sources:
-    $$ \phi(x) = \frac{1}{4\pi} \left( \frac{e^{-\sigma_{tr} d_r}}{d_r} - \frac{e^{-\sigma_{tr} d_v}}{d_v} \right) $$
-    where $d_r = \|x - x_r\|$ and $d_v = \|x - x_v\|$ are distances to the real and virtual sources, and $\sigma_{tr}$ is the transport extinction coefficient [S1, unofficial].
-4.  **Compute Diffuse Reflectance:** The total diffuse reflectance $R_d$ is derived from the fluence and the Fresnel transmission. A rational approximation for the Fresnel transmission factor $F_{dr}$ is used:
+1.  Compute reduced scattering coefficient $\sigma_s' = \sigma_s(1-g)$ and transport extinction $\sigma_t = \sigma_a + \sigma_s'$ [G].
+2.  Position the real light source at distance $z_r = 1/\sigma_t$ beneath the surface, and the negative virtual light source at $z_v = z_r + 4AD$ above the surface, where $A$ is a refractive-index-dependent factor [S2, unofficial].
+3.  Compute the fluence $\phi(x)$ at a surface point $x$ using the superposition of the real and virtual sources:
+    $$ \phi(x) = \frac{1}{4\pi} \left( \frac{e^{-\sigma_t d_r}}{d_r} - \frac{e^{-\sigma_t d_v}}{d_v} \right) $$
+    where $d_r = \|x - x_r\|$ and $d_v = \|x - x_v\|$ are distances to the real and virtual sources [S2, unofficial].
+4.  Compute the Fresnel transmission factor $F_{dr}$ using a rational approximation:
     $$ F_{dr} = -1.440 \eta^{-2} + 0.710 \eta^{-1} + 0.668 + 0.0636 \eta $$
-    where $\eta$ is the relative index of refraction [S1, unofficial].
-5.  **Evaluate BSDF:** The BSSRDF value is computed by combining the reflectance with the geometric terms (dot products of normals and directions) and the Fresnel factor.
+    where $\eta$ is the relative index of refraction [S2, unofficial].
+5.  Evaluate the outgoing radiance as a surface integral combining subsurface transport and surface reflection:
+    $$ L_o(x_o, \omega_o) = \iint \rho_s(x_o, x_i, \omega_o, \omega_i) L_i(x_i, \omega_i) |\cos \theta_i| dA_i d\omega_i + \int \rho_r(x_o, \omega_o, \omega_i) L_i(x_o, \omega_i) |\cos \theta_i| d\omega_i $$
+    where $\rho_s$ is the BSSRDF, $\rho_r$ is the BRDF (e.g., GGX rough dielectric), and $L_i$ is incident illumination [S1].
 
 **Formulas:**
-*   **Fresnel Approximation:** $F_{dr} = -1.440 \eta^{-2} + 0.710 \eta^{-1} + 0.668 + 0.0636 \eta$ [S1, unofficial].
-*   **Reflectance Dependence:** The total diffuse reflectance $R_d$ depends on the reduced albedo $\alpha_0$ and the geometry factor $A$. The source text provides a garbled formula: $R_d = 1 + (4/3)A * [ e^{-\sqrt{3(1-\alpha_0)} * \sqrt{A}} / \sqrt{3(1-\alpha_0)} ]$ [S1, unofficial]. Implementers should note this formula is incomplete and likely refers to the asymptotic behavior or specific limiting cases of the dipole solution.
+*   Fluence: $\phi(x) = \frac{1}{4\pi} \left( \frac{e^{-\sigma_t d_r}}{d_r} - \frac{e^{-\sigma_t d_v}}{d_v} \right)$ [S2, unofficial].
+*   Fresnel approximation: $F_{dr} = -1.440 \eta^{-2} + 0.710 \eta^{-1} + 0.668 + 0.0636 \eta$ [S2, unofficial].
+*   Surface integral: $L_o = \iint \rho_s L_i |\cos \theta_i| dA_i d\omega_i + \int \rho_r L_i |\cos \theta_i| d\omega_i$ [S1].
 
 **Parameters:**
-*   $z_r$: Typically $1/\sigma_t$ [S1, unofficial].
-*   $A$: Depends on refractive index $n$. For $n=1.33$, $A \approx 0.71$ [S1, unofficial].
+*   $z_r$: Set to $1/\sigma_t$ (one mean free path) [S2, unofficial].
+*   $A$: Depends on refractive index $\eta$; for $\eta=1.33$, $A \approx 0.71$ [S2, unofficial].
+*   Material parameters: Represented as texture maps or uniform values [S1].
 
 **Edge Cases and Pitfalls:**
-*   **High Absorption:** The diffusion approximation fails when $\sigma_a$ is large relative to $\sigma_s'$. The model is inaccurate for highly absorbing media [S1, unofficial].
-*   **Sharp Features:** The assumption of infinite or smooth boundaries breaks down near sharp edges or thin regions [S2].
-*   **Precision:** Numerical stability issues may arise when $d_r$ or $d_v$ are very small (light source very close to surface).
+*   Numerical stability degrades when $d_r$ or $d_v$ approach zero [G].
+*   The diffusion approximation assumes smooth boundaries; accuracy degrades near sharp features or thin regions [S3].
 
 ## Subtopics
 
@@ -49,29 +46,29 @@ The method relies on analytical formulas rather than complex data structures. Ke
 The Effective BRDF is a computationally efficient approximation for rendering optically dense, approximately planar media under low-frequency illumination, derived as a limiting case of the subsurface scattering model. It replaces the expensive integration of the subsurface propagator over a surface area with a single bidirectional reflectance evaluation, enabling its use in level-of-detail hierarchies for participating media.
 
 ### Shape-adaptive BSSRDF Model
-**Definition:** Introduces a shape-adaptive BSSRDF model using a conditional variational autoencoder that learns to sample from a reference distribution produced by a brute-force volumetric path tracer [S2].
+**Definition:** Introduces a shape-adaptive BSSRDF model using a conditional variational autoencoder that learns to sample from a reference distribution produced by a brute-force volumetric path tracer [S3].
 
 **Layout:** Relies on three neural networks:
-1.  **Feature Network:** Extracts features from input parameters. Inputs include material properties (reflectivity, anisotropy, refractive index) and geometric features (low-order ternary polynomials encoding approximate distance functions for curvature, thickness, angle) [S2].
-2.  **Scatter Network:** Learns to sample from the reference distribution generated by a volume path tracer [S2].
-3.  **Absorption Network:** Performs regression fitting on the scale factor of the distribution of multiple scattering [S2].
+1.  **Feature Network:** Extracts features from input parameters. Inputs include material properties (reflectivity, anisotropy, refractive index) and geometric features (low-order ternary polynomials encoding approximate distance functions for curvature, thickness, angle) [S3].
+2.  **Scatter Network:** Learns to sample from the reference distribution generated by a volume path tracer [S3].
+3.  **Absorption Network:** Performs regression fitting on the scale factor of the distribution of multiple scattering [S3].
 
-**Pitfall:** Can only handle high-order scattering effects and does not work well on shapes with sharp features [S2].
+**Pitfall:** Can only handle high-order scattering effects and does not work well on shapes with sharp features [S3].
 
-**Comparison:** Maintains efficiency of classic BSSRDF model without assumption of diffusion theory, greatly improving overall accuracy [S2].
+**Comparison:** Maintains efficiency of classic BSSRDF model without assumption of diffusion theory, greatly improving overall accuracy [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per surface point evaluation, as it relies on analytical formulas.
-*   **Memory Complexity:** $O(1)$, requiring only material parameters.
-*   **Measured Performance:** Interactive frame rates are achievable on GPU implementations due to the lack of integration [S2].
-*   **Strengths:** Extremely fast; suitable for real-time rendering; simple to implement.
-*   **Limitations:** Inaccurate for high absorption; assumes diffusion theory (fails for thin media or sharp features); limited to homogeneous media in its basic form [S1, unofficial][S2].
-*   **When to Use:** Real-time rendering of translucent materials with low absorption and smooth geometry.
-*   **When Not to Use:** High-precision offline rendering, highly absorbing media, or media with complex geometry (sharp edges).
+*   **Time Complexity:** $O(1)$ per surface point evaluation, as it relies on analytical formulas [G].
+*   **Memory Complexity:** $O(1)$, requiring only material parameters [G].
+*   **Strengths:** Avoids expensive volumetric path tracing in participating media [S1].
+*   **Limitations:** Assumes diffusion theory, which fails for highly absorbing media or sharp geometric features [S3].
+*   **When to Use:** Real-time rendering of translucent materials with smooth geometry and low absorption [G].
+*   **When Not to Use:** High-precision offline rendering or media with sharp features [S3].
 
 ## Background
-The BSSRDF Model based on the dipole approximation originates from the work of Jensen et al. (2001) "A Practical Model for Subsurface Light Transport" [S1, unofficial]. It has been widely adopted in computer graphics for rendering translucent materials like skin, wax, and marble. The shape-adaptive variant was introduced by Vicini et al. (2019) to address the limitations of diffusion theory in complex geometries [S2].
+The BSSRDF Model based on the dipole approximation originates from Jensen et al. [2001] "A Practical Model for Subsurface Light Transport" [S2, unofficial]. It has been widely adopted in computer graphics for rendering translucent materials like skin, wax, and marble [G]. The shape-adaptive variant was introduced by Vicini et al. [2019] to address the limitations of diffusion theory in complex geometries [S3].
 
 ## Sources
-[S1] Practical Model for Subsurface Light Transport, https://www.scribd.com/document/904578145/A-Practical-Model-for-Subsurface-Light-Transport, fetched 2026-10-29 (unofficial)
-[S2] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26
+[S1] Reconstructing Translucent Objects using Differentiable Rendering, https://doi.org/10.1145/3528233.3530714, fetched 2026-11-03
+[S2] Practical Model for Subsurface Light Transport, https://www.scribd.com/document/904578145/A-Practical-Model-for-Subsurface-Light-Transport, fetched 2026-10-29 (unofficial)
+[S3] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26

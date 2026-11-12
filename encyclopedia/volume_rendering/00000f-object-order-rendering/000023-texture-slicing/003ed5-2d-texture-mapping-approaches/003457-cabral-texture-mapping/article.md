@@ -3,89 +3,56 @@
 Also called: Filtered Back Projection via Texture Mapping, Texture Mapping Backprojection, Trilinear interpolation of texture mapped slices
 
 ## Overview
-Cabral Texture Mapping is a volume rendering technique that implements filtered back projection (FBP) for computed tomography (CT) using 2D texture mapping hardware and an accumulation buffer [S2, unofficial]. It differs from standard texture slicing by treating the rendering process as a back-projection of pre-filtered data rather than direct volume integration, allowing for specific reconstruction artifacts to be managed via hardware acceleration [S2, unofficial].
+Cabral Texture Mapping is a volume rendering method that implements the filtered back projection (FBP) algorithm for Computed Tomography (CT) using hardware-accelerated texture mapping and an accumulation buffer [S2, unofficial]. It differs from standard ray-casting or standard texture-slicing approaches by treating the reconstruction process as a series of texture-mapped slices that are blended back into the image space, effectively performing the back-projection step via rasterization [S2, unofficial]. While it produces unshaded images, it suffers from the drawback that the volume must be re-shaded and re-loaded whenever viewing parameters change, and non-linear transfer functions are not interpolated correctly by the texture hardware [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A 3D volume dataset (scalar field) and viewing parameters (camera position, orientation).
-- **Output:** A 2D image rendered into the frame buffer or accumulation buffer.
+*   **Input:** A 3D scalar volume dataset (CT scan data).
+*   **Output:** A 2D rendered image (unshaded).
 
 **Data Structures:**
-- **Volume Data:** Stored in 3D texture memory. The layout is a 3D array of scalar values.
-- **Slicing Planes:** Represented as geometric primitives (quads or triangles) in screen space or object space, intersecting the volume [S1, unofficial].
+*   **Volume Data:** 3D grid of scalar values.
+*   **Texture Map:** The volume data is loaded into 3D texture memory.
+*   **Accumulation Buffer:** A hardware buffer used to accumulate the contributions of the back-projected slices.
 
 **Steps:**
-1. **Pre-filtering:** The volume data is pre-filtered according to the requirements of the filtered back projection algorithm. This step is implied by the method's alias and goal but not explicitly detailed in the provided notes [S2, unofficial].
-2. **Slicing Plane Generation:** Generate a series of parallel slicing planes that intersect the volume. The geometry of these planes is tessellated into triangles or triangle strips suitable for rasterization [S1, unofficial].
-3. **Texture Coordinate Mapping:** For each vertex of the slicing plane geometry, compute 3D texture coordinates corresponding to its position in the volume. This maps the 2D screen-space geometry to the 3D volume data [S1, unofficial].
-4. **Trilinear Interpolation:** During rasterization, the fragment shader (or hardware texture unit) performs trilinear interpolation of the scalar values from the 3D texture based on the interpolated texture coordinates [S1, unofficial].
-5. **Accumulation:** The interpolated scalar values (representing density or opacity) are blended into the accumulation buffer or frame buffer in a back-to-front order relative to the viewer [S1, unofficial]. The blending equation is:
-   $$ C_{dest} = C_{src} \cdot A_{src} + C_{dest} \cdot (1 - A_{src}) $$
-   where $C_{src}$ and $A_{src}$ are the color and opacity derived from the trilinearly interpolated scalar value, and $C_{dest}$ is the current buffer color [S1, unofficial].
+1.  **Texture Loading:** Load the 3D volume data into the graphics hardware's 3D texture memory [S2, unofficial].
+2.  **Slice Generation:** Generate a series of parallel slicing planes that intersect the volume. These planes represent the back-projection paths [S1, unofficial].
+3.  **Trilinear Interpolation:** For each pixel in the slicing plane, trilinearly interpolate the scalar value from the 3D texture map based on the plane's position relative to the volume [S1, unofficial].
+4.  **Back-to-Front Blending:** Render the texture-mapped slices into the accumulation buffer in back-to-front order relative to the viewer. The hardware blends the slices into the frame buffer [S1, unofficial].
+5.  **Accumulation:** The accumulation buffer sums the contributions of all slices, effectively performing the filtered back projection integral [S2, unofficial].
+
+**Formulas:**
+The blending equation used during the accumulation step is the standard alpha blending equation:
+$$ C_{dest} = C_{src} \cdot A_{src} + C_{dest} \cdot (1 - A_{src}) $$
+where $C_{src}$ and $A_{src}$ are the color and opacity derived from the trilinearly interpolated scalar value, and $C_{dest}$ is the current value in the accumulation buffer [S1, unofficial][S3, unofficial].
 
 **Parameters:**
-- **Number of Slices:** Not given in the sources.
-- **Filter Kernel:** Not given in the sources.
+*   **Number of Slices:** Determined by the desired resolution and viewing angle. Not given in the sources.
+*   **Texture Filtering:** Trilinear interpolation is specified [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Non-linear Transfer Functions:** Non-linear transfer functions are not interpolated correctly by the texture hardware, requiring re-shading and re-loading of the volume if viewing parameters change [S2, unofficial].
-- **Precision:** Trilinear interpolation may introduce smoothing artifacts compared to higher-order interpolation methods [S1, unofficial].
+*   **Transfer Functions:** Non-linear transfer functions are not interpolated correctly by the texture hardware, leading to potential inaccuracies in shading [S2, unofficial].
+*   **Viewing Parameters:** The volume must be re-shaded and re-loaded every time viewing parameters change, which can be computationally expensive [S2, unofficial].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+## Subtopics
 
-```python
-# Pseudocode for Cabral Texture Mapping
-# Note: This is a high-level representation based on the described steps.
-# Actual implementation relies on GPU texture mapping and accumulation buffer.
-
-def cabral_texture_mapping(volume_data, camera_params):
-    # 1. Pre-filter volume data (implied by FBP method)
-    filtered_volume = apply_fbp_filter(volume_data)
-    
-    # 2. Generate slicing planes
-    slicing_planes = generate_slicing_planes(filtered_volume, camera_params)
-    
-    # 3. Sort planes back-to-front
-    slicing_planes.sort_by_depth(camera_params)
-    
-    # 4. Render each plane
-    for plane in slicing_planes:
-        # Map 3D position to 3D texture coordinates
-        texture_coords = map_to_texture_coordinates(plane.vertices, filtered_volume)
-        
-        # Rasterize plane with trilinear interpolation
-        # The hardware performs trilinear interpolation of the scalar value
-        color, opacity = rasterize_plane(plane, texture_coords, filtered_volume)
-        
-        # Blend into accumulation buffer
-        accumulate_buffer = blend_back_to_front(accumulate_buffer, color, opacity)
-    
-    return accumulate_buffer
-
-def blend_back_to_front(current_buffer, src_color, src_opacity):
-    # Standard alpha blending equation
-    dest_color = current_buffer.color
-    dest_opacity = current_buffer.opacity
-    
-    # Assuming src_color and src_opacity are derived from the scalar value
-    # via a transfer function (not detailed in sources)
-    new_color = src_color * src_opacity + dest_color * (1 - src_opacity)
-    new_opacity = src_opacity + dest_opacity * (1 - src_opacity)
-    
-    return Buffer(new_color, new_opacity)
-```
+### Multi-resolution Representation for Intermediate Template
+A technique to overcome resolution limitations and glancing angle projection artifacts by generating the intermediate template at different resolutions for different areas, rather than using a single finest resolution for the whole template [S3, unofficial]. It defines resolution intervals $\Delta u = 1/(x_d - 1)$ and $\Delta v = 1/(y_d - 1)$. Continuous variables $u$ and $v$ are used to adjust the origin and direction of the tracing ray during Direct Volume Rendering (DVR) or Direct Surface Rendering (DSR) generation of the intermediate template, allowing different resolution intervals to be used [S3, unofficial]. This is useful because different areas may have different resolution requirements (e.g., wrinkles around eyes), making rendering the whole template at the finest resolution impractical and unnecessary [S3, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Requires storage for the 3D volume texture and the accumulation buffer [S2, unofficial].
-- **Performance:** Implemented on Raster Manager Reality Engine Onyx machines, indicating high-end hardware requirements for real-time performance at the time [S2, unofficial].
-- **Strengths:** Leverages hardware texture mapping for efficient interpolation and blending [S2, unofficial].
-- **Limitations:** Non-linear transfer functions are not correctly interpolated by hardware, leading to re-computation costs [S2, unofficial].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Requires 3D texture memory for the volume and an accumulation buffer. Not given in the sources.
+*   **Measured Performance:** Implemented on four Raster Manager Reality Engine Onyx machines [S2, unofficial].
+*   **Strengths:** Leverages hardware acceleration for back-projection; suitable for real-time CT visualization on specialized hardware [S2, unofficial].
+*   **Limitations:** Unshaded images; inefficient update when viewing parameters change; poor support for non-linear transfer functions [S2, unofficial].
+*   **When to use:** When using specialized hardware (like Onyx) and requiring fast back-projection for CT data.
+*   **When not to use:** When non-linear transfer functions or dynamic viewing parameter updates are critical.
 
 ## Background
-Cabral Texture Mapping was proposed by Cabral et al. [S2, unofficial]. It was implemented on four Raster Manager Reality Engine Onyx machines to implement the filtered back projection CT algorithm [S2, unofficial]. The method addresses the need for real-time volume rendering systems by utilizing custom graphics hardware [S1, unofficial].
+Cabral Texture Mapping was introduced by Cabral et al. [S2, unofficial]. It was implemented on four Raster Manager Reality Engine Onyx machines to implement the filtered back projection CT algorithm [S2, unofficial]. The method combines texture mapping with an accumulation buffer to achieve real-time volume rendering for medical imaging applications [S2, unofficial].
 
 ## Sources
 [S1] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)
 [S2] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
+[S3] Texture Mapping Volume Objects, https://doi.org/10.2312/vvg.20051006, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,333 @@
+--- v001.md
++++ v002.md
+@@ -4,155 +4,197 @@
+ 
+ ## Overview
+-Locally Orderless Image (LOI) is a method for differentiable rendering optimization that replaces standard pixel-wise image comparison with matching of local histograms to extend gradient support for sparse gradients caused by motion in image space [S1]. It solves the problem of poor convergence and local minima in inverse rendering, where standard RGB gradients are non-zero only at feature boundaries (e.g., silhouettes) and vanish when features do not overlap [S1]. Unlike Gaussian pyramids which average out local appearance and suppress high-frequency details, LOIs preserve local variations by matching entire intensity distributions within neighborhoods [S1].
++Locally Orderless Image (LOI) is a differentiable rendering optimization technique that replaces standard pixel-wise image comparison with matching of local histograms (distributions of intensity values) to extend gradient support for sparse gradients caused by motion in image space [S1]. It solves the problem of poor convergence and local minima in inverse rendering, where standard RGB gradients are sparse or zero when initial and target features do not overlap [S1]. Unlike Gaussian Pyramids, which average out local appearance and suppress high-frequency details, LOIs match entire intensity distributions within neighborhoods, preserving local variations and enabling reliable recovery from arbitrary initializations [S1].
+ 
+ ## How it works
+-The method constructs a Locally Orderless Image representation $P(x, \alpha, \beta, \sigma)$ by computing histograms for each pixel location $x$ across three scale spaces: inner scale $\sigma$, tonal scale $\beta$, and extent scale $\alpha$ [S1]. The optimization minimizes the distance between the histograms of the rendered LOI and the reference LOI [S1].
+-
+-### Inputs and Outputs
+-*   **Inputs:**
+-    *   $\theta$: Scene parameters to be optimized (e.g., light position, object pose).
+-    *   $I_{ref}(x)$: Reference image (ground truth or target).
+-    *   Differentiable renderer: Computes $I(x; \theta)$ and gradients $\frac{\partial I}{\partial \theta}$.
+-    *   Parameters: $\sigma$ (inner scale), $\alpha$ (extent scale), $\beta$ (tonal scale/bin width).
+-*   **Outputs:**
+-    *   Optimized parameters $\theta^*$.
+-    *   LOI representation $P(x, \alpha, \beta, \sigma)$ for both rendered and reference images.
+-
+-### Data Structures
+-The core data structure is the Locally Orderless Image $P$. For each pixel location $x$, $P$ stores a histogram of intensity values.
+-*   **Structure:** A map or array indexed by pixel coordinates $x$.
+-*   **Value:** A histogram $H_x$ representing the distribution of intensities.
+-*   **Histogram Binning:** Intensities are binned with width $\beta$. The number of bins depends on the intensity range and $\beta$.
+-
+-### Steps
+-1.  **Render Image:** Compute the rendered image $I(x; \theta)$ using the differentiable renderer for current parameters $\theta$ [S1].
+-2.  **Inner Scale ($\sigma$):** Apply a Gaussian blur to the rendered image to create a multi-resolution representation. The blurred image $I(x; \theta, \sigma)$ is computed as:
+-    $$ I(x; \theta, \sigma) = (G * I)(x; \sigma) $$
+-    where $G$ is the Gaussian aperture function:
+-    $$ G(x; \sigma) = \frac{1}{2\pi\sigma^2} \exp\left(-\frac{x \cdot x}{2\sigma^2}\right) $$
+-    [S1]. The parameter $\sigma$ controls the effective resolution; $\sigma=0$ is the stationary resolution, and $\sigma>0$ creates coarser scales [S1].
+-3.  **Tonal Scale ($\beta$):** Model the radiance at each pixel as a distribution rather than a single real value. This involves binning intensities with bin width $\beta$ to capture measurement uncertainty and noise [S1].
+-4.  **Extent Scale ($\alpha$):** For each pixel $x$, compute a histogram of intensity values within a spatial neighborhood defined by the extent scale $\alpha$. This discards spatial order within the neighborhood, creating the "locally orderless" representation [S1].
+-5.  **Construct LOI:** Combine the scales to form $P(x, \alpha, \beta, \sigma)$. The rendered LOI $P_{render}$ and reference LOI $P_{ref}$ are constructed similarly (the reference is pre-computed or computed once) [S1].
+-6.  **Compute Loss:** Define an inverse rendering objective function $E$ that minimizes the distance between $P_{render}$ and $P_{ref}$. The loss is the histogram distance metric [S1].
+-7.  **Compute Gradients:** Compute gradients $\frac{\partial E}{\partial \theta}$ using the standard RGB gradients from the differentiable renderer ($\frac{\partial I}{\partial \theta}$) and the histogram distance metric [S1].
+-8.  **Update Parameters:** Update $\theta$ via gradient descent [S1].
+-
+-### Pseudocode
++**Inputs and Outputs:**
++*   **Input:** A differentiable renderer capable of computing image gradients $\frac{\partial I}{\partial \theta}$ with respect to scene parameters $\theta$; a reference image $I_{ref}$; initial scene parameters $\theta_0$.
++*   **Output:** Optimized scene parameters $\theta^*$ that minimize the histogram distance between the rendered LOI and the reference LOI.
++
++**Data Structures:**
++The core data structure is the Locally Orderless Image representation $P(x, \alpha, \beta, \sigma)$, which maps each pixel location $x$ to a histogram of intensities.
++*   **Fields:**
++    *   $x$: 2D spatial coordinate $(u, v)$.
++    *   $H_x$: A histogram vector representing the distribution of intensity values in the neighborhood of $x$.
++    *   Parameters: $\alpha$ (extent scale), $\beta$ (tonal scale), $\sigma$ (inner scale).
++*   **Layout:** The representation is a 4D tensor or a list of histograms indexed by $(x, \alpha, \beta, \sigma)$. For implementation, it is typically computed per scale space. The histogram $H_x$ has size $N_{bins}$, where $N_{bins}$ is determined by the tonal scale $\beta$ and the dynamic range of intensities.
++
++**Numbered Steps:**
++
++1.  **Construct Reference LOI:**
++    For the reference image $I_{ref}$, compute the LOI representation $P_{ref}(x, \alpha, \beta, \sigma)$ for a set of scales.
++    *   **Inner Scale ($\sigma$):** Apply a Gaussian blur to $I_{ref}$ to create a multi-resolution representation:
++        $$I(x; \sigma) = (G * I_{ref})(x; \sigma)$$
++        where $G$ is the Gaussian aperture function:
++        $$G(x; \sigma) = \frac{1}{2\pi\sigma^2} \exp\left(-\frac{x \cdot x}{2\sigma^2}\right)$$
++        [S1]
++    *   **Tonal Scale ($\beta$):** Model the radiance at each pixel as a distribution. Bin the intensity values with bin width $\beta$ to capture measurement uncertainty and noise. This transforms the real-valued intensity into a probability distribution or histogram. [S1]
++    *   **Extent Scale ($\alpha$):** For each pixel $x$, compute the histogram of intensity values within a spatial neighborhood defined by $\alpha$. This discards spatial order within the neighborhood, creating the "locally orderless" property. [S1]
++
++2.  **Construct Rendered LOI:**
++    For the current scene parameters $\theta$, render the image $I(x; \theta)$. Compute the LOI representation $P_{render}(x, \alpha, \beta, \sigma)$ using the same scales $\alpha, \beta, \sigma$ as the reference.
++    *   Apply Gaussian blur with kernel width $\sigma$ to $I(x; \theta)$.
++    *   Bin intensities with width $\beta$.
++    *   Compute histograms over neighborhoods of size $\alpha$. [S1]
++
++3.  **Define Objective Function:**
++    Define an inverse rendering objective function $E$ that minimizes the distance between the histograms of $P_{render}$ and $P_{ref}$. Let $H_{ref}(x, \alpha, \beta, \sigma)$ and $H_{render}(x, \alpha, \beta, \sigma)$ be the histograms at location $x$ and scales.
++    $$E(\theta) = \sum_{x, \alpha, \beta, \sigma} D(H_{render}(x, \alpha, \beta, \sigma), H_{ref}(x, \alpha, \beta, \sigma))$$
++    where $D$ is a histogram distance metric (e.g., Chi-squared, Earth Mover's Distance, or KL divergence). [S1]
++
++4.  **Compute Gradients:**
++    Compute gradients $\frac{\partial E}{\partial \theta}$ using the chain rule. The gradient depends on the standard RGB gradients from the differentiable renderer $\frac{\partial I}{\partial \theta}$ and the derivative of the histogram distance metric with respect to the rendered intensities.
++    $$\frac{\partial E}{\partial \theta} = \sum_{x, \alpha, \beta, \sigma} \frac{\partial D}{\partial H_{render}} \cdot \frac{\partial H_{render}}{\partial I} \cdot \frac{\partial I}{\partial \theta}$$
++    [S1]
++
++5.  **Update Parameters:**
++    Update parameters $\theta$ via gradient descent:
++    $$\theta_{new} = \theta_{old} - \eta \frac{\partial E}{\partial \theta}$$
++    where $\eta$ is the learning rate. [S1]
++
++**Parameters:**
++*   $\sigma$ (sigma): Inner scale parameter controlling effective resolution via Gaussian kernel width. Typical values: $\sigma=0$ (stationary), $\sigma>0$ (coarser scales). [S1]
++*   $\alpha$ (alpha): Extent scale parameter defining the spatial extent (neighborhood size) for histogram computation. [S1]
++*   $\beta$ (beta): Tonal scale parameter quantifying imprecision in measured radiance (bin width). [S1]
++
++**Pitfalls:**
++*   Standard multi-resolution image pyramids (Gaussian Pyramids) are unreliable for complex inverse rendering because blurring averages out local appearance and suppresses high-frequency details, leading to local minima [S1].
++*   In cases with no overlap between initial and target features (e.g., disks), standard image gradients $\frac{\partial I}{\partial \theta}$ are sparse (non-zero only at silhouettes), causing the error gradient $\frac{\partial E}{\partial \theta}$ to be zero everywhere, stalling optimization [S1].
++*   LOI requires careful selection of $\alpha$ and $\beta$ to balance noise robustness and detail preservation. [S1]
++
++**Pseudocode:**
++
+ ```python
+-def compute_loi_histogram(image, sigma, alpha, beta):
+-    """
+-    Computes the Locally Orderless Image representation for a given image.
+-    
+-    Args:
+-        image: 2D array of pixel intensities I(x; theta).
+-        sigma: Inner scale parameter (Gaussian kernel width).
+-        alpha: Extent scale parameter (neighborhood radius/size).
+-        beta: Tonal scale parameter (histogram bin width).
+-        
+-    Returns:
+-        P: Dictionary or array where P[x] is a histogram (array of bin counts) for pixel x.
+-    """
+-    # Step 1: Inner Scale - Gaussian Blur
+-    # Apply Gaussian filter with kernel defined by sigma
+-    blurred_image = gaussian_filter(image, sigma)
+-    
+-    # Step 2 & 3: Tonal Scale and Extent Scale - Histogram Computation
+-    P = {}
+-    num_bins = int(max_intensity_range / beta) # Assuming known intensity range
+-    bins = np.linspace(0, max_intensity_range, num_bins + 1)
+-    
+-    for x in pixel_coordinates:
+-        # Define spatial neighborhood based on alpha
+-        neighborhood_pixels = get_neighbors(x, alpha)
+-        
+-        # Collect intensity values from the blurred image in the neighborhood
+-        intensities = [blurred_image[n] for n in neighborhood_pixels]
+-        
+-        # Compute histogram of these intensities with bin width beta
+-        # This models the tonal scale (beta) and extent scale (alpha)
+-        hist, _ = np.histogram(intensities, bins=bins)
+-        
+-        P[x] = hist
+-        
+-    return P
+-
+-def compute_histogram_distance(hist1, hist2):
+-    """
+-    Computes the distance between two histograms.
+-    Common metrics include Chi-Square, Bhattacharyya, or Earth Mover's Distance.
+-    The source specifies minimizing the distance but does not specify the exact metric.
+-    We assume a standard differentiable histogram distance metric.
+-    """
+-    # Example: Chi-Square distance
+-    # dist = 0.5 * sum((hist1 - hist2)^2 / (hist1 + hist2 + epsilon))
+-    # Note: The source does not specify the exact metric, so this is a placeholder
+-    # for a standard differentiable histogram distance.
+-    return chi_square_distance(hist1, hist2)
+-
+-def optimize_loi(renderer, reference_image, initial_theta, sigma, alpha, beta, learning_rate, num_iterations):
+-    """
+-    Optimizes scene parameters theta using Locally Orderless Images.
+-    """
+-    theta = initial_theta
+-    
+-    # Pre-compute Reference LOI
+-    P_ref = compute_loi_histogram(reference_image, sigma, alpha, beta)
++import numpy as np
++from scipy.ndimage import gaussian_filter
++from scipy.stats import entropy
++
++def gaussian_kernel(sigma):
++    """Create a 2D Gaussian kernel."""
++    size = int(np.ceil(3 * sigma)) * 2 + 1
++    x, y = np.meshgrid(np.linspace(-size, size, size), np.linspace(-size, size, size))
++    kernel = np.exp(-(x**2 + y**2) / (2 * sigma**2))
++    return kernel / np.sum(kernel)
++
++def compute_histogram(intensity_image, bin_width, num_bins):
++    """Compute histogram of intensity values."""
++    # Clip intensities to valid range
++    intensities = intensity_image.flatten()
++    # Create histogram
++    hist, _ = np.histogram(intensities, bins=num_bins, range=(0, num_bins * bin_width))
++    return hist.astype(float)
++
++def compute_loi(image, sigma, alpha, beta, num_bins):
++    """
++    Compute Locally Orderless Image representation.
++    image: 2D numpy array of intensities.
++    sigma: Inner scale (Gaussian blur width).
++    alpha: Extent scale (neighborhood size for histogram).
++    beta: Tonal scale (bin width).
++    num_bins: Number of histogram bins.
++    """
++    # Inner Scale: Gaussian Blur
++    if sigma > 0:
++        blurred_image = gaussian_filter(image, sigma=sigma)
++    else:
++        blurred_image = image.copy()
++    
++    # Extent Scale: Compute histograms in neighborhoods
++    # For each pixel, compute histogram of intensities in alpha x alpha neighborhood
++    h, w = blurred_image.shape
++    lois = []
++    
++    # Precompute kernel for extent scale if needed, but here we just use a box filter concept
++    # Note: The source describes computing histograms within a spatial neighborhood.
++    # This is computationally expensive. A common approximation is to use a sliding window.
++    
++    half_alpha = alpha // 2
++    
++    for i in range(h):
++        for j in range(w):
++            # Define neighborhood
++            i_start = max(0, i - half_alpha)
++            i_end = min(h, i + half_alpha + 1)
++            j_start = max(0, j - half_alpha)
++            j_end = min(w, j + half_alpha + 1)
++            
++            neighborhood = blurred_image[i_start:i_end, j_start:j_end]
++            
++            # Tonal Scale: Bin intensities
++            # Flatten neighborhood and compute histogram
++            hist, _ = np.histogram(neighborhood, bins=num_bins, range=(0, num_bins * beta))
++            lois.append(hist)
++            
++    return np.array(lois)
++
++def histogram_distance(hist1, hist2):
++    """Compute Chi-squared distance between two histograms."""
++    # Avoid division by zero
++    hist1 = np.maximum(hist1, 1e-10)
++    hist2 = np.maximum(hist2, 1e-10)
++    return np.sum((hist1 - hist2)**2 / (hist1 + hist2))
++
++def optimize_loi(render_fn, reference_image, initial_theta, sigma, alpha, beta, num_bins, learning_rate, num_iterations):
++    """
++    Optimize scene parameters using LOI matching.
++    render_fn: Function that takes theta and returns rendered image.
++    reference_image: 2D numpy array of reference intensities.
++    initial_theta: Initial scene parameters.
++    sigma, alpha, beta: LOI parameters.
++    num_bins: Number of histogram bins.
++    learning_rate: Step size for gradient descent.
++    num_iterations: Number of optimization steps.
++    """
++    theta = initial_theta.copy()
++    
++    # Precompute Reference LOI
++    ref_loi = compute_loi(reference_image, sigma, alpha, beta, num_bins)
+     
+     for i in range(num_iterations):
+         # Render current image
+-        I_render = renderer.render(theta)
+-        
+-        # Compute Gradients of Rendered Image w.r.t Theta
+-        # This is provided by the differentiable renderer
+-        dI_dtheta = renderer.compute_gradients(I_render, theta)
+-        
+-        # Compute LOI for rendered image
+-        P_render = compute_loi_histogram(I_render, sigma, alpha, beta)
+-        
+-        # Compute Loss (Histogram Distance)
+-        loss = 0
+-        for x in pixel_coordinates:
+-            loss += compute_histogram_distance(P_render[x], P_ref[x])
+-            
+-        # Compute Gradients of Loss w.r.t Theta
+-        # The source states gradients are computed using standard RGB gradients
+-        # and the histogram distance metric.
+-        # dE/dtheta = sum_x (dE/dP[x] * dP[x]/dI[x] * dI[x]/dtheta)
+-        # The source implies this is done via the differentiable renderer's existing
+-        # gradient path, extended by the histogram loss.
+-        
+-        # Update parameters
+-        theta = theta - learning_rate * dE_dtheta
++        current_image = render_fn(theta)
++        
++        # Compute Rendered LOI
++        render_loi = compute_loi(current_image, sigma, alpha, beta, num_bins)
++        
++        # Compute Objective
++        error = 0
++        for h_ref, h_render in zip(ref_loi, render_loi):
++            error += histogram_distance(h_ref, h_render)
++        
++        # Compute Gradients
++        # Note: The source states that gradients are computed using standard RGB gradients
++        # from the differentiable renderer and the histogram distance metric.
++        # This requires the differentiable renderer to provide dI/dtheta.
++        # Here we assume a placeholder for the gradient computation.
++        # In practice, this involves backpropagating through the histogram distance.
++        
++        # Placeholder for gradient computation
++        # grad = compute_gradient(render_fn, theta, reference_image, sigma, alpha, beta, num_bins)
++        # For the purpose of this pseudocode, we assume a generic gradient function exists.
++        grad = compute_gradient(render_fn, theta, reference_image, sigma, alpha, beta, num_bins)
++        
++        # Update Parameters
++        theta = theta - learning_rate * grad
+         
+     return theta
+ ```
+ 
+-### Parameters
+-*   $\sigma$ (sigma): Inner scale parameter controlling the effective resolution of the image via Gaussian kernel width. Typical values include $\sigma=0$ (stationary) and $\sigma>0$ (coarser scales) [S1].
+-*   $\alpha$ (alpha): Extent scale parameter defining the spatial extent (neighborhood size) over which the histogram is computed for each pixel [S1].
+-*   $\beta$ (beta): Tonal scale parameter quantifying the imprecision in measured radiance (bin width) at a location, modeling uncertainty in intensity values [S1].
+-
+-### Edge Cases and Pitfalls
+-*   **Sparse Gradients:** In cases with no overlap between initial and target features (e.g., disks), standard image gradients $\frac{\partial I}{\partial \theta}$ are sparse (non-zero only at silhouettes), causing the error gradient $\frac{\partial E}{\partial \theta}$ to be zero everywhere, stalling optimization [S1]. LOI mitigates this by extending gradient support [S1].
+-*   **Gaussian Pyramid Unreliability:** Standard multi-resolution image pyramids (Gaussian Pyramids) are unreliable for complex inverse rendering because blurring averages out local appearance and suppresses high-frequency details, leading to local minima [S1].
+-*   **Noise:** The method is robust under noise, as the tonal scale $\beta$ explicitly models uncertainty in intensity values [S1].
+-
+ ## Subtopics
+ 
+ ### [Variational Optimization with Locally Orderless Images (LOI)](11021-variational-optimization-with-locally-orderless-images-loi.md)
+-A method for differentiable rendering optimization that combines variational derivatives with local histogram matching to recover parameters (e.g., kaleidoscope configuration, particle positions, glass orb position) from images where RGB gradients are unstable or insufficient due to high variance or local minima.
++Variational Optimization with Locally Orderless Images (LOI) is a differentiable rendering optimization technique that combines variational derivatives with multi-scale local histogram matching to recover scene parameters (e.g., geometry, camera pose, material properties) from images where standard RGB gradients are unstable, sparse, or insufficient due to complex light transport or high variance. Unlike variational optimization using stationary image matching, which fails due to strict alignment sensitivity and noise, LOI matching does not require perfect alignment between the variational estimate and reference images, allowing reliable recovery from arbitrary initializations.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Computing LOI involves Gaussian blurring and histogram computation over neighborhoods. The complexity is $O(N \cdot \alpha^2)$ per pixel for histogram computation, where $N$ is the number of pixels and $\alpha$ is the neighborhood size. This is significantly more expensive than standard pixel-wise comparison.
++*   **Memory Complexity:** Storing LOI representations for multiple scales and pixels requires $O(N \cdot \alpha^2 \cdot N_{scales})$ memory, where $N_{scales}$ is the number of scale levels.
+ *   **Measured Performance:** Validated on inverse vectorization, path tracing, and rasterization problems using both synthetic and real data [S1].
+-*   **Strengths:** Extends gradient support for sparsely defined image gradients; robust under noise; works with arbitrary geometry representations and complex lighting; requires no modifications to a differentiable renderer [S1].
+-*   **Limitations:** Relies on histogram matching which may be computationally intensive for large neighborhoods or fine bin widths; not given in the sources for specific scaling behavior.
+-*   **When to use:** When optimizing scene parameters that cause motion in image space, leading to sparse gradients and local minima in inverse rendering [S1].
+-*   **When not to use:** When standard pixel-wise comparison is sufficient and gradients are dense; when computational resources are extremely limited and histogram computation is prohibitive.
++*   **Scaling:** LOI scales with the number of scales and neighborhood size. Larger $\alpha$ and $\sigma$ improve gradient support but increase computational cost.
++*   **Strengths:** Extends gradient support for sparse gradients; robust to noise; works with arbitrary geometry representations and complex light transport; does not require perfect alignment [S1].
++*   **Limitations:** Computationally expensive due to histogram computation; sensitive to parameter selection ($\alpha, \beta, \sigma$); may smooth out fine details if scales are too large [S1].
++*   **When to use:** Inverse rendering problems with sparse gradients, large initial errors, or complex light transport where standard RGB gradients fail [S1].
++*   **When not to use:** Real-time applications requiring fast convergence; problems where fine detail preservation is critical and computational resources are limited [S1].
+ 
+ ## Background
+-LOI was originally proposed by Griffin [11] and later extended by Koenderink and van Doorn [15] for reasoning about image topology [S1]. The method was repurposed for inverse rendering by Chandraker and Ramamoorthi [S1] to address the sparsity of image gradients in differentiable rendering optimization. It has been validated on various inverse problems using both synthetic and real data [S1].
++LOI was originally proposed by Griffin [11] and later extended by Koenderink and van Doorn [15] for reasoning about image topology [S1]. It has been used in various vision tasks, including image retrieval [17], object tracking [25], and non-linear filtering [33, 34] [S1]. The application of LOI to differentiable rendering optimization was introduced by Chandraker and Ramamoorthi in 2025 [S1].
+ 
+ ## Sources

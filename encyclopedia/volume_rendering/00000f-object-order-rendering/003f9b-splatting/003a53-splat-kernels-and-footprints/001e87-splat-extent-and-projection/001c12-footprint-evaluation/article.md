@@ -7,12 +7,12 @@ Footprint Evaluation is a forward-mapping (object-order) volume rendering algori
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D volume grid of voxels $V(i,j,k)$ with scalar values $\rho(s)$, a viewing transform (orthographic or perspective), and a 3D spherically symmetric reconstruction kernel $w(x,y,z)$ [S2, unofficial][S6, unofficial].
+*   **Input:** A 3D volume grid of voxels $V(i,j,k)$ with scalar values $\rho(s)$, a viewing transform (orthographic or perspective), and a 3D spherically symmetric reconstruction kernel $w(x,y,z)$ [S2][S6, unofficial].
 *   **Output:** A 2D image buffer where each pixel contains the accumulated color and opacity from all projected voxels [S3, unofficial][S4, unofficial].
 
 **Data Structures:**
 1.  **Volume Grid:** A 3D array of voxels. Each voxel $s$ has a position $(x_s, y_s, z_s)$ in object space and a value $\rho(s)$ [S9, unofficial].
-2.  **Footprint Table:** A pre-computed 2D lookup table representing the integration of the 3D kernel along the ray axis. For orthographic projection with uniform grid spacing and symmetric kernels, a single generic table is used for all voxels [S4, unofficial][S9, unofficial]. For perspective projection, view-dependent elliptical footprints may require separate tables or transformations [S6, unofficial][S9, unofficial].
+2.  **Footprint Table:** A pre-computed 2D lookup table representing the integration of the 3D kernel along the ray axis [S4, unofficial]. For orthographic projection with uniform grid spacing and symmetric kernels, a single generic table is used for all voxels [S9, unofficial]. For perspective projection, view-dependent elliptical footprints may require separate tables or transformations [S6, unofficial][S9, unofficial].
 3.  **Buffers:**
     *   **Compositing Buffer:** The final image accumulator [S6, unofficial].
     *   **Sheet Buffer (Optional):** An intermediate buffer used in the sheet-buffer method to cache splats from a slice of the volume before compositing into the main buffer [S1, unofficial][S6, unofficial].
@@ -20,7 +20,7 @@ Footprint Evaluation is a forward-mapping (object-order) volume rendering algori
 **Formulas:**
 The reconstructed continuous volume function $f_r(v)$ is the sum of sample densities weighted by the kernel:
 $$ f_r(v) = \sum_k w(v - v_k) f(v_k) $$
-where $f(v_k)$ is the density at sample $k$ and $w$ is the reconstruction kernel [S2, unofficial][S6, unofficial].
+where $f(v_k)$ is the density at sample $k$ and $w$ is the reconstruction kernel [S2][S6, unofficial].
 
 The intensity $I(p)$ for a pixel $p$ along ray $r$ is the integral of the reconstructed function:
 $$ I(p) = \int f_r(p+r) dr = \int \sum_k w(p+r-v_k) f(v_k) dr $$
@@ -28,7 +28,7 @@ By switching summation and integral, the intensity becomes the sum of voxel dens
 $$ I(p) = \sum_k f(v_k) \cdot \int w(p+r-v_k) dr $$
 The term $\int w(p+r-v_k) dr$ is the **footprint function** $F(x,y)$, defined as the integral of the 3D kernel along the ray axis (z-axis):
 $$ F(x,y) = \int w(x,y,z) dz $$
-For a Gaussian kernel $w(x,y,z) = d \exp(-x^2/a^2 - y^2/b^2 - z^2/c^2)$, the footprint is also a Gaussian [S2, unofficial][S6, unofficial].
+For a Gaussian kernel $w(x,y,z) = d \exp(-x^2/a^2 - y^2/b^2 - z^2/c^2)$, the footprint is also a Gaussian [S2][S6, unofficial].
 
 The contribution of a sample $s$ to an image plane pixel $p(x,y)$ is:
 $$ I_s(p) = \rho(s) F(x-x_s, y-y_s) $$
@@ -37,13 +37,13 @@ where $(x_s, y_s)$ is the projected center of the voxel in screen space [S9, uno
 **Numbered Steps:**
 1.  **Preprocessing:**
     *   Select a 3D spherically symmetric kernel $w(x,y,z)$, such as a Gaussian [S6, unofficial].
-    *   Compute the 2D footprint function $F(x,y) = \int w(x,y,z) dz$ [S2, unofficial][S6, unofficial].
+    *   Compute the 2D footprint function $F(x,y) = \int w(x,y,z) dz$ [S2][S6, unofficial].
     *   Store $F(x,y)$ in a finely sampled 2D lookup table (Footprint Table) [S4, unofficial][S10, unofficial].
     *   If using perspective projection, determine the transformation to map the generic spherical footprint to the view-dependent elliptical footprint [S6, unofficial][S9, unofficial].
 
 2.  **Volume Slicing (Sheet Selection):**
-    *   Determine the stack of volume slices most parallel to the image plane based on the viewing angle [S2, unofficial][S6, unofficial].
-    *   If the viewing angle is ~30 degrees, use the stack aligned with the x-axis; if ~70 degrees, use the stack aligned with the y-axis [S2, unofficial][S6, unofficial].
+    *   Determine the stack of volume slices most parallel to the image plane based on the viewing angle [S2][S6, unofficial].
+    *   If the viewing angle is ~30 degrees, use the stack aligned with the x-axis; if ~70 degrees, use the stack aligned with the y-axis [S2][S6, unofficial].
 
 3.  **Projection and Splatting (Per Voxel):**
     *   Visit voxels in the selected stack in either back-to-front or front-to-back order [S3, unofficial][S4, unofficial].
@@ -51,7 +51,7 @@ where $(x_s, y_s)$ is the projected center of the voxel in screen space [S9, uno
         a.  Transform the voxel center $(x_s, y_s, z_s)$ from object space to screen space $(x_s', y_s')$ [S9, unofficial].
         b.  Compute the screen-space extent of the footprint (the region of pixels affected) [S9, unofficial].
         c.  For each pixel $(x,y)$ within the extent:
-            i.  Calculate the displacement $(dx, dy)$ from the voxel's projected center.
+            i.  Calculate the displacement $(dx, dy)$ from the voxel's projected center [S10, unofficial].
             ii. Look up the weight $w_{footprint} = F(dx, dy)$ from the footprint table [S10, unofficial].
             iii. If using perspective projection, apply the view-dependent transformation to the footprint coordinates or weight [S6, unofficial][S9, unofficial].
             iv. Accumulate the voxel's contribution to the pixel:
@@ -60,8 +60,8 @@ where $(x_s, y_s)$ is the projected center of the voxel in screen space [S9, uno
 
 4.  **Compositing (Sheet-Buffer Variant):**
     *   If using the sheet-buffer method [S1, unofficial][S7, unofficial]:
-        a.  Add voxel kernels within the current sheet to the sheet buffer.
-        b.  Transfer the sheet buffer to the compositing buffer.
+        a.  Add voxel kernels within the current sheet to the sheet buffer [S7, unofficial].
+        b.  Transfer the sheet buffer to the compositing buffer [S7, unofficial].
         c.  Composite the sheet buffer with the compositing buffer using a compositing operator (e.g., front-to-back) [S6, unofficial].
         d.  Repeat for subsequent sheets.
 
@@ -72,80 +72,85 @@ where $(x_s, y_s)$ is the projected center of the voxel in screen space [S9, uno
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Preprocessing
-def compute_footprint_table(kernel_func, table_size, resolution):
+import math
+
+def compute_footprint_table(kernel_params, table_size, resolution):
     """
     Computes the 2D footprint table by integrating the 3D kernel along Z.
-    kernel_func: function w(x, y, z)
+    kernel_params: dict with 'a', 'b', 'c', 'd' for Gaussian w(x,y,z) = d*exp(-x^2/a^2 - y^2/b^2 - z^2/c^2)
     table_size: int, dimension of the square table
     resolution: float, pixel size in object space units
     """
     table = [[0.0 for _ in range(table_size)] for _ in range(table_size)]
     center = table_size // 2
+    a, b, c, d = kernel_params['a'], kernel_params['b'], kernel_params['c'], kernel_params['d']
+    # Analytic integral of Gaussian along z: sqrt(pi)*c * exp(-x^2/a^2 - y^2/b^2)
     for i in range(table_size):
         for j in range(table_size):
             x = (i - center) * resolution
             y = (j - center) * resolution
-            # Integrate kernel along z from -infinity to infinity
-            # Approximated by numerical integration or analytic solution for Gaussian
-            footprint_val = integrate_kernel_along_z(kernel_func, x, y)
+            footprint_val = d * math.sqrt(math.pi) * c * math.exp(-(x**2 / a**2) - (y**2 / b**2))
             table[i][j] = footprint_val
     return table
 
-def integrate_kernel_along_z(kernel_func, x, y):
-    # Placeholder for actual integration logic
-    # For Gaussian w(x,y,z) = exp(-x^2/a^2 - y^2/b^2 - z^2/c^2)
-    # Integral over z is sqrt(pi)*c * exp(-x^2/a^2 - y^2/b^2)
-    return 0.0 # Not given in sources
+def get_slices_parallel_to_view(volume, view_transform):
+    """
+    Returns slices of the volume ordered for projection based on viewing angle.
+    """
+    # Simplified logic based on viewing angle thresholds
+    # In practice, this calculates the angle between view vector and volume axes
+    # and returns slices aligned with the most parallel axis.
+    # Here we assume a simple iteration over z-slices for demonstration.
+    return [volume[z] for z in range(volume.shape[0])]
 
-# Rendering
-def footprint_evaluation(volume, view_transform, footprint_table, kernel_value_func):
+def get_footprint_extent(sx, sy, footprint_radius_pixels, image_width, image_height):
+    """
+    Returns bounding box (min_x, max_x, min_y, max_y) in screen pixels.
+    """
+    min_x = max(0, int(sx - footprint_radius_pixels))
+    max_x = min(image_width - 1, int(sx + footprint_radius_pixels))
+    min_y = max(0, int(sy - footprint_radius_pixels))
+    max_y = min(image_height - 1, int(sy + footprint_radius_pixels))
+    return min_x, max_x, min_y, max_y
+
+def footprint_evaluation(volume, view_transform, footprint_table, kernel_value_func, footprint_radius_pixels):
     """
     volume: 3D array of voxel values
     view_transform: function to map (x,y,z) -> (sx, sy)
     footprint_table: 2D array of precomputed footprint weights
     kernel_value_func: function to get voxel value rho(s)
+    footprint_radius_pixels: int, radius of footprint in screen pixels
     """
-    image_width, image_height = get_image_dimensions()
+    image_width, image_height = volume.shape[2], volume.shape[3] # Assuming 4D volume (z, y, x, channels) or similar
     image = [[0.0 for _ in range(image_height)] for _ in range(image_width)]
     
-    # Determine slice order based on viewing angle
     slices = get_slices_parallel_to_view(volume, view_transform)
     
-    for slice in slices:
-        # Optional: Use sheet buffer for this slice
+    for slice_data in slices:
         sheet_buffer = [[0.0 for _ in range(image_height)] for _ in range(image_width)]
         
-        for voxel in slice:
-            # 1. Project voxel center
+        for voxel in slice_data:
             sx, sy = view_transform(voxel.x, voxel.y, voxel.z)
             
-            # 2. Determine footprint extent
-            # Assume footprint has radius R in screen pixels
-            extent = get_footprint_extent(sx, sy, image_width, image_height)
+            min_x, max_x, min_y, max_y = get_footprint_extent(sx, sy, footprint_radius_pixels, image_width, image_height)
             
-            # 3. Splat onto sheet buffer
-            for dx, dy in extent:
-                px = int(sx + dx)
-                py = int(sy + dy)
-                
-                if 0 <= px < image_width and 0 <= py < image_height:
-                    # Look up footprint weight
-                    # Map screen offset to table index
+            for px in range(min_x, max_x + 1):
+                for py in range(min_y, max_y + 1):
+                    dx = px - sx
+                    dy = py - sy
+                    
                     table_idx_x = int(dx) + len(footprint_table) // 2
                     table_idx_y = int(dy) + len(footprint_table) // 2
                     
-                    weight = footprint_table[table_idx_x][table_idx_y]
+                    # Clamp table indices
+                    table_idx_x = max(0, min(len(footprint_table) - 1, table_idx_x))
+                    table_idx_y = max(0, min(len(footprint_table) - 1, table_idx_y))
                     
-                    # Get voxel value
+                    weight = footprint_table[table_idx_x][table_idx_y]
                     rho = kernel_value_func(voxel)
                     
-                    # Accumulate
-                    # Note: Simple addition. For correct opacity compositing, 
-                    # front-to-back compositing with alpha is needed [S6, unofficial]
                     sheet_buffer[px][py] += rho * weight
         
-        # Composite sheet buffer to image
         for px in range(image_width):
             for py in range(image_height):
                 image[px][py] += sheet_buffer[px][py]
@@ -154,16 +159,16 @@ def footprint_evaluation(volume, view_transform, footprint_table, kernel_value_f
 ```
 
 **Parameters:**
-*   **Kernel Shape/Size:** Critical for quality. Larger footprints increase blurring (used for high pixel-to-voxel ratios); smaller sizes generate gaps [S2, unofficial][S6, unofficial]. A 3D Gaussian is a common choice [S6, unofficial].
+*   **Kernel Shape/Size:** Critical for quality [S6, unofficial]. Larger footprints increase blurring (used for high pixel-to-voxel ratios); smaller sizes generate gaps [S2][S6, unofficial]. A 3D Gaussian is a common choice [S6, unofficial].
 *   **Footprint Table Size:** Larger tables allow nearest neighbor interpolation; smaller tables require interpolation from nearest samples [S11, unofficial].
 *   **Traversal Order:** Back-to-front guarantees correct visibility; front-to-back is faster as it can stop when pixels are fully opaque [S3, unofficial][S6, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Overlapping Splats:** When splats overlap, the algorithm performs reconstruction and integration on a per-splat basis rather than globally, resulting in incorrect compositing and aliasing artifacts [S2, unofficial][S4, unofficial][S6, unofficial].
+*   **Overlapping Splats:** When splats overlap, the algorithm performs reconstruction and integration on a per-splat basis rather than globally, resulting in incorrect compositing and aliasing artifacts [S2][S4, unofficial][S6, unofficial].
 *   **High Resolution/Aliasing:** Standard splatting fails to correctly render cases where volume sampling rate is higher than image sampling rate (e.g., orthographic projections of high-resolution volumes), causing severe spatial and temporal aliasing [S4, unofficial].
-*   **View-Dependent Footprints:** In perspective projection, footprints become elliptical. If not handled correctly (e.g., by transforming the generic table), artifacts occur [S6, unofficial][S9, unofficial].
+*   **View-Dependent Footprints:** In perspective projection, footprints become elliptical [S6, unofficial]. If not handled correctly (e.g., by transforming the generic table), artifacts occur [S9, unofficial].
 *   **Sheet Buffer Popping:** In the sheet-buffer method, sudden changes in slice orientation can cause popping artifacts [S1, unofficial][S7, unofficial].
-*   **Non-linear Classification:** If classification or shading is non-linear, performing it prior to projection (as is efficient in splatting) produces incorrect results [S4, unofficial].
+*   **Non-linear Classification:** If classification or shading is non-linear, performing it prior to projection (as is efficient in splatting) produces incorrect results [S5, unofficial].
 
 ## Subtopics
 
@@ -174,38 +179,38 @@ Antialiased Splatting with Footprint Alignment is a forward-mapping volume rende
 The Footprint Function Mechanism is a method for implementing 3D spherically symmetric splatting kernels in volume rendering by reducing the computational dimensionality from 3D to 2D. It solves the problem of efficiently projecting volumetric data onto a 2D image plane by pre-computing the integration of the 3D kernel along one axis, storing the result as a 2D lookup table. This approach sets itself apart from naive 3D splatting by avoiding per-pixel 3D kernel evaluations, instead relying on 2D table lookups and interpolation, as detailed in [Footprint Evaluation](1180-footprint-evaluation.md).
 
 ### Separable Footprint (SF) Projector
-The Separable Footprint (SF) Projector is a projector model that accounts for the finite width of detector pixels and volume voxels, providing higher accuracy than methods that do not model finite widths (like Siddon or Joseph), though at higher computational cost [S13, unofficial]. It models finite detector/voxel widths, whereas Siddon and Joseph do not. SF is more accurate and avoids artifacts produced by Siddon/Joseph in some cases, but is more computationally expensive [S13, unofficial].
+The Separable Footprint (SF) Projector is a projector model that accounts for the finite width of detector pixels and volume voxels, providing higher accuracy than methods that do not model finite widths (like Siddon or Joseph), though at higher computational cost [S15, unofficial]. It models finite detector/voxel widths, whereas Siddon and Joseph do not [S15, unofficial]. SF is more accurate and avoids artifacts produced by Siddon/Joseph in some cases, but is more computationally expensive [S15, unofficial].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   Splatting has a complexity of $O(k^2 n^3)$, where $k$ is the kernel size and $n^3$ is the voxel count, because every voxel is splatted exactly once [S3, unofficial][S4, unofficial].
+*   Splatting has a complexity of $O(k^2 n^3)$, where $k$ is the kernel size and $n^3$ is the voxel count, because every voxel is splatted exactly once [S4, unofficial]. (Note: [S3, unofficial] cites $O(k^2 n^2)$.)
 *   This is faster than ray casting, which has a complexity of at least $O(k^3 n^3)$ because reconstruction is performed for each sample point along the ray [S3, unofficial][S4, unofficial].
 *   Memory usage depends on the footprint table size and the number of buffers (image, sheet) [S6, unofficial].
 
 **Measured Performance:**
 *   Splatting is inherently faster than ray casting for large datasets due to pre-computed convolution [S3, unofficial][S4, unofficial].
-*   However, achieving high image quality with splatting requires as much CPU computing time as ray casting, due to the need for large kernels and handling overlaps [S2, unofficial][S6, unofficial].
-*   Footprint mapping is more costly than trilinear interpolation at moderate screen sizes but can be faster at large screen sizes for specific datasets due to screen-size-independent setup costs [S12].
+*   However, achieving high image quality with splatting requires as much CPU computing time as ray casting, due to the need for large kernels and handling overlaps [S2][S6, unofficial].
+*   Footprint mapping is more costly than trilinear interpolation at moderate screen sizes but can be faster at large screen sizes for specific datasets due to screen-size-independent setup costs [S12, unofficial].
 
 **Strengths and Limitations:**
 *   **Strengths:** Fast object-order rendering; simple static parallel decomposition; efficient for sparse data (air voxels can be disregarded); pre-integrated kernels reduce per-voxel cost [S3, unofficial][S6, unofficial].
-*   **Limitations:** Poor quality in original form (blurry images for zoomed views due to Gaussian cutting high frequencies); aliasing artifacts when splats overlap or sampling rate is high; incorrect compositing for non-linear transfer functions; high fill-rate for zoomed splats [S2, unofficial][S4, unofficial][S6, unofficial].
+*   **Limitations:** Poor quality in original form (blurry images for zoomed views due to Gaussian cutting high frequencies); aliasing artifacts when splats overlap or sampling rate is high; incorrect compositing for non-linear transfer functions; high fill-rate for zoomed splats [S2][S4, unofficial][S6, unofficial].
 
 **When to Use:**
-*   Use when speed is critical and high-quality anti-aliasing is not the primary concern, or when using variants like Antialiased Splatting.
+*   Use when speed is critical and high-quality anti-aliasing is not the primary concern, or when using variants like Antialiased Splatting [S3, unofficial][S6, unofficial].
 *   Suitable for real-time visualization of large volumetric datasets on CPU or GPU [S3, unofficial][S6, unofficial].
 
 **When Not to Use:**
-*   Avoid when high-frequency details must be preserved without blurring.
-*   Avoid when strict physical accuracy (correct compositing of overlapping volumes) is required without additional corrections.
-*   Avoid for non-linear classification/shading if performed pre-projection.
+*   Avoid when high-frequency details must be preserved without blurring [S6, unofficial].
+*   Avoid when strict physical accuracy (correct compositing of overlapping volumes) is required without additional corrections [S4, unofficial].
+*   Avoid for non-linear classification/shading if performed pre-projection [S5, unofficial].
 
 ## Background
 Footprint Evaluation, commonly known as Splatting, was introduced by L. Westover in 1990 in the paper "Footprint evaluation for volume rendering" [S9, unofficial][S11, unofficial]. It was first described for rendering regular grids on a CPU [S1, unofficial]. The method was developed to provide an efficient object-order alternative to image-order ray casting, leveraging the linearity of integration to pre-compute kernel contributions [S3, unofficial][S4, unofficial]. It has since been extended to handle perspective projection, scattered data (e.g., SPH), and improved quality through techniques like sheet buffering and anti-aliasing [S1, unofficial][S6, unofficial].
 
 ## Sources
 [S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
-[S2] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
+[S2] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25
 [S3] DTIC ADA363073: Perspective Splatting, https://archive.org/details/DTIC_ADA363073, fetched 2026-10-26 (unofficial)
 [S4] DTIC ADA606342: An Anti-Aliasing Technique for Splatting, https://archive.org/details/DTIC_ADA606342, fetched 2026-10-26 (unofficial)
 [S5] Volume rendering techniques for general purpose graphics hardware, https://opus4.kobv.de/opus4-fau/files/9/Dissertation.pdf, fetched 2026-10-26 (unofficial)
@@ -215,5 +220,5 @@ Footprint Evaluation, commonly known as Splatting, was introduced by L. Westover
 [S9] PDF Volume Rendering - LSU, http://www.csc.lsu.edu/~karki/courses/SV/12-Splatting.pdf, fetched 2026-10-28 (unofficial)
 [S10] Footprint Evaluation for Volume Rendering - SlideServe, https://www.slideserve.com/christopherivy/footprint-evaluation-for-volume-rendering-powerpoint-ppt-presentation, fetched 2026-10-28 (unofficial)
 [S11] Footprint Evaluation for Volume Rendering A Feedforward Approach, https://slidetodoc.com/footprint-evaluation-for-volume-rendering-a-feedforward-approach/, fetched 2026-10-28 (unofficial)
-[S12] A Practical Evaluation of Popular Volume Rendering ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/PracticalEvaluationofVolumeRenderingAlgorithms.pdf, fetched 2026-10-29
+[S12] A Practical Evaluation of Popular Volume Rendering ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/PracticalEvaluationofVolumeRenderingAlgorithms.pdf, fetched 2026-10-29 (unofficial)
 [S13] PDF Differentiable Forward Projector for X-ray Computed Tomography, https://differentiable.xyz/papers-2023/paper_48.pdf, fetched 2026-10-29 (unofficial)

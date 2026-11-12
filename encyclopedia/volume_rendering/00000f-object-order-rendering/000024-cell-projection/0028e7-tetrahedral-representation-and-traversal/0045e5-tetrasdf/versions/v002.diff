@@ -1,0 +1,393 @@
+--- v001.md
++++ v002.md
+@@ -1,243 +1,181 @@
+ # TetraSDF
+ 
+-Also called: Analytic Isosurface Extraction with Multi-resolution Tetrahedral Grid
++Also called: Analytic Isosurface Extraction, Analytic Isosurface Extraction with Multi-resolution Tetrahedral Grid, TetraSDF extraction
+ 
+ ## Overview
+-TetraSDF is an analytic isosurface extraction framework for neural Signed Distance Functions (SDFs) that enables exact zero-level set extraction by preserving a global Continuous Piecewise Affine (CPWA) structure [S1]. Unlike sampling-based methods like Marching Cubes, which introduce discretization error, or plain ReLU MLPs, which lack high-frequency expressiveness, TetraSDF composes a ReLU MLP with a multi-resolution tetrahedral positional encoder [S1]. This composition ensures the entire network remains CPWA, allowing the zero-level set to be extracted analytically via edge subdivision without marching artifacts [S1]. It is distinguished by its use of barycentric interpolation to maintain affine continuity across tetrahedral cells and an analytic input preconditioner to mitigate directional bias from the encoder's grid geometry [S1].
++TetraSDF is an analytic isosurface extraction framework for neural Signed Distance Functions (SDFs) that represents the SDF as a ReLU Multi-Layer Perceptron (MLP) composed with a multi-resolution tetrahedral positional encoder [S1]. It solves the problem of discretization error inherent in sampling-based methods like Marching Cubes, which deviate from the true zero-level set, and the lack of high-frequency detail capture in plain ReLU MLPs with analytic marching [S2, unofficial]. It sets itself apart by preserving a global Continuous Piecewise Affine (CPWA) structure via barycentric interpolation, enabling exact zero-level set extraction without grid resolution artifacts [S1].
+ 
+ ## How it works
+-### Inputs and Outputs
+-**Inputs:**
+-1.  A trained neural network $f(\mathbf{x}) = \nu^{(M)}(\tau(\mathbf{x}))$, where $\nu^{(M)}$ is an $M$-layer ReLU MLP and $\tau$ is the multi-resolution tetrahedral positional encoder [S1].
+-2.  Network parameters: Weights $W^{(i)}$ and biases $b^{(i)}$ for the MLP [S1].
+-3.  Encoder parameters: Hash table entries $H_i^{(\ell)}$ for each level $\ell$ [S1].
+-4.  Extraction bounds: A bounding cube $\mathcal{S} = [0, 1]^3$ (or transformed coordinates) [S1].
++**Inputs and Outputs:**
++*   **Input:** A trained neural SDF model $f(\mathbf{x}) = \nu^{(M)}(\tau(\mathbf{x}))$, where $\nu^{(M)}$ is an $M$-layer ReLU network and $\tau$ is the multi-resolution tetrahedral positional encoder. The model parameters (weights, biases, hash table features) and hyperparameters ($L, N_{min}, N_{max}$) are required.
++*   **Output:** A triangle mesh representing the exact zero-level set $\{\mathbf{x} | f(\mathbf{x}) = 0\}$.
+ 
+-**Outputs:**
+-1.  A set of vertices $V$ and edges $E$ defining the polyhedral complex of the zero-level set [S1].
+-2.  A mesh extracted from $(V, E)$ representing the exact isosurface [S1].
++**Data Structures:**
++1.  **Multi-resolution Tetrahedral Grid:** Defined by $L$ levels. Level $\ell$ has resolution $N_\ell$. Each unit cube cell at level $\ell$ is decomposed into 6 congruent tetrahedra [S1].
++2.  **Barycentric Mask $\mathbf{m}(\mathbf{x})$:** A binary vector of length $4L$. For level $\ell$, $m_i^{(\ell)}(\mathbf{x}) = 1$ if barycentric weight $w_i^{(\ell)}(\mathbf{x}) > \epsilon_b$, else $0$. Zero entries indicate the point lies on a face (1 zero), edge (2 zeros), or vertex (3 zeros) of the tetrahedron [S1].
++3.  **Region Indicator $\mathbf{r}(\mathbf{x})$:** A vector of length $4L$. For level $\ell$, $\mathbf{r}^{(\ell)}(\mathbf{x}) = [\mathbf{a}^{(\ell)}(\mathbf{x}), t^{(\ell)}(\mathbf{x})]$, where $\mathbf{a}^{(\ell)}(\mathbf{x}) = \lfloor N_\ell \mathbf{x} \rfloor$ is the grid anchor (lexicographically smallest vertex of the containing cube) and $t^{(\ell)}(\mathbf{x}) \in \{0, \dots, 5\}$ is the tetrahedron offset within that cube [S1].
++4.  **Sign Vector $\mathbf{s}_k^{(m)}(\mathbf{x})$:** Tracks the state of neurons in the ReLU network. Entry $\gamma_j^{(i)}(\mathbf{x})$ is $+1$ if preactivation $> \epsilon_s$, $-1$ if $< -\epsilon_s$, and $0$ if $|\text{preactivation}| \le \epsilon_s$ [S1].
+ 
+-### Data Structures
+-1.  **Multi-resolution Tetrahedral Grid:**
+-    *   Defined by $L$ resolution levels, minimum resolution $N_{\min}$, and maximum resolution $N_{\max}$ [S1].
+-    *   Level resolution $N_\ell$ is calculated via geometric progression [S1].
+-    *   Each level $\ell$ subdivides the unit cube into $N_\ell^3$ cube cells, each decomposed into 6 congruent tetrahedra [S1].
+-2.  **Sign Vector $\mathbf{s}_k^{(m)}(\mathbf{x})$:**
+-    *   A vector of length $K_m$ (number of neurons in layer $m$) [S1].
+-    *   Entries $\gamma_j^{(i)}(\mathbf{x}) \in \{-1, 0, +1\}$ indicate the state of the $j$-th neuron in layer $i$ relative to a threshold $\epsilon_s$ [S1].
+-3.  **Barycentric Mask $\mathbf{m}(\mathbf{x})$:**
+-    *   Concatenated binary vector of length $4L$ [S1].
+-    *   Entries $m_i^{(\ell)}(\mathbf{x}) \in \{0, 1\}$ indicate if the $i$-th barycentric weight at level $\ell$ is above a small threshold $\epsilon_b$ [S1].
+-4.  **Region Indicator $\mathbf{r}(\mathbf{x})$:**
+-    *   Concatenated integer vector of length $4L$ [S1].
+-    *   Entries $\mathbf{r}^{(\ell)}(\mathbf{x}) = [\mathbf{a}^{(\ell)}(\mathbf{x}), t^{(\ell)}(\mathbf{x})]$ identify the containing cube anchor and tetrahedron offset at each level [S1].
+-5.  **Skeleton $(V, E)$:**
+-    *   $V$: Set of 3D vertices.
+-    *   $E$: Set of edges connecting vertices [S1].
++**Parameters:**
++*   $L$: Number of resolution levels.
++*   $N_{min}, N_{max}$: Minimum and maximum grid resolutions.
++*   $\epsilon_s$: Small positive constant for decision boundary detection.
++*   $\epsilon_b$: Small threshold for barycentric mask.
++*   $\mathbf{A}^*$: Input preconditioner matrix.
+ 
+-### Formulas and Definitions
+-**1. Multi-resolution Grid Parameters:**
+-Geometric progression ratio $\gamma$ and level resolution $N_\ell$ [S1]:
+-$$ \gamma := \exp\left(\frac{\ln N_{\max} - \ln N_{\min}}{L - 1}\right) $$
+-$$ N_\ell := \lfloor N_{\min} \gamma^\ell \rfloor, \quad \ell \in \{0, 1, \dots, L-1\} $$
++**Algorithm Steps:**
+ 
+-**2. Barycentric Weights and Preconditioning:**
+-Barycentric weights $\mathbf{w}(\mathbf{x}) = [w_0, w_1, w_2, w_3]^\top$ are an affine mapping of input $\mathbf{x}$ within a tetrahedron [S1]:
+-$$ \mathbf{w}(\mathbf{x}) = \mathbf{J}_{\mathcal{T}}\mathbf{x} + \mathbf{b}_{\mathcal{T}} $$
+-where $\mathbf{J}_{\mathcal{T}}$ is the Jacobian matrix [S1].
+-To mitigate directional bias, an input preconditioner $\mathbf{A}^*$ is applied:
+-$$ \mathbf{x}' = \mathbf{A}^* \mathbf{x} $$
+-This isotropizes the average local metric $\mathbf{M} = 6 \sum_{\mathcal{T}} \mathbf{J}_{\mathcal{T}}^\top \mathbf{J}_{\mathcal{T}}$, reducing the condition number from 16.39 to 5.05 [S1].
++1.  **Input Preconditioning:**
++    Compute the Jacobian $\mathbf{J}_{\mathcal{T}}$ of the barycentric weights. Calculate the average local metric $\mathbf{M} = 6 \sum_{\mathcal{T}} \mathbf{J}_{\mathcal{T}}^T \mathbf{J}_{\mathcal{T}}$. Apply the global linear preconditioner $\mathbf{A}^*$ to the input coordinates: $\mathbf{x}' = \mathbf{A}^* \mathbf{x}$. This isotropizes the metric, reducing the condition number from 16.39 to 5.05 [S1].
+ 
+-**3. Encoder Output:**
+-The encoder $\tau$ concatenates barycentric interpolations across levels [S1]:
+-$$ \tau(\mathbf{x}) := \bigoplus_{\ell=0}^{L-1} \left( \sum_{v \in V(\mathcal{T}^{(\ell)}(\mathbf{x}))} w_v^{(\ell)}(\mathbf{x}) H_i^{(\ell)} \right) $$
+-where $H_i^{(\ell)}$ is the feature vector for vertex $v$ at level $\ell$, and $\oplus$ denotes concatenation [S1].
++2.  **Initial Skeleton Extraction:**
++    Represent the encoder-induced polyhedral cells $\mathcal{C}_{\mathbf{x}}$ as a union of parallel-plane sets. Group shared normals $\mathcal{N} = \{\mathbf{n}_0, \dots\}$ with level-dependent offsets $d^{(i)}$.
++    *   Extract vertices as intersections of 3+ planes with linearly independent normals.
++    *   Extract edges as intersections of 2+ non-parallel planes.
++    This forms the initial vertex set $V$ and edge set $E$ [S1].
+ 
+-**4. Sign Vector Entry:**
+-For neuron preactivation $\nu_j^{(i)}(\mathbf{x})$ and threshold $\epsilon_s$ [S1]:
+-$$ \gamma_j^{(i)}(\mathbf{x}) = \begin{cases} +1, & \text{if } \nu_j^{(i)}(\mathbf{x}) > \epsilon_s \\ 0, & \text{if } |\nu_j^{(i)}(\mathbf{x})| \leq \epsilon_s \\ -1, & \text{if } \nu_j^{(i)}(\mathbf{x}) < -\epsilon_s \end{cases} $$
+-$\gamma = 0$ indicates the point lies on the decision boundary $H_j^{(i)} = \{\mathbf{x} \mid \nu_j^{(i)}(\mathbf{x}) = 0\}$ [S1].
++3.  **Edge Subdivision (Joint Tracking):**
++    Process all ReLU decision boundaries $H_k^{(m)}$ in increasing order of layer $m$ and neuron index $k$. For each boundary:
++    *   Iterate through all edges $(\mathbf{x}_0, \mathbf{x}_1)$ in $E$.
++    *   Check for sign change: if $\gamma_k^{(m)}(\mathbf{x}_0) \gamma_k^{(m)}(\mathbf{x}_1) < 0$, the edge crosses the boundary.
++    *   Compute intersection weight: $w = d_0 / (d_0 - d_1)$, where $d_0 = \nu_k^{(m)}(\mathbf{x}_0)$ and $d_1 = \nu_k^{(m)}(\mathbf{x}_1)$ [S1].
++    *   Compute intersection point: $\hat{\mathbf{x}}_{0,1} = (1 - w)\mathbf{x}_0 + w\mathbf{x}_1$ [S1].
++    *   Add $\hat{\mathbf{x}}_{0,1}$ to $V$. Split edge $(\mathbf{x}_0, \mathbf{x}_1)$ into $(\mathbf{x}_0, \hat{\mathbf{x}}_{0,1})$ and $(\hat{\mathbf{x}}_{0,1}, \mathbf{x}_1)$ in $E$ [S1].
++    *   *Note:* To handle folded hyperplanes consistently, use sign vectors to determine valid candidate edges formed by intersection points. Two intersection points are connected if their sign vectors match on all non-zero entries, and if they share at least two zero entries (indicating they lie on the same geometric feature) [S1].
+ 
+-**5. Barycentric Mask:**
+-For threshold $\epsilon_b$ [S1]:
+-$$ m_i^{(\ell)}(\mathbf{x}) = \begin{cases} 1, & w_i^{(\ell)}(\mathbf{x}) > \epsilon_b \\ 0, & w_i^{(\ell)}(\mathbf{x}) \leq \epsilon_b \end{cases} $$
+-Zeros in $\mathbf{m}(\mathbf{x})$ indicate the point lies on the boundary (face, edge, or vertex) of the tetrahedron [S1].
++4.  **Mesh Extraction:**
++    From the final sets $V$ and $E$, extract faces. This typically involves identifying polygons formed by the intersection of the zero-level set with the polyhedral cells, using the connectivity established in $E$ [S1].
+ 
+-**6. Region Indicator:**
+-Grid anchor $\mathbf{a}^{(\ell)}(\mathbf{x}) = \lfloor N_\ell \mathbf{x} \rfloor$ and tetrahedron offset $t^{(\ell)}(\mathbf{x}) \in \{0, \dots, 5\}$ [S1]:
+-$$ \mathbf{r}^{(\ell)}(\mathbf{x}) = [\mathbf{a}^{(\ell)}(\mathbf{x}), t^{(\ell)}(\mathbf{x})] $$
+-$$ \mathbf{r}(\mathbf{x}) := \bigoplus_{\ell=0}^{L-1} \mathbf{r}^{(\ell)}(\mathbf{x}) $$
++**Pseudocode:**
+ 
+-**7. Edge Intersection:**
+-For an edge $(\mathbf{x}_0, \mathbf{x}_1)$ crossing a decision boundary where $\gamma(\mathbf{x}_0)\gamma(\mathbf{x}_1) < 0$, let $d_0 = \nu(\mathbf{x}_0)$ and $d_1 = \nu(\mathbf{x}_1)$ [S1]:
+-$$ w = \frac{d_0}{d_0 - d_1} $$
+-$$ \hat{\mathbf{x}}_{0,1} = (1 - w)\mathbf{x}_0 + w\mathbf{x}_1 $$
++```python
++import torch
++import numpy as np
+ 
+-### Parameters
+-*   $L$: Number of resolution levels. Typical values not specified in the sources, but implied to be small integers (e.g., 4–8) [S1].
+-*   $N_{\min}$: Minimum grid resolution [S1].
+-*   $N_{\max}$: Maximum grid resolution [S1].
+-*   $\epsilon_s$: Small positive constant for sign vector boundary detection. Value not specified in the sources [S1].
+-*   $\epsilon_b$: Small threshold for barycentric mask. Value not specified in the sources [S1].
++def compute_grid_resolution(N_min, N_max, L):
++    """Compute geometric progression ratio and level resolutions."""
++    gamma = np.exp((np.log(N_max) - np.log(N_min)) / (L - 1))
++    N_l = np.floor(N_min * gamma ** np.arange(L)).astype(int)
++    return N_l
+ 
+-### Pseudocode
+-```python
+-def extract_mesh(network, bounds, L, N_min, N_max, epsilon_s, epsilon_b):
++def barycentric_weights(pos_frac, tet_idx):
+     """
+-    Extracts the zero-level set mesh from a TetraSDF network.
++    Compute barycentric weights for a point within a specific tetrahedron.
++    pos_frac: (N, 3) fractional coordinates in [0, 1].
++    tet_idx: (N,) integer indices of tetrahedra (0-5).
++    Returns: (N, 4) barycentric weights.
++    """
++    # Define the 6 tetrahedra partitioning a unit cube.
++    # Vertices of the cube are indexed 0..7.
++    # Standard decomposition (e.g., from [S1] Fig 3):
++    # T0: [0, 1, 5, 7], T1: [0, 3, 5, 7], T2: [0, 2, 5, 7],
++    # T3: [0, 4, 5, 7], T4: [0, 6, 5, 7], T5: [0, 7, 5, 7] 
++    # Note: Exact vertex indices depend on the specific convention. 
++    # Using a generic lookup for A and B matrices derived from tet geometry.
+     
+-    Args:
+-        network: Object containing MLP weights W, biases b, and encoder hash table H.
+-        bounds: Bounding box [min_coord, max_coord].
+-        L: Number of resolution levels.
+-        N_min: Minimum grid resolution.
+-        N_max: Maximum grid resolution.
+-        epsilon_s: Threshold for neuron sign detection.
+-        epsilon_b: Threshold for barycentric mask.
+-        
+-    Returns:
+-        vertices: List of 3D points.
+-        edges: List of edge indices (i, j).
++    # Precomputed matrices A (6x4x3) and B (6x4) for the 6 tetrahedra
++    # such that weights = A @ pos_frac + B
++    # These matrices map fractional cube coordinates to barycentric coords of the tet.
++    # Implementation detail: These are constant for the specific subdivision scheme.
++    A = torch.tensor([...], dtype=torch.float32) # Shape (6, 4, 3)
++    B = torch.tensor([...], dtype=torch.float32) # Shape (6, 4)
++    
++    A_sel = A[tet_idx] # (N, 4, 3)
++    B_sel = B[tet_idx] # (N, 4)
++    
++    weights = torch.bmm(A_sel, pos_frac.unsqueeze(-1)).squeeze(-1) + B_sel
++    return weights
++
++def get_tetrahedron_index(pos_frac):
+     """
++    Determine which of the 6 tetrahedra contains the point based on sorted fractional coords.
++    """
++    # Sort fractional coordinates descending to get permutation
++    perm = torch.argsort(pos_frac, dim=-1, descending=True, stable=True)
++    # Encode permutation into a key
++    enc = perm[:, 0] * 9 + perm[:, 1] * 3 + perm[:, 2]
++    # Map key to tetrahedron index using a lookup table
++    # PERM_TO_TETRA_IDX is a tensor of size 27 (3^3) mapping enc to tet_idx
++    key_lut = torch.tensor([...], dtype=torch.long) # Size 27
++    tet_idx = key_lut[enc]
++    return tet_idx
++
++def extract_mesh(model, points, grid_resolution, L, N_min, N_max, epsilon_s, epsilon_b):
++    """
++    Simplified extraction logic for a batch of points.
++    Note: Full extraction requires iterative edge subdivision over the entire domain,
++    not just point-wise evaluation. This pseudocode illustrates the core evaluation
++    and sign-checking logic used within the subdivision steps.
++    """
++    # 1. Preconditioning (if enabled)
++    # x_precond = A_star @ points
+     
+-    # 1. Compute Preconditioner
+-    # Calculate Jacobian J_T for the tetrahedral subdivision.
+-    # Compute average metric M = 6 * sum(J_T^T J_T).
+-    # Compute preconditioner A* to isotropize M.
+-    # Note: Explicit form of A* is in Appendix A.2 of [S1].
+-    A_star = compute_preconditioner()
++    # 2. Grid Positioning
++    pos_scaled = points * (grid_resolution - 1)
++    pos_grid_float = torch.floor(pos_scaled)
++    pos_frac = pos_scaled - pos_grid_float
+     
+-    # 2. Initialize Skeleton from Encoder Geometry
+-    # Define set of unique plane normals N and offsets d^(i) for all levels.
+-    # Extract initial vertices V as intersections of 3+ planes with independent normals.
+-    # Extract initial edges E as intersections of 2+ non-parallel planes.
+-    V, E = extract_initial_skeleton(L, N_min, N_max)
++    # 3. Identify Cell
++    cube_indices = pos_grid_float.long()
++    tet_idx = get_tetrahedron_index(pos_frac)
+     
+-    # 3. Edge Subdivision
+-    # Process all decision boundaries H^(m)_k from the MLP layers m=1..M and neurons k.
+-    # Order boundaries by (m, k).
+-    for m in range(1, network.M + 1):
+-        for k in range(network.num_neurons(m)):
+-            boundary_H = get_boundary(network, m, k)
++    # 4. Barycentric Weights
++    weights = barycentric_weights(pos_frac, tet_idx)
++    
++    # 5. Barycentric Mask
++    m = (weights > epsilon_b).float() # (N, 4)
++    
++    # 6. Region Indicator
++    # a = floor(N_l * x) -> derived from pos_grid_float scaled by level ratio
++    # t = tet_idx
++    # r = concat(a, t) across levels
++    
++    # 7. Network Evaluation for Sign Vectors
++    # Encode point using multi-resolution encoder
++    features = []
++    for l in range(L):
++        # Scale point for level l
++        N_l = compute_grid_resolution(N_min, N_max, L)[l]
++        # ... hash grid lookup and barycentric interpolation ...
++        # h_i = hash_table[level_l][index]
++        # feat_l = sum(w_v * h_v)
++        features.append(feat_l)
++    
++    x_encoded = torch.cat(features, dim=-1)
++    
++    # Pass through ReLU MLP
++    # nu(x) = rho(M) o sigma(M-1) o ... o rho(1)
++    x_net = x_encoded
++    for i in range(model.M):
++        x_net = model.linear_layers[i](x_net)
++        if i < model.M - 1:
++            x_net = torch.relu(x_net)
+             
+-            # Identify edges in E intersected by H^(m)_k
+-            intersected_edges = []
+-            for edge in E:
+-                x0, x1 = V[edge[0]], V[edge[1]]
+-                # Evaluate preactivation at endpoints
+-                d0 = evaluate_neuron_preactivation(network, x0, m, k)
+-                d1 = evaluate_neuron_preactivation(network, x1, m, k)
+-                
+-                # Check for sign change (crossing the boundary)
+-                # Use epsilon_s to define the boundary region
+-                if is_sign_change(d0, d1, epsilon_s):
+-                    intersected_edges.append((edge, x0, x1, d0, d1))
+-            
+-            # Subdivide intersected edges
+-            new_vertices = []
+-            new_edges = []
+-            
+-            for edge_idx, x0, x1, d0, d1 in intersected_edges:
+-                # Compute intersection point
+-                # w = d0 / (d0 - d1)
+-                # x_hat = (1-w)*x0 + w*x1
+-                w = d0 / (d0 - d1)
+-                x_hat = (1 - w) * x0 + w * x1
+-                
+-                # Add new vertex
+-                v_new_idx = add_vertex(V, x_hat)
+-                new_vertices.append(v_new_idx)
+-                
+-                # Split edge: remove (x0, x1), add (x0, x_hat) and (x_hat, x1)
+-                remove_edge(E, edge_idx)
+-                add_edge(E, edge_idx, (edge[0], v_new_idx))
+-                add_edge(E, edge_idx, (v_new_idx, edge[1]))
+-            
+-            # Add new edges formed by intersection polygons
+-            # Determine validity of candidate edges between new vertices using sign vectors
+-            # Two vertices are connected if:
+-            # 1. Sign vectors match on all nonzero entries.
+-            # 2. If a vertex pair shares at least two zero entries, they are connected.
+-            # (Implementation detail: Construct candidate edges between new_vertices,
+-            #  compute sign vectors for each, and filter based on rules in [S1])
+-            new_edges = form_intersection_edges(V, new_vertices, network, m, k, epsilon_s)
+-            E.extend(new_edges)
+-            
+-    # 4. Identify Neighboring Cells (for mesh face extraction)
+-    # Use region indicator r(x) and barycentric mask m(x) to find neighbors
+-    # when points lie on boundaries.
+-    # Perturb tetra index r^(l)(x) according to zero pattern in m^(l)(x).
+-    # (Used for face extraction step, details in Appendix A.8 of [S1])
++    # 8. Sign Vector Calculation
++    # For each neuron, determine +1, -1, or 0
++    # This is complex for the full network; typically done layer by layer
++    # during the subdivision process to track regions.
+     
+-    # 5. Extract Mesh Faces
+-    # From final V and E, extract faces (triangles) forming the zero-level set.
+-    faces = extract_faces(V, E)
+-    
+-    return V, faces
+-
+-def is_sign_change(d0, d1, epsilon_s):
+-    """
+-    Checks if the preactivation values d0 and d1 indicate a crossing of the
+-    decision boundary defined by epsilon_s.
+-    """
+-    # Sign function based on epsilon_s
+-    def sign(val):
+-        if val > epsilon_s: return 1
+-        if val < -epsilon_s: return -1
+-        return 0
+-        
+-    s0 = sign(d0)
+-    s1 = sign(d1)
+-    
+-    # A crossing occurs if signs are opposite and non-zero,
+-    # or if one is zero and the other is non-zero (boundary touch/cross).
+-    # The source states: gamma(x0)*gamma(x1) < 0 implies crossing.
+-    # However, gamma=0 means on boundary.
+-    # Standard edge subdivision logic: if signs differ, edge crosses.
+-    if s0 * s1 < 0:
+-        return True
+-    # Handle boundary cases where one point is exactly on the boundary
+-    if s0 == 0 or s1 == 0:
+-        # If one is on boundary, it's a vertex of the isosurface.
+-        # Depending on implementation, this might trigger subdivision or vertex addition.
+-        # The source implies subdivision happens when sign changes.
+-        # If d0=0, x0 is on boundary. If d1!=0, edge connects boundary to interior.
+-        # We treat this as a crossing for the purpose of adding the vertex x0 to V if not present.
+-        return True
+-    return False
+-
+-def evaluate_neuron_preactivation(network, x, m, k):
+-    """
+-    Evaluates the preactivation value of the k-th neuron in the m-th layer
+-    of the MLP for input x.
+-    """
+-    # Forward pass through the MLP up to layer m
+-    # f(x) = rho(M) o sigma(M-1) o ... o rho(1)
+-    # We need the preactivation of neuron k in layer m.
+-    # This requires computing activations of previous layers.
+-    # For efficiency, this is typically done via tensorized operations on GPU.
+-    # Here, we assume a helper function exists.
+-    return network.forward_preactivation(x, m, k)
++    return weights, tet_idx, cube_indices
+ ```
+ 
+-### Edge Cases and Pitfalls
+-1.  **Precision:** The use of $\epsilon_s$ and $\epsilon_b$ is critical. If $\epsilon_s$ is too large, the boundary region is overestimated; if too small, numerical noise may cause false sign changes. The sources do not specify exact values [S1].
+-2.  **Boundary Handling:** Points lying exactly on tetrahedron boundaries are handled implicitly by the barycentric interpolation scheme, but the barycentric mask $\mathbf{m}(\mathbf{x})$ explicitly identifies these locations for neighbor identification [S1].
+-3.  **Degenerate Input:** The method assumes the input domain is a cube $\mathcal{S}$ [S1]. Non-cubic domains require transformation.
+-4.  **Complexity:** Naively enumerating all polyhedral cells $\mathcal{C}_{\mathbf{x}}$ is prohibitive. The method uses plane intersection and tensorized operations to avoid this [S1].
++## Subtopics
++
++### [Tensorized Edge Construction from Planes](13262-tensorized-edge-construction-from-planes.md)
++The geometric core of the TetraSDF framework, responsible for extracting the zero-level set from a continuous piecewise affine (CPWA) scalar field defined on a tetrahedral grid. It is distinguished from marching cubes or standard marching tetrahedra by operating directly on the analytic plane intersections rather than sampling discrete voxels, enabling exact zero-level set extraction without grid resolution artifacts.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not explicitly given in the sources. The method involves edge subdivision over the bounding volume, with complexity dependent on the number of ReLU neurons and the resolution levels [S1].
+-*   **Memory Complexity:** Not explicitly given. Depends on the size of the hash table for the encoder and the number of vertices/edges in the extracted mesh [S1].
+-*   **Performance:** The sources state that TetraSDF matches or surpasses existing grid-based encoders in accuracy across multiple benchmarks [S1]. The preconditioner reduces the condition number from 16.39 to 5.05, improving optimization conditioning [S1].
+-*   **Strengths:** Exact analytic extraction (no discretization error); preserves high-frequency details via multi-resolution encoder; stable training due to preconditioning [S1].
+-*   **Limitations:** Requires the network to be a ReLU MLP composed with the specific tetrahedral encoder; complex implementation of edge subdivision and neighbor identification [S1].
+-*   **When to use:** When exact isosurface extraction from a neural SDF is required, and high-frequency details are important.
+-*   **When not to use:** When approximate meshes are acceptable and simpler methods (e.g., Marching Cubes) are preferred for ease of implementation.
++*   **Time Complexity:** Depends on the number of ReLU decision boundaries and the complexity of the polyhedral complex. The edge subdivision algorithm processes boundaries sequentially, which can be expensive for high-capacity networks with many linear regions.
++*   **Memory Complexity:** Scales with the number of vertices and edges in the extracted mesh, as well as the hash table size for the encoder. Model capacity 'large' uses ~8 GB GPU memory, 'medium' ~1.5 GB [S2, unofficial].
++*   **Performance:** Matches or surpasses existing grid-based encoders in reconstruction accuracy. On the Stanford dataset, the fraction of faces with minimum angle below 5 degrees is 11.83% (vs 10.05% for AM and 10.94% for TropicalNeRF) [S1].
++*   **Strengths:** Exact zero-level set extraction; preserves fine geometric detail; no discretization error.
++*   **Limitations:** Requires a CPWA representation (ReLU MLP + specific encoder); complex implementation due to joint tracking of encoder cells and ReLU regions; potential for skinny triangles (though post-processing can mitigate this at the cost of exactness) [S1].
++*   **When to use:** When exact agreement with the learned neural SDF is critical and the model uses a compatible CPWA architecture.
++*   **When not to use:** For non-CPWA networks (e.g., those using trilinear interpolation or non-piecewise affine activations) where sampling-based methods are the only option.
+ 
+ ## Background
+-TetraSDF was introduced by Seonghun Oh, Youngjung Uh, and Jin-Hwa Kim from Yonsei University, NAVER AI Lab, and Seoul National University [S1]. The paper "TetraSDF: Analytic Isosurface Extraction with Multi-resolution Tetrahedral Grid" was published in 2025 (arXiv:2511.16273v4) [S1]. It addresses the challenge of extracting explicit surfaces from neural SDFs that exactly match the zero-level set, overcoming the discretization errors of sampling-based methods and the expressiveness limitations of plain ReLU MLPs [S1].
++TetraSDF was introduced by Seonghun Oh, Youngjung Uh, and Jin-Hwa Kim from Yonsei University, NAVER AI Lab, and Seoul National University [S1]. The paper "TetraSDF: Analytic Isosurface Extraction with Multi-resolution Tetrahedral Grid" was published on arXiv in 2025 [S1]. It addresses the limitations of Marching Cubes (discretization error) and plain ReLU MLPs (lack of high-frequency detail) by combining the expressiveness of grid-based encoders with the exactness of analytic extraction. The method builds on the principles of tetrahedral representation and traversal [4396-tetrahedral-representation-and-traversal.md].
+ 
+ ## Sources
+-[S1] TetraSDF: Analytic Isosurface Extraction with Multi-resolution Tetrahedral Grid, https://arxiv.org/abs/2511.16273v4, fetched 2026-10-26+[S1] TetraSDF: Analytic Isosurface Extraction with Multi-resolution Tetrahedral Grid, https://arxiv.org/abs/2511.16273v4, fetched 2026-10-26
++[S2] naver-ai/TetraSDF, https://github.com/naver-ai/TetraSDF, fetched 2026-10-27 (unofficial)

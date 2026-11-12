@@ -1,0 +1,268 @@
+--- v001.md
++++ v002.md
+@@ -3,137 +3,174 @@
+ 
+ ## Overview
+-Surface-aligned Texture Field (TexF) is a UV-free texture representation that associates material attributes with voxels derived from a mesh surface, preserving spatial locality without requiring UV parameterization [S1, unofficial]. It solves the problem of transferring 2D texture data to 3D geometry by embedding attributes directly in a surface-aligned 3D field, allowing direct queries at mesh surface positions during rendering [S1, unofficial]. Unlike UV-based pipelines that rely on chart-based unfolding and UV coordinates, TexF enables direct 3D spatial queries, reducing transfer and discretization errors through differentiable rendering refinement [S1, unofficial].
++Surface-aligned Texture Field (TexF) is a UV-free volumetric representation that associates texture attributes with voxels derived from a mesh surface, preserving spatial locality without UV parameterization [S1, unofficial]. It solves the problem of transferring and storing 2D texture maps on 3D geometry by embedding attributes directly in a 3D field, allowing direct queries at mesh surface positions during rendering [S1, unofficial]. Unlike UV-based pipelines that rely on chart-based unfolding and UV coordinates, TexF operates in a shared 3D coordinate system, enabling direct spatial queries and facilitating compression via 3D attribute codecs [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A textured mesh $M$ with geometry and source material maps (e.g., base color, roughness, metallicity).
+-*   **Output:** A sparse voxel field $T$ where each active voxel $q \in Q$ stores texture attributes $t(q)$, typically RGB color by default, extendable to other PBR attributes [S1, unofficial].
++**Inputs:** A textured mesh $M$ (geometry and source UV texture maps); a grid resolution parameter $K$.
++**Outputs:** A sparse set of active voxels $Q$ with associated texture attributes $t(q)$; a differentiable renderer for refinement.
+ 
+ **Data Structures:**
+-*   **Canonical Grid:** A $K \times K \times K$ axis-aligned bounding box (AABB) discretization shared between the mesh geometry and the TexF [S1, unofficial].
+-*   **Active Set $Q$:** A sparse set of voxels intersecting the mesh surface. The grid is not allocated densely; only active voxels are stored [S1, unofficial].
+-*   **Voxel Attribute:** $t(q)$, a vector of material properties.
+-
+-**Parameters:**
+-*   $K$: The resolution of the canonical AABB grid. Typical values are not specified in the sources [S1, unofficial].
++*   **Grid:** A canonical axis-aligned bounding box (AABB) of the mesh discretized into a $K \times K \times K$ grid.
++*   **Active Voxels ($Q$):** A sparse set of voxel indices intersecting the mesh surface. The dense $K^3$ grid is not allocated; only active voxels are stored.
++*   **Attributes ($t(q)$):** For each voxel $q \in Q$, a vector of attributes (default: RGB base color; extensible to PBR attributes like roughness/metallicity).
+ 
+ **Construction Steps:**
+-1.  **Discretization:** Define the canonical AABB of mesh $M$ and discretize it into a $K \times K \times K$ grid [S1, unofficial].
+-2.  **Active Voxel Identification:** Identify voxels intersecting the mesh surface to form the active set $Q$. This is done via surface sampling and voxelization without allocating the dense $K^3$ grid [S1, unofficial].
+-3.  **UV Texture Transfer Initialization:**
+-    *   Sample points on the mesh surface. For each sample, compute its 3D position $\mathbf{p}$ and UV coordinate $\mathbf{u}$ using barycentric coordinates [S1, unofficial].
+-    *   Sample the source material maps using $\mathbf{u}$ to retrieve attribute values [S1, unofficial].
+-    *   Assign the retrieved attributes to the voxel corresponding to $\mathbf{p}$ in the grid [S1, unofficial].
+-    *   If multiple samples map to the same voxel, average their attributes [S1, unofficial].
+-4.  **Differentiable Rendering Refinement (Inverse Rendering):**
+-    *   Render the mesh using the initialized TexF via a differentiable renderer [S1, unofficial].
+-    *   Use multi-view image-space supervision to refine voxel attributes $t(q)$ and reduce transfer/discretization errors introduced by voxelization and interpolation [S1, unofficial].
++1.  **Grid Discretization:** Compute the canonical AABB of mesh $M$. Define a grid resolution $K$. The TexF and mesh geometry share this common coordinate system [S1, unofficial].
++2.  **Surface Sampling:** Sample points on the mesh surface. For each sample, compute its 3D position $\mathbf{p}$ and barycentric coordinates [S1, unofficial].
++3.  **UV Coordinate Mapping:** Use the barycentric coordinates to determine the corresponding UV coordinate $\mathbf{u}$ on the source texture maps [S1, unofficial].
++4.  **Attribute Retrieval:** Sample the source material maps at $\mathbf{u}$ to retrieve the texture attribute vector $\mathbf{t}_{src}$ [S1, unofficial].
++5.  **Voxel Assignment:** Map the 3D position $\mathbf{p}$ to the corresponding voxel index $q$ in the $K \times K \times K$ grid.
++6.  **Attribute Aggregation:** If multiple surface samples map to the same voxel $q$, average their retrieved attributes $\mathbf{t}_{src}$ to determine the final attribute $t(q)$ for that voxel [S1, unofficial].
++7.  **Sparse Support Formation:** The set of voxels $Q$ containing assigned attributes forms the sparse support. Voxels not intersecting the surface or receiving no samples are excluded [S1, unofficial].
++
++**Refinement (Inverse Rendering):**
++Voxel discretization and interpolation during UV transfer introduce errors [S1, unofficial]. These are reduced using a differentiable renderer:
++1.  **Rasterization:** Rasterize the mesh to determine visible surface positions for each camera view [S1, unofficial].
++2.  **TexF Query:** For each visible surface position, query the TexF $T$ using trilinear interpolation to obtain the texture attribute $\hat{t}(\mathbf{q})$ [S1, unofficial].
++3.  **Rendering:** Render the image using the queried attributes [S1, unofficial].
++4.  **Optimization:** Use multi-view image-space supervision to refine the voxel attributes $t(q)$ (and potentially compressed neural fields) via inverse rendering (IR) [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def construct_texf(mesh, source_maps, K):
++def construct_texf(mesh, texture_maps, K):
+     """
+     Construct a Surface-aligned Texture Field from a textured mesh.
+     
+     Args:
+-        mesh: Triangular mesh with geometry and UV coordinates.
+-        source_maps: Dictionary of 2D texture maps (e.g., 'color', 'roughness').
++        mesh: Object with geometry (vertices, faces) and UV coordinates.
++        texture_maps: Dictionary of source texture maps (e.g., 'diffuse', 'roughness').
+         K: Resolution of the canonical AABB grid.
+         
+     Returns:
+-        texf: Sparse dictionary mapping voxel indices to attribute vectors.
++        active_voxels: List of active voxel indices.
++        attributes: Dictionary mapping voxel index to attribute vector.
+     """
+-    # 1. Define Canonical AABB and Grid
++    # 1. Compute canonical AABB and grid parameters
+     bbox_min, bbox_max = mesh.compute_aabb()
+-    voxel_size = (bbox_max - bbox_min) / K
++    grid_size = K
++    voxel_size = (bbox_max - bbox_min) / grid_size
+     
+-    # 2. Initialize Sparse Active Set
+-    # Q is a set of voxel indices (i, j, k)
+-    Q = set()
+-    # texf stores attributes for active voxels
+-    texf = {} 
++    # Dictionary to accumulate attributes for each voxel
++    # Key: (x, y, z) voxel index, Value: list of attribute vectors
++    voxel_accumulators = {}
+     
+-    # 3. Surface Sampling and UV Transfer
+-    # Sample points on the mesh surface
+-    surface_samples = mesh.sample_surface_points(num_samples=10000)
++    # 2. Sample mesh surface
++    # Note: Implementation of surface sampling is not specified in sources [G]
++    # Typically involves stratified sampling or uniform sampling on faces
++    surface_samples = mesh.sample_surface(num_samples=10000) 
+     
+     for sample in surface_samples:
+-        # Get 3D position and UV via barycentric coordinates
+-        p_3d = sample.position
+-        u_uv = sample.uv_coordinate
++        # sample.position: 3D point on mesh
++        # sample.barycentric: (u, v, w) barycentric coordinates
++        # sample.face_id: index of the triangle
+         
+-        # Sample source maps using UV
+-        # Assume source_maps['color'] is a function sample_color(u, v)
+-        attr = {}
+-        for map_name, map_data in source_maps.items():
+-            attr[map_name] = map_data.sample(u_uv)
+-            
+-        # Map 3D position to voxel index
+-        voxel_idx = world_to_voxel(p_3d, bbox_min, voxel_size)
++        # 3. Determine UV coordinate from barycentric coordinates
++        # Assuming mesh stores UVs per vertex
++        v0, v1, v2 = mesh.get_face_vertices(sample.face_id)
++        uv0, uv1, uv2 = mesh.get_face_uvs(sample.face_id)
+         
+-        # Add to active set
+-        Q.add(voxel_idx)
++        u_coord = sample.barycentric[0] * uv0[0] + sample.barycentric[1] * uv1[0] + sample.barycentric[2] * uv2[0]
++        v_coord = sample.barycentric[0] * uv0[1] + sample.barycentric[1] * uv1[1] + sample.barycentric[2] * uv2[1]
+         
+-        # Average attributes for the same voxel
+-        if voxel_idx not in texf:
+-            texf[voxel_idx] = {k: 0.0 for k in attr}
+-            texf[voxel_idx]['count'] = 0
+-            
+-        for k, v in attr.items():
+-            texf[voxel_idx][k] += v
+-        texf[voxel_idx]['count'] += 1
++        # 4. Sample texture maps
++        # Note: texture_maps is assumed to be a function or object supporting sampling
++        # Default attribute is RGB base color
++        attr = texture_maps.sample(u_coord, v_coord)
+         
+-    # Normalize averages
+-    for voxel_idx in texf:
+-        count = texf[voxel_idx]['count']
+-        for k in texf[voxel_idx]:
+-            if k != 'count':
+-                texf[voxel_idx][k] /= count
+-        del texf[voxel_idx]['count']
++        # 5. Map 3D position to voxel index
++        # Clamp position to bbox to handle boundary cases
++        pos = sample.position
++        pos_clamped = clamp(pos, bbox_min, bbox_max)
+         
+-    # 4. Refinement via Differentiable Rendering
+-    # This step requires a differentiable renderer and multi-view images
+-    # The refinement loop is not detailed in the construction phase notes
+-    # [G] In practice, this involves optimizing t(q) to minimize 
+-    # reconstruction error against reference images.
++        # Calculate voxel index
++        x = int((pos_clamped[0] - bbox_min[0]) / voxel_size[0])
++        y = int((pos_clamped[1] - bbox_min[1]) / voxel_size[1])
++        z = int((pos_clamped[2] - bbox_min[2]) / voxel_size[2])
++        
++        voxel_idx = (x, y, z)
++        
++        # 6. Accumulate attributes
++        if voxel_idx not in voxel_accumulators:
++            voxel_accumulators[voxel_idx] = []
++        voxel_accumulators[voxel_idx].append(attr)
++        
++    # 7. Average attributes and form sparse support
++    active_voxels = []
++    attributes = {}
+     
+-    return texf, Q
++    for voxel_idx, attr_list in voxel_accumulators.items():
++        # Average attributes assigned to the same voxel
++        avg_attr = sum(attr_list) / len(attr_list)
++        active_voxels.append(voxel_idx)
++        attributes[voxel_idx] = avg_attr
++        
++    return active_voxels, attributes
+ 
+-def query_texf(texf, Q, p_3d, bbox_min, voxel_size):
++def query_texf(texf, position):
+     """
+-    Query texture attributes at a 3D surface position.
++    Query the TexF at a given 3D position using trilinear interpolation.
++    
++    Args:
++        texf: Object containing active_voxels, attributes, bbox_min, bbox_max, K.
++        position: 3D point to query.
++        
++    Returns:
++        attribute: Interpolated attribute vector.
+     """
+-    voxel_idx = world_to_voxel(p_3d, bbox_min, voxel_size)
+-    if voxel_idx in Q:
+-        return texf[voxel_idx]
+-    else:
+-        # [G] Fallback or interpolation logic would be needed here
+-        # for positions not exactly on a voxel center.
+-        return None
++    # 1. Check if position is within bounds
++    if not is_inside_bbox(position, texf.bbox_min, texf.bbox_max):
++        return None # Or default value
++        
++    # 2. Calculate fractional voxel coordinates
++    voxel_size = (texf.bbox_max - texf.bbox_min) / texf.K
++    frac_pos = (position - texf.bbox_min) / voxel_size
++    
++    # 3. Get voxel indices for trilinear interpolation
++    x0 = floor(frac_pos[0])
++    y0 = floor(frac_pos[1])
++    z0 = floor(frac_pos[2])
++    
++    x1 = x0 + 1
++    y1 = y0 + 1
++    z1 = z0 + 1
++    
++    # 4. Retrieve attributes for surrounding voxels
++    # Note: In a sparse implementation, missing voxels return a default or are handled via hashing
++    # Here we assume a dense lookup for simplicity, or a hash map for sparse
++    attrs = []
++    for dx in [0, 1]:
++        for dy in [0, 1]:
++            for dz in [0, 1]:
++                idx = (x0 + dx, y0 + dy, z0 + dz)
++                if idx in texf.attributes:
++                    attrs.append(texf.attributes[idx])
++                else:
++                    attrs.append(None) # Handle missing voxels
++                    
++    # 5. Trilinear interpolation
++    # Note: Full implementation requires handling None values and weights
++    # This is a simplified placeholder for the interpolation logic [G]
++    # In practice, one would use a library or implement the 8-point interpolation
++    return interpolate_trilinear(frac_pos, attrs, texf.attributes)
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Transfer Errors:** Voxel discretization and interpolation during UV texture transfer introduce errors [S1, unofficial]. These are mitigated by the inverse-rendering refinement step [S1, unofficial].
+-*   **Coordinate System:** TexF and mesh geometry share a common coordinate system (the canonical AABB), which is critical for direct querying [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Bitstream-oriented TexF Compression](10086-bitstream-oriented-texf-compression.md)
+-Encodes voxel attributes directly using established 3D attribute codecs (Unicorn or G-PCC), exploiting spatial correlations in native 3D neighborhoods. Voxel locations are reconstructed from the decoded mesh, avoiding separate voxel-position coding.
++Compresses TexF attributes using 3D point cloud attribute codecs (Unicorn, G-PCC), treating attributes as a point cloud dataset without transmitting voxel coordinates.
+ 
+ ### [Differentiable TexF Rendering](10095-differentiable-texf-rendering.md)
+-Uses a differentiable renderer to enable inverse-rendering (IR) refinement, using multi-view image-space supervision to reduce transfer and discretization errors.
++Renders TexF by querying the 3D field at rasterized surface positions using trilinear interpolation, enabling inverse-rendering refinement.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Construction involves surface sampling and voxelization, which is efficient due to sparse support. Refinement via differentiable rendering adds computational cost proportional to the number of views and iterations.
+-*   **Memory Complexity:** Sparse voxel support avoids allocating the dense $K^3$ grid. Memory usage depends on the number of active voxels $|Q|$ and the size of attributes per voxel.
+-*   **Performance:** Experiments on MPEG and AOM mesh compression benchmarks demonstrate improved average rate-distortion performance over representative UV-based methods for both bitstream and GPU-resident compression [S1, unofficial].
+-*   **Strengths:** Direct 3D queries without UV parameterization; compatibility with standard 3D attribute codecs; support for real-time rendering via GPU-resident compression (3DNTC) [S1, unofficial].
+-*   **Limitations:** Requires differentiable rendering for optimal fidelity; discretization errors if refinement is skipped [S1, unofficial].
+-*   **When to Use:** When UV parameterization is difficult or undesirable; when direct 3D spatial queries are needed; for compression tasks leveraging 3D spatial correlations.
+-*   **When Not to Use:** When strict compatibility with legacy UV-based pipelines is required without baking; when computational resources for differentiable refinement are unavailable.
++*   **Time Complexity:** Construction is linear in the number of surface samples. Querying is $O(1)$ with a hash map or $O(\log N)$ with a tree structure for sparse voxels. Refinement requires iterative optimization.
++*   **Memory Complexity:** Proportional to the number of active voxels $|Q|$, which is typically much less than $K^3$.
++*   **Performance:** Experiments on MPEG and AOM benchmarks show improved average rate-distortion performance over UV-based methods for both bitstream and GPU-resident compression [S1, unofficial]. 3DNTC supports real-time rendering [S1, unofficial].
++*   **Strengths:** No UV parameterization overhead; direct 3D queries; compatible with 3D attribute codecs; supports inverse rendering.
++*   **Limitations:** Voxel discretization and interpolation introduce transfer errors, requiring refinement [S1, unofficial]. Resolution $K$ must be chosen carefully to balance detail and memory.
++*   **When to use:** When UV mapping is difficult or undesirable; when 3D spatial correlations are beneficial for compression; when inverse rendering is needed.
++*   **When not to use:** When UV-based pipelines are strictly required for compatibility; when memory is extremely constrained and $K$ must be very small.
+ 
+ ## Background
+-TexF was introduced in the paper "Beyond UV Mapping: Mesh Texture Compression via Surface-Aligned Texture Fields" [S1, unofficial]. It represents a shift from UV-based paradigms, which dominate production pipelines, to UV-free approaches that embed texture attributes directly in a 3D field. The method supports both bitstream compression (using codecs like Unicorn and G-PCC) and GPU-resident compression (using a neural codec called 3DNTC) [S1, unofficial].
++TexF was introduced in "Beyond UV Mapping: Mesh Texture Compression via Surface-Aligned Texture Fields" [S1, unofficial]. It addresses the limitations of UV-based texture representations, which require chart-based unfolding and UV coordinates. By embedding texture attributes in a surface-aligned 3D field, TexF enables direct queries and leverages 3D spatial correlations for compression. The method supports both bitstream compression using established 3D attribute codecs and GPU-resident compression using a neural codec (3DNTC) [S1, unofficial].
+ 
+ ## Sources
