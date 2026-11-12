@@ -8,7 +8,7 @@ Lipschitz Transformation Bounds compute distances to implicitly defined surfaces
 ## How it works
 **Inputs:** A transformation function $T(\mathbf{x})$ and its inverse $T^{-1}(\mathbf{x})$, a base SDF function $d(\mathbf{x})$ for the untransformed primitive, and a ray origin $\mathbf{o}$ and direction $\mathbf{d}$ [S1].
 **Outputs:** A safe step size $\Delta t$ for ray marching and the transformed distance value [G].
-**Data Structures:** Standard vector/matrix types. The core data is the Lipschitz constant $L$, a scalar [S1].
+**Data Structures:** Standard vector and matrix types for coordinates and transformation parameters [G].
 
 **Method:**
 The distance to a transformed implicit surface defined by $f(T^{-1}(\mathbf{x})) = 0$ is not simply $d(T^{-1}(\mathbf{x}))$ [S1]. The Lipschitz constant of the composition is no greater than the product of the component Lipschitz constants, requiring adjustment by the Lipschitz constant of the inverse transformation $T^{-1}$ [S1].
@@ -16,7 +16,7 @@ The distance to a transformed implicit surface defined by $f(T^{-1}(\mathbf{x}))
 1. **Identify Transformation Type:** Determine if $T$ is an isometry, uniform scale, linear deformation, taper, or twist [S1].
 2. **Compute Lipschitz Constant ($L$):** Calculate the Lipschitz constant of $T^{-1}$, representing the maximum stretching factor of the inverse transformation [S1].
     - **Isometry:** If $T$ preserves distances (rotation, translation, reflection), $L = 1$. The distance is exact: $d(T^{-1}(\mathbf{0})) = d(T^{-1}(\mathbf{x}) - T^{-1}(\mathbf{0}))$ [S1].
-    - **Uniform Scale:** If $T(\mathbf{x}) = s\mathbf{x}$, the inverse scales by $1/s$. The Lipschitz constant is $L = 1/s$. The distance is scaled: $d(s T^{-1}(\mathbf{0})) = \frac{1}{s} d(T^{-1}(\mathbf{x}) - T^{-1}(\mathbf{0}))$ [S1].
+    - **Uniform Scale:** If $T(\mathbf{x}) = s\mathbf{x}$, the inverse scales by $1/s$ [S1]. The Lipschitz constant is $L = 1/s$. The distance is scaled: $d(s T^{-1}(\mathbf{0})) = \frac{1}{s} d(T^{-1}(\mathbf{x}) - T^{-1}(\mathbf{0}))$ [S1].
     - **Linear Deformation:** For a linear matrix $M$, $L$ is found by the power method, which iteratively finds the largest eigenvalue of a matrix [S1].
     - **Taper:** Defined as $\text{taper}(\mathbf{x}) = (s(z)x, s(z)y, z)$. The Lipschitz constant is determined by the tightest tapering: $Lip_{taper} = \min \frac{1}{s(z)}$ over the domain [S1].
     - **Twist:** Defined by rotation angle $\theta(z)$. Twisting is not Lipschitz over unbounded domains; it must be constrained to a domain like a unit cylinder along the twisting axis [S1]. The bound is $Lip_{twist} = \sqrt{4 + \frac{\theta^2}{4}}$ [S1].
@@ -34,69 +34,66 @@ def compute_lipschitz_bound(transform_type, params):
     if transform_type == 'isometry':
         return 1.0
     elif transform_type == 'uniform_scale':
-        s = params['scale']
-        return 1.0 / s
+        return 1.0 / params['scale']
     elif transform_type == 'linear_deformation':
-        # Power method to find largest eigenvalue of M^-T M^-1
-        M_inv = params['M_inv']
+        # Power method to find largest singular value of M_inv
+        M = params['M_inv']
         v = [1.0, 1.0, 1.0]
-        for _ in range(10):
-            M_inv_T_M_inv = [[sum(M_inv[k][i] * M_inv[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
-            v_new = [sum(M_inv_T_M_inv[i][j] * v[j] for j in range(3)) for i in range(3)]
-            norm = math.sqrt(sum(x*x for x in v_new))
-            v = [x / norm for x in v_new]
-        return math.sqrt(sum(M_inv_T_M_inv[i][j] * v[i] * v[j] for i in range(3) for j in range(3)))
+        for _ in range(20):
+            v_new = [sum(M[i][j] * v[j] for j in range(3)) for i in range(3)]
+            v_new2 = [sum(M[j][i] * v_new[j] for j in range(3)) for i in range(3)]
+            norm = math.sqrt(sum(x*x for x in v_new2))
+            v = [x / norm for x in v_new2]
+        return math.sqrt(sum(v_new2[i] * v[i] for i in range(3)))
     elif transform_type == 'taper':
-        # Requires interval analysis or evaluation over the ray segment
-        # Not given in the sources as a closed form for arbitrary z.
-        return params['min_inverse_alpha']
+        # L = min(1/s(z)) over the domain, typically precomputed or via interval analysis
+        return params['min_inverse_scale']
     elif transform_type == 'twist':
         theta = params['max_angle']
         return math.sqrt(4.0 + (theta * theta) / 4.0)
     else:
         raise ValueError("Unsupported transformation type")
 
-def ray_march_transformed_sdf(ray_origin, ray_direction, sdf_func, transform_type, params):
+def ray_march_step(ray_origin, ray_direction, sdf_func, transform_type, params):
     """Performs one step of ray marching using Lipschitz bounds."""
-    current_point = ray_origin
+    # Apply inverse transformation to current point
     if transform_type == 'uniform_scale':
-        base_point = [p / params['scale'] for p in current_point]
+        p = [ray_origin[i] / params['scale'] for i in range(3)]
     elif transform_type == 'twist':
         theta = params['max_angle']
-        base_point = [
-            current_point[0] * math.cos(theta) - current_point[2] * math.sin(theta),
-            current_point[1] / 2.0,
-            current_point[0] * math.sin(theta) + current_point[2] * math.cos(theta)
+        p = [
+            ray_origin[0] * math.cos(theta) - ray_origin[2] * math.sin(theta),
+            ray_origin[1] / 2.0,
+            ray_origin[0] * math.sin(theta) + ray_origin[2] * math.cos(theta)
         ]
     else:
-        base_point = current_point
+        p = list(ray_origin)
 
-    dist_base = sdf_func(base_point)
+    dist = sdf_func(p)
     L = compute_lipschitz_bound(transform_type, params)
-    safe_step = abs(dist_base) / L
-    next_point = [ray_origin[i] + ray_direction[i] * safe_step for i in range(3)]
-    return next_point, safe_step
+    step = abs(dist) / L
+    return [ray_origin[i] + ray_direction[i] * step for i in range(3)], step
 ```
 
 **Edge Cases and Pitfalls:**
 - **Twisting on Unbounded Domains:** Twisting is not Lipschitz over infinite space. It must be constrained to a bounded domain (e.g., a unit cylinder) to define a valid $L$ [S1].
-- **Precision:** The Lipschitz constant is an upper bound. Using a loose bound results in smaller steps (slower convergence) but safety. Using a bound that is too tight causes tunneling [G].
+- **Precision:** The Lipschitz constant is an upper bound. Using a loose bound results in smaller steps (slower convergence) but safety [G]. Using a bound that is too tight causes tunneling [G].
 - **Non-Linear Taper:** The Lipschitz constant for tapering depends on the derivative $\alpha'(z)$. It must be computed per interval or via interval analysis [S2].
 
 ## Subtopics
 
 ### [Warped-Space SDF Ray Marching](4726-warped-space-sdf-ray-marching.md)
-Warped-Space SDF Ray Marching renders scenes with regularly spaced geometry (e.g., urban environments) by defining the scene in a sheared coordinate space ("road space") where buildings are axis-aligned. It differs from standard Euclidean ray marching by applying a safety factor (Lipschitz bound) to the computed distances to compensate for the non-Euclidean metric introduced by the spatial transformation, preventing the ray from tunneling through walls.
+Warped-Space SDF Ray Marching renders scenes with regularly spaced geometry (e.g., urban environments) by defining the scene in a sheared coordinate space ("road space") where buildings are axis-aligned. It differs from standard Euclidean ray marching by applying a safety factor (Lipschitz bound) to the computed distances to compensate for the non-Euclidean metric introduced by the spatial transformation, preventing the ray from tunneling through walls. Choose it when rendering structured environments with consistent geometry spacing.
 
 ### Lipschitz Bound Computation for Tapering Transformation
-A method to compute the bound of the norm of the Jacobian for a tapering transformation to determine the Lipschitz bound. For a tapering transformation $\omega^{-1}(\mathbf{p}) = (\alpha(z)x, \alpha(z)y, z)$, the Jacobian matrix is:
+A method to compute the bound of the norm of the Jacobian for a tapering transformation to determine the Lipschitz bound [S2]. For a tapering transformation $\omega^{-1}(\mathbf{p}) = (\alpha(z)x, \alpha(z)y, z)$, the Jacobian matrix is:
 $$ \mathbf{J}_{\omega^{-1}} = \begin{pmatrix} \alpha & 0 & \beta \\ 0 & \alpha & 0 \\ \beta & 0 & 1 \end{pmatrix} $$
 where $\beta = \alpha'$. The Euclidean norm (Lipschitz bound) is:
 $$ \|\mathbf{J}_{\omega^-}\| = \frac{1}{\sqrt{2}}\sqrt{\alpha^2 + 2\beta^2 + 1 + (1 + \alpha)\sqrt{\alpha^2 - 2\alpha + 4\beta^2 + 1}} $$
 For a given input interval, this norm can be obtained by developing the equation or by interval analysis [S2].
 
 ### SDF Deformations
-Non-uniform spatial distortion is applied by modifying space as a function of position. An example of a twist deformation in GLSL is:
+Non-uniform spatial distortion is applied by modifying space as a function of position [S3, unofficial]. An example of a twist deformation in GLSL is:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```glsl
@@ -115,9 +112,9 @@ This applies a rotation that varies with the y-coordinate, effectively twisting 
 - **Time Complexity:** $O(1)$ per step for isometry and uniform scale. $O(k)$ for linear deformation (power method iterations). $O(1)$ for taper/twist if precomputed or simple analytic bounds are used [G].
 - **Memory Complexity:** $O(1)$ [G].
 - **Strengths:** Guarantees no tunneling for transformed primitives. Simple to implement for common transforms [G].
-- **Limitations:** The bound is a worst-case estimate, which can lead to smaller step sizes than necessary, increasing the number of samples. Non-linear transforms require careful evaluation of the Lipschitz constant over the ray segment [G].
+- **Limitations:** The bound is a worst-case estimate, which can lead to smaller step sizes than necessary, increasing the number of samples [G]. Non-linear transforms require careful evaluation of the Lipschitz constant over the ray segment [G].
 - **When to Use:** When rendering transformed SDF primitives (rotated, scaled, sheared, twisted) in ray marching [G].
-- **When Not to Use:** For simple translations/rotations where the bound is 1, standard SDF evaluation is sufficient. For highly complex non-linear deformations where computing the Jacobian norm is expensive, other methods might be preferred [G].
+- **When Not to Use:** For simple translations/rotations where the bound is 1, standard SDF evaluation is sufficient [G]. For highly complex non-linear deformations where computing the Jacobian norm is expensive, other methods might be preferred [G].
 - **Measured Performance:** Not given in the sources.
 
 ## Background

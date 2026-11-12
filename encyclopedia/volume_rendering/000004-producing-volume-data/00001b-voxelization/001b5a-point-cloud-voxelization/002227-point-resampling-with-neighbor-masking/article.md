@@ -3,168 +3,144 @@
 Also called: Point Resampling
 
 ## Overview
-Point Resampling with Neighbor Masking is a method for reducing the density of a point cloud by selectively discarding points based on their topological relationship to active elements (such as tetrahedra in a grid) [S1, unofficial]. It solves the problem of maintaining geometric fidelity while compressing point-based representations by ensuring that points critical to the structure (neighbors of active elements) are preserved, while redundant points are removed [S1, unofficial]. It distinguishes itself from its siblings by using explicit neighbor masks derived from the underlying grid structure rather than random selection or error-driven metrics [S1, unofficial].
+Point Resampling with Neighbor Masking is a method for selectively reducing the density of a point cloud or tetrahedral grid by identifying and discarding points based on their topological relationship to active regions [S1, unofficial]. It solves the problem of maintaining geometric fidelity while compressing data, ensuring that points critical to the structure (neighbors of active elements) are preserved while redundant points are removed [S1, unofficial]. It distinguishes itself from its siblings by using explicit neighbor masks derived from Signed Distance Fields (SDF) and tetrahedral connectivity rather than random selection or error-driven metrics [S1, unofficial].
 
 ## How it works
-The method operates on a set of points $P$ and a set of active elements (e.g., tetrahedra $T$) defined by a Signed Distance Field (SDF) or similar implicit representation. The core logic involves creating a boolean mask that identifies which points to keep.
-
-**Inputs:**
-- `points`: Array of point coordinates, shape $(N, 3)$.
-- `sdf`: Signed Distance Field function or grid.
-- `tets`: Array of tetrahedra indices, shape $(M, 4)$.
-- `strategy`: One of "partial", "percentage", or "full".
-
-**Outputs:**
-- `resampled_points`: The subset of points retained after masking.
-- `mask`: Boolean array of length $N$, where `True` indicates a point is kept.
+**Inputs and Outputs:**
+- Input: A set of points `x_nx3` (shape $N \times 3$), a Signed Distance Field `sdf`, and a tetrahedral mesh `tets` (indices of vertices forming tetrahedra).
+- Output: A boolean mask `mask` of length $N$, where `True` indicates a point to be kept (resampled) and `False` indicates a point to be discarded.
 
 **Data Structures:**
-- `mask`: Boolean array of size $N$ (number of points).
-- `active_points_ids`: List of indices of points considered "active" (e.g., inside or near the isosurface).
-- `neighbor_active_points_ids`: List of indices of points that are neighbors to the active points or elements.
+- `mask`: A boolean array of size $N$.
+- `neighbor_active_points_ids`: A list or tensor of indices representing points that are neighbors to active tetrahedra.
+- `active_points_ids`: A list or tensor of indices representing points that are currently active (e.g., inside or near the isosurface).
 
 **Steps:**
+The method supports three strategies: Partial, Percentage, and Full resampling.
 
-1. **Identify Active Points:**
-   Determine which points are "active" based on the SDF and tetrahedra. This is typically done via `get_active_points(sdf, tets)`. Let $A$ be the set of active point indices.
+1. **Partial Resampling:**
+   - Identify neighbor points: Call `neighbor_active_points(sdf, tets)` to get `neighbor_active_points_ids`. These are points adjacent to tetrahedra that are active (intersecting or near the isosurface).
+   - Create mask: Initialize `mask` of size $N$ with `False`.
+   - Set `mask[neighbor_active_points_ids] = True`.
+   - The number of resampled points is the count of `True` values in `mask`.
 
-2. **Identify Neighbor Points:**
-   Determine which points are neighbors to the active points or tetrahedra. This is done via `neighbor_active_points(sdf, tets)`. Let $N$ be the set of neighbor point indices.
+2. **Percentage Resampling:**
+   - Identify active points: Call `get_active_points(sdf, tets)` to get `active_points_ids`.
+   - Identify neighbor points: Call `neighbor_active_points(sdf, tets)` to get `neighbor_active_points_ids`.
+   - Create mask: Initialize `mask` of size $N$ with `False`.
+   - Set `mask[active_points_ids] = True`.
+   - Find indices where mask is `True`: `true_indices = where(mask == True)`.
+   - Add neighbors: Set `mask[neighbor_active_points_ids] = True`.
+   - Update `true_indices` to reflect all `True` positions in the updated mask.
+   - Shuffle `true_indices` randomly.
+   - Determine the number of points to keep: $K = \lfloor 0.9 \times \text{len}(true\_indices) \rfloor$ (or another specified percentage).
+   - Set the first $K$ indices in the shuffled `true_indices` to `False` in the mask.
+   - The number of resampled points is the count of `True` values in `mask`.
 
-3. **Create Mask:**
-   Initialize a boolean mask $M$ of size $N_{points}$ with `False`.
-
-4. **Apply Strategy:**
-   Depending on the chosen strategy, modify the mask:
-
-   - **Partial Strategy:**
-     - Set $M[i] = \text{True}$ for all $i \in N$.
-     - The number of resampled points is the count of `True` values in $M$.
-     - This strategy preserves only the neighbors of active elements.
-
-   - **Percentage Strategy:**
-     - Set $M[i] = \text{True}$ for all $i \in A$.
-     - Set $M[i] = \text{True}$ for all $i \in N$.
-     - Let $I_{true}$ be the list of indices where $M$ is `True`.
-     - Shuffle $I_{true}$ randomly.
-     - Flip the first $90\%$ of the shuffled indices in $I_{true}$ to `False`. (Note: The source specifies "flip first 90%... to False", implying a reduction of the initially True set).
-     - The number of resampled points is the count of `True` values in $M$.
-
-   - **Full Strategy:**
-     - Set the number of resampled points to $N_{points}$.
-     - Set all values in $M$ to `False` (or effectively, no points are discarded by the mask logic, but the strategy name implies full retention or a specific handling of the full set). *Note: The source says "create all-False mask" but also "set nb_resampled_points to x_nx3.shape[0]". This implies the mask might be inverted or used differently in the final selection step, or that the "full" strategy bypasses the masking logic for retention.* [S1, unofficial].
-
-5. **Select Points:**
-   Return `points[mask]`.
+3. **Full Resampling:**
+   - Set `nb_resampled_points = x_nx3.shape[0]`.
+   - Create `mask` of size $N$ with all `False`.
+   - This strategy implies no points are masked out by the logic, effectively keeping all points if the mask is inverted or used as a filter for removal. *Note: The source description is ambiguous here; it sets an all-False mask but defines the count as the total points. Implementation likely inverts this mask for removal or uses it as a "keep all" flag.*
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def point_resampling_with_neighbor_masking(points, sdf, tets, strategy="partial"):
+def resample_points(x_nx3, sdf, tets, strategy='partial', percentage=0.9):
     """
-    Resamples points based on active/neighbor status.
+    Resample points based on neighbor masking.
     
     Args:
-        points: numpy array of shape (N, 3)
-        sdf: Signed Distance Field function or grid
-        tets: numpy array of shape (M, 4) containing tetrahedron indices
-        strategy: str, one of "partial", "percentage", "full"
+        x_nx3: Array of shape (N, 3) containing point coordinates.
+        sdf: Signed Distance Field function or grid.
+        tets: Array of tetrahedron vertex indices.
+        strategy: 'partial', 'percentage', or 'full'.
+        percentage: Fraction of active+neighbor points to keep (for 'percentage' strategy).
         
     Returns:
-        resampled_points: numpy array of shape (K, 3)
-        mask: numpy boolean array of shape (N,)
+        mask: Boolean array of shape (N,) where True means keep the point.
     """
-    N = points.shape[0]
-    mask = np.zeros(N, dtype=bool)
+    N = x_nx3.shape[0]
+    mask = torch.zeros(N, dtype=torch.bool)
     
-    # Helper functions assumed to be defined elsewhere or implemented based on SDF/tet logic
-    # get_active_points returns indices of points considered active
-    active_ids = get_active_points(sdf, tets)
-    
-    # neighbor_active_points returns indices of points that are neighbors to active elements
-    neighbor_ids = neighbor_active_points(sdf, tets)
-    
-    if strategy == "partial":
-        # Keep only neighbors of active points
+    if strategy == 'partial':
+        # Get indices of points that are neighbors to active tetrahedra
+        neighbor_ids = neighbor_active_points(sdf, tets)
         mask[neighbor_ids] = True
         
-    elif strategy == "percentage":
-        # Start with active and neighbor points as True
+    elif strategy == 'percentage':
+        # Get indices of active points
+        active_ids = get_active_points(sdf, tets)
+        # Get indices of neighbor points
+        neighbor_ids = neighbor_active_points(sdf, tets)
+        
+        # Mark active points as True
         mask[active_ids] = True
+        
+        # Mark neighbor points as True
         mask[neighbor_ids] = True
         
         # Get all indices that are currently True
-        true_indices = np.where(mask)[0]
+        true_indices = torch.where(mask)[0]
         
-        # Shuffle these indices
-        np.random.shuffle(true_indices)
+        # Shuffle the indices
+        shuffled_indices = true_indices[torch.randperm(len(true_indices))]
         
-        # Flip the first 90% of the shuffled indices to False
-        num_to_flip = int(len(true_indices) * 0.9)
-        indices_to_flip = true_indices[:num_to_flip]
-        mask[indices_to_flip] = False
+        # Calculate how many to keep
+        num_to_keep = int(len(shuffled_indices) * percentage)
         
-    elif strategy == "full":
-        # Full strategy: keep all points (or handle as per specific implementation)
-        # Source says: set nb_resampled_points to x_nx3.shape[0]; create all-False mask.
-        # This implies the mask might not be used for selection in the same way,
-        # or that the "full" strategy is a no-op for masking but sets a count.
-        # For implementation, we assume all points are kept.
-        mask[:] = True
+        # Set the first num_to_keep to False (discard them)
+        # The rest remain True
+        mask[shuffled_indices[:num_to_keep]] = False
         
-    else:
-        raise ValueError(f"Unknown strategy: {strategy}")
+    elif strategy == 'full':
+        # Keep all points (mask is False, implying no removal via this mask logic, 
+        # or mask is inverted in usage. Based on source: "create all-False mask")
+        mask = torch.zeros(N, dtype=torch.bool)
         
-    resampled_points = points[mask]
-    return resampled_points, mask
+    return mask
 
-def get_active_points(sdf, tets):
-    """
-    [G] Placeholder for implementation. Typically checks if points are within a certain distance of the isosurface
-    or are vertices of active tetrahedra.
-    """
-    # Implementation depends on specific SDF/tet definition
+# Helper functions assumed to be defined elsewhere in the TetWeave context
+def neighbor_active_points(sdf, tets):
+    # Returns indices of points adjacent to tetrahedra that are active
     pass
 
-def neighbor_active_points(sdf, tets):
-    """
-    [G] Placeholder for implementation. Typically finds points that are neighbors to the active tetrahedra
-    or active points in the point cloud graph.
-    """
-    # Implementation depends on specific neighbor definition
+def get_active_points(sdf, tets):
+    # Returns indices of points that are active (e.g., inside isosurface)
     pass
 ```
 
 **Parameters:**
-- `strategy`: Controls the aggressiveness of resampling. "partial" is most conservative, "percentage" reduces density by 90% of the active/neighbor set, "full" retains all.
-- `shuffle_seed`: For reproducibility in the percentage strategy.
+- `strategy`: String, one of `'partial'`, `'percentage'`, `'full'`. Default: `'partial'`.
+- `percentage`: Float, fraction of points to keep in percentage mode. Default: `0.9` (90%).
 
 **Edge Cases and Pitfalls:**
-- **Precision:** The SDF evaluation must be precise to correctly identify active points.
-- **Boundaries:** Points on the boundary of the domain may have fewer neighbors, affecting the mask.
-- **Degenerate Input:** If `tets` is empty, no points are active or neighbors, resulting in an empty mask for partial/percentage strategies.
+- **Precision:** SDF evaluation must be precise to correctly identify active vs. inactive regions.
+- **Boundaries:** Points on the boundary of the domain may have fewer neighbors, affecting the mask density.
+- **Degenerate Input:** If `tets` is empty or `sdf` is undefined, the helper functions will fail. [G] Ensure `tets` and `sdf` are valid before calling.
 
 ## Subtopics
 
 ### [Error-Driven Point Resampling & Grid Aggregation](5425-error-driven-point-resampling-grid-aggregation.md)
-This method accumulates per-pixel rendering errors from multiple camera views into a 3D voxel grid to compute mean error density, which guides point resampling for tetrahedral grid refinement. It distinguishes itself from its parent [Point Resampling with Neighbor Masking](2710-point-resampling-with-neighbor-masking.md) by driving the resampling probability based on quantitative rendering error rather than topological neighbor status.
+Drives resampling based on rendering error density rather than topological neighbor status.
 
 ### [Random Point Subsampling](6215-random-point-subsampling.md)
-Random Point Subsampling selects a fixed-size random subset of points from an input set without replacement. It serves as a deterministic-free downsampling primitive within the Point Resampling with Neighbor Masking pipeline, providing a baseline for reducing point cloud density. Unlike Error-Driven Point Resampling & Grid Aggregation, which prioritizes geometric fidelity or grid-based density, this method ignores spatial distribution, treating all points as equally probable candidates.
+A deterministic-free downsampling primitive used within the pipeline for baseline reduction.
+
+### [A-buffer Sampling Method](12360-a-buffer-sampling-method.md)
+Maps points to a grid using weighted averaging, differing in its aggregation approach.
 
 ## Operating characteristics
-- **Time Complexity:** Depends on the cost of `get_active_points` and `neighbor_active_points`. Typically $O(N)$ for point iteration and $O(M)$ for tetrahedra processing.
-- **Memory Complexity:** $O(N)$ for the mask and active/neighbor lists.
-- **Performance:** The method is efficient for compression, as demonstrated by the reduction of a model from 1.0MB to 345.5kB [S1, unofficial].
-- **Strengths:** Preserves topological structure by keeping neighbors of active elements. Simple to implement.
-- **Limitations:** The "percentage" strategy's 90% reduction is fixed and may not be optimal for all scenes. The "full" strategy's behavior is ambiguous in the source.
-- **When to use:** When compressing point clouds for storage or transmission while maintaining structural integrity.
-- **When not to use:** When geometric fidelity is critical and error-driven methods are preferred.
+- **Time Complexity:** Depends on the cost of `get_active_points` and `neighbor_active_points`, which typically involve traversing the tetrahedral mesh and evaluating the SDF. For $N$ points and $T$ tetrahedra, neighbor identification is $O(T)$ or $O(N)$ depending on implementation. Shuffling is $O(N)$.
+- **Memory Complexity:** $O(N)$ for the mask and indices.
+- **Performance:** The method is efficient for compression, reducing file size significantly (e.g., from 1.0MB to 345.5kB in the cited example) by discarding inactive points [S1, unofficial].
+- **Strengths:** Preserves geometric structure by keeping neighbors of active regions. Simple to implement.
+- **Limitations:** Relies on the quality of the SDF and tetrahedral mesh. May not preserve fine details if the percentage is too low.
+- **When to use:** When compressing point clouds or tetrahedral grids for storage or transmission while maintaining structural integrity.
+- **When not to use:** When uniform random sampling is sufficient or when error-driven refinement is required.
 
 ## Background
-The method is part of the TetWeave framework, which focuses on isosurface extraction using on-the-fly Delaunay tetrahedral grids for gradient-based mesh optimization [S1, unofficial]. It was introduced in the SIGGRAPH 2025 paper "TetWeave: Isosurface Extraction using On-The-Fly Delaunay Tetrahedral Grids for Gradient-Based Mesh Optimization" by Binninger et al. [S1, unofficial].
+The method originates from the TetWeave project, which focuses on isosurface extraction using on-the-fly Delaunay tetrahedral grids for gradient-based mesh optimization [S1, unofficial]. It was developed by Alexandre Binninger, Ruben Wiersma, Philipp Herholz, and Olga Sorkine-Hornung for SIGGRAPH 2025 [S1, unofficial]. The technique is part of a pipeline that includes compression via discarding inactive points and converting values to `float16` [S1, unofficial].
 
 ## Sources
 [S1] AlexandreBinninger/TetWeave, https://github.com/AlexandreBinninger/TetWeave, fetched 2026-10-27 (unofficial)

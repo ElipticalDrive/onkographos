@@ -3,187 +3,162 @@
 Also called: Stroke generation via RK4(3)
 
 ## Overview
-Curvature Field Line Tracing for Strokes is a method for generating hatching strokes in volume illustration by tracing paths from seed points along maximal curvature directions in object space [S1, unofficial]. It differs from standard streamline tracing by integrating a curvature-derived vector field rather than a velocity field, and by using adaptive step size control to terminate strokes when the hatch direction deviates significantly from the original, ensuring strokes remain visually coherent and front-facing [S1, unofficial].
+Curvature Field Line Tracing for Strokes is a method for generating hatching strokes in volume illustration by tracing paths from seed points along maximal curvature directions in object space [S1, unofficial]. It differs from standard streamline tracing by following the principal direction of the scalar field's curvature rather than a velocity vector, and by employing an adaptive step size controlled by a deviation threshold to ensure strokes remain visually coherent and front-facing [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   Scalar field data.
-*   A set of seed points on a target iso-surface.
-*   A deviation threshold constant (angle) for stroke termination.
+- Scalar field $f(\mathbf{x})$ defined on a 3D grid.
+- A set of seed points $\mathbf{x}_0$ on an iso-surface or within the volume.
+- A target iso-value $v_{iso}$ (used to determine initial positioning, though the tracing occurs in object space) [S1, unofficial].
+- A deviation threshold angle $\theta_{max}$ (constant) [S1, unofficial].
 
 **Outputs:**
-*   A set of strokes, where each stroke is a line strip (sequence of points).
+- A set of strokes, where each stroke is a line strip (sequence of points).
+- Each point in a stroke stores:
+  - Vertex coordinates $\mathbf{p}_i$.
+  - Gray-scale gradient $\nabla f(\mathbf{p}_i)$ interpolated from the scalar field.
+  - Texture coordinate $t_i$, defined as the distance from the seed point relative to the total stroke length [S1, unofficial].
 
 **Data Structures:**
-Each point in a stroke stores:
-1.  Vertex coordinates ($\mathbf{p}$).
-2.  Gray-scale gradient ($\nabla f$) interpolated from the scalar field.
-3.  Texture coordinate ($t$), defined as the distance from the current point to the seed point divided by the total stroke length.
+- **Curvature Field:** Derived from the scalar field. The direction of tracing is the "maximal curvature direction" in object space [S1, unofficial]. The exact mathematical definition of this direction (e.g., eigenvector of the Hessian) is not explicitly detailed in the source, but it is treated as a vector field $\mathbf{V}(\mathbf{x})$ [S1, unofficial].
+- **Stroke Point:** A struct containing `vec3 position`, `vec3 gradient`, and `float texture_coord` [S1, unofficial].
 
-**Method Steps:**
-
-1.  **Initialize:** For each seed point $\mathbf{p}_0$, determine the initial hatch direction $\mathbf{d}_0$ (maximal curvature direction at $\mathbf{p}_0$). Let $\mathbf{p}_{current} = \mathbf{p}_0$. Store $\mathbf{p}_0$ in the stroke's point list. Calculate initial texture coordinate $t_0 = 0$.
-
-2.  **Integrate:** Use Runge-Kutta 4(3) (RK4(3)) with adaptive step size control to trace the path along the curvature field [S1, unofficial].
-    *   At each step, evaluate the curvature vector field $\mathbf{V}(\mathbf{p})$ at the current position.
-    *   Compute the next position $\mathbf{p}_{next}$ using the RK4(3) formula.
-    *   The adaptive step size reduces the number of intermediate points by adjusting the integration step based on local field variation [S1, unofficial].
-
-3.  **Check Termination:** Calculate the angle $\theta$ between the current hatch direction $\mathbf{d}_{current}$ (the direction of the vector field at $\mathbf{p}_{next}$) and the original hatch direction $\mathbf{d}_0$.
-    *   If $\theta > \text{threshold}$, terminate the stroke [S1, unofficial].
-    *   This prevents stepping into regions with high curvature field variations [S1, unofficial].
-
-4.  **Store Point:** If not terminated, add $\mathbf{p}_{next}$ to the stroke's point list.
-    *   Interpolate the gray-scale gradient $\nabla f$ at $\mathbf{p}_{next}$ from the scalar field.
-    *   Update the texture coordinate $t$ based on the cumulative distance from the seed.
-
-5.  **Repeat:** Set $\mathbf{p}_{current} = \mathbf{p}_{next}$ and repeat from Step 2 until termination or a maximum length is reached.
-
-6.  **Lighting and Culling:**
-    *   Compute a cone of normals from the stored gradients for each stroke.
-    *   Use this cone to cull back-facing strokes [S1, unofficial].
-    *   Assume sufficiently accurate curvature directions ensure each stroke is placed entirely in front of the selected surface [S1, unofficial].
+**Algorithm Steps:**
+1. **Initialization:** For each seed point $\mathbf{x}_0$, determine the initial hatch direction $\mathbf{d}_0$ as the maximal curvature direction at $\mathbf{x}_0$. Initialize current position $\mathbf{p} = \mathbf{x}_0$ and current direction $\mathbf{d} = \mathbf{d}_0$. Initialize stroke point list $S = [\mathbf{p}]$.
+2. **Integration Loop:** While the stroke is not terminated:
+   a. Compute the curvature vector field $\mathbf{V}(\mathbf{p})$ at the current position.
+   b. Use RK4(3) integration with adaptive step size control to advance the position along $\mathbf{V}(\mathbf{p})$ [S1, unofficial].
+      - The adaptive step size reduces the number of intermediate points when the field is smooth.
+      - The step size is adjusted to maintain accuracy despite tri-linear interpolation of the curvature field [S1, unofficial].
+   c. Let the new position be $\mathbf{p}_{new}$ and the new direction be $\mathbf{d}_{new} = \mathbf{V}(\mathbf{p}_{new})$.
+   d. **Termination Check:** Calculate the angle $\alpha$ between the current hatch direction $\mathbf{d}_{new}$ and the original hatch direction $\mathbf{d}_0$. If $\alpha > \theta_{max}$, terminate the stroke [S1, unofficial].
+   e. **Lighting and Culling Prep:** Interpolate the gray-scale gradient $\nabla f(\mathbf{p}_{new})$ from the scalar field [S1, unofficial].
+   f. **Store Point:** Add $\mathbf{p}_{new}$ to $S$. Compute texture coordinate $t = \text{dist}(\mathbf{p}_{new}, \mathbf{x}_0) / \text{total_length}$ (total length is updated or estimated) [S1, unofficial].
+   g. Update $\mathbf{p} = \mathbf{p}_{new}$ and $\mathbf{d} = \mathbf{d}_{new}$.
+3. **Post-processing:**
+   - Compute a cone of normals from the set of all gradients in the stroke to cull back-facing strokes [S1, unofficial].
+   - Render the stroke as a line strip using the stored points, gradients, and texture coordinates [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def trace_curvature_stroke(seed_point, scalar_field, deviation_threshold):
+def generate_stroke(seed_point, scalar_field, curvature_field, theta_max):
     """
-    Trace a single stroke from a seed point along maximal curvature directions.
+    Generates a single hatching stroke by tracing along maximal curvature directions.
     
     Args:
-        seed_point: Initial 3D position on the iso-surface.
-        scalar_field: Function to evaluate scalar values and gradients.
-        deviation_threshold: Maximum allowed angle (in radians) between 
-                             current hatch direction and original direction.
-                             
+        seed_point: Initial 3D position.
+        scalar_field: Function to interpolate scalar values and gradients.
+        curvature_field: Function to interpolate maximal curvature directions.
+        theta_max: Maximum allowed deviation angle from original hatch direction (radians).
+        
     Returns:
-        list of dicts: Each dict contains 'pos', 'gradient', 'texture_coord'.
+        list of StrokePoint objects.
     """
     # 1. Initialize
+    original_direction = curvature_field(seed_point)
     current_pos = seed_point
-    # Get initial curvature direction (maximal curvature direction at seed)
-    # Note: Exact formula for maximal curvature direction is not specified in sources [G]
-    # Assuming a function get_maximal_curvature_direction(pos, scalar_field) exists
-    original_direction = get_maximal_curvature_direction(current_pos, scalar_field)
-    
-    stroke_points = []
-    stroke_points.append({
-        'pos': current_pos,
-        'gradient': interpolate_gradient(current_pos, scalar_field),
-        'texture_coord': 0.0
-    })
-    
-    total_length = 0.0
     current_direction = original_direction
     
-    # 2. Integrate using RK4(3) with adaptive step size
-    # Note: Adaptive step size logic is described but not detailed in sources [G]
-    # Standard RK4(3) involves computing k1, k2, k3, k4 and combining them
-    # The step size h is adjusted based on error estimate between RK4 and RK3
+    # Store the first point
+    stroke_points = []
+    add_stroke_point(stroke_points, current_pos, scalar_field.gradient(current_pos), 0.0)
     
+    total_length = 0.0
+    prev_pos = current_pos
+    
+    # 2. Integration Loop
     while True:
-        # Compute next position using RK4(3)
-        # The vector field is the curvature field derived from the scalar field
-        next_pos, step_size = rk43_integrate(current_pos, current_direction, scalar_field)
+        # RK4(3) integration with adaptive step size
+        # Note: The exact adaptive step size logic is not specified, 
+        # but it uses RK4(3) to integrate the curvature field.
+        next_pos, next_direction = rk43_integrate(
+            curvature_field, 
+            current_pos, 
+            current_direction, 
+            step_size_hint=None # Adaptive controller determines this
+        )
         
-        # 3. Check Termination
-        # Calculate angle between current direction (at next_pos) and original direction
-        new_direction = get_maximal_curvature_direction(next_pos, scalar_field)
-        angle = angle_between_vectors(current_direction, original_direction)
+        # Calculate deviation from original hatch direction
+        angle_deviation = angle_between_vectors(next_direction, original_direction)
         
-        if angle > deviation_threshold:
+        # Termination condition
+        if angle_deviation > theta_max:
             break
             
-        # 4. Store Point
-        gradient = interpolate_gradient(next_pos, scalar_field)
-        total_length += step_size
-        texture_coord = total_length # Distance to seed relative to total length 
-                                     # (Note: Source says relative, but absolute distance is 
-                                     # used for interpolation; final normalization happens later)
+        # Interpolate gradient for lighting
+        gradient = scalar_field.gradient(next_pos)
         
-        stroke_points.append({
-            'pos': next_pos,
-            'gradient': gradient,
-            'texture_coord': texture_coord
-        })
+        # Update length
+        segment_length = distance(prev_pos, next_pos)
+        total_length += segment_length
         
+        # Texture coordinate: distance to seed / total length
+        # Note: total_length is cumulative, so this is relative progress
+        texture_coord = distance(seed_point, next_pos) / total_length if total_length > 0 else 0.0
+        
+        # Store point
+        add_stroke_point(stroke_points, next_pos, gradient, texture_coord)
+        
+        # Update state
+        prev_pos = next_pos
         current_pos = next_pos
-        current_direction = new_direction
+        current_direction = next_direction
         
-    # Normalize texture coordinates to [0, 1] based on total length
-    if total_length > 0:
-        for point in stroke_points:
-            point['texture_coord'] /= total_length
+        # Safety break to prevent infinite loops in degenerate cases
+        if len(stroke_points) > MAX_STROKE_LENGTH:
+            break
             
     return stroke_points
 
-def rk43_integrate(pos, direction, scalar_field):
-    """
-    Placeholder for RK4(3) integration with adaptive step size.
-    Returns next position and the step size taken.
-    """
-    # Implementation details of RK4(3) and adaptive step size control 
-    # are not provided in the sources [G]
-    pass
-
-def get_maximal_curvature_direction(pos, scalar_field):
-    """
-    Placeholder for computing maximal curvature direction.
-    """
-    # Implementation details are not provided in the sources [G]
-    pass
-
-def interpolate_gradient(pos, scalar_field):
-    """
-    Interpolate gray-scale gradient from scalar field at pos.
-    """
-    # Typically done via tri-linear interpolation of the gradient field
-    # derived from the scalar field [S1, unofficial]
-    pass
+def add_stroke_point(points, pos, grad, tex_coord):
+    points.append({
+        'position': pos,
+        'gradient': grad,
+        'texture_coord': tex_coord
+    })
 
 def angle_between_vectors(v1, v2):
-    """
-    Calculate angle between two vectors.
-    """
-    import math
-    dot = sum(a * b for a, b in zip(v1, v2))
-    mag1 = math.sqrt(sum(a * a for a in v1))
-    mag2 = math.sqrt(sum(b * b for b in v2))
-    if mag1 == 0 or mag2 == 0:
-        return 0
-    cos_angle = dot / (mag1 * mag2)
-    # Clamp to [-1, 1] to avoid numerical errors
+    dot = dot_product(v1, v2)
+    norm_product = magnitude(v1) * magnitude(v2)
+    if norm_product == 0:
+        return 0.0
+    cos_angle = dot / norm_product
+    # Clamp to avoid numerical errors
     cos_angle = max(-1.0, min(1.0, cos_angle))
-    return math.acos(cos_angle)
+    return acos(cos_angle)
 ```
 
 **Parameters:**
-*   **Deviation Threshold:** A constant angle deviation from the original hatch direction that terminates the stroke. No specific value is given in the sources [S1, unofficial].
+- **Deviation Threshold ($\theta_{max}$):** A constant angle deviation from the original hatch direction that terminates the stroke. No specific value is given in the sources [S1, unofficial].
+- **Integration Method:** RK4(3) with adaptive step size [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **High Variations:** The method avoids stepping into regions where the curvature field shows high variations by terminating the stroke when the direction deviates [S1, unofficial].
-*   **Precision:** Although tri-linear interpolation is used for the curvature field, the RK4(3) method allows for high accuracy in computing field lines [S1, unofficial].
+- **High Curvature Variations:** The deviation threshold prevents stepping into regions where the curvature field shows high variations, which could otherwise lead to erratic strokes [S1, unofficial].
+- **Back-facing Strokes:** Strokes that turn away from the viewer may be back-facing. The method computes a cone of normals from gradients to cull these [S1, unofficial].
+- **Interpolation Accuracy:** Although tri-linear interpolation is used for the curvature field, the RK4(3) method ensures high accuracy in field line computation [S1, unofficial].
 
 ## Subtopics
 
+### [Integral Surface](11268-integral-surface.md)
+An integral surface generalizes the concept of integral lines to higher-dimensional seeding geometries, creating a surface in time-varying velocity fields or a stream surface in steady flow. It is defined by a univariate seeding curve (or "rake") and integrates the velocity field along trajectories emanating from this curve. Unlike single integral lines, it captures the collective evolution of a continuous set of particles, serving as a fundamental structure for visualizing flow topology and particle advection.
+
 ## Operating characteristics
-*   **Time Complexity:** Not explicitly given. Adaptive step size reduces the number of intermediate points, potentially improving performance in smooth regions [S1, unofficial].
-*   **Memory Complexity:** Strokes are stored as sets of points (line strips). Each point stores vertex coordinates, gradient, and texture coordinate. The number of points is reduced by adaptive step size control [S1, unofficial].
-*   **Strengths:**
-    *   High accuracy in field line computation despite tri-linear interpolation [S1, unofficial].
-    *   Effective culling of back-facing strokes using a cone of normals [S1, unofficial].
-    *   Strokes are placed entirely in front of the selected surface, assuming accurate curvature directions [S1, unofficial].
-    *   Compact encoding of strokes using a small number of line segments [S1, unofficial].
-*   **Limitations:**
-    *   Requires computation of curvature directions, which may be complex.
-    *   Termination condition depends on a user-defined threshold.
-*   **When to Use:** Suitable for interactive volume illustration where hatching strokes are needed to represent surfaces and internal structures, especially when visual coherence and front-facing rendering are important [S1, unofficial].
+- **Time Complexity:** Depends on the number of seed points and the average stroke length. Adaptive step size reduces the number of intermediate points, improving performance in smooth regions [S1, unofficial].
+- **Memory Complexity:** Proportional to the total number of points in all strokes. Each point stores position, gradient, and texture coordinate [S1, unofficial].
+- **Strengths:**
+  - High accuracy in field line computation despite simple tri-linear interpolation [S1, unofficial].
+  - Efficient encoding of strokes using a small number of line segments due to adaptive step size [S1, unofficial].
+  - Effective culling of back-facing strokes using gradient-based normal cones [S1, unofficial].
+- **Limitations:**
+  - Requires computation of curvature field, which may be more expensive than velocity field evaluation.
+  - Termination is based on deviation from the *original* direction, which may not be suitable for all visualization goals.
+- **When to Use:** When generating hatching strokes for volume illustration that need to follow the structural curvature of the scalar field and maintain visual coherence.
+- **When Not to Use:** When velocity-based flow visualization is required, or when the curvature field is noisy or ill-defined.
 
 ## Background
-The method was introduced in the paper "Interactive volume illustration" [S1, unofficial]. It is part of a broader approach to volume illustration that uses hatching strokes to convey shape and structure. The use of RK4(3) integration with adaptive step size control is a key technical contribution to ensure accuracy and efficiency in stroke generation [S1, unofficial].
+The method was introduced in the context of interactive volume illustration. It is described in the paper "Interactive volume illustration" [S1, unofficial]. The approach leverages the fact that strokes placed entirely in front of a selected surface can effectively illustrate the volume's structure. The use of RK4(3) with adaptive step size is chosen to balance accuracy and performance, allowing for high-quality strokes with minimal computational overhead.
 
 ## Sources
 [S1] Interactive volume illustration, https://openalex.org/W2147354080, fetched 2026-10-27 (unofficial)

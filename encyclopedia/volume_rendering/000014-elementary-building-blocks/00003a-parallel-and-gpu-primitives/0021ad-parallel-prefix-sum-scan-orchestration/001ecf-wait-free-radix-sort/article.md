@@ -3,147 +3,144 @@
 Also called: Hierarchical Blelloch Scan Sort
 
 ## Overview
-A parallel sorting algorithm designed for heterogeneous GPU environments (specifically WebGPU) that avoids inter-workgroup spin-waiting by using a hierarchical Blelloch scan to compute element positions [S1, unofficial]. It solves the problem of stable, wait-free sorting across workgroups where scheduling order is not guaranteed, ensuring consistent behavior without busy-waiting [S1, unofficial]. It sets itself apart from siblings like [CUDA-based Exclusive Prefix Sum for Vertex Indexing](1112-cuda-based-exclusive-prefix-sum-for-vertex-indexing.md) by explicitly decoupling workgroup synchronization via a multi-level scan dispatch rather than relying on fixed scheduling assumptions or tile-based rasterizer constraints [S1, unofficial].
+A parallel sorting algorithm designed for GPU execution that avoids inter-workgroup spin-waiting by using a hierarchical Blelloch scan to compute element positions, ensuring consistent behavior across heterogeneous GPU schedulers [S1, unofficial]. It differs from naive parallel prefix sum approaches by explicitly decoupling the global position calculation from the scatter phase via a two-level hierarchical scan, allowing each level to be executed as an independent compute dispatch without cross-workgroup polling [S1, unofficial].
 
 ## How it works
-**Inputs:** An array of $N$ 32-bit keys (e.g., depth values) to be sorted [S1, unofficial].
-**Outputs:** A permutation of the input array sorted by key [G].
+**Inputs and Outputs:**
+- Input: An array of $N$ elements with 32-bit integer keys.
+- Output: The same array sorted by key.
+- Auxiliary storage: Arrays for histograms, tile sums, and scan results. Size is $O(N/w_g)$ where $w_g$ is the workgroup size [S1, unofficial].
 
 **Data Structures:**
-*   `input`: Array of $N$ keys.
-*   `output`: Array of $N$ values to be reordered.
-*   `histogram`: Local buffer per workgroup of size 256, storing counts of each digit value $d \in [0, 255]$ [S1, unofficial].
-*   `tile_sums`: Array of size $N/wg$, storing the sum of each workgroup's histogram for a specific digit [S1, unofficial].
-*   `prefixes`: Array of size $N/wg$, storing the exclusive prefix sums of `tile_sums` [S1, unofficial].
+- `histogram[wg][256]`: Local histogram for each workgroup, counting occurrences of each 8-bit digit value $d \in [0, 255]$.
+- `tile_sums[256][N/w_g]`: Array storing the sum of counts for each digit value across all workgroups.
+- `prefix_wg[256][N/w_g]`: Inter-workgroup prefix sums for each digit value.
+- `base_d[256]`: Global base offset for each digit value, representing the starting position in the output array for elements with digit $d$.
 
 **Parameters:**
-*   $N$: Number of elements.
-*   $wg$: Workgroup size (tile size).
-*   $B$: Number of bits per pass (8).
-*   $R$: Radix size ($2^B = 256$).
-*   $P$: Number of passes ($32/B = 4$).
+- $N$: Number of elements to sort.
+- $w_g$: Workgroup size (number of threads per workgroup).
+- Radix: 8 bits (256 buckets).
+- Passes: 4 passes for 32-bit keys, processing bits $k \times 8$ to $(k + 1) \times 8 - 1$ for pass $k \in \{0, 1, 2, 3\}$ [S1, unofficial].
 
-**Algorithm Steps:**
-The full sort is performed by executing $P$ consecutive passes of an 8-bit radix sort, starting from the least significant bits [S1, unofficial]. In the $k$-th pass ($k=0 \dots P-1$), the algorithm processes bits $k \times 8$ to $(k + 1) \times 8 - 1$ of the key [S1, unofficial]. Each pass consists of three steps:
+**Steps:**
+The algorithm performs four consecutive passes of an 8-bit radix sort, starting from the least significant bits. Each pass consists of three steps: Local Histogram, Prefix Scan, and Scatter.
 
-1.  **Local Histogram:** Each workgroup counts digit frequencies within its assigned elements [S1, unofficial].
-2.  **Prefix Scan:** A hierarchical Blelloch scan is executed to compute two values:
-    *   $\text{base}_d$: The global offset for digit $d$, equal to the total count of all elements with a digit value less than $d$ across all workgroups.
-    *   $\text{prefix}_{wg}$: The inter-workgroup rank, representing the total count of elements with digit $d$ in all workgroups processed before the current workgroup.
-    
-    The Blelloch scan is implemented as a two-phase process:
-    *   **Forward Pass (Upsweep):** Level $l_0$ performs an exclusive scan inside each workgroup tile of size $wg$ over the indicator stream for digit $d$, producing tile sums forming an array of length $N/wg$ [S1, unofficial]. Level $l_1$ runs the same Blelloch scan on this array to obtain prefixes across tiles, recursing until a single level remains [S1, unofficial].
-    *   **Backward Pass (Downsweep):** The prefixes computed at level $l_1$ are added back to their corresponding $l_0$ tiles, and then to individual elements, yielding the inter-workgroup offset $\text{prefix}_{wg}$ [S1, unofficial].
-    *   $\text{base}_d$ is read from the last level as the sum of counts of digits smaller than $d$ [S1, unofficial].
-3.  **Scatter:** Each element $i$ is written to its new position $pos$ in the sorted array [S1, unofficial].
+1. **Local Histogram:**
+   Each workgroup $wg$ computes a local histogram of the digit values extracted from the keys of elements assigned to it. Let $d_i$ be the digit value of the element at index $i$ in the current pass. The workgroup increments `histogram[wg][d_i]` for each element.
 
-**Formulas:**
-$$pos = \text{base}_d + \text{rank}_i$$
-where $pos$ is the final position for an element originally at index $i$, $d$ is the specific digit value of the element, $\text{base}_d$ is the global offset equal to the total count of all elements with a digit value less than $d$, and $\text{rank}_i$ is the count of elements appearing before index $i$ sharing the same digit value $d$ [S1, unofficial].
+2. **Prefix Scan (Hierarchical Blelloch Scan):**
+   This step computes `base_d` and `prefix_wg` using a two-level hierarchical Blelloch scan.
+   
+   - **Forward Pass (Upsweep):**
+     - Level $l_0$: Perform an exclusive scan inside each workgroup tile of size $w_g$ over the indicator stream for digit $d$. This produces tile sums, forming an array of length $N/w_g$. Specifically, for each workgroup $wg$, compute the sum of `histogram[wg][d]` and store it in `tile_sums[d][wg]`.
+     - Level $l_1$: Run the same Blelloch scan on the `tile_sums` array to obtain prefixes across tiles. Recurse until a single level remains.
+     - Compute `base_d` as the sum of counts of digits smaller than $d$ across all workgroups. This is derived from the final level of the upsweep.
+   
+   - **Backward Pass (Downsweep):**
+     - Add prefixes computed at level $l_1$ back to their corresponding $l_0$ tiles, and then to individual elements, yielding the inter-workgroup offset `prefix_wg[d][wg]`.
+   
+   Each level is executed as an independent compute dispatch consuming the previous level's buffers, with only intra-workgroup barriers inside a tile [S1, unofficial].
 
-$$\text{rank}_i = \text{prefix}_{wg} + \text{rank}_{\text{local}_i}$$
-where $\text{prefix}_{wg}$ is the inter-workgroup rank (total count of elements with digit $d$ in all workgroups processed before the current one) and $\text{rank}_{\text{local}_i}$ is the intra-workgroup rank (number of elements with digit $d$ within the current workgroup before index $i$) [S1, unofficial].
+3. **Scatter:**
+   Write each element to its new position `pos` in the sorted array. The position is calculated as:
+   $$pos = \text{base}_d + \text{rank}_i$$
+   where $\text{rank}_i$ is decomposed into:
+   $$\text{rank}_i = \text{prefix}_{wg} + \text{rank}_{\text{local}_i}$$
+   Here, $\text{prefix}_{wg}$ is the inter-workgroup rank (total count of elements with digit $d$ in all workgroups processed before the current one), and $\text{rank}_{\text{local}_i}$ is the intra-workgroup rank (number of elements with digit $d$ within the current workgroup before index $i$) [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def wait_free_radix_sort(input_keys, N, wg):
-    output = [0] * N
-    # 32-bit sort requires 4 passes of 8-bit radix sort, LSB first [S1, unofficial]
-    for k in range(4):
-        shift = k * 8
-        # Extract digit d for each element [S1, unofficial]
-        digits = [(key >> shift) & 0xFF for key in input_keys]
+def wait_free_radix_sort(keys, N, wg_size):
+    # Assume keys is an array of N 32-bit integers
+    # Output array 'sorted_keys' of size N
+    
+    for k in range(4):  # 4 passes for 32-bit keys
+        # Extract digit d for each element in this pass
+        digits = [(key >> (k * 8)) & 0xFF for key in keys]
         
-        # Step 1: Local Histogram [S1, unofficial]
-        # Each workgroup counts digit frequencies within its assigned elements.
-        num_wgs = (N + wg - 1) // wg
-        local_histograms = [[0] * 256 for _ in range(num_wgs)]
+        # Step 1: Local Histogram
+        # histogram[wg][d] stores count of digit d in workgroup wg
+        histogram = [[0] * 256 for _ in range(N // wg_size)]
         for i in range(N):
-            w = i // wg
+            wg = i // wg_size
             d = digits[i]
-            local_histograms[w][d] += 1
-        
-        # Step 2: Prefix Scan (Hierarchical Blelloch) [S1, unofficial]
-        # Compute tile sums for the current digit d across workgroups
-        tile_sums = [hist[d] for hist in local_histograms]
-        
-        # Forward pass (upsweep): exclusive scan on tile_sums [S1, unofficial]
-        prefixes = blelloch_exclusive_scan(tile_sums)
-        
-        # base_d is the sum of counts of digits smaller than d across all workgroups [S1, unofficial]
-        base_d = sum(local_histograms[w][d_small] for w in range(num_wgs) for d_small in range(d))
-        
-        # Step 3: Scatter [S1, unofficial]
+            histogram[wg][d] += 1
+            
+        # Step 2: Prefix Scan (Hierarchical Blelloch Scan)
+        # Compute tile_sums[d][wg] = sum of histogram[wg][d] for all wg
+        tile_sums = [[0] * (N // wg_size) for _ in range(256)]
+        for d in range(256):
+            for wg in range(N // wg_size):
+                tile_sums[d][wg] = histogram[wg][d]
+                
+        # Level l0: Exclusive scan within each workgroup for each digit
+        # This produces local ranks within the workgroup
+        # rank_local[i] for element i in workgroup wg with digit d
+        rank_local = [0] * N
+        for wg in range(N // wg_size):
+            for d in range(256):
+                # Compute exclusive scan of histogram[wg][d] for elements in this workgroup
+                # This is a simplified representation; in practice, this is done in parallel
+                local_sum = 0
+                for i in range(wg * wg_size, (wg + 1) * wg_size):
+                    if digits[i] == d:
+                        rank_local[i] = local_sum
+                        local_sum += 1
+                        
+        # Level l1: Blelloch scan on tile_sums to get global prefixes
+        # prefix_wg[d][wg] is the sum of tile_sums[d][0...wg-1]
+        prefix_wg = [[0] * (N // wg_size) for _ in range(256)]
+        for d in range(256):
+            # Perform Blelloch scan on tile_sums[d]
+            # This is a simplified representation; in practice, this is done in parallel
+            prefix = 0
+            for wg in range(N // wg_size):
+                prefix_wg[d][wg] = prefix
+                prefix += tile_sums[d][wg]
+                
+        # Compute base_d: sum of counts of digits smaller than d across all workgroups
+        base_d = [0] * 256
+        for d in range(256):
+            total_count_d = sum(tile_sums[d])
+            base_d[d] = sum(sum(tile_sums[d_prime]) for d_prime in range(d))
+            
+        # Step 3: Scatter
+        sorted_keys = [0] * N
         for i in range(N):
-            d_i = digits[i]
-            w = i // wg
-            idx_in_wg = i % wg
+            d = digits[i]
+            wg = i // wg_size
+            # rank_i = prefix_wg[d][wg] + rank_local[i]
+            rank_i = prefix_wg[d][wg] + rank_local[i]
+            pos = base_d[d] + rank_i
+            sorted_keys[pos] = keys[i]
             
-            # prefix_wg: inter-workgroup rank [S1, unofficial]
-            prefix_wg = prefixes[w]
-            
-            # rank_local_i: intra-workgroup rank [S1, unofficial]
-            # Count elements with digit d_i in the current workgroup before index i
-            rank_local_i = sum(1 for j in range(idx_in_wg) if digits[w * wg + j] == d_i)
-            
-            rank_i = prefix_wg + rank_local_i
-            pos = base_d + rank_i
-            output[pos] = input_keys[i]
-        
-        input_keys = output
-    return output
-
-def blelloch_exclusive_scan(data):
-    """Standard Blelloch exclusive scan on an array [G]."""
-    n = len(data)
-    if n == 0: return []
-    if n == 1: return [0]
-    
-    # Upsweep (reduce)
-    tree = [0] * (2 * n)
-    tree[n:] = data[:]
-    level = n
-    while level > 1:
-        for i in range(0, level, 2):
-            tree[i // 2] = tree[i] + tree[i + 1]
-        level //= 2
-    
-    # Set root to 0 for exclusive scan
-    tree[0] = 0
-    
-    # Downsweep
-    level = 1
-    while level < n:
-        for i in range(level * 2 - 1, -1, -2):
-            if i + 1 < 2 * n:
-                tree[i + 1] += tree[i]
-        level *= 2
-        
-    return tree[n:]
+        keys = sorted_keys  # Update keys for next pass
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Stability:** The algorithm guarantees that elements with identical digits are placed into the output array in the same relative order in which they appeared in the input [S1, unofficial].
-*   **Dispatch Overhead:** Each hierarchical level executes as an independent compute dispatch consuming the previous level's buffers, with only intra-workgroup barriers inside a tile [S1, unofficial].
-*   **Precision:** The algorithm relies on integer arithmetic for counts. Ensure that the total count $N$ fits within the data type used for offsets [G].
+- Precision: Ensure that the scan operations do not overflow for large $N$. Use appropriate data types for counters.
+- Boundaries: Handle cases where $N$ is not a multiple of $w_g$ by padding or adjusting loop bounds.
+- Degenerate Input: The algorithm is stable and handles duplicate keys correctly by preserving their relative order [S1, unofficial].
 
 ## Subtopics
 
 ### [8-bit Radix Sort](2599-8-bit-radix-sort.md)
-The fundamental pass used in the wait-free radix sort. It sorts elements based on a single 8-bit digit of the key. It is chosen for its efficiency in parallel histogram computation and its compatibility with the hierarchical scan structure.
+This method performs a single pass of a radix sort on 64-bit keys by processing one 8-bit chunk per iteration, designed for GPU execution within a wait-free orchestration framework. It differs from full radix sort implementations by serving as the core digit-processing kernel, relying on parent orchestration for global position calculation and on subgroup-based variants for optimized local partitioning[3368-subgroup-based-radix-sort-partition.md].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear work $O(N)$ per pass, with $P=4$ passes, resulting in $O(P \cdot N)$ total work [S1, unofficial].
-*   **Memory Complexity:** $O(N/wg)$ auxiliary storage for the tile sums and prefixes [S1, unofficial].
-*   **Performance:** Avoids spin waiting across heterogeneous GPU schedulers, making it robust across different hardware [S1, unofficial].
-*   **Strengths:** Wait-free, stable, works on WebGPU and heterogeneous devices.
-*   **Limitations:** Requires multiple compute dispatches for the hierarchical scan levels, which may introduce overhead.
+- Time Complexity: $O(N)$ work per pass, with 4 passes for 32-bit keys. Total work is $O(N)$.
+- Memory Complexity: $O(N/w_g)$ auxiliary storage for tile sums and prefixes [S1, unofficial].
+- Performance: Linear work $O(N)$, avoids spin waiting across heterogeneous GPU schedulers [S1, unofficial].
+- Strengths: Wait-free, consistent behavior across heterogeneous GPUs, no cross-workgroup polling.
+- Limitations: Requires multiple compute dispatches for the hierarchical scan, which may introduce overhead.
+- When to use: Suitable for GPU environments where inter-workgroup synchronization is expensive or unreliable.
+- When not to use: For small datasets where the overhead of hierarchical scan outweighs benefits.
 
 ## Background
-Designed for WebGPU to enable efficient Gaussian Splatting in web browsers, this method addresses the limitations of CUDA-based approaches that assume fixed scheduling orders, which can degenerate into busy-waits on devices without such guarantees [S1, unofficial].
+Originated in the context of WebGPU-based Gaussian Splatting rendering, specifically in the WebSplatter project, to enable cross-device efficient rendering by avoiding busy-waiting on heterogeneous GPU schedulers [S1, unofficial]. The method builds on the hierarchical Blelloch scan algorithm for parallel prefix sums, adapting it for radix sort in a wait-free manner.
 
 ## Sources
 [S1] WebSplatter: Enabling Cross-Device Efficient Gaussian Splatting in Web Browsers via WebGPU, https://doi.org/10.48550/arxiv.2602.03207, fetched 2026-10-26 (unofficial)

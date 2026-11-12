@@ -86,13 +86,13 @@ def train_vccnf(model, embeddings, dataloader, start_epoch, epochs, embedding_ep
 - **Resuming Training:** The function `latest_epoch()` computes the epoch as `len(losses)//100*100`. No existence check for the weight file is performed before loading, unlike `DeepSDFTraining` [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Performance:** Not given in the sources.
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Performance:** Not given in the sources [S1, unofficial].
 - **Strengths:** Simple MSE-based supervision; leverages pre-trained embeddings [S1, unofficial].
 - **Limitations:** No validation loss tracking mentioned; potential crash on resume if weights are missing [S1, unofficial].
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
+- **When to use:** Not given in the sources [S1, unofficial].
+- **When not to use:** Not given in the sources [S1, unofficial].
 
 ## Background
 The VCCNF Training Loop is a training procedure for a Voxelized Continuous Coordinate Normalizing Flow (VCCNF) that learns to map Gaussian noise to shape latent codes conditioned on voxel data [S1, unofficial]. It builds on [Training Loop](4290-training-loop.md) [S1, unofficial].

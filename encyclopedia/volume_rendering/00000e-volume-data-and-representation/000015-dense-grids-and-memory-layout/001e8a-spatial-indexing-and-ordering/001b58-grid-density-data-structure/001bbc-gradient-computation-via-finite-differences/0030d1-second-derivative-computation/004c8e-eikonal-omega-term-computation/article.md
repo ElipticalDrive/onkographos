@@ -3,156 +3,146 @@
 Also called: Double backprop for Eikonal term, Second-order dOmega
 
 ## Overview
-Computes the Eikonal constraint term involving second-order derivatives of the hash grid encoding, supporting two backpropagation implementations: double backprop and second-order dOmega [S1, unofficial]. It differs from sibling methods like [Mean Curvature Grid Computation](3126-mean-curvature-grid-computation.md) by specifically targeting the Eikonal equation's second-order gradient terms within a tetrahedral hash grid framework, rather than general mesh or voxel curvature [S1, unofficial].
+Computes the gradient of the Eikonal constraint term with respect to the hash grid encoding features, enabling the enforcement of the unit-norm gradient property in neural implicit surfaces. It differs from standard first-order backpropagation by explicitly handling the second-order derivative dependencies inherent in the Eikonal loss, supporting two distinct implementation paths: a "double backprop" approach and a "second-order dOmega" approach.
 
 ## How it works
-The method operates as a custom autograd function in a deep learning framework (specifically PyTorch, based on the source implementation). It computes the forward pass as a zero tensor and delegates the backward pass to optimized CUDA kernels (`_tetra_db_double` or `_tetra_db_second`) that handle the complex second-order derivative calculations over tetrahedral decompositions of the hash grid.
+The method operates on a tetrahedral hash grid encoding (specifically TetraSDF). It computes the gradient of the Eikonal term $\mathcal{L}_{Eikonal} = \sum (\|\nabla \phi\|^2 - 1)^2$ with respect to the feature table. The implementation relies on CUDA kernels that access features via hash-based indexing and interpolate within tetrahedra.
 
+### Inputs and Outputs
 **Inputs:**
 *   `x_pre`: Input coordinates tensor of shape $(N, 3)$, where $N$ is the number of points.
-*   `feature_table`: The hash grid feature tensor.
-*   `resolutions`: Array of grid resolutions for each level.
-*   `cube_vertices`: Cube vertex indices defining the tetrahedral decomposition.
-*   `tetrahedra_index`: Index mapping for tetrahedra.
-*   `prime_factors`: Prime factors used for hash collision resolution.
-*   `g_de`: Gradient tensor related to the encoding (from upstream loss).
+*   `feature_table`: The hash grid feature tensor of shape $(L, F, \text{table\_size})$ or similar flattened layout, where $L$ is the number of levels, $F$ is the feature dimension, and $\text{table\_size}$ is the hash table size.
+*   `resolutions`: Array of grid resolutions for each level $L$.
+*   `cube_vertices`: Array defining the cube topology.
+*   `tetrahedra_index`: Array mapping cube vertices to tetrahedra.
+*   `prime_factors`: Array of three prime numbers used for hash collision resolution.
+*   `g_de`: Gradient tensor flowing back from the Eikonal loss with respect to the encoded field values.
 *   `alpha_dn`: Scaling factor tensor for the Eikonal term.
-*   `z_dalpha_dx_de`: Optional tensor for second-order derivative information. If not provided, treated as empty.
-*   `table_size`: Size of the hash table.
-*   `F`: Feature dimension.
-*   `L`: Number of levels in the hash grid.
-*   `N`: Number of points.
+*   `z_dalpha_dx_de`: Optional tensor containing second-order derivative information. If empty or None, the "second-order dOmega" path is not used in the specific conditional logic described in [S1, unofficial].
 
 **Outputs:**
-*   Forward: A scalar zero tensor of the same device/dtype as `x_pre`.
-*   Backward: Gradients for `feature_table` (`g_feature_table`), and potentially `g_de`, `alpha_dn`, etc., depending on the implementation path.
+*   `g_feature_table`: Gradient tensor with respect to `feature_table`.
+*   Other gradients (`grad_x_pre`, etc.) are returned as `None` or not computed in this specific backward pass implementation [S1, unofficial].
 
-**Data Structures:**
-The implementation relies on the `TetraSDF` specific data structures:
-*   `cube_vertices`: Defines the 8 vertices of a cube.
-*   `tetrahedra_index`: Maps cube vertices to 5 tetrahedra per cube.
-*   `prime_factors`: Used in `grid_index_or_hash` to compute hash indices: $h = (x \cdot p_0) \oplus (y \cdot p_1) \oplus (z \cdot p_2)$, where $p_i$ are prime factors [S1, unofficial].
+### Data Structures
+The method uses a hash grid structure. The index into the feature table is computed using a hash function based on prime factors to minimize collisions [S1, unofficial]:
+$$ h = (x \cdot P_0) \oplus (y \cdot P_1) \oplus (z \cdot P_2) $$
+$$ \text{index} = h \pmod{\text{table\_size}} $$
+where $P_0, P_1, P_2$ are the prime factors. If `table_size` is a power of two, a bitwise AND is used instead of modulo [S1, unofficial].
 
-**Steps:**
+Coordinates are normalized to the grid resolution $R$ using:
+$$ s = R - 1 $$
+$$ p_x = x \cdot s $$
+$$ g_x = \lfloor p_x \rfloor $$
+$$ f_x = p_x - g_x $$
+where $g_x$ is the integer grid coordinate and $f_x$ is the fractional part [S1, unofficial].
 
-1.  **Forward Pass**:
-    *   Save all input tensors (`x_pre`, `feature_table`, `resolutions`, `cube_vertices`, `tetrahedra_index`, `prime_factors`, `g_de`, `alpha_dn`, `z_dalpha_dx_de`, `F_tensor`, `table_size_tensor`) to the context.
-    *   Return a scalar zero tensor of the same device and dtype as `x_pre`.
+### Steps
+1.  **Forward Pass (Context Saving):**
+    *   Save all input tensors (`x_pre`, `feature_table`, `resolutions`, `cube_vertices`, `tetrahedra_index`, `prime_factors`, `g_de`, `alpha_dn`, `z_dalpha_dx_de`, etc.) to the autograd context.
+    *   Return a scalar zero tensor of the same device and dtype as `x_pre` [S1, unofficial].
 
-2.  **Backward Pass**:
+2.  **Backward Pass:**
     *   Retrieve saved tensors from context.
-    *   Compute `scale` = `float(grad_out.item())`.
-    *   Extract dimensions: $N$ (points), $L$ (levels), $F$ (features), `table_size`.
-    *   Initialize `g_feature_table` as a zero tensor with the same shape as `feature_table`.
-    *   Determine the computation path based on available kernels:
-        *   **Path A (Double Backprop)**: If `_tetra_db_double` is available:
-            *   If `z_dalpha_dx_de` is empty (numel == 0), set $z = \text{zeros}(N, L \cdot F)$.
-            *   Else, set $z = (z\_dalpha\_dx\_de \cdot \text{scale}).\text{contiguous}().\text{float}()$.
-            *   Call `_tetra_db_double(x_pre, feature_table, z, g_de, (alpha_dn \cdot \text{scale}), resolutions, g_feature_table, N, L, F, table_size, cube_vertices, tetrahedra_index, prime_factors)`.
-        *   **Path B (Second-order dOmega)**: If `_tetra_db_second` is available (and Path A is not used):
-            *   Call `_tetra_db_second(x_pre, g_de, (alpha_dn \cdot \text{scale}), resolutions, g_feature_table, N, L, F, table_size, cube_vertices, tetrahedra_index, prime_factors)`.
-        *   **Error**: If neither kernel is available, raise `RuntimeError`.
-    *   Return gradients: `grad_x_pre=None`, `grad_feature_table=g_feature_table`, `grad_resolutions=None`, `grad_cv=None`, `grad_ti=None`, `grad_pf=None`, `grad_g_de=None`, `grad_alpha_dn=None`, `grad_z=None`, `grad_F=None`, `grad_table_size=None`.
+    *   Compute `scale` from the incoming gradient: `scale = float(grad_out.item())`.
+    *   Extract dimensions $N$ (points), $L$ (levels), $F$ (features), and `table_size`.
+    *   Initialize `g_feature_table` as a zero tensor of the same shape as `feature_table`.
+    *   **Conditional Execution:**
+        *   If `_tetra_db_double` kernel is available:
+            *   Check if `z_dalpha_dx_de` is empty (`numel() == 0`).
+            *   If empty, initialize $z$ as a zero tensor of shape $(N, L \cdot F)$.
+            *   If not empty, set $z = (z\_dalpha\_dx\_de \cdot \text{scale}).\text{contiguous}().\text{float}()$.
+            *   Call `_tetra_db_double` kernel with arguments: `x_pre`, `feature_table`, `z`, `g_de`, `(alpha_dn * scale)`, `resolutions`, `g_feature_table`, $N, L, F$, `table_size`, `cube_vertices`, `tetrahedra_index`, `prime_factors`.
+        *   Else if `_tetra_db_second` kernel is available:
+            *   Call `_tetra_db_second` kernel with arguments: `x_pre`, `g_de`, `(alpha_dn * scale)`, `resolutions`, `g_feature_table`, $N, L, F$, `table_size`, `cube_vertices`, `tetrahedra_index`, `prime_factors`.
+        *   Else:
+            *   Raise `RuntimeError` [S1, unofficial].
 
-**Pseudocode:**
+3.  **Return:**
+    *   Return gradients: `grad_x_pre=None`, `grad_feature_table=g_feature_table`, `grad_resolutions=None`, `grad_cv=None`, `grad_ti=None`, `grad_pf=None`, `grad_g_de=None`, `grad_alpha_dn=None`, `grad_z=None`, `grad_F=None`, `grad_table_size=None` [S1, unofficial].
 
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import torch
-
-class EikonalOmegaTerm(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x_pre, feature_table, resolutions, cube_vertices, tetrahedra_index, prime_factors, g_de, alpha_dn, z_dalpha_dx_de, F_tensor, table_size_tensor):
-        # Save inputs for backward pass
-        ctx.save_for_backward(
-            x_pre, feature_table, resolutions, cube_vertices, tetrahedra_index,
-            prime_factors, g_de, alpha_dn, z_dalpha_dx_de, F_tensor, table_size_tensor
-        )
-        # Return zero tensor as per source implementation
-        return torch.zeros_like(x_pre)
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        # Retrieve saved tensors
-        (x_pre, feature_table, resolutions, cube_vertices, tetrahedra_index,
-         prime_factors, g_de, alpha_dn, z_dalpha_dx_de, F_tensor, table_size_tensor) = ctx.saved_tensors
-
-        # Compute scale
-        scale = float(grad_out.item())
-
-        # Extract dimensions
-        N = x_pre.shape[0]
-        L = resolutions.shape[0]
-        F = feature_table.shape[-1]
-        table_size = table_size_tensor.item()
-
-        # Initialize gradient feature table
-        g_feature_table = torch.zeros_like(feature_table)
-
-        # Determine computation path
-        # Note: _tetra_db_double and _tetra_db_second are custom CUDA kernels defined in the source repo
-        # This pseudocode assumes these functions are available in the global scope or imported
-        if hasattr(torch.ops, 'tetrasdf') and hasattr(torch.ops.tetrasdf, 'tetra_db_double'):
-            # Path A: Double Backprop
-            if z_dalpha_dx_de.numel() == 0:
-                z = torch.zeros(N, L * F, device=x_pre.device, dtype=torch.float32)
-            else:
-                z = (z_dalpha_dx_de * scale).contiguous().float()
-
-            # Call CUDA kernel
-            # _tetra_db_double(x_pre, feature_table, z, g_de, alpha_dn_scaled, resolutions, g_feature_table, N, L, F, table_size, cube_vertices, tetrahedra_index, prime_factors)
-            # Implementation detail: The kernel updates g_feature_table in-place
-            torch.ops.tetrasdf.tetra_db_double(
-                x_pre.contiguous().float(),
-                feature_table.contiguous().float(),
-                z,
-                g_de.contiguous().float(),
-                (alpha_dn * scale).contiguous().float(),
-                resolutions.contiguous(),
-                g_feature_table,
-                N, L, F, table_size,
-                cube_vertices.contiguous(),
-                tetrahedra_index.contiguous(),
-                prime_factors.contiguous()
-            )
-        elif hasattr(torch.ops, 'tetrasdf') and hasattr(torch.ops.tetrasdf, 'tetra_db_second'):
-            # Path B: Second-order dOmega
-            # _tetra_db_second(x_pre, g_de, alpha_dn_scaled, resolutions, g_feature_table, N, L, F, table_size, cube_vertices, tetrahedra_index, prime_factors)
-            torch.ops.tetrasdf.tetra_db_second(
-                x_pre.contiguous().float(),
-                g_de.contiguous().float(),
-                (alpha_dn * scale).contiguous().float(),
-                resolutions.contiguous(),
-                g_feature_table,
-                N, L, F, table_size,
-                cube_vertices.contiguous(),
-                tetrahedra_index.contiguous(),
-                prime_factors.contiguous()
-            )
+def eikonal_omega_backward(grad_out, context):
+    # Retrieve saved tensors
+    x_pre = context.saved_tensors[0]
+    feature_table = context.saved_tensors[1]
+    resolutions = context.saved_tensors[2]
+    cube_vertices = context.saved_tensors[3]
+    tetrahedra_index = context.saved_tensors[4]
+    prime_factors = context.saved_tensors[5]
+    g_de = context.saved_tensors[6]
+    alpha_dn = context.saved_tensors[7]
+    z_dalpha_dx_de = context.saved_tensors[8]
+    
+    # Compute scale
+    scale = float(grad_out.item())
+    
+    # Extract dimensions
+    N, L, F, table_size = get_dimensions(feature_table, resolutions)
+    
+    # Initialize gradient table
+    g_feature_table = torch.zeros_like(feature_table)
+    
+    # Check which kernel to use
+    if has_kernel("_tetra_db_double"):
+        if z_dalpha_dx_de.numel() == 0:
+            z = torch.zeros(N, L * F, device=x_pre.device, dtype=torch.float32)
         else:
-            raise RuntimeError("No Eikonal Omega term kernel available")
-
-        # Return gradients for all inputs
-        # Gradients for most inputs are None as per source
-        return (
-            None, g_feature_table, None, None, None, None, None, None, None, None, None
+            z = (z_dalpha_dx_de * scale).contiguous().float()
+            
+        _tetra_db_double(
+            x_pre.contiguous().float(),
+            feature_table.contiguous().float(),
+            z,
+            g_de.contiguous().float(),
+            (alpha_dn * scale).contiguous().float(),
+            resolutions.contiguous(),
+            g_feature_table,
+            N, L, F, table_size,
+            cube_vertices.contiguous(),
+            tetrahedra_index.contiguous(),
+            prime_factors.contiguous()
         )
+    elif has_kernel("_tetra_db_second"):
+        _tetra_db_second(
+            x_pre.contiguous().float(),
+            g_de.contiguous().float(),
+            (alpha_dn * scale).contiguous().float(),
+            resolutions.contiguous(),
+            g_feature_table,
+            N, L, F, table_size,
+            cube_vertices.contiguous(),
+            tetrahedra_index.contiguous(),
+            prime_factors.contiguous()
+        )
+    else:
+        raise RuntimeError("No Eikonal backward kernel available")
+        
+    return None, g_feature_table, None, None, None, None, None, None, None, None, None
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Empty `z_dalpha_dx_de`**: If the optional tensor is empty, it must be explicitly replaced with a zero tensor of shape $(N, L \cdot F)$ before passing to the double backprop kernel [S1, unofficial].
-*   **Kernel Availability**: The method requires specific CUDA kernels (`_tetra_db_double` or `_tetra_db_second`). If neither is compiled/available, the operation fails [S1, unofficial].
-*   **Precision**: Inputs are cast to `float32` before kernel execution [S1, unofficial].
+### Parameters
+*   `x_pre`: Input coordinates.
+*   `g_de`: Gradient from Eikonal loss.
+*   `alpha_dn`: Scaling factor.
+*   `z_dalpha_dx_de`: Optional second-order derivative tensor.
+
+### Edge Cases and Pitfalls
+*   **Empty `z_dalpha_dx_de`:** The implementation explicitly checks if this tensor is empty to decide whether to pass a zero tensor or the actual second-order derivative data to the double backprop kernel [S1, unofficial].
+*   **Kernel Availability:** The method relies on specific CUDA kernels (`_tetra_db_double` or `_tetra_db_second`). If neither is available, it raises an error [S1, unofficial].
+*   **Hash Collisions:** The hash function uses prime factors to distribute indices. Collisions are handled by the underlying hash table implementation, but poor prime selection can lead to performance degradation [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: Depends on the number of points $N$, levels $L$, and the cost of the CUDA kernel. The kernel iterates over $N \cdot L$ elements [S1, unofficial].
-*   **Memory Complexity**: Requires storage for saved tensors in the forward pass and a gradient feature table of the same size as `feature_table` [S1, unofficial].
-*   **Strengths**: Efficiently computes second-order derivatives for Eikonal constraints using optimized CUDA kernels [S1, unofficial].
-*   **Limitations**: Requires specific CUDA kernel implementations; not a generic finite difference method but tied to the TetraSDF hash grid structure [S1, unofficial].
+*   **Time Complexity:** Depends on the number of points $N$, levels $L$, and features $F$. The hash lookup is $O(1)$ on average. The interpolation within tetrahedra is constant time per point per level.
+*   **Memory Complexity:** Requires storing the feature table and intermediate gradients. The backward pass requires temporary storage for $z$ if using the double backprop method [S1, unofficial].
+*   **Strengths:** Efficiently computes gradients for the Eikonal constraint in hash-based neural implicit representations.
+*   **Limitations:** Requires specific CUDA kernel implementations. Relies on hash grid structure, which may have collision issues.
 
 ## Background
-Originated in the Naver AI TetraSDF project, which implements a tetrahedral hash grid for SDF representation [S1, unofficial]. The method supports two backpropagation strategies for the Eikonal term: double backpropagation and second-order dOmega, allowing flexibility in gradient computation for training [S1, unofficial].
+This method is part of the TetraSDF framework, which uses tetrahedral hash grids for neural implicit surface representation. The Eikonal term is crucial for ensuring the predicted field is a valid signed distance function. The "double backprop" and "second-order dOmega" approaches are specific implementations within this framework to handle the second-order derivatives required for the Eikonal loss gradient [S1, unofficial].
 
 ## Sources
 [S1] naver-ai/TetraSDF, https://github.com/naver-ai/TetraSDF, fetched 2026-10-27 (unofficial)

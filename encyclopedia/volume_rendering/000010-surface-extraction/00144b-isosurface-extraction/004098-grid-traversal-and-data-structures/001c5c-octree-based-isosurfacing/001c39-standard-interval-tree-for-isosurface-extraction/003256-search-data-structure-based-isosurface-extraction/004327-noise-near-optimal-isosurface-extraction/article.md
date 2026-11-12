@@ -1,0 +1,149 @@
+# NOISE (Near Optimal IsoSurface Extraction)
+
+Also called: Near Optimal IsoSurface Extraction
+
+## Overview
+NOISE is a rapid isosurface extraction algorithm for structured and unstructured grids that enables interactive, real-time changes to the isosurface threshold without full recalculation [S2, unofficial]. It solves the problem of efficiently identifying candidate cells containing an iso-surface by avoiding the inspection of every cell in the domain [S1, unofficial]. It sets itself apart from its siblings by embedding a K-D tree directly into "span-space" (defined by min/max voxel values) to prune the search space, whereas alternatives like ISSUE use different spatial partitioning or interval trees [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A volumetric dataset (structured or unstructured grid) where each voxel $v$ has a scalar value $f(v)$. A user-specified isosurface threshold $v_{iso}$.
+*   **Output:** A set of voxels (or cells) that potentially intersect the isosurface, which are then triangulated.
+
+**Data Structures**
+The core data structure is a K-D tree built in "span-space" [S1, unofficial].
+*   **Span-Space Point:** Each grid cell (or voxel) $c$ is represented as a point in a 2D span-space defined by two scalar values:
+    *   $v_{min}(c) = \min_{v \in c} f(v)$
+    *   $v_{max}(c) = \max_{v \in c} f(v)$
+*   **K-D Tree Node:** Each node in the K-D tree stores the bounding box of the span-space points in its subtree. Specifically, for a node covering a subset of cells, it stores the global minimum $v_{min}$ and global maximum $v_{max}$ of all cells in that subtree [S2, unofficial].
+
+**Algorithm Steps**
+1.  **Index Construction:**
+    *   Iterate over all cells $c$ in the volumetric dataset.
+    *   Compute $v_{min}(c)$ and $v_{max}(c)$ for each cell.
+    *   Insert the point $(v_{min}(c), v_{max}(c))$ into a K-D tree. The K-D tree is built recursively, splitting the space along the dimension with the largest variance or equal distribution, storing the min/max bounds at each node [S2, unofficial].
+
+2.  **Query (Search):**
+    *   Given an isovalue $v_{iso}$, traverse the K-D tree to find all cells where the isosurface might exist.
+    *   A cell $c$ contains the isosurface if and only if:
+        $$v_{min}(c) \le v_{iso} \le v_{max}(c)$$
+    *   During tree traversal, if a node's stored bounds $[V_{min}, V_{max}]$ do not satisfy $V_{min} \le v_{iso} \le V_{max}$, the entire subtree is pruned (discarded) [S1, unofficial].
+    *   If the bounds satisfy the condition, the algorithm checks the children. Leaf nodes that satisfy the condition are added to the list of candidate voxels [S2, unofficial].
+
+3.  **Extraction:**
+    *   For each candidate voxel identified in the query step, apply the Marching Cubes algorithm to generate triangles [S2, unofficial].
+    *   Render the generated triangles [S2, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_noise_index(volumetric_data):
+    """
+    Builds the K-D tree in span-space.
+    volumetric_data: List of cells, each cell has a list of voxel values.
+    Returns: Root of the K-D tree.
+    """
+    points = []
+    for cell in volumetric_data:
+        vmin = min(cell.values)
+        vmax = max(cell.values)
+        points.append({'vmin': vmin, 'vmax': vmax, 'cell_id': cell.id})
+    
+    # Build K-D tree from points
+    # Standard K-D tree construction: split on vmin or vmax dimension
+    root = build_kd_tree(points, depth=0)
+    return root
+
+def build_kd_tree(points, depth):
+    if not points:
+        return None
+    
+    # Choose axis to split on (alternating or variance-based)
+    axis = depth % 2
+    
+    # Sort points by the chosen axis to find median
+    # Note: In practice, quickselect is used for O(N) median finding
+    sorted_points = sorted(points, key=lambda p: p['vmin' if axis == 0 else 'vmax'])
+    median_idx = len(sorted_points) // 2
+    median_point = sorted_points[median_idx]
+    
+    # Create node
+    node = {
+        'point': median_point,
+        'left': None,
+        'right': None,
+        'bounds': {
+            'vmin': min(p['vmin'] for p in points),
+            'vmax': max(p['vmax'] for p in points)
+        }
+    }
+    
+    left_points = sorted_points[:median_idx]
+    right_points = sorted_points[median_idx+1:]
+    
+    node['left'] = build_kd_tree(left_points, depth + 1)
+    node['right'] = build_kd_tree(right_points, depth + 1)
+    
+    return node
+
+def query_noise_index(node, v_iso):
+    """
+    Finds all cells where vmin <= v_iso <= vmax.
+    """
+    if node is None:
+        return []
+    
+    # Pruning check: if the node's bounding box does not contain v_iso, skip
+    if not (node['bounds']['vmin'] <= v_iso <= node['bounds']['vmax']):
+        return []
+    
+    candidates = []
+    
+    # Check the point stored at this node
+    p = node['point']
+    if p['vmin'] <= v_iso <= p['vmax']:
+        candidates.append(p['cell_id'])
+    
+    # Recurse into children
+    # Optimization: Only recurse into the side that could contain v_iso
+    # If splitting on vmin (axis 0):
+    #   Left child has smaller vmin values. If v_iso < left.max_vmin, only go left?
+    #   Standard K-D tree search logic applies here.
+    
+    candidates.extend(query_noise_index(node['left'], v_iso))
+    candidates.extend(query_noise_index(node['right'], v_iso))
+    
+    return candidates
+
+def extract_surface(candidates, volumetric_data):
+    """
+    Applies Marching Cubes to candidate cells.
+    """
+    triangles = []
+    for cell_id in candidates:
+        cell = get_cell_by_id(volumetric_data, cell_id)
+        # Marching Cubes logic
+        tri_set = marching_cubes(cell.values)
+        triangles.extend(tri_set)
+    return triangles
+```
+
+**Parameters and Edge Cases**
+*   **Ambiguity:** Standard Marching Cubes has ambiguous cases (e.g., saddle points) that require neighbor data or complex logic to resolve correctly [S2, unofficial]. Implementing this disambiguation logic can significantly slow down real-time frame rates or bloat file size if precomputed [S2, unofficial].
+*   **Precision:** The comparison $v_{min} \le v_{iso} \le v_{max}$ is sensitive to floating-point precision. If $v_{iso}$ is exactly equal to $v_{min}$ or $v_{max}$, the cell is included. [G] Ensure consistent epsilon handling if exact boundary cases are critical.
+
+## Operating characteristics
+*   **Time Complexity:** Index construction is $O(N \log N)$ for $N$ cells due to K-D tree building. Query time is $O(\sqrt{N})$ on average for range searches in K-D trees, but depends on the distribution of data. Extraction is proportional to the number of active cells.
+*   **Memory Complexity:** $O(N)$ to store the K-D tree and span-space points.
+*   **Performance:** Enables interactive, real-time changes to the isosurface threshold because the expensive index construction is done once, and queries are fast [S2, unofficial].
+*   **Strengths:** Rapid identification of candidate cells; avoids inspecting every cell; suitable for structured and unstructured grids [S2, unofficial].
+*   **Limitations:** The overhead of index creation means it is only beneficial for multiple queries. If the dataset is examined only once, total time exceeds simple linear traversal [S1, unofficial]. Ambiguity resolution in Marching Cubes can degrade performance [S2, unofficial].
+
+## Background
+NOISE was proposed by Y. Livnat et al. [S2, unofficial]. It was implemented at Sandia National Laboratories as a baseline for DYNAISOLOD [S2, unofficial]. The method was later improved by other authors who used interval trees instead of K-D trees [S1, unofficial]. It is part of the broader class of search data structure-based isosurface extraction methods [S1, unofficial].
+
+## Sources
+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S2] Dynamic isosurface extraction and level-of-detail in voxel space, https://digital.library.unt.edu/ark:/67531/metadc707496/?q=marching cubes, fetched 2026-10-28 (unofficial)

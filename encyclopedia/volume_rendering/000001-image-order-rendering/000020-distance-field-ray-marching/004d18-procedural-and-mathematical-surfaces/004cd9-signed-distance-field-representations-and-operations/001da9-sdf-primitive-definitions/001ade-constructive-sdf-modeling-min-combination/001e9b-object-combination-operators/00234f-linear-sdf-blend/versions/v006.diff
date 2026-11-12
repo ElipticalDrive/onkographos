@@ -1,0 +1,137 @@
+--- v005.md
++++ v006.md
+@@ -4,70 +4,95 @@
+ 
+ ## Overview
+-Linear SDF Blend interpolates between two signed distance functions (SDFs) using a linear blend factor to create smooth transitions or morphing between shapes [S1, unofficial]. It produces a linear interpolation of the distance values themselves, rather than a rounded boolean union or intersection [S1, unofficial].
++Linear SDF Blend performs a weighted linear interpolation between two signed distance function values, allowing for morphing between shapes or creating smooth transitions based on a scalar control factor [S1, unofficial]. Unlike [SDF Smooth Union](1817-sdf-smooth-union.md) which creates a rounded union edge, or [Smooth Intersection](1839-smooth-intersection.md) which creates a rounded intersection, Linear Blend does not inherently produce a geometrically correct distance field for the combined shape; rather, it produces a visual blend or a morph [S1, unofficial]. It is distinct from spatially varying blends like [Smoothstep SDF Blend](#smoothstep-sdf-blend) by using a constant or externally controlled factor rather than deriving the factor from the query point's position.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input 1: $d_1$, the signed distance from the query point to the first primitive [S1, unofficial].
+-- Input 2: $d_2$, the signed distance from the query point to the second primitive [S1, unofficial].
+-- Input 3: $a$, the blend factor, a scalar in the range $[0, 1]$ [S1, unofficial].
+-- Output: $d_{blend}$, the interpolated signed distance [S1, unofficial].
++- Input $d_1$: The signed distance value of the first primitive at the query point.
++- Input $d_2$: The signed distance value of the second primitive at the query point.
++- Input $a$: The blend factor, a scalar in the range $[0, 1]$.
++- Output $d_{blend}$: The interpolated signed distance value.
+ 
+ **Data Structures:**
+-The operation is element-wise on scalar distances [S1, unofficial]. When material identification is required, the function can return a tuple or vector containing the blended distance and a primitive identifier [S2, unofficial].
++- The inputs and output are simple scalar floating-point values. No complex structures are required for the basic operation.
+ 
+-**Formula:**
+-$$d_{blend} = a \cdot d_1 + (1 - a) \cdot d_2$$
+-Where $d_1$ and $d_2$ are the distances of the two shapes, and $a \in [0, 1]$ is the blend factor [S1, unofficial].
++**Steps:**
++1. Retrieve the signed distance $d_1$ for the first shape at the current raymarching position.
++2. Retrieve the signed distance $d_2$ for the second shape at the current raymarching position.
++3. Determine the blend factor $a$. This can be a constant, a function of time, or a function of other scene variables, but it is not derived from the spatial distance to the origin in the basic definition [S1, unofficial].
++4. Compute the blended distance using the linear interpolation formula:
++   $$ d_{blend} = a \cdot d_1 + (1 - a) \cdot d_2 $$
+ 
+ **Parameters:**
+-- $a$: The blend factor. Typical usage involves a constant value for static blending or a time-varying value (e.g., derived from $\sin(\text{time})$) for animation [S1, unofficial].
++- $a$: The blending weight. $a=0$ yields $d_2$, $a=1$ yields $d_1$. Typical values depend on the desired visual effect or morphing state [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Lipschitz Continuity:** As with all combination operators, the resulting function preserves the Lipschitz condition (gradient magnitude $\le 1$) only if the gradients of the two input SDFs are orthogonal. If the angle between gradients deviates significantly (e.g., $>30^\circ$) or surfaces are parallel, the blended result may violate the Lipschitz condition, leading to ray marching artifacts such as overshooting or jittering [S1, S2, unofficial].
++- **Geometric Accuracy:** The result is not a true distance field for the boolean combination of the shapes. It is a visual blend. Using this for precise collision detection or accurate raymarching of the combined geometry is generally incorrect unless the specific visual artifact is acceptable [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def linear_sdf_blend(d1: float, d2: float, a: float) -> float:
+-    """Linearly interpolate between two SDF values."""
++    """
++    Perform linear interpolation between two SDF values.
++    
++    Args:
++        d1: Distance of the first primitive.
++        d2: Distance of the second primitive.
++        a: Blend factor in [0, 1].
++        
++    Returns:
++        The blended distance value.
++    """
++    # Ensure a is clamped to [0, 1] if not guaranteed by caller
++    a = max(0.0, min(1.0, a))
+     return a * d1 + (1.0 - a) * d2
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-- The blend factor $a$ can be constant or vary over time or space [S1, unofficial].
+-- If the blend factor varies rapidly in space, the resulting distance field may not represent a true metric distance, which can affect ray marching step sizes [G].
+ 
+ ## Subtopics
+ 
+ ### Smoothstep SDF Blend
+-A variant where the blend factor $s$ is determined by the spatial position of the query point, specifically its distance from the origin, creating a spatially varying blend region [S2, unofficial].
+-- **Definition:** Blends two SDFs using a smoothstep interpolation factor based on the length of the query point $p$ [S2, unofficial].
++A variant where the blend factor is derived spatially from the query point's distance to the origin using a smoothstep function [S2, unofficial].
++- **Definition:** Blends between two SDFs based on the distance of the query point from the origin, creating a spatially varying transition zone [S2, unofficial].
+ - **Formula:**
+-  $$s = \text{smoothstep}(0.0, 1.0, \|p\|)$$
+-  $$d = (1 - s) \cdot d_1 + s \cdot d_2$$
+-  [S2, unofficial]
+-- **Parameters:** The smoothstep range is fixed between 0.0 and 1.0, defining the spherical shell region where the blend occurs [S2, unofficial].
+-- **Data Layout:** The function returns a `vec2` where the x-component is the distance and the y-component is a primitive identifier (e.g., 1) [S2, unofficial].
++  $$ s = \text{smoothstep}(0.0, 1.0, \|p\|) $$
++  $$ d = (1 - s) \cdot a_x + s \cdot b_x $$
++  where $p$ is the query point, $\|p\|$ is its length, and $a_x, b_x$ are the distance components of the input SDFs [S2, unofficial].
++- **Parameters:** The smoothstep range is fixed between 0.0 and 1.0, defining the radial region where the blend occurs [S2, unofficial].
++- **Layout:** The SDF functions return a `vec2` where the x-component is the distance (float) and the y-component is the primitive ID (float, typically 1) [S2, unofficial].
+ - **Pseudocode:**
+   ```python
+-  def smoothstep(edge0: float, edge1: float, x: float) -> float:
+-      """Standard cubic Hermite smoothstep interpolation [G]."""
+-      t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
+-      return t * t * (3.0 - 2.0 * t)
+-
+-  def smoothstep_sdf_blend(p: tuple, d1: float, d2: float) -> tuple:
+-      """Blend two SDFs based on the distance of the query point from the origin."""
+-      dist_from_origin = (p[0]**2 + p[1]**2 + p[2]**2)**0.5
++  def smoothstep_sdf_blend(p: Vector3, a: Vector2, b: Vector2) -> Vector2:
++      """
++      Blend two SDFs based on the distance of p from the origin.
++      
++      Args:
++          p: Query point.
++          a: vec2 containing (distance, id) for primitive A.
++          b: vec2 containing (distance, id) for primitive B.
++          
++      Returns:
++          vec2 containing (blended_distance, id).
++      """
++      # Calculate spatial blend factor based on distance from origin
++      dist_from_origin = length(p)
+       s = smoothstep(0.0, 1.0, dist_from_origin)
+-      blended_d = (1.0 - s) * d1 + s * d2
+-      return (blended_d, 1.0)
++      
++      # Interpolate distances
++      d = (1.0 - s) * a.x + s * b.x
++      
++      # Return blended distance and primitive ID (assuming both are ID 1 or similar)
++      return Vector2(d, 1.0)
+   ```
+-- **When to choose:** Use when the transition between shapes should depend on the object's position relative to a center, creating a fading effect between geometries [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per query point, involving two multiplications and one addition [G].
+-- **Memory Complexity:** $O(1)$, requiring no additional data structures beyond the input distances and blend factor [G].
+-- **Strengths:** Simple to implement; allows for smooth morphing animations; works with any pair of SDFs [S1, unofficial].
+-- **Limitations:** Does not preserve the Lipschitz continuity property (gradient magnitude $\le 1$), meaning it is not a true distance field in the mathematical sense after blending [G].
+-- **When to use:** For visual effects, morphing animations, or when the exact distance metric is less critical than the visual smoothness of the transition [S1, unofficial].
++- **Time Complexity:** $O(1)$ per query, as it involves only basic arithmetic operations.
++- **Memory Complexity:** $O(1)$, requiring no additional storage beyond the input values.
++- **Strengths:** Extremely fast; simple to implement; useful for morphing animations or visual blending where geometric precision is not critical.
++- **Limitations:** Does not produce a valid distance field for the combined shape; prone to ray marching artifacts if the Lipschitz condition is violated; not suitable for precise boolean operations or collision detection [S1, S2, unofficial].
++- **When to use:** Visual effects, morphing shapes, or when a simple visual transition is desired without the complexity of smooth boolean operators.
++- **When not to use:** When a geometrically correct distance field for the union/intersection is required, or when high-precision ray marching is needed.
+ 
+ ## Background
+-The technique was demonstrated by Alan Zucconi as a method for morphing between shapes like spheres and cubes using a time-varying blend factor [S1, unofficial]. Geeks3D extended the concept to spatially varying blends using smoothstep functions to transition between primitives like rounded boxes and tori based on their distance from the origin [S2, unofficial].
++The concept of blending SDFs using linear interpolation is discussed in the context of volumetric rendering and raymarching tutorials. It is presented as a direct analogy to alpha blending in color space [S1, unofficial]. The technique is attributed to Alan Zucconi in his work on Signed Distance Functions [S1, unofficial]. The spatially varying variant using smoothstep is documented in raymarching tutorials by Geeks3D [S2, unofficial].
+ 
+ ## Sources

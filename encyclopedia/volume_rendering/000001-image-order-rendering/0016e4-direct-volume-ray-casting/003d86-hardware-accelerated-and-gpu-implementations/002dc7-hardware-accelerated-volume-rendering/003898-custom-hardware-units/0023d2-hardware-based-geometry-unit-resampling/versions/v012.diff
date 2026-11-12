@@ -1,0 +1,116 @@
+--- v011.md
++++ v012.md
+@@ -12,18 +12,18 @@
+ 
+ **Data Structures**
+-*   **Weight Memory:** Size $256\text{K} \times 16$ bits. Stores precalculated interpolation weights [S1]. Addressed by three 6-bit fractional parts (one per coordinate $x, y, z$) of the resampling location [S1].
++*   **Weight Memory:** Size $256\text{K} \times 16$ bits [S1]. Stores precalculated interpolation weights [S1]. Addressed by three 6-bit fractional parts (one per coordinate $x, y, z$) of the resampling location [S1].
+ *   **Gradient Buffer:** Limits the maximal resampled dataset size to $512^3$ [S1].
+-*   **Memory System:** Supports 8-neighbor access using Fast Page Mode, alternate memory bank read-out, and a 1-entry cache for previously used voxels. A controller returns 0 for addresses outside the data cube [S1].
++*   **Memory System:** Supports 8-neighbor access using Fast Page Mode, alternate memory bank read-out, and a 1-entry cache for previously used voxels [S1]. A controller returns 0 for addresses outside the data cube [S1].
+ *   **Data Precision:** 16-bit accuracy for density and gradient values [S1].
+ 
+ **Steps**
+ 1.  **Ray Parameter Initialization:** For each scanline of light rays, store the ray starting point and the vector to the next resample location [S1].
+-2.  **Address Generation:** Use hardware to generate the positions of the sampling points. Round the $X, Y, Z$ components of the sampling location to obtain integer addresses of the 8 neighbor voxels in the original dataset [S1].
+-3.  **Density Mapping:** Map the raw voxel values to density values using the density LUT. This allows for grey value segmentation without prior data segmentation [S1].
+-4.  **Interpolation (Backward Mapping):** Perform weighted interpolation among the 8 voxel neighbors to resample the volume data. The weights are retrieved from the Weight Memory using the 6-bit fractional parts of the coordinates [S1].
++2.  **Address Generation:** Use hardware to generate the positions of the sampling points [S1]. Round the $X, Y, Z$ components of the sampling location to obtain integer addresses of the 8 neighbor voxels in the original dataset [S1].
++3.  **Density Mapping:** Map the raw voxel values to density values using the density LUT [S1]. This allows for grey value segmentation without prior data segmentation [S1].
++4.  **Interpolation (Backward Mapping):** Perform weighted interpolation among the 8 voxel neighbors to resample the volume data [S1]. The weights are retrieved from the Weight Memory using the 6-bit fractional parts of the coordinates [S1].
+ 5.  **Gradient Estimation:** Estimate the $X$ and $Y$ components of the gradient using 20 Sobel filters applied to the interpolated data [S1].
+ 
+ **Formulas**
+-The interpolation is a weighted sum of the 8 neighbors. The Sobel filter weights $w_{i,j}$ used for gradient estimation are defined as [S1]:
++The interpolation is a weighted sum of the 8 neighbors [S1]. The Sobel filter weights $w_{i,j}$ used for gradient estimation are defined as [S1]:
+ 
+ $$
+@@ -34,5 +34,5 @@
+ *   **Dataset Size:** Max $256^3$ for 16-bit voxels with 4Mbit ORAMs; $512 \times 512 \times 256$ for 16Mbit DRAMs [S1].
+ *   **Resampled Size:** Max $512^3$ (limited by gradient buffer) [S1].
+-*   **Weight Resolution:** 6-bit fractional parts per coordinate. This resolution is sufficient to make artifacts from weight discreteness invisible to the viewer [S1].
++*   **Weight Resolution:** 6-bit fractional parts per coordinate [S1]. This resolution is sufficient to make artifacts from weight discreteness invisible to the viewer [S1].
+ *   **Performance:** One unit generates 26 to 36 million transformed locations per second [S1].
+ *   **Memory Bandwidth:** Up to 640 MBytes/second (calculated as $40\text{MHz} \times 8 \text{ neighbors} \times 2 \text{ Bytes/voxel}$) [S1].
+@@ -42,15 +42,15 @@
+ def geometry_unit_resample(ray_start, ray_vector, volume_data, density_lut, weight_memory):
+     """
+-    Performs hardware-based resampling for a single sample point along a scanline.
+-    The hardware pipeline iterates this logic across the scanline in parallel.
++    Generates one resampled sample point and its gradient for a scanline.
++    Hardware iterates this logic per sample location along the ray.
+     """
+-    # 1. Calculate current sampling position along the ray
++    # 1. Current sampling position (advances by ray_vector each hardware cycle)
+     current_pos = ray_start
+-    
+-    # 2. Determine integer voxel coordinates and 6-bit fractional parts
++
++    # 2. Address Generation: Round coordinates to get integer voxel addresses
+     x_int, y_int, z_int = int(current_pos[0]), int(current_pos[1]), int(current_pos[2])
+     fx, fy, fz = current_pos[0] - x_int, current_pos[1] - y_int, current_pos[2] - z_int
+-    
+-    # 3. Retrieve 8 neighbor voxel values (conflict-free access)
++
++    # 3. Retrieve 8 neighbor voxel values (conflict-free access, 0 for out-of-bounds)
+     neighbors = []
+     for dx in (0, 1):
+@@ -58,39 +58,31 @@
+             for dz in (0, 1):
+                 addr = (x_int + dx, y_int + dy, z_int + dz)
+-                # Hardware controller returns 0 for out-of-bounds addresses
+-                val = volume_data.read(addr)
+-                neighbors.append(val)
+-                
+-    # 4. Map raw values to density using LUT
++                neighbors.append(volume_data.read(addr))
++
++    # 4. Density Mapping: Map raw values to density using LUT
+     densities = [density_lut.lookup(v) for v in neighbors]
+-    
+-    # 5. Interpolate using precalculated weights
+-    # Weight memory is indexed by the 6-bit fractional parts (fx, fy, fz)
+-    # Returns a tuple of 8 weights corresponding to the 8 neighbors
++
++    # 5. Interpolation (Backward Mapping): Weighted sum of 8 neighbors
++    # Weights are indexed by 6-bit fractional parts (fx, fy, fz)
+     weights = weight_memory.read(fx, fy, fz)
+     interpolated_density = sum(d * w for d, w in zip(densities, weights))
+-    
+-    # 6. Estimate gradient using Sobel filters on the interpolated data grid
+-    # The hardware applies 20 Sobel filters to estimate Gx and Gy
+-    gradient_x = sobel_filter_x(interpolated_data_grid)
+-    gradient_y = sobel_filter_y(interpolated_data_grid)
+-    
++
++    # 6. Gradient Estimation: Apply 20 Sobel filters to the interpolated data grid [G]
++    # Hardware computes Gx and Gy in parallel across the sample plane
++    gradient_x = _apply_sobel_x(interpolated_data_grid)
++    gradient_y = _apply_sobel_y(interpolated_data_grid)
++
+     return interpolated_density, gradient_x, gradient_y
+ 
+-def fractional_part(x):
+-    return x - int(x)
++def _apply_sobel_x(grid):
++    # Standard 3x3 Sobel convolution for X gradient [G]
++    return _convolve_2d(grid, [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
+ 
+-def sobel_filter_x(grid):
+-    # Standard 3x3 Sobel kernel for X gradient [G]
+-    kernel = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]
+-    return _convolve_2d(grid, kernel)
+-
+-def sobel_filter_y(grid):
+-    # Standard 3x3 Sobel kernel for Y gradient [G]
+-    kernel = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]
+-    return _convolve_2d(grid, kernel)
++def _apply_sobel_y(grid):
++    # Standard 3x3 Sobel convolution for Y gradient [G]
++    return _convolve_2d(grid, [[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
+ 
+ def _convolve_2d(grid, kernel):
+-    # Hardware performs this convolution in parallel across the sample plane [G]
++    # Standard 2D convolution [G]
+     h, w = len(grid), len(grid[0])
+     kh, kw = len(kernel), len(kernel[0])

@@ -1,0 +1,123 @@
+--- v010.md
++++ v011.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-This method offloads the computationally intensive geometry operations of volume rendering—specifically perspective calculations, gradient estimation, and volume data resampling—to dedicated hardware accelerators. It solves the bottleneck where software implementations consume up to 80% of computation time on these tasks [S1]. Unlike general-purpose GPU implementations that rely on texture sampling hardware, this method uses custom address generation and precalculated weight memories to perform backward mapping interpolation and gradient estimation in parallel, generating ray starting points and sample values for downstream ray-casting units [S1].
++This method offloads the computationally intensive geometry operations of volume rendering—specifically perspective calculations, gradient estimation, and volume data resampling—to dedicated hardware accelerators [S1]. It solves the bottleneck where software implementations consume up to 80% of computation time on these tasks [S1]. Unlike general-purpose GPU implementations that rely on texture sampling hardware, this method uses custom address generation and precalculated weight memories to perform backward mapping interpolation and gradient estimation in parallel, generating ray starting points and sample values for downstream ray-casting units [S1].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** Ray starting point, ray vector (direction), volume dataset (stored in ORAMs or DRAMs), density Lookup Table (LUT).
+-*   **Output:** Resampled voxel values (density), gradient components ($G_x, G_y$), and sampling point positions for the next iteration.
++*   **Input:** Ray starting point, ray vector (direction), volume dataset (stored in ORAMs or DRAMs), density Lookup Table (LUT) [S1].
++*   **Output:** Resampled voxel values (density), gradient components ($G_x, G_y$), and sampling point positions for the next iteration [S1].
+ 
+ **Data Structures**
+-*   **Weight Memory:** Size $256\text{K} \times 16$ bits. Stores precalculated interpolation weights. Addressed by three 6-bit fractional parts (one per coordinate $x, y, z$) of the resampling location.
++*   **Weight Memory:** Size $256\text{K} \times 16$ bits. Stores precalculated interpolation weights [S1]. Addressed by three 6-bit fractional parts (one per coordinate $x, y, z$) of the resampling location [S1].
+ *   **Gradient Buffer:** Limits the maximal resampled dataset size to $512^3$ [S1].
+ *   **Memory System:** Supports 8-neighbor access using Fast Page Mode, alternate memory bank read-out, and a 1-entry cache for previously used voxels. A controller returns 0 for addresses outside the data cube [S1].
+@@ -42,47 +42,68 @@
+ def geometry_unit_resample(ray_start, ray_vector, volume_data, density_lut, weight_memory):
+     """
+-    Performs hardware-based resampling for a single ray step.
+-    Note: This pseudocode represents the logical flow of the hardware pipeline.
+-    Actual hardware executes these steps in parallel pipelines.
++    Performs hardware-based resampling for a single sample point along a scanline.
++    The hardware pipeline iterates this logic across the scanline in parallel.
+     """
+-    # 1. Calculate current sampling position
++    # 1. Calculate current sampling position along the ray
+     current_pos = ray_start
+     
+-    # 2. Determine 8 neighbor voxel coordinates (integer part)
+-    # and 6-bit fractional parts for weight lookup
+-    x_int, y_int, z_int = floor(current_pos)
+-    fx, fy, fz = fractional_part(current_pos) # 6-bit resolution
++    # 2. Determine integer voxel coordinates and 6-bit fractional parts
++    x_int, y_int, z_int = int(current_pos[0]), int(current_pos[1]), int(current_pos[2])
++    fx, fy, fz = current_pos[0] - x_int, current_pos[1] - y_int, current_pos[2] - z_int
+     
+-    # 3. Retrieve 8 neighbor voxel values
+-    # Hardware accesses these conflict-free via Fast Page Mode
++    # 3. Retrieve 8 neighbor voxel values (conflict-free access)
+     neighbors = []
+-    for dx in [0, 1]:
+-        for dy in [0, 1]:
+-            for dz in [0, 1]:
++    for dx in (0, 1):
++        for dy in (0, 1):
++            for dz in (0, 1):
+                 addr = (x_int + dx, y_int + dy, z_int + dz)
+-                # Controller returns 0 if addr is outside data cube
++                # Hardware controller returns 0 for out-of-bounds addresses
+                 val = volume_data.read(addr)
+                 neighbors.append(val)
+                 
+-    # 4. Map to density using LUT
++    # 4. Map raw values to density using LUT
+     densities = [density_lut.lookup(v) for v in neighbors]
+     
+     # 5. Interpolate using precalculated weights
+-    # Weights are indexed by (fx, fy, fz)
+-    # The specific weight combination for the 8 neighbors is determined by the hardware
+-    # architecture addressing the 256Kx16 bit memory.
+-    interpolated_density = 0.0
+-    for i, d in enumerate(densities):
+-        # w_i is the precalculated weight for this neighbor based on fx, fy, fz
+-        w_i = weight_memory.read(fx, fy, fz, neighbor_index=i)
+-        interpolated_density += d * w_i
+-        
+-    # 6. Estimate Gradient using Sobel filters
+-    # Applied to the interpolated data grid
+-    # 20 Sobel filters are used to estimate Gx and Gy
++    # Weight memory is indexed by the 6-bit fractional parts (fx, fy, fz)
++    # Returns a tuple of 8 weights corresponding to the 8 neighbors
++    weights = weight_memory.read(fx, fy, fz)
++    interpolated_density = sum(d * w for d, w in zip(densities, weights))
++    
++    # 6. Estimate gradient using Sobel filters on the interpolated data grid
++    # The hardware applies 20 Sobel filters to estimate Gx and Gy
+     gradient_x = sobel_filter_x(interpolated_data_grid)
+     gradient_y = sobel_filter_y(interpolated_data_grid)
+     
+     return interpolated_density, gradient_x, gradient_y
++
++def fractional_part(x):
++    return x - int(x)
++
++def sobel_filter_x(grid):
++    # Standard 3x3 Sobel kernel for X gradient [G]
++    kernel = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]
++    return _convolve_2d(grid, kernel)
++
++def sobel_filter_y(grid):
++    # Standard 3x3 Sobel kernel for Y gradient [G]
++    kernel = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]
++    return _convolve_2d(grid, kernel)
++
++def _convolve_2d(grid, kernel):
++    # Hardware performs this convolution in parallel across the sample plane [G]
++    h, w = len(grid), len(grid[0])
++    kh, kw = len(kernel), len(kernel[0])
++    out = [[0.0] * w for _ in range(h)]
++    for i in range(h):
++        for j in range(w):
++            val = 0.0
++            for ki in range(kh):
++                for kj in range(kw):
++                    ni, nj = i - kh//2 + ki, j - kw//2 + kj
++                    if 0 <= ni < h and 0 <= nj < w:
++                        val += grid[ni][nj] * kernel[ki][kj]
++            out[i][j] = val
++    return out
+ ```
+ 
+@@ -100,5 +121,5 @@
+ 
+ ## Background
+-This method was developed as part of the VIRIM (Volume Rendering Image Machine) architecture, an object-order volume rendering engine developed at the University of Mannheim and commercially distributed by Volume Graphics GmbH [S1, S2]. It was designed to address the high computational cost of geometry operations in software-based volume rendering, which accounted for 80% of computation time per projection [S1]. The architecture utilizes a farm of programmable Digital Signal Processors (DSPs) for the ray-casting portion, while the geometry unit handles the intensive resampling and gradient calculations in hardware [S1, S2].
++This method was developed as part of the VIRIM (Volume Rendering Image Machine) architecture, an object-order volume rendering engine developed at the University of Mannheim and commercially distributed by Volume Graphics GmbH [S1]. It was designed to address the high computational cost of geometry operations in software-based volume rendering, which accounted for 80% of computation time per projection [S1]. The architecture utilizes a farm of programmable Digital Signal Processors (DSPs) for the ray-casting portion, while the geometry unit handles the intensive resampling and gradient calculations in hardware [S1].
+ 
+ ## Sources

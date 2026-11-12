@@ -1,205 +1,244 @@
 # Rotation Transformation
 
+Also called: Model Rotation
 
 ## Overview
-Rotation Transformation constructs a 4×4 homogeneous rotation matrix to rotate a shape or vector around a specified axis by a given angle [S1, unofficial]. It sets itself apart from [Quaternion Rotation](2302-quaternion-rotation.md) by yielding an explicit matrix representation rather than using quaternion algebra, and from [SE2 Lie Group Implementation](3144-se2-lie-group-implementation.md) by operating in 3D space rather than 2D [G].
+Rotation Transformation constructs a 4x4 homogeneous rotation matrix to rotate points or shapes around a specified axis by a given angle [S1, unofficial][S2, unofficial]. It serves as a fundamental building block for constructing camera poses and deforming Signed Distance Fields (SDFs) [G]. Unlike [Quaternion Rotation](2302-quaternion-rotation.md), which operates in 3D space with unit quaternions to avoid gimbal lock, this method explicitly constructs orthogonal matrices for single axes or composes them sequentially [G]. Unlike [Rigid Body Transformation (SE3)](11475-rigid-body-transformation-se3.md), it handles orientation only, leaving translation to sibling methods like [Translation Transformation](2281-translation-transformation.md).
 
 ## How it works
-**Inputs and Outputs:**
-1.  Rotation specification: Either a single axis index $i \in \{0, 1, 2\}$ (0: x, 1: y, 2: z) and an angle $\theta$ in radians [S1, unofficial], or three angles $\alpha_X, \alpha_Y, \alpha_Z$ in degrees for combined Euler rotation [S3, unofficial].
-2.  (Optional) Two vectors `from_vec` and `to_vec` to compute the rotation aligning one to the other [S4, unofficial].
-Outputs: A 4×4 rotation matrix $R$ in row-major layout [S1, unofficial][S3, unofficial].
+**Inputs:**
+1.  `axis`: Integer specifying the rotation axis (0: x, 1: y, 2: z) [S1, unofficial].
+2.  `angle`: Rotation angle in radians [S1, unofficial]. If degrees are provided, they must be converted: $\theta_{rad} = \theta_{deg} \times \frac{\pi}{180}$ [S3, unofficial].
+
+**Outputs:**
+A 4x4 rotation matrix $R$ in row-major or column-major layout (consistent with the multiplication context). The sources provide row-major definitions for individual axes [S3, unofficial].
 
 **Data Structures:**
-The rotation matrix is a 4×4 array of floating-point numbers [S1, unofficial][S3, unofficial].
-Layout for single-axis rotation about axis $i$:
+The matrix is a 4x4 array of floating-point numbers.
 $$
 R = \begin{bmatrix}
-1 & 0 & 0 & 0 \\
-0 & & & 0 \\
-0 & & R_{3\times3} & 0 \\
-0 & 0 & 0 & 1
+r_{00} & r_{01} & r_{02} & r_{03} \\
+r_{10} & r_{11} & r_{12} & r_{13} \\
+r_{20} & r_{21} & r_{22} & r_{23} \\
+r_{30} & r_{31} & r_{32} & r_{33}
 \end{bmatrix}
 $$
-Where $R_{3\times3}$ is the 3×3 rotation submatrix [S1, unofficial][S3, unofficial]. The 4th row and column are identity elements $[0, 0, 0, 1]$ to preserve homogeneous coordinates [S1, unofficial][S3, unofficial].
 
-**Numbered Steps:**
-1.  Validate inputs [S1, unofficial].
-2.  Initialize a 4×4 matrix `mat` with zeros [S1, unofficial].
-3.  Compute indices for the plane perpendicular to axis $i$:
-    $$ j = (i + 1) \pmod 3 $$
-    $$ k = (j + 1) \pmod 3 $$
-4.  Set the diagonal element for the rotation axis:
-    $$ \text{mat}[i][i] = 1 $$
-5.  Set the off-diagonal elements in the $j,k$ plane:
-    $$ \text{mat}[j][j] = \cos(\theta) $$
-    $$ \text{mat}[j][k] = -\sin(\theta) $$
-    $$ \text{mat}[k][j] = \sin(\theta) $$
-    $$ \text{mat}[k][k] = \cos(\theta) $$
-6.  Set all other elements in rows/cols $i, j, k$ to 0 (already initialized) [S1, unofficial].
-7.  Return `mat` [S1, unofficial].
+**Steps:**
 
-**Combined Euler Rotation (X-Y-Z order):**
-1.  Convert angles from degrees to radians:
-    $$ \text{rad}_X = \alpha_X \times \frac{\pi}{180} $$
-    $$ \text{rad}_Y = \alpha_Y \times \frac{\pi}{180} $$
-    $$ \text{rad}_Z = \alpha_Z \times \frac{\pi}{180} $$
-    [S3, unofficial]
-2.  Construct individual rotation matrices $R_X, R_Y, R_Z$ using the single-axis layout [S3, unofficial].
-3.  Multiply matrices in order:
-    $$ R_{\text{combined}} = R_X \times R_Y $$
-    $$ R_{\text{final}} = R_{\text{combined}} \times R_Z $$
-    [S3, unofficial]
-
-**Vector-to-Vector Rotation:**
-1.  Compute the cross product $v = \text{from\_vec} \times \text{to\_vec}$ [S4, unofficial].
-2.  Compute the dot product $c = \text{from\_vec} \cdot \text{to\_vec}$ [S4, unofficial].
-3.  Compute the scaling factor $k$:
-    $$ k = \frac{1.0}{1.0 + c} $$
-    [S4, unofficial]
-4.  Construct the 3×3 rotation matrix components using $v$ and $k$ [S4, unofficial].
-5.  Return the 4×4 homogeneous matrix embedding the 3×3 result [S4, unofficial].
-
-**Formulas:**
-For single-axis rotation about axis $i$, let $j=(i+1)\%3$, $k=(j+1)\%3$. The non-zero entries are:
-$$ R_{jj}=\cos\theta, \quad R_{jk}=-\sin\theta, \quad R_{kj}=\sin\theta, \quad R_{kk}=\cos\theta, \quad R_{ii}=1 $$
-All other entries in rows/cols $i,j,k$ are 0 [S1, unofficial].
-
-For vector-to-vector rotation, the 3×3 submatrix $R$ is:
-$$
-\begin{aligned}
-R_{0,0} &= v_0^2 k + c \\
-R_{0,1} &= v_0 v_1 k - v_2 \\
-R_{0,2} &= v_0 v_2 k + v_1 \\
-R_{1,0} &= v_0 v_1 k + v_2 \\
-R_{1,1} &= v_1^2 k + c \\
-R_{1,2} &= v_1 v_2 k - v_0 \\
-R_{2,0} &= v_0 v_2 k - v_1 \\
-R_{2,1} &= v_1 v_2 k + v_0 \\
-R_{2,2} &= v_2^2 k + c
-\end{aligned}
-$$
-where $v_0, v_1, v_2$ are the components of $v$, and $c$ is the dot product [S4, unofficial].
-
-**Parameters:**
-Typical values are not given in the sources. Angles are provided in degrees for Euler rotation and converted to radians internally [S3, unofficial].
-
-**Edge Cases and Pitfalls:**
-If the cross product $v$ is zero (vectors are parallel), check $c$ [S4, unofficial]. If $c > 0$, set $R$ to the identity matrix [S4, unofficial]. If $c < 0$, set $R$ to the negative identity matrix [S4, unofficial]. Division by zero in $k = 1.0/(1.0+c)$ occurs when $c = -1$ (opposite vectors), which is handled by the $c < 0$ branch [S4, unofficial].
+1.  **Validate Inputs:** Ensure `axis` is in $\{0, 1, 2\}$ and `angle` is a valid number [S1, unofficial].
+2.  **Initialize Matrix:** Create a 4x4 identity matrix.
+3.  **Compute Indices:** Let $i$ be the rotation axis index. Let $j = (i + 1) \pmod 3$ and $k = (j + 1) \pmod 3$ [S1, unofficial].
+4.  **Set Diagonal and Off-Diagonal Elements:**
+    *   $R_{ii} = 1$
+    *   $R_{jj} = \cos(\theta)$
+    *   $R_{kk} = \cos(\theta)$
+    *   $R_{jk} = -\sin(\theta)$
+    *   $R_{kj} = \sin(\theta)$
+    *   All other elements in rows/cols $i, j, k$ are 0 [S1, unofficial][S3, unofficial].
+5.  **Return Matrix:** The resulting matrix $R$ rotates a column vector $v$ via $v' = R v$ [S1, unofficial]. Note: Some implementations multiply by the transpose if using row vectors [S2, unofficial].
 
 **Pseudocode (Single Axis):**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
 
-def rotation_transformation_single_axis(axis_index: int, angle: float) -> list:
+def rotation_matrix_single_axis(axis: int, angle: float) -> list:
     """
     Creates a 4x4 rotation matrix for rotation by a given angle about a specified axis.
-    
-    Args:
-        axis_index: 0 for X, 1 for Y, 2 for Z.
-        angle: Rotation angle in radians.
-        
-    Returns:
-        A 4x4 list of lists representing the rotation matrix.
+    axis: 0 for X, 1 for Y, 2 for Z.
+    angle: in radians.
+    Returns: 4x4 matrix as list of lists (row-major).
     """
-    # Validate inputs
-    if axis_index not in (0, 1, 2):
-        raise ValueError("Axis index must be 0, 1, or 2")
+    # Initialize 4x4 identity matrix
+    mat = [
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+    ]
     
-    # Initialize 4x4 matrix with zeros
-    mat = [[0.0 for _ in range(4)] for _ in range(4)]
-    
-    # Compute indices for the plane perpendicular to axis
-    j = (axis_index + 1) % 3
+    # Validate axis
+    if axis not in (0, 1, 2):
+        raise ValueError("Axis must be 0, 1, or 2")
+
+    # Compute indices j and k
+    j = (axis + 1) % 3
     k = (j + 1) % 3
     
-    # Set diagonal element for the rotation axis
-    mat[axis_index][axis_index] = 1.0
-    
-    # Set the 2x2 rotation submatrix in the j-k plane
     cos_a = math.cos(angle)
     sin_a = math.sin(angle)
     
+    # Set elements according to the rotation formula
+    # R_ii = 1 (already set by identity)
     mat[j][j] = cos_a
     mat[j][k] = -sin_a
+    mat[j][axis] = 0
+    
     mat[k][j] = sin_a
     mat[k][k] = cos_a
+    mat[k][axis] = 0
     
-    # Set the homogeneous coordinate
-    mat[3][3] = 1.0
+    mat[axis][j] = 0
+    mat[axis][k] = 0
+    # mat[axis][axis] is 1
     
     return mat
 ```
 
-**Pseudocode (Vector to Vector):**
+**Composing Rotations (Euler Angles):**
+To rotate around X, Y, and Z axes with angles $\theta_x, \theta_y, \theta_z$, compute individual matrices $R_x, R_y, R_z$ and multiply them. The order matters. One common convention (used in [S3, unofficial]) is $R = R_x \times R_y \times R_z$ (applied right-to-left to column vectors, or left-to-right depending on convention; the source multiplies `rotX * rotY` then result `* rotZ`) [S3, unofficial].
+
+**Pseudocode (Euler Angles):**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-import numpy as np
+def rotation_matrix_euler(angle_x: float, angle_y: float, angle_z: float) -> list:
+    """
+    Computes a 4x4 rotation matrix from Euler angles (X, Y, Z) in radians.
+    Follows the composition order: R = Rx * Ry * Rz.
+    """
+    # Helper to create 4x4 matrix
+    def mat4x4():
+        return [
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ]
 
-def rotation_transformation_vector_to_vector(from_vec: np.ndarray, to_vec: np.ndarray) -> np.ndarray:
-    """
-    Constructs a 4x4 rotation matrix that rotates from_vec to align with to_vec.
-    Handles batched inputs.
-    """
-    from_vec = np.asarray(from_vec, dtype=float)
-    to_vec = np.asarray(to_vec, dtype=float)
+    # Helper to multiply two 4x4 matrices
+    def multiply(A, B):
+        C = mat4x4()
+        for r in range(4):
+            for c in range(4):
+                val = 0.0
+                for k in range(4):
+                    val += A[r][k] * B[k][c]
+                C[r][c] = val
+        return C
+
+    rad_x = angle_x
+    rad_y = angle_y
+    rad_z = angle_z
     
-    # Compute cross product v
-    v = np.cross(from_vec, to_vec)
+    # Construct individual rotation matrices
+    # Rx
+    rx = mat4x4()
+    rx[1][1] = math.cos(rad_x)
+    rx[1][2] = -math.sin(rad_x)
+    rx[2][1] = math.sin(rad_x)
+    rx[2][2] = math.cos(rad_x)
+    
+    # Ry
+    ry = mat4x4()
+    ry[0][0] = math.cos(rad_y)
+    ry[0][2] = math.sin(rad_y)
+    ry[2][0] = -math.sin(rad_y)
+    ry[2][2] = math.cos(rad_y)
+    
+    # Rz
+    rz = mat4x4()
+    rz[0][0] = math.cos(rad_z)
+    rz[0][1] = -math.sin(rad_z)
+    rz[1][0] = math.sin(rad_z)
+    rz[1][1] = math.cos(rad_z)
+    
+    # Combine: R = Rx * Ry * Rz
+    # Note: Source [S3, unofficial] does: rotX * rotY, then result * rotZ
+    rotation_matrix = multiply(rx, ry)
+    rotation_matrix = multiply(rotation_matrix, rz)
+    
+    return rotation_matrix
+```
+
+**Alternative: Rotation from Two Vectors (Axis-Angle via Cross Product):**
+If the rotation is defined by aligning a `from_vec` to a `to_vec`, compute the rotation matrix using the cross product and dot product [S4, unofficial].
+
+1.  Compute $v = \text{cross}(\text{from\_vec}, \text{to\_vec})$ [S4, unofficial].
+2.  Compute $c = \text{dot}(\text{from\_vec}, \text{to\_vec})$ [S4, unofficial].
+3.  Compute $k = 1.0 / (1.0 + c)$ [S4, unofficial].
+4.  Construct the 3x3 rotation matrix components:
+    $$
+    \begin{aligned}
+    R_{00} &= v_0^2 k + c \\
+    R_{01} &= v_0 v_1 k - v_2 \\
+    R_{02} &= v_0 v_2 k + v_1 \\
+    R_{10} &= v_0 v_1 k + v_2 \\
+    R_{11} &= v_1^2 k + c \\
+    R_{12} &= v_1 v_2 k - v_0 \\
+    R_{20} &= v_0 v_2 k - v_1 \\
+    R_{21} &= v_1 v_2 k + v_0 \\
+    R_{22} &= v_2^2 k + c
+    \end{aligned}
+    $$
+    [S4, unofficial]
+5.  **Edge Case:** If $v$ is zero (vectors are parallel):
+    *   If $c > 0$ (identical), set $R$ to Identity.
+    *   If $c < 0$ (opposite), set $R$ to Negative Identity (or 180-degree rotation about any orthogonal axis) [S4, unofficial].
+
+**Pseudocode (From-To Vector):**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def rotation_matrix_from_vectors(from_vec: list, to_vec: list) -> list:
+    """
+    Constructs a 3x3 rotation matrix that rotates from_vec to to_vec.
+    Returns 3x3 matrix.
+    """
+    # Compute cross product v = from x to
+    v = [
+        from_vec[1]*to_vec[2] - from_vec[2]*to_vec[1],
+        from_vec[2]*to_vec[0] - from_vec[0]*to_vec[2],
+        from_vec[0]*to_vec[1] - from_vec[1]*to_vec[0]
+    ]
     
     # Compute dot product c
-    c = np.sum(from_vec * to_vec, axis=-1)
+    c = from_vec[0]*to_vec[0] + from_vec[1]*to_vec[1] + from_vec[2]*to_vec[2]
     
-    # Compute k
+    # Check for parallel vectors
+    # Calculate magnitude of v squared to check if zero
+    v_mag_sq = v[0]**2 + v[1]**2 + v[2]**2
+    
+    if v_mag_sq < 1e-9:
+        if c > 0:
+            # Identical vectors
+            return [
+                [1, 0, 0],
+                [0, 1, 0],
+                [0, 0, 1]
+            ]
+        else:
+            # Opposite vectors
+            return [
+                [-1, 0, 0],
+                [0, -1, 0],
+                [0, 0, -1]
+            ]
+            
     k = 1.0 / (1.0 + c)
     
-    # Extract components
-    v0 = v[..., 0]
-    v1 = v[..., 1]
-    v2 = v[..., 2]
+    # Construct matrix
+    out = [
+        [v[0]**2 * k + c, v[0]*v[1]*k - v[2], v[0]*v[2]*k + v[1]],
+        [v[0]*v[1]*k + v[2], v[1]**2 * k + c, v[1]*v[2]*k - v[0]],
+        [v[0]*v[2]*k - v[1], v[1]*v[2]*k + v[0], v[2]**2 * k + c]
+    ]
     
-    # Initialize 3x3 matrix array
-    if from_vec.ndim > 1:
-        R = np.zeros((*from_vec.shape[:-1], 3, 3))
-    else:
-        R = np.zeros((3, 3))
-        
-    R[..., 0, 0] = v0**2 * k + c
-    R[..., 0, 1] = v0 * v1 * k - v2
-    R[..., 0, 2] = v0 * v2 * k + v1
-    R[..., 1, 0] = v0 * v1 * k + v2
-    R[..., 1, 1] = v1**2 * k + c
-    R[..., 1, 2] = v1 * v2 * k - v0
-    R[..., 2, 0] = v0 * v2 * k - v1
-    R[..., 2, 1] = v1 * v2 * k + v0
-    R[..., 2, 2] = v2**2 * k + c
-    
-    # Handle edge cases: parallel vectors
-    parallel_mask = np.all(v == 0, axis=-1)
-    if np.any(parallel_mask):
-        if np.any(parallel_mask & (c > 0)):
-            R[parallel_mask & (c > 0)] = np.eye(3)
-        if np.any(parallel_mask & (c < 0)):
-            R[parallel_mask & (c < 0)] = -np.eye(3)
-            
-    # Embed into 4x4 homogeneous matrix
-    if from_vec.ndim > 1:
-        R_4x4 = np.zeros((*from_vec.shape[:-1], 4, 4))
-        R_4x4[..., :3, :3] = R
-        R_4x4[..., 3, 3] = 1.0
-    else:
-        R_4x4 = np.zeros((4, 4))
-        R_4x4[:3, :3] = R
-        R_4x4[3, 3] = 1.0
-        
-    return R_4x4
+    return out
 ```
 
 ## Subtopics
+
+### RotateY
+RotateY is a geometric transformation primitive that rotates a point or shape around the Y-axis in 3D space [S1, unofficial]. It serves as a fundamental building block for constructing camera poses and deforming Signed Distance Fields (SDFs) [G]. Unlike [Rotation Transformation](2279-rotation-transformation.md), which may imply a general rotation matrix, RotateY specifically isolates the Y-axis component [G]. Unlike [Twist](1722-twist.md), it applies a uniform rotation angle to the entire object rather than a spatially varying one [G]. It is a sibling to [RotateX](2278-rotatex.md) and [RotateZ](2280-rotatez.md) [S1, unofficial].
+
+### [Rotation Matrix Computation](2280-rotation-matrix-computation.md)
+Computes a 3x3 rotation matrix from a rotation axis and angle. It provides a direct algebraic solution for orientation, distinct from sequential axis rotations or quaternion conversions.
 
 ### [Quaternion Rotation](2302-quaternion-rotation.md)
 Quaternion Rotation applies a 3D rotation to a vector using quaternion algebra. It sets itself apart from [SE2 Lie Group Implementation](3144-se2-lie-group-implementation.md) and [2D Rotation](3357-2d-rotation.md) by operating in 3D space with unit quaternions, and from [Quaternion to SO3 Conversion](2305-quaternion-to-so3-conversion.md) by directly yielding a rotated vector rather than an intermediate rotation matrix [G].
@@ -210,14 +249,24 @@ The SE2 Lie group implementation parameterizes 2D rigid body transformations usi
 ### [2D Rotation](3357-2d-rotation.md)
 2D Rotation rotates a 2D vector by a specified angle in the plane perpendicular to a specified axis. It differs from [Quaternion Rotation](2302-quaternion-rotation.md) and [SE2 Lie Group Implementation](3144-se2-lie-group-implementation.md) by operating directly on the two vector components rather than constructing a full 3×3 matrix or quaternion representation [G].
 
+### RotateZ
+Similar to RotateX, but rotates around the z-axis instead [S6, unofficial]. It takes a float input representing the angle of rotation [S6, unofficial].
+
 ## Operating characteristics
-Not given in the sources.
+**Time Complexity:** $O(1)$ for single axis rotation. $O(1)$ for Euler composition (constant number of multiplications). $O(1)$ for from-vector rotation.
+**Memory Complexity:** $O(1)$ (fixed 4x4 or 3x3 matrix storage).
+**Strengths:** Simple to implement; direct mapping to hardware matrix units; intuitive for Euler angle specifications.
+**Limitations:** Susceptible to gimbal lock when composing rotations (though the matrix itself is valid, the parameterization fails); sequential axis rotations depend on order; not suitable for interpolation (slerp) without conversion to quaternions.
+**When to use:** When a single axis rotation is required, or when Euler angles are the natural input format and interpolation is not needed.
+**When not:** When smooth interpolation between orientations is required (use [Quaternion Rotation](2302-quaternion-rotation.md)); when avoiding gimbal lock is critical for complex pose chains (use quaternions or SLERP).
 
 ## Background
-Not given in the sources.
+Rotation Transformation is a standard linear algebra operation used in computer graphics, robotics, and volume rendering. It is foundational for camera pose construction, where the orientation component of the view matrix is derived from rotation matrices [S3, unofficial]. In volume rendering, it is used to align ray directions or deform SDFs [G]. The specific implementation details (axis indices, sign conventions) vary by coordinate system (left-handed vs right-handed) and matrix layout (row-major vs column-major).
 
 ## Sources
 [S1] chloearluck/volume_rendering, https://github.com/chloearluck/volume_rendering, fetched 2026-10-24 (unofficial)
 [S2] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
 [S3] indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, https://github.com/indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, fetched 2026-10-26 (unofficial)
 [S4] szat/Jax-Volumetric-Renderer, https://github.com/szat/Jax-Volumetric-Renderer, fetched 2026-10-27 (unofficial)
+[S5] Blocky terrains - Voxel Tools documentation, https://voxel-tools.readthedocs.io/en/latest/blocky_terrain/, fetched 2026-10-27
+[S6] PDF COS 426 Final Project Writeup Raymarching with Signed Distance Fields, https://jbaum98.github.io/cos426_final_project/writeup.pdf, fetched 2026-10-27 (unofficial)

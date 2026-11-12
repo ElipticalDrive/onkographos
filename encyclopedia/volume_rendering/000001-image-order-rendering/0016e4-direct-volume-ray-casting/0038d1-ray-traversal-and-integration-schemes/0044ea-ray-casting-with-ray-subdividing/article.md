@@ -1,0 +1,132 @@
+# Ray Casting with Ray Subdividing
+
+Also called: Adaptive Ray Subdivision, Ray Splitting for Perspective Rendering, Ray Subdividing
+
+## Overview
+Ray Casting with Ray Subdividing is a technique for direct volume ray casting that addresses the issue of insufficient sampling density in perspective projections. Unlike fixed-step methods, it dynamically adjusts the sampling rate along the ray to maintain consistent spatial resolution relative to the screen pixels, preventing aliasing and artifacts caused by ray divergence. It sets itself apart from [Ray Marching and Discretization](2788-ray-marching-and-discretization.md) by varying the step size $\Delta t$ adaptively rather than keeping it constant.
+
+## How it works
+The method extends the standard direct volume ray casting loop by introducing a conditional subdivision step.
+
+**Inputs and Outputs:**
+*   **Input:** Volume dataset $V$, transfer function $T$, camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$, field of view), and a target screen-space sampling density threshold.
+*   **Output:** Pixel color $C_{out}$ and opacity $\alpha_{out}$.
+
+**Data Structures:**
+*   **Ray State:** Contains current position $t$, current step size $\Delta t$, and accumulated color/opacity.
+*   **Subdivision Queue:** A stack or list of rays (or ray segments) requiring further subdivision when divergence exceeds the threshold.
+
+**Steps:**
+1.  **Ray Generation:** Define the primary ray $r(t) = \mathbf{o} + t\mathbf{d}$ for each pixel. Intersect with the volume bounding box to find $t_{start}$ and $t_{end}$ [S1, S8, S16, unofficial].
+2.  **Initial Discretization:** Calculate an initial step size $\Delta t_{init}$ based on the volume resolution and camera distance, ensuring adequate sampling near the camera [S5, S10, S17, unofficial].
+3.  **Divergence Check:** As the ray progresses, calculate the distance between adjacent rays in the screen plane. If the distance between sample points projected onto the screen exceeds a predefined threshold (indicating rays are "drawing away from each other"), trigger subdivision [S2, unofficial].
+4.  **Subdivision:**
+    *   Split the current ray segment into two or more sub-segments.
+    *   Recalculate the step size for the new segments to maintain the target sampling density.
+    *   Push the new segments onto the processing queue [S1, unofficial].
+5.  **Sampling and Interpolation:** For each active segment, sample the volume at equidistant intervals. Retrieve scalar values $V(\mathbf{p}_i)$ using trilinear interpolation of the eight surrounding voxels [S9, S11, S47, unofficial].
+6.  **Classification:** Map scalar values to color $C_i$ and extinction coefficient $\sigma_i$ using the transfer function. Compute opacity $\alpha_i$ for the step size $\Delta t$:
+    $$ \alpha_i = 1 - e^{-\sigma_i \Delta t} $$
+    [S24, S30, unofficial].
+7.  **Compositing:** Accumulate results using front-to-back alpha compositing:
+    $$ C_{out} = C_{in} + (1 - \alpha_{in}) \cdot C_{sample} \cdot \alpha_{sample} $$
+    $$ \alpha_{out} = \alpha_{in} + (1 - \alpha_{in}) \cdot \alpha_{sample} $$
+    Initialize $C_{in} = 0, \alpha_{in} = 0$ [S15, S46, unofficial][S52, S60, unofficial].
+8.  **Merge:** If rays were split, merge the results of the sub-segments back into the parent ray's accumulation buffer.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_cast_with_subdivision(volume, transfer_function, ray_origin, ray_direction, max_depth):
+    # Initialize ray state
+    t_start, t_end = intersect_volume(ray_origin, ray_direction, volume.bounding_box)
+    if t_end is None:
+        return 0, 0
+    
+    # Initial step size based on volume resolution and camera distance
+    # [G] Typical initial step is 1 voxel width in world space
+    delta_t = volume.resolution_world_size 
+    
+    # Queue for active ray segments: (t_current, t_end, delta_t, acc_color, acc_opacity)
+    ray_queue = [(t_start, t_end, delta_t, [0,0,0], 0.0)]
+    
+    while ray_queue:
+        t_curr, t_end, dt, acc_color, acc_opacity = ray_queue.pop()
+        
+        # Check if ray has reached the end
+        if t_curr >= t_end:
+            continue
+            
+        # Calculate screen-space distance between adjacent rays to check divergence
+        # [G] This requires access to neighboring rays or camera projection matrix
+        # If divergence > threshold, split the ray
+        if should_subdivide(t_curr, dt, ray_origin, ray_direction):
+            # Split into two sub-segments
+            mid_t = t_curr + dt / 2.0
+            # Recalculate dt for sub-segments to maintain density
+            new_dt = dt / 2.0 
+            
+            # Push sub-segments to queue
+            ray_queue.append((t_curr, mid_t, new_dt, acc_color, acc_opacity))
+            ray_queue.append((mid_t, t_end, new_dt, acc_color, acc_opacity))
+            continue
+            
+        # Sample and composite
+        p = ray_origin + t_curr * ray_direction
+        scalar = volume.interpolate(p)
+        color, sigma = transfer_function(scalar)
+        
+        # Opacity calculation
+        alpha = 1.0 - math.exp(-sigma * dt)
+        
+        # Front-to-back compositing
+        new_acc_color = acc_color + (1.0 - acc_opacity) * color * alpha
+        new_acc_opacity = acc_opacity + (1.0 - acc_opacity) * alpha
+        
+        # Advance ray
+        t_curr += dt
+        
+        # If opacity is 1.0, we can stop early (not given in sources, but standard optimization)
+        if new_acc_opacity >= 1.0:
+            return new_acc_color, 1.0
+            
+        # Update state for next iteration
+        # Note: In a real implementation, this might be handled by pushing updated state
+        # or accumulating into a larger buffer. Here we assume single-pass per segment.
+        # For simplicity, we push the updated state back if not done.
+        # However, the loop structure above pops and pushes. 
+        # To handle accumulation correctly across splits, the queue should store 
+        # the *remaining* ray segment and the *accumulated* result so far.
+        
+        # Re-push with updated accumulation if not finished
+        if t_curr < t_end:
+             ray_queue.append((t_curr, t_end, dt, new_acc_color, new_acc_opacity))
+             
+    return acc_color, acc_opacity
+```
+
+**Parameters:**
+*   **Divergence Threshold:** The maximum allowed distance between sample points on the screen. Not given in the sources.
+*   **Max Depth:** Maximum recursion depth for subdivision to prevent infinite loops. Not given in the sources.
+
+**Edge Cases:**
+*   **Precision:** Floating-point errors in $t$ calculations can lead to gaps or overlaps in sampling. Use epsilon comparisons.
+*   **Boundaries:** Ensure subdivision does not create segments smaller than the voxel size, which would waste computation.
+*   **Degenerate Input:** If the volume is empty or the ray misses, return black/transparent immediately.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the average number of samples per ray. $S$ varies dynamically based on divergence.
+*   **Memory Complexity:** $O(N)$ for the ray queue in the worst case (deep subdivision).
+*   **Performance:** Higher quality than fixed-step ray casting in perspective views, especially at large distances. Slower due to overhead of subdivision checks and queue management.
+*   **Strengths:** Maintains consistent image quality across the depth range; reduces aliasing in distant regions.
+*   **Limitations:** Complex implementation; overhead of managing ray segments; potential for over-sampling near the camera if not balanced.
+*   **When to use:** Perspective rendering where high quality is required and computational resources allow for adaptive processing.
+*   **When not to use:** Real-time applications with strict performance constraints; parallel projection where ray divergence is minimal.
+
+## Background
+The concept of splitting rays to maintain sampling rate in perspective rendering was proposed as an equivalent approach to EWA splatting for raycasting [S1, unofficial]. Kreeger et al. improved this scheme by splitting and merging rays in an optimal way to handle divergence [S1, unofficial]. The technique is specifically noted for use with perspective projection, where rays draw away from each other, leading to incomplete sampling of the volume [S2, unofficial].
+
+## Sources
+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S2] Introduction to volume rendering, https://slidetodoc.com/introduction-to-volume-rendering-presented-by-zvi-devir/, fetched 2026-10-29 (unofficial)

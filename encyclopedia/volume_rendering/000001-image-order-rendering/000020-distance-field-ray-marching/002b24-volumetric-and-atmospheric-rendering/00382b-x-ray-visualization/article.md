@@ -1,0 +1,122 @@
+# X-Ray Visualization
+
+Also called: Average Density Projection, X-Ray Rendering, n-D X-ray projection
+
+## Overview
+X-Ray Visualization is a volume rendering technique that computes the average density along a ray cast through the data set, visualizing the result as a grey-scale image similar to a medical X-ray [S2]. Unlike standard volume rendering which relies on opacity accumulation and depth cues, this method treats ordering as irrelevant, simplifying the user interface by eliminating occlusion explorations [S1, unofficial]. It is particularly useful for revealing topological information in n-dimensional spaces (where $n>3$) where traditional depth perception is difficult [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D (or n-D) scalar data set representing density $\rho$, a viewing direction defined by a ray origin $\mathbf{o}$ and direction $\mathbf{d}$, and rotation parameters for the view.
+*   **Output:** A 2D grey-scale image where pixel intensity corresponds to the average density along the corresponding ray.
+
+**Data Structures:**
+*   **Density Field:** A 3D grid of scalar values. The specific bit-depth is not given in the sources, though typical medical datasets may range from 0 to 4095 [S2].
+*   **Ray Parameters:** Origin $\mathbf{o}$, direction $\mathbf{d}$, and step size $\Delta t$.
+
+**Steps:**
+1.  **View Transformation:** The user defines the viewing direction by rotating the data set in any of the 3 directions (X, Y, Z axes) in degrees ranging from -360 to 360 [S2]. In n-D contexts, this involves stretching and rotating a system of $n$ axis vectors [S1, unofficial].
+2.  **Ray Casting:** For each pixel in the output image, cast a ray through the data set in the desired viewing direction [S2].
+3.  **Density Sampling:** Sample the density $\rho$ at discrete points along the ray.
+4.  **Average Calculation:** Compute the average density value along the ray. Let $N$ be the number of samples along the ray, and $\rho_i$ be the density at the $i$-th sample. The average density $\bar{\rho}$ is:
+    $$ \bar{\rho} = \frac{1}{N} \sum_{i=1}^{N} \rho_i $$
+    *Note: The sources describe this as "average density values along the ray" [S2]. It does not explicitly specify if this is a simple arithmetic mean of sampled points or an integral approximation divided by path length. Given the context of "average density," the arithmetic mean of samples is the direct interpretation.*
+5.  **Visualization:** Map the computed average density $\bar{\rho}$ to a grey-scale intensity value for the corresponding pixel [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def xray_visualization(data_grid, ray_origin, ray_direction, num_samples):
+    """
+    Computes the X-Ray visualization for a single ray.
+    
+    Args:
+        data_grid: 3D array of density values.
+        ray_origin: 3D vector (x, y, z).
+        ray_direction: 3D vector (x, y, z), assumed normalized.
+        num_samples: Integer, number of steps along the ray.
+        
+    Returns:
+        float: Average density along the ray.
+    """
+    # Determine the length of the ray through the bounding box of the data grid.
+    # This step is not explicitly detailed in the sources, so we assume a fixed 
+    # path length or that the ray is normalized to traverse the entire volume.
+    # [G] Assuming the ray traverses the full extent of the data grid.
+    # A common implementation would calculate the intersection of the ray 
+    # with the grid bounds to determine the total distance D.
+    # For this simplified version, we assume the ray direction is scaled 
+    # such that the total distance is 1.0, or that num_samples covers 
+    # the relevant volume.
+    
+    total_density = 0.0
+    
+    # Step 1: Cast ray and sample density
+    for i in range(num_samples):
+        # Calculate current position along the ray
+        # [G] Assuming uniform sampling from 0 to 1 along the ray direction
+        t = i / (num_samples - 1) if num_samples > 1 else 0.0
+        current_pos = ray_origin + t * ray_direction
+        
+        # Sample density at current_pos
+        # [G] Assuming trilinear interpolation or nearest-neighbor sampling 
+        # from data_grid. The source does not specify the interpolation method.
+        density = sample_density(data_grid, current_pos)
+        
+        total_density += density
+        
+    # Step 2: Calculate average density
+    if num_samples > 0:
+        average_density = total_density / num_samples
+    else:
+        average_density = 0.0
+        
+    return average_density
+
+def sample_density(grid, point):
+    """
+    Samples the density value from the 3D grid at the given point.
+    [G] Implementation detail not in sources. Assumes grid coordinates 
+    are normalized to [0,1] or similar.
+    """
+    # Normalize point to grid coordinates
+    # This depends on the specific grid layout, which is not given.
+    # [G] Placeholder for grid lookup logic.
+    return 0.0 # Placeholder
+```
+
+**Parameters:**
+*   **View Rotation:** The view of the data set can be rotated in any of the 3 directions (X, Y, Z axes) in degrees (-360 ... 0 ... 360) [S2].
+*   **Number of Samples:** Not specified in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The sources do not specify precision issues. However, averaging many samples may lead to loss of high-frequency detail if the sampling rate is insufficient.
+*   **Boundaries:** The method assumes the ray traverses the data set. Handling rays that miss the data set entirely requires a default value (e.g., 0 or background color), which is not explicitly defined [G].
+
+## Subtopics
+
+### n-D X-Ray Projection
+*   **What it is:** An extension of X-Ray Visualization to n-dimensional spaces ($n>3$) where ordering is irrelevant.
+*   **What sets it apart:** It simplifies the user interface by eliminating occlusion explorations, allowing users to reveal topological information in high-dimensional spaces.
+*   **When to choose it:** When visualizing high-dimensional data (e.g., 4D datasets) where traditional depth cues are insufficient or confusing.
+*   **Link:** [n-D X-Ray Projection](52-n-d-x-ray-projection.md)
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of samples per ray and the number of pixels. $O(P \cdot N)$, where $P$ is the number of pixels and $N$ is the number of samples.
+*   **Memory Complexity:** Linear with respect to the size of the data set. $O(V)$, where $V$ is the volume of the data set.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** The method is scalable, as demonstrated by the interactive user interface presented by Bajaj et al. [S1, unofficial].
+*   **Strengths:** Simplifies user interface; eliminates occlusion; reveals topological information in n-D spaces; fast computation (no complex shading or accumulation).
+*   **Limitations:** Lacks depth cues; ordering is irrelevant, which may hide occlusion details; limited to grey-scale visualization (though color ranges can be mapped, the core method is grey-scale) [S2].
+*   **When to use it:** When visualizing high-dimensional data or when a quick, occlusion-free overview of density distribution is needed [S1, unofficial][S2].
+*   **When not to use it:** When depth perception and occlusion details are critical [S1, unofficial].
+
+## Background
+*   **Origin:** The method was introduced by Bajaj et al. for n-D volume rendering [S1, unofficial].
+*   **History and Development:** It was developed to simplify the user interface for n-D volume rendering by eliminating the need for occlusion explorations [S1, unofficial]. The authors demonstrated that useful topological information can be revealed despite the lack of depth cues [S1, unofficial].
+*   **Where it is used:** In scientific visualization, particularly for high-dimensional data sets (e.g., 4D datasets) [S1, unofficial]. It is also used in medical imaging contexts, as indicated by the reference to medical X-rays and density ranges typical of human body scans (0 to 4095) [S2].
+
+## Sources
+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S2] VOLUME RENDERING Application by Thomas Lidy, https://www.cg.tuwien.ac.at/courses/Visualisierung/2001-2002/Ergebnisse/Beispiel1/LidyT/description.html, fetched 2026-10-29

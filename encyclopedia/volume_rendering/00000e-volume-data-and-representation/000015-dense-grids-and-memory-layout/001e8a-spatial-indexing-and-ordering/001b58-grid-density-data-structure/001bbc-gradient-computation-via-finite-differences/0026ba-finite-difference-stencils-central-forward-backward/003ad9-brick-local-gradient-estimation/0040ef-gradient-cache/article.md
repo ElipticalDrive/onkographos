@@ -1,0 +1,116 @@
+# Gradient Cache
+
+Also called: Grimm et al. Gradient Cache, Per-brick Gradient Cache
+
+## Overview
+The Gradient Cache is a per-brick caching mechanism that stores computed volume gradients to avoid redundant finite difference calculations during ray casting [S1][S2, unofficial]. It differs from precomputing gradients for the entire volume by requiring only modest, volume-size-independent memory, while offering higher speedups than cell-local caching by reusing gradients across multiple cells within a brick [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Volume data brick of dimensions $B_x \times B_y \times B_z$ voxels; ray traversal state.
+*   **Output:** Gradient vector $\nabla f$ for a specific grid position $(i, j, k)$.
+
+**Data Structures:**
+1.  **Gradient Cache:** An array of size $(B_x + 1) \times (B_y + 1) \times (B_z + 1)$ [S2, unofficial]. Each entry stores a 3-component gradient vector using single-precision floating-point numbers (4 bytes per component), totaling 12 bytes per entry [S2, unofficial]. The $+1$ dimension allows interpolation across block boundaries [S2, unofficial].
+2.  **Bit List:** A bit array of size $(B_x + 1) \times (B_y + 1) \times (B_z + 1)$ [S2, unofficial]. The bit at index $(i, j, k)$ is set to 1 if the gradient at that grid position is currently in the cache, and 0 otherwise [S1][S2, unofficial].
+
+**Algorithm:**
+1.  **Initialization:** Allocate the gradient cache and bit list for the current brick. Initialize all bits in the bit list to 0 [S1][S2, unofficial].
+2.  **Ray Traversal:** As a ray enters a new voxel cell within the brick, identify the eight corner grid positions of that cell [S2, unofficial].
+3.  **Cache Query:** For each of the eight corners $(i, j, k)$:
+    *   Check the corresponding bit in the bit list [S1][S2, unofficial].
+    *   If the bit is 0:
+        *   Compute the gradient $\nabla f(i, j, k)$ using the chosen finite difference stencil (e.g., central differences) [S1][S2, unofficial].
+        *   Store $\nabla f(i, j, k)$ in the gradient cache at index $(i, j, k)$ [S2, unofficial].
+        *   Set the bit at index $(i, j, k)$ to 1 [S2, unofficial].
+    *   If the bit is 1:
+        *   Retrieve $\nabla f(i, j, k)$ directly from the gradient cache at index $(i, j, k)$ [S2, unofficial].
+4.  **Interpolation:** Use the retrieved or computed gradients at the cell corners to interpolate the gradient at the ray's current sample position [S2, unofficial].
+5.  **Brick Flush:** After processing all rays for the current brick, flush the cache (reset all bits to 0) before moving to the next brick [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_gradient_cache(brick_dims, volume_data):
+    """
+    brick_dims: tuple (Bx, By, Bz)
+    volume_data: 3D array of voxel values
+    Returns: gradient_cache, bit_list
+    """
+    Bx, By, Bz = brick_dims
+    # Cache size includes +1 for boundary interpolation
+    cache_size = (Bx + 1) * (By + 1) * (Bz + 1)
+    
+    # Initialize cache with zeros (12 bytes per entry: 3 floats)
+    gradient_cache = [Vector3(0.0, 0.0, 0.0)] * cache_size
+    
+    # Initialize bit list to 0
+    bit_list = [0] * cache_size
+    
+    return gradient_cache, bit_list
+
+def get_gradient(gradient_cache, bit_list, brick_dims, volume_data, i, j, k):
+    """
+    Retrieves or computes the gradient at grid position (i, j, k).
+    brick_dims: tuple (Bx, By, Bz)
+    """
+    Bx, By, Bz = brick_dims
+    # Map 3D index to 1D index
+    idx = i + j * (Bx + 1) + k * (Bx + 1) * (By + 1)
+    
+    # Check if gradient is in cache
+    if bit_list[idx] == 0:
+        # Compute gradient using finite differences
+        grad = compute_gradient_finite_diff(volume_data, i, j, k)
+        
+        # Store in cache
+        gradient_cache[idx] = grad
+        
+        # Set bit to 1
+        bit_list[idx] = 1
+        
+    return gradient_cache[idx]
+
+def compute_gradient_finite_diff(volume_data, i, j, k):
+    """
+    Computes gradient using central differences.
+    Assumes volume_data is padded or boundaries are handled.
+    """
+    # Central difference formula
+    dx = volume_data[i+1, j, k] - volume_data[i-1, j, k]
+    dy = volume_data[i, j+1, k] - volume_data[i, j-1, k]
+    dz = volume_data[i, j, k+1] - volume_data[i, j, k-1]
+    
+    return Vector3(dx, dy, dz)
+
+def flush_cache(bit_list):
+    """
+    Resets all bits to 0 for the next brick.
+    """
+    for idx in range(len(bit_list)):
+        bit_list[idx] = 0
+```
+
+**Parameters:**
+*   **Brick Dimensions ($B_x, B_y, B_z$):** Typical values are not specified in the sources, but the cache size scales with the brick size [S2, unofficial].
+*   **Gradient Precision:** Single-precision floating-point (4 bytes) [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Redundancy:** Gradients at the border of a brick are computed multiple times (up to eight times for corner voxels shared by adjacent bricks) because the cache is flushed per brick [S1][S2, unofficial]. This is considered rare and causes no significant performance loss [S1].
+*   **Perspective Distortion:** High speedup is primarily observed with orthogonal projection. In perspective rendering, ray divergence for distant bricks increases the distance between neighboring rays, lowering the cache reuse ratio [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Reduces the number of gradient computations by reusing cached values within a brick. Average speedup factor of approximately 2.2 is expected with orthogonal projection [S1].
+*   **Memory Complexity:** Memory usage is independent of the total volume size and depends only on the brick size. Cache size is $(B_x + 1) \times (B_y + 1) \times (B_z + 1)$ entries, with 12 bytes per entry [S2, unofficial]. This is significantly less than precomputing gradients for the entire volume, which would increase dataset size by a factor of four (assuming 2-byte components) [S2, unofficial].
+*   **Strengths:** Modest, volume-size-independent memory requirements; significant performance improvement for gradient-heavy rendering [S2, unofficial].
+*   **Limitations:** Reduced effectiveness in perspective rendering due to lower cache reuse; redundant computation at brick boundaries [S1][S2, unofficial].
+*   **When to Use:** Ideal for large datasets where precomputing gradients is too memory-intensive, and orthogonal projection is used [S1][S2, unofficial].
+*   **When Not to Use:** Perspective rendering with significant ray divergence, or when memory bandwidth is the primary bottleneck and precomputed gradients fit in memory [S2, unofficial].
+
+## Background
+The Gradient Cache was proposed by Grimm et al. in [GBKG04] as part of their work on interactive volume rendering with ray tracing [S1]. It was introduced to address the high computational cost of on-the-fly gradient estimation, particularly when using expensive gradient methods [S2, unofficial]. The method builds on the concept of caching intermediate results during ray casting, a technique previously explored in various forms [S1].
+
+## Sources
+[S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24
+[S2] Efficient Volume Visualization of Large Medical Datasets, https://old.cescg.org/CESCG-2004/web/Bruckner-Stefan/html/, fetched 2026-10-30 (unofficial)

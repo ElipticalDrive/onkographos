@@ -3,103 +3,94 @@
 Also called: FBO composition pass, Screen Render Pass, Two-pass rendering pipeline
 
 ## Overview
-Screen Quad Rendering is the final compositing pass in a two-pass volume rendering pipeline, responsible for displaying the pre-computed volumetric data (stored in off-screen textures) onto the default framebuffer [S1, S2, unofficial]. It solves the problem of transferring high-precision or auxiliary data (such as position or depth) from intermediate render targets to the visible screen while applying final transformations like upscaling or debug overlays [S1, S2, unofficial]. It differs from sibling methods like [Fullscreen Triangle Rendering](4230-fullscreen-triangle-rendering.md) by its specific reliance on a two-stage architecture where the first pass handles volume splatting into Framebuffer Objects (FBOs), and this second pass handles the final presentation [S1, S2, unofficial].
+Screen Quad Rendering is the final compositing stage in a two-pass splatting pipeline, where pre-rendered volumetric data stored in off-screen Framebuffer Objects (FBOs) is composited into the default framebuffer. It solves the problem of transferring intermediate rendering results (such as color and auxiliary buffers) from GPU memory to the display surface. It differs from its siblings by explicitly decoupling the volume splatting geometry pass from the final screen composition, allowing for post-processing effects or debug overlays (e.g., crosshairs) to be applied during the final blit [S1, S2, unofficial].
 
 ## How it works
-The method executes a single draw call that renders a primitive covering the entire viewport, sampling from the textures generated in the previous pass.
-
 **Inputs and Outputs:**
-*   **Input Textures:**
-    *   `colorTexture`: The accumulated color buffer from the first pass (e.g., splatted volume). Format: `GL_RGBA`, `GL_UNSIGNED_BYTE` [S1, unofficial].
-    *   `positionTexture`: Auxiliary data buffer (e.g., world-space positions or depth). Format: `GL_RGBA32F`, `GL_FLOAT` [S1, unofficial].
-*   **Uniforms:**
-    *   `viewportSize`: The resolution of the output screen $(W, H)$ [S1, unofficial].
-    *   `upscale`: A scaling factor used to determine the resolution of the input textures relative to the viewport. Default value is $1$ [S1, unofficial].
-    *   `crossSection`: A float parameter for debug visualization, clamped to $[0, 1]$ [S1, unofficial].
-*   **Output:** The default framebuffer (screen) [S1, unofficial].
+- **Inputs:**
+  - `colorTexture`: 2D texture containing the accumulated splat color, bound to unit 0. Format: `GL_RGBA`, type `GL_UNSIGNED_BYTE` [S1, unofficial].
+  - `positionTexture`: 2D texture containing auxiliary data (e.g., world-space positions), bound to unit 3. Format: `GL_RGBA32F`, type `GL_FLOAT` [S1, unofficial].
+  - `viewportSize`: Vector2 uniform specifying the target resolution [S1, unofficial].
+  - `upscale`: Scalar uniform dividing the first-pass texture resolution [S1, unofficial].
+  - `crossSection`: Scalar uniform for debug overlay positioning, clamped to $[0, 1]$ [S1, unofficial].
+- **Outputs:**
+  - Default framebuffer (screen) with the composited image.
 
 **Data Structures:**
-The intermediate rendering state is stored in a Framebuffer Object (FBO) with specific attachments [S1, unofficial]:
-1.  `GL_COLOR_ATTACHMENT0`: Bound to `colorTexture` (RGBA, Unsigned Byte).
-2.  `GL_COLOR_ATTACHMENT3`: Bound to `positionTexture` (RGBA32F, Float).
-3.  Draw Buffer Configuration: `drawBuffers[] = {GL_COLOR_ATTACHMENT0, GL_NONE, GL_NONE, GL_COLOR_ATTACHMENT3}` [S1, unofficial].
+The intermediate rendering state is stored in an FBO with two attachments [S1, unofficial]:
+1.  `GL_COLOR_ATTACHMENT0`: `colorTexture` (RGBA, Unsigned Byte).
+2.  `GL_COLOR_ATTACHMENT3`: `positionTexture` (RGBA32F, Float).
+Draw buffers are configured as `drawBuffers[] = {GL_COLOR_ATTACHMENT0, GL_NONE, GL_NONE, GL_COLOR_ATTACHMENT3}` [S1, unofficial].
 
-**Algorithm Steps:**
-1.  **Initialize Render Pass:** Begin a render pass labeled 'Screen Render Pass' [S2, unofficial].
-2.  **Configure Attachment:** Bind the current context's texture as the color attachment for this pass [S2, unofficial].
-3.  **Clear Buffer:** Clear the color attachment with value $\{r:0.0, g:0.0, b:0.0, a:1.0\}$ using `loadOp: 'clear'` and `storeOp: 'store'` [S2, unofficial].
-4.  **Bind Shaders:** Set up the fragment shader to sample from `colorTexture` (unit 0) and `positionTexture` (unit 3) [S1, unofficial].
-5.  **Set Uniforms:** Pass `viewportSize`, `upscale`, and `crossSection` to the shader [S1, unofficial]. Clamp `crossSection` using:
-    ```python
-    if crossSection < 0:
-        crossSection = 0
-    if crossSection > 1:
-        crossSection = 1
-    ```
-    [S1, unofficial].
-6.  **Render Primitive:** Draw the full-screen primitive (quad or triangle) using the configured pipeline [S1, S2, unofficial].
-7.  **End Pass:** Finalize the render pass [S2, unofficial].
+**Steps:**
+1.  **Pass 1 (Splatting):** Render the volume primitives into the FBO described above. The texture resolution is scaled by `upscale` (default 1) [S1, unofficial].
+2.  **Pass 2 (Screen Render Pass):**
+    a.  Bind the default framebuffer (ID 0) [S1, unofficial].
+    b.  Bind `colorTexture` to texture unit 0 and `positionTexture` to texture unit 3 [S1, unofficial].
+    c.  Set uniforms: `viewportSize`, `upscale`, and `crossSection` [S1, unofficial].
+    d.  Clear the color attachment with `{r:0.0, g:0.0, b:0.0, a:1.0}` and set `loadOp` to 'clear', `storeOp` to 'store' [S2, unofficial].
+    e.  Draw a full-screen primitive (triangle or quad) using the screen pass shader [S1, S2, unofficial].
+    f.  End the render pass [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def screen_quad_render_pass(context, color_texture, position_texture, viewport_width, viewport_height, upscale=1, cross_section=0.5):
-    """
-    Renders the pre-computed volume textures to the default framebuffer.
-    """
-    # 1. Bind default framebuffer (screen)
-    context.bind_framebuffer(GL_FRAMEBUFFER, 0)
-    
-    # 2. Bind textures to units
-    context.active_texture(GL_TEXTURE0)
-    context.bind_texture(GL_TEXTURE_2D, color_texture)
-    
-    context.active_texture(GL_TEXTURE3)
-    context.bind_texture(GL_TEXTURE_2D, position_texture)
-    
-    # 3. Set uniforms
-    shader.set_uniform("colorTexture", 0)
-    shader.set_uniform("positionTexture", 3)
-    shader.set_uniform("viewportSize", (viewport_width, viewport_height))
-    shader.set_uniform("upscale", upscale)
-    
-    # Clamp cross-section
+def screen_quad_render_pass(color_texture, position_texture, viewport_size, upscale, cross_section):
+    # Clamp cross-section to [0, 1]
     if cross_section < 0:
         cross_section = 0
     if cross_section > 1:
         cross_section = 1
-    shader.set_uniform("crossSection", cross_section)
-    
-    # 4. Draw full-screen primitive
-    # Using a full-screen triangle or quad that covers the viewport
-    draw_fullscreen_primitive(shader)
+
+    # Bind default framebuffer
+    bind_framebuffer(0)
+
+    # Bind textures
+    bind_texture(color_texture, unit=0)
+    bind_texture(position_texture, unit=3)
+
+    # Set uniforms
+    set_uniform("viewportSize", viewport_size)
+    set_uniform("upscale", upscale)
+    set_uniform("crossSection", cross_section)
+
+    # Begin render pass with clear
+    begin_render_pass(
+        color_attachment=color_texture,
+        clear_value=(0.0, 0.0, 0.0, 1.0),
+        load_op="clear",
+        store_op="store"
+    )
+
+    # Draw full-screen primitive (e.g., triangle or quad)
+    draw_fullscreen_primitive()
+
+    # End render pass
+    end_render_pass()
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Resolution Mismatch:** The input texture resolution is calculated as $\lfloor W / \text{upscale} \rfloor \times \lfloor H / \text{upscale} \rfloor$. If `upscale` is not an integer divisor of the viewport dimensions, filtering artifacts may occur [S1, unofficial].
-*   **Alpha Compositing:** The fragment shader must force output alpha to $1.0$ to prevent compositing artifacts on certain windowing systems like Wayland [S1, unofficial].
-*   **Debug Overlay:** If `crossSection` is active, the shader must inject pixel-level crosshair logic, which can interfere with standard blit operations if not handled in the fragment shader [S1, unofficial].
+- **Wayland Compositing:** On Wayland, forcing output alpha to 1.0 in the fragment shader prevents compositing artifacts [S1, unofficial].
+- **Upscale Factor:** If `upscale` > 1, the intermediate textures are smaller than the viewport, requiring filtering during the final draw [S1, unofficial].
 
 ## Subtopics
 
 ### [Screen-space blit / Resample copy](2563-screen-space-blit-resample-copy.md)
-Performs a screen-space copy with injected debug crosshairs and alpha forcing.
+Performs a screen-space copy with injected debug logic and alpha forcing.
 
 ### [Fullscreen Triangle Rendering](4230-fullscreen-triangle-rendering.md)
-Uses a single oversized triangle to avoid diagonal seams.
+Uses a single oversized triangle to avoid diagonal seams and double-shading artifacts.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ relative to volume size; depends only on screen resolution $W \times H$ [S1, S2, unofficial].
-*   **Memory Complexity:** $O(1)$ additional memory; reuses existing FBO textures [S1, S2, unofficial].
-*   **Performance:** Extremely fast, limited only by fill-rate and fragment shader complexity [S1, S2, unofficial].
-*   **Strengths:** Decouples volume computation from display; allows for post-processing effects [S1, S2, unofficial].
-*   **Limitations:** Requires two passes; auxiliary data (like positions) must be stored in textures, increasing memory bandwidth usage [S1, unofficial].
-*   **When to use:** When the volume data is already computed in an FBO and needs to be displayed or overlaid [S1, S2, unofficial].
-*   **When not to use:** For single-pass ray casting where no intermediate buffer is needed [S1, S2, unofficial].
+- **Time Complexity:** $O(1)$ relative to volume size; depends only on screen resolution.
+- **Memory Complexity:** $O(W \times H)$ for the intermediate FBO attachments [S1, unofficial].
+- **Strengths:** Decouples volume rendering from display output, enabling post-processing and debug overlays [S1, S2, unofficial].
+- **Limitations:** Requires two passes; intermediate FBOs consume VRAM [S1, unofficial].
+- **When to use:** When post-processing, debug overlays, or separate auxiliary buffer handling is required [S1, S2, unofficial].
 
 ## Background
-The method originates from standard GPU rendering pipelines where off-screen rendering (FBOs) is used for intermediate computations [S1, S2, unofficial]. It is commonly used in real-time volume visualization tools and WebGPU-based renderers to separate the heavy splatting/compositing pass from the final presentation pass [S1, S2, unofficial].
+Originating from standard OpenGL/WebGPU rendering pipelines, this method is used in real-time volume visualization tools like Zazen and WebGPU volume renderer demos [S1, S2, unofficial]. It leverages hardware-accelerated rasterization for the final composition step [S1, S2, unofficial].
 
 ## Sources
 [S1] gabrielmuller/zazen, https://github.com/gabrielmuller/zazen, fetched 2026-10-26 (unofficial)

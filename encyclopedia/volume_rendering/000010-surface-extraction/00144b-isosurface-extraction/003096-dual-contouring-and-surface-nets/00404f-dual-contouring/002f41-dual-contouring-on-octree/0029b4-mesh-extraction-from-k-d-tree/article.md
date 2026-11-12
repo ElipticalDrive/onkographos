@@ -1,107 +1,92 @@
 # Mesh Extraction from K-D Tree
+
 Also called: K-D Tree Contouring, Kdtree::extractMesh
 
 ## Overview
-Extracts a triangle mesh from a scalar field by traversing a hierarchical K-D tree structure, generating vertex indices, and performing contouring on cells, faces, and edges [S1, unofficial]. It differs from standard marching cubes by operating directly on the hierarchical K-D tree structure, allowing for adaptive resolution and handling of complex topologies through recursive contour edge traversal [S1, unofficial].
+Extracts a triangle mesh from a K-D tree by traversing the tree structure, generating vertex indices, and performing contouring on cells, faces, and edges [S1, unofficial]. Unlike octrees which group cells by spatial position, this method groups cells by value intervals, allowing for faster determination of active cells at the cost of higher memory usage [S2, unofficial]. It builds on [Dual Contouring on Octree](4469-dual-contouring-on-octree.md) by adapting the recursive traversal and contouring logic to a K-D tree hierarchy.
 
 ## How it works
-**Inputs and Outputs:**
-- Input: A K-D tree representing a scalar field, a threshold value for isosurface extraction [S1, unofficial].
-- Output: A mesh object containing vertices and triangle indices [S1, unofficial].
+**Inputs:** A K-D tree representing a scalar field, a threshold value for isosurface extraction, and a grid of vertices.
+**Outputs:** A mesh object containing vertices and triangle indices.
 
 **Data Structures:**
-- `Mesh`: Contains vertex positions and triangle indices [S1, unofficial].
-- `GridHolder`: Represents a node in the K-D tree, containing `grid.minCode`, `grid.maxCode`, and references to children [S1, unofficial].
-- `PositionCode`: A structure representing coordinates in the grid, with fields `minCode` and `maxCode` for each dimension [S1, unofficial].
-- `ScalarField`: Provides access to scalar values at specific grid positions via `index()` [S1, unofficial].
+*   **Mesh:** Stores vertex positions and triangle indices.
+*   **GridHolder:** Represents a node in the K-D tree. Contains `grid.minCode` and `grid.maxCode` (PositionCode arrays defining the bounding box of the node in grid coordinates), `children` (array of two GridHolder pointers), `planeDir` (direction of the splitting plane), and `axis` (axis along which the split occurs).
+*   **PositionCode:** An array or structure representing coordinates in the grid space.
+*   **ScalarField:** Provides access to scalar values at grid positions via `index(pos)`.
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+**Algorithm Steps:**
 
-```python
-def extract_mesh(kd_tree, threshold):
-    mesh = Mesh()
-    # Generate vertex indices by traversing the tree and adding vertices from grid.vertices to mesh [S1, unofficial]
-    for node in traverse(kd_tree):
-        mesh.add_vertices(node.grid.vertices)
-    contour_cell(kd_tree, threshold, mesh)
-    return mesh
+1.  **Initialization:** Create a new `Mesh` object.
+2.  **Vertex Generation:** Traverse the K-D tree to collect all unique vertices from `grid.vertices` and add them to the mesh. [S1, unofficial]
+3.  **Recursive Contouring:** Call `contourCell` starting from the root node.
 
-def contour_cell(node, threshold, mesh):
-    if node is None or is_contouring_leaf(node, threshold):
-        return [S1, unofficial]
-    face_kd = FaceKd(node.children[0], node.children[1]) [S1, unofficial]
-    contour_face(node.plane_dir, node.axis(), face_kd, mesh) [S1, unofficial]
-    contour_cell(node.children[0], threshold, mesh) [S1, unofficial]
-    contour_cell(node.children[1], threshold, mesh) [S1, unofficial]
+    **`contourCell(node, threshold)`:**
+    1.  If `node` is null, return.
+    2.  If `isContouringLeaf(node, threshold)` is true, return. [G] (This function likely checks if the node's value range crosses the threshold or if it is a leaf node suitable for direct contouring).
+    3.  Create a `FaceKd` object from `node->children[0]` and `node->children[1]`. [G] (This represents the interface between the two children).
+    4.  Call `contourFace(node->planeDir, node->axis(), FaceKd)`.
+    5.  Recursively call `contourCell(node->children[0], threshold)`.
+    6.  Recursively call `contourCell(node->children[1], threshold)`.
 
-def contour_face(plane_dir, axis, face_kd, mesh):
-    if face_kd.nodes[0] is None or face_kd.nodes[1] is None:
-        return [S1, unofficial]
-    if is_contouring_leaf(face_kd.nodes[0]) and is_contouring_leaf(face_kd.nodes[1]):
-        return [S1, unofficial]
-    if not check_minimal_face(face_kd):
-        return [S1, unofficial]
-    # Traverse down children until is_contouring_leaf or plane_dir != dir [S1, unofficial]
-    for node in traverse_down(face_kd):
-        if not is_leaf(node):
-            contour_face(plane_dir, node.axis(), FaceKd(node.children[0], node.children[1]), mesh) [S1, unofficial]
-        if node.axis_within_face_bounds():
-            line = construct_line(node)
-            contour_edge(line, mesh) [S1, unofficial]
+    **`contourFace(planeDir, axis, faceNodes)`:**
+    1.  Let `nodes[0]` and `nodes[1]` be the two nodes defining the face.
+    2.  If `nodes[0]` or `nodes[1]` is null, return.
+    3.  If both `nodes[0]` and `nodes[1]` are `isContouringLeaf`, return.
+    4.  Check if the face is minimal using `checkMinimalFace(nodes[0], nodes[1])`. [G] (If not minimal, return).
+    5.  Traverse down the children of `nodes[0]` and `nodes[1]` until `isContouringLeaf` is true or the node's `axis` differs from `planeDir`.
+    6.  For each node in the traversal:
+        a.  If the node is not a leaf, recursively call `contourFace` on its children.
+        b.  If the node's `axis` is within the face bounds, construct a line segment along the intersection and call `contourEdge`.
 
-def check_sign(nodes, quad_dir1, quad_dir2, scalar_field, side, min_end, max_end):
-    dir = 3 - quad_dir1 - quad_dir2 [S1, unofficial]
-    if nodes[0] != nodes[1]:
-        max_end = min_end = nodes[0].grid.max_code [S1, unofficial]
-    else:
-        max_end = min_end = nodes[3].grid.min_code [S1, unofficial]
-    max_end[dir] = min(nodes[0].grid.max_code[dir], nodes[1].grid.max_code[dir],
-                       nodes[2].grid.max_code[dir], nodes[3].grid.max_code[dir]) [S1, unofficial]
-    min_end[dir] = max(nodes[0].grid.min_code[dir], nodes[1].grid.min_code[dir],
-                       nodes[2].grid.min_code[dir], nodes[3].grid.min_code[dir]) [S1, unofficial]
-    if min_end[dir] >= max_end[dir]:
-        return False [S1, unofficial]
-    v1 = scalar_field.index(min_end)
-    v2 = scalar_field.index(max_end) [S1, unofficial]
-    if (v1 >= 0 and v2 >= 0) or (v1 < 0 and v2 < 0):
-        return False [S1, unofficial]
-    side[0] = 0 if v2 >= 0 and v1 <= 0 else 1 [S1, unofficial]
-    return True [S1, unofficial]
+    **`checkSign(nodes, quadDir1, quadDir2, scalarField, side, minEnd, maxEnd)`:**
+    This function determines if a quad defined by `quadDir1` and `quadDir2` intersects the isosurface.
+    1.  Calculate `dir = 3 - quadDir1 - quadDir2`.
+    2.  Determine `minEnd` and `maxEnd` coordinates for the edge along `dir`:
+        *   If `nodes[0] != nodes[1]`:
+            `minEnd = maxEnd = nodes[0]->grid.maxCode`
+        *   Else:
+            `minEnd = maxEnd = nodes[3]->grid.minCode`
+        *   Update `maxEnd[dir]`:
+            $$maxEnd[dir] = \min(\min(nodes[0]->grid.maxCode[dir], nodes[1]->grid.maxCode[dir]), \min(nodes[2]->grid.maxCode[dir], nodes[3]->grid.maxCode[dir]))$$
+        *   Update `minEnd[dir]`:
+            $$minEnd[dir] = \max(\max(nodes[0]->grid.minCode[dir], nodes[1]->grid.minCode[dir]), \max(nodes[2]->grid.minCode[dir], nodes[3]->grid.minCode[dir]))$$
+    3.  If `minEnd[dir] >= maxEnd[dir]`, return `false`.
+    4.  Get scalar values: $v_1 = s->index(minEnd)$, $v_2 = s->index(maxEnd)$.
+    5.  If $(v_1 \ge 0 \land v_2 \ge 0) \lor (v_1 < 0 \land v_2 < 0)$, return `false`.
+    6.  Set `side`: If $v_2 \ge 0$ and $v_1 \le 0$, `side = 0`; else `side = 1`.
+    7.  Return `true`.
 
-def generate_quad(nodes, quad_dir1, quad_dir2, mesh, scalar_field, threshold):
-    side = [0]
-    min_end = PositionCode()
-    max_end = PositionCode()
-    if check_sign(nodes, quad_dir1, quad_dir2, scalar_field, side, min_end, max_end): [S1, unofficial]
-        mesh.add_quad(min_end, max_end) [S1, unofficial]
-```
+    **`generateQuad(nodes, quadDir1, quadDir2, mesh, scalarField, threshold)`:**
+    1.  Call `checkSign` to determine `side`, `minEnd`, and `maxEnd`.
+    2.  If `checkSign` returns `false`, return.
+    3.  Generate the quad geometry using the determined endpoints and add to `mesh`. [G] (Specific vertex generation logic is not fully detailed in the provided snippets, but it uses the scalar field and threshold to interpolate or position vertices).
 
 **Parameters:**
-- `threshold`: The scalar value at which the isosurface is extracted. Typical values depend on the scalar field's range [S1, unofficial].
+*   `threshold`: The scalar value defining the isosurface. Typical values depend on the scalar field range.
+*   `unitSize`: A static float member in `RectilinearGrid`, likely representing the physical size of a grid cell. [S1, unofficial]
 
 **Edge Cases and Pitfalls:**
-- Null nodes in the K-D tree traversal must be handled to avoid segmentation faults [S1, unofficial].
-- Precision issues may arise when comparing scalar values for sign changes; ensure robust comparison logic [S1, unofficial].
-- Degenerate cases where `minEnd[dir] >= maxEnd[dir]` indicate no intersection and should be skipped [S1, unofficial].
+*   **Null Nodes:** The algorithm explicitly checks for null nodes in `contourFace` and `contourCell` to prevent dereferencing errors.
+*   **Non-Minimal Faces:** The `checkMinimalFace` function (implementation not provided) is crucial for avoiding redundant or invalid contouring on large faces. [G]
+*   **Precision:** The comparison `minEnd[dir] >= maxEnd[dir]` relies on integer grid coordinates, avoiding floating-point precision issues in boundary checks. However, scalar value comparisons ($v_1, v_2$) are subject to floating-point precision.
 
 ## Subtopics
 
 ### [Discrete k-d tree isosurface extraction](4964-discrete-k-d-tree-isosurface-extraction.md)
-Extracts an isosurface from a scalar field by traversing a discrete k-d tree hierarchy along contour edges, refining nodes until contouring leaves are found, then generating quads. It differs from standard marching cubes by operating directly on the hierarchical k-d tree structure, allowing for adaptive resolution and handling of complex topologies through recursive contour edge traversal.
+Extracts an isosurface by traversing a discrete k-d tree hierarchy along contour edges, refining nodes until contouring leaves are found, and generating quads. Groups cells by value intervals for faster active cell determination at the cost of higher memory usage.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Not given in the sources.
-- **Strengths:** Adaptive resolution, efficient handling of complex topologies, direct operation on hierarchical structures [S1, unofficial].
-- **Limitations:** Not given in the sources.
-- **When to Use:** Not given in the sources.
-- **When Not to Use:** Not given in the sources.
+*   **Time Complexity:** Depends on the tree depth and the number of active cells. Traversal is $O(N)$ where $N$ is the number of nodes, but contouring is only performed on active cells.
+*   **Memory Complexity:** Higher than octree-based methods due to the grouping of cells by value intervals, which may require storing more metadata or larger node structures. [S2, unofficial]
+*   **Strengths:** Faster determination of active cells compared to spatial grouping (octrees).
+*   **Limitations:** Higher memory usage.
+*   **When to use:** When the scalar field has distinct value intervals that can be efficiently grouped, and memory is not the primary constraint.
+*   **When not to use:** When memory usage is critical or the scalar field does not exhibit clear value-based clustering.
 
 ## Background
-The method is implemented in the `KdtreeISO` repository by Danielmelody [S1, unofficial]. It leverages the hierarchical nature of K-D trees to efficiently traverse and contour scalar fields, offering an alternative to traditional grid-based surface extraction techniques [S1, unofficial].
+This method is implemented in the open-source project `KdtreeISO` by Danielmelody [S1, unofficial]. It is an adaptation of dual contouring techniques to K-D trees, leveraging the tree's structure for efficient isosurface extraction.
 
 ## Sources
 [S1] Danielmelody/KdtreeISO, https://github.com/Danielmelody/KdtreeISO, fetched 2026-10-27 (unofficial)
+[S2] Discrete k-d tree isosurface extraction, https://github.com/Danielmelody/KdtreeISO/blob/master/README.md (inferred from context), fetched 2026-10-27 [S2, unofficial]

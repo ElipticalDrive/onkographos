@@ -1,0 +1,134 @@
+# Regular Isosurface Extraction
+
+Also called: Edge Intersection Method, Zero-Isovalue Polygonization
+
+## Overview
+Regular Isosurface Extraction computes the zero-isovalue intersection curve on a cubic grid cell by identifying edge crossings, grouping them by face, sorting them, and connecting adjacent pairs with line segments [S1, unofficial]. It differs from topological methods like Marching Cubes by explicitly constructing the intersection geometry through face-wise pairing rather than relying on a precomputed lookup table for cell topology [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A scalar field value $d$ at each of the 8 vertices of a unit cube. The cube is defined by coordinates $a = -0.5$ and $b = 0.5$ [S1, unofficial].
+*   **Output:** A set of line segments (or cylinders) representing the intersection of the zero-isovalue surface with the cube [S1, unofficial].
+
+**Data Structures**
+The method relies on fixed connectivity arrays for a cube:
+1.  **Vertices:** 8 points defined by combinations of $a$ and $b$ [S1, unofficial].
+    *   $V_0=(a,a,a), V_1=(b,a,a), V_2=(a,b,a), V_3=(b,b,a)$
+    *   $V_4=(a,a,b), V_5=(b,a,b), V_6=(a,b,b), V_7=(b,b,b)$
+2.  **Edges:** An array of 12 pairs of vertex indices [S1, unofficial]:
+    *   Front: $[0,1], [0,2], [1,3], [2,3]$
+    *   Side: $[0,4], [1,5], [2,6], [3,7]$
+    *   Back: $[4,5], [4,6], [5,7], [6,7]$
+3.  **EdgeToFaces:** An array of 12 pairs of face indices (0-5) mapping each edge to the two faces it belongs to [S1, unofficial]:
+    *   Front edges: $[0,2], [0,1], [0,4], [0,3]$
+    *   Side edges: $[1,2], [2,4], [1,3], [3,4]$
+    *   Back edges: $[2,5], [1,5], [4,5], [3,5]$
+4.  **Faces:** An array of 6 empty lists, where each list stores indices into the global `IntersectionPoints` array [S1, unofficial].
+5.  **FaceAsymptoticSort:** A fixed array `[0, 2, 0, 0, 2, 0]` mapping face indices to the coordinate axis (x=0, y=1, z=2) used for sorting points on that face [S1, unofficial].
+
+**Algorithm Steps**
+1.  Initialize an empty list `IntersectionPoints` and an array `Faces` containing six empty lists [S1, unofficial].
+2.  Iterate over the 12 predefined cube edges. For each edge $i$ connecting vertices $e[0]$ and $e[1]$:
+    a. Retrieve scalar values $u = d[e[0]]$ and $v = d[e[1]]$ [S1, unofficial].
+    b. Retrieve 3D positions $upos = Vertices[e[0]]$ and $vpos = Vertices[e[1]]$ [S1, unofficial].
+    c. Check for intersection using the condition $u \cdot v \le 0$ [S1, unofficial].
+    d. If an intersection exists, compute the interpolation parameter:
+       $$t = \frac{u}{u - v}$$
+       where $t \in [0, 1]$ [S1, unofficial].
+    e. Calculate the intersection point:
+       $$P = upos + t \cdot (vpos - upos)$$
+    f. Append $P$ to `IntersectionPoints`.
+    g. Let $idx$ be the index of the newly added point in `IntersectionPoints`. Add $idx$ to `Faces[EdgeToFaces[i][0]]` and `Faces[EdgeToFaces[i][1]]` [S1, unofficial].
+3.  For each of the six faces $f$ (index $i$ from 0 to 5):
+    a. If the face contains more than one intersection point, sort the points in `Faces[i]` based on the coordinate component specified by `FaceAsymptoticSort[i]` [S1, unofficial].
+    b. Iterate through the sorted points in steps of two. For each pair, create a line segment (or cylinder) connecting them [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_regular_isosurface(cube_data, vertices, edges, edge_to_faces, face_asymptotic_sort):
+    """
+    cube_data: list of 8 scalar values at cube vertices
+    vertices: list of 8 (x,y,z) tuples
+    edges: list of 12 pairs of vertex indices
+    edge_to_faces: list of 12 pairs of face indices
+    face_asymptotic_sort: list of 6 integers (0, 1, or 2) indicating sort axis
+    Returns: list of line segments (pairs of points)
+    """
+    intersection_points = []
+    faces = [[] for _ in range(6)]
+    segments = []
+
+    # Step 1 & 2: Find intersections on edges
+    for i, (v_idx1, v_idx2) in enumerate(edges):
+        u = cube_data[v_idx1]
+        v = cube_data[v_idx2]
+        
+        # Check for zero-isovalue crossing
+        if u * v <= 0:
+            pos1 = vertices[v_idx1]
+            pos2 = vertices[v_idx2]
+            
+            # Avoid division by zero if both are zero (degenerate)
+            if u == v:
+                t = 0.0
+            else:
+                t = u / (u - v)
+            
+            # Linear interpolation
+            p = (
+                pos1[0] + t * (pos2[0] - pos1[0]),
+                pos1[1] + t * (pos2[1] - pos1[1]),
+                pos1[2] + t * (pos2[2] - pos1[2])
+            )
+            
+            idx = len(intersection_points)
+            intersection_points.append(p)
+            
+            # Add to the two faces sharing this edge
+            face1, face2 = edge_to_faces[i]
+            faces[face1].append(idx)
+            faces[face2].append(idx)
+
+    # Step 3: Connect points on each face
+    for face_idx in range(6):
+        point_indices = faces[face_idx]
+        if len(point_indices) < 2:
+            continue
+            
+        # Sort points based on the asymptotic sort axis
+        sort_axis = face_asymptotic_sort[face_idx]
+        
+        # Create a list of (coordinate_value, point_index) for sorting
+        sorted_indices = sorted(point_indices, key=lambda idx: intersection_points[idx][sort_axis])
+        
+        # Pair adjacent points
+        for j in range(0, len(sorted_indices) - 1, 2):
+            p1 = intersection_points[sorted_indices[j]]
+            p2 = intersection_points[sorted_indices[j+1]]
+            segments.append((p1, p2))
+            
+    return segments
+```
+
+**Parameters**
+*   `a = -0.5`, `b = 0.5`: Coordinates defining the unit cube centered at the origin [S1, unofficial].
+*   `SphereRadius`: Radius used to visualize intersection points as spheres (visualization only) [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Odd Point Count:** The algorithm assumes an even number of intersection points per face. If the count is odd, the loop `j+=2` will skip the last point [S1, unofficial]. This can occur in degenerate cases or with non-zero isovalue thresholds [S1, unofficial].
+*   **Zero Division:** If $u = v = 0$, the interpolation parameter $t$ is undefined. A guard such as `if u == v: t = 0.0` is required [G].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per cube, as it performs a fixed number of operations (12 edge checks, 6 face sorts) regardless of grid size.
+*   **Memory Complexity:** $O(1)$ per cube for temporary storage of intersection points and face lists.
+*   **Strengths:** Simple implementation; explicit control over intersection geometry; no need for large lookup tables [S1, unofficial].
+*   **Limitations:** Does not guarantee manifold mesh connectivity across cube boundaries without additional stitching logic; sensitive to degenerate cases where an odd number of intersections occur on a face [S1, unofficial].
+*   **When to use:** Suitable for visualizing zero-isovalue surfaces on regular grids where simplicity is prioritized over topological robustness [S1, unofficial].
+
+## Background
+The method is described in the context of interactive isosurface extraction tools, specifically within the `weinkauf/InteractiveIsosurfaceExtraction` repository [S1, unofficial]. It serves as a foundational technique for understanding how scalar fields intersect with cubic grid cells before applying more complex topological treatments [S1, unofficial].
+
+## Sources
+[S1] weinkauf/InteractiveIsosurfaceExtraction, https://github.com/weinkauf/InteractiveIsosurfaceExtraction, fetched 2026-10-27 (unofficial)

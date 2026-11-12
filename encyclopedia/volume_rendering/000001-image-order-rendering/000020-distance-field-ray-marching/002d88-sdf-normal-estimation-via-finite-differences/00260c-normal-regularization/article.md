@@ -3,117 +3,61 @@
 Also called: spatial interpolation of normals
 
 ## Overview
-Normal Regularization is a technique to alleviate numerical instability (jitter) of surface normals near the Unsigned Distance Function (UDF) zero-level set (cusps) by replacing naively sampled normals with interpolated normals from the neighborhood [S1]. It prevents highly bright and dark regions in 2D images that occur with high-quality reconstruction without it [S1].
+Normal Regularization is a technique to alleviate numerical instability (jitter) of surface normals near the Unsigned Distance Function (UDF) zero-level set, specifically at cusps where the function is not first-order differentiable [S1]. It solves the problem of unreliable gradients leading to inaccurate surface reconstruction in differentiable volume rendering by replacing naively sampled normals with interpolated normals from the neighborhood [S1]. It is distinguished from its siblings by its specific focus on stabilizing gradients for UDF-based open surface reconstruction during volume rendering, rather than general gradient estimation or post-processing [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A point $p(t_i)$ on the ray, the UDF $\Psi(\cdot)$, its derivative $\Psi'(\cdot)$ (returning gradients), and a neighbor count $K$ [S1].
-*   **Output:** A regularized normal vector $\mathbf{n}(p(t_i))$ [S1].
+*   **Input:** A sequence of points $p(t_i)$ along a ray, the UDF $\Psi(\cdot)$, its derivative $\Psi'(\cdot)$ which returns gradients, and a neighborhood size parameter $K$.
+*   **Output:** A regularized normal vector $\mathbf{n}(p(t_i))$ at the query point.
 
 **Data Structures:**
-*   The method requires access to $K$ neighboring points $p(t_{i-k})$ for $k=1 \dots K$, typically previous points along the ray or in the local spatial neighborhood [S1].
+*   **Point Sequence:** An ordered list of 3D points $p(t_i)$ sampled along the ray, where $t_i$ is the distance along the ray.
+*   **Gradient Buffer:** Stores $\Psi'(p(t_i-k))$ for $k \in [1, K]$.
 
 **Parameters:**
-*   $K$: Number of neighboring points used for interpolation [S1].
-*   $\Psi'$: Derivative of UDF $\Psi$, returning gradients [S1].
+*   **$K$:** Number of neighboring points used for interpolation. Typical values are not explicitly given in the sources, but it defines the window size [S1].
 
-**Steps:**
-1.  Retrieve $K$ neighboring points $p(t_{i-k})$ for $k=1 \dots K$ [S1].
-2.  For each neighbor $k$, compute the weight $w_{i-k}$ as the squared Euclidean distance from the current point $p(t_i)$ to the neighbor $p(t_{i-k})$:
+**Algorithm:**
+1.  Identify the query point $p(t_i)$ on the ray where the normal is needed.
+2.  Select $K$ preceding points $p(t_{i-k})$ for $k=1, \dots, K$ along the ray.
+3.  Compute the Euclidean distance squared between the query point and each neighbor:
     $$w_{i-k} = \|p(t_i) - p(t_{i-k})\|_2^2$$
-3.  Evaluate the UDF gradient at each neighbor: $\mathbf{g}_{i-k} = \Psi'(p(t_{i-k}))$ [S1].
-4.  Compute the weighted sum of the gradients:
-    $$\mathbf{S} = \sum_{k=1}^K w_{i-k} \mathbf{g}_{i-k}$$
-5.  Compute the sum of the weights:
-    $$W = \sum_{k=1}^K w_{i-k}$$
-6.  Compute the regularized normal:
-    $$\mathbf{n}(p(t_i)) = \frac{\mathbf{S}}{W}$$
-7.  (Optional) Renormalize $\mathbf{n}(p(t_i))$ to unit length if required by the downstream shading model [G].
+    [S1]
+4.  Evaluate the UDF gradient at each neighbor: $\mathbf{g}_{i-k} = \Psi'(p(t_{i-k}))$.
+5.  Compute the weighted sum of the gradients:
+    $$\mathbf{N}_{sum} = \sum_{k=1}^K w_{i-k} \mathbf{g}_{i-k}$$
+    [S1]
+6.  Compute the sum of the weights:
+    $$W_{sum} = \sum_{k=1}^K w_{i-k}$$
+    [S1]
+7.  Calculate the regularized normal:
+    $$\mathbf{n}(p(t_i)) = \frac{\mathbf{N}_{sum}}{W_{sum}}$$
+    [S1]
+8.  (Optional) Renormalize $\mathbf{n}(p(t_i))$ to unit length if required by the shading model [G].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def normal_regularization(p_current, neighbor_points, udf_gradient_func, K):
-    """
-    Computes the regularized normal at p_current by interpolating gradients
-    from K neighboring points.
-    
-    Args:
-        p_current: Current 3D point on the ray.
-        neighbor_points: List of K points p(t_{i-k}) for k=1..K.
-        udf_gradient_func: Function returning the gradient of the UDF at a point.
-        K: Number of neighbors to use for interpolation.
-        
-    Returns:
-        Regularized normal vector.
-    """
-    weighted_sum = [0.0, 0.0, 0.0]
-    weight_total = 0.0
-    
-    for k in range(K):
-        p_neighbor = neighbor_points[k]
-        
-        # Calculate squared Euclidean distance
-        diff_x = p_current[0] - p_neighbor[0]
-        diff_y = p_current[1] - p_neighbor[1]
-        diff_z = p_current[2] - p_neighbor[2]
-        w = diff_x**2 + diff_y**2 + diff_z**2
-        
-        # Get gradient at neighbor
-        grad = udf_gradient_func(p_neighbor)
-        
-        # Accumulate weighted gradient
-        weighted_sum[0] += w * grad[0]
-        weighted_sum[1] += w * grad[1]
-        weighted_sum[2] += w * grad[2]
-        weight_total += w
-        
-    if weight_total == 0:
-        # Fallback if all neighbors are at the same location (degenerate)
-        return udf_gradient_func(p_current)
-        
-    # Compute average
-    regularized_normal = [
-        weighted_sum[0] / weight_total,
-        weighted_sum[1] / weight_total,
-        weighted_sum[2] / weight_total
-    ]
-    
-    # Renormalize to unit length
-    length_sq = regularized_normal[0]**2 + regularized_normal[1]**2 + regularized_normal[2]**2
-    length = length_sq**0.5
-    if length > 0:
-        regularized_normal[0] /= length
-        regularized_normal[1] /= length
-        regularized_normal[2] /= length
-        
-    return regularized_normal
-```
-
-**Edge Cases and Pitfalls:**
+**Pitfalls:**
 *   **Cusps:** Points in the UDF's zero-level set are cusps that are not first-order differentiable, causing gradients of sampled points in the vicinity of the learned surface to be numerically unstable (jittered) [S1].
-*   **Weight Calculation:** The weight is the squared distance $w_{i-k} = \|p(t_i) - p(t_{i-k})\|_2^2$ [S1].
-*   **Degenerate Input:** If $W=0$ (all neighbors are at the same location as $p(t_i)$), the division is undefined, requiring a fallback to the naive gradient [G].
+*   **Boundary Conditions:** The method assumes preceding points are available. If $K$ exceeds the number of available previous samples, the window must be truncated or padded [G].
+*   **Weighting:** Using squared distance emphasizes closer points significantly more than linear distance [S1].
 
 ## Subtopics
 
-### Shepard Normalization for Normal Maps
-A post-processing step to produce normal images for evaluation and visualization by Shepard-normalizing per-surfel unit normals within each surface layer and renormalizing the result [S2, unofficial]. It involves two steps: 1) Shepard-normalize the per-surfel unit normals within each surface layer, and 2) Renormalize the resulting vector to unit length [S2, unofficial]. This method is used to recover smoother normals and more faithful specular highlights in inverse rendering [S2, unofficial].
-
 ### [Robust Structure Rendering](10494-robust-structure-rendering.md)
-Rendering for structures with consistently well-defined boundaries and rapid density changes normal to the boundary (e.g., bone in CT). It retains the original scene for normal estimation but prepares the structure via filtering/interpolation.
+Robust Structure Rendering is a methodology for visualizing structures with consistently well-defined boundaries and rapid density changes normal to the boundary, such as bone in CT scans. It addresses the problem of digitization effects and numerical instability in normal estimation by retaining the original scene for scene-space normal estimation while preparing the structure itself via combinations of interpolation, grey transforms, and filtering. It is distinguished from frail structure rendering by its reliance on the original scene's density gradients for normals, assuming the structure satisfies specific robustness conditions.
+
+### Shepard Normalization for Normal Maps
+Shepard Normalization for Normal Maps is a post-processing step to produce normal images for evaluation and visualization by Shepard-normalizing per-surfel unit normals within each surface layer and renormalizing the result [S2, unofficial]. The steps are: 1) Shepard-normalize the per-surfel unit normals within each surface layer; 2) Renormalize the resulting vector to unit length [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Strengths:** Alleviates jitter near cusps; prevents highly bright and dark regions in 2D images [S1].
-*   **Limitations:** Not given in the sources.
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+*   **Time Complexity:** $O(K)$ per query point, where $K$ is the number of neighbors.
+*   **Memory Complexity:** $O(K)$ to store neighbor gradients and weights.
+*   **Strengths:** Prevents highly bright and dark regions in 2D images that occur with high-quality reconstruction without it, leading to smoother open surface reconstruction [S1].
+*   **Limitations:** Introduces spatial smoothing which may reduce high-frequency geometric detail if $K$ is too large [S1].
+*   **When to use:** When rendering UDF-based surfaces where gradient jitter at the zero-level set causes visual artifacts [S1].
+*   **When not to use:** When exact first-order differentiability is required at cusps or when high-frequency detail preservation is critical and jitter is acceptable [S1].
 
 ## Background
-Originated in "NeUDF: Leaning Neural Unsigned Distance Fields with Volume Rendering" [S1]. It is used in differentiable volume rendering for high-fidelity open surface reconstruction [S1].
+Normal Regularization was introduced in the context of learning Neural Unsigned Distance Fields with Volume Rendering [S1]. It addresses the inherent instability of gradients at the zero-level set of UDFs, which are non-differentiable at cusps [S1]. The technique leverages the fact that unstable normals only exist near the surface, using offset points to approximate the unstable normal [S1].
 
 ## Sources
 [S1] NeUDF: Leaning Neural Unsigned Distance Fields with Volume Rendering, https://doi.org/10.1109/cvpr52729.2023.00031, fetched 2026-10-26

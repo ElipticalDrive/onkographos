@@ -3,134 +3,111 @@
 Also called: intersectOctree
 
 ## Overview
-Calculates the entry and exit distances ($t$-values) of a ray relative to the axis-aligned bounding box (AABB) of an octree root node [S1, unofficial]. It normalizes the ray direction to be positive to simplify subsequent intersection logic and handles zero-direction components to prevent division by zero [S1, unofficial]. This method serves as the initial boundary check for [Octree Raycasting](11317-octree-raycasting.md), determining whether a ray intersects the octree's spatial extent before traversal begins.
+Calculates the entry and exit distances of a ray relative to the bounding box of an octree root node [S1, unofficial]. It normalizes the ray direction to be strictly positive to simplify intersection logic and handles zero-direction components to prevent division by zero [S1, unofficial]. This method serves as the core intersection test within the broader [Octree Raycasting](11317-octree-raycasting.md) framework, determining if a ray intersects the octree's spatial bounds before initiating traversal [S1, unofficial]. It distinguishes itself from [Ray-Octant Traversal (Entry)](11321-ray-octant-traversal-entry.md) by operating on the aggregate root bounding box rather than individual octant primitives, providing the initial hit test for the entire structure.
 
 ## How it works
 **Inputs:**
-- Ray origin $\mathbf{o} = (o_x, o_y, o_z)$
-- Ray direction $\mathbf{d} = (d_x, d_y, d_z)$
-- Octree bounding box defined by minimum corner $\mathbf{min}_{oct}$ and maximum corner $\mathbf{max}_{oct}$
+*   `ray`: A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+*   `octree`: An octree structure with defined bounds.
+*   `flags`: A `RaycastingFlags` object (integer) to store axis flip information.
 
 **Outputs:**
-- Array $[t_{x0}, t_{y0}, t_{z0}, t_{x1}, t_{y1}, t_{z1}]$ if the ray intersects the bounding box, where $t_{i0}$ is the entry distance and $t_{i1}$ is the exit distance along axis $i$.
-- `null` if the ray does not intersect the bounding box.
-- Flags indicating axis flips (stored in a `RaycastingFlags` object) [S1, unofficial].
+*   An array `[tx0, ty0, tz0, tx1, ty1, tz1]` if the ray hits the octree, where $t_{x0}, t_{y0}, t_{z0}$ are entry distances and $t_{x1}, t_{y1}, t_{z1}$ are exit distances for each axis.
+*   `null` if the ray does not intersect the octree.
 
 **Data Structures:**
-- `RaycastingFlags`: An integer or object storing bitmasks. Bit 0 (value 1) indicates Z flip, Bit 1 (value 2) indicates Y flip, Bit 2 (value 4) indicates X flip [S1, unofficial].
+*   `RaycastingFlags`: An integer where Bit 0 (value 1) indicates Z flip, Bit 1 (value 2) indicates Y flip, and Bit 2 (value 4) indicates X flip [S1, unofficial].
 
 **Steps:**
-1.  **Translate Extents:** Translate the octant extents to the scene origin. Set local minimum $\mathbf{min} = (0, 0, 0)$ and local maximum $\mathbf{max} = \mathbf{max}_{oct} - \mathbf{min}_{oct}$ [S1, unofficial].
-2.  **Compute Dimensions:** Calculate dimensions $\mathbf{dim} = \mathbf{max} - \mathbf{min}$ and half-dimensions $\mathbf{halfDim} = \mathbf{dim} \times 0.5$ [S1, unofficial].
-3.  **Translate Ray Origin:** Translate the ray origin to the center of the octant: $\mathbf{o}' = \mathbf{o} - \mathbf{min}_{oct} + \mathbf{halfDim}$ [S1, unofficial].
-4.  **Initialize Flags:** Reset raycasting flags to 0 [S1, unofficial].
-5.  **Normalize Direction and Flip:** For each axis $i \in \{x, y, z\}$:
-    - If $d_i < 0$:
-        - Flip the origin coordinate: $o'_i = dim_i - o'_i$ [S1, unofficial].
-        - Negate the direction: $d_i = -d_i$ [S1, unofficial].
-        - Set the corresponding flag bit: $x \rightarrow 4$, $y \rightarrow 2$, $z \rightarrow 1$ [S1, unofficial].
-6.  **Handle Zero Direction:** For each axis $i$, if $d_i == 0$, set $d_i = \epsilon$ (where $\epsilon$ is `Number.EPSILON`) to prevent division by zero [S1, unofficial].
-7.  **Compute Inverse Directions:** Calculate $\mathbf{invD} = (1/d_x, 1/d_y, 1/d_z)$ [S1, unofficial].
-8.  **Calculate Intersection Parameters:** For each axis $i$:
-    - $t_{i0} = (min_i - o'_i) \times invD_i$
-    - $t_{i1} = (max_i - o'_i) \times invD_i$
-    [S1, unofficial].
-9.  **Check Intersection:** The ray hits the octree if $\max(t_{x0}, t_{y0}, t_{z0}) < \min(t_{x1}, t_{y1}, t_{z1})$ [S1, unofficial].
-    - If hit, return $[t_{x0}, t_{y0}, t_{z0}, t_{x1}, t_{y1}, t_{z1}]$.
-    - Otherwise, return `null` [S1, unofficial].
+1.  **Translate Extents:** Translate the octant extents to the scene origin. Set `min` to $(0, 0, 0)$ and `max` to `octree.max - octree.min` [S1, unofficial].
+2.  **Calculate Dimensions:** Compute dimensions and half-dimensions of the octree:
+    $$ \text{dimensions} = \text{octree.getDimensions()} $$
+    $$ \text{halfDimensions} = \text{dimensions} \times 0.5 $$
+    [S1, unofficial]
+3.  **Translate Origin:** Translate the ray origin to the center of the octant:
+    $$ \text{origin} = \text{ray.origin} - \text{octree.getCenter()} + \text{halfDimensions} $$
+    [S1, unofficial]
+4.  **Reset Flags:** Reset raycasting flags to 0 [S1, unofficial].
+5.  **Normalize Direction (Flip):** For each axis ($x, y, z$):
+    *   If `direction[axis] < 0`:
+        *   Flip the origin coordinate: $\text{origin}[axis] = \text{dimensions}[axis] - \text{origin}[axis]$.
+        *   Negate the direction: $\text{direction}[axis] = -\text{direction}[axis]$.
+        *   Set the corresponding flag bit: $x \rightarrow 4$, $y \rightarrow 2$, $z \rightarrow 1$ [S1, unofficial].
+6.  **Handle Zero Direction:** For each axis, if `direction[axis] == 0`, set `direction[axis]` to `Number.EPSILON` to prevent division by zero [S1, unofficial].
+7.  **Compute Inverse Directions:**
+    $$ \text{invDir}_x = 1.0 / \text{direction}_x, \quad \text{invDir}_y = 1.0 / \text{direction}_y, \quad \text{invDir}_z = 1.0 / \text{direction}_z $$
+    [S1, unofficial]
+8.  **Calculate Intersection Parameters:** For each axis, calculate entry ($t_0$) and exit ($t_1$) distances:
+    $$ t_{x0} = (\text{min}_x - \text{origin}_x) \times \text{invDir}_x, \quad t_{x1} = (\text{max}_x - \text{origin}_x) \times \text{invDir}_x $$
+    (Similarly for $y$ and $z$) [S1, unofficial].
+9.  **Check Intersection:**
+    $$ \text{hit} = \max(t_{x0}, t_{y0}, t_{z0}) < \min(t_{x1}, t_{y1}, t_{z1}) $$
+    Return `[tx0, ty0, tz0, tx1, ty1, tz1]` if hit, else `null` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def intersect_octree(ray_origin, ray_direction, octree_min, octree_max):
-    # Step 1: Translate extents to scene origin (local coordinates)
-    min_local = (0.0, 0.0, 0.0)
-    max_local = (
-        octree_max.x - octree_min.x,
-        octree_max.y - octree_min.y,
-        octree_max.z - octree_min.z
-    )
+def intersect_octree(ray_origin, ray_direction, octree_min, octree_max, octree_center, flags):
+    # Step 1: Translate extents to scene origin
+    min_ext = [0.0, 0.0, 0.0]
+    max_ext = [octree_max[i] - octree_min[i] for i in range(3)]
     
-    # Step 2: Compute dimensions and half-dimensions
-    dim = (
-        max_local.x - min_local.x,
-        max_local.y - min_local.y,
-        max_local.z - min_local.z
-    )
-    half_dim = (
-        dim.x * 0.5,
-        dim.y * 0.5,
-        dim.z * 0.5
-    )
+    # Step 2: Calculate dimensions and half-dimensions
+    dimensions = [max_ext[i] - min_ext[i] for i in range(3)]
+    half_dimensions = [d * 0.5 for d in dimensions]
     
     # Step 3: Translate ray origin to center of octant
-    origin = (
-        ray_origin.x - octree_min.x + half_dim.x,
-        ray_origin.y - octree_min.y + half_dim.y,
-        ray_origin.z - octree_min.z + half_dim.z
-    )
+    origin = [ray_origin[i] - octree_center[i] + half_dimensions[i] for i in range(3)]
     
-    # Step 4: Initialize flags
-    flags = 0
+    # Step 4: Reset flags
+    flags.value = 0
     
-    # Step 5 & 6: Normalize direction, flip origin, and handle zero direction
-    direction = ray_direction
-    epsilon = 1e-10 # Number.EPSILON equivalent
-    
-    for axis_idx, axis_name in enumerate(['x', 'y', 'z']):
-        o_val = getattr(origin, axis_name)
-        d_val = getattr(direction, axis_name)
-        d_dim = getattr(dim, axis_name)
-        
-        if d_val < 0:
-            # Flip origin
-            setattr(origin, axis_name, d_dim - o_val)
-            # Negate direction
-            setattr(direction, axis_name, -d_val)
+    # Step 5: Normalize direction (Flip)
+    for i in range(3):
+        if ray_direction[i] < 0:
+            origin[i] = dimensions[i] - origin[i]
+            ray_direction[i] = -ray_direction[i]
             # Set flag bit: x=4, y=2, z=1
-            flag_bit = 4 if axis_name == 'x' else (2 if axis_name == 'y' else 1)
-            flags |= flag_bit
+            if i == 0: flags.value |= 4
+            elif i == 1: flags.value |= 2
+            elif i == 2: flags.value |= 1
             
-        if d_val == 0:
-            setattr(direction, axis_name, epsilon)
-            
+    # Step 6: Handle zero direction
+    EPSILON = 1e-8 # Number.EPSILON equivalent
+    direction = [ray_direction[i] if ray_direction[i] != 0 else EPSILON for i in range(3)]
+    
     # Step 7: Compute inverse directions
-    inv_dir = (
-        1.0 / direction.x,
-        1.0 / direction.y,
-        1.0 / direction.z
-    )
+    inv_dir = [1.0 / direction[i] for i in range(3)]
     
     # Step 8: Calculate intersection parameters
-    # min_local is (0,0,0), so (min_local - origin) is just -origin
-    t0 = (
-        (min_local.x - origin.x) * inv_dir.x,
-        (min_local.y - origin.y) * inv_dir.y,
-        (min_local.z - origin.z) * inv_dir.z
-    )
-    t1 = (
-        (max_local.x - origin.x) * inv_dir.x,
-        (max_local.y - origin.y) * inv_dir.y,
-        (max_local.z - origin.z) * inv_dir.z
-    )
+    tx0 = (min_ext[0] - origin[0]) * inv_dir[0]
+    tx1 = (max_ext[0] - origin[0]) * inv_dir[0]
+    ty0 = (min_ext[1] - origin[1]) * inv_dir[1]
+    ty1 = (max_ext[1] - origin[1]) * inv_dir[1]
+    tz0 = (min_ext[2] - origin[2]) * inv_dir[2]
+    tz1 = (max_ext[2] - origin[2]) * inv_dir[2]
     
     # Step 9: Check intersection
-    t_enter = max(t0.x, t0.y, t0.z)
-    t_exit = min(t1.x, t1.y, t1.z)
+    t_enter = max(tx0, ty0, tz0)
+    t_exit = min(tx1, ty1, tz1)
     
     if t_enter < t_exit:
-        return [t0.x, t0.y, t0.z, t1.x, t1.y, t1.z]
+        return [tx0, ty0, tz0, tx1, ty1, tz1]
     else:
         return None
 ```
 
 **Parameters:**
-- `flags`: A `RaycastingFlags` object used to store axis flip information [S1, unofficial].
+*   `flags`: A `RaycastingFlags` object used to store axis flip information. Bit 0 (value 1) indicates Z flip, Bit 1 (value 2) indicates Y flip, Bit 2 (value 4) indicates X flip [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Zero Direction Components:** Rays with zero direction components cause division by zero. The implementation replaces $0.0$ with `Number.EPSILON` [S1, unofficial].
-- **Precision:** The use of `Number.EPSILON` is a specific implementation detail to avoid NaN results; standard robust implementations might use a small tolerance or handle axis-aligned rays separately [S1, unofficial].
+*   **Zero Direction Components:** Rays with zero direction components cause division by zero. The implementation replaces $0.0$ with `Number.EPSILON` [S1, unofficial].
+
+## Subtopics
+
+### [Ray-AABB Intersection for Octree Traversal](13555-ray-aabb-intersection-for-octree-traversal.md)
+This algorithm determines whether a ray intersects an axis-aligned bounding box (AABB) representing an octree node and prepares the necessary parameters for traversing its subtrees. It distinguishes itself by normalizing the ray direction to be strictly positive through coordinate flipping, which simplifies the subsequent intersection logic and traversal order determination. This method serves as the core intersection test within the broader [Ray-Octree Boundary Intersection](11318-ray-octree-boundary-intersection.md) framework.
 
 ## Operating characteristics
 Not given in the sources.

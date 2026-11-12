@@ -3,140 +3,126 @@
 Also called: Panoramic Neural Radiance Fields with Joint Guidance
 
 ## Overview
-360FusionNeRF is a semi-supervised learning framework for synthesizing novel views from a single RGB-D 360° panorama image [S1]. It extends OmniNeRF by introducing geometric supervision via auxiliary depth maps and semantic consistency via CLIP features to guide progressive training and reduce artifacts caused by occlusion in unobserved regions [S1]. Unlike standard NeRF methods that rely solely on color reconstruction, 360FusionNeRF explicitly penalizes geometric errors and semantic inconsistencies to ensure plausible completions of missing scene parts [S1].
+360FusionNeRF is a semi-supervised learning framework for synthesizing novel views from a single RGB-D 360° panorama image [S1]. It extends OmniNeRF by introducing geometric supervision via auxiliary depth maps and semantic consistency via CLIP features to guide progressive training and reduce artifacts caused by occlusion in unobserved regions [S1]. Unlike standard NeRF methods that rely solely on photometric reconstruction, 360FusionNeRF explicitly constrains the geometry and semantics of the learned radiance field to ensure plausible completions of missing data [S1].
 
 ## How it works
-**Inputs and Outputs**
+**Inputs and Outputs:**
 *   **Input:** A single RGB-D 360° panoramic image.
-*   **Output:** A trained Neural Radiance Field (MLP) capable of rendering novel views from arbitrary camera poses.
+*   **Output:** A trained neural radiance field (MLP) capable of rendering novel views from arbitrary camera poses.
 
-**Data Structures**
-The method uses a Multi-Layer Perceptron (MLP) to represent the scene, identical in structure to OmniNeRF [S1]. The MLP takes a 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ as input and outputs density $\sigma$ and color $\mathbf{c}$ [S1]. No explicit voxel grid or hash table is used; the representation is purely implicit [S1].
+**Data Structures:**
+The method uses a standard Multi-Layer Perceptron (MLP) architecture identical to OmniNeRF, mapping 3D coordinates and viewing directions to density ($\sigma$) and color ($c$) [S1]. The sampling strategy employs a hierarchical two-stage approach:
+1.  **Coarse Stage:** Uniformly samples $N_c$ intervals along the ray.
+2.  **Refined Stage:** Samples $N_f$ intervals based on the density distribution from the coarse stage [S1].
 
-**Numbered Steps**
-1.  **Virtual Camera Reprojection:** The input 360° panorama is re-projected to generate synthetic 360° images at virtual camera positions surrounding the scene [S1].
-2.  **Auxiliary Data Extraction:** At these virtual camera positions, auxiliary depth maps are extracted from the input RGB-D data [S1].
-3.  **Hierarchical Sampling:** For each training ray $r$, sampling is performed in two stages:
-    *   **Coarse Stage:** $N_c$ intervals are uniformly sampled along the ray [S1].
-    *   **Refined Stage:** $N_f$ intervals are sampled based on the densities predicted during the coarse stage [S1].
-4.  **Volume Rendering:** The rendered color $\hat{C}(r)$ is computed for both coarse and refined samples using the standard volume rendering equation [S1].
-5.  **Loss Calculation:** The total loss is the sum of three components:
-    *   **Color Reconstruction Loss ($L_{Color}$):** Mean squared error between rendered color and ground truth color at known poses [S1].
-    *   **Geometric Loss ($L_{Geo}$):** Supervision using the auxiliary depth maps extracted at virtual positions [S1].
-    *   **Semantic Consistency Loss ($L_{Sem}$):** Computed using activations from a pre-trained CLIP Vision Transformer to encourage realistic features in novel views [S1].
-6.  **Optimization:** The MLP parameters are updated by minimizing the total loss [S1].
+**Numbered Steps:**
+1.  **Data Reprojection:** The input 360° panorama is re-projected to generate synthetic views at virtual camera positions. Auxiliary depth maps are extracted for these virtual positions [S1].
+2.  **Hierarchical Sampling:** For each training ray $r$, the coarse network samples $N_c$ points uniformly. The refined network samples $N_f$ points adaptively based on the coarse densities [S1].
+3.  **Volume Rendering:** Compute the rendered color $\hat{C}(r)$ for both coarse and refined stages using the volume rendering equation [S1].
+4.  **Loss Computation:** Calculate three loss components:
+    *   **Color Loss ($L_{Color}$):** Mean Squared Error (MSE) between rendered and ground truth color at known poses [S1].
+    *   **Geometric Loss ($L_{Geo}$):** Supervision using the auxiliary depth maps extracted in Step 1 [S1].
+    *   **Semantic Consistency Loss ($L_{Sem}$):** Loss derived from CLIP Vision Transformer activations to ensure semantic plausibility in novel views [S1].
+5.  **Optimization:** Minimize the total loss to update the MLP weights [S1].
 
-**Formulas**
+**Formulas:**
 The rendered color $\hat{C}(r)$ for a ray $r(t) = o + td$ is computed as [S1]:
-
-$$
-\hat{C}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) c_i
-$$
-
+$$ \hat{C}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
 where:
-*   $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance [S1].
-*   $\delta_i = t_{i+1} - t_i$ is the interval between adjacent samples [S1].
-*   $c_i$ is the predicted color at sample $i$ [S1].
-*   $\sigma_i$ is the predicted density at sample $i$ [S1].
+*   $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance.
+*   $\delta_i = t_{i+1} - t_i$ is the interval length between adjacent samples.
+*   $\sigma_i$ is the density and $c_i$ is the color at sample $i$.
 
-The color reconstruction loss is defined as [S1]:
+The total optimization objective minimizes the mean squared error between rendered color $\hat{C}(r)$ and ground truth color $C(r)$ over the set of input rays $R_i$ [S1]:
+$$ L_{Color} = \sum_{r \in R_i} ||(C(r) - \hat{C}(r))||^2 $$
 
-$$
-L_{Color} = \sum_{r \in R_i} ||(C(r) - \hat{C}(r))||^2
-$$
+**Parameters:**
+*   $N_c$: Number of intervals uniformly sampled along the ray during the coarse stage. [S1]
+*   $N_f$: Number of intervals decided in accordance with densities from the coarse stage during the refined stage. [S1]
 
-where $R_i$ is the set of input rays during training and $C(r)$ is the ground truth color [S1].
-
-**Parameters**
-*   $N_c$: Number of intervals uniformly sampled along the ray during the coarse stage. Not given in the sources.
-*   $N_f$: Number of intervals decided in accordance with densities from the coarse stage during the refined stage. Not given in the sources.
-
-**Pseudocode**
-
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def train_360fusionnerf(input_rgb_d_pano, virtual_cameras, clip_model):
+def train_360fusionnerf(panorama_rgb, panorama_depth, virtual_cameras, clip_model):
     """
-    Trains 360FusionNeRF from a single RGB-D 360 panorama.
-    
-    Args:
-        input_rgb_d_pano: Single RGB-D 360 degree panoramic image.
-        virtual_cameras: List of virtual camera poses for reprojection.
-        clip_model: Pre-trained CLIP Vision Transformer.
-        
-    Returns:
-        trained_mlp: The optimized Neural Radiance Field MLP.
+    Trains 360FusionNeRF from a single RGB-D panorama.
     """
-    # Initialize MLP (OmniNeRF structure)
-    mlp = initialize_omninerf_mlp()
+    # Initialize MLP (OmniNeRF architecture)
+    mlp = OmniNeRF_MLP()
     
-    # Extract auxiliary depth maps at virtual camera positions
-    # This involves re-projecting the input panorama to the virtual views
-    auxiliary_depth_maps = reproject_and_extract_depth(input_rgb_d_pano, virtual_cameras)
-    
-    # Define ray set R_i from input poses
-    rays = generate_rays_from_input_poses(input_rgb_d_pano)
-    
+    # Extract auxiliary depth maps for virtual camera positions
+    # Re-project panorama to virtual poses
+    auxiliary_depths = {}
+    for cam in virtual_cameras:
+        depth_map = reproject_depth(panorama_depth, cam.pose)
+        auxiliary_depths[cam.id] = depth_map
+
     for epoch in range(num_epochs):
-        total_loss = 0.0
+        total_loss = 0
+        
+        # Sample rays from input panorama poses
+        rays = sample_rays_from_panorama(panorama_rgb)
         
         for ray in rays:
-            # 1. Hierarchical Sampling
-            # Coarse stage: Uniform sampling
-            coarse_samples = uniform_sample_along_ray(ray, N_c)
-            coarse_sigma, coarse_color = mlp.forward(coarse_samples)
+            # 1. Coarse Sampling
+            t_coarse = uniform_sample(ray.origin, ray.direction, N_c)
+            sigma_coarse, color_coarse = mlp.query(t_coarse, ray.direction)
             
-            # Refined stage: Density-based sampling
-            refined_samples = density_based_sample(ray, coarse_sigma, N_f)
-            refined_sigma, refined_color = mlp.forward(refined_samples)
+            # 2. Refined Sampling (based on coarse densities)
+            t_refined = importance_sample(t_coarse, sigma_coarse, N_f)
+            sigma_refined, color_refined = mlp.query(t_refined, ray.direction)
             
-            # 2. Volume Rendering
-            coarse_rendered_color = volume_render(coarse_samples, coarse_sigma, coarse_color)
-            refined_rendered_color = volume_render(refined_samples, refined_sigma, refined_color)
+            # 3. Volume Rendering
+            c_coarse = volume_render(t_coarse, sigma_coarse, color_coarse)
+            c_refined = volume_render(t_refined, sigma_refined, color_refined)
             
-            # 3. Color Loss (MSE)
-            ground_truth_color = get_ground_truth_color(ray)
-            loss_color = mse(coarse_rendered_color, ground_truth_color) + mse(refined_rendered_color, ground_truth_color)
+            # 4. Loss Calculation
             
-            # 4. Geometric Loss
-            # Compute loss using auxiliary depth maps at corresponding virtual positions
-            # Note: Exact formulation of L_Geo is not detailed in sources beyond "penalizes geometric loss via auxiliary depth"
-            loss_geo = compute_geometric_loss(ray, auxiliary_depth_maps) [G]
+            # Color Loss (MSE)
+            gt_color = get_ground_truth_color(ray)
+            loss_color = mse(c_refined, gt_color) + mse(c_coarse, gt_color)
             
-            # 5. Semantic Consistency Loss
-            # Extract features from rendered image and ground truth using CLIP
-            rendered_image = render_image_from_mlp(mlp, ray.camera_pose)
-            gt_image = get_ground_truth_image(ray.camera_pose)
+            # Geometric Loss (using auxiliary depth)
+            # Note: Exact formulation of L_Geo is not specified in source [S1]
+            # It penalizes deviation from auxiliary depth maps
+            loss_geo = compute_geometric_loss(ray, auxiliary_depths) 
             
-            clip_features_rendered = clip_model.encode(rendered_image)
-            clip_features_gt = clip_model.encode(gt_image)
+            # Semantic Consistency Loss (CLIP)
+            # Rendered image is passed through CLIP Vision Transformer
+            # Compared against CLIP features of ground truth or other views
+            rendered_img = render_image_from_mlp(mlp, ray.camera_pose)
+            gt_img = get_ground_truth_image(ray.camera_pose)
             
-            loss_sem = semantic_consistency_loss(clip_features_rendered, clip_features_gt) [G]
+            clip_feat_rendered = clip_model.encode_image(rendered_img)
+            clip_feat_gt = clip_model.encode_image(gt_img)
+            loss_sem = semantic_loss(clip_feat_rendered, clip_feat_gt)
             
-            # 6. Update
-            current_loss = loss_color + loss_geo + loss_sem
-            total_loss += current_loss
-            update_mlp_parameters(mlp, current_loss)
+            # Total Loss
+            loss = loss_color + loss_geo + loss_sem
+            total_loss += loss
             
+        # Update MLP weights
+        mlp.backward_and_update(total_loss)
+
     return mlp
 ```
 
-**Edge Cases and Pitfalls**
-*   **Occlusion Artifacts:** Standard NeRFs may overfit to training views and produce artifacts in unobserved regions. 360FusionNeRF mitigates this via semantic and geometric guidance [S1].
-*   **Single Input Limitation:** The method relies on a single panorama. Performance depends heavily on the quality of the depth map and the effectiveness of the virtual camera reprojection [S1].
+**Edge Cases and Pitfalls:**
+*   **Occlusion Artifacts:** Without geometric and semantic guidance, the method may produce artifacts in unobserved regions due to overfitting to training views [S1].
+*   **Depth Extraction:** The quality of auxiliary depth maps depends on the accuracy of re-projecting the single panorama to virtual poses [S1].
 
 ## Operating characteristics
 *   **Time Complexity:** Not given in the sources.
 *   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** The method produces plausible completions of unobserved regions while preserving scene features, improving perceptual quality compared to OmniNeRF [S1].
-*   **Strengths:** Reduces artifacts from occlusion; uses only a single RGB-D input; leverages semantic consistency for realistic completions [S1].
-*   **Limitations:** Relies on the accuracy of auxiliary depth extraction and CLIP features; specific hyperparameters ($N_c, N_f$) are not provided [S1].
-*   **When to use:** When novel views must be synthesized from a single 360° RGB-D panorama and occlusion artifacts are a concern [S1].
-*   **When not to use:** When multiple views are available (standard NeRF or Instant-NGP may be more efficient) or when semantic consistency is not required [S1].
+*   **Performance:** The method produces plausible completions of unobserved regions while preserving scene features, improving perceptual quality compared to OmniNeRF [S1].
+*   **Strengths:** Reduces artifacts from occlusion; generalizable scene representation from a single image; leverages semantic consistency for realistic content.
+*   **Limitations:** Relies on the availability of a high-quality RGB-D 360° panorama; requires a pre-trained CLIP model for semantic features.
+*   **When to use:** When novel views must be synthesized from a single 360° panorama with significant unobserved regions.
+*   **When not to use:** When multiple views are available (standard NeRF or other multi-view methods may be more appropriate).
 
 ## Background
-360FusionNeRF was proposed by Shreyas Kulkarni, Peng Yin, and Sebastian Scherer [S1]. It was published in IEEE Robotics and Automation Letters in 2023 (preprint arXiv:2209.14265 in 2022) [S1]. The work extends OmniNeRF, which estimates scene representations from a single 360° panoramic image [S1]. Prior studies in this setting relied on neighborhood interpolation of multi-layer perceptrons to complete missing regions, leading to artifacts [S1]. 360FusionNeRF addresses this by introducing joint geometric and semantic guidance [S1].
+360FusionNeRF was proposed by Shreyas Kulkarni, Peng Yin, and Sebastian Scherer in 2022 [S1]. It is based on the OmniNeRF framework, which estimates neural radiance fields from 360° panoramic images [S1]. The method addresses the challenge of overfitting to training views and artifacts in unobserved regions by introducing semi-supervised guidance [S1]. It was published in IEEE Robotics and Automation Letters (RA-L) [S1].
 
 ## Sources
 [S1] 360FusionNeRF: Panoramic Neural Radiance Fields with Joint Guidance, https://doi.org/10.1109/iros55552.2023.10341346, fetched 2026-10-26

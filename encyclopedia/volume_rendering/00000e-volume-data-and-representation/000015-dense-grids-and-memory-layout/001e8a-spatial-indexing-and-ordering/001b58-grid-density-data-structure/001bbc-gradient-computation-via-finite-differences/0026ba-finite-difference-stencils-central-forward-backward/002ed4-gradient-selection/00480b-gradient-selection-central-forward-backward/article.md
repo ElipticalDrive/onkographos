@@ -1,0 +1,93 @@
+# Gradient Selection — Central/Forward/Backward
+
+Also called: Finite Difference Gradient Selection, Gradient Calculation
+
+## Overview
+This method estimates the gradient (slope) of a scalar volume field at a specific position using finite differences. It selects between central, forward, or backward difference schemes based on the position's proximity to the data boundaries. It is distinct from Sobel estimation [Parent](5889-gradient-selection.md) and on-the-fly interpolation variants [Subtopics](#gradient-estimation-via-on-the-fly-interpolation) by explicitly handling boundary conditions with one-sided differences to avoid out-of-bounds access.
+
+## How it works
+**Inputs:**
+- `current`: Scalar value at the current index $i$.
+- `prev`: Scalar value at index $i-1$.
+- `next`: Scalar value at index $i+1$.
+- `min`: Minimum valid axis index (typically 0).
+- `max`: Maximum valid axis index (typically axis length - 1).
+- `is_integer`: Boolean indicating if the position is an integer voxel coordinate.
+
+**Outputs:**
+- `gradient`: The estimated derivative along the axis.
+
+**Data Structures:**
+- The input values are typically single-precision floats or integers representing voxel intensities.
+
+**Steps:**
+1. Determine the sampling mode based on `is_integer`.
+   - If `is_integer` is true, use direct array access for `prev`, `current`, and `next`.
+   - If `is_integer` is false, use a trilinear interpolation function (e.g., `getRealVoxel`) to sample `prev`, `current`, and `next` at the fractional coordinates corresponding to $i-1$, $i$, and $i+1$ [S1, unofficial].
+2. Evaluate the position $i$ relative to boundaries `min` and `max`.
+3. Apply the appropriate finite difference formula:
+   - **Central Difference:** If $min < i < max-1$, compute $gradient = next - current$.
+   - **Forward Difference:** If $i \le min$, compute $gradient = next - current$.
+   - **Backward Difference:** If $i \ge max-1$, compute $gradient = current - prev$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_gradient(current, prev, next, min_idx, max_idx, is_integer):
+    """
+    Computes the gradient using central, forward, or backward differences.
+    
+    Args:
+        current: Value at index i.
+        prev: Value at index i-1.
+        next: Value at index i+1.
+        min_idx: Minimum valid index (usually 0).
+        max_idx: Maximum valid index (usually length - 1).
+        is_integer: True if i is an integer voxel coordinate.
+        
+    Returns:
+        The estimated gradient.
+    """
+    # Note: In a real implementation, 'prev', 'current', 'next' are fetched 
+    # based on 'is_integer'. If not integer, getRealVoxel is used.
+    # This function assumes values are already retrieved.
+    
+    if min_idx < i < max_idx - 1:
+        # Central difference for interior points
+        return next - current
+    elif i <= min_idx:
+        # Forward difference at the lower boundary
+        return next - current
+    else:
+        # Backward difference at the upper boundary
+        return current - prev
+```
+
+**Parameters:**
+- `min`: Minimum valid axis value. Typically 0 [S1, unofficial].
+- `max`: Maximum valid axis value. Typically axis length - 1 [S1, unofficial].
+- `i`: The axis index being altered (typically z) [S1, unofficial].
+
+**Edge Cases:**
+- **Boundary Conditions:** The method explicitly handles indices at or beyond the boundaries by switching to one-sided differences, preventing out-of-bounds memory access [S1, unofficial].
+- **Non-Integer Positions:** For non-integer coordinates, the method requires interpolating the support samples (`prev`, `current`, `next`) on the fly rather than using direct voxel lookups [S1, unofficial].
+
+## Subtopics
+
+### Gradient Estimation via On-the-Fly Interpolation
+This variant estimates gradients using central differencing at the sample point $(x,y,z)$ by interpolating the required support samples on the fly. It has lower complexity than the gradient filter method but often offers practical application-specific advantages. It is distinct from the fixed-grid selection method by performing interpolation dynamically at the ray sample point rather than relying on pre-computed or boundary-aware discrete differences [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per gradient evaluation.
+- **Memory Complexity:** $O(1)$ auxiliary space.
+- **Strengths:** Simple to implement; robust against boundary errors; efficient for sparse or on-demand gradient calculations.
+- **Limitations:** Less smooth than Sobel or filter-based methods; sensitive to interpolation quality for non-integer positions [S2, unofficial].
+- **When to use:** When memory is constrained or when gradients are needed only at specific ray sample points without pre-computing a full gradient volume.
+
+## Background
+The method originates from basic finite difference calculus applied to volume rendering. It is implemented in educational volume rendering frameworks such as `joshcodd/volume-rendering` [S1, unofficial]. The theoretical basis for on-the-fly interpolation variants is discussed in the Stony Brook Overview of Volume Rendering [S2, unofficial].
+
+## Sources
+[S1] joshcodd/volume-rendering, https://github.com/joshcodd/volume-rendering, fetched 2026-10-26 (unofficial)
+[S2] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)

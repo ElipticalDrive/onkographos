@@ -1,0 +1,1820 @@
+GO-Surf: Neural Feature Grid Optimization for
+Fast, High-Fidelity RGB-D Surface Reconstruction
+Jingwen Wang* , Tymoteusz Bleja* , and Lourdes Agapito
+arXiv:2206.14735v2 [cs.CV] 17 Sep 2022
+Department of Computer Science, University College London
+Figure 1: Given an input RGB-D sequence, GO-Surf obtains a high quality 3D surface reconstruction by direct optimization
+of a multi-resolution feature grid and signed distance value and colour prediction. We formulate a new smoothness prior
+on the signed distance values that leads to improved hole filling and smoothness properties, while preserving details. Our
+optimization is ×60 times faster than MLP-based methods.
+Abstract
+We present GO-Surf, a direct feature grid optimization
+method for accurate and fast surface reconstruction from
+RGB-D sequences. We model the underlying scene with a
+learned hierarchical feature voxel grid that encapsulates
+multi-level geometric and appearance local information.
+Feature vectors are directly optimized such that after being tri-linearly interpolated, decoded by two shallow MLPs
+into signed distance and radiance values, and rendered via
+volume rendering, the discrepancy between synthesized and
+observed RGB/depth values is minimized. Our supervision
+signals — RGB, depth and approximate SDF — can be obtained directly from input images without any need for fusion or post-processing. We formulate a novel SDF gradient regularization term that encourages surface smoothness
+and hole filling while maintaining high frequency details.
+GO-Surf can optimize sequences of 1-2K frames in 15-45
+minutes, a speedup of ×60 over NeuralRGB-D [1], the most
+related approach based on an MLP representation, while
+maintaining on par performance on standard benchmarks.
+Project page: https://jingwenwang95.github.
+io/go_surf.
+* The first two authors contributed equally.
+1. Introduction
+Recent years have seen impressive progress in learningbased methods for 3D scene modelling from video sequences, with a strong focus on coordinate-based scene representations [21, 11] and the application to highly photorealistic novel view synthesis [27, 12]. NeRF [12] and its
+variants represent the scene in the weights of a multi-layer
+perceptron (MLP) that is trained to predict the volume density and colour of any 3D point location. Combined with
+classic differentiable volume renderering, NeRF learns to
+synthesize the input images and can generalize to render
+nearby unseen views.
+Although MLPs have shown an extraordinary ability to
+represent radiance fields of complex scenes with a low
+memory footprint, this comes at the cost of very long training and inference times. Direct optimization of trilinearly
+interpolated features on multi-resolution feature grids has
+become a powerful alternative representation due to its
+fast convergence that leads to orders of magnitude faster
+training and inference times [13, 8, 37, 41, 3, 30]. Their
+higher memory requirement has also been addressed by
+using sparse feature grids, such as octrees [37], or multiresolution hash tables [13].
+An added limitation of NeRF [12] is its choice of ge-
+ometric primitive: the volume density representation does
+not allow for accurate 3D surface extraction and can lead
+to blurry renderings or 3D reconstruction artefacts because
+of the limited capacity of the network to infer the exact
+surface location. A number of methods have addressed
+this [33, 16, 36] and proposed differentiable surface rendering pipelines that can be used in conjunction with neural
+implicit surface representations, thus avoiding representing
+the scene geometry via density. However, surface representations have mainly been proposed in the context of slow
+coordinate-based networks, while existing grid-based approaches struggle to achieve the level of smoothness comparable to MLP-based methods [13]. Critically though, most
+AR/VR and robotics applications require both accurate and
+fast 3D surface reconstruction, therefore both limitations
+should be tackled for high fidelity surface inference at interactive runtimes.
+GO-Surf combines, for the first time, learnable feature
+volumes with SDF surface-based representations and rendering to improve both speed and accuracy. To further
+help overcome these limitations we adopt the advantages
+of using depth measurements from consumer-level RGB-D
+cameras, which have become highly accessible, inexpensive, and are now found on many mobile-phones. Other
+approaches have recently also adopted RGB-D inputs in the
+context of neural scene representations [29, 41, 20, 1] and
+use depth images to supervise scene reconstruction. Unlike GO-Surf, iMAP [29] models volume density, while
+NICE-SLAM [41] uses occupancy, both failing to predict
+high-fidelity, accurate surface reconstructions. Although
+NeuralRGB-D [1] adopts an SDF representation, such as
+GO-Surf, it uses an MLP to encode the scene, leading
+to very long training times. Our experimental evaluation
+shows that GO-Surf achieves a speedup of ×60 through use
+of learnable feature volumes. Although iSDF [20] also uses
+an SDF representation, we show that our novel SDF regularization term results in more accurate and higher fidelity
+reconstructions.
+Contribution: GO-Surf brings learnable feature grids into
+the context of SDF reconstruction from RGB-D sequences
+to achieve both: (i) fast optimization at interactive runtimes,
+and (ii) highly accurate surface reconstruction. We also apply for the first time Eikonal and smoothness regularisation
+terms in the context of voxel grids.
+2. Related Work
+Classic RGB-D Reconstruction Although this review focuses on learning based approaches to RGB-D reconstruction we cite KinectFusion [15], VoxelHashing [17] and
+BundleFusion [6] as the best representatives of classic
+methods, with the last one being one of our baselines.
+Coordinate-based Networks Pioneered by Scene Representation Networks [27], and popularized by NeRF [12],
+coordinate-based methods encode the scene within the
+weights of a fully connected neural network that take as input a 3D location and predict its geometry and appearance
+information in the form of density and radiance [12, 29],
+occupancy [11, 4], signed distance fields [21, 7, 1, 20],
+colour [19] or semantic labels [40, 9]. NeRF [12] demonstrated photo-realistic novel view synthesis by combining
+an MLP to encode density and colour with classical volumetric rendering, only requiring a set of posed RGB images
+for training. Using hybrid scene representations, NVSF [10]
+and Plenoctrees [38] combine neural implicit fields with explicit sparse voxel structures to accelerate rendering.
+Closely related to our work are coordinate-based networks trained with additional depth supervision for 3D reconstruction [29, 20, 1]. iMAP [29] is the first to train
+an MLP in live, real-time operation with RGB-D inputs to
+learn a scene specific 3D model of occupancy and colour,
+using rendered depth and RGB as supervision signals, while
+also tracking camera pose. In iSDF [20] the focus is actual surface reconstruction. Taking as input a live stream of
+posed depth images, approximate signed distance values are
+predicted by minimising a loss on both the predicted signed
+distance and its spatial gradient. Both [29, 20] achieve live
+operation via active sampling and keyframe selection. Instead, Neural RGB-D [1] operates in batch mode, taking as
+input a large set of RGB-D frames to train MLPs to map
+coordinate inputs to approximate SDF values and radiance
+via differentiable volumetric rendering. While they achieve
+extremely accurate reconstructions that preserve high frequency details, their training time is on the order of 10 hours
+for typical scenes. The huge advantage of these MLP-based
+representations is their compactness, given that they can be
+sampled continuously without increasing memory footprint,
+they either suffer from extremely long training times [1] or
+sacrifice accuracy/details for online operation [29, 20].
+Neural 3D Scene Reconstruction A recent trend includes
+architectures trained end-to-end on multiple sequences to
+aggregate image features and perform fusion over multiple
+frames using a volumetric representation and decoders to
+predict signed distance [31, 14, 2] or radiance [39] fields.
+NeuralRecon [31] reconstructs surfaces sequentially from
+video fragments as TSDF volumes by performing feature
+fusion from previous fragments via recurrent units. Atlas [14] aggregates image features over an entire sequence
+to predict a globally consistent TSDF volume and semantic labels with a 3DNN, while others [2, 28] rely on transformers for feature fusion. While the above methods require
+direct SDF supervision at training time, inference only requires posed RGB video. NeRFusion [39] uses a 3D CNN
+for feature fusion but drops the need for 3D supervision by
+including a volume rendering module and can be trained
+only from RGB images.
+Neural Implicit Surface Reconstruction Following a sim-
+Figure 2: GO-Surf uses multi-level feature grids and two shallow MLP decoders. Given a sample point along a ray, each grid
+is queried via tri-linear interpolation. Multi-level features are concatenated and decoded into SDF, and used to compute the
+sample weight. Color is decoded separately from the finest grid. Loss terms are applied to SDF values, and rendered depth
+and color. The gradient of the SDF is calculated at each query point and used for Eikonal and smoothness regularization.
+ilar observation to ours — that the volume density estimated
+by NeRF [12] does not enable high-quality surface extraction — a recent family of methods focus instead on neural
+surface representations and formulate compatible differentiable renderers. DVR [16] propose the first differentiable
+renderer for implicit shape and texture representations needing only multiview RGB images and object masks as supervision. IDR [36] trains an end-to-end architecture with
+a learned neural renderer that approximates light reflected
+from the surface and can implicitly model a variety of lighting conditions and materials. NeuS [33] instead formulates
+a new volume rendering method to train a bias-free neural
+SDF representation, while VolSDF [35] formulate a novel
+parameterization for volume density, both leading to more
+accurate surface reconstruction even without mask supervision. UniSurf [30] unifies neural volume and surface rendering enabling both within the same model.
+Direct Grid Optimization Recent, mostly concurrent,
+work has also explored the use of directly optimizing neural features on an explicit volumetric grid. NGLoD [32]
+represents implicit surfaces using a sparse octree feature
+volume which adaptively fits shapes with multiple levels
+of detail using 3D supervision. Instant NGP [13] proposes a multi-resolution hash table of trainable feature vectors achieving a speedup of various orders of magnitude,
+demonstrating instant training on a variety of tasks. DirectVoxGO [30] also improves NeRF’s training time by two
+orders of magnitude by adopting an explicit density voxelgrid with post-activation interpolation — that enables to
+model sharp boundaries — and a feature voxel-grid with
+a shallow MLP for view-dependent appearance. Plenoxels [37] and ReLU Fields [8] take this idea further dropping
+the reliance on any neural networks. While Plenoxels [37]
+relies on a spherical harmonics basis, ReLU Fields [8] apply
+post-activation interpolation. TensoRF [3] tackles the issue of memory footprint by modelling the volume field as a
+4D tensor that is factorized into multiple compact low-rank
+tensor components. Finally, NiceSLAM [41] is an RGBD SLAM system that encodes the scene as a multi-level
+feature grid that is optimized at run-time using pre-trained
+geometric priors, enabling detailed reconstruction on large
+indoor scenes.
+3. Method
+We formulate scene reconstruction as a direct optimisation problem, representing scene geometry and color using multi-resolution feature grids, which are decoded into
+SDF and RGB values with two MLP decoders shared across
+grids. Given a sequence of RGB-D images {It , Dt }, and
+initial camera poses {ξt } ∈ SE(3) (provided by SLAM
+or SfM) we jointly optimize feature volumes, decoders and
+camera poses.
+3.1. Hybrid Scene Representation
+Our hybrid scene representation combines multi-level
+feature grids and shared MLPs for geometry and color prediction. We encode the scene geometry into a four-level feature grid Vθ = {V l }, where l ∈ {0, 1, 2, 3} encode multi-
+level local detail from coarse to fine. Finer features capture
+high-frequency detailed geometry while the coarser features
+encapsulate larger structures and are crucial for hole-filling.
+Given a scene point x ∈ R3 , its geometry feature is obtained by concatenating the trilinearly interpolated features
+at each level. The feature is decoded into an SDF value
+φ(x) via the geometry MLP fω (·):
+Vθ (x) = [V 0 (x), V 1 (x), V 2 (x), V 3 (x)]
+φ(x) = fω (Vθ (x))
+(1)
+(2)
+We encode color information only at the finest level, as [41],
+using a separate feature grid Wβ and decoder gγ (·):
+(3)
+c = gγ (Wβ (x), d)
+where d is the viewing direction. Here θ, β, ω, γ represent
+the optimizable parameters, i.e. geometry and color local
+features and decoder parameters.
+Architecture Details. The multi-resolution feature grids,
+use geometry features of dimension hg = 4 per-level, giving a final geometry feature vector of dimension 16. Color
+features have dimension hc = 6. For both geometry and
+color decoders we use light-weight MLPs with 2 hidden
+layers, 32 neurons each.
+3.2. Depth and Color Rendering
+Inspired by the recent success of volume rendering [12],
+we render depth and color by integrating predicted colors
+and sampled depth along camera rays. Specifically, for each
+back-projected ray parameterised by camera centre o and
+ray direction r we sample N points xi = o + di r, i ∈
+{1, . . . , N } and take the expected values of predicted colors
+ci and sampled depth di :
+ĉ =
+N
+X
+w i ci ,
+i=1
+dˆ =
+N
+X
+wi di
+(4)
+i=1
+where {wi } are unbiased and occlusion-aware weights [33]
+Qi−1
+given by wi = Ti αi , where Ti = j=1 (1 − αj ) represents
+the accumulated transmittance at point xi , and αi is the
+opacity value computed by:
+
+
+σs (φ(xi )) − σs (φ(xi+1 ))
+,0
+(5)
+αi = max
+σs (φ(xi ))
+where σs (x) = (1 + e−sx )−1 is a Sigmoid function modulated by a learnable parameter s which controls the smoothness of the transition at the surface. The RGB and depth
+per-pixel rendering losses are:
+`rgb = kI[u, v] − ĉk,
+ˆ
+`d = |D[u, v] − d|
+(6)
+To obtain sampling points along the ray we perform 3 steps
+of importance sampling, as [33]: starting from Nc = 96
+coarse samples we iteratively add 12 samples each time
+based on weights computed with previously sampled points.
+3.3. Approximate SDF Supervision
+Similar to [1, 20], for each sampled point along the ray
+we also approximate ground-truth SDF supervision based
+on the distance to observed depth values along the ray direction: b(x) = D[u, v] − d. With this bound we have
+|φ(x)| ≤ |b(x)|, ∀x, which is expected to be tighter near
+the surface, so for near-surface points (|D[u, v] − d| <= t)
+we apply the following SDF loss:
+(7)
+`sdf (x) = |φ(x) − b(x)|
+The truncation threshold t is a hyper-parameter (we set t =
+16cm). Unlike [1] which models TSDF for points far from
+the surface (|D[u, v] − d| > t), encouraging the MLP to
+predict a fixed truncation value; we apply a relaxed loss to
+encourage free space prediction as [20]:
+
+
+`f s (x) = max 0, e−αφ(x) − 1, φ(x) − b(x)
+(8)
+We apply no penalty if the SDF prediction is positive and
+smaller than the bound, a linear loss if it is larger, and exponential penalty (α = 5) if it is negative. Despite being
+approximated SDF values, these terms provide more direct
+supervision than the rendering terms in Sec. 3.2. Empirically we observed that they add robustness to the optimisation.
+3.4. Grid-based SDF Regularisation
+Directly optimizing the feature volume from RGB-D observations is not sufficiently constrained and can lead to artifacts and invalid predictions. We employ two regularization
+terms on the SDF values: Eikonal term `eik and smoothness term `smooth . Eikonal regularisation has been used
+in [7, 33, 20] to encourage valid SDF values, especially in
+areas without direct supervision. Specifically, at any query
+point, the gradient of the SDF value w.r.t. 3D query coordinates should have unit length:
+2
+`eik (x) = 1 − k∇φ(x)k
+(9)
+Intuitively, this term encourages the absolute value of SDF
+to increase uniformly as we move away from the surface.
+Unlike [1, 33, 29, 41] that use an MLP scene representation with built-in smoothness priors, we must explicitly add
+a smoothness term. Our loss minimises the difference between the gradients of nearby points.
+2
+`smooth (x) = k∇φ(x) − ∇φ(x + )k
+(10)
+Here x is taken from near-surface points sampled randomly
+across the whole model,  is a small perturbation of length
+δs and random direction (we set δs between 4mm and 1mm,
+see Fig.3).
+Customised Grid Sampler. Adding the above terms to the
+final loss requires second order derivatives of the SDF to be
+SDF and free space losses, Lsdf and Lf s are applied on two
+disjoint subsets Str and Sf s of sampled ray points:
+M
+Lsdf =
+Figure 3: The distance between sampled points for gradient
+regularisation (δs ) controls surface smoothness. Left: δs =
+1 mm, Middle: δs = 4 mm, Right: δs = 2 cm.
+computed. The SDF value is a function of 3D coordinates
+x, feature vectors θ, and geometry network parameters ω:
+φ(x, θ, ω) = fω (Vθ (x))
+(11)
+The gradient of the SDF w.r.t. 3D query coordinates is:
+∂φ
+∂fω (Vθ (x)) ∂Vθ (x)
+=
+∂x
+∂Vθ (x)
+∂x
+(12)
+To regularise this gradient we need to compute the first three
+rows (since x is 3-dimensional) of the Hessian of the SDF
+(Eq. 11). In practice, Pytorch’s automatic differentiation
+package supports double back-propagation through an MLP
+in the computation graph, but we still need to compute second order derivatives of the trilinear interpolation w.r.t. features θ and query coordinates x. We implement a dropin replacement of Pytorch’s grid sampler that supports
+double back-propagation. Specifically, we reuse Pytorch’s
+implementation for forward and backward passes, and add
+a new CUDA kernel for the second backward pass. Our
+implementation will be open-sourced. For derivation of the
+second order derivatives of trilinear interpolation, please refer to the supplementary material.
+3.5. Optimization
+To optimize our scene representation described in
+Sec 3.1, at each iteration we sample a batch of R rays from
+all pixels across all images (including pixels that have missing depth values). Our global objective function L(P) is:
+L(P) = λrgb Lrgb + λd Ld + λsdf Lsdf +
+λf s Lf s + λeik Leik + λsmooth Lsmooth
+(13)
+where P = {θ, ω, β, γ, {ξt }} is the list of parameters being
+optimised, including features, decoders and camera poses.
+Lrgb and Ld measure the difference between observed pixel
+color/depth and rendered values. Lrgb is computed over all
+the sampled rays, while for Ld only rays with valid depth
+values Rd are considered.
+M
+Lrgb =
+1 X m
+` ,
+M m=1 rgb
+Ld =
+1 X m
+`d
+|Rd |
+r∈Rd
+(14)
+1 X 1 X
+`sdf (xs )
+M m=1 |Str |
+(15)
+s∈Str
+M
+Lf s =
+1 X 1 X
+`f s (xs )
+M m=1 |Sf s |
+(16)
+s∈Sf s
+Leik encourages points far from the surface to have valid
+SDF predictions and is applied on Sf s :
+M
+Leik =
+1 X 1 X
+`eik (xs )
+M m=1 |Sf s |
+(17)
+s∈Sf s
+Lsmooth encourages surface smoothness and is applied to
+randomly sampled near-surface points Sg over the whole
+voxel grid:
+Lsmooth =
+1 X
+`smooth (xs )
+|Sg |
+(18)
+s∈Sg
+Geometric Initialisation. To improve convergence, we initialize our feature grid and geometry decoder such that the
+initial surface is a sphere [7] centred at volume origin and
+with a radius half the size of the smallest dimension.
+4. Results
+4.1. Experimental Setup
+Datasets. We consider two main datasets for evaluation.
+We qualitatively evaluate our reconstruction quality on real
+sequences from ScanNet [5] showing our approach is able
+to achieve complete and smooth reconstructions. We also
+quantitatively evaluate our method on 10 synthetic datasets
+following the same evaluation protocol as in [1].
+Metrics. We measure accuracy, completion, chamfer `1
+distance, normal consistency and F-score for reconstruction quality. As for pose accuracy we measure translation
+and rotation error. The metrics are computed between point
+clouds sampled at a density of 1 point per cm2 . F-score is
+computed using athreshold of 5cm.
+Baselines. We consider NeuralRGB-D Surface Reconstruction [1] (NeuralRGB-D) as our main baseline, and also
+compare quantitatively against some other state-of-the-art
+traditional as well as learning-based RGB-D reconstruction
+methods: BundleFusion [6], COLMAP with Poisson surface reconstruction [25, 24, 23], RoutedFusion [34], Convolutional Occupancy Networks [22] and SIREN [26].
+Implementation Details. We run our reconstruction
+method on a desktop PC with a 3.60GHz Intel i7-9700K
+CPU and an NVIDIA RTX-2080Ti GPU. For all our experiments, we sample M = 6144 rays per batch, and Nc = 96
+RGB
+BundleFusion [6]
+Neural RGBD [1]
+GO-Surf (Ours)
+Figure 4: We compare our method to Neural RGB-D Surface Reconstruction [1] and BundleFusion [6] on scenes 0, 2, and
+12 of the ScanNet dataset. Qualitative results show that our method displays higher completion and smoothness than the
+baselines. Our method is also able to produce high-quality reconstructions for missing depth regions and thin structures.
+coarse samples and Nf = 36 fine samples along each ray.
+Our method is implemented in Pytorch using the ADAM
+optimizer with learning rate of 1 × 10−3 , 1 × 10−2 and
+5×10−4 for MLP decoders, feature grids and camera poses.
+Ours
+Ours w/o RGB loss
+Ours w/o smoothness prior
+Ours w/o pose optim.
+Figure 5: We evaluate our method without different loss components. We observe better reconstruction of fine details with
+RGB loss which, however, without smoothness prior results in noisy surfaces. Similarly to [1], we observe improved surface
+consistency with pose refinement.
+Method
+Acc ↓
+BundleFusion
+RoutedFusion
+COLMAP
+ConvOccNets
+SIREN
+0.0191
+0.0223
+0.0271
+0.0498
+0.0229
+Neural RGBD
+Ours
+0.0151
+0.0158
+Com ↓
+C-`1 ↓
+NC ↑
+0.0581
+0.0364
+0.0322
+0.0524
+0.0412
+0.0386
+0.0293
+0.0296
+0.0511
+0.0320
+0.9027
+0.8765
+0.9134
+0.8607
+0.9049
+0.0197
+0.0195
+0.0174
+0.0177
+0.9316
+0.9317
+F-score ↑
+Method
+Trans. error (meters) ↓
+Rot. error (degrees) ↓
+0.014
+0.143
+0.8439
+0.8736
+0.8744
+0.6822
+0.8515
+BundleFusion
+COLMAP
+Neural RGBD
+0.9635
+0.9591
+Table 2: We evaluate the average translation and rotation errors of the estimated camera poses. Our method further improves camera poses from BundleFusion initialization and
+outperforms NeuralRGB-D which adopts similar pose refinement scheme.
+Table 1: Quantitative evaluation of the reconstruction quality on a dataset of 10 synthetic scenes using the protocol
+established in [1]. We compare with a number of baselines
+and with NeuralRGB-D [1]. GO-Surf is on par in terms of
+performance but is significantly faster.
+We set the loss weights to λrgb = 10.0, λdepth = 1.0,
+λsdf = 10.0, λf s = 1.0, λeik = 1.0 and λsmooth = 1.0.
+We use 3cm, 6cm, 24cm and 96cm voxel sizes for each
+level. Camera pose is parameterised as translation vector
+t ∈ R3 and Lie Algebra ν ∈ so(3). We run the optimisation for 10k for all scenes. The optimisation process takes
+15 to 45 minutes depending on the scene size.
+4.2. Reconstruction Quality
+Qualitative Evaluation on ScanNet [5]. We test our
+method on real-world sequences from the ScanNet RGB-
+Ours
+0.033
+0.038
+0.023
+0.571
+0.692
+0.146
+D dataset. Depth image measurements are often noisy and
+miss valid depth values in areas such as glass and thin structures like chair legs. We show that our RGB loss and SDF
+regularisation can mitigate these effects significantly. We
+also jointly refine the camera poses provided in ScanNet.
+Fig. 4 shows comparisons of our method with reconstructions obtained via BundleFusion [6], and NeuralRGBD [1]. Our method produces more complete and smoother
+reconstruction results. For missing depth on areas such as
+TV screens (2nd, 4th and 5th row), our method demonstrates strong hole-filling ability and produces high-quality
+reconstruction. Our method also captures thin structures
+(bike in the 2nd row and chair leg in the 5th row) better than
+dimension
+voxel dim
+runtime
+model size
+num params
+scene 0000
+scene 0012
+morning apartment
+8.8 × 9.1 × 3.4
+321 × 321 × 129
+44 min
+268 MB
+66.5 M
+5.8 × 5.7 × 2.9
+225 × 225 × 129
+31 min
+132 MB
+32.7 M
+3.5 × 4.0 × 2.3
+129 × 161 × 97
+19 min
+41 MB
+10.1 M
+Table 3: Performance Analysis on 3 scenes from ScanNet [5] and synthetic dataset. Our method requires much
+less runtime than NeuralRGB-D [1] at the cost of larger
+model size.
+our baselines. More reconstruction results can be found in
+the supplementary material.
+Quantitative Evaluation on Synthetic Sequences. We
+perform a quantatitive evaluation of our method on a synthetic dataset of 10 sequences [1]. Noise and artifacts are
+added to the rendered ground-truth depth images to simulate a real depth sensor. The camera poses obtained with
+BundleFusion [6] are used as initialization for reconstruction, and are optimized along with the feature grids and decoders. We run marching cubes at the resolution of 1cm to
+extract meshes. For fair comparison, we also run BundleFusion [6] and RoutedFusion at the same resolution. Regions
+that are not observed in any camera views are culled before
+evaluation.
+As shown in Tab. 1, our method performs on par with
+NeuralRGB-D, and outperforms all the other baselines by
+a large margin. Specifically, we achieve better Completion and Normal Consistency which shows the benefit of
+our proposed smoothness prior in terms of hole-filling and
+smoothness. In Tab. 2 we evaluate the pose estimation accuracy of our method. We take BundleFusion as initial
+camera poses and refine them along with other optimisable parameters. Results show that our pose-refinement significantly improved the initial poses and also outperforms
+NeuralRGB-D in terms of both translation and rotation error.
+4.3. Performance Analysis
+Runtime. GO-Surf achieves high-quality reconstructions
+in 15 to 45 minutes, while NeuralRGB-D [1] takes 15 to
+25 hours on the same hardware. Tab. 3 shows our method’s
+runtime on 3 example scenes with various scales from ScanNet and synthetic datasets.
+Memory Footprint. We report memory usage for storing
+our model in Tab. 3. Our model requires hundreds of MB
+to store the full feature grid and scales up rapidly as the
+scene size increases. This is one of our major limitations
+and we leave it as future work to optimize memory footprint. In contrast, our method runs much faster than the lowmemory-footprint implicit representations while achieving
+on par reconstruction quality and still requires fewer parameters than traditional methods that use explicit voxel grid.
+4.4. Ablation Studies
+We conduct ablation studies to show the effect of individual building blocks and justify our design choices.
+Effect of RGB Term. We compare our full model against
+our model without the RGB loss term. Results show that
+the RGB loss term enables reconstruction of high frequency
+details that could not be recovered using solely the depth supervision while still preserving overall smoothness (Fig. 5).
+Effect of Smoothness Term We also verify the effectiveness of the smoothness prior term, which has a twofold role.
+Firstly, it completes the unobserved parts of the scene, for
+example holes on the floor. Secondly, it regularises the RGB
+and depth losses that would otherwise overfit and produce
+noisy surfaces (Fig. 5).
+Effect of Pose Refinement Similarly to [1], we observe that
+joint optimisation of the model and camera poses corrects
+the imperfect trajectory estimate from SLAM system and
+leads to more consistent surface reconstruction (Fig. 5).
+5. Conclusion
+We presented GO-Surf, a novel approach to surface
+reconstruction from a sequence of RGB-D images. We
+achieved a level of smoothness and hole filling on-par with
+MLP-based approaches while reducing the training time by
+an order of magnitude. Our system produces accurate and
+complete meshes of indoor scenes.
+Limitations and Future Work. The biggest limitation of
+our system is the memory consumption which at the moment scales cubically with the scene dimensions. This is a
+well-known problem of voxel-like architectures and various
+solutions have been proposed to mitigate it. Voxel hashing
+[18] or octree-based sparsification would significantly reduce the memory footprint of our system and we intend to
+explore this direction in future work. We also recognize the
+high complexity of our loss term which makes it difficult
+to fully explore the hyperparameter space. Specifically, we
+would like to better understand the relation between SDF,
+free-space and depth loss and preferably merge them into
+one loss term. Finally, our method currently overfits to a
+single scene. We are interested in learning the geometry
+priors on large datasets to use them at inference time.
+Acknowledgements
+Research presented here has been supported by the UCL
+Centre for Doctoral Training in Foundational AI under
+UKRI grant number EP/S021566/1. TB was supported
+from a sponsored research award by Cisco Research. We
+also thank Dejan Azinovic for providing additional details
+and results of NeuralRGBD.
+References
+[1] Dejan Azinović, Ricardo Martin-Brualla, Dan B Goldman,
+Matthias Nießner, and Justus Thies. Neural rgb-d surface
+reconstruction. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), June
+2022. 1, 2, 4, 5, 6, 7, 8
+[2] Aljaz Bozic, Pablo Palafox, Justus Thies, Angela Dai, and
+Matthias Nießner. Transformerfusion: Monocular rgb scene
+reconstruction using transformers. Advances in Neural Information Processing Systems, 34, 2021. 2
+[3] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and
+Hao Su. Tensorf: Tensorial radiance fields. arXiv preprint
+arXiv:2203.09517, 2022. 1, 3
+[4] Julian Chibane, Thiemo Alldieck, and Gerard Pons-Moll.
+Implicit functions in feature space for 3d shape reconstruction and completion. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+6970–6981, 2020. 2
+[5] Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, and Matthias Nießner. Scannet:
+Richly-annotated 3d reconstructions of indoor scenes. In
+Proc. Computer Vision and Pattern Recognition (CVPR),
+IEEE, 2017. 5, 7, 8
+[6] Angela Dai, Matthias Nießner, Michael Zollhöfer, Shahram
+Izadi, and Christian Theobalt. Bundlefusion: Real-time
+globally consistent 3d reconstruction using on-the-fly surface reintegration. ACM Transactions on Graphics (TOG),
+36(4):76a, 2017. 2, 5, 6, 7, 8
+[7] Amos Gropp, Lior Yariv, Niv Haim, Matan Atzmon, and
+Yaron Lipman. Implicit geometric regularization for learning
+shapes. In International Conference on Machine Learning,
+pages 3789–3799. PMLR, 2020. 2, 4, 5
+[8] Animesh Karnewar, Tobias Ritschel, Oliver Wang, and
+Niloy J Mitra. Relu fields: The little non-linearity that could.
+arXiv preprint arXiv:2205.10824, 2022. 1, 3
+[9] Abhijit Kundu, Kyle Genova, Xiaoqi Yin, Alireza Fathi,
+Caroline Pantofaru, Leonidas Guibas, Andrea Tagliasacchi,
+Frank Dellaert, and Thomas Funkhouser. Panoptic neural
+fields: A semantic object-aware neural scene representation.
+arXiv preprint arXiv:2205.04334, 2022. 2
+[10] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and
+Christian Theobalt. Neural sparse voxel fields. Advances
+in Neural Information Processing Systems, 33:15651–15663,
+2020. 2
+[11] Lars Mescheder, Michael Oechsle, Michael Niemeyer, Sebastian Nowozin, and Andreas Geiger. Occupancy networks:
+Learning 3d reconstruction in function space. In Proceedings IEEE Conf. on Computer Vision and Pattern Recognition (CVPR), 2019. 1, 2
+[12] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 1, 2, 3, 4
+[13] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. arXiv preprint arXiv:2201.05989,
+2022. 1, 2, 3
+[14] Zak Murez, Tarrence van As, James Bartolozzi, Ayan Sinha,
+Vijay Badrinarayanan, and Andrew Rabinovich. Atlas: Endto-end 3d scene reconstruction from posed images. In European Conference on Computer Vision, pages 414–431.
+Springer, 2020. 2
+[15] Richard A Newcombe, Shahram Izadi, Otmar Hilliges,
+David Molyneaux, David Kim, Andrew J Davison, Pushmeet
+Kohi, Jamie Shotton, Steve Hodges, and Andrew Fitzgibbon. Kinectfusion: Real-time dense surface mapping and
+tracking. In 2011 10th IEEE International Symposium on
+Mixed and Augmented Reality (ISMAR), pages 127–136.
+IEEE, 2011. 2
+[16] Michael Niemeyer, Lars Mescheder, Michael Oechsle, and
+Andreas Geiger. Differentiable volumetric rendering: Learning implicit 3d representations without 3d supervision. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 3504–3515, 2020. 2,
+3
+[17] Matthias Nießner, Michael Zollhöfer, Shahram Izadi, and
+Marc Stamminger. Real-time 3d reconstruction at scale using voxel hashing. ACM Transactions on Graphics (ToG),
+32(6):1–11, 2013. 2
+[18] M. Nießner, M. Zollhöfer, S. Izadi, and M. Stamminger.
+Real-time 3d reconstruction at scale using voxel hashing.
+ACM Transactions on Graphics (TOG), 2013. 8
+[19] Michael Oechsle, Lars Mescheder, Michael Niemeyer, Thilo
+Strauss, and Andreas Geiger. Texture fields: Learning texture representations in function space. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 4531–4540, 2019. 2
+[20] Joseph Ortiz, Alexander Clegg, Jing Dong, Edgar Sucar,
+David Novotny, Michael Zollhoefer, and Mustafa Mukadam.
+isdf: Real-time neural signed distance fields for robot perception. arXiv preprint arXiv:2204.02296, 2022. 2, 4
+[21] Jeong Joon Park, Peter Florence, Julian Straub, Richard
+Newcombe, and Steven Lovegrove. Deepsdf: Learning continuous signed distance functions for shape representation.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 165–174, 2019. 1, 2
+[22] Songyou Peng, Michael Niemeyer, Lars Mescheder, Marc
+Pollefeys, and Andreas Geiger. Convolutional occupancy
+networks. In European Conference on Computer Vision
+(ECCV), Cham, Aug. 2020. Springer International Publishing. 5
+[23] Johannes L. Schonberger and Jan-Michael Frahm. Structurefrom-motion revisited. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR),
+June 2016. 5
+[24] Johannes Lutz Schönberger, True Price, Torsten Sattler, JanMichael Frahm, and Marc Pollefeys. A vote-and-verify strategy for fast spatial verification in image retrieval. In Asian
+Conference on Computer Vision (ACCV), 2016. 5
+[25] Johannes Lutz Schönberger, Enliang Zheng, Marc Pollefeys,
+and Jan-Michael Frahm. Pixelwise view selection for unstructured multi-view stereo. In European Conference on
+Computer Vision (ECCV), 2016. 5
+[26] Vincent Sitzmann, Julien N.P. Martel, Alexander W.
+Bergman, David B. Lindell, and Gordon Wetzstein. Implicit
+neural representations with periodic activation functions. In
+arXiv, 2020. 5
+[27] Vincent Sitzmann, Michael Zollhöfer, and Gordon Wetzstein. Scene representation networks: Continuous 3dstructure-aware neural scene representations. In Advances
+in Neural Information Processing Systems, 2019. 1, 2
+[28] Noah Stier, Alexander Rich, Pradeep Sen, and Tobias
+Höllerer. VoRTX: Volumetric 3d reconstruction with transformers for voxelwise view selection and fusion. In 2021 International Conference on 3D Vision (3DV), pages 320–330.
+IEEE, 2021. 2
+[29] Edgar Sucar, Shikun Liu, Joseph Ortiz, and Andrew J Davison. imap: Implicit mapping and positioning in real-time. In
+Proceedings of the IEEE/CVF International Conference on
+Computer Vision, pages 6229–6238, 2021. 2, 4
+[30] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel
+grid optimization: Super-fast convergence for radiance fields
+reconstruction. arXiv preprint arXiv:2111.11215, 2021. 1, 3
+[31] Jiaming Sun, Yiming Xie, Linghao Chen, Xiaowei Zhou, and
+Hujun Bao. Neuralrecon: Real-time coherent 3d reconstruction from monocular video. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 15598–15607, 2021. 2
+[32] Towaki Takikawa, Joey Litalien, Kangxue Yin, Karsten
+Kreis, Charles Loop, Derek Nowrouzezahrai, Alec Jacobson,
+Morgan McGuire, and Sanja Fidler. Neural geometric level
+of detail: Real-time rendering with implicit 3D shapes. 2021.
+3
+[33] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku
+Komura, and Wenping Wang. Neus: Learning neural implicit
+surfaces by volume rendering for multi-view reconstruction.
+NeurIPS, 2021. 2, 3, 4
+[34] Silvan Weder, Johannes L. Schönberger, Marc Pollefeys, and
+Martin R. Oswald. Routedfusion: Learning real-time depth
+map fusion. In IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), June 2020. 5
+[35] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman.
+Volume rendering of neural implicit surfaces. In ThirtyFifth Conference on Neural Information Processing Systems,
+2021. 3
+[36] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan
+Atzmon, Basri Ronen, and Yaron Lipman. Multiview neural surface reconstruction by disentangling geometry and appearance. Advances in Neural Information Processing Systems, 33:2492–2502, 2020. 2, 3
+[37] Alex Yu, Sara Fridovich-Keil, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. arXiv preprint
+arXiv:2112.05131, 2021. 1, 3
+[38] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng,
+and Angjoo Kanazawa. Plenoctrees for real-time rendering
+of neural radiance fields. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pages 5752–
+5761, 2021. 2
+[39] Xiaoshuai Zhang, Sai Bi, Kalyan Sunkavalli, Hao Su, and
+Zexiang Xu. Nerfusion: Fusing radiance fields for largescale scene reconstruction. CVPR, 2022. 2
+[40] Shuaifeng Zhi, Tristan Laidlow, Stefan Leutenegger, and Andrew J Davison. In-place scene labelling and understanding
+with implicit scene representation. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 15838–15847, 2021. 2
+[41] Zihan Zhu, Songyou Peng, Viktor Larsson, Weiwei Xu, Hujun Bao, Zhaopeng Cui, Martin R. Oswald, and Marc Pollefeys. Nice-slam: Neural implicit scalable encoding for slam.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), 2022. 1, 2, 3, 4
+Supplementary Material
+GO-Surf: Neural Feature Grid Optimization for
+Fast, High-Fidelity RGB-D Surface Reconstruction
+arXiv:2206.14735v2 [cs.CV] 17 Sep 2022
+Jingwen Wang* , Tymoteusz Bleja* , and Lourdes Agapito
+Department of Computer Science, University College London
+1. Second-order Grid Sampler
+In this section we provide additional details on our
+implementation of grid sampler that allows double backpropagation in PyTorch. As described in our main paper,
+thepredicted SDF value φ is a function of 3D coordinates
+of the query point x, feature vectors in feature grid θ, and
+geometry network parameters ω:
+φ(x, θ, ω) = fω (z(θ, x))
+(1)
+where z = Vθ (x) ∈ RC is the tri-linearly interpolated feature vector at the query point x. The first-order gradient of
+the SDF w.r.t. 3D query coordinates is:
+∂φ
+∂x
+=
+=
+∂fω (z) ∂z
+∂z ∂x
+C
+X ∂fω (z) ∂zi
+i=1
+∂zi
+∂x
+(2)
+Here, to avoid the usage of higher-order tensors in derivation of second-order derivatives we consider the derivatives
+for each individual feature dimension zi , as in Eq. 2. To
+regularise this gradient term we need to obtain the gradient
+Eq. 2 w.r.t. x, θ and ω respectively, which corresponds to
+the first three row of the Hessian of SDF:
+
+2
+C
+X
+∂2φ
+∂ 2 fω (z) ∂zi
+∂fω (z) ∂ 2 zi
+=
++
+(3)
+2
+∂x2
+∂zi
+∂x
+∂zi ∂x2
+i=1
+∂2φ
+∂x∂θ
+=
+∂2φ
+∂x∂ω
+=
+C
+X
+∂ 2 fω (z) ∂zi ∂zi
+i=1
+∂zi2
+∂θ ∂x
+C
+X
+∂ 2 fω (z) ∂zi
+i=1
+∂zi ∂ω ∂x
++
+∂fω (z) ∂ 2 zi
+(4)
+∂zi ∂x∂θ
+(5)
+We don’t need to implement Eq. 5 as Pytorch’s automatic
+differentiation package supports double back-propagation
+* The first two authors contributed equally.
+Figure 1: Example of trilinear interpolation in a 3D voxel.
+through an MLP and Pytorch’s grid sampler also has
+first-order gradient implementation. However Eq. 3 and
+4 need to be implemented as they require double backpropagation through the grid sampler which is not implemented in PyTorch.
+Derivative Derivation. Now we will derive the secondorder derivatives of the tri-linear interpolation. More specif2
+∂ 2 zi
+.
+ically, we only need two Hessian blocks: ∂∂xz2i and ∂x∂θ
+For simplicity we derive with 1-D features, but it generalises to any feature dimensions as the derivation is equivalent to all dimensions. Assume we have a query point
+x = [x, y, z] and 8 feature vectors (points) stacking in a column θ = [θ000 , θ001 , θ010 , θ011 , θ100 , θ101 , θ110 , θ111 ]T ∈
+R8 that correspond to the eight vertices of the voxel that encloses the point x. Then, the tri-linearly interpolated feature
+f at point x is given by:
+f = θT w(x)
+(6)
+where w(x) ∈ R8 is the coefficient vector of the 8 vertices:
+
+
+(1 − x)(1 − y)(1 − z)
+ (1 − x)(1 − y)z 
+
+
+ (1 − x)y(1 − z) 
+
+
+
+
+(1 − x)yz
+
+
+(7)
+w(x) = 
+
+x(1
+−
+y)(1
+−
+z)
+
+
+
+
+x(1 − y)z
+
+
+
+
+xy(1 − z)
+xyz
+Then the Jacobian of f w.r.t. x is given by:
+∂f
+∂w(x)
+= θT
+∂x
+∂x
+(8)
+where the Jacobian of the coefficient vector w w.r.t. query
+point x is a 8 × 3 matrix and is given by:
+∂w
+∂x
+J1
+J2
+J3
+
+
+J1 J 2 J3
+
+
+−(1 − y)(1 − z)
+ −(1 − y)z 
+
+
+ −y(1 − z) 
+
+
+
+
+−yz
+
+= 
+ (1 − y)(1 − z) 
+
+
+
+
+(1 − y)z
+
+
+
+
+y(1 − z)
+yz
+
+
+−(1 − x)(1 − z)
+ −(1 − x)z 
+
+
+ (1 − x)(1 − z) 
+
+
+
+
+(1 − x)z
+
+= 
+ −x(1 − z) 
+
+
+
+
+−xz
+
+
+
+
+x(1 − z)
+xz
+
+
+−(1 − x)(1 − y)
+ (1 − x)(1 − y) 
+
+
+ −(1 − x)y) 
+
+
+
+
+(1 − x)y
+
+
+= 
+
+ −x(1 − y) 
+
+
+x(1 − y)
+
+
+
+
+−xy
+xy
+=
+(9)
+where {JTi θ}3i=1 are inner-products between each column
+of Eq. 9 and θ, so the result is a 3 × 3 matrix with each
+column being the derivative w.r.t. x, y and z. It is trivial
+to show that all diagonal elements are zero as each Ji term
+only contains the variables of other two dimensions, as in
+Eq. 10, 11 and 12. The off-diagonal elements can be easily
+computed as:
+h12 = h21 = (1 − z)(θ000 + θ110 − θ010 − θ100 )
++ z(θ001 + θ111 − θ011 − θ101 )
+(10)
+h13 = h31 = (1 − y)(θ000 + θ101 − θ001 − θ100 )
++ y(θ010 + θ111 − θ011 − θ110 )
+h23 = h32 = (1 − x)(θ000 + θ011 − θ001 − θ010 )
++ x(θ100 + θ111 − θ101 − θ110 )
+(16)
+(17)
+(18)
+2. Per-scene Quantitative Evaluation
+(11)
+(12)
+2
+∂ f
+Then the second-order derivative ∂x∂θ
+is given by:
+
+
+∂2f
+∂
+∂f
+=
+∂x∂θ
+∂θ ∂xT
+
+T
+∂w
+=
+∂x
+2
+∂ f
+other second-order derivative ∂x
+2 , we just need to differentiate Eq. 8 further w.r.t. the query points:
+
+
+∂
+∂2f
+∂f
+=
+∂x2
+∂x ∂xT
+ T 
+J θ
+∂  1T 
+J2 θ
+=
+(14)
+∂x
+JT3 θ
+
+
+h11 h12 h13
+= h21 h22 h23 
+(15)
+h31 h32 h33
+(13)
+which is simply the transpose of Eq. 9. And to obtain the
+In this section we provide additional per-scene breakdown of the our quantitative evaluation on the 10 synthetic
+sequences.
+Evaluation Protocol. For all the methods we run marching
+cubes at 1cm resolution to extract the meshes for evaluation.
+We measure accuracy (Acc), completion (Comp), chamfer`1 (C-`1 ), normal consistency (NC) and F-score for evaluation of reconstruction quality. Specifically, all the metrics are computed between point clouds sampled on groundtruth and predicted mesh. Instead of sampling a fixed number of points we sample point cloud at density of 1 point per
+cm2 to take into account the scene scale. The treshold for
+computing F-score is set to 5 cm.
+Mesh Culling. To prevent the evaluation from falsely penalizing the scene completion ability of our method, surfaces that are not observed in RGB-D images are culled.
+Following [1] we subdivide the meshes such that all the
+faces have maximum edge length of below 1.5cm. A face
+will be removed if 1. it is not inside any camera frusta, or 2.
+it is occluded by other geometry, or 3. it has no valid depth
+measurements. Note for thin geometry sequence, we only
+apply the first two criteria.
+Scene
+Method
+Complete kitchen
+Kitchen
+Breakfast room
+Morning apartment
+Grey white room
+BundleFusion
+RoutedFusion
+COLMAP
+ConvOccNets
+SIREN
+Acc ↓
+0.0303
+0.0270
+0.0365
+0.0502
+0.0319
+Comp ↓
+0.1475
+0.0854
+0.0354
+0.0527
+0.0700
+NeuralRGBD
+Ours
+0.0224
+0.0224
+BundleFusion
+RoutedFusion
+COLMAP
+ConvOccNets
+SIREN
+C-`1 ↓
+0.0889
+0.0562
+0.0360
+0.0514
+0.0509
+NC ↑
+0.8570
+0.8484
+0.9245
+0.8667
+0.9031
+F-score ↑
+Trans. ↓
+Rot. ↓
+0.0394
+0.0258
+0.0309
+0.0241
+0.9098
+0.9413
+0.8962
+0.8998
+0.083
+0.017
+0.450
+0.137
+0.0253
+0.0281
+0.0228
+0.0420
+0.0327
+0.0578
+0.0362
+0.0282
+0.049
+0.0575
+0.0416
+0.0322
+0.0255
+0.0455
+0.0451
+0.9112
+0.8553
+0.9332
+0.8752
+0.8996
+0.7967
+0.8484
+0.9170
+0.6253
+0.7071
+0.038
+0.103
+-
+0.327
+0.641
+-
+NeuralRGBD
+Ours
+0.0218
+0.0214
+0.0297
+0.0271
+0.0257
+0.0243
+0.9296
+0.9316
+0.9005
+0.9379
+0.030
+0.026
+0.114
+0.145
+BundleFusion
+RoutedFusion
+COLMAP
+ConvOccNets
+SIREN
+0.0129
+0.0181
+0.0191
+0.0311
+0.0150
+0.0235
+0.0202
+0.0194
+0.0329
+0.0454
+0.0182
+0.0191
+0.0192
+0.0320
+0.0302
+0.9582
+0.9341
+0.9522
+0.8925
+0.9371
+0.9606
+0.9758
+0.9533
+0.9602
+0.9230
+0.037
+0.009
+-
+0.697
+0.210
+-
+NeuralRGBD
+Ours
+0.0145
+0.0144
+0.0148
+0.0136
+0.0146
+0.0139
+0.9657
+0.9629
+0.9898
+0.9829
+0.007
+0.009
+0.135
+0.137
+BundleFusion
+RoutedFusion
+COLMAP
+ConvOccNets
+SIREN
+0.0079
+0.0100
+0.0133
+0.0408
+0.0105
+0.0146
+0.0143
+0.0183
+0.0482
+0.0146
+0.0112
+0.0121
+0.0158
+0.0445
+0.0125
+0.8891
+0.8754
+0.8810
+0.8105
+0.8765
+0.9740
+0.9795
+0.9666
+0.7912
+0.9718
+0.008
+0.017
+-
+0.165
+0.380
+-
+NeuralRGBD
+Ours
+0.0087
+0.0095
+0.0121
+0.0129
+0.0104
+0.0112
+0.8918
+0.8874
+0.9866
+0.9778
+0.005
+0.005
+0.093
+0.101
+BundleFusion
+RoutedFusion
+COLMAP
+ConvOccNets
+SIREN
+0.0297
+0.0303
+0.0287
+0.0470
+0.0323
+0.0456
+0.0347
+0.0293
+0.0488
+0.0335
+0.0377
+0.0325
+0.0290
+0.0479
+0.0329
+0.8612
+0.8531
+0.9013
+0.8434
+0.8697
+0.7537
+0.7908
+0.9036
+0.6057
+0.8142
+0.056
+0.029
+-
+1.891
+0.296
+-
+NeuralRGBD
+Ours
+0.0132
+0.0140
+0.0151
+0.0158
+0.0142
+0.0149
+0.9318
+0.9261
+0.9923
+0.9895
+0.014
+0.013
+0.146
+0.205
+0.6943
+0.7939
+0.8248
+0.6610
+0.7415
+0.050
+0.009
+-
+0.566
+0.210
+-
+Table 1: We compare the quality of our reconstruction on several synthetic scenes for which ground truth data is available. We
+measure accuracy, completion, chamfer `1 distance, normal consistency and F-score for reconstruction quality. The numbers
+are computed between point clouds sampled with a density of 1 point per cm2 .
+Scene
+Method
+White room
+Green room
+Staircase
+Thin geometry
+ICL living room
+BundleFusion
+RoutedFusion
+COLMAP
+ConvOccNets
+SIREN
+Acc ↓
+0.0276
+0.0289
+0.0309
+0.0537
+0.0276
+Comp ↓
+0.0918
+0.0430
+0.0342
+0.0583
+0.0588
+NeuralRGBD
+Ours
+0.0204
+0.0210
+BundleFusion
+RoutedFusion
+COLMAP
+ConvOccNets
+SIREN
+C-`1 ↓
+0.0597
+0.0360
+0.0325
+0.0560
+0.0432
+NC ↑
+0.8788
+0.8280
+0.9188
+0.8653
+0.8992
+F-score ↑
+Trans. ↓
+Rot. ↓
+0.0256
+0.0325
+0.0230
+0.0268
+0.9297
+0.9281
+0.9551
+0.9233
+0.028
+0.024
+0.146
+0.157
+0.0118
+0.0156
+0.0159
+0.0548
+0.0183
+0.0339
+0.0193
+0.0194
+0.0493
+0.0253
+0.0228
+0.0174
+0.0177
+0.0521
+0.0218
+0.9254
+0.9095
+0.9270
+0.8600
+0.9143
+0.9314
+0.9735
+0.9712
+0.7434
+0.9448
+0.027
+0.014
+-
+0.546
+0.227
+-
+NeuralRGBD
+Ours
+0.0106
+0.0138
+0.0142
+0.0169
+0.0124
+0.0153
+0.9348
+0.9256
+0.9913
+0.9838
+0.012
+0.014
+0.104
+0.085
+BundleFusion
+RoutedFusion
+COLMAP
+ConvOccNets
+SIREN
+0.0257
+0.0411
+0.0454
+0.0618
+0.0355
+0.1146
+0.0512
+0.058
+0.0562
+0.0514
+0.0701
+0.0461
+0.0517
+0.059
+0.0434
+0.8792
+0.8909
+0.9253
+0.8601
+0.9117
+0.7108
+0.6896
+0.6875
+0.5646
+0.7487
+0.039
+0.043
+-
+0.643
+0.305
+-
+NeuralRGBD
+Ours
+0.0216
+0.0221
+0.0254
+0.0257
+0.0235
+0.024
+0.9471
+0.9496
+0.9333
+0.9235
+0.016
+0.015
+0.123
+0.144
+BundleFusion
+RoutedFusion
+COLMAP
+ConvOccNets
+SIREN
+0.0072
+0.0070
+0.0372
+0.0115
+0.0086
+0.0305
+0.0396
+0.0558
+0.0329
+0.0335
+0.0188
+0.0233
+0.0465
+0.0222
+0.0210
+0.9063
+0.8243
+0.8181
+0.8800
+0.8823
+0.9199
+0.8785
+0.7209
+0.9072
+0.9115
+0.009
+0.079
+-
+0.126
+2.4
+-
+NeuralRGBD
+Ours
+0.0079
+0.0093
+0.0092
+0.0121
+0.0086
+0.0107
+0.9077
+0.8986
+0.9956
+0.9817
+0.010
+0.011
+0.037
+0.146
+BundleFusion
+RoutedFusion
+COLMAP
+ConvOccNets
+SIREN
+0.0129
+0.0168
+0.0209
+0.1049
+0.0167
+0.0214
+0.0201
+0.0238
+0.0956
+0.0219
+0.0172
+0.0185
+0.0224
+0.1003
+0.0193
+0.9606
+0.9456
+0.9528
+0.8535
+0.9555
+0.9694
+0.9841
+0.9730
+0.5619
+0.9734
+0.022
+0.029
+-
+0.382
+0.836
+-
+NeuralRGBD
+Ours
+0.0095
+0.0105
+0.0115
+0.0127
+0.0105
+0.0117
+0.9689
+0.9661
+0.9944
+0.9909
+0.007
+0.007
+0.109
+0.167
+0.7286
+0.8222
+0.8259
+0.5012
+0.7788
+0.045
+0.018
+-
+0.375
+0.167
+-
+Table 2: We compare the quality of our reconstruction on several synthetic scenes for which ground truth data is available. We
+measure accuracy, completion, chamfer `1 distance, normal consistency and F-score for reconstruction quality. The numbers
+are computed between point clouds sampled with a density of 1 point per cm2 .
+RGB-D Input
+Ground Truth
+GO-Surf (Ours)
+Ours w/o RGB term
+Ours-full
+Figure 2: Qualitative reconstruction results on synthetic sequence with thin geometries and missing depth measurements.
+Method
+Ours (no rgb)
+Ours (full)
+Acc.) ↓
+0.0087
+0.0093
+Com. ↓
+0.0291
+0.0121
+C-`1 ↓
+0.0189
+0.0107
+NC ↑
+0.8967
+0.8986
+F-score ↑
+0.9273
+0.9817
+Table 3: We evaluate the reconstruction results of our model
+with out RGB loss term and our full model on a synthetic
+sequence with thin geometries.
+Synthetic Dataset. We evaluate on the same synthetic
+dataset as in [1] which consists of 10 scenes published under the CC-BY or CC-0 license. For more details please
+refer to their paper [1].
+3. More Ablation Studies
+In this section, we show additional ablation studies on
+the effect of RGB loss term, regularisation terms .
+3.1. Effect of RGB Loss Term
+Similar to [1], in the main paper we showed in Fig. 5 that
+the RGB loss term is able to capture better high-frequency
+details and recover missing depth regions. In this section
+we show quantitative evaluation on a synthetic scene with
+thin geometries that have no depth measurements, and also
+show more qualitative ablation results on real-world ScanNet scenes.
+For the experiment on the synthetic scene, we simulate
+missing depth by removing the depth measurements from
+the baskets and table legs (top left corner in Fig. 2). Comparison in Fig. 2 demonstrates that RGB loss term is able
+to recover thin structures with missing depth and produce
+complete reconstruction. Tab. 3 also shows our full model
+achieves significantly better reconstruction quality, especially completeness.
+3.2. Effect of SDF Regularisation Terms
+In this section we provide additional ablation studies on
+the two SDF regularisation terms.
+NICE-SLAM [6]
+Figure 3: Reconstructed meshes (unculled) of sequential
+mapping on ScanNet scene0000. Note that for fair comparison NICE-SLAM is running in mapping mode with ground
+truth camera poses. GO-Surf runs over ×30 faster while
+achieving much smoother high-quality reconstruction.
+Eikonal Term The Eikonal term encourages the model prediction to be a valid signed distance field. We observe that
+without the Eikonal term the SDF values are being reconstructed only within the truncation region (i.e. very close
+to the surface). The Eikonal term helps correct SDF values
+to be propagated outside of the truncation region, although
+some local artefacts still remain (see Fig. 4) which we suspect are due to the local nature of gradients in the feature
+grid.
+Normal Smoothness Term We found that the normal
+smoothness term fills the holes in unobserved regions which
+is particularly useful for fixing discontinuities in large planar structures like walls or floor. It also encourages surface smoothness in all other areas, usually at the cost of
+some fine details. We investigate different settings of normal smoothness radius (see Fig. 5).
+4. More Results
+In this section, we show more qualitative reconstruction results on synthetic scenes. Note that in order to also
+showcase the scene completion ability of different methods,
+the results shown here are from unculled meshes. Fig. 6
+shows the comparison of our method to NeuralRGB-D and
+other learning-based methods. Overall, our method produces smoother, and more complete reconstruction without
+losing tiny details.
+From the first two columns it can be seen that both
+NeuralRGB-D and our method have the ability to fill in unobserved regions (windows and the top ceiling). However,
+NeuralRGB-D tends to produce noisier scene completion
+results with many artefacts whereas ours is much smoother
+and looks more natural. In Fig 7 we provide more results to
+further showcase our method’s advantage over NeuralRGBD in terms of scene completion.
+Full model
+w/o Eikonal term
+w/o Geometric initialisation
+Figure 4: We found that applying the Eikonal term to some extent propagates the SDF gradient to empty spaces. Without
+the Eikonal term SDF is reconstructed only within the truncation region. Geometric initialisation reduces the noise in the
+unobserved regions (e.g. behind walls).
+δs = 0 (no reg.)
+δs = 5mm
+δs = 2cm
+δs = 10cm
+Figure 5: Ablation study on effect of smoothness prior. We compare the reconstruction results with different values of δs
+for normal regularisation term. With δs = 0 the results capture more details like the backpack strap and tiny objects on the
+kitchen table, but also have more high frequency noises. Also the hole shows up near the sofa. Increasing δs to 10cm results
+in over-smoothed reconstruction. We empirically found 2 − 5mm is a good trade-off between smoothness and details.
+BundleFusion [3]
+ConvOccNets [4]
+SIREN [5]
+NeuralRGBD [1]
+GO-Surf (Ours)
+GT
+Figure 6: Qualitative comparison on synthetic scenes. GO-Surf produces smoother, and more complete reconstruction without losing tiny details. Both NeuralRGBD and our method have the scene completion ability. However, NeuralRGBD
+produces much noisier completion results with many artefacts whereas ours is much smoother and looks more natural.
+BundleFusion [3]
+NeuralRGBD [1]
+GO-Surf (Ours)
+GT
+Figure 7: Scene completion comparison. NeuralRGBD produces much noisier completion results with many artefacts
+whereas ours is much smoother and looks more natural.
+scene
+complete kitchen
+kitchen
+breakfast room
+morning apartment
+grey white room
+white room
+staircase
+green room
+thin geometry
+ICL living room
+scene 0000
+scene 0002
+scene 0005
+scene 0012
+scene 0024
+scene 0050
+scene dim.
+voxel dim.
+runtime
+num params.
+model size
+9.3 × 10.0 × 3.3
+7.0 × 8.7 × 3.4
+4.1 × 4.7 × 3.3
+3.5 × 4.0 × 2.3
+5.9 × 4.4 × 3.1
+5.6 × 7.9 × 3.8
+6.8 × 6.5 × 3.7
+8.0 × 4.7 × 3.1
+3.4 × 3.6 × 1.2
+5.3 × 2.9 × 5.4
+321 × 353 × 129
+257 × 321 × 129
+161 × 193 × 129
+129 × 161 × 97
+225 × 161 × 129
+193 × 289 × 161
+257 × 225 × 161
+289 × 193 × 129
+129 × 129 × 65
+193 × 193 × 129
+45 min
+40 min
+25 min
+19 min
+24 min
+39 min
+39 min
+30 min
+15 min
+24 min
+73.1 M
+53.2 M
+20.1 M
+10.1 M
+23.4 M
+44.9 M
+46.6 M
+36.0 M
+5.4 M
+24.1 M
+294 MB
+214 MB
+81 MB
+41 MB
+94 MB
+181 MB
+188 MB
+145 MB
+28 MB
+97 MB
+44 min
+28 min
+33 min
+31 min
+40 min
+26 min
+66.5 M
+23.4 M
+27.1 M
+32.7 M
+53.9 M
+23.4 M
+268 MB
+113 MB
+113 MB
+132 MB
+217 MB
+94 MB
+8.8 × 9.1 × 3.4
+4.4 × 6.0 × 3.5
+5.8 × 5.3 × 2.9
+5.8 × 5.7 × 2.9
+7.6 × 8.4 × 2.9
+5.9 × 4.5 × 3.1
+321 × 321 × 129
+161 × 225 × 129
+225 × 193 × 125
+225 × 225 × 129
+289 × 289 × 129
+225 × 161 × 129
+Table 4: Runtime and memory requirement on synthetic and ScanNet [2] scenes. We list scene dimension (m3 ), voxel
+dimension, runtime (min), number of model parameters and model size (MB). Our method requires much less runtime than
+NeuralRGBD [1] (15 − 45 min vs 15 − 25 hours) at the cost of larger model size (tens to hundreds of MB vs several MB).
+5. Runtime and Memory Analysis
+In Tab. 4 we provide detailed breakdown of of the runtime and memory usage of our method on all of the scenes
+that we had run experiments on. Our method requires 15 to
+45 minutes to converge which is approximately ×60 faster
+than NeuralRGB-D. However our model size is much larger
+(tens to hundreds million of parameters vs several million
+parameters) and scales rapidly as the scene gets larger. This
+is This is an inherent problem of voxel-like architectures as
+the number of voxels scales cubically with the scene dimension. Voxel hashing or octree-based sparsification could
+be adopted to significantly reduce the memory footprint of
+our system and we intend to explore this direction in future
+work.
+6. Sequential Mapping Experiments
+GO-Surf’s fast runtime also enables sequential/online
+mapping at interactive framerate with slightly reduced resolution. In this section we run GO-Surf in a sequential fashion using 3-level feature grid with voxel sizes of
+6cm, 24cm and 96cm on ScanNet scene0000 and compare
+against NICE-SLAM [6] running on the same scene with
+ground truth camera poses.
+With increased voxel size GO-Surf runs in near realtime at 15Hz while NICE-SLAM runs much slower below
+0.5Hz. Fig 3 shows the comparison of reconstruction results. Ours is much smoother and has has less artifacts.
+References
+[1] Dejan Azinović, Ricardo Martin-Brualla, Dan B Goldman,
+Matthias Nießner, and Justus Thies. Neural rgb-d surface reconstruction. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), June 2022.
+2, 5, 7, 8, 9
+[2] Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber,
+Thomas Funkhouser, and Matthias Nießner. Scannet: Richlyannotated 3d reconstructions of indoor scenes. In Proc. Computer Vision and Pattern Recognition (CVPR), IEEE, 2017. 9
+[3] Angela Dai, Matthias Nießner, Michael Zollhöfer, Shahram
+Izadi, and Christian Theobalt. Bundlefusion: Real-time globally consistent 3d reconstruction using on-the-fly surface reintegration. ACM Transactions on Graphics (TOG), 36(4):76a,
+2017. 7, 8
+[4] Songyou Peng, Michael Niemeyer, Lars Mescheder, Marc
+Pollefeys, and Andreas Geiger. Convolutional occupancy networks. In European Conference on Computer Vision (ECCV),
+Cham, Aug. 2020. Springer International Publishing. 7
+[5] Vincent Sitzmann, Julien N.P. Martel, Alexander W. Bergman,
+David B. Lindell, and Gordon Wetzstein. Implicit neural
+representations with periodic activation functions. In arXiv,
+2020. 7
+[6] Zihan Zhu, Songyou Peng, Viktor Larsson, Weiwei Xu, Hujun Bao, Zhaopeng Cui, Martin R. Oswald, and Marc Pollefeys. Nice-slam: Neural implicit scalable encoding for slam.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2022. 5, 9
