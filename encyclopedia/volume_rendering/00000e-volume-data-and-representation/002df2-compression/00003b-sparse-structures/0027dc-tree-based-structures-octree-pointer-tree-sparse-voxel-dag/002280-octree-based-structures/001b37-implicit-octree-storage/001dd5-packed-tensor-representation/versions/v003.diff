@@ -1,0 +1,156 @@
+--- v002.md
++++ v003.md
+@@ -4,31 +4,26 @@
+ 
+ ## Overview
+-Packed Tensor Representation is a data structure designed to store samples from rays that have varying numbers of valid samples, avoiding the memory inefficiency of fixed-size tensors with masks when large portions of space are empty [S1]. It packs per-sample ray indices into per-ray chunk information (start index and count) for flattened tensors [S2, unofficial]. This approach is similar to those used in Instant-NGP and PyTorch3D, but is explicitly described here as a solution to the memory inefficiency of storing data as a tensor with shape $(n\_rays, n\_samples, ...)$ and an extra mask [S1].
++Packed Tensor Representation is a data structure used in volume rendering to store ray samples where rays have varying numbers of valid samples, avoiding the memory inefficiency of fixed-size tensors with masks when large portions of space are empty [S1]. It packs per-sample ray indices into per-ray chunk information (start index and count) for flattened tensors [S2, unofficial]. Unlike fixed-size storage or mask-based approaches, it replaces a sequence of $N$ samples with a compact representation, which is particularly effective when large portions of the ray consist of transparent or empty space [S1]. It is similar to approaches used in Instant-NGP and PyTorch3D but explicitly described as a solution to the memory inefficiency of $(n\_rays, n\_samples, ...)$ with a mask [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** `ray_indices`: A 1D LongTensor of shape $(n\_sample)$ containing the ray index for each valid sample [S2, unofficial].
+-*   **Input:** `n_rays`: Optional integer specifying the total number of rays. If `None`, it is inferred as `ray_indices.max().item() + 1` [S2, unofficial].
+-*   **Output:** `packed_info`: A LongTensor of shape $(n\_rays, 2)$ where `packed_info[i, 0]` is the start index of ray $i$'s samples in the flattened data tensor, and `packed_info[i, 1]` is the count of samples for ray $i$ [S1][S2, unofficial].
+-*   **Output:** The method assumes the existence of a separate data tensor of shape $(all\_samples, ...)$ containing only the valid samples corresponding to the indices in `ray_indices` [S1].
++- Input: `ray_indices`, a 1D tensor of shape $(n\_sample)$ containing the ray index for each sample [S2, unofficial].
++- Input: `n_rays`, optional integer specifying the total number of rays. If `None`, it is inferred as `ray_indices.max().item() + 1` [S2, unofficial].
++- Output: `packed_info`, a tensor of shape $(n\_rays, 2)$ where `packed_info[i, 0]` is the start index of ray $i$'s samples in the flattened data tensor, and `packed_info[i, 1]` is the count of samples for ray $i$ [S2, unofficial].
++- Output: The actual data is stored in a separate data tensor of shape `(all_samples, ...)` containing only valid samples [S1].
+ 
+ **Data Structures:**
+-The representation relies on two tensors:
+-1.  A data tensor holding the actual sample values (e.g., color, density) for all valid samples across all rays, flattened into a single dimension [S1].
+-2.  The `packed_info` tensor of shape $(n\_rays, 2)$, which acts as an index map [S1][S2, unofficial].
++1.  **Data Tensor**: A flattened tensor containing only the valid samples for all rays. Its first dimension size is the total number of valid samples across all rays [S1].
++2.  **Packed Info Tensor**: An integer tensor of shape $(n\_rays, 2)$ [S2, unofficial].
++    -   Column 0: Start index in the Data Tensor for each ray.
++    -   Column 1: Count of valid samples for each ray [S2, unofficial].
+ 
+-**Algorithm:**
+-The construction of `packed_info` from `ray_indices` follows these steps [S2, unofficial]:
+-
+-1.  Assert that `ray_indices` is a 1D tensor [S2, unofficial].
+-2.  Determine the device and data type (`dtype`) from `ray_indices` [S2, unofficial]. If `ray_indices` is on CUDA, proceed; otherwise, raise `NotImplementedError` as CPU inputs are not supported [S2, unofficial].
++**Steps:**
++1.  Assert that `ray_indices` is 1-dimensional [S2, unofficial].
++2.  Determine device and data type from `ray_indices` [S2, unofficial].
+ 3.  If `n_rays` is not provided, set `n_rays = ray_indices.max().item() + 1` [S2, unofficial].
+-4.  Initialize `chunk_cnts` as a zero tensor of shape $(n\_rays)$ with the same device and `dtype` as `ray_indices` [S2, unofficial].
+-5.  Accumulate the counts of samples per ray by adding 1 to `chunk_cnts` at indices specified by `ray_indices`:
+-    $$ \text{chunk\_cnts}[\text{ray\_indices}] \leftarrow \text{chunk\_cnts}[\text{ray\_indices}] + 1 $$
+-    In implementation, this is often done via `index_add_` [S2, unofficial].
+-6.  Compute the cumulative sum of `chunk_cnts` to determine the end positions, then subtract the counts to find the start positions:
+-    $$ \text{chunk\_starts} = \text{cumsum}(\text{chunk\_cnts}) - \text{chunk\_cnts} $$
+-    where $\text{cumsum}$ is computed along dimension 0 with the appropriate `dtype` [S2, unofficial].
++4.  Initialize `chunk_cnts` as a zero tensor of shape $(n\_rays)$ with the same device and data type as `ray_indices` [S2, unofficial].
++5.  Accumulate sample counts per ray: `chunk_cnts.index_add_(0, ray_indices, torch.ones_like(ray_indices))` [S2, unofficial].
++6.  Compute cumulative sums to determine start indices: `chunk_starts = chunk_cnts.cumsum(dim=0, dtype=dtype) - chunk_cnts` [S2, unofficial].
+ 7.  Stack `chunk_starts` and `chunk_cnts` along the last dimension to form `packed_info` of shape $(n\_rays, 2)$ [S2, unofficial].
+ 
+@@ -36,64 +31,68 @@
+ ```python
+ def pack_tensor(ray_indices, n_rays=None):
++    """
++    Packs ray indices into start and count information for flattened tensors.
++    
++    Args:
++        ray_indices: 1D LongTensor of shape (n_samples) containing ray indices.
++        n_rays: Optional int. If None, inferred from ray_indices.
++        
++    Returns:
++        packed_info: Tensor of shape (n_rays, 2).
++    """
+     # Assert 1D
+-    assert ray_indices.ndim == 1
++    assert ray_indices.dim() == 1, "ray_indices must be 1D"
+     
+-    # Device and dtype handling
++    # Determine device and dtype
+     device = ray_indices.device
+     dtype = ray_indices.dtype
+     
+-    if device != 'cuda':
+-        raise NotImplementedError("Only CUDA inputs are supported")
+-        
+     # Infer n_rays if not provided
+     if n_rays is None:
+         n_rays = ray_indices.max().item() + 1
+         
+-    # Initialize counts
+-    chunk_cnts = zeros(shape=(n_rays,), device=device, dtype=dtype)
++    # Initialize counts tensor
++    chunk_cnts = torch.zeros(n_rays, device=device, dtype=dtype)
+     
+-    # Accumulate counts: for each sample, increment the count for its ray
+-    for idx in ray_indices:
+-        chunk_cnts[idx] += 1
+-        
+-    # Compute start indices
+-    # cumsum gives the end index (exclusive) for each ray's block
+-    chunk_ends = cumsum(chunk_cnts, axis=0, dtype=dtype)
+-    chunk_starts = chunk_ends - chunk_cnts
++    # Accumulate counts: add 1 for each occurrence of a ray index
++    # Equivalent to: for i in range(len(ray_indices)): chunk_cnts[ray_indices[i]] += 1
++    chunk_cnts.index_add_(0, ray_indices, torch.ones_like(ray_indices))
+     
+-    # Stack to form packed_info
+-    packed_info = stack([chunk_starts, chunk_cnts], axis=-1)
++    # Compute start indices using cumulative sum
++    # chunk_starts[i] = sum(chunk_cnts[0...i-1])
++    chunk_starts = chunk_cnts.cumsum(dim=0, dtype=dtype) - chunk_cnts
++    
++    # Stack start and count
++    packed_info = torch.stack([chunk_starts, chunk_cnts], dim=-1)
+     
+     return packed_info
+ ```
+-*Note: `zeros`, `cumsum`, and `stack` refer to standard contiguous array operations.*
+ 
+ **Parameters:**
+-*   `ray_indices`: LongTensor, shape $(n\_sample)$ [S2, unofficial].
+-*   `n_rays`: Optional int. Default is inferred [S2, unofficial].
++-   `ray_indices`: Input LongTensor of shape $(n\_sample)$ [S2, unofficial].
++-   `n_rays`: Optional number of rays. If `None`, inferred as `ray_indices.max().item() + 1` [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **CPU Support:** The implementation described in the sources only supports CUDA inputs; CPU inputs raise `NotImplementedError` [S2, unofficial].
+-*   **Differentiability:** The function is not differentiable [S2, unofficial].
+-*   **Empty Rays:** If a ray has no valid samples, its count in `chunk_cnts` will be 0, and its start index will be equal to the start index of the next ray with samples (or the total number of samples if it is the last ray) [S2, unofficial]. Accessing data for such a ray should handle zero-length slices gracefully [S1][S2, unofficial].
++-   Only CUDA inputs are supported; CPU inputs raise `NotImplementedError` [S2, unofficial].
++-   The function is not differentiable [S2, unofficial].
++-   Precision issues may arise if `ray_indices` contains large values, though standard integer types are used [S2, unofficial].
++-   The method assumes `ray_indices` are contiguous and valid (i.e., $0 \le ray\_indices[i] < n\_rays$) [G].
++
++## Subtopics
++
++### [Partial Composite Storage](11434-partial-composite-storage.md)
++Partial Composite Storage is a data compression technique used in volume rendering to reduce memory footprint and communication overhead by aggregating consecutive ray samples into a single representative entity. Unlike fixed-size storage or mask-based approaches (such as those in [Packed Tensor Representation](1611-packed-tensor-representation.md)), it replaces a sequence of $N$ samples with a fixed-size structure containing the accumulated color, opacity, and depth bounds, regardless of $N$. This method is particularly effective when large portions of the ray consist of transparent or empty space, allowing for significant reduction in data volume during the exchange phase of distributed rendering.
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Memory:** The memory usage is proportional to the number of *valid* samples plus $2 \times n\_rays$ integers for the `packed_info` tensor [S1][S2, unofficial]. This is significantly more efficient than a fixed-size tensor of shape $(n\_rays, n\_samples, ...)$ with a mask when the sparsity is high (i.e., many rays have few valid samples or large gaps) [S1].
+-*   **Time:** The construction of `packed_info` requires a single pass to count indices and a cumulative sum, which is $O(n\_sample + n\_rays)$ [S2, unofficial].
+-
+-**Measured Performance:**
+-*   In experiments replacing code in official NeRF repositories, NerfAcc using packed tensors showed improvements [S1]. For example, on the "nerfacc (occ)" variant, it achieved a training time of 130 minutes and rendering time of 30.11 seconds, with camera errors of 0.044 (rotational) and 0.07/0.35 (translational, scaled) [S1].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Efficient memory usage for sparse data; supports variable numbers of samples per ray without padding or masking overhead; enables spatial skipping [S1].
+-*   **Limitations:** Not differentiable; currently limited to CUDA in the cited implementation; requires careful handling of ray indices to ensure correct mapping [S2, unofficial].
+-
+-**When to Use:**
+-*   Use when rays have highly variable numbers of valid samples (e.g., due to spatial skipping or empty space traversal) and memory efficiency is critical [S1].
+-*   Avoid when differentiability through the sampling process is required, or when running on CPU-only hardware [S2, unofficial].
++-   **Time Complexity**: $O(n\_samples)$ for counting and $O(n\_rays)$ for cumulative sum, resulting in $O(n\_samples + n\_rays)$ total time [S2, unofficial].
++-   **Memory Complexity**: $O(n\_valid\_samples + 2 \cdot n\_rays)$ integers for the packed info, plus the data tensor size [S1]. This is significantly more memory-efficient than $(n\_rays, n\_samples, ...)$ with a mask when $n\_valid\_samples \ll n\_rays \cdot n\_samples$ [S1].
++-   **Performance**: Enables efficient sampling with spatial skipping by supporting various numbers of samples across rays [S1].
++-   **Strengths**: Reduces memory footprint for sparse samples; supports variable-length samples per ray; compatible with CUDA operations [S1][S2, unofficial].
++-   **Limitations**: Not differentiable; CPU support is not available in the reference implementation [S2, unofficial].
++-   **When to use**: When rays have highly variable numbers of valid samples, especially in sparse scenes or with spatial skipping [S1].
++-   **When not to use**: When all rays have the same number of samples, or when differentiability through the packing step is required [S2, unofficial].
+ 
+ ## Background
+-Packed Tensor Representation was introduced in the context of efficient sampling for Neural Radiance Fields (NeRFs) [S1]. It addresses the memory inefficiency of fixed-size tensors with masks, which become problematic when large portions of space are empty or when rays have different numbers of valid samples [S1]. The approach is similar to techniques used in Instant-NGP and PyTorch3D but is explicitly detailed in NerfAcc [S1]. It is used in conjunction with ray marching and volume rendering pipelines to optimize the storage and access of sample data [S2, unofficial].
++Packed Tensor Representation was introduced in the context of efficient NeRF sampling to address memory inefficiencies in handling variable-length ray samples [S1]. It is similar to approaches used in Instant-NGP and PyTorch3D but explicitly described in NerfAcc [S1]. It is used in NerfAcc and Nerfstudio to support various radiance fields and efficient sampling with spatial skipping [S1].
+ 
+ ## Sources

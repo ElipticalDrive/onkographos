@@ -1,49 +1,48 @@
 # Projection and MIP Techniques
+
 Also called: MIP (Maximum Intensity Projection)
 
 ## Overview
-This family encompasses volume rendering techniques that project 3D scalar data onto a 2D image plane by aggregating values along viewing rays, rather than compositing optical properties via the emission-absorption model. Unlike standard Direct Volume Ray Casting [19-direct-volume-ray-casting.md] which preserves depth cues through opacity accumulation, these methods discard depth information to emphasize specific intensity ranges (high or low) or total density, solving the problem of visualizing high-contrast structures like vessels or bones against noisy backgrounds [S1, unofficial][S2][S3, unofficial].
+Projection and MIP Techniques are a family of direct volume rendering methods that generate 2D images by aggregating scalar values along viewing rays using operators other than the standard emission-absorption compositing. They solve the problem of visualizing specific volumetric features—such as high-density bones, contrast-enhanced vessels, or low-density airways—by emphasizing extremal or cumulative values while suppressing intermediate background data. This family is distinct from [Compositing and Blending](2515-compositing-and-blending.md) because it discards opacity accumulation and depth cues in favor of order-independent aggregation (max, min, sum) or geometric approximation, and from [Volume Raycasting Output Generation](4277-volume-raycasting-output-generation.md) by focusing on these specific projection primitives rather than general output pipeline integration.
 
 ## Shared principles
-All methods in this family share the following core mechanism, building on [Direct volume ray casting](19-direct-volume-ray-casting.md):
+All methods in this family share the fundamental structure of ray generation and traversal as defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). For each pixel, a ray $r(t) = \mathbf{o} + t\mathbf{d}$ is intersected with the volume domain, and samples are taken along the ray segment. The core distinction lies in the aggregation function $A$ applied to the sampled scalar values $s_i$:
+$$ A = \text{Aggregate}(s_0, s_1, \dots, s_{N-1}) $$
+Common aggregators include:
+- **Maximum:** $A = \max_i(s_i)$
+- **Minimum:** $A = \min_i(s_i)$
+- **Summation:** $A = \sum_i s_i \cdot \Delta t$ (line integral)
 
-1.  **Ray Definition**: For each pixel $(x, y)$, a ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined and intersected with the volume bounding box to determine $t_{near}$ and $t_{far}$ [Parent].
-2.  **Sampling**: The ray segment is discretized into $N$ samples at positions $\mathbf{p}_i$. Scalar values $s_i$ are retrieved via trilinear interpolation [Parent].
-3.  **Aggregation**: Instead of the front-to-back compositing equation, a specific aggregation operator $A$ is applied to the sequence of scalar values $\{s_1, \dots, s_N\}$:
-    *   **Maximum**: $A = \max_i(s_i)$
-    *   **Minimum**: $A = \min_i(s_i)$
-    *   **Summation**: $A = \sum_i s_i \cdot \Delta t$ (Line Integral)
-    *   **Approximation**: $A \approx \text{OrthographicProjection}(V)$
-4.  **Classification**: The aggregated scalar $A$ is mapped to a color $\mathbf{c}$ using a transfer function $T(A) \rightarrow \mathbf{c}$ [Parent]. Opacity is typically set to $1.0$ or derived from the transfer function, but depth is not accumulated [Parent].
+These methods are generally order-independent (except for summation where order does not matter, but the result is cumulative), allowing for flexible traversal orders and early termination strategies. They inherently lose depth information, producing 2D projections that lack explicit spatial cues regarding the relative position of structures along the ray.
 
 ## Subtopics
 
 ### [Maximum Intensity Projection](902-maximum-intensity-projection.md)
-Projects the maximum scalar value along each ray. It highlights high-intensity structures (e.g., contrast-enhanced vessels) while suppressing lower-intensity background. It is order-independent and discards depth cues.
+Maximum Intensity Projection (MIP) projects the maximum scalar value encountered along each viewing ray. It sets itself apart from siblings by using the maximum aggregation operator, which highlights high-intensity structures like blood vessels or bone while suppressing lower-intensity tissue. It is chosen when the goal is to visualize high-contrast anatomical features without the occlusion effects of alpha blending. See [Maximum Intensity Projection](902-maximum-intensity-projection.md) for implementation details.
 
 ### [Projected Slabs Approximation](1449-projected-slabs-approximation.md)
-Accelerates perspective rendering by partitioning the view frustum into parallel slabs, approximating perspective projection with orthographic-like processing to leverage hardware acceleration.
+Projected Slabs Approximation accelerates perspective volume rendering by approximating the perspective view volume with a series of parallel projected slabs. It sets itself apart from scalar aggregation methods by providing a geometric approximation that enables the use of hardware optimized for parallel projection. It is chosen when interactive frame rates are required for perspective views on hardware lacking native perspective ray-casting support. See [Projected Slabs Approximation](1449-projected-slabs-approximation.md) for implementation details.
 
 ### [Forward Projection (aTx)](1492-forward-projection-atx.md)
-Computes the line integral of density along each ray, simulating X-ray attenuation. It aggregates all encountered densities, providing a cumulative measure of material thickness.
+Forward Projection (aTx) computes the line integral of volume density along each ray, simulating X-ray attenuation. It sets itself apart by aggregating all encountered densities to provide a cumulative measure of material thickness, unlike MIP which only highlights the peak. It is chosen for generating synthetic radiographs or for visualizing the total mass of dense structures. See [Forward Projection (aTx)](1492-forward-projection-atx.md) for implementation details.
 
 ### [Minimum Intensity Projection](5299-minimum-intensity-projection.md)
-Projects the minimum scalar value along each ray. It is used to visualize low-density structures (e.g., air-filled lungs) that are obscured by high-density tissues in MIP.
+Minimum Intensity Projection (MinIP) projects the minimum scalar value along each viewing ray. It sets itself apart from MIP by selecting the lowest values, making it suitable for visualizing low-density structures such as airways or tumors in contrast-filled vessels. It is chosen when the target features have intensities lower than the surrounding background. See [Minimum Intensity Projection](5299-minimum-intensity-projection.md) for implementation details.
 
 ### [Projection](7205-projection.md)
-Sums voxel values along the projection axis. It visualizes total accumulated intensity, decreasing noise but reducing contrast due to background accumulation.
+Projection (Summation) visualizes the total accumulated intensity by summing voxel values along the ray. It sets itself apart from extremal projections (MIP/MinIP) by aggregating all data, creating a "total intensity" map. It is chosen for quantitative analysis of total density or when a simple orthographic projection is sufficient. See [Projection](7205-projection.md) for implementation details.
 
 ### [Maximum Intensity Projection (MIP)](10702-maximum-intensity-projection-mip.md)
-A specific implementation of MIP that projects the maximum scalar value, discarding depth information and losing the ability to differentiate front/back structures with identical max intensity.
+This entry refers to the specific implementation variant of MIP often used in standard raycasting pipelines. It sets itself apart by emphasizing the order-independence and the specific handling of the accumulator initialization to $-\infty$. It is chosen for general-purpose high-intensity visualization. See [Maximum Intensity Projection (MIP)](10702-maximum-intensity-projection-mip.md) for implementation details.
 
 ### Perspective Approximation via Orthogonal Slices
-An approximation for perspective volume rendering that uses view-orthogonal slices instead of concentric spherical shells, which are expensive to generate [S2]. The only difference from exact ray casting is that the distances of sample positions along a ray depend on the ray's orientation [S2]. Exact perspective ray casting produces associated sample positions forming concentric spherical shells, not planes [S2].
+An approximation for perspective volume rendering that uses view-orthogonal slices instead of concentric spherical shells, which are expensive to generate [S2]. The only difference from exact ray casting is that the distances of sample positions along a ray depend on the ray's orientation [S2]. Exact perspective ray casting produces associated sample positions forming concentric spherical shells, not planes. Generating these shells is expensive [S2].
 
 ### ProjectionVolumeStyle
 A non-composable render style. An example image shows Bronchial tubes rendered with maximum intensity projection (MIP) [S3, unofficial].
 
 ## Background
-Originating from the need for fast visualization of volumetric data, particularly in medical imaging (CT, MRI, Angiography), these techniques predate or run parallel to full ray casting. MIP became standard in diagnostic radiology for viewing contrast-enhanced vasculature [S1, unofficial][S2]. The "Projected Slabs" approximation was introduced to enable interactive perspective rendering on early graphics hardware by avoiding expensive spherical shell generation [S2].
+The concept of Maximum Intensity Projection (MIP) originated in the early 1990s as a method to visualize contrast-enhanced vascular structures in CT angiography, allowing radiologists to see vessels without the clutter of surrounding tissue [S5, S11, S23, unofficial][S29, book][S30, S35, unofficial]. The term "MIP_Mode" appears in early GPU raycasting implementations, such as those in the Visualization Library, where it was distinguished from other raycasting modes like Isosurface or RaycastBrightnessControl [S1, unofficial]. The approximation of perspective projection using parallel slabs was explored to leverage hardware acceleration designed for orthographic views, addressing the performance bottleneck of generating spherical sample shells [S1, unofficial][S2]. Forward projection (aTx) is rooted in the physics of X-ray attenuation and computed tomography, where the line integral represents the projection data acquired by scanners [S1, unofficial]. Minimum Intensity Projection (MinIP) was developed as a complementary technique to MIP for visualizing low-density structures like airways in CT scans [S1, unofficial][S2].
 
 ## Sources
 [S1] GPU Raycast Volume Rendering with Transfer ... - Visualization Library, https://visualizationlibrary.org/documentation/pag_guide_raycast_volume.html, fetched 2026-10-26 (unofficial)

@@ -7,18 +7,18 @@ Naive Tetrahedral Surfacing is an isosurface extraction method that processes ea
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A tetrahedron defined by four sample points (vertices) and their corresponding scalar field values.
-- Input: `iso_val`, the scalar threshold defining the isosurface.
-- Output: A list of 3D vertices (`vertices`) representing the intersection points on the tetrahedron edges.
+- Input: A tetrahedron defined by four sample points (vertices) and their corresponding scalar field values [S1, unofficial].
+- Input: `iso_val`, the scalar threshold defining the isosurface [S1, unofficial].
+- Output: A list of 3D vertices (`vertices`) representing the intersection points on the tetrahedron edges [S1, unofficial].
 
 **Data Structures:**
-- `samp_pts`: A list of 4 `Vector3` objects representing the tetrahedron vertices.
-- `surf_vals`: A list of 4 `float` values representing the scalar field evaluated at each vertex in `samp_pts`.
-- `less_than_iso`: A list of `Vector3` objects containing vertices where `value < iso_val`.
-- `less_val`: A list of `float` values corresponding to `less_than_iso`.
-- `more_than_iso`: A list of `Vector3` objects containing vertices where `value >= iso_val`.
-- `more_val`: A list of `float` values corresponding to `more_than_iso`.
-- `vertices`: An output list of `Vector3` objects storing the calculated intersection points.
+- `samp_pts`: A list of 4 `Vector3` objects representing the tetrahedron vertices [S1, unofficial].
+- `surf_vals`: A list of 4 `float` values representing the scalar field evaluated at each vertex in `samp_pts` [S1, unofficial].
+- `less_than_iso`: A list of `Vector3` objects containing vertices where `value < iso_val` [S1, unofficial].
+- `less_val`: A list of `float` values corresponding to `less_than_iso` [S1, unofficial].
+- `more_than_iso`: A list of `Vector3` objects containing vertices where `value >= iso_val` [S1, unofficial].
+- `more_val`: A list of `float` values corresponding to `more_than_iso` [S1, unofficial].
+- `vertices`: An output list of `Vector3` objects storing the calculated intersection points [S1, unofficial].
 
 **Steps:**
 1. Evaluate the scalar function at all sample points (vertices) of the tetrahedron to obtain `surf_vals` [S1, unofficial].
@@ -31,24 +31,26 @@ Naive Tetrahedral Surfacing is an isosurface extraction method that processes ea
 The intersection vertex is calculated as:
 $$ \text{new\_vertex} = \frac{v1 \cdot \text{diff}_2 + v2 \cdot \text{diff}_1}{\text{diff\_tot}} $$
 Where:
-- $\text{diff\_tot} = |val1 - val2|$
-- $\text{diff}_1 = |val1 - \text{iso\_val}|$
-- $\text{diff}_2 = |val2 - \text{iso\_val}|$
+- $\text{diff\_tot} = |val1 - val2|$ [S1, unofficial]
+- $\text{diff}_1 = |val1 - \text{iso\_val}|$ [S1, unofficial]
+- $\text{diff}_2 = |val2 - \text{iso\_val}|$ [S1, unofficial]
 
 This is equivalent to standard linear interpolation:
-$$ \text{new\_vertex} = v1 + (v2 - v1) \cdot \frac{\text{iso\_val} - val1}{val2 - val1} $$
+$$ \text{new\_vertex} = v1 + (v2 - v1) \cdot \frac{\text{iso\_val} - val1}{val2 - val1} $$ [S1, unofficial]
 
 **Parameters:**
 - `iso_val`: The scalar threshold value defining the isosurface. Typical value depends on the field (e.g., 0 for signed distance fields) [S1, unofficial].
 - `eps`: A hardcoded epsilon value (0.1) used in `less_than` for lexicographical comparison of points, though the code comments note this function was abandoned because duplicate vertices are considered acceptable [S1, unofficial].
 
 **Pitfalls:**
-- The algorithm performs a pairwise comparison of all 'less' and 'more' points. For a tetrahedron with 4 vertices, if 2 are less and 2 are more, this results in $2 \times 2 = 4$ intersection calculations, whereas standard MT only generates 2 edges. This is computationally inefficient and may generate redundant or incorrect geometry if the topology assumption (that every less point connects to every more point) is invalid for the specific scalar field distribution [S1, unofficial].
+- The algorithm performs a pairwise comparison of all 'less' and 'more' points [S1, unofficial]. For a tetrahedron with 4 vertices, if 2 are less and 2 are more, this results in $2 \times 2 = 4$ intersection calculations, whereas standard MT only generates 2 edges [S1, unofficial]. This is computationally inefficient and may generate redundant or incorrect geometry if the topology assumption (that every less point connects to every more point) is invalid for the specific scalar field distribution [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+from typing import List
+
 def naive_tetrahedral_surfacing(samp_pts: List[Vector3], surf_vals: List[float], iso_val: float) -> List[Vector3]:
     """
     Extracts isosurface intersection vertices from a single tetrahedron using naive pairwise intersection.

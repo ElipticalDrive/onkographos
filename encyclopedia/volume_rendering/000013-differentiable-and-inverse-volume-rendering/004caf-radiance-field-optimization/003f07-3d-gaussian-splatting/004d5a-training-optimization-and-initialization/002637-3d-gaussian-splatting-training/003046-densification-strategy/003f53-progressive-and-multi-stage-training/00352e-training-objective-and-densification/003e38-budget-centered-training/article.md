@@ -1,24 +1,23 @@
 # Budget-Centered Training
 
-
 ## Overview
 Budget-Centered Training (BCT) is a training strategy for 3D Gaussian Splatting that initializes and constrains the primitive count to the "knee" of the scene's capacity floor curve ($N^*$), ensuring the model is born at the optimal size for a target quality rather than growing large and being pruned later [S1, unofficial]. It differs from standard densification pipelines by replacing gradient-based pruning signals with a redundancy map ($\theta$) and by treating the primitive budget as a hard constraint during the optimization phase, thereby eliminating wasted computation on primitives that will eventually be removed [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   Scene data (training views).
-*   Measured capacity floor curve for the scene, from which the knee point $N^*$ (optimal primitive count) is identified.
-*   Redundancy map $\theta$, computed per region based on local factoring/multiplicity.
+*   Scene data (training views) [S1, unofficial].
+*   Measured capacity floor curve for the scene, from which the knee point $N^*$ (optimal primitive count) is identified [S1, unofficial].
+*   Redundancy map $\theta$, computed per region based on local factoring/multiplicity [S1, unofficial].
 
 **Outputs:**
-*   A 3D Gaussian Splatting model with primitive count capped at $N^*$, optimized for the target quality.
+*   A 3D Gaussian Splatting model with primitive count capped at $N^*$, optimized for the target quality [S1, unofficial].
 
 **Data Structures:**
-*   **Primitive Set:** A collection of 3D Gaussians. The total count is maintained $\le N^*$.
+*   **Primitive Set:** A collection of 3D Gaussians. The total count is maintained $\le N^*$ [S1, unofficial].
 *   **Redundancy Map ($\theta$):** A spatial map where each region has a value $\theta$. High local multiplicity (over-covered regions) corresponds to low $\theta$ values [S1, unofficial].
 *   **State Variables:**
-    *   $N_{init}$: Initial primitive count.
-    *   $N_{stop}$: Refine-stop fraction threshold.
+    *   $N_{init}$: Initial primitive count [S1, unofficial].
+    *   $N_{stop}$: Refine-stop fraction threshold [S1, unofficial].
     *   $\theta_{waste}$: Measured redundancy ratio, defined as $N_{opt}/N_{full}$ [S1, unofficial].
 
 **Parameters:**
@@ -28,73 +27,101 @@ Budget-Centered Training (BCT) is a training strategy for 3D Gaussian Splatting 
 *   Refine-stop fraction: A second fraction of $N^*$ used to determine when to stop refinement. Scaled by $\theta_{waste}$ [S1, unofficial].
 
 **Algorithm Steps:**
-
 1.  **Measure Capacity Floor:** Determine the capacity floor curve for the scene. Identify the knee point $N^*$, defined as the budget with the largest steepest-window slope on the error-vs-budget curve [S1, unofficial].
 2.  **Initialize Model:** Set the initial primitive count $N_{init}$ to a fixed initial fraction of $N^*$ [S1, unofficial].
 3.  **Compute Redundancy:** Calculate the redundancy map $\theta$ per region from the local factoring of the model. Regions with high local multiplicity (low $\theta$) are identified as over-covered [S1, unofficial].
-4.  **Optimize with Budget Constraint:** Train the model using MCMC densification, but enforce a hard cap on the total primitive count at $N^*$.
-    *   **Densification:** Proceed with standard densification logic to add primitives where needed.
+4.  **Optimize with Budget Constraint:** Train the model using MCMC densification, but enforce a hard cap on the total primitive count at $N^*$ [S1, unofficial].
+    *   **Densification:** Proceed with standard densification logic to add primitives where needed [S1, unofficial].
     *   **Pruning:** Replace standard pruning signals (positional gradients/opacity) with the $\theta$ redundancy map. Prune primitives inside regions flagged by $\theta$ (specifically those with low $\theta$) based on their opacity. This removes primitives with the smallest approximation loss [S1, unofficial].
 5.  **Stop Criterion:** Monitor validation improvement. Freeze density control (stop densification/pruning) once the validation improvement falls below $\epsilon = 0.5$ dB [S1, unofficial].
 6.  **Refine-Stop:** Apply the refine-stop fraction (scaled by $\theta_{waste}$) to determine the final termination of the refinement phase [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def budget_centered_training(scene_data, capacity_floor_curve):
+def budget_centered_training(scene_data, capacity_floor_curve, N_opt, N_full):
     # Step 1: Identify optimal budget N*
-    # N* is the knee point: budget with the largest steepest-window slope
+    # N* is the knee point: budget with the largest steepest-window slope on the error curve
     N_star = find_knee_point(capacity_floor_curve)
-    
-    # Step 2: Initialize model with fraction of N*
+
+    # Step 2: Initialize model
     # Initial fraction is a fixed value, scaled by measured redundancy
-    # Note: Exact fraction value not specified in sources [S1, unofficial]
-    theta_waste = calculate_redundancy_ratio() # N_opt / N_full
-    N_init = N_star * get_initial_fraction() 
-    
+    theta_waste = N_opt / N_full
+    N_init = N_star * get_initial_fraction()
     model = initialize_gaussians(count=N_init)
-    
+
     # Step 3: Compute redundancy map theta
     # Computed per region from local factoring
     # Low theta indicates high local multiplicity (over-covered)
     theta_map = compute_redundancy_map(model)
-    
+
     # Step 4: Optimization Loop
     validation_history = []
     prev_val_psnr = 0.0
-    
+
     while True:
         # Standard MCMC Densification step
         model = densify_step(model, scene_data)
-        
+
         # Pruning using theta map instead of gradients
         # Prune in theta-flagged regions (low theta) by opacity
         model = prune_by_theta(model, theta_map)
-        
+
         # Enforce hard cap at N*
         if model.primitive_count > N_star:
             model.prune_to_count(N_star)
-            
+
         # Evaluate validation performance
         val_psnr = evaluate_validation(model, scene_data)
         validation_history.append(val_psnr)
-        
+
         # Step 5: Rate-based stopping criterion
         # Freeze density control if improvement < epsilon
         if len(validation_history) >= 2:
             improvement = validation_history[-1] - validation_history[-2]
             if improvement < 0.5: # epsilon = 0.5 dB
                 break
-                
+
     # Step 6: Refine-stop fraction application
     # Scaled by theta_waste
-    # Note: Exact implementation of refine-stop fraction application not detailed
-    # [S1, unofficial]
     apply_refine_stop(model, N_star, theta_waste)
-    
+
     return model
+
+def find_knee_point(curve):
+    # Scans the error-vs-budget curve for the budget with the largest steepest-window slope
+    return max_slope_point(curve)
+
+def get_initial_fraction():
+    # Returns a fixed fraction of N* (value not specified in sources)
+    return 0.5  # [G]
+
+def initialize_gaussians(count):
+    # Creates a set of random 3D Gaussians
+    return GaussianSet(count)
+
+def compute_redundancy_map(model):
+    # Partitions space into regions, computes local multiplicity, and inverts to get theta
+    return map_regions_by_multiplicity(model)
+
+def densify_step(model, scene_data):
+    # Standard 3DGS densification: splits/ clones Gaussians based on gradients
+    return standard_3dgs_densify(model, scene_data)
+
+def prune_by_theta(model, theta_map):
+    # Removes primitives with lowest opacity inside regions flagged by low theta
+    return opacity_prune_in_regions(model, theta_map, threshold=low_theta)
+
+def evaluate_validation(model, scene_data):
+    # Renders validation views and computes PSNR
+    return compute_psnr(model, scene_data.validation_set)
+
+def apply_refine_stop(model, N_star, theta_waste):
+    # Stops refinement when primitive count drops below the refine-stop fraction of N*
+    stop_threshold = N_star * get_refine_stop_fraction(theta_waste)
+    if model.primitive_count < stop_threshold:
+        model.freeze_refinement()
 ```
 
 **Edge Cases and Pitfalls:**
@@ -105,7 +132,7 @@ def budget_centered_training(scene_data, capacity_floor_curve):
 ## Subtopics
 
 ### Budget-Centered Training with Factoring Trees
-A two-stage Level-of-Detail (LOD) system where a model is trained at the budget-centered knee ($N^*$) to minimize redundancy, and then a factoring tree is built over this model (and optionally the full model) to allow continuous quality scaling post-hoc [S1, unofficial]. It is chosen when continuous quality scaling across different hardware budgets is required. It sets itself apart by using the BCT-trained model as a root for the factoring tree, ensuring the tree starts with a model that has almost no redundancy to lose [S1, unofficial].
+A two-stage Level-of-Detail (LOD) system where a model is trained at the budget-centered knee ($N^*$) to minimize redundancy, and then a factoring tree is built over this model (and optionally the full model) to allow continuous quality scaling post-hoc [S1, unofficial]. It is chosen when continuous quality scaling across different hardware budgets is required [S1, unofficial]. It sets itself apart by using the BCT-trained model as a root for the factoring tree, ensuring the tree starts with a model that has almost no redundancy to lose [S1, unofficial].
 
 *   **Steps:**
     1.  Train the model at $N^*$ using BCT [S1, unofficial].
@@ -115,17 +142,16 @@ A two-stage Level-of-Detail (LOD) system where a model is trained at the budget-
 *   **Comparison:** BCT is the correct front end for factoring tree deployment because a model born at the floor's budget contains almost no redundancy for the tree to lose [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces training time compared to train-then-prune methods because it avoids optimizing and then removing a large number of primitives. The exact speedup is not quantified, but it is described as avoiding "wasted" training time on removed primitives [S1, unofficial].
-*   **Memory Complexity:** The model memory footprint is capped at $N^*$, which is the minimal primitive count for the target quality. This is significantly smaller than the initial large model used in traditional pipelines [S1, unofficial].
+*   **Time Complexity:** Reduces training time compared to train-then-prune methods because it avoids optimizing and then removing a large number of primitives [S1, unofficial]. The exact speedup is not quantified, but it is described as avoiding "wasted" training time on removed primitives [S1, unofficial].
+*   **Memory Complexity:** The model memory footprint is capped at $N^*$, which is the minimal primitive count for the target quality [S1, unofficial]. This is significantly smaller than the initial large model used in traditional pipelines [S1, unofficial].
 *   **Measured Performance:** On the 'room' scene, BCT-trained models achieve high quality (34.19 dB) at matched budgets compared to full models [S1, unofficial].
 *   **Scaling:** The method scales to city-scale scenes, enabling real-time rendering within consumer GPU memory limits [S1, unofficial].
-*   **Strengths:** Eliminates redundancy from the start; provides a clear measure of scene capacity; enables efficient LOD via factoring trees.
+*   **Strengths:** Eliminates redundancy from the start; provides a clear measure of scene capacity; enables efficient LOD via factoring trees [S1, unofficial].
 *   **Limitations:** Requires accurate measurement of the capacity floor curve; may not provide significant gains on scenes with inherently low redundancy [S1, unofficial].
-*   **When to use:** When a fixed quality target must be met with minimal primitive count, or when building LOD systems via factoring trees.
-*   **When not to use:** When the capacity floor curve is flat or difficult to measure, or when the scene already has very low redundancy [S1, unofficial].
+*   **When to use:** When a fixed quality target must be met with minimal primitive count, or when building LOD systems via factoring trees [S1, unofficial].
 
 ## Background
-Budget-Centered Training was proposed in the paper "Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD" [S1, unofficial]. It is based on the theory that a measurable capacity floor exists for 3D Gaussian Splatting scenes, which defines the minimal achievable rendering error at a given primitive count. The method was developed to address the inefficiency of traditional pipelines that train large models and then compress them, wasting computation on primitives that are eventually removed. It is used in the context of large-scale 3D Gaussian Splatting, particularly for city-scale scenes and real-time rendering applications [S1, unofficial].
+Budget-Centered Training was proposed in the paper "Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD" [S1, unofficial]. It is based on the theory that a measurable capacity floor exists for 3D Gaussian Splatting scenes, which defines the minimal achievable rendering error at a given primitive count [S1, unofficial]. The method was developed to address the inefficiency of traditional pipelines that train large models and then compress them, wasting computation on primitives that are eventually removed [S1, unofficial]. It is used in the context of large-scale 3D Gaussian Splatting, particularly for city-scale scenes and real-time rendering applications [S1, unofficial].
 
 ## Sources
 [S1] Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD, https://arxiv.org/abs/2610.03162, fetched 2026-10-29 (unofficial)

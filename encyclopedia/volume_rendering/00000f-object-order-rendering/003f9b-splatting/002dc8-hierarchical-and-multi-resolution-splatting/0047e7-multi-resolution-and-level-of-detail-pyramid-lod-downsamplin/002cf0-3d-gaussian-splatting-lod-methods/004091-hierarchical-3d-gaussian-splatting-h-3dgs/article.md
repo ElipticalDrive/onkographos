@@ -1,47 +1,56 @@
 # Hierarchical 3D Gaussian Splatting (H-3DGS)
 Also called: H-3DGS, Hierarchical-3DGS
 ## Overview
-Hierarchical 3D Gaussian Splatting (H-3DGS) is a method for large-scale 3D reconstruction that addresses the memory bottlenecks of standard 3D Gaussian Splatting (3DGS) by training scene chunks independently and merging them into a global Level-of-Detail (LoD) hierarchy [S1, unofficial]. Unlike standard 3DGS, which requires storing all Gaussian primitives in VRAM, H-3DGS uses chunking to mitigate memory usage during training, though this approach introduces specific boundary artifacts such as chunk bleeding and ghosting [S1, unofficial]. It builds on [3D Gaussian Splatting LOD methods](5439-3d-gaussian-splatting-lod-methods.md) by introducing a Split Point Tree (SPT) structure to manage the hierarchy.
-
+Hierarchical 3D Gaussian Splatting (H-3DGS) is a method for large-scale 3D reconstruction that mitigates the memory bottlenecks of standard 3D Gaussian Splatting by training scene chunks independently and merging them into a global Level-of-Detail (LoD) hierarchy [S1, unofficial]. It sets itself apart from siblings like [CityGaussian / VastGaussian / DoGaussian](6143-citygaussian-vastgaussian-dogaussian.md) and [Octree-GS](7341-octree-gs.md) by using a unified training and rendering pipeline with external memory management to handle ultra-large scenes, whereas alternatives often rely on post-processing, manual threshold tuning, or different spatial partitioning strategies.
 ## Shared principles
-H-3DGS shares the fundamental rendering equation of 3DGS, where a scene is represented as a collection of anisotropic 3D Gaussians. Each Gaussian $G_i$ is defined by a mean position $\mu_i$, a covariance matrix $\Sigma_i$ (parameterized by a rotation matrix $R_i$ and a scaling vector $s_i$), and view-dependent color coefficients represented by spherical harmonics (SH). The rendering process projects these 3D Gaussians to 2D ellipses on the image plane using a linearized projection matrix $J$ and a camera projection matrix $P$, resulting in a 2D covariance $\Sigma'$ and mean $\mu'$ [S1, unofficial]. The color $C$ at a pixel is computed via alpha compositing of the splatted Gaussians sorted by depth.
-
-The core innovation of H-3DGS is the **Hierarchical Split Point Tree (HSPT)**. This structure organizes the scene into a hierarchy of spatial partitions (chunks) and levels of detail. During training, the scene is divided into chunks. Each chunk is trained independently to manage memory constraints. After training, the chunks are merged into a global hierarchy. The HSPT allows the renderer to select the appropriate level of detail based on the camera's distance to the Gaussians and the focal length, enabling efficient rendering of ultra-large scale environments by only loading necessary data from external memory [S1, unofficial].
 
 ## Subtopics
 
 ### CityGaussian / VastGaussian / DoGaussian
-These methods are siblings in the family of large-scale 3DGS optimizations. CityGaussian combines chunked training with per-chunk LoD selection using LightGaussian. VastGaussian introduces decoupled appearance modeling and progressive partitioning. DoGaussian is another approach within this lineage. They are chosen when specific large-scale artifacts or appearance inconsistencies in chunked training need to be addressed beyond the basic hierarchy management of H-3DGS. See [CityGaussian / VastGaussian / DoGaussian](6143-citygaussian-vastgaussian-dogaussian.md).
+These methods combine chunked training with per-chunk LoD selection or progressive partitioning to address large-scale artifacts. They set themselves apart by decoupling appearance modeling or distributing training across nodes. Choose them when specific large-scale artifacts or appearance inconsistencies in chunked training need to be addressed beyond basic hierarchy management. See [CityGaussian / VastGaussian / DoGaussian](6143-citygaussian-vastgaussian-dogaussian.md).
 
-### Octree-GS
-Octree-GS uses an octree structure to manage Gaussian primitives, offering a different spatial partitioning strategy compared to the chunk-based HSPT of H-3DGS. It is chosen when a more regular, grid-based spatial hierarchy is preferred over the arbitrary chunk boundaries of H-3DGS. See [Octree-GS](7341-octree-gs.md).
+### [Octree-GS](7341-octree-gs.md)
+Octree-GS uses an octree structure to manage Gaussian primitives, offering a regular grid-based spatial hierarchy compared to the chunk-based approach of H-3DGS. It sets itself apart by achieving LOD effects in a single end-to-end training round using an accumulative LOD strategy. Choose it when a more regular, grid-based spatial hierarchy is preferred over arbitrary chunk boundaries. See [Octree-GS](7341-octree-gs.md).
 
 ### LightGaussian
-LightGaussian focuses on compressing the Gaussian representation by pruning insignificant Gaussians and quantizing parameters. It is often used in conjunction with chunked training (e.g., in CityGaussian) to reduce memory footprint. It is chosen when the primary bottleneck is the storage size of the Gaussian attributes rather than the spatial hierarchy itself. See [LightGaussian](8036-lightgaussian.md).
+LightGaussian focuses on compressing the Gaussian representation by pruning insignificant Gaussians and quantizing parameters, often used with chunked training. It sets itself apart by targeting storage size reduction rather than spatial hierarchy management. Choose it when the primary bottleneck is the storage size of the Gaussian attributes. See [LightGaussian](8036-lightgaussian.md).
 
 ### Scale-Adaptive Gaussian Splatting
-This method adapts the scale of Gaussians dynamically during training to better fit the scene geometry. It differs from H-3DGS by focusing on the geometric fidelity of individual primitives rather than the hierarchical organization of chunks. It is chosen when high-frequency geometric details are critical. See [Scale-Adaptive Gaussian Splatting](8085-scale-adaptive-gaussian-splatting.md).
+This method adapts the scale of Gaussians dynamically during training to better fit scene geometry. It sets itself apart by focusing on the geometric fidelity of individual primitives rather than hierarchical organization. Choose it when high-frequency geometric details are critical. See [Scale-Adaptive Gaussian Splatting](8085-scale-adaptive-gaussian-splatting.md).
 
 ### Multi-scale filtering
-Multi-scale filtering applies filtering operations at different scales to smooth or enhance the Gaussian representation. It is a post-processing or training regularization technique. It is chosen when noise or artifacts in the reconstructed surface need to be reduced. See [Multi-scale filtering](8244-multi-scale-filtering.md).
+Multi-scale filtering applies filtering operations at different scales to smooth or enhance the Gaussian representation, typically as a post-processing or regularization technique. It sets itself apart by operating on the primitive attributes rather than the spatial structure. Choose it when noise or artifacts in the reconstructed surface need to be reduced. See [Multi-scale filtering](8244-multi-scale-filtering.md).
 
 ### Virtual Memory for 3D Gaussian Splatting
-This approach manages memory by swapping Gaussian data between VRAM and system RAM. It is chosen when the scene size exceeds available VRAM but system RAM is abundant. It complements H-3DGS's chunking by handling the data transfer logic. See [Virtual Memory for 3D Gaussian Splatting](8403-virtual-memory-for-3d-gaussian-splatting.md).
+This approach manages memory by swapping Gaussian data between VRAM and system RAM. It sets itself apart by handling data transfer logic independently of the training partitioning strategy. Choose it when the scene size exceeds available VRAM but system RAM is abundant. See [Virtual Memory for 3D Gaussian Splatting](8403-virtual-memory-for-3d-gaussian-splatting.md).
 
 ### Gaussian clustering and merging
-This technique groups similar Gaussians to reduce the total count. It is chosen when the goal is to reduce the number of primitives for faster rendering or lower storage. See [Gaussian clustering and merging](8436-gaussian-clustering-and-merging.md).
+This technique groups similar Gaussians to reduce the total primitive count. It sets itself apart by aggregating primitives based on similarity metrics rather than spatial distance. Choose it when the goal is to reduce the number of primitives for faster rendering or lower storage. See [Gaussian clustering and merging](8436-gaussian-clustering-and-merging.md).
 
 ### Iterative Gaussian Synopsis
-This method creates a simplified synopsis of the Gaussian set iteratively. It is chosen for applications requiring real-time preview or low-bandwidth transmission. See [Iterative Gaussian Synopsis](9289-iterative-gaussian-synopsis.md).
+This method creates a simplified synopsis of the Gaussian set iteratively. It sets itself apart by progressively discarding or merging primitives to meet a target complexity. Choose it for applications requiring real-time preview or low-bandwidth transmission. See [Iterative Gaussian Synopsis](9289-iterative-gaussian-synopsis.md).
 
 ### Budgeted Gaussian Splatting
-This approach optimizes the Gaussian set under a strict memory or rendering budget. It is chosen when computational resources are severely constrained. See [Budgeted Gaussian Splatting](9672-budgeted-gaussian-splatting.md).
+This approach optimizes the Gaussian set under a strict memory or rendering budget. It sets itself apart by enforcing hard constraints on primitive count or memory footprint during optimization. Choose it when computational resources are severely constrained. See [Budgeted Gaussian Splatting](9672-budgeted-gaussian-splatting.md).
 
 ### Sequential Point Trees (SPTs)
-SPTs are the underlying spatial data structure used in H-3DGS to manage the hierarchy. They define the split points and levels of detail. See [Sequential Point Trees (SPTs)](10290-sequential-point-trees-spts.md).
+SPTs are the underlying spatial data structure used in H-3DGS to manage the hierarchy, defining split points and levels of detail. They set themselves apart by providing a dynamic, distance-based partitioning mechanism. Choose them when a flexible, view-dependent hierarchy is required. See [Sequential Point Trees (SPTs)](10290-sequential-point-trees-spts.md).
+
+### FilterGS
+FilterGS applies filtering operations to Gaussian primitives to reduce artifacts and improve rendering quality. It sets itself apart by operating as a dedicated filtering stage within the splatting pipeline. Choose it when specific rendering artifacts require targeted suppression. See [FilterGS](12631-filtergs.md).
+
+### Hierarchical 3DGS
+Uses an octree-like tree of clusters; renders only the relevant LoD; achieves 99% reduction at far distances [S2, unofficial]. A cluster-based Level of Detail (LoD) method developed by Inria, capable of rendering large scenes like Mont Saint-Michel interactively [S2, unofficial].
+
+### Varying Level of Detail (LoD) Noise
+A technique to prevent overfitting of Gaussians to specific viewing distances by introducing noise into the hierarchy cut distances, ensuring coarser levels are trained occasionally [S1, unofficial]. For each training iteration, multiply the distances to the SPT centers by a factor calculated as $1 + 5^{u}$, where the exponent is a uniformly random variable $u \in (0, 1)$ [S1, unofficial]. The scaling factor applied to the distance is $1 + 5^{u}$, where $u \in (0, 1)$ is a uniformly random variable [S1, unofficial]. This ensures most iterations train near the highest LoD, but coarser levels are trained occasionally [S1, unofficial]. Without this noise, Gaussians of a specific scale overfit to views from a particular distance, leading to LoD popping artifacts [S1, unofficial].
+
+### Varying Focal Length Adaptation
+A method to account for differing focal lengths in datasets by using a relative distance metric for HSPT cuts, ensuring the required LoD is consistent across cameras with different projections [S1, unofficial]. Choose a base focal length $f_{\text{base}}$. For the current camera with focal length $f$, calculate the relative distance metric $\tilde{d}$ for HSPT cuts as $\tilde{d} = \frac{f}{f_{\text{base}}} d$, where $d$ is the actual distance [S1, unofficial]. Unlike standard methods that use only Euclidean distance, this method scales the cut distance by the ratio of the current focal length to a base focal length [S1, unofficial]. For example, a camera with double the focal length requires the cut distance to be halved to account for the larger projection footprint [S1, unofficial].
 
 ## Background
-H-3DGS was introduced by Kerbl et al. in 2024 as an extension of the original 3D Gaussian Splatting method [S1, unofficial]. The original 3DGS method, proposed by Kerbl et al. in 2023, demonstrated high-quality real-time rendering but suffered from high memory consumption, making it unsuitable for large-scale scenes [S1, unofficial]. Prior methods for large-scale environments, such as those by Tancik et al. [2022] and Xu et al. [2023], employed scene partitioning or multi-GPU strategies. H-3DGS specifically addresses the limitations of chunk-based training, such as view-chunk misalignment, chunk bleeding, and chunk ghosting, by introducing a global LoD hierarchy [S1, unofficial]. The method is implemented in PyTorch and C++/CUDA, utilizing the densification implementation of Kheradmand et al. [2024] [S1, unofficial]. It is used for ultra-large scale reconstruction, including aerial and street-level datasets.
+H-3DGS was introduced by Kerbl et al. [S1, unofficial]. It addresses memory bottlenecks in large-scale environments by dividing scenes into chunks for independent training before merging them into a global LoD hierarchy [S1, unofficial]. The implementation uses PyTorch and C++/CUDA, incorporating densification from Kheradmand et al. [2024] [S1, unofficial]. It is applied to ultra-large scale reconstruction, including aerial and street-level datasets [S1, unofficial].
 
 ## Sources
 [S1] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28 (unofficial)
+[S2] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

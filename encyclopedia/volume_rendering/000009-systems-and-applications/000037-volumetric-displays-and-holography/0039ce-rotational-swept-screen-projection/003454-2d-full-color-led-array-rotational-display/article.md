@@ -1,0 +1,85 @@
+# 2D Full-Color LED Array Rotational Display
+
+Also called: LED Array Volumetric Display, Multivox Volumetric Display System, Rotational Volumetric Display
+
+## Overview
+A 2D full-color LED array rotational display renders volumetric images by rotating a 2D LED panel array around a central axis and synchronously updating the panel content to match the rotation angle [S2, unofficial]. It differs from laser-based swept-screen systems by generating voxels directly on an emissive surface without requiring external synchronization with electron beams or lasers [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel buffer (volume data) and a target rotation speed.
+*   **Output:** A 3D volumetric image perceived by the human eye via persistence of vision.
+
+**Data Structures:**
+*   **Voxel Buffer:** A 3D array stored in shared memory. The driver scans this buffer.
+*   **LED Panel State:** The current 2D image frame to be displayed on the HUB75 panels.
+
+**Parameters:**
+*   **Images per rotation:** 512 frames per full revolution [S2, unofficial].
+*   **Rotation Speed:** Several hundred RPM [S1, unofficial].
+*   **Panel Type:** HUB75 LED panels [S1, unofficial].
+
+**Steps:**
+1.  **Initialization:** Configure the GPIO memory-mapped access base address (`BCM_BASE`) for the specific hardware (e.g., Raspberry Pi 4) [S1, unofficial]. Define GPIO mappings and panel layout in the driver configuration [S1, unofficial].
+2.  **Synchronization Setup:** Establish a sync signal using a single GPIO pin connected to a photodiode or similar sensor. The signal is high for 180° of rotation and low for the other 180° [S1, unofficial].
+3.  **Frame Calculation:** For each rotation, calculate the 512 required 2D slices [S2, unofficial]. Map the 3D voxel data to 2D screen coordinates $(u, v)$ for the current rotation angle $\theta_k = k \cdot \Delta \theta$, where $k$ is the frame index ($0 \le k < 512$) [S1, unofficial].
+4.  **Buffer Update:** Write the calculated 2D frame data into the shared memory voxel buffer [S1, unofficial].
+5.  **Scanout:** The driver reads the voxel buffer and drives the HUB75 LED panels in sync with the rotation angle detected by the sync signal [S1, unofficial].
+6.  **Persistence:** The rapid rotation and frame updates blend the discrete 2D slices into a continuous 3D volume [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Configuration
+BCM_BASE = 0xFE000000  # Base address for Raspberry Pi 4 GPIO [S1, unofficial]
+FRAMES_PER_ROTATION = 512  # [S2, unofficial]
+SYNC_PIN = 17  # Example GPIO pin for photodiode sync [S1, unofficial]
+
+def init_gpio():
+    # Memory-map GPIO access using BCM_BASE [S1, unofficial]
+    # Configure SYNC_PIN as input
+    pass
+
+def get_rotation_angle():
+    # Read SYNC_PIN state
+    # High = 180 degrees, Low = 0 degrees (or vice versa, depending on wiring) [S1, unofficial]
+    # Return current angle theta in radians
+    pass
+
+def render_frame(voxel_buffer, theta):
+    # Map 3D voxel data to 2D coordinates for angle theta
+    # Calculate which voxels are visible on the rotating plane
+    # Return 2D image data for HUB75 panels
+    pass
+
+def main():
+    init_gpio()
+    while True:
+        theta = get_rotation_angle()
+        # Determine frame index k based on theta
+        k = int((theta / (2 * 3.14159)) * FRAMES_PER_ROTATION) % FRAMES_PER_ROTATION
+        
+        # Get 2D slice for this angle
+        frame_data = render_frame(voxel_buffer, theta)
+        
+        # Drive LED panels with frame_data
+        drive_hub75_panels(frame_data)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Hardware Compatibility:** The GPIO memory-mapped access assumes a Raspberry Pi 4. Using different Pi models requires changing `BCM_BASE` and is untested [S1, unofficial].
+*   **Synchronization:** Precise timing between the screen's angular position and the image update is critical. Misalignment results in Z-depth distortion [S1, unofficial].
+
+## Operating characteristics
+*   **Complexity:** Time complexity is linear with respect to the number of voxels and frames per rotation. Memory complexity is proportional to the voxel buffer size.
+*   **Performance:** Requires high-speed GPIO updates and precise timing. The system runs on a Raspberry Pi 4 embedded in the spinning hardware [S1, unofficial].
+*   **Strengths:** Self-contained system; no external synchronization devices needed; full-color output [S2, unofficial].
+*   **Limitations:** Limited to the resolution of the LED panels; rotation speed limits the maximum volume size and frame rate; hardware-specific GPIO code [S1, unofficial].
+
+## Background
+The concept of using rotating 2D full-color LED arrays for volumetric display was proposed by Xie et al. in 2009 [S2, unofficial]. This method was later categorized as a "free-space" volumetric display by Sumalley et al. in 2018 [S2, unofficial]. A specific implementation, Multivox, uses two HUB75 LED panels controlled by a Raspberry Pi 4 [S1, unofficial].
+
+## Sources
+[S1] Multivox: Volumetric Display, https://github.com/AncientJames/multivox, fetched 2026-10-26 (unofficial)
+[S2] ボリュメトリックディスプレイ, https://www.jstage.jst.go.jp/article/jvrsj/29/3/29_27/_pdf/-char/ja, fetched 2026-10-30 (unofficial)

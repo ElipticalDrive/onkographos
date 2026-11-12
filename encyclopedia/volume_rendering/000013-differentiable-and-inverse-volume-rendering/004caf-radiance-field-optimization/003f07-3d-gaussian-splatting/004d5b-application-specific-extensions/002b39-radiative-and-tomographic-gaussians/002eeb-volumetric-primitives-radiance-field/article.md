@@ -2,101 +2,121 @@
 
 
 ## Overview
-Volumetric Primitives Radiance Field (VPRF) is a rendering integrator designed for 3D Gaussian Splatting-like assets, optimized specifically for radiance field optimization and rendering tasks [S1, unofficial]. It shares the core volumetric primitive structure of the Volumetric Primitives Path Tracer (VPPT) but diverges by simplifying the radiative transfer model to consider only primary rays from the camera and accumulating emission based on spherical harmonics within segments [S2, unofficial]. Unlike VPPT, which targets general volumetric scattering media, VPRF is tailored for reconstructing and rendering radiance fields from photographic data [S1, unofficial].
+Volumetric Primitives Radiance Field (VPRF) is a rendering integrator variant designed for 3D Gaussian Splatting-like assets, optimized specifically for radiance field optimization and rendering tasks [S1, unofficial]. It shares the core volumetric primitive structure of the Volumetric Primitives Path Tracer (VPPT) but diverges by simplifying the light transport model to consider only primary rays from the camera [S1, unofficial][S2, unofficial]. Unlike VPPT, which targets general volumetric scattering media, VPRF is tailored for reconstructing and rendering emissive radiance fields [S1, unofficial].
 
 ## How it works
+VPRF renders scenes composed of 3D Gaussian kernels by accumulating emission along primary camera rays. It relies on the closed-form integration of spherical harmonics within the segments defined by the intersection of rays and volumetric primitives [S2, unofficial].
+
 **Inputs and Outputs:**
-*   **Input:** A set of volumetric primitives (position, covariance, spherical harmonic coefficients for emission) and camera parameters [S1, unofficial][S2, unofficial].
-*   **Output:** A 2D image representing the accumulated emission along primary rays [S2, unofficial].
+*   **Input:** A set of $M$ 3D Gaussian primitives $\mathcal{G} = \{G_i\}_{i=1}^M$, where each primitive is defined by position $\mathbf{p}_i$, rotation $\mathbf{R}_i$, and scale $\mathbf{S}_i$ [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md). Each primitive carries view-independent scalar attributes or feature vectors representing emission [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md).
+*   **Input:** Camera parameters defining primary rays.
+*   **Output:** Pixel colors (radiance) for the image plane.
 
 **Data Structures:**
-The scene is represented by a list of $M$ primitives. Each primitive $i$ contains:
-*   $\mathbf{p}_i \in \mathbb{R}^3$: Position [S1, unofficial].
-*   $\mathbf{\Sigma}_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (derived from rotation and scale) [S1, unofficial].
-*   $\mathbf{c}_i$: Spherical harmonic coefficients defining the view-dependent emission intensity [S2, unofficial].
-*   $\alpha_i$: A scalar opacity or density parameter controlling the magnitude of emission/absorption [G].
+The primitive representation follows the standard 3DGS layout:
+*   $\mathbf{p}_i \in \mathbb{R}^3$: Position.
+*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix.
+*   $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$: Scale matrix.
+*   Covariance: $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^\top \mathbf{R}_i^\top$ [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md).
+*   Attributes: View-independent emission coefficients (typically represented via Spherical Harmonics or simple scalars per band/channel).
 
-**Rendering Pipeline:**
-1.  **Ray Generation:** Generate primary rays $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ from the camera origin $\mathbf{o}$ through each pixel direction $\mathbf{d}$ [S2, unofficial].
-2.  **Ray-Primitive Intersection:** For each ray, determine the intersection intervals (segments) with the primitives. The method uses closed-form solutions for ray-primitive intersections to avoid stochastic noise [S2, unofficial].
-3.  **Segmentation:** Sort the intersection intervals along the ray. The ray is divided into segments where the emission contribution is integrated [S2, unofficial].
-4.  **Emission Accumulation:** For each segment, compute the accumulated emission. The emission color is evaluated using spherical harmonics based on the view direction $\mathbf{d}$ [S2, unofficial].
-5.  **Compositing:** Combine the contributions from all segments using alpha compositing. The final color is computed by accumulating emitted radiance weighted by transmittance along the ray [G].
+**Algorithm Steps:**
+1.  **Ray Generation:** Generate primary rays $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ from the camera center $\mathbf{o}$ through each pixel direction $\mathbf{d}$ [S2, unofficial].
+2.  **Intersection:** For each ray, determine intersections with the 3D Gaussian primitives. The closed-form nature of the Gaussian volume allows for exact calculation of entry and exit points (segments) without probabilistic sampling [S2, unofficial].
+3.  **Segmentation:** Split the ray into segments based on the intersection intervals with the primitives. The order of primitives along the ray is strictly enforced to avoid ordering artifacts [S2, unofficial].
+4.  **Emission Accumulation:** For each segment $k$ within a primitive $i$, compute the accumulated emission. This is done by integrating the primitive's emission function (modeled via Spherical Harmonics) over the segment length [S2, unofficial].
+    *   The integration leverages the analytical properties of the Gaussian kernel and Spherical Harmonics to provide a closed-form solution, eliminating noise associated with stochastic methods [S2, unofficial].
+5.  **Compositing:** Composite the accumulated emissions from all segments along the ray to produce the final pixel color. Since VPRF focuses on primary rays and emission, absorption and scattering between primitives are typically simplified or omitted compared to full path tracing [S1, unofficial][S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def zeros(shape, dtype=float):
-    if isinstance(shape, int):
-        return [0.0] * shape
-    return [zeros(s, dtype) for s in shape]
-
-def evaluate_sh(coeffs, direction):
-    # [G] Standard spherical harmonics evaluation; degree 0 is isotropic.
-    return coeffs[0]
-
-def gaussian_density_at_center(prim, origin, direction, segment_length):
-    # [G] Approximation: density at center scaled by segment length.
-    # Exact integration requires error functions; this is a standard simplification.
-    return math.exp(-0.5 * segment_length)
-
 def render_vprf(primitives, camera):
-    image = zeros((camera.height, camera.width, 3))
+    """
+    Render a scene using the VPRF integrator.
+    primitives: List of Gaussian objects with attributes (p, R, S, emission_coeffs)
+    camera: Object with method get_primary_ray(x, y) returning (origin, direction)
+    """
+    image = empty_image(camera.width, camera.height)
+    
     for y in range(camera.height):
         for x in range(camera.width):
-            ray_origin = camera.origin
-            ray_dir = camera.get_direction(x, y)
+            ray_origin, ray_dir = camera.get_primary_ray(x, y)
+            total_radiance = vec3(0.0, 0.0, 0.0)
+            
+            # 1. Find intersections and sort by distance
             intersections = []
             for prim in primitives:
-                t_start, t_end = prim.intersect(ray_origin, ray_dir)
+                # Calculate intersection interval [t_start, t_end] for this Gaussian
+                # Uses closed-form solution for Gaussian volume boundary
+                t_start, t_end = intersect_gaussian(ray_origin, ray_dir, prim)
                 if t_start is not None:
                     intersections.append((t_start, t_end, prim))
-            intersections.sort(key=lambda x: x[0])
-            current_transmittance = 1.0
-            accumulated_color = zeros(3)
+            
+            # Sort intersections by t_start to ensure correct ordering
+            intersections.sort(key=lambda item: item[0])
+            
+            # 2. Accumulate emission along segments
             for t_start, t_end, prim in intersections:
-                view_dir = ray_dir
-                emission_color = evaluate_sh(prim.sh_coeffs, view_dir)
-                segment_length = t_end - t_start
-                alpha = prim.opacity * gaussian_density_at_center(prim, ray_origin, ray_dir, segment_length)
-                contribution = current_transmittance * alpha * emission_color
-                accumulated_color = [accumulated_color[i] + contribution[i] for i in range(3)]
-                current_transmittance *= (1.0 - alpha)
-                if current_transmittance < 1e-6:
-                    break
-            image[y][x] = accumulated_color
+                # 3. Integrate emission over the segment [t_start, t_end]
+                # Uses closed-form integration of Spherical Harmonics within the Gaussian
+                segment_radiance = integrate_emission_segment(
+                    ray_origin, ray_dir, t_start, t_end, prim
+                )
+                
+                # 4. Composite (Simple addition for emissive primary rays)
+                # Note: In a full radiance field, opacity/absorption might modulate this
+                total_radiance += segment_radiance
+            
+            image[y, x] = total_radiance
+            
     return image
+
+def integrate_emission_segment(ray_origin, ray_dir, t_start, t_end, prim):
+    """
+    Computes the radiance emitted by a Gaussian primitive along a ray segment.
+    Uses closed-form integration of the Gaussian density weighted by SH coefficients.
+    """
+    # Transform ray to local primitive space
+    # ... (standard affine transformation using prim.R and prim.S) ...
+    
+    # Integrate the Gaussian kernel * SH emission function from t_start to t_end
+    # This step replaces Monte Carlo sampling with analytical calculation
+    # to ensure zero noise [S2, unofficial]
+    radiance = analytical_sh_gaussian_integral(
+        local_ray_origin, local_ray_dir, t_start_local, t_end_local, prim.sh_coeffs
+    )
+    
+    return radiance
 ```
 
 **Parameters:**
-*   **Spherical Harmonics Degree:** Determines the view-dependency of the emission [S2, unofficial].
-*   **Opacity/Density:** Controls the strength of the primitive's contribution [G].
+*   **Spherical Harmonics Degree:** Determines the view-dependent (or view-independent in this specific emissive context) color fidelity. Not given in the sources.
+*   **Ray Depth:** Fixed at 1 (primary rays only) [S2, unofficial].
 
 **Edge Cases:**
-*   **Degenerate Gaussians:** If the covariance matrix is singular, intersection calculations may fail. [G] Add a small epsilon to the diagonal of the covariance matrix.
-*   **Deep Scenes:** Sorting intersections can be expensive. [G] Use a spatial acceleration structure (e.g., BVH) to cull primitives not intersecting the frustum.
+*   **Degenerate Gaussians:** If scale matrices result in zero volume, intersection calculations may fail. [G] Guard against zero-scale primitives.
+*   **Precision:** Closed-form integration requires careful handling of floating-point precision at segment boundaries to avoid gaps or overlaps [S2, unofficial].
 
 ## Subtopics
 
 ### Volumetric Primitives Path Tracer (VPPT)
-A general-purpose integrator for volumetric scattering media using the same primitive representation [S1, unofficial]. It handles multiple scattering and complex light paths, unlike VPRF which is limited to primary rays [S2, unofficial]. Choose VPPT for physically accurate volumetric rendering; choose VPRF for radiance field optimization [S1, unofficial].
+A sibling integrator that handles general volumetric scattering media, including multiple scattering and absorption, unlike VPRF's primary-ray-only emission model. Choose VPPT for physically accurate volumetric light transport; choose VPRF for efficient radiance field optimization. [S1, unofficial]
 
-### 3D Gaussian Splatting
-The foundational method that VPRF extends. 3DGS uses alpha compositing of 2D projected Gaussians for fast rasterization [G]. VPRF uses volumetric primitives for more accurate physical modeling [S1, unofficial].
+### Radiative Gaussian Splatting
+The foundational method that replaces RGB opacity/color with view-independent scalar attributes or feature vectors, enabling the emission-based rendering used by VPRF. [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md)
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot M)$ for $N$ pixels and $M$ primitives, assuming no acceleration structure [G]. With a BVH, it approaches $O(N \log M)$ for intersection testing [G].
-*   **Memory Complexity:** $O(M)$ to store the primitives [G].
-*   **Strengths:** Provides closed-form solutions for ray-primitive intersections, reducing noise compared to stochastic methods [S2, unofficial]. Suitable for differentiable rendering and optimization [S2, unofficial].
-*   **Limitations:** Limited to primary rays, making it unsuitable for complex global illumination effects like multiple scattering [S2, unofficial]. Performance degrades with very high numbers of primitives without acceleration [G].
-*   **When to use:** Radiance field optimization, novel view synthesis from photos, and scenarios requiring differentiable rendering of volumetric data [S2, unofficial].
-*   **When not to use:** Real-time rendering requiring high frame rates with millions of primitives, or scenes requiring complex light transport [G].
+*   **Time Complexity:** Linear with respect to the number of primitives $M$ and pixels, assuming efficient spatial acceleration structures for intersection testing. The closed-form integration avoids iterative sampling, reducing per-ray cost compared to stochastic volumetric rendering.
+*   **Memory Complexity:** Linear with respect to $M$, storing Gaussian attributes and SH coefficients. Significantly more memory-efficient than voxel grids for complex volumes [S2, unofficial].
+*   **Strengths:** Zero noise due to analytical integration; fast rendering of emissive media; compatible with radiance field optimization pipelines; avoids ordering artifacts through strict ray ordering [S2, unofficial].
+*   **Limitations:** Limited to primary rays and emission; does not handle complex scattering or global illumination natively (unlike VPPT) [S1, unofficial][S2, unofficial].
+*   **When to use:** Radiance field optimization, rendering 3D Gaussian Splatting assets, and scenarios requiring noise-free emissive volume rendering.
+*   **When not to use:** Scenes requiring multiple scattering, complex absorption, or full path-traced global illumination.
 
 ## Background
-VPRF is part of the "Volumetric Primitives" framework introduced by Facebook Research [S1, unofficial]. It was developed to address the limitations of standard rasterization-based 3D Gaussian Splatting in physically based rendering contexts [S1, unofficial]. By using volumetric primitives, it enables more accurate modeling of light transport for radiance field applications [S2, unofficial]. The method leverages the mathematical properties of volumetric kernels to allow for exact integration along rays, a key insight from the broader Volumetric Primitives research [S2, unofficial].
+VPRF was introduced as part of the "Volumetric Primitives" framework by Facebook Research, designed to render 3D Gaussian Splatting-like assets efficiently [S1, unofficial]. It builds upon the mathematical foundation of representing volumes with Gaussian kernels, leveraging their analytical properties for integration [S2, unofficial]. The method is particularly relevant for the reconstruction and rendering of radiance fields from image collections.
 
 ## Sources
 [S1] facebookresearch/volumetric_primitives, https://github.com/facebookresearch/volumetric_primitives, fetched 2026-10-26 (unofficial)

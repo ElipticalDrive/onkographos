@@ -1,0 +1,102 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,3 @@
+ # TideGS
+-
+-
+ ## Overview
+ TideGS is a fully out-of-core optimization framework for training 3D Gaussian Splatting (3DGS) that enables training with over one billion primitives on a single GPU with limited VRAM [S2, unofficial]. It solves the VRAM bottleneck of standard 3DGS by decoupling memory usage from the total scene size $N$, keeping the full parameter table on SSD and materializing only the per-iteration working set in GPU memory [S2, unofficial]. Unlike [Grendel-GS](7349-grendel-gs.md), which distributes Gaussians across multiple GPUs, TideGS operates on a single machine, treating GPU VRAM as a high-bandwidth working-set cache rather than a persistent parameter store [S2, unofficial].
+@@ -54,53 +52,59 @@
+ # Constants
+ B = 4096  # Spatial block size (primitives per block)
+-C = 24 * 1024 * 1024 * 1024  # VRAM capacity limit (e.g., 24 GB)
+-CPU_CACHE_SIZE = 16 * 1024 * 1024 * 1024  # CPU cache size (e.g., 16 GB)
++D = 59    # Parameter dimensionality per Gaussian
++C = 24 * 1024**3  # VRAM capacity limit in bytes (e.g., 24 GB)
++CPU_CACHE_SIZE = 16 * 1024**3  # CPU cache size in bytes
+ K = (N + B - 1) // B  # Total number of blocks
+ 
+-# Preprocessing (done once)
+-# 1. Morton-sort Gaussians
+-# 2. Compute block bounds (bounding spheres)
++# Preprocessing (done once before training)
++# 1. Morton-sort N primitives
++# 2. Compute block bounds (bounding spheres) and statistics
+ # 3. Write initial base segment to SSD
+ # End Preprocessing
+ 
++# Initialize resident set and CPU cache
++R_t = []  # List of block indices currently in VRAM
++cpu_cache = {}  # Dictionary mapping block index to data array
++
+ for t in range(num_iterations):
+-    # Stage 1: Identify working set
+-    # Compute block-level working set K_t via CPU-side 6-plane frustum tests against block bounding spheres
+-    K_t = set()
++    batch = camera_batches[t]
++    
++    # Stage 1: Identify working set (CPU)
++    # Conservative CPU-side block visibility test (6-plane frustum test against bounding spheres)
++    K_t = []
+     for k in range(K):
+-        if block_is_visible(k, camera_batch[t]):
+-            K_t.add(k)
++        if block_bounding_sphere_intersects_frustum(k, batch):
++            K_t.append(k)
+             
+-    # Stage 2: Prefetch & materialize (asynchronous)
+-    # Prefetch blocks in K_t to CPU cache
+-    # Materialize blocks in K_t to GPU VRAM (resident set R_t)
+-    # Evict blocks from R_t if capacity C exceeded, writing back dirty blocks asynchronously
+-    R_t = set()
++    # Stage 2: Prefetch & materialize (Async H2D stream)
++    # Evict cold blocks from VRAM if capacity C is exceeded
++    while len(R_t) * B * D * 4 > C:
++        evict_block(R_t, cpu_cache)
++        
+     for k in K_t:
+         if k not in R_t:
+-            prefetch_to_cpu_cache(k, CPU_CACHE_SIZE)
+-            materialize_to_vram(k, C)
+-            R_t.add(k)
++            # Fetch from SSD or CPU cache
++            if k in cpu_cache:
++                data = cpu_cache[k]
++            else:
++                data = read_ssd_block(k)
++                cpu_cache[k] = data
++            # Asynchronously copy to GPU VRAM
++            async_h2d_copy(k, data)
++            R_t.append(k)
+             
+     # Stage 3: Render & backprop (GPU)
+-    # Extract active Gaussian indices I_t from R_t via GPU-side fine filtering
+-    I_t = set()
+-    for k in R_t:
+-        for i in block_gaussians(k):
+-            if gaussian_is_visible(i, camera_batch[t]):
+-                I_t.add(i)
+-                
+-    # Perform standard 3DGS forward pass and backward pass on I_t
+-    loss, gradients = standard_3dgs_forward_backward(I_t, camera_batch[t])
+-    
+-    # Update optimizer states (Adam) for I_t
++    # GPU-side fine filtering to get exact active Gaussian indices I_t
++    I_t = gpu_frustum_culling(R_t, batch)
++    # Execute standard 3DGS forward and backward pass
++    loss, gradients = standard_3dgs_forward_backward(I_t, batch)
++    # Update Adam optimizer states for active Gaussians (standard 3DGS step)
+     update_adam_optimizer(I_t, gradients)
+     
+-    # Stage 4: Evict & write back (asynchronous overlap with Stage 1/2 of next iter)
+-    # Mark evicted blocks as dirty if modified
+-    # Asynchronously write dirty blocks to SSD
++    # Stage 4: Evict & write back (Async overlap with next stages)
++    # Mark modified blocks as dirty and write back to SSD asynchronously
+     for k in R_t:
+-        if is_dirty(k):
+-            async_write_to_ssd(k)
++        if block_is_dirty(k):
++            async_write_ssd_block(k)
+ ```
+ 

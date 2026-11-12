@@ -3,123 +3,243 @@
 Also called: 3D Gaussian Splatting for Ultrasound, Ultrasound Gaussian Splatting
 
 ## Overview
-UltraGauss is a rendering method for 3D ultrasound volumes that treats the ultrasound probe plane as a 3D intersection target rather than a 2D projection target [S1, unofficial]. It evaluates 3D Gaussians by intersecting them with the probe plane in 3D space using a 3D Mahalanobis distance to evaluate opacity, thereby avoiding the occlusion modeling required in visual spectrum rendering [S1, unofficial]. Unlike [Volumetric Gaussian Splatting (AVIS)](1875-volumetric-gaussian-splatting-avis.md) which supervises on voxel grids, UltraGauss renders directly to the 2D pixel grid of the probe by lifting 2D points to the probe's 3D coordinate frame [S1, unofficial].
+UltraGauss is a rendering method for 3D ultrasound volumes that treats the ultrasound probe plane as a 3D intersection target rather than a 2D projection target [S1, unofficial]. It evaluates Gaussian opacity using 3D Mahalanobis distance, thereby avoiding the occlusion modeling inherent in standard RGB Gaussian Splatting [S1, unofficial]. Unlike its siblings which project 3D primitives to 2D image space, UltraGauss lifts 2D pixel coordinates to the probe's 3D coordinate frame to compute intersections [S1, unofficial].
 
 ## How it works
-**Inputs:** A set of $K$ 3D Gaussians, each defined by mean $\mu_i \in \mathbb{R}^3$, covariance $\Sigma_i \in \mathbb{R}^{3 \times 3}$, color $c_i \in \mathbb{R}^3$, and opacity $\alpha_i \in [0, 1]$ [S1, unofficial]. The probe's world-to-probe transformation matrix $W$ [S1, unofficial]. The probe image dimensions $(W, H)$ [S1, unofficial]. Background color $c_{BG}$ and background opacity coefficient $\alpha_{BG}$ [S1, unofficial].
+**Inputs:**
+*   Set of $M$ 3D Gaussians $\mathcal{G} = \{G_i\}_{i=1}^M$. Each Gaussian $i$ is defined by:
+    *   Mean position $\mu_i \in \mathbb{R}^3$.
+    *   Lower-triangular matrix $L_i \in \mathbb{R}^{3 \times 3}$ parameterizing the inverse covariance (see Covariance Parameterization).
+    *   Opacity $\alpha_i \in [0, 1]$.
+    *   Color $c_i \in \mathbb{R}^3$ (view-independent).
+*   Probe transform matrix $W \in \mathbb{R}^{3 \times 3}$ (rotation part of extrinsic matrix mapping world to probe frame).
+*   Background color $c_{BG} \in \mathbb{R}^3$ and background opacity coefficient $\alpha_{BG} > 0$.
+*   Probability density percentage $p$ (typically 0.95).
+*   Regularization constant $\beta > 0$.
 
-**Outputs:** Rendered color $\hat{c}(x) \in \mathbb{R}^3$ and opacity $\hat{\alpha}(x) \in \mathbb{R}$ for each pixel $x$ in the probe image [S1, unofficial].
+**Outputs:**
+*   Rendered color $\hat{c}(x) \in \mathbb{R}^3$ and opacity $\hat{\alpha}(x) \in \mathbb{R}$ for each pixel $x$ in the probe plane.
 
-**Data Structures:** Gaussian attributes stored in arrays of size $K$: $\mu$ ($K \times 3$), $L$ ($K \times 6$), $c$ ($K \times 3$), and $\alpha$ ($K$) [S1, unofficial]. Pixel accumulators `color_accum` and `opacity_accum` of size $W \times H$ [S1, unofficial].
+**Data Structures:**
+*   **Gaussian Attributes:** Stored in contiguous arrays for GPU access. $L_i$ is stored as 9 floats (lower triangular).
+*   **Bounding Box:** For each Gaussian, precomputed 3D bounding box $[b^{\min}, b^{\max}]$ based on the ellipsoid encompassing $p\%$ of probability density.
 
-**Covariance Parameterization:** To ensure positive-definiteness and efficient inversion, $\Sigma$ is parameterized using a lower-triangular matrix $L$ such that $\Sigma^{-1} = LL^T$ [S1, unofficial]. The matrix $L$ is constructed from 6 learnable parameters and a regularization constant $\beta > 0$:
-$$
-L = \begin{bmatrix} L_{11}^2 + \beta & 0 & 0 \\ L_{12} & L_{22}^2 + \beta & 0 \\ L_{13} & L_{23} & L_{33}^2 + \beta \end{bmatrix}
-$$
-(Note: The source Eq. 11 contains a typo repeating $L_{12}$ at position $(3,2)$; the standard lower-triangular form with $L_{23}$ is used here [G].)
+**Covariance Parameterization:**
+To ensure positive-definiteness and efficient inversion, the inverse covariance $\Sigma^{-1}$ is parameterized using a lower-triangular matrix $L$ [S1, unofficial]:
+$$ \Sigma^{-1} = LL^T $$
+where $L$ is defined as:
+$$ L = \begin{bmatrix} L_{11}^2 + \beta & 0 & 0 \\ L_{12} & L_{22}^2 + \beta & 0 \\ L_{13} & L_{12} & L_{33}^2 + \beta \end{bmatrix} $$
+Note: The source notation for $L_{23}$ in the matrix definition appears inconsistent with standard lower-triangular structure; the formula implies $L_{23}=L_{12}$ and $L_{33}$ is distinct. However, standard Cholesky-like parameterization usually implies distinct elements. The source explicitly writes $L_{12}$ in the $(2,3)$ position. We follow the source's explicit matrix form [S1, unofficial]. The diagonal elements are strictly positive due to $\beta > 0$.
 
-**Algorithm Steps:**
+**Numbered Steps:**
 
-1. **Transform to Probe Frame:** Transform each Gaussian's mean and covariance to the probe's coordinate frame using $W$ [S1, unofficial].
-   $$ \mu_i^{3D} = W \mu_i, \quad \Sigma_i^{3D} = W \Sigma_i W^T $$
-   (Note: The source Eq. 9 contains a typo in the mean transformation formula; the geometric intent requires transforming to probe space [S1, unofficial].)
+1.  **Transform to Probe Frame:**
+    For each Gaussian $i$, transform mean and covariance to the probe's coordinate frame using $W$ [S1, unofficial]:
+    $$ \mu_i^{3D} = W^{-1} (W \mu_i) $$
+    $$ \Sigma_i^{3D} = W \Sigma_i W^T $$
+    *Note: In practice, $\Sigma_i^{3D}$ is not explicitly formed. Instead, the inverse covariance in the probe frame is computed as $(\Sigma_i^{3D})^{-1} = W^{-T} \Sigma_i^{-1} W^{-1} = W^{-T} L_i L_i^T W^{-1}$. However, the source simplifies this by stating $\Sigma_i^{3D} = W \Sigma_i W^T$ and using the Mahalanobis distance formula directly with the transformed parameters. For implementation, one must compute the effective inverse covariance in the probe frame or transform the point $x_{|0}$ into the Gaussian's local frame. The source formula (8) uses $\mu_i^{3D}$ and $(\Sigma_i^{3D})^{-1}$. We assume the renderer computes the Mahalanobis distance using the transformed inverse covariance.*
 
-2. **Compute Bounding Boxes:** For each Gaussian, compute the 3D axis-aligned bounding box of the ellipsoid encompassing $p\%$ of probability density [S1, unofficial].
-   $$ \lambda = \frac{\chi_{3,1-p}^2}{\det(\Sigma_i^{3D})} $$
-   $$ b^{\min}_j = \mu^{3D}_j - \sqrt{\lambda \cdot \Sigma^{3D}_{jj}}, \quad b^{\max}_j = \mu^{3D}_j + \sqrt{\lambda \cdot \Sigma^{3D}_{jj}} $$
-   where $\Sigma^{3D}_{jj}$ is the $j$-th diagonal element of $\Sigma_i^{3D}$ [G].
+2.  **Compute Bounding Box:**
+    For each Gaussian, compute the 3D bounding box $b^{\min/\max}$ that encloses the ellipsoid containing $p\%$ of the probability mass [S1, unofficial]:
+    $$ b^{\min/\max} = \mu_i^{3D} \pm \sqrt{\lambda v} $$
+    where $\lambda = \frac{\chi_{3,1-p}^2}{\det(\Sigma_i^{3D})}$ and $v$ is the vector of eigenvalues of $\Sigma_i^{3D}$? No, the source defines $b^{\min/\max}$ as vectors. The formula $b^{\min/\max} = \mu^{3D} \pm \sqrt{\lambda v}$ is ambiguous. Re-reading Eq 13: $b^{\min/\max}$ are the min/max coordinates. The standard way to compute an axis-aligned bounding box for an ellipsoid $(x-\mu)^T \Sigma^{-1} (x-\mu) \le \chi^2$ is to find the extrema along the axes. The source likely implies computing the bounds along the principal axes or using a simplified approximation. Given the ambiguity, we note that the bounding box is used for rejection. The value $\chi_{3,1-p}^2$ is 7.815 for $p=95\%$ [S1, unofficial].
 
-3. **Phase 1: Load Balancing / Rejection:** Iterate through all Gaussians and reject those whose cut-off boundaries do not intersect the probe plane ($b^{\min}_3 > 0$ or $b^{\max}_3 < 0$) [S1, unofficial]. Compact the list of accepted Gaussians into a contiguous buffer [S1, unofficial].
+3.  **Phase 1: Load Balancing / Rejection:**
+    *   Iterate through all Gaussians.
+    *   Check if the Gaussian's 3D bounding box intersects the probe plane (defined as $z=0$ in the probe frame).
+    *   Reject Gaussian $i$ if $b^{\min}_3 > 0$ or $b^{\max}_3 < 0$.
+    *   Compact the list of accepted Gaussians into a contiguous buffer.
 
-4. **Phase 2: Rasterization:** For each accepted Gaussian $i$, iterate only over 2D pixels $x$ inside the 2D bounding box of the probe plane intersection ($b^{\min}_1 \le x_1 \le b^{\max}_1$ and $b^{\min}_2 \le x_2 \le b^{\max}_2$) [S1, unofficial]. Atomically add to pixel accumulators for color and opacity [S1, unofficial].
+4.  **Phase 2: Rasterization:**
+    *   For each accepted Gaussian $i$:
+        *   Compute the 2D bounding box in the probe plane ($z=0$) from the 3D bounding box.
+        *   Iterate over all pixels $x = (x_1, x_2)$ within this 2D bounding box.
+        *   Lift pixel $x$ to 3D in the probe frame: $x_{|0} = [x_1, x_2, 0]^T$.
+        *   Compute the squared Mahalanobis distance:
+            $$ d^2 = (x_{|0} - \mu_i^{3D})^T (\Sigma_i^{3D})^{-1} (x_{|0} - \mu_i^{3D}) $$
+        *   Compute opacity contribution:
+            $$ \hat{\alpha}_i(x) = \alpha_i \exp \left( -\frac{1}{2} d^2 \right) $$
+        *   Atomically add $\hat{\alpha}_i(x)$ to the pixel's accumulated opacity $\hat{\alpha}(x)$ and $\hat{\alpha}_i(x) c_i$ to the color accumulator.
 
-5. **Final Compositing:** Combine the accumulated Gaussian contributions with a uniform background component [S1, unofficial].
-   $$ \hat{\alpha}(x) = \sum_i^n \hat{\alpha}_i(x) + \alpha_{\text{BG}} $$
-   $$ \hat{c}(x) = \frac{1}{\hat{\alpha}(x)} \left( \sum_i^n \hat{\alpha}_i(x) c_i + \alpha_{\text{BG}} c_{\text{BG}} \right) $$
+5.  **Composite:**
+    *   After all Gaussians are processed, compute final color and opacity for each pixel $x$ [S1, unofficial]:
+        $$ \hat{\alpha}(x) = \sum_i^n \hat{\alpha}_i(x) + \alpha_{BG} $$
+        $$ \hat{c}(x) = \frac{1}{\hat{\alpha}(x)} \left( \sum_i^n \hat{\alpha}_i(x) c_i + \alpha_{BG} c_{BG} \right) $$
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ultra_gauss_render(Gaussians, W, W_dim, H_dim, c_BG, alpha_BG):
-    # Initialize accumulators
-    color_accum = zeros((W_dim, H_dim, 3))
-    opacity_accum = zeros((W_dim, H_dim))
+import torch
+import math
+
+def ultra_gauss_render(gaussians, W, c_BG, alpha_BG, p=0.95, beta=1e-4):
+    """
+    gaussians: dict with keys 'mu' (M,3), 'L' (M,3,3), 'alpha' (M,), 'color' (M,3)
+    W: (3,3) rotation matrix from world to probe frame
+    """
+    M = gaussians['mu'].shape[0]
     
-    accepted = []
-    for i in range(K):
-        # 1. Transform to probe frame
-        mu_3d = W @ Gaussians.mu[i]
-        Sigma_3d = W @ Gaussians.Sigma[i] @ W.T
+    # 1. Transform to Probe Frame
+    # mu_3D = W @ mu (since W is rotation, W^-1 @ W @ mu = mu? No. 
+    # Source says: mu_i^3D = W^-1 (W mu_i). This implies W maps probe to world? 
+    # "gaussian's parameters are moved to the probe's coordinate-frame using its inverse transform matrix W"
+    # Usually extrinsic matrix E maps World to Camera. 
+    # If W is the rotation part of the extrinsic, then W @ mu_world gives probe coords.
+    # The source formula: mu_i^3D = W^-1 (W mu_i) is tautological if W is applied twice.
+    # Re-reading: "using its inverse transform matrix W". This phrasing is confusing.
+    # Standard: x_probe = R * x_world + t.
+    # If W is the rotation R, then mu_probe = W @ mu_world.
+    # Sigma_probe = W @ Sigma_world @ W.T.
+    # Let's assume W is the rotation matrix from World to Probe.
+    
+    mu_probe = torch.matmul(W, gaussians['mu'].T).T # (M, 3)
+    # Sigma_probe = W @ Sigma @ W.T
+    # We need Sigma_inv_probe. 
+    # Sigma_inv_world = L @ L.T
+    # Sigma_inv_probe = (W @ Sigma @ W.T)^-1 = W^-T @ Sigma^-1 @ W^-1
+    # Since W is rotation, W^-1 = W.T.
+    # Sigma_inv_probe = W @ Sigma_inv_world @ W.T
+    
+    Sigma_inv_world = torch.bmm(gaussians['L'], gaussians['L'].transpose(1, 2)) # (M, 3, 3)
+    Sigma_inv_probe = torch.bmm(torch.matmul(W, Sigma_inv_world), W.transpose(1, 2)) # (M, 3, 3)
+    
+    # 2. Bounding Box Rejection
+    # Compute bounds for ellipsoid (x-mu)^T Sigma^-1 (x-mu) <= chi2
+    # Approximate bounding box using eigenvalues/vectors or simple heuristic.
+    # Source Eq 13: b_min/max = mu +/- sqrt(lambda v). 
+    # This formula is ambiguous. We will implement a simple AABB check for z=0 intersection.
+    # If the Gaussian is far from z=0, reject.
+    # A robust check: min_z of ellipsoid > 0 or max_z < 0.
+    # For simplicity in this pseudocode, we assume a pre-computed 'z_min' and 'z_max' for each Gaussian.
+    # If not available, we can approximate using the standard deviation along z.
+    
+    # Placeholder for bounding box logic based on source Eq 13
+    # chi2 = 7.815 for p=95%
+    chi2 = 7.815
+    # Compute eigenvalues of Sigma_probe to get extents
+    # Sigma_probe = inv(Sigma_inv_probe)
+    Sigma_probe = torch.linalg.inv(Sigma_inv_probe) # (M, 3, 3)
+    eigenvalues = torch.linalg.eigvalsh(Sigma_probe) # (M, 3)
+    
+    # Extent along z axis (assuming principal axes aligned or using max extent)
+    # For a general ellipsoid, the max extent along a direction d is sqrt(d^T Sigma d * chi2)
+    # For z-axis (0,0,1), extent is sqrt(Sigma_probe[:,:,2,2] * chi2)
+    z_extent = torch.sqrt(Sigma_probe[:, 2, 2] * chi2)
+    
+    z_min = mu_probe[:, 2] - z_extent
+    z_max = mu_probe[:, 2] + z_extent
+    
+    # Rejection
+    mask = (z_min <= 0) & (z_max >= 0)
+    active_indices = torch.where(mask)[0]
+    
+    if len(active_indices) == 0:
+        # Return background
+        return c_BG, alpha_BG
+
+    mu_active = mu_probe[active_indices]
+    Sigma_inv_active = Sigma_inv_probe[active_indices]
+    alpha_active = gaussians['alpha'][active_indices]
+    color_active = gaussians['color'][active_indices]
+    
+    # 3. Rasterization
+    # For each active Gaussian, determine 2D bounding box and splat
+    # This part is complex to vectorize fully without CUDA. 
+    # We outline the logic for a single Gaussian.
+    
+    # Initialize accumulators
+    # Assume image size H, W
+    H, W_img = 100, 100 # Example
+    acc_alpha = torch.zeros(H, W_img)
+    acc_color = torch.zeros(H, W_img, 3)
+    
+    for i in range(len(active_indices)):
+        mu = mu_active[i] # (3,)
+        Sigma_inv = Sigma_inv_active[i] # (3,3)
+        alpha = alpha_active[i]
+        color = color_active[i]
         
-        # 2. Compute bounding box
-        det_Sigma = det(Sigma_3d)
-        lambda_val = CHI_SQUARED_3_95 / det_Sigma
-        diag_Sigma = diag(Sigma_3d)
-        b_min = mu_3d - sqrt(lambda_val * diag_Sigma)
-        b_max = mu_3d + sqrt(lambda_val * diag_Sigma)
+        # Compute 2D bounding box in probe plane (z=0)
+        # Ellipse equation: (x_2D - mu_2D)^T Sigma_2D_inv (x_2D - mu_2D) <= chi2
+        # Sigma_2D_inv is the top-left 2x2 block of Sigma_inv_probe? 
+        # No, marginalizing z=0 is not just taking the block.
+        # However, for bounding box, we can use the 3D bounds projected to 2D.
+        # x_extent = sqrt(Sigma_probe[0,0] * chi2)
+        # y_extent = sqrt(Sigma_probe[1,1] * chi2)
         
-        # 3. Rejection
-        if b_min[2] > 0 or b_max[2] < 0:
+        x_extent = torch.sqrt(Sigma_probe[i, 0, 0] * chi2)
+        y_extent = torch.sqrt(Sigma_probe[i, 1, 1] * chi2)
+        
+        x_min = int(max(0, mu[0] - x_extent))
+        x_max = int(min(W_img-1, mu[0] + x_extent))
+        y_min = int(max(0, mu[1] - y_extent))
+        y_max = int(min(H-1, mu[1] + y_extent))
+        
+        if x_min > x_max or y_min > y_max:
             continue
-        accepted.append(i)
-        
-    # 4. Rasterization
-    for i in accepted:
-        mu_3d = W @ Gaussians.mu[i]
-        Sigma_3d = W @ Gaussians.Sigma[i] @ W.T
-        Sigma_inv_3d = inv(Sigma_3d)
-        
-        b_min_2d = max(0, floor(b_min[:2]))
-        b_max_2d = min([W_dim, H_dim], ceil(b_max[:2]))
-        
-        for x1 in range(b_min_2d[0], b_max_2d[0]):
-            for x2 in range(b_min_2d[1], b_max_2d[1]):
-                x_3d = array([x1, x2, 0.0])
-                diff = x_3d - mu_3d
-                mahalanobis = diff.T @ Sigma_inv_3d @ diff
-                alpha_i = Gaussians.alpha[i] * exp(-0.5 * mahalanobis)
-                
-                if alpha_i > 1e-6:
-                    opacity_accum[x1, x2] += alpha_i
-                    color_accum[x1, x2] += alpha_i * Gaussians.c[i]
-                    
-    # 5. Compositing
-    rendered_color = zeros((W_dim, H_dim, 3))
-    rendered_opacity = zeros((W_dim, H_dim))
-    for x1 in range(W_dim):
-        for x2 in range(H_dim):
-            alpha_hat = opacity_accum[x1, x2] + alpha_BG
-            c_hat = (color_accum[x1, x2] + alpha_BG * c_BG) / alpha_hat
-            rendered_color[x1, x2] = c_hat
-            rendered_opacity[x1, x2] = alpha_hat
             
-    return rendered_color, rendered_opacity
+        # Splat
+        # Create grid of points
+        y_coords, x_coords = torch.meshgrid(torch.arange(y_min, y_max+1), 
+                                            torch.arange(x_min, x_max+1), indexing='ij')
+        points_2d = torch.stack([x_coords.float(), y_coords.float()], dim=-1) # (H', W', 2)
+        
+        # Lift to 3D: [x, y, 0]
+        points_3d = torch.cat([points_2d, torch.zeros_like(points_2d[..., :1])], dim=-1) # (H', W', 3)
+        
+        # Diff
+        diff = points_3d - mu.unsqueeze(0).unsqueeze(0) # (H', W', 3)
+        
+        # Mahalanobis distance
+        # d2 = diff^T @ Sigma_inv @ diff
+        # Vectorized:
+        left = torch.matmul(diff, Sigma_inv) # (H', W', 3)
+        d2 = torch.sum(left * diff, dim=-1) # (H', W')
+        
+        # Opacity
+        alpha_splat = alpha * torch.exp(-0.5 * d2)
+        
+        # Accumulate
+        # Using scatter_add for atomic-like behavior in PyTorch
+        # This is a simplified representation. In CUDA, this is done with atomics.
+        acc_alpha[y_min:y_max+1, x_min:x_max+1] += alpha_splat
+        acc_color[y_min:y_max+1, x_min:x_max+1] += alpha_splat.unsqueeze(-1) * color.unsqueeze(0).unsqueeze(0)
+
+    # 4. Composite
+    total_alpha = acc_alpha + alpha_BG
+    total_color = (acc_color + alpha_BG * c_BG) / total_alpha.unsqueeze(-1)
+    
+    return total_color, total_alpha
 ```
 
 **Parameters:**
-- $\alpha_{BG}$: Added to avoid division by zero and improve numerical stability [S1, unofficial]. Not given in the sources.
-- $p$: Probability density percentage for bounding box. Typically 95%, corresponding to a chi-squared bound value of 7.815 for 3 degrees of freedom [S1, unofficial].
-- $\beta$: Regularization constant in $L$ parameterization [S1, unofficial]. Not given in the sources.
-- Initialization: $\mu_i$ uniformly at random within imaged volume boundaries [S1, unofficial]. $L_{ij}$ uniformly randomly initialized between 4 and 5 [S1, unofficial].
-- Learning rate: 0.05 for Gaussian parameters ($c, \alpha, L$) [S1, unofficial]. 0.00016 for means $\mu_i$ with exponential decay scheduler [S1, unofficial].
-- Optimizer: Adam [S1, unofficial].
-- Hardware: NVIDIA RTX A4000 GPU [S1, unofficial].
+*   $\alpha_{BG}$: Background opacity coefficient. Value not given in the sources, but must be $>0$ to avoid division by zero [S1, unofficial].
+*   $p$: Probability density percentage for bounding box. Typical value: 95% [S1, unofficial].
+*   $\beta$: Regularization constant for covariance parameterization. Value not given in the sources, but must be $>0$ [S1, unofficial].
+*   Initialization of $\mu_i$: Uniformly at random within the imaged volume boundaries [S1, unofficial].
+*   Initialization of $L_{ij}$: Uniformly randomly initialized between 4 and 5, corresponding to a variance between 0.0017 and 0.0043 [S1, unofficial].
+*   Learning rate for Gaussian parameters: 0.05 [S1, unofficial].
+*   Learning rate for means $\mu_i$: Starting value of 0.00016 with exponential decay scheduler [S1, unofficial].
+*   Optimizer: Adam [S1, unofficial].
+*   Initialization of $\alpha_i$: 0.731 [S1, unofficial].
+*   Initialization of $c_i$: 0.5 [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- Quaternion normalization for covariance parameterization causes numerical instabilities in this setting; replaced by lower-triangular matrix parameterization with $\beta$ regularization [S1, unofficial].
-- Inverting ill-conditioned $\Sigma^{-1}$ explicitly for resampling is numerically unstable; solved by using the lower-triangular factorization $L$ which allows efficient inversion via forward substitution [S1, unofficial].
-- Ultrasound rendering does not model occlusions in the same way as RGB; the probe plane intersection is the primary mechanism and accumulated transmittance $T$ from standard splatting is incorrect for ultrasound [S1, unofficial].
+*   **Numerical Instability:** Quaternion normalization for covariance parameterization causes numerical instabilities in this setting. The lower-triangular matrix parameterization with $\beta$ regularization is used instead [S1, unofficial].
+*   **Ill-conditioned Inversion:** Inverting ill-conditioned $\Sigma^{-1}$ explicitly for resampling is numerically unstable. The lower-triangular factorization $L$ allows efficient inversion via forward substitution [S1, unofficial].
+*   **Occlusion:** Occlusions do not play as large a role as in the visual spectrum and are not modeled [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(K \cdot A)$ where $K$ is the number of Gaussians and $A$ is the average number of pixels covered by a Gaussian's bounding box [G]. The rejection phase reduces $K$ to active Gaussians [S1, unofficial].
-- **Memory Complexity:** $O(K)$ for Gaussian attributes and $O(W \cdot H)$ for pixel accumulators [G].
-- **Performance:** Supports up to 2 million Gaussians with respectable reconstruction times on a single NVIDIA RTX A4000 GPU [S1, unofficial].
-- **Strengths:** Efficient rasterization via bounding box rejection and lower-triangular covariance factorization; suitable for volumetric ultrasound data where occlusion is less critical than surface intersection [S1, unofficial].
-- **Limitations:** Requires custom CUDA kernels for efficiency; initialization is random rather than from Structure-from-Motion [S1, unofficial].
+*   **Time Complexity:** The method avoids nested iterations over all pixels and all Gaussians by using bounding box rejection and tile-based distribution [S1, unofficial].
+*   **Memory Complexity:** Supports up to 2 million Gaussians with respectable reconstruction times on a single NVIDIA RTX A4000 GPU [S1, unofficial].
+*   **Performance:** Measured on NVIDIA RTX A4000 GPU [S1, unofficial].
+*   **Strengths:** Efficient handling of 3D ultrasound volumes; avoids occlusion modeling; stable optimization via triangular covariance parameterization.
+*   **Limitations:** Requires custom CUDA kernels for rasterization and gradients; initialization is random rather than point-cloud derived [S1, unofficial].
 
 ## Background
-UltraGauss was introduced in the paper "UltraGauss: Ultrafast Gaussian Reconstruction of 3D Ultrasound Volumes" [S1, unofficial]. It adapts 3D Gaussian Splatting to the specific domain of 3D ultrasound, addressing the limitations of standard splatting which projects to 2D image space and models occlusion [S1, unofficial]. The method was validated on volumetric ultrasound scans and freehand ultrasound video sequences [S1, unofficial].
+UltraGauss was introduced in the paper "UltraGauss: Ultrafast Gaussian Reconstruction of 3D Ultrasound Volumes" [S1, unofficial]. It adapts 3D Gaussian Splatting for the specific domain of ultrasound imaging, where the probe plane intersects the volume rather than projecting it. The method was implemented in PyTorch with custom CUDA kernels [S1, unofficial].
 
 ## Sources
 [S1] UltraGauss: Ultrafast Gaussian Reconstruction of 3D Ultrasound Volumes, https://doi.org/10.48550/arXiv.2505.05643, fetched 2026-10-27 (unofficial)

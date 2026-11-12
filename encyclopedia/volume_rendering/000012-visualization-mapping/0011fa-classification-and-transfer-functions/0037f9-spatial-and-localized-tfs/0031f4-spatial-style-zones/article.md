@@ -3,57 +3,112 @@
 Also called: Multi-level Interface Zones, Zones with Different Styles
 
 ## Overview
-Spatial Style Zones is a technique for volume illustration that partitions the volume space into distinct geometric regions (zones), each assigned an independent rendering style [S1][S2, unofficial]. It solves the problem of managing complex, multi-material visualizations by allowing users to define high-level "materials" and apply specific combinations of effects (e.g., sketch, illumination, color) to spatial zones rather than tuning low-level transfer function parameters for every voxel [S1][S2, unofficial]. It differs from Model-Based Local Transfer Functions by defining styles via explicit spatial geometry (ellipsoids/rectangles) rather than derived data features [S1][S2, unofficial].
+Spatial Style Zones is a technique for volume illustration where distinct regions of volume space (zones) are assigned different rendering styles, allowing for complex, multi-material visual effects [S1][S2, unofficial]. It differs from sibling methods by explicitly decoupling spatial location from material identity via "zones," enabling users to apply specific combinations of transfer functions (e.g., sketch, illumination) to arbitrary spatial subsets, rather than relying solely on local data statistics or model-based geometry [S1][S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D volume dataset $V$; a set of spatial zones $Z_i$, each defined as an ellipsoid or rectangle; a set of styles $S_j$, where each style is a collection of transfer functions controlling color, opacity, and enhancement effects [S1][S2, unofficial].
-*   **Output:** A rendered image where voxels within each zone $Z_i$ are rendered according to the assigned style $S_i$ [S1][S2, unofficial].
+*   **Input:** A volume dataset $V$, a set of defined spatial zones $\mathcal{Z} = \{Z_1, ..., Z_n\}$, and a set of styles $\mathcal{S} = \{S_1, ..., S_m\}$. Each style $S_j$ is a set of transfer functions controlling color, opacity, and enhancement effects [S1][S2, unofficial].
+*   **Output:** A rendered image where each sample point $\mathbf{x}$ is colored and shaded according to the style assigned to the zone containing $\mathbf{x}$ [S1][S2, unofficial].
 
 **Data Structures:**
-*   **Zone:** Defined by geometric parameters.
-    *   Ellipsoid: Center $(c_x, c_y, c_z)$, axes $(a_x, a_y, a_z)$, and orientation [S1][S2, unofficial].
-    *   Rectangle: Minimum and maximum bounds $(x_{min}, y_{min}, z_{min})$ and $(x_{max}, y_{max}, z_{max})$ [S1][S2, unofficial].
-*   **Style:** A set of transfer functions. Each function maps input data values to optical properties (color, opacity, weight) [S2, unofficial].
-*   **Material Mapping:** A mapping from material IDs to transfer function widgets. Multiple widgets can share a material ID [S1][S2, unofficial].
+*   **Zone:** Defined geometrically as either an ellipsoid or a rectangle within the volume space [S1][S2, unofficial].
+    *   *Ellipsoid:* Defined by center $\mathbf{c}$, axes $\mathbf{a}$, and orientation [S1][S2, unofficial].
+    *   *Rectangle:* Defined by min/max bounds [S1][S2, unofficial].
+*   **Style:** A collection of transfer function parameters (color, opacity, sketch intensity, illumination direction) [S1][S2, unofficial].
+*   **Material Mapping:** Materials are regions in the transfer domain assigned meaningful names. Widgets in the interface are associated with Material IDs [S2, unofficial].
 
 **Steps:**
-1.  **Define Zones:** Create spatial regions within the volume space. Each zone is either an ellipsoid or a rectangle [S1][S2, unofficial].
-2.  **Define Styles:** Create styles, where each style is a set of transfer functions. These functions control rendering appearance such as color, opacity, sketch effects, and illumination [S1][S2, unofficial].
-3.  **Assign Styles to Zones:** Associate each zone with a specific style. Each transfer function within a style can be modified independently [S2, unofficial].
-4.  **Map Materials:** Assign meaningful names to regions of the transfer domain (materials). Associate transfer function widgets with material IDs [S1][S2, unofficial].
-5.  **Render:** For each sample point $\mathbf{x}$ in the volume:
+1.  **Define Zones:** Create spatial regions (ellipsoids or rectangles) within the volume [S1][S2, unofficial].
+2.  **Define Materials:** Identify regions in the transfer function domain (e.g., density ranges) and assign them meaningful names and Material IDs [S2, unofficial].
+3.  **Assign Styles to Zones:** Associate each zone with a specific style. A style consists of a set of transfer functions that can be modified independently [S2, unofficial].
+4.  **Map Materials to Styles:** Link Material IDs to specific widgets in the transfer function editor. Multiple widgets can share the same Material ID [S2, unofficial].
+5.  **Render:** For each sample point $\mathbf{x}$:
     a. Determine which zone $Z_i$ contains $\mathbf{x}$ [S1][S2, unofficial].
-    b. Retrieve the style $S_i$ associated with $Z_i$ [S2, unofficial].
-    c. Evaluate the transfer functions in $S_i$ using the data value $v = f(\mathbf{x})$ to obtain optical properties [S2, unofficial].
-    d. Accumulate optical properties for ray casting [G].
+    b. Retrieve the style $S_j$ associated with $Z_i$ [S2, unofficial].
+    c. Evaluate the transfer functions in $S_j$ using the data value at $\mathbf{x}$ to determine color, opacity, and effects [S1][S2, unofficial].
 
-**Formulas:**
-*   **Ellipsoid Point Test:** A point $\mathbf{x}$ is inside an ellipsoid centered at $\mathbf{c}$ with axes $\mathbf{a}$ if:
-    $$ \left(\frac{x_x - c_x}{a_x}\right)^2 + \left(\frac{x_y - c_y}{a_y}\right)^2 + \left(\frac{x_z - c_z}{a_z}\right)^2 \leq 1 $$
-    [S1][S2, unofficial]
-*   **Rectangle Point Test:** A point $\mathbf{x}$ is inside a rectangle if:
-    $$ x_{min} \leq x_x \leq x_{max} \land y_{min} \leq x_y \leq y_{max} \land z_{min} \leq x_z \leq z_{max} $$
-    [S1][S2, unofficial]
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_spatial_style_zones(volume, zones, styles, materials):
+    """
+    volume: 3D array of scalar values
+    zones: list of Zone objects, each with a 'contains(x)' method and 'style_id'
+    styles: dict mapping style_id to a Style object
+    materials: dict mapping material_name to material_id
+    """
+    image = empty_image(volume.shape)
+    
+    for x in volume.indices():
+        # Determine which zone contains the current sample point
+        zone = None
+        for z in zones:
+            if z.contains(x):
+                zone = z
+                break
+        
+        # If no zone contains the point, use a default style or background
+        if zone is None:
+            style = styles.get('default', None)
+        else:
+            style = styles[zone.style_id]
+        
+        # Get the data value at the sample point
+        value = volume[x]
+        
+        # Determine the material ID for this value
+        # Note: The source implies materials are regions in the transfer domain.
+        # The specific mapping logic from value to material_id is not detailed,
+        # but typically involves checking if value falls within the material's range.
+        material_id = get_material_id_for_value(value, materials)
+        
+        # Apply the style's transfer functions
+        # The style may contain multiple transfer functions (e.g., sketch, illumination)
+        color = style.apply_color(material_id, value)
+        opacity = style.apply_opacity(material_id, value)
+        sketch_intensity = style.apply_sketch(material_id, value)
+        
+        # Composite the result
+        image[x] = composite(image[x], color, opacity, sketch_intensity)
+        
+    return image
+
+def get_material_id_for_value(value, materials):
+    """
+    Placeholder for the specific logic mapping a scalar value to a material ID.
+    The source states materials are regions of the transfer domain.
+    """
+    # Implementation depends on the specific transfer function editor's data structure.
+    # Not given in the sources.
+    pass
+```
 
 **Parameters:**
-*   Zone Shape: Ellipsoid or Rectangle [S2, unofficial].
-*   Style Components: Color, Opacity, Sketch, Illumination, Enhancement parameters [S1][S2, unofficial].
+*   **Zone Shape:** Ellipsoid or Rectangle [S2, unofficial].
+*   **Style Components:** Color, opacity, sketch, illumination, enhancement parameters [S1][S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Zone Overlap:** If zones overlap, the rendering behavior is not explicitly defined in the sources. Implementers should define a priority order or blending strategy [G].
-*   **Boundary Precision:** Geometric tests for zone membership must handle boundary conditions consistently to avoid artifacts [G].
+*   **Zone Overlap:** The sources do not specify behavior for overlapping zones. [G] Typically, the first matching zone or a priority system is used.
+*   **Unassigned Points:** Points not contained in any zone require a default style. [G]
+*   **Complexity:** The number of parameters can be very large, making the system hard to master for novices [S2, unofficial].
+
+## Subtopics
+
+### Multi-level Interface
+A UI approach where transfer functions are parameterized at different levels of abstraction (high-level materials, middle-level parameters, low-level transfer functions) to manage complexity [S1][S2, unofficial].
+
+### Illustration Motifs
+Pre-defined style combinations (e.g., "white sketch on everything except bone") that can be applied to zones [S1][S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Determining zone membership for each sample point is $O(1)$ per zone check. If $N$ zones are present, complexity is $O(N)$ per sample point unless spatial acceleration structures are used [G].
-*   **Memory Complexity:** Storage for zone definitions and style parameters. Scales with the number of zones and styles [G].
-*   **Strengths:** Allows intuitive, high-level control over complex visualizations. Separates spatial concerns from data-value concerns. Supports diverse effects per region [S1][S2, unofficial].
-*   **Limitations:** Requires manual definition of zones. May not adapt automatically to data features. Performance degrades with many zones without acceleration [G].
-*   **When to Use:** Medical visualization where anatomical structures have distinct spatial boundaries and require different illustrative styles (e.g., bone vs. soft tissue) [S1][S2, unofficial].
-*   **When Not to Use:** When data features are not spatially coherent or when automatic adaptation to data is preferred [G].
+*   **Complexity:** Not given in the sources.
+*   **Strengths:** Allows a large set of possible effects by combining spatial zones with independent styles [S1][S2, unofficial]. Solves the problem of tedious management of many parameters by using materials and high-level descriptions [S2, unofficial].
+*   **Limitations:** Hard to master due to the large number of parameters [S2, unofficial]. Requires user to define zones and styles manually [S1][S2, unofficial].
+*   **When to use:** When creating illustrative visualizations for medicine or science where specific materials need distinct visual treatments (e.g., sketching, illumination) in specific spatial regions [S1][S2, unofficial].
 
 ## Background
-Spatial Style Zones was introduced in the context of Interactive Volume Illustration Systems for medicine [S1][S2, unofficial]. It is part of a multi-level interface approach designed to make volume visualization accessible to non-experts by abstracting low-level transfer function parameters into high-level materials and styles [S1][S2, unofficial]. The method allows users to define materials (regions of the transfer domain) and apply different styles (sets of transfer functions) to different spatial zones [S1][S2, unofficial].
+Originated in the context of interactive volume illustration systems for medicine and science [S1][S2, unofficial]. The method is part of a broader effort to make volume visualization more accessible and expressive by using multi-level interfaces and illustration motifs [S1][S2, unofficial].
 
 ## Sources
 [S1] Volume illustration for medicine and flows, https://doi.org/10.1145/1185657.1185694, fetched 2026-10-28

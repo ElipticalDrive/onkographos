@@ -3,105 +3,196 @@
 Also called: CUDA Voxel Rasterization
 
 ## Overview
-Voxel Rasterization converts a triangle mesh into a voxelized representation by rasterizing triangles directly into a 3D voxel grid [S3, unofficial]. It differs from its parent [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by focusing on the specific algorithmic steps of iterating over triangle surfaces, interpolating normals/colors, and writing to a voxel buffer, often leveraging GPU acceleration for performance [S1, S3, unofficial]. Unlike [3D Grid Rasterization](903-3d-grid-rasterization.md) which may use different traversal strategies, this method explicitly samples along triangle edges and spans to fill voxels [S3, unofficial].
+Voxel Rasterization converts a triangle mesh into a 3D voxel grid by projecting triangles onto a 3D volume and marking occupied voxels [S2, unofficial][S3, unofficial]. It differs from [Ray Casting](52-name.md) by using fixed-function or compute-shader-style iteration over triangle edges rather than per-voxel ray intersection, and from [Marching Cubes](53-name.md) by producing a discrete occupancy grid directly rather than a continuous implicit surface [S3, unofficial]. It serves as the core rasterization step in [Rasterization-based Voxelization](908-rasterization-based-voxelization.md), where it fills a hash table or structured grid with voxel centers and attributes before generating a cube mesh [S2, unofficial].
 
 ## How it works
 **Inputs:**
-- Triangle mesh defined by vertices $V$ and face indices $F$.
-- Voxel grid dimensions $V_x, V_y, V_z$ [S3, unofficial].
-- Accuracy parameter $a$ (default 2) [S3, unofficial].
-- Mode flags: `octree_render`, `colorizemap` [S3, unofficial].
-- Optional: CUDA controller flag `IsUseCuda` [S1, unofficial].
+- Triangle mesh: list of vertices $V$ and indices $I$ defining faces $t$.
+- Voxel grid dimensions: $V_x, V_y, V_z$ (integers) [S3, unofficial].
+- Grid bounds: AABB defined by min/max coordinates [S4, unofficial].
+- Accuracy multiplier: $accuracy$ (float, default 2) [S3, unofficial].
+- Mode flags: `octree_render` (bool), `colorizemap` (bool) [S3, unofficial].
 
 **Outputs:**
-- Voxel buffer containing occupancy bits and optionally color/normal data [S2, S3, unofficial].
+- Occupancy grid: bit-packed array `voxel` of size $\lceil V_x/8 \rceil \times V_y \times V_z$ [S3, unofficial].
+- Optional color/normal data: stored in separate buffers or packed into voxel structs [S2, unofficial][S3, unofficial].
 
 **Data Structures:**
-- **Voxel Buffer (Occupancy):** Bit-packed array `voxel`. Index calculation for point $p=(x,y,z)$:
+- `voxel`: 1D array of `uint8_t` (or `int`) where each byte stores 8 voxels along the X-axis. Index calculation:
   $$
   \begin{aligned}
   px &= \lfloor p.x \cdot V_x \rfloor \\
   py &= \lfloor p.y \cdot V_y \rfloor \\
   pz &= \lfloor p.z \cdot V_z \rfloor \\
-  vx8 &= V_x / 8 \\
-  ofs &= px \gg 3 + py \cdot vx8 + pz \cdot vx8 \cdot V_y \\
-  bit &= 1 \ll (px \& 7) \\
-  voxel[ofs] \ |= \ bit
+  vx8 &= \lceil V_x / 8 \rceil \\
+  ofs &= px // 8 + py \cdot vx8 + pz \cdot vx8 \cdot V_y
   \end{aligned}
   $$
-  Boundary check: if $px > V_x-1$ or $py > V_y-1$ or $pz > V_z-1$, discard [S3, unofficial].
-- **Voxel Buffer (Color/Normal):** Struct with `pos[3]` (int) and `color[4]` (int) for RGBA [S2, unofficial]. Or bit-manipulated color arrays `voxel_col1` where bits are set/cleared based on color values [S3, unofficial].
-- **CUDA Block Data (if CUDA):** `vdGenBlk` containing `zoneData`, `voxelData`, `materialData`, `cacheData` [S1, unofficial].
+  Bit mask: $bit = 1 \ll (px \bmod 8)$ [S3, unofficial].
+- `voxel_col1`: Optional color array, bit-packed similarly [S3, unofficial].
 
 **Steps:**
-1. **Initialization:** If `IsUseCuda` is true, create `TVdGenBlockCuda` with `TotalZoneCount` and populate `zoneData` with zone positions [S1, unofficial]. Otherwise, prepare CPU-side buffers [S2, unofficial].
-2. **Triangle Processing:** For each triangle face $t$ with vertices $p_1, p_2, p_3$ and normals $n_1, n_2, n_3$:
-   a. Calculate edge vectors $d_1 = p_2 - p_1$, $d_2 = p_3 - p_1$ and normal differences $dn_1 = n_2 - n_1$, $dn_2 = n_3 - n_1$ [S3, unofficial].
-   b. Determine sampling count $c$ along the longest edge direction. Let $vm = \max(|d_1|, |d_2|)$ (using max component magnitude or length as per source context, source uses `d1.length()` and `d2.length()` but compares `vx, vy, vz` for `vm`? Source says: `int vm = (vx > vy) ? vx : vy; if(vz>vm)vm=vz; int c = d1.length()*float(vm)*accuracy;` This implies `vm` is the max grid dimension, used to scale the sampling density relative to grid resolution) [S3, unofficial].
-      $$ c = \max(|d_1|, |d_2|) \cdot \max(V_x, V_y, V_z) \cdot a $$
-      Adjust $c$ if $c_2 > c$ [S3, unofficial].
-   c. **Outer Loop:** Iterate $i$ from $0$ to $c$.
-      i. Interpolation factor $a_i = i / c$.
-      ii. Calculate points $x_1 = p_1 + d_1 \cdot a_i$ and $x_2 = p_1 + d_2 \cdot a_i$ [S3, unofficial].
-      iii. Calculate vector $dx = x_2 - x_1$ [S3, unofficial].
-      iv. Calculate inner loop count $d = |dx| \cdot \max(V_x, V_y, V_z) \cdot a$ [S3, unofficial].
-      v. **Inner Loop:** Iterate $j$ from $0$ to $d$.
-          1. Factor $b_j = j / d$.
-          2. Calculate point $p = x_1 + dx \cdot b_j$ [S3, unofficial].
-          3. Calculate interpolated normal $n = n_1 + (n_2 - n_1) \cdot a_i + (n_3 - n_1 - (n_2 - n_1)) \cdot a_i \dots$? Source simplifies: $xn_1 = n_1 + dn_1 \cdot a_i$, $xn_2 = n_1 + dn_2 \cdot a_i$, $dnx = xn_2 - xn_1$, then $n = xn_1 + dnx \cdot b_j$ [S3, unofficial].
-          4. **Write Voxel:**
-             - If `octree_render` is false:
-               - If `colorizemap` is false: Call `set_voxel(p)` (occupancy only) [S3, unofficial].
-               - If `colorizemap` is true: Call `map_voxel(p, n)` (position and normal) [S3, unofficial].
-             - If `colorizemap` is false and `voxel_col1` active: Clear bit and set color bits in `voxel_col1` array [S3, unofficial].
+1. **Preprocessing:** Compute grid size from AABB and voxel size if not provided [S4, unofficial]. Prepare vertex and index buffers [S2, unofficial].
+2. **Triangle Loop:** For each triangle $t$ with vertices $p_1, p_2, p_3$ and normals $n_1, n_2, n_3$:
+   a. Calculate edge vectors: $d_1 = p_2 - p_1$, $d_2 = p_3 - p_1$.
+   b. Calculate normal differences: $dn_1 = n_2 - n_1$, $dn_2 = n_3 - n_1$.
+   c. Determine sampling density:
+      $$
+      \begin{aligned}
+      vx &= |d_1.x| \cdot V_x, \quad vy = |d_1.y| \cdot V_y, \quad vz = |d_1.z| \cdot V_z \\
+      vm &= \max(vx, vy, vz) \\
+      c &= \text{length}(d_1) \cdot vm \cdot accuracy \\
+      c_2 &= \text{length}(d_2) \cdot vm \cdot accuracy \\
+      \text{if } c_2 > c: c = c_2
+      \end{aligned}
+      $$
+      (Note: $accuracy$ defaults to 2, increases to 3 if $V_x < 1024$, and 4 if $V_x < 512$) [S3, unofficial].
+   d. **Outer Loop (i from 0 to c):**
+      i. Interpolation factor: $a = i / c$.
+      ii. Points on edges: $x_1 = p_1 + d_1 \cdot a$, $x_2 = p_1 + d_2 \cdot a$.
+      iii. Edge vector: $dx = x_2 - x_1$.
+      iv. Normal interpolation: $xn_1 = n_1 + dn_1 \cdot a$, $xn_2 = n_1 + dn_2 \cdot a$, $dnx = xn_2 - xn_1$.
+      v. **Inner Loop (j from 0 to d):**
+         1. Calculate inner count: $d = \text{length}(dx) \cdot vm \cdot accuracy$.
+         2. Factor: $b = j / d$.
+         3. Point: $p = x_1 + dx \cdot b$.
+         4. Normal: $n = xn_1 + dnx \cdot b$.
+         5. **Voxel Write:**
+            - If `octree_render` is true, skip [S3, unofficial].
+            - If `colorizemap` is true, call `map_voxel(p, n)` [S3, unofficial].
+            - Else, call `set_voxel(p)` [S3, unofficial].
+3. **CUDA Optimization (Optional):** If using CUDA, launch a 3D grid of thread blocks to process voxels in parallel, using precomputed face bounds and zone data to optimize device-side computation [S1, unofficial]. The kernel `CudaGenerateVd` processes `vdGenBlk` structure containing zone positions and voxel data [S1, unofficial].
+4. **Post-processing:** Copy voxel data from GPU to CPU if necessary [S1, unofficial].
 
-3. **CUDA Execution (if applicable):**
-   a. Call `CudaGenerateVd(vdGenBlk)` [S1, unofficial].
-   b. Copy results back: `P.Vd->copyDataUnsafe` for voxel/material data and `copyCacheUnsafe` for cache data [S1, unofficial].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-4. **Finalization:** Generate cube mesh for occupied voxels if required by parent [S2, unofficial].
+```python
+def voxel_rasterize(triangles, grid_dims, accuracy=2.0, colorizemap=False, octree_render=False):
+    """
+    triangles: list of (p1, p2, p3, n1, n2, n3) where p and n are vec3
+    grid_dims: (Vx, Vy, Vz)
+    """
+    Vx, Vy, Vz = grid_dims
+    # Initialize bit-packed occupancy grid
+    vx8 = (Vx + 7) // 8
+    voxel_grid = [0] * (vx8 * Vy * Vz)
+    
+    # Optional color grid
+    if colorizemap:
+        color_grid = [0] * (vx8 * Vy * Vz)
+
+    for p1, p2, p3, n1, n2, n3 in triangles:
+        d1 = p2 - p1
+        d2 = p3 - p1
+        dn1 = n2 - n1
+        dn2 = n3 - n1
+        
+        # Calculate max dimension projection for sampling density
+        vx_proj = abs(d1.x) * Vx
+        vy_proj = abs(d1.y) * Vy
+        vz_proj = abs(d1.z) * Vz
+        vm = max(vx_proj, vy_proj, vz_proj)
+        
+        # Sampling counts along edges
+        c1 = length(d1) * vm * accuracy
+        c2 = length(d2) * vm * accuracy
+        c = max(c1, c2)
+        
+        if c == 0: continue
+        
+        # Outer loop along the "longest" edge interpolation
+        for i in range(int(c) + 1):
+            a = i / c
+            x1 = p1 + d1 * a
+            x2 = p1 + d2 * a
+            dx = x2 - x1
+            
+            xn1 = n1 + dn1 * a
+            xn2 = n1 + dn2 * a
+            dnx = xn2 - xn1
+            
+            # Inner loop across the triangle width
+            d_inner = length(dx) * vm * accuracy
+            if d_inner == 0: continue
+            
+            for j in range(int(d_inner) + 1):
+                b = j / d_inner
+                p = x1 + dx * b
+                n = xn1 + dnx * b
+                
+                if octree_render:
+                    continue
+                
+                # Map point to voxel coordinates
+                px = int(p.x * Vx)
+                py = int(p.y * Vy)
+                pz = int(p.z * Vz)
+                
+                # Boundary check
+                if px < 0 or px >= Vx or py < 0 or py >= Vy or pz < 0 or pz >= Vz:
+                    continue
+                
+                # Bit packing index
+                ofs = (px // 8) + py * vx8 + pz * vx8 * Vy
+                bit = 1 << (px % 8)
+                
+                # Set occupancy
+                voxel_grid[ofs] |= bit
+                
+                # Set color if needed
+                if colorizemap:
+                    # Simplified color mapping: use normal or position
+                    # Actual implementation may use a specific color buffer
+                    pass 
+
+    return voxel_grid
+```
 
 **Parameters:**
 - `accuracy`: Float multiplier for sampling density. Default 2. Increases to 3 if $V_x < 1024$, and 4 if $V_x < 512$ [S3, unofficial].
-- `mScale`: Voxel size scaling factor (default 1.0f) [S2, unofficial].
-- `mSize`: Dimensions of the voxel grid (Vector3) [S2, unofficial].
+- `mScale`: Voxel size scaling factor. Default 1.0f [S2, unofficial].
+- `mSize`: Dimensions of the voxel grid [S2, unofficial].
 
-**Edge Cases and Pitfalls:**
-- **Boundary Checks:** Must check $px, py, pz$ against grid dimensions to prevent out-of-bounds writes [S3, unofficial].
-- **Bit Packing:** Assumes $V_x$ is divisible by 8 or handled via `vx8` shift logic [S3, unofficial].
-- **Precision:** Floating point interpolation errors may cause gaps or overlaps; accuracy parameter mitigates this [S3, unofficial].
+**Edge Cases:**
+- **Degenerate Triangles:** If vertices are colinear, `length(dx)` may be zero, causing division by zero in inner loop count calculation. Guard against `d_inner == 0` [S5].
+- **Boundary Writes:** Indices $px, py, pz$ must be clamped or checked against grid dimensions to prevent out-of-bounds memory access [S3, unofficial].
+- **Bit Packing Alignment:** Assumes $V_x$ is handled via `vx8 = (Vx+7)//8` to ensure correct byte alignment [S3, unofficial].
 
 ## Subtopics
 
 ### [CUDA Voxelization](3491-cuda-voxelization.md)
-A CUDA GPU implementation of the voxelization algorithm that launches a 3D grid of thread blocks to process voxels in parallel. It differs from its parent [Voxel Rasterization](3204-voxel-rasterization.md) by utilizing a specific 3D block launch configuration and precomputed face bounds to optimize device-side computation.
+A CUDA GPU implementation that launches a 3D grid of thread blocks to process voxels in parallel. It differs from the parent by utilizing a specific 3D block launch configuration and precomputed face bounds to optimize device-side computation.
 
 ### [Hybrid Voxelization Classification](3946-hybrid-voxelization-classification.md)
-Hybrid Voxelization Classification is a GPU-accelerated method for voxelizing 3D CAD models (specifically .obj and .off formats) using a nested, two-level resolution structure. It distinguishes itself from single-resolution rasterization by maintaining a coarse Level1 grid and a finer Level2 grid for voxels containing surface geometry, allowing for detailed normal estimation while managing memory. It builds on [Voxel Rasterization](3204-voxel-rasterization.md) by extending the output data structures to support hierarchical classification and normal accumulation.
+Uses a nested two-level resolution structure (coarse Level1 and fine Level2 grids) for detailed normal estimation while managing memory. It builds on Voxel Rasterization by extending output data structures to support hierarchical classification.
 
 ### [CUDA Sparse Voxel Rasterization Wrapper](10783-cuda-sparse-voxel-rasterization-wrapper.md)
-This method provides a differentiable PyTorch interface for rasterizing sparse voxel representations into 2D image space, enabling gradient-based optimization of voxel geometry and appearance. It distinguishes itself from standard rasterization by supporting simultaneous outputs for color, depth, surface normals, and distortion, which facilitates advanced regularization and reconstruction tasks.
+Provides a differentiable PyTorch interface for rasterizing sparse voxels into 2D image space. It supports simultaneous outputs for color, depth, normals, and distortion for gradient-based optimization.
+
+### [Direct Voxel Rasterization with Edge Fading](13471-direct-voxel-rasterization-with-edge-fading.md)
+Renders 3D spheres into a voxel grid using axis-aligned bounding boxes and Euclidean distance. It introduces anti-aliased edges via intensity falloff and maximum blending, differing from binary voxelization.
 
 ### CUDA Rasterizer
-Custom forward and backward CUDA kernels for rasterization and interpolation, supporting full-image rendering and batched pixel-query modes [S5]. Training takes between 1-3 minutes on an RTX A6000 Ada [S5].
+Custom forward and backward CUDA kernels for rasterization and interpolation, supporting full-image rendering and batched pixel-query modes. Training takes 1-3 minutes on an RTX A6000 Ada [S5].
 
 ### Raster Preprocessing
-A preprocessing step that calculates the number of duplicates (likely for binning or occupancy) and generates a geometry buffer for rasterization [S6, unofficial]. It calls `_C.rasterize_preprocess` with image dimensions, camera parameters (tanfovx, tanfovy, cx, cy, w2c_matrix, c2w_matrix, near_plane), voxel data (octree_paths, vox_centers, vox_lengths), and a debug flag [S6, unofficial]. If `return_buffer` is True, it returns both `n_duplicates` and `geomBuffer`; otherwise, it returns only `n_duplicates` [S6, unofficial].
+Calculates the number of duplicates for binning/occupancy and generates a geometry buffer. Calls `_C.rasterize_preprocess` with image dimensions, camera parameters (tanfovx, tanfovy, cx, cy, w2c_matrix, c2w_matrix, near_plane), and voxel data (octree_paths, vox_centers, vox_lengths). Returns `n_duplicates` and optionally `geomBuffer` [S6, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Depends on the number of triangles and the sampling density (accuracy parameter). The nested loops iterate over triangle edges and spans, making it roughly proportional to the surface area of the mesh scaled by grid resolution and accuracy [S3, unofficial].
-- **Memory Complexity:** Proportional to the voxel grid size $V_x \cdot V_y \cdot V_z / 8$ for occupancy bits, plus additional storage for color/normal data if enabled [S3, unofficial]. CUDA implementations require additional memory for block data and caches [S1, unofficial].
-- **Performance:** GPU-accelerated versions (CUDA) offer significant speedups over CPU implementations, with training/rasterization times reported as 1-3 minutes for complex scenes on high-end GPUs like RTX A6000 Ada [S5].
-- **Strengths:** Efficient for large meshes; supports normal and color mapping; flexible accuracy settings [S3, unofficial].
-- **Limitations:** Bit-packing limits color resolution; boundary checks add overhead; accuracy parameter tuning required for quality vs. performance [S3, unofficial].
+- **Time Complexity:** $O(N \cdot L \cdot W)$, where $N$ is the number of triangles, and $L, W$ are the number of sample points along the triangle edges and width, determined by grid resolution and accuracy [S3, unofficial].
+- **Memory Complexity:** $O(V_x \cdot V_y \cdot V_z / 8)$ for occupancy grid [S3, unofficial].
+- **Performance:** CUDA implementations can significantly accelerate the process by parallelizing voxel writes, though synchronization overhead may occur if multiple threads write to the same voxel [S1, unofficial].
+- **Strengths:** Simple to implement, fast for high-resolution grids compared to ray casting, supports normal/color mapping [S3, unofficial].
+- **Limitations:** Aliasing artifacts if sampling density is low, memory intensive for large grids, conservative voxelization requires additional steps [S3, unofficial].
 
 ## Background
-Voxel Rasterization is a technique used in Direct3D 11-based voxelization systems to render input geometry into a voxel buffer, supporting multiple material effects and outputting voxel data through a callback interface [S2, unofficial]. It is widely used in voxel-based terrain generation, neural reconstruction, and 3D modeling tools [S1, unofficial][S5]. The method evolved from traditional rasterization techniques adapted for 3D volume representation [S3, unofficial].
+Voxel Rasterization is a fundamental technique in computer graphics for converting polygonal meshes into voxel representations. It is widely used in terrain generation, voxel-based rendering, and 3D printing preprocessing [S2, unofficial][S3, unofficial]. The method leverages the efficiency of rasterization pipelines, adapting 2D rasterization concepts to 3D volumes [S2, unofficial].
 
 ## Sources
 [S1] bw2012/UE4VoxelTerrain, https://github.com/bw2012/UE4VoxelTerrain, fetched 2026-10-26 (unofficial)
 [S2] nustxujun/AfterHumanDeclined, https://github.com/nustxujun/AfterHumanDeclined, fetched 2026-10-26 (unofficial)
-[S3] sp4cerat/OpenGL-Voxel-Splatting, https://github.com/sp4cerat/OpenGL-Voxel-Splatting, fetched 2026-10-07 (unofficial)
+[S3] sp4cerat/OpenGL-Voxel-Splatting, https://github.com/sp4cerat/OpenGL-Voxel-Splatting, fetched 2026-10-27 (unofficial)
 [S4] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)
 [S5] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26
 [S6] leonhardrobin/svraster-win10, https://github.com/leonhardrobin/svraster-win10, fetched 2026-10-27 (unofficial)

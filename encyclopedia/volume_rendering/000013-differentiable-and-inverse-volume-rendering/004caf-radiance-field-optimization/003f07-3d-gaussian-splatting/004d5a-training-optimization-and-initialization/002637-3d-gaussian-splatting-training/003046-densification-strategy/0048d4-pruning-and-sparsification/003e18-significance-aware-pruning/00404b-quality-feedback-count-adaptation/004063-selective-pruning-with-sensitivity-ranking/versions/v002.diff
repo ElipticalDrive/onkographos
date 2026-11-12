@@ -1,0 +1,117 @@
+--- v001.md
++++ v002.md
+@@ -4,59 +4,80 @@
+ 
+ ## Overview
+-Selective Pruning with Sensitivity Ranking is a post-growth pruning mechanism that selects the final Gaussian population in a single event, matching the cumulative effect of periodic pruning throughout training. It differs from its parent, [Quality Feedback Count Adaptation](10207-quality-feedback-count-adaptation.md), by executing the reduction as a one-time "final selection" rather than a dynamic adjustment based on current learning allowance, and by explicitly ranking Gaussians by sensitivity to determine retention.
++Selective Pruning with Sensitivity Ranking is a post-growth pruning step that selects the final Gaussian population in a single event, matching the cumulative effect of periodic pruning throughout training [S1, unofficial]. It ranks Gaussians by sensitivity and retains a calculated count [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Current Gaussian population $P$ with count $N_{\text{pre}}$.
+-- Current training PSNR $\rho$.
+-- Total training iterations $T_{\text{total}}$.
+-- Current iteration $T_{\text{curr}}$.
+-- Sensitivity scores for each Gaussian in $P$.
++- Current Gaussian population $P$ with count $N_{\text{pre}}$ [S1, unofficial].
++- Current training PSNR $\rho$ [S1, unofficial].
++- Current iteration $T_{\text{curr}}$ and total training iterations $T_{\text{total}}$ [G].
++- Sensitivity scores for each Gaussian in $P$ [S1, unofficial].
+ 
+ **Outputs:**
+-- Pruned Gaussian population $P'$ with count $N_G$.
++- Pruned Gaussian population $P'$ with count $N_G$ [S1, unofficial].
+ 
+ **Data Structures:**
+-- Each Gaussian $g_i \in P$ has a scalar sensitivity score $s_i$.
+-- $s_i$ is defined as the accumulated, opacity-weighted effect on training views.
++- Each Gaussian $g_i \in P$ has a scalar sensitivity score $s_i$ [S1, unofficial].
++- $s_i$ is defined as the accumulated, opacity-weighted effect on training views [S1, unofficial].
+ 
+ **Steps:**
+-1. **Calculate Reference Schedule:** Determine the number of remaining events $h$ in a reference pruning schedule. This schedule spaces pruning events 8% of the total training iterations apart.
+-   $$ h = \left\lfloor \frac{T_{\text{total}} - T_{\text{curr}}}{0.08 \cdot T_{\text{total}}} \right\rfloor $$
+-   [G] If $h < 0$, set $h=0$.
++1. Calculate the number of remaining events $h$ in a reference pruning schedule.
++2. Compute the keep fraction $f$ based on $\rho$ and a multiplier $s > 1$.
++3. Calculate the retained count $N_G$ using $N_{\text{pre}}$, $f$, and $h$.
++4. Rank all Gaussians in $P$ by $s_i$ in descending order and select the top $N_G$ to form $P'$.
++5. Optimize $P'$ for the remainder of training iterations.
+ 
+-2. **Calculate Keep Fraction:** Compute the keep fraction $f$ based on the current PSNR $\rho$ and a multiplier $s > 1$.
+-   $$ f = \min(1, s \cdot \rho) $$
+-   [G] The multiplier $s$ compensates for the inability to regrow removed Gaussians. Typical values for $s$ are not specified in the source but must be $>1$.
++**Formulas:**
++- Reference schedule spacing: events are spaced $8\%$ of $T_{\text{total}}$ apart [S1, unofficial].
++- Remaining events: $h = \max\left(0, \left\lfloor \frac{T_{\text{total}} - T_{\text{curr}}}{0.08 \cdot T_{\text{total}}} \right\rfloor\right)$ [G].
++- Keep fraction: $f = \min(1, s \cdot \rho)$ [S1, unofficial].
++- Retained count: $N_G = N_{\text{pre}} \cdot f^h$ [S1, unofficial].
+ 
+-3. **Calculate Retained Count:** Determine the number of Gaussians to retain $N_G$ using the reference schedule count $h$.
+-   $$ N_G = N_{\text{pre}} \cdot f^h $$
+-   [G] If $N_G < 1$, set $N_G = 1$.
++**Pseudocode:**
++```python
++def selective_pruning_with_sensitivity_ranking(P, rho, T_curr, T_total, s, P_star):
++    # 1. Calculate remaining reference events h
++    interval = 0.08 * T_total
++    h = max(0, int((T_total - T_curr) // interval))
+ 
+-4. **Rank and Select:** Rank all Gaussians in $P$ by their sensitivity score $s_i$ in descending order. Select the top $N_G$ Gaussians to form $P'$.
++    # 2. Calculate keep fraction f
++    f = min(1.0, s * rho)
++    if rho <= P_star:
++        f = 1.0
+ 
+-5. **Optimize:** Optimize the retained population $P'$ for the remainder of the training iterations.
++    # 3. Calculate retained count N_G
++    N_pre = len(P)
++    N_G = max(1, int(round(N_pre * (f ** h))))
++
++    # 4. Rank and select
++    P_sorted = sorted(P, key=lambda g: g.sensitivity_score, reverse=True)
++    P_prime = P_sorted[:N_G]
++
++    # 5. Optimize retained population
++    optimize(P_prime)
++
++    return P_prime
++```
+ 
+ **Parameters:**
+-- $s$: Multiplier for the keep fraction. $s > 1$. Not given in the sources.
+-- $\rho$: Current training PSNR.
+-- $T_{\text{total}}$: Total training iterations.
+-- $T_{\text{curr}}$: Current training iteration.
++- $s$: Multiplier for the keep fraction. $s > 1$ [S1, unofficial]. Not given in the sources.
++- $\rho$: Current training PSNR [S1, unofficial].
++- $P^*$: PSNR threshold below which no removal occurs [S1, unofficial].
++- $T_{\text{total}}$, $T_{\text{curr}}$: Total and current training iterations [G].
+ 
+ **Edge Cases and Pitfalls:**
+-- **No Removal at Low PSNR:** If the current PSNR $\rho$ is at or below a threshold $P^*$, the keep fraction $f=1$, and no Gaussians are removed. [S1, unofficial]
+-- **Irreversibility:** Gaussians removed during this final selection stage cannot be regrown. Therefore, the multiplier $s > 1$ is necessary to retain a larger fraction than a standard soft prune would at the same PSNR level. [S1, unofficial]
+-- **Precision:** Ensure $N_G$ is an integer. [G]
++- **No Removal at Low PSNR:** If $\rho \le P^*$, $f=1$, so the final selection removes nothing [S1, unofficial].
++- **Irreversibility:** Gaussians removed during this final selection stage cannot be regrown [S1, unofficial]. Therefore, $s > 1$ retains a larger fraction than a standard soft prune at the same PSNR level [S1, unofficial].
++- **Precision:** $N_G$ must be an integer. [G]
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \log N)$ for sorting Gaussians by sensitivity, where $N$ is the number of Gaussians.
+-- **Memory Complexity:** $O(N)$ to store sensitivity scores.
+-- **Strengths:** Provides a deterministic final population size that accounts for the cumulative effect of pruning. The sensitivity ranking ensures that the most "important" Gaussians are retained.
+-- **Limitations:** The final selection is irreversible. The choice of $s$ and $P^*$ is critical and not specified in the sources.
+-- **When to use:** At the end of the growth phase, before the final optimization stage.
+-- **When not to use:** If regrowth is still desired after pruning.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Strengths:** Provides a deterministic final population size that accounts for the cumulative effect of pruning [S1, unofficial].
++- **Limitations:** The final selection is irreversible [S1, unofficial]. The choice of $s$ and $P^*$ is critical and not specified in the sources [S1, unofficial].
++- **When to use:** At the end of the growth phase, before the final optimization stage [S1, unofficial].
++- **When not to use:** If regrowth is still desired after pruning [G].
+ 
+ ## Background
+-Selective Pruning with Sensitivity Ranking is implemented in LiteGS (Liao et al., 2025). It is part of a densification strategy that includes growth and periodic pruning. The method aims to compactify the Gaussian representation by selecting the most significant Gaussians in a single event, mimicking the effect of continued periodic pruning.
++Selective Pruning with Sensitivity Ranking is implemented in LiteGS (Liao et al., 2025) [S1, unofficial]. It is part of a densification strategy that includes growth and periodic pruning [S1, unofficial]. The method aims to compactify the Gaussian representation by selecting the most significant Gaussians in a single event, mimicking the effect of continued periodic pruning [S1, unofficial].
+ 
+ ## Sources

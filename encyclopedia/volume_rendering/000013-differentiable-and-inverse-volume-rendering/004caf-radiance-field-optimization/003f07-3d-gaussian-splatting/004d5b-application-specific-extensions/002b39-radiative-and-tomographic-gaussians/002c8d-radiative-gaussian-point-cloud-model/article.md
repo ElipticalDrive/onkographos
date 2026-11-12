@@ -3,160 +3,87 @@
 Also called: Radiation Intensity Response Function, Radiative Gaussian, X-Gaussian point cloud model
 
 ## Overview
-The Radiative Gaussian Point Cloud Model is a scene representation designed for X-ray imaging that replaces the view-dependent Spherical Harmonics (SH) of standard 3D Gaussian Splatting with a view-independent Radiation Intensity Response Function (RIRF) [S1]. It solves the problem of modeling isotropic X-ray attenuation, where radiation intensity depends on radiodensity rather than view direction, thereby avoiding the complex and unnecessary computation of SH functions [S1].
+The Radiative Gaussian Point Cloud Model is a primitive representation designed for X-ray imaging that replaces the view-dependent Spherical Harmonics (SH) of standard RGB 3DGS with a view-independent Radiation Intensity Response Function (RIRF) [S1]. It exploits the isotropic nature of X-ray attenuation, where radiation intensity depends on radiodensity rather than view direction, to enable efficient novel view synthesis for transmission imaging [S1]. Unlike RGB 3DGS, which models anisotropic surface reflection, this model predicts scalar radiation intensity directly from learnable feature vectors, avoiding the computational complexity of SH functions [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A set of $N_p$ 3D Gaussian primitives $\mathcal{G}_x$, camera extrinsic matrix $\mathbf{M}_{ext}$, and intrinsic matrix $\mathbf{M}_{int}$ [S1].
-*   **Output:** A rendered 2D X-ray image $\mathbf{I}$ [S1].
+**Inputs and Outputs**
+*   **Input:** A set of $N_p$ Gaussian primitives $\mathcal{G}_x$, camera extrinsic matrix $\mathbf{M}_{ext}$, and intrinsic matrix $\mathbf{M}_{int}$ [S1].
+*   **Output:** A rendered 2D radiation intensity image $\mathbf{I}$ [S1].
 
-**Data Structures:**
-The scene is represented by a set of Gaussian points $\mathcal{G}_x = \{G_i \mid i = 1, \dots, N_p\}$ [S1]. Each Gaussian $G_i$ is defined by the following fields:
+**Data Structures**
+The model defines a set of Gaussian points $\mathcal{G}_x$:
+$$ \mathcal{G}_x = \{G_i(\boldsymbol{\mu}_i, \boldsymbol{\Sigma}_i, \alpha_i, \mathbf{f}_i) \mid i = 1, 2, \dots, N_p\} \quad (4) $$
+Each primitive $G_i$ contains:
 *   $\boldsymbol{\mu}_i \in \mathbb{R}^3$: Center position [S1].
 *   $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix [S1].
 *   $\alpha_i \in \mathbb{R}$: Opacity [S1].
 *   $\mathbf{f}_i \in \mathbb{R}^{N_f}$: Learnable feature vector representing inherent radiative properties [S1].
 
-The dimensionality $N_f$ of the feature vector is a parameter [S1]. The covariance $\boldsymbol{\Sigma}_i$ is derived from rotation and scale parameters as in the parent method [G].
+**Radiation Intensity Response Function (RIRF)**
+The core distinction is the RIRF, which predicts the scalar radiation intensity $\mathbf{i}$ of a Gaussian point. It excludes view direction dependence, matching the isotropic nature of X-ray imaging [S1].
 
-**The Radiation Intensity Response Function (RIRF):**
-Standard 3DGS uses SH to model view-dependent color $\mathbf{c}(\mathbf{d})$ [S1]. The Radiative Gaussian Point Cloud Model replaces this with RIRF to predict a scalar radiation intensity $\mathbf{i}$ that is view-independent [S1].
+$$ \mathbf{i}(\mathbf{f}) = \text{RIRF}(\mathbf{f}) = \text{Sigmoid}(\boldsymbol{\lambda} \odot \mathbf{f}) \quad (3) $$
 
-The RIRF is defined as:
-$$ \mathbf{i}(\mathbf{f}) = \text{Sigmoid}(\boldsymbol{\lambda} \odot \mathbf{f}) $$
-where:
-*   $\mathbf{i} \in \mathbb{R}$ is the predicted radiation intensity [S1].
-*   $\mathbf{f} \in \mathbb{R}^{N_f}$ is the learnable feature vector for the Gaussian point [S1].
-*   $\boldsymbol{\lambda} \in \mathbb{R}^{N_f}$ is a set of constant (learned) basis weights controlling the importance of each component of $\mathbf{f}$ [S1].
-*   $\odot$ denotes element-wise multiplication [S1].
-*   $\text{Sigmoid}(x) = \frac{1}{1 + e^{-x}}$ [G].
+Where:
+*   $\mathbf{i} \in \mathbb{R}$: The predicted radiation intensity [S1].
+*   $\mathbf{f} \in \mathbb{R}^{N_f}$: The learnable feature vector for the Gaussian point [S1].
+*   $\boldsymbol{\lambda} \in \mathbb{R}^{N_f}$: A set of constant weights controlling the importance of each component of $\mathbf{f}$ [S1].
+*   $\odot$: Element-wise multiplication [S1].
+*   $\text{Sigmoid}(x) = \frac{1}{1 + e^{-x}}$ [S1].
 
-This formulation excludes the view direction $\mathbf{d} = (\theta, \phi)$, matching the isotropic nature of X-ray imaging [S1].
+**Rendering Pipeline (Differentiable Radiative Rasterization)**
+The rendering process, termed Differentiable Radiative Rasterization (DRR), follows these steps:
 
-**Rendering Pipeline (Differentiable Radiative Rasterization):**
-The rendering process, termed Differentiable Radiative Rasterization (DRR), follows these steps [S1]:
-
-1.  **Ray Space Transformation:** Transform 3D Gaussians into ray space to align viewing rays with the coordinate axis [G].
-2.  **Projection:** Project 3D Gaussians to the 2D image plane. Compute the projected 2D covariance $\mathbf{\hat{\Sigma}}_i$ using the Jacobian $J$ of the affine approximation of the projection and the rotation part $W$ of the extrinsic matrix:
+1.  **Projection:** Transform 3D Gaussian centers $\boldsymbol{\mu}_i$ into camera space using $\mathbf{M}_{ext}$. Project the 3D covariance $\boldsymbol{\Sigma}_i$ to 2D screen space $\mathbf{\hat{\Sigma}}_i$ using the Jacobian $J$ of the affine approximation of the projection and the rotation part $W$ of the extrinsic matrix:
     $$ \mathbf{\hat{\Sigma}}_i = J W \boldsymbol{\Sigma}_i W^T J^T $$
+    [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md)
+
+2.  **Intensity Calculation:** For each Gaussian $i$, compute the radiation intensity $\mathbf{i}_i$ using the RIRF:
+    $$ \mathbf{i}_i = \text{Sigmoid}(\boldsymbol{\lambda} \odot \mathbf{f}_i) $$
     [S1]
-3.  **Sorting:** Sort the Gaussians along the viewing ray based on their distance from the camera [G].
-4.  **Alpha Compositing:** Compute the rendered intensity by summing contributions of sorted Gaussians. In radiative models, the contribution $c_i$ is unity or related to source intensity, and attenuation is modeled via the scalar radiation intensity $\mathbf{i}$ derived from RIRF [S1]. The standard alpha compositing formula is:
-    $$ I_{\text{rendered}} = \sum_{i=1}^M c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
-    [S1]
 
-**Pseudocode:**
+3.  **Rasterization:** Render the Gaussians to the image plane. Since the attribute is a scalar intensity $\mathbf{i}_i$ (not a vector color), the accumulation is performed over opacity $\alpha_i$ and intensity $\mathbf{i}_i$. For a pixel $p$, the final intensity $\mathbf{I}(p)$ is computed by alpha-blending the sorted Gaussians $i=1 \dots N$ contributing to $p$:
+    $$ \mathbf{I}(p) = \sum_{i \in \text{sorted}} \mathbf{i}_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+    [G] (Standard volumetric rendering accumulation adapted for scalar intensity)
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+**Parameters**
+*   $N_f$: Dimensionality of the feature vector $\mathbf{f}$. Not given in the sources.
+*   $\boldsymbol{\lambda}$: Learnable basis weights. Initialized as constants or learned parameters? The source describes them as "constant weights" in Eq 3 description but implies they are part of the model parameters. [S1]
 
-```python
-import numpy as np
-
-def sigmoid(x):
-    """Standard sigmoid activation function."""
-    return 1.0 / (1.0 + np.exp(-x))
-
-def compute_radiation_intensity(feature_vector, basis_weights):
-    """
-    Computes the radiation intensity using the Radiation Intensity Response Function (RIRF).
-    Matches i(f) = Sigmoid(lambda o f) [S1].
-    """
-    # Element-wise multiplication followed by sigmoid.
-    # To yield a scalar intensity i in R, the result is reduced (e.g., sum) or N_f=1.
-    return sigmoid(np.sum(basis_weights * feature_vector))
-
-def render_radiative_gaussians(gaussians, M_ext, M_int, image_shape):
-    """
-    Renders an X-ray image using Differentiable Radiative Rasterization (DRR) [S1].
-    """
-    height, width = image_shape
-    rendered_image = np.zeros((height, width))
-    
-    # Extract extrinsic rotation W and projection Jacobian J [G]
-    W = M_ext[:3, :3]
-    fx, fy = M_int[0, 0], M_int[1, 1]
-    cx, cy = M_int[0, 2], M_int[1, 2]
-    J = np.array([[fx, 0, cx], [0, fy, cy]])
-    
-    projected = []
-    for g in gaussians:
-        mu_3d = g['mu']
-        Sigma_3d = g['Sigma']
-        alpha = g['alpha']
-        f = g['f']
-        lam = g['basis_weights']
-        
-        # Ray space transformation and projection [G]
-        mu_ray = W @ mu_3d
-        dist = np.linalg.norm(mu_ray)
-        Sigma_2d = J @ W @ Sigma_3d @ W.T @ J.T
-        mu_2d = J @ mu_3d[:2]
-        
-        projected.append({
-            'mu_2d': mu_2d,
-            'Sigma_2d': Sigma_2d[:2, :2],
-            'alpha': alpha,
-            'intensity': compute_radiation_intensity(f, lam),
-            'dist': dist
-        })
-        
-    # Sort by depth [G]
-    projected.sort(key=lambda x: x['dist'])
-    
-    # Alpha compositing loop [S1]
-    for g in projected:
-        mu_2d = g['mu_2d']
-        Sigma_2d = g['Sigma_2d']
-        alpha = g['alpha']
-        c_i = g['intensity']
-        
-        # Compute bounding box for rasterization [G]
-        std = np.sqrt(np.diag(Sigma_2d))
-        min_x, max_x = int(mu_2d[0] - 3 * std[0]), int(mu_2d[0] + 3 * std[0])
-        min_y, max_y = int(mu_2d[1] - 3 * std[1]), int(mu_2d[1] + 3 * std[1])
-        min_x, min_y = max(0, min_x), max(0, min_y)
-        max_x, max_y = min(width, max_x), min(height, max_y)
-        
-        # Accumulate contributions [G]
-        for y in range(min_y, max_y):
-            for x in range(min_x, max_x):
-                dx, dy = x - mu_2d[0], y - mu_2d[1]
-                D = 0.5 * (dx, dy) @ np.linalg.inv(Sigma_2d) @ (dx, dy)
-                alpha_pixel = alpha * np.exp(-D)
-                rendered_image[y, x] += c_i * alpha_pixel * (1 - rendered_image[y, x])
-                
-    return rendered_image
-```
-
-**Parameters:**
-*   $N_f$: Dimensionality of the feature vector $\mathbf{f}$ [S1]. Value not given in the sources.
-*   $\boldsymbol{\lambda}$: Basis weights vector [S1]. Value not given in the sources.
-
-**Edge Cases and Pitfalls:**
-*   **Initialization:** Standard Structure-from-Motion (SfM) initialization is not suitable for X-ray imaging due to lower contrast and overlapping layers [S1]. The method uses a customized "Angle-pose Cuboid Uniform Initialization" (ACUI) strategy, though details are not provided in the source text [S1].
-*   **Isotropy Assumption:** The model assumes X-ray attenuation is isotropic [S1]. If anisotropic effects are significant, this model may not capture them accurately.
+**Edge Cases and Pitfalls**
+*   **Isotropy Assumption:** The model assumes X-ray attenuation is isotropic. If the imaging setup involves anisotropic scattering or detector artifacts not modeled by simple attenuation, the RIRF may fail to capture view-dependent variations [S1].
+*   **Initialization:** Standard Structure-from-Motion (SfM) initialization is unsuitable for X-ray images due to low contrast and overlapping layers [S1]. The model relies on custom initialization strategies (e.g., Angle-pose Cuboid Uniform Initialization) not detailed in this specific article but referenced in the parent context [S1].
 
 ## Subtopics
 
 ### Radiative Gaussian Splatting
-Uses central density $\rho_i$ for isotropic density fields in CT reconstruction [3040-radiative-gaussian-splatting.md]. Choose when reconstructing volumetric density from CT data. [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md)
+*   **What it is:** The broader family of methods using Gaussian splatting for radiative (non-optical) imaging.
+*   **Difference:** Focuses on the general adaptation of 3DGS primitives for physical radiative properties (X-ray, thermal, etc.).
+*   **When to choose:** When adapting 3DGS for any non-visible spectrum where view-dependence differs from optical reflection.
+*   **Link:** [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md)
 
 ### X-Gaussian
-Uses direct radiation intensity $I_i$ as the primitive scalar [4525-x-gaussian.md]. Choose when direct intensity mapping is preferred over feature-based RIRF. [X-Gaussian](4525-x-gaussian.md)
+*   **What it is:** A specific implementation of the Radiative Gaussian Point Cloud Model for X-ray Novel View Synthesis (NVS).
+*   **Difference:** Specifically tailored for X-ray imaging, including custom initialization (ACUI) and Differentiable Radiative Rasterization (DRR).
+*   **When to choose:** For X-ray CT or projection data reconstruction and NVS.
+*   **Link:** [X-Gaussian](4525-x-gaussian.md)
 
 ### Volumetric Primitives Radiance Field
-Uses volumetric primitives for radiance field representation [5900-volumetric-primitives-radiance-field.md]. Choose for general radiance field applications beyond X-ray. [Volumetric Primitives Radiance Field](5900-volumetric-primitives-radiance-field.md)
+*   **What it is:** An alternative radiative primitive representation.
+*   **Difference:** May use different primitive shapes or density representations compared to the Gaussian kernel.
+*   **When to choose:** When Gaussian kernels are insufficient for the specific volumetric structure.
+*   **Link:** [Volumetric Primitives Radiance Field](5900-volumetric-primitives-radiance-field.md)
 
 ## Operating characteristics
-*   **Time Complexity:** Faster than original 3DGS because it avoids the complex computation of Spherical Harmonics (SH) functions [S1].
-*   **Memory Complexity:** Depends on the dimensionality $N_f$ of the feature vector $\mathbf{f}$ and the basis weights $\boldsymbol{\lambda}$ [S1].
-*   **Strengths:** Matches the isotropic nature of X-ray imaging; faster forward and backward processes compared to original 3DGS [S1].
-*   **Limitations:** Not suitable for view-dependent phenomena; requires specialized initialization (ACUI) due to the unsuitability of SfM for X-ray images [S1].
-*   **When to use:** X-ray novel view synthesis (NVS) and reconstruction [S1].
-*   **When not to use:** Natural light imaging where view-dependent color is important [S1].
+*   **Time Complexity:** Faster than original 3DGS because RIRF avoids the complex computation of Spherical Harmonics (SH) functions [S1]. The forward and backward passes are simplified to element-wise operations and Sigmoid activation.
+*   **Memory Complexity:** Stores a feature vector $\mathbf{f}_i$ of size $N_f$ per Gaussian instead of SH coefficients. Memory usage depends on $N_f$.
+*   **Strengths:** Exploits isotropy of X-ray attenuation; faster training and rendering due to simplified attribute representation; suitable for grayscale, low-contrast X-ray images where SfM fails.
+*   **Limitations:** Assumes isotropic radiation; requires custom initialization for X-ray data; not directly applicable to view-dependent optical phenomena without modification.
+*   **When to use:** X-ray novel view synthesis, transmission imaging reconstruction.
+*   **When not to use:** Optical RGB imaging with strong view-dependent reflections or specularities.
 
 ## Background
-The Radiative Gaussian Point Cloud Model was proposed in the paper "Radiative Gaussian Splatting for Efficient X-Ray Novel View Synthesis" [S1]. It addresses the limitations of standard 3DGS in X-ray imaging, where natural light assumptions (reflection, anisotropy) do not hold [S1]. X-rays penetrate objects, and attenuation depends on radiodensity, making the radiation intensity isotropic [S1]. The method replaces the view-dependent SH with the view-independent RIRF to handle the isotropic nature of X-ray attenuation [S1]. To address X-ray image characteristics such as low contrast and overlapping layers, it employs a customized ACUI initialization strategy rather than standard SfM [S1].
+The Radiative Gaussian Point Cloud Model was proposed in the context of X-ray Novel View Synthesis (NVS) to address the limitations of standard 3DGS when applied to X-ray imaging [S1]. Standard 3DGS uses Spherical Harmonics (SH) to model view-dependent, anisotropic color, which is appropriate for natural light reflection but incorrect for X-ray attenuation, which is isotropic and depends on radiodensity [S1]. Additionally, standard SfM initialization is inaccurate for X-ray images due to low contrast and overlapping structures [S1]. The model was introduced in "Radiative Gaussian Splatting for Efficient X-Ray Novel View Synthesis" [S1].
 
 ## Sources
 [S1] Radiative Gaussian Splatting for Efficient X-Ray Novel View Synthesis, https://doi.org/10.1007/978-3-031-73232-4_16, fetched 2026-10-26

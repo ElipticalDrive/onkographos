@@ -1,0 +1,158 @@
+# SparseGaussianAdam
+
+Also called: Sparse Adam for Gaussian Splatting
+
+## Overview
+SparseGaussianAdam is a sparse variant of the Adam optimizer designed specifically for 3D Gaussian Splatting training [S1, unofficial]. It addresses the computational and memory inefficiency of standard Adam by applying parameter updates only to Gaussians that are visible in the current rendering pass, thereby skipping updates for occluded or out-of-view primitives [S1, unofficial]. It builds on [BOGausS Optimizer](9298-bogauss-optimizer.md) by integrating visibility-aware state management into the Adam update logic.
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Parameter tensor $P$ (shape $[N, D]$), gradient tensor $G$ (same shape), visibility mask $V$ (boolean tensor of length $N$, where $V_i = \text{True}$ if Gaussian $i$ contributes to the image), learning rate $\eta$, epsilon $\epsilon$, beta1 $\beta_1$, beta2 $\beta_2$, number of Gaussians $N$.
+- **Outputs:** Updated parameter tensor $P$.
+
+**Data Structures:**
+The optimizer maintains state variables for each parameter tensor:
+- `step`: Scalar float32, initialized to 0.0.
+- `exp_avg`: Tensor of shape $[N, D]$, initialized to zeros. Stores the first moment estimate.
+- `exp_avg_sq`: Tensor of shape $[N, D]$, initialized to zeros. Stores the second moment estimate.
+- `visibility_mask`: Boolean tensor of length $N$. Indicates which Gaussians are visible.
+
+**Parameters:**
+- $\eta$ (lr): Learning rate. Typical values depend on the specific Gaussian attribute (e.g., position vs. color), often ranging from $10^{-4}$ to $10^{-2}$.
+- $\epsilon$ (eps): Numerical stability constant. Default is $10^{-8}$.
+- $\beta_1$: Exponential decay rate for first moment. Default is 0.9.
+- $\beta_2$: Exponential decay rate for second moment. Default is 0.999.
+- $N$: Total number of Gaussians.
+- $M$: Number of elements per Gaussian, calculated as $M = \text{param.numel()} // N$.
+
+**Algorithm Steps:**
+1. **Initialization:** If the optimizer state for the parameter is empty, initialize `step` to 0.0, `exp_avg` to a zero tensor of shape $[N, D]$, and `exp_avg_sq` to a zero tensor of shape $[N, D]$.
+2. **Gradient Check:** If the parameter has no gradient, skip the update.
+3. **State Retrieval:** Retrieve `exp_avg` and `exp_avg_sq` from the optimizer state.
+4. **Calculate M:** Compute $M = \text{param.numel()} // N$.
+5. **Sparse Update:** Invoke the sparse Adam update kernel (e.g., `_C.adamUpdate`) with the following arguments:
+   - Parameter tensor $P$.
+   - Gradient tensor $G$.
+   - First moment estimate `exp_avg`.
+   - Second moment estimate `exp_avg_sq`.
+   - Visibility mask $V$.
+   - Learning rate $\eta$.
+   - $\beta_1 = 0.9$.
+   - $\beta_2 = 0.999$.
+   - $\epsilon$.
+   - $N$ (number of Gaussians).
+   - $M$ (elements per Gaussian).
+   
+   The kernel updates only the rows in `exp_avg`, `exp_avg_sq`, and $P$ corresponding to indices where $V_i$ is True. The update logic for visible Gaussians follows the standard Adam algorithm:
+   $$
+   \begin{aligned}
+   m_t &= \beta_1 m_{t-1} + (1 - \beta_1) g_t \\
+   v_t &= \beta_2 v_{t-1} + (1 - \beta_2) g_t^2 \\
+   \hat{m}_t &= \frac{m_t}{1 - \beta_1^t} \\
+   \hat{v}_t &= \frac{v_t}{1 - \beta_2^t} \\
+   P_t &= P_{t-1} - \eta \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon}
+   \end{aligned}
+   $$
+   where $m_t$ and $v_t$ are the current moment estimates, $g_t$ is the gradient, and $t$ is the step count. For invisible Gaussians, the state variables remain unchanged.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def sparse_gaussian_adam_step(param, grad, state, visibility_mask, lr, eps, beta1=0.9, beta2=0.999):
+    """
+    Performs one step of SparseGaussianAdam.
+    
+    Args:
+        param: Parameter tensor of shape [N, D]
+        grad: Gradient tensor of shape [N, D]
+        state: Dict containing 'step', 'exp_avg', 'exp_avg_sq'
+        visibility_mask: Boolean tensor of shape [N]
+        lr: Learning rate
+        eps: Epsilon for numerical stability
+        beta1: Beta1 for first moment
+        beta2: Beta2 for second moment
+    """
+    # Lazy initialization
+    if 'step' not in state:
+        state['step'] = torch.tensor(0.0, dtype=torch.float32, device=param.device)
+        state['exp_avg'] = torch.zeros_like(param, memory_format=torch.preserve_format)
+        state['exp_avg_sq'] = torch.zeros_like(param, memory_format=torch.preserve_format)
+    
+    # Retrieve state
+    step = state['step']
+    exp_avg = state['exp_avg']
+    exp_avg_sq = state['exp_avg_sq']
+    
+    # Increment step
+    step += 1
+    state['step'] = step
+    
+    # If no gradient, skip update
+    if grad is None:
+        return
+    
+    # Calculate M (elements per Gaussian)
+    N = param.shape[0]
+    M = param.numel() // N
+    
+    # Perform sparse update using CUDA kernel
+    # This kernel updates only rows where visibility_mask is True
+    # The kernel implements the standard Adam update for visible rows
+    # and leaves invisible rows unchanged.
+    # Note: In a pure Python implementation, this would be:
+    
+    # Create a mask for visible Gaussians
+    visible_mask_expanded = visibility_mask.unsqueeze(1).expand_as(param)
+    
+    # Update moments only for visible Gaussians
+    # exp_avg[visible] = beta1 * exp_avg[visible] + (1 - beta1) * grad[visible]
+    # exp_avg_sq[visible] = beta2 * exp_avg_sq[visible] + (1 - beta2) * grad[visible]**2
+    
+    # Bias correction
+    bias_correction1 = 1 - beta1 ** step
+    bias_correction2 = 1 - beta2 ** step
+    
+    # Compute adaptive learning rates for visible Gaussians
+    # grad_sq = grad ** 2
+    # exp_avg_sq[visible] = beta2 * exp_avg_sq[visible] + (1 - beta2) * grad_sq[visible]
+    # exp_avg[visible] = beta1 * exp_avg[visible] + (1 - beta1) * grad[visible]
+    
+    # Update exp_avg and exp_avg_sq for visible Gaussians
+    exp_avg[visible_mask_expanded] = beta1 * exp_avg[visible_mask_expanded] + (1 - beta1) * grad[visible_mask_expanded]
+    exp_avg_sq[visible_mask_expanded] = beta2 * exp_avg_sq[visible_mask_expanded] + (1 - beta2) * (grad[visible_mask_expanded] ** 2)
+    
+    # Compute bias-corrected moments for visible Gaussians
+    exp_avg_corrected = exp_avg[visible_mask_expanded] / bias_correction1
+    exp_avg_sq_corrected = exp_avg_sq[visible_mask_expanded] / bias_correction2
+    
+    # Compute update for visible Gaussians
+    update = exp_avg_corrected / (torch.sqrt(exp_avg_sq_corrected) + eps)
+    
+    # Apply update to visible Gaussians
+    param[visible_mask_expanded] -= lr * update
+    
+    # Invisible Gaussians are not updated
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The use of `torch.preserve_format` ensures memory layout consistency, which is critical for efficient CUDA kernel execution [S1, unofficial].
+- **Boundaries:** The visibility mask must align exactly with the number of Gaussians $N$. Mismatches will cause runtime errors or incorrect updates.
+- **Degenerate Input:** If all Gaussians are invisible, no updates occur, and the state remains unchanged. This is a valid but potentially inefficient state if the scene is completely occluded.
+
+## Operating characteristics
+- **Time Complexity:** $O(K \cdot D)$ per step, where $K$ is the number of visible Gaussians and $D$ is the dimensionality of each Gaussian's parameters. This is significantly faster than standard Adam's $O(N \cdot D)$ when $K \ll N$.
+- **Memory Complexity:** $O(N \cdot D)$ for storing the full state variables (`exp_avg`, `exp_avg_sq`), as the state is allocated for all Gaussians regardless of visibility. However, computation is sparse.
+- **Measured Performance:** The method reduces memory bandwidth usage and computation time during optimization by skipping updates for invisible Gaussians [S1, unofficial].
+- **Strengths:** Efficient for scenes with significant occlusion or sparse visibility. Reduces computational overhead during training.
+- **Limitations:** Memory usage remains high for large $N$ because the state tensors are fully allocated. Not suitable for scenarios where memory is the primary constraint and $N$ is very large.
+- **When to Use:** Use when training 3D Gaussian Splatting models with large numbers of Gaussians where visibility is sparse or varies significantly across views.
+- **When Not to Use:** Use standard Adam if memory is extremely constrained and $N$ is small, or if visibility is dense (all Gaussians visible) as the overhead of managing the mask may not be worth the savings.
+
+## Background
+SparseGaussianAdam is introduced in the context of optimizing 3D Gaussian Splatting training efficiency. It is part of the optimization strategies proposed in the Laplacian-GS repository [S1, unofficial]. The method leverages the sparsity of Gaussian visibility to accelerate the Adam optimizer, which is commonly used for training neural radiance fields and Gaussian splats.
+
+## Sources
+[S1] SorenZhang574/Laplacian-GS, https://github.com/SorenZhang574/Laplacian-GS, fetched 2026-10-27 (unofficial)

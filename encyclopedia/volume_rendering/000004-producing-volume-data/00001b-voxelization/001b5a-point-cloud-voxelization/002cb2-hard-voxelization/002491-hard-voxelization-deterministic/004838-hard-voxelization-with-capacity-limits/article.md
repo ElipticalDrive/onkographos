@@ -1,0 +1,118 @@
+# Hard Voxelization with Capacity Limits
+
+Also called: Point Binning, Voxel Grid Update, Voxel Point Insertion & Binning
+
+## Overview
+Hard Voxelization with Capacity Limits inserts 3D points into a sparse voxel grid structure while enforcing a strict maximum number of points per voxel [S1, unofficial]. It extends basic hard voxelization by rejecting points that exceed this capacity limit and managing chunk readiness for disk-backed storage [S1, unofficial]. Unlike [Grid Pooling](4327-grid-pooling-max-pooling-over-points.md) which aggregates values, this method retains individual point coordinates up to the limit, and unlike [Voxel Hashing and Mean Aggregation](11234-voxel-hashing-and-mean-aggregation.md), it does not average inputs but rather bins them deterministically [S1, unofficial].
+
+## How it works
+**Inputs:** A list of 3D points (typically `std::array<double, 3>` or `Eigen::Vector3d`), a voxel resolution (world-to-voxel scale), a maximum points-per-voxel limit, and a sliding window context for chunk management.
+**Outputs:** A modified voxel grid (sparse hash map) where each active voxel contains a list of points, and counters for inserted, rejected, and out-of-range points.
+
+**Data Structures:**
+*   **Point:** 3D coordinate $(x, y, z)$.
+*   **Voxel Coordinate:** Integer tuple $(i, j, k)$ representing the grid cell.
+*   **Cell (Voxel Content):**
+    *   `points`: Fixed-size array of 3D points, size `max_points_per_voxel`.
+    *   `num_points`: Integer counter of currently stored points (0 to `max_points_per_voxel`).
+*   **Chunk:**
+    *   `accessor`: Pointer to the sparse voxel map accessor.
+    *   `ready`: Atomic boolean flag indicating if the chunk is loaded and available for modification.
+    *   `state`: Enum (e.g., `MODIFIED`) indicating if the chunk has been changed.
+    *   `countdown`: Integer for chunk dismissal logic.
+
+**Steps:**
+1.  **Validate Point:** Check if all coordinates of the input point are finite. If not, skip the point [S1, unofficial].
+2.  **Compute Voxel Coordinate:** Convert the world-space point to voxel space using the resolution. The formula is:
+    $$ \text{voxel\_coord} = \lfloor \mathbf{p} \times \text{inv\_resolution} \rfloor $$
+    where $\mathbf{p}$ is the point vector and $\text{inv\_resolution} = 1 / \text{resolution}$ [S1, unofficial].
+3.  **Check Window/Chunk:** Determine the chunk index corresponding to the voxel coordinate. If the point falls outside the current sliding window (defined by `current_source_chunk_idx_` and `sliding_window_size`), increment `out_of_range_count` and skip [S1, unofficial].
+4.  **Wait for Chunk Readiness:** If the target chunk is not ready (e.g., undergoing disk I/O), poll the `ready` flag with a 1ms sleep interval. If the wait exceeds 10ms, log an error and return failure [S1, unofficial].
+5.  **Access Voxel:** Query the voxel at `voxel_coord` using the chunk's accessor.
+6.  **Insert or Reject:**
+    *   If the voxel exists and `num_points < max_points_per_voxel`: Append the point to `points[num_points]`, increment `num_points`, set chunk state to `MODIFIED`, and increment `insert_count` [S1, unofficial].
+    *   If the voxel exists but `num_points >= max_points_per_voxel`: Increment `rejected_count` [S1, unofficial].
+    *   If the voxel does not exist: Create a new `Cell` object, set `points[0]` to the input point, set `num_points = 1`, store the cell in the map, set chunk state to `MODIFIED`, and increment `insert_count` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def insert_points(points, resolution, max_points_per_voxel, chunk_map, current_chunk_idx, window_size):
+    inv_resolution = 1.0 / resolution
+    insert_count = 0
+    rejected_count = 0
+    out_of_range_count = 0
+
+    for p in points:
+        # 1. Validate Point
+        if not is_finite(p.x) or not is_finite(p.y) or not is_finite(p.z):
+            continue
+
+        # 2. Compute Voxel Coordinate
+        voxel_coord = floor(p * inv_resolution)
+
+        # 3. Check Window/Chunk
+        point_chunk_idx = get_chunk_idx(voxel_coord)
+        if not is_neighbor_chunk(point_chunk_idx, current_chunk_idx, window_size):
+            out_of_range_count += 1
+            continue
+
+        # 4. Wait for Chunk Readiness
+        chunk = chunk_map[point_chunk_idx]
+        wait_start = now()
+        while not chunk.ready:
+            sleep(1ms)
+            if now() - wait_start > 10ms:
+                log_error("Chunk load timeout")
+                return False
+
+        # 5. Access Voxel
+        val = chunk.accessor.value(voxel_coord)
+
+        # 6. Insert or Reject
+        if val is not None:
+            if val.num_points < max_points_per_voxel:
+                val.points[val.num_points] = p
+                val.num_points += 1
+                chunk.state = MODIFIED
+                insert_count += 1
+            else:
+                rejected_count += 1
+        else:
+            cell = Cell()
+            cell.points[0] = p
+            cell.num_points = 1
+            chunk.accessor.setValue(voxel_coord, cell)
+            chunk.state = MODIFIED
+            insert_count += 1
+
+    return insert_count, rejected_count, out_of_range_count
+```
+
+**Parameters:**
+*   `max_points_per_voxel`: Maximum points stored per voxel before rejection. Typical value: 10 [S1, unofficial].
+*   `resolution`: World-to-voxel scale factor. Typical value: 0.2 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Infinite Blocking:** If a chunk is stuck in disk I/O, the polling loop must have a timeout (e.g., 10ms) to prevent the application from hanging [S1, unofficial].
+*   **Out-of-Window Points:** Points outside the current sliding window are discarded. The implementation must correctly calculate neighbor chunks to ensure points near boundaries are handled [S1, unofficial].
+*   **Non-Finite Coordinates:** Points with NaN or Inf coordinates must be filtered out to prevent undefined behavior in coordinate conversion [S1, unofficial].
+
+## Subtopics
+
+### [Probabilistic Raytracing Occupancy Update](12215-probabilistic-raytracing-occupancy-update.md)
+Updates voxel occupancy probability using raytracing hits and misses, incrementing log-odds on hits and decrementing on misses, bounded by min/max thresholds.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ for $N$ points, assuming $O(1)$ average case for hash map access. The chunk readiness polling adds a constant overhead per point if chunks are busy.
+*   **Memory Complexity:** Proportional to the number of occupied voxels times `max_points_per_voxel`. Sparse storage (via Bonxai) minimizes memory for empty space.
+*   **Performance:** Depends heavily on chunk I/O latency. Disk-backed chunks introduce latency if not managed with a sliding window and async loading [S1, unofficial].
+*   **Strengths:** Deterministic, simple, preserves individual point data up to a limit.
+*   **Limitations:** Rigid capacity limit may lead to information loss (rejection) in dense regions. No aggregation of point attributes (e.g., color, intensity) is described in the core method, only positions [S1, unofficial].
+
+## Background
+This method is part of the `voxlvoxl` library, which implements a sliding window voxelization system for large-scale point cloud processing [S1, unofficial]. It uses the Bonxai sparse voxel octree for efficient storage and retrieval. The approach is designed for real-time or near-real-time applications where point clouds are updated incrementally within a moving window [S1, unofficial].
+
+## Sources
+[S1] goguma426/voxlvoxl, https://github.com/goguma426/voxlvoxl, fetched 2026-10-28 (unofficial)

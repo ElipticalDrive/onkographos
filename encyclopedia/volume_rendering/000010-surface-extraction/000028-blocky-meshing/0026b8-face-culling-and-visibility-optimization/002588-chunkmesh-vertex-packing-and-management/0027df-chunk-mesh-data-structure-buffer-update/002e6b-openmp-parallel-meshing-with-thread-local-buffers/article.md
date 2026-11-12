@@ -3,53 +3,42 @@
 Also called: Parallel Chunk Mesher, Thread-Local Mesh Buffers
 
 ## Overview
-This method distributes the mesh generation workload across multiple OpenMP threads using pre-allocated, thread-local buffers to eliminate dynamic memory allocation overhead during the critical meshing phase [S1, unofficial]. It builds on [Chunk Mesh Data Structure & Buffer Update](4182-chunk-mesh-data-structure-buffer-update.md) by managing the lifecycle of these temporary buffers, ensuring that geometry and index data are processed in parallel without race conditions or synchronization bottlenecks [S1, unofficial].
+This method distributes mesh generation across 4 OpenMP threads using thread-local buffer slots to avoid synchronization overhead during parallel chunk processing [S1, unofficial]. It builds on [Chunk Mesh Data Structure & Buffer Update](4182-chunk-mesh-data-structure-buffer-update.md) by managing per-thread scratch memory for geometry, work indices, and SVL masks without global locks [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A `ChunkSet` structure containing chunk metadata, remesh flags (`svl_dirty`, `mesh_dirty`), and configuration parameters (`root`, `MESHER_THREAD_BUFFERS`).
-*   **Output:** Populated thread-local buffers containing geometry (`geom`), work indices/vertices (`work`), and SVL masks (`mask`) for each chunk processed. These buffers are subsequently consumed by the buffer update system.
+*   **Input:** A `ChunkSet` structure containing chunk metadata, remesh flags (`svl_dirty`, `mesh_dirty`), and configuration parameters (`root`, `MESHER_THREAD_BUFFERS`) [S1, unofficial].
+*   **Output:** Populated thread-local buffers containing geometry (`geom`), work indices/vertices (`work`), and SVL masks (`mask`) for each chunk processed [S1, unofficial].
 
 **Data Structures:**
-Each thread maintains a local array of buffer slots. The number of slots per thread is defined by `MESHER_THREAD_BUFFERS`.
+Each thread maintains a local array of buffer slots [S1, unofficial].
 *   **Buffer Slot Layout:**
-    *   `geom`: Array of size `pow(root, 3) * 10`. Stores output geometry vertices/indices.
-    *   `work`: Array of size `pow(root+1, 3) * 10`. Stores intermediate index/vertex data.
-    *   `mask`: Array of size `pow(root+1, 3)`. Stores SVL (Surface Volume Level) mask data.
-    *   `is_allocated`: Boolean flag indicating if the memory for the above arrays has been allocated.
+    *   `geom`: Array of size `pow(root, 3) * 10` [S1, unofficial].
+    *   `work`: Array of size `pow(root+1, 3) * 10` [S1, unofficial].
+    *   `mask`: Array of size `pow(root+1, 3)` [S1, unofficial].
+    *   `is_allocated`: Boolean flag indicating if the memory for the above arrays has been allocated [G].
 
 **Parameters:**
-*   `root`: The side length of the chunk in voxels (e.g., 8). Derived from `root_bitw` where `root = 1 << root_bitw` [S1, unofficial].
-*   `MESHER_THREAD_BUFFERS`: Number of pre-allocated buffers per thread. Default value: 2 [S1, unofficial].
+*   `root`: The side length of the chunk in voxels, derived from `root_bitw` where `root = 1 << root_bitw` [S1, unofficial].
+*   `MESHER_THREAD_BUFFERS`: Number of pre-allocated buffers per thread. Value: 2 [S1, unofficial].
 
 **Algorithm Steps:**
-1.  **Parallel Loop Initialization:** Begin an OpenMP parallel region. Inside, declare thread-local variables for buffer index (`buf_id`) and buffer pointers (`geom`, `work`, `mask`).
-2.  **Buffer Acquisition:**
-    *   Iterate over chunks using `#pragma omp for`.
-    *   Each thread selects a free buffer index from its local pool (0 to `MESHER_THREAD_BUFFERS - 1`).
-    *   Check if the selected buffer slot is `NULL` (unallocated).
-    *   **Lazy Allocation:** If `NULL`, allocate memory for `geom`, `work`, and `mask` arrays using the sizes defined above. Mark the slot as allocated. This happens without synchronization because each thread accesses only its own local buffer indices [S1, unofficial].
-3.  **Remesh Check:**
-    *   Retrieve the chunk's dirty flags: `svl_dirty` and `mesh_dirty`.
-    *   Compute effective remesh requirement: `remesh = remesh | svl_dirty | mesh_dirty`.
-    *   If `remesh == 0`:
-        *   If `mesh_dirty` was true, free the old GPU Vertex Buffer Object (VBO) and Index Buffer Object (IBO) associated with this chunk.
-        *   If the buffer is idle, compress the data if necessary.
-        *   Continue to the next chunk (skip meshing).
-4.  **Mesh Generation:**
-    *   If `remesh != 0`, execute the meshing algorithm using the thread-local `work` and `mask` arrays as scratch space.
-    *   Write the resulting geometry into the thread-local `geom` array.
-5.  **Buffer Release/Reuse:**
-    *   After processing, the buffer slot remains allocated for potential reuse by the same thread in subsequent frames or chunk batches, avoiding reallocation costs.
+1.  Begin an OpenMP parallel region and iterate over chunks using `#pragma omp for` [S1, unofficial].
+2.  Each thread selects a free buffer index from its local pool (0 to `MESHER_THREAD_BUFFERS - 1`) [S1, unofficial].
+3.  Check if the selected buffer slot is `NULL` (unallocated) [S1, unofficial].
+4.  If `NULL`, allocate memory for `geom`, `work`, and `mask` arrays using the sizes defined above [S1, unofficial].
+5.  Retrieve the chunk's dirty flags: `svl_dirty` and `mesh_dirty` [S1, unofficial].
+6.  Compute effective remesh requirement: `remesh = remesh | svl_dirty | mesh_dirty` [S1, unofficial].
+7.  If `remesh == 0`, free the old GPU Vertex Buffer Object (VBO) and Index Buffer Object (IBO) if `mesh_dirty` was true, compress the data if idle, and continue to the next chunk [S1, unofficial].
+8.  If `remesh != 0`, execute the meshing algorithm using the thread-local `work` and `mask` arrays as scratch space, and write the resulting geometry into the thread-local `geom` array [S1, unofficial].
+9.  After processing, the buffer slot remains allocated for potential reuse by the same thread in subsequent frames or chunk batches, avoiding reallocation costs [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
-import openmp
 
-# Constants from configuration
 MESHER_THREAD_BUFFERS = 2
 
 def parallel_meshing(chunk_set):
@@ -57,85 +46,75 @@ def parallel_meshing(chunk_set):
     geom_size = int(math.pow(root, 3)) * 10
     work_size = int(math.pow(root + 1, 3)) * 10
     mask_size = int(math.pow(root + 1, 3))
-    
+
     # Thread-local storage for buffers
-    # Each thread gets its own list of buffers
     thread_buffers = [None] * MESHER_THREAD_BUFFERS
-    
+
     # Parallel loop over chunks
-    # Note: In real C/OpenMP, this is #pragma omp for
     for chunk_idx in chunk_set.chunks:
         chunk = chunk_set.get_chunk(chunk_idx)
-        
+
         # 1. Find or allocate a thread-local buffer
         buf = None
         for i in range(MESHER_THREAD_BUFFERS):
             if thread_buffers[i] is None:
                 # Allocate memory for this buffer
-                # geom: geometry output
-                # work: index/vertex work
-                # mask: SVL mask
                 thread_buffers[i] = {
-                    'geom': allocate_array(geom_size),
-                    'work': allocate_array(work_size),
-                    'mask': allocate_array(mask_size),
+                    'geom': [0] * geom_size,
+                    'work': [0] * work_size,
+                    'mask': [0] * mask_size,
                     'allocated': True
                 }
                 buf = thread_buffers[i]
                 break
-        
+
         if buf is None:
-            # Fallback or error if all buffers busy; 
-            # in this design, buffers are reused, so this shouldn't happen 
-            # if buffers are released after use. 
             # [G] Assuming buffers are released at end of frame or chunk batch.
             continue
-            
+
         # 2. Check remesh flags
         svl_dirty = chunk.flags.svl_dirty
         mesh_dirty = chunk.flags.mesh_dirty
         remesh = svl_dirty | mesh_dirty
-        
+
         if remesh == 0:
             # No remeshing needed
             if mesh_dirty:
-                # Free old GPU buffers
-                free_gpu_buffers(chunk)
-            # Compress if idle [S1, unofficial]
+                # [G] Release GPU VBO/IBO handles associated with the chunk
+                pass
+            # [G] Run RLE compression on the mask or geometry if the chunk is idle
             continue
-            
+
         # 3. Perform meshing using thread-local buffers
-        # The meshing algorithm reads chunk data and writes to buf.work, buf.mask, buf.geom
-        perform_meshing(chunk, buf['work'], buf['mask'], buf['geom'])
-        
+        # [G] Standard surface extraction reads chunk voxels, writes to buf['work'] and buf['mask'],
+        # and outputs vertices/indices to buf['geom']
+        pass
+
         # 4. Update chunk metadata with new buffer reference
         chunk.current_buffer = buf
-        
-        # [G] Buffer is not freed here to allow reuse. 
-        # It is freed when the thread exits or during a global reset.
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Race Conditions:** Buffer allocation must be strictly thread-local. Using a global pool with atomic indices is an alternative, but thread-local indices (`omp_id`, `buf_id`) are used here to avoid synchronization overhead [S1, unofficial].
-*   **Memory Limits:** The total memory usage is `num_threads * MESHER_THREAD_BUFFERS * (geom_size + work_size + mask_size)`. For large `root` values, this can be significant.
-*   **Buffer Exhaustion:** If `MESHER_THREAD_BUFFERS` is too low, threads may block or require fallback mechanisms. The default value of 2 is chosen to balance memory usage and parallelism [S1, unofficial].
+*   **Race Conditions:** Buffer allocation happens inside the parallel loop without synchronization, relying on thread-local indices (`omp_id`, `buf_id`) to avoid race conditions [S1, unofficial].
+*   **Memory Limits:** The total memory usage is `num_threads * MESHER_THREAD_BUFFERS * (geom_size + work_size + mask_size)` [G].
+*   **Buffer Exhaustion:** If `MESHER_THREAD_BUFFERS` is too low, threads may block or require fallback mechanisms [G].
 
 ## Subtopics
 
 ### Memory Management and Scratch Buffers
-This variant focuses on the creation and lifecycle of scratch buffers used during meshing. It uses `createMeshScratch()` to allocate per-caller work areas for face masks and temporary light arrays, allowing reuse between calls [S2, unofficial]. Unlike the reference implementation which returns zero-copy subarray views (which are dangerous as they are only valid until the next call), this API returns newly owned data every time, ensuring safe lifetime contracts [S2, unofficial]. No output accumulator pooling is used to avoid changing ownership semantics [S2, unofficial]. A critical pitfall is that the same scratch buffer must NOT be shared in parallel meshing processing, as it leads to data races [S2, unofficial].
+This variant focuses on the creation and lifecycle of scratch buffers used during meshing. It uses `createMeshScratch()` to allocate per-caller work areas for face masks and temporary light arrays, allowing reuse between calls [S2, unofficial]. Unlike the reference implementation which returns zero-copy subarray views (dangerous as they are only valid until the next call), this API returns newly owned data every time, ensuring safe lifetime contracts [S2, unofficial]. No output accumulator pooling is used to avoid changing ownership semantics [S2, unofficial]. A critical pitfall is that the same scratch buffer must NOT be shared in parallel meshing processing, as it leads to data races [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of chunks, distributed across $T$ threads. The per-chunk meshing cost is dominated by the voxel traversal and surface extraction, which is linear in the number of voxels per chunk ($root^3$).
-*   **Memory Complexity:** $O(T \times B \times root^3)$ where $T$ is the number of threads and $B$ is `MESHER_THREAD_BUFFERS`. The constant factor is approximately 20-30 bytes per voxel (sum of `geom`, `work`, `mask` sizes).
+*   **Time Complexity:** $O(N)$ where $N$ is the number of chunks, distributed across $T$ threads. The per-chunk meshing cost is dominated by the voxel traversal and surface extraction, which is linear in the number of voxels per chunk ($root^3$) [G].
+*   **Memory Complexity:** $O(T \times B \times root^3)$ where $T$ is the number of threads and $B$ is `MESHER_THREAD_BUFFERS`. The constant factor is approximately 20-30 bytes per voxel (sum of `geom`, `work`, `mask` sizes) [G].
 *   **Performance:** Eliminates dynamic allocation overhead during the parallel loop, leading to smoother frame times and reduced CPU cache pressure from allocator locks [S1, unofficial].
-*   **Strengths:** High parallel efficiency, no synchronization overhead during meshing, predictable memory usage.
-*   **Limitations:** Higher peak memory usage due to pre-allocation. Requires careful tuning of `MESHER_THREAD_BUFFERS` to avoid underutilization or excessive memory consumption.
-*   **When to use:** When meshing large volumes with many chunks and frequent updates, where allocation overhead is a bottleneck.
-*   **When not to use:** When memory is extremely constrained, or when the number of chunks is small enough that sequential processing is faster than thread management overhead.
+*   **Strengths:** High parallel efficiency, no synchronization overhead during meshing, predictable memory usage [S1, unofficial].
+*   **Limitations:** Higher peak memory usage due to pre-allocation. Requires careful tuning of `MESHER_THREAD_BUFFERS` to avoid underutilization or excessive memory consumption [G].
+*   **When to use:** When meshing large volumes with many chunks and frequent updates, where allocation overhead is a bottleneck [G].
+*   **When not to use:** When memory is extremely constrained, or when the number of chunks is small enough that sequential processing is faster than thread management overhead [G].
 
 ## Background
-This method originates from the VoxelPlat project, an unofficial implementation of voxel-based terrain and volume rendering [S1, unofficial]. It addresses the performance bottleneck of dynamic memory allocation in real-time meshing systems, particularly in game engines where frame times are critical. The approach of using thread-local buffers is a common optimization in high-performance computing to minimize lock contention.
+This method originates from the `voxplat` repository [S1, unofficial]. It addresses the performance bottleneck of dynamic memory allocation in real-time meshing systems, particularly in game engines where frame times are critical [G]. The approach of using thread-local buffers is a common optimization in high-performance computing to minimize lock contention [G].
 
 ## Sources
 [S1] kosshi-net/voxplat, https://github.com/kosshi-net/voxplat, fetched 2026-10-27 (unofficial)

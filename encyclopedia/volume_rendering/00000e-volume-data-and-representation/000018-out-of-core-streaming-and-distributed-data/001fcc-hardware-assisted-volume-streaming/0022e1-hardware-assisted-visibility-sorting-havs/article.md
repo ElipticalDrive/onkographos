@@ -1,6 +1,5 @@
 # Hardware Assisted Visibility Sorting (HAVS)
 
-
 ## Overview
 Hardware Assisted Visibility Sorting (HAVS) is a hybrid volume rendering algorithm for unstructured grids that combines object-space sorting on the CPU with image-space fragment sorting on the GPU using a k-buffer [S3, unofficial][S8]. It solves the problem of rendering large, non-convex unstructured meshes where explicit fragment ordering is required, unlike regular grids which can rely on generation order [S8]. HAVS is distinguished from its siblings by its reliance on a fixed-depth sorting network (k-buffer) to handle visibility, offering a robust compromise between implementation complexity, image quality, and performance, though it may produce artifacts if fragments are highly out of order [S1][S5, unofficial].
 
@@ -12,7 +11,7 @@ HAVS operates in two phases: object-space partial sorting on the CPU and image-s
 *   **Output:** Rendered image (color and opacity) in the framebuffer.
 
 ### Data Structures
-*   **k-buffer:** A buffer of fixed size $k$ stored per pixel. It holds $k$ fragments, each containing a scalar value $v$ and a distance $d$ (fragment to eye) [S2][S3, unofficial].
+*   **k-buffer:** A buffer of fixed size $k$ stored per pixel. It holds $k$ fragments, each containing a scalar value $v$ and a distance $d$ (fragment to eye) [S2].
 *   **Pre-integrated Table:** A 3D texture (typically $128^3$ 8-bit RGBA) mapping front scalar, back scalar, and distance to color and opacity [S3, unofficial][S8].
 *   **Framebuffer:** A floating-point 2D texture storing accumulated color and opacity [S3, unofficial][S8].
 *   **Vertex Data:** Vertices are marked as internal or boundary to handle mesh boundaries correctly [S3, S4, unofficial].
@@ -22,78 +21,68 @@ HAVS operates in two phases: object-space partial sorting on the CPU and image-s
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Phase 1: CPU Object-Space Sorting
-def cpu_sort(mesh_faces):
-    """
-    Sorts mesh faces based on centroid distance to camera.
-    Uses LSD radix sort or counting sort on floating-point coordinates.
-    """
-    # Convert float coordinates to sortable integers for radix/counting sort
-    # Formula: f_int = f * (-(f >> 31) | 0x80000000)
-    # This maps floats to unsigned integers preserving order
+def cpu_sort_faces(mesh_faces, camera_position):
+    """Sorts mesh faces by centroid distance to camera using radix/counting sort."""
+    def float_to_sortable_int(f):
+        # Converts float to sortable unsigned int preserving order
+        return f * (-(f >> 31) | 0x80000000)
+    
     for face in mesh_faces:
         face.centroid_int = float_to_sortable_int(face.centroid.z)
-    
-    # Sort faces by centroid_int using LSD radix sort or counting sort
-    sorted_faces = radix_sort(mesh_faces, key=lambda f: f.centroid_int)
+        
+    # Standard LSD radix sort or counting sort on 32-bit integers
+    sorted_faces = sorted(mesh_faces, key=lambda f: f.centroid_int)
     return sorted_faces
 
-# Phase 2: GPU Image-Space Rendering
-def gpu_render(sorted_faces, k_buffer_size, pre_integrated_table, framebuffer):
+def gpu_fragment_shader(fragment, k_buffer_entries, pre_integrated_table, framebuffer):
     """
-    Rasterizes sorted faces and uses a k-buffer to sort fragments and composite.
+    Fragment program logic for HAVS.
+    fragment: (scalar, distance)
+    k_buffer_entries: list of k (scalar, distance) tuples
     """
-    for face in sorted_faces:
-        rasterize(face)
-        # For each fragment generated:
-        fragment = current_fragment()
+    # Combine current fragment with k-buffer entries
+    candidates = [fragment] + k_buffer_entries
+    
+    # Find nearest (min distance) and second nearest fragment
+    # Implemented via sorting network logic equivalent to selection
+    sorted_candidates = sorted(candidates, key=lambda c: c.distance)
+    nearest = sorted_candidates[0]
+    second_nearest = sorted_candidates[1]
+    
+    # 3D texture lookup for pre-integrated transfer function
+    # Inputs: front_scalar, back_scalar, distance_segment
+    front_scalar = nearest.scalar
+    back_scalar = second_nearest.scalar
+    distance_segment = second_nearest.distance - nearest.distance
+    
+    color, opacity = pre_integrated_table.lookup(front_scalar, back_scalar, distance_segment)
+    
+    # Nullify if scalar value is invalid (< 0)
+    if front_scalar < 0:
+        color, opacity = 0.0, 0.0
         
-        # Load k-buffer entries from textures (stored as pairs in 2D textures)
-        # k_buffer_size is typically 6, so we load 6 entries + current fragment
-        k_entries = load_k_buffer_entries()
-        all_candidates = [fragment] + k_entries
+    # Read framebuffer color/opacity
+    fb_color, fb_opacity = framebuffer.read()
+    
+    # Early termination check
+    if fb_opacity >= 0.99:
+        return # Early termination
         
-        # Find the nearest (min_z) and second nearest fragment
-        # Using a sorting network of CMP operations
-        nearest = find_min_distance(all_candidates)
-        second_nearest = find_second_min_distance(all_candidates, nearest)
-        
-        # Lookup pre-integrated color/opacity
-        # Inputs: front_scalar (nearest.v), back_scalar (second_nearest.v), 
-        #         distance (second_nearest.d - nearest.d)
-        color, opacity = lookup_pre_integrated_table(
-            nearest.scalar, 
-            second_nearest.scalar, 
-            second_nearest.distance - nearest.distance
-        )
-        
-        # Nullify if scalar value is invalid (e.g., < 0)
-        if nearest.scalar < 0:
-            color = 0
-            opacity = 0
-            
-        # Composite with framebuffer (front-to-back)
-        fb_color, fb_opacity = read_framebuffer()
-        new_color = color * (1 - fb_opacity) + fb_color
-        new_opacity = opacity * (1 - fb_opacity) + fb_opacity
-        
-        # Early termination check
-        if new_opacity >= 0.99:
-            discard_fragment()
-            return
-            
-        write_framebuffer(new_color, new_opacity)
-        
-        # Update k-buffer: remove the nearest fragment, keep the rest
-        remaining_entries = remove_fragment(all_candidates, nearest)
-        write_k_buffer_entries(remaining_entries)
+    # Front-to-back compositing
+    new_color = color * (1.0 - fb_opacity) + fb_color
+    new_opacity = opacity * (1.0 - fb_opacity) + fb_opacity
+    framebuffer.write(new_color, new_opacity)
+    
+    # Update k-buffer: remove nearest, keep remaining k
+    remaining = [c for i, c in enumerate(candidates) if c is not nearest]
+    k_buffer_entries = remaining[:len(k_buffer_entries)]
 ```
 
 ### Parameters and Formulas
 *   **k-buffer size ($k$):** The number of fragments stored per pixel. Small $k$ (e.g., 2 or 6) is used for efficiency [S3, unofficial][S8].
 *   **Integer Conversion for Sorting:** To sort floating-point coordinates using integer-based radix/counting sorts, the formula is:
     $$f_{int} = f \times (-(f \gg 31) \mid 0x80000000)$$
-    where $f$ is the floating-point coordinate, $\gg$ is bitwise right shift, and $|$ is bitwise OR [S2].
+    where $f$ is the floating-point coordinate, $\gg$ is bitwise right shift, and $\mid$ is bitwise OR [S2].
 *   **Comparison Cost (Unsorted k-buffer):** For a screen of $m \times n$ pixels, with $s_j$ fragments at pixel $j$, and buffer size $k$, the total comparisons $N_1$ are:
     $$N_1 = \sum_{j=1}^{m \times n} \left( \sum_{l=2}^k (2l-3) + (k + k - 1) \times (s_j - k) \right)$$
     The average comparisons per pixel $e_1$ is:
@@ -125,14 +114,14 @@ This method extends Hardware Assisted Visibility Sorting (HAVS) to perform radio
 *   **Limitations:** Requires hardware support for read/write framebuffers; sorting errors can cause artifacts if fragments are not nearly sorted; limited by k-buffer size for highly complex scenes [S1, S2][S4, unofficial].
 
 ## Background
-HAVS was introduced by Steven Callahan, Milan Ikits, Joao Comba, and Claudio Silva in 2005 [S3, S4, unofficial]. It was developed to address the limitations of previous unstructured volume rendering techniques, which either required complex preprocessing (like PT/VO) or suffered from poor performance on GPUs. HAVS leverages the parallelism of modern GPUs by shifting the heavy lifting of fragment sorting to the GPU while using the CPU for a quick, approximate object-space sort [S3, unofficial][S8]. It is considered one of the most important unstructured grid volume rendering algorithm frameworks based on GPU [S2].
+Developed by Callahan et al. [S3, S4, unofficial], HAVS was introduced to address the limitations of previous unstructured volume rendering techniques, which either required complex preprocessing (like PT/VO) or suffered from poor performance on GPUs [S4, S5, unofficial]. HAVS leverages the parallelism of modern GPUs by shifting the heavy lifting of fragment sorting to the GPU while using the CPU for a quick, approximate object-space sort [S3, unofficial][S8]. It is considered one of the most important unstructured grid volume rendering algorithm frameworks based on GPU [S2].
 
 ## Sources
 [S1] Sorting-free pre-integrated projected tetrahedra, https://doi.org/10.1145/1838544.1838546, fetched 2026-11-01
 [S2] Optimization and Implementation of Unstructured Grid Volume Rendering Algorithm, https://doi.org/10.2991/iccasm.2012.373, fetched 2026-10-26
 [S3] THE K-BUFFER AND ITS APPLICATIONS TO VOLUME RENDERING, https://ctsilva.github.io/thesis/steve-callahan-ms-thesis.pdf, fetched 2026-10-27 (unofficial)
 [S4] PDF A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
-[S5] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey_of_GPU-Based_Volume_Rendering_of_Unstructured_Grids, fetched 2026-10-28 (unofficial)
+[S5] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey_of GPU-Based Volume Rendering of Unstructured Grids, fetched 2026-10-28 (unofficial)
 [S6] PDF Parallel Unstructured Volume Rendering in ParaView, https://www.kennethmoreland.com/documents/ParallelVolRen.pdf, fetched 2026-10-27
 [S7] Volume rendering for curvilinear and unstructured grids, https://www.researchgate.net/publication/4023713_Volume_rendering_for_curvilinear_and_unstructured_grids, fetched 2026-10-30 (unofficial)
 [S8] PDF Hardware-Assisted Visibility Sorting for Unstructured Volume Rendering, https://www.sci.utah.edu/~stevec/papers/havs.pdf, fetched 2026-10-29

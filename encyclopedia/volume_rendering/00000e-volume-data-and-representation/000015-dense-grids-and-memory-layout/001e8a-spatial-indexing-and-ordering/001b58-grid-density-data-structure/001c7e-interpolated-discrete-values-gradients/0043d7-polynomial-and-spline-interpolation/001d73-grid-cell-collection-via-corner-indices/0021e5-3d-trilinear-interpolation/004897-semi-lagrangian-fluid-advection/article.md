@@ -1,0 +1,236 @@
+# Semi-Lagrangian Fluid Advection
+
+Also called: Advection in Eulerian View, Backtracing, Semi-Lagrangian Advection
+
+## Overview
+Semi-Lagrangian Fluid Advection updates physical quantities (volume and velocity) on a fixed Eulerian grid by back-tracing from the current grid center to the previous time step using the velocity field, then interpolating the value [S1, S3, unofficial]. It differs from Lagrangian methods by keeping particles fixed to the grid, and from pure Eulerian finite-difference advection by using characteristic tracing which allows larger time steps without instability [S1, unofficial]. It builds on [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) for the sampling step.
+
+## How it works
+**Inputs:**
+- Current grid dimensions: $W \times H \times D$ (width, height, depth) [S2, unofficial].
+- Velocity field at time $t-1$: $\mathbf{u}_{t-1}$, stored as three scalar grids $U, V, W$ [S3, unofficial].
+- Scalar field (e.g., volume/density) at time $t-1$: $V_{t-1}$ [S1, unofficial].
+- Time step size: $\Delta t$ (referred to as `gGridFluidStep.y` in implementation notes) [S3, unofficial].
+- Grid cell size: $h$ (referred to as `gGridFluidStep.x` in implementation notes) [S3, unofficial].
+- Boundary type flags: `gGridFluidCellTypes` indicating if a cell is outside the fluid domain or has a non-zero type [S3, unofficial].
+
+**Outputs:**
+- Updated scalar field at time $t$: $V_t$ [S1, unofficial].
+- Updated velocity field at time $t$: $\mathbf{u}_t$ (after projection) [S1, unofficial].
+
+**Data Structures:**
+- FluidGrid: A 1D `std::vector<float>` storing data in row-major order [S2, unofficial].
+- Index calculation: $\text{index} = z \cdot (W \cdot H) + y \cdot W + x$ [S2, unofficial].
+- Velocity components $U, V, W$ are stored in separate 1D arrays of size $W \cdot H \cdot D$ [S3, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Thread Dispatch:** Map threads to grid cells $(x, y, z)$ [S3, unofficial].
+2.  **Boundary Check:** If the cell is outside the fluid domain or `gGridFluidCellTypes[index] != 0`, skip processing and write $0.0$ to the output scalar $V_t$ [S3, unofficial].
+3.  **World Position Calculation:** Calculate the world position of the current cell center:
+    $$ \mathbf{p}_{curr} = (x + 0.5, y + 0.5, z + 0.5) \cdot h $$
+    (Note: Implementation notes use `dispatchThreadId + 0.5` multiplied by `gGridFluidStep.x`) [S3, unofficial].
+4.  **Midpoint Velocity Sampling:**
+    a. Estimate the midpoint position by stepping back half a time step from the current position using the current velocity $\mathbf{u}_{curr}$:
+    $$ \mathbf{p}_{mid} = \mathbf{p}_{curr} - 0.5 \cdot \Delta t \cdot \mathbf{u}_{curr} $$
+    b. Sample the velocity at $\mathbf{p}_{mid}$ using trilinear interpolation on the $U, V, W$ grids:
+    $$ \mathbf{u}_{mid} = \text{TrilinearInterp}(\mathbf{u}_{t-1}, \mathbf{p}_{mid}) $$
+    (Note: $\mathbf{u}_{curr}$ is typically the velocity at $\mathbf{p}_{curr}$ from the previous step or an intermediate state) [S3, unofficial].
+5.  **Source Position Calculation:** Calculate the final source position by stepping back a full time step from the cell center using the midpoint velocity:
+    $$ \mathbf{p}_{src} = \mathbf{p}_{curr} - \Delta t \cdot \mathbf{u}_{mid} $$
+    (Note: The velocity field $\mathbf{u}_{t-1}$ represents the average velocity over the interval $(t-1) \to t$) [S1, unofficial].
+6.  **Scalar Advection:**
+    a. Sample the scalar field $V_{t-1}$ at $\mathbf{p}_{src}$ using trilinear interpolation:
+    $$ V_t(x, y, z) = \text{TrilinearInterp}(V_{t-1}, \mathbf{p}_{src}) $$
+    b. Assign the sampled value to the current grid cell in $V_t$ [S1, S3, unofficial].
+7.  **Velocity Advection:**
+    a. Repeat steps 4-6 for each component of the velocity field ($U, V, W$) to advect the velocity itself.
+    b. Sample the velocity components at $\mathbf{p}_{src}$ from the respective $U, V, W$ grids [S3, unofficial].
+8.  **Projection and Forces:** Apply external forces and pressure projection to the advected velocities to ensure the velocity field is divergence-free (incompressible) [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def clamp(val, min_val, max_val):
+    return max(min_val, min(val, max_val))
+
+def trilinear_interp(data, x, y, z, width, height, depth):
+    """
+    Performs 3D trilinear interpolation on a 1D array 'data' representing a 3D grid.
+    Handles boundary clamping.
+    """
+    # Clamp coordinates to valid range [0, width-1], etc.
+    x = clamp(x, 0.0, width - 1.0)
+    y = clamp(y, 0.0, height - 1.0)
+    z = clamp(z, 0.0, depth - 1.0)
+
+    # Integer coordinates
+    x0 = int(math.floor(x))
+    y0 = int(math.floor(y))
+    z0 = int(math.floor(z))
+    
+    # Neighbor coordinates
+    x1 = x0 + 1
+    y1 = y0 + 1
+    z1 = z0 + 1
+    
+    # Fractional parts
+    sx = x - x0
+    sy = y - y0
+    sz = z - z0
+
+    # Helper to get value from 1D array
+    def get_val(ix, iy, iz):
+        # Clamp indices for array access
+        ix = clamp(ix, 0, width - 1)
+        iy = clamp(iy, 0, height - 1)
+        iz = clamp(iz, 0, depth - 1)
+        return data[iz * (width * height) + iy * width + ix]
+
+    # Fetch 8 corner values
+    c000 = get_val(x0, y0, z0)
+    c100 = get_val(x1, y0, z0)
+    c010 = get_val(x0, y1, z0)
+    c110 = get_val(x1, y1, z0)
+    c001 = get_val(x0, y0, z1)
+    c101 = get_val(x1, y0, z1)
+    c011 = get_val(x0, y1, z1)
+    c111 = get_val(x1, y1, z1)
+
+    # Interpolate along x
+    c00 = c000 * (1 - sx) + c100 * sx
+    c01 = c010 * (1 - sx) + c110 * sx
+    c10 = c001 * (1 - sx) + c101 * sx
+    c11 = c011 * (1 - sx) + c111 * sx
+
+    # Interpolate along y
+    c0 = c00 * (1 - sy) + c01 * sy
+    c1 = c10 * (1 - sy) + c11 * sy
+
+    # Interpolate along z
+    return c0 * (1 - sz) + c1 * sz
+
+def advect_scalar_field(V_prev, U_prev, V_prev_comp, W_prev_comp, width, height, depth, dt, cell_size):
+    """
+    Advects a scalar field V using semi-Lagrangian method.
+    Returns V_curr.
+    """
+    V_curr = [0.0] * (width * height * depth)
+    
+    # Assume boundary flags are handled externally or default to valid
+    # In this simplified version, we process all cells. 
+    # Real implementation checks gGridFluidCellTypes.
+
+    for z in range(depth):
+        for y in range(height):
+            for x in range(width):
+                # 1. World position of current cell center
+                px = (x + 0.5) * cell_size
+                py = (y + 0.5) * cell_size
+                pz = (z + 0.5) * cell_size
+                
+                # 2. Sample current velocity at cell center
+                u_curr = trilinear_interp(U_prev, px, py, pz, width, height, depth)
+                v_curr = trilinear_interp(V_prev_comp, px, py, pz, width, height, depth)
+                w_curr = trilinear_interp(W_prev_comp, px, py, pz, width, height, depth)
+                vel_curr = (u_curr, v_curr, w_curr)
+                
+                # 3. Midpoint position
+                mid_x = px - 0.5 * dt * vel_curr[0]
+                mid_y = py - 0.5 * dt * vel_curr[1]
+                mid_z = pz - 0.5 * dt * vel_curr[2]
+                
+                # 4. Sample velocity at midpoint
+                u_mid = trilinear_interp(U_prev, mid_x, mid_y, mid_z, width, height, depth)
+                v_mid = trilinear_interp(V_prev_comp, mid_x, mid_y, mid_z, width, height, depth)
+                w_mid = trilinear_interp(W_prev_comp, mid_x, mid_y, mid_z, width, height, depth)
+                
+                # 5. Source position
+                src_x = px - dt * u_mid
+                src_y = py - dt * v_mid
+                src_z = pz - dt * w_mid
+                
+                # 6. Sample scalar at source position
+                val = trilinear_interp(V_prev, src_x, src_y, src_z, width, height, depth)
+                
+                # 7. Write to output
+                idx = z * (width * height) + y * width + x
+                V_curr[idx] = val
+                
+    return V_curr
+
+def advect_velocity_field(U_prev, V_prev_comp, W_prev_comp, width, height, depth, dt, cell_size):
+    """
+    Advects the velocity field components using semi-Lagrangian method.
+    Returns U_curr, V_curr, W_curr.
+    """
+    U_curr = [0.0] * (width * height * depth)
+    V_curr = [0.0] * (width * height * depth)
+    W_curr = [0.0] * (width * height * depth)
+    
+    for z in range(depth):
+        for y in range(height):
+            for x in range(width):
+                # 1. World position
+                px = (x + 0.5) * cell_size
+                py = (y + 0.5) * cell_size
+                pz = (z + 0.5) * cell_size
+                
+                # 2. Current velocity
+                u_curr = trilinear_interp(U_prev, px, py, pz, width, height, depth)
+                v_curr = trilinear_interp(V_prev_comp, px, py, pz, width, height, depth)
+                w_curr = trilinear_interp(W_prev_comp, px, py, pz, width, height, depth)
+                
+                # 3. Midpoint
+                mid_x = px - 0.5 * dt * u_curr
+                mid_y = py - 0.5 * dt * v_curr
+                mid_z = pz - 0.5 * dt * w_curr
+                
+                # 4. Midpoint velocity
+                u_mid = trilinear_interp(U_prev, mid_x, mid_y, mid_z, width, height, depth)
+                v_mid = trilinear_interp(V_prev_comp, mid_x, mid_y, mid_z, width, height, depth)
+                w_mid = trilinear_interp(W_prev_comp, mid_x, mid_y, mid_z, width, height, depth)
+                
+                # 5. Source position
+                src_x = px - dt * u_mid
+                src_y = py - dt * v_mid
+                src_z = pz - dt * w_mid
+                
+                # 6. Sample components
+                idx = z * (width * height) + y * width + x
+                U_curr[idx] = trilinear_interp(U_prev, src_x, src_y, src_z, width, height, depth)
+                V_curr[idx] = trilinear_interp(V_prev_comp, src_x, src_y, src_z, width, height, depth)
+                W_curr[idx] = trilinear_interp(W_prev_comp, src_x, src_y, src_z, width, height, depth)
+                
+    return U_curr, V_curr, W_curr
+```
+
+**Parameters:**
+- $\Delta t$: Time step size. Typical values depend on the CFL condition, but semi-Lagrangian methods are unconditionally stable for advection, allowing larger steps than explicit Eulerian schemes [S1, unofficial].
+- $h$: Grid cell size. Determined by domain size and resolution [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions:** When sampling near grid edges, coordinates may fall outside $[0, W-1] \times [0, H-1] \times [0, D-1]$. The implementation uses clamping: $x = \text{clamp}(x, 0, W-1)$ [S2, unofficial].
+- **Out-of-Bounds Source:** If the back-traced source position $\mathbf{p}_{src}$ is far outside the grid, clamping may introduce artifacts. Proper boundary handling (e.g., reflection or zeroing) is required [S2, unofficial].
+- **Velocity Accuracy:** Using the midpoint velocity improves accuracy over using the current velocity alone [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N = W \cdot H \cdot D$ is the number of grid cells, as each cell is processed once with constant-time interpolation [S2, unofficial].
+- **Memory Complexity:** $O(N)$ for storing the scalar and velocity fields [S2, unofficial].
+- **Performance:** Efficient for GPU implementation due to regular memory access patterns and independence of grid cells during advection [S3, unofficial].
+- **Strengths:** Unconditionally stable for advection, allowing large time steps; simple to implement; differentiable [S1, unofficial].
+- **Limitations:** Numerical diffusion can smooth out sharp gradients; requires pressure projection for incompressibility [S1, unofficial].
+- **When to use:** When simulating fluid dynamics on a fixed grid where stability and simplicity are prioritized over high-fidelity sharp feature preservation.
+- **When not to use:** When preserving sharp interfaces is critical without additional diffusion correction, or when Lagrangian particle methods are more suitable for sparse fluids.
+
+## Background
+The semi-Lagrangian method for advection was introduced in the context of computational fluid dynamics to handle the stability issues of explicit Eulerian schemes. It traces characteristics backward in time to sample values from the previous time step [S1, unofficial]. In the context of volume rendering and inverse rendering of fluids, it is used to advect volume and velocity fields on Eulerian grids [S1, unofficial]. The specific implementation details with midpoint velocity sampling and boundary clamping are found in open-source fluid simulation repositories [S2, S3, unofficial].
+
+## Sources
+[S1] Inferring Fluid Dynamics via Inverse Rendering, https://doi.org/10.48550/arxiv.2304.04446, fetched 2026-10-26 (unofficial)
+[S2] tzhazuma/Fluid_simulation, https://github.com/tzhazuma/Fluid_simulation, fetched 2026-10-26 (unofficial)
+[S3] HiroSakuraba/destructible-voxel-engine, https://github.com/HiroSakuraba/destructible-voxel-engine, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,181 @@
+--- v003.md
++++ v004.md
+@@ -4,55 +4,140 @@
+ 
+ ## Overview
+-Vector Normalization converts a 3D vector into a unit vector, or returns a zero vector if the input magnitude falls below a precision threshold [S3, unofficial]. Some implementations modify the input vector in place rather than returning a new instance [S2, unofficial]. It is commonly used to process direction data such as sun vectors [S4, unofficial].
++Vector normalization converts a 3D vector into a unit vector (magnitude 1) or identifies its dominant axis, serving as a fundamental preprocessing step for vector field visualization, compression, and geometric calculations in volume rendering. It differs from [Octahedral Normal Encoding](5029-octahedral-normal-encoding.md) by producing a full 3D float vector rather than a compressed 2D coordinate, and from [Half-Precision Float Conversion](3267-half-precision-float-conversion.md) by focusing on directional magnitude rather than bit-depth reduction.
+ 
+ ## How it works
+-**Inputs:** A 3D vector $v$ [S2, unofficial].
+-**Outputs:** A normalized 3D vector, or a zero vector $(0,0,0)$ if the magnitude is below the threshold [S3, unofficial].
++The method encompasses two primary operations: standard Euclidean normalization (unitizing) and maximum-index identification. A third variant, L-infinity normalization, is used for specific eigenvector storage contexts.
+ 
+-**Data Structures:**
+-The input is a 3-component vector [S2, unofficial]. For grid-based operations, active voxels are represented as coordinate-value pairs $(c, v)$ within a grid tree, and normalized results are stored in a dictionary keyed by coordinate [S3, unofficial]. The resulting grid retains the original voxel size and uses a background value of $(0,0,0)$ [S3, unofficial].
++### Inputs and Outputs
++*   **Input:** A 3D vector $\mathbf{v} = (v_x, v_y, v_z)$ of type $T$ (typically `float` or `double`).
++*   **Output:** 
++    *   For normalization: A vector $\mathbf{u}$ such that $\|\mathbf{u}\| = 1$, or a zero vector if $\mathbf{v}$ is degenerate.
++    *   For MaxIndex: An integer index $i \in \{0, 1, 2\}$ corresponding to the component with the largest absolute value.
+ 
+-**Parameters:**
+-- $\epsilon(T)$: A precision threshold dependent on the data type $T$ [S3, unofficial].
++### Data Structures
++*   **Vector:** A contiguous array or struct of three numeric values. In grid-based volume data, these are stored per-voxel, often interleaved (RGB) or planar (RRR, GGG, BBB) depending on the grid format (e.g., OpenVDB, GPUNanoGrid).
+ 
+-**Steps:**
+-1. Compute the magnitude $n = \|v\|$ of the input vector [S3, unofficial].
+-2. Implementations may use `Math.hypot` for numerical stability [S4, unofficial] or standard Euclidean calculation [S3, unofficial].
+-3. Check for degeneracy: If $n < \epsilon(T)$, return or set the vector to $(0, 0, 0)$ [S3, unofficial].
+-4. Normalize: Divide each component by $n$ [S2, unofficial].
+-5. For grid operations, iterate over all active voxels $(c, v)$ in the grid tree, apply the normalization to $v$, store the result in a dictionary keyed by coordinate, and build the result grid using the computed data, a background value of $(0,0,0)$, and the original grid's voxel size [S3, unofficial].
++### Steps and Formulas
+ 
+-**Formulas:**
+-- $n = \|v\|$
+-- $u_i \leftarrow \frac{u_i}{\|u\|}$ for $i=0,1,2$, where $u$ is the vector and $\|u\|$ is its magnitude [S2, unofficial].
+-- $\text{result} = (0,0,0)$ if $n < \epsilon(T)$, else $(v[0]/n, v[1]/n, v[2]/n)$ [S3, unofficial].
++#### 1. Standard Euclidean Normalization
++This operation scales the vector to unit length.
++
++1.  Compute the Euclidean magnitude (L2 norm) of the input vector $\mathbf{v}$:
++    $$ n = \|\mathbf{v}\| = \sqrt{v_x^2 + v_y^2 + v_z^2} $$
++2.  Check for degeneracy. Let $\epsilon(T)$ be the machine epsilon or a small threshold for type $T$ (e.g., $10^{-7}$ for float).
++3.  If $n < \epsilon(T)$, return the zero vector $\mathbf{0} = (0, 0, 0)$ [S3, unofficial].
++4.  Otherwise, compute the normalized components:
++    $$ u_i \leftarrow \frac{v_i}{n} \quad \text{for } i \in \{x, y, z\} $$
++    Or in index notation for a 0-indexed array:
++    $$ u_i \leftarrow \frac{u_i}{\|u\|} \quad \text{for } i=0,1,2 \text{ [S2, unofficial]} $$
++5.  Return $\mathbf{u}$.
++
++**Pseudocode (In-place):**
++```python
++def normalize_vector_inplace(v):
++    """
++    Normalizes vector v in-place to unit length.
++    Returns True if normalized, False if zero vector was returned due to small magnitude.
++    """
++    # Compute magnitude
++    mag_sq = v[0]*v[0] + v[1]*v[1] + v[2]*v[2]
++    mag = math.sqrt(mag_sq)
++    
++    # Threshold check
++    # Note: eps(T) is implementation dependent. A common safe guard for floats is ~1e-7.
++    if mag < 1e-7: 
++        v[0] = 0.0
++        v[1] = 0.0
++        v[2] = 0.0
++        return False
++    
++    # Normalize
++    inv_mag = 1.0 / mag
++    v[0] *= inv_mag
++    v[1] *= inv_mag
++    v[2] *= inv_mag
++    return True
++```
++
++**Pseudocode (Grid-based Volume Data):**
++When normalizing a vector field stored in a sparse grid (e.g., VDB):
++1.  Iterate over all active voxels $(c, v)$ in the grid tree, where $c$ is the coordinate and $v$ is the vector value [S3, unofficial].
++2.  Apply the standard normalization function to $v$.
++3.  Store the result in a new grid or update the existing one, keyed by $c$.
++4.  Set the background value of the result grid to the zero vector $(0,0,0)$ [S3, unofficial].
++
++#### 2. MaxIndex (Dominant Axis Identification)
++This operation returns the index of the component with the largest absolute value. It is often used as a fast approximation for normalizing or for octahedral encoding logic.
++
++1.  Compare absolute values: $|v_x|, |v_y|, |v_z|$.
++2.  Return the index $i$ corresponding to $\max(|v_x|, |v_y|, |v_z|)$.
+ 
+ **Pseudocode:**
+ ```python
+-def vector_normalize(v, eps):
+-    n = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+-    if n < eps:
+-        return (0.0, 0.0, 0.0)
+-    return (v[0] / n, v[1] / n, v[2] / n)
++def max_index(v):
++    """
++    Returns the index (0, 1, or 2) of the component with the largest absolute value.
++    """
++    abs_x = abs(v[0])
++    abs_y = abs(v[1])
++    abs_z = abs(v[2])
++    
++    if abs_x >= abs_y and abs_x >= abs_z:
++        return 0
++    elif abs_y >= abs_x and abs_y >= abs_z:
++        return 1
++    else:
++        return 2
+ ```
+ 
+-**Edge Cases:**
+-- **Zero Vector:** If the input magnitude is below $\epsilon(T)$, division by zero is avoided by returning $(0, 0, 0)$ [S3, unofficial].
+-- **Precision:** Using `Math.hypot` can be used to calculate the length [S4, unofficial].
++#### 3. Sun Direction Normalization
++A specific application for directional light vectors.
++
++1.  Calculate the length of the sun direction vector $\mathbf{d}$:
++    $$ \text{len} = \sqrt{d_x^2 + d_y^2 + d_z^2} $$
++    (Implemented via `Math.hypot(d.x, d.y, d.z)` in some libraries [S4, unofficial]).
++2.  Normalize components:
++    $$ d_i \leftarrow \frac{d_i}{\text{len}} $$
++
++### Parameters
++*   **v:** Input 3D vector [S1].
++*   **eps(T):** Threshold for zero-magnitude check. Not given in the sources as a fixed constant, but implied to be type-dependent [S3, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Zero Vector:** Normalizing a zero vector results in division by zero. The method must explicitly check for magnitude $< \epsilon$ and return a zero vector or handle it as a special case [S3, unofficial].
++*   **Numerical Instability in L-Infinity:** When using L-infinity normalization for eigenvectors, if the vector is perpendicular to the view direction, the L-infinity norm can be 0. This case is typically ignored or assumed not to occur in valid rendering contexts [S6, unofficial].
++*   **Precision:** For high-precision requirements, intermediate calculations (like magnitude squared) should be performed in a higher precision type if the input is low precision (e.g., `float` input, `double` intermediate) to avoid premature underflow or overflow [G].
+ 
+ ## Subtopics
+ 
+ ### [Octahedral Normal Decoding](3373-octahedral-normal-decoding.md)
+-Decodes a 2D octahedral coordinate into a 3D unit vector.
++Decodes a 2D octahedral coordinate into a 3D unit vector. It serves as the inverse operation for octahedral normal encoding, reconstructing surface normals from compressed 2D representations. It differs from [Octahedral Normal Encoding](5029-octahedral-normal-encoding.md) by performing the inverse mapping (index to vector) rather than the forward mapping, and from [Data-Dependent Normal Vector Quantizer (Simulated Annealing)](5865-data-dependent-normal-vector-quantizer-simulated-annealing.md) by using a fixed geometric distribution rather than a data-driven one.
++
++### Vector Normalization for Simplification
++A preprocessing step applied to vector field data before mesh simplification to standardize magnitude and range [S5].
++*   **Method:** Find the vector with the maximum length in the dataset. Scale all vectors so that the maximum length becomes 1. Shift the scaled vectors into the unit interval $[0, 1]$ using the affine transformation $0.5 \mathbf{v} + 0.5$, where $\mathbf{v}$ is the vector after scaling the maximum length to 1 [S5].
++*   **Purpose:** Ensures consistent visualization and extraction ranges for streamlines and other vector field techniques on simplified meshes.
++
++### L-Infinity Vector Normalization
++Scales projected eigenvectors using the L-infinity norm to ensure one component is exactly 1 or -1, preventing numerical instability and allowing storage in 8-bit textures [S6, unofficial].
++*   **Formula:** $v_{\lambda_i}'' = \frac{v_{\lambda_i}'}{\|v_{\lambda_i}'\|_\infty}$, where $v_{\lambda_i}''$ is the scaled eigenvector, $v_{\lambda_i}'$ is the projected eigenvector, and $\|v\|_\infty = \max(|v_x|, |v_y|)$ for a 2D vector [S6, unofficial].
++*   **Storage:** The scaled eigenvectors are mapped to range $[0,1]$ and stored in RGBA channels of an 8-bit texture [S6, unofficial].
++*   **Pitfall:** If the surface normal is perpendicular to the view direction, the L-infinity norm is 0. This case is ignored/handled by not scaling or assuming it doesn't occur in valid rendering contexts [S6, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
+-- **Strengths:** Not given in the sources.
+-- **Limitations:** Not given in the sources.
+-- **When to use:** Not given in the sources.
++*   **Time Complexity:** $O(1)$ per vector for standard normalization and MaxIndex. $O(N)$ for grid-wide normalization where $N$ is the number of active voxels.
++*   **Memory Complexity:** $O(1)$ auxiliary space for in-place normalization. $O(N)$ for grid-wide normalization if a new grid is allocated.
++*   **Strengths:** Fast, numerically stable (with epsilon checks), essential for lighting calculations and vector field visualization.
++*   **Limitations:** Loses magnitude information, which may be critical for certain physical simulations or flow speed visualizations.
++*   **When to use:** Lighting calculations, normal mapping, vector field streamline generation, preprocessing for compression.
++*   **When not to use:** When magnitude is a critical data attribute (e.g., velocity magnitude visualization).
+ 
+ ## Background
+-Not given in the sources.
++Vector normalization is a fundamental linear algebra operation widely used in computer graphics. In the context of volume rendering and vector field visualization, it is crucial for standardizing directional data. The specific implementations cited here appear in various libraries and research papers:
++*   **OpenVDB:** Provides `MaxIndex` and generic vector math utilities in its `nanovdb::math` namespace [S1].
++*   **Volume Rendering Tutorials:** Simple in-place normalization is common in WebGL-based volume rendering tutorials [S2, unofficial].
++*   **Lyr.jl:** A Julia-based volume rendering framework that implements grid-based vector normalization for GPU rendering [S3, unofficial].
++*   **Theme Generation:** Used in procedural terrain generation for normalizing sun directions [S4, unofficial].
++*   **Vector Field Visualization:** Used in mesh simplification pipelines for vector fields [S5] and in LIC-like methods for tensor field visualization using L-infinity normalization for efficient storage [S6, unofficial].
+ 
+ ## Sources
+@@ -60,3 +145,5 @@
+ [S2] chloearluck/volume_rendering, https://github.com/chloearluck/volume_rendering, fetched 2026-10-24 (unofficial)
+ [S3] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
+-[S4] mingderwang/theme1, https://github.com/mingderwang/theme1, fetched 2026-10-27 (unofficial)+[S4] mingderwang/theme1, https://github.com/mingderwang/theme1, fetched 2026-10-27 (unofficial)
++[S5] Segment-based tetrahedral meshing and rendering, https://doi.org/10.1145/1174429.1174507, fetched 2026-11-06
++[S6] Image-Space Tensor Field Visualization Using a LIC-like Method, https://doi.org/10.1007/978-3-642-21608-4_11, fetched 2026-10-27 (unofficial)
