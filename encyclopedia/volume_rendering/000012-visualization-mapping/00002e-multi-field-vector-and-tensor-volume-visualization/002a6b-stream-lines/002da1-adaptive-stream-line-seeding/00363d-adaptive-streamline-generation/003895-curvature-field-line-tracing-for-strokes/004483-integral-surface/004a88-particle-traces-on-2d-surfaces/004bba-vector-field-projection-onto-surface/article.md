@@ -1,0 +1,29 @@
+# Vector Field Projection onto Surface
+
+Also called: Normal projection, Projections for Particle Traces, Vieweye projection, XY normal projection
+
+## Overview
+This family defines methods for projecting a 3D vector field onto a 2D surface to determine the direction of particle trace segments, as required by [Particle Traces on 2D Surfaces](12772-particle-traces-on-2d-surfaces.md). The primary distinction among siblings is viewpoint dependency: most techniques are viewpoint independent, while the vieweye projection requires recalculation when the viewpoint changes.
+
+## Shared principles
+All techniques in this family operate on a 3D vector $\mathbf{v}$ at a point $\mathbf{p}$ on a 2D surface. The goal is to compute a 2D direction vector $\mathbf{d}$ tangent to the surface at $\mathbf{p}$, which represents the projected flow direction. The surface is assumed to be defined such that its normal $\mathbf{n}$ at $\mathbf{p}$ is available. The resulting direction $\mathbf{d}$ is used to orient the particle trace segments.
+
+## Subtopics
+
+### Normal Projection
+Normal projection is the standard technique where the 3D vector $\mathbf{v}$ is projected onto the surface in a direction parallel to the surface normal $\mathbf{n}$ at the point of interest. This method is viewpoint independent. While straightforward to implement, it can yield unintuitive particle traces, particularly in uniform vector fields where the projection may obscure the field's true nature (e.g., making a constant velocity field appear non-uniform) [S1, unofficial].
+
+### XY Normal Projection
+The XY normal projection is designed specifically for scenarios where the viewpoint rotates about the vertical (z) axis, such as in film loops. It projects the vector onto the surface using the XY plane normal. Like the normal projection, it is viewpoint independent. It is a specialized variant of the general projection family [S1, unofficial].
+
+### Cylinder Projection
+Cylinder projection is another viewpoint-independent technique. It projects the 3D vector onto the surface along a direction defined by a cylinder axis, typically aligned with the vertical axis. This method is intended to better represent 3D flow characteristics on the surface compared to simple normal projection [S1, unofficial].
+
+### Vieweye Projection
+The vieweye projection is viewpoint dependent. It projects the 3D vector onto the surface relative to the current camera viewpoint. Consequently, the particle traces must be recalculated every time the viewpoint changes. This dependency makes it computationally more expensive for interactive applications compared to the other techniques, which do not require recalculation upon viewpoint changes [S1, unofficial].
+
+## Background
+This family of techniques originates from research into visualizing 3D velocity fields near contour surfaces. The specific comparison of these four projection methods (normal, xy normal, cylinder, and vieweye) was conducted to evaluate their ability to indicate 3D flow on 2D surfaces. The study used a simple test case of a constant velocity field to assess the intuitiveness of the resulting particle traces [S1, unofficial].
+
+## Sources
+[S1] Visualizing 3D velocity fields near contour surfaces. Revision 1, https://digital.library.unt.edu/ark:/67531/metadc1395286/?q=vector field volume rendering, fetched 2026-10-28 (unofficial)

@@ -3,153 +3,188 @@
 Also called: Data Structure and Compression
 
 ## Overview
-Structural and Geometric Compression is a method for compressing particle-based volume data by storing only the surface depth values, connectivity links, and normals for each pixel column, rather than the full volumetric grid. It solves the problem of high memory usage in particle rendering by exploiting the sparsity of particle systems, where most voxels are empty. Unlike sibling methods that compress the entire 3D coefficient space (e.g., [Value compression](6-value-compression.md)), this method operates on a 2.5D representation (depth layers per pixel), achieving high compression ratios by storing only the relevant surface geometry and its immediate topological connections.
+Structural and Geometric Compression refers to methods that compress volumetric or surface data by exploiting the spatial structure, geometric relationships, and self-similarity of the underlying data rather than relying solely on statistical redundancy of raw values. It addresses the problem of storing and transmitting large-scale 3D datasets (such as particle surfaces or mapped environments) efficiently while maintaining the ability to render them on-the-fly. Unlike standard value compression which treats data as a grid of independent samples, this approach encodes geometric primitives (depth, normals, connectivity) and uses structural descriptors to reconstruct complex shapes from compact representations [S1, S2].
 
 ## How it works
-The method compresses particle data by extracting surface information into a compact data structure per pixel column.
+The method operates on two primary paradigms found in the literature: **Surface-Linked Depth/Normal Storage** for particle rendering [S1] and **Descriptor-Based Map Expansion** for voxel mapping [S2].
 
-**Inputs and Outputs:**
-*   **Input:** A set of particle spheres defined by center and radius.
-*   **Output:** A compressed bitstream containing depth values, neighbor links, and normals for each pixel column.
+### Inputs and Outputs
+*   **Input:** Raw volumetric data (e.g., particle positions, TSDF volumes) or surface meshes.
+*   **Output:** A compressed bitstream or memory structure containing depth values, connectivity links, normal vectors, and/or geometric descriptors.
 
-**Data Structures:**
-For each pixel column (voxel column along the view ray), the following data is stored:
-1.  **Depth Values:** Stored in 32-bit floating-point format [S1]. Multiple entries may exist per column for translucency (entry and exit depths).
-2.  **Neighbor Links:** Links to the four direct spatial neighbors (up, down, left, right) of each depth value. Each link is stored in 1 byte, totaling 32 bits (4 bytes) per depth entry [S1].
-3.  **Normals:** Compressed to a 32-bit word using octahedron normal encoding. This consists of two 16-bit normalized integers [S1].
+### Data Structures
 
-**Steps:**
-1.  **Voxelization:** Mark voxels that overlap the surface of each particle sphere. Only these voxels are processed [S1].
-2.  **Depth Extraction:** For each pixel column, extract the depth values of the surface intersections.
-3.  **Link Generation:** Generate links to the four direct neighbors for each depth value. These links allow on-the-fly computation of surface connectivity during rendering [S1].
-4.  **Normal Estimation:** Apply a Sobel operator to estimate derivatives in two directions to generate normals [S1].
-5.  **Compression:**
-    *   Store depth values as 32-bit floats [S1].
-    *   Store neighbor links as 1-byte integers per direction, totaling 32 bits per depth entry [S1].
-    *   Encode normals using octahedron encoding (two 16-bit integers) into a 32-bit word [S1].
-6.  **Rendering:**
-    *   For frontmost surface rendering, read the first depth and normal entry of every pixel column [S1].
-    *   For translucency, iterate over all depth and normal entries, applying a scattering and absorption model using ray segment lengths computed from the differences between adjacent entry and exit depths [S1].
+#### 1. Surface-Linked Depth/Normal Structure [S1]
+Used for rendering particle spheres. Each voxel column (pixel) stores:
+*   **Depth Values:** Stored in 32-bit floating-point format. Multiple layers (entry/exit depths) may be stored for translucency.
+*   **Connectivity Links:** For each depth value, links to its four direct neighbors (up, down, left, right) are stored. Each link is 1 byte, totaling 32 bits (4 bytes) per depth entry.
+*   **Normals:** Compressed into a 32-bit word using octahedron normal encoding. This consists of two 16-bit normalized integers representing the x and y components of the normal vector on an octahedron projection.
 
-**Pseudocode:**
+#### 2. Descriptor-Based Model Structure [S2]
+Used for selective feature expansion in mapping.
+*   **Descriptors:** Fixed-length vectors (e.g., 64 elements) representing the geometric signature of a feature (e.g., a floor plane).
+*   **TSDF Encodings:** The descriptors are generated by encoding Truncated Signed Distance Fields (TSDFs) over a range of transformations (e.g., 15 different offsets).
+
+### Steps
+
+#### Phase 1: Preprocessing and Descriptor Generation [S2]
+1.  Identify geometries of interest (e.g., floors, walls).
+2.  Sample the TSDF of these geometries over a range of transformations (e.g., horizontal planes at 15 different offsets).
+3.  Encode each sample into a fixed-length feature vector (descriptor).
+4.  Store these descriptors as a small reference model.
+
+#### Phase 2: Compression and Storage [S1, S2]
+1.  **For Surface Data [S1]:**
+    *   Extract depth values for each voxel column.
+    *   Compute connectivity links to the four direct neighbors.
+    *   Compute normals using the Sobel operator on the depth values.
+    *   Encode normals using octahedron encoding.
+    *   Store depth, links, and normals in parallel arrays.
+2.  **For Map Data [S2]:**
+    *   Compress the voxel map into descriptors (e.g., using PCA or auto-encoders).
+    *   Store the compressed descriptors.
+
+#### Phase 3: Selective Reconstruction (Decompression) [S2]
+1.  For each compressed block in the map, compute the similarity to the reference descriptors.
+2.  Calculate the squared norm of the difference between the block's descriptor and each model descriptor.
+3.  If the distance is below a specified threshold, decompress the block.
+4.  Use PCA's ordered linear subspace property to match feature vectors of different dimensionality (e.g., match a 32-dim descriptor against the first half of a 64-dim descriptor).
+
+### Formulas
+
+**Octahedron Normal Encoding [S1]:**
+A normal vector $\mathbf{n} = (n_x, n_y, n_z)$ is encoded into two 16-bit integers. Let $u, v$ be the encoded coordinates.
+$$ u = \text{encode}(n_x / (1 - |n_z|)) $$
+$$ v = \text{encode}(n_y / (1 - |n_z|)) $$
+*(Note: Exact bit-packing details for the 16-bit integers are not specified in the source, but the geometric mapping is standard octahedron projection.)*
+
+**Similarity Distance [S2]:**
+$$ D = \sum_{i=1}^{k} (d_i - m_i)^2 $$
+Where $d_i$ is the $i$-th element of the block's descriptor, $m_i$ is the $i$-th element of the model descriptor, and $k$ is the dimensionality of the smaller descriptor.
+
+### Parameters
+*   **Link Size:** 1 byte per neighbor [S1].
+*   **Normal Encoding:** 16-bit normalized integers per axis [S1].
+*   **Descriptor Dimension:** 64 elements (example) [S2].
+*   **Transformation Offsets:** 15 different offsets (example for floors) [S2].
+
+### Edge Cases and Pitfalls
+*   **Affine Invariance:** Descriptors are **not** invariant to affine transformations. If they were, decompression would fail to reproduce the field in the correct location or orientation [S2].
+*   **Dimensionality Mismatch:** PCA allows matching vectors of different dimensions by truncating the larger vector, but this assumes the principal components are ordered by variance [S2].
+*   **Precision:** Depth values are stored as 32-bit floats; quantization of normals to 16-bit integers may introduce slight angular errors [S1].
+
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Data structure for a single depth entry in a pixel column
-class DepthEntry:
-    depth: float32      # 32-bit float
-    links: [uint8, uint8, uint8, uint8] # 4 bytes: up, down, left, right
-    normal: uint32      # 32-bit octahedron encoded normal
-
-def compress_particle_data(particles, image_width, image_height):
-    # Initialize storage for each pixel column
-    # Each column stores a list of DepthEntry objects
-    column_data = [[[] for _ in range(image_height)] for _ in range(image_width)]
+def compress_surface_data(depth_map):
+    """
+    Compresses surface data for particle rendering.
+    depth_map: 3D array of depth values.
+    Returns: Compressed structure with depth, links, and normals.
+    """
+    compressed_depth = []
+    compressed_links = []
+    compressed_normals = []
     
-    # Step 1: Voxelization - mark voxels overlapping particle surfaces
-    for particle in particles:
-        voxels = get_voxels_overlapping_sphere(particle.center, particle.radius)
-        for voxel in voxels:
-            # Mark voxel as part of surface
-            mark_voxel_surface(voxel)
-
-    # Step 2: Depth Extraction and Link Generation
-    for x in range(image_width):
-        for y in range(image_height):
-            # Get depth values for this column
-            depths = get_depth_values_for_column(x, y)
+    for x, y, z in depth_map.voxels:
+        if depth_map.is_surface(x, y, z):
+            # Store depth
+            d = depth_map.get_depth(x, y, z)
+            compressed_depth.append(d)
             
-            # Sort depths to ensure correct entry/exit order
-            depths.sort()
+            # Store links to 4 direct neighbors (1 byte each)
+            links = [
+                depth_map.get_neighbor_link(x+1, y, z),
+                depth_map.get_neighbor_link(x-1, y, z),
+                depth_map.get_neighbor_link(x, y+1, z),
+                depth_map.get_neighbor_link(x, y-1, z)
+            ]
+            compressed_links.append(pack_links(links)) # 32-bit word
             
-            for i, depth in enumerate(depths):
-                entry = DepthEntry()
-                entry.depth = depth
-                
-                # Step 3: Generate links to neighbors
-                # Links point to the index of the neighbor's depth entry in the same column
-                # or a special value if no neighbor exists
-                entry.links = [
-                    get_neighbor_link(x, y, i, direction='up'),
-                    get_neighbor_link(x, y, i, direction='down'),
-                    get_neighbor_link(x, y, i, direction='left'),
-                    get_neighbor_link(x, y, i, direction='right')
-                ]
-                
-                # Step 4: Normal Estimation
-                # Use Sobel operator on depth derivatives
-                normal = estimate_normal_sobel(depths, i)
-                entry.normal = octahedron_encode(normal)
-                
-                column_data[x][y].append(entry)
-                
-    return column_data
-
-def render_frontmost(column_data):
-    for x in range(image_width):
-        for y in range(image_height):
-            entries = column_data[x][y]
-            if entries:
-                # Read first depth and normal
-                first_entry = entries[0]
-                depth = first_entry.depth
-                normal = octahedron_decode(first_entry.normal)
-                # Render pixel at depth with normal
-                render_pixel(x, y, depth, normal)
-
-def render_translucent(column_data):
-    for x in range(image_width):
-        for y in range(image_height):
-            entries = column_data[x][y]
-            if len(entries) < 2:
-                continue
+            # Compute and encode normal
+            normal = compute_normal_sobel(depth_map, x, y, z)
+            encoded_normal = octahedron_encode(normal) # 32-bit word
+            compressed_normals.append(encoded_normal)
             
-            # Iterate over all depth entries
-            for i in range(len(entries) - 1):
-                entry_in = entries[i]
-                entry_out = entries[i+1]
+    return {
+        "depth": compressed_depth,
+        "links": compressed_links,
+        "normals": compressed_normals
+    }
+
+def decompress_map_selective(compressed_map, reference_descriptors, threshold):
+    """
+    Decompresses map blocks based on similarity to reference descriptors.
+    compressed_map: List of compressed block descriptors.
+    reference_descriptors: List of model descriptors (e.g., floor planes).
+    threshold: Maximum squared distance for expansion.
+    Returns: Expanded voxel data.
+    """
+    expanded_data = []
+    
+    for block in compressed_map:
+        min_dist = infinity
+        best_descriptor = None
+        
+        for model in reference_descriptors:
+            # Match using PCA property: truncate larger descriptor if needed
+            k = min(len(block), len(model))
+            dist = sum((block[i] - model[i])**2 for i in range(k))
+            
+            if dist < min_dist:
+                min_dist = dist
+                best_descriptor = model
                 
-                # Compute ray segment length
-                segment_length = entry_out.depth - entry_in.depth
-                
-                # Apply scattering and absorption model
-                color = apply_scattering_absorption(
-                    entry_in.normal, 
-                    segment_length, 
-                    particle_properties
-                )
-                accumulate_color(x, y, color)
+        if min_dist < threshold:
+            # Decompress block using the matched descriptor
+            expanded_block = decompress_block(block, best_descriptor)
+            expanded_data.append(expanded_block)
+            
+    return expanded_data
+
+def octahedron_encode(normal):
+    """
+    Encodes a normal vector into two 16-bit integers.
+    normal: (nx, ny, nz)
+    """
+    # Avoid division by zero
+    if abs(normal.z) >= 1.0:
+        return (0, 0)
+        
+    u = normal.x / (1.0 - abs(normal.z))
+    v = normal.y / (1.0 - abs(normal.z))
+    
+    # Map u, v from [-1, 1] to [0, 65535]
+    u_int = int((u + 1.0) * 32767.5)
+    v_int = int((v + 1.0) * 32767.5)
+    
+    # Pack into 32-bit word
+    return (u_int << 16) | v_int
 ```
-
-**Parameters:**
-*   **Smoothing Iterations:** The number of iterations for the 3x3 smoothing kernel depends on the distance of the surface point to the camera to maintain a constant world-space filter radius [S1].
-*   **Link Size:** 1 byte per neighbor direction [S1].
-*   **Normal Encoding:** Octahedron encoding with two 16-bit integers [S1].
-
-**Edge Cases:**
-*   **Empty Columns:** Pixel columns with no particle intersections should be handled gracefully (e.g., skip rendering or use background color).
-*   **Boundary Links:** Links at the image boundaries must be handled to avoid out-of-bounds access.
-*   **Precision:** Depth values are stored as 32-bit floats, which may introduce precision errors for very large or very small depth values [S1].
 
 ## Subtopics
 
 ### [Fractal Compression](5719-fractal-compression.md)
-Fractal compression is a lossy volume compression method that exploits self-similarity within the dataset by mapping each "range block" to a larger, dissimilar "domain block" from the same volume, storing only the affine transformation required to convert the domain block into the range block. Unlike vector quantization, which stores a reference to a codeword, fractal compression stores the geometric relationship between two different-sized blocks, allowing for high compression ratios at the cost of extreme encoding complexity and iterative reconstruction during decoding.
+Fractal compression is a lossy volume compression method that exploits self-similarity within the dataset by mapping each "range block" to a larger, most similar "domain block" from the same volume, storing only the affine transformation required to convert the domain block into the range block. Unlike vector quantization, which stores a reference to a codeword, fractal compression stores the geometric relationship between two different-sized blocks, allowing for high compression ratios at the cost of extreme encoding complexity and iterative reconstruction during decoding.
 
 ### [Parallel Edgebreaker](7789-parallel-edgebreaker.md)
-Parallel Edgebreaker is a parallel compression algorithm for isosurfaces where each part of the mesh is encoded independently from the others, based on the Edgebreaker algorithm. It solves the bottleneck of sequential mesh compression in distributed environments by trading a slight increase in file size for significant reductions in transmission and processing time. Unlike sequential methods that require global traversal, this method allows independent encoding of mesh partitions, making it suitable for high-latency network transfers where processing speed outweighs storage efficiency.
+Parallel Edgebreaker is a parallel compression algorithm for isosurfaces where each part of the mesh is encoded independently from the others, based on the Edgebreaker algorithm. It solves the problem of efficiently transmitting or storing large isosurface meshes in distributed environments by leveraging parallel processing. Unlike sequential compression, which processes the mesh as a single unit, this method partitions the mesh to allow concurrent encoding, trading a slight increase in file size (~10%) for significant reductions in transmission and processing time.
+
+### Selective Feature-Based Map Expansion
+A variant of descriptor-based compression where specific geometric features (e.g., floors) are modeled using TSDF encodings over a range of transformations. Decompression is selective: only blocks whose descriptor similarity distance (squared norm of difference) falls below a threshold are expanded. It leverages PCA's ordered linear subspace to match feature vectors of different dimensionality (e.g., 32-dim against 64-dim) [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Encoding complexity is dominated by voxelization and link generation, which is linear with respect to the number of particles and surface voxels. Decoding is efficient as it involves simple lookups and on-the-fly connectivity computation [S1].
-*   **Memory Complexity:** Memory usage is proportional to the number of surface voxels per pixel column, significantly less than storing the full 3D volume [S1].
-*   **Measured Performance:** Not given in the sources.
-*   **Strengths:** High compression ratios for sparse particle data; efficient rendering for frontmost and translucent surfaces; on-the-fly connectivity computation reduces storage overhead [S1].
-*   **Limitations:** Limited to particle-based data; smoothing iterations depend on camera distance, which may require dynamic adjustment [S1].
-*   **When to use:** Suitable for rendering large-scale particle systems where memory bandwidth is a bottleneck and the data is sparse.
-*   **When not to use:** Not suitable for dense volumetric data or non-particle-based volumes.
+*   **Memory Efficiency:** The surface-linked structure [S1] is highly memory-efficient for particle rendering, storing only surface layers rather than the full volume. Depth (32-bit), links (32-bit), and normals (32-bit) are stored per surface voxel.
+*   **Compression Ratio:** Fractal compression [S1] can achieve high ratios but requires significant encoding time. Descriptor-based methods [S2] offer a balance, allowing variable levels of compression by adjusting descriptor dimensionality and thresholds.
+*   **Rendering Speed:** On-the-fly rendering is supported. For surface data [S1], rendering is fast as it only requires reading the first depth and normal entry per voxel column. For translucency, it iterates over all depth/normal entries.
+*   **Complexity:** Fractal compression has high encoding complexity. Descriptor-based methods [S2] require PCA or auto-encoder training but offer faster selective decompression.
+*   **Limitations:** Descriptors [S2] are not affine-invariant, limiting their use to known orientations. Octahedron encoding [S1] may lose precision for normals near the poles of the octahedron.
 
 ## Background
-The method was introduced in "Memory-Efficient On-The-Fly Voxelization of Particle Data" [S1]. It builds on the idea of storing surface geometry rather than volumetric data to reduce memory footprint. The use of octahedron normal encoding and neighbor links allows for efficient rendering and connectivity computation without storing explicit mesh structures [S1].
+Structural and Geometric Compression techniques have evolved to handle the increasing size of 3D datasets in volume rendering and robotics. The surface-linked depth/normal structure [S1] was developed for memory-efficient on-the-fly voxelization of particle data, allowing real-time rendering of complex particle systems. The descriptor-based approach [S2] emerged from robotics mapping applications, where unsupervised learning (PCA, auto-encoders) is used to compress voxel-based maps for efficient storage and transmission.
 
 ## Sources
 [S1] Memory-Efficient On-The-Fly Voxelization of Particle Data, https://doi.org/10.2312/pgv.20151150, fetched 2026-10-26
+[S2] Compressed Voxel-Based Mapping Using Unsupervised Learning, https://doi.org/10.3390/robotics6030015, fetched 2026-10-26

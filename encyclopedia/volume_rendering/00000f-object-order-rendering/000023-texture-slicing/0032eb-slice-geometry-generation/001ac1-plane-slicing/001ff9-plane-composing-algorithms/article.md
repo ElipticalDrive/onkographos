@@ -1,24 +1,43 @@
 # Plane Composing Algorithms
 
-Also called: Slicing Method
+Also called: Image Order Volume Rendering, Slicing Method
 
 ## Overview
-Plane Composing Algorithms are a category of direct volume rendering methods that operate by compositing several slices which comprise a volumetric model [S1, unofficial][S2, unofficial]. They tend to work best when the view-plane is fixed parallel to the model, so that each of the voxels being composed may be accessed on separate planes [S1, unofficial][S2, unofficial]. This approach differs from ray casting by leveraging spatial coherence through slicing, often enhanced by texture-based rendering techniques [S1, unofficial][S2, unofficial].
+Plane Composing Algorithms are direct volume rendering methods that operate by compositing several slices which comprise a volumetric model [S1, S2, S3, unofficial]. They tend to work best when the view-plane is fixed parallel to the model, so that each of the voxels being composed may be accessed on separate planes [S1, S2, unofficial]. This approach is distinct from ray casting [Ray Casting](42-ray-casting.md) in that it processes data in object-order slices rather than image-order rays, and it differs from [Texture Slicing](845-texture-slicing.md) by explicitly defining the composition logic of those slices rather than relying solely on hardware texture interpolation.
 
 ## Shared principles
-The core mechanism operates by compositing several slices which comprise a volumetric model [S2, unofficial]. The computational complexity of these algorithms is relative to the volume size [S1, unofficial][S2, unofficial]. When the view-plane is fixed parallel to the model, the algorithm achieves optimal performance because the voxels being composed can be accessed on separate planes [S1, unofficial][S2, unofficial]. Texture-based rendering is identified as a key technique within this family, where slices of volumetric data are composited using texture mapping capabilities [S1, unofficial][S2, unofficial]. Shear-Warp factorization can be used to enhance performance of rendering volume slices by applying a shearing transformation to exploit spatial coherency of the model, reducing computational complexity of rendering a volume from an arbitrary viewing angle [S1, unofficial][S2, unofficial].
+The core mechanism involves dividing the volume into slices (planes) and composing them one over the other to produce the final image [S3, unofficial]. The computational complexity is relative to the volume size [S1, S2, S3, unofficial].
+
+**Composition Order:**
+Planes can be composed from rear to front or front to back [S3, unofficial].
+*   **Rear to Front:** If composed rear to front, the accumulation of color and transparency uses specific equations starting with initial values (typically zero color and zero opacity) [S3, unofficial].
+*   **Front to Back:** If composed front to back, the standard ray casting accumulation equations remain valid [S3, unofficial].
+
+**Geometric Constraints:**
+The method works best when the view-plane is parallel to the volume edge [S3, unofficial]. In this case, voxels can be accessed easily as planes in the volume [S3, unofficial]. If the view-plane is not parallel to the volume, a more complicated sampling algorithm is needed [S3, unofficial].
+
+**Filtering:**
+Since a voxel is not projected onto one pixel, a filter should be used for the composition to handle aliasing and interpolation [S3, unofficial].
 
 ## Subtopics
 
-### Texture-Based Slicing
-Uses GPU texture units to store and sample volume slices, compositing them via fragment shaders. Chosen when hardware acceleration is available and view angles are constrained or can be approximated by shearing. See [Texture-Based Slicing](846-texture-based-slicing.md).
+### Slice Plane Ordering
+See [Slice Plane Ordering](4041-slice-plane-ordering.md) for details on the specific ordering strategies used to traverse the planes during composition.
 
-### Shear-Warp Factorization
-Applies a shearing transformation to align the volume with the view plane, allowing efficient slicing and compositing, followed by a warping step to correct the perspective. Chosen for arbitrary viewing angles where performance is critical. See [Shear-Warp Factorization](847-shear-warp-factorization.md).
+### Transparent Planes
+**Definition:** A strategy that slices the volume by many planes, applies a transfer function to each vertex on the plane to create variation in color and transparency, and renders the planes from back to front [S4, unofficial].
+
+**Parameters:** The number of planes is typically between 200 and 1000 [S4, unofficial].
+
+**Comparison:** These planes can be quickly rendered using 2D textures or 3D textures [S4, unofficial].
 
 ## Background
-Plane Composing Algorithms are one of the two main categories of direct volume rendering algorithms, the other being Ray Casting [S1, unofficial][S2, unofficial]. They were developed as an alternative to ray casting to address computational complexity, particularly by exploiting spatial coherence [S1, unofficial][S2, unofficial]. The approach is closely associated with texture-based rendering techniques and the Shear-Warp factorization method, which was introduced to handle arbitrary viewing angles efficiently [S1, unofficial][S2, unofficial].
+Plane Composing Algorithms are one of the two main categories of direct volume rendering algorithms, the other being Ray Casting [S1, S2, unofficial]. They were identified as a primary technique for rendering volumes based on their ability to exploit spatial coherency and texture-based rendering hardware [S1, S2, unofficial].
+
+Performance improvements for this method include Shear-Warp factorization of the viewing matrix, which applies a shearing transformation to exploit spatial coherency of the model, reducing computational complexity of rendering a volume from an arbitrary viewing angle [S1, S2, unofficial]. Other optimizations mentioned include using information of min-max non-transparent voxels, interleaving methods (such as sampling only half of the planes or ¼ of the points in the image), and using hardware graphic accelerators to send volume planes one by one as transparent textures [S3, unofficial].
 
 ## Sources
 [S1] Volume Ray Casting Techniques and Applications using ..., https://halogenica.net/bin/graphics/volume-rendering-using-gpgpu/Thesis.pdf, fetched 2026-10-27 (unofficial)
 [S2] Volume ray casting techniques and applications using general purpose computations on graphics processing units, https://repository.rit.edu/cgi/viewcontent.cgi?article=6466&context=theses, fetched 2026-10-28 (unofficial)
+[S3] Introduction to volume rendering, https://slidetodoc.com/introduction-to-volume-rendering-presented-by-zvi-devir/, fetched 2026-10-29 (unofficial)
+[S4] PPT - Volume Rendering, Part 2 PowerPoint Presentation, free download - ID:2205448, https://slideserve.com/walter/volume-rendering-part-2-powerpoint-ppt-presentation, fetched 2026-10-24 (unofficial)

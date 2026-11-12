@@ -1,127 +1,62 @@
 # Sparse-Controlled 3D Gaussian Splatting
-
 Also called: SC-GS, Sparse-Controlled
 
 ## Overview
-Sparse-Controlled 3D Gaussian Splatting (SC-GS) is a dynamic scene representation method that enables user-driven editing of 4D scenes by propagating sparse control point edits across time via a learned deformation prior [S1, unofficial]. It distinguishes itself from sibling methods like Deformable 3DGS by replacing per-Gaussian MLP deformation networks with a compact, control-point-driven influence model, resulting in a more editable and memory-efficient representation [S2, unofficial].
+Sparse-Controlled 3D Gaussian Splatting (SC-GS) is a dynamic scene representation method that enables sparse user-provided control points to edit a dynamic scene, propagating these edits across time via a learned deformation prior [S1, unofficial][S2, unofficial]. It distinguishes itself from sibling methods like Deformable 3DGS by using a small set of control points with influence weights to drive the deformation of other Gaussians, resulting in a more compact and editable representation [S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** A set of canonical 3D Gaussians $\mathcal{G}_{canon}$ (position $\boldsymbol{\mu}$, rotation $\mathbf{q}$, scale $\mathbf{s}$, opacity $\alpha$, spherical harmonics coefficients $\mathbf{c}_{SH}$), a sparse set of user-provided control points $\mathcal{C} = \{(\mathbf{p}_k, \mathbf{w}_k)\}_{k=1}^K$ where $\mathbf{p}_k$ are spatial locations and $\mathbf{w}_k$ are influence weights, and a time parameter $t \in [0, 1]$ [S1, unofficial][S2, unofficial].
-*   **Outputs:** Time-varying Gaussian parameters $\mathcal{G}(t)$ suitable for differentiable rasterization.
+**Inputs:**
+- Canonical 3D Gaussian set $\mathcal{G}_{canon}$ (position $\boldsymbol{\mu}_i$, rotation $\mathbf{q}_i$, scale $\mathbf{s}_i$, opacity $\alpha_i$, SH coefficients $\mathbf{c}_{SH,i}$) [G].
+- A small set of sparse user-provided control points $\mathcal{C} = \{c_j\}_{j=1}^M$.
+- Time parameter $t \in [0, 1]$.
+
+**Outputs:**
+- Deformation deltas $(\Delta\boldsymbol{\mu}_i, \Delta\mathbf{q}_i, \Delta\mathbf{s}_i)$ for each Gaussian $i$.
+- Rendered image at time $t$.
 
 **Data Structures:**
-*   **Canonical Gaussians:** Stored as a flat array or list. Each element contains:
-    *   $\boldsymbol{\mu}_i \in \mathbb{R}^3$: Center position.
-    *   $\mathbf{q}_i \in \mathbb{R}^4$: Unit quaternion for rotation.
-    *   $\mathbf{s}_i \in \mathbb{R}^3$: Scale vector (usually log-scale for optimization).
-    *   $\alpha_i \in \mathbb{R}$: Opacity.
-    *   $\mathbf{c}_{SH,i} \in \mathbb{R}^{D}$: Spherical Harmonics coefficients (dimension $D$ depends on order).
-*   **Control Points:** A small list of tuples $(\mathbf{p}_k, \mathbf{w}_k)$. $\mathbf{p}_k$ is the 3D position of the $k$-th control point. $\mathbf{w}_k$ is a scalar or vector weight defining the influence magnitude and direction of the edit [S2, unofficial].
+- Control Points: A list of $M$ points, each with a 3D position $\mathbf{p}_j$ and potentially an associated influence radius or weight function parameters.
+- Influence Weights: For each Gaussian $i$, a weight vector $\mathbf{w}_i \in \mathbb{R}^M$ representing the influence of each control point.
 
-**Algorithm Steps:**
-1.  **Deformation Prior Learning:** Train a network $\mathcal{F}_{\theta}$ or compute influence weights that map the canonical Gaussian features and time $t$ to deformation deltas $(\Delta\boldsymbol{\mu}, \Delta\mathbf{q}, \Delta\mathbf{s})$. The network takes as input the canonical Gaussian attributes and the time $t$ [S2, unofficial].
-2.  **Control Point Influence Propagation:** For each Gaussian $i$, compute the deformation deltas based on its proximity and relationship to the sparse control points $\mathcal{C}$. The influence of control point $k$ on Gaussian $i$ is weighted by $\mathbf{w}_k$ [S2, unofficial].
-3.  **Parameter Update:** Compute the time-varying parameters using the deformation deltas:
-    $$ \boldsymbol{\mu}_i(t) = \boldsymbol{\mu}_i + \Delta\boldsymbol{\mu}_i $$
-    $$ \mathbf{q}_i(t) = \text{Normalize}(\mathbf{q}_i \otimes \Delta\mathbf{q}_i) $$
-    $$ \mathbf{s}_i(t) = \mathbf{s}_i + \Delta\mathbf{s}_i $$
-    where $\otimes$ denotes quaternion multiplication [G].
-4.  **Rendering:** Rasterize the updated Gaussians $\mathcal{G}(t)$ using standard 3D Gaussian Splatting rasterization for the given camera pose and time $t$ [S1, unofficial].
+**Steps:**
+1. **Compute Influence Weights:** For each Gaussian $i$, calculate its influence weights $\mathbf{w}_i$ based on its spatial distance to the control points $\mathcal{C}$. A common approach is using a radial basis function (e.g., Gaussian kernel) centered at each control point $c_j$:
+   $$ w_{i,j} = \exp\left(-\frac{\|\boldsymbol{\mu}_i - \mathbf{p}_j\|^2}{2\sigma_j^2}\right) $$
+   where $\sigma_j$ is the influence radius of control point $j$. Normalize weights if necessary: $\hat{w}_{i,j} = \frac{w_{i,j}}{\sum_k w_{i,k}}$. [G]
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+2. **Predict Deformation Deltas:** Use a learned deformation network (e.g., MLP) conditioned on the normalized influence weights $\hat{\mathbf{w}}_i$ and time $t$ to predict the deformation deltas for Gaussian $i$:
+   $$ (\Delta\boldsymbol{\mu}_i, \Delta\mathbf{q}_i, \Delta\mathbf{s}_i) = \text{DeformNet}(\hat{\mathbf{w}}_i, t) $$
+   The network maps the sparse control influence to dense Gaussian deformation. [S2, unofficial]
 
-```python
-def get_deformation(gaussian, control_points, time_t):
-    """
-    Computes deformation deltas for a single Gaussian based on control points.
-    gaussian: dict with keys 'mu', 'q', 's', 'alpha', 'c_SH'
-    control_points: list of tuples (p_k, w_k)
-    time_t: float in [0, 1]
-    Returns: delta_mu, delta_q, delta_s
-    """
-    # Initialize deltas
-    delta_mu = np.zeros(3)
-    delta_q = np.array([1.0, 0.0, 0.0, 0.0]) # Identity quaternion
-    delta_s = np.zeros(3)
-    
-    # Aggregate influence from all control points
-    for p_k, w_k in control_points:
-        # Compute influence weight based on distance and user-defined w_k
-        # Note: Exact distance metric and weighting function are implementation-specific [G]
-        dist = np.linalg.norm(gaussian['mu'] - p_k)
-        influence = w_k * exp(-dist) # Example influence decay
-        
-        # Get deformation contribution from control point k at time t
-        # This requires a learned model or predefined trajectory for control points [G]
-        # Assuming a function get_control_deformation(p_k, w_k, t) exists
-        d_mu_k, d_q_k, d_s_k = get_control_deformation(p_k, w_k, time_t)
-        
-        # Accumulate deltas
-        delta_mu += influence * d_mu_k
-        # Quaternion multiplication accumulation
-        delta_q = normalize(delta_q * d_q_k) # * is quaternion multiplication
-        delta_s += influence * d_s_k
-        
-    return delta_mu, delta_q, delta_s
+3. **Apply Deformation:** Update the canonical Gaussian parameters using the predicted deltas, following the shared principles of the parent method:
+   $$ \boldsymbol{\mu}_i(t) = \boldsymbol{\mu}_i + \Delta\boldsymbol{\mu}_i $$
+   $$ \mathbf{q}_i(t) = \text{Normalize}(\mathbf{q}_i \otimes \Delta\mathbf{q}_i) $$
+   $$ \mathbf{s}_i(t) = \mathbf{s}_i + \Delta\mathbf{s}_i $$
+   [G]
 
-def render_dynamic_scene(gaussians, control_points, time_t, camera):
-    """
-    Renders a dynamic scene at time t using sparse control points.
-    """
-    updated_gaussians = []
-    for g in gaussians:
-        d_mu, d_q, d_s = get_deformation(g, control_points, time_t)
-        
-        # Update parameters
-        new_mu = g['mu'] + d_mu
-        new_q = normalize(g['q'] * d_q)
-        new_s = g['s'] + d_s
-        
-        # Create new Gaussian with updated parameters
-        new_g = {
-            'mu': new_mu,
-            'q': new_q,
-            's': new_s,
-            'alpha': g['alpha'],
-            'c_SH': g['c_SH']
-        }
-        updated_gaussians.append(new_g)
-        
-    # Rasterize using standard 3DGS rasterizer
-    image = rasterize(updated_gaussians, camera)
-    return image
-```
+4. **Render:** Rasterize the deformed Gaussians $\mathcal{G}(t)$ using standard differentiable rasterization for the given camera pose and time $t$ [S1, unofficial][G].
 
 **Parameters:**
-*   Number of control points $K$: Small number, typically much less than the number of Gaussians [S2, unofficial].
-*   Influence weights $\mathbf{w}_k$: User-defined or learned weights [S2, unofficial].
-*   Time $t$: Normalized to $[0, 1]$ [G].
+- Number of control points $M$: Small, user-defined.
+- Influence radius $\sigma_j$: Controls the spatial extent of each control point's influence.
+- Deformation Network Architecture: Typically a small MLP.
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** Quaternion normalization is critical to avoid drift [G].
-*   **Boundaries:** Control points outside the scene extent may have negligible influence [G].
-*   **Degenerate Input:** If no control points are provided, the method degrades to the static canonical representation [S1, unofficial].
+- **Degenerate Control Points:** If control points are too close or coincident, influence weights may become unstable. [G]
+- **Zero Influence:** If a Gaussian is far from all control points, weights may be near zero, leading to no deformation. Ensure network handles this gracefully. [G]
+- **Precision:** Quaternion normalization is critical to prevent rotation drift. [G]
 
 ## Subtopics
 
-### Deformable 3DGS
-Uses per-Gaussian MLP deformation networks. Choose when high-fidelity, unconstrained deformation is needed and editability is secondary [S2, unofficial].
-
-### Spacetime Gaussians (STG)
-Uses temporal opacity envelopes and polynomial trajectories. Choose for continuous-time 4D reconstruction without explicit control points [S2, unofficial].
-
 ## Operating characteristics
-*   **Time Complexity:** Rendering time is dominated by rasterization, similar to static 3DGS. Deformation computation is $O(N \cdot K)$ where $N$ is the number of Gaussians and $K$ is the number of control points. Since $K \ll N$, this is efficient [S2, unofficial].
-*   **Memory Complexity:** Stores canonical Gaussians plus a small set of control points. Significantly less memory than methods storing per-Gaussian deformation networks [S2, unofficial].
-*   **Strengths:** Compact representation, high editability via sparse control points, efficient deformation propagation [S1, unofficial][S2, unofficial].
-*   **Limitations:** Quality depends on the sparsity and placement of control points; may struggle with complex, non-rigid deformations not captured by the control points [S2, unofficial].
-*   **When to use:** When user-driven editing of dynamic scenes is required and computational efficiency is important [S1, unofficial].
-*   **When not to use:** When fully automatic, high-fidelity reconstruction of complex non-rigid motion without user input is needed [S2, unofficial].
+**Time Complexity:** Deformation prediction is $O(N \cdot M)$ for $N$ Gaussians and $M$ control points, assuming constant-time weight computation and network evaluation. Rendering remains $O(N)$ per pixel.
+**Memory Complexity:** $O(N + M)$, significantly lower than methods storing per-Gaussian deformation networks or trajectories, as deformation is driven by sparse controls.
+**Strengths:** High editability via sparse controls; compact representation; efficient deformation prediction.
+**Limitations:** Quality depends on control point placement; may struggle with complex, non-local deformations if controls are insufficient.
+**When to Use:** When user interaction/editing of dynamic scenes is required, or when memory efficiency is critical.
+**When Not to Use:** For highly complex, autonomous dynamic scenes without user control points.
 
 ## Background
-SC-GS was introduced as a method to address the limitations of existing dynamic 3DGS approaches, which often lack editability or are computationally expensive. It builds on the canonical + deformation decomposition principle common in dynamic scene representations [S1, unofficial][S2, unofficial]. The method leverages the sparsity of user-provided control points to drive the deformation of the entire Gaussian set, offering a balance between flexibility and efficiency [S1, unofficial][S2, unofficial].
+SC-GS was introduced as a variant of 3D Gaussian Splatting for dynamic scenes, focusing on sparse control for editing and compactness [S1, unofficial][S2, unofficial]. It builds on the canonical + deformation decomposition common in deformable 3DGS methods.
 
 ## Sources
 [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)

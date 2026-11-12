@@ -1,18 +1,17 @@
 # Entropy Loss
 
-Also called: Gaussian Entropy Loss, Anchor Attribute Entropy Loss
 
 ## Overview
 Entropy Loss is a compression-oriented loss function used within Hash Grid Loss frameworks to minimize the bit consumption of quantized anchor attributes in sparse volume representations [S1, unofficial]. It differs from standard reconstruction losses by optimizing the probability model of the data itself, leveraging the Gaussian-like distribution of neural network features to estimate the theoretical minimum bits required for encoding [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Quantized anchor attributes $\hat{\mathbf{f}}_i$ for all anchors $i=1 \dots N^{\text{at}}$, where $\mathbf{f} \in \{\mathbf{A}\}$ represents the set of attribute types (e.g., color, opacity, position deltas).
-*   **Input:** Context model parameters: mean $\mu_i$ and variance $\sigma_i$ for each attribute component.
-*   **Output:** Scalar loss value $L_{\text{entropy}}$ representing the estimated bit cost.
+*   **Input:** Quantized anchor attributes $\hat{\mathbf{f}}_i$ for all anchors $i=1 \dots N^{\text{at}}$, where $\mathbf{f} \in \{\mathbf{A}\}$ represents the set of attribute types [S1, unofficial].
+*   **Input:** Context model parameters: mean $\mu_i$ and variance $\sigma_i$ for each attribute component [S1, unofficial].
+*   **Output:** Scalar loss value $L_{\text{entropy}}$ representing the estimated bit cost [S1, unofficial].
 
 **Data Structures:**
-*   **Attributes ($\mathbf{A}$):** A set of attribute vectors associated with each anchor. Common attributes include position offsets ($\Delta x_g$), color ($c$), and opacity ($\alpha$) [S1, unofficial].
+*   **Attributes ($\mathbf{A}$):** A set of attribute vectors associated with each anchor. The evidence explicitly mentions position offsets ($\Delta x_g$) as one of the attributes [S1, unofficial]. Other attributes are not given in the sources.
 *   **Quantized Attributes ($\hat{\mathbf{f}}_i$):** The discrete representation of attributes after quantization-aware training [S1, unofficial].
 
 **Steps:**
@@ -21,7 +20,7 @@ Entropy Loss is a compression-oriented loss function used within Hash Grid Loss 
 3.  **Probability Calculation:** Compute the probability density $p(\hat{\mathbf{f}}_i)$ using the Gaussian PDF:
     $$ p(\hat{\mathbf{f}}_i) = \frac{1}{\sqrt{2\pi\sigma_i^2}} \exp\left( -\frac{(\hat{\mathbf{f}}_i - \mu_i)^2}{2\sigma_i^2} \right) $$
 4.  **Bit Consumption Calculation:** Calculate the negative log-likelihood for each attribute, which corresponds to the bit cost under arithmetic coding assumptions [S1, unofficial].
-5.  **Aggregation:** Sum the bit costs over all attribute types and all anchors.
+5.  **Aggregation:** Sum the bit costs over all attribute types and all anchors [S1, unofficial].
 
 **Formula:**
 The entropy loss is defined as [S1, unofficial]:
@@ -29,9 +28,9 @@ The entropy loss is defined as [S1, unofficial]:
 $$ L_{\text{entropy}} = \sum_{\mathbf{f} \in \{\mathbf{A}\}} \sum_{i=1}^{N^{\text{at}}} \left( -\log_2 p(\hat{\mathbf{f}}_i) \right) $$
 
 Where:
-*   $N^{\text{at}}$ is the number of anchors.
-*   $\mathbf{f}$ iterates over the set of attribute types $\{\mathbf{A}\}$.
-*   $p(\hat{\mathbf{f}}_i)$ is the modeled probability of the quantized attribute value.
+*   $N^{\text{at}}$ is the number of anchors [S1, unofficial].
+*   $\mathbf{f}$ iterates over the set of attribute types $\{\mathbf{A}\}$ [S1, unofficial].
+*   $p(\hat{\mathbf{f}}_i)$ is the modeled probability of the quantized attribute value [S1, unofficial].
 
 **Parameters:**
 *   $N^{\text{at}}$: Number of anchors. Typical values depend on the scene resolution and sparsity threshold. Not given in the sources.
@@ -43,12 +42,18 @@ Where:
 
 ## Subtopics
 
+### [Gaussian Probability Modeling](2122-gaussian-probability-modeling.md)
+Models quantized anchor attributes as Gaussian distributions to estimate bit consumption, differing from uniform or discrete models by leveraging Gaussian-like feature distributions.
+
+### [Entropy Model for Rate Estimation](11663-entropy-model-for-rate-estimation.md)
+Estimates feature grid entropy during training as a lower bound for bitrate, allowing rate integration into the loss function.
+
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of anchors and attributes $O(N^{\text{at}} \cdot |\mathbf{A}|)$, as it requires computing the Gaussian PDF and log for each attribute component.
-*   **Memory Complexity:** Requires storing mean and variance parameters for each attribute component per anchor, plus the quantized attributes.
+*   **Time Complexity:** Linear with respect to the number of anchors and attributes $O(N^{\text{at}} \cdot |\mathbf{A}|)$, as it requires computing the Gaussian PDF and log for each attribute component [G].
+*   **Memory Complexity:** Requires storing mean and variance parameters for each attribute component per anchor, plus the quantized attributes [G].
 *   **Strengths:** Directly optimizes for compression efficiency; leverages the natural Gaussian distribution of neural features for accurate probability estimation [S1, unofficial].
 *   **Limitations:** Requires a context model to predict $\mu_i$ and $\sigma_i$; sensitive to quantization precision [S1, unofficial].
-*   **When to use:** When the primary goal is reducing the storage size of sparse volume representations (e.g., hash grids) without significant quality loss.
+*   **When to use:** When the primary goal is reducing the storage size of sparse volume representations (e.g., hash grids) without significant quality loss [G].
 
 ## Background
 Entropy Loss was introduced in the context of ECoNGS (Efficient Compressive Neural Gaussian Splats) for volume visualization [S1, unofficial]. It builds on the observation that neural network features in sparse representations exhibit Gaussian-like distributions, allowing for more efficient entropy coding compared to uniform models [S1, unofficial].

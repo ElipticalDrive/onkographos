@@ -3,17 +3,17 @@
 Also called: CPU Decompression, Pre-rendering CPU Decompression
 
 ## Overview
-CPU-Based Block Decompression is a strategy where spatial data blocks are decoded on the CPU before or during rendering, often utilizing caching to reuse decompressed data for subsequent frames [S1, unofficial]. It differs from [Compression Domain Rendering](960-compression-domain-rendering.md), which performs shading directly on compressed coefficients, and [Stripe-based On-the-fly Decoding](5363-stripe-based-on-the-fly-decoding.md), which decodes data streams on the GPU during traversal. This method prioritizes high-quality reconstruction and CPU-side logic (such as error-based block selection) at the cost of increased CPU load and PCIe bandwidth usage for transferring large decompressed textures to the GPU [S1, unofficial].
+CPU-Based Block Decompression is a strategy where spatial data blocks are decoded on the CPU before or during rendering, often utilizing caching to reuse decompressed data for subsequent frames [S1, unofficial]. It differs from [Compression Domain Rendering](960-compression-domain-rendering.md), which performs shading directly on compressed coefficients, and [Stripe-based On-the-fly Decoding](5363-stripe-based-on-the-fly-decoding.md), which decodes data streams on the GPU during traversal [G]. This method prioritizes high-quality reconstruction and CPU-side logic at the cost of increased CPU load and PCIe bandwidth usage for transferring large decompressed textures to the GPU [S1, unofficial].
 
 ## How it works
-The method involves selecting specific spatial blocks based on rendering parameters, decoding them on the CPU, caching the results, and transferring them to the GPU for texture mapping.
+The method involves selecting specific spatial blocks based on rendering parameters, decoding them on the CPU, caching the results, and transferring them to the GPU for texture mapping [S1, unofficial].
 
 **Inputs and Outputs**
-*   **Input:** Compressed volume data (e.g., wavelet coefficients, LZO-compressed blocks), current camera view, rendering resolution, and reconstruction error metrics for data layers.
-*   **Output:** A 3D texture (or set of 3D textures) on the GPU containing the decompressed voxel data ready for ray casting or ray marching.
+*   **Input:** Compressed volume data (e.g., wavelet coefficients, LZO-compressed blocks), current camera view, rendering resolution, and reconstruction error metrics for data layers [S1, unofficial].
+*   **Output:** A 3D texture (or set of 3D textures) on the GPU containing the decompressed voxel data ready for ray casting or ray marching [S1, unofficial].
 
 **Data Structures**
-*   **Block Cache:** A memory structure storing recently decompressed 3D blocks. The exact layout is implementation-dependent but typically maps spatial coordinates or block IDs to uncompressed voxel arrays [S1, unofficial].
+*   **Block Cache:** A memory structure storing recently decompressed 3D blocks [S1, unofficial].
 *   **Compressed Blocks:** The raw compressed data units, size and format dependent on the compression scheme (e.g., wavelet sub-bands, LZO streams) [S1, unofficial].
 
 **Steps**
@@ -27,53 +27,38 @@ The method involves selecting specific spatial blocks based on rendering paramet
 
 ```python
 def cpu_block_decompression(compressed_volume, camera_state, previous_cache):
-    """
-    Decompresses volume blocks on the CPU and prepares them for GPU rendering.
-    
-    Args:
-        compressed_volume: The compressed volume data structure.
-        camera_state: Current view and resolution parameters.
-        previous_cache: Cache of decompressed blocks from the previous frame.
-        
-    Returns:
-        gpu_texture: A 3D texture object on the GPU.
-    """
     # Step 1: Block Selection
-    # Select blocks based on resolution and reconstruction error
-    # Implementation detail: Guthe et al. use error metrics to prioritize blocks [S1, unofficial]
-    required_blocks = select_blocks(compressed_volume, camera_state)
-    
+    required_blocks = [bid for bid in compressed_volume.block_ids if check_block_relevance(bid, camera_state)]
     decompressed_blocks = {}
     
     for block_id in required_blocks:
-        # Check cache first
+        # Step 3 (partial): Cache check
         if block_id in previous_cache:
             decompressed_blocks[block_id] = previous_cache[block_id]
             continue
             
-        # Step 2: Decompression on CPU
-        # Decode the block. Example: Wavelet decoding or LZO
+        # Step 2: Decompression
         compressed_data = compressed_volume.get_block(block_id)
-        decompressed_data = decode_cpu(compressed_data)
+        decompressed_data = decode_compressed_block(compressed_data)
         
         # Step 3: Caching
-        # Store in cache for next frame reuse
         decompressed_blocks[block_id] = decompressed_data
         
-    # Step 4: Transfer to GPU
-    # Combine blocks into a 3D texture
+    # Step 4: Transfer
     gpu_texture = create_3d_texture(decompressed_blocks)
-    
     return gpu_texture
 
-def decode_cpu(compressed_data):
-    """
-    Generic CPU decompression function.
-    Specific implementation depends on the compression algorithm (e.g., wavelet, LZO).
-    """
-    # Placeholder for specific decoder logic (e.g., wavelet inverse transform)
-    # Ihm et al. use wavelet decoding [S1, unofficial]
-    return decompress_algorithm(compressed_data)
+def check_block_relevance(block_id, state):
+    # Returns True if the block is required by current rendering resolution and reconstruction error metrics [S1, unofficial]
+    return True
+
+def decode_compressed_block(compressed_data):
+    # Applies the inverse transform for the specific compression scheme (e.g., wavelet reconstruction or LZO decompression) [S1, unofficial]
+    return decompress(compressed_data)
+
+def create_3d_texture(blocks):
+    # Allocates GPU memory, maps decompressed block arrays into a 3D texture layout, and transfers the data [G]
+    return allocate_and_upload(blocks)
 ```
 
 **Parameters and Edge Cases**
@@ -88,13 +73,13 @@ In this variant, the CPU performs the initial step of lossless decompression (e.
 
 ## Operating characteristics
 *   **Time Complexity:** Decompression time is proportional to the number of selected blocks and the complexity of the decoder (e.g., wavelet inverse transform is more expensive than dictionary decoding) [S1, unofficial].
-*   **Memory Complexity:** Requires CPU memory for the cache and GPU memory for the 3D texture. The total memory usage is higher than compression-domain methods because the full uncompressed data must reside in GPU memory during rendering [S1, unofficial].
+*   **Memory Complexity:** Requires CPU memory for the cache and GPU memory for the 3D texture [S1, unofficial].
 *   **Performance:** Suitable for static or slowly changing datasets where caching provides significant benefits. For time-varying or large-scale data, pure CPU decompression may struggle to achieve interactive frame rates due to CPU decoding latency and PCIe transfer bandwidth limits [S1, unofficial].
-*   **Strengths:** High-quality reconstruction; flexible block selection based on error metrics; leverages mature CPU decompression libraries.
+*   **Strengths:** High-quality reconstruction; flexible block selection based on error metrics; leverages mature CPU decompression libraries [S1, unofficial].
 *   **Limitations:** High CPU utilization; significant PCIe bandwidth consumption; less suitable for real-time visualization of very large dynamic datasets compared to GPU-based or hybrid methods [S1, unofficial].
 
 ## Background
-The method originated from early volume visualization systems where CPU-side processing was the primary computational resource. Key contributions include Ihm et al.'s use of wavelet decoding on the CPU [24] and Guthe et al.'s adaptive block selection based on resolution and reconstruction error [23], as cited in [S1, unofficial]. It is commonly used in conjunction with compression formats like LZO and PVTC [S1, unofficial].
+Key contributions include Ihm et al.'s use of wavelet decoding on the CPU [24] and Guthe et al.'s adaptive block selection based on resolution and reconstruction error [23], cited in [S1, unofficial]. It is commonly used in conjunction with compression formats like LZO and PVTC [S1, unofficial].
 
 ## Sources
 [S1] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,235 @@
+# Tetrahedron Volumetric Divergence (TVD) Predictor
+
+Also called: TVD predictor
+
+## Overview
+The Tetrahedron Volumetric Divergence (TVD) Predictor is a metric used to approximate the volumetric divergence between an extracted isosurface mesh (typically from Marching Cubes) and the ideal trilinear interpolation isosurface within a voxel cube [S1]. It models the volume between the planar mesh triangles and the curved ideal surface using tetrahedra, providing a computationally cheaper alternative to the recursive Volumetric Divergence Metric (VDC) [S1]. While VDC relies on deep recursive subdivision to estimate error, TVD uses a closed-form geometric approximation based on triangle centroids and normals, making it suitable for real-time or high-performance evaluation of isosurface accuracy [S1].
+
+## How it works
+The TVD predictor calculates a scalar value $P_T$ for each cube containing an extracted isosurface. The method assumes the extracted surface consists of planar triangles (e.g., from Marching Cubes) and the reference surface is defined by trilinear interpolation within the cube [S1].
+
+### Inputs and Outputs
+*   **Input:**
+    *   The vertices of the extracted mesh triangles within a single unit cube. Let there be $m$ triangles.
+    *   For each triangle $j$, the three intersection points $P_{j,1}, P_{j,2}, P_{j,3}$ where the isosurface intersects the cube edges.
+    *   The trilinear interpolation function $f(x,y,z)$ defining the ideal isosurface (implicitly defined as $f(x,y,z) = \text{iso}$).
+*   **Output:**
+    *   The TVD predictor value $P_T$ for the cube.
+
+### Data Structures
+No complex data structures are required beyond standard geometric primitives:
+*   **Point:** A 3D vector $(x, y, z)$.
+*   **Triangle:** Defined by three Points $P_1, P_2, P_3$.
+*   **Vector:** A 3D vector used for normals and directions.
+
+### Steps
+1.  **Initialize Sum:** Set $P_T = 0$.
+2.  **Iterate Triangles:** For each triangle $j$ in the extracted mesh within the cube (from $j=0$ to $m-1$):
+    a.  **Calculate Normal:** Compute the normal vector $\mathbf{n}_j$ of the triangle plane using the cross product of two edge vectors formed by the intersection points $P_{j,1}, P_{j,2}, P_{j,3}$.
+        $$ \mathbf{n}_j = (P_{j,2} - P_{j,1}) \times (P_{j,3} - P_{j,1}) $$
+        Normalize $\mathbf{n}_j$ if necessary, though direction is sufficient for line definition.
+    b.  **Calculate Centroid:** Compute the centroid $C_j$ of the triangle.
+        $$ C_j = \frac{P_{j,1} + P_{j,2} + P_{j,3}}{3} $$
+    c.  **Define Line:** Define a half-line starting at $C_j$ with direction $\mathbf{n}_j$. The parametric equation of the line is:
+        $$ L(t) = C_j + t \cdot \mathbf{n}_j, \quad t \ge 0 $$
+    d.  **Find Intersection $M_j$:** Find the intersection point $M_j$ of this half-line with the trilinear interpolation isosurface.
+        *   Substitute $L(t)$ into the trilinear interpolation equation $f(x,y,z) = \text{iso}$.
+        *   This results in a cubic equation in $t$: $a t^3 + b t^2 + c t + d = 0$.
+        *   Solve for real roots $t \ge 0$.
+        *   **Fallback:** If the half-line from the centroid has no intersection with the isosurface (no valid real root $t \ge 0$), iterate through the three vertices of the triangle. For each vertex $V_k$ ($k=1,2,3$), define a median line from $V_k$ through the centroid $C_j$ (or simply the normal from the vertex if the centroid line fails, but the source specifies "median from that vertex" and "triangle normal half line" in the fallback context, implying checking normals from vertices or lines through vertices). The source states: "we pick a new point along the median of the triangle from one of its vertices... Since the triangle and the trilinear interpolation isosurface meet at three vertices... we can always find an intersection point" [S1]. Specifically, the algorithm considers the three triangle vertices one at a time until an intersection point is found. Let the found intersection point be $M_j$.
+    e.  **Calculate Distance $d_j$:** Compute the distance $d_j$ between the centroid $C_j$ and the intersection point $M_j$.
+        $$ d_j = \| C_j - M_j \| $$
+        This $d_j$ approximates the largest distance between the triangle plane and the trilinear isosurface [S1].
+    f.  **Calculate Area $S_j$:** Compute the area $S_j$ of the triangle.
+        $$ S_j = \frac{1}{2} \| (P_{j,2} - P_{j,1}) \times (P_{j,3} - P_{j,1}) \| $$
+    g.  **Calculate Tetrahedron Volume $V_j$:** Compute the volume of the tetrahedron formed by the triangle and the intersection point.
+        $$ V_j = \frac{1}{3} S_j d_j $$
+    h.  **Accumulate:** Add $V_j$ to the sum.
+3.  **Finalize:** Multiply the accumulated sum by 2 to obtain $P_T$.
+    $$ P_T = 2 \sum_{j=0}^{m-1} V_j = 2 \sum_{j=0}^{m-1} S_j d_j $$
+
+### Formula
+The TVD predictor $P_T$ is defined as:
+$$ P_T = 2 \sum_{j=0}^{m} S_j d_j = 2 \sum_{j=0}^{m} V_j $$
+Where:
+*   $m$ is the number of triangles in the extracted mesh in the unit cube.
+*   $S_j$ is the area of the $j$-th triangle.
+*   $d_j$ is the approximate largest distance between the $j$-th triangle plane and the trilinear interpolation isosurface.
+*   $V_j$ is the volume of the tetrahedron generated from the $j$-th triangle.
+*   The constant multiplier **2** scales the TVD predictor values to match the values of the Volumetric Divergence Metric [S1].
+
+### Parameters
+*   **Constant Multiplier:** 2. This value is empirically determined to align the TVD predictor with the Volumetric Divergence Metric [S1].
+
+### Edge Cases and Pitfalls
+*   **No Intersection from Centroid:** If the half-line from the triangle centroid perpendicular to the triangle plane does not intersect the trilinear isosurface, the algorithm must fallback. It iterates through the three triangle vertices, considering the median (or normal) from each vertex, until an intersection is found. An intersection is guaranteed because the triangle vertices lie on the isosurface [S1].
+*   **Cubic Root Solving:** Finding the intersection requires solving a cubic equation derived from the trilinear interpolation function. Numerical stability in root-finding should be considered [S1].
+*   **Comparison Fairness:** When comparing TVD to VDC, note that VDC time includes subdivision computation that would also be required if TVD were used in an adaptive isosurfacing context. However, TVD is still significantly faster [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def cross_product(v1, v2):
+    return [
+        v1[1]*v2[2] - v1[2]*v2[1],
+        v1[2]*v2[0] - v1[0]*v2[2],
+        v1[0]*v2[1] - v1[1]*v2[0]
+    ]
+
+def dot_product(v1, v2):
+    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+
+def subtract(v1, v2):
+    return [v1[0]-v2[0], v1[1]-v2[1], v1[2]-v2[2]]
+
+def add(v1, v2):
+    return [v1[0]+v2[0], v1[1]+v2[1], v1[2]+v2[2]]
+
+def scale(v, s):
+    return [v[0]*s, v[1]*s, v[2]*s]
+
+def magnitude(v):
+    return math.sqrt(dot_product(v, v))
+
+def normalize(v):
+    mag = magnitude(v)
+    if mag == 0:
+        return [0, 0, 0]
+    return [v[0]/mag, v[1]/mag, v[2]/mag]
+
+def trilinear_interpolation_isosurface_intersection(line_point, line_dir, iso_value, voxel_data):
+    """
+    Finds the intersection of a half-line with the trilinear isosurface.
+    line_point: Point C on the line.
+    line_dir: Direction vector N of the line.
+    iso_value: The isovalue defining the surface.
+    voxel_data: The scalar field data for the voxel.
+    
+    Returns the intersection point M or None if not found.
+    Note: Solving the cubic equation for trilinear interpolation is complex.
+    This is a placeholder for the root-finding logic described in [S1].
+    """
+    # The trilinear interpolation function f(x,y,z) is substituted with
+    # x = line_point[0] + t * line_dir[0], etc.
+    # This yields a cubic equation a*t^3 + b*t^2 + c*t + d = 0.
+    # We solve for real roots t >= 0.
+    # If multiple roots exist, the closest one to the line_point (smallest t) is typically chosen,
+    # or the one that lies on the surface segment.
+    # For implementation, a robust cubic solver is needed.
+    
+    # Simplified logic for pseudocode completeness:
+    # 1. Construct cubic coefficients from voxel data and line parameters.
+    # 2. Find real roots t >= 0.
+    # 3. If roots exist, return line_point + t * line_dir for the smallest valid t.
+    # 4. If no roots, return None.
+    
+    # [G] Implementation detail: The cubic coefficients depend on the 8 corner values of the voxel.
+    # The exact derivation is in Equation 3 of [S1].
+    return None # Placeholder for cubic root finding
+
+def find_intersection_fallback(triangle_vertices, iso_value, voxel_data):
+    """
+    Fallback if centroid line fails. Iterates through vertices.
+    """
+    for vertex in triangle_vertices:
+        # Define line from vertex through centroid? 
+        # Source says "median from that vertex" or "triangle normal half line".
+        # Let's assume normal from vertex for robustness, or line through centroid.
+        # Source: "pick a new point along the median of the triangle from one of its vertices"
+        # Median direction is Centroid - Vertex.
+        centroid = [(triangle_vertices[0][0]+triangle_vertices[1][0]+triangle_vertices[2][0])/3,
+                    (triangle_vertices[0][1]+triangle_vertices[1][1]+triangle_vertices[2][1])/3,
+                    (triangle_vertices[0][2]+triangle_vertices[1][2]+triangle_vertices[2][2])/3]
+        dir_vec = subtract(centroid, vertex)
+        if magnitude(dir_vec) == 0:
+            continue
+        dir_vec = normalize(dir_vec)
+        
+        # Check intersection from vertex along median
+        M = trilinear_interpolation_isosurface_intersection(vertex, dir_vec, iso_value, voxel_data)
+        if M is not None:
+            return M
+            
+        # Also try normal from vertex if median fails? 
+        # Source implies checking vertices until intersection is found.
+        # "Since the triangle and the trilinear interpolation isosurface meet at three vertices...
+        # we can always find an intersection point between some triangle normal half line and the trilinear interpolation isosurface"
+        # This suggests trying the normal at the vertex.
+        # Calculate normal at vertex? Or just use triangle normal?
+        # Let's try triangle normal from vertex.
+        # Normal is constant for the plane.
+        pass # Logic simplified: The source guarantees a hit eventually.
+    
+    # Fallback to one of the vertices if all else fails (since vertices are on the surface)
+    return triangle_vertices[0]
+
+def compute_tvd_predictor(triangles, iso_value, voxel_data):
+    """
+    triangles: List of triangles, each triangle is a list of 3 points [P1, P2, P3].
+    iso_value: The isovalue.
+    voxel_data: Scalar field data.
+    
+    Returns: TVD Predictor value P_T.
+    """
+    total_volume = 0.0
+    
+    for tri in triangles:
+        P1, P2, P3 = tri
+        
+        # 1. Calculate Normal
+        edge1 = subtract(P2, P1)
+        edge2 = subtract(P3, P1)
+        normal = cross_product(edge1, edge2)
+        
+        # 2. Calculate Centroid
+        centroid = [(P1[0]+P2[0]+P3[0])/3,
+                    (P1[1]+P2[1]+P3[1])/3,
+                    (P1[2]+P2[2]+P3[2])/3]
+        
+        # 3. Define Line and Find Intersection M
+        # Line: L(t) = Centroid + t * Normal
+        # We need a direction. Use normal.
+        dir_vec = normalize(normal)
+        
+        M = trilinear_interpolation_isosurface_intersection(centroid, dir_vec, iso_value, voxel_data)
+        
+        # 4. Fallback if no intersection from centroid
+        if M is None:
+            M = find_intersection_fallback(tri, iso_value, voxel_data)
+            
+        # 5. Calculate Distance d_j
+        vec_CM = subtract(M, centroid)
+        d_j = magnitude(vec_CM)
+        
+        # 6. Calculate Area S_j
+        S_j = 0.5 * magnitude(cross_product(edge1, edge2))
+        
+        # 7. Calculate Volume V_j
+        V_j = (1.0/3.0) * S_j * d_j
+        
+        total_volume += V_j
+        
+    # 8. Final Result
+    P_T = 2.0 * total_volume
+    return P_T
+```
+
+## Operating characteristics
+*   **Time Complexity:** The TVD predictor is significantly faster than the Volumetric Divergence Metric (VDC). For a frog CT-scan dataset (256x256x44), VDC with subdivision depth 7 took 3961.2 seconds, while TVD took 0.35 seconds [S1]. It is also faster than the MC23 isosurfacing algorithm itself (0.47 seconds) [S1].
+*   **Memory Complexity:** Low. It requires storing only the triangle vertices and scalar field data for the current voxel. No recursive subdivision structures are needed.
+*   **Accuracy:** The TVD predictor correlates strongly with the Volumetric Divergence Metric (MD) for high-frequency base cases (e.g., base cases 1, 2, 5, 8, 17, 20, 21) with correlation coefficients close to +1 [S1]. For complex shapes with internal ambiguity (base cases 6, 11, 14), the correlation is weaker but still positive [S1].
+*   **Error:** On a synthetic 20x20x20 dataset, the TVD predictor error compared to VD10 (ground truth) was less than 13.5% for isovalues 40.5, 70.5, and 100.5 [S1].
+*   **Strengths:** Low computational cost, suitable for real-time evaluation, good approximation for common Marching Cubes base cases.
+*   **Limitations:** Approximation error can be higher for complex trilinear shapes or ambiguous cases. Relies on the assumption that the tetrahedron volume approximates the divergence well.
+*   **When to use:** When a fast estimate of isosurface accuracy is needed, or when integrating error estimation into adaptive isosurfacing pipelines where VDC is too slow.
+*   **When not to use:** When high-precision volumetric divergence is required and computational cost is not a constraint (use VDC instead).
+
+## Background
+The Tetrahedron Volumetric Divergence (TVD) Predictor was introduced as a new metric to evaluate the accuracy of isosurfaces extracted by marching isosurfacing algorithms, specifically Marching Cubes [S1]. It was proposed to address the high computational cost of the existing Volumetric Divergence Computation (VDC) method, which recursively subdivides cubes [S1]. The method was tested on real datasets (frog CT-scan) and synthetic datasets to validate its correlation with VDC and its computational efficiency [S1].
+
+## Sources
+[S1] New metric for evaluating the accuracy of marching isosurfacing algorithms, https://doi.org/10.1145/2638404.2638484, fetched 2026-11-05

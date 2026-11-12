@@ -3,179 +3,221 @@
 Also called: Gaussian Alpha Computation, Single Point Alpha
 
 ## Overview
-Computes the alpha value for a single 3D Gaussian projected onto a 2D pixel [S1, unofficial]. It transforms the Gaussian to camera space, computes the 2D covariance, projects it to screen space, and evaluates the 2D Gaussian probability density at the pixel center [S1, unofficial]. It differs from its sibling [2D Gaussian Probability Density (Standard)](3466-2d-gaussian-probability-density-standard.md) by including the full projection pipeline (camera transform, Jacobian approximation) rather than assuming a pre-computed 2D covariance [S1, unofficial]. It differs from [2D Gaussian Probability Density (Conic)](3475-2d-gaussian-probability-density-conic.md) by using the explicit covariance matrix inversion and exponential form rather than the conic matrix (inverse covariance) for evaluation [S1, unofficial].
+Computes the alpha (opacity) contribution of a single 3D Gaussian primitive projected onto a specific 2D pixel center. It solves the problem of determining how much a single Gaussian splat contributes to the final color of a pixel during object-order rasterization. It differs from [2D Gaussian Probability Density (Standard)](3466-2d-gaussian-probability-density-standard.md) by including the full projection pipeline (camera transform, Jacobian approximation) and the final scaling by intrinsic opacity, whereas the parent method only evaluates the PDF value given a pre-computed 2D covariance.
 
 ## How it works
 **Inputs:**
-- $xyz$: 3D position of the Gaussian center in world space [S1, unofficial].
-- $q$: Quaternion $(w, x, y, z)$ representing orientation [S1, unofficial].
-- $s$: Scale vector $(s_x, s_y, s_z)$ in log-space [S1, unofficial].
-- $\sigma_{raw}$: Raw opacity value (pre-activation) [S1, unofficial].
-- $T_{camera}$: $4 \times 4$ world-to-camera transformation matrix [S1, unofficial].
-- $K$: $3 \times 3$ camera intrinsic matrix [S1, unofficial].
-- $uv_{center}$: 2D screen coordinates of the pixel center [S1, unofficial].
+- $xyz \in \mathbb{R}^3$: World-space position of the Gaussian center.
+- $q \in \mathbb{R}^4$: Quaternion representing the Gaussian orientation (w, x, y, z).
+- $s \in \mathbb{R}^3$: Log-scale vector (exponentiated to get scale).
+- $\sigma \in \mathbb{R}$: Intrinsic opacity parameter (pre-activation).
+- $T_{camera} \in \mathbb{R}^{4 \times 4}$: World-to-camera transformation matrix.
+- $K \in \mathbb{R}^{3 \times 3}$: Camera intrinsic matrix.
+- $uv_{center} \in \mathbb{R}^2$: Screen-space coordinates of the pixel center.
 
 **Outputs:**
-- $\alpha$: Scalar alpha value for the Gaussian at the pixel [S1, unofficial].
+- $\alpha \in \mathbb{R}$: The computed alpha value for this Gaussian at this pixel.
 
 **Data Structures:**
-- Matrices are $3 \times 3$ or $4 \times 4$ standard floating-point arrays [G].
-- Vectors are standard 3D or 4D floating-point arrays [G].
+- Matrices are stored in row-major or column-major format consistent with the linear algebra library used. $T_{camera}$ is a $4 \times 4$ homogeneous transformation. $K$ is a $3 \times 3$ intrinsic matrix.
 
 **Steps:**
-1. **Homogenize position:** Construct homogeneous coordinate $p_{world} = [xyz, 1]^T$ [S1, unofficial].
-2. **Transform to camera space:** Compute $p_{camera} = T_{camera} \cdot p_{world}$ [S1, unofficial].
-3. **Extract camera coordinates:** Let $xyz_{camera} = [x_c, y_c, z_c]^T$ be the first three components of $p_{camera}$ [S1, unofficial].
-4. **Project to UV:**
-   - Compute $uv1 = K \cdot xyz_{camera}$ [S1, unofficial].
-   - Let $w_{proj} = uv1_z$ [S1, unofficial].
-   - Compute screen coordinates $uv = [uv1_x / w_{proj}, uv1_y / w_{proj}]^T$ [S1, unofficial].
-5. **Compute 3D Covariance $\Sigma$:**
-   - Compute scale matrix $S = \text{diag}(\exp(s_x), \exp(s_y), \exp(s_z))$ [S1, unofficial].
-   - Compute rotation matrix $R$ from quaternion $q$ [S1, unofficial].
-   - Compute $\Sigma = R S S R^T$ [S1, unofficial].
-6. **Compute Jacobian $J$:**
-   - Let $T_{camera}$ be decomposed into rotation $W$ ($3 \times 3$) and translation $t$ ($3 \times 1$) [S1, unofficial].
-   - The projection Jacobian $J$ with respect to the camera-space position is derived from the pinhole camera model [G]. For a point $xyz_{camera}$, the Jacobian of the projection $(x_c, y_c, z_c) \to (x_c/z_c, y_c/z_c)$ is:
-     $$ J = \begin{bmatrix} 1/z_c & 0 & -x_c/z_c^2 \\ 0 & 1/z_c & -y_c/z_c^2 \end{bmatrix} $$ [G].
-7. **Compute 2D Covariance $cov$:**
-   - Let $W$ be the upper-left $3 \times 3$ rotation part of $T_{camera}$ [S1, unofficial].
-   - Compute $cov = J W \Sigma W^T J^T$ [S1, unofficial].
-   - This approximates the 2D covariance in screen space by projecting the 3D covariance through the camera geometry [S1, unofficial].
-8. **Compute Probability Density $p$:**
-   - Compute the inverse of the 2D covariance matrix $cov^{-1}$ [S1, unofficial].
-   - Compute the squared Mahalanobis distance: $d^2 = (uv_{center} - uv)^T \cdot cov^{-1} \cdot (uv_{center} - uv)$ [S1, unofficial].
-   - Compute $p = \exp(-0.5 \cdot d^2)$ [S1, unofficial].
-9. **Compute Alpha:**
-   - Apply sigmoid to raw opacity: $\sigma = \frac{1}{1 + e^{-\sigma_{raw}}}$ [G].
-   - Compute $\alpha = \sigma \cdot p$ [S1, unofficial].
+
+1.  **Homogenize Position:**
+    Construct the homogeneous coordinate vector:
+    $$ \mathbf{p}_{hom} = [x, y, z, 1]^T $$
+
+2.  **Transform to Camera Space:**
+    Apply the world-to-camera transformation:
+    $$ \mathbf{p}_{cam\_hom} = T_{camera} \cdot \mathbf{p}_{hom} $$
+    Extract the camera-space position $\mathbf{p}_{cam} = [x_c, y_c, z_c]^T$ from the first three components of $\mathbf{p}_{cam\_hom}$.
+
+3.  **Compute 3D Covariance Matrix:**
+    Compute the scale matrix $S$ and rotation matrix $R$:
+    $$ S = \text{diag}(\exp(s_x), \exp(s_y), \exp(s_z)) $$
+    $$ R = \text{QuaternionToRotationMatrix}(q) $$
+    Compute the 3D covariance matrix $\Sigma$:
+    $$ \Sigma = R S S^T R^T $$
+    Note: Since $S$ is diagonal, $S S^T = S^2 = \text{diag}(\exp(2s_x), \exp(2s_y), \exp(2s_z))$.
+
+4.  **Compute Projection Jacobian:**
+    Let $W$ be the upper-left $3 \times 3$ submatrix of $T_{camera}$ (the rotation part).
+    The projection from 3D camera space to 2D screen space is approximated by the Jacobian $J$. For a pinhole camera with intrinsics $K$, the Jacobian $J$ relating small changes in 3D camera coordinates to 2D screen coordinates is derived from the projection equations.
+    $$ J = \frac{\partial (u, v)}{\partial (x_c, y_c, z_c)} $$
+    Using the standard perspective projection $u = f_x \frac{x_c}{z_c} + c_x$ and $v = f_y \frac{y_c}{z_c} + c_y$:
+    $$ J = \begin{bmatrix} \frac{f_x}{z_c} & 0 & -\frac{f_x x_c}{z_c^2} \\ 0 & \frac{f_y}{z_c} & -\frac{f_y y_c}{z_c^2} \end{bmatrix} $$
+    *Note: Some implementations combine the rotation $W$ and the Jacobian $J$ into a single $2 \times 3$ matrix $J W$ to transform the 3D covariance directly.*
+
+5.  **Compute 2D Covariance:**
+    Transform the 3D covariance $\Sigma$ to 2D screen space covariance $cov$:
+    $$ cov = J W \Sigma W^T J^T $$
+    Here, $W$ rotates the covariance from world space to camera space (if $\Sigma$ was in world space) or is part of the projection chain. In the standard Gaussian Splatting pipeline, $\Sigma$ is often defined in world space, so $W$ (the rotation part of $T_{camera}$) transforms it to camera space before projection. If $\Sigma$ is already in camera space, $W$ is identity. The source notes specify $W$ is the rotation part of $T_{camera}$, implying $\Sigma$ is in world space.
+    $$ cov = J \cdot (W \Sigma W^T) \cdot J^T $$
+
+6.  **Compute Probability Density:**
+    Calculate the Mahalanobis distance squared between the pixel center $uv_{center}$ and the projected Gaussian center $uv_{proj}$.
+    First, compute the projected center $uv_{proj}$:
+    $$ uv_{proj} = \left[ \frac{K_{00} x_c + K_{01} y_c + K_{02} z_c + K_{03}}{z_c}, \frac{K_{10} x_c + K_{11} y_c + K_{12} z_c + K_{13}}{z_c} \right]^T $$
+    *Correction based on Step 4/5 logic:* The Jacobian $J$ is evaluated at $\mathbf{p}_{cam}$. The center of the Gaussian in screen space is $uv_{proj}$.
+    Let $\mathbf{d} = uv_{center} - uv_{proj}$.
+    Compute the inverse of the 2D covariance matrix $cov^{-1}$.
+    $$ p = \exp\left( -0.5 \cdot \mathbf{d}^T \cdot cov^{-1} \cdot \mathbf{d} \right) $$
+    *Note: The normalization factor $\frac{1}{2\pi \sqrt{\det(cov)}}$ is omitted in the alpha computation step as it is absorbed into the opacity parameter or handled separately in the compositing equation. The source note explicitly defines $p$ as the exponential term.*
+
+7.  **Compute Alpha:**
+    Scale the probability density by the intrinsic opacity $\sigma$. The opacity is typically passed through a sigmoid function if $\sigma$ is a raw logit, or used directly if it is already in $[0,1]$. The source note uses $\sigma(point\_alpha)$, implying a function application. In standard Gaussian Splatting, $\sigma$ is the raw opacity parameter, and the final alpha is often $\alpha = \sigma \cdot p$ or $\alpha = \text{sigmoid}(\sigma) \cdot p$. The note says $\alpha = \sigma(point\_alpha) \cdot p$. We interpret $\sigma$ as the intrinsic opacity value.
+    $$ \alpha = \sigma \cdot p $$
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import numpy as np
 
-def single_point_alpha_forward(xyz, q, s, sigma_raw, T_camera, K, uv_center):
+def single_point_alpha_forward(xyz, q, s, sigma, T_camera, K, uv_center):
     """
-    Computes alpha for a single Gaussian at a specific pixel.
+    Computes the alpha value for a single 3D Gaussian projected onto a 2D pixel.
     
     Args:
-        xyz: np.ndarray, shape (3,), world position.
-        q: np.ndarray, shape (4,), quaternion (w, x, y, z).
-        s: np.ndarray, shape (3,), log-scale.
-        sigma_raw: float, raw opacity.
-        T_camera: np.ndarray, shape (4, 4), world-to-camera matrix.
-        K: np.ndarray, shape (3, 3), camera intrinsics.
-        uv_center: np.ndarray, shape (2,), pixel center coordinates.
+        xyz: np.array([x, y, z]), world space position.
+        q: np.array([w, x, y, z]), quaternion orientation.
+        s: np.array([sx, sy, sz]), log-scale.
+        sigma: float, intrinsic opacity parameter.
+        T_camera: np.array(4x4), world-to-camera transformation matrix.
+        K: np.array(3x3), camera intrinsic matrix.
+        uv_center: np.array([u, v]), screen space pixel center.
         
     Returns:
         alpha: float, computed alpha value.
     """
-    # 1. Homogenize position
-    p_world = np.array([xyz[0], xyz[1], xyz[2], 1.0])
+    # 1. Homogenize point position
+    p_hom = np.array([xyz[0], xyz[1], xyz[2], 1.0])
     
     # 2. Transform to camera space
-    p_camera = T_camera @ p_world
+    p_cam_hom = T_camera @ p_hom
+    p_cam = p_cam_hom[:3] # [x_c, y_c, z_c]
+    z_c = p_cam[2]
     
-    # 3. Extract camera coordinates
-    x_c, y_c, z_c = p_camera[0], p_camera[1], p_camera[2]
+    # 3. Compute 3D covariance Sigma
+    # Scale matrix S
+    scale = np.exp(s)
+    S = np.diag(scale)
     
-    # 4. Project to UV
-    uv1 = K @ np.array([x_c, y_c, z_c])
-    w_proj = uv1[2]
-    uv = np.array([uv1[0] / w_proj, uv1[1] / w_proj])
-    
-    # 5. Compute 3D Covariance Sigma
-    # Scale matrix
-    exp_s = np.exp(s)
-    S = np.diag(exp_s)
-    
-    # Rotation matrix from quaternion
+    # Rotation matrix R from quaternion q
     R = quaternion_to_rotation_matrix(q)
     
-    # Sigma = R * S * S * R^T
-    # Since S is diagonal, S * S = diag(exp_s^2)
-    SS = np.diag(exp_s**2)
-    Sigma = R @ SS @ R.T
+    # Sigma = R * S * S^T * R^T
+    # Since S is diagonal, S * S^T = S^2
+    S2 = np.diag(scale**2)
+    Sigma = R @ S2 @ R.T
     
-    # 6. Compute Jacobian J
-    # J is 2x3 Jacobian of projection (x/z, y/z) w.r.t (x, y, z)
-    z_c_sq = z_c * z_c
-    J = np.array([
-        [1.0 / z_c, 0.0, -x_c / z_c_sq],
-        [0.0, 1.0 / z_c, -y_c / z_c_sq]
-    ])
-    
-    # 7. Compute 2D Covariance cov
-    # W is the upper-left 3x3 rotation part of T_camera
+    # 4. Compute Jacobian J of projection
+    # W is the rotation part of T_camera (upper-left 3x3)
     W = T_camera[:3, :3]
     
-    # cov = J * W * Sigma * W^T * J^T
-    cov = J @ W @ Sigma @ W.T @ J.T
+    # Intrinsic matrix K
+    fx = K[0, 0]
+    fy = K[1, 1]
+    cx = K[0, 2]
+    cy = K[1, 2]
     
-    # 8. Compute Probability Density p
-    # Invert 2x2 covariance matrix
+    # Projected center in screen space
+    # uv_proj = K @ p_cam_hom[0:3] / z_c
+    # But p_cam_hom is already in camera space, so we use p_cam
+    # u = fx * x_c / z_c + cx
+    # v = fy * y_c / z_c + cy
+    uv_proj = np.array([
+        fx * p_cam[0] / z_c + cx,
+        fy * p_cam[1] / z_c + cy
+    ])
+    
+    # Jacobian J (2x3)
+    # d(u)/dx = fx/z, d(u)/dy = 0, d(u)/dz = -fx*x/z^2
+    # d(v)/dx = 0, d(v)/dy = fy/z, d(v)/dz = -fy*y/z^2
+    J = np.array([
+        [fx / z_c, 0.0, -fx * p_cam[0] / (z_c**2)],
+        [0.0, fy / z_c, -fy * p_cam[1] / (z_c**2)]
+    ])
+    
+    # 5. Compute 2D covariance cov
+    # cov = J * W * Sigma * W^T * J^T
+    # Note: Sigma is in world space. W transforms to camera space.
+    # So we transform Sigma to camera space first: Sigma_cam = W @ Sigma @ W^T
+    Sigma_cam = W @ Sigma @ W.T
+    cov = J @ Sigma_cam @ J.T
+    
+    # 6. Compute probability density p
+    # d = uv_center - uv_proj
+    d = uv_center - uv_proj
+    
+    # Inverse of 2x2 covariance matrix
     det_cov = cov[0, 0] * cov[1, 1] - cov[0, 1] * cov[1, 0]
-    if det_cov == 0:
-        # Handle degenerate case, e.g., clamp or return 0
+    if det_cov <= 0:
+        # Handle degenerate case (e.g., zero determinant)
+        # Return 0 or a small epsilon to avoid division by zero
         return 0.0
+    
     inv_cov = np.array([
         [cov[1, 1] / det_cov, -cov[0, 1] / det_cov],
         [-cov[1, 0] / det_cov, cov[0, 0] / det_cov]
     ])
     
-    diff = uv_center - uv
-    d_sq = diff @ inv_cov @ diff
-    p = np.exp(-0.5 * d_sq)
+    # Mahalanobis distance squared
+    mahal_sq = d @ inv_cov @ d
     
-    # 9. Compute Alpha
-    sigma = 1.0 / (1.0 + np.exp(-sigma_raw))
+    # Probability density (unnormalized)
+    p = np.exp(-0.5 * mahal_sq)
+    
+    # 7. Compute alpha
     alpha = sigma * p
     
     return alpha
 
 def quaternion_to_rotation_matrix(q):
-    """Converts quaternion (w, x, y, z) to 3x3 rotation matrix."""
+    """
+    Converts a quaternion [w, x, y, z] to a 3x3 rotation matrix.
+    """
     w, x, y, z = q[0], q[1], q[2], q[3]
-    return np.array([
-        [1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y)],
-        [2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x)],
-        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y)]
+    
+    # Normalize quaternion
+    norm = np.sqrt(w**2 + x**2 + y**2 + z**2)
+    w, x, y, z = w/norm, x/norm, y/norm, z/norm
+    
+    R = np.array([
+        [1 - 2*(y**2 + z**2), 2*(x*y - w*z), 2*(x*z + w*y)],
+        [2*(x*y + w*z), 1 - 2*(x**2 + z**2), 2*(y*z - w*x)],
+        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x**2 + y**2)]
     ])
+    return R
 ```
 
 **Parameters:**
-- $K$: Camera intrinsics, typically $3 \times 3$ matrix containing focal lengths and principal point [G].
-- $T_{camera}$: World-to-camera transform, typically $4 \times 4$ matrix [G].
-- $q$: Quaternion, normalized to unit length [G].
-- $s$: Log-scale, typically optimized during training [S1, unofficial].
+- $\sigma$: Intrinsic opacity. Typical values depend on the training data, but often range from 0 to 1 after sigmoid activation, or are logits before activation.
+- $s$: Log-scale. Typical values depend on the scene scale.
 
 **Edge Cases and Pitfalls:**
-- **Depth $z_c \le 0$:** If the Gaussian is behind the camera, the projection is invalid. The implementation should check $z_c > 0$ and return 0 or handle appropriately [G].
-- **Singular Covariance:** If $det(cov) \approx 0$, the inverse is undefined. Clamp or return 0 [G].
-- **Precision:** Floating-point precision issues may arise for very small or large covariances. Use stable exponential and inverse implementations [G].
+- **Degenerate Covariance:** If the determinant of $cov$ is zero or negative (due to numerical error or extreme scaling), the inverse is undefined. Guard against this by checking the determinant and returning 0 or a small epsilon.
+- **Z-depth:** If $z_c \le 0$, the Gaussian is behind the camera. The projection is invalid. Return 0.
+- **Precision:** The exponential function can underflow to 0 for large Mahalanobis distances. This is acceptable as it means the Gaussian does not contribute to the pixel.
 
 ## Subtopics
 
 ### [2D Gaussian Alpha Computation (Batched)](4273-2d-gaussian-alpha-computation-batched.md)
 This method computes the alpha values for all $N$ 2D Gaussians across all $W \times H$ pixels in a single batched operation, serving as the core rasterization step in Gaussian Splatting. It builds on [Single Point Alpha Forward](3478-single-point-alpha-forward.md) by vectorizing the evaluation over the entire image grid, enabling efficient GPU execution [G]. It differs from [Explicit Intersection Alpha Compositing](4814-explicit-intersection-alpha-compositing.md) by computing raw alpha contributions for all pixel-gaussian pairs rather than identifying explicit intersection pairs for compositing.
 
-### 3D Gaussian Point Spread Function Model
-A PSF model defined by a 3x3 symmetric positive semi-definite covariance matrix $\Sigma$ [S2, unofficial]. It controls the blur level in the rendered image [S2, unofficial]. The formula is $h(\mathbf{x}) = \frac{e^{-\frac{1}{2}\mathbf{x}^T \Sigma^{-1} \mathbf{x}}}{\sqrt{(2\pi)^3 \det \Sigma}}$ for $\mathbf{x} \in \mathbb{R}^3$ [S2, unofficial]. Its Fourier transform is $\hat{h}(\xi) = e^{-\frac{1}{2} \xi^T \Sigma^{-1} \xi}$, where $\xi \in \mathbb{R}^3$ is the wavevector [S2, unofficial]. The parameter $\Sigma$ is optimized during inference to control blur [S2, unofficial]. More photorealistic PSFs can be used (e.g., based on refractive indices or Zernike polynomials), but the Gaussian model is the baseline implemented here [S2, unofficial].
+### [RoofGS Range-Aware Fast Exponential Evaluation](9821-roofgs-range-aware-fast-exponential-evaluation.md)
+This method replaces the transcendental exponential function in the Gaussian blending loop with a range-aware bit-level approximation, leveraging the bounded exponent range resulting from opacity culling. It sets itself apart from standard implementations by reducing special-function-unit (SFU) pressure and arithmetic overhead, achieving significant throughput gains with negligible visual quality loss. It builds on [Single Point Alpha Forward](3478-single-point-alpha-forward.md) by optimizing the final opacity evaluation step.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per Gaussian-pixel pair. The dominant cost is matrix inversion (constant size $2 \times 2$) and exponential evaluation [G].
-- **Memory Complexity:** $O(1)$ auxiliary memory per evaluation [G].
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Scales linearly with the number of Gaussians and pixels if batched. Vectorization on GPU significantly improves throughput [G].
-- **Strengths:** Simple, differentiable, and efficient for single-point evaluation [G].
-- **Limitations:** Does not handle occlusion or compositing directly. Requires careful handling of degenerate cases (singular covariance, behind-camera) [G].
-- **When to use:** When computing the contribution of a single Gaussian to a specific pixel, e.g., in analytical derivatives or debugging [G].
-- **When not to use:** For full image rasterization, use batched methods like [2D Gaussian Alpha Computation (Batched)](4273-2d-gaussian-alpha-computation-batched.md).
+- **Time Complexity:** $O(1)$ per Gaussian-pixel pair. The operations involve matrix-vector multiplications and a single exponential evaluation.
+- **Memory Complexity:** $O(1)$ auxiliary memory per evaluation.
+- **Performance:** The method is computationally lightweight per pixel but is called for every Gaussian-pixel intersection. In a full rasterization pass, the cost is proportional to the number of splats per pixel.
+- **Strengths:** Simple, differentiable, and efficient for sparse scenes.
+- **Limitations:** Does not handle occlusion or compositing order; these are handled in subsequent steps. The approximation of the projection using the Jacobian can introduce artifacts for large Gaussians or extreme viewing angles.
 
 ## Background
-Implemented in [S1, unofficial] as part of a Taichi-based 3D Gaussian Splatting rasterizer. The method is a fundamental building block for rasterizing 3D Gaussians onto 2D screens. The related 3D Gaussian Point Spread Function Model is discussed in [S2, unofficial] for differentiable rendering of fluorescence microscopy, where it serves as a baseline PSF model [S2, unofficial].
+The method is a core component of 3D Gaussian Splatting, a technique for real-time radiance field rendering. It was introduced in the context of learning 3D Gaussian primitives from images. The specific formulation of projecting 3D Gaussians to 2D and computing alpha values is detailed in the implementation of Gaussian Splatting [S1, unofficial]. The underlying mathematical model of using a Gaussian kernel as a Point Spread Function (PSF) is also discussed in the context of differentiable rendering for fluorescence microscopy [S2, unofficial].
 
 ## Sources
 [S1] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)

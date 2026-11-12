@@ -1,134 +1,194 @@
 # Volume Texture Setup
 
+Also called: Volume Texture Initialization, GPU Volume Texture Creation
+
 ## Overview
-Volume Texture Setup configures GPU-accessible 3D texture objects and their associated sampling states to serve as the data source for real-time volumetric rendering [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial]. It solves the problem of translating abstract volumetric data representations (density fields, label maps, noise functions) into hardware-ready texture resources with correct memory layouts, filtering modes, and resource flags [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial]. It is distinct from [Volume Texture Creation](1857-volume-texture-creation.md), which handles high-level allocation and object lifecycle, by focusing on the specific configuration of format, filtering, and platform-specific flags required for correct sampling behavior [S1, unofficial][S2, unofficial][S3, unofficial].
+Volume Texture Setup is the method for configuring GPU-accessible 3D texture objects to store volumetric data for raymarching or splatting rendering. It solves the problem of transferring raw voxel data from host memory to device memory while defining the sampling behavior (filtering, wrapping) required for correct interpolation during rendering. It differs from [Volume Texture Creation](1857-volume-texture-creation.md) by focusing on the specific parameterization and upload steps rather than the high-level object lifecycle, and from [Trilinear Volume Sampling for Texture Generation](2726-trilinear-volume-sampling-for-texture-generation.md) by handling the storage layout rather than the interpolation algorithm itself.
 
 ## How it works
-The method creates texture objects, defines their memory format and dimensions, configures sampling parameters (filtering and wrapping), and applies platform-specific resource flags to ensure efficient rendering [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial]. The implementation varies based on the graphics API (OpenGL, Unreal Engine, WebGPU) and the data type (continuous density, discrete labels, or procedural noise) [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial].
+The method involves creating texture objects, configuring hardware sampling parameters, and uploading data. The specific steps vary based on the API (OpenGL, WebGPU, or engine-specific abstractions) and data type (continuous scalar, label-weighted, or noise).
 
 ### Inputs and Outputs
-*   **Inputs**: Volumetric data parameters (resolution, data type, channel count), source data (CPU memory arrays, files, or procedural generation), and rendering requirements (filtering mode, wrapping mode, streaming needs) [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial].
-*   **Outputs**: Configured GPU texture objects (`GL_TEXTURE_3D`, `Texture3D`, `Texture2D`) and sampler states ready for shader binding [S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial].
+*   **Inputs**: Raw volume data (array of floats or integers), volume dimensions $(W, H, D)$, data format (e.g., `GL_RED`, `RGBA32F`, `depth32float`), and sampling preferences (filter mode, wrap mode).
+*   **Outputs**: Bound GPU texture object(s) ready for shader sampling.
 
 ### Data Structures and Layouts
-The layout depends on the specific variant, but common structures include:
-1.  **Continuous Density/Noise Textures**: Format `GL_RGBA32F` or `PF_A32B32G32R32F`, dimensions cubic or rectangular defined by `settings.hiResNoise.resolution` or `settings.loResNoise.resolution`, 4 channels (RGBA) for density and auxiliary data [S1, unofficial][S2, unofficial].
-2.  **Label-Weighted Volumes (VRDF)**: Label texture (`Texture3D`, discrete integer labels), Weight texture (`Texture3D`, continuous float weights), Transfer Function (`Texture2D`, 1D LUT mapped to 2D texture space) for color/alpha mapping, and Label Control (`Texture2D`, 256x1 RGBAFloat) for dynamic UI control of label visibility [S5, unofficial].
-3.  **Procedural Noise Textures**: High-Resolution (`volumeTexHighRes`, `GL_RGBA32F`, dimensions `dimHiRes x dimHiRes x dimHiRes`), Low-Resolution (`volumeTexLowRes`, `GL_RGBA32F`, dimensions `dimLoRes x dimLoRes x dimLoRes`) [S2, unofficial].
+The layout depends on the specific variant:
+1.  **Standard 3D Texture**: A single 3D texture object.
+    *   **Format**: `GL_RGBA32F` (RGBA 32-bit float) or `GL_RED` (Red 32-bit float) [S2, S3, unofficial].
+    *   **Dimensions**: $W \times H \times D$ [S3, unofficial].
+    *   **Wrapping**: `GL_REPEAT` for noise textures [S2, unofficial], `GL_CLAMP_TO_EDGE` for medical data [S3, unofficial].
+    *   **Filtering**: `GL_LINEAR` (trilinear) [S2, S3, unofficial].
+2.  **Label-Weighted (VRDF)**: Two separate 3D textures and auxiliary 2D textures.
+    *   **Label Texture**: `Texture3D`, point filtering (nearest) [S5, unofficial].
+    *   **Weight Texture**: `Texture3D`, bilinear filtering [S5, unofficial].
+    *   **Transfer Function**: `Texture2D` (1D LUT mapped to 2D) [S5, unofficial].
+    *   **Label Control**: `Texture2D` (256x1 RGBAFloat) for dynamic UI control [S5, unofficial].
+3.  **WebGPU Specific**:
+    *   **Format**: `rgba8unorm` or `depth32float` [S4, unofficial].
+    *   **Usage Flags**: `TEXTURE_BINDING`, `COPY_DST`, `RENDER_ATTACHMENT` [S4, unofficial].
 
-### Steps
-1.  **Generate and Bind Texture Object**: Generate a texture ID using `glGenTextures(1)` and bind it with `glBindTexture(GL_TEXTURE_3D, id)` [S3, unofficial].
-2.  **Allocate Memory**: Allocate the 3D texture with the specified internal format (e.g., `GL_RED`, `GL_RGBA32F`, `depth32float`) and dimensions extracted from the data shape (e.g., `shape[2]`, `shape[1]`, `shape[0]`) [S2, unofficial][S3, unofficial][S4, unofficial].
-3.  **Normalize Data**: For continuous data, normalize values to [0, 1] using `(data - min) / (max - min)` [S3, unofficial].
-4.  **Configure Filtering**: Set magnification and minification filters. Use `GL_LINEAR` for continuous density/noise, `GL_NEAREST` or point filter for discrete labels, and bilinear for weights [S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial].
-5.  **Configure Wrapping**: Set S, T, and R wrap modes. Use `GL_REPEAT` for seamless tiling of procedural noise, and `GL_CLAMP_TO_EDGE` for finite medical or label volumes [S2, unofficial][S3, unofficial].
-6.  **Apply Resource Flags**: Disable SRGB conversion (`SRGB = false`), disable mipmaps (`MipGenSettings = TMGS_NoMipmaps`), disable streaming (`NeverStream = true`), and disable compression (`CompressionNone = true`) [S1, unofficial].
-7.  **Bind and Update**: Bind the texture to a specific texture unit (e.g., `GL_TEXTURE0` or `GL_TEXTURE1`) and update the resource on the rendering thread (`UpdateResource()`) [S2, unofficial][S3, unofficial][S1, unofficial].
-8.  **Create Sampler (WebGPU)**: Create a sampler object with address modes and filter settings, separate from the texture object [S4, unofficial].
+### Numbered Steps
+The general procedure, synthesized from OpenGL and WebGPU implementations, is as follows:
+
+1.  **Generate Texture ID**: Create a texture identifier.
+    *   OpenGL: `glGenTextures(1, &id)` [S3, unofficial].
+    *   WebGPU: `device.createTexture({...})` [S4, unofficial].
+2.  **Bind Texture**: Bind the generated ID to the target target.
+    *   OpenGL: `glBindTexture(GL_TEXTURE_3D, id)` [S3, unofficial].
+    *   WebGPU: Implicit via bind group creation.
+3.  **Configure Sampling Parameters**: Set filtering and wrapping modes.
+    *   **Filtering**: Set Magnification and Minification filters to `GL_LINEAR` for smooth interpolation [S2, S3, unofficial]. For label data, use `GL_NEAREST` [S5, unofficial].
+    *   **Wrapping**: Set S, T, and R wrap modes. Use `GL_REPEAT` for procedural noise [S2, unofficial]. Use `GL_CLAMP_TO_EDGE` to prevent boundary artifacts in medical data [S3, unofficial].
+    *   **Mipmaps**: Disable mipmaps if the volume is not multi-resolution or if mipmaps are generated manually. Set `MipGenSettings = TMGS_NoMipmaps` [S1, unofficial].
+    *   **SRGB**: Disable sRGB conversion for linear data. Set `SRGB = false` [S1, unofficial].
+    *   **Compression**: Disable texture compression to preserve float precision. Set `CompressionNone = true` [S1, unofficial].
+4.  **Allocate and Upload Data**:
+    *   **OpenGL**: Call `glTexImage3D` with the internal format (e.g., `GL_RED`), dimensions $(W, H, D)$, format `GL_RED`, type `GL_FLOAT`, and a pointer to the data [S3, unofficial].
+    *   **WebGPU**: Use `device.queue.copyExternalImageToTexture` or `copyBufferToTexture` to upload data [S4, unofficial].
+    *   **Engine Abstraction**: Update the resource on the rendering thread (e.g., `NewTexture->UpdateResource()`) [S1, unofficial].
+5.  **Normalize Data (Optional)**: If the input data is not in $[0, 1]$, normalize it:
+    $$ v_{norm} = \frac{v - v_{min}}{v_{max} - v_{min}} $$
+    where $v$ is the voxel value, and $v_{min}, v_{max}$ are the global minimum and maximum of the volume [S3, unofficial].
+6.  **Create Sampler (WebGPU)**: Create a sampler object with address modes (e.g., `repeat` for U/V) and filter modes (e.g., `nearest` for mag/min) [S4, unofficial].
 
 ### Pseudocode
+The following pseudocode combines OpenGL and WebGPU concepts into a unified Python-like style. It assumes a generic `Texture` class that abstracts the API differences.
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def setup_volume_texture(width, height, depth, data, internal_format="GL_RGBA32F", filtering="linear", wrap="repeat"):
-    # 1. Generate and bind texture object
-    texture_id = generate_texture_id()
-    bind_texture_3d(texture_id)
+def setup_volume_texture(volume_data, dimensions, api="opengl"):
+    """
+    Setup a GPU volume texture.
+    
+    Args:
+        volume_data: numpy array or buffer of shape (D, H, W) or (W, H, D).
+        dimensions: tuple (width, height, depth).
+        api: "opengl" or "webgpu".
+        
+    Returns:
+        texture_object: Bound GPU texture.
+        sampler: Sampler object (WebGPU only).
+    """
+    width, height, depth = dimensions
+    
+    # 1. Normalize data if necessary [S3, unofficial]
+    # Note: In practice, normalization might be done on CPU or via a shader.
+    # Here we assume data is already in [0, 1] or normalized by the caller.
+    # If not:
+    # min_val = volume_data.min()
+    # max_val = volume_data.max()
+    # volume_data = (volume_data - min_val) / (max_val - min_val)
+    
+    # 2. Create Texture Object
+    if api == "opengl":
+        # Generate and bind [S3, unofficial]
+        tex_id = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_3D, tex_id)
+        
+        # 3. Set Parameters [S1, S2, S3, unofficial]
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE) # Or GL_REPEAT
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE)
+        
+        # Disable mipmaps [S1, unofficial]
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_GENERATE_MIPMAPS, GL_FALSE)
+        
+        # 4. Upload Data [S3, unofficial]
+        # Format: GL_RED, Type: GL_FLOAT
+        glTexImage3D(
+            GL_TEXTURE_3D, 0, GL_RED, width, height, depth,
+            0, GL_RED, GL_FLOAT, volume_data.ctypes.data
+        )
+        
+        return tex_id, None
+        
+    elif api == "webgpu":
+        # Create Texture [S4, unofficial]
+        texture = device.createTexture({
+            size: [width, height, depth],
+            format: "rgba32float", # Or specific format
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+        })
+        
+        # Upload Data [S4, unofficial]
+        # Assuming volume_data is a typed array
+        device.queue.writeTexture(
+            { texture: texture },
+            volume_data,
+            { offset: 0 },
+            [width, height, depth]
+        )
+        
+        # Create Sampler [S4, unofficial]
+        sampler = device.createSampler({
+            addressModeU: "clamp-to-edge", # Or "repeat"
+            addressModeV: "clamp-to-edge",
+            addressModeW: "clamp-to-edge",
+            magFilter: "linear",
+            minFilter: "linear",
+            mipmapFilter: "nearest"
+        })
+        
+        return texture, sampler
 
-    # 2. Allocate texture memory with specified dimensions and format
-    allocate_texture_3d(
-        target=texture_id,
-        internal_format=internal_format,
-        width=width, height=height, depth=depth,
-        base_format=internal_format,
-        data_type="GL_FLOAT"
-    )
-
-    # 3. Normalize continuous data to [0, 1]
-    if filtering == "linear":
-        data_min = min(data)
-        data_max = max(data)
-        data = (data - data_min) / (data_max - data_min)
-
-    # 4. Upload normalized data to GPU
-    upload_texture_data(texture_id, data)
-
-    # 5. Configure filtering
-    if filtering == "linear":
-        set_filter(texture_id, "MAG", "GL_LINEAR")
-        set_filter(texture_id, "MIN", "GL_LINEAR")
-    elif filtering == "nearest":
-        set_filter(texture_id, "MAG", "GL_NEAREST")
-        set_filter(texture_id, "MIN", "GL_NEAREST")
-
-    # 6. Configure wrapping
-    if wrap == "repeat":
-        set_wrap(texture_id, "S", "GL_REPEAT")
-        set_wrap(texture_id, "T", "GL_REPEAT")
-        set_wrap(texture_id, "R", "GL_REPEAT")
-    elif wrap == "clamp":
-        set_wrap(texture_id, "S", "GL_CLAMP_TO_EDGE")
-        set_wrap(texture_id, "T", "GL_CLAMP_TO_EDGE")
-        set_wrap(texture_id, "R", "GL_CLAMP_TO_EDGE")
-
-    # 7. Apply platform-specific resource flags
-    set_flag(texture_id, "SRGB", False)
-    set_flag(texture_id, "MipGenSettings", "TMGS_NoMipmaps")
-    set_flag(texture_id, "NeverStream", True)
-    set_flag(texture_id, "CompressionNone", True)
-
-    # 8. Bind to texture unit and update resource
-    active_texture("GL_TEXTURE0")
-    bind_texture_3d(texture_id)
-    update_resource(texture_id)
-
-    return texture_id
-
-# Helper definitions representing standard API operations
-def generate_texture_id():
-    return 1  # Standard glGenTextures(1) equivalent
-
-def bind_texture_3d(texture_id):
-    pass  # Standard glBindTexture(GL_TEXTURE_3D, texture_id) equivalent
-
-def allocate_texture_3d(target, internal_format, width, height, depth, base_format, data_type):
-    pass  # Standard glTexImage3D equivalent
-
-def upload_texture_data(texture_id, data):
-    pass  # Standard glTexSubImage3D or glTexImage3D data upload equivalent
-
-def set_filter(texture_id, filter_type, mode):
-    pass  # Standard glTexParameteri equivalent
-
-def set_wrap(texture_id, coord, mode):
-    pass  # Standard glTexParameteri equivalent
-
-def set_flag(texture_id, flag_name, value):
-    pass  # Platform-specific flag setter (e.g., Unreal Engine texture properties)
-
-def active_texture(unit):
-    pass  # Standard glActiveTexture equivalent
-
-def update_resource(texture_id):
-    pass  # Standard resource update call (e.g., Unreal Engine UpdateResource)
+def setup_label_weighted_texture(labels, weights, dimensions, api="webgpu"):
+    """
+    Setup VRDF-style label and weight textures [S5, unofficial].
+    """
+    width, height, depth = dimensions
+    
+    # Label Texture: Point Filter [S5, unofficial]
+    label_tex = device.createTexture({
+        size: [width, height, depth],
+        format: "r32uint", # Assuming integer labels
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+    })
+    device.queue.writeTexture({ texture: label_tex }, labels, { offset: 0 }, [width, height, depth])
+    
+    # Weight Texture: Bilinear Filter [S5, unofficial]
+    weight_tex = device.createTexture({
+        size: [width, height, depth],
+        format: "r32float",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+    })
+    device.queue.writeTexture({ texture: weight_tex }, weights, { offset: 0 }, [width, height, depth])
+    
+    # Samplers
+    label_sampler = device.createSampler({
+        addressModeU: "clamp-to-edge",
+        magFilter: "nearest",
+        minFilter: "nearest"
+    })
+    
+    weight_sampler = device.createSampler({
+        addressModeU: "clamp-to-edge",
+        magFilter: "linear",
+        minFilter: "linear"
+    })
+    
+    return label_tex, label_sampler, weight_tex, weight_sampler
 ```
 
 ### Parameters and Typical Values
-*   **Format**: `GL_RGBA32F` or `PF_A32B32G32R32F` for high-precision density/noise; `GL_RED` or `depth32float` for specific channel or depth requirements [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial].
-*   **Filtering**: `GL_LINEAR` for smooth density fields; `GL_NEAREST` or point filter for discrete anatomical labels; bilinear for continuous weights [S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial].
-*   **Wrap Mode**: `GL_REPEAT` for procedural noise; `GL_CLAMP_TO_EDGE` for finite medical or label volumes [S2, unofficial][S3, unofficial].
-*   **Resolution**: Scene-dependent; `settings.hiResNoise.resolution` for high-resolution noise, `settings.loResNoise.resolution` for low-resolution noise [S2, unofficial].
+*   **Filtering**: `GL_LINEAR` (trilinear) is standard for continuous data [S2, S3, unofficial]. `GL_NEAREST` is used for discrete labels [S5, unofficial].
+*   **Wrapping**: `GL_CLAMP_TO_EDGE` prevents edge artifacts [S3, unofficial]. `GL_REPEAT` is used for procedural noise [S2, unofficial].
+*   **Format**: `GL_RGBA32F` allows 4-channel data (e.g., RGBA) [S2, unofficial]. `GL_RED` is sufficient for scalar volumes [S3, unofficial].
+*   **Mipmaps**: Disabled by default for volume textures unless multi-resolution rendering is implemented [S1, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Precision Loss**: Using `GL_RGBA8` for density data causes banding artifacts; use `GL_RGBA32F` for continuous data [S1, unofficial][S3, unofficial].
-*   **Filtering Artifacts**: Using `GL_LINEAR` on label textures blends discrete classes, leading to incorrect segmentation; always use `GL_NEAREST` for labels [S5, unofficial].
-*   **Memory Limits**: Single contiguous textures are limited by API constraints (e.g., DirectX 12 limit of 2048 voxels per dimension); use sparse setups for larger volumes [S2, unofficial][S3, unofficial].
-*   **Streaming Overhead**: Enabling streaming on static volumes causes performance penalties due to unnecessary page faults; disable streaming for static data [S1, unofficial].
+*   **Precision**: Using compressed formats or 8-bit integers for continuous data leads to banding artifacts. Use `GL_RGBA32F` or `GL_RED` with `GL_FLOAT` [S2, S3, unofficial].
+*   **Boundary Artifacts**: Without `GL_CLAMP_TO_EDGE`, wrapping modes can cause data from the opposite side of the volume to leak into the rendering, creating visible seams [S3, unofficial].
+*   **Memory Limits**: Single 3D textures are limited by hardware (e.g., 2048 voxels per dimension in DirectX 12) [S2, unofficial]. For larger volumes, sparse textures or chunking are required.
+*   **Data Normalization**: If data is not normalized to $[0, 1]$, transfer functions may not work correctly. Explicit normalization is required [S3, unofficial].
 
 ## Subtopics
 
 ### [3D Texture Upload](4419-3d-texture-upload.md)
-This method handles the transfer of classified RGBA volume data from CPU memory to GPU memory by uploading it into an OpenGL `GL_TEXTURE_3D` texture object. It solves the problem of converting nested 3D array structures (common in JavaScript/Python data processing) into a flat, contiguous byte buffer required by OpenGL's `glTexImage3D` or `glTexSubImage3D` functions. It is distinct from [Volume Atlas Texture Update](7157-volume-atlas-texture-update.md), which manages multiple smaller textures in an atlas layout, whereas this method focuses on a single monolithic 3D texture upload.
+This method transfers volume data and transfer function data from CPU memory to GPU memory by uploading them into OpenGL `GL_TEXTURE_3D` and `GL_TEXTURE_2D` texture objects. It handles the generation, binding, parameter configuration, and data upload of these textures.
 
 ### [VRDF Texture Construction for Label-Weighted Volumes](6959-vrdf-texture-construction-for-label-weighted-volumes.md)
 This method constructs GPU-accessible 3D textures for Unity volume rendering when the input data is in 'anatomy_label_weighted' mode with 2 channels. It separates discrete labels and continuous weights into distinct 3D textures with specific filtering modes to support weighted raymarching. It serves as the runtime counterpart to the VRDF file export logic, ensuring that the label and weight data are sampled correctly for opacity modulation.
@@ -136,23 +196,22 @@ This method constructs GPU-accessible 3D textures for Unity volume rendering whe
 ### [Sparse Volume Texture Setup](7432-sparse-volume-texture-setup.md)
 Sparse Volume Texture (SVT) setup is a method for rendering large volumetric datasets in Unreal Engine 5 by storing data in sparse tiles within a single large volume texture, circumventing the DirectX 12 API limit of 2048 voxels per dimension. It solves the problem of contiguous memory fragmentation limiting single texture allocation to approximately 1 gigavoxel in earlier approaches, allowing the display of massive datasets (up to ~6 gigavoxels) at reasonable frame rates by treating a collection of sparse tiles as a single logical volume. Unlike a single contiguous texture which avoids lighting discontinuities but exceeds allocation limits, SVT enables the display of entire massive datasets without chunking artifacts.
 
-### Texture Setup
-This variant focuses on loading 2D textures for procedural effects or shadow maps in WebGPU environments. It involves loading a texture from a file (e.g., `./LDR_LLL1_16.png`), creating a sampler with specific address modes ("repeat" for U and V) and filter modes ("nearest" for mag, min, and mipmap), and configuring the texture with usages for both rendering and binding [S4, unofficial]. The texture is created with a size of 512x512 and format "depth32float" or "rgba8unorm" depending on the purpose [S4, unofficial].
+### [Voxel Volume Initialization & Binding](12429-voxel-volume-initialization-binding.md)
 
-### VRDF Runtime Volume Rendering Setup
-This variant defines the runtime behavior of the VolumeDVR component, which parses VRDF files, builds GPU textures, and sets up shader uniforms for real-time 3D raymarched volume rendering with weight-driven transparency [S5, unofficial]. The result is real-time 3D raymarched volume rendering where the weight map drives transparency and per-label color/visibility is fully dynamic [S5, unofficial]. The process involves reading the magic header 'VRDF0001', building GPU textures for labels (point filter), weights (bilinear filter), a 1D LUT (`Texture2D`) for colors/alpha, and a `_LabelCtrlTex` (256x1 RGBAFloat) for dynamic UI control [S5, unofficial]. Injected shader uniforms include `_VolumeTexLabels` (`Texture3D`), `_VolumeTexWeights` (`Texture3D`), `_HasWeights` (`bool`/`int`), `_TFTex` (`Texture2D`), and `_LabelCtrlTex` (`Texture2D`), along with affine matrices and volume dimensions [S5, unofficial].
+### [Volume Texture Mapping with ROI](12595-volume-texture-mapping-with-roi.md)
+A technique to render volumetric data using 3D texture mapping by defining a Data Region of Interest (ROI) within the source data and a Geometry ROI in world space, allowing rendering of sub-volumes without copying data.
 
 ## Operating characteristics
-*   **Time Complexity**: O(N) for data upload where N is the number of voxels; texture creation is O(1) relative to data size but depends on driver overhead [S3, unofficial].
-*   **Memory Complexity**: O(N) for storing the volume data in GPU memory [S3, unofficial].
-*   **Performance**: Linear filtering provides smooth visuals but requires more memory bandwidth; nearest filtering is faster for discrete data [S2, unofficial][S5, unofficial].
-*   **Strengths**: Flexible configuration for various data types; supports both continuous and discrete data [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial].
-*   **Limitations**: Single texture size limits; streaming overhead if not disabled; precision loss with low-bit formats [S1, unofficial][S2, unofficial][S3, unofficial].
-*   **When to Use**: When rendering volumetric data in real-time; when data requires specific filtering or wrapping modes [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial].
-*   **When Not to Use**: For extremely large datasets exceeding texture dimension limits (use Sparse Volume Texture Setup); for data requiring compression (use uncompressed formats) [S1, unofficial][S2, unofficial].
+*   **Time Complexity**: $O(N)$ where $N$ is the number of voxels, for data upload. Texture parameter configuration is $O(1)$.
+*   **Memory Complexity**: $O(N)$ for storing the volume data on the GPU.
+*   **Performance**: Upload speed depends on the bus bandwidth (PCIe) and the efficiency of the `glTexImage3D` or `copyBufferToTexture` calls. WebGPU's `copyExternalImageToTexture` can be optimized for specific formats [S4, unofficial].
+*   **Strengths**: Direct GPU access allows for efficient raymarching. Flexible sampling parameters allow for various interpolation methods.
+*   **Limitations**: Memory usage is high for large volumes. Single texture allocation limits exist (e.g., 2048^3 in DX12) [S2, unofficial].
+*   **When to Use**: When real-time volume rendering is required and the volume fits within GPU memory limits.
+*   **When Not to Use**: For extremely large volumes that exceed GPU memory, consider sparse textures or out-of-core rendering.
 
 ## Background
-Volume Texture Setup is a fundamental technique in real-time volume rendering, evolving with graphics APIs from OpenGL to Vulkan and WebGPU [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial]. It is used in medical imaging, scientific visualization, and procedural effects in games [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial]. The method has been adapted to handle various data formats, including continuous density fields, discrete label maps, and procedural noise functions [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial].
+Volume texture setup is a fundamental technique in GPU-based volume rendering, evolving with the capabilities of OpenGL, DirectX, and WebGPU. Early implementations relied on OpenGL's `glTexImage3D` [S3, unofficial]. More recent approaches utilize WebGPU's explicit resource management [S4, unofficial] and engine-specific abstractions like Unreal Engine's `UTexture3D` [S1, unofficial]. The VRDF format [S5, unofficial] represents a specialized approach for label-weighted medical data.
 
 ## Sources
 [S1] JI20/unreal-splat, https://github.com/JI20/unreal-splat, fetched 2026-10-27 (unofficial)
