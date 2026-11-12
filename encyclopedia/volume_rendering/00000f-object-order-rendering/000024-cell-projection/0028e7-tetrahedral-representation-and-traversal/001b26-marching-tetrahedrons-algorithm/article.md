@@ -2,82 +2,83 @@
 
 
 ## Overview
-The Marching Tetrahedrons Algorithm (MTA) is an iso-surface extraction method that decomposes volumetric grid cells (typically cubes) into tetrahedra to resolve topological ambiguities inherent in cube-based methods like Marching Cubes [S1, unofficial]. It sets itself apart by ensuring planar faces and consistent topology through tetrahedral subdivision, though it introduces directional ambiguities due to the non-symmetric nature of cube-to-tetrahedron decomposition [S1, unofficial].
+The Marching Tetrahedrons Algorithm (MTA) is an iso-surface extraction method that decomposes volumetric grid cells (typically cubes) into tetrahedra to resolve topological ambiguities inherent in cube-based methods like Marching Cubes [S1, unofficial]. It sets itself apart from its siblings by using a tetrahedral decomposition to ensure consistent, planar intersections within each cell, thereby avoiding the "problem cells" where rays might intersect a face twice or where topology is ambiguous [S1, S2, S8, S13, S19, unofficial][S4].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A scalar field defined on a regular grid (e.g., $N \times N \times N$ voxels), where each vertex $v_i$ has a scalar value $s_i$. A threshold value $T$ defines the iso-surface.
-*   **Output:** A triangle soup representing the iso-surface.
+*   **Input:** A regular 3D grid (voxel lattice) where each vertex $v_i$ has an associated scalar value $s_i$. A threshold value $T$ defines the iso-surface.
+*   **Output:** A triangular mesh representing the iso-surface.
 
 **Data Structures:**
-*   **Grid:** A 3D array of scalar values.
-*   **Tetrahedral Decomposition:** Each cubic cell is split into 5 or 6 tetrahedra. The specific connectivity pattern must be fixed for the entire grid to ensure consistency [S1, S8, S13, S19].
-*   **Lookup Table:** A table mapping the binary configuration of vertex signs (relative to $T$) to the set of edges intersected by the iso-surface within a tetrahedron. Since a tetrahedron has 4 vertices, there are $2^4 = 16$ possible configurations.
+*   **Grid:** A 3D array of vertices. Each vertex $v$ has coordinates $(x, y, z)$ and scalar value $s$.
+*   **Cell:** A cube defined by 8 vertices.
+*   **Tetrahedron:** A convex polyhedron with 4 vertices. Each cube is decomposed into 5 or 6 tetrahedra [S2, S8, S13, S19, unofficial][S1, unofficial].
 
 **Steps:**
-1.  **Grid Traversal:** Iterate through each cubic cell in the grid.
-2.  **Tetrahedral Subdivision:** Decompose the current cubic cell into its constituent tetrahedra using a pre-defined, consistent decomposition scheme [S1, S8, S13, S19].
-3.  **Vertex Classification:** For each tetrahedron, determine the sign of each vertex relative to the threshold $T$. Let $b_i = 1$ if $s_i \ge T$ and $b_i = 0$ if $s_i < T$.
-4.  **Lookup:** Use the 4-bit index formed by $(b_0, b_1, b_2, b_3)$ to retrieve the intersection pattern from the lookup table.
-5.  **Edge Intersection:** For each edge in the intersection pattern, calculate the intersection point $P$ where the scalar value equals $T$.
-    *   Let the edge connect vertices $v_a$ and $v_b$ with scalar values $s_a$ and $s_b$.
-    *   The intersection point is found via linear interpolation:
-        $$ P = v_a + \frac{T - s_a}{s_b - s_a} (v_b - v_a) $$
-    *   [G] Guard against division by zero if $s_a = s_b$; if $s_a = s_b = T$, the edge lies on the surface, and handling depends on the specific topology resolution strategy (often treated as intersecting or ignored based on neighbor consistency).
-6.  **Triangle Generation:** Connect the intersection points to form triangles. The lookup table specifies which pairs of intersection points form triangles.
-7.  **Output:** Add the generated triangles to the output mesh.
+1.  **Decomposition:** For each cube cell in the grid, decompose it into tetrahedra. The decomposition must be consistent across shared faces to ensure manifold connectivity. A common scheme divides the cube into 6 tetrahedra by connecting the center of the cube to the faces, or by splitting along diagonals [S1, unofficial][S2].
+2.  **Classification:** For each tetrahedron, determine the state of its 4 vertices relative to the threshold $T$. Each vertex $v_i$ is marked as inside ($s_i \ge T$) or outside ($s_i < T$). This results in $2^4 = 16$ possible configurations.
+3.  **Intersection:** For each tetrahedron with mixed vertex states (some inside, some outside), compute the intersection points of the iso-surface with the tetrahedron's edges.
+    *   Let the vertices of the tetrahedron be $v_0, v_1, v_2, v_3$ with scalar values $s_0, s_1, s_2, s_3$.
+    *   For each edge $(v_i, v_j)$ where $s_i$ and $s_j$ have different signs relative to $T$, calculate the intersection point $p$ using linear interpolation:
+        $$ p = v_i + \frac{T - s_i}{s_j - s_i} (v_j - v_i) $$
+    *   [G] Handle the case where $s_i = s_j$ by skipping the edge or treating it as outside, as the iso-surface does not cross the edge.
+4.  **Triangulation:** Connect the intersection points to form triangles. The connectivity is determined by the configuration index (0-15). Standard lookup tables define which edges are connected for each configuration [S1, unofficial][S2].
+5.  **Output Generation:** Collect all generated triangles from all tetrahedra.
 
 **Parameters:**
-*   **Threshold $T$:** The scalar value defining the surface.
-*   **Decomposition Scheme:** The specific way cubes are split into tetrahedra. Common schemes split a cube into 5 tetrahedra by adding a central vertex or 6 tetrahedra by splitting along diagonals. The choice affects the directional bias [S1, unofficial].
+*   **Threshold $T$:** The scalar value defining the iso-surface.
+*   **Decomposition Scheme:** The specific pattern used to split cubes into tetrahedra.
 
 **Edge Cases and Pitfalls:**
-*   **Directional Ambiguities:** Because a cube cannot be subdivided into tetrahedra symmetrically, the MTA introduces directional biases. Different decomposition schemes may produce different surfaces for the same data, particularly in ambiguous configurations [S1, unofficial].
-*   **Missing Boundaries:** In multi-material contexts, if an isosurface enters a tetrahedron but only intersects one edge, the algorithm may miss the boundary if detection relies solely on vertex information [S2].
-*   **Precision:** Linear interpolation assumes a linear scalar field within the tetrahedron. Non-linear fields may lead to inaccuracies [S1, unofficial][S2].
+*   **Directional Ambiguities:** The MTA has directional ambiguities because a cube cannot be subdivided into tetrahedra symmetrically [S1, unofficial]. Different decomposition schemes may yield different topologies for the same data, leading to inconsistencies if not handled globally [S1, unofficial].
+*   **Missing Boundaries:** In multi-material contexts, the algorithm can miss material boundaries if the isosurface enters a tetrahedron but only intersects one edge, as detection relies on vertex information [S2].
+*   **Precision:** Linear interpolation assumes a linear scalar field within the tetrahedron. Non-linear fields may introduce errors [S1, unofficial][S2][S3].
 
 ## Subtopics
 
 ### [Regularised Marching Tetrahedra](1301-regularised-marching-tetrahedra.md)
-Regularised Marching Tetrahedra (RMT) combines MTA with vertex clustering to simplify surfaces and improve triangle aspect ratios, reducing triangle count by ~70% while preserving topology.
+Regularised Marching Tetrahedra (RMT) is an iso-surface extraction algorithm that combines the topological consistency of the Marching Tetrahedrons Algorithm with vertex clustering to generate simplified surfaces with improved triangle aspect ratios. Unlike standard Marching Tetrahedra, which can produce thin, degenerate triangles that degrade interpolated shading, RMT reduces the triangle count by approximately 70% while preserving the original topology by basing clustering on the tetrahedral lattice. See [Regularised Marching Tetrahedra](1301-regularised-marching-tetrahedra.md).
 
 ### [Subgrid Pipeline](1640-subgrid-pipeline.md)
-The Subgrid Pipeline explicitly resolves topological ambiguities in isosurface extraction by processing individual tetrahedra to generate open, scoop, and normal boundary curves, handling configurations not resolved by standard MTA.
+The Subgrid Pipeline is a method for extracting isosurfaces from tetrahedral grids by resolving topological ambiguities within individual tetrahedra using subgrid-accurate intersection data. It distinguishes itself from standard Marching Tetrahedrons by explicitly handling open, scoop, and normal boundary curves to ensure watertightness, allowing multiple intersection vertices per edge to represent complex topology. It builds on [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md) by replacing the fixed lookup table with a local reconstruction procedure that processes boundary curves. See [Subgrid Pipeline](1640-subgrid-pipeline.md).
 
 ### [Tetrahedral Normal Calculation](1941-tetrahedral-normal-calculation.md)
-A method for calculating smooth isosurface normals for tetrahedral meshes by computing vertex normals weighted by the volume of connected tetrahedra.
+Tetrahedral Normal Calculation is a method for computing smooth isosurface normals in tetrahedral volume rendering by weighting vertex normals with the volumes of connected tetrahedra. It solves the problem of severe shading discontinuities that arise when using the constant plane normal of individual tetrahedra, which decreases rendering quality. It differs from its parent, the Marching Tetrahedrons Algorithm, by post-processing the geometric intersection to provide continuous lighting, and from siblings like Regularised Marching Tetrahedra by relying on pre-computed vertex weights rather than local regularization kernels[1301-regularised-marching-tetrahedra.md]. See [Tetrahedral Normal Calculation](1941-tetrahedral-normal-calculation.md).
 
 ### [McGrids](2289-mcgrids.md)
-McGrids constructs adaptive, non-uniform tetrahedral grids using Monte Carlo sampling and Centroidal Voronoi Tessellation (CVT) relaxation, then extracts the surface via MTA, reducing memory usage compared to uniform grids.
+McGrids is an iso-surface extraction method that constructs adaptive, non-uniform tetrahedral grids using an iterative Monte Carlo process to estimate a probability density function (PDF) based on the implicit field, followed by a refinement step and mesh extraction via [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md). It solves the problem of inefficient uniform grid sampling by concentrating grid points near surfaces and geometric details, significantly reducing the number of implicit field queries and memory usage compared to uniform grids. Unlike [Regularised Marching Tetrahedra](1301-regularised-marching-tetrahedra.md) or [Subgrid Pipeline](1640-subgrid-pipeline.md) which may rely on fixed or hierarchical structures, McGrids dynamically adapts the grid topology through probabilistic sampling and Centroidal Voronoi Tessellation (CVT) relaxation. See [McGrids](2289-mcgrids.md).
 
 ### [Exact Fiber Surface Extraction](3445-exact-fiber-surface-extraction.md)
-Computes the pre-image of a 1-manifold path in a bivariate field over a tetrahedral mesh, guaranteeing planar pre-images within each tetrahedron by decomposing extraction into base surface generation and precise clipping.
+Exact Fiber Surface Extraction computes the pre-image of a 1-manifold path (Fiber Surface Control Polygon, FSCP) in the range of a bivariate field $f: \mathbb{R}^3 \to \mathbb{R}^2$ over a tetrahedral mesh. It solves the problem of approximating these surfaces using signed distance fields, which fail to capture sharp bends and complex topologies. Unlike [Regularised Marching Tetrahedra](1301-regularised-marching-tetrahedra.md) which smooths geometry, this method guarantees planar pre-images within each tetrahedron by decomposing the extraction into base surface generation and precise clipping. See [Exact Fiber Surface Extraction](3445-exact-fiber-surface-extraction.md).
 
 ### [Marching Tetrahedra Reconstruction](3516-marching-tetrahedra-reconstruction.md)
-Converts input vertices and normals into a 3D mesh by computing an implicit field using the Welland function, sampling it on a tetrahedral grid, and extracting the zero-level set via MTA, replacing linear interpolation with Welland-based evaluation.
+Marching Tetrahedra Reconstruction is a surface reconstruction method that converts a set of input vertices and normals into a 3D mesh by computing an implicit field using the Welland function, sampling it on a tetrahedral grid, and extracting the zero-level set via Marching Tetrahedra. It differs from standard Marching Cubes by using a tetrahedral decomposition of the grid cells, which eliminates the ambiguity cases inherent in cube-based extraction. It builds on [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md) but replaces the standard linear interpolation with a Welland-based implicit field evaluation. See [Marching Tetrahedra Reconstruction](3516-marching-tetrahedra-reconstruction.md).
 
 ### [Raster Algorithm for Fiber Surface Extraction](4960-raster-algorithm-for-fiber-surface-extraction.md)
-Approximates fiber surfaces by extracting the 0 level-set of a signed range distance field to the Fiber Surface Control Polygon (FSCP), rasterizing the scalar field range into a 2D grid to reduce computational cost.
+The Raster Algorithm for Fiber Surface Extraction approximates fiber surfaces by extracting the 0 level-set of a signed range distance field to the Fiber Surface Control Polygon (FSCP). It reduces the computational cost of distance field evaluation by rasterizing the scalar field range into a 2D grid, trading geometric accuracy for speed. Unlike exact methods, it imposes a lower bound on Hausdorff distance near FSCP bends and only handles closed FSCPs. See [Raster Algorithm for Fiber Surface Extraction](4960-raster-algorithm-for-fiber-surface-extraction.md).
 
 ### [Keppel Heuristic](10336-keppel-heuristic.md)
-A heuristic method that applies tetrahedrons to points and computes volume to determine the next vertex in contour tiling.
+The Keppel Heuristic is a local decision method used in contour tiling to determine how to connect two parallel contour segments during volume rendering. It resolves the ambiguity of which vertex to connect next by comparing the volumes of two candidate tetrahedra formed with interior reference points. It sets itself apart from global optimization methods like [Planar Contour Tiling](10346-planar-contour-tiling.md) by using a greedy, local volume comparison rather than a graph-theoretic global optimum. See [Keppel Heuristic](10336-keppel-heuristic.md).
 
 ### [Tetrahedralization Schemes](10948-tetrahedralization-schemes.md)
-Methods that decompose volumetric grid cells into tetrahedra to facilitate MTA, solving topological ambiguity and geometric distortion issues by providing specific tessellation patterns (e.g., BCC, Diamond, Centered Cubic).
+Tetrahedralization Schemes are methods that decompose volumetric grid cells into tetrahedra to facilitate isosurface extraction via the Marching Tetrahedrons Algorithm. They solve the topological ambiguity and geometric distortion issues inherent in cubic grid decomposition by providing specific tessellation patterns. This family is distinguished from its siblings by the specific lattice structure (BCC, Diamond, or Centered Cubic) and the resulting tetrahedral connectivity used to define the local cell geometry. See [Tetrahedralization Schemes](10948-tetrahedralization-schemes.md).
+
+### [MTCut](11818-mtcut.md)
+MTCut is a real-time volume cutting algorithm that modifies isosurfaces generated by the Marching Tetrahedra (MT) algorithm using a user-defined cutting tool. Unlike traditional tetrahedral mesh cutting strategies that require a pre-computed tetrahedrization of the entire volume, MTCut computes the tetrahedrization of only the intersected cells on-the-fly, enabling interactive performance for complex meshes. It produces a watertight manifold model, distinguishing it from approaches like Zachow et al. [ZGSZ03] that yield open surfaces with borders. See [MTCut](11818-mtcut.md).
 
 ### Nielson-Franke Generalization
-A direct generalization of Nielson's and Franke's algorithm for multi-material data sets. It uses barycentric coordinates to represent material fractions at each vertex. When restricted to single-material vertices, it reduces to the Nielson-Franke algorithm. It uses a BSP algorithm for clipping material boundaries within tetrahedra [S2].
+The Nielson-Franke Generalization is a direct generalization of Nielson's and Franke's algorithm for multi-material interfaces [S2]. It reduces to the Nielson-Franke algorithm when material fractions are restricted such that exactly one $l_i=1$ at each vertex [S2]. In the three-material case, the point $c = (1/3, 1/3, 1/3)$ is chosen as the "center" of the barycentric triangle, assuming three distinct sectors subdividing the triangle in a "Y" fashion [S2]. The algorithm can miss material boundaries in tetrahedra if the isosurface enters a tetrahedron but only intersects one edge, as detection relies on vertex information [S2]. See [Nielson-Franke Generalization](unofficial).
 
 ## Operating characteristics
-*   **Time Complexity:** Effectively the same as Marching Cubes/Tetrahedra, $O(N)$ where $N$ is the number of cells/voxels [S2].
-*   **Memory Complexity:** $O(N)$ for the grid and output mesh. Lookup tables are constant size.
-*   **Strengths:** Resolves topological ambiguities of Marching Cubes; ensures planar faces; consistent topology with proper decomposition [S1, S8, S13, S19].
-*   **Limitations:** Directional ambiguities due to non-symmetric cube decomposition; potential to miss boundaries in multi-material cases if vertex information is insufficient [S1, unofficial][S2].
-*   **When to Use:** When topological correctness is critical and directional bias is acceptable or can be mitigated.
-*   **When Not to Use:** When strict isotropy is required without post-processing, or when multi-material boundaries are complex and vertex-only detection is insufficient [S2].
+*   **Time Complexity:** The algorithm runs in effectively the same time as the marching cubes/tetrahedra algorithm [S2]. It traverses the cells of a grid and calculates, for each cell, a polygonal representation of the material boundaries [S2].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Resolves topological ambiguities of Marching Cubes; produces watertight surfaces; consistent topology across shared faces.
+*   **Limitations:** Directional ambiguities due to asymmetric tetrahedral decomposition; potential for missing boundaries in multi-material cases; requires careful handling of edge cases [S1, unofficial][S2].
+*   **When to use:** When topological consistency is critical and the data is defined on a regular grid.
+*   **When not to use:** When directional symmetry is required, or when dealing with complex multi-material interfaces that may not be captured by vertex-based detection [S1, unofficial][S2].
 
 ## Background
-The Marching Tetrahedrons Algorithm was developed to address the topological ambiguities present in Marching Cubes. By decomposing cubic cells into tetrahedra, it ensures that the iso-surface is well-defined within each cell. However, the non-symmetric nature of tetrahedral decomposition introduces directional biases [S1, unofficial]. The algorithm has been generalized for multi-material data sets, such as the Nielson-Franke generalization, which uses barycentric coordinates to handle volume fractions [S2].
+The Marching Tetrahedrons Algorithm was developed to address the topological ambiguities inherent in the Marching Cubes algorithm [S1, unofficial]. It was initially overlooked, resulting in the accidental generation of holes in some data sets, but this problem has since been fixed [S1, unofficial]. The algorithm is based on the decomposition of cubic cells into tetrahedra, which allows for a more robust handling of iso-surface extraction [S1, S2, S8, S13, S19, unofficial][S1, unofficial].
 
 ## Sources
 [S1] Volume-Enclosing Surface Extraction, https://arxiv.org/abs/1011.1787v4, fetched 2026-10-26 (unofficial)

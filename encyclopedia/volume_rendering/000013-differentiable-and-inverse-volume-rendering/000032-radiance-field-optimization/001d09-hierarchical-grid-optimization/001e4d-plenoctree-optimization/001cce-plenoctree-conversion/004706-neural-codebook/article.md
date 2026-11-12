@@ -1,0 +1,189 @@
+# Neural Codebook
+
+
+## Overview
+The Neural Codebook (NCB) is a shallow neural network module designed to recover high-frequency spatial details lost during the non-uniform compression and downsampling of voxel grid models (specifically density and color features) in radiance field optimization [S1]. It acts as a refinement step that maps a compressed, upsampled grid back to the original resolution, restoring fidelity without the storage overhead of dense grids [S1]. Unlike sibling methods like [PlenOctree](1366-plenoctree.md) which rely on sparse octree structures for storage, NCB operates on dense grids to provide a compact, high-quality representation suitable for real-time rendering [S1].
+
+## How it works
+**Inputs and Outputs:**
+The module takes a pair of grid models $(V, \hat{V})$ as input, where $V = \{V_\sigma, V_c\}$ represents the source grid (ground truth or high-resolution reference) and $\hat{V} = \{\hat{V}_\sigma, \hat{V}_c\}$ represents the upsampled compressed grid [S1]. The output is a refined grid $V_r = \{V_r^\sigma, V_r^c\}$ [S1]. The input and output features share the same type and identical shape [S1].
+
+**Data Structures:**
+The architecture processes two modalities: volume density ($\sigma$) and color ($c$) [S1]. The grid features are stored as dense tensors corresponding to the voxel dimensions [S1].
+
+**Algorithm Steps:**
+1.  **Coordinate Embedding:** For each voxel coordinate $v$ in the grid, compute a high-dimensional position embedding $P$ using sinusoidal functions [S1].
+2.  **Feature Transformation:** Pass the upsampled compressed features $\hat{V}$ through a shallow fully-connected (FC) network [S1].
+3.  **Adaptive Modulation:** At each FC layer, modulate the activations using Adaptive Layer Normalization (AdaLN) conditioned on the position embedding $P$ [S1].
+4.  **Residual Refinement:** Add the network output to the input features using a residual connection to ease information propagation and recover high-frequency details [S1].
+5.  **Output Generation:** The final output $V_r$ is the result of the residual addition [S1].
+
+**Formulas:**
+The position embedding $\gamma(v)$ for a voxel $v$ is defined as [S1]:
+$$
+\gamma(v) = [\cos(2\pi a_1^\top v), \sin(2\pi a_1^\top v), \dots, \cos(2\pi a_L^\top v), \sin(2\pi a_L^\top v)]
+$$
+where $A = [a_1, \dots, a_L]$ is a matrix of basis vectors sampled from a standard normal distribution, and $L$ is the embedding dimension [S1]. The position embedding is denoted as $P = \gamma(v)$ [S1].
+
+The Adaptive Layer Normalization (AdaLN) modulates the activation $u$ of an FC layer using parameters $y = (y_b, y_s)$ derived from a learned transformation on $P$ [S1]:
+$$
+\text{AdaLN}(u, y) = y_s \cdot \frac{u - \mu(u)}{\nu(u)} + y_b
+$$
+where $\mu(u)$ and $\nu(u)$ are the mean and variance of $u$ computed across channels [S1].
+
+**Training and Loss:**
+The NCB parameters are model-specific (scene-specific) [S1]. The network is trained by minimizing the L1 loss between the refined output and the source grid [S1]:
+$$
+\mathcal{L} = \lambda_c \| V_r^c - V_c \|_1 + \lambda_\sigma \| V_r^\sigma - V_\sigma \|_1
+$$
+where $\lambda_c$ and $\lambda_\sigma$ are weighting factors [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class NeuralCodebook(nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, embed_dim, num_layers=2):
+        """
+        Args:
+            in_channels: Number of input feature channels (density + color).
+            hidden_channels: Number of channels in hidden FC layers.
+            out_channels: Number of output feature channels.
+            embed_dim: Dimension of the sinusoidal position embedding.
+            num_layers: Number of fully connected layers.
+        """
+        super().__init__()
+        self.num_layers = num_layers
+        self.layers = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        
+        # Input layer
+        self.layers.append(nn.Linear(in_channels, hidden_channels))
+        self.norms.append(nn.Linear(embed_dim, hidden_channels * 2)) # For AdaLN scale/bias
+        
+        # Hidden layers
+        for _ in range(num_layers - 2):
+            self.layers.append(nn.Linear(hidden_channels, hidden_channels))
+            self.norms.append(nn.Linear(embed_dim, hidden_channels * 2))
+            
+        # Output layer
+        self.layers.append(nn.Linear(hidden_channels, out_channels))
+        # No AdaLN on the final output layer as per standard residual structure description
+        # [G] Assuming the residual connection is applied after the final layer output.
+
+    def sinusoidal_embedding(self, coords, basis_matrix):
+        """
+        Computes sinusoidal position embedding.
+        Args:
+            coords: Tensor of shape (..., 3) representing voxel coordinates.
+            basis_matrix: Tensor of shape (L, 3) with basis vectors sampled from N(0,1).
+        Returns:
+            Tensor of shape (..., 2*L)
+        """
+        # Expand coords to (..., 1, 3) and basis to (1, L, 3) for broadcasting
+        # Dot product results in (..., L)
+        dot_product = torch.matmul(coords, basis_matrix.T) # (..., L)
+        
+        cos_embed = torch.cos(2 * torch.pi * dot_product)
+        sin_embed = torch.sin(2 * torch.pi * dot_product)
+        
+        # Concatenate along the last dimension
+        embedding = torch.cat([cos_embed, sin_embed], dim=-1)
+        return embedding
+
+    def adaln(self, x, y_scale, y_bias):
+        """
+        Adaptive Layer Normalization.
+        Args:
+            x: Input activations (..., C).
+            y_scale: Scale parameters (..., C).
+            y_bias: Bias parameters (..., C).
+        Returns:
+            Normalized and scaled activations.
+        """
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, keepdim=True, unbiased=False)
+        # Standardize
+        x_norm = (x - mean) / torch.sqrt(var + 1e-5)
+        # Scale and shift
+        return y_scale * x_norm + y_bias
+
+    def forward(self, V_hat, coords, basis_matrix):
+        """
+        Args:
+            V_hat: Upsampled compressed grid features, shape (N, C_in).
+            coords: Corresponding voxel coordinates, shape (N, 3).
+            basis_matrix: Pre-computed basis matrix, shape (L, 3).
+        Returns:
+            Refined grid features V_r, shape (N, C_out).
+        """
+        # 1. Compute Position Embedding
+        P = self.sinusoidal_embedding(coords, basis_matrix) # (N, 2*L)
+        
+        # 2. Process through layers
+        x = V_hat
+        for i, layer in enumerate(self.layers):
+            if i < self.num_layers - 1:
+                # Apply AdaLN before activation for hidden layers
+                # Transform P to get scale and bias for this layer
+                y = self.norms[i](P) # (N, 2*hidden)
+                y_scale = y[:, :self.layers[i].out_features]
+                y_bias = y[:, self.layers[i].out_features:]
+                
+                x = layer(x)
+                x = self.adaln(x, y_scale, y_bias)
+                x = F.relu(x) # [G] Standard ReLU activation assumed for shallow network
+            else:
+                # Final layer
+                x = layer(x)
+        
+        # 3. Residual Connection
+        # The input V_hat and output x have identical shape
+        V_r = x + V_hat
+        
+        return V_r
+```
+
+**Parameters:**
+-   **Training Time:** Typically costs about 20 minutes on a single NVIDIA A100 GPU [S1].
+-   **Downsampling Scales:** Default scale for color features is 1/4, and for density features is 1/2 [S1].
+
+**Edge Cases and Pitfalls:**
+-   **Contextual Information:** Pointwise manipulation may omit contextual information existing in spatial locations of grid models [S1]. This is mitigated by the residual structure and position embedding [S1].
+-   **Model-Specificity:** The parameters of NCB are model-specific, meaning a separate NCB must be trained for each scene [S1].
+
+## Subtopics
+
+### PlenOctree
+A sparse octree representation for real-time rendering. NCB is used in the conversion pipeline to refine the dense grid before or during the sparse extraction process, ensuring high-frequency details are preserved despite compression [S1].
+
+### PlenOctree Conversion
+The pipeline that utilizes NCB to transform a trained NeRF-SH model into a sparse octree. NCB handles the refinement of the intermediate dense grid representation [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+-   **Storage Size:** NCB achieves significant compression. On Synthetic-NeRF, it achieves 5.67 MB compared to Plenoxels' 86 MB [S1]. On LLFF, it achieves 5.5 MB compared to Plenoxels' 2575 MB [S1].
+-   **Test Time:** Rendering time is comparable to or slightly better than Plenoxels. On Synthetic-NeRF, 1.28 ms vs 1.39 ms [S1]. On LLFF, 13.7 ms vs 55.9 ms [S1].
+-   **Deployment Time:** NCB reduces disk I/O and host-device transfer times significantly due to smaller size. On LLFF, Disk IO & Decode takes 52 ms for NCB vs 1257 ms for Plenoxels [S1]. However, NCB requires additional time for trilinear upsampling (1219 ms) and NCB inference (97 ms) during rendering, resulting in a total deployment time of 1398 ms vs 1367 ms for Plenoxels on LLFF [S1].
+
+**Performance:**
+-   **Synthetic-NeRF:** 31.45 dB PSNR [S1].
+-   **LLFF:** 26.03 dB PSNR [S1].
+-   **Comparison:** NCB achieves higher PSNR (31.45 dB) than independent networks for density and color (31.38 dB) with fewer parameters [S1].
+
+**Strengths and Limitations:**
+-   **Strengths:** High compression ratio (>40x reduction rate), comparable or better rendering quality, fast training (20 mins on A100) [S1].
+-   **Limitations:** Requires per-scene training (model-specific parameters), adds inference overhead for upsampling and NCB evaluation during rendering [S1].
+
+**When to Use:**
+Use NCB when storage size is a critical constraint and real-time rendering is required, particularly for forward-facing scenes where the overhead of trilinear upsampling is acceptable [S1].
+
+## Background
+The Neural Codebook was introduced in the paper "Compact Real-Time Radiance Fields with Neural Codebook" [S1]. It addresses the limitations of existing compact radiance field methods by providing a mechanism to recover high-frequency details lost during grid compression. The design is inspired by style injection techniques [S1]. The method is part of a pipeline for converting NeRF-SH models into sparse octree representations for real-time rendering [S1].
+
+## Sources
+[S1] Compact Real-Time Radiance Fields with Neural Codebook, https://doi.org/10.1109/icme55011.2023.00374, fetched 2026-10-26

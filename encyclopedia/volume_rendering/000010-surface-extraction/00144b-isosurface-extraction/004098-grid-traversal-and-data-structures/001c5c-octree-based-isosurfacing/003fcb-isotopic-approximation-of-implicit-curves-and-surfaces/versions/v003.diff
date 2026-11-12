@@ -1,0 +1,282 @@
+--- v002.md
++++ v003.md
+@@ -17,5 +17,5 @@
+ ### Data Structures
+ **Interval:** A pair of floats `[lo, hi]` representing a closed range with error bounds [S1].
+-**Point:** A tuple of $n$ floats representing coordinates in $\mathbb{R}^n$.
++**Point:** A tuple of $n$ floats representing coordinates in $\mathbb{R}^n$ [G].
+ **Cell:** A tree node containing:
+ - `bounds`: A tuple of $n$ `Interval` objects defining the spatial extent.
+@@ -28,6 +28,6 @@
+ 2. **Adaptive Subdivision**: Recursively subdivide $T$ until all leaf cells $C$ satisfy the termination condition: $0 \notin \Box F(C) \lor \langle \Box \nabla F(C), \Box \nabla F(C) \rangle > 0$ [S1].
+ 3. **Balancing**: Balance $T$ so that neighboring cells differ in size by at most a factor of two [S1].
+-4. **Vertex Placement**: For each edge of the tree structure, evaluate $F$ at its two endpoints. If the signs of $F$ at the endpoints are opposite, construct a vertex at the midpoint of the edge [S1].
+-5. **Mesh Construction**: For each leaf cell $C$, identify the vertices placed on its boundary. If the leaf contains exactly two vertices, connect them by a line segment. If it contains four vertices, find the two vertices on the same side and connect each of them to one of the other two vertices [S1].
++4. **Vertex Placement**: For each edge of the tree structure, evaluate $F$ at its two endpoints [S1]. If the signs of $F$ at the endpoints are opposite, construct a vertex at the midpoint of the edge [S1].
++5. **Mesh Construction**: For each leaf cell $C$, identify the vertices placed on its boundary [S1]. If the leaf contains exactly two vertices, connect them by a line segment [S1]. If it contains four vertices, find the two vertices on the same side and connect each of them to one of the other two vertices [S1].
+ 
+ ### Formulas
+@@ -39,84 +39,9 @@
+ ### Pseudocode
+ ```python
+-def isotopic_approximation(F, B, max_depth=10):
+-    """
+-    Generates an isotopic piecewise linear approximation of F=0 within bounding box B.
+-    F: Callable taking a Point (tuple of floats) and returning a float.
+-    B: Tuple of n Intervals defining the bounding box.
+-    max_depth: Optional limit to handle singularities.
+-    Returns: List of edges (2D) or triangles (3D).
+-    """
+-    # 1. Initialize Tree
+-    root = Cell(bounds=B, children=None, is_leaf=False, level=0)
+-    queue = [root]
+-    
+-    # 2. Subdivision Phase
+-    while queue:
+-        cell = queue.pop(0)
+-        if cell.level >= max_depth:
+-            cell.is_leaf = True
+-            continue
+-            
+-        # Evaluate inclusion of F over cell.bounds
+-        F_interval = interval_eval(F, cell.bounds)
+-        
+-        # Evaluate inclusion of Gradient over cell.bounds
+-        grad_interval = interval_gradient_eval(F, cell.bounds)
+-        
+-        # Condition: 0 not in F_interval OR squared norm of gradient > 0
+-        zero_not_in_F = F_interval.lo > 0 or F_interval.hi < 0
+-        grad_norm_sq = interval_squared_norm(grad_interval)
+-        grad_positive = grad_norm_sq.lo > 0
+-        
+-        if zero_not_in_F or grad_positive:
+-            cell.is_leaf = True
+-        else:
+-            cell.is_leaf = False
+-            children = subdivide_cell(cell)
+-            cell.children = children
+-            queue.extend(children)
+-            
+-    # 3. Balancing Phase
+-    # Standard tree balancing to ensure neighbor size difference <= 2 [G]
+-    balance_tree(root)
+-    
+-    # 4. Vertex Placement
+-    all_edges = collect_all_edges(root)
+-    vertices_on_edges = []
+-    
+-    for edge in all_edges:
+-        val_start = F(edge.p1)
+-        val_end = F(edge.p2)
+-        # Check sign change; treat zero as matching sign of neighbor or handle explicitly
+-        if (val_start <= 0 and val_end > 0) or (val_start > 0 and val_end <= 0):
+-            mid = tuple((a + b) / 2.0 for a, b in zip(edge.p1, edge.p2))
+-            vertex = Vertex(position=mid, edge=edge)
+-            vertices_on_edges.append(vertex)
+-            edge.has_vertex = True
+-            edge.vertex = vertex
+-            
+-    # 5. Mesh Construction
+-    mesh_elements = []
+-    
+-    for leaf in collect_leaves(root):
+-        boundary_vertices = get_vertices_on_leaf_boundary(leaf, vertices_on_edges)
+-        
+-        if len(boundary_vertices) == 2:
+-            mesh_elements.append((boundary_vertices[0], boundary_vertices[1]))
+-        elif len(boundary_vertices) == 4:
+-            # Group vertices by the face/edge they lie on
+-            sides = group_vertices_by_side(boundary_vertices, leaf.bounds)
+-            side_with_two = find_side_with_two_vertices(sides)
+-            v1, v2 = side_with_two
+-            other_vertices = []
+-            for s in sides:
+-                if s is not side_with_two:
+-                    other_vertices.extend(s)
+-            mesh_elements.append((v1, other_vertices[0]))
+-            mesh_elements.append((v2, other_vertices[1]))
+-            
+-    return mesh_elements
++class Interval:
++    def __init__(self, lo, hi):
++        self.lo = lo
++        self.hi = hi
+ 
+-# --- Helper Interval Arithmetic (Self-Contained) ---
+ def interval_add(a, b): return Interval(a.lo + b.lo, a.hi + b.hi)
+ def interval_mul(a, b):
+@@ -128,25 +53,24 @@
+     else:
+         return Interval(0, max(a.lo**2, a.hi**2))
+-def interval_squared_norm(grad_interval):
+-    # grad_interval is a list of n Intervals
+-    total = Interval(0, 0)
+-    for comp in grad_interval:
+-        total = interval_add(total, interval_square(comp))
+-    return total
+ 
+-def interval_eval(F, bounds):
+-    # Simplified inclusion: evaluate F at bounds corners and take min/max
+-    # In practice, use a proper interval library or Taylor model [G]
+-    corners = generate_corners(bounds)
+-    vals = [F(c) for c in corners]
++def interval_eval(func, bounds):
++    # Standard corner-based inclusion function [G]
++    corners = []
++    for mask in range(1 << len(bounds)):
++        pt = []
++        for d, b in enumerate(bounds):
++            pt.append(b.lo if (mask >> d) & 1 else b.hi)
++        corners.append(tuple(pt))
++    vals = [func(p) for p in corners]
+     return Interval(min(vals), max(vals))
+ 
+-def interval_gradient_eval(F, bounds):
+-    # Compute partial derivatives over bounds using interval arithmetic [G]
+-    # Returns list of n Intervals
+-    return [interval_eval(lambda p: partial_F_x(p), bounds), interval_eval(lambda p: partial_F_y(p), bounds)]
++class Cell:
++    def __init__(self, bounds, level=0):
++        self.bounds = bounds
++        self.level = level
++        self.children = None
++        self.is_leaf = True
+ 
+ def subdivide_cell(cell):
+-    # Split each dimension interval in half
+     new_bounds = []
+     for dim_interval in cell.bounds:
+@@ -154,41 +78,96 @@
+         new_bounds.append(Interval(dim_interval.lo, mid))
+         new_bounds.append(Interval(mid, dim_interval.hi))
+-    # Generate 2^n children cells
+     children = []
+-    for i in range(4 if len(cell.bounds)==2 else 8):
++    dim = len(cell.bounds)
++    for i in range(1 << dim):
+         child_bounds = []
+-        for d in range(len(cell.bounds)):
++        for d in range(dim):
+             idx = (i >> d) & 1
+             child_bounds.append(new_bounds[d * 2 + idx])
+-        children.append(Cell(bounds=tuple(child_bounds), children=None, is_leaf=False, level=cell.level+1))
++        children.append(Cell(bounds=tuple(child_bounds), level=cell.level + 1))
+     return children
+ 
+-def collect_all_edges(cell, parent_edge=None):
+-    edges = []
+-    if cell.children is None:
+-        return edges
+-    # Generate edges from cell geometry and recurse
+-    # (Implementation details for edge generation omitted for brevity; standard grid traversal [G])
++def balance_tree(root):
++    # Standard tree balancing to ensure neighboring cells differ at most a factor of two in size [G]
++    pass
++
++def collect_all_edges(cell, edges=None, parent=None):
++    if edges is None: edges = []
++    if cell.children is None: return edges
++    dim = len(cell.bounds)
++    for i in range(1 << dim):
++        for d in range(dim):
++            if (i >> d) & 1:
++                p1 = [cell.bounds[j].lo if ((i >> j) & 1) else cell.bounds[j].hi for j in range(dim)]
++                p2 = list(p1)
++                p2[d] = cell.bounds[d].hi
++                edges.append((tuple(p1), tuple(p2)))
+     for child in cell.children:
+-        edges.extend(collect_all_edges(child))
++        collect_all_edges(child, edges)
+     return edges
+ 
++def group_by_side(vertices, bounds):
++    # Group vertices by which face/edge of the cell they lie on [G]
++    sides = [[] for _ in range(2 * len(bounds))]
++    for v in vertices:
++        for d, b in enumerate(bounds):
++            if abs(v[d] - b.lo) < 1e-9:
++                sides[d].append(v)
++            elif abs(v[d] - b.hi) < 1e-9:
++                sides[d + len(bounds)].append(v)
++    return [s for s in sides if s]
++
++def isotopic_approximation(F, grad_F, B, max_depth=10):
++    root = Cell(bounds=B, level=0)
++    queue = [root]
++    while queue:
++        cell = queue.pop(0)
++        if cell.level >= max_depth:
++            cell.is_leaf = True
++            continue
++        F_val = interval_eval(F, cell.bounds)
++        grad_vals = [interval_eval(g, cell.bounds) for g in grad_F]
++        zero_not_in_F = F_val.lo > 0 or F_val.hi < 0
++        grad_norm_sq = Interval(0, 0)
++        for g in grad_vals:
++            grad_norm_sq = interval_add(grad_norm_sq, interval_square(g))
++        grad_positive = grad_norm_sq.lo > 0
++        if zero_not_in_F or grad_positive:
++            cell.is_leaf = True
++        else:
++            cell.is_leaf = False
++            children = subdivide_cell(cell)
++            cell.children = children
++            queue.extend(children)
++    balance_tree(root)
++    edges = collect_all_edges(root)
++    vertices = []
++    for e in edges:
++        v1, v2 = e[0], e[1]
++        if (F(v1) <= 0 and F(v2) > 0) or (F(v1) > 0 and F(v2) <= 0):
++            mid = tuple((a + b) / 2.0 for a, b in zip(v1, v2))
++            vertices.append((mid, e))
++    mesh = []
++    for leaf in collect_leaves(root):
++        leaf_edges = set()
++        for child in leaf.children if leaf.children else []:
++            leaf_edges.update(collect_all_edges(child))
++        leaf_verts = [v for v, e in vertices if e in leaf_edges]
++        if len(leaf_verts) == 2:
++            mesh.append((leaf_verts[0], leaf_verts[1]))
++        elif len(leaf_verts) == 4:
++            sides = group_by_side(leaf_verts, leaf.bounds)
++            side_with_two = [s for s in sides if len(s) == 2][0]
++            others = [v for s in sides if len(s) == 1 for v in s]
++            mesh.append((side_with_two[0], others[0]))
++            mesh.append((side_with_two[1], others[1]))
++    return mesh
++
+ def collect_leaves(cell):
+-    if cell.children is None:
+-        return [cell]
++    if cell.children is None: return [cell]
+     leaves = []
+     for child in cell.children:
+         leaves.extend(collect_leaves(child))
+     return leaves
+-
+-def group_vertices_by_side(vertices, bounds):
+-    # Group by which face/edge of the cell they lie on [G]
+-    pass
+-
+-def find_side_with_two_vertices(sides):
+-    for s in sides:
+-        if len(s) == 2:
+-            return s
+-    return None
+ ```
+ 
+@@ -206,9 +185,9 @@
+ ## Operating characteristics
+ - **Time Complexity**: The subdivision process terminates because cells shrink towards a point, and for a regular curve/surface, at least one of the two clauses ($0 \notin F(C)$ or $\langle \nabla F, \nabla F \rangle > 0$) converges to a non-zero value [S1]. The algorithm is fast because it uses a simple interval test and adds little overhead compared to other enumeration methods [S1].
+-- **Memory Complexity**: Proportional to the number of leaf nodes in the balanced quadtree/octree.
+-- **Strengths**: Guarantees correct topology (regular isotopy); does not require computing critical points; fast due to simple interval tests; flexible adaptive resolution.
+-- **Limitations**: Requires $F$ to be smooth and $0$ to be a regular value (gradient non-zero on surface); singularities require special handling (max depth); interval arithmetic can be computationally expensive if not optimized.
++- **Memory Complexity**: Proportional to the number of leaf nodes in the balanced quadtree/octree [G].
++- **Strengths**: Guarantees correct topology (regular isotopy); does not require computing critical points; fast due to simple interval tests; flexible adaptive resolution [S1].
++- **Limitations**: Requires $F$ to be smooth and $0$ to be a regular value (gradient non-zero on surface); singularities require special handling (max depth); interval arithmetic can be computationally expensive if not optimized [S1].
+ - **When to Use**: Visualization of implicit surfaces where piecewise linear approximations are required; constructing initial meshes for time-dependent surfaces (e.g., morphing) [S1].
+-- **When Not to Use**: When the implicit function has singularities and high precision is required without fallback strategies; when performance is critical and interval arithmetic overhead is prohibitive.
++- **When Not to Use**: When the implicit function has singularities and high precision is required without fallback strategies; when performance is critical and interval arithmetic overhead is prohibitive [S1].
+ 
+ ## Background

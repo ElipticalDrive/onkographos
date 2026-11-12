@@ -1,0 +1,148 @@
+# In scattering
+Also called: Source Function contribution
+## Overview
+In scattering accounts for the increase in radiance along a ray due to light scattering from other directions into the ray's current direction [S1, book]. It serves as the volumetric analog to the Bidirectional Scattering Distribution Function (BSDF), describing how radiance from the surrounding environment is redistributed into the viewing direction [S1, book]. Unlike out-scattering, which removes radiance from the ray, in-scattering adds radiance, fundamentally altering the appearance of participating media such as clouds and fog [S1, book].
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   Position $p$ in the medium.
+*   Outgoing direction $\omega$ (direction of the ray).
+*   Incident radiance field $L_i(p, \omega_i)$ for all incoming directions $\omega_i \in \mathcal{S}^2$.
+*   Phase function $p(p, \omega_i, \omega)$.
+*   Medium coefficients: absorption $\sigma_a(p, \omega)$, scattering $\sigma_s(p, \omega)$, and total attenuation $\sigma_t(p, \omega) = \sigma_a(p, \omega) + \sigma_s(p, \omega)$.
+*   Emitted radiance $L_e(p, \omega)$.
+
+**Outputs:**
+*   Added radiance per unit distance $dL_o^+(p, \omega)$.
+
+### Data Structures
+No specific data structures are mandated by the definition. The phase function $p$ is typically evaluated as a function of the angle between $\omega_i$ and $\omega$. The incident radiance $L_i$ is obtained by integrating over the sphere, often requiring sampling strategies in implementation.
+
+### Steps
+1.  **Verify Assumptions**: Ensure the separation between scattering particles is at least a few times their radii. This allows inter-particle interactions to be ignored, treating the phase function as the angular distribution of scattered radiation at a single point [S1, book].
+2.  **Compute Source Function $L_s^+$**: Calculate the source function at position $p$ for direction $\omega$. This function combines volume emission and in-scattering contributions [S1, book]:
+    $$
+    L_s^+(p, \omega) = \frac{\sigma_a(p, \omega)}{\sigma_t(p, \omega)} L_e(p, \omega) + \frac{\sigma_s(p, \omega)}{\sigma_t(p, \omega)} \int_{\mathcal{S}^2} p(p, \omega_i, \omega) L_i(p, \omega_i) d\omega_i
+    $$
+    Here, $\frac{\sigma_s(p, \omega)}{\sigma_t(p, \omega)}$ is the single-scattering albedo, representing the probability of scattering versus absorption [S1, book].
+3.  **Calculate Added Radiance**: Multiply the source function by the total attenuation coefficient and the differential distance $dt$ to get the total added radiance per unit distance [S1, book]:
+    $$
+    dL_o^+(p, \omega) = \sigma_t(p, \omega) L_s^+(p, \omega) dt
+    $$
+
+### Formulas
+**Phase Function Normalization:**
+The phase function $p(\omega, \omega')$ must satisfy the normalization constraint:
+$$
+\int_{\mathcal{S}^2} p(\omega, \omega') d\omega' = 1
+$$
+This ensures that phase functions act as probability distributions for scattering into a particular direction [S1, book].
+
+**Source Function:**
+$$
+L_s^+(p, \omega) = \frac{\sigma_a(p, \omega)}{\sigma_t(p, \omega)} L_e(p, \omega) + \frac{\sigma_s(p, \omega)}{\sigma_t(p, \omega)} \int_{\mathcal{S}^2} p(p, \omega_i, \omega) L_i(p, \omega_i) d\omega_i
+$$
+*   $L_s^+$: Source function (accounts for emission and in-scattering) [S1, book].
+*   $\sigma_a$: Absorption coefficient [S1, book].
+*   $\sigma_s$: Scattering coefficient [S1, book].
+*   $\sigma_t$: Total attenuation coefficient ($\sigma_a + \sigma_s$) [S1, book].
+*   $L_e$: Emitted radiance [S1, book].
+*   $L_i$: Incident radiance [S1, book].
+*   $\omega_i$: Incident direction [S1, book].
+*   $p$: Phase function [S1, book].
+
+**Added Radiance:**
+$$
+dL_o^+(p, \omega) = \sigma_t(p, \omega) L_s^+(p, \omega) dt
+$$
+*   $dL_o^+$: Total added radiance per unit distance [S1, book].
+*   $dt$: Differential distance [S1, book].
+
+### Parameters
+*   **Single-Scattering Albedo**: Defined as $\sigma_s / \sigma_t$. Under radiometry assumptions, this value is always between 0 and 1 [S1, book]. It describes the probability of scattering versus absorption at a scattering event [S1, book].
+*   **Mean Free Path**: Defined as $1 / \sigma_t(p, \omega)$. This gives the average distance a ray travels in a medium with attenuation coefficient $\sigma_t(p, \omega)$ before interacting with a particle [S1, book].
+
+### Edge Cases and Pitfalls
+*   **Inter-particle Interactions**: The model assumes particles are sufficiently separated (at least a few times their radii). If particles are too close, inter-particle interactions cannot be ignored, and the phase function description at a particular location becomes invalid [S1, book].
+*   **Cosine Term Absence**: Unlike surface scattering equations (e.g., Equation 4.14 in [S1, book]), the in-scattering source function does not include a cosine term. This is because the phase function operates on radiance rather than differential irradiance [S1, book].
+*   **Normalization**: The phase function must be normalized to 1 over the sphere. Failure to normalize results in incorrect energy conservation [S1, book].
+*   **Absorption vs. Scattering**: If the single-scattering albedo is 1 (no absorption), light scatters many times, significantly altering appearance (e.g., dense clouds) [S1, book].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_in_scattering(p, omega, sigma_a, sigma_s, sigma_t, L_e, phase_function, incident_radiance_sampler):
+    """
+    Computes the added radiance per unit distance due to in-scattering.
+    
+    Args:
+        p: Position in the medium.
+        omega: Outgoing direction.
+        sigma_a: Absorption coefficient at p.
+        sigma_s: Scattering coefficient at p.
+        sigma_t: Total attenuation coefficient at p (sigma_a + sigma_s).
+        L_e: Emitted radiance at p.
+        phase_function: Function evaluating p(omega_i, omega).
+        incident_radiance_sampler: Function that samples L_i(p, omega_i) for a given omega_i.
+        
+    Returns:
+        dL_o_plus: Added radiance per unit distance.
+    """
+    # Step 1: Compute the single-scattering albedo
+    # Note: sigma_t should be > 0. If sigma_t is 0, no scattering occurs.
+    if sigma_t == 0:
+        return 0.0
+    
+    single_scattering_albedo = sigma_s / sigma_t
+    
+    # Step 2: Compute the emission contribution to the source function
+    emission_contribution = (sigma_a / sigma_t) * L_e
+    
+    # Step 3: Compute the in-scattering contribution
+    # Integrate over the sphere S^2
+    # In practice, this is done via Monte Carlo integration or quadrature
+    in_scattering_contribution = 0.0
+    
+    # Placeholder for spherical integration logic
+    # The integral is: integral_{S^2} p(omega_i, omega) * L_i(p, omega_i) domega_i
+    # This requires sampling directions omega_i and weighting by the phase function and incident radiance
+    # For a complete implementation, one would use a sampling strategy (e.g., uniform, importance sampling)
+    # Here we denote the result of the spherical integral as 'integral_result'
+    integral_result = spherical_integral(phase_function, omega, incident_radiance_sampler)
+    
+    in_scattering_contribution = single_scattering_albedo * integral_result
+    
+    # Step 4: Combine to get the source function L_s^+
+    L_s_plus = emission_contribution + in_scattering_contribution
+    
+    # Step 5: Compute added radiance per unit distance
+    # dL_o^+ = sigma_t * L_s^+ * dt
+    # Since we want radiance per unit distance, we assume dt = 1 for the rate
+    dL_o_plus = sigma_t * L_s_plus
+    
+    return dL_o_plus
+
+def spherical_integral(phase_function, omega, incident_radiance_sampler):
+    """
+    Computes the spherical integral of phase_function(omega_i, omega) * L_i(p, omega_i).
+    This is a placeholder for the actual integration method (e.g., Monte Carlo).
+    """
+    # Not given in the sources. Implementation depends on the renderer's integration strategy.
+    # Typically involves sampling directions omega_i, evaluating phase_function(omega_i, omega)
+    # and incident_radiance_sampler(omega_i), and averaging with appropriate weights.
+    pass
+```
+## Operating characteristics
+*   **Complexity**: The computational cost is dominated by the spherical integral $\int_{\mathcal{S}^2} p(p, \omega_i, \omega) L_i(p, \omega_i) d\omega_i$. This requires sampling or integrating over the hemisphere/sphere of incident directions, making it significantly more expensive than out-scattering, which is a simple exponential decay.
+*   **Memory**: Requires storage for the incident radiance field or a method to sample it (e.g., light maps, ray tracing).
+*   **Strengths**: Accurately models the bright appearance of participating media like clouds and fog where light is scattered into the viewer's eye from other directions.
+*   **Limitations**: Computationally expensive due to the integral. Approximations (e.g., single scattering, precomputed radiance transfer) are often necessary for real-time rendering.
+*   **When to use**: When visual fidelity requires accurate depiction of light transport within participating media, especially in dense media where multiple scattering is significant.
+*   **When not to use**: For simple volumetric effects where performance is critical and approximate lighting is acceptable.
+
+## Background
+In scattering is a fundamental concept in volume rendering and radiative transfer theory. It is described in detail in "Physically Based Rendering: From Theory to Implementation" (PBR-book), specifically in Chapter 11 on Volume Scattering Processes [S1, book]. The concept is analogous to surface scattering but adapted for volumetric media, where the phase function replaces the BSDF. The cloud model examples in [S1, book] illustrate the visual impact of in-scattering, particularly when absorption is negligible (single-scattering albedo of 1).
+
+## Sources
+[S1] 11.1 Volume Scattering Processes, https://pbr-book.org/4ed/Volume_Scattering/Volume_Scattering_Processes, fetched 2026-10-29 (book)

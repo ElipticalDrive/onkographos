@@ -1,0 +1,108 @@
+# Genetic Algorithm Optimization
+
+Also called: GA-based Opacity and Transfer Function Optimization, Genetic Algorithm Optimization for DVRIs, Genetic Algorithm for DVRIs
+
+## Overview
+Genetic Algorithm (GA) Optimization is a stochastic search method used to automatically generate Direct Volume Rendering Images (DVRIs) that guarantee the visibility of specific structures of interest within a Region of Interest (ROI) [S1]. Unlike gradient-based methods that optimize continuous parameters via backpropagation, this approach treats the selection of opacity seed values for atomic structures as a discrete optimization problem, using an energy function to balance visibility, coherence, and context [S1]. It is distinct from standard differentiable optimization loops because it does not rely on gradients of the rendering equation; instead, it iteratively evolves a population of candidate transfer function configurations until user-defined quality thresholds are met [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A segmented volume where voxels are grouped into structures. Structures are decomposed into "atomic structures" if they are too large or suffer from self-occlusion [S1]. User-defined thresholds for visibility, coherence, and context metrics [S1].
+*   **Output:** A set of generated DVRIs where all structures of interest are visible, followed by a subset chosen for animation [S1].
+
+**Data Structures:**
+*   **Solution Encoding:** A 1D array of floating-point numbers $(x_1, x_2, \dots, x_n)$, where $x_i$ represents the opacity seed value for the $i$-th structure or atomic structure [S1]. This encoding is more flexible than 1D intensity-based transfer functions because it allows independent opacity control for occluding structures of similar intensity [S1].
+*   **Visibility/Quality State:** A data structure tracking which structures have been revealed in high quality and their current visibility status [S1].
+
+**Algorithm Steps:**
+1.  **Initialization:** Generate an initial population of solutions. Each solution is an array of opacity seed values for all atomic structures in the ROI [S1].
+2.  **Rendering:** For each solution in the population, automatically generate a 2D transfer function for each atomic structure based on its assigned opacity seed value [S1]. Render an intermediate DVRI using these transfer functions [S1].
+3.  **Evaluation:** Calculate the energy function $E$ for the intermediate DVRI using three metrics [S1]:
+    *   **Visibility Metric:** Ensures unrevealed voxels are visible [S1].
+    *   **Coherence Metric:** Ensures structures appear coherent with each other (not assigned strange, inconsistent opacities) [S1].
+    *   **Context Metric:** Adds shared context to make inter-structure relations understandable [S1].
+    $$ E = w_v M_v + w_c M_c + w_{ctx} M_{ctx} $$
+    Where $M_v, M_c, M_{ctx}$ are the normalized metric values and $w$ are weights [G].
+4.  **Selection:** Select a subset of the population based on their energy scores (lower energy is better) to serve as parents for the next generation [S1].
+5.  **Crossover and Mutation:** Apply genetic operators to the selected parents to create a new population of solutions [S1].
+6.  **Termination Check:**
+    *   If the quality of the best intermediate DVRI meets user-defined thresholds, output it as a valid DVRI [S1].
+    *   Update the structure visibility and quality information [S1].
+    *   Repeat the process until all structures of interest are visible and each atomic structure in the ROI is revealed in high quality at least once [S1].
+7.  **Animation Generation:** Choose a subset of the successfully generated DVRIs to create an animation [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def genetic_algorithm_optimization(volume, segmented_structures, user_thresholds):
+    # Decompose structures into atomic structures if necessary
+    atomic_structures = decompose_structures(segmented_structures)
+    
+    # Initialize population: array of opacity seeds for each atomic structure
+    population = initialize_population(len(atomic_structures))
+    
+    # Track visibility status
+    revealed_structures = set()
+    generated_dvris = []
+    
+    while not all_structures_revealed(atomic_structures, revealed_structures, user_thresholds):
+        # Evaluate fitness for each individual in the population
+        fitness_scores = []
+        for individual in population:
+            # Generate 2D transfer functions based on opacity seeds
+            transfer_functions = generate_transfer_functions(individual, atomic_structures)
+            
+            # Render intermediate DVRI
+            dvri = render_volume(volume, transfer_functions)
+            
+            # Calculate energy function metrics
+            visibility_metric = calculate_visibility_metric(dvri, atomic_structures)
+            coherence_metric = calculate_coherence_metric(dvri, atomic_structures)
+            context_metric = calculate_context_metric(dvri, atomic_structures)
+            
+            energy = energy_function(visibility_metric, coherence_metric, context_metric)
+            fitness_scores.append(energy)
+            
+            # If quality meets thresholds, store DVRI
+            if meets_thresholds(energy, user_thresholds):
+                generated_dvris.append(dvri)
+                update_revealed_structures(atomic_structures, dvri, revealed_structures)
+        
+        # Select parents for next generation
+        parents = select_parents(population, fitness_scores)
+        
+        # Generate new population via crossover and mutation
+        population = create_next_generation(parents)
+        
+        # Early exit if all structures are revealed in high quality
+        if all_structures_revealed(atomic_structures, revealed_structures, user_thresholds):
+            break
+            
+    # Select subset for animation
+    animation_frames = select_animation_subset(generated_dvris)
+    return animation_frames
+```
+
+**Edge Cases and Pitfalls:**
+*   **Self-occlusion:** Large segments may not receive enough visibility when rendered individually. Decomposition is required to break them into smaller atomic structures [S1].
+*   **Coherence vs. Visibility:** Assigning different opacities to structures may make them appear incoherent. The coherence metric in the energy function mitigates this [S1].
+*   **Solution Space:** The solution space is constrained to opacity seeds for atomic structures to remain small enough for efficient search while guaranteeing visibility [S1].
+
+## Subtopics
+
+### Solution Encoding for Genetic Algorithm
+Represents a solution as an array of floating-point numbers where each number is an opacity seed value for a structure or atomic structure [S1]. Unlike methods using a 1D array for opacity mapping (which is not flexible enough for occluding structures), this method uses opacity seeds for atomic structures to guarantee visibility [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. The method is iterative and depends on the population size, number of generations, and rendering cost per evaluation.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Guarantees visibility of specific structures of interest; handles occlusion better than global transfer functions; does not require differentiable rendering or gradients [S1].
+*   **Limitations:** Computationally expensive due to repeated rendering; requires manual definition of energy function metrics and thresholds; not suitable for real-time optimization [S1].
+*   **When to use:** When automatic generation of high-quality DVRIs for specific anatomical or structural features is required, and gradient-based methods fail due to occlusion or non-differentiable constraints [S1].
+
+## Background
+Originated in the context of visibility-aware direct volume rendering for segmented volumes [S1]. The method addresses the problem of structures of similar intensities occluding each other, which cannot be solved by standard 1D transfer functions [S1]. It was developed to automatically generate a comprehensive presentation of structures of interest through an animation of high-quality DVRIs [S1].
+
+## Sources
+[S1] Visibility-Aware Direct Volume Rendering, https://doi.org/10.1007/s11390-011-9428-3, fetched 2026-10-26

@@ -1,0 +1,134 @@
+--- v001.md
++++ v002.md
+@@ -4,22 +4,22 @@
+ 
+ ## Overview
+-AbsGS (Absolute Positional Gradients) is a densification strategy for 3D Gaussian Splatting that addresses the smoothing of fine details and thin structures during optimization [S1, unofficial]. It improves upon standard view-space gradient accumulation by using absolute sums of positional gradients across multiple views, preventing gradient collisions where positive and negative gradients cancel each other out [S3, unofficial]. This allows the method to identify "fence-sitting" Gaussians more accurately and sharpen edges [S2, unofficial].
++AbsGS (Absolute Positional Gradients) is a densification strategy for 3D Gaussian Splatting that recovers fine details and thin structures smoothed out during standard optimization [S1, unofficial]. It replaces signed gradient averaging with absolute sums across multiple views to identify "fence-sitting" Gaussians and sharpen edges [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** The current set of 3D Gaussians, camera parameters for $M$ training views, and the ground truth images.
+-- **Outputs:** Updated Gaussian parameters (specifically position $\tilde{\mu}$) based on densification criteria derived from absolute gradients.
++- **Inputs:** Current 3D Gaussian parameters, camera poses for $M$ training views, and ground truth images [S1, unofficial].
++- **Outputs:** Updated Gaussian parameters after densification decisions based on absolute gradient magnitudes [S3, unofficial].
+ 
+ **Data Structures:**
+-- **View-space Positional Gradient Accumulator:** A vector field associated with each Gaussian, storing the accumulated absolute gradient magnitude in the view space. Unlike standard methods that average or sum signed gradients, this stores the absolute values.
++- **View-space Positional Gradient Accumulator:** A per-Gaussian vector storing the accumulated absolute gradient magnitude in the view space [S3, unofficial]. Unlike standard accumulators that sum signed gradients, this stores absolute values to prevent cancellation [S3, unofficial].
+ 
+ **Steps:**
+-1. **High-Pass Filtering (Optional but common in AbsGS context):** Compare the reconstructed image against the ground truth using a high-pass filter to isolate high-frequency residuals [S1, unofficial].
+-2. **Back-propagation:** Back-propagate only the high-frequency residuals to sharpen edges and thin structures [S1, unofficial]. *Note: Standard AbsGS implementation in `gsplat` primarily focuses on the gradient accumulation method; the high-pass filtering is described as a related technique for fine detail recovery in the same context [S1, unofficial].*
+-3. **Gradient Accumulation:** For each Gaussian $n$, accumulate the view-space positional gradients across $M$ camera views. Instead of summing signed gradients, sum the absolute values of the gradients for the x and y components [S3, unofficial].
+-4. **Densification Decision:** Use the accumulated absolute gradient magnitude to determine if a Gaussian should be split or duplicated. Gaussians with high absolute positional gradients are candidates for densification [S3, unofficial].
++1. **High-Pass Filtering:** Compare the rendered image against the ground truth using a high-pass filter to isolate high-frequency residuals [S1, unofficial].
++2. **Back-propagation:** Back-propagate only the high-frequency residuals to sharpen edges and thin structures [S1, unofficial].
++3. **Gradient Accumulation:** For each Gaussian $n$, accumulate the view-space positional gradients across $M$ camera views using absolute sums [S3, unofficial].
++4. **Densification Decision:** Compare the accumulated absolute gradient magnitude against a threshold to determine if a Gaussian should be split or duplicated [S3, unofficial].
+ 
+ **Formula:**
+-The view-space positional gradient for a Gaussian $\tilde{\mu}_n$ is accumulated as [S3, unofficial]:
++The accumulated view-space positional gradient for a Gaussian $\tilde{\mu}_n$ is computed as [S3, unofficial]:
+ 
+ $$
+@@ -28,65 +28,58 @@
+ 
+ Where:
+-- $M$ is the number of camera views.
+-- $\frac{\delta L_x}{\delta \tilde{\mu}_x}$ is the gradient of the loss with respect to the x-component of the Gaussian's position in view space.
+-- $\frac{\delta L_y}{\delta \tilde{\mu}_y}$ is the gradient of the loss with respect to the y-component of the Gaussian's position in view space.
+-- The absolute value operator $|\cdot|$ prevents cancellation between positive and negative gradients from different views [S3, unofficial].
++- $M$ is the number of camera views [S3, unofficial].
++- $\frac{\delta L_x}{\delta \tilde{\mu}_x}$ is the gradient of the loss with respect to the x-component of the Gaussian's position in view space [S3, unofficial].
++- $\frac{\delta L_y}{\delta \tilde{\mu}_y}$ is the gradient of the loss with respect to the y-component of the Gaussian's position in view space [S3, unofficial].
++- The absolute value operator $|\cdot|$ prevents cancellation between positive and negative view-space gradients from different views [S3, unofficial].
+ 
+ **Parameters:**
+-- `absgrad`: A boolean API flag to enable this feature in the rasterization call [S3, unofficial].
++- `absgrad`: A boolean API flag to enable absolute gradient accumulation in the rasterization call [S3, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Assuming a training loop structure similar to gsplat
+-for step in range(num_steps):
+-    # Rasterize the scene
+-    # The 'absgrad=True' flag enables the accumulation of absolute positional gradients
+-    rgb_image, alpha, meta_data = rasterization(
+-        means3d=gaussians.means,
+-        scales=gaussians.scales,
+-        quats=gaussians.quats,
+-        opacities=gaussians.opacities,
+-        colors=gaussians.colors,
+-        cameras=cameras,
+-        absgrad=True  # Enable AbsGS feature
+-    )
+-    
+-    # Compute loss (potentially using high-pass filtered residuals for fine details [S1, unofficial])
+-    loss = compute_loss(rgb_image, ground_truth_image)
+-    
+-    # Back-propagate
+-    loss.backward()
+-    
+-    # Densification step uses the accumulated absolute gradients in meta_data
+-    # to decide which Gaussians to split/duplicate
+-    densify_gaussians(meta_data)
+-    
+-    # Update parameters
+-    gaussians.update()
++def train_absgs(gaussians, cameras, ground_truth_images, num_steps, threshold):
++    for step in range(num_steps):
++        # Render scene and compute high-frequency residuals
++        rgb_image = render(gaussians, cameras[step])
++        residuals = high_pass_filter(rgb_image - ground_truth_images[step])
++        # Back-propagate residuals
++        loss = compute_loss(residuals)
++        loss.backward()
++        # Accumulate absolute view-space positional gradients
++        for g in gaussians:
++            g.grad_accum_x += sum(abs(g.dL_dx_k) for k in range(len(cameras)))
++            g.grad_accum_y += sum(abs(g.dL_dy_k) for k in range(len(cameras)))
++        # Densify based on threshold
++        for g in gaussians:
++            if g.grad_accum_x > threshold or g.grad_accum_y > threshold:
++                split_or_duplicate(g)
++        # Update parameters
++        gaussians.update()
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Gradient Collisions:** Standard signed gradient accumulation can result in poor densification heuristics when positive and negative view-space gradients cancel each other out [S3, unofficial]. AbsGS specifically mitigates this.
+-- **Fine Detail Smoothing:** Without AbsGS (or similar high-frequency emphasis), optimization tends to smooth out fine details and thin structures [S1, unofficial].
++- **Gradient Collisions:** Standard signed accumulation causes positive and negative view-space gradients to cancel, producing poor densification heuristics [S3, unofficial].
++- **Fine Detail Smoothing:** Without high-frequency emphasis, optimization smooths out thin structures and fine textures [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Base 3DGS Optimization](7549-base-3d-gaussian-splatting-optimization.md)
+-The foundational optimization loop that AbsGS enhances.
++The foundational training loop managing camera sampling and metric evaluation. It differs from AbsGS by using standard signed gradient accumulation for densification. Choose it for baseline training without fine-detail emphasis.
+ 
+ ### [Densification Strategy](6234-densification-strategy.md)
+-The broader category of methods for adding Gaussians, including AbsGS.
++The broader category of methods for adding Gaussians during training. It encompasses various heuristics like area-based scaling or normal propagation. Choose it when configuring the overall densification pipeline.
+ 
+ ### [GSP Training Loss](9156-gsp-training-loss.md)
+-The loss function used in conjunction with gradient computation.
++The composite loss function combining photometric and perceptual terms. It differs from AbsGS by defining the optimization objective rather than the gradient accumulation method. Choose it to define the training target.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Adds minimal overhead to the rasterization step as it involves computing absolute values of existing gradients. The benefit is faster convergence to fine details, potentially reducing total training time [S1, unofficial].
+-- **Memory Complexity:** No significant additional memory overhead beyond storing the absolute gradient values if they are not already stored.
+-- **Strengths:** Prevents gradient cancellation, improves recovery of fine details and thin structures, stabilizes convergence [S1, S3, unofficial].
+-- **Limitations:** Requires modification of the gradient accumulation logic in the rasterizer [S3, unofficial].
++- **Time Complexity:** Adds minimal overhead per rasterization step due to absolute value computation [S3, unofficial]. Reduces total training time by stabilizing convergence [S1, unofficial].
++- **Memory Complexity:** No significant overhead beyond storing accumulated gradient vectors per Gaussian [S3, unofficial].
++- **Strengths:** Prevents gradient cancellation, improves fine detail recovery, and stabilizes optimization [S1, S3, unofficial].
++- **Limitations:** Requires rasterizer modification to support absolute gradient accumulation [S3, unofficial].
++- **When to use:** Scenes with fine textures or thin structures where standard densification fails [S1, S2, unofficial].
+ 
+ ## Background
+-AbsGS was introduced to address the issue of fine detail recovery being smoothed out during the optimization process of 3D Gaussian Splatting [S1, unofficial]. It was identified as a key improvement in densification strategies, specifically tackling the problem of "fence-sitting" Gaussians where standard gradient averaging fails [S2, unofficial]. The method is implemented in the `gsplat` library, providing an API flag `absgrad` to enable it [S3, unofficial].
++AbsGS was introduced to address fine detail recovery being smoothed out during 3D Gaussian Splatting optimization [S1, unofficial]. It was identified as a solution for "fence-sitting" Gaussians where standard gradient averaging fails [S2, unofficial]. The method is implemented in the `gsplat` library, providing the `absgrad` API flag to enable it [S3, unofficial].
+ 
+ ## Sources

@@ -10,28 +10,28 @@ The Vector to Closest Point (VCP) Octree is a hierarchical sparse data structure
 **Outputs:** A hierarchical octree structure where nodes contain either VCP vectors or scalar distance values [S1, S2, unofficial].
 
 **Data Structures:**
-The space is discretized into a uniform Cartesian grid. The structure uses blocks of $2^3 = 8$ cubical cells [S1, S2, unofficial].
-1.  **Non-Empty Blocks:** Blocks overlapping the narrow $\varepsilon$-band around the surface store VCP vectors at their grid points (vertices). Each vertex stores a 3D vector $\vec{v} = (x, y, z)$ pointing to the closest point on the original geometry [S1, S2, unofficial].
-2.  **Empty Blocks:** Blocks not overlapping the surface band store a single scalar value representing the minimum distance from any vertex of the block to the surface [S1, S2, unofficial].
+The space is discretized via a uniform Cartesian grid [S1, unofficial]. The structure uses blocks of $2^3 = 8$ cubical cells [S1, S2, unofficial].
+1.  **Non-Empty Blocks:** Blocks overlapping the narrow $\varepsilon$-band around the surface store VCP vectors at their grid points (vertices) [S1, unofficial]. Each vertex stores a 3D vector $\vec{v} = (x, y, z)$ pointing to the closest point on the original geometry [S2, unofficial].
+2.  **Empty Blocks:** Blocks not overlapping the surface band store a single scalar value representing the minimum distance from any vertex of the block to the surface [S1, unofficial].
 
 **Compression and Storage:**
 To mitigate the high memory cost of storing 8 vectors per voxel (compared to 8 scalars for a scalar field), the following optimizations are applied [S2, unofficial]:
-1.  **Vector Compression:** Each VCP vector is compressed into a single 32-bit integer. This is achieved by converting the vector into two spherical angles (representing direction) and a radius (representing distance) [S2, unofficial].
-2.  **Neighbor Sharing:** VCP vectors are shared between up to eight neighboring grid cells. They are stored in memory as a sparse 3D texture, allowing adjacent cells to reference the same vector data [S2, unofficial].
+1.  **Vector Compression:** Each VCP vector is compressed into a single 32-bit integer by converting it into two spherical angles and a radius [S2, unofficial].
+2.  **Neighbor Sharing:** VCP vectors are shared between up to eight neighboring grid cells and stored in memory as a sparse 3D texture [S2, unofficial].
 
 **Ray-Casting Algorithm:**
-1.  **Traversal:** Cast a ray through the octree.
+1.  **Traversal:** Cast a ray through the octree [S1, unofficial].
 2.  **Step Size Determination:**
-    *   If the ray hits an **Empty Block**, the step size is set to the stored scalar minimum distance. This ensures the ray never crosses the surface in empty space [S1, S2, unofficial].
-    *   If the ray hits a **Non-Empty Block**, the VCP vectors at the block's vertices are interpolated (e.g., trilinearly) to estimate the VCP vector $\vec{v}_{interp}$ at the current ray position. The step size is the magnitude $|\vec{v}_{interp}|$ [S1, S2, unofficial].
-3.  **Intersection Check:** If the current step size (or interpolated vector magnitude) is less than the threshold $\varepsilon$, a surface intersection is assumed [S1, S2, unofficial].
-4.  **Refinement:** The exact intersection point is found by interpolating the location between the current and previous sampling points where the distance is exactly $\varepsilon$ [S1, S2, unofficial].
-5.  **Normal Computation:** The surface normal is derived from the interpolated VCP vector, as the VCP vector is always perpendicular to the surface [S1, S2, unofficial].
+    *   If the ray hits an **Empty Block**, the step size is set to the stored scalar minimum distance [S1, unofficial].
+    *   If the ray hits a **Non-Empty Block**, the VCP vectors at the block's vertices are interpolated to estimate the VCP vector $\vec{v}_{interp}$ at the current ray position, and the step size is the magnitude $|\vec{v}_{interp}|$ [S1, unofficial].
+3.  **Intersection Check:** If the current step size (or interpolated vector magnitude) is less than the threshold $\varepsilon$, a surface intersection is assumed [S1, unofficial].
+4.  **Refinement:** The exact intersection point is found by linearly interpolating the parameter $t$ between the current and previous sampling points where the distance is exactly $\varepsilon$ [S1, unofficial].
+5.  **Normal Computation:** The surface normal is derived from the interpolated VCP vector, as the VCP vector is always perpendicular to the surface [S1, unofficial].
 
 **Simplification (Merging):**
 To reduce tree depth and memory usage, child nodes with surface data can be merged into a parent node if the interpolation error is low [S2, unofficial]:
-1.  Compare the exact VCP vectors stored in non-empty leaf cells with the VCP vectors interpolated from the single parent cell.
-2.  Compute the Euclidean distance between the original vectors and their interpolated replacements.
+1.  Compare the exact VCP vectors stored in non-empty leaf cells with the VCP vectors interpolated from the single parent cell [S2, unofficial].
+2.  Compute the Euclidean distance between the original vectors and their interpolated replacements [S2, unofficial].
 3.  If the maximum of these distances is below a predefined threshold, merge the children to a non-empty leaf node at the next level [S2, unofficial].
 
 **Pseudocode:**
@@ -54,36 +54,38 @@ def ray_cast_vcp_octree(ray_origin, ray_direction, octree, epsilon):
     """
     t = 0.0
     prev_t = 0.0
+    prev_vcp_mag = float('inf')
+    MAX_DISTANCE = 1e6
     
     while t < MAX_DISTANCE:
         # 1. Traverse octree to find current block
         block = octree.find_block_at(ray_origin + ray_direction * t)
-        
         if block is None:
-            # Ray left the structure
             break
             
-        # 2. Determine step size
+        # 2. Determine step size and current VCP magnitude
         if block.is_empty:
-            # Empty block: use stored scalar minimum distance
             step_size = block.scalar_min_distance
+            vcp_mag = step_size
         else:
-            # Non-empty block: interpolate VCP vectors at vertices
             vcp_vectors = block.get_vertex_vcp_vectors()
             local_pos = (ray_origin + ray_direction * t - block.origin) / block.cell_size
             interpolated_vcp = interpolate_vcp(vcp_vectors, local_pos)
-            step_size = length(interpolated_vcp)
+            vcp_mag = length(interpolated_vcp)
+            step_size = vcp_mag
             
         # 3. Check for intersection
-        if step_size < epsilon:
-            # Intersection found within epsilon band
-            # Refine intersection point between prev_t and t
-            # Note: Exact refinement requires solving for distance = epsilon
-            # Simplified: return current position as intersection
-            return ray_origin + ray_direction * t
+        if vcp_mag < epsilon:
+            # 4. Refine: interpolate t where vcp_mag == epsilon
+            if prev_vcp_mag != vcp_mag:
+                t_int = prev_t + (t - prev_t) * (epsilon - prev_vcp_mag) / (vcp_mag - prev_vcp_mag)
+            else:
+                t_int = t
+            return ray_origin + ray_direction * t_int
             
-        # 4. Advance ray
+        # 5. Advance ray
         prev_t = t
+        prev_vcp_mag = vcp_mag
         t += step_size
         
     return None
@@ -91,13 +93,29 @@ def ray_cast_vcp_octree(ray_origin, ray_direction, octree, epsilon):
 def interpolate_vcp(vectors, local_pos):
     """
     Trilinearly interpolates VCP vectors from 8 vertices.
-    vectors: list of 8 3D vectors (compressed or uncompressed).
+    vectors: list of 8 3D vectors at block corners (indices 0..7 map to x,y,z bits).
     local_pos: 3D vector in [0, 1]^3 relative to block origin.
     """
-    # Extract x, y, z components from vectors
-    # Perform trilinear interpolation for x, y, and z separately
-    # Return resulting 3D vector
-    pass
+    x, y, z = local_pos
+    def lerp(a, b, t):
+        return a + t * (b - a)
+    
+    # Trilinear interpolation for each component separately
+    def trilinear(v0, v1, v2, v3, v4, v5, v6, v7, x, y, z):
+        c0 = lerp(v0, v1, x)
+        c1 = lerp(v2, v3, x)
+        c2 = lerp(v4, v5, x)
+        c3 = lerp(v6, v7, x)
+        c01 = lerp(c0, c1, y)
+        c23 = lerp(c2, c3, y)
+        return lerp(c01, c23, z)
+
+    return (trilinear(vectors[0].x, vectors[1].x, vectors[2].x, vectors[3].x,
+                      vectors[4].x, vectors[5].x, vectors[6].x, vectors[7].x, x, y, z),
+            trilinear(vectors[0].y, vectors[1].y, vectors[2].y, vectors[3].y,
+                      vectors[4].y, vectors[5].y, vectors[6].y, vectors[7].y, x, y, z),
+            trilinear(vectors[0].z, vectors[1].z, vectors[2].z, vectors[3].z,
+                      vectors[4].z, vectors[5].z, vectors[6].z, vectors[7].z, x, y, z))
 ```
 
 ## Subtopics
@@ -109,15 +127,15 @@ A method for estimating the VCP vector at an arbitrary query point within a grid
 A method for building the hierarchical octree from a VCP grid, using bottom-up hierarchy and dynamic subvolume loading to store VCP information only near the surface, reducing memory traffic.
 
 ## Operating characteristics
-**Time Complexity:** Ray-casting time depends on the depth of the octree. The VCP representation allows for a significantly shallower tree hierarchy compared to standard voxel octrees, reducing traversal costs [S1, unofficial]. Step sizes are adaptive, allowing larger steps in empty space [S1, S2, unofficial].
+**Time Complexity:** Ray-casting time depends on the depth of the octree [S1, unofficial]. The VCP representation allows for a significantly shallower tree hierarchy compared to standard voxel octrees, reducing traversal costs [S1, unofficial]. Step sizes are adaptive, allowing larger steps in empty space [S1, S2, unofficial].
 **Memory Complexity:** Higher per-voxel memory than scalar fields (8 vectors vs 8 scalars), but overall memory is lower due to the shallower tree and sparse storage of only the $\varepsilon$-band [S1, S2, unofficial]. Compression to 32-bit integers and neighbor sharing further reduces memory footprint [S2, unofficial].
 **Strengths:** High-quality rendering of high-resolution surface models; smooth normals via interpolation; ability to render smooth surfaces at arbitrary zoom levels; reduced block artifacts compared to scalar voxels [S1, unofficial].
 **Limitations:** Higher memory usage per cell than scalar fields; requires careful tuning of $\varepsilon$; interpolation artifacts if not handled by specialized schemes (e.g., VCP Interpolation Scheme) [S1, S2, unofficial].
-**When to use:** When high-quality, smooth surface rendering is required from a polygon mesh, especially at high zoom levels, and memory can be optimized via sparsity and compression.
-**When not to use:** When memory is extremely constrained and scalar fields are sufficient, or when sharp feature preservation is critical without using specialized interpolation schemes.
+**When to use:** When high-quality, smooth surface rendering is required from a polygon mesh, especially at high zoom levels, and memory can be optimized via sparsity and compression [S1, S2, unofficial].
+**When not to use:** When memory is extremely constrained and scalar fields are sufficient, or when sharp feature preservation is critical without using specialized interpolation schemes [S1, S2, unofficial].
 
 ## Background
-The VCP Octree was introduced in 2015 by [S1, unofficial] as an improvement over voxel-based ray-casting to overcome block artifacts at high zoom levels. It builds on the idea that storing a vector field (direction and distance) allows for smoother surface approximation than scalar distance fields. The method was further explored in student theses [S2, unofficial] focusing on simplification and compression techniques for sparse voxel octrees using VCP representations.
+The VCP Octree was introduced in 2015 by [S1, unofficial] as an improvement over voxel-based ray-casting to overcome block artifacts at high zoom levels [S1, unofficial]. It builds on the idea that storing a vector field (direction and distance) allows for smoother surface approximation than scalar distance fields [S2, unofficial]. The method was further explored in student theses [S2, unofficial] focusing on simplification and compression techniques for sparse voxel octrees using VCP representations [S2, unofficial].
 
 ## Sources
 [S1] Vector-to-Closest-Point Octree for Surface Ray-Casting, https://doi.org/10.2312/vmv.20151259, fetched 2026-10-26 (unofficial)

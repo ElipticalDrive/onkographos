@@ -1,0 +1,187 @@
+# DWTNeRF
+
+Also called: Discrete Wavelet Transform Neural Radiance Fields
+
+## Overview
+DWTNeRF is a unified framework for few-shot Neural Radiance Fields (NeRF) that builds on [Standard Multi-resolution Hash Encoding](13152-standard-multi-resolution-hash-encoding.md) (Instant-NGP) to enable fast training from sparse views [S1, unofficial]. It distinguishes itself by introducing a Discrete Wavelet Transform (DWT) loss to explicitly prioritize low-frequency learning and multi-head attention modules for cross-branch interactions, avoiding architectural changes to the base MLP that typically degrade performance in Instant-NGP [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Sparse set of training views (images and camera poses), 3D positions $\mathbf{x}$, viewing directions $\mathbf{d}$.
+*   **Outputs:** Predicted color $\mathbf{c}(\mathbf{r})$ and density $\sigma(\mathbf{r})$ for rays $\mathbf{r}$, used to render novel views.
+
+**Data Structures:**
+The network uses separate MLP branches for density and color, following CombiNeRF [S1, unofficial].
+*   **Density Branch:** 2 MLP layers. Input encoded using hash encoding with 16 resolution levels [S1, unofficial].
+*   **Color Branch:** 3 MLP layers. Input encoded using 64 bases of spherical harmonics [S1, unofficial].
+*   **Hash Encoding:** Uses the standard multi-resolution hash grid structure defined in [Standard Multi-resolution Hash Encoding](13152-standard-multi-resolution-hash-encoding.md) [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Encoding:** Encode 3D position $\mathbf{x}$ using the hash encoder $\gamma(\mathbf{x})$ and viewing direction $\mathbf{d}$ using spherical harmonics $\gamma(\mathbf{d})$ [S1, unofficial].
+2.  **Forward Pass:**
+    *   Compute density features $f_d$ through the density branch.
+    *   Compute color features $f_c$ through the color branch.
+    *   Apply **Cross-Branch Interactions** using multi-head attention at the input and output levels of the MLPs to model color-density interactions without altering the MLP architecture [S1, unofficial].
+    *   Output density $\sigma$ and color $\mathbf{c}$ [S1, unofficial].
+3.  **Rendering:** Render the predicted view $I$ from the ray batch $R$ [S1, unofficial].
+4.  **Loss Computation:**
+    *   Compute the photometric loss $L_{MSE}$ between predicted color $\mathbf{c}(\mathbf{r})$ and ground-truth color $\mathbf{c}_{gt}(\mathbf{r})$ [S1, unofficial]:
+        $$ L_{MSE} = \frac{1}{|R|} \sum_{\mathbf{r} \in R} ||\mathbf{c}(\mathbf{r}) - \mathbf{c}_{gt}(\mathbf{r})||_2^2 $$
+    *   Compute the **Discrete Wavelet (DW) Loss** $L_{DW}$ by decomposing the rendered view $I$ and ground-truth view $I_{gt}$ into four sub-bands (LL, LH, HL, HH) using the Discrete Wavelet Transform [S1, unofficial]:
+        $$ L_{DW} = \sum_{sb \in \{LL, LH, HL, HH\}} \lambda_{sb} ||I_{sb} - I_{sb}^{gt}||_2^2 $$
+        where $\lambda_{sb}$ is the weighting for sub-band $sb$. Set $\lambda_{LL} > \lambda_{LH}, \lambda_{HL}, \lambda_{HH}$ to explicitly prioritize learning of low frequencies [S1, unofficial].
+    *   Combine $L_{DW}$ with $L_{MSE}$ and CombiNeRF regularization losses (distortion $L_{dist}$, feature $L_{fg}$, depth smoothness $L_{ds}$, KL-divergence $L_{KL}$) to form the total loss [S1, unofficial]:
+        $$ L = L_{MSE} + L_{DW} + \lambda_{dist} L_{dist} + \lambda_{fg} L_{fg} + \lambda_{ds} L_{ds} + \lambda_{KL} L_{KL} $$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# Assume HashEncoder and SphericalHarmonicsEncoder are defined elsewhere
+# Assume MultiHeadAttention is defined elsewhere
+
+class DWTNeRF(nn.Module):
+    def __init__(self, num_hash_levels=16, num_sh_bases=64):
+        super().__init__()
+        # Density branch: 2 MLP layers
+        self.density_mlp = nn.Sequential(
+            nn.Linear(256, 256), # Input dim depends on hash encoding output
+            nn.ReLU(),
+            nn.Linear(256, 1)    # Output density
+        )
+        
+        # Color branch: 3 MLP layers
+        self.color_mlp = nn.Sequential(
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 3)    # Output color (RGB)
+        )
+        
+        # Cross-branch interaction modules (Multi-head attention)
+        # Applied at input and output levels
+        self.density_input_attn = MultiHeadAttention()
+        self.density_output_attn = MultiHeadAttention()
+        self.color_input_attn = MultiHeadAttention()
+        self.color_output_attn = MultiHeadAttention()
+        
+        # Hash and SH encoders
+        self.hash_encoder = HashEncoder(num_levels=num_hash_levels)
+        self.sh_encoder = SphericalHarmonicsEncoder(num_bases=num_sh_bases)
+        
+        # DW Loss parameters
+        self.lambda_ll = 1.0 # Higher than other sub-bands
+        self.lambda_lh = 0.1
+        self.lambda_hl = 0.1
+        self.lambda_hh = 0.1
+        
+        # CombiNeRF regularization weights
+        self.lambda_dist = 0.01
+        self.lambda_fg = 0.01
+        self.lambda_ds = 0.01
+        self.lambda_kl = 0.01
+
+    def forward(self, positions, directions):
+        # Encode inputs
+        pos_encoded = self.hash_encoder(positions)
+        dir_encoded = self.sh_encoder(directions)
+        
+        # Density branch
+        density_input = self.density_input_attn(pos_encoded, dir_encoded)
+        density_features = self.density_mlp(density_input)
+        density_output = self.density_output_attn(density_features, dir_encoded)
+        density = self.density_mlp[-1](density_output) # Assuming last layer is linear
+        
+        # Color branch
+        color_input = self.color_input_attn(pos_encoded, dir_encoded)
+        color_features = self.color_mlp(color_input)
+        color_output = self.color_output_attn(color_features, dir_encoded)
+        color = self.color_mlp[-1](color_output)
+        
+        return density, color
+
+    def compute_dw_loss(self, I, I_gt):
+        # Decompose I and I_gt into LL, LH, HL, HH sub-bands
+        # Using Haar wavelet for cost-effectiveness
+        LL, LH, HL, HH = dwt_2d(I)
+        LL_gt, LH_gt, HL_gt, HH_gt = dwt_2d(I_gt)
+        
+        loss_ll = self.lambda_ll * torch.mean((LL - LL_gt) ** 2)
+        loss_lh = self.lambda_lh * torch.mean((LH - LH_gt) ** 2)
+        loss_hl = self.lambda_hl * torch.mean((HL - HL_gt) ** 2)
+        loss_hh = self.lambda_hh * torch.mean((HH - HH_gt) ** 2)
+        
+        return loss_ll + loss_lh + loss_hl + loss_hh
+
+    def compute_loss(self, I, I_gt, density, positions, directions):
+        # Photometric loss
+        c = render_ray(density, positions, directions) # Simplified rendering
+        c_gt = render_ray_ground_truth(I_gt, positions, directions) # Simplified
+        l_mse = torch.mean((c - c_gt) ** 2)
+        
+        # DW Loss
+        l_dw = self.compute_dw_loss(I, I_gt)
+        
+        # CombiNeRF Regularization Losses
+        l_dist = compute_distortion_loss(density, positions)
+        l_fg = compute_feature_loss(density, positions)
+        l_ds = compute_depth_smoothness_loss(density, positions)
+        l_kl = compute_kl_divergence(density)
+        
+        total_loss = (l_mse + l_dw + 
+                      self.lambda_dist * l_dist + 
+                      self.lambda_fg * l_fg + 
+                      self.lambda_ds * l_ds + 
+                      self.lambda_kl * l_kl)
+        
+        return total_loss
+
+# Helper functions for DWT
+def dwt_2d(image):
+    # Apply 2D DWT using Haar wavelet
+    # Decompose into LL (low-low), LH (low-high), HL (high-low), HH (high-high)
+    # Using convolution with low-pass filter l and high-pass filter h
+    l = [0.7071, 0.7071] # Haar low-pass filter
+    h = [0.7071, -0.7071] # Haar high-pass filter (Alternating Flip condition)
+    
+    # Construct 2D low-pass matrix L from 1D low-pass filter coefficients
+    # L is constructed by shifting rows of l
+    # For simplicity, assume 2D convolution with separable filters
+    LL = F.conv2d(image, l_2d, stride=2, padding=0)
+    LH = F.conv2d(image, lh_2d, stride=2, padding=0)
+    HL = F.conv2d(image, hl_2d, stride=2, padding=0)
+    HH = F.conv2d(image, hh_2d, stride=2, padding=0)
+    
+    return LL, LH, HL, HH
+```
+
+**Parameters:**
+*   **Wavelet Choice:** Haar wavelet is used as the method of choice because it is cost-effective [S1, unofficial]. The db3 wavelet is best-performing but costlier due to more coefficients [S1, unofficial].
+*   **Hash Encoding Levels:** 16 resolution levels [S1, unofficial].
+*   **Spherical Harmonics Bases:** 64 bases [S1, unofficial].
+*   **Sub-band Weights:** $\lambda_{LL}$ is set higher than $\lambda_{LH}, \lambda_{HL}, \lambda_{HH}$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Architectural Sensitivity:** Model-based methods (e.g., adding residual connections or element-wise interactions) degrade performance in Instant-NGP due to its aggressive optimization dynamics [S1, unofficial]. DWTNeRF avoids this by using multi-head attention at inputs/outputs [S1, unofficial].
+*   **Frequency Masking Incompatibility:** Frequency masking, which masks high-frequency inputs, is incompatible with multi-resolution hash encoding because fine resolutions do not strictly correspond to high frequencies [S1, unofficial]. DWTNeRF bypasses this by decomposing the image into frequency sub-bands [S1, unofficial].
+*   **Over-parameterization:** Densities are only position-dependent and vulnerable to over-parameterization, so cross-branch interactions are implemented from density towards color branch, but not vice versa [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training is fast due to Instant-NGP's hash encoding, but slower than vanilla INGP due to the additional DW loss computation and attention modules [S1, unofficial].
+*   **Memory Complexity:** Memory usage is reduced compared to standard NeRF due to hash encoding, but increased slightly due to the attention modules and regularization terms [S1, unofficial].
+*   **Performance:** On the 3-shot LLFF benchmark, DWTNeRF outperforms Vanilla INGP by 15.07% in PSNR, 24.45% in SSIM, and 36.30% in LPIPS [S1, unofficial].
+*   **Strengths:** Effective for few-shot NeRF, compatible with Instant-NGP's aggressive optimization, reduces overfitting on high frequencies.
+*   **Limitations:** Slightly higher computational cost than vanilla INGP, sensitive to wavelet choice (though Haar is sufficient).
+
+## Background
+DWTNeRF was introduced in 2025 by [S1, unofficial]. It addresses the limitations of NeRF in few-shot scenarios, where dense training views are unavailable. It builds on Instant-NGP's fast-converging hash encoding and CombiNeRF's regularization techniques [S1, unofficial].
+
+## Sources
+[S1] DWTNeRF: Boosting Few-shot Neural Radiance Fields via Discrete Wavelet Transform, https://arxiv.org/abs/2501.12637v3, fetched 2026-10-27 (unofficial)

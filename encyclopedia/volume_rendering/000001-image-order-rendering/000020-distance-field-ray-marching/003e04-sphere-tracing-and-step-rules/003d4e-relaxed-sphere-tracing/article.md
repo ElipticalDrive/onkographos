@@ -7,41 +7,43 @@ Relaxed sphere tracing is an acceleration technique for distance-field ray march
 
 ## How it works
 **Inputs:**
-- Ray origin $\mathbf{p} \in \mathbb{R}^3$.
-- Ray direction $\mathbf{v} \in \mathbb{R}^3$ with $\|\mathbf{v}\| = 1$.
-- Signed Distance Function Estimate (SDFE) $f: \mathbb{R}^3 \to \mathbb{R}$.
-- Relaxation parameter $\omega \ge 0$.
-- Maximum iteration count $i_{max}$.
-- Convergence threshold $\epsilon$ (e.g., $0.001$).
-- Maximum travel distance $t_{max}$ (optional, for bounding volumes).
+- Ray origin $\mathbf{p} \in \mathbb{R}^3$ [S1, unofficial].
+- Ray direction $\mathbf{v} \in \mathbb{R}^3$ with $\|\mathbf{v}\| = 1$ [S1, unofficial].
+- Signed Distance Function Estimate (SDFE) $f: \mathbb{R}^3 \to \mathbb{R}$ [S1, unofficial].
+- Relaxation parameter $\omega \ge 0$ [S1, unofficial].
+- Maximum iteration count $i_{max}$ [S1, unofficial].
+- Convergence threshold $\epsilon$ (e.g., $0.001$) [S1, unofficial].
+- Maximum travel distance $t_{max}$ (optional, for bounding volumes) [G].
 
 **Outputs:**
-- Distance traveled $t$ along the ray.
-- Hit status (implicit in termination condition).
+- Distance traveled $t$ along the ray [S1, unofficial].
+- Hit status (implicit in termination condition) [G].
 
 **Data Structures:**
-- Scalar variables: $t$ (accumulated distance), $r_i$ (SDF value at current step), $r_{i+1}$ (SDF value at next step), $d_i$ (step size).
-- Integer counter: $i$ (iteration index).
+- Scalar variables: $t$ (accumulated distance), $r_i$ (SDF value at current step), $r_{i+1}$ (SDF value at next step), $d_i$ (step size) [S1, unofficial].
+- Integer counter: $i$ (iteration index) [S1, unofficial].
 
 **Parameters:**
-- $\omega$: Relaxation factor. A typical value cited is $0.6$, resulting in a step size multiplier of $1.6$ [S2, unofficial]. The sources do not specify an optimal theoretical range, but $\omega > 0$ is required for acceleration.
+- $\omega$: Relaxation factor. A typical value cited is $0.6$, resulting in a step size multiplier of $1.6$ [S2, unofficial]. The sources do not specify an optimal theoretical range, but $\omega > 0$ is required for acceleration [S1, unofficial].
 
 **Algorithm Steps:**
-1. Initialize $t = 0$, $i = 0$, $r_i = 0$, $r_{i+1} = \infty$ (or a value $> \epsilon$).
+1. Initialize $t = 0$, $i = 0$, $r_i = 0$, $r_{i+1} = \infty$ (or a value $> \epsilon$) [S1, unofficial].
 2. Loop while $i < i_{max}$ and $r_{i+1} > \epsilon$:
-   a. Calculate the relaxed step size: $d_i = r_i + \omega \cdot r_i = r_i(1 + \omega)$.
-   b. Sample the SDF at the proposed next position: $\mathbf{p}_{next} = \mathbf{p} + (t + d_i)\mathbf{v}$.
-   c. Compute $r_{i+1} = f(\mathbf{p}_{next})$.
-   d. **Safety Check:** If $d_i > r_i + r_{i+1}$, the unbounding spheres of the current and next steps are disjoint, meaning the ray might have skipped the surface. In this case, revert to the conservative step:
-      - Set $d_i = r_i$.
-      - Recompute the position: $\mathbf{p}_{next} = \mathbf{p} + (t + d_i)\mathbf{v}$.
-      - Recompute $r_{i+1} = f(\mathbf{p}_{next})$.
-   e. Update accumulated distance: $t = t + d_i$.
-   f. Update current radius: $r_i = r_{i+1}$.
-   g. Increment iteration: $i = i + 1$.
-3. Return $t$.
+   a. Calculate the relaxed step size: $d_i = r_i + \omega \cdot r_i = r_i(1 + \omega)$ [S1, unofficial].
+   b. Sample the SDF at the proposed next position: $\mathbf{p}_{next} = \mathbf{p} + (t + d_i)\mathbf{v}$ [S1, unofficial].
+   c. Compute $r_{i+1} = f(\mathbf{p}_{next})$ [S1, unofficial].
+   d. **Safety Check:** If $d_i > r_i + r_{i+1}$, the unbounding spheres of the current and next steps are disjoint, meaning the ray might have skipped the surface [S1, unofficial]. In this case, revert to the conservative step:
+      - Set $d_i = r_i$ [S1, unofficial].
+      - Recompute the position: $\mathbf{p}_{next} = \mathbf{p} + (t + d_i)\mathbf{v}$ [S1, unofficial].
+      - Recompute $r_{i+1} = f(\mathbf{p}_{next})$ [S1, unofficial].
+   e. Update accumulated distance: $t = t + d_i$ [S1, unofficial].
+   f. Update current radius: $r_i = r_{i+1}$ [S1, unofficial].
+   g. Increment iteration: $i = i + 1$ [S1, unofficial].
+3. Return $t$ [S1, unofficial].
 
 **Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
 ```python
 def relaxed_sphere_tracing(p, v, f, omega, epsilon, max_steps):
     t = 0.0
@@ -49,30 +51,7 @@ def relaxed_sphere_tracing(p, v, f, omega, epsilon, max_steps):
     r_i = 0.0
     r_next = float('inf')
     
-    # Initial sample to set r_i correctly for the first iteration logic
-    # Note: Standard sphere tracing starts with r_i = f(p). 
-    # The source algorithm initializes r_i=0, r_next=inf, implying 
-    # the loop body handles the first sample. However, logically, 
-    # r_i must be the distance at the CURRENT position before stepping.
-    # The source [S1, unofficial] pseudocode shows:
-    # r_i = 0; r_next = inf; t = 0; i = 0
-    # Loop:
-    #   d_i = r_i + omega * r_i  <-- If r_i is 0, d_i is 0. This suggests 
-    #   the source pseudocode might assume r_i is initialized to f(p) 
-    #   before the loop, or the first iteration is a special case.
-    # Re-reading [S1, unofficial] Algorithm 2:
-    # "i=0; r_i=0; r_{i+1}=inf; t=0"
-    # "for i < imax and r_{i+1} not too small"
-    # "d_i = r_i + omega * r_i"
-    # If r_i is 0, step is 0. This is likely a typo in the source or 
-    # implies r_i is set to f(p) before the loop. 
-    # Standard interpretation: r_i holds f(current_point).
-    
-    # Corrected initialization based on standard sphere tracing logic 
-    # and the need for a non-zero first step:
-    r_i = f(p)
-    
-    while i < max_steps and r_i > epsilon:
+    while i < max_steps and r_next > epsilon:
         # Calculate relaxed step size
         d_i = r_i * (1.0 + omega)
         
@@ -83,9 +62,8 @@ def relaxed_sphere_tracing(p, v, f, omega, epsilon, max_steps):
         r_next = f(p_next)
         
         # Safety check: disjoint unbounding spheres
-        # Condition: step size > sum of radii
         if d_i > r_i + r_next:
-            # Revert to conservative step
+            # Revert to conservative step to prevent skipping intersections [S1, unofficial]
             d_i = r_i
             p_next = p + (t + d_i) * v
             r_next = f(p_next)
@@ -99,9 +77,9 @@ def relaxed_sphere_tracing(p, v, f, omega, epsilon, max_steps):
 ```
 
 **Edge Cases and Pitfalls:**
-- **Disjoint Spheres:** The core safety mechanism is the check $d_i > r_i + r_{i+1}$. If this condition is met, the ray has jumped over the surface. Failing to revert to the conservative step $d_i = r_i$ will cause the ray to miss the intersection [S1, S2, unofficial].
-- **Zero Distance:** If the ray starts exactly on the surface ($f(\mathbf{p}) = 0$), the loop terminates immediately.
-- **Oscillation:** In narrow gaps or highly curved surfaces, the relaxation factor may cause the ray to oscillate near the surface if the safety check is not robust. The conservative fallback prevents infinite loops but may reduce performance in such areas [S1, unofficial].
+- **Disjoint Spheres:** The core safety mechanism is the check $d_i > r_i + r_{i+1}$. If this condition is met, the ray has jumped over the surface. Failing to revert to the conservative step $d_i = r_i$ will cause the ray to miss the intersection [S1, unofficial].
+- **Zero Distance:** If the ray starts exactly on the surface ($f(\mathbf{p}) = 0$), the loop terminates immediately after the first iteration samples the origin [S1, unofficial].
+- **Oscillation:** In narrow gaps or highly curved surfaces, the relaxation factor may cause the ray to oscillate near the surface if the safety check is not robust. The conservative fallback prevents skipping intersections but may reduce performance in such areas [S1, unofficial].
 - **Precision:** Floating-point precision errors in the SDF evaluation can lead to incorrect safety checks. Using a small epsilon for the comparison $d_i > r_i + r_{i+1}$ may be necessary in practice [G].
 
 ## Subtopics
@@ -110,7 +88,7 @@ def relaxed_sphere_tracing(p, v, f, omega, epsilon, max_steps):
 Uses a geometric construction to find the optimal tangential step size for planar surfaces, offering faster convergence than relaxed tracing but with higher computational cost per step [S1, unofficial].
 
 ### Uniform Sphere Tracing
-Uses a fixed step size regardless of the SDF value, simpler but less efficient for complex scenes [4406-uniform-sphere-tracing.md].
+Uses a fixed step size regardless of the SDF value, simpler but less efficient for complex scenes [G].
 
 ## Operating characteristics
 - **Time Complexity:** $O(k)$ where $k$ is the number of iterations. Relaxed sphere tracing typically requires fewer iterations than basic sphere tracing due to larger step sizes, but each iteration includes a conditional branch for the safety check [S1, S2, unofficial].

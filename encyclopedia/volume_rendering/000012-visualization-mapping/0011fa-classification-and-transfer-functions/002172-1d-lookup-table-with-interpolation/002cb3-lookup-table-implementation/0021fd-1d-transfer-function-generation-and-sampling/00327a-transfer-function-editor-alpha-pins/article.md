@@ -12,46 +12,26 @@ The Transfer Function Editor (Alpha Pins) is an interactive visualization tool t
 
 **Data Structures**
 The editor maintains two distinct sets of control points:
-1.  **Alpha Pins:** Defined in a top panel where the Y-axis represents opacity $[0, 1]$. Supported types:
-    *   **Ramps:** Straight lines defined by position and slope [S1].
-    *   **Hats:** Trapezoidal functions defined by height, width, and edge slope; special cases include tophat and triangle [S1].
-    *   **Blanks:** Regions of zero opacity defined by width and position [S1].
-2.  **Colour Pins:** Vertical dashed lines in the color mapping panel. Each pin defines an RGB color value $[0, 255]$ at a specific scalar position [S1].
+1.  **Alpha Pins:** Defined in a top panel where the Y-axis represents opacity $[0, 1]$ [S1]. Supported types include straight lines (ramps) with controllable slope and position, trapezoidal functions (hats) with controllable height, width, and edge slope (special cases: tophat, triangle), and blanks with controllable width and position [S1].
+2.  **Colour Pins:** Vertical dashed lines in the color mapping panel [S1]. Each colour pin defines an RGB color value in the range $[0, 255]$ at a specific scalar position [S1].
 
 **Algorithm**
-The transfer function $T(S)$ is computed in two stages: opacity composition and color interpolation.
-
-1.  **Opacity Composition:**
-    For a given scalar value $S$, determine the opacity contribution $\alpha_i(S)$ from each alpha pin $i$.
-    *   If $S$ falls within the domain of a **Blank** pin, $\alpha_{blank}(S) = 0$.
+The transfer function $T(S)$ is computed in two stages: opacity composition and color interpolation [S1].
+1.  **Opacity Composition:** For a given scalar value $S$, determine the opacity contribution $\alpha_i(S)$ from each alpha pin $i$ [S1].
+    *   If $S$ falls within the domain of a **Blank** pin, $\alpha_{blank}(S) = 0$ [S1].
     *   If $S$ falls within the domain of a **Ramp** or **Hat** pin, $\alpha_{pin}(S)$ is calculated based on the pin's geometric parameters (slope, height, width) [S1].
-    *   The total opacity $\alpha_F(S)$ is the maximum of all individual pin opacities, with the exception that any active Blank takes precedence:
-        $$
-        \alpha_F(S) = \begin{cases} 
-        0 & \text{if } \exists \text{ Blank pin covering } S \\
-        \max_i (\alpha_i(S)) & \text{otherwise}
-        \end{cases}
-        $$
-    *   Note: The sources state "maximum opacity is adopted, except that blanks... have precedence" [S1]. This implies a logical OR for transparency (0) and MAX for non-zero values.
-
-2.  **Color Interpolation:**
-    *   Sort the colour pins by their scalar position $p_j$.
-    *   Find the interval $[p_j, p_{j+1}]$ such that $p_j \le S < p_{j+1}$.
-    *   Let $C_j = (R_j, G_j, B_j)$ and $C_{j+1} = (R_{j+1}, G_{j+1}, B_{j+1})$ be the colors of the adjacent pins.
-    *   Compute the normalized position $t$ within the interval:
-        $$
-        t = \frac{S - p_j}{p_{j+1} - p_j}
-        $$
-    *   Interpolate the color components linearly:
-        $$
-        F(S) = C_j + t \cdot (C_{j+1} - C_j)
-        $$
-    *   If $S$ is outside the range of defined colour pins, the color is clamped to the nearest edge pin's color [S1].
+    *   The total opacity $\alpha_F(S)$ is the maximum of all individual pin opacities, except that blanks (totally transparent) have precedence over all other pins [S1].
+2.  **Color Interpolation:** Colours are linearly interpolated between the colour pins [S1].
+    *   Sort the colour pins by their scalar position $p_j$ [G].
+    *   Find the interval $[p_j, p_{j+1}]$ such that $p_j \le S < p_{j+1}$ [G].
+    *   Let $C_j = (R_j, G_j, B_j)$ and $C_{j+1} = (R_{j+1}, G_{j+1}, B_{j+1})$ be the colors of the adjacent pins [G].
+    *   Compute the normalized position $t$ within the interval: $t = \frac{S - p_j}{p_{j+1} - p_j}$ [G].
+    *   Interpolate the color components linearly: $F(S) = C_j + t \cdot (C_{j+1} - C_j)$ [G].
 
 **Parameters**
-*   **X-axis range:** Scalar data domain, typically $[0, 255]$ for 8-bit data [S1].
-*   **Y-axis range (Opacity):** $[0, 1]$ [S1].
-*   **Color values:** $[0, 255]$ for R, G, B [S1].
+*   **X-axis range:** Scalar data domain, e.g., $[0, 255]$ for 8-bit data [S1].
+*   **Y-axis range (opacity panel):** Opacity in the range $[0, 1]$ [S1].
+*   **Colour pin values:** Red, green, and blue values in the range $[0, 255]$ [S1].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -72,7 +52,6 @@ def compute_transfer_function(scalar_value: float, alpha_pins: list, color_pins:
     Returns:
         (r, g, b, alpha) tuple.
     """
-    
     # 1. Compute Opacity
     max_alpha = 0.0
     is_blank = False
@@ -82,49 +61,33 @@ def compute_transfer_function(scalar_value: float, alpha_pins: list, color_pins:
         pos = pin['pos']
         
         if pin_type == 'blank':
-            # Blanks have precedence over all other pins
-            # Assuming 'width' defines the extent from pos, or pos is center/left?
-            # Source says "width and position can be controlled". 
-            # Standard interpretation: interval [pos, pos + width] or similar.
-            # We assume a simple interval check. If sources don't specify exact 
-            # geometric definition of 'blank' interval, we assume it covers 
-            # a range around 'pos'. Let's assume pos is start and width is length.
+            # Blanks have precedence over all other pins [S1]
+            # Assuming 'width' defines the extent from pos
             if pos <= scalar_value < pos + pin.get('width', 0):
                 is_blank = True
                 break
-        elif pin_type in ['ramp', 'hat']:
-            # Calculate opacity contribution based on geometry
-            # This is a placeholder for the specific geometric formulas 
-            # which are not explicitly detailed in the source text beyond 
-            # "slope", "height", "width".
-            # [G] Assuming standard linear ramp/hat definitions:
-            # For a ramp starting at pos with slope m: alpha = min(1, max(0, m * (S - pos)))
-            # For a hat, it's a trapezoid.
-            # Since exact formulas are not in [S1], we calculate a generic 
-            # contribution based on distance from center/edge if parameters allow.
-            # However, to remain strictly implementable from text:
-            # The text says "slope and position" for ramps.
-            # alpha = clamp(slope * (scalar_value - pos), 0, 1) for ramps?
-            # Or is it a line between two points? "Straight lines... controllable slope/position".
-            # Let's assume a ramp is defined by a start point and slope.
-            if pin_type == 'ramp':
-                slope = pin.get('slope', 0)
-                # Linear interpolation from 0 at pos
-                alpha_val = slope * (scalar_value - pos)
-                alpha_val = max(0.0, min(1.0, alpha_val))
-            else: # hat
-                # Trapezoidal. Needs width, height, edge slope.
-                # [G] Without explicit formula, we cannot implement exact hat math.
-                # We will assume a simplified contribution or 0 if not defined.
-                # But the prompt requires implementation. 
-                # We will assume the 'height' is the max alpha and 'width' is base width.
-                # Edge slope controls the rise/fall.
-                # This is a gap. We will return 0 for hats to be safe, 
-                # or assume a standard trapezoid.
-                # Let's assume the source implies standard geometric primitives.
-                # We'll skip specific hat math as it's not explicitly formulaic in [S1].
-                alpha_val = 0.0 
-            
+        elif pin_type == 'ramp':
+            # Linear ramp from pos with given slope [G]
+            slope = pin.get('slope', 0.0)
+            alpha_val = max(0.0, min(1.0, slope * (scalar_value - pos)))
+            if alpha_val > max_alpha:
+                max_alpha = alpha_val
+        elif pin_type == 'hat':
+            # Trapezoidal hat: rises from pos, plateaus, falls [G]
+            width = pin.get('width', 0.0)
+            height = pin.get('height', 1.0)
+            edge_slope = pin.get('edge_slope', 1.0)
+            rise_width = height / edge_slope if edge_slope > 0 else 0
+            fall_start = pos + width - rise_width
+            fall_end = pos + width
+            if pos <= scalar_value < pos + rise_width:
+                alpha_val = min(height, edge_slope * (scalar_value - pos))
+            elif pos + rise_width <= scalar_value < fall_start:
+                alpha_val = height
+            elif fall_start <= scalar_value < fall_end:
+                alpha_val = max(0.0, height - edge_slope * (scalar_value - fall_start))
+            else:
+                alpha_val = 0.0
             if alpha_val > max_alpha:
                 max_alpha = alpha_val
 
@@ -134,16 +97,15 @@ def compute_transfer_function(scalar_value: float, alpha_pins: list, color_pins:
         alpha = max_alpha
 
     # 2. Compute Color
-    # Sort color pins by position
+    # Sort colour pins by their scalar position [G]
     sorted_pins = sorted(color_pins, key=lambda p: p['pos'])
     
-    # Find interval
     r, g, b = 0, 0, 0
     
     if not sorted_pins:
         return (0, 0, 0, alpha)
         
-    # Handle boundaries
+    # Find interval [p_j, p_{j+1}] such that p_j <= S < p_{j+1} [G]
     if scalar_value <= sorted_pins[0]['pos']:
         pin = sorted_pins[0]
         return (pin['r'], pin['g'], pin['b'], alpha)
@@ -151,7 +113,6 @@ def compute_transfer_function(scalar_value: float, alpha_pins: list, color_pins:
         pin = sorted_pins[-1]
         return (pin['r'], pin['g'], pin['b'], alpha)
     else:
-        # Find j such that pos_j <= S < pos_{j+1}
         for i in range(len(sorted_pins) - 1):
             p1 = sorted_pins[i]
             p2 = sorted_pins[i+1]
@@ -166,15 +127,15 @@ def compute_transfer_function(scalar_value: float, alpha_pins: list, color_pins:
 ```
 
 **Edge Cases and Pitfalls**
-*   **Precision:** Color values are integers $[0, 255]$. Interpolation should be performed in floating point and rounded/clamped to integer range [S1].
 *   **Blanks Precedence:** If a blank overlaps a ramp, the result is transparent, not the ramp's opacity [S1].
 *   **Domain:** The X-axis range must match the scalar data domain (e.g., $[0, 255]$) [S1].
+*   **Precision:** Not given in the sources.
 
 ## Operating characteristics
-*   **Complexity:** Time complexity is $O(N)$ where $N$ is the number of alpha pins and color pins per voxel evaluation. Memory complexity is proportional to the number of pins stored in the editor.
-*   **Performance:** The method is computationally lightweight per voxel, relying on simple comparisons and linear interpolation.
+*   **Complexity:** Time complexity is $O(N)$ where $N$ is the number of alpha pins and color pins per voxel evaluation [G]. Memory complexity is proportional to the number of pins stored in the editor [G].
+*   **Performance:** The method is computationally lightweight per voxel, relying on simple comparisons and linear interpolation [G].
 *   **Strengths:** Intuitive control over specific features (ramps, blanks) allows users to isolate signal from noise effectively [S1].
-*   **Limitations:** Requires manual placement of pins; not suitable for automatic classification without user input.
+*   **Limitations:** Requires manual placement of pins; not suitable for automatic classification without user input [G].
 
 ## Background
 The method was introduced in the context of visualizing large astronomical cubes using a distributed-data perspective shear-warp volume rendering algorithm [S1]. It was designed to provide an effective way to map scalar data to color and opacity by leveraging strong color gradients and moderate opacity for interesting signal parts, while using gradual gradients and low/zero opacities for noise [S1].

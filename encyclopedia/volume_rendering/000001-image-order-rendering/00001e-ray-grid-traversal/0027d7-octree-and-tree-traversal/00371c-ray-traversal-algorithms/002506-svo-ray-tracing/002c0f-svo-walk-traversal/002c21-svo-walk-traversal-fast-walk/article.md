@@ -3,7 +3,7 @@
 Also called: BVH Traversal with SVO Leaves, BVH-SVO Hybrid Traversal
 
 ## Overview
-This method is a hybrid ray traversal algorithm that combines a Bounding Volume Hierarchy (BVH) for coarse culling with Sparse Voxel Octree (SVO) structures for fine-grained density evaluation [S1, unofficial]. It efficiently renders large, sparse volumetric datasets by delegating leaf-node processing to an SVO ray marcher while using BVH ray-sphere intersection to skip empty regions [S1, unofficial]. It reduces visited nodes compared to pure SVO traversal and maintains SVO memory efficiency at the leaves compared to pure BVH traversal [S1, unofficial].
+This method is a hybrid ray traversal algorithm for a Bounding Volume Hierarchy (BVH) where leaf nodes point to Sparse Voxel Octree (SVO) structures [S1, unofficial]. It uses ray-sphere intersection to cull BVH nodes and delegates leaf traversal to the SVO ray marcher [S1, unofficial]. It reduces visited nodes compared to pure SVO traversal and maintains SVO memory efficiency at the leaves compared to pure BVH traversal [S1, unofficial].
 
 ## How it works
 **Inputs:** Ray origin $O$ and direction $D$; BVH node buffer `BVHNodes`; BVH leaf buffer `BVHLeafs`; SVO data structures accessed via leaf `address`; output accumulators `min_t`, `o_t`, `o_color`, `o_normal` [S1, unofficial].
@@ -15,41 +15,46 @@ This method is a hybrid ray traversal algorithm that combines a Bounding Volume 
    a. Pop `idx` from `S`. If empty, break [S1, unofficial].
    b. Load `node = BVHNodes[idx]` [S1, unofficial].
    c. Check leaf: `is_leaf = (node.left_child & 0x80000000) != 0` [S1, unofficial].
-   d. If leaf: call leaf tracer for left (`node.left_child ^ 0x80000000`) and right (`node.right_child ^ 0x80000000`). Update accumulators on hit [S1, unofficial].
-   e. If not leaf: load children. Ray-sphere test for both. Set `left_descend`, `right_descend` [S1, unofficial].
-   f. If neither: continue (pop next) [S1, unofficial].
-   g. If one: set current to that child [S1, unofficial].
-   h. If both: push farther to `S`, set current to nearer [S1, unofficial].
-3. After loop: `o_t = min_t` [S1, unofficial].
-4. Return `min_t < 10000.0` [S1, unofficial].
+   d. If leaf: call `bvh_trace_leaf` for left (`node.left_child ^ 0x80000000`) and right (`node.right_child ^ 0x80000000`) [S1, unofficial]. Update `min_t`, `o_t`, `o_color`, `o_normal` if a hit is found [S1, unofficial].
+   e. If not leaf: load left and right nodes. Perform ray-sphere intersection for both. Set `left_descend` and `right_descend` based on intersection results [S1, unofficial].
+   f. If neither child is descended into, pop from stack if available, else break [S1, unofficial].
+   g. If one child is descended into, move to that child [S1, unofficial].
+   h. If both are descended into, push the farther child to stack and move to the nearer child [S1, unofficial].
+3. After loop: set `o_t = min_t` [S1, unofficial].
+4. Return true if `min_t < 10000.0` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def fast_walk(ray_origin, ray_direction, bvh_nodes, bvh_leaves, svo_data, max_t=10000.0):
-    stack = [0]
+    stack = []
+    idx = 0
     min_t = float('inf')
     o_t = 0.0
     o_color = (0.0, 0.0, 0.0, 0.0)
     o_normal = (0.0, 0.0, 0.0)
 
     while True:
-        if not stack:
-            break
-        idx = stack.pop()
         node = bvh_nodes[idx]
-
         is_leaf = (node.left_child & 0x80000000) != 0
+
         if is_leaf:
-            for child_mask in [node.left_child, node.right_child]:
-                leaf_idx = child_mask ^ 0x80000000
-                hit_t, hit_color, hit_normal = trace_leaf(ray_origin, ray_direction, bvh_leaves[leaf_idx], svo_data, min_t)
-                if hit_t < min_t:
-                    min_t = hit_t
-                    o_t = hit_t
-                    o_color = hit_color
-                    o_normal = hit_normal
+            left_idx = node.left_child ^ 0x80000000
+            right_idx = node.right_child ^ 0x80000000
+            hit_t, hit_color, hit_normal = trace_leaf(ray_origin, ray_direction, bvh_leaves[left_idx], svo_data, min_t)
+            if hit_t < min_t:
+                min_t = hit_t
+                o_t = hit_t
+                o_color = hit_color
+                o_normal = hit_normal
+            hit_t, hit_color, hit_normal = trace_leaf(ray_origin, ray_direction, bvh_leaves[right_idx], svo_data, min_t)
+            if hit_t < min_t:
+                min_t = hit_t
+                o_t = hit_t
+                o_color = hit_color
+                o_normal = hit_normal
+            idx = stack.pop() if stack else break
         else:
             left_node = bvh_nodes[node.left_child]
             right_node = bvh_nodes[node.right_child]
@@ -58,24 +63,20 @@ def fast_walk(ray_origin, ray_direction, bvh_nodes, bvh_leaves, svo_data, max_t=
             right_descend = ray_sphere_intersect(ray_origin, ray_direction, right_node.center, right_node.radius, min_t)
 
             if not left_descend and not right_descend:
-                continue
+                idx = stack.pop() if stack else break
             elif left_descend and right_descend:
                 dist_left = length(left_node.center - ray_origin)
                 dist_right = length(right_node.center - ray_origin)
                 if dist_left > dist_right:
-                    if len(stack) < 64:
-                        stack.append(node.left_child)
+                    stack.append(node.left_child)
                     idx = node.right_child
                 else:
-                    if len(stack) < 64:
-                        stack.append(node.right_child)
+                    stack.append(node.right_child)
                     idx = node.left_child
             elif left_descend:
                 idx = node.left_child
             else:
                 idx = node.right_child
-
-            stack.append(idx)
 
     o_t = min_t
     return min_t < max_t, o_t, o_color, o_normal
@@ -117,22 +118,28 @@ def transform_vector(matrix, vector):
     y = matrix[1][0]*vector.x + matrix[1][1]*vector.y + matrix[1][2]*vector.z
     z = matrix[2][0]*vector.x + matrix[2][1]*vector.y + matrix[2][2]*vector.z
     return (x, y, z)
+
+def length(v):
+    return sqrt(v.x*v.x + v.y*v.y + v.z*v.z)
+
+def dot(a, b):
+    return a.x*b.x + a.y*b.y + a.z*b.z
 ```
 
 **Edge Cases and Pitfalls:**
-- Stack overflow: `BVH_STACK_SIZE` is fixed at 64. Deep BVHs may cause stack overflow if not handled [S1, unofficial].
+- Stack overflow: `BVH_STACK_SIZE` is fixed at 64 [S1, unofficial]. Deep BVHs may cause stack overflow if not handled [S1, unofficial].
 - Precision: Ray-sphere intersection precision can affect culling accuracy.
-- Leaf Index Masking: The leaf index is stored with the MSB set. It must be XORed with `0x80000000` to get the actual index [S1, unofficial].
+- Leaf Index Masking: The leaf index is stored with the MSB set [S1, unofficial]. It must be XORed with `0x80000000` to get the actual index [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Performance:** Not given in the sources.
-- **Strengths:** Efficient for large, sparse datasets. Good balance between memory usage and traversal speed.
-- **Limitations:** Stack size limitation. Complexity of implementation due to hybrid nature.
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Performance:** Not given in the sources [S1, unofficial].
+- **Strengths:** Not given in the sources [S1, unofficial].
+- **Limitations:** Not given in the sources [S1, unofficial].
 
 ## Background
-The hybrid BVH-SVO traversal approach is described in the unofficial source [S1, unofficial]. It is part of the `mxbrt/svo` project. The approach combines BVH and SVO techniques, which are common in volume rendering.
+The hybrid BVH-SVO traversal approach is described in the unofficial source [S1, unofficial]. It is part of the `mxbrt/svo` project [S1, unofficial].
 
 ## Sources
 [S1] mxbrt/svo, https://github.com/mxbrt/svo, fetched 2026-10-26 (unofficial)

@@ -3,142 +3,178 @@
 Also called: Fisher Information-based pruning score, PUP 3D-GS, PUP 3D-GS Pruning Score & Pipeline, Principled Uncertainty Pruning for 3D Gaussian Splatting
 
 ## Overview
-Principled Uncertainty Pruning (PUP) is a post-hoc method for compressing pretrained 3D Gaussian Splatting (3D-GS) models by removing Gaussians with low sensitivity to reconstruction error, thereby preserving visual fidelity at high compression ratios [S1]. Unlike heuristic-based siblings such as [Significance-Aware Pruning](9676-significance-aware-pruning.md) which rely on opacity or visibility thresholds, PUP computes a mathematically grounded uncertainty score derived from the Fisher Information matrix of the spatial parameters, enabling aggressive pruning (up to 90%) via a multi-round prune-refine pipeline [S1].
+Principled Uncertainty Pruning (PUP) is a post-hoc pruning technique that removes redundant 3D Gaussians from a pretrained 3D Gaussian Splatting (3D-GS) model by assessing their sensitivity to the reconstruction error using a Fisher Information-based approximation of the Hessian [S1]. Unlike heuristic methods or those relying on visibility scores, PUP computes a mathematically principled uncertainty score based on the spatial parameters (mean and scale) of each Gaussian, enabling the removal of up to 90% of primitives while preserving fine foreground details and achieving higher image quality metrics than alternatives like LightGaussian [S1]. It operates via a multi-round prune-refine pipeline that can be applied to any converged 3D-GS model without modifying its original training pipeline [S1].
 
 ## How it works
-**Inputs:** A converged 3D-GS model (set of Gaussians $\mathcal{G}$), training view poses $\Phi$, and ground truth images $\mathcal{I}$.
-**Outputs:** A pruned set of Gaussians $\mathcal{G}'$ and fine-tuned parameters.
+**Inputs and Outputs:**
+- **Input:** A converged 3D-GS model $\mathcal{G}$ (set of $N$ Gaussians), the set of training views $\mathcal{P}_{gt}$ with corresponding ground truth images $I_{gt}$, and target pruning percentages.
+- **Output:** A pruned set of Gaussians $\mathcal{G}'$ and a fine-tuned model.
 
 **Data Structures:**
-*   **Gaussian Parameters:** Each Gaussian $g_k$ is defined by mean $\mu_k \in \mathbb{R}^3$, scale $s_k \in \mathbb{R}^3$, rotation $q_k \in \mathbb{R}^4$, and color coefficients. PUP focuses exclusively on the spatial parameters $\theta_k = [\mu_k, s_k] \in \mathbb{R}^6$ [S1].
-*   **Fisher Matrix:** For each Gaussian, a $6 \times 6$ block-diagonal approximation of the Hessian is computed. The memory footprint scales linearly with the number of Gaussians $N$, requiring $36N$ elements (bytes if stored as floats) [S1].
+- **Gaussian Parameters:** Each Gaussian $g_k$ is defined by mean $\mu_k \in \mathbb{R}^3$, scale $s_k \in \mathbb{R}^3$ (and rotation $q_k$, color $c_k$). PUP restricts the sensitivity score to the 6 spatial parameters $\theta_k = [\mu_k, s_k]$ [S1].
+- **Fisher Matrix:** For each Gaussian, a $6 \times 6$ block-diagonal Fisher Information matrix $F_k$ is computed [S1].
+- **Pruning Score:** A scalar score $S_k = \log \det(F_k)$ for each Gaussian [S1].
 
-**Step 1: Compute the Fisher Information Score**
-The uncertainty of a Gaussian is defined as the sensitivity of the reconstruction loss to perturbations in its parameters. This is approximated by the log-determinant of the Fisher Information matrix block corresponding to that Gaussian [S1].
+**Numbered Steps:**
 
-1.  Define the L2 loss over training views:
-    $$L_2 = \frac{1}{2} \sum_{\phi \in \Phi} \|I_{\mathcal{G}}(\phi) - I_{gt}(\phi)\|_2^2$$
-    where $I_{\mathcal{G}}(\phi)$ is the rendered image at pose $\phi$ and $I_{gt}(\phi)$ is the ground truth [S1].
+1.  **Compute Reconstruction Error:** Calculate the L2 error over the input reconstruction images using the formula [S1]:
+    $$L_2 = \frac{1}{2} \sum_{\phi \in \mathcal{P}_{gt}} \|I_{\mathcal{G}}(\phi) - I_{gt}\|_2^2$$
+    where $I_{\mathcal{G}}(\phi)$ is the rendered image for pose $\phi$ using the current Gaussian set $\mathcal{G}$.
 
-2.  Compute the Hessian of the loss. The full Hessian is:
-    $$\nabla_G^2 L_2 = \sum_{\phi \in \Phi} \nabla_G I_G(\phi) \nabla_G I_G(\phi)^T + (I_G(\phi) - I_{gt}) \nabla_G^2 I_G(\phi)$$
-    On a converged model, the residual term $(I_G(\phi) - I_{gt})$ approaches zero, causing the second-order term to vanish. The Hessian simplifies to the Fisher Information matrix approximation:
-    $$\nabla_G^2 L_2 \approx \sum_{\phi \in \Phi} \nabla_G I_G(\phi) \nabla_G I_G(\phi)^T$$
-    [S1].
+2.  **Approximate Hessian via Fisher Information:** Direct computation of the full Hessian $\nabla_G^2 L_2$ is intractable. The Hessian is approximated by the Fisher Information matrix. The exact Hessian of the L2 loss is [S1]:
+    $$\nabla_G^2 L_2 = \sum_{\phi \in \mathcal{P}_{gt}} \nabla_G I_G(\phi) \nabla_G I_G(\phi)^T + (I_G(\phi) - I_{gt}) \nabla_G^2 I_G(\phi)$$
+    On a converged model, the residual term $\|I_G - I_{gt}\|$ approaches zero, causing the second-order term to vanish. The simplified Fisher approximation is [S1]:
+    $$\nabla_G^2 L_2 \approx \sum_{\phi \in \mathcal{P}_{gt}} \nabla_G I_G(\phi) \nabla_G I_G(\phi)^T$$
+    This is identified as the Fisher Information matrix $I(\theta)$ [S1].
 
-3.  Restrict the gradient $\nabla_G$ to the spatial parameters $\theta_k = [\mu_k, s_k]$ for each Gaussian $k$. This yields a $6 \times 6$ matrix $F_k$ per Gaussian [S1].
-    *   *Note:* Including rotation parameters expands this to $10 \times 10$ (2.78× memory increase) and degrades quality. Including RGB color parameters correlates with visibility rather than error sensitivity, also degrading quality [S1].
+3.  **Compute Block-Wise Fisher Matrix:** To handle memory constraints and focus on geometric uncertainty, compute the Fisher matrix for each Gaussian $g_k$ using only its mean and scale parameters (6 parameters). This results in a $6 \times 6$ matrix $F_k$ [S1].
+    -   **Note:** Including rotation parameters expands this to $10 \times 10$, increasing memory by $2.78\times$ and causing out-of-memory errors on 16GB GPUs [S1]. Including RGB color parameters degrades quality as it correlates with visibility rather than error sensitivity [S1].
 
-4.  Compute the pruning score $S_k$ for each Gaussian as the log-determinant of its Fisher block:
+4.  **Calculate Sensitivity Score:** Compute the pruning score $S_k$ for each Gaussian as the log determinant of its block-diagonal Fisher matrix [S1]:
     $$S_k = \log \det(F_k)$$
-    This score represents the entropy of the second-order Laplace approximation of the posterior distribution for that Gaussian [S1]. Lower scores indicate higher uncertainty (less sensitivity to error), making the Gaussian a candidate for removal [S1].
+    This score represents the entropy of a second-order Laplace approximation of the posterior distribution over that Gaussian's parameters [S1]. Higher entropy indicates higher uncertainty (less sensitivity), making the Gaussian a candidate for removal.
 
-5.  **Patch-based Approximation:** To reduce computational cost, the gradients are computed over image patches rather than full images. The default patch size is $4 \times 4$ pixels, though $2 \times 2$ and $8 \times 8$ are also viable [S1].
+5.  **Compute Score over Image Patches:** The sensitivity score is computed over image patches of size $P \times P$ (default $4 \times 4$ pixels) to determine local relevance [S1].
 
-**Step 2: Multi-Round Prune-Refine Pipeline**
-PUP applies pruning and fine-tuning iteratively to recover quality lost during aggressive removal [S1].
-
-1.  **Round 1:**
-    *   Calculate scores $S_k$ for all Gaussians.
-    *   Prune the bottom 80% of Gaussians (those with lowest scores).
-    *   Fine-tune the remaining Gaussians for 5,000 iterations using standard 3D-GS optimization [S1].
-
-2.  **Round 2:**
-    *   Recalculate scores $S_k$ on the fine-tuned model.
-    *   Prune the bottom 50% of the *remaining* Gaussians.
-    *   Fine-tune for another 5,000 iterations [S1].
-
-This two-round process achieves ~90% total pruning. One-shot pruning of 90% yields inferior metrics compared to this two-round approach [S1].
+6.  **Prune and Refine (Multi-Round Pipeline):** Execute a multi-round prune-refine process [S1]:
+    -   **Round 1:** Prune the top $80\%$ of Gaussians with the lowest sensitivity scores (highest uncertainty). Fine-tune the remaining $20\%$ for 5,000 iterations to recover quality [S1].
+    -   **Round 2:** Prune an additional $50\%$ of the *remaining* Gaussians. Fine-tune for another 5,000 iterations [S1].
+    -   This two-round approach (totaling 90% pruning) outperforms one-shot 90% pruning with equivalent total fine-tuning steps [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def principled_uncertainty_pruning(gaussians, poses, ground_truth_images, 
-                                   patch_size=4, round1_prune_pct=0.8, 
-                                   round2_prune_pct=0.5, fine_tune_iters=5000):
+def principled_uncertainty_pruning(gaussians, training_views, target_prune_ratio=0.9):
     """
-    gaussians: List of Gaussian objects with attributes .mu, .scale, .render()
-    poses: List of camera poses
-    ground_truth_images: List of ground truth images corresponding to poses
+    Prunes 3D Gaussians using Fisher Information-based uncertainty.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes .mean, .scale, .render()
+        training_views: List of (pose, ground_truth_image) tuples
+        target_prune_ratio: Total percentage of Gaussians to remove (default 0.9)
+        
+    Returns:
+        pruned_gaussians: List of remaining Gaussian objects
     """
     
-    # Helper to compute Fisher score for a single Gaussian
-    def compute_fisher_score(g, poses, gt_images, patch_size):
-        # Initialize 6x6 matrix for spatial params (mu: 3, scale: 3)
-        fisher_matrix = zeros((6, 6))
-        
-        for pose, gt_img in zip(poses, gt_images):
-            # Render image patch centered on Gaussian projection
-            # Note: In implementation, gradients are w.r.t mu and scale
-            # This requires differentiable rasterization
-            rendered_patch = render_patch(g, pose, patch_size)
-            
-            # Compute gradient of L2 loss w.r.t spatial params
-            # dL/dtheta = (rendered_patch - gt_patch) * d(rendered)/dtheta
-            residual = rendered_patch - gt_patch
-            grad_mu, grad_scale = compute_gradients(g, pose, residual)
-            
-            # Flatten gradient to 6-vector
-            grad_vec = concat(grad_mu, grad_scale)
-            
-            # Outer product for Fisher approximation
-            fisher_matrix += outer_product(grad_vec, grad_vec)
-            
-        # Log determinant is the pruning score
-        # Lower determinant = higher uncertainty = more likely to prune
-        return log_det(fisher_matrix)
-
-    # --- Round 1 ---
-    scores_r1 = []
+    # Step 1 & 2: Compute Fisher Information Matrix for each Gaussian
+    # We approximate the Hessian of the L2 loss using the Fisher approximation
+    # F_k = sum_{phi} grad_I * grad_I^T for spatial params (mean, scale)
+    
+    fisher_matrices = []
     for g in gaussians:
-        score = compute_fisher_score(g, poses, ground_truth_images, patch_size)
-        scores_r1.append(score)
+        # Initialize 6x6 matrix for mean (3) and scale (3)
+        F_k = zeros((6, 6))
         
-    # Sort and identify indices to prune (lowest scores)
-    sorted_indices = argsort(scores_r1)
-    prune_count_r1 = int(len(gaussians) * round1_prune_pct)
-    indices_to_prune_r1 = sorted_indices[:prune_count_r1]
+        for pose, gt_img in training_views:
+            # Render current Gaussian to get image I_G
+            # Note: In practice, this requires differentiable rendering
+            # to get gradients w.r.t Gaussian parameters.
+            img = g.render(pose)
+            
+            # Compute gradient of rendered image w.r.t Gaussian spatial params
+            # grad_I is a vector of size (H*W) for the image, but we need
+            # the Jacobian w.r.t the 6 params.
+            # In auto-diff frameworks, this is obtained via backprop.
+            grad_I = compute_gradient(img, g.spatial_params) # Shape: (6, H*W)
+            
+            # Outer product: grad_I^T * grad_I gives (H*W, H*W)
+            # We need the contribution to the 6x6 Fisher matrix.
+            # F_k += J^T J where J is (H*W, 6)
+            # J is grad_I transposed if grad_I is (6, H*W)
+            J = grad_I.T # Shape: (H*W, 6)
+            F_k += J.T @ J
+            
+        fisher_matrices.append(F_k)
+        
+    # Step 3 & 4: Compute Pruning Scores
+    scores = []
+    for F_k in fisher_matrices:
+        # Log determinant of the Fisher matrix
+        # If det is <= 0, handle singularity (e.g., add small epsilon)
+        det_F = determinant(F_k)
+        if det_F <= 0:
+            det_F = 1e-9 # [G] Guard against singular matrices
+        score = log(det_F)
+        scores.append(score)
+        
+    # Step 5: Sort Gaussians by score (ascending: lowest sensitivity first)
+    indexed_scores = list(enumerate(scores))
+    indexed_scores.sort(key=lambda x: x[1])
+    
+    # Step 6: Multi-Round Pruning
+    # Round 1: Prune 80%
+    num_to_prune_round1 = int(len(gaussians) * 0.8)
+    pruned_indices_round1 = [idx for idx, _ in indexed_scores[:num_to_prune_round1]]
     
     # Remove pruned Gaussians
-    active_gaussians = [g for i, g in enumerate(gaussians) if i not in indices_to_prune_r1]
+    remaining_indices = [i for i in range(len(gaussians)) if i not in pruned_indices_round1]
+    gaussians = [gaussians[i] for i in remaining_indices]
     
-    # Fine-tune remaining Gaussians
-    active_gaussians = fine_tune(active_gaussians, poses, ground_truth_images, fine_tune_iters)
+    # Fine-tune remaining Gaussians for 5000 iterations
+    # [G] This step requires an optimizer (e.g., Adam) and differentiable rendering
+    # to update the parameters of the remaining Gaussians to minimize L2 loss.
+    fine_tune(gaussians, training_views, iterations=5000)
     
-    # --- Round 2 ---
-    scores_r2 = []
-    for g in active_gaussians:
-        score = compute_fisher_score(g, poses, ground_truth_images, patch_size)
-        scores_r2.append(score)
+    # Round 2: Prune 50% of remaining
+    num_to_prune_round2 = int(len(gaussians) * 0.5)
+    
+    # Recompute scores for remaining Gaussians (optional but recommended for accuracy)
+    # Or use updated scores from fine-tuning if available.
+    # For simplicity, we assume we re-evaluate or use the last computed scores.
+    # Here we assume we re-sort the current list based on their scores.
+    # Note: The scores list needs to be updated to match the new gaussians list.
+    # In a real implementation, you would recompute Fisher matrices for the remaining set.
+    
+    # Re-compute Fisher matrices for remaining Gaussians
+    fisher_matrices_remaining = []
+    for g in gaussians:
+        F_k = zeros((6, 6))
+        for pose, gt_img in training_views:
+            img = g.render(pose)
+            grad_I = compute_gradient(img, g.spatial_params)
+            J = grad_I.T
+            F_k += J.T @ J
+        fisher_matrices_remaining.append(F_k)
         
-    sorted_indices_r2 = argsort(scores_r2)
-    prune_count_r2 = int(len(active_gaussians) * round2_prune_pct)
-    indices_to_prune_r2 = sorted_indices_r2[:prune_count_r2]
+    scores_remaining = [log(max(determinant(F), 1e-9)) for F in fisher_matrices_remaining]
+    indexed_scores_remaining = list(enumerate(scores_remaining))
+    indexed_scores_remaining.sort(key=lambda x: x[1])
     
-    # Remove pruned Gaussians
-    final_gaussians = [g for i, g in enumerate(active_gaussians) if i not in indices_to_prune_r2]
+    pruned_indices_round2 = [idx for idx, _ in indexed_scores_remaining[:num_to_prune_round2]]
     
-    # Fine-tune again
-    final_gaussians = fine_tune(final_gaussians, poses, ground_truth_images, fine_tune_iters)
+    # Remove second round of pruned Gaussians
+    final_indices = [i for i in range(len(gaussians)) if i not in pruned_indices_round2]
+    pruned_gaussians = [gaussians[i] for i in final_indices]
     
-    return final_gaussians
+    # Fine-tune again for 5000 iterations
+    fine_tune(pruned_gaussians, training_views, iterations=5000)
+    
+    return pruned_gaussians
 ```
 
+**Parameters:**
+- **Pruning Percentages:** 80% in Round 1, 50% in Round 2 (total 90% pruning) [S1].
+- **Fine-tuning Iterations:** 5,000 steps per round (10,000 total) [S1].
+- **Patch Size:** $4 \times 4$ pixels (default), with $2 \times 2$ and $8 \times 8$ also tested [S1].
+- **Parameters Included:** Only mean ($\mu$) and scale ($s$) parameters (6 parameters) [S1].
+
 **Edge Cases and Pitfalls:**
-*   **Convergence Requirement:** The Fisher approximation assumes a small L1 residual. Pruning before the model has converged degrades the approximation and final quality [S1].
-*   **Memory Constraints:** Including rotation parameters increases the Fisher matrix to $10 \times 10$, increasing memory usage by 2.78×. This can cause out-of-memory errors on 16GB GPUs (e.g., RTX A4000) [S1].
-*   **Parameter Selection:** Using RGB color parameters for the score degrades quality because it measures visibility rather than reconstruction error sensitivity [S1].
+- **Convergence Requirement:** The method assumes the scene is fully converged. The Fisher approximation relies on a small L1 residual; pruning before convergence degrades the approximation [S1].
+- **Memory Constraints:** Including rotation parameters increases the Fisher matrix to $10 \times 10$, requiring $2.78\times$ more memory, which causes OOM on 16GB GPUs (e.g., RTX A4000) [S1].
+- **Color Parameters:** Using RGB color parameters for the sensitivity score degrades image quality as it correlates with visibility rather than reconstruction error sensitivity [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** The dominant cost is computing the Fisher matrices. For $N$ Gaussians, memory scales as $O(N)$ (specifically $36N$ bytes) [S1]. Gradient computation per Gaussian depends on the number of training views and patch size.
-*   **Performance:** On the Deep Blending playroom scene, PUP reduces Gaussians from 2.65M to 0.265M (90% pruning), increasing rendering speed from 76.65 FPS to 318.06 FPS (4.15×) on an RTX A4000 [S1]. Across Mip-NeRF 360, Tanks & Temples, and Deep Blending, it achieves an average 3.56× speedup with higher PSNR/SSIM than LightGaussian [S1].
-*   **Strengths:** Preserves fine foreground details better than heuristic methods; enables extreme compression (90%) without catastrophic quality loss; post-hoc (does not require modifying training code).
-*   **Limitations:** Requires a fully converged pretrained model; memory intensive for large scenes if high-precision gradients are used; sensitive to the choice of patch size and pruning percentages [S1].
+- **Time Complexity:** The dominant cost is computing the Fisher matrices, which scales linearly with the number of Gaussians $N$ and the number of training views. The memory requirement is proportional to $N \times 36$ bytes (for the $6 \times 6$ matrix per Gaussian) [S1].
+- **Measured Performance:** On the Deep Blending playroom scene, PUP 3D-GS prunes from 2.65M to 0.265M Gaussians, accelerating rendering from 76.65 FPS to 318.06 FPS (4.15x speed-up) [S1]. On average across Mip-NeRF 360, Tanks & Temples, and Deep Blending, it increases rendering speed by 3.56x after 90% pruning [S1].
+- **Scaling:** The method is effective for high compression ratios (up to 90% pruning), significantly outperforming one-shot pruning [S1].
+- **Strengths:** Preserves fine details and foreground information better than LightGaussian; achieves higher PSNR, SSIM, and lower LPIPS than LightGaussian and other pruning methods (Compact-3DGS, Mini-Splatting) at similar compression levels [S1].
+- **Limitations:** Requires a converged model; memory usage scales with $N$; requires multiple rounds of fine-tuning which adds to the total pipeline time [S1].
 
 ## Background
-Principled Uncertainty Pruning was introduced by Alex Hanson, Allen Tu, Vasu Singla, Mayuka Jayawardhana, Matthias Zwicker, and Tom Goldstein from the University of Maryland, College Park [S1]. It was published in CVPR 2025 [S1]. The method builds on the Bayesian interpretation of the Hessian as the Fisher Information matrix, extending prior work like FisherRF (which used color parameters for active view selection) to spatial parameters for pruning [S1]. It addresses the high storage and memory costs of 3D-GS, which can consist of millions of Gaussians [S1].
+Principled Uncertainty Pruning (PUP) was introduced by Alex Hanson, Allen Tu, Vasu Singla, Mayuka Jayawardhana, Matthias Zwicker, and Tom Goldstein from the University of Maryland, College Park [S1]. It was published in 2025 at the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) [S1]. The method addresses the high storage and memory requirements of 3D Gaussian Splatting, which can consist of millions of Gaussians, limiting its viability on resource-constrained devices [S1]. It builds on the concept of using Fisher Information for uncertainty estimation in neural networks, adapting it to the specific structure of 3D-GS [S1].
 
 ## Sources
 [S1] PUP 3D-GS: Principled Uncertainty Pruning for 3D Gaussian Splatting, https://doi.org/10.1109/CVPR52734.2025.00558, fetched 2026-10-29

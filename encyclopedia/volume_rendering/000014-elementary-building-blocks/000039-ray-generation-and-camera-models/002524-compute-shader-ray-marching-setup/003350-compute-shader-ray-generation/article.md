@@ -39,8 +39,8 @@ This method generates initial camera rays for a frame by launching a compute sha
 
 **Edge Cases and Pitfalls:**
 *   **Division by Zero:** If $W$ or $H$ is zero, normalization fails [G]. Ensure $W, H > 0$.
-*   **Precision:** Using integer arithmetic for thread ID calculation is safe. Floating point precision for $u, v$ depends on the window size. For very large resolutions, $u^2 + v^2 + f^2$ may suffer from precision loss if $f$ is very small or very large [G].
-*   **Boundary Pixels:** The mapping ensures all pixels from $(0,0)$ to $(W-1, H-1)$ are covered. The window is divided into $8 \times 8$ squares, and the dispatch arguments are the number of squares in the X and Y directions [S1, unofficial].
+*   **Precision:** Using integer arithmetic for thread ID calculation is safe. Floating point precision for $u, v$ depends on the window size [G]. For very large resolutions, $u^2 + v^2 + f^2$ may suffer from precision loss if $f$ is very small or very large [G].
+*   **Boundary Pixels:** The mapping ensures all pixels from $(0,0)$ to $(W-1, H-1)$ are covered [S1, unofficial][S2]. The window is divided into $8 \times 8$ squares, and the dispatch arguments are the number of squares in the X and Y directions [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -111,15 +111,16 @@ def generate_ray(group_id_x, group_id_y, group_thread_id_x, group_thread_id_y, W
 Generates view rays for each framebuffer pixel by bilinearly interpolating four pre-computed world-space corner rays of the camera's view frustum, then traces them through a 3D voxel or Sparse Voxel Octree (SVO) texture to produce a color image. It differs from standard perspective projection by avoiding per-pixel matrix-vector multiplication for ray direction generation, instead relying on spatial interpolation of boundary vectors. Choose this method when minimizing arithmetic intensity per pixel is critical and the camera is static or moves slowly.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per pixel. The computation involves a constant number of arithmetic operations (normalization, trigonometry, normalization) [G].
-*   **Memory Complexity:** $O(1)$ per thread. No additional memory is allocated for ray generation [G].
+*   **Time Complexity:** $O(1)$ per pixel [G]. The computation involves a constant number of arithmetic operations (normalization, trigonometry, normalization) [G].
+*   **Memory Complexity:** $O(1)$ per thread [G]. No additional memory is allocated for ray generation [G].
 *   **Performance:** Highly parallelizable. The $8 \times 8$ thread block size aligns with typical GPU warp/wavefront sizes (32 or 64 threads), ensuring efficient SIMD execution [S2].
 *   **Strengths:** Simple, deterministic, and low overhead. Suitable for real-time applications where ray generation is a small fraction of the total rendering cost [G].
-*   **Limitations:** Assumes a pinhole camera model. Does not account for lens effects (bokeh, distortion) without extension. Requires explicit rotation handling for non-axis-aligned cameras [S2].
+*   **Limitations:** Assumes a pinhole camera model. Does not account for lens effects (bokeh, distortion) without extension [G]. Requires explicit rotation handling for non-axis-aligned cameras [S2].
 
 ## Background
-This method originates from implementations of GPU-based raycasting and raymarching, specifically those utilizing compute shaders for general-purpose rendering tasks. It is detailed in works on CUDA-based distance field raymarching [S2] and voxel raycasting implementations [S1, unofficial][S2]. The approach of mapping thread IDs to pixel coordinates and generating rays via a pinhole model is a standard technique in GPU ray tracing pipelines [G].
+This method originates from implementations of GPU-based raycasting and raymarching, specifically those utilizing compute shaders for general-purpose rendering tasks [G]. It is detailed in works on CUDA-based distance field raymarching [S2] and voxel raycasting implementations [S1, unofficial][S2]. The approach of mapping thread IDs to pixel coordinates and generating rays via a pinhole model is a standard technique in GPU ray tracing pipelines [G].
 
 ## Sources
 [S1] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)
 [S2] Raymarching Distance Fields with CUDA, https://doi.org/10.3390/electronics10222730, fetched 2026-10-26
+[S3] (PDF) Raymarching Distance Fields with CUDA - ResearchGate, https://www.researchgate.net/publication/356081826_Raymarching_Distance_Fields_with_CUDA, fetched 2026-10-27 (unofficial)

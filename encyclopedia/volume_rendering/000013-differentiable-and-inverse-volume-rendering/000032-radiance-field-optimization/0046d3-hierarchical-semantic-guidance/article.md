@@ -1,0 +1,134 @@
+# Hierarchical Semantic Guidance
+
+
+## Overview
+Hierarchical Semantic Guidance (HSG) is a supervision method for radiance-field optimization that enforces semantic consistency across views by aligning coarse-to-fine semantic content with coarse-to-fine scene representations [S1, unofficial]. It solves the problem where standard CLIP-based semantic loss fails during early training because rendered images are blurred (low-frequency) while ground-truth images are high-resolution, causing a sharp drop in cosine similarity [S1, unofficial]. Unlike direct depth supervision or standard photometric loss, HSG dynamically adjusts the spatial resolution of the semantic comparison to match the learning stage of the neural field [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A randomly selected known camera pose, the current state of the radiance field model (e.g., NeRF MLPs), and the ground-truth image $C_i$ corresponding to that pose.
+- **Output:** A scalar semantic loss value used to update the radiance field parameters.
+
+**Data Structures:**
+- **Image:** $C \in \mathbb{R}^{H \times W \times 3}$, where $H$ and $W$ are height and width.
+- **Pixel Set:** $P(s_i)$, a set of 2D pixel coordinates $(u, v)$ sampled from the image plane.
+- **Feature Vector:** $\phi \in \mathbb{R}^D$, the output of the CLIP image encoder.
+
+**Parameters:**
+- $s_{max}$: Maximum sampling stride. Typical value: $0.1 \cdot \min(H, W)$ [S1, unofficial].
+- $N_{hsg}$: Number of iterations until full pixels are sampled. Typical value: 50% of total training iterations [S1, unofficial].
+- $i$: Current training iteration index.
+
+**Steps:**
+1. **Random Pose Selection:** Select a known camera pose from the training set.
+2. **Render Image:** Render an image $\hat{C}_{sem}$ from the selected pose using the current radiance field model.
+3. **Compute Stride:** Calculate the current sampling stride $s_i$ based on the iteration count $i$:
+   $$ s_i = \max\left(\left\lceil s_{max} \cdot \frac{1 + \cos((i/N_{hsg})\pi)}{2} \right\rceil, 1\right) $$
+   where $\lceil \cdot \rceil$ is the ceiling operation [S1, unofficial].
+4. **Sample Pixels:** Define the set of pixel locations $P(s_i)$ to sample:
+   $$ P(s_i) = \{(u, v) \mid u \in [0, H, \text{stride} = s_i], v \in [0, W, \text{stride} = s_i]\} $$
+   This creates a grid of pixels with spacing $s_i$ [S1, unofficial].
+5. **Encode Features:** Encode the rendered image $\hat{C}_{sem}$ and the ground-truth image $C_i$ using the CLIP image encoder $f_{clip}$ to obtain feature vectors $\phi_{sem}$ and $\phi_i$:
+   $$ \phi_{sem} = f_{clip}(\hat{C}_{sem}), \quad \phi_i = f_{clip}(C_i) $$
+   Note: The CLIP encoder typically operates on the full image, but the semantic guidance relies on the *coarse-to-fine* nature of the training. The text implies that by starting with sparse sampling (large $s_i$), the effective information density matches the low-frequency nature of early-stage NeRF renders [S1, unofficial]. However, the formula (9) in the source applies $f_{clip}$ to the full images $\hat{C}_{sem}$ and $C_i$. The "coarse-to-fine" aspect is achieved by the *progressive reduction* of $s_i$ over time, which effectively changes the granularity of the semantic supervision signal relative to the scene representation's detail level [S1, unofficial].
+6. **Compute Loss:** Compute the cosine similarity between $\phi_{sem}$ and $\phi_i$. The semantic loss is typically defined as $1 - \text{cosine\_similarity}(\phi_{sem}, \phi_i)$ or similar, minimizing the distance between feature vectors [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+from torchvision import transforms
+# Assume f_clip is a pre-loaded CLIP image encoder
+# Assume render_image(pose, model) returns an image tensor
+# Assume get_cosine_similarity(v1, v2) returns the cosine similarity
+
+def hierarchical_semantic_guidance_loss(model, pose, ground_truth_image, iteration, total_iterations_hsg, max_stride, height, width):
+    """
+    Computes the Hierarchical Semantic Guidance loss.
+    
+    Args:
+        model: The radiance field model (e.g., NeRF).
+        pose: Camera pose for rendering.
+        ground_truth_image: Tensor of shape (H, W, 3) or (3, H, W).
+        iteration: Current training iteration index (0-based or 1-based, consistent with source).
+        total_iterations_hsg: N_hsg, iterations until full sampling.
+        max_stride: s_max, maximum sampling stride.
+        height: H, image height.
+        width: W, image width.
+        
+    Returns:
+        loss: Scalar tensor representing the semantic guidance loss.
+    """
+    # Step 1: Render the image from the selected pose
+    rendered_image = render_image(pose, model) # Shape: (H, W, 3)
+    
+    # Step 2: Compute the current sampling stride s_i
+    # Formula: s_i = max(ceil(s_max * (1 + cos((i/N_hsg)*pi)) / 2), 1)
+    # Note: Source uses i/N_hsg. If iteration is 0-based, ensure consistency.
+    # Assuming iteration starts at 1 for the formula context or normalized 0-1.
+    # Let's assume iteration is 1-based for the cosine calculation to match "i/N_hsg"
+    # If iteration is 0-based, use (iteration + 1).
+    # The source says "i/N_hsg", and s_i decreases from s_max to 1.
+    # At i=0, cos(0)=1 -> s_i = s_max. At i=N_hsg, cos(pi)=-1 -> s_i = 1.
+    # So i should range from 0 to N_hsg.
+    
+    ratio = iteration / total_iterations_hsg
+    cosine_val = math.cos(ratio * math.pi)
+    stride_float = max_stride * (1 + cosine_val) / 2
+    s_i = max(math.ceil(stride_float), 1)
+    
+    # Step 3: Sample pixels (conceptually, though CLIP takes full image)
+    # The source defines P(s_i) but applies CLIP to the full images.
+    # The "coarse-to-fine" is achieved by the *progressive* nature of s_i
+    # affecting the *effective* supervision granularity or matching the 
+    # blurred nature of early renders.
+    # However, strictly following the source, we encode the full images.
+    
+    # Preprocess images for CLIP (resize to 224x224, normalize, etc.)
+    # This is implementation detail [G]
+    rendered_clip_input = preprocess_for_clip(rendered_image)
+    gt_clip_input = preprocess_for_clip(ground_truth_image)
+    
+    # Step 4: Encode features
+    phi_sem = f_clip(rendered_clip_input)
+    phi_i = f_clip(gt_clip_input)
+    
+    # Step 5: Compute cosine similarity
+    # Cosine similarity = (A . B) / (||A|| * ||B||)
+    similarity = torch.cosine_similarity(phi_sem, phi_i, dim=0)
+    
+    # Loss is typically 1 - similarity to minimize distance
+    loss = 1.0 - similarity
+    
+    return loss
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The cosine similarity decreases sharply with down-sampling rate in complex real-world scenes [S1, unofficial].
+- **Boundaries:** The stride $s_i$ is clamped to a minimum of 1 to ensure full pixel sampling eventually [S1, unofficial].
+- **Degenerate Input:** If the rendered image is completely black or white, CLIP features may be uninformative [G].
+
+## Subtopics
+
+### Hierarchical Geometric Guidance (HGG)
+Supervises geometry using local-to-global sampling to mitigate depth bias. [Link](1414-hierarchical-grid-optimization.md) (Note: HGG is distinct from HSG but part of the same HG3-NeRF framework).
+
+### Hierarchical Photometric Guidance (HPG)
+Supervises appearance using coarse and fine models. [Link](44-radiance-field-optimization.md)
+
+## Operating characteristics
+- **Time Complexity:** Depends on the CLIP encoder inference time, which is significant. The sampling step is negligible.
+- **Memory Complexity:** Low, as it only stores feature vectors and images.
+- **Performance:** Improves novel view synthesis quality, especially for sparse view inputs, by providing robust semantic constraints [S1, unofficial].
+- **Strengths:** Handles the mismatch between low-frequency early-stage NeRF renders and high-resolution ground truth.
+- **Limitations:** CLIP semantic consistency is limited for multi-resolution images; performance may degrade in complex scenes if the coarse-to-fine alignment is not perfectly matched [S1, unofficial].
+- **When to use:** Sparse view reconstruction where semantic consistency is crucial.
+- **When not to use:** Dense view settings where standard photometric loss is sufficient, or when computational budget for CLIP is limited.
+
+## Background
+Hierarchical Semantic Guidance was proposed in the HG3-NeRF paper, which introduces hierarchical geometric, semantic, and photometric guidance for neural radiance fields from sparse view inputs [S1, unofficial]. It builds on the observation that NeRF learns low-frequency information first, resulting in blurred early renders that do not match high-resolution ground truth in feature space [S1, unofficial].
+
+## Sources
+[S1] HG3-NeRF: Hierarchical Geometric, Semantic, and Photometric Guided Neural Radiance Fields for Sparse View Inputs, https://doi.org/10.48550/arXiv.2401.11711, fetched 2026-10-29 (unofficial)

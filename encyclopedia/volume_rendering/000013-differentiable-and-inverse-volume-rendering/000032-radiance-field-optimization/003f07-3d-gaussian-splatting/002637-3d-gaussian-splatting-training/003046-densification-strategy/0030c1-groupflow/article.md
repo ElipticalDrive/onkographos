@@ -1,183 +1,166 @@
 # GroupFlow
 
-Also called: Groupwise SE(3) Motion Distillation, Motion Grouping
+Also called: Groupwise SE(3) Motion Distillation, GroupFlow Motion Grouping
 
 ## Overview
-GroupFlow is a motion compression technique for dynamic 3D Gaussian Splatting that distills per-Gaussian neural deformation fields into shared SE(3) transformations for groupwise motion [S1, unofficial]. It solves the computational bottleneck of evaluating individual neural networks for every Gaussian at every timestep by clustering Gaussians into groups and assigning each group a single learned rigid-body trajectory [S1, unofficial]. This reduces the number of transformations per frame from $N$ (per Gaussian) to $J$ (per group), accelerating rendering by up to 13.71× and shortening training time by 2.53× compared to baseline deformable methods [S1, unofficial].
+GroupFlow is a motion compression technique for dynamic 3D Gaussian Splatting that distills per-Gaussian neural deformation fields into shared SE(3) transformations for groupwise motion [S1, unofficial]. It addresses the computational bottleneck of applying individual neural networks to every Gaussian in dynamic scenes by clustering Gaussians into groups and learning a single rigid-body trajectory per group [S1, unofficial]. Unlike methods that retain dense neural fields or use global rigid assumptions, GroupFlow captures locally coherent motion through adaptive grouping, enabling significant acceleration in both training and rendering while preserving temporal coherence [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A dense set of dynamic 3D Gaussians $\mathcal{G}$, where each Gaussian $i$ has a sequence of mean positions $\mathcal{M}_i = \{\mu_i^t\}_{t=0}^{F-1}$ across $F$ timesteps, derived from a pre-trained neural deformation field [S1, unofficial].
-*   **Output:** A set of $J$ control trajectories $\{h_j^t\}_{j=1}^J$ and associated SE(3) parameters $\{R_j^t, T_j^t\}$ that define the motion for each group [S1, unofficial].
+*   **Input:** A set of $N$ dynamic 3D Gaussians $\mathcal{G}$, where each Gaussian $i$ has a sequence of mean positions $\mathcal{M}_i = \{\mu_i^t\}_{t=0}^{F-1}$ across $F$ timesteps, typically sampled from training data or predicted by a base deformation network.
+*   **Output:** A set of $J$ control trajectories $\{h_j^t\}_{j=0}^{J-1}$, each defined by an initial position $h_j^0$, a rotation sequence $R_j^t$, and a translation sequence $T_j^t$. Each Gaussian $i$ is assigned to a group $j$ via a similarity score $S_{i,j}$.
 
 **Data Structures:**
-*   **Gaussian Sequence:** For each Gaussian $i$, store the mean positions $\mu_i^t \in \mathbb{R}^3$ for $t=0 \dots F-1$.
-*   **Control Trajectories:** $J$ control points $h_j^0 \in \mathbb{R}^3$ initialized at $t=0$.
-*   **Group Parameters:** For each group $j$ and timestep $t$, store rotation matrix $R_j^t \in \mathbb{R}^{3 \times 3}$ and translation vector $T_j^t \in \mathbb{R}^3$.
+*   **Gaussian Means:** A tensor or list of shape $(N, F, 3)$ storing $\mu_i^t$.
+*   **Control Trajectories:** A list of $J$ objects, each containing:
+    *   $h_j^0 \in \mathbb{R}^3$: Initial position of the control point.
+    *   $R_j^t \in SO(3)$: Rotation matrix at timestep $t$.
+    *   $T_j^t \in \mathbb{R}^3$: Translation vector at timestep $t$.
+*   **Group Assignments:** A vector of length $N$ storing the group index $j$ for each Gaussian.
+
+**Parameters:**
+*   $J$: Number of control trajectories (groups). Not given in the sources.
+*   $F$: Number of timesteps used for trajectory analysis. Not given in the sources.
+*   $\lambda_r$: Weighting factor for the trajectory similarity score. Not given in the sources.
 
 **Algorithm Steps:**
 
-1.  **Initialization:** Initialize $J$ control trajectories $\{h_j^t\}$ by performing Farthest Point Sampling (FPS) on the initial mean positions $\{\mu_i^0\}_{i=1}^N$ at $t=0$ [S1, unofficial].
-2.  **Assignment:** Assign each Gaussian $i$ to the group $j$ that minimizes the trajectory similarity score $S_{i,j}$ [S1, unofficial].
-3.  **Optimization:** Jointly optimize the shared flow parameters $\{h_j^0, R_j^t, T_j^t\}$ with the scene representation to minimize reconstruction error [S1, unofficial].
+1.  **Initialize Control Trajectories:**
+    Select $J$ initial control points $\{h_j^0\}_{j=0}^{J-1}$ from the set of Gaussian means at $t=0$ using Farthest Point Sampling (FPS) to ensure spatial diversity [S1, unofficial].
 
-**Formulas:**
+2.  **Compute Trajectory Similarity:**
+    For each Gaussian $i$ and each control trajectory $j$, compute the similarity score $S_{i,j}$ based on the deviation of the Gaussian's mean trajectory from the control trajectory's path [S1, unofficial]:
+    $$
+    S_{i,j} = \lambda_r \, \mathrm{std}_t(\| \mu_i^t - h_j^t \|) + (1-\lambda_r) \, \mathrm{mean}_t(\| \mu_i^t - h_j^t \|)
+    $$
+    where:
+    *   $\mu_i^t$ is the mean position of Gaussian $i$ at time $t$.
+    *   $h_j^t$ is the position of control trajectory $j$ at time $t$. Note: Initially, $h_j^t$ may be approximated or learned; in the context of assignment, $h_j^t$ represents the expected position of the control trajectory at time $t$. If $h_j^t$ is not yet defined, it is often initialized as $\mu_{c_j}^t$ where $c_j$ is the Gaussian closest to $h_j^0$ [S1, unofficial].
+    *   $\mathrm{std}_t$ and $\mathrm{mean}_t$ compute the standard deviation and mean over the time dimension $t=0 \dots F-1$.
+    *   $\| \cdot \|$ is the Euclidean norm.
 
-The trajectory similarity score $S_{i,j}$ determines the assignment of Gaussian $i$ to control trajectory $j$:
-$$
-S_{i,j} = \lambda_r \, \mathrm{std}_t(\| \mu_i^t - h_j^t \|) + (1-\lambda_r) \, \mathrm{mean}_t(\| \mu_i^t - h_j^t \|)
-$$
-Where:
-*   $S_{i,j}$ is the similarity score between Gaussian $i$ and control trajectory $j$.
-*   $\lambda_r$ is a weighting factor balancing stability and accuracy.
-*   $\mathrm{std}_t(\cdot)$ and $\mathrm{mean}_t(\cdot)$ compute the standard deviation and mean over timesteps $t=0 \dots F-1$.
-*   $\mu_i^t$ is the mean position of Gaussian $i$ at time $t$.
-*   $h_j^t$ is the position of control trajectory $j$ at time $t$.
+3.  **Assign Gaussians to Groups:**
+    Assign each Gaussian $i$ to the group $j$ that minimizes the similarity score $S_{i,j}$:
+    $$
+    j^* = \arg\min_j S_{i,j}
+    $$
+    Let $\mathcal{M}^j$ be the set of means for all Gaussians assigned to group $j$.
 
-The predicted mean position $\mu_i^t$ for a Gaussian $i$ belonging to group $j$ is calculated using the learned SE(3) transformation:
-$$
-\mu_i^t = R_j^t (\mu_i^0 - h_j^0) + h_j^0 + T_j^t
-$$
-Where:
-*   $\mu_i^t$ is the predicted mean position of Gaussian $i$ at time $t$.
-*   $R_j^t$ is the rotation matrix for group $j$ at time $t$.
-*   $T_j^t$ is the translation vector for group $j$ at time $t$.
-*   $\mu_i^0$ is the initial mean position of Gaussian $i$.
-*   $h_j^0$ is the initial position of control trajectory $j$.
+4.  **Fit Group-wise SE(3) Trajectory:**
+    For each group $j$, optimize the SE(3) parameters $\{h_j^0, R_j^t, T_j^t\}$ to best fit the means $\mu_i^t$ for all $i \in \mathcal{M}^j$. The deformation model is:
+    $$
+    \mu_i^t = R_j^t (\mu_i^0 - h_j^0) + h_j^0 + T_j^t
+    $$
+    This equation predicts the position of Gaussian $i$ at time $t$ by applying a rotation $R_j^t$ and translation $T_j^t$ relative to the control point $h_j^0$ [S1, unofficial]. The parameters are optimized jointly with the scene representation, minimizing the reconstruction error between predicted and actual means [S1, unofficial].
+
+5.  **Rendering:**
+    During rendering, instead of querying a neural network for each Gaussian, apply the pre-computed SE(3) transformation for the assigned group $j$ to the Gaussian's base parameters [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Choice of $J$:** Too few groups lead to underfitting of complex motions; too many groups reduce compression benefits. Not given in the sources.
+*   **Initialization of $h_j^t$:** The formula for $S_{i,j}$ requires $h_j^t$. If $h_j^t$ is not explicitly stored, it must be derived from the current SE(3) parameters of group $j$ at time $t$ [S1, unofficial].
+*   **Precision:** SE(3) parameters must be maintained in a valid manifold (e.g., using quaternions for rotation) to avoid drift [G].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def groupflow_distill(gaussians, F, J, lambda_r):
+import numpy as np
+
+def groupflow_assign_and_fit(means_sequence, J, lambda_r, num_iterations):
     """
-    Distills per-Gaussian neural motion into groupwise SE(3) transformations.
-    
-    Args:
-        gaussians: List of N Gaussians, each with attribute 'means' of shape (F, 3).
-        F: Number of timesteps.
-        J: Number of groups/control trajectories.
-        lambda_r: Weighting factor for similarity score.
-        
-    Returns:
-        control_points: Array of shape (J, 3) for h_j^0.
-        rotations: Array of shape (J, F, 3, 3) for R_j^t.
-        translations: Array of shape (J, F, 3) for T_j^t.
-        assignments: Array of shape (N,) indicating group index for each Gaussian.
+    means_sequence: np.array of shape (N, F, 3)
+    J: number of groups
+    lambda_r: weighting factor
+    num_iterations: optimization steps for SE(3) parameters
     """
-    N = len(gaussians)
+    N, F, _ = means_sequence.shape
     
-    # Step 1: Initialize control trajectories via Farthest Point Sampling at t=0
-    initial_means = np.array([g.means[0] for g in gaussians]) # Shape (N, 3)
-    control_points = farthest_point_sampling(initial_means, J) # Shape (J, 3)
+    # Step 1: Initialize control trajectories using Farthest Point Sampling
+    # Simplified FPS: pick J points with max min-distance
+    control_indices = farthest_point_sampling(means_sequence[:, 0, :], J)
+    h_j0 = means_sequence[control_indices, 0, :]  # Shape (J, 3)
     
     # Initialize SE(3) parameters (identity rotation, zero translation)
-    rotations = np.zeros((J, F, 3, 3))
-    for j in range(J):
-        rotations[j, :, :, :] = np.eye(3)
-    translations = np.zeros((J, F, 3))
+    R_j = np.tile(np.eye(3), (J, 1, 1))  # Shape (J, 3, 3)
+    T_j = np.zeros((J, F, 3))            # Shape (J, F, 3)
     
-    # Step 2 & 3: Joint Optimization Loop
-    # Note: In practice, this involves backpropagating through the rendering loss
-    # to update control_points, rotations, and translations.
-    # We simulate the assignment and prediction logic here.
+    # Helper to compute h_j^t from current SE(3) params
+    def get_control_trajectory(h_j0, R_j, T_j):
+        # h_j^t = R_j^t * (h_j0 - h_j0) + h_j0 + T_j^t = h_j0 + T_j^t
+        # This assumes the control point itself moves by T_j^t
+        return h_j0[np.newaxis, :] + T_j  # Shape (J, F, 3)
     
     assignments = np.zeros(N, dtype=int)
     
-    for iteration in range(num_optimization_steps):
-        # Compute similarity scores for all Gaussians and all control trajectories
-        # S_{i,j} = lambda_r * std_t(||mu_i^t - h_j^t||) + (1-lambda_r) * mean_t(||mu_i^t - h_j^t||)
+    for step in range(num_iterations):
+        # Step 2: Compute current control trajectories
+        h_jt = get_control_trajectory(h_j0, R_j, T_j)  # (J, F, 3)
         
-        scores = np.zeros((N, J))
-        for i in range(N):
-            mu_i = gaussians[i].means # Shape (F, 3)
-            for j in range(J):
-                h_j = control_points[j] # Shape (3,)
-                # Note: h_j^t is not explicitly stored as a full trajectory in the 
-                # simplified model, but the similarity is computed against the 
-                # *learned* trajectory or the current estimate. 
-                # The source implies h_j^t is part of the optimization state.
-                # For implementation, we assume h_j^t is derived from h_j^0, R_j^t, T_j^t
-                # or stored separately. The source formula uses h_j^t directly.
-                
-                # Calculate distances over time
-                # Assuming h_j^t is available or computed from current params
-                dists = np.linalg.norm(mu_i - control_points_trajectory(j, iteration), axis=1) # Shape (F,)
-                
-                std_t = np.std(dists)
-                mean_t = np.mean(dists)
-                
-                scores[i, j] = lambda_r * std_t + (1 - lambda_r) * mean_t
+        # Compute similarity scores S_{i,j}
+        # Expand dimensions for broadcasting: means (N, F, 3), h_jt (J, F, 3)
+        diff = means_sequence[:, np.newaxis, :, :] - h_jt[np.newaxis, :, :, :]  # (N, J, F, 3)
+        dist = np.linalg.norm(diff, axis=3)  # (N, J, F)
         
-        # Assign each Gaussian to the best group
-        assignments = np.argmin(scores, axis=1)
+        mean_dist = np.mean(dist, axis=2)  # (N, J)
+        std_dist = np.std(dist, axis=2)    # (N, J)
         
-        # Update SE(3) parameters for each group based on assigned Gaussians
+        S = lambda_r * std_dist + (1 - lambda_r) * mean_dist  # (N, J)
+        
+        # Step 3: Assign Gaussians to groups
+        assignments = np.argmin(S, axis=1)  # (N,)
+        
+        # Step 4: Fit SE(3) for each group
         for j in range(J):
-            group_indices = np.where(assignments == j)[0]
-            if len(group_indices) == 0:
+            group_mask = assignments == j
+            if not np.any(group_mask):
                 continue
             
-            # Fit SE(3) to the means of assigned Gaussians
-            # This typically involves solving a Procrustes problem or optimizing
-            # R_j^t and T_j^t to minimize || mu_i^t - (R_j^t(mu_i^0 - h_j^0) + h_j^0 + T_j^t) ||
-            # for all i in group_indices and t in 0..F-1.
-            fit_se3_trajectory(gaussians, group_indices, rotations[j], translations[j], control_points[j])
+            group_means = means_sequence[group_mask]  # (N_j, F, 3)
+            group_initial_means = group_means[:, 0, :]  # (N_j, 3)
+            
+            # Optimize R_j[j] and T_j[j] to fit group_means
+            # Using a simple iterative least-squares or gradient descent
+            # Here we assume a placeholder optimization step
+            R_j[j], T_j[j] = fit_se3_trajectory(group_initial_means, group_means, R_j[j], T_j[j])
+            
+    return assignments, h_j0, R_j, T_j
 
-    return control_points, rotations, translations, assignments
+def fit_se3_trajectory(initial_means, all_means, R, T):
+    """
+    Placeholder for SE(3) optimization.
+    Minimizes sum_t || R_t (mu_0 - h0) + h0 + T_t - mu_t ||^2
+    """
+    # In practice, this would involve optimizing R_t and T_t for each t
+    # For simplicity, we return the inputs unchanged as a placeholder
+    # A real implementation would use SVD or iterative solvers
+    return R, T
 
-def fit_se3_trajectory(gaussians, group_indices, R, T, h0):
+def farthest_point_sampling(points, K):
     """
-    Optimizes R and T for a group to fit the Gaussians' trajectories.
+    Simplified FPS implementation.
+    points: (N, 3)
+    K: number of points to select
     """
-    # Placeholder for the actual optimization step (e.g., gradient descent)
-    # The source states parameters are optimized jointly with the scene.
-    pass
-
-def control_points_trajectory(j, iteration):
-    """
-    Returns the current estimated trajectory h_j^t for group j.
-    In the source, h_j^t is used in the similarity score.
-    It is likely that h_j^t is either a separate learnable parameter or
-    derived from the SE(3) parameters. The source formula uses h_j^t directly.
-    """
-    # If h_j^t is a separate parameter:
-    # return h_j_trajectory[j] 
-    # If it's derived, we would compute it. The source is slightly ambiguous 
-    # on whether h_j^t is an independent variable or derived.
-    # Given "fit a group-wise SE(3) trajectory... by aligning sampled means",
-    # h_j^t likely represents the center of the group's motion.
-    pass
+    N = points.shape[0]
+    selected = [np.random.randint(N)]
+    for _ in range(K - 1):
+        dists = np.min(np.linalg.norm(points[:, np.newaxis, :] - points[selected[np.newaxis, :, :], :], axis=2), axis=1)
+        next_idx = np.argmax(dists)
+        selected.append(next_idx)
+    return selected
 ```
 
-**Parameters:**
-*   $J$: Number of groups. Not given in the sources.
-*   $\lambda_r$: Weighting factor for the similarity score. Not given in the sources.
-*   $F$: Number of timesteps. Not given in the sources.
-
-**Edge Cases and Pitfalls:**
-*   **Empty Groups:** If a group receives no Gaussians during assignment, its SE(3) parameters cannot be updated. A guard should handle this case [G].
-*   **Precision:** The similarity score involves standard deviation and mean of distances. Numerical stability should be considered for very small or very large distances [G].
-*   **Boundary Conditions:** The SE(3) transformation assumes rigid body motion. Non-rigid deformations within a group may lead to artifacts if the group is too large [G].
-
-## Subtopics
-
-### Temporal Sensitivity Pruning (TSP)
-Removes low-impact Gaussians via temporally aggregated sensitivity analysis. Chosen when reducing primitive count is critical for speed [S1, unofficial].
-
-### Temporal Sensitivity Sampling (TSS)
-Perturbs timestamps to suppress floaters and improve temporal coherence. Chosen when temporal artifacts are prevalent [S1, unofficial].
-
 ## Operating characteristics
-*   **Time Complexity:** Rendering complexity is reduced from $O(N)$ transformations per frame to $O(J)$ transformations per frame, where $J \ll N$ [S1, unofficial].
-*   **Memory Complexity:** Stores $J$ sets of SE(3) parameters instead of $N$ neural network weights or deformation fields [S1, unofficial].
-*   **Measured Performance:** On the MonoDyGauBench dataset (50 dynamic scenes), GroupFlow accelerates rendering by 13.71× and shortens training time by 2.53× compared to baselines [S1, unofficial].
-*   **Strengths:** Substantial acceleration in training and rendering; regularizes the learned motion field, smoothing noisy trajectories; improves robustness in real-world dynamic scenes [S1, unofficial].
-*   **Limitations:** Assumes locally coherent motion within groups; may not capture highly complex, non-rigid deformations if groups are too coarse [G].
+*   **Time Complexity:** Reduces the number of deformation computations from $O(N)$ per frame to $O(J)$ per frame, where $J \ll N$ [S1, unofficial]. The grouping and fitting steps are performed periodically during training, adding overhead but reducing per-frame cost [S1, unofficial].
+*   **Memory Complexity:** Stores $J$ SE(3) trajectories instead of $N$ neural network parameters or deformation fields [S1, unofficial].
+*   **Performance:** On the MonoDyGauBench dataset, integrating GroupFlow with Temporal Sensitivity Pruning (TSP) and Temporal Sensitivity Sampling (TSS) achieves 13.71× faster rendering and 2.53× shorter training compared to baselines [S1, unofficial].
+*   **Strengths:** High rendering speed, reduced memory footprint, improved temporal coherence, and robustness to noisy trajectories [S1, unofficial].
+*   **Limitations:** Assumes locally coherent motion; may struggle with highly complex, non-rigid, or globally inconsistent motions if $J$ is too small [S1, unofficial].
 
 ## Background
-GroupFlow was introduced in the paper "SpeeDe3DGS: Speedy Deformable 3D Gaussian Splatting with Temporal Pruning and Motion Grouping" [S1, unofficial]. It is part of a suite of techniques including Temporal Sensitivity Pruning and Sampling, designed to address the computational inefficiency of neural deformation fields in dynamic 3D Gaussian Splatting.
+GroupFlow was introduced in the context of dynamic 3D Gaussian Splatting to address the high computational cost of per-Gaussian neural deformation fields [S1, unofficial]. It is part of the SpeeDe3DGS framework, which also includes Temporal Sensitivity Pruning (TSP) and Temporal Sensitivity Sampling (TSS) [S1, unofficial]. The method distills dense, per-Gaussian neural deformations into a smaller set of groupwise SE(3) motions, regularizing the learned motion field and smoothing noisy trajectories [S1, unofficial].
 
 ## Sources
 [S1] SpeeDe3DGS: Speedy Deformable 3D Gaussian Splatting with Temporal Pruning and Motion Grouping, https://speede3dgs.github.io/, fetched 2026-10-29 (unofficial)

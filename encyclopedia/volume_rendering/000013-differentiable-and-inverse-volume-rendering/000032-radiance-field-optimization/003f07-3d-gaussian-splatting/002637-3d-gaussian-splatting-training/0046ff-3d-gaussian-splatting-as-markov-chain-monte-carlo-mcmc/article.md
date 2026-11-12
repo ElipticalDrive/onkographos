@@ -1,0 +1,232 @@
+# 3D Gaussian Splatting as Markov Chain Monte Carlo (MCMC)
+
+Also called: MCMC-GS, SGLD-based Gaussian Splatting
+
+## Overview
+This method reinterprets the training of 3D Gaussian Splatting as a sampling process from a target distribution $\mathcal{G}$, rather than a deterministic minimization of a loss function via gradient descent [S1]. By framing the optimization as Markov Chain Monte Carlo (MCMC), it enables discrete structural changes (moving, cloning, pruning Gaussians) to be treated as valid state transitions that preserve probability mass, avoiding the discontinuities that break standard gradient-based assumptions [S1]. It differs from [Base 3DGS Optimization](7549-base-3dgs-optimization.md) by injecting anisotropic noise into the mean updates and rewriting heuristics as MCMC moves, and from [Physical Parameter Optimization](4111-physical-parameter-optimization.md) by focusing on the probabilistic interpretation of the training dynamics rather than physical constraints.
+
+## How it works
+**Inputs:** A set of 3D Gaussians $\mathcal{G} = \{g_i\}$, each defined by mean $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $o_i$, and spherical harmonics coefficients for color. Training images $\mathcal{I}$.
+**Outputs:** Optimized Gaussian parameters $\mathcal{G}'$ that sample from the distribution $\mathcal{G} \propto \exp(-\mathcal{L}_{\text{total}})$.
+
+**Data Structures:**
+*   **Gaussian State:** For each Gaussian $i$:
+    *   $\boldsymbol{\mu}_i \in \mathbb{R}^3$: Position.
+    *   $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (symmetric positive definite).
+    *   $o_i \in [0, 1]$: Opacity.
+    *   $\mathbf{c}_i$: Color coefficients.
+    *   Adam moment statistics: $m_{\boldsymbol{\mu}, i}, m_{\boldsymbol{\Sigma}, i}, m_{o, i}, m_{\mathbf{c}, i}$ and $v_{\boldsymbol{\mu}, i}, v_{\boldsymbol{\Sigma}, i}, v_{o, i}, v_{\mathbf{c}, i}$ (not updated for noise, but used for gradient scaling).
+
+**Parameters:**
+*   $\lambda_{\text{lr}}$: Learning rate scalar.
+*   $\lambda_{\text{noise}}$: Noise scaling factor.
+*   $k=100$: Sigmoid sharpness.
+*   $t=0.005$: Sigmoid center (default pruning threshold).
+*   $\lambda_{\text{D-SSIM}}=0.2$: Weight for D-SSIM loss.
+*   $\lambda_o, \lambda_\Sigma$: Regularization weights for opacity and scale.
+*   Adam $\beta_1, \beta_2$: Default values (0.9, 0.999).
+
+**Formulas:**
+1.  **Target Distribution:**
+    $$ \mathcal{G} \propto \exp(-\mathcal{L}_{\text{total}}) $$
+2.  **Total Loss:**
+    $$ \mathcal{L}_{\text{total}} = (1 - \lambda_{\text{D-SSIM}}) \mathcal{L}_1 + \lambda_{\text{D-SSIM}} \mathcal{L}_{\text{D-SSIM}} + \lambda_o \sum_i |o_i|_1 + \lambda_\Sigma \sum_{i,j} \left| \sqrt{\text{eig}_j(\boldsymbol{\Sigma}_i)} \right|_1 $$
+    Where $\text{eig}_j(\boldsymbol{\Sigma}_i)$ is the $j$-th eigenvalue of the covariance matrix.
+3.  **SGLD Update Rule:**
+    $$ \mathbf{g} \leftarrow \mathbf{g} - \lambda_{\text{lr}} \nabla_{\mathbf{g}} \mathbb{E}_{\mathbf{I} \sim \mathcal{I}} [\mathcal{L}_{\text{total}}(\mathbf{g}; \mathbf{I})] + \lambda_{\text{noise}} \epsilon $$
+    In practice, the gradient term is processed by the Adam optimizer.
+4.  **Noise Term (Mean only):**
+    $$ \epsilon_\mu = \lambda_{\text{lr}} \cdot \sigma(-k(t-o_i)) \cdot \boldsymbol{\Sigma}_i \eta $$
+    $$ \epsilon = [\epsilon_\mu, \mathbf{0}] $$
+    Where $\eta \sim \mathcal{N}(0, I)$, $\sigma$ is the sigmoid function. Noise is **not** added to opacity, scale, or color.
+5.  **Relocation Move (State Transition):**
+    When moving $N-1$ dead Gaussians to one live Gaussian $g_N$:
+    $$ \boldsymbol{\mu}_{1,\dots,N}^{\text{new}} = \boldsymbol{\mu}_N^{\text{old}} $$
+    $$ o_{1,\dots,N}^{\text{new}} = 1 - \sqrt[N]{1 - o_N^{\text{old}}} $$
+    $$ \boldsymbol{\Sigma}_{1,\dots,N}^{\text{new}} = (o_N^{\text{old}})^2 \left( \sum_{i=1}^N \sum_{k=0}^{i-1} \left( \binom{i-1}{k} \frac{(-1)^k (o_N^{\text{new}})^{k+1}}{\sqrt{k+1}} \right) \right)^{-2} \boldsymbol{\Sigma}_N^{\text{old}} $$
+
+**Algorithm Steps:**
+1.  **Initialize:** Start with initial Gaussian set (e.g., from SfM points). Initialize Adam moments.
+2.  **Render & Loss:** Render current Gaussians. Compute $\mathcal{L}_{\text{total}}$ using Eq. 2.
+3.  **Gradient & Noise Update:**
+    *   Compute gradients $\nabla \mathcal{L}_{\text{total}}$ for all parameters.
+    *   For each Gaussian $i$:
+        *   Sample $\eta \sim \mathcal{N}(0, I)$.
+        *   Compute $\epsilon_{\mu, i}$ using Eq. 4.
+        *   Update mean $\boldsymbol{\mu}_i$ using Adam step with gradient plus noise $\epsilon_{\mu, i}$.
+        *   Update other parameters ($\boldsymbol{\Sigma}, o, \mathbf{c}$) using Adam step with gradient **only** (no noise).
+4.  **Relocation Move (Every 100 iterations):**
+    *   Identify dead Gaussians ($o_i < 0.005$).
+    *   For each dead Gaussian, select a target live Gaussian $g_N$ via multinomial sampling proportional to $o_N$.
+    *   Group dead Gaussians by target $g_N$.
+    *   For each group moving to $g_N$:
+        *   Apply Eq. 5 to update $\boldsymbol{\mu}, o, \boldsymbol{\Sigma}$ for the involved Gaussians.
+        *   **Reset** Adam moment statistics for the target Gaussian $g_N$ (to bias it to stay stationary).
+        *   **Retain** Adam moment statistics for the source (dead) Gaussians (to encourage exploration via noise).
+5.  **Repeat** until convergence.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+
+def sgld_update(gaussians, images, lambda_lr, lambda_noise, k=100, t=0.005):
+    """
+    Perform one SGLD step for all Gaussians.
+    gaussians: dict with keys 'mu', 'Sigma', 'opacity', 'color', 'adam_m', 'adam_v'
+    images: batch of training images
+    """
+    # 1. Compute Loss
+    rendered_images = render(gaussians['mu'], gaussians['Sigma'], 
+                             gaussians['opacity'], gaussians['color'])
+    loss_l1 = l1_loss(rendered_images, images)
+    loss_dssim = dssim_loss(rendered_images, images)
+    reg_opacity = torch.sum(torch.abs(gaussians['opacity']))
+    reg_scale = 0
+    for i in range(len(gaussians['mu'])):
+        eigvals = torch.linalg.eigvals(gaussians['Sigma'][i])
+        reg_scale += torch.sum(torch.abs(torch.sqrt(eigvals)))
+    
+    lambda_dssim = 0.2
+    lambda_o = 0.0 # Placeholder, should be set
+    lambda_sigma = 0.0 # Placeholder, should be set
+    
+    loss_total = (1 - lambda_dssim) * loss_l1 + lambda_dssim * loss_dssim + \
+                 lambda_o * reg_opacity + lambda_sigma * reg_scale
+    
+    # 2. Compute Gradients
+    loss_total.backward()
+    
+    # 3. Update Parameters with Adam + Noise
+    for i in range(len(gaussians['mu'])):
+        mu = gaussians['mu'][i]
+        Sigma = gaussians['Sigma'][i]
+        opacity = gaussians['opacity'][i]
+        
+        # Noise for mean only
+        eta = torch.randn(3)
+        sigmoid_val = torch.sigmoid(-k * (t - opacity))
+        epsilon_mu = lambda_lr * sigmoid_val * Sigma @ eta
+        
+        # Update Mean with Adam + Noise
+        # Note: In practice, Adam updates are applied to the parameters directly
+        # Here we simulate the update step
+        grad_mu = mu.grad # Assuming gradients are attached
+        gaussians['mu'][i] = adam_step(mu, grad_mu, gaussians['adam_m']['mu'][i], 
+                                       gaussians['adam_v']['mu'][i], lambda_lr) + epsilon_mu
+        gaussians['adam_m']['mu'][i] = ... # Update Adam moments for mu
+        gaussians['adam_v']['mu'][i] = ...
+        
+        # Update other params with Adam ONLY (no noise)
+        grad_Sigma = Sigma.grad
+        gaussians['Sigma'][i] = adam_step(Sigma, grad_Sigma, gaussians['adam_m']['Sigma'][i], 
+                                          gaussians['adam_v']['Sigma'][i], lambda_lr)
+        # ... similar for opacity and color
+        
+    return loss_total
+
+def relocation_move(gaussians, iteration, move_interval=100):
+    """
+    Move dead Gaussians to live Gaussians every move_interval iterations.
+    """
+    if iteration % move_interval != 0:
+        return
+        
+    dead_indices = [i for i, o in enumerate(gaussians['opacity']) if o < 0.005]
+    live_indices = [i for i, o in enumerate(gaussians['opacity']) if o >= 0.005]
+    
+    if not dead_indices or not live_indices:
+        return
+        
+    # Group dead Gaussians by target live Gaussian
+    # Target selection: multinomial sampling proportional to opacity
+    live_opacities = torch.tensor([gaussians['opacity'][i] for i in live_indices])
+    live_opacities = live_opacities / live_opacities.sum()
+    
+    for dead_idx in dead_indices:
+        # Sample target from live indices
+        target_idx_in_live = torch.multinomial(live_opacities, 1).item()
+        target_idx = live_indices[target_idx_in_live]
+        
+        # We need to handle groups. For simplicity, assume one-to-one or 
+        # aggregate logic. The paper describes moving N-1 to 1.
+        # Here we implement the logic for a single move to a target.
+        # In practice, multiple dead Gaussians might target the same live one.
+        pass # See detailed logic below
+
+def apply_relocation(gaussians, source_indices, target_idx):
+    """
+    Apply the relocation formula (Eq. 9) for moving source_indices to target_idx.
+    """
+    N = len(source_indices) + 1 # Total Gaussians involved (N-1 sources + 1 target)
+    
+    target_mu_old = gaussians['mu'][target_idx]
+    target_Sigma_old = gaussians['Sigma'][target_idx]
+    target_opacity_old = gaussians['opacity'][target_idx]
+    
+    # New Mean: all become target's mean
+    for idx in source_indices + [target_idx]:
+        gaussians['mu'][idx] = target_mu_old.clone()
+        
+    # New Opacity
+    # o_new = 1 - (1 - o_old)^(1/N)
+    target_opacity_new = 1 - torch.pow(1 - target_opacity_old, 1/N)
+    for idx in source_indices + [target_idx]:
+        gaussians['opacity'][idx] = target_opacity_new
+        
+    # New Covariance
+    # Complex formula involving binomial coefficients
+    sum_term = 0
+    for i in range(1, N + 1):
+        for k in range(0, i):
+            binom = torch.combinatorial(i-1, k) # Compute binomial coeff
+            term = binom * ((-1)**k) * (torch.pow(target_opacity_new, k+1)) / torch.sqrt(k+1)
+            sum_term += term
+            
+    factor = (target_opacity_old**2) * (sum_term**(-2))
+    new_Sigma = factor * target_Sigma_old
+    
+    for idx in source_indices + [target_idx]:
+        gaussians['Sigma'][idx] = new_Sigma
+        
+    # Adjust Adam Moments
+    # Reset target moments to bias stationarity
+    gaussians['adam_m']['mu'][target_idx] = torch.zeros_like(gaussians['adam_m']['mu'][target_idx])
+    gaussians['adam_v']['mu'][target_idx] = torch.zeros_like(gaussians['adam_v']['mu'][target_idx])
+    # Retain source moments for exploration
+    # (No change needed for sources)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The covariance update formula involves high-order powers and binomial coefficients. Numerical stability should be monitored, especially when $o_N$ is close to 1 or 0.
+*   **Boundaries:** The noise term is modulated by opacity. If opacity is very low, noise is high, which can cause Gaussians to wander far. The relocation move mitigates this by resetting moments for the target.
+*   **Discrete Changes:** The relocation move is an approximation ($P(g_{new}) \approx P(g_{old})$). Applying it too frequently can disrupt the MCMC chain. The 100-iteration interval is a heuristic to balance stability and exploration.
+*   **Noise Application:** Noise is only applied to the mean. Applying it to scale or opacity harms performance [S1].
+
+## Subtopics
+
+### [MCMC-based 3D Gaussian Splatting](11914-mcmc-based-3d-gaussian-splatting.md)
+General MCMC approaches for 3DGS.
+
+### [Sliced Wasserstein-based Gaussian Cloning Update](11919-sliced-wasserstein-based-gaussian-cloning-update.md)
+Alternative cloning strategy.
+
+### [Base 3DGS Optimization](7549-base-3dgs-optimization.md)
+Standard gradient-based optimization.
+
+## Operating characteristics
+*   **Time Complexity:** Similar to standard 3DGS per iteration, but with additional overhead for noise generation and occasional relocation moves. The relocation move is $O(N)$ where $N$ is the number of Gaussians.
+*   **Memory Complexity:** Same as standard 3DGS, plus storage for Adam moments.
+*   **Performance:** Improves reconstruction quality, especially in areas with missing geometry or sparse initialization, by encouraging exploration via noise [S1].
+*   **Strengths:** Handles discrete operations (splitting/pruning) naturally within the optimization framework. Better exploration of the parameter space.
+*   **Limitations:** Requires careful tuning of noise parameters. The relocation move is an approximation and may not perfectly preserve the target distribution.
+*   **When to Use:** When standard 3DGS fails to converge in sparse regions or when initialization is poor. When computational budget allows for slightly longer training times due to exploration.
+
+## Background
+The method was introduced in "3D Gaussian Splatting as Markov Chain Monte Carlo" by the UBC Vision group [S1]. It builds on the observation that standard 3DGS optimization is similar to Stochastic Gradient Langevin Dynamics (SGLD) [S1]. The work connects MCMC sampling theory with neural rendering optimization, allowing for more robust training dynamics.
+
+## Sources
+[S1] 3D Gaussian Splatting as Markov Chain Monte Carlo, https://ubc-vision.github.io/3dgs-mcmc/, fetched 2026-10-26

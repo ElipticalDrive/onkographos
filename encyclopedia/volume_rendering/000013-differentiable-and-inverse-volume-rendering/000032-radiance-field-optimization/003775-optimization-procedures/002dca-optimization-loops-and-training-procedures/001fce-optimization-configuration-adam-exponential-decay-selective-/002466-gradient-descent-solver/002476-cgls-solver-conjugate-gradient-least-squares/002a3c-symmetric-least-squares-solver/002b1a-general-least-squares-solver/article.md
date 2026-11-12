@@ -1,27 +1,26 @@
 # General Least Squares Solver
-Also called: General Linear Least Squares, Non-Symmetric Least Squares via Normal Equations
 
 ## Overview
-The General Least Squares Solver addresses the overdetermined linear system $Ax = b$ where $A$ is a non-symmetric matrix [S1, unofficial]. It solves this by explicitly forming the normal equations $A^T A x = A^T b$, thereby reducing the problem to solving a symmetric positive semi-definite system [S1, unofficial]. It is distinguished from matrix-free iterative methods (like CGLS) by its direct assembly of the normal equations, making it the fastest alternative for small-to-medium systems but prone to numerical instability if the system matrix is ill-conditioned [S1, unofficial].
+The General Least Squares Solver addresses the overdetermined linear system $Ax = b$ for a non-symmetric matrix $A$ [S1, unofficial]. It solves this by explicitly forming the normal equations $A^T A x = A^T b$, thereby reducing the problem to solving a symmetric system [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Matrix $A$ (dimensions $m \times n$), vector $b$ (dimensions $m$).
-- Output: Solution vector $x$ (dimensions $n$), residual error scalar.
+- Input: Matrix $A$ (non-symmetric), vector $b$.
+- Output: Solution vector $x$, residual error scalar.
 
 **Data Structures:**
-- $A$: Dense matrix of floats.
+- $A$: Dense matrix.
 - $A^T$: Transpose of $A$.
-- $A^T A$: Symmetric matrix of size $n \times n$.
-- $A^T b$: Vector of size $n$.
-- $x$: Solution vector of size $n$.
+- $A^T A$: Symmetric matrix.
+- $A^T b$: Vector.
+- $x$: Solution vector.
 
 **Steps:**
 1. Compute the transpose of $A$, denoted $A^T$, using a standard matrix transpose operation [S1, unofficial].
-2. Compute the product $A^T A$ using a matrix multiplication routine optimized for the form $A^T A$ (often called `mmul_ata`) [S1, unofficial].
-3. Compute the product $A^T b$ using a matrix-vector multiplication routine (often called `vmul`) [S1, unofficial].
-4. Solve the symmetric system $(A^T A) x = A^T b$ using the Symmetric Least Squares Solver (or equivalent SVD-based pseudoinverse method) [S1, unofficial].
-5. Return the solution $x$ and the residual error $\|Ax - b\|$ [S1, unofficial].
+2. Compute the product $A^T A$ using a matrix multiplication routine optimized for the form $A^T A$ [S1, unofficial].
+3. Compute the product $A^T b$ using a matrix-vector multiplication routine [S1, unofficial].
+4. Solve the symmetric system $(A^T A) x = A^T b$ using the Symmetric Least Squares Solver (SVD-based pseudoinverse method) [S1, unofficial].
+5. Return the solution $x$ and the residual error [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -29,22 +28,30 @@ The General Least Squares Solver addresses the overdetermined linear system $Ax 
 ```python
 def solve_general_least_squares(A, b, svd_tol, svd_sweeps, pinv_tol):
     # Step 1: Transpose A
-    At = transpose(A)
+    At = [[A[j][i] for j in range(len(A))] for i in range(len(A[0]))]
     
     # Step 2: Compute A^T A
-    AtA = mmul_ata(At, A)
+    n = len(At)
+    AtA = [[sum(At[i][k] * A[k][j] for k in range(len(A))) for j in range(n)] for i in range(n)]
     
     # Step 3: Compute A^T b
-    Atb = vmul(At, b)
+    Atb = [sum(At[i][j] * b[j] for j in range(len(b))) for i in range(n)]
     
-    # Step 4: Solve symmetric system using Symmetric Least Squares Solver
-    # This internally uses SVD to compute the pseudoinverse of AtA
+    # Step 4: Solve symmetric system (A^T A)x = A^T b using SVD-based pseudoinverse [S1, unofficial]
     x = solve_symmetric(AtA, Atb, svd_tol, svd_sweeps, pinv_tol)
     
-    # Step 5: Calculate residual error
-    residual = calc_error(A, x, b)
+    # Step 5: Calculate residual error ||Ax - b||
+    Ax = [sum(A[i][j] * x[j] for j in range(len(x))) for i in range(len(A))]
+    residual = sum((Ax[i] - b[i])**2 for i in range(len(b)))**0.5
     
     return x, residual
+
+def solve_symmetric(AtA, Atb, svd_tol, svd_sweeps, pinv_tol):
+    # Computes pseudoinverse of AtA via SVD and solves for x [S1, unofficial]
+    # Uses getSymmetricSvd and pseudoinverse routines internally
+    # Returns solution vector x
+    # (Implementation details delegated to the symmetric solver component)
+    return x
 ```
 
 **Parameters:**
@@ -53,24 +60,18 @@ def solve_general_least_squares(A, b, svd_tol, svd_sweeps, pinv_tol):
 - `pinv_tol`: Tolerance for pseudoinverse calculation. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- Ill-conditioned matrices: Forming $A^T A$ squares the condition number of $A$, potentially leading to significant numerical errors if $A$ is ill-conditioned [S1, unofficial].
-- Singular matrices: If $A$ has full column rank, $A^T A$ is positive definite; otherwise, it is positive semi-definite, requiring a pseudoinverse approach (handled by the symmetric solver) [S1, unofficial].
+Not given in the sources.
 
 ## Subtopics
 
 ### [Normal Equations Solver](4954-normal-equations-solver.md)
-The Normal Equations Solver addresses the overdetermined linear system $Ax = b$ by explicitly forming the symmetric positive semi-definite matrix $A^T A$ and vector $A^T b$, then solving the resulting square system. It is distinguished from matrix-free iterative methods (like CGLS) by its direct assembly of the normal equations, making it the fastest alternative for small-to-medium systems but prone to numerical instability if the system matrix is ill-conditioned.
+The Normal Equations Solver addresses the overdetermined linear system $Ax = b$ by explicitly forming the symmetric positive semi-definite matrix $A^T A$ and vector $A^T b$, then solving the resulting square system. It is distinguished from matrix-free iterative methods (like CGLS) by its direct assembly of the normal equations.
 
 ## Operating characteristics
-- Time Complexity: Dominated by the matrix multiplication $A^T A$ ($O(m n^2)$) and the symmetric solver ($O(n^3)$ for SVD).
-- Memory Complexity: Requires storage for $A$, $A^T$, $A^T A$, and $A^T b$.
-- Strengths: Simple to implement; efficient for small-to-medium systems [S1, unofficial].
-- Limitations: Numerical instability for ill-conditioned matrices due to squaring the condition number [S1, unofficial].
-- When to use: Small-to-medium overdetermined systems where $A$ is well-conditioned [S1, unofficial].
-- When not to use: Large-scale systems or ill-conditioned matrices where iterative methods (like CGLS) are preferred [S1, unofficial].
+Not given in the sources.
 
 ## Background
-The method is implemented in the DualContouringCSharp repository by tuckbone [S1, unofficial]. It relies on the Symmetric Least Squares Solver for the final step, which uses SVD-based pseudoinverse calculation [S1, unofficial].
+The method relies on the Symmetric Least Squares Solver for the final step, which uses SVD-based pseudoinverse calculation [S1, unofficial].
 
 ## Sources
 [S1] tuckbone/DualContouringCSharp, https://github.com/tuckbone/DualContouringCSharp, fetched 2026-10-26 (unofficial)

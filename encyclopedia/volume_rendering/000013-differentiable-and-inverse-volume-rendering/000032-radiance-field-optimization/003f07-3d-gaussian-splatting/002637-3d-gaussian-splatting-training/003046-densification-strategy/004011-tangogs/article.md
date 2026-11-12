@@ -1,267 +1,193 @@
 # TangoGS
 
-Also called: Gauss What You Need
+Also called: Gauss What You Need, Capture-Conditioned Learning Allowance
 
 ## Overview
-TangoGS is a density controller for 3D Gaussian Splatting that automatically scales the Gaussian population size across different capture scales without per-capture hyperparameter tuning [S1, unofficial]. It combines a capture-derived "learning allowance" (model sizing based on track-adjusted pixels) with training-based quality feedback (PSNR-driven adaptation) to determine the final number of Gaussians [S1, unofficial]. Unlike sibling methods that rely on fixed defaults or per-capture tuning, TangoGS ensures the model budget is invariant to redundant views (e.g., duplicated images) and adapts dynamically to reconstruction quality [S1, unofficial].
+TangoGS is a density controller for 3D Gaussian Splatting that automatically scales the number of Gaussians across different capture sizes without per-capture retuning [S1, unofficial]. It combines a capture-derived learning allowance (model sizing) with training-based adaptation (quality feedback) to determine the target Gaussian population [S1, unofficial]. Unlike sibling methods that rely on fixed defaults or per-capture tuning, TangoGS ensures the model budget is invariant to redundant views by using track-adjusted pixels, while dynamically adjusting pruning thresholds based on reconstruction quality [S1, unofficial].
 
 ## How it works
-TangoGS operates by first calculating a target Gaussian count based on the capture geometry, then adjusting this target during training based on reconstruction error, and finally pruning the population based on sensitivity scores.
+**Inputs and Outputs:**
+*   **Inputs:** Sparse reconstruction metadata (image count $N_{\text{img}}$, track-adjusted pixel count $\mathcal{A}$), training views, and the current Gaussian population $\mathcal{G}$.
+*   **Outputs:** A pruned and densified Gaussian population $\mathcal{G}'$ and updated parameters.
 
-### Inputs and Outputs
-*   **Inputs:**
-    *   Capture metadata: Number of images $N_{\text{img}}$ (including held-out/validation images), track length information (valid image-point observations).
-    *   Training metrics: Mean per-image PSNR $P$ from the preceding calibration epoch.
-    *   Current state: Current Gaussian population $\mathcal{G}$, Adam optimizer buffers.
-*   **Outputs:**
-    *   Updated Gaussian population $\mathcal{G}'$ with a specific count $N_G$.
-    *   Pruning mask indicating which Gaussians to retain.
+**Data Structures:**
+*   **Gaussian Population:** Unclustered parameters and Adam optimizer buffers are filtered and reclustered into Morton-ordered groups of 128 elements to align with batch removal operations [S1, unofficial].
+*   **Sensitivity Scores:** Accumulated per-Gaussian scores, opacity-weighted, computed via a backward pass with a unit upstream image multiplier [S1, unofficial].
 
-### Data Structures
-*   **Gaussian Population:** Standard 3DGS representation (position, scale, rotation, opacity, spherical harmonics coefficients).
-*   **Optimizer Buffers:** Adam optimizer states for all parameters.
-*   **Sensitivity Score Buffer:** Accumulated scalar score per Gaussian, computed via a modified backward pass.
-*   **Cluster Map:** Morton-ordered groups of 128 elements used for batch removal operations [S1, unofficial].
+**Parameters:**
+*   $g \approx 0.063362106$: Effective Gaussian count scaling factor [S1, unofficial].
+*   $T_{\text{ref}} = 2,462,476$: Reference count (geometric mean of 13 standard linear allowances) [S1, unofficial].
+*   $s = 1.7$: Sensitivity scaling factor for final selection [S1, unofficial].
+*   $c = 0.0075$: Quality feedback coefficient [S1, unofficial].
+*   $P^* = 20 \text{ dB}$: No-removal threshold PSNR [S1, unofficial].
+*   $\rho_{\min}$: Guard abort threshold for removal count (90% of population) [S1, unofficial].
+*   Split/Clone threshold: $0.001$ [S1, unofficial].
+*   Opacity decay factor: $0.5$ with floor $1/128$ [S1, unofficial].
+*   SH-rest learning-rate divisor: $20$ [S1, unofficial].
 
-### Parameters and Constants
-*   $g \approx 0.063362106$: Effective Gaussian count scaling factor (Gaussians per track-adjusted pixel) [S1, unofficial].
-*   $T_{\text{ref}} = 2,462,476$: Reference count, the rounded geometric mean of linear allowances over 13 standard scenes [S1, unofficial].
-*   $s = 1.7$: Scaling factor for final selection keep fraction [S1, unofficial].
-*   $c = 0.0075$: Coefficient for PSNR-based pruning threshold [S1, unofficial].
-*   $P^* = 20 \text{ dB}$: Threshold PSNR above which no removal occurs [S1, unofficial].
-*   $h$: Number of remaining events in a reference pruning schedule spaced 8% of total training iterations apart [S1, unofficial].
-*   $N_{\text{pre}}$: Population of Gaussians entering the final selection event [S1, unofficial].
-*   $\rho_{\text{min}} = 0.1$: Guard threshold; pruning events removing >90% of population are aborted [S1, unofficial].
-*   Opacity decay factor: 0.5 per step, floor 1/128 [S1, unofficial].
-*   SH learning-rate divisor: 20 [S1, unofficial].
-*   Split/clone gradient threshold: 0.001 [S1, unofficial].
+**Steps:**
 
-### Formulas
+1.  **Calculate Learning Allowance:**
+    Compute the linear allowance $T_{\text{lin}}$ and capped allowance $T_{\text{cap}}$ based on the capture's track-adjusted pixel count $\mathcal{A}$ (derived from $N_{\text{img}}$ and track lengths) [S1, unofficial]:
+    $$ T_{\text{lin}} = \text{round} \left[ 0.90 \cdot \text{round}(0.07040234 \cdot \mathcal{A}) \right] $$
+    $$ T_{\text{cap}} = \text{round} \left[ T_{\text{ref}} \cdot \left( \frac{T_{\text{lin}}}{T_{\text{ref}}} \right)^{0.5} \right] $$
+    Nested rounding implements the effective scaling factor $g$ [S1, unofficial].
 
-**1. Learning Allowance Calculation**
-The linear allowance $T_{\text{lin}}$ is derived from the image count $N_{\text{img}}$ using nested rounding to implement the scaling factor $g$:
-$$ T_{\text{lin}} = \text{round} \left[ 0.90 \cdot \text{round}(0.07040234 \cdot N_{\text{img}}) \right] $$
-The capped allowance $T_{\text{cap}}$ applies a square-root mapping to reduce spread between scenes:
-$$ T_{\text{cap}} = \text{round} \left[ T_{\text{ref}} \cdot \left( \frac{T_{\text{lin}}}{T_{\text{ref}}} \right)^{0.5} \right] $$
+2.  **Schedule Growth and Pruning:**
+    *   Densification starts at 2% of total training iterations and ends at 80% [S1, unofficial].
+    *   Soft pruning begins at approximately 9% of training [S1, unofficial].
+    *   Growth events are spaced five epochs apart for runs $\ge 150$ epochs; for shorter runs, spacing scales proportionally to a minimum of one epoch [S1, unofficial].
 
-**2. Quality Feedback and Keep Ratio**
-At each growth or pruning event, the mean per-image PSNR $P$ from the preceding epoch determines the keep ratio $\rho$:
-$$ \rho = \frac{1}{s} - c \cdot (P - P^*) $$
-Where $s=1.7$, $c=0.0075$, and $P^*=20$. If $P \ge P^*$, $\rho \ge 1/s$, effectively preventing removal in the final selection phase. The densification target is:
-$$ T_{\text{adapt}} = \rho \cdot T_{\text{cap}} $$
+3.  **Budgeted Densification (at Growth Events):**
+    *   Compute the mean per-image PSNR $P$ over the just-completed training epoch [S1, unofficial].
+    *   Calculate the keep fraction $\rho$ for the current growth window:
+        $$ \rho = 0.7382 - 0.0075 \cdot P $$
+        (Note: The intercept is rounded to place the no-removal threshold at $\approx 19.995$ dB) [S1, unofficial].
+    *   Compute the densification target $T_{\text{adapt}} = \rho \cdot T_{\text{cap}}$ [S1, unofficial].
+    *   Add Gaussians up to $T_{\text{adapt}}$, ramping linearly from the initial point count to $T_{\text{adapt}}$ over the growth window [S1, unofficial].
+    *   Newly created Gaussians are exempt from pruning until they have trained [S1, unofficial].
 
-**3. Final Selection**
-After growth ends, the final retained count $N_G$ is determined by applying a keep fraction $f$ repeatedly:
-$$ f = \min(1, s \cdot \rho) $$
-$$ N_G = N_{\text{pre}} \cdot f^h $$
-Gaussians are ranked by sensitivity score, and the top $N_G$ are retained [S1, unofficial].
+4.  **Soft Pruning (at Growth Events):**
+    *   Rank Gaussians present *before* the growth phase using their accumulated sensitivity score [S1, unofficial].
+    *   Keep the top fraction $\rho$ of these pre-growth Gaussians [S1, unofficial].
+    *   Remove the rest. Removal counts are rounded down to the nearest multiple of 128 [S1, unofficial].
+    *   If the removal count would exceed 90% of the population, abort the event to prevent model collapse [S1, unofficial].
 
-### Numbered Steps
+5.  **Final Selection (at 80% Iterations):**
+    *   Let $N_{\text{pre}}$ be the population entering this event.
+    *   Calculate the final keep fraction $f = \min(1, s \cdot \rho)$, where $\rho$ is recalibrated from the preceding epoch [S1, unofficial].
+    *   Determine the number of reference pruning events $h$ remaining in a hypothetical schedule spaced 8% of total iterations apart [S1, unofficial].
+    *   Compute the retained count $N_G = N_{\text{pre}} \cdot f^h$ [S1, unofficial].
+    *   Rank all Gaussians by sensitivity score, keep the top $N_G$, and optimize this population for the remainder of training [S1, unofficial].
 
-1.  **Pre-training Setup:**
-    *   Calculate $T_{\text{lin}}$ using $N_{\text{img}}$.
-    *   Calculate $T_{\text{cap}}$ using $T_{\text{lin}}$ and $T_{\text{ref}}$.
-    *   Initialize Gaussian population (e.g., from SfM points).
-
-2.  **Training Loop (Per Epoch):**
-    *   Perform standard 3DGS training iterations.
-    *   Compute mean per-image PSNR $P$ over the training views.
-
-3.  **Growth Event (Periodic):**
-    *   Triggered every 5 epochs (for runs $\ge 150$ epochs) or scaled proportionally for shorter runs.
-    *   Calculate current target $T_{\text{adapt}}$ using current $P$.
-    *   Perform budgeted densification: Add Gaussians to ramp linearly from current count to $T_{\text{adapt}}$ over the growth window.
-    *   *Note:* Densification starts at 2% of total iterations and ends at 80% [S1, unofficial].
-
-4.  **Soft Pruning (Periodic):**
-    *   Triggered at ~9% of total iterations and periodically thereafter.
-    *   Compute sensitivity scores for Gaussians present *before* the current growth event.
-    *   Rank Gaussians by sensitivity score.
-    *   Keep top fraction $\rho$ of the pre-growth population.
-    *   Newly created Gaussians are exempt from pruning until they have trained.
-    *   Remove Gaussians below the threshold.
-
-5.  **Final Selection (End of Training):**
-    *   Triggered at 80% of total iterations (or end of training).
-    *   Calculate $f = \min(1, s \cdot \rho)$ using the final $P$.
-    *   Calculate $N_G = N_{\text{pre}} \cdot f^h$.
-    *   Rank all Gaussians by sensitivity score.
-    *   Retain the top $N_G$ Gaussians.
-    *   Optimize the retained population for the remainder of training.
-
-6.  **Buffer Management:**
-    *   Parameters and Adam buffers are unclustered, filtered, and reclustered into Morton-ordered groups of 128 elements to align with batch removal [S1, unofficial].
-    *   Removal counts are rounded down to the nearest multiple of 128 [S1, unofficial].
-
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def tango_gs_training(capture_metadata, initial_gaussians, total_iterations):
-    """
-    Main training loop for TangoGS.
-    capture_metadata: dict with 'N_img' (total images including held-out)
-    initial_gaussians: list of Gaussian objects
-    total_iterations: int
-    """
+def tango_gs_training(gaussians, training_data, total_iterations):
     # Constants
-    T_ref = 2462476
-    g_effective = 0.063362106
-    s = 1.7
-    c = 0.0075
-    P_star = 20.0
-    min_epochs = 150
-    growth_spacing_epochs = 5
-    soft_prune_start_iter_fraction = 0.09
-    densify_start_iter_fraction = 0.02
-    densify_end_iter_fraction = 0.80
+    T_REF = 2462476
+    G_SCALE = 0.063362106
+    S_FACTOR = 1.7
+    C_COEFF = 0.0075
+    P_STAR = 20.0
+    INTERCEPT_ROUNDED = 0.7382
+    COEFF_ROUNDED = 0.0075
+    GROUP_SIZE = 128
+    MAX_REMOVAL_PCT = 0.9
     
-    # 1. Pre-training: Calculate Allowance
-    N_img = capture_metadata['N_img']
-    # Nested rounding to implement g_effective
-    T_lin = round(0.90 * round(0.07040234 * N_img))
-    T_cap = round(T_ref * (T_lin / T_ref) ** 0.5)
+    # Pre-compute Allowance
+    # A is track-adjusted pixel count derived from capture metadata
+    A = compute_track_adjusted_pixels(training_data)
+    T_lin = round(0.90 * round(0.07040234 * A))
+    T_cap = round(T_REF * (T_lin / T_REF)**0.5)
     
-    # Determine epoch spacing based on total iterations
-    # Assume 1 iteration = 1 view, so epochs = total_iterations / N_img
-    total_epochs = total_iterations / N_img
-    if total_epochs >= min_epochs:
-        spacing = growth_spacing_epochs
-    else:
-        # Scale proportionally, min 1 epoch
-        spacing = max(1, round(growth_spacing_epochs * (total_epochs / min_epochs)))
+    # Schedule parameters
+    densify_start = 0.02 * total_iterations
+    densify_end = 0.80 * total_iterations
+    prune_start = 0.09 * total_iterations
+    epoch_spacing = 5
+    if total_epochs < 150:
+        epoch_spacing = max(1, 5 * (total_epochs / 150))
         
-    growth_interval_iters = spacing * N_img
+    current_gaussian_count = len(gaussians)
+    initial_count = current_gaussian_count
     
-    # 2. Training Loop
-    current_gaussians = initial_gaussians
-    current_iter = 0
-    
-    while current_iter < total_iterations:
+    for iter in range(total_iterations):
         # Standard 3DGS training step
-        render_loss, psnr_values = train_step(current_gaussians)
-        current_iter += 1
+        train_step(gaussians, training_data, iter)
         
-        # Calculate mean per-image PSNR for the epoch
-        # In practice, accumulate PSNR over the epoch and average
-        epoch_psnr = calculate_mean_psnr(psnn_values)
-        
-        # Check for Growth Event
-        if current_iter >= total_iterations * densify_start_iter_fraction:
-            # Calculate target based on quality feedback
-            rho = (1.0 / s) - c * (epoch_psnr - P_star)
-            T_adapt = rho * T_cap
-            
-            # Budgeted densification: ramp to T_adapt
-            # This is a simplified representation; actual implementation 
-            # ramps linearly over the growth window
-            if len(current_gaussians) < T_adapt:
-                current_gaussians = densify_gaussians(current_gaussians, T_adapt)
+        # Check for Growth/Pruning Event
+        if iter >= densify_start and iter <= densify_end:
+            # Determine if it's a growth event (every epoch_spacing epochs)
+            current_epoch = iter // iterations_per_epoch
+            if current_epoch % epoch_spacing == 0:
                 
-        # Check for Soft Pruning
-        if current_iter >= total_iterations * soft_prune_start_iter_fraction:
-            # Compute sensitivity scores for pre-growth Gaussians
-            # This requires a backward pass with unit upstream multiplier
-            sensitivity_scores = compute_sensitivity_scores(current_gaussians)
-            
-            # Rank and keep top fraction rho
-            # Note: rho is recalculated from the *preceding* epoch's PSNR
-            # For the first prune, use initial P or a default
-            rho_prune = (1.0 / s) - c * (epoch_psnr - P_star)
-            
-            # Guard against catastrophic collapse
-            if rho_prune < 0.1:
-                rho_prune = 0.1 # Abort event or clamp? Source says "guard abort"
-                # Implementation: skip pruning if it would remove >90%
-                pass 
-            else:
-                current_gaussians = prune_gaussians(current_gaussians, sensitivity_scores, rho_prune)
+                # 1. Quality Feedback
+                P = compute_mean_per_image_psnr(gaussians, training_data)
                 
-        # Check for Final Selection
-        if current_iter >= total_iterations * densify_end_iter_fraction:
-            # Final selection logic
-            rho_final = (1.0 / s) - c * (epoch_psnr - P_star)
-            f = min(1.0, s * rho_final)
-            
-            # h is the number of remaining events in a reference schedule
-            # For simplicity, assume h=1 for the final single prune event 
-            # as described in Eq 4 for the final selection stage
-            h = 1 
-            N_pre = len(current_gaussians)
-            N_G = round(N_pre * (f ** h))
-            
-            # Rank and retain top N_G
-            sensitivity_scores = compute_sensitivity_scores(current_gaussians)
-            current_gaussians = retain_top_gaussians(current_gaussians, sensitivity_scores, N_G)
-            
-            # Optimize retained population for remainder of training
-            # This breaks the loop structure slightly; in practice, 
-            # the loop continues but with a fixed, smaller population
-            break 
-            
-    return current_gaussians
+                # 2. Calculate Target
+                rho = INTERCEPT_ROUNDED - COEFF_ROUNDED * P
+                T_adapt = rho * T_cap
+                
+                # 3. Budgeted Densification
+                # Ramp linearly from initial_count to T_adapt
+                # This step adds Gaussians based on standard densification logic
+                # scaled to reach T_adapt by the end of the growth window
+                gaussians = densify_gaussians(gaussians, T_adapt, initial_count, iter, densify_end)
+                
+                # 4. Soft Pruning (if after prune_start)
+                if iter >= prune_start:
+                    # Compute sensitivity scores for Gaussians existing BEFORE growth
+                    # Note: Newly created Gaussians are exempt
+                    pre_growth_indices = get_indices_before_growth(gaussians)
+                    scores = compute_sensitivity_scores(gaussians[pre_growth_indices])
+                    
+                    # Rank and keep top rho fraction
+                    num_to_keep = max(1, round(rho * len(pre_growth_indices)))
+                    sorted_indices = argsort_descending(scores)
+                    keep_indices = pre_growth_indices[sorted_indices[:num_to_keep]]
+                    
+                    # Remove others
+                    remove_indices = [i for i in pre_growth_indices if i not in keep_indices]
+                    
+                    # Guard against catastrophic collapse
+                    if len(remove_indices) > MAX_REMOVAL_PCT * len(gaussians):
+                        break # Abort event
+                        
+                    # Round removal count to multiple of GROUP_SIZE
+                    num_to_remove = len(remove_indices)
+                    num_to_remove = (num_to_remove // GROUP_SIZE) * GROUP_SIZE
+                    remove_indices = remove_indices[:num_to_remove]
+                    
+                    gaussians = remove_gaussians(gaussians, remove_indices)
+                    
+                # Recalibrate quality for next event
+                P = compute_mean_per_image_psnr(gaussians, training_data)
 
-def compute_sensitivity_scores(gaussians):
-    """
-    Computes sensitivity score using LiteGS kernel.
-    Substitutes unit upstream image multiplier during photometric-loss backward pass.
-    """
-    scores = zeros(len(gaussians))
-    # Accumulate scores over the epoch
-    # This is a placeholder for the specific kernel implementation
-    # which scatters visible cluster scores back to original Gaussian indices
-    return scores
+        # Final Selection at 80%
+        if iter == densify_end:
+            N_pre = len(gaussians)
+            P = compute_mean_per_image_psnr(gaussians, training_data)
+            rho_final = INTERCEPT_ROUNDED - COEFF_ROUNDED * P
+            f = min(1.0, S_FACTOR * rho_final)
+            
+            # Estimate h (remaining events in reference schedule)
+            # Reference schedule: prunes every 8% of total iterations
+            # h is count of 8% intervals remaining from iter to total_iterations
+            remaining_iter = total_iterations - iter
+            h = floor(remaining_iter / (0.08 * total_iterations))
+            if h == 0: h = 1 # Ensure at least one selection step
+            
+            N_G = N_pre * (f ** h)
+            
+            # Rank all by sensitivity
+            scores = compute_sensitivity_scores(gaussians)
+            sorted_indices = argsort_descending(scores)
+            keep_indices = sorted_indices[:round(N_G)]
+            
+            gaussians = gaussians[keep_indices]
+            break # Final selection ends the densification phase
 
-def prune_gaussians(gaussians, scores, rho):
-    """
-    Prunes Gaussians based on sensitivity score.
-    Removes counts rounded down to multiple of 128.
-    """
-    # Sort by score descending
-    sorted_indices = argsort(scores, descending=True)
-    
-    # Calculate number to keep
-    N_keep = round(len(gaussians) * rho)
-    
-    # Calculate number to remove
-    N_remove = len(gaussians) - N_keep
-    
-    # Round down to multiple of 128
-    N_remove_aligned = (N_remove // 128) * 128
-    
-    # Select Gaussians to keep
-    keep_indices = sorted_indices[:N_keep + N_remove_aligned] # Keep extra to align? 
-    # Actually, source says "Removal counts are rounded down... preserving smaller remainders"
-    # So we remove N_remove_aligned, keeping the rest.
-    
-    # Recluster into Morton-ordered groups of 128
-    remaining_gaussians = [gaussians[i] for i in keep_indices]
-    return recluster_morton_128(remaining_gaussians)
+    return gaussians
 ```
-
-### Edge Cases and Pitfalls
-*   **Catastrophic Collapse:** If a pruning event would remove more than 90% of the Gaussian population, the event is aborted [S1, unofficial].
-*   **Redundant Views:** The allowance calculation uses track-adjusted pixels, making it invariant to duplicated views, unlike methods using total pixel count [S1, unofficial].
-*   **Precision:** Nested rounding in the allowance formula ensures integer precision for the scaling factor $g$ [S1, unofficial].
-*   **New Gaussians:** Newly created Gaussians are exempt from pruning until they have trained [S1, unofficial].
 
 ## Subtopics
 
 ### [Capture-Conditioned Learning Allowance](10214-capture-conditioned-learning-allowance.md)
-Determines the target Gaussian population size based on capture characteristics, specifically using track-adjusted pixels normalized against standard scenes, to replace fixed defaults. It ensures the model budget is invariant to redundant views.
+A method to determine the target Gaussian population size for 3D Gaussian Splatting based on capture characteristics, specifically using track-adjusted pixels normalized against standard scenes, to replace fixed defaults. It sets apart from sibling methods by ensuring the model budget is invariant to redundant views (e.g., duplicated images), whereas alternatives like total pixel count scale with view count and SfM point counts scale with matched-observation density rather than capture scale.
 
 ## Operating characteristics
-*   **Time Complexity:** Training time is comparable to standard 3DGS, with additional overhead for sensitivity score computation and periodic densification/pruning. Sensitivity scoring uses a modified backward pass without additional renders [S1, unofficial].
-*   **Memory Complexity:** Memory usage scales with the number of Gaussians, which is automatically determined by TangoGS. On 13 standard benchmark scenes, TangoGS uses 48% fewer Gaussians than the best-performing baseline (LeGS) while matching PSNR [S1, unofficial].
-*   **Performance:** Matches the mean PSNR of the best-performing evaluated baseline (LeGS) on 13 standard scenes [S1, unofficial]. Automatically scales to larger models for large captures without retuning [S1, unofficial].
-*   **Strengths:** No per-capture tuning required; invariant to redundant views; reduces model size significantly on standard scenes.
-*   **Limitations:** Requires sensitivity score computation; relies on accurate PSNR estimation; fixed constants ($T_{\text{ref}}$, $g$) may not be optimal for all scene types.
-*   **When to Use:** When training on multiple captures with varying scales and view densities, and when computational resources for per-capture hyperparameter tuning are limited.
-*   **When Not to Use:** When maximum possible PSNR is required regardless of model size, or when the capture characteristics deviate significantly from the standard scenes used to derive $T_{\text{ref}}$.
+*   **Time and Memory Complexity:** The allowance calculation is $O(1)$ relative to scene complexity, depending only on metadata. The densification and pruning are $O(N)$ per event, where $N$ is the number of Gaussians. The sensitivity score computation requires a backward pass, adding gradient computation overhead but no additional renders [S1, unofficial].
+*   **Measured Performance:** On 13 standard benchmark scenes, TangoGS matches the mean PSNR of the best-performing baseline (LeGS) with 48% fewer Gaussians [S1, unofficial]. On 8 large captures, it automatically scales to larger models without retuning [S1, unofficial].
+*   **Strengths:** Single configuration across all 21 tested captures; invariant to redundant views; automatic scaling to large captures; reduced model size compared to baselines [S1, unofficial].
+*   **Limitations:** Requires accurate sparse reconstruction metadata (tracks) for allowance calculation; sensitive to the quality feedback loop (PSNR calculation); potential for model collapse if pruning thresholds are misaligned with training progress (mitigated by the 90% guard) [S1, unofficial].
+*   **When to Use:** When deploying 3D Gaussian Splatting across diverse capture scales (from small indoor to large outdoor) without manual hyperparameter tuning.
+*   **When Not to Use:** When the sparse reconstruction is poor or unavailable, as the allowance calculation depends on track-adjusted pixels.
 
 ## Background
-TangoGS was introduced in the paper "Gauss What You Need: Compact Gaussian Splatting Across Scene Scales" [S1, unofficial]. It addresses the limitation of standard 3DGS, which requires manual tuning of densification parameters for different scenes. TangoGS combines capture-derived model sizing with training-based adaptation to automatically scale the number of Gaussians. It is implemented on top of LiteGS [S1, unofficial].
+TangoGS was introduced in the paper "Gauss What You Need: Compact Gaussian Splatting Across Scene Scales" [S1, unofficial]. It addresses the limitation of standard 3D Gaussian Splatting, which requires per-capture tuning of densification parameters and fixed population sizes that do not scale well across different capture extents and resolutions [S1, unofficial]. The method builds on LiteGS for its renderer and optimizer, integrating sensitivity-based pruning from Speedy-Splat [S1, unofficial].
 
 ## Sources
 [S1] Gauss What You Need: Compact Gaussian Splatting Across Scene Scales, https://arxiv.org/abs/2609.31248, fetched 2026-10-29 (unofficial)

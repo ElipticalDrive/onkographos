@@ -1,0 +1,208 @@
+--- v005.md
++++ v006.md
+@@ -1,40 +1,44 @@
+ # Adaptive Gaussian Refinement
+ 
+-Also called: Residual Gaussian Refinement, 7DGS Adaptive Refinement
++Also called: 7DGS Adaptive Refinement, Residual Correction Module
+ 
+ ## Overview
+-Adaptive Gaussian Refinement is a technique that dynamically adjusts Gaussian parameters using neural network-predicted residuals to improve the modeling of complex non-rigid deformations and time-varying appearance [S1]. It addresses the limitation of static covariance matrices in standard 3D Gaussian Splatting, which cannot adequately represent dynamic shape changes or motion-induced deformations [S1]. Unlike sibling methods that rely on gradient-based densification triggers [Parent], this method operates continuously during rendering by applying learned corrections to the base Gaussian parameters before conditional slicing.
++Adaptive Gaussian Refinement is a technique that dynamically adjusts Gaussian parameters using neural network-predicted residuals to improve the modeling of complex non-rigid deformations and time-varying appearance [S1]. It addresses the limitation of static covariance matrices in standard 3D Gaussian Splatting, which cannot represent dynamic shape changes or motion-induced deformations [S1]. Unlike sibling methods that rely on gradient-based densification or MCMC sampling, this method uses lightweight MLPs to predict continuous residual corrections for position, time, direction, and covariance based on a contextual feature vector [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Base Gaussian parameters: spatial mean $\mu_p$, temporal coordinate $\mu_t$, directional mean $\mu_d$, vectorized lower-triangular elements of the 7D covariance matrix $l$, and base opacity $\alpha$. Current time $t$ and view direction $d$ are also required for the refinement context.
+-*   **Output:** Refined parameters $\hat{\mu}_p, \hat{\mu}_t, \hat{\mu}_d, \hat{l}$, which are used to compute the refined covariance $\hat{\Sigma}$ for subsequent conditional slicing [S1].
++*   **Inputs:**
++    *   Gaussian parameters: spatial mean $\mu_p$, temporal coordinate $\mu_t$, directional mean $\mu_d$, base opacity $\alpha$, and the vectorized lower-triangular elements of the 7D covariance matrix $l$ [S1].
++    *   Observed time $t$ [S1].
++    *   View direction $d$ (used in subsequent conditional slicing, but the refinement itself operates on the 7D parameters) [S1].
++*   **Outputs:**
++    *   Refined parameters: $\hat{\mu}_p, \hat{\mu}_t, \hat{\mu}_d, \hat{l}$ [S1].
++    *   Refined covariance matrix $\hat{\Sigma}$ (derived from $\hat{l}$) [S1].
+ 
+ **Data Structures:**
+-*   **Feature Vector $f$:** A concatenated vector containing the geometric and temporal context of the Gaussian.
+-    *   Layout: $f = [\mu_p; \mu_t; \mu_d; \gamma(t)]$.
+-    *   Dimensions: $\mu_p \in \mathbb{R}^3$, $\mu_t \in \mathbb{R}^1$ (scalar time coordinate), $\mu_d \in \mathbb{R}^3$, $\gamma(t) \in \mathbb{R}^{2K}$.
+-*   **MLP Architecture:** Small two-layer multilayer perceptrons (MLPs) used to predict residuals.
+-    *   Architecture: $C_{in} \times 64 \times C_{out}$.
+-    *   $C_{in}$ is the dimension of $f$. $C_{out}$ matches the dimension of the parameter being refined (e.g., 3 for position, 1 for time, 3 for direction, 28 for covariance vector $l$).
++*   **Feature Vector $f$:** A concatenated vector containing $\mu_p$ (3D), $\mu_t$ (1D), $\mu_d$ (3D), and temporal encoding $\gamma(t)$ (20D). Total dimension $C_{in} = 3 + 1 + 3 + 20 = 27$ [S1].
++*   **MLP Architecture:** Small two-layer multilayer perceptrons with architecture $C_{in} \times 64 \times C_{out}$ [S1]. Separate MLPs are used for each parameter group: $\phi_p, \phi_t, \phi_d, \phi_l$ [S1].
+ 
+ **Steps:**
+-1.  **Temporal Encoding:** Compute the high-frequency temporal encoding $\gamma(t)$ for the current time step $t$.
++1.  **Temporal Encoding:** Compute the high-frequency temporal encoding $\gamma(t)$ for the observed time $t$. The encoding is defined as:
+     $$ \gamma(t) = [\sin(2^0 \pi t), \cos(2^0 \pi t), \dots, \sin(2^{K-1} \pi t), \cos(2^{K-1} \pi t)] $$
+-    where $K=10$ [S1].
+-2.  **Feature Construction:** Concatenate the spatial mean $\mu_p$, temporal coordinate $\mu_t$, directional mean $\mu_d$, and the encoded time $\gamma(t)$ to form the feature vector $f$:
++    where $K=10$ [S1]. This results in a 20-dimensional vector.
++
++2.  **Feature Construction:** Construct the feature vector $f$ by concatenating the spatial mean, temporal coordinate, directional mean, and temporal encoding:
+     $$ f = \mu_p \oplus \mu_t \oplus \mu_d \oplus \gamma(t) $$
+     where $\oplus$ denotes vector concatenation [S1].
+-3.  **Residual Prediction:** Pass $f$ through separate lightweight MLPs $\phi_p, \phi_t, \phi_d, \phi_l$ to predict residual adjustments for position, time, direction, and covariance, respectively.
+-    $$ r_p = \phi_p(f), \quad r_t = \phi_t(f), \quad r_d = \phi_d(f), \quad r_l = \phi_l(f) $$
+-4.  **Parameter Update:** Add the predicted residuals to the original base parameters to obtain the refined estimates:
+-    $$ \hat{\mu}_p = \mu_p + r_p $$
+-    $$ \hat{\mu}_t = \mu_t + r_t $$
+-    $$ \hat{\mu}_d = \mu_d + r_d $$
+-    $$ \hat{l} = l + r_l $$
+-    Here, $l$ represents the vectorized lower-triangular elements of the 7D covariance matrix [S1].
++
++3.  **Residual Prediction:** Pass $f$ through four separate two-layer MLPs ($\phi_p, \phi_t, \phi_d, \phi_l$) to predict residual adjustments for the spatial position, temporal coordinate, directional mean, and covariance parameters respectively [S1].
++
++4.  **Parameter Update:** Add the predicted residuals to the original parameters to obtain the refined estimates:
++    $$ \hat{\mu}_p = \mu_p + \phi_p(f) $$
++    $$ \hat{\mu}_t = \mu_t + \phi_t(f) $$
++    $$ \hat{\mu}_d = \mu_d + \phi_d(f) $$
++    $$ \hat{l} = l + \phi_l(f) $$
++    where $l$ represents the vectorized lower-triangular elements of the 7D covariance matrix [S1].
++
+ 5.  **Covariance Reconstruction:** Reconstruct the refined covariance matrix $\hat{\Sigma}$ from the updated lower-triangular elements $\hat{l}$:
+     $$ \hat{\Sigma} = \hat{L}\hat{L}^\top $$
+-    where $\hat{L}$ is the matrix formed from $\hat{l}$ [S1].
++    where $\hat{L}$ is the matrix form of $\hat{l}$ [S1].
+ 
+ **Pseudocode:**
+@@ -42,71 +46,92 @@
+ import numpy as np
+ 
+-def adaptive_gaussian_refinement(mu_p, mu_t, mu_d, l, t, K=10):
++def temporal_encoding(t, K=10):
+     """
+-    Applies adaptive refinement to Gaussian parameters using neural network residuals.
+-    
++    Computes the high-frequency temporal encoding gamma(t).
+     Args:
+-        mu_p: numpy array, shape (3,), spatial mean.
++        t: float, observed time.
++        K: int, number of frequency bands (default 10).
++    Returns:
++        np.array, shape (2*K,)
++    """
++    frequencies = np.power(2, np.arange(K))
++    sin_vals = np.sin(2 * np.pi * frequencies * t)
++    cos_vals = np.cos(2 * np.pi * frequencies * t)
++    return np.concatenate([sin_vals, cos_vals])
++
++def adaptive_gaussian_refinement(mu_p, mu_t, mu_d, l, t, mlps):
++    """
++    Performs adaptive Gaussian refinement using neural network residuals.
++    Args:
++        mu_p: np.array, shape (3,), spatial mean.
+         mu_t: float, temporal coordinate.
+-        mu_d: numpy array, shape (3,), directional mean.
+-        l: numpy array, shape (28,), vectorized lower-triangular elements of 7D covariance.
+-        t: float, current time.
+-        K: int, number of frequency bands for temporal encoding (default 10).
+-        
++        mu_d: np.array, shape (3,), directional mean.
++        l: np.array, shape (28,), vectorized lower-triangular elements of 7D covariance.
++        t: float, observed time.
++        mlps: dict, containing 'phi_p', 'phi_t', 'phi_d', 'phi_l' MLP functions.
++              Each MLP takes a feature vector and returns a residual vector.
+     Returns:
+-        mu_p_hat, mu_t_hat, mu_d_hat, l_hat: Refined parameters.
++        tuple: (mu_p_hat, mu_t_hat, mu_d_hat, l_hat, Sigma_hat)
+     """
+     # Step 1: Temporal Encoding
+-    # gamma(t) = [sin(2^0 pi t), cos(2^0 pi t), ..., sin(2^(K-1) pi t), cos(2^(K-1) pi t)]
+-    exponents = np.arange(K)
+-    freqs = 2.0 ** exponents
+-    sin_vals = np.sin(freqs * np.pi * t)
+-    cos_vals = np.cos(freqs * np.pi * t)
+-    gamma_t = np.concatenate([sin_vals, cos_vals])
++    gamma_t = temporal_encoding(t, K=10)
+     
+     # Step 2: Feature Construction
+-    # f = mu_p ⊕ mu_t ⊕ mu_d ⊕ gamma(t)
+-    # Note: mu_t is a scalar, needs to be treated as a vector of size 1 for concatenation
+-    f = np.concatenate([mu_p, np.array([mu_t]), mu_d, gamma_t])
++    # mu_p: 3, mu_t: 1 (scalar), mu_d: 3, gamma_t: 20
++    # Note: mu_t must be reshaped to (1,) for concatenation if necessary
++    mu_t_vec = np.array([mu_t])
++    f = np.concatenate([mu_p, mu_t_vec, mu_d, gamma_t])
+     
+     # Step 3 & 4: Residual Prediction and Parameter Update
+-    # In a real implementation, phi_p, phi_t, phi_d, phi_l are trained MLPs.
+-    # Here we simulate the residual application.
+-    # The sources specify MLP architecture: C_in x 64 x C_out.
+-    # C_in = len(f). C_out depends on the parameter.
++    # phi_p predicts residual for mu_p (shape 3)
++    residual_p = mlps['phi_p'](f)
++    mu_p_hat = mu_p + residual_p
+     
+-    # Placeholder for MLP forward pass
+-    # r_p = phi_p(f)
+-    # r_t = phi_t(f)
+-    # r_d = phi_d(f)
+-    # r_l = phi_l(f)
++    # phi_t predicts residual for mu_t (shape 1)
++    residual_t = mlps['phi_t'](f)
++    mu_t_hat = mu_t + residual_t[0] # Extract scalar
+     
+-    # For the purpose of this article, we denote the residuals as r_p, r_t, r_d, r_l
+-    # These are outputs of the respective MLPs.
++    # phi_d predicts residual for mu_d (shape 3)
++    residual_d = mlps['phi_d'](f)
++    mu_d_hat = mu_d + residual_d
+     
+-    # Step 4: Update parameters
+-    mu_p_hat = mu_p + r_p
+-    mu_t_hat = mu_t + r_t
+-    mu_d_hat = mu_d + r_d
+-    l_hat = l + r_l
++    # phi_l predicts residual for l (shape 28)
++    residual_l = mlps['phi_l'](f)
++    l_hat = l + residual_l
+     
+-    return mu_p_hat, mu_t_hat, mu_d_hat, l_hat
++    # Step 5: Covariance Reconstruction
++    # Reconstruct 7x7 matrix from lower triangular elements
++    L_hat = np.zeros((7, 7))
++    idx = 0
++    for i in range(7):
++        for j in range(i + 1):
++            L_hat[i, j] = l_hat[idx]
++            idx += 1
++            
++    Sigma_hat = L_hat @ L_hat.T
++    
++    return mu_p_hat, mu_t_hat, mu_d_hat, l_hat, Sigma_hat
+ ```
+ 
++**Parameters:**
++*   $K=10$: Number of frequency bands for temporal encoding [S1].
++*   MLP Hidden Size: 64 [S1].
++*   MLP Input Size ($C_{in}$): 27 (3 for $\mu_p$ + 1 for $\mu_t$ + 3 for $\mu_d$ + 20 for $\gamma(t)$) [S1].
++
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The temporal encoding uses high-frequency sinusoids. Care must be taken with floating-point precision for large $t$ values to avoid numerical instability in the sine/cosine calculations [S1].
+-*   **Covariance Validity:** The refined covariance matrix $\hat{\Sigma}$ must remain positive semi-definite. Since $\hat{\Sigma}$ is reconstructed from $\hat{L}\hat{L}^\top$, it is inherently positive semi-definite by construction, provided $\hat{L}$ is a valid lower-triangular matrix [S1]. However, the residuals $r_l$ must be small enough to prevent $\hat{L}$ from becoming numerically unstable or degenerate.
+-*   **MLP Training:** The MLPs $\phi$ must be trained jointly with the Gaussian parameters. If the residuals are not properly regularized, they may lead to overfitting or unstable dynamics [S1].
++*   **Precision:** The temporal encoding involves high-frequency sinusoids. Care must be taken with numerical stability for large $t$ values, although the periodic nature mitigates overflow.
++*   **Covariance Validity:** The refined covariance $\hat{\Sigma}$ must remain positive semi-definite. Since $\hat{\Sigma} = \hat{L}\hat{L}^\top$, it is inherently positive semi-definite by construction, provided $\hat{L}$ is real [S1]. However, if the residual $\phi_l(f)$ is large, the resulting covariance might become ill-conditioned or numerically unstable during subsequent operations (e.g., inversion in conditional slicing) [S1].
++*   **Timing:** The refinement module is applied *before* the conditional slicing step [S1]. Applying it after would be incorrect as the slicing depends on the refined 7D parameters.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Adds the cost of two MLP forward passes per Gaussian per view. The MLPs are small ($C_{in} \times 64 \times C_{out}$), so the overhead is relatively low compared to the rendering cost, preserving the real-time efficiency of 3DGS [S1].
+-*   **Memory Complexity:** Requires storing the weights of the MLPs. The number of parameters is proportional to $C_{in} \times 64 + 64 \times C_{out}$ per MLP. Since there are four MLPs, the memory overhead is constant per Gaussian instance (shared weights) or small if weights are shared across Gaussians.
+-*   **Strengths:** Enables accurate modeling of complex non-rigid deformations and time-varying appearance without increasing the number of Gaussians [S1].
+-*   **Limitations:** Requires training additional neural networks. Performance depends on the capacity of the MLPs and the quality of the temporal encoding.
+-*   **When to use:** When rendering dynamic scenes with non-rigid deformations or time-varying appearance where static Gaussians are insufficient [S1].
+-*   **When not to use:** For static scenes, where standard 3DGS or densification strategies are more appropriate.
++*   **Time Complexity:** Adds the cost of evaluating four small MLPs per Gaussian per frame. The MLPs are $C_{in} \times 64 \times C_{out}$, which is negligible compared to the rasterization cost.
++*   **Memory Complexity:** Requires storing the MLP weights. The MLPs are small (hidden size 64), so the memory overhead is minimal compared to the Gaussian parameters themselves.
++*   **Strengths:** Enables accurate modeling of complex non-rigid deformations and time-varying appearance without increasing the number of Gaussians [S1]. Preserves the computational efficiency of real-time rendering pipelines [S1].
++*   **Limitations:** Relies on the capacity of the MLPs to capture the dynamics. May struggle with highly chaotic or unpredictable motions if the MLP is not sufficiently expressive or trained adequately.
++*   **When to use:** When rendering dynamic scenes with non-rigid deformations or time-varying appearance where static Gaussians fail to capture the motion [S1].
++*   **When not to use:** For static scenes where standard 3DGS is sufficient, as the MLP overhead is unnecessary.
+ 
+ ## Background
+-Adaptive Gaussian Refinement was introduced in the 7DGS paper (Unified Spatial-Temporal-Angular Gaussian Splatting) [S1]. It was developed to address the limitations of static covariance in representing complex dynamic behaviors such as non-rigid deformations or motion-induced shape changes [S1]. The method was evaluated on synthetic monocular videos (D-NeRF) and in-the-wild multi-view videos (Technicolor) [S1].
++Adaptive Gaussian Refinement was introduced in the 7DGS (Unified Spatial-Temporal-Angular Gaussian Splatting) paper [S1]. It was developed to address the limitation of static covariance in 3D Gaussian Splatting when representing complex dynamic behaviors such as non-rigid deformations or motion-induced shape changes [S1]. The method is part of the 7DGS model, which jointly encodes spatial structure, temporal evolution, and angular information [S1].
+ 
+ ## Sources
