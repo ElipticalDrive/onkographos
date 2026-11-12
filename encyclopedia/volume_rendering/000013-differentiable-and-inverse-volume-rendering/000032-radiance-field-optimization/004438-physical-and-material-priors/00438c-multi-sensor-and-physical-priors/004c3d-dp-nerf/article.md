@@ -3,70 +3,70 @@
 Also called: Deblurred Neural Radiance Field with Physical Scene Priors
 
 ## Overview
-DP-NeRF is a framework for reconstructing clean, sharp 3D scenes from blurry input images (specifically camera motion blur and defocus blur) by imposing two physical priors derived from the image acquisition process: the Rigid Blurring Kernel (RBK) and Adaptive Weight Proposal (AWP) [S1]. Unlike methods that optimize rays independently in 2D, DP-NeRF ensures 3D geometric and appearance consistency by modeling the blurring process as a rigid camera motion and refining color composition based on depth-blur relationships [S1]. It differs from Deblur-NeRF by using these 3D physical priors and a coarse-to-fine optimization strategy with two predicted blurred colors, rather than a single 2D pixel-wise optimization [S1].
+DP-NeRF is a framework for reconstructing clean 3D scenes from blurred input images (camera motion blur and defocus blur) by imposing two physical priors derived from the image acquisition process [S1]. It differs from prior methods like Deblur-NeRF by using 3D physical priors instead of 2D pixel-wise independent ray optimization, ensuring geometric and appearance consistency across views [S1]. Unlike Deblur-NeRF, which predicts a single blurred color, DP-NeRF employs two blurred color predictions to enable a coarse-to-fine optimization strategy [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of $N$ blurry RGB images $\{B_{sp}\}$ with known camera poses (calibrated via COLMAP) [S1]. The images are resized to $600 \times 400$ [S1].
-*   **Outputs:** A trained sharp NeRF model capable of rendering sharp novel views [S1].
+*   **Inputs:** A set of blurred RGB images $B_{sp}$ with known camera poses (calibrated via COLMAP) [S1].
+*   **Outputs:** A trained "sharp" NeRF model capable of rendering clean novel views [S1].
 
 **Data Structures:**
-*   **RBK Architecture:**
-    *   **Input:** View information $l_s$ embedded into 64 channels [S1].
-    *   **Encoding Branch ($E$):** MLP with 4 fully connected linear layers, each with 64 dimensions and ReLU activation [S1].
-    *   **Decoding Branches ($W, R, L$):** Three separate branches. Each consists of one linear layer with 32 dimensions followed by an output linear layer [S1].
+The method relies on the standard NeRF representation (MLPs for density $\sigma$ and color $\mathbf{c}$) augmented with two specific modules:
+1.  **Rigid Blurring Kernel (RBK):**
+    *   **Encoding Branch ($E$):** MLP with 4 fully-connected linear layers, each 64 dimensions, ReLU activation [S1].
+    *   **Decoding Branches ($W, R, L$):** Each consists of one linear layer with 32 dimensions and an output linear layer [S1].
     *   **Outputs:**
-        *   $m_s$: Motion weights, channel dimension $k$ (hyper-parameter controlling the number of rigid camera motions). Normalized such that $\sum_{i=0}^{k} m_{s,i} = 1$ [S1].
+        *   $m_s$: Motion weights, channel dimension $k$ (hyper-parameter controlling the number of rigid camera motions) [S1]. Normalized such that $\sum_{i=0}^{k} m_{s,i} = 1$ [S1].
         *   $r_s$: Rigid motion parameters, channel dimension $3k$ [S1].
         *   $v_s$: View-specific parameters, channel dimension $3k$ [S1].
-*   **AWP Architecture:**
-    *   Uses Feature Modulation (FM) and a Motion Aggregation Module (MAM) [S1].
-    *   Inputs include depth features of samples for transformed rays, viewing direction, and view information [S1].
-    *   Notations (Table 3 in [S1]):
-        *   $l_s$: View info, dim 64.
-        *   $C_{d1}, C_{d2}, C_{d3}, C_{d4}$: Feature dimensions 128, 64, 32, 16.
-        *   $N_m$: Number of motions ($1+k$).
-        *   $N_s$: Number of samples ($N_c + N_f$).
-        *   $N_c, N_f$: Coarse and fine sample counts (64 each in default config) [S1].
-
-**Parameters:**
-*   $\lambda_s$: Initial weight for coarse-to-fine optimization, set to 0.9 [S1].
-*   $\lambda_e$: Final weight for coarse-to-fine optimization, set to 0.1 [S1].
-*   $k$: Hyper-parameter for the number of rigid camera motions in RBK [S1].
-*   Learning Rate: Exponential decay from $5 \times 10^{-4}$ to $8 \times 10^{-5}$ [S1].
-*   Optimizer: Adam with default parameters [S1].
-*   Training Iterations: 200,000 total [S1].
+    *   **Input:** View information $l_s$ embedded with 64 channels [S1].
+2.  **Adaptive Weight Proposal (AWP):**
+    *   Uses Feature Modulation (FM) and a Motion Feature Aggregation Module (MAM) [S1].
+    *   **Inputs:** Depth features of samples for transformed rays, viewing direction, and view information [S1].
+    *   **Notations (Default Values):**
+        *   $l_s$: 64 channels [S1].
+        *   $N_m$: Number of rigid motions ($k$) [S1].
+        *   $N_s$: Total samples per ray ($N_c + N_f$) [S1].
+        *   $N_c, N_f$: Coarse and fine samples (64 each) [S1].
+        *   $\zeta_{motion}$: Motion feature (16 channels) [S1].
+        *   $\zeta_{sample}$: Sample feature (16 channels) [S1].
+        *   $\hat{\eta}_p$: Intermediate feature (32 channels) [S1].
+        *   $\eta_p$: Final feature (32 channels) [S1].
+        *   $C_{corr}$: Correlation operation [S1].
 
 **Numbered Steps:**
-1.  **Coarse Initialization:** Train a pure NeRF for 1200 iterations to obtain a coarse scene representation [S1].
-2.  **RBK and AWP Optimization:** After 1200 iterations, begin joint optimization of the RBK, AWP, and the sharp NeRF [S1].
-3.  **RBK Processing:**
-    *   Embed view information $l_s$ (64 channels) [S1].
-    *   Pass $l_s$ through Encoding Branch $E$ (4 layers, 64 dims, ReLU) [S1].
-    *   Pass the encoded features through Decoding Branches $W, R, L$ (each: 1 layer 32 dims + output layer) [S1].
-    *   Generate outputs $m_s$ (dim $k$), $r_s$ (dim $3k$), and $v_s$ (dim $3k$) [S1].
-    *   Normalize $m_s$ along the motion axis $k$ so $\sum_{i=0}^{k} m_{s,i} = 1$ [S1].
+
+1.  **Coarse Scene Initialization:** Train a pure NeRF for 1200 iterations to obtain a coarse scene representation [S1].
+2.  **RBK Processing:**
+    *   For each view, embed view information $l_s$ into 64 dimensions [S1].
+    *   Pass $l_s$ through Encoding Branch $E$ [S1].
+    *   Pass the encoded features through Decoding Branches $W, R, L$ to generate $m_s, r_s, v_s$ [S1].
     *   Use $r_s$ and $v_s$ to construct a 3D deformation field representing rigid camera motion, independent of 2D spatial ray position [S1].
-4.  **AWP Processing:**
-    *   Refine color composition weights using depth features, viewing direction, and view information [S1].
-    *   Utilize Feature Modulation (FM) and Motion Aggregation Module (MAM) to account for the relationship between depth and blur [S1].
-    *   Produce a second blurred color prediction $\tilde{B}_{sp}$ [S1].
-5.  **Color Composition:**
-    *   Generate two predicted blurred colors: $\hat{B}_{sp}$ (from RBK) and $\tilde{B}_{sp}$ (from AWP) [S1].
-    *   Compute the coarse loss $L_c = ||B_{sp} - \hat{B}_{sp}||$ and fine loss $L_f = ||B_{sp} - \tilde{B}_{sp}||$ [S1].
-6.  **Coarse-to-Fine Optimization:**
-    *   Calculate the exponential decay weight $\lambda$ for the current iteration $e_c$ [S1]:
-        $$ \alpha = -\log(\lambda_s / \lambda_e) / (e_f - e_c) $$
+    *   Compute a coarse blurred color prediction $\hat{B}_{sp}$ using the deformation field and the NeRF samples [S1].
+3.  **AWP Processing:**
+    *   For each ray, compute depth features for the transformed samples [S1].
+    *   Aggregate motion features using MAM based on depth features, viewing direction, and view information [S1].
+    *   Refine the composition weights using Feature Modulation [S1].
+    *   Compute a fine blurred color prediction $\tilde{B}_{sp}$ [S1].
+4.  **Loss Calculation:**
+    *   Compute the coarse reconstruction loss $L_c = ||B_{sp} - \hat{B}_{sp}||$ [S1].
+    *   Compute the fine reconstruction loss $L_f = ||B_{sp} - \tilde{B}_{sp}||$ [S1].
+    *   Calculate the exponential decay weight $\lambda$ for the current iteration $e_c$:
+        $$ \alpha = -\log(\lambda_s / \lambda_e) / (e_f - e_i) $$
         $$ \lambda = \lambda_s (\exp(\alpha(e_c - e_i))) $$
         where $e_i$ is the initial iteration (1200), $e_f$ is the final iteration (200,000), $\lambda_s = 0.9$, and $\lambda_e = 0.1$ [S1].
     *   Compute the final loss:
         $$ L_{final} = \lambda L_c + (1 - \lambda) L_f $$
-        $$ L_{final} = \lambda ||B_{sp} - \hat{B}_{sp}|| + (1 - \lambda) ||B_{sp} - \tilde{B}_{sp}|| $$
         [S1].
-    *   Update RBK, AWP, and NeRF parameters using gradient descent [S1].
-7.  **Inference:** Render the reconstructed 3D scene using only the trained sharp NeRF model [S1].
+5.  **Joint Optimization:**
+    *   Optimize the RBK, AWP, and the sharp NeRF parameters jointly using the Adam optimizer [S1].
+    *   Use only the reconstruction loss from the blurred input as supervision [S1].
+    *   Train for 200,000 iterations total (80,000 iterations for the joint phase) [S1].
+6.  **Inference:**
+    *   Render clean novel views using only the trained sharp NeRF model, ignoring the RBK and AWP modules [S1].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -78,98 +78,153 @@ class RBK(nn.Module):
     def __init__(self, k):
         super().__init__()
         self.k = k
-        # Encoding branch: 4 layers, 64 dims, ReLU
+        # Encoding branch: 4 FC layers, 64 dims, ReLU
         self.enc = nn.Sequential(
             nn.Linear(64, 64), nn.ReLU(),
             nn.Linear(64, 64), nn.ReLU(),
             nn.Linear(64, 64), nn.ReLU(),
             nn.Linear(64, 64), nn.ReLU()
         )
-        # Decoding branches: 1 layer 32 dims + output layer
-        self.dec_w = nn.Sequential(nn.Linear(64, 32), nn.Linear(32, k))
-        self.dec_r = nn.Sequential(nn.Linear(64, 32), nn.Linear(32, 3*k))
-        self.dec_v = nn.Sequential(nn.Linear(64, 32), nn.Linear(32, 3*k))
+        # Decoding branches
+        self.W = nn.Sequential(nn.Linear(64, 32), nn.Linear(32, k))
+        self.R = nn.Sequential(nn.Linear(64, 32), nn.Linear(32, 3*k))
+        self.L = nn.Sequential(nn.Linear(64, 32), nn.Linear(32, 3*k))
 
     def forward(self, l_s):
-        # l_s: [Batch, 64]
+        # l_s: [B, 64]
         h = self.enc(l_s)
-        m_s = self.dec_w(h) # [Batch, k]
-        r_s = self.dec_r(h) # [Batch, 3k]
-        v_s = self.dec_v(h) # [Batch, 3k]
-        
+        m_s = self.W(h) # [B, k]
+        r_s = self.R(h) # [B, 3k]
+        v_s = self.L(h) # [B, 3k]
         # Normalize m_s along motion axis k
         m_s = F.softmax(m_s, dim=-1)
         return m_s, r_s, v_s
 
+class AWP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Simplified MAM and FM structure based on description
+        # Inputs: depth features, viewing direction, view info
+        # Outputs: refined weights
+        self.mam = nn.Linear(64, 32) # Placeholder for MAM logic
+        self.fm = nn.Linear(32, 1)   # Placeholder for FM logic
+
+    def forward(self, depth_features, view_dir, view_info):
+        # Aggregate features
+        motion_feat = self.mam(torch.cat([depth_features, view_dir, view_info], dim=-1))
+        # Refine weights
+        weights = torch.sigmoid(self.fm(motion_feat))
+        return weights
+
 class DPNeRF:
-    def __init__(self, nerf_model, rbk, awp, k, lambda_s=0.9, lambda_e=0.1):
-        self.nerf = nerf_model
-        self.rbk = rbk
-        self.awp = awp
+    def __init__(self, k=10, n_coarse=64, n_fine=64):
         self.k = k
-        self.lambda_s = lambda_s
-        self.lambda_e = lambda_e
+        self.n_coarse = n_coarse
+        self.n_fine = n_fine
+        self.neural_nerf = NeuralNeRF() # Standard NeRF MLPs
+        self.rbk = RBK(k)
+        self.awp = AWP()
+        self.lambda_s = 0.9
+        self.lambda_e = 0.1
         self.e_i = 1200
         self.e_f = 200000
 
-    def get_lambda(self, e_c):
-        # e_c: current iteration
-        alpha = -torch.log(torch.tensor(self.lambda_s / self.lambda_e)) / (self.e_f - e_c)
-        lam = self.lambda_s * torch.exp(alpha * (e_c - self.e_i))
-        return lam
+    def render_ray(self, ray_o, ray_d, t_near, t_far, samples):
+        """
+        Standard NeRF rendering to get sigma and c for samples.
+        Returns sigma, c, depth.
+        """
+        # Implementation details of standard NeRF rendering
+        # ...
+        pass
 
-    def compute_loss(self, B_sp, B_hat_sp, B_tilde_sp, e_c):
-        # B_sp: Ground truth blurred RGB
-        # B_hat_sp: Prediction from RBK
-        # B_tilde_sp: Prediction from AWP
-        L_c = torch.norm(B_sp - B_hat_sp, p=2)
-        L_f = torch.norm(B_sp - B_tilde_sp, p=2)
+    def compute_blurred_color(self, ray_o, ray_d, t_near, t_far, view_info):
+        """
+        Computes both coarse (RBK) and fine (AWP) blurred color predictions.
+        """
+        # 1. Sample points along ray
+        t_vals = torch.linspace(t_near, t_far, self.n_coarse + self.n_fine)
+        xyz = ray_o.unsqueeze(0) + ray_d.unsqueeze(0) * t_vals.unsqueeze(1)
         
-        lam = self.get_lambda(e_c)
+        # 2. Get NeRF outputs
+        sigma, c = self.neural_nerf(xyz)
+        
+        # 3. RBK: Coarse prediction
+        # Apply rigid motion deformation based on view_info
+        m_s, r_s, v_s = self.rbk(view_info)
+        # Deform xyz based on r_s, v_s, m_s
+        xyz_deformed = apply_rigid_motion(xyz, r_s, v_s, m_s)
+        # Re-evaluate NeRF on deformed points (or approximate)
+        # Note: The paper implies RBK generates a deformation field used for composition
+        # Simplified: Assume we get coarse blurred color B_hat
+        B_hat = self.compute_composition(xyz, sigma, c, xyz_deformed)
+        
+        # 4. AWP: Fine prediction
+        # Get depth features for samples
+        depth_features = compute_depth_features(xyz, ray_d)
+        view_dir = ray_d
+        # Refine weights
+        weights = self.awp(depth_features, view_dir, view_info)
+        # Compute fine blurred color B_tilde using weights
+        B_tilde = self.compute_weighted_composition(xyz, sigma, c, weights)
+        
+        return B_hat, B_tilde
+
+    def compute_composition(self, xyz, sigma, c, xyz_deformed):
+        """
+        Standard volume rendering equation for coarse prediction.
+        """
+        # ... standard DVR ...
+        pass
+
+    def compute_weighted_composition(self, xyz, sigma, c, weights):
+        """
+        Volume rendering with adaptive weights from AWP.
+        """
+        # ... weighted DVR ...
+        pass
+
+    def train_step(self, ray_o, ray_d, t_near, t_far, view_info, gt_blurred_rgb):
+        B_hat, B_tilde = self.compute_blurred_color(ray_o, ray_d, t_near, t_far, view_info)
+        
+        L_c = torch.norm(gt_blurred_rgb - B_hat)
+        L_f = torch.norm(gt_blurred_rgb - B_tilde)
+        
+        # Coarse-to-fine weight decay
+        alpha = -torch.log(torch.tensor(self.lambda_s / self.lambda_e)) / (self.e_f - self.e_i)
+        # ec is current iteration, passed as argument or tracked externally
+        # lambda = lambda_s * exp(alpha * (ec - e_i))
+        # For this step, assume ec is available
+        lam = self.lambda_s * torch.exp(alpha * (self.current_iter - self.e_i))
+        
         L_final = lam * L_c + (1 - lam) * L_f
         return L_final
-
-    def train_step(self, images, poses, e_c):
-        # 1. Render coarse prediction using RBK
-        # RBK generates rigid motion field based on view info
-        view_info = get_view_info(poses) # Implementation detail: extract view embedding
-        m_s, r_s, v_s = self.rbk(view_info)
-        
-        # Use r_s, v_s to transform rays/samples for coarse prediction
-        B_hat_sp = self.nerf.render_with_rigid_motion(poses, m_s, r_s, v_s)
-        
-        # 2. Render fine prediction using AWP
-        # AWP refines weights based on depth and blur relationship
-        B_tilde_sp = self.awp.refine_color_composition(poses, self.nerf.get_depths())
-        
-        # 3. Compute Loss
-        loss = self.compute_loss(images, B_hat_sp, B_tilde_sp, e_c)
-        
-        # 4. Backpropagate
-        loss.backward()
-        return loss
-
-    def render(self, new_poses):
-        # Inference: Use only sharp NeRF
-        return self.nerf.render_sharp(new_poses)
 ```
 
+**Parameters:**
+*   $\lambda_s$: Initial weight for coarse-to-fine optimization, set to 0.9 [S1].
+*   $\lambda_e$: Final weight for coarse-to-fine optimization, set to 0.1 [S1].
+*   $k$: Hyper-parameter controlling the number of rigid camera motions in the RBK. Output channel dimensions for $m_s, r_s, v_s$ are $k, 3k, 3k$ respectively [S1].
+*   $N_c, N_f$: Number of coarse and fine samples, set to 64 each [S1].
+*   Learning Rate: Exponentially decays from $5 \times 10^{-4}$ to $8 \times 10^{-5}$ [S1].
+*   Optimizer: Adam with default parameters [S1].
+*   Image Resolution: Resized to $600 \times 400$ [S1].
+*   Total Iterations: 200,000 [S1].
+*   RBK Training Start: After 1200 iterations of pure NeRF training [S1].
+
 **Edge Cases and Pitfalls:**
-*   **Object Motion Blur:** The method assumes a static scene. It fails to reconstruct correct geometry for moving objects because it lacks multi-view data for a specific time instance [S1].
+*   **Object Motion Blur:** The model assumes a static scene. It fails to reconstruct correct geometry for moving objects because it lacks multi-view data for a specific time instance [S1].
 *   **Complex Depth/Textures:** The RBK alone may lose detail in regions with complex depth or similar textures; the AWP is required to refine these areas [S1].
-*   **Initialization:** Starting directly with RBK/AWP may lead to instability; the 1200-iteration pure NeRF warm-up is critical [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Training requires 200,000 iterations [S1]. The RBK adds overhead per view but is view-independent per ray, unlike 2D pixel-wise methods [S1].
-*   **Memory Complexity:** Depends on the NeRF size plus the RBK parameters ($k$ motions $\times$ 3 channels for rotation/translation) and AFP features [S1].
-*   **Performance:** Achieves significant improvements in PSNR, SSIM, and LPIPS over Naive NeRF and Deblur-NeRF on synthetic and real datasets (Factory, Cozyroom, Pool, Tanabata, Trolley) [S1].
-*   **Strengths:** Ensures 3D geometric and appearance consistency; handles camera motion and defocus blur effectively; high perceptual quality (LPIPS) [S1].
-*   **Limitations:** Cannot handle object motion blur; requires calibrated camera poses (COLMAP) [S1].
-*   **When to use:** Novel view synthesis from blurry inputs (motion/defocus) where 3D consistency is paramount.
-*   **When not to use:** Scenes with significant object motion or uncalibrated poses.
+*   **Time Complexity:** Training involves joint optimization of NeRF, RBK, and AWP. The coarse-to-fine strategy stabilizes training but adds computational overhead due to the two parallel prediction paths (RBK and AWP) per ray [S1].
+*   **Memory Complexity:** Standard NeRF memory usage plus overhead for RBK and AWP parameters. The RBK parameters are view-dependent but not ray-dependent, keeping memory usage manageable compared to per-pixel kernel methods [S1].
+*   **Performance:** DP-NeRF achieves significant improvements in PSNR, SSIM, and LPIPS over Naive NeRF and Deblur-NeRF on synthetic and real scenes with camera motion and defocus blur [S1].
+*   **Strengths:** Ensures 3D geometric and appearance consistency by using 3D physical priors (RBK) instead of 2D pixel-wise optimization [S1]. Handles both camera motion and defocus blur [S1].
+*   **Limitations:** Cannot handle object motion blur due to the static scene assumption [S1]. Requires calibrated camera poses (COLMAP) [S1].
 
 ## Background
-DP-NeRF was proposed in the paper "DP-NeRF: Deblurred Neural Radiance Field with Physical Scene Priors" [S1]. It addresses the limitations of Deblur-NeRF, which models blurring kernels based on 2D offsets, breaking 3D consistency [S1]. DP-NeRF introduces physical scene priors (RBK and AWP) derived from the actual blurring process during image acquisition [S1]. It is used for novel view synthesis on synthetic and real scenes with camera motion and defocus blur [S1].
+DP-NeRF was proposed in 2022 by the authors of the paper "DP-NeRF: Deblurred Neural Radiance Field with Physical Scene Priors" [S1]. It was developed to address the limitations of previous deblurring NeRF methods, specifically Deblur-NeRF, which relied on 2D pixel-wise independent ray optimization that broke 3D consistency [S1]. The method builds on the standard NeRF framework [26] and incorporates physical priors derived from the camera blurring process [S1]. It is used for novel view synthesis on synthetic and real scenes with blur [S1].
 
 ## Sources
 [S1] DP-NeRF: Deblurred Neural Radiance Field with Physical Scene Priors, https://arxiv.org/abs/2211.12046v4, fetched 2026-10-26

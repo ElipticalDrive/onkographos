@@ -1,0 +1,80 @@
+# Linear Learning Rate Schedule
+
+Also called: Linear Interpolation Schedule, LinearSchedule
+
+## Overview
+A learning rate schedule that transitions from an initial value to a final value over a specified number of steps using linear interpolation [S1, unofficial]. It provides a deterministic, monotonic decay path for optimization parameters in radiance-field training [S1, unofficial]. Unlike exponential decay, which changes rate proportionally to the current value, this method changes the rate by a constant absolute amount per step [S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs**: `step` (current optimization step index, integer $\ge 0$), `initial_value` (starting learning rate, float), `final_value` (target learning rate at completion, float), `num_steps` (total steps for the transition, integer).
+*   **Output**: The computed learning rate for the current step (float).
+
+**Data Structures**
+No persistent data structures are required. The state is purely a function of the current step index and the fixed parameters.
+
+**Parameters**
+*   `initial_value`: The learning rate at step 0.
+*   `final_value`: The learning rate at step `num_steps`.
+*   `num_steps`: The total number of steps over which the interpolation occurs.
+
+**Algorithm**
+1.  Compute the progress ratio $\alpha$ as the fraction of steps completed, capped at 1.0:
+    $$ \alpha = \min\left(\frac{\text{step}}{\text{num\_steps}}, 1.0\right) $$
+2.  Compute the learning rate $lr$ by linearly interpolating between `initial_value` and `final_value` using $\alpha$:
+    $$ lr = (1.0 - \alpha) \cdot \text{initial\_value} + \alpha \cdot \text{final\_value} $$
+
+**Edge Cases and Pitfalls**
+*   **Division by Zero**: If `num_steps` is 0, the division in step 1 is undefined. The implementation must ensure `num_steps > 0` or handle this case explicitly (e.g., returning `initial_value` or `final_value` depending on context) [G].
+*   **Step Bounds**: If `step` exceeds `num_steps`, $\alpha$ is clamped to 1.0, ensuring the learning rate remains at `final_value` rather than extrapolating negatively or positively [S1, unofficial].
+*   **Precision**: Using floating-point arithmetic for `step / num_steps` is standard. For very large `num_steps`, precision loss is negligible for typical learning rate magnitudes [G].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def linear_schedule(step: int, initial_value: float, final_value: float, num_steps: int) -> float:
+    """
+    Compute the learning rate using a linear schedule.
+    
+    Args:
+        step: Current optimization step index.
+        initial_value: Starting learning rate.
+        final_value: Target learning rate at completion.
+        num_steps: Total number of steps for the transition.
+        
+    Returns:
+        The computed learning rate.
+    """
+    if num_steps <= 0:
+        # Guard against division by zero; behavior is undefined in sources for num_steps=0 [G]
+        return initial_value
+        
+    # Compute progress ratio, capped at 1.0
+    alpha = min(step / num_steps, 1.0)
+    
+    # Linear interpolation
+    lr = (1.0 - alpha) * initial_value + alpha * final_value
+    
+    return lr
+```
+
+## Subtopics
+
+### [Cosine Learning Rate Schedule](11851-cosine-learning-rate-schedule.md)
+A learning rate schedule that eases slowly using a cosine function to transition between an initial value and a final value. It builds on [Linear Learning Rate Schedule](11850-linear-learning-rate-schedule.md) by replacing linear interpolation with a smooth cosine curve, reducing oscillation during the decay phase.
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ per step. The calculation involves a single division, a minimum, and two multiplications and an addition.
+*   **Memory Complexity**: $O(1)$. No history or state needs to be stored beyond the current step counter.
+*   **Strengths**: Simple to implement and understand. Provides a predictable, linear decay path. Useful when a steady, constant reduction in learning rate is desired without the compounding effect of exponential decay.
+*   **Limitations**: The rate of change is constant, which may not be optimal for all loss landscapes. It lacks the smoothness of cosine schedules or the adaptive nature of exponential decay.
+*   **When to use**: When a simple, deterministic decay is sufficient and computational overhead of more complex schedules is undesirable.
+*   **When not to use**: When the optimization landscape requires a smoother transition (consider Cosine) or a faster initial decay followed by a slower tail (consider Exponential Decay).
+
+## Background
+The linear learning rate schedule is a fundamental technique in optimization, widely used in deep learning and specifically in NeRF training pipelines. It is implemented in libraries such as Nerfies [S1, unofficial] and density_bounded_ray_weights [S2, unofficial]. Its simplicity makes it a common baseline for learning rate scheduling in radiance-field optimization.
+
+## Sources
+[S1] google/nerfies, https://github.com/google/nerfies, fetched 2026-10-26 (unofficial)
+[S2] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)

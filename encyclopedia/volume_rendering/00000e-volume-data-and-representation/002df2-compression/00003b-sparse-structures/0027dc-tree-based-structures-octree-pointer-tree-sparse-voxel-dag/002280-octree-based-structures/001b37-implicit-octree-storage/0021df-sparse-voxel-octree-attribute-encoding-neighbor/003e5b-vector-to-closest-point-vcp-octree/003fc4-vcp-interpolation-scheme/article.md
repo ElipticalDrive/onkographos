@@ -1,37 +1,34 @@
 # VCP Interpolation Scheme
 
-Also called: VCP Plane-Trilinear Hybrid Interpolation
 
 ## Overview
-The VCP Interpolation Scheme is a method for estimating the Vector-to-Closest-Point (VCP) vector at an arbitrary query point within a grid cell, given the VCP vectors stored at the cell's eight vertices. It solves the problem of geometric inconsistency inherent in standard interpolation techniques: pure trilinear interpolation produces zero vectors when adjacent VCPs point in opposite directions, while pure plane-based projection loses sharp triangle boundaries by treating surface patches as infinite planes. The method combines both approaches and selects the result with the greater magnitude to ensure robust, artifact-free ray-casting [S1, unofficial].
+The VCP Interpolation Scheme is a method for estimating the Vector-to-Closest-Point (VCP) vector at an arbitrary query point within a grid cell, given the VCP vectors stored at the cell's eight vertices [S1, unofficial]. It solves the problem of geometric inconsistency inherent in standard interpolation techniques: pure trilinear interpolation produces zero vectors when adjacent VCPs point in opposite directions, while pure plane-based projection loses sharp triangle boundaries by treating surface patches as infinite planes [S1, unofficial]. The method combines both approaches and selects the result with the greater magnitude to ensure robust, artifact-free ray-casting [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Query point $p'$ (a 3D vector).
-- Eight grid points $p_i$ (for $i=0 \dots 7$) defining the corners of the containing octree leaf cell.
-- Eight VCP vectors $vcp_i$ stored at each grid point $p_i$.
+- Query point $p'$ (a 3D vector) [S1, unofficial].
+- Eight grid points $p_i$ (for $i=0 \dots 7$) defining the corners of the containing octree leaf cell [S1, unofficial].
+- Eight VCP vectors $vcp_i$ stored at each grid point $p_i$ [S1, unofficial].
 
 **Outputs:**
-- Interpolated VCP vector $vcp_{final}$ at $p'$.
+- Interpolated VCP vector $vcp_{final}$ at $p'$ [S1, unofficial].
 
 **Data Structures:**
-- The VCP grid stores 3D vectors. No additional metadata (such as triangle indices) is required for this interpolation step [S1, unofficial].
+- The VCP grid stores 3D vectors at each vertex [S1, unofficial].
 
 **Steps:**
 1. **Plane-Based Projection:** For each of the 8 grid points $p_i$:
    - Define a plane $\Pi_i$ passing through $p_i + vcp_i$ with normal vector $vcp_i$. This implies $vcp_i \perp \Pi_i$ and $p_i + vcp_i \in \Pi_i$ [S1, unofficial].
    - Calculate the perpendicular vector from the query point $p'$ to the plane $\Pi_i$. This projected vector is denoted $vcp^{\star}_i$:
      $$ vcp^{\star}_i = \frac{vcp_i \cdot (p_i + vcp_i - p')}{vcp_i \cdot vcp_i} vcp_i $$
-   - Note: The term $(p_i + vcp_i - p')$ is the vector from the query point to the point on the plane defined by the VCP endpoint. The scalar projection factor scales the normal $vcp_i$ to reach the plane perpendicularly [S1, unofficial].
-   - Collect all 8 projected vectors $\{vcp^{\star}_0, \dots, vcp^{\star}_7\}$.
+   - The term $(p_i + vcp_i - p')$ is the vector from the query point to the point on the plane defined by the VCP endpoint [S1, unofficial].
+   - Collect all 8 projected vectors $\{vcp^{\star}_0, \dots, vcp^{\star}_7\}$ [S1, unofficial].
    - Select the vector with the minimum length as the plane-based result $vcp^{\star}$:
      $$ vcp^{\star} = \underset{vcp^{\star}_i}{\text{argmin}} \{ \| vcp^{\star}_i \| \} $$
 
 2. **Trilinear Interpolation:** Perform standard trilinear interpolation of the 8 original VCP vectors $vcp_i$ using the relative position of $p'$ within the cell. Let the result be $vcp_{trilinear}$ [S1, unofficial].
 
-3. **Selection:** Compare the magnitudes of the two candidate vectors:
-   - If $\| vcp^{\star} \| > \| vcp_{trilinear} \|$, return $vcp_{final} = vcp^{\star}$.
-   - Otherwise, return $vcp_{final} = vcp_{trilinear}$ [S1, unofficial].
+3. **Selection:** Compare the magnitudes of the two candidate vectors and return the vector with the greater length as the final interpolated VCP [S1, unofficial].
 
 **Pitfalls and Edge Cases:**
 - **Zero Vector Artifacts:** Pure trilinear interpolation fails when adjacent VCPs point in opposite directions (e.g., $(-\epsilon, 0, 0)$ and $(\epsilon, 0, 0)$). Linear interpolation at the midpoint yields $(0,0,0)$, causing false intersections during ray-casting [S1, unofficial].
@@ -46,105 +43,97 @@ def interpolate_vcp(p_prime, p_vertices, vcp_vertices):
     Interpolates VCP vector at p_prime using the hybrid scheme.
     
     Args:
-        p_prime: tuple/ndarray (x, y, z), query point.
-        p_vertices: list of 8 tuples/ndarrays, grid points p_i.
-        vcp_vertices: list of 8 tuples/ndarrays, VCP vectors vcp_i.
+        p_prime: tuple (x, y, z), query point.
+        p_vertices: list of 8 tuples (x, y, z), grid points p_i.
+        vcp_vertices: list of 8 tuples (x, y, z), VCP vectors vcp_i.
         
     Returns:
-        tuple/ndarray, the final interpolated VCP vector.
+        tuple (x, y, z), the final interpolated VCP vector.
     """
-    import numpy as np
+    projected = []
     
     # Step 1: Plane-based projection
-    projected_vectors = []
-    
     for i in range(8):
-        pi = np.array(p_vertices[i])
-        vcpi = np.array(vcp_vertices[i])
+        pi = p_vertices[i]
+        vcpi = vcp_vertices[i]
         
-        # Calculate the point on the plane: pi + vcpi
-        plane_point = pi + vcpi
+        # Point on the plane: pi + vcpi
+        plane_pt = (pi[0] + vcpi[0], pi[1] + vcpi[1], pi[2] + vcpi[2])
         
         # Vector from query point to plane point
-        vec_to_plane = plane_point - np.array(p_prime)
+        vec = (plane_pt[0] - p_prime[0], plane_pt[1] - p_prime[1], plane_pt[2] - p_prime[2])
         
         # Dot products
-        dot_vcpi_vcpi = np.dot(vcpi, vcpi)
-        dot_vcpi_vec = np.dot(vcpi, vec_to_plane)
+        dot_vcpi_vcpi = vcpi[0]**2 + vcpi[1]**2 + vcpi[2]**2
+        dot_vcpi_vec = vcpi[0]*vec[0] + vcpi[1]*vec[1] + vcpi[2]*vec[2]
         
-        # Avoid division by zero if vcpi is zero (should not happen in valid VCP cells)
+        # Guard against zero-length VCP vectors
         if dot_vcpi_vcpi == 0:
-            projected_vectors.append(np.zeros(3))
+            projected.append((0.0, 0.0, 0.0))
         else:
-            # Project vcpi onto the direction perpendicular to the plane
-            # Formula: vcp*_i = (vcpi . (pi + vcpi - p')) / (vcpi . vcpi) * vcpi
             scale = dot_vcpi_vec / dot_vcpi_vcpi
-            vcp_star_i = scale * vcpi
-            projected_vectors.append(vcp_star_i)
+            projected.append((scale * vcpi[0], scale * vcpi[1], scale * vcpi[2]))
             
     # Select the shortest projected vector
-    projected_vectors = np.array(projected_vectors)
-    lengths = np.linalg.norm(projected_vectors, axis=1)
-    min_idx = np.argmin(lengths)
-    vcp_plane = projected_vectors[min_idx]
-    
+    min_len_sq = float('inf')
+    vcp_plane = (0.0, 0.0, 0.0)
+    for v in projected:
+        len_sq = v[0]**2 + v[1]**2 + v[2]**2
+        if len_sq < min_len_sq:
+            min_len_sq = len_sq
+            vcp_plane = v
+            
     # Step 2: Trilinear interpolation
-    # Assuming p_vertices are ordered consistently with standard trilinear interpolation
-    # (e.g., 0:000, 1:100, 2:010, 3:110, 4:001, 5:101, 6:011, 7:111)
-    # We need the relative coordinates of p_prime within the cell
-    # For simplicity, assume p_vertices define a unit cube or we compute barycentric-like weights
-    # Standard trilinear interpolation requires normalized coordinates u,v,w in [0,1]
+    # Compute normalized coordinates u, v, w in [0, 1]
+    min_p = (min(p[0] for p in p_vertices), min(p[1] for p in p_vertices), min(p[2] for p in p_vertices))
+    max_p = (max(p[0] for p in p_vertices), max(p[1] for p in p_vertices), max(p[2] for p in p_vertices))
+    cell_size = (max_p[0] - min_p[0], max_p[1] - min_p[1], max_p[2] - min_p[2])
     
-    # Compute min/max of vertices to normalize p_prime
-    p_arr = np.array(p_vertices)
-    min_p = np.min(p_arr, axis=0)
-    max_p = np.max(p_arr, axis=0)
-    
-    # Handle degenerate cell (zero size)
-    cell_size = max_p - min_p
-    if np.any(cell_size == 0):
-        # Fallback to first vertex if cell is degenerate
+    # Fallback for degenerate cells [G]
+    if cell_size[0] == 0 or cell_size[1] == 0 or cell_size[2] == 0:
         return vcp_vertices[0]
         
     u = (p_prime[0] - min_p[0]) / cell_size[0]
     v = (p_prime[1] - min_p[1]) / cell_size[1]
     w = (p_prime[2] - min_p[2]) / cell_size[2]
     
-    # Trilinear interpolation weights
-    # Vertices order: 0(0,0,0), 1(1,0,0), 2(0,1,0), 3(1,1,0), 4(0,0,1), 5(1,0,1), 6(0,1,1), 7(1,1,1)
-    weights = np.array([
-        (1-u)*(1-v)*(1-w), # 0
-        u*(1-v)*(1-w),     # 1
-        (1-u)*v*(1-w),     # 2
-        u*v*(1-w),         # 3
-        (1-u)*(1-v)*w,     # 4
-        u*(1-v)*w,         # 5
-        (1-u)*v*w,         # 6
-        u*v*w              # 7
-    ])
+    # Weights for vertices ordered 000 to 111
+    w0 = (1-u)*(1-v)*(1-w)
+    w1 = u*(1-v)*(1-w)
+    w2 = (1-u)*v*(1-w)
+    w3 = u*v*(1-w)
+    w4 = (1-u)*(1-v)*w
+    w5 = u*(1-v)*w
+    w6 = (1-u)*v*w
+    w7 = u*v*w
     
-    vcp_trilinear = np.zeros(3)
-    for i in range(8):
-        vcp_trilinear += weights[i] * np.array(vcp_vertices[i])
-        
+    vcp_trilinear = (
+        w0*vcp_vertices[0][0] + w1*vcp_vertices[1][0] + w2*vcp_vertices[2][0] + w3*vcp_vertices[3][0] +
+        w4*vcp_vertices[4][0] + w5*vcp_vertices[5][0] + w6*vcp_vertices[6][0] + w7*vcp_vertices[7][0],
+        w0*vcp_vertices[0][1] + w1*vcp_vertices[1][1] + w2*vcp_vertices[2][1] + w3*vcp_vertices[3][1] +
+        w4*vcp_vertices[4][1] + w5*vcp_vertices[5][1] + w6*vcp_vertices[6][1] + w7*vcp_vertices[7][1],
+        w0*vcp_vertices[0][2] + w1*vcp_vertices[1][2] + w2*vcp_vertices[2][2] + w3*vcp_vertices[3][2] +
+        w4*vcp_vertices[4][2] + w5*vcp_vertices[5][2] + w6*vcp_vertices[6][2] + w7*vcp_vertices[7][2]
+    )
+    
     # Step 3: Selection
-    len_plane = np.linalg.norm(vcp_plane)
-    len_trilinear = np.linalg.norm(vcp_trilinear)
+    len_plane_sq = vcp_plane[0]**2 + vcp_plane[1]**2 + vcp_plane[2]**2
+    len_trilinear_sq = vcp_trilinear[0]**2 + vcp_trilinear[1]**2 + vcp_trilinear[2]**2
     
-    if len_plane > len_trilinear:
+    if len_plane_sq > len_trilinear_sq:
         return vcp_plane
     else:
         return vcp_trilinear
 ```
 
 ## Operating characteristics
-- **Time Complexity:** Constant time $O(1)$ per query, involving 8 plane projections, 8 dot products, and one trilinear interpolation.
-- **Memory Complexity:** $O(1)$ auxiliary memory. No additional storage is required beyond the VCP vectors themselves.
-- **Strengths:** Eliminates the zero-vector artifact of pure trilinear interpolation and the boundary smoothing artifact of pure plane projection. It is computationally cheap and requires no extra data storage (unlike storing triangle indices) [S1, unofficial].
-- **Limitations:** The method assumes the VCP vectors are consistent with the local geometry. It does not handle topological changes or highly complex self-intersections better than the underlying VCP representation [S1, unofficial].
+- **Time Complexity:** Constant time per query, involving 8 plane projections and one trilinear interpolation [S1, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary memory [G].
+- **Strengths:** Eliminates the zero-vector artifact of pure trilinear interpolation and the boundary smoothing artifact of pure plane projection [S1, unofficial]. It is computationally cheap [S1, unofficial].
+- **Limitations:** The method assumes the VCP vectors are consistent with the local geometry [S1, unofficial].
 
 ## Background
-The VCP Interpolation Scheme was introduced in the context of surface ray-casting using Vector-to-Closest-Point Octrees. It addresses specific rendering artifacts observed when using naive interpolation methods on VCP data. The method was proposed as a feasible alternative to storing additional geometric primitives (like triangle indices) to resolve boundary ambiguities [S1, unofficial].
+The VCP Interpolation Scheme was introduced in the context of surface ray-casting using Vector-to-Closest-Point Octrees [S1, unofficial]. It addresses specific rendering artifacts observed when using naive interpolation methods on VCP data [S1, unofficial]. The method was proposed as a feasible alternative to storing additional geometric primitives (like triangle indices) to resolve boundary ambiguities [S1, unofficial].
 
 ## Sources
 [S1] Vector-to-Closest-Point Octree for Surface Ray-Casting, https://doi.org/10.2312/vmv.20151259, fetched 2026-10-26 (unofficial)

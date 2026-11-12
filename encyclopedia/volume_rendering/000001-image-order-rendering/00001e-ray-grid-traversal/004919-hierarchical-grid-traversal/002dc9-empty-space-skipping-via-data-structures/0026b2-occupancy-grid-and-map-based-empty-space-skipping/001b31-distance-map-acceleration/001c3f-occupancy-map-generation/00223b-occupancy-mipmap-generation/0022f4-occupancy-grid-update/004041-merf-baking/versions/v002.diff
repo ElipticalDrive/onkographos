@@ -1,0 +1,324 @@
+--- v001.md
++++ v002.md
+@@ -4,166 +4,193 @@
+ 
+ ## Overview
+-MERF Baking is a post-training procedure that evaluates and stores the outputs of a trained neural radiance field (specifically the MLP components) onto discrete grids to enable real-time rendering [S1]. It solves the problem of high memory consumption and slow inference associated with continuous neural representations by converting them into a sparse, multi-resolution occupancy grid structure [S1]. Unlike generic baking pipelines that use uniform sampling, this method is distinguished by its use of proposal-MLP sampling and real-time renderer step sizes for visibility culling, which prevents fog-like artifacts and floating blobs in unbounded scenes [S1].
++MERF Baking is a post-training procedure that converts a trained neural radiance field (specifically the Multi-resolution Encoding Radiance Field) into a discrete, block-sparse grid representation for real-time rendering [S2]. It solves the problem of high memory consumption and slow inference associated with on-the-fly MLP evaluation by storing pre-computed attributes in 2D planes and 3D voxels [S1]. Unlike generic baking pipelines that use uniform sampling, this method is Proposal-MLP-aware, using the proposal network's sampling distribution and the real-time renderer's step sizes to aggressively cull empty or occluded voxels, resulting in a lossless compression of the neural field [S2].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:** A trained neural network (specifically the Proposal MLP and the final MLP components), a set of training rays, and the real-time renderer's step size configuration.
+-*   **Outputs:** A binary occupancy grid $A$ at base resolution, multiple downsampled occupancy grids for acceleration, and baked discrete representations (3D voxel grid and 2D planes) stored in a block-sparse format.
+ 
+-**Data Structures**
+-*   **Binary Occupancy Grid ($A$):** A 3D grid where each voxel is a binary flag (occupied/unoccupied).
+-*   **Block-Sparse Voxel Grid:** Stores the baked density/color data. Only data blocks containing at least one occupied voxel are stored in memory [S1].
+-*   **Mipmap Hierarchy:** Multiple lower-resolution versions of $A$ created via max-pooling to accelerate ray traversal [S1].
++### Inputs and Outputs
++**Inputs:**
++*   A trained MERF model, including the Proposal MLP and the attribute MLPs [S2].
++*   The set of training rays $\mathcal{R}$ used during training [S2].
++*   Rendering parameters: voxel resolution per block ($N_v = 512$), triplane resolution per block ($N_t = 2048$), and occupancy threshold ($\tau = 0.005$) [S1, S2].
+ 
+-**Parameters**
+-*   **Occupancy Threshold ($\tau$):** 0.005. Both the volume rendering weight and the opacity must exceed this value to mark a voxel as occupied [S1].
+-*   **Real-time Step Size ($\Delta$):** The uniform step size used by the real-time renderer in contracted space. This is used to compute opacity for culling decisions [S1].
+-*   **Max-Pooling Filters:** Filter sizes of 16, 32, and 128 are used to generate lower-resolution occupancy grids from the base resolution (e.g., 4096) [S1].
++**Outputs:**
++*   A block-sparse 3D occupancy grid hierarchy (mipmaps) for empty space skipping [S2].
++*   Baked attribute data: high-resolution 2D triplanes and low-resolution 3D voxel grids per block, stored as PNG textures [S1, S2].
+ 
+-**Algorithm Steps**
+-1.  **Render Training Rays:** Render all training rays using the trained Proposal MLP. Extract a set of weighted points $\{(x_i, w_i)\}$, where $x_i$ is the spatial position and $w_i$ is the volume rendering weight associated with that point [S1].
+-    *   *Note:* These points cluster around surfaces because they are sampled according to the Proposal MLP's importance sampling [S1].
+-2.  **Compute Opacity for Culling:** For each point $x_i$, compute the opacity $\alpha_i$ based on the distance between samples $\Delta$ used by the real-time renderer. This ensures that the culling logic matches the visibility constraints of the actual real-time renderer, which steps through contracted space with a small uniform step size [S1].
+-3.  **Mark Occupied Voxels:** For each weighted point $(x_i, w_i)$:
+-    *   Identify the eight voxels surrounding position $x_i$ in the base-resolution binary grid $A$.
+-    *   Mark these voxels as occupied if both conditions are met:
+-        $$ w_i > \tau \quad \text{and} \quad \alpha_i > \tau $$
+-    *   where $\tau = 0.005$ [S1].
+-    *   *Rationale:* Using $w_i$ accounts for visibility (occlusion along the ray), while using $\alpha_i$ computed with the real-time step size $\Delta$ ensures aggressive culling of regions that would be skipped during real-time rendering, even if the Proposal MLP suggested larger steps during training [S1].
+-4.  **Generate Mipmap Hierarchy:** Create multiple lower-resolution versions of the binary occupancy grid $A$ by applying max-pooling with filter sizes 16, 32, and 128. This hierarchy is used for hierarchical empty space skipping during ray traversal [S1].
+-5.  **Bake Discrete Representations:**
+-    *   Evaluate the trained MLP outputs on the discrete grids.
+-    *   Store the low-resolution 3D voxel grid and three high-resolution 2D planes.
+-    *   Store the voxel grid in a block-sparse format, retaining only blocks with occupied voxels [S1].
+-6.  **Encode and Store:** Encode the resulting textures/grids as PNGs to reduce storage footprint [S1].
++### Data Structures
+ 
+-**Pseudocode**
++**1. Binary Occupancy Grid ($A$)**
++*   **Type:** 3D boolean array.
++*   **Resolution:** Matches the voxel grid resolution of the block ($512^3$) [S1].
++*   **Content:** $A[x, y, z] = \text{true}$ if the voxel is occupied, $\text{false}$ otherwise.
++
++**2. Block-Sparse Voxel Grid**
++*   **Structure:** A collection of data blocks. Each block corresponds to a $512^3$ region in the local coordinate space.
++*   **Storage:** Only blocks where at least one voxel in $A$ is $\text{true}$ are stored [S2].
++*   **Content:** For each occupied voxel, stores the attribute values (density, color, etc.) derived from the baked planes/voxels [S1].
++
++**3. Triplanes**
++*   **Structure:** Three 2D textures (XY, YZ, XZ planes).
++*   **Resolution:** $2048 \times 2048$ per plane [S1].
++*   **Content:** Attribute values baked from the MLP outputs [S1].
++
++**4. Occupancy Mipmaps**
++*   **Structure:** A hierarchy of downsampled binary occupancy grids.
++*   **Generation:** Created via max-pooling on $A$ with filter sizes 16, 32, and 128 [S2].
++*   **Purpose:** Accelerates ray marching by skipping empty space at multiple scales [S2].
++
++### Steps
++
++1.  **Render Training Rays:**
++    Render all training rays $\mathcal{R}$ using the trained Proposal MLP to collect ray samples [S2]. The Proposal MLP samples points clustered around surfaces [S2].
++
++2.  **Extract Weighted Points:**
++    For each ray, extract a set of weighted points $\{(x_i, w_i)\}$ [S2].
++    *   $x_i$: The 3D position of the $i$-th sample.
++    *   $w_i$: The volume rendering weight associated with the sample, computed as:
++        $$ w_i = \alpha_i \prod_{j < i} (1 - \alpha_j) $$
++        where $\alpha_j$ is the opacity at sample $j$ [S2]. Note: $\alpha_j$ depends on the density at $x_j$ and the step size used by the *real-time renderer* (small uniform step size in contracted space), not necessarily the Proposal MLP's step size [S2].
++
++3.  **Mark Occupied Voxels:**
++    Initialize the binary occupancy grid $A$ to all false. For each weighted point $(x_i, w_i)$:
++    *   Compute the opacity $\alpha_i$ at $x_i$ using the real-time renderer's step size [S2].
++    *   If $w_i > \tau$ AND $\alpha_i > \tau$ (where $\tau = 0.005$):
++        *   Identify the 8 voxels surrounding $x_i$ in the $512^3$ grid.
++        *   Set these 8 voxels to $\text{true}$ in $A$ [S2].
++    *   *Note:* Using both $w_i$ and $\alpha_i$ ensures that voxels contributing to visibility (accounting for occlusion via $w_i$) and significant local density (via $\alpha_i$) are preserved [S2].
++
++4.  **Generate Occupancy Mipmaps:**
++    Create lower-resolution versions of $A$ using max-pooling with filter sizes 16, 32, and 128 [S2]. These form the hierarchy for empty space skipping during rendering [S2].
++
++5.  **Bake Attributes:**
++    Evaluate the trained MLP to generate the attribute function $f_{k,l}$ for each block [S1].
++    *   Bake high-resolution 2D triplanes ($2048^2$) [S1].
++    *   Bake a low-resolution 3D voxel grid ($512^3$) within each block [S1].
++    *   Store only the data blocks corresponding to occupied voxels in $A$ using a block-sparse format [S2].
++
++6.  **Compress and Store:**
++    Encode the resulting textures (triplanes and voxel grids) into PNG format to reduce storage footprint [S1, S2].
++
++### Pseudocode
+ 
+ ```python
+-def merf_baking(training_rays, proposal_mlp, real_time_step_size, base_resolution, threshold=0.005):
++def merf_baking(training_rays, proposal_mlp, real_time_renderer_params, voxel_res=512, triplane_res=2048, threshold=0.005):
+     """
+-    Bakes a trained neural radiance field into a sparse occupancy grid.
++    Bakes a trained MERF model into discrete grids.
+     
+     Args:
+         training_rays: List of rays used during training.
+-        proposal_mlp: The trained proposal MLP used for importance sampling.
+-        real_time_step_size: The uniform step size used in the real-time renderer.
+-        base_resolution: The resolution of the base occupancy grid A.
+-        threshold: The occupancy threshold (default 0.005).
++        proposal_mlp: The trained proposal network for sampling.
++        real_time_renderer_params: Parameters for the real-time renderer (e.g., step size, contraction).
++        voxel_res: Resolution of the voxel grid per block (default 512).
++        triplane_res: Resolution of the triplanes per block (default 2048).
++        threshold: Occupancy threshold for weight and opacity (default 0.005).
+         
+     Returns:
+-        occupancy_grid: Binary 3D grid of shape (base_resolution, base_resolution, base_resolution).
+-        mipmap_grids: List of downsampled occupancy grids.
+-        baked_data: The sparse voxel and plane data.
++        occupancy_mipmaps: List of downsampled binary occupancy grids.
++        baked_data: Dictionary containing triplanes and block-sparse voxel data.
+     """
+-    # Initialize binary occupancy grid
+-    # 0 = empty, 1 = occupied
+-    occupancy_grid = np.zeros((base_resolution, base_resolution, base_resolution), dtype=np.uint8)
+     
+-    # Step 1: Render training rays and extract weighted points
++    # Step 1 & 2: Render training rays and extract weighted points
+     weighted_points = []
+     for ray in training_rays:
+-        # Sample points using the Proposal MLP
+-        # This returns positions x_i and their associated volume rendering weights w_i
+-        points, weights = proposal_mlp.sample_and_weight(ray)
+-        for x_i, w_i in zip(points, weights):
+-            weighted_points.append((x_i, w_i))
++        # Sample points using Proposal MLP (clusters around surfaces)
++        samples = proposal_mlp.sample(ray)
++        
++        for i, sample in enumerate(samples):
++            x_i = sample.position
++            # Compute opacity alpha_i based on real-time renderer's step size
++            # This ensures culling matches the real-time rendering behavior
++            alpha_i = compute_opacity(sample.density, real_time_renderer_params.step_size)
+             
+-    # Step 2 & 3: Populate occupancy grid based on weights and opacity
+-    for x_i, w_i in weighted_points:
+-        # Check if weight exceeds threshold
+-        if w_i <= threshold:
+-            continue
++            # Compute volume rendering weight w_i
++            # w_i = alpha_i * product(1 - alpha_j) for j < i
++            # Note: The product term accounts for occlusion along the ray
++            w_i = compute_volume_rendering_weight(samples[:i], alpha_i)
+             
+-        # Compute opacity alpha_i based on the real-time renderer's step size
+-        # This simulates the opacity contribution if the real-time renderer
+-        # were to step through this region with uniform step size
+-        alpha_i = compute_opacity_for_step_size(x_i, real_time_step_size)
++            if w_i > threshold and alpha_i > threshold:
++                weighted_points.append((x_i, w_i, alpha_i))
++
++    # Step 3: Mark occupied voxels
++    # Initialize binary occupancy grid A
++    A = zeros((voxel_res, voxel_res, voxel_res), dtype=bool)
++    
++    for (x_i, w_i, alpha_i) in weighted_points:
++        # Map continuous position x_i to grid indices
++        # Assuming contracted space mapping is handled by the renderer/MLP
++        grid_coords = continuous_to_grid(x_i, voxel_res)
+         
+-        if alpha_i <= threshold:
+-            continue
+-            
+         # Mark the 8 surrounding voxels as occupied
+-        # Convert continuous position x_i to voxel coordinates
+-        voxel_coords = world_to_voxel(x_i, base_resolution)
+-        
+-        # Get the 8 neighbors (floor and ceil in each dimension)
+-        neighbors = get_8_neighbors(voxel_coords)
+-        
+-        for neighbor in neighbors:
+-            # Ensure neighbor is within bounds
+-            if is_within_bounds(neighbor, base_resolution):
+-                occupancy_grid[neighbor] = 1
+-                
+-    # Step 4: Create mipmap hierarchy for empty space skipping
+-    mipmap_grids = []
+-    filter_sizes = [16, 32, 128]
+-    current_grid = occupancy_grid
++        for dx in [-1, 0]:
++            for dy in [-1, 0]:
++                for dz in [-1, 0]:
++                    idx = grid_coords + [dx, dy, dz]
++                    if is_valid_index(idx, voxel_res):
++                        A[idx] = True
++
++    # Step 4: Generate Occupancy Mipmaps
++    occupancy_mipmaps = [A]
++    current_grid = A
++    for filter_size in [16, 32, 128]:
++        # Max-pooling to downsample
++        next_grid = max_pool(current_grid, filter_size)
++        occupancy_mipmaps.append(next_grid)
++        current_grid = next_grid
++
++    # Step 5: Bake Attributes
++    # Evaluate MLP to get attribute function f_k,l
++    # This involves baking triplanes and voxel grids
++    triplanes = bake_triplanes(proposal_mlp, triplane_res)
++    voxel_blocks = bake_voxel_blocks(proposal_mlp, A, voxel_res)
+     
+-    for filter_size in filter_sizes:
+-        # Max-pool the current grid to create a lower-resolution version
+-        downsampled_grid = max_pool(current_grid, filter_size)
+-        mipmap_grids.append(downsampled_grid)
+-        current_grid = downsampled_grid
+-        
+-    # Step 5: Bake discrete representations
+-    # Evaluate MLP outputs on the grid
+-    # Store in block-sparse format
+-    baked_data = bake_sparse_grid(occupancy_grid, proposal_mlp)
++    # Step 6: Compress
++    baked_data = {
++        'triplanes': compress_to_png(triplanes),
++        'voxel_blocks': voxel_blocks # Stored in block-sparse format
++    }
+     
+-    # Step 6: Encode textures (e.g., as PNGs)
+-    # This is handled by the storage layer, not the algorithm itself
+-    
+-    return occupancy_grid, mipmap_grids, baked_data
++    return occupancy_mipmaps, baked_data
+ 
+-def compute_opacity_for_step_size(x_i, step_size):
++def compute_volume_rendering_weight(samples, current_alpha):
+     """
+-    Computes the opacity contribution at x_i assuming a uniform step size.
+-    This approximates the visibility culling behavior of the real-time renderer.
++    Computes the volume rendering weight for the current sample.
++    w_i = alpha_i * product_{j < i} (1 - alpha_j)
+     """
+-    # In the context of MERF, opacity is derived from density.
+-    # Assuming density sigma is available or computed:
+-    # alpha = 1 - exp(-sigma * step_size)
+-    # Since we are using the Proposal MLP, we can estimate sigma or alpha directly.
+-    # The source notes imply alpha_i is computed based on the distance between samples.
+-    # A simple approximation for the opacity contribution of a single sample
+-    # in a uniform stepping scheme is:
+-    sigma = proposal_mlp.get_density(x_i)
+-    alpha = 1.0 - np.exp(-sigma * step_size)
+-    return alpha
++    transmittance = 1.0
++    for sample in samples:
++        alpha_j = compute_opacity(sample.density, real_time_renderer_params.step_size)
++        transmittance *= (1.0 - alpha_j)
++    return current_alpha * transmittance
++
++def compute_opacity(density, step_size):
++    """
++    Computes opacity from density and step size.
++    alpha = 1 - exp(-density * step_size)
++    """
++    return 1.0 - exp(-density * step_size)
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-*   **Precision:** The use of a stop-gradient in the quantization function (Eq. 9 in source) prevents gradients from backpropagating during training, but this is a training-time detail. For baking, the primary precision concern is the threshold value. Setting the threshold too low may include occluded or noisy voxels, leading to artifacts; setting it too high may cull valid geometry. The value 0.005 is empirically chosen [S1].
+-*   **Boundaries:** When marking the 8 surrounding voxels, care must be taken to ensure voxel coordinates are within the grid bounds [G].
+-*   **Degenerate Input:** If the Proposal MLP fails to sample a region (e.g., completely occluded or out-of-bounds), those voxels will not be marked as occupied, which is the desired behavior for empty space skipping [S1].
+-
+-## Subtopics
+-
+-### Occupancy Grid Update
+-Periodically refreshes the 3D occupancy grid using the current neural network's density predictions. MERF Baking is the initial creation of this grid post-training. [Occupancy Grid Update](2916-occupancy-grid-update.md)
+-
+-### Density Grid Update with EMA
+-Uses Exponential Moving Average to smooth density updates. MERF Baking uses a binary occupancy grid based on weighted points, not EMA smoothing. [Density Grid Update with EMA](3884-density-grid-update-with-ema.md)
+-
+-### Occupancy Grid Transition and Update
+-Handles the transition between different grid resolutions or states. MERF Baking establishes the initial state. [Occupancy Grid Transition and Update](7522-occupancy-grid-transition-and-update.md)
++### Parameters and Edge Cases
++*   **Threshold ($\tau$):** Set to 0.005 for both volume rendering weight and opacity [S2]. This value balances aggressive culling with the guarantee that voxels with significant opacity are not culled [S2].
++*   **Voxel Resolution:** $512^3$ per block [S1].
++*   **Triplane Resolution:** $2048^2$ per block [S1].
++*   **Edge Case - Occlusion:** The use of volume rendering weight $w_i$ (which includes the transmittance product) is critical. It ensures that voxels occluded by closer geometry are not marked as occupied, even if their local density/opacity is high [S2].
++*   **Edge Case - Step Size Mismatch:** The opacity $\alpha_i$ must be computed using the *real-time renderer's* step size, not the Proposal MLP's step size. The Proposal MLP may suggest larger steps, which would overestimate opacity if used for culling, leading to incorrect occupancy [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The baking process requires rendering all training rays, which is $O(N_r \cdot N_s)$ where $N_r$ is the number of training rays and $N_s$ is the number of samples per ray. Populating the grid is $O(N_p)$ where $N_p$ is the number of weighted points. Generating the mipmap hierarchy is linear in the number of voxels.
+-*   **Memory Complexity:** The block-sparse storage ensures that memory usage is proportional to the number of occupied voxels, not the total volume. The mipmap hierarchy adds a small constant overhead (sum of $1/16^2 + 1/32^2 + 1/128^2$ of the base grid size).
+-*   **Measured Performance:** The method is described as "almost lossless" compared to pre-baking quality [S1]. It significantly decreases the fraction of the volume marked as occupied compared to uniform sampling methods, leading to faster ray marching.
+-*   **Strengths:**
+-    *   Prevents fog-like artifacts and floating blobs by using proposal-MLP sampling.
+-    *   Aggressive culling using real-time renderer step sizes reduces memory and computation.
+-    *   Block-sparse storage minimizes memory footprint.
+-*   **Limitations:**
+-    *   Requires a trained Proposal MLP.
+-    *   The baking process is a post-training step, not online.
+-    *   Relies on the quality of the Proposal MLP's sampling.
++
++*   **Time Complexity:** The baking process is $O(N_r \cdot N_s)$, where $N_r$ is the number of training rays and $N_s$ is the number of samples per ray. This is a one-time offline cost [S2].
++*   **Memory Complexity:** The memory footprint is determined by the number of occupied voxels and the size of the triplanes. The block-sparse format and PNG compression significantly reduce storage compared to a dense grid [S1, S2].
++*   **Performance:** Real-time rendering frame rates are lower than mesh rasterization-based methods due to the use of volume rendering, but higher than on-the-fly neural field evaluation [S1].
++*   **Quality:** The method is almost lossless compared to the pre-baking quality because it uses Proposal-MLP-aware sampling and visibility culling, avoiding the fog-like artifacts and floating blobs common in uniform-sampling baking pipelines [S2].
++*   **When to Use:** Suitable for real-time neural rendering of unbounded scenes where memory efficiency and fast inference are required, and the scene has been captured with a Proposal MLP [S2].
++*   **When Not to Use:** If mesh rasterization is preferred for higher frame rates, or if the scene does not benefit from neural field reconstruction (e.g., simple geometric scenes) [S1].
+ 
+ ## Background
+-MERF (Memory-Efficient Radiance Fields) was introduced by Barron et al. in 2022 [S1]. The baking method described here is part of the MERF pipeline, which aims to enable real-time view synthesis in unbounded scenes. It builds on the idea of using discrete grids for real-time rendering but improves upon previous baking pipelines by incorporating the proposal-MLP's sampling distribution and the real-time renderer's step size for visibility culling. This addresses the issue of artifacts caused by uniform sampling in regions not well-covered by the proposal MLP.
++
++MERF (Memory-Efficient Radiance Fields) was introduced by [S2] for real-time view synthesis in unbounded scenes. The baking pipeline is a key component of MERF, designed to convert the trained neural representation into a discrete format for efficient rendering. It builds on the idea of block-sparse grids (as seen in SNeRG) and enhances it with Proposal-MLP-aware culling [S2]. The method was developed to address the limitations of existing baking pipelines that ignore the proposal network's sampling distribution, leading to artifacts [S2].
+ 
+ ## Sources
+-[S1] MERF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes, https://doi.org/10.1145/3592426, fetched 2026-10-26+
++[S1] City-on-Web: Real-Time Neural Rendering of Large-Scale Scenes on the Web, https://doi.org/10.1007/978-3-031-72970-6_22, fetched 2026-10-26
++[S2] MERF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes, https://doi.org/10.1145/3592426, fetched 2026-10-26

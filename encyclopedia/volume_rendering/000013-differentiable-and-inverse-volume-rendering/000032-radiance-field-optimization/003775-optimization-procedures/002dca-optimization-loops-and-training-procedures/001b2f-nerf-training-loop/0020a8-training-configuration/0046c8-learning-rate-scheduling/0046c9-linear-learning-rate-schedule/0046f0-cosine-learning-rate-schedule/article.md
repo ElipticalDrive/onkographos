@@ -1,0 +1,102 @@
+# Cosine Learning Rate Schedule
+
+Also called: CosineEasingSchedule
+
+## Overview
+A learning rate schedule that eases slowly using a cosine function to transition between an initial value and a final value [S1, unofficial]. It builds on [Linear Learning Rate Schedule](11850-linear-learning-rate-schedule.md) by replacing linear interpolation with a smooth cosine curve, reducing oscillation during the decay phase [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `step`: Current training step (integer).
+- `num_steps`: Total number of training steps (integer).
+- `initial_value`: Starting learning rate (float).
+- `final_value`: Target learning rate at `num_steps` (float).
+
+**Data Structures:**
+None required; stateless computation.
+
+**Steps:**
+1. Compute the normalized progress: $\alpha = \min(\frac{step}{num\_steps}, 1.0)$.
+2. Clamp $\alpha$ to $[0.0, 1.0]$ to handle edge cases: $x = \min(\max(\alpha, 0.0), 1.0)$.
+3. Compute the scale factor: $scale = final\_value - initial\_value$.
+4. Apply the cosine interpolation: $value = initial\_value + scale \cdot 0.5 \cdot (1 + \cos(\pi x + \pi))$.
+
+**Formula:**
+$$ v = v_{init} + (v_{final} - v_{init}) \cdot 0.5 \cdot (1 + \cos(\pi x + \pi)) $$
+where $x = \min(\max(step/num\_steps, 0), 1)$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def cosine_schedule(step, num_steps, initial_value, final_value):
+    # Step 1: Normalize progress
+    alpha = min(step / num_steps, 1.0)
+    
+    # Step 2: Clamp to [0.0, 1.0]
+    x = min(max(alpha, 0.0), 1.0)
+    
+    # Step 3: Compute scale
+    scale = final_value - initial_value
+    
+    # Step 4: Cosine interpolation
+    # Note: cos(pi * x + pi) is equivalent to -cos(pi * x)
+    # At x=0: cos(pi) = -1 -> factor = 0.5 * (1 - 1) = 0 -> v = v_init
+    # At x=1: cos(2*pi) = 1 -> factor = 0.5 * (1 + 1) = 1 -> v = v_init + scale = v_final
+    return initial_value + scale * 0.5 * (1 + math.cos(math.pi * x + math.pi))
+```
+
+**Parameters:**
+- `num_steps`: Total training duration. Typical values depend on the dataset size and batch size; not given in the sources.
+- `initial_value`: Starting LR. Not given in the sources.
+- `final_value`: Ending LR. Often set to a small value like $10^{-6}$ or $0$. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- If `num_steps` is 0, division by zero occurs. Guard against this by checking `num_steps > 0` [G].
+- If `step` exceeds `num_steps`, the clamping ensures the value stays at `final_value` [S1, unofficial].
+- Precision issues with `cos` near boundaries are negligible due to the smoothness of the function [G].
+
+## Subtopics
+
+### Delayed Cosine Schedule
+A schedule wrapper that delays the start of a base schedule using a sinusoidal rate multiplier [S1, unofficial]. It is chosen when a warm-up or delay period is desired before the primary schedule begins [S1, unofficial].
+- **Definition:** Computes a delay rate and multiplies it by the base schedule's output [S1, unofficial].
+- **Formula:** $delay\_rate = delay\_mult + (1 - delay\_mult) \cdot \sin(0.5 \cdot \pi \cdot \text{clip}(\frac{step}{delay\_steps}, 0, 1))$. The final value is $delay\_rate \cdot base\_schedule(step)$ [S1, unofficial].
+- **Parameters:**
+  - `base_schedule`: The underlying Schedule object (e.g., CosineEasingSchedule) [S1, unofficial].
+  - `delay_steps`: Number of steps over which the delay rate transitions [S1, unofficial].
+  - `delay_mult`: Minimum multiplier applied during the delay period [S1, unofficial].
+- **Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def delayed_cosine_schedule(step, base_schedule, delay_steps, delay_mult):
+    # Clip step/delay_steps to [0, 1]
+    ratio = min(max(step / delay_steps, 0.0), 1.0)
+    
+    # Compute delay rate
+    delay_rate = (
+        delay_mult
+        + (1 - delay_mult)
+        * math.sin(0.5 * math.pi * ratio)
+    )
+    
+    # Apply to base schedule
+    return delay_rate * base_schedule(step)
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per step.
+- **Memory Complexity:** $O(1)$.
+- **Strengths:** Smooth decay reduces oscillation compared to linear schedules; easy to implement.
+- **Limitations:** Requires knowing `num_steps` in advance; less flexible than adaptive schedules.
+- **When to use:** Standard for NeRF training where smooth convergence is preferred [S1, unofficial].
+- **When not to use:** When the optimal training duration is unknown or dynamic.
+
+## Background
+Originated in the context of NeRFies training scripts, which use JAX and Flax for differentiable volume rendering optimization [S1, unofficial]. It is part of the `nerfies.schedules` module [S1, unofficial].
+
+## Sources
+[S1] google/nerfies, https://github.com/google/nerfies, fetched 2026-10-26 (unofficial)

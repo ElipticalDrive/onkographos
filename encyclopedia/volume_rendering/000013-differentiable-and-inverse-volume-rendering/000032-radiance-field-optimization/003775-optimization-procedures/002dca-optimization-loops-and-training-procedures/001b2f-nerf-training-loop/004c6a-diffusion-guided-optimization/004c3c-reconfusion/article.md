@@ -3,29 +3,31 @@
 Also called: ReconFusion: 3D Reconstruction with Diffusion Priors
 
 ## Overview
-ReconFusion is a method for reconstructing real-world 3D scenes from a small number of input images (few-view setting) by regularizing a NeRF-based optimization pipeline with a diffusion model prior trained for novel view synthesis [S1]. It solves the problem of underconstrained reconstruction, where standard NeRFs produce artifacts like "fog" and "floater" artifacts when trained on sparse inputs [S1]. Unlike DreamFusion, which uses text prompts, ReconFusion conditions the diffusion prior on observed input images and poses, allowing it to preserve the appearance of well-sampled regions while synthesizing plausible geometry in unobserved areas [S1]. It differs from SparseFusion by sampling a new image at each iteration rather than using a multistep sampling approach where an image is sampled given a noisy encoding of the current rendering as a target, and it empirically outperforms Score Distillation Sampling (SDS) [S1].
+ReconFusion is a 3D reconstruction method that recovers high-quality scenes from a limited number of input images (few-view setting) by regularizing a NeRF optimization pipeline with a diffusion prior trained for novel view synthesis [S1]. It solves the problem of underconstrained reconstruction, where standard NeRFs produce artifacts like "fog" and "floater" geometry when trained on sparse inputs [S1]. Unlike methods that use text-conditioned diffusion for generation (e.g., DreamFusion), ReconFusion uses a multiview-conditioned diffusion model to provide geometric and appearance priors for unobserved camera poses, effectively acting as a drop-in regularizer for NeRF training [S1]. It differs from SparseFusion by sampling a new image from the diffusion model at each optimization iteration rather than using a multistep sampling approach where a noisy encoding of the current rendering serves as a target [S1].
 
 ## How it works
-ReconFusion consists of two main components: a diffusion model trained for novel view synthesis and a 3D reconstruction procedure that optimizes a NeRF using this model as a regularizer [S1].
+ReconFusion consists of two main components: a diffusion model trained for novel view synthesis conditioned on input images and poses, and a NeRF optimization loop that minimizes a combination of reconstruction loss and a diffusion-based sampling loss [S1].
 
 ### Inputs and Outputs
 **Inputs:**
 - A set of $N$ posed input images $x_{obs} = \{x_i\}_{i=1}^N$ and their corresponding camera parameters $\pi_{obs} = \{\pi_i\}_{i=1}^N$ [S1].
-- A target novel camera pose $\pi$ for which a sample is required [S1].
+- A target novel camera pose $\pi$ for which a prior image is required [S1].
 
 **Outputs:**
 - Optimized NeRF parameters $\psi$ representing the 3D scene [S1].
-- Rendered images from novel viewpoints [S1].
 
 ### Data Structures
-1.  **NeRF Backbone:** Uses Zip-NeRF [2] as the backbone [S1].
-2.  **Diffusion Model:** A Latent Diffusion Model (LDM) [42] with the following specifications:
-    -   **Input Resolution:** $512 \times 512 \times 3$ [S1].
+1.  **NeRF Backbone:** Uses Zip-NeRF [2] as the base architecture [S1].
+2.  **PixelNeRF Encoder ($R_\phi$):** A U-Net-based encoder that fuses input image data to render a feature map for geometric conditioning [S1].
+    -   Input: Images of resolution $512 \times 512$.
+    -   Output: Feature map $f$ of resolution $64 \times 64$ with 128 channels [S1].
+3.  **Diffusion Model:** A Latent Diffusion Model (LDM) [42] finetuned for novel view synthesis [S1].
+    -   **VAE Encoder ($E$):** Encodes images to latents.
+    -   **Denoising U-Net ($\epsilon_\theta$):** Maps noisy latents to clean latents, conditioned on input images and poses [S1].
+    -   **VAE Decoder ($D$):** Recovers images from latents [S1].
     -   **Latent Space:** Dimensions $64 \times 64 \times 8$ [S1].
-    -   **Encoder/Decoder:** Pretrained Variational Auto-Encoder (VAE) with encoder $E$ and decoder $D$ [S1].
-    -   **Denoising Network:** A U-Net $\epsilon_\theta$ that maps noisy latents to clean latents [S1].
-    -   **Conditioning:** The U-Net is augmented with cross-attention to accept CLIP embeddings of input images and a feature map from a PixelNeRF-style model [S1].
-3.  **PixelNeRF Encoder:** A small U-Net that takes input images of resolution $512 \times 512$ and outputs a feature map $f$ of resolution $64 \times 64$ with 128 channels [S1].
+    -   **Input Resolution:** $512 \times 512 \times 3$ [S1].
+    -   **Conditioning:** Uses CLIP embeddings of input images via cross-attention [S1].
 
 ### Parameters
 -   **Classifier-Free Guidance Scale:** 3.0 [S1].
@@ -33,245 +35,190 @@ ReconFusion consists of two main components: a diffusion model trained for novel
 -   **Noise Schedule:**
     -   $t_{max}$: Fixed at 1.0 for all training steps [S1].
     -   $t_{min}$: Linearly annealed from 1.0 to 0.0 during training [S1].
--   **Loss Weighting ($w_{sample}$):** Linearly decayed from 1 to 0.1 over the course of NeRF training [S1].
--   **Training Iterations:**
-    -   Diffusion Model Joint Training: 250,000 iterations [S1].
-    -   NeRF Optimization: 1,000 iterations [S1].
--   **Learning Rate:** $10^{-4}$ for joint training of PixelNeRF and finetuning of the denoising U-Net [S1].
--   **Batch Size:** 256 for joint training [S1].
--   **Classifier-Free Guidance Dropout:** Input images are set to all zeros with probability 10% during diffusion model training [S1].
+-   **Loss Weighting ($L_{sample}$):** Linearly decayed from 1 to 0.1 over the course of training [S1].
+-   **Learning Rate:** $10^{-4}$ [S1].
+-   **Batch Size:** 256 (for joint training of PixelNeRF and finetuning of the denoising U-Net) [S1].
+-   **NeRF Training Iterations:** 1000 [S1].
+-   **Diffusion Model Finetuning Iterations:** 250,000 [S1].
+-   **Classifier-Free Guidance Probability:** Input images are set to all zeros with probability 10% [S1].
 -   **Conditioning Views:** The 3 nearest camera positions from the observed inputs are selected for a target novel view [S1].
 
+### Formulas
+The total loss $L$ minimized during NeRF optimization is:
+$$ L = L_{recon} + L_{sample} $$
+
+**Reconstruction Loss ($L_{recon}$):**
+$$ L_{recon}(\psi) = \mathbb{E}_{x_{obs}, \pi_{obs}} \ell(x(\psi, \pi_{obs}), x_{obs}) $$
+where $\ell$ is the Charbonnier loss [S1].
+
+**Sampling Loss ($L_{sample}$):**
+$$ L_{sample}(\psi) = \mathbb{E}_{\pi, t} w(t) \left( \|x - \hat{x}_\pi\|_1 + L_p(x, \hat{x}_\pi) \right) $$
+where:
+-   $x$ is the rendered image from the NeRF at pose $\pi$ [S1].
+-   $\hat{x}_\pi$ is the sample image generated by the diffusion model for pose $\pi$ [S1].
+-   $L_p$ is the perceptual distance (LPIPS) [S1].
+-   $w(t)$ is a noise-level dependent weighting function [S1].
+
 ### Steps
+1.  **Train Diffusion Prior (Offline):**
+    1.  Start with a pretrained LDM [42] trained on image-text pairs [S1].
+    2.  Finetune the model on a mixture of real-world and synthetic multiview datasets: RealEstate10K [66], CO3D [38], MVImgNet [64], and Objaverse [10] [S1].
+    3.  For Objaverse, render 3D assets from 16 randomly sampled views at $512 \times 512$ and composite onto random solid color backgrounds [S1].
+    4.  Jointly train the PixelNeRF encoder and finetune the denoising U-Net with batch size 256 and learning rate $10^{-4}$ for 250k iterations [S1].
+    5.  Enable classifier-free guidance by zeroing input images with 10% probability [S1].
 
-#### Phase 1: Training the Diffusion Prior
-1.  **Dataset Preparation:** Finetune a pretrained LDM on a mixture of real-world and synthetic multiview datasets: RealEstate10K [66], CO3D [38], MVImgNet [64], and Objaverse [10] [S1].
-2.  **Feature Map Generation:** For a set of input images $x_{obs}$ and poses $\pi_{obs}$, and a target novel view pose $\pi$, use the PixelNeRF encoder $R_\phi$ to render a feature map $f$:
-    $$ f = R_\phi(x_{obs}, \pi_{obs}, \pi) $$
-    where $f$ has resolution $64 \times 64$ and 128 channels [S1].
-3.  **CLIP Embeddings:** Compute CLIP embeddings for the input images $x_{obs}$ [S1].
-4.  **Diffusion Training:** Train the denoising U-Net $\epsilon_\theta$ to predict the noise added to latents, conditioned on the feature map $f$ and CLIP embeddings via cross-attention [S1].
-
-#### Phase 2: NeRF Optimization with Diffusion Prior
-1.  **Initialize NeRF:** Initialize Zip-NeRF parameters $\psi$ [S1].
-2.  **Select Novel Pose:** For each optimization step, select a random novel camera pose $\pi$ based on a distribution defined by the input poses (e.g., nearest neighbor selection) [S1].
-3.  **Generate Sample Image:**
-    a.  **Render Feature Map:** Compute the feature map $f$ for the novel pose $\pi$ using the PixelNeRF encoder $R_\phi$ and the 3 nearest input views [S1].
-    b.  **Add Noise:** Render the current NeRF image $x$ from pose $\pi$. Encode it to latent space using $E$. Add noise at time step $t$ to get noisy latent $z_t$ [S1].
-    c.  **Denoise:** Input $z_t$, the feature map $f$, and CLIP embeddings of the 3 nearest input images into the trained U-Net $\epsilon_\theta$. Perform $k=10$ steps of DDIM sampling with classifier-free guidance scale 3.0 to generate a clean latent $z_0$. Decode $z_0$ using $D$ to get the sample image $\hat{x}_\pi$ [S1].
-4.  **Compute Losses:**
-    a.  **Reconstruction Loss ($L_{recon}$):** Compute the Charbonnier loss between the NeRF rendering $x(\psi, \pi_{obs})$ and the observed input images $x_{obs}$ [S1]:
-        $$ L_{recon}(\psi) = \mathbb{E}_{x_{obs}, \pi_{obs}} \ell(x(\psi, \pi_{obs}), x_{obs}) $$
-        where $\ell$ is the Charbonnier loss [S1].
-    b.  **Sample Loss ($L_{sample}$):** Compute the loss between the NeRF rendering $x(\psi, \pi)$ and the diffusion sample $\hat{x}_\pi$ [S1]:
-        $$ L_{sample}(\psi) = \mathbb{E}_{\pi, t} w(t) \left( \| x - \hat{x}_\pi \|_1 + L_p(x, \hat{x}_\pi) \right) $$
-        where $L_p$ is the perceptual distance (LPIPS) [65], and $w(t)$ is a noise-level dependent weighting function [S1].
-5.  **Update NeRF:** Minimize the total loss $L_{total} = L_{recon} + w_{sample} L_{sample}$ with respect to $\psi$ for 1,000 iterations [S1].
+2.  **Optimize NeRF (Online):**
+    1.  Initialize NeRF parameters $\psi$ (using Zip-NeRF backbone) [S1].
+    2.  For each training iteration:
+        a.  **Reconstruction Loss:** Render images $x$ from the NeRF at observed poses $\pi_{obs}$ and compute $L_{recon}$ using Charbonnier loss against input images $x_{obs}$ [S1].
+        b.  **Select Novel Pose:** Sample a random novel camera pose $\pi$ based on a distribution defined by the input poses (e.g., ensuring views are not inside objects) [S1].
+        c.  **Conditioning:** Select the 3 nearest camera positions from $x_{obs}$ to condition the diffusion model for pose $\pi$ [S1].
+        d.  **Generate Feature Map:** Use the PixelNeRF encoder $R_\phi$ to render a feature map $f$ for the target viewpoint $\pi$ using the input images and poses:
+            $$ f = R_\phi(x_{obs}, \pi_{obs}, \pi) $$
+            [S1]
+        e.  **Generate Diffusion Sample:**
+            i.  Render the current NeRF image $x$ at pose $\pi$.
+            ii. Encode $x$ to a latent and add noise at level $t$ (where $t \in [t_{min}, t_{max}]$) to get a noisy latent [S1].
+            iii. Provide the noisy latent, the feature map $f$, and CLIP embeddings of the input images to the denoising U-Net $\epsilon_\theta$ [S1].
+            iv. Perform $k=10$ steps of DDIM sampling with classifier-free guidance scale 3.0 to generate a clean latent, then decode it to get the sample image $\hat{x}_\pi$ [S1].
+        f.  **Compute Sampling Loss:** Calculate $L_{sample}$ between the NeRF rendering $x$ and the diffusion sample $\hat{x}_\pi$ using L1 and LPIPS losses, weighted by $w(t)$ and the current decay factor [S1].
+        g.  **Update:** Compute gradients of $L = L_{recon} + L_{sample}$ with respect to $\psi$ and update using an optimizer (e.g., Adam) [S1].
+    3.  Repeat for 1000 iterations [S1].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.optim as optim
 
-# Assume these models are loaded and initialized
-# nerf_model: Zip-NeRF backbone, parameters psi
-# pixelnerf_encoder: PixelNeRF encoder R_phi, parameters phi
-# diffusion_model: Trained LDM with U-Net epsilon_theta, VAE E and D
-# clip_encoder: CLIP image encoder
+# Assume pre-trained components are loaded
+# vae: Latent Diffusion VAE (encoder E, decoder D)
+# denoising_unet: Finetuned LDM U-Net epsilon_theta
+# pixelnerf_encoder: PixelNeRF-style encoder R_phi
+# nerf: Zip-NeRF backbone with parameters psi
+# clip_encoder: CLIP text/image encoder
 
-def compute_feature_map(pixelnerf_encoder, input_images, input_poses, target_pose):
+def get_feature_map(input_images, input_poses, target_pose):
     """
-    Renders a feature map for the target pose using the 3 nearest input views.
+    Renders a feature map for the target pose using the PixelNeRF encoder.
     """
-    # Select 3 nearest camera positions from input_poses to target_pose
-    nearest_indices = get_nearest_indices(input_poses, target_pose, k=3)
-    selected_images = [input_images[i] for i in nearest_indices]
-    selected_poses = [input_poses[i] for i in nearest_indices]
+    # R_phi takes input images, input poses, and target pose
+    # Returns feature map f of shape (B, 128, 64, 64)
+    f = pixelnerf_encoder(input_images, input_poses, target_pose)
+    return f
+
+def sample_diffusion_image(input_images, input_poses, target_pose, current_nerf_rendering, t):
+    """
+    Generates a sample image from the diffusion model conditioned on input images and pose.
+    """
+    # 1. Encode current rendering to latent
+    latent = vae.encode(current_nerf_rendering)
     
-    # Render feature map using PixelNeRF encoder
-    # R_phi takes input images and poses, outputs feature map f
-    feature_map = pixelnerf_encoder(selected_images, selected_poses, target_pose)
-    return feature_map
-
-def compute_clip_embeddings(clip_encoder, input_images):
-    """
-    Computes CLIP embeddings for the input images.
-    """
-    embeddings = []
-    for img in input_images:
-        emb = clip_encoder.encode_image(img)
-        embeddings.append(emb)
-    return embeddings
-
-def diffusion_sample(diffusion_model, feature_map, clip_embeddings, nerf_rendering, t_min, t_max, k_steps, cfg_scale):
-    """
-    Generates a sample image from the diffusion model conditioned on feature map and CLIP embeddings.
-    """
-    # Encode NeRF rendering to latent
-    latent = diffusion_model.vae_encoder(nerf_rendering)
+    # 2. Add noise at level t
+    noisy_latent = vae.add_noise(latent, t)
     
-    # Add noise at time step t
-    # t is sampled or fixed based on schedule. Here we assume a specific t for the step.
-    # In practice, t is annealed from t_max to t_min.
-    noisy_latent = diffusion_model.add_noise(latent, t)
+    # 3. Get conditioning feature map
+    f = get_feature_map(input_images, input_poses, target_pose)
     
-    # Denoise using U-Net with cross-attention to CLIP embeddings and feature map
-    # Perform k_steps of DDIM sampling
-    clean_latent = diffusion_model.denoise_loop(
+    # 4. Get CLIP embeddings of input images
+    clip_embeds = clip_encoder(input_images)
+    
+    # 5. Denoise using U-Net with classifier-free guidance
+    # cfg_scale = 3.0
+    # k = 10 steps (DDIM)
+    clean_latent = denoising_unet.sample(
         noisy_latent, 
-        feature_map, 
-        clip_embeddings, 
-        u_net=diffusion_model.u_net, 
-        steps=k_steps, 
-        cfg_scale=cfg_scale
+        conditioning_feature=f, 
+        clip_embeddings=clip_embeds, 
+        cfg_scale=3.0, 
+        num_steps=10
     )
     
-    # Decode latent to image
-    sample_image = diffusion_model.vae_decoder(clean_latent)
+    # 6. Decode to image
+    sample_image = vae.decode(clean_latent)
     return sample_image
 
-def charbonnier_loss(pred, target, epsilon=1e-3):
+def train_reconfusion(input_images, input_poses, num_iterations=1000):
     """
-    Computes Charbonnier loss.
+    Main training loop for ReconFusion.
     """
-    return torch.mean(torch.sqrt((pred - target)**2 + epsilon**2))
-
-def lpips_loss(lpips_model, pred, target):
-    """
-    Computes LPIPS perceptual loss.
-    """
-    return lpips_model(pred, target)
-
-def train_reconfusion(
-    nerf_model, 
-    pixelnerf_encoder, 
-    diffusion_model, 
-    clip_encoder, 
-    input_images, 
-    input_poses, 
-    lpips_model,
-    num_iterations=1000,
-    learning_rate=1e-4,
-    t_max=1.0,
-    t_min_start=1.0,
-    t_min_end=0.0,
-    cfg_scale=3.0,
-    k_steps=10,
-    sample_loss_weight_start=1.0,
-    sample_loss_weight_end=0.1
-):
-    """
-    Optimizes NeRF parameters using ReconFusion.
-    """
-    optimizer = torch.optim.Adam(neurf_model.parameters(), lr=learning_rate)
+    optimizer = optim.Adam(nerf.parameters(), lr=1e-4)
     
-    # Precompute CLIP embeddings for input images
-    clip_embeddings = compute_clip_embeddings(clip_encoder, input_images)
+    # Annealing parameters
+    t_min_start = 1.0
+    t_min_end = 0.0
+    weight_start = 1.0
+    weight_end = 0.1
+    t_max = 1.0
     
     for step in range(num_iterations):
-        # Anneal parameters
-        t_min = t_min_start - (t_min_start - t_min_end) * (step / num_iterations)
-        sample_loss_weight = sample_loss_weight_start - (sample_loss_weight_start - sample_loss_weight_end) * (step / num_iterations)
-        
-        # Sample a random novel pose
-        target_pose = sample_random_pose(input_poses)
-        
         # 1. Compute Reconstruction Loss
-        # Render from input poses
-        rendered_input_images = neurf_model.render(input_poses)
-        l_recon = 0
-        for rendered_img, input_img in zip(rendered_input_images, input_images):
-            l_recon += charbonnier_loss(rendered_img, input_img)
-        l_recon /= len(input_images)
+        # Render from observed poses
+        rendered_obs = nerf.render(input_poses)
+        # Charbonnier loss
+        l_recon = charbonnier_loss(rendered_obs, input_images)
         
-        # 2. Compute Sample Loss
-        # Generate feature map for target pose
-        feature_map = compute_feature_map(pixelnerf_encoder, input_images, input_poses, target_pose)
+        # 2. Sample Novel Pose
+        # Select 3 nearest input poses for conditioning
+        nearest_poses = select_nearest_poses(input_poses, num=3)
+        target_pose = sample_novel_pose(input_poses)
         
-        # Render from target pose
-        rendered_target = neurf_model.render([target_pose])[0]
+        # 3. Compute Sampling Loss
+        # Render from novel pose
+        rendered_novel = nerf.render(target_pose)
         
-        # Sample from diffusion model
-        # Note: t is sampled from [t_min, t_max] or fixed. The paper says t_max is fixed at 1.0, 
-        # and t_min is annealed. It implies the noise level is controlled by t.
-        # For simplicity, we assume a specific t is chosen for the sample generation.
-        # The paper states "tmax is fixed at 1.0... tmin is linearly annealed".
-        # This usually refers to the range of noise levels used during training or the specific t for sampling.
-        # In SDS-like methods, t is often sampled. Here, it seems t is part of the diffusion process.
-        # We assume a single t is used for the sample generation, possibly sampled from [t_min, t_max].
+        # Anneal t_min and weight
+        t_min = t_min_start + (t_min_end - t_min_start) * (step / num_iterations)
+        weight = weight_start + (weight_end - weight_start) * (step / num_iterations)
+        
+        # Sample t from [t_min, t_max]
         t = torch.rand(1).item() * (t_max - t_min) + t_min
         
-        sample_image = diffusion_sample(
-            diffusion_model, 
-            feature_map, 
-            clip_embeddings, 
-            rendered_target, 
-            t, 
-            t_max, 
-            k_steps, 
-            cfg_scale
+        # Generate diffusion sample
+        # Note: In practice, classifier-free guidance requires running the model twice 
+        # (with and without conditioning) or using a unified conditioning vector with zeroed inputs.
+        # Here we assume the sample function handles CFG internally.
+        diffusion_sample = sample_diffusion_image(
+            input_images, nearest_poses, target_pose, rendered_novel, t
         )
         
-        # Compute L1 and LPIPS loss
-        l1_loss = torch.mean(torch.abs(rendered_target - sample_image))
-        l_p_loss = lpips_loss(lpips_model, rendered_target, sample_image)
-        l_sample = l1_loss + l_p_loss
+        # L1 + LPIPS loss
+        l1_loss = torch.nn.functional.l1_loss(rendered_novel, diffusion_sample)
+        lpips_loss = lpips_loss_fn(rendered_novel, diffusion_sample)
+        l_sample = weight * (l1_loss + lpips_loss)
         
-        # Total Loss
-        l_total = l_recon + sample_loss_weight * l_sample
-        
-        # Backpropagate
-        optimizer.zero_grad()
-        l_total.backward()
+        # 4. Total Loss and Update
+        loss = l_recon + l_sample
+        loss.backward()
         optimizer.step()
+        optimizer.zero_grad()
         
-        # Log losses
-        print(f"Step {step}: L_recon={l_recon.item():.4f}, L_sample={l_sample.item():.4f}, L_total={l_total.item():.4f}")
+        # Log loss
+        print(f"Step {step}: L_recon={l_recon.item()}, L_sample={l_sample.item()}")
 
-def get_nearest_indices(pos_list, target_pose, k):
-    """
-    Returns indices of the k nearest poses in pos_list to target_pose.
-    """
-    distances = [torch.norm(p - target_pose) for p in pos_list]
-    sorted_indices = torch.argsort(torch.tensor(distances))
-    return sorted_indices[:k].tolist()
-
-def sample_random_pose(input_poses):
-    """
-    Samples a novel pose based on the distribution of input poses.
-    For simplicity, this example randomly selects a pose near one of the inputs.
-    In practice, this might involve interpolating between poses or sampling from a predefined path.
-    """
-    # Placeholder for pose sampling logic
-    # The paper mentions defining a distribution based on known input poses.
-    # Here we just pick a random input pose as a proxy for "novel view selection" logic
-    # or interpolate between two random input poses.
-    idx1 = torch.randint(0, len(input_poses), (1,)).item()
-    idx2 = torch.randint(0, len(input_poses), (1,)).item()
-    alpha = torch.rand(1).item()
-    new_pose = (1 - alpha) * input_poses[idx1] + alpha * input_poses[idx2]
-    return new_pose
+    return nerf
 ```
 
 ### Edge Cases and Pitfalls
 -   **Few-View Scenarios:** With 3 or 9 views, the reconstruction problem is severely underconstrained. The diffusion prior prevents catastrophic failures and improves robustness [S1].
--   **Dense Capture Settings:** With 54 views, the method helps reduce "fog" and "floater" artifacts common to volumetric reconstruction methods like NeRF while preserving the appearance of well-sampled regions [S1].
--   **Classifier-Free Guidance:** To enable classifier-free guidance, input images are set to all zeros randomly with probability 10% during the training of the diffusion model [S1].
--   **Novel View Selection:** Views should not be placed inside objects or behind walls. The method uses a distribution based on known input poses to define a reasonable set of novel camera poses [S1].
+-   **Dense Capture:** With 54 views, the method helps reduce "fog" and "floater" artifacts common in volumetric reconstruction while preserving well-sampled regions [S1].
+-   **Novel View Selection:** Views should not be placed inside objects or behind walls. The pose distribution should match expected observation positions [S1].
+-   **Comparison with SDS:** ReconFusion empirically found to work better than Score Distillation Sampling (SDS) [S1].
+-   **Comparison with SparseFusion:** ReconFusion samples a new image at each iteration, whereas SparseFusion uses multistep sampling with a noisy encoding of the current rendering as a target [S1].
 
 ## Operating characteristics
--   **Time Complexity:** The NeRF is trained for 1,000 iterations [S1]. Each iteration requires rendering from input poses, generating a feature map, sampling from the diffusion model (10 DDIM steps), and computing losses. The diffusion model itself was trained for 250,000 iterations with a batch size of 256 [S1].
--   **Memory Complexity:** The diffusion model operates on a latent space of $64 \times 64 \times 8$ [S1]. The PixelNeRF encoder outputs a feature map of $64 \times 64$ with 128 channels [S1].
--   **Performance:** ReconFusion outperforms existing baselines on datasets of forward-facing and unbounded 360-degree scenes, including CO3D, RealEstate10K, LLFF, DTU, and mip-NeRF 360 [S1]. It is empirically found to work better than SDS and SparseFusion [S1].
--   **Strengths:** Effective drop-in regularizer for NeRFs across a range of capture settings. Provides strong prior for plausible geometry and appearance in few-view scenarios. Reduces artifacts in denser captures.
--   **Limitations:** Requires a pre-trained diffusion model finetuned on multiview datasets. Computationally expensive due to the need to sample from the diffusion model at each NeRF optimization step.
+-   **Time Complexity:** The NeRF is trained for 1000 iterations [S1]. Each iteration requires rendering from observed poses, rendering from a novel pose, and a full diffusion sampling process (10 DDIM steps) [S1]. The diffusion model itself was finetuned for 250k iterations [S1].
+-   **Memory Complexity:** The diffusion model operates in a latent space of $64 \times 64 \times 8$ [S1]. The PixelNeRF encoder outputs a $64 \times 64 \times 128$ feature map [S1].
+-   **Performance:** Improves quality over previous few-view NeRF approaches on datasets like CO3D, RealEstate10K, LLFF, DTU, and mip-NeRF 360 [S1].
+-   **Strengths:** Effective drop-in regularizer for NeRFs across a range of capture settings; synthesizes realistic geometry and texture in underconstrained regions; preserves appearance of observed regions [S1].
+-   **Limitations:** Requires finetuning a diffusion model on multiview datasets; relies on a pretrained LDM and VAE [S1].
+-   **When to use:** When reconstructing real-world scenes from a few photos (3-9 views) where standard NeRFs fail due to underconstrained geometry [S1].
+-   **When not to use:** When dense input views are available and artifacts are minimal, the overhead of diffusion sampling may not be justified [S1].
 
 ## Background
-ReconFusion was introduced in the paper "ReconFusion: 3D Reconstruction with Diffusion Priors" [S1]. It builds on the challenges of few-view NeRF reconstruction, where standard methods require tens to hundreds of input images [S1]. The method leverages advances in latent diffusion models [42] and PixelNeRF [63] to create a diffusion prior for novel view synthesis. It is related to DreamFusion [36] and SparseFusion [67], but differs in its conditioning on input images and its sampling strategy [S1]. The diffusion model is finetuned on RealEstate10K [66], CO3D [38], MVImgNet [64], and Objaverse [10] [S1].
+ReconFusion was introduced in the paper "ReconFusion: 3D Reconstruction with Diffusion Priors" [S1]. It builds on the challenge that 3D reconstruction methods like NeRF require tens to hundreds of input images for high-quality results, making capture time-consuming [S1]. The method leverages a diffusion prior trained on synthetic and multiview datasets (RealEstate10K, CO3D, MVImgNet, Objaverse) to regularize NeRF optimization at novel poses [S1]. It is similar to SparseFusion in using a diffusion prior but differs in the sampling strategy [S1]. The method uses Zip-NeRF as a backbone and PixelNeRF for conditioning [S1].
 
 ## Sources
 [S1] ReconFusion: 3D Reconstruction with Diffusion Priors, https://doi.org/10.1109/cvpr52733.2024.02036, fetched 2026-10-26

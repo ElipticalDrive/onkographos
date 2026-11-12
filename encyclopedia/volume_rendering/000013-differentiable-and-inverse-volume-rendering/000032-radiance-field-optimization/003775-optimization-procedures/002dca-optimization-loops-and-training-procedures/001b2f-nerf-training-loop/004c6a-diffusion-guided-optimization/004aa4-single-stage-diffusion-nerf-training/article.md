@@ -3,103 +3,113 @@
 Also called: Joint optimization of NeRF and Diffusion Prior, SSDNeRF training
 
 ## Overview
-Single-Stage Diffusion NeRF Training (SSDNeRF) is a method that jointly optimizes scene codes, a diffusion prior, and a NeRF decoder in a single training loop to minimize a combined loss of rendering fidelity and diffusion prior consistency [S1]. Unlike two-stage methods that ignore the prior term during autoencoder training—effectively setting the render-to-prior weight ratio to infinity and resulting in biased, noisy scene codes—this approach constrains codes with both terms simultaneously to prevent such bias [S1].
+Single-Stage Diffusion NeRF Training (SSDNeRF) is a method for jointly optimizing a 3D scene representation (scene codes), a 2D diffusion prior, and a NeRF decoder in a single unified training loop [S1]. It solves the problem of biased and noisy scene codes that arise in two-stage methods, where the autoencoder is trained without the diffusion prior [S1]. Unlike [DreamFusion](12087-dreamfusion.md), which optimizes a fixed NeRF from scratch using score distillation, SSDNeRF optimizes latent scene codes and the prior parameters simultaneously, enabling generalizable 3D reconstruction from images [S1].
 
 ## How it works
-**Inputs and Outputs**
-*   **Inputs:** Ground truth observations $\{y_{ij}^{gt}\}$ and corresponding ray directions $\{r_{ij}^{gt}\}$ for a batch of scenes $i$ and rays $j$ [S1].
-*   **Outputs:** Optimized scene codes $\{x_i\}$, diffusion prior parameters $\phi$, and NeRF decoder parameters $\psi$ [S1].
+**Inputs and Outputs:**
+*   **Inputs:** A dataset of images $\{y_{ij}^{gt}\}$ with corresponding camera poses $\{r_{ij}^{gt}\}$, where $i$ indexes the scene and $j$ indexes the ray (pixel).
+*   **Outputs:** Optimized scene codes $\{x_i\}$, diffusion prior parameters $\phi$, and NeRF decoder parameters $\psi$.
 
-**Data Structures**
+**Data Structures:**
 *   **Scene Codes ($x_i$):** Represented as triplanes with shape $\mathbb{R}^{3 \times 6 \times 128 \times 128}$ [S1].
-*   **Diffusion Prior ($p_\phi$):** A Gaussian diffusion model (e.g., U-Net) that takes a noisy code $x_i^{(t)}$ and timestep $t$ as input, outputting a denoised code $\hat{x}_i$ [S1].
-*   **NeRF Decoder ($p_\psi$):** A decoder that maps scene code $x_i$ and ray $r_{ij}$ to predicted pixel RGB values $y_{\psi}(x_i, r_{ij})$ [S1].
+*   **Diffusion Prior ($p_\phi$):** A Gaussian diffusion model (U-Net) conditioned on the scene code [S1].
+*   **NeRF Decoder ($p_\psi$):** A decoder that maps scene codes and ray parameters to pixel observations [S1].
 
-**Formulas**
-The total training objective is defined as [S1]:
-$$
-L = \lambda_{\text{rend}} L_{\text{rend}}(\{x_i\}, \psi) + \lambda_{\text{diff}} L_{\text{diff}}(\{x_i\}, \phi)
-$$
-where $L_{\text{rend}}$ is the rendering loss against known observations and $L_{\text{diff}}$ is the approximate upper bound of the diffusion negative log-likelihood (NLL), also referred to as score distillation [S1].
+**Training Objective:**
+The total loss $L$ combines rendering fidelity and diffusion prior consistency [S1]:
+$$ L = \lambda_{\text{rend}} L_{\text{rend}}(\{x_i\}, \psi) + \lambda_{\text{diff}} L_{\text{diff}}(\{x_i\}, \phi) $$
+where $L_{\text{rend}}$ is the negative log-likelihood of the rendering given the observations, and $L_{\text{diff}}$ is an approximate upper bound of the diffusion model's negative log-likelihood (score distillation) [S1].
 
-The empirical weighting factors are calculated as [S1]:
-$$
-\lambda_{\text{diff}} = \frac{c_{\text{diff}}}{\text{EMA} \|x_i\|_F^2}
-$$
-$$
-\lambda_{\text{rend}} = \frac{c_{\text{rend}} (1 - e^{-0.1 N_v})}{N_v}
-$$
-where $c_{\text{diff}}$ and $c_{\text{rend}}$ are constant scales, $N_v$ is the number of available views, and $\text{EMA} \|x_i\|_F^2$ is the exponential moving average of the scene codes' Frobenius norms [S1]. The rendering weight calibration prevents the loss from scaling linearly with the number of rays under the assumption of ray independence [S1].
-
-**Parameters**
-*   $K_{\text{out}}$: Number of outer iterations [S1].
-*   $K_{\text{in}}$: Number of inner iterations per outer loop [S1].
-*   $B_{\text{sc}}$: Batch of scenes [S1].
-*   $B_{\text{ray}}$: Batch of rays [S1].
+**Parameters:**
+*   $\lambda_{\text{rend}}$: Rendering loss weight. Calculated as $\lambda_{\text{rend}} := c_{\text{rend}} (1 - e^{-0.1 N_v}) / N_v$, where $c_{\text{rend}}$ is a constant scale and $N_v$ is the number of available views [S1]. This calibrates the loss to prevent linear scaling with ray count [S1].
+*   $\lambda_{\text{diff}}$: Diffusion loss weight. Calculated as $\lambda_{\text{diff}} := c_{\text{diff}} / \text{EMA} \|x_i\|_F^2$, where $c_{\text{diff}}$ is a constant scale and $\text{EMA} \|x_i\|_F^2$ is the exponential moving average of the scene codes' Frobenius norms [S1].
 *   $c_{\text{rend}}, c_{\text{diff}}$: Constant scales for empirical weighting [S1].
 
-**Pitfalls**
-*   **Computational Cost:** The diffusion loss $L_{\text{diff}}$ is significantly more expensive to evaluate than the rendering loss $L_{\text{rend}}$, reducing overall efficiency [S1].
-*   **Gradient Caching:** To mitigate cost, prior gradients are cached and reused across multiple Adam steps, while rendering gradients are refreshed every step [S1].
+**Algorithm:**
+The method uses an outer loop for diffusion parameter updates and an inner loop for scene code updates, employing prior gradient caching to mitigate the high computational cost of $L_{\text{diff}}$ [S1].
 
-**Pseudocode**
+1.  Initialize scene codes $\{x_i\}$, diffusion prior parameters $\phi$, and NeRF decoder parameters $\psi$.
+2.  Loop for $K_{\text{out}}$ outer iterations:
+    a. Sample a batch of scenes $i \in B_{\text{sc}}$.
+    b. Compute gradients for diffusion loss $L_{\text{diff}}$ with respect to $\phi$ and $\{x_i\}$: $g_\phi, g_{x}^{\text{diff}} \leftarrow \nabla_{\phi, \{x_i\}_{B_{\text{sc}}}} \lambda_{\text{diff}} L_{\text{diff}}$.
+    c. Update diffusion parameters $\phi$ using Adam optimizer with gradient $g_\phi$: $\phi \leftarrow \phi - \text{Adam}(g_\phi)$.
+    d. Loop for $K_{\text{in}}$ inner iterations:
+        i. Sample a batch of rays $j \in B_{\text{ray}}$.
+        ii. Compute gradients for rendering loss $L_{\text{rend}}$ with respect to $\{x_i\}$: $g_{x}^{\text{rend}} \leftarrow \nabla_{\{x_i\}_{B_{\text{sc}}}} \lambda_{\text{rend}} L_{\text{rend}}$.
+        iii. Combine cached diffusion gradient $g_{x}^{\text{diff}}$ with current rendering gradient $g_{x}^{\text{rend}}$ to get total gradient $g_x$: $g_x \leftarrow g_{x}^{\text{rend}} + g_{x}^{\text{diff}}$.
+        iv. Update scene codes $\{x_i\}$ using Adam optimizer with total gradient $g_x$: $\{x_i\}_{B_{\text{sc}}} \leftarrow \{x_i\}_{B_{\text{sc}}} - \text{Adam}(g_x)$.
+        v. If $k_{\text{in}}$ equals $K_{\text{in}}$ (last inner iteration), compute gradients for decoder parameters $\psi$ with respect to rendering loss: $g_\psi \leftarrow \nabla_\psi \lambda_{\text{rend}} L_{\text{rend}}$.
+        vi. Update decoder parameters $\psi$ using Adam optimizer with gradient $g_\psi$: $\psi \leftarrow \psi - \text{Adam}(g_\psi)$.
+
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Algorithm 1: Single-stage diffusion NeRF training [S1]
-# Input: Ground truth observations {y_ij_gt}, ray directions {r_ij_gt}
-# Initialize scene codes {x_i}, diffusion prior parameters phi, NeRF decoder parameters psi
+# Initialization
+x_i = initialize_scene_codes() # Shape: [N_scenes, 3, 6, 128, 128]
+phi = initialize_diffusion_params()
+psi = initialize_decoder_params()
+ema_norm_sq = 0.0
+cached_grad_x_diff = None
 
-for kout in range(1, K_out + 1):
-    # Sample a batch of scenes
-    batch_scenes = SampleBatch(B_sc)
+for k_out in range(K_out):
+    # Outer loop: Update Diffusion Prior
+    batch_scenes = sample_batch(x_i, size=B_sc)
     
-    # Compute gradients for diffusion loss with respect to phi and {x_i}
-    # L_diff is the approximate upper bound of diffusion NLL [S1]
-    grad_phi, grad_x_diff = ComputeGradients(
-        variables=[phi, batch_scenes],
-        loss=lambda_diff * L_diff(batch_scenes, phi)
-    )
+    # Compute diffusion loss and gradients
+    # L_diff is approximated upper bound of NLL (score distillation)
+    loss_diff = compute_diffusion_loss(batch_scenes, phi)
+    grad_phi, grad_x_diff = compute_gradients(loss_diff, [phi, batch_scenes])
     
-    # Update diffusion parameters phi using Adam
-    phi = AdamUpdate(phi, grad_phi)
+    # Update diffusion parameters
+    phi = adam_update(phi, grad_phi)
     
-    # Cache the diffusion gradient for scene codes to reuse in inner loop
+    # Cache diffusion gradient for inner loop
     cached_grad_x_diff = grad_x_diff
     
-    for kin in range(1, K_in + 1):
-        # Sample a batch of rays
-        batch_rays = SampleBatch(B_ray)
+    # Update EMA of scene code norms for lambda_diff calculation
+    # Note: In practice, EMA is updated continuously or periodically
+    for x in batch_scenes:
+        ema_norm_sq = 0.9 * ema_norm_sq + 0.1 * torch.norm(x, 'fro')**2
         
-        # Compute gradients for rendering loss with respect to {x_i}
-        # L_rend is the rendering loss against known observations [S1]
-        grad_x_rend = ComputeGradients(
-            variables=[batch_scenes],
-            loss=lambda_rend * L_rend(batch_scenes, psi, batch_rays)
-        )
+    # Inner loop: Update Scene Codes and Decoder
+    for k_in in range(K_in):
+        batch_rays = sample_batch_rays(batch_scenes, size=B_ray)
         
-        # Combine cached diffusion gradient with current rendering gradient
-        total_grad_x = grad_x_rend + cached_grad_x_diff
+        # Compute rendering loss and gradients w.r.t scene codes
+        loss_rend = compute_rendering_loss(batch_rays, batch_scenes, psi)
+        grad_x_rend = compute_gradients(loss_rend, batch_scenes)
         
-        # Update scene codes {x_i} using Adam optimizer with total gradient
-        batch_scenes = AdamUpdate(batch_scenes, total_grad_x)
+        # Combine gradients
+        # lambda_rend and lambda_diff are computed based on N_v and EMA norm
+        lambda_rend = c_rend * (1 - exp(-0.1 * N_v)) / N_v
+        lambda_diff = c_diff / ema_norm_sq
         
-        # If this is the last inner iteration, update decoder parameters
-        if kin == K_in:
-            grad_psi = ComputeGradients(
-                variables=[psi],
-                loss=lambda_rend * L_rend(batch_scenes, psi, batch_rays)
-            )
-            psi = AdamUpdate(psi, grad_psi)
+        total_grad_x = lambda_rend * grad_x_rend + lambda_diff * cached_grad_x_diff
+        
+        # Update scene codes
+        batch_scenes = adam_update(batch_scenes, total_grad_x)
+        
+        # Update decoder only on last inner iteration
+        if k_in == K_in - 1:
+            grad_psi = compute_gradients(loss_rend, psi)
+            psi = adam_update(psi, grad_psi)
 ```
 
+**Edge Cases and Pitfalls:**
+*   **Computational Cost:** The diffusion loss $L_{\text{diff}}$ is significantly more expensive to evaluate than the rendering loss $L_{\text{rend}}$, reducing overall efficiency [S1]. Prior gradient caching is required to mitigate this [S1].
+*   **Bias in Two-Stage Methods:** Ignoring the prior term during autoencoder training (effectively setting $\lambda_{\text{rend}}/\lambda_{\text{diff}}$ to infinity) results in biased and noisy scene codes [S1].
+
 ## Operating characteristics
-*   **Efficiency:** The method is computationally expensive due to the diffusion loss evaluation. It employs prior gradient caching to accelerate reconstruction by refreshing rendering gradients every step while reusing prior gradients [S1].
-*   **Quality:** Joint optimization prevents the biased and noisy scene codes produced by two-stage methods that ignore the prior during autoencoder training [S1].
-*   **Generalization:** The empirical weighting mechanism adapts to the number of available views $N_v$, making it suitable for generalizable test-time NeRF reconstruction covering a wide spectrum from single-view to dense observations [S1].
+*   **Time Complexity:** High due to the joint optimization of three sets of parameters and the expensive diffusion loss evaluation. Prior gradient caching reduces the number of diffusion passes [S1].
+*   **Memory Complexity:** Requires storing gradients for scene codes, diffusion parameters, and decoder parameters. The triplane representation ($\mathbb{R}^{3 \times 6 \times 128 \times 128}$) is memory-intensive per scene [S1].
+*   **Strengths:** Prevents bias and noise in scene codes by constraining them with both rendering and diffusion terms in a single stage [S1]. Enables generalizable test-time NeRF reconstruction from single-view to dense observations [S1].
+*   **Limitations:** Computationally expensive compared to two-stage methods or rendering-only optimization [S1].
+*   **When to use:** When high-quality, generalizable 3D reconstruction is required from limited or noisy input views, and computational resources allow for joint optimization [S1].
+*   **When not to use:** When real-time performance is critical or computational resources are limited [S1].
 
 ## Background
-Single-Stage Diffusion NeRF was introduced in the paper "Single-Stage Diffusion NeRF: A Unified Approach to 3D Generation and Reconstruction" [S1]. It addresses limitations in previous two-stage generative neural field methods [2, 13, 32, 47] and finetuning approaches [8, 61] by unifying the training of the diffusion prior and the NeRF decoder.
+SSDNeRF was introduced in the paper "Single-Stage Diffusion NeRF: A Unified Approach to 3D Generation and Reconstruction" [S1]. It addresses limitations in previous two-stage generative neural field methods [S1]. The method builds on score distillation techniques [S1] and triplane NeRF representations [S1].
 
 ## Sources
 [S1] Single-Stage Diffusion NeRF: A Unified Approach to 3D Generation and Reconstruction, https://doi.org/10.1109/iccv51070.2023.00229, fetched 2026-10-29

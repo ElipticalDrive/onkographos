@@ -1,113 +1,128 @@
 # Point Location
-Also called: Octree Point Location, Integer coordinate point location
+
+Also called: Coordinate-based hashing, Frisken and Perry hashing, Integer coordinate point location, Octree Hashing and Point Location, Octree Point Location, Point Location via Bitwise Masking
 
 ## Overview
-Point location maps a continuous 3D coordinate vector to a specific leaf node or voxel within a canonical octree [S1, S2][S3, unofficial]. It solves the problem of efficiently retrieving data associated with a spatial position by traversing the tree from a given starting node to the target leaf [S1, S2][S3, unofficial]. What sets this method apart from generic tree traversal is its reliance on precomputed bit masks to determine child indices using constant-time bitwise operations, avoiding the computational cost of arbitrary bit shifts [S1, S2][S3, unofficial]. It builds on [Octree Child Index Computation](1807-octree-child-index-computation.md) to derive the 0-7 octant offset [S1].
+Point Location maps a continuous 3D coordinate vector to a specific leaf node (or scalar value) within a canonical sparse voxel octree [S1, S2][S5, unofficial]. It solves the problem of efficiently determining which octree cell contains a given point without traversing the tree structure using geometric bounding-box comparisons [S4, unofficial]. Unlike sibling methods that may rely on Morton codes or explicit parent pointers, this method uses precomputed bitwise masks to extract the octant index directly from integer coordinates, enabling fast top-down traversal [S1, S2]. It is distinct from [Octree Child Index Computation](1807-octree-child-index-computation.md) in that it performs the full search from a given depth to the leaf, whereas the sibling method only computes the offset for a single level [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** `dest`: A 3D integer coordinate vector representing the target location [S3, unofficial]. `depth`: The current depth level in the octree, starting from the root or an intermediate node [S3, unofficial]. `index`: The index of the current node in the flat node array [S3, unofficial]. `max_depth`: The maximum depth of the octree [S3, unofficial].
-*   **Output:** The scalar value stored in the leaf node containing `dest` [S1, S2][S3, unofficial].
+**Inputs:**
+*   `dest`: A 3D integer vector $(x, y, z)$ representing the target coordinate. Components are cast from continuous space to integers, constrained to the interval $[0, 2^{d_{max}}]$ [S1, S2][S4, S5, unofficial].
+*   `depth`: The current depth level in the octree (0 is root) [S1][S3, unofficial].
+*   `index`: The index of the current node in the `nodes` array at the current `depth` [S1][S3, unofficial].
+*   `octdata`: A structure containing:
+    *   `nodes`: An array of arrays `OctNode[max_depth]`, where `OctNode` contains:
+        *   `child_scalars[8]`: Scalar values for leaf children [S1, S2].
+        *   `child_start`: Unsigned integer base pointer/index to the children nodes [S1, S2].
+        *   `child_offset[8]`: Char array storing the offset from `child_start` for each of the 8 children. A value of `-1` indicates the child is a leaf [S1, S2].
+    *   `child_bit_depth`: An integer array of size `max_depth` [S1, S2].
+    *   `max_depth`: The maximum depth of the octree [S1, S2].
+    *   `caps`: An array of `OctCap` structures, where `OctCap` contains `scalars[8]` [S1, S2].
 
-**Data Structures:**
-The method assumes the following data structures, typically stored in an `OctreeData` container:
-*   `nodes`: A 2D array `nodes[depth][index]` of type `OctNode` [S1, S2].
-*   `caps`: An array `caps[index]` of type `OctCap`, used for leaf voxels at the deepest level [S1, S2].
-*   `child_bit_depth`: A precomputed 1D array `child_bit_depth[max_depth]` [S1, S2][S3, unofficial].
-*   `OctNode` layout:
-    *   `child_scalars[8]`: Array of scalar values for leaf children [S1, S2].
-    *   `child_start`: Unsigned integer base pointer or index to the children of this node [S1, S2].
-    *   `child_offset[8]`: Array of 8 signed chars representing the offset from `child_start` to the child node. A value of `-1` indicates the child is a leaf (scalar) [S1, S2][S3, unofficial].
-*   `OctCap` layout:
-    *   `child_scalars[8]`: Array of scalar values for the 8 voxels in the cap [S1, S2].
+**Outputs:**
+*   The scalar value associated with the leaf node containing `dest` [S1, S2].
 
-**Precomputation:**
-Before traversal, the `child_bit_depth` array is computed for each depth level $d$ from $0$ to `max_depth`:
-$$ \text{child\_bit\_depth}[d] = 1 \ll (\text{max\_depth} - d - 1) $$
-This precomputation avoids expensive arbitrary left-shift operations during traversal [S1, S2][S3, unofficial].
+**Data Structures and Precomputation:**
+The method relies on a precomputed array `child_bit_depth` to avoid expensive arbitrary left-shift operations during traversal [S1, S2][S3, unofficial]. For each depth level $d$, the mask is computed as:
+$$ \text{child\_bit\_depth}[d] = 1 \ll (d_{max} - d - 1) $$
+This mask isolates the single bit in the coordinate components that determines the child octant at that specific depth level [S1, S2][S3, unofficial].
 
 **Algorithm Steps:**
-1.  **Cast Coordinates:** Convert continuous input coordinates to integers and ensure they fall within the canonical interval $[0, 2^{\text{max\_depth}})$ [S1, S2][S3, unofficial].
-2.  **Initialize:** Start with the given `depth` and `index` [S3, unofficial].
-3.  **Retrieve Node:** Access the current node: `node = nodes[depth][index]` [S3, unofficial].
-4.  **Get Mask:** Retrieve the precomputed bit mask for the current depth: `child_bit = child_bit_depth[depth]` [S1, S2][S3, unofficial].
-5.  **Compute Child Index:** Determine the 0-7 octant index of the child containing `dest` by testing bits against `child_bit`, shifting results, and combining them:
-    $$ \text{child} = ((\text{dest}.x \ \& \ \text{child\_bit}) \neq 0) \ll 2 \ | \ ((\text{dest}.y \ \& \ \text{child\_bit}) \neq 0) \ll 1 \ | \ ((\text{dest}.z \ \& \ \text{child\_bit}) \neq 0) $$
-    This yields the 0-7 octant offset of the child, and hence its index [S2][S3, unofficial].
-6.  **Check for Leaf in Interior Node:** If `node.child_offset[child] == -1`, the child is a scalar leaf [S3, unofficial]. Return `node.child_scalars[child]` [S1, S2][S3, unofficial].
-7.  **Check for Cap Node (Deepest Level):** If `depth == max_depth - 2`, the node is a cap node containing voxels [S2][S3, unofficial].
-    *   Calculate the final child index using the lowest bit (bit 0) of the coordinates:
-        $$ \text{child} = (\text{dest}.x \ \& \ 1) \ll 2 \ | \ (\text{dest}.y \ \& \ 1) \ll 1 \ | \ (\text{dest}.z \ \& \ 1) $$
-    *   Update `index = node.child_start + node.child_offset[child]` and return `caps[index].child_scalars[child]` [S2][S3, unofficial].
-8.  **Traverse Down:** If not a leaf and not a cap:
-    *   Update `index` to point to the child's start location: `index = node.child_start + node.child_offset[child]` [S2][S3, unofficial].
-    *   Increment `depth`: `depth += 1` [S2][S3, unofficial].
-    *   Repeat from Step 3.
+1.  Initialize the search with the starting `depth` and `index`.
+2.  Enter an infinite loop for top-down traversal:
+    a.  Retrieve the current node: `node = nodes[depth][index]`.
+    b.  Retrieve the precomputed mask: `child_bit = child_bit_depth[depth]`.
+    c.  Compute the target child octant index ($0-7$) using bitwise operations:
+        $$ \text{child} = \left( (dest.x \ \& \ \text{child\_bit}) \neq 0 \right) \ll 2 \ | \ \left( (dest.y \ \& \ \text{child\_bit}) \neq 0 \right) \ll 1 \ | \ \left( (dest.z \ \& \ \text{child\_bit}) \neq 0 \right) $$
+        This extracts the relevant bit from each coordinate component and packs them into a 3-bit integer [S1, S2][S3, S5, unofficial].
+    d.  Check if the child is a leaf:
+        i.  If `node.child_offset[child] == -1`, the child is a scalar leaf. Return `node.child_scalars[child]` [S1, S2][S3, unofficial].
+        ii. If `depth == max_depth - 2`, the child is a cap node (containing voxels). Update `index = node.child_start + node.child_offset[child]`. Compute the final voxel index using the lowest bit of the coordinates:
+            $$ \text{child} = (dest.x \ \& \ 1) \ll 2 \ | \ (dest.y \ \& \ 1) \ll 1 \ | \ (dest.z \ \& \ 1) $$
+            Return `caps[index].scalars[child]` [S1, S2][S3, unofficial].
+        iii. Otherwise, the child is an internal node. Update `index = node.child_start + node.child_offset[child]` and increment `depth`. Continue the loop [S1, S2][S3, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def point_locate(dest: Vec3i, depth: int, index: int, max_depth: int, 
-                 nodes: List[List[OctNode]], caps: List[OctCap], 
-                 child_bit_depth: List[int]) -> T:
-    while True:
-        node = nodes[depth][index]
-        child_bit = child_bit_depth[depth]
+def point_locate(dest: Vec3i, depth: int, index: int, octdata: OctreeData) -> float:
+    """
+    Locates the scalar value for a given integer coordinate in the octree.
+    
+    Args:
+        dest: Integer coordinates (x, y, z) in range [0, 2^max_depth].
+        depth: Current depth in the octree.
+        index: Index of the current node in octdata.nodes[depth].
+        octdata: Structure containing nodes, caps, child_bit_depth, and max_depth.
         
-        # Compute child index (0-7) based on bits in dest coordinates
-        child = ((dest.x & child_bit) != 0) << 2 | \
-                ((dest.y & child_bit) != 0) << 1 | \
-                ((dest.z & child_bit) != 0)
+    Returns:
+        The scalar value at the leaf node containing dest.
+    """
+    for _ in range(10000): # Safety break, though logic guarantees termination
+        node = octdata.nodes[depth][index]
+        child_bit = octdata.child_bit_depth[depth]
         
-        # Check if child is a scalar leaf in an interior node
+        # Compute child octant index (0-7)
+        # Extract bit for each axis, convert to 0/1, shift to position
+        x_bit = 1 if (dest.x & child_bit) else 0
+        y_bit = 1 if (dest.y & child_bit) else 0
+        z_bit = 1 if (dest.z & child_bit) else 0
+        child = (x_bit << 2) | (y_bit << 1) | z_bit
+        
+        # Check if child is a scalar leaf
         if node.child_offset[child] == -1:
             return node.child_scalars[child]
         
-        # Check if we are at the cap level (max_depth - 2)
-        elif depth == max_depth - 2:
-            # Use the lowest bit for cap nodes
+        # Check if child is a cap node (voxel leaf)
+        # Caps are typically at max_depth - 2, storing 2x2x2 voxels
+        if depth == octdata.max_depth - 2:
             index = node.child_start + node.child_offset[child]
-            child = (dest.x & 1) << 2 | (dest.y & 1) << 1 | (dest.z & 1)
-            return caps[index].child_scalars[child]
+            # Use the lowest bit (depth max_depth - 1) to index into the 2x2x2 cap
+            x_cap = dest.x & 1
+            y_cap = dest.y & 1
+            z_cap = dest.z & 1
+            cap_child = (x_cap << 2) | (y_cap << 1) | z_cap
+            return octdata.caps[index].scalars[cap_child]
         
-        # Traverse to the child node
+        # Move to the child node
         index = node.child_start + node.child_offset[child]
         depth += 1
         
-    return 0  # Fallback return, though the loop always returns for valid inputs
+    return 0.0 # Should not be reached if tree is valid and dest is in bounds
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Coordinate Range:** Coordinates must be within the canonical interval $[0, 2^{\text{max\_depth}}]$ and cast to integers [S1, S2][S3, unofficial].
-*   **Cap Nodes:** The algorithm explicitly handles the deepest level (`max_depth - 2`) as a special case using the lowest bit, implying the octree structure uses "caps" for the finest resolution [S2][S3, unofficial].
-*   **Parent Pointers:** Parent pointers are omitted to save memory [S2]. Neighbor finding (which may call point location) relies on a separate `parent_trace` array provided by the ray traversal algorithm [S2][S3, unofficial].
+*   **Coordinate Bounds:** Coordinates must be within $[0, 2^{d_{max}}]$. Out-of-bounds coordinates may access invalid memory or return incorrect values [S1][S4, unofficial].
+*   **Cap Nodes:** The method assumes a specific structure where leaf nodes at `max_depth - 2` are "caps" containing 8 voxels, handled separately from scalar leaves [S1, S2].
+*   **Parent Pointers:** Parent pointers are omitted from nodes to save memory. Traversal relies on the `child_offset` and `child_start` fields [S1, S2].
 
 ## Subtopics
 
+### [Octant Identity Calculation](11038-octant-identity-calculation.md)
+Computes the cardinal identity (0-7) of an octant based on absolute voxel coordinates and octree depth levels. It serves as the core bitwise extraction step within Point Location, determining which of the 8 children a coordinate falls into at a specific depth. It is chosen when the octant index is needed for traversal or neighbor finding. See [Octant Identity Calculation](11038-octant-identity-calculation.md).
+
 ### Recursive Octree Insertion with Bitstream
-An algorithm to traverse and insert a voxel into an Octree using a pre-computed bitstream to determine child indices [S4, unofficial].
-*   **Definition:** It uses a bitstream `b` encoding the voxel's position to guide insertion [S4, unofficial].
-*   **Steps:**
-    1.  If `depth d` is 0, return a new node containing the voxel `v` [S4, unofficial].
-    2.  Extract the child index from the bitstream `b` using `group(b, d, 3)` and get the corresponding child `n'` from node `n` [S4, unofficial].
-    3.  If child `n'` is null, create a new empty node [S4, unofficial].
-    4.  Recursively insert the voxel into the child node with `depth d-1`, and set the result as the child at the index derived from the bitstream [S4, unofficial].
-*   **Parameters:** `b`: The bitstream encoding the voxel's position [S4, unofficial].
-*   **When to choose:** Used for dynamic insertion into an octree where a bitstream representation of coordinates is available [S4, unofficial].
+An algorithm to traverse and insert a voxel into an Octree using a pre-computed bitstream to determine child indices. It uses `group(b, d, 3)` to extract 3 bits from the bitstream `b` at depth `d` to identify the child. If the child is null, it creates a new empty node. This variant is used when building or modifying the octree structure dynamically, rather than querying it. See [Recursive Octree Insertion with Bitstream](11039-recursive-octree-insertion-with-bitstream.md).
+
+### Sphere Marching
+A ray traversal strategy for the outer band that searches for the octree node containing the current point and computes step length by evaluating the corresponding polynomial. It uses variable error extension with a delta ($\delta$) of 0.02 to reduce octree memory size. Compared to standard Octree Traversal, it can start at any position on the ray inside the node, generally requiring fewer iterations on average but with a longer tail in iteration count distribution. See [Sphere Marching](11040-sphere-marching.md).
 
 ## Operating characteristics
-*   **Time Complexity:** $O(d)$, where $d$ is the depth of the octree, as each iteration performs constant-time bitwise operations and array lookups [G].
-*   **Memory Complexity:** $O(\text{max\_depth})$ for the precomputed `child_bit_depth` array [S2]. The node structure itself is compact, using `child_offset` as signed chars to save space [S2][S3, unofficial].
-*   **Performance:** Precomputing bit masks avoids expensive arbitrary left-shift operations, providing noticeably better performance than the original Frisken and Perry method [S1, S2][S3, unofficial].
-*   **Strengths:** Fast lookup, low memory overhead (no parent pointers), simple bitwise logic [S2][S3, unofficial].
-*   **Limitations:** Requires canonical coordinate system $[0, 2^{\text{max\_depth}}]$. Neighbor finding requires additional infrastructure (`parent_trace`) [S2][S3, unofficial].
+*   **Time Complexity:** $O(d_{max})$ per query, where $d_{max}$ is the maximum depth of the octree. Each level requires a constant number of bitwise operations and array lookups [S1, S2].
+*   **Memory Complexity:** $O(1)$ auxiliary space for the traversal, excluding the storage of the octree itself. The `child_bit_depth` array requires $O(d_{max})$ space [S1, S2].
+*   **Performance:** The use of precomputed masks avoids expensive arbitrary left-shift instructions, providing noticeably better performance than naive shifting approaches [S1, S2][S3, unofficial].
+*   **Strengths:** Fast, branch-predictable traversal; minimal memory overhead for parent pointers; works well with canonical integer coordinates [S1, S2].
+*   **Limitations:** Requires coordinates to be cast to integers and constrained to the canonical range; less flexible for non-canonical coordinate systems without preprocessing [S4, unofficial].
 
 ## Background
-Originating from the work of Frisken and Perry, this method was adapted for interactive isosurface ray tracing of large octree volumes [S1, S2][S3, unofficial]. The original proposal involved creating a single-bit mask corresponding to the current depth and applying it to coordinates [S1, S2][S3, unofficial]. The optimized version, caching `child_bit_depth` to avoid arbitrary shifts, was introduced in subsequent implementations for performance [S1, S2][S3, unofficial].
+The method is based on the octree hashing scheme proposed by Frisken and Perry [4, 5, 26], which observed that octree locational codes can be represented directly by integer coordinates [S1, S2][S3, S4, S5, unofficial]. It was popularized in the context of interactive isosurface ray tracing of large octree volumes [S1, S2][S3, unofficial]. The optimization of caching depth masks to avoid arbitrary shifts was introduced to improve performance on hardware where shift operations by variable amounts are costly [S1, S2][S3, unofficial].
 
 ## Sources
 [S1] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~wald/Publications/2006/OctIso/octiso.pdf, fetched 2026-10-27
 [S2] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~knolla/octiso-rt06.pdf, fetched 2026-10-28
 [S3] Interactive isosurface ray tracing of large octree volumes, https://www.researchgate.net/publication/310054812_Interactive_isosurface_ray_tracing_of_large_octree_volumes, fetched 2026-10-29 (unofficial)
-[S4] Estudio de la compresión y la eficiencia del Sparse Voxel Octree en el cálculo de la Iluminación Global, https://hdl.handle.net/2117/445971, fetched 2026-10-26 (unofficial)
+[S4] PDF A Survey of Octree Volume Rendering Methods, https://www.sci.utah.edu/~knolla/octsurvey.pdf, fetched 2026-10-29 (unofficial)
+[S5] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)
+[S6] Estudio de la compresión y la eficiencia del Sparse Voxel Octree en el cálculo de la Iluminación Global, https://hdl.handle.net/2117/445971, fetched 2026-10-26 (unofficial)
+[S7] Rendering piecewise approximations of SDFs through analytic intersections, https://doi.org/10.1016/j.cag.2024.103981, fetched 2026-10-27

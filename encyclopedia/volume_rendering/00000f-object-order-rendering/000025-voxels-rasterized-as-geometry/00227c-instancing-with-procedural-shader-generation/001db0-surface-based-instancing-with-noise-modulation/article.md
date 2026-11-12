@@ -3,52 +3,61 @@
 Also called: Instanced surface points, Surface primitive instancing
 
 ## Overview
-Surface-based instancing with noise modulation generates high-density point clouds from surface primitives to achieve smooth volumetric appearance at high resolutions. It differs from sibling methods by explicitly instantiating a massive number of points (e.g., ~400 million) per primitive and modulating their density or position using procedural noise functions before rasterization or voxelization.
+Surface-based Instancing with Noise Modulation is a technique for rendering volumetric primitives by generating a dense cloud of instanced points on a parametric surface, where point density and position are modulated by procedural noise functions [S1, unofficial]. It solves the problem of creating smooth, organic volumetric appearances (such as smoke or fire) from discrete surface meshes by distributing millions of sample points across the geometry [S1, unofficial]. It differs from sibling methods like [3D Gaussian Splatting via Instancing](1586-3d-gaussian-splatting-via-instancing.md) by using scalar/vector noise to drive density and displacement rather than learned Gaussian parameters, and from [Procedural Particle Rendering](2926-procedural-particle-rendering.md) by explicitly mapping noise to surface parameter space ($s,t$) rather than world space [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- **Input:** A mesh primitive defined by a grid of vertices with attributes (position, normal, velocity, thickness, derivatives). Parameters include `numCols`, `numRows`, `numPoints` (total instances per primitive), `instanceRadius`, noise scales (`densScale`, `dispScale`), noise amplitudes, and fractal noise evaluators (`densFractal`, `dispFractal`).
-- **Output:** A set of instanced points with world-space positions, density vectors, and radii.
+**Inputs:**
+- A mesh geometry composed of pieces, where each piece has attributes: `density` (Vector), `wsP` (World Space Position, Vector), `wsVelocity` (Vector), `wsNormal` (Vector), `thickness` (Float), and grid dimensions `numCols`, `numRows` [S1, unofficial].
+- Noise configuration: `doDensNoise` (Boolean), `doDispNoise` (Boolean), `densScale` (Float), `dispScale` (Float), `dispAmplitude` (Float), `densFractal` (Scalar Noise Evaluator), `dispFractal` (Vector Noise Evaluator) [S1, unofficial].
+- Instancing parameters: `numPoints` (Integer, typically ~400 million), `instanceRadius` (Float), `seed` (Integer) [S1, unofficial].
+
+**Outputs:**
+- A point cloud with attributes: `position` (Vector), `density` (Vector), `radius` (Float) [S1, unofficial].
 
 **Data Structures:**
-- **Mesh Attributes:** Stored per mesh piece. Includes `numCols`, `numRows`, and vertex attributes indexed by $(s, t)$ coordinates.
-- **Point Attributes:** Stored per instance. Includes `position` (Vector3), `density` (Vector3), and `radius` (Float).
-- **Noise Evaluators:** Objects providing `eval()` for scalar noise and `evalVec()` for vector noise.
+- `Meshes::CPtr meshes`: Container of mesh pieces.
+- `AttrVisitor`: Iterator for mesh and point attributes.
+- `Imath::Rand48`: Random number generator state [S1, unofficial].
+- `SURFACE_INST_INTERP`: Macro/function for bilinear interpolation of attributes on a quad-connected mesh patch given $s,t$ coordinates [S1, unofficial].
 
-**Numbered Steps:**
-1.  **Initialize:** For each mesh piece, update mesh attributes and calculate `numPoints = numCols * numRows`. Initialize a random number generator (e.g., `Rand48`) with a seed.
-2.  **Loop Instances:** For each instance index $i$ from $0$ to `numPoints`:
-    a.  **Generate Local Position:** Generate a random local space position $lsP = (lsP_x, lsP_y, lsP_z)$ using three uniform random floats in $[0, 1]$.
-    b.  **Map to Surface Parameters:** Calculate surface parameters $s$ and $t$:
-        $$s = lsP_x \times (numCols - 1)$$
-        $$t = lsP_y \times (numRows - 1)$$
-    c.  **Interpolate Attributes:** Interpolate instance attributes at $(s, t)$ using bilinear or spline interpolation (macro `SURFACE_INST_INTERP`):
-        -   $instanceDensity$: Density vector.
-        -   $instanceWsP$: World space position.
-        -   $instanceWsV$: World space velocity.
-        -   $wsN$: Normal vector (normalized).
-        -   $wsDPds$: Derivative with respect to $s$.
-        -   $wsDPdt$: Derivative with respect to $t$.
-        -   $thickness$: Scalar thickness.
-    d.  **Offset Position:** Offset the world space position along the normal based on the local $z$ coordinate:
-        $$instanceWsP += \text{fit01}(lsP_z, -1.0, 1.0) \times wsN \times thickness$$
-        Where $\text{fit01}(v, min, max)$ maps $v$ from $[min, max]$ to $[0, 1]$.
-    e.  **Apply Density Noise (if enabled):**
-        i.  Calculate noise lookup position: $nsLookupP = nsP / densScale$. (Note: $nsP$ is typically derived from $lsP$ or world position; source uses $nsP = lsP$ in code snippet).
-        ii. Evaluate scalar noise: $noise = densFractal.eval(nsLookupP)$.
-        iii. Calculate edge fade: $fade = edgeFade(lsP_x, lsP_y, lsP_z)$.
-        iv. Update density: $instanceDensity *= noise + fade$.
-    f.  **Apply Displacement Noise (if enabled):**
-        i.  Calculate noise lookup position: $nsLookupP = nsP / dispScale$.
-        ii. Evaluate vector noise: $disp = dispFractal.evalVec(nsLookupP)$.
-        iii. Update position by adding components along tangent, bitangent, and normal:
-        $$instanceWsP += disp.x \times wsDPds \times thickness \times dispAmplitude$$
-        $$instanceWsP += disp.y \times wsDPdt \times thickness \times dispAmplitude$$
-        $$instanceWsP += disp.z \times wsN \times thickness \times dispAmplitude$$
-    g.  **Set Instance Attributes:**
-        -   Position: $instanceWsP$
-        -   Density: $instanceDensity$
-        -   Radius: $instanceRadius$
+**Steps:**
+1. Iterate over each mesh piece in the input geometry.
+2. Update mesh-specific attributes (`updateSurfAttrs`) and point attributes for the current piece (`updatePointAttrs`) [S1, unofficial].
+3. Calculate the grid dimensions: `numCols` and `numRows` for the current piece [S1, unofficial].
+4. Initialize a random number generator `rng` with the configured `seed` [S1, unofficial].
+5. Loop for `i` from 0 to `m_surfAttrs.numPoints - 1`:
+    a. Generate a random local space position `lsP` using `rng.nextf()` for x, y, and z components (uniform in [0,1]) [S1, unofficial].
+    b. Compute surface parameters:
+       $$s = lsP.x \times (numCols - 1)$$
+       $$t = lsP.y \times (numRows - 1)$$
+    c. Interpolate instance attributes at $(s,t)$ using `SURFACE_INST_INTERP`:
+       - `instanceDensity` (Vector)
+       - `instanceWsP` (Vector)
+       - `instanceWsV` (Vector)
+       - `wsN` (Vector, normalized)
+       - `wsDPds` (Vector, tangent derivative)
+       - `wsDPdt` (Vector, bitangent derivative)
+       - `thickness` (Float)
+    d. Offset the world space position along the normal:
+       $$instanceWsP += \text{fit01}(lsP.z, -1.0, 1.0) \times wsN \times thickness$$
+       Where `fit01` maps the z-component from [0,1] to [-1,1] [S1, unofficial].
+    e. If `doDensNoise` is true:
+       - Calculate noise lookup position: $nsLookupP = lsP / densScale$
+       - Evaluate scalar noise: $noise = densFractal.eval(nsLookupP)$
+       - Calculate edge fade: $fade = edgeFade(lsP.x, lsP.y, lsP.z)$
+       - Update density: $instanceDensity *= noise + fade$
+    f. If `doDispNoise` is true:
+       - Calculate noise lookup position: $nsLookupP = lsP / dispScale$
+       - Evaluate vector noise: $disp = dispFractal.evalVec(nsLookupP)$
+       - Update position by adding displacement components:
+         $$instanceWsP += disp.x \times wsDPds \times thickness \times dispAmplitude$$
+         $$instanceWsP += disp.y \times wsDPdt \times thickness \times dispAmplitude$$
+         $$instanceWsP += disp.z \times wsN \times thickness \times dispAmplitude$$
+    g. Set instance attributes:
+       - Position: `instanceWsP`
+       - Density: `instanceDensity`
+       - Radius: `instanceRadius`
+6. Repeat for all mesh pieces [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -56,112 +65,105 @@ Surface-based instancing with noise modulation generates high-density point clou
 ```python
 def surface_based_instancing(meshes, params):
     """
-    Generates instanced points from surface primitives with noise modulation.
+    meshes: List of mesh pieces, each with attrs: density, wsP, wsVelocity, wsNormal, thickness, numCols, numRows
+    params: dict containing numPoints, instanceRadius, seed, doDensNoise, doDispNoise, 
+            densScale, dispScale, dispAmplitude, densFractal, dispFractal
     """
-    points = [] # List of point attributes
+    points = [] # Output point cloud
+    
     for mesh in meshes:
-        # Update mesh attributes
-        num_cols = mesh.num_cols
-        num_rows = mesh.num_rows
-        num_points = num_cols * num_rows
+        # Update attributes for this mesh piece
+        update_surf_attrs(mesh)
         
-        # Initialize random number generator
-        rng = Rand48(seed=params.seed)
+        num_cols = mesh.numCols
+        num_rows = mesh.numRows
         
-        # Pre-calculate derivatives if not stored
-        # wsDPds(s, t) and wsDPdt(s, t) are assumed available
+        # Initialize RNG
+        rng = Rand48(seed=params['seed'])
         
-        for i in range(params.num_points):
-            # 1. Generate random local space position
-            lsP_x = rng.nextf()
-            lsP_y = rng.nextf()
-            lsP_z = rng.nextf()
-            lsP = Vector3(lsP_x, lsP_y, lsP_z)
+        # Pre-calculate derivatives if not available in mesh attrs
+        # Note: SURFACE_INST_INTERP handles interpolation of dPds/dPdt
+        
+        for i in range(params['numPoints']):
+            # 1. Random local space position
+            ls_p = V3f(rng.nextf(), rng.nextf(), rng.nextf())
             
-            # 2. Map to surface parameters
-            s = lsP_x * (num_cols - 1)
-            t = lsP_y * (num_rows - 1)
+            # 2. Surface parameters
+            s = ls_p.x * (num_cols - 1)
+            t = ls_p.y * (num_rows - 1)
             
-            # 3. Interpolate instance attributes
-            # SURFACE_INST_INTERP macro performs interpolation based on s, t
-            instance_density = interpolate_attribute(mesh, "density", s, t)
-            instance_ws_p = interpolate_attribute(mesh, "wsP", s, t)
-            instance_ws_v = interpolate_attribute(mesh, "wsVelocity", s, t)
-            ws_n = normalize(interpolate_attribute(mesh, "wsNormal", s, t))
-            ws_dpds = dPds(s, t)
-            ws_dpdt = dPdt(s, t)
-            thickness = interpolate_attribute(mesh, "thickness", s, t)
+            # 3. Interpolate attributes
+            # Assuming SURFACE_INST_INTERP returns the interpolated value
+            instance_density = surf_inst_interp(mesh, 'density', s, t)
+            instance_ws_p = surf_inst_interp(mesh, 'wsP', s, t)
+            instance_ws_v = surf_inst_interp(mesh, 'wsVelocity', s, t)
+            ws_n = surf_inst_interp(mesh, 'wsNormal', s, t).normalized()
+            ws_dpds = surf_inst_interp(mesh, 'dPds', s, t)
+            ws_dpdt = surf_inst_interp(mesh, 'dPdt', s, t)
+            thickness = surf_inst_interp(mesh, 'thickness', s, t)
             
-            # 4. Offset position along normal
-            # fit01 maps value from [min, max] to [0, 1]
-            z_factor = fit01(lsP_z, -1.0, 1.0)
-            instance_ws_p += z_factor * ws_n * thickness
+            # 4. Offset along normal
+            z_offset = fit01(ls_p.z, -1.0, 1.0)
+            instance_ws_p += z_offset * ws_n * thickness
             
-            # 5. Apply density noise
-            if params.do_dens_noise:
-                ns_lookup_p = lsP / params.dens_scale
-                noise = params.dens_fractal.eval(ns_lookup_p)
-                fade = edge_fade(lsP_x, lsP_y, lsP_z)
+            # 5. Density Noise
+            if params['do_dens_noise']:
+                ns_lookup_p = ls_p / params['dens_scale']
+                noise = params['dens_fractal'].eval(ns_lookup_p)
+                fade = edge_fade(ls_p.x, ls_p.y, ls_p.z)
                 instance_density *= noise + fade
             
-            # 6. Apply displacement noise
-            if params.do_disp_noise:
-                ns_lookup_p = lsP / params.disp_scale
-                disp = params.disp_fractal.eval_vec(ns_lookup_p)
-                amp = params.disp_amplitude
+            # 6. Displacement Noise
+            if params['do_disp_noise']:
+                ns_lookup_p = ls_p / params['disp_scale']
+                disp = params['disp_fractal'].eval_vec(ns_lookup_p)
+                amp = params['disp_amplitude']
+                
                 instance_ws_p += disp.x * ws_dpds * thickness * amp
                 instance_ws_p += disp.y * ws_dpdt * thickness * amp
                 instance_ws_p += disp.z * ws_n * thickness * amp
             
-            # 7. Set instance attributes
+            # 7. Set attributes
             points.append({
-                "position": instance_ws_p,
-                "density": instance_density,
-                "radius": params.instance_radius
+                'position': instance_ws_p,
+                'density': instance_density,
+                'radius': params['instance_radius']
             })
             
     return points
 
-def fit01(value, min_val, max_val):
-    """Maps value from [min_val, max_val] to [0, 1]."""
-    if max_val == min_val:
-        return 0.0
-    return (value - min_val) / (max_val - min_val)
+def fit01(val, min_val, max_val):
+    """Maps value from [0,1] to [min_val, max_val]"""
+    return min_val + val * (max_val - min_val)
 
 def edge_fade(x, y, z):
-    """
-    Placeholder for edge fade function.
-    Typically fades out points near the boundaries of the local space.
-    Implementation details not fully specified in source.
-    """
-    # [G] Generic edge fade logic: fade based on distance from center or boundaries
-    # Source mentions edgeFade(lsP.x, lsP.y, lsP.z) but does not define the function.
-    # A common implementation might be:
-    # return 1.0 - max(abs(x - 0.5), abs(y - 0.5), abs(z - 0.5)) * 2.0
-    # However, since the exact formula is not given, we leave this as a comment.
-    return 1.0 # Placeholder
+    """Placeholder for edge fade function. Implementation details not provided in source."""
+    # [G] Typically fades out points near the boundaries of the local space cube
+    # to prevent artifacts at the edges of the primitive.
+    return 1.0 
 ```
 
 **Parameters:**
-- `numPoints`: Number of output points per primitive. Typically ~400 million for smooth results at 1024x1024 resolution [S1, unofficial].
-- `voxelBufferResolution`: Frustum-shaped buffer dimensions ~1200x1200x250 [S1, unofficial].
-- `densScale`, `dispScale`: Scaling factors for noise lookup [S1, unofficial].
-- `dispAmplitude`: Amplitude for displacement noise [S1, unofficial].
-- `instanceRadius`: Radius of each instanced point [S1, unofficial].
+- `numPoints`: Number of instanced points per primitive. Typically ~400 million for smooth results at 1024x1024 resolution [S1, unofficial].
+- `voxel buffer resolution`: Frustum-shaped buffer of ~1200x1200x250 used for rasterization of the instanced points [S1, unofficial].
+- `densScale`, `dispScale`: Scaling factors for noise lookup coordinates [S1, unofficial].
+- `dispAmplitude`: Magnitude of displacement noise [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Wasteful Evaluation:** Noise-modulated primitives are computationally wasteful because a point must be instantiated, its noise space position calculated, and the full fractal noise function evaluated before determining if it should be culled due to zero density [S1, unofficial].
-- **Boundary Conditions:** The `edgeFade` function is required to handle boundaries, but its exact implementation is not specified in the source [S1, unofficial].
+- **Wasteful Evaluation:** Primitives modulated by noise are computationally wasteful because a point must be instantiated, its noise space position calculated, and the full fractal noise function evaluated before determining if it should be culled due to zero density [S1, unofficial].
+- **Boundary Artifacts:** Points near the edges of the local space cube may require edge fading to prevent visual artifacts [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of primitives and $M$ is the number of points per primitive. Each point requires noise evaluation, which can be expensive for fractal noise.
-- **Memory Complexity:** $O(N \cdot M)$ to store the generated points. With 400 million points per primitive, memory usage is significant.
-- **Performance:** Requires high-resolution voxel buffers (~1200x1200x250) and large point counts for smooth results. The noise evaluation step is a bottleneck.
-- **Strengths:** Achieves smooth volumetric appearance with high detail through noise modulation.
-- **Limitations:** High computational cost due to massive point counts and noise evaluation. Inefficient culling as noise must be evaluated before culling.
+- **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of mesh pieces and $P$ is the number of instanced points per piece. The cost is dominated by noise evaluation for each point if noise modulation is enabled [S1, unofficial].
+- **Memory Complexity:** $O(P)$ for storing the instanced point attributes (position, density, radius) [S1, unofficial].
+- **Performance:** Requires high point counts (~400 million) to achieve smooth results at standard resolutions (1024x1024) [S1, unofficial].
+- **Strengths:** Produces smooth, organic volumetric appearances; flexible noise modulation for density and displacement [S1, unofficial].
+- **Limitations:** High computational cost due to noise evaluation per point; potential for wasted cycles on points that are ultimately culled [S1, unofficial].
+- **When to use:** When organic, noise-driven volumetric effects are needed and computational resources allow for high point counts [S1, unofficial].
+- **When not to use:** When performance is critical and noise modulation is not required, or when the scene cannot support the memory bandwidth of hundreds of millions of points [S1, unofficial].
 
 ## Background
-Originated in production volume rendering pipelines, specifically for simulating effects like pyroclastic flows using surface primitives. The technique is described in "Production Volume Rendering" [S1, unofficial]. It is used in conjunction with level set modeling for tracking interfaces.
+Originated in production volume rendering pipelines, specifically described in "Production Volume Rendering" (2011) [S1, unofficial]. It is used in visual effects for simulating organic volumetric phenomena like smoke and fire by instancing points on surface primitives and modulating them with Perlin noise [S1, unofficial].
 
 ## Sources
 [S1] Production Volume Rendering, https://cg.informatik.uni-freiburg.de/intern/seminar/volumeRenderingProductionFundamentals2011.pdf, fetched 2026-10-27 (unofficial)

@@ -1,91 +1,235 @@
 # Direction-dependent Morton Order Sorting
 
-Also called: Ray sign bit sorting, Sparse Voxel Rasterization Sorting
+Also called: Direction-Dependent Morton Sorting, MortonSorter, Ray sign bit sorting, Sparse Voxel Rasterization Sorting
 
 ## Overview
-This method sorts sparse voxels into a near-to-far order for each image tile by replacing primitive z-depth with a direction-dependent Morton order, ensuring correct rendering order for all ray directions [S1]. Unlike [3D Gaussian Splatting](3d-gaussian-splatting.md) which duplicates primitives per tile and sorts by z-depth, this technique duplicates voxels per ray sign bit pattern and sorts by Morton order to handle arbitrary viewing angles without popping artifacts [S1].
+This method sorts sparse voxels into a near-to-far order for each image tile to ensure correct alpha blending during rasterization. It replaces the primitive z-depth used in Gaussian Splatting with a direction-dependent Morton order, ensuring the rendering order is correct for all ray directions by duplicating voxels for each ray sign bit pattern they cover [S1]. Unlike 3DGS, which uses z-depth, this approach uses precomputed Morton codes remapped by ray direction signs to guarantee topological correctness across the entire viewing sphere [S1].
 
 ## How it works
 **Inputs:**
-- A list of voxels, each with an Octree Morton code (`octpath`) and a unique 1D array index (`voxel_id`) [S1].
-- Ray directions (`rd`) for the current frame or tile [S1].
+- `positions`: Array of voxel coordinates (Float32, interleaved x,y,z).
+- `cameraPosition`: Camera origin $[x, y, z]$.
+- `cameraTarget`: Camera look-at point $[x, y, z]$.
+- `octlevels`: Optional array of Octree levels per voxel (Uint8).
+- `octpaths`: Optional array of Octree paths per voxel (Uint32). If absent, bounding box normalization is used [S2, unofficial].
+- `tileSize`: Width/height of image tiles in pixels (e.g., 16) [S1].
 
 **Outputs:**
-- A sorted list of key-value pairs ready for rasterization [S1].
+- `sortedKeys`: Array of 64-bit integers (or split 32-bit pairs) representing the sort key.
+- `sortedValues`: Array of 32-bit integers representing voxel IDs and ray sign bits.
 
 **Data Structures:**
-The sorting key-value pair is packed into 64-bit and 32-bit unsigned integers respectively [S1]:
-- **Key (64-bit):**
-  - Upper 16 bits: Tile ID [S1].
-  - Lower 48 bits: Direction-dependent Morton order ($3L = 48$ bits, where $L=16$) [S1].
-- **Value (32-bit):**
-  - Upper 3 bits: Ray sign bits [S1].
-  - Lower 29 bits: Voxel ID [S1].
+The sort key is packed into 64 bits:
+- Bits 0–15: Tile ID (16 bits).
+- Bits 16–63: Direction-dependent Morton Order (48 bits, derived from $L=16$ Octree levels) [S1].
+
+The sort value is packed into 32 bits:
+- Bits 0–2: Ray Sign Bits (3 bits).
+- Bits 3–31: Voxel ID (29 bits) [S1].
 
 **Parameters:**
-- $L=16$: Maximum number of Octree levels [S1].
-- Maximum tiles: $2^{16} = 65,536$ [S1].
-- Maximum image resolution: $4096 \times 4096$ with $16 \times 16$ tile size [S1].
-- Maximum grid resolution: $(2^{16})^3 = 65,536^3$ [S1].
-- Maximum voxels: $2^{29} \approx 500$ million [S1].
+- $L=16$: Maximum Octree levels, determining the Morton code width ($3L = 48$ bits) [S1].
+- Max Tiles: $2^{16} = 65,536$ (supports $4096 \times 4096$ resolution with $16 \times 16$ tiles) [S1].
+- Max Voxels: $2^{29} \approx 500$ million [S1].
 
-**Steps:**
-1. **Compute Ray Sign Bits:** For each ray direction $\mathbf{rd} = (rd_x, rd_y, rd_z)$, compute the 3-bit sign mask:
-   $$ \text{signbits} = 4 \cdot (rd_x < 0) + 2 \cdot (rd_y < 0) + (rd_z < 0) $$
-   [S1]
+**Algorithm Steps:**
 
-2. **Compute Direction-Dependent Morton Order:** For each voxel with Octree Morton code `octpath` and a specific `signbits` pattern, remap the Morton code using a lookup table `order_tables` indexed by `signbits` [S1]. The table permutes the 3-bit child indices at each level to align with the near-to-far order for that ray direction [S1].
-   $$ \text{order} = \sum_{i=0}^{L-1} \text{order\_tables}[\text{signbits}][\text{octpath} \ \& \ 0\text{b}111] \ll 3i $$
-   [S1]
+1. **Compute Ray Direction and Sign Bits:**
+   Calculate the normalized ray direction vector $\vec{d}$ from `cameraPosition` to `cameraTarget`. Determine the 3-bit `raySignBits` integer:
+   $$ \text{raySignBits} = 4 \cdot (\vec{d}_x < 0) + 2 \cdot (\vec{d}_y < 0) + 1 \cdot (\vec{d}_z < 0) $$
+   where $(\cdot)$ evaluates to 1 if true, 0 if false. This results in an integer from 0 to 7 [S1][S2, unofficial].
 
-3. **Duplicate Voxels:** Duplicate each voxel for each distinct ray sign bit pattern it covers [S1]. Attach the corresponding `signbits` to each duplicate [S1].
+2. **Compute Base Morton Code:**
+   For each voxel, compute its base Morton code ($M$) based on its spatial position.
+   - If `octpaths` and `octlevels` are provided: Convert the octpath to a Morton code. Iterate level $l$ from 0 to `octlevel`-1. Extract 3 bits from `octpath` at position $3 \cdot (\text{octlevel} - 1 - l)$. Accumulate: $M = M \mid (\text{levelBits} \ll (3 \cdot l))$ [S2, unofficial].
+   - If `octpaths` are not provided: Compute the bounding box of all voxels ($min_x, max_x, \dots$). Normalize voxel coordinates to $[0, 1]$:
+     $$ x' = \frac{x - min_x}{max_x - min_x + \epsilon}, \quad y' = \frac{y - min_y}{max_y - min_y + \epsilon}, \quad z' = \frac{z - min_z}{max_z - min_z + \epsilon} $$
+     Scale to $[0, 2^B-1]$ (where $B$ is sufficient bits, e.g., 16), spread bits, and interleave: $M = (x' \ll 2) \mid (y' \ll 1) \mid z'$ [S2, unofficial].
 
-4. **Sort:** Sort the list of key-value pairs using a GPU Radix sort (or similar) based on the key, ordering by Tile ID first, then by Morton order (near-to-far) [S1].
+3. **Apply Direction-Dependent Permutation:**
+   Remap the base Morton code $M$ into a direction-dependent order $M'$ using the `raySignBits`. The Morton code consists of 3-bit chunks corresponding to Octree levels. For each 3-bit chunk $c$ in $M$, apply a permutation table lookup:
+   $$ M' = \sum_{i=0}^{L-1} \text{Table}[\text{raySignBits}][c_i] \ll (3 \cdot i) $$
+   The permutation tables are hard-coded 8x8 arrays that reorder the 3-bit indices (0-7) to ensure near-to-far order for the specific ray direction quadrant [S1].
 
-5. **Render:** For each pixel, iterate through voxels belonging to its tile and composite only those with matching attached ray sign bits [S1].
+4. **Duplicate Voxels:**
+   Each voxel is duplicated for every distinct `raySignBits` pattern (0-7) that its spatial extent covers. In practice, this often means duplicating the voxel 8 times, once for each possible ray direction sign combination, attaching the specific `raySignBits` to each copy [S1].
+
+5. **Assign Tile IDs:**
+   For each duplicated voxel instance, determine which image tiles it overlaps. Assign the Tile ID to the key. The Tile ID is typically calculated from the voxel's world position and the camera's projection, mapped to the tile grid [S1].
+
+6. **Sort:**
+   Perform a GPU Radix Sort (or similar stable sort) on the list of key-value pairs. The primary sort key is the Tile ID (MSB), followed by the Direction-dependent Morton Order (LSB). This groups voxels by tile and orders them near-to-far within each tile [S1].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-MAX_NUM_LEVELS = 16
-order_tables = [
-    [0, 1, 2, 3, 4, 5, 6, 7],
-    [1, 0, 3, 2, 5, 4, 7, 6],
-    [2, 3, 0, 1, 6, 7, 4, 5],
-    [3, 2, 1, 0, 7, 6, 5, 4],
-    [4, 5, 6, 7, 0, 1, 2, 3],
-    [5, 4, 7, 6, 1, 0, 3, 2],
-    [6, 7, 4, 5, 2, 3, 0, 1],
-    [7, 6, 5, 4, 3, 2, 1, 0]
+# Hard-coded permutation tables for 8 ray sign bits
+# Each row corresponds to a raySignBits value (0-7)
+# Each column corresponds to the original 3-bit Morton chunk (0-7)
+ORDER_TABLES = [
+    [0, 1, 2, 3, 4, 5, 6, 7], # (+,+,+)
+    [1, 0, 3, 2, 5, 4, 7, 6], # (-,+,+)
+    [2, 3, 0, 1, 6, 7, 4, 5], # (+,-,+)
+    [3, 2, 1, 0, 7, 6, 5, 4], # (-,-,+)
+    [4, 5, 6, 7, 0, 1, 2, 3], # (+,+,-)
+    [5, 4, 7, 6, 1, 0, 3, 2], # (-,+,-)
+    [6, 7, 4, 5, 2, 3, 0, 1], # (+,-,-)
+    [7, 6, 5, 4, 3, 2, 1, 0]  # (-,-,-)
 ]
 
-def compute_signbits(rd):
-    return 4 * (rd[0] < 0) + 2 * (rd[1] < 0) + (rd[2] < 0)
+MAX_NUM_LEVELS = 16
 
-def compute_dir_dep_morton_order(octpath, signbits):
-    table = order_tables[signbits]
-    order = 0
+def compute_ray_sign_bits(ray_direction):
+    """
+    Compute 3-bit sign mask from normalized ray direction.
+    Bit 2: x < 0, Bit 1: y < 0, Bit 0: z < 0
+    """
+    sign_bits = 0
+    if ray_direction[0] < 0:
+        sign_bits |= 4
+    if ray_direction[1] < 0:
+        sign_bits |= 2
+    if ray_direction[2] < 0:
+        sign_bits |= 1
+    return sign_bits
+
+def apply_direction_permutation(morton_code, sign_bits):
+    """
+    Remap Morton code chunks based on ray direction signs.
+    """
+    table = ORDER_TABLES[sign_bits]
+    permuted_order = 0
+    current_code = morton_code
+    
     for i in range(MAX_NUM_LEVELS):
-        order |= table[octpath & 0b111] << (3 * i)
-        octpath = octpath >> 3
-    return order
+        # Extract 3 bits for current level
+        chunk = current_code & 0b111
+        # Apply permutation
+        permuted_chunk = table[chunk]
+        # Place back into result
+        permuted_order |= permuted_chunk << (3 * i)
+        # Shift to next level
+        current_code >>= 3
+        
+    return permuted_order
+
+def compute_morton_from_octpath(octpath, octlevel):
+    """
+    Convert octpath to Morton code if precomputed path is available.
+    """
+    morton = 0
+    for level in range(octlevel):
+        # Extract 3 bits from octpath at position 3*(octlevel-1-level)
+        # Assuming octpath stores bits MSB first or similar structure
+        # Note: Exact bit extraction depends on storage format. 
+        # Simplified assumption: octpath is a flat integer where bits are packed.
+        shift = 3 * (octlevel - 1 - level)
+        chunk = (octpath >> shift) & 0b111
+        morton |= chunk << (3 * level)
+    return morton
+
+def compute_morton_from_coords(x, y, z, min_x, max_x, min_y, max_y, min_z, max_z):
+    """
+    Compute Morton code from normalized coordinates.
+    """
+    # Normalize to [0, 1]
+    x_norm = (x - min_x) / (max_x - min_x + 1e-9)
+    y_norm = (y - min_y) / (max_y - min_y + 1e-9)
+    z_norm = (z - min_z) / (max_z - min_z + 1e-9)
+    
+    # Scale to integer range (e.g., 16 bits per axis -> 2^16 - 1)
+    bits = 16
+    scale = (1 << bits) - 1
+    ix = int(x_norm * scale)
+    iy = int(y_norm * scale)
+    iz = int(z_norm * scale)
+    
+    # Interleave bits (spread and merge)
+    # This is a simplified interleaving; production code uses bit-spread functions
+    mx = spread_bits(ix)
+    my = spread_bits(iy)
+    mz = spread_bits(iz)
+    
+    return (mx << 2) | (my << 1) | mz
+
+def spread_bits(n):
+    """
+    Spread bits of n into every other bit position.
+    Standard bit interleaving helper.
+    """
+    n = (n ^ (n << 16)) & 0x0000FFFF0000FFFF
+    n = (n ^ (n << 8)) & 0x00FF00FF00FF00FF
+    n = (n ^ (n << 4)) & 0x0F0F0F0F0F0F0F0F
+    n = (n ^ (n << 2)) & 0x3333333333333333
+    n = (n ^ (n << 1)) & 0x5555555555555555
+    return n
+
+def sort_voxels(voxels, camera_pos, camera_target, tile_size):
+    """
+    Main sorting routine.
+    """
+    # 1. Compute Ray Direction
+    ray_dir = normalize(camera_target - camera_pos)
+    ray_sign_bits = compute_ray_sign_bits(ray_dir)
+    
+    # 2. Precompute Bounding Box if needed
+    if octpaths are not provided:
+        min_x, max_x, min_y, max_y, min_z, max_z = compute_bounding_box(voxels)
+    
+    sorted_items = []
+    
+    for voxel in voxels:
+        # 3. Compute Base Morton Code
+        if octpaths provided:
+            base_morton = compute_morton_from_octpath(voxel.octpath, voxel.octlevel)
+        else:
+            base_morton = compute_morton_from_coords(
+                voxel.x, voxel.y, voxel.z,
+                min_x, max_x, min_y, max_y, min_z, max_z
+            )
+            
+        # 4. Duplicate for all 8 sign patterns (or only those covered)
+        # For simplicity, duplicate for all 8 patterns as per S1 description
+        for s in range(8):
+            # 5. Apply Permutation
+            permuted_morton = apply_direction_permutation(base_morton, s)
+            
+            # 6. Determine Tile ID
+            # Note: Tile ID calculation depends on camera projection and voxel position
+            tile_id = compute_tile_id(voxel.world_pos, camera_pos, camera_target, tile_size)
+            
+            # 7. Pack Key and Value
+            # Key: Tile ID (16 bits) | Morton Order (48 bits)
+            key = (tile_id << 48) | permuted_morton
+            # Value: Ray Sign Bits (3 bits) | Voxel ID (29 bits)
+            value = (s << 29) | voxel.id
+            
+            sorted_items.append((key, value))
+            
+    # 8. Sort
+    sorted_items.sort(key=lambda x: x[0])
+    
+    return sorted_items
 ```
 
 **Edge Cases and Pitfalls:**
-- The `voxel_id` in the value field must be the 1D array index where the voxel is stored, not the 3D grid $(i, j, k)$ index [S1].
-- The maximum number of voxels is limited to $2^{29}$ due to the 29-bit field in the value [S1].
-- If the grid resolution exceeds $65,536^3$, custom data types with extra bits are required for the GPU Radix sort [S1].
+- **Voxel ID Indexing:** The voxel ID in the value field refers to the 1D array index where the voxel is stored, not the grid $(i, j, k)$ index [S1].
+- **Precision:** The 48-bit Morton order requires careful handling of 64-bit integers during sorting to avoid overflow or truncation [S1].
+- **Degenerate Input:** If `max - min` is zero (single point), normalization must handle division by zero (add epsilon) [S2, unofficial].
+- **Non-Functional Code Warning:** Some online implementations (e.g., WebGL ports) are noted as non-functional or AI-generated approximations and do not strictly follow the paper's logic [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Sorting complexity depends on the number of duplicated voxels [S1]. With up to $2^{29}$ voxels and 65,536 tiles, the sort is performed on a large list of key-value pairs [S1].
-- **Memory Complexity:** Requires storing duplicated voxels [S1]. Each voxel is duplicated for each ray sign bit pattern it covers, increasing memory usage compared to non-duplicated approaches [S1].
-- **Strengths:** Ensures correct near-to-far rendering order for all ray directions, eliminating popping artifacts common in z-depth sorting for arbitrary viewpoints [S1].
-- **Limitations:** Increased memory footprint due to voxel duplication; limited by 64-bit key and 32-bit value constraints unless custom types are used [S1].
-- **When to use:** When rendering sparse voxel grids with arbitrary camera orientations where z-depth sorting fails to maintain correct occlusion order [S1].
+- **Time Complexity:** Dominated by the sorting step. Sorting complexity is $O(N \log N)$ or $O(N)$ depending on the radix sort implementation, where $N$ is the total number of duplicated voxels. Since each voxel is duplicated up to 8 times, $N \le 8 \cdot V_{total}$ [S1].
+- **Memory Complexity:** Requires storing the sorted key-value pairs. Each entry uses 64 bits for key and 32 bits for value. Memory usage scales linearly with the number of duplicated voxels [S1].
+- **Performance:** The method enables efficient tile-based rasterization by ensuring correct draw order without per-pixel depth sorting. Performance is limited by the GPU radix sort throughput and memory bandwidth for the duplicated data [S1].
+- **Strengths:** Guarantees correct alpha blending for all viewing directions; avoids popping artifacts associated with z-depth sorting in complex geometries [S1].
+- **Limitations:** Increases memory and compute overhead due to voxel duplication (up to 8x) [S1].
 
 ## Background
-This method is part of the Sparse Voxels Rasterization pipeline, introduced in "Sparse Voxels Rasterization: Real-time High-fidelity Radiance Field Rendering" [S1]. It addresses the limitations of 3D Gaussian Splatting's z-depth sorting, which can cause artifacts when rays are not aligned with the principal axis [S1]. The technique builds on [Direction-dependent Morton Order Mapping](2662-direction-dependent-morton-order-mapping.md) to remap Octree codes based on ray direction signs [S1].
+This method was introduced in the context of Sparse Voxel Rasterization (SVRaster) as an alternative to 3D Gaussian Splatting. It addresses the limitation of z-depth sorting, which can fail to maintain correct occlusion order for non-convex or complex voxel structures depending on the view direction. By using direction-dependent Morton orders, it ensures topological correctness for alpha blending in real-time rendering [S1].
 
 ## Sources
 [S1] Sparse Voxels Rasterization: Real-time High-fidelity Radiance Field Rendering, https://doi.org/10.1109/cvpr52734.2025.01509, fetched 2026-10-26
+[S2] Gaussian Splatting Alternative: WebGL Implementation of Nvidia's SVRaster, https://github.com/samuelm2/svraster-webgl, fetched 2026-10-26 (unofficial)

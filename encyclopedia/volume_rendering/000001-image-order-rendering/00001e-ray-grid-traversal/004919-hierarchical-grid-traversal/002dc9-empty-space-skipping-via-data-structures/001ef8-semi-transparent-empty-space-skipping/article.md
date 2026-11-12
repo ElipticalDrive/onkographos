@@ -24,22 +24,22 @@ The acceleration structure is a BVH. Each node stores:
     *   For **constant density** materials, use sphere tracing with **lower bounds** [S1]. If a node's lower bound is non-zero, the region is active and the ray proceeds to evaluate it [S1].
     *   For **varying density** materials, use sphere tracing with the proposed BVH methods to perform fast empty-space skipping outside the volume [S1]. Inside the volume, full volumetric rendering is required [S1].
 3.  **Traversal and Integration:**
-    *   **Case A: Constant Density $\rho(p) = \rho_0$**
+    *   **Case A: Constant Density $\rho(p) = \rho_0$** [S1]
         *   When the ray enters a region with density $\rho_0$, it continues toward the exit point [S1].
         *   The optical depth $\tau$ for a segment of length $L$ is calculated analytically: $\tau = \rho_0 \cdot L$ [S1].
         *   The transmittance is $T = e^{-\tau}$ [G].
         *   The contribution of the segment is added to the accumulator using standard volume rendering equations [G]. The ray is advanced to the exit point of the current active region [S1].
         *   Quadratic bounds can be used to quickly move away from the entry surface, improving performance [S1].
-    *   **Case B: Varying Density $\rho(p)$**
+    *   **Case B: Varying Density $\rho(p)$** [S1]
         *   **Outside Volume:** Use sphere tracing with the BVH to skip empty space. The ray advances by the distance to the nearest active region boundary [S1].
         *   **Inside Volume:** Switch to constant-size ray marching. Numerically integrate the density along the ray segment within the active region. This part is not optimized by the skipping technique itself, as the density varies [S1].
 4.  **Termination:** Stop when the ray exits the volume or accumulated opacity $\alpha_{acc}$ exceeds a threshold (e.g., 1.0) [G].
 
 ### Formulas
 *   **Optical Depth (Constant Density):**
-    $$ \tau = \int_{0}^{L} \rho_0 \, ds = \rho_0 \cdot L $$
+    $$ \tau = \int_{0}^{L} \rho_0 \, ds = \rho_0 \cdot L $$ [S1]
 *   **Transmittance:**
-    $$ T = e^{-\tau} $$
+    $$ T = e^{-\tau} $$ [G]
 *   **Color Accumulation:**
     $$ C_{out} = C_{in} \cdot T + C_{local} \cdot (1 - T) $$
     Where $C_{local}$ is the emitted/scattered color of the segment [G].
@@ -63,7 +63,7 @@ def render_semi_transparent_ray(ray_origin, ray_direction, bvh, density_func, is
     
     while acc_alpha < 1.0:
         # Query BVH for next active region interval [entry_t, exit_t]
-        # Implementation of BVH traversal is not given in the sources [S1].
+        # BVH traversal logic not specified in sources [S1].
         entry_t, exit_t = bvh.query(ray_origin + ray_direction * t, ray_direction)
         
         if entry_t is None:
@@ -93,7 +93,7 @@ def render_semi_transparent_ray(ray_origin, ray_direction, bvh, density_func, is
         else:
             # Varying density: Ray march inside the region
             # This part is not optimized by skipping [S1]
-            step_size = 0.01 # Not given in sources [S1]
+            step_size = 0.01  # step_size not given in sources [S1]
             num_steps = max(1, int(segment_length / step_size))
             
             for i in range(num_steps):

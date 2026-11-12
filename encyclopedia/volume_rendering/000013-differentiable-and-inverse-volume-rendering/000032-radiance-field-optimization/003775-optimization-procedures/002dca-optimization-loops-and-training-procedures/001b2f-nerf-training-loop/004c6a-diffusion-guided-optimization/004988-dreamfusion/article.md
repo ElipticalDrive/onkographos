@@ -3,52 +3,41 @@
 Also called: Diffusion-guided NeRF Optimization, Text-to-3D NeRF Optimization, Text-to-3D diffusion NeRF
 
 ## Overview
-DreamFusion is a text-to-3D generation method that optimizes a Neural Radiance Field (NeRF) to render images with high scores from a 2D text-to-image diffusion model, requiring no 3D training data [S2]. It differs from standard NeRF training by using a pretrained diffusion model as a perceptual loss function instead of ground-truth pixel comparisons, enabling the synthesis of novel 3D objects from text prompts [S1, S2].
+DreamFusion is a text-to-3D generation method that optimizes a Neural Radiance Field (NeRF) to render images with high scores from a text-to-image diffusion model, requiring no 3D training data [S2]. It differs from standard NeRF training by using a 2D diffusion model as a regularizer to guide the optimization of the 3D scene representation, rather than relying on a dataset of multi-view images [S1, S2].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A text prompt (e.g., "a red apple") and a camera trajectory.
-- **Output:** A trained NeRF model (MLP parameters) representing the 3D scene.
+- **Input:** A text prompt $P$ describing the desired 3D object or scene.
+- **Output:** A trained NeRF model (specifically a mipNeRF 360 variant) representing the 3D geometry and appearance.
 
 **Data Structures:**
-- **NeRF Model:** A Multi-Layer Perceptron (MLP) parameterized by weights $W$. Unlike standard NeRF which outputs radiance, DreamFusion parameterizes surface color directly via the MLP [S1]. The architecture is based on mipNeRF 360 [S1].
-- **Diffusion Model:** A pretrained text-to-image diffusion model (specifically Imagen in the original work) [S1].
+- **NeRF Model:** A mipNeRF 360 based NeRF model [S1].
+- **Diffusion Model:** A pretrained text-to-image diffusion model, specifically Imagen [S1].
+- **Camera Poses:** Randomly sampled camera poses for rendering views [S1, S2].
 
-**Numbered Steps:**
-1. **Initialization:** Initialize a mipNeRF 360-based NeRF model from scratch for the target object or scene [S1].
-2. **Camera Sampling:** Sample a random camera pose $(c, \theta, \phi)$ for the current training iteration. The text prompt can include view-specific keywords (e.g., "overhead view", "front view") to guide the diffusion model's generation relative to the camera angle [S1].
-3. **Ray Marching:** For each pixel in the rendered image, generate a ray from the camera. Use the NeRF to query density and color along the ray and integrate them to produce a rendered RGB image $I_{render}$ [S1].
-4. **Diffusion Scoring:**
-   - Encode the text prompt using the diffusion model's text encoder.
-   - Pass the rendered image $I_{render}$ and the text embedding into the pretrained diffusion model (Imagen) [S1].
-   - Compute the loss based on the diffusion model's prediction of the noise added to the image or the likelihood of the image given the text [S2]. The goal is to maximize the score of the rendered image under the diffusion model's distribution.
-5. **Backpropagation:** Compute gradients of the diffusion loss with respect to the NeRF parameters $W$ via backpropagation through the differentiable rendering process [S2].
-6. **Optimization:** Update the NeRF parameters $W$ using an optimizer (e.g., Adam) [S1].
-7. **Iteration:** Repeat steps 2-6 for a fixed number of iterations or until convergence.
+**Method Steps:**
+1. **Initialize NeRF:** Train a mipNeRF 360 based NeRF model from scratch for the target object or scene [S1].
+2. **Sample View:** Randomly sample a camera pose and render an image $I_{render}$ from the current NeRF state.
+3. **Condition Diffusion:** Input the text prompt $P$ into the diffusion model (Imagen) [S1]. The prompt can include view-specific keywords (e.g., "overhead view", "front view") to control the generated view [S1].
+4. **Compute Loss:** Calculate the diffusion loss $L_{diff}$ by measuring the consistency between the rendered image $I_{render}$ and the text prompt $P$ using the diffusion model's score distillation or negative log-likelihood approximation [S1, S2].
+5. **Update NeRF:** Backpropagate the gradient of the diffusion loss through the differentiable rendering process to update the NeRF parameters using an optimizer like Adam [S1, S2].
+6. **Repeat:** Iterate steps 2-5 until convergence.
 
-**Formulas:**
-Let $L_{diff}$ be the loss derived from the diffusion model. The optimization objective is:
-$$ \min_W L_{diff}(I_{render}(W), \text{text\_prompt}) $$
-Where $I_{render}(W)$ is the image rendered by the NeRF with parameters $W$.
+**Key Modification:**
+- Surface color is parameterized by an MLP instead of radiance [S1].
 
-**Parameters:**
-- **Resolution:** The diffusion model (Imagen) generates images at 64x64 resolution [S1].
-- **View Control:** Keywords such as "overhead view", "front view", and "back view" are appended to the text prompt to control the subject's orientation during generation [S1].
-
-**Edge Cases and Pitfalls:**
-- **Resolution Limitation:** Because the diffusion model generates images at 64x64 resolution, the resulting NeRF model lacks the capability to produce finer details [S1].
-- **No 3D Data:** The method does not require 3D training data, but relies entirely on the quality and alignment of the 2D diffusion model [S2].
+**Pitfalls:**
+- The diffusion model (Imagen) used in the original implementation generated images at a 64x64 resolution [S1]. This low resolution limited the resulting NeRF model's capability to produce finer details [S1].
 
 ## Operating characteristics
-- **Time Complexity:** High, due to the iterative optimization of the NeRF and the computationally expensive diffusion model inference per iteration.
-- **Memory Complexity:** Moderate, storing the NeRF parameters and the diffusion model weights.
-- **Strengths:** Enables text-to-3D generation without 3D training data; allows view-specific control via text prompts.
-- **Limitations:** Low output resolution (64x64) limits detail; prone to artifacts common in diffusion-guided optimization (e.g., over-saturation, "fried egg" artifacts, though not explicitly detailed in sources, the low resolution is a noted limitation) [S1].
-- **When to use:** When generating novel 3D objects from text descriptions is required and high-fidelity texture is not the primary constraint.
-- **When not to use:** When high-resolution details are needed or when ground-truth 3D data is available (standard NeRF training is more appropriate).
+- **Resolution Limitation:** The original implementation suffered from low output detail due to the 64x64 resolution of the source diffusion images (Imagen) [S1].
+- **Data Efficiency:** Requires no 3D training data, relying solely on text prompts and a pretrained 2D diffusion model [S2].
+- **View Control:** Allows for specific view control via text prompt keywords (e.g., "front view") [S1].
 
 ## Background
-DreamFusion was introduced in September 2022 [S1]. It was proposed as a text-to-3D diffusion NeRF model, utilizing images from 2D diffusion models to train a NeRF-based pipeline [S1]. The method builds on the concept of using pretrained 2D generative models as priors for 3D reconstruction. It was followed by Latent-NeRF (November 2022) and Magic3D (November 2022), which addressed its low-resolution limitations [S1].
+- **Origin:** Introduced in September 2022 [S1, S2].
+- **Authors/Context:** Proposed as a text-to-3D diffusion NeRF model [S1].
+- **Development:** Built upon the concept of using 2D diffusion models for 3D generation. Later methods like Latent-NeRF (November 2022) and Magic3D (November 2022) addressed its limitations, such as low resolution and lack of shape constraints [S1].
 
 ## Sources
 [S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

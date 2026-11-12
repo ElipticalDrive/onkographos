@@ -1,29 +1,38 @@
 # Diffusion-guided Optimization
-
-Also called: Diffusion-guided NeRF, Score Distillation Sampling (SDS) based optimization, Diffusion Prior Regularization
+Also called: Diffusion-guided NeRF, Score Distillation, Diffusion Regularization
 
 ## Overview
-Diffusion-guided optimization is a family of methods that train Neural Radiance Fields (NeRFs) by using a pretrained 2D diffusion model as a perceptual prior or loss function, rather than relying solely on ground-truth pixel comparisons. This approach solves the problem of underconstrained optimization in scenarios with sparse input views or the complete absence of 3D training data, enabling text-to-3D generation and robust few-view reconstruction. It differs from standard NeRF training by replacing the photometric loss with a gradient derived from the diffusion model's score function, allowing the synthesis of novel 3D objects from text prompts [S2] or the regularization of geometry in sparse settings [S1].
+Diffusion-guided optimization methods enhance NeRF training by integrating a pretrained 2D diffusion model as a geometric and appearance prior. This approach solves the problem of underconstrained optimization in sparse-view settings or text-to-3D generation, where standard multi-view stereo fails due to lack of input data [S1, S2]. Unlike standard NeRF training which relies solely on photometric consistency between observed images, these methods use the diffusion model to penalize renderings that deviate from the learned 2D data distribution, effectively regularizing the 3D solution space [S1, S2].
 
 ## Shared principles
-All methods in this family share the core mechanism of backpropagating gradients from a 2D diffusion model through the differentiable NeRF rendering process. The optimization objective minimizes a loss $L$ that combines rendering fidelity with diffusion consistency:
-$$ L = \lambda_{\text{rend}} L_{\text{rend}} + \lambda_{\text{diff}} L_{\text{diff}} $$
-where $L_{\text{diff}}$ is typically an approximation of the diffusion model's negative log-likelihood (NLL) or score distillation loss [S1, S2]. The diffusion model acts as a regularizer, penalizing renderings that are inconsistent with the learned 2D data distribution. The specific conditioning of the diffusion model varies: it may be conditioned on text prompts [S2], observed input images and poses [S1], or both. The optimization loop iteratively updates NeRF parameters (or scene codes) using an optimizer like Adam, leveraging the gradient of the diffusion loss with respect to the NeRF output [S1, S2].
+All methods in this family share the core mechanism of coupling a differentiable NeRF renderer with a pretrained diffusion model. The optimization loop alternates between rendering views from the NeRF and computing a loss signal derived from the diffusion model's understanding of image statistics.
+
+The fundamental mathematical operation is **Score Distillation Sampling (SDS)** or a variant thereof. For a rendered image $I_{render}$ and a conditioning signal $C$ (text prompt or observed images), the gradient of the diffusion loss with respect to the NeRF parameters $\theta$ is approximated using the noise prediction $\epsilon_\theta$ of the diffusion model:
+
+$$ \nabla_\theta \mathcal{L}_{diff} \approx \mathbb{E}_{t, \epsilon} \left[ w(t) (\epsilon_\theta(I_t, C, t) - \epsilon) \frac{\partial I_t}{\partial \theta} \right] $$
+
+where $I_t$ is the noisy version of $I_{render}$ at timestep $t$, $\epsilon$ is the sampled noise, and $w(t)$ is a weighting function [S1, S2]. This gradient allows backpropagation through the diffusion model to update the NeRF, despite the diffusion model not being directly differentiable with respect to the NeRF parameters.
+
+The optimization objective typically combines a reconstruction loss $\mathcal{L}_{recon}$ (e.g., L2 or Charbonnier loss against ground truth) and the diffusion loss $\mathcal{L}_{diff}$:
+
+$$ \mathcal{L}_{total} = \lambda_{recon} \mathcal{L}_{recon} + \lambda_{diff} \mathcal{L}_{diff} $$
+
+The weights $\lambda$ are critical for balancing fidelity to input data against the prior's influence [S1].
 
 ## Subtopics
 
 ### [DreamFusion](12087-dreamfusion.md)
-A text-to-3D method that optimizes a NeRF to maximize the score of rendered images under a text-conditioned diffusion model. It differs from siblings by requiring no 3D data and using text prompts for view control, enabling synthesis of novel objects.
+Text-to-3D generation using SDS to optimize a NeRF from a text prompt without any 3D data. It differs by using unconditional or text-conditioned diffusion for generation rather than reconstruction.
 
 ### [Single-Stage Diffusion NeRF Training](12803-single-stage-diffusion-nerf-training.md)
-A method that jointly optimizes scene codes, a diffusion prior, and a NeRF decoder in a single loop. It differs by preventing bias in scene codes that occurs in two-stage methods, using empirical weighting to balance rendering and diffusion losses.
+Jointly optimizes latent scene codes, a diffusion prior, and a NeRF decoder in one loop. It differs by avoiding the bias of two-stage methods where the prior is not seen during code training.
 
 ### [ReconFusion](13211-reconfusion.md)
-A few-view reconstruction method that regularizes NeRF optimization with a diffusion prior conditioned on input images. It differs from DreamFusion by using image-conditioned diffusion to preserve appearance of well-sampled regions and outperforms SDS in sparse settings.
+Few-view reconstruction using a multiview-conditioned diffusion model. It differs by sampling a new image at each iteration (unlike SparseFusion) and using a feature map encoder for conditioning, outperforming SDS in sparse settings.
 
 ## Background
-The concept originated with DreamFusion [S2], which introduced Score Distillation Sampling (SDS) for text-to-3D generation, demonstrating that 2D diffusion models could guide 3D optimization without 3D data. Subsequent work, such as ReconFusion [S1], adapted this for few-view reconstruction by conditioning the diffusion prior on observed views to mitigate artifacts like "fog" and "floater" artifacts common in sparse NeRF training. Single-stage methods [S1] further refined the approach by integrating the diffusion prior directly into the training loop to avoid biases inherent in decoupled optimization stages. These methods are primarily used in novel view synthesis, 3D generation from text, and robust reconstruction from sparse inputs.
+Originating from the need to generate 3D assets from text [S2] and reconstruct scenes from sparse views [S1], this family bridges 2D generative models and 3D inverse rendering. DreamFusion introduced SDS for text-to-3D [S2], while ReconFusion and SSDNeRF adapted diffusion priors for reconstruction tasks to mitigate artifacts like "fog" and "floaters" common in sparse NeRFs [S1].
 
 ## Sources
-[S1] Single-Stage Diffusion NeRF Training, ReconFusion, and related notes.
-[S2] DreamFusion and Score Distillation Sampling notes.
+[S1] Single-Stage Diffusion NeRF Training notes
+[S2] DreamFusion notes

@@ -1,0 +1,101 @@
+# Static Data Partition Method
+Also called: Static data partitioning, Static workload allocation for BSP-Disk model
+## Overview
+The Static Data Partition Method is a load balancing strategy for distributed isocontour visualization that partitions a massive dataset among computational nodes at the preprocessing stage to minimize communication overhead. It is chosen over dynamic redistribution because PC clusters have low bandwidth, making inter-node data transfer the least scalable factor as data size increases. It sets itself apart from dynamic methods by fixing the data-to-node mapping permanently, relying on careful initial partitioning rather than runtime migration.
+## How it works
+**Inputs and Outputs:**
+- Input: A massive dataset $D$ of size $N$, a set of $P$ computational nodes (each with a local disk), and a replication factor $R$.
+- Output: A partitioned dataset where each node $i$ holds a subset of data blocks $B_i$, and an external interval tree index structure for each node's local disk.
+
+**Data Structures:**
+- **Data Blocks:** The dataset is divided into atomic data elements or blocks.
+- **External Interval Tree:** An index structure built on each node's local disk to manage the blocks assigned to that node. This allows efficient retrieval of specific data regions during the isocontour extraction phase.
+- **Replication Factor ($R$):** A parameter defining the maximum number of times any atomic data element is duplicated across the disks.
+
+**Parameters:**
+- **Replication Factor ($R$):** The maximum number of times any atomic data element is duplicated on those disks. For large datasets, $R=1$ is typically used. This provides good load balance and leaves little room for optimization with larger factors [S1].
+- **Number of Nodes ($P$):** The number of computational nodes in the cluster.
+
+**Steps:**
+1. **Preprocessing Partitioning:** At the preprocessing stage, partition the dataset $D$ among the $P$ computational nodes. The goal is to ensure each processor has approximately the same amount of work [S1].
+2. **Data Assignment:** Assign data blocks to disks such that the replication factor is constant. The assignment must ensure that the maximum number of times any atomic data element is duplicated is $R$. For large datasets, $R=1$ is preferred to avoid excessive storage and communication costs [S1].
+3. **Index Construction:** For each node, build an external interval tree as the index structure for the blocks stored on its local disk. This index supports efficient access during the visualization phase [S1].
+4. **Execution:** During isocontour visualization, each node independently processes its assigned data blocks using the local index. Since computation on each sub-volume progresses independently, no inter-node communication is required for data redistribution [S1].
+
+**Pitfalls and Edge Cases:**
+- **Storage Constraints:** Replicating the entire dataset on each local disk is not affordable for datasets much larger than a single disk. The method must enforce a constant replication factor, typically $R=1$ [S1].
+- **Load Balance:** If the initial partitioning is not careful, some processors may have significantly more work than others. However, experimental results show that even with $R=1$, good load balance is achieved [S1].
+- **Communication Bottleneck:** Dynamic load redistribution is avoided because it would require transmitting large amounts of data between processors, which is inefficient on low-bandwidth PC clusters [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def static_data_partition(dataset, num_nodes, replication_factor=1):
+    """
+    Partitions a dataset among computational nodes for static load balancing.
+    
+    Args:
+        dataset: The massive dataset to be partitioned.
+        num_nodes: The number of computational nodes.
+        replication_factor: The maximum number of times any atomic data element 
+                            is duplicated. Default is 1.
+    
+    Returns:
+        partitions: A list of partitions, where each partition is a list of 
+                    data blocks assigned to a node.
+        indices: A list of external interval trees, one for each node.
+    """
+    # Step 1: Partition the dataset
+    # The dataset is divided into blocks. The exact partitioning algorithm 
+    # is not specified in the sources, but it aims for equal work distribution.
+    # We assume a function `partition_dataset` exists that handles the 
+    # distribution logic.
+    partitions = partition_dataset(dataset, num_nodes, replication_factor)
+    
+    # Step 2: Build external interval trees for each node
+    indices = []
+    for i in range(num_nodes):
+        # Build an external interval tree for the blocks on node i's local disk
+        # This index structure manages the blocks assigned to that node.
+        index = build_external_interval_tree(partitions[i])
+        indices.append(index)
+        
+    return partitions, indices
+
+def build_external_interval_tree(blocks):
+    """
+    Builds an external interval tree for a list of data blocks.
+    
+    Args:
+        blocks: A list of data blocks assigned to a node.
+        
+    Returns:
+        An external interval tree index structure.
+    """
+    # Implementation details of the external interval tree are not provided 
+    # in the sources. This is a placeholder for the actual construction logic.
+    # [G] In practice, this would involve sorting blocks by spatial coordinates 
+    # and building a tree structure that supports range queries.
+    tree = ExternalIntervalTree()
+    for block in blocks:
+        tree.insert(block)
+    return tree
+```
+## Subtopics
+
+### [BSP-Disk Model](11891-bsp-disk-model.md)
+The BSP-Disk model is a distributed memory parallel computation model designed to describe PC clusters where each node possesses its own CPU, local memory, and local disk. It combines the Bulk Synchronous Parallel (BSP) model with the Parallel Disk Model (PDM) to account for local computation, local disk I/O, and inter-processor communication. It is primarily used to analyze and optimize isocontour visualization algorithms for massive datasets, where static data partitioning is chosen to avoid the scalability bottlenecks of dynamic load redistribution in low-bandwidth cluster environments.
+
+## Operating characteristics
+- **Time Complexity:** The preprocessing step involves partitioning the dataset and building index structures. The exact time complexity is not given, but it is performed once at the start. The execution phase is independent per node, so the time complexity is proportional to the size of the data assigned to each node.
+- **Memory Complexity:** The method requires $O(N)$ disk storage space, where $N$ is the size of the dataset. This is optimal because it avoids replicating the entire dataset on each local disk [S1].
+- **Performance:** Experimental results demonstrate that for large datasets, a distribution with replication factor 1 gives very good load balance [S1].
+- **Strengths:** Minimizes communication overhead by avoiding dynamic load redistribution. Suitable for low-bandwidth PC clusters.
+- **Limitations:** Requires careful initial partitioning to ensure load balance. Not suitable for datasets where dynamic load balancing is necessary due to varying computational costs per block.
+- **When to Use:** When visualizing massive datasets on commodity off-the-shelf clusters with low bandwidth, and when the computational cost per data block is relatively uniform.
+- **When Not to Use:** When the dataset is small enough to fit on a single disk, or when the computational cost per block varies significantly, requiring dynamic load balancing.
+## Background
+The Static Data Partition Method was introduced in the context of scalable isosurface visualization of massive datasets on commodity off-the-shelf clusters. It was developed to address the scalability bottlenecks of dynamic load redistribution in low-bandwidth cluster environments. The method is based on the BSP-Disk model, which combines the Bulk Synchronous Parallel (BSP) model with the Parallel Disk Model (PDM) [S1].
+## Sources
+[S1] Scalable isosurface visualization of massive datasets on commodity off-the-shelf clusters., https://doi.org/10.1016/j.jpdc.2008.07.006, fetched 2026-11-08
