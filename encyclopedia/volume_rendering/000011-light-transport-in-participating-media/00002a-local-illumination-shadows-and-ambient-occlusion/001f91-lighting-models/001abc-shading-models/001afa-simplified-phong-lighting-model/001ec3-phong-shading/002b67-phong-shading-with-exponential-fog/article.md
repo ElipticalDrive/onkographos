@@ -1,82 +1,141 @@
 # Phong Shading with Exponential Fog
 
-Also called: Fragment Shader Lighting, Standard Lighting
+Also called: Fragment Shader Lighting, Levoy - Shading, Phong Shading with Depth Cueing, Standard Lighting
 
 ## Overview
-A fragment shading model that combines ambient, diffuse, and specular lighting components with exponential distance fog to blend the computed surface color with a fog color based on the fragment's distance from the camera [S1, unofficial]. It uses an exponential decay function for fog attenuation instead of linear fog, as linear fog is commented out in the reference implementation [S1, unofficial].
+Phong Shading with Exponential Fog is a local illumination model that combines the standard Phong lighting components (ambient, diffuse, specular) with exponential depth cueing to simulate distance-based fading in volume rendering [S1, S2, unofficial]. It differs from its parent [Phong Shading](1853-phong-shading.md) by explicitly integrating a distance-dependent attenuation factor into the final color calculation, and from [Reflectance Map Shading](3606-reflectance-map-shading.md) by computing lighting dynamically per fragment rather than via precomputed textures [S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** Vertex attributes `Normal` (`vec3`), `Position` (`vec4`), `viewSpace` (`vec4`); light properties `color` (`vec3`), `ambientIntensity` (`float`), `diffuseIntensity` (`float`), `direction` (`vec3`); camera property `eyePosition` (`vec3`); material properties `shininess` (`float`), `specularIntensity` (`float`); fog parameters `FogDensity` (`float`), `fogColor` (`vec3`) [S1, unofficial].
-*   **Outputs:** Final fragment color (`finalColor`) [S1, unofficial].
+**Inputs:**
+*   Surface normal vector $N$ (normalized).
+*   Fragment position in view space $P_{view}$ (or distance $d(x)$ to the picture plane).
+*   Light direction vector $L$ (normalized).
+*   Eye/View direction vector $V$ (normalized, pointing from fragment to eye).
+*   Material coefficients: ambient $k_a$, diffuse $k_d$, specular $k_s$, shininess $p$.
+*   Light color $C_p$ (parallel light source color).
+*   Fog parameters: fog density $k_1$ (or `FogDensity`), fog color $C_f$.
+
+**Outputs:**
+*   Final fragment color $C(x)$.
 
 **Data Structures:**
-The vertex shader passes `Normal`, `Position`, and `viewSpace` to the fragment shader [S1, unofficial].
+The method operates on per-fragment data. In a typical GPU implementation, the vertex shader outputs the following to the fragment shader [S2, unofficial]:
+*   `Normal`: `vec3` (normalized surface normal in view space).
+*   `Position`: `vec4` (fragment position in view space).
+*   `viewSpace`: `vec4` (fragment position in view space, used for distance calculation).
 
 **Parameters:**
-*   `FogDensity`: Exponential fog density constant, value `0.01f` [S1, unofficial].
-*   `fogColor`: Fog color, value `vec3(0.0f, 0.3f, 0.6f)` [S1, unofficial].
-*   `material.shininess`: Exponent for specular highlight [S1, unofficial].
-*   `material.specularIntensity`: Multiplier for specular color [S1, unofficial].
+*   $k_a, k_d, k_s$: Ambient, diffuse, and specular light coefficients [S1, unofficial].
+*   $p$: Shininess exponent for specular highlights [S1, unofficial].
+*   $k_1$: Exponential fog density constant. Typical value: `0.01f` [S2, unofficial].
+*   $C_f$: Fog color. Typical value: `vec3(0.0f, 0.3f, 0.6f)` [S2, unofficial].
+*   $C_p$: Color of the parallel light source [S1, unofficial].
 
 **Steps:**
-1.  **Calculate Ambient Component:** Multiply the light's color by its ambient intensity, setting alpha to 1.0: `ambientColor = vec4(light.color, 1.0f) * light.ambientIntensity` [S1, unofficial].
-2.  **Calculate Diffuse Component:** Compute the diffuse factor using the dot product of the normalized surface normal and normalized light direction: `diffuseFactor = max(dot(normalize(Normal), normalize(direction)), 0.0f)` [S1, unofficial]. Compute the diffuse color: `diffuseColor = vec4(light.color * light.diffuseIntensity * diffuseFactor, 1.0f)` [S1, unofficial].
-3.  **Calculate Specular Component:** If `diffuseFactor > 0.0f`, compute the vector from the fragment to the eye: `fragToEye = normalize(eyePosition - Position.xyz)` [S1, unofficial]. Compute the reflection vector: `reflectedVertex = normalize(reflect(direction, normalize(Normal)))` [S1, unofficial]. Compute the specular factor: `specularFactor = dot(fragToEye, reflectedVertex)` [S1, unofficial]. If `specularFactor > 0.0f`, raise it to the material's shininess: `specularFactor = pow(specularFactor, material.shininess)` [S1, unofficial]. Compute specular color: `specularColor = vec4(light.color * material.specularIntensity * specularFactor, 1.0f)` [S1, unofficial].
-4.  **Combine Lighting:** Sum the components: `finalColor = ambientColor + diffuseColor + specularColor` [S1, unofficial].
-5.  **Calculate Fog Factor:** Compute the distance from the camera in view space: `dist = length(viewSpace)` [S1, unofficial]. Compute the exponential fog factor: `fogFactor = 1.0 / exp(dist * FogDensity)` [S1, unofficial]. Clamp `fogFactor` to `[0.0, 1.0]` [S1, unofficial].
-6.  **Apply Fog:** Mix the lit color with the fog color using the source's specific mixing formula: `color = mix(color * 1.5f, vec4(fogColor, 1.0f), (1.0f - fogFactor))` [S1, unofficial].
+
+1.  **Calculate Ambient Component:**
+    Compute the ambient contribution based on the light's ambient intensity and color.
+    $$ C_{ambient} = C_p \cdot k_a $$
+    [S2, unofficial] specifies `ambientColor = vec4(light.color, 1.0f) * light.ambientIntensity`.
+
+2.  **Calculate Diffuse Component:**
+    Compute the dot product between the normal $N$ and light direction $L$.
+    $$ N_{dot\_L} = \max(N \cdot L, 0.0) $$
+    $$ C_{diffuse} = C_p \cdot k_d \cdot N_{dot\_L} $$
+    [S2, unofficial] specifies `diffuseFactor = max(dot(normalize(Normal), normalize(direction)), 0.0f)` and `diffuseColor = vec4(light.color * light.diffuseIntensity * diffuseFactor, 1.0f)`.
+
+3.  **Calculate Specular Component:**
+    If $N_{dot\_L} > 0.0$, compute the specular highlight.
+    a. Calculate the half-vector $H$ or the reflection vector. The formula in [S1, unofficial] uses $H$ (normalized vector for maximum highlight direction). The pseudocode in [S2, unofficial] uses the reflection vector $R$. Both are valid approximations; the standard Phong model uses $H$.
+    $$ H = \text{normalize}(L + V) $$
+    $$ H_{dot\_N} = \max(H \cdot N, 0.0) $$
+    $$ C_{specular} = C_p \cdot k_s \cdot (H_{dot\_N})^p $$
+    [S2, unofficial] uses the reflection vector approach: `reflectedVertex = normalize(reflect(direction, normalize(Normal)))`, `specularFactor = dot(fragToEye, reflectedVertex)`, and `specularFactor = pow(specularFactor, material.shininess)` if positive.
+
+4.  **Combine Lighting:**
+    Sum the components.
+    $$ C_{lit} = C_{ambient} + C_{diffuse} + C_{specular} $$
+    [S1, unofficial] formula: $C_p (k_a + k_d (N \cdot L) + k_s (N \cdot H)^p)$.
+
+5.  **Calculate Fog Factor:**
+    Compute the distance $d(x)$ from the fragment to the picture plane (or camera).
+    $$ d(x) = \| P_{view} \| $$
+    [S2, unofficial] specifies `dist = length(viewSpace)`.
+    Compute the exponential fog factor.
+    $$ F = e^{-k_1 \cdot d(x)} $$
+    [S1, unofficial] formula includes a quadratic term $e^{-k_2 d(x)^2}$, but [S2, unofficial] uses only the exponential term $1.0 / \exp(dist * FogDensity)$. The sources disagree on the inclusion of the quadratic term. [S1, unofficial] defines $k_2$ as a fall-off constant, while [S2, unofficial] does not mention $k_2$. We provide the general form from [S1, unofficial] and the implementation from [S2, unofficial].
+    General form [S1, unofficial]:
+    $$ F = e^{-k_1 d(x)} \cdot e^{-k_2 d(x)^2} $$
+    Implementation form [S2, unofficial]:
+    $$ F = \frac{1}{\exp(d(x) \cdot \text{FogDensity})} $$
+    Clamp $F$ to $[0.0, 1.0]$ [S2, unofficial].
+
+6.  **Apply Fog:**
+    Mix the lit color with the fog color.
+    $$ C(x) = C_{lit} \cdot F + C_f \cdot (1 - F) $$
+    [S2, unofficial] specifies `color = mix(color*1.5f, vec4(fogColor, 1.0f), (1.0f - fogFactor))`. Note the `color*1.5f` multiplier, which is a specific implementation detail in [S2, unofficial] not present in the general formula [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Standard vector/matrix operations assumed: vec4, normalize, dot, reflect, pow, length, clamp, mix
-def phong_shading_with_exponential_fog(Normal, Position, viewSpace, light_color, light_ambient_intensity, light_diffuse_intensity, light_direction, eye_position, material_shininess, material_specular_intensity, fog_density, fog_color):
+def phong_shading_with_exponential_fog(N, L, V, P_view, k_a, k_d, k_s, p, C_p, k_1, k_2, C_f):
     # 1. Ambient
-    ambient_color = vec4(light_color, 1.0) * light_ambient_intensity
-
+    ambient = C_p * k_a
+    
     # 2. Diffuse
-    N = normalize(Normal)
-    L = normalize(light_direction)
-    diffuse_factor = max(dot(N, L), 0.0)
-    diffuse_color = vec4(light_color * light_diffuse_intensity * diffuse_factor, 1.0)
-
+    N_dot_L = max(dot(N, L), 0.0)
+    diffuse = C_p * k_d * N_dot_L
+    
     # 3. Specular
-    specular_color = vec4(0.0, 0.0, 0.0, 1.0)
-    if diffuse_factor > 0.0:
-        V = normalize(eye_position - Position.xyz)
-        R = normalize(reflect(light_direction, N))
-        spec_factor = dot(V, R)
-        if spec_factor > 0.0:
-            spec_factor = pow(spec_factor, material_shininess)
-            specular_color = vec4(light_color * material_specular_intensity * spec_factor, 1.0)
-
-    # 4. Combine
-    final_color = ambient_color + diffuse_color + specular_color
-
-    # 5. Fog
-    dist = length(viewSpace)
-    fog_factor = 1.0 / exp(dist * fog_density)
+    # Using Half-Vector H as per standard Phong formula [S1, unofficial]
+    H = normalize(L + V)
+    H_dot_N = max(dot(H, N), 0.0)
+    specular = C_p * k_s * pow(H_dot_N, p)
+    
+    # Combine lighting
+    C_lit = ambient + diffuse + specular
+    
+    # 4. Fog Distance
+    dist = length(P_view)
+    
+    # 5. Fog Factor
+    # Sources disagree on quadratic term. [S1, unofficial] includes k_2, [S2, unofficial] does not.
+    # If k_2 is 0 or not provided, use exponential only.
+    if k_2 is defined:
+        fog_factor = exp(-k_1 * dist) * exp(-k_2 * dist * dist)
+    else:
+        fog_factor = exp(-k_1 * dist)
+        
+    # Clamp fog factor
     fog_factor = clamp(fog_factor, 0.0, 1.0)
-
+    
     # 6. Apply Fog
-    # Source mixes final_color * 1.5 with fog_color
-    fogged_color = mix(final_color * 1.5, vec4(fog_color, 1.0), 1.0 - fog_factor)
-
-    return fogged_color
+    # [S2, unofficial] applies a 1.5x multiplier to the lit color before mixing.
+    # [S1, unofficial] does not specify this multiplier.
+    # We follow [S1, unofficial] for the general formula, but note [S2, unofficial]'s variation.
+    final_color = mix(C_lit, C_f, 1.0 - fog_factor)
+    
+    return final_color
 ```
 
 **Edge Cases and Pitfalls:**
-*   The source multiplies the final lit color by `1.5` before fog mixing, which is an implementation detail that may cause over-brightening in scenes without fog or with low fog density [S1, unofficial].
-*   The source calls `reflect(direction, normalize(Normal))` directly on the light direction vector without negation, implying the implementation assumes `direction` represents the incident vector or follows a specific non-standard convention [S1, unofficial].
-*   With `FogDensity = 0.01`, fog becomes significant at distances around 100 units ($1/e \approx 0.37$) [S1, unofficial].
+*   **Precision:** At large distances, $e^{-k_1 d(x)}$ approaches zero, potentially causing underflow if not handled carefully in fixed-point arithmetic [S1, S2, unofficial].
+*   **Boundary Conditions:** If $d(x) = 0$, fog factor is 1.0, and no fog is applied [S2, unofficial].
+*   **Disagreement:** The sources disagree on the fog function. [S1, unofficial] uses a double exponential $e^{-k_1 d} e^{-k_2 d^2}$, while [S2, unofficial] uses a single exponential $e^{-k_1 d}$. Implementers should check if $k_2$ is provided; if not, use the single exponential [S1, S2, unofficial].
+*   **Lighting Multiplier:** [S2, unofficial] multiplies the lit color by 1.5 before fog mixing, which is not part of the standard model described in [S1, unofficial] [S2, unofficial].
 
 ## Operating characteristics
-Not given in the sources.
+*   **Time Complexity:** $O(1)$ per fragment. The calculation involves a constant number of vector operations, dot products, and exponentials.
+*   **Memory Complexity:** $O(1)$ auxiliary memory. No large data structures are required beyond the fragment inputs.
+*   **Strengths:** Simple to implement; provides realistic depth perception in volume rendering; computationally inexpensive.
+*   **Limitations:** Does not account for light scattering within the volume (only surface shading with distance fade); the quadratic fog term parameters ($k_2$) are often difficult to tune visually [S1, unofficial].
+*   **When to use:** When depth cueing is needed for spatial understanding in volume visualizations without the cost of full participating media scattering [S1, unofficial].
+*   **When not to use:** When physically accurate light transport within the medium is required [S1, unofficial].
 
 ## Background
-The method is implemented in the Proccraft project by Fredrik Erik Johansson [S1, unofficial].
+The method is attributed to Marc Levoy, who described "Levoy - Shading" as Phong Shading combined with Depth Cueing in the context of Direct Volume Rendering (DVR) [S1, unofficial]. It was presented in lecture materials for a course on DVR Ray-casting (Fall 2007) by Mengxia Zhu [S1, unofficial]. The implementation details in [S2, unofficial] reflect a modern GPU fragment shader interpretation of this concept, using exponential fog for depth cueing.
 
 ## Sources
-[S1] Proccraft, https://github.com/FredrikErikJohansson/Proccraft, fetched 2026-10-27 (unofficial)
+[S1] Direct Volume Rendering (DVR): Ray-casting, https://www.slideshare.net/slideshow/direct-volume-rendering-dvr-raycasting/265104120, fetched 2026-10-26 (unofficial)
+[S2] FredrikErikJohansson/Proccraft, https://github.com/FredrikErikJohansson/Proccraft, fetched 2026-10-27 (unofficial)

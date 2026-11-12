@@ -2,125 +2,57 @@
 
 
 ## Overview
-Progressive downsampling generates a hierarchy of data representations at decreasing spatial resolutions to accelerate volume rendering and enable interactive feedback. It solves the problem of high computational cost in full-resolution rendering by providing lower-quality approximations that are refined over time. It is distinguished from sibling methods like [Mipmap Generation](2602-mipmap-generation.md) by its explicit iterative refinement strategy, where resolution is gradually increased from a coarse initial state back to the original, rather than pre-computing all levels or using morphological operations.
+Progressive downsampling generates a hierarchy of volume representations at decreasing spatial resolutions to accelerate rendering and enable interactive exploration. It solves the problem of high computational cost in dense volume rendering by allowing the renderer to start with a coarse approximation and gradually refine the image. It is distinguished from sibling methods like [Mipmap Generation](2602-mipmap-generation.md) by its explicit iterative refinement strategy, often using logarithmic decay to balance speed and accuracy during the rendering process.
 
 ## How it works
-The method constructs a pyramid data structure consisting of a sequence of volumes. For an original data set of $N^3$ samples, the hierarchy contains $\log_2 N$ volumes.
-
-**Inputs and Outputs:**
-- Input: Original volume data $V_0$ of size $N \times N \times N$.
-- Output: A list of downsampled volumes $V_1, V_2, \dots, V_k$ where $k = \log_2 N$, and a rendering pipeline that iteratively refines the image.
+**Inputs:** Original volume dataset $V$ of size $N \times N \times N$; target resolution; iteration limit.
+**Outputs:** A sequence of downsampled volumes $V_0, V_1, \dots, V_k$ where $V_0 = V$ and $V_i$ has lower resolution than $V_{i-1}$.
 
 **Data Structures:**
-- **Pyramid:** A list of 3D arrays. $V_i$ has dimensions $(N/2^i) \times (N/2^i) \times (N/2^i)$.
-- **Rendering State:** Current iteration count $t$, current resolution level $L$, and target resolution.
+The method typically employs a pyramid structure. For an original dataset of $N^3$ samples, the pyramid consists of $\log_2 N$ volumes [S2, unofficial].
+- $V_0$: Original data.
+- $V_i$: Created by averaging $2 \times 2 \times 2$ groups of samples from $V_{i-1}$ [S2, unofficial].
+- Each level $i$ has linear resolution $N / 2^i$.
 
 **Steps:**
-1. **Pyramid Construction:**
-   - Create $V_0$ as the original data.
-   - For $i$ from 1 to $\log_2 N$:
-     - Create $V_i$ with dimensions half of $V_{i-1}$ in each axis.
-     - For each voxel in $V_i$, compute the average of the $2 \times 2 \times 2$ group of samples from $V_{i-1}$ that map to it.
-     - Formula: $V_i[x, y, z] = \frac{1}{8} \sum_{dx=0}^{1} \sum_{dy=0}^{1} \sum_{dz=0}^{1} V_{i-1}[2x+dx, 2y+dy, 2z+dz]$.
-
-2. **Progressive Rendering Loop:**
-   - Initialize rendering at the coarsest level $V_k$ (or a user-defined initial coarse level).
-   - For each frame or iteration $t$:
-     - Render the current volume level $V_L$ to produce a low-resolution image.
-     - If $t < T_{max}$ (e.g., 19500 iterations [S1]):
-       - Gradually increase resolution. The resolution increases with a logarithmic decay back to the original resolution [S1].
-       - Update $L$ based on $t$. Typically, start with a significant downsampling (e.g., 8x [S1]) and refine.
-     - If $t \ge T_{max}$ or convergence criteria met:
-       - Render at full resolution $V_0$.
+1. **Initial Coarse Rendering:** Downsample the original image or volume by a factor of 8 initially to establish a baseline [S1].
+2. **Iterative Refinement:** Gradually increase the resolution back to the original. The resolution increase follows a logarithmic decay schedule until a specified iteration count (e.g., 19,500) [S1].
+3. **Pyramid Construction (General Case):**
+   - For each level $i$ from 1 to $\log_2 N$:
+     - For each voxel $(x, y, z)$ in $V_i$:
+       - $V_i[x, y, z] = \frac{1}{8} \sum_{dx=0}^{1} \sum_{dy=0}^{1} \sum_{dz=0}^{1} V_{i-1}[2x+dx, 2y+dy, 2z+dz]$ [S2, unofficial].
+4. **Rendering Loop:**
+   - Render at current resolution.
+   - If iteration count < limit, refine resolution according to decay schedule.
+   - Repeat.
 
 **Parameters:**
-- Initial downsampling factor: Often 8x [S1].
-- Refinement schedule: Logarithmic decay back to original resolution [S1].
-- Max iterations: Example value 19500 [S1].
+- Initial downsampling factor: 8x [S1].
+- Logarithmic decay rate: Applied to resolution increase [S1].
+- Iteration limit: 19,500 (example from specific implementation) [S1].
 
 **Edge Cases:**
-- **Precision:** Averaging may introduce floating-point errors in deep pyramids. Use consistent accumulation.
-- **Boundaries:** Ensure $N$ is a power of 2 for exact halving. If not, handle boundary voxels by padding or truncation.
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def build_pyramid(volume):
-    """
-    Builds a pyramid of downsampled volumes.
-    volume: 3D numpy array of shape (N, N, N)
-    returns: list of 3D arrays [V0, V1, ..., Vk]
-    """
-    pyramid = [volume]
-    current = volume
-    while current.shape[0] > 1:
-        next_shape = (current.shape[0] // 2, current.shape[1] // 2, current.shape[2] // 2)
-        next_vol = np.zeros(next_shape, dtype=current.dtype)
-        # Average 2x2x2 blocks
-        for x in range(next_shape[0]):
-            for y in range(next_shape[1]):
-                for z in range(next_shape[2]):
-                    block = current[2*x:2*x+2, 2*y:2*y+2, 2*z:2*z+2]
-                    next_vol[x, y, z] = np.mean(block)
-        pyramid.append(next_vol)
-        current = next_vol
-    return pyramid
-
-def progressive_render(pyramid, max_iterations=19500):
-    """
-    Renders progressively from coarse to fine.
-    pyramid: list of volumes from coarsest to finest
-    returns: final image
-    """
-    # Start at coarsest level
-    current_level_idx = len(pyramid) - 1
-    current_vol = pyramid[current_level_idx]
-    
-    for t in range(max_iterations):
-        # Render current volume
-        image = render_volume(current_vol)
-        
-        # Check if we should refine
-        # Logarithmic decay schedule: refine as t increases
-        # Example: switch level when t crosses thresholds
-        # This is a simplified schedule; actual implementation may vary
-        if t < max_iterations:
-            # Gradually increase resolution
-            # Determine new level based on t
-            # For example, start at level k, move to k-1, etc.
-            # A simple linear interpolation of level index might be used
-            # or a logarithmic schedule as per [S1]
-            new_level_idx = max(0, current_level_idx - 1) # Simplified step
-            if new_level_idx != current_level_idx:
-                current_level_idx = new_level_idx
-                current_vol = pyramid[current_level_idx]
-        
-        # Update image or display
-        update_display(image)
-        
-    # Final full resolution render
-    final_image = render_volume(pyramid[0])
-    return final_image
-```
+- **Boundary Conditions:** When $N$ is not a power of 2, padding or truncation is required before downsampling.
+- **Precision:** Averaging operations may introduce floating-point errors; use double precision for intermediate calculations if necessary.
 
 ## Subtopics
 
 ### Bit-Packed Binary Rendering
-An optimization for binary sample values where bits are packed into bytes to generate lower resolution images faster. It processes data bit by bit for full resolution but byte by byte for lower resolution. If more than four bits of a byte are set, the byte represents an object element; otherwise, it represents background. This produces an image with one-half the linear resolution in approximately one-eighth the time [S2, unofficial].
+An optimization for binary sample values where bits are packed into bytes to generate lower resolution images faster [S2, unofficial]. It processes data bit by bit for full resolution, but byte by byte for lower resolution [S2, unofficial]. If more than four bits of a byte are set, the byte represents an object element; otherwise, it is background [S2, unofficial]. This produces an image with one-half the linear resolution in approximately one-eighth the time [S2, unofficial].
+
+### CorrBlockFast1D
+Constructs a pyramid of correlation volumes between two feature maps for efficient 1D correlation sampling [S3, unofficial]. It initializes with `fmap1`, `fmap2`, `num_levels` (default 4), and `radius` (default 4) [S3, unofficial]. It computes initial correlation, reshapes it, and downsamples using `F.avg_pool2d` with stride 2 for each level [S3, unofficial]. The `__call__` method samples correlation using `CorrSampler.apply` with coordinates scaled by $2^i$ and concatenates results [S3, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Pyramid construction is $O(N^3)$ for the original data, with each subsequent level being $1/8$ the size. Total construction time is $O(N^3)$. Progressive rendering time per frame depends on the current resolution level.
-- **Memory Complexity:** $O(N^3)$ for the full pyramid, as the sum of geometric series $N^3 + (N/2)^3 + \dots \approx \frac{8}{7} N^3$.
-- **Measured Performance:** Bit-packed binary rendering achieves half linear resolution in one-eighth the time [S2, unofficial]. Initial 8x downsampling allows for rapid feedback [S1].
-- **Strengths:** Provides immediate low-quality feedback; reduces computational load for interactive scenes.
-- **Limitations:** Requires pre-computation or on-the-fly pyramid construction; quality at coarse levels may be insufficient for some applications.
-- **When to use:** Interactive volume visualization where rapid feedback is critical.
-- **When not to use:** When final high-quality image is needed immediately without iterative refinement.
+- **Time Complexity:** Initial rendering is fast due to coarse resolution. Refinement time increases with resolution. Bit-packed binary rendering offers significant speedup (1/8th time for 1/2 resolution) [S2, unofficial].
+- **Memory Complexity:** Pyramid structure requires $O(N^3)$ total memory for all levels, but only one level is typically active in memory at a time if streamed.
+- **Performance:** Effective for interactive visualization where immediate feedback is prioritized over final accuracy [S2, unofficial].
+- **Limitations:** May introduce artifacts if the decay schedule is too aggressive or if the volume has high-frequency details not captured by coarse levels.
 
 ## Background
-The concept of pyramid data structures for volume visualization was introduced in the context of efficient splatting and progressive rendering. The bit-packing optimization for binary data was described in early volume visualization literature [S2, unofficial]. Progressive refinement strategies have been adopted in various rendering systems to balance speed and quality [S1].
+The concept of building a pyramid data structure for volume visualization was introduced in early volume rendering literature [S2, unofficial]. It allows for efficient splatting and hierarchical culling. The specific application of progressive downsampling with logarithmic decay for Gaussian Splatting was detailed in recent works on efficient rendering [S1].
 
 ## Sources
 [S1] Trick-GS: A Balanced Bag of Tricks for Efficient Gaussian Splatting, https://doi.org/10.1109/icassp49660.2025.10889395, fetched 2026-10-30
 [S2] PDF Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)
+[S3] YaourtB/GPS_plus, https://github.com/YaourtB/GPS_plus, fetched 2026-10-27 (unofficial)

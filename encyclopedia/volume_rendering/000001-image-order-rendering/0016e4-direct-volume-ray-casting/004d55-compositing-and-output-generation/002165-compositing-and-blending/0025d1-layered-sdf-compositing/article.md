@@ -2,14 +2,11 @@
 ## Overview
 Layered SDF Compositing is a method for rendering Signed Distance Field (SDF) glyphs by compositing multiple layers (typically a face and one or more outline layers) using alpha blending and pre-multiplied alpha handling [S1, unofficial]. It differs from standard volume ray casting by operating on discrete, pre-sampled layers of a 2D texture atlas rather than continuous 3D volume data, allowing for efficient, sharp text rendering with variable-width outlines [S1, unofficial].
 ## How it works
-**Inputs:**
-- `color0` to `color3`: RGB color vectors for each layer.
-- `alpha0` to `alpha3`: Scalar alpha values for each layer.
-- `alpha`: A scalar global opacity multiplier for Layer1, or a vector `[alpha0, alpha1, alpha2, alpha3]` for Layer2 and Layer4.
-
-**Outputs:**
-- `outColor`: The final un-premultiplied RGB color.
-- `outAlpha`: The final accumulated scalar alpha.
+**Inputs and Outputs:**
+- `color0` to `color3`: RGB color vectors for each layer [S1, unofficial].
+- `alpha0` to `alpha3`: Scalar alpha values for each layer [S1, unofficial].
+- `alpha`: A scalar global opacity multiplier for Layer1, or a vector `[alpha0, alpha1, alpha2, alpha3]` for Layer2 and Layer4 [S1, unofficial].
+- Outputs are `outColor` (final un-premultiplied RGB color) and `outAlpha` (final accumulated scalar alpha) [S1, unofficial].
 
 **Data Structures:**
 Inputs are passed as vectors or structs. The accumulator state is a 4D vector `(outColor.rgb, outColor.a)` where `.rgb` holds the blended color and `.a` holds the accumulated alpha [S1, unofficial].
@@ -18,6 +15,19 @@ Inputs are passed as vectors or structs. The accumulator state is a 4D vector `(
 1. **Layer 1 (Face only):** Multiply `color0.a` by the scalar `alpha`. Set `outColor` to `color0` [S1, unofficial].
 2. **Layer 2 (Face + 1 Outline):** Multiply `color1.a` by `alpha.y`. Premultiply `color0.rgb` by `color0.a` and `color1.rgb` by `color1.a`. Compute `outColor = lerp(color1, color0, alpha.x)`. Divide `outColor.rgb` by `outColor.a` [S1, unofficial].
 3. **Layer 4 (Face + 3 Outlines):** Multiply `color3.a` by `alpha.w`. Premultiply all color RGBs by their respective alphas. Compute `outColor = lerp(lerp(lerp(color3, color2, alpha.z), color1, alpha.y), color0, alpha.x)`. Divide `outColor.rgb` by `outColor.a` [S1, unofficial].
+
+**Formulas:**
+- Linear interpolation: $C_{out} = C_{outer} \cdot (1 - t) + C_{inner} \cdot t$, where $t$ is the corresponding alpha component [G].
+- Alpha accumulation (standard front-to-back): $\alpha_{acc}^{(i)} = \alpha_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \cdot \alpha_i$ [G].
+- Un-premultiplication: $C_{final} = C_{premult} / \alpha_{acc}$ [G].
+
+**Parameters:**
+- `alpha` components control outline thickness and opacity per layer [S1, unofficial].
+- Typical values for `alpha` components are in $[0.0, 1.0]$ [G].
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** If `outColor.a` is $0$, division by zero occurs. A guard is required to return black or transparent [G].
+- **Precision:** Premultiplying and then dividing can lead to precision loss, especially with low alpha values [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -73,11 +83,6 @@ def composite_layer4(color0, color1, color2, color3, alpha_vec):
         out_color = (0.0, 0.0, 0.0)
     return out_color, out_alpha
 ```
-
-**Edge Cases and Pitfalls:**
-- **Division by Zero:** If `outColor.a` is 0, division by zero occurs. A guard is required to return black or transparent [G].
-- **Precision:** Premultiplying and then dividing can lead to precision loss, especially with low alpha values [G].
-- **Order of Operations:** The order of layers (inner to outer or outer to inner) is critical. The source implies a specific order (Layer0 to Layer3 in the lerp chain, but the lerp is `lerp(outer, inner, weight)`).
 ## Subtopics
 
 ### [SDF Underlay & Inner Underlay](5612-sdf-underlay-inner-underlay.md)

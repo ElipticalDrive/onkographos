@@ -1,70 +1,68 @@
 # Gaussian clustering and merging
-Also called: Gaussian LOD merging, Gaussian cluster reduction
 
 ## Overview
-This family of methods reduces the computational and memory cost of 3D Gaussian Splatting (3DGS) by grouping splats into spatial or attribute-based clusters and replacing them with a single representative Gaussian or a hierarchical structure [S1, unofficial]. It solves the problem of rendering overhead when the number of Gaussians exceeds hardware limits or when distant details are perceptually redundant. It differs from sibling methods by focusing specifically on the *merging* primitive (how to compute the representative Gaussian) or the *culling* logic (how to select which merged clusters to render), rather than just storage optimization or hierarchical traversal alone.
+This family of techniques reduces the rendering cost of 3D Gaussian Splatting by grouping Gaussians into clusters and replacing them with representative proxies or hierarchical structures for Level-of-Detail (LOD) selection [G]. It differs from sibling methods by focusing specifically on the merging primitive (how to compute the representative Gaussian) or the culling logic (how to select which merged clusters to render), rather than just storage optimization or hierarchical traversal alone [G].
 
 ## Shared principles
-All methods in this family operate on a set of input Gaussians $\{G_i\}_{i=1}^N$, where each $G_i$ is defined by position $\mathbf{t}_i$, covariance matrix $\mathbf{\Sigma}_i$ (or rotation/scale), opacity $\alpha_i$, and color/amplitude coefficients $c_i$ (often represented as spherical harmonic coefficients).
+All methods in this family operate on a set of input Gaussians $\{G_i\}_{i=1}^N$, where each $G_i$ is defined by position $\mathbf{t}_i$, covariance matrix $\mathbf{\Sigma}_i$ (or rotation/scale), opacity $\alpha_i$, and color/amplitude coefficients $c_i$ [G].
 
 The core mechanism involves two phases:
-1.  **Partitioning:** The $N$ Gaussians are grouped into clusters $C_j$. Partitioning strategies vary from greedy hierarchical merging based on error cost [S1, unofficial] to k-means clustering in multidimensional attribute space [S1, unofficial].
-2.  **Merging/Reduction:** Each cluster $C_j$ is reduced to a single representative Gaussian $G_{merged}$ or a lower-resolution proxy. The parameters of $G_{merged}$ ($\mathbf{t}_m, \mathbf{\Sigma}_m, \alpha_m, c_m$) are computed to approximate the visual contribution of the original cluster.
+1. **Partitioning:** The $N$ Gaussians are grouped into clusters $C_j$ based on spatial proximity or attribute similarity [G].
+2. **Merging/Reduction:** Each cluster $C_j$ is reduced to a single representative Gaussian $G_{merged}$ or a lower-resolution proxy [G]. The parameters of $G_{merged}$ ($\mathbf{t}_m, \mathbf{\Sigma}_m, \alpha_m, c_m$) are computed to approximate the visual contribution of the original cluster [G].
 
 Common mathematical operations include:
-*   **Weighted Moments:** Computing the first moment (center of mass) and second moment (covariance) of the cluster to determine position and shape [S1, unofficial].
-    $$ \mathbf{t}_{m} = \frac{1}{W} \sum_{i \in C} w_i \mathbf{t}_i $$
-    $$ \mathbf{\Sigma}_{m} = \frac{1}{W} \sum_{i \in C} w_i (\mathbf{\Sigma}_i + \mathbf{t}_i \mathbf{t}_i^T) - \mathbf{t}_{m} \mathbf{t}_{m}^T $$
-    where $W = \sum w_i$ and $w_i$ is typically opacity $\alpha_i$ or a volume-normalized weight [S1, unofficial].
-*   **Arithmetic Averaging:** Simple averaging of position, opacity, and color, often used in hierarchical LOD approaches [S1, unofficial].
-*   **L2 Optimization:** Minimizing the integrated squared error between the merged Gaussian and the sum of original Gaussians to optimize opacity and amplitude [S1, unofficial].
+* **Weighted Moments:** Computing the first moment (center of mass) and second moment (covariance) of the cluster to determine position and shape [G].
+  $$ \mathbf{t}_{m} = \frac{1}{W} \sum_{i \in C} w_i \mathbf{t}_i $$
+  $$ \mathbf{\Sigma}_{m} = \frac{1}{W} \sum_{i \in C} w_i (\mathbf{\Sigma}_i + \mathbf{t}_i \mathbf{t}_i^T) - \mathbf{t}_{m} \mathbf{t}_{m}^T $$
+  where $W = \sum w_i$ and $w_i$ is typically opacity $\alpha_i$ or a volume-normalized weight [G].
+* **Arithmetic Averaging:** Simple averaging of position, opacity, and color, often used in hierarchical LOD approaches [G].
+* **L2 Optimization:** Minimizing the integrated squared error between the merged Gaussian and the sum of original Gaussians to optimize opacity and amplitude [G].
 
 ## Subtopics
 
 ### [K-wise moment-matched merging with L2-optimal amplitude](5440-k-wise-moment-matched-merging-with-l2-optimal-amplitude.md)
-A level-of-detail technique that reduces a set of $K$ Gaussian splats into a single representative splat by matching spatial moments and optimizing the resulting amplitude to minimize L2 error. It differs from simple arithmetic averaging by preserving the first and second moments (mass and extent) of the cluster while analytically solving for the optimal opacity/amplitude to minimize the integrated squared error between the merged splat and the original cluster. This method serves as a core merging primitive for substitutive LOD generation in 3D Gaussian Splatting.
+Reduces a cluster of $K$ Gaussians into a single representative splat by matching statistical moments and optimizing the resulting amplitude to minimize integrated squared error. It distinguishes itself from simple arithmetic averaging by explicitly solving for the optimal amplitude coefficient via L2 optimization, ensuring the merged splat best approximates the visual energy of the original group. Choose when visual fidelity during merging is prioritized over computational speed.
 
 ### [Hierarchical Gaussian Merging](8358-hierarchical-gaussian-merging.md)
-Hierarchical Gaussian Merging generates Level-of-Detail (LOD) representations for 3D Gaussian Splatting by recursively halving the number of Gaussians per page to reduce memory bandwidth and rendering overhead at distance. It differs from sibling methods by using a simple arithmetic average for most properties (excluding scale) within a unified buffer structure, rather than complex moment-matching or L2-optimal amplitude optimization.
+Generates multiple levels of detail (LOD) for 3D Gaussian Splatting by iteratively reducing the number of Gaussians in each cluster. It solves the problem of rendering large Gaussian datasets efficiently by allowing the renderer to select a coarser representation based on distance or performance constraints. Unlike methods that optimize merged parameters via L2 error minimization or moment matching, this approach relies on simple arithmetic averaging of Gaussian properties to create simplified proxies. Choose for real-time LOD generation where computational efficiency is critical.
 
 ### [LOD Generation for 3DGS](8408-lod-generation-for-3dgs.md)
-This method reduces the number of Gaussians copied, stored, sorted, and rendered by merging Gaussians into clusters based on similar attributes, minimizing distant appearance impact without altering scene creation. It differs from virtual texturing approaches where mip levels are uniform-sized pages; instead, this method reduces the Gaussian count with each LOD level, allowing multiple virtual pages to reside within a single physical page.
+Reduces the number of Gaussians copied, stored, sorted, and rendered by merging Gaussians into clusters based on similar attributes, minimizing distant appearance impact without altering scene creation. It differs from virtual texturing approaches where mip levels are uniform-sized pages; instead, it reduces the Gaussian count with each LOD level, allowing multiple virtual pages to map to a single physical page. Choose when dynamic memory management and virtual texturing integration are required.
 
 ### [Cluster Culling (Nanite-style)](10402-cluster-culling-nanite-style.md)
-Cluster Culling is a hierarchical spatial culling and Level-of-Detail (LOD) selection system for Gaussian splats, implementing Nanite-style spatial clustering to optimize rendering throughput. It solves the problem of efficiently determining which clusters of Gaussians are visible within the view frustum and selecting the appropriate resolution (LOD) for each, thereby reducing the number of draw calls and splats processed. It sets itself apart from sibling merging methods by focusing on the *selection* and *culling* phase of the rendering pipeline rather than the geometric approximation of merged clusters, operating on pre-computed cluster hierarchies to filter visible geometry before rasterization.
+A hierarchical culling and Level-of-Detail (LOD) selection mechanism for 3D Gaussian Splatting, designed to efficiently determine which clusters of Gaussians are visible and at what resolution they should be rendered. It solves the problem of rendering overhead in dense scenes by testing cluster bounding volumes against the view frustum and selecting the appropriate LOD based on screen-space error, outputting a compact list of visible clusters for subsequent rendering passes. It differs from sibling methods by focusing on the *selection* and *culling* phase rather than the geometric merging algorithm itself. Choose when frustum culling and screen-space error metrics are needed to optimize draw calls.
 
 ### Gaussian Cluster Builder
-#### definition
-- [S1, unofficial] A builder class for constructing hierarchical cluster structures from Gaussian splat data, implementing Nanite-style spatial clustering.
-#### step
-- [S1, unofficial] Sort splats by Morton code (Z-order curve) for spatial locality.
-- [S1, unofficial] Group into leaf clusters of N splats each.
-- [S1, unofficial] Recursively merge clusters into parent nodes.
-- [S1, unofficial] Calculate bounding volumes and error metrics.
-#### parameter
-- [S1, unofficial] SplatsPerCluster: Number of splats per leaf cluster.
-- [S1, unofficial] MaxChildrenPerCluster: Maximum children per parent cluster.
-- [S1, unofficial] bReorderSplats: Whether to reorder splat data for cluster locality.
-- [S1, unofficial] bGenerateLOD: Whether to generate LOD splats for parent clusters.
-- [S1, unofficial] LODReductionRatio: How many original splats per LOD splat (default: divide by 4).
-#### layout
-- [S1, unofficial] FBuildSettings: int32 SplatsPerCluster (default: GaussianClusterConstants::DefaultSplatsPerCluster), int32 MaxChildrenPerCluster (default: GaussianClusterConstants::MaxChildrenPerCluster), bool bReorderSplats (default: true), bool bGenerateLOD (default: true), int32 LODReductionRatio (default: 4).
+#### Definition
+A builder class for constructing hierarchical cluster structures from Gaussian splat data, implementing Nanite-style spatial clustering [G].
+#### Steps
+- Sort splats by Morton code (Z-order curve) for spatial locality [G].
+- Group into leaf clusters of N splats each [G].
+- Recursively merge clusters into parent nodes [G].
+- Calculate bounding volumes and error metrics [G].
+#### Parameters
+- SplatsPerCluster: Number of splats per leaf cluster [G].
+- MaxChildrenPerCluster: Maximum children per parent cluster [G].
+- bReorderSplats: Whether to reorder splat data for cluster locality [G].
+- bGenerateLOD: Whether to generate LOD splats for parent clusters [G].
+- LODReductionRatio: How many original splats per LOD splat (default: divide by 4) [G].
+#### Layout
+- FBuildSettings: int32 SplatsPerCluster, int32 MaxChildrenPerCluster, bool bReorderSplats, bool bGenerateLOD, int32 LODReductionRatio [G].
 
 ### Cluster Hierarchy Construction
-#### step
-- [S1, unofficial] Calculate global bounding box of all splats using CalculateGlobalBounds.
-- [S1, unofficial] Build parent level by merging child clusters using BuildParentLevel, specifying MaxChildrenPerCluster, ParentLODLevel, and NextClusterID.
-#### parameter
-- [S1, unofficial] SplatsPerCluster: Number of splats per leaf cluster. Default value: 128 (from GaussianClusterConstants::DefaultSplatsPerCluster).
-- [S1, unofficial] MaxChildrenPerCluster: Maximum number of children per parent cluster. Default value: 8 (from GaussianClusterConstants::MaxChildrenPerCluster).
-- [S1, unofficial] bReorderSplats: Boolean flag to reorder splat data for cluster locality. Default value: true.
-- [S1, unofficial] bGenerateLOD: Boolean flag to generate LOD splats for parent clusters. Default value: true.
-- [S1, unofficial] LODReductionRatio: Ratio of original splats per LOD splat. Default value: 4.
-#### layout
-- [S1, unofficial] FSplatSortEntry: Structure for sorting splats by Morton code. Fields: uint64 MortonCode, int32 OriginalIndex. Comparison operator: returns true if MortonCode < Other.MortonCode.
+#### Steps
+- Calculate global bounding box of all splats [G].
+- Build parent level by merging child clusters, specifying MaxChildrenPerCluster, ParentLODLevel, and NextClusterID [G].
+#### Parameters
+- SplatsPerCluster: Number of splats per leaf cluster. Default value: 128 [G].
+- MaxChildrenPerCluster: Maximum number of children per parent cluster. Default value: 8 [G].
+- bReorderSplats: Boolean flag to reorder splat data for cluster locality. Default value: true [G].
+- bGenerateLOD: Boolean flag to generate LOD splats for parent clusters. Default value: true [G].
+- LODReductionRatio: Ratio of original splats per LOD splat. Default value: 4 [G].
+#### Layout
+- FSplatSortEntry: Structure for sorting splats by Morton code. Fields: uint64 MortonCode, int32 OriginalIndex. Comparison operator: returns true if MortonCode < Other.MortonCode [G].
 
 ## Background
-The need for clustering and merging in 3D Gaussian Splatting arises from the high memory footprint and rendering cost of large-scale scenes reconstructed from NeRF or multi-view stereo pipelines. Early 3DGS implementations stored millions of Gaussians, leading to bandwidth bottlenecks during sorting and rasterization. Hierarchical and multi-resolution techniques, inspired by point cloud compression and Nanite-style virtual geometry, were developed to mitigate this. The specific "K-wise moment-matched" approach provides a mathematically rigorous way to merge splats with minimal visual error, while simpler averaging methods offer computational efficiency for real-time LOD generation. These methods are primarily used in real-time rendering engines and offline visualization tools where performance scalability is critical.
+Not given in the sources.
 
 ## Sources
-[S1] YuanBaoSMadLab/OpenSplat4D, https://github.com/YuanBaoSMadLab/OpenSplat4D, fetched 2026-10-27 (unofficial)

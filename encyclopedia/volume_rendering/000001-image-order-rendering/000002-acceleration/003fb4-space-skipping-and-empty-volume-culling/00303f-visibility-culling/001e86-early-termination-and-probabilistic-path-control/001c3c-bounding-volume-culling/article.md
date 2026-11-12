@@ -3,116 +3,92 @@
 Also called: Distance-based Culling, Ray Termination by Distance
 
 ## Overview
-Bounding Volume Culling is an optimization that limits raymarching to a specific bounding volume, dropping rays that exceed a certain distance from the eye or miss the volume entirely to speed up rendering [S1, unofficial][S2]. It differs from its siblings, such as [Empty-space skipping](1002-empty-space-skipping.md) which skips empty voxels, by discarding rays based on geometric bounds before or during traversal [S2]. Unlike [Early Stop](1790-early-stop.md) which terminates based on accumulated opacity, Bounding Volume Culling relies on spatial limits [S1, unofficial].
+Bounding Volume Culling is an optimization that limits raymarching to a specific geometric boundary, dropping rays that exceed a certain distance from the eye or miss the volume entirely to speed up rendering [S1, unofficial][S3, unofficial][S4]. It differs from its parent, [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md), which relies on accumulated opacity or transmittance to stop integration, by using hard geometric constraints to discard rays before or during traversal [S1, unofficial][S2]. Unlike [Empty-space skipping](1002-empty-space-skipping.md), which skips empty voxels within a defined volume, Bounding Volume Culling often rejects the entire ray if it does not intersect the volume's outer bounds [S3, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- Input: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, bounding volume geometry (e.g., AABB, sphere, or spheroid), and maximum travel distance $t_{max}$ [S1, unofficial][S2].
-- Output: Valid ray segment $[t_{enter}, t_{exit}]$ for traversal, or a flag indicating the ray misses the volume [S2].
+The method varies by the type of bounding volume used (scalar distance limit, axis-aligned box, or heap-managed collection). The core principle is to compute a distance or intersection test against the bounding geometry before or during the sampling loop.
 
-**Data Structures:**
-- **Bounding Volume:** Defined by its geometric parameters. For an Axis-Aligned Bounding Box (AABB), this is typically the minimum and maximum coordinates $(\mathbf{min}, \mathbf{max})$ [S4, unofficial]. For a spheroid/cloud, it may be a pointer to a voxel grid and geometric bounds [S2].
-- **Heap (for Heap-based variant):** A priority queue storing distances to bounding volumes [S3].
+### Inputs and Outputs
+*   **Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, bounding volume definition (e.g., max distance $D_{max}$, AABB min/max, or list of bounding volumes), and the volume data structure.
+*   **Outputs:** A color value (or background) if the ray is culled or fully processed; otherwise, the result of the raymarching loop.
 
-**Steps:**
-1. **Intersection Test:** Determine if the ray intersects the bounding volume.
-   - For an AABB, compute the intersection interval $[t_{min}, t_{max}]$ using the slab method [S4, unofficial].
-   - For a spheroid, compute the intersection with the enclosing sphere [S2].
-2. **Culling:**
-   - If the ray does not intersect the bounding volume, discard the ray immediately and assign a background color [S2][S4, unofficial].
-   - If the ray intersects, calculate the valid segment $[t_{enter}, t_{exit}]$ within the volume [S2].
-3. **Distance Limiting:**
-   - Track the total distance traveled $t$ along the ray [S1, unofficial].
-   - If $t$ exceeds a predefined limit $t_{max}$, terminate the raymarch process [S1, unofficial].
-   - Alternatively, limit the segment to the intersection with the bounding volume boundaries [S2].
-4. **Traversal:** Perform volume rendering only within the valid segment $[t_{enter}, t_{exit}]$ [S2].
+### Data Structures
+1.  **Scalar Limit:** A single floating-point value $D_{max}$ representing the maximum travel distance [S1, unofficial].
+2.  **AABB:** Two 3D vectors $\mathbf{min}$ and $\mathbf{max}$ defining the box extents [S3, unofficial][S4].
+3.  **Heap (for Sphere Tracing):** A priority queue (min-heap) storing pairs of $(d_{bv}, \text{object\_id})$, where $d_{bv}$ is the distance to the bounding volume [S2].
 
-**Formulas:**
-- **AABB Intersection:** For each axis $i \in \{x, y, z\}$:
-  $$ t_{i, min} = \frac{min_i - o_i}{d_i}, \quad t_{i, max} = \frac{max_i - o_i}{d_i} $$
-  $$ t_{enter} = \max_i(t_{i, min}), \quad t_{exit} = \min_i(t_{i, max}) $$
-  If $t_{enter} > t_{exit}$, the ray misses [S4, unofficial].
-- **Distance Limit:** Terminate if $t > t_{max}$ [S1, unofficial].
+### Algorithm: Scalar Distance Culling
+This variant tracks the total distance traveled by the ray and terminates if it exceeds a predefined limit [S1, unofficial].
 
-**Parameters:**
-- $t_{max}$: Maximum ray length. Typical values depend on scene scale; e.g., 64 steps in some implementations [S1, unofficial].
-- Bounding Box: Defined by scene extent [S4, unofficial].
+1.  Initialize accumulated distance $t = 0$.
+2.  While $t < D_{max}$:
+    a. Evaluate sample at $\mathbf{o} + t\mathbf{d}$.
+    b. Update $t \leftarrow t + \Delta t$ (step size).
+3.  If $t \ge D_{max}$, terminate and return background or fog color [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-- **Parallel Rays:** If $\mathbf{d}_i = 0$, handle division by zero in AABB intersection by using the inverse direction or special casing [S4, unofficial].
-- **Degenerate Volumes:** Ensure bounding volumes have non-zero extent to avoid invalid intervals [S4, unofficial].
-- **Precision:** Floating-point errors may cause rays to miss thin bounding volumes; consider epsilon adjustments [G].
+### Algorithm: AABB Culling
+This variant uses the six planar faces of a rectangular grid volume to reject rays that do not intersect the volume [S3, unofficial][S4].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+1.  Define the bounding box by $\mathbf{min}$ and $\mathbf{max}$.
+2.  For each pixel, compute the intersection interval $[t_{enter}, t_{exit}]$ of the ray with the AABB.
+    *   $t_{min} = \max(\frac{min_x - o_x}{d_x}, \frac{min_y - o_y}{d_y}, \frac{min_z - o_z}{d_z})$
+    *   $t_{max} = \min(\frac{max_x - o_x}{d_x}, \frac{max_y - o_y}{d_y}, \frac{max_z - o_z}{d_z})$
+    *   (Handle division by zero if $d_i = 0$ by treating the term as $-\infty$ or $+\infty$ appropriately).
+3.  If $t_{max} < 0$ or $t_{min} > t_{max}$, the ray misses the volume.
+4.  If the ray misses, assign a background/empty color and skip volume traversal [S3, unofficial][S4].
+5.  If the ray hits, clamp the start of the march to $t_{min}$ (if $t_{min} > 0$) and end at $t_{max}$ [S4].
 
-```python
-def bounding_volume_cull(ray_origin, ray_direction, aabb_min, aabb_max, max_dist):
-    # Initialize intersection interval
-    t_min = -infinity
-    t_max = max_dist
-    
-    for i in range(3): # x, y, z
-        if abs(ray_direction[i]) < epsilon:
-            # Ray parallel to slab
-            if ray_origin[i] < aabb_min[i] or ray_origin[i] > aabb_max[i]:
-                return None # Miss
-        else:
-            inv_d = 1.0 / ray_direction[i]
-            t1 = (aabb_min[i] - ray_origin[i]) * inv_d
-            t2 = (aabb_max[i] - ray_origin[i]) * inv_d
-            
-            # Update interval
-            t_min = max(t_min, min(t1, t2))
-            t_max = min(t_max, max(t1, t2))
-            
-            # Early exit if interval is invalid
-            if t_min > t_max:
-                return None # Miss
-    
-    # Check if intersection is in front of camera and within max_dist
-    if t_max < 0 or t_min > max_dist:
-        return None # Miss
-    
-    # Return valid segment
-    return (max(0.0, t_min), min(t_max, max_dist))
-```
+### Algorithm: Heap-based Bounding Volume Culling (Sphere Tracing)
+This variant finds the closest object in a collection by maintaining a heap of bounding volume distances, culling based on the smallest bounding volume distance [S2].
+
+1.  Compute distances $d_{bv}$ to each bounding volume in the collection.
+2.  Create a min-heap of these distances.
+3.  Initialize $d_{min} = \infty$.
+4.  Loop:
+    a. Let $d_{top}$ be the distance to the bounding volume at the top of the heap.
+    b. Let $d_{content}$ be the distance to the contents of the object associated with $d_{top}$.
+    c. Update $d_{min} = \min(d_{min}, d_{content})$.
+    d. Remove the top of the heap.
+    e. If the heap is empty, return $d_{min}$.
+    f. Let $d_{next\_bv}$ be the distance to the bounding volume now at the top of the heap.
+    g. If $d_{content} < d_{next\_bv}$, return $d_{min}$ (the closest object has been found).
+    h. If $d_{min} < d_{next\_bv}$, return $d_{min}$ (a closer object was found earlier). [S2]
+
+### Parameters
+*   $D_{max}$: Maximum ray travel distance. Typical values depend on scene scale; e.g., 64 steps in some demonstrations [S1, unofficial].
+*   $d_{bv}$: Distance to the bounding volume currently at the top of the heap [S2].
+
+### Edge Cases and Pitfalls
+*   **Perspective Degradation:** In perspective projection, bounding volume enhancements can degrade performance for typical implicit surfaces if the overhead of distance computation outweighs the culling benefit [S2].
+*   **Precision:** Ray-AABB intersection requires careful handling of parallel rays (direction component zero) to avoid division by zero or incorrect interval calculations [S3, unofficial].
+*   **Frustum Culling:** Bounding boxes can also be used to avoid iterations over objects outside the camera view frustum [S4].
 
 ## Subtopics
 
+### [Bounding Spheres Optimization](1567-bounding-spheres-optimization.md)
+Bounding Spheres Optimization reduces the computational cost of sphere tracing by grouping scene objects into larger enclosing spheres, thereby eliminating unnecessary distance calculations during ray traversal. It differs from its parent, [Bounding Volume Culling](1239-bounding-volume-culling.md), which typically discards rays entirely based on geometric bounds, by deferring the evaluation of individual object distances until the ray actually penetrates the enclosing volume. Unlike [Orthogonal Culling Optimization](4034-orthogonal-culling-optimization.md), which pre-computes object visibility via orthogonal projection to reduce per-step evaluations, Bounding Spheres Optimization dynamically manages the active set of distance fields based on ray proximity.
+
 ### Heap-based Bounding Volume Culling for Sphere Tracing
-An algorithm to find the closest object in a collection by maintaining a heap of bounding volume distances [S3]. It computes distances to bounding volumes first, then contents, culling based on the smallest bounding volume distance [S3]. Unlike standard culling which discards rays, this variant optimizes sphere tracing by deferring expensive distance computations [S3].
-**Steps:**
-1. Compute distances to each bounding volume in the union/collection [S3].
-2. Create a heap of these distances [S3].
-3. Initialize $d_{min}$ to infinity [S3].
-4. Loop: Let $d_{content}$ be $\min(d_{min}, \text{distance to contents of top BV})$ [S3].
-5. Remove top of heap [S3].
-6. Let $d_{bv}$ be distance to new top BV [S3].
-7. Stop if $d_{content} < d_{bv}$ or heap empty [S3].
-8. Return $d_{content}$ [S3].
-**Parameters:**
-- $d_{bv}$: The distance to the bounding volume currently at the top of the heap [S3].
+An algorithm to find the closest object in a collection by maintaining a heap of bounding volume distances. It computes distances to bounding volumes first, then contents, culling based on the smallest bounding volume distance [S2]. It is used when the scene consists of a union of implicit objects and sphere tracing is employed. It differs from simple scalar culling by managing a complex hierarchy of objects rather than a single distance limit [S2].
 
 ### Axis-Aligned Bounding Box (AABB) Culling
-A spatial acceleration technique that uses the outer boundaries of the data volume to quickly reject rays that do not intersect the volume, avoiding unnecessary computation [S4, unofficial]. It differs from other variants by using the six planar faces of the rectangular grid volume as the bounding object [S4, unofficial].
-**Steps:**
-1. Define the bounding object as the six planar faces of the rectangular grid volume [S4, unofficial].
-2. For each pixel, test the cast ray against the six bounding faces before initiating the full volume trace [S4, unofficial].
-3. If the ray misses the bounding volume, immediately assign a background/empty color to the pixel and skip volume traversal [S4, unofficial].
+A spatial acceleration technique that uses the outer boundaries of the data volume to quickly reject rays that do not intersect the volume, avoiding unnecessary computation [S3, unofficial]. It is used for grid-based volumes where the extent is known. It differs from heap-based methods by using a single static box rather than a dynamic hierarchy of objects [S3, unofficial].
+
+### Scene Delimitation with Bounding Boxes
+Using bounding boxes to delimit cloud volumes and Smits' algorithm to limit ray-marching to the volume inside the cloud's boundaries, discarding rays that never hit the boundaries [S4]. It is used in real-time GPU volumetric cloud rendering. It differs from other methods by integrating with Smits' algorithm to calculate the specific segment of the Euclidean straight line for rendering and allowing separate voxel grids per cloud [S4].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per ray for AABB intersection [S4, unofficial]. Heap-based variant is $O(N \log N)$ for setup and $O(\log N)$ per query [S3].
-- **Memory Complexity:** $O(1)$ for AABB [S4, unofficial]. $O(N)$ for heap-based variant where $N$ is the number of bounding volumes [S3].
-- **Performance:** Increases FPS by discarding rays that never hit the boundaries [S2]. GPU fragment shader implementation has very reduced linear cost [S2].
-- **Strengths:** Simple to implement, effective for sparse volumes [S4, unofficial].
-- **Limitations:** Less effective for dense volumes where most rays intersect the bounding box [S4, unofficial].
+*   **Time Complexity:** $O(1)$ for scalar and AABB culling per ray (intersection test). $O(N \log N)$ or $O(N)$ for heap-based culling depending on the number of bounding volumes $N$ and heap operations [S2].
+*   **Memory Complexity:** $O(1)$ for scalar/AABB. $O(N)$ for heap-based culling to store the heap [S2].
+*   **Performance:** AABB culling provides a rapid determination of a pixel's color when the data volume's projection does not affect it, reducing CPU/GPU time spent on ray location and object intersection [S3, unofficial]. Scene delimitation with bounding boxes increases FPS by discarding rays that never hit the boundaries and avoiding iterations over spheres outside the camera view frustum [S4].
+*   **Limitations:** In perspective cases, bounding volume enhancements can degrade performance for typical implicit surfaces if the overhead is high [S2].
+*   **When to use:** When the volume has a well-defined, limited extent (e.g., fog, clouds, specific objects) and rays frequently miss the volume or travel long distances through empty space [S1, unofficial][S3, unofficial][S4].
 
 ## Background
-Originating from early ray tracing and volume visualization research, bounding volumes were introduced to reduce the computational cost of locating objects [S4, unofficial]. Smits' algorithm was adapted for cloud rendering to limit ray-marching to cloud boundaries [S2]. The technique is widely used in GPU fragment shaders for real-time volumetric cloud rendering [S2].
+Bounding volume culling is a fundamental technique in computer graphics for accelerating ray tracing and ray marching. The use of bounding volumes to limit search space is one of the simplest techniques to reduce computation time for locating objects [S3, unofficial]. The concept of using bounding parallelepipeds for implicit surfaces was explored by Kay & Kajiya in 1986 [S2]. In the context of ray marching, limiting rays to a bounding volume is a common optimization to speed up rendering by dropping rays that exceed a certain distance [S1, unofficial]. Modern implementations often use GPU fragment shaders for bounding box delimitation with reduced linear cost [S4].
 
 ## Sources
 [S1] Raymarching Distance Fields (2013), http://9bitscience.blogspot.com/2013/07/raymarching-distance-fields_14.html, fetched 2026-10-26 (unofficial)
-[S2] Efficient Algorithms for Real-Time GPU Volumetric Cloud Rendering with Enhanced Geometry, https://doi.org/10.3390/sym10040125, fetched 2026-10-26
-[S3] (PDF) Sphere Tracing: A Geometric Method for the Antialiased Ray ..., https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27
-[S4] DTIC ADA215533: Sampling Scattered Data Onto Rectangular Grids for Volume Visualization, https://archive.org/details/DTIC_ADA215533, fetched 2026-10-26 (unofficial)
+[S2] Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces, https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27
+[S3] DTIC ADA215533: Sampling Scattered Data Onto Rectangular Grids for Volume Visualization, https://archive.org/details/DTIC_ADA215533, fetched 2026-10-26 (unofficial)
+[S4] Efficient Algorithms for Real-Time GPU Volumetric Cloud Rendering with Enhanced Geometry, https://doi.org/10.3390/sym10040125, fetched 2026-10-26

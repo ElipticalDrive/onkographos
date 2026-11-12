@@ -1,0 +1,260 @@
+--- v003.md
++++ v004.md
+@@ -1,91 +1,100 @@
+ # Over-relaxation Sphere Tracing
+ 
+-Also called: Over-relaxed sphere tracing, Sphere tracing with over-relaxation, Over-relaxation-based sphere tracing, Over-relaxation sphere tracing with screen-space selection, Over-relaxation Sphere Tracing with Screen-Space Intersection Selection
++Also called: Enhanced Sphere Tracing - Over Relaxation, Over-relaxation Sphere Tracing with Screen-Space Intersection Selection, Over-relaxation sphere tracing with screen-space selection, Over-relaxation-based sphere tracing, Over-relaxed sphere tracing, Sphere tracing with over-relaxation
+ 
+ ## Overview
+-Over-relaxation sphere tracing accelerates the convergence of standard sphere tracing by stepping along the ray by a factor $\omega > 1$ times the current signed distance estimate (SDE), reducing the total number of distance function evaluations [S1][S3, unofficial][S4, abstract only, unofficial]. It differs from standard sphere tracing, which steps by exactly the SDE, by trading safety for speed: if the larger step overshoots the surface (detected by checking if the new unbounding sphere is disjoint from the previous one), the algorithm falls back to standard sphere tracing ($\omega=1$) from a corrected position [S1][S3, unofficial]. Unlike [Enhanced Sphere Tracing](3811-enhanced-sphere-tracing.md), which uses historical step data to approximate surface curvature, over-relaxation uses a constant multiplier and a simple overlap test [S4, abstract only, unofficial]. It also integrates a screen-space error metric to select the best intersection candidate when the maximum iteration count is exceeded, avoiding artifacts common when simply using the last evaluated point [S1].
++Over-relaxation Sphere Tracing accelerates the standard sphere tracing algorithm by stepping further along the ray than the conservative signed distance bound (SDF) allows, controlled by a relaxation parameter $\omega \in [1, 2)$ [S1][S3, unofficial]. It reduces the number of SDF evaluations by 20–40% in typical 3D renders [S4, unofficial]. Unlike standard sphere tracing, which guarantees no surface is skipped by stepping exactly the distance estimate, this method risks overshooting the surface; it detects such overshoots via an overlap test between consecutive unbounding spheres and falls back to standard sphere tracing ($\omega=1$) if an intersection might have been missed [S1][S3, unofficial]. It also incorporates screen-space error metrics to select the best intersection candidate when the maximum iteration count is exceeded, preventing artifacts from rays grazing object edges [S1][S3, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+ *   Ray origin $o$ and normalized direction $d$.
+-*   Signed distance function $f(p)$, returning the signed distance bound at point $p$.
+-*   $t_{min}$: Minimum ray distance.
+-*   $t_{max}$: Maximum ray distance.
+-*   $\omega$: Relaxation parameter, typically in $[1, 2)$ [S1][S2, unofficial].
+-*   $MAX\_ITERATIONS$: Maximum number of steps (e.g., 80) [S1][S2, unofficial].
+-*   $pixelRadius$: Radius of a pixel at $t=1$, used as a sub-pixel accuracy threshold [S1][S2, unofficial].
+-*   $forceHit$: Boolean flag; if true, returns the best candidate even if error exceeds $pixelRadius$ or $t_{max}$ is reached [S1].
++*   Signed Distance Function $f(p)$, where $f(p) < 0$ inside the object and $f(p) > 0$ outside [S1][S3, unofficial].
++*   Parameters:
++    *   $\omega$: Relaxation parameter, typically $1.2$ [S1][S3, unofficial]. Range $[1, 2)$ [S2, S3, unofficial].
++    *   $t_{min}$: Minimum ray distance.
++    *   $t_{max}$: Maximum ray distance.
++    *   $MAX\_ITERATIONS$: Maximum number of steps, typically 80 [S1][S3, unofficial].
++    *   $pixelRadius$: Radius of a pixel at $t=1$ (half pixel size), used for early termination [S1][S3, unofficial].
++    *   $forceHit$: Boolean flag. If true, returns the best candidate even if error > $pixelRadius$ [S1][S3, unofficial].
+ 
+ **Outputs:**
+-*   $t_{hit}$: The distance to the intersection, or $INFINITY$ if no valid hit is found.
++*   Intersection distance $t$, or $INFINITY$ if no valid intersection is found within constraints.
+ 
+ **Data Structures:**
+-*   `candidate_t`: Stores the best intersection distance found so far.
+-*   `candidate_error`: Stores the screen-space error of `candidate_t`.
+-*   `previousRadius`: Stores the absolute SDE of the previous step.
+-*   `stepLength`: The distance to advance in the current step.
++*   Floating-point variables for ray position $t$, current radius, previous radius, step length, and best candidate tracking.
+ 
+ **Algorithm Steps:**
+ 1.  **Initialization:**
+     *   Set $t = t_{min}$.
+-    *   Set `candidate_error` = $INFINITY$.
+-    *   Set `candidate_t` = $t_{min}$.
+-    *   Set `previousRadius` = 0.
+-    *   Set `stepLength` = 0.
+-    *   Determine `functionSign`: If $f(o) < 0$, `functionSign` = -1; else +1. This handles the sign of the distance bound relative to the ray origin [S1][S2, unofficial].
++    *   Initialize $candidate\_t = t_{min}$ and $candidate\_error = \infty$.
++    *   Initialize $previousRadius = 0$.
++    *   Initialize $stepLength = 0$.
++    *   Determine $functionSign$: if $f(o) < 0$, $functionSign = -1$, else $+1$. This handles rays starting inside the object [S1][S3, unofficial].
+ 
+-2.  **Iteration Loop:** For $i$ from 0 to $MAX\_ITERATIONS - 1$:
+-    *   **Evaluate Distance:** Compute current position $p = o + t \cdot d$. Calculate `signedRadius` = `functionSign` $\cdot f(p)$ [S1][S2, unofficial].
+-    *   **Absolute Radius:** Compute `radius` = $| \text{signedRadius} |$ [S1][S2, unofficial].
+-    *   **Overshoot Detection (SOR Fail):** Check if over-relaxation has caused the step to skip the surface. This occurs if $\omega > 1$ AND the sum of the absolute radii of the current and previous steps is less than the length of the previous step:
+-        $$ \text{radius} + \text{previousRadius} < \text{stepLength} $$
+-        If this condition is true, `sorFail` = true; otherwise, `sorFail` = false [S1][S2, S3, unofficial].
++2.  **Iteration Loop:** For $i$ from $0$ to $MAX\_ITERATIONS - 1$:
++    *   **Evaluate SDF:** Calculate current position $p = d \cdot t + o$. Compute $signedRadius = functionSign \cdot f(p)$ and $radius = |signedRadius|$ [S1][S3, unofficial].
++    *   **Overshoot Detection (SOR Fail):** Check if the over-relaxation step would skip a surface. An overshoot is detected if:
++        $$ \omega > 1 \quad \text{AND} \quad (radius + previousRadius) < stepLength $$
++        This condition implies that the unbounding spheres of the previous step and the current step do not overlap, meaning the segment between them might contain a surface intersection [S1][S3, unofficial].
+     *   **Handle Failure or Advance:**
+-        *   **If `sorFail` is true:**
+-            *   The previous step overshot. Retreat by backing up the step length: `stepLength` = `stepLength` - $\omega \cdot \text{stepLength}$ [S1][S2, unofficial].
+-            *   Disable over-relaxation for subsequent steps: $\omega = 1$ [S1][S2, unofficial].
+-            *   *Note:* Some implementations suggest falling back to a specific position $p_{fallback} = p_i + d \cdot \delta_{i-1} \cdot (1-\omega)$, but the provided pseudocode effectively handles this by reducing the step size and resetting $\omega$ for the next iteration, which naturally performs a standard sphere tracing step from the current position $p$ [S1][S2, unofficial].
+-        *   **If `sorFail` is false:**
+-            *   Calculate the new step length: `stepLength` = `signedRadius` $\cdot \omega$ [S1][S2, unofficial].
+-            *   Update `previousRadius` = `radius` [S1][S2, unofficial].
+-            *   **Screen-Space Error:** Calculate error metric: `error` = `radius` / $t$ [S1][S2, unofficial].
+-            *   **Update Best Candidate:** If `error` < `candidate_error`, update `candidate_t` = $t$ and `candidate_error` = `error` [S1][S2, unofficial].
+-            *   **Early Termination:** If `error` < `pixelRadius`, break the loop [S1][S2, unofficial].
+-            *   **Advance Ray:** $t = t + \text{stepLength}$ [S1][S2, unofficial].
+-    *   **Post-Step Check:** If $t > t_{max}$, break the loop [S1][S2, unofficial].
++        *   **If SOR Fail is true:**
++            *   The algorithm has potentially skipped an intersection.
++            *   Retreat to the position before the over-relaxed step. The fallback position is calculated as:
++                $$ p_{fallback} = p_{prev} + d \cdot \delta_{i-1} \cdot (1 - \omega) $$
++                where $\delta_{i-1}$ is the step size of the previous iteration. In terms of $t$, this effectively reduces the current step length to revert to a standard step. The implementation simplifies this by adjusting `stepLength` and disabling over-relaxation:
++                ```python
++                stepLength -= omega * stepLength
++                omega = 1
++                ```
++                This sets $\omega=1$, forcing subsequent steps to use the conservative SDF value [S1][S3, unofficial].
++        *   **If SOR Fail is false:**
++            *   Calculate the over-relaxed step length: $stepLength = signedRadius \cdot \omega$ [S1][S3, unofficial].
++            *   Update $previousRadius = radius$ [S1][S3, unofficial].
++            *   **Screen-Space Error Calculation:** Compute the screen-space error metric:
++                $$ error = \frac{radius}{t} $$
++                This represents the unbounding sphere radius as measured in screen space [S1][S3, unofficial].
++            *   **Update Best Candidate:** If the current step is valid (!sorFail) and the error is better than the best seen so far:
++                ```python
++                if error < candidate_error:
++                    candidate_t = t
++                    candidate_error = error
++                ```
++            *   **Early Termination:** If the error is sub-pixel ($error < pixelRadius$) or the maximum distance is reached ($t > t_{max}$), break the loop [S1][S3, unofficial].
++            *   **Advance Ray:** Update $t = t + stepLength$ [S1][S3, unofficial].
+ 
+-3.  **Final Result:**
+-    *   If `candidate_error` > `pixelRadius` AND $t > t_{max}$ AND `forceHit` is false, return $INFINITY$ [S1][S2, unofficial].
+-    *   Otherwise, return `candidate_t` [S1][S2, unofficial].
++3.  **Post-Loop Result:**
++    *   If $forceHit$ is false, and either $t > t_{max}$ or $candidate\_error > pixelRadius$, return $INFINITY$ [S1][S3, unofficial].
++    *   Otherwise, return $candidate\_t$ [S1][S3, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def over_relaxation_sphere_tracing(o, d, f, t_min, t_max, omega, max_iterations, pixel_radius, force_hit):
++def over_relaxation_sphere_tracing(o, d, f, omega, t_min, t_max, max_iterations, pixel_radius, force_hit):
+     t = t_min
+     candidate_error = float('inf')
+     candidate_t = t_min
+-    previous_radius = 0.0
+-    step_length = 0.0
++    previous_radius = 0
++    step_length = 0
+     
+-    # Determine sign of the distance bound at origin
+-    # f(o) < 0 implies inside, f(o) >= 0 implies outside
+-    function_sign = -1.0 if f(o) < 0 else 1.0
+-    
++    # Determine if ray starts inside or outside
++    if f(o) < 0:
++        function_sign = -1
++    else:
++        function_sign = 1
++        
+     for i in range(max_iterations):
+-        # Evaluate signed distance at current position
+-        # Note: d is normalized, so d*t + o is the world position
+-        p = o + d * t
++        # Evaluate SDF at current position
++        p = d * t + o
+         signed_radius = function_sign * f(p)
+         radius = abs(signed_radius)
+         
+-        # Check for over-relaxation failure (overshoot)
+-        # Condition: omega > 1 AND (current_radius + previous_radius) < previous_step_length
++        # Check for overshoot (Sphere of Influence Relaxation failure)
++        # Overshoot occurs if the new sphere does not overlap the previous one
+         sor_fail = (omega > 1) and ((radius + previous_radius) < step_length)
+         
+         if sor_fail:
+-            # Fallback: reduce step length and disable over-relaxation
+-            # Effectively backing up to perform a standard step next iteration
++            # Fallback: retreat and disable over-relaxation
++            # Effectively revert to standard sphere tracing step size
+             step_length -= omega * step_length
+-            omega = 1.0
++            omega = 1
+         else:
+             # Calculate over-relaxed step size
+@@ -93,68 +102,60 @@
+             previous_radius = radius
+             
+-            # Screen-space error metric
+-            # Avoid division by zero if t is very small
++            # Calculate screen-space error
+             if t > 0:
+                 error = radius / t
+             else:
+                 error = float('inf')
+-            
+-            # Track best candidate
++                
++            # Update best candidate
+             if error < candidate_error:
+                 candidate_t = t
+                 candidate_error = error
+-            
+-            # Early termination if sub-pixel accuracy reached
+-            if error < pixel_radius:
++                
++            # Early termination if sub-pixel accuracy reached or max distance exceeded
++            if error < pixel_radius or t > t_max:
+                 break
+-            
+-            # Advance ray
+-            t += step_length
+-            
+-            # Check max distance
+-            if t > t_max:
+-                break
+-    
+-    # Final decision
+-    if (t > t_max or candidate_error > pixel_radius) and not force_hit:
++                
++        # Advance ray
++        t += step_length
++        
++    # Final check
++    if not force_hit and (t > t_max or candidate_error > pixel_radius):
+         return float('inf')
+-    else:
+-        return candidate_t
++        
++    return candidate_t
+ ```
+ 
+-**Parameters:**
+-*   $\omega$: Relaxation parameter. Range $[1, 2)$ [S1][S2, unofficial]. Typical value 1.2 provides a good balance between performance and stability; values closer to 2 increase the risk of overshooting and premature fallback [S1][S2, unofficial].
+-*   $MAX\_ITERATIONS$: Typical value 80 [S1][S2, unofficial].
+-*   $pixelRadius$: Half the pixel size at $t=1$ [S1][S2, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Overshooting:** If $\omega$ is too large, the algorithm may step over the surface. The overlap test $|f(p_{i-1})| + |f(p_i)| < \delta_{i-1}$ detects this [S1][S2, unofficial]. If not handled, rendering artifacts such as holes appear [S3, unofficial].
+-*   **Non-Lipschitz SDFs:** Numeric or non-Lipschitz distance estimators (e.g., some user-defined DEs) can make the overlap test unreliable. In such cases, fall back to $\omega=1$ or make $\omega$ tunable [S3, unofficial].
+-*   **Grazing Rays:** When a ray grazes an object, it may terminate in mid-air if the last point is used. The screen-space error metric selects the best candidate, reducing artifacts [S1].
+-*   **Branching Divergence:** Checking if the fallback sphere overlaps with the current sphere to guarantee no surface was passed requires additional state and branching, which can diminish GPU performance due to thread divergence [S1][S2, unofficial]. The provided implementation avoids this by simply resetting $\omega$ and backing up the step size.
++*   **Overshooting:** If $\omega$ is too large, the algorithm may step over thin geometry. The overlap test $(radius + previousRadius) < stepLength$ detects this, but if the SDF is not Lipschitz continuous (e.g., user-defined DEs in fractal rendering), the test may be unreliable [S4, unofficial]. In such cases, fall back to $\omega=1$ or tune $\omega$ manually [S4, unofficial].
++*   **Grazing Rays:** Rays grazing an object's edge may terminate in mid-air if the last point is used. The screen-space error metric selects the point with the smallest unbounding radius, reducing "aura" artifacts [S1][S3, unofficial].
++*   **Branching Divergence:** An optimization exists where, if the fallback position's unbounding sphere overlaps with the current position's sphere, the previous over-relaxed step is guaranteed safe, and tracing can continue from the current position without retreating. However, this adds branching and state handling, which can diminish performance on GPUs due to thread divergence [S1][S3, unofficial].
++*   **Self-Intersection:** For secondary rays, dynamic $\epsilon$ offsetting is recommended to prevent self-intersection, as the screen-space termination metric can result in intersection points with varying distances from the surface [S1][S3, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Binary Sphere Tracing](10174-binary-sphere-tracing.md)
+-An extreme variant of over-relaxation sphere tracing designed for conformally transformed Kernel-Reflection Sequences (KRSs). It uses a binary search approach (advancing by full diameter or reducing radius) instead of distance functions, requiring only binary intersection tests with spheres. It is chosen when geometries are defined by implicit kernel sequences rather than explicit SDFs.
++A trial-and-error search for unbounding spheres of conformally transformed Kernel-Reflection Sequences, acting as an extreme variant of over-relaxation that uses binary search logic instead of distance functions.
++
++### [Accelerating Sphere Tracing](13706-accelerating-sphere-tracing.md)
++Predicts the next step distance by assuming the surface is locally planar, using historical SDF values to allow larger steps than standard over-relaxation while reducing overshoot corrections.
+ 
+ ## Operating characteristics
+-*   **Performance:** Reduces the number of distance function evaluations (steps) by 20–40% in 3D renders compared to standard sphere tracing [S3, unofficial][S4, abstract only, unofficial].
++*   **Performance:** Reduces the number of SDF evaluations (steps) by 20–40% in 3D renders compared to standard sphere tracing [S4, unofficial].
+ *   **Measured Performance:**
+-    *   City scene (1280x720, NVIDIA GTX Titan): 16.829 ms (59.4 Hz) with over-relaxation vs 20.409 ms (49.0 Hz) without [S1].
+-    *   Jewel scene: 2.978 ms (335.7 Hz) with over-relaxation vs 3.472 ms (288.0 Hz) without [S1].
+-    *   Path tracing integration: 101.9 ms vs 118.3 ms for one sample per pixel [S1].
+-*   **Scaling:** Performance gains are consistent across hardware types (CPU/GPU) as the reduction is in function evaluations [S3, unofficial].
+-*   **Strengths:** Significant speedup for complex scenes; improves visual quality by allowing deeper tracing before hitting iteration limits; reduces artifacts from grazing rays.
+-*   **Limitations:** Requires careful tuning of $\omega$; larger $\omega$ leads to more frequent fallbacks; non-Lipschitz SDFs may require disabling over-relaxation; additional branching for robust fallback detection can hurt GPU performance [S1][S3, unofficial].
+-*   **When to use:** Real-time rendering of SDF-based geometry where performance is critical and SDFs are well-behaved (Lipschitz continuous).
+-*   **When not to use:** When using non-Lipschitz or user-defined distance estimators that violate the overlap test assumptions, or when strict correctness without any fallback risk is required without the overhead of additional checks.
++    *   City scene (1280x720, NVIDIA GTX Titan): 16.829 ms (59.421 Hz) with over-relaxation vs 20.409 ms (48.998 Hz) without [S1][S3, unofficial].
++    *   Jewel scene: 2.978 ms (335.744 Hz) with over-relaxation vs 3.472 ms (288.018 Hz) without [S1][S3, unofficial].
++    *   Path tracing (10 bounces, 1 sample/pixel): 101.934 ms (9.8 Hz) with $\omega=1.4$ vs 118.302 ms (8.453 Hz) without [S3, unofficial].
++*   **Scaling:** Performance gains are consistent across hardware, as the primary benefit is reduced function evaluation count [S4, unofficial].
++*   **Strengths:** Significant speedup for complex scenes; improved visual quality by handling grazing rays better via screen-space selection.
++*   **Limitations:** Requires careful tuning of $\omega$; larger $\omega$ causes earlier fallback to standard tracing, negating benefits; non-Lipschitz SDFs can break the overshoot detection [S1][S4, unofficial].
+ 
+ ## Background
+-The method was introduced by Keinert et al. in 2014 in the paper "Enhanced Sphere Tracing" [S1][S3, unofficial][S4, abstract only, unofficial]. It is part of a suite of enhancements to classical sphere tracing, including screen-space intersection selection and dynamic epsilon for self-intersection prevention. The technique is widely used in real-time ray marching for fractals and implicit surfaces [S3, unofficial][S4, abstract only, unofficial].
++The method was introduced by Keinert et al. in 2014 in the paper "Enhanced Sphere Tracing" [S1][S3, S4, unofficial]. It is part of a suite of enhancements to classical sphere tracing, including screen-space intersection selection and dynamic $\epsilon$ for self-intersection prevention. The technique is widely used in real-time ray marching, particularly in fractal rendering and GPU-based path tracing [S1][S3, S4, unofficial].
+ 
+ ## Sources
+ [S1] Enhanced Sphere Tracing, https://doi.org/10.2312/stag.20141233, fetched 2026-10-26
+-[S2] Enhanced Sphere Tracing, https://kev.town/raymarching-toolkit/media/enhanced_sphere_tracing.pdf, fetched 2026-10-27 (unofficial)
+-[S3] Over-relaxed sphere tracing for the DE raymarchers (3D: ~20–40% fewer steps), https://github.com/AloneButsober/FracturingFog/issues/1335, fetched 2026-10-27 (unofficial)
+-[S4] Enhanced Sphere Tracing | Request PDF - ResearchGate, https://www.researchgate.net/publication/265020476_Enhanced_Sphere_Tracing, fetched 2026-11-03 (abstract only, unofficial)+[S2] 要約EnhancedSphereTracing～より良いレイマーチングに向けて～, https://qiita.com/Hirai0827/items/eddcb73a1976c3088b88, fetched 2026-10-26 (unofficial)
++[S3] Enhanced Sphere Tracing, https://kev.town/raymarching-toolkit/media/enhanced_sphere_tracing.pdf, fetched 2026-10-27 (unofficial)
++[S4] Over-relaxed sphere tracing for the DE raymarchers (3D: ~20–40% fewer steps), https://github.com/AloneButUnsober/FracturingFog/issues/1335, fetched 2026-10-27 (unofficial)
++[S5] Enhanced Sphere Tracing | Request PDF - ResearchGate, https://www.researchgate.net/publication/265020476_Enhanced_Sphere_Tracing, fetched 2026-11-03 (abstract only, unofficial)

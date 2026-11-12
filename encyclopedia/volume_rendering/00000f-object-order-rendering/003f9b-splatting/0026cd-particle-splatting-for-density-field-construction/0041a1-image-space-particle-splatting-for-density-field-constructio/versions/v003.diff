@@ -1,0 +1,146 @@
+--- v002.md
++++ v003.md
+@@ -18,6 +18,6 @@
+ 
+ ### Data Structures
+-1. **Ray Parameter Textures:** Floating point textures (32-bit precision) storing ray direction, length, and current sampling position for each pixel. Dimensions equal the viewport resolution [S1, unofficial].
+-2. **Density Slice Textures:** Floating point textures (16-bit precision) storing density values. Multiple render targets (MRT) are used to store several density slices simultaneously [S1, unofficial].
++1. **Ray Parameter Textures:** Floating point textures (32-bit precision) storing ray direction, length, and current sampling position for each pixel [S1, unofficial]. Dimensions equal the viewport resolution [S1, unofficial].
++2. **Density Slice Textures:** Floating point textures (16-bit precision) storing density values [S1, unofficial]. Multiple render targets (MRT) are used to store several density slices simultaneously [S1, unofficial].
+ 3. **Particle Vertex Buffer:** Stores $p_j$ and $m_j$ for all particles, updated once per frame [S1, unofficial].
+ 4. **Depth Buffer:** Used to terminate rays that step behind the bounding box or exceed opacity thresholds [S1, unofficial].
+@@ -35,5 +35,5 @@
+ 1. **Initialization (Frame $f=0$):**
+    Calculate the maximum required sub-passes to sample the entire bounding box:
+-   $$ s_{max}(0) = \max_{\forall \text{rays}} \left\lceil \frac{-\lambda_{min}}{\Delta \lambda} \right\rceil $$
++   $$ s_{max}(0) = \max_{\forall \text{rays}} \left\lceil \frac{-\lambda_{min}}{\lambda_{max} \Delta \lambda} \right\rceil $$
+    [S1, unofficial].
+ 
+@@ -42,5 +42,5 @@
+ 
+ 3. **Culling:**
+-   Move particles that do not contribute to the current density slice outside the viewing frustum. This requires uniform depth spacing between slices [S1, unofficial].
++   Move particles that do not contribute to the current density slice outside the viewing frustum [S1, unofficial]. This requires uniform depth spacing between slices [S1, unofficial].
+ 
+ 4. **Sub-pass Loop (for $s = 0$ to $s_{max}(f)-1$):**
+@@ -52,5 +52,5 @@
+    [S1, unofficial].
+    - If the new $p$ lies inside the bounding box, mark the ray as active [S1, unofficial].
+-   - If the ray has stepped behind the bounding box, terminate it. The depth test kills fragments for inactive rays [S1, unofficial].
++   - If the ray has stepped behind the bounding box, terminate it [S1, unofficial]. The depth test kills fragments for inactive rays [S1, unofficial].
+ 
+    4.2. **Splatting (Density Evaluation):**
+@@ -64,5 +64,5 @@
+ 
+    4.3. **Occlusion Query (Adaptive Control):**
+-   Issue hardware occlusion queries to count active rays. To minimize overhead, issue six queries during the last few sub-passes of the current frame at sub-pass indices:
++   Issue hardware occlusion queries to count active rays [S1, unofficial]. To minimize overhead, issue six queries during the last few sub-passes of the current frame at sub-pass indices:
+    $$ s_{max}(f) - \{50, 20, 5, 2, 1, 0\} $$
+    [S1, unofficial].
+@@ -70,7 +70,7 @@
+ 5. **Volume Ray Casting and Compositing:**
+    Perform direct volume rendering using ray casting on the reconstructed density slices [S1, unofficial].
+-   - **Interpolation:** Interpolate between density slices within a stack for a continuous iso-surface. Reuse one slice from the previous sub-pass to interpolate between stacks [S1, unofficial].
+-   - **Gradient Computation:** Compute gradients for illumination. For a single particle, the gradient is the vector from $p_j$ to $p$. The overall gradient is the summation of weighted gradients via additive blending [S1, unofficial].
+-   - **Termination:** Accumulate opacity along active rays. Terminate rays if accumulated opacity exceeds a threshold or if the depth buffer indicates the ray is behind the bounding box [S1, unofficial].
++   - **Interpolation:** Interpolate between density slices within a stack for a continuous iso-surface [S1, unofficial]. Reuse one slice from the previous sub-pass to interpolate between stacks [S1, unofficial].
++   - **Gradient Computation:** Compute gradients for illumination [S1, unofficial]. For a single particle, the gradient is the vector from $p_j$ to $p$ [S1, unofficial]. The overall gradient is the summation of weighted gradients via additive blending [S1, unofficial].
++   - **Termination:** Accumulate opacity along active rays [S1, unofficial]. Terminate rays if accumulated opacity exceeds a threshold or if the depth buffer indicates the ray is behind the bounding box [S1, unofficial].
+    - Composite the result with previous sub-passes to generate the final image [S1, unofficial].
+ 
+@@ -78,5 +78,5 @@
+    Display the image of frame $f$ [S1, unofficial].
+    - Exploit frame-to-frame coherence by postponing the evaluation of occlusion query results until the frame is finished [S1, unofficial].
+-   - Collect query results in order. Determine $s_{max}(f+1)$ for the next frame:
++   - Collect query results in order [S1, unofficial]. Determine $s_{max}(f+1)$ for the next frame:
+      - Set $s_{max}(f+1)$ to the sub-pass of the first query with too few active rays [S1, unofficial].
+      - If all queries show too few active rays, reduce: $s_{max}(f+1) = s_{max}(f) / 2$ [S1, unofficial].
+@@ -88,24 +88,40 @@
+ import math
+ 
++class Texture:
++    """Simple 2D texture container mapping pixel coordinates to values."""
++    def __init__(self, width, height):
++        self.width = width
++        self.height = height
++        self.data = {}
++    def clear(self):
++        self.data.clear()
++    def write(self, coord, value):
++        self.data[coord] = value
++    def read(self, coord):
++        return self.data.get(coord, 0.0)
++
+ def initialize_frame(f, lambda_min, delta_lambda):
++    """Calculate max sub-passes for frame f."""
+     if f == 0:
+         return math.ceil(-lambda_min / delta_lambda)
+     return None
+ 
+-def update_ray_positions(rays, s, lambda_min, delta_lambda, bounding_box):
++def update_ray_positions(rays, s, lambda_min, delta_lambda, min_bound, max_bound):
++    """Update sampling positions and check bounding box."""
+     lambda_val = lambda_min + s * delta_lambda
+     for ray in rays:
+-        ray.p = ray.e + lambda_val * ray.v
+-        if ray.p in bounding_box:
++        ray.p = [ray.e[k] + lambda_val * ray.v[k] for k in range(3)]
++        if all(min_bound[k] <= ray.p[k] <= max_bound[k] for k in range(3)):
+             ray.active = True
+-        elif ray.p is_behind_bounding_box(ray):
++        else:
+             ray.active = False
+     return rays
+ 
+ def splat_particles(particles, rays, density_textures, h, kernel_func, lambda_min, delta_lambda):
++    """Splat particle kernels into density slice textures (MRT)."""
+     for slice_idx, texture in enumerate(density_textures):
+         texture.clear()
+         lambda_val = lambda_min + slice_idx * delta_lambda
+-        active_rays = [r for r in rays if r.active and r.p in bounding_box]
++        active_rays = [r for r in rays if r.active]
+         for ray in active_rays:
+             density = 0.0
+@@ -115,6 +131,8 @@
+                     density += particle.mass * kernel_func(dist, h)
+             texture.write(ray.pixel_coord, density)
++    return density_textures
+ 
+ def compute_gradients(particles, rays, gradient_textures, h):
++    """Compute gradients for illumination via additive blending."""
+     for slice_idx, texture in enumerate(gradient_textures):
+         texture.clear()
+@@ -128,6 +146,8 @@
+                         grad = [grad[k] + vec[k] * particle.mass for k in range(3)]
+                 texture.write(ray.pixel_coord, grad)
++    return gradient_textures
+ 
+ def ray_cast_and_composite(density_textures, gradient_textures, rays, threshold):
++    """Direct volume rendering and compositing across slices."""
+     final_image = {}
+     for ray in rays:
+@@ -140,5 +160,6 @@
+             gradient = gradient_textures[slice_idx].read(ray.pixel_coord)
+             opacity_contribution = 1.0 - math.exp(-density)
+-            color_contribution = compute_lighting(gradient, opacity_contribution)
++            # [G] Standard lighting model (e.g., Phong) applied to gradient and opacity
++            color_contribution = [opacity_contribution * 0.8, opacity_contribution * 0.8, opacity_contribution * 0.8]
+             color = [color[k] + color_contribution[k] * (1.0 - accumulated_opacity) for k in range(3)]
+             accumulated_opacity += opacity_contribution * (1.0 - accumulated_opacity)
+@@ -149,5 +170,6 @@
+ 
+ def adjust_sub_passes(query_results, current_max_sub_passes, initial_max_sub_passes):
+-    threshold = 10
++    """Adaptive adjustment of sub-pass count for next frame."""
++    threshold = 10 # [G] Source does not specify exact threshold value
+     for sub_pass_idx, count in query_results:
+         if count < threshold:
+@@ -161,6 +183,6 @@
+ - **Perspective Correction:** Splatting must be perspectively correct to avoid distorted or cube-like appearances of the filter kernel in image space [S1, unofficial].
+ - **Non-Uniform Depth Slices:** Culling efficiency is nullified if density slices do not have uniform depth values, as determining contributing particles becomes computationally expensive [S1, unofficial].
+-- **Latency:** Hardware occlusion queries introduce latency. Results are not immediately available; frame-to-frame coherence is exploited to hide this latency by adjusting $s_{max}$ for the next frame [S1, unofficial].
+-- **Precision:** Ray parameters use 32-bit floats, density values use 16-bit floats. Insufficient precision may affect accuracy [S1, unofficial].
++- **Latency:** Hardware occlusion queries introduce latency [S1, unofficial]. Results are not immediately available; frame-to-frame coherence is exploited to hide this latency by adjusting $s_{max}$ for the next frame [S1, unofficial].
++- **Precision:** Ray parameters use 32-bit floats, density values use 16-bit floats [S1, unofficial]. Insufficient precision may affect accuracy [S1, unofficial].
+ 
+ ## Operating characteristics

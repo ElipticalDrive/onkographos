@@ -1,102 +1,58 @@
 # Statistical Metrics-based Transfer Function
 
-Also called: Statistical Transfer Function, Local Statistical Metrics TF
+Also called: Joint Information TF, Statistical TF (Neighborhood)
 
 ## Overview
-This method classifies volume data by mapping voxel intensities to optical properties using local statistical metrics (such as mean and variance) computed over a neighborhood, rather than relying solely on the scalar value at the voxel center [S2, unofficial]. It addresses the problem of feature separation in regions where scalar values overlap but local statistical properties differ, offering a semi-automatic mechanism for selecting neighborhoods to extract these properties [S1, unofficial]. It is distinguished from sibling methods like the Gaussian Sum Transfer Function by its explicit use of first- and second-order local statistics (mean, variance) as the primary classification domain, enabling the separation of fine structures based on their local homogeneity or heterogeneity [S2, unofficial].
+Statistical Metrics-based Transfer Function is a classification method that maps volume data to optical properties using local statistical features—such as mean and variance—computed from a voxel's neighborhood, rather than relying solely on the voxel's scalar intensity [S2, unofficial]. It solves the problem of separating features with similar scalar values but distinct local structures (e.g., fine textures or edges) by integrating spatial context into the transfer function domain [S1, unofficial]. Unlike standard scalar-based transfer functions, it incorporates neighborhood statistics, and unlike higher-order moment analysis, it typically focuses on first and second-order statistics (mean, variance) as the primary delineation tools [S1, S2, unofficial].
 
 ## How it works
+The method extends the classification domain from a single scalar value $v$ to a multi-dimensional space defined by statistical metrics of the local neighborhood.
+
 **Inputs and Outputs:**
-*   **Input:** A 3D volume dataset $V$ where each voxel has a scalar intensity $v$. A neighborhood radius $r$ (or a dynamically changing radius) defining the local context [S2, unofficial].
-*   **Output:** A transfer function $T$ that maps the computed statistical metrics (mean $\mu$, variance $\sigma^2$, and potentially radius $r$) to opacity $\alpha$ and color $C$ [S2, unofficial].
+*   **Input:** Volume data $V$ where $V(\mathbf{x})$ is the scalar value at position $\mathbf{x}$. A neighborhood radius $r$ (or a dynamically determined radius) defining the spatial extent for statistical calculation.
+*   **Output:** Optical properties (Opacity $\alpha$, Color $C$) derived from the statistical metrics.
 
 **Data Structures:**
-1.  **Statistical Volume:** A pre-computed volume of the same dimensions as $V$, storing the local mean $\mu$ and variance $\sigma^2$ for each voxel. This requires storing at least two additional volumes (one for mean, one for variance) [S1, unofficial].
-2.  **Transfer Function Domain:** A multi-dimensional space defined by axes $(\mu, \sigma^2, r)$ [S2, unofficial].
+For each voxel $\mathbf{x}$, the method computes a feature vector $\mathbf{f}(\mathbf{x})$. The exact layout depends on the specific variant (e.g., Caban et al. vs. Patel et al.), but generally includes:
+1.  Local Mean $\mu(\mathbf{x})$: The average intensity in the neighborhood.
+2.  Local Variance $\sigma^2(\mathbf{x})$ or Standard Deviation $\sigma(\mathbf{x})$: The dispersion of intensities in the neighborhood.
+3.  (Optional) Neighborhood Radius $r(\mathbf{x})$: In semi-automatic variants, the effective radius used for calculation.
 
 **Steps:**
-1.  **Pre-computation of Statistical Metrics:** For each voxel $\mathbf{x}$ in the volume, compute the local mean $\mu(\mathbf{x})$ and variance $\sigma^2(\mathbf{x})$ over the neighborhood defined by radius $r$.
-    *   The mean is calculated as:
-        $$ \mu(\mathbf{x}) = \frac{1}{N} \sum_{\mathbf{y} \in \mathcal{N}_r(\mathbf{x})} V(\mathbf{y}) $$
-    *   The variance is calculated as:
-        $$ \sigma^2(\mathbf{x}) = \frac{1}{N} \sum_{\mathbf{y} \in \mathcal{N}_r(\mathbf{x})} (V(\mathbf{y}) - \mu(\mathbf{x}))^2 $$
-    *   Where $\mathcal{N}_r(\mathbf{x})$ is the set of voxels within distance $r$ of $\mathbf{x}$, and $N$ is the number of voxels in the neighborhood [S2, unofficial].
-2.  **Dynamic Neighborhood Selection (Optional):** In advanced implementations, the radius $r$ is not fixed but is determined dynamically or semi-automatically based on an adaptive sample selection technique to optimize feature separation [S2, unofficial].
-3.  **Transfer Function Definition:** The user defines the classification function $C(\mu, \sigma^2, r)$ using a user interface. This function maps the statistical tuple to opacity and color. Linear combinations of these metrics can be used to classify fine structures [S2, unofficial].
-4.  **Rendering:** During ray casting, for each sample point, the pre-computed statistical values are retrieved (or interpolated) and passed to the transfer function to determine the sample's contribution to the final image [S1, unofficial].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def compute_statistical_volumes(volume, radius):
-    """
-    Pre-compute mean and variance volumes.
-    volume: 3D array of scalar values.
-    radius: integer radius for the neighborhood.
-    Returns: mean_vol, var_vol (3D arrays).
-    """
-    height, width, depth = volume.shape
-    mean_vol = np.zeros((height, width, depth))
-    var_vol = np.zeros((height, width, depth))
-    
-    # Define neighborhood kernel or iteration bounds
-    # Note: Efficient implementation uses integral images or separable filters
-    # to avoid O(N*r^3) complexity. Not given in sources, assumed standard optimization.
-    
-    for x in range(height):
-        for y in range(width):
-            for z in range(depth):
-                # Get neighborhood values
-                neighbors = get_neighbors(volume, x, y, z, radius)
-                if not neighbors:
-                    continue
-                
-                # Compute Mean
-                mu = np.mean(neighbors)
-                mean_vol[x, y, z] = mu
-                
-                # Compute Variance
-                sigma_sq = np.var(neighbors)
-                var_vol[x, y, z] = sigma_sq
-                
-    return mean_vol, var_vol
-
-def classify_with_stats(mean_vol, var_vol, radius, transfer_function):
-    """
-    Apply statistical transfer function during rendering.
-    mean_vol: pre-computed mean volume.
-    var_vol: pre-computed variance volume.
-    radius: current neighborhood radius (may vary per voxel if dynamic).
-    transfer_function: callable C(mu, sigma_sq, r) -> (alpha, color).
-    Returns: rendered image.
-    """
-    # During ray casting, for each sample point (x,y,z):
-    # mu = mean_vol[x, y, z]
-    # sigma_sq = var_vol[x, y, z]
-    # alpha, color = transfer_function(mu, sigma_sq, radius)
-    # Accumulate alpha and color into the ray buffer.
-    pass
-```
+1.  **Neighborhood Definition:** Define a neighborhood $N(\mathbf{x}, r)$ around each voxel $\mathbf{x}$ with radius $r$. This can be a fixed Euclidean ball or a dynamically changing neighborhood [S2, unofficial].
+2.  **Statistical Computation:** Compute the local mean $\mu(\mathbf{x})$ and variance $\sigma^2(\mathbf{x})$ for all voxels.
+    $$ \mu(\mathbf{x}) = \frac{1}{|N(\mathbf{x}, r)|} \sum_{\mathbf{y} \in N(\mathbf{x}, r)} V(\mathbf{y}) $$
+    $$ \sigma^2(\mathbf{x}) = \frac{1}{|N(\mathbf{x}, r)|} \sum_{\mathbf{y} \in N(\mathbf{x}, r)} (V(\mathbf{y}) - \mu(\mathbf{x}))^2 $$
+    Where $|N(\mathbf{x}, r)|$ is the number of voxels in the neighborhood [S2, unofficial].
+3.  **Feature Space Mapping:** Map each voxel to a point in the statistical feature space, typically $(\mu, \sigma)$ or $(\mu, \sigma^2)$ [S2, unofficial].
+4.  **Transfer Function Design:** Define the transfer function $T(\mu, \sigma)$ (or $T(\mu, \sigma, r)$) in this multi-dimensional space. This is often done via user interaction with histograms of the statistical metrics (e.g., LH histograms) [S1, unofficial].
+5.  **Classification:** Evaluate $T(\mu(\mathbf{x}), \sigma(\mathbf{x}))$ for each sample point to determine opacity and color. Caban et al. use linear combinations of these metrics to classify fine structures [S2, unofficial]. Patel et al. allow selection based on mean, variance, and radius [S2, unofficial].
+6.  **Semi-automatic Radius Selection (Optional):** In variants by Haidacher et al., the radius $r$ is selected semiautomatically via an adaptive sample selection technique to optimize feature separation [S2, unofficial].
 
 **Parameters:**
-*   **Radius ($r$):** The size of the local neighborhood. Can be fixed or adaptive. Typical values depend on the resolution and feature size; not given in the sources.
-*   **Transfer Function:** User-defined mapping from $(\mu, \sigma^2, r)$ to optical properties.
+*   **Neighborhood Radius ($r$):** Determines the scale of local context. Fixed in basic implementations; dynamic or adaptive in advanced ones [S2, unofficial].
+*   **Statistical Metrics:** Mean and Variance are standard. Higher-order moments are not typically used in this specific family [S1, S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Noise Sensitivity:** The method performs poorly when the noise distribution in the data differs significantly from the assumed Gaussian white noise, as variance metrics are highly sensitive to non-Gaussian noise [S1, unofficial].
-*   **Boundary Conditions:** Neighbors near the volume boundaries must be handled (e.g., by clamping, wrapping, or reducing the neighborhood size). Not given in the sources.
+*   **Noise Sensitivity:** The method suffers from poor performance when the noise distribution in the data is significantly different from the assumed Gaussian white noise, as statistical metrics like variance are highly sensitive to outliers and non-Gaussian noise [S1, unofficial].
+*   **Memory Consumption:** Pre-computing statistical metrics for the entire volume requires significant memory. The pre-processing step can require triple the memory of the original volume data [S1, unofficial].
+*   **Boundary Conditions:** Voxels near the volume boundary have smaller neighborhoods, leading to biased statistical estimates. Padding or boundary handling strategies are required [G].
+
+## Subtopics
+
+### [Statistical Signatures](12205-statistical-signatures.md)
+A method for automatic transfer function specification that characterizes each voxel by the statistical properties of its local neighborhood, rather than just its scalar value. It solves the problem of identifying meaningful features (such as edges) by mapping voxels into a multi-dimensional space defined by metrics like mean and standard deviation, allowing users to select regions of interest via histograms. It differs from standard scalar-based transfer functions by incorporating spatial context, and from higher-order moment analysis by focusing on first and second-order statistics (mean, variance) as the primary delineation tool.
 
 ## Operating characteristics
-*   **Time Complexity:** The pre-computation step is $O(N \cdot r^3)$ for a naive implementation, where $N$ is the number of voxels and $r$ is the radius. Optimizations using separable filters or integral volumes can reduce this, but the sources do not specify the exact optimized complexity [S1, unofficial][S2, unofficial].
-*   **Memory Complexity:** The method requires storing the original volume plus the pre-computed mean and variance volumes. This results in a memory consumption of approximately triple the original data size [S1, unofficial].
-*   **Strengths:** Intuitive feature selection by visualizing statistical properties; effective at separating features with similar scalar values but different local statistical characteristics (e.g., texture/homogeneity) [S1, unofficial][S2, unofficial].
-*   **Limitations:** High memory overhead; sensitivity to non-Gaussian noise; computational cost of pre-computation [S1, unofficial].
-*   **When to use:** When scalar values alone are insufficient to distinguish features, and local homogeneity/heterogeneity is a distinguishing characteristic.
-*   **When not to use:** When memory is constrained or the data contains significant non-Gaussian noise [S1, unofficial].
+*   **Time Complexity:** $O(N \cdot k)$, where $N$ is the number of voxels and $k$ is the number of voxels in the neighborhood. Computing mean and variance for each voxel requires iterating over the neighborhood.
+*   **Memory Complexity:** $O(N \cdot d)$, where $d$ is the number of statistical features stored per voxel. The method suffers from very high memory consumption in pre-processing steps, requiring triple the memory of the original data [S1, unofficial].
+*   **Strengths:** Intuitive feature selection by integrating statistical information into the TF design process [S1, unofficial]. Effective at separating features with similar scalar values but different local neighborhoods (e.g., fine structures) [S2, unofficial].
+*   **Limitations:** High memory usage for pre-processing [S1, unofficial]. Poor performance with non-Gaussian noise [S1, unofficial].
+*   **When to Use:** When scalar-based classification fails to separate features that differ in texture or local structure (e.g., distinguishing fine details in medical imaging) [S2, unofficial].
+*   **When Not to Use:** When memory is constrained or the data contains significant non-Gaussian noise [S1, unofficial].
 
 ## Background
-This approach was described in references [21] and [22] by Caban et al. and Patel et al., aiming to address the complexity of traditional transfer function design by integrating statistical information [S1, unofficial]. It builds on the idea that local neighborhoods contain semantic information about the data structure (e.g., fine structures, textures) that scalar values alone do not capture [S2, unofficial]. Haidacher et al. later extended this by introducing semi-automatic radius selection [S2, unofficial].
+The method was described in references [21] and [22] [S1, unofficial]. It addresses the complexity of adjusting parameters in traditional transfer functions and reduces the unpredictability of visual results [S1, unofficial]. Variants include work by Caban et al. [10], Patel et al. [74], and Haidacher et al. [38] [S2, unofficial].
 
 ## Sources
 [S1] Context-Preserving Volume Image Exploration Using A 3D Painting Metaphor, https://doi.org/10.32920/ryerson.14646888, fetched 2026-10-26 (unofficial)

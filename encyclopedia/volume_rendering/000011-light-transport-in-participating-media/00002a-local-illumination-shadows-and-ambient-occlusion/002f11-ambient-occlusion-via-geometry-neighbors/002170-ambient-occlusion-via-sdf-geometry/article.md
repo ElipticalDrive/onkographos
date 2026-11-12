@@ -1,9 +1,9 @@
 # Ambient Occlusion via SDF/Geometry
 
-Also called: SDF-based Ambient Occlusion, GVDB Ambient Occlusion, Screen-Space Ambient Occlusion (SSAO), Disk-Based Ambient Occlusion, Monte Carlo Ambient Occlusion with Distance Mapping
+Also called: SDF-based Ambient Occlusion, GVDB Ambient Occlusion, Screen-Space Ambient Occlusion, Disk-Based Ambient Occlusion, Monte Carlo Ambient Occlusion with Distance Mapping
 
 ## Overview
-This family evaluates ambient occlusion by querying geometric representations—such as Signed Distance Fields (SDFs), volumetric density grids, screen-space depth buffers, or mesh primitives—to determine how much the local environment blocks indirect light [S1, S2, S3, S4, S5]. It differs from parent methods that rely on precomputed vertex colors or simple gradient approximations by explicitly sampling the geometry's proximity or density along specific directions to compute a visibility factor [S5].
+This family of methods estimates local ambient occlusion by querying geometric or volumetric data structures (Signed Distance Fields, density volumes, depth buffers, or mesh topology) to determine how much of the surrounding hemisphere is blocked by nearby geometry [S1, S2, S3, S4, unofficial]. Unlike parent methods that may rely on explicit neighbor lookups or screen-space heuristics without geometric depth, these techniques use explicit distance queries, ray casting, or analytical projections to approximate visibility [S5]. They are chosen when a renderer requires physically plausible shading based on scene geometry rather than screen-space artifacts or precomputed vertex data.
 
 ## Shared principles
 All methods in this family share the core mechanism of evaluating visibility or illumination at a specific point $\mathbf{p}$ within or on the boundary of a volume, based on a light source direction $\mathbf{l}$ or environment [G].
@@ -23,69 +23,38 @@ All methods in this family share the core mechanism of evaluating visibility or 
 ## Subtopics
 
 ### [SDF-based Ambient Occlusion](1881-sdf-based-ambient-occlusion.md)
-Estimates local occlusion by sampling a Signed Distance Field (SDF) along the surface normal at increasing distances, weighting closer samples more heavily to simulate ambient light blockage. It approximates ambient occlusion by using the distance field itself to simulate light occlusion based on object proximity, avoiding the unrealistic results of Screen Space Ambient Occlusion (SSAO) which relies on depth buffers and surface normals in screen space. This method is capable of producing visually pleasing results by leveraging the geometric accuracy of the SDF representation.
+SDF-based Ambient Occlusion estimates local occlusion by sampling a Signed Distance Field (SDF) along the surface normal at increasing distances, weighting closer samples more heavily to simulate ambient light blockage. Unlike Screen-Space Ambient Occlusion (SSAO), which relies on depth buffers and can produce unrealistic artifacts, this method uses the geometric proximity information inherent in the distance field to approximate how occluded a surface is from surrounding geometry. It builds on the parent method [Ambient Occlusion via SDF/Geometry](2527-ambient-occlusion-via-sdf-geometry.md) by utilizing the SDF's explicit distance queries rather than neighbor lookups or screen-space heuristics.
 
 ### [GVDB Ambient Occlusion](2193-gvdb-ambient-occlusion.md)
-Computes local occlusion at a surface point by sampling a hemisphere of directions against a volume density field, using either point sampling or ray casting with distance-based falloff. It differs from SDF-based AO by querying a volumetric density field directly rather than a signed distance function, and from SSAO by operating in world-space volume coordinates rather than screen-space depth buffers.
+GVDB Ambient Occlusion is a local illumination technique that approximates indirect lighting at a surface point within a volume by sampling a hemisphere of directions against a density field. It distinguishes itself from sibling methods by supporting two distinct sampling modes—point sampling and ray casting—allowing a trade-off between computational cost and geometric accuracy in occlusion estimation.
 
 ### [Screen-Space Ambient Occlusion (SSAO)](3980-screen-space-ambient-occlusion-ssao.md)
-Screen-Space Ambient Occlusion (SSAO) is a post-processing technique that estimates ambient occlusion by sampling points in a hemisphere around each pixel's surface position and checking if those points are occluded by geometry in the depth buffer. It is the first screen-space method for ambient occlusion, using only the Z-Buffer to compute AO at full resolution. Unlike SDF-based methods which rely on global geometric representations, SSAO relies exclusively on screen-space data (depth and normals), meaning its performance cost is independent of scene complexity and depends only on output resolution.
+Screen-Space Ambient Occlusion (SSAO) is a post-processing technique that estimates ambient occlusion by sampling points in a hemisphere around each pixel's surface position and checking if those points are occluded by geometry in the depth buffer. It was the first screen-space method for ambient occlusion, using only the Z-Buffer to compute AO at full resolution. Unlike sibling methods that rely on explicit geometry or SDFs, SSAO operates entirely on screen-space data, meaning its performance cost is independent of scene complexity and depends only on output resolution.
 
 ### [Disk-Based Ambient Occlusion](4333-disk-based-ambient-occlusion.md)
-Approximates surface geometry as a collection of disk-shaped elements at mesh vertices to compute ambient occlusion (AO) and bent normals analytically, avoiding the cost of ray casting. It distinguishes itself from SDF-based methods by operating directly on mesh primitives without voxelization or distance field construction, though it requires a two-pass approach to correct for double shadowing artifacts inherent in naive disk summation.
+Disk-Based Ambient Occlusion approximates surface visibility by modeling mesh vertices as collections of disk-shaped elements, allowing for the analytical calculation of occlusion factors without ray casting. It solves the problem of real-time ambient occlusion for dynamic geometry where precomputation is infeasible, distinguishing itself from SDF-based methods by operating directly on mesh topology rather than a volumetric grid.
 
 ### [Monte Carlo Ambient Occlusion with Distance Mapping](4335-monte-carlo-ambient-occlusion-with-distance-mapping.md)
-Computes ambient occlusion by casting rays in random directions and numerically evaluating the occlusion factor using a distance mapping function.
+This method computes the ambient occlusion factor for a point $\mathbf{p}$ by numerically integrating visibility over the hemisphere of incoming light directions using random sampling. It distinguishes itself from deterministic grid-based or screen-space approaches by relying on a distance mapping function $v(\mathbf{p}, \mathbf{l}_i)$ to evaluate occlusion along random ray directions, allowing for flexible integration with various geometric representations.
 
-#### Fake Ambient Occlusion
-**Definition**
-A simplified ambient occlusion estimation technique that approximates occlusion based on the angle between the surface normal and the scene's upward vector, rather than ray-marching for occluders. It does not reflect the influence of nearby occluders [S1, unofficial].
+### Fake Ambient Occlusion
+- **Definition:** A simplified ambient occlusion estimation technique that approximates occlusion based on the angle between the surface normal and the scene's upward vector, rather than ray-marching for occluders. It does not reflect the influence of nearby occluders [S1, unofficial].
+- **Step:** Calculate occlusion using the dot product of the surface normal $\mathbf{n}$ and the unit upwards vector $\mathbf{u}$: $\text{occlusion} = (1 - (\mathbf{n} \cdot \mathbf{u}))$. Scale the occlusion value by a scale factor $s$, clamp the result to the range $[0, 1]$, and return $1 - \text{clamp}(s \cdot \text{occlusion}, 0, 1)$ to produce the final brightness [S1, unofficial].
+- **Parameter:** $s$: A scale value used to adjust the strength of the fake ambient occlusion effect [S1, unofficial].
+- **Pitfall:** The method does not account for occlusion caused by nearby objects (occluders); it only considers self-occlusion relative to the upward direction [S1, unofficial].
 
-**Step**
-1. Calculate occlusion using the dot product of the surface normal $\mathbf{n}$ and the unit upwards vector $\mathbf{u}$: $\text{occlusion} = 1 - (\mathbf{n} \cdot \mathbf{u})$ [S1, unofficial].
-2. Scale the occlusion value by a scale factor $s$, clamp the result to the range $[0, 1]$, and return $1 - \text{clamp}(s \cdot \text{occlusion}, 0, 1)$ to produce the final brightness [S1, unofficial].
+### Hemispheric Ambient Occlusion
+- **Definition:** Calculates hemispheric ambient occlusion (0..1) from nearby terrain geometry by sampling along the normal direction, measuring how much the terrain rises relative to the sample distance [S2, unofficial].
+- **Step:** If AO is disabled or samples $\le 0$, return 1. Initialize $\text{occlusion} = 0$. Loop $i$ from 1 to $\text{samples}$: $d = (\text{aoRadius} \cdot i) / \text{samples}$. Sample point $\mathbf{s}_x = \mathbf{p}_x + \mathbf{n}_x \cdot d$, $\mathbf{s}_y = \mathbf{p}_y + \mathbf{n}_y \cdot d$, $\mathbf{s}_z = \mathbf{p}_z + \mathbf{n}_z \cdot d$. Calculate $\text{rise} = \text{heightAtExtended}(\text{field}, \mathbf{s}_x, \mathbf{s}_z) - \mathbf{s}_y$. If $\text{rise} > 0$, add $\text{clamp01}(\text{rise} / (0.9 \cdot d)) / \text{samples}$ to $\text{occlusion}$. Return $\text{clamp01}(1 - \text{occlusion} \cdot \text{aoStrength})$ [S2, unofficial].
+- **Formula:** $\text{occlusion} = \sum_{i=1}^{\text{samples}} \text{clamp01}(\text{rise}_i / (0.9 \cdot d_i)) / \text{samples}$, where $d_i = (\text{aoRadius} \cdot i) / \text{samples}$, $\text{rise}_i = \max(0, \text{height}(\mathbf{s}_{x_i}, \mathbf{s}_{z_i}) - \mathbf{s}_{y_i})$. Final $\text{AO} = \text{clamp01}(1 - \text{occlusion} \cdot \text{aoStrength})$ [S2, unofficial].
+- **Parameter:** $\text{aoSamples}$: number of samples to take for AO; $\text{aoRadius}$: maximum radius for AO sampling; $\text{aoStrength}$: multiplier for the final occlusion value [S2, unofficial].
 
-**Parameter**
-*   $s$: A scale value used to adjust the strength of the fake ambient occlusion effect [S1, unofficial].
-
-**Pitfall**
-The method does not account for occlusion caused by nearby objects (occluders); it only considers self-occlusion relative to the upward direction [S1, unofficial].
-
-#### Hemispheric Ambient Occlusion
-**Definition**
-Calculates hemispheric ambient occlusion (0..1) from nearby terrain geometry by sampling along the normal direction, measuring how much the terrain rises relative to the sample distance [S2, unofficial].
-
-**Step**
-1. If AO is disabled or samples $\le 0$, return 1. Initialize $\text{occlusion} = 0$ [S2, unofficial].
-2. Loop $i$ from 1 to $\text{samples}$:
-   a. $d = (\text{aoRadius} \cdot i) / \text{samples}$ [S2, unofficial].
-   b. Sample point $\mathbf{s}_x = \mathbf{p}_x + \mathbf{n}_x \cdot d$, $\mathbf{s}_y = \mathbf{p}_y + \mathbf{n}_y \cdot d$, $\mathbf{s}_z = \mathbf{p}_z + \mathbf{n}_z \cdot d$ [S2, unofficial].
-   c. Calculate $\text{rise} = \text{heightAtExtended}(\text{field}, \mathbf{s}_x, \mathbf{s}_z) - \mathbf{s}_y$ [S2, unofficial].
-   d. If $\text{rise} > 0$, add $\text{clamp01}(\text{rise} / (0.9 \cdot d)) / \text{samples}$ to $\text{occlusion}$ [S2, unofficial].
-3. Return $\text{clamp01}(1 - \text{occlusion} \cdot \text{aoStrength})$ [S2, unofficial].
-
-**Formula**
-$$ \text{occlusion} = \sum_{i=1}^{\text{samples}} \frac{\text{clamp01}(\text{rise}_i / (0.9 \cdot d_i))}{\text{samples}} $$
-where $d_i = (\text{aoRadius} \cdot i) / \text{samples}$ and $\text{rise}_i = \max(0, \text{height}(\mathbf{s}_{x_i}, \mathbf{s}_{z_i}) - \mathbf{s}_{y_i})$. Final AO = $\text{clamp01}(1 - \text{occlusion} \cdot \text{aoStrength})$ [S2, unofficial].
-
-**Parameter**
-*   $\text{aoSamples}$: number of samples to take for AO [S2, unofficial].
-*   $\text{aoRadius}$: maximum radius for AO sampling [S2, unofficial].
-*   $\text{aoStrength}$: multiplier for the final occlusion value [S2, unofficial].
-
-#### Exponential Decay Ambient Occlusion
-**Definition**
-An improvement over Real Ambient Occlusion that weighs samples exponentially based on their distance from the surface, giving less importance to further samples [S3, unofficial].
-
-**Step**
-1. Initialize $\text{sum}$ and $\text{maxSum}$ to 0 [S3, unofficial].
-2. Calculate the sample position $\mathbf{p}$ by moving from the surface position ($\text{pos}$) along the normal by $(i+1) \cdot \text{_AOStepSize}$ [S3, unofficial].
-3. Add the weighted distance field value at $\mathbf{p}$ to $\text{sum}$. The weight is $1 / 2^i$ [S3, unofficial].
-4. Add the weighted maximum possible distance $(i+1) \cdot \text{_AOStepSize}$ to $\text{maxSum}$. The weight is $1 / 2^i$ [S3, unofficial].
-5. Return the ratio of $\text{sum}$ to $\text{maxSum}$. If no occlusion, $\text{sum}$ equals $\text{maxSum}$, resulting in 1 [S3, unofficial].
+### Exponential Decay Ambient Occlusion
+- **Definition:** An improvement over Real Ambient Occlusion that weighs samples exponentially based on their distance from the surface, giving less importance to further samples [S3, unofficial].
+- **Step:** Initialize $\text{sum}$ and $\text{maxSum}$ to 0. Calculate the sample position $\mathbf{p}$ by moving from the surface position ($\text{pos}$) along the normal by $(i+1) \cdot \text{_AOStepSize}$. Add the weighted distance field value at $\mathbf{p}$ to $\text{sum}$. The weight is $1 / 2^i$. Add the weighted maximum possible distance $(i+1) \cdot \text{_AOStepSize}$ to $\text{maxSum}$. The weight is $1 / 2^i$. Return the ratio of $\text{sum}$ to $\text{maxSum}$ [S3, unofficial].
 
 ## Background
-Ambient occlusion via geometric queries originated as a way to approximate indirect lighting in real-time rendering and volumetric visualization. Early implementations relied on screen-space techniques like SSAO to avoid the cost of ray tracing [S2, unofficial]. Later, as Signed Distance Fields (SDFs) became popular for implicit surfaces, methods like SDF-based AO emerged to provide more geometrically accurate occlusion estimates [S1, unofficial]. Volumetric approaches, such as GVDB AO, adapted these concepts to 3D texture data, allowing for occlusion in non-surface-based media [S1, unofficial]. The family also includes simplified heuristics like "Fake Ambient Occlusion" for performance-critical applications where geometric accuracy is secondary to speed [S1, unofficial].
+Ambient Occlusion via Geometry/Neighbors methods have evolved from simple screen-space heuristics to explicit geometric queries. SSAO was introduced as a real-time solution using depth buffers [S2, unofficial]. SDF-based methods leverage the explicit distance information in Signed Distance Fields for more accurate occlusion estimation [S5]. GVDB methods extend this to volumetric density fields [S1, unofficial]. Disk-based methods target dynamic mesh topology [S1, unofficial]. Monte Carlo approaches provide a flexible integration framework using distance mapping functions [S1, unofficial]. Fake AO provides a cheap approximation based on normal orientation [S1, unofficial]. Hemispheric AO is often used in terrain rendering [S2, unofficial]. Exponential Decay AO improves realism by weighting closer samples more heavily [S3, unofficial].
 
 ## Sources
 [S1] GPU Ray Marching for Ambient Occlusion, https://www.scribd.com/document/520755804/imm6392, fetched 2026-10-28 (unofficial)

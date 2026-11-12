@@ -1,0 +1,181 @@
+--- v001.md
++++ v002.md
+@@ -8,19 +8,19 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Immutable instruction memory (shared across all cores), immutable data memory (shared across all cores), and a global storage manager.
+-*   **Output:** Frame buffer (via `pushf` instruction).
++*   **Input:** Immutable instruction memory (shared across all cores), immutable data memory (shared across all cores), and a global storage manager [S1, unofficial].
++*   **Output:** Frame buffer (via `pushf` instruction) [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Storage Manager:** Implemented as a double-ended queue (deque). It holds all non-running threads. It supports coarse-grained execution priority control [S1, unofficial].
++1.  **Storage Manager:** Implemented as a double-ended queue (deque) [S1, unofficial]. It holds all non-running threads and supports coarse-grained execution priority control [S1, unofficial].
+ 2.  **Core State:** Each core maintains:
+-    *   **Instruction Pointer (IP):** Points to the current instruction in the immutable instruction memory.
+-    *   **Mutable Registers:** 16 registers per thread.
+-    *   **DFU Stack:** A stack for arithmetic operations within the Data Flow Unit (DFU).
+-3.  **Thread State:** A thread consists of an instruction pointer and 16 mutable registers. Registers are loaded on start, saved on pause, and copied when spawning a child [S1, unofficial].
++    *   **Instruction Pointer (IP):** Points to the current instruction in the immutable instruction memory [S1, unofficial].
++    *   **Mutable Registers:** 16 registers per thread [S1, unofficial].
++    *   **DFU Stack:** A stack for arithmetic operations within the Data Flow Unit (DFU) [S1, unofficial].
++3.  **Thread State:** A thread consists of an instruction pointer and 16 mutable registers [S1, unofficial]. Registers are loaded on start, saved on pause, and copied when spawning a child [S1, unofficial].
+ 
+ **Instruction Set:**
+ *   `val`: Assigns immediate values into the DFU (currently used for assigning distance function IDs) [S1, unofficial].
+-*   `setval`: Changes the value of a register.
+-*   `pack`: Reads the value of a register.
++*   `setval`: Changes the value of a register [S1, unofficial].
++*   `pack`: Reads the value of a register [S1, unofficial].
+ *   `pushq`: Spawns a new thread. Copies all 16 registers and pushes them onto the global queue (storage manager) for later execution by any core [S1, unofficial].
+ *   `drop`: Terminates the current thread and discards all registers [S1, unofficial].
+@@ -29,31 +29,27 @@
+ 
+ **Numbered Steps:**
+-1.  **Initialization:** The storage manager is initialized as an empty double-ended queue. All cores are idle.
+-2.  **Dispatch:** The storage manager selects a core that is ready to receive a thread. If multiple cores are ready, one is chosen arbitrarily. A thread is popped from the storage manager and sent to the core [S1, unofficial].
+-3.  **Execution:** The core loads the thread's 16 registers and instruction pointer. The core executes instructions from the immutable instruction memory.
+-    *   Arithmetic operations use the DFU stack.
+-    *   Control flow is managed via `pushq`, `drop`, and `pushf`.
+-4.  **Thread Spawning (`pushq`):** When `pushq` is executed, the core copies the current state (16 registers + IP) and pushes it to the back/front of the storage manager (depending on priority logic not fully specified, but implied by deque usage) [S1, unofficial].
++1.  **Initialization:** The storage manager is initialized as an empty double-ended queue [G]. All cores are idle.
++2.  **Dispatch:** The storage manager selects a core that is ready to receive a thread [S1, unofficial]. If multiple cores are ready, one is chosen arbitrarily [S1, unofficial]. A thread is popped from the storage manager and sent to the core [S1, unofficial].
++3.  **Execution:** The core loads the thread's 16 registers and instruction pointer [S1, unofficial]. The core executes instructions from the immutable instruction memory [S1, unofficial].
++    *   Arithmetic operations use the DFU stack [S1, unofficial].
++    *   Control flow is managed via `pushq`, `drop`, and `pushf` [S1, unofficial].
++4.  **Thread Spawning (`pushq`):** When `pushq` is executed, the core copies the current state (16 registers + IP) and pushes it to the storage manager [S1, unofficial]. The current thread continues execution.
+ 5.  **Thread Termination (`drop`):** The thread is removed from the core, registers are discarded, and the core requests a new thread from the storage manager [S1, unofficial].
+-6.  **Frame Buffer Output (`pushf`):** The thread is removed from the core. The values in `r1` (pixel pointer) and `r2` (color) are written to the frame buffer. The core requests a new thread [S1, unofficial].
++6.  **Frame Buffer Output (`pushf`):** The thread is removed from the core [S1, unofficial]. The values in `r1` (pixel pointer) and `r2` (color) are written to the frame buffer [S1, unofficial]. The core requests a new thread [S1, unofficial].
+ 7.  **Distance Function Acceleration:** The `next` and `accum` instructions are used to find the minimum distance among a set of distance functions, reducing the size of individual distance function code [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode for the execution model
+-# Note: This is a conceptual representation of the hardware behavior described.
++import collections
+ 
+ class StorageManager:
+     def __init__(self):
+-        self.queue = []  # Double-ended queue
++        self.queue = collections.deque()
+ 
+     def push(self, thread_data):
+-        # thread_data is a tuple of (ip, [r0, r1, ..., r15])
+         self.queue.append(thread_data)
+ 
+     def pop(self):
+-        if self.queue:
+-            return self.queue.pop(0)
+-        return None
++        return self.queue.popleft() if self.queue else None
+ 
+ class Core:
+@@ -77,71 +73,42 @@
+     def run_thread(self):
+         while self.is_busy:
+-            instruction = self.instruction_memory[self.ip]
++            instr = self.instruction_memory[self.ip]
+             self.ip += 1
++            op = instr['op']
+ 
+-            if instruction.op == 'setval':
+-                # Set register r to value v
+-                self.registers[instruction.r] = instruction.v
+-
+-            elif instruction.op == 'pack':
+-                # Read register r to DFU stack
+-                self.dfu_stack.append(self.registers[instruction.r])
+-
+-            elif instruction.op == 'val':
+-                # Assign immediate value to DFU (for DFU ID)
+-                self.dfu_stack.append(instruction.v)
+-
+-            elif instruction.op == 'pushq':
+-                # Spawn new thread: copy registers and push to storage
+-                new_thread = (self.ip, self.registers.copy())
+-                self.storage_manager.push(new_thread)
+-                # Continue execution of current thread? 
+-                # Source implies spawning is an action, termination is separate.
+-                # Assuming current thread continues unless terminated.
+-
+-            elif instruction.op == 'drop':
+-                # Terminate and discard
++            if op == 'setval':
++                self.registers[instr['r']] = instr['v']
++            elif op == 'pack':
++                self.dfu_stack.append(self.registers[instr['r']])
++            elif op == 'val':
++                self.dfu_stack.append(instr['v'])
++            elif op == 'pushq':
++                self.storage_manager.push((self.ip, self.registers.copy()))
++            elif op == 'drop':
+                 self.is_busy = False
+                 self.registers = [0] * 16
+                 self.ip = 0
+-                # Request new thread
+-                self.execute() 
+-
+-            elif instruction.op == 'pushf':
+-                # Terminate and send r1 (pixel), r2 (color) to frame buffer
+-                pixel_ptr = self.registers[1]
+-                color = self.registers[2]
+-                frame_buffer.write(pixel_ptr, color)
++                self.execute()
++            elif op == 'pushf':
++                frame_buffer.write(self.registers[1], self.registers[2])
+                 self.is_busy = False
+                 self.registers = [0] * 16
+                 self.ip = 0
+-                # Request new thread
+                 self.execute()
+-
+-            elif instruction.op == 'next':
+-                # Accelerate min distance calculation
+-                # Built-in accumulator logic
++            elif op == 'next':
+                 pass
+-
+-            elif instruction.op == 'accum':
+-                # Built-in accumulator logic
++            elif op == 'accum':
+                 pass
+-
+             else:
+-                # Arithmetic operations using DFU stack
+-                # ...
++                # Arithmetic operations use the DFU stack. Specific instructions not given in the sources. [G]
++                pass
+ 
+ class FrameBuffer:
+     def write(self, pixel_ptr, color):
+-        # Write color to pixel_ptr
+         pass
+ 
+-# Initialization
+ storage = StorageManager()
+ fb = FrameBuffer()
+ cores = [Core(storage, instruction_mem, data_mem) for _ in range(N)]
+-
+-# Initial threads are pushed to storage manager
+-# ...
+ ```
+ 
+@@ -153,13 +120,13 @@
+ *   **Arbitrary Core Selection:** If multiple cores are ready, one is chosen arbitrarily, which may affect performance predictability [S1, unofficial].
+ *   **Instruction Predictability:** The instruction set is restrictive to make instruction memory accesses predictable [S1, unofficial].
++*   **Square Root Precision:** Calculating distances is integral to the algorithm, requiring a robust square root implementation for performance [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources. [G]
++*   **Memory Complexity:** Not given in the sources. [G]
++*   **Measured Performance:** Not given in the sources. [G]
+ *   **Strengths:** Native threading support, coarse-grained priority control via deque, predictable instruction memory access, reduced code size for distance functions via `next`/`accum` [S1, unofficial].
+ *   **Limitations:** Arbitrary core selection, potentially complex hardware implementation for storage manager and DFU [S1, unofficial].
+ *   **When to use:** When implementing a custom GPU architecture specifically optimized for Sphere Tracing with native threading requirements [S1, unofficial].
+-*   **When not to use:** When using standard SIMD GPUs or when warp-based scheduling is sufficient [S1, unofficial].
+ 
+ ## Background

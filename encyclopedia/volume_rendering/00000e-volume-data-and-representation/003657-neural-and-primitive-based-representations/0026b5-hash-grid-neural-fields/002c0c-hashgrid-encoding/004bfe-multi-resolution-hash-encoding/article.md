@@ -1,0 +1,260 @@
+# Multi-resolution Hash Encoding
+
+Also called: Instant-NGP Hash Encoding, Instant-NGP Multiresolution Hash Encoding, Multi-resolution learnable hashgrids, Multi-scale Hash Encoding, Multiresolution Dense Grid Encoding, Multiresolution Grid Encoding, NGP hash encoding
+
+## Overview
+Multi-resolution Hash Encoding (MHE) is a neural feature encoding method that maps 3D spatial coordinates to a high-dimensional feature vector using a set of trainable, sparse hash grids at multiple resolutions, enabling efficient neural rendering by replacing expensive positional encoding and large MLPs with a compact, trainable representation [S1][S3, unofficial][S11, S12]. It solves the problem of slow training times and high memory consumption associated with traditional NeRF models by allowing the encoding itself to be trained alongside a shallow network, achieving faster convergence and reduced parameter counts [S1][S3, unofficial][S11, S12]. Unlike its siblings, it relies on a fixed-size hash table structure with trilinear interpolation and a specific hash function, whereas alternatives may use simplex structures, tetrahedron querying, or global preconditioners [S1][S3, unofficial][S12].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D spatial coordinate $x \in \mathbb{R}^3$ and a viewing direction $d \in \mathbb{R}^3$ (optional, for color prediction).
+*   **Output:** A feature vector $y \in \mathbb{R}^{L \cdot F}$ (concatenated features from all levels) which is fed into a small MLP to predict density and color [S1][S3, S8, unofficial][S12].
+
+**Data Structures:**
+The encoding consists of $L$ levels of hash tables. Each level $l \in \{0, \dots, L-1\}$ has:
+*   **Resolution $N_l$:** The conceptual grid resolution for level $l$.
+*   **Hash Table Size $T$:** The capacity of the hash table (number of entries).
+*   **Feature Dimension $F$:** The size of the feature vector stored at each entry.
+*   **Feature Vector:** A learnable vector $v \in \mathbb{R}^F$ stored at each hash table index.
+
+**Parameters:**
+*   $L$: Number of hierarchical grid levels. Typical value: 16 [S8, unofficial].
+*   $N_{min}$: Coarsest resolution. Typical value: 16 [S5][S6, S8, unofficial].
+*   $N_{max}$: Finest resolution. Typical value: 2048 [S5].
+*   $T$: Hash table size. Typical value: $2^{19}$ [S8, unofficial][S12].
+*   $F$: Feature dimension. Typical value: 2 [S6, unofficial][S12].
+*   $\pi_1, \pi_2, \pi_3$: Prime numbers for hashing. $\pi_1 = 1$, $\pi_2 = 2,654,435,761$, $\pi_3 = 805,459,861$ [S8, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Calculate Resolutions:**
+    Compute the resolution $N_l$ for each level $l$ using the geometric progression between $N_{min}$ and $N_{max}$ [S5][S8, unofficial]:
+    $$ b = \left( \frac{N_{max}}{N_{min}} \right)^{\frac{1}{L-1}} $$
+    $$ N_l = \lfloor N_{min} \cdot b^l \rfloor $$
+    Note: [S5] defines $b = 2^{\frac{\log_2(N_{max}/N_{min})}{L}}$ and $N_l = \lfloor N_{min} \cdot b^l \rfloor$. [S8, unofficial] defines $b = (N_{max}/N_{min})^{1/(L-1)}$. Both result in similar exponential spacing. We use the [S8, unofficial] formulation as it is standard in Instant-NGP literature [S1, S12].
+
+2.  **Query Hash Tables for Each Level:**
+    For each level $l$ from $0$ to $L-1$:
+    a. **Grid Coordinates:** Compute the integer grid coordinates of the cell containing $x$:
+       $$ i_l = \lfloor x \cdot N_l \rfloor $$
+       $$ j_l = \lfloor x \cdot N_l \rfloor $$
+       $$ k_l = \lfloor x \cdot N_l \rfloor $$
+       (Note: $x, y, z$ components are scaled by $N_l$ and floored).
+       The eight corner indices of the cell are $(i_l + \delta_x, j_l + \delta_y, k_l + \delta_z)$ where $\delta_x, \delta_y, \delta_z \in \{0, 1\}$.
+    b. **Hashing:** Map each corner index $(i, j, k)$ to a hash table index $h$ using the spatial hash function [S8, unofficial]:
+       $$ h(i, j, k) = (i \cdot \pi_1 \oplus j \cdot \pi_2 \oplus k \cdot \pi_3) \pmod T $$
+       where $\oplus$ is bitwise XOR.
+    c. **Feature Retrieval:** Retrieve the $F$-dimensional feature vector $v_{i,j,k}$ from the hash table at level $l$ using index $h(i, j, k)$.
+    d. **Trilinear Interpolation:** Interpolate the 8 retrieved feature vectors based on the fractional part of $x \cdot N_l$ to obtain the level-specific feature vector $f_l \in \mathbb{R}^F$.
+       Let $\alpha = (x \cdot N_l) - i_l$, $\beta = (x \cdot N_l) - j_l$, $\gamma = (x \cdot N_l) - k_l$.
+       The interpolation weights are determined by the relative position within the cell. Standard trilinear interpolation is used [S1][S3, S8, unofficial][S11].
+       *Note: [S5] suggests using a second-order continuous interpolation weight function $d(x) = 6x^5 - 15x^4 + 10x^3$ to improve continuity, but standard trilinear is the primary method described in Instant-NGP [S1, S12].*
+
+3.  **Concatenation:**
+    Concatenate the feature vectors from all $L$ levels to form the final input vector $y$:
+    $$ y = [f_0; f_1; \dots; f_{L-1}] \in \mathbb{R}^{L \cdot F} $$
+
+4.  **MLP Inference:**
+    Feed $y$ (and optionally the encoded viewing direction $d$) into a small MLP to predict density $\sigma$ and color $c$ [S1][S3, S8, unofficial][S12].
+    *   **Density MLP:** $f_c = m_d(y; \Phi_d)$, $\sigma = f_c[0]$ [S8, unofficial].
+    *   **Color MLP:** $c = m_c(f_c; \Phi_c)$ [S8, unofficial].
+    *   Typical MLP architecture: 2 hidden layers with 64 neurons each, ReLU activation [S11, S12]. For NeRF synthetic datasets, a tiny network with one hidden layer and 64 neurons is used for density [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def multi_resolution_hash_encoding(x, L, N_min, N_max, T, F, pi1, pi2, pi3, hash_tables):
+    """
+    Computes multi-resolution hash encoding for a single 3D point x.
+    
+    Args:
+        x: numpy array of shape (3,), 3D coordinate.
+        L: int, number of levels.
+        N_min: float, minimum resolution.
+        N_max: float, maximum resolution.
+        T: int, hash table size.
+        F: int, feature dimension.
+        pi1, pi2, pi3: int, prime numbers for hashing.
+        hash_tables: list of numpy arrays, hash_tables[l] is the feature grid for level l.
+                     Shape: (T, F).
+    
+    Returns:
+        y: numpy array of shape (L * F,), concatenated features.
+    """
+    # Calculate resolution ratio b
+    b = (N_max / N_min) ** (1.0 / (L - 1))
+    
+    features = []
+    
+    for l in range(L):
+        # Calculate resolution for this level
+        N_l = int(np.floor(N_min * (b ** l)))
+        
+        # Compute grid coordinates for the 8 corners
+        # Scale x by resolution
+        scaled_x = x * N_l
+        
+        # Floor and ceil indices
+        ix = np.floor(scaled_x).astype(int)
+        iy = np.floor(scaled_y).astype(int) # Note: typo in variable name in thought, corrected below
+        iz = np.floor(scaled_z).astype(int)
+        
+        # Corrected:
+        ix = np.floor(scaled_x[0]).astype(int)
+        iy = np.floor(scaled_x[1]).astype(int)
+        iz = np.floor(scaled_x[2]).astype(int)
+        
+        # Fractional parts for interpolation
+        fx = scaled_x[0] - ix
+        fy = scaled_x[1] - iy
+        fz = scaled_x[2] - iz
+        
+        # Generate 8 corner indices
+        corners = []
+        for dx in [0, 1]:
+            for dy in [0, 1]:
+                for dz in [0, 1]:
+                    corners.append([ix + dx, iy + dy, iz + dz])
+        
+        # Hash each corner and retrieve features
+        corner_features = []
+        for corner in corners:
+            i, j, k = corner
+            # Hash function
+            h = (i * pi1 ^ j * pi2 ^ k * pi3) % T
+            # Retrieve feature vector
+            v = hash_tables[l][h]
+            corner_features.append(v)
+        
+        corner_features = np.array(corner_features) # Shape (8, F)
+        
+        # Trilinear Interpolation
+        # Weights for each corner based on fractional coordinates
+        # Corner order: 000, 001, 010, 011, 100, 101, 110, 111
+        # Corresponding to dx, dy, dz
+        weights = np.zeros(8)
+        weights[0] = (1-fx) * (1-fy) * (1-fz) # 000
+        weights[1] = (1-fx) * (1-fy) * fz     # 001
+        weights[2] = (1-fx) * fy * (1-fz)     # 010
+        weights[3] = (1-fx) * fy * fz         # 011
+        weights[4] = fx * (1-fy) * (1-fz)     # 100
+        weights[5] = fx * (1-fy) * fz         # 101
+        weights[6] = fx * fy * (1-fz)         # 110
+        weights[7] = fx * fy * fz             # 111
+        
+        # Interpolate
+        f_l = np.dot(weights, corner_features)
+        features.append(f_l)
+    
+    # Concatenate all level features
+    y = np.concatenate(features)
+    return y
+
+# Example usage parameters
+pi1 = 1
+pi2 = 2654435761
+pi3 = 805459861
+L = 16
+N_min = 16
+N_max = 2048
+T = 2**19
+F = 2
+
+# Initialize hash tables (random initialization)
+# In practice, initialized with U(-1e-4, 1e-4) [S12]
+hash_tables = [np.random.uniform(-1e-4, 1e-4, (T, F)) for _ in range(L)]
+
+x = np.array([0.5, 0.5, 0.5])
+y = multi_resolution_hash_encoding(x, L, N_min, N_max, T, F, pi1, pi2, pi3, hash_tables)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Hash Collisions:** At fine resolutions, $N_l^3$ may exceed $T$, leading to hash collisions. The hash function distributes indices modulo $T$ [S5][S8, unofficial].
+*   **Cache Misses:** If $T$ is too large, it exceeds the GPU L2 cache (e.g., 6 MB on RTX 3090), causing significant performance drops. Performance remains constant for $T \le 2^{19}$ [S12].
+*   **Gradient Sparsity:** Gradients are sparse when $T \gg$ BatchSize. Skipping Adam steps for zero gradients saves ~10% performance [S12].
+*   **Precision:** Hash table entries are stored at half precision (2 bytes) for performance, with a master copy in full precision for stable mixed-precision parameter updates [S12].
+*   **Boundary Conditions:** The method assumes the input space is bounded or contracted (e.g., using the mip-NeRF 360 contraction function) to handle unbounded scenes [S1, S5].
+
+## Subtopics
+
+### [Tetrahedron Property Querying via Instant-NGP](4935-tetrahedron-property-querying-via-instant-ngp.md)
+This method queries a differentiable radiance field parameterized by an Instant-NGP data structure and the mip-NeRF 360 contraction function to produce density and appearance features for individual tetrahedra. It solves the problem of mapping point-based neural fields to volume-based primitives during optimization, where attaching features directly to vertices fails due to topological changes in the Delaunay tetrahedralization. It differs from standard NeRF point querying by using tetrahedron centers (centroid or circumcenter) and incorporating a radius-based downweighting to handle geometric degeneracy.
+
+### [Multi-resolution Hash Encoding with Simplex Structure](9584-multi-resolution-hash-encoding-with-simplex-structure.md)
+Multi-resolution Hash Encoding with Simplex Structure is a neural encoding method that replaces the explicit hypercube-based grid structure of Instant-NGP with a simplex-based structure, using hash tables to store learnable feature vectors at simplex vertices across multiple resolution levels. It solves the memory inefficiency of dense grids in simplicial domains by storing only accessed vertices, avoiding the overhead of explicit ordering for unused vertices. It sets itself apart from standard Instant-NGP by using barycentric interpolation within skewed simplices rather than trilinear interpolation within hypercubes.
+
+### [Global Preconditioner for Encoder-Induced Metric](11747-global-preconditioner-for-encoder-induced-metric.md)
+The Global Preconditioner for Encoder-Induced Metric is a fixed linear transformation applied to the input space of a HashGrid encoding to isotropize the average metric induced by the encoder. It solves the problem of anisotropic feature scaling caused by the discrete, multi-resolution grid structure, ensuring that all spatial directions are treated equally on average without globally rescaling the volume. Unlike adaptive preconditioners, it uses a closed-form solution derived from the symmetrized average metric of the canonical cell, setting apart from siblings by providing a static, volume-preserving correction that reduces the condition number of the encoder-induced metric to 1 for the average case.
+
+### DWTNeRF
+DWTNeRF is a unified framework for few-shot Neural Radiance Fields (NeRF) that builds on [Standard Multi-resolution Hash Encoding](13152-standard-multi-resolution-hash-encoding.md) (Instant-NGP) to enable fast training from sparse views [S1]. It distinguishes itself by introducing a Discrete Wavelet Transform (DWT) loss to explicitly prioritize low-frequency learning and multi-head attention modules for cross-branch interactions, avoiding architectural changes to the base MLP that typically degrade performance in Instant-NGP [S1].
+
+### [Standard Multi-resolution Hash Encoding](13152-standard-multi-resolution-hash-encoding.md)
+Standard Multi-resolution Hash Encoding maps 3D spatial coordinates to a high-dimensional feature vector using a set of trainable, sparse hash grids at multiple resolutions, enabling efficient neural rendering by replacing expensive positional encoding and large MLPs with a compact, trainable representation. It solves the problem of slow training times and high memory consumption associated with traditional NeRF models by allowing the encoding itself to be trained alongside a shallow network, achieving faster convergence and reduced parameter counts. Unlike its siblings, it relies on a fixed-size hash table structure with trilinear interpolation and a specific hash function, whereas alternatives may use simplex structures, tetrahedron querying, or global preconditioners.
+
+### [MF-NeRF Mixed-Feature Hash Encoding](13261-mf-nerf-mixed-feature-hash-encoding.md)
+MF-NeRF is a memory-efficient neural radiance field framework that reduces memory usage and training time by sharing scene features across consecutive resolution grids via a shared hash table. Unlike [Standard Multi-resolution Hash Encoding](13152-standard-multi-resolution-hash-encoding.md) which assigns dedicated grid sizes to different resolution levels, MF-NeRF mixes multiple grids into a single hash table to learn combined coarse and fine abstracted features, assuming that overlapping grids in the same radiance field exhibit analogous feature distributions.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Memory:** The memory usage is dominated by the hash tables. Total encoding parameters are $L \cdot T \cdot F$. For $T=2^{19}$ and $L=16$, encoding parameters are 12.6 M, which is 1,191× larger than weight parameters (10k) [S8, unofficial]. Training requires more than twelve times as much video memory as rendering due to intermediate activations and Adam optimizer statistics [S4].
+*   **Time:** Training time is significantly reduced compared to vanilla NeRF. Instant-NGP achieves a 1000-10000x training speedup, enabling convergence in 2-5 minutes on a single GPU [S1][S10, unofficial]. Rendering speedup is > 3000× compared to the original NeRF [S10, unofficial].
+
+**Measured Performance:**
+*   **Hardware:** Tested on NVIDIA A100 GPU [S1, S12].
+*   **Resolution:** 1080p [S1, S12].
+*   **Speed:** Instant-NGP renders at 2.4 +- 0.4 FPS on an A100 GPU at 1080p [S1]. This is 12x faster than NeRF (0.2 FPS) but 28x slower than 3DGS (68.4 FPS) [S1].
+*   **Quality:** On the NeRF Synthetic (Blender) dataset, Instant-NGP achieved PSNR = 32.6 +- 0.4 dB [S1]. On the Mip-NeRF 360 unbounded dataset, it achieved PSNR = 26.4 +- 0.6 dB [S1].
+
+**Scaling:**
+*   Performance remains roughly constant for $T \le 2^{19}$. Beyond this, performance drops significantly due to the 6 MB L2 cache limit on NVIDIA RTX 3090, where $2 \cdot T \cdot F > 6 \cdot 2^{20}$ bytes [S12].
+*   Allocating memory space for hash tables and cache buffering that exceeds computer cache memory significantly increases training time due to a greatly increased cache miss ratio, without improving rendering quality [S8, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Extremely fast training and rendering compared to vanilla NeRF. High-quality reconstruction with sharp details. Efficient use of GPU hardware via hash table lookups [S1, S7, S12].
+*   **Limitations:** Moderate surface accuracy compared to SDF-based methods like NeuS because it uses a faster density representation rather than explicit surface geometry [S1]. Sensitive to soft tissues in medical images, which may appear less detailed or slightly blurred [S7].
+
+**When to Use:**
+*   Use when fast training and real-time rendering are required, and moderate surface accuracy is acceptable [S1].
+*   Suitable for rapid prototyping and applications where immediate visual feedback is required during acquisition [S1].
+
+**When Not to Use:**
+*   Use when high surface accuracy is critical (e.g., NeuS) [S1].
+*   Use when real-time rendering at > 60 FPS is required (e.g., 3DGS) [S1].
+
+## Background
+**Origin:**
+Multi-resolution Hash Encoding was introduced in the paper "Instant Neural Graphics Primitives" by Müller et al. in 2022 [S1][S6, unofficial][S12]. It was designed to address the slow training and rendering speeds of Neural Radiance Fields (NeRF) by replacing the large, deep MLP with a multi-resolution hash-encoded feature grid [S1][S3, unofficial].
+
+**History and Development:**
+The method leverages GPU hash table lookup operations, which are highly optimized for modern hardware, to reduce MLP depth and width substantially [S1]. It has become a standard component in many modern neural rendering frameworks due to its efficiency [S1][S3, unofficial][S12]. Variants and extensions include MF-NeRF, DWTNeRF, and various simplex-based or tetrahedron-based adaptations [S1][S3, S8, unofficial][S12][S17, S18, S19, S20, unofficial][S21].
+
+**Usage:**
+It is used in various contexts, including agricultural 3D reconstruction [S9], medical image volume reconstruction [S7], and general neural rendering [S1][S3, unofficial][S12].
+
+## Sources
+[S1] Neural Rendering Techniques, https://doi.org/10.5281/zenodo.19614729, fetched 2026-10-26
+[S2] Volume Feature Rendering for Fast Neural Radiance Field Reconstruction, https://doi.org/10.52202/075280-2853, fetched 2026-10-26
+[S3] From reconstruction to reasoning : neural radiance fields for comprehensive 3D scene understanding, https://theses.hal.science/tel-05693528v1, fetched 2026-10-26 (unofficial)
+[S4] MERF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes, https://doi.org/10.1145/3592426, fetched 2026-10-26
+[S5] Multi-scale hash encoding based neural geometry representation, https://doi.org/10.1007/s41095-023-0340-x, fetched 2026-10-26
+[S6] Nvidia – learning representations of positions in a 3D scene [pdf], https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf, fetched 2026-10-26 (unofficial)
+[S7] The Adaption of Recent New Concepts in Neural Radiance Fields and Their Role for High-Fidelity Volume Reconstruction in Medical Images., https://doi.org/10.3390/s24185923, fetched 2026-10-26
+[S8] MF-NeRF: Memory Efficient NeRF with Mixed-Feature Hash Table, https://core.ac.uk/download/564091854.pdf, fetched 2026-10-27 (unofficial)
+[S9] High-fidelity 3D Reconstruction of Plants using Neural Radiance Field, https://arxiv.org/abs/2311.04154v1, fetched 2026-10-27
+[S10] NEPHELE: A Neural Platform for Highly Realistic Cloud Radiance Rendering, https://arxiv.org/abs/2303.04086v1, fetched 2026-10-27 (unofficial)
+[S11] MixRT: Mixed Neural Representations For Real-Time NeRF Rendering, https://doi.org/10.1109/3dv62453.2024.00087, fetched 2026-10-27
+[S12] Instant Neural Graphics Primitives with a Multiresolution ..., https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Mueller22.pdf, fetched 2026-10-28
+[S13] UE4-NeRF: Neural Radiance Field for Real-Time Rendering of Large-Scale Scene, https://doi.org/10.48550/arXiv.2310.13263, fetched 2026-10-29
+[S14] Learning Neural Volumetric Representations of Dynamic Humans in Minutes, https://doi.org/10.1109/cvpr52729.2023.00846, fetched 2026-10-30
+[S15] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)
+[S16] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31
+[S17] Low-Cost Neural Radiance Fields, https://doi.org/10.48550/arxiv.2605.09312, fetched 2026-10-26 (unofficial)
+[S18] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
+[S19] Neural rendering enables dynamic tomography, https://doi.org/10.48550/arxiv.2410.20558, fetched 2026-10-26 (unofficial)
+[S20] DWTNeRF: Boosting Few-shot Neural Radiance Fields via Discrete Wavelet Transform, https://arxiv.org/abs/2501.12637v3, fetched 2026-10-27 (unofficial)
+[S21] Vanishing Point Aided Hash-Frequency Encoding for Neural Radiance Fields (NeRF) from Sparse 360°Input, https://doi.org/10.1109/ismar59233.2023.00131, fetched 2026-10-27

@@ -3,220 +3,236 @@
 Also called: View Frustum Culling, Frustum Culling for Chunk Rendering, Frustum Culling for Chunk Visibility, Frustum and Proximity Culling, ToF View Frustum Culling, markVisible
 
 ## Overview
-Frustum culling is a visibility culling technique that reduces rendering load by identifying and excluding geometry, chunks, or voxels that lie outside the camera's view frustum [S2, S3, unofficial]. It solves the problem of unnecessary computation for primitives that do not contribute to the final image [S3, unofficial]. Unlike [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md), which handles depth-based occlusion, or [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md), which handles ray integration termination, frustum culling operates on spatial bounds to reject entire regions before they enter the rendering pipeline [S3, unofficial][S4]. It is often combined with [Proximity Culling](6289-adaptive-multi-step-empty-voxel-skipping.md) to manage data loading, though implementations may face accuracy issues when mixing these strategies [S2, unofficial].
+Frustum culling is a visibility culling technique that reduces rendering load by rejecting geometry, chunks, or primitives that lie outside the camera's view frustum or beyond a specified proximity threshold [S2, S3, unofficial]. It serves as a primary filter in image-order rendering pipelines to avoid unnecessary computation for objects not visible to the user [S3, unofficial]. Unlike [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md) which handles hidden surface removal, or [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md) which stops ray traversal, frustum culling operates at a coarser level to exclude entire data structures or bounding volumes from the rendering pipeline entirely [S2, S3, unofficial].
 
 ## How it works
-**Inputs:**
-- Camera parameters: View matrix ($V$), Projection matrix ($P$), Near plane distance ($n$), Far plane distance ($f$) [S1, S6, unofficial].
-- Scene representation: A set of bounding volumes (spheres, boxes, or chunks) defined by center $c$ and radius $r$ (or min/max extents) [S3, S5, unofficial].
-- Optional: Hierarchical spatial structure (e.g., octree, DAG) for accelerated traversal [S3, unofficial][S4].
+The method determines the visibility of spatial entities (chunks, blocks, or segments) by testing their bounding volumes against the planes defining the camera's view frustum.
 
-**Outputs:**
-- A boolean mask or list of visible primitives/chunks [S1, S5, unofficial].
-- In hierarchical structures, a subset of nodes marked as "visible" or "intersecting" [S3, S6, unofficial].
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   Entity positions/bounding volumes (e.g., chunk centers, block bounding spheres, segment bounds) [S1, S5, unofficial].
+    *   View matrix ($V$) and Projection matrix ($P$) defining the camera [S1, unofficial].
+    *   Near plane distance ($n$) and Far plane distance ($f$) [S1, unofficial].
+    *   Optional: Camera FOV, aspect ratio, and spherical coordinates for initialization [S6, unofficial].
+*   **Outputs:**
+    *   A boolean tensor or list indicating which entities are visible [S1, unofficial].
+    *   A subset of active blocks/segments to be processed in subsequent stages [S5, unofficial][S4].
 
 **Data Structures:**
-- **Frustum Planes:** Six planes derived from the combined projection and view matrices ($P \times V$). Each plane is defined by a normal vector $\mathbf{n}_i$ and a distance $d_i$ from the origin [S3, S5, unofficial].
-- **Bounding Volumes:**
-  - Sphere: Center $\mathbf{c} = (x, y, z)$, Radius $r$ [S5, unofficial].
-  - Axis-Aligned Bounding Box (AABB): Min corner $\mathbf{b}_{min}$, Max corner $\mathbf{b}_{max}$ [S6, unofficial].
-  - Chunk: Often represented by a center point generated during map loading [S2, unofficial].
+*   **Bounding Volumes:** Entities are typically represented by simple bounding volumes to accelerate intersection tests. Common choices include:
+    *   **Spheres:** Defined by center $c_k$ and radius $r_k$ [S5, unofficial].
+    *   **Axis-Aligned Bounding Boxes (AABBs):** Defined by min/max corners [S6, unofficial].
+    *   **Chunks:** Represented by their center point, often calculated during map loading [S2, unofficial].
+*   **Frustum Planes:** The view frustum is defined by six planes (Left, Right, Bottom, Top, Near, Far). These are typically extracted from the combined View-Projection matrix ($VP = P \times V$) [S3, S6, unofficial].
 
 **Algorithm Steps:**
 
-1. **Extract Frustum Planes:**
-   Compute the six planes of the view frustum from the combined matrix $M = P \times V$. For a perspective camera, the planes are extracted from the rows of $M$ [S3, S6, unofficial].
-   - Left, Right, Bottom, Top, Near, Far.
-   - Normalize each plane equation $Ax + By + Cz + D = 0$ to ensure $\sqrt{A^2+B^2+C^2}=1$ [S3, unofficial].
+1.  **Frustum Extraction:** Compute the six clipping planes of the view frustum from the view and projection matrices. For a perspective camera, the planes are derived from the rows of the $VP$ matrix [S3, S6, unofficial].
+    *   *Note:* In helper implementations, the frustum is explicitly computed from `projectionMatrix * matrixWorldInverse` [S6, unofficial].
 
-2. **Define Bounding Volume Test:**
-   For each primitive or chunk with bounding volume $B$:
-   - If $B$ is a sphere with center $\mathbf{c}$ and radius $r$:
-     Calculate the signed distance $d$ from $\mathbf{c}$ to each frustum plane.
-     The sphere is **inside** (visible) if $d \ge -r$ for all six planes [S5, unofficial].
-     The sphere is **outside** (culled) if $d < -r$ for any plane [S5, unofficial].
-   - If $B$ is an AABB with min $\mathbf{b}_{min}$ and max $\mathbf{b}_{max}$:
-     For each plane with normal $\mathbf{n}$ and distance $D$:
-     Determine the corner of the box most distant in the direction of $-\mathbf{n}$.
-     If that corner's distance to the plane is less than 0, the box is outside [S3, S6, unofficial].
+2.  **Bounding Volume Test:** For each entity $k$ with bounding volume $B_k$:
+    *   **Sphere Test:** If the entity is represented by a sphere with center $c_k$ and radius $r_k$, test against each of the 6 frustum planes. Let $d$ be the signed distance from the sphere center $c_k$ to a plane with normal $\mathbf{n}$ and offset $w$ (where the plane equation is $\mathbf{n} \cdot \mathbf{x} + w = 0$).
+        *   The sphere is **outside** (culled) if $d < -r_k$ for any plane [S5, unofficial].
+        *   The sphere is **inside** (kept) if $d \ge -r_k$ for all planes.
+        *   Mathematically, the active block set $\mathcal{K}_t$ for a camera batch $\mathcal{B}_t$ is:
+            $$ \mathcal{K}_t = \bigcup_{c \in \mathcal{B}_t} \{k \mid \text{visible}(k, c)\} $$
+            where $\text{visible}(k, c)$ is true if the sphere intersects the frustum [S5, unofficial].
+    *   **Box Test:** If the entity is an AABB, check if the box intersects the frustum. If the box is completely outside any single plane, it is culled [S3, S6, unofficial].
+    *   **Point/Center Test:** In some chunk-based systems, visibility is determined solely by the chunk center. If the center is outside the frustum, the chunk is culled [S2, unofficial].
 
-3. **Hierarchical Traversal (Optional):**
-   If using a tree structure (e.g., Octree, DAG):
-   - Test the parent node's bounding volume against the frustum.
-   - If the parent is completely outside, discard all descendants [S3, unofficial].
-   - If the parent is completely inside, mark all descendants as visible [S3, unofficial].
-   - If intersecting, recurse to children [S3, unofficial].
-   - In DAG-based segment rendering, reject segments outside the frustum early to prevent unnecessary refinement [S4].
+3.  **Hierarchical Skipping (Optional):** If the data is organized in a hierarchy (e.g., Octree, DAG):
+    *   Test the parent node's bounding volume.
+    *   If the parent is completely outside the frustum, all descendants are culled without further testing [S3, unofficial].
+    *   If the parent is completely inside, all descendants are marked visible [S3, unofficial].
+    *   If the parent intersects, recurse to children [S3, unofficial].
 
-4. **Proximity Check (Optional/Combined):**
-   - Calculate Euclidean distance from camera to chunk center.
-   - Cull if distance $> D_{max}$ [S2, unofficial].
-   - Note: Some implementations cannot use frustum and proximity culling simultaneously due to mutual exclusivity in their current design [S2, unofficial].
+4.  **Proximity Culling (Variant):** In addition to angular frustum bounds, a distance-based cutoff can be applied. Entities with Euclidean distance from the camera center greater than a threshold $D_{max}$ are culled [S2, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def extract_frustum_planes(view_matrix, proj_matrix, near, far):
-    """
-    Extracts 6 planes from the combined projection and view matrices.
-    Returns list of tuples (normal_x, normal_y, normal_z, distance).
-    """
-    # Combined matrix M = P * V
-    # Planes are extracted from rows of M
-    # Plane equation: Ax + By + Cz + D = 0
-    # Left, Right, Bottom, Top, Near, Far
-    
-    planes = []
-    # Simplified extraction logic for perspective projection
-    # Row i of M gives plane coefficients
-    for i in range(6):
-        # Extract plane from M
-        # Left:  M[3] + M[0]
-        # Right: M[3] - M[0]
-        # Bottom: M[3] + M[1]
-        # Top:    M[3] - M[1]
-        # Near:   M[3] + M[2]
-        # Far:    M[3] - M[2]
-        
-        if i == 0: # Left
-            p = [view_matrix[0][0] + proj_matrix[0][3], 
-                 view_matrix[1][0] + proj_matrix[1][3], 
-                 view_matrix[2][0] + proj_matrix[2][3], 
-                 view_matrix[3][0] + proj_matrix[3][3]]
-        elif i == 1: # Right
-            p = [view_matrix[0][0] - proj_matrix[0][3], 
-                 view_matrix[1][0] - proj_matrix[1][3], 
-                 view_matrix[2][0] - proj_matrix[2][3], 
-                 view_matrix[3][0] - proj_matrix[3][3]]
-        elif i == 2: # Bottom
-            p = [view_matrix[0][1] + proj_matrix[0][3], 
-                 view_matrix[1][1] + proj_matrix[1][3], 
-                 view_matrix[2][1] + proj_matrix[2][3], 
-                 view_matrix[3][1] + proj_matrix[3][3]]
-        elif i == 3: # Top
-            p = [view_matrix[0][1] - proj_matrix[0][3], 
-                 view_matrix[1][1] - proj_matrix[1][3], 
-                 view_matrix[2][1] - proj_matrix[2][3], 
-                 view_matrix[3][1] - proj_matrix[3][3]]
-        elif i == 4: # Near
-            p = [view_matrix[0][2] + proj_matrix[0][3], 
-                 view_matrix[1][2] + proj_matrix[1][3], 
-                 view_matrix[2][2] + proj_matrix[2][3], 
-                 view_matrix[3][2] + proj_matrix[3][3]]
-        elif i == 5: # Far
-            p = [view_matrix[0][2] - proj_matrix[0][3], 
-                 view_matrix[1][2] - proj_matrix[1][3], 
-                 view_matrix[2][2] - proj_matrix[2][3], 
-                 view_matrix[3][2] - proj_matrix[3][3]]
-        
-        # Normalize
-        length = sqrt(p[0]**2 + p[1]**2 + p[2]**2)
-        planes.append((p[0]/length, p[1]/length, p[2]/length, p[3]/length))
-    return planes
+import math
 
-def sphere_frustum_test(sphere_center, sphere_radius, frustum_planes):
+def extract_frustum_planes(view_proj_matrix):
     """
-    Tests if a sphere is inside the frustum.
+    Extracts 6 planes from a 4x4 View-Projection matrix.
+    Returns list of tuples (normal_x, normal_y, normal_z, w).
+    Plane equation: n.x + n.y + n.z + w = 0
+    """
+    planes = []
+    # Left plane
+    planes.append((
+        view_proj_matrix[3][0] + view_proj_matrix[0][0],
+        view_proj_matrix[3][1] + view_proj_matrix[0][1],
+        view_proj_matrix[3][2] + view_proj_matrix[0][2],
+        view_proj_matrix[3][3] + view_proj_matrix[0][3]
+    ))
+    # Right plane
+    planes.append((
+        view_proj_matrix[3][0] - view_proj_matrix[0][0],
+        view_proj_matrix[3][1] - view_proj_matrix[0][1],
+        view_proj_matrix[3][2] - view_proj_matrix[0][2],
+        view_proj_matrix[3][3] - view_proj_matrix[0][3]
+    ))
+    # Bottom plane
+    planes.append((
+        view_proj_matrix[3][0] + view_proj_matrix[1][0],
+        view_proj_matrix[3][1] + view_proj_matrix[1][1],
+        view_proj_matrix[3][2] + view_proj_matrix[1][2],
+        view_proj_matrix[3][3] + view_proj_matrix[1][3]
+    ))
+    # Top plane
+    planes.append((
+        view_proj_matrix[3][0] - view_proj_matrix[1][0],
+        view_proj_matrix[3][1] - view_proj_matrix[1][1],
+        view_proj_matrix[3][2] - view_proj_matrix[1][2],
+        view_proj_matrix[3][3] - view_proj_matrix[1][3]
+    ))
+    # Near plane
+    planes.append((
+        view_proj_matrix[3][0] + view_proj_matrix[2][0],
+        view_proj_matrix[3][1] + view_proj_matrix[2][1],
+        view_proj_matrix[3][2] + view_proj_matrix[2][2],
+        view_proj_matrix[3][3] + view_proj_matrix[2][3]
+    ))
+    # Far plane
+    planes.append((
+        view_proj_matrix[3][0] - view_proj_matrix[2][0],
+        view_proj_matrix[3][1] - view_proj_matrix[2][1],
+        view_proj_matrix[3][2] - view_proj_matrix[2][2],
+        view_proj_matrix[3][3] - view_proj_matrix[2][3]
+    ))
+    
+    # Normalize planes
+    normalized_planes = []
+    for p in planes:
+        length = math.sqrt(p[0]**2 + p[1]**2 + p[2]**2)
+        normalized_planes.append((p[0]/length, p[1]/length, p[2]/length, p[3]/length))
+        
+    return normalized_planes
+
+def sphere_frustum_intersection(center, radius, planes):
+    """
+    Tests if a sphere intersects the frustum defined by planes.
     Returns True if visible, False if culled.
     """
-    cx, cy, cz = sphere_center
-    for (nx, ny, nz, d) in frustum_planes:
+    for (nx, ny, nz, w) in planes:
         # Signed distance from center to plane
-        dist = nx * cx + ny * cy + nz * cz + d
-        if dist < -sphere_radius:
+        dist = center[0]*nx + center[1]*ny + center[2]*nz + w
+        # Cull if distance is less than negative radius
+        if dist < -radius:
             return False
     return True
 
-def aabb_frustum_test(aabb_min, aabb_max, frustum_planes):
+def frustum_cull_chunks(chunks, view_matrix, proj_matrix, near, far):
     """
-    Tests if an AABB is inside the frustum.
-    Returns True if visible, False if culled.
+    Culls chunks based on view frustum.
+    chunks: list of dicts with 'center' (x,y,z) and 'radius' (or size)
     """
-    for (nx, ny, nz, d) in frustum_planes:
-        # Find the corner of the box most distant in direction -normal
-        # If normal component is positive, min corner is further in negative direction
-        # If normal component is negative, max corner is further in negative direction
+    # Combine view and projection matrices
+    # Note: In standard OpenGL/DirectX math, VP = P * V
+    # Implementation of matrix multiplication omitted for brevity, 
+    # assuming a function multiply_matrices(A, B) exists.
+    vp_matrix = multiply_matrices(proj_matrix, view_matrix)
+    
+    planes = extract_frustum_planes(vp_matrix)
+    
+    visible_chunks = []
+    for chunk in chunks:
+        center = chunk['center']
+        radius = chunk.get('radius', chunk.get('size', 0) / 2) # [G] Default radius assumption
         
-        if nx > 0:
-            x = aabb_min[0]
-        else:
-            x = aabb_max[0]
+        if sphere_frustum_intersection(center, radius, planes):
+            visible_chunks.append(chunk)
             
-        if ny > 0:
-            y = aabb_min[1]
-        else:
-            y = aabb_max[1]
+    return visible_chunks
+
+def cull_octree_helper(octree, camera_fov, camera_aspect, camera_near, camera_far):
+    """
+    Helper logic for visualizing intersecting octants (from [S6, unofficial]).
+    """
+    # 1. Construct camera frustum
+    # In Three.js style: frustum = projectionMatrix * matrixWorldInverse
+    # Here we assume we have the 6 planes extracted.
+    planes = extract_frustum_planes(camera_fov, camera_aspect, camera_near, camera_far)
+    
+    intersections = []
+    
+    # 2. Traverse octree
+    stack = [octree.root]
+    while stack:
+        node = stack.pop()
+        bounds = node.get_bounds() # Returns min, max vectors
+        
+        # 3. Check intersection
+        if not box_frustum_intersection(bounds.min, bounds.max, planes):
+            continue # Cull this octant
             
-        if nz > 0:
-            z = aabb_min[2]
-        else:
-            z = aabb_max[2]
+        intersections.append(node)
+        
+        # Add children to stack if not leaf
+        if not node.is_leaf():
+            stack.extend(node.children)
             
-        dist = nx * x + ny * y + nz * z + d
+    return intersections
+
+def box_frustum_intersection(box_min, box_max, planes):
+    """
+    Tests if an AABB intersects the frustum.
+    Returns True if intersecting, False if completely outside.
+    """
+    for (nx, ny, nz, w) in planes:
+        # Determine the corner of the box most likely to be outside
+        # If nx > 0, min.x is the farthest in negative direction
+        # If nx < 0, max.x is the farthest in negative direction
+        if nx >= 0:
+            dist = box_min[0]*nx + box_min[1]*ny + box_min[2]*nz + w
+        else:
+            dist = box_max[0]*nx + box_max[1]*ny + box_max[2]*nz + w
+            
         if dist < 0:
             return False
     return True
-
-def cull_chunks(chunks, view_matrix, proj_matrix, near, far):
-    """
-    Main culling function.
-    chunks: list of dicts with 'center' (x,y,z) and 'radius' (or 'min', 'max')
-    Returns list of visible chunks.
-    """
-    frustum_planes = extract_frustum_planes(view_matrix, proj_matrix, near, far)
-    visible_chunks = []
-    
-    for chunk in chunks:
-        if 'radius' in chunk:
-            if sphere_frustum_test(chunk['center'], chunk['radius'], frustum_planes):
-                visible_chunks.append(chunk)
-        elif 'min' in chunk and 'max' in chunk:
-            if aabb_frustum_test(chunk['min'], chunk['max'], frustum_planes):
-                visible_chunks.append(chunk)
-                
-    return visible_chunks
 ```
 
 **Parameters:**
-- Camera FOV: 20 degrees (example from helper implementation) [S6, unofficial].
-- Aspect Ratio: 1.77 (example from helper implementation) [S6, unofficial].
-- Near Plane: 0.5 (example from helper implementation) [S6, unofficial].
-- Far Plane: 5.0 (example from helper implementation) [S6, unofficial].
-- Proximity Distance: Not specified, but recommended to be set just a chunk away from the far vision boundary for better loading effects [S2, unofficial].
+*   **Camera FOV:** Typically 20 degrees in helper visualizations [S6, unofficial]. Standard rendering uses wider FOVs (e.g., 60-90 degrees).
+*   **Near/Far Planes:** Defined by the camera setup (e.g., near 0.5, far 5 in helpers [S6, unofficial]; arbitrary in rendering engines).
+*   **Proximity Threshold:** Distance cutoff for culling. Can be set "just a chunk away from far vision boundary" to preload chunks [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Accuracy Issues:** Chunks may disappear when they should be visible. This is often due to incorrect calculation of chunk centers, which are generated early during map loading [S2, unofficial].
-- **Boundary Definitions:** Using spherical boundaries for frustum culling and Euclidean distance for proximity culling can lead to visible artifacts or inconsistencies [S2, unofficial].
-- **Mutual Exclusivity:** Some implementations cannot use frustum and proximity culling together [S2, unofficial].
-- **DAG Dependencies:** In segment-based rendering, DAG dependencies may cause over-refinement of segments outside the frustum. Early rejection is required to counteract this [S4].
+*   **Center Calculation Errors:** If chunk centers are calculated incorrectly during map loading, chunks may disappear erroneously even if they should be visible [S2, unofficial].
+*   **Boundary Definitions:** Using spherical boundaries for frustum culling and Euclidean distance for proximity can lead to visible artifacts or inconsistencies if not aligned [S2, unofficial].
+*   **Mutual Exclusivity:** In some implementations, frustum culling and proximity culling cannot be used simultaneously due to conflicting logic or state management [S2, unofficial].
+*   **Conservatism:** Level 1 culling (coarse) is conservative and may admit extra blocks that are later culled at Level 2 (fine) [S5, unofficial].
 
 ## Subtopics
 
 ### View Frustum Culling for Segments
-An optimization technique specifically for segment-based tetrahedral meshing. It rejects segments lying outside the view frustum early in the rendering pipeline. This prevents unnecessary refinement caused by DAG dependencies, reducing mesh size and improving performance [S4]. Choose this when using adaptive meshing with dependency graphs where out-of-view regions are still being refined [S4].
+An optimization technique specifically for segment-based tetrahedral meshes. It rejects segments lying outside the view frustum early in the rendering pipeline. This is crucial to counteract over-refinement caused by Directed Acyclic Graph (DAG) dependencies, which might otherwise refine segments outside the view due to attribute error thresholds [S4]. By rejecting these segments early, the mesh size is reduced, and unnecessary refinement is prevented [S4].
 
 ### Two-Level Visibility Culling
-A hierarchical approach used in out-of-core 3D Gaussian Splatting (TideGS).
-- **Level 1 (CPU):** Computes an active block set $\mathcal{K}_t$ for a camera batch $\mathcal{B}_t$ using coarse bounding spheres. Applies a 6-plane frustum test. A sphere is culled if its signed distance to a plane $d < -r_k$. This conservatively admits extra blocks but reduces data transfer [S5, unofficial].
-- **Level 2 (GPU):** Materializes selected resident blocks in VRAM. Runs standard 3DGS projection/rasterization. Determines the final contributing set $I_t$. Only Gaussians in $I_t$ participate in forward/backward passes [S5, unofficial].
-Choose this for large-scale 3DGS rendering where memory bandwidth is a bottleneck [S5, unofficial].
+A hierarchical approach used in out-of-core 3D Gaussian Splatting (e.g., TideGS).
+*   **Level 1 (CPU):** Computes an active block set $\mathcal{K}_t$ using coarse bounding spheres. For each block $k$ with center $c_k$ and radius $r_k$, a 6-plane frustum test is applied. A sphere is culled if its signed distance to any plane $d < -r_k$. This step is conservative and scales with the selected block working set rather than the full model size [S5, unofficial].
+*   **Level 2 (GPU):** Materializes the selected resident blocks $R_t$ in VRAM. The standard 3DGS projection/rasterization pipeline runs on these blocks. Gaussian-level culling determines the final contributing set $I_t$. Only Gaussians in $I_t$ participate in forward/backward passes. This preserves standard 3DGS semantics while allowing block-level storage [S5, unofficial].
 
 ### Frustum Culling Helper
-A helper class implementation for visualizing and culling octrees. It constructs a `PerspectiveCamera` (FOV 20, aspect 1.77, near 0.5, far 5) and computes the frustum from the projection and view matrices. It iterates through an octree, marking intersecting octants with an `InstancedMesh` (yellow boxes) [S6, unofficial]. Useful for debugging and visualization of spatial partitioning structures [S6, unofficial].
+A utility class implementation (e.g., in `sparse-octree`) that uses a camera's frustum to cull an octree and visualize intersecting octants.
+*   **Setup:** Constructs a `PerspectiveCamera` with FOV 20, aspect 1.77, near 0.5, far 5. Camera position is initialized using spherical coordinates (radius 5, phi $\pi/3$, theta $\pi \times 1.75$) [S6, unofficial].
+*   **Visualization:** Uses an `InstancedMesh` with `BoxGeometry(1,1,1)` and transparent yellow material, capacity 2500 [S6, unofficial].
+*   **Execution:** In `updateCamera()`, the camera looks at (0,0,0) and the frustum is computed from `projectionMatrix * matrixWorldInverse`. In `cull()`, intersecting octants are identified. For each intersection, the instance matrix is composed from the octant's center, quaternion, and dimensions. The mesh count is updated, and `instanceMatrix` is marked for update [S6, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ for flat lists of primitives, where $N$ is the number of bounding volumes. $O(\log N)$ or better for hierarchical structures (octrees, BVH) where $N$ is the number of nodes, as entire subtrees can be skipped [S3, unofficial].
-- **Memory Complexity:** Minimal overhead. Requires storing frustum planes (constant size) and bounding volumes for scene objects [S3, S5, unofficial].
-- **Performance:** Significantly reduces the number of primitives sent to the GPU, lowering fill rate and vertex processing costs [S3, unofficial]. In 3DGS, it reduces SSD/PCIe traffic by filtering blocks before transfer [S5, unofficial].
-- **Strengths:** Simple to implement, highly effective for large scenes with sparse distribution, works well with hierarchical data structures [S3, unofficial].
-- **Limitations:** Accuracy depends on correct bounding volume generation (e.g., chunk centers) [S2, unofficial]. May admit conservative false positives (visible but culled blocks) in hierarchical tests [S5, unofficial]. Cannot be easily combined with proximity culling in some implementations [S2, unofficial].
-- **When to use:** Always as a first-pass culling step for any scene with spatial structure [S3, unofficial].
-- **When not to use:** Not sufficient alone for occluded geometry (requires [Occlusion Clipping](990-occlusion-clipping-with-orthogonal-opacity-map.md)) or for ray-based volume rendering where empty space skipping is more efficient [S1, S6, unofficial].
+*   **Time Complexity:** $O(N)$ for non-hierarchical culling, where $N$ is the number of entities. With hierarchical spatial partitioning (e.g., Octree), it can approach $O(\log N)$ or better, as entire subtrees can be skipped if their parent is outside the frustum [S3, unofficial].
+*   **Memory Complexity:** Minimal overhead. Requires storing bounding volumes (centers, radii, or box corners) for each entity [S5, unofficial].
+*   **Performance:** Significantly reduces the number of primitives sent to the GPU, lowering bandwidth and rasterization costs [S5, unofficial]. In 3DGS, it prevents SSD/PCIe traffic from scaling with the total number of Gaussians $N$ [S5, unofficial].
+*   **Strengths:** Simple to implement; highly effective for large scenes with sparse visibility; reduces GPU load [S3, unofficial].
+*   **Limitations:** Can suffer from accuracy issues if bounding volumes or centers are poorly calculated [S2, unofficial]. Conservative culling may still pass some invisible objects to the GPU, requiring a second pass (Level 2) [S5, unofficial]. Proximity culling adds distance checks which may conflict with angular frustum checks if not integrated carefully [S2, unofficial].
 
 ## Background
-Frustum culling is a fundamental technique in computer graphics, originally described in the context of OpenGL and spatial data structures [S3, unofficial]. It is widely used in out-of-core visualization of large datasets to manage memory and rendering load [S3, unofficial]. In the context of volume rendering and chunk-based terrain, it is often paired with proximity culling to manage data streaming [S2, unofficial]. Recent applications include scalable training of 3D Gaussian Splatting primitives, where it reduces data transfer overhead [S5, unofficial], and segment-based tetrahedral meshing, where it prevents unnecessary refinement [S4].
+Frustum culling is a fundamental technique in computer graphics, often implemented alongside back-face culling and occlusion culling [S3, unofficial]. It is widely used in out-of-core visualization of large datasets to manage memory and rendering load [S3, unofficial]. In the context of volume rendering and chunk-based systems, it is often combined with proximity culling to manage chunk loading and unloading [S2, unofficial]. Recent applications include scalable training of 3D Gaussian Splatting, where it is used to filter blocks before GPU transfer [S5, unofficial], and segment-based tetrahedral meshing to prevent over-refinement [S4].
 
 ## Sources
 [S1] brownvc/gftorf, https://github.com/brownvc/gftorf, fetched 2026-10-27 (unofficial)

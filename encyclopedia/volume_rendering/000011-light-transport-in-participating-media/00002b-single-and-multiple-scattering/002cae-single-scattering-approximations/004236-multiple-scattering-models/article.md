@@ -1,215 +1,54 @@
 # Multiple Scattering Models
 
-Also called: Most Probable Paths (MPP) model, Premože et al. model, Blinn-extended model
+Also called: Multiple Scattering, Multiple Bounce, Global Illumination in Participating Media
 
 ## Overview
-Multiple scattering models approximate the radiance contribution from light bouncing dozens or hundreds of times within a participating medium before escaping, addressing the limitation of single-scattering approximations which fail to render dense media like thick clouds correctly [S3]. Unlike single-scattering methods that assume light travels directly from source to camera, these models account for the diffuse, bright appearance of high-albedo volumes by approximating the complex integral of indirect illumination [S2, S3]. The primary distinction of the Most Probable Paths (MPP) approach is its reformulation of the scattering integral to allow single and multiple scattering components to be computed in a single volume sweep, avoiding the separate 3D blurring volumes and adaptive step sizes required by earlier implementations [S2].
+Multiple scattering models compute the radiance contribution from light that undergoes two or more scattering events within a participating medium before reaching the eye [S1, S5]. While single-scattering approximations suffice for thin media like haze, they fail for dense media such as clouds or smoke, where photons bounce dozens or hundreds of times, causing the medium to reflect significant light (e.g., up to 90% for thick cumulus clouds) [S1]. These models solve the problem of simulating this internal light transport, which is computationally expensive because every additional bounce multiplies the work required to trace rays [S1]. They are distinguished from single-scattering siblings by their attempt to capture indirect lighting and energy redistribution within the volume, rather than only direct light attenuation and one-time deflection.
 
-## How it works
-The MPP model splits the total radiance $L(x, \vec{\omega})$ arriving at the eye from a direction $\vec{\omega}$ at position $x$ into three components: the weighted object image $L_{obj}$, the single-scattered light $L_{SS}$, and the multiple-scattered light $L_{MS}$ [S2]:
+## Shared principles
+The radiative transfer equation (RTE) describes light transport in participating media. The total radiance $L(x, \vec{\omega})$ at position $x$ in direction $\vec{\omega}$ is the sum of emitted radiance, attenuated incoming radiance, and in-scattered radiance [S1][S3, book]. The in-scattering term is an integral over all incoming directions $\vec{\omega}'$, involving the phase function $p(\vec{\omega}', \vec{\omega})$, the scattering coefficient $\sigma_s(x)$, and the incoming radiance $L(x, \vec{\omega}')$ [S3, book].
 
-$$ L(x, \vec{\omega}) = W \cdot L_{obj}(x, \vec{\omega}) + L_{SS}(x, \vec{\omega}) + L_{MS}(x, \vec{\omega}) $$
+$$ L_{in}(x, \vec{\omega}) = \int_{4\pi} p(\vec{\omega}', \vec{\omega}) \sigma_s(x) L(x, \vec{\omega}') d\vec{\omega}' $$
 
-### Inputs and Outputs
-*   **Inputs**:
-    *   Volume density field $\rho(x)$ or scattering coefficient $b(x) = \sigma_s \rho(x)$.
-    *   Absorption coefficient $c(x)$ (often assumed constant ratio $a/b = c/b$).
-    *   Mean square scattering angle $\theta^2$ (assumed constant for the medium) [S2].
-    *   Directional light source intensity $L_0$ and direction $\vec{\omega}_0$ [S2].
-    *   Object image $L_{obj}$ (unfiltered) [S2].
-    *   Rate adjustment parameter $\gamma$ (default 1.0, or 0.45 for denser media) [S2].
-*   **Outputs**:
-    *   Final radiance $L(x, \vec{\omega})$ for each pixel.
+Multiple scattering arises because $L(x, \vec{\omega}')$ itself contains contributions from other directions, creating a recursive dependency. Exact solution requires solving this integral equation iteratively or via path tracing with deep recursion. Most practical models approximate this by:
+1.  **Truncation:** Limiting the number of scattering events to a finite depth $N$ [S1, S5].
+2.  **Approximation:** Using simplified integrals, such as diffusion approximations (not covered here), or precomputed filters/lookup tables to estimate the integral of indirect light [S1][S2, unofficial][S4].
+3.  **Separation:** Decomposing radiance into single-scattered ($L_{SS}$) and multiple-scattered ($L_{MS}$) components, often computing $L_{SS}$ explicitly and approximating $L_{MS}$ [S1][S3, book].
 
-### Data Structures
-1.  **Light Volume**: A 3D data structure storing the number of scattering events $\ell_{light}$ for every volume cell. This volume is oriented such that its z-axis is aligned with the light direction $\vec{\omega}_0$ [S2].
-2.  **Object Image**: A 2D texture or buffer containing the scene rendered without participating media effects (shadows only) [S2].
-
-### Number of Scattering Events
-The fundamental quantity characterizing a path is the number of scattering events $\ell$, defined as the integral of the scattering coefficient along the path [S2]:
-
-$$ \ell = \int_{path} b(x) ds $$
-
-Integrals for other coefficients (like absorption $c$) along the same path are derived by multiplying $\ell$ by the constant ratio of coefficients (e.g., $\int c(x) ds = (c/b)\ell$) [S2].
-
-### Step 1: Precompute Light Volume
-Before rendering, compute $\ell_{light}$ for every voxel in the volume. This represents the optical depth (in scattering events) from the light source to the voxel, attenuated by the medium [S2]. This is effectively a variation of a deep shadow map [S2].
-
-### Step 2: Compute Single-Scattered Radiance
-For a directional light source $\vec{\omega}_0$, the single-scattered radiance $\Delta L_{SS}$ arriving at the eye from position $x$ along a segment $\Delta x$ is [S2]:
-
-$$ \Delta L_{SS}(x, \vec{\omega}) = L_{unscat}(x, \vec{\omega}_0) P(x, \vec{\omega}, \vec{\omega}_0) \exp\left(-\gamma \frac{c}{b} \ell_{eye}\right) b(x) \Delta x $$
-
-Where:
-*   $L_{unscat}(x, \vec{\omega}_0) = L_0 \exp\left(-\frac{c}{b} \ell_{light}\right)$ is the unscattered radiance available at $x$ from the light source.
-*   $P(x, \vec{\omega}, \vec{\omega}_0)$ is the single-scattering phase function.
-*   $\ell_{eye}$ is the number of scattering events from $x$ to the eye.
-*   $\gamma$ is the rate adjustment parameter.
-
-### Step 3: Compute Multiple-Scattered Radiance
-The multiple-scattered component $L_{MS}$ is approximated using the Most Probable Path (MPP) theory. It relies on a blurred incident radiance $L_{blurred}$ and an object weight $W$.
-
-#### 3.1 Blurring Width
-The width (standard deviation) $w(\ell, s)$ of the Gaussian distribution approximating the spread of paths is [S2]:
-
-$$ w(\ell, s)^2 = \frac{\theta^2 \ell s^2}{24} \left(1 + \frac{\theta^2 (a/b) \ell^2}{12}\right) $$
-
-Where:
-*   $\ell$ is the total scattering events ($\ell_{light} + \ell_{eye}$).
-*   $s$ is the physical length of the path.
-*   $\theta^2$ is the mean square scattering angle.
-*   $a/b$ is the ratio of absorption to scattering coefficients.
-
-*Note: The original model includes a curvature attenuation term $A_c = \Delta\theta^2 / 2\ell\theta^2$. This term is dropped in the implementation described here because it penalizes short paths with large angle changes, severely underestimating backscattering [S2].*
-
-#### 3.2 Blurred Incident Radiance
-The blurred radiance $L_{blurred}$ accounts for the contribution of all paths surrounding the MPP. It is computed by integrating the incident radiance profile $L_0(x)$ weighted by a Gaussian [S2]:
-
-$$ L_{blurred}(x_0, w) = \frac{(\bar{b}/\pi\bar{\theta}^2)}{2} \int L_0(x) \exp\left(-\frac{(x-x_0)^2}{2w^2}\right) dA $$
-
-Where $\bar{b}$ and $\bar{\theta}^2$ are global averages of the scattering coefficient and mean square angle, respectively. To avoid runtime filtering penalties, the unfiltered object image $L_{obj}$ is used for $L_0(x)$ [S2].
-
-#### 3.3 Object Weight
-The weight $W$ applied to the object image $L_{obj}$ combines the direct object contribution and the multiple-scattered contribution derived from the blurred radiance [S2]:
-
-$$ W = \left(1 + \ell_{obj} + \frac{2\bar{b}^2 w^2 \ell_{obj}}{\bar{\theta}^2}\right) \exp\left(-\gamma \frac{c}{b} \ell_{obj}\right) $$
-
-Where $\ell_{obj}$ is the number of scattering events from the object to the eye.
-
-#### 3.4 Final Multiple Scattering Term
-The multiple-scattered radiance is then [S2]:
-
-$$ L_{MS}(x, \vec{\omega}) = L_{blurred}(x_0, w(\ell_{obj})) \cdot \ell_{obj} \cdot \exp\left(-\gamma \frac{c}{b} \ell_{obj}\right) $$
-
-*Correction on Dimensions*: Integrating weighted radiance in the incident plane yields dimensions of radiance $\times$ area, which is incorrect. An effective area per path must be included. The effective area for a path with last scattering at distance $d$ and deviation angle $\alpha$ is $\pi(d\alpha)^2$. The expected value is $\pi\theta^2/b^2 s_i$. The global average scattering coefficient $\bar{b}$ is used in the normalization factor of $L_{blurred}$ to correct this [S2].
-
-### Pseudocode
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def compute_multiple_scattering(volume, light_dir, light_intensity, object_image, params):
-    """
-    volume: 3D array of scattering coefficients b(x)
-    light_dir: vector direction of light
-    light_intensity: scalar L0
-    object_image: 2D array of radiance L_obj
-    params: dict containing theta_sq, c_over_b, gamma, b_bar, theta_sq_bar
-    """
-    
-    # Step 1: Precompute Light Volume (scattering events from light to voxel)
-    # Orient volume z-axis with light_dir
-    light_volume = zeros_like(volume)
-    for voxel in volume:
-        # Integrate b(x) along ray from light source to voxel
-        # This is equivalent to a deep shadow map accumulation
-        light_volume[voxel] = integrate_scattering_events(volume, light_dir, voxel)
-        
-    # Step 2: Render
-    final_radiance = zeros_like(object_image)
-    
-    for pixel in object_image:
-        x, omega = pixel.position, pixel.direction
-        l_eye = integrate_scattering_events(volume, omega, x) # Events from x to eye
-        l_light = light_volume[x]
-        l_obj = l_eye # Approximation: l_light + l_eye approx l_obj for object paths
-        
-        # Single Scattering
-        L_unscat = light_intensity * exp(-params.c_over_b * l_light)
-        phase = phase_function(x, omega, light_dir)
-        L_SS = L_unscat * phase * exp(-params.gamma * params.c_over_b * l_eye) * volume[x]
-        
-        # Multiple Scattering
-        # Calculate blurring width
-        # s is physical length, approximated by step size or ray segment length
-        # For implementation, s is often normalized or handled via integration step
-        # Here we assume s is available from the ray marching context
-        s = get_physical_segment_length() 
-        l_total = l_light + l_eye
-        
-        w_sq = (params.theta_sq * l_total * s**2 / 24) * (1 + (params.theta_sq * params.c_over_b * l_total**2) / 12)
-        w = sqrt(w_sq)
-        
-        # Blurred Radiance (using global averages for normalization)
-        # In practice, this integral is approximated by filtering the object image
-        # or precomputed if homogeneous. For heterogeneous, it's complex.
-        # The source suggests using L_obj directly in the integral for L_blurred
-        # to avoid runtime filtering, leading to the weight W formulation.
-        
-        # Object Weight
-        # Note: w here is w(l_obj)
-        w_obj_sq = (params.theta_sq * l_obj * s**2 / 24) * (1 + (params.theta_sq * params.c_over_b * l_obj**2) / 12)
-        w_obj = sqrt(w_obj_sq)
-        
-        W = (1 + l_obj + (2 * params.b_bar**2 * w_obj_sq * l_obj) / params.theta_sq_bar) * exp(-params.gamma * params.c_over_b * l_obj)
-        
-        # L_MS term
-        # L_blurred is approximated by L_obj * exp(-attenuation) in the weight derivation
-        # The final L_MS is derived as:
-        L_MS = W * object_image[pixel] # This combines the blurred contribution and weight
-        
-        # Total
-        final_radiance[pixel] = L_SS + L_MS
-        
-    return final_radiance
-
-def integrate_scattering_events(volume, direction, start_point):
-    """
-    Integrates the scattering coefficient b(x) along a ray starting at start_point
-    in the given direction. Returns the total number of scattering events.
-    """
-    # Ray march from start_point in direction
-    # Sum b(x) * delta_s for each step
-    # If direction is light_dir, integrate from light source to start_point (backwards)
-    # If direction is eye_dir, integrate from start_point to far plane
-    total_events = 0
-    current_pos = start_point
-    while not at_boundary(current_pos, direction):
-        b_val = volume[current_pos]
-        delta_s = get_step_size(current_pos, direction)
-        total_events += b_val * delta_s
-        current_pos += direction * delta_s
-    return total_events
-```
-
-### Parameters and Typical Values
-*   $\gamma$: Rate adjustment parameter. 1.0 for the original model; 0.45 for denser media to fit Monte Carlo simulations better [S2].
-*   $\theta^2$: Mean square scattering angle. Assumed constant for the medium [S2].
-*   $\bar{b}$: Global average scattering coefficient [S2].
-*   $\bar{\theta}^2$: Global average mean square scattering angle [S2].
-
-### Edge Cases and Pitfalls
-*   **Backscattering Underestimation**: The original MPP model includes a curvature attenuation term that penalizes short paths with large angle changes. This causes severe underestimation of backscattering. Dropping this term corrects the behavior [S2].
-*   **Dimensional Error**: Integrating weighted radiance in the incident plane produces a result with dimensions of radiance $\times$ area. An effective area per path (derived from $\pi\theta^2/b^2 s_i$) must be included in the normalization [S2].
-*   **Object Image Filtering**: Using a blurred version of the object image for $L_{obj}$ would be more accurate but requires runtime filtering. The unfiltered object image is used to avoid this penalty, which does not lead to visually objectionable artifacts [S2].
-*   **Heterogeneity**: The standard MPP model assumes homogeneous media or global averages. For heterogeneous volumes, local coefficients must be used, which complicates the precomputation of the light volume and the blurring width [S2, S1].
+Key parameters common to these models include the extinction coefficient $\sigma_t = \sigma_a + \sigma_s$, the single-scattering albedo $\omega_0 = \sigma_s / \sigma_t$, and the phase function $p$, which describes the angular distribution of scattered light [S1][S3, book].
 
 ## Subtopics
 
 ### [Heterogeneous In-scattering with Multiple Scattering](4934-heterogeneous-in-scattering-with-multiple-scattering.md)
-This method extends multiple scattering to heterogeneous volumes by evaluating local extinction and scattering coefficients at each integration step, allowing for spatially varying density and material properties. Unlike homogeneous approximations that use global averages, it operates directly on the volumetric light transport integral to capture internal light transport, handling direct lighting and recursively computing indirect lighting (multiple scattering) up to a maximum depth. It distinguishes itself from surface-only albedo corrections by modeling the volume itself.
+This method recursively computes indirect lighting in heterogeneous volumes by evaluating local extinction and scattering coefficients at each integration step [4934-heterogeneous-in-scattering-with-multiple-scattering.md]. It distinguishes itself from homogeneous approximations by handling spatially varying density and material properties directly within the volumetric light transport integral [4934-heterogeneous-in-scattering-with-multiple-scattering.md]. Unlike surface-only albedo corrections, it operates on the volume itself, allowing for accurate internal light transport in complex media [4934-heterogeneous-in-scattering-with-multiple-scattering.md]. It is chosen when high accuracy in heterogeneous media is required and computational cost is secondary to correctness. See [Heterogeneous In-scattering with Multiple Scattering](4934-heterogeneous-in-scattering-with-multiple-scattering.md).
+
+### [Most Probable Paths (MPP) Lighting Model](12244-most-probable-paths-mpp-lighting-model.md)
+The MPP model approximates the multiple scattering term $L_{MS}$ for general inhomogeneous media without relying on the diffusion approximation [12244-most-probable-paths-mpp-lighting-model.md]. It simplifies the complex transport integral by summing contributions only over paths close to the "Most Probable Path" (MPP), assuming strong forward scattering [12244-most-probable-paths-mpp-lighting-model.md]. Unlike previous methods that assume planar surfaces or uniform media, this model handles inhomogeneous densities and avoids artifacts near boundaries and low-density areas where diffusion fails [12244-most-probable-paths-mpp-lighting-model.md]. It is chosen for real-time or interactive rendering of dense, forward-scattering media like clouds or fog where diffusion is inaccurate. See [Most Probable Paths (MPP) Lighting Model](12244-most-probable-paths-mpp-lighting-model.md).
+
+### [3D-Filter / Concrete Directions](12253-3d-filter-concrete-directions.md)
+The 3D-Filter method is an implicit representation of directional radiance distribution used to approximate multiple scattering in participating media, specifically clouds and snow [12253-3d-filter-concrete-directions.md]. It solves the problem of efficiently computing the contribution of second and third-order sunlight scattering by precomputing a "contribution-ratio pattern" (the 3D-filter) [12253-3d-filter-concrete-directions.md]. Unlike sibling methods that may use diffusion equations or explicit path tracing for all orders, this method restricts multiple scattering to the first three orders, computes single scattering separately, and leverages the forward-scattering nature of clouds to reduce the computational cost of extended form factors [12253-3d-filter-concrete-directions.md]. It is chosen for offline or precomputed rendering of volumetric clouds where high-order scattering is significant but limited to a few bounces. See [3D-Filter / Concrete Directions](12253-3d-filter-concrete-directions.md).
 
 ### Multiple Scattering (Max/Kajiya)
-The first scattering rendering model, presented by Kajiya [KH84], is a two-pass method. Pass 1 pre-calculates the proportion of reflected light per voxel considering attenuation. Pass 2 renders the image via ray casting using the pre-calculated intensity information [S4, unofficial]. Max [Max94] extended Blinn's model to arbitrary shapes via analytical functions, accounting for multiple reflections and introducing anisotropic light dispersion (e.g., halo effects) [S4, unofficial].
+Kajiya's two-pass method was the first scattering rendering model, pre-calculating reflected light proportion per voxel considering attenuation in Pass 1, and rendering the image via ray casting in Pass 2 [S2, unofficial]. Max extended this model to arbitrary shapes via analytical functions, accounting for multiple reflections and introducing anisotropic light dispersion (e.g., halo effects) [S2, unofficial]. This model is historically significant as the first to handle multiple scattering in arbitrary volumes.
 
 ### Multiple Forward/Backward Scattering Approximation
-Kniss et al. [30] generalized single-pass shadow algorithms to multiple forward scattering by gathering accumulated light from several sampled directions in the previous sampling plane [S5, book]. Zhang et al. [62] extended this by adding backward scattering from the next couple of sampling planes [S5, book].
+Kniss et al. generalized single-pass shadow algorithms to multiple forward scattering by gathering accumulated light from several sampled directions in the previous sampling plane [S3, book]. Zhang et al. added backward scattering from the next couple of sampling planes [S3, book]. This approach extends the efficiency of single-pass methods to handle more complex scattering behaviors.
 
-## Operating characteristics
-*   **Time Complexity**: The MPP model allows single and multiple scattering to be computed in a single volume sweep, making it efficient for real-time or interactive rendering compared to full path tracing [S2]. However, the precomputation of the light volume (deep shadow map) adds an initial cost [S2].
-*   **Memory Complexity**: Requires storing the light volume (3D data structure) in addition to the main density volume and object image [S2]. This increases the memory footprint significantly compared to single-scattering methods [S2].
-*   **Performance**: Designed for efficient rendering in a single pass through the volume, taking advantage of programmable graphics hardware [S1].
-*   **Strengths**: Captures the bright, diffuse appearance of dense media (e.g., clouds, snow) that single scattering fails to render [S3]. Efficient for homogeneous or slowly varying media [S2].
-*   **Limitations**: Approximates the complex integral of multiple scattering; accuracy depends on the validity of the MPP assumptions (strongly forward scattering) [S2]. Struggles with highly heterogeneous media without modifications [S1]. The curvature term removal improves backscattering but is an empirical fix [S2].
-*   **When to Use**: Suitable for dense participating media like clouds, fog, or snow where multiple bounces are significant [S3, S1].
-*   **When Not to Use**: For thin media where single scattering is sufficient, or for highly heterogeneous media where the MPP assumptions break down [S3, S1].
+### Riley et al. Angular Distribution Renderer
+Riley et al. proposed a multiple model system to generate fine angularly dependent chromatic effects such as rainbows, halos, and glories [S4]. The core is an angular distribution renderer handling forward multi-scattering behavior of large water and ice atmospheric particles using multiple scattering angular distribution functions [S4]. It is designed for efficient single-pass rendering on programmable graphics hardware, using a half-angle slicing scheme for light and eye buffers [S4]. Skylight and aerial perspective effects are added based on a simplified single-scattering analytic model [S4].
+
+### Ambient Term Approximation for Multiple Scattering
+This approach approximates multiple scattering by an ambient term to obtain images of typical shafts of light caused by sunlight [S4]. It is a simplified method suitable for atmospheric effects where detailed multiple scattering is not critical.
+
+### Multiple Scattering (Max/Kajiya)
+Multiple scattering refers to the effect resulting from more than one scattering bounce, required for real-world effects like scattering in clouds or subsurface scattering [S5]. Unbiased rendering of multiple scattering can be noisy, so in practice, the number of bounces is often limited to keep render times acceptable [S5]. For materials like skin or milk, subsurface scattering is often more efficient than volume multiple scattering [S5].
 
 ## Background
-The concept of multiple scattering in participating media is fundamental to realistic volume rendering, as dense media like cumulus clouds reflect up to 90% of incident light through dozens or hundreds of bounces [S3]. The Most Probable Paths (MPP) model was introduced by Premože et al. [2004] to provide a lighting model for general participating media that splits radiance into object, single-scattered, and multiple-scattered components [S2]. It reformulates the multiple scattering expression to allow single and multiple scattering computation in a single volume sweep, improving upon earlier methods that required separate 3D blurring volumes [S2]. Earlier work by Kajiya [KH84] and Max [Max94] laid the groundwork for multiple scattering in volumes, with Kajiya's two-pass method being the first to account for scattering [S4, unofficial]. Dobashi et al. [19] and Harris and Lastra [30, 31] also contributed to real-time atmospheric rendering with multiple scattering approximations [S1].
+The concept of multiple scattering in volume rendering emerged with Kajiya's 1984 work, which introduced the first model to account for scattering in arbitrary volumes using a two-pass approach [S2, unofficial]. Max extended this in 1994 to include anisotropic dispersion [S2, unofficial]. The challenge of simulating multiple scattering lies in its computational cost; while single scattering is sufficient for thin media, dense media like clouds require many bounces to appear realistic, as they can reflect up to 90% of incident light [S1]. Modern techniques, such as the MPP model and 3D-filters, aim to approximate these effects efficiently for real-time or interactive applications [S1][S2, unofficial][S3, book][S4]. Unbiased methods remain noisy and slow, leading to the widespread use of approximations in both real-time engines and offline renderers [S5].
 
 ## Sources
-[S1] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26
-[S2] A lighting model for general participating media, https://doi.org/10.1145/1053427.1053446, fetched 2026-11-02
-[S3] Introduction to Volumetric Rendering, https://help.maxon.net/c4d/2027/en-us/Content/html/What_is_Volumetric_Rendering.html, fetched 2026-10-29
-[S4] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)
-[S5] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)
+[S1] Introduction to Volumetric Rendering, https://help.maxon.net/c4d/2027/en-us/Content/html/What_is_Volumetric_Rendering.html, fetched 2026-10-29
+[S2] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)
+[S3] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)
+[S4] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26
+[S5] Volumes — Blender Manual, https://www.blender.org/manual/nb/3.6/render/materials/components/volume.html, fetched 2026-10-26

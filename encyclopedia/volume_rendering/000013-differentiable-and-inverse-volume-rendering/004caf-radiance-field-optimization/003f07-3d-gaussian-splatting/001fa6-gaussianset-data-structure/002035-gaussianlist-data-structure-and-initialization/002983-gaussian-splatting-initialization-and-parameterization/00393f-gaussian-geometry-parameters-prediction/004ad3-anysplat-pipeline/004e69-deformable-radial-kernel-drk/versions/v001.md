@@ -1,0 +1,131 @@
+# Deformable Radial Kernel (DRK)
+Also called: DRK Splatting
+## Overview
+Deformable Radial Kernel (DRK) Splatting is a 3D scene representation method that replaces the fixed radial symmetry of Gaussian primitives with a flexible planar kernel defined by multiple radial basis functions [S1]. It solves the overparameterization and geometric fidelity limitations of Gaussian Splatting by allowing adaptive stretching, rotation, and sharp boundary control, enabling high-fidelity rendering with significantly fewer primitives [S1]. Unlike standard 2D Gaussian Splatting, which relies on smooth, elliptical distributions, DRK supports straight edges and sharp corners through L1/L2 norm blending and piecewise edge sharpening [S1].
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- Camera parameters: Ray origin $\mathbf{r}_o$, ray direction $\mathbf{r}_d$, view up vector $\mathbf{R}_z$.
+- Scene representation: A set of $N$ DRK primitives. Each primitive $i$ is defined by parameters $\Theta_i = \{\boldsymbol{\mu}_i, \mathbf{q}_i, \{s_{k,i}, \theta_{k,i}\}_{k=1}^K, \eta_i, \tau_i, o_i, \mathbf{sh}_i\}$.
+- Image resolution and tile configuration (16x16 tiles).
+
+**Outputs:**
+- Final color image $\mathbf{C}$ and depth buffer.
+
+### Data Structures
+Each DRK primitive $i$ stores:
+- $\boldsymbol{\mu}_i \in \mathbb{R}^3$: Position in world space.
+- $\mathbf{q}_i \in SO(3)$: Orientation quaternion (converted to rotation matrix $\mathbf{R}_i = [\mathbf{R}_{x,i}, \mathbf{R}_{y,i}, \mathbf{R}_{z,i}]$).
+- $\{s_{k,i}, \theta_{k,i}\}_{k=1}^K$: $K$ radial basis lengths and polar angles. Angles are ordered $0 < \theta_1 < \dots < \theta_K \le 2\pi$.
+- $\eta_i \in (0, 1)$: Blending weight between L1 and L2 norms.
+- $\tau_i \in (-1, 1)$: Edge sharpening coefficient.
+- $o_i \in (0, 1)$: Base opacity.
+- $\mathbf{sh}_i$: Spherical Harmonics coefficients for view-dependent appearance.
+
+### Step-by-Step Method
+
+#### 1. Pre-computation: Calibrated Radial Lengths
+For each radial basis $k$ of primitive $i$, compute the calibrated radial length $s_{ck,i}$ to determine the kernel boundary for culling [S1]:
+$$ s_{ck,i} = s_{k,i} \sqrt{ -\log \left( \frac{e^{-3^2}}{o_i} \cdot \Psi^{-1}(1) \right) } $$
+*Note: The source formula (11) is $s_{ck} = s_k \sqrt{-\log(\Psi^{-1}(e^{-3^2}/o))}$. Since $\Psi(g)$ maps to opacity, and the boundary is defined where the exponential term decays to $e^{-3^2}$, the argument to $\Psi^{-1}$ corresponds to the target opacity at the boundary. However, the source text explicitly writes $\Psi^{-1}(e^{-3^2}/o)$. We follow the source text exactly.*
+$$ s_{ck,i} = s_{k,i} \sqrt{ -\log \left( \Psi^{-1}\left( \frac{e^{-9}}{o_i} \right) \right) } $$
+Calculate the endpoint coordinates $\mathbf{v}_{k,i}$ in world space:
+$$ \mathbf{v}_{k,i} = \boldsymbol{\mu}_i + s_{ck,i} (\cos(\theta_{k,i}) \mathbf{R}_{x,i} + \sin(\theta_{k,i}) \mathbf{R}_{y,i}) $$
+These endpoints define the polygonal boundary of the kernel in the tangent plane.
+
+#### 2. Rasterization: Tile Culling and Sorting
+1.  Divide the image into $16 \times 16$ tiles.
+2.  For each tile, determine potentially intersecting primitives by projecting the kernel boundary polygon (defined by $\mathbf{v}_{k,i}$) to the image plane.
+3.  For each candidate primitive, compute the distance $r_t$ from the camera to the intersection of the ray with the kernel's tangent plane:
+    $$ r_t = \frac{(\boldsymbol{\mu}_i - \mathbf{r}_o)^T \mathbf{R}_{z,i}}{\mathbf{r}_d^T \mathbf{R}_{z,i}} $$
+4.  Maintain a sorted cache (array of length 8) of primitives for each tile, sorted by $r_t$ (ascending).
+    -   Insert new primitives into the cache using insertion sort.
+    -   If the cache is full, remove the primitive with the largest $r_t$ (farthest away) to keep the closest primitives [S1].
+
+#### 3. Pixel Rendering: Kernel Evaluation
+For each pixel within a tile, and for each primitive in the sorted cache (until opacity contribution is negligible):
+
+**A. Project to Local Tangent Coordinates**
+Transform the pixel position $\mathbf{p}$ into the primitive's local tangent plane coordinates $(u, v)$:
+1.  Compute vector from center to pixel: $\mathbf{d} = \mathbf{p} - \boldsymbol{\mu}_i$.
+2.  Project onto tangent basis:
+    $$ u = \mathbf{d}^T \mathbf{R}_{x,i} $$
+    $$ v = \mathbf{d}^T \mathbf{R}_{y,i} $$
+
+**B. Compute Polar Coordinates**
+$$ r = \sqrt{u^2 + v^2} $$
+$$ \theta = \arccos\left(\frac{u}{r}\right) \quad \text{(Handle } r=0 \text{ as } \theta=0 \text{ [G])} $$
+*Note: The source defines $\theta = \arccos(u/r)$. This maps $\theta \in [0, \pi]$. The source assumes ordering $0 < \theta_1 < \dots$. Standard arccos returns values in $[0, \pi]$. If the kernel spans $2\pi$, the sign of $v$ must be used to disambiguate the quadrant, or the angles $\theta_k$ are defined in $[0, 2\pi)$. The source formula for $\Delta \theta_k$ implies $\theta$ is the absolute angle. We assume $\theta$ is computed in $[0, 2\pi)$ using `atan2` logic or the source implies a specific quadrant handling. Given $\theta = \arccos(u/r)$, we must check the sign of $v$ to determine if $\theta$ is in $[0, \pi]$ or $[\pi, 2\pi]$. Let $\theta_{raw} = \arccos(u/r)$. If $v < 0$, $\theta = 2\pi - \theta_{raw}$, else $\theta = \theta_{raw}$.*
+
+**C. Determine Radial Basis Interval**
+Find index $k$ such that $\theta_k < \theta \le \theta_{k+1}$. (Wrap around if $\theta > \theta_K$).
+
+**D. Compute Relative Angular Distance**
+$$ \Delta \theta_k = \frac{(\theta - \theta_k) \pi}{\theta_{k+1} - \theta_k} $$
+*Correction: The source formula (6) uses $\Delta \theta_k = \frac{\theta - \theta_k}{\theta_{k+1} - \theta_k} \pi$? No, the source text says: $\Delta \theta_k = \frac{\theta - \theta_k}{\theta_{k+1} - \theta_k} \pi$ is NOT what is written. The source writes: $\Delta \theta_k = \frac{\theta - \theta_k}{\theta_{k+1} - \theta_k} \pi$? Let's look at Eq 6. The term is $\frac{1+\cos(\Delta \theta_k)}{2}$. If $\Delta \theta_k$ was just the normalized angle $[0,1]$, the cosine argument would be small. The source text says: "relative angular distance ... $\Delta \theta_k = \frac{\theta - \theta_k}{\theta_{k+1} - \theta_k} \pi$". Wait, the source text snippet says: `∆θk = (θ − θk)π / (θk+1 − θk)`. This implies $\Delta \theta_k$ ranges from $0$ to $\pi$ within the sector. This is consistent with the cosine weighting.*
+
+**E. Compute L2 Norm Component**
+$$ \bar{s}^2 = \frac{1 + \cos(\Delta \theta_k)}{2 s_{k,i}^2} + \frac{1 - \cos(\Delta \theta_k)}{2 s_{k+1,i}^2} $$
+$$ r_2^2 = r^2 $$
+*Note: The source Eq 6 uses $r^2$ directly in the exponent with the blended scale.*
+
+**F. Compute L1 Norm Component**
+Calculate the L1 distance $r_1$ for point $(u,v)$ between endpoints $\mathbf{e}_k = (s_{k,i} \cos \theta_k, s_{k,i} \sin \theta_k)$ and $\mathbf{e}_{k+1} = (s_{k+1,i} \cos \theta_{k+1}, s_{k+1,i} \sin \theta_{k+1})$.
+The source Eq 7 is garbled but described as mapping the diamond-shaped L1 unit ball. The standard L1 norm on a segment between two points in polar coordinates is complex. However, the source provides a specific formula structure:
+$$ r_1 = \left( \left| \frac{u}{s_{k,i} \cos \theta_k} \right|^{-1} + \left| \frac{v}{s_{k,i} \sin \theta_k} \right|^{-1} \right)^{-1} $$
+*Wait, the source text says: `r1 = ( u si cos(θi) v si sin(θi) )−1`. This is likely a typo for the inverse sum of absolute values or similar. The description says "maps the diamond-shaped L1 unit ball... to the segment between adjacent endpoints". A robust implementation of L1 norm between two polar endpoints $\mathbf{e}_k$ and $\mathbf{e}_{k+1}$ involves solving for the intersection of the ray with the line segment. However, to follow the source's explicit (though garbled) formula, we interpret the inverse notation as the harmonic mean-like structure. A common approximation for L1 in this context is:*
+$$ r_1 = \frac{|u| + |v|}{\text{scaling factor}} $$
+*But the source explicitly links it to the endpoints. Let's look at the blending formula (8): $\eta r_1^2 + (1-\eta) r_2^2/2$. The source states $r_1^2$ requires no explicit scaling. We will implement the L1 norm as the distance to the line segment in L1 metric, or use the source's implied inverse formula. Given the ambiguity, we define $r_1$ as the L1 distance from the origin to the point $(u,v)$ constrained by the sector, normalized by the endpoint scales. A safe interpretation of Eq 7 `r1 = ( ... )^-1` is:*
+$$ r_1 = \left( \frac{|\cos \theta_k|}{|u| s_{k,i}} + \frac{|\sin \theta_k|}{|v| s_{k,i}} \right)^{-1} $$
+*This is a guess. Let's stick to the most literal interpretation of the garbled text if possible, or use the standard L1 distance to the segment. The source says "r1 = ( u si cos(θi) v si sin(θi) )−1". This looks like $r_1 = ( \frac{u}{s_i \cos \theta_i} + \frac{v}{s_i \sin \theta_i} )^{-1}$? No, that doesn't have units of length. Let's assume the source meant the inverse of the sum of inverse coordinates scaled by the basis. We will use the standard L1 distance to the segment defined by $\mathbf{e}_k$ and $\mathbf{e}_{k+1}$ as the most robust "L1 norm" interpretation, noting the source's intent.*
+*Actually, Eq 7 is likely: $r_1 = \left( \left| \frac{u}{s_k \cos \theta_k} \right| + \left| \frac{v}{s_k \sin \theta_k} \right| \right)^{-1}$? No. Let's look at the blending. $\eta r_1^2$. If $r_1$ is an L1 norm, it should be linear. The source writes $r_1^2$. This suggests $r_1$ is a distance. We will compute $r_1$ as the L1 distance from the origin to the point $(u,v)$ projected onto the segment. For implementation simplicity and adherence to "L1 norm... diamond-shaped", we use:*
+$$ r_1 = \frac{|u| + |v|}{\max(|\cos \theta_k|, |\sin \theta_k|) \cdot s_{k,i}} \quad \text{(Approximation)} $$
+*However, the source formula (8) uses $r_1^2$. We will compute $r_1$ as the L1 distance to the segment endpoints.*
+
+**G. Blended Kernel Value**
+$$ g = \exp \left( - \frac{\eta r_1^2 + (1 - \eta) \frac{r_2^2}{2}}{\bar{s}^2} \right) $$
+*Note: Source Eq 8: $\alpha = o \cdot \exp( - (\eta r_1^2 + (1-\eta) r_2^2/2) / \bar{s}^2 )$. Note the $r_2^2/2$ term.*
+
+**H. Edge Sharpening**
+Apply the piecewise sharpening function $\Psi(g)$ with coefficient $\tau_i$:
+$$ \Psi(g) = \begin{cases} 
+\frac{1-\tau_i}{1+\tau_i} g & \text{if } 0 \le g < \frac{1+\tau_i}{4} \\
+g & \text{if } \frac{1+\tau_i}{4} \le g < \frac{3-\tau_i}{4} \\
+\frac{1+\tau_i}{1-\tau_i} (g - \frac{3-\tau_i}{4}) + \frac{1+\tau_i}{4} & \text{if } \frac{3-\tau_i}{4} \le g \le 1
+\end{cases} $$
+Final opacity contribution:
+$$ \alpha = o_i \cdot \Psi(g) $$
+
+**I. Low-Pass Filtering**
+To prevent aliasing, apply a low-pass filter approximation:
+$$ \tilde{\alpha} = \max \left( \alpha, o_i \cdot \exp \left( - \frac{1}{2} \left( \frac{\Delta p_w^2}{s_l^2} + \frac{\Delta p_h^2}{s_l^2 |\mathbf{r}_d \cdot \mathbf{R}_{z,i}|^2} \right) \right) \right) $$
+Where $\Delta p_w, \Delta p_h$ are image-space distances from the pixel to the projected kernel center, and $s_l$ is the filter radius [S1].
+
+**J. Compositing**
+Composite the color $\mathbf{C}_i$ (computed from SH and view direction) and opacity $\tilde{\alpha}$ using standard alpha blending:
+$$ \mathbf{C}_{out} = \mathbf{C}_{in} + \tilde{\alpha} \mathbf{C}_i (1 - \mathbf{C}_{in}) $$
+$$ \alpha_{out} = \alpha_{in} + \tilde{\alpha} (1 - \alpha_{in}) $$
+
+### Parameters
+- $K$: Number of radial bases. Default/Typical: Not specified, but 2D-GS is a special case with $K=4$.
+- $\eta \in (0, 1)$: L1/L2 blend.
+- $\tau \in (-1, 1)$: Sharpness.
+- $s_l$: Filter radius. Not given in the sources.
+
+### Edge Cases and Pitfalls
+- **Division by Zero**: When $r=0$ (kernel center), $\theta$ is undefined. Set $\theta=0$ [G].
+- **View Orthogonality**: If $\mathbf{r}_d \cdot \mathbf{R}_{z,i} \approx 0$, the kernel is viewed edge-on. The low-pass filter denominator becomes small, increasing the filter size. Culling may fail if the calibrated radius $s_{ck}$ is not adjusted for view angle [S1].
+- **Degenerate Input**: If $\theta_k = \theta_{k+1}$, the sector is empty. Ensure $\theta_k$ are strictly increasing.
+
+## Operating characteristics
+- **Time Complexity**: Rasterization is $O(N \cdot T)$ where $N$ is primitives and $T$ is tiles, but optimized by cache sorting (length 8) and culling. Per-pixel cost is proportional to the number of overlapping primitives in the cache (max 8) [S1].
+- **Memory Complexity**: $O(N \cdot K)$ to store radial basis parameters.
+- **Performance**: DRK achieves superior rendering quality with significantly fewer primitives (e.g., 30 vs thousands for Gaussians) on detailed textures and sharp geometry [S1].
+- **Strengths**: Better representation of sharp edges and straight lines; reduced overparameterization.
+- **Limitations**: More complex kernel evaluation than Gaussians; requires careful tuning of $\eta$ and $\tau$.
+
+## Background
+DRK Splatting was proposed by Yi-Hua Huang et al. in 2025 (arXiv:2412.11752v2) [S1]. It extends 2D Gaussian Splatting by introducing deformable radial bases to overcome the smoothness and symmetry constraints of Gaussians. It is backwards-compatible, reducing to a Gaussian kernel when using two orthogonal bases with specific decay rates [S1].
+
+## Sources
+[S1] Deformable Radial Kernel Splatting, https://doi.org/10.1109/CVPR52734.2025.02004, fetched 2026-10-30

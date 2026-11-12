@@ -1,0 +1,92 @@
+# Hermite Interpolation of Scalar Fields
+
+Also called: C1-continuous Hermite Interpolation, Hermite Interpolation
+
+## Overview
+Hermite Interpolation of Scalar Fields is a technique for rendering scalar-valued functions, such as height fields and signed distance fields (SDFs), by storing partial derivatives alongside function values and using Hermite interpolation between samples to guarantee a globally $C^1$-continuous result [S1, unofficial]. It differs from its siblings by explicitly encoding gradient information into the grid data structure to enable exact normal computation for shading, serving as a storage-efficient replacement for normal mapping when surface normals are already derived from the discrete field [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A regular grid of scalar values $f$ and their associated partial derivatives $\nabla f = (\frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z})$.
+*   **Output:** A continuous scalar field $u(\mathbf{p})$ and its gradient $\nabla u(\mathbf{p})$ at any query point $\mathbf{p}$.
+
+**Data Structures:**
+Each grid node stores a tuple $(f, \frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z})$. In 3D, this requires 4 scalar values per node. The sources note that this does not necessarily require extra storage if surface normals are already part of the discrete field of samples, as the gradient components can be derived from normalized normals or stored directly [S1, unofficial].
+
+**Steps:**
+1.  **Grid Construction:** Store the partial derivatives of the scalar-valued function with the function values at each grid node [S1, unofficial].
+2.  **Mixed Partial Derivative Approximation:** For 3D first-order fields, derive approximations for mixed partial derivatives (e.g., $\frac{\partial^2 f}{\partial x \partial y}$) akin to Adini's method for parametric surface patches [S1, unofficial]. This is necessary to fully define the trivariate Hermite basis or to ensure smoothness across cell boundaries in higher-order contexts.
+3.  **Interpolation:** Use Hermite interpolation between the samples. For a 1D interval $[0,1]$ with parameter $t$, the value is:
+    $$ u(t) = h_{00}(t)f_0 + h_{10}(t)f_1 + h_{01}(t)f'_0 + h_{11}(t)f'_1 $$
+    where $h_{ij}$ are the cubic Hermite basis functions. In 3D, this is extended via tensor products or specific multivariate Hermite bases [S1, unofficial].
+4.  **Shading:** Use the exact normals of the reconstructed cubic Hermite surface as shading normals. The gradient $\nabla u(\mathbf{p})$ is computed analytically from the interpolated polynomial [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hermite_1d(t, f0, f1, df0, df1):
+    """
+    Cubic Hermite interpolation in 1D.
+    t: parameter in [0, 1]
+    f0, f1: function values at endpoints
+    df0, df1: derivatives at endpoints (scaled by interval length if not unit)
+    """
+    t2 = t * t
+    t3 = t2 * t
+    
+    # Cubic Hermite basis functions
+    h00 = 2 * t3 - 3 * t2 + 1
+    h10 = t3 - 2 * t2 + t
+    h01 = -2 * t3 + 3 * t2
+    h11 = t3 - t2
+    
+    return h00 * f0 + h10 * df0 + h01 * f1 + h11 * df1
+
+def sample_hermite_field(p, grid, spacing, origin):
+    """
+    Sample a 3D Hermite-interpolated scalar field.
+    Assumes grid stores (value, dx, dy, dz) at each node.
+    """
+    # Map world point to grid coordinates
+    idx = floor((p - origin) / spacing)
+    
+    # Determine local coordinates within the cell
+    # Note: Exact boundary handling and mixed derivative computation 
+    # are implementation-specific details not fully detailed in sources [S1, unofficial].
+    # [G] Standard trilinear Hermite extension is assumed for 3D.
+    
+    # Retrieve 8 corner nodes and their derivatives
+    # Compute mixed partials using Adini's method if required for C1 continuity
+    # [G] Adini's method approximates mixed derivatives from surrounding nodes.
+    
+    # Perform trivariate Hermite interpolation
+    # This involves 64 coefficients for a full trivariate cubic Hermite patch
+    # or a simplified tensor-product approach if mixed derivatives are neglected.
+    # [S1, unofficial] mentions deriving approximations for mixed partials, implying a full 
+    # trivariate basis or a specific surface reconstruction method.
+    
+    return value, gradient
+```
+
+**Edge Cases and Pitfalls:**
+*   **Mixed Derivatives:** The sources highlight the derivation of mixed partial derivatives for 3D fields [S1, unofficial]. Omitting these may reduce continuity or accuracy in complex fields.
+*   **Boundary Handling:** As with all grid-based methods, out-of-bounds accesses require explicit strategies (clamp, periodic, or constant) [Parent].
+
+## Subtopics
+
+### Floating Scale Surface Reconstruction (FSSR) Integration
+FSSR integrates Hermite interpolation by replacing the original weighting function with a $C^1$-continuous variant: $w(r) = \frac{1}{12}(r - 3)^{12} \cdot (r + 1)^4$ [S2]. This ensures $C^1$ continuity in the reconstructed surface. In FSSR, cubic Hermite interpolation improves mean and RMS error and visual appearance compared to quadratic methods, although maximum error can remain large [S2].
+
+## Operating characteristics
+*   **Complexity:** Time complexity is constant per sample, dependent on the number of basis functions (e.g., 64 for full trivariate cubic). Memory complexity is 4x that of scalar-only grids (value + 3 derivatives) [S1, unofficial].
+*   **Performance:** Provides a storage-efficient replacement for normal mapping with richer visual appearance [S1, unofficial].
+*   **Strengths:** Guarantees globally $C^1$-continuous results; exact shading normals from the reconstructed surface [S1, unofficial].
+*   **Limitations:** Requires storage of derivatives; mixed partial derivative approximation adds computational overhead [S1, unofficial].
+
+## Background
+The method was proposed to address the $C^0$ approximation limitations of bi- or trilinear filtering in real-time computer graphics for scalar-valued functions like height and signed distance fields [S1, unofficial]. It generalizes to arbitrary orders and dimensions and has been demonstrated in height field and SDF rendering [S1, unofficial]. It has also been applied in surface reconstruction algorithms like Poisson Surface Reconstruction (PSR) and Floating Scale Surface Reconstruction (FSSR) [S2].
+
+## Sources
+[S1] (PDF) Accelerating Sphere Tracing - ResearchGate, https://www.researchgate.net/publication/329152815_Accelerating_Sphere_Tracing, fetched 2026-11-04 (unofficial)
+[S2] Accurate Isosurface Interpolation with Hermite Data, https://ieeexplore.ieee.org/document/7335492/, fetched 2026-11-05

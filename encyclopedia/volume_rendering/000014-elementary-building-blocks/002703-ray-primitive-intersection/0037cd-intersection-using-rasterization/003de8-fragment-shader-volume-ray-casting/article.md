@@ -1,146 +1,151 @@
 # Fragment Shader Volume Ray Casting
 
-Also called: OpenGL Fragment Shader Volume Rendering
+Also called: GLSL Ray Casting, GPU Ray Casting via Rasterization, OpenGL Fragment Shader Volume Rendering, Shader Type 2: RAY CASTING Method
 
 ## Overview
-Fragment Shader Volume Ray Casting is a GPU-accelerated volume rendering technique that leverages OpenGL rasterization to determine ray-volume intersections and performs the volume rendering integral within a fragment shader [S1]. It solves the problem of efficiently mapping view rays to volume space and accumulating optical properties without explicit ray-triangle intersection code [S1]. It differs from procedural intersection methods by using the rasterization pipeline to generate ray origins and directions, and from compute shader approaches by relying on the fixed-function rasterizer for ray setup [S1][S3, unofficial].
+Fragment Shader Volume Ray Casting is a volume rendering technique implemented via a fragment shader that samples a 3D texture along rays cast from the camera through a unit cube geometry to produce a final color [S2, unofficial]. It solves the problem of mapping screen-space fragments to 3D ray parameters and evaluating the volume rendering equation efficiently on the GPU by leveraging OpenGL rasterization [S1]. Unlike procedural intersection methods which may require different logic for orthogonal versus perspective projections, this approach yields identical ray setup logic for both projection types [S2, unofficial]. It builds on [Intersection using Rasterization](8072-intersection-using-rasterization.md) by using two rendering passes to decouple the calculation of ray entry/exit points from the volumetric integration.
 
 ## How it works
-**Inputs and Outputs:**
-The method requires a 3D texture for the volume data, a 1D texture for the transfer function, and a 2D texture storing the exit points of rays from a previous pass [S1]. The output is a color buffer containing the final rendered image [S1].
+The method requires two rendering passes. The first pass calculates the exit point of the ray. The second pass calculates the entry point, ray direction, and numerically evaluates the volume rendering equation [S1].
 
-**Data Structures:**
-*   `lastHit`: A `sampler2D` at binding 1, storing the exit point coordinates (vec3) for each pixel [S1].
-*   `transferFunction`: A `sampler1D` at binding 2, mapping scalar values to RGBA [S1].
-*   `volume`: A `sampler3D` at binding 3, storing the scalar field data [S1].
-*   `h`: A uniform float representing the step size for ray traversal [S1].
-*   `first`: A uniform `invec3` storing the entry point of the ray [S1].
-*   `opacityThreshold`: A constant set to 0.99 for early ray termination [S1].
+### Inputs and Outputs
+**Inputs:**
+*   **Volume Data:** A 3D texture (`volume`) containing the scalar field. Format: unsigned byte (`GLubyte`) with no header [S2, unofficial].
+*   **Transfer Function:** A 1D texture (`transferFunction`) mapping scalar values to color and opacity [S1].
+*   **Exit Point Texture:** A 2D texture (`lastHit`) storing the exit point of the ray for each pixel, generated in the first pass [S1].
+*   **Camera Position:** A `vec3` uniform (`u_cameraPosition`) representing the camera position in world space [S2, unofficial].
+*   **Model-View-Projection Matrix:** A `mat4` uniform (`u_MVPMatrix`) combining perspective and model-view transformations [S2, unofficial].
+*   **Step Size:** A `vec3` uniform (`u_stepSize`) representing the step size for ray marching, calculated as $(1.0/XDIM, 1.0/YDIM, 1.0/ZDIM)$, where $XDIM, YDIM, ZDIM$ are the dimensions of the volume dataset [S2, unofficial]. Alternatively, a scalar float `h` may be used [S1].
 
-**Algorithm Steps:**
-The method operates in two rendering passes [S1].
+**Outputs:**
+*   **Final Color:** A `vec4` output (`vFragColor`) containing the accumulated color and opacity [S1].
 
-1.  **Pass 1 (Exit Point Calculation):** Render the back faces of the volume's bounding box to calculate and store the exit point of each view ray into the `lastHit` texture [S1].
-2.  **Pass 2 (Ray Casting and Compositing):** Render the front faces of the volume's bounding box. For each fragment:
-    a.  Fetch the exit point from `lastHit` using `texelFetch` [S1].
-    b.  Calculate the ray direction vector by subtracting the entry point (`first`) from the exit point [S1].
-    c.  Compute the ray length $D$ as the magnitude of the direction vector [S1].
-    d.  Normalize the direction vector [S1].
-    e.  Initialize the accumulated color `color` to $(0.0, 0.0, 0.0, 1.0)$ and the current ray position `tr` to `first` [S1].
-    f.  Calculate the step vector `rayStep` as `direction * h` [S1].
-    g.  Traverse the volume in a loop from $t=0$ to $t \le D$ with increment $h$:
-        i.  Sample the scalar field from the volume texture at `tr` [S1].
-        ii. Sample the transfer function using the scalar value from the volume sample to get RGBA [S1].
-        iii. Calculate the sample alpha using the formula: $\alpha_{samp} = 1.0 - \exp(-0.5 \times \alpha_{raw})$ [S1].
-        iv. Apply the under operator:
-            $$ \text{color}.rgb += \text{samp}.rgb \times \text{samp}.a \times \text{color}.a $$
-            $$ \text{color}.a = 1.0 - \text{samp}.a \times (1.0 - \text{color}.a) $$
-            *(Note: The source code uses `samp.w` for alpha in the update step, implying `samp.a` is stored in `.w` or the variable names in the source text/code snippet have swapped `.a` and `.w` conventions. The provided code snippet uses `samp.w` in the alpha update and `1.0f - color.w` for termination, suggesting the source code treats the 4th component as the weight/alpha accumulator. We follow the logic: `color.a` is initialized to 1.0, `color.w` is used for termination check `1.0 - color.w`. In standard GLSL `vec4`, `.a` is alpha. The code snippet `color.a = 1.0f - samp.w` and `1.0f - color.w > opacityThreshold` suggests `w` is used as the accumulated opacity/weight. We will use `color.a` for the accumulated alpha/weight in the pseudocode to match standard conventions, but note the source's specific variable usage.)*
-            *Correction based on source code snippet:* The source code initializes `color.a = 1.0f`. It updates `color.a = 1.0f - samp.w`. It checks `1.0f - color.w`. It finalizes `color.w = 1.0f - color.w`. This implies the source code uses `.w` as the primary accumulator for opacity/weight and `.a` might be unused or mislabeled in the snippet's variable names vs standard GLSL. To be implementable and correct, we will use `color.a` for the accumulated alpha (opacity) and `color.rgb` for color, adhering to standard GLSL `vec4` semantics, while preserving the mathematical logic:
-            $$ \text{color}.rgb += \text{samp}.rgb \times \text{samp}.a \times \text{color}.a $$
-            $$ \text{color}.a = \text{color}.a \times (1.0 - \text{samp}.a) $$
-            Early termination if $1.0 - \text{color}.a > \text{opacityThreshold}$ [S1].
-        v.  Increment `tr` by `rayStep` [S1].
-    h.  Finalize the output alpha: $\text{color}.a = 1.0 - \text{color}.a$ [S1].
-    i.  Store `color` in `vFragColor` [S1].
+### Data Structures
+*   **Geometry:** A unit cube defined by 8 vertices at coordinates $(\pm 0.5, \pm 0.5, \pm 0.5)$ and 36 indices forming 12 triangles (`GL_TRIANGLES`) [S2, unofficial]. The cube is stored in a Vertex Array Object (VAO) with two Vertex Buffer Objects (VBOs): one for vertex positions (`GL_ARRAY_BUFFER`) and one for indices (`GL_ELEMENT_ARRAY_BUFFER`) [S2, unofficial].
+*   **Textures:**
+    *   `volume`: `uniform sampler3D` at binding 3 [S1].
+    *   `transferFunction`: `uniform sampler1D` at binding 2 [S1].
+    *   `lastHit`: `uniform sampler2D` at binding 1 [S1].
 
-**Pseudocode:**
+### Algorithm Steps
+1.  **Initialization:** Create and compile vertex and fragment shaders. Link them into a shader program. Bind attribute `aPosition` to location `ATTRIBUTE_POSITION`. Retrieve uniform locations for `u_MVPMatrix`, `u_Volume3DSampler`, `u_cameraPosition`, and `u_stepSize` [S2, unofficial].
+2.  **First Pass (Exit Point):** Render the back faces of the unit cube to calculate and store the ray exit points in the `lastHit` texture [S1].
+3.  **Second Pass Setup:** Enable blending. Set the shader program. Pass the Model-View-Projection matrix, camera position, and step size. Bind the 3D volume texture to unit 0, the exit point texture to binding 1, and the transfer function to binding 2 [S2, unofficial].
+4.  **Second Pass Rendering:** Draw the unit cube using the 36 indices. For each fragment:
+    a.  **Fetch Exit Point:** Retrieve the exit point from the `lastHit` texture using `texelFetch` based on the fragment coordinates [S1].
+    b.  **Calculate Ray Parameters:**
+        *   Let `first` be the entry point (interpolated from the front face rendering or passed as a uniform/attribute depending on implementation details; the source implies it is available as `first` in the shader context) [S1].
+        *   Calculate direction: $\vec{d} = \text{last}.xyz - \text{first}.xyz$ [S1].
+        *   Calculate length: $D = \|\vec{d}\|$ [S1].
+        *   Normalize direction: $\vec{d} = \frac{\vec{d}}{\|\vec{d}\|}$ [S1].
+    c.  **Initialize Accumulators:**
+        *   $\text{color} = (0.0, 0.0, 0.0, 1.0)$ [S1].
+        *   $\vec{tr} = \text{first}$ [S1].
+        *   $\vec{rayStep} = \vec{d} \times h$ [S1].
+    d.  **Ray Marching Loop:** Iterate for $t$ from $0$ to $D$ with step $h$:
+        i.  **Sample Volume:** Sample the scalar field from the volume texture at $\vec{tr}$: $v = \text{texture}(\text{volume}, \vec{tr})$ [S1].
+        ii. **Sample Transfer Function:** Map the scalar value to color and opacity: $\text{samp} = \text{texture}(\text{transferFunction}, v.x).rgba$ [S1].
+        iii. **Calculate Alpha:** Apply the opacity model: $\text{samp}.a = 1.0 - \exp(-0.5 \times \text{samp}.a)$ [S1].
+        iv. **Pre-multiply Color:** $\text{samp}.rgb = \text{samp}.rgb \times \text{samp}.a$ [S1].
+        v.  **Accumulate Color (Under Operator):**
+            *   $\text{color}.rgb += \text{samp}.rgb \times \text{color}.a$ [S1].
+            *   $\text{color}.a = 1.0 - \text{samp}.a$ [S1].
+        vi. **Early Ray Termination:** If $1.0 - \text{color}.a > \text{opacityThreshold}$ (where $\text{opacityThreshold} = 0.99$), break the loop [S1].
+        vii. **Advance Ray:** $\vec{tr} += \vec{rayStep}$ [S1].
+    e.  **Finalize:**
+        *   $\text{color}.a = 1.0 - \text{color}.a$ [S1].
+        *   Store $\text{color}$ in `vFragColor` [S1].
 
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 # Fragment Shader Main Function
 # Inputs:
-#   lastHit: sampler2D (binding 1) - Exit point texture
-#   transferFunction: sampler1D (binding 2) - Transfer function
-#   volume: sampler3D (binding 3) - Volume data
-#   h: float - Step size
-#   first: vec3 - Entry point (uniform)
-#   opacityThreshold: float = 0.99
+#   lastHit: sampler2D (binding 1)
+#   transferFunction: sampler1D (binding 2)
+#   volume: sampler3D (binding 3)
+#   h: float (step size)
+#   first: vec3 (entry point)
+#   opacityThreshold: float (0.99)
+# Output:
+#   vFragColor: vec4
 
-# 1. Get Exit Point
-# Assuming gl_FragCoord is available
-exit_point = texelFetch(lastHit, ivec2(gl_FragCoord.xy), 0).xyz
+void main() {
+    // 1. Fetch exit point from the texture generated in the first pass
+    ivec2 tcoord = ivec2(gl_FragCoord.xy);
+    vec3 last = texelFetch(lastHit, tcoord, 0).xyz;
 
-# 2. Calculate Ray Properties
-direction = exit_point - first
-D = length(direction)
-direction = normalize(direction)
+    // 2. Calculate ray direction and length
+    vec3 direction = last - first;
+    float D = length(direction);
+    direction = normalize(direction);
 
-# 3. Initialize Accumulators
-# color.rgb: Accumulated color
-# color.a: Accumulated opacity (weight)
-color = vec4(0.0, 0.0, 0.0, 1.0)
-tr = first
-rayStep = direction * h
+    // 3. Initialize accumulators
+    vec4 color = vec4(0.0, 0.0, 0.0, 1.0);
+    vec3 tr = first;
+    vec3 rayStep = direction * h;
 
-# 4. Ray Traversal Loop
-t = 0.0
-while t <= D:
-    # Sample Volume
-    scalar = texture(volume, tr).x
-    # Sample Transfer Function
-    samp = texture(transferFunction, scalar).rgba
+    // 4. Ray marching loop
+    for (float t = 0.0; t <= D; t += h) {
+        // Sample scalar field
+        vec4 samp = texture(volume, tr);
+        
+        // Map scalar to color and alpha via transfer function
+        // Note: Source uses samp.x as the index for the 1D transfer function
+        samp = texture(transferFunction, samp.x);
+
+        // Calculate alpha using the exponential model
+        samp.a = 1.0 - exp(-0.5 * samp.a);
+
+        // Pre-multiply color by alpha
+        samp.rgb = samp.rgb * samp.a;
+
+        // Accumulate using the under operator
+        color.rgb += samp.rgb * color.a;
+        color.a = 1.0 - samp.a;
+
+        // Early ray termination
+        if (1.0 - color.a > opacityThreshold) {
+            break;
+        }
+
+        // Advance ray position
+        tr += rayStep;
+    }
+
+    // 5. Finalize opacity
+    color.a = 1.0 - color.a;
     
-    # Calculate Sample Alpha
-    # Formula: samp.a = 1.0 - exp(-0.5 * samp.a)
-    # Note: samp.a here refers to the raw alpha from the transfer function
-    raw_alpha = samp.a
-    samp.a = 1.0 - exp(-0.5 * raw_alpha)
-    
-    # Accumulate Color and Alpha (Under Operator)
-    # color.rgb += samp.rgb * samp.a * color.a
-    # color.a = color.a * (1.0 - samp.a)
-    color.rgb += samp.rgb * samp.a * color.a
-    color.a = color.a * (1.0 - samp.a)
-    
-    # Early Ray Termination
-    # If accumulated opacity (1.0 - color.a) exceeds threshold, stop
-    if (1.0 - color.a) > opacityThreshold:
-        break
-    
-    # Advance Ray
-    tr += rayStep
-    t += h
-
-# 5. Finalize
-# color.a = 1.0 - color.a (This step in source seems to invert the accumulated alpha again?
-# Standard compositing results in color.a being the total opacity.
-# The source code: color.w = 1.0f - color.w; vFragColor = color;
-# If color.w was the accumulated opacity weight, 1.0 - weight is the transparency.
-# However, usually we want to output the opaque color and its opacity.
-# Given the source code explicitly does this, we include it.
-color.a = 1.0 - color.a
-
-vFragColor = color
+    // 6. Output final color
+    vFragColor = color;
+}
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Loop Limits:** Fragment programs on older GPUs may have a maximum loop count (e.g., 256 iterations), requiring nested loops for large volumes [S2].
-*   **Precision:** Floating-point precision in ray position accumulation (`tr += rayStep`) can lead to drift over long rays [G].
-*   **Boundary Conditions:** The entry and exit points must be correctly calculated for all view rays, including those that miss the volume [S1].
+### Parameters and Edge Cases
+*   **Step Size (`h`):** Determines the resolution of the ray march. A smaller `h` increases accuracy but reduces performance. It can be derived from the volume dimensions as $(1/XDIM, 1/YDIM, 1/ZDIM)$ [S2, unofficial].
+*   **Opacity Threshold:** Set to $0.99$ for early ray termination [S1].
+*   **Precision:** The use of `texelFetch` for `lastHit` ensures exact sampling of the exit point texture, avoiding interpolation artifacts that might occur with `texture()` [S1].
+*   **Boundaries:** The method assumes the ray intersects the unit cube. The entry point `first` must be correctly interpolated from the front face rasterization in the second pass [S1].
 
 ## Subtopics
 
 ### GPU Fragment Program Ray Casting
-A volume rendering technique implemented on consumer graphics boards using fragment programs to simulate ray tracing per pixel, approximating the volume rendering integral via discrete sampling [S2]. It differs from modern shader models by being restricted to older fragment program architectures with limited loop counts (max 256 iterations) and no recursion [S2]. It is chosen when targeting older GPU hardware or for historical implementation studies [S2]. Pitfalls include the inability to implement secondary rays for advanced shading due to lack of recursion and the need for nested loops to traverse large volumes [S2]. First presented by Stegmaier et al. in 2005 [S2].
-
-### Rasterization-based Ray Setup
-An implementation approach for ray casting where each fragment corresponds to a ray, determined by rasterizing the volume's bounding box [S3, unofficial]. It differs from procedural intersection by generating rays via rasterization rather than mathematical intersection tests [S3, unofficial]. It is chosen for its simplicity and identical behavior for orthogonal and perspective projections [S3, unofficial]. The steps involve rasterizing the bounding box to generate fragments and computing the ray start position and direction vector for each [S3, unofficial].
+A volume rendering technique implemented on consumer graphics boards using fragment programs to simulate ray tracing per pixel, approximating the volume rendering integral via discrete sampling [S3]. It differs from modern GLSL implementations by being constrained by older fragment program limitations, specifically a maximum loop count of 256 iterations [S3]. This restriction requires volume traversal to be implemented using nested loops [S3]. Unlike software ray tracing, it lacks recursion and flexible loop structures, making secondary rays for advanced shading (e.g., reflections) difficult or impossible to implement [S3]. However, it fully exploits the built-in parallelism of modern graphics boards [S3]. First presented by Stegmaier et al. in 2005 [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of samples along the ray, which depends on the volume size and step size $h$ [S1].
-*   **Memory Complexity:** Requires storage for the volume texture, transfer function, and the `lastHit` texture (resolution of the viewport) [S1].
-*   **Performance:** Efficient on modern GPUs due to parallel fragment processing [S2]. Performance is limited by memory bandwidth for texture sampling and the number of samples per ray [S1].
-*   **Strengths:** Leverages existing rasterization hardware for ray setup; simple implementation; supports early ray termination [S1].
-*   **Limitations:** Requires two rendering passes; limited by fragment program loop constraints on older hardware; no support for secondary rays (reflections, shadows) [S1][S2].
-*   **When to use:** Interactive volume rendering on modern GPUs where simplicity and speed are prioritized over advanced shading [S1].
-*   **When not to use:** When advanced shading effects requiring recursion are needed, or on very old hardware with strict loop limits [S2].
+*   **Time Complexity:** Linear with respect to the number of samples per ray ($N$) and the number of pixels ($P$). $O(P \times N)$.
+*   **Memory Complexity:** $O(V)$ for the volume texture, $O(T)$ for the transfer function, and $O(P)$ for the intermediate `lastHit` texture [S1].
+*   **Performance:** Highly parallel on the GPU due to fragment shader execution [S3]. Performance is limited by memory bandwidth when sampling the 3D texture and the number of steps required for convergence [S1].
+*   **Strengths:** Efficient ray setup for both orthogonal and perspective projections [S2, unofficial]. Simple implementation using standard OpenGL rasterization [S1]. Early ray termination can significantly reduce computation for opaque regions [S1].
+*   **Limitations:** Requires two rendering passes [S1]. Limited by the maximum loop count in older fragment program architectures (256 iterations) [S3]. No support for recursion, limiting advanced shading effects [S3].
+*   **When to Use:** Real-time volume rendering on GPUs where hardware ray tracing is not available or when a simple, rasterization-based approach is preferred [S1, S3].
+*   **When Not to Use:** When advanced shading effects requiring recursion (e.g., reflections, refractions) are needed [S3]. When the volume is very large and memory bandwidth becomes a bottleneck [S3].
 
 ## Background
-The method originated from the need to perform volume rendering on GPUs using the OpenGL pipeline [S1]. It builds on the concept of using rasterization for ray-primitive intersection [S1]. The specific implementation using fragment shaders for ray casting was detailed in a 2017 comparison paper [S1]. The broader context of GPU fragment programs for ray casting was introduced by Stegmaier et al. in 2005 [S2]. Rasterization-based ray setup was proposed by Krüger and Westermann in 2003 [S3, unofficial].
+The method originated from the need to perform volume rendering on programmable graphics hardware. Early implementations used fragment programs to simulate ray tracing on consumer graphics boards, as presented by Stegmaier et al. in 2005 [S3]. This approach exploited the parallelism of GPUs to approximate the volume rendering integral [S3]. Later implementations, such as those described in 2017, refined the technique using two-pass rasterization to decouple ray intersection calculation from volumetric integration, allowing for efficient use of OpenGL fragment shaders [S1]. The technique is widely used in scientific visualization and medical imaging [S2, unofficial].
 
 ## Sources
 [S1] A Comparison between GPU-based Volume Ray Casting Implementations: Fragment Shader, Compute Shader, OpenCL and CUDA, https://www.researchgate.net/publication/321454253_A_Comparison_between_GPU-based_Volume_Ray_Casting_Implementations_Fragment_Shader_Compute_Shader_OpenCL_and_CUDA, fetched 2026-10-26
-[S2] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24
-[S3] PDF Volume Rendering - Isenberg, https://tobias.isenberg.cc/graphics/uploads/Class/07-volume-rendering.pdf, fetched 2026-10-28 (unofficial)
+[S2] Volumetric Render Engine, https://github.com/mikejernil/volumetric-render-engine, fetched 2026-10-27 (unofficial)
+[S3] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24

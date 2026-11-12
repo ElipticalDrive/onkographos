@@ -1,0 +1,111 @@
+--- v002.md
++++ v003.md
+@@ -9,5 +9,4 @@
+ **Inputs:**
+ *   Current density field $\mathbf{F}_v^\sigma$ (voxel grid) [S1].
+-*   Current color field $\mathbf{F}_v^c$ (voxel grid, represented by Spherical Harmonics coefficients) [S1].
+ *   Set of $K$ source camera poses and intrinsics [S1].
+ *   Ground truth images [S1].
+@@ -19,11 +18,11 @@
+ 
+ **Data Structures:**
+-*   **Voxel Grid:** 3D grid where each voxel $v$ stores density $\sigma_v$ and color coefficients. For Plenoxels, color is stored as $3 \times (2+1)^2 = 27$ Spherical Harmonic (SH) coefficients per voxel (SH degree 2) [S1].
+-*   **Ray Batch:** A set of $|R_{cf}|$ rays. For Plenoxels, $|R_{cf}|=25$; for DVGO, $|R_{cf}|=10$ [S1].
++*   **Voxel Grid:** 3D grid where each voxel $v$ stores density $\sigma_v$ and color coefficients [S1]. For Plenoxels, color is stored as $3 \times (2+1)^2 = 27$ Spherical Harmonic (SH) coefficients per voxel (SH degree 2) [S1].
++*   **Ray Batch:** A set of $|R_{cf}|$ rays [S1]. For Plenoxels, $|R_{cf}|=25$; for DVGO, $|R_{cf}|=10$ [S1].
+ 
+ **Algorithm:**
+ 
+-1.  **Ray Selection:** Select a mini-batch of rays $R_{cf}$ from the training set. A uniform probability distribution $p_d(d) \equiv \frac{1}{4\pi}$ is applied to directions [S1].
+-2.  **Voxel Identification:** Identify all voxels intersected by the rays in $R_{cf}$. Let $N$ be the number of voxels per ray, and $M = |R_{cf}| \times N$ be the total number of intersected voxels [S1].
++1.  **Ray Selection:** Select a mini-batch of rays $R_{cf}$ from the training set [S1]. A uniform probability distribution $p_d(d) \equiv \frac{1}{4\pi}$ is applied to directions [S1].
++2.  **Voxel Identification:** Identify all voxels intersected by the rays in $R_{cf}$ [S1]. Let $N$ be the number of voxels per ray, and $M = |R_{cf}| \times N$ be the total number of intersected voxels [S1].
+ 3.  **Closed-Form Color Estimation:** For each intersected voxel $v$, estimate its color $\hat{\mathbf{c}}_v$ by solving a linear system that accounts for occlusion and non-uniform view distribution [S1]. The method applies a bias reduction scheme where $\tilde{m} = m$ if $i = \ell$, else $\tilde{m} = i$ [S1].
+ 4.  **Rendering Estimated Color:** Render the scene using the estimated color field $\hat{\mathbf{F}}_v^c$ and the current density field $\mathbf{F}_v^\sigma$ following the volume rendering equation:
+@@ -49,5 +48,7 @@
+ 
+ ```python
+-def compute_cf_loss(density_field, color_field, cameras, gt_images, ray_batch, lambda_weight):
++import numpy as np
++
++def compute_cf_loss(density_field, cameras, gt_images, ray_batch, lambda_weight):
+     """
+     Computes the Closed-Form Color Estimation Loss.
+@@ -64,20 +65,25 @@
+         # Gather rays passing through this voxel from all K cameras
+         voxel_rays = [r for r in ray_batch if voxel in r.voxels]
+-        
++        K = len(voxel_rays)
++        if K == 0:
++            continue
++            
+         # Construct observation vector b and interaction matrix A
+-        A = []
+-        b = []
+-        for r in voxel_rays:
++        A = np.zeros((K, 27))  # 27 SH coefficients per voxel [S1]
++        b = np.zeros((K, 3))    # RGB ground truth colors
++        for i, r in enumerate(voxel_rays):
+             # Compute transmittance from voxel to camera along the ray
+             transmittance = 1.0
+-            for i, v in enumerate(r.voxels):
++            for j, v in enumerate(r.voxels):
+                 if v == voxel:
+                     break
+-                transmittance *= r.transmittance_factors[i]
+-            A.append(transmittance)
+-            b.append(r.gt_color)
++                transmittance *= r.transmittance_factors[j]
++            # Map transmittance to SH basis (simplified to constant for RGB) [G]
++            A[i, :] = transmittance
++            b[i, :] = r.gt_color
+             
+         # Solve least-squares problem (A^T A) c = A^T b for SH coefficients [G]
+-        estimated_colors[voxel] = solve_least_squares(A, b)
++        # Note: The source mentions a bias reduction scheme in Appendix A [S1]
++        estimated_colors[voxel] = np.linalg.lstsq(A, b, rcond=None)[0]
+         
+     # Step 3: Render the scene using estimated colors and current density
+@@ -86,5 +92,5 @@
+         ray_estimated_colors = []
+         for voxel in ray.voxels:
+-            ray_estimated_colors.append(estimated_colors.get(voxel, [0.0, 0.0, 0.0]))
++            ray_estimated_colors.append(estimated_colors.get(voxel, np.zeros(27)))
+             
+         # Volume render using estimated colors and current density
+@@ -96,5 +102,5 @@
+     loss = 0.0
+     for est_c, gt_c in zip(estimated_rendered_colors, gt_colors):
+-        loss += sum((e - g) ** 2 for e, g in zip(est_c, gt_c))
++        loss += np.sum((est_c - gt_c) ** 2)
+     loss /= len(ray_batch)
+     
+@@ -102,19 +108,12 @@
+     return lambda_weight * loss
+ 
+-def solve_least_squares(A, b):
+-    """Solves (A^T A) c = A^T b using standard linear algebra operations [G]."""
+-    import numpy as np
+-    A_mat = np.array(A)
+-    b_vec = np.array(b)
+-    return np.linalg.lstsq(A_mat, b_vec, rcond=None)[0]
+-
+ def volume_render(ray, estimated_colors, density_field):
+     """Computes rendered color using the volume rendering equation [S1]."""
+-    rendered = [0.0, 0.0, 0.0]
++    rendered = np.zeros(3)
+     T = 1.0
+     for i, voxel in enumerate(ray.voxels):
+         sigma = density_field[voxel]
+         delta = ray.step_sizes[i]
+-        c = estimated_colors[i]
++        c = estimated_colors[i][:3]  # Extract RGB from SH coefficients
+         alpha = 1.0 - np.exp(-sigma * delta)
+         rendered += T * alpha * c
+@@ -132,5 +131,5 @@
+ *   The total number of voxels involved is $M = |R_{cf}| \times N$ [S1].
+ *   For each voxel, density values along the ray from the voxel to $K$ source cameras need to be calculated [S1].
+-*   The total computation is of order $K \times |R_{cf}| \times N^2$ without optimization [S1].
++*   The total computation is of order $KBN^2$ without optimization [S1].
+ *   With CUDA parallelization (one block per voxel, one thread per camera), the theoretical overhead is reduced to order $N$ [S1].
+ *   Memory usage scales with the ray batch size $|R_{cf}|$ and intersected voxels $M$, avoiding storage of intermediate states for all pixels [G].

@@ -3,84 +3,125 @@
 Also called: Linear Color Interpolation, Linear RGB Blending
 
 ## Overview
-Color Blending linearly interpolates between two source colors based on a scalar ratio to produce a single output color [S1, unofficial]. It solves the problem of smoothly transitioning between discrete color values in volume rendering pipelines by handling red, green, blue, and alpha channels independently [S1, unofficial]. It is distinguished from [Voxel Color Mapping](2970-voxel-color-mapping.md) (which maps scalar values to colors) and [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md) (which generates the color map) by operating directly on RGBA color pairs rather than individual voxel properties or transfer function lookups.
+Color blending is the fundamental operation of computing a final pixel color by combining two source colors based on a scalar ratio. In the context of 1D transfer function sampling, it resolves the color value for a scalar voxel position that lies between two defined key-value pairs. It is distinguished from its siblings by its simplicity: it operates channel-wise on the RGB components and typically inherits the alpha channel from the first source, whereas methods like [Voxel Color Mapping](2970-voxel-color-mapping.md) may involve complex spatial averaging or [Parametric Function Generation](5349-parametric-function-generation.md) may use non-linear basis functions.
 
 ## How it works
-**Inputs and Outputs:**
-- Input: Two colors $C_1 = (r_1, g_1, b_1, \alpha_1)$ and $C_2 = (r_2, g_2, b_2, \alpha_2)$, and a blending ratio $t \in [0, 1]$ [S1, unofficial].
-- Output: A blended color $C_{result} = (r_{res}, g_{res}, b_{res}, \alpha_{res})$ [S1, unofficial].
+**Inputs:**
+- `c1`: First source color (RGBA).
+- `c2`: Second source color (RGBA).
+- `ratio`: Blending factor, typically in $[0, 1]$.
+
+**Outputs:**
+- `result`: Blended color (RGBA).
 
 **Data Structures:**
-- Color tuples: Each color is represented as four channels $(r, g, b, \alpha)$ stored as floating-point or integer values [S1, unofficial].
+Colors are represented as four channels: Red ($R$), Green ($G$), Blue ($B$), and Alpha ($A$). Each channel is typically an 8-bit unsigned integer ($0-255$) or a normalized float ($0.0-1.0$). The implementation below assumes 8-bit integer channels for the final output, consistent with standard LUT sampling [S1, unofficial].
 
 **Steps:**
-1. Extract the red, green, and blue channels from $C_1$ and $C_2$ [S1, unofficial].
-2. For each channel $ch \in \{r, g, b\}$, compute the interpolated value: $ch_{res} = round(ch_1 \cdot (1 - t) + ch_2 \cdot t)$ [S1, unofficial].
-3. Assign the alpha channel of $C_1$ to the result: $\alpha_{res} = \alpha_1$ [S1, unofficial].
-4. Return $C_{result} = (r_{res}, g_{res}, b_{res}, \alpha_{res})$ [S1, unofficial].
+1. For each color channel $ch \in \{R, G, B\}$, compute the linear interpolation between `c1.ch` and `c2.ch` using `ratio`.
+2. Round the result to the nearest integer to fit the 8-bit representation.
+3. Set the Alpha channel of the result to the Alpha channel of `c1`.
 
-**Formulas:**
-- Channel interpolation: $result = round(c1.ch \cdot (1 - ratio) + c2.ch \cdot ratio)$ for $ch \in \{r, g, b\}$ [S1, unofficial].
-- Alpha assignment: $\alpha_{result} = \alpha_1$ [S1, unofficial].
+**Formula:**
+For each channel $ch \in \{R, G, B\}$:
+$$ result.ch = \text{round}(c1.ch \times (1 - \text{ratio}) + c2.ch \times \text{ratio}) $$
+$$ result.A = c1.A $$
 
 **Parameters:**
-- $ratio$ (or $t$): Blending weight, typically in range $[0, 1]$ [S1, unofficial].
-- $c1.ch, c2.ch$: Channel values, typically in range $[0, 1]$ for normalized floats or $[0, 255]$ for integers [G].
+- `ratio`: The interpolation weight. If `ratio` is 0, `result` equals `c1`. If `ratio` is 1, `result` equals `c2`.
 
 **Edge Cases and Pitfalls:**
-- **Precision:** The `round` operation implies integer arithmetic or fixed-point representation; if using floating-point, rounding may introduce quantization artifacts at low bit depths [G].
-- **Alpha Handling:** Alpha is not interpolated but copied from the first color, which may cause visual discontinuities if $C_1$ and $C_2$ have significantly different opacities [G].
-- **Ratio Bounds:** Values of $ratio$ outside $[0, 1]$ extrapolate rather than interpolate, potentially producing out-of-gamut colors [G].
+- **Precision:** When working with floating-point intermediate values, rounding errors can occur. Using `round()` ensures the result fits the target integer format [S1, unofficial].
+- **Alpha Handling:** The alpha channel is not interpolated in the standard definition; it is taken directly from `c1`. This implies that the blend is treated as a replacement of the first color by the second, rather than a physical mixture of transparencies. If physical alpha blending is required, a different method (e.g., [Voxel Color Mapping](2970-voxel-color-mapping.md) or compositing equations) must be used.
+- **Boundary Conditions:** If `ratio` is outside $[0, 1]$, the result may extrapolate beyond the defined color range. Clamping `ratio` to $[0, 1]$ is recommended if the input is untrusted.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def color_blend(c1, c2, ratio):
+def color_blend(c1: Color, c2: Color, ratio: float) -> Color:
     """
-    c1: tuple (r, g, b, alpha)
-    c2: tuple (r, g, b, alpha)
-    ratio: float in [0, 1]
-    Returns: tuple (r, g, b, alpha)
+    Linearly interpolates between two colors c1 and c2 based on ratio.
+    Alpha is taken from c1.
+    
+    Args:
+        c1: First color (R, G, B, A) as integers 0-255.
+        c2: Second color (R, G, B, A) as integers 0-255.
+        ratio: Interpolation factor in [0, 1].
+        
+    Returns:
+        Blended color (R, G, B, A) as integers 0-255.
     """
-    r_res = round(c1[0] * (1.0 - ratio) + c2[0] * ratio)
-    g_res = round(c1[1] * (1.0 - ratio) + c2[1] * ratio)
-    b_res = round(c1[2] * (1.0 - ratio) + c2[2] * ratio)
-    alpha_res = c1[3]
-    return (r_res, g_res, b_res, alpha_res)
+    # Clamp ratio to [0, 1] to prevent extrapolation
+    ratio = max(0.0, min(1.0, ratio))
+    
+    # Interpolate RGB channels
+    r = round(c1.r * (1.0 - ratio) + c2.r * ratio)
+    g = round(c1.g * (1.0 - ratio) + c2.g * ratio)
+    b = round(c1.b * (1.0 - ratio) + c2.b * ratio)
+    
+    # Alpha is taken from c1
+    a = c1.a
+    
+    return Color(r, g, b, a)
 ```
 
 ## Subtopics
 
-### [SVT Animation Interpolation](7953-svt-animation-interpolation.md)
-SVT Animation Interpolation is a technique used to smooth the playback of animated Sparse Volume Textures (SVTs) by blending between two adjacent frames using a scalar alpha value. It addresses the visual discontinuity inherent in discrete frame-based animation by providing temporal continuity, distinguishing it from simple frame stepping or non-interpolated playback.
-
 ### Blur Group Colour Replacement
-A mechanism to preserve sharpness when the average method causes object blur due to large differences between $C_1$ and $C_2$, by replacing the voxel's colour with that of a neighbouring voxel from a 'clear group' [S2].
-- **Definition:** Used when the difference between color components $C_1$ and $C_2$ is large, causing blur [S2].
+A mechanism to preserve sharpness when the average method causes object blur due to large differences between C1 and C2 [S2]. It addresses the visual discontinuity inherent in discrete frame-based animation by providing temporal continuity, distinguishing it from simple frame stepping or non-interpolated playback [S1, unofficial].
+- **Definition:** A post-processing step that replaces a voxel's color with that of a neighboring voxel from a 'clear group' if the difference between the two source colors exceeds a threshold [S2].
 - **Steps:**
-  1. Set defined colours into a blur group if the difference of $C_1$ and $C_2$ is more than a particular threshold [S2].
-  2. Set defined colours into a clear group if the difference of $C_1$ and $C_2$ is less than or equal to the threshold [S2].
-  3. Replace colour $C_{old}$ of the voxel in the blur group by colour of neighbouring voxel that has the closest value to $C_{old}$ and has to be in the clear group [S2].
+  1. Define a threshold for color difference.
+  2. If the difference between C1 and C2 is greater than the threshold, add the color to a 'blur group'.
+  3. If the difference is less than or equal to the threshold, add the color to a 'clear group'.
+  4. For voxels in the blur group, replace the color $C_{old}$ with the color of a neighboring voxel that has the closest value to $C_{old}$ and belongs to the clear group [S2].
+- **When to choose:** Use when standard linear blending causes unacceptable blur in high-contrast regions, particularly in multi-view reconstruction or animation [S2].
 
 ### Density-based Blending
 An improvement to color blending where the blending function is based on the physical density of the medium integrated along the camera ray, rather than an empirical function of distance [S3, unofficial].
-- **Definition:** Replaces empirical blending with a density-driven function $b'$ calculated by integrating the medium density $\varrho$ along the camera ray to the pixel's 3D location [S3, unofficial].
-- **Formula:** $b'(\mathbf{x}_{2D}) = \int_{\text{camera}}^{\text{pixel } \mathbf{x}} \varrho(\mathbf{x}') \, d\mathbf{x}'$ [S3, unofficial].
+- **Definition:** Uses the integral of the density function $\varrho$ along the camera ray to determine the blending weight [S3, unofficial].
+- **Formula:**
+  $$ b'(\mathbf{x}_{2D}) = \int_{\text{camera}}^{\text{pixel } \mathbf{x}} \varrho(\mathbf{x}') \, d\mathbf{x}' $$
+  The blending factor is derived from $b'$, normalized by a maximum density value [S3, unofficial].
 - **Pitfall:** The values of $b'$ are not in $[0, 1]$, so the equation must be normalized by a certain maximum density before use in the blending formula [S3, unofficial].
+- **When to choose:** Use when physically based scattering is required, and the density function is known or analytically integrable [S3, unofficial].
+
+### Transfer Function Blending & Transition
+Blends between multiple transfer functions by interpolating a floating-point index, wrapping around if it exceeds the number of functions [S4, unofficial].
+- **Definition:** Allows smooth transitions between different transfer functions by treating the transfer function index as a continuous variable [S4, unofficial].
+- **Steps:**
+  1. Get the current transfer function index from the mapper.
+  2. Add a step value (scaled by `blendperframe`).
+  3. If the index $\ge$ number of functions, wrap using `index = index - floor(index)`.
+  4. Set the new index as a float to be used for interpolation [S4, unofficial].
+- **Parameter:** `blendperframe`: Controls transition speed. Scaled as $0.01 \times \text{speed}$. Applied per frame to index [S4, unofficial].
+- **Pitfall:** Index wrapping uses `floor()` to handle fractional overshoot correctly, ensuring smooth cycling through functions [S4, unofficial].
+- **When to choose:** Use when animating or transitioning between different scalar-to-color mappings [S4, unofficial].
+
+### Color Constraint with Blend Ratio
+An optional constraint to preserve original primitive color while allowing learnable variation, controlled by hyperparameter $\mu_{blend}$ [S5, unofficial].
+- **Definition:** Blends an original color $c_i^{org}$ with a learnable color $c_i^{var}$ [S5, unofficial].
+- **Formula:**
+  $$ c_i = \mu_{blend} c_i^{org} + (1 - \mu_{blend}) c_i^{var} $$
+  Where $c_i^{org}$ is the original color, $c_i^{var}$ is the learnable color, and $\mu_{blend} \in [0, 1]$ is the hyperparameter [S5, unofficial].
+- **Parameter:** $\mu_{blend}$: Ratio defining blend between original and learnable color. Default is 0. Value 1 uses original colors [S5, unofficial].
+- **When to choose:** Use in differentiable rendering or optimization contexts where preserving some original aesthetic while allowing variation is desired [S5, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per blend operation, as it performs a fixed number of arithmetic operations per channel [G].
-- **Memory Complexity:** $O(1)$, requiring only storage for two input colors and one output color [G].
-- **Strengths:** Computationally inexpensive; provides smooth visual transitions; handles multi-channel data uniformly [S1, unofficial].
-- **Limitations:** Does not account for physical light transport or opacity accumulation; alpha is not interpolated, which can break transparency continuity [G].
-- **When to use:** When a simple, fast color transition between two known states is required, such as in transfer function editing or frame interpolation [S1, unofficial].
-- **When not to use:** When physically accurate compositing of translucent volumes is needed, or when alpha blending is required for transparency [G].
+- **Time Complexity:** $O(1)$ per color channel. The operation involves a constant number of arithmetic operations.
+- **Memory Complexity:** $O(1)$. No additional data structures are required beyond the input colors and ratio.
+- **Strengths:** Extremely fast, simple to implement, and numerically stable for small ratios.
+- **Limitations:** Does not account for physical light transport (alpha is not blended). May cause blur in high-contrast regions if not supplemented with sharpness-preserving techniques like Blur Group Colour Replacement [S2].
+- **When to use:** Standard 1D transfer function sampling, simple color interpolation.
+- **When not to use:** When physical alpha blending is required, or when sharp edges must be preserved in high-contrast regions without additional post-processing.
 
 ## Background
-The method originates from basic computer graphics color interpolation techniques and is applied in volume rendering pipelines to smoothly transition between classified color regions [S1, unofficial]. It is commonly used in transfer function editors and real-time visualization tools where performance is prioritized over physical accuracy [G].
+Linear color interpolation is a fundamental technique in computer graphics, widely used in texture mapping, transfer functions, and animation. In the context of volume rendering, it is the standard method for sampling 1D transfer functions, which map scalar values to RGBA colors. The specific implementation of taking alpha from the first color is common in LUT-based sampling where the alpha channel defines the opacity of the material at that scalar value, rather than a mixture of opacities [S1, unofficial].
 
 ## Sources
 [S1] Musta-Kissa/quadtree-raycast, https://github.com/Musta-Kissa/quadtree-raycast, fetched 2026-10-24 (unofficial)
 [S2] Volumetric Representation for Sparse Multi-Views, https://doi.org/10.1109/icip.2006.312545, fetched 2026-10-26
 [S3] PDF Real-Time Light Transport in Analytically Integrable Participating Media, https://cgg.mff.cuni.cz/~tomas/publications/pub-thesis-real-time-scattering/thesis.pdf, fetched 2026-10-29 (unofficial)
+[S4] mversiotech/volume-rendering-demo, https://github.com/mversiotech/volume-rendering-demo, fetched 2026-10-26 (unofficial)
+[S5] DiffBMP: Differentiable Rendering with Bitmap Primitives, https://doi.org/10.48550/arXiv.2602.22625, fetched 2026-10-27 (unofficial)

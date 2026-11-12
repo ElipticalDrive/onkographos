@@ -1,57 +1,67 @@
 # Edit-NeRF
 
+Also called: Conditional Radiance Field for Editing
 
 ## Overview
-Edit-NeRF is a method for scene editing using image conditioning from user input, formulated as a joint optimization problem of both the NeRF network parameters and latent codes [S1]. It is the first method to execute user-controlled deformation models on NeRF, proposing a modular network's conditional radiance field to guide model editing [S2]. It sets itself apart from standard NeRF by introducing instance-specific latent codes for shape and appearance, allowing the network to learn underlying part features in an unsupervised manner and propagate 2D user guidance to 3D space [S2].
+Edit-NeRF is a method for user-controlled 3D scene editing that formulates the problem as a joint optimization of NeRF network parameters and latent codes [S1]. It solves the limitation of standard NeRFs, which are static and cannot be easily modified by external features, by introducing a modular network architecture with conditional radiance fields [S2]. It differs from its siblings by being the first method to execute user-controlled deformation models on NeRF using a shared shape network and instance-specific latent codes, whereas methods like CLIP-NeRF later introduced text/image guidance via CLIP embeddings [S1, S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of input images of a scene (or category instances), user-provided image conditioning (guidance for editing), and camera poses.
-*   **Outputs:** A modified radiance field representation capable of rendering edited views.
+*   **Input:** User-provided image conditioning (2D image or sketch) representing the desired edit; initial NeRF weights; category-specific shared shape network parameters.
+*   **Output:** Edited 3D radiance field (density $\sigma$ and color $\mathbf{c}$) consistent with the user's edit.
 
 **Data Structures:**
 The shape representation is composed of two networks [S1]:
-1.  **Category-specific shared shape network ($F_{share}$):** A neural network that is not conditioned on latent codes. In theory, it behaves as a deformation field [S1].
-2.  **Instance-specific shape network ($F_{inst}$):** A neural network conditioned on a shape latent code $\mathbf{z}_s$ [S1].
+1.  **Shared Shape Network ($F_{share}$):** Category-specific, not conditioned on latent codes. It behaves as a deformation field [S1].
+2.  **Instance-Specific Shape Network ($F_{inst}$):** Conditioned on a shape latent code $z_s$ [S1].
 
-The rendering equation for a ray $\mathbf{r}$ with shape latent $\mathbf{z}_s$ and appearance latent $\mathbf{z}_a$ is [S2]:
-$$
-\hat{C}(\mathbf{r}, \mathbf{z}_s, \mathbf{z}_a) = \sum_{i=1}^{N_c-1} \mathbf{c}_i \alpha_i \exp \left( -\sum_{j=1}^{i-1} \sigma_j \delta_j \right)
-$$
-where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ and $\delta_i$ is the distance between samples [S2]. $\mathbf{c}_i$ is the color and $\sigma_i$ is the density predicted by the network conditioned on $\mathbf{z}_s$ and $\mathbf{z}_a$.
+The color network is conditioned on an appearance latent code $z_a$ (or $z_c$ in some notations) [S1, S2].
 
-**Optimization Procedure:**
-The editing is performed via Gradient Latent Optimization (GLO) [S1]. The process involves three stages [S1]:
-1.  **Latent Code Optimization:** Optimize the photometric loss with respect to the latent codes $\mathbf{z}_s$ and $\mathbf{z}_a$ while keeping the MLP weights fixed.
-2.  **Network Weight Optimization:** Optimize the MLP weights with respect to the photometric loss while keeping the latent codes fixed.
-3.  **Joint Optimization:** Optimize both the latent codes and the MLP weights jointly [S1].
+**Numbered Steps:**
+1.  **Initialization:** Train the model on multiple instances of the same category to learn underlying part features in an unsupervised manner [S2].
+2.  **Latent Code Optimization:** Optimize the latent codes $z_s$ and $z_a$ to minimize the NeRF photometric loss against the user-provided image conditioning [S1].
+3.  **Network Weight Optimization:** Optimize the MLP weights of the NeRF networks while keeping latent codes fixed [S1].
+4.  **Joint Optimization:** Optimize both the latent codes ($z_s, z_a$) and the MLP weights jointly to refine the edit [S1].
+
+**Formulas:**
+The rendered color $\hat{C}(\mathbf{r}, z_s, z_c)$ for a ray $\mathbf{r}$ is computed via volumetric rendering [S2]:
+$$
+\hat{C}(\mathbf{r}, z_s, z_c) = \sum_{i=1}^{N_c} c_i \alpha_i \exp \left( -\sum_{j=1}^{i-1} \sigma_j \delta_j \right)
+$$
+where:
+*   $N_c$ is the number of samples along the ray.
+*   $c_i$ is the color at sample $i$.
+*   $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ is the transmittance-derived alpha.
+*   $\sigma_j$ is the density at sample $j$.
+*   $\delta_j$ is the distance between samples.
 
 **Parameters:**
-*   $\mathbf{z}_s$: Shape latent code.
-*   $\mathbf{z}_a$: Appearance latent code (referred to as $\mathbf{z}_c$ in some contexts, representing color features) [S2].
+*   $z_s$: Shape latent code.
+*   $z_a$ (or $z_c$): Appearance/Color latent code.
 
-**Pitfalls:**
-*   Limited capability in shape operations; it only supports adding or deleting local parts of an object [S2].
-*   The editing process is slow due to its iterative optimization nature [S2].
+**Edge Cases and Pitfalls:**
+*   **Limited Shape Operations:** The method only supports adding or deleting local parts of an object; it does not support complex global deformations [S2].
+*   **Slow Convergence:** The editing process is slow due to its iterative optimization nature [S2].
+*   **Blurriness:** Without explicit geometric consistency constraints (as seen in later methods like Instruct-NeRF2NeRF), edits may lead to blurriness or unintended global texture changes [S1].
 
 ## Subtopics
 
-### Instruct-NeRF2NeRF
-A diffusion-based method for editing a NeRF scene guided by text instructions, utilizing InstructPix2Pix [S3]. The edit is performed by iteratively updating the image dataset of the original scene while training NeRF using these edited images [S3]. It demonstrates high-quality local edit results on real scenes but sometimes cannot preserve the rest of the scene, resulting in a blurrier scene compared to the original, and sometimes introduces texture and color changes to the entire scene [S3].
+### [Instruct-NeRF2NeRF](12265-instruct-nerf2nerf.md)
+Instruct-NeRF2NeRF is a diffusion-based method for editing a NeRF scene guided by text instructions, utilizing InstructPix2Pix. It solves the problem of modifying 3D scenes via 2D text prompts by iteratively updating the image dataset of the original scene while training NeRF using these edited images. It differs from Edit-NeRF by lacking explicit geometric consistency constraints during the editing phase, which can lead to blurriness or unintended global texture changes.
 
 ### SINE
-A method for editing a NeRF scene by editing a single view and applying the edit to the entire scene [S3]. It encodes changes in geometry and texture over the original NeRF scene by learning a prior-guided editing field. This field is used to render modified object geometry and color, with a color compositing layer supervised by the single edited view to apply the edit on novel views [S3]. It is applied on real and synthetic scenes by changing the geometry and texture of objects [S3].
+SINE is a method for editing a NeRF scene by editing a single view and applying the edit to the entire scene [S3]. It encodes changes in geometry and texture over the original NeRF scene by learning a prior-guided editing field. This field is used to render modified object geometry and color, and a color compositing layer supervised by the single edited view applies the edit on novel views [S3]. It is applied on real and synthetic scenes by changing geometry and texture of objects [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Slow due to iterative optimization (GLO) involving joint optimization of latent codes and network weights [S2].
-*   **Memory Complexity:** Requires storing latent codes $\mathbf{z}_s$ and $\mathbf{z}_a$ for each instance or edit target, in addition to the standard NeRF weights [S1].
-*   **Strengths:** Allows for user-controlled deformation and modular network conditional radiance fields [S2]. Supports unsupervised learning of underlying part features [S2].
-*   **Limitations:** Limited to adding or deleting local parts; cannot perform complex global deformations [S2]. Slow convergence due to iterative nature [S2].
-*   **When to use:** When user-controlled, local shape/texture edits are required via image conditioning.
-*   **When not to use:** When real-time editing or complex global shape manipulation is needed.
+*   **Time Complexity:** Slow due to iterative optimization of latent codes and network weights [S2].
+*   **Memory Complexity:** Requires storing latent codes $z_s$ and $z_a$ per instance/edit [S1].
+*   **Strengths:** Allows user-controlled deformation; modular architecture separates shape and appearance [S2].
+*   **Limitations:** Limited to local part addition/deletion; slow convergence; potential for blurriness without geometric constraints [S2].
+*   **When to Use:** When user-controlled local edits on a category of objects are required and computational time is not the primary constraint [S2].
+*   **When Not to Use:** For global deformations, real-time editing, or when high geometric consistency is critical without additional constraints [S2].
 
 ## Background
-Edit-NeRF was proposed in June 2021 by Liu et al. [S1, S2]. It is the first method to execute user-controlled deformation models on NeRF, addressing the lack of theoretical priors for model editability in standard NeRF [S2]. It builds on the concept of latent-conditioned NeRF models, where shape and appearance are disentangled into latent codes [S1]. Innovations on this approach include CLIP-NeRF (December 2021), which uses CLIP to extract latent space displacements from text or image input [S1].
+Edit-NeRF was proposed by Liu et al. in 2021 [S2]. It was the first method to execute user-controlled deformation models on NeRF, proposing a modular network's conditional radiance field to guide model editing [S2]. It builds on the standard latent-conditioned NeRF architecture but introduces a shared shape network and instance-specific latent codes to enable editing [S1]. It was innovated upon by CLIP-NeRF in December 2021, which introduced text/image guidance via CLIP [S1].
 
 ## Sources
 [S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

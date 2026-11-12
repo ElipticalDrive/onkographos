@@ -3,107 +3,75 @@
 Also called: k-D Tree Volume Subdivision
 
 ## Overview
-K-D Tree Subdivision partitions a volumetric dataset into subvolumes using a k-D tree structure with alternating binary subdivision of coordinate planes, enabling unambiguous front-to-back ordering for compositing [S1][S2, S3, unofficial]. Unlike fixed viewpoint partitioning which minimizes overlap by slicing orthogonal to the view, k-D tree partitioning is view-independent and suitable for animation sequences where the viewpoint changes [S2, S3, unofficial].
+K-D Tree Subdivision partitions a 3D volume into subvolumes using a k-d tree structure with alternating binary subdivision of coordinate planes, enabling unambiguous front-to-back ordering for compositing [S2, S3, unofficial]. Unlike fixed viewpoint partitioning which minimizes overlap by slicing orthogonal to the view, k-D tree partitioning is view-independent and suitable for animation sequences where the viewpoint changes [S2, unofficial]. It is used to determine the front-to-back image compositing order hierarchically by recursive traversal, visiting the 'front' child before the 'back' child [S3, unofficial].
 
 ## How it works
-**Inputs:** A 3D volume grid of $N$ grid points (voxels) [S2, S3, unofficial].
-**Outputs:** A k-D tree structure defining subvolumes and a hierarchical traversal order for front-to-back compositing [S1][S2, S3, unofficial].
+**Inputs:** A 3D volume grid of points (voxels).
+**Outputs:** A k-d tree structure defining subvolumes and a traversal order for front-to-back compositing.
 
 **Data Structures:**
-The k-D tree is a binary tree where each node represents a subvolume [S2, S3, unofficial]. Each node stores the following fields:
-- `dim`: The split dimension ($d \in \{x, y, z\}$) [S2, S3, unofficial].
-- `split_pos`: The coordinate or index along `dim` where the split occurs [G].
-- `left`: Reference to the front child node [G].
-- `right`: Reference to the back child node [G].
-The split dimension alternates at each level: level 0 splits $x$, level 1 splits $y$, level 2 splits $z$, and so on [S2, S3, unofficial].
-
-**Steps:**
-1. Partition the volume equally along all coordinate planes using a k-D tree structure with alternating binary subdivision at each level [S2, S3, unofficial].
-2. Replicate one layer of the boundary grid at each subvolume to prevent loss of ray samples at cut boundaries [S2, S3, unofficial]. If a subvolume is split at index $k$, the left child includes layers up to $k$, and the right child includes layers from $k$ to $n$, with layer $k$ replicated in the right child [S2, S3, unofficial].
-3. Determine the front-to-back compositing order by recursively traversing the k-D tree, visiting the 'front' child before the 'back' child [S1][S2, S3, unofficial].
-
-**Pseudocode:**
+The volume is represented as a grid of points. The k-d tree is not explicitly stored as nodes with pointers in the primary description, but the structure is defined by the recursive subdivision logic. For implementation, a node can be defined as:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-class Node:
-    def __init__(self, dim, split_pos, left, right):
-        self.dim = dim
-        self.split_pos = split_pos
-        self.left = left
-        self.right = right
-
-def build_kd_tree(grid_points, bounds, depth=0):
-    """
-    Recursively build a k-D tree for volume subdivision.
-    grid_points: list of 3D coordinate tuples representing the volume grid
-    bounds: tuple (min_x, max_x, min_y, max_y, min_z, max_z)
-    depth: current tree depth, used to determine split dimension
-    """
-    # Standard guard for leaf conversion [G]
-    if depth >= 10 or len(grid_points) <= 1:
-        return Node(dim=None, split_pos=None, left=None, right=None)
-
-    # Determine split dimension: 0=x, 1=y, 2=z
-    dim = depth % 3
-    axis_idx = dim
-    min_val, max_val = bounds[axis_idx * 2], bounds[axis_idx * 2 + 1]
-    mid_val = (min_val + max_val) / 2.0
-
-    # Partition grid points equally along the chosen dimension
-    left_points = [p for p in grid_points if p[axis_idx] <= mid_val]
-    right_points = [p for p in grid_points if p[axis_idx] > mid_val]
-
-    # Boundary Replication: Replicate the boundary layer to the right child
-    # to avoid missing ray samples at the cut.
-    boundary_points = [p for p in grid_points if abs(p[axis_idx] - mid_val) < 1e-9]
-    right_points.extend(boundary_points)
-
-    # Update bounds for recursive calls
-    left_bounds = list(bounds)
-    right_bounds = list(bounds)
-    left_bounds[axis_idx * 2 + 1] = mid_val
-    right_bounds[axis_idx * 2] = mid_val
-
-    left_child = build_kd_tree(left_points, tuple(left_bounds), depth + 1)
-    right_child = build_kd_tree(right_points, tuple(right_bounds), depth + 1)
-
-    return Node(dim, mid_val, left_child, right_child)
-
-def get_compositing_order(node):
-    """
-    Returns the list of subvolumes in front-to-back compositing order.
-    """
-    if node is None:
-        return []
-    if node.left is None and node.right is None:
-        return [node]
-    
-    # Visit front child first, then back child
-    front_order = get_compositing_order(node.left)
-    back_order = get_compositing_order(node.right)
-    
-    return front_order + back_order
+class KdTreeNode:
+    split_axis: int  # 0 for x, 1 for y, 2 for z
+    split_value: float  # Coordinate value of the split plane
+    left_child: KdTreeNode  # Subvolume 'behind' or 'left' of split
+    right_child: KdTreeNode  # Subvolume 'in front' or 'right' of split
+    samples: List[Sample]  # Only for leaf nodes
 ```
+Where `Sample` contains position $(x, y, z)$ and function value.
+
+**Steps:**
+1. **Recursive Subdivision:**
+   - Start with the root node representing the bounding box of all samples.
+   - For a node at depth $i$, determine the split axis $d = i \pmod 3$ [S4].
+   - Sort the vector $v$ of samples in the $x_d$ direction [S4].
+   - Split $v$ into two halves, $v_1$ and $v_2$ [S4].
+   - If $v$ is odd-sized, store a link to the midpoint and the pivot value in the current node [S4].
+   - Recurse on $v_1$ and $v_2$ until the subvector length is 1 [S4].
+   - Each leaf node contains exactly one sample [S4].
+
+2. **Boundary Replication:**
+   - When a volume is evenly subdivided, ray samples lying in the cut boundary region are lost because each voxel is located at a corner of the grid [S2, S3, unofficial].
+   - To prevent this, replicate one layer of the boundary grid at each subvolume [S2, unofficial].
+   - For example, if splitting into Subvolume 1 and Subvolume 2 at layer $k$, Subvolume 1 includes layers $1$ to $k$, and Subvolume 2 includes layers $k$ to $n$, where layer $k$ is replicated in Subvolume 2 [S2, unofficial].
+
+3. **Traversal for Compositing:**
+   - Determine the front-to-back compositing order by recursively traversing the k-d tree [S2, S3, unofficial].
+   - Visit the 'front' child before the 'back' child [S2, S3, unofficial].
+   - The definition of 'front' and 'back' depends on the view direction relative to the split plane. For a split along axis $d$, if the view direction has a positive component along $d$, the child with higher coordinate values is 'front' [G].
+
+**Formulas:**
+- Tree height: $\lfloor \log_2(n + 1) \rfloor$ [S4].
+- Worst-case number of nodes (when $n = 2^j$): $2n - 1$ [S4].
 
 **Parameters:**
-- Split Strategy: Equal partitioning along coordinate planes [S2, S3, unofficial].
-- Tree Depth: Determined by the desired number of subvolumes [G].
+- Alternating axis: $x, y, z$ repeating [S4].
+- Leaf size: 1 sample [S4].
 
 **Edge Cases and Pitfalls:**
-- **Boundary Loss:** If boundary layers are not replicated, ray samples in the cut boundary region are lost, which causes black strips to appear in the composited image when the view vector is parallel to the cut plane [S2, S3, unofficial].
-- **View Independence:** This method does not minimize overlap for a specific view, potentially increasing compositing cost compared to view-dependent slicing [S2, S3, unofficial].
+- **Boundary Loss:** If boundary replication is not performed, black strips will appear in the composited image when the view vector is parallel to the cut plane [S2, S3, unofficial].
+- **View Dependency:** The 'front' and 'back' children must be determined dynamically based on the current view direction during traversal [G].
+
+## Subtopics
+
+### Array-based kd-tree Construction
+A data structure storing $n$ scattered data points in a 3D kd-tree to enable fast neighbor search, avoiding expensive Voronoi diagram computation for natural neighbors [S4]. It stores the tree in a single array where the root is at index 1, and children of node $j$ are at $2j$ and $2j+1$ [S4]. Binary indexing operators are used: $a^0_d = a_d$, $a^j_d = (a^{j-1}_d) * 2$ (left shift), $a_j = (a_{j-1}) \text{ div } 2$ (right shift) [S4]. The father of node $b_d$ is $b_{d1}$ (right shift). Children are $b_{d1}$ and $(b_{d1}) \oplus 1_d$ (XOR with 1) [S4]. This method is chosen when fast neighbor search is required for point-based rendering [S4].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Strengths:** View-independent, suitable for animation and perspective projection, enables parallel rendering of sibling nodes [S2, S3, unofficial].
-- **Limitations:** Does not minimize overlap for a fixed view, potentially higher compositing cost than view-dependent methods [S2, S3, unofficial].
+- **Time Complexity:** Construction is $O(n \log n)$ due to sorting at each level [S4]. Traversal is $O(N)$ where $N$ is the number of nodes visited.
+- **Memory Complexity:** $O(n)$ for storing samples and tree structure [S4].
+- **Strengths:** View-independent, suitable for animation [S2, unofficial]. Hierarchical structure allows parallel processing of sibling nodes [S2, unofficial].
+- **Limitations:** Requires boundary replication to avoid artifacts [S2, unofficial]. Sorting at each level can be costly for large datasets [S4].
+- **When to use:** When viewpoint is unknown or changes frequently (e.g., animation) [S2, S3, unofficial]. When parallel compositing is desired [S2, unofficial].
 
 ## Background
-Developed for data-distributed parallel ray-traced volume rendering [S1][S2, S3, unofficial]. It serves as an alternative to fixed viewpoint partitioning to handle changing viewpoints in animation sequences [S2, S3, unofficial]. The traversal logic is similar to well-known front-to-back traversals of BSP-trees and octrees [S2, S3, unofficial].
+Originated in the context of parallel ray-traced volume rendering [S1][S2, S3, unofficial]. The method was proposed to handle volume partitioning for distributed rendering where the viewpoint might change or be perspective [S2, S3, unofficial]. It builds on the concept of k-d trees for spatial partitioning [S2, S3, unofficial].
 
 ## Sources
 [S1] A data distributed, parallel algorithm for ray-traced volume rendering, https://doi.org/10.1109/prs.1993.586080, fetched 2026-10-24
 [S2] NASA Technical Reports Server (NTRS) 19940009248: A data distributed parallel algorithm for ray-traced volume rendering, https://archive.org/details/NASA_NTRS_Archive_19940009248, fetched 2026-10-26 (unofficial)
 [S3] DTIC ADA270501: A Data Distributed Parallel Algorithm for Ray-Traced Volume Rendering, https://archive.org/details/DTIC_ADA270501, fetched 2026-10-26 (unofficial)
+[S4] Direct Isosurface Extraction from Scattered Volume Data, https://doi.org/10.2312/vissym/eurovis06/099-106, fetched 2026-10-26

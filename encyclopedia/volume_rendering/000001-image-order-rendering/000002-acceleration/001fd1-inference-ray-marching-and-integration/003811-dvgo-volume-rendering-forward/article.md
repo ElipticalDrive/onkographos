@@ -3,211 +3,170 @@
 Also called: DVGO Forward Pass, Direct Voxel Grid Optimization Rendering
 
 ## Overview
-Performs volume rendering for a batch of rays, including sampling, density/alpha computation, transmittance calculation, color estimation, and ray marching [S1, unofficial]. It differs from its parent [Inference Ray Marching and Integration](2148-inference-ray-marching-and-integration.md) by explicitly implementing the forward pass logic for Direct Voxel Grid Optimization (DVGO), utilizing a discrete voxel grid with trilinear interpolation for density and a separate network for color, rather than a continuous MLP [S1, unofficial][S2].
+Performs volume rendering for a batch of rays, including sampling, density/alpha computation, transmittance calculation, color estimation, and ray marching [S1, unofficial]. It differs from implicit NeRF methods by storing features in a discrete voxel grid and using interpolation, which allows for faster evaluation than MLP-based approaches while maintaining view-dependent effects through a separate color network [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Ray origins and directions for a batch of rays.
-- Camera parameters (near/far planes, intrinsics).
-- Pre-trained density network weights.
-- Pre-trained color network weights ($k_0$ network and optional $rgbnet$).
-- Voxel grid data structure (density values).
-- Optional mask cache for free space pruning.
-- Parameters: `interval` (step size), `fast_color_thres`, `use_fourier_grid`, `rgbnet_full_implicit`, `rgbnet_direct`, `render_depth`.
+- `ray_pts`: Tensor of shape $(N, 3)$ containing 3D coordinates of sampled points along rays.
+- `ray_id`: Tensor of shape $(N)$ mapping each point to its parent ray index.
+- `step_id`: Tensor of shape $(N)$ containing the depth index or distance metric for each point.
+- `viewdirs`: Tensor of shape $(N, 3)$ containing viewing directions for each point.
+- `mask_cache`: Optional boolean mask tensor indicating free space.
+- `bg`: Background color tensor.
+- `alphainv_last`: Accumulated transmittance at the end of the ray for background contribution.
+- `render_depth`: Boolean flag to compute depth output.
 
-**Outputs:**
-- Rendered RGB images.
-- Optional depth maps.
+**Parameters:**
+- `interval`: Step size for sampling, calculated as `render_kwargs['stepsize'] * self.voxel_size_ratio` [S1, unofficial].
+- `fast_color_thres`: Threshold for early termination of color computation. If $> 0$, points with alpha or weight below this threshold are filtered [S1, unofficial].
+- `use_fourier_grid`: Boolean flag. If false, mask caching and fast color thresholds are applied [S1, unofficial].
+- `rgbnet_full_implicit`: Boolean flag. If false, color feature $k_0$ is queried from a dedicated network [S1, unofficial].
+- `rgbnet_direct`: Boolean flag. If true, $k_0$ is used directly as the view feature; otherwise, $k_0$ is split into diffuse and view components [S1, unofficial].
+- `viewfreq`: Frequency multiplier for positional embedding of view directions [S1, unofficial].
 
 **Data Structures:**
-- **Voxel Grid:** A 3D tensor storing density values. Access is performed via trilinear interpolation.
-- **Mask Cache:** A boolean grid or sparse structure indicating free space to skip sampling [S1, unofficial].
-- **Ray Data:** Arrays for ray points (`ray_pts`), ray IDs (`ray_id`), and step IDs (`step_id`) [S1, unofficial].
+- The method relies on standard PyTorch tensors for all geometric and feature data.
+- `Alphas2Weights.apply`: A custom operation that computes accumulated transmittance weights from alpha values and ray IDs.
+- `segment_coo`: A sparse accumulation operation that sums values grouped by ray ID.
 
 **Steps:**
-
-1.  **Sampling:** Sample points along the rays using a sampling function `self.sample_ray`. The step size `interval` is calculated as:
-    $$ \text{interval} = \text{render\_kwargs}['\text{stepsize}'] \times \text{self.voxel\_size\_ratio} $$
-    [S1, unofficial]
-
-2.  **Free Space Pruning:** If a `mask_cache` exists and `use_fourier_grid` is false, filter `ray_pts`, `ray_id`, and `step_id` to skip points known to be in free space [S1, unofficial].
-
-3.  **Density Query:** Query the density $\sigma$ from the density network at the sampled points. This typically involves trilinear interpolation from the voxel grid [S1, unofficial].
-
-4.  **Alpha Conversion:** Activate density to alpha ($\alpha$) using `self.activate_density`. The standard conversion is:
-    $$ \alpha = 1 - \exp(-\sigma \cdot \delta) $$
-    where $\delta$ is the distance between samples (often approximated by `interval`) [G].
-
-5.  **Alpha Filtering:** If `fast_color_thres > 0` and `use_fourier_grid` is false, filter out points where $\alpha \le \text{fast\_color\_thres}$ [S1, unofficial].
-
-6.  **Weight Computation:** Compute accumulated transmittance weights $w_i$ for each sample point using `Alphas2Weights.apply`. This function computes the standard volume rendering weights:
-    $$ w_i = \alpha_i \prod_{j < i} (1 - \alpha_j) $$
-    grouped by `ray_id` [S1, unofficial].
-
-7.  **Weight Filtering:** If `fast_color_thres > 0` and `use_fourier_grid` is false, filter out points where $w_i \le \text{fast\_color\_thres}$ [S1, unofficial].
-
-8.  **Color Feature Extraction:** Query the color feature $k_0$ from the $k_0$ network if `rgbnet_full_implicit` is false. This $k_0$ represents the base color/diffuse component [S1, unofficial].
-
-9.  **View-Dependent Color:** If an $rgbnet$ exists, compute view-dependent color:
-    - If `rgbnet_direct` is true, use $k_0$ as the view feature input.
-    - Otherwise, split $k_0$ into diffuse (first 3 channels) and view-dependent (remaining channels) components [S1, unofficial].
-
-10. **View Direction Embedding:** Compute positional embedding for view directions:
-    - Flatten view directions.
+1. **Sampling:** Sample points on rays using `self.sample_ray`. This generates `ray_pts`, `ray_id`, and `step_id` [S1, unofficial].
+2. **Free Space Culling:** If `mask_cache` exists and `use_fourier_grid` is false, filter `ray_pts`, `ray_id`, and `step_id` to remove points in known free space [S1, unofficial].
+3. **Density Query:** Query density from the density network using the sampled points [S1, unofficial].
+4. **Alpha Activation:** Convert density to alpha using `self.activate_density` [S1, unofficial].
+5. **Fast Color Filtering (Alpha):** If `fast_color_thres > 0` and `use_fourier_grid` is false, filter points where alpha $> fast\_color\_thres$ [S1, unofficial].
+6. **Weight Computation:** Compute accumulated transmittance weights using `Alphas2Weights.apply` with alpha, `ray_id`, and $N$ (total number of rays) [S1, unofficial].
+7. **Fast Color Filtering (Weight):** If `fast_color_thres > 0` and `use_fourier_grid` is false, filter points where weights $> fast\_color\_thres$ [S1, unofficial].
+8. **Color Feature Query:** Query color feature $k_0$ from the $k_0$ network if `rgbnet_full_implicit` is false [S1, unofficial].
+9. **View-Dependent Color:**
+   - If `rgbnet` exists, compute view-dependent color.
+   - If `rgbnet_direct` is true, use $k_0$ as the view feature.
+   - Otherwise, split $k_0$ into diffuse ($k_{0\_diffuse}$, first 3 channels) and view ($k_{0\_view}$, remaining channels) components [S1, unofficial].
+10. **View Direction Embedding:**
+    - Flatten `viewdirs`.
     - Multiply by `viewfreq`.
     - Concatenate sin/cos embeddings.
-    - Flatten and index by `ray_id` [S1, unofficial].
-
-11. **RGB Logit Computation:** Concatenate $k_0$ (view component) and the view direction embedding, then pass through the $rgbnet$ to get `rgb_logit` [S1, unofficial].
-
+    - Flatten and index by `ray_id` to get `viewdirs_emb` [S1, unofficial].
+11. **RGB Logit Computation:** Concatenate $k_{0\_view}$ and `viewdirs_emb`, pass through `rgbnet` to get `rgb_logit` [S1, unofficial].
 12. **Final RGB Calculation:**
-    - If `rgbnet_direct` is true: $\text{RGB} = \sigma(\text{rgb\_logit})$
-    - Else: $\text{RGB} = \sigma(\text{rgb\_logit} + k_0^{\text{diffuse}})$
-    where $\sigma$ is the sigmoid function [S1, unofficial].
-
-13. **Ray Marching Integration:** Compute the final RGB for each ray using `segment_coo`:
-    $$ \text{RGB}_{\text{ray}} = \sum_i w_i \cdot \text{RGB}_i + \alpha_{\text{inv\_last}} \cdot \text{bg} $$
-    where $\alpha_{\text{inv\_last}}$ is the accumulated transmittance after the last sample, and `bg` is the background color [S1, unofficial].
-
-14. **Depth Rendering:** If `render_depth` is true, compute depth using `segment_coo`:
-    $$ \text{Depth}_{\text{ray}} = \sum_i w_i \cdot \text{step\_id}_i $$
-    [S1, unofficial]
+    - If `rgbnet_direct` is true: $\text{RGB} = \sigma(\text{rgb\_logit})$.
+    - Else: $\text{RGB} = \sigma(\text{rgb\_logit} + k_{0\_diffuse})$, where $\sigma$ is the sigmoid function [S1, unofficial].
+13. **Marched RGB:** Compute final RGB using `segment_coo`: sum of $(\text{weights} \times \text{RGB})$ grouped by `ray_id`, plus background contribution $(\text{alphainv\_last} \times \text{bg})$ [S1, unofficial].
+14. **Depth Computation:** If `render_depth` is true, compute depth using `segment_coo`: sum of $(\text{weights} \times \text{step\_id})$ grouped by `ray_id` [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def dvgo_forward(rays, density_grid, k0_net, rgbnet, bg_color, 
-                 mask_cache=None, use_fourier_grid=False, 
-                 fast_color_thres=0.0, rgbnet_full_implicit=False, 
-                 rgbnet_direct=True, render_depth=False, 
-                 stepsize=1.0, voxel_size_ratio=1.0, viewfreq=1):
-    """
-    Performs the DVGO volume rendering forward pass.
-    """
-    # 1. Sampling
-    # Calculate interval
-    interval = stepsize * voxel_size_ratio
-    
-    # Sample points along rays (returns ray_pts, ray_id, step_id)
-    ray_pts, ray_id, step_id = sample_ray(rays, interval)
-    
-    # 2. Free Space Pruning
+def dvgo_forward(ray_pts, ray_id, step_id, viewdirs, mask_cache, bg, alphainv_last, 
+                 render_depth, fast_color_thres, use_fourier_grid, rgbnet_full_implicit, 
+                 rgbnet_direct, viewfreq, density_net, k0_net, rgb_net, 
+                 activate_density, alphas2weights, segment_coo):
+    # 1. Sampling is assumed to have produced ray_pts, ray_id, step_id
+    # 2. Free Space Culling
     if mask_cache is not None and not use_fourier_grid:
-        mask = query_mask_cache(mask_cache, ray_pts)
+        mask = mask_cache[ray_pts] # Assuming mask_cache is indexed by point location or pre-computed grid
         ray_pts = ray_pts[mask]
         ray_id = ray_id[mask]
         step_id = step_id[mask]
-        
+        viewdirs = viewdirs[mask]
+
     # 3. Density Query
-    # Query density from voxel grid using trilinear interpolation
-    density = query_density(density_grid, ray_pts)
-    
-    # 4. Alpha Conversion
-    alpha = 1.0 - torch.exp(-density * interval)
-    
-    # 5. Alpha Filtering
+    density = density_net(ray_pts)
+
+    # 4. Alpha Activation
+    alpha = activate_density(density)
+
+    # 5. Fast Color Filtering (Alpha)
     if fast_color_thres > 0 and not use_fourier_grid:
         valid_alpha = alpha > fast_color_thres
         ray_pts = ray_pts[valid_alpha]
         ray_id = ray_id[valid_alpha]
         step_id = step_id[valid_alpha]
+        viewdirs = viewdirs[valid_alpha]
         alpha = alpha[valid_alpha]
-        
+
     # 6. Weight Computation
-    # Compute weights w_i = alpha_i * prod(1 - alpha_j) for j < i
     weights = alphas2weights(alpha, ray_id)
-    
-    # 7. Weight Filtering
+
+    # 7. Fast Color Filtering (Weight)
     if fast_color_thres > 0 and not use_fourier_grid:
         valid_weight = weights > fast_color_thres
         ray_pts = ray_pts[valid_weight]
         ray_id = ray_id[valid_weight]
         step_id = step_id[valid_weight]
+        viewdirs = viewdirs[valid_weight]
         alpha = alpha[valid_weight]
         weights = weights[valid_weight]
-        
-    # 8. Color Feature Extraction
+
+    # 8. Color Feature Query
     if not rgbnet_full_implicit:
         k0 = k0_net(ray_pts)
     else:
-        k0 = None
-        
-    # 9 & 10. View-Dependent Color & Embedding
+        k0 = None # Implicit handling not detailed in sources
+
+    # 9. View-Dependent Color Setup
     if rgbnet is not None:
         if rgbnet_direct:
             k0_view = k0
+            k0_diffuse = None
         else:
-            k0_diffuse = k0[:, :3]
             k0_view = k0[:, 3:]
-            
-        # Flatten viewdirs and compute embedding
-        viewdirs = rays.directions[ray_id]
-        viewdirs_flat = viewdirs.view(-1, 3)
-        # Positional embedding for viewdirs
-        viewdirs_emb = positional_embedding(viewdirs_flat, viewfreq)
-        
-        # Concatenate and pass through rgbnet
+            k0_diffuse = k0[:, :3]
+    else:
+        k0_view = None
+        k0_diffuse = None
+
+    # 10. View Direction Embedding
+    viewdirs_flat = viewdirs.view(-1, 3)
+    viewdirs_emb = torch.cat([
+        torch.sin(viewdirs_flat * viewfreq),
+        torch.cos(viewdirs_flat * viewfreq)
+    ], dim=-1).view(-1, viewdirs_flat.size(1) * 2)
+    
+    # Index by ray_id is handled implicitly by the network input structure or explicit gathering
+    # Assuming viewdirs_emb is already aligned with ray_pts
+    viewdirs_emb = viewdirs_emb[torch.arange(len(viewdirs_emb))] # Placeholder for indexing logic
+
+    # 11. RGB Logit Computation
+    if k0_view is not None:
         rgb_input = torch.cat([k0_view, viewdirs_emb], dim=-1)
-        rgb_logit = rgbnet(rgb_input)
+        rgb_logit = rgb_net(rgb_input)
     else:
         rgb_logit = None
-        k0_diffuse = k0[:, :3] if not rgbnet_full_implicit else None
-        
-    # 11 & 12. Final RGB Calculation
+
+    # 12. Final RGB Calculation
     if rgbnet_direct:
         rgb = torch.sigmoid(rgb_logit)
     else:
         rgb = torch.sigmoid(rgb_logit + k0_diffuse)
-        
-    # 13. Ray Marching Integration
-    # Sum weights * rgb grouped by ray_id
-    rgb_image = segment_coo(weights * rgb, ray_id, num_rays=rays.num_rays)
+
+    # 13. Marched RGB
+    # segment_coo sums weights * rgb grouped by ray_id
+    rgb_marched = segment_coo(weights * rgb, ray_id)
     
     # Add background contribution
-    # alphainv_last is the accumulated transmittance after the last sample
-    alphainv_last = accumulated_transmittance(alpha, ray_id)
-    rgb_image = rgb_image + alphainv_last * bg_color
-    
-    # 14. Depth Rendering
-    depth_image = None
+    # alphainv_last is assumed to be aligned with ray_id for the final accumulation
+    rgb_final = rgb_marched + alphainv_last * bg
+
+    # 14. Depth Computation
     if render_depth:
-        depth_image = segment_coo(weights * step_id, ray_id, num_rays=rays.num_rays)
-        
-    return rgb_image, depth_image
+        depth = segment_coo(weights * step_id, ray_id)
+        return rgb_final, depth
+    
+    return rgb_final
 ```
-
-**Parameters:**
-- `interval`: Calculated as `render_kwargs['stepsize'] * self.voxel_size_ratio` [S1, unofficial].
-- `fast_color_thres`: Threshold for filtering points based on alpha and weight values. Typical value: 0.0 (disabled) or small positive value like 0.01 [S1, unofficial].
-- `use_fourier_grid`: Boolean flag. If true, skips mask cache and fast color thres filtering [S1, unofficial].
-- `rgbnet_full_implicit`: Boolean flag. If false, uses $k_0$ network for base color [S1, unofficial].
-- `rgbnet_direct`: Boolean flag. Determines how $k_0$ is used in the color network [S1, unofficial].
-- `render_depth`: Boolean flag. Enables depth map output [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-- **Precision:** Trilinear interpolation and exponential operations in alpha calculation can suffer from precision issues at very small densities or large step sizes [G].
-- **Boundaries:** Ray points outside the voxel grid bounds must be handled (e.g., clamped or filtered) before interpolation [G].
-- **Degenerate Input:** Empty ray batches or rays with no valid samples after filtering should return background color and zero depth [G].
 
 ## Subtopics
 
 ### [NeRF Volume Rendering](12442-nerf-volume-rendering.md)
-NeRF Volume Rendering synthesizes novel viewpoint images by sampling points along camera rays and accumulating density and color values predicted by a neural network. It differs from its parent [DVGO Volume Rendering Forward](8157-dvgo-volume-rendering-forward.md) by using a continuous Multi-Layer Perceptron (MLP) to query volumetric properties rather than a discrete voxel grid with trilinear interpolation.
+NeRF Volume Rendering is a differentiable method for synthesizing photorealistic novel views of a scene by estimating volume density and RGB color along camera rays using a neural network. It solves the problem of continuous 3D scene representation and rendering by parameterizing the scene as an implicit function, typically implemented via Multi-Layer Perceptrons (MLPs). Unlike explicit voxel-based methods such as DVGO, which store features in a grid and use interpolation, the classical NeRF approach queries a continuous field directly at sampled points along the ray. This allows for high-fidelity view-dependent effects but incurs significant computational costs due to the large number of MLP queries required.
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of sampled points per ray and the number of rays. Filtering steps reduce the effective number of points processed in the color network.
-- **Memory Complexity:** Dominated by the voxel grid storage and the intermediate tensors for ray points, densities, and alphas. The mask cache adds overhead if used.
-- **Measured Performance:** Performance depends heavily on the voxel grid resolution and the efficiency of the `segment_coo` operation. Fast color thresholding can significantly speed up rendering by reducing the number of points processed by the color network [S1, unofficial].
-- **Strengths:** Efficient inference due to discrete grid lookups and optional pruning. Suitable for real-time applications when combined with acceleration structures.
-- **Limitations:** Resolution is limited by the voxel grid size. High-resolution grids consume significant memory. View-dependent effects require additional network layers.
-- **When to Use:** Real-time rendering, applications requiring fast inference, scenes with moderate complexity.
-- **When Not to Use:** Scenes requiring extremely high frequency details that exceed the voxel grid resolution, or when memory is severely constrained.
+Time and memory complexity are not explicitly detailed in the sources. The method's performance depends on the number of sampled points, the size of the voxel grid, and the efficiency of the `segment_coo` and `Alphas2Weights` operations. The use of `mask_cache` and `fast_color_thres` provides optimization opportunities by reducing the number of points processed in later stages. Strengths include the ability to handle view-dependent effects and efficient rendering via voxel grid interpolation. Limitations may include the discretization error inherent in voxel-based representations and the computational cost of querying multiple networks (density, k0, rgb).
 
 ## Background
-DVGO (Direct Voxel Grid Optimization) was introduced as an alternative to continuous NeRF representations, aiming for faster training and inference by using a discrete voxel grid [S1, unofficial][S2]. It was developed by researchers at Shanghai Jiao Tong University [S1, unofficial].
+The method is part of the Direct Voxel Grid Optimization (DVGO) framework, which aims to accelerate NeRF training and rendering by using explicit voxel grids. The specific implementation details are derived from the `UnboundedNeRFPytorch` repository [S1, unofficial].
 
 ## Sources
 [S1] sjtuytc/UnboundedNeRFPytorch, https://github.com/sjtuytc/UnboundedNeRFPytorch, fetched 2026-10-26 (unofficial)
-[S2] Direct Voxel Grid Optimization, https://arxiv.org/abs/2206.07291, fetched 2026-10-26

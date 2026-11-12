@@ -1,117 +1,130 @@
 # CLIP Direction Consistency
 
-Also called: CLIP Direction Score
+Also called: CLIP Direction Score, Consistency Score
 
 ## Overview
-CLIP Direction Consistency is a regularization metric used in text-driven NeRF stylization to ensure that the semantic trajectory of the edited scene matches that of the original scene across adjacent camera views [S1]. It solves the problem of non-uniform stylization by enforcing that the direction of change in CLIP feature space between consecutive frames remains consistent between the original and edited renderings [S1]. Unlike standard CLIP losses that only measure absolute similarity to a text prompt, this method measures the *relative* consistency of style evolution, preventing artifacts where stylization strength varies unpredictably across the scene [S1].
+CLIP Direction Consistency is a quantitative metric used to evaluate the temporal or spatial coherence of edits in Neural Radiance Fields (NeRFs) by comparing the semantic trajectory of changes between adjacent views. It solves the problem of verifying that an edited scene evolves smoothly relative to the original scene, ensuring that the direction of semantic change in the edited views matches the direction of change in the original views. It is distinct from the CLIP Direction Similarity metric, which measures the alignment between the text prompt and the image features; instead, this metric focuses on the consistency of the *delta* (change) between consecutive frames [S1, S2].
 
 ## How it works
-**Inputs and Outputs**
-- **Inputs**: A sequence of $N$ consecutive rendered views from the original scene ($I^o_1, \dots, I^o_N$) and the corresponding edited/stylized scene views ($I^e_1, \dots, I^e_N$). The views are typically sampled from adjacent camera positions in the training trajectory.
-- **Outputs**: A scalar loss value $L_{direction}$ representing the average cosine similarity between the change vectors of the original and edited scenes.
+**Inputs and Outputs:**
+*   **Inputs:** A sequence of rendered images from the original NeRF ($I^o$) and a sequence of rendered images from the edited NeRF ($I^e$). The sequences must consist of consecutive views (e.g., adjacent camera poses).
+*   **Outputs:** A scalar score representing the average cosine similarity between the change vectors of the original and edited scenes across the selected views.
 
-**Data Structures**
-- $E_I(\cdot)$: The CLIP image encoder (typically ViT-L/14 or ViT-B/16) which maps an image to a normalized embedding vector in the CLIP latent space.
-- $I^o_i$: Original view at index $i$.
-- $I^e_i$: Edited view at index $i$.
+**Data Structures:**
+*   Images are treated as tensors or arrays of pixel values.
+*   CLIP embeddings are vectors in the CLIP image feature space (typically 768-dimensional for ViT-B/16).
 
-**Steps**
-1. **Select View Pairs**: Choose a set of consecutive view indices. The source specifies computing the score on six consecutive views and averaging the results [S1]. Let the indices be $i$ and $i+1$ for $i = 1$ to $5$ (assuming 6 views total).
-2. **Encode Original Views**: Compute CLIP embeddings for the original consecutive views:
-   $$ E^o_i = E_I(I^o_i) $$
-   $$ E^o_{i+1} = E_I(I^o_{i+1}) $$
-3. **Encode Edited Views**: Compute CLIP embeddings for the edited consecutive views:
-   $$ E^e_i = E_I(I^e_i) $$
-   $$ E^e_{i+1} = E_I(I^e_{i+1}) $$
-4. **Compute Change Vectors**: Calculate the difference vectors in the CLIP embedding space for both original and edited sequences:
-   $$ \Delta I^o_i = E^o_{i+1} - E^o_i $$
-   $$ \Delta I^e_i = E^e_{i+1} - E^e_i $$
-5. **Compute Cosine Similarity**: Calculate the cosine similarity between the change vectors for each pair:
-   $$ S_i = \frac{\Delta I^o_i \cdot \Delta I^e_i}{\|\Delta I^o_i\| \|\Delta I^e_i\|} $$
-   where $\cdot$ denotes the dot product and $\|\cdot\|$ denotes the L2 norm.
-6. **Average**: Compute the final loss by averaging the similarities over the selected consecutive pairs:
-   $$ L_{direction} = \frac{1}{K} \sum_{i=1}^{K} S_i $$
-   where $K$ is the number of pairs (e.g., $K=5$ for 6 views).
+**Steps:**
+1.  **Select View Pairs:** Identify $N$ pairs of consecutive views. Let the indices be $i$ and $i+1$. The sources specify using six consecutive views (implying 5 pairs or a sliding window over 6 frames) [S2].
+2.  **Encode Images:** Pass the original images $I^o_i, I^o_{i+1}$ and edited images $I^e_i, I^e_{i+1}$ through the CLIP image encoder $E_I$ (or $\mathbf{C}_I$) to obtain embeddings [S1, S2].
+3.  **Compute Change Vectors:** Calculate the difference between the embeddings of consecutive views for both the original and edited sequences.
+    *   Original change: $\Delta I^o_i = E_I(I^o_{i+1}) - E_I(I^o_i)$
+    *   Edited change: $\Delta I^e_i = E_I(I^e_{i+1}) - E_I(I^e_i)$
+4.  **Compute Cosine Similarity:** Calculate the cosine similarity between the original change vector and the edited change vector for each pair.
+    $$ L_{direction, i} = \frac{\Delta I^o_i \cdot \Delta I^e_i}{\|\Delta I^o_i\| \|\Delta I^e_i\|} $$
+    Where $\cdot$ denotes the dot product and $\|\cdot\|$ denotes the L2 norm [S2].
+    *Note: Source [S1] presents a similar formula but includes text embeddings in the numerator for "text-image direction score," whereas the "consistency score" in [S1] uses the same structure as [S2] but references text embeddings in the description. The formula in [S2] is explicitly labeled $L_{direction}$ and uses only image embeddings for the consistency of adjacent frames. We follow the explicit formula in [S2] for the consistency metric.*
+5.  **Average:** Compute the final score by averaging the similarity scores over the selected consecutive view pairs.
+    $$ \text{Score} = \frac{1}{N} \sum_{i=1}^{N} L_{direction, i} $$
 
-**Pseudocode**
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def clip_direction_consistency(original_views, edited_views, clip_encoder):
+import torch
+import torch.nn.functional as F
+
+def clip_direction_consistency(original_images, edited_images, clip_encoder):
     """
-    Computes the CLIP Direction Consistency loss.
+    Computes the CLIP Direction Consistency score.
     
     Args:
-        original_views: List of N original rendered images [I^o_1 ... I^o_N]
-        edited_views: List of N edited rendered images [I^e_1 ... I^e_N]
-        clip_encoder: Function E_I that returns CLIP embeddings for an image
+        original_images (Tensor): Shape (N, C, H, W), consecutive original views.
+        edited_images (Tensor): Shape (N, C, H, W), consecutive edited views.
+        clip_encoder (Module): CLIP image encoder returning normalized embeddings.
         
     Returns:
-        Scalar loss value L_direction
+        float: Average cosine similarity of change vectors.
     """
-    # Ensure we have at least 2 views
-    if len(original_views) < 2:
-        return 0.0
-
-    similarities = []
+    # Ensure inputs are on the same device
+    device = original_images.device
     
-    # Iterate through consecutive pairs
-    for i in range(len(original_views) - 1):
-        # Step 1: Encode original views
-        emb_o_curr = clip_encoder(original_views[i])
-        emb_o_next = clip_encoder(original_views[i+1])
+    # Get embeddings for all frames
+    # clip_encoder typically returns normalized embeddings, but we compute deltas explicitly
+    emb_o = clip_encoder(original_images) # Shape (N, D)
+    emb_e = clip_encoder(edited_images)   # Shape (N, D)
+    
+    # Compute change vectors (deltas) between consecutive frames
+    # We have N frames, so we have N-1 pairs
+    # delta_o[i] = emb_o[i+1] - emb_o[i]
+    delta_o = emb_o[1:] - emb_o[:-1] # Shape (N-1, D)
+    delta_e = emb_e[1:] - emb_e[:-1] # Shape (N-1, D)
+    
+    # Compute cosine similarity for each pair
+    # cos_sim = (A . B) / (||A|| * ||B||)
+    # Using F.cosine_similarity handles the normalization
+    
+    similarities = []
+    for i in range(len(delta_o)):
+        d_o = delta_o[i]
+        d_e = delta_e[i]
         
-        # Step 2: Encode edited views
-        emb_e_curr = clip_encoder(edited_views[i])
-        emb_e_next = clip_encoder(edited_views[i+1])
+        # Compute norms
+        norm_o = torch.norm(d_o)
+        norm_e = torch.norm(d_e)
         
-        # Step 3: Compute change vectors
-        delta_o = emb_o_next - emb_o_curr
-        delta_e = emb_e_next - emb_e_curr
-        
-        # Step 4: Compute norms
-        norm_o = torch.linalg.norm(delta_o)
-        norm_e = torch.linalg.norm(delta_e)
-        
-        # Handle degenerate cases where change is zero
+        # Guard against zero vectors (degenerate case where no change occurred)
         if norm_o < 1e-8 or norm_e < 1e-8:
-            continue
-            
-        # Step 5: Compute cosine similarity
-        dot_product = torch.dot(delta_o, delta_e)
-        similarity = dot_product / (norm_o * norm_e)
+            # If one or both deltas are zero, similarity is undefined or 0.
+            # In practice, if no change, consistency is trivially high or ignored.
+            # We treat it as 0 similarity to be conservative or skip.
+            # Given the metric measures "consistency of change", zero change 
+            # implies no direction. We'll set to 0.
+            sim = 0.0
+        else:
+            dot_product = torch.dot(d_o, d_e)
+            sim = dot_product / (norm_o * norm_e)
         
-        similarities.append(similarity)
+        similarities.append(sim)
         
-    # Step 6: Average
     if not similarities:
         return 0.0
         
-    return torch.mean(torch.tensor(similarities))
+    final_score = sum(similarities) / len(similarities)
+    return final_score
 ```
 
-**Parameters**
-- **Number of views**: The source specifies using six consecutive views [S1].
-- **CLIP Model**: The specific variant (e.g., ViT-L/14) is not explicitly detailed in the formula section, but standard CLIP image encoders are implied [S1].
+**Parameters:**
+*   **Number of views:** The sources specify computing the score on six consecutive views and averaging the results [S2]. This implies 5 pairs of consecutive frames.
+*   **CLIP Encoder:** ViT-B/16 is commonly used in the cited works [S1, S2].
 
-**Edge Cases and Pitfalls**
-- **Zero Change**: If the CLIP embeddings for consecutive frames are identical (e.g., static camera or no change in stylization), the denominator becomes zero. A guard clause or small epsilon should be added to prevent division by zero [G].
-- **View Selection**: The metric assumes a temporal or spatial continuity in the camera trajectory. Randomly sampled views may not represent a valid "direction" of change [S1].
+**Edge Cases and Pitfalls:**
+*   **Zero Change:** If the original or edited scene does not change between two views (e.g., static background), the delta vector is zero. The cosine similarity is undefined. The implementation must handle this, typically by skipping the pair or assigning a neutral value [G].
+*   **View Ordering:** The views must be temporally or spatially ordered such that $i$ and $i+1$ are adjacent in the camera trajectory. Random pairs will yield meaningless results.
+*   **Resolution:** The CLIP encoder expects specific input resolutions (e.g., 224x224). Images must be resized/cropped accordingly before encoding.
 
 ## Subtopics
 
-### [Global-Local Contrastive Learning](13433-global-local-contrastive-learning.md)
-Extends directional consistency by adding local contrastive terms to ensure uniform stylization magnitude, addressing the limitation that directional CLIP losses alone may fail to enforce sufficient stylization strength across the entire scene.
-
 ## Operating characteristics
-- **Time Complexity**: Dominated by the CLIP encoder inference. For $N$ views, it requires $2N$ forward passes through the CLIP image encoder. This is significantly more expensive than photometric losses but cheaper than full NeRF training steps.
-- **Memory Complexity**: Requires storing embeddings for $2N$ views. Since CLIP embeddings are fixed-size vectors (e.g., 768 or 1024 dimensions), memory overhead is low compared to storing full images or volumes.
-- **Strengths**: Enforces semantic consistency in the *change* rather than just the final state, leading to more coherent stylization trajectories [S1].
-- **Limitations**: Relies on the quality of CLIP embeddings; may not capture fine-grained geometric details or texture changes that do not affect high-level semantics [S1].
-- **When to use**: Text-driven NeRF stylization where maintaining the relative style evolution between original and edited scenes is critical [S1].
+**Time and Memory Complexity:**
+*   **Time:** $O(N \cdot C \cdot H \cdot W)$ for encoding, where $N$ is the number of frames, $C$ channels, $H, W$ height/width. The CLIP encoder dominates the cost. The vector operations are negligible.
+*   **Memory:** $O(N \cdot D)$ to store embeddings, where $D$ is the embedding dimension (768 for ViT-B/16).
+
+**Measured Performance:**
+*   In simple settings (5 edits on face scene), ViCA-NeRF achieved a score of 0.9035 compared to Instruct-NeRF2NeRF's 0.9004 [S1].
+*   In difficult settings (10 edits on real-world scenes), ViCA-NeRF achieved 0.6498 compared to Instruct-NeRF2NeRF's 0.5161 [S1].
+*   Higher scores indicate better consistency between the direction of change in the original and edited scenes.
+
+**Strengths and Limitations:**
+*   **Strengths:** Provides a semantic measure of edit consistency that correlates with human perception of smoothness. It is effective in detecting non-uniform stylization artifacts [S1].
+*   **Limitations:** It is a post-hoc evaluation metric, not a loss function used during training (though it can guide training). It relies on the CLIP model's ability to capture semantic changes, which may not align perfectly with photometric changes.
+
+**When to Use:**
+*   Use for evaluating the quality of NeRF editing methods, specifically when assessing the smoothness and coherence of semantic changes across views.
 
 ## Background
-The CLIP Direction Score was introduced in [23] (cited within [S1]) as a metric to evaluate consistency between adjacent frames in edited NeRF scenes. It was adopted in Blended-NeRF [S1] to regularize the blending of generated objects into existing radiance fields. The method leverages the semantic alignment capabilities of CLIP to ensure that the "direction" of the edit in feature space is preserved across the scene.
+The CLIP Direction Consistency metric was introduced in the context of evaluating neural radiance field editing methods. It appears in ViCA-NeRF [S1] and Blended-NeRF [S2]. It addresses the limitation of directional CLIP losses which enforce relative style trajectories but may fail to ensure uniformity across the scene [S1]. The metric was developed to provide a more robust evaluation of view-consistency in 3D editing tasks.
 
 ## Sources
-[S1] Blended-NeRF: Zero-Shot Object Generation and Blending in Existing Neural Radiance Fields, https://arxiv.org/abs/2306.12760v2, fetched 2026-10-26
+[S1] ViCA-NeRF: View-Consistency-Aware 3D Editing of Neural Radiance Fields, https://arxiv.org/abs/2402.00864v1, fetched 2026-10-26
+[S2] Blended-NeRF: Zero-Shot Object Generation and Blending in Existing Neural Radiance Fields, https://arxiv.org/abs/2306.12760v2, fetched 2026-10-26

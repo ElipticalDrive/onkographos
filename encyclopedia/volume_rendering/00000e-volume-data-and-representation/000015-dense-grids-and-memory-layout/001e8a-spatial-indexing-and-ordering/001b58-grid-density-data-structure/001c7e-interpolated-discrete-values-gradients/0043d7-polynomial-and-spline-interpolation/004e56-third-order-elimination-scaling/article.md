@@ -1,0 +1,76 @@
+# Third Order Elimination (Scaling)
+Also called: Scaling, SCALING
+
+## Overview
+Third Order Elimination (Scaling) is a quadratic interpolation method for implicit functions that eliminates the third-order coefficient ($a_3$) from a cubic polynomial by scaling the input derivatives [S1]. It solves the problem of approximating a smooth surface from discrete voxel data and derivative estimates while reducing the computational complexity of cubic Hermite interpolation [S1]. It is distinguished from its sibling [B-spline Field Interpolation](11066-b-spline-field-interpolation.md) by its specific algebraic constraint of nullifying the cubic term via derivative scaling, and from [Piecewise Quadratic Hermite Interpolation](4001-piecewise-quadratic-hermite-interpolation.md) by its derivation from a cubic base rather than a direct quadratic fit [S1].
+
+## How it works
+**Inputs:**
+*   $v_0, v_1$: Function values at grid indices $t=0$ and $t=1$.
+*   $d_0, d_1$: Derivative estimates at $t=0$ and $t=1$.
+
+**Outputs:**
+*   Quadratic polynomial coefficients $a_0, a_1, a_2$ for $p(t) = a_0 + a_1 t + a_2 t^2$.
+
+**Data Structures:**
+*   Scalar values $v_0, v_1, d_0, d_1$.
+*   Coefficients $a_0, a_1, a_2$.
+
+**Steps:**
+1.  Set $a_0 = v_0$ [S1].
+2.  Calculate the scaling factor $s$ using the formula:
+    $$ s = \frac{2v_1 - 2v_0}{d_0 + d_1} $$
+    [S1]
+3.  Calculate $a_1$ using the scaled derivative:
+    $$ a_1 = s \cdot d_0 $$
+    [S1]
+4.  Calculate $a_2$ using the value constraint $a_0 + a_1 + a_2 = v_1$:
+    $$ a_2 = v_1 - a_0 - a_1 $$
+    [S1]
+
+**Pitfalls:**
+*   **Instability:** The solution becomes numerically unstable if $d_0 + d_1 \approx 0$ (derivatives cancel each other out) [S1].
+*   **Context:** This instability is less likely to cause issues for indicator functions with steep gradients where partial derivatives are unlikely to have opposite signs [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def third_order_elimination_scaling(v0, v1, d0, d1):
+    # Step 1: Set a0
+    a0 = v0
+    
+    # Step 2: Calculate scaling factor s
+    # Pitfall: Check for division by zero or near-zero denominator
+    denom = d0 + d1
+    if abs(denom) < 1e-9:
+        # Fallback or error handling for unstable case [G]
+        # Not specified in source; typically clamp or use linear interpolation [G]
+        pass 
+    s = (2 * v1 - 2 * v0) / denom
+    
+    # Step 3: Calculate a1
+    a1 = s * d0
+    
+    # Step 4: Calculate a2
+    a2 = v1 - a0 - a1
+    
+    return a0, a1, a2
+```
+
+## Subtopics
+
+### Third Order Elimination (Offset)
+A quadratic method obtained by adding an offset $o$ to derivatives to eliminate the third order coefficient $a_3$ [S1]. It sets $a_3=0$ via the constraint $2v_0 - 2v_1 + (d_0 + o) + (d_1 + o) = 0$ [S1]. The offset is calculated as $o = (2v_1 - 2v_0 - d_0 - d_1) / 2$ [S1]. This solution is equivalent to the Least-Squares Derivatives method (equation 11 in [S1]) [S1].
+
+## Operating characteristics
+*   **Complexity:** Constant time $O(1)$ per sample, requiring only basic arithmetic operations [S1].
+*   **Performance:** Implemented in the PSR code for interpolating the indicator function [S1].
+*   **Strengths:** Reduces cubic interpolation to quadratic, potentially simplifying hardware implementation or reducing evaluation cost [S1].
+*   **Limitations:** Numerical instability when derivatives sum to near zero [S1].
+
+## Background
+The method is described in the context of accurate isosurface interpolation using Hermite data [S1]. It is one of several algebraic surface interpolation techniques compared against linear interpolation and least-squares derivatives [S1].
+
+## Sources
+[S1] Accurate Isosurface Interpolation with Hermite Data, https://ieeexplore.ieee.org/document/7335492/, fetched 2026-11-05

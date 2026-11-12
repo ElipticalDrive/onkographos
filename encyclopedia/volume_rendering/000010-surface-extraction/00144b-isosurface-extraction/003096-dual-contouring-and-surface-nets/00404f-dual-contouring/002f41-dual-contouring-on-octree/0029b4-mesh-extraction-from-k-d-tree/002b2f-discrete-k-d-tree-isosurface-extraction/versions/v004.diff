@@ -1,0 +1,278 @@
+--- v003.md
++++ v004.md
+@@ -1,163 +1,140 @@
+ # Discrete k-d tree isosurface extraction
+ 
+-Also called: KD-Tree Isosurface Extraction, KD-tree contour edge traversal
++Also called: Direct Isosurface Extraction from Scattered Volume Data, KD-Tree Isosurface Extraction, KD-tree contour edge traversal
+ 
+ ## Overview
+-Discrete k-d tree isosurface extraction extracts an isosurface from a scalar field by traversing a discrete k-d tree hierarchy along contour edges, refining nodes until contouring leaves are found, and then generating quads [S2, unofficial]. Unlike octrees, which group cells by spatial position, this method groups cells by their value intervals, allowing for faster determination of active cells at the cost of higher memory usage [S1].
++This method extracts isosurfaces directly from scattered volume data (unstructured samples with no known connectivity) without resampling onto a structured grid or generating a global/local polyhedral mesh [S2]. It computes points on the isosurface by linearly interpolating between neighboring pairs of samples and renders the result as a point cloud [S2]. It sets itself apart from gridded methods like Marching Cubes by avoiding grid construction, and from Delaunay tetrahedrization by being approximately one order of magnitude faster [S2].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A scalar field volume, a k-d tree structure built from that volume, and a scalar threshold value defining the isosurface level [S2, unofficial].
+-*   **Output:** A triangle mesh representing the isosurface [S2, unofficial].
++**Inputs:** A set of scattered sample points $X = \{x_i\}$ in $\mathbb{R}^3$ with associated scalar values $f(x_i)$, and a real isovalue $v_{iso}$ [S2].
++**Outputs:** A point cloud representing the isosurface $f(x) = v_{iso}$ [S2].
+ 
+-**Data Structures:**
+-*   **Kdtree::EdgeKd:** An array of 4 `Kdtree::Node` pointers, indexed 0..3. It is accessed as `nodes[i*2]` and `nodes[i*2+1]` to form pairs [S2, unofficial].
+-*   **AALine:** A struct containing a `point` of type `PositionCode` and a `dir` of type `int` [S2, unofficial].
+-*   **PositionCode:** A vector-like type with integer components accessible via `[dir]`, representing grid coordinates [S2, unofficial].
+-*   **Node:** Represents a node in the k-d tree. It has a `min` and `max` value range and child pointers [S1][S2, unofficial].
++### Data Structures
++1.  **K-D Tree:** Partitions the 3D domain of scattered sample positions into cells [S2].
++2.  **Binary Index:** Each cell in the k-d tree is assigned a binary index to enable direct access without tree traversal [S2].
++3.  **EdgeKd:** An array of 4 k-d tree node pointers, indexed 0..3, accessed as `nodes[i*2]` and `nodes[i*2+1]` for pairs [S3, unofficial].
++4.  **AALine:** A struct containing a `PositionCode` (integer vector representing grid coordinates) and a `dir` (int) [S3, unofficial].
++5.  **PositionCode:** A vector-like type with integer components accessible via `[dir]` [S3, unofficial].
+ 
+-**Parameters:**
+-*   **threshold (float):** The scalar value defining the isosurface level, used in `isContouringLeaf` checks [S2, unofficial].
+-*   **error (float):** An error threshold for numerical comparisons, defaulting to $10^{-7}$ [S2, unofficial].
++### Algorithm Steps
+ 
+-**Algorithm Steps:**
++1.  **Build K-D Tree:** Partition the 3D domain of scattered samples into cells using a k-d tree data structure [S2].
++2.  **Index Cells:** Assign a binary index to each cell in the k-d tree [S2].
++3.  **Neighbor Candidate Selection:** For each sample $x_i$:
++    *   Determine potential neighbor candidates by performing bitwise operations on the binary indices of the cell representing $x_i$ and its neighbors [S2].
++    *   Select appropriate neighbors from the small set of candidates using an angle criterion $\alpha$ [S2].
++    *   *Note:* Using nearest neighbors instead of natural neighbors (estimated via k-d tree/angle criterion) fails in cases of varying density distributions [S2].
++4.  **Isosurface Intersection Detection:** For each sample $x_i$ and each selected neighbor $x_j$:
++    *   Examine if the neighbor is separated from the sample by the isosurface (i.e., $f(x_i) - v_{iso}$ and $f(x_j) - v_{iso}$ have opposite signs) [S2].
++5.  **Isopoint Computation:** For each pair $(x_i, x_j)$ separated by the isosurface:
++    *   Linearly interpolate between $x_i$ and $x_j$ to compute the exact position $p_k$ of the isopoint on the connecting edge:
++        $$ p_k = x_i + \frac{v_{iso} - f(x_i)}{f(x_j) - f(x_i)} (x_j - x_i) $$
++    *   Add $p_k$ to the output point cloud [S2].
++6.  **Rendering:** Render the resulting set of isopoints using point-based rendering techniques, specifically splatting [S2].
+ 
+-1.  **Mapping:** Cells of the scalar field are mapped into a 2D space based on their min/max value intervals to build the k-d tree [S1].
+-2.  **Initialization:** For each contour edge direction, initialize an `EdgeKd` array of 4 nodes. Call `detectQuad` to traverse down the tree for each pair of nodes until they become contouring leaves or hit boundaries [S2, unofficial].
+-3.  **Tree Traversal:** During traversal, for each level of the tree, test only one of the `min` or `max` values to determine if the isovalue falls within the node's range [S1].
+-4.  **Quad Direction Calculation:** Compute `quadDir2 = 3 - quadDir1 - line.dir`. Check minimal edge validity via `checkMinialEdge`. Convert min/max codes to positions [S2, unofficial].
+-5.  **Recursive Traversal:** Traverse each node while it is not a contouring leaf and `planeDir != line.dir`, updating via `nextQuadIndex`. If a node pointer becomes null (e.g., tree boundary), return immediately to prevent segfaults [S2, unofficial].
+-6.  **Leaf Detection and Quad Generation:**
+-    *   If all 4 nodes are contouring leaves, call `generateQuad` [S2, unofficial].
+-    *   Otherwise, for each node that is not a contouring leaf and `planeDir == line.dir`, split into two recursive `contourEdge` calls with `children[0]` and `children[1]` [S2, unofficial].
+-7.  **Edge Validity Check (`checkMinialEdge`):** Compute `minEnd` and `maxEnd` by intersecting min/max codes of the 4 nodes along `line.dir`. If `minEnd[dir] >= maxEnd[dir]`, the edge is degenerate and the quad is skipped [S2, unofficial].
+-8.  **Quad Generation (`generateQuad`):**
+-    *   Define points based on face intersections. If a segment intersects the face, compute intersection points.
+-    *   Evaluate the scalar field at the 4 corner points of the quad.
+-    *   If signs differ between adjacent corners, solve for the intersection point on the edge.
+-    *   Accumulate these intersection points into a `massPointSum`.
+-    *   If `pointCount > 0`, create a face vertex at `massPointSum / pointCount` and add it to the mesh [S2, unofficial].
+-    *   Handle concave/convex conditions and potential self-intersections by swapping polygon order or splitting into triangles if necessary [S2, unofficial].
+-
+-**Pseudocode:**
++### Pseudocode
+ 
+ ```python
+-def detect_quad(line: AALine, nodes: List[Kdtree::Node], threshold: float) -> List[Vertex]:
++def extract_isosurface(samples, v_iso, angle_alpha):
+     """
+-    Traverse the k-d tree to find contouring leaves for a quad.
++    samples: list of (position: Vec3, value: float)
++    v_iso: float, isovalue
++    angle_alpha: float, angle criterion in degrees
++    returns: list of Vec3 (isopoints)
+     """
+-    # Initialize EdgeKd array with 4 nodes
+-    edge_kd = [None] * 4
+-    
+-    # Traverse down the tree for each pair until nodes are contouring leaves or hit boundaries
+-    for i in range(4):
+-        edge_kd[i] = traverse_node(nodes[i], line, threshold)
++    # Step 1 & 2: Build K-D Tree and Index Cells
++    # Implementation detail: Partition 3D domain into cells using k-d tree.
++    # Assign binary index to each cell for direct access.
++    kdtree = build_kd_tree(samples)
++    cell_indices = assign_binary_indices(kdtree)
++
++    isopoints = []
++
++    # Step 3: Neighbor Selection
++    for sample in samples:
++        # Get cell index for current sample
++        current_cell_idx = get_cell_index(sample.position, kdtree)
+         
+-    # Check if all nodes are contouring leaves
+-    if all(is_contouring_leaf(node, threshold) for node in edge_kd):
+-        return generate_quad(edge_kd, line)
+-    else:
+-        # Split non-leaf nodes
+-        for i in range(4):
+-            if not is_contouring_leaf(edge_kd[i]) and plane_dir == line.dir:
+-                # Recursive contourEdge calls
+-                detect_quad(line, [edge_kd[i].children[0], edge_kd[i].children[1]], threshold)
++        # Determine potential neighbors via bitwise operations on indices
++        candidate_cells = get_bitwise_neighbors(current_cell_idx, cell_indices)
++        
++        # Select appropriate neighbors using angle criterion
++        selected_neighbors = []
++        for candidate_cell in candidate_cells:
++            # Retrieve samples in candidate cell
++            candidate_samples = get_samples_in_cell(candidate_cell, kdtree)
++            for cand_sample in candidate_samples:
++                if cand_sample is sample:
++                    continue
+                 
+-    return []
++                # Calculate angle between sample vector and neighbor vector
++                vec = cand_sample.position - sample.position
++                angle = compute_angle(vec)
++                
++                # Apply angle criterion
++                if angle <= angle_alpha:
++                    selected_neighbors.append(cand_sample)
+ 
+-def traverse_node(node: Kdtree::Node, line: AALine, threshold: float) -> Kdtree::Node:
++        # Step 4 & 5: Isosurface Intersection and Interpolation
++        for neighbor in selected_neighbors:
++            # Check if separated by isosurface
++            val_diff_sample = sample.value - v_iso
++            val_diff_neighbor = neighbor.value - v_iso
++            
++            if (val_diff_sample > 0 and val_diff_neighbor < 0) or \
++               (val_diff_sample < 0 and val_diff_neighbor > 0):
++                
++                # Linear interpolation
++                t = (v_iso - sample.value) / (neighbor.value - sample.value)
++                isopoint = sample.position + t * (neighbor.position - sample.position)
++                isopoints.append(isopoint)
++
++    return isopoints
++
++def render_point_cloud(isopoints):
+     """
+-    Traverse a single node in the k-d tree.
++    Render isopoints using point-based rendering (splatting).
+     """
+-    # If node is null, return immediately
+-    if node is None:
+-        return None
+-        
+-    # If node is a contouring leaf, return it
+-    if is_contouring_leaf(node, threshold):
+-        return node
+-        
+-    # If planeDir != line.dir, update via nextQuadIndex
+-    if plane_dir != line.dir:
+-        return traverse_node(next_quad_index(node, line), line, threshold)
+-    else:
+-        # Traverse children
+-        child0 = traverse_node(node.children[0], line, threshold)
+-        child1 = traverse_node(node.children[1], line, threshold)
+-        
+-        # Return the appropriate child or merge logic as per source
+-        return child0 if child0 else child1
+-
+-def is_contouring_leaf(node: Kdtree::Node, threshold: float) -> bool:
+-    """
+-    Check if the node's value range contains the threshold.
+-    Only one of min or max is tested per level.
+-    """
+-    # Test min or max based on tree level
+-    if node.min <= threshold <= node.max:
+-        return True
+-    return False
+-
+-def generate_quad(nodes: List[Kdtree::Node], line: AALine) -> List[Vertex]:
+-    """
+-    Generate quads from 4 contouring leaves.
+-    """
+-    # Compute quadDir2
+-    quad_dir2 = 3 - quad_dir1 - line.dir
+-    
+-    # Check minimal edge validity
+-    if not check_minial_edge(nodes, line):
+-        return []
+-        
+-    # Convert min/max codes to positions
+-    points = [code_to_pos(node.min) for node in nodes[:2]] + \
+-             [code_to_pos(node.max) for node in nodes[2:]]
+-             
+-    mass_point_sum = fvec3(0.0)
+-    point_count = 0
+-    
+-    # Evaluate scalar field at corners
+-    for k in range(4):
+-        v1 = scalar_field.value(points[k])
+-        v2 = scalar_field.value(points[(k + 1) % 4])
+-        
+-        # Check for sign change
+-        if (v1 >= 0 and v2 < 0) or (v1 < 0 and v2 >= 0):
+-            x = solve_intersection(points[k], points[(k + 1) % 4])
+-            mass_point_sum += x
+-            point_count += 1
+-            
+-    if point_count > 0:
+-        face_vertex = Vertex(mass_point_sum / point_count)
+-        mesh.add_vertex(face_vertex)
+-        return [face_vertex]
+-    else:
+-        return []
+-
+-def check_minial_edge(nodes: List[Kdtree::Node], line: AALine) -> bool:
+-    """
+-    Check if the edge is degenerate.
+-    """
+-    min_end = intersect_min_codes(nodes, line.dir)
+-    max_end = intersect_max_codes(nodes, line.dir)
+-    
+-    # If minEnd[dir] >= maxEnd[dir], the edge is degenerate
+-    if min_end[line.dir] >= max_end[line.dir]:
+-        return False
+-    return True
++    # Implementation detail: Use spherical splats for rendering.
++    # Note: Elliptical splats and sharp edge handling are not supported in the basic implementation [S2].
++    for point in isopoints:
++        draw_splat(point)
+ ```
+ 
++### Parameters
++*   **$v_{iso}$**: The real isovalue defining the isosurface $f(x) = v_{iso}$, within the range of the scalar function $f$ [S2].
++*   **Angle criterion ($\alpha$)**: A parameter used to select appropriate neighbors. Values tested include $15^\circ$, $35^\circ$, $55^\circ$, and $80^\circ$ [S2].
++*   **Error threshold**: Defaults to $10^{-7}$ [S3, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Density Variation:** Using nearest neighbors instead of natural neighbors (estimated via k-d tree/angle criterion) fails in cases of varying density distributions of samples [S2].
++*   **Boundary Handling:** During traversal (in related contouring implementations), if a node pointer becomes null (e.g., boundary of tree), the function returns immediately to prevent segfaults [S3, unofficial].
++*   **Degenerate Edges:** In contouring leaf checks, if `minEnd[dir] >= maxEnd[dir]`, the edge is degenerate and the quad is skipped [S3, unofficial].
++*   **Rendering Limitations:** The current implementation uses spherical splats instead of elliptical ones and cannot deal with sharp edges and corners yet [S2].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Determining active cells is faster than in octrees because cells are grouped by intervals rather than spatial positions [S1].
+-*   **Memory Complexity:** The k-d tree requires more memory than an octree because the position of cells corresponding to a node must be stored explicitly, whereas in an octree this information is implicit [S1].
+-*   **Strengths:** Efficient determination of active cells for isosurface extraction [S1].
+-*   **Limitations:** Higher memory consumption compared to octrees [S1].
+-*   **When to use:** When fast active cell determination is prioritized over memory usage [S1].
+-*   **When not to use:** When memory is a critical constraint [S1].
++*   **Time Complexity:** Approximately one order of magnitude faster than 3D mesh generation algorithms like Delaunay tetrahedrization, which has quadratic asymptotic time complexity [S2].
++*   **Memory:** K-D trees require more memory than octrees because they store explicit cell positions, whereas octrees have implicit position information [S1].
++*   **Quality:** The method gets very close to what a gridded isosurfacing technique like Marching Cubes generates in terms of deviation from the analytic surface [S2].
++*   **Performance Data:**
++    *   Synthetic sphere (8M samples, radius 70): Deviations from analytic sphere range from 0.0182 to 0.0425 depending on angle $\alpha$. Marching Cubes on 200x200x200 grid had a deviation of 0.0018 [S2].
++    *   Sphere data set (8M samples):
++        *   $\alpha=15^\circ$: 437,473 isopoints, deviation 0.0425.
++        *   $\alpha=35^\circ$: 227,588 isopoints, deviation 0.0355.
++        *   $\alpha=55^\circ$: 77,512 isopoints, deviation 0.0320.
++        *   $\alpha=80^\circ$: 64,165 isopoints, deviation 0.0182 [S2].
++    *   Boston Teapot (resampled 256x256x178): 243,238 isopoints extracted [S2].
++    *   Engine (resampled 16M scattered points): 405,327 isopoints generated [S2].
++*   **Strengths:** Fast extraction from scattered data; robust against varying density; no need for grid reconstruction or global meshing.
++*   **Limitations:** Output is a point cloud (requires splatting for rendering); spherical splats cannot handle sharp edges/corners; higher memory usage than octrees.
+ 
+ ## Background
+-The method was proposed in [28] (cited in [S1]) as a range-based technique where cells are mapped into a 2D space and a k-d tree is created on them to allow efficient range search. The tree organizes points such that during traversal, only one of the min or max values is tested for each level. This approach was implemented in the Danielhu/KdtreeISO example viewer for extracting iso-surfaces from volume data (tiff files) using oct/kd trees [S2, unofficial].
++*   **Origin:** Proposed by P. Rosenthal and L. Linsen in 2006 [S2].
++*   **Paper:** "Direct Isosurface Extraction from Scattered Volume Data" [S2].
++*   **History:** Isosurface extraction is a common visualization technique. Previous methods often required structured grids or expensive 3D mesh generation (e.g., Delaunay tetrahedrization). This method addresses the gap for direct extraction from scattered data without these steps [S2].
++*   **Usage:** Implemented in the Danielhu/KdtreeISO example viewer for extracting iso-surfaces from volume data (tiff files) using oct/kd trees [S3, unofficial].
+ 
+ ## Sources
+ [S1] Parallel Isosurface Extraction for 3D Data Analysis Workflows in Distributed Environments, https://doi.org/10.1002/cpe.1710, fetched 2026-10-26
+-[S2] Danielmelody/KdtreeISO, https://github.com/Danielmelody/KdtreeISO, fetched 2026-10-27 (unofficial)+[S2] Direct Isosurface Extraction from Scattered Volume Data, https://doi.org/10.2312/vissym/eurovis06/099-106, fetched 2026-10-26
++[S3] Danielmelody/KdtreeISO, https://github.com/Danielmelody/KdtreeISO, fetched 2026-10-27 (unofficial)

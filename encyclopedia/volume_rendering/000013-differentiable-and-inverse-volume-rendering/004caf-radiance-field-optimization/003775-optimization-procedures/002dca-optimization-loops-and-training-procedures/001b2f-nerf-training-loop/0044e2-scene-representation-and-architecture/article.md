@@ -1,9 +1,9 @@
 # Scene Representation and Architecture
 
-Also called: NeRF Architectures, Radiance Field Models
+Also called: NeRF Architectures, Radiance Field Networks
 
 ## Overview
-Scene Representation and Architecture defines the neural network topologies, data structures, and input encodings used to approximate the continuous radiance field in differentiable volume rendering. While the canonical NeRF uses a monolithic Multi-Layer Perceptron (MLP) to map 6D coordinates to density and color, this family encompasses methods that modify the network topology, input representation, or underlying data structures to address limitations in rendering speed, memory consumption, generalization, dynamic scene modeling, and single-view synthesis. These architectures set themselves apart from the canonical baseline by introducing mechanisms such as sparse grids, tensor decompositions, transformer attention, or explicit geometric priors, enabling applications ranging from real-time rendering to 3D-aware image generation.
+This family defines the neural network structures and input-output mappings that approximate the continuous radiance field function $F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$, mapping 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ to volume density $\sigma$ and color $\mathbf{c}$ [Parent]. It differs from sibling methods like [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) by focusing on the internal topology of the network and the representation of the scene data, rather than the numerical integration of the rendering equation. It sets itself apart from [Scene Representation and Partitioning](9444-scene-representation-and-partitioning.md) by addressing the global mapping capacity and feature encoding, whereas partitioning methods address scalability through domain decomposition.
 
 ## Shared principles
 All methods in this family share the mechanism of mapping 6D input coordinates (3D position $\mathbf{x}$ and 2D viewing direction $\mathbf{d}$) to 4D output values (density $\sigma$ and color $\mathbf{c}$) using a differentiable neural network. This allows the radiance field to be optimized through the volumetric rendering integral.
@@ -30,7 +30,7 @@ and $\delta_i$ is the distance between samples [S1][S3].
 ## Subtopics
 
 ### [Specific Model Architectures](8585-specific-model-architectures.md)
-Specific Model Architectures refers to the family of neural network topologies and data structures used to represent the radiance field in differentiable volume rendering. While the canonical NeRF uses a monolithic Multi-Layer Perceptron (MLP) to map 6D coordinates to density and color, this family encompasses methods that modify the network topology, input representation, or underlying data structures to address limitations in rendering speed, memory consumption, generalization, dynamic scene modeling, and single-view synthesis. These architectures set themselves apart from the canonical baseline by introducing mechanisms such as sparse grids, tensor decompositions, transformer attention, or explicit geometric priors, enabling applications ranging from real-time rendering to 3D-aware image generation.
+Specific Model Architectures refers to the family of neural network designs that map 6D input coordinates (3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$) to radiance field properties (density $\sigma$ and color $\mathbf{c}$) [Parent]. While the canonical NeRF uses a simple two-MLP structure, this family encompasses modifications to the network topology, input representations, and output heads to address specific challenges such as single-view synthesis, dynamic scenes, high-resolution rendering, and semantic editing. These architectures differ from their siblings by introducing specialized components like diffusion priors, multi-scale grids, or physical material decompositions to enhance reconstruction quality, efficiency, or controllability.
 
 ### [Scene Representation and Partitioning](9444-scene-representation-and-partitioning.md)
 This family of methods addresses the scalability limits of single-network NeRFs by decomposing the scene into multiple, smaller representations (submodules, blocks, or fields) that are optimized and queried independently. While the parent [Scene Representation and Architecture](11368-scene-representation-and-architecture.md) establishes the global mapping from 6D coordinates to radiance properties, these methods partition the domain to enable parallel training, reduce memory footprint, or handle dynamic content. They differ from siblings like [Specific Model Architectures](8585-specific-model-architectures.md) by focusing on the structural decomposition of the scene space rather than the internal topology of the neural network itself.
@@ -40,6 +40,9 @@ This family defines specific neural network topologies and input configurations 
 
 ### [NeRFReN](11981-nerfren.md)
 NeRFReN addresses the failure of standard Neural Radiance Fields (NeRF) to render reflective surfaces, such as glass and mirrors, by separating the radiance field into transmitted and reflected components. It distinguishes itself from sibling methods by explicitly modeling the reflection fraction $\beta$ derived from the transmitted geometry, allowing for the separation of reflection artifacts from physical entities.
+
+### [MobileNeRF](12170-mobilenerf.md)
+MobileNeRF is a framework that trains a NeRF-like model based on a polygonal mesh with color, feature, and opacity MLPs attached to each mesh vertex. It is designed to render novel images efficiently on mobile devices such as phones and light laptops. It sets itself apart from standard volumetric NeRFs by replacing the ray-marching integration with a rasterization-based approach, achieving a speed approximately 10 times faster than SNeRG.
 
 ### [Neural Body](12176-neural-body.md)
 Neural Body is a method for synthesizing novel views of dynamic human avatars from sparse multi-view videos by combining NeRF volume rendering with a vertex-based deformable human body model (SMPL). It solves the problem of rendering articulated bodies with moving poses, which standard NeRF approaches struggle with due to the complexity of modeling large non-rigid deformations. By anchoring latent variables to the vertices of a deformable mesh, Neural Body enables the interpolation of poses and frames, establishing a foundational paradigm for neural field rendering of human avatars.
@@ -60,15 +63,6 @@ AR-NeRF is an extension of Neural Radiance Fields (NeRF) that employs an apertur
 #### NeRF with Per-Frame Latent Codes
 - [S1] A method using per-frame learned latent codes and adding facial expression as a 76-dimensional coefficient of a morphable model constructed from Face2Face [210].
 
-#### MobileNeRF
-- [S1] A framework training a NeRF-like model based on a polygonal mesh with color, feature, and opacity MLPs attached to each mesh vertex.
-- [S1] Discretize alpha values.
-- [S1] Super-sample features for anti-aliasing.
-- [S1] During rendering, rasterize the mesh with associated features and opacities according to the viewing position.
-- [S1] Use a small MLP to shade each pixel.
-- [S1] Polygonal mesh with color, feature, and opacity MLPs attached to each mesh vertex.
-- [S1] Speed approximately 10 times faster than SNeRG.
-
 #### Nerfacto Pipeline
 - [S2, unofficial] The default baseline model in Nerfstudio, integrating several advances from recent NeRF literature into a single, efficient pipeline for in-the-wild reconstruction.
 - [S2, unofficial] Combine a hash-grid encoding for compact and expressive scene representation.
@@ -79,7 +73,7 @@ AR-NeRF is an extension of Neural Radiance Fields (NeRF) that employs an apertur
 - [S2, unofficial] Apply appearance embeddings to account for illumination variations across input images.
 
 ## Background
-The canonical NeRF architecture was introduced by Mildenhall et al. in 2020 [S1]. It established the use of MLPs with positional encoding for implicit scene representation. Subsequent developments have focused on improving efficiency, handling dynamics, and supporting specific camera models. MobileNeRF was introduced in June 2022 [S1], offering a mesh-based approach. NELF was presented in July 2021 [S1], focusing on light transport. NeRF with Per-Frame Latent Codes (Nerfies) and concurrent work like NerFace appeared in late 2020 and early 2021 [S1]. The Nerfacto pipeline, part of the Nerfstudio framework, integrates recent advances such as hash-grid encoding and Mip-NeRF 360 sampling [S2, unofficial].
+The canonical NeRF architecture was introduced by Mildenhall et al. in 2020 [S1]. It established the use of coupled MLPs for density and color prediction with positional encoding. Subsequent developments include NSVF (Liu et al., 2020) which introduced feature connections [S1], and Nerfies (Pumarola et al., 2021) which introduced per-frame latent codes for dynamic scenes [S1]. Neural Body (Pumarola et al., 2021) extended this to human avatars using SMPL [S1][S2, unofficial]. NELF (Park et al., 2021) introduced light transport vectors for relighting [S1]. HyperNeRF (Park et al., 2021) extended the canonical space to higher dimensions [S1]. CoNeRF (Park et al., 2021) added controllable editing via Hypermaps [S1]. MobileNeRF targets mobile efficiency via mesh-based rasterization [S1][S2, unofficial]. NeuMan (Wang et al., 2021) handles single-video human-scene interaction [S1]. AR-NeRF (Wang et al., 2021) introduces aperture rendering for defocus [S1]. The Nerfacto pipeline (Nerfstudio, 2023) integrates hash grids, Mip-NeRF 360 sampling, and other improvements as a standard baseline [S2, unofficial].
 
 ## Sources
 [S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

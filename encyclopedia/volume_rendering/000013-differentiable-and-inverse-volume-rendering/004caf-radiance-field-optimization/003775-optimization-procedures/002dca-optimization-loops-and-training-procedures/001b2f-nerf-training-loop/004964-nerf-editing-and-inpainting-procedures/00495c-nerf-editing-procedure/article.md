@@ -1,0 +1,256 @@
+# NeRF Editing Procedure
+
+Also called: DFF Editing, ViCA-NeRF Editing, Feature-Field Guided Editing
+
+## Overview
+This procedure enables localized 3D editing of a pre-trained Neural Radiance Field ($F_\Theta$) by integrating external semantic or geometric guidance into the volume rendering pipeline. It solves the problem of view-dependent artifacts and inconsistent edits that arise when modifying specific objects or regions without affecting the background. It differs from standard NeRF optimization by decoupling the editing logic from the global parameter update, instead using a query-based selection mechanism (via a Distilled Feature Field or segmentation masks) to selectively transform density and color values during ray marching [S1, S2].
+
+## How it works
+The method operates on a pre-trained NeRF $F_\Theta$ and an external guidance source (e.g., a Distilled Feature Field (DFF) [S1] or 2D segmentation masks [S2]). The core mechanism modifies the standard volume rendering integral by intercepting point queries along rays and applying transformations based on a selection probability or mask.
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   Pre-trained NeRF parameters $\Theta$ (mapping $\mathbf{x}, \mathbf{d} \to \sigma, c$).
+    *   Guidance source:
+        *   Option A: DFF model $F_{DFF}$ providing coordinate matching probabilities [S1].
+        *   Option B: 2D segmentation masks and depth maps for target views [S2].
+    *   Edit type: Deletion, Colorization, Translation/Rescaling, or Stylization [S1, S2].
+    *   Parameters: Threshold $\tau$ (for DFF), blending ratio $\lambda$ (for ViCA-NeRF), mask $m_w$ [S1, S2].
+*   **Outputs**:
+    *   Edited rendered images $I'$.
+    *   Optionally, updated NeRF parameters $\Theta'$ after optimization loop (if fine-tuning is applied).
+
+### Data Structures
+1.  **NeRF Model $F_\Theta$**: Standard MLP or grid-based representation.
+    *   Input: $\mathbf{x} \in \mathbb{R}^3, \mathbf{d} \in \mathbb{R}^3$.
+    *   Output: $\sigma \in \mathbb{R}_{\ge 0}, c \in \mathbb{R}^3$.
+2.  **DFF Model $F_{DFF}$** (if used):
+    *   Input: $\mathbf{x} \in \mathbb{R}^3$.
+    *   Output: Probability $p \in [0, 1]$ indicating if $\mathbf{x}$ matches the target semantic query [S1].
+3.  **Mask $m_w$**: Binary mask of shape $(H, W)$ indicating the edit region in 2D image space [S2].
+
+### Algorithm Steps
+
+#### Phase 1: Guidance Preparation (ViCA-NeRF Specific)
+If using the ViCA-NeRF warm-up strategy [S2]:
+1.  Select a random view $j$ to edit.
+2.  Generate an edited image $I_j^{edit}$ using a 2D prior (e.g., Instruct-Pix2Pix).
+3.  Project $I_j^{edit}$ onto all other views $i$ using depth information to create a blended initialization.
+4.  Compute the initial pixel value $I_i'$ for view $i$ using the blending formula:
+    $$ I_i' = \lambda I_i \odot m_w + (1 - \lambda) I_{i,j} \odot m_w + I_i \odot (1 - m_w) $$
+    Where:
+    *   $I_i$ is the original rendered image.
+    *   $I_{i,j}$ is the projected edited image from view $j$ to view $i$.
+    *   $m_w$ is the binary mask for the projected area.
+    *   $\lambda$ is a hyperparameter controlling the preservation of the original pixel value (typically $\lambda \in [0, 1]$) [S2].
+5.  Use $I_i'$ as the target for the initial optimization step to accelerate convergence and ensure consistency [S2].
+
+#### Phase 2: Ray Marching and Point Transformation (DFF Specific)
+For each ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, sample points $\mathbf{x}_k$ at depths $t_k$ [S1].
+
+1.  **Query Selection**:
+    *   Query the DFF for each point $\mathbf{x}_k$ to obtain probability $p_k$.
+    *   Define selection status:
+        $$ \text{selected}_k = \begin{cases} \text{True} & \text{if } p_k > \tau \\ \text{False} & \text{otherwise} \end{cases} $$
+    *   Alternatively, use soft weighting by mixing results in proportion to $p_k$ [S1].
+
+2.  **Point Transformation (if selected)**:
+    *   **Deletion**: Set density $\sigma(\mathbf{x}_k) = 0$. Color is irrelevant as density is zero [S1].
+    *   **Color Editing**:
+        *   Query NeRF for $\sigma(\mathbf{x}_k)$ and $c(\mathbf{x}_k)$.
+        *   Apply colorization function $b$: $c'(\mathbf{x}_k) = b(c(\mathbf{x}_k))$ [S1].
+    *   **Translation/Rescaling**:
+        *   Compute inverse transformation $g^{-1}$.
+        *   Calculate deformed coordinate $\mathbf{x}_0 = g^{-1}(\mathbf{x}_k)$ [S1].
+        *   Check if $\mathbf{x}_0$ is also selected by the query.
+        *   If $\mathbf{x}_0$ is selected:
+            *   Query NeRF for $\sigma(\mathbf{x}_0)$ and $c(\mathbf{x}_0)$.
+            *   If both $\mathbf{x}_k$ and $\mathbf{x}_0$ have non-zero density, mix colors based on alpha ratios:
+                $$ c_{final}(\mathbf{x}_k) = \frac{\alpha_k c(\mathbf{x}_k) + \alpha_0 c(\mathbf{x}_0)}{\alpha_k + \alpha_0} $$
+                Where $\alpha$ represents the alpha contribution at the point [S1].
+        *   If $\mathbf{x}_0$ is not selected, use $\mathbf{x}_0$ to query NeRF for $\sigma(\mathbf{x}_0)$ and $c(\mathbf{x}_0)$ directly [S1].
+
+3.  **Vanilla Query (if not selected)**:
+    *   Query NeRF for $\sigma(\mathbf{x}_k)$ and $c(\mathbf{x}_k)$ directly [S1].
+
+4.  **Volume Rendering**:
+    *   Perform standard volume rendering using the series of $(\sigma, c)$ tuples for the ray [S1].
+
+#### Phase 3: Local Editing via SAM and Depth Propagation (ViCA-NeRF Specific)
+If using local editing with SAM [S2]:
+1.  **Segmentation**: Use Segment Anything Model (SAM) to derive masks for all components in each input image [S2].
+2.  **Target Selection**: User selects a target instance via a single point prompt [S2].
+3.  **Mask Propagation**:
+    *   Utilize depth information to project the identified mask from the source view to other views [S2].
+    *   Iteratively project the mask as long as the projected mask sufficiently overlaps with the corresponding mask in the current view [S2].
+    *   Integrate the wrapped segmentation mask with the segmented masks in the current view to form a multi-view consistent mask [S2].
+4.  **Optimization**:
+    *   Use the consistent mask to restrict the loss calculation to the target object, leaving the background unchanged [S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_edited_ray(ray_origin, ray_direction, nerf_model, dff_model=None, 
+                      edit_type='color', transformation_g_inv=None, 
+                      mask_2d=None, depth_map=None, lambda_blend=0.5, threshold=0.5):
+    """
+    Renders a single ray with editing capabilities.
+    
+    Args:
+        ray_origin: 3D vector, origin of the ray.
+        ray_direction: 3D vector, direction of the ray.
+        nerf_model: Function mapping (x, d) -> (sigma, color).
+        dff_model: Optional function mapping x -> probability p.
+        edit_type: 'deletion', 'color', 'translation', or 'stylization'.
+        transformation_g_inv: Function mapping x -> x0 (inverse edit transform).
+        mask_2d: Optional 2D mask for local editing (ViCA-NeRF).
+        depth_map: Optional depth map for mask propagation (ViCA-NeRF).
+        lambda_blend: Blending ratio for warm-up (ViCA-NeRF).
+        threshold: Probability threshold for DFF selection.
+        
+    Returns:
+        color: 3D vector, final color of the ray.
+        alpha: float, final alpha of the ray.
+    """
+    # Standard NeRF sampling
+    t_vals = sample_points_along_ray(ray_origin, ray_direction)
+    points = ray_origin + t_vals[:, None] * ray_direction[:, None]
+    
+    densities = []
+    colors = []
+    
+    for i, x in enumerate(points):
+        # 1. Query Selection (DFF-based)
+        is_selected = False
+        if dff_model is not None:
+            p = dff_model.query(x)
+            is_selected = (p > threshold)
+            
+        # 2. Point Transformation
+        if is_selected:
+            if edit_type == 'deletion':
+                sigma = 0.0
+                c = (0.0, 0.0, 0.0)
+            elif edit_type == 'color':
+                sigma, c = nerf_model.query(x, ray_direction)
+                c = colorization_function(c) # b(c(x))
+            elif edit_type == 'translation':
+                x0 = transformation_g_inv(x)
+                # Check if x0 is also selected
+                p0 = dff_model.query(x0) if dff_model else False
+                if p0 > threshold:
+                    sigma_x, c_x = nerf_model.query(x, ray_direction)
+                    sigma_x0, c_x0 = nerf_model.query(x0, ray_direction)
+                    # Mix colors based on alpha ratios
+                    # Note: Alpha at point is approximated by sigma * delta_t
+                    alpha_x = sigma_x * (t_vals[i+1] - t_vals[i]) if i < len(t_vals)-1 else 0
+                    alpha_x0 = sigma_x0 * (t_vals[i+1] - t_vals[i]) if i < len(t_vals)-1 else 0
+                    total_alpha = alpha_x + alpha_x0
+                    if total_alpha > 0:
+                        c = (alpha_x * c_x + alpha_x0 * c_x0) / total_alpha
+                    else:
+                        c = c_x
+                    sigma = sigma_x # Use original sigma for blending weight
+                else:
+                    sigma, c = nerf_model.query(x0, ray_direction)
+            else:
+                # Fallback for stylization or other types
+                sigma, c = nerf_model.query(x, ray_direction)
+                c = apply_stylization(c) # Placeholder for specific style transfer
+        else:
+            # Vanilla NeRF query
+            sigma, c = nerf_model.query(x, ray_direction)
+            
+        densities.append(sigma)
+        colors.append(c)
+        
+    # 3. Volume Rendering
+    final_color, final_alpha = volume_render(densities, colors, t_vals)
+    return final_color, final_alpha
+
+def warm_up_editing(nerf_model, views, edited_view_j, mask_w, lambda_blend):
+    """
+    ViCA-NeRF Warm-up Strategy.
+    Projects edited view onto all other views to initialize consistency.
+    """
+    updated_views = {}
+    for i, view in enumerate(views):
+        if i == j:
+            updated_views[i] = view # Keep edited view as is
+        else:
+            # Project edited view j to view i using depth
+            projected_view = project_view(view_i=views[i], view_j=edited_view_j, depth=depth_map_i)
+            
+            # Blend using formula: Ii' = lambda*Ii * mw + (1-lambda)*Ii,j * mw + Ii * (1-mw)
+            original_pixel = view.rendered_image
+            blended_pixel = lambda_blend * original_pixel * mask_w + \
+                            (1 - lambda_blend) * projected_view * mask_w + \
+                            original_pixel * (1 - mask_w)
+            updated_views[i] = blended_image
+    return updated_views
+
+def propagate_mask_sam(source_view, target_views, depth_maps, sam_model):
+    """
+    Local Editing via SAM and Depth Propagation.
+    """
+    # 1. Segment source view
+    masks = sam_model.segment(source_view)
+    target_mask = select_mask_by_point(masks, user_point)
+    
+    propagated_masks = {source_view.id: target_mask}
+    
+    for target_view in target_views:
+        # Project mask from source to target using depth
+        projected_mask = project_mask(target_mask, depth_maps[source_view.id], 
+                                      depth_maps[target_view.id], 
+                                      camera_poses)
+        
+        # Check overlap with existing segmentation in target view
+        existing_mask = sam_model.segment(target_view)
+        overlap = calculate_overlap(projected_mask, existing_mask)
+        
+        if overlap > threshold_overlap:
+            # Integrate masks
+            final_mask = integrate_masks(projected_mask, existing_mask)
+            propagated_masks[target_view.id] = final_mask
+        else:
+            propagated_masks[target_view.id] = existing_mask # Fallback
+            
+    return propagated_masks
+```
+
+### Parameters and Typical Values
+*   **Threshold $\tau$**: Probability threshold for DFF selection. Not given in the sources.
+*   **$\lambda$**: Blending ratio for ViCA-NeRF warm-up. Not given in the sources, but described as controlling the ratio preserved from the original pixel value [S2].
+*   **SAM**: Segment Anything Model used for initial segmentation [S2].
+*   **LSeg/DINO**: Pre-trained feature encoders used to build the DFF [S1].
+
+### Edge Cases and Pitfalls
+*   **Boundary Mixing**: When translating objects, if both the original point $\mathbf{x}$ and deformed point $\mathbf{x}_0$ are selected and have non-zero density, colors are mixed. This handles boundaries between deformed objects and others [S1].
+*   **Background Alteration**: Existing methods often induce simultaneous changes in background and foreground. The local editing procedure using SAM and depth propagation specifically addresses this by restricting edits to the segmented object [S2].
+*   **Incorrect Depth**: ViCA-NeRF demonstrates robustness to incorrect depth estimation, managing glossy surfaces and sparse views as long as the NeRF is successfully built [S2].
+
+## Subtopics
+
+### Local Editing via SAM and Depth Propagation
+A technique to edit specific objects within a NeRF without altering the background, using 2D segmentation masks propagated across views via depth information. It employs SAM to derive masks, allows user selection via a single point, and projects masks across views using depth to ensure multi-view consistency. Choose this when precise object isolation is required without background distortion [S2].
+
+### ViCA-NeRF Warm-Up
+A strategy to efficiently warm up the editing process by blending edits directly before the entire editing process, accelerating editing while preserving consistency. It randomly selects a view to edit, projects it onto all other views, and blends the results using a hyperparameter $\lambda$. Choose this when rapid convergence and initial consistency are prioritized over iterative refinement [S2].
+
+## Operating characteristics
+*   **Time Complexity**: Depends on the number of samples per ray and the cost of querying the DFF or SAM. DFF queries add overhead to each point sampling step [S1]. SAM segmentation is performed per view, not per ray [S2].
+*   **Memory Complexity**: Requires storing the pre-trained NeRF and potentially the DFF model or SAM model. The DFF adds memory for the feature field [S1].
+*   **Strengths**: Enables localized edits without retraining the entire NeRF from scratch (if using DFF query-time modification). Handles complex edits like deletion, colorization, and translation [S1]. Ensures multi-view consistency through depth propagation or warm-up blending [S2].
+*   **Limitations**: Requires a pre-trained NeRF and external models (DFF, SAM, Instruct-Pix2Pix). Performance depends on the quality of the external guidance (e.g., SAM accuracy, DFF probability calibration) [S1, S2].
+*   **When to Use**: When editing specific objects or regions in a static NeRF scene with minimal computational overhead compared to full re-optimization.
+*   **When Not to Use**: When the edit requires significant structural changes to the scene geometry that cannot be captured by point-wise transformations or 2D priors.
+
+## Background
+The NeRF Editing Procedure is based on two primary approaches: DFF (Decomposing NeRF for Editing Via Feature Field Distillation) [S1] and ViCA-NeRF (View-Consistency-Aware 3D Editing of Neural Radiance Fields) [S2]. DFF introduces the concept of querying a distilled feature field to determine if a 3D point belongs to a target semantic region, allowing for edit operations like deletion and colorization at query time. ViCA-NeRF focuses on view consistency, using 2D priors and depth propagation to ensure edits are consistent across views, and introduces a warm-up strategy to accelerate convergence. These methods build on the foundational NeRF optimization procedures [Parent](12494-nerf-editing-and-inpainting-procedures.md).
+
+## Sources
+[S1] Decomposing NeRF for Editing Via Feature Field Distillation, https://doi.org/10.52202/068431-1694, fetched 2026-10-26
+[S2] ViCA-NeRF: View-Consistency-Aware 3D Editing of Neural Radiance Fields, https://arxiv.org/abs/2402.00864v1, fetched 2026-10-26
