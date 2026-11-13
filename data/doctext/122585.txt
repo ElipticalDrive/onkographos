@@ -1,0 +1,962 @@
+Uses the half-angle slicing technique and odd-even merge sort on the GPU 
+
+
+ported from [David Li](https://github.com/dli/flow/)'s beautful webGL implementation
+
+
+based on this [Nvida Article](chrome-extension://kjnclckkljgkjkephofiphecmokenanp/http://docs.nvidia.com/cuda/samples/5_Simulations/smokeParticles/doc/smokeParticles.pdf)
+
+### assets/background.frag
+```
+#version 330
+
+out vec4 FragColor;
+
+void main () {
+    
+    FragColor = vec4(vec3(.7), 1.0); //.1 is bg distance scale
+    
+}
+```
+
+### assets/background.vert
+```
+#version 330
+
+in vec4 ciPosition;
+in vec2 ciTexCoord0;
+uniform mat4 ciModelViewProjection;
+
+void main () {
+    
+    gl_Position = ciModelViewProjection * ciPosition;
+}
+```
+
+### assets/floor.frag
+```
+#version 330
+
+in vec4 vPosition;
+
+uniform sampler2D uOpacityTexture;
+
+uniform mat4 uLightViewProjection;
+
+out vec4 FragColor;
+
+void main () {
+    
+    vec2 lightTextureCoordinates = vec2(uLightViewProjection * vec4(vPosition.xyz, 1.0)) * 0.5 + 0.5;
+    
+    float opacity = texture(uOpacityTexture, lightTextureCoordinates).a;
+    
+    if (lightTextureCoordinates.x < 0.0 || lightTextureCoordinates.x > 1.0 || lightTextureCoordinates.y < 0.0 || lightTextureCoordinates.y > 1.0) {
+        opacity = 0.0;
+    }
+    
+    FragColor = vec4(0.0, 0.0, 0.0, opacity * 0.5);
+}
+```
+
+### assets/floor.vert
+```
+#version 330
+
+in vec4 ciPosition;
+in vec2 ciTexCoord0;
+uniform mat4 ciModelViewProjection;
+
+out vec2 vTexCoord0;
+out vec4 vPosition;
+
+void main () {
+    
+    vTexCoord0 = ciTexCoord0;
+    vPosition = ciPosition;
+    
+    gl_Position = ciModelViewProjection * ciPosition;
+}
+```
+
+### assets/opacity.frag
+```
+#version 330
+
+uniform float uParticleAlpha;
+
+out vec4 FragColor;
+
+void main () {
+    
+    float distanceFromCenter = distance(gl_PointCoord.xy, vec2(0.5, 0.5));
+    
+    if (distanceFromCenter > 0.5) discard;
+    
+    float alpha = clamp(1.0 - distanceFromCenter * 2.0, 0.0, 1.0) * uParticleAlpha;
+    
+    FragColor = vec4(1.,1., 1.0, alpha); //under operator requires this premultiplication
+}
+```
+
+### assets/opacity.vert
+```
+#version 330
+
+in vec2 ciTexCoord0;
+in vec4 ciPosition;
+
+uniform sampler2D uParticleTexture;
+
+uniform mat4 ciViewMatrix;
+uniform mat4 ciModelMatrix;
+uniform mat4 ciProjectionMatrix;
+
+uniform float uParticleDiameter;
+uniform float uScreenWidth;
+
+void main () {
+    
+    vec4 data = texture(uParticleTexture, ciTexCoord0.xy);
+    vec3 position = data.rgb;
+    
+    vec3 viewSpacePosition = vec3(ciViewMatrix * vec4(position, 1.0));
+    
+    vec4 corner = vec4(uParticleDiameter * 0.5, uParticleDiameter * 0.5, viewSpacePosition.z, 1.0);
+    
+    float projectedCornerX = dot(vec4(ciProjectionMatrix[0][0],
+                                      ciProjectionMatrix[1][0],
+                                      ciProjectionMatrix[2][0],
+                                      ciProjectionMatrix[3][0]
+                                      )
+                                 , corner);
+    
+    float projectedCornerW = dot(vec4(ciProjectionMatrix[0][3],
+                                      ciProjectionMatrix[1][3],
+                                      ciProjectionMatrix[2][3],
+                                      ciProjectionMatrix[3][3]
+                                      )
+                                 , corner);
+    
+    gl_PointSize = uScreenWidth * 0.5 * projectedCornerX * 2.0 / projectedCornerW * pow( data.a/4., .1);
+    
+    gl_Position = ciProjectionMatrix * vec4(viewSpacePosition, 1.0);
+}
+```
+
+### assets/render.frag
+```
+#version 330
+
+in vec3 vPosition;
+in float vOpacity;
+
+in vec2 vTexCoord0;
+
+uniform float uParticleAlpha;
+uniform vec3 uParticleColor;
+//uniform bool uFlipped; //non-flipped is front-to-back, flipped is back-to-front
+
+out vec4 FragColor;
+
+void main () {
+    
+   // FragColor = vec4( vTexCoord0, 1., 1.);
+    
+    float distanceFromCenter = distance( gl_PointCoord.xy, vec2(0.5, 0.5) );
+    
+    if (distanceFromCenter > 0.5) discard;
+    
+    float alpha = clamp(1.0 - distanceFromCenter * 2.0, 0.0, 1.0) * uParticleAlpha;
+    
+    vec3 color = (1.0 - vOpacity * .75 ) * uParticleColor;
+    
+    //premultiply alpha
+    FragColor = vec4(color * alpha, alpha);
+    
+}
+```
+
+### assets/render.vert
+```
+#version 330
+
+//in vec4 ciPosition;
+//in vec2 ciTexCoord0;
+//uniform mat4 ciModelViewProjection;
+//
+//out vec2 vTexCoord0;
+//
+//uniform sampler2D uPositions;
+//
+//void main () {
+//    vTexCoord0 = ciTexCoord0;
+//    
+//    vec3 position = texture(uPositions, ciTexCoord0).xyz;
+//    
+//    gl_Position = ciModelViewProjection * vec4( position, 1. );
+//}
+
+//#version 330
+
+in vec4 ciPosition;
+in vec2 ciTexCoord0;
+
+out vec3 vPosition;
+out float vOpacity;
+out vec2 vTexCoord0;
+
+uniform sampler2D uParticleTexture;
+
+uniform sampler2D uOpacityTexture;
+
+uniform mat4 ciViewMatrix;
+uniform mat4 ciModelMatrix;
+uniform mat4 ciProjectionMatrix;
+uniform mat4 ciModelViewProjection;
+
+uniform mat4 uLightViewProjection;
+
+uniform float uParticleDiameter;
+uniform float uScreenWidth;
+
+//const mat4 biasMat  = mat4(	0.5, 0.0, 0.0, 0.0,
+//                           0.0, 0.5, 0.0, 0.0,
+//                           0.0, 0.0, 0.5, 0.0,
+//                           0.5, 0.5, 0.5, 1.0 );
+
+void main () {
+    
+    vTexCoord0 = ciTexCoord0;
+    
+    vec4 data = texture(uParticleTexture, ciTexCoord0.xy);
+    
+    vec3 position = data.rgb;
+    
+    vPosition = position;
+    
+    vec2 lightTextureCoordinates = vec2(uLightViewProjection *  vec4(position, 1.0) ) * 0.5 + 0.5;
+    
+    //biasMat * uLightViewProjection * ciModelMatrix * vec4(position, 1.0)
+    
+    vOpacity = texture(uOpacityTexture, lightTextureCoordinates ).a;
+    
+    vec3 viewSpacePosition = vec3( ciViewMatrix  *  vec4( position, 1.0 ) );
+    
+    vec4 corner = vec4(uParticleDiameter * 0.5, uParticleDiameter * 0.5, viewSpacePosition.z, 1.0);
+    
+    float projectedCornerX = dot( vec4(ciProjectionMatrix[0][0],
+                                       ciProjectionMatrix[1][0],
+                                       ciProjectionMatrix[2][0],
+                                       ciProjectionMatrix[3][0]
+                                       )
+                                 , corner );
+    
+    float projectedCornerW = dot( vec4(ciProjectionMatrix[0][3],
+                                       ciProjectionMatrix[1][3],
+                                       ciProjectionMatrix[2][3],
+                                       ciProjectionMatrix[3][3]
+                                       )
+                                 , corner);
+    
+    gl_PointSize = uScreenWidth * 0.5 * projectedCornerX * 2.0 / projectedCornerW * smoothstep(0.,1., data.a/4.);
+    
+    gl_Position = ciProjectionMatrix * vec4(viewSpacePosition, 1.0);
+    
+    if (position.y < -.25 ) gl_Position = vec4(9999999.0, 9999999.0, 9999999.0, 1.0); //less than floor origin
+    
+}
+```
+
+### assets/simulation.frag
+```
+#version 330
+
+uniform sampler2D uParticleTexture;
+uniform sampler2D uSpawnTexture;
+
+uniform vec2 uResolution;
+
+uniform float uDeltaTime;
+uniform float uTime;
+
+uniform float uPersistence;
+
+const int OCTAVES =  3;
+
+vec4 mod289(vec4 x) {
+    return x - floor(x * (1.0 / 289.0)) * 289.0;
+}
+
+float mod289(float x) {
+    return x - floor(x * (1.0 / 289.0)) * 289.0;
+}
+
+vec4 permute(vec4 x) {
+    return mod289(((x*34.0)+1.0)*x);
+}
+
+float permute(float x) {
+    return mod289(((x*34.0)+1.0)*x);
+}
+
+vec4 taylorInvSqrt(vec4 r) {
+    return 1.79284291400159 - 0.85373472095314 * r;
+}
+
+float taylorInvSqrt(float r) {
+    return 1.79284291400159 - 0.85373472095314 * r;
+}
+
+vec4 grad4(float j, vec4 ip) {
+    const vec4 ones = vec4(1.0, 1.0, 1.0, -1.0);
+    vec4 p,s;
+    
+    p.xyz = floor( fract (vec3(j) * ip.xyz) * 7.0) * ip.z - 1.0;
+    p.w = 1.5 - dot(abs(p.xyz), ones.xyz);
+    s = vec4(lessThan(p, vec4(0.0)));
+    p.xyz = p.xyz + (s.xyz*2.0 - 1.0) * s.www;
+    
+    return p;
+}
+
+#define F4 0.309016994374947451
+
+vec4 simplexNoiseDerivatives (vec4 v) {
+    const vec4  C = vec4( 0.138196601125011,0.276393202250021,0.414589803375032,-0.447213595499958);
+    
+    vec4 i  = floor(v + dot(v, vec4(F4)) );
+    vec4 x0 = v -   i + dot(i, C.xxxx);
+    
+    vec4 i0;
+    vec3 isX = step( x0.yzw, x0.xxx );
+    vec3 isYZ = step( x0.zww, x0.yyz );
+    i0.x = isX.x + isX.y + isX.z;
+    i0.yzw = 1.0 - isX;
+    i0.y += isYZ.x + isYZ.y;
+    i0.zw += 1.0 - isYZ.xy;
+    i0.z += isYZ.z;
+    i0.w += 1.0 - isYZ.z;
+    
+    vec4 i3 = clamp( i0, 0.0, 1.0 );
+    vec4 i2 = clamp( i0-1.0, 0.0, 1.0 );
+    vec4 i1 = clamp( i0-2.0, 0.0, 1.0 );
+    
+    vec4 x1 = x0 - i1 + C.xxxx;
+    vec4 x2 = x0 - i2 + C.yyyy;
+    vec4 x3 = x0 - i3 + C.zzzz;
+    vec4 x4 = x0 + C.wwww;
+    
+    i = mod289(i);
+    float j0 = permute( permute( permute( permute(i.w) + i.z) + i.y) + i.x);
+    vec4 j1 = permute( permute( permute( permute (
+                                                  i.w + vec4(i1.w, i2.w, i3.w, 1.0 ))
+                                        + i.z + vec4(i1.z, i2.z, i3.z, 1.0 ))
+                               + i.y + vec4(i1.y, i2.y, i3.y, 1.0 ))
+                      + i.x + vec4(i1.x, i2.x, i3.x, 1.0 ));
+    
+    
+    vec4 ip = vec4(1.0/294.0, 1.0/49.0, 1.0/7.0, 0.0) ;
+    
+    vec4 p0 = grad4(j0,   ip);
+    vec4 p1 = grad4(j1.x, ip);
+    vec4 p2 = grad4(j1.y, ip);
+    vec4 p3 = grad4(j1.z, ip);
+    vec4 p4 = grad4(j1.w, ip);
+    
+    vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+    p0 *= norm.x;
+    p1 *= norm.y;
+    p2 *= norm.z;
+    p3 *= norm.w;
+    p4 *= taylorInvSqrt(dot(p4,p4));
+    
+    vec3 values0 = vec3(dot(p0, x0), dot(p1, x1), dot(p2, x2)); //value of contributions from each corner at point
+    vec2 values1 = vec2(dot(p3, x3), dot(p4, x4));
+    
+    vec3 m0 = max(0.5 - vec3(dot(x0,x0), dot(x1,x1), dot(x2,x2)), 0.0); //(0.5 - x^2) where x is the distance
+    vec2 m1 = max(0.5 - vec2(dot(x3,x3), dot(x4,x4)), 0.0);
+    
+    vec3 temp0 = -6.0 * m0 * m0 * values0;
+    vec2 temp1 = -6.0 * m1 * m1 * values1;
+    
+    vec3 mmm0 = m0 * m0 * m0;
+    vec2 mmm1 = m1 * m1 * m1;
+    
+    float dx = temp0[0] * x0.x + temp0[1] * x1.x + temp0[2] * x2.x + temp1[0] * x3.x + temp1[1] * x4.x + mmm0[0] * p0.x + mmm0[1] * p1.x + mmm0[2] * p2.x + mmm1[0] * p3.x + mmm1[1] * p4.x;
+    float dy = temp0[0] * x0.y + temp0[1] * x1.y + temp0[2] * x2.y + temp1[0] * x3.y + temp1[1] * x4.y + mmm0[0] * p0.y + mmm0[1] * p1.y + mmm0[2] * p2.y + mmm1[0] * p3.y + mmm1[1] * p4.y;
+    float dz = temp0[0] * x0.z + temp0[1] * x1.z + temp0[2] * x2.z + temp1[0] * x3.z + temp1[1] * x4.z + mmm0[0] * p0.z + mmm0[1] * p1.z + mmm0[2] * p2.z + mmm1[0] * p3.z + mmm1[1] * p4.z;
+    float dw = temp0[0] * x0.w + temp0[1] * x1.w + temp0[2] * x2.w + temp1[0] * x3.w + temp1[1] * x4.w + mmm0[0] * p0.w + mmm0[1] * p1.w + mmm0[2] * p2.w + mmm1[0] * p3.w + mmm1[1] * p4.w;
+    
+    return vec4(dx, dy, dz, dw) * 49.0;
+}
+
+
+in vec2 vTexCoord0;
+out vec4 FragColor;
+
+void main () {
+    
+    vec2 textureCoordinates = gl_FragCoord.xy / uResolution;
+    
+    vec4 data = texture(uParticleTexture, vTexCoord0);
+    
+    vec3 oldPosition = data.rgb;
+    
+    vec3 noisePosition = oldPosition *  1.5; //noise position scale
+    
+    float noiseTime = uTime;// * (1./4000.) ; //noise time scale
+    
+    vec4 xNoisePotentialDerivatives = vec4(0.0);
+    vec4 yNoisePotentialDerivatives = vec4(0.0);
+    vec4 zNoisePotentialDerivatives = vec4(0.0);
+    
+    float persistence = uPersistence;
+    
+    for (int i = 0; i < OCTAVES; ++i) {
+        
+        float scale = (1.0 / 2.0) * pow(2.0, float(i));
+        
+        float noiseScale = pow(persistence, float(i));
+        
+        if (persistence == 0.0 && i == 0) { //fix undefined behaviour
+            noiseScale = 1.0;
+        }
+        
+        xNoisePotentialDerivatives += simplexNoiseDerivatives(vec4(noisePosition * pow(2.0, float(i)), noiseTime)) * noiseScale * scale;
+        yNoisePotentialDerivatives += simplexNoiseDerivatives(vec4((noisePosition + vec3(123.4, 129845.6, -1239.1)) * pow(2.0, float(i)), noiseTime)) * noiseScale * scale;
+        zNoisePotentialDerivatives += simplexNoiseDerivatives(vec4((noisePosition + vec3(-9519.0, 9051.0, -123.0)) * pow(2.0, float(i)), noiseTime)) * noiseScale * scale;
+    }
+    
+    
+    //compute curl
+    vec3 noiseVelocity = vec3(
+                              zNoisePotentialDerivatives[1] - yNoisePotentialDerivatives[2],
+                              xNoisePotentialDerivatives[2] - zNoisePotentialDerivatives[0],
+                              yNoisePotentialDerivatives[0] - xNoisePotentialDerivatives[1]
+                              ) * .075; //noise scale
+    
+    vec3 velocity = vec3( .2 , 0.0, 0.0); //base speed in x axis
+    vec3 totalVelocity = velocity + noiseVelocity;
+    
+    vec3 newPosition = oldPosition + totalVelocity * uDeltaTime;
+    
+    float oldLifetime = data.a;
+    float newLifetime = oldLifetime - uDeltaTime;
+    
+    vec4 spawnData = texture(uSpawnTexture, vTexCoord0);
+    
+    if (newLifetime < 0.0) {
+        newPosition = spawnData.rgb;
+        newLifetime = spawnData.a + newLifetime;
+    }
+    
+    FragColor = vec4(newPosition, newLifetime);
+}
+```
+
+### assets/simulation.vert
+```
+#version 330
+
+in vec4 ciPosition;
+in vec2 ciTexCoord0;
+uniform mat4 ciModelViewProjection;
+
+out vec2 vTexCoord0;
+
+void main () {
+    vTexCoord0 = ciTexCoord0;
+    gl_Position = ciModelViewProjection * ciPosition;
+}
+```
+
+### assets/sort.frag
+```
+#version 330
+
+uniform sampler2D uDataTexture;
+
+uniform vec2 uResolution;
+
+uniform float uPass;
+uniform float uStage;
+
+uniform vec3 uCameraPosition;
+
+uniform vec3 uHalfVector;
+
+in vec2 vTexCoord0;
+
+out vec4 FragColor;
+
+void main () {
+    
+    vec2 normalizedCoordinates = vTexCoord0;//gl_FragCoord.xy / uResolution;
+
+    vec4 self = texture(uDataTexture, vTexCoord0);
+    
+    float i = floor(normalizedCoordinates.x * uResolution.x) + floor(normalizedCoordinates.y * uResolution.y) * uResolution.x;
+    
+    float j = floor( mod( i, 2.0 * uStage ) );
+    
+    float compare = 0.0;
+    
+    if ((j < mod(uPass, uStage)) || (j > (2.0 * uStage - mod(uPass, uStage) - 1.0))) {
+        compare = 0.0;
+    } else {
+        if (mod((j + mod(uPass, uStage)) / uPass, 2.0) < 1.0) {
+            compare = 1.0;
+        } else {
+            compare = -1.0;
+        }
+    }
+    
+    float adr = i + compare * uPass;
+    
+    vec4 partner = texture(uDataTexture, vec2(floor( mod(adr, uResolution.x)) / uResolution.x, floor(adr / uResolution.x) / uResolution.y));
+    
+    float selfProjectedLength = dot(uHalfVector, self.xyz);
+    float partnerProjectedLength = dot(uHalfVector, partner.xyz);
+    
+    FragColor = (selfProjectedLength * compare < partnerProjectedLength * compare) ? self : partner;
+}
+```
+
+### assets/sort.vert
+```
+#version 330
+
+in vec4 ciPosition;
+in vec2 ciTexCoord0;
+uniform mat4 ciModelViewProjection;
+
+out vec2 vTexCoord0;
+
+void main () {
+    vTexCoord0 = ciTexCoord0;
+    gl_Position = ciModelViewProjection * ciPosition;
+}
+```
+
+### include/Resources.h
+```
+#pragma once
+#include "cinder/CinderResources.h"
+
+//#define RES_MY_RES			CINDER_RESOURCE( ../resources/, image_name.png, 128, IMAGE )
+```
+
+### src/half_angle_slicingApp.cpp
+```
+#include "cinder/app/App.h"
+#include "cinder/app/RendererGl.h"
+#include "cinder/gl/gl.h"
+
+#include "cinder/gl/GlslProg.h"
+#include "cinder/gl/Fbo.h"
+#include "cinder/Log.h"
+#include "cinder/gl/Batch.h"
+#include "cinder/Rand.h"
+
+using namespace ci;
+using namespace ci::app;
+using namespace std;
+
+const int   PARTICLES = 256; //squared
+const float PRESIMULATION_DELTA_TIME = 0.1;
+const int   BASE_LIFETIME = 2;
+const float MAX_DELTA_TIME = 0.2;
+const int   SLICES = 128;
+const int   OPACITY_TEXTURE_RESOLUTION = 1024;
+
+gl::GlslProgRef loadShader( const std::string& filename )
+{
+    gl::GlslProgRef prog;
+    try {
+        prog = gl::GlslProg::create( loadAsset( filename+".vert"), loadAsset(filename+".frag") );
+    } catch (const gl::GlslProgCompileExc& e) {
+        console() << filename+" shader" << e.what() << endl;
+    } catch (const gl::GlslProgLinkExc& e) {
+        console() << filename+" shader" << e.what() << endl;
+    }
+    return prog;
+}
+
+class half_angle_slicingApp : public App {
+public:
+    void setup() override;
+    void mouseDown( MouseEvent event ) override;
+    void update() override;
+    void draw() override;
+    
+    gl::BatchRef    mVertices, mParticleQuad, mFullScreen, mFloor;
+    gl::FboRef      mSimulationFbo[2], mOpacityFbo;
+    gl::GlslProgRef mSimulationShader, mRenderShader, mSortShader, mOpacityShader, mFloorShader, mBackgroundShader;
+    gl::TextureRef  mSpawnTexture;
+    
+    CameraPersp     mCamera;
+    
+    int mCurrent = 0;
+    int mMaxParticleCount = PARTICLES * PARTICLES;
+    
+    float mInitialTurbulance = 0.4f;
+    float mPrevTime = 0.f;
+    float mDeltaTime = 0.f;
+    float mInitialSpeed = 1.0f;
+    
+    bool mFirstFrame = true;
+    
+    int mTotalSortSteps;
+    int mSortStepsLeft;
+    int mSortPass = -1;
+    int mSortStage = -1;
+
+    bool mFlipped = false;
+    
+    CameraOrtho mLightCamera;
+    
+};
+
+void half_angle_slicingApp::setup()
+{
+    mSimulationShader = loadShader("simulation");
+    mRenderShader = loadShader("render");
+    mSortShader = loadShader("sort");
+    mOpacityShader = loadShader("opacity");
+    mBackgroundShader = loadShader("background");
+    mFloorShader = loadShader("floor");
+    
+    gl::Texture::Format fmt;
+    fmt.setWrap( GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE );
+    fmt.setMinFilter( GL_NEAREST );
+    fmt.setMagFilter( GL_NEAREST );
+    fmt.setInternalFormat(GL_RGBA32F);
+    fmt.setDataType(GL_FLOAT);
+    
+    mSimulationFbo[0] = gl::Fbo::create(PARTICLES, PARTICLES, gl::Fbo::Format().colorTexture(fmt).disableDepth() );
+    mSimulationFbo[1] = gl::Fbo::create(PARTICLES, PARTICLES, gl::Fbo::Format().colorTexture(fmt).disableDepth() );
+    
+    {
+        gl::ScopedFramebuffer fbo( mSimulationFbo[0] );
+        gl::clear();
+    }
+    {
+        gl::ScopedFramebuffer fbo( mSimulationFbo[1] );
+        gl::clear();
+    }
+    
+    mParticleQuad = gl::Batch::create(geom::Plane().size(vec2(PARTICLES)).origin(vec3(PARTICLES/2, PARTICLES/2, 0.)).normal(vec3(0,0,1)), mSimulationShader);
+    
+    
+    gl::Texture::Format opacity_fmt;
+    opacity_fmt.setWrap( GL_CLAMP_TO_EDGE, GL_CLAMP_TO_EDGE );
+    opacity_fmt.setMagFilter( GL_LINEAR );
+    opacity_fmt.setMagFilter( GL_LINEAR );
+    opacity_fmt.setDataType(GL_UNSIGNED_BYTE);
+    opacity_fmt.setInternalFormat(GL_RGBA);
+    
+    mOpacityFbo = gl::Fbo::create( OPACITY_TEXTURE_RESOLUTION, OPACITY_TEXTURE_RESOLUTION, gl::Fbo::Format().disableDepth().colorTexture(opacity_fmt) );
+    
+    vector<vec4> positions;
+    vector<vec2> texCoords;
+    vector<vec4> spawn;
+    
+    for( int y = 0; y < PARTICLES; y++ ){
+        for( int x = 0; x < PARTICLES; x++ ){
+            
+            auto sphere_pt = randVec3();
+            
+            auto tc = vec2( (x + 0.5) / PARTICLES, (y + 0.5) / PARTICLES );
+            auto spawndata = vec4( sphere_pt*.1f, (float)BASE_LIFETIME + randFloat() * 2.f );
+            
+            spawn.push_back(spawndata);
+            positions.push_back(vec4(tc,0.,1.));
+            texCoords.push_back(tc);
+            
+        }
+    }
+    
+    geom::BufferLayout pos_layout, tc_layout;
+    
+    auto pos_buffer = gl::Vbo::create(GL_ARRAY_BUFFER, sizeof(vec4)*positions.size(), positions.data(), GL_DYNAMIC_DRAW);
+    
+    pos_layout.append(geom::POSITION, 4, 0, 0);
+    
+    auto tc_buffer = gl::Vbo::create(GL_ARRAY_BUFFER, sizeof(vec2)*texCoords.size(), texCoords.data(), GL_STATIC_DRAW);
+    
+    tc_layout.append(geom::TEX_COORD_0, 2, 0, 0);
+    
+    vector<pair<geom::BufferLayout, gl::VboRef>> buffers;
+    
+    buffers.push_back(make_pair(pos_layout, pos_buffer));
+    buffers.push_back(make_pair(tc_layout, tc_buffer));
+
+    auto mesh = gl::VboMesh::create( PARTICLES * PARTICLES, GL_POINTS, buffers );
+    
+    mVertices = gl::Batch::create( mesh, mRenderShader);
+
+    mSpawnTexture = gl::Texture::create( Surface32f( (float*)spawn.data(), PARTICLES, PARTICLES, sizeof(vec4)*PARTICLES, SurfaceChannelOrder::RGBA ), fmt );
+    
+    mCamera.setPerspective(60, getWindowAspectRatio(), .1, 10000);
+    mCamera.lookAt(vec3(-1,0,.5),vec3(0));
+    
+    mLightCamera.setOrtho(-5.0, 5.0, -5.0, 5.0, -50.0, 50.0);
+   // mLightCamera.setViewDirection(vec3(0,-1,0));
+    //mLightCamera.setWorldUp(vec3(0,1,0));
+    mLightCamera.lookAt(vec3(0,5,0), vec3(0,0,0));
+    
+    
+    mFullScreen = gl::Batch::create(geom::Plane().size(getWindowSize()).origin(vec3(getWindowCenter(),0.)).normal(vec3(0,0,1)), mBackgroundShader);
+    
+    mFloor = gl::Batch::create(geom::Plane().size(vec2(100,100)).origin(vec3(0.,-.25, 0. )).normal(vec3(0,1,0)), mFloorShader);
+    
+    mTotalSortSteps = (log2(mMaxParticleCount) * (log2(mMaxParticleCount) + 1)) / 2;
+    mSortStepsLeft = mTotalSortSteps;
+    mSortPass = -1;
+    mSortStage = -1;
+    
+    gl::enable(GL_VERTEX_PROGRAM_POINT_SIZE_NV);
+}
+
+void half_angle_slicingApp::mouseDown( MouseEvent event )
+{
+}
+
+void half_angle_slicingApp::update()
+{
+    mCamera.lookAt( vec3( cos(getElapsedSeconds()*.5)+.5, 0., sin(getElapsedSeconds()*.5)  ), vec3(.5, 0,0) );
+   // mLightCamera.lookAt(vec3(sin(getElapsedSeconds()), sin(getElapsedSeconds()*.5)*5., cos(getElapsedSeconds()*.5)*5.),vec3(0), vec3(0,1,0));
+
+    gl::disableAlphaBlending();
+    //swap
+    mCurrent = 1 - mCurrent;
+    
+    //delta time
+    mDeltaTime = getElapsedSeconds() - mPrevTime;
+    mPrevTime = getElapsedSeconds();
+    
+    
+    if (mDeltaTime > MAX_DELTA_TIME) {
+        mDeltaTime = 0;
+    }
+    
+    bool flippedThisFrame = false; //if the order reversed this frame
+    
+    vec3 viewDirection = mCamera.getViewDirection();
+    vec3 lightViewDirection = mLightCamera.getViewDirection();
+    vec3 halfVector;
+    
+    if (dot(viewDirection, lightViewDirection) > 0.0) {
+        
+        halfVector = normalize( lightViewDirection + viewDirection );
+        
+        if (mFlipped) {
+            flippedThisFrame = true;
+        }
+        
+        mFlipped = false;
+        
+    } else {
+        
+        halfVector = normalize( lightViewDirection - viewDirection );
+        
+        if (!mFlipped) {
+            flippedThisFrame = true;
+        }
+        
+        mFlipped = true;
+    }
+
+    mParticleQuad->replaceGlslProg(mSimulationShader);
+
+    {
+        gl::ScopedFramebuffer fbo( mSimulationFbo[mCurrent] );
+        gl::ScopedMatrices pushMatrix;
+        gl::ScopedViewport view( vec2(0), mSimulationFbo[mCurrent]->getSize() );
+        gl::setMatricesWindow(mSimulationFbo[mCurrent]->getSize());
+        
+        gl::ScopedTextureBind prevPositions( mSimulationFbo[1-mCurrent]->getColorTexture(), 0 );
+        gl::ScopedTextureBind spawnTex( mSpawnTexture, 1 );
+        
+        for (int i = 0; i < (mFirstFrame ? BASE_LIFETIME / PRESIMULATION_DELTA_TIME : 1); ++i) {
+            
+            auto glsl = mParticleQuad->getGlslProg();
+            
+            glsl->uniform( "uResolution", vec2(PARTICLES) );
+            glsl->uniform( "uDeltaTime", mFirstFrame ? PRESIMULATION_DELTA_TIME : mDeltaTime * mInitialSpeed );
+            glsl->uniform( "uTime", mFirstFrame ? PRESIMULATION_DELTA_TIME : (float)getElapsedSeconds() );
+            glsl->uniform( "uParticleTexture", 0);
+            glsl->uniform( "uSpawnTexture", 1);
+            glsl->uniform( "uPersistence", mInitialTurbulance );
+            
+            mParticleQuad->draw();
+        }
+    }
+    
+    mFirstFrame = false;
+    
+    if (flippedThisFrame) { //if the order reversed this frame sort everything
+        mSortPass = -1;
+        mSortStage = -1;
+        mSortStepsLeft = mTotalSortSteps;
+    }
+    
+    
+    mParticleQuad->replaceGlslProg(mSortShader);
+    
+    {
+        
+        for (int i = 0; i < ( mTotalSortSteps ); ++i) {
+            
+            mCurrent = 1 - mCurrent;
+            
+            gl::ScopedFramebuffer fbo( mSimulationFbo[mCurrent] );
+            
+            gl::ScopedMatrices pushMatrix;
+            
+            gl::setMatricesWindow( mSimulationFbo[mCurrent]->getSize() );
+            gl::ScopedViewport view( vec2(0), mSimulationFbo[mCurrent]->getSize() );
+            
+            mSortPass--;
+            
+            if (mSortPass < 0) {
+                mSortStage++;
+                mSortPass = mSortStage;
+            }
+            
+            gl::ScopedTextureBind particleTex( mSimulationFbo[1-mCurrent]->getColorTexture(), 0 );
+            
+            auto glsl = mParticleQuad->getGlslProg();
+            glsl->uniform( "uDataTexture", 0);
+            glsl->uniform( "uResolution", vec2(PARTICLES) );
+            glsl->uniform( "uPass", float(1 << mSortPass) );
+            glsl->uniform( "uStage", float(1 << mSortStage) );
+            glsl->uniform( "uHalfVector", halfVector );
+            
+            mParticleQuad->draw();
+            
+            mSortStepsLeft--;
+            
+            if (mSortStepsLeft == 0) {
+                mSortStepsLeft = mTotalSortSteps;
+                mSortPass = -1;
+                mSortStage = -1;
+            }
+        }
+    }
+
+
+    
+    if(getElapsedFrames() % 60 ==0 )console() << getAverageFps() << endl;
+
+}
+
+void half_angle_slicingApp::draw()
+{
+    gl::clear( ColorA( 0.0, 0.0, 0.0, 0 ) );
+
+    gl::enableAlphaBlending();
+    
+    {
+        gl::ScopedFramebuffer fbo( mOpacityFbo );
+        gl::clear( ColorA(0,0,0,0) );
+    }
+    
+    gl::ScopedTextureBind particles( mSimulationFbo[mCurrent]->getColorTexture(), 0 );
+    
+    for( int i = 0; i < SLICES; i++ ){
+        
+        
+        mVertices->replaceGlslProg(mRenderShader);
+        
+        ///RENDER PARTICLES
+        
+        {
+            gl::ScopedMatrices pushMatrix;
+            gl::setMatrices(mCamera);
+            gl::ScopedViewport view( vec2(0), getWindowSize() );
+            
+            gl::ScopedTextureBind opacity( mOpacityFbo->getColorTexture(), 1 );
+            
+            auto glsl = mVertices->getGlslProg();
+            glsl->uniform( "uParticleTexture", 0 );
+            glsl->uniform( "uOpacityTexture", 1 );
+            glsl->uniform( "uLightViewProjection", mLightCamera.getProjectionMatrix() * mLightCamera.getViewMatrix() );
+            glsl->uniform( "uParticleDiameter", 0.02f );
+            glsl->uniform( "uScreenWidth", (float)getWindowWidth() );
+            glsl->uniform( "uParticleAlpha", .4f );
+            glsl->uniform( "uParticleColor", vec3(1,0,.5) );
+            
+            if( mFlipped ){
+                
+                gl::ScopedBlend blend( GL_ONE, GL_ONE_MINUS_SRC_ALPHA );
+                
+                mVertices->draw( i * (mMaxParticleCount / SLICES), mMaxParticleCount / SLICES);
+                
+            }else{
+                
+                gl::ScopedBlend blend(  GL_ONE_MINUS_DST_ALPHA, GL_ONE );
+                
+                mVertices->draw( i * (mMaxParticleCount / SLICES), mMaxParticleCount / SLICES);
+                
+            }
+            
+        }
+        
+        ///OPACTIY PASS : FROM LIGHT
+        mVertices->replaceGlslProg(mOpacityShader);
+        
+        {
+            
+            gl::ScopedFramebuffer fbo( mOpacityFbo );
+            gl::ScopedMatrices pushMatrix;
+            
+            gl::setMatrices(mLightCamera);
+            gl::ScopedViewport view( vec2(0), mOpacityFbo->getSize() );
+            
+            auto glsl = mVertices->getGlslProg();
+            
+            glsl->uniform( "uParticleTexture", 0 );
+            glsl->uniform( "uParticleDiameter", .02f );
+            glsl->uniform( "uScreenWidth", (float)mOpacityFbo->getWidth() );
+            glsl->uniform( "uParticleAlpha", .4f );
+            
+            gl::ScopedBlend blend( GL_ONE, GL_ONE_MINUS_SRC_ALPHA );
+            
+            mVertices->draw( i * (mMaxParticleCount / SLICES), mMaxParticleCount / SLICES);
+            
+        }
+        
+    }
+    
+    {
+        gl::ScopedMatrices push;
+        gl::setMatrices(mCamera);
+        gl::ScopedViewport view( vec2(0,0), getWindowSize() );
+        gl::ScopedTextureBind opacity( mOpacityFbo->getColorTexture(), 2 );
+        auto glsl = mFloor->getGlslProg();
+        glsl->uniform( "uLightViewProjection", mLightCamera.getProjectionMatrix() * mLightCamera.getViewMatrix()  );
+        glsl->uniform( "uOpacityTexture", 2 );
+        
+        gl::ScopedBlend blend(  GL_ONE_MINUS_DST_ALPHA, GL_ONE );
+        
+        mFloor->draw();
+    }
+
+
+    {
+        gl::ScopedMatrices push;
+        gl::setMatricesWindow(getWindowSize());
+        gl::ScopedViewport view( vec2(0), getWindowSize() );
+        
+        gl::ScopedBlend blend(  GL_ONE_MINUS_DST_ALPHA, GL_ONE );
+
+        mFullScreen->draw();
+    }
+
+    
+}
+
+CINDER_APP( half_angle_slicingApp, RendererGl, [&](half_angle_slicingApp::Settings*settigns){ settigns->setFullScreen(); } )
+```

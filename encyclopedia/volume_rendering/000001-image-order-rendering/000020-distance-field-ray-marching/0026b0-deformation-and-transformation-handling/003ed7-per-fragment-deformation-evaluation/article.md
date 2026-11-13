@@ -3,168 +3,127 @@
 Also called: Fragment shader deformation, Shader Shift, Shader Sine
 
 ## Overview
-Per-fragment deformation evaluation is a volume rendering technique that applies deformation functions directly within the fragment shader for every sample point along the ray, rather than deforming proxy geometry on the CPU or per-vertex [S1]. It solves the problem of rendering dynamically deforming volumes (such as those driven by volume widgets or complex spline fields) at interactive frame rates by shifting the computational burden to the GPU [S1]. Unlike [Inverse Model Matrix Transformation for Distance Fields](1962-inverse-model-matrix-transformation-for-distance-fields.md), which handles rigid or simple affine transformations via matrix inversion, this method supports arbitrary, non-linear, and spatially varying deformation functions [S1]. It differs from [Motion-Compensated Block Warping](4613-motion-compensated-block-warping.md) by evaluating deformation continuously per-sample rather than estimating block-wise rigid transforms for compression [S1].
+Per-fragment deformation evaluation is a volume rendering technique that applies deformation functions directly within the fragment shader for every sample point along a ray, rather than deforming proxy geometry on the CPU or GPU vertex shader [S1]. It solves the problem of rendering dynamically deforming volumes (such as those driven by volume widgets) without the overhead of retessellation or proxy geometry management required by per-vertex methods [S1]. Unlike [Inverse Model Matrix Transformation for Distance Fields](1962-inverse-model-matrix-transformation-for-distance-fields.md), which relies on analytical inverse transformations, this method evaluates deformation functions (analytical or texture-based) explicitly in the rendering loop [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** The current volume data (texture), the deformation function definition (analytical or texture-based), and the camera/view parameters.
-*   **Output:** The final color and opacity of the rendered fragment.
+- Input: Volume data (texture), deformation parameters (uniforms or textures), ray origin, ray direction, view/projection matrices.
+- Output: Color and opacity for the fragment.
 
 **Data Structures:**
-1.  **Volume Texture:** 3D texture storing the scalar field values.
-2.  **Deformation Texture (Optional):** A 3D texture storing samples of the inverse deformation function $\mathbf{u}^{-1}$. The resolution is independent of the volume data resolution [S1].
-3.  **Shader Parameters:** Floating-point parameters defining the deformation for the current frame (e.g., sine amplitude, B-spline control points) [S1].
+- **Deformation Parameters:** Uniform variables for analytical deformations (e.g., amplitude, frequency for sine waves) or 3D texture handles for complex deformations (e.g., Hierarchical B-Splines) [S1].
+- **Volume Texture:** Standard 3D texture storing density/opacity values [S1].
 
 **Steps:**
-1.  **Ray Marching Setup:** For each pixel, generate a ray origin $\mathbf{o}$ and direction $\mathbf{d}$ in world space.
-2.  **Sample Position Generation:** Determine a sample point $\mathbf{p}_{world}$ along the ray in world space.
-3.  **Deformation Evaluation:**
-    *   **Analytical Deformation:** If the deformation is simple (e.g., translation, sine wave), compute the deformed coordinate $\mathbf{q}$ directly in the shader using the analytical formula [S1].
-    *   **Texture-Based Deformation:** If the deformation is complex (e.g., Hierarchical B-Spline, Thin-Plate Spline), sample the deformation texture to retrieve the inverse deformation vector. The deformed coordinate $\mathbf{q}$ is retrieved via trilinear interpolation from the deformation texture at $\mathbf{p}_{world}$ [S1].
-4.  **Volume Sampling:** Evaluate the volume density $v(\mathbf{q})$ at the deformed local coordinate $\mathbf{q}$ using the volume texture [S1].
-5.  **Gradient Computation (Optional):** If shading is required, compute the gradient $\nabla v$ at $\mathbf{q}$ using forward finite differences in the deformed space [S1]. The gradient approximation is:
-    $$ \nabla v(\mathbf{u}(O)) \approx \left( v(\mathbf{u}(O_x + \Delta O_x, O_y, O_z)) - v(\mathbf{u}(O)), \dots \right) $$
-    where $\mathbf{u}$ is the deformation function and $O$ is the sample position [S1].
-6.  **Shading and Compositing:** Apply the transfer function to map density to color/alpha and perform shading (e.g., diffuse lighting using the computed gradient). Composite the result along the ray [S1].
+1. **Ray Marching Loop:** For each fragment, iterate along the ray.
+2. **Sample Position:** Calculate the world-space position $\mathbf{p}$ of the current sample point.
+3. **Deformation Evaluation:** Apply the deformation function $D(\mathbf{p}, \mathbf{u})$ to $\mathbf{p}$ using uniform parameters $\mathbf{u}$ or texture lookups.
+   - For analytical deformations (e.g., Shader Shift, Shader Sine), compute the offset directly in the shader [S1].
+   - For complex deformations (e.g., HBSpline), sample a deformation texture to retrieve the offset or transformed coordinate [S1].
+4. **Volume Sampling:** Evaluate the volume density at the deformed position (or use the deformed position to sample the volume, depending on the specific implementation of "deformation evaluation" vs "deformed sampling"; the source implies the deformation is applied to the coordinate before or during the density evaluation context) [S1].
+5. **Shading:** Compute color and opacity using transfer functions and potentially gradients (Case 2) [S1].
+6. **Compositing:** Accumulate color and opacity using front-to-back or back-to-front compositing [S1].
+
+**Formulas:**
+- **Shader Shift (Trivial Translation):**
+  $$ \mathbf{p}' = \mathbf{p} + \mathbf{t} $$
+  where $\mathbf{t}$ is a translation vector uniform [S1].
+- **Shader Sine:**
+  $$ \mathbf{p}' = \mathbf{p} + A \sin(\omega \mathbf{p} + \phi) $$
+  where $A$ is amplitude, $\omega$ is frequency, and $\phi$ is phase, all uniforms [S1].
+- **Hierarchical B-Spline (HBSpline):**
+  The deformation is precomputed and stored in a 3D texture $T_{def}$. The offset is retrieved via:
+  $$ \mathbf{d} = T_{def}(\mathbf{p}) $$
+  The deformed position is then:
+  $$ \mathbf{p}' = \mathbf{p} + \mathbf{d} $$
+  (Note: The source states HBSpline is "evaluated and stored in a 16^3 texture", implying the texture stores the deformation field or the mapped coordinates) [S1].
+
+**Parameters:**
+- **Texture Size for HBSpline:** 16^3 is used in the primary performance tests [S1].
+- **Sample Planes per Voxel:** Tested at 0.5 and 1.0 [S1].
+
+**Edge Cases and Pitfalls:**
+- **Discontinuities:** Volume widgets (e.g., leafer widget) introduce discontinuities in deformation functions, requiring conditional branches in the shader. These branches are inefficient on some hardware [S1].
+- **Performance Optimization:** Direct texture coordinate feeding (no deformation) is faster than trivial computation (Shader Shift) due to hardware optimizations for direct lookups. The shift operation reduces performance from 39 fps to 29.2 fps in Case 1 [S1].
+- **Memory Coherence:** Texture-based deformations suffer from poor memory coherence and high bandwidth costs for updating deformation textures [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Fragment Shader Pseudocode
-# Inputs: volume_tex, deformed_tex (optional), deformation_params
-# Outputs: out_color, out_alpha
-
-def evaluate_deformation(p_world, deformation_type, params, deformed_tex):
-    """
-    Evaluates the deformation function to find the local coordinate q.
-    """
-    if deformation_type == "ANALYTICAL":
-        # Example: Sine wave deformation
-        # q = p_world + amplitude * sin(frequency * p_world)
-        q = p_world + params.amplitude * sin(params.frequency * p_world)
-    elif deformation_type == "TEXTURE":
-        # Sample the pre-computed inverse deformation texture
-        # The texture stores the offset or the mapped coordinate directly
-        # Trilinear interpolation is performed by hardware
-        q = texture(deformed_tex, p_world).xyz
-    return q
-
-def compute_gradient(p_world, deformation_type, params, deformed_tex, volume_tex):
-    """
-    Computes the gradient of the volume at the deformed position.
-    """
-    q = evaluate_deformation(p_world, deformation_type, params, deformed_tex)
+def per_fragment_deformation(ray_origin, ray_direction, volume_tex, deform_type, uniforms, deform_tex=None):
+    color = vec4(0.0)
+    alpha = 0.0
     
-    # Forward finite differences in the deformed space
-    delta = 1.0 / volume_tex.resolution # Approximate voxel size in local space
+    # Ray marching parameters
+    step_size = 0.01 # Example step size
+    max_dist = 10.0
     
-    # Evaluate neighbors in the deformed coordinate space
-    # Note: The source uses u(O + delta) notation, implying evaluation at perturbed local coordinates
-    q_x_plus = q + vec3(delta, 0, 0)
-    q_x_minus = q - vec3(delta, 0, 0)
-    q_y_plus = q + vec3(0, delta, 0)
-    q_y_minus = q - vec3(0, delta, 0)
-    q_z_plus = q + vec3(0, 0, delta)
-    q_z_minus = q - vec3(0, 0, delta)
-    
-    # Sample volume at these local coordinates
-    v_x_plus = texture(volume_tex, q_x_plus).r
-    v_x_minus = texture(volume_tex, q_x_minus).r
-    v_y_plus = texture(volume_tex, q_y_plus).r
-    v_y_minus = texture(volume_tex, q_y_minus).r
-    v_z_plus = texture(volume_tex, q_z_plus).r
-    v_z_minus = texture(volume_tex, q_z_minus).r
-    
-    gradient = vec3(
-        (v_x_plus - v_x_minus) / (2 * delta),
-        (v_y_plus - v_y_minus) / (2 * delta),
-        (v_z_plus - v_z_minus) / (2 * delta)
-    )
-    return gradient
-
-def fragment_shader(p_world):
-    # 1. Evaluate deformation to get local coordinate
-    q = evaluate_deformation(p_world, deformation_type, params, deformed_tex)
-    
-    # 2. Sample volume density
-    density = texture(volume_tex, q).r
-    
-    # 3. Compute gradient for shading (if needed)
-    gradient = compute_gradient(p_world, deformation_type, params, deformed_tex, volume_tex)
-    
-    # 4. Apply transfer function and shading
-    color = transfer_function(density)
-    if shading_enabled:
-        normal = normalize(gradient)
-        light_dir = normalize(light_position - p_world)
-        diffuse = max(dot(normal, light_dir), 0.0)
-        color *= (ambient + diffuse)
+    t = 0.0
+    while t < max_dist and alpha < 1.0:
+        # 1. Get world space position
+        p = ray_origin + ray_direction * t
+        
+        # 2. Evaluate deformation
+        if deform_type == "shift":
+            p_deformed = p + uniforms.translation
+        elif deform_type == "sine":
+            p_deformed = p + uniforms.amplitude * sin(uniforms.frequency * p + uniforms.phase)
+        elif deform_type == "hbspline":
+            # Sample deformation texture
+            d = deform_tex.sample(p)
+            p_deformed = p + d
+        else:
+            p_deformed = p
+            
+        # 3. Sample volume at deformed position
+        # Note: Source implies deformation is applied to the coordinate context
+        density = volume_tex.sample(p_deformed).r
+        
+        # 4. Shading (Case 1: simple transfer function)
+        # Case 2 would include gradient computation and diffuse shading
+        if density > 0.0:
+            c, a = transfer_function(density)
+            color = color + c * a * (1.0 - alpha)
+            alpha = alpha + a * (1.0 - alpha)
+            
+        t += step_size
         
     return color
 ```
 
-**Parameters:**
-*   **Deformation Type:** `ANALYTICAL` or `TEXTURE` [S1].
-*   **Control Texture Size:** Resolutions such as $16^3$, $32^3$, or $64^3$ for the deformation texture [S1].
-*   **Samples per Voxel:** Number of ray steps per voxel unit, typically 0.5 or 1.0 [S1].
-
-**Edge Cases and Pitfalls:**
-*   **Discontinuities:** Volume widgets (e.g., leafer widgets) introduce discontinuities in deformation functions, requiring conditional branches in the shader which are inefficient on some hardware [S1].
-*   **Approximation Error:** Texture-based deformation relies on piecewise-linear approximation via trilinear interpolation. This may fail to capture high frequencies or desired smoothness unless a large number of samples (high-resolution texture) is used [S1].
-*   **Performance Bound:** Performance is often bound by texture access and memory bandwidth, especially when using texture-based deformations, due to poor memory coherence and the cost of updating deformation textures [S1].
-*   **Hardware Optimization:** Direct texture coordinate feeding is faster than performing a trivial computation (shift) on the coordinate before lookup, suggesting hardware optimizations for direct lookups that may not apply to complex deformations [S1].
-
 ## Subtopics
 
-### Deformation Texture
-A technique to encode a complex deformation function into a 3D texture by storing samples of the inverse deformation function evaluated on a regular 3D grid [S1]. It allows efficient evaluation in fragment shaders via trilinear interpolation [S1].
-*   **Definition:** A 3D texture storing samples of $\mathbf{u}^{-1}$, the inverse deformation function [S1].
-*   **Process:**
-    1.  Evaluate the inverse deformation function on the CPU for all points on a regular 3D grid prior to rendering [S1].
-    2.  Store these samples in a 3D texture [S1].
-    3.  In the fragment program, perform a single 3D texture sampling operation to retrieve the deformed coordinate [S1].
-    4.  If only the forward deformation function is available, compute the inverse on the CPU using scattered data interpolation before storing in the texture [S1].
-*   **Pitfalls:**
-    *   Piecewise linear approximation may fail to capture desired smoothness or high frequencies, requiring large numbers of samples [S1].
-    *   The entire table must be evaluated densely, which may be expensive [S1].
-    *   Fragment programs often become texture-lookup bound [S1].
-*   **Comparison:** Simple deformations (bends, twists) are best performed directly in shaders; deformation textures are used for complex functions like Hierarchical B-Splines and Thin-Plate Splines [S1].
+### [Deformation Texture](9847-deformation-texture.md)
+Encodes inverse deformation mapping into a 3D texture to solve inverse parameterization for complex functions like HBSplines. Chosen when direct shader evaluation is too costly, trading memory bandwidth for computational simplicity.
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   **Analytical Deformation:** $O(1)$ per sample for deformation evaluation. Memory usage is minimal (shader parameters) [S1].
-*   **Texture-Based Deformation:** $O(1)$ per sample for texture lookup. Memory usage is proportional to the control texture size ($16^3$, $32^3$, $64^3$) [S1].
-*   **Gradient Computation:** Requires 6 additional volume texture lookups per sample for finite differences [S1].
+- Performance is bound by texture access and memory bandwidth when using texture-based deformations (HBSpline) due to poor memory coherence and the cost of writing/updating deformation textures [S1].
+- Analytical deformations (Shift, Sine) have lower computational overhead but still incur a performance penalty compared to no deformation due to the loss of hardware optimizations for direct texture lookups [S1].
 
 **Measured Performance:**
-*   **Hardware:** NVIDIA GeForce 6800GT (circa 2005) [S1].
-*   **Scene 1 (512x512x106 CT Head):**
-    *   Shader Shift: 29.2 fps (Case 1), 8.5 fps (Case 2) [S1].
-    *   Shader Sine: 29 fps (Case 1), 7.1 fps (Case 2) [S1].
-    *   Texture-based HBSpline: 21.7 fps (Case 1), 5.7 fps (Case 2) [S1].
-    *   Case 1: Density-to-color/alpha lookup. Case 2: Adds gradient computation and diffuse shading [S1].
-    *   Trivial translation baseline: 39 fps (Case 1) with direct texture coordinate feeding; 29.2 fps with shift computation [S1].
-*   **Scene 2 (256x256x192 Mouse Torso):**
-    *   **Control Texture Size Impact (1 sample/voxel):** Control: 3.71 fps, $32^3$ Texture: 3.55 fps, $64^3$ Texture: 6.57 fps [S1].
-    *   **Control Texture Size Impact (0.5 samples/voxel):** Control: 7.12 fps, $32^3$ Texture: 6.57 fps, $64^3$ Texture: 12.25 fps [S1].
-    *   **HBSpline Deformation Impact (1 sample/voxel):** Control: 5.15 fps, $16^3$ Texture: 3.96 fps, $32^3$ Texture: 1.41 fps [S1].
-    *   **HBSpline Deformation Impact (0.5 samples/voxel):** Control: 9.56 fps, $16^3$ Texture: 6.19 fps, $32^3$ Texture: 1.63 fps [S1].
+- **Hardware/Scene:** 512x512x106 CT Head [S1].
+- **Shader Shift:** 29.2 fps (Case 1), 8.5 fps (Case 2) [S1].
+- **Shader Sine:** 29 fps (Case 1), 7.1 fps (Case 2) [S1].
+- **Texture (HBSpline):** 21.7 fps (Case 1), 5.7 fps (Case 2) [S1].
+- **Baseline (Direct Texture):** 39 fps (Case 1) [S1].
+- **Mouse Torso (256x256x192):**
+  - HBSpline 16^3 Texture, 1 sample/voxel: 3.96 fps [S1].
+  - HBSpline 16^3 Texture, 0.5 samples/voxel: 6.19 fps [S1].
+  - Control (no deformation), 1 sample/voxel: 5.15 fps [S1].
+  - Control (no deformation), 0.5 samples/voxel: 9.56 fps [S1] [S1].
 
 **Strengths and Limitations:**
-*   **Strengths:** Provides flexible proxy geometry, enables interaction techniques (volume widgets), and avoids recomputation of proxy geometry for view-dependent deformations [S1]. Animation cost is negligible as it uses floating-point parameters [S1].
-*   **Limitations:** Performance is bound by texture access and memory bandwidth. Discontinuities in widget deformations cause branch inefficiencies. Texture-based methods suffer from approximation errors and high memory costs for high-frequency details [S1].
+- **Strengths:** Flexible proxy geometry, avoids retessellation, supports interactive volume widgets [S1].
+- **Limitations:** Conditional branches for discontinuities are inefficient; texture-based methods suffer from memory bandwidth and coherence issues; analytical methods still lose hardware optimization benefits [S1].
 
 **When to Use:**
-*   Use for interactive visualization of dynamically deforming volumes where the deformation is complex (e.g., splines) or driven by user interaction (widgets) [S1].
-*   Use analytical deformation for simple, smooth functions (sine, translation) to avoid texture overhead [S1].
-
-**When Not to Use:**
-*   Avoid for very high-frequency deformations if texture resolution is limited, as piecewise-linear approximation will fail [S1].
-*   Avoid if hardware does not support efficient fragment shader branching (for widget discontinuities) [S1].
+- Use for real-time interactive visualization of deforming volumes, especially when deformations are driven by user interaction (widgets) or simple analytical functions.
+- Avoid for very complex deformations requiring high-frequency detail if memory bandwidth is a bottleneck, unless texture-based methods are optimized.
 
 ## Background
-Per-fragment deformation evaluation was introduced in the context of integrating dynamic deformations into interactive volume visualization [S1]. The method was developed to address the limitations of per-vertex deformation methods, which require retessellation of proxy geometry for view-dependent deformations and are less flexible for interaction [S1]. The idea of storing a sampled representation of the deformation function in a 3D texture was suggested in [RSSSG01] [S1]. The specific implementation details, including the use of Hierarchical B-Splines and volume widgets, were presented in the EuroVis 2006 paper "Integrating Dynamic Deformations into Interactive Volume Visualization" [S1].
+Originating from the work on integrating dynamic deformations into interactive volume visualization, this method addresses the third hurdle of deformation rendering: performance [S1]. It contrasts with per-vertex methods that rely on proxy geometry tessellation, which must be retessilated for view-dependent deformations [S1]. The approach was implemented to support volume widgets, such as the leafer widget, directly in the shader [S1].
 
 ## Sources
 [S1] Integrating Dynamic Deformations into Interactive Volume Visualization, https://doi.org/10.2312/vissym.eurovis06.219-226, fetched 2026-10-31

@@ -3,189 +3,156 @@
 Also called: Proposed Marching Cubes Algorithm
 
 ## Overview
-Midpoint Marching Cubes is a surface extraction method that modifies the standard Marching Cubes algorithm by replacing linear edge interpolation with midpoint selection to determine intersection positions [S1, unofficial]. It reduces the 256 possible cube configurations to 15 basic patterns using reflective and rotational symmetries [S1, unofficial]. Unlike standard Marching Cubes, which calculates intersection points based on scalar field values, this method assumes the isosurface intersects edges exactly at their geometric centers if the edge spans the surface [S1, unofficial].
+Midpoint Marching Cubes is a surface extraction method that replaces the linear scalar interpolation of standard Marching Cubes with a fixed midpoint selection heuristic [S1, unofficial]. It reduces the 256 standard cube configurations to 15 basic patterns by relying on reflective and rotational symmetries [S1, unofficial]. This approach simplifies computation by eliminating interpolation costs but introduces topological ambiguities, specifically the "hole problem," and is limited to smooth, featureless surfaces [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A regular 3-D grid of volumetric data (binary occupancy states for vertices) [S1, unofficial].
-*   **Output:** A triangle mesh representing the isosurface [S1, unofficial].
+*   **Input:** A regular 3-D grid of scalar values (e.g., from endoscope scanning) representing a volumetric dataset [S1, unofficial].
+*   **Output:** A triangle mesh rendered via OpenGL, where vertex positions are determined by edge midpoints [S1, unofficial].
 
 **Data Structures:**
-*   **Reduced Lookup Table:** A table mapping 8-bit case indices to triangle configurations. The standard 256 cases are reduced to 15 basic patterns based on symmetry [S1, unofficial].
-*   **Edge Midpoints:** Predefined coordinates for the 12 midpoints of a unit cube's edges.
+*   **Grid:** A regular 3-D grid where each cell is a logical cube defined by 8 vertices [S1, unofficial].
+*   **Lookup Table:** A reduced table containing 15 basic patterns derived from the 256 possible configurations using symmetry operations [S1, unofficial].
+*   **Vertex Index:** An 8-bit binary integer representing the occupancy state of the 8 vertices of a cube [S1, unofficial].
 
 **Steps:**
-1.  **Grid Generation:** Loop through the volumetric dataset to generate a regular 3-D grid. For each logical cube, determine the vertex occupancy. A vertex is assigned a binary `1` if it is "inside" the surface, and `0` otherwise [S1, unofficial].
-2.  **Case Index Calculation:** Calculate an 8-bit binary index $C$ for the cube based on the occupancy states of its 8 vertices ($v_1$ to $v_8$) [S1, unofficial]. The bit assignment must match the vertex ordering assumed by the lookup table [S1, unofficial].
-3.  **Lookup:** Use the 8-bit index $C$ to look up the surface intersection pattern in the reduced lookup table (15 basic patterns) [S1, unofficial].
-4.  **Intersection Point Selection:** For each intersected edge of the cube, set the surface intersection point exactly at the midpoint of that edge [S1, unofficial]. This replaces the standard linear interpolation formula $P = V_1 + \frac{I - V_1}{V_2 - V_1}(V_2 - V_1)$ with $P = \frac{V_1 + V_2}{2}$ [S1, unofficial].
-5.  **Triangle Generation:** Generate triangles using the 12 possible midpoint positions on the cube edges as vertices, according to the pattern from the lookup table [S1, unofficial].
-6.  **Rendering:** Render the resulting triangle vertex coordinates [S1, unofficial].
+1.  **Grid Generation:** Convert the raw volumetric dataset into a regular 3-D grid [S1, unofficial].
+2.  **Vertex Occupancy Determination:** For each logical cube, determine the binary state of its 8 vertices. A vertex is assigned a binary `1` if it is considered "inside" the surface, and `0` otherwise [S1, unofficial].
+    *   *Note:* The source describes a projection-based method where points are projected onto the $i-j$ plane and compared against the midpoint of cube edges to assign binary values [S1, unofficial]. Specifically, if projection distances on $i$ and $j$ axes exceed the midpoint, vertices $(i+1, j, k)$, $(i, j+1, k)$, and $(i, j, k+1)$ are set to `1`, while others are `0` [S1, unofficial].
+3.  **Index Calculation:** Calculate an 8-bit binary index for the cube based on the occupancy states of vertices #1 to #8 [S1, unofficial].
+4.  **Pattern Lookup:** Use the 8-bit index to look up the corresponding surface intersection pattern in the reduced lookup table (15 basic patterns) [S1, unofficial].
+    *   Pattern 0 implies no spatial points within the cube (no triangles).
+    *   Pattern 1 implies only one vertex is inside the surface [S1, unofficial].
+5.  **Intersection Positioning:** For each intersected edge of the cube, set the surface intersection point exactly at the **midpoint** of that edge [S1, unofficial].
+    *   There are 12 possible edge midpoints in a cube [S1, unofficial].
+    *   This step replaces linear interpolation based on scalar values [S1, unofficial].
+6.  **Triangle Generation:** Generate triangles using the calculated midpoint positions as vertices [S1, unofficial].
+7.  **Rendering:** Render the resulting triangle vertex coordinates using OpenGL [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def midpoint_marching_cubes(grid, cube_size=1.0):
+def midpoint_marching_cubes(grid):
     """
-    Extracts isosurface from a binary grid using midpoint selection.
-    grid: 3D array of shape (Nx, Ny, Nz) with boolean values (True/1 for inside, False/0 for outside).
-    cube_size: Physical size of one voxel edge.
+    grid: 3D array of scalar values.
+    Returns: List of triangles (each triangle is a list of 3 vertices).
     """
     triangles = []
-    
     # Precompute the 12 edge midpoints for a unit cube
-    # Edge indices follow standard MC convention:
-    # Bottom (z=0): 0:(0,0,0)-(1,0,0), 1:(1,0,0)-(1,1,0), 2:(1,1,0)-(0,1,0), 3:(0,1,0)-(0,0,0)
-    # Top (z=1):    4:(0,0,1)-(1,0,1), 5:(1,0,1)-(1,1,1), 6:(1,1,1)-(0,1,1), 7:(0,1,1)-(0,0,1)
-    # Vertical:     8:(0,0,0)-(0,0,1), 9:(1,0,0)-(1,0,1), 10:(1,1,0)-(1,1,1), 11:(0,1,0)-(0,1,1)
-    
-    unit_midpoints = [
-        (0.5, 0.0, 0.0), (1.0, 0.5, 0.0), (0.5, 1.0, 0.0), (0.0, 0.5, 0.0), # 0-3
-        (0.5, 0.0, 1.0), (1.0, 0.5, 1.0), (0.5, 1.0, 1.0), (0.0, 0.5, 1.0), # 4-7
-        (0.0, 0.0, 0.5), (1.0, 0.0, 0.5), (1.0, 1.0, 0.5), (0.0, 1.0, 0.5)  # 8-11
+    # Edge indices: 0-11 corresponding to standard MC edge ordering
+    edge_midpoints = [
+        (0.5, 0.0, 0.0), (1.0, 0.5, 0.0), (0.5, 1.0, 0.0), (0.0, 0.5, 0.0), # Bottom face
+        (0.0, 0.0, 0.5), (1.0, 0.0, 0.5), (1.0, 1.0, 0.5), (0.0, 1.0, 0.5), # Top face
+        (0.5, 0.0, 0.5), (1.0, 0.5, 0.5), (0.5, 1.0, 0.5), (0.0, 0.5, 0.5)  # Vertical edges
     ]
+    
+    # Reduced lookup table mapping 8-bit index to triangle configurations
+    # Each entry is a list of triangle definitions, where each triangle is a list of 3 edge indices
+    # This table must be precomputed based on the 15 symmetric patterns [S1, unofficial]
+    lookup_table = get_reduced_lookup_table() 
 
-    # Reduced lookup table mapping case index to list of triangle vertex edge indices
-    # This is a simplified representation; actual implementation requires the full 15-pattern table
-    # derived from symmetry reduction of the standard 256 cases.
-    # Format: { case_index: [ (e1, e2, e3), ... ] }
-    reduced_table = get_reduced_lookup_table() 
-
-    for x in range(grid.shape[0] - 1):
-        for y in range(grid.shape[1] - 1):
-            for z in range(grid.shape[2] - 1):
+    for i in range(grid.shape[0] - 1):
+        for j in range(grid.shape[1] - 1):
+            for k in range(grid.shape[2] - 1):
                 # 1. Determine vertex occupancy
-                # Vertices are ordered 0..7 corresponding to standard MC
-                v0 = grid[x, y, z]
-                v1 = grid[x+1, y, z]
-                v2 = grid[x+1, y+1, z]
-                v3 = grid[x, y+1, z]
-                v4 = grid[x, y, z+1]
-                v5 = grid[x+1, y, z+1]
-                v6 = grid[x+1, y+1, z+1]
-                v7 = grid[x, y+1, z+1]
+                # Note: The source uses a specific projection-based heuristic for binary assignment [S1, unofficial]
+                # Standard MC would use grid[i,j,k] > threshold. 
+                # Here we assume a function `get_occupancy` implements the specific heuristic described.
+                occupancy = get_occupancy_heuristic(grid, i, j, k)
                 
-                # 2. Calculate 8-bit case index
-                case_index = 0
-                if v0: case_index |= 1 << 0
-                if v1: case_index |= 1 << 1
-                if v2: case_index |= 1 << 2
-                if v3: case_index |= 1 << 3
-                if v4: case_index |= 1 << 4
-                if v5: case_index |= 1 << 5
-                if v6: case_index |= 1 << 6
-                if v7: case_index |= 1 << 7
+                # 2. Calculate 8-bit index
+                # Vertices are ordered #1 to #8. 
+                # Assuming standard MC vertex ordering:
+                # 0:(i,j,k), 1:(i+1,j,k), 2:(i+1,j+1,k), 3:(i,j+1,k)
+                # 4:(i,j,k+1), 5:(i+1,j,k+1), 6:(i+1,j+1,k+1), 7:(i,j+1,k+1)
+                index = 0
+                for v in range(8):
+                    if occupancy[v]:
+                        index |= (1 << v)
                 
                 # 3. Lookup pattern
-                # Note: The source [S1, unofficial] mentions reducing 256 cases to 15.
-                # In practice, one maps the case_index to a symmetry-equivalent class
-                # or uses a table that handles symmetries.
-                # For this implementation, we assume a direct lookup or symmetry mapping
-                # is handled by `reduced_table`. If the table only has 15 entries,
-                # we must map `case_index` to one of those 15.
-                # Standard MC LUT has 256 entries. Midpoint MC often uses the standard
-                # LUT structure but with midpoint coordinates. The source says "reduce... to 15".
-                # This implies a lookup table of size 15 or a mapping function.
-                # We will assume a helper function maps case_index to the specific triangles.
-                
-                triangle_configs = get_triangles_for_case(case_index, reduced_table)
-                
-                if not triangle_configs:
-                    continue
+                pattern = lookup_table[index]
                 
                 # 4. Generate triangles
-                for tri in triangle_configs:
-                    e1, e2, e3 = tri
-                    
-                    # Calculate world coordinates of midpoints
-                    p1 = get_world_midpoint(x, y, z, e1, cube_size, unit_midpoints)
-                    p2 = get_world_midpoint(x, y, z, e2, cube_size, unit_midpoints)
-                    p3 = get_world_midpoint(x, y, z, e3, cube_size, unit_midpoints)
-                    
-                    triangles.append((p1, p2, p3))
-
+                for triangle_def in pattern:
+                    # triangle_def is a list of 3 edge indices (0-11)
+                    verts = []
+                    for edge_idx in triangle_def:
+                        # Get the midpoint of the edge in world/grid coordinates
+                        # The edge_midpoints are relative to the cube corner (i,j,k)
+                        # We need to map edge indices to actual grid coordinates
+                        # This mapping depends on the specific edge-to-vertex mapping used in the lookup table
+                        # Standard MC edge mapping:
+                        # 0: (0,0,0)-(1,0,0), 1: (1,0,0)-(1,1,0), 2: (1,1,0)-(0,1,0), 3: (0,1,0)-(0,0,0)
+                        # 4: (0,0,1)-(1,0,1), 5: (1,0,1)-(1,1,1), 6: (1,1,1)-(0,1,1), 7: (0,1,1)-(0,0,1)
+                        # 8: (0,0,0)-(0,0,1), 9: (1,0,0)-(1,0,1), 10: (1,1,0)-(1,1,1), 11: (0,1,0)-(0,1,1)
+                        
+                        # Calculate midpoint coordinates
+                        # This is a simplified mapping; actual implementation requires precise edge-to-coordinate mapping
+                        mid = get_edge_midpoint_coords(edge_idx, i, j, k)
+                        verts.append(mid)
+                    triangles.append(verts)
     return triangles
 
-def get_world_midpoint(x, y, z, edge_idx, cube_size, unit_midpoints):
-    mx, my, mz = unit_midpoints[edge_idx]
-    return (
-        x * cube_size + mx * cube_size,
-        y * cube_size + my * cube_size,
-        z * cube_size + mz * cube_size
-    )
+def get_occupancy_heuristic(grid, i, j, k):
+    """
+    Implements the specific projection-based binary assignment described in [S1, unofficial].
+    This is a placeholder for the complex heuristic described in the text.
+    """
+    # The source states: "As both the projection distances on i and j axes exceed the midpoint, 
+    # we assign a binary number 1 to the vertexes (i+1, j, k) and (i, j+1, k) respectively, 
+    # as well as vertex (i, j, k+1) for the same reason, while the other vertexes in the same cube 
+    # are set to be binary number 0."
+    # This description is ambiguous regarding the full 8-vertex state. 
+    # A standard interpretation of "midpoint selection" usually implies checking if the scalar value 
+    # is above/below the midpoint of the range, or simply using the sign of the value.
+    # However, the source explicitly links the binary assignment to projection distances.
+    # Without a precise formula, we assume a standard threshold check for the sake of implementation completeness [G].
+    # In practice, this heuristic likely maps to: vertex is 1 if grid_value > 0.5 (assuming normalized 0-1)
+    # Or it might be a specific geometric test. Given the ambiguity, we default to standard thresholding [G].
+    threshold = 0.5
+    # Vertices: 0:(i,j,k), 1:(i+1,j,k), 2:(i+1,j+1,k), 3:(i,j+1,k)
+    #           4:(i,j,k+1), 5:(i+1,j,k+1), 6:(i+1,j+1,k+1), 7:(i,j+1,k+1)
+    vals = [
+        grid[i, j, k], grid[i+1, j, k], grid[i+1, j+1, k], grid[i, j+1, k],
+        grid[i, j, k+1], grid[i+1, j, k+1], grid[i+1, j+1, k+1], grid[i, j+1, k+1]
+    ]
+    return [v > threshold for v in vals]
 
-def get_triangles_for_case(case_index, table):
-    # Implementation detail: The source [S1, unofficial] reduces 256 cases to 15.
-    # This usually involves checking for symmetry equivalence.
-    # For a complete implementation, one would map the 256 indices to the 15 canonical forms.
-    # Here we assume the table handles this or provides the direct mapping.
-    # If the table is strictly 15 entries, we need a mapping function.
-    # Given the constraint of "no placeholders", we define the logic:
-    
-    # Canonical forms are determined by the number of vertices and their symmetry.
-    # However, without the explicit 15-pattern table data in the source,
-    # we rely on the standard MC LUT structure but with midpoint coordinates.
-    # The source [S1, unofficial] states: "reduce all possible combination from 256 cases to 15 basic patterns".
-    # This suggests the lookup table itself is smaller or indexed differently.
-    # To be implementable, we assume a standard MC LUT is used for topology,
-    # but the coordinates are midpoints. The "15 patterns" likely refers to the
-    # visual distinctness or a specific optimization.
-    # We will use the standard 256-entry LUT for topology (as it's the "standard MC look-up table" mentioned)
-    # but the source explicitly says "reduce... to 15".
-    # Let's assume a mapping `symmetry_map` exists.
-    
-    # Since the exact 15-pattern table is not provided in the text,
-    # and the standard LUT is 256x16, we must note this gap.
-    # However, the source says "employ the standard MC look-up table... reduce... to 15".
-    # This is contradictory if the LUT is standard.
-    # Interpretation: The *logic* uses symmetry to handle the 256 cases,
-    # effectively treating them as 15 types.
-    # We will use the standard LUT for the triangle indices, as that is the "standard MC look-up table".
-    
-    # Standard MC LUT (simplified representation for pseudocode completeness)
-    # In reality, this is a large constant array.
-    standard_lut = get_standard_marching_cubes_lut()
-    
-    if case_index >= len(standard_lut):
-        return []
-        
-    config = standard_lut[case_index]
-    if config == -1:
-        return []
-        
-    # Return list of triangles (triplets of edge indices)
-    triangles = []
-    i = 0
-    while i < len(config) and config[i] != -1:
-        e1 = config[i]
-        e2 = config[i+1]
-        e3 = config[i+2]
-        triangles.append((e1, e2, e3))
-        i += 3
-        
-    return triangles
+def get_edge_midpoint_coords(edge_idx, i, j, k):
+    """
+    Returns the 3D coordinates of the midpoint of the specified edge relative to cube corner (i,j,k).
+    """
+    # Edge definitions based on standard MC
+    edges = [
+        ((0,0,0), (1,0,0)), ((1,0,0), (1,1,0)), ((1,1,0), (0,1,0)), ((0,1,0), (0,0,0)),
+        ((0,0,1), (1,0,1)), ((1,0,1), (1,1,1)), ((1,1,1), (0,1,1)), ((0,1,1), (0,0,1)),
+        ((0,0,0), (0,0,1)), ((1,0,0), (1,0,1)), ((1,1,0), (1,1,1)), ((0,1,0), (0,1,1))
+    ]
+    p1, p2 = edges[edge_idx]
+    mid = ((p1[0]+p2[0])/2, (p1[1]+p2[1])/2, (p1[2]+p2[2])/2)
+    return (i + mid[0], j + mid[1], k + mid[2])
 ```
 
 **Parameters:**
-*   **Isovalue:** Implicitly defined by the binary classification of vertices (inside/outside) [S1, unofficial].
-*   **Grid Resolution:** Determined by the scanning gap $D$ of the endoscope system [S1, unofficial].
+*   **Threshold:** Not explicitly defined in the source for the binary assignment, but implied by the "midpoint" concept [S1, unofficial].
+*   **Lookup Table Size:** 15 patterns [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 *   **Hole Problem:** The method suffers from the "hole problem" because the lookup table depends only on complementary symmetry, which may fail to resolve ambiguous cases correctly [S1, unofficial].
-*   **Accuracy:** High accuracy is not guaranteed for complex geometries; the method is limited to objects with smooth, featureless surfaces [S1, unofficial].
-*   **Ambiguity:** Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points. The standard LUT uses a fixed triangulation, which can cause cracks if adjacent voxels resolve ambiguity differently [10327-lookup-table-and-ambiguity-handling]. Midpoint MC does not explicitly resolve these differently from standard MC, inheriting the risk [S1, unofficial].
+*   **Surface Complexity:** High accuracy is not guaranteed for complex geometries; the method is limited to objects with smooth, featureless surfaces [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is processed once with constant-time lookup and midpoint calculation.
-*   **Memory Complexity:** $O(N)$ for the output mesh, which can be significantly larger than the input grid.
-*   **Strengths:** Simplifies intersection calculation by avoiding scalar interpolation; reduces computational overhead per voxel [S1, unofficial].
-*   **Limitations:** Lower geometric accuracy compared to linear interpolation; prone to topological errors (holes) in ambiguous cases; unsuitable for complex or feature-rich surfaces [S1, unofficial].
-*   **When to use:** Suitable for real-time applications or systems with limited computational resources where the surface is smooth and featureless, such as endoscopic scanning [S1, unofficial].
-*   **When not to use:** When high geometric fidelity is required or when the scalar field has significant variation within voxels [S1, unofficial].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of cubes, as it avoids interpolation calculations [S1, unofficial].
+*   **Memory Complexity:** Low, as it only requires storing the 15-pattern lookup table and the grid [S1, unofficial].
+*   **Strengths:** Simplifies computation by eliminating interpolation; reduces configuration space from 256 to 15 [S1, unofficial].
+*   **Limitations:** Suffers from topological errors (holes); inaccurate for complex or feature-rich surfaces [S1, unofficial].
+*   **When to use:** Suitable for smooth, featureless objects where computational speed is prioritized over geometric accuracy [S1, unofficial].
+*   **When not to use:** Not suitable for complex geometries or when high accuracy is required [S1, unofficial].
 
 ## Background
-The method was proposed in the context of 3-D surface reconstruction based on endoscope and optical fiber scanning systems [S1, unofficial]. It was introduced as a "Proposed Marching Cubes Algorithm" to simplify the surface extraction process for specific medical imaging applications [S1, unofficial]. The authors reduced the 256 cases to 15 basic patterns using symmetry to streamline the lookup process [S1, unofficial].
+The method was proposed in the context of 3-D surface reconstruction based on endoscope and optical fiber scanning systems [S1, unofficial]. It was introduced as a "proposed algorithm" to simplify the standard Marching Cubes process by using midpoint selection instead of linear interpolation [S1, unofficial]. The authors cite previous work on the "hole problem" in [12], [14], [15], and [17] [S1, unofficial].
 
 ## Sources
 [S1] A Marching Cubes Algorithm: Application for Three-dimensional Surface Reconstruction Based on Endoscope and Optical Fiber, https://inria.hal.science/hal-01205823v1, fetched 2026-10-26 (unofficial)

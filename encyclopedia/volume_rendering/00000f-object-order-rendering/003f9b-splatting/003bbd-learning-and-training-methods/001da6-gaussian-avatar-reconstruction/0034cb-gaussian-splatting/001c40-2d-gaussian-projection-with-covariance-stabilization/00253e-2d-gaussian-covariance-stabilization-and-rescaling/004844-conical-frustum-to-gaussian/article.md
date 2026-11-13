@@ -1,222 +1,240 @@
 # Conical Frustum to Gaussian
 
-Also called: Conical Frustum to Gaussian Approximation, cone ray featurization
+Also called: Conical Frustum to Gaussian Approximation, Frustum Gaussian Approximation, cone ray featurization
 
 ## Overview
-This method approximates the density of a conical frustum (or cylinder) segment along a ray as a 3D Gaussian distribution, defined by a mean position and a covariance matrix. It solves the problem of integrating positional encodings and density contributions over a volume that varies in width along the ray, enabling anti-aliased neural rendering. It differs from its parent, [2D Gaussian Covariance Stabilization and Rescaling](3467-2d-gaussian-covariance-stabilization-and-rescaling.md), which operates on the projected 2D covariance; this method operates in 3D space to lift the 1D ray-space statistics into a full 3D Gaussian before projection.
+Approximates a conical frustum (defined by ray origin, direction, start/end distances, and base radius) as a 3D Gaussian distribution (mean and covariance) to enable differentiable volume rendering with integrated positional encoding [S1, S3, unofficial]. It lifts a 1D Gaussian defined along the ray axis and a radial variance into 3D space, aligning the covariance with the ray direction [S3, unofficial]. It differs from its parent [2D Gaussian Covariance Stabilization and Rescaling](3467-2d-gaussian-covariance-stabilization-and-rescaling.md) by operating in 3D ray space to produce the full covariance tensor required for 3D Gaussian Splatting, whereas the parent operates on 2D screen-space covariances [S1, S3, unofficial].
 
 ## How it works
-The method computes the mean and covariance of a Gaussian that approximates the integral of a conical frustum's density. It consists of two main phases: calculating the statistical moments of the frustum in ray-space (time and radius), and lifting these moments into 3D space using the ray direction.
-
-### Inputs and Outputs
 **Inputs:**
-- `origins`: Tensor of shape $[B, 3]$, ray origin coordinates.
-- `directions`: Tensor of shape $[B, 3]$, normalized ray direction vectors.
-- `t_samples`: Tensor of shape $[B, n_{sample}+1]$, fencepost distances along the ray defining the frustum segments.
-- `radii`: Tensor of shape $[B, 1]$, base radii of the rays (for cones).
-- `ray_shape`: String, either `'cone'` or `'cylinder'`.
-- `diagonal`: Boolean, if `True`, returns diagonal covariance matrices; otherwise, full $3 \times 3$ matrices.
+- `origins`: Tensor of shape `[B, 3]`, ray origins.
+- `directions`: Tensor of shape `[B, 3]`, normalized ray direction vectors.
+- `starts`: Tensor of shape `[B]` or `[B, n_samples]`, start distances $t_0$ along the ray.
+- `ends`: Tensor of shape `[B]` or `[B, n_samples]`, end distances $t_1$ along the ray.
+- `base_radius`: Tensor of shape `[B]` or `[B, 1]`, radius of the frustum at distance $t=1$ (for cones) or constant radius (for cylinders) [S1, S3, unofficial].
+- `ray_shape`: String, either `'cone'` or `'cylinder'` [S1, unofficial].
+- `diagonal`: Boolean, if `True` returns diagonal covariance; if `False` returns full $3 \times 3$ covariance [S1, S3, unofficial].
+- `stable`: Boolean, if `True` uses numerically stable formulas for moments; if `False` uses raw moment formulas (discouraged) [S1, S3, unofficial].
 
 **Outputs:**
-- `means`: Tensor of shape $[B, n_{sample}, 3]$, 3D mean positions.
-- `covs`: Tensor of shape $[B, n_{sample}, 3, 3]$ (or $[B, n_{sample}, 3]$ if diagonal), 3D covariance matrices.
+- `means`: Tensor of shape `[B, 3]` (or `[B, n_samples, 3]`), mean positions.
+- `covs`: Tensor of shape `[B, 3, 3]` (or `[B, n_samples, 3, 3]`), covariance matrices.
 
-### Data Structures and Layout
-The input `t_samples` defines $n_{sample}$ segments. For each segment $i$ ($0 \le i < n_{sample}$), the frustum is bounded by $t_0 = t\_samples[:, i]$ and $t_1 = t\_samples[:, i+1]$.
+**Data Structures:**
+- Tensors are dense floating-point arrays. No bit-packing is specified.
 
-### Parameters
-- `eps`: Machine epsilon for `float16` (or the precision of `t_samples`), used for numerical stability.
-- `ray_shape`: Determines the geometric model.
-- `diagonal`: Determines the covariance representation.
+**Steps:**
 
-### Steps
+1.  **Calculate Intermediate Parameters:**
+    Compute the midpoint $\mu$ and half-width $hw$ of the interval $[t_0, t_1]$:
+    $$ \mu = \frac{t_0 + t_1}{2} $$
+    $$ hw = \frac{t_1 - t_0}{2} $$
+    [S1, S3, unofficial]
 
-1. **Compute Ray-Space Moments:**
-   For each segment defined by $t_0$ and $t_1$:
-   - Compute intermediate parameters:
-     $$ \mu = \frac{t_0 + t_1}{2} $$
-     $$ hw = \frac{t_1 - t_0}{2} $$
-   - Compute the stability denominator:
-     $$ \text{denom} = \max(\epsilon, 3\mu^2 + hw^2) $$
-     where $\epsilon$ is the machine epsilon of the input precision.
+2.  **Compute Denominator (Stable Mode Only):**
+    If `stable` is `True`, compute a denominator to prevent division by zero when $\mu$ is small:
+    $$ \text{denom} = \max(\epsilon, 3\mu^2 + hw^2) $$
+    where $\epsilon$ is the machine epsilon for the data type (e.g., `torch.finfo(torch.float16).eps`) [S1, S3, unofficial].
+    If `stable` is `False`, `denom` is not used in the moment calculations [S1, S3, unofficial].
 
-   - **If `ray_shape` is 'cone':**
-     Calculate the mean and variance in the time (depth) dimension and the radial variance:
-     $$ t_{\text{mean}} = \frac{3(t_1^4 - t_0^4)}{4(t_1^3 - t_0^3)} $$
-     $$ t_{\text{mosq}} = \frac{3}{5} \frac{t_1^5 - t_0^5}{t_1^3 - t_0^3} $$
-     $$ t_{\text{var}} = t_{\text{mosq}} - t_{\text{mean}}^2 $$
-     $$ r_{\text{var}} = \text{base\_radius}^2 \left( \frac{3}{20} \frac{t_1^5 - t_0^5}{t_1^3 - t_0^3} \right) $$
-     *Note: The source [S1, unofficial] provides an alternative formula for $t_{\text{mean}}$ and $t_{\text{var}}$ using $\mu, hw, \text{denom}$ which is numerically more stable. Implementers should use the stable formulas below for consistency with the "stable" flag in the source code.*
-     
-     Stable formulas for cone:
-     $$ t_{\text{mean}} = \mu + \frac{2\mu hw^2}{\text{denom}} $$
-     $$ t_{\text{var}} = \frac{hw^2}{3} - \frac{4}{15} \frac{hw^4 (12\mu^2 - hw^2)}{\text{denom}^2} $$
-     $$ r_{\text{var}} = \text{base\_radius}^2 \left( \frac{\mu^2}{4} + \frac{5}{12}hw^2 - \frac{4}{15} \frac{hw^4}{\text{denom}} \right) $$
+3.  **Compute 1D Longitudinal Moments ($t_{\text{mean}}, t_{\text{var}}$):**
+    
+    *If `ray_shape` is `'cone'` and `stable` is `True`:*
+    $$ t_{\text{mean}} = \mu + \frac{2\mu hw^2}{\text{denom}} $$
+    $$ t_{\text{var}} = \frac{hw^2}{3} - \frac{4}{15} \frac{hw^4 (12\mu^2 - hw^2)}{\text{denom}^2} $$
+    [S1, S3, unofficial]
 
-   - **If `ray_shape` is 'cylinder':**
-     $$ r_{\text{var}} = \text{base\_radius}^2 \left( \frac{\mu^2}{4} + \frac{5}{12}hw^2 - \frac{4}{15} \frac{hw^4}{\text{denom}} \right) $$
-     $$ t_{\text{mean}} = \mu $$
-     $$ t_{\text{var}} = \frac{hw^2}{3} $$
-     *(Note: The source [S1, unofficial] implies cylinder handling but raises `NotImplementedError` in the reference code. The formulas above are derived from standard cylinder moments.)*
+    *If `ray_shape` is `'cone'` and `stable` is `False`:*
+    $$ t_{\text{mean}} = \frac{3(t_1^4 - t_0^4)}{4(t_1^3 - t_0^3)} $$
+    $$ t_{\text{mosq}} = \frac{3}{5} \frac{t_1^5 - t_0^5}{t_1^3 - t_0^3} $$
+    $$ t_{\text{var}} = t_{\text{mosq}} - t_{\text{mean}}^2 $$
+    [S3, unofficial]
 
-2. **Lift to 3D:**
-   Using the computed $t_{\text{mean}}$, $t_{\text{var}}$, and $r_{\text{var}}$, and the ray directions $d$:
+    *If `ray_shape` is `'cylinder'`:*
+    The sources indicate that cylinder support may raise `NotImplementedError` in some implementations (e.g., [S2, unofficial]), but the formula for radial variance is provided below. The longitudinal variance for a cylinder is typically derived differently, but the notes do not provide a specific stable/unstable formula for $t_{\text{var}}$ in cylinder mode, only for $r_{\text{var}}$. [S1, S2, unofficial]
 
-   - **If `diagonal` is True:**
-     $$ d_{\text{outer\_diag}} = d^2 $$
-     $$ n_{\text{outer\_diag}} = 1 - \frac{d^2}{\sum d^2 + 10^{-10}} $$
-     $$ t_{\text{cov\_diag}} = t_{\text{var}} \cdot d_{\text{outer\_diag}} $$
-     $$ xy_{\text{cov\_diag}} = r_{\text{var}} \cdot n_{\text{outer\_diag}} $$
-     $$ \text{cov\_diag} = t_{\text{cov\_diag}} + xy_{\text{cov\_diag}} $$
-     $$ \text{mean} = d \cdot t_{\text{mean}} $$
+4.  **Compute Radial Variance ($r_{\text{var}}$):**
+    
+    *If `ray_shape` is `'cone'` and `stable` is `True`:*
+    $$ r_{\text{var}} = \text{base\_radius}^2 \left( \frac{\mu^2}{4} + \frac{5}{12}hw^2 - \frac{4}{15} \frac{hw^4}{\text{denom}} \right) $$
+    [S1, S3, unofficial]
 
-   - **If `diagonal` is False:**
-     Compute the full covariance matrix $\Sigma$. The source code implies a decomposition into axial and radial components.
-     $$ \Sigma = t_{\text{var}} (d \otimes d) + r_{\text{var}} (I - \frac{d \otimes d}{\|d\|^2}) $$
-     *(Note: The source [S1, unofficial] code snippet for diagonal case suggests the radial component is orthogonal to the direction. For full covariance, this projection is applied to the identity matrix.)*
+    *If `ray_shape` is `'cone'` and `stable` is `False`:*
+    $$ r_{\text{var}} = \text{base\_radius}^2 \frac{3}{20} \frac{t_1^5 - t_0^5}{t_1^3 - t_0^3} $$
+    [S3, unofficial]
 
-### Pseudocode
+    *If `ray_shape` is `'cylinder'`:*
+    $$ r_{\text{var}} = \text{base\_radius}^2 \left( \frac{\mu^2}{4} + \frac{5}{12}hw^2 - \frac{4}{15} \frac{hw^4}{3\mu^2 + hw^2} \right) $$
+    [S1, unofficial]
+
+5.  **Lift to 3D (Compute Mean and Covariance):**
+    
+    *Mean:*
+    $$ \mathbf{m} = \mathbf{d} \cdot t_{\text{mean}} $$
+    where $\mathbf{d}$ is the direction vector [S1, S3, unofficial].
+
+    *Covariance:*
+    Compute the squared magnitude of the direction, clamped to a minimum value to avoid division by zero:
+    $$ d_{\text{mag\_sq}} = \max(\|\mathbf{d}\|^2, 10^{-10}) $$
+    [S3, unofficial]
+
+    *If `diagonal` is `True`:*
+    $$ d_{\text{outer\_diag}} = \mathbf{d}^2 $$
+    $$ \text{null\_outer\_diag} = 1 - \frac{d_{\text{outer\_diag}}}{d_{\text{mag\_sq}}} $$
+    $$ t_{\text{cov\_diag}} = t_{\text{var}} \cdot d_{\text{outer\_diag}} $$
+    $$ xy_{\text{cov\_diag}} = r_{\text{var}} \cdot \text{null\_outer\_diag} $$
+    $$ \text{cov\_diag} = t_{\text{cov\_diag}} + xy_{\text{cov\_diag}} $$
+    [S1, S3, unofficial]
+
+    *If `diagonal` is `False`:*
+    $$ \mathbf{d}_{\text{outer}} = \mathbf{d} \mathbf{d}^T $$
+    $$ \mathbf{I} = \text{Identity}(3) $$
+    $$ \mathbf{N}_{\text{outer}} = \mathbf{I} - \frac{\mathbf{d} \mathbf{d}^T}{d_{\text{mag\_sq}}} $$
+    $$ \mathbf{t}_{\text{cov}} = t_{\text{var}} \cdot \mathbf{d}_{\text{outer}} $$
+    $$ \mathbf{xy}_{\text{cov}} = r_{\text{var}} \cdot \mathbf{N}_{\text{outer}} $$
+    $$ \mathbf{\Sigma} = \mathbf{t}_{\text{cov}} + \mathbf{xy}_{\text{cov}} $$
+    [S3, unofficial]
+
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
-import math
+import torch.nn.functional as F
 
-def conical_frustum_to_gaussian(origins, directions, t_samples, radii, ray_shape='cone', diagonal=True):
+def conical_frustum_to_gaussian(origins, directions, starts, ends, base_radius, ray_shape='cone', diagonal=True, stable=True):
     """
-    Approximates conical frustums as Gaussians.
+    Approximates a conical frustum as a Gaussian distribution.
     
     Args:
         origins: [B, 3]
-        directions: [B, 3] (normalized)
-        t_samples: [B, n_samples + 1]
-        radii: [B, 1]
+        directions: [B, 3], normalized
+        starts: [B] or [B, n_samples]
+        ends: [B] or [B, n_samples]
+        base_radius: [B] or [B, 1]
         ray_shape: 'cone' or 'cylinder'
         diagonal: bool
+        stable: bool
         
     Returns:
-        means: [B, n_samples, 3]
-        covs: [B, n_samples, 3, 3] or [B, n_samples, 3]
+        means: [B, 3] or [B, n_samples, 3]
+        covs: [B, 3, 3] or [B, n_samples, 3, 3] or [B, 3] if diagonal
     """
-    # t_samples shape: [B, n_samples + 1]
-    t0 = t_samples[:, :-1]  # [B, n_samples]
-    t1 = t_samples[:, 1:]  # [B, n_samples]
+    # Ensure dimensions match for broadcasting
+    # origins: [B, 1, 3], directions: [B, 1, 3], base_radius: [B, 1, 1]
+    origins = origins.unsqueeze(1)
+    directions = directions.unsqueeze(1)
+    base_radius = base_radius.unsqueeze(1).unsqueeze(2) if base_radius.dim() == 1 else base_radius.unsqueeze(2)
     
-    # Intermediate parameters
-    mu = (t0 + t1) / 2.0
-    hw = (t1 - t0) / 2.0
+    # starts, ends: [B, 1]
+    starts = starts.unsqueeze(1)
+    ends = ends.unsqueeze(1)
     
-    # Stability denominator
-    eps = torch.finfo(t0.dtype).eps
-    denom = torch.maximum(eps, 3.0 * mu**2 + hw**2)
+    # 1. Intermediate parameters
+    mu = (starts + ends) / 2.0
+    hw = (ends - starts) / 2.0
     
-    # Compute variances and means based on shape
+    # 2. Denominator
+    if stable:
+        eps = torch.finfo(directions.dtype).eps
+        denom = torch.maximum(eps, 3.0 * mu**2 + hw**2)
+    else:
+        denom = None
+        
+    # 3. Longitudinal moments
     if ray_shape == 'cone':
-        # Stable formulas from [S1, unofficial]
-        t_mean = mu + (2.0 * mu * hw**2) / denom
-        t_var = (hw**2) / 3.0 - (4.0 / 15.0) * (hw**4 * (12.0 * mu**2 - hw**2)) / (denom**2)
-        r_var = (radii**2) * ((mu**2) / 4.0 + (5.0 / 12.0) * hw**2 - (4.0 / 15.0) * (hw**4) / denom)
+        if stable:
+            t_mean = mu + (2.0 * mu * hw**2) / denom
+            t_var = (hw**2) / 3.0 - (4.0 / 15.0) * (hw**4 * (12.0 * mu**2 - hw**2)) / (denom**2)
+        else:
+            # Avoid division by zero if t1^3 == t0^3
+            denom_t = torch.maximum(torch.abs(1.0 * (ends**3 - starts**3)), torch.finfo(directions.dtype).eps)
+            t_mean = 3.0 * (ends**4 - starts**4) / (4.0 * denom_t)
+            t_mosq = 3.0 / 5.0 * (ends**5 - starts**5) / denom_t
+            t_var = t_mosq - t_mean**2
     elif ray_shape == 'cylinder':
-        # Derived from standard cylinder moments, using stable denom for consistency
+        # Note: Some implementations raise NotImplementedError for cylinder
+        # Assuming standard cylinder moments if supported, but sources are ambiguous on t_var for cylinder
+        # Using placeholder logic based on uniform distribution along axis if stable=False logic doesn't apply
+        # For now, we follow the source's implication that cylinder might be unsupported or requires specific handling
+        # If supported, t_var for uniform cylinder of length L is L^2/12. 
+        # However, source [S1, unofficial] gives r_var for cylinder. Source [S3, unofficial] doesn't specify t_var for cylinder.
+        # We will assume the caller handles cylinder or it's not supported.
+        # [G] Fallback to simple uniform variance if ray_shape is cylinder and stable is true, 
+        # though this is an implementation gap in the provided notes.
         t_mean = mu
-        t_var = (hw**2) / 3.0
-        r_var = (radii**2) * ((mu**2) / 4.0 + (5.0 / 12.0) * hw**2 - (4.0 / 15.0) * (hw**4) / denom)
+        t_var = hw**2 / 3.0 # Variance of uniform distribution on [-hw, hw] is hw^2/3
     else:
         raise ValueError("ray_shape must be 'cone' or 'cylinder'")
         
-    # Lift to 3D
-    # directions: [B, 3]
-    # t_mean: [B, n_samples]
-    # t_var: [B, n_samples]
-    # r_var: [B, n_samples]
-    
-    # Expand dimensions for broadcasting
-    # directions: [B, 1, 3]
-    # t_mean, t_var, r_var: [B, n_samples, 1]
-    
-    d = directions.unsqueeze(1)  # [B, 1, 3]
-    t_m = t_mean.unsqueeze(2)    # [B, n_samples, 1]
-    t_v = t_var.unsqueeze(2)     # [B, n_samples, 1]
-    r_v = r_var.unsqueeze(2)     # [B, n_samples, 1]
-    
+    # 4. Radial variance
+    if ray_shape == 'cone':
+        if stable:
+            r_var = base_radius**2 * (mu**2 / 4.0 + 5.0/12.0 * hw**2 - 4.0/15.0 * hw**4 / denom)
+        else:
+            denom_t = torch.maximum(torch.abs(1.0 * (ends**3 - starts**3)), torch.finfo(directions.dtype).eps)
+            r_var = base_radius**2 * 3.0/20.0 * (ends**5 - starts**5) / denom_t
+    elif ray_shape == 'cylinder':
+        r_var = base_radius**2 * (mu**2 / 4.0 + 5.0/12.0 * hw**2 - 4.0/15.0 * hw**4 / (3.0 * mu**2 + hw**2))
+        
+    # 5. Lift to 3D
     # Mean
-    means = d * t_m  # [B, n_samples, 3]
+    means = directions * t_mean
+    
+    # Covariance
+    d_mag_sq = torch.sum(directions**2, dim=-1, keepdim=True)
+    d_mag_sq = torch.maximum(d_mag_sq, torch.tensor(1e-10, dtype=directions.dtype))
     
     if diagonal:
-        # d_outer_diag: [B, 1, 3]
-        d_outer_diag = d**2
-        # sum(d^2) is 1.0 if normalized, but we add epsilon for safety
-        # norm_sq = torch.sum(d**2, dim=2, keepdim=True) # [B, 1, 1]
-        # However, directions are assumed normalized. 
-        # Source uses: 1 - d**2 / (sum(d**2) + 1e-10)
-        # If normalized, sum(d**2) is 1.
-        
-        # To be safe and match source logic exactly:
-        norm_sq = torch.sum(d**2, dim=2, keepdim=True) + 1e-10
-        null_outer_diag = 1.0 - d**2 / norm_sq
-        
-        t_cov_diag = t_v * d_outer_diag
-        xy_cov_diag = r_v * null_outer_diag
-        cov_diag = t_cov_diag + xy_cov_diag
-        
-        # cov_diag shape: [B, n_samples, 3]
-        return means, cov_diag.squeeze(2) # [B, n_samples, 3]
+        d_outer_diag = directions**2
+        null_outer_diag = 1.0 - d_outer_diag / d_mag_sq
+        t_cov_diag = t_var * d_outer_diag
+        xy_cov_diag = r_var * null_outer_diag
+        covs = t_cov_diag + xy_cov_diag
     else:
         # Full covariance
-        # Sigma = t_var * (d @ d.T) + r_var * (I - (d @ d.T) / ||d||^2)
+        # d_outer = d[..., :, None] * d[..., None, :]
+        d_outer = directions.unsqueeze(-1) * directions.unsqueeze(-2)
+        I = torch.eye(3, dtype=directions.dtype, device=directions.device)
+        # null_outer = I - d_outer / d_mag_sq
+        null_outer = I - d_outer / d_mag_sq
+        t_cov = t_var.unsqueeze(-1).unsqueeze(-1) * d_outer
+        xy_cov = r_var.unsqueeze(-1).unsqueeze(-1) * null_outer
+        covs = t_cov + xy_cov
         
-        # d @ d.T: [B, n_samples, 3, 3]
-        outer_dd = torch.bmm(d.transpose(1, 2), d) # [B, 1, 3, 3] -> [B, n_samples, 3, 3]
-        # Actually d is [B, 1, 3]. d.transpose(1,2) is [B, 3, 1].
-        # bmm([B, 3, 1], [B, 1, 3]) -> [B, 3, 3]
-        # We need to broadcast t_v and r_v
-        
-        # Let's do it element-wise for clarity
-        # d: [B, 1, 3]
-        # outer_dd[i,j,k,l] = d[i,j,k] * d[i,j,l]
-        outer_dd = d.unsqueeze(3) * d.unsqueeze(2) # [B, n_samples, 3, 3]
-        
-        # Identity matrix
-        I = torch.eye(3, device=d.device, dtype=d.dtype).unsqueeze(0).unsqueeze(0) # [1, 1, 3, 3]
-        
-        # Projection matrix P = I - (d @ d.T) / ||d||^2
-        # ||d||^2 is sum(d^2) over dim 2
-        norm_sq = torch.sum(d**2, dim=2, keepdim=True) + 1e-10 # [B, 1, 1]
-        P = I - outer_dd / norm_sq
-        
-        # Sigma = t_var * outer_dd + r_var * P
-        # t_v: [B, n_samples, 1, 1]
-        # r_v: [B, n_samples, 1, 1]
-        
-        covs = t_v * outer_dd + r_v * P
-        
-        return means, covs
+    return means, covs
 ```
 
-### Edge Cases and Pitfalls
-- **Numerical Stability:** Using non-stable formulas (direct division by $t_1^3 - t_0^3$) causes catastrophic failure when $t_0 \approx t_1$ or near the origin. The stable denominator `denom = max(eps, 3*mu^2 + hw^2)` must be used [S1, unofficial].
-- **Normalized Directions:** The lifting step assumes `directions` are normalized. If not, `norm_sq` must be computed and used in the projection matrix $P$ [S1, unofficial].
-- **Cylinder Support:** The reference code raises `NotImplementedError` for cylinders. Implementers must provide the cylinder moment formulas derived from standard geometry [S1, unofficial].
+**Parameters:**
+- `ray_shape`: `'cone'` or `'cylinder'` [S1, unofficial].
+- `diagonal`: `True` for diagonal covariance, `False` for full [S1, S3, unofficial].
+- `stable`: `True` recommended. `False` causes catastrophic failure [S1, S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Numerical Instability:** Setting `stable=False` causes catastrophic failure due to division by zero or large errors when $\mu$ is small [S1, S3, unofficial]. Always use `stable=True`.
+- **Offsets:** The method raises `NotImplementedError` if frustum offsets are present, as the approximation logic does not support them [S2, unofficial].
+- **Zero Direction:** Direction magnitude is clamped to $10^{-10}$ to prevent division by zero in covariance calculation [S3, unofficial].
+- **Cylinder Support:** Some implementations (e.g., [S2, unofficial]) raise `NotImplementedError` for cylinders, though formulas are provided in [S1, unofficial].
 
 ## Subtopics
 
-### 2D Gaussian Covariance Stabilization and Rescaling
-Computes the conic matrix and rescale factor for the 2D projection. Chosen when anti-aliasing requires minimum pixel coverage enforcement after 3D-to-2D projection.
-
-### Mip-NeRF
-The parent framework that introduced conical frustums for anti-aliased volume rendering. Chosen for general neural radiance field training with multi-scale representations.
+### Conical Frustum Integral Derivations
+A parameterization of an axis-aligned cone used to derive moments for the uniform distribution over a conical frustum, defined as $(x, y, z) = \phi(r, t, \theta) = (rt \cos \theta, rt \sin \theta, t)$ for $\theta \in [0, 2\pi)$, $t \ge 0$, $|r| \le \dot{r}$ [S4]. This derivation underpins the moment calculations for $t_{\text{mean}}$, $t_{\text{var}}$, and $r_{\text{var}}$ [S4].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot B)$, where $N$ is the number of samples per ray and $B$ is the batch size. The operations are element-wise tensor operations.
-- **Memory Complexity:** $O(N \cdot B \cdot D)$, where $D$ is the dimensionality (3 for mean, 9 or 3 for covariance).
-- **Strengths:** Enables differentiable integration of positional encodings and density over varying-width volumes. Provides anti-aliasing by accounting for the frustum's width.
-- **Limitations:** Approximation error exists between the true frustum integral and the Gaussian moment. The diagonal covariance assumption reduces accuracy for off-axis viewing angles but is faster.
-- **When to use:** When training neural radiance fields that require anti-aliasing (e.g., Mip-NeRF, 3D Gaussian Splatting variants).
-- **When not to use:** For simple ray marching without positional encoding integration, or when exact volume integration is required without approximation.
+- **Time Complexity:** $O(B)$ for batch size $B$, involving basic arithmetic operations.
+- **Memory Complexity:** $O(B)$ for storing means and covariances.
+- **Strengths:** Enables differentiable rendering of cone-shaped rays, crucial for anti-aliasing in Mip-NeRF and Gaussian Splatting. The stable formulation ensures robustness near the origin.
+- **Limitations:** Approximation error increases for very short frustums or extreme aspect ratios if not stabilized. Cylinder support is inconsistent across implementations.
+- **When to Use:** When rendering with cone-shaped rays to integrate positional encoding or density over a volume.
+- **When Not to Use:** When offsets are required or when high-precision non-stable moments are explicitly needed (though unstable).
 
 ## Background
-The method originates from Mip-NeRF (Barron et al., 2021), which proposed representing rays as conical frustums to integrate neural network inputs over the volume of the ray, effectively anti-aliasing the rendering [S1, unofficial]. The specific "conical frustum to Gaussian" approximation allows these frustums to be represented as Gaussians, facilitating efficient computation of integrated positional encodings. This technique is a core component of 3D Gaussian Splatting and its variants, where 3D Gaussians are projected to 2D for rendering.
+Originated in Mip-NeRF (Barron et al., 2021) to anti-alias neural radiance fields by representing rays as cones rather than lines [S4]. Adopted by 3D Gaussian Splatting variants (e.g., [S1, S2, S3, unofficial]) to project 3D Gaussians onto rays or approximate frustum segments as Gaussians for efficient rendering. The stable formulation was introduced to handle numerical issues near the camera origin [S1, S3, unofficial].
 
 ## Sources
 [S1] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)
+[S2] Gaussian-Splatting-Toolkit/Gaussian-Splatting-Toolkit, https://github.com/Gaussian-Splatting-Toolkit/Gaussian-Splatting-Toolkit, fetched 2026-10-27 (unofficial)
+[S3] https://github.com/CPREgroup/CaSE-NeRF, https://github.com/CPREgroup/CaSE-NeRF, fetched 2026-10-30 (unofficial)
+[S4] Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00580, fetched 2026-10-26

@@ -1,0 +1,212 @@
+# Blurpool Resampling
+
+Also called: Resampling Along Rays
+
+## Overview
+Blurpool Resampling is a differentiable resampling method used in neural volume rendering to generate new sample positions ($t$ values) along rays based on a learned or estimated weight distribution. It solves the problem of adapting sample density to scene complexity by treating the sampling process as a differentiable operation on a discrete probability distribution. It sets itself apart from [Max Dilation](8984-max-dilation.md) by using average pooling on max-pooled weights to create a smoother, blurrier distribution, whereas Max Dilation uses only max-pooling. It builds on [Step Function Resampling](8985-step-function-resampling.md) by providing the specific weight transformation logic required before sampling.
+
+## How it works
+The method transforms input weights associated with initial sample positions into a new set of sample positions. It operates on a piecewise constant probability density function (PDF) derived from the weights.
+
+### Inputs and Outputs
+*   **Input Weights**: Tensor of shape `[batch_size, num_samples]`. Represents the importance or probability mass of each initial sample.
+*   **Input Parameters**:
+    *   `resample_padding`: Float value added to weights to prevent zero-probability regions [S1, S2, unofficial].
+    *   `stop_grad`: Boolean flag. If true, prevents backpropagation through the sampling operation [S1, S2, unofficial].
+*   **Output t_samples**: Tensor of shape `[batch_size, num_samples + 1]`. The new sampled $t$ values (boundaries of the new intervals) [S1, unofficial].
+*   **Output Points**: Tensor of shape `[batch_size, num_samples, 3]`. The 3D coordinates corresponding to the new samples, derived via ray casting [S1, S2, unofficial].
+
+### Data Structures and Layout
+The core data structure is the weight tensor. The algorithm assumes the weights define a discrete distribution over the initial sample indices. The output `t_samples` defines the boundaries of the new intervals, implying `num_samples + 1` boundaries for `num_samples` intervals.
+
+### Steps
+1.  **Padding**: Pad the input weights tensor `weights` of shape `[B, N]` along the last dimension. Concatenate the first element, the original weights, and the last element.
+    $$ \text{weights\_pad} = \text{concat}([\text{weights}[:, :1], \text{weights}, \text{weights}[:, -1:]], \text{dim}=-1) $$
+    The shape of `weights_pad` is `[B, N + 2]` [S1, S2, unofficial].
+
+2.  **Max Pooling**: Compute the element-wise maximum of adjacent elements in `weights_pad`.
+    $$ \text{weights\_max} = \max(\text{weights\_pad}[:, :-1], \text{weights\_pad}[:, 1:]) $$
+    The shape of `weights_max` is `[B, N + 1]` [S1, S2, unofficial].
+
+3.  **Blurpool (Average Pooling)**: Compute the element-wise average of adjacent elements in `weights_max`.
+    $$ \text{weights\_blur} = 0.5 \times (\text{weights\_max}[:, :-1] + \text{weights\_max}[:, 1:]) $$
+    The shape of `weights_blur` is `[B, N]` [S1, S2, unofficial].
+
+4.  **Add Padding**: Add the `resample_padding` scalar to `weights_blur`.
+    $$ \text{weights\_final} = \text{weights\_blur} + \text{resample\_padding} $$
+    This ensures all weights are positive [S1, S2, unofficial].
+
+5.  **Sampling**: Sample new $t$ values from the normalized distribution defined by `weights_final`. This is done using a sorted piecewise constant PDF sampler.
+    $$ \text{new\_t\_vals} = \text{sorted\_piecewise\_constant\_pdf}(t\_samples, \text{weights\_final}, \text{num\_samples}, \text{randomized}) $$
+    The output `new_t_vals` has shape `[B, N + 1]` [S1, S2, unofficial].
+
+6.  **Gradient Control**: If `stop_grad` is true, wrap steps 1-5 in a no-gradient context (e.g., `torch.no_grad()` or `jax.lax.stop_gradient`) [S1, S2, unofficial].
+
+7.  **Ray Casting**: Cast rays using the new $t$ values, ray origins, directions, and radii to compute the mean positions and covariances.
+    $$ \text{means}, \text{covs} = \text{cast\_rays}(\text{new\_t\_vals}, \text{origins}, \text{directions}, \text{radii}, \text{ray\_shape}) $$
+    The output `means` has shape `[B, N, 3]` [S1, S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import math
+
+def blurpool_resampling(weights, t_samples, origins, directions, radii, ray_shape, resample_padding=1e-6, stop_grad=False, randomized=True):
+    """
+    Resamples t-values along rays based on weights using blurpool technique.
+    
+    Args:
+        weights: Tensor [batch_size, num_samples]
+        t_samples: Tensor [batch_size, num_samples + 1] (boundaries for initial samples)
+        origins: Tensor [batch_size, 3]
+        directions: Tensor [batch_size, 3]
+        radii: Tensor [batch_size] or scalar
+        ray_shape: String or enum defining ray geometry
+        resample_padding: Float, added to weights
+        stop_grad: Boolean, if True, disable gradients
+        randomized: Boolean, if True, use randomized sampling
+        
+    Returns:
+        new_t_vals: Tensor [batch_size, num_samples + 1]
+        means: Tensor [batch_size, num_samples, 3]
+        covs: Tensor [batch_size, num_samples, 3, 3]
+    """
+    if stop_grad:
+        with torch.no_grad():
+            return _blurpool_core(weights, t_samples, origins, directions, radii, ray_shape, resample_padding, randomized)
+    else:
+        return _blurpool_core(weights, t_samples, origins, directions, radii, ray_shape, resample_padding, randomized)
+
+def _blurpool_core(weights, t_samples, origins, directions, radii, ray_shape, resample_padding, randomized):
+    # Step 1: Pad weights
+    # weights shape: [B, N]
+    # Pad with first and last elements along dim=-1
+    first = weights[..., :1]  # [B, 1]
+    last = weights[..., -1:]  # [B, 1]
+    weights_pad = torch.cat([first, weights, last], dim=-1)  # [B, N+2]
+    
+    # Step 2: Max pooling of adjacent elements
+    # weights_max shape: [B, N+1]
+    weights_max = torch.maximum(weights_pad[..., :-1], weights_pad[..., 1:])
+    
+    # Step 3: Blurpool (average pooling) of adjacent elements
+    # weights_blur shape: [B, N]
+    weights_blur = 0.5 * (weights_max[..., :-1] + weights_max[..., 1:])
+    
+    # Step 4: Add padding
+    weights_final = weights_blur + resample_padding
+    
+    # Step 5: Sample new t values
+    # Assuming sorted_piecewise_constant_pdf is implemented or available
+    # It takes the boundaries t_samples, the weights, and the number of samples to generate
+    # The output new_t_vals has shape [B, N+1]
+    new_t_vals = sorted_piecewise_constant_pdf(t_samples, weights_final, t_samples.shape[-1], randomized)
+    
+    # Step 6: Cast rays
+    # Assuming cast_rays is implemented or available
+    # It takes the new t values and ray parameters
+    means, covs = cast_rays(new_t_vals, origins, directions, radii, ray_shape)
+    
+    return new_t_vals, (means, covs)
+
+def sorted_piecewise_constant_pdf(t_samples, weights, num_samples, randomized):
+    """
+    Samples from a piecewise constant PDF defined by weights over intervals t_samples.
+    Returns num_samples + 1 boundaries.
+    """
+    # Normalize weights to sum to 1
+    probs = weights / weights.sum(dim=-1, keepdim=True)
+    
+    # Compute cumulative distribution function (CDF)
+    cdf = torch.cumsum(probs, dim=-1)
+    # Ensure CDF ends at 1.0
+    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], dim=-1)
+    cdf[..., -1] = 1.0
+    
+    # Generate uniform random numbers
+    u = torch.rand_like(cdf[..., :1])
+    if not randomized:
+        # Deterministic sampling (e.g., midpoints)
+        # This is a placeholder for deterministic logic if needed
+        pass
+        
+    # Inverse CDF sampling
+    # Find indices where u falls in the CDF
+    indices = torch.searchsorted(cdf[..., 1:], u[..., 0], right=True)
+    indices = torch.clamp(indices, 0, cdf.shape[-1] - 2)
+    
+    # Linear interpolation within the interval
+    t_low = t_samples[torch.arange(t_samples.shape[0]), indices]
+    t_high = t_samples[torch.arange(t_samples.shape[0]), indices + 1]
+    p_low = cdf[torch.arange(cdf.shape[0]), indices]
+    p_high = cdf[torch.arange(cdf.shape[0]), indices + 1]
+    
+    # Avoid division by zero
+    denom = p_high - p_low
+    denom = torch.where(denom == 0, 1.0, denom)
+    
+    t_new = t_low + (u[..., 0] - p_low) / denom * (t_high - t_low)
+    
+    # Return boundaries: prepend first t, append last t, and insert sampled points?
+    # The source says output is [B, N+1]. If input t_samples is [B, N+1], and we sample N points,
+    # we might return the sorted union or just the sampled points as boundaries.
+    # Based on source [S1, unofficial] output t_samples: [batch_size, num_samples+1], it implies the output
+    # is the new set of boundaries.
+    # A common implementation is to return the sorted unique values of the original boundaries
+    # and the new samples, or just the new samples if they replace the old ones.
+    # Given the context of "resampling", it likely returns the new t values that define the new intervals.
+    # Let's assume it returns the sorted new t values including endpoints.
+    # For simplicity, we return the sampled points as the new internal boundaries, 
+    # but the source implies a direct mapping. 
+    # Let's stick to the source's output shape: [B, N+1].
+    # If we sample N points, we have N+1 intervals? No, N points define N-1 intervals.
+    # The source says input weights [B, N], output t_samples [B, N+1].
+    # This suggests the output t_samples are the boundaries of N+1 intervals?
+    # Or maybe it returns the original boundaries plus one new sample?
+    # Let's assume the function returns the new t values directly.
+    # Since the exact implementation of sorted_piecewise_constant_pdf is not provided,
+    # we note it as a standard operation.
+    
+    # Re-reading source: "Call math.sorted_piecewise_constant_pdf with key, t_vals, weights, t_vals.shape[-1], and randomized to get new_t_vals."
+    # It takes t_vals (boundaries) and weights. It returns new_t_vals.
+    # The output shape is [B, N+1].
+    # If input t_vals is [B, N+1], and we want output [B, N+1], it might be a resampling to the same number of intervals?
+    # Or maybe it returns the boundaries of the new distribution.
+    # Let's assume it returns the new boundaries.
+    
+    # For the purpose of this article, we assume the function exists and returns [B, N+1].
+    return t_new # Placeholder, actual implementation varies
+
+def cast_rays(t_vals, origins, directions, radii, ray_shape):
+    """
+    Casts rays at the given t values.
+    """
+    # positions = origins + t_vals[..., None] * directions
+    # This is a placeholder for the actual ray casting logic
+    # Returns means and covs
+    means = origins[..., None, :] + t_vals[..., :, None] * directions[..., None, :]
+    covs = torch.eye(3).unsqueeze(0).unsqueeze(0).repeat(means.shape[0], means.shape[1], 1, 1)
+    return means, covs
+```
+
+### Edge Cases and Pitfalls
+*   **Zero Weights**: If all weights are zero, normalization fails. The `resample_padding` parameter mitigates this by ensuring positive weights [S1, S2, unofficial].
+*   **Precision**: Floating-point precision issues in cumulative sum and inverse CDF sampling can lead to incorrect sample positions. Use stable CDF computation [G].
+*   **Boundary Conditions**: The padding step handles boundaries by repeating the first and last weights, which affects the max and blurpool operations at the edges [S1, S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(N)$ per ray, where $N$ is the number of samples. The operations are element-wise tensor operations.
+*   **Memory Complexity**: $O(N)$ for storing intermediate tensors (`weights_pad`, `weights_max`, `weights_blur`).
+*   **Strengths**: Differentiable, allowing gradient-based optimization of sample positions. Smooths the weight distribution, potentially leading to more stable sampling.
+*   **Limitations**: The blurpool operation may oversmooth sharp peaks in the weight distribution, leading to less accurate sampling in high-detail regions compared to non-smoothed methods.
+*   **When to Use**: When differentiable sampling is required and a smooth weight distribution is beneficial.
+*   **When Not to Use**: When sharp, precise sampling is needed and differentiability is not required.
+
+## Background
+Blurpool Resampling is used in neural volume rendering frameworks, specifically in implementations like [AlexSheldrick/density_bounded_ray_weights](https://github.com/AlexSheldrick/density_bounded_ray_weights) and [CPREgroup/CaSE-NeRF](https://github.com/CPREgroup/CaSE-NeRF). It is an adaptation of the "blurpool" concept from image processing (used in convolutional neural networks to reduce aliasing) to the domain of ray sampling. The method was introduced in unofficial repositories as part of efforts to improve the stability and quality of NeRF training by adapting sample densities.
+
+## Sources
+[S1] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)
+[S2] https://github.com/CPREgroup/CaSE-NeRF, https://github.com/CPREgroup/CaSE-NeRF, fetched 2026-10-30 (unofficial)

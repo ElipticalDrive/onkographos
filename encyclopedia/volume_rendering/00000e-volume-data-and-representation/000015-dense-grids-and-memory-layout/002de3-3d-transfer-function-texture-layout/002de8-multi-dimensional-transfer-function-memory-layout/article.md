@@ -1,50 +1,46 @@
 # Multi-Dimensional Transfer Function Memory Layout
 
-Also called: Memory Consumption for Multi-Dimensional Transfer Functions, Quantized Normal Volume Layout
+Also called: Memory Consumption for Multi-Dimensional Transfer Functions, Memory Management for Multi-Dimensional Data, Quantized Normal Volume Layout
 
 ## Overview
-This method defines the memory layout and storage overhead for hardware-based volume rendering using multi-dimensional transfer functions (MTFs) [S1]. It addresses the problem that hardware renderers cannot compute transfer function variables on the fly, requiring all variables to be stored at each voxel sample point [S1, S2]. It is distinguished from standard scalar volume rendering by the explicit inclusion of a quantized normal volume, which imposes specific alignment constraints on the texture memory layout [S1, S2].
+This method defines the memory layout required to store multi-dimensional transfer function (MDF) variables and precomputed lighting normals at each voxel sample point for hardware-accelerated volume rendering. It solves the problem of high memory overhead inherent in MDF rendering by pre-computing and storing all necessary transfer function data, as hardware-based approaches cannot compute these quantities on the fly [S1][S2, S2, unofficial]. It is distinguished from dynamic normal calculation methods by its reliance on pre-stored data, which avoids bandwidth bottlenecks associated with multiple texture lookups, but incurs fixed storage costs per voxel [S1][S2, S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D volume dataset with multi-variate data per voxel.
-*   **Output:** A texture memory layout suitable for hardware sampling, consisting of the transfer function variables and a quantized normal volume [S1].
+*   **Input:** A 3D volume dataset of dimensions $W \times H \times D$.
+*   **Output:** A texture memory layout occupying 6 bytes per voxel, consisting of the transfer function variables and the quantized normal volume.
 
-**Data Structures and Layout:**
-The dataset representation requires two distinct components stored in texture memory:
-1.  **Transfer Function Variables:** The multi-dimensional data values mapped to the transfer function axes [S1].
-2.  **Quantized Normal Volume:** A volume storing the quantized surface normals [S1]. Due to pixel field alignment restrictions in hardware texture formats, this volume is stored using three bytes per voxel instead of two [S1, S2].
+**Data Structures:**
+The memory layout is packed into a contiguous block of texture memory. Each voxel sample point stores:
+1.  **Transfer Function Variables (VGH):** Three bytes. These represent the values mapped to the transfer function axes (e.g., density, gradient magnitude, and another dependent quantity) [S1][S2, S2, unofficial].
+2.  **Quantized Normal Volume:** Three bytes. These represent the precomputed lighting normals [S1][S2, S2, unofficial].
 
-**Memory Calculation:**
-The total memory requirement per voxel is six bytes [S1, S2]. This comprises the bytes for the transfer function variables and the three bytes for the quantized normal volume [S1, S2].
-$$ \text{Bytes per Voxel} = \text{Bytes}_{\text{TF}} + 3 $$
-Where $\text{Bytes}_{\text{Normal}} = 3$ [S1, S2].
+**Layout Details:**
+*   The quantized normal volume requires three bytes per voxel instead of two due to pixel field alignment restrictions [S1][S2, S2, unofficial].
+*   The total memory consumption is 6 bytes per voxel (3 bytes for VGH + 3 bytes for quantized normals) [S1][S2, S2, unofficial].
 
 **Parameters and Constraints:**
-*   **Alignment Restriction:** The normal volume uses 3 bytes/voxel due to pixel field alignment restrictions [S1, S2].
-*   **Total Dataset Size:** The sources specify a total representation of six bytes per voxel for the dataset [S1, S2].
-*   **Hardware Limit:** The implementation is restricted by available texture memory [S1, S2]. With 104 MB of texture memory, the maximum dataset size is limited to $256 \times 256 \times 128$ voxels [S1, S2].
+*   **Texture Memory Limit:** The implementation is restricted by the available texture memory. With 104 MB of texture memory, the maximum dataset size is limited to $256 \times 256 \times 128$ [S1][S2, S2, unofficial].
+*   **Alignment:** Pixel field alignment restrictions dictate the 3-byte storage for normals [S1][S2, S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Memory Exhaustion:** Exceeding the 104 MB limit prevents rendering or requires down-sampling, as the hardware cannot compute variables on the fly [S1, S2].
-*   **Alignment Padding:** Using 3 bytes for normals instead of 2 increases memory consumption for the normal component compared to a tightly packed representation [S1, S2].
+*   **Memory Limitations:** The fixed 6-byte per voxel cost restricts the maximum volume size. For larger datasets, parallel hardware rendering methods are required [S1][S2, S2, unofficial].
+*   **Alignment Overhead:** The alignment restriction forces the use of 3 bytes for normals, increasing memory usage compared to a theoretical 2-byte representation [S1][S2, S2, unofficial].
 
 ## Subtopics
 
-### Quantized Normal Volume Storage
-This variant focuses specifically on the storage of the normal component within the multi-dimensional layout [S2]. It is characterized by the use of three bytes per voxel to satisfy pixel field alignment restrictions, rather than a more compact two-byte representation [S2]. This layout choice directly contributes to the total memory footprint of six bytes per voxel [S2]. It is used when hardware-based rendering requires pre-computed transfer function variables, as the hardware cannot compute these quantities on the fly [S1, S2]. The primary limitation is the reduced maximum dataset size; for example, with 104 MB of texture memory, the dataset is restricted to $256 \times 256 \times 128$ [S2].
+### [Quantized Normal Volume Storage](5736-quantized-normal-volume-storage.md)
+Quantized Normal Volume Storage is a memory layout technique for hardware-accelerated volume rendering that stores precomputed lighting normals alongside transfer function variables at each voxel sample point. It solves the problem of high memory overhead in multi-dimensional transfer function rendering by using quantized normal vectors, allowing complex lighting calculations to be performed on the GPU without computing gradients on the fly. It is distinguished from dynamic normal calculation methods by its reliance on pre-stored data, which avoids bandwidth bottlenecks associated with multiple texture lookups, but incurs fixed storage costs per voxel.
 
 ## Operating characteristics
-*   **Memory Complexity:** The memory usage is linear with respect to the number of voxels $V$, specifically $6 \times V$ bytes for the cited implementation [S1, S2].
-*   **Measured Performance:** The cited implementation supports datasets up to $256 \times 256 \times 128$ on hardware with 104 MB of texture memory [S1, S2].
-*   **Strengths:** Enables interactive rendering of multi-variate data (e.g., fluid flow, meteorological data) using hardware acceleration by pre-computing necessary variables [S1, S2].
-*   **Limitations:** High memory consumption restricts dataset size. The 3-byte alignment for normals is inefficient compared to theoretical minimums [S1, S2].
-*   **When to use:** When interactive rendering of multi-dimensional transfer functions is required on hardware that cannot compute variables dynamically [S1, S2].
-*   **When not to use:** When dataset sizes exceed the available texture memory (e.g., >104 MB in the cited context) [S1, S2].
+*   **Memory Complexity:** The method requires 6 bytes per voxel. This is a fixed overhead per sample point [S1][S2, S2, unofficial].
+*   **Performance:** By storing all transfer function variables and normals, the method avoids the need to compute these quantities on the fly, which is not supported by hardware-based approaches [S1][S2, S2, unofficial]. This reduces bandwidth bottlenecks associated with multiple texture lookups [S1][S2, S2, unofficial].
+*   **Limitations:** The primary limitation is memory consumption. With 104 MB of texture memory, the maximum dataset size is restricted to $256 \times 256 \times 128$ [S1][S2, S2, unofficial].
+*   **Use Cases:** Suitable for hardware-accelerated volume rendering where memory bandwidth is a bottleneck and pre-computation is feasible. Not suitable for very large datasets without parallel hardware rendering methods [S1][S2, S2, unofficial].
 
 ## Background
-The method originates from work on interactive volume rendering using multi-dimensional transfer functions, specifically addressing the challenges of hardware-based rendering [S1, S2]. It was developed to allow the rendering of multi-variate volume data, such as fluid flow simulations or meteorological data, by mapping multiple quantities to transfer function axes [S1, S2]. The specific memory layout constraints (3-byte normals) were identified as a drawback of the hardware approach at the time, with future work proposed to expand dataset sizes using parallel hardware rendering methods [S1, S2].
+This method originates from the work on Interactive Volume Rendering Using Multi-Dimensional Transfer Functions and Direct Manipulation Widgets [S1][S2, S2, unofficial]. It addresses the challenges of rendering multi-variate volume data, such as fluid flow simulations or meteorological data, by determining which quantities are mapped to the transfer function axes [S1][S2, S2, unofficial]. The approach was developed to leverage the capabilities of commodity graphics cards (specifically nVidia and ATI) which support hardware-based rendering features [S1][S2, S2, unofficial].
 
 ## Sources
 [S1] PDF Interactive Volume Rendering Using Multi-Dimensional Transfer Functions ..., https://collections.lib.utah.edu/dl_files/d4/e4/d4e47bfc09e54eee9f532e4f22b17e9214f4c755.pdf, fetched 2026-10-27
-[S2] PDF Interactive Volume Rendering Using Multi-Dimensional Transfer Functions ..., https://publications.sci.utah.edu/publications/jmk01/simian-paper.pdf, fetched 2026-10-27
+[S2] https://www.researchgate.net/publication/2399866_Interactive_Volume_Rendering_Using_Multi-Dimensional_Transfer_Functions_and_Direct_Manipulation_Widgets, https://www.researchgate.net/publication/2399866_Interactive_Volume_Rendering_Using_Multi-Dimensional_Transfer_Functions_and_Direct_Manipulation_Widgets, fetched 2026-11-01 (unofficial)

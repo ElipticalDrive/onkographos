@@ -1,0 +1,199 @@
+# Generalized Marching Cubes
+
+Also called: Multi-material Contouring, Multi-material Marching Cubes Extraction
+
+## Overview
+Generalized Marching Cubes extracts triangulated mesh surfaces from volumetric data containing multiple distinct materials, rather than a single scalar field [S1, unofficial][S2]. It solves the problem of identifying boundaries between different material types by dynamically selecting isovales based on the specific materials adjacent to a voxel edge, enabling the generation of non-manifold meshes where multiple materials meet [S2]. Unlike standard Marching Cubes which relies on a single global threshold, this method adapts the contouring logic to material interfaces, ensuring that the extracted surface lies precisely between the characteristic values of the two interacting materials [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume tensor representing voxel data. Each voxel contains a CT value (or intensity) and a classified material type [S1, unofficial][S2].
+*   **Output:** A triangulated mesh (e.g., OBJ format) containing vertices and faces. The mesh may be non-manifold at junctions where more than two materials intersect [S2].
+
+**Data Structures:**
+*   **Volume Tensor:** A 3D array where each element holds a scalar value (CT intensity) and an integer label (material ID) [S1, unofficial][S2].
+*   **Material List:** A set of distinct material types present in the volume [S2].
+*   **Output Mesh:** A collection of vertices and faces. In implementations like [S1, unofficial], vertices are offset by a `vert_start` index to prevent index collisions when writing multiple material meshes to a single file [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Preprocessing and Normalization:**
+    Normalize the input volume tensor $V$ to the range $[0, 1]$ to stabilize thresholding. The formula is:
+    $$ V_{norm} = \frac{V - V_{min}}{V_{max} - V_{min} + \epsilon} $$
+    where $\epsilon$ is a small constant (e.g., $10^{-12}$) to prevent division by zero [S1, unofficial].
+
+2.  **Material Classification (if not provided):**
+    If material types are not pre-classified, segment the volume into distinct materials.
+    *   For $n_{materials} = 2$: Apply Otsu thresholding and Total Variation (TV) denoising [S1, unofficial].
+    *   For $n_{materials} > 2$: Compute multi-Otsu thresholds to determine $n_{materials}-1$ cut points [S1, unofficial].
+    *   Alternatively, use region growing or Graph-cut algorithms to classify voxels into material sets $M_i$, handling "doubt" voxels iteratively [S2].
+
+3.  **Threshold Determination:**
+    Determine the specific isovalue $iso(A, B)$ for each pair of adjacent materials $A$ and $B$. The isovalue must satisfy the condition that it lies between the CT values of the two endpoints of an edge connecting material $A$ and material $B$ [S2].
+    *   Let $I_p$ be the CT value of voxel $p$ (material $A$) and $I_q$ be the CT value of voxel $q$ (material $B$).
+    *   The condition is: $iso(A, B)$ is between $I_p$ and $I_q$ [S2].
+
+4.  **Edge Processing and Vertex Insertion:**
+    Iterate over every edge of every voxel in the volume.
+    *   Let the edge connect voxel $p$ (material $M_p$) and voxel $q$ (material $M_q$).
+    *   **Case 1: $M_p = M_q$**: No vertex is inserted on this edge for the boundary between these materials [S2].
+    *   **Case 2: $M_p \neq M_q$**: A vertex is inserted on the edge. The position $v$ is computed by linear interpolation using the CT values $I_p$ and $I_q$ and the specific isovalue $iso(M_p, M_q)$ [S2].
+        $$ v = p + \frac{iso(M_p, M_q) - I_p}{I_q - I_p} (q - p) $$
+        [G: Standard linear interpolation formula derived from the requirement that the value at $v$ equals the isovalue].
+
+5.  **Triangle Generation:**
+    For each voxel, determine the configuration of material types at its 8 corners.
+    *   Unlike standard Marching Cubes which uses a binary sign bit, this method uses the material IDs.
+    *   Consult a generalized lookup table (or compute dynamically) to determine which edges are crossed by the material boundaries [S2].
+    *   Generate triangles connecting the interpolated vertices.
+    *   Note: The resulting mesh is non-manifold where $>2$ materials meet, but each individual isosurface for a specific material pair is manifold [S2].
+
+6.  **Output Assembly:**
+    Collect all generated vertices and faces. If outputting to a single file format (e.g., OBJ), offset vertex indices for subsequent materials to avoid collisions [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generalized_marching_cubes(volume, material_labels, isovalue_map):
+    """
+    Extracts mesh from multi-material volume.
+    
+    Args:
+        volume: 3D numpy array of CT values.
+        material_labels: 3D numpy array of integer material IDs.
+        isovalue_map: Dictionary mapping tuple (mat_a, mat_b) to float isovalue.
+        
+    Returns:
+        vertices: List of 3D points.
+        faces: List of 3-tuples of vertex indices.
+    """
+    vertices = []
+    faces = []
+    vert_offset = 0
+    
+    # Get volume dimensions
+    nx, ny, nz = volume.shape
+    
+    # Iterate over all voxels
+    for x in range(nx - 1):
+        for y in range(ny - 1):
+            for z in range(nz - 1):
+                # Get the 8 corners of the current voxel
+                corners = [
+                    (x, y, z), (x+1, y, z), (x, y+1, z), (x+1, y+1, z),
+                    (x, y, z+1), (x+1, y, z+1), (x, y+1, z+1), (x+1, y+1, z+1)
+                ]
+                
+                # Get material IDs and CT values for corners
+                mats = [material_labels[c] for c in corners]
+                vals = [volume[c] for c in corners]
+                
+                # Define the 12 edges of the cube
+                # Edge indices: 0-3 (bottom), 4-7 (top), 8-11 (vertical)
+                edges = [
+                    (0, 1), (1, 3), (3, 2), (2, 0), # Bottom
+                    (4, 5), (5, 7), (7, 6), (6, 4), # Top
+                    (0, 4), (1, 5), (3, 7), (2, 6)  # Vertical
+                ]
+                
+                edge_vertices = []
+                
+                for e_idx, (i1, i2) in enumerate(edges):
+                    mat1 = mats[i1]
+                    mat2 = mats[i2]
+                    val1 = vals[i1]
+                    val2 = vals[i2]
+                    
+                    if mat1 != mat2:
+                        # Determine isovalue for this material pair
+                        # Ensure consistent ordering for lookup
+                        pair = tuple(sorted((mat1, mat2)))
+                        iso = isovalue_map.get(pair)
+                        
+                        if iso is None:
+                            # Fallback: average of values if map not provided
+                            # [G] This is a common heuristic if explicit isovalue_map is missing
+                            iso = (val1 + val2) / 2.0 
+                            
+                        # Interpolate vertex position
+                        # t = (iso - val1) / (val2 - val1)
+                        # Avoid division by zero
+                        denom = val2 - val1
+                        if abs(denom) < 1e-12:
+                            t = 0.5
+                        else:
+                            t = (iso - val1) / denom
+                        
+                        # Interpolate coordinates
+                        p1 = corners[i1]
+                        p2 = corners[i2]
+                        v = (1 - t) * p1 + t * p2
+                        
+                        # Store vertex index
+                        edge_vertices.append(vert_offset)
+                        vertices.append(v)
+                        vert_offset += 1
+                    else:
+                        edge_vertices.append(None)
+                
+                # Generate triangles based on the configuration of edge_vertices
+                # This requires a generalized lookup table or logic for non-binary configurations
+                # Standard Marching Cubes logic does not apply directly.
+                # [S2] mentions using a generalized table or dual contouring.
+                # For simplicity, we assume a placeholder logic for triangle generation
+                # which would map the 12 edge states to triangles.
+                # In practice, this step is complex for N materials.
+                # [G] A robust implementation would use a precomputed table for N-material
+                # configurations or decompose into pairwise boundaries.
+                
+                # Example: If we were doing standard MC, we'd use triangleTable.
+                # Here, we must identify which edges are "active" (crossed).
+                # Since materials are not binary, the "crossed" status depends on
+                # whether the specific boundary iso(A,B) lies between val1 and val2.
+                
+                # Re-evaluate edge crossing for specific material pairs
+                # This part is highly implementation-specific and often handled by
+                # iterating over all unique material pairs and extracting their
+                # respective manifolds, then merging.
+                
+                pass # Detailed triangle generation for N-materials is non-trivial 
+                     # and often delegated to libraries or specific lookup tables 
+                     # not fully detailed in the provided sources.
+
+    return vertices, faces
+```
+
+**Parameters:**
+*   `nmaterials`: Number of distinct attenuation ranges or material types [S1, unofficial].
+*   `pitch`: Voxel spacing (e.g., 1.0) used for geometric calculations [S1, unofficial].
+*   `isovalue_map`: Mapping of material pairs to specific isovales [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** When interpolating, if $I_q = I_p$, the denominator is zero. Use a small epsilon ($10^{-12}$) or default to midpoint [S1, unofficial].
+*   **Non-Manifold Geometry:** Where more than two materials meet, the resulting mesh is non-manifold. Each individual isosurface (for a pair of materials) remains manifold, but the global structure may have non-manifold edges/vertices [S2].
+*   **Classification Accuracy:** The quality of the mesh depends heavily on accurate material classification. Misclassified voxels lead to incorrect isovalue selection and distorted boundaries [S2].
+
+## Subtopics
+
+### Multi-Isosurface Extraction
+Extracts multiple scalar isosurfaces from a single volume using different thresholds. It is simpler than Generalized Marching Cubes as it does not require material classification, only scalar thresholds. Choose when the volume is a single scalar field with multiple distinct features [1162-multi-isosurface-extraction.md].
+
+### STEVE (Space-Time-Enclosing Volume Extraction)
+Extracts surfaces from 4D data (3D space + time). It extends the contouring logic to higher dimensions. Choose when dealing with time-varying volumes where topological changes occur [10398-steve-space-time-enclosing-volume-extraction.md].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of voxels $N$, $O(N)$, as each voxel and edge is processed once. However, the constant factor is higher than standard Marching Cubes due to material classification and dynamic isovalue lookup [S1, unofficial][S2].
+*   **Memory Complexity:** Linear with respect to the number of vertices and faces generated. The output mesh size depends on the complexity of the material interfaces [S2].
+*   **Strengths:** Accurately captures boundaries between different materials in CT data. Handles non-manifold junctions naturally.
+*   **Limitations:** Requires accurate material classification. The resulting mesh is non-manifold, which may be problematic for some downstream applications (e.g., standard FEA solvers requiring manifold meshes).
+*   **When to Use:** Multi-material CT volumes where material boundaries are the primary interest.
+*   **When Not to Use:** Single-material volumes (use standard Marching Cubes) or when a strictly manifold mesh is required without post-processing.
+
+## Background
+Generalized Marching Cubes was proposed by Suzuki et al. in 2007 to address the limitations of standard Marching Cubes in multi-material CT data [S2]. Standard Marching Cubes assumes a binary classification (inside/outside), which fails when multiple materials with different CT values coexist. Suzuki's method extends the algorithm to handle material types, allowing for the extraction of non-manifold meshes that accurately represent the interfaces between different materials [S2]. The method has been applied in medical imaging and industrial CT analysis for reconstructing mechanical parts with multiple components [S2].
+
+## Sources
+[S1] jakeoung/ShapeFromProjections, https://github.com/jakeoung/ShapeFromProjections, fetched 2026-10-26 (unofficial)
+[S2] Extraction of isosurfaces from multi-material CT volumetric data of mechanical parts, https://doi.org/10.1145/1364901.1364931, fetched 2026-11-01

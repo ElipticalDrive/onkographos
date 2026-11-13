@@ -3,133 +3,167 @@
 Also called: Sparse Dual Marching Cubes from Points
 
 ## Overview
-Sparse Dual Marching Cubes generates a quad-based mesh from sparse voxel Signed Distance Fields (SDFs) or scalar fields by placing a dual vertex at the center of each active voxel and connecting them across shared isosurface edges [S1, unofficial]. It differs from standard Marching Cubes by producing quadrilateral topology rather than triangles, and from Dual Contouring by using fixed voxel centers as dual vertices instead of optimizing vertex positions via linear systems [S1, unofficial].
+Sparse Dual Marching Cubes extracts a quad-based mesh from sparse voxel Signed Distance Fields (SDFs) or scalar fields by placing dual vertices at voxel centers and connecting them across shared marching cube edges [S1, unofficial]. It differs from standard Dual Contouring by using a fixed dual vertex position (the voxel center) rather than optimizing vertex positions via quadratic error functions, and from standard Marching Cubes by outputting quads instead of triangles [S1, unofficial].
 
 ## How it works
 **Inputs:**
-1.  `coords`: Integer tensor or list of shape $[N, 3]$ containing the $(x, y, z)$ coordinates of active voxels [S1, unofficial].
-2.  `corners`: Float tensor or list of shape $[N, 8]$ containing the scalar values at the 8 corners of each voxel [S1, unofficial].
-    *   *Alternative Input:* If corners are not pre-computed, `sparse_dual_marching_cubes_from_points` accepts `point_values` (shape $[N]$ or $[N, 1]$) and `default_value` (typically $1.0$) to gather corner values on the fly [S1, unofficial].
-3.  `iso`: Float value representing the iso-level threshold [S1, unofficial].
+1.  `coords`: Integer tensor of shape $[N, 3]$ containing the $(x, y, z)$ coordinates of active voxels [S1, unofficial].
+2.  `corners`: Float tensor of shape $[N, 8]$ containing the scalar values at the 8 corners of each voxel [S1, unofficial].
+    *   *Alternative Input:* If corners are not pre-computed, `sparse_dual_marching_cubes_from_points` takes `point_values` (shape $[N]$ or $[N, 1]$) and `default_value` (scalar, typically 1.0) to gather corner values on the fly [S1, unofficial].
+3.  `iso`: Float value representing the iso-level to contour at [S1, unofficial].
 
 **Outputs:**
-1.  `verts`: Float tensor or list of shape $[V, 3]$ containing the 3D positions of the dual vertices [S1, unofficial].
-2.  `quads`: Integer tensor or list of shape $[Q, 4]$ containing indices into `verts` for each quadrilateral face [S1, unofficial].
+1.  `verts`: Float tensor of shape $[V, 3]$ with dual vertex positions [S1, unofficial].
+2.  `quads`: Int tensor of shape $[Q, 4]$ with quad indices [S1, unofficial].
 
 **Data Structures:**
-*   **Voxel Corner Values:** For each voxel $i$, the 8 corner values $c_{i,j}$ ($j \in 0..7$) are stored in a flat array or tensor [S1, unofficial].
-*   **Dual Vertex:** One vertex is generated per active voxel, located at the voxel's integer coordinate $(x, y, z)$ [S1, unofficial].
+*   `V3f`: Struct with fields `x, y, z` (float) for vertex positions [S1, unofficial].
+*   `Quad`: Struct with fields `v0, v1, v2, v3` (int) representing a quadrilateral face [S1, unofficial].
 
 **Algorithm Steps:**
 
-1.  **Case Index Calculation:**
-    For each active voxel $i$, determine the Marching Cubes case index $I_i$ by comparing corner values to the iso-level:
-    $$ I_i = \sum_{j=0}^{7} b_j \cdot 2^j $$
-    where $b_j = 1$ if $c_{i,j} < \text{iso}$ and $b_j = 0$ otherwise [S1, unofficial]. The implementation uses a strict less-than comparison for the bit test [S1, unofficial].
+1.  **Determine Marching Cube Cases:**
+    For each voxel $i$, determine the binary case index based on corner values relative to `iso`. Let $c_{i,j}$ be the value of the $j$-th corner of voxel $i$. The case index $C_i$ is calculated as:
+    $$ C_i = \sum_{j=0}^{7} b_{i,j} \cdot 2^j $$
+    where $b_{i,j} = 1$ if $c_{i,j} < \text{iso}$, else $0$ [S1, unofficial].
+    *Note: The source code defines the bit order explicitly: bit 0 corresponds to corner 0, bit 1 to corner 1, etc. [S1, unofficial].*
 
-2.  **Dual Vertex Generation:**
-    Create a dual vertex $v_i$ for each active voxel $i$ at position $\mathbf{p}_i = \text{coords}[i]$ [S1, unofficial].
+2.  **Generate Dual Vertices:**
+    For each active voxel $i$, create a dual vertex $v_i$ at the geometric center of the voxel. If the voxel coordinates are integer grid positions, the vertex position is $(x_i + 0.5, y_i + 0.5, z_i + 0.5)$ [S1, unofficial].
 
-3.  **Edge Intersection Detection:**
-    Iterate through the 12 edges of each voxel. An edge $e$ connecting corners $c_a$ and $c_b$ intersects the isosurface if $(c_a < \text{iso}) \neq (c_b < \text{iso})$ [G].
+3.  **Identify Shared Edges:**
+    Identify the 12 edges of the cube for each voxel. An edge is "active" (intersected by the isosurface) if the scalar values at its two endpoints straddle the `iso` level (i.e., one is $< \text{iso}$ and the other is $\ge \text{iso}$) [S1, unofficial].
 
-4.  **Quad Formation:**
-    For each intersecting edge, collect all active voxels that share that edge in the grid [G]. Sort the neighboring voxels around the edge axis to form a topological ring, then connect consecutive dual vertices to form quadrilateral faces [G]. This ensures mesh coherence across shared boundaries [G].
+4.  **Form Quads:**
+    Connect dual vertices across shared marching cube edges. Specifically, quads are formed by connecting dual vertices of adjacent voxels that share an active edge. The connectivity logic follows the standard Dual Marching Cubes topology, where the quad faces are constructed based on the case index $C_i$ and the shared edges between neighboring voxels [S1, unofficial].
+    *   *Implementation Detail:* The CUDA backend handles the neighbor lookups and quad assembly efficiently. In a CPU implementation, one would typically build a hash map of voxel coordinates to dual vertex indices, then iterate over all voxels, check their 12 edges, and if an edge is shared with a neighbor, create a quad using the dual vertices of the current voxel and the neighbor [G].
 
-**Pseudocode:**
+5.  **Handle Missing Corners (if using `from_points`):**
+    If using the `from_points` variant, for any corner of a voxel that is not present in the input `coords`, assign the `default_value` (default 1.0) [S1, unofficial].
+
+**Pseudocode (CPU Reference Implementation):**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sparse_dual_marching_cubes(coords, corners, iso):
+import numpy as np
+
+def sparse_dual_marching_cubes_cpu(coords, corners, iso):
     """
-    Generates a quad mesh from sparse voxel data.
-    
-    Args:
-        coords: List of [N, 3] integer voxel coordinates.
-        corners: List of [N, 8] scalar values at voxel corners.
-        iso: Float, iso-surface threshold.
-        
-    Returns:
-        verts: List of [V, 3] dual vertex positions.
-        quads: List of [Q, 4] quad indices.
+    Reference CPU implementation of Sparse Dual Marching Cubes.
+    coords: [N, 3] int
+    corners: [N, 8] float
+    iso: float
+    Returns: verts [V, 3], quads [Q, 4]
     """
-    N = len(coords)
-    verts = list(coords)  # Dual vertices are at voxel centers
+    N = coords.shape[0]
+    if N == 0:
+        return np.empty((0, 3), dtype=np.float32), np.empty((0, 4), dtype=np.int32)
+
+    # 1. Create dual vertices at voxel centers
+    # Assuming integer grid coordinates, center is at +0.5
+    verts = (coords.astype(np.float32) + 0.5)
     
-    # Map each spatial edge to the list of voxel indices sharing it
-    edge_to_voxels = {}
-    for i in range(N):
-        x, y, z = coords[i]
-        # 12 edges of a cube, each defined by two corner indices (0..7)
-        edges = [
-            (0, 1), (1, 5), (4, 5), (0, 4),
-            (2, 3), (3, 7), (6, 7), (2, 6),
-            (0, 2), (1, 3), (4, 6), (5, 7)
-        ]
-        for c0, c1 in edges:
-            dx0, dy0, dz0 = c0 & 1, (c0 >> 1) & 1, (c0 >> 2) & 1
-            dx1, dy1, dz1 = c1 & 1, (c1 >> 1) & 1, (c1 >> 2) & 1
-            p0 = (x + dx0, y + dy0, z + dz0)
-            p1 = (x + dx1, y + dy1, z + dz1)
-            edge_key = tuple(sorted([p0, p1]))
-            if edge_key not in edge_to_voxels:
-                edge_to_voxels[edge_key] = []
-            edge_to_voxels[edge_key].append(i)
-            
+    # Map voxel coordinate to vertex index
+    coord_to_idx = {tuple(coords[i]): i for i in range(N)}
+    
+    # 2. Determine active edges for each voxel
+    # Edge indices for a cube: 
+    # 0:(0,1), 1:(1,2), 2:(2,3), 3:(3,0), 4:(4,5), 5:(5,6), 6:(6,7), 7:(7,4)
+    # 8:(0,4), 9:(1,5), 10:(2,6), 11:(3,7)
+    edge_corners = [
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7)
+    ]
+    
+    # 3. Identify shared active edges and form quads
     quads = []
-    for edge_key, voxel_indices in edge_to_voxels.items():
-        if len(voxel_indices) < 2:
-            continue
+    
+    # To avoid duplicates, we only form quads for specific edge types or use a set
+    # Standard Dual Marching Cubes connects dual vertices of adjacent voxels
+    # across shared active edges.
+    
+    # We iterate over all voxels and their edges.
+    # If an edge is active and shared with a neighbor, we add a quad.
+    # The quad consists of the dual vertex of the current voxel and the dual vertex of the neighbor.
+    # However, a single quad is formed by 4 dual vertices? 
+    # Correction: In Dual Marching Cubes, each active edge in the primal grid corresponds to a dual vertex? 
+    # No, the source says: "Each active voxel generates a dual vertex at its center, and quads are formed by connecting dual vertices across shared marching cube edges."
+    # This implies the quad vertices are the centers of the 4 voxels surrounding an active edge? 
+    # Let's re-read carefully: "quads are formed by connecting dual vertices across shared marching cube edges."
+    # In standard Dual Marching Cubes, the dual mesh is defined on the primal vertices? No, on primal cells.
+    # The dual vertex is the cell center.
+    # A quad in the dual mesh corresponds to a vertex in the primal mesh? Or an edge?
+    # Actually, Dual Marching Cubes typically produces a quad mesh where each quad corresponds to a primal vertex? 
+    # Let's stick to the source description: "connecting dual vertices across shared marching cube edges."
+    # This likely means: For each active edge in the primal grid, identify the 4 voxels sharing that edge. 
+    # The dual vertices of these 4 voxels form a quad.
+    
+    # Let's implement this logic:
+    # 1. Find all active edges in the grid.
+    # 2. For each active edge, find the 4 neighboring voxels.
+    # 3. If all 4 neighbors exist, form a quad from their dual vertices.
+    
+    active_edges = {} # Map edge_key -> list of voxel_indices
+    
+    for i in range(N):
+        c = corners[i]
+        # Determine active edges for this voxel
+        for edge_idx, (c1, c2) in enumerate(edge_corners):
+            v1 = c[c1]
+            v2 = c[c2]
+            if (v1 < iso) != (v2 < iso):
+                # Edge is active
+                # Define edge key: sorted tuple of the two corner coordinates in global grid
+                # Corner coordinates:
+                # 0:(0,0,0), 1:(1,0,0), 2:(1,1,0), 3:(0,1,0)
+                # 4:(0,0,1), 5:(1,0,1), 6:(1,1,1), 7:(0,1,1)
+                corner_offsets = [
+                    (0,0,0), (1,0,0), (1,1,0), (0,1,0),
+                    (0,0,1), (1,0,1), (1,1,1), (0,1,1)
+                ]
+                p1 = tuple(coords[i] + np.array(corner_offsets[c1]))
+                p2 = tuple(coords[i] + np.array(corner_offsets[c2]))
+                edge_key = tuple(sorted([p1, p2]))
+                
+                if edge_key not in active_edges:
+                    active_edges[edge_key] = []
+                active_edges[edge_key].append(i)
+
+    # Form quads
+    for edge_key, voxel_indices in active_edges.items():
+        # An edge in a cubic grid is shared by 4 voxels.
+        # If we have 4 voxels, we form a quad.
+        if len(voxel_indices) == 4:
+            # The quad vertices are the dual vertices (centers) of these 4 voxels
+            # Order matters for winding. 
+            # The source does not specify the exact winding order for the quad.
+            # We will just collect them.
+            q_verts = [coord_to_idx[idx] for idx in voxel_indices]
+            quads.append(q_verts)
             
-        # Check if the edge actually intersects the isosurface
-        p0, p1 = edge_key
-        ref_v = voxel_indices[0]
-        x, y, z = coords[ref_v]
+    if not quads:
+        return verts, np.empty((0, 4), dtype=np.int32)
         
-        def get_corner_val(v, p):
-            dx, dy, dz = p[0]-x, p[1]-y, p[2]-z
-            idx = dx + (dy << 1) + (dz << 2)
-            return corners[v][idx]
-            
-        val0 = get_corner_val(ref_v, p0)
-        val1 = get_corner_val(ref_v, p1)
-        if (val0 < iso) == (val1 < iso):
-            continue
-            
-        # Sort voxels around the edge to form a ring
-        ex, ey, ez = p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]
-        if ex != 0:
-            voxel_indices.sort(key=lambda v: (coords[v][2], coords[v][1]))
-        elif ey != 0:
-            voxel_indices.sort(key=lambda v: (coords[v][2], coords[v][0]))
-        else:
-            voxel_indices.sort(key=lambda v: (coords[v][1], coords[v][0]))
-            
-        # Connect consecutive dual vertices to form quads
-        m = len(voxel_indices)
-        for j in range(m):
-            v0 = voxel_indices[j]
-            v1 = voxel_indices[(j + 1) % m]
-            quads.append([v0, v1])
-            
+    quads = np.array(quads, dtype=np.int32)
     return verts, quads
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Missing Corners:** When using `sparse_dual_marching_cubes_from_points`, corners not present in the input `coords` are assigned a `default_value` (default $1.0$) [S1, unofficial]. This value must be chosen such that it is consistently inside or outside the surface to avoid artifacts [S1, unofficial].
-*   **Precision:** Corner values are float32. The iso-level comparison uses `< iso` for the bit test [S1, unofficial].
-*   **Sparse Topology:** If fewer than two active voxels share an intersecting edge, no quad is generated for that edge, which may leave gaps in highly fragmented sparse distributions [G].
+*   **Missing Neighbors:** If an active edge is on the boundary of the sparse voxel set (i.e., not all 4 neighboring voxels are present), no quad is formed for that edge [G].
+*   **Default Value:** When using `from_points`, the `default_value` must be chosen such that it consistently places the corner either inside or outside the surface to avoid spurious geometry [S1, unofficial].
+*   **Precision:** Corner values should be float32. The iso-level comparison is strict ($<$ iso) [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ average-case complexity using a hash map for edge-to-voxel lookups, where $N$ is the number of active voxels [G].
-*   **Memory Complexity:** $O(N)$ for storing coordinates, corner values, and the output mesh [S1, unofficial].
-*   **Performance:** Implemented in CUDA for high performance on GPU [S1, unofficial].
-*   **Strengths:** Produces quad-based meshes, which are often preferred for subdivision surfaces and animation. Efficient for sparse data as it only processes active voxels [S1, unofficial].
-*   **Limitations:** Requires pre-computed or gatherable corner values. Highly non-uniform voxel distributions may produce irregular quad rings or require post-processing for manifold guarantees [G].
+*   **Time Complexity:** Linear with respect to the number of active voxels $N$ and the number of active edges. The CUDA backend performs this in parallel [S1, unofficial].
+*   **Memory Complexity:** Proportional to $N$ for input and $V$ for output vertices, where $V \approx N$. The number of quads $Q$ is proportional to the number of active edges [S1, unofficial].
+*   **Performance:** High-performance CUDA implementation available in `spcumc` [S1, unofficial].
+*   **Strengths:** Outputs quad meshes, which are often preferred for subdivision surfaces or certain rendering pipelines. Efficient for sparse data.
+*   **Limitations:** Fixed vertex positions (voxel centers) may not capture sharp features as well as optimized Dual Contouring. Requires careful handling of boundary conditions [S1, unofficial].
 
 ## Background
-Sparse Dual Marching Cubes is part of the `spcumc` library, which provides high-performance sparse Marching Cubes and Dual Marching Cubes implementations for PyTorch [S1, unofficial]. It extends the traditional Dual Marching Cubes algorithm to handle sparse voxel grids, making it suitable for large-scale 3D reconstruction from point clouds or sparse SDFs [S1, unofficial].
+Sparse Dual Marching Cubes is part of the `spcumc` library, which provides high-performance sparse marching cube algorithms for CUDA [S1, unofficial]. It extends the concept of Dual Marching Cubes to sparse voxel grids, allowing for efficient extraction of quad-based meshes from large, sparse SDF representations [S1, unofficial].
 
 ## Sources
 [S1] hwanhuh/spcumc, https://github.com/hwanhuh/spcumc, fetched 2026-10-27 (unofficial)

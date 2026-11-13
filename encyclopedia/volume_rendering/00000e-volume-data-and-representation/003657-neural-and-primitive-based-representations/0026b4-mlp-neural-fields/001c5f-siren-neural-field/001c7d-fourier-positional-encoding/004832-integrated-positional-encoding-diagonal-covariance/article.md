@@ -1,0 +1,328 @@
+# Integrated Positional Encoding (Diagonal Covariance)
+
+Also called: Expected Sine for Positional Encoding, integrated positional encoding component
+
+## Overview
+Integrated Positional Encoding (Diagonal Covariance) computes the expected value of sinusoidal positional encodings when the input coordinates are modeled as Gaussian random variables with diagonal covariance. It solves the problem of aliasing and high-frequency loss in neural fields by integrating over the uncertainty (ray thickness or voxel size) represented by the covariance matrix [S1, S2, unofficial]. Unlike standard Fourier Positional Encoding which treats inputs as point samples, this method accounts for the spatial extent of the query, effectively acting as a low-pass filter where wider variances suppress high-frequency components [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: `x_coord` containing mean coordinates $x$ and covariance information. If `diagonal=True`, covariance is a vector of variances $x_{var}$; if `diagonal=False`, it is a full covariance matrix $x_{cov}$.
+- Parameters: `min_deg` (int, minimum exponent), `max_deg` (int, maximum exponent, exclusive), `diagonal` (bool).
+- Output: Encoded vector containing the expected sine/cosine values and their variance-dependent scaling factors.
+
+**Data Structures:**
+- `x`: Tensor of shape $(N, D)$, where $N$ is batch size and $D$ is dimensionality (typically 3).
+- `x_var`: Tensor of shape $(N, D)$, diagonal elements of covariance.
+- `x_cov`: Tensor of shape $(N, D, D)$, full covariance matrix.
+- `scales`: Tensor of shape $(K, D)$, where $K = max\_deg - min\_deg$. Values are $2^i$ for $i \in [min\_deg, max\_deg)$.
+
+**Steps:**
+1. Extract mean $x$ and covariance ($x_{var}$ or $x_{cov}$) from `x_coord`.
+2. Compute frequency scales: $s_i = 2^i$ for $i$ from `min_deg` to `max_deg - 1`.
+3. Construct basis matrix $B$ by concatenating $s_i \cdot I_D$ for each scale $i$.
+4. Compute transformed mean $y = x \cdot B$.
+5. Compute transformed variance $y_{var}$:
+   - If diagonal: $y_{var} = x_{var} \cdot B^2$ (element-wise square of scales applied to variances).
+   - If full: $y_{var} = \sum_{j} (x_{cov} \cdot B)_{ij} \cdot B_{kj}$ (matrix multiplication followed by contraction).
+6. Compute expected sine using the formula: $E[\sin(z)] = e^{-0.5 \sigma^2} \sin(\mu)$, where $\mu$ is the mean and $\sigma^2$ is the variance.
+7. Concatenate results for sine and cosine components.
+
+**Formula:**
+The core integration result for a Gaussian variable $z \sim \mathcal{N}(\mu, \sigma^2)$ is:
+$$ E[\sin(z)] = e^{-\frac{1}{2}\sigma^2} \sin(\mu) $$
+$$ E[\cos(z)] = e^{-\frac{1}{2}\sigma^2} \cos(\mu) $$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def integrated_pos_enc_diag(x_coord, min_deg, max_deg, diagonal=True):
+    """
+    Computes integrated positional encoding for diagonal covariance.
+    
+    Args:
+        x_coord: Tuple or dict containing 'mean' (x) and 'var' (x_var).
+                 x shape: (N, D)
+                 x_var shape: (N, D)
+        min_deg: int, minimum exponent for scales.
+        max_deg: int, maximum exponent for scales (exclusive).
+        diagonal: bool, if True uses diagonal covariance logic.
+        
+    Returns:
+        encoded: Tensor of shape (N, 2 * D * (max_deg - min_deg))
+    """
+    # 1. Extract inputs
+    x = x_coord['mean']  # (N, D)
+    x_var = x_coord['var']  # (N, D)
+    
+    # 2. Compute scales: 2^i for i in [min_deg, max_deg)
+    exponents = np.arange(min_deg, max_deg)
+    scales = np.power(2.0, exponents)  # (K,)
+    
+    # 3. Construct basis and transform mean
+    # We need to apply each scale to each dimension.
+    # y will be (N, D * K)
+    # For each scale s, we compute s * x
+    # Reshape scales to (1, 1, K) to broadcast correctly if needed, 
+    # but here we iterate or use einsum.
+    
+    # Let's build y explicitly:
+    # y = [s_0 * x, s_1 * x, ..., s_{K-1} * x]
+    # x shape: (N, D)
+    # scales shape: (K,)
+    
+    # Expand x to (N, D, 1) and scales to (1, 1, K)
+    x_expanded = x[:, :, np.newaxis]  # (N, D, 1)
+    scales_expanded = scales[np.newaxis, np.newaxis, :]  # (1, 1, K)
+    
+    y = x_expanded * scales_expanded  # (N, D, K)
+    y = y.reshape(x.shape[0], -1)  # (N, D*K)
+    
+    # 4. Compute transformed variance y_var
+    # For diagonal covariance, variance scales by square of frequency.
+    # y_var_component for scale s is s^2 * x_var
+    scales_sq = np.square(scales)  # (K,)
+    scales_sq_expanded = scales_sq[np.newaxis, np.newaxis, :]  # (1, 1, K)
+    
+    y_var = x_var[:, :, np.newaxis] * scales_sq_expanded  # (N, D, K)
+    y_var = y_var.reshape(x.shape[0], -1)  # (N, D*K)
+    
+    # 5. Compute Expected Sine and Cosine
+    # Formula: E[sin] = exp(-0.5 * var) * sin(mean)
+    #         E[cos] = exp(-0.5 * var) * cos(mean)
+    
+    # Precompute decay factor
+    decay = np.exp(-0.5 * y_var)  # (N, D*K)
+    
+    # Compute sine and cosine of the scaled means
+    sin_vals = np.sin(y)  # (N, D*K)
+    cos_vals = np.cos(y)  # (N, D*K)
+    
+    # Apply decay
+    exp_sin = decay * sin_vals
+    exp_cos = decay * cos_vals
+    
+    # 6. Concatenate
+    # Standard practice is to interleave or concatenate sin/cos blocks.
+    # Based on "concatenate [y, y + 0.5*pi]" logic in notes, this implies 
+    # sin(x) and cos(x) are derived from sin(x) and sin(x + pi/2).
+    # exp_sin is E[sin(x)]. exp_cos is E[cos(x)].
+    
+    encoded = np.concatenate([exp_sin, exp_cos], axis=-1)
+    
+    return encoded
+
+def integrated_pos_enc_full(x_coord, min_deg, max_deg):
+    """
+    Computes integrated positional encoding for full covariance.
+    """
+    x = x_coord['mean']  # (N, D)
+    x_cov = x_coord['cov']  # (N, D, D)
+    
+    # 1. Compute scales
+    exponents = np.arange(min_deg, max_deg)
+    scales = np.power(2.0, exponents)  # (K,)
+    
+    # 2. Construct Basis Matrix B
+    # B is (D*K, D) ? Or we apply scales to dimensions.
+    # Note [S1, unofficial] says: basis = concat(2^i * Identity(3))
+    # This creates a matrix of shape (D*K, D) if we view it as linear map from D to D*K.
+    # However, usually we compute y = x @ B.
+    # Let's construct B such that y = x @ B.
+    # If B is (D, D*K), then y is (N, D*K).
+    # B is block diagonal with blocks s_i * I.
+    
+    D = x.shape[1]
+    K = len(scales)
+    
+    # Construct B: (D, D*K)
+    # B = [s_0*I, s_1*I, ..., s_{K-1}*I]
+    B_parts = []
+    for s in scales:
+        B_parts.append(s * np.eye(D))
+    B = np.hstack(B_parts)  # (D, D*K)
+    
+    # 3. Compute y = x @ B
+    y = x @ B  # (N, D*K)
+    
+    # 4. Compute y_var
+    # Note [S1, unofficial]: y_var = sum((x_cov @ basis) * basis, dim=-2)
+    # This formula is slightly ambiguous in text. 
+    # Standard result for linear transform y = Ax where x ~ N(mu, Sigma):
+    # Var(y) = A Sigma A^T.
+    # Here A is B^T? No, y = x B. So y^T = B^T x^T.
+    # Cov(y^T) = B^T Cov(x^T) B = B^T Sigma B.
+    # So Cov(y) = B^T Sigma B.
+    # y_var should be the diagonal of this covariance matrix.
+    
+    # Let's follow the note's specific instruction:
+    # "y_var = sum((x_cov @ basis) * basis, dim=-2)"
+    # If basis is B (D, D*K), and x_cov is (N, D, D).
+    # x_cov @ B -> (N, D, D*K)
+    # Multiply by B? B needs to be aligned.
+    # If we interpret "basis" in the second term as B^T?
+    # Let's assume the note implies: y_var = diag(B^T @ x_cov @ B)
+    
+    # Compute M = x_cov @ B  # (N, D, D*K)
+    # Then we need to multiply by B^T?
+    # (N, D, D*K) @ (D*K, D) -> (N, D, D)
+    # Then take diagonal.
+    
+    # Reshape B for matmul: B is (D, D*K). B_T is (D*K, D).
+    B_T = B.T  # (D*K, D)
+    
+    # M = x_cov @ B  # (N, D, D*K)
+    # This requires x_cov (N, D, D) and B (D, D*K).
+    # Result is (N, D, D*K).
+    
+    # Then y_cov_full = M @ B_T ?
+    # (N, D, D*K) @ (D*K, D) -> (N, D, D).
+    # This gives the full covariance of y.
+    
+    # y_var is the diagonal of this covariance.
+    
+    # Implementation:
+    # x_cov: (N, D, D)
+    # B: (D, D*K)
+    
+    # Step 4a: x_cov @ B
+    # Using einsum for clarity: 'ndk, kmd -> ndm' ? No.
+    # x_cov[i, j, l] * B[l, m] -> M[i, j, m]
+    M = np.einsum('ndj,jm->ndm', x_cov, B)  # (N, D, D*K)
+    
+    # Step 4b: M @ B^T
+    # M[i, j, m] * B_T[m, k] = M[i, j, m] * B[k, m]
+    # Result Cov_y[i, j, k]
+    Cov_y = np.einsum('ndm,km->ndk', M, B)  # (N, D, D)
+    
+    # Extract diagonal
+    # y_var[i, idx] where idx corresponds to the diagonal elements of the DxD covariance.
+    # The diagonal elements are Cov_y[i, 0, 0], Cov_y[i, 1, 1], etc.
+    # But y has D*K dimensions. The covariance matrix is DxD?
+    # Wait. y is (N, D*K). The covariance of y should be (D*K, D*K).
+    # The formula y = x B maps D dims to D*K dims.
+    # Cov(y) = B^T Sigma_x B. This is (D*K, D*K).
+    
+    # Let's re-read [S1, unofficial]: "y_var = sum((x_cov @ basis) * basis, dim=-2)"
+    # If basis is (D, D*K).
+    # x_cov @ basis -> (N, D, D*K).
+    # Multiply by basis? If basis is (D, D*K), we can't multiply directly on right.
+    # Maybe basis is transposed in the note's context?
+    
+    # Let's stick to the standard linear algebra result for y = x B:
+    # Cov(y) = B^T Sigma_x B.
+    # We need the diagonal of this (D*K x D*K) matrix.
+    
+    # Recompute properly:
+    # Sigma_y = B^T @ Sigma_x @ B
+    # B is (D, D*K). B^T is (D*K, D).
+    # Sigma_x is (N, D, D).
+    
+    # Term 1: Sigma_x @ B -> (N, D, D*K)
+    Term1 = np.einsum('ndj,jm->ndm', x_cov, B)
+    
+    # Term 2: B^T @ Term1 -> (D*K, D) @ (N, D, D*K) -> (N, D*K, D*K)
+    # This is expensive.
+    
+    # Alternative: The note says "sum(..., dim=-2)".
+    # If we look at [S2, unofficial]: "y_var = sum(matmul(x_cov, basis) * basis, -2)"
+    # This suggests an element-wise operation after matmul.
+    
+    # Let's assume the "basis" in the multiplication is B^T?
+    # If we compute M = x_cov @ B (N, D, D*K).
+    # And we want to project back?
+    
+    # Actually, for diagonal covariance, it's simple. For full, it's complex.
+    # Given the ambiguity, I will implement the standard Cov(y) = B^T Sigma B diagonal extraction.
+    
+    # B^T is (D*K, D).
+    # Sigma_x is (N, D, D).
+    # B is (D, D*K).
+    
+    # Sigma_y = B^T @ Sigma_x @ B
+    # Let's compute Sigma_x @ B first: (N, D, D*K)
+    SB = np.einsum('ndj,jm->ndm', x_cov, B)
+    
+    # Now B^T @ SB: (D*K, D) @ (N, D, D*K)
+    # This results in (N, D*K, D*K).
+    # We only need the diagonal of this large matrix.
+    # Diag(Sigma_y)[k] = sum_l (B^T[k, l] * SB[l, k])? No.
+    # Sigma_y[k, k] = sum_{i,j} B^T[k, i] Sigma_x[i, j] B[j, k]
+    # = sum_{i,j} B[i, k] Sigma_x[i, j] B[j, k]
+    
+    # We can compute this vectorized:
+    # B[i, k] is scale factor for dim i at output index k.
+    # Let's iterate k? No, vectorize.
+    
+    # B is (D, D*K).
+    # We want vector V of length D*K.
+    # V[k] = sum_{i,j} B[i, k] * Sigma_x[:, i, j] * B[j, k]
+    
+    # Reshape B to (D*K, D) -> B_T
+    B_T = B.T  # (D*K, D)
+    
+    # We want B_T[k, i] * Sigma_x[i, j] * B_T[k, j]
+    # Sum over i, j.
+    
+    # Term: B_T[:, :, np.newaxis] * Sigma_x[np.newaxis, :, :] * B_T[:, np.newaxis, :]
+    # Shape: (D*K, D, D)
+    # Sum over last two dims.
+    
+    product = B_T[:, :, np.newaxis] * x_cov[np.newaxis, :, :] * B_T[:, np.newaxis, :]
+    y_var = np.sum(product, axis=(1, 2))  # (N, D*K)
+    
+    # 5. Compute Expected Sine
+    decay = np.exp(-0.5 * y_var)
+    sin_vals = np.sin(y)
+    cos_vals = np.cos(y)
+    
+    exp_sin = decay * sin_vals
+    exp_cos = decay * cos_vals
+    
+    encoded = np.concatenate([exp_sin, exp_cos], axis=-1)
+    
+    return encoded
+```
+
+## Subtopics
+
+### [Fourier Feature Networks](2765-fourier-feature-networks.md)
+Uses random Gaussian frequencies instead of deterministic powers of two.
+
+### [Off-Axis Positional Encoding](3503-off-axis-positional-encoding.md)
+Adjusts frequencies based on viewing direction to reduce aliasing.
+
+### [Coordinate-Time Encoding](5105-coordinate-time-encoding.md)
+Extends positional encoding to temporal dimensions for dynamic scenes.
+
+### [Integrated Positional Encoding](5255-integrated-positional-encoding.md)
+The general family of integrating over uncertainty, of which this is a specific diagonal covariance implementation.
+
+### [2D Positional Embedding](12829-2d-positional-embedding.md)
+Standard sinusoidal embeddings for 2D data, lacking the integration aspect.
+
+### [Frequency Annealing](13443-frequency-annealing.md)
+Gradually increases frequencies during training, a different approach to handling high frequencies.
+
+### [Truncated Dynamic Low-pass Filter](14016-truncated-dynamic-low-pass-filter.md)
+Dynamically filters frequencies based on scene content, distinct from the fixed Gaussian integration.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot D \cdot K)$, where $N$ is batch size, $D$ is dimensionality, and $K$ is the number of frequency bands. Full covariance computation adds a factor of $D^2$ or $D^3$ depending on implementation, making it significantly slower than diagonal or standard Fourier encoding.
+- **Memory Complexity:** $O(N \cdot D \cdot K)$ for the output. Full covariance requires storing $O(N \cdot D^2)$ for the covariance matrix.
+- **Performance:** Effectively reduces high-frequency aliasing artifacts in NeRFs by smoothing the signal over the ray segment or voxel [S1, S2, unofficial].
+- **Strengths:** Handles ray thickness and voxel size naturally; prevents high-frequency noise from being overfit [S1, unofficial].
+- **Limitations:** Computationally expensive for full covariance; diagonal approximation may be insufficient for highly anisotropic uncertainties [S1, S2, unofficial].
+- **When to use:** When input coordinates represent uncertain regions (e.g., thick rays, large voxels) and aliasing is a concern.
+- **When not to use:** For point-wise queries with negligible uncertainty, or when computational resources are limited.
+
+## Background
+Integrated Positional Encoding was introduced in the context of Mip-NeRF to address the issue of high-frequency aliasing caused by sampling points along rays with significant thickness [S1, S2, unofficial]. It builds on the idea that positional encodings should account for the spatial extent of the query, not just the mean position. The diagonal covariance variant is a computationally efficient approximation of the full integrated encoding, assuming independence between coordinate dimensions [S1, S2, unofficial].
+
+## Sources
+[S1] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)
+[S2] https://github.com/CPREgroup/CaSE-NeRF, https://github.com/CPREgroup/CaSE-NeRF, fetched 2026-10-30 (unofficial)

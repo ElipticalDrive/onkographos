@@ -1,0 +1,365 @@
+--- v011.md
++++ v012.md
+@@ -4,142 +4,197 @@
+ 
+ ## Overview
+-This method defines the composite objective function used to optimize neural radiance fields and related volumetric or primitive-based representations by balancing photometric fidelity against geometric and structural regularization terms [S1, S3, S4, S6, S7]. It solves the ill-posed inverse problem of recovering 3D structure and appearance from 2D images by preventing overfitting to noise and ensuring physically plausible geometry [S3, S6]. Unlike the parent [Photometric and Image Reconstruction Losses](9789-photometric-and-image-reconstruction-losses.md) which focuses solely on pixel-level error metrics, this method explicitly integrates regularization terms (e.g., Total Variation, Eikonal, Compactness) to constrain the solution space [S1, S3, S6, S7]. It differs from [Composite Image Loss with Visibility Weighting](4262-composite-image-loss-with-visibility-weighting.md) by incorporating diverse geometric priors beyond visibility-aware weighting, such as density concentration and surface normal consistency [S3, S6].
++This method defines the total training objective for differentiable volume rendering and inverse rendering pipelines by aggregating a primary photometric reconstruction term with multiple regularization constraints. It solves the ill-posed nature of recovering 3D structure and appearance from 2D images by penalizing spatial noise, enforcing physical priors (such as SDF gradient norms or Gaussian compactness), and stabilizing optimization. It differs from its sibling [Composite Image Loss with Visibility Weighting](4262-composite-image-loss-with-visibility-weighting.md) by explicitly incorporating diverse geometric and structural regularizers (e.g., total variation, eikonal, size penalties) rather than focusing solely on visibility-weighted photometric fidelity.
+ 
+ ## How it works
+-The method computes a scalar total loss $\mathcal{L}$ by summing a photometric reconstruction term and one or more regularization terms, weighted by hyperparameters. The specific components vary by representation (voxels, Gaussians, SDFs), but the general structure is:
++The method computes a scalar loss $\mathcal{L}$ by summing weighted components. The specific components depend on the scene representation (voxels, Gaussians, SDFs) and the rendering setup (static, dynamic, inverse rendering).
++
++### Inputs and Outputs
++*   **Inputs:** Rendered image/patch $\tilde{I}$ (or $\mathbf{C}_{\text{Inp}}, \mathbf{C}_{\text{Up}}$), ground-truth image/patch $I$ (or $\mathbf{C}_{\text{gt}}$), scene parameters (opacity $\sigma$, SH coefficients, Gaussian scales $s$, SDF $S$, roughness $\alpha$), and sampled rays $\mathcal{R}$.
++*   **Outputs:** Scalar loss value $\mathcal{L}$ and gradients for backpropagation.
++
++### Data Structures
++*   **Rays:** Set $\mathcal{R}$ of sampled rays.
++*   **Voxels/Grid:** Voxel grid containing opacity $\sigma$ and color features (e.g., SH coefficients).
++*   **Gaussians:** Set $\mathcal{G}$ of primitives, each with position, rotation, scale $s_{i,j}$, opacity $\alpha_i$, and color.
++*   **SDF:** Implicit function $S(\mathbf{x})$ and its gradient $\nabla_x S$.
++
++### Formulas and Steps
++The total loss is generally structured as:
+ $$ \mathcal{L} = \mathcal{L}_{\text{photo}} + \sum_k \lambda_k \mathcal{L}_{\text{reg}, k} $$
+ 
+-### Inputs and Outputs
+-- **Inputs**: Rendered image $\mathbf{I}_r$ (or patch $\tilde{I}_P$), ground-truth image $\mathbf{I}_{gt}$ (or $I_P$), scene representation parameters (e.g., voxel opacities $\sigma$, SH coefficients, Gaussian scales $s$, SDF values $S$), and camera parameters.
+-- **Outputs**: Scalar loss value $\mathcal{L}$ used for gradient-based optimization.
+-
+-### Data Structures
+-The data structures depend on the underlying representation:
+-- **Voxel Grids**: 3D arrays storing density $\sigma$ and color features (e.g., SH coefficients) [S1, S2].
+-- **Gaussians**: List of primitives, each with position, scale $s_{i,j}$ (3 axes), opacity $\alpha_i$, and color [S7].
+-- **SDF**: Neural network mapping 3D coordinates to signed distance values $S(\mathbf{x})$ [S6].
+-
+-### Formulas and Steps
+-The implementation varies significantly based on the specific variant. Below are the canonical formulations from the sources.
+-
+-#### 1. Voxel-Based with Total Variation (HDR-Plenoxels)
+-Used for optimizing voxel opacity and SH coefficients from LDR images [S1].
+-
+-**Reconstruction Loss** $\mathcal{L}_{\text{recon}}$:
+-$$ \mathcal{L}_{\text{recon}} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} M_i(\mathbf{r}) \| I_i(\Pi_i(\mathbf{r})) - \mathcal{T}(\hat{C}(\mathbf{r})) \|_2^2 $$
+-- $\mathcal{R}$: Set of sampled rays.
+-- $M_i(\mathbf{r})$: Saturation mask for the $i$-th image, computed from input LDR values.
+-- $\Pi_i(\mathbf{r})$: Camera projection of ray $\mathbf{r}$ to 2D pixel coordinate.
+-- $\mathcal{T}$: Tone mapping function.
+-- $\hat{C}(\mathbf{r})$: Rendered color along ray $\mathbf{r}$.
+-
+-**Total Variation Loss** $\mathcal{L}_{\text{TV}}$:
+-$$ \mathcal{L}_{\text{TV}} = \frac{1}{|\mathcal{V}|} \sum_{\mathbf{v} \in \mathcal{V}, d \in [D]} \sqrt{\Delta_x^2(\mathbf{v}, d) + \Delta_y^2(\mathbf{v}, d) + \Delta_z^2(\mathbf{v}, d) + \epsilon} $$
+-- $\mathcal{V}$: Set of voxels.
+-- $d$: Index of feature channel (opacity or SH coefficient).
+-- $\Delta_x(\mathbf{v}, d)$: Difference between voxel $\mathbf{v}$ and its neighbor along the x-axis for channel $d$.
+-- $\epsilon$: Small constant for numerical stability [G].
+-
+-**Smoothness Loss** $\mathcal{L}_{\text{smooth}}$:
+-$$ \mathcal{L}_{\text{smooth}} = \sum_{i=1}^N \sum_{e \in [0,1]} g_i''(e)^2 $$
+-- $g_i(e)$: Camera Response Function (CRF) for channel $i$.
+-- $g_i''(e)$: Second-order derivative of CRF w.r.t. domain $e$.
+-
+-**Total Loss**:
+-$$ \mathcal{L} = \mathcal{L}_{\text{recon}} + \lambda_{\text{TV}} \mathcal{L}_{\text{TV}} + \lambda_{\text{smooth}} \mathcal{L}_{\text{smooth}} $$
+-
+-#### 2. Dynamic Voxel with Flow and Inpainting
+-Used for dynamic scene novel view synthesis [S2].
+-
+-**Photometric Loss** $\mathcal{L}_{\text{photo}}$:
+-$$ \mathcal{L}_{\text{photo}} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \| \mathbf{C}_{\text{Inp}}(\mathbf{r}) - \mathbf{C}_{\text{gt}}(\mathbf{r}) \|_2^2 + \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \| \mathbf{C}_{\text{Up}}(\mathbf{r}) - \mathbf{C}_{\text{gt}}(\mathbf{r}) \|_2^2 $$
+-- $\mathbf{C}_{\text{Inp}}$: Rendered color from inpainted grid.
+-- $\mathbf{C}_{\text{Up}}$: Rendered color from up-sampled grid.
+-
+-**Additional Terms**:
+-- $\mathcal{L}_{\text{ptc}}$: Point color loss (L1 norm of color difference at sampled points) [S2].
+-- $\mathcal{L}_{\text{bg}}$: Background entropy loss encouraging density concentration [S2].
+-- $\mathcal{L}_{\text{flow}}$: L1 norm of flow field $V^{flow}_t$ in canonical space [S2].
+-- $\mathcal{L}_{\text{vdiff}}$: L1 norm of difference between input and output of inpaint network [S2].
+-- $\mathcal{L}_{\text{tv}}(\cdot)$: Total variation applied to canonical density $V\sigma^{Can}$, flow $V^{flow}_t$, and rendered depths $\mathbf{D}$ [S2].
+-
+-**Total Loss**:
+-$$ \mathcal{L} = \mathcal{L}_{\text{photo}} + w_1\mathcal{L}_{\text{ptc}} + w_2\mathcal{L}_{\text{bg}} + w_3\mathcal{L}_{\text{flow}} + w_4\mathcal{L}_{\text{vdiff}} + w_5\mathcal{L}_{\text{tv}}(V\sigma^{Can}) + w_6\mathcal{L}_{\text{tv}}(V^{flow}_t) + w_7\mathcal{L}_{\text{tv}}(\mathbf{D}) $$
+-
+-#### 3. Triangle Splatting with Size Regularization
+-Used for optimizing triangle splats [S3].
+-
+-**Photometric Loss**:
+-$$ \mathcal{L}_{\text{photo}} = (1 - \lambda)\mathcal{L}_1 + \lambda\mathcal{L}_{\text{D-SSIM}} $$
+-- $\mathcal{L}_1$: L1 photometric loss.
+-- $\mathcal{L}_{\text{D-SSIM}}$: LD-SSIM loss.
+-- $\lambda$: Weight for D-SSIM term.
+-
+-**Regularization Terms**:
+-- $\mathcal{L}_0$: Opacity loss [S3].
+-- $\mathcal{L}_d$: Distortion loss [S3].
+-- $\mathcal{L}_n$: Normal consistency loss [S3].
+-- $\mathcal{L}_s$: Size regularization.
+-
+-**Size Regularization** $\mathcal{L}_s$:
+-$$ \mathcal{L}_s = 2 \| (\mathbf{v}_1 - \mathbf{v}_0) \times (\mathbf{v}_2 - \mathbf{v}_0) \|^{-1} $$
+-- $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$: Vertices of the triangle.
+-- This term encourages larger triangles by penalizing small cross-product magnitudes [S3].
+-
+-**Total Loss**:
+-$$ \mathcal{L} = (1 - \lambda)\mathcal{L}_1 + \lambda\mathcal{L}_{\text{D-SSIM}} + \beta_1\mathcal{L}_0 + \beta_2\mathcal{L}_d + \beta_3\mathcal{L}_n + \beta_4\mathcal{L}_s $$
+-
+-#### 4. Dynamic Human with Perceptual Loss
+-Used for neural volumetric representations of dynamic humans [S4].
+-
+-**RGB Loss** $L_{rgb}$:
+-$$ L_{rgb} = \| \tilde{I}_P - I_P \|_2^2 + \| F_{vgg}(\tilde{I}_P) - F_{vgg}(I_P) \|_2^2 $$
+-- $\tilde{I}_P$: Rendered image patch.
+-- $I_P$: Ground-truth image patch.
+-- $F_{vgg}$: VGG feature extractor [S4].
+-
+-**Regularization**:
+-- Density concentration regularizer applied to human surface [S4].
+-
+-#### 5. Inverse Rendering with SDF
+-Used for optimizing neural SDF and material parameters [S6].
+-
+-**Total Loss**:
+-$$ \mathcal{L} = L_2(\text{pyramid}(\hat{I}), \text{pyramid}(I)) + (1 - \text{SSIM}(\hat{I}, I)) + \lambda_1 \|\nabla_x S - 1\|_2^2 + \lambda_2 \text{Loss}_{\text{roughness}} $$
+-- $\hat{I}$: Predicted image.
+-- $I$: Ground-truth image.
+-- $\text{pyramid}$: Gaussian pyramid.
+-- $\text{SSIM}$: Structural Similarity Index.
+-- $S$: Neural SDF.
+-- $\|\nabla_x S - 1\|_2^2$: Eikonal loss enforcing SDF validity [S6].
+-- $\text{Loss}_{\text{roughness}}$: Encourages roughness < 0.5 [S6].
+-
+-#### 6. Compact 3D Gaussian Splatting
+-Used for compact 3DGS optimization [S7].
+-
+-**Total Loss**:
+-$$ \mathcal{L} = (1-\lambda_D)\mathcal{L}_1 + \lambda_D \mathcal{L}_{D\text{-SSIM}} + \lambda_s \frac{1}{|G|} \sum_i \prod_{j=1}^3 s_{i,j} + \lambda_o \frac{1}{|G|} \sum_i \alpha_i $$
+-- $G$: Set of Gaussians.
+-- $s_{i,j}$: Three scale axes of Gaussian $i$.
+-- $\alpha_i$: Opacity of Gaussian $i$.
+-- $\lambda_D$: Weight for D-SSIM (default 0.2) [S7].
+-- $\lambda_s, \lambda_o$: Weights for volume and opacity terms (default 0.01) [S7].
++#### 1. Photometric Reconstruction Loss ($\mathcal{L}_{\text{photo}}$ or $\mathcal{L}_{\text{recon}}$)
++Computes the error between rendered and ground-truth images. Variants include:
++
++*   **L1/L2 + Perceptual:**
++    $$ \mathcal{L}_{\text{rgb}} = \| \tilde{I}_P - I_P \|_2^2 + \| F_{\text{vgg}} (\tilde{I}_P) - F_{\text{vgg}} (I_P) \|_2^2 $$
++    where $F_{\text{vgg}}$ is a VGG feature extractor [S4].
++
++*   **Multi-Grid Photometric:**
++    $$ \mathcal{L}_{\text{photo}} = \frac {1}{|\mathcal {R}|} \sum _{r\in \mathcal {R}} \left \| \mathbf {C_{\text {Inp}}}(\mathbf {r}) - \mathbf {C}_{\text {gt}}(\mathbf {r}) \right \|_2^2 + \frac {1}{|\mathcal {R}|} \sum _{r\in \mathcal {R}} \left \| \mathbf {C_{\text {Up}}}(\mathbf {r}) - \mathbf {C}_{\text {gt}}(\mathbf {r}) \right \|_2^2 $$
++    where $\mathbf{C}_{\text{Inp}}$ is rendered from an inpainted grid and $\mathbf{C}_{\text{Up}}$ from an up-sampled grid [S2].
++
++*   **Saturation-Masked LDR:**
++    $$ \mathcal{L}_{\text{recon}}=\frac {1}{|\mathcal {R}|} \sum _{\mathbf {r} \in \mathcal {R}} M_i(\mathbf {r}) \|I_i\left (\mathrm {\Pi }_i(\mathbf {r})\right ) -\mathcal{T} \left (\hat {C}(\mathbf {r})\right )\|_{2}^{2} $$
++    where $\Pi_i$ is camera projection, $M_i$ is a saturation mask, and $\mathcal{T}$ is tone mapping [S1].
++
++*   **Pyramid + SSIM:**
++    $$ \mathcal{L} = L_2(\text{pyramid}(\hat{I}), \text{pyramid}(I)) + (1 - \text{SSIM}(\hat{I}, I)) $$
++    where $\text{pyramid}$ denotes a Gaussian pyramid [S6].
++
++*   **LD-SSIM:**
++    Used in combination with L1: $\mathcal{L} = (1 - \lambda)\mathcal{L}_1 + \lambda\mathcal{L}_{\text{D-SSIM}}$ [S3, S7].
++
++#### 2. Regularization Terms
++Specific regularizers are applied based on the representation:
++
++*   **Total Variation (TV) Loss:**
++    Encourages spatial smoothness. For voxels:
++    $$ \mathcal{L}_{\text{TV}}=\frac {1}{|\mathcal {V}|} \sum _{\mathbf {v} \in \mathcal {V}, d \in [D]} \sqrt {\Delta _{x}^{2}(\mathbf {v}, d)+\Delta _{y}^{2}(\mathbf {v}, d)+\Delta _{z}^{2}(\mathbf {v}, d) +\epsilon } $$
++    where $\Delta$ is the difference between successive voxels along axes [S1]. Applied to opacity $\sigma$ and SH coefficients separately [S1]. Also used for density $\mathcal{L}_{\text{tv}}(\mathbf{V}_{\sigma}^{\text{Can}})$, flow $\mathcal{L}_{\text{tv}}(\mathbf{V}_{\text{flow}}^t)$, and depth $\mathcal{L}_{\text{tv}}(\mathbf{D})$ [S2].
++
++*   **Smoothness Loss (CRF):**
++    Ensures physically appropriate Camera Response Functions (CRF):
++    $$ \mathcal{L}_{\text{smooth}}=\sum _{i=1}^N \sum _{e \in [0,1]} g_i^{\prime \prime }(e)^{2} $$
++    where $g_i''(e)$ is the second-order derivative of the CRF $g_i$ [S1].
++
++*   **Eikonal Loss (SDF):**
++    Enforces unit gradient magnitude for valid SDF:
++    $$ \mathcal{L}_{\text{eikonal}} = \| \nabla_x S - 1 \|_2^2 $$
++    [S6].
++
++*   **Size/Compactness Regularization (Gaussians):**
++    *   **Volume Term:** Penalizes oversized primitives by the product of scale axes:
++        $$ \mathcal{L}_{\text{vol}} = \frac{1}{|G|} \sum_i \prod_{j=1}^3 s_{i,j} $$
++        [S7].
++    *   **Opacity Term:** Drives redundant Gaussians to zero:
++        $$ \mathcal{L}_{\text{op}} = \frac{1}{|G|} \sum_i \alpha_i $$
++        [S7].
++    *   **Scaling Regularization:** Prevents long, thin Gaussians:
++        $$ \mathcal{L}_{\text{scaling}}(i) = \begin{cases} |\hat{s}_i|, & \hat{s}_i > \max(T_s, T_r \tilde{s}_i) \\ 0, & \text{otherwise} \end{cases} $$
++        where $\hat{s}_i$ is max scaling, $\tilde{s}_i$ is min scaling, $T_s$ is length threshold, $T_r$ is thinness ratio [S5, unofficial].
++    *   **Triangle Size:** Encourages larger triangles in triangle splatting:
++        $$ \mathcal{L}_s = 2 \| (v_1 - v_0) \times (v_2 - v_0) \|^{-1} $$
++        [S3].
++
++*   **Other Regularizers:**
++    *   **Opacity Loss ($\mathcal{L}_0$):** [S3].
++    *   **Distortion Loss ($\mathcal{L}_d$):** [S3].
++    *   **Normal Loss ($\mathcal{L}_n$):** [S3].
++    *   **Point Color Supervision ($\mathcal{L}_{\text{ptc}}$):** Directly supervises sampled point colors [S2].
++    *   **Background Entropy ($\mathcal{L}_{\text{bg}}$):** Encourages density concentration on foreground/background [S2].
++    *   **Flow Loss ($\mathcal{L}_{\text{flow}}$):** L1 norm of motion vectors in canonical space [S2].
++    *   **Inpaint Diff ($\mathcal{L}_{\text{vdiff}}$):** L1 norm of difference between inpainted and upsampled grids [S2].
++    *   **Roughness Range Loss:** Encourages roughness $\alpha < 0.5$ [S6].
+ 
+ ### Parameters
+-- **$\lambda_{\text{TV}, \sigma}$**: TV weighting for opacity. Typical value: $5 \times 10^{-4}$ [S1].
+-- **$\lambda_{\text{TV}, \text{SH}}$**: TV weighting for SH coefficients. Typical value: $1 \times 10^{-2}$ [S1].
+-- **$\lambda_{\text{smooth}}$**: Smoothness weighting. Typical value: $1 \times 10^{-3}$ [S1].
+-- **$\lambda$**: Weight for D-SSIM term [S3].
+-- **$\beta_1, \beta_2, \beta_3, \beta_4$**: Weights for opacity, distortion, normal, and size regularization respectively [S3].
+-- **$w_1 \dots w_7$**: Weights balancing components in dynamic voxel loss [S2].
+-- **$\lambda_1, \lambda_2$**: Loss weights for Eikonal and roughness terms [S6].
+-- **$\lambda_D, \lambda_s, \lambda_o$**: Weights for D-SSIM, volume, and opacity terms in compact 3DGS [S7].
+-- **$T_s, T_r$**: Thresholds for length and thinness ratio in scaling regularization [S5, unofficial].
+-
+-### Edge Cases and Pitfalls
+-- **Saturation**: In LDR reconstruction, saturation masks $M_i(\mathbf{r})$ must be correctly computed to avoid penalizing clipped pixels [S1].
+-- **Numerical Stability**: The size regularization $\mathcal{L}_s$ involves an inverse norm; degenerate triangles (zero area) can cause division by zero [S3]. A small epsilon or clamping is required [G].
+-- **SDF Validity**: The Eikonal loss requires the SDF gradient to be close to 1; improper initialization or learning rates can lead to invalid SDFs [S6].
+-- **Gaussian Scaling**: The scaling regularization in [S5, unofficial] applies only when max scaling is both long and thin; incorrect thresholding can fail to prevent elongated artifacts [S5, unofficial].
++*   **$\lambda_{\text{TV, SH}}$:** TV weight for SH coefficients. Typical: $1 \times 10^{-2}$ [S1].
++*   **$\lambda_{\text{TV, } \sigma}$:** TV weight for opacity. Typical: $5 \times 10^{-4}$ [S1].
++*   **$\lambda_{\text{smooth}}$:** Smoothness weight. Typical: $1 \times 10^{-3}$ [S1].
++*   **$\lambda_D$:** D-SSIM weight. Typical: $0.2$ [S7].
++*   **$\lambda_s, \lambda_o$:** Volume and opacity regularization weights. Typical: $0.01$ [S7].
++*   **$\lambda_1, \lambda_2$:** Weights for Eikonal and Roughness losses [S6].
++*   **$w_1 \dots w_7$:** Balancing weights for dynamic scene components [S2].
++*   **$\beta_1 \dots \beta_4$:** Weights for opacity, distortion, normal, and size regularization [S3].
++*   **$T_s, T_r$:** Thresholds for scaling regularization [S5, unofficial].
++
++### Pseudocode
++```python
++def compute_composite_loss(rendered_img, gt_img, scene_params, config):
++    """
++    Computes the total composite loss.
++    rendered_img: Tensor of shape (H, W, 3) or (B, H, W, 3)
++    gt_img: Tensor of shape (H, W, 3)
++    scene_params: Dict containing relevant fields (sigma, sh, scales, opacity, sdf, etc.)
++    config: Dict containing hyperparameters (lambda_tv, lambda_smooth, etc.)
++    """
++    loss = 0.0
++    
++    # 1. Photometric Loss
++    # Select variant based on config or scene type
++    if config.get('use_perceptual'):
++        # L2 + VGG Perceptual
++        l_rgb = mse(rendered_img, gt_img) + perceptual_loss(rendered_img, gt_img)
++    elif config.get('use_ssim'):
++        # L2 on Pyramids + SSIM
++        l_rgb = l2_pyramid(rendered_img, gt_img) + (1.0 - ssim(rendered_img, gt_img))
++    elif config.get('use_ld_ss'):
++        # L1 + D-SSIM
++        l_rgb = l1_loss(rendered_img, gt_img) + config['lambda_d'] * d_ssir_loss(rendered_img, gt_img)
++    else:
++        # Standard MSE
++        l_rgb = mse(rendered_img, gt_img)
++        
++    loss += l_rgb
++    
++    # 2. Regularization Terms (Conditional on scene representation)
++    
++    # Total Variation on Opacity/Features
++    if 'sigma' in scene_params:
++        tv_sigma = total_variation(scene_params['sigma'])
++        loss += config['lambda_tv_sigma'] * tv_sigma
++        
++    if 'sh_coeffs' in scene_params:
++        tv_sh = total_variation(scene_params['sh_coeffs'])
++        loss += config['lambda_tv_sh'] * tv_sh
++        
++    # Smoothness for CRF (if applicable)
++    if 'crf' in scene_params:
++        crf_smooth = sum(second_derivative(crf) ** 2 for crf in scene_params['crf'])
++        loss += config['lambda_smooth'] * crf_smooth
++        
++    # SDF Specific Regularizers
++    if 'sdf' in scene_params:
++        grad_sdf = gradient(scene_params['sdf'])
++        eikonal = l2_norm(grad_sdf - 1.0)
++        loss += config['lambda_1'] * eikonal
++        
++        # Roughness constraint (if material params exist)
++        if 'roughness' in scene_params:
++            roughness = scene_params['roughness']
++            # Encourage roughness < 0.5 (specific formula not provided, assumed hinge or soft constraint)
++            roughness_loss = max(0, roughness - 0.5) 
++            loss += config['lambda_2'] * roughness_loss
++
++    # Gaussian Specific Regularizers
++    if 'gaussians' in scene_params:
++        scales = scene_params['scales'] # Shape (N, 3)
++        opacities = scene_params['opacity'] # Shape (N,)
++        
++        # Volume term (product of axes)
++        vol_term = mean(product(scales, axis=1))
++        loss += config['lambda_s'] * vol_term
++        
++        # Opacity term
++        op_term = mean(opacities)
++        loss += config['lambda_o'] * op_term
++        
++        # Scaling regularization (prevent long/thin)
++        max_scales = max(scales, axis=1)
++        min_scales = min(scales, axis=1)
++        scaling_mask = max_scales > max(config['Ts'], config['Tr'] * min_scales)
++        scaling_loss = mean(max_scales * scaling_mask)
++        loss += config['lambda_scaling'] * scaling_loss
++
++    # Dynamic Scene Regularizers
++    if 'flow' in scene_params:
++        flow_loss = l1_norm(scene_params['flow'])
++        loss += config['w_flow'] * flow_loss
++        
++    if 'depth' in scene_params:
++        depth_tv = total_variation(scene_params['depth'])
++        loss += config['w_7'] * depth_tv
++
++    return loss
++
++def total_variation(grid):
++    """Computes L1 total variation over a 3D grid."""
++    # Differences along x, y, z axes
++    dx = grid[1:, :, :] - grid[:-1, :, :]
++    dy = grid[:, 1:, :] - grid[:, :-1, :]
++    dz = grid[:, :, 1:] - grid[:, :, :-1]
++    # Sum of absolute differences (or sqrt of sum of squares for L2-TV)
++    # Note: Source [S1] uses sqrt(sum of squares) which is L2-TV magnitude
++    return mean(sqrt(dx**2 + dy**2 + dz**2 + epsilon))
++```
+ 
+ ## Subtopics
+@@ -149,23 +204,21 @@
+ 
+ ### Scaling and Background Mixing Regularization
+-This variant augments the photometric loss with a scaling regularization term to prevent Gaussians from growing long and thin, particularly in monocular settings [S5, unofficial]. It also employs background mixing, where a random background color is generated every iteration to mix with the rendered image and ground truth, providing silhouette cues [S5, unofficial]. The scaling loss $\mathcal{L}_{\text{scaling}}(i)$ is non-zero only when the max scaling $\hat{s}_i$ exceeds a length threshold $T_s$ and a thinness ratio $T_r$ times the min scaling $\tilde{s}_i$ [S5, unofficial].
++This variant augments the photometric loss with a scaling regularization term to prevent Gaussians from growing long and thin, which is critical for monocular video reconstruction with limited viewing angles [S5, unofficial]. It also employs background mixing, where a random background color is generated every iteration to mix with the rendered image and ground truth to provide silhouette cues [S5, unofficial]. The scaling loss is applied only when the max scaling is both long (larger than $T_s$) and thin (larger than $T_r$ times the min scaling) [S5, unofficial].
+ 
+ ### Inverse Rendering Loss Function
+-This variant is used for optimizing neural SDF and material parameters from multi-view photometric images [S6]. It combines image fidelity (L2 on Gaussian pyramids), structural similarity (SSIM), SDF validity (Eikonal loss), and material constraints (roughness range loss) [S6]. It differs from standard photometric losses by explicitly enforcing geometric priors (Eikonal) and material plausibility [S6].
++This variant is used to optimize neural SDF and material parameters from multi-view photometric images. It combines image fidelity (L2 on Gaussian pyramids + SSIM), SDF validity (Eikonal loss), and material constraints (Roughness Range Loss) [S6]. It differs from standard volume rendering losses by explicitly enforcing the gradient magnitude of the SDF to be 1 and constraining material roughness [S6].
+ 
+ ### Compactness-Regularized Objective
+-This variant augments the standard 3DGS photometric loss with two lightweight compactness terms: a volume term (product of scale axes) and an opacity term (L1 on opacity) [S7]. The volume term penalizes oversized primitives more sharply than their sum, and the opacity term drives redundant Gaussians below the prune threshold [S7]. It replaces the L1 penalty on scale axes used in 3D-GS-MCMC with this volume term [S7].
++This variant augments the standard 3DGS photometric loss with two lightweight compactness terms: a volume term (product of scale axes) and an opacity term (L1 on opacity) [S7]. It replaces the L1 penalty on scale axes (used in 3D-GS-MCMC) with a volume term, which penalizes oversized primitives more sharply than their sum [S7]. The volume term discourages oversized Gaussians, and the opacity term drives redundant Gaussians below the prune threshold [S7].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Depends on the number of rays $|\mathcal{R}|$, voxels $|\mathcal{V}|$, or Gaussians $|G|$. Total Variation terms add a constant factor per voxel/Gaussian for neighbor comparisons [S1, S2, S7].
+-- **Memory Complexity**: Requires storing gradients for all parameters (opacity, SH, scales, SDF values) [S1, S3, S6, S7].
+-- **Performance**: Regularization terms improve convergence and reduce artifacts (e.g., floating geometry, noise) but increase training time [S4, S7].
+-- **Strengths**: Robust to noise, prevents overfitting, enforces geometric consistency [S1, S3, S6].
+-- **Limitations**: Hyperparameter tuning is critical; poor weights can lead to under-regularization (artifacts) or over-regularization (blur) [S1, S3, S6].
+-- **When to Use**: When ground-truth 3D geometry is unavailable or noisy, or when the representation is prone to artifacts (e.g., floating Gaussians, invalid SDFs) [S1, S3, S6, S7].
+-- **When Not to Use**: When computational resources are extremely limited and regularization overhead is prohibitive, or when ground-truth geometry is highly accurate and sufficient [S1, S6].
++*   **Time Complexity:** Depends on the number of sampled rays $|\mathcal{R}|$ and the complexity of the regularizers. TV loss requires neighborhood access ($O(|\mathcal{V}|)$ for voxels). Perceptual loss adds VGG inference cost.
++*   **Memory Complexity:** Requires storing gradients for all regularized parameters (opacity, SH, scales, SDF, etc.).
++*   **Strengths:** Stabilizes training in ill-posed scenarios (e.g., dynamic scenes, monocular inputs). Prevents artifacts like noise, floating geometry, and overly large primitives.
++*   **Limitations:** Hyperparameter tuning ($\lambda$ values) is critical and scene-dependent. Over-regularization can blur details or suppress valid high-frequency features.
++*   **When to use:** When photometric loss alone leads to unstable optimization, noisy reconstructions, or physically implausible structures. Essential for dynamic scenes, inverse rendering, and compact representations.
+ 
+ ## Background
+-The concept of combining photometric and regularization losses originated in early neural rendering and inverse rendering works. The use of Total Variation for volumetric regularization is common in sparse reconstruction [S1, S2]. The Eikonal loss for SDFs was introduced in [10, 12] and cited in [S6]. The integration of perceptual losses for neural radiance fields was highlighted in [S4]. The compactness regularization for 3DGS was proposed in [S7] building on 3D-GS-MCMC [22]. The MPF objective is described in [S1].
++The concept of combining photometric and regularization losses is fundamental to differentiable rendering. Early works like NeRF used simple L2 losses. Subsequent works introduced SSIM [S6], perceptual losses [S4], and various regularizers. Total variation regularization for radiance fields was popularized by RegNeRF [S2, citing RegNeRF]. Compactness regularization for 3DGS was introduced in 3D-GS-MCMC [S7, citing 3D-GS-MCMC] and refined in DART-3DGS [S7]. Inverse rendering losses combining SDF and material constraints were developed in IRON [S6].
+ 
+ ## Sources

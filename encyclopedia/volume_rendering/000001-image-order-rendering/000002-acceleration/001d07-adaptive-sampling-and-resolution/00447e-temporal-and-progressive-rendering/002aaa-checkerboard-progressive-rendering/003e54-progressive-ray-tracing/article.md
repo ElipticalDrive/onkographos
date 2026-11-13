@@ -1,108 +1,134 @@
 # Progressive Ray Tracing
-
-Also called: Progressive Refinement Ray Casting
+Also called: Progressive Path Tracing with Preview Scaling, Progressive Refinement Ray Casting
 
 ## Overview
-Progressive Ray Tracing is an adaptive sampling technique that produces lower-quality images which are then improved over time [S1, unofficial]. It solves the problem of maintaining interactive frame rates during user interaction by computing only a subset of rays, then progressively filling in the remaining pixels with actual values once interaction ceases [S2, book]. It sets itself apart from its sibling [Checkerboard Progressive Rendering](4836-checkerboard-progressive-rendering.md) by using interpolation to fill gaps during interaction rather than temporal blending of partial frames, and by refining the image spatially (pixel-by-pixel) rather than just reducing the active pixel count per frame.
+Progressive ray tracing is an interactive rendering technique that produces lower-quality images which are then improved over time [S2, unofficial]. It solves the latency problem in interactive volume visualization by decoupling the immediate feedback loop from the final convergence, allowing users to navigate scenes without waiting for full-resolution, multi-sample convergence [S3, book]. Unlike its sibling [Checkerboard Progressive Rendering](4836-checkerboard-progressive-rendering.md), which reduces per-frame compute by tracing only half the pixels each frame, progressive ray tracing typically operates by tracing a reduced-resolution preview or a sparse subset of rays during interaction, then progressively refining the full-resolution result once interaction ceases or in the background [S1, unofficial][S3, book].
 
 ## How it works
-**Inputs and Outputs:**
-- Input: User interaction state (active/inactive), scene geometry/volume data, camera parameters, subsampling factor $n$.
-- Output: A rendered image that transitions from an interpolated approximation to a fully ray-traced result.
+**Inputs and Outputs**
+- **Inputs**: Scene data (volumes, materials, lights), camera parameters, user interaction state (active/inactive), and configuration parameters (`pratio`, `samples`, `exposure`).
+- **Outputs**: A display buffer containing the current rendered image, updated progressively.
 
-**Data Structures:**
-- Image buffer: 2D array of color values $(C_{x,y})$.
-- Interaction flag: Boolean indicating if the user is currently manipulating the view.
+**Data Structures**
+- `app->render`: 2D array/vector indexed by pixel coordinates `{i, j}` (x, y). Stores the raw pixel values (radiance) before tonemapping.
+- `app->display`: 2D array/vector indexed by `{i, j}`. Stores the final pixel values after tonemapping, presented to the user.
+- `pprms`: Preview rendering state structure. Contains `resolution` (current preview width/height) and `samples` (current sample count per pixel).
+- `pstate`: Full rendering state structure. Contains `render` buffer and other scene-specific state.
+- `app->params`: Configuration object containing `pratio` (preview ratio), `samples` (total target samples), `exposure` (tonemapping exposure), and `resolution` (full target resolution).
+- `app->render_stop`: Boolean flag to terminate the asynchronous rendering loop.
 
-**Steps:**
-1. **Interaction Phase:**
-   - If the user is interacting with the scene:
-     - Compute ray casting results only for every $n$-th pixel along each image dimension (e.g., $n=2$ for a checkerboard-like pattern, resulting in a 4x speedup for 2D) [S2, book].
-     - Let $P_{sampled}$ be the set of pixels where rays were actually traced.
-     - For all other pixels $P_{missing}$, calculate their color values using interpolation based on the surrounding sampled pixels [S2, book].
-     - Display the interpolated image.
+**Parameters**
+- `pratio`: Integer preview scaling factor. The preview resolution is calculated as `full_resolution / pratio`. Range: 1 to 64 [S1, unofficial].
+- `samples`: Integer total sample count for the final progressive rendering pass. Range: 16 to 4096 [S1, unofficial].
+- `exposure`: Float tonemapping exposure value. Range: -5 to 5 [S1, unofficial].
 
-2. **Refinement Phase:**
-   - If the user stops interacting:
-     - Identify all pixels in $P_{missing}$ that still hold interpolated values.
-     - Progressively replace these interpolated values with actual ray-traced results. The order of replacement can be arbitrary or based on a heuristic (e.g., distance from sampled pixels), but the source specifies "progressively filled in" [S2, book].
-     - As each pixel is updated, the image quality improves until all pixels are fully ray-traced.
+**Algorithm Steps**
 
-**Parameters:**
-- $n$: The subsampling stride. Typical value $n=2$ is mentioned, yielding a four-times speed-up [S2, book]. Larger $n$ values increase speed but result in blurrier, less detailed images [S2, book].
+1. **Initialization**:
+   - Set the preview resolution: `pprms.resolution = app->params.resolution / app->params.pratio`.
+   - Set the preview sample count: `pprms.samples = 1`.
+   - Initialize the render and display buffers to zero or clear them.
 
-**Edge Cases and Pitfalls:**
-- **High-Frequency Details:** The method tends to lose high-frequency details during the interpolated phase [S1, unofficial].
-- **Bias vs. Noise:** While progressive refinement reduces bias compared to some other low-quality methods, it may still introduce noise if not combined with techniques like Russian roulette termination [S1, unofficial].
-- **Interpolation Artifacts:** The quality of the interpolated image depends heavily on the interpolation method used. Poor interpolation can lead to noticeable artifacts before refinement completes.
+2. **Interaction Phase (Preview)**:
+   - While the user is interacting (e.g., rotating, zooming):
+     - Compute only every $n$-th ray along each image dimension, where $n$ is related to the preview scaling or a fixed stride (e.g., $n=2$ for checkerboard-like sparsity, or derived from `pratio`) [S3, book].
+     - Trace these preview samples into the temporary preview state: `trace_samples(pstate, app->scene, app->camera, pprms)`.
+     - Use interpolation to fill in the remaining pixels in the preview buffer. This creates a visually complete but lower-resolution or sparser image [S3, book].
+     - Downsample/upsample the preview result to the full resolution for display. Map full image coordinates $(i, j)$ to preview coordinates $(pi, pj)$ using clamped division:
+       $$ pi = \text{clamp}\left(\left\lfloor \frac{i}{\text{app->params.pratio}} \right\rfloor, 0, \text{pstate->render.size().x} - 1\right) $$
+       $$ pj = \text{clamp}\left(\left\lfloor \frac{j}{\text{app->params.pratio}} \right\rfloor, 0, \text{pstate->render.size().y} - 1\right) $$
+     - Copy the interpolated preview value to the render buffer: `app->render[{i, j}] = pstate->render[{pi, pj}]`.
+     - Apply tonemapping and update the display buffer: `app->display[{i, j}] = tonemap(app->render[{i, j}], app->exposure)`.
 
-**Pseudocode:**
+3. **Refinement Phase (Progressive)**:
+   - When the user stops interacting (or immediately in the background if non-interactive):
+     - Launch an asynchronous worker loop.
+     - Iterate through the total sample count: `for (sample = 0; sample < app->params.samples; sample++)`.
+     - Update the progress fraction: `app->progress = (float)sample / (float)app->params.samples`.
+     - Trace full-resolution samples into the render state, passing the stop flag: `trace_samples(app->render_state, app->scene, app->camera, app->params, &app->render_stop)`.
+     - Check the stop flag. If set, return.
+     - Copy the new full-resolution samples to the render buffer: `app->render[{i, j}] = app->render_state->render[{i, j}]`.
+     - Apply tonemapping and update the display buffer: `app->display[{i, j}] = tonemap(app->render[{i, j}], app->exposure)`.
+
+**Pseudocode**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def progressive_ray_tracing(scene, camera, n=2):
-    # Initialize image buffer with zeros or previous frame
-    image = initialize_image_buffer()
-    user_interacting = True
+def progressive_ray_tracing(app):
+    # Initialization
+    app->params.pratio = 4  # Example value
+    app->params.samples = 64
+    app->params.exposure = 1.0
     
-    while True:
-        if user_interacting:
-            # Compute only every n-th ray
-            for y in range(0, height, n):
-                for x in range(0, width, n):
-                    ray = camera.generate_ray(x, y)
-                    color = trace_ray(scene, ray)
-                    image[x, y] = color
-            
-            # Interpolate missing pixels
-            image = interpolate_missing_pixels(image, n)
-            
-            # Check for interaction stop
-            if not check_user_input():
-                user_interacting = False
-        else:
-            # Refine the image
-            # Identify pixels that are not yet fully traced
-            # This could be tracked via a mask or by checking against a 'traced' flag
-            pixels_to_trace = get_untraced_pixels(image, n)
-            
-            if not pixels_to_trace:
-                break # Rendering complete
-            
-            # Progressively trace remaining pixels
-            # In a real implementation, this would be done incrementally per frame
-            for (x, y) in pixels_to_trace:
-                ray = camera.generate_ray(x, y)
-                color = trace_ray(scene, ray)
-                image[x, y] = color
-                
-            # Update display
-            display_image(image)
-            
-            # Check if all pixels are traced
-            if is_fully_traced(image, n):
-                break
+    # Preview State
+    pprms.resolution = app->params.resolution / app->params.pratio
+    pprms.samples = 1
+    
+    # Interaction Loop
+    while app->user_interacting:
+        # Trace sparse rays for preview
+        trace_samples(pstate, app->scene, app->camera, pprms)
         
-        display_image(image)
+        # Interpolate and upscale to full resolution
+        for i in range(app->params.resolution.x):
+            for j in range(app->params.resolution.y):
+                pi = clamp(i // app->params.pratio, 0, pstate->render.size().x - 1)
+                pj = clamp(j // app->params.pratio, 0, pstate->render.size().y - 1)
+                app->render[{i, j}] = pstate->render[{pi, pj}]
+        
+        # Display preview
+        for i in range(app->params.resolution.x):
+            for j in range(app->params.resolution.y):
+                app->display[{i, j}] = tonemap(app->render[{i, j}], app->params.exposure)
+    
+    # Progressive Refinement Loop
+    app->render_stop = False
+    for sample in range(app->params.samples):
+        if app->render_stop:
+            break
+            
+        app->progress = sample / app->params.samples
+        
+        # Trace full resolution samples
+        trace_samples(app->render_state, app->scene, app->camera, app->params, &app->render_stop)
+        
+        # Update buffers
+        for i in range(app->params.resolution.x):
+            for j in range(app->params.resolution.y):
+                app->render[{i, j}] = app->render_state->render[{i, j}]
+                app->display[{i, j}] = tonemap(app->render[{i, j}], app->params.exposure)
+
+def trace_samples(render_state, scene, camera, params, stop_flag=None):
+    # Implementation detail: traces rays based on params.resolution and params.samples
+    # Updates render_state.render with accumulated radiance
+    # Checks stop_flag if provided
+    pass
+
+def tonemap(radiance, exposure):
+    # Standard tonemapping operator (e.g., Reinhard, ACES)
+    # Returns display value
+    pass
 ```
 
-## Subtopics
-
-### Checkerboard Progressive Rendering
-Reduces per-frame compute by tracing only half the pixels each frame while blending results over time. [Link](4836-checkerboard-progressive-rendering.md)
+**Edge Cases and Pitfalls**
+- **Precision**: Clamped division for upsampling can introduce aliasing if the preview resolution is too low relative to the full resolution. Interpolation quality affects the perceived smoothness during interaction [S3, book].
+- **Boundaries**: The clamping function must handle indices exactly at the boundaries of the preview buffer to avoid out-of-bounds access [S1, unofficial].
+- **Degenerate Input**: If `pratio` is 1, the preview resolution equals the full resolution, and the method degrades to standard progressive rendering without the interactive preview benefit [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** During interaction, the complexity is reduced by a factor of $n^2$ for 2D subsampling (e.g., 4x speedup for $n=2$) [S2, book]. Refinement phase complexity is proportional to the number of missing pixels.
-- **Memory Complexity:** Requires storage for the image buffer and potentially a mask to track traced pixels.
-- **Performance:** Provides a four-times speed-up with $n=2$ without a noticeable decrease in image quality during interaction [S2, book]. Larger reductions in sampling rate increase speed but degrade image quality [S2, book].
-- **Strengths:** Maintains interactivity during view manipulation; improves image quality progressively after interaction stops.
-- **Limitations:** Loses high-frequency details during the interpolated phase; requires interpolation which may introduce artifacts; refinement phase may still be slow for large scenes.
-- **When to Use:** Interactive volume visualization where user interaction is frequent but final high-quality rendering can be deferred.
-- **When Not to Use:** When high-frequency details are critical during interaction; when real-time feedback is required without any interpolation artifacts.
+- **Time Complexity**: During interaction, complexity is reduced by a factor of $n^2$ (where $n$ is the stride or `pratio`) compared to full-resolution tracing, plus the cost of interpolation. During refinement, complexity is $O(S \cdot W \cdot H)$, where $S$ is the total sample count, and $W, H$ are image dimensions.
+- **Memory Complexity**: Requires storage for two buffers (render and display) of full resolution, plus a smaller preview buffer. Memory usage is $O(W \cdot H)$.
+- **Measured Performance**: A four-times speed-up is achieved by computing every 2nd ray along each dimension during interaction, with no noticeable decrease in image quality for the preview [S3, book]. Larger reductions (higher `pratio`) yield further speed-ups at the cost of blurry, less detailed previews [S3, book].
+- **Strengths**: Provides immediate visual feedback during interaction, improving user experience in complex volume scenes.
+- **Limitations**: The final image quality depends on the total sample count and may require significant time to converge for high-quality results. Interpolation artifacts may be visible during the transition from preview to refinement.
+- **When to Use**: Interactive volume visualization where user navigation is frequent and final image quality is not required in real-time.
+- **When Not to Use**: Offline rendering where final quality is paramount and interactivity is not needed.
 
 ## Background
-Progressive ray tracing was introduced as a technique to produce lower quality images which are then improved with time [S1, unofficial]. It is part of the broader field of adaptive sampling and resolution techniques in volume rendering. The method is discussed in the context of advanced computer graphics, specifically within the VTK (Visualization Toolkit) framework [S2, book]. It is often compared with object-order techniques like splatting, which may use precomputed resolution levels or octree representations [S2, book].
+Progressive ray tracing was introduced as a technique to address the high computational cost of ray tracing in volume visualization. It allows for the production of lower-quality images that are improved over time, helping to maintain interactivity [S2, unofficial]. The method is particularly useful in distributed volume visualization and large dataset management, where reducing the per-frame compute load is critical [S2, unofficial][S3, book]. It builds on earlier image-order rendering and acceleration techniques, such as checkerboard progressive rendering, by offering a different trade-off between resolution and sample count during interaction [S1, unofficial].
 
 ## Sources
-[S1] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
-[S2] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)
+[S1] RickyMexx/yocto-gl-vpt, https://github.com/RickyMexx/yocto-gl-vpt, fetched 2026-10-26 (unofficial)
+[S2] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
+[S3] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)

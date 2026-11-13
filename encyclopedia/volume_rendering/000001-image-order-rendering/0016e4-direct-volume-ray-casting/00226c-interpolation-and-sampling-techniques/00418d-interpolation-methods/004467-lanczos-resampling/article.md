@@ -3,137 +3,126 @@
 Also called: Lanczos kernel
 
 ## Overview
-Lanczos resampling is an interpolation technique used to resample (downsample or upsample) volumetric data by replacing each selected sample with a translated copy of the Lanczos kernel, which is a limited Sinc function [S1, unofficial]. It sets itself apart from linear or cubic interpolation by offering a sharper frequency response with reduced aliasing, at the cost of a wider support radius and higher computational complexity. It builds on [Interpolation Methods](10526-interpolation-methods.md).
+Lanczos resampling is an interpolation technique used to resample (downsample or upsample) volumetric data by replacing each selected sample with a translated copy of the Lanczos kernel, which is a limited Sinc function [S1, unofficial]. It is chosen when higher fidelity than trilinear interpolation is required, offering a balance between sharpness and aliasing reduction by using a windowed sinc function with a finite support [S1, unofficial]. Unlike [Nearest Neighbor Sampling](11694-nearest-neighbor-sampling.md) which introduces blockiness, or [Volumetric Ray Casting with Trilinear Interpolation](13406-volumetric-ray-casting-with-trilinear-interpolation.md) which is computationally cheaper but blurrier, Lanczos provides a sharper reconstruction at the cost of increased computational complexity and memory bandwidth [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A discrete volumetric dataset $V$ defined on a grid, and a query position $\mathbf{p}$ in continuous voxel space.
-*   **Output:** A scalar value $V(\mathbf{p})$ representing the interpolated intensity at $\mathbf{p}$.
+*   Input: A discrete volumetric dataset $V_i$ at grid positions $\mathbf{p}_i$, a query position $\mathbf{p}$, and a Lanczos order parameter $a$ (typically an integer $\ge 2$).
+*   Output: The interpolated scalar value $V(\mathbf{p})$.
 
 **Data Structures:**
-The method relies on the Lanczos kernel function $L(x)$. No auxiliary data structures are required beyond the input volume and the kernel parameters.
+*   The kernel is defined by a single parameter $a$, representing the number of lobes (support radius).
+*   The `sinc` function is defined as $\text{sinc}(x) = \frac{\sin(\pi x)}{\pi x}$ for $x \neq 0$, and $1$ for $x = 0$.
 
-**Kernel Formula:**
-The Lanczos kernel $L(x)$ is defined as a windowed sinc function:
+**Formula:**
+The weight $w_i$ for a sample at distance $x = |\mathbf{p} - \mathbf{p}_i|$ is given by:
 $$
 L(x) = \begin{cases} 
 \text{sinc}\left(\frac{\pi x}{a}\right) \text{sinc}(\pi x) & \text{if } |x| < a \\
 0 & \text{otherwise}
 \end{cases}
 $$
-Where:
-*   $x$ is the distance from the query point to the center of a neighboring voxel.
-*   $a$ is the Lanczos order (or aperture), determining the support radius. Typical values are integers $a \ge 2$ (e.g., $a=2$ or $a=3$) [S1, unofficial].
-*   $\text{sinc}(u)$ is the normalized sinc function: $\text{sinc}(u) = \frac{\sin(u)}{u}$ for $u \neq 0$, and $1$ for $u = 0$.
+The interpolated value is the sum of weights multiplied by sample values:
+$$
+V(\mathbf{p}) = \sum_{i} L(|\mathbf{p} - \mathbf{p}_i|) V_i
+$$
+where the sum is over all grid points $i$ within the support radius $a$ of $\mathbf{p}$ [S1, unofficial].
 
-**Algorithm Steps:**
-1.  **Determine Support:** Identify all voxel centers $\mathbf{c}_i$ within the support radius $a$ of the query point $\mathbf{p}$. The number of neighbors depends on the dimensionality and $a$. For 3D, this is a cube of side length $2a-1$.
-2.  **Calculate Weights:** For each neighbor $i$, compute the distance vector $\mathbf{d}_i = \mathbf{p} - \mathbf{c}_i$. Compute the weight $w_i$ by evaluating the kernel along each axis. For a 3D query, the weight is the product of the 1D kernel evaluations along each axis:
-    $$ w_i = L(d_{i,x}) \cdot L(d_{i,y}) \cdot L(d_{i,z}) $$
-    Where $d_{i,x}, d_{i,y}, d_{i,z}$ are the components of $\mathbf{d}_i$.
-3.  **Sum Contributions:** Compute the interpolated value:
-    $$ V(\mathbf{p}) = \sum_{i} w_i V_i $$
-    Where $V_i$ is the value at voxel center $\mathbf{c}_i$.
+**Parameters:**
+*   $a$ (Lanczos order): Determines the support width. Common values are $a=2$ or $a=3$. Higher $a$ increases sharpness but also computational cost and potential ringing artifacts [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def sinc(u):
-    """Normalized sinc function: sin(pi*u) / (pi*u)"""
-    if abs(u) < 1e-9:
-        return 1.0
-    return math.sin(math.pi * u) / (math.pi * u)
-
 def lanczos_kernel(x, a):
     """
-    Lanczos kernel of order a.
+    Computes the 1D Lanczos kernel value.
     x: distance from sample center
-    a: Lanczos order (aperture)
+    a: Lanczos order (support radius)
     """
     if abs(x) >= a:
         return 0.0
+    
+    # Define sinc function handling x=0 to avoid division by zero
+    def sinc(val):
+        if val == 0:
+            return 1.0
+        return sin(pi * val) / (pi * val)
+    
     return sinc(x / a) * sinc(x)
 
-def lanczos_resample(volume, query_point, a):
+def interpolate_lanczos_3d(volume, query_pos, a):
     """
-    Interpolate value at query_point using Lanczos resampling.
+    Performs 3D Lanczos interpolation.
     volume: 3D array of voxel values
-    query_point: tuple (x, y, z) in continuous voxel coordinates
-    a: Lanczos order (integer >= 2)
+    query_pos: (x, y, z) float coordinates in voxel space
+    a: Lanczos order
     """
-    qx, qy, qz = query_point
+    # Determine integer bounds of the support region
+    x, y, z = query_pos
+    x_min = floor(x - a)
+    x_max = ceil(x + a)
+    y_min = floor(y - a)
+    y_max = ceil(y + a)
+    z_min = floor(z - a)
+    z_max = ceil(z + a)
+    
     total_value = 0.0
-    total_weight = 0.0
     
-    # Determine bounds of the support cube
-    # The support extends from floor(q - a) + 1 to ceil(q + a) - 1
-    # However, since kernel is 0 at |x| >= a, we can iterate integer offsets
-    # from -floor(a-1) to floor(a-1) relative to the nearest integer coordinate?
-    # Safer: iterate all integer coordinates within distance a in each axis.
-    
-    min_x = math.floor(qx - a) + 1
-    max_x = math.ceil(qx + a) - 1
-    min_y = math.floor(qy - a) + 1
-    max_y = math.ceil(qy + a) - 1
-    min_z = math.floor(qz - a) + 1
-    max_z = math.ceil(qz + a) - 1
-    
-    for x in range(min_x, max_x + 1):
-        for y in range(min_y, max_y + 1):
-            for z in range(min_z, max_z + 1):
-                # Calculate distance from query point to voxel center
-                dx = qx - x
-                dy = qy - y
-                dz = qz - z
+    for i in range(x_min, x_max):
+        for j in range(y_min, y_max):
+            for k in range(z_min, z_max):
+                # Calculate distance from sample center (i, j, k) to query
+                dx = i - x
+                dy = j - y
+                dz = k - z
                 
-                # Calculate weight using separable kernel
-                w = lanczos_kernel(dx, a) * lanczos_kernel(dy, a) * lanczos_kernel(dz, a)
+                # Compute 3D weight as product of 1D kernels (separable property)
+                # Note: The formula L(x) in [S1, unofficial] is applied per axis
+                wx = lanczos_kernel(dx, a)
+                wy = lanczos_kernel(dy, a)
+                wz = lanczos_kernel(dz, a)
                 
-                if w != 0.0:
-                    # Get voxel value, assuming volume is indexed [x][y][z]
-                    # Note: Implementation must handle boundary checks if query is near edges
-                    val = volume[x][y][z]
-                    total_value += w * val
-                    total_weight += w
-    
-    # Normalize by sum of weights to handle edge cases or non-uniform sampling
-    if total_weight > 0:
-        return total_value / total_weight
-    else:
-        return 0.0
+                weight = wx * wy * wz
+                
+                # Get voxel value, handling boundary checks if necessary
+                voxel_val = volume[i, j, k]
+                
+                total_value += weight * voxel_val
+                
+    return total_value
 ```
 
-**Parameters:**
-*   **Lanczos Order ($a$):** Determines the width of the kernel. Common values are $a=2$ or $a=3$ [S1, unofficial]. Higher $a$ provides sharper results but increases computational cost.
-
 **Edge Cases and Pitfalls:**
-*   **Boundary Conditions:** The kernel is zero outside $|x| < a$. At volume boundaries, fewer neighbors contribute. Normalization by the sum of weights helps maintain intensity consistency [G].
-*   **Precision:** The sinc function involves division by zero at $x=0$. This must be handled explicitly as the limit is 1.
-*   **Computational Cost:** The support radius $a$ leads to $O(a^3)$ operations per sample in 3D.
+*   **Boundary Conditions:** The support radius $a$ may extend beyond the volume bounds. Samples outside the volume must be handled (e.g., clamped, mirrored, or treated as zero) [G].
+*   **Ringing Artifacts:** The sinc function's negative lobes can cause overshoot (ringing) near sharp edges. This is more pronounced with larger $a$ [S1, unofficial].
+*   **Computational Cost:** The number of samples accessed grows as $(2a)^3$. For $a=3$, 27 samples are needed per query, which is significantly more than trilinear (8 samples) [S1, unofficial].
 
 ## Subtopics
 
 ### High-Quality Resampling (3D Lanczos via 2D Targets)
-A technique to perform 3D Lanczos resampling on GPUs that lack native 3D render targets by decomposing the 3D filter into sequential 1D filters along the major axes, using 2D render targets and texture shifting [S2, unofficial].
-*   **Method:** For a Lanczos order of $N=3$:
-    1.  Use the 3D input texture six times, shifted each time by one voxel along the z-axis. Use two weighting textures for the six weights. Sum weighted input voxels and store the result in a $6 \times 6 \times 6$ intermediate output texture.
-    2.  Perform the same operation for the y-axis using the 6 previously generated textures, leading to six new intermediate output textures.
-    3.  Use these textures, each shifted by one pixel along the x-axis, leading to the final texture.
-*   **Parameters:** Lanczos Order $N$ determines the number of passes. For $N=3$, 43 passes are required ($36+6+1$). For $N=2$, 21 passes are required [S2, unofficial].
-*   **Pitfalls:** Hardware limitation: Native 3D render targets were not supported at the time of writing, necessitating the split-axis approach using multiple 2D targets and object batching [S2, unofficial].
+A technique to perform 3D Lanczos resampling on GPUs that lack native 3D render targets by decomposing the 3D filter into sequential 1D filters along the major axes, using 2D render targets and texture shifting [S2, unofficial]. This approach is necessary because native 3D render targets were not supported at the time of the source's writing [S2, unofficial].
+
+*   **Definition:** Decomposes the 3D Lanczos convolution into three passes (Z, Y, X) using intermediate 2D textures.
+*   **Steps (for N=3):**
+    1.  Use the 3D input texture six times, shifted each time by one voxel along the z-axis. Use two weighting textures for the six weights. Sum weighted input voxels and store in a $6 \times 6 \times 6$ intermediate output texture [S2, unofficial].
+    2.  Perform the same operation for the y-axis using the 6 previously generated textures, leading to six new intermediate output textures [S2, unofficial].
+    3.  Use these textures, each shifted by one pixel along the x-axis, leading to the final texture [S2, unofficial].
+*   **Parameters:** Lanczos Order $N$. For $N=3$, 43 passes are required ($36+6+1$). For $N=2$, 21 passes are required [S2, unofficial].
+*   **Pitfalls:** Hardware limitation regarding native 3D render targets necessitates this split-axis approach, increasing complexity and memory bandwidth usage due to multiple intermediate textures [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(a^3)$ per sample in 3D, where $a$ is the Lanczos order. For GPU implementations using the split-axis method, the complexity is proportional to the number of passes, which is $3N^2 - 3N + 1$ for order $N$ (e.g., 43 passes for $N=3$) [S2, unofficial].
-*   **Memory Complexity:** $O(1)$ auxiliary memory for CPU implementation. GPU split-axis implementation requires intermediate textures of size proportional to the output volume, specifically $N^3$ intermediate textures for the first stage [S2, unofficial].
-*   **Performance:** Offers higher quality (PSNR) than linear or cubic interpolation, suitable for medical image resampling [S1, unofficial]. However, it is computationally expensive due to the wide support and sinc function evaluation.
-*   **Strengths:** Sharp reconstruction, minimal aliasing, good frequency response.
-*   **Limitations:** High computational cost, ringing artifacts (Gibbs phenomenon) near sharp edges if not windowed properly (though Lanczos windowing mitigates this compared to pure sinc).
+*   **Time Complexity:** $O(a^3)$ per query, where $a$ is the Lanczos order. This is significantly higher than trilinear interpolation ($O(1)$ with constant 8 samples) [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ additional memory per query for standard implementation. The GPU variant requires $O(a^2)$ intermediate storage for the split-axis method [S2, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Provides sharper results than linear interpolation, reducing blurring artifacts. Good for high-quality volume visualization and preprocessing [S1, unofficial].
+*   **Limitations:** Computationally expensive due to the large support radius and multiple sample accesses. Prone to ringing artifacts [S1, unofficial]. The GPU split-axis implementation requires many passes and intermediate textures, which can be bandwidth-bound [S2, unofficial].
+*   **When to use:** When visual quality is critical and computational resources allow for higher sampling rates, such as in offline rendering or high-end medical image analysis [S1, unofficial].
+*   **When not to use:** In real-time applications with strict performance constraints, or when ringing artifacts are unacceptable without additional post-processing [S1, unofficial].
 
 ## Background
-Lanczos resampling is named after Cornelius Lanczos. It is used in various image and volume processing applications, including downsampling high-resolution medical images [S1, unofficial]. The technique is based on the Lanczos windowed-sinc function [S2, unofficial].
+Lanczos resampling originates from the work of Cornelis Lanczos on signal processing and numerical analysis. In the context of volume rendering, it has been applied to resample volumetric medical images to achieve high PSNR (Peak Signal-to-Noise Ratio) in compression and reconstruction tasks [S1, unofficial]. The technique leverages the properties of the windowed sinc function to provide a good approximation of the ideal low-pass filter while maintaining finite support [S1, unofficial]. The GPU-specific implementation for 3D resampling via 2D targets was developed to address hardware limitations in rendering pipelines [S2, unofficial].
 
 ## Sources
 [S1] Bournemouth University Research Online [BURO] - A Novel Implicit Neural Representation for Volume Data., https://eprints.bournemouth.ac.uk/38355/, fetched 2026-10-29 (unofficial)

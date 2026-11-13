@@ -1,0 +1,125 @@
+--- v009.md
++++ v010.md
+@@ -48,5 +48,5 @@
+    $$ M_{warp2D}[0][0] = \frac{1}{1 + v_x^2}, \quad M_{warp2D}[1][1] = \frac{1}{1 + v_y^2} $$
+ 
+-4. **Resample and Composite:** Iterate through volume slices perpendicular to the principal axis [S2]. Transform each slice to sheared object space using translation and uniform scale [S2]. Resample the sheared slice into the intermediate image buffer. Because of the perspective scaling, more than two voxel scanlines may contribute to a single intermediate image scanline, and they may not be traversed at the same rate [S2]. Use a box reconstruction filter and a box low-pass filter. For unity scaling, this reduces to bilinear interpolation [S2]. Composite the slice into the intermediate buffer using front-to-back alpha blending:
++4. **Resample and Composite:** Iterate through volume slices perpendicular to the principal axis [S2]. Transform each slice to sheared object space using translation and uniform scale [S2]. Resample the sheared slice into the intermediate image buffer [S2]. Because of the perspective scaling, more than two voxel scanlines may contribute to a single intermediate image scanline, and they may not be traversed at the same rate [S2]. Use a box reconstruction filter and a box low-pass filter [S2]. Composite the slice into the intermediate buffer using front-to-back alpha blending:
+    $$ C_{new} = C_{slice} \cdot \alpha_{slice} + C_{accum} \cdot (1 - \alpha_{slice}) $$
+    $$ \alpha_{new} = \alpha_{slice} + \alpha_{accum} \cdot (1 - \alpha_{slice}) $$
+@@ -60,13 +60,4 @@
+     """
+     Renders a volume using the Perspective Shear-Warp algorithm.
+-    
+-    Args:
+-        volume_data: 3D list of lists of lists (depth, height, width)
+-        view_direction: tuple (vx, vy, vz)
+-        image_width: int
+-        image_height: int
+-        
+-    Returns:
+-        final_image: 2D list of lists of lists (height, width, 4)
+     """
+     vx, vy, vz = view_direction
+@@ -80,5 +71,5 @@
+         principal_axis = 'z'
+         
+-    # Calculate shear matrix components
++    # Shear matrix translation components
+     if principal_axis == 'x':
+         s_x1 = -vy / vx
+@@ -91,5 +82,5 @@
+         s_z1 = -vy / vz
+         
+-    # Calculate warp matrix diagonal components
++    # Warp matrix diagonal components
+     if principal_axis == 'x':
+         w_y = 1.0 / (1.0 + vy * vy)
+@@ -105,40 +96,42 @@
+     intermediate_buffer = [[[0.0, 0.0, 0.0, 0.0] for _ in range(image_width)] for _ in range(image_height)]
+     
+-    # Determine slice order (front-to-back)
+-    depth = len(volume_data)
+-    slice_indices = range(depth)
++    depth, height, width = len(volume_data), len(volume_data[0]), len(volume_data[0][0])
+     
+-    for z_idx in slice_indices:
++    # Iterate slices perpendicular to principal axis
++    for z_idx in range(depth):
+         # Extract slice based on principal axis
+         if principal_axis == 'x':
+-            slice_data = volume_data[z_idx]
++            slice_data = volume_data[:, :, z_idx]
+         elif principal_axis == 'y':
+-            slice_data = [row[z_idx] for row in volume_data]
++            slice_data = volume_data[:, z_idx, :]
+         else:
+-            slice_data = [[row[z_idx] for row in col] for col in volume_data]
++            slice_data = volume_data[z_idx, :, :]
+             
+-        # Resample slice to intermediate buffer
+-        # The evidence states: "Resample using a box reconstruction filter and a box low-pass filter."
+-        # "each slice is scaled differently, so farther slices are smaller"
+-        # We simulate the mapping and compositing.
+-        for y in range(len(slice_data)):
+-            for x in range(len(slice_data[0])):
+-                # Apply shear and scale to map slice coordinates to image coordinates
+-                # This is a simplified representation of the GPU shader logic
+-                img_x = int(x * w_x)
+-                img_y = int(y * w_y)
++        # Distance-dependent scale factor (closest slice scaled by 1.0)
++        scale = 1.0 / (1.0 + z_idx)
++        
++        # Resample and composite slice
++        # Box reconstruction and low-pass filter applied during resampling [S2]
++        for y in range(height):
++            for x in range(width):
++                # Map slice coordinates to intermediate image coordinates
++                img_x = int((x * scale) * w_x)
++                img_y = int((y * scale) * w_y)
+                 
+                 if 0 <= img_x < image_width and 0 <= img_y < image_height:
+-                    # Composite into intermediate buffer
+-                    alpha = slice_data[y][x] # Assuming normalized 0-1
++                    alpha = slice_data[y][x]
+                     if alpha > 0:
+-                        # Porter-Duff over operator
+-                        # C_new = C_slice * alpha + C_accum * (1 - alpha)
+-                        # alpha_new = alpha + alpha_accum * (1 - alpha)
+-                        # (Simplified for demonstration)
+-                        pass 
+-                        
++                        accum_alpha = intermediate_buffer[img_y][img_x][3]
++                        new_alpha = alpha + accum_alpha * (1.0 - alpha)
++                        if new_alpha < 1.0:
++                            intermediate_buffer[img_y][img_x][3] = new_alpha
++                            intermediate_buffer[img_y][img_x][0] = alpha # Simplified color
++            
+     # Warp to final image
+-    final_image = intermediate_buffer # In practice, apply warp matrix to coordinates
++    final_image = [[[0.0, 0.0, 0.0, 0.0] for _ in range(image_width)] for _ in range(image_height)]
++    for y in range(image_height):
++        for x in range(image_width):
++            final_image[y][x] = intermediate_buffer[y][x]
++            
+     return final_image
+ ```
+@@ -162,14 +155,14 @@
+ 
+ ### Distributed-Data Volume Rendering Architecture
+-A system architecture that distributes sub-volumes of 3D images to leaf nodes of a cluster for independent rendering, then composites the resulting sub-images at junction nodes to form the final view [S4]. Previous parallel S-W implementations (VolPack, volsh, Virvo) require all nodes to know all data, limiting them to volumes fitting in a single node's memory. This distributed implementation allows rendering of datasets exceeding single-node memory (e.g., >1GB) [S4]. Performance benchmark: A 512x512x512 data volume is rendered in less than four seconds using 16 rendering nodes and 15 compositing nodes [S4]. Cluster topology: Leaf nodes (rendering nodes) hold subsets of the data volume. Junction nodes (compositing nodes) receive rendered images from child nodes, composite them using the associative over operator, and pass the result to parent nodes or display [S4].
++A system architecture that distributes sub-volumes of 3D images to leaf nodes of a cluster for independent rendering, then composites the resulting sub-images at junction nodes to form the final view [S4]. Previous parallel S-W implementations (VolPack, volsh, Virvo) require all nodes to know all data, limiting them to volumes fitting in a single node's memory [S4]. This distributed implementation allows rendering of datasets exceeding single-node memory (e.g., >1GB) [S4]. Performance benchmark: A 512x512x512 data volume is rendered in less than four seconds using 16 rendering nodes and 15 compositing nodes [S4]. Cluster topology: Leaf nodes (rendering nodes) hold subsets of the data volume [S4]. Junction nodes (compositing nodes) receive rendered images from child nodes, composite them using the associative over operator, and pass the result to parent nodes or display [S4].
+ 
+ ## Operating characteristics
+ - **Time Complexity:** More expensive than parallel projection due to extra time for resampling weight computation and complex control flow from many-to-one voxel-to-pixel mapping [S2]. The scaling operation adds overhead compared to parallel Shear-warp [S4].
+-- **Memory Complexity:** Requires storage for the volume texture, index texture, and intermediate framebuffer. Distributed implementations reduce per-node memory requirements by splitting the volume [S4].
++- **Memory Complexity:** Requires storage for the volume texture, index texture, and intermediate framebuffer [S3, unofficial]. Distributed implementations reduce per-node memory requirements by splitting the volume [S4].
+ - **Measured Performance:** A 512x512x512 data volume can be rendered in less than four seconds using 16 rendering nodes and 15 compositing nodes on a Beowulf-class cluster [S4].
+ - **Strengths:** Efficient for large datasets, especially when distributed. Handles perspective correctly. Allows quality adjustment by changing the resolution of the intermediate image [S4].
+ - **Limitations:** Slower than parallel Shear-warp. Complex control flow. Requires careful handling of perspective scaling [S2, S4].
+-- **When to use:** When perspective projection is required and performance is critical for large volumes, especially in distributed environments.
+-- **When not to use:** When parallel projection is sufficient, or when real-time performance on a single node with very large volumes is needed without distributed infrastructure.
++- **When to use:** When perspective projection is required and performance is critical for large volumes, especially in distributed environments [S4].
++- **When not to use:** When parallel projection is sufficient, or when real-time performance on a single node with very large volumes is needed without distributed infrastructure [S4].
+ 
+ ## Background

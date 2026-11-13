@@ -11,7 +11,7 @@ Trace-based SDF Rendering is a technique that traces rays through a sparse voxel
 *   **Outputs**: A rendered color tensor, hit depth tensor, and hit voxel ID tensor [S1, unofficial].
 
 **Data Structures**
-*   **SparseVoxelModel**: Stores voxel geometry and SH coefficients.
+*   **SparseVoxelModel**: Stores voxel geometry and SH coefficients [S1, unofficial].
     *   `sh_degree`: Degree of spherical harmonics (e.g., 0 for constant color) [S1, unofficial].
     *   `sh0`: Tensor of SH coefficients for the zeroth degree (base color), indexed by voxel ID [S1, unofficial].
     *   `vox_key`: Keys mapping voxel IDs to their spatial location or data [S1, unofficial].
@@ -21,12 +21,9 @@ Trace-based SDF Rendering is a technique that traces rays through a sparse voxel
     *   `hit_vox_id`: Integer tensor storing the ID of the voxel hit by the ray. Value `-1` indicates no hit (background) [S1, unofficial].
 
 **Algorithm Steps**
-1.  **Ray Tracing**: For each view, invoke the voxel model's rendering function with the SDF trace mode [S1, unofficial].
-    *   The system traces rays through the sparse voxel structure.
-    *   It uses the SDF to determine the intersection depth (`hit_depth`) and identifies the specific voxel containing the hit point (`hit_vox_id`) [S1, unofficial].
-2.  **Color Retrieval**: Retrieve the base color from the zeroth-degree SH coefficients (`sh0`) indexed by `hit_vox_id` [S1, unofficial].
-    *   The color tensor is extracted and the last axis (RGB) is moved to the front to match image layout [S1, unofficial].
-3.  **Masking**: Apply a boolean mask to the rendering. Pixels where `hit_vox_id` is `-1` are masked out (set to background or ignored) [S1, unofficial].
+1.  **Ray Tracing**: For each view, invoke the voxel model's rendering function with the SDF trace mode [S1, unofficial]. The system traces rays through the sparse voxel structure [S1, unofficial]. It uses the SDF to determine the intersection depth (`hit_depth`) and identifies the specific voxel containing the hit point (`hit_vox_id`) [S1, unofficial].
+2.  **Color Retrieval**: Retrieve the base color from the zeroth-degree SH coefficients (`sh0`) indexed by `hit_vox_id` [S1, unofficial]. The color tensor is extracted and the last axis (RGB) is moved to the front to match image layout [S1, unofficial].
+3.  **Masking**: Apply a boolean mask to the rendering [S1, unofficial]. Pixels where `hit_vox_id` is `-1` are masked out (set to background or ignored) [S1, unofficial].
 4.  **Evaluation (Optional)**: Compute Mean Squared Error (MSE) and Peak Signal-to-Noise Ratio (PSNR) against ground truth images for quality assessment [S1, unofficial].
 
 **Pseudocode**
@@ -53,7 +50,7 @@ def render_trace_sdf(voxel_model, view, near_plane=0.02):
     # Index sh0 by hit_vox_id and move the color channel axis to the front
     # Assuming sh0 shape is (N_voxels, 3) or (N_voxels, 1, 3) for SH0
     color_tensor = voxel_model.sh0[hit_vox_id]
-    rendering = color_tensor.moveaxis(-1, 0)
+    rendering = moveaxis(color_tensor, -1, 0)
     
     # Step 3: Mask out background/non-hit pixels
     # hit_vox_id == -1 indicates no intersection
@@ -67,16 +64,32 @@ def evaluate_quality(rendering, ground_truth):
     Computes MSE and PSNR between rendered and ground truth images.
     """
     # Clip to valid range [0, 1]
-    render_clipped = rendering.clip(0, 1)
-    gt_clipped = ground_truth.clip(0, 1)
+    render_clipped = clip(rendering, 0, 1)
+    gt_clipped = clip(ground_truth, 0, 1)
     
     # Compute MSE
-    mse = ((render_clipped - gt_clipped) ** 2).mean()
+    mse = mean((render_clipped - gt_clipped) ** 2)
     
     # Compute PSNR
-    psnr = -10 * torch.log10(mse)
+    psnr = -10 * log10(mse)
     
     return mse, psnr
+
+def moveaxis(tensor, src, dst):
+    # Standard array operation to move the last axis to the front
+    return tensor.transpose(src, dst)
+
+def clip(tensor, min_val, max_val):
+    # Standard array operation to clamp values
+    return max(min_val, min(max_val, tensor))
+
+def mean(tensor):
+    # Standard array operation to compute mean
+    return sum(tensor) / len(tensor)
+
+def log10(x):
+    import math
+    return math.log(x, 10)
 ```
 
 **Parameters**
@@ -90,12 +103,12 @@ def evaluate_quality(rendering, ground_truth):
 *   **TSDF Fusion**: The underlying geometry is often derived from TSDF fusion, which requires careful handling of bandwidth and pruning thresholds to ensure valid SDF values [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: Depends on the number of voxels and the efficiency of the sparse voxel traversal. The SDF step size allows for larger steps than uniform grid ray marching, potentially reducing the number of evaluations per ray [S1, unofficial].
-*   **Memory Complexity**: Proportional to the number of active voxels in the sparse model. Each voxel stores SH coefficients (size depends on `sh_degree`) and geometric data [S1, unofficial].
+*   **Time Complexity**: Not given in the sources.
+*   **Memory Complexity**: Not given in the sources.
 *   **Strengths**: High-quality geometry reconstruction from multi-view data via TSDF fusion; efficient rendering using sparse structures; support for high-frequency appearance via SH coefficients [S1, unofficial].
 *   **Limitations**: Requires pre-processing (TSDF fusion, voxelization); may struggle with highly transparent or thin structures if not properly captured in the SDF; memory usage can grow with scene complexity [S1, unofficial].
 *   **When to Use**: Suitable for novel view synthesis from multi-view images where high-fidelity geometry and appearance are required, and the scene can be represented as a sparse voxel grid [S1, unofficial].
-*   **When Not to Use**: Not suitable for real-time applications with extremely limited memory or when dynamic geometry changes require frequent re-voxelization [S1, unofficial].
+*   **When Not to Use**: Not given in the sources.
 
 ## Background
 Trace-based SDF Rendering is implemented in the `svraster-win10` repository by leonhardrobin [S1, unofficial]. It builds upon the principles of sphere tracing with SDFs and integrates them with sparse voxel models and spherical harmonics for appearance representation [S1, unofficial]. The method is part of a pipeline that includes TSDF fusion for geometry reconstruction and adaptive voxel subdivision [S1, unofficial].

@@ -3,240 +3,167 @@
 Also called: Local Edge Histogram CGDM, Occlusion-based CGDM
 
 ## Overview
-A method to generate a Close-Up Image Depth Map (CGDM) for images lacking a single vanishing point or containing multiple convergence points, relying on occlusion cues and local edge histograms to infer depth [S1]. It differs from perspective view methods by using local edge density rather than global geometric projection, where regions with fewer edges are interpreted as farther away [S1].
+A method to generate a Cumulative Gradient Depth Map (CGDM) for close-up images (defined as scenes with no or multiple vanishing points) by leveraging occlusion cues and local edge histograms [S1]. It distinguishes itself from [Perspective View Depth Map Generation](14031-perspective-view-depth-map-generation.md) by relying on local edge density rather than global geometric convergence, and from [Distant View Depth Map Generation](#distant-view-depth-map-generation) by handling moderate-distance scenes with perspective distortion rather than infinite-distance horizons [S1].
 
 ## How it works
-**Inputs:** A 2D grayscale or luminance image.
-**Outputs:** An 8-bit CGDM image $D_f$ of the same dimensions as the input.
+**Inputs:** A 2D RGB or grayscale image $I$.
+**Outputs:** An 8-bit CGDM $D_f$ of the same dimensions as $I$.
 
 **Data Structures:**
-*   **Edge Image:** Binary or grayscale map resulting from edge detection.
-*   **Block Grid:** The image divided into non-overlapping $5 \times 5$ pixel blocks.
-*   **Main Blocks:** A subset of blocks where the edge count $N_{ij}$ exceeds the average edge count $N_{av}$.
-*   **CGDM Block ($D_i$):** An $R \times R$ circular gradient map centered at the block center, where $R$ is the radius.
-
-**Parameters:**
-*   $M$: Total number of main blocks.
-*   $N_{i0}$: Number of edges in the $i$-th main block.
-*   $N_{av}$: Average number of edges per block across the entire image.
-*   $R$: Radius of the circular depth gradient. The optimized value is half the length (or width) of the image [S1].
-*   $D_i$: The CGDM generated for the $i$-th main block.
-*   $D_f$: The final fused CGDM.
+- $E$: Binary edge map (same size as $I$), where 1 indicates an edge, 0 otherwise.
+- $B_{ij}$: A 5x5 block grid covering $I$. Indices $i, j$ range over the grid dimensions.
+- $N_{ij}$: Integer count of edge pixels in block $B_{ij}$.
+- $N_{av}$: Average edge count per block.
+- $M$: Total number of "main blocks" identified.
+- $D_i$: Circular depth gradient map for the $i$-th main block.
+- $N_{i0}$: Edge count of the $i$-th main block.
 
 **Steps:**
-1.  **Edge Extraction:** Extract edges from the input 2D image using the Canny algorithm [S1].
-2.  **Block Division:** Divide the edge image into a grid of $5 \times 5$ pixel blocks.
-3.  **Edge Counting:** Count the number of edge pixels $N_{ij}$ in each block $(i, j)$.
-4.  **Average Calculation:** Compute the average edge count $N_{av}$ across all blocks.
-5.  **Main Block Identification:** Identify blocks where $N_{ij} > N_{av}$ as "main blocks." Let the total count of these blocks be $M$.
-6.  **Local CGDM Generation:** For each main block $i$:
-    a.  Define a circular region centered at the block's center.
-    b.  Set the pixel value at the center to 255.
-    c.  Set the pixel value at the circumference (radius $R$) to 0.
-    d.  Interpolate pixel values linearly from 255 at the center to 0 at the circumference.
-7.  **Fusion:** Combine the CGDMs of all main blocks into the final depth map $D_f$ using the weighted sum formula:
-    $$ D_f = \sum_{i=1}^{M} \left( D_i \times \frac{N_{i0}}{\sum_{k=1}^{M} N_{k0}} \right) $$
-    where $N_{i0}$ is the edge count of the $i$-th main block [S1].
+1. **Edge Extraction:** Extract edges from $I$ using the Canny algorithm to produce binary map $E$ [S1].
+2. **Block Division:** Divide $E$ into a grid of 5x5 pixel blocks [S1].
+3. **Edge Counting:** Count the number of edge pixels $N_{ij}$ in each block $B_{ij}$ [S1].
+4. **Average Calculation:** Compute the average edge count $N_{av}$ across all blocks [S1].
+5. **Main Block Identification:** Identify blocks where $N_{ij} > N_{av}$ as "main blocks" [S1]. Let the set of main blocks be indexed $k=1 \dots M$. Let $N_{k0}$ be the edge count $N_{ij}$ for the $k$-th main block [S1].
+6. **Individual CGDM Generation:** For each main block $k$:
+    - Define a circular depth gradient map $D_k$ centered at the center of block $B_{ij}$ [S1].
+    - Assign pixel value 255 at the center [S1].
+    - Assign pixel value 0 at the circumference [S1].
+    - Decrease pixel values evenly (linearly) from the center to the circumference [S1].
+    - Determine the radius $R_k$. The source states an optimized radius is half the length (or width) of the image [S1].
+7. **Fusion:** Combine all $D_k$ maps into the final CGDM $D_f$ using the weighted sum formula [S1]:
+   $$ D_f = \sum_{k=1}^{M} \left( D_k \times \frac{N_{k0}}{\sum_{j=1}^{M} N_{j0}} \right) $$
+   where $N_{k0}$ is the edge count of the $k$-th main block [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def generate_close_up_cgdm(image):
-    # Step 1: Extract edges
-    edge_image = canny_edge_detection(image)
+def generate_close_up_cgdm(image: np.ndarray) -> np.ndarray:
+    # 1. Edge Extraction
+    # Convert to grayscale if necessary, then apply Canny
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) if len(image.shape) == 3 else image
+    edges = cv2.Canny(gray, threshold1=50, threshold2=150)
     
-    # Step 2 & 3: Divide into 5x5 blocks and count edges
-    block_size = 5
-    height, width = edge_image.shape
-    blocks = []
-    edge_counts = []
+    h, w = edges.shape
     
-    for y in range(0, height, block_size):
-        for x in range(0, width, block_size):
-            # Extract block, handling boundary conditions if necessary
-            block = edge_image[y:y+block_size, x:x+block_size]
-            # Count non-zero pixels (edges)
-            n_ij = count_non_zero(block)
-            blocks.append({'x': x, 'y': y, 'block': block})
-            edge_counts.append(n_ij)
+    # 2. Block Division and Counting
+    # Define block size as 5x5
+    block_h, block_w = 5, 5
+    
+    # Calculate grid dimensions
+    grid_h = h // block_h
+    grid_w = w // block_w
+    
+    # Pad edges if dimensions are not divisible by 5 to ensure full coverage
+    # Note: The source does not specify padding strategy. 
+    # We assume strict division or that image dimensions are multiples of 5.
+    # If not, we truncate or pad. For implementation robustness [G]:
+    if h % block_h != 0 or w % block_w != 0:
+        pad_h = (block_h - h % block_h) % block_h
+        pad_w = (block_w - w % block_w) % block_w
+        edges = np.pad(edges, ((0, pad_h), (0, pad_w)), mode='constant')
+        h, w = edges.shape
+        grid_h = h // block_h
+        grid_w = w // block_w
+
+    # Count edges in each block
+    block_counts = np.zeros((grid_h, grid_w), dtype=np.int32)
+    for i in range(grid_h):
+        for j in range(grid_w):
+            y_start, y_end = i * block_h, (i + 1) * block_h
+            x_start, x_end = j * block_w, (j + 1) * block_w
+            block_counts[i, j] = np.sum(edges[y_start:y_end, x_start:x_end])
             
-    # Step 4: Calculate average
-    if not edge_counts:
-        return np.zeros_like(image, dtype=np.uint8)
-        
-    n_av = np.mean(edge_counts)
-    
-    # Step 5: Identify main blocks
+    # 3. Average and Main Block Identification
+    N_av = np.mean(block_counts)
     main_blocks = []
-    for idx, count in enumerate(edge_counts):
-        if count > n_av:
-            main_blocks.append(blocks[idx])
-            
-    m = len(main_blocks)
-    if m == 0:
-        return np.zeros_like(image, dtype=np.uint8)
+    for i in range(grid_h):
+        for j in range(grid_w):
+            if block_counts[i, j] > N_av:
+                main_blocks.append((i, j, block_counts[i, j]))
+                
+    M = len(main_blocks)
+    if M == 0:
+        # Fallback if no main blocks found: return uniform depth or zero map [G]
+        return np.zeros((h, w), dtype=np.uint8)
         
-    # Step 6: Generate local CGDMs
-    # Optimized radius: half the image width or height
-    r = min(width, height) // 2
+    # 4. Generate Individual CGDMs and Sum
+    # Radius: optimized as half the image length or width [S1]
+    R = min(h, w) / 2
     
-    # Precompute circle mask and gradient values
-    # Center of the circle is at (0,0) relative to the block center for generation,
-    # then shifted to block center.
-    y_coords, x_coords = np.ogrid[-r:r+1, -r:r+1]
-    dist = np.sqrt(x_coords**2 + y_coords**2)
+    # Create coordinate grids for the entire image
+    y_coords, x_coords = np.mgrid[0:h, 0:w]
     
-    # Normalize distance to [0, 1] where 0 is center, 1 is circumference
-    # Avoid division by zero if r=0
-    if r == 0:
-        max_dist = 1.0
-    else:
-        max_dist = r
-        
-    normalized_dist = dist / max_dist
-    # Gradient: 255 at center (dist=0), 0 at circumference (dist=1)
-    gradient = 255 * (1 - normalized_dist)
-    # Clip to valid range
-    gradient = np.clip(gradient, 0, 255).astype(np.uint8)
+    # Precompute denominator for weighting
+    total_main_edges = sum(nb[2] for nb in main_blocks)
     
-    # Create a mask for the circle to ignore pixels outside radius
-    circle_mask = (dist <= r).astype(np.uint8)
+    fused_d = np.zeros((h, w), dtype=np.float32)
     
-    # Initialize final depth map
-    d_f = np.zeros((height, width), dtype=np.float32)
+    for i, j, n_k0 in main_blocks:
+        # Center of the block
+        cy = (i + 0.5) * block_h
+        cx = (j + 0.5) * block_w
+        
+        # Distance from center
+        dist = np.sqrt((y_coords - cy)**2 + (x_coords - cx)**2)
+        
+        # Create circular gradient D_k
+        # Value 255 at center, 0 at circumference R, linear decrease
+        # Clip distance to R to handle blocks near image edges where circle extends outside
+        dist_clipped = np.clip(dist, 0, R)
+        
+        # Linear interpolation: val = 255 * (1 - dist/R)
+        D_k = 255.0 * (1.0 - dist_clipped / R)
+        
+        # Mask out areas outside the circle radius R from the block center
+        # Although the source says "circle with depth gradient", it implies
+        # the influence is limited to the circle. Pixels outside are 0.
+        mask = dist <= R
+        D_k = np.where(mask, D_k, 0.0)
+        
+        # Weight
+        weight = n_k0 / total_main_edges
+        
+        # Add to fused map
+        fused_d += D_k * weight
+        
+    # Convert to 8-bit
+    D_f = np.clip(fused_d, 0, 255).astype(np.uint8)
     
-    # Sum of edge counts for normalization
-    sum_n_i0 = sum(b['count'] for b in main_blocks) # Note: need to store count in block dict or re-access
-    # Re-accessing counts for main blocks
-    main_counts = []
-    for b in main_blocks:
-        # Find index in original edge_counts
-        idx = blocks.index(b)
-        main_counts.append(edge_counts[idx])
-        
-    sum_n_i0 = sum(main_counts)
-    
-    # Step 7: Fuse
-    for i, b in enumerate(main_blocks):
-        n_i0 = main_counts[i]
-        
-        # Create a blank canvas for this block's contribution
-        d_i = np.zeros((height, width), dtype=np.float32)
-        
-        # Place the gradient circle at the block center
-        # Block center coordinates
-        cx = b['x'] + block_size // 2
-        cy = b['y'] + block_size // 2
-        
-        # Define region of interest in the final map
-        # The circle extends from cx-r to cx+r
-        y_start = max(0, cy - r)
-        y_end = min(height, cy + r + 1)
-        x_start = max(0, cx - r)
-        x_end = min(width, cx + r + 1)
-        
-        # Corresponding slice of the gradient and mask
-        # Adjust gradient indices to match the ROI
-        # Gradient is centered at 0,0. ROI is offset by (cx-r, cy-r)
-        # So gradient index (dy, dx) corresponds to image index (cy-r+dy, cx-r+dx)
-        # We need to map image indices back to gradient indices
-        # dy_img = y - cy + r
-        # dx_img = x - cx + r
-        
-        # Efficiently place the gradient
-        # Create a temporary array for the circle
-        circle_h = y_end - y_start
-        circle_w = x_end - x_start
-        
-        # Calculate relative coordinates within the circle placement
-        # y_rel = y - (cy - r)
-        # x_rel = x - (cx - r)
-        # But gradient is defined from -r to r.
-        # So gradient index = y_rel - r = y - cy
-        # Let's just slice the precomputed gradient and mask
-        
-        # Gradient shape is (2r+1, 2r+1)
-        # We need to place it such that center (r, r) in gradient aligns with (cx, cy) in image
-        # So gradient row 0 aligns with image row cy-r
-        # gradient row r aligns with image row cy
-        
-        y_grad_start = 0
-        y_grad_end = 2*r + 1
-        
-        # Clip to image bounds
-        if y_start < 0:
-            y_grad_start = -y_start
-            y_start = 0
-        if y_end > height:
-            y_grad_end = y_grad_end - (y_end - height)
-            y_end = height
-            
-        if x_start < 0:
-            x_grad_start = -x_start
-            x_start = 0
-        if x_end > width:
-            x_grad_end = x_grad_end - (x_end - width)
-            x_end = width
-            
-        # Extract the relevant part of the gradient and mask
-        # Note: The gradient/mask arrays are full size (2r+1, 2r+1)
-        # We need to slice them based on the overlap with the image ROI
-        # The ROI in the image is [y_start:y_end, x_start:x_end]
-        # The corresponding indices in the gradient array are:
-        # y_grad_idx = y_img - (cy - r)
-        # So for y_img = y_start, y_grad_idx = y_start - cy + r
-        # Since y_start >= cy-r (after clipping), this is >= 0
-        
-        y_g_start = y_start - (cy - r)
-        y_g_end = y_end - (cy - r)
-        x_g_start = x_start - (cx - r)
-        x_g_end = x_end - (cx - r)
-        
-        # Ensure indices are within gradient bounds
-        y_g_start = max(0, y_g_start)
-        y_g_end = min(2*r + 1, y_g_end)
-        x_g_start = max(0, x_g_start)
-        x_g_end = min(2*r + 1, x_g_end)
-        
-        local_gradient = gradient[y_g_start:y_g_end, x_g_start:x_g_end]
-        local_mask = circle_mask[y_g_start:y_g_end, x_g_start:x_g_end]
-        
-        # Calculate the weight for this block
-        weight = n_i0 / sum_n_i0
-        
-        # Add to the final map
-        # d_f[y_start:y_end, x_start:x_end] += local_gradient * local_mask * weight
-        # Only add where mask is 1
-        roi = d_f[y_start:y_end, x_start:x_end]
-        roi_masked = roi * (1 - local_mask.astype(np.float32)) # Zero out existing values where mask is 1? 
-        # The source implies fusion by sum. If blocks overlap, they sum. 
-        # The mask ensures only the circle area is affected.
-        # However, standard fusion usually just adds. The mask prevents adding outside the circle.
-        
-        # Correct logic:
-        # d_f[y_start:y_end, x_start:x_end] += (local_gradient * local_mask * weight)
-        
-        d_f[y_start:y_end, x_start:x_end] += local_gradient.astype(np.float32) * local_mask.astype(np.float32) * weight
-        
-    # Convert to uint8
-    d_f_uint8 = np.clip(d_f, 0, 255).astype(np.uint8)
-    return d_f_uint8
+    return D_f
 ```
+
+**Parameters:**
+- Block size: 5x5 pixels [S1].
+- Radius $R$: Half the length or width of the image [S1].
+- Center value: 255 [S1].
+- Circumference value: 0 [S1].
+- Gradient type: Linear/even decrease [S1].
+
+**Edge Cases and Pitfalls:**
+- **Image Dimensions:** If image dimensions are not divisible by 5, block boundaries are ambiguous. The source does not specify padding or cropping [S1]. Implementation must handle this [G].
+- **No Main Blocks:** If no block has edge count $> N_{av}$, $M=0$. The formula is undefined. A fallback is required [G].
+- **Circle Boundary:** The circular gradient extends beyond the block. The source states the CGDM is fused from these circles. It does not specify if values outside the circle radius $R$ from the block center are zero. The pseudocode assumes zero outside $R$ [G].
+- **Precision:** The source uses 8-bit values (0-255). Intermediate calculations should use float to prevent quantization errors during fusion [G].
 
 ## Subtopics
 
-### Perspective View Depth Map Generation
-A variant for images with a clear vanishing point (perspective view, $p \le 0.5$). It detects the vanishing point $(x_{vp}, y_{vp})$ via Hough transform on Canny edges and calculates separate horizontal and vertical depth gradients. Horizontal depth is assigned along columns from the VP to the edge, and vertical depth along rows [S1]. Pitfall: The vanishing point may not be central, requiring image expansion by zero-padding to avoid depth errors in reconstruction [S1].
+### [Perspective View Depth Map Generation](14031-perspective-view-depth-map-generation.md)
+Generates CGDM for perspective views using vanishing points. Chose when scene has a single clear convergence point.
+
+### [Distant View Depth Map Generation](#distant-view-depth-map-generation)
+Generates CGDM for distant views (horizons). Chose when scene is at infinite distance.
 
 ## Operating characteristics
-*   **Complexity:** Linear with respect to the number of pixels for edge detection and block counting. The fusion step is proportional to the number of main blocks $M$ and the area of the circles.
-*   **Strengths:** Effective for close-up images where perspective cues are absent or ambiguous. Uses local occlusion cues (edge density) which are robust for object-centric scenes.
-*   **Limitations:** Relies on the Canny algorithm's quality; noisy edges can distort block counts. The assumption that "fewer edges = farther" may not hold for all textures. The fixed $5 \times 5$ block size may not adapt well to varying scene scales.
-*   **Performance:** Not given in the sources.
+- **Time Complexity:** $O(H \times W)$ for edge detection and block counting. Fusion is $O(M \times H \times W)$ if naive, but can be optimized to $O(H \times W)$ by accumulating contributions per pixel. $M$ is at most $H \times W / 25$.
+- **Memory Complexity:** $O(H \times W)$ for edge map, block counts, and final CGDM.
+- **Strengths:** Simple, fast, relies on local occlusion cues which are robust for close-up scenes without global perspective [S1].
+- **Limitations:** Discrete block structure may cause artifacts at block boundaries. Radius is fixed relative to image size, not object size. Does not handle perspective distortion explicitly [S1].
+- **When to Use:** Close-up images with no or multiple vanishing points [S1].
+- **When Not to Use:** Perspective views with a single vanishing point (use [Perspective View Depth Map Generation](14031-perspective-view-depth-map-generation.md)) or distant views (use [Distant View Depth Map Generation](#distant-view-depth-map-generation)) [S1].
 
 ## Background
-Originated in the context of holographic 3D display using 2D-to-3D rendering approaches [S1]. The method classifies images into perspective view and close-up types to apply appropriate depth map generation strategies for computer-generated holography (CGH) [S1].
+Originated in the context of holographic 3D display using depth maps generated by 2D-to-3D rendering [S1]. The method is part of a family of CGDM generation techniques that classify images based on convergence points to select the appropriate depth estimation strategy [S1]. It builds on the observation that regions with fewer edges are generally farther away in close-up scenes [S1].
 
 ## Sources
 [S1] Holographic 3D Display Using Depth Maps Generated by 2D-to-3D Rendering Approach, https://doi.org/10.3390/app11219889, fetched 2026-10-26
