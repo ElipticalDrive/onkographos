@@ -1,0 +1,100 @@
+--- v005.md
++++ v006.md
+@@ -21,5 +21,5 @@
+ 
+ **Data Structures:**
+-The implementation uses standard PyTorch tensors. The internal C++ extension (`dvx`) manages memory for intermediate polygon splitting structures (vectors of barycentric coordinates) during the voxelization loop [S1, unofficial].
++The implementation uses standard PyTorch tensors [S1, unofficial]. The internal C++ extension (`dvx`) manages memory for intermediate polygon splitting structures (vectors of barycentric coordinates) during the voxelization loop [S1, unofficial].
+ 
+ **Algorithm:**
+@@ -67,17 +67,87 @@
+            for all dimensions $d \in \{0, 1, 2\}$ [S1, unofficial].
+ 
+-**Pitfalls:**
++**Pseudocode:**
++```python
++def voxelize_forward(vertices, indices, grid_shape, method, dtype, 
++                     num_samples_per_voxel=16, num_samples_per_simplex=64, 
++                     filter_radius=None):
++    validate_common_voxelize_arguments(vertices, indices, grid_shape, method, dtype)
++    occupancy = zeros(grid_shape, dtype=dtype)
++    if method == 'mc':
++        primal = voxelize_mc_f32 if dtype == float32 else voxelize_mc_f64
++    else:
++        primal = voxelize_cf_f32 if dtype == float32 else voxelize_cf_f64
++    primal(vertices, indices, occupancy)
++    return occupancy
++
++def voxelize_backward(vertices, indices, occupancy, d_occupancy, method, dtype, 
++                      num_samples_per_simplex=64):
++    d_vertices = zeros_like(vertices)
++    if method == 'mc':
++        backward = voxelize_backward_mc_f32 if dtype == float32 else voxelize_backward_mc_f64
++    else:
++        backward = voxelize_backward_cf_f32 if dtype == float32 else voxelize_backward_cf_f64
++    backward(vertices, indices, occupancy, d_vertices, d_occupancy)
++    return d_vertices
++
++def cf_closed_form_step(vertices, indices, occupancy, d_vertices, d_occupancy, 
++                        method, num_samples_per_simplex):
++    for face_idx in range(len(indices)):
++        i0, i1, i2 = indices[face_idx]
++        v0, v1, v2 = vertices[i0], vertices[i1], vertices[i2]
++        e1, e2 = v1 - v0, v2 - v0
++        normal = normalize(cross(e1, e2))
++        area = 0.5 * norm(cross(e1, e2))
++        if area < 1e-12: continue
++
++        u, v = uniform_sample(), uniform_sample()
++        if u + v > 1: u, v = 1 - u, 1 - v
++        sample = v0 + u * e1 + v * e2
++
++        d_xbn_d_v0 = normal * (1 - u - v)
++        d_xbn_d_v1 = normal * u
++        d_xbn_d_v2 = normal * v
++
++        d_xbn = dot(d_vertices[i0], d_xbn_d_v0) + dot(d_vertices[i1], d_xbn_d_v1) + dot(d_vertices[i2], d_xbn_d_v2)
++
++        voxel_size = 2.0 / array(grid_shape)
++        grid_coords = (sample + 1.0) / voxel_size
++        support_box = get_support_box(grid_coords)
++
++        for nx, ny, nz in support_box:
++            n_center = (array([nx, ny, nz]) + 0.5) * voxel_size - 1.0
++            filter_weight = compute_filter_weight(sample, n_center, filter_radius)
++            if filter_weight == 0: continue
++
++            n_voxel_index = linear_index(nx, ny, nz)
++            if method == 'mc':
++                d_occupancy[n_voxel_index] += d_xbn * filter_weight * area / num_samples_per_simplex
++            else:
++                differential_weight = d_occupancy[n_voxel_index] * filter_weight * area / num_samples_per_simplex
++                d_vertices[3 * i0] += d_xbn_d_v0 * differential_weight
++                d_vertices[3 * i1] += d_xbn_d_v1 * differential_weight
++                d_vertices[3 * i2] += d_xbn_d_v2 * differential_weight
++```
++
++**Parameters:**
++- `num_samples_per_voxel`: Number of samples per voxel for MC forward pass. Default: 16 [S1, unofficial].
++- `num_samples_per_simplex`: Number of samples per simplex for MC backward pass. Default: 64 [S1, unofficial].
++- `filter_radius`: Radius of the filter. Default: half voxel size. For CF method, it must equal half voxel size, otherwise it has no effect [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
+ - The CF method uses a different coordinate convention (width, height vs height, width), requiring a transpose of the output voxels (`voxels.transpose(0, -1)`), which regresses performance [S1, unofficial].
+ - The implementation is CPU-only; GPU tensors are automatically moved to CPU for processing and moved back, issuing a warning [S1, unofficial].
+ - For the CF method, `filter_radius` must equal half voxel size; otherwise, it has no effect [S1, unofficial].
+ - The 'auto' method selects 'cf' if `filter_radius` equals half voxel size, otherwise 'mc' [S1, unofficial].
++- Grid coordinates range from $-1$ to $1$, with cell spacing $\text{step}_x = 2/\text{depth}$, $\text{step}_y = 2/\text{height}$, $\text{step}_z = 2/\text{width}$ [S1, unofficial].
++- Degenerate triangles with area $< 10^{-12}$ are skipped to avoid division by zero [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Differentiable Voxelization via Smoothed Winding Numbers](2325-differentiable-voxelization-via-smoothed-winding-numbers.md)
+-Differentiable Voxelization via Smoothed Winding Numbers (DVX) is a method for voxelizing triangle meshes into smoothed winding number voxel grids that provides closed-form gradients with respect to mesh vertex positions, enabling gradient-based optimization of surface representations based on volumetric properties. Unlike [Differentiable Voxelization (MC/CF)](1742-differentiable-voxelization-mc-cf.md) which samples a non-smoothed winding number and uses automatic differentiation (yielding sparse near-surface derivative signals), this method yields a broader gradient pattern matching finite-difference references.
++Differentiable Voxelization via Smoothed Winding Numbers (DVX) is a method for voxelizing triangle meshes into smoothed winding number voxel grids that provides closed-form gradients with respect to mesh vertex positions, enabling gradient-based optimization of surface representations based on volumetric properties. Unlike [Differentiable Voxelization (MC/CF)](1742-differentiable-voxelization-mc-cf.md) which samples a non-smoothed winding number and uses automatic differentiation (yielding sparse near-surface derivative signals), this method yields a broader gradient pattern matching finite-difference references. Choose DVX when smooth volumetric gradients are required for optimization; choose MC/CF when sparse near-surface gradients or closed-form polygon splitting are preferred.
+ 
+ ### [Differentiable Voxelization from Radiative Gaussians](2380-differentiable-voxelization-from-radiative-gaussians.md)
+-This method provides a differentiable voxelizer $\mathcal{V}$ that efficiently queries a 3D density volume $V \in \mathbb{R}^{X \times Y \times Z}$ from a set of radiative Gaussians $G_3$. It solves the computational bottleneck of mapping continuous Gaussian splats to a discrete grid, enabling 3D regularization priors for tomographic reconstruction. Unlike [Differentiable Voxelization (MC/CF)](1742-differentiable-voxelization-mc-cf.md) which operates on polygonal meshes, this method operates directly on parametric Gaussian distributions, leveraging spatial tiling for acceleration.
++This method provides a differentiable voxelizer $\mathcal{V}$ that efficiently queries a 3D density volume $V \in \mathbb{R}^{X \times Y \times Z}$ from a set of radiative Gaussians $G_3$. It solves the computational bottleneck of mapping continuous Gaussian splats to a discrete grid, enabling 3D regularization priors for tomographic reconstruction. Unlike [Differentiable Voxelization (MC/CF)](1742-differentiable-voxelization-mc-cf.md) which operates on polygonal meshes, this method operates directly on parametric Gaussian distributions, leveraging spatial tiling for acceleration. Choose Radiative Gaussians for Gaussian splat rendering or tomographic priors; choose MC/CF for mesh-based differentiable rendering.
+ 
+ ### Backward Differentiable Closed-form Voxelization

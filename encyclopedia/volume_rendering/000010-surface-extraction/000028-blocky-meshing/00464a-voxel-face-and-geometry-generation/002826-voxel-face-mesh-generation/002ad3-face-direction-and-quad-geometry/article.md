@@ -3,18 +3,18 @@
 Also called: FaceDir, Index Generation, Quad Position Generation, UV Generation, Standard Vertex Buffer Rendering (Pipeline B/C)
 
 ## Overview
-Face Direction and Quad Geometry defines the six axis-aligned face orientations on a voxel cube and provides the deterministic logic for generating quad geometry (positions, indices, UVs, and normals) for meshing [S1, S2, unofficial]. It solves the problem of converting abstract voxel face exposure data into concrete vertex buffer layouts suitable for standard rasterization pipelines [S1, S2, unofficial]. It differs from its sibling [Texture Atlas UV Mapping](4238-texture-atlas-uv-mapping.md) by handling the geometric construction and coordinate mapping, whereas the sibling handles the specific texture coordinate lookup logic [S1, S2, unofficial].
+Face Direction and Quad Geometry defines the six axis-aligned face orientations on a voxel cube and provides the deterministic logic for generating quad geometry (positions, indices, UVs, and normals) for meshing [S1, unofficial]. It solves the problem of converting abstract voxel face exposure data into concrete vertex buffer layouts suitable for standard rasterization pipelines [S2, unofficial].
 
 ## How it works
 **Inputs:**
-- `FaceDir`: An enum representing one of the six face orientations.
+- `FaceDir`: An integer enum representing one of the six face orientations.
 - `voxel`: A 3D integer coordinate `[u32; 3]` representing the minimum-corner voxel of the quad in padded chunk coordinates [S1, unofficial].
 - `w`, `h`: Unsigned integers representing the width and height of the quad in voxel units [S1, unofficial].
-- `basePos`: A 3D vector representing the chunk's world position [S2, unofficial].
+- `base_idx`: The starting index of the four vertices in the vertex buffer [S1, unofficial].
 - `flip_u`, `flip_v`: Boolean flags indicating whether to flip the U or V texture coordinates [S1, unofficial].
 
 **Outputs:**
-- A set of four vertex positions in world space.
+- A set of four vertex positions in local block space.
 - A set of four UV coordinates.
 - An index buffer containing six indices forming two triangles.
 - A normal vector for the face.
@@ -55,14 +55,13 @@ The discriminants match the index in a `[Vec<Quad>; 6]` buffer [S1, unofficial].
     -   `u_axis()`: Returns 2 (Z) for X faces, 2 (Z) for Y faces, 0 (X) for Z faces.
     -   `v_axis()`: Returns 1 (Y) for X faces, 0 (X) for Y faces, 1 (Y) for Z faces.
 
-3.  **Quad Position Generation**: Calculate the world position for the four vertices of the quad [S1, S2, unofficial].
-    -   Determine the `origin` in block space. If the face is positive (`is_positive()` is true), add $1.0$ to the coordinate corresponding to `normal_axis()`. Otherwise, use the `voxel` coordinate for that axis.
+3.  **Quad Position Generation**: Calculate the local block position for the four vertices of the quad [S1, S2, unofficial].
+    -   Determine the `origin` in block space. If the face is positive (`is_positive()` is true), add $1.0$ to the coordinate corresponding to `normal_axis()`. Otherwise, use the `voxel` coordinate for that axis [S1, unofficial].
     -   The four vertices in local block space (0-1) are defined as:
         -   $V_0$: `min_u_min_v` (origin)
         -   $V_1$: `max_u_min_v` (origin + $w$ on `u_axis`)
         -   $V_2$: `min_u_max_v` (origin + $h$ on `v_axis`)
         -   $V_3$: `max_u_max_v` (origin + $w$ on `u_axis` + $h$ on `v_axis`)
-    -   Compute final world position: $\mathbf{P}_i = \text{basePos} + \mathbf{faceVertices}[\text{face}][i] + \text{translation}$, where translation is the chunk world position [S2, unofficial].
 
 4.  **Index Generation**: Generate two triangles for the quad [S1, S2, unofficial].
     -   Let `base` be the starting index of the four vertices in the vertex buffer.
@@ -73,77 +72,64 @@ The discriminants match the index in a `[Vec<Quad>; 6]` buffer [S1, unofficial].
     -   Alternatively, push 6 indices forming two triangles: `startIndex+0,1,2` and `startIndex+2,3,0` [S2, unofficial].
 
 5.  **UV Generation**: Generate UV coordinates for the four vertices [S1, S2, unofficial].
-    -   Define local UVs for corners: $(0,0), (0,1), (1,1), (1,0)$ corresponding to vertex order $V_0, V_1, V_2, V_3$.
-    -   If `flip_u` is true, flip the U coordinate.
-    -   If `flip_v` is true, flip the V coordinate.
+    -   Define local UVs for corners: $(0,0), (0,1), (1,1), (1,0)$ corresponding to vertex order $V_0, V_1, V_2, V_3$ [S2, unofficial].
     -   Positive faces flip U (`flip_u = true`) [S1, unofficial].
+    -   If `flip_v` is true, V is flipped [S1, unofficial].
     -   UVs are baked with width/height so textures repeat [S1, unofficial].
-    -   Compute final UV using `Atlas::GetUVCoords` [S2, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def generate_face_geometry(face_dir: FaceDir, voxel: [u32, u32, u32], w: u32, h: u32, base_pos: Vec3, flip_u: bool, flip_v: bool) -> (Vec3[4], Vec2[4], IndexBuffer):
+def generate_quad_geometry(face_dir: int, voxel: list, w: int, h: int, base_idx: int, flip_u: bool, flip_v: bool) -> tuple:
+    # face_dir: 0=XNeg, 1=XPos, 2=YNeg, 3=YPos, 4=ZNeg, 5=ZPos
+    # voxel: [x, y, z]
+    
     # 1. Normal Calculation
-    if face_dir == XNeg: normal = [-1, 0, 0]
-    elif face_dir == XPos: normal = [1, 0, 0]
-    elif face_dir == YNeg: normal = [0, -1, 0]
-    elif face_dir == YPos: normal = [0, 1, 0]
-    elif face_dir == ZNeg: normal = [0, 0, -1]
-    elif face_dir == ZPos: normal = [0, 0, 1]
+    normals = {
+        0: [-1, 0, 0], 1: [1, 0, 0],
+        2: [0, -1, 0], 3: [0, 1, 0],
+        4: [0, 0, -1], 5: [0, 0, 1]
+    }
+    normal = normals[face_dir]
     
     # 2. Axis Identification
-    normal_axis = 0 if face_dir in [XNeg, XPos] else (1 if face_dir in [YNeg, YPos] else 2)
-    if face_dir in [XNeg, XPos]:
-        u_axis = 2 # Z
-        v_axis = 1 # Y
-    elif face_dir in [YNeg, YPos]:
-        u_axis = 2 # Z
-        v_axis = 0 # X
-    else: # Z faces
-        u_axis = 0 # X
-        v_axis = 1 # Y
+    if face_dir in [0, 1]:
+        normal_axis, u_axis, v_axis = 0, 2, 1
+    elif face_dir in [2, 3]:
+        normal_axis, u_axis, v_axis = 1, 2, 0
+    else:
+        normal_axis, u_axis, v_axis = 2, 0, 1
         
     # 3. Quad Position Generation
-    # Determine origin in block space
     origin = [float(voxel[0]), float(voxel[1]), float(voxel[2])]
-    if face_dir in [XPos, YPos, ZPos]:
+    is_positive = face_dir in [1, 3, 5]
+    if is_positive:
         origin[normal_axis] += 1.0
         
-    # Calculate local vertex positions
-    # V0: min_u_min_v (origin)
-    # V1: max_u_min_v (origin + w on u_axis)
-    # V2: min_u_max_v (origin + h on v_axis)
-    # V3: max_u_max_v (origin + w on u_axis + h on v_axis)
+    v0 = origin[:]
+    v1 = origin[:]
+    v1[u_axis] += w
+    v2 = origin[:]
+    v2[v_axis] += h
+    v3 = origin[:]
+    v3[u_axis] += w
+    v3[v_axis] += h
     
-    local_verts = [
-        origin,
-        add_axis(origin, u_axis, w),
-        add_axis(origin, v_axis, h),
-        add_axis(add_axis(origin, u_axis, w), v_axis, h)
-    ]
-    
-    # Compute world positions
-    world_verts = [add(base_pos, v) for v in local_verts]
+    local_verts = [v0, v1, v2, v3]
     
     # 4. Index Generation
-    base_idx = 0 # Assuming starting index 0 for this quad
-    if face_dir in [XNeg, YPos, ZPos]:
-        # CCW winding
+    if face_dir in [0, 3, 5]: # XNeg, YPos, ZPos
         indices = [base_idx, base_idx+1, base_idx+2, base_idx+1, base_idx+3, base_idx+2]
-    else:
-        # CW winding
+    else: # XPos, YNeg, ZNeg
         indices = [base_idx, base_idx+2, base_idx+1, base_idx+1, base_idx+2, base_idx+3]
         
     # 5. UV Generation
-    # Local UVs: (0,0), (0,1), (1,1), (1,0)
     local_uvs = [(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)]
-    
     final_uvs = []
-    for i, (u, v) in enumerate(local_uvs):
-        if face_dir in [XPos, YPos, ZPos]: # Positive faces flip U
+    for u, v in local_uvs:
+        if is_positive:
             u = 1.0 - u
         if flip_u:
             u = 1.0 - u
@@ -151,12 +137,7 @@ def generate_face_geometry(face_dir: FaceDir, voxel: [u32, u32, u32], w: u32, h:
             v = 1.0 - v
         final_uvs.append((u, v))
         
-    return world_verts, final_uvs, indices
-
-def add_axis(vec: Vec3, axis: int, val: float) -> Vec3:
-    res = vec.copy()
-    res[axis] += val
-    return res
+    return local_verts, final_uvs, indices, normal
 ```
 
 **Edge Cases and Pitfalls:**
@@ -197,14 +178,14 @@ Maps an `EVoxelFace` enum to a unit normal vector and an integer offset vector f
     -   Default: Face
 
 ## Operating characteristics
--   **Time Complexity**: $O(1)$ per quad generated. The calculations involve simple arithmetic and array lookups.
--   **Memory Complexity**: $O(N)$ where $N$ is the number of exposed faces. Each face generates 4 vertices and 6 indices.
+-   **Time Complexity**: Not given in the sources.
+-   **Memory Complexity**: Not given in the sources.
 -   **Measured Performance**: Not given in the sources.
 -   **Scaling**: Scales linearly with the number of exposed faces.
--   **Strengths**: Simple, deterministic, and efficient for standard blocky rendering. Matches standard vertex buffer rendering pipelines.
--   **Limitations**: Generates a separate quad for each exposed face, which can lead to high vertex counts for complex terrain. Does not handle overlapping expanded cubes (requires DCx rules for that).
+-   **Strengths**: Simple, deterministic, and efficient for standard blocky rendering. Generates explicit vertex and index buffers for opaque and transparent meshes, rendered via standard draw calls [S2, unofficial].
+-   **Limitations**: Generates a separate quad for each exposed face, which can lead to high vertex counts for complex terrain. Does not handle overlapping expanded cubes (requires DCx rules for that) [S1, unofficial].
 -   **When to use**: Standard voxel rendering where simplicity and compatibility with standard pipelines are priorities.
--   **When not to use**: When memory bandwidth is a critical bottleneck and vertex sharing is required (consider [Static Index Buffer Generation](6255-static-index-buffer-generation.md) or other mesh optimization techniques).
+-   **When not to use**: When overlapping expanded cubes are present or when memory bandwidth is a critical bottleneck and vertex sharing is required.
 
 ## Background
 Originating from implementations such as `infinigen` [S1, unofficial], `VoxelEngine` [S2, unofficial], and `VoxelWorlds` [S3, unofficial], this method is a fundamental component of voxel face mesh generation. It provides the geometric foundation for rendering voxel chunks by defining how face orientations map to vertex positions and indices.

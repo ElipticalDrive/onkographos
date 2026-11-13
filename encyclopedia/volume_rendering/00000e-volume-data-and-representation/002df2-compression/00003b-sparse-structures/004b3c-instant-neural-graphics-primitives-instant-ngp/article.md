@@ -1,0 +1,239 @@
+# Instant Neural Graphics Primitives (Instant NGP)
+
+Also called: Instant-NGP, MLP with Multiresolution Hash Encoding, multiresolution learnable hashgrids
+
+## Overview
+Instant Neural Graphics Primitives (Instant NGP) is a method that greatly improves NeRF model training and inference speed using a learned parametric multi-resolution hash encoding and advanced ray marching techniques [S1]. It replaces the large, deep MLP of Vanilla NeRF with a compact structure using multiresolution learnable hashgrids to explicitly encode spatial information, reducing computation cost and improving training stability [S2, unofficial]. Unlike voxel-based representations, Instant-NGP provides a continuous representation via interpolation and a decoder, avoiding blocky artifacts, while unlike explicit occupancy/color storage, learned embeddings act as compressed latent codes [S2, unofficial]. Compared to Vanilla NeRF, Instant NGP updates only embeddings associated with the neighborhood of a sampled point (local constraint), whereas Vanilla NeRF updates all weights globally, which slows convergence and causes instability [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of training images with known camera poses; a scene bounding box defining the volume of interest.
+*   **Outputs:** A trained model consisting of $L$ hash tables (one per resolution level) and a shallow MLP decoder, capable of predicting volume density ($\sigma$) and view-dependent color ($\mathbf{c}$) for any 3D point and viewing direction.
+
+**Data Structures:**
+1.  **Multi-resolution Hash Grids:** A hierarchy of $L$ 3D grids $G^i$ (for $i = 0 \dots L-1$) with increasing resolutions. Instead of storing a unique feature vector for every vertex, each grid uses a fixed-size hash table.
+    *   **Hash Table Layout:** A flat array of size $H_i$ (hash table size for level $i$). Each entry stores a trainable embedding vector $\mathbf{e} \in \mathbb{R}^d$ (where $d$ is the feature dimension, typically 2 or 4).
+    *   **Hashing Function:** A vertex index $v$ at resolution $i$ is mapped to a table index $h$ via a hash function $h = \text{hash}(v, i) \pmod{H_i}$. This allows embeddings to be shared across vertices, drastically reducing memory consumption [S2, unofficial].
+2.  **Shallow MLP (Decoder):** A small neural network (typically 2-3 layers) that takes the concatenated features from all resolution levels and predicts density and color.
+
+**Algorithm Steps:**
+1.  **Initialization:** Initialize $L$ hash tables with random small values. Initialize the shallow MLP weights.
+2.  **Ray Sampling:** For each pixel, cast a ray through the scene. Sample points along the ray using advanced techniques:
+    *   **Exponential Stepping:** Step size increases exponentially with distance from the camera to handle large empty spaces efficiently.
+    *   **Empty Space Skipping:** Skip regions where density is negligible.
+    *   **Sample Compaction:** Only process samples that contribute significantly to the final color [S1].
+3.  **Feature Retrieval (Hash Encoding):** For each sampled 3D point $\mathbf{x}$:
+    *   For each resolution level $i$:
+        *   Determine the 8 surrounding grid vertices of $\mathbf{x}$ in grid $G^i$.
+        *   Retrieve the hash table indices for these 8 vertices using the hash function.
+        *   Fetch the corresponding embedding vectors $\mathbf{e}_j$ from the hash tables.
+        *   Perform trilinear interpolation of these 8 embeddings based on $\mathbf{x}$'s fractional position within the voxel to get the feature vector $\mathbf{f}_i$ for level $i$.
+    *   Concatenate all $\mathbf{f}_i$ vectors from all $L$ levels into a single feature vector $\mathbf{F}$.
+4.  **Decoding:** Pass $\mathbf{F}$ and the viewing direction $\mathbf{d}$ into the shallow MLP to predict density $\sigma$ and color $\mathbf{c}$.
+5.  **Rendering:** Use standard volume rendering integration (e.g., alpha compositing) to compute the final pixel color from the sampled $\sigma$ and $\mathbf{c}$ values along the ray.
+6.  **Training:** Compute the loss between rendered and ground-truth images. Update the hash table embeddings and MLP weights via gradient descent. Note that only the embeddings associated with the neighborhood of the sampled points are updated [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class InstantNGP:
+    def __init__(self, num_levels=16, num_features_per_level=2, hash_size=1<<19, 
+                 num_layers=2, hidden_dim=64, bounds_min=[-1,-1,-1], bounds_max=[1,1,1]):
+        """
+        Initialize Instant NGP model.
+        :param num_levels: Number of resolution levels L.
+        :param num_features_per_level: Dimension d of each embedding vector.
+        :param hash_size: Size H of each hash table (must be prime for best distribution).
+        :param num_layers: Number of layers in the decoder MLP.
+        :param hidden_dim: Hidden dimension of the decoder MLP.
+        :param bounds_min/max: Bounding box of the scene.
+        """
+        self.num_levels = num_levels
+        self.num_features_per_level = num_features_per_level
+        self.hash_size = hash_size
+        self.bounds_min = torch.tensor(bounds_min)
+        self.bounds_max = torch.tensor(bounds_max)
+        
+        # Initialize hash tables: L tables, each of size H, storing vectors of dim d
+        # Using a single large tensor for all tables for cache efficiency
+        self.embeddings = nn.Parameter(torch.randn(num_levels, hash_size, num_features_per_level))
+        
+        # Initialize shallow MLP decoder
+        # Input dim: num_levels * num_features_per_level
+        # Output dim: 4 (density + 3 color channels)
+        layers = []
+        input_dim = num_levels * num_features_per_level
+        for _ in range(num_layers):
+            layers.append(nn.Linear(input_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            input_dim = hidden_dim
+        layers.append(nn.Linear(hidden_dim, 4)) # density + rgb
+        self.decoder = nn.Sequential(*layers)
+
+    def hash_encode(self, xyz):
+        """
+        Multi-resolution hash encoding for a batch of points.
+        :param xyz: Tensor of shape (N, 3) with coordinates in [0, 1] range (normalized).
+        :return: Concatenated features of shape (N, num_levels * num_features_per_level).
+        """
+        # Normalize coordinates to [0, 1] based on scene bounds
+        xyz = (xyz - self.bounds_min) / (self.bounds_max - self.bounds_min)
+        
+        all_features = []
+        for level in range(self.num_levels):
+            # Determine grid resolution for this level
+            # Resolution increases exponentially with level
+            # Typical base resolution is 16, scaling factor is 2^(level/base_scale)
+            # For simplicity, assuming standard Instant NGP scaling:
+            base_scale = 16
+            scale = base_scale * (2 ** (level / (self.num_levels - 1)))
+            grid_size = scale
+            
+            # Map xyz to grid coordinates
+            grid_coords = xyz * grid_size
+            
+            # Get floor and ceil indices for trilinear interpolation
+            x0 = torch.floor(grid_coords[:, 0]).long()
+            y0 = torch.floor(grid_coords[:, 1]).long()
+            z0 = torch.floor(grid_coords[:, 2]).long()
+            x1 = x0 + 1
+            y1 = y0 + 1
+            z1 = z0 + 1
+            
+            # Wrap indices to grid size (periodic boundary conditions)
+            x0 = x0 % grid_size
+            y0 = y0 % grid_size
+            z0 = z0 % grid_size
+            x1 = x1 % grid_size
+            y1 = y1 % grid_size
+            z1 = z1 % grid_size
+            
+            # Calculate fractional weights for trilinear interpolation
+            dx = grid_coords[:, 0] - x0.float()
+            dy = grid_coords[:, 1] - y0.float()
+            dz = grid_coords[:, 2] - z0.float()
+            
+            # Hash the 8 vertex indices to get table indices
+            # Hash function: simple modulo with a prime hash size
+            # Note: In practice, a more robust hash function is used, but modulo is a valid approximation for implementation
+            def get_hash_indices(x, y, z):
+                # Combine coordinates into a single integer index
+                # Using a simple linear congruential generator or similar for hashing
+                # Here we use a simple combination for demonstration
+                idx = (x * 73856093) ^ (y * 19349663) ^ (z * 83492791)
+                return idx % self.hash_size
+
+            idx_000 = get_hash_indices(x0, y0, z0)
+            idx_100 = get_hash_indices(x1, y0, z0)
+            idx_010 = get_hash_indices(x0, y1, z0)
+            idx_110 = get_hash_indices(x1, y1, z0)
+            idx_001 = get_hash_indices(x0, y0, z1)
+            idx_101 = get_hash_indices(x1, y0, z1)
+            idx_011 = get_hash_indices(x0, y1, z1)
+            idx_111 = get_hash_indices(x1, y1, z1)
+
+            # Fetch embeddings from the hash table for this level
+            # embeddings[level] has shape (hash_size, num_features_per_level)
+            e000 = self.embeddings[level, idx_000]
+            e100 = self.embeddings[level, idx_100]
+            e010 = self.embeddings[level, idx_010]
+            e110 = self.embeddings[level, idx_110]
+            e001 = self.embeddings[level, idx_001]
+            e101 = self.embeddings[level, idx_101]
+            e011 = self.embeddings[level, idx_011]
+            e111 = self.embeddings[level, idx_111]
+
+            # Trilinear interpolation
+            # Weight calculation
+            w000 = (1-dx)*(1-dy)*(1-dz)
+            w100 = dx*(1-dy)*(1-dz)
+            w010 = (1-dx)*dy*(1-dz)
+            w110 = dx*dy*(1-dz)
+            w001 = (1-dx)*(1-dy)*dz
+            w101 = dx*(1-dy)*dz
+            w011 = (1-dx)*dy*dz
+            w111 = dx*dy*dz
+
+            # Interpolate features
+            features = (w000.unsqueeze(1)*e000 + w100.unsqueeze(1)*e100 + 
+                        w010.unsqueeze(1)*e010 + w110.unsqueeze(1)*e110 + 
+                        w001.unsqueeze(1)*e001 + w101.unsqueeze(1)*e101 + 
+                        w011.unsqueeze(1)*e011 + w111.unsqueeze(1)*e111)
+            
+            all_features.append(features)
+        
+        # Concatenate features from all levels
+        return torch.cat(all_features, dim=1)
+
+    def forward(self, xyz, dirs):
+        """
+        Forward pass for Instant NGP.
+        :param xyz: Tensor of shape (N, 3) sampled points.
+        :param dirs: Tensor of shape (N, 3) viewing directions.
+        :return: density (N,) and color (N, 3).
+        """
+        # Encode spatial coordinates
+        features = self.hash_encode(xyz)
+        
+        # Concatenate features with viewing direction (optional, depending on specific implementation)
+        # Standard Instant NGP often includes direction in the decoder input
+        # For simplicity, we assume direction is concatenated if needed, 
+        # but the core innovation is the hash encoding of xyz.
+        # If direction is used: features = torch.cat([features, dirs], dim=1)
+        
+        # Decode
+        output = self.decoder(features)
+        density = output[:, 0]
+        color = torch.sigmoid(output[:, 1:]) # Color is in [0, 1]
+        
+        return density, color
+
+    def fully_fused_mlp(self, xyz, dirs):
+        """
+        Optimized forward pass using a single CUDA kernel (conceptually).
+        In PyTorch, this is simulated by the standard forward pass, 
+        but in the original C++/CUDA implementation, this is a single fused kernel.
+        """
+        return self.forward(xyz, dirs)
+```
+
+**Parameters:**
+*   **Number of Levels ($L$):** Typically 16 [S2, unofficial].
+*   **Hash Table Size ($H_i$):** Typically $2^{19}$ or $2^{20}$ per level [S2, unofficial].
+*   **Feature Dimension ($d$):** Typically 2 or 4 [S2, unofficial].
+*   **Decoder MLP:** 2-3 layers, 64 hidden units [S2, unofficial].
+*   **Training Time:** Convergence reduced from several hours to a few minutes per scene [S2, unofficial]. Specifically, 170s on CUDA (RTX 3090, Ubuntu 20.04) for 20,000 iterations on the Lego model at 800x800 resolution [S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Hash Collisions:** Since hash tables are smaller than the total number of vertices, collisions occur. The hash function should be well-distributed to minimize negative interference between distinct spatial locations [S2, unofficial].
+*   **Precision:** Trilinear interpolation requires floating-point precision. Low precision can lead to artifacts in high-resolution levels [G].
+*   **Boundary Conditions:** The hash encoding assumes periodic boundary conditions or requires careful handling of points outside the bounding box [G].
+
+## Subtopics
+
+### fV-SRN
+An interactive rendering method for compressed Implicit Neural Representations (INRs) that uses a volumetric latent grid and a lightweight MLP to achieve real-time frame rates by fusing network evaluation into shared memory [S5, unofficial]. It differs from Neurcomp by eliminating global memory access via shared memory fusion, achieving significantly higher speed [S5, unofficial]. It constructs a volumetric latent grid (typically $32^3$ resolution, 16 features per vertex), pairs it with a lightweight MLP (four layers, 32 channels), and executes a custom GPU TensorCore kernel that fuses the entire network evaluation into 48 kB of on-chip shared memory, eliminating global memory access during inference [S5, unofficial]. It predicts density, gradient, and curvature in a single forward pass to avoid finite-difference gradient computation [S5, unofficial]. Rendering speedup is 150–200× over Neurcomp, and shaded rendering speedup is 12× [S5, unofficial]. Performance is 5–10 FPS at $512^2$ resolution on volumes up to $1024^3$ [S5, unofficial]. A pitfall is that training requires the full volume in GPU memory, limiting use to offline workflows or requiring sufficient VRAM [S5, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is drastically reduced compared to Vanilla NeRF, converging in minutes rather than hours [S2, unofficial]. Inference is fast due to the shallow decoder and optimized hash lookups.
+*   **Memory Complexity:** Memory consumption is drastically reduced compared to unique feature vectors per vertex due to embedding sharing via hashing [S2, unofficial]. The memory footprint is determined by the sum of hash table sizes across all levels, which is much smaller than a dense voxel grid of the highest resolution.
+*   **Measured Performance:** On an RTX 3090, Instant NGP trained the Lego model (800x800 resolution, 20,000 iterations) in 170 seconds [S4, unofficial]. It can be easily trained in less than 10 minutes [S3].
+*   **Scaling:** The method scales well with resolution due to the multi-resolution approach, capturing fine details at higher levels while maintaining coarse structure at lower levels [S2, unofficial].
+*   **Strengths:** Extremely fast training and inference; real-time rendering is achievable; high-quality reconstruction; continuous representation avoids blocky artifacts [S2, unofficial].
+*   **Limitations:** Hash collisions can cause artifacts if not managed; memory usage can still be significant for very high resolutions and many levels; requires GPU acceleration for optimal performance [S2, unofficial].
+*   **When to Use:** When fast training and real-time rendering are required for NeRF-like applications.
+*   **When Not to Use:** When memory is extremely constrained and high resolution is needed, or when offline workflows with massive volumes are required without sufficient VRAM [S5, unofficial].
+
+## Background
+Instant Neural Graphics Primitives (Instant NGP) was introduced in January 2022 [S1]. It was proposed by NVIDIA researchers to address the slow training and inference speeds of previous NeRF methods [S1]. The method combines a learned parametric multi-resolution hash encoding with advanced ray marching techniques and a fully-fused MLP implementation [S1]. The fully-fused MLP, implemented in a single CUDA kernel, performs all computations in the GPU's local cache, resulting in a 10x efficiency improvement [S4, unofficial]. This breakthrough made NeRF technology feasible for a wider range of applications, including real-time rendering and rapid iteration [S4, unofficial].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] From reconstruction to reasoning : neural radiance fields for comprehensive 3D scene understanding, https://theses.hal.science/tel-05693528v1, fetched 2026-10-26 (unofficial)
+[S3] ScanNeRF: a Scalable Benchmark for Neural Radiance Fields, https://doi.org/10.1109/wacv56688.2023.00088, fetched 2026-10-26
+[S4] Taichi NeRF (Part 1): Develop and Deploy Instant NGP without writing CUDA | Taichi Docs, https://docs.taichi-lang.org/blog/taichi-instant-ngp, fetched 2026-10-29 (unofficial)
+[S5] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

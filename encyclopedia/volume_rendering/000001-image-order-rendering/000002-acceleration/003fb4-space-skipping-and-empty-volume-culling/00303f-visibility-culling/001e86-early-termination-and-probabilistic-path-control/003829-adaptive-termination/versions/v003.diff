@@ -1,0 +1,162 @@
+--- v002.md
++++ v003.md
+@@ -3,33 +3,28 @@
+ 
+ ## Overview
+-Adaptive Termination is a volume rendering acceleration technique that terminates ray integration early once the accumulated color change between consecutive samples falls below a defined threshold [S1, unofficial][S2, unofficial]. It differs from standard early termination (which relies solely on opacity thresholds) by monitoring the *rate of change* in the accumulated color, allowing it to skip remaining samples in regions where the visual contribution is negligible even if opacity has not yet saturated [S1, unofficial][S2, unofficial].
++Adaptive Termination is a volume rendering acceleration technique that terminates ray integration early once the accumulated color change between consecutive samples falls below a defined threshold $\epsilon$ [S1, unofficial][S2, unofficial]. It identifies the last sample along a ray that significantly changes the color, defined as $C_{out} - C_{in} > \epsilon$, and stops further sampling when the change is no longer significant or when opacity exceeds $1 - \epsilon$ [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Ray parameters ($\mathbf{o}, \mathbf{d}$), volume data, transfer functions (opacity $\alpha$, color $C$), and a termination threshold $\epsilon > 0$.
+-*   **Output:** Final pixel color $C_{final}$.
++*   **Input:** Ray parameters ($\mathbf{o}, \mathbf{d}$), volume data, transfer functions (opacity $\alpha$, color $C$), step size $\Delta t$, and termination threshold $\epsilon > 0$ [S1, unofficial][S2, unofficial].
++*   **Output:** Final pixel color $C_{final}$ and accumulated opacity $\alpha_{acc}$ [G].
+ 
+ **Data Structures:**
+-*   Accumulated color $C_{acc}$ (initialized to 0).
+-*   Accumulated opacity $\alpha_{acc}$ (initialized to 0).
+-*   Previous accumulated color $C_{prev}$ (initialized to 0).
+-*   Threshold $\epsilon$ (small positive constant).
++*   Accumulated color $C_{acc}$ (initialized to $[0,0,0]$) [S1, unofficial][S2, unofficial].
++*   Accumulated opacity $\alpha_{acc}$ (initialized to $0$) [S1, unofficial][S2, unofficial].
++*   Previous accumulated color $C_{prev}$ (initialized to $[0,0,0]$) [S1, unofficial][S2, unofficial].
++*   Threshold $\epsilon$ (small positive constant) [S1, unofficial][S2, unofficial].
+ 
+ **Steps:**
+-1.  Cast a ray through the volume.
+-2.  Sample equidistant points along the ray segment within the volume bounds [S1, unofficial][S2, unofficial].
++1.  Cast a ray through the volume and compute its intersection interval $[t_{min}, t_{max}]$ with the volume bounds [S1, unofficial][S2, unofficial].
++2.  Sample equidistant points along the ray segment within the volume bounds using step size $\Delta t$ [S1, unofficial][S2, unofficial].
+ 3.  For each sample $i$:
+-    a. Retrieve sample color $C_{sample}$ and opacity $\alpha_{sample}$ from transfer functions.
+-    b. Compute the contribution to the accumulated color:
+-       $$ \Delta C = C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
+-    c. Update accumulated color:
+-       $$ C_{acc} = C_{acc} + \Delta C $$
+-    d. Update accumulated opacity:
+-       $$ \alpha_{acc} = \alpha_{acc} + \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
+-    e. Check termination condition:
+-       i. If $\alpha_{acc} \ge 1 - \epsilon$, terminate [S1, unofficial][S2, unofficial].
+-       ii. Else, if $\| C_{acc} - C_{prev} \| < \epsilon$, terminate [S1, unofficial][S2, unofficial].
+-    f. Set $C_{prev} = C_{acc}$.
+-4.  Return $C_{acc}$.
++    a. Retrieve sample color $C_{sample}$ and opacity $\alpha_{sample}$ from transfer functions [S1, unofficial][S2, unofficial].
++    b. Compute the contribution to the accumulated color: $\Delta C = C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{acc})$ [S1, unofficial][S2, unofficial].
++    c. Update accumulated color: $C_{acc} = C_{acc} + \Delta C$ [S1, unofficial][S2, unofficial].
++    d. Update accumulated opacity: $\alpha_{acc} = \alpha_{acc} + \alpha_{sample} \cdot (1 - \alpha_{acc})$ [S1, unofficial][S2, unofficial].
++    e. Check termination condition: if $\alpha_{acc} \ge 1 - \epsilon$ or $|C_{acc} - C_{prev}| \le \epsilon$, terminate [S1, unofficial][S2, unofficial].
++    f. Set $C_{prev} = C_{acc}$ [S1, unofficial][S2, unofficial].
++4.  Return $C_{acc}$ [S1, unofficial][S2, unofficial].
+ 
+ **Parameters:**
+@@ -37,51 +32,61 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The comparison $\| C_{acc} - C_{prev} \| < \epsilon$ is sensitive to floating-point precision. If $\epsilon$ is too small relative to the precision of $C_{acc}$, the condition may never trigger, negating the benefit.
+-*   **Boundary:** The condition $\alpha_{acc} \ge 1 - \epsilon$ ensures that rays passing through fully opaque regions terminate correctly, even if color changes are minimal due to occlusion.
++*   **Precision:** The comparison $|C_{acc} - C_{prev}| \le \epsilon$ is sensitive to floating-point precision. If $\epsilon$ is too small relative to the precision of $C_{acc}$, the condition may never trigger, negating the benefit [G].
++*   **Boundary:** The condition $\alpha_{acc} \ge 1 - \epsilon$ ensures that rays passing through fully opaque regions terminate correctly, even if color changes are minimal due to occlusion [S1, unofficial][S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def adaptive_termination(ray_origin, ray_direction, volume, transfer_func, epsilon):
+-    # Initialize accumulators
++def adaptive_termination(ray_origin, ray_direction, volume_bounds, step_size, epsilon):
++    # 1. Intersect ray with volume bounding box [G]
++    t_min, t_max = 0.0, 0.0
++    inv_dir = [1.0 / d if d != 0 else float('inf') for d in ray_direction]
++    for i in range(3):
++        t1 = (volume_bounds[2 * i] - ray_origin[i]) * inv_dir[i]
++        t2 = (volume_bounds[2 * i + 1] - ray_origin[i]) * inv_dir[i]
++        t_min = max(t_min, min(t1, t2))
++        t_max = min(t_max, max(t1, t2))
++    if t_min > t_max:
++        return [0.0, 0.0, 0.0, 0.0]  # Ray misses volume
++
++    # 2. Initialize accumulators [S1, unofficial][S2, unofficial]
+     acc_color = [0.0, 0.0, 0.0]
+     acc_opacity = 0.0
+     prev_color = [0.0, 0.0, 0.0]
+-    
+-    # Determine ray segment within volume bounds
+-    # (Assuming bounding box intersection is handled by parent method)
+-    t_min, t_max = intersect_volume(ray_origin, ray_direction, volume.bounds)
+-    
+-    # Sample along ray
+-    step_size = volume.resolution / (t_max - t_min) # Simplified step calculation
++
+     t = t_min
+-    
+-    while t < t_max:
+-        # Sample volume at current position
+-        pos = ray_origin + ray_direction * t
+-        sample_color, sample_opacity = transfer_func.sample(pos)
+-        
+-        # Front-to-back compositing
++    # 3. March along ray segment [S1, unofficial][S2, unofficial]
++    while t <= t_max:
++        # Sample volume at current position [G]
++        pos = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
++        sample_color, sample_opacity = volume_data.sample(pos)
++
++        # Front-to-back compositing [S1, unofficial][S2, unofficial]
+         weight = sample_opacity * (1.0 - acc_opacity)
+-        acc_color = acc_color + sample_color * weight
++        acc_color = [acc_color[j] + sample_color[j] * weight for j in range(3)]
+         acc_opacity = acc_opacity + sample_opacity * (1.0 - acc_opacity)
+-        
+-        # Check termination conditions
+-        # Condition 1: Opacity saturation
++
++        # 4. Check termination conditions [S1, unofficial][S2, unofficial]
+         if acc_opacity >= 1.0 - epsilon:
+             break
+-            
+-        # Condition 2: Negligible color change
+-        color_diff = magnitude(acc_color - prev_color)
+-        if color_diff < epsilon:
++        color_diff = sum(abs(acc_color[j] - prev_color[j]) for j in range(3))
++        if color_diff <= epsilon:
+             break
+-            
+-        # Update previous color for next iteration
++
+         prev_color = acc_color
+-        
+-        # Advance ray
+         t += step_size
+-        
+-    return acc_color
++
++    return acc_color + [acc_opacity]
+ ```
++
++## Operating characteristics
++*   **Time Complexity:** $O(N)$ in the worst case (no early termination), but typically $O(K)$ where $K \ll N$ is the number of samples processed before termination [G].
++*   **Memory Complexity:** $O(1)$ per ray, as it only stores current and previous color/opacity states [G].
++*   **Strengths:** Reduces computation in homogeneous or low-contrast regions where opacity accumulates slowly but color change is minimal [G]. Complements opacity-based termination by handling cases where opacity is high but color is stable [G].
++*   **Limitations:** Requires computing the difference between consecutive accumulated colors, adding a small per-sample overhead [G]. May introduce artifacts if $\epsilon$ is set too high, causing premature termination in regions with subtle but important details [S1, unofficial][S2, unofficial].
++*   **When to use:** When the volume has regions of low contrast or homogeneous density where color changes are negligible despite remaining samples [S1, unofficial][S2, unofficial].
++*   **When not to use:** When high-frequency color details are critical and $\epsilon$ cannot be set low enough without performance loss [S1, unofficial][S2, unofficial].
++
++## Background
++Adaptive Termination was introduced in the context of Direct Volume Rendering (DVR) techniques, specifically within ray-casting algorithms [S1, unofficial][S2, unofficial]. It is described in educational resources on volume rendering, such as presentations on ray-casting methods [S1, unofficial][S2, unofficial]. The technique leverages the observation that once the accumulated color stabilizes (i.e., changes by less than a small threshold $\epsilon$), further samples contribute negligibly to the final image, allowing for early termination [S1, unofficial][S2, unofficial].
+ 
+ ## Subtopics
+@@ -96,15 +101,4 @@
+ Probabilistically terminates rays based on transmittance, used for stochastic paths rather than deterministic ray casting [1371-russian-roulette.md].
+ 
+-## Operating characteristics
+-*   **Time Complexity:** $O(N)$ in the worst case (no early termination), but typically $O(K)$ where $K \ll N$ is the number of samples processed before termination.
+-*   **Memory Complexity:** $O(1)$ per ray, as it only stores current and previous color/opacity states.
+-*   **Strengths:** Reduces computation in homogeneous or low-contrast regions where opacity accumulates slowly but color change is minimal. Complements opacity-based termination by handling cases where opacity is high but color is stable.
+-*   **Limitations:** Requires computing the difference between consecutive accumulated colors, adding a small per-sample overhead. May introduce artifacts if $\epsilon$ is set too high, causing premature termination in regions with subtle but important details.
+-*   **When to use:** When the volume has regions of low contrast or homogeneous density where color changes are negligible despite remaining samples.
+-*   **When not to use:** When high-frequency color details are critical and $\epsilon$ cannot be set low enough without performance loss.
+-
+-## Background
+-Adaptive Termination was introduced in the context of Direct Volume Rendering (DVR) techniques, specifically within ray-casting algorithms. It is described in educational resources on volume rendering, such as presentations on ray-casting methods [S1, unofficial][S2, unofficial]. The technique leverages the observation that once the accumulated color stabilizes (i.e., changes by less than a small threshold $\epsilon$), further samples contribute negligibly to the final image, allowing for early termination.
+-
+ ## Sources
+ [S1] Direct Volume Rendering Techniques, https://www.scribd.com/presentation/380929057/10-raycasting, fetched 2026-10-25 (unofficial)

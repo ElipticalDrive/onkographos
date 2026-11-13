@@ -1,27 +1,34 @@
 # Acceleration and Sparse Structures
 
-Also called: Sparse Acceleration, Visual Hull Constraints, Hybrid Radiance Caching
+Also called: Spatial Partitioning, Visual Hull Culling, Block-based NeRF
 
 ## Overview
-This family of methods accelerates NeRF training and rendering by reducing the computational cost of evaluating the neural radiance field. It addresses the bottleneck of querying high-dimensional MLPs for every sample point along every ray. Unlike standard uniform or adaptive sampling over the entire scene bounding box, these methods restrict evaluation to sparse structures (visual hulls) or use lightweight approximations (caches) to predict radiance, thereby reducing the number of expensive neural network queries [S1].
+This family of methods accelerates NeRF training and rendering by reducing the volume of space queried by the neural network, addressing the computational bottleneck of sampling empty space or redundant regions in large scenes. Unlike [Zip-NeRF Training Procedure](9538-zip-nerf-training-procedure.md) which uses caching to reduce gradient variance, or [Adaptive Ray Sampling](8870-adaptive-ray-sampling.md) which varies density along rays, these methods explicitly restrict the spatial domain of queries using geometric hulls, spatial partitioning, or block decomposition.
 
 ## Shared principles
-The core mechanism across these methods is the reduction of the search space or the replacement of expensive queries with cheaper approximations.
-
-1.  **Spatial Restriction:** Methods like VaxNeRF restrict ray sampling to a sparse subset of the volume, defined by geometric constraints (e.g., visual hull), eliminating queries in empty space [S1].
-2.  **Approximation via Caching:** Methods like Zip-NeRF use hybrid cache systems (fast cache + NeRF-cache) to estimate incoming radiance for importance sampling, serving as control variates to correct bias while maintaining accuracy with fewer samples [S1].
-3.  **Gradient Management:** When using caches as control variates, the "gradient trick" (stop-gradient on the cache estimator) is applied to ensure correct gradient flow to the primary model parameters during joint optimization [S1].
+The core mechanism is spatial culling or decomposition. Instead of sampling points uniformly or density-based across the entire scene bounding box, these methods maintain a data structure (voxel grid, block list, or cache) that identifies "empty" or "irrelevant" regions. Queries to the neural network are either skipped entirely or restricted to a subset of the scene. This reduces the number of forward passes through the MLP, directly lowering training and inference time.
 
 ## Subtopics
 
 ### [Zip-NeRF Training Procedure](9538-zip-nerf-training-procedure.md)
-A two-stage optimization method using a hybrid radiance cache (fast cache + NeRF-cache) to estimate incoming radiance for importance sampling. It sets itself apart by using a fixed small number of samples and direct distance prediction in the fast cache as a control variate, correcting the bias of the NeRF cache.
+Uses a hybrid radiance cache (Fast Cache and NeRF-cache) as a control variate to correct bias in gradient estimation, allowing for efficient joint optimization of materials and environment maps.
 
 ### [VaxNeRF](11379-vaxnerf.md)
-An acceleration strategy that restricts ray sampling to the visual hull $V$, defined by the maximum volume compatible with object silhouettes. It sets itself apart by using a single MLP with uniform sampling restricted to voxels inside $V$, eliminating the need for adaptive sampling and reducing the search space.
+Restricts ray sampling to the visual hull $V$, defined by the intersection of camera frustums and foreground masks, eliminating queries to empty space outside the object silhouette.
+
+### [Block-NeRF](13537-block-nerf.md)
+Scales to city-scale scenes by partitioning the environment into overlapping spatial blocks, training independent NeRFs per block, and using a visibility MLP to composite results, handling transient objects via semantic masking.
+
+### Spatial Partitioning
+A strategy to create tiles that ensures balanced workload across GPUs by recursively partitioning space based on a sparse point cloud or sampled rays, ensuring each tile contains a comparable number of points.
+
+### Spatial Partitioning
+- **Definition**: A strategy to create tiles that ensures balanced workload (similar number of network evaluations/ray samples) across GPUs, avoiding suboptimal GPU utilization caused by uneven scene content distribution [S1].
+- **Step**: If a sparse point cloud is available, recursively identify the plane where the Cumulative Distribution Function (CDF) equals 0.5 for the 3D point distribution along each axis to partition space [S1]. If no sparse point cloud is available, discretize randomly sampled training rays into 3D samples to estimate scene content distribution, then partition similarly [S1].
+- **Parameter**: Partitioning runs typically within seconds [S1].
 
 ## Background
-The need for acceleration in NeRF arises from the high computational cost of evaluating MLPs for every sample point. Standard NeRF uses coarse/fine two-stage sampling over the entire bounding box, which is inefficient for large scenes or sparse data. VaxNeRF introduces the visual hull constraint to prune empty space [S1]. Zip-NeRF introduces hybrid caching to handle high-fidelity material models and environment maps efficiently by approximating incoming radiance [S1].
+The original NeRF [G] samples points uniformly or by density along rays, which is inefficient for scenes with large empty spaces or complex geometry. VaxNeRF [S1] introduced visual hull culling to remove empty space queries. Block-NeRF [S1] addressed the scalability of NeRF to city-scale data by decomposing the scene. NeRF-XL [S1] introduced spatial partitioning to balance multi-GPU workloads.
 
 ## Sources
-[S1] Source notes for Zip-NeRF and VaxNeRF.
+[S1] NeRF-XL: Scaling NeRFs with Multiple GPUs, https://doi.org/10.1007/978-3-031-73195-2_6, fetched 2026-10-26

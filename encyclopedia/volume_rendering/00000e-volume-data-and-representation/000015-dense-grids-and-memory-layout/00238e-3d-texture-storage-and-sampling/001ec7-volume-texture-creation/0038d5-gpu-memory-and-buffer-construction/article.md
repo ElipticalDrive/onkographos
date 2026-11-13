@@ -1,29 +1,22 @@
 # GPU Memory and Buffer Construction
 
-Also called: GPU Data Layout, ClearView Unified Buffer Construction, Device Volume Snapshot, GPU Texture Upload and Composition
 
 ## Overview
-GPU Memory and Buffer Construction defines the mechanisms for organizing volumetric data, transfer functions, and rendering state into GPU-accessible memory structures (textures, framebuffers, and unified buffers) to enable efficient raycasting and volume visualization. It solves the problem of translating host-side volumetric representations (dense grids, hexahedral meshes) into GPU-friendly formats that minimize memory bandwidth bottlenecks and support specific rendering techniques like MIP, speckle reduction, and hybrid rasterization-compositing. It sets itself apart from [Volume Texture Creation](1857-volume-texture-creation.md) by focusing on the final memory layout, buffer construction, and resource management (framebuffers, unified buffers) rather than the interpolation or sampling logic itself.
+GPU Memory and Buffer Construction organizes volumetric data, transfer functions, and rendering state into GPU-accessible memory structures (textures, framebuffers, and unified buffers) to enable efficient raycasting and volume visualization [G]. It solves the problem of translating host-side volumetric representations (dense grids, hexahedral meshes) into GPU-friendly formats that minimize memory bandwidth bottlenecks and support specific rendering techniques like MIP, speckle reduction, and hybrid rasterization-compositing [G]. It sets itself apart from [Volume Texture Creation](1857-volume-texture-creation.md) by focusing on the final memory layout, buffer construction, and resource management (framebuffers, unified buffers) rather than the interpolation or sampling logic itself [G].
 
 ## Shared principles
-The family shares the principle of mapping logical volumetric data structures to specific GPU memory resources (textures, framebuffers, or unified buffers) with strict constraints on data types, dimensions, and formats to ensure compatibility with shader pipelines.
+The family maps logical volumetric data structures to specific GPU memory resources with strict constraints on data types, dimensions, and formats to ensure compatibility with shader pipelines [G].
 
-1.  **Resource Typing**: Data is mapped to specific OpenGL/CUDA resource types:
-    *   3D Textures: For volumetric scalar data.
-    *   1D Textures: For transfer functions (color and opacity).
-    *   2D Textures: For depth buffers, color buffers, noise textures, and specialized topology data (ClearView).
-    *   Framebuffer Objects (FBOs): For offscreen rendering and ping-pong accumulation.
-    *   Unified Buffers/Structs: For passing metadata and handles to kernels (CUDA).
+1. **Resource Typing**: Data is mapped to specific OpenGL/CUDA resource types [G].
+   * 3D Textures are used for volumetric scalar data [G].
+   * 1D Textures are used for transfer functions (color and opacity) [G].
+   * 2D Textures are used for depth buffers, color buffers, noise textures, and specialized topology data (ClearView) [G].
+   * Framebuffer Objects (FBOs) are used for offscreen rendering and ping-pong accumulation [G].
+   * Unified Buffers/Structs are used for passing metadata and handles to kernels (CUDA) [S1, unofficial].
 
-2.  **Validation and Constraints**:
-    *   Scalar data must be single-component or four-component (RGBA) [S1, unofficial].
-    *   Four-component data must be `VTK_UNSIGNED_CHAR` (RGBA) [S1, unofficial].
-    *   Additive blend mode is restricted to single-component scalars [S1, unofficial].
-    *   Texture formats must match shader expectations (e.g., `GL_RGBA32F` for compositing) [S2, unofficial].
+2. **Validation and Constraints**: Structures must be initialized and validated before being passed to shaders or render passes [G]. Texture formats must match shader expectations (e.g., `GL_RGBA32F` for compositing) [S2, unofficial].
 
-3.  **Initialization**: Structures must be initialized and validated before being passed to shaders or render passes [G]. This includes setting up bounding boxes, transform pointers, and noise textures for speckle reduction [S1, unofficial].
-
-4.  **Topology Mapping (ClearView)**: Hexahedral meshes are converted into four 2D textures (vertices, edges, faces, cellScalar) to optimize gather/resolve passes, using specific linear indexing and dimensioning strategies [S1, unofficial].
+3. **Initialization**: Host-side structures are populated with validated data types and bounds before kernel execution [S1, unofficial].
 
 ## Subtopics
 
@@ -54,7 +47,7 @@ Dispatch compute work groups based on the resolution of `outputTexture` to rende
 `outputTexture` must be `GL_RGBA32F`; using a different format will cause undefined behavior or rendering failure [S2, unofficial].
 
 ## Background
-The concepts in this family originate from CUDA-accelerated volume rendering engines and hybrid rendering pipelines. The "GPU Data Layout" and "Device Volume Snapshot" structures are derived from the `cuVRender` engine, which uses a `Scene` class to manage camera, volume, transfer function, and light state, committing snapshots to device memory for kernel execution [S1, unofficial]. The "ClearView Unified Buffer Construction" is specific to the ClearView renderer, which optimizes hexahedral mesh rendering by precomputing topology into 2D textures [S1, unofficial]. The "GPU Texture Upload and Composition" technique is associated with the DoonEngine, which integrates voxel maps with rasterized scenes using compute shaders [S2, unofficial]. These methods are used in scientific visualization, medical imaging, and real-time volume rendering applications where performance and memory efficiency are critical.
+The concepts in this family originate from CUDA-accelerated volume rendering engines and hybrid rendering pipelines [G]. The "GPU Data Layout" and "Device Volume Snapshot" structures are derived from the `cuVRender` engine, which uses a `Scene` class to manage camera, volume, transfer function, and light state, committing snapshots to device memory for kernel execution [S1, unofficial]. The "GPU Texture Upload and Composition" technique is associated with the DoonEngine, which integrates voxel maps with rasterized scenes using compute shaders [S2, unofficial]. These methods are used in scientific visualization, medical imaging, and real-time volume rendering applications where performance and memory efficiency are critical [G].
 
 ## Sources
 [S1] Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, https://github.com/Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, fetched 2026-10-27 (unofficial)

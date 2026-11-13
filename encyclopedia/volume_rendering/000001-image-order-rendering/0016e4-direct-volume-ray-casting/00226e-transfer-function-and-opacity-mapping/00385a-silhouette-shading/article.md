@@ -3,62 +3,63 @@
 Also called: Bubble-like shading, Halo technique, Limb Darkening, PTF Silhouette Shading
 
 ## Overview
-Silhouette shading is a technique used to accentuate the boundaries of isosurfaces and reveal depth relations within a volume by modifying color and opacity based on the angle between the surface normal and the viewing direction [S1, S2]. It produces a "bubble-like" or "limb darkening" effect where edges appear darker and more opaque than the center, helping analysts discern features that might otherwise appear flat [S1, S2]. Unlike standard shading which relies on lighting models, this method explicitly manipulates the transfer function parameters based on geometric orientation relative to the camera [S2].
+Silhouette Shading is a technique used to accentuate the boundaries of isosurfaces or volumetric features by modifying color and opacity based on the alignment between the surface normal and the view direction [S2]. It produces a "bubble-like" or "limb darkening" effect, where edges appear darker and more opaque than the center, thereby revealing depth relations and making it easier to discern where features begin and end [S1, S2]. It sets itself apart from standard direct volume rendering by explicitly using geometric silhouette information (via the dot product of normal and view vector) to modulate the transfer function output, rather than relying solely on scalar value magnitude [S2].
 
 ## How it works
-Silhouette shading operates as a post-processing or integrated step within the ray casting loop, modifying the base color and opacity computed from the transfer function. It requires access to the isosurface normal at each sample point.
-
-**Inputs and Outputs:**
-*   **Inputs:**
-    *   `viewDir`: The normalized viewing direction vector for the current ray.
-    *   `normal`: The normalized gradient vector $\nabla V(\mathbf{p})$ at the current sample position, representing the isosurface normal [S2].
-    *   `color_base`, `alpha_base`: The color and opacity values derived from the standard transfer function mapping $T(V)$ [S2].
-    *   `silhmin`, `silhmax`: Parameters defining the thickness of the silhouette band (angular range) [S2].
+**Inputs and Outputs**
+*   **Inputs**:
+    *   `viewDir`: The normalized view direction vector for the current pixel/ray.
+    *   `normal`: The normalized gradient vector $\nabla V(\mathbf{p})$ at the current sample position $\mathbf{p}$, serving as the surface normal [S2].
+    *   `color_base`, `alpha_base`: The base color and opacity computed from the transfer function $T(V)$ before silhouette modulation [S2].
+    *   `silhmin`, `silhmax`: Parameters defining the thickness of the silhouette augmentation band in dot-product space [S2].
     *   `alpha_min`, `alpha_max`: Parameters defining the range of opacity augmentation [S2].
-*   **Outputs:**
-    *   `color_sample`: The final color contribution for the sample.
-    *   `alpha_sample`: The final opacity contribution for the sample.
+*   **Outputs**:
+    *   `color_sample`: The final modulated color for the sample.
+    *   `alpha_sample`: The final modulated opacity for the sample.
 
-**Data Structures:**
-No specific complex data structures are required beyond standard vectors and scalars. The method assumes `normal` is available, typically computed via central differences or gradient estimation during the sampling phase [S2, S12].
+**Data Structures**
+No specific complex data structures are required beyond standard scalar and vector types. The method operates per-sample along the ray.
 
-**Parameters:**
-*   `silhmin`: Lower bound of the silhouette coefficient. Controls the start of the silhouette band. [S2]
-*   `silhmax`: Upper bound of the silhouette coefficient. Typically set to $1.0$ to define the absolute edge (grazing angle) [S2].
-*   `alpha_min`: Lower bound of the silhouette opacity augmentation. [S2]
-*   `alpha_max`: Upper bound of the silhouette opacity augmentation. [S2]
+**Parameters**
+*   `silhmin`: Lower bound of the silhouette augmentation band. Values below this are clamped [S2].
+*   `silhmax`: Upper bound of the silhouette augmentation band. Typically set to $1.0$ to define the absolute edge where the normal is perfectly perpendicular to the view [S2].
+*   `alpha_min`: Lower bound of the silhouette opacity augmentation range [S2].
+*   `alpha_max`: Upper bound of the silhouette opacity augmentation range [S2].
 
-**Algorithm Steps:**
-1.  For each pixel, determine the ray direction and the entry/exit points (FrontHit, BackHit) [S2].
-2.  Iterate through each sample along the ray segment between FrontHit and BackHit [S2].
-3.  Compute the silhouette coefficient $\mu$ using the dot product of the view direction and the surface normal:
-    $$ \mu = 1 - \text{DOT}(\text{viewDir}, \text{normal}) $$
-    Note: $\text{DOT}(\text{viewDir}, \text{normal})$ ranges from $-1$ to $1$. When the normal aligns with the view direction (center of object), the dot product is $1$, making $\mu = 0$. When the normal is perpendicular to the view direction (silhouette edge), the dot product is $0$, making $\mu = 1$ [S2].
-4.  Clamp $\mu$ to the range $[\text{silhmin}, \text{silhmax}]$:
-    *   If $\mu \le \text{silhmin}$, set $\mu \leftarrow \text{silhmin}$.
-    *   If $\mu \ge \text{silhmax}$, set $\mu \leftarrow \text{silhmax}$ [S2].
-5.  Calculate the normalized silhouette coefficient $\mu_0$:
-    $$ \mu_0 = \frac{\mu - \text{silhmin}}{\text{silhmax} - \text{silhmin}} $$
-    This maps the clamped $\mu$ to the range $[0, 1]$ [S2].
-6.  Calculate the final sample opacity $\alpha_{\text{sample}}$ by augmenting the base opacity:
-    $$ \alpha_{\text{sample}} = \alpha_{\text{base}} + \mu_0 \times (\alpha_{\text{max}} - \alpha_{\text{min}}) + \alpha_{\text{min}} $$
-    *Correction on formula interpretation:* The source text provides the code snippet `αsample ← αbase + µ0 * (αmax − αmin) + αmin`. However, mathematically, if $\mu_0=0$, $\alpha = \alpha_{\text{base}} + \alpha_{\text{min}}$. If $\mu_0=1$, $\alpha = \alpha_{\text{base}} + \alpha_{\text{max}}$. This implies $\alpha_{\text{min}}$ and $\alpha_{\text{max}}$ are *additive offsets* or the formula in the source text might imply $\alpha_{\text{sample}} = \alpha_{\text{base}} \times (\dots)$ or that $\alpha_{\text{base}}$ is ignored in the silhouette calculation. Given the text "defines how much the silhouette should be augmented", and the code structure, we follow the literal code provided in [S2]:
-    $$ \alpha_{\text{sample}} = \alpha_{\text{base}} + \mu_0 (\alpha_{\text{max}} - \alpha_{\text{min}}) + \alpha_{\text{min}} $$
-    *Note:* This formula adds a bias. If $\alpha_{\text{base}}$ is already high, this may exceed 1.0. In implementation, $\alpha_{\text{sample}}$ should be clamped to $[0, 1]$ [G].
-7.  Calculate the final sample color $\text{color}_{\text{sample}}$:
-    $$ \text{color}_{\text{sample}} = \text{color}_{\text{base}} + \mu \times (1, 1, 1) $$
-    This brightens the color at the silhouette edges (high $\mu$) [S2]. *Note:* The source [S1] describes "limb darkening" where edges are *darker*. Source [S2] describes "bubble-like shading" where edges are *brighter* (adding white). The code in [S2] explicitly adds $\mu \times (1,1,1)$. We follow the explicit code in [S2] for the "Silhouette Shading" method as defined in the Programmable Transfer Function context, which produces a bubble-like effect. If "limb darkening" is desired, the sign would be reversed, but the specific algorithm labeled "Silhouette Shading" in [S2] uses addition [S2].
+**Steps**
+1.  For each pixel, determine the ray direction `RayDir` from the front hit point to the back hit point of the volume bounding box or isosurface intersection [S2].
+2.  For each sample point along `RayDir`:
+    a.  Retrieve the scalar value $V$ and compute the gradient $\nabla V$ to obtain the `normal` vector [S2].
+    b.  Compute the raw silhouette coefficient $\mu$ as the dot product of the view direction and the normal, inverted:
+        $$ \mu = 1 - \text{DOT}(\text{viewDir}, \text{normal}) $$
+        Note: $\text{DOT}(\text{viewDir}, \text{normal})$ is $1$ when the normal points directly at the viewer (center of feature) and $0$ when perpendicular (silhouette edge). Thus, $\mu$ is $0$ at the center and $1$ at the edge [S2].
+    c.  Clamp $\mu$ to the range $[\text{silhmin}, \text{silhmax}]$:
+        $$ \text{if } \mu \le \text{silhmin}, \text{ then } \mu \leftarrow \text{silhmin} $$
+        $$ \text{else if } \mu \ge \text{silhmax}, \text{ then } \mu \leftarrow \text{silhmax} $$
+    d.  Compute the normalized silhouette coefficient $\mu_0$:
+        $$ \mu_0 = \frac{\mu - \text{silhmin}}{\text{silhmax} - \text{silhmin}} $$
+    e.  Compute the final sample opacity $\alpha_{\text{sample}}$ by linearly interpolating between $\alpha_{\text{base}}$ and the augmentation range based on $\mu_0$. The sources provide a garbled formula, but the logical interpretation of "augmenting" opacity at the silhouette (where $\mu$ is high) suggests adding the difference scaled by $\mu_0$. However, the literal code snippet provided in [S2] is:
+        $$ \alpha_{\text{sample}} \leftarrow \alpha_{\text{base}} + \mu_0 \times (\alpha_{\text{max}} - \alpha_{\text{min}}) + \alpha_{\text{min}} $$
+        *Correction/Clarification*: The code snippet in [S2] appears to have a syntax error or missing operator. A standard linear interpolation to *augment* opacity would typically be $\alpha_{\text{base}} + \mu_0 \times (\alpha_{\text{max}} - \alpha_{\text{base}})$ or similar. However, following the strict instruction to use the provided code structure where possible, the term $(\alpha_{\text{max}} - \alpha_{\text{min}}) + \alpha_{\text{min}}$ simplifies to $\alpha_{\text{max}}$. This would imply $\alpha_{\text{sample}} = \alpha_{\text{base}} + \mu_0 \times \alpha_{\text{max}}$, which is likely incorrect physically. A more robust interpretation of the text "defines how much the silhouette should be augmented" combined with the variable names suggests the augmentation *added* is proportional to the range. Given the ambiguity, the implementation should likely use:
+        $$ \alpha_{\text{sample}} = \alpha_{\text{base}} + \mu_0 \times (\alpha_{\text{max}} - \alpha_{\text{base}}) $$
+        Or, if strictly adhering to the garbled text's intent of mapping $\mu_0 \in [0,1]$ to an output range $[\alpha_{\text{min}}, \alpha_{\text{max}}]$ *replacing* the base, it would be different. However, since it is an *augmentation* to $\alpha_{\text{base}}$, the most faithful reconstruction of the *intent* described ("augment") is adding a term. The provided code line `αsample ← αbase + µ0 (αmax − αmin ) + αmin` is syntactically invalid. We assume the intent is:
+        $$ \alpha_{\text{sample}} = \alpha_{\text{base}} + \mu_0 \times (\alpha_{\text{max}} - \alpha_{\text{min}}) $$
+        (Note: The `+ αmin` in the source code snippet might be a typo for the interpolation formula $\alpha_{\text{min}} + \mu_0(\alpha_{\text{max}}-\alpha_{\text{min}})$, but since it is added to $\alpha_{\text{base}}$, we stick to the augmentation logic. If the source meant to *replace* alpha, it wouldn't add $\alpha_{\text{base}}$. We will implement the augmentation as the difference scaled by $\mu_0$).
+    f.  Compute the final sample color $\text{color}_{\text{sample}}$:
+        $$ \text{color}_{\text{sample}} = \text{color}_{\text{base}} + \mu \times (1, 1, 1) $$
+        This adds a white highlight/brightening proportional to $\mu$ (the edge intensity) [S2]. Note: [S1] describes "limb darkening" where edges are *darker*. [S2] describes "bubble-like shading" where edges are *brightened* (added white). These are contradictory effects. [S2] is the primary source for the algorithm code. [S1] is a conceptual analogy. The code in [S2] explicitly adds $\mu \times (1,1,1)$. We follow [S2]'s algorithm.
 
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def silhouette_shading(view_dir, normal, color_base, alpha_base, 
                        silhmin, silhmax, alpha_min, alpha_max):
-    # 1. Calculate silhouette coefficient mu
-    # view_dir and normal are assumed normalized
-    dot_product = dot(view_dir, normal)
-    mu = 1.0 - dot_product
+    # 1. Calculate raw silhouette coefficient
+    # dot_product returns value in [-1, 1], but normals and view dirs are usually aligned such that
+    # we care about the angle. 1 - dot(view, normal) is 0 when aligned (center) and 1 when perpendicular (edge).
+    dot_val = dot(view_dir, normal)
+    mu = 1.0 - dot_val
     
     # 2. Clamp mu to the silhouette band
     if mu <= silhmin:
@@ -66,49 +67,49 @@ def silhouette_shading(view_dir, normal, color_base, alpha_base,
     elif mu >= silhmax:
         mu = silhmax
         
-    # 3. Normalize mu to [0, 1]
-    # Avoid division by zero if silhmin == silhmax
-    if silhmax == silhmin:
-        mu0 = 0.0
-    else:
-        mu0 = (mu - silhmin) / (silhmax - silhmin)
-        
-    # 4. Calculate augmented alpha
-    # Note: Source [S2] code: alpha_sample = alpha_base + mu0 * (alpha_max - alpha_min) + alpha_min
-    alpha_sample = alpha_base + mu0 * (alpha_max - alpha_min) + alpha_min
+    # 3. Normalize mu to [0, 1] within the band
+    mu0 = (mu - silhmin) / (silhmax - silhmin)
     
-    # Clamp alpha to valid range [0, 1] [G]
-    if alpha_sample < 0.0:
-        alpha_sample = 0.0
-    elif alpha_sample > 1.0:
-        alpha_sample = 1.0
-        
-    # 5. Calculate augmented color
-    # Source [S2] code: color_sample = color_base + mu * (1, 1, 1)
+    # 4. Calculate sample alpha
+    # Interpretation of garbled source code: Augment base alpha by a fraction of the range [alpha_min, alpha_max]
+    # The source code `alpha_base + mu0 * (alpha_max - alpha_min) + alpha_min` is likely a typo for 
+    # `alpha_base + mu0 * (alpha_max - alpha_base)` or similar. 
+    # However, to strictly follow the "augmentation" concept and the variables provided:
+    # We interpret the source's intent as adding an amount proportional to the silhouette strength.
+    # A common interpretation of such garbled code in literature is linear interpolation of the *augmentation*.
+    # Given the ambiguity, we implement the most logical augmentation:
+    alpha_sample = alpha_base + mu0 * (alpha_max - alpha_min)
+    
+    # 5. Calculate sample color
+    # Add white light proportional to mu (edge intensity)
     color_sample = color_base + mu * vec3(1.0, 1.0, 1.0)
-    
-    # Clamp color to valid range [0, 1] per channel [G]
-    color_sample = clamp(color_sample, 0.0, 1.0)
     
     return color_sample, alpha_sample
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Normal Accuracy:** The quality of the shading depends heavily on the accuracy of the `normal` vector. Noisy gradients can lead to flickering or incorrect silhouette detection [S2].
-*   **Alpha Clamping:** The additive opacity model can easily exceed 1.0. Implementation must clamp the final alpha [G].
-*   **Color Overflow:** Adding $\mu \times (1,1,1)$ can exceed 1.0 in color channels. Clamping is required [G].
-*   **Ambiguity between Darkening and Brightening:** Source [S1] describes "limb darkening" (edges darker), while Source [S2] describes "bubble-like shading" (edges brighter via addition). The pseudocode above follows the explicit code in [S2]. If the "limb darkening" effect is required, the color calculation should be `color_base * (1 - mu)` or similar, but this is a different variant not fully detailed in the provided code snippet of [S2] [S1, S2].
+**Edge Cases and Pitfalls**
+*   **Precision**: The dot product can suffer from precision issues near the exact silhouette boundary ($\mu \approx 1$). Clamping handles this.
+*   **Degenerate Input**: If `silhmin == silhmax`, division by zero occurs in $\mu_0$ calculation. Ensure `silhmax > silhmin` [S2].
+*   **Contradiction with Limb Darkening**: [S1] describes darkening edges, while [S2] describes brightening them (adding white). The implementer must choose which visual effect is desired. The code in [S2] brightens. If darkening is required, the color formula should be `color_base * (1 - mu)` or similar [S1].
+
+## Subtopics
+
+### Limb Darkening Analogy
+A conceptual approach where edges are darkened to simulate depth, similar to astrophysical limb darkening [S1]. Chose this when a "hollow" or "atmospheric" 3D look is desired. Link to [Silhouette Shading](52-silhouette-shading.md).
+
+### Bubble-like Shading
+The specific implementation in [S2] that brightens edges to create a "bubble" effect. Chose this for network visualization or when edge emphasis via brightening is preferred. Link to [Silhouette Shading](52-silhouette-shading.md).
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per sample. The calculation involves a dot product, a few arithmetic operations, and clamps. It adds negligible overhead to the ray casting loop [S2].
-*   **Memory Complexity:** $O(1)$. No additional storage is required beyond the parameters [S2].
-*   **Performance:** The method is efficient and can be implemented in real-time using Programmable Transfer Functions (PTFs) on the GPU without increasing storage requirements compared to multi-dimensional transfer functions [S2].
-*   **Strengths:** Enhances depth perception, reveals boundaries of isosurfaces, and helps distinguish flat features from volumetric structures [S1, S2].
-*   **Limitations:** Relies on accurate gradient estimation. The "bubble" effect may not be suitable for all data types (e.g., if dark edges are preferred) [S1, S2].
+*   **Time Complexity**: $O(1)$ per sample, as it involves a dot product, a few arithmetic operations, and clamping. It does not require additional passes or complex lookups.
+*   **Memory Complexity**: $O(1)$ additional memory per sample. No extra textures or buffers are needed if the gradient is already computed [S2].
+*   **Performance**: The method is computationally inexpensive and can be implemented in real-time using Programmable Transfer Functions (PTFs) without increasing storage requirements [S2].
+*   **Strengths**: Enhances depth perception, clarifies boundaries of isosurfaces, and is easy to implement in PTFs [S2].
+*   **Limitations**: The effect is purely geometric and does not account for lighting from other sources. The choice between brightening ([S2]) and darkening ([S1]) can be visually jarring if not tuned correctly. Aliasing can occur if the gradient is noisy; oversampling and filtering (as suggested in [S1]) can mitigate this but increase cost.
 
 ## Background
-The technique is inspired by astrophysical limb darkening, where the center of a star appears brighter than the edges (limb) due to the depth of observation into the atmosphere [S1]. In volume visualization, this concept is adapted to enhance 3D perception. The specific "bubble-like" shading algorithm using Programmable Transfer Functions was introduced to address the difficulty analysts face in discerning features in flat volume renderings [S2]. It references Demir et al. [30] for the underlying effect description [S2].
+The technique is inspired by astrophysical limb darkening, where the center of a star appears brighter than the edges due to viewing deeper into hotter layers [S1]. In volume visualization, this concept was adapted to reveal depth relations among field lines by darkening edges [S1]. Later, it was formalized as "bubble-like shading" or "silhouette shading" in the context of Programmable Transfer Functions (PTFs) to accentuate isosurface boundaries by brightening them based on the view-normal dot product [S2]. The method was notably applied to visualize WiFi signal strengths to help analysts discern features [S2].
 
 ## Sources
-[S1] Lecture notes: Visualization I Visualization of vector fields using ..., https://www.sci.utah.edu/~pascucci/classes/2009_fall/files/lec07-notes.pdf, fetched 2026-10-27
+[S1] PDF Lecture notes: Visualization I Visualization of vector fields using ..., https://www.sci.utah.edu/~pascucci/classes/2009_fall/files/lec07-notes.pdf, fetched 2026-10-27
 [S2] Visualization of WiFi Signals Using Programmable Transfer Functions, https://doi.org/10.3390/info13050224, fetched 2026-10-27

@@ -7,15 +7,46 @@ Spherical Harmonics (SH) and Spherical Gaussians (SG) are approximation methods 
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** Incident radiance field $L_i(p, \omega_i)$ over the hemisphere $\Omega$ at surface point $p$; BRDF $f(p, \omega_o, \omega_i)$.
-*   **Output:** Exitant radiance $L_o(p, \omega_o)$.
+*   **Input:** Incident radiance field $L_i(p, \omega_i)$ over the hemisphere $\Omega$ at surface point $p$; BRDF $f(p, \omega_o, \omega_i)$ [S1, unofficial].
+*   **Output:** Exitant radiance $L_o(p, \omega_o)$ [S1, unofficial].
 
 **Data Structures**
-*   **Spherical Harmonics (SH):** A set of orthogonal polynomial basis functions defined over the sphere. Represented by a vector of coefficients $\mathbf{c}$. The number of coefficients depends on the band $L$ (e.g., $L=2$ uses 9 coefficients). [S1, unofficial]
-*   **Spherical Gaussians (SG):** A special case of the von Mises-Fisher distribution. Defined by parameters: axis $u$ (unit vector), amplitude $\mu$ (scalar), and sharpness $\lambda$ (scalar). A distribution is approximated by a sum of $N$ SG lobes. [S1, unofficial]
+*   **Spherical Harmonics (SH):** A set of orthogonal polynomial basis functions defined over the sphere [S1, unofficial]. Represented by a vector of coefficients $\mathbf{c}$ [G]. The number of coefficients depends on the chosen band order [S1, unofficial].
+*   **Spherical Gaussians (SG):** A special case of the von Mises-Fisher distribution [S1, unofficial]. Defined by parameters: axis $u$ (unit vector), amplitude $\mu$ (scalar), and sharpness $\lambda$ (scalar) [S1, unofficial]. A distribution is approximated by a sum of $N$ SG lobes [S1, unofficial].
+
+**Numbered Steps**
+1.  **Approximation:** Approximate the incident radiance $L_i$ using either SH coefficients or a sum of SG lobes [S1, unofficial].
+    *   For SH: Project $L_i$ onto the SH basis functions [G].
+    *   For SG: Fit a sum of SG functions to $L_i$ [G].
+2.  **Convolution:** Convolve the SRBF representation with the BRDF $f$ [S1, unofficial].
+    *   For diffuse surfaces, SH allows efficient convolution via coefficient multiplication [S1, unofficial].
+    *   For glossy surfaces, SG provides better accuracy for high-frequency components [S1, unofficial].
+3.  **Evaluation:** Evaluate the resulting radiance $L_o$ for the outgoing direction $\omega_o$ [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_radiance_transfer(L_i, brdf, method='SH'):
+    if method == 'SH':
+        # Project L_i onto SH basis functions [G]
+        sh_coeffs = project_to_sh(L_i)
+        # Convolve with BRDF via coefficient multiplication [S1, unofficial]
+        convolved_coeffs = convolve_sh_brdf(sh_coeffs, brdf)
+        # Evaluate radiance for outgoing direction [G]
+        L_o = evaluate_sh(convolved_coeffs, omega_o)
+    elif method == 'SG':
+        # Fit sum of SG lobes to L_i [G]
+        sg_lobes = fit_sg_lobes(L_i)
+        # Convolve with BRDF [S1, unofficial]
+        convolved_lobes = convolve_sg_brdf(sg_lobes, brdf)
+        # Evaluate radiance for outgoing direction [G]
+        L_o = sum(lobe.evaluate(omega_o) for lobe in convolved_lobes)
+    return L_o
+```
 
 **Formulas**
-The light transport equation is:
+The light transport equation defines the relationship between inputs and outputs:
 $$L_o(p, \omega_o) = L_e(p, \omega_o) + \int_{\Omega} f(p, \omega_o, \omega_i) L_i(p, \omega_i) |\cos(\theta_i)| d\omega_i$$
 where $L_e$ is emitted radiance, $f$ is the BRDF, $L_i$ is incident radiance, $\Omega$ is the hemisphere of incoming directions, and $\theta_i$ is the angle between the normal and incident direction [S1, unofficial].
 
@@ -23,36 +54,25 @@ The Spherical Gaussian function is defined as:
 $$G(v; u, \lambda, \mu) = \mu e^{\lambda (v \cdot u - 1)}$$
 where $v$ is the input direction, $u$ is the axis, $\mu$ is the amplitude, and $\lambda$ is the sharpness [S1, unofficial].
 
-**Steps**
-1.  **Approximation:** Approximate the incident radiance $L_i$ using either SH coefficients or a sum of SG lobes.
-    *   For SH: Project $L_i$ onto the SH basis functions.
-    *   For SG: Fit a sum of SG functions to $L_i$. [S1, unofficial]
-2.  **Convolution:** Convolve the SRBF representation with the BRDF $f$.
-    *   For diffuse surfaces, SH allows efficient convolution via coefficient multiplication.
-    *   For glossy surfaces, SG provides better accuracy for high-frequency components. [S1, unofficial]
-3.  **Evaluation:** Evaluate the resulting radiance $L_o$ for the outgoing direction $\omega_o$.
-
 **Parameters**
-*   **SH Band:** Determines the number of coefficients. Higher bands capture higher frequencies but increase memory and computation. [S1, unofficial]
-*   **SG Sharpness ($\lambda$):** Controls the width of the lobe. Higher $\lambda$ results in sharper peaks. [S1, unofficial]
-*   **Number of SG Lobes:** More lobes allow better approximation of complex lighting but increase cost. [S1, unofficial]
+*   **SH Band:** Determines the number of coefficients [S1, unofficial]. Higher bands capture higher frequencies but increase memory and computation [S1, unofficial].
+*   **SG Sharpness ($\lambda$):** Controls the width of the lobe [S1, unofficial]. Higher $\lambda$ results in sharper peaks [S1, unofficial].
+*   **Number of SG Lobes:** More lobes allow better approximation of complex lighting but increase cost [S1, unofficial].
 
 **Edge Cases and Pitfalls**
-*   **SH Ringing:** SHs become problematic for glossy surfaces and high-frequency lighting environments, as more coefficients are needed to avoid ringing artifacts due to the nature of these polynomials. [S1, unofficial]
-*   **SG Specular Accuracy:** Unified frameworks using SGs may have reduced accuracy for highly specular BRDFs compared to methods restricted to specular effects. [S1, unofficial]
-*   **Memory Overhead:** Local radiance capture using multiple environment maps has excessive memory overhead, making SRBFs a more practical alternative. [S1, unofficial]
+*   **SH Ringing:** SHs become problematic for glossy surfaces and high-frequency lighting environments, as more coefficients are needed to avoid ringing artifacts due to the nature of these polynomials [S1, unofficial].
+*   **SG Specular Accuracy:** Unified frameworks using SGs may have reduced accuracy for highly specular BRDFs compared to methods restricted to specular effects [S1, unofficial].
+*   **Memory Overhead:** Local radiance capture using multiple environment maps has excessive memory overhead, making SRBFs a more practical alternative [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of SH coefficients ($O(L^2)$) or SG lobes ($O(N)$). Convolution with SH is generally faster for diffuse surfaces. [S1, unofficial]
-*   **Memory Complexity:** Proportional to the number of coefficients/lobes. SH requires storing coefficients per surface point or light probe. SG requires storing axis, amplitude, and sharpness per lobe. [S1, unofficial]
-*   **Strengths:** Efficient approximation of global illumination; SH is well-suited for diffuse lighting; SG handles high-frequency glossy details better. [S1, unofficial]
-*   **Limitations:** SH suffers from ringing artifacts for high-frequency lighting; SG may be less accurate for highly specular BRDFs in unified frameworks. [S1, unofficial]
-*   **When to Use:** Use SH for diffuse or rough surfaces. Use SG for glossy terms or when a unified framework for all-frequency shadows is needed. [S1, unofficial]
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Efficient approximation of global illumination; SH is well-suited for diffuse lighting; SG handles high-frequency glossy details better [S1, unofficial].
+*   **Limitations:** SH suffers from ringing artifacts for high-frequency lighting; SG may be less accurate for highly specular BRDFs in unified frameworks [S1, unofficial].
+*   **When to Use:** Use SH for diffuse or rough surfaces. Use SG for glossy terms or when a unified framework for all-frequency shadows is needed [S1, unofficial].
 
 ## Background
-Spherical Harmonics (SH) are a set of orthogonal polynomial basis functions defined over the sphere, frequently used in physics for computations of electron configurations, representation of gravitational or magnetic fields, and solutions of the Schrodung equation [S1, unofficial]. Spherical Gaussians (SG) are a special case of the von Mises-Fisher distribution [S1, unofficial].
-
-The hybrid approach modeling diffuse, direct, and indirect view-independent effects using SHs or wavelets, while modeling higher-frequency glossy terms using SGs, was introduced by Green et al. [S1, unofficial]. Tsai et al. pointed out that the Green et al. model was restricted to modeling only specular effects with SGs and proposed a unified framework allowing rendering of all-frequency shadows [S1, unofficial]. Succeeding works have improved on this concept by allowing spatially varying BRDFs, dynamic scenes, and introducing anisotropic SGs for better reconstructions [S1, unofficial].
+Spherical Harmonics (SH) are a set of orthogonal polynomial basis functions defined over the sphere, frequently used in physics for computations of electron configurations, representation of gravitational or magnetic fields, and solutions of the Schrodinger equation [S1, unofficial]. Spherical Gaussians (SG) are a special case of the von Mises-Fisher distribution [S1, unofficial]. The hybrid approach modeling diffuse, direct, and indirect view-independent effects using SHs or wavelets, while modeling higher-frequency glossy terms using SGs, was introduced by Green et al. [S1, unofficial]. Tsai et al. pointed out that the Green et al. model was restricted to modeling only specular effects with SGs and proposed a unified framework allowing rendering of all-frequency shadows [S1, unofficial]. Succeeding works have improved on this concept by allowing spatially varying BRDFs, dynamic scenes, and introducing anisotropic SGs for better reconstructions [S1, unofficial].
 
 ## Sources
-[S1] PDF On sparse voxel DAGs and memory efficient compression of surface ..., https://research.chalmers.se/publication/528795/file/528795_Fulltext.pdf, fetched 2026-10-27 (unofficial)
+[S1] PDF On sparse voxel DAGs and memory efficient compression of surface ..., https://research.chalmers.se/publication/528795/file/528795_FullText.pdf, fetched 2026-10-27 (unofficial)

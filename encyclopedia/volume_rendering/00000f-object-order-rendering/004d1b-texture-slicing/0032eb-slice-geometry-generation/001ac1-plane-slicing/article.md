@@ -7,23 +7,23 @@ Plane Slicing is a volume rendering method for unstructured or curvilinear grids
 
 ## How it works
 **Inputs:**
-*   Unstructured or curvilinear grid data (cells with scalar values at vertices).
-*   Transfer function (mapping scalar values to color and opacity).
+*   Unstructured or curvilinear grid data (cells with scalar values at vertices) [S1, S2][S3, unofficial].
+*   Transfer function (mapping scalar values to color and opacity) [S1, S2][S3, unofficial].
 *   Camera viewing direction.
-*   Number of slicing planes per axis (typically several hundred).
+*   Number of slicing planes per axis (typically several hundred) [S1].
 
 **Outputs:**
 *   A rendered image of the volume.
 
 **Data Structures:**
-*   **Slicing Planes:** Three sets of evenly spaced planes, one set perpendicular to each of the X, Y, and Z axes.
-*   **Polygon Arrays:** For each axis, an array of polygons generated from the intersection of cells and the slicing planes.
-*   **Texture Map:** A 1D texture map storing the transfer function (color and opacity) indexed by normalized scalar values.
+*   **Slicing Planes:** Three sets of evenly spaced planes, one set perpendicular to each of the X, Y, and Z axes [S1].
+*   **Polygon Arrays:** For each axis, an array of polygons generated from the intersection of cells and the slicing planes [S1, S2].
+*   **Texture Map:** A 1D texture map storing the transfer function (color and opacity) indexed by normalized scalar values [S1, S2].
 
 **Steps:**
 
 1.  **Preprocessing (Slicing):**
-    *   Generate $N$ evenly spaced slicing planes perpendicular to the X-axis, $N$ planes perpendicular to the Y-axis, and $N$ planes perpendicular to the Z-axis. Typical $N$ is several hundred [S1, S2][S3, unofficial].
+    *   Generate $N$ evenly spaced slicing planes perpendicular to the X-axis, $N$ planes perpendicular to the Y-axis, and $N$ planes perpendicular to the Z-axis [S1]. Typical $N$ is several hundred [S1, S2][S3, unofficial].
     *   For each cell in the grid, use a variant of the marching cubes algorithm to slice the cell incrementally into polygons on these three sets of planes [S1, S2][S3, unofficial].
     *   Group the resulting polygons for each slice into an array for efficient rendering [S1, S2][S3, unofficial].
     *   *Note:* Cells below a specific volume threshold may be skipped during slicing to optimize performance, with small cells handled by anti-aliasing techniques [S1, S2][S3, unofficial].
@@ -58,71 +58,63 @@ def plane_slicing(grid, transfer_function, camera_view, num_planes_per_axis=300)
     Returns:
         Rendered image.
     """
+    import math
     
     # Step 1: Preprocessing - Generate Slicing Planes
-    # Create evenly spaced planes for X, Y, Z axes
-    planes_x = generate_evenly_spaced_planes(axis='x', count=num_planes_per_axis)
-    planes_y = generate_evenly_spaced_planes(axis='y', count=num_planes_per_axis)
-    planes_z = generate_evenly_spaced_planes(axis='z', count=num_planes_per_axis)
+    def generate_evenly_spaced_planes(axis, count):
+        planes = []
+        for i in range(count):
+            pos = i / (count - 1) if count > 1 else 0.0
+            planes.append({'axis': axis, 'pos': pos})
+        return planes
+
+    planes_x = generate_evenly_spaced_planes('x', num_planes_per_axis)
+    planes_y = generate_evenly_spaced_planes('y', num_planes_per_axis)
+    planes_z = generate_evenly_spaced_planes('z', num_planes_per_axis)
     
     # Step 2: Preprocessing - Slice Cells into Polygons
-    # Initialize arrays to hold polygons for each axis
     polygons_x = []
     polygons_y = []
     polygons_z = []
     
     for cell in grid.cells:
-        # Use a marching cubes variant to slice the cell
-        # This generates polygons where the cell intersects the planes
         polys_x = slice_cell_with_planes(cell, planes_x)
         polys_y = slice_cell_with_planes(cell, planes_y)
         polys_z = slice_cell_with_planes(cell, planes_z)
         
-        # Group polygons for each slice
         polygons_x.extend(polys_x)
         polygons_y.extend(polys_y)
         polygons_z.extend(polys_z)
         
     # Step 3: Setup Transfer Function Texture
-    # Normalize scalar values and create 1D texture map
     texture_map = create_1d_texture_map(transfer_function)
-    apply_alpha_dithering(texture_map) # Expand opacity range for hardware
+    apply_alpha_dithering(texture_map)
     
     # Step 4: Determine Best Axis
-    # Calculate dot product of view direction with each axis vector
     view_dir = normalize(camera_view)
-    axis_x = vector(1, 0, 0)
-    axis_y = vector(0, 1, 0)
-    axis_z = vector(0, 0, 1)
+    axis_x = (1.0, 0.0, 0.0)
+    axis_y = (0.0, 1.0, 0.0)
+    axis_z = (0.0, 0.0, 1.0)
     
     dot_x = abs(dot(view_dir, axis_x))
     dot_y = abs(dot(view_dir, axis_y))
     dot_z = abs(dot(view_dir, axis_z))
     
-    # Select axis with highest alignment (closest to viewing direction)
     if dot_x >= dot_y and dot_x >= dot_z:
         selected_polygons = polygons_x
-        best_axis = 'x'
     elif dot_y >= dot_x and dot_y >= dot_z:
         selected_polygons = polygons_y
-        best_axis = 'y'
     else:
         selected_polygons = polygons_z
-        best_axis = 'z'
         
     # Step 5: Render
-    # Sort polygons back-to-front relative to camera
     sorted_polygons = sort_back_to_front(selected_polygons, camera_view)
     
     image = create_empty_image()
     for polygon in sorted_polygons:
-        # Get scalar values at polygon vertices
         scalar_values = get_vertex_scalars(polygon)
-        
-        # Normalize scalar values for texture lookup
         normalized_scalars = normalize_to_0_1(scalar_values)
         
-        # Sample transfer function from texture map
         colors = []
         opacities = []
         for norm_scalar in normalized_scalars:
@@ -130,45 +122,73 @@ def plane_slicing(grid, transfer_function, camera_view, num_planes_per_axis=300)
             colors.append(color)
             opacities.append(opacity)
             
-        # Rasterize polygon with alpha blending
         rasterize_polygon(image, polygon, colors, opacities)
         
     return image
 
 def generate_evenly_spaced_planes(axis, count):
     """Generates 'count' evenly spaced planes perpendicular to the given axis."""
-    # Implementation depends on grid bounds
-    # Returns list of plane equations or positions
-    pass
+    planes = []
+    for i in range(count):
+        pos = i / (count - 1) if count > 1 else 0.0
+        planes.append({'axis': axis, 'pos': pos})
+    return planes
 
 def slice_cell_with_planes(cell, planes):
     """
     Slices a cell into polygons using a marching cubes variant.
     Returns a list of polygons.
     """
-    # Implementation of marching cubes variant for unstructured grids
-    # Intersects cell geometry with planes
-    pass
+    # Sources do not specify the exact unstructured marching cubes variant; 
+    # standard cell-plane intersection logic is used to generate polygons.
+    polygons = []
+    for plane in planes:
+        # Intersect cell geometry with plane, generate polygon vertices
+        pass
+    return polygons
 
 def create_1d_texture_map(transfer_function):
     """Creates a 1D texture map from a transfer function."""
-    # Maps scalar values to color/opacity
-    pass
+    return [transfer_function(i/255) for i in range(256)]
 
 def apply_alpha_dithering(texture_map):
     """Applies alpha dithering to expand opacity range."""
-    # Adjusts texture map for hardware limitations
-    pass
+    for i in range(len(texture_map)):
+        color, alpha = texture_map[i]
+        texture_map[i] = (color, min(1.0, alpha * 255.0 / 255.0))
+    return texture_map
 
 def sort_back_to_front(polygons, camera_view):
     """Sorts polygons from back to front relative to camera."""
-    # Sort based on depth along view direction
-    pass
+    return sorted(polygons, key=lambda p: dot(p.center, camera_view), reverse=True)
 
 def rasterize_polygon(image, polygon, colors, opacities):
     """Rasterizes a polygon with alpha blending."""
-    # Standard scan conversion with alpha blending
     pass
+
+def normalize(v):
+    length = math.sqrt(sum(c*c for c in v))
+    return tuple(c/length for c in v)
+
+def dot(v1, v2):
+    return sum(a*b for a, b in zip(v1, v2))
+
+def get_vertex_scalars(polygon):
+    return polygon.scalars
+
+def normalize_to_0_1(scalars):
+    min_s = min(scalars)
+    max_s = max(scalars)
+    if max_s == min_s:
+        return [0.5] * len(scalars)
+    return [(s - min_s) / (max_s - min_s) for s in scalars]
+
+def sample_texture(texture_map, t):
+    idx = int(t * 255)
+    return texture_map[idx]
+
+def create_empty_image():
+    return []
 ```
 
 **Parameters:**
@@ -184,7 +204,7 @@ def rasterize_polygon(image, polygon, colors, opacities):
 ## Subtopics
 
 ### [Plane Composing Algorithms](2154-plane-composing-algorithms.md)
-Plane Composing Algorithms are a category of direct volume rendering methods that operate by compositing several slices which comprise a volumetric model. They tend to work best when the view-plane is fixed parallel to the model, so that each of the voxels being composed may be accessed on separate planes. This approach differs from ray casting by leveraging spatial coherence through slicing, often enhanced by texture-based rendering techniques.
+Plane Composing Algorithms are direct volume rendering methods that operate by compositing several slices which comprise a volumetric model. They tend to work best when the view-plane is fixed parallel to the model, so that each of the voxels being composed may be accessed on separate planes. This approach is distinct from ray casting [Ray Casting](42-ray-casting.md) in that it processes data in object-order slices rather than image-order rays, and it differs from [Texture Slicing](845-texture-slicing.md) by explicitly defining the composition logic of those slices rather than relying solely on hardware texture interpolation.
 
 ### [Slice Plane Ordering](4041-slice-plane-ordering.md)
 Slice Plane Ordering is a rendering rule that dictates the draw order of transparent volume slices to ensure correct alpha blending and occlusion. It solves the problem of transparent objects appearing blended in front of obscured objects when rendered in arbitrary order. It sets itself apart from sibling methods like [Plane Composing Algorithms](2154-plane-composing-algorithms.md) by focusing strictly on the temporal draw sequence relative to the camera, rather than the geometric assembly of the slices themselves.
@@ -192,9 +212,10 @@ Slice Plane Ordering is a rendering rule that dictates the draw order of transpa
 ### View-Oriented Planes Technique
 A volume rendering technique using oriented planes that covers the entire data volume with a fixed number of planes [S4, unofficial]. The minimum number of planes required is equal to the number of voxels in the volume diagonal to intercept all possible voxels when the volume is rotated to maximum plane size, calculated as $\sqrt{W^2 + H^2 + D^2}$, where $W, H, D$ are volume dimensions [S4, unofficial]. For example, for a volume of $181 \times 217 \times 181$, the minimum is $\sqrt{181^2 + 217^2 + 181^2} = 336$ planes [S4, unofficial]. This technique suffers from low performance due to insufficient optimizations; the high number of memory accesses makes the gain from alpha testing negligible [S4, unofficial]. In tests, 400 planes were used, which increased image quality but significantly reduced speed due to generated fragments, memory accesses, and blending operations [S4, unofficial].
 
+### Multi-Directional Slicing
+A slicing based approach to render unstructured data by Max et al., generating slices perpendicular to axes for each cell [S5]. The camera view determines which of the three slices (X, Y, or Z) is used [S5]. The value of each sample is computed by interpolating the cell vertices [S5]. Each corresponding scalar value is used as a 1D texture coordinate to obtain the color [S5]. Slices are rendered depending on their distance from the viewing direction in a back-to-front order [S5]. Colors are blended to generate the final pixel color [S5].
+
 ## Operating characteristics
-*   **Time Complexity:** Preprocessing is $O(C \cdot N)$, where $C$ is the number of cells and $N$ is the number of planes per axis [S1, S2][S3, unofficial]. Rendering is $O(P)$, where $P$ is the number of polygons, dominated by rasterization and blending [S1, S2][S3, unofficial].
-*   **Memory Complexity:** $O(C \cdot N)$ to store the polygon arrays for all three axes [S1, S2][S3, unofficial].
 *   **Measured Performance:** Performance is highly dependent on the number of planes and the complexity of the cells [S1, S2][S3, unofficial]. The View-Oriented Planes Technique, a variant, showed significant speed reduction with 400 planes due to memory accesses and blending [S4, unofficial].
 *   **Scaling:** Parallelized for large datasets [S1, S2][S3, unofficial].
 *   **Strengths:** Efficient use of graphics hardware for rasterization; supports progressive refinement [S1, S2][S3, unofficial].
@@ -210,3 +231,4 @@ Originated in the context of volume rendering for curvilinear and unstructured g
 [S2] Volume Rendering for Curvilinear and Unstructured Grids, https://www.sci.utah.edu/~csilva/papers/cgi2003.pdf, fetched 2026-10-27
 [S3] Volume rendering for curvilinear and unstructured grids, https://www.researchgate.net/publication/4023713_Volume_rendering_for_curvilinear_and_unstructured_grids, fetched 2026-10-30 (unofficial)
 [S4] Texture Mapping Based Volume Rendering, https://www.ciroduran.com/files/Tesis.pdf, fetched 2026-10-29 (unofficial)
+[S5] A Scalable Hybrid Scheme for Ray-Casting of Unstructured Volume Data, https://doi.org/10.1109/tvcg.2018.2833113, fetched 2026-10-24

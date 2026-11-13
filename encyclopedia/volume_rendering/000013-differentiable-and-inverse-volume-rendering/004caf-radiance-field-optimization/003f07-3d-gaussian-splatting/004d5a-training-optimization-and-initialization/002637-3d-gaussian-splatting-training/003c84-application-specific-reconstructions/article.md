@@ -1,105 +1,48 @@
 # Application-Specific Reconstructions
 
+Also called: Specialized 3DGS Training Regimes
 
 ## Overview
-Application-Specific Reconstructions extend the base 3D Gaussian Splatting (3DGS) optimization framework to handle specialized domains such as human avatars, dynamic bodies, robotics, and plants, which require structural priors or modified training pipelines beyond standard static scene reconstruction [S1][S2, unofficial]. This family is distinguished from general optimization techniques by its reliance on domain-specific constraints (e.g., mesh embedding, physical priors, or semantic features) to resolve ambiguities inherent in monocular or dynamic inputs, whereas [Base 3DGS Optimization](7549-base-3dgs-optimization.md) focuses on generic photometric loss and densification [S1][S2, unofficial].
+Application-Specific Reconstructions modify the standard 3D Gaussian Splatting (3DGS) training loop to address domain-specific challenges such as dynamic human avatars, displaced objects, robotics simulation, and scientific inverse problems. Unlike [Base 3DGS Optimization](7549-base-3d-gaussian-splatting.md), which assumes a static, rigid scene, these methods introduce custom initialization strategies, deformation priors, and generative repair mechanisms to handle non-rigid motion, occlusion artifacts, and translucent materials. They are chosen when the standard densification and optimization pipeline fails to converge on complex geometries or dynamic scenes.
 
 ## Shared principles
-The shared principles of this family are defined by the integration of external domain knowledge into the Gaussian parameter space (position, covariance, opacity, spherical harmonics, or feature fields) [S1][S2, unofficial]. Unlike [Base 3DGS Optimization](7549-base-3dgs-optimization.md), which treats Gaussians as independent entities optimized solely for photometric consistency, application-specific methods impose structural or physical constraints to regularize the solution space [S1][S2, unofficial]. Common mechanisms include:
-1. Structural Embedding: Mapping Gaussians to a canonical representation (e.g., a mesh surface or a parametric body model) to ensure topological consistency and enable motion control [S1].
-2. Physical/Geometric Priors: Using physical laws (e.g., cloth dynamics) or geometric constraints (e.g., surface normals) to regularize Gaussian positions and orientations in the canonical space, preventing artifacts in dynamic or translucent scenarios [S1].
-3. Modified Optimization Steps: Altering the standard densification, pruning, and splitting routines to better suit the specific geometry or dynamics of the target domain, often to improve training efficiency or rendering fidelity [S1].
-4. Feature Field Integration: Extending the Gaussian attributes to include semantic or appearance features that can be rendered alongside color, enabling tasks like segmentation or open-vocabulary querying [S2, unofficial].
+All application-specific reconstructions build on [3D Gaussian Splatting Training](3761-3d-gaussian-splatting-training.md) but replace or augment its generic steps with domain-specific logic. The shared mechanism involves:
+1.  **Custom Initialization:** Gaussians are not initialized via Structure-from-Motion (SfM) points alone but are often mapped to parametric meshes (e.g., FLAME for faces) or physical priors [S1][S2, unofficial].
+2.  **Deformation Priors:** For dynamic scenes, Gaussians are constrained to follow physical or geometric rules (e.g., staying on a mesh surface, physical cloth regularization) rather than optimizing freely in 3D space [S1][S2, unofficial].
+3.  **Generative or Hybrid Repair:** When input data is insufficient (e.g., displaced objects revealing unseen backgrounds), generative models (like LaMa) or feature fusion networks are integrated into the training loop to fill missing information [S1][S2, unofficial].
+4.  **Modified Optimization Schedules:** Training iterations, densification frequencies, and opacity resets are tuned specifically for the convergence properties of the target domain (e.g., minute-level training for humans) [S1][S2, unofficial].
 
 ## Subtopics
 
+### [Inpainting for Displaced Objects](9523-inpainting-for-displaced-objects.md)
+Remedies black smudges and dirty textures caused by displaced objects exposing unseen background areas that 3DGS cannot recover from input images. Unlike vanilla 3DGS, which leaves empty spots or blends irrelevant kernels, this technique uses generative AI inpainting to repair the scene representation. It is specifically designed for scenarios where object movement reveals occluded regions not present in the training data.
+
 ### [SplattingAvatar](9556-splattingavatar.md)
-A real-time human avatar rendering method that embeds 3D Gaussians onto a driving mesh (FLAME) to enable non-ambiguous motion control and high-fidelity rendering of complex geometries like eyes and hair, avoiding the noise associated with nearest-triangle sampling in canonical space.
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-# SplattingAvatar Training Loop
-# Based on
-
-def train_splatting_avatar(subject_data, mesh, total_iterations=30000):
-    # Initialize Gaussians: one per mesh triangle in tangent space
-    gaussians = initialize_gaussians_per_triangle(mesh)  # Not given in the sources.
-
-    # Set parameters
-    lambda_l = 0.01
-    lambda_s = 1.0
-    Ts = 10.0
-    Tr = 0.008
-    
-    for iteration in range(1, total_iterations + 1):
-        # Get current pose and expression from subject_data
-        pose, expression = get_current_frame(subject_data, iteration)  # Not given in the sources.
-        
-        # Deform Gaussians using embeddings-based motion control
-        # This avoids nearest-triangle sampling noise
-        deformed_gaussians = apply_embedding_deformation(gaussians, pose, expression)  # Not given in the sources.
-        
-        # Render and compute loss
-        rendered_image = render_gaussians(deformed_gaussians)  # Not given in the sources.
-        target_image = get_target_image(subject_data, iteration)  # Not given in the sources.
-        loss = compute_loss(rendered_image, target_image, lambda_l, lambda_s, Ts, Tr)  # Not given in the sources.
-        
-        # Backpropagate and update embeddings and Gaussian attributes
-        update_parameters(loss)  # Not given in the sources.
-        
-        # Densify, Prune, and Opacity Reset Schedule
-        if iteration >= 600 and iteration <= 15000:
-            if iteration % 100 == 0:
-                # Densify and Prune
-                gaussians = densify_and_prune(gaussians, loss_gradients)  # Not given in the sources.
-                
-                # Walking on Triangle Step
-                # Ensures Gaussians stay on mesh surface
-                gaussians = walking_on_triangle(gaussians, mesh)
-        
-        if iteration % 3000 == 0 and iteration <= 15000:
-            # Reset opacity to remove redundant Gaussians
-            for g in gaussians:
-                g.opacity = 0.0
-                
-    return gaussians
-
-def walking_on_triangle(gaussians, mesh):
-    # Project Gaussians back to mesh surface to prevent sticking at boundaries
-    # Implementation detail: pybind11, ~3.5 ms per frame
-    for g in gaussians:
-        g.position = project_to_mesh_surface(g.position, mesh)  # Not given in the sources.
-    return gaussians
-```
+A real-time human avatar rendering method that embeds 3D Gaussians onto a driving mesh (FLAME) to enable non-ambiguous motion control and high-fidelity rendering of complex geometries like eyes and hair. Unlike [INSTA](52-inst.md), which suffers from noise in complex regions due to nearest-triangle sampling, SplattingAvatar uses trainable embeddings for motion control, avoiding unstable sampling in canonical space. It prioritizes photometric quality and rendering efficiency over accurate geometry and material reconstruction, outperforming mesh-based approaches like [FLARE](52-flare.md) in visual fidelity.
 
 ### GauHuman
-Re-designs the prune/split/clone operations of the original 3DGS to achieve efficient optimization, achieving minute-level training and real-time rendering (166 FPS) [S1].
+*   **Step:** Re-designs the prune/split/clone operations of the original 3DGS to achieve efficient optimization [S1].
+*   **Number:** It achieves minute-level training and real-time rendering (166 FPS) [S1].
 
 ### GaussianBody
-A method for dynamic digital human modeling from monocular video that leverages physical-based priors to regularize the Gaussians in the canonical space, avoiding artifacts in dynamic cloth that typically arise from monocular input ambiguity [S1].
+*   **Step:** Leverages physical-based priors to regularize the Gaussians in the canonical space to avoid artifacts in dynamic cloth from monocular video [S1].
 
 ### Fast-SegSim
-Adapts the feature rendering pipeline for robotics simulation, achieving real-time open-vocabulary segmentation by fusing 3DGS with a lightweight 2D segmentation network [S2, unofficial].
+*   **Definition:** Adapts the feature rendering pipeline for robotics simulation, achieving real-time open-vocabulary segmentation by fusing 3DGS with a lightweight 2D segmentation network [S2, unofficial].
 
 ### LeafFit
-Applies 3DGS to create digital plant assets, leveraging alpha blending and feature fields to accurately reconstruct translucent leaf structures [S2, unofficial].
+*   **Definition:** Applies 3DGS to create digital plant assets, leveraging alpha blending and feature fields to accurately reconstruct translucent leaf structures [S2, unofficial].
 
-### Inpainting for Displaced Objects
-A technique to fix black smudges and dirty textures caused by displaced objects exposing unseen areas that 3DGS cannot recover from input images [S3]. Unlike vanilla 3DGS which leaves empty spots and dirty textures blended from irrelevant kernels when objects are displaced, this method ameliorates the issue using generative AI inpainting [S3].
-
-The procedure is as follows:
-1. Remove all Gaussian kernels of the object that may be displaced [S3].
-2. Use LaMa [61] to inpaint the rendered results [S3].
-3. Note the new colors of pixels originally in the spots and assign them to the first Gaussian kernel encountered by rays emitted from these pixels [S3].
-4. Average the recorded colors on all noted Gaussian kernels for their diffuse color [S3].
-5. Set opacity to 1 [S3].
-6. Set specular color to 0 to prevent highlights [S3].
+### Inverse Problem State Generation
+*   **Step:** Defines unknown scatterers using a grid mapper and an extinction transform that maps the abstract state vector to a grid mask: `unknown_scatterers = at3d.containers.UnknownScatterers(at3d.medium.UnknownScatterer(grid_to_optical_properties, extinction=(None, at3d.transforms.StateToGridMask(mask=cloud_mask))))` [S3, unofficial].
+*   **Step:** Initializes the state generator with the reconstruction solver dictionary, unknown scatterers, surfaces, numerical parameters, sources, Stokes counts, and background scatterers: `state_gen = at3d.medium.StateGenerator(solvers_reconstruct, unknown_scatterers, surfaces, numerical_parameters, sources, num_stokes, background_optical_scatterers)` [S3, unofficial].
+*   **Parameter:** `cloud_mask`: boolean array identifying cloud regions, derived from `solvers[wvl].medium['cloud'].extinction.data > 0` [S3, unofficial].
+*   **Parameter:** `uncertainty_model`: radiometric noise uncertainty applied to sensors, initialized with parameters 1e-5 and 1e-3 [S3, unofficial].
 
 ## Background
-The application of 3D Gaussian Splatting to specific domains emerged as researchers sought to address the limitations of the base method in handling dynamic, articulated, or semantically rich scenes [S1][S2, unofficial]. Early extensions focused on human avatars, where embedding Gaussians onto canonical human body meshes provided a stable topology for motion [S1]. Subsequent work expanded to dynamic bodies using physical priors to handle cloth deformation [S1], and to robotics and plant modeling by integrating feature fields for semantic reasoning and translucent rendering [S2, unofficial]. Inpainting techniques were developed to handle displaced objects exposing unseen areas, where standard 3DGS fails to reconstruct color and texture information [S3].
+The application-specific extensions of 3D Gaussian Splatting emerged as the base method [Base 3DGS Optimization](7549-base-3d-gaussian-splatting.md) proved insufficient for dynamic, non-rigid, or physically constrained scenes. Early adaptations focused on human avatars, where mesh-based deformation (e.g., [INSTA](52-inst.md)) introduced noise in complex regions like eyes [S2, unofficial]. SplattingAvatar [S2, unofficial] and GaussianBody [S1] introduced embedding-based and physics-based regularization, respectively. Concurrently, methods like GauHuman [S1] optimized the training efficiency for real-time applications. Other domains, such as robotics (Fast-SegSim [S2, unofficial]) and scientific imaging (Inverse Problem State Generation [S3, unofficial]), adapted the representation for feature fusion and inverse problem solving.
 
 ## Sources
 [S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
 [S2] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
-[S3] Gaussian Splashing: Unified Particles for Versatile Motion Synthesis and Rendering, https://doi.org/10.1109/CVPR52734.2025.00057, fetched 2026-10-29
+[S3] lforster/hybridCT, https://github.com/lforster/hybridCT, fetched 2026-10-27 (unofficial)

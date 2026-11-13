@@ -1,0 +1,185 @@
+--- v002.md
++++ v003.md
+@@ -1,91 +1,125 @@
+ # Block Culling
+ 
+-Also called: RT+Cull
+-
+ ## Overview
+-Block culling is an optimization technique for distance-field ray marching that reduces rendering time by skipping traversal of empty or irrelevant blocks within RGBA volumes [S1, unofficial]. It is particularly effective when sparsity in the volume is induced by runtime parameters, such as narrowing the allowed density range, rather than inherent data sparsity [S1, unofficial]. Unlike [Beam Optimization](932-beam-optimization.md) which focuses on ray coherence, or [Bounding Shape Optimization](7750-bounding-shape-optimization.md) which refines geometry bounds, block culling operates on a hierarchical block structure to prune entire regions of the volume tree [S1, unofficial].
+-
++Block culling is an optimization technique for volume rendering that reduces the time required to reach content values inside RGBA volumes by skipping empty or irrelevant spatial blocks [S1, unofficial]. It is particularly effective when sparsity in the volume data results from runtime parameters, such as narrower allowed density ranges, rather than inherent data sparsity [S1, unofficial]. Unlike [Beam Optimization](932-beam-optimization.md) which focuses on ray coherence, or [Bounding Shape Optimization](7750-bounding-shape-optimization.md) which uses geometric bounds, block culling operates on a hierarchical block structure to prune traversal paths [S1, unofficial].
+ ## How it works
+-Block culling integrates with the ray traversal logic to determine if a block contains any voxels that satisfy the current rendering criteria (e.g., density threshold). If a block is determined to be "culled" (empty with respect to the criteria), the ray traversal skips the block entirely, avoiding sample fetches and shading calculations.
++Block culling integrates with hardware ray tracing (RT) to accelerate volume rendering. The method relies on the hierarchical structure of the volume data, typically organized into blocks (e.g., octree nodes or fixed-size grid blocks).
+ 
+ **Inputs and Outputs:**
+-*   **Input:** Ray origin, ray direction, volume block hierarchy (e.g., octree or grid), current density/content range parameters.
+-*   **Output:** Rendered pixel color, reduced traversal time.
++*   **Input:** A volume dataset organized in blocks, a ray traversal state, and a user-defined content range (density threshold) for rendering.
++*   **Output:** A rendered image with reduced computation time by skipping blocks that do not contain relevant content.
+ 
+ **Data Structures:**
+-The method relies on the existing block hierarchy used in [Block Walking](932-beam-optimization.md) or standard ray tracing. Each block node typically contains bounding information and a summary statistic (e.g., max density, occupancy bit) used for culling tests [S1, unofficial].
++*   **Block Hierarchy:** The volume is divided into blocks. Each block typically stores metadata indicating whether it contains content within the relevant density range. The exact layout depends on the underlying acceleration structure (e.g., BVH or Octree), but the key attribute is a "valid" or "empty" flag for the content range [S1, unofficial].
++*   **Ray State:** Standard ray tracing state including origin, direction, and current traversal depth [S1, unofficial].
+ 
+-**Steps:**
+-1.  **Ray-Block Intersection:** Intersect the ray with the current block's bounding volume.
+-2.  **Culling Test:** Evaluate the block's summary statistic against the user-requested content range.
+-    *   If the block's maximum density is below the lower threshold of the requested range, or minimum density is above the upper threshold, the block is culled.
+-    *   If the block passes the test, traversal continues into the block's children or interior samples.
+-3.  **Traversal:** Proceed to the next block or sample. If culled, skip to the next sibling or parent's next child.
++**Algorithm Steps:**
++1.  **Ray-Block Intersection:** For each ray, determine the first block it intersects.
++2.  **Culling Check:** Evaluate the block's metadata. If the block is determined to be empty or outside the user-requested content range, the block is culled.
++3.  **Traversal:**
++    *   If the block is culled, skip to the next intersected block along the ray's path.
++    *   If the block contains relevant content, traverse into its children (if hierarchical) or perform ray marching within the block.
++4.  **Rendering:** Accumulate color and opacity for rays passing through non-culled blocks [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Content Range:** The density interval $[d_{min}, d_{max}]$ considered "visible" or relevant. This is often a runtime parameter [S1, unofficial].
++*   **Content Range:** The density threshold defining what constitutes "content." If the user-requested range is greater than or equal to the actual content range, culling has no impact [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **No Impact:** If the user-requested content range is greater than or equal to the actual content range of the volume, block culling provides no significant performance gain and does not cause regression [S1, unofficial].
+-*   **Sparse Data:** When data is inherently too sparse, block culling may not be as effective as block walking, as the overhead of checking culling conditions might outweigh the benefits if few blocks are actually skipped [S1, unofficial].
++*   **No Impact Range:** If the user-requested content range encompasses the entire actual content range, block culling provides no performance benefit and does not cause significant regression [S1, unofficial].
++*   **Sparse Data:** When data is inherently too sparse, block culling may not be effective if the blocks are small or if the overhead of checking culling conditions outweighs the savings [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def cull_block(block, ray, density_range):
++def ray_march_with_block_culling(ray, volume_structure, content_range):
+     """
+-    Determines if a block can be skipped based on density range.
+-    block.max_density: Maximum density value in the block.
+-    block.min_density: Minimum density value in the block.
+-    density_range: Tuple (lower_bound, upper_bound).
++    Ray marching with block culling optimization.
++    
++    Args:
++        ray: Ray object with origin and direction.
++        volume_structure: Hierarchical volume structure with block metadata.
++        content_range: Tuple (min_density, max_density) for relevant content.
++        
++    Returns:
++        Color and opacity for the ray.
+     """
+-    lower, upper = density_range
+-    # If the block's density range does not overlap with the requested range, cull it
+-    if block.max_density < lower or block.min_density > upper:
+-        return True  # Cull this block
+-    return False     # Keep this block for further traversal
+-
+-def ray_march_with_culling(ray, root_block, density_range):
+-    """
+-    Simplified ray marching with block culling.
+-    """
+-    stack = [root_block]
+-    color = vec3(0.0)
++    color = (0.0, 0.0, 0.0)
++    opacity = 0.0
+     
+-    while stack:
+-        block = stack.pop()
+-        
+-        # 1. Intersect ray with block
+-        if not ray_intersects_block(ray, block):
++    # Get initial block intersection
++    current_block = volume_structure.get_first_intersected_block(ray)
++    
++    while current_block is not None:
++        # Check if block contains relevant content
++        if not is_block_relevant(current_block, content_range):
++            # Cull block: skip to next intersection
++            current_block = volume_structure.get_next_intersected_block(ray, current_block)
+             continue
+             
+-        # 2. Apply Culling Test
+-        if cull_block(block, ray, density_range):
+-            continue
+-            
+-        # 3. Traverse or Sample
+-        if block.is_leaf():
+-            color += sample_block(ray, block)
++        # Block is relevant: traverse or march
++        if current_block.is_leaf():
++            # Perform ray marching within the block
++            block_color, block_opacity = ray_march_block(ray, current_block)
++            color, opacity = composite(color, opacity, block_color, block_opacity)
+         else:
+-            # Push children to stack (order may vary based on traversal strategy)
+-            for child in block.children:
+-                stack.append(child)
++            # Traverse to children
++            current_block = volume_structure.get_first_child(current_block)
++            # Note: In a full implementation, children are processed in order
++            # This simplified loop assumes a specific traversal order
++            # For a proper implementation, a stack or recursion is needed
++            # Here we assume the structure handles child traversal internally
++            # or we iterate through children explicitly
++            for child in current_block.children:
++                # Re-evaluate ray against child
++                child_ray = ray.transform_to_local(child.transform)
++                child_color, child_opacity = ray_march_with_block_culling(child_ray, child, content_range)
++                color, opacity = composite(color, opacity, child_color, child_opacity)
+                 
+-    return color
++        # Move to next block in ray path
++        current_block = volume_structure.get_next_intersected_block(ray, current_block)
++        
++    return color, opacity
++
++def is_block_relevant(block, content_range):
++    """
++    Check if block contains content within the specified range.
++    
++    Args:
++        block: Block object with metadata.
++        content_range: Tuple (min_density, max_density).
++        
++    Returns:
++        Boolean indicating relevance.
++    """
++    # Metadata typically stores min and max density in the block
++    block_min = block.metadata.min_density
++    block_max = block.metadata.max_density
++    
++    # Check for overlap with content range
++    return block_max >= content_range[0] and block_min <= content_range[1]
+ ```
++[G] The pseudocode assumes a standard hierarchical traversal. In hardware ray tracing, this is often handled by the BVH traversal unit, where culling is a property of the node's bounding volume or density bounds. The `is_block_relevant` function is the core culling logic.
+ 
+ ## Subtopics
+ 
+ ### Block Walking with Culling
+-This variant combines block walking (which skips empty space by jumping between occupied blocks) with block culling (which prunes blocks outside the density range) [S1, unofficial]. It is chosen when both spatial sparsity and density-based filtering are present. It offers the best average performance compared to using either technique alone or standard ray tracing [S1, unofficial].
++Block walking with culling combines block walking and block culling algorithms to reduce rendering time [S1, unofficial]. Block walking optimizes traversal by skipping empty space between blocks, while culling prunes blocks outside the content range [S1, unofficial]. This combination yields the best average performance compared to using either technique alone or standard ray tracing [S1, unofficial]. It is particularly effective in block traversal mode, where it achieves significant speedups (e.g., 5.543ms vs 9.745ms on Fish (a)) [S1, unofficial]. However, in blend mode, the performance gain is less consistent, with some datasets showing minimal improvement (e.g., 107.725ms vs 113.983ms on Fish (a)) [S1, unofficial]. The combination is most beneficial when the volume has a mix of sparse and dense regions, allowing both techniques to prune different parts of the traversal [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces the number of visited blocks and samples. In block traversal mode, 'RT+Cull' achieved 4.823ms on Fish (c) vs 7.375ms for 'RT' [S1, unofficial]. In blend mode, 'RT+Cull' achieved 8.079ms on Fish (c) vs 10.798ms for 'RT' [S1, unofficial].
+-*   **Memory Complexity:** No additional memory overhead beyond the block hierarchy's existing metadata.
+-*   **Strengths:** Significant performance gains (up to 2x in block traversal mode) when sparsity is caused by runtime density filtering [S1, unofficial]. No performance regression when culling is ineffective [S1, unofficial].
+-*   **Limitations:** Less effective when data is inherently too sparse, where block walking overhead is high and culling gains are limited [S1, unofficial].
+-*   **Scaling:** Performance improvement scales with the degree of sparsity induced by the content range.
++*   **Time Complexity:** Reduces the number of blocks traversed, leading to faster rendering times. The exact speedup depends on the sparsity and the content range [S1, unofficial].
++*   **Memory Complexity:** Requires additional metadata for blocks to store density bounds, increasing memory usage slightly [S1, unofficial].
++*   **Measured Performance:**
++    *   **Block Traversal Mode:**
++        *   Fish (c): RT+Cull: 4.823ms vs RT: 7.375ms [S1, unofficial].
++        *   Fish (a): RT+Walk+Cull: 5.543ms vs RT: 9.745ms [S1, unofficial].
++    *   **Blend Mode:**
++        *   Fish (c): RT+Cull: 8.079ms vs RT: 10.798ms [S1, unofficial].
++        *   Fish (a): RT+Walk+Cull: 107.725ms vs RT: 113.983ms [S1, unofficial].
++*   **Strengths:** Effective for sparse volumes with runtime density thresholds; no significant regression when culling is ineffective [S1, unofficial].
++*   **Limitations:** Less effective when data is inherently too sparse, as block walking overhead may increase [S1, unofficial]. Performance gains vary by dataset and mode [S1, unofficial].
++*   **When to Use:** When rendering RGBA volumes with sparse content defined by runtime density ranges, especially in block traversal mode [S1, unofficial].
++*   **When Not to Use:** When the content range covers the entire data range, or when data is extremely sparse, making block walking inefficient [S1, unofficial].
+ 
+ ## Background
+-Block culling was introduced as part of sparse volume rendering techniques leveraging hardware ray tracing [S1, unofficial]. It addresses the inefficiency of standard ray marching in large, sparse RGBA volumes where much of the space is empty or irrelevant to the current view [S1, unofficial].
++Block culling was introduced in the context of sparse volume rendering using hardware ray tracing [S1, unofficial]. It was developed to address the performance challenges of rendering large, sparse volumes by leveraging the hierarchical structure of the data and the capabilities of modern GPU ray tracing hardware [S1, unofficial]. The technique is part of a broader effort to optimize volume rendering for real-time applications, such as medical imaging and scientific visualization [S1, unofficial].
+ 
+ ## Sources

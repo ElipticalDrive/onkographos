@@ -1,0 +1,127 @@
+--- v005.md
++++ v006.md
+@@ -1,54 +1,93 @@
+ # Threshold Slicing and Anti-Aliasing
+ 
+-Also called: Hybrid Threshold Splatting
++Also called: Threshold Slicing, Hybrid Splatting-Slicing
+ 
+ ## Overview
+-Threshold Slicing and Anti-Aliasing is a hybrid volume rendering technique that partitions volumetric data based on a scalar value threshold to optimize rendering quality and performance. It addresses the problem of aliasing artifacts and geometric inaccuracies that arise when rendering unstructured or curvilinear grids using standard rasterization methods. Unlike pure splatting, which may blur sharp features, or pure polygonal slicing, which struggles with complex topologies and gaps, this method renders high-value cells as precise polygons and low-value cells as anti-aliased ellipsoidal splats [S1].
++Threshold Slicing and Anti-Aliasing is a hybrid rendering technique for unstructured and curvilinear grids that combines polygon-based slicing for high-value data with ellipsoidal splatting for low-value data to ensure complete coverage [S1]. It solves the problem of visual gaps and aliasing artifacts that occur when standard slicing leaves empty space between slice planes or when pixel samples miss thin structures [S1]. Unlike pure slicing methods which may miss data between planes, or pure splatting which may suffer from over-blurring, this method dynamically selects the representation based on a volume threshold [S1].
+ 
+ ## How it works
+-The method operates on unstructured or curvilinear grid data, decomposing the volume into convex polyhedral cells. It utilizes a hybrid rendering pipeline that combines exact geometric projection for significant data with approximate splatting for less significant data.
+-
+ **Inputs and Outputs:**
+-*   **Input:** A volumetric dataset defined by unstructured/curvilinear cells, a camera view (Model-View-Projection matrix), and a scalar threshold value $T$.
+-*   **Output:** A 2D image where high-density regions are sharp and low-density regions are smoothly blended.
++*   **Input:** A volume dataset defined on curvilinear or unstructured grids, a scalar threshold value $T$, and a camera view.
++*   **Output:** A rendered 2D image.
+ 
+ **Data Structures:**
+-*   **Cell Data:** Each cell $C_i$ is defined by its vertices $\mathbf{v}_j$ and scalar values $s_j$ at those vertices.
+-*   **Threshold:** A scalar $T$ determines the classification of each cell.
++*   **Cells:** The volume is composed of convex polyhedral cells.
++*   **Threshold:** A scalar value $T$ used to classify cells.
+ 
+-**Algorithm Steps:**
++**Steps:**
++1.  **Classification:** For each cell in the volume, determine if its representative value (e.g., center value or maximum) is above the threshold $T$.
++2.  **High-Value Rendering (Slicing):** For cells where the value is above $T$:
++    *   Slice the cell using a collection of closely spaced parallel planes [S1].
++    *   Project the resulting polygons onto the image plane [S1].
++    *   Render these polygons using standard rasterization techniques.
++3.  **Low-Value Rendering (Splatting):** For cells where the value is below $T$ (or cells that lie between the slice planes/pixel samples):
++    *   Represent the cell using an anti-aliased ellipsoidal splat [S1].
++    *   The splat is defined by the cell's geometry and projected footprint.
++    *   Render the splats using accumulation (blending) to handle transparency and overlap [S1].
+ 
+-1.  **Cell Classification:** Iterate through all cells $C_i$ in the volume. For each cell, determine its average or maximum scalar value. If the value exceeds the threshold $T$, classify the cell as "High"; otherwise, classify it as "Low".
+-2.  **High-Value Rendering (Slicing):** For all cells classified as "High":
+-    *   Project the vertices of the convex polyhedral cell onto the 2D image plane using the current view matrix.
+-    *   Perform polygonal rasterization. The projection of the edges divides the image plane into polygons. Each polygon lies within the projection of a single front-facing face and a single back-facing face.
+-    *   For orthogonal projections, the contribution of a pixel is determined by the length $l$ of the viewing ray segment within the cell. The intensity is modulated by the cell's density/extinction coefficient.
+-3.  **Low-Value Rendering (Splatting):** For all cells classified as "Low":
+-    *   These cells may lie between slice planes or between pixel samples of the high-value polygons.
+-    *   Render these cells using anti-aliased ellipsoidal splats, as described by Zwicker et al. [S1, citing [5]].
+-    *   The splat footprint $F(x,y)$ is the integral of the 3D kernel along the view direction, accounting for perspective distortion (foreshortening) via EWA (Elliptical Weighted Average) filtering.
+-    *   The intensity written to the pixel is $P(x,y) = \text{weight}(x,y) \cdot \rho(C_i)$, where $\text{weight}(x,y)$ is the splat footprint value at pixel $(x,y)$ and $\rho(C_i)$ is the density of the cell.
+-4.  **Compositing:** Accumulate contributions from both high-value polygons and low-value splats. Standard alpha compositing is used to handle transparency and occlusion, typically in back-to-front order to ensure correct blending of the splatted low-value data behind the sliced high-value geometry.
++**Formulas:**
++*   Let $C$ be a cell.
++*   If $Value(C) > T$: Render as sliced polygon.
++*   If $Value(C) \le T$: Render as ellipsoidal splat.
+ 
+ **Parameters:**
+-*   **Threshold $T$:** Determines the boundary between polygonal and splat rendering. Typical values depend on the data's scalar range (e.g., normalized 0-1).
+-*   **Kernel Width:** For the ellipsoidal splats, the width of the Gaussian kernel controls the smoothness of the anti-aliasing.
++*   **Threshold ($T$):** The scalar value separating slicing from splatting. Typical values depend on the data normalization.
++*   **Slice Plane Spacing:** The distance between parallel planes used for slicing. Must be small enough to prevent gaps but large enough for performance.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** When cells lie exactly on the threshold, consistent classification is required to avoid gaps or overlaps. [G] A small epsilon margin or consistent tie-breaking rule (e.g., $\ge$ vs $>$) should be applied.
+-*   **Gaps:** Low-value cells might lie between the slice planes of high-value cells. The splatting step specifically addresses this by filling these gaps with smooth, anti-aliased contributions, preventing visual holes.
+-*   **Complex Topology:** For non-convex cells, the polygonal projection step may require decomposition into convex sub-cells before rasterization.
++*   **Gaps:** If the slice plane spacing is too large, gaps may appear even for high-value cells. The method assumes "closely spaced" planes [S1].
++*   **Between Planes:** Cells lying between slice planes or between pixel samples in these planes are explicitly handled by the splatting stage to prevent visual holes [S1].
++*   **Precision:** The threshold comparison must be consistent across parallel processing stages if parallelized [S1].
++
++**Pseudocode:**
++```python
++def render_threshold_slicing(volume, threshold, camera):
++    high_value_cells = []
++    low_value_cells = []
++    
++    # Step 1: Classification
++    for cell in volume.cells:
++        # Determine representative value for the cell
++        cell_value = get_cell_value(cell)
++        
++        if cell_value > threshold:
++            high_value_cells.append(cell)
++        else:
++            low_value_cells.append(cell)
++            
++    # Step 2: High-Value Rendering (Slicing)
++    # Slice cells into polygons using closely spaced parallel planes
++    sliced_polygons = []
++    for cell in high_value_cells:
++        # Generate intersection polygons with parallel planes
++        polygons = slice_cell_with_planes(cell, camera.plane_spacing)
++        sliced_polygons.extend(polygons)
++        
++    # Render polygons
++    render_polygons(sliced_polygons, camera)
++    
++    # Step 3: Low-Value Rendering (Splatting)
++    # Render remaining cells as anti-aliased ellipsoidal splats
++    splats = []
++    for cell in low_value_cells:
++        # Create ellipsoidal splat based on cell geometry and view
++        splat = create_ellipsoidal_splat(cell, camera)
++        splats.append(splat)
++        
++    # Render splats using accumulation
++    render_splats(splats, camera)
++```
+ 
+ ## Subtopics
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the distribution of data relative to the threshold. High-value cells require $O(N_{high} \cdot V)$ for polygon projection and rasterization, where $V$ is the number of vertices. Low-value cells require $O(N_{low} \cdot K)$ for splatting, where $K$ is the number of pixels covered by the splat footprint.
+-*   **Memory Complexity:** $O(N)$ to store the volume data and cell connectivity.
+-*   **Strengths:** Combines the sharpness of polygonal rendering for significant structures with the robustness of splatting for filling gaps and anti-aliasing. Effective for unstructured grids where polygonal rendering alone might be complex or incomplete.
+-*   **Limitations:** Requires two rendering passes or a hybrid pipeline. The choice of threshold is critical and may require tuning.
+-*   **When to use:** Ideal for interactive visualization of large unstructured datasets where both sharp features and smooth background data are important.
++*   **Time Complexity:** Depends on the ratio of high-value to low-value cells. Slicing is generally more expensive per cell than splatting due to polygon generation, but splatting requires blending.
++*   **Memory Complexity:** Requires storing both polygon meshes for high-value cells and splat data for low-value cells.
++*   **Strengths:** Eliminates gaps between slice planes; handles thin structures better than pure slicing; reduces aliasing for low-value regions.
++*   **Limitations:** Requires careful tuning of the threshold and slice plane spacing; hybrid approach increases implementation complexity.
++*   **When to Use:** When visualizing unstructured grids where both high-density features (best rendered as surfaces) and low-density diffuse features (best rendered as volumes) are important.
+ 
+ ## Background
+-The method was proposed in the context of volume rendering for curvilinear and unstructured grids. It builds on the work of Yagel et al. for slicing cells into polygons and Zwicker et al. for anti-aliased ellipsoidal splatting. The hybrid approach was introduced to handle the limitations of pure polygonal methods (aliasing, gaps) and pure splatting methods (blurring, lack of sharp edges) in complex grid structures [S1].
++Originated in the context of volume rendering for curvilinear and unstructured grids [S1]. It builds on the idea of slicing cells into polygons (as proposed by Yagel et al.) and combining it with anti-aliased ellipsoidal splats (as described by Zwicker et al.) to handle the gaps inherent in slicing [S1]. The method was designed to provide interactive visualization for large datasets, with parallelization strategies also described [S1].
+ 
+ ## Sources

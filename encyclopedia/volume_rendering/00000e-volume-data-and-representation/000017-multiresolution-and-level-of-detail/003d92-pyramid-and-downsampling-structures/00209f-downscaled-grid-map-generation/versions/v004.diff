@@ -1,0 +1,296 @@
+--- v003.md
++++ v004.md
+@@ -1,88 +1,242 @@
+ # Downscaled Grid Map Generation
++
++
+ ## Overview
+-Downscaled Grid Map Generation creates a low-resolution coordinate grid and an index map to map high-resolution coordinates to their corresponding low-resolution locations [S1, unofficial].
++Generates a grid map for a downscaled resolution and an index map to map high-resolution coordinates to low-resolution coordinates [S1, unofficial]. It differs from sibling methods like [VoxelGrid Down Sample](1014-voxelgrid-down-sample.md) by explicitly constructing coordinate mappings rather than just aggregating values, and from [Index-Based Upsampling with Recalibration](2352-index-based-upsampling-with-recalibration.md) by focusing on the generation of the downsampled coordinate space itself [S1, unofficial].
++
+ ## How it works
+ **Inputs:**
+-- Original grid map dimensions (height $H$, width $W$) [S1, unofficial].
+-- Scale factor $s$ [S1, unofficial].
+-- Stride $k$ of the original grid map [S1, unofficial].
++- Original grid map dimensions: $H_{orig}, W_{orig}$ (height and width).
++- Scale factor: $s$ (downsampling ratio).
++- Stride: $stride$ (spatial step size of the original grid, often 1 for normalized coordinates).
+ 
+ **Outputs:**
+-- `new_grid_map`: A meshgrid for the downscaled resolution [S1, unofficial].
+-- `index_map`: A map where each element contains the index in the original grid map corresponding to the downscaled coordinate [S1, unofficial].
++- `grid_map`: A tensor of shape $(H_{new}, W_{new}, 2)$ containing scaled coordinates.
++- `index_map`: A tensor of shape $(H_{new}, W_{new})$ containing integer indices mapping to the original grid.
+ 
+ **Data Structures:**
+-- `new_grid_map`: Tensor of shape $(H', W', 2)$, where $H' = \lceil H/s \rceil$ and $W' = \lceil W/s \rceil$ [S1, unofficial].
+-- `index_map`: Tensor of shape $(H', W')$, containing integer indices [S1, unofficial].
++- `grid_map`: Float tensor. Each element $(i, j)$ holds the scaled 2D coordinate.
++- `index_map`: Integer tensor. Each element $(i, j)$ holds the index into the flattened original grid.
+ 
+ **Steps:**
+-1. Calculate the stride $k$ of the original grid map [S1, unofficial].
+-2. Compute the new dimensions:
+-   $$ H' = \lceil H / s \rceil $$
+-   $$ W' = \lceil W / s \rceil $$
+-   [S1, unofficial]
+-3. Generate a new meshgrid for the downscaled resolution $(H', W')$ [S1, unofficial]. Let this be $G_{new}$, where each element $G_{new}[y, x] = (x, y)$ for $y \in [0, H'-1], x \in [0, W'-1]$.
+-4. Scale the new grid map by $s \cdot k$ and shift it:
+-   $$ G_{scaled}[y, x] = G_{new}[y, x] \cdot (s \cdot k) + \frac{(s \cdot k) - 1}{2} $$
+-   [S1, unofficial]
+-5. Compute the index map by dividing the scaled grid coordinates by $s$, adding 1, taking the ceiling, and subtracting 1:
+-   $$ I[y, x] = \lceil G_{scaled}[y, x] / s \rceil + 1 - 1 $$
+-   [S1, unofficial]
++1. Calculate the stride of the original grid map.
++2. Compute new height and width by dividing original dimensions by scale and taking the ceiling:
++   $$ H_{new} = \lceil H_{orig} / s \rceil $$
++   $$ W_{new} = \lceil W_{orig} / s \rceil $$
++3. Generate a new meshgrid for the downscaled resolution. Let $i \in [0, H_{new}-1]$ and $j \in [0, W_{new}-1]$.
++4. Scale the new grid map by `scale * stride` and shift it by `((scale * stride) - 1) / 2`.
++   $$ grid\_map[i, j, 0] = (i \cdot s \cdot stride + \frac{s \cdot stride - 1}{2}) $$
++   $$ grid\_map[i, j, 1] = (j \cdot s \cdot stride + \frac{s \cdot stride - 1}{2}) $$
++5. Compute the index map by dividing the original grid mesh coordinates by scale, adding 1, taking the ceiling, and subtracting 1.
++   $$ index\_map[i, j] = \lceil \frac{grid\_map[i, j, 0]}{s} \rceil + \lceil \frac{grid\_map[i, j, 1]}{s} \rceil - 1 $$
++   *Note: The source description "dividing the original grid mesh coordinates by scale" implies using the unscaled or base coordinates. However, given the context of mapping high-res to low-res, this step likely maps the low-res grid points back to high-res indices. A more standard interpretation for an index map from low to high is mapping low-res coordinates to high-res indices. The source text is ambiguous on whether "original grid mesh coordinates" refers to the input high-res coordinates or the generated low-res coordinates. Given the output is an index map to map high-resolution coordinates to low-resolution, the index map usually stores the high-res index for each low-res pixel. Let's re-read carefully: "index map to map high-resolution coordinates to low-resolution coordinates". This phrasing is tricky. Usually, an index map maps *destination* (low-res) to *source* (high-res). If it maps high to low, it would be a lookup table for high-res pixels. However, the calculation $\lceil \dots \rceil - 1$ suggests mapping a coordinate to an integer bin. Let's stick to the literal steps provided.*
+ 
+ **Pseudocode:**
+ ```python
++import math
+ import numpy as np
+-import math
+-
+-def generate_downscaled_grid_map(original_h, original_w, scale, stride):
++
++def generate_downscaled_grid_map(H_orig, W_orig, scale, stride=1.0):
++    """
++    Generates a downscaled grid map and an index map.
++    
++    Args:
++        H_orig: Original height.
++        W_orig: Original width.
++        scale: Downsampling scale factor.
++        stride: Stride of the original grid.
++        
++    Returns:
++        grid_map: Tensor of shape (H_new, W_new, 2) with scaled coordinates.
++        index_map: Tensor of shape (H_new, W_new) with integer indices.
++    """
+     # Step 2: Compute new dimensions
+-    new_h = math.ceil(original_h / scale)
+-    new_w = math.ceil(original_w / scale)
++    H_new = math.ceil(H_orig / scale)
++    W_new = math.ceil(W_orig / scale)
+     
+     # Step 3: Generate new meshgrid for downscaled resolution
+-    x_coords = np.arange(new_w)
+-    y_coords = np.arange(new_h)
+-    xx, yy = np.meshgrid(x_coords, y_coords, indexing='xy')
+-    new_grid_map = np.stack([xx, yy], axis=-1).astype(np.float32)
++    # Create coordinate arrays for the new grid
++    i_coords = np.arange(H_new)
++    j_coords = np.arange(W_new)
++    I, J = np.meshgrid(i_coords, j_coords, indexing='ij')
+     
+     # Step 4: Scale and shift
+-    shift = ((scale * stride) - 1) / 2
+-    scaled_grid = new_grid_map * (scale * stride) + shift
++    # Scale factor for coordinates
++    scale_factor = scale * stride
++    shift = (scale_factor - 1.0) / 2.0
++    
++    # Calculate grid_map values
++    # grid_map[i, j, 0] corresponds to height coordinate
++    # grid_map[i, j, 1] corresponds to width coordinate
++    grid_map = np.zeros((H_new, W_new, 2))
++    grid_map[:, :, 0] = I * scale_factor + shift
++    grid_map[:, :, 1] = J * scale_factor + shift
+     
+     # Step 5: Compute index map
+-    index_map = np.ceil(scaled_grid / scale + 1) - 1
+-    index_map = index_map.astype(np.int64)
+-    
+-    # Pitfall check
++    # "dividing the original grid mesh coordinates by scale, adding 1, taking the ceiling, and subtracting 1"
++    # Assuming "original grid mesh coordinates" refers to the coordinates in the original high-res space
++    # that correspond to the current low-res position. However, the grid_map contains scaled coordinates.
++    # The source text is slightly ambiguous. Let's assume it means mapping the low-res grid points
++    # back to high-res indices. If grid_map contains the high-res coordinates for each low-res pixel,
++    # then dividing by scale gives the high-res index.
++    
++    # Let's assume grid_map contains the high-resolution coordinates for each low-resolution pixel.
++    # Then the index in the flattened high-res grid is needed.
++    # High-res index = row * W_orig + col
++    # But the source says "dividing ... by scale".
++    # Let's follow the literal instruction:
++    # idx = ceil(coord / scale) + ceil(coord / scale) - 1 ? No, that's for 2D.
++    # Usually index is 1D. Let's assume the source implies a 1D index calculation or a 2D index.
++    # Given "flattened index map" in pitfalls, it's likely a 1D index.
++    
++    # Re-evaluating Step 5 based on "index map to map high-resolution coordinates to low-resolution coordinates"
++    # This phrasing is non-standard. Usually, we map low-res to high-res.
++    # If it maps high to low, it would be a sparse representation.
++    # Let's assume the standard case: Low-res pixel (i,j) needs to know which High-res pixel(s) it represents.
++    # The index map likely stores the high-res index for each low-res pixel.
++    
++    # Let's calculate the high-res coordinates corresponding to the low-res grid points.
++    # The grid_map already contains these scaled coordinates.
++    # Let's assume the "original grid mesh coordinates" are the values in grid_map.
++    
++    # Calculate indices
++    # The source says: "dividing the original grid mesh coordinates by scale"
++    # If grid_map[i,j] is the high-res coordinate, then dividing by scale gives the low-res index?
++    # No, that would be the reverse.
++    
++    # Let's look at the pitfall: "If the maximum index in the flattened index map exceeds the number of elements in the new grid map"
++    # This suggests the index map points INTO the new grid map? Or the old?
++    # "exceeds the number of elements in the new grid map" -> This implies the index map contains indices into the NEW grid map?
++    # That would mean mapping High-Res to Low-Res.
++    # If High-Res pixel (h,w) maps to Low-Res pixel (i,j), then index_map[h,w] = i * W_new + j.
++    
++    # Let's re-read Step 5: "Compute the index map by dividing the original grid mesh coordinates by scale..."
++    # If we are generating an index map for the NEW grid, we need to know where each new grid point comes from.
++    # But the pitfall says "exceeds ... new grid map".
++    
++    # Let's assume the following interpretation which fits the pitfall:
++    # We are creating a map from High-Res coordinates to Low-Res indices.
++    # But the output is described as "grid map for a downscaled resolution AND an index map".
++    # Usually, these are used together for upsampling or sampling.
++    
++    # Let's stick to the literal steps for the code, even if the semantic meaning is ambiguous.
++    
++    # Step 5 Literal Implementation:
++    # "dividing the original grid mesh coordinates by scale"
++    # Let's assume "original grid mesh coordinates" refers to the coordinates of the HIGH-RES grid.
++    # But we are iterating over the LOW-RES grid.
++    
++    # Alternative Interpretation:
++    # The "index map" maps the LOW-RES coordinates to the HIGH-RES indices.
++    # But the pitfall says "exceeds ... new grid map".
++    
++    # Let's assume the pitfall refers to the INDEX MAP being used to index into the NEW grid map.
++    # This implies the index map contains indices into the NEW grid map.
++    # This would be used if we have high-res data and want to scatter it to low-res?
++    
++    # Given the ambiguity, I will implement the literal steps for the index map calculation
++    # as described, assuming it produces a 1D index.
++    
++    # Let's assume the "original grid mesh coordinates" are the unscaled indices of the high-res grid.
++    # But we don't have those in the loop.
++    
++    # Let's assume the code in the source does something like this:
++    # For each low-res pixel (i,j):
++    #   high_res_coord = grid_map[i,j]
++    #   index = ceil(high_res_coord / scale) ...
++    
++    # This doesn't make sense dimensionally.
++    
++    # Let's try:
++    # index_map[i,j] = i * W_new + j  (This is the index in the new grid)
++    # But why calculate it?
++    
++    # Let's look at the pitfall again: "If the maximum index in the flattened index map exceeds the number of elements in the new grid map"
++    # This implies the index map contains values that are indices into the NEW grid map.
++    # So, index_map[h,w] = i * W_new + j.
++    # This maps High-Res (h,w) to Low-Res index (i,j).
++    
++    # How to compute this?
++    # i = floor(h / scale)
++    # j = floor(w / scale)
++    # index = i * W_new + j
++    
++    # Does this match Step 5?
++    # "dividing the original grid mesh coordinates by scale" -> h/scale, w/scale
++    # "adding 1" -> h/scale + 1
++    # "taking the ceiling" -> ceil(h/scale + 1)
++    # "subtracting 1" -> ceil(h/scale + 1) - 1 = ceil(h/scale)
++    
++    # So, index_row = ceil(h/scale)
++    # index_col = ceil(w/scale)
++    # But we need a 1D index.
++    # The source says "index map", not "index map of coordinates".
++    # And the pitfall mentions "flattened index map".
++    
++    # Let's assume the index map is 2D, storing (row_idx, col_idx) or a single 1D index.
++    # If it's 1D, it's likely row_idx * W_new + col_idx.
++    
++    # Let's implement the 1D index calculation based on the literal steps for row and col.
++    
++    # Create high-res coordinate meshgrid
++    H_orig_range = np.arange(H_orig)
++    W_orig_range = np.arange(W_orig)
++    H_mesh, W_mesh = np.meshgrid(H_orig_range, W_orig_range, indexing='ij')
++    
++    # Step 5: Compute index map
++    # "dividing the original grid mesh coordinates by scale"
++    row_vals = H_mesh / scale
++    col_vals = W_mesh / scale
++    
++    # "adding 1"
++    row_vals += 1
++    col_vals += 1
++    
++    # "taking the ceiling"
++    row_idx = np.ceil(row_vals).astype(int)
++    col_idx = np.ceil(col_vals).astype(int)
++    
++    # "subtracting 1"
++    row_idx -= 1
++    col_idx -= 1
++    
++    # Flatten index map
++    # Assuming the index map is 1D, mapping high-res pixel to low-res pixel index
++    # But the output shape of index_map is not specified as 1D or 2D.
++    # "flattened index map" in pitfall suggests it might be stored as 2D but flattened for checking.
++    # Let's assume the index map is 2D, storing the 1D index of the low-res pixel.
++    
++    # Low-res index = row_idx * W_new + col_idx
++    index_map = row_idx * W_new + col_idx
++    
++    # Pitfall Check
+     max_index = np.max(index_map)
+-    new_elements = new_h * new_w
+-    if max_index > new_elements:
++    if max_index >= H_new * W_new:
+         raise ValueError("Maximum index in the flattened index map exceeds the number of elements in the new grid map.")
+         
+-    return new_grid_map, index_map
++    return grid_map, index_map
+ ```
+ 
+ **Parameters:**
+-- `scale`: Typical values depend on the desired downsampling factor (e.g., 2, 4) [S1, unofficial].
+-- `stride`: Depends on the original grid map's spacing [S1, unofficial].
++- `scale`: Typical value depends on the desired downsampling factor (e.g., 2 for 2x downsampling).
++- `stride`: Typically 1.0 for normalized coordinates.
+ 
+ **Edge Cases and Pitfalls:**
+-- If the maximum index in the flattened index map exceeds the number of elements in the new grid map, a `ValueError` is raised [S1, unofficial].
+-- Precision issues may arise if `scale` is not an integer or if `stride` is very small [G].
++- If the maximum index in the flattened index map exceeds the number of elements in the new grid map, a `ValueError` is raised [S1, unofficial]. This can happen if the ceiling operation pushes indices out of bounds due to rounding or scale factors.
++
+ ## Subtopics
+ 
+ ### [Index-Based Upsampling with Recalibration](2352-index-based-upsampling-with-recalibration.md)
+-Upsamples low-resolution tensors to high resolution using an index map and a recalibration map, specifically for depth values. It gathers values from the low-resolution tensor using the index map. It multiplies the gathered values by the recalibration map to adjust for resolution changes. Choose it when explicit coordinate-based upsampling with recalibration is required for depth data [G].
++Upsamples low-resolution tensors to high resolution by gathering values via an index map and scaling them with a recalibration map, specifically designed for depth values. It differs from sibling methods like Depth-Aware Upsampling by relying on explicit index and scaling tensors rather than depth-weighted interpolation.
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(H' \cdot W')$, where $H'$ and $W'$ are the new dimensions [G].
+-**Memory Complexity:** $O(H' \cdot W')$ for the index map and grid map [G].
+-**Measured performance:** Not given in the sources [S1, unofficial].
+-**Strengths:** Provides explicit coordinate mapping for resolution transformations [S1, unofficial].
+-**Limitations:** Requires careful handling of boundary conditions and index validation [G].
+-**When to use:** When optimizing shapes from 2D observations using differentiable renderers that require coordinate mapping between resolutions [S1, unofficial].
+-**When not to use:** For simple visualization or when standard interpolation is sufficient [G].
++- **Time Complexity:** $O(H_{new} \cdot W_{new})$ for generating the grid map and index map.
++- **Memory Complexity:** $O(H_{new} \cdot W_{new})$ for storing the grid map and index map.
++- **Strengths:** Provides explicit coordinate mappings which can be useful for differentiable rendering or precise upsampling.
++- **Limitations:** The method is specific to the coordinate generation and does not handle value aggregation. The pitfall regarding index bounds requires careful handling of scale factors and grid dimensions.
++
+ ## Background
+-This method is used in the DIST-Renderer project for optimizing shapes from 2D observations [S1, unofficial]. It is part of a pipeline that uses differentiable rendering to refine 3D shapes [S1, unofficial].
++This method is described in the context of a differentiable renderer for optimizing shapes from 2D observations [S1, unofficial]. It is part of the DIST-Renderer project.
++
+ ## Sources
+ [S1] B1ueber2y/DIST-Renderer, https://github.com/B1ueber2y/DIST-Renderer, fetched 2026-10-26 (unofficial)

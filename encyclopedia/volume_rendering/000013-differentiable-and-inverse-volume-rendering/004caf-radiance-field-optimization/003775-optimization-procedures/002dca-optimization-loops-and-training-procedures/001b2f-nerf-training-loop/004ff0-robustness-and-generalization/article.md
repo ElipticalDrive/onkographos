@@ -1,34 +1,27 @@
 # Robustness and Generalization
 
-Also called: Adversarial Regularization, Ensemble Pruning, Post-Training Enhancement
 
 ## Overview
-This family of methods addresses the generalization gap in Neural Radiance Fields (NeRF), where interpolation between seen views yields inconsistent geometries and artifacts [S1]. While standard training minimizes photometric error on training data, these techniques explicitly enforce smoothness, structural consistency, or feature robustness to improve novel view synthesis quality [S1]. Aug-NeRF distinguishes itself by injecting worst-case adversarial perturbations into coordinates, features, and outputs during training to implicitly regularize the model [S1]. NeRF Ensemble with Conjoint Pruning improves quality by combining models of different resolutions and pruning them jointly to avoid the suboptimal results of vanilla ensembling [S1]. RoGUENeRF differs by operating as a post-processing enhancer that uses multi-view alignment and attention, requiring less training data and avoiding test-time augmentation compared to methods like NeRFLiX [S1].
+This family encompasses methods that improve the generalization of Neural Radiance Fields (NeRFs) to unseen views and enhance visual fidelity by addressing inconsistencies in geometry and texture. Unlike standard training which minimizes photometric error on training data, these methods introduce mechanisms to prevent overfitting, handle calibration errors, or refine features post-training. [Aug-NeRF](10294-aug-nerf.md) uses adversarial perturbations during training to regularize the model, [NeRF Ensemble with Conjoint Pruning](12608-nerf-ensemble-with-conjoint-pruning.md) combines multiple models to reduce variance, and [RoGUENeRF](13731-roguenerf.md) applies geometric reprojection and refinement to restore high-frequency details in novel views.
 
 ## Shared principles
-The core mechanism across these methods is the modification of the standard NeRF optimization or inference pipeline to enforce constraints that prevent overfitting to the specific training views.
-
-1.  **Adversarial Regularization (Aug-NeRF):** The training objective becomes a min-max game where the network parameters $\Theta$ are optimized to minimize loss, while perturbations $\delta$ are optimized to maximize it [S1]. The objective is:
-    $$ \min_{\Theta} \mathbb{E}_{(r, \hat{C}) \sim P(\mathcal{R})} \left[ \| C(r | \Theta) - \hat{C} \|_2^2 + \lambda \max_{\delta} \| C^\dag(r | \Theta, \delta) - \hat{C} \|_2^2 \right] $$
-    where $\lambda = 0.1$ [S1]. Perturbations are constrained within specific radii $\epsilon$ using Projected Gradient Descent (PGD) [S1].
-
-2.  **Ensemble Consistency (NeRF Ensemble):** The method relies on averaging outputs from multiple models with different inductive biases (grid resolutions) and pruning parameters jointly to maintain performance [S1]. The ensemble output is $C_{avg} = \frac{1}{2} \sum_{n=1}^{2} C^n(w_n, x, \omega)$ [S1].
-
-3.  **Multi-View Alignment (RoGUENeRF):** The method aligns features from training views to a novel test view using geometric projections (depth and camera poses) and refines them with optical flow [S1]. It uses attention masks to regulate contributions from misaligned regions [S1].
+The methods share the goal of improving novel view synthesis quality beyond the training set. They operate on the principle that standard NeRF optimization can lead to overfitting, geometric artifacts, or loss of high-frequency details.
+*   **Regularization vs. Ensemble vs. Refinement:** The approaches diverge in mechanism: [Aug-NeRF](10294-aug-nerf.md) uses min-max optimization (adversarial regularization) [S1]; [NeRF Ensemble with Conjoint Pruning](12608-nerf-ensemble-with-conjoint-pruning.md) uses model averaging and pruning [S1]; [RoGUENeRF](13731-roguenerf.md) uses post-processing reprojection [S1].
+*   **Geometric Consistency:** All methods implicitly or explicitly rely on the geometric consistency of the scene representation. [RoGUENeRF](13731-roguenerf.md) explicitly uses rendered depth maps for reprojection [S1]. [Aug-NeRF](10294-aug-nerf.md) perturbs coordinates to enforce smoothness [S1].
 
 ## Subtopics
 
 ### [Aug-NeRF](10294-aug-nerf.md)
-Injects adversarial perturbations at coordinate, feature, and output levels. Choose this when you need to improve generalization to unseen views without sacrificing representation flexibility, avoiding explicit regularizers like Laplacian.
+A training framework that injects worst-case adversarial perturbations at three levels: input coordinates, intermediate MLP features, and pre-rendering outputs. It treats perturbation search as a regularization term in a min-max game. Choose this when you need to improve geometry smoothness and generalization without sacrificing representation capacity, specifically to address non-smooth geometries. It differs from explicit smoothness regularizers by using data-adaptive perturbations.
 
 ### [NeRF Ensemble with Conjoint Pruning](12608-nerf-ensemble-with-conjoint-pruning.md)
-Combines two NeRF models of different grid resolutions (e.g., DVGO) and prunes them jointly. Choose this to achieve superior performance over single models while maintaining a similar memory footprint, avoiding the degradation of vanilla ensembling.
+A method that improves novel view synthesis by combining two NeRF models of different grid resolutions (DVGO architecture). It solves high computational requirements and sensitivity to training data. Choose this when you want to achieve superior results with a similar parameter count/memory footprint compared to a single model. It differs from vanilla ensembling by introducing fine-tuning and conjoint pruning to prevent performance degradation.
 
 ### [RoGUENeRF](13731-roguenerf.md)
-A post-processing pipeline using nearest-neighbor selection, 3D alignment, and non-rigid refinement. Choose this for high-frequency texture fidelity and robustness to inaccurate camera calibration, especially when training data is limited or inference speed is critical (no TTA).
+A post-processing enhancer that improves visual fidelity and restores high-frequency textures while maintaining geometric consistency. It leverages depth maps and camera poses to perform 3D feature reprojection from training views to a novel test view, followed by non-rigid optical flow refinement. Choose this when you need to correct camera calibration errors or enhance textures in a trained model. It differs from training-time methods by operating as a universal enhancer on a single model.
 
 ## Background
-These methods were developed to address the limitations of standard NeRF training, which often produces blurry or inconsistent results in novel views due to under-constrained optimization [S1]. Aug-NeRF introduces adversarial training concepts from computer vision to radiance fields [S1]. The ensemble approach addresses the computational trade-offs of high-resolution voxel grids [S1]. RoGUENeRF extends the field by focusing on post-training enhancement using multi-view consistency, drawing on techniques from image restoration and optical flow estimation [S1].
+The need for robustness and generalization in NeRFs arises from the tendency of neural implicit representations to overfit to training views, resulting in artifacts in novel views [S1]. Adversarial training techniques, such as those in [Aug-NeRF](10294-aug-nerf.md), were adapted from computer vision to regularize neural fields [S1]. Ensemble methods, like [NeRF Ensemble with Conjoint Pruning](12608-nerf-ensemble-with-conjoint-pruning.md), draw from traditional model averaging but require specific pruning strategies to be effective in the context of voxel-based or grid-based NeRFs [S1]. Post-processing enhancements like [RoGUENeRF](13731-roguenerf.md) address the limitation of NeRFs in capturing high-frequency details by leveraging 2D image priors and geometric alignment [S1].
 
 ## Sources
-[S1] Source notes provided in the prompt for Aug-NeRF, NeRF Ensemble with Conjoint Pruning, and RoGUENeRF.
+[S1] Source notes for Robustness and Generalization family

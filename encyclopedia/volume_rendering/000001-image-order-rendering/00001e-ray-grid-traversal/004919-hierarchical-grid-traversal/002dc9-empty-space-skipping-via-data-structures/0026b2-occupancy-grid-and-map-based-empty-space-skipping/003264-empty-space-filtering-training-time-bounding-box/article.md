@@ -26,9 +26,9 @@ Empty Space Filtering is a training-time acceleration strategy for dynamic neura
 1.  **Query Alpha Values:** For every grid vertex in the coarse deformation feature grid, retrieve its alpha value for all training time steps $t$ [S1].
 2.  **Classify Vertices:** Classify each grid vertex as an "object point" if its alpha value exceeds the threshold $\tau$ at any time step; otherwise, classify it as "empty space" [S1].
     *   Condition: A point is an object point if $\alpha > \tau$ [S1].
-3.  **Compute Bounding Box:** Determine the smallest axis-aligned bounding box (AABB) that fully encloses all vertices classified as object points across all time steps. This defines the "coarse geometry prior" [S1].
+3.  **Compute Bounding Box:** Determine the smallest axis-aligned bounding box (AABB) that fully encloses all vertices classified as object points across all time steps [S1]. This defines the "coarse geometry prior" [S1].
 4.  **Filter Sampled Points:** During training, when sampling points for rays:
-    *   **Deformation Module:** Filter out sampled points if their alpha values are below the threshold $\tau$ for *all* training time steps. This assumes empty points are static [S1].
+    *   **Deformation Module:** Filter out sampled points if their alpha values are below the threshold $\tau$ for *all* training time steps [S1]. This assumes empty points are static [S1].
     *   **Canonical Module:** Filter out sampled points if their alpha values are below the threshold $\tau$ at the *canonical time* only [S1].
 5.  **Fine Stage Initialization:** Use the coarse geometry prior (bounding box) to reduce the volume of the grid in the fine model stage, avoiding empty points [S1].
 
@@ -80,8 +80,9 @@ def empty_space_filtering(coarse_deform_grid, alpha_threshold, time_steps):
         # Deformation module: filter if alpha < threshold for ALL times
         always_below = True
         for t in all_times:
-            deformed_point = warp_point(point, t)
-            alpha = coarse_deform_grid.get_alpha_at_position(deformed_point)
+            # Warp canonical point to time t using the deformation field [G]
+            deformed_point = point + deformation_field(point, t)
+            alpha = coarse_deform_grid.query_alpha(deformed_point)  # Trilinear interpolation on grid vertices [G]
             if alpha > alpha_threshold:
                 always_below = False
                 break
@@ -90,24 +91,20 @@ def empty_space_filtering(coarse_deform_grid, alpha_threshold, time_steps):
             return True  # Empty in deformation module
             
         # Canonical module: filter if alpha < threshold at canonical time
-        alpha_canonical = coarse_deform_grid.get_alpha_at_position(point)
+        alpha_canonical = coarse_deform_grid.query_alpha(point)
         if alpha_canonical <= alpha_threshold:
             return True  # Empty in canonical module
             
         return False
 
     return bounding_box, is_empty
-
-def warp_point(point, t):
-    """Warp canonical point to time t using the deformation field [G]."""
-    return point + deformation_field(point, t)
 ```
 
 **Parameters:**
-*   **Alpha Threshold ($\tau$):** A predefined scalar value used to distinguish object points from empty space [S1]. Typical values are not given in the sources.
+*   **Alpha Threshold ($\tau$):** A predefined scalar value used to distinguish object points from empty space [S1]. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Low-Density Regions:** Regions with low density (e.g., a white plate on a white background) may have low image reconstruction error even if the learned density is close to zero. These regions might be incorrectly filtered out as empty space [S1]. This can be alleviated by using a background with a different color or disabling the filtering strategy for such scenes [S1].
+*   **Low-Density Regions:** Regions with low density (e.g., a white plate on a white background) may have low image reconstruction error even if the learned density is close to zero [S1]. These regions might be incorrectly filtered out as empty space [S1]. This can be alleviated by using a background with a different color or disabling the filtering strategy for such scenes [S1].
 
 ## Subtopics
 

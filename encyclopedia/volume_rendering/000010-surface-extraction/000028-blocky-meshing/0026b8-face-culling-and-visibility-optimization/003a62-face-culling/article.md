@@ -3,58 +3,49 @@
 Also called: Exposure Culling, Face Occlusion Culling, Neighbor Check Culling, Only render block faces that aren't adjacent to another face, Voxel Neighbor Face Culling
 
 ## Overview
-Face Culling is a mesh generation optimization that prevents rendering block faces occluded by adjacent solid blocks, significantly reducing triangle count in homogeneous voxel terrain [S1, unofficial]. It solves the problem of naively rendering all six faces of every cube, including those hidden by neighbors, by skipping the generation of internal faces [S2, unofficial]. Unlike [Voxel Backface Culling and Internal Face Masking](4569-voxel-backface-culling-and-internal-face-masking.md) which operates during rasterization or [Block Visibility Culling](5334-block-visibility-culling.md) which operates at a higher level, Face Culling operates at the mesh construction phase to minimize the vertex/index buffer size sent to the GPU [S1, unofficial].
+Face Culling is a mesh generation optimization that prevents the rendering of block faces occluded by adjacent solid voxels, significantly reducing triangle count in homogeneous voxel terrain [S1, unofficial]. It solves the problem of naively rendering all six faces of every cube, including those hidden by neighbors, by skipping the addition of voxel faces adjacent to existing neighboring voxels to the vertex buffer [S2, unofficial]. Unlike view-dependent methods, this is a static, geometry-based optimization performed once during mesh creation, resulting in no framerate loss during rendering [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of occupied voxel positions (solid blocks) in a 3D grid.
-*   **Output:** A list of vertices and indices representing only the exposed faces of the voxel mesh.
+*   **Input:** A voxel grid (or chunk) representing occupied and empty space.
+*   **Output:** A list of faces (vertices/triangles) to be sent to the GPU, excluding internal faces.
 
 **Data Structures:**
-The implementation may use a set or hash map to store occupied positions for $O(1)$ lookup [S2, unofficial].
-*   `occupiedPositions`: A set of 3D integer coordinates (`glm::ivec3` or equivalent) representing the center of each solid voxel [S2, unofficial].
-*   `Cube` struct (optional, for per-cube management):
-    *   `cubeCenter`: `glm::ivec3` representing the voxel's grid position [S2, unofficial].
-    *   `gridPos`: `glm::ivec3` representing the voxel's grid position [S2, unofficial].
-    *   `neighbors`: `int` counter for adjacent solid voxels [S2, unofficial].
-    *   `faces`: `std::vector<Face>` of size 6, one for each direction [S2, unofficial].
-*   `Face` struct (optional):
-    *   `vertices`: `std::vector<float>` containing vertex data [S2, unofficial].
-    *   `normal`: `glm::ivec3` representing the face normal direction [S2, unofficial].
-    *   `isSideFace`: `bool` indicating if the face is a side face (not bottom) [S2, unofficial].
-    *   `isBottomFace`: `bool` indicating if the face is the bottom face [S2, unofficial].
-    *   `renderFlag`: `bool` indicating whether the face should be rendered [S2, unofficial].
+The method relies on checking the occupancy state of neighboring positions. A common implementation uses a set or array to store occupied voxel coordinates [S2, unofficial].
+*   `occupiedPositions`: A collection (e.g., `std::unordered_set<glm::ivec3>` or a boolean array) mapping voxel coordinates to occupancy status [S2, unofficial].
+*   `Cube` struct (optional, for per-cube processing):
+    *   `cubeCenter`: `glm::ivec3` representing the voxel's position [S2, unofficial].
+    *   `faces`: An array or vector of 6 `Face` objects, one for each direction [S2, unofficial].
+    *   `Face` struct:
+        *   `vertices`: `std::vector<float>` containing vertex data [S2, unofficial].
+        *   `normal`: `glm::ivec3` indicating the face's outward direction [S2, unofficial].
+        *   `isSideFace`: `bool` [S2, unofficial].
+        *   `isBottomFace`: `bool` [S2, unofficial].
+        *   `renderFlag`: `bool` indicating whether the face should be rendered [S2, unofficial].
 
 **Numbered Steps:**
-1.  Iterate through each solid voxel at position $P$ in the world grid.
-2.  For each of the six potential faces defined by normal vectors $N \in \{(\pm 1, 0, 0), (0, \pm 1, 0), (0, 0, \pm 1)\}$:
-    a. Calculate the neighbor position $P_{neighbor} = P + N$.
-    b. Check if $P_{neighbor}$ exists in the `occupiedPositions` set.
-    c. If $P_{neighbor}$ is occupied (solid), the face is internal and is culled (not added to the mesh).
-    d. If $P_{neighbor}$ is empty (air) or out of bounds, the face is potentially visible and is added to the vertex buffer [S1, unofficial][S2, unofficial].
-
-**Special Logic (Bottom and Side Faces):**
-Some implementations apply specific culling rules for bottom and side faces to optimize further or handle specific terrain types [S2, unofficial]:
-*   **Bottom Faces:** Always culled (`renderFlag = false`) regardless of neighbors below [S2, unofficial].
-*   **Side Faces:** Culled if a neighbor exists directly adjacent OR if a neighbor exists directly above the neighbor position [S2, unofficial]. This implies checking `occupiedPositions.find(P + N)` and `occupiedPositions.find(P + N + (0, 1, 0))` [S2, unofficial].
+1.  Iterate through every solid voxel in the grid or chunk.
+2.  For each of the six faces of the voxel, determine the coordinate of the adjacent voxel in the direction of the face normal: $P_{neighbor} = P + N$, where $P$ is the current voxel position and $N$ is the face normal [S1, unofficial].
+3.  Check if $P_{neighbor}$ is occupied by a solid block in the `occupiedPositions` data structure [S2, unofficial].
+4.  If $P_{neighbor}$ is occupied, the face is internal and is culled (not added to the mesh) [S1, unofficial].
+5.  If $P_{neighbor}$ is empty (air) or out of bounds, the face is potentially visible and is added to the vertex buffer [S2, unofficial].
 
 **Pseudocode:**
+The following pseudocode implements the neighbor check logic. It assumes a chunk-based approach where boundary checks are handled.
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def generate_mesh(occupied_positions):
+def generate_mesh_chunk(chunk_voxels, chunk_bounds):
     """
-    Generates a voxel mesh using face culling.
-    occupied_positions: Set of (x, y, z) tuples representing solid voxels.
-    Returns: List of vertices and indices for exposed faces.
+    Generates a mesh for a chunk of voxels using face culling.
+    chunk_voxels: A 3D array or set of occupied voxel coordinates within the chunk.
+    chunk_bounds: Tuple (min_x, max_x, min_y, max_y, min_z, max_z) defining the chunk extent.
     """
-    vertices = []
-    indices = []
+    faces_to_render = []
     
-    # Define the 6 face normals and their corresponding vertex offsets for a unit cube
-    # Assuming a cube centered at (0,0,0) with side length 1, vertices at +/- 0.5
-    # This is a simplified representation; actual vertex generation depends on the mesh format.
-    face_normals = [
+    # Define the 6 directions and their corresponding normals
+    directions = [
         (1, 0, 0),   # Right
         (-1, 0, 0),  # Left
         (0, 1, 0),   # Top
@@ -63,97 +54,70 @@ def generate_mesh(occupied_positions):
         (0, 0, -1)   # Back
     ]
     
-    # Define vertex indices for a single quad (2 triangles) for each face
-    # This is a placeholder for actual vertex generation logic
-    face_quads = [
-        [0, 1, 2, 2, 1, 3], # Right
-        [4, 5, 6, 6, 5, 7], # Left
-        [8, 9, 10, 10, 9, 11], # Top
-        [12, 13, 14, 14, 13, 15], # Bottom
-        [16, 17, 18, 18, 17, 19], # Front
-        [20, 21, 22, 22, 21, 23]  # Back
-    ]
-    
-    for pos in occupied_positions:
-        x, y, z = pos
-        
-        for i, normal in enumerate(face_normals):
-            nx, ny, nz = normal
-            neighbor_pos = (x + nx, y + ny, z + nz)
-            
-            # Check if neighbor is solid
-            is_neighbor_solid = neighbor_pos in occupied_positions
-            
-            # Apply culling logic
-            # Standard logic: Cull if neighbor is solid
-            # Special logic from [S2, unofficial]:
-            # Bottom faces (normal[1] == -1) are always culled
-            # Side faces (normal[1] == 0) are also culled if neighbor above exists
-            
-            should_render = True
-            
-            if normal == (0, -1, 0): # Bottom face
-                should_render = False
-            elif normal == (0, 1, 0): # Top face
-                # Standard logic applies: cull if neighbor above is solid
-                if is_neighbor_solid:
-                    should_render = False
-            else: # Side faces
-                if is_neighbor_solid:
-                    should_render = False
-                # Additional check from [S2, unofficial]:
-                # Check if neighbor above the current neighbor is solid
-                # This effectively culls side faces if they are covered by a block above the adjacent block
-                neighbor_above = (x + nx, y + ny + 1, z + nz)
-                if neighbor_above in occupied_positions:
-                    should_render = False
-            
-            if should_render:
-                # Generate vertices for this face
-                # In a real implementation, this would involve transforming the face geometry
-                # based on the face normal and position, and adding to the vertex buffer.
-                # For this pseudocode, we assume a helper function exists.
-                add_face_to_mesh(vertices, indices, pos, normal, face_quads[i])
-                
-    return vertices, indices
+    # Helper to check if a voxel is solid
+    def is_solid(x, y, z):
+        # Check if within chunk bounds
+        if not (chunk_bounds[0] <= x <= chunk_bounds[1] and
+                chunk_bounds[2] <= y <= chunk_bounds[3] and
+                chunk_bounds[4] <= z <= chunk_bounds[5]):
+            return False
+        # Check if voxel is in the occupied set
+        return (x, y, z) in chunk_voxels
 
-def add_face_to_mesh(vertices, indices, pos, normal, quad_indices):
+    for (x, y, z) in chunk_voxels:
+        for dx, dy, dz in directions:
+            neighbor_x = x + dx
+            neighbor_y = y + dy
+            neighbor_z = z + dz
+            
+            # Check if the neighbor is solid
+            if not is_solid(neighbor_x, neighbor_y, neighbor_z):
+                # Neighbor is empty or out of bounds, so this face is visible
+                # Generate the 2 triangles for this face
+                face_vertices = create_face_vertices(x, y, z, dx, dy, dz)
+                faces_to_render.append(face_vertices)
+                
+    return faces_to_render
+
+def create_face_vertices(x, y, z, dx, dy, dz):
     """
-    Adds the vertices and indices for a single face to the mesh buffers.
-    This is a placeholder for the actual vertex generation logic.
+    Generates vertex data for a single face of a voxel at (x,y,z) with normal (dx,dy,dz).
+    Assumes unit cube size.
     """
-    # Placeholder: In a real implementation, this would calculate the 4 vertices
-    # of the face based on the voxel position and normal, and add them to the
-    # global vertex list. It would also add the corresponding indices to the
-    # global index list, offset by the current vertex count.
-    pass
+    # Define the 4 corners of the face based on the normal
+    # This is a simplified representation; actual implementation depends on coordinate system
+    # For example, if normal is (0, 1, 0) (Top face), corners are (x,y+1,z), (x+1,y+1,z), etc.
+    # For brevity, we assume a helper exists or vertices are hardcoded per direction.
+    # [G] In a real implementation, this function would map the normal to specific vertex positions.
+    return generate_quad_vertices(x, y, z, dx, dy, dz)
 ```
 
 **Parameters:**
-*   Chunk size: Typically 16x16x16 voxels [S1, unofficial].
-*   Neighbor check: Runs once during mesh creation, resulting in no framerate loss during rendering [S2, unofficial].
+*   **Chunk Size:** Commonly $16 \times 16 \times 16$ voxels [S1, unofficial].
+*   **Neighbor Check Scope:** Must include adjacent chunks to avoid rendering chunk outlines [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Chunk Boundaries:** Adjacent cubes across chunk boundaries (e.g., x=0 and x=15) must be checked. If ignored, the outline of each chunk is drawn, killing performance [S1, unofficial].
-*   **Bottom Faces:** In some implementations, bottom faces are always culled regardless of neighbors below [S2, unofficial].
-*   **Side Faces:** Side faces may be culled if a neighbor exists directly adjacent OR if a neighbor exists directly above the neighbor position [S2, unofficial].
+*   **Chunk Boundaries:** Adjacent cubes across chunk boundaries (e.g., $x=0$ and $x=15$) must be checked. If ignored, the outline of each chunk is drawn, killing performance [S1, unofficial].
+*   **Bottom Faces:** In some implementations, bottom faces are always culled regardless of neighbors below, as indicated by logic such as `face.renderFlag = false` for `isBottomFace` [S2, unofficial]. This may be intentional for terrain rendering where the ground is not visible from below, but it is a specific design choice.
+*   **Side Face Logic:** Some implementations cull side faces if a neighbor exists directly adjacent OR if a neighbor exists directly above the neighbor position (checking `neighborPos + glm::ivec3(0, 1, 0)`), which may be an attempt to handle overhangs or specific terrain types [S2, unofficial].
+*   **Performance:** The culling check runs once during mesh creation, resulting in no framerate loss during rendering [S2, unofficial].
 
 ## Subtopics
 
 ### Binary Hidden-Face Culling
-A technique to reduce the number of faces in a voxel mesh by removing those completely hidden (adjacent to another voxel), using bitwise operations on a bitmask representation of voxels to determine visible faces in bulk [S3, unofficial]. It represents each voxel as a bit in a bitmask (1 = solid, 0 = transparent/air) [S3, unofficial]. To determine visible left faces, it shifts the bitmask right by 1 position, inverts the result, and performs a bitwise AND with the original mask [S3, unofficial]. Similarly, for right faces, it shifts left [S3, unofficial]. This avoids the poor performance of looping through neighbors and performing random memory access [S3, unofficial].
+A technique to reduce the number of faces in a voxel mesh by removing those completely hidden (adjacent to another voxel), using bitwise operations on a bitmask representation of voxels to determine visible faces in bulk [S3, unofficial]. It represents each voxel as a bit in a bitmask (1 for solid, 0 for transparent/air). To determine visible left faces, the bitmask is shifted right by 1 position, inverted, and bitwise ANDed with the original mask. Right faces use a left shift. This avoids looping through neighbors and random memory access, which leads to poor performance [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(V)$ where $V$ is the number of voxels, as each voxel is processed once and each face check is $O(1)$ with a hash set [S2, unofficial].
-*   **Memory Complexity:** $O(V)$ for storing the occupied positions and the resulting mesh [S1, unofficial].
-*   **Measured Performance:** With this optimization, performance allows running more than 14,440 chunks on a fairly old PC (Intel Core i7 2.5 GHz, AMD Radeon HD 6770M 1024 MB) while performing GPU-heavy algorithms like cascaded shadow mapping and water shading [S1, unofficial]. Without it, only ~20 chunks could be drawn without lagging [S1, unofficial]. The optimization reduces the triangle count to ~1/1000 of the previously drawn triangles [S1, unofficial]. Another measurement shows 4096 cubes rendered at ~60 FPS [S2, unofficial].
-*   **Strengths:** Dramatically reduces the number of vertices and indices sent to the GPU, especially in homogeneous terrain [S1, unofficial][S2, unofficial].
-*   **Limitations:** Requires careful handling of chunk boundaries to avoid rendering chunk outlines [S1, unofficial].
-*   **When to use:** When rendering large voxel worlds with homogeneous terrain, to reduce draw calls and vertex processing overhead [S1, unofficial].
-*   **When not to use:** When the terrain is highly heterogeneous or sparse, the overhead of the culling check might not be worth the reduction in triangles, though this is rare in voxel games [S1, unofficial].
+*   **Time Complexity:** $O(V)$, where $V$ is the number of voxels in the chunk. Each voxel is processed once, and for each voxel, 6 neighbor checks are performed.
+*   **Memory Complexity:** $O(V)$ for storing the voxel grid and the resulting mesh. The mesh size is significantly reduced compared to naive rendering.
+*   **Measured Performance:** With this optimization, performance allows running more than 14,440 chunks on a fairly old PC (Intel Core i7 2.5 GHz, AMD Radeon HD 6770M 1024 MB) while performing GPU-heavy algorithms like cascaded shadow mapping and water shading [S1, unofficial]. Without it, only ~20 chunks could be drawn without lagging [S1, unofficial]. The optimization reduces the triangle count to approximately 1/1000 of the previously drawn triangles [S1, unofficial]. Another measurement shows 4096 cubes rendered at ~60 FPS on the author's system [S2, unofficial].
+*   **Strengths:** Dramatic reduction in triangle count for homogeneous terrain; no runtime overhead during rendering; simple to implement.
+*   **Limitations:** Does not handle view-dependent culling (backfaces); requires careful handling of chunk boundaries; bottom face culling may be inappropriate for all use cases.
+*   **When to Use:** Ideal for voxel games and terrain rendering where the majority of voxels are solid and adjacent.
+*   **When Not to Use:** When the scene is sparse or highly heterogeneous, or when view-dependent culling is required for additional performance.
 
 ## Background
-Face Culling is a standard optimization in voxel rendering, widely used in voxel games and terrain generation systems [S1, unofficial]. It is often used alongside VBO per chunk, frustum culling, and backface culling [S1, unofficial]. The technique is fundamental to efficient voxel mesh generation, as naively rendering all faces of all voxels is computationally prohibitive for large worlds [S2, unofficial].
+Face Culling is a fundamental optimization in voxel rendering, widely used in voxel games and terrain generation systems. It was discussed in a 2016 GameDev StackExchange post as a critical optimization for rendering voxel worlds [S1, unofficial]. The technique is often combined with other optimizations such as VBO per chunk, frustum culling, and backface culling [S1, unofficial]. Binary Hidden-Face Culling, a variant using bitwise operations, was described in a 2025 devlog for a voxel game project [S3, unofficial].
 
 ## Sources
 [S1] Optimising Voxel World Rendering, https://gamedev.stackexchange.com/questions/117398/optimising-voxel-world-rendering, fetched 2026-10-27 (unofficial)

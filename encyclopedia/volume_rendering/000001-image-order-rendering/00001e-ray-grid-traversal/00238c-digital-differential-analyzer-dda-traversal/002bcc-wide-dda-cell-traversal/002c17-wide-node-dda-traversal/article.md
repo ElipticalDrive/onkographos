@@ -1,62 +1,61 @@
 # Wide Node DDA Traversal
 Also called: Wide Node DDA
 ## Overview
-Wide Node DDA Traversal is a specialized algorithm for traversing a 4x4x4 grid of "wide cells" within an Axis-Aligned Bounding Box (AABB) using a Digital Differential Analyzer (DDA) approach [S1, unofficial]. It generates bounding boxes and t-intervals for each cell to optimize octree traversal by visiting only occupied child cells in ray order [S1, unofficial]. It builds on [Wide DDA Cell Traversal](5122-wide-dda-cell-traversal.md) by providing the specific visitor callback mechanism and mask-based filtering required for wide octree nodes [S1, unofficial].
-
+Wide Node DDA Traversal traverses a 4x4x4 grid of wide cells within an Axis-Aligned Bounding Box (AABB) using a Digital Differential Analyzer (DDA) approach to visit occupied child cells in ray order [S1, unofficial]. It generates bounding boxes and t-intervals for each cell to optimize octree traversal [S1, unofficial]. It builds on [Wide DDA Cell Traversal](5122-wide-dda-cell-traversal.md) by providing a visitor callback mechanism and mask-based filtering required for wide octree nodes [S1, unofficial].
 ## How it works
 **Inputs and Outputs:**
 *   **Inputs:**
-    *   `bounds`: The AABB of the wide node (`glm::vec3` min/max).
-    *   `origin`, `direction`: Ray origin and direction vectors.
-    *   `t_near`, `t_far`: The ray segment interval to traverse.
-    *   `reverse`: Boolean flag for traversal direction.
-    *   `node_index`: Index of the wide node in the octree structure.
-    *   `octree`: The global octree data structure containing `wide_nodes()`, `max_depth()`, and `payload_base()`.
-    *   `depth_remaining`: Current recursion depth counter.
-    *   `best`: Current best hit record (containing `hit`, `t`, etc.) for pruning.
+    *   `bounds_min`, `bounds_max`: The AABB of the wide node as 3D vectors [S1, unofficial].
+    *   `origin`, `direction`: Ray origin and direction vectors [S1, unofficial].
+    *   `t_near`, `t_far`: The ray segment interval to traverse [S1, unofficial].
+    *   `reverse`: Boolean flag for traversal direction [S1, unofficial].
+    *   `node_index`: Index of the wide node in the octree structure [S1, unofficial].
+    *   `octree`: The global octree data structure containing `wide_nodes()`, `max_depth()`, and `payload_base()` [S1, unofficial].
+    *   `depth_remaining`: Current recursion depth counter [S1, unofficial].
+    *   `best`: Current best hit record containing `hit` and `t` for pruning [S1, unofficial].
 *   **Outputs:**
-    *   `bool`: Indicates traversal success or early termination.
-    *   Side effects: Calls `consider_leaf` or recursive traversal for valid children.
+    *   `bool`: Indicates traversal success or early termination [S1, unofficial].
+    *   Side effects: Calls `consider_leaf` or recursive traversal for valid children [S1, unofficial].
 
 **Data Structures:**
 *   **WideNodeDescriptor**:
-    *   `child_mask`: `std::uint64_t`, bitmask of occupied child cells.
-    *   `leaf_mask`: `std::uint64_t`, bitmask of children that are leaves.
-    *   `internal_child_mask`: `std::uint64_t`, bitmask of children that are internal nodes.
-    *   `payload_base`: Implied offset for leaf payloads.
-    *   `child_base`: Implied offset for child nodes.
+    *   `child_mask`: `std::uint64_t`, bitmask of occupied child cells [S1, unofficial].
+    *   `leaf_mask`: `std::uint64_t`, bitmask of children that are leaves [S1, unofficial].
+    *   `internal_child_mask`: `std::uint64_t`, bitmask of children that are internal nodes [S1, unofficial].
+    *   `payload_base`: Implied offset for leaf payloads [S1, unofficial].
+    *   `child_base`: Implied offset for child nodes [S1, unofficial].
 *   **Cell Info**:
-    *   `child_index`: Index of the cell within the 4x4x4 grid (0-63).
-    *   `bounds`: Bounding box of the specific wide cell.
-    *   `t_near`, `t_far`: T-interval of the ray intersection with the cell.
+    *   `child_index`: Index of the cell within the 4x4x4 grid (0-63) [S1, unofficial].
+    *   `bounds_min`, `bounds_max`: Bounding box of the specific wide cell [S1, unofficial].
+    *   `t_near`, `t_far`: T-interval of the ray intersection with the cell [S1, unofficial].
 
 **Helper Functions:**
-*   `count_bits_device(mask)`: Counts set bits in `mask`.
-*   `prefix_rank_device(mask, child_index)`: Returns the rank (index among set bits) of `child_index` in `mask`.
-*   `child_index_for_depth_device(x, y, z, child_depth)`: Computes the 3-bit child index from coordinates.
-*   `contains_point_device(min_bound, max_bound, point)`: Checks if point is inside bounds.
+*   `count_bits(mask)`: Counts set bits in `mask` [S1, unofficial].
+*   `prefix_rank(mask, child_index)`: Returns the rank (index among set bits) of `child_index` in `mask` [S1, unofficial].
+*   `child_index_for_depth(x, y, z, child_depth)`: Computes the 3-bit child index from coordinates [S1, unofficial].
+*   `contains_point(min_bound, max_bound, point)`: Checks if point is inside bounds [S1, unofficial].
 
 **Numbered Steps:**
 1.  **Boundary Check**: If `node_index` is out of bounds or `depth_remaining <= 0`, return immediately [S1, unofficial].
 2.  **Descriptor Retrieval**: Retrieve `WideNodeDescriptor` from `octree.wide_nodes()[node_index]` [S1, unofficial].
-3.  **DDA Iteration**: Call `visit_wide_cells_dda` with `bounds`, `origin`, `direction`, `node_t_near`, `node_t_far`, `reverse`, and a lambda visitor [S1, unofficial].
+3.  **DDA Iteration**: Call `visit_wide_cells_dda` with `bounds_min`, `bounds_max`, `origin`, `direction`, `t_near`, `t_far`, `reverse`, and a lambda visitor [S1, unofficial].
     *   *Note*: `visit_wide_cells_dda` iterates through the 4x4x4 grid using DDA logic, invoking the visitor for each cell intersected by the ray [S1, unofficial].
 4.  **Visitor Logic** (executed for each cell):
     a.  Get `child_index` from `cell.child_index` [S1, unofficial].
-    b.  Compute `child_bit` as `1ull << child_index` [S1, unofficial].
+    b.  Compute `child_bit` as `1 << child_index` [S1, unofficial].
     c.  **Occupancy Check**: If `child_bit` is not in `child_mask`, skip this cell [S1, unofficial].
-    d.  **Pruning**: If `best.hit` is true and `max(cell.t_near, 0.0f) > best.t + kEpsilon`, skip this cell [S1, unofficial].
+    d.  **Pruning**: If `best.hit` is true and `max(cell.t_near, 0.0) > best.t + kEpsilon`, skip this cell [S1, unofficial].
     e.  **Leaf Processing**: If `child_bit` is in `leaf_mask`:
         i.  Compute `leaf_id` using `descriptor.payload_base()` and `prefix_rank(leaf_mask, child_index)` [S1, unofficial].
         ii. Compute `depth` as `octree.max_depth() - depth_remaining + 2` [S1, unofficial].
-        iii. Call `consider_leaf(cell.bounds, leaf_id, depth)` [S1, unofficial].
+        iii. Call `consider_leaf(cell.bounds_min, cell.bounds_max, leaf_id, depth)` [S1, unofficial].
     f.  **Internal Node Processing**: If `child_bit` is in `internal_child_mask` (and not leaf), recursively call `traverse_wide_node` with updated `depth_remaining - 1` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def traverse_wide_node(node_index, depth_remaining, octree, best, bounds, origin, direction, t_near, t_far):
+def traverse_wide_node(node_index, depth_remaining, octree, best, bounds_min, bounds_max, origin, direction, t_near, t_far):
     # Step 1: Boundary Check
     if node_index >= octree.num_wide_nodes() or depth_remaining <= 0:
         return False
@@ -68,7 +67,6 @@ def traverse_wide_node(node_index, depth_remaining, octree, best, bounds, origin
     internal_child_mask = descriptor.internal_child_mask
 
     # Step 3: DDA Iteration
-    # visit_wide_cells_dda iterates through 4x4x4 cells, calling visitor for each intersected cell
     def visitor(cell):
         # Step 4a: Get child_index
         child_index = cell.child_index
@@ -86,23 +84,83 @@ def traverse_wide_node(node_index, depth_remaining, octree, best, bounds, origin
         
         # Step 4e: Leaf Processing
         if child_bit & leaf_mask:
-            # Compute leaf_id using prefix_rank
             leaf_rank = prefix_rank(leaf_mask, child_index)
             leaf_id = descriptor.payload_base() + leaf_rank
             depth = octree.max_depth() - depth_remaining + 2
-            consider_leaf(cell.bounds, leaf_id, depth)
+            consider_leaf(cell.bounds_min, cell.bounds_max, leaf_id, depth)
         
         # Step 4f: Internal Node Processing
         elif child_bit & internal_child_mask:
-            # Recursively traverse child node
-            # Note: child_node_index would be derived from descriptor.child_base and child_index
-            # For simplicity, assuming a helper to get child index
-            child_node_index = get_child_node_index(descriptor, child_index)
+            child_node_index = descriptor.child_base + child_index
             traverse_wide_node(child_node_index, depth_remaining - 1, octree, best, 
-                               cell.bounds, origin, direction, cell.t_near, cell.t_far)
+                               cell.bounds_min, cell.bounds_max, origin, direction, cell.t_near, cell.t_far)
 
-    visit_wide_cells_dda(bounds, origin, direction, t_near, t_far, False, visitor)
+    visit_wide_cells_dda(bounds_min, bounds_max, origin, direction, t_near, t_far, False, visitor)
     return True
+
+def visit_wide_cells_dda(bounds_min, bounds_max, origin, direction, t_near_global, t_far_global, reverse, visitor):
+    # Standard 3D DDA for a 4x4x4 grid
+    inv_dir = [1.0 / d if d != 0.0 else float('inf') for d in direction]
+    step = [1 if d > 0 else -1 for d in direction]
+    
+    # Clamp origin to bounds to find starting cell
+    t = [(bounds_min[i] - origin[i]) * inv_dir[i] for i in range(3)]
+    t_max = [(bounds_max[i] - origin[i]) * inv_dir[i] for i in range(3)]
+    
+    # Initial cell coordinates
+    ix = int((origin[0] - bounds_min[0]) * inv_dir[0]) if direction[0] != 0 else 0
+    iy = int((origin[1] - bounds_min[1]) * inv_dir[1]) if direction[1] != 0 else 0
+    iz = int((origin[2] - bounds_min[2]) * inv_dir[2]) if direction[2] != 0 else 0
+    ix = max(0, min(3, ix))
+    iy = max(0, min(3, iy))
+    iz = max(0, min(3, iz))
+    
+    # DDA state
+    t_max_x = t_max[0] if direction[0] != 0 else float('inf')
+    t_max_y = t_max[1] if direction[1] != 0 else float('inf')
+    t_max_z = t_max[2] if direction[2] != 0 else float('inf')
+    t_next_x = t_max_x if step[0] == 1 else t[0]
+    t_next_y = t_max_y if step[1] == 1 else t[1]
+    t_next_z = t_max_z if step[2] == 1 else t[2]
+    
+    # Precompute cell size
+    cell_size = [bounds_max[i] - bounds_min[i] for i in range(3)]
+    cell_size = [s / 4.0 for s in cell_size]
+    
+    # Visit cells in DDA order
+    for _ in range(64):
+        # Compute t-interval for current cell
+        cell_min = [bounds_min[i] + ix * cell_size[i] for i in range(3)]
+        cell_max = [cell_min[i] + cell_size[i] for i in range(3)]
+        
+        t_entry = max((cell_min[i] - origin[i]) * inv_dir[i] for i in range(3))
+        t_exit = min((cell_max[i] - origin[i]) * inv_dir[i] for i in range(3))
+        
+        t_near = max(t_entry, t_near_global)
+        t_far = min(t_exit, t_far_global)
+        
+        if t_near < t_far:
+            child_index = ix + 4 * iy + 16 * iz
+            visitor({'child_index': child_index, 'bounds_min': cell_min, 'bounds_max': cell_max, 't_near': float(t_near), 't_far': float(t_far)})
+        
+        # Step DDA
+        if t_next_x < t_next_y:
+            if t_next_x < t_next_z:
+                ix += step[0]
+                t_next_x += t_max_x
+            else:
+                iz += step[2]
+                t_next_z += t_max_z
+        else:
+            if t_next_y < t_next_z:
+                iy += step[1]
+                t_next_y += t_max_y
+            else:
+                iz += step[2]
+                t_next_z += t_max_z
+                
+        if not (0 <= ix <= 3 and 0 <= iy <= 3 and 0 <= iz <= 3):
+            break
 
 def prefix_rank(mask, child_index):
     if child_index <= 0:
@@ -116,17 +174,23 @@ def count_bits(mask):
         count += mask & 1
         mask = mask >> 1
     return count
+
+def consider_leaf(bounds_min, bounds_max, leaf_id, depth):
+    # Processes leaf hit; implementation depends on downstream rendering logic [G]
+    pass
+
+kEpsilon = 1e-6
 ```
 
 **Parameters:**
-*   `kEpsilon`: Small float value for pruning comparison. Not given in the sources.
-*   `max_depth`: Maximum depth of the octree. Not given in the sources.
+*   `kEpsilon`: Small float value for pruning comparison [G].
+*   `max_depth`: Maximum depth of the octree [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 *   **Precision**: Floating-point comparisons for t-intervals and pruning require epsilon tolerance [S1, unofficial].
 *   **Boundaries**: `node_index` out of bounds must be checked to prevent memory access violations [S1, unofficial].
 *   **Degenerate Input**: `depth_remaining <= 0` stops recursion to prevent infinite loops or invalid accesses [S1, unofficial].
-
+*   **Zero Direction Components**: DDA must handle zero direction components by clamping to `inf` and skipping steps to avoid division by zero [G].
 ## Subtopics
 
 ### Octree Node Traversal (Wide)
@@ -134,27 +198,25 @@ Traverses a wide octree node by iterating over 4x4x4 wide cells using `visit_wid
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   Time: Proportional to the number of wide cells intersected by the ray, filtered by occupancy masks. Not given in the sources.
-*   Memory: O(1) additional memory per node traversal, excluding the octree structure itself. Not given in the sources.
+*   Time: Proportional to the number of wide cells intersected by the ray, filtered by occupancy masks [G].
+*   Memory: O(1) additional memory per node traversal, excluding the octree structure itself [G].
 
 **Measured Performance:**
 *   Not given in the sources.
 
 **Scaling:**
-*   Scales with the number of wide cells and the depth of the octree. Not given in the sources.
+*   Scales with the number of wide cells and the depth of the octree [G].
 
 **Strengths and Limitations:**
-*   Strengths: Efficiently visits only occupied cells in ray order, reducing unnecessary checks. Not given in the sources.
-*   Limitations: Requires pre-computed masks and descriptors. Not given in the sources.
+*   Strengths: Efficiently visits only occupied cells in ray order, reducing unnecessary checks [G].
+*   Limitations: Requires pre-computed masks and descriptors [S1, unofficial].
 
 **When to Use:**
-*   Use when traversing wide octree nodes with sparse occupancy. Not given in the sources.
+*   Use when traversing wide octree nodes with sparse occupancy [G].
 
 **When Not to Use:**
 *   Not given in the sources.
-
 ## Background
-Wide Node DDA Traversal is part of the sparse voxel octree rendering pipeline, specifically designed for GPU-based ray tracing. It originates from the `hectorpiteau/sparse-voxels` repository, which implements efficient wide-node traversal for volume rendering [S1, unofficial]. It is used in real-time ray tracing applications where wide nodes are employed to reduce traversal overhead.
-
+Wide Node DDA Traversal is part of the sparse voxel octree rendering pipeline [S1, unofficial]. It originates from the `hectorpiteau/sparse-voxels` repository, which implements efficient wide-node traversal for volume rendering [S1, unofficial].
 ## Sources
 [S1] hectorpiteau/sparse-voxels, https://github.com/hectorpiteau/sparse-voxels, fetched 2026-10-24 (unofficial)

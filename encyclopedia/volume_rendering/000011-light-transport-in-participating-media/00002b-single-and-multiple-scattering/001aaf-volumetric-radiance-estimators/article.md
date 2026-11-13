@@ -3,26 +3,71 @@
 Also called: B-B1D, B-B2D, B-B3D, B-P2D, B-P3D, P-B2D, P-B3D, P-P3D
 
 ## Overview
-Volumetric Radiance Estimators are a family of nine distinct methods introduced by Jarosz et al. [2011a] that estimate equilibrium radiance in participating media by reconstructing values from discrete samples (photon points or photon beams) using spatial blurring [S1]. They differ from unbiased path integral estimators by lacking a general path contribution function and pdf, instead relying on specific radiometric quantities and kernel dimensions to approximate the radiance field [S1].
+Volumetric Radiance Estimators are a family of nine distinct methods introduced by Jarosz et al. [2011a] that estimate equilibrium radiance in participating media by reconstructing continuous fields from discrete samples (photons or beams) using spatial blurring kernels [S1]. They solve the problem of efficiently computing in-scattered radiance for multiple scattering events where direct path tracing is prohibitively expensive or noisy. They differ from unbiased path integral estimators by trading strict unbiasedness for variance reduction through kernel density estimation, and they differ from sibling methods like [Delta tracking](985-delta-tracking.md) by relying on pre-computed photon data structures rather than on-the-fly ray marching [S1].
 
 ## Shared principles
-These methods build on the conservation of energy and fundamental interactions defined in [Single and multiple scattering](35-single-and-multiple-scattering.md) [G].
+All methods in this family are derived from the conservation of energy for a differential cylinder of light passing through a medium [G]. They share the following core definitions and mechanisms:
+
+**1. Fundamental Interactions**
+Any volumetric effect is composed of three fundamental characteristics [G]:
+*   **Absorption:** The loss of radiant energy along a ray due to energy conversion (e.g., to heat). It is described by the absorption coefficient $\sigma_a$ (units: $m^{-1}$) [G].
+*   **Emission:** The addition of radiant energy where the medium is luminous (e.g., flames). It is described by the emissive term $L_e(\mathbf{p}, \boldsymbol{\omega})$, representing radiance emitted per unit length [G].
+*   **Scattering:** The redirection of light rays upon collision with particles. It is split into:
+    *   *In-scattering:* Light from other directions reflected into the view ray [G].
+    *   *Out-scattering:* Light from the view ray reflected away [G].
+In most lighting calculations, out-scattering is folded into the **extinction** term because its net effect on the view ray is identical to absorption [G].
+
+**2. Notation**
+*   $\mathbf{p}$: Position of interaction.
+*   $\boldsymbol{\omega}$: Ray direction (unit vector).
+*   $L$: Radiance quantity.
+*   $L_i$: Incoming radiance.
+*   $L_o$: Outgoing radiance.
+*   $\sigma_t$: Total extinction coefficient, $\sigma_t = \sigma_a + \sigma_s$ [G].
+
+**3. Differential Forms**
+The change in radiance $dL$ over a differential path length $dt$ is governed by the balance of loss and gain terms [G]:
+*   **Absorption Model:** $dL = -\sigma_a L_i dt$ [G].
+*   **Emission Model:** $dL = \sigma_e dt$ (where $\sigma_e$ is the emission coefficient) [G].
+*   **General RTE:** Combines extinction (loss) and source terms (gain from emission and in-scattering) [G].
+
+**4. Transmittance**
+The fraction of light surviving transmission through a medium is defined by the Beer-Lambert law [G]:
+$$ T = e^{-\tau} $$
+where $\tau$ is the optical depth (integrated extinction) [G].
 
 ## Subtopics
 
-The naming convention for estimators (e.g., B-P3D) indicates radiance data (Photon Points or Photon Beams), query type (Point or Beam), and kernel dimension (1D, 2D, 3D) in that order [S1]. This opposes the convention used by Jarosz et al. [2011a] [S1].
+The family consists of nine estimators defined by three dimensions: the **data representation** (Photon Points or Photon Beams), the **query type** (Point or Beam), and the **kernel dimension** (1D, 2D, or 3D) [S1]. The naming convention follows the order: Data × Query × Kernel Dimension (e.g., B-P3D is Beam Data, Point Query, 3D Kernel) [S1]. This opposes the convention used by Jarosz et al. [2011a] [S1].
 
 ### [Point Query × Point Data, 3D Blur](2235-point-query-point-data-3d-blur.md)
-Estimates in-scattered radiance at a specific query point by averaging photon energy over a 3D spherical kernel. It uses a fixed-density spatial average rather than a balance heuristic.
+Point Query × Point Data, 3D Blur estimates the in-scattered radiance at a specific 3D point by averaging the energy of nearby discrete photon points within a spherical kernel. It solves the problem of reconstructing continuous radiance fields from discrete photon samples in participating media. It differs from its sibling, the Extended Balance Heuristic, by using a fixed spherical kernel and simple density estimation rather than balancing probabilities, and from its child, Beam Query × Beam Data, 2D Blur, by blurring energy in three dimensions rather than restricting it to a 2D cross-section perpendicular to a beam direction.
 
 ### [Extended Balance Heuristic](5601-extended-balance-heuristic.md)
-A variance reduction technique that combines estimates from a mixture of sampling techniques by incorporating kernel support size into the weighting function.
+The Extended Balance Heuristic is a variance reduction technique used to combine estimates from a mixture of sampling techniques, specifically unbiased path sampling and extended space volumetric estimators, within the framework of volumetric radiance estimation. It differs from standard balance heuristics by incorporating an "extended" probability density function (pdf) that accounts for the blurring or kernel operations inherent in volumetric estimators, allowing for optimal weighting of samples that are not point-wise exact. It is primarily used to merge results from different radiance estimators, such as those derived from photon mapping or vertex merging, to produce a lower-variance final image.
+
+### [Beam Query × Beam Data, 2D Blur](1402-unified-points-beams-and-paths-upbp.md)
+Beam Query × Beam Data, 2D Blur is a specific estimator within the Unified Points, Beams, and Paths (UPBP) framework that uses beam data and beam queries with a 2D kernel. It differs from point-based estimators by leveraging the directional coherence of photon beams, reducing variance in scenes with strong directional lighting. It is chosen when beam-based photon mapping is employed to capture directional light transport efficiently.
 
 ### Short Beam Estimator via Russian Roulette
-A technique to convert a long beam estimator into a short beam estimator by treating the beam length sampling as a Russian Roulette (RR) decision on the contribution [S1]. A zero contribution is made whenever the beam length $l$ is less than the distance to the query point $t$; otherwise, the original long beam estimator result is divided by the RR probability $\Pr\{l > t\}$ [S1]. The probability that a short beam of length $l$ contributes at distance $t_0$ is $\Pr\{l > t_0\} = \int_{t_0}^{\infty} p(t') dt'$, where $p(t)$ is the pdf used to sample the beam length [S1]. The short beam estimator is calculated as $\langle I \rangle_{\text{short}} = \langle I \rangle_{\text{long}} \frac{H(l - t)}{\Pr\{l > t\}}$, where $H$ is the Heaviside step function [S1]. This approach provides an intuitive explanation and generalization of Jarosz et al.'s [2011b] unbiased progressive deep shadow maps [S1].
+A technique to convert a long beam estimator into a short beam estimator by treating the beam length sampling as a Russian Roulette (RR) decision on the contribution. It differs from long beam estimators by approximating transmittance with a single step function, effectively creating "progressive deep shadow maps." It is chosen to simplify the handling of beam termination and transmittance in complex scenes [S1].
+
+### Short Beam Estimator via Russian Roulette
+**Definition**
+A technique to convert a long beam estimator into a short beam estimator by treating the beam length sampling as a Russian Roulette (RR) decision on the contribution [S1].
+
+**Steps**
+1.  Make a zero contribution whenever the beam length $l$ is less than the distance to the query point $t$ [S1].
+2.  Otherwise, divide the original long beam estimator result by the RR probability $\Pr\{l > t\}$ [S1].
+
+**Formula**
+The probability that a short beam of length $l$ contributes at distance $t_0$ is: $\Pr\{l > t_0\} = \int_{t_0}^{\infty} p(t') dt'$, where $p(t)$ is the pdf used to sample the beam length [S1]. The short beam estimator is calculated as: $\langle I \rangle_{\text{short}} = \langle I \rangle_{\text{long}} \frac{H(l - t)}{\Pr\{l > t\}}$, where $H$ is the Heaviside step function indicating if the beam is long enough [S1].
+
+**Comparison**
+This approach provides an intuitive explanation and generalization of Jarosz et al.'s [2011b] unbiased progressive deep shadow maps [S1].
 
 ## Background
-The family of nine distinct volumetric radiance estimators was introduced by Jarosz et al. [2011a]. They differ in the representation of equilibrium radiance, the radiometric quantities estimated, and the dimension of blur used to reconstruct the desired quantity from samples [S1]. The estimators are evaluated on segments along light and eye subpaths [S1]. Jarosz et al. [2011b] later proposed an unbiased approximation of transmittance using step functions, coined "progressive deep shadow maps," which corresponds to the short beam variants [S1].
+The family of Volumetric Radiance Estimators was introduced by Jarosz et al. in 2011 [S1]. The original nine estimators were designed to address the high variance associated with multiple scattering in participating media by using photon-based density estimation [S1]. The framework was later generalized and unified with unbiased path tracing methods in the Unified Points, Beams, and Paths (UPBP) algorithm, which allows for the combination of these biased estimators with unbiased path integral estimators using the Extended Balance Heuristic [S1]. The concept of "short beams" was also introduced in related work by Jarosz et al. [2011b] as "progressive deep shadow maps" [S1].
 
 ## Sources
 [S1] Unifying points, beams, and paths in volumetric light transport simulation, https://doi.org/10.1145/2601097.2601219, fetched 2026-10-30

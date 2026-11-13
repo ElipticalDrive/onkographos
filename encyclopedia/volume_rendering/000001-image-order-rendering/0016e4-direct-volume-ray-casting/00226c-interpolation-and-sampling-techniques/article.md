@@ -3,48 +3,59 @@
 Also called: Trilinear Interpolation (DRR), Trilinear rendering
 
 ## Overview
-Interpolation and Sampling Techniques define how continuous scalar fields are reconstructed from discrete voxel data during the sampling phase of direct volume ray casting. They solve the problem of retrieving volume values $V(\mathbf{p})$ at arbitrary ray positions $\mathbf{p}$ that do not align with voxel grid centers. This family is distinguished from [Nearest Neighbor Sampling](11694-nearest-neighbor-sampling.md) by providing spatial continuity, and from [Pre-integration and Approximation Methods](12352-pre-integration-and-approximation-methods.md) by typically evaluating the transfer function per-sample rather than pre-computing integrals over segments, although it serves as the foundational sampling primitive for those methods.
+Interpolation and Sampling Techniques define how discrete voxel data is converted into continuous scalar fields and how rays traverse this field to retrieve values for compositing. This family solves the fundamental problem of estimating volume properties at arbitrary 3D coordinates that do not align with the discrete grid centers, while managing the trade-off between computational cost, visual smoothness, and aliasing artifacts. It sets itself apart from sibling methods by focusing on the geometric and algebraic mechanisms of value retrieval (e.g., [Interpolation Methods](10526-interpolation-methods.md), [Plane-Based Sampling](13531-plane-based-sampling.md)) and the specific parameterizations required for modern neural or accelerated rendering pipelines (e.g., [Space Warping](5815-space-warping-log-warp.md), [Depth to Distance Conversion](2428-depth-to-distance-conversion.md)), rather than the compositing logic itself.
 
 ## Shared principles
-All methods in this family map a query position $\mathbf{p}$ in voxel space to a scalar value $V(\mathbf{p})$ by combining a finite set of neighboring voxel values $V_i$ using a set of weights $w_i(\mathbf{p})$:
-$$
-V(\mathbf{p}) = \sum_{i} w_i(\mathbf{p}) V_i
-$$
-The weights are derived from a reconstruction kernel $h(\mathbf{z})$, where $\mathbf{z}$ is the distance from the query point to the sample center [G]. The choice of scheme defines the trade-off between computational complexity, spatial extent (number of neighbors), and frequency response (aliasing vs. blurring) [S1, unofficial][S2].
+All methods in this family operate on the principle that a continuous function $V(\mathbf{p})$ must be approximated from a discrete set of samples $V_i$ located at grid positions $\mathbf{p}_i$. The core mechanism involves:
+
+1.  **Query Positioning**: Determining the 3D coordinate $\mathbf{p}$ along the ray $r(t) = \mathbf{o} + t\mathbf{d}$ where a value is needed. This may involve converting depth parameters to physical distances or warping coordinates for neural encodings.
+2.  **Kernel/Weight Application**: Computing weights $w_i(\mathbf{p})$ based on the distance between $\mathbf{p}$ and the sample centers $\mathbf{p}_i$. The interpolated value is:
+    $$
+    V(\mathbf{p}) = \sum_{i} w_i(\mathbf{p}) V_i
+    $$
+    The choice of kernel (e.g., linear, cubic, inverse distance) determines the spatial extent (number of neighbors) and frequency response (aliasing vs. blurring) [S1, unofficial][S2][S10526].
+3.  **Coordinate Transformation**: Mapping world-space or camera-space coordinates to the local coordinate system of the volume data (e.g., normalized $[-1, 1]$ or $[0, 1]$ ranges) before interpolation [S2430].
 
 ## Subtopics
 
 ### [Depth to Distance Conversion](2428-depth-to-distance-conversion.md)
-Transforms discrete depth samples into physical segment lengths for integration.
+Transforms discrete depth samples ($z\_vals$) along a ray into physical segment lengths ($dists$) required for volume rendering integration. It accounts for the cosine of the angle between the ray and the viewing direction to convert axial depth differences into true Euclidean distances along the ray. Choose this when working with depth-based neural rendering or camera-space parameterizations where physical step sizes are required for Beer-Lambert integration.
 
 ### [Alpha Grid Mask](2430-alpha-grid-mask.md)
-Stores and samples a 3D alpha volume for spatially varying opacity constraints.
+A module that stores a 3D alpha volume and provides efficient sampling of alpha values at arbitrary 3D coordinates using trilinear interpolation. It serves as the core sampling primitive for volume rendering to incorporate spatially varying opacity constraints derived from external supervision or geometry masks. Choose this when integrating external alpha masks or geometry-derived opacity fields into a ray marching loop.
 
 ### [Sampling and Jittering](2516-sampling-and-jittering.md)
-Perturbs sample positions to reduce banding and aliasing artifacts.
+A direct volume rendering technique that casts rays from the camera through a 3D voxel grid, perturbing sample positions with pre-computed offsets to reduce banding and aliasing artifacts caused by regular grid structures. It distinguishes itself from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by breaking the periodicity of sample placement, and from [Stochastic Jittering](924-stochastic-jittering.md) by using a deterministic, fixed 2D texture for offsets rather than runtime random number generation. It builds on [Interpolation and Sampling Techniques](2787-interpolation-and-sampling-techniques.md) by applying these perturbations before interpolation to mitigate high-frequency sampling errors.
 
 ### [Space Warping (Log+Warp)](5815-space-warping-log-warp.md)
-Warps 3D space to dampen high-frequency background details in neural rendering.
+A positional encoding strategy for neural radiance fields that warps 3D space towards the view cell center using radial distortion. It solves the problem of high-frequency background details requiring excessive network capacity by dampening these frequencies while preserving foreground detail. It sets itself apart from standard logarithmic sampling by applying an additional inverse-square-root warp to the encoded coordinates, ensuring that sample locations in space remain consistent across different viewpoints.
 
 ### [MLS Volume Reconstruction](9796-mls-volume-reconstruction.md)
-Reconstructs smooth fields using Moving Least Squares for adaptive preintegration.
+A volume rendering technique that reconstructs a smooth scalar field from discrete samples (regular or irregular grids) using Moving Least Squares (MLS) approximation, allowing for adaptive preintegration to handle the computational cost of the scalar field evaluation. Unlike Radial Basis Functions (RBFs), which require solving a global system of equations, MLS solves a local weighted least squares problem at each query point, making it more efficient for large datasets. It provides a unifying framework that subsumes convolution (equivalent to MLS with a constant basis) and allows for tunable smoothing and interpolation control.
 
 ### [Interpolation Methods](10526-interpolation-methods.md)
-General reconstruction of continuous fields from discrete voxels.
+Reconstructs a continuous scalar field from discrete voxel data to estimate values at arbitrary query positions during ray casting. The choice of scheme defines the trade-off between computational complexity, spatial extent (number of neighbors), and frequency response (aliasing vs. blurring). Unlike [Nearest Neighbor Sampling](11694-nearest-neighbor-sampling.md), which produces severe staircase artifacts, higher-order methods like [Trilinear Interpolation](13406-volumetric-ray-casting-with-trilinear-interpolation.md) and [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md) provide smoother results, while [Frequency Domain Volume Rendering with Sinc Resampling](826-frequency-domain-volume-rendering-with-sinc-resampling.md) achieves theoretical optimality by operating in the Fourier domain.
+
+### [Plane-Based Sampling](13531-plane-based-sampling.md)
+A ray casting acceleration technique that replaces per-voxel interpolation with linear interpolation between ray-plane intersection points. It solves the high computational cost of traditional Ray Casting Algorithms (RCA) by reducing the number of arithmetic operations required to determine optical properties at sampling points. Unlike sibling methods that interpolate within individual voxels (e.g., [Interpolation Methods](10526-interpolation-methods.md)) or use complex warping, this method leverages the geometry of equidistant parallel planes to compute values via definite proportions.
 
 ### Space-covering volume sampling
-A technique to extend pre-integrated volume rendering to multidimensional transfer functions [S2].
+A technique to extend pre-integrated volume rendering to multidimensional transfer functions. It uses space-covering volume sampling to approximate the integral of the transfer function over the segment, improving accuracy for complex, multi-dimensional mappings [S2].
 
 ### Pre-filtered Cubic B-spline Interpolation
-An on-the-fly interpolation approach combined with a pre-filtering step to perform more accurate interpolations without larger data storage [S3, unofficial]. It involves pre-processing all voxel values and performing a combination of local lookups during ray evaluation [S3, unofficial].
+An on-the-fly interpolation approach combined with a pre-filtering step to perform more accurate interpolations without larger data storage. The method involves pre-processing all voxel values (prefiltering step) and then performing a combination of local lookups during the evaluation of the rays to perform more accurate interpolations. The advantages are that it does not require larger data storage or memory footprint, though it comes at a performance penalty [S3, unofficial].
 
 ### Variable Sample Distance / Random Offset
-A strategy to break the stripe pattern of onion ring artifacts by varying sample locations of rays in adjacent pixels [S3, unofficial]. This is achieved by using variable sample distances or a random offset at the beginning of each ray, resulting in a more 'dithered' image where errors are randomly distributed [S3, unofficial].
+A strategy to break the stripe pattern of onion ring artifacts by varying sample locations of rays in adjacent pixels. The steps involve varying sample locations of rays in adjacent pixels, either by using variable sample distances or a random offset at the beginning of each ray. The result is a more 'dithered' image where errors are randomly distributed over pixels [S3, unofficial].
+
+### Inverse Distance Weighting Interpolation
+A method to interpolate feature vectors from a source point cloud (xyz, feat) to a target point cloud (new_xyz) using k-nearest neighbors and inverse distance weighting. The steps involve performing a k-nearest neighbor query to find indices (idx) and distances (dist) for each point in new_xyz relative to xyz, initializing an output tensor of shape (n, c) to zeros, and looping over k neighbors to accumulate weighted features: $new\_feat += feat[idx[:, i]] * weight[:, i]$. The formula computes reciprocal distances with epsilon regularization: $dist\_recip = 1.0 / (dist + 1e-8)$, then normalizes weights by summing reciprocals along the neighbor dimension: $norm = \sum_{i=1}^{k} dist\_recip_i$, then $weight = dist\_recip / norm$. The input layout is xyz (m, 3), new_xyz (n, 3), feat (m, c), offset (b), new_offset (b), with output (n, c). A pitfall is division by zero in distance calculation, which is prevented by adding epsilon (1e-8) to the distance before inversion [S4, unofficial].
 
 ## Background
-Trilinear interpolation is widely used in volume rendering due to its simplicity, hardware support on GPUs, and acceptable visual quality for high-resolution datasets [S3, unofficial]. In the context of Digital Radiographic Reconstructions (DRR), trilinear rendering offers significant speed advantages over exact intersection methods like Siddon's method. For example, with 25 sample points per ray, trilinear interpolation takes approximately 737 μs, whereas Siddon's method takes ~25 ms. The cost of trilinear interpolation matches Siddon's method only when the number of sample points reaches approximately 2,000 [S1, unofficial].
+Trilinear interpolation has been a standard technique in volume rendering for decades due to its simplicity and hardware support on GPUs [S3, unofficial]. In the context of Digital Radiographic Reconstructions (DRR), trilinear rendering offers a significant speed advantage over exact intersection methods like Siddon's method. For example, rendering with 25 points takes ~737 μs, whereas Siddon's method takes ~25 ms [S1, unofficial]. As the number of points increases, the cost of trilinear interpolation rises linearly, matching Siddon's method at around 2,000 points [S1, unofficial]. More advanced techniques like MLS and pre-filtered B-splines have been developed to address the blurring artifacts inherent in linear interpolation, particularly for high-frequency details or irregular data [S1, S3, unofficial]. The integration of these sampling techniques with neural rendering fields has led to new positional encoding strategies like Log+Warp to handle view-dependent frequency distributions [S1, unofficial].
 
 ## Sources
 [S1] Trilinear rendering - diffdrr, https://vivekg.dev/DiffDRR/tutorials/trilinear.html, fetched 2026-10-28 (unofficial)
 [S2] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
 [S3] Common Artifacts in Volume Rendering, https://doi.org/10.48550/arxiv.2109.13704, fetched 2026-10-26 (unofficial)
+[S4] LogosIntelligenceLab/4d-gaussian-splatting, https://github.com/LogosIntelligenceLab/4d-gaussian-splatting, fetched 2026-10-27 (unofficial)

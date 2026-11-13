@@ -1,46 +1,42 @@
 # Piecewise Linear Mapping and Integration
-
-Also called: Piecewise Linear Transfer Functions, Linear Opacity Mapping
+Also called: Piecewise Linear Transfer Function Integration
 
 ## Overview
-This family defines opacity $\alpha$ as a continuous, piecewise linear function of the scalar volume value $V$, enabling smooth transitions between tissue types and supporting semi-transparent blending [S1][S2, unofficial]. It differs from binary thresholding by allowing gradual opacity changes and from non-linear mappings by offering computational simplicity and analytical tractability [S1][S2, unofficial].
+This family defines methods for mapping scalar volume data values to optical properties (opacity and color) using piecewise linear interpolation between defined control points, often augmented by gradient-based modulation or specific integration techniques [S1][S2, unofficial][S9000]. It differs from [Opacity Correction for Slice Count Invariance](1277-opacity-correction-for-slice-count-invariance.md) by focusing on the functional form of the transfer function itself rather than step-size invariance, and from [SDF-based Opacity Derivation via Logistic CDF](3233-sdf-based-opacity-derivation-via-logistic-cdf.md) by using explicit linear segments rather than a probabilistic cumulative distribution function [S1][S2, unofficial][S3233].
 
 ## Shared principles
 All methods in this family share the following core mechanism:
 
-1.  **Piecewise Linear Definition**: The transfer function is defined by a set of control points $(v_k, \alpha_k)$, where $v_k$ are scalar volume values (e.g., CT numbers) and $\alpha_k$ are target opacities. The opacity for a value $v$ is determined by linear interpolation between the two nearest control points $v_n$ and $v_{n+1}$ such that $v_n \le v \le v_{n+1}$ [S1][S2, unofficial].
-2.  **Linear Interpolation Formula**: For $v \in [v_n, v_{n+1}]$, the base opacity $\alpha_{base}$ is calculated as:
-    $$
-    \alpha_{base}(v) = \alpha_n + (\alpha_{n+1} - \alpha_n) \frac{v - v_n}{v_{n+1} - v_n}
-    $$
-    [S1][S2, unofficial]. Outside the defined range $[v_1, v_N]$, opacity is typically zero [S2, unofficial].
-3.  **Step Size Correction**: The interpolated opacity $\alpha_{base}$ represents the probability of interaction over a unit distance. For a discrete step size $\Delta t$, the effective opacity $\alpha_i$ used in compositing is corrected to approximate continuous attenuation, often using the Beer-Lambert law: $\alpha_i = 1 - e^{-\sigma \Delta t}$, where $\sigma$ is derived from $\alpha_{base}$ or directly mapped [S26, S33, S39, unofficial]. Note: Some implementations (e.g., [7016-linear-opacity-interpolation.md]) apply a discrete correction $\alpha' = 1 - (1 - \alpha)^{\Delta t}$ [S11, S32, unofficial].
-4.  **Gradient Independence (Base)**: The base piecewise linear mapping operates solely on scalar intensity $V$, ignoring spatial gradients [S1][S2, unofficial]. Variants may incorporate gradients as a post-processing modulation step.
+1.  **Input Domain**: The input is a scalar value $V$ retrieved from the volume at a sample position. This value may be raw, normalized, or derived from a Signed Distance Function (SDF) [S1, S2, S3, S4, unofficial][S6].
+2.  **Mapping Function**: A function $T(V)$ computes the optical properties. The most common form is a piecewise function defined by control points $(v_k, \mathbf{c}_k, \alpha_k)$ [S1, S2, S9000].
+3.  **Opacity Correction**: The raw opacity $\alpha_{raw}$ derived from $T(V)$ often requires correction for the sampling step size $\Delta t$ to approximate continuous attenuation. The Beer-Lambert law is the standard physical model: $\alpha_i = 1 - e^{-\sigma_i \Delta t}$, where $\sigma_i$ is the extinction coefficient [S26, S33, S39, unofficial]. Alternative corrections include linear scaling for slice count invariance [S1277] or logistic CDF mapping for SDFs [S3233].
+4.  **Gradient Modulation**: Many methods augment the base opacity and color with information derived from the local gradient $\nabla V(\mathbf{p}_i)$, which serves as a surface normal. This is used for shading [S8281], silhouette enhancement [S8222], or gradient-based opacity [S13088].
+5.  **Output**: The result is a tuple $(\mathbf{c}_i, \alpha_i)$ passed to the compositing stage [S2789].
 
 ## Subtopics
 
 ### [Piecewise Density Approximation for Reparameterized Sampling](1139-piecewise-density-approximation-for-reparameterized-sampling.md)
-This method approximates the density field $\sigma_r(t)$ along a ray as piecewise constant or piecewise linear on a predefined grid to enable analytical inversion of the cumulative opacity integral. It is chosen when stochastic sampling requires sample locations $t$ that correspond to uniform random opacity samples without numerical root-finding. It differs from other siblings by focusing on the density integral's inversion for reparameterized sampling rather than direct opacity mapping.
+This method enables analytical inversion of the volume rendering opacity function by approximating the density field $\sigma_r$ along a ray as either piecewise constant or piecewise linear on a predefined grid. It solves the problem of computing sample locations $t$ for reparameterized sampling (inverse opacity sampling) without numerical root-finding, allowing gradients to back-propagate through the sample generation process. It differs from [Opacity Correction for Slice Count Invariance](1277-opacity-correction-for-slice-count-invariance.md) by focusing on sample location derivation for stochastic integration, and from [Piecewise Linear Mapping and Integration](9000-piecewise-linear-mapping-and-integration.md) by explicitly constructing the density approximation to facilitate the inversion of the cumulative opacity integral.
 
 ### [Piecewise Linear Opacity Mapping with Gradient Scaling](1335-piecewise-linear-opacity-mapping-with-gradient-scaling.md)
-This method scales the piecewise linear opacity by the magnitude of the local gradient $|\nabla f(x_i)|$ to suppress tissue interiors and enhance bounding surfaces. It is chosen for visualizing thin, wispy structures and creating semi-transparent surface overlays (e.g., skin over bone). It differs from base linear interpolation by explicitly using gradient magnitude to modulate visibility, making it suitable for rendering multiple semi-transparent surfaces in superposition.
+This method renders volume data by mapping scalar voxel values to opacity using piecewise linear interpolation and then modulating that opacity by the magnitude of the local gradient vector. It solves the problem of visualizing thin, wispy structures and suppressing interior tissue opacity, which binary thresholding fails to do. Unlike [Linear Opacity Interpolation](7016-linear-opacity-interpolation.md), which maps intensity directly to opacity, this method scales the result by gradient magnitude to enhance bounding surfaces. It builds on [Piecewise Linear Mapping and Integration](9000-piecewise-linear-mapping-and-integration.md) by adding a gradient-based modulation step.
 
 ### [Linear Opacity Interpolation](7016-linear-opacity-interpolation.md)
-This method maps scalar volume values to opacity using linear interpolation between two threshold values. It serves as the foundational opacity mapping primitive, providing a simple, computationally inexpensive way to define transparency ranges. It differs from other siblings by operating directly on opacity without gradient scaling or density approximation, making it suitable only for scalar-intensity-based segmentation.
+Linear Opacity Interpolation maps scalar volume data values to opacity using linear interpolation between two threshold values. It sets itself apart from its sibling [Piecewise Linear Mapping and Integration](9000-piecewise-linear-mapping-and-integration.md) by restricting the mapping to a single linear segment defined by a lower and upper threshold, rather than a general piecewise chain.
 
 ### Power Function Opacity Transfer
-- **Definition**: A simple power function used to map voxel values to opacity before enhancement, allowing illustrative enhancements to supplement existing volume rendering mechanisms [S1].
+- **Definition**: A simple power function used to map voxel values to opacity before enhancement. It allows illustrative enhancements to supplement existing volume rendering mechanisms [S1].
 - **Step**: Calculate the gradient used for enhancement from the dataset *after* the simple power function transfer function has been applied, as this gradient is more effective in capturing subtle features [S1].
 - **Formula**: $o_v = (k_{os}v_i)^{k_{oe}}$, where $v_i$ is the volume sample value, $k_{os}$ is the scalar controlling maximum opacity, and $k_{oe}$ is the exponent [S1]. Values of $k_{oe} < 1$ soften volume differences; values $> 1$ increase contrast [S1].
-- **Parameter**: $k_{os}$: Scalar controlling maximum opacity. $k_{oe}$: Exponent controlling contrast [S1].
+- **Parameters**: $k_{os}$: Scalar controlling maximum opacity. $k_{oe}$: Exponent controlling contrast [S1].
 
 ### Piecewise Linear Transfer Function Integration
 - **Definition**: A rendering technique that integrates piecewise linear transfer functions using a 2D texture map to compute correct exponential per-pixel opacity [S2, unofficial].
-- **Parameter**: Texture Map: A 2D texture map parameterized by opacity and thickness [S2, unofficial].
+- **Parameters**: Texture Map: A 2D texture map parameterized by opacity and thickness [S2, unofficial].
 
 ## Background
-Piecewise linear transfer functions are a standard technique in direct volume rendering, originating from the need to map scalar data (like CT numbers) to optical properties with smooth transitions [S1][S2, unofficial]. The use of piecewise linear approximations for density integration and opacity mapping has been widely adopted in both structured and unstructured grid rendering, often leveraging hardware acceleration via texture lookups or analytical inversion for stochastic sampling [S1][S2, unofficial]. The integration of gradient scaling was introduced to enhance surface visibility while maintaining transparency for interior structures [S1][S2, unofficial].
+The use of piecewise linear transfer functions is a standard technique in direct volume rendering, allowing artists and scientists to define specific opacity and color mappings for different tissue types or data ranges [S1][S2, unofficial]. The integration of these functions, particularly for hardware acceleration, has been explored using texture maps to compute the volume rendering integral efficiently [S2, unofficial]. The family also includes variants for illustrative rendering, where power functions are used to enhance subtle features before gradient-based shading is applied [S1].
 
 ## Sources
-[S1] Volume illustration: nonphotorealistic rendering of volume models ..., https://www.csee.umbc.edu/~rheingan/pubs/volillus.tvcg01.pdf, fetched 2026-10-27
+[S1] PDF Volume illustration: nonphotorealistic rendering of volume models ..., https://www.csee.umbc.edu/~rheingan/pubs/volillus.tvcg01.pdf, fetched 2026-10-27
 [S2] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey_of_GPU-Based_Volume_Rendering_of_Unstructured_Grids, fetched 2026-10-28 (unofficial)

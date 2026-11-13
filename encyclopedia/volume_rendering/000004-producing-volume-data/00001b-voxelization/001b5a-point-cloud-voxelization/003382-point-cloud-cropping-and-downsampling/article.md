@@ -1,136 +1,172 @@
 # Point Cloud Cropping and Downsampling
-Also called: Crop and Downsample Point Cloud
+
+Also called: Crop and Downsample Point Cloud, Voxel Grid Filtering, VoxelGrid Filter
 
 ## Overview
-Crops a point cloud using a specified volume and downsamples it using either voxel or uniform downsampling [S1, unofficial]. It differs from its siblings by providing a unified interface for spatial filtering and density reduction, which serves as a critical preprocessing step for downstream tasks such as ICP registration and voxelization [S1, unofficial]. Unlike [Farthest Point Sampling (FPS)](7182-farthest-point-sampling-fps.md) which operates in continuous Euclidean space to maximize geometric spread, this method relies on spatial binning or random selection within a defined bounding volume [S1, unofficial].
+This method reduces the density of a point cloud by first removing points outside a specified spatial volume (cropping) and then subsampling the remaining points to a target resolution (downsampling) [S1, unofficial]. It solves the problem of excessive point cloud size and noise in unprojected data, which hinders downstream processing like registration or rendering [S2, unofficial]. It sets itself apart from sibling methods like [Hard Voxelization](5345-hard-voxelization.md) by offering a choice between voxel-based averaging and uniform random sampling, and from [Point Resampling with Neighbor Masking](2710-point-resampling-with-neighbor-masking.md) by relying on global spatial binning or simple random selection rather than local geometric consistency metrics.
 
 ## How it works
 **Inputs:**
-- `points`: Array of point coordinates, shape $(N, 3)$.
-- `crop_volume`: Bounding box or volume definition for cropping.
-- `down_sample_method`: String, either `'voxel'` or `'uniform'`. Default: `'voxel'` [S1, unofficial].
-- `voxel_size`: Float, size of the voxel grid cell for downsampling. Default: $0.01$ [S1, unofficial].
-- `MAX_POINT_NUMBER`: Integer, maximum number of points before uniform downsampling is triggered. Value not specified in code snippet [S1, unofficial].
-- `trans`: Optional transformation matrix applied before downsampling (used in registration variants) [S1, unofficial].
+- Point cloud $P$ with $N$ points, where each point $p_i \in \mathbb{R}^3$ has coordinates $(x, y, z)$.
+- Cropping volume $V$, defined as an axis-aligned bounding box (AABB) with minimum corner $(x_{min}, y_{min}, z_{min})$ and maximum corner $(x_{max}, y_{max}, z_{max})$.
+- Downsampling method $M \in \{\text{'voxel'}, \text{'uniform'}\}$. Default: 'voxel' [S1, unofficial].
+- Voxel size $s$ (leaf size) in meters. Default: $0.01$ [S1, unofficial] or $(0.025, 0.025, 0.025)$ [S2, unofficial].
+- Maximum point number $N_{max}$ for uniform downsampling. Value not specified in code snippet [S1, unofficial].
 
 **Outputs:**
-- `cropped_points`: Array of point coordinates after cropping and downsampling.
+- Downsampled point cloud $P'$ with $N' \le N$ points.
 
 **Data Structures:**
-- Points are stored as a dense array of 3D coordinates.
-- Voxel grid is implicitly managed by hashing or binning coordinates into integer indices based on `voxel_size`.
+- The point cloud is typically stored as a list or array of 3D coordinates.
+- For voxel downsampling, a hash map or grid structure maps voxel indices $(i, j, k)$ to a list of points or an accumulated centroid.
 
 **Steps:**
-1. **Cropping:** Filter points that lie outside the `crop_volume`.
-   - If `crop_volume` is an axis-aligned bounding box defined by min/max coordinates, retain points $p$ where $min_x \le p_x \le max_x$, $min_y \le p_y \le max_y$, and $min_z \le p_z \le max_z$.
-2. **Downsampling:**
-   - If `down_sample_method` is `'voxel'`:
-     - Create a voxel grid with cell size `voxel_size`.
-     - For each point, compute its voxel index: $idx = \lfloor p / voxel\_size \rfloor$.
-     - Use a hash map or grid structure to store one representative point per occupied voxel (typically the first point encountered or the centroid of points in the voxel).
-     - Return the set of representative points.
-   - If `down_sample_method` is `'uniform'`:
-     - Check if the number of points $N > MAX\_POINT\_NUMBER$.
-     - If true, randomly select a subset of points such that the new count is $\le MAX\_POINT\_NUMBER$.
-     - If false, return all points.
-     - Note: `MAX_POINT_NUMBER` value is not specified in the source [S1, unofficial].
+
+1. **Input Validation and Cleaning:**
+   Filter the input point cloud $P$ to remove any points containing NaN (Not a Number) values in their coordinates [S2, unofficial]. Let the cleaned cloud be $P_{clean}$.
+
+2. **Cropping:**
+   Iterate through each point $p \in P_{clean}$. Keep $p$ if and only if:
+   $$
+   x_{min} \le p.x \le x_{max} \quad \land \quad y_{min} \le p.y \le y_{max} \quad \land \quad z_{min} \le p.z \le z_{max}
+   $$
+   Let the cropped cloud be $P_{crop}$.
+
+3. **Downsampling:**
+   If $M = \text{'voxel'}$:
+   a. Compute the voxel grid dimensions based on the crop volume bounds and voxel size $s$.
+   b. For each point $p \in P_{crop}$, compute its voxel index $(i, j, k)$:
+      $$
+      i = \lfloor \frac{p.x - x_{min}}{s} \rfloor, \quad j = \lfloor \frac{p.y - y_{min}}{s} \rfloor, \quad k = \lfloor \frac{p.z - z_{min}}{s} \rfloor
+      $$
+   c. Accumulate points into voxels. For each voxel containing points, compute the centroid:
+      $$
+      c_{ijk} = \frac{1}{|V_{ijk}|} \sum_{p \in V_{ijk}} p
+      $$
+      where $V_{ijk}$ is the set of points in voxel $(i, j, k)$.
+   d. The output $P'$ consists of all centroids $c_{ijk}$.
+
+   If $M = \text{'uniform'}$:
+   a. If the number of points in $P_{crop}$ exceeds $N_{max}$, randomly select $N_{max}$ points from $P_{crop}$ without replacement.
+   b. If the number of points is $\le N_{max}$, keep all points.
+   c. The output $P'$ is the selected subset.
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def crop_and_downsample(points, crop_volume, down_sample_method='voxel', voxel_size=0.01, MAX_POINT_NUMBER=None, trans=None):
-    # Apply transformation if provided
-    if trans is not None:
-        points = apply_transformation(points, trans)
+def crop_and_downsample(points, crop_volume, method='voxel', voxel_size=0.01, max_points=None):
+    """
+    points: list of tuples (x, y, z)
+    crop_volume: tuple (x_min, y_min, z_min, x_max, y_max, z_max)
+    method: 'voxel' or 'uniform'
+    voxel_size: float, size of the voxel edge
+    max_points: int, max points for uniform downsampling
+    """
+    x_min, y_min, z_min, x_max, y_max, z_max = crop_volume
     
-    # Step 1: Crop points within volume
-    # Assuming crop_volume is a function or object that returns a boolean mask
-    # For an AABB, this would be:
-    # mask = (points >= crop_volume.min) & (points <= crop_volume.max)
-    # cropped_points = points[mask]
-    cropped_points = apply_crop(points, crop_volume)
+    # Step 1: Filter NaN values
+    cleaned_points = []
+    for p in points:
+        if not (math.isnan(p[0]) or math.isnan(p[1]) or math.isnan(p[2])):
+            cleaned_points.append(p)
     
-    # Step 2: Downsample
-    if down_sample_method == 'voxel':
-        # Voxel Downsampling
-        # Compute voxel indices
-        voxel_indices = np.floor(cropped_points / voxel_size).astype(int)
-        
-        # Use a dictionary to store one point per voxel
+    # Step 2: Crop
+    cropped_points = []
+    for p in cleaned_points:
+        if x_min <= p[0] <= x_max and y_min <= p[1] <= y_max and z_min <= p[2] <= z_max:
+            cropped_points.append(p)
+            
+    # Step 3: Downsample
+    if method == 'voxel':
         voxel_map = {}
-        for i, point in enumerate(cropped_points):
-            key = tuple(voxel_indices[i])
+        for p in cropped_points:
+            # Compute voxel index
+            i = int(math.floor((p[0] - x_min) / voxel_size))
+            j = int(math.floor((p[1] - y_min) / voxel_size))
+            k = int(math.floor((p[2] - z_min) / voxel_size))
+            key = (i, j, k)
+            
             if key not in voxel_map:
-                voxel_map[key] = point
-        
-        # Return unique points
-        return np.array(list(voxel_map.values()))
-        
-    elif down_sample_method == 'uniform':
-        # Uniform Downsampling
-        if MAX_POINT_NUMBER is None:
-            # Default behavior if not specified
-            return cropped_points
-        
-        if len(cropped_points) > MAX_POINT_NUMBER:
-            # Randomly sample points
-            indices = np.random.choice(len(cropped_points), MAX_POINT_NUMBER, replace=False)
-            return cropped_points[indices]
+                voxel_map[key] = []
+            voxel_map[key].append(p)
+            
+        downsampled_points = []
+        for key, pts in voxel_map.items():
+            # Compute centroid
+            sum_x = sum(p[0] for p in pts)
+            sum_y = sum(p[1] for p in pts)
+            sum_z = sum(p[2] for p in pts)
+            count = len(pts)
+            downsampled_points.append((sum_x / count, sum_y / count, sum_z / count))
+            
+    elif method == 'uniform':
+        if max_points is not None and len(cropped_points) > max_points:
+            import random
+            downsampled_points = random.sample(cropped_points, max_points)
         else:
-            return cropped_points
+            downsampled_points = cropped_points
     else:
-        raise ValueError("Invalid down_sample_method")
+        raise ValueError("Unknown downsampling method")
+        
+    return downsampled_points
 ```
 
-**Parameters with Typical Values:**
-- `voxel_size`: $0.01$ [S1, unofficial].
-- `down_sample_method`: `'voxel'` [S1, unofficial].
+**Parameters:**
+- `voxel_size`: Voxel size for downsampling. Default: $0.01$ [S1, unofficial]. Specific implementations may use $(0.025, 0.025, 0.025)$ [S2, unofficial].
+- `max_points`: Maximum number of points before uniform downsampling is triggered. Value not specified in code snippet [S1, unofficial]. In some registration contexts, this may default to $4 \times \text{MAX\_POINT\_NUMBER}$ but is noted as not used in current implementation [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- `MAX_POINT_NUMBER` is not specified in the code snippet, so its default behavior is undefined [S1, unofficial].
-- Precision issues may arise when computing voxel indices for points near boundaries; using `np.floor` is standard but may require careful handling of negative coordinates depending on the implementation [G].
-- If `crop_volume` is empty or invalid, the output will be an empty point cloud.
+- **NaN Values:** Input clouds may contain NaN coordinates. These must be filtered out before cropping or downsampling to prevent errors in centroid calculation or random sampling [S2, unofficial].
+- **Empty Voxels:** If a voxel contains no points, it is ignored.
+- **Boundary Conditions:** Points exactly on the boundary of the crop volume are included if the condition is inclusive ($\le$).
+- **Precision:** Floating-point precision in voxel index calculation can lead to jitter if not handled consistently. Using `floor` ensures deterministic binning.
 
 ## Subtopics
 
+### [Farthest Point Sampling (FPS)](7182-farthest-point-sampling-fps.md)
+Farthest Point Sampling (FPS) is a deterministic (after initial random seed) algorithm for selecting a subset of points from a point cloud such that the selected points are maximally spread out in Euclidean space, ensuring maximum spatial coverage. It solves the problem of uniform downsampling where simple random sampling may leave gaps or cluster points, and grid-based methods may lose fine geometric details. It sets itself apart from sibling methods like [Adaptive Point Cloud Downsampling based on Geometry and Texture Complexity](10729-adaptive-point-cloud-downsampling-based-on-geometry-and-text.md) by relying purely on geometric distance metrics rather than local feature complexity or texture density.
+
+### [Point Cloud Filtering and Noise Removal](8464-point-cloud-filtering-and-noise-removal.md)
+Removes statistical outliers from a point cloud to clean noise and artifacts, specifically targeting clear floaters in unprojected point clouds. It differs from sibling methods like Farthest Point Sampling, which focuses on uniform spatial distribution, by preserving the original density of inliers while discarding points that deviate significantly from local geometric consistency.
+
+### [Adaptive Point Cloud Downsampling based on Geometry and Texture Complexity](10729-adaptive-point-cloud-downsampling-based-on-geometry-and-text.md)
+This method reduces the density of a point cloud by selecting a subset of points based on local geometric curvature and color texture complexity, ensuring that visually or structurally significant regions are preserved during downsampling. It differs from uniform voxel downsampling by using probabilistic sampling weighted by complexity metrics rather than simple spatial binning, and from uniform random downsampling by biasing selection toward high-complexity areas. It builds on [Point Cloud Cropping and Downsampling](7057-point-cloud-cropping-and-downsampling.md).
+
 ### Voxel Downsampling Registration
-Performs ICP registration between source and ground truth target point clouds using voxel downsampling, with an initial transformation [S1, unofficial]. It differs from uniform registration by using voxel-based downsampling which preserves geometric structure better for dense clouds [S1, unofficial]. Choose this when high precision is required and the point cloud density is high.
-1. If verbose: print `voxel_size` and threshold, set Open3D verbosity to Debug [S1, unofficial].
-2. Downsample source: `crop_and_downsample(source, crop_volume, 'voxel', voxel_size, trans=init_trans)` [S1, unofficial].
-3. Downsample target: `crop_and_downsample(gt_target, crop_volume, 'voxel', voxel_size)` [S1, unofficial].
-4. Perform ICP: `registration_icp(s, t, threshold, np.identity(4), TransformationEstimationPointToPoint(True), ICPConvergenceCriteria(1e-6, max_itr))` [S1, unofficial].
-5. Update transformation: `reg.transformation = matmul(reg.transformation, init_trans)` [S1, unofficial].
-6. Return registration result [S1, unofficial].
-Parameters: `voxel_size` is required [S1, unofficial]. ICP convergence: tolerance $1e-6$, max iterations `max_itr` [S1, unofficial].
+Performs ICP registration between source and ground truth target point clouds using voxel downsampling, with an initial transformation [S1, unofficial].
+1. If verbose: print voxel_size and threshold, set Open3D verbosity to Debug.
+2. Downsample source: `crop_and_downsample(source, crop_volume, 'voxel', voxel_size, trans=init_trans)`.
+3. Downsample target: `crop_and_downsample(gt_target, crop_volume, 'voxel', voxel_size)`.
+4. Perform ICP: `registration_icp(s, t, threshold, np.identity(4), TransformationEstimationPointToPoint(True), ICPConvergenceCriteria(1e-6, max_itr))`.
+5. Update transformation: `reg.transformation = matmul(reg.transformation, init_trans)`.
+6. Return registration result.
+Parameters: `voxel_size` is required [S1, unofficial]. ICP convergence tolerance is $10^{-6}$, max iterations `max_itr` [S1, unofficial].
 
 ### Uniform Registration
-Performs ICP registration between source and ground truth target point clouds using uniform downsampling, with an initial transformation [S1, unofficial]. It differs from voxel registration by using random sampling, which is faster but may lose geometric detail [S1, unofficial]. Choose this when speed is prioritized over geometric fidelity.
-1. If verbose: print threshold, set Open3D verbosity to Debug [S1, unofficial].
-2. Downsample source: `crop_and_downsample(source, crop_volume, 'uniform', trans=init_trans)` [S1, unofficial].
-3. Downsample target: `crop_and_downsample(gt_target, crop_volume, 'uniform')` [S1, unofficial].
-4. Perform ICP: `registration_icp(s, t, threshold, np.identity(4), TransformationEstimationPointToPoint(True), ICPConvergenceCriteria(1e-6, max_itr))` [S1, unofficial].
-5. Update transformation: `reg.transformation = matmul(reg.transformation, init_trans)` [S1, unofficial].
-6. Return registration result [S1, unofficial].
-Parameters: `max_size` is default $4 \times MAX\_POINT\_NUMBER$ but not used in current implementation [S1, unofficial]. ICP convergence: tolerance $1e-6$, max iterations `max_itr` [S1, unofficial].
-
-### Point Cloud Filtering and Noise Removal
-Removes clear floaters from unprojected point clouds for each frame using a 3D statistical filter from Open3D [S2]. It differs from cropping and downsampling by focusing on outlier removal rather than density reduction [S2]. Choose this when dealing with noisy unprojected point clouds.
-Parameters: Number of neighbors: $20$. Standard deviation ratio: $2.0$ [S2].
+Performs ICP registration between source and ground truth target point clouds using uniform downsampling, with an initial transformation [S1, unofficial].
+1. If verbose: print threshold, set Open3D verbosity to Debug.
+2. Downsample source: `crop_and_downsample(source, crop_volume, 'uniform', trans=init_trans)`.
+3. Downsample target: `crop_and_downsample(gt_target, crop_volume, 'uniform')`.
+4. Perform ICP: `registration_icp(s, t, threshold, np.identity(4), TransformationEstimationPointToPoint(True), ICPConvergenceCriteria(1e-6, max_itr))`.
+5. Update transformation: `reg.transformation = matmul(reg.transformation, init_trans)`.
+6. Return registration result.
+Parameters: `max_size` defaults to $4 \times \text{MAX\_POINT\_NUMBER}$ but is not used in current implementation [S1, unofficial]. ICP convergence tolerance is $10^{-6}$, max iterations `max_itr` [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Voxel downsampling is $O(N)$ where $N$ is the number of points, assuming hash map operations are $O(1)$. Uniform downsampling is $O(N)$ for filtering and $O(K)$ for sampling where $K$ is the target size.
-- **Memory Complexity:** $O(N)$ for storing points and voxel grid.
+- **Time Complexity:** Cropping is $O(N)$ where $N$ is the number of points. Voxel downsampling is $O(N)$ on average with hash map insertion, but depends on the number of occupied voxels. Uniform downsampling is $O(N)$ for filtering and $O(K)$ for sampling where $K$ is the output size.
+- **Memory Complexity:** $O(N)$ for storing the input and intermediate cropped points. Voxel downsampling requires additional memory for the voxel grid, proportional to the number of occupied voxels.
 - **Measured Performance:** Not given in the sources.
-- **Scaling:** Voxel downsampling scales well with point cloud density as it reduces points to the number of occupied voxels.
-- **Strengths:** Simple to implement, effective for reducing density while maintaining spatial distribution.
-- **Limitations:** Voxel size selection is critical; too large a size loses detail, too small a size provides little reduction. Uniform downsampling may remove important geometric features.
-- **When to use:** Preprocessing for ICP registration, voxelization, or rendering.
-- **When not to use:** When geometric fidelity is critical and random sampling is unacceptable.
+- **Scaling:** Scales linearly with the number of points. Voxel size affects the number of voxels and thus the memory overhead and output size.
+- **Strengths:** Simple to implement, effective for reducing point cloud density, handles noise via voxel averaging.
+- **Limitations:** Voxel downsampling may lose fine geometric details if the voxel size is too large. Uniform downsampling may result in non-uniform spatial distribution.
+- **When to use:** When a quick reduction in point cloud size is needed for registration or visualization.
+- **When not to use:** When preserving fine geometric details is critical, or when the point cloud has significant anisotropic density.
 
 ## Background
-Originated from the Open3D library and used in 2D Gaussian Splatting implementations [S1, unofficial]. It is commonly used in 3D reconstruction and view synthesis pipelines to prepare point clouds for further processing [S1, unofficial][S2].
+Origin: This method is commonly implemented in point cloud processing libraries such as Open3D [S1, unofficial][S2, unofficial]. It is a standard preprocessing step in 3D computer vision pipelines, particularly for LiDAR data and 3D reconstruction.
 
 ## Sources
 [S1] hbb1/2d-gaussian-splatting, https://github.com/hbb1/2d-gaussian-splatting, fetched 2026-10-27 (unofficial)
-[S2] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03
+[S2] zAle711/Point-Cloud-Voxelization-Node, https://github.com/zAle711/Point-Cloud-Voxelization-Node, fetched 2026-10-27 (unofficial)

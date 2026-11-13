@@ -1,0 +1,192 @@
+--- v001.md
++++ v002.md
+@@ -4,91 +4,129 @@
+ 
+ ## Overview
+-This method remedies black smudges and dirty textures caused by displaced objects exposing unseen areas that 3D Gaussian Splatting (3DGS) cannot recover from input images [S1]. Unlike vanilla 3DGS, which leaves empty spots and dirty textures blended from irrelevant kernels when objects are displaced, this technique ameliorates the issue using generative AI inpainting [S1]. It is specifically designed for scenarios where object movement reveals background or occluded regions not present in the training data.
++This method remedies the "black smudges" and "dirty textures" that appear in 3D Gaussian Splatting (3DGS) when objects are displaced, exposing previously occluded background areas that are absent from the input training images [S1]. Unlike vanilla 3DGS, which leaves empty spots or blends irrelevant kernels into these unseen regions, this technique uses generative AI inpainting to reconstruct the missing background texture and reinitializes the Gaussian kernels in those areas with the inpainted colors [S1]. It builds on [3D Gaussian Splatting Training](3761-3d-gaussian-splatting-training.md) by replacing the standard optimization of displaced object kernels with a generative repair step.
+ 
+ ## How it works
+ **Inputs:**
+-*   A set of 3D Gaussian kernels representing the scene, including those belonging to the displaced object.
+-*   A rendered image of the scene containing artifacts (black smudges/dirty textures) in the regions exposed by the displacement.
+-*   A generative inpainting model (specifically LaMa [61] in the primary formulation) [S1].
++1.  A trained 3D Gaussian Splatting scene containing a set of Gaussian kernels $\mathcal{G}$.
++2.  A segmentation mask or identification of the "displaced object" (the object whose movement reveals unseen background) [S1].
++3.  A generative inpainting model (specifically LaMa [61] in the primary formulation) [S1].
++4.  Camera parameters for the training views.
+ 
+ **Outputs:**
+-*   Updated Gaussian kernels with corrected diffuse colors, opacity, and specular properties.
+-*   A clean rendered image free of displacement artifacts.
++1.  An updated set of Gaussian kernels $\mathcal{G}'$ where the displaced object's kernels are removed and the background kernels are reinitialized with inpainted colors.
++2.  A rendered image free of black smudges in the exposed background regions.
+ 
+ **Data Structures:**
+-*   **Gaussian Kernel:** Standard 3DGS attributes including position $\mathbf{p}$, covariance $\Sigma$ (or scale/rotation), opacity $\alpha$, spherical harmonics coefficients for color, and diffuse/specular color components.
+-*   **Rendered Image:** A 2D array of pixel colors and an alpha mask indicating valid/invalid regions.
++*   **Gaussian Kernel:** Defined by position $\mathbf{p}$, covariance matrix $\Sigma$ (or rotation $\mathbf{R}$ and scale $\mathbf{s}$), opacity $\alpha$, and color coefficients (diffuse $\mathbf{c}_{diff}$, specular $\mathbf{c}_{spec}$, spherical harmonics coefficients) [S1].
++*   **Rendered Image:** A color image $\mathbf{I}$ and an alpha mask $\mathbf{M}$ indicating valid vs. missing pixels.
+ 
+ **Steps:**
+-1.  **Kernel Removal:** Identify and remove all Gaussian kernels associated with the object that may be displaced. This clears the "dirty" or missing texture data from the scene representation [S1].
+-2.  **Rendering:** Render the scene with the displaced object's kernels removed. This results in an image with holes or background regions where the object was previously located.
+-3.  **Generative Inpainting:** Use LaMa [61] to inpaint the rendered results. The model generates plausible texture for the missing regions based on the surrounding context [S1].
+-4.  **Color Tracking:** Note the new colors of pixels in the inpainted regions. For each pixel in the inpainted area, cast a ray from the camera through that pixel and identify the first Gaussian kernel encountered by this ray [S1].
+-5.  **Color Assignment:** Assign the new inpainted color to the identified Gaussian kernel. If multiple rays (from different views or iterations) map to the same kernel, average the recorded colors on all noted Gaussian kernels to determine their final diffuse color [S1].
+-6.  **Parameter Update:**
+-    *   Set the opacity $\alpha$ of the affected kernels to 1 [S1].
+-    *   Set the specular color to 0 to prevent highlights in the inpainted regions [S1].
++
++1.  **Identify Displaced Kernels:**
++    Identify all Gaussian kernels $\mathcal{G}_{obj} \subset \mathcal{G}$ belonging to the displaced object. This is typically done via segmentation masks provided in the input images or post-processing [S1].
++
++2.  **Remove Displaced Kernels:**
++    Remove all kernels in $\mathcal{G}_{obj}$ from the scene representation. This creates "holes" in the rendered background where the object used to be [S1].
++
++3.  **Render with Holes:**
++    Render the scene using the remaining kernels $\mathcal{G} \setminus \mathcal{G}_{obj}$ from the training camera viewpoints. This produces images with missing background regions (black smudges or transparent holes) [S1].
++
++4.  **Generative Inpainting:**
++    Use the LaMa model to inpaint the rendered images. Let $\mathbf{I}_{rendered}$ be the image with holes and $\mathbf{M}_{hole}$ be the binary mask of the holes. The inpainting model generates a completed image $\mathbf{I}_{inpainted}$:
++    $$ \mathbf{I}_{inpainted} = \text{LaMa}(\mathbf{I}_{rendered}, \mathbf{M}_{hole}) $$
++    This step fills the unseen background areas with plausible textures generated by the AI [S1].
++
++5.  **Ray Casting and Color Assignment:**
++    For each pixel $(u, v)$ in the inpainted image $\mathbf{I}_{inpainted}$ that was previously in a hole (i.e., $\mathbf{M}_{hole}(u, v) = 1$):
++    a.  Emit a ray from the camera center through $(u, v)$.
++    b.  Find the first Gaussian kernel $\mathbf{g}_{first}$ encountered by this ray in the *original* scene (before removal) or in the scene geometry corresponding to the background plane. Note: The source specifies "first Gaussian kernel encountered by the rays emitted from these pixels" [S1]. In practice, this often implies finding the background geometry that was occluded by the displaced object.
++    c.  Record the color $\mathbf{c}_{new}(u, v)$ from $\mathbf{I}_{inpainted}$ at $(u, v)$.
++
++6.  **Reinitialize Background Kernels:**
++    For each background Gaussian kernel $\mathbf{g}_{bg}$ that was occluded by the displaced object:
++    a.  Collect all recorded colors $\mathbf{c}_{new}$ from rays that hit $\mathbf{g}_{bg}$ (or the corresponding pixel locations).
++    b.  Compute the average color:
++        $$ \mathbf{c}_{diff} = \frac{1}{N} \sum_{i=1}^{N} \mathbf{c}_{new}^{(i)} $$
++    c.  Update the kernel's diffuse color to $\mathbf{c}_{diff}$.
++    d.  Set opacity $\alpha = 1$ [S1].
++    e.  Set specular color $\mathbf{c}_{spec} = 0$ to prevent highlights in the background [S1].
+ 
+ **Pseudocode:**
++
+ ```python
+-def inpaint_displaced_objects(gaussians, camera, la_ma_model):
+-    # Step 1: Identify and remove kernels of the displaced object
+-    # Assume 'displaced_object_mask' identifies which kernels belong to the object
+-    active_gaussians = [g for g in gaussians if not displaced_object_mask[g.id]]
++def inpaint_displaced_objects(scene, object_mask, laema_model, cameras):
++    """
++    scene: Object containing list of Gaussian kernels.
++    object_mask: Segmentation mask identifying the displaced object.
++    laema_model: The LaMa inpainting model.
++    cameras: List of camera parameters for training views.
++    """
++    # Step 1 & 2: Identify and remove displaced kernels
++    displaced_kernels = [g for g in scene.gaussians if object_mask.contains(g.position)]
++    background_kernels = [g for g in scene.gaussians if not object_mask.contains(g.position)]
+     
+-    # Step 2: Render the scene without the object
+-    # Returns image with holes/background and ray data
+-    rendered_image, ray_data = render_scene(active_gaussians, camera)
++    # Store original positions for ray casting reference if needed, 
++    # though typically we re-render background.
++    scene.remove_kernels(displaced_kernels)
+     
+-    # Step 3: Inpaint the rendered image using LaMa
+-    # LaMa fills in the missing regions with generated texture
+-    inpainted_image = la_ma_model.inpaint(rendered_image, ray_data.alpha_mask)
++    # Step 3 & 4: Render and Inpaint
++    for camera in cameras:
++        # Render scene with holes (background only)
++        rendered_image, hole_mask = scene.render(camera)
++        
++        # Inpaint the holes using LaMa
++        inpainted_image = laema_model.inpaint(rendered_image, hole_mask)
++        
++        # Step 5 & 6: Assign colors to background kernels
++        # Note: This step requires mapping pixels back to the specific background 
++        # kernels that were occluded. In a simplified implementation, we might 
++        # just update the background kernels based on the inpainted image's 
++        # corresponding pixel colors.
++        
++        for pixel_u, pixel_v in hole_mask.get_true_indices():
++            # Cast ray from camera through pixel
++            ray = camera.get_ray(pixel_u, pixel_v)
++            
++            # Find the first background kernel hit by this ray in the 
++            # *original* scene (before displacement) or the background plane.
++            # Since displaced kernels are removed, we must rely on stored 
++            # occlusion data or re-project.
++            # Assuming we have a mapping of which background kernel was 
++            # occluded by which pixel:
++            occluded_kernel = get_occluded_kernel(pixel_u, pixel_v, object_mask, scene)
++            
++            if occluded_kernel is not None:
++                new_color = inpainted_image[pixel_u, pixel_v]
++                occluded_kernel.record_color(new_color)
+     
+-    # Step 4 & 5: Assign new colors to kernels
+-    # For each pixel in the inpainted region, find the corresponding kernel
+-    for pixel in inpainted_image.masked_regions():
+-        ray = camera.get_ray(pixel.u, pixel.v)
+-        # Find the first kernel intersected by the ray
+-        kernel = ray.cast_first_intersection(active_gaussians)
+-        
+-        if kernel is not None:
+-            # Record the new color from the inpainted image
+-            new_color = inpainted_image.get_color(pixel.u, pixel.v)
+-            kernel.color_history.append(new_color)
++    # Step 6: Finalize kernel properties
++    for kernel in background_kernels:
++        if kernel.has_recorded_colors():
++            kernel.diffuse_color = kernel.average_recorded_colors()
++            kernel.opacity = 1.0
++            kernel.specular_color = 0.0
+             
+-    # Average the recorded colors for diffuse color
+-    for kernel in active_gaussians:
+-        if kernel.color_history:
+-            kernel.diffuse_color = average(kernel.color_history)
+-            
+-    # Step 6: Update parameters
+-    for kernel in active_gaussians:
+-        kernel.opacity = 1.0
+-        kernel.specular_color = 0.0
+-        
+-    return active_gaussians
++    return scene
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The accuracy of color assignment depends on the precision of ray-kernel intersection tests.
+-*   **Boundaries:** The method assumes the displaced object is fully segmented or identifiable. If the mask is inaccurate, kernels may be incorrectly removed or retained.
+-*   **Degenerate Input:** If the inpainted region is too large or lacks sufficient context, LaMa may generate hallucinated details that do not match the scene's lighting or geometry.
++*   **Precision:** The accuracy of the color assignment depends on the precision of the ray-kernel intersection test. If the background geometry is not well-represented by the remaining kernels, the assignment may be incorrect [S1].
++*   **Boundaries:** The method assumes the displaced object is fully segmented. Incomplete segmentation may leave parts of the object's kernels, causing artifacts [S1].
++*   **Degenerate Input:** If the background is not visible in any training view (e.g., completely enclosed), LaMa may hallucinate incorrect textures, which will then be baked into the scene [S1].
+ 
+ ## Subtopics
+ 
+ ### 3D Inpainting Pipeline
+-A sequential pipeline to fill occluded/missing regions in rendered novel views while maintaining 3D consistency, leveraging the constraint that Gaussians do not hallucinate details [S2]. Unlike the single-view LaMa approach, this method iterates across multiple views. Steps: 1. Render a novel view with holes and an alpha mask. 2. Use Stable Diffusion inpainting to generate missing texture in the masked regions. 3. Estimate monocular depth on the inpainted image. 4. Use the gradient of this depth to fill in rendered depth in the masked regions using Poisson blending. 5. Project Gaussians to the scene using the inpainted depth and image. 6. Repeat the process sequentially for a few novel views until the scene is 3D consistent and renderable from any view without holes [S2].
++A sequential pipeline designed for sparse view synthesis that maintains 3D consistency while filling occluded regions [S2]. Unlike the primary method which uses LaMa on 2D renders, this approach uses Stable Diffusion for inpainting, estimates monocular depth on the inpainted image, and uses Poisson blending to fill rendered depth maps using the depth gradient [S2]. It projects Gaussians using the inpainted depth and image, repeating the process for multiple novel views until the scene is 3D consistent and renderable from any view without holes [S2]. This method leverages the constraint that Gaussians do not hallucinate details, allowing safe use of generative models [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the cost of rendering and the generative inpainting model. LaMa and Stable Diffusion are computationally expensive compared to standard rasterization.
+-*   **Memory Complexity:** Requires storing the generative model weights and intermediate rendered images.
+-*   **Performance:** Significantly reduces artifacts in dynamic scenes with displaced objects compared to vanilla 3DGS [S1].
+-*   **Strengths:** Effectively handles unseen background regions revealed by object movement. Prevents black smudges and dirty textures.
+-*   **Limitations:** Relies on the quality of the generative inpainting model. May introduce inconsistencies if the inpainted texture does not match the lighting or geometry of the rest of the scene. Not suitable for reconstructing geometry that was never visible in any input view.
+-*   **When to use:** When objects in a scene move and expose previously occluded background areas.
+-*   **When not to use:** When the goal is to reconstruct the object itself, or when the occluded regions contain complex geometry that cannot be inferred from surrounding context.
++*   **Time Complexity:** The method adds a generative inference step (LaMa or Stable Diffusion) per training view or novel view. This is significantly slower than standard 3DGS optimization but faster than full re-training.
++*   **Memory Complexity:** No significant additional memory overhead beyond storing the inpainted images and the updated kernel attributes.
++*   **Performance:** Effectively removes black smudges and dirty textures caused by displaced objects [S1]. It ameliorates the issue of empty spots and blended irrelevant kernels [S1].
++*   **Strengths:** Handles unseen background areas that 3DGS cannot recover from input images [S1]. Maintains 3D consistency in the variant pipeline [S2].
++*   **Limitations:** Relies on the quality of the generative model (LaMa/Stable Diffusion). May hallucinate incorrect textures if the background is not well-constrained [S1, S2].
+ 
+ ## Background
+-Originated in the context of Gaussian Splashing (GSP), a method for unified particle-based motion synthesis and rendering [S1]. The technique was introduced to address the limitation of 3DGS in handling dynamic scenes where objects displace and reveal unseen areas. The primary source cites LaMa [61] as the inpainting model used. A variant using Stable Diffusion and Poisson blending for 3D consistency was later proposed in CoherentGS [S2].
++The method was introduced in "Gaussian Splashing: Unified Particles for Versatile Motion Synthesis and Rendering" (2025) to address artifacts in dynamic scenes where objects move and reveal unseen background [S1]. The variant using Stable Diffusion and Poisson blending was introduced in "CoherentGS: Sparse Novel View Synthesis with Coherent 3D Gaussians" (2025) for sparse view synthesis [S2].
+ 
+ ## Sources

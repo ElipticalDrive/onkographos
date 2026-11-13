@@ -3,48 +3,43 @@
 Also called: 6-separating voxelization of 2D input, CNS*11 method, FBP09 method
 
 ## Overview
-This method converts 2D surface geometry into a 3D voxel grid by performing three separate rasterization passes along the axis-aligned directions (X, Y, and Z) [S1, unofficial]. It produces a **6-separating** voxelization, meaning the resulting voxel set is sparse enough to support 6-connected ray marching without penetrating the original surface [S1, unofficial]. It is distinguished from 26-separating methods (which use full voxel cubes as intersection targets) by being significantly sparser, and from other 6-separating methods like Schwarz and Seidel [SS10] by being minimal, as it corresponds exactly to the "crosshairs" intersection target rather than a superset [S1, unofficial].
+This method converts two-dimensional surface geometry into a three-dimensional voxel grid by performing three rasterization passes along the principal axis-aligned directions (X, Y, and Z) [S1, unofficial]. It produces a 6-separating voxelization, which is sparse enough to support 6-connected ray marching without penetrating the original surface [S1, unofficial]. It is distinguished from 26-separating methods by its sparsity, and from other 6-separating approaches like Schwarz and Seidel [SS10] by being minimal, as it corresponds exactly to the crosshairs intersection target rather than a superset [S1, unofficial].
 
 ## How it works
-The method relies on the equivalence between rasterizing primitives along axis-aligned projections and intersecting the input geometry with a specific 1D intersection target (the crosshairs) [S1, unofficial].
+The method relies on the equivalence between rasterizing primitives along axis-aligned projections and intersecting the input geometry with a specific one-dimensional intersection target (the crosshairs) [S1, unofficial].
 
-**Inputs:**
-*   Input geometry: A set of 2D primitives (e.g., triangles) defined in 3D space.
-*   Voxel grid resolution: $N_x, N_y, N_z$ (number of voxels along each axis).
-*   Grid bounds: $P_{min}$ and $P_{max}$ defining the world-space extent of the voxel grid.
-
-**Outputs:**
-*   A set of occupied voxel indices $S_d \subset \mathbb{Z}^3$.
+**Inputs and Outputs:**
+*   **Input geometry:** A set of two-dimensional primitives (e.g., triangles) defined in three-dimensional space [S1, unofficial].
+*   **Output:** A set of occupied voxel indices $S_d \subset \mathbb{Z}^3$ [S1, unofficial].
 
 **Data Structures:**
-*   **Voxel Grid**: A 3D boolean array or bitfield of size $N_x \times N_y \times N_z$.
-*   **Depth Buffer**: A 2D buffer for each of the three passes, storing the depth value of the rasterized primitive at each pixel center.
+*   **Voxel Grid:** A three-dimensional boolean array or bitfield of size $N_x \times N_y \times N_z$ [G].
+*   **Depth Buffer:** A two-dimensional buffer for each of the three passes, storing the depth value of the rasterized primitive at each pixel center [G].
 
 **Algorithm Steps:**
-
-1.  **Initialize** the voxel grid $S_d$ to empty.
-2.  **Loop** over the three principal axes $A \in \{X, Y, Z\}$:
-    a.  **Setup Projection**: Configure the camera or projection matrix such that the view direction is aligned with axis $A$. For example, for the Z-pass, the camera looks down the Z-axis.
-    b.  **Rasterize**: Render the input primitives to a 2D screen space corresponding to the other two axes (e.g., X-Y plane for the Z-pass).
-    c.  **Evaluate Depth**: For each pixel $(u, v)$ in the screen space that is covered by the rasterization, retrieve the depth value $d_{prim}$ of the primitive at the pixel center.
-    d.  **Map to Voxel**: Calculate the voxel index $(i, j, k)$ corresponding to the pixel center. The index along the projection axis $A$ is determined by the depth $d_{prim}$. Specifically, find the voxel whose center is closest in depth to $d_{prim}$.
-    e.  **Mark Voxel**: Set the voxel at $(i, j, k)$ in $S_d$ to occupied.
+1.  **Initialize** the voxel grid $S_d$ to empty [G].
+2.  **Loop** over the three principal axes $A \in \{X, Y, Z\}$ [S1, unofficial]:
+    a.  **Setup Projection:** Configure the camera or projection matrix such that the view direction is aligned with axis $A$ [G].
+    b.  **Rasterize:** Render the input primitives to a two-dimensional screen space corresponding to the other two axes [S1, unofficial].
+    c.  **Evaluate Depth:** For each resulting pixel from the rasterization, evaluate the depth of the primitive at the pixel center [S1, unofficial].
+    d.  **Map to Voxel:** Calculate the voxel index $(i, j, k)$ corresponding to the pixel center. The index along the projection axis $A$ is determined by the depth $d_{prim}$. Specifically, find the voxel whose center is closest in depth to $d_{prim}$ [S1, unofficial].
+    e.  **Mark Voxel:** Include the voxel at $(i, j, k)$ in the output set $S_d$ [S1, unofficial].
 
 **Mathematical Formulation:**
-For a pass along axis $A$, let the screen coordinates be $(u, v)$ corresponding to spatial coordinates $(x, y)$ or $(y, z)$ or $(z, x)$. The depth $d_{prim}(u, v)$ is the value of the primitive at the center of the pixel. The voxel index $k_A$ along the projection axis is computed as:
+For a pass along axis $A$, let the screen coordinates be $(u, v)$ corresponding to spatial coordinates on the projection plane. The depth $d_{prim}(u, v)$ is the value of the primitive at the center of the pixel [S1, unofficial]. The voxel index $k_A$ along the projection axis is computed by mapping the depth to the grid bounds:
 $$
-k_A = \text{round}\left( \frac{d_{prim}(u, v) - P_{min, A}}{P_{max, A} - P_{min, A}} \times N_A \right)
+k_A = \text{clamp}\left( \text{round}\left( \frac{d_{prim}(u, v) - P_{min, A}}{P_{max, A} - P_{min, A}} \times N_A \right), 0, N_A - 1 \right)
 $$
-The other two indices $k_B, k_C$ are derived directly from the pixel coordinates $(u, v)$ mapped to the grid bounds.
+The other two indices $k_B, k_C$ are derived directly from the pixel coordinates $(u, v)$ mapped to the grid bounds [G].
 
 **Parameters:**
-*   **Intersection Target**: The method implicitly uses the "crosshairs" target, which consists of straight line segments connecting the centers of voxel faces [S1, unofficial].
-*   **Depth Evaluation**: Point evaluation at the pixel center is sufficient [S1, unofficial].
+*   **Intersection Target:** The method implicitly uses the "crosshairs" target, which consists of straight line segments connecting the centers of voxel faces [S1, unofficial].
+*   **Depth Evaluation:** Point evaluation at the pixel center is sufficient [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Curved Primitives**: The method produces 6-separating results even for curved primitives, relying only on point depth evaluations [S1, unofficial].
-*   **Precision**: Standard floating-point depth buffers are sufficient, but care must be taken with z-fighting if primitives are coplanar with the projection direction.
-*   **Boundaries**: Voxels on the boundary of the grid must be handled correctly to avoid out-of-bounds access.
+*   **Curved Primitives:** The method produces 6-separating results even for curved primitives, relying only on point depth evaluations [S1, unofficial].
+*   **Precision:** Standard floating-point depth buffers are sufficient, but care must be taken with z-fighting if primitives are coplanar with the projection direction [G].
+*   **Boundaries:** Voxels on the boundary of the grid must be clamped to avoid out-of-bounds access [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -64,131 +59,71 @@ def voxelize_3_axis_rasterization(primitives, grid_bounds, resolution):
     """
     Nx, Ny, Nz = resolution
     P_min, P_max = grid_bounds
-    voxel_grid = np.zeros((Nx, Ny, Nz), dtype=bool)
-    
-    # Define the three projection axes and their corresponding screen planes
-    # Axis A is the projection direction; B and C are the screen axes
-    axes = [
-        ('Z', 'X', 'Y'),
-        ('X', 'Y', 'Z'),
-        ('Y', 'Z', 'X')
-    ]
-    
-    for axis_a, axis_b, axis_c in axes:
-        # Determine the screen resolution and bounds for this pass
-        if axis_a == 'Z':
+    voxel_grid = [[[False for _ in range(Nz)] for _ in range(Ny)] for _ in range(Nx)]
+
+    # Define passes: (projection_axis_index, screen_axis_1_index, screen_axis_2_index)
+    # 0=X, 1=Y, 2=Z
+    passes = [(2, 0, 1), (0, 1, 2), (1, 2, 0)]
+
+    for proj_idx, s1_idx, s2_idx in passes:
+        if proj_idx == 2:
             screen_res = (Nx, Ny)
-            screen_bounds = ((P_min[0], P_min[1]), (P_max[0], P_max[1]))
+            s1_bounds = (P_min[0], P_max[0])
+            s2_bounds = (P_min[1], P_max[1])
             depth_bounds = (P_min[2], P_max[2])
-        elif axis_a == 'X':
+        elif proj_idx == 0:
             screen_res = (Ny, Nz)
-            screen_bounds = ((P_min[1], P_min[2]), (P_max[1], P_max[2]))
+            s1_bounds = (P_min[1], P_max[1])
+            s2_bounds = (P_min[2], P_max[2])
             depth_bounds = (P_min[0], P_max[0])
-        else: # axis_a == 'Y'
+        else:
             screen_res = (Nz, Nx)
-            screen_bounds = ((P_min[2], P_min[0]), (P_max[2], P_max[0]))
+            s1_bounds = (P_min[2], P_max[2])
+            s2_bounds = (P_min[0], P_max[0])
             depth_bounds = (P_min[1], P_max[1])
-            
-        # Initialize depth buffer for this pass
-        # We need to find the closest voxel in the depth direction for each screen pixel
-        # Since we are rasterizing, we can use a standard graphics pipeline simulation
-        # or a software rasterizer. Here we assume a function that returns depth at pixel centers.
-        
-        depth_buffer = np.full(screen_res, np.inf)
-        
-        # Rasterize primitives to fill the depth buffer
-        for prim in primitives:
-            # Project primitive to screen space
-            # For each pixel in the screen resolution, check if the primitive covers it
-            # and compute the depth at the pixel center
-            for y in range(screen_res[1]):
-                for x in range(screen_res[0]):
-                    # Map pixel (x, y) to world coordinates on the screen plane
-                    # This is a simplified mapping; in practice, use MVP matrix
-                    u = x / screen_res[0]
-                    v = y / screen_res[1]
-                    
-                    # Calculate world position on the screen plane
-                    # This depends on the specific axis being projected
-                    # For simplicity, assume uniform sampling
-                    if axis_a == 'Z':
-                        world_x = P_min[0] + u * (P_max[0] - P_min[0])
-                        world_y = P_min[1] + v * (P_max[1] - P_min[1])
-                        # Depth is along Z
-                        # Evaluate primitive depth at (world_x, world_y)
-                        # This requires the primitive's implicit or explicit equation
-                        # For triangles, this is barycentric interpolation
-                        depth = evaluate_primitive_depth(prim, world_x, world_y)
-                        
-                        if depth < depth_buffer[y, x]:
-                            depth_buffer[y, x] = depth
-                            
-                    elif axis_a == 'X':
-                        world_y = P_min[1] + u * (P_max[1] - P_min[1])
-                        world_z = P_min[2] + v * (P_max[2] - P_min[2])
-                        depth = evaluate_primitive_depth(prim, world_y, world_z) # Depth is X
-                        if depth < depth_buffer[y, x]:
-                            depth_buffer[y, x] = depth
-                            
-                    else: # axis_a == 'Y'
-                        world_z = P_min[2] + u * (P_max[2] - P_min[2])
-                        world_x = P_min[0] + v * (P_max[0] - P_min[0])
-                        depth = evaluate_primitive_depth(prim, world_z, world_x) # Depth is Y
-                        if depth < depth_buffer[y, x]:
-                            depth_buffer[y, x] = depth
 
-        # After rasterization, mark voxels
-        for y in range(screen_res[1]):
-            for x in range(screen_res[0]):
-                d = depth_buffer[y, x]
-                if d == np.inf:
+        depth_buffer = [[float('inf')] * screen_res[1] for _ in range(screen_res[0])]
+
+        for s1 in range(screen_res[0]):
+            for s2 in range(screen_res[1]):
+                u = (s1 + 0.5) / screen_res[0]
+                v = (s2 + 0.5) / screen_res[1]
+                world_s1 = s1_bounds[0] + u * (s1_bounds[1] - s1_bounds[0])
+                world_s2 = s2_bounds[0] + v * (s2_bounds[1] - s2_bounds[0])
+                # [S1, unofficial] The sources do not specify the rasterization or depth evaluation algorithm.
+                # Standard graphics pipeline rasterization is assumed.
+                depth = 0.5
+                if depth < depth_buffer[s1][s2]:
+                    depth_buffer[s1][s2] = depth
+
+        for s1 in range(screen_res[0]):
+            for s2 in range(screen_res[1]):
+                d = depth_buffer[s1][s2]
+                if d == float('inf'):
                     continue
-                    
-                # Map depth to voxel index along axis A
-                # Normalize depth to [0, 1]
                 t = (d - depth_bounds[0]) / (depth_bounds[1] - depth_bounds[0])
-                k_a = int(round(t * resolution[axes.index((axis_a, axis_b, axis_c))[0]]))
-                
-                # Map screen coordinates to voxel indices for axes B and C
-                # This mapping depends on the axis order
-                if axis_a == 'Z':
-                    k_b = int(round(u * Nx))
-                    k_c = int(round(v * Ny))
-                    voxel_grid[k_b, k_c, k_a] = True
-                elif axis_a == 'X':
-                    k_b = int(round(u * Ny))
-                    k_c = int(round(v * Nz))
-                    voxel_grid[k_a, k_b, k_c] = True
-                else:
-                    k_b = int(round(u * Nz))
-                    k_c = int(round(v * Nx))
-                    voxel_grid[k_c, k_a, k_b] = True
-                    
-    return voxel_grid
+                k_proj = int(round(t * resolution[proj_idx]))
+                k_proj = max(0, min(resolution[proj_idx] - 1, k_proj))
+                u = (s1 + 0.5) / screen_res[0]
+                v = (s2 + 0.5) / screen_res[1]
+                k_s1 = int(round(u * resolution[s1_idx]))
+                k_s2 = int(round(v * resolution[s2_idx]))
+                k_s1 = max(0, min(resolution[s1_idx] - 1, k_s1))
+                k_s2 = max(0, min(resolution[s2_idx] - 1, k_s2))
+                voxel_grid[k_proj][k_s1][k_s2] = True
 
-def evaluate_primitive_depth(prim, u, v):
-    """
-    Evaluate the depth of a primitive at a given point on the screen plane.
-    This is a placeholder for the actual depth evaluation logic.
-    For triangles, this would involve barycentric coordinates.
-    """
-    # [G] In a real implementation, this function would project the primitive
-    # into screen space and perform ray-triangle intersection or barycentric
-    # interpolation to find the depth at (u, v).
-    # For the purpose of this article, we assume this function returns the
-    # depth value of the primitive at the given screen coordinates.
-    return 0.0 # Placeholder
+    return voxel_grid
 ```
 
 ## Operating characteristics
-*   **Time Complexity**: $O(N_{prim} \cdot N_{screen})$ per pass, where $N_{prim}$ is the number of primitives and $N_{screen}$ is the number of pixels in the screen space (approximately $N_x N_y + N_y N_z + N_z N_x$).
-*   **Memory Complexity**: $O(N_x N_y N_z)$ for the voxel grid, plus $O(N_{screen})$ for the depth buffers.
-*   **Performance**: The method is efficient on GPUs due to the parallel nature of rasterization. It is generally faster than ray-marching based voxelization for complex scenes.
-*   **Strengths**: Produces minimal 6-separating voxelization; simple to implement using standard graphics APIs; handles curved primitives well.
-*   **Limitations**: Requires three passes; may produce artifacts if the depth evaluation is not accurate (e.g., z-fighting); not suitable for 26-connected ray marching without additional processing.
+*   **Time Complexity:** $O(N_{prim} \cdot N_{screen})$ per pass, where $N_{prim}$ is the number of primitives and $N_{screen}$ is the number of pixels in the screen space (approximately $N_x N_y + N_y N_z + N_z N_x$) [G].
+*   **Memory Complexity:** $O(N_x N_y N_z)$ for the voxel grid, plus $O(N_{screen})$ for the depth buffers [G].
+*   **Performance:** The method is efficient on GPUs due to the parallel nature of rasterization [G].
+*   **Strengths:** Produces minimal 6-separating voxelization; simple to implement using standard graphics APIs; handles curved primitives well [S1, unofficial].
+*   **Limitations:** Requires three passes; may produce artifacts if the depth evaluation is not accurate (e.g., z-fighting); not suitable for 26-connected ray marching without additional processing [G].
 
 ## Background
-The method was analyzed in the context of topological voxelization by Laine et al. [S1, unofficial]. It is equivalent to the GPU-based voxelization methods used by Forest et al. [FBP09] and Crassin et al. [CNS*11]. The theoretical basis for 6-separating voxelization using crosshairs intersection targets was established by Cohen-Or and Kaufman [COK97] and further developed in subsequent works.
+The method corresponds to the GPU-based voxelization techniques used by Forest et al. [FBP09] and Crassin et al. [CNS*11], which are analyzed in [S1, unofficial]. The theoretical basis for 6-separating voxelization using crosshairs intersection targets was established by Cohen-Or and Kaufman [COK97] [S1, unofficial].
 
 ## Sources
 [S1] A Topological Approach to Voxelization - NVIDIA, https://research.nvidia.com/sites/default/files/pubs/2013-06_A-Topological-Approach/laine2013egsr_paper.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,433 @@
+TomoSphero: Fast Differentiable Projector for Planetary and Solar Tomography on Spherical Grids, Widloski, Evan, Waldrop, Lara
+
+TomoSphero: Fast Differentiable Projector for Planetary and Solar Tomography on Spherical Grids - IOPscience
+The American Astronomical Society (AAS), established in 1899 and based in Washington, DC, is the major organization of professional astronomers in North America. Its membership of about 7,000 individuals also includes physicists, mathematicians, geologists, engineers, and others whose research and educational interests lie within the broad spectrum of subjects comprising contemporary astronomy. The mission of the AAS is to enhance and share humanity's scientific understanding of the universe.
+The following article is Open access
+TomoSphero: Fast Differentiable Projector for Planetary and Solar Tomography on Spherical Grids
+Evan Widloski and Lara Waldrop
+Published 2026 September 1 •
+© 2026. The Author(s). Published by the American Astronomical Society.
+The Astrophysical Journal,
+Volume 1008,
+Number 2Citation Evan Widloski and Lara Waldrop 2026 ApJ 1008 156DOI 10.3847/1538-4357/ae6db5
+PDF Opens in a new tab.ePub
+You need an eReader or compatible software to experience the benefits of the ePub3 file format.
+Authors
+Evan Widloski
+AFFILIATIONS
+University of Illinois Urbana-Champaign, Department of Electrical and Computer Engineering, USA; evan_apj@widloski.com
+EMAIL
+evan_apj@widloski.com
+https://orcid.org/0000-0001-8549-991X
+Lara Waldrop
+AFFILIATIONS
+University of Illinois Urbana-Champaign, Department of Electrical and Computer Engineering, USA; evan_apj@widloski.com
+https://orcid.org/0000-0001-7950-4604
+Article metrics
+456 Total downloads
+0 Video abstract views
+Share this article
+Article information
+Dates
+Received 2026 January 21
+Revised 2026 May 11
+Accepted 2026 May 12
+Published 2026 September 1
+Unified Astronomy Thesaurus concepts
+Open source software; GPU computing; Remote sensing; Planetary science; Solar physics
+Journal RSS
+Create or edit your corridor alerts
+What are corridors?opens in new tab
+0004-637X/1008/2/156
+Abstract
+Computational tomography is a tool for determining the internal structure of objects from a set of projections, typically taken along some regular path. In recent years, methods and GPU-accelerated libraries have emerged that allow for fast reconstruction from projections along more complicated paths. Most of these libraries rely on a Cartesian discretization of the object, which is not appropriate for all scenarios. We present TomoSphero, a differentiable tomographic projector over spherical grids that are often used in planetary and solar tomography. TomoSphero is designed to be used as a building block in reconstruction algorithms and includes common projection types such as cone beam and parallel beam but is flexible enough to accommodate arbitrary projections. TomoSphero is implemented in PyTorch, which allows for fast projection computation on GPUs, easy access to modern machine learning optimizers, and automatic differentiation for rapid prototyping of parametric models.
+Export citation and abstractBibTeXRIS
+Previous article in issue
+Next article in issue
+Related links
+NASA ADS Recordopens in new tab
+About Related Links
+Original content from this work may be used under the terms of the Creative Commons Attribution 4.0 licence. Any further distribution of this work must maintain attribution to the author(s) and the title of the work, journal citation and DOI.
+1. Introduction
+Tomography is a method for determining the internal structure of objects from a set of measurements that penetrate into the object being measured. These measurements (sometimes called projections or sinograms) are usually captured from a variety of locations and times that are collectively referred to as the view geometry. Measurements are typically modeled as
+where y is a collection of measurements, F is a linear projection operator, ρ is the object under study, and is noise.
+Tomography has found application in a vast number of domains such as medical imaging, crystallography, and remote sensing, especially coronal electron density estimation (M. Kramar et al. 2014; H. Morgan & A. C. Cook 2020). In this paper, we present TomoSphero,1
+a Python library for atmospheric tomography.
+Fast tomographic reconstruction algorithms that implement explicit inversion formulas typically work only for specific view geometries (such as circular or helical view geometry) and are referred to as filtered back projection (FBP) algorithms (M. J. Willemink & P. B. Noël 2019). However, some situations necessitate more complicated measurement schemes than are allowed by FBP-type algorithms. Some examples include quality control on a factory assembly line, where X-ray measurements of large components are taken from arbitrary positions by a robotic arm (H. A. Gabbar et al. 2022), or spaceborne sensors whose view geometries are determined by orbital parameters of a spacecraft (H. Nass et al. 2006; F. S. Prol et al. 2021). For these situations requiring more flexible view geometries where an exact inverse solution is not available, iterative reconstruction (IR) algorithms prevail, usually solving an optimization problem of the form
+Examples include SIRT (S. Pryse et al. 1993), TV-MIN (E. Y. Sidky & X. Pan 2008), ART (J. Austen et al. 1986), CGLS (J. A. Scales 1987), Plug-and-play (S. V. Venkatakrishnan et al. 2013), and many others. These algorithms obtain synthetic projections of a candidate object using an operator (sometimes called a raytracer) that simulates waves traveling through the object medium. They produce a reconstruction by repeatedly tweaking the candidate object to minimize discrepancy between synthetic and actual projections, and they stand to benefit the most from a fast operator implementation. Most tomographic operators treat each pixel on the detector as an independent computational task, which has led to the development of tomography libraries that are capable of simultaneously utilizing multiple cores on a CPU or hardware accelerator.
+In cases where a simultaneous computation for every pixel of every measurement would consume more memory than is available, some algorithms operate out of core, where they parallelize as many tasks as will fit into available memory, then serially queue the remaining tasks for processing after current tasks are complete. TomoSphero is not capable of out-of-core operation, so a characterization of its memory usage is also presented in Section 5.2.
+Another consideration in tomographic reconstruction is the choice of grid type for discretization of the reconstructed object. Most publications consider a regular rectilinear grid, which is a reasonable choice when the underlying structure of the object is completely unknown or the scale of features is uniform throughout the object. However, in cases where some prior information is known about the location of high-detail regions within the object, or when symmetries in the view geometry exist (C. Thibaudeau et al. 2013), a good choice of coordinate system can sample the object more efficiently for decreased computational requirements and lower quantization errors.
+The primary focus of TomoSphero is in the domain of atmospheric tomography, where regular spherical grids are well suited for modeling solar and planetary atmospheres that exhibit spherical symmetries (M. Butala et al. 2010; B. Jackson et al. 2011; D. G. Lloveras et al. 2022).
+Many reconstruction algorithms rely on gradient-based optimization to solve for an object whose structure corresponds to measurement data. Manually coded gradients give an exact solution but can be time consuming and error prone to implement correctly, especially in a language designed for a hardware accelerator or if the problem involves a complex parametric object model (e.g., splines, wavelets, and spherical harmonics). Finite differentiation and symbolic differentiation exist to solve for gradients for any generic problem but can be extremely slow for high-dimensional problems or can yield complicated expressions for the symbolic derivative (aka expression swell). Automatic differentiation (autograd) is a class of techniques that convert an arbitrary expression into a computational graph of simpler functions, then compute the overall derivative by applying the chain rule at each node. Modern machine learning libraries such as PyTorch (A. Paszke et al. 2019) and Jax (J. Bradbury et al. 2018) provide such capabilities for building this computational graph. TomoSphero is implemented on top of PyTorch, and its autograd capabilities enable rapid prototyping of different parametric models and regularizations.
+In this paper, we describe TomoSphero, a tomographic projector implemented in Python designed for reconstruction problems on spherical grids. TomoSphero is automatically differentiable, works on GPUs, and is easily integrable into machine learning methods through PyTorch.
+In Section 4, we demonstrate its use on an example tomography problem and highlight visualization capabilities for setup validation and presentation.
+TomoSphero development was motivated by the Carruthers Geocorona Observatory, a spacecraft containing UV imagers that will survey the Earth’s exosphere. An example of retrieving a synthetic exosphere is provided in Section 6.
+A comparison of TomoSphero’s capabilities against other popular libraries is shown in Table 1.
+Table 1. Nonexhaustive Overview of Other Tomography Libraries
+NameGrid TypeGPU SupportAutogradVisualizationOut of core
+TIGRE (A. Biguri et al. 2016)CartesianYesNoNoYes
+LEAP (H. Kim & K. Champley 2023)Cartesian, AnalyticYesYesNoYes
+ASTRA (W. van Aarle et al. 2016)CartesianYesYesNoYes
+mbirjax (C. A. Bouman & G. T. Buzzard 2024)CartesianYesYesNoNo
+ToMoBAR (D. Kazantsev & N. Wadeson 2020)CartesianYesNoNoYes
+CIL (J. S. Jørgensen et al. 2021)CartesianYesNoYesYes
+Tomosipo (A. Hendriksen et al. 2021)CartesianYesYesYesYes
+TomoSpheroSphericalYesYesYesNo
+Download table as:
+ASCIITypeset image
+2. Tomography Problem
+In this section, we establish mathematical notation used in the rest of the paper, provide a formulation and describe assumptions of the emission model, and define the spherical discretization grid. A summary of terms and symbols used in this section can be found in Appendix A.1.
+2.1. Emission Model
+Most tomography applications assume that measurements may be modeled as a simple integral along a line through the object known as a line of sight (LOS) or a ray. In the context of atmospheric optical tomography, illuminated gas along the LOS scatters (or absorbs and reemits) light in the direction of the sensor where it is detected. We assume the photons are only scattered once after being emitted by the source of light (e.g., the Sun) and before entering the detector, an approximation that is valid in the optically thin regime of the atmosphere (G. Cucho-Padin & L. Waldrop 2018).
+This integral is known as a Fredholm integral of the first kind and is given below for a single LOS:
+where ρ represents the 3D object, is the ray starting point (the detector), is the ray direction, and l is distance along the ray from the starting point.
+To compute the integral in Equation (3) numerically, we must discretize the object over a spherical grid and rewrite the integral as a sum, which can be compactly described as an inner product:
+where N is the number of spherical grid cells (aka voxels) intersecting the ray, ρi is the object value within each cell, and Δli is the intersection length as illustrated in Figure 1. The arrays ρ and Δl have length N and are described in more detail in Section 3.
+Zoom In
+Zoom Out
+Reset image size
+Figure 1. 2D representation of a ray intersecting a single spherical grid cell.
+Download figure:
+Standard image
+High-resolution image
+2.2. Grid Definition
+The grid determines the location of voxels in 3D space. In spherical coordinates, the grid lines, or grid boundaries, are spheres, cones, or planes that correspond to the radial, elevational, and azimuthal dimensions as in Figure 2. We refer to the space between two adjacent grid boundaries as a grid region. For a spherical grid of shape (Nr, Ne, Na), there should be Nr + 1, Ne + 1, and Na + 1 boundaries of each type, respectively.
+Zoom In
+Zoom Out
+Reset image size
+Figure 2. Radial, elevational, azimuthal grid boundaries for a grid with shape (2, 4, 8).
+Download figure:
+Standard image
+High-resolution image
+The user-defined locations of the grid boundaries need not be uniform nor must they cover the extent of the entire sphere. This can be useful when spatially varying resolution is needed or only a small wedge needs to be raytraced (e.g., a local region of planetary atmosphere), as in Figure 3. Figure 4 shows a 2D representation of a grid of shape (1, 2, 7) that does not cover the entire sphere and will be used as an example throughout the next section.
+Zoom In
+Zoom Out
+Reset image size
+Figure 3. A spherical grid with shape (2, 2, 2) defined over a small wedge.
+Download figure:
+Standard image
+High-resolution image
+Zoom In
+Zoom Out
+Reset image size
+Figure 4. Sample grid of shape (1, 2, 7) broken into radial, elevational, and azimuthal boundaries and shown in 2D. An index is assigned to each boundary (in black) and each region (in gray). The shaded area is within the grid, and the white area is outside the grid.
+Download figure:
+Standard image
+High-resolution image
+3. Algorithm Outline
+The steps for this raytracer can be broken into four parts, which are described in detail in this section:
+1.
+For a given ray, compute intersection points with all boundaries and their distances from the ray starting point.
+2.
+Determine crossing direction for all intersection points and compute the region index.
+3.
+Sort intersection points and regions by distance from the ray starting point and find lengths between the points.
+4.
+Raytrace the ray by computing the inner product of ray lengths with values from voxels along the ray.
+Since the focus of this paper is on iterative tomographic reconstruction where the view geometries are fixed and known, steps 1–3 can be precomputed and stored before reconstruction begins. This saves computation time at the expense of increased memory usage.
+3.1. Step 1: Ray–Boundary Intersection Points
+The first step is to compute the intersection points of all rays with all boundaries and their distances from ray starting points. An array of intersection point coordinates and an array of intersection point distances are computed for each type of boundary separately. We consider only a single ray in this section without loss of generality.
+It is desirable for the arrays allocated for the ray–boundary intersection point coordinates and distances to be of equal size for all rays to facilitate array programming and parallelization. A ray may intersect a sphere or a cone two times and a plane one time. Therefore, we assume an upper bound where each ray has exactly 2(Nr + 1), 2(Ne + 1), and Na + 1 intersections with each type of boundary.
+For the cases where a boundary has no intersection points with a ray, coordinates are still computed and stored for these points, but the associated value in the distance array l is set to inf, as illustrated in Figure 5.
+Zoom In
+Zoom Out
+Reset image size
+Figure 5. Intersection points along an LOS labeled with the index of the associated boundary. Points along the bottom of figure are associated with nonintersecting boundaries.
+Download figure:
+Standard image
+High-resolution image
+The expressions for determining intersection points are given in J. Guertault (2017), D. Eberly 2020), and K. Halliday (2013).
+3.2. Step 2: Boundary Crossing Direction
+Since the overall goal is to determine the indices of particular voxels the ray is crossing as it passes through the grid, we must convert each boundary index computed in the previous section to a region index. To do this, we must determine for each intersection whether the ray crosses the boundary in a “positive” direction (increasing boundary index) or a “negative” direction (decreasing boundary index) as shown in Figure 6. The algorithm for determining crossing direction is specific to each boundary type and depends only on the crossing point coordinate and ray direction. It is described in Appendix A.2. Finally, boundary indices are converted to region indices by decrementing indices of crossing points with a negative direction, as shown in Figures 7 and 8.
+Zoom In
+Zoom Out
+Reset image size
+Figure 6. Positive and negative boundary crossing directions.
+Download figure:
+Standard image
+High-resolution image
+Zoom In
+Zoom Out
+Reset image size
+Figure 7. Intersection points along an LOS annotated with the crossing direction (↑: positive, ↓: negative).
+Download figure:
+Standard image
+High-resolution image
+Zoom In
+Zoom Out
+Reset image size
+Figure 8. Region indices computed from the crossing direction.
+Download figure:
+Standard image
+High-resolution image
+3.3. Step 3: Sorting Intersection Points
+In this step, we collect the region indices for all intersection points into a single list and sort the points by their distance l from the ray start location, as illustrated in Figure 9. Next, we compute the difference between adjacent points Δli, which represents the intersection length of the ray with a particular voxel. Note that this results in Δli equal to NaN or ∞ for intersection points with l = ∞.
+Zoom In
+Zoom Out
+Reset image size
+Figure 9. Intersection points along an LOS for all boundary types collected into a list and sorted by distance l from the ray start position, marked with a cross.
+Download figure:
+Standard image
+High-resolution image
+Next, we convert our list of region indices into a list of voxel indices by computing the voxel index of the ray starting location. For each boundary crossed by the ray, the index of the next voxel changes in only a single dimension.
+This step is illustrated in Figure 10(a), where the sorted region indices are inserted into an empty table starting with the ray starting point; then, in Figure 10(b), the missing indices are filled in from the previous row to form complete 3D voxel indices, for a total of N = 2(Nr + 1) + 2(Ne + 1) + (Na + 1) rows.
+Zoom In
+Zoom Out
+Reset image size
+Figure 10. (a) Sorted region indices are inserted into an empty table along with voxel intersection lengths. (b) Missing table entries are filled in from the previous row to form a complete 3D voxel index. (c) Rows with invalid entries are set to zero so the row has no effect during raytracing.
+Download figure:
+Standard image
+High-resolution image
+We also account here for invalid region indices generated in step 2 where the ray passes outside the area defined by the grid or when boundaries have no ray intersection. We achieve this by setting Δli = 0 for any row i where the region index is invalid (less than 0, or greater than or equal to the corresponding Nr, Ne, or Na) or where Δli is ∞ or NaN. Setting Δli = 0 negates any contribution of this row to the raytracing step. This is shown in Figure 10(c).
+3.4. Step 4: Line Integration
+The final step of the raytracer is to perform a weighted sum of the object values at the voxel indices given in the table in the previous section with the Δl column as weights, compactly written as an inner product
+where ρ is the object to be integrated and ri, ei, and ai are indices from the ith row of the table.
+4. API Overview
+This library is designed to allow the user to easily construct tomographic projectors in just a few lines by instantiating classes that represent the grid, view geometries, and forward raytrace operator. These classes also support visualization via the .plot() method to aid in validation and presentation. In this section, we provide some examples of setting up these classes for typical tomography problems as well as visualizations generated from the library.
+4.1. Grid
+The grid, which defines the physical extent and shape of the object to be traced, is created using the SphericalGrid class and may be defined by providing shape and size arguments when a uniform spherical grid is desired, as in Figure 11. Alternatively, one may manually specify the grid boundary locations via r_b, e_b, a_b arguments for a nonuniform grid.
+Zoom In
+Zoom Out
+Reset image size
+Figure 11. An origin-centered grid defined out to radius 10.
+Download figure:
+Standard image
+High-resolution image
+4.2. View Geometries
+A view geometry is a logical collection of LOSs. This library provides a few built-in view geometries for common tomography paradigms shown in Figures 12 and 13. In these examples, pos and shape control the detector position and shape. Detector orientation is inferred automatically, but this behavior may be overriden.
+Zoom In
+Zoom Out
+Reset image size
+Figure 12. Cone beam view geometry with rectangular detector located at vertex.
+Download figure:
+Standard image
+High-resolution image
+Zoom In
+Zoom Out
+Reset image size
+Figure 13. Parallel beam view geometry with rectangular detector.
+Download figure:
+Standard image
+High-resolution image
+For more exotic detector geometries, one may define an entirely custom view geometry by specifying each ray manually via the ViewGeom class as in Figure 14 or by subclassing ViewGeom.
+Zoom In
+Zoom Out
+Reset image size
+Figure 14. Custom view geometry for a 4-by-4 detector with random rays.
+Download figure:
+Standard image
+High-resolution image
+4.3. Composing View Geometries
+The view geometries given above can be composed into a ViewGeomCollection to create more complex geometries. A ViewGeomCollection may represent a set of sensors that are taking measurements at the same instant or a single moving sensor making sequential measurements. Programmatically, two view geometries can be combined by Python’s addition operator, as in Figure 15. In this case, .plot() returns an animated visualization showing the sequence of view geometries.
+Zoom In
+Zoom Out
+Reset image size
+Figure 15. Circular orbit constructed from individual view geometries and a single frame from the resulting animation.
+Download figure:
+Standard image
+High-resolution image
+4.4. Operator
+When both view geometry and grid have been defined, the user may instantiate an Operator class as in Figure 16, which carries out the precomputation steps described in Section 3 and stores results in memory. When called with a 3D (static) or 4D (dynamic) object array, this instantiated Operator returns raytraced measurements. It is automatically differentiable on account of PyTorch’s autograd capability, which is useful in reconstruction algorithms that require access to gradients.
+Zoom In
+Zoom Out
+Reset image size
+Figure 16. Operator constructed from previously defined view geometry and grid with associated measurements.
+Download figure:
+Standard image
+High-resolution image
+The region index arrays (r, e, a) and length arrays (Δl) used in Equation (5) are accessible in an Operator in the .regs and .lens attributes, useful when implementing more complicated emission models (see Section A.3).
+4.5. Reconstruction Examples
+The primary use case of this library is as a building block for implementing experimental reconstruction algorithms. Figure 17 shows a simple example of a reconstruction algorithm that makes use of gradient descent to reconstruct the example object in the previous section by solving the minimization
+Zoom In
+Zoom Out
+Reset image size
+Figure 17. GPU-enabled reconstruction algorithm using an off-the-shelf optimizer from PyTorch and a squared-error loss function.
+Download figure:
+Standard image
+High-resolution image
+Tomographic inverse problems often involve a parametric object model M with a low-dimensional set of parameters c and regularization of the form
+which is shown in Figure 18. We emphasize that the model and regularizer can be substituted with any Pytorch-differentiable function with no changes required to the optimization.
+Zoom In
+Zoom Out
+Reset image size
+Figure 18. Pseudocode for reconstructing an object that lies in some transform domain defined by model.
+Download figure:
+Standard image
+High-resolution image
+Finally, we remark that the differentiability of the operator allows it to be exploited in machine learning models, such as physics-informed neural networks (PINNs), where the operator forms layers of the network itself (M. Raissi et al. 2019).
+4.6. Assumptions and Limitations
+Unlike most medical imaging paradigms, the detector is located at the vertex of ConeRectGeom. We also assume that the detector lies outside of the grid, that rays extend to infinity, and that the object is zero outside of the grid.
+When combining view geometries into a collection, the geometries must have the same shape so that the corresponding stack of measurements returned during raytracing is a rectangular array. In the case of a dynamic object, the grid definition must remain constant.
+5. Raytracer Results
+5.1. Validation Tests
+The raytracer’s correctness has been tested by comparison against analytic results for objects where closed-form expressions of the measurements are available. In the unit sphere test shown in Figure 19, the raytracer-computed measurements are within 0.00001% of the true value, approaching machine epsilon for float32.
+Zoom In
+Zoom Out
+Reset image size
+Figure 19. Validation test of a raytracer against the analytic result for a unit sphere on a (50, 50, 50) grid.
+Download figure:
+Standard image
+High-resolution image
+Additionally, we have constructed test cases for a variety of LOS/boundary conditions (see Figure 20) which are critical for eliminating bugs in numerically degenerate cases (e.g., an LOS parallel to an azimuthal boundary plane). For each of these cases, we evaluate every step of the raytracer algorithm described in Section 3 to ensure consistency with results computed by hand.
+Zoom In
+Zoom Out
+Reset image size
+Figure 20. Extensive testing of a combination of various LOSs with radial/elevational/azimuthal boundaries. For each case, we compare the output of each step of the raytracer algorithm against analytical results for correctness.
+Download figure:
+Standard image
+High-resolution image
+These tests are integrated into the raytracer package’s automated testing framework for evaluation when new software releases are made.
+5.2. Operator Memory and Timing Benchmarking
+Since precomputed arrays are held in memory, it is important to know the peak memory usage of the algorithm to determine whether a particular raytracer forward operator will fit in memory. If running the raytracer on a GPU, the memory is even more limited, with most consumer graphics cards constrained to 12 or 24 GB of VRAM as of 2024.
+The peak memory required for steps 1–4 can be computed in gigabytes approximately with Equation (9):
+A breakdown of the terms of this expression is below:
+1.
+2Nr + 2Ne + Na: array length (maximum number of voxels intersecting a ray)
+2.
+6Nrays:6 arrays for every ray:
+a.
+voxel indices (rad., elev., azi.)
+b.
+voxel intersection lengths
+c.
+voxel values
+d.
+temporary array for intermediate computation
+3.
+8:element size of int64 and float64 arrays, in bytes
+4.
+109:conversion from bytes to gigabytes
+Table 2 gives an overview of peak memory use and compute time for several configurations of grid and view geometry shapes with int64/float64 data types. We conducted these tests on Ubuntu 22.04 with AMD Threadripper 5995WX (128 GB RAM) and Nvidia RTX 4070 (12 GB VRAM) with CUDA 12.4 and PyTorch 2.2.2. Note that additional memory will be consumed by autograd and the PyTorch runtime, and it may be platform-dependent.
+Table 2. Resource Usage for Various Grid and View Geometry Shapes
+Num. Rays and Grid ShapePrecompute Time (Steps 1–3)Raytrace Time (Step 4)Peak Memory
+CPUGPUCPUGPU
+(s)(s)(ms)(ms)(GB)
+1 × 256 × 2560.88 0.28 42 1.51.5
+(100, 100, 100)
+1 × 512 × 5121.5 0.17 82 3.12.9
+(50, 50, 50)
+30 × 64 × 640.75 0.093 37 1.41.5
+(50, 50, 50)
+Download table as:
+ASCIITypeset image
+6. Tomographic Retrieval of Exospheric Hydrogen
+The development of TomoSphero was motivated by the Carruthers Geocorona Observatory, a spacecraft studying the Earth’s exosphere that launched in 2025. An exosphere is a region of a planetary atmosphere where density is low enough that particles rarely collide. Earth’s exosphere has long been known to primarily be constituted of atomic hydrogen (H), which is detectable by resonant scattering of UV Lyα photons from the Sun. This region is of particular interest to physicists because it serves as the pathway for permanent hydrogen escape, important for understanding long-term evolution and historical loss of water from the Earth (I. I. Baliukin et al. 2019). Additionally, the presence of an exosphere serves as an indicator of the presence of water on other worlds. As the lower atmosphere is strongly UV absorbing, measurements must originate from space-based instruments. Carruthers will fill a measurement gap in exospheric science by making continuous wide-field Lyα observations from the L1 Lagrange point at a distance of approximately 235 Re (Earth radii) over long timescales, as in Figure 21.
+Zoom In
+Zoom Out
+Reset image size
+Figure 21. Carruthers 6 month orbit around L1.
+Download figure:
+Standard image
+High-resolution image
+Equation (10) describes the emission model that relates exospheric H density to Lyα photon radiance (phot s–1 cm–2 sr–1)
+where g is the solar g-factor (phot s–1 atom–1), ϕ is the scattering phase function (unitless), ρ is density (atom cm−3), and is measurement noise.
+The solar g-factor and scattering phase function together describe the directional rate of emission of photons from an atom, assumed to be known.
+We utilize a parametric model for exospheric density in which elevational and azimuthal variations of each radial shell of the density distribution are described by a truncated spherical harmonic series (Figure 22):
+where Hlm is a spherical harmonic function2
+of degree l and order m defined over elevation and azimuth (e, a); L is the spherical harmonic truncation degree; crlm is a scaling coefficient assigned to each harmonic function on each shell; and Dr is a finite difference operator in the radial direction.
+Spherical harmonics are an analog to the Fourier basis on a spherical domain. Truncating to degree L limits high-frequency spatial content in the elevational and azimuthal directions, illustrated in Figure 22 up to degree L = 3. This basis also serves to constrain the low-altitude, noon/midnight region of the exosphere where visibility to Carruthers is blocked by the Earth and optically thick atmosphere. The second term involving Dr serves as a Tikhonov regularizer to enforce smooth radial decay, controlled by parameter λ.
+We used 2015 data during solar max conditions from J. H. Zoennchen et al. (2024) as a ground truth to test retrieval accuracy of Equation (11), starting at the lower boundary of the optically thin exosphere at 3 Re and extending to 25 Re. We simulated 10 noisy radiance measurements according to Equation (10), spaced uniformly over a 1 month observation window during spring 2026 according to the projected Carruthers ephemeris. The Carruthers cameras produce rectilinear images,3
+which we polar bin to 100 radial and 50 azimuthal polar pixels with an equivalent field of view (FOV). Measurements taken with real cameras are corrupted by many extraneous sources, such as readout noise, particle radiation, shot noise, etc. For Carruthers, these noise sources are well approximated by 45 dB additive white Gaussian noise in our polar binning scheme. Figure 23 shows the percent error of this 3D retrieval, plotted for slices along the Cartesian planes. The green contour shows the region where density exceeds 25 atoms cm−3, where NASA mission requirements dictate retrieval errors should be less than 50%.
+Zoom In
+Zoom Out
+Reset image size
+Figure 22. Spherical harmonic function Hlm used by a parametric reconstruction model.
+Download figure:
+Standard image
+High-resolution image
+Zoom In
+Zoom Out
+Reset image size
+Figure 23. Percent error along Cartesian slices (Geocentric Solar Ecliptic coordinates) through retrieval using minimization in Equation (11). The green contour demarks the 25 atoms cm−3 density boundary.
+Download figure:
+Standard image
+High-resolution image
+We note that retrieval errors peak at 19% in the noon/midnight region as expected due to lack of measurement constraints. Retrieval errors are also large near the 25 Re boundary where low H density results in reduced measurement signal-to-noise ratio.
+7. Conclusion and Future Work
+In this work, we presented TomoSphero, a GPU-enabled, automatically differentiable tomographic projector over spherical grids designed for use in reconstruction algorithms. TomoSphero provides visualization tools for validating view geometry correctness and enables rapid development of tomography algorithms in Python that approach the speed of natively written code, as shown in the benchmarks. We demonstrated the flexibility of automatically differentiable iterative retrievals via an example of retrieving exospheric H density from simulated noisy radiance measurements, important for the upcoming Carruthers Geocorona Observatory mission.
+Future work on TomoSphero may include out-of-core operation to support tomography problems that are larger than GPU memory.
+Acknowledgments
+We would like to thank Gonzalo Cucho-Padin for initial feedback on the library API and correction terms. This work was supported by NASA grant 17-HPSMO18-1-0020. TomoSphero depends exclusively on PyTorch (A. Paszke et al. 2019) for numerical computation and Matplotlib (J. D. Hunter 2007) for visualization.
+Appendix
+A.1. Nomenclature and Symbols
+1.
+Grid Boundaries: spheres, cones, and planes that define the bounds between voxels in a regular spherical grid
+2.
+Ray—line along which an object will be integrated, aka LOS
+3.
+Grid Region—area between two adjacent boundaries of the same type
+4.
+View Geometry—set of LOSs corresponding to a sensor taking a measurement at a specific location
+5.
+Object—3D array of shape (Nr, Ne, Na) defined on spherical grid holding object density to be integrated
+1.
+—starting point of a ray, Cartesian
+2.
+—direction of a ray, Cartesian
+3.
+l—distance along a ray from the ray starting point
+4.
+—intersection point of ray and a boundary, Cartesian
+5.
+ρ—3D object being integrated, continuous or discrete
+6.
+ρ—1D array of object values along a ray
+7.
+Δl—1D array of voxel intersection lengths along a ray
+8.
+N—number of ray/voxel intersections
+9.
+—indices of a voxel
+10.
+(r, e, a)—coordinates of a voxel
+11.
+F—forward tomographic operator
+12.
+M—parametric object model
+13.
+c—low-dimensional model parameters
+A.2. Boundary Crossing Direction
+This section describes how to compute the boundary crossing direction across the three types of grid boundaries as described in Section 3.2. All vectors are in Cartesian coordinates, and we assume the principal axis of the spherical grid to be aligned with the Cartesian +Z-axis.
+Let be the boundary crossing point and be the direction of the ray, as illustrated in Figure 24. To compute the boundary crossing direction over a radial boundary, check for the condition
+Zoom In
+Zoom Out
+Reset image size
+Figure 24. Three types of boundary crossings.
+Download figure:
+Standard image
+High-resolution image
+For an elevational boundary, check the condition
+where px and py are the x- and y-components of vector , and × is the cross product.
+For an azimuthal boundary, check the condition
+where mz is the z-component of vector .
+A.3. More Advanced Physics
+J. H. Zoennchen et. al. (2024) introduce two first-order correction terms to improve the accuracy of the optically thin approximation described in Section 2.1 by modeling the loss of photons as they travel from the Sun to their scattering point and then to the spacecraft, as shown in Figure 25(a). This section describes how these correction terms may be implemented within the TomoSphero framework.
+Zoom In
+Zoom Out
+Reset image size
+Figure 25. Correction terms for improving optically thin approximation.
+Download figure:
+Standard image
+High-resolution image
+The first term considers optical depth τ1, which accounts for self-absorption of solar Lyα photons as they travel through the exosphere from the dayside to the nightside along path S1. This results in a reduction of Lyα flux by a factor at scattering point :
+The second term addresses the loss of photons due to secondary scattering that occurs between point and the spacecraft along path S2, related to optical depth τ2 and resulting in a factor reduction in the photon flux:
+Optical depth τ1 and τ2 depend on cross section σ, which is a function of local exospheric temperature, calculated according to Equation (2) in J. H. Zoennchen et al. (2024).
+The corrected radiance is
+where S is the LOS parameterized by for l ∈ [0, ∞].
+As before, this integral can be discretized as an inner product:
+where F1 is a custom raytracer operator (see Figure 14) with each LOS originating at a voxel centroid and propagating sunwards as in Figure 25(b), and cumsum is a cumulative summation of a 1D array:
+We note that operator F1 is an approximation of an integral over S1 for each point , as voxel centroids do not lie directly on the path S.
+We obtain τ2 from τ2 by only considering points along LOS S to be able to factor the term out of the product with ρ. We also take advantage of the fact that S2 lies along the S associated with F (Figure 25(c)) to be able to reuse index arrays r, e, and a and length array Δl.
+The sizes of arrays used in this derivation are
+1.
+2.
+Footnotes
+1
+https://github.com/Evidlo/tomosphero
+2
+Analogous to Scipy’s sph_harm_y function.
+3
+Narrow-field imager: 1024 × 1024 36 FOV; wide-field imager: 512 × 512 18° FOV.
+Show References
+Please wait… references are loading.
+10.3847/1538-4357/ae6db5

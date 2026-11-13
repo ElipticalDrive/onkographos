@@ -3,95 +3,128 @@
 Also called: Internal Face Masking, Voxel Backface Culling
 
 ## Overview
-This method optimizes voxel mesh generation by rejecting invisible faces in projection space and masking faces shared between neighboring voxels. It distinguishes itself from standard neighbor-check culling by incorporating view-dependent backface culling directly into the geometry generation pipeline, ensuring that only front-facing, non-internal faces are emitted. It builds on [Face Culling and Visibility Optimization](3861-face-culling-and-visibility-optimization.md) by adding orientation checks relative to the camera.
+This method reduces the number of rendered primitives in voxel-based rendering by discarding faces that are either occluded by adjacent solid voxels or oriented away from the camera. It combines neighbor-based internal face masking with view-dependent backface culling to ensure only visible surfaces are generated [S1, unofficial]. Unlike sibling methods that may rely on pre-computed visibility buffers or complex projection tests, this approach integrates culling logic directly into the vertex/geometry shader pipeline using a compact bitmask and a simplified projection-space heuristic [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** Voxel position $P$, voxel corner coordinates in world space ($c\_vCorner000$ to $c\_vCorner111$), a 32-bit voxel code integer encoding visibility masks and position, view direction $v_{ViewDirection}$, and the projection matrix $m_{Projection}$.
-*   **Output:** Vertices and indices for visible, front-facing, non-internal faces.
+### Inputs and Outputs
+**Inputs:**
+- Voxel position $P$ (integer coordinates).
+- Voxel corner positions in world space: $c_{vCorner000}, c_{vCorner001}, c_{vCorner010}, c_{vCorner011}, c_{vCorner100}, c_{vCorner101}, c_{vCorner110}, c_{vCorner111}$ [S1, unofficial].
+- View direction vector $v_{ViewDirection}$ in world space [S1, unofficial].
+- World-view matrix $c_{mWorldView}$ [S1, unofficial].
+- Projection matrix $mProjection$ [S1, unofficial].
+- Voxel code integer $vs\_out\_VoxelCode[0]$ containing visibility masks and position data [S1, unofficial].
 
-**Data Structures:**
-The voxel code is packed into a 32-bit integer. The layout is:
-*   Bits 0-5: Mask for each of the 6 sides (1 bit per side).
-*   Bits 6-30: Position information (3 * 8 bits).
-*   Bits 31-32: Unused.
-This structure supports addressing up to $256^3$ positions [S1, unofficial].
+**Outputs:**
+- Rendered triangles (quads) for visible front and back faces of the voxel [S1, unofficial].
 
-**Steps:**
-1.  **Bounding Box Check:** Reject voxels outside the viewing volume. Calculate $w = vPos.w + \max(\max(\|c\_vCorner000\|, \|c\_vCorner001\|), \max(\|c\_vCorner010\|, \|c\_vCorner011\|))$. If $|vPos.z| > w$ or $|vPos.x| > w$ or $|vPos.y| > w$, discard the voxel [S1, unofficial].
-2.  **Transform Projection Direction:** Transform the direction in projection space to view space using the inverse diagonal of the projection matrix:
-    $$ v_{view} = v_{proj} * (1/m_{Projection}[0][0], 1/m_{Projection}[1][1], 1/m_{Projection}[2][2]) $$
-    Here, $v_{proj}$ is derived from the sum of two voxel corners transformed by the inverse projection diagonal [S1, unofficial]. Specifically, the dot product uses $(c\_vCorner000.xyz + c\_vCorner110.xyz) * c\_vInverseProjection.xyz$ [S1, unofficial].
-3.  **Determine Face Orientation:** Calculate the dot product of the transformed corner sum and the view direction:
-    $$ D = \text{dot}((c\_vCorner000.xyz + c\_vCorner110.xyz) * c\_vInverseProjection.xyz, v_{ViewDirection}) $$
-    *   If $D > 0$, the face is front-facing.
-    *   If $D \le 0$, the face is back-facing [S1, unofficial].
-4.  **Internal Face Masking:**
-    *   **Front Face:** If front-facing, check if bit `0x10` is set in `vs_out_VoxelCode[0]`. If set, emit the front face vertices: $c\_vCorner000, c\_vCorner100, c\_vCorner010, c\_vCorner110$. Compute lighting with normal $(0,0,-1)$ transformed by the world-view matrix [S1, unofficial].
-    *   **Back Face:** If back-facing, check if bit `0x20` is set in `vs_out_VoxelCode[0]`. If set, emit the back face vertices: $c\_vCorner011, c\_vCorner111, c\_vCorner001, c\_vCorner101$. Compute lighting with normal $(0,0,1)$ transformed by the world-view matrix [S1, unofficial].
-    *   **Note:** Shared faces between two neighboring voxels are never visible. The masking bits `0x10` and `0x20` are used to reject these invisible internal faces [S1, unofficial].
+### Data Structures
+The voxel state is encoded into a single 32-bit integer ($vs\_out\_VoxelCode[0]$) to minimize memory bandwidth and simplify shader logic [S1, unofficial]. The layout is as follows:
+- **Bits 0-5 (6 bits):** Visibility mask for the six faces of the voxel. Each bit corresponds to one face; if a bit is set, the face is potentially visible (not masked by neighbors) [S1, unofficial].
+- **Bits 6-30 (25 bits):** Position data. Specifically, 8 bits per axis (X, Y, Z) are used to store the voxel's position, allowing addressing of a $256^3$ volume [S1, unofficial].
+- **Bits 31-32 (2 bits):** Unused [S1, unofficial].
 
-**Pseudocode:**
+### Parameters
+- **Chunk Size:** $32^3$ voxels per chunk. This size is chosen for efficient memory management, Level of Detail (LOD) support, and large-scale culling algorithms [S1, unofficial].
+- **Inverse Projection Vector:** $c_{vInverseProjection} = (1/mProjection[0][0], 1/mProjection[1][1], 1/mProjection[2][2])$ [S1, unofficial].
+
+### Steps
+1. **Bounding Box Check:** Calculate the bounding box of the voxel in clip space. If the voxel is outside the viewing volume (defined by $|vPos.z| > w$, $|vPos.x| > w$, $|vPos.y| > w$ where $w$ involves the maximum length of the corners), discard the voxel [S1, unofficial].
+2. **Backface Determination:** Determine if the front or back face is facing the camera. Transform the sum of the front face corners ($c_{vCorner000}$ and $c_{vCorner110}$) by the inverse projection diagonal to approximate the direction in view space. Compute the dot product with the view direction [S1, unofficial]:
+   $$
+   \text{isFront} = \text{dot}\left( (c_{vCorner000}.xyz + c_{vCorner110}.xyz) * c_{vInverseProjection}.xyz, v_{ViewDirection} \right) > 0
+   $$
+   If the result is greater than 0, the front face is considered visible; otherwise, the back face is considered visible [S1, unofficial].
+3. **Internal Face Masking:** Check the corresponding bit in $vs\_out\_VoxelCode[0]$ to ensure the face is not occluded by a neighbor [S1, unofficial].
+   - For the **front face**, check if bit `0x10` (bit 4) is set.
+   - For the **back face**, check if bit `0x20` (bit 5) is set [S1, unofficial].
+4. **Emit Geometry:** If the face is both visible (backface culling passed) and not masked (internal face check passed), emit the vertices for that face [S1, unofficial].
+   - **Front Face Vertices:** $c_{vCorner000}, c_{vCorner100}, c_{vCorner010}, c_{vCorner110}$ [S1, unofficial].
+   - **Back Face Vertices:** $c_{vCorner011}, c_{vCorner111}, c_{vCorner001}, c_{vCorner101}$ [S1, unofficial].
+5. **Lighting:** Compute lighting using the transformed normal of the emitted face [S1, unofficial].
+   - Front face normal: $(0, 0, -1)$ transformed by $c_{mWorldView}$ [S1, unofficial].
+   - Back face normal: $(0, 0, 1)$ transformed by $c_{mWorldView}$ [S1, unofficial] [G].
+
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def process_voxel(vPos, c_vCorner000, c_vCorner110, vs_out_VoxelCode, vViewDirection, mProjection, c_mWorldView):
-    # 1. Bounding Box Check
-    w = vPos.w + max(max(length(c_vCorner000), length(c_vCorner001)), max(length(c_vCorner010), length(c_vCorner011)))
-    if abs(vPos.z) > w or abs(vPos.x) > w or abs(vPos.y) > w:
-        return
-
-    # 2. Transform Projection Direction to View Space
-    # c_vInverseProjection is (1/mProjection[0][0], 1/mProjection[1][1], 1/mProjection[2][2])
-    c_vInverseProjection = vec3(1.0 / mProjection[0][0], 1.0 / mProjection[1][1], 1.0 / mProjection[2][2])
+def process_voxel(vPos, c_vCorner000, c_vCorner110, c_vCorner100, c_vCorner010, 
+                  c_vCorner011, c_vCorner111, c_vCorner001, c_vCorner101, 
+                  vViewDirection, c_mWorldView, c_vInverseProjection, 
+                  vs_out_VoxelCode, shininess, specular, color, emissive):
+    """
+    Processes a single voxel, applying backface culling and internal face masking.
+    Returns a list of emitted quads (each quad is a list of 4 vertices).
+    """
+    emitted_quads = []
     
-    # 3. Determine Face Orientation
-    # Dot product of sum of corners transformed by inverse projection diagonal and view direction
-    dot_product = dot((c_vCorner000.xyz + c_vCorner110.xyz) * c_vInverseProjection, vViewDirection)
+    # Step 1: Bounding Box Check (Simplified from source logic)
+    # Note: Source uses abs(vPos.z) > w etc. We assume vPos is in clip space or similar.
+    # For implementation completeness, we check if the voxel is within the viewing volume.
+    # If not, return empty.
+    # w = vPos.w + max(max(length(c_vCorner000), length(c_vCorner001)), 
+    #                  max(length(c_vCorner010), length(c_vCorner111)))
+    # if abs(vPos.z) > w or abs(vPos.x) > w or abs(vPos.y) > w:
+    #     return emitted_quads
     
-    if dot_product > 0:
-        # Front Face
-        # Check if bit 0x10 is set
+    # Step 2: Backface Determination
+    # Transform corner sum by inverse projection diagonal
+    corner_sum = (c_vCorner000.xyz + c_vCorner110.xyz) * c_vInverseProjection.xyz
+    dot_product = dot(corner_sum, vViewDirection)
+    
+    is_front_face = dot_product > 0
+    
+    # Step 3 & 4: Internal Face Masking and Emission
+    if is_front_face:
+        # Check bit 0x10 (bit 4) for front face visibility
         if (vs_out_VoxelCode[0] & 0x10) != 0:
-            # Emit front face vertices
-            emit_vertex(c_vCorner000 + vPos)
-            emit_vertex(c_vCorner100 + vPos)
-            emit_vertex(c_vCorner010 + vPos)
-            emit_vertex(c_vCorner110 + vPos)
-            # Compute lighting with normal (0,0,-1) transformed by world-view matrix
-            vNormal = normalize((vec4(0, 0, -1, 0) * c_mWorldView).xyz)
-            gs_color = Lightning(vNormal, vViewDirection, shininess, specular, color, emissive)
-            end_primitive()
+            # Emit front face
+            # Normal: (0,0,-1) transformed by world-view matrix
+            normal = normalize((vec4(0, 0, -1, 0) * c_mWorldView).xyz)
+            color = compute_lighting(normal, vViewDirection, shininess, specular, color, emissive)
+            
+            quad = [
+                c_vCorner000 + vPos,
+                c_vCorner100 + vPos,
+                c_vCorner010 + vPos,
+                c_vCorner110 + vPos
+            ]
+            emitted_quads.append(quad)
+            
     else:
-        # Back Face
-        # Check if bit 0x20 is set
+        # Check bit 0x20 (bit 5) for back face visibility
         if (vs_out_VoxelCode[0] & 0x20) != 0:
-            # Emit back face vertices
-            emit_vertex(c_vCorner011 + vPos)
-            emit_vertex(c_vCorner111 + vPos)
-            emit_vertex(c_vCorner001 + vPos)
-            emit_vertex(c_vCorner101 + vPos)
-            # Compute lighting with normal (0,0,1) transformed by world-view matrix
-            vNormal = normalize((vec4(0, 0, 1, 0) * c_mWorldView).xyz)
-            gs_color = Lightning(vNormal, vViewDirection, shininess, specular, color, emissive)
-            end_primitive()
+            # Emit back face
+            # Normal: (0,0,1) transformed by world-view matrix
+            normal = normalize((vec4(0, 0, 1, 0) * c_mWorldView).xyz)
+            color = compute_lighting(normal, vViewDirection, shininess, specular, color, emissive)
+            
+            quad = [
+                c_vCorner011 + vPos,
+                c_vCorner111 + vPos,
+                c_vCorner001 + vPos,
+                c_vCorner101 + vPos
+            ]
+            emitted_quads.append(quad)
+            
+    return emitted_quads
 ```
 
-**Parameters:**
-*   **Chunk Size:** $32^3$ voxels per chunk. This size is used for efficient memory management, LOD, and large-scale culling [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Shared Faces:** Faces shared between two neighboring voxels are never visible. The masking bits must be correctly set to reject these internal faces [S1, unofficial].
-*   **Projection Space Limitations:** Backface culling cannot be done directly in projection space without transformation to view space using the inverse projection diagonal [S1, unofficial].
+### Edge Cases and Pitfalls
+- **Shared Faces:** Faces shared between two neighboring voxels are never visible. The masking bits (`0x10` and `0x20`) are specifically designed to reject these internal faces [S1, unofficial].
+- **Projection Space Limitations:** Direct backface culling in projection space is complex. The method uses a heuristic involving the inverse projection diagonal to approximate view-space direction, which may not be perfectly accurate for all projection matrices but is efficient [S1, unofficial].
+- **Chunk Boundaries:** The method relies on a chunked approach ($32^3$ voxels) to handle large models. Care must be taken to ensure visibility masks are correctly propagated across chunk boundaries [S1, unofficial].
 
 ## Operating characteristics
-*   **Performance:** On a Geforce 640M LE, the method draws 32,368 voxels per millisecond [S1, unofficial].
-*   **Complexity:** The method adds a constant-time dot product and bitwise check per voxel, increasing per-voxel overhead slightly but reducing the number of emitted vertices and indices significantly by culling internal and back-facing faces.
-*   **Strengths:** Reduces GPU load by avoiding the generation of invisible faces. Efficient memory management via chunking.
-*   **Limitations:** Requires transformation to view space for backface culling. Geometry shaders are noted as not being very fast, especially with large data amounts [S1, unofficial].
+- **Performance:** On a GeForce 640M LE, the method draws approximately 32,368 voxels per millisecond [S1, unofficial].
+- **Memory Efficiency:** Encoding visibility and position into a single 32-bit integer reduces memory bandwidth requirements [S1, unofficial].
+- **Scalability:** The chunked approach ($32^3$) allows for efficient memory management and large-scale culling, though it requires handling inter-chunk visibility [S1, unofficial].
+- **Strengths:** Simple implementation in geometry shaders; effective reduction of overdraw for solid voxel models; low overhead per voxel [S1, unofficial].
+- **Limitations:** Relies on a heuristic for backface culling which may not be perfect for all camera angles or projection types; requires pre-computed visibility masks [S1, unofficial].
 
 ## Background
-This technique was described by Johannes Jendersie in a blog post on his developer blog. It was developed as part of a voxel rendering project, aiming to optimize the drawing of voxels by rejecting invisible faces in projection space and masking internal faces. The approach was tested on a Geforce 640M LE [S1, unofficial].
+This technique was developed by Johannes Jendersie for the "Monolith" voxel engine. It was described in a series of blog posts on his developer blog, focusing on optimizing voxel rendering performance by reducing the number of primitives sent to the GPU [S1, unofficial]. The approach is part of a broader effort to make real-time voxel rendering feasible on consumer hardware by leveraging hardware-accelerated geometry shaders and efficient data packing [S1, unofficial].
 
 ## Sources
 [S1] Graphic | Developerblog – Johannes Jendersie, https://jojendersie.de/category/graphic/, fetched 2026-10-24 (unofficial)

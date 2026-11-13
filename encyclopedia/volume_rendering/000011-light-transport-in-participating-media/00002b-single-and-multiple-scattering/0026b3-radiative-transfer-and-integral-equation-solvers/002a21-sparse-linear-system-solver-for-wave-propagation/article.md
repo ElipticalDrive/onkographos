@@ -46,8 +46,6 @@ Initialize $A$ as a zero matrix of size $(2N+2) \times (2N+2)$ and $\mathbf{b}$ 
 
 **Edge Cases and Pitfalls:**
 *   **Dense Solver:** The source implementation uses a dense solver, which is less efficient than exploiting the matrix sparsity [S1].
-*   **Impedance Contrast:** If $Z_i = Z_{i+1}$, then $R=0$ and $T=1$, resulting in no reflection [S1].
-*   **Precision:** Standard floating-point arithmetic is assumed; no specific precision requirements are given in the sources [S1].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -83,7 +81,7 @@ def solve_wave_propagation(N, Z):
         r_g = 2 * i + 2
         A[r_g][2 * i] = -T_i_to_i1
         A[r_g][2 * i + 2] = 1.0
-        A[r_g][2 * i + 3] = -abs((Z1 - Z2) / (Z1 + Z2))
+        A[r_g][2 * i + 3] = -R_i_to_i1
 
         # Row for d_i (index 2i+1) [S1]
         r_d = 2 * i + 1

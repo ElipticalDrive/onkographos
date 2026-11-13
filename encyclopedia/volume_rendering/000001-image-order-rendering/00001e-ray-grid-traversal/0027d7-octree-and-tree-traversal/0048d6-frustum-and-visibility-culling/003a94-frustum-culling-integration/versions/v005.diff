@@ -1,0 +1,122 @@
+--- v004.md
++++ v005.md
+@@ -4,84 +4,56 @@
+ 
+ ## Overview
+-Frustum Culling Integration is a visibility optimization technique applied during the progressive loading of volumetric splats (specifically 3D Gaussian Splatting) to prioritize data transmission and rendering of elements within the user's current view [S1]. It operates by filtering out splats that lie outside the viewing frustum, thereby reducing the computational load on background elements [S1]. Unlike the base octree-only approach, which provides a static scene representation without user-specific knowledge, this method leverages the user's initial pose to improve performance when such information is available [S1].
++Frustum Culling Integration is a visibility optimization technique applied during the progressive loading of Gaussian splats, specifically after global contribution-based ordering has been established [S1]. It filters out splats that lie outside the current camera's viewing frustum to prioritize the transmission and rendering of visible geometry [S1]. Unlike its sibling [Bounding-Sphere Tree Traversal with Frame-Rate Control](7227-bounding-sphere-tree-traversal-with-frame-rate-control.md) which manages frame budgets, or [Frustum-Occlusion Culling for Octree Traversal](12324-frustum-occlusion-culling-for-octree-traversal.md) which integrates visibility into the traversal structure, this method operates as a post-ordering filter [S1]. It is distinct because it does not account for depth-based occlusions from the current viewpoint, relying instead on the pre-computed global importance ranking [S1].
+ 
+ ## How it works
+-**Inputs:** A list of splats (Gaussians) with their spatial parameters (mean position, covariance) and the current camera view matrix defining the viewing frustum.
+-**Outputs:** A filtered subset of splats marked as "visible" for immediate processing/loading.
++**Inputs:**
++- A list of Gaussian splats, pre-sorted by global contribution (e.g., based on training view importance) [S1].
++- The current camera projection matrix and view frustum parameters [S1].
++- A frustum margin parameter [S1].
++
++**Outputs:**
++- A filtered subset of splats that are considered "visible" for the current frame [S1].
+ 
+ **Data Structures:**
+-*   **Splat List:** Array of splat objects containing 3D mean position $\mathbf{\mu}$ and projection parameters.
+-*   **Frustum Planes:** Six planes (left, right, bottom, top, near, far) defining the viewing volume.
++- The splat list is typically organized in chunks or segments, often derived from a compressed `.ply` format where minimum and maximum splat indices are stored to allow dequantization upon loading [S1].
++- Each splat is defined by its mean position $\mathbf{\mu}$ and covariance matrix $\mathbf{\Sigma}$ (or scale/rotation/quaternion parameters) [S1].
+ 
+ **Steps:**
+-1.  **Global Ordering (Pre-requisite):** The method is applied *after* a global ordering of splats has been determined (e.g., by depth or contribution) [S1]. This means the culling does not account for occlusions from the current viewpoint, only geometric visibility [S1].
+-2.  **Projection:** Project the mean position $\mathbf{\mu}$ of each splat onto the image plane using the current view-projection matrix [S1].
+-3.  **Margin Application:** Expand the boundaries of the viewing frustum by a specified margin percentage to account for the spatial extent of Gaussians, which cover areas rather than single points [S1].
+-4.  **Filtering:** Determine if the projected splat (including its margin-adjusted extent) falls within the expanded frustum boundaries [S1].
+-    *   If the splat is outside the expanded frustum, it is excluded from the current batch.
+-    *   If inside, it is included.
+-5.  **Selection:** Select a percentage of the filtered splats for rapid movement and high-priority loading [S1].
++1. **Global Ordering:** First, determine the global ordering of all splats based on their contribution to the scene (e.g., using the contribution of the highest contributing Gaussians per pixel as a proxy) [S1]. This step is independent of the current viewpoint [S1].
++2. **Projection:** Project the mean position $\mathbf{\mu}_i$ of each splat $i$ onto the 2D image plane using the current camera projection matrix $P$ [S1].
++   $$ \mathbf{p}_i = P \cdot \begin{bmatrix} \mathbf{\mu}_i \\ 1 \end{bmatrix} $$
++   Normalize $\mathbf{p}_i$ to obtain normalized device coordinates (NDC) $(x_i, y_i, z_i)$ [S1].
++3. **Frustum Filtering:** Check if the projected splat falls within the viewing frustum boundaries $[x_{min}, x_{max}] \times [y_{min}, y_{max}]$ in NDC space [S1].
++   - To account for the fact that Gaussians cover areas rather than points, apply a margin to the frustum boundaries [S1].
++   - The effective boundaries are expanded by a margin percentage $m$ (typically 30%) [S1]:
++     $$ x'_{min} = x_{min} - m \cdot (x_{max} - x_{min}) $$
++     $$ x'_{max} = x_{max} + m \cdot (x_{max} - x_{min}) $$
++     (Similarly for $y$) [S1].
++   - A splat is considered inside if $x'_{min} \le x_i \le x'_{max}$ and $y'_{min} \le y_i \le y'_{max}$ [S1].
++4. **Selection:** Select a percentage of the splats that pass the filter, prioritizing those with higher global contribution scores [S1]. This allows for rapid movement while focusing on visible content [S1].
+ 
+ **Parameters:**
+-*   **Frustum Margin:** The percentage by which frustum boundaries are increased. Typical value: 30% [S1].
++- **Frustum Margin:** The percentage by which frustum boundaries are increased to include partially visible splats. Typical value: 30% [S1].
++- **Selection Percentage:** The proportion of in-frustum splats to load. Not explicitly fixed, but described as "a percentage" to allow rapid movement [S1].
+ 
+-**Pitfalls:**
+-*   **Late Application:** Because frustum culling occurs after global ordering, it does not account for occlusions from the current viewpoint [S1].
+-*   **Background Noise:** If more than 10% of splats are visible within the current frustum, small background splats may still not be selected efficiently, as the ordering was not optimized for the specific view [S1].
+-
+-**Pseudocode:**
+-```python
+-def frustum_cull_splats(splats, view_projection_matrix, margin_percent=0.3):
+-    """
+-    Filters splats based on visibility in the viewing frustum.
+-    Assumes splats are already globally ordered.
+-    """
+-    visible_splats = []
+-    
+-    # Define frustum boundaries from view_projection_matrix
+-    # This step extracts the 6 planes (left, right, bottom, top, near, far)
+-    frustum_planes = extract_frustum_planes(view_projection_matrix)
+-    
+-    # Apply margin to frustum boundaries
+-    # Note: Exact expansion logic depends on projection space; 
+-    # typically involves scaling the near/far or extending clip-space bounds.
+-    expanded_planes = expand_frustum(frustum_planes, margin_percent)
+-    
+-    for splat in splats:
+-        # Project splat mean to clip space
+-        clip_pos = view_projection_matrix @ splat.mean_position
+-        
+-        # Check if splat is inside expanded frustum
+-        # For Gaussians, we check if the mean is inside, 
+-        # potentially expanded by the margin to cover the Gaussian's area
+-        if is_inside_frustum(clip_pos, expanded_planes):
+-            visible_splats.append(splat)
+-            
+-    return visible_splats
+-
+-def is_inside_frustum(clip_pos, planes):
+-    """
+-    Checks if a point in clip space is inside all 6 frustum planes.
+-    """
+-    for plane in planes:
+-        # Plane equation: Ax + By + Cz + D <= 0 for inside
+-        if plane.a * clip_pos.x + plane.b * clip_pos.y + \
+-           plane.c * clip_pos.z + plane.d > 0:
+-            return False
+-    return True
+-```
++**Edge Cases and Pitfalls:**
++- **Occlusion Ignorance:** Since culling occurs after global ordering, it does not account for occlusions from the current viewpoint [S1]. Splats that are globally important but occluded in the current view may still be loaded if they are in-frustum [S1].
++- **Background Noise:** If more than 10% of all splats are visible within the current frustum, small background splats may still be selected despite being low priority, because the global order is fixed [S1].
++- **Mean vs. Extent:** The check is based on the splat mean. A splat with a mean outside the frustum might still partially overlap the view, hence the margin [S1].
+ 
+ ## Subtopics
+ 
+ ### In-frustum prioritization
+-A technique to fine-tune ordering based on the user's initial pose, selecting a percentage of splats from within the viewing frustum to allow rapid movement [S1]. It involves projecting all splats onto the image plane and filtering those that fall outside the frustum [S1]. The frustum margin is typically set to 30% to ensure Gaussians covering areas are not incorrectly culled [S1].
++A technique to fine-tune the initial ordering based on the user's initial pose, selecting a percentage of splats from within the viewing frustum to allow rapid movement [S1]. It involves projecting all splats onto the image plane and filtering those that fall outside the frustum [S1]. It uses a frustum margin (typically 30%) to account for the area coverage of Gaussians [S1].
+ 
+ ## Operating characteristics
+-*   **Performance:** Improves foreground quality marginally by focusing resources on visible splats [S1].
+-*   **Limitations:** Does not improve background representation if the visible splat count is high (>10%), as small background splats may still be deprioritized due to the pre-existing global ordering [S1].
+-*   **Comparison:** The complete approach (with octree and frustum culling) performs better when user-specific view information is available, whereas the octree-only approach provides good scene representation without user-specific knowledge [S1].
++- **Time Complexity:** Linear with respect to the number of splats for projection and filtering $O(N)$ [S1].
++- **Memory Complexity:** Depends on the chunking strategy; typically loads only in-frustum splats, reducing memory bandwidth [S1].
++- **Performance:** Improves foreground quality marginally when user-specific view information is available [S1]. However, it performs worse than octree-only approaches when user-specific knowledge is absent, as it cannot adapt to the current viewpoint's occlusion structure [S1].
++- **Limitations:** Fails to reduce load for occluded objects; if >10% of splats are in-frustum, background noise persists [S1].
++- **When to Use:** When the user's initial pose is known and rapid movement is prioritized over perfect occlusion culling [S1].
+ 
+ ## Background
+-This method is part of the PRoGS (Progressive Rendering of Gaussian Splats) framework, which brings progressive rendering of 3D Gaussian Splats into an academic context [S1]. It builds upon base ordering techniques by adding view-dependent culling to optimize bandwidth and rendering load for dynamic user viewpoints [S1].
++Originated in the context of progressive rendering of 3D Gaussian Splats (3DGS) [S1]. The method is part of the PRoGS (Progressive Rendering of Gaussian Splats) framework [S1]. It builds on the base approach of global contribution ordering and is often combined with octree structures for better scene representation without user-specific knowledge [S1]. The approach was adapted from techniques used in compression and chunking of compressed `.ply` files [S1].
+ 
+ ## Sources
