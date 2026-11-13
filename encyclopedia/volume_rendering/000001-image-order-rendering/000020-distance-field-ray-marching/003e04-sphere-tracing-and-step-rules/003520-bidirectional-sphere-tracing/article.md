@@ -49,8 +49,6 @@ Bidirectional sphere tracing is a robust surface extraction technique that mitig
 
 **Pseudocode**
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
 def bidirectional_sphere_tracing(r_o, r_d, S, n=16, eps_conv=5e-5, 
                                  n_samples=100, n_sec=8, eps_grad=0.005, 

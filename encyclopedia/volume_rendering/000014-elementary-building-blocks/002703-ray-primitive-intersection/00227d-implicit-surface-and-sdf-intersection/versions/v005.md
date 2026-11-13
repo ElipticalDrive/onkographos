@@ -1,0 +1,60 @@
+# Implicit Surface and SDF Intersection
+
+
+## Overview
+This family defines methods for determining the intersection between a ray and a surface defined implicitly by a scalar field $f(\mathbf{x})$ (where the surface is the zero-level set $f(\mathbf{x})=0$) or a Signed Distance Field (SDF) [G]. It solves the problem of finding the nearest point $\mathbf{o} + t\mathbf{d}$ such that $f(\mathbf{o} + t\mathbf{d}) = 0$ without relying on explicit triangle meshes [G]. It is distinguished from [General Ray-Triangle Intersection](909-general-ray-triangle-intersection-pl-cker-coordinates.md) by its reliance on function evaluation rather than geometric primitives, and from [Sphere Intersection](1620-sphere-intersection.md) by its generality, requiring numerical root-finding or traversal rather than closed-form quadratic solutions for arbitrary functions [G].
+
+## Shared principles
+The shared principles of this family are the geometric definition of rays and the parallel execution model [G].
+**Ray Definition**
+Rays are defined by an origin $\mathbf{o}$ and a direction $\mathbf{d}$ [G]. The direction is typically normalized. The origin is often the camera eye position, but can vary based on the camera model [G].
+**Parallel Execution**
+Computations are mapped to parallel threads [G]. Each thread typically processes one or more pixels or samples [G]. Memory access patterns are optimized for coalescing [G]. Synchronization is used to manage data dependencies between threads [G].
+
+## Subtopics
+
+### [Kalra & Barr Implicit Surface Intersection](1278-kalra-barr-implicit-surface-intersection.md)
+The Kalra & Barr method is a robust, mathematically sound algorithm for finding the nearest intersection between a ray and an implicit surface. It solves the problem of missing fine surface features or failing to converge in standard ray-marching schemes by guaranteeing numerical convergence without requiring fine-tuning or human-chosen interactive parameters. It distinguishes itself from ad-hoc schemes by relying on two specific upper bounds, $L$ and $G$, to define an "LG-implicit surface," ensuring robustness for a broader class of functions than traditional quadric or polynomial-specific solvers.
+
+### [SDF Raycast Collision Detection](2417-sdf-raycast-collision-detection.md)
+This method determines if a line segment intersects a surface defined by a Signed Distance Field (SDF) by evaluating the distance function at the segment's endpoints and checking for a sign change. It serves as a lightweight, broad-phase collision detection primitive. Unlike [Kalra & Barr Implicit Surface Intersection](1278-kalra-barr-implicit-surface-intersection.md) which computes the exact intersection point, or [Ray Tracing Implicit Surfaces](2814-ray-tracing-implicit-surfaces.md) which traces the ray through the field, this method only reports binary existence of an intersection within the segment bounds. It is distinct from [Terrain SDF Collision Detection and Resolution](3049-terrain-sdf-collision-detection-and-resolution.md) in that it performs detection only, without resolving penetration or modifying velocity.
+
+### [Ray Tracing Implicit Surfaces](2814-ray-tracing-implicit-surfaces.md)
+Ray tracing implicit surfaces renders a surface defined by a filter function $f(\mathbf{x})$ and an isovalue $v$ by solving for the root where a viewing ray intersects the surface $f(\mathbf{x}) - v = 0$, without using a proxy triangle mesh. It solves the root-finding problem $f_t(t) = 0$ for the smallest $t > 0$, where $f_t$ is the implicit function evaluated along the parametric ray. Unlike rasterization of proxy geometry (e.g., [Marching Cubes](2795-implicit-surface-and-sdf-intersection.md)), ray tracing does not require mesh extraction, avoiding time complexity on the order of the number of samples and issues with proxy sampling rates beneath the Nyquist limit. It is distinguished from simple ray casting by its native support for secondary rays (shadows, refractions) and ray traversal of acceleration structures.
+
+### [LevelSetHDDA](2875-levelsethdda.md)
+LevelSetHDDA is a specialized Hierarchical Digital Differential Analyzer (HDDA) designed for static intersection testing against level set trees. It recursively traverses a VDB tree hierarchy from a specified node level down to the leaf level (-1) to determine if a ray intersects the implicit surface. It sets itself apart from generic volume traversal methods like [VolumeHDDA](2815-volume-hdda.md) by targeting the specific structure of level sets, where the traversal terminates at the voxel level rather than the leaf node level, allowing for precise surface intersection checks via a provided tester object.
+
+### [Ray-Ellipsoid Intersection](3463-ray-ellipsoid-intersection.md)
+Computes the intersection of a ray with a 3D ellipsoid defined by a rotation matrix, translation vector, and scale factors. It returns whether an intersection exists and the intersection point in world space. This method transforms the ray into the ellipsoid's local space, solving a quadratic equation for the unit sphere, then transforms the result back. It is distinguished from general implicit surface methods by its closed-form quadratic solution, which is computationally cheaper than iterative root-finding but requires the primitive to be strictly ellipsoidal.
+
+### [RayImplicitIntersection](3591-rayimplicitintersection.md)
+Detects if a ray intersects a zero-crossing at the voxel level of a grid in the accessor. It performs empty-space ray-marching at all levels of the tree using an HDDA (Hierarchical Distance Field Acceleration). The method is optimized for performance, precision, and correctness, and surfaces a shared cache-hint helper for other operations. It is SDF-sign-agnostic and reports the EXIT crossing for rays that start inside the surface, matching nanovdb::ZeroCrossing behavior.
+
+### DeVella's Necklace Test
+- **Definition**: A test to detect the existence of a tunnel in a cell based on coefficients of the isosurface equation [S1].
+- **Steps**: Compute $G[F_i]$ and $Disc[F_i]$ from the coefficients of the isosurface equation. If $G[F_i] < 0$ and $Disc[F_i] > 0$, a tunnel exists in the cell [S1].
+- **Formulas**:
+  $$G[F_i] = (AE - BD)(AF - BC)(AG - CD)$$
+  $$Disc[F_i] = (AH)^2 + (BG)^2 + (CE)^2 + (DF)^2 - 2ABGH - 2ACEH - 2ADFH - 2BCEG - 2BDFG - 2CDEF + 4AEFG + 4BCDH$$
+  where A, B, C, D, E, F, G, H are coefficients of the isosurface equation [S1].
+
+### Implicit Shape Obstacle Approximation
+- **Definition**: A basic method to influence the velocity field by approximating obstacles as simple shapes (box, ball) defined by implicit equations, adding the obstacle's average velocity to the fluid velocity in that region [S2, unofficial].
+- **Formula**: Obstacle shape defined by implicit equation $f(x, y, z) \le 0$ [S2, unofficial].
+
+### Edge Point Re-parametrization
+- **Formula**:
+  Deformation equation: $x_{\Theta_s} = x + t_{\Theta_s} \cdot n$, where $x$ is the initial edge point, $n$ is the surface normal, and $t_{\Theta_s}$ is the learned scalar displacement [S3].
+  Initial condition: At initialization $\Theta_s = \Theta_s^{(0)}$, the displacement is zero: $t_{\Theta_s} \big|_{\Theta_s = \Theta_s^{(0)}} = 0$ [S3].
+  Gradient update rule derived from implicit differentiation of the zero-level set constraint $S_{\Theta_s}(x_{\Theta_s}) = 0$: $\frac{\partial t}{\partial \Theta_s} \big|_{\Theta_s = \Theta_s^{(0)}} = -\frac{1}{n^T n} \cdot \frac{\partial S}{\partial \Theta_s}(x) \big|_{\Theta_s = \Theta_s^{(0)}}$ [S3].
+  Final re-parametrization for gradient-based optimization: $x_{\Theta_s} = x - \frac{n}{n^T n} \cdot S_{\Theta_s}(x)$ [S3].
+- **Pitfall**: The re-parametrization only provides an unbiased first-order gradient with respect to $\Theta_s$, which is suitable for gradient-based optimizers but may not capture higher-order surface curvature effects [S3].
+
+## Background
+The problem of intersecting rays with implicit surfaces is fundamental to ray tracing and volume rendering, allowing for the rendering of complex shapes without explicit mesh representation [G]. Early work focused on robust root-finding for algebraic surfaces [G]. For large-scale volumetric data, hierarchical traversal methods like LevelSetHDDA [2875-levelsethdda.md] and RayImplicitIntersection [3591-rayimplicitintersection.md] optimize performance by skipping empty space using Digital Differential Analyzers (DDAs) [G]. Topological analysis of implicit surfaces, such as DeVella's Necklace Test [S1], allows for the detection of complex features like tunnels within grid cells, which is crucial for topologically accurate dual isosurfacing. Implicit shapes are also used in fluid dynamics to approximate obstacles, where the implicit equation defines the solid region [S2, unofficial]. Recent advances in inverse rendering and neural fields utilize edge point re-parametrization [S3] to optimize implicit surface parameters directly from images, ensuring the surface remains on the zero-level set during gradient descent.
+
+## Sources
+[S1] Topologically Accurate Dual Isosurfacing Using Ray Intersection, https://doi.org/10.20385/1860-2037/4.2007.4, fetched 2026-10-26
+[S2] PDF Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
+[S3] IRON: Inverse Rendering by Optimizing Neural SDFs and Materials from Photometric Images, https://doi.org/10.1109/cvpr52688.2022.00548, fetched 2026-10-26

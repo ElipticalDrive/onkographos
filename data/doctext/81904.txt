@@ -1,0 +1,809 @@
+# NeRF-Renderer
+
+### main.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+from vectorObject import VectorObject, Surface
+from rayTracer import RayTracer, Light
+from objectReflectanceNerf import ObjectReflectanceNeRF
+from render import Renderer
+
+
+def create_example_object() -> VectorObject:
+    vertices = np.array(
+        [
+            [-1, -1, -1],
+            [1, -1, -1],
+            [1, 1, -1],
+            [-1, 1, -1],
+            [-1, -1, 1],
+            [1, -1, 1],
+            [1, 1, 1],
+            [-1, 1, 1],
+        ]
+    )
+
+    normals = np.array(
+        [
+            [0, 0, -1],
+            [0, 0, 1],  # front, back
+            [1, 0, 0],
+            [-1, 0, 0],  # right, left
+            [0, 1, 0],
+            [0, -1, 0],  # top, bottom
+        ]
+    )
+
+    surfaces = []
+    colors = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0], [1, 0, 1], [0, 1, 1]]
+
+    faces = [
+        [0, 1, 2, 3],  # front
+        [4, 5, 6, 7],  # back
+        [1, 5, 6, 2],  # right
+        [0, 4, 7, 3],  # left
+        [3, 2, 6, 7],  # top
+        [0, 1, 5, 4],  # bottom
+    ]
+
+    for i, (face, normal, color) in enumerate(zip(faces, normals, colors)):
+        face_vertices = vertices[face]
+        face_normals = np.tile(normal, (len(face_vertices), 1))
+        face_indices = np.array([[0, 1, 2], [0, 2, 3]])
+
+        surfaces.append(
+            Surface(
+                vertices=face_vertices,
+                normals=face_normals,
+                faces=face_indices,
+                base_color=np.array(color),
+            )
+        )
+
+    return VectorObject(surfaces)
+
+
+def create_example_dataset(
+    init_camera_position: np.ndarray,
+    init_light_position: np.ndarray,
+    object: VectorObject,
+):
+    light = Light(
+        position=init_light_position, intensity=1.0, color=np.array([1, 1, 1])
+    )
+    camera_position = init_camera_position
+
+    ray_tracer = RayTracer(init_camera_position, [light])
+
+    positions = []
+    view_dirs = []
+    light_dirs = []
+    colours = []
+
+    for surface, _ in object.get_visible_surfaces(camera_position):
+        points = surface.sample_surface_points(20)
+
+        for point in points:
+            colour = ray_tracer.calculate_color_at_point(point, object)
+
+            cam_diff = camera_position - point
+            light_diff = light.position - point
+
+            theta_cam = np.degrees(np.arctan2(cam_diff[1], cam_diff[0]))
+            phi_cam = np.degrees(
+                np.arctan2(cam_diff[2], np.sqrt(cam_diff[0] ** 2 + cam_diff[1] ** 2))
+            )
+
+            theta_light = np.degrees(np.arctan2(light_diff[1], light_diff[0]))
+            phi_light = np.degrees(
+                np.arctan2(
+                    light_diff[2], np.sqrt(light_diff[0] ** 2 + light_diff[1] ** 2)
+                )
+            )
+
+            positions.append(point)
+            view_dirs.append(np.array([theta_cam, phi_cam]))
+            light_dirs.append(np.array([theta_light, phi_light]))
+            colours.append(colour)
+
+    return positions, view_dirs, light_dirs, colours
+
+
+def main():
+    model = ObjectReflectanceNeRF()
+    object_3d = create_example_object()
+    renderer = Renderer(model, object_3d)
+
+    camera_position = np.array([3, 3, 3])
+    light_position = np.array([5, 5, -5])
+
+    image = renderer.render_view(camera_position, light_position)
+
+    print("Rendered image shape:", image.shape)
+
+    positions, view_dirs, light_dirs, colours = create_example_dataset(
+        camera_position, light_position, object_3d
+    )
+
+    print(colours)
+
+    # plt.imshow(image)
+    # plt.axis("off")
+    # plt.show()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### nerf.py
+```
+import torch
+import torch.nn as nn
+
+
+class ReflectanceNeRF(nn.Module):
+    def __init__(self, hidden_dim=256):
+        super().__init__()
+
+        self.network = nn.Sequential(
+            # Input features: position (3), view direction (3), light direction (3), base color (3)
+            nn.Linear(12, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            # Output: reflectance modification factors (3) for RGB
+            nn.Linear(hidden_dim, 3),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, positions, view_dirs, light_dirs, base_colors):
+        # Normalize input vectors
+        view_dirs = view_dirs / torch.norm(view_dirs, dim=-1, keepdim=True)
+        light_dirs = light_dirs / torch.norm(light_dirs, dim=-1, keepdim=True)
+
+        x = torch.cat([positions, view_dirs, light_dirs, base_colors], dim=-1)
+
+        # Get reflectance factors
+        reflectance = self.network(x)
+
+        # Modify base colors with learned reflectance
+        modified_colors = base_colors * reflectance
+
+        return modified_colors
+
+
+def train_reflectance_nerf(model, train_data, num_epochs=400, learning_rate=0.001):
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    loss_fn = nn.MSELoss()
+
+    for epoch in range(num_epochs):
+        total_loss = 0
+        for batch in train_data:
+            positions, view_dirs, light_dirs, base_colors, target_colors = batch
+
+            predicted_colors = model(positions, view_dirs, light_dirs, base_colors)
+            loss = loss_fn(predicted_colors, target_colors)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+
+        if (epoch + 1) % 10 == 0:
+            print(
+                f"Epoch [{epoch+1}/{num_epochs}], Loss: {total_loss/len(train_data):.4f}"
+            )
+
+
+def render_with_nerf(model, position, view_dir, light_dir, base_color):
+    """
+    Render a single point using the trained NeRF model
+    """
+    with torch.no_grad():
+        position = torch.FloatTensor(position).unsqueeze(0)
+        view_dir = torch.FloatTensor(view_dir).unsqueeze(0)
+        light_dir = torch.FloatTensor(light_dir).unsqueeze(0)
+        base_color = torch.FloatTensor(base_color).unsqueeze(0)
+
+        modified_color = model(position, view_dir, light_dir, base_color)
+        return modified_color.squeeze(0).numpy()
+
+
+def main():
+    model = ReflectanceNeRF()
+
+    # Generate synthetic training data
+    num_samples = 1000
+    positions = torch.rand(num_samples, 3)
+    view_dirs = torch.rand(num_samples, 3)
+    light_dirs = torch.rand(num_samples, 3)
+    base_colors = torch.rand(num_samples, 3)
+    target_colors = torch.rand(num_samples, 3)
+
+    train_data = [(positions, view_dirs, light_dirs, base_colors, target_colors)]
+
+    # Train the model
+    train_reflectance_nerf(model, train_data)
+
+    # Test rendering
+    test_position = [0.5, 0.5, 0.5]
+    test_view_dir = [0.0, 0.0, 1.0]
+    test_light_dir = [1.0, 1.0, 1.0]
+    test_base_color = [0.8, 0.2, 0.2]
+
+    modified_color = render_with_nerf(
+        model, test_position, test_view_dir, test_light_dir, test_base_color
+    )
+    print(f"Modified color: {modified_color}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### objectReflectanceNerf.py
+```
+import torch
+import torch.nn as nn
+
+
+class ObjectReflectanceNeRF(nn.Module):
+    def __init__(self, hidden_dim=256):
+        super().__init__()
+
+        # Poistion, light, and view direction encoder
+        self.encoder = nn.Sequential(
+            nn.Linear(9, hidden_dim),  # position (3) + view_dir (3) + light_dir (3)
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+
+        # Color modifier network
+        self.color_network = nn.Sequential(
+            nn.Linear(hidden_dim + 3, hidden_dim),  # hidden + base colours (3)
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 3),  # rgb (3)
+            nn.Sigmoid(),
+        )
+
+    def forward(self, positions, view_dirs, light_dirs, base_colors):
+        features = self.encoder(torch.cat([positions, view_dirs, light_dirs], dim=1))
+        combined = torch.cat([features, base_colors], dim=1)
+
+        modified_colour = self.color_network(combined)
+
+        return modified_colour
+```
+
+### rayTracer.py
+```
+import numpy as np
+from typing import List, Optional
+from dataclasses import dataclass
+from vectorObject import Surface, VectorObject
+
+
+@dataclass
+class Ray:
+    origin: np.ndarray  # (3,) array representing ray origin
+    direction: np.ndarray  # (3,) array representing ray direction (normalized)
+
+
+@dataclass
+class Light:
+    position: np.ndarray  # (3,) array for light position
+    intensity: float  # light intensity
+    color: np.ndarray  # (3,) array for RGB color
+
+
+@dataclass
+class Intersection:
+    point: np.ndarray  # (3,) array for intersection point
+    normal: np.ndarray  # (3,) array for surface normal at intersection
+    distance: float  # distance from ray origin to intersection point
+    surface: Surface  # reference to intersected surface
+
+
+class RayTracer:
+    def __init__(self, camera_position: np.ndarray, lights: List[Light]):
+        self.camera_position = camera_position
+        self.lights = lights
+        self.ambient_intensity = 0.1
+        self.specular_power = 32
+        self.specular_intensity = 0.5
+
+    def ray_triangle_intersection(
+        self, ray: Ray, vertices: np.ndarray, normal: np.ndarray
+    ) -> Optional[float]:
+        """
+        Compute ray-triangle intersection using Möller–Trumbore algorithm.
+        Returns distance to intersection or None if no intersection.
+        """
+        v0, v1, v2 = vertices
+        edge1 = v1 - v0
+        edge2 = v2 - v0
+
+        h = np.cross(ray.direction, edge2)
+        a = np.dot(edge1, h)
+
+        if abs(a) < 1e-6:  # Ray parallel to triangle
+            return None
+
+        f = 1.0 / a
+        s = ray.origin - v0
+        u = f * np.dot(s, h)
+
+        if u < 0.0 or u > 1.0:
+            return None
+
+        q = np.cross(s, edge1)
+        v = f * np.dot(ray.direction, q)
+
+        if v < 0.0 or u + v > 1.0:
+            return None
+
+        t = f * np.dot(edge2, q)
+
+        return t if t > 1e-6 else None
+
+    def find_intersection(
+        self, ray: Ray, vector_object: VectorObject
+    ) -> Optional[Intersection]:
+        """Find the closest intersection between a ray and any surface in the vector object."""
+        closest_intersection = None
+        min_distance = float("inf")
+
+        for surface in vector_object.surfaces:
+            for face_idx in range(len(surface.faces)):
+                face = surface.faces[face_idx]
+                vertices = surface.vertices[face]
+                normal = surface.normals[face[0]]
+
+                distance = self.ray_triangle_intersection(ray, vertices, normal)
+
+                if distance is not None and distance < min_distance:
+                    min_distance = distance
+                    intersection_point = ray.origin + ray.direction * distance
+                    closest_intersection = Intersection(
+                        point=intersection_point,
+                        normal=normal,
+                        distance=distance,
+                        surface=surface,
+                    )
+
+        return closest_intersection
+
+    def compute_lighting(self, intersection: Intersection) -> np.ndarray:
+        """Compute the color at an intersection point considering all lights."""
+        final_color = intersection.surface.base_color * self.ambient_intensity
+
+        for light in self.lights:
+            light_dir = light.position - intersection.point
+            light_distance = np.linalg.norm(light_dir)
+            light_dir /= light_distance
+
+            view_dir = self.camera_position - intersection.point
+            view_dir /= np.linalg.norm(view_dir)
+
+            diffuse = max(0.0, np.dot(intersection.normal, light_dir))
+            diffuse_color = (
+                intersection.surface.base_color
+                * light.color
+                * (diffuse * light.intensity / light_distance**2)
+            )
+
+            # Specular lighting
+            reflect_dir = (
+                -light_dir
+                + 2.0 * np.dot(light_dir, intersection.normal) * intersection.normal
+            )
+            specular = max(0.0, np.dot(view_dir, reflect_dir)) ** self.specular_power
+            specular_color = light.color * (
+                specular * self.specular_intensity * light.intensity / light_distance**2
+            )
+
+            final_color += diffuse_color + specular_color
+
+        return np.clip(final_color, 0, 1)
+
+    def trace_ray(self, ray: Ray, vector_object: VectorObject) -> np.ndarray:
+        """Trace a single ray and return the color."""
+        intersection = self.find_intersection(ray, vector_object)
+
+        if intersection is None:
+            return np.zeros(3)  # Background color (black)
+
+        return self.compute_lighting(intersection)
+
+    def calculate_color_at_point(
+        self, point: np.ndarray, vector_object: VectorObject
+    ) -> Optional[np.ndarray]:
+        """
+        Render a specific 3D point on the vector object.
+        Returns the color at that point or None if the point isn't on any surface.
+        """
+        direction = point - self.camera_position
+        direction /= np.linalg.norm(direction)
+        ray = Ray(origin=self.camera_position, direction=direction)
+
+        intersection = self.find_intersection(ray, vector_object)
+        if intersection is None:
+            return None
+
+        if np.linalg.norm(intersection.point - point) < 1e-6:
+            return self.compute_lighting(intersection)
+
+        return None
+```
+
+### reflectance_dataset.py
+```
+import torch
+from torch.utils.data import Dataset
+from typing import Tuple
+import numpy as np
+
+
+class ReflectanceDataset(Dataset):
+    def __init__(
+        self,
+        positions: np.ndarray,  # (N, 3) array of 3D positions
+        view_dirs: np.ndarray,  # (N, 2) array of view directions
+        light_dirs: np.ndarray,  # (N, 2) array of light directions
+        colors: np.ndarray,  # (N, 3) array of RGB colors
+    ):
+        self.positions = torch.FloatTensor(positions)
+        self.view_dirs = torch.FloatTensor(view_dirs)
+        self.light_dirs = torch.FloatTensor(light_dirs)
+        self.colors = torch.FloatTensor(colors)
+
+        self.train_data, self.val_data = self._prepare_training_data()
+
+    def __len__(self):
+        return self.positions.shape[0]
+
+    def __getitem__(self, idx):
+        return {
+            "position": self.positions[idx],
+            "view_dir": self.view_dirs[idx],
+            "light_dir": self.light_dirs[idx],
+            "color": self.colors[idx],
+        }
+
+    def _prepare_training_data(self) -> Tuple[Tuple, Tuple]:
+        num_samples = self.positions.shape[0]
+        split_index = int(0.8 * num_samples)
+
+        train_data = (
+            self.positions[:split_index],
+            self.view_dirs[:split_index],
+            self.light_dirs[:split_index],
+            self.colors[:split_index],
+        )
+        val_data = (
+            self.positions[split_index:],
+            self.view_dirs[split_index:],
+            self.light_dirs[split_index:],
+            self.colors[split_index:],
+        )
+
+        return train_data, val_data
+```
+
+### render.py
+```
+import torch
+import numpy as np
+from vectorObject import VectorObject, Surface
+from objectReflectanceNerf import ObjectReflectanceNeRF
+from typing import Tuple
+
+
+class Renderer:
+    def __init__(self, model: ObjectReflectanceNeRF, object_3d: VectorObject):
+        self.model = model
+        self.object_3d = object_3d
+
+    def render_view(
+        self,
+        camera_position: np.ndarray,
+        light_position: np.ndarray,
+        resolution: Tuple[int, int] = (512, 512),
+    ) -> np.ndarray:
+        height, width = resolution
+        render_buffer = np.zeros((height, width, 3))
+
+        visible_surfaces = self.object_3d.get_visible_surfaces(camera_position)
+
+        for surface, center in visible_surfaces:
+            points = surface.sample_surface_points(80)
+
+            view_dirs = camera_position - points
+            view_dirs /= np.linalg.norm(view_dirs, axis=-1, keepdims=True)
+
+            light_dirs = light_position - points
+            light_dirs /= np.linalg.norm(light_dirs, axis=-1, keepdims=True)
+
+            positions = torch.FloatTensor(points)
+            normals = torch.FloatTensor(self._interpolate_normals(surface, points))
+            view_dirs = torch.FloatTensor(view_dirs)
+            light_dirs = torch.FloatTensor(light_dirs)
+            base_colors = torch.FloatTensor(surface.base_color).expand(len(points), -1)
+
+            with torch.no_grad():
+                modified_colors = self.model(
+                    positions, view_dirs, light_dirs, base_colors
+                ).numpy()
+
+            self._update_render_buffer(
+                render_buffer, points, modified_colors, camera_position, resolution
+            )
+
+        return render_buffer
+
+    def render_scene(
+        self,
+        camera_position: np.ndarray,
+        lighting: np.ndarray,
+        resolution: Tuple[int, int] = (512, 512),
+    ) -> np.ndarray:
+        height, width = resolution
+        render_buffer = np.zeros((height, width, 3))
+
+        visible_surfaces = self.object_3d.get_visible_surfaces(camera_position)
+
+    def set_colours(self, colours):
+        pass
+
+    def _interpolate_normals(self, surface: Surface, points: np.ndarray) -> np.ndarray:
+        avg_normal = surface.normals.mean(axis=0)
+        return np.tile(avg_normal, (len(points), 1))
+
+    def _update_render_buffer(
+        self,
+        buffer: np.ndarray,
+        points: np.ndarray,
+        colors: np.ndarray,
+        camera_position: np.ndarray,
+        resolution: Tuple[int, int],
+    ):
+        height, width = resolution
+
+        f = 100
+        for point, color in zip(points, colors):
+            d = point - camera_position
+            x = int(f * d[0] / d[2] + width / 2)
+            y = int(f * d[1] / d[2] + height / 2)
+
+            if 0 <= x < width and 0 <= y < height:
+                buffer[y, x] = color
+```
+
+### train.py
+```
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+import numpy as np
+from typing import Tuple
+import wandb
+from tqdm import tqdm
+from reflectance_dataset import ReflectanceDataset
+
+
+def normalize_vectors(vectors: torch.Tensor) -> torch.Tensor:
+    return vectors / torch.norm(vectors, dim=-1, keepdim=True)
+
+
+def train(
+    model: nn.Module,
+    data: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    num_epochs: int = 100,
+    batch_size: int = 1024,
+    learning_rate: float = 1e-4,
+    use_wandb: bool = False,
+    scheduler_patience: int = 10,
+    early_stopping_patience: int = 20,
+) -> dict:
+    """
+    Args:
+        model: The NeRF model
+        data: Tuple of (positions, view_dirs, light_dirs, colors)
+        num_epochs: Number of training epochs
+        batch_size: Batch size for training
+        learning_rate: Initial learning rate
+        use_wandb: Whether to log metrics to Weights & Biases
+        scheduler_patience: Epochs to wait before reducing learning rate
+        early_stopping_patience: Epochs to wait before early stopping
+
+    Returns:
+        dict: Training history
+    """
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    dataset = ReflectanceDataset(*data)
+
+    train_loader = DataLoader(
+        dataset.train_dataset, batch_size=batch_size, shuffle=True
+    )
+    val_loader = DataLoader(dataset.val_dataset, batch_size=batch_size)
+
+    model = model.to(device)
+
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=scheduler_patience, verbose=True
+    )
+
+    mse_loss = nn.MSELoss()
+
+    if use_wandb:
+        wandb.init(
+            project="nerf-reflectance",
+            config={
+                "learning_rate": learning_rate,
+                "batch_size": batch_size,
+                "num_epochs": num_epochs,
+            },
+        )
+
+    history = {
+        "train_loss": [],
+        "val_loss": [],
+        "best_val_loss": float("inf"),
+        "best_model_state": None,
+    }
+
+    no_improve_epochs = 0
+
+    for epoch in range(num_epochs):
+        model.train()
+        train_losses = []
+
+        with tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}") as pbar:
+            for batch in pbar:
+                positions = batch["position"].to(device)
+                view_dirs = normalize_vectors(batch["view_dir"]).to(device)
+                light_dirs = normalize_vectors(batch["light_dir"]).to(device)
+                target_colors = batch["color"].to(device)
+
+                predicted_colors = model(positions, view_dirs, light_dirs)
+
+                loss = mse_loss(predicted_colors, target_colors)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                train_losses.append(loss.item())
+                pbar.set_postfix({"train_loss": f"{loss.item():.6f}"})
+
+        avg_train_loss = np.mean(train_losses)
+
+        # Validation phase
+        model.eval()
+        val_losses = []
+
+        with torch.no_grad():
+            for batch in val_loader:
+                positions = batch["position"].to(device)
+                view_dirs = normalize_vectors(batch["view_dir"]).to(device)
+                light_dirs = normalize_vectors(batch["light_dir"]).to(device)
+                target_colors = batch["color"].to(device)
+
+                predicted_colors = model(positions, view_dirs, light_dirs)
+                loss = mse_loss(predicted_colors, target_colors)
+                val_losses.append(loss.item())
+
+        avg_val_loss = np.mean(val_losses)
+
+        history["train_loss"].append(avg_train_loss)
+        history["val_loss"].append(avg_val_loss)
+
+        if use_wandb:
+            wandb.log(
+                {
+                    "train_loss": avg_train_loss,
+                    "val_loss": avg_val_loss,
+                    "learning_rate": optimizer.param_groups[0]["lr"],
+                }
+            )
+
+        print(f"Epoch {epoch+1}/{num_epochs}")
+        print(f"Train Loss: {avg_train_loss:.6f}")
+        print(f"Val Loss: {avg_val_loss:.6f}")
+
+        scheduler.step(avg_val_loss)
+
+        if avg_val_loss < history["best_val_loss"]:
+            history["best_val_loss"] = avg_val_loss
+            history["best_model_state"] = model.state_dict().copy()
+            no_improve_epochs = 0
+        else:
+            no_improve_epochs += 1
+
+        if no_improve_epochs >= early_stopping_patience:
+            print(f"Early stopping triggered after {epoch+1} epochs")
+            break
+
+    model.load_state_dict(history["best_model_state"])
+
+    if use_wandb:
+        wandb.finish()
+
+    return history
+```
+
+### vectorObject.py
+```
+import numpy as np
+from typing import List, Tuple
+from dataclasses import dataclass
+
+
+@dataclass
+class Surface:
+    vertices: np.ndarray  # (N, 3) array of vertex positions
+    normals: np.ndarray  # (N, 3) array of vertex normals
+    faces: np.ndarray  # (M, 3) array of face indices
+    base_color: np.ndarray  # (3,) RGB color
+
+    def __eq__(self, other):
+        if isinstance(other, Surface):
+            return (
+                np.array_equal(self.vertices, other.vertices)
+                and np.array_equal(self.normals, other.normals)
+                and np.array_equal(self.faces, other.faces)
+                and np.array_equal(self.base_color, other.base_color)
+            )
+        return False
+
+    def sample_surface_points(self, num_samples: int) -> np.ndarray:
+        points = []
+        for face in self.faces:
+            v1, v2, v3 = self.vertices[face]
+            for _ in range(num_samples):
+                a, b = np.random.random(2)
+                if a + b > 1:
+                    a, b = 1 - a, 1 - b
+                c = 1 - a - b
+                point = a * v1 + b * v2 + c * v3
+                points.append(point)
+        return np.array(points)
+
+
+class VectorObject:
+    def __init__(self, surfaces: List[Surface]):
+        self.surfaces = surfaces
+
+    def get_visible_surfaces(
+        self, camera_position: np.ndarray
+    ) -> List[Tuple[Surface, np.ndarray]]:
+        visible = []
+        for surface in self.surfaces:
+            center = surface.vertices.mean(axis=0)
+
+            avg_normal = surface.normals.mean(axis=0)
+            avg_normal /= np.linalg.norm(avg_normal)
+
+            # Check if surface faces camera (dot product > 0)
+            view_dir = camera_position - center
+            view_dir /= np.linalg.norm(view_dir)
+
+            if np.dot(avg_normal, view_dir) > 0:
+                visible.append((surface, center))
+
+        return visible
+```

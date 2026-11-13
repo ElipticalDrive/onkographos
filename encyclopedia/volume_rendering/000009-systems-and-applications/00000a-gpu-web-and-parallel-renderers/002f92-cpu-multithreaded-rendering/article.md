@@ -30,7 +30,7 @@ The sources do not specify a universal data structure layout for the volume data
     *   Stereo pairs can be rendered in parallel using multi-threading [S2, unofficial].
 
 ### Parameters
-*   **Core Count**: Performance scales with the number of cores. Tested on systems ranging from 1 core to 32 cores (Opteron) [S1].
+*   **Core Count**: Performance scales with the number of cores [S1]. Tested on systems ranging from 1 core to 32 cores (Opteron) [S1].
 *   **Data Size**: Typical visualizations use $256^3$ data sets [S2, unofficial].
 
 ### Pseudocode
@@ -44,71 +44,51 @@ import time
 
 class SceneRenderer:
     def __init__(self, user_context=None):
-        # Create an internal invisible context if none provided
         self.internal_context = self._create_opengl_context() if user_context is None else None
         self.user_context = user_context
-        
-        # Two persistent threads per scene
-        self.thread_user = threading.Thread(target=self._render_loop, args=(self.user_context,))
-        self.thread_internal = threading.Thread(target=self._render_loop, args=(self.internal_context,))
-        
-        # Flags for asynchronous requests
-        self.request_lock = threading.Lock()
+        self.request_event = threading.Event()
         self.pending_render = False
         self.render_data = None
-        
-        # Start threads
+        self.lock = threading.Lock()
+        self.thread_user = threading.Thread(target=self._render_loop, args=(self.user_context,))
+        self.thread_internal = threading.Thread(target=self._render_loop, args=(self.internal_context,))
         self.thread_user.start()
         self.thread_internal.start()
 
     def _create_opengl_context(self):
-        # [G] Placeholder for OpenGL context creation logic
-        # In a real implementation, this would create a hidden window/context
+        # Sources do not specify OpenGL context creation; standard hidden context initialization would go here.
         return "OpenGL_Context_Instance"
 
     def _render_loop(self, context):
+        data = None
         while True:
-            with self.request_lock:
+            self.request_event.wait()
+            self.request_event.clear()
+            with self.lock:
                 if self.pending_render:
                     data = self.render_data
                     self.pending_render = False
                     self.render_data = None
-            
             if data is not None:
-                # Bind context
-                self._bind_context(context)
-                
-                # Perform rendering
+                # Sources do not specify OpenGL context binding; standard context activation would go here.
                 self._execute_render(data)
-                
-                # Unbind context
-                self._unbind_context()
-            
-            # Fall asleep until next request
-            time.sleep(0.01)
+                # Sources do not specify OpenGL context unbinding; standard context deactivation would go here.
+            data = None
 
     def render_async(self, data):
-        with self.request_lock:
+        with self.lock:
             self.render_data = data
             self.pending_render = True
-        # Return immediately to caller
+        self.request_event.set()
         return
 
-    def _bind_context(self, context):
-        # [G] Placeholder for glMakeCurrent or equivalent
-        pass
-
-    def _unbind_context(self):
-        # [G] Placeholder for context unbinding
-        pass
-
     def _execute_render(self, data):
-        # [G] Placeholder for actual volume rendering logic
+        # Sources do not specify the actual volume rendering logic; standard raycasting/compositing would go here.
         pass
 ```
 
 ### Edge Cases and Pitfalls
-*   **OpenGL Context Binding**: Creating a new thread for each asynchronous operation causes costly OpenGL context binding operations. This is mitigated by using persistent threads that fall asleep between requests [S3].
+*   **OpenGL Context Binding**: Creating a new thread for each asynchronous operation causes costly OpenGL context binding operations [S3]. This is mitigated by using persistent threads that fall asleep between requests [S3].
 *   **Context Availability**: If a user does not provide an OpenGL context (e.g., in command-line applications), an internal invisible context must be used [S3].
 
 ## Subtopics
@@ -120,8 +100,8 @@ A software-based volume rendering approach that achieves high performance by wor
 A threading strategy for managing multiple scenes and asynchronous rendering operations that minimizes the cost of OpenGL context binding by using persistent threads per scene [S3]. Each scene uses two persistent threads (one for user context, one for internal context) that fall asleep between requests [S3]. Choose this when integrating CPU rendering with OpenGL-based UI frameworks where asynchronous rendering is required without blocking the main thread [S3].
 
 ## Operating characteristics
-*   **Time Complexity**: Performance increases with the number of cores. Tested on 1 to 32 cores (Opteron) [S1].
-*   **Memory Complexity**: Not given in the sources.
+*   **Time Complexity**: Performance increases with the number of cores [S1]. Tested on 1 to 32 cores (Opteron) [S1].
+*   **Memory Complexity**: Not given in the sources [S1].
 *   **Measured Performance**: Up to 35 frames per second on a single CPU for $256^3$ medical data sets using voxel-set rendering [S2, unofficial].
 *   **Strengths**: High flexibility with visualization parameters (e.g., two-level volume rendering) [S2, unofficial]. Supports stereo pairs rendered in parallel [S2, unofficial].
 *   **Limitations**: Performance depends on the structure of visualized features [S2, unofficial]. OpenGL context binding is costly if not managed with persistent threads [S3].
@@ -129,7 +109,7 @@ A threading strategy for managing multiple scenes and asynchronous rendering ope
 *   **When Not to Use**: When real-time performance on large monolithic volumes is required without feature sparsity [S2, unofficial].
 
 ## Background
-The concept of CPU multithreaded volume rendering has been implemented in various software frameworks. The Voxel Game Engine describes a CPU software version that splits the world for parallel rendering, tested on Opteron processors [S1]. The Real Time Volume Rendering Library (RTVR) introduced voxel-set rendering for interactive volume rendering, achieving high performance by focusing on structures of interest [S2, unofficial]. The VRE volume rendering engine implemented a scene management system with persistent OpenGL contexts to handle asynchronous rendering efficiently [S3].
+The concept of CPU multithreaded volume rendering has been implemented in various software frameworks [S1][S2, unofficial][S3]. The Voxel Game Engine describes a CPU software version that splits the world for parallel rendering, tested on Opteron processors [S1]. The Real Time Volume Rendering Library (RTVR) introduced voxel-set rendering for interactive volume rendering, achieving high performance by focusing on structures of interest [S2, unofficial]. The VRE volume rendering engine implemented a scene management system with persistent OpenGL contexts to handle asynchronous rendering efficiently [S3].
 
 ## Sources
 [S1] Voxel Game Engine, http://voxelgames.com/, fetched 2026-10-27

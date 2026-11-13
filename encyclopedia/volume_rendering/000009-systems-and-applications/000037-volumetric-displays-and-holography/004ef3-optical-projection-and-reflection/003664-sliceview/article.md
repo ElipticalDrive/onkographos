@@ -3,75 +3,129 @@
 Also called: Pepper's Ghost volumetric extension, Pepper's ghost display, Pepper's ghost effect, holographic display
 
 ## Overview
-SliceView is a volumetric display technique that extends the classical Pepper's Ghost optical illusion to multiple stacked translucent planes, cumulatively creating a three-dimensional volume from initially two-dimensional projections [S2]. It solves the problem of presenting 3D content with natural occlusion cues by reflecting images from a display source onto semi-reflective surfaces positioned between the viewer and the real background [S1]. Unlike stereoscopic displays, SliceView avoids vergence accommodation conflict (VAC) because the virtual object and the real background exist at different optical distances, with the image acting as a reflection rather than a focused 2D plane in the traditional sense [S1]. It differs from persistence-of-vision displays by using static stacked planes rather than moving parts or oscillating surfaces [S2].
+SliceView is a volumetric display system that extends the Pepper's Ghost optical illusion to multiple stacked translucent planes, cumulatively giving volume to an initially two-dimensional projection [S2]. It solves the problem of presenting 3D content in physical space without moving parts by superimposing distinct image slices at different depths, allowing the viewer to perceive a floating volume that occludes the real background [S2]. Unlike stereoscopic displays, it avoids vergence accommodation conflict (VAC) between the virtual object and the real background, and differs from persistence-of-vision displays by using static stacked planes rather than oscillating surfaces or levitated particles [S1, S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 2D image or video stream intended for projection, typically surrounded by a black background to define the object's silhouette [S1, S2].
-*   **Output:** A virtual 3D image perceived by the viewer, appearing to float in space and occluding the real background behind the display [S1, S2].
+*   **Input:** A set of 2D image slices corresponding to different depth layers; viewer position $E = (x_0, y_0, z_0)$ for perspective correction; physical parameters of the display stack (layer thicknesses $t_i$, reflection coefficients $R_i$, transmission coefficients $T_i$) [S1, S2].
+*   **Output:** A perceived 3D volumetric image floating in space, superimposed on the real background [S1, S2].
 
 **Data Structures:**
-The system relies on a physical arrangement of optical components rather than a complex data structure. The core data is the pixel buffer of the display source.
-*   **Display Source:** A screen (LCD, LED, or projector) capable of displaying high-contrast images with black backgrounds.
-*   **Optical Stack:** A series of $N$ translucent or semi-reflective planes.
-    *   **Plane Properties:** Each plane $i$ has a specific thickness $t_i$ and optical properties (reflection coefficient $R_i$, transmission coefficient $T_i$) [S2].
-    *   **Geometry:** Planes are positioned at specific depths $z_i$ relative to the viewer and the display source.
+The system relies on a physical stack of $N$ translucent planes. Each plane $i$ (where $i = 1 \dots N$) is defined by:
+*   Position $z_i$ along the optical axis.
+*   Thickness $t_i$.
+*   Optical properties: Reflection coefficient $R_i$ and Transmission coefficient $T_i$.
+*   Content: A 2D image buffer $I_i(x, y)$ with a black background [S1, S2].
 
-**Steps:**
-1.  **Image Preparation:** Generate a 2D image frame where the subject is rendered against a pure black background. This ensures that only the subject reflects light, while the background remains transparent or non-emissive [S1, S2].
-2.  **Projection/Display:** Display the prepared image on the source screen. In the basic Pepper's Ghost configuration, the screen is positioned below or behind a semi-reflective surface [S1]. In the SliceView extension, the image is projected or displayed such that it reflects off multiple planes [S2].
-3.  **Reflection:** The light from the display source strikes the first semi-reflective surface (or translucent plane) positioned at an angle. The surface reflects a portion of the light towards the viewer while transmitting the rest [S1, S2].
-4.  **Layering:** For multiple planes, the process repeats. Light reflects off the first plane, then the second, and so on. Each plane contributes a "slice" of the volume at a specific depth [S2].
-5.  **Perception:** The viewer sees the superimposed reflections from all planes. The black background of the source image ensures that the virtual object appears to occlude the real world behind it, creating a strong depth cue [S1].
-
-**Formulas:**
-*   **Occlusion Cue:** The perception of volume is driven by the occlusion between the bright image and the real background. If $I_{img}$ is the intensity of the projected image and $I_{bg}$ is the intensity of the real background, the contrast $C$ at the boundary is:
+**Numbered Steps:**
+1.  **Layer Preparation:** For each layer $i$, generate or retrieve the 2D image $I_i$ representing the cross-section of the 3D object at depth $z_i$. The image must be surrounded by a black background to ensure high contrast [S1].
+2.  **Perspective Projection:** Adjust the content of each layer $I_i$ based on the viewer's position $E$ to simulate a virtual image located at depth $z_i$. The projection onto the plane $P$ (perpendicular to the line $EO$, where $O$ is the origin) is governed by the matrix $S$ [S1]:
+    $$ S = \begin{bmatrix} -r^2 & r^2 x_0 & 0 & 0 \\ -r x_0 z_0 & -r y z_0 & r \rho^2 & 0 \\ 0 & 0 & 0 & r \rho \\ -\rho x_0 & -\rho y_0 & -\rho z_0 & r \rho \end{bmatrix} $$
+    where:
+    $$ r = \frac{1}{\sqrt{x_0^2 + y_0^2 + z_0^2}} $$
+    $$ \rho = \frac{1}{\sqrt{x_0^2 + y_0^2}} $$
+    [S1]
+3.  **Display Emission:** Emit light from the display source (e.g., LCD/OLED panel or projector) for each layer $i$. The light strikes the semi-reflective surface or translucent plane $i$ [S1, S2].
+4.  **Reflection and Transmission:** The semi-reflective surface reflects a portion of the light ($R_i$) towards the viewer and transmits the remainder ($T_i$) to the next layer or background. The viewer sees the virtual image appearing to float in space [S1, S2].
+5.  **Superposition:** The viewer perceives the superimposed images from all layers $i=1 \dots N$. The high contrast between the projected image intensity $I_{img}$ and the real background intensity $I_{bg}$ creates the perception of volume [S1]. The contrast $C$ at the boundary is defined as:
     $$ C = \frac{I_{img} - I_{bg}}{I_{img} + I_{bg}} $$
-    High contrast (bright image, dark background) enhances the floating effect [S1].
-*   **Layer Thickness Optimization:** The thickness of each layer $t_i$ is evaluated alongside light reflection and transmission properties to optimize image quality. Exact formulas for optimal $t_i$ are not specified in the sources, but it is noted that this parameter is critical for balancing brightness and depth perception [S2].
+    [S1]
 
 **Parameters:**
-*   **Layer Thickness ($t_i$):** Not given in the sources as a specific value, but evaluated to optimize image quality [S2].
-*   **Number of Layers ($N$):** Not specified, but "multiple planes" are required to create volume [S2].
-*   **Angle of Incidence:** The translucent material is placed at a certain angle to reflect the image towards the user [S2].
+*   **Layer Thickness ($t_i$):** Evaluated alongside light reflection and transmission properties to optimize image quality. Exact optimization formulas are not specified in the sources [S2].
+*   **Reflection/Transmission Coefficients ($R_i, T_i$):** Critical for balancing brightness and depth perception. $R_i + T_i \leq 1$ (accounting for absorption).
 
 **Edge Cases and Pitfalls:**
-*   **Vergence Accommodation Conflict (VAC):** While stereoscopic displays suffer from VAC (conflict between eye focus and convergence), SliceView avoids this because the virtual object and real background are at different optical distances, and the image is a reflection [S1]. However, the sources note that "no VAC occur between the virtual object and the real background" specifically in this configuration [S1].
-*   **Black Background Requirement:** If the background of the source image is not pure black, the transmitted light will illuminate the real background, reducing the contrast and the "floating" illusion [S1].
-*   **Light Leakage:** In multi-layer systems, light from deeper layers may leak through upper layers, potentially washing out the image. This is mitigated by optimizing layer thickness and optical properties [S2].
+*   **Vergence Accommodation Conflict (VAC):** While stereoscopic displays suffer from VAC due to the gap between accommodation on a 2D display and 3D vergence sensation, SliceView avoids this because the virtual object and real background are at different optical distances, and the image is a reflection, not a focused 2D plane in the same way [S1].
+*   **Contrast Loss:** If the background is not sufficiently dark, the contrast $C$ decreases, reducing the "floating" effect and volume perception [S1].
+*   **Layer Alignment:** Misalignment of the physical planes or the projected images can cause ghosting or misregistration of the volume [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_sliceview(viewer_pos, layers, display_params):
+    """
+    Render the SliceView volumetric display.
+    
+    Args:
+        viewer_pos: Tuple (x0, y0, z0) representing viewer position E.
+        layers: List of dicts, each containing:
+            - 'image': 2D numpy array of the layer's content.
+            - 'z': Depth of the layer.
+            - 'R': Reflection coefficient.
+            - 'T': Transmission coefficient.
+        display_params: Dict containing optical parameters.
+        
+    Returns:
+        None (displays images to respective layers)
+    """
+    x0, y0, z0 = viewer_pos
+    
+    # Calculate projection matrix components
+    r = 1.0 / math.sqrt(x0**2 + y0**2 + z0**2)
+    rho = 1.0 / math.sqrt(x0**2 + y0**2)
+    
+    # Construct projection matrix S
+    S = [
+        [-r**2, r**2 * x0, 0, 0],
+        [-r * x0 * z0, -r * y0 * z0, r * rho**2, 0],
+        [0, 0, 0, r * rho],
+        [-rho * x0, -rho * y0, -rho * z0, r * rho]
+    ]
+    
+    for layer in layers:
+        image = layer['image']
+        z = layer['z']
+        R = layer['R']
+        T = layer['T']
+        
+        # Apply perspective projection to the image
+        # Note: In practice, this involves warping the 2D image buffer
+        # based on the viewer's position to simulate the virtual image at depth z.
+        # The matrix S defines the geometric transformation.
+        projected_image = apply_perspective_warp(image, S, z)
+        
+        # Display the projected image on the layer's display source
+        # The semi-reflective surface will reflect R portion to viewer
+        # and transmit T portion to subsequent layers/background
+        display_layer(projected_image, R, T)
+
+def apply_perspective_warp(image, S, z):
+    """
+    Warp the 2D image based on the perspective projection matrix S.
+    This is a placeholder for the actual image processing algorithm.
+    """
+    # Implementation details for warping are not specified in sources [G]
+    # Typically involves inverse mapping using the projection matrix
+    return image # Placeholder
+
+def display_layer(image, R, T):
+    """
+    Emit light for the layer with specified reflection and transmission properties.
+    """
+    # Emit light intensity proportional to image brightness
+    # The physical surface handles the R/T split
+    pass
+```
 
 ## Subtopics
 
 ### Transparent Retro-Reflective Surface Display
-A 360° volumetric display variant that uses a transparent projection surface made of a sparse cube corner distribution [S1]. It derives from the Pepper's Ghost configuration but replaces the semi-reflective surface with a transparent retro-reflective surface to project a real image [S1].
-*   **Definition:** A 360° volumetric display based on a transparent projection surface made of sparse cube corner distribution [S1].
-*   **Steps:**
-    1.  Project a real image onto a transparent retro-reflective surface (made of sparse cube corners) [S1].
-    2.  The surface reflects the image towards the viewer while remaining transparent [S1].
-    3.  The image seen through the semi-reflective surface (or directly if configured as aerial) seems to float if surrounded by a black background [S1].
-    4.  Occlusion between the bright image and the real background creates volume perception [S1].
-*   **Layout:** The transparent projection surface is made of a sparse cube corner distribution [S1].
-*   **Comparison:** Compared to classical Pepper's Ghost design, this solution avoids the presence of a display panel above the device and presents a brighter image [S1].
+A 360° volumetric display based on a transparent projection surface made of sparse cube corner distribution. It derives from the Pepper's Ghost configuration but uses a transparent retro-reflective surface to project a real image, avoiding the need for a display panel above the device [S1]. The surface reflects the image towards the viewer while remaining transparent. The image seen through the semi-reflective surface (or directly if configured as aerial) seems to float if surrounded by a black background. Occlusion between the bright image and the real background creates volume perception. Compared to classical Pepper's Ghost design, this solution avoids the presence of a display panel above the device and presents a brighter image [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources. The rendering is essentially 2D image generation, which is standard for display technologies.
-*   **Memory Complexity:** Not given in the sources. Depends on the resolution of the display source.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
 *   **Measured Performance:** Not given in the sources.
-*   **Scaling:** The volume size scales with the number of stacked planes and their physical separation [S2].
-*   **Strengths:**
-    *   Avoids vergence accommodation conflict (VAC) [S1].
-    *   Provides natural occlusion cues [S1].
-    *   Simple and cheap compared to complex volumetric solutions [S1].
-    *   The transparent retro-reflective variant offers 360° viewing and brighter images without a top display panel [S1].
-*   **Limitations:**
-    *   Limited to static or temporally multiplexed multi-view perception (video with moving scene) [S1].
-    *   Requires a black background for the source image [S1].
-    *   Image quality depends on the optical properties (reflection/transmission) and thickness of the layers [S2].
-*   **When to use:** When a simple, low-cost volumetric effect is needed for public displays, retro-gaming, or data visualization where 360° viewing or natural occlusion is beneficial [S1, S2].
-*   **When not to use:** When high-resolution, full-parallax, or dynamic focus cues are required, or when the environment is too bright to maintain contrast with the projected image [S1].
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Avoids vergence accommodation conflict (VAC) between the virtual object and the real background; simple and cheap compared to complex solutions; provides a 360° view in the transparent retro-reflective variant; no moving parts in the projected volume [S1, S2].
+*   **Limitations:** Relies on high contrast between projected image and real background; layer thickness and optical properties require careful optimization; limited to static volumes or temporally varying multi-view perception [S1, S2].
+*   **When to use:** When a simple, low-cost volumetric display is needed for public demonstrations, retro-gaming, or data visualization where high fidelity and wide viewing angles are prioritized over precise depth cues [S2].
+*   **When not to use:** When precise stereoscopic depth cues are required, or when the environment has high ambient light that reduces contrast [S1].
 
 ## Background
-The Pepper's Ghost effect is a well-known optical illusion used in theater and entertainment for over a century [S1]. It produces a virtual image from a display by reflection on a semi-reflective surface [S1]. SliceView extends this concept to multiple planes to create a volumetric display [S2]. The transparent retro-reflective surface variant was developed in a laboratory and presented to the public during a symposium, with the optical design detailed in [S1]. SliceView was implemented as a layer-based painting tool, retro-gaming platform, text overlaying media player for subtitles, browser-based 3D scene renderer, and volumetric data visualizer [S2]. User studies compared SliceView with commercial lightfield displays in tasks requiring observation of information at multiple depths [S2].
+The SliceView concept extends the Pepper's Ghost optical illusion, which has been used for centuries in theater and entertainment. The Pepper's Ghost effect creates a virtual image from a display by reflection on a semi-reflective surface [S1]. SliceView specifically applies this to multiple stacked translucent planes to create a volumetric display [S2]. The transparent retro-reflective surface variant was developed in a laboratory and presented to the public during a symposium, aiming to provide a 360° volumetric display without the need for a display panel above the device [S1]. SliceView has been implemented as a layer-based painting tool, retro-gaming platform, text overlaying media player for subtitles, browser-based 3D scene renderer, and volumetric data visualizer [S2].
 
 ## Sources
 [S1] Multi-user volumetric 360° display based on retro-reflective transparent surfaces, https://doi.org/10.1364/oe.409181, fetched 2026-10-26

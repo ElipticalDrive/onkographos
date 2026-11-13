@@ -1,21 +1,11 @@
 # Geometry Shader Processing
 
-Also called: Geometry Shader Volume Techniques, GS Voxel Rendering
 
 ## Overview
-Geometry Shader Processing is a family of object-order rendering techniques that generate geometric primitives (cubes, quads, lines, or strips) directly on the GPU from scalar or vector field data, submitting them to the rasterizer [S1, S2, S3, unofficial]. It solves the problem of dynamic volumetric visualization by avoiding CPU-side mesh generation and pre-computed vertex buffers, instead expanding point primitives into visible surface geometry within the graphics pipeline [S2, S3, unofficial]. Unlike [Voxels rasterized as geometry](27-voxels-rasterized-as-geometry.md) which may rely on static buffers or CPU culling, this family performs visibility culling and primitive generation in the geometry shader stage, optimizing memory usage by storing only compact voxel attributes (position, color, face flags) [S2, S3, unofficial].
+Geometry Shader Processing generates geometric primitives (cubes, quads, lines, or strips) directly on the GPU from scalar or vector field data to solve dynamic volumetric visualization without CPU-side mesh generation [G]. Unlike [Voxels rasterized as geometry](27-voxels-rasterized-as-geometry.md) which relies on static buffers or CPU culling, this family performs visibility culling and primitive generation in the geometry shader stage, optimizing memory usage by storing only compact voxel attributes (position, color, face flags) [G].
 
 ## Shared principles
-The family shares the fundamental mechanism of converting scalar field data into geometric primitives that are submitted to the graphics pipeline [G].
-
-1.  **Primitive Generation**: Each occupied voxel or data element is represented by one or more geometric primitives. The most common representation is a cube (6 faces, 8 vertices for shared shading, or 24 vertices for flat shading) or a set of quads representing visible faces [G].
-2.  **Coordinate Transformation**: Voxel indices $(i, j, k)$ are transformed into world space. For a dense grid with bounds $P_{min}$ and $P_{max}$ and dimension $N_{dim}$, the world position $P_{world}$ of a voxel center is calculated as:
-    $$
-    P_{world} = P_{min} + \frac{I_{voxel}}{N_{dim}} \times (P_{max} - P_{min})
-    $$
-    For unit voxels, this simplifies to $P_{world} = I_{voxel} \times V_{size}$, where $V_{size}$ is the voxel dimension [G].
-3.  **Rasterization**: The generated primitives are transformed into clip space using the Model-View-Projection (MVP) matrix and rasterized. Visibility is determined by the depth buffer (z-buffer) or a back-to-front painter's algorithm if transparency is required [G].
-4.  **Culling**: To manage performance, frustum culling is applied to exclude voxels outside the camera view. Back-face culling is often enabled to discard faces oriented away from the camera, calculated by the dot product of the view-space normal and the view vector [G].
+The family shares the fundamental mechanism of converting scalar field data into geometric primitives that are submitted to the graphics pipeline [G]. For coordinate transformation, rasterization, and culling details, see [Voxels rasterized as geometry](27-voxels-rasterized-as-geometry.md).
 
 ## Subtopics
 
@@ -37,7 +27,11 @@ Renders point-based particle systems as 2D sprites (billboards) by expanding poi
 ### [Recursive Geometry Shader Beam Generation](8395-recursive-geometry-shader-beam-generation.md)
 Generates base caustic triangles and performs adaptive subdivision using a geometry shader executed recursively via stream-out feedback. It differs by treating beam geometry as a dynamic mesh refined through GPU feedback loops rather than static primitives. Choose for dynamic light transport path visualization.
 
+### Geometry Shader Voxel Rendering
+A technique where each vertex represents a voxel, and a geometry shader spawns individual cubic geometry for each voxel [S1, unofficial]. It packs data into voxel vertices using bitflags to maximize space efficiency, using the 5 least significant bits for 32 voxel types and the 3 most significant bits for other data [S1, unofficial]. Its viability depends heavily on voxel size and intended viewing distance, as it generates large amounts of geometry [S1, unofficial]. Extracting packed bit data on the GPU requires newer versions of GLSL and HLSL that support bitwise operators [S1, unofficial].
+
 ## Background
-Originating from the introduction of the Geometry Shader in OpenGL 3.0, these techniques leverage the GPU's ability to generate and transform primitives on the fly. They are widely used in scientific visualization for real-time volumetric data exploration, particle systems, and caustic rendering, where dynamic geometry generation is preferred over static mesh storage.
+Originating from the introduction of the Geometry Shader in OpenGL 3.0, these techniques leverage the GPU's ability to generate and transform primitives on the fly [G]. They are widely used in scientific visualization for real-time volumetric data exploration, particle systems, and caustic rendering, where dynamic geometry generation is preferred over static mesh storage [G].
 
 ## Sources
+[S1] Rendering different materials in a voxel terrain, https://gamedev.stackexchange.com/questions/45022/rendering-different-materials-in-a-voxel-terrain, fetched 2026-10-26 (unofficial)

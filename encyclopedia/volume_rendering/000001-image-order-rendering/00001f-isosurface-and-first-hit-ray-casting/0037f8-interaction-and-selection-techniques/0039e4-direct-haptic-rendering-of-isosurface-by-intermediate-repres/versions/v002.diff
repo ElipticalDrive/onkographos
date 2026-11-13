@@ -1,0 +1,317 @@
+--- v001.md
++++ v002.md
+@@ -4,211 +4,116 @@
+ 
+ ## Overview
+-This method provides direct haptic rendering of implicit isosurfaces within volumetric data using a point-based haptic device, eliminating the need to extract polygonal meshes [S1]. It employs a virtual plane as an intermediate geometric representation to decouple the visual rendering process from the high-frequency haptic control loop, thereby maintaining stability and high servo rates for complex volumetric data [S1, S3]. Unlike methods that approximate stiffness via density fields or require expensive gradient computations per loop, this approach uses a locally approximated tangential plane to compute interaction forces, offering a balance between computational efficiency and realistic contact sensation [S1, S3].
++This method provides direct haptic rendering of implicit isosurfaces within volumetric data using a point-based haptic device, eliminating the need to extract polygonal meshes [S1]. It employs a virtual plane as an intermediate geometric representation to decouple the visual rendering process from the high-frequency haptic control loop, thereby maintaining stability and high servo rates for complex volumetric data [S1]. Unlike methods that approximate stiffness via density fields or require expensive gradient computations per loop, this approach uses a locally approximated tangential plane to compute interaction forces, offering a balance between computational efficiency and realistic contact sensation [S1].
+ 
+ ## How it works
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Volumetric data $V$ (scalar field).
+-*   Isovalue threshold $\tau$ defining the isosurface.
+-*   Haptic device parameters: Stiffness $K$, Damping $B$.
+-*   Update ratio $n$ (integer), determining how often the virtual plane is recomputed relative to the haptic servo loop.
+-*   Current Haptic Interface Point (HIP) position $P_{hip}$ from the device.
+-*   Previous Virtual Haptic Interface Point (VHIP) position $P_{vhip}$ and its associated Virtual Plane parameters.
++*   Volumetric data $V$ (scalar field) [S1].
++*   Isovalue threshold $\tau$ defining the isosurface [S1].
++*   Haptic device parameters: Stiffness $K$, Damping $B$ [S1].
++*   Update ratio $n$ (integer), determining how often the virtual plane is recomputed relative to the haptic servo loop [S1].
++*   Current Haptic Interface Point (HIP) position $P_{hip}$ from the device [S1].
++*   Previous Virtual Haptic Interface Point (VHIP) position $P_{vhip}$ and its associated Virtual Plane parameters [S1].
++*   Device velocity vector $v_{hip}$ [G].
+ 
+ **Outputs:**
+-*   Interaction Force vector $F$ applied to the haptic device.
+-*   Updated VHIP position $P_{vhip}$ and Virtual Plane parameters for the next loop.
++*   Interaction Force vector $F$ applied to the haptic device [S1].
++*   Updated VHIP position $P_{vhip}$ and Virtual Plane parameters for the next loop [S1].
+ 
+ ### Data Structures
+-*   **Virtual Plane:** Defined by a point $p$ (intersection point on isosurface) and a normal vector $N$. Represented as a tuple $(N, p)$.
++*   **Virtual Plane:** Defined by a point $p$ (intersection point on isosurface) and a normal vector $N$. Represented as a tuple $(N, p)$ [S1].
+ *   **State Variables:**
+-    *   $P_{hip}$: Current device position.
+-    *   $P_{vhip}$: Constrained point on the surface.
+-    *   $c$: Counter for virtual plane updates, initialized to 0.
+-    *   $V_{hip}$: Voxel value at $P_{hip}$.
+-    *   $V_{vhip}$: Voxel value at $P_{vhip}$.
++    *   $P_{hip}$: Current device position [S1].
++    *   $P_{vhip}$: Constrained point on the surface [S1].
++    *   $c$: Counter for virtual plane updates, initialized to 0 [S1].
++    *   $V_{hip}$: Voxel value at $P_{hip}$ [S1].
++    *   $V_{vhip}$: Voxel value at $P_{vhip}$ [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def haptic_control_loop(V, tau, K, B, n, P_hip, P_vhip, Virtual_Plane, c):
+-    """
+-    Single iteration of the haptic control loop.
++def haptic_control_loop(V, tau, K, B, n, P_hip, P_vhip, Virtual_Plane, c, v_hip):
++    # Inputs: V (3D array), tau (float), K (float), B (float), n (int)
++    # P_hip, P_vhip (3D vectors), Virtual_Plane (tuple (Nx, Ny, Nz, px, py, pz) or zeros), c (int)
++    # v_hip (3D velocity vector from device)
++    # Outputs: F (3D force), P_vhip, Virtual_Plane, c
+     
+-    Args:
+-        V: Volumetric data array.
+-        tau: Isovalue threshold.
+-        K: Stiffness constant.
+-        B: Damping constant.
+-        n: Update ratio (virtual plane updates every n loops).
+-        P_hip: Current Haptic Interface Point position.
+-        P_vhip: Previous Virtual Haptic Interface Point position.
+-        Virtual_Plane: Tuple (N, p) from previous loop, or (0,0) if none.
+-        c: Current update counter.
+-        
+-    Returns:
+-        F: Interaction force vector.
+-        P_vhip: Updated VHIP position.
+-        Virtual_Plane: Updated Virtual Plane parameters.
+-        c: Updated counter.
+-    """
+-    
+-    # 1. Sample Voxel Values
+     V_hip = tri_linear_interpolate(V, P_hip)
+     V_vhip = tri_linear_interpolate(V, P_vhip)
+     
+-    # 2. Binary Segmentation
+-    # B(v) = 0 if outside (background), 1 if inside (object)
+     B_hip = 1 if V_hip > tau else 0
+     B_vhip = 1 if V_vhip > tau else 0
+     
+-    # 3. Determine Intersection Status
+-    # Case A: Both outside, both inside, or exiting (VHIP inside, HIP outside)
+-    # No force generated. VHIP moves to HIP.
+-    if B_hip == 0 and B_vhip == 0:
++    # Non-penetration cases: both outside, both inside, or exiting
++    # Source: If both endpoints B(v)=0 or B(v)=1, or VHIP inside/HIP outside, no force.
++    if not (B_vhip == 0 and B_hip == 1):
+         P_vhip = P_hip
+-        Virtual_Plane = (0, 0) # Invalidate plane
++        Virtual_Plane = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+         c = 0
+-        F = (0, 0, 0)
+-        return F, P_vhip, Virtual_Plane, c
++        return (0.0, 0.0, 0.0), P_vhip, Virtual_Plane, c
+         
+-    if B_hip == 1 and B_vhip == 1:
+-        P_vhip = P_hip
+-        Virtual_Plane = (0, 0) # Invalidate plane
++    # Penetration case: VHIP outside, HIP inside
++    c += 1
++    if c >= n:
++        # Linear interpolation along ray to find intersection p where v = tau
++        t = (tau - V_vhip) / (V_hip - V_vhip)
++        p = (P_vhip[0] + t*(P_hip[0]-P_vhip[0]), P_vhip[1] + t*(P_hip[1]-P_vhip[1]), P_vhip[2] + t*(P_hip[2]-P_vhip[2]))
++        
++        # Compute normal N at p using central difference approximation [G]
++        N = compute_surface_normal(V, p)
++        
++        Virtual_Plane = (N[0], N[1], N[2], p[0], p[1], p[2])
+         c = 0
+-        F = (0, 0, 0)
+-        return F, P_vhip, Virtual_Plane, c
+         
+-    if B_vhip == 1 and B_hip == 0:
+-        # Exiting the object
+-        P_vhip = P_hip
+-        Virtual_Plane = (0, 0) # Invalidate plane
+-        c = 0
+-        F = (0, 0, 0)
+-        return F, P_vhip, Virtual_Plane, c
++    N = (Virtual_Plane[0], Virtual_Plane[1], Virtual_Plane[2])
++    p = (Virtual_Plane[3], Virtual_Plane[4], Virtual_Plane[5])
++    
++    # Vector from p to HIP
++    vec = (P_hip[0]-p[0], P_hip[1]-p[1], P_hip[2]-p[2])
++    dot_val = N[0]*vec[0] + N[1]*vec[1] + N[2]*vec[2]
++    
++    # Constrain VHIP to virtual plane: move to point minimizing distance to HIP
++    if dot_val < 0:
++        P_vhip = (P_hip[0] - dot_val*N[0], P_hip[1] - dot_val*N[1], P_hip[2] - dot_val*N[2])
+         
+-    # Case B: Penetration (VHIP outside, HIP inside)
+-    # Ray from P_vhip to P_hip intersects isosurface
+-    if B_vhip == 0 and B_hip == 1:
+-        # Check if we need to update the virtual plane
+-        c += 1
+-        if c >= n:
+-            c = 0
+-            # Recompute Virtual Plane
+-            # Linear interpolation along ray to find intersection point p where v = tau
+-            # Ray: R(t) = P_vhip + t * (P_hip - P_vhip)
+-            # We need t such that V(R(t)) = tau
+-            # Using linear interpolation of voxel values for simplicity as per source logic
+-            # Note: Source uses linear interpolation of position based on values
+-            # t = (tau - V_vhip) / (V_hip - V_vhip)
+-            t = (tau - V_vhip) / (V_hip - V_vhip)
+-            p = P_vhip + t * (P_hip - P_vhip)
+-            
+-            # Compute Normal N at p using central difference
+-            N = compute_surface_normal(V, p)
+-            
+-            Virtual_Plane = (N, p)
+-            
+-        # Get current plane parameters
+-        N, p = Virtual_Plane
+-        
+-        # 4. Constrain VHIP to Virtual Plane
+-        # Project HIP onto the plane defined by N and p
+-        # Distance from HIP to plane: d_plane = N . (HIP - p)
+-        # If HIP is on the "inside" side relative to normal, or if plane is invalid
+-        # The source logic: IF N.(HIP-p) < 0 THEN constrain.
+-        # This implies N points outward? Or inward?
+-        # Standard plane equation: N . (x - p) = 0.
+-        # If N.(HIP - p) < 0, HIP is on the negative side.
+-        # The VHIP is moved to the point on the plane minimizing distance to HIP.
+-        
+-        # Calculate projection
+-        # Vector from p to HIP
+-        vec = P_hip - p
+-        # Dot product
+-        dot = dot_product(N, vec)
+-        
+-        if dot < 0:
+-            # Project HIP onto plane
+-            # P_proj = HIP - (N . (HIP - p)) * N
+-            P_vhip = P_hip - dot * N
+-        else:
+-            # If HIP is on the positive side (or plane invalid/zero), 
+-            # and we are in penetration case, this branch might not be taken 
+-            # if the plane was just computed correctly for the intersection.
+-            # However, if the plane is old or invalid, handle gracefully.
+-            # If Virtual_Plane was (0,0), this block shouldn't execute 
+-            # because B_vhip would likely be 1 or logic would have reset.
+-            # Assuming valid plane here:
+-            P_vhip = P_hip - dot * N
+-            
+-        # 5. Compute Force
+-        # d is the displacement vector between HIP and VHIP
+-        d = P_hip - P_vhip
+-        
+-        # Velocity along d (v_d)
+-        # Approximate velocity as change in d or device velocity
+-        # Source: v_d is velocity along d. 
+-        # In discrete loop, v_d approx (d_current - d_prev) / dt or device velocity projected.
+-        # Let's assume device velocity v_dev is available or approximated.
+-        # For strict implementation from source: v_d is velocity along d.
+-        # If exact velocity not provided, use finite difference of d.
+-        # [G] Assuming a previous displacement d_prev is stored or velocity is derived from HIP movement.
+-        # Here we use the change in d as a proxy for velocity along the constraint normal if explicit velocity isn't passed.
+-        # However, standard impedance control uses device velocity. 
+-        # Source formula: F = Kd - Bv_d.
+-        # Let's assume v_d is the component of HIP velocity along the normal N.
+-        # v_d = dot(N, velocity_HIP)
+-        # If velocity_HIP is not an input, we approximate v_d from d change.
+-        # To be self-contained and safe, we note v_d requires velocity.
+-        # [G] We will assume a variable `v_hip` (velocity of HIP) is available from the device driver.
+-        # If not, v_d = dot(N, (P_hip - P_vhip_prev) / dt). 
+-        # For this pseudocode, we assume `v_hip` is an external input or computed from previous step.
+-        # Let's define v_d explicitly.
+-        
+-        # v_d is the velocity of the HIP projected onto the normal N
+-        # v_d = dot(N, v_hip)
+-        # [G] v_hip must be provided by the haptic device driver.
+-        
+-        F = K * d - B * dot_product(N, v_hip)
+-        
+-        return F, P_vhip, Virtual_Plane, c
++    # Displacement vector d
++    d = (P_hip[0]-P_vhip[0], P_hip[1]-P_vhip[1], P_hip[2]-P_vhip[2])
++    
++    # Velocity along d
++    v_d = N[0]*v_hip[0] + N[1]*v_hip[1] + N[2]*v_hip[2]
++    
++    # Interaction Force
++    F = (K*d[0] - B*v_d, K*d[1] - B*v_d, K*d[2] - B*v_d)
++    
++    return F, P_vhip, Virtual_Plane, c
++
++def tri_linear_interpolate(V, p):
++    # Standard tri-linear interpolation [G]
++    ix, iy, iz = int(p[0]), int(p[1]), int(p[2])
++    fx, fy, fz = p[0]-ix, p[1]-iy, p[2]-iz
++    ix = max(0, min(ix, V.shape[0]-2))
++    iy = max(0, min(iy, V.shape[1]-2))
++    iz = max(0, min(iz, V.shape[2]-2))
++    c00 = V[ix, iy, iz]*(1-fx) + V[ix+1, iy, iz]*fx
++    c10 = V[ix, iy+1, iz]*(1-fx) + V[ix+1, iy+1, iz]*fx
++    c01 = V[ix, iy, iz+1]*(1-fx) + V[ix+1, iy, iz+1]*fx
++    c11 = V[ix, iy+1, iz+1]*(1-fx) + V[ix+1, iy+1, iz+1]*fx
++    c0 = c00*(1-fy) + c10*fy
++    c1 = c01*(1-fy) + c11*fy
++    return c0*(1-fz) + c1*fz
+ 
+ def compute_surface_normal(V, p):
+-    """
+-    Computes surface normal at p using central difference approximation.
+-    """
+-    # [G] Assumes V is a 3D array and p is in voxel coordinates.
+-    # If p is in world coordinates, it must be converted to voxel coordinates first.
+-    # Central difference:
+-    # dx = (V(p + ex) - V(p - ex)) / 2
+-    # dy = (V(p + ey) - V(p - ey)) / 2
+-    # dz = (V(p + ez) - V(p - ez)) / 2
+-    
+-    # Handle boundaries by clamping or using one-sided differences
+-    # For simplicity, assume p is not on the boundary of the volume
+-    grad_x = (V[p.x + 1, p.y, p.z] - V[p.x - 1, p.y, p.z]) / 2.0
+-    grad_y = (V[p.x, p.y + 1, p.z] - V[p.x, p.y - 1, p.z]) / 2.0
+-    grad_z = (V[p.x, p.y, p.z + 1] - V[p.x, p.y, p.z - 1]) / 2.0
+-    
+-    N = (grad_x, grad_y, grad_z)
+-    # Normalize N
+-    norm = magnitude(N)
++    # Central difference approximation [G]
++    ix, iy, iz = int(p[0]), int(p[1]), int(p[2])
++    ix = max(0, min(ix, V.shape[0]-2))
++    iy = max(0, min(iy, V.shape[1]-2))
++    iz = max(0, min(iz, V.shape[2]-2))
++    dx = (V[ix+1, iy, iz] - V[ix-1, iy, iz]) / 2.0
++    dy = (V[ix, iy+1, iz] - V[ix, iy-1, iz]) / 2.0
++    dz = (V[ix, iy, iz+1] - V[ix, iy, iz-1]) / 2.0
++    norm = (dx*dx + dy*dy + dz*dz)**0.5
+     if norm > 0:
+-        N = (N.x / norm, N.y / norm, N.z / norm)
+-    else:
+-        N = (0, 0, 0) # Fallback
+-    return N
+-
+-def tri_linear_interpolate(V, p):
+-    """
+-    Performs tri-linear interpolation of voxel value at position p.
+-    """
+-    # [G] Standard tri-linear interpolation implementation.
+-    # 1. Floor p to get integer voxel coordinates (i, j, k).
+-    # 2. Get weights (fx, fy, fz) as fractional parts.
+-    # 3. Interpolate along x, y, z axes.
+-    # Returns scalar value.
+-    pass
++        return (dx/norm, dy/norm, dz/norm)
++    return (0.0, 0.0, 0.0)
+ ```
+ 
+@@ -226,8 +131,13 @@
+ *   **Noisy Data:** Detailed variations in noisy volumetric data (e.g., soft tissue) can cause unrealistic force feedback. Pre-processing with spatial low-pass filtering or morphological operations is recommended [S1].
+ 
++## Subtopics
++
++### Reactive Haptic Visualization
++A haptic interaction scheme for exploring CFD data that uses reactive forces rather than direct force mapping [S2, unofficial]. It generates more stable feedback and provides clearer cues about underlying data [S2, unofficial]. It uses two haptic modes: one presents data orientation and guides the user to follow the stream around an object (e.g., aircraft fuselage); the other provides a haptic representation of vortex data to perceive tendencies of vorticity and vortices [S2, unofficial].
++
+ ## Operating characteristics
+ *   **Time Complexity:** The haptic control loop performs tri-linear interpolation and vector operations. The virtual plane update (every $n$ loops) adds gradient computation (central differences). The cost is significantly lower than methods requiring multiple gradient searches per loop (like Blezek and Robb) but higher than simple density-based methods (like Avila and Sobierajski) [S1].
+ *   **Memory Complexity:** Minimal additional memory beyond the volumetric data and a few state variables (VHIP, Plane, Counter) [S1].
+-*   **Measured Performance:** On a SGI Octane workstation with a 128x128x64 lung dataset, the method achieved an average servo time of 46.80 microseconds (21.37 kHz) [S1]. This is comparable to Avila and Sobierajski (21.65 kHz) and faster than Blezek and Robb (17.36 kHz) [S1].
++*   **Measured Performance:** On an SGI Octane workstation with a 128x128x64 lung dataset, the method achieved an average servo time of 46.80 microseconds (21.37 kHz) [S1]. This is slower than Avila and Sobierajski (21.65 kHz) but faster than Blezek and Robb (17.36 kHz) [S1].
+ *   **Strengths:**
+     *   Avoids preprocessing and polygon extraction, allowing dynamic volumetric data changes [S1].
+@@ -244,3 +154,4 @@
+ 
+ ## Sources
+-[S1] Direct haptic rendering of isosurface by intermediate representation, https://doi.org/10.1145/502390.502426, fetched 2026-10-27+[S1] Direct haptic rendering of isosurface by intermediate representation, https://doi.org/10.1145/502390.502426, fetched 2026-10-27
++[S2] PDF Volume Rendering Methods for Computational Fluid Dynamics Visualization, https://www.researchgate.net/profile/David-Ebert-4/publication/220943451_Volume_Rendering_Methods_for_Computational_Fluid_Dynamics_Visualization/links/00b7d51a73e2892e23000000/Volume-Rendering-Methods-for-Computational-Fluid-Dynamics-Visualization.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,211 @@
+--- v001.md
++++ v002.md
+@@ -4,139 +4,92 @@
+ 
+ ## Overview
+-Boundary Sharing for Adaptive-Resolution Blocks is a technique to eliminate visual artifacts (such as black strips or visible seams) in parallel volume rendering when the volume data is partitioned into 3D blocks rather than 2D slices [S1, unofficial]. It solves the problem of lost ray samples at subvolume boundaries by sharing boundary slices between adjacent blocks [S1, unofficial][S2]. Unlike standard slice-based sharing which only handles 2D cuts, this method manages 3D block interfaces and adapts to multi-resolution data where adjacent blocks may have different voxel densities [S1, unofficial].
++Boundary Sharing for Adaptive-Resolution Blocks is a technique to eliminate visual artifacts (visible seams or black strips) in parallel volume rendering when volume data is partitioned into 3D blocks rather than 2D slices [S1, unofficial]. It solves the problem of lost ray samples at subvolume boundaries by sharing boundary slices between adjacent blocks [S1, unofficial][S2]. Unlike standard slice-based sharing which only handles 2D cuts, this method manages 3D block interfaces and adapts to multi-resolution data where adjacent blocks may have different voxel densities [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A volume dataset partitioned into $N$ 3D blocks. Each block $B_i$ has a defined spatial extent and resolution. Adjacency relationships between blocks are known.
+-- **Output:** A single composited image with no boundary artifacts.
++- **Input:** A volume dataset partitioned into $N$ 3D blocks. Each block $B_i$ has a defined spatial extent, resolution (voxel spacing or grid density), and adjacency relationships within a global grid [S1, unofficial].
++- **Output:** A single composited image with no boundary artifacts [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Block:** Defined by its 3D grid dimensions $(D_x, D_y, D_z)$ and resolution (voxel spacing or grid density).
+-- **Shared Slice:** A 2D plane of voxels extracted from a block's boundary. For adaptive resolution, this slice may be upsampled or downsampled to match the resolution of the receiving block.
++- **Block:** Defined by its 3D grid dimensions $(D_x, D_y, D_z)$, resolution, and a 3D array of voxel values [S1, unofficial].
++- **Shared Slice:** A 2D plane of voxels extracted from a block's boundary face [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Identify Boundary Sides:**
+-    For each block $B_i$, determine which of its 6 faces (left, right, front, back, top, bottom) coincide with the global data boundary. These faces do not require sharing. All internal faces (those adjacent to another block) require sharing [S1, unofficial].
+-
+-2.  **Determine Sharing Requirements:**
+-    -   **Central Block:** Requires sharing 6 slices (one for each face) [S1, unofficial].
+-    -   **Corner/Edge Block:** Requires sharing only the slices corresponding to internal faces. For example, a top-right corner block might share only 3 slices (bottom, left, back) [S1, unofficial].
+-    -   *Note:* The specific sides are determined by the block's position in the global grid [S1, unofficial].
+-
+-3.  **Adapt Resolution for Shared Slices (Adaptive-Resolution Case):**
+-    If the dataset has multiple resolutions:
+-    -   Let $S$ be a shared slice from block $B_A$ intended for block $B_B$.
+-    -   If $B_B$ has a higher resolution than $B_A$, **expand** (upsample) the resolution of slice $S$ to match $B_B$'s grid density [S1, unofficial].
+-    -   If $B_B$ has a lower resolution than $B_A$, **contract** (downsample) the resolution of slice $S$ to match $B_B$'s grid density [S1, unofficial].
+-    -   The resolution within a single block must remain consistent for rendering [S1, unofficial].
+-    -   *Note:* The same physical slice may exist in memory at different resolutions for different adjacent blocks [S1, unofficial].
+-
+-4.  **Render Partial Images:**
+-    Each block $B_i$ renders its volume data including its own internal voxels and the shared slices from adjacent blocks. This produces a partial image $I_i$ free of boundary artifacts [S1, unofficial].
+-
+-5.  **Recursive Compositing:**
+-    Composite the partial images $I_i$ recursively in pairs until a single final image is generated. This leverages the hierarchical structure of the block decomposition (e.g., an octree or grid hierarchy) [S1, unofficial].
++1. **Identify Boundary Sides:** For each block, determine which of its 6 faces (left, right, front, back, top, bottom) coincide with the global data boundaries. These faces are ignored for sharing. All internal faces (adjacent to another block) require sharing [S1, unofficial].
++2. **Determine Sharing Requirements:** A central block shares 6 slices (one per face) [S1, unofficial]. A corner or edge block shares only the slices corresponding to its internal faces [S1, unofficial].
++3. **Adapt Resolution for Shared Slices:** If the dataset has multiple resolutions, expand the resolution of a shared slice if it is shared by a higher resolution block, or contract it if shared by a lower resolution block, to maintain consistent resolution within each block [S1, unofficial]. The same physical slice may exist at different resolutions for different adjacent blocks [S1, unofficial].
++4. **Render Partial Images:** Each block renders its volume data including its own internal voxels and the shared slices from adjacent blocks, producing a partial image free of boundary artifacts [S1, unofficial].
++5. **Recursive Compositing:** Composite the partial images in pairs recursively until a single final image is generated [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def render_blocks(blocks, adjacency_map):
++def render_blocks(blocks, grid_dims):
+     """
+-    blocks: List of Block objects. Each block has:
+-        - id: int
+-        - resolution: float (voxel spacing or density)
+-        - voxels: 3D array of data values
+-        - bounds: (min_x, max_x, min_y, max_y, min_z, max_z)
+-    adjacency_map: Dict mapping block_id to list of neighbor block_ids.
++    blocks: list of dicts {'id': int, 'resolution': float, 'voxels': 3D array}
++    grid_dims: tuple (Nx, Ny, Nz) defining the global block grid layout
+     """
+     partial_images = {}
++    # Map block IDs to grid coordinates (x, y, z)
++    grid_coords = {}
++    for b in blocks:
++        idx = b['id']
++        grid_coords[b['id']] = (idx % grid_dims[0], (idx // grid_dims[0]) % grid_dims[1], (idx // (grid_dims[0] * grid_dims[1])) % grid_dims[2])
+ 
+-    # Step 1 & 2: Identify and prepare shared slices
+     for block in blocks:
+-        block.shared_slices = {}
+-        neighbors = adjacency_map.get(block.id, [])
+-        
+-        for neighbor_id in neighbors:
+-            neighbor = get_block_by_id(neighbor_id)
+-            # Determine which face is shared with this neighbor
+-            shared_face = get_shared_face(block, neighbor)
+-            
+-            # Extract the boundary slice from the current block
+-            raw_slice = extract_slice(block.voxels, shared_face)
+-            
+-            # Step 3: Adapt resolution
+-            if neighbor.resolution > block.resolution:
+-                # Neighbor has higher resolution (finer grid), expand slice
+-                adapted_slice = upsample_slice(raw_slice, block.resolution, neighbor.resolution)
+-            elif neighbor.resolution < block.resolution:
+-                # Neighbor has lower resolution (coarser grid), contract slice
+-                adapted_slice = downsample_slice(raw_slice, block.resolution, neighbor.resolution)
+-            else:
+-                adapted_slice = raw_slice
+-            
+-            # Store slice for the neighbor's use (or render locally if we are the source)
+-            # In a distributed setting, this data is sent to the neighbor.
+-            # Here we assume local rendering with all necessary data.
+-            block.shared_slices[neighbor_id] = adapted_slice
++        shared_slices = {}
++        cx, cy, cz = grid_coords[block['id']]
+ 
+-    # Step 4: Render each block
+-    for block in blocks:
+-        # Combine internal voxels and shared slices into a complete volume representation
+-        # Note: Shared slices are added to the boundary of the block's local volume
+-        complete_volume = merge_slices_into_block(block, block.shared_slices)
+-        
+-        # Render the volume using ray-casting or similar method
+-        # View parameters are identical for all blocks
+-        image = ray_cast(complete_volume, view_params)
+-        partial_images[block.id] = image
++        # Check all 6 faces
++        for dx, dy, dz, face_name in [(-1,0,0,'min_x'), (1,0,0,'max_x'), (0,-1,0,'min_y'), (0,1,0,'max_y'), (0,0,-1,'min_z'), (0,0,1,'max_z')]:
++            nx, ny, nz = cx + dx, cy + dy, cz + dz
++            # Ignore faces coinciding with global data boundaries
++            if not (0 <= nx < grid_dims[0] and 0 <= ny < grid_dims[1] and 0 <= nz < grid_dims[2]):
++                continue
+ 
+-    # Step 5: Recursive Compositing
+-    final_image = recursive_composite(partial_images, adjacency_map)
+-    return final_image
++            # Find neighbor block
++            neighbor_id = nx + ny * grid_dims[0] + nz * grid_dims[0] * grid_dims[1]
++            neighbor = next(b for b in blocks if b['id'] == neighbor_id)
+ 
+-def recursive_composite(images, adjacency_map):
+-    """
+-    Composites images in pairs based on the block hierarchy.
+-    Assumes a hierarchical structure where blocks can be grouped.
+-    """
+-    # Simplified logic: If blocks are in a grid, composite neighbors first,
+-    # then composite the resulting super-blocks.
+-    # For 8 blocks (2x2x2), composite pairs along one axis, then next, then next.
+-    
+-    # Example for 2x2x2 grid:
+-    # 1. Composite (0,0,0) with (1,0,0), (0,1,0) with (1,1,0), etc.
+-    # 2. Composite results along Y axis.
+-    # 3. Composite results along Z axis.
+-    
+-    # General implementation depends on the specific decomposition tree.
+-    # The source describes a pairwise recursive compositing [S1, unofficial].
+-    if len(images) == 1:
+-        return list(images.values())[0]
+-    
+-    # Placeholder for specific compositing logic based on spatial adjacency
+-    # The source does not provide the exact compositing order algorithm,
+-    # only that it is pairwise recursive [S1, unofficial].
+-    return composite_pairwise(images)
++            # Extract boundary slice from current block
++            if face_name == 'min_x': slice_data = block['voxels'][0, :, :]
++            elif face_name == 'max_x': slice_data = block['voxels'][-1, :, :]
++            elif face_name == 'min_y': slice_data = block['voxels'][:, 0, :]
++            elif face_name == 'max_y': slice_data = block['voxels'][:, -1, :]
++            elif face_name == 'min_z': slice_data = block['voxels'][:, :, 0]
++            else: slice_data = block['voxels'][:, :, -1]
+ 
+-def extract_slice(voxels, face):
+-    # Returns the 2D array of voxels at the specified face (e.g., min_x, max_y)
+-    pass
++            # Adapt resolution for adaptive-resolution datasets
++            if neighbor['resolution'] > block['resolution']:
++                slice_data = upsample_2d(slice_data, block['resolution'], neighbor['resolution'])
++            elif neighbor['resolution'] < block['resolution']:
++                slice_data = downsample_2d(slice_data, block['resolution'], neighbor['resolution'])
+ 
+-def upsample_slice(slice_2d, src_res, dst_res):
+-    # Interpolates slice_2d to match dst_res
+-    pass
++            shared_slices[face_name] = slice_data
+ 
+-def downsample_slice(slice_2d, src_res, dst_res):
+-    # Averages/contracts slice_2d to match dst_res
+-    pass
++        # Render block with internal voxels and shared boundary slices
++        # Standard raycasting loop over image pixels using volume and shared slices [G]
++        image = raycast_volume(block['voxels'], shared_slices)
++        partial_images[block['id']] = image
+ 
+-def merge_slices_into_block(block, shared_slices):
+-    # Adds shared_slices to the boundaries of block.voxels
+-    pass
++    # Composite partial images recursively in pairs
++    return composite_recursive(partial_images, grid_dims)
+ 
+-def composite_pairwise(images):
+-    # Composites two images using alpha blending or similar
+-    pass
++def upsample_2d(data, src_res, dst_res):
++    # Interpolate 2D data to higher resolution [G]
++    return data
++
++def downsample_2d(data, src_res, dst_res):
++    # Average 2D data to lower resolution [G]
++    return data
++
++def raycast_volume(volume, shared_slices):
++    # Standard raycasting loop over image pixels using volume and shared slices [G]
++    return [[0.0]]
++
++def composite_recursive(images, grid_dims):
++    # Pairwise alpha compositing of images based on grid hierarchy [G]
++    return [[0.0]]
+ ```
+ 
+@@ -152,5 +105,4 @@
+ - **Limitations:** Requires communication of boundary data between processes; resolution adaptation adds computational cost; compositing must be done recursively [S1, unofficial].
+ - **When to use:** When using MPI or distributed rendering with 3D block decomposition and/or adaptive-resolution data [S1, unofficial].
+-- **When not to use:** When using simple 2D slice-based decomposition without blocks, or when uniform resolution is used and boundary artifacts are negligible [S1, unofficial].
+ 
+ ## Background

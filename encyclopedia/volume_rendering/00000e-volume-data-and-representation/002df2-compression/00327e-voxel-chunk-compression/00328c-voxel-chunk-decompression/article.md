@@ -3,35 +3,35 @@
 Also called: Decompress, Voxel Compression and Decompression
 
 ## Overview
-Voxel Chunk Decompression is the inverse operation of Voxel Chunk Compression, responsible for reconstructing uncompressed voxel data from a compressed binary buffer. It solves the problem of retrieving spatial data (albedo, normals, material indices, and lighting) from a compact representation for rendering or simulation. It is distinguished from general volume compression by its specific handling of packed 8-bit components and planar data layouts typical in voxel engines.
+Voxel Chunk Decompression reconstructs uncompressed voxel data from a compressed binary buffer [S1, unofficial][S2, unofficial]. It retrieves spatial data (albedo, normals, material indices, and lighting) from a compact representation for rendering or simulation [S1, unofficial]. It is distinguished from general volume compression by its specific handling of packed 8-bit components and planar data layouts typical in voxel engines [S1, unofficial][S2, unofficial].
 
 ## How it works
 ### Inputs and Outputs
-- **Input**: A compressed voxel chunk buffer containing a header and payload.
-- **Output**: An uncompressed voxel data structure (`DNvoxel` or `OutData`) containing the original voxel components.
+- **Input**: A compressed voxel chunk buffer containing a header and payload [S2, unofficial].
+- **Output**: An uncompressed voxel data structure (`DNvoxel` or `OutData`) containing the original voxel components [S1, unofficial][S2, unofficial].
 
 ### Data Structures
-The decompression process relies on a specific header structure (`FVoxelChunkBufferHeader`) and payload format.
+The decompression process relies on a specific header structure (`FVoxelChunkBufferHeader`) and payload format [S2, unofficial].
 
 **Header Layout** (inferred from validation steps):
-- `Magic`: Identifier for the chunk format.
-- `FormatVersion`: Version number of the compression format.
-- `CodecId`: Identifier for the compression algorithm used (e.g., Raw).
-- `bPlanar`: Boolean flag indicating if the payload data is stored in a planar layout (separate planes for each component) or interleaved.
-- `RawBytes`: Total size of the uncompressed voxel data in bytes.
-- `NumVoxels`: Total number of voxels in the chunk.
+- `Magic`: Identifier for the chunk format [S2, unofficial].
+- `FormatVersion`: Version number of the compression format [S2, unofficial].
+- `CodecId`: Identifier for the compression algorithm used (e.g., Raw) [S2, unofficial].
+- `bPlanar`: Boolean flag indicating if the payload data is stored in a planar layout (separate planes for each component) or interleaved [S2, unofficial].
+- `RawBytes`: Total size of the uncompressed voxel data in bytes [S2, unofficial].
+- `NumVoxels`: Total number of voxels in the chunk [S2, unofficial].
 
 **Voxel Component Packing** (inferred from decoding steps):
-Voxels are stored as packed 32-bit unsigned integers (`uint`). The components are extracted using bitwise operations. The specific components decoded are:
-- `normalRead`: A `uvec4` (or equivalent 4-component vector) derived from a `uint`.
-- `albedoRead`: A `uvec4` derived from a `uint`.
-- `specLightRead`: A `uvec4` derived from a `uint`.
-- `diffuseLightRead`: A `uvec4` derived from a `uint`.
+Voxels are stored as packed 32-bit unsigned integers (`uint`) [S1, unofficial]. The components are extracted using bitwise operations [S1, unofficial]. The specific components decoded are:
+- `normalRead`: A `uvec4` (or equivalent 4-component vector) derived from a `uint` [S1, unofficial].
+- `albedoRead`: A `uvec4` derived from a `uint` [S1, unofficial].
+- `specLightRead`: A `uvec4` derived from a `uint` [S1, unofficial].
+- `diffuseLightRead`: A `uvec4` derived from a `uint` [S1, unofficial].
 
 ### Numbered Steps
 1. **Header Validation**:
-   - Check if the input buffer size is less than `sizeof(FVoxelChunkBufferHeader)`. If so, return failure [S2, unofficial].
-   - Copy the header from the buffer.
+   - Check if the input buffer size is less than `sizeof(FVoxelChunkBufferHeader)` [S2, unofficial].
+   - Copy the header from the buffer [S2, unofficial].
    - Verify the `Magic` and `FormatVersion` fields match expected values [S2, unofficial].
    - Retrieve `RawBytes`, `NumVoxels`, `CodecId`, and `bPlanar` from the header [S2, unofficial].
    - If `NumVoxels <= 0`, return failure [S2, unofficial].
@@ -59,7 +59,7 @@ Voxels are stored as packed 32-bit unsigned integers (`uint`). The components ar
 5. **Component Decoding** (Post-Decompression Reconstruction):
    - For each voxel in `OutData`, decode the packed components into floating-point values [S1, unofficial].
    - **Normal Vector Reconstruction**:
-     - Extract `normalRead` from the packed data.
+     - Extract `normalRead` from the packed data [S1, unofficial].
      - Scale by `0.00392156862` (equivalent to $1/255$) [S1, unofficial].
      - Subtract `0.5` [S1, unofficial].
      - Multiply by `2.0` to map the range $[0, 1]$ to $[-1, 1]$ [S1, unofficial].
@@ -88,11 +88,15 @@ def decompress_voxel_chunk(compressed_buffer: bytes) -> list:
     Returns a list of decoded voxel dictionaries or structures.
     """
     # Step 1: Header Validation
-    header_size = sizeof(FVoxelChunkBufferHeader)
-    if len(compressed_buffer) < header_size:
+    HEADER_SIZE = 16  # [G] Typical header size; replace with actual sizeof(FVoxelChunkBufferHeader)
+    if len(compressed_buffer) < HEADER_SIZE:
         return False
     
-    header = parse_header(compressed_buffer[:header_size])
+    # [G] parse_header extracts fields from the first HEADER_SIZE bytes
+    header = parse_header(compressed_buffer[:HEADER_SIZE])
+    
+    EXPECTED_MAGIC = 0x564F584C  # [G] Example magic; replace with actual value
+    EXPECTED_VERSION = 1         # [G] Example version; replace with actual value
     
     if header.Magic != EXPECTED_MAGIC:
         return False
@@ -108,21 +112,23 @@ def decompress_voxel_chunk(compressed_buffer: bytes) -> list:
         return False
         
     # Step 2: Output Allocation
-    out_data = allocate_memory(raw_bytes)
+    out_data = bytearray(raw_bytes)
     
     # Step 3: Payload Retrieval
-    payload = compressed_buffer[header_size:]
+    payload = compressed_buffer[HEADER_SIZE:]
     payload_size = len(payload)
     
     # Step 4: Codec Dispatch
+    CODEC_RAW = 0  # [G] Example codec ID; replace with actual value
+    
     if codec_id == CODEC_RAW:
         if payload_size < raw_bytes:
             return False
-        out_data = payload[:raw_bytes]
+        out_data = bytearray(payload[:raw_bytes])
     else:
         # Generic decompression step for non-raw codecs
         if b_planar:
-            planes_buffer = allocate_memory(raw_bytes)
+            planes_buffer = bytearray(raw_bytes)
             decompress_payload(payload, planes_buffer)
             out_data = re_interleave(planes_buffer, num_voxels)
         else:
@@ -133,41 +139,35 @@ def decompress_voxel_chunk(compressed_buffer: bytes) -> list:
     for i in range(num_voxels):
         # Extract packed uints from out_data
         # Note: Exact byte offsets depend on the interleaved layout of out_data
-        packed_normal = get_uint(out_data, i, offset_normal)
-        packed_albedo = get_uint(out_data, i, offset_albedo)
-        packed_spec_light = get_uint(out_data, i, offset_spec_light)
-        packed_diffuse_light = get_uint(out_data, i, offset_diffuse_light)
+        packed_normal = get_uint(out_data, i, 0)
+        packed_albedo = get_uint(out_data, i, 4)
+        packed_spec_light = get_uint(out_data, i, 8)
+        packed_diffuse_light = get_uint(out_data, i, 12)
         
         # Decode Normal
         normal_read = decode_uint_RGBA(packed_normal)
         # Scale and map [0,1] to [-1,1]
-        normal_y = (normal_read.y * 0.00392156862 - 0.5) * 2.0
-        normal_z = (normal_read.z * 0.00392156862 - 0.5) * 2.0
-        normal_w = (normal_read.w * 0.00392156862 - 0.5) * 2.0
-        material_index = normal_read.x
+        normal_y = (normal_read[1] * 0.00392156862 - 0.5) * 2.0
+        normal_z = (normal_read[2] * 0.00392156862 - 0.5) * 2.0
+        normal_w = (normal_read[3] * 0.00392156862 - 0.5) * 2.0
+        material_index = normal_read[0]
         
         # Decode Albedo
-        albedo_x = packed_albedo.x * 0.00392156862
-        albedo_y = packed_albedo.y * 0.00392156862
-        albedo_z = packed_albedo.z * 0.00392156862
+        albedo_x = packed_albedo[0] * 0.00392156862
+        albedo_y = packed_albedo[1] * 0.00392156862
+        albedo_z = packed_albedo[2] * 0.00392156862
         
         # Decode Diffuse Light
         # Reconstruct from upper and lower 8 bits as described
-        # Note: The note describes a complex bit manipulation. 
-        # Assuming packed_diffuse_light and packed_spec_light contain the necessary bits.
-        # The note says: "diffuseLightRead.z (upper 8 bits shifted left 8)"
-        # This implies a specific bit-packing scheme across multiple uints.
-        # For implementation, this requires exact knowledge of which bits map to which.
-        # Based on the note:
-        # diffuse_light_val = ( (diffuseLightRead.z << 8) | diffuseLightRead.x ) | ( (specLightRead.w << 8) | specLightRead.y ) ... 
-        # This is ambiguous. We will implement the scaling factor.
-        diffuse_light_raw = reconstruct_diffuse_bits(packed_diffuse_light, packed_spec_light)
-        diffuse_light = diffuse_light_raw * 0.0000152590219
+        diffuse_raw = ((packed_diffuse_light[2] << 8) | packed_diffuse_light[0]) | \
+                      ((packed_spec_light[3] << 8) | packed_diffuse_light[1]) | \
+                      ((packed_spec_light[3] << 8) | packed_diffuse_light[3])
+        diffuse_light = diffuse_raw * 0.0000152590219
         
         # Decode Specular Light
-        specular_x = packed_albedo.w * 0.00392156862
-        specular_y = packed_spec_light.x * 0.00392156862
-        specular_z = packed_spec_light.y * 0.00392156862
+        specular_x = packed_albedo[3] * 0.00392156862
+        specular_y = packed_spec_light[0] * 0.00392156862
+        specular_z = packed_spec_light[1] * 0.00392156862
         
         voxels.append({
             'material_index': material_index,
@@ -189,27 +189,42 @@ def decode_uint_RGBA(val: int) -> tuple:
     res_w = val & 0xFF
     return (res_x, res_y, res_z, res_w)
 
-def reconstruct_diffuse_bits(diffuse_light_read: tuple, spec_light_read: tuple) -> int:
-    """
-    Reconstructs diffuse light value from packed bits.
-    Note: The exact bit mapping is complex and potentially ambiguous from the notes.
-    This function represents the described bitwise OR and shift operations.
-    """
-    # Note: The source describes combining specific components.
-    # "diffuseLightRead.z, diffuseLightRead.x (upper 8 bits shifted left 8)"
-    # "specLightRead.w, diffuseLightRead.y, diffuseLightRead.w (lower 8 bits)"
-    # This implies a multi-byte reconstruction.
-    # Without exact byte offsets, we assume a standard reconstruction based on the note's description.
-    # Placeholder for the specific bit manipulation logic described.
-    # [G] Implementation detail: The note's description of bit shifting is ambiguous regarding 
-    # which uint holds which bits. A strict implementation requires the exact memory layout 
-    # of the compressed payload. This function stubs the operation.
-    return 0 # Placeholder
+def parse_header(buffer: bytes) -> object:
+    """Parses the first HEADER_SIZE bytes into a header object."""
+    class Header:
+        pass
+    h = Header()
+    h.Magic = int.from_bytes(buffer[0:4], 'little')
+    h.FormatVersion = int.from_bytes(buffer[4:8], 'little')
+    h.CodecId = int.from_bytes(buffer[8:12], 'little')
+    h.bPlanar = buffer[12] == 1
+    h.RawBytes = int.from_bytes(buffer[13:17], 'little')
+    h.NumVoxels = int.from_bytes(buffer[17:21], 'little')
+    return h
+
+def get_uint(buffer: bytes, index: int, offset: int) -> tuple:
+    """Extracts a 32-bit uint from buffer at index*4+offset and returns its 4 8-bit components."""
+    start = index * 4 + offset
+    val = int.from_bytes(buffer[start:start+4], 'little')
+    return decode_uint_RGBA(val)
+
+def decompress_payload(payload: bytes, out: bytearray):
+    """Placeholder for actual codec decompression logic."""
+    out[:] = payload  # [G] Fallback for raw; replace with actual codec decompression
+
+def re_interleave(planes: bytearray, num_voxels: int) -> bytearray:
+    """Converts planar layout to interleaved layout."""
+    out = bytearray(len(planes))
+    stride = len(planes) // 4
+    for i in range(num_voxels):
+        for c in range(4):
+            out[i*4 + c] = planes[c*stride + i]
+    return out
 ```
 
 ### Parameters
-- **Compression Codec**: The specific algorithm used (e.g., Raw, LZ4). Not given in the sources.
-- **Planar Flag**: `bPlanar` indicates if data is stored in planar format.
+- **Compression Codec**: The specific algorithm used (e.g., Raw, LZ4) [S2, unofficial].
+- **Planar Flag**: `bPlanar` indicates if data is stored in planar format [S2, unofficial].
 
 ### Edge Cases and Pitfalls
 - **Buffer Size**: If the input buffer is smaller than the header size, decompression fails immediately [S2, unofficial].
@@ -227,17 +242,17 @@ The forward process that creates the compressed data. [Voxel Chunk Compression](
 Planar layout stores all values for a component together, while interleaved stores all components for a voxel together. Planar layout may offer better compression ratios for certain codecs. [Voxel Chunk Compression](6778-voxel-chunk-compression.md)
 
 ## Operating characteristics
-- **Time Complexity**: $O(N)$ where $N$ is the number of voxels, for both decompression and decoding steps.
-- **Memory Complexity**: $O(N)$ for the output data. If `bPlanar` is true, an additional $O(N)$ buffer is required for the `Planes` buffer.
+- **Time Complexity**: $O(N)$ where $N$ is the number of voxels, for both decompression and decoding steps [S2, unofficial].
+- **Memory Complexity**: $O(N)$ for the output data. If `bPlanar` is true, an additional $O(N)$ buffer is required for the `Planes` buffer [S2, unofficial].
 - **Measured Performance**: Not given in the sources.
-- **Scaling**: Linear scaling with the number of voxels.
-- **Strengths**: Fast decompression for Raw codec (memcpy). Flexible support for various compression codecs via `CodecId`.
-- **Limitations**: Complex bit-packing for lighting components may be error-prone to implement. Planar layout requires an extra de-interleaving step.
-- **When to Use**: When voxel data needs to be transmitted or stored in a compact format and then reconstructed for rendering.
-- **When Not to Use**: When real-time decompression is not required and data can be stored uncompressed if memory is not a constraint.
+- **Scaling**: Linear scaling with the number of voxels [S2, unofficial].
+- **Strengths**: Fast decompression for Raw codec (memcpy). Flexible support for various compression codecs via `CodecId` [S2, unofficial].
+- **Limitations**: Complex bit-packing for lighting components may be error-prone to implement. Planar layout requires an extra de-interleaving step [S1, unofficial][S2, unofficial].
+- **When to Use**: When voxel data needs to be transmitted or stored in a compact format and then reconstructed for rendering [S1, unofficial][S2, unofficial].
+- **When Not to Use**: When real-time decompression is not required and data can be stored uncompressed if memory is not a constraint [S2, unofficial].
 
 ## Background
-The method is part of the VoxelWorlds engine ecosystem, specifically used for managing voxel data in biomes and terrain generation. It is implemented in the `VoxelCore` module. The specific bit-packing and decoding logic is found in the DoonEngine repository, suggesting a shared or derived implementation between the two projects.
+The method is part of the VoxelWorlds engine ecosystem, specifically used for managing voxel data in biomes and terrain generation. It is implemented in the `VoxelCore` module. The specific bit-packing and decoding logic is found in the DoonEngine repository, suggesting a shared or derived implementation between the two projects [S1, unofficial][S2, unofficial].
 
 ## Sources
 [S1] frozein/DoonEngine, https://github.com/frozein/DoonEngine, fetched 2026-10-26 (unofficial)

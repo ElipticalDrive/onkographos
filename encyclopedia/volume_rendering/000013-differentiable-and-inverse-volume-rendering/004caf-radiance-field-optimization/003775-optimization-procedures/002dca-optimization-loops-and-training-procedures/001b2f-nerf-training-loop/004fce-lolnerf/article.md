@@ -1,0 +1,355 @@
+# LOLNeRF
+
+Also called: Learn from One Look
+
+## Overview
+LOLNeRF is a method for single-shot view synthesis of human faces that learns a generative 3D model from single-view images without relying on explicit geometric information like depth or point clouds [S2]. It differs from adversarial approaches like $\pi$-GAN by using Generative Latent Optimization (GLO) to learn a per-image table of latent codes, allowing it to reconstruct specific training images with high fidelity while avoiding the resolution limits imposed by GAN discriminators [S2].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   A dataset of $K$ single-view images $I_k$ of a specific object class (e.g., human faces) [S2].
+*   2D landmark coordinates for each image, extracted using a pre-trained landmarker (e.g., MediaPipe Face Mesh) [S2].
+*   Foreground segmentation masks for each image, extracted using a pre-trained segmenter (e.g., MediaPipe Selfie Segmentation) [S2].
+
+**Outputs:**
+*   A trained neural radiance field (NeRF) model consisting of a foreground density/radiance network and a background radiance network [S2].
+*   A latent table $Z$ containing learned latent codes for each training image [S2].
+*   A statistical model of the latent space (mean and covariance) for unconditional generation [S2].
+
+### Data Structures
+*   **Latent Table ($Z$):** A matrix of shape $K \times D$, where $K$ is the number of training images and $D$ is the latent dimension. Initialized to zeros ($0_{K \times D}$) [S2].
+*   **Foreground Model:** A neural network parameterized by $\theta_{fg}$ that takes positional encoding $\gamma^L(x)$ and latent code $z$ as input, outputting density $\sigma(x|z)$ and radiance $c(x|z)$ [S2].
+*   **Background Model:** A lower-capacity neural network parameterized by $\theta_{bg}$ that takes ray direction $d$ and latent code $z$ as input, outputting background radiance $C_{bg}(d|z)$ [S2].
+
+### Steps
+
+1.  **Camera Alignment:**
+    For each training image, extract 2D landmark locations using a pre-trained landmarker. Align these 2D landmarks with the projections of class-specific canonical 3D landmark positions using a least-squares "shape matching" optimization. This yields a rough estimate of the camera parameters (pose and focal length) for each image [S2].
+
+2.  **Model Initialization:**
+    Initialize the latent table $Z$ to $0_{K \times D}$ [S2]. Initialize the foreground and background neural networks [S2].
+
+3.  **Training Loop:**
+    For each training image $I_k$:
+    a.  Sample rays from the image using the aligned camera parameters.
+    b.  For each ray, sample $N$ points $x_i$ along the ray direction $d$.
+    c.  Query the foreground model for density $\sigma(x_i|z_k)$ and radiance $c(x_i|z_k)$, where $z_k$ is the $k$-th row of $Z$ [S2].
+    d.  Query the background model for background radiance $C_{bg}(d|z_k)$ [S2].
+    e.  Compute rendering weights $w_i$ and accumulated alpha $\alpha(p|z_k)$ for each pixel $p$ [S2].
+    f.  Compute the rendered foreground color $C_{NeRF}(p|z_k)$ and final color $C(p|z_k)$ [S2].
+    g.  Compute the total loss $L_{total}$ for the pixel [S2].
+    h.  Update the network parameters and the latent code $z_k$ using gradient descent [S2].
+
+4.  **Conditional Generation (Inference):**
+    To reconstruct a new image not in the training set, initialize a new latent row to the mean $\mu_Z$ of the existing latent table. Optimize this new row using the same loss function and optimizer as the training loop [S2].
+
+5.  **Unconditional Generation (Inference):**
+    Model the distribution of latent codes $Z$ as a multivariate Gaussian with mean $\mu_Z$ and covariance $\chi_Z$, computed via Principal Component Analysis (PCA) on the rows of $Z$. Sample latent codes from this distribution, optionally applying a "truncation trick" to control the trade-off between diversity and quality [S2].
+
+### Formulas
+
+**Volume Rendering:**
+The foreground color $C_{NeRF}(p)$ is computed as a weighted sum of radiance values:
+$$ C_{NeRF}(p|z) = \sum_{i=1}^{N} w_i \cdot c(x_i, d|z) $$
+where the weights $w_i$ are derived from the accumulated transmittance:
+$$ w_i = (1 - \exp(-\sigma(x_i|z)\delta_i)) \cdot \exp\left(-\sum_{j=1}^{i-1} \sigma(x_j|z)\delta_j\right) $$
+Here, $\delta_i$ is the distance between sample points [S2].
+
+**Final Color Composition:**
+The final pixel color combines the foreground NeRF output and the background model:
+$$ C(p|z) = \alpha(p|z) \cdot C_{NeRF}(p|z) + (1 - \alpha(p|z)) \cdot C_{bg}(d|z) $$
+where $\alpha(p|z)$ is the accumulated opacity:
+$$ \alpha(p|z) = \sum_{i=1}^{N} w_i $$
+[ S2 ]
+
+**Loss Function:**
+The total loss is a weighted sum of three terms:
+$$ L_{total} = L_{rgb} + \lambda_{mask} L_{mask} + \lambda_{hard} L_{hard} $$
+[ S2 ]
+
+1.  **RGB Loss:** Standard L2 photometric reconstruction loss:
+    $$ L_{rgb} = \mathbb{E}_{k \in \{1..K\}, p \in I_k} \left[ (C(p|z_k) - C^G_T(p))^2 \right] $$
+    where $C^G_T(p)$ is the ground truth pixel color [S2].
+
+2.  **Mask Loss:** Encourages transparency consistency with a pre-trained segmenter $S_I$:
+    $$ L_{mask} = \mathbb{E}_{k \in \{1..K\}, p \in I_k} \left[ (\alpha(p|z_k) - S_I(p))^2 \right] $$
+    [ S2 ]
+
+3.  **Hard Surface Loss:** Encourages sharp density transitions by penalizing intermediate weights. The probability distribution of weights is modeled as a mixture of Laplacian distributions:
+    $$ IP(w) \propto e^{-|w|} + e^{-|1-w|} $$
+    The loss is defined as:
+    $$ L_{hard} = -\log(IP(w)) $$
+    This encourages the density to produce a step function that saturates sampling weight over at least one interval [S2].
+
+### Parameters
+*   $\lambda_{hard}$: Weight for the hard surface loss. Set to 0.1 in experiments [S2].
+*   $\lambda_{mask}$: Weight for the mask loss. Set to 1.0 when training on face datasets using MediaPipe Selfie Segmentation [S2].
+*   $N$: Number of samples per ray. Not given in the sources.
+*   $D$: Latent dimension. Not given in the sources.
+*   $L$: Dimension of positional encoding. Not given in the sources.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+# Assume pre-trained models for landmarks and segmentation are available
+# from external libraries.
+
+class ForegroundNeRF(nn.Module):
+    def __init__(self, latent_dim, pos_enc_dim):
+        super().__init__()
+        # Placeholder for the actual network architecture
+        self.net = nn.Sequential(
+            nn.Linear(pos_enc_dim + latent_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 2) # Output: density, radiance
+        )
+
+    def forward(self, x, z):
+        # x: [N, pos_enc_dim], z: [D]
+        # Concatenate positional encoding of x with z
+        x_enc = pos_enc(x) # L-dimensional positional encoding
+        input = torch.cat([x_enc, z], dim=-1)
+        out = self.net(input)
+        sigma = torch.exp(out[..., 0]) # Ensure positive density
+        c = torch.sigmoid(out[..., 1]) # Radiance
+        return sigma, c
+
+class BackgroundNeRF(nn.Module):
+    def __init__(self, latent_dim, dir_enc_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dir_enc_dim + latent_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 3) # Output: background radiance
+        )
+
+    def forward(self, d, z):
+        # d: [N, dir_enc_dim], z: [D]
+        d_enc = dir_enc(d)
+        input = torch.cat([d_enc, z], dim=-1)
+        c_bg = torch.sigmoid(self.net(input))
+        return c_bg
+
+def pos_enc(x, L=10):
+    # Standard NeRF positional encoding
+    # Returns [N, 2*L]
+    pass
+
+def dir_enc(d, L=4):
+    # Standard NeRF directional encoding
+    # Returns [N, 2*L]
+    pass
+
+def render_ray(x_i, d, sigma, c_fg, c_bg, z):
+    # x_i: [N, 3], d: [3], sigma: [N], c_fg: [N, 3], c_bg: [3]
+    # Compute delta_i
+    delta = torch.diff(x_i, dim=-2, prepend=x_i[0:1])
+    delta = torch.norm(delta, dim=-1)
+    
+    # Compute transmittance
+    alpha_sample = 1.0 - torch.exp(-sigma * delta)
+    T = torch.cumprod(1.0 - alpha_sample + 1e-10, dim=0)
+    T = torch.roll(T, 1)
+    T[0] = 1.0
+    
+    # Weights
+    w = alpha_sample * T
+    
+    # Foreground color
+    c_neurf = torch.sum(w.unsqueeze(-1) * c_fg, dim=0)
+    
+    # Alpha
+    alpha = torch.sum(w)
+    
+    # Final color
+    c_final = alpha * c_neurf + (1.0 - alpha) * c_bg
+    
+    return c_final, alpha, w
+
+def compute_hard_loss(w, lambda_hard):
+    # IP(w) proportional to exp(-|w|) + exp(-|1-w|)
+    # We compute log(IP(w)) directly to avoid underflow/overflow issues
+    # log(IP(w)) = log(exp(-|w|) + exp(-|1-w|))
+    # Using logsumexp trick: log(exp(a) + exp(b)) = max(a,b) + log(1 + exp(-|a-b|))
+    a = -torch.abs(w)
+    b = -torch.abs(1.0 - w)
+    log_ip = torch.logsumexp(torch.stack([a, b], dim=-1), dim=-1)
+    
+    L_hard = -torch.mean(log_ip)
+    return lambda_hard * L_hard
+
+def train_lolnerf(images, landmarks, segments, latent_dim, pos_enc_dim, dir_enc_dim, 
+                  lambda_mask=1.0, lambda_hard=0.1, num_iters=10000):
+    K = len(images)
+    D = latent_dim
+    
+    # Initialize models
+    fg_model = ForegroundNeRF(D, pos_enc_dim)
+    bg_model = BackgroundNeRF(D, dir_enc_dim)
+    
+    # Initialize latent table
+    Z = torch.zeros(K, D)
+    
+    # Optimizer
+    optimizer = optim.Adam(list(fg_model.parameters()) + 
+                           list(bg_model.parameters()) + 
+                           [Z], lr=1e-4)
+    
+    for step in range(num_iters):
+        # Select a random image index
+        k = torch.randint(0, K, (1,)).item()
+        z_k = Z[k]
+        
+        # Get image, landmarks, segment for image k
+        I_k = images[k]
+        lm_k = landmarks[k] # [L, 2]
+        seg_k = segments[k] # [H, W]
+        
+        # 1. Camera Alignment (Simplified: assume pre-computed or done once)
+        # In practice, this is a least-squares fit of 2D landmarks to 3D canonical points
+        # Here we assume we have a function to get camera parameters from landmarks
+        cam_params = fit_camera_from_landmarks(lm_k)
+        
+        # 2. Sample Rays
+        # For each pixel in the image, generate a ray using cam_params
+        # This is complex to implement from scratch without a ray sampler library.
+        # We assume a function `sample_rays` that returns:
+        # x_i: [N, 3] sample points
+        # d: [3] ray direction
+        # pixel_indices: [N] corresponding pixel (u, v)
+        x_i, d, pixel_indices = sample_rays(I_k.shape, cam_params)
+        
+        # 3. Forward Pass
+        sigma, c_fg = fg_model(x_i, z_k)
+        c_bg = bg_model(d, z_k)
+        
+        # 4. Render
+        c_render, alpha, w = render_ray(x_i, d, sigma, c_fg, c_bg, z_k)
+        
+        # 5. Compute Losses
+        # RGB Loss
+        # c_render is [3], I_k[pixel_indices] is [3]
+        # Note: In practice, this is done for all pixels in the image
+        # For simplicity, we assume we render the whole image or a batch of pixels
+        # Here we compute loss for the sampled rays
+        gt_colors = I_k[pixel_indices] # Gather ground truth colors
+        L_rgb = torch.mean((c_render - gt_colors) ** 2)
+        
+        # Mask Loss
+        # Get segmentation values for the sampled pixels
+        seg_values = seg_k[pixel_indices]
+        L_mask = torch.mean((alpha - seg_values) ** 2)
+        
+        # Hard Surface Loss
+        L_hard = compute_hard_loss(w, lambda_hard)
+        
+        # Total Loss
+        loss = L_rgb + lambda_mask * L_mask + L_hard
+        
+        # 6. Backward Pass
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        # Optional: Update latent code Z[k] specifically?
+        # The optimizer includes Z, so it updates automatically.
+        
+    return fg_model, bg_model, Z
+
+def generate_conditional(new_image, fg_model, bg_model, Z, pos_enc_dim, dir_enc_dim):
+    # Initialize new latent code to mean of Z
+    mu_Z = torch.mean(Z, dim=0)
+    z_new = mu_Z.clone().detach().requires_grad_(True)
+    
+    optimizer = optim.Adam([z_new], lr=1e-4)
+    
+    # Optimize z_new to reconstruct new_image
+    # Similar to training loop, but only optimizing z_new
+    for step in range(1000):
+        # Sample rays from new_image
+        # ... (same as above)
+        
+        # Render
+        # ... (same as above)
+        
+        # Compute RGB Loss
+        L_rgb = torch.mean((c_render - gt_colors) ** 2)
+        
+        # Optional: Include other losses if desired
+        loss = L_rgb
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+    return z_new
+
+def generate_unconditional(Z, pos_enc_dim, dir_enc_dim, fg_model, bg_model, truncation=1.0):
+    # Compute mean and covariance of Z
+    mu_Z = torch.mean(Z, dim=0)
+    # PCA to find covariance
+    # ... (implement PCA)
+    
+    # Sample from Gaussian
+    # z_sample = mu_Z + truncation * noise
+    pass
+```
+
+### Edge Cases and Pitfalls
+*   **Flat Representation:** Without multi-view consistency, NeRF methods can collapse to a flat representation. LOLNeRF mitigates this with the hard surface loss and camera alignment [S2].
+*   **Surface Blurring:** In single-view cases, the surface may blur along the view direction. The hard surface loss helps enforce sharp transitions [S2].
+*   **Segmentation Errors:** If the segmentation module fails to remove non-subject foreground objects or erroneously removes parts of the subject, reconstruction quality degrades [S2].
+*   **Camera Fitting Errors:** Unreasonable camera estimates (e.g., too short focal lengths) can lead to distorted reconstructions [S2].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Memory:** Training complexity is decoupled from image resolution. Unlike GAN-based methods that supervise on inter-pixel relationships (requiring memory proportional to image size for discriminators), LOLNeRF trains on individual pixels, allowing arbitrary image sizes without increasing memory requirements during training [S2].
+*   **Time:** Training involves optimizing latent codes for each image alongside network parameters. The time complexity is proportional to the number of images and the number of optimization steps per image [S2].
+
+### Measured Performance
+*   **Reconstruction (CelebA subset):** On a 200-image subset of the $\pi$-GAN training set (CelebA), LOLNeRF trained on FFHQ achieves PSNR 29.0, SSIM 0.913, LPIPS 0.199 at $128^2$ resolution [S2].
+*   **Reconstruction (FFHQ Test):** On test images from FFHQ, LOLNeRF trained on CelebA-HQ at $256^2$ achieves PSNR 26.2, SSIM 0.856, LPIPS 0.363 [S2].
+*   **Novel View Synthesis (HUMBI):** On the HUMBI dataset, LOLNeRF trained on CelebA-HQ achieves PSNR 26.6, SSIM 0.930, Mask-LPIPS 0.0989 [S2].
+
+### Strengths and Limitations
+*   **Strengths:**
+    *   Works with single-view images without explicit geometric supervision [S2].
+    *   Higher resolution capability than GAN-based methods due to pixel-wise supervision [S2].
+    *   Learns per-image latent codes, enabling high-quality reconstruction of specific images [S2].
+*   **Limitations:**
+    *   Requires pre-trained models for landmarks and segmentation, which may fail on out-of-distribution data [S2].
+    *   Camera fitting is approximate and can produce errors [S2].
+    *   Limited to specific object classes (e.g., faces) where canonical landmarks are available [S2].
+
+### When to Use
+*   Use when you have single-view images of a specific object class (e.g., faces) and want to generate novel views or reconstruct the 3D shape.
+*   Use when you need high-resolution output and cannot use GAN-based methods due to memory constraints.
+
+### When Not to Use
+*   Do not use if you have multi-view data and want to use standard NeRF, which may be more robust.
+*   Do not use if the input images contain significant background clutter or non-subject foreground objects that the segmentation model cannot handle.
+
+## Background
+
+LOLNeRF was introduced in November 2021 [S1]. It was built similarly to $\pi$-GAN but used Generative Latent Optimization (GLO) instead of adversarial training [S1]. The method addresses the bottleneck of requiring multi-view data for NeRF training by leveraging approximate camera poses derived from 2D landmarks [S2]. It is used for single-shot view synthesis of human faces [S1].
+
+## Sources
+
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] LOLNeRF: Learn from One Look, https://doi.org/10.1109/cvpr52688.2022.00161, fetched 2026-10-29

@@ -1,9 +1,8 @@
 # Deep Learning and Neural Architectures
 
-Also called: Deep Learning-based Tomographic Reconstruction, Neural Inverse Rendering
 
 ## Overview
-This family encompasses methods that utilize neural networks to solve the inverse problem of tomographic reconstruction, either by serving as implicit regularizers, direct mapping functions, or feature extractors within a differentiable rendering loop. Unlike traditional algebraic or analytical methods, these approaches leverage the expressive power of deep learning to handle sparse, noisy, or incomplete projection data. They distinguish themselves from sibling methods like [Neural Adaptive Tomography (NeAT)](1862-neural-adaptive-tomography-neat.md) by focusing on end-to-end differentiable architectures or implicit priors rather than explicit adaptive sampling or specific Gaussian parameterizations.
+This family encompasses methods that utilize neural networks to solve the inverse problem of tomographic reconstruction, mapping measured sinograms to 3D volumes. It distinguishes itself from classical iterative methods by replacing explicit regularization or fixed filters with learned representations or differentiable end-to-end mappings. Unlike [Deep Image Prior Reconstruction](1221-deep-image-prior-reconstruction.md) which optimizes a network per instance, or [R2-Gaussian](6090-r2-gaussian.md) which uses explicit geometric primitives, this family includes generalizable end-to-end models [7504-end-to-end-reconstruction-model-architecture.md], hierarchical domain transforms [10853-hierarchical-ct-reconstruction-via-domain-transform.md], and attention-based architectures [13148-transformer-based-architectures.md].
 
 ## Shared principles
 All methods in this family rely on the differentiability of the forward projection operator $\mathcal{P}$ and its adjoint (back-projection) $\mathcal{P}^T$ [G]. The core optimization problem is generally formulated as minimizing a loss function $\mathcal{L}$ between the measured sinogram $p$ and the rendered projection $\hat{p} = \mathcal{P}(x)$ of the current volume estimate $x$:
@@ -30,40 +29,40 @@ Key shared components include:
 ## Subtopics
 
 ### [Deep Image Prior Reconstruction](1221-deep-image-prior-reconstruction.md)
-An iterative inverse rendering method that reconstructs a volume or image from sparse or noisy projection data by using a neural network as an implicit regularizer. It distinguishes itself from traditional iterative algebraic methods by jointly optimizing a latent variable for data consistency and the network weights to fit the sinogram.
+Deep Image Prior Reconstruction (DIP Reconstruction) is an iterative tomographic reconstruction method that utilizes a neural network as an implicit regularizer to solve the inverse problem of reconstructing a volume from sparse or noisy sinogram data. It addresses the ill-posed nature of limited-angle or sparse-view tomography by leveraging the structural bias of a convolutional neural network architecture, which naturally favors natural image statistics over noise. Unlike supervised deep learning methods that require large datasets of paired projections and ground-truth volumes, DIP Reconstruction is unsupervised, relying solely on the measured sinogram data to guide the optimization. It distinguishes itself from other neural architectures in this family by explicitly decoupling the optimization of the network weights from the optimization of an intermediate latent variable, allowing the network to act as a dynamic prior that adapts to the specific data consistency constraints.
 
-### [DuDoTrans](1409-dudotrans.md)
-A dual-domain transformer architecture designed for sparse-view CT reconstruction, operating within the differentiable inverse rendering framework [Deep Learning and Neural Architectures](8282-deep-learning-and-neural-architectures.md). It addresses the ill-posed nature of sparse-view tomography by leveraging Swin Transformer blocks with window-based multi-head self-attention (W-MSA) and shifted windows to capture long-range dependencies while maintaining computational efficiency. Unlike standard Multi-Head Self-Attention which computes attention over the entire image ($O(N^2)$ complexity), DuDoTrans restricts attention to local windows, reducing complexity to $O(N \cdot W_s^2)$ where $N$ is the number of tokens and $W_s$ is the window size.
+### [R2-Gaussian](6090-r2-gaussian.md)
+R2-Gaussian is a tomographic reconstruction method that adapts 3D Gaussian Splatting (3DGS) to sparse-view X-ray imaging by rectifying an integration bias inherent in standard 3DGS splatting. It replaces the appearance-based 3DGS kernel with a radiative Gaussian kernel parameterized by density, position, and covariance, and derives new X-ray rendering functions to ensure accurate volume retrieval. Unlike siblings that use 3DGS only for data augmentation or replace rasterization with simulators, R2-Gaussian maintains efficient differentiable rasterization while enabling direct 3D density volume extraction.
 
 ### [End-to-End Reconstruction Model Architecture](7504-end-to-end-reconstruction-model-architecture.md)
-This method is an end-to-end differentiable architecture for tomographic reconstruction that directly maps a noisy sinogram into a denoised reconstruction. It combines reconstruction and denoising in a single forward pass to mitigate noise amplification caused by the ill-conditioning of the Radon transform. Unlike traditional Filtered Back-Projection (FBP) which uses fixed linear filtration, or iterative methods that separate reconstruction and regularization, this model uses two trainable neural networks connected by a differentiable Radon back-projection operator. It builds on [Deep Learning and Neural Architectures](8282-deep-learning-and-neural-architectures.md) by implementing the shared principle of end-to-end optimization via back-projection gradients.
+This method is an end-to-end differentiable deep learning architecture that directly maps a noisy sinogram into a denoised 3D reconstruction, combining the reconstruction and denoising steps to mitigate noise amplification caused by the ill-conditioning of the Radon transform. It differs from traditional Filtered Back-Projection (FBP) by replacing the fixed linear filtration with a trainable neural network, and from pure post-processing methods by learning the physics of the acquisition geometry implicitly through the differentiable back-projection operator. Unlike [Deep Image Prior Reconstruction](1221-deep-image-prior-reconstruction.md) which optimizes a static network's weights per instance, this model learns a generalizable mapping from sinogram to volume via joint optimization of its parameters.
 
-### Generator Architecture
-#### definition
+### [Hierarchical CT Reconstruction via Domain Transform](10853-hierarchical-ct-reconstruction-via-domain-transform.md)
+Hierarchical CT Reconstruction via Domain Transform is a deep learning framework that solves large-scale inverse problems, such as tomographic reconstruction, by decomposing the non-local, space-variant integral transform into a sequence of simpler, local hierarchical steps. Unlike brute-force fully connected networks that require intractable parameter counts for full-scale data, this method avoids dense connectivity by introducing virtual intermediate data representations (partial line integrals). It sets itself apart from siblings like [Deep Image Prior Reconstruction](1221-deep-image-prior-reconstruction.md) and [DuDoTrans](1409-dudotrans.md) by explicitly constructing a homotopy-like continuum of data domains (from line integrals to partial line integrals to voxels) rather than relying on implicit neural priors or direct end-to-end mapping of the full sinogram to the image.
+
+### [Transformer-based Architectures](13148-transformer-based-architectures.md)
+Transformer-based architectures apply self-attention mechanisms to volume rendering and tomographic reconstruction, enabling the modeling of long-range dependencies that local convolutions miss. They address the ill-posed nature of inverse problems (e.g., sparse-view CT, limited-angle SPECT) and the computational cost of per-scene optimization in NeRFs by leveraging global context aggregation. This family distinguishes itself from sibling methods like [Deep Image Prior Reconstruction](1221-deep-image-prior-reconstruction.md) and [R2-Gaussian](6090-r2-gaussian.md) by replacing iterative optimization or explicit geometric priors with learned attention-based feature fusion and reconstruction.
+
+#### Generator Architecture
+**Definition**
 - [S1, unofficial] A generator network $G(r, z)$ that maps a sinogram $r$ and a latent vector $z$ to a reconstructed image, used for optimization in the inverse problem.
-#### layout
+
+**Layout**
 - [S1, unofficial] Input: Sinogram $r$ and latent vector $z$. Processing: $r$ passes through Embedding Conv 2D and U-net Blocks. $z$ is processed by a 'Modified Block' (described in Section 2.2 of source, not detailed here) and integrated into the network.
 
-### Depth-Encoded Ray Transformer (DERT)
-#### definition
-- [S2] A transformer architecture that infers volume density by incorporating relative depth differences as position encoding, rather than absolute positions.
-#### step
-- [S2] 1. Sample M points p_m on ray r with depths t_m. 2. Calculate relative depth encoding E_m for each point using δ_m. 3. Element-wise add E_m to point feature f_m. 4. Pass through self-attention and feed-forward network to predict volume density σ_m.
-#### parameter
-- [S2] K: Length of the position encoding feature vector.
+#### MRI-based Acoustic Impedance Estimation
+**Definition**
+- [S2] A supervised learning approach to map MRI intensities to acoustic impedance values Z(x, y, z) using a multi-layer perceptron (MLP) fitted to paired data of MRI intensities and reference impedance values from literature.
 
-### MRI-based Acoustic Impedance Estimation
-#### definition
-- [S3] A supervised learning approach to map MRI intensities to acoustic impedance values Z(x, y, z) using a multi-layer perceptron (MLP) fitted to paired data of MRI intensities and reference impedance values from literature.
-#### parameter
-- [S3] Reference impedance values: Literature values [4,5,6,14] used for supervised training.
-#### pitfall
-- [S3] MRI intensities do not correspond directly to physical quantities like density or impedance, making impedance reconstruction from MRI fundamentally ill-posed.
+**Parameter**
+- [S2] Reference impedance values: Literature values [4,5,6,14] used for supervised training.
+
+**Pitfall**
+- [S2] MRI intensities do not correspond directly to physical quantities like density or impedance, making impedance reconstruction from MRI fundamentally ill-posed.
 
 ## Background
-The application of deep learning to tomographic reconstruction has evolved from post-processing denoising to end-to-end differentiable inverse rendering. Early works focused on using CNNs to clean FBP reconstructions, while recent approaches integrate neural networks directly into the forward model to learn complex priors or implicit representations. The family includes architectures like U-Nets for direct mapping [S1, unofficial], Transformers for capturing long-range dependencies in sparse views [S1, unofficial], and specialized encoders for specific physical modalities like ultrasound [S3] or NeRFs with depth perception [S2].
+The application of deep learning to tomographic reconstruction emerged as a response to the limitations of classical analytical methods (like FBP) and iterative algebraic reconstruction techniques (ART/SIRT) in handling sparse data, noise, and computational complexity. Early works focused on using CNNs for post-processing denoising of FBP reconstructions. Subsequent developments introduced end-to-end differentiable architectures that integrate the physics of the Radon transform directly into the network, allowing for joint reconstruction and denoising [S1, unofficial]. The use of implicit neural representations and Gaussian splatting has further expanded the family, enabling efficient rendering and reconstruction from sparse views [S2].
 
 ## Sources
 [S1] Generative Tomography Reconstruction, https://core.ac.uk/works/91148923, fetched 2026-10-31 (unofficial)
-[S2] NeRF-SDP: Efficient Generalizable Neural Radiance Field with Scene Depth Perception, https://doi.org/10.1145/3595916.3626380, fetched 2026-10-30
-[S3] DiffUS: Differentiable Ultrasound Rendering from Volumetric Imaging., https://doi.org/10.1007/978-3-032-06329-8_3, fetched 2026-10-26
+[S2] DiffUS: Differentiable Ultrasound Rendering from Volumetric Imaging., https://doi.org/10.1007/978-3-032-06329-8_3, fetched 2026-10-26

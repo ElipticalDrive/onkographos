@@ -1,12 +1,12 @@
 # Dynamic and Temporal Modeling
 
-Also called: Dynamic Scene Reconstruction, 4D Modeling, Deformation Fields
+Also called: Dynamic Scene Reconstruction, 4D Gaussian Splatting, Deformation Fields
 
 ## Overview
-Dynamic and Temporal Modeling extends static 3D Gaussian Splatting (3DGS) and Neural Radiance Fields (NeRF) to reconstruct and render scenes that change over time, addressing the limitation of static representations in capturing non-rigid motion, emerging objects, and temporal variations [S1, S3]. It sets itself apart from static methods by introducing time-dependent parameters or deformation fields, and from naive time-conditioned NeRFs by often decomposing the problem into canonical space mappings or explicit artifact modeling to handle complex non-rigid geometries and optical imperfections [S1, S3].
+Dynamic and Temporal Modeling extends static radiance field representations (such as NeRF and 3D Gaussian Splatting) to handle scenes that change over time, enabling the synthesis of novel views at arbitrary timestamps [S1, S3]. It solves the problem of modeling non-rigid geometry and appearance variations that static methods cannot capture [S1, S3]. Unlike static methods, this family explicitly parameterizes time, either by warping coordinates to a canonical space, conditioning neural fields on temporal inputs, or parameterizing Gaussian attributes as time-dependent functions [S1, S3]. It is distinguished from sibling methods like [Base 3DGS Optimization](7549-base-3d-gaussian-splatting.md) by the introduction of temporal degrees of freedom, and from [WildGaussians](6064-wildgaussians.md) by its focus on continuous or structured temporal modeling rather than just handling wild camera motion in static scenes.
 
 ## Shared principles
-The family of dynamic and temporal modeling methods shares the following core mechanisms:
+The family shares the following core mechanisms for handling temporal dynamics:
 
 1.  **Temporal Parameterization:** Attributes that vary with time, such as position $\mathbf{c}$, rotation $\mathbf{q}$, opacity $\alpha$, density $\sigma$, or color $\mathbf{c}$, are expressed as functions of time $t$ [S1, S2, S3]. Common functional forms include:
     *   **Polynomial/Linear:** $\mathbf{q}(t) = \mathbf{q}_0 + \mathbf{m}t$ [S2].
@@ -28,42 +28,54 @@ The family of dynamic and temporal modeling methods shares the following core me
 ## Subtopics
 
 ### [Projected Color-Guided Dynamic NeRF](7523-projected-color-guided-dynamic-nerf.md)
-An on-the-fly training method for dynamic scenes that replaces temporal deformation fields with a NeRF model conditioned on multi-view projected colors. By leveraging the observation that the projected color of a corresponding 3D point remains invariant across consecutive frames, the model implicitly tracks point correspondence, allowing it to effectively utilize radiance fields from previous frames to optimize the current frame. Unlike sibling methods such as [D-NeRF](8660-d-nerf.md) or [DaReNeRF](13782-darenerf.md) which rely on explicit temporal inputs or deformation networks that extrapolate poorly to unseen times, OD-NeRF requires the minimum number of optimization iterations per frame and exhibits superior temporal extrapolation capabilities. Choose this method when streaming dynamic scenes with minimal latency and when explicit deformation modeling is computationally prohibitive.
+**What it is:** An on-the-fly training method for dynamic scenes that replaces temporal deformation fields with a NeRF model conditioned on multi-view projected colors.
+**Distinction:** Unlike sibling methods that use explicit temporal inputs or deformation networks which extrapolate poorly to unseen times, OD-NeRF requires the minimum number of optimization iterations per new frame.
+**When to choose:** When streaming dynamic scenes is required with minimal per-frame optimization cost, leveraging the invariance of projected color for correspondence.
 
 ### [On-the-Fly Dynamic NeRF Training](7582-on-the-fly-dynamic-nerf-training.md)
-A method for reconstructing dynamic scenes by training a neural radiance field concurrently with the acquisition of training frames, enabling the streaming of the scene as the event unfolds. Unlike standard dynamic NeRFs that require full video sequences for offline 4D reconstruction, this approach estimates the radiance field for the current time step $t_k$ using only the images up to $t_k$ and the radiance field from the previous step $t_{k-1}$. It distinguishes itself by applying a first-order Markov assumption to limit the dependency history, allowing for minimal optimization iterations per frame and interactive-speed streaming. Choose this method for real-time or near-real-time reconstruction of unfolding events.
+**What it is:** A method for training dynamic Neural Radiance Fields concurrently with the acquisition of training frames, enabling the streaming of dynamic scenes as they unfold.
+**Distinction:** It applies a first-order Markov assumption to decouple current estimation from the entire history, allowing for minimal optimization iterations per frame and interactive-speed streaming.
+**When to choose:** For real-time or near-real-time reconstruction of dynamic scenes where offline 4D reconstruction is not feasible.
 
 ### [D-NeRF](8660-d-nerf.md)
-A method for synthesizing novel views at an arbitrary point in time of dynamic scenes with complex non-rigid geometries, optimizing an underlying deformable volumetric function from a sparse set of input monocular views without ground-truth geometry or multi-view images. It sets itself apart from naive extensions of NeRF (which map $(x, y, z, t)$ directly to density and radiance) by decomposing the learning process into two modules: a deformation network that maps dynamic coordinates to a static canonical space, and a canonical radiance network that predicts density and color from that space. This decomposition effectively exploits temporal redundancy, allowing the model to handle rigid, articulated, and non-rigid motions from a single camera moving around the scene. Choose this method for high-fidelity offline reconstruction of complex non-rigid dynamics from monocular input.
+**What it is:** A method for synthesizing novel views at an arbitrary point in time of dynamic scenes with complex non-rigid geometries, optimized from a sparse set of input monocular views without ground-truth geometry or multi-view images.
+**Distinction:** Unlike naive extensions of NeRF that map $(x, y, z, t)$ directly to density and radiance, D-NeRF exploits temporal redundancy by anchoring all time instances to a common canonical configuration (typically $t=0$), allowing it to handle rigid, articulated, and non-rigid motions from a single camera moving around the scene.
+**When to choose:** When reconstructing dynamic scenes from sparse, monocular video inputs where explicit multi-view correspondence is unavailable.
 
 ### [DaReNeRF](13782-darenerf.md)
-A method for novel view synthesis of dynamic scenes that addresses the shift variance and direction ambiguity inherent in traditional Discrete Wavelet Transforms (DWT) by employing a direction-aware representation. It decomposes the 4D spatiotemporal volume into a sum of Hadamard products of 2D plane-based representations and learned vectors, utilizing an inverse dual-tree complex wavelet transformation (DTCWT) to recover plane information from six distinct orientations. Unlike baseline plane-based decompositions that suffer from checkerboard artifacts and poor motion handling, DaReNeRF ensures shift invariance and directional selectivity, reducing memory complexity from $O(N^3 T F)$ to $O(R N^2 T F)$ while maintaining high-fidelity rendering of complex motions. Choose this method when memory efficiency and handling of complex directional motion are critical.
+**What it is:** A method for novel view synthesis of dynamic scenes that addresses the shift variance and direction ambiguity inherent in traditional Discrete Wavelet Transforms (DWT) by employing a direction-aware representation.
+**Distinction:** It differs from standard plane-based decompositions by capturing scene dynamics from six distinct orientations using an inverse dual-tree complex wavelet transformation (DTCWT), thereby eliminating the checkerboard artifacts and ghosting associated with DWT.
+**When to choose:** When high-quality reconstruction of dynamic scenes is needed and artifacts from standard wavelet-based decompositions (like checkerboard patterns) are problematic.
 
 ### [Blur and Transient Modeling](13851-blur-and-transient-modeling.md)
-This family addresses artifacts caused by dynamic elements and optical imperfections in 3D Gaussian Splatting (3DGS) training. It distinguishes itself from sibling methods by explicitly modeling transient occluders and optical blur rather than relying solely on temporal deformation fields. It sets itself apart from [NeTF](4692-neural-transient-field-netf.md) by using Gaussian primitives for transient filtering instead of neural fields, and from [SWAG](6875-swag.md) by focusing on blur modeling techniques. Choose this method when the scene contains fast-moving occluders or when camera motion blur significantly degrades reconstruction quality.
+**What it is:** A family addressing the limitations of standard 3D Gaussian Splatting (3DGS) when applied to dynamic scenes, non-line-of-sight (NLOS) imaging, and real-world captures with optical artifacts. It extends the static Gaussian representation to handle temporal dynamics, transient occluders, and blur effects.
+**Distinction:** It differs from sibling NeRF-based methods (e.g., [D-NeRF](8660-d-nerf.md)) by maintaining a unified, explicit Gaussian representation rather than a neural field, which yields efficiency and state-of-the-art results on diverse photo scenes without requiring explicit transient labels.
+**When to choose:** When using 3DGS for dynamic scenes or scenes with transient artifacts where explicit neural fields are too slow or require additional labeling.
 
 ### [Deformation Field Modeling](13852-deformation-field-modeling.md)
-Deformation Field Modeling represents dynamic scenes by mapping time-dependent 3D coordinates to a static canonical space, allowing standard static radiance field queries to render temporal variations. It differs from explicit attribute parameterization (e.g., Fourier-based Gaussian motion) by learning a continuous displacement function $\Psi_t$, which handles complex non-rigid deformations more flexibly than fixed analytical functions. Choose this method for general-purpose dynamic scene reconstruction where the motion is complex and not easily described by simple parametric functions.
+**What it is:** Deformation Field Modeling handles temporal dynamics in radiance fields by mapping dynamic scene coordinates to a static canonical space via a learned displacement function.
+**Distinction:** It differs from sibling methods that use explicit attribute parameterization (like Fourier series for Gaussians) or independent per-frame models by relying on a continuous neural warp to align time-varying geometry with a static underlying radiance representation.
+**When to choose:** When a continuous, smooth deformation of geometry is preferred over discrete per-frame or polynomial attribute updates.
 
-### Temporal 3D Gaussian Splatting
+#### Temporal 3D Gaussian Splatting
 - [S1] A method that introduces a temporal radial basis function to represent temporal opacity, modeling emerging or vanishing content. Polynomial functions model motion and rotation.
 - [S1] Spherical harmonics are replaced with features consisting of base color, view-related feature, and time-related feature. The latter two are translated into residual color through an MLP added to the base color.
 - [S1] During optimization, new 3D Gaussians are sampled at under-optimized positions based on training error and coarse depth.
 
-### SWAGS
+#### SWAGS
 - [S1] A method that divides the dynamic sequence into different windows based on motion amount, training separate dynamic 3DGS models in different windows with different canonical spaces and deformation fields.
 - [S1] The deformation field uses a tunable MLP that focuses more on modeling the dynamic part of the scene.
 - [S1] Fine-tuning ensures temporal consistency between windows using overlapping frames to add constraints. The MLP is fixed and only the canonical representation is optimized during fine-tuning.
 
-### 3DGStream
+#### 3DGStream
 - [S1] A method that allows online training of 3DGS into dynamic scene reconstruction by modeling the transformation between frames as a neural transformation cache and adaptively adding 3D Gaussians to handle emerging objects.
 
-### Multi-scale Motion-Compensated Reconstruction
+#### Multi-scale Motion-Compensated Reconstruction
 - [S2] A procedure coupled with the two-step DynART/P-DVC algorithm to handle large displacement amplitudes by resolving large-scale features first and progressively enriching with finer details.
 - [S2] Resolve large-scale features of both microstructure and motion.
 - [S2] Progressively enrich the description with finer details.
 
-### Time-dependent NeRF
+#### Time-dependent NeRF
 - [S3] A NeRF variant that represents scene geometry and appearance at each specific time step t, trained using neighboring frames around time t, to capture local scene geometry and motion.
 - [S3] Represent scene appearance using mapping function c = ϕc(x, d) taking point x ∈ R3 and viewing direction d ∈ R2 to predict color c ∈ R3.
 - [S3] Represent scene geometry via mapping function s = ϕg(x) which maps a 3D point x to a signed distance value s ∈ R.
@@ -73,7 +85,7 @@ Deformation Field Modeling represents dynamic scenes by mapping time-dependent 3
 - [S3] Render pixel color Ĉ(r) via volume rendering: Ĉ(r) = Σ(i=1 to K) Li σi ci, where Li = Π(j=1 to i-1) (1 - σj) is the accumulated transmittance.
 
 ## Background
-Dynamic and temporal modeling in volume rendering originated from the need to extend static NeRF and 3DGS representations to 4D scenes. D-NeRF [S1, S3] was one of the early methods to introduce deformation networks for non-rigid scenes. Subsequent works like DaReNeRF [S1] and OD-NeRF [S1] improved efficiency and handling of dynamic artifacts. In the context of 3D Gaussian Splatting, methods like Temporal 3DGS [S1], SWAGS [S1], and 3DGStream [S1] adapted the explicit Gaussian representation to handle dynamics through temporal basis functions, windowed training, and neural caches. The field has also seen applications in medical imaging, such as infant motion reconstruction [S1].
+Dynamic scene reconstruction has evolved from static NeRF and 3DGS representations to handle temporal variations. Early approaches like D-NeRF [S1, S3] introduced deformation networks to map dynamic scenes to a canonical space, enabling novel view synthesis from sparse monocular inputs. Subsequent methods like OD-NeRF [S1] focused on on-the-fly training for streaming applications, utilizing Markov assumptions to reduce computational load. In the context of 3D Gaussian Splatting, methods such as Temporal 3D Gaussian Splatting [S1] and SWAGS [S1] adapted the explicit Gaussian representation to handle dynamics through temporal basis functions and windowed deformation fields. DaReNeRF [S1] addressed artifacts in wavelet-based dynamic representations. More recent work integrates these techniques into online streaming frameworks like 3DGStream [S1] and handles complex artifacts like blur and transients [S1, S2]. The field also intersects with tomographic reconstruction, where multi-scale motion-compensated methods [S2] handle large displacements. Joint optimization of camera motion and dynamic scene geometry, as seen in Time-dependent NeRF [S3], further expands the applicability to monocular video inputs.
 
 ## Sources
 [S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

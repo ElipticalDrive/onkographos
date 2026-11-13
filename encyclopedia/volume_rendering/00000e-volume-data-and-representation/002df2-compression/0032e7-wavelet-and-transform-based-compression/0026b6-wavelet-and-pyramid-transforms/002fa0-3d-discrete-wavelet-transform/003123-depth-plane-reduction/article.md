@@ -7,110 +7,46 @@ Depth-plane reduction is a data rearrangement technique that deforms a volumetri
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A 3D volumetric dataset $V$ with dimensions $W \times H \times D$, where $W$ is width, $H$ is height, and $D$ is the original number of depth planes. The voxel values are typically in the range $[0, 255]$.
-- Output: A deformed volumetric dataset $V'$ with dimensions $W \times H \times D'$, where $D' < D$, and a mapping or metadata indicating the new structure.
+- Input: A 3D volumetric dataset $V$ with dimensions $W \times H \times D$, where $W$ is width, $H$ is height, and $D$ is the original number of depth planes [S1].
+- Output: A deformed volumetric dataset $V'$ with dimensions $W \times H \times D'$, where $D' < D$ [S1].
 
 **Data Structures:**
-The input is treated as a set of depth planes $P_0, P_1, \dots, P_{D-1}$, where each plane $P_i$ is a 2D grid of size $W \times H$. The output is a compacted set of planes $P'_0, P'_1, \dots, P'_{D'-1}$.
+The input is treated as a set of depth planes $P_0, P_1, \dots, P_{D-1}$, where each plane $P_i$ is a 2D grid of size $W \times H$ [S1]. The output is a compacted set of planes $P'_0, P'_1, \dots, P'_{D'-1}$ [S1].
 
 **Parameters:**
-- Fill value: $128$. This is the center value of the $[0, 255]$ range, which shifts to zero in the pre-processing step of the JPEG2000 codec [S1].
+- Fill value: $128$. This is the center value of the data range, which shifts to zero in the pre-processing step of the JPEG2000 codec [S1].
 
 **Steps:**
-1. **Identify Empty Planes:** For each width coordinate $x \in [0, W-1]$ and height coordinate $y \in [0, H-1]$, identify the sequence of depth indices $z$ where the voxel $V(x, y, z)$ is non-empty (part of the model).
-2. **Shift Voxels:** For each $(x, y)$, shift the existing voxels forward along the depth axis to fill the empty depth planes. Specifically, if the existing voxels are at indices $z_1, z_2, \dots, z_k$, they are moved to indices $0, 1, \dots, k-1$ in the new volume $V'$. This reduces the total number of depth planes $D$ to $D'$, where $D'$ is the maximum number of existing voxels along the depth axis for any $(x, y)$ pair [S1].
+1. **Identify Existing Voxels:** For each width coordinate $x \in [0, W-1]$ and height coordinate $y \in [0, H-1]$, identify the sequence of depth indices $z$ where the voxel $V(x, y, z)$ is part of the model [S1].
+2. **Shift Voxels:** For each $(x, y)$, shift the existing voxels forward along the depth axis to fill the empty depth planes, reducing the total number of depth planes [S1]. Specifically, if the existing voxels are at indices $z_1, z_2, \dots, z_k$, they are moved to indices $0, 1, \dots, k-1$ in the new volume $V'$ [S1].
 3. **Fill Holes:** Fill all non-existing voxels (holes created by the shift) in the deformed volume $V'$ with the constant value $128$ [S1]. This eliminates holes that would otherwise lead to high-frequency energy after wavelet transform [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def depth_plane_reduction(volume, width, height, original_depth):
+def depth_plane_reduction(volume, present_mask, width, height, original_depth):
     """
     volume: 3D array of shape (width, height, original_depth)
+    present_mask: 3D boolean array of shape (width, height, original_depth)
     Returns: deformed_volume of shape (width, height, new_depth), new_depth
     """
-    # Determine the new depth by finding the maximum number of non-empty voxels
-    # along the depth axis for any (x, y) position.
-    # Note: The source implies shifting voxels to fill empty planes,
-    # effectively compacting the data.
-    
-    # Initialize a list to store the compacted planes for each (x, y)
-    # However, since the output is a regular grid, we must determine the
-    # global new depth first or handle variable depth per (x,y).
-    # The source states "reducing the number of depth planes", implying
-    # a global reduction. Let's assume the new depth is the max count.
-    
-    max_voxels = 0
-    for x in range(width):
-        for y in range(height):
-            # Count non-empty voxels at (x, y)
-            # Assuming 'non-empty' means part of the model.
-            # In the context of the source, the model is coded independently,
-            # so we likely have a mask or the volume itself has valid values.
-            # The source says "non-existing voxels are filled with 128".
-            # This implies we need to know which voxels are "existing".
-            # Let's assume a binary mask or that the volume contains valid data
-            # and we are rearranging based on a known structure.
-            # For the purpose of this algorithm, we assume we can identify
-            # the "existing" voxels. Let's assume the input volume has
-            # valid data in some positions and we are compacting them.
-            
-            # To implement strictly from the text:
-            # We shift voxels forward. This implies we know which are "present".
-            # Let's assume a mask 'is_present' is available or derived.
-            # Since the source doesn't specify how "non-existing" is defined
-            # beyond the context of the model structure, we assume the caller
-            # provides the set of existing voxels or the volume is sparse.
-            
-            # For the sake of a complete implementation, we assume:
-            # 1. We have a boolean mask 'present' of shape (width, height, original_depth)
-            # 2. We compact the True values to the start of the depth axis.
-            
-            # Placeholder for mask generation if not provided
-            # present = volume != background_value # Example
-            pass
-
-    # Re-reading the source: "shifting the voxels forward to fill the empty depth plane in each width"
-    # This suggests the operation is per (x, y) column.
-    
-    # Let's assume we have a mask 'present' indicating valid voxels.
-    # If not provided, the algorithm cannot distinguish existing from non-existing.
-    # The source says "the model is coded independently", implying the structure
-    # is known. We will assume 'present' is an input or derived from context.
-    
-    # For the pseudocode to be self-contained, we assume 'present' is given.
-    # If not, the user must provide the logic to identify existing voxels.
-    
-    # Let's assume 'present' is a 3D boolean array.
-    # If the source implies the volume itself defines the structure,
-    # we might need a threshold. But the source says "non-existing voxels",
-    # implying a binary distinction.
-    
-    # We will assume 'present' is passed in.
-    
-    # Find new depth
     new_depth = 0
     for x in range(width):
         for y in range(height):
-            count = sum(present[x, y, z] for z in range(original_depth))
+            count = sum(present_mask[x, y, z] for z in range(original_depth))
             if count > new_depth:
                 new_depth = count
-                
-    # Initialize output volume with fill value
+
     fill_value = 128
-    deformed_volume = np.full((width, height, new_depth), fill_value)
-    
-    # Shift voxels
+    deformed_volume = [[[fill_value] * new_depth for _ in range(height)] for _ in range(width)]
+
     for x in range(width):
         for y in range(height):
-            # Get indices of present voxels
-            present_indices = [z for z in range(original_depth) if present[x, y, z]]
-            
-            # Shift them to 0, 1, ...
+            present_indices = [z for z in range(original_depth) if present_mask[x, y, z]]
             for i, z in enumerate(present_indices):
-                deformed_volume[x, y, i] = volume[x, y, z]
-                
+                deformed_volume[x][y][i] = volume[x][y][z]
+
     return deformed_volume, new_depth
 ```
 
@@ -125,17 +61,15 @@ def depth_plane_reduction(volume, width, height, original_depth):
 A straightforward extension of the 2D algorithm to 3D data. [3D Discrete Wavelet Transform](6083-3d-discrete-wavelet-transform.md)
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** In the Leo sequence experiment, depth planes were reduced from $86$ to $25$ (over three times reduction), while bits used decreased by half compared to the original volume [S1].
-- **Scaling:** The smaller number of depth planes requires a smaller number of bits, although the number of existing voxels are identical [S1].
-- **Strengths:** Reduces high-frequency energy after wavelet transformation, leading to better compression efficiency [S1]. Filling with $128$ improves reconstructed image quality by up to $1.4$ dB [S1].
-- **Limitations:** Requires a minimum number of bits to code the model, limiting scalability at very low bitrates [S1].
-- **When to use:** When the volume has many empty depth planes and the model structure is known and coded independently [S1].
-- **When not to use:** At very low bitrates where the overhead of coding the model structure is too high [S1].
+- Measured Performance: In the Leo sequence experiment, depth planes were reduced from $86$ to $25$ (over three times reduction), while bits used decreased by half compared to the original volume [S1].
+- Scaling: The smaller number of depth planes requires a smaller number of bits, although the number of existing voxels are identical [S1].
+- Strengths: Reduces high-frequency energy after wavelet transformation, leading to better compression efficiency [S1]. Filling with $128$ improves reconstructed image quality by up to $1.4$ dB [S1].
+- Limitations: Requires a minimum number of bits to code the model, limiting scalability at very low bitrates [S1].
+- When to use: When the volume has many empty depth planes and the model structure is known and coded independently [S1].
+- When not to use: At very low bitrates where the overhead of coding the model structure is too high [S1].
 
 ## Background
-Originated in the context of color volumetric compression for realistic view synthesis applications [S1]. The technique leverages the fact that the number of voxels along the surface is much smaller than those of the whole object, allowing the volume to be deformed to reduce the number of depth planes [S1].
+The technique leverages the fact that the number of voxels along the surface is much smaller than those of the whole object, allowing the volume to be deformed to reduce the number of depth planes [S1].
 
 ## Sources
 [S1] Colour volumetric compression for realistic view synthesis applications, https://doi.org/10.1007/s11042-010-0484-4, fetched 2026-10-26

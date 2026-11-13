@@ -11,20 +11,20 @@ This method calculates Level-of-Detail (LOD) levels for visible tiles entirely o
 *   **Outputs:** The calculated LOD level and the corresponding vertex buffer offset for each visible tile [S1].
 
 **Data Structures:**
-The method operates on a grid of tiles. Each tile requires precomputed or accessible metadata:
+The method operates on a grid of tiles [S1]. Each tile requires precomputed or accessible metadata [S1]:
 1.  **Tile Center:** 3D coordinates $(x, y, z)$ [S1].
 2.  **Elevation Statistics:** The normalized standard deviation of elevation values ($\sigma$) for the tile's area [S1].
 3.  **Geometry:** The tile's inscribed circle radius is required for the transition interpolation [S1].
 
 **Parameters:**
-*   $\theta$: Field of view.
+*   $\theta$: Field of view [S1].
 *   $r$: Ground resolution of the tile (meters per pixel) [S1].
 *   $\varepsilon$: Allowable screen-space error threshold. Typical value: 1–2 pixels [S1].
 *   $\alpha$: Coefficient adjusting the influence weight of terrain relief. Determined by testing $\alpha \in [0.0, 1.0]$ on 30 terrain samples (plains, hills, mountains, high mountains) against original resolution benchmarks to minimize root-mean-square pixel error. Final value: $\alpha = 0.5$ [S1].
 *   $\sigma$: Normalized standard deviation of elevation values within the tile, reflecting terrain ruggedness [S1].
 
 **Steps:**
-1.  **Frustum and Occlusion Culling:** Determine which tiles are visible. This may utilize parallelization strategies from WebGPU compute pipelines or big data processing techniques for large-scale terrain mapping [S1].
+1.  **Frustum and Occlusion Culling:** Determine which tiles are visible [S1].
 2.  **LOD Calculation:** For each visible tile, compute the LOD level using the following formula [S1]:
     $$ \text{LOD} = \max\left(0, \left\lfloor \log_2 \left( \frac{d \cdot \tan(\theta/2)}{r \cdot \varepsilon \cdot (1 + \alpha \cdot \sigma)} \right) \right\rfloor \right) $$
     Where:
@@ -40,71 +40,28 @@ The method operates on a grid of tiles. Each tile requires precomputed or access
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Compute Shader Stage
 def compute_tile_lod(tile_center, viewpoint, fov, ground_resolution, error_threshold, ruggedness, relief_weight):
-    """
-    Calculates LOD for a single tile.
-    tile_center: vec3
-    viewpoint: vec3
-    fov: float (radians)
-    ground_resolution: float (meters per pixel)
-    error_threshold: float (pixels)
-    ruggedness: float (normalized std dev of elevation)
-    relief_weight: float (alpha)
-    """
-    # Distance from tile center to viewpoint
+    """Calculates LOD for a single tile on the GPU compute shader."""
     d = length(viewpoint - tile_center)
-    
-    # Calculate numerator: d * tan(theta/2)
     numerator = d * tan(fov / 2.0)
-    
-    # Calculate denominator: r * epsilon * (1 + alpha * sigma)
     denominator = ground_resolution * error_threshold * (1.0 + relief_weight * ruggedness)
-    
-    # Avoid division by zero
     if denominator == 0:
         return 0
-        
-    # Calculate log2 ratio
     log_ratio = log2(numerator / denominator)
-    
-    # Floor and clamp to 0
     lod = floor(log_ratio)
     if lod < 0:
         lod = 0
-        
     return lod
 
 def vertex_shader_interpolation(vertex_pos, tile_center, tile_inscribed_radius, lod_current, lod_neighbor):
-    """
-    Interpolates LOD for smooth transitions.
-    vertex_pos: vec3
-    tile_center: vec3
-    tile_inscribed_radius: float
-    lod_current: float
-    lod_neighbor: float
-    """
-    # Distance from vertex to tile center
+    """Interpolates LOD for smooth transitions in the vertex shader."""
     dist_to_center = length(vertex_pos - tile_center)
-    
-    # Distance from vertex to tile boundary (approximated as radius - dist_to_center)
-    # Note: The source defines t as min distance to boundary / inscribed radius.
-    # Assuming a square tile, min distance to boundary is roughly inscribed_radius - dist_to_center
-    # if vertex is inside. If outside, t=0 or handled by culling.
-    # For implementation safety, we assume vertex is within the tile's influence area.
-    
-    dist_to_boundary = tile_inscribed_radius - dist_to_center
-    if dist_to_boundary < 0:
-        dist_to_boundary = 0
-        
+    # Source defines t as min distance to boundary / inscribed radius.
+    # For a vertex inside the tile, min distance to boundary ≈ inscribed_radius - dist_to_center.
+    dist_to_boundary = max(0.0, tile_inscribed_radius - dist_to_center)
     t = dist_to_boundary / tile_inscribed_radius
-    if t < 0.0:
-        t = 0.0
-    if t > 1.0:
-        t = 1.0
-        
-    interpolated_lod = (1.0 - t) * lod_current + t * lod_neighbor
-    return interpolated_lod
+    t = max(0.0, min(1.0, t))
+    return (1.0 - t) * lod_current + t * lod_neighbor
 ```
 
 **Edge Cases and Pitfalls:**
@@ -118,7 +75,7 @@ def vertex_shader_interpolation(vertex_pos, tile_center, tile_inscribed_radius, 
 *   **Strengths:** Reduces CPU overhead by migrating LOD decisions to the GPU; accounts for terrain ruggedness for better visual quality [S1].
 *   **Limitations:** Requires precomputed or accessible elevation statistics ($\sigma$) for each tile; interpolation adds complexity to the vertex shader [S1].
 *   **When to Use:** Large-scale terrain rendering where CPU bottleneck is significant and visual quality needs to adapt to terrain complexity [S1].
-*   **When Not to Use:** Scenes with uniform flat terrain where ruggedness adjustment is unnecessary, or when GPU compute capabilities are limited [G].
+*   **When Not to Use:** Uniform flat terrain where ruggedness adjustment is unnecessary, or when GPU compute capabilities are limited [G].
 
 ## Background
 This method was introduced in "Efficient Parsing and Rendering of Large-Scale Terrain Data Based on WebGPU" (CACG 2026) [S1]. It addresses the limitation of CPU-side LOD computation, which becomes non-negligible when handling thousands of visible tiles [S1]. The approach draws on parallelization strategies from WebGPU compute pipelines and big data processing techniques for large-scale terrain mapping [S1].

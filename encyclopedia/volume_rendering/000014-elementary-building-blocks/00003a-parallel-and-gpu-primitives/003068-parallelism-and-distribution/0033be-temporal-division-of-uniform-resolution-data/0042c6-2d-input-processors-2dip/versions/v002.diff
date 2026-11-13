@@ -1,0 +1,116 @@
+--- v001.md
++++ v002.md
+@@ -25,7 +25,5 @@
+    where $T_{p0} = T_p / m$ and $T_{f0}$ is the frame fetch time [S1].
+    [S1]
+-   If we assume $T_{f0} \approx T_{s0}$ and $T_{p0} \approx T_p/m$, and set $T_{s0} = T_r$, the formula simplifies to:
+-   $$ n = \frac{T_s + T_p}{T_r} + 1 $$
+-   [S1]
++   Assuming ideal load balancing where each input processor handles $1/m$ of the data, $T_{f0} = T_s / m$ and $T_{p0} = T_p / m$ [S1].
+ 4. **Configure Input Processors**: Organize the available input processors into $n$ groups of $m$ processors [S1].
+ 5. **Concurrent Execution**:
+@@ -41,52 +39,57 @@
+ ### Pseudocode
+ ```python
+-# Estimate times from profiling or historical data
+-T_s = estimate_send_time(dataset_size)
+-T_p = estimate_preprocess_time(dataset_size)
+-T_r = estimate_render_time(rendering_processors, resolution)
+-T_f0 = estimate_fetch_time() # Often approximated as T_s0 or T_s/m
++import math
+ 
+-# Calculate m: number of input processors per group
+-# Constraint: T_s0 < T_r => T_s / m < T_r => m > T_s / T_r
+-m = ceil(T_s / T_r)
++def calculate_2dip_parameters(T_s, T_p, T_r, T_f0):
++    """
++    Calculates the required number of input processors per group (m)
++    and the number of groups (n) to hide I/O and preprocessing latency.
++    """
++    # m ensures send time per group T_s0 = T_s / m is less than rendering time T_r
++    m = math.ceil(T_s / T_r)
+ 
+-# Calculate n: number of groups
+-# Constraint: Keep rendering busy. 
+-# Time to prepare n-1 steps = Time to render n steps (approx)
+-# (T_f0 + T_p0) * (n-1) = T_r * n ? 
+-# The source derives n = (T_f0 + T_p0) / T_r + 1 based on T_s0 = T_r boundary.
+-T_p0 = T_p / m
+-n = ceil((T_f0 + T_p0) / T_r) + 1
++    # Per-group times are divided by m
++    T_s0 = T_s / m
++    T_p0 = T_p / m
+ 
+-# Total input processors needed
+-total_input_processors = n * m
++    # n ensures the pipeline stays full: (T_f0 + T_p0) * (n - 1) = T_r * n (approx)
++    # Simplified from source: n = (T_f0 + T_p0) / T_r + 1
++    n = math.ceil((T_f0 + T_p0) / T_r) + 1
+ 
+-# Configuration
+-# Input processors are divided into n groups of m processors.
+-# Group i is responsible for time step i.
++    return m, n
+ 
+-def input_processor_group(group_id, time_step_id, data, m_processors):
++def execute_2dip_pipeline(m, n, time_steps):
+     """
+-    Each group reads, preprocesses, and distributes one time step.
++    Executes the 2DIP strategy.
++    time_steps: list of time step data to render.
+     """
+-    # 1. Read data for time_step_id
+-    # Using Independent Contiguous Read is superior to Collective Noncontiguous Read [S1]
+-    raw_data = read_time_step(time_step_id)
+-    
+-    # 2. Preprocess data (spread across m processors)
+-    # Preprocessing cost T_p0 = T_p / m
+-    processed_data = preprocess(raw_data)
+-    
+-    # 3. Distribute to all rendering processors
+-    # Send time T_s0 = T_s / m
+-    distribute_to_renderers(processed_data)
++    # Input processors are organized into n groups of m processors.
++    # Each group i reads, preprocesses, and distributes time step i.
++    for i in range(n):
++        # 1. Read data for time step i
++        # Independent Contiguous Read is used for superior performance [S1]
++        raw_data = time_steps[i]
+ 
+-def render_processor(render_id, time_step_id):
+-    """
+-    Renders the current time step.
+-    """
+-    # Wait for data from input processor group
+-    data = receive_from_input_group(time_step_id)
+-    render(data)
++        # 2. Preprocess data (spread across m processors, cost T_p0 = T_p / m)
++        processed_data = preprocess(raw_data, m)
++
++        # 3. Distribute to all rendering processors (cost T_s0 = T_s / m)
++        distribute(processed_data, m)
++
++        # 4. Rendering processors render the current time step
++        # While rendering, the next group prepares the next time step
++        render(processed_data)
++
++def preprocess(data, m):
++    # Spreads preprocessing cost T_p0 = T_p / m across m processors [G]
++    return data
++
++def distribute(data, m):
++    # Spreads sending cost T_s0 = T_s / m across m processors [G]
++    pass
++
++def render(data):
++    # Performs volume rendering on the distributed data [G]
++    pass
+ ```
+ 
+@@ -98,5 +101,5 @@
+ ### Edge Cases and Pitfalls
+ - **$T_s \le T_r$**: If sending time is less than rendering time, 1DIP is sufficient and more efficient. 2DIP is only needed when $T_s > T_r$ [S1].
+-- **Insufficient Input Processors**: If the total number of available input processors is less than $n \times m$, the pipeline stalls. The system must either reduce $n$ (fewer time steps in flight) or increase $m$ (if possible) to reduce $T_{s0}$ [S1].
++- **Insufficient Input Processors**: If the total number of available input processors is less than $n \times m$, the pipeline stalls. The send time per group is strictly determined by $m$ ($T_{s0} = T_s / m$), so $T_{s0}$ cannot be reduced by changing $n$ [S1]. To reduce $T_{s0}$, $m$ must be increased, which may require adjusting $n$ to maintain pipeline occupancy [G].
+ - **Read Strategy**: Using Collective Noncontiguous Read is inferior to Independent Contiguous Read for 2DIP, resulting in higher sending and total times [S1].
+ 

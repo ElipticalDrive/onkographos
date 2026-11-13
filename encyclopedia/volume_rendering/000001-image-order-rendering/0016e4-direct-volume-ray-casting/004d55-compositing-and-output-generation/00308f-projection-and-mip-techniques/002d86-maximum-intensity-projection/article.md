@@ -1,193 +1,186 @@
 # Maximum Intensity Projection
 
-Also called: MIP, MIP rendering, Max Intensity Projection
+Also called: MIP, Max Intensity Projection, Mip Shader, Ray Traversal -MIP
 
 ## Overview
-Maximum Intensity Projection (MIP) is a volume rendering technique that projects the maximum scalar value encountered along each viewing ray onto the 2D image plane [S1, S2, unofficial][S3][S4, S5, S6, S7, S8, S9, S10, S11, S12, S14, S15, S17, unofficial][S19][S20, S21, S22, S23, S25, S27, S28, S29, S30, S31, S32, S33, unofficial][S34][S35, book][S36][S37, S39, S40, S41, S42, S44, S46, S47, S48, S49, S50, S51, S52, unofficial]. It solves the problem of visualizing high-intensity structures, such as contrast-enhanced blood vessels or bones, by emphasizing them while suppressing lower-intensity background noise [S6, S7, S29, S30, S37, S43, unofficial]. Unlike standard front-to-back compositing [Projection and MIP Techniques](6305-projection-and-mip-techniques.md), which accumulates color and opacity based on an emission-absorption model, MIP is order-independent and performs no emission or absorption; it simply selects the single highest value along the ray [S4, S5, S11, S46, unofficial]. This makes it significantly faster than full ray casting but results in a complete loss of depth information, as the position of the maximum value is not inherently preserved in the final color [S4, S10, S11, S15, S33, unofficial][S34][S37, S47, unofficial].
+Maximum Intensity Projection (MIP) is a volume rendering technique that projects the maximum scalar value encountered along each viewing ray onto the 2D image plane [S1, S2, unofficial][S3][S4, S5, S7, S11, S12, S14, S17, S23, S25, S26, S27, S28, S33, S37, unofficial]. It solves the problem of visualizing high-intensity structures, such as contrast-enhanced blood vessels in angiography or dense bone structures in CT scans, by emphasizing them while suppressing lower-intensity background tissue [S5, S11, S23, S29, S30, unofficial][S35, book]. Unlike standard Direct Volume Ray Casting which accumulates opacity and color via the emission-absorption model, MIP is order-independent and ignores intermediate values, effectively producing an X-ray-like image that lacks depth cues [S4, S6, S9, S27, S28, unofficial][S38][S39, unofficial]. It sets itself apart from siblings like [Projected Slabs Approximation](1449-projected-slabs-approximation.md) and [Projection](7205-projection.md) by using a maximum aggregation operator rather than summation or slab averaging, and from [Minimum Intensity Projection](5299-minimum-intensity-projection.md) by selecting the highest rather than lowest values [S1, S2, S27, S28, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D volume dataset $V$ containing scalar values (e.g., CT Hounsfield units, MRI intensity). A viewing ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ for each pixel. A transfer function $TF$ mapping scalar values to color and opacity (optional, often used for visualization but not required for the MIP logic itself) [S4, S15, S31, S33, S44, S49, unofficial].
-*   **Output:** A 2D image where each pixel $(u, v)$ contains the color corresponding to the maximum scalar value found along the ray passing through that pixel [S3][S12, S14, S29, S50, unofficial].
+*   **Input:** A 3D volume dataset $V$ with dimensions $D_x \times D_y \times D_z$, scalar values $s \in [s_{min}, s_{max}]$, a viewing ray $r(t) = \mathbf{o} + t\mathbf{d}$ for each pixel, and a transfer function $T(s)$ mapping scalar values to color $C$ [S2, S12, S14, S16, S25, S26, S27, S32, unofficial][S34][S50, unofficial].
+*   **Output:** A 2D image where each pixel $(u, v)$ contains the color $C_{out}$ corresponding to the maximum scalar value found along the ray [S1, S2, unofficial][S3][S4, S12, S14, S26, S27, S32, unofficial][S34].
 
 **Data Structures:**
-*   **Volume Texture:** The 3D scalar field is typically stored in a 3D texture (e.g., `sampler3D` in GLSL/HLSL) or a linear array. For GPU implementations, it is often a `Texture3D<float>` or `Data3DTexture` with linear filtering [S13, S14, S18, S29, S41, unofficial].
-*   **Accumulator:** A single scalar variable `max_intensity` initialized to the minimum possible value (e.g., $-\infty$, $-1.0$, or the volume's minimum) [S2, S12, S15, S20, S22, S25, S29, S31, S39, S40, S41, S49, unofficial].
-*   **Ray State:** Variables for current position `pos`, step size `step_size`, and remaining ray length `ray_length` [S18, S20, S29, S40, S41, unofficial].
+*   **Volume Texture:** The volume data is typically stored in a 3D texture (e.g., `sampler3D` or `Data3DTexture`) with linear filtering (`LinearFilter`) to support trilinear interpolation during ray marching [S10, S11, S15, S18, S23, S29, S31, S40, unofficial]. The format is often single-channel (e.g., `RedFormat`, `rg8unorm` where red/green encode a 16-bit value) [S10, S18, S29, unofficial].
+*   **Accumulator:** A single scalar variable `max_val` initialized to the minimum representable value (e.g., $-\infty$, $-1.0$, or $0.0$ depending on data range) [S2, S12, S15, S16, S17, unofficial][S19][S20, S22, S25, S32, S33, unofficial][S34][S39, S40, unofficial].
+*   **Position Tracker (Optional):** A variable `max_val_pos` to store the 3D coordinate of the maximum value, used if lighting or depth mapping is applied to the final pixel [S16, S20, S32, S40, unofficial].
+
+**Parameters:**
+*   **Step Size ($\Delta t$):** The distance between samples along the ray. It can be fixed (e.g., $0.5$ [S17, S22, unofficial]) or derived from `1.0 / steps` [S13, S16, unofficial].
+*   **Number of Steps ($N$):** Total samples per ray. Not given in the sources.
+*   **Thresholds:** Optional lower (`minDensityThreshold`, e.g., $0.15$ [S16, unofficial]) and upper bounds to filter valid samples. Early termination thresholds (e.g., $0.75 \times \text{volume\_maximum}$) can stop traversal if the maximum is sufficiently high [S15, S20, S40, unofficial].
 
 **Algorithm:**
-The method iterates along the ray, sampling the volume, and updating the accumulator with the maximum value found.
+The method follows the ray generation and traversal structure defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). For each pixel, the ray is intersected with the volume domain, and the aggregation function is applied.
 
-1.  **Initialize:** For each pixel, define the ray origin $\mathbf{o}$ and direction $\mathbf{d}$. Calculate the entry and exit points of the ray with the volume's bounding box to determine the valid traversal range $[t_{near}, t_{far}]$ [S18, S29, unofficial]. Initialize `max_intensity` to $-\infty$ (or a value lower than any valid voxel) [S2, S12, S20, S39, S41, unofficial].
-2.  **Ray Marching:** Iterate from $t = t_{near}$ to $t = t_{far}$ with a step size $\Delta t$ [S10, S15, S20, S22, S29, S41, unofficial].
-    *   Calculate sample position: $\mathbf{p} = \mathbf{o} + t \cdot \mathbf{d}$ [S20, S22, S25, unofficial].
-    *   Sample the volume at $\mathbf{p}$ to get scalar value $s = V(\mathbf{p})$ [S15, S20, S29, S41, unofficial].
-    *   Update maximum: `max_intensity` = $\max(\text{max\_intensity}, s)$ [S2, S12, S20, S29, S31, S39, S40, S41, unofficial].
-    *   (Optional) If a threshold is defined, check if $s$ exceeds it. Some implementations break early if the maximum possible remaining value cannot exceed the current `max_intensity`, but standard MIP usually traverses the full ray or until a specific condition is met [S15, S20, unofficial].
-3.  **Color Mapping:** After the loop, map `max_intensity` to a color using a transfer function $TF$ [S15, S31, S33, S49, unofficial].
-    *   $C_{final} = TF(\text{max\_intensity})$ [S31, S49, unofficial].
-    *   If no transfer function is used, the scalar value itself may be rendered directly (e.g., grayscale) [S4, S15, unofficial].
-4.  **Output:** Write $C_{final}$ to the pixel buffer [S15, S20, S49, unofficial].
+1.  **Initialize:** For each pixel, set `max_val` to $-\infty$ (or minimum representable value) and `max_val_pos` to null [S2, S16, S32, unofficial].
+2.  **Ray Marching:** Iterate along the ray $r(t)$ from entry $t_{near}$ to exit $t_{far}$ with step size $\Delta t$:
+    a.  Compute sample position: $\mathbf{p} = \mathbf{o} + t \cdot \mathbf{d}$ [S16, S20, S32, unofficial].
+    b.  Sample volume: $s = \text{TrilinearInterpolate}(V, \mathbf{p})$ [S12, S15, S18, S23, S25, S33, unofficial][S34].
+    c.  **Update Rule:** If $s > \text{max\_val}$, update $\text{max\_val} \leftarrow s$ and optionally $\text{max\_val\_pos} \leftarrow \mathbf{p}$ [S2, S12, S16, S20, S32, S33, unofficial][S34][S40, unofficial].
+    d.  **Early Termination:** If $\text{max\_val}$ exceeds a threshold or $t \ge t_{far}$, break loop [S15, S20, S40, unofficial].
+3.  **Classification:** Map the final `max_val` to color using a transfer function (e.g., window/level): $C = T(\text{max\_val})$ [S2, S12, S16, S25, S26, S27, S32, unofficial][S34][S50, unofficial].
+4.  **Output:** Write $C$ to the pixel. If `max_val_pos` was tracked, lighting can be computed at that position [S16, S20, S32, S40, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_mip(ray_origin, ray_direction, volume_texture, step_size, t_near, t_far):
+def compute_mip(volume_texture, ray_origin, ray_direction, step_size, volume_dims, window_width=1.0, window_center=0.5):
     """
     Computes the Maximum Intensity Projection for a single ray.
-    
-    Args:
-        ray_origin: vec3, origin of the ray.
-        ray_direction: vec3, direction of the ray (normalized).
-        volume_texture: 3D texture object, supports sampling at normalized coordinates.
-        step_size: float, distance between samples.
-        t_near: float, entry point of ray into volume.
-        t_far: float, exit point of ray from volume.
-        
-    Returns:
-        vec4: Final color (RGBA) for the pixel.
+    volume_texture: 3D texture object supporting trilinear sampling.
+    ray_origin: vec3, start of the ray.
+    ray_direction: vec3, normalized direction of the ray.
+    step_size: float, distance between samples.
+    volume_dims: vec3, dimensions of the volume in world units.
+    window_width: float, range of intensity values to map to display range.
+    window_center: float, midpoint of the intensity range for window/level mapping.
     """
-    # 1. Initialize accumulator
-    max_intensity = -float('inf')
+    # 1. Ray-AABB intersection
+    # Handle zero direction components to avoid division by zero
+    inv_dir = vec3(
+        1.0 / ray_direction.x if ray_direction.x != 0 else float('inf'),
+        1.0 / ray_direction.y if ray_direction.y != 0 else float('inf'),
+        1.0 / ray_direction.z if ray_direction.z != 0 else float('inf')
+    )
     
-    # 2. Ray march
+    t1 = inv_dir * (vec3(0.0) - ray_origin)
+    t2 = inv_dir * (vec3(volume_dims) - ray_origin)
+    t_near = max(max(min(t1.x, t2.x), min(t1.y, t2.y)), min(t1.z, t2.z))
+    t_far = min(min(max(t1.x, t2.x), max(t1.y, t2.y)), max(t1.z, t2.z))
+    
+    # Edge case: Ray misses volume or starts behind it
+    if t_near > t_far or t_far < 0.0:
+        return vec4(0.0, 0.0, 0.0, 0.0) # Background color
+
+    # 2. Initialize accumulator
+    max_val = -float('inf')
+    max_val_pos = vec3(0.0)
+    
+    # 3. Ray Marching
     t = t_near
     while t < t_far:
-        # Calculate sample position in world space
-        sample_pos = ray_origin + ray_direction * t
+        pos = ray_origin + ray_direction * t
+        # Normalize to [0, 1] for texture sampling
+        sample_pos = clamp(pos / vec3(volume_dims), vec3(0.0), vec3(1.0))
         
-        # Convert to texture coordinates (assuming volume is normalized 0-1)
-        # Note: Implementation details for coordinate conversion depend on the specific renderer.
-        # Here we assume a helper function `world_to_tex_coord` exists.
-        tex_coord = world_to_tex_coord(sample_pos)
+        # Sample volume (trilinear interpolation)
+        intensity = volume_texture.sample(sample_pos).r
         
-        # 3. Sample volume
-        # Sample returns a scalar value (e.g., from the red channel or a specific format)
-        intensity = volume_texture.sample(tex_coord).r
-        
-        # 4. Update maximum
-        if intensity > max_intensity:
-            max_intensity = intensity
+        # Update Rule: Max
+        if intensity > max_val:
+            max_val = intensity
+            max_val_pos = pos
             
-        # Advance ray
+            # Early Termination (Optional, based on threshold)
+            # if max_val > 0.75 * volume_max: break
+            
         t += step_size
         
-    # 5. Map to color
-    # If max_intensity is still -inf (ray missed volume), return transparent/black
-    if max_intensity == -float('inf'):
-        return vec4(0.0, 0.0, 0.0, 0.0)
-        
-    # Apply transfer function
-    color = transfer_function(max_intensity)
+    # 4. Window/Level mapping (standard transfer function for MIP)
+    # Maps intensity to [0, 1] grayscale
+    lower = window_center - window_width / 2.0
+    normalized = (max_val - lower) / window_width
+    normalized = clamp(normalized, 0.0, 1.0)
+    color = vec4(normalized, normalized, normalized, 1.0)
     
     return color
 ```
 
-**Parameters:**
-*   **Step Size:** Determines the distance between samples. Smaller steps increase accuracy but reduce performance. Typical values range from 0.5 to 1.0 voxel units, or adaptive based on view angle [S14, S15, S18, S22, S31, unofficial].
-*   **Thresholds:** Some variants use a minimum intensity threshold to ignore noise, but standard MIP considers all values [S15, S20, unofficial].
-*   **Transfer Function:** Maps intensity to color. Common mappings for CT/MIP include bone/contrast mapping to white and soft tissue to gray/black [S44, unofficial].
-
 **Edge Cases and Pitfalls:**
-*   **Depth Loss:** The primary pitfall is the loss of depth information. A high-intensity structure in the background can occlude a lower-intensity structure in the foreground, leading to misinterpretation of spatial relationships [S4, S10, S11, S15, S33, unofficial][S34][S37, S47, unofficial].
-*   **Noise Amplification:** MIP is sensitive to noise. A single noisy high-intensity voxel can dominate the projection, creating artifacts [S48, unofficial].
-*   **Ray Misses:** If the ray does not intersect the volume, the accumulator remains at its initial minimum value. This must be handled to avoid rendering invalid data [S18, S29, unofficial].
-*   **Order Independence:** Since MIP is order-independent, the iteration order (front-to-back vs. back-to-front) does not affect the result, allowing for flexible acceleration structures [S2, unofficial][S35, book][S46, unofficial].
+*   **Depth Loss:** MIP discards all depth information; a high-intensity structure in the background can occlude a closer, lower-intensity structure [S8, S12, S27, S28, S30, unofficial][S38].
+*   **Order Independence:** The result does not depend on the order of sample processing, allowing for random access and acceleration structures [S2, S29, S37, unofficial].
+*   **Hardware Blending:** Standard OpenGL blending cannot compute a maximum; the `EXT_blend_minmax` extension (`glBlendEquationEXT(GL_MAX_EXT)`) is required if using hardware blending for MIP [S9, S11, unofficial][S36].
+*   **Degenerate Rays:** If the ray does not intersect the volume or the intersection is degenerate ($t_{near} \ge t_{far}$), the algorithm should output a background color immediately [S15, S18, unofficial].
+*   **Precision:** When using integer or fixed-point formats for volume data, ensure the accumulator uses a type capable of holding the maximum value without overflow [S23, unofficial].
 
 ## Subtopics
 
 ### [Local Maximum Intensity Projection](6054-local-maximum-intensity-projection.md)
-Selects the first local intensity maximum above a threshold, preserving some depth cues compared to global MIP.
+Selects the first local intensity maximum above a threshold instead of the global maximum, preserving some depth information and acting as an acceleration technique by discarding subsequent samples.
 
 ### [Fast Maximum Intensity Projection (MIP)](6635-fast-maximum-intensity-projection-mip.md)
-Accelerates MIP using shear-warp projection and density interval decomposition to avoid unnecessary resampling.
+Accelerates MIP by decomposing the density domain into intervals and using shear-warp projection to resample only at voxel locations within the relevant interval.
 
 ### [MIP with Offset Lookup](6637-mip-with-offset-lookup.md)
-Uses binary volume masks and bitwise operations to skip low-density intervals, accelerating the search for the global maximum.
+Uses a binary volume mask and bitwise operations to determine the highest density interval along a ray, skipping low-density samples entirely.
 
 ### [Priority Queue MIP with Min/Max Grids](10338-priority-queue-mip-with-min-max-grids.md)
-Combines hierarchical spatial acceleration (min/max grids) with a priority queue to skip empty or low-intensity regions.
-
-### [Maximum Activity Projection](12564-maximum-activity-projection.md)
-Applies simulated exponential attenuation before selecting the maximum, used in nuclear medicine to preserve depth cues.
+Combines a hierarchical min/max grid with a priority queue to skip empty or low-intensity regions during traversal.
 
 ### Morphological Maximum Intensity Projection (MMIP) with Morphological Closing
-Prevents hole formation in non-axial views caused by undersampling by applying a morphological closing operation to the 2D projection image after voxel projection [S53]. Uses a 2x2x2 structuring element [S53].
+A variant for non-axial views that prevents hole formation due to undersampling by applying a final morphological closing operation to the 2D projection image after voxel projection [S43, unofficial]. It uses a structuring element (e.g., 2x2x2) to reconstruct a continuous function from discrete data [S43, unofficial]. Standard MIP for axial views can overwrite old values by projecting low-to-high, but non-axial views require this closing to handle undersampling holes [S43, unofficial].
 
 ### Closest Vessel Projection
-A local projection technique used in slab imaging for vascular diagnosis. It requires setting a dataset-specific threshold for the local maximum, making it more difficult to apply than standard MIP [S34].
+A local projection technique often used in slab imaging for vascular structure diagnosis [S34]. It requires setting an appropriate threshold for the local maximum, which is dataset-specific, making it more difficult to apply than standard MIP [S34].
 
 ### FVR Approximation of Maximum Intensity Projection
-Approximates MIP using Fourier Volume Rendering (FVR) by preprocessing the dataset with $v = b^v$ (e.g., $b=2$), performing FVR, and taking the base-$b$ logarithm of the result. This suffers from artifacts due to non-linear compression of the resampling filter [S52, unofficial].
-
-### DepthShaded Maximum Intensity Projection
-Modulates the intensity of sampled values by their depth to address the lack of depth cues in standard MIP. Values far from the viewer have less chance of being projected, potentially obscuring high-intensity volumetric features [S54, unofficial].
+Approximates MIP using Fourier Volume Rendering (FVR) by preprocessing the dataset: replace each voxel value $v$ with $b^v$ (e.g., $b=2$), perform FVR projection, and take the base-$b$ logarithm of the result [S52, unofficial]. This method suffers from artifacts because the logarithm compresses the resampling filter non-linearly, amplifying tails and worsening the signal-to-noise ratio, unless a much larger, slower filter is used [S52, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples along the ray. With acceleration structures (e.g., Min/Max grids), the average case can be significantly faster by skipping empty regions [S1, S52, unofficial].
-*   **Memory Complexity:** $O(V)$ for the volume data, plus $O(1)$ per pixel for the accumulator [S2, S13, unofficial].
-*   **Performance:** MIP is generally faster than full ray casting with compositing because it avoids the accumulation of color and opacity, and early ray termination is not applicable in the same way (though threshold-based early exit can be used) [S11, unofficial][S19].
-*   **Strengths:** Excellent for visualizing high-contrast, thin structures like blood vessels in angiography or bones in CT [S1, S6, S7, S14, S29, S37, S43, unofficial]. Simple to implement and fast to compute [S19][S35, book].
-*   **Limitations:** Complete loss of depth information makes it difficult to distinguish overlapping structures [S4, S10, S11, S15, S33, unofficial][S34][S37, S47, unofficial]. Sensitive to noise [S48, unofficial]. Not suitable for general navigation where spatial context is critical [S36].
-*   **When to Use:** When the goal is to detect or highlight high-intensity features (e.g., vessels, bones) and depth ambiguity is acceptable or secondary [S7, S14, S29, S37, S43, unofficial].
-*   **When Not to Use:** When accurate spatial relationships or depth cues are required, or when the volume contains low-contrast structures that might be obscured by high-intensity background noise [S4, S11, unofficial][S36][S47, unofficial].
+*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of samples per ray (or volume depth) [S1, S2, S12, S25, unofficial][S34]. Acceleration structures (e.g., min/max grids) can reduce the effective $P$ by skipping empty regions [S2, S22, unofficial].
+*   **Memory Complexity:** $O(V)$ for the volume data, plus $O(1)$ per ray for the accumulator [S2, S10, S15, unofficial].
+*   **Performance:** MIP is generally faster than alpha-blended DVR because it avoids complex opacity accumulation and lighting calculations for every sample [S9, unofficial][S19][S29, S37, unofficial]. It is well-suited for real-time visualization of high-intensity structures like blood vessels in angiography [S2, S5, S30, unofficial][S35, book].
+*   **Strengths:** Simple implementation, order-independent, emphasizes high-intensity structures, fast [S2, S5, S9, S29, S37, unofficial].
+*   **Limitations:** Complete loss of depth information, potential for occlusion of foreground structures by background high-intensity values, less effective for MR images where inner regions may not have higher intensities than outer regions [S8, S12, S27, S28, S30, unofficial][S34][S39, unofficial].
+*   **When to Use:** Visualizing contrast-enhanced vessels (angiography), bone structures in CT, or any scenario where highlighting the brightest structures is the primary goal [S1, S5, S11, S23, S29, S30, unofficial][S35, book].
+*   **When Not to Use:** When depth perception is critical, or when the volume contains structures with similar intensities at different depths [S8, S12, S27, S28, S30, unofficial][S38].
 
 ## Background
-Maximum Intensity Projection was introduced as a simple alternative to the complex radiative transfer equation for volume rendering [S10, S11, unofficial]. It is widely used in medical imaging, particularly for Magnetic Resonance Angiography (MRA) and Computed Tomography Angiography (CTA), to visualize blood vessels [S1, S4, S6, S14, S29, S37, S43, unofficial]. The technique was formalized in the context of ray traversal schemes, where it is categorized as a "Max" intensity traversal [S1, S9, unofficial]. It is often implemented using GPU acceleration via OpenGL extensions like `GL_EXT_blend_minmax` for hardware-accelerated maximum selection [S11, unofficial][S45].
+MIP was introduced as a simple compositing function for previewing and is well-known in medical imaging for visualizing blood-vessel structures [S8, S29, unofficial]. It is often used in Magnetic Resonance Angiograms (MRA) and CT angiography (CTA) to extract vessel structures [S1, S5, S11, S23, S30, unofficial][S35, book]. The technique approximates density integrals by the maximum density value along viewing rays, providing an X-ray-like effect without numerical integration [S8, S9, S29, unofficial]. It is implemented in libraries such as VTK via `vtkVolumeRayCastMIPFunction` [S7, S31, unofficial]. The loss of depth information led to the development of variants like LMIP [S8, unofficial].
 
 ## Sources
 [S1] PPT - Direct Volume Rendering (DVR): Ray-casting PowerPoint Presentation - ID:465503, https://slideserve.com/jariath/direct-volume-rendering-dvr-ray-casting, fetched 2026-10-24 (unofficial)
 [S2] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
 [S3] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24
-[S4] Volume Rendering Volume Rendering. Lecture 21. Acknowledgements. These slides are collected from many sources. A particularly valuable source is the IEEE Visualization conference tutorials. Sources fr, https://www.slideserve.com/hayes-levine/volume-rendering-powerpoint-ppt-presentation, fetched 2026-10-25 (unofficial)
-[S5] Real-Time Volume Graphics [03] GPU-Based Volume Rendering Real-Time Volume Graphics [03] GPU-Based Volume Rendering. Volume Rendering. Image order approach:. Data Set. Image Plane. Eye. For each pixel, https://www.slideserve.com/risa/real-time-volume-graphics-03-gpu-based-volume-rendering, fetched 2026-10-25 (unofficial)
-[S6] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
-[S7] Direct Volume Rendering Data, https://www.scribd.com/document/1050958395/Direct-Volume-Rendering-Data, fetched 2026-10-25 (unofficial)
-[S8] Volume Ray Casting Techniques, https://www.scribd.com/document/102700078/03-raycasting, fetched 2026-10-25 (unofficial)
-[S9] Direct Volume Rendering (DVR): Ray-casting | PPT - SlideShare, https://www.slideshare.net/slideshow/direct-volume-rendering-dvr-raycasting/265104120, fetched 2026-10-26 (unofficial)
-[S10] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
-[S11] Volume rendering techniques for general purpose graphics hardware, https://opus4.kobv.de/opus4-fau/files/9/Dissertation.pdf, fetched 2026-10-26 (unofficial)
-[S12] joshcodd/volume-rendering, https://github.com/joshcodd/volume-rendering, fetched 2026-10-26 (unofficial)
-[S13] Konstiu/VolumeVisualization, https://github.com/Konstiu/VolumeVisualization, fetched 2026-10-26 (unofficial)
-[S14] BernhardKidalka/D3DVolumeRaycaster, https://github.com/BernhardKidalka/D3DVolumeRaycaster, fetched 2026-10-26 (unofficial)
-[S15] rhnfzl/raycasting-volume-rendering, https://github.com/rhnfzl/raycasting-volume-rendering, fetched 2026-10-26 (unofficial)
-[S16] rokcej/volumetric-ray-casting, https://github.com/rokcej/volumetric-ray-casting, fetched 2026-10-26 (unofficial)
-[S17] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
-[S18] terier/vpt, https://github.com/terier/vpt, fetched 2026-10-26 (unofficial)
-[S19] QuickVol: A lightweight browser tool for immersive visualizations of volumetric data., https://doi.org/10.1016/j.isci.2024.111379, fetched 2026-10-26
-[S20] viljanvr/VisualNifty, https://github.com/viljanvr/VisualNifty, fetched 2026-10-26 (unofficial)
-[S21] cjcamp16/sciviz-paraview, https://github.com/cjcamp16/sciviz-paraview, fetched 2026-10-26 (unofficial)
-[S22] indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, https://github.com/indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, fetched 2026-10-26 (unofficial)
-[S23] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26 (unofficial)
-[S24] faviasono/raycastingrendering, https://github.com/faviasono/raycastingrendering, fetched 2026-10-26 (unofficial)
-[S25] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
-[S26] [PDF] Direct Volume Rendering | CGL @ ETHZ, https://cgl.ethz.ch/teaching/former/scivis_07/Notes/stuff/StuttgartCourse/VIS-Modules-06-Direct_Volume_Rendering.pdf, fetched 2026-10-26 (unofficial)
-[S27] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
-[S28] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
-[S29] fraserlove/ossium, https://github.com/fraserlove/ossium, fetched 2026-10-27 (unofficial)
-[S30] mneela/Volume-Rendering, https://github.com/mneela/Volume-Rendering, fetched 2026-10-27 (unofficial)
-[S31] 1vx-437312114/webgl_volume_renderer, https://github.com/1vx-437312114/webgl_volume_renderer, fetched 2026-10-27 (unofficial)
-[S32] urielfederez/Volume-Data-Visualization, https://github.com/urielfederez/Volume-Data-Visualization, fetched 2026-10-27 (unofficial)
-[S33] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)
-[S34] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
-[S35] PDF Direct Volume Rendering, https://www.sci.utah.edu/~stevec/classes/cs5630/dvr.pdf, fetched 2026-10-27 (book)
-[S36] Real-Time Volume Rendered MRI for Interventional Guidance, https://pmc.ncbi.nlm.nih.gov/articles/PMC2570028/, fetched 2026-10-27
-[S37] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
-[S38] VStudio - A Framework for Interactive Volume Visualization, https://www.cg.tuwien.ac.at/courses/Visualisierung/2008-2009/Beispiel1/Hausmair/index.html, fetched 2026-10-27
-[S39] Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, https://github.com/Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, fetched 2026-10-27 (unofficial)
-[S40] GitHub - m-pilia/volume-raycasting: Simple visualiser based on GPU ..., https://github.com/m-pilia/volume-raycasting, fetched 2026-10-27 (unofficial)
-[S41] GPU-accelerated single-pass volumetric raycasting in Qt ..., https://martinopilia.com/posts/2018/09/17/volume-raycasting.html, fetched 2026-10-27 (unofficial)
-[S42] PDF Volume Rendering - Isenberg, https://tobias.isenberg.cc/graphics/uploads/Class/07-volume-rendering.pdf, fetched 2026-10-28 (unofficial)
-[S43] PDF Direct Volume Rendering, https://www.cs.unh.edu/~cs880/lectureNotes/DVR.pdf, fetched 2026-10-28 (unofficial)
-[S44] Volume Rendering, Maximum Intensity Projection and ..., https://ryanrossi.com/sv3.php, fetched 2026-10-28 (unofficial)
-[S45] Hardware-based view-independent cell projection, https://www.semanticscholar.org/paper/Hardware-based-view-independent-cell-projection-Weiler-Kraus/36615d19709bce724437ec3257e43a1916f7de26, fetched 2026-10-29
-[S46] Direct Volume Rendering, https://cscheid.net/writing/data_visualization/direct_volume_rendering/, fetched 2026-10-29 (unofficial)
-[S47] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)
-[S48] Indirect volume rendering, https://slidetodoc.com/direct-volume-rendering-what-is-volume-rendering-accumulate/, fetched 2026-10-29 (unofficial)
-[S49] https://github.com/pygfx/pygfx/blob/main/pygfx/renderers/wgpu/wgsl/volume_ray.wgsl, https://github.com/pygfx/pygfx/blob/main/pygfx/renderers/wgpu/wgsl/volume_ray.wgsl, fetched 2026-10-29 (unofficial)
-[S50] GENERAL IMPLEMENTATION ASPECTS OF THE GPU- ..., http://sv-journal.org/2011-1/02/, fetched 2026-10-30 (unofficial)
-[S51] Volume Rendering in Unity3D - Speaker Deck, https://speakerdeck.com/mlavik1/volume-rendering-in-unity3d, fetched 2026-10-30 (unofficial)
-[S52] Fourier volume rendering, https://shiftleft.com/mirrors/www.hpl.hp.com/techreports/95/HPL-95-73.pdf, fetched 2026-10-31 (unofficial)
-[S53] Comparison of Morphological Pyramids for Multiresolution MIP Volume Rendering, https://doi.org/10.2312/vissym/vissym02/061-070, fetched 2026-10-29
-[S54] Context-Preserving Volume Image Exploration Using A 3D Painting Metaphor, https://doi.org/10.32920/ryerson.14646888, fetched 2026-10-26 (unofficial)
+[S4] Real-Time Volume Graphics [03] GPU-Based Volume Rendering Real-Time Volume Graphics [03] GPU-Based Volume Rendering. Volume Rendering. Image order approach:. Data Set. Image Plane. Eye. For each pixel, https://www.slideserve.com/risa/real-time-volume-graphics-03-gpu-based-volume-rendering, fetched 2026-10-25 (unofficial)
+[S5] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
+[S6] Volume Ray Casting Techniques, https://www.scribd.com/document/102700078/03-raycasting, fetched 2026-10-25 (unofficial)
+[S7] Direct Volume Rendering (DVR): Ray-casting | PPT - SlideShare, https://www.slideshare.net/slideshow/direct-volume-rendering-dvr-raycasting/265104120, fetched 2026-10-26 (unofficial)
+[S8] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
+[S9] Volume rendering techniques for general purpose graphics hardware, https://opus4.kobv.de/opus4-fau/files/9/Dissertation.pdf, fetched 2026-10-26 (unofficial)
+[S10] Konstiu/VolumeVisualization, https://github.com/Konstiu/VolumeVisualization, fetched 2026-10-26 (unofficial)
+[S11] BernhardKidalka/D3DVolumeRaycaster, https://github.com/BernhardKidalka/D3DVolumeRaycaster, fetched 2026-10-26 (unofficial)
+[S12] rhnfzl/raycasting-volume-rendering, https://github.com/rhnfzl/raycasting-volume-rendering, fetched 2026-10-26 (unofficial)
+[S13] rokcej/volumetric-ray-casting, https://github.com/rokcej/volumetric-ray-casting, fetched 2026-10-26 (unofficial)
+[S14] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
+[S15] terier/vpt, https://github.com/terier/vpt, fetched 2026-10-26 (unofficial)
+[S16] viljanvr/VisualNifty, https://github.com/viljanvr/VisualNifty, fetched 2026-10-26 (unofficial)
+[S17] indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, https://github.com/indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, fetched 2026-10-26 (unofficial)
+[S18] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26 (unofficial)
+[S19] faviasono/raycastingrendering, https://github.com/faviasono/raycastingrendering, fetched 2026-10-26
+[S20] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
+[S21] [PDF] Direct Volume Rendering | CGL @ ETHZ, https://cgl.ethz.ch/teaching/former/scivis_07/Notes/stuff/StuttgartCourse/VIS-Modules-06-Direct_Volume_Rendering.pdf, fetched 2026-10-26 (unofficial)
+[S22] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
+[S23] fraserlove/ossium, https://github.com/fraserlove/ossium, fetched 2026-10-27 (unofficial)
+[S24] mneela/Volume-Rendering, https://github.com/mneela/Volume-Rendering, fetched 2026-10-27 (unofficial)
+[S25] 1vx-437312114/webgl_volume_renderer, https://github.com/1vx-437312114/webgl_volume_renderer, fetched 2026-10-27 (unofficial)
+[S26] urielfederez/Volume-Data-Visualization, https://github.com/urielfederez/Volume-Data-Visualization, fetched 2026-10-27 (unofficial)
+[S27] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)
+[S28] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27 (unofficial)
+[S29] PDF Direct Volume Rendering, https://www.sci.utah.edu/~stevec/classes/cs5630/dvr.pdf, fetched 2026-10-27 (unofficial)
+[S30] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
+[S31] VStudio - A Framework for Interactive Volume Visualization, https://www.cg.tuwien.ac.at/courses/Visualisierung/2008-2009/Beispiel1/Hausmair/index.html, fetched 2026-10-27 (unofficial)
+[S32] Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, https://github.com/Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, fetched 2026-10-27 (unofficial)
+[S33] GitHub - m-pilia/volume-raycasting: Simple visualiser based on GPU ..., https://github.com/m-pilia/volume-raycasting, fetched 2026-10-27 (unofficial)
+[S34] GPU-accelerated single-pass volumetric raycasting in Qt ..., https://martinopilia.com/posts/2018/09/17/volume-raycasting.html, fetched 2026-10-27
+[S35] PDF Direct Volume Rendering, https://www.cs.unh.edu/~cs880/lectureNotes/DVR.pdf, fetched 2026-10-28 (book)
+[S36] Hardware-based view-independent cell projection, https://www.semanticscholar.org/paper/Hardware-based-view-independent-cell-projection-Weiler-Kraus/36615d19709bce724437ec3257e43a1916f7de26, fetched 2026-10-29
+[S37] Direct Volume Rendering, https://cscheid.net/writing/data_visualization/direct_volume_rendering/, fetched 2026-10-29 (unofficial)
+[S38] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29
+[S39] Indirect volume rendering, https://slidetodoc.com/direct-volume-rendering-what-is-volume-rendering-accumulate/, fetched 2026-10-29 (unofficial)
+[S40] https://github.com/pygfx/pygfx/blob/main/pygfx/renderers/wgpu/wgsl/volume_ray.wgsl, https://github.com/pygfx/pygfx/blob/main/pygfx/renderers/wgpu/wgsl/volume_ray.wgsl, fetched 2026-10-29 (unofficial)
+[S41] Volume Rendering in Unity3D - Speaker Deck, https://speakerdeck.com/mlavik1/volume-rendering-in-unity3d, fetched 2026-10-30 (unofficial)
+[S42] Fourier volume rendering, https://shiftleft.com/mirrors/www.hpl.hp.com/techreports/95/HPL-95-73.pdf, fetched 2026-10-31 (unofficial)
+[S43] Comparison of Morphological Pyramids for Multiresolution MIP Volume Rendering, https://doi.org/10.2312/vissym/vissym02/061-070, fetched 2026-10-29 (unofficial)

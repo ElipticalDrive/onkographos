@@ -1,12 +1,12 @@
 # Deformation Field Modeling
 
-Also called: Deformation Fields, Canonical Space Deformation
+Also called: Deformation Fields, Canonical Space Mapping
 
 ## Overview
-Deformation Field Modeling represents dynamic scenes by mapping time-dependent 3D coordinates to a static canonical space, allowing standard static radiance field queries to render temporal variations [S1, S3]. It differs from explicit attribute parameterization (e.g., Fourier-based Gaussian motion) by learning a continuous displacement function $\Psi_t$, which handles complex non-rigid deformations more flexibly than fixed analytical functions [S1, S2].
+Deformation Field Modeling handles temporal dynamics in radiance fields by mapping dynamic scene coordinates to a static canonical space via a learned displacement function [S1, S3]. It differs from sibling methods that use explicit attribute parameterization (like Fourier series for Gaussians) or independent per-frame models by relying on a continuous neural warp to align time-varying geometry with a static underlying radiance representation [S1, S2].
 
 ## Shared principles
-The core mechanism for dynamic modeling involves representing the 4D volume $D(x, y, z, t)$ using inputs captured at various times $t$. The shared principles across the subtopics are:
+The family shares the following core mechanisms for handling temporal dynamics:
 
 1.  **Temporal Parameterization:** Attributes that vary with time, such as position $\mathbf{c}$, rotation $\mathbf{q}$, opacity $\alpha$, density $\sigma$, or color $\mathbf{c}$, are expressed as functions of time $t$ [S1, S2, S3]. Common functional forms include:
     *   **Polynomial/Linear:** $\mathbf{q}(t) = \mathbf{q}_0 + \mathbf{m}t$ [S2].
@@ -28,18 +28,16 @@ The core mechanism for dynamic modeling involves representing the 4D volume $D(x
 ## Subtopics
 
 ### [Dynamic Object Embedding in Static Scenes](8796-dynamic-object-embedding-in-static-scenes.md)
-This method addresses the problem of integrating dynamic advertising objects into static NeRF scenes while maintaining perspective consistency and computational efficiency. It differs from traditional dynamic NeRF approaches (e.g., DyNeRF) by decoupling the scene into a static background and a localized dynamic region, using a lightweight deformation field to warp coordinates rather than training independent models for each time step. This reduces parameter count by 95% compared to full-scene dynamic models, making it suitable for VR devices. See [Dynamic Object Embedding in Static Scenes](8796-dynamic-object-embedding-in-static-scenes.md).
+This method integrates dynamic advertising objects into static NeRF scenes by ensuring perspective consistency through spatial alignment and joint rendering with alpha blending [8796-dynamic-object-embedding-in-static-scenes.md]. It addresses the high computational cost of traditional dynamic NeRFs (e.g., DyNeRF), which require over 100M parameters and independent models per time step, by using a static NeRF for static areas and a lightweight deformation field for dynamic regions [8796-dynamic-object-embedding-in-static-scenes.md]. Unlike siblings like [Dynamic 3D Gaussian Splatting (Katsumata et al.)](9168-dynamic-3d-gaussian-splatting-katsumata-et-al.md) which model dynamics via Gaussian attributes, this approach warps coordinates into a static radiance field [8796-dynamic-object-embedding-in-static-scenes.md].
 
 ### [Dynamic 3D Gaussian Splatting (Katsumata et al.)](9168-dynamic-3d-gaussian-splatting-katsumata-et-al.md)
-Dynamic 3D Gaussian Splatting (Katsumata et al.) models dynamic scenes by parameterizing the temporal evolution of Gaussian positions and orientations using explicit mathematical functions, while keeping other Gaussian attributes (such as color, opacity, and scale) static. It distinguishes itself from implicit deformation networks by using a Fourier series for position and linear functions for rotation, ensuring temporal continuity and robustness against overfitting. This approach is particularly suited for scenes with periodic or smooth motion, such as human articulation. See [Dynamic 3D Gaussian Splatting (Katsumata et al.)](9168-dynamic-3d-gaussian-splatting-katsumata-et-al.md).
+Dynamic 3D Gaussian Splatting (Katsumata et al.) models dynamic scenes by explicitly parameterizing the temporal evolution of 3D Gaussian positions and orientations, while keeping other Gaussian attributes (opacity, scale, spherical harmonics) static [9168-dynamic-3d-gaussian-splatting-katsumata-et-al.md]. It distinguishes itself from implicit deformation networks by using continuous parametric functions (Fourier series for position, linear for rotation), ensuring that the number of learnable parameters remains independent of the number of time steps [9168-dynamic-3d-gaussian-splatting-katsumata-et-al.md]. This approach balances computational efficiency with robustness for periodic or smooth motions [9168-dynamic-3d-gaussian-splatting-katsumata-et-al.md].
 
 #### NeRF with Deformation Fields (Nerfies)
-- [S1] A NeRF model built using a deformation field to improve performance in the presence of non-rigid transformations (dynamic scenes).
-- [S1] Introduce an additional MLP that maps input observation frame coordinates to deformed canonical coordinates.
-- [S1] Add elastic regularization, background regularization, and coarse-to-fine deformation regularization by adaptive masking the positional encoding.
+Nerfies is a NeRF model built using a deformation field to improve performance in the presence of non-rigid transformations in the scene, such as dynamic scenes [S1]. It introduces an additional MLP that maps input observation frame coordinates to deformed canonical coordinates [S1]. To stabilize training, it adds elastic regularization, background regularization, and coarse-to-fine deformation regularization by adaptively masking the positional encoding [S1].
 
 ## Background
-The concept of using deformation fields for dynamic scenes was introduced by Park et al. in November 2020 with Nerfies [S1]. This work demonstrated that mapping observation coordinates to deformed canonical coordinates via an MLP could accurately reconstruct non-static scenes where baseline NeRF failed [S1]. Concurrently, NerFace (December 2020) used per-frame latent codes and facial expression coefficients [S1]. Subsequently, HyperNeRF (June 2021) extended these concepts [S1].
+The concept of using deformation fields to handle non-rigid transformations in NeRFs was introduced by Park et al. in November 2020 with the paper "Nerfies" [S1]. This work strongly improved model performance in dynamic scenes where baseline NeRFs failed. Concurrently, NerFace (December 2020) used per-frame learned latent codes with facial expression coefficients [S1]. Subsequently, HyperNeRF (June 2021) built upon Nerfies by extending the canonical space approach [S1].
 
 ## Sources
 [S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

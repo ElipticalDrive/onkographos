@@ -1,0 +1,83 @@
+# (2+1)D CNN Radiance Decoder
+
+Also called: 2+1D Convolutional Decoder, Factorized CNN Decoder
+
+## Overview
+The (2+1)D CNN Radiance Decoder is a factorized convolutional neural network that predicts the radiance field from a target view frustum volume by applying 2D spatial convolutions followed by 1D depth convolutions [S1]. It solves the problem of synthesizing novel views by aggregating multi-view information into a volumetric representation, offering a balance between performance and efficiency [S1]. It sets itself apart from sibling methods like the Ray Transformer (which models only depth context) and standard MLPs (point-only) by leveraging spatial context in the 2D plane, while using 50% fewer parameters than a full 3D CNN [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A target view frustum volume, which aggregates information from multi-view input images [S1]. The volume represents the scene geometry and appearance relative to the target camera.
+*   **Output:** A predicted radiance field (color and opacity) for the target view [S1].
+
+**Data Structures:**
+The model is a convolutional neural network. The specific internal tensor layouts are not detailed in the sources, but the architecture processes a 3D volume tensor (Height $\times$ Width $\times$ Depth) [S1].
+
+**Parameters:**
+*   **Total Parameters:** 10.4M [S1].
+*   **Comparison:** This is significantly fewer than the 16.6M parameters required by a comparable 3D CNN decoder [S1].
+
+**Algorithm Steps:**
+1.  **Input Preparation:** Construct the target view frustum volume by aggregating features or raw data from the source multi-view images [S1].
+2.  **2D Spatial Convolution:** Apply a series of 2D convolutional layers to the input volume. These layers operate on the spatial dimensions (Height and Width) to capture local spatial context and structure [S1].
+3.  **1D Depth Convolution:** Apply 1D convolutional layers along the depth dimension. This step models the context along the ray/depth axis, completing the 3D context modeling [S1].
+4.  **Radiance Prediction:** The final layers output the predicted radiance values (color and opacity) for each voxel or pixel in the target view [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def predict_radiance(volume: Tensor) -> Tensor:
+    """
+    Predicts radiance from a target view frustum volume using a factorized (2+1)D CNN.
+    
+    Args:
+        volume: Input tensor of shape (Batch, Depth, Height, Width, Channels) 
+                representing the aggregated multi-view frustum.
+                
+    Returns:
+        Tensor of predicted radiance (color/opacity) for the target view.
+    """
+    # Step 1: 2D Spatial Convolutions
+    # Apply convolutions over Height and Width dimensions
+    x = volume
+    for layer in spatial_conv_layers:
+        x = layer(x) # 2D Convolution + Activation
+        
+    # Step 2: 1D Depth Convolutions
+    # Apply convolutions over the Depth dimension
+    for layer in depth_conv_layers:
+        x = layer(x) # 1D Convolution along Depth + Activation
+        
+    # Step 3: Output Head
+    # Predict final radiance values
+    radiance = output_head(x)
+    
+    return radiance
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The sources do not specify numerical precision issues, but the factorized approach is chosen for efficiency, implying potential trade-offs in representational capacity compared to dense 3D convolutions [S1].
+*   **Boundaries:** The method relies on the quality of the aggregated frustum volume; if the multi-view aggregation is sparse or noisy, the spatial context modeling may be less effective [S1].
+
+## Subtopics
+
+### Implicit Decoder Architecture
+A convolutional network variant that outputs a full-resolution 2D map corresponding to the camera index [S2]. It differs from the standard (2+1)D decoder by explicitly incorporating the camera index as a conditional input. It is chosen when explicit conditioning on the camera pose/index is required for the output map [S2].
+*   **Steps:** Concatenate the normalized scalar input camera index to the CoorDConv layer in the first layer of the decoder [S2]. Follow with a series of convolutional and upsampling layers using bi-linear interpolation until the desired output resolution is reached [S2].
+*   **Parameters:** Capacity is controlled by a scalar capacity factor $c$ multiplied by a preset multiplier $[2c, 4c, 8c]$ per layer [S2]. Depth decoder capacity factors are 10 for 2 inputs, 15 for 3 inputs, and 18 for 4 inputs [S2]. Opacity decoder capacity factors are 6 for 2 inputs, 10 for 3 inputs, and 12 for 4 inputs [S2].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** The factorized (2+1)D approach uses 50% fewer parameters (10.4M) than a full 3D CNN (16.6M), indicating lower memory footprint and potentially faster inference/training times [S1].
+*   **Measured Performance:** In ablation studies, the (2+1)D CNN consistently outperforms Ray Transformer (depth-only) and MLP (point-only) decoders [S1]. It produces sharper structures than a full 3D CNN while maintaining similar performance metrics [S1].
+*   **Strengths:** Better structural fidelity than MLPs and Ray Transformers; higher efficiency than 3D CNNs [S1].
+*   **Limitations:** Relies on the quality of the input frustum volume aggregation [S1].
+*   **When to use:** When a balance between sharp structural details and computational efficiency is needed for radiance field prediction from multi-view volumes [S1].
+*   **When not to use:** When maximum possible representational capacity is required regardless of parameter count (use 3D CNN) or when memory is extremely constrained (consider MLP/Ray Transformer if spatial context is less critical) [S1].
+
+## Background
+The (2+1)D CNN Radiance Decoder was introduced in the context of Multi-Baseline Radiance Fields (MuRF) [S1]. The method was selected over a full 3D CNN and other alternatives like Ray Transformers and MLPs based on ablation studies showing superior efficiency and comparable or better performance [S1]. The Implicit Decoder Architecture variant is associated with CoherentGS, which uses a similar convolutional decoder approach for view synthesis [S2].
+
+## Sources
+[S1] MuRF: Multi-Baseline Radiance Fields, https://doi.org/10.1109/cvpr52733.2024.01894, fetched 2026-10-27
+[S2] CoherentGS: Sparse Novel View Synthesis with Coherent 3D Gaussians, https://doi.org/10.1007/978-3-031-73404-5_2, fetched 2026-10-27

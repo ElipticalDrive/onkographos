@@ -17,20 +17,51 @@ Wavelet Slice Compression is a volumetric data compression method that partition
 1. **Partitioning:** The volume $V$ is partitioned into $D$ independent 2D slices $S_0, S_1, \dots, S_{D-1}$ [S1].
 2. **Spatial Transform:** Each slice $S_d$ is transformed using a 2D wavelet transform (e.g., Haar or biorthogonal 9/7) to produce coefficient blocks $C_d$ [S1].
 3. **Temporal Prediction:** To exploit temporal coherence, the method predicts the current slice's coefficients $C_d$ based on previously decoded slices, leveraging video coding techniques [S1].
-    *   *Simple Approach:* Use the previous slice $C_{d-1}$ as a predictor. The residual $R_d = C_d - C_{d-1}$ is computed [G].
-    *   *Advanced Approach (Video Coding):* Apply motion estimation between slices to find a displacement vector $\vec{m}_d$ such that a shifted version of a reference slice $C_{ref}$ best matches $C_d$. The residual is $R_d = C_d - C_{ref}(\vec{x} + \vec{m}_d)$ [G].
+    * *Simple Approach:* Use the previous slice $C_{d-1}$ as a predictor. The residual $R_d = C_d - C_{d-1}$ is computed [G].
+    * *Advanced Approach (Video Coding):* Apply motion estimation between slices to find a displacement vector $\vec{m}_d$ such that a shifted version of a reference slice $C_{ref}$ best matches $C_d$. The residual is $R_d = C_d - C_{ref}(\vec{x} + \vec{m}_d)$ [G].
 4. **Quantization:** The residual coefficients $R_d$ (or the original coefficients if no prediction is used) are quantized using a quantization step size $Q$. The quantized value is $\hat{R}_d = \text{round}(R_d / Q)$ [G].
 5. **Entropy Encoding:** The quantized residuals and motion vectors (if any) are entropy encoded (e.g., Huffman or Arithmetic coding) to produce the final bitstream [G].
 6. **Decoding:** The bitstream is entropy decoded to recover quantized residuals. Inverse quantization yields approximate residuals. If motion vectors are present, they are used to reconstruct the predicted slice. The inverse 2D wavelet transform is applied to each slice to recover the spatial data [G].
 
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def wavelet_slice_compress(volume, Q, use_motion_estimation=False):
+    # volume: 3D array of shape (D, H, W)
+    # Q: quantization step size
+    bitstream = []
+    ref_coeffs = None
+    for d in range(volume.shape[0]):
+        # 1. Spatial Transform
+        coeffs = apply_2d_wavelet_transform(volume[d]) # [G]
+        # 2. Temporal Prediction
+        if ref_coeffs is not None and use_motion_estimation:
+            m_d = estimate_motion(coeffs, ref_coeffs) # [G]
+            pred = shift_slice(ref_coeffs, m_d) # [G]
+        elif ref_coeffs is not None:
+            m_d = None
+            pred = ref_coeffs
+        else:
+            m_d = None
+            pred = np.zeros_like(coeffs)
+        residual = coeffs - pred
+        # 3. Quantization
+        quantized_residual = np.round(residual / Q) # [G]
+        # 4. Entropy Encoding
+        bitstream.append(encode(quantized_residual, m_d)) # [G]
+        ref_coeffs = coeffs
+    return bitstream
+```
+
 **Parameters:**
-*   **Wavelet Filter:** Commonly Haar or biorthogonal 9/7 [S1].
-*   **Quantization Step ($Q$):** Controls lossiness [G].
-*   **Reference Frame:** Typically the previous slice ($d-1$) or a keyframe [G].
+* **Wavelet Filter:** Commonly Haar or biorthogonal 9/7 [S1].
+* **Quantization Step ($Q$):** Controls lossiness [G].
+* **Reference Frame:** Typically the previous slice ($d-1$) or a keyframe [G].
 
 **Edge Cases:**
-*   **Boundary Conditions:** Wavelet transforms require handling boundaries. Padding or symmetric extension is typically used [G].
-*   **Degenerate Input:** If slices are uncorrelated, temporal prediction yields no benefit, and overhead may reduce compression efficiency [G].
+* **Boundary Conditions:** Wavelet transforms require handling boundaries. Padding or symmetric extension is typically used [G].
+* **Degenerate Input:** If slices are uncorrelated, temporal prediction yields no benefit, and overhead may reduce compression efficiency [G].
 
 ## Subtopics
 
@@ -38,12 +69,12 @@ Wavelet Slice Compression is a volumetric data compression method that partition
 Compresses volumetric data by treating it as a multi-component signal and applying a lifting-based DWT along the component axis to remove inter-component correlations, followed by spatial decomposition. It differs from standard 3D transforms by explicitly separating component-wise correlation removal from spatial compression, leveraging the JPEG2000 Part-2 framework. Choose it when inter-component correlation is high and spatial compression needs to be decoupled from component correlation removal. Builds on this method by applying wavelet transforms across the depth/component dimension rather than treating slices as temporal frames.
 
 ## Operating characteristics
-**Time Complexity:** Spatial transform is $O(W \cdot H \cdot D)$. Temporal prediction is $O(W \cdot H \cdot D)$ for simple difference or $O(W \cdot H \cdot D \cdot M)$ for motion estimation with search range $M$. Entropy encoding is $O(N \log N)$ where $N$ is the number of coefficients [G].
-**Memory Complexity:** $O(W \cdot H \cdot D)$ for input/output. Intermediate buffers for coefficients and residuals are also $O(W \cdot H \cdot D)$ [G].
-**Strengths:** High compression ratios for volumes with strong inter-slice correlation (e.g., medical imaging, time-varying data). Leverages mature video coding infrastructure [G].
-**Limitations:** Less effective for volumes with weak inter-slice correlation. Motion estimation adds computational cost [G].
-**When to use:** Volumetric data with high temporal/spatial coherence between slices [G].
-**When not to use:** Volumes with low inter-slice correlation or where random access to arbitrary slices is critical without decoding preceding slices [G].
+**Time Complexity:** Not given in the sources.
+**Memory Complexity:** Not given in the sources.
+**Strengths:** Not given in the sources.
+**Limitations:** Not given in the sources.
+**When to use:** Not given in the sources.
+**When not to use:** Not given in the sources.
 
 ## Background
 This approach was proposed by Rodler [Rod99] as a way to exploit the similarities between volumetric data and video sequences, applying video coding principles to 3D wavelet compression [S1]. It builds on the shared principles of [Wavelet and Pyramid Transforms](3856-wavelet-and-pyramid-transforms.md) by using wavelet transforms for spatial decomposition but diverges in its handling of the third dimension [S1].

@@ -1,0 +1,46 @@
+# Monocular Depth Scale Alignment
+
+Also called: Global Scale Alignment, Metric Scale Correction
+
+## Overview
+Monocular Depth Scale Alignment is a post-optimization step in 3D Gaussian Splatting that resolves the up-to-scale ambiguity inherent in image-only reconstruction pipelines [S1, unofficial]. It aligns the metric scale of the optimized 3D Gaussians with metric-scale monocular depth estimates [S1, unofficial]. Unlike sibling methods that may prune initial points or use different depth priors, this method fixes the Gaussian parameters and optimizes a single global scale factor [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Optimized 3D Gaussian parameters $\Theta$ (means $\mathbf{c}_i$, scales, rotations, opacities) and a set of metric-scale monocular inverse depth maps $D^{\text{mono}}_i$ for $N_{\mathcal{I}}$ known views [S1, unofficial].
+*   **Output:** A global scale factor $a \in \mathbb{R}$ and updated Gaussian means and scales [S1, unofficial].
+
+**Data Structures:**
+*   $D^{\text{mono}}_i$: Inverse depth map for view $i$, derived by taking the reciprocal of the metric depth output from a monocular estimator (e.g., DepthAnythingV2 metric variant) [S1, unofficial].
+*   $D^{\text{rendered}}_i$: Rendered inverse depth map from the current 3D Gaussian scene for view $i$ [S1, unofficial].
+
+**Steps:**
+1.  **Render Inverse Depth:** Render the inverse depth map $D^{\text{rendered}}_i$ for each known view $i$ using the current 3D Gaussian parameters $\Theta$ [S1, unofficial].
+2.  **Optimize Scale:** Optimize the global scale factor $a$ to minimize the L1 difference between the monocular inverse depth and the scaled rendered inverse depth [S1, unofficial]:
+    $$ a^* = \arg \min_a \frac{1}{N_{\mathcal{I}}} \sum_{i=1}^{N_{\mathcal{I}}} \| D^{\text{mono}}_i - a \cdot D^{\text{rendered}}_i \|_1 $$
+3.  **Update Gaussians:** Apply the optimal scale $a^*$ to the Gaussian parameters. Specifically, update the mean positions $\mathbf{c}_i$ and the scale attributes of each Gaussian [S1, unofficial]. The rotation and opacity remain unchanged [S1, unofficial].
+
+**Pitfalls:**
+*   **Pruning:** Unlike standard 3DGS pipelines, initial COLMAP points should not be pruned before this step to avoid affecting the distribution of optimized Gaussian parameters [S1, unofficial].
+*   **Depth Type:** Use metric-scale monocular depth estimators (e.g., DepthAnythingV2 metric) rather than relative depth estimators [S1, unofficial].
+*   **Inverse Depth:** Convert metric depth to inverse depth by taking the reciprocal, as the optimization is performed in inverse depth space [S1, unofficial].
+
+## Subtopics
+
+### Coarse Alignment with Optical Flow
+A preprocessing step used in CoherentGS to align monocular depth estimates across views before Gaussian initialization [S2]. It optimizes per-view scale $s_i$ and offset $o_i$ parameters to mitigate misalignments caused by relative depth scales [S2]. The objective minimizes the L1 norm of flow-warped depth differences:
+$$ \mathbf{s}^*, \mathbf{o}^* = \arg \min_{\mathbf{s}, \mathbf{o}} \sum_{(i,j)}\sum_{\mathbf{p}} \left\| M_{i \rightarrow j} \odot \left( g(s_i \cdot D^m_i[\mathbf{p}] + o_i, \mathbf{p}) - g(s_j \cdot D^m_j[\mathbf{q}] + o_j, \mathbf{q}) \right) \right\|_1 $$
+where $D^m$ is monocular depth, $g$ is the depth warping function, and $M_{i \rightarrow j}$ is the optical flow mask [S2]. The aligned depth is then $D^{\text{init}} = s \cdot D^m + o$ [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Linear in the number of views $N_{\mathcal{I}}$ for the optimization step, dominated by rendering inverse depth maps [S1, unofficial].
+*   **Memory Complexity:** Requires storing inverse depth maps for all known views [S1, unofficial].
+*   **Strengths:** Simple, global correction that effectively resolves scale ambiguity without altering the geometric structure learned during optimization [S1, unofficial].
+*   **Limitations:** Assumes a single global scale factor is sufficient; may not handle scenes with significant depth-dependent scale variations or non-rigid deformations [S1, unofficial].
+
+## Background
+Originated in the context of 3D Gaussian Splatting optimization to address the lack of metric scale in multi-view reconstruction [S1, unofficial]. It builds on the observation that monocular depth estimators can provide metric-scale priors [S1, unofficial]. The method was formalized in works such as Quantile Rendering [S1, unofficial] and CoherentGS [S2].
+
+## Sources
+[S1] Quantile Rendering: Efficiently Embedding High-dimensional Feature on 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2512.20927, fetched 2026-10-26 (unofficial)
+[S2] CoherentGS: Sparse Novel View Synthesis with Coherent 3D Gaussians, https://doi.org/10.1007/978-3-031-73404-5_2, fetched 2026-10-27

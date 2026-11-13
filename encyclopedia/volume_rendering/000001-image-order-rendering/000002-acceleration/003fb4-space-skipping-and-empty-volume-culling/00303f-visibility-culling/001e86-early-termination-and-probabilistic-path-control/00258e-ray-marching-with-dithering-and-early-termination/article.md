@@ -11,23 +11,9 @@ Ray marching with dithering and early termination is a GPU-based volume renderin
 *   **Outputs:** Final pixel color (RGBA) [S1, S2, unofficial].
 
 **Data Structures:**
-*   **Volume Texture:** 3D texture storing density or intensity values. In the reference implementation, it is a `GL_TEXTURE_3D` or equivalent, sampled via `texture(voltex, pos)` [S1, S2, unofficial].
-*   **Transfer Function Texture:** 1D or 2D texture mapping intensity to RGBA color. Sampled via `texture(tftex, intensity)` [S1, unofficial].
-*   **Uniforms:**
-    *   `uCamPos` (vec3): Camera position [S2, unofficial].
-    *   `uLightP` (vec3 array): Light positions [S2, unofficial].
-    *   `uLightC` (vec3 array): Light colors [S2, unofficial].
-    *   `uTex` (texture): Volume texture [S2, unofficial].
-    *   `uTexDim` (vec3): Volume dimensions [S2, unofficial].
-    *   `uOffset` (vec3): Volume offset [S2, unofficial].
-    *   `uTMK` (float): Transmittance kernel constant [S2, unofficial].
-    *   `uShininess` (float): Specular shininess [S2, unofficial].
-    *   `uShadingMode` (int): 0 (Blinn-Phong), 1 (Blinn-Phong + Edge Enhancement), 2 (Toon) [S1, unofficial].
-    *   `gStepSize` (float): Step size, calculated as $\sqrt{3} / \text{MAX\_STEPS}$ for unit cube diagonal traversal [S2, unofficial].
-    *   `SHADING_THRES` (float): 0.10 [S1, unofficial].
-    *   `DELTA` (float): 0.005 for gradient calculation [S1, unofficial].
-    *   `TM_MIN` (float): Transmittance threshold for early termination (value not explicitly defined in sources, used in condition `tm < TM_MIN`) [S2, unofficial].
-    *   Early termination threshold: 0.95 for accumulated alpha [S1, unofficial].
+*   **Volume Texture:** 3D texture storing density or intensity values, sampled via `texture(voltex, pos)` [S1, S2, unofficial].
+*   **Transfer Function Texture:** 1D or 2D texture mapping intensity to RGBA color, sampled via `texture(tftex, intensity)` [S1, unofficial].
+*   **Uniforms:** `uCamPos` (vec3), `uLightP` (vec3 array), `uLightC` (vec3 array), `uTex` (texture), `uTexDim` (vec3), `uOffset` (vec3), `uTMK` (float), `uShininess` (float), `uShadingMode` (int), `gStepSize` (float), `SHADING_THRES` (float), `DELTA` (float), `TM_MIN` (float) [S1, S2, unofficial].
 
 **Numbered Steps:**
 
@@ -36,29 +22,32 @@ Ray marching with dithering and early termination is a GPU-based volume renderin
     *   Determine ray origin `ro` and direction `rd` based on camera and screen position [S1, S2, unofficial].
     *   Calculate ray length `len` and direction vector `direction = end - start` [S1, unofficial].
     *   Normalize direction: `direction = normalize(direction)` [S1, unofficial].
-    *   Calculate step size: `stepsize = len / nsamples` [S1, unofficial].
+    *   Calculate step size: `stepsize = len / nsamples` [S1, unofficial]. (Note: [S2, unofficial] uses `gStepSize = \sqrt{3} / \text{MAX\_STEPS}` for unit cube diagonal traversal.)
     *   Calculate delta vector: `delta = direction * stepsize` [S1, unofficial].
     *   Initialize accumulated color `outcolor` to `vec4(0.0)` and current color `color` to `vec4(0.0)` [S1, unofficial].
     *   Initialize ray position `pos` to ray origin `ro` [S2, unofficial].
+    *   Initialize transmittance `tm` to `1.0` [S2, unofficial].
 
 2.  **Dithering:**
     *   Apply dithering to the starting position to hide aliasing: `pos = pos + delta * rand()` [S1, unofficial]. [G] `rand()` should be a pseudo-random number generator providing a value in $[0, 1)$, seeded per-pixel or per-frame to ensure consistency.
 
 3.  **Ray Marching Loop:**
-    *   Loop for `i` from 0 to `nsamples` (or `MAX_STEPS`) while `len > 0` [S1, unofficial].
+    *   Loop for `i` from 0 to `nsamples` while `len > 0` [S1, unofficial].
+    *   Increment position: `pos = pos + delta` [S1, unofficial].
+    *   Decrement remaining length: `len = len - stepsize` [S1, unofficial].
+    *   **Boundary Check:** If `pos` is outside the volume bounds (e.g., $[0, 1]$ for unit cube), break loop [S2, unofficial].
     *   Sample volume intensity: `intensity = texture(voltex, pos).r` [S1, unofficial].
     *   Map intensity to color via transfer function: `color = texture(tftex, intensity)` [S1, unofficial].
     *   **Early Termination Check (Alpha):** If `outcolor.a > 0.95`, break loop [S1, unofficial].
-    *   **Early Termination Check (Transmittance):** Calculate transmittance `tm`. If `tm < TM_MIN`, break loop [S2, unofficial].
-    *   **Boundary Check:** If `pos` is outside the volume bounds (e.g., $[0, 1]$ for unit cube), break loop [S2, unofficial].
+    *   **Transmittance Update & Check:** Calculate step transmittance `dtm = exp(-uTMK * stepsize * intensity)` [S2, unofficial]. Update `tm = tm * dtm` [S2, unofficial]. If `tm < TM_MIN`, break loop [S2, unofficial].
     *   **Shading Calculation:**
         *   If `color.a > SHADING_THRES` (0.10) and `shading_mode != 3` and `nsamples > 500`, compute shading [S1, unofficial].
-        *   Compute normal `N` using central differences:
-            $$ N_x = \text{sampleVolTex}(pos + \text{stepSize}, 0, 0) - \text{sampleVolTex}(pos - \text{stepSize}, 0, 0) $$
-            $$ N_y = \text{sampleVolTex}(pos, \text{stepSize}, 0) - \text{sampleVolTex}(pos, -\text{stepSize}, 0) $$
-            $$ N_z = \text{sampleVolTex}(pos, 0, \text{stepSize}) - \text{sampleVolTex}(pos, 0, -\text{stepSize}) $$
+        *   Compute normal `N` using central differences with `DELTA` (0.005):
+            $$ N_x = \text{sampleVolTex}(pos + \text{DELTA}, 0, 0) - \text{sampleVolTex}(pos - \text{DELTA}, 0, 0) $$
+            $$ N_y = \text{sampleVolTex}(pos, \text{DELTA}, 0) - \text{sampleVolTex}(pos, -\text{DELTA}, 0) $$
+            $$ N_z = \text{sampleVolTex}(pos, 0, \text{DELTA}) - \text{sampleVolTex}(pos, 0, -\text{DELTA}) $$
             $$ N = \text{normalize}(N) $$
-            [S1, S2, unofficial]. [G] The step size for gradient calculation should be small relative to the volume resolution to approximate the derivative accurately.
+            [S1, S2, unofficial].
         *   Transform normal to world space: `N = normalize(vec3(normalmatrix * N))` [S1, unofficial].
         *   Calculate light vector `L` from `pos` to light position `uLightP[0]` and view vector `V` from `pos` to ray origin `ro` [S1, S2, unofficial].
         *   Compute halfway vector: `H = normalize(L + V)` [S2, unofficial].
@@ -72,9 +61,9 @@ Ray marching with dithering and early termination is a GPU-based volume renderin
                 $$ C_{acc} = C_{acc} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
                 $$ \alpha_{acc} = \alpha_{acc} + \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
                 [S1, unofficial].
-            *   Mode 1/2: MIP or MIDA [S1, unofficial].
-    *   Update position: `pos = pos + delta` [S1, unofficial].
-    *   Decrement remaining length: `len = len - stepsize` [S1, unofficial].
+            *   Mode 1: MIP [S1, unofficial].
+            *   Mode 2: MIDA [S1, unofficial].
+    *   **Early Ray Termination:** If `outcolor.a > 0.95`, break loop [S1, unofficial].
 
 4.  **Output:**
     *   Return final accumulated color `outcolor` [S1, unofficial].
@@ -105,95 +94,81 @@ def ray_march_with_dithering_and_early_termination(ro, rd, volume_texture, tf_te
             - uLightC: Light colors (array of vec3)
             - normalmatrix: Transformation matrix for normals
             - rand_func: Function returning random float in [0, 1)
+            - vol_min: Volume minimum bound (vec3)
+            - vol_max: Volume maximum bound (vec3)
             
     Returns:
         vec4: Final color
     """
-    # 1. Ray Initialization
     direction = normalize(rd)
-    len = length(rd) # Assuming rd is scaled by length
+    len = length(rd)
     stepsize = len / params['nsamples']
     delta = direction * stepsize
     
     outcolor = vec4(0.0, 0.0, 0.0, 0.0)
+    tm = 1.0
     pos = ro
     
-    # 2. Dithering
+    # Dithering to hide staircase aliasing
     pos = pos + delta * params['rand_func']()
     
-    # 3. Ray Marching Loop
     for i in range(params['nsamples']):
-        # Boundary Check
-        if not is_inside_volume(pos, params['volume_bounds']):
+        pos = pos + delta
+        len = len - stepsize
+        
+        if len <= 0:
             break
             
-        # Sample Volume
+        # Boundary check (sources use [0,1] for unit cube, generalized here)
+        if not (params['vol_min'] <= pos <= params['vol_max']):
+            break
+            
         intensity = volume_texture.sample(pos).r
         color = tf_texture.sample(intensity)
         
-        # Early Termination Check (Alpha)
+        # Early termination (alpha)
         if outcolor.a > 0.95:
             break
             
-        # Early Termination Check (Transmittance)
-        # Calculate transmittance for this step
-        # tm *= exp(-uTMK * stepsize * intensity)
-        # if tm < TM_MIN: break
-        # Note: Full transmittance calculation requires maintaining tm across steps
-        # Simplified here as per source logic which checks tm < TM_MIN
-        # We assume tm is maintained in a variable if needed, but source [S2, unofficial]
-        # shows a separate getTransmittance function. For single pass,
-        # we can approximate or maintain tm.
-        # Let's maintain tm for correctness.
-        # tm = tm * exp(-params['uTMK'] * stepsize * intensity)
-        # if tm < params['TM_MIN']: break
-        
-        # Shading Calculation
+        # Transmittance update & check
+        dtm = exp(-params['uTMK'] * stepsize * intensity)
+        tm = tm * dtm
+        if tm < params['TM_MIN']:
+            break
+            
+        # Shading
         if color.a > params['SHADING_THRES'] and params['shading_mode'] != 3 and params['nsamples'] > 500:
-            # Compute Normal
-            step = stepsize
+            step = params['DELTA']
             nx = volume_texture.sample(pos + vec3(step, 0, 0)).r - volume_texture.sample(pos - vec3(step, 0, 0)).r
             ny = volume_texture.sample(pos + vec3(0, step, 0)).r - volume_texture.sample(pos - vec3(0, step, 0)).r
             nz = volume_texture.sample(pos + vec3(0, 0, step)).r - volume_texture.sample(pos - vec3(0, 0, step)).r
             N = normalize(vec3(nx, ny, nz))
-            
-            # Transform Normal
             N = normalize(params['normalmatrix'] * vec4(N, 0.0))
             
-            # Vectors
             L = normalize(params['uLightP'][0] - pos)
             V = normalize(ro - pos)
             H = normalize(L + V)
             
-            # Shading
             if params['shading_mode'] == 0:
                 spec = pow(max(dot(H, N), 0.0), params['uShininess'])
                 color.rgb += spec * params['uLightC'][0]
             elif params['shading_mode'] == 1:
-                # Blinn-Phong + Edge Enhancement
                 spec = pow(max(dot(H, N), 0.0), params['uShininess'])
                 color.rgb += spec * params['uLightC'][0]
-                # Edge enhancement logic not fully detailed in sources, assumed to modify color based on N or intensity
+                # Edge enhancement logic not detailed in sources [S1, unofficial]
             elif params['shading_mode'] == 2:
-                # Toon shading
-                # Simplified toon shading
                 quantized = floor(dot(H, N) * 10.0) / 10.0
                 color.rgb *= quantized + 0.1
                 
         # Compositing (Front-to-Back)
-        # C_acc = C_acc + C_sample * alpha_sample * (1 - alpha_acc)
-        # alpha_acc = alpha_acc + alpha_sample * (1 - alpha_acc)
         outcolor.rgb = outcolor.rgb + color.rgb * color.a * (1.0 - outcolor.a)
         outcolor.a = outcolor.a + color.a * (1.0 - outcolor.a)
         
-        # Update Position
-        pos = pos + delta
-        
+        # Early ray termination check
+        if outcolor.a > 0.95:
+            break
+            
     return outcolor
-
-def is_inside_volume(pos, bounds):
-    # Assuming unit cube [0,1] for simplicity as per source [S2, unofficial]
-    return 0.0 <= pos.x <= 1.0 and 0.0 <= pos.y <= 1.0 and 0.0 <= pos.z <= 1.0
 ```
 
 ## Subtopics
@@ -202,16 +177,16 @@ def is_inside_volume(pos, bounds):
 A GPU-based technique that performs front-to-back alpha blending and shading accumulation in a single fragment shader pass using dynamic branching. It extends the base method by supporting procedurally generated dynamic density fields and Shader Model 3.0 features. Choose this when rendering dynamic volumes composed of overlapping spherical sources.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of samples (steps) along the ray. Early termination reduces the average number of steps, especially in opaque regions.
-*   **Memory Complexity:** $O(1)$ per pixel for accumulation variables, plus storage for the volume texture and transfer function.
-*   **Measured Performance:** Performance depends heavily on the volume density and the early termination threshold. In sparse volumes, rays may traverse many empty steps, but boundary checks can skip them. In dense volumes, early termination at `outcolor.a > 0.95` significantly reduces work. [S1, S2, unofficial].
-*   **Strengths:** Simple to implement in a fragment shader; effective at reducing aliasing with dithering; good performance improvement in opaque regions via early termination.
-*   **Limitations:** Dithering does not prevent aliasing in transfer function or shading; requires careful tuning of step size and thresholds; dynamic branching can cause performance issues on some GPUs if divergence is high.
-*   **When to Use:** Real-time volume rendering where visual quality is acceptable with undersampling and dithering, and performance is critical.
-*   **When Not to Use:** When high precision is required without aliasing artifacts, or when the volume is very sparse and early termination provides little benefit.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Dithering hides woodgrain/staircase aliasing from undersampling but does not prevent transfer function and shading aliasing [S1, unofficial].
+*   **Limitations:** Dynamic branching can cause performance issues on some GPUs if divergence is high [G].
+*   **When to Use:** Not given in the sources.
+*   **When Not to Use:** Not given in the sources.
 
 ## Background
-This method is implemented in the `qvrc` (Qt Volume Raycasting) project by Fargiolas and the `webgl-volumetric` project by Baravalle [S1, S2, unofficial]. It leverages modern OpenGL/WebGL features such as fragment shaders, texture sampling, and dynamic branching to perform volume rendering on the GPU. The use of dithering to hide staircase aliasing is a common technique in ray marching, and early termination based on transmittance or accumulated alpha is a standard optimization in volume rendering.
+This method is implemented in the `qvrc` (Qt Volume Raycasting) project by Fargiolas and the `webgl-volumetric` project by Baravalle [S1, S2, unofficial]. It leverages modern OpenGL/WebGL features such as fragment shaders, texture sampling, and dynamic branching to perform volume rendering on the GPU [S1, S2, unofficial]. The use of dithering to hide staircase aliasing is a common technique in ray marching, and early termination based on transmittance or accumulated alpha is a standard optimization in volume rendering [S2, unofficial].
 
 ## Sources
 [S1] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26 (unofficial)

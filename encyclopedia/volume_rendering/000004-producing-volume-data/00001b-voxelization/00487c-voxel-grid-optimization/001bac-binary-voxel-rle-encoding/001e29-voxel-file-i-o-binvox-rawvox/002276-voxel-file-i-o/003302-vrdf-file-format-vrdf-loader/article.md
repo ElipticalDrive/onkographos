@@ -14,7 +14,7 @@ The VRDF (Volume Rendering Data Format) is a binary file format designed for sto
 ### Data Structures
 
 #### File Layout
-The file consists of sequential blocks. All multi-byte integers are Little-Endian (LE) [S1, unofficial].
+The file consists of sequential blocks [S1, unofficial]. All multi-byte integers are Little-Endian (LE) [S1, unofficial].
 1. **Magic**: 8 bytes ASCII `"VRDF0001"` [S1, unofficial].
 2. **Total Size**: 8 bytes `uint64 LE` [S1, unofficial].
 3. **Metadata Block**: 8 bytes `uint64 LE` for `metaLen`, followed by `metaLen` bytes of UTF-8 JSON [S1, unofficial].
@@ -22,10 +22,10 @@ The file consists of sequential blocks. All multi-byte integers are Little-Endia
 5. **Raw Data Block**: 8 bytes `uint64 LE` for `rawLen`, followed by `rawLen` bytes of raw voxel data [S1, unofficial].
 
 #### VRDFMeta Struct
-Parsed from the Metadata JSON. Fields: `dim` (`int[3]`), `spacing_mm` (`float[3]`), `dtype` (`string`), `intensity_range` (`float[2]`), `affine` (`float[4,4]`), `mode` (`string`), `endianness` (`string`), `order` (`string`), `channels` (`int`), `channel_meaning` (`List<string>`) [S1, unofficial].
+Parsed from the Metadata JSON [S1, unofficial]. Fields: `dim` (`int[3]`), `spacing_mm` (`float[3]`), `dtype` (`string`), `intensity_range` (`float[2]`), `affine` (`float[4,4]`), `mode` (`string`), `endianness` (`string`), `order` (`string`), `channels` (`int`), `channel_meaning` (`List<string>`) [S1, unofficial].
 
 #### VRDFTransferFunction Struct
-Parsed from the Transfer Function JSON. Fields: `type` (`string`), `entries` (`List<VRDFTFEntry>`), `curve` (`List<TFPoint>`), `origin` (`string`), `channel_names_hint` (`List<string>`) [S1, unofficial].
+Parsed from the Transfer Function JSON [S1, unofficial]. Fields: `type` (`string`), `entries` (`List<VRDFTFEntry>`), `curve` (`List<TFPoint>`), `origin` (`string`), `channel_names_hint` (`List<string>`) [S1, unofficial].
 
 #### VRDFTFEntry Struct
 - `label`: `float`
@@ -40,7 +40,7 @@ Parsed from the Transfer Function JSON. Fields: `type` (`string`), `entries` (`L
 
 ### Steps
 1. **Open File**: Open the input file in binary read mode [S1, unofficial].
-2. **Validate Magic**: Read 8 bytes. If not equal to `"VRDF0001"`, abort with error [S1, unofficial].
+2. **Validate Magic**: Read 8 bytes [S1, unofficial]. If not equal to `"VRDF0001"`, abort with error [S1, unofficial].
 3. **Read Total Size**: Read 8 bytes as `uint64 LE` into `totalSize` [S1, unofficial].
 4. **Read Metadata**: Read 8 bytes as `uint64 LE` into `metaLen`, read `metaLen` bytes, decode as UTF-8 JSON, parse into `VRDFMeta` struct [S1, unofficial].
 5. **Read Transfer Function**: Read 8 bytes as `uint64 LE` into `tfLen`, read `tfLen` bytes, decode as UTF-8 JSON, parse into `VRDFTransferFunction` struct [S1, unofficial].
@@ -54,7 +54,7 @@ $$ N = dimX \times dimY \times dimZ $$
 **Validation for `anatomy_label_weighted` (2 channels)**:
 If `meta.mode == "anatomy_label_weighted"` and `meta.channels == 2`:
 $$ rawLen == N \times 2 \times 4 \text{ bytes} $$
-Data is interleaved `[label, weight]` pairs. Each pair is 8 bytes.
+Data is interleaved `[label, weight]` pairs [S1, unofficial]. Each pair is 8 bytes [S1, unofficial].
 For voxel $i$ from $0$ to $N-1$:
 - Label offset: $i \times 8$
 - Weight offset: $i \times 8 + 4$
@@ -114,7 +114,7 @@ def load_vrdf(file_path):
         dim = meta['dim']
         voxel_count = dim[0] * dim[1] * dim[2]
         
-        # Handle Affine Fallback [G]
+        # Handle Affine Fallback [S1, unofficial]
         if meta['affine'] is None:
             spacing = meta['spacing_mm']
             meta['affine'] = [spacing[0], 0, 0, 0, 0, spacing[1], 0, 0, 0, 0, spacing[2], 0, 0, 0, 0, 1.0]
@@ -166,9 +166,9 @@ def load_vrdf(file_path):
 - **JSON Encoding**: UTF-8, compact separators `(",",":")` recommended for size efficiency [S1, unofficial].
 
 ### Edge Cases and Pitfalls
-- **Affine Matrix Order**: JSON stores the affine matrix in row-major order. When loading into column-major systems (e.g., Unity's `Matrix4x4`), use row-setting methods or transpose carefully. If the affine is missing or malformed, fallback to a diagonal matrix using `spacing_mm` and zero translation [S1, unofficial].
-- **Interleaved Data**: `Buffer.BlockCopy` or direct memory mapping cannot efficiently unpack interleaved `[label, weight]` pairs due to stride. Manual iteration with `struct.unpack` or equivalent is required [S1, unofficial].
-- **4D Volumes**: Some export modes handle 4D data (X,Y,Z,T) by splitting into multiple VRDF files (e.g., `_t00.vrdf`). The loader should expect single 3D volumes per file unless explicitly handling a sequence [S1, unofficial].
+- **Affine Matrix Order**: JSON stores the affine matrix in row-major order [S1, unofficial]. When loading into column-major systems (e.g., Unity's `Matrix4x4`), use row-setting methods or transpose carefully [S1, unofficial]. If the affine is missing or malformed, fallback to a diagonal matrix using `spacing_mm` and zero translation [S1, unofficial].
+- **Interleaved Data**: `Buffer.BlockCopy` or direct memory mapping cannot efficiently unpack interleaved `[label, weight]` pairs due to stride [S1, unofficial]. Manual iteration with `struct.unpack` or equivalent is required [S1, unofficial].
+- **4D Volumes**: Some export modes handle 4D data (X,Y,Z,T) by splitting into multiple VRDF files (e.g., `_t00.vrdf`) [S1, unofficial]. The loader should expect single 3D volumes per file unless explicitly handling a sequence [S1, unofficial].
 
 ## Subtopics
 
@@ -187,13 +187,13 @@ def load_vrdf(file_path):
 ## Operating characteristics
 
 ### Time and Memory Complexity
-- **Time**: $O(N)$ where $N$ is the number of voxels. Parsing JSON is $O(M)$ where $M$ is metadata size (typically small) [G]. Interleaved unpacking is $O(N)$ with higher constant factor than contiguous copy [G].
-- **Memory**: $O(N)$ for the volume data. Metadata and TF are $O(1)$ relative to $N$ [G].
+- **Time**: $O(N)$ where $N$ is the number of voxels [G]. Parsing JSON is $O(M)$ where $M$ is metadata size (typically small) [G]. Interleaved unpacking is $O(N)$ with higher constant factor than contiguous copy [G].
+- **Memory**: $O(N)$ for the volume data [G]. Metadata and TF are $O(1)$ relative to $N$ [G].
 
 ### Measured Performance
 - **Hardware**: Standard CPU [G].
 - **Resolution**: Performance scales linearly with voxel count [G].
-- **Scaling**: Efficient for large volumes due to binary layout. JSON parsing overhead is negligible compared to I/O and data unpacking [G].
+- **Scaling**: Efficient for large volumes due to binary layout [G]. JSON parsing overhead is negligible compared to I/O and data unpacking [G].
 
 ### Strengths and Limitations
 - **Strengths**: Self-describing (metadata embedded), supports complex data types (label+weight), compact binary storage, easy to parse with standard libraries [S1, unofficial].

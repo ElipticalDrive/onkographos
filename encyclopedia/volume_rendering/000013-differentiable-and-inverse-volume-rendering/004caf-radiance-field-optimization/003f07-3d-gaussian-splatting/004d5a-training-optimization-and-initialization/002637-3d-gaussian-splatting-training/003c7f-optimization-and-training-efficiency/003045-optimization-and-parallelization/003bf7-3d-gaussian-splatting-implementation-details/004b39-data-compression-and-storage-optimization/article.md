@@ -1,27 +1,30 @@
 # Data Compression and Storage Optimization
 
-Also called: 3DGS Compression, Gaussian Attribute Quantization
+Also called: Gaussian Compression, 3DGS Storage Reduction
 
 ## Overview
-This family of methods reduces the memory footprint and storage requirements of 3D Gaussian Splatting (3DGS) scenes, which often exceed 1GB for large datasets due to per-Gaussian spherical harmonic (SH) coefficients and geometric parameters [S1]. Unlike sibling methods that optimize rendering pipelines or camera models, these techniques focus on the serialization and representation of Gaussian attributes. They distinguish themselves by operating on the data layer—using codebooks, hash grids, or ASCII encoding—rather than altering the differentiable rendering equation [S1].
+This family of methods addresses the excessive memory footprint and storage overhead of 3D Gaussian Splatting (3DGS), which often exceeds 1 GB for large scenes due to per-Gaussian attributes [S1]. The methods reduce storage requirements by compressing numerical representations, clustering parameters into codebooks, or replacing explicit attributes with neural fields [S1]. They distinguish themselves from sibling methods like [Sorting and Rendering Pipeline Optimization](12180-sorting-and-rendering-pipeline-optimization.md) by focusing on data representation density rather than rendering throughput, and from [Gaussian Representation and Truncation](12855-gaussian-representation-and-truncation.md) by employing structural compression (clustering/quantization) rather than geometric pruning alone.
 
 ## Shared principles
-All methods in this family address the redundancy in 3DGS attributes. Standard 3DGS stores unique, high-precision values for position, opacity, rotation, scale, and SH coefficients for every Gaussian. The shared principle is that these attributes exhibit spatial or statistical redundancy, allowing for lossy or lossless compression without significant visual degradation [S1]. The core mechanism involves replacing per-Gaussian storage with shared references (indices) or compact representations (grids/strings), thereby decoupling the number of Gaussians from the storage size [S1].
+All methods in this family aim to reduce the storage size of Gaussian attributes (position, scale, rotation, opacity, color/SH coefficients) while maintaining rendering quality. The core mechanism involves replacing high-precision, per-Gaussian storage with compact representations. This is achieved through:
+1.  **Quantization/Encoding:** Mapping continuous values to discrete, smaller representations (e.g., ASCII strings, integer indices) [S1].
+2.  **Codebooks/Clustering:** Grouping similar parameters (SH coefficients, shape) into shared codebooks, storing only indices [S1].
+3.  **Neural Fields:** Replacing explicit per-Gaussian attributes (like color) with learned implicit representations (e.g., hash grids) [S1].
+4.  **Redundancy Exploitation:** Identifying and removing or compressing spatially redundant or low-impact parameters [S1].
 
 ## Subtopics
 
 ### [ASCII-Based Data Compression](11820-ascii-based-data-compression.md)
-This method reduces bit-width by encoding numerical values into compact ASCII strings, improving transmission speed during distributed training. It operates on the serialization layer rather than the geometric representation layer, focusing on I/O overhead reduction rather than storage density.
+Reduces storage by encoding numerical values as compact ASCII strings. It operates on the serialization layer, trading minor precision loss for faster I/O, distinct from geometric compression methods.
 
 ### [Sensitivity-Aware Vector Clustering](12167-sensitivity-aware-vector-clustering.md)
-This scheme clusters SH coefficients and shape features into compact codebooks, achieving up to 31× compression. It distinguishes itself by incorporating a sensitivity measure $S$ that weights the distance between vectors and centroids, prioritizing the preservation of parameters that significantly affect image quality.
+Clusters SH coefficients and shape parameters into codebooks using sensitivity-aware vector quantization. It prioritizes high-impact parameters, distinguishing itself from standard k-Means by weighting distances based on parameter sensitivity.
 
 ### [Compact 3D Gaussian Representation (C3DGS)](12927-compact-3d-gaussian-representation-c3dgs.md)
-C3DGS reduces storage by replacing per-Gaussian color storage with a hash-based neural grid and geometric parameters with codebook indices. It addresses excessive memory consumption by exploiting spatial redundancy in color and geometry, achieving over 25× compression.
+Replaces per-Gaussian color with a hash-based neural field and geometry with a discrete codebook. It achieves over 25× compression by exploiting spatial redundancy, distinct from methods that retain explicit per-Gaussian attributes.
 
 ## Background
-The standard 3D Gaussian Splatting method [S1] generates scenes with millions of Gaussians, leading to large file sizes. Subsequent research identified that a significant portion of this data is redundant or low-precision, prompting the development of various compression strategies [S1]. These methods are used in applications requiring efficient storage and transmission of 3D scenes, such as web-based viewers and mobile rendering [S1].
+The high memory cost of 3D Gaussian Splatting, particularly for large-scale scenes, has motivated various compression techniques. Standard 3DGS stores full SH coefficients and shape parameters for each Gaussian, leading to significant storage overhead [S1]. Recent research has focused on reducing this footprint through quantization, clustering, and neural field integration [S1].
 
 ## Sources
-
-[S1] 3D Gaussian Splatting Compression Notes, Unofficial Source, 2024
+[S1] Unofficial notes on 3D Gaussian Splatting compression methods.

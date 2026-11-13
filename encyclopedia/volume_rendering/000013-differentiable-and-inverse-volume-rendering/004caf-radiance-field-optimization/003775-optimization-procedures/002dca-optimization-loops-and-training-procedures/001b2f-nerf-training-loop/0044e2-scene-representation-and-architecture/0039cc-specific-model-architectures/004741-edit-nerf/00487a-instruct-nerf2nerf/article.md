@@ -2,57 +2,56 @@
 
 
 ## Overview
-Instruct-NeRF2NeRF is a diffusion-based method for editing a NeRF scene guided by text instructions, utilizing InstructPix2Pix [S1]. It solves the problem of modifying 3D scenes via 2D text prompts by iteratively updating the image dataset of the original scene while training NeRF using these edited images [S1]. It differs from subsequent methods like ViCA-NeRF by lacking explicit geometric consistency constraints during the editing phase, which can lead to blurriness or unintended global texture changes [S1, S2].
+Instruct-NeRF2NeRF is a diffusion-based method for editing a Neural Radiance Field (NeRF) scene guided by text instructions, utilizing InstructPix2Pix [S1]. It differs from [Edit-NeRF](9388-edit-nerf.md) by relying on iterative image dataset updates rather than a modular conditional radiance field, and from [Depth-Guided Sequential Editing](13713-depth-guided-sequential-editing.md) by integrating the diffusion model directly into the training loop rather than propagating edits via geometric projection [S1].
 
 ## How it works
-**Inputs:**
-*   A pre-trained NeRF model representing the original scene.
-*   A set of input images $\{I_i\}$ with corresponding camera poses $\{P_i\}$ and intrinsics $\{K_i\}$ from the original scene capture.
-*   A text instruction $T$ describing the desired edit.
+**Inputs and outputs:**
+*   **Input:** An existing NeRF model and a corresponding dataset of training images (views) of the scene. A text instruction describing the desired edit.
+*   **Output:** An edited NeRF model representing the scene with the applied modifications.
 
-**Outputs:**
-*   An edited NeRF model representing the scene with the applied modifications.
-
-**Data Structures:**
-*   **Image Dataset:** A collection of 2D images. Initially, this is the original capture dataset. During the iterative process, images are replaced by their edited versions.
-*   **NeRF Model:** The standard MLP-based radiance field representation (as defined in [Edit-NeRF](9388-edit-nerf.md)).
+**Data structures:**
+*   **NeRF Model:** Standard MLP-based radiance field representation (position and color).
+*   **Training Dataset:** A set of 2D images and their associated camera poses.
+*   **Diffusion Model:** InstructPix2Pix, a text-conditioned image-to-image diffusion model.
 
 **Steps:**
-1.  **Initialize:** Load the original NeRF model and the original image dataset $\mathcal{D}_0 = \{I_i\}$.
-2.  **Iterative Editing and Training:** Repeat the following loop until convergence or a fixed number of epochs:
-    a.  **Edit Images:** For each image $I_i$ in the current dataset $\mathcal{D}_{t}$, generate an edited image $I'_i$ using InstructPix2Pix conditioned on the text instruction $T$ and the input image $I_i$.
-        $$ I'_i = \text{InstructPix2Pix}(I_i, T) $$
-        [G] InstructPix2Pix is a diffusion model trained to edit images based on text instructions. It takes an image and a text prompt as input and outputs an edited image.
-    b.  **Update Dataset:** Replace the original images with the edited ones to form the new dataset $\mathcal{D}_{t+1} = \{I'_i\}$.
-    c.  **Retrain NeRF:** Train the NeRF model on the updated dataset $\mathcal{D}_{t+1}$ using standard volume rendering losses (e.g., MSE between rendered and edited images). This step aligns the 3D representation with the 2D edits.
-3.  **Output:** Return the final trained NeRF model.
+1.  **Initialization:** Load the pre-trained NeRF model and the original training image dataset.
+2.  **Iterative Editing Loop:**
+    a. For each training image in the dataset (or a subset thereof):
+    i.   Pass the original image and the text instruction to the InstructPix2Pix model.
+    ii.  Generate an edited version of the image using the diffusion model's denoising process conditioned on the instruction.
+    iii. Replace the original image in the training dataset with the generated edited image.
+    b. Train the NeRF model using the updated dataset. This involves rendering views from the NeRF and optimizing the network parameters (weights) to minimize the difference between rendered images and the edited dataset images.
+3.  **Convergence:** Repeat steps 2a and 2b for a fixed number of iterations or until convergence criteria are met.
+
+**Formulas:**
+Not given in the sources. The core mechanism relies on the black-box operation of InstructPix2Pix: $I_{edited} = \text{InstructPix2Pix}(I_{original}, \text{instruction})$.
 
 **Parameters:**
-*   **Text Instruction $T$:** The user-provided command (e.g., "make the sky cloudy").
-*   **Number of Iterations:** Not explicitly defined in the sources. [G] In practice, this is a hyperparameter tuned to balance edit fidelity and scene consistency.
+*   Number of editing iterations: Not given in the sources.
+*   Learning rate for NeRF training: Not given in the sources.
+*   Text instruction: User-defined.
 
-**Edge Cases and Pitfalls:**
-*   **Scene Blur:** The method sometimes fails to preserve the rest of the scene, resulting in a blurrier scene compared to the original [S1].
-*   **Global Changes:** It may introduce texture and color changes to the entire scene rather than just the targeted region [S1].
-*   **Geometric Inconsistency:** Because edits are performed independently per view without explicit 3D consistency checks, the resulting NeRF may exhibit flickering or artifacts when viewed from novel angles [S1, S2].
+**Edge cases and pitfalls:**
+*   **Scene Preservation:** The method sometimes fails to preserve the rest of the scene, resulting in a blurrier scene compared to the original [S1].
+*   **Global Changes:** It may introduce unintended texture and color changes to the entire scene, rather than limiting edits to the target object [S1].
+*   **Consistency:** As it updates the dataset iteratively, maintaining multi-view consistency across the edited views is not explicitly enforced by geometric constraints, potentially leading to inconsistencies [S1].
 
 ## Subtopics
 
-### Depth-Guided Sequential Editing
-A sequential editing strategy that reflects 2D edits in 3D by defining key views, editing them sequentially, and projecting modifications to subsequent views to enforce geometric consistency [S2]. It selects key views based on a modified ratio $\rho$ and a maximum desired modified ratio $\phi$ (set to 0.3) [S2]. It projects edits from edited view $j$ to view $i$ using depth maps $D_i$ and camera intrinsics $K_i$ to calculate 3D points $p_i = P^{-1}(D_i, K_i, \xi_i)$ [S2]. Only unmodified pixels are altered to prevent overwriting, mixing modifications from key views [S2]. This method is chosen when geometric consistency is critical, unlike Instruct-NeRF2NeRF which lacks this constraint [S2].
+### [Depth-Guided Sequential Editing](13713-depth-guided-sequential-editing.md)
+A two-stage method that ensures multi-view consistency by sequentially editing key 2D views and propagating edits via geometric projection, avoiding the integration of a diffusion model into the NeRF training loop.
 
 ## Operating characteristics
-*   **Time Complexity:** High, due to the iterative nature of retraining the NeRF after every batch of 2D edits. Each iteration requires running InstructPix2Pix on all images and then performing full NeRF training.
-*   **Memory Complexity:** Standard NeRF memory requirements plus storage for the edited image dataset.
-*   **Performance:** Demonstrates high-quality local edit results on real scenes [S1]. However, it often fails to preserve the unedited parts of the scene, leading to blurriness and unintended global texture/color changes [S1].
-*   **Strengths:** Simple to implement; leverages powerful 2D diffusion models for high-fidelity edits.
-*   **Limitations:** Lacks explicit 3D consistency; prone to blurring and global artifacts; computationally expensive due to repeated training.
-*   **When to use:** When high-quality local edits are needed and geometric consistency is less critical than ease of implementation.
-*   **When not to use:** When strict view-consistency or preservation of the unedited scene is required.
+*   **Time Complexity:** Not given in the sources. However, [Depth-Guided Sequential Editing](13713-depth-guided-sequential-editing.md) is noted to be approximately 3 times faster, implying Instruct-NeRF2NeRF is computationally intensive due to the iterative diffusion and NeRF training loop [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Demonstrates high-quality local edit results on real scenes [S1].
+*   **Limitations:** Can result in a blurrier scene and may introduce unwanted texture and color changes to the entire scene [S1].
+*   **When to use:** When high-quality local edits are required and computational cost is secondary to ease of implementation via existing diffusion models.
+*   **When not to use:** When strict multi-view consistency, scene preservation, or editing speed are critical.
 
 ## Background
-Instruct-NeRF2NeRF was introduced as a concurrent work to Blended-NeRF [S1]. It utilizes InstructPix2Pix [9] to enable editing images based on text instructions [S1]. The method was noted for its impressive high-quality local edit results but was also critiqued for its inability to preserve the rest of the scene and for introducing global texture changes [S1]. It serves as a baseline for subsequent methods like ViCA-NeRF, which address its geometric inconsistency issues [S2].
+Instruct-NeRF2NeRF was presented concurrently with Blended-NeRF [S1]. It utilizes InstructPix2Pix [9] to enable editing images based on text instructions. The approach was developed to leverage the capabilities of large-scale text-conditioned diffusion models for 3D scene editing.
 
 ## Sources
 [S1] Blended-NeRF: Zero-Shot Object Generation and Blending in Existing Neural Radiance Fields, https://arxiv.org/abs/2306.12760v2, fetched 2026-10-26
-[S2] ViCA-NeRF: View-Consistency-Aware 3D Editing of Neural Radiance Fields, https://arxiv.org/abs/2402.00864v1, fetched 2026-10-26
