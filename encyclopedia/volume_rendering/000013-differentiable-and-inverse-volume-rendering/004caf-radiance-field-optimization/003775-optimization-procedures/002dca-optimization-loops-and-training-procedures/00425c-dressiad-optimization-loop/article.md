@@ -3,7 +3,7 @@
 Also called: Dressi-AD Computational Graph Execution, DressiAD Training Loop
 
 ## Overview
-The DressiAD Optimization Loop is a define-and-run differentiable rendering optimization procedure that constructs a computational graph, marks variables for gradient tracking, and executes forward/backward passes using Stochastic Gradient Descent (SGD) [S1]. It distinguishes itself from standard AD libraries by packing the backward pass into Vulkan command buffers, allowing the optimization loop to execute directly on the GPU without CPU-side backpropagation overhead [S1].
+The DressiAD Optimization Loop is a define-and-run differentiable rendering optimization procedure that constructs a computational graph, marks variables for gradient tracking, and executes forward and backward passes using Stochastic Gradient Descent (SGD) [S1]. It distinguishes itself from standard AD libraries by packing the backward pass into Vulkan command buffers, allowing the optimization loop to execute directly on the GPU without CPU-side backpropagation overhead [S1].
 
 ## How it works
 **Inputs and Outputs:**
@@ -14,7 +14,7 @@ The DressiAD Optimization Loop is a define-and-run differentiable rendering opti
 *   **CpuImage:** A simple buffer representing a 2D image used to store scene data [S1].
 *   **Variable:** A data structure representing inputs and outputs of functions in the computational graph. It contains:
     *   `type`: One of `VEC3`, `VEC2`, `IVEC3`, `MAT4`, `FLOAT`, `VEC4` [S1].
-    *   `size`: Dimensions of the data [S1].
+    *   `size`: Size of the data [S1].
     *   `dirty` flag: Indicates if the variable has changed [S1].
     *   `requires_grad` flag: Marks the variable as an optimization target [S1].
     *   `creator`: Reference to the `Function` that generated this variable [S1].
@@ -25,25 +25,23 @@ The DressiAD Optimization Loop is a define-and-run differentiable rendering opti
 *   `r`: Radius parameter for HardSoftRas. Typical value: $0.01$ [S1].
 *   `sigma`: Blending parameter for HardSoftRas. Calculated as $r / 7$ [S1].
 *   `delta`: Silhouette edge width for HardSoftRas. Equal to $r$ [S1].
-*   `FAST_REBUILD_COUNT`: Threshold for fast graph rebuild [S1].
-*   `FULL_REBUILD_COUNT`: Threshold for full graph rebuild [S1].
 
 **Steps:**
 1.  **Initialization:** Create a `DressiBasicRenderer` instance and load scene data from files into CPU memory [S1].
 2.  **Graph Construction:** Call `BuildBasicRenderGraph` with scene variables and HardSoftRas parameters ($K, r, \sigma, \delta$) to construct the forward rendering computational graph [S1].
-3.  **Loss Calculation:** Compute the L1 loss between the target image and the rendered image:
+3.  **Target Marking:** Mark vertex positions and normal textures as optimization targets by setting their `requires-gradient` flags [S1].
+4.  **Loss Calculation:** Compute the L1 loss between the target image and the rendered image:
     $$
     \text{Loss} = \text{Mean}(|\text{Target} - \text{Rendered}|)
     $$
     [S1].
-4.  **Target Marking:** Mark vertex positions and normal textures as optimization targets by setting their `requires-gradient` flags [S1].
 5.  **Optimizer Setup:** Set the loss variable and an SGD optimizer function to the `DressiAD` instance [S1].
 6.  **Iteration Loop:** For each iteration:
-    a.  Check if any input variable has changed dirty flags. If so, reset `m_graph_static_cnt` to 0 [S1].
+    a.  Check if any input variable has changed dirty flags. If so, reset `m_graph_static_cnt` to $0$ [S1].
     b.  If `m_graph_static_cnt` equals `FAST_REBUILD_COUNT`, set `m_init_status` to `InitStatus::STAGE` [S1].
     c.  If `m_graph_static_cnt` equals `FULL_REBUILD_COUNT`, set `m_init_status` to `InitStatus::SUBSTAGE` [S1].
-    d.  Execute `execStep()` which performs the forward pass, constructs the backward pass, and executes Vulkan commands [S1].
-    e.  Increment `m_graph_static_cnt` [S1].
+    d.  Execute `execStep()` which performs the forward pass, constructs the backward pass, traverses the graph, packs it into Vulkan stages, and executes commands [S1].
+    e.  Increment `m_graph_static_cnt` [G].
 7.  **Cleanup:** Mark all input variables as clean recursively and set `m_init_status` to `FINISHED` [S1].
 
 **Pseudocode:**
@@ -51,6 +49,33 @@ The DressiAD Optimization Loop is a define-and-run differentiable rendering opti
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+class InitStatus:
+    BACKWARD = 0
+    STAGE = 1
+    SUBSTAGE = 2
+    FINISHED = 3
+
+FAST_REBUILD_COUNT = 10  # Not given in the sources.
+FULL_REBUILD_COUNT = 100 # Not given in the sources.
+
+def is_any_variable_dirty_changed(vars):
+    return any(v.dirty for v in vars)
+
+def vk_queue_submit(cmd_buf):
+    # Submits the Vulkan command buffer for execution
+    pass
+
+def Float(val):
+    return Variable(type="FLOAT", value=val)
+
+def sum_pixel_wise(vars_list):
+    if not vars_list:
+        return Variable(type="FLOAT", value=0.0)
+    result = vars_list[0]
+    for v in vars_list[1:]:
+        result = result + v
+    return result
+
 class DressiAD:
     def __init__(self):
         self.m_loss_var = None
@@ -68,77 +93,61 @@ class DressiAD:
         self.m_optimizer = optimizer_func
 
     def exec_step(self):
-        # Check dirty flags of input variables
         if is_any_variable_dirty_changed(self.m_input_vars):
             self.m_graph_static_cnt = 0
 
-        # Check rebuild condition
         if self.m_graph_static_cnt == FAST_REBUILD_COUNT:
             self.m_init_status = InitStatus.STAGE
         elif self.m_graph_static_cnt == FULL_REBUILD_COUNT:
             self.m_init_status = InitStatus.SUBSTAGE
 
-        # Build backward pass
-        input_vars, input_grad_vars = build_backward(self.m_loss_var)
+        input_vars, input_grad_vars = self.build_backward(self.m_loss_var)
 
-        # Execute optimizer
         if self.m_optimizer:
             updated_vars = self.m_optimizer(input_vars, input_grad_vars)
-            # Update variables with optimized values
             for var, updated in zip(input_vars, updated_vars):
                 var.set_value(updated)
 
-        # Execute command buffer
         vk_queue_submit(self.m_vk_cmd_buf)
 
-        # Mark as clean recursively
         for v in self.m_input_vars:
             v.set_dirty_recursively(False)
 
         self.m_init_status = InitStatus.FINISHED
+        self.m_graph_static_cnt += 1
 
-def build_backward(loss_var):
-    fwd_bwds_map = {}
-    func_queue = []
+    def build_backward(self, loss_var):
+        fwd_bwds_map = {}
+        func_queue = []
 
-    # Set loss as the starting point
-    fwd_bwds_map[loss_var] = [Float(1.0)]
-    func_queue.append(loss_var.get_creator())
+        fwd_bwds_map[loss_var] = [Float(1.0)]
+        creator = loss_var.get_creator()
+        if creator:
+            func_queue.append(creator)
 
-    if self.m_init_status <= InitStatus.BACKWARD:
-        # Traverse the forward computational graph and generate the backward graph
-        while func_queue:
-            func = func_queue.pop()
-            # Generate backward gradients for inputs of this function
-            input_grads = func.build_bwd(fwd_bwds_map[func.output])
-            for x, gx in zip(func.inputs, input_grads):
-                if x not in fwd_bwds_map:
-                    fwd_bwds_map[x] = []
-                fwd_bwds_map[x].append(gx)
-                x_creator = x.get_creator()
-                if x_creator:
-                    func_queue.append(x_creator)
+        if self.m_init_status <= InitStatus.BACKWARD:
+            while func_queue:
+                func = func_queue.pop()
+                input_grads = func.build_bwd(fwd_bwds_map[func.output])
+                for x, gx in zip(func.inputs, input_grads):
+                    if x not in fwd_bwds_map:
+                        fwd_bwds_map[x] = []
+                    fwd_bwds_map[x].append(gx)
+                    x_creator = x.get_creator()
+                    if x_creator:
+                        func_queue.append(x_creator)
 
-    # Collect input and gradient of input variables
-    input_vars = []
-    input_grad_vars = []
-    for x, gxs in fwd_bwds_map.items():
-        input_vars.append(x)
-        input_grad_vars.append(sum_pixel_wise(gxs))
+        input_vars = []
+        input_grad_vars = []
+        for x, gxs in fwd_bwds_map.items():
+            input_vars.append(x)
+            input_grad_vars.append(sum_pixel_wise(gxs))
 
-    return input_vars, input_grad_vars
-
-def sgd_optimizer(xs, gxs, lr=0.01):
-    updated_xs = []
-    for i in range(len(xs)):
-        updated_xs.append(xs[i] - gxs[i] * lr)
-    return updated_xs
+        return input_vars, input_grad_vars
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Dirty Flags:** If input variables do not update dirty flags correctly, the graph may not rebuild when necessary, leading to stale gradients [S1].
-*   **Rebuild Counts:** Incorrect values for `FAST_REBUILD_COUNT` and `FULL_REBUILD_COUNT` can lead to inefficient graph rebuilding or stale computational graphs [S1].
-*   **Variable Types:** Ensure that all variables in the computational graph have correctly defined types (`VEC3`, `VEC2`, etc.) to avoid type mismatches during gradient computation [S1].
+*   **Dirty Flags:** Input variables must correctly update dirty flags so the system can detect changes and reset the static counter [S1].
 
 ## Subtopics
 
@@ -197,10 +206,10 @@ def sgd_optimizer(xs, gxs, lr=0.01):
 *   **Link:** [Two-Stage Inverse Rendering Optimization](7387-two-stage-inverse-rendering-optimization.md)
 
 ## Operating characteristics
-*   **Time Complexity:** The time complexity depends on the number of iterations and the size of the computational graph. The backward pass construction and execution are optimized by packing into Vulkan command buffers [S1].
-*   **Memory Complexity:** Memory usage is determined by the size of the computational graph and the intermediate variables stored during the forward and backward passes [S1].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
 *   **Measured Performance:** Not given in the sources.
-*   **Scaling:** The method scales with the size of the scene and the number of optimization targets [S1].
+*   **Scaling:** Not given in the sources.
 *   **Strengths:** Hardware-agnostic design, efficient GPU execution of backward passes, and reactive shader packing [S1].
 *   **Limitations:** Requires Vulkan support, and the define-and-run paradigm may limit flexibility compared to eager execution frameworks [S1].
 *   **When to use:** When optimizing differentiable rendering parameters with a focus on GPU efficiency and hardware agnosticism [S1].

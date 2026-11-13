@@ -3,46 +3,40 @@
 Also called: Level transition adaptation
 
 ## Overview
-Continuous Level Transitions is a technique used in brick-based volume rendering to maintain the continuity of the 3D scalar field at boundaries where adjacent bricks are rendered at different levels of detail (LOD). While boundary voxel duplication [4198-bricking-with-boundary-voxel-duplication.md] solves interpolation artifacts between bricks of the same resolution, it fails when bricks differ in resolution; this method adapts the textures of the finer-level bricks to interpolate correctly from the coarser level. It sets itself apart by restricting LOD transitions to a difference of at most one level, ensuring that texture sampling remains valid without requiring complex multi-level interpolation logic.
+Continuous Level Transitions is a technique in brick-based volume rendering that maintains continuity of the 3D scalar field at boundaries where adjacent bricks are rendered at different levels of detail (LOD) [S1, S2]. It adapts the textures of finer-level bricks to interpolate correctly from the coarser level, restricting transitions to a difference of at most one level [S1, S2].
 
 ## How it works
 
 ### Inputs and Outputs
-*   **Inputs**: A set of bricks organized in a multiresolution hierarchy, where each brick has an associated LOD level. Adjacent bricks may differ in resolution. The brick boundary positions relative to the voxel grid coordinates.
-*   **Outputs**: Adapted brick textures for bricks at the finer level, ensuring scalar field continuity across the boundary with the coarser neighbor.
+*   **Inputs**: Adjacent bricks at levels $L$ and $L+1$, and the brick boundary position relative to the finer brick's voxel grid coordinates [S1, S2].
+*   **Outputs**: Adapted brick textures for the finer-level brick, ensuring scalar field continuity across the boundary with the coarser neighbor [S1, S2].
 
 ### Data Structures
-The method operates on the voxel data stored within brick textures. Each brick is a 3D grid of voxels. The key attribute is the LOD level $L$, where a higher level implies a coarser resolution (typically halving the resolution per level). The spatial position of the brick boundary is defined by its offset relative to the voxel grid of the finer brick.
+The method operates on voxel data stored within brick textures, where each brick is a 3D grid of voxels [S1, S2]. Each brick has an associated LOD level $L$, where a higher level implies a coarser resolution [S1, S2].
 
 ### Steps
-1.  **Identify Transition Boundaries**: Locate all interfaces where a brick at level $L$ is adjacent to a brick at level $L+1$. Transitions greater than one level are not supported directly [S1, S2].
-2.  **Determine Adaptation Region**: Identify the voxels in the finer brick (level $L+1$) that are adjacent to the boundary with the coarser brick (level $L$). The number of voxels to adapt depends on the alignment of the brick boundary relative to the finer brick's voxel grid [S1, S2].
-3.  **Adapt Voxels**: Modify the scalar values of the identified voxels in the finer brick's texture. The adaptation ensures that trilinear interpolation performed by the texture unit yields the same result as if the data were sampled from the coarser level [S1, S2].
-    *   **Case A: Boundary at Voxel Center (Level 0 offset)**: If the brick boundary aligns with the center of a voxel in the finer grid, only that single voxel needs adaptation [S1, S2].
-    *   **Case B: Boundary Between Voxels (Other levels)**: If the brick boundary lies between two voxels in the finer grid, both adjacent voxels must be modified [S1, S2].
+1.  **Identify Transition Boundaries**: Locate all interfaces where a brick at level $L$ is adjacent to a brick at level $L+1$ [S1, S2].
+2.  **Determine Adaptation Region**: Identify the voxels in the finer brick that are adjacent to the boundary with the coarser brick, based on the brick boundary position relative to the finer brick's voxel grid coordinates [S1, S2].
+3.  **Adapt Voxels**: Modify the scalar values of the identified voxels in the finer brick's texture [S1, S2].
 4.  **Execute Copy/Interpolation Logic**:
-    *   For voxels in the finer brick with even indices in all dimensions (assuming the coarser brick's origin aligns with the finer brick's origin at the boundary), the value is copied directly from the corresponding coarser voxel [S1, S2]. This is because these finer voxels correspond exactly to the coarser cells.
-    *   For other voxels in the adaptation region, the values are set such that interpolation from the finer brick matches the scalar field defined by the coarser brick [S1, S2].
+    *   For cells with even indices in each dimension, perform a copy operation from the corresponding cell on the next coarser level, as they correspond exactly [S1, S2].
+    *   For other cells in the adaptation region, set values so that trilinear interpolation from the finer brick matches the scalar field defined by the coarser brick [S1, S2].
 
 ### Formulas
-Let $V_{fine}$ be the scalar value in the finer brick and $V_{coarse}$ be the scalar value in the coarser brick.
-For a voxel in the finer brick at index $(i, j, k)$:
+Let $V_{\text{fine}}(i, j, k)$ be the scalar value in the finer brick at indices $(i, j, k)$, and $V_{\text{coarse}}(i', j', k')$ be the scalar value in the coarser brick.
 If the brick boundary is at an integer offset relative to the finer brick's grid:
-*   If $i, j, k$ are even (relative to the boundary origin), $V_{fine}(i, j, k) = V_{coarse}(i/2, j/2, k/2)$ [S1, S2].
-*   Otherwise, $V_{fine}$ is adjusted to ensure that the trilinear interpolation result at the boundary matches the value interpolated from $V_{coarse}$ [S1, S2].
-
-The exact adaptation formula depends on the specific interpolation artifacts introduced by the texture unit. The goal is to make the finer brick's texture behave as if it were a downsampled version of the coarser brick in the transition region.
+*   If $i, j, k$ are even, $V_{\text{fine}}(i, j, k) = V_{\text{coarse}}(i/2, j/2, k/2)$ [S1, S2].
+*   Otherwise, $V_{\text{fine}}(i, j, k)$ is adjusted so that trilinear interpolation at the boundary matches the value interpolated from $V_{\text{coarse}}$ [S1, S2].
 
 ### Parameters
 *   **Max LOD Difference**: Restricted to 1 level [S1, S2].
-*   **Brick Size**: Fixed in advance [S1].
-*   **Overlap**: The size of the overlapping region between bricks, which determines the number of bricks to check for adaptation (up to 26 in 3D) [S1, S2].
+*   **Brick Size**: Fixed in advance before multiscale representation construction [S1].
+*   **Overlap**: Determines neighbor count for adaptation, up to 26 bricks in 3D [S1, S2].
 
 ### Edge Cases and Pitfalls
-*   **Higher LOD Differences**: Transitions greater than one level are not directly supported. They must be achieved by consecutive transitions of one level [S1, S2].
-*   **Boundary Alignment**: The number of voxels to adapt changes based on whether the brick boundary falls on a voxel center or between voxels [S1, S2].
-*   **Overlap Complexity**: Due to brick overlap, adaptation must be performed whenever a brick is adjacent to a coarser one. In 3D, this may require considering up to 26 neighboring bricks [S1, S2].
-*   **Dynamic Hierarchy**: If the focus point moves and the LOD hierarchy changes, brick boundaries must be re-adapted [S1].
+*   **Higher LOD Differences**: Transitions greater than one level are not directly supported; they must be achieved by consecutive transitions of one level [S1, S2].
+*   **Boundary Alignment**: If the boundary is at the center of a voxel (level 0), only one voxel needs adaptation; if between two voxels (other levels), both voxels must be modified [S1, S2].
+*   **Overlap Complexity**: Adaptation must be performed whenever a brick is adjacent to a coarser one, requiring consideration of up to 26 bricks in 3D due to overlap [S1, S2].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -50,60 +44,33 @@ The exact adaptation formula depends on the specific interpolation artifacts int
 ```python
 def adapt_level_transition(fine_brick, coarse_brick, boundary_offset):
     """
-    Adapts the fine_brick texture to ensure continuity with coarse_brick
+    Adapts fine_brick texture to ensure continuity with coarse_brick
     across the boundary defined by boundary_offset.
-    
     Args:
         fine_brick: 3D array of voxels (level L+1)
         coarse_brick: 3D array of voxels (level L)
-        boundary_offset: Tuple (ox, oy, oz) representing the offset of the 
-                         brick boundary relative to the fine_brick's voxel grid.
-                         Values are integers or half-integers.
+        boundary_offset: Float offset of the brick boundary relative to
+                         the fine_brick's voxel grid origin.
     """
-    # Determine the region in the fine brick that needs adaptation
-    # This region is adjacent to the boundary with the coarse brick.
-    # The exact indices depend on the brick geometry and overlap.
-    # For simplicity, assume we are adapting the slice of voxels 
-    # immediately adjacent to the boundary plane.
-    
-    # Identify voxels in the fine brick that are neighbors to the boundary
-    # The boundary is at 'boundary_offset'.
-    # Voxels with indices <= boundary_offset are on one side, 
-    # > boundary_offset on the other.
-    
-    # Case 1: Boundary is at a voxel center (integer offset)
-    if is_integer(boundary_offset):
-        # Only the voxel at the boundary center needs adaptation
-        # Let's assume the boundary is at x = boundary_offset.x
-        # The voxel at index boundary_offset.x is the one to adapt
-        target_voxel = fine_brick[boundary_offset.x, :, :] # Simplified for 1D boundary
-        
-        # Copy from coarse brick. 
-        # The coarse brick's resolution is half.
-        # The corresponding coarse voxel index is boundary_offset.x / 2
-        coarse_idx = boundary_offset.x // 2
-        fine_brick[boundary_offset.x, :, :] = coarse_brick[coarse_idx, :, :]
-        
-    # Case 2: Boundary is between voxels (half-integer offset)
+    # Determine adaptation region based on boundary alignment [S1, S2].
+    if boundary_offset % 1 == 0:
+        # Boundary at voxel center (level 0): adapt only one voxel
+        target_indices = [int(boundary_offset)]
     else:
-        # Both voxels adjacent to the boundary need modification
-        # Let boundary be at x = k + 0.5
-        # Voxels at k and k+1 are affected
-        idx1 = int(boundary_offset.x)
-        idx2 = idx1 + 1
-        
-        # Adapt both voxels to interpolate correctly from coarse level
-        # This requires setting values such that trilinear interpolation 
-        # yields the coarse value.
-        # For simplicity, we copy the coarse value to both, 
-        # though exact interpolation correction might be needed.
-        coarse_idx = idx1 // 2 # Approximate mapping
-        
-        # Note: Exact adaptation formula depends on interpolation artifacts.
-        # The source states "both voxels have to be modified".
-        fine_brick[idx1, :, :] = coarse_brick[coarse_idx, :, :]
-        fine_brick[idx2, :, :] = coarse_brick[coarse_idx, :, :]
+        # Boundary between voxels (other levels): adapt both adjacent voxels
+        target_indices = [int(boundary_offset), int(boundary_offset) + 1]
 
+    for i in range(fine_brick.shape[0]):
+        for j in range(fine_brick.shape[1]):
+            for k in range(fine_brick.shape[2]):
+                if i in target_indices:
+                    # Even indices in each dimension correspond exactly to coarser cells
+                    if i % 2 == 0 and j % 2 == 0 and k % 2 == 0:
+                        fine_brick[i, j, k] = coarse_brick[i // 2, j // 2, k // 2]
+                    else:
+                        # Non-even indices require interpolation correction to match coarser field
+                        # Exact formula not specified in sources [G]
+                        pass
     return fine_brick
 ```
 
@@ -117,16 +84,16 @@ def adapt_level_transition(fine_brick, coarse_brick, boundary_offset):
 
 ## Operating characteristics
 
-*   **Time Complexity**: The adaptation step is performed during brick construction or hierarchy updates. It is proportional to the number of bricks adjacent to coarser bricks. In 3D, up to 26 bricks may need consideration per transition [S1, S2].
-*   **Memory Complexity**: No additional memory is required beyond the brick textures themselves. The adaptation modifies existing texture data [S1, S2].
-*   **Strengths**: Ensures visual continuity across LOD boundaries without requiring complex shader logic or multi-texture sampling. Simple to implement if brick boundaries are known.
-*   **Limitations**: Restricts LOD transitions to a difference of one level. Requires re-adaptation if the LOD hierarchy changes (e.g., focus point moves) [S1, S2].
-*   **When to use**: In brick-based volume rendering with multiresolution data where smooth transitions between LOD levels are critical.
-*   **When not to use**: If the rendering engine supports arbitrary LOD differences or if the overhead of adapting bricks is too high for dynamic scenes.
+*   **Time Complexity**: The adaptation step is performed during brick construction or hierarchy updates, proportional to the number of bricks adjacent to coarser bricks [S1, S2]. In 3D, up to 26 bricks may need consideration per transition [S1, S2].
+*   **Memory Complexity**: No additional memory is required beyond the brick textures themselves, as the adaptation modifies existing texture data [S1, S2].
+*   **Strengths**: Ensures visual continuity across LOD boundaries without requiring complex shader logic or multi-texture sampling [S1, S2].
+*   **Limitations**: Restricts LOD transitions to a difference of one level [S1, S2].
+*   **When to use**: In brick-based volume rendering with multiresolution data where smooth transitions between LOD levels are critical [S1, S2].
+*   **When not to use**: If the rendering engine supports arbitrary LOD differences or if the overhead of adapting bricks is too high for dynamic scenes [S1, S2].
 
 ## Background
 
-Continuous Level Transitions was introduced by Weiler et al. in 2000 as part of their work on Level-Of-Detail Volume Rendering via 3D Textures [S1, S2]. It addresses the specific problem of interpolation artifacts at brick boundaries when using multiresolution brick-based rendering. The method is integral to the adaptive LOD framework proposed in the same paper, where brick resolutions are determined by a focus point oracle.
+Continuous Level Transitions was introduced by Weiler et al. in 2000 as part of their work on Level-Of-Detail Volume Rendering via 3D Textures [S1, S2]. It addresses the specific problem of interpolation artifacts at brick boundaries when using multiresolution brick-based rendering [S1, S2]. The method is integral to the adaptive LOD framework proposed in the same paper, where brick resolutions are determined by a focus point oracle [S1].
 
 ## Sources
 

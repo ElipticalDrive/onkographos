@@ -1,0 +1,228 @@
+--- v005.md
++++ v006.md
+@@ -14,5 +14,5 @@
+ 1.  **Hashed Grids:** Separate grids for surface vertices and medium vertices, used for Point-Point (P-P) estimators [S2].
+ 2.  **Bounding Volume Hierarchy (BVH):** Built over medium vertices, used for Point-Beam (P-B) estimators [S2].
+-3.  **Uniform Grid:** Organizes photon beams, used for Beam-Beam (B-B) estimators. The uniform grid is chosen over BVH for beams because it is faster to build, though query performance is suboptimal [S2].
++3.  **Uniform Grid:** Organizes photon beams, used for Beam-Beam (B-B) estimators [S2]. The uniform grid is chosen over BVH for beams because it is faster to build, though query performance is suboptimal [S2].
+ 
+ ### Active Estimators
+@@ -36,5 +36,5 @@
+ ### Step-by-Step Algorithm
+ 
+-**Stage 1: Light Subpath Generation and Storage**
++**Stage 1: Light Subpath Generation and Storage** [S3]
+ 1.  Generate $n_{BPT}$ light subpaths $\bar{\bf y}$ using standard path tracing or light tracing techniques [S2, S3].
+ 2.  Store vertices on surfaces and vertices/beams in media [S2, S3].
+@@ -44,5 +44,5 @@
+ 6.  Store fewer photon beams than points due to higher memory and computational costs per beam [S2].
+ 
+-**Stage 2: Camera Subpath Evaluation**
++**Stage 2: Camera Subpath Evaluation** [S2, S3]
+ 1.  For each pixel, generate one camera subpath $\bar{\bf z}$ [S3].
+ 2.  Stochastically terminate light and camera subpaths up to the maximum path length $k$ [S3].
+@@ -84,19 +84,15 @@
+ ```python
+ def upbp_render(scene, camera, max_path_length_k, n_light_subpaths):
+-    """
+-    Main UPBP rendering loop.
+-    """
+-    # Stage 1: Light Subpath Generation and Storage
++    # Stage 1: Light Subpath Generation and Storage [S2, S3]
+     light_subpaths = []
+     surface_vertices = []
+     medium_vertices = []
+     photon_beams = []
+-    
+-    for i in range(n_light_subpaths):
+-        # Generate a light subpath y_bar
+-        y_bar = trace_light_subpath(scene, max_path_length_k)
++
++    for _ in range(n_light_subpaths):
++        # Generate light subpath y_bar [S3]
++        y_bar = trace_light_subpath(scene, max_path_length_k) # [G] Standard light subpath generation
+         light_subpaths.append(y_bar)
+-        
+-        # Store vertices and beams
++
+         for vertex in y_bar.vertices:
+             if vertex.is_surface:
+@@ -104,111 +100,86 @@
+             else:
+                 medium_vertices.append(vertex)
+-        
+-        # Store beams (segments between medium vertices)
++
+         for beam in y_bar.beams:
+             photon_beams.append(beam)
+ 
+-    # Build Data Structures
+-    surface_grid = build_hashed_grid(surface_vertices)
+-    medium_grid = build_hashed_grid(medium_vertices)
+-    medium_bvh = build_bvh(medium_vertices)
+-    beam_grid = build_uniform_grid(photon_beams)
+-
+-    # Stage 2: Camera Subpath Evaluation
++    # Build Data Structures [S2]
++    surface_grid = build_hashed_grid(surface_vertices) # [G] Standard spatial hashing
++    medium_grid = build_hashed_grid(medium_vertices)   # [G] Standard spatial hashing
++    medium_bvh = build_bvh(medium_vertices)            # [G] Standard BVH construction
++    beam_grid = build_uniform_grid(photon_beams)       # [G] Standard uniform grid construction
++
++    # Stage 2: Camera Subpath Evaluation [S2, S3]
+     image = zeros(camera.resolution)
+-    
++
+     for pixel in camera.pixels:
+-        # Generate one camera subpath per pixel
+-        z_bar = trace_camera_subpath(camera, max_path_length_k)
+-        
++        # Generate one camera subpath z_bar per pixel [S3]
++        z_bar = trace_camera_subpath(camera, max_path_length_k) # [G] Standard camera subpath generation
+         pixel_radiance = 0.0
+-        
+-        # Evaluate BPT and P-P estimators at vertices
++
++        # Evaluate estimators at vertices [S2, S3]
+         for s, vertex in enumerate(z_bar.vertices):
+-            # BPT: Connect to a random light subpath
+-            # Note: In practice, BPT connects to ALL light subpath vertices, 
+-            # but the formula averages over n_BPT. 
+-            # The source [S3] says "evaluated with all vertices of a randomly chosen light subpath"
+-            # but the formula sums over n_BPT. We follow the formula structure.
+-            
+-            # Calculate MIS weight denominator g_v(x)
+-            # This requires PDFs for all techniques. 
+-            # For implementation, we compute contributions and weights.
+-            
+-            # BPT Contribution
++            # t is derived from s and max path length k [S3]
++            t = max_path_length_k + 1 - s
++
++            # BPT Contribution [S2, S3]
+             bpt_contrib = 0.0
+             for light_subpath in light_subpaths:
+-                # Connect vertex to light subpath vertices
+-                # Evaluate BPT estimator <I>_BPT,s
+-                bpt_contrib += evaluate_bpt_estimator(vertex, light_subpath)
+-            bpt_contrib /= n_light_subpaths
+-            
+-            # P-P2D (Surface) or P-P3D (Medium) Contribution
++                # Connect camera vertex to light subpath vertices [S2]
++                bpt_contrib += evaluate_bpt_estimator(vertex, light_subpath) # [G] Standard BPT connection and radiance evaluation
++            bpt_contrib /= len(light_subpaths)
++
++            # P-P Contribution [S2]
+             pp_contrib = 0.0
+             if vertex.is_surface:
+-                # Query surface_grid
+-                pp_contrib = evaluate_pp2d_estimator(vertex, surface_grid)
+-            else:
+-                # Query medium_grid
+-                pp_contrib = evaluate_pp3d_estimator(vertex, medium_grid)
+-                
+-            # Compute MIS weights and sum
+-            # w_v,s,t = n_v * p_v,s / g_v
+-            # Contribution = w * <I>
+-            # Note: The formula divides by n_v outside the sum. 
+-            # The inner sum is over s.
+-            # We accumulate weighted contributions.
+-            
+-            # Simplified accumulation logic based on the formula structure:
+-            # The formula sums over i (samples) and s (vertices).
+-            # Here we have 1 camera sample (z_bar).
+-            
+-            # We need to compute the weight for each technique at this vertex/segment.
+-            # This requires the PDFs.
+-            
+-            # For BPT:
+-            w_bpt = compute_mis_weight('BPT', s, z_bar, light_subpaths, surface_grid, medium_grid, beam_grid, medium_bvh)
+-            pixel_radiance += w_bpt * bpt_contrib
+-            
+-            # For P-P:
+-            w_pp = compute_mis_weight('PP', s, z_bar, light_subpaths, surface_grid, medium_grid, beam_grid, medium_bvh)
+-            pixel_radiance += w_pp * pp_contrib
+-
+-        # Evaluate P-B and B-B estimators at segments (beams)
++                pp_contrib = evaluate_pp2d_estimator(vertex, surface_grid) # [G] Standard P-P2D density estimation
++            else:
++                pp_contrib = evaluate_pp3d_estimator(vertex, medium_grid)  # [G] Standard P-P3D density estimation
++
++            # Compute MIS weights [S3]
++            # Numerator: n_v * p_v,s
++            # Denominator: sum over all techniques j of n_j * p_j,s
++            p_bpt = get_pdf_bpt(s, z_bar, light_subpaths) # [G] Standard BPT PDF calculation
++            p_pp = get_pdf_pp(s, vertex)                  # [G] Standard P-P PDF calculation
++            p_pb = get_pdf_pb(s, vertex)                  # [G] Standard P-B PDF calculation
++            p_bb = get_pdf_bb(s, vertex)                  # [G] Standard B-B PDF calculation
++
++            n_bpt = len(light_subpaths)
++            n_pp = len(light_subpaths)
++            n_pb = len(light_subpaths)
++            n_bb = len(light_subpaths)
++
++            g = (n_bpt * p_bpt + n_pp * p_pp + n_pb * p_pb + n_bb * p_bb)
++            if g > 0:
++                w_bpt = (n_bpt * p_bpt) / g
++                w_pp = (n_pp * p_pp) / g
++                w_pb = (n_pb * p_pb) / g
++                w_bb = (n_bb * p_bb) / g
++            else:
++                w_bpt, w_pp, w_pb, w_bb = 0.0, 0.0, 0.0, 0.0
++
++            pixel_radiance += w_bpt * bpt_contrib + w_pp * pp_contrib
++
++        # Evaluate estimators at segments (beams) [S2]
+         for s, beam in enumerate(z_bar.beams):
+-            # P-Bl2D (Point-Beam)
+-            p_bl2d_contrib = evaluate_p_bl2d_estimator(beam, medium_bvh, beam_grid)
+-            
+-            # Bs-Bl1D (Beam-Beam)
+-            bs_bl1d_contrib = evaluate_bs_bl1d_estimator(beam, beam_grid)
+-            
+-            # Compute MIS weights for beam estimators
+-            w_p_bl2d = compute_mis_weight('P-B', s, z_bar, light_subpaths, surface_grid, medium_grid, beam_grid, medium_bvh)
+-            w_bs_bl1d = compute_mis_weight('B-B', s, z_bar, light_subpaths, surface_grid, medium_grid, beam_grid, medium_bvh)
+-            
+-            pixel_radiance += w_p_bl2d * p_bl2d_contrib
+-            pixel_radiance += w_bs_bl1d * bs_bl1d_contrib
+-            
++            # P-Bl2D and Bs-Bl1D contributions [S2]
++            p_bl2d_contrib = evaluate_p_bl2d_estimator(beam, medium_bvh, beam_grid) # [G] Standard P-Bl2D density estimation
++            bs_bl1d_contrib = evaluate_bs_bl1d_estimator(beam, beam_grid)           # [G] Standard Bs-Bl1D density estimation
++
++            # MIS weights for beam estimators [S3]
++            p_pb_seg = get_pdf_pb_segment(s, beam) # [G] Standard P-B segment PDF calculation
++            p_bb_seg = get_pdf_bb_segment(s, beam) # [G] Standard B-B segment PDF calculation
++            g_seg = (len(light_subpaths) * p_bpt + len(light_subpaths) * p_pp + len(light_subpaths) * p_pb_seg + len(light_subpaths) * p_bb_seg)
++            if g_seg > 0:
++                w_pb_seg = (len(light_subpaths) * p_pb_seg) / g_seg
++                w_bb_seg = (len(light_subpaths) * p_bb_seg) / g_seg
++            else:
++                w_pb_seg, w_bb_seg = 0.0, 0.0
++
++            pixel_radiance += w_pb_seg * p_bl2d_contrib + w_bb_seg * bs_bl1d_contrib
++
+         image[pixel] = pixel_radiance
+ 
+     return image
+-
+-def compute_mis_weight(technique, s, z_bar, light_subpaths, surface_grid, medium_grid, beam_grid, medium_bvh):
+-    """
+-    Computes the MIS weight w_v,s,t using the extended balance heuristic.
+-    """
+-    # Numerator: n_v * p_v,s
+-    n_v = get_n_light_subpaths(technique)
+-    p_v_s = get_pdf(technique, s, z_bar, light_subpaths, surface_grid, medium_grid, beam_grid, medium_bvh)
+-    numerator = n_v * p_v_s
+-    
+-    # Denominator: sum over all techniques j of n_j * p_j,s
+-    denominator = 0.0
+-    for technique_j in ['BPT', 'B-B1D', 'P-B2D', 'P-P3D', 'P-P2D']:
+-        n_j = get_n_light_subpaths(technique_j)
+-        p_j_s = get_pdf(technique_j, s, z_bar, light_subpaths, surface_grid, medium_grid, beam_grid, medium_bvh)
+-        denominator += n_j * p_j_s
+-        
+-    return numerator / denominator
+ ```
+ 

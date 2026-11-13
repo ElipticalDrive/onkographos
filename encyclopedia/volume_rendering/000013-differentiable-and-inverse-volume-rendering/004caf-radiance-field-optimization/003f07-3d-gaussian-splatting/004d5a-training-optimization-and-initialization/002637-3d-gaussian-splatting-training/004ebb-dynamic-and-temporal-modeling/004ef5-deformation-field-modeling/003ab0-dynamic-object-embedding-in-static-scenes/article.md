@@ -3,125 +3,106 @@
 Also called: Lightweight Dynamic NeRF Modeling via Local Deformation Field, Local deformation field model
 
 ## Overview
-This method addresses the problem of integrating dynamic advertising objects into static NeRF scenes while maintaining perspective consistency and computational efficiency. It differs from traditional dynamic NeRF approaches (e.g., DyNeRF) by decoupling the scene into a static background and a localized dynamic region, using a lightweight deformation field to warp coordinates rather than training independent models for each time step [S1]. This reduces parameter count by 95% compared to full-scene dynamic models, making it suitable for VR devices [S1].
+This method integrates dynamic advertising objects into static NeRF scenes by ensuring perspective consistency through spatial alignment and joint rendering with alpha blending [S1]. It addresses the high computational cost of traditional dynamic NeRFs (e.g., DyNeRF), which require over 100M parameters and independent models per time step, by using a static NeRF for static areas and a lightweight deformation field for dynamic regions [S1]. Unlike siblings like [Dynamic 3D Gaussian Splatting (Katsumata et al.)](9168-dynamic-3d-gaussian-splatting-katsumata-et-al.md) which model dynamics via Gaussian attributes, this approach warps coordinates into a static radiance field [S1].
 
 ## How it works
-The method integrates dynamic elements into a static radiance field through four main stages: static scene reconstruction, dynamic object modeling, spatial alignment, and joint rendering.
+**Inputs and Outputs:**
+*   **Inputs:** Sparse video frames of the static scene (exhibition stand + background), sparse video frames of the dynamic object (e.g., rotating watch), and four corresponding marking points (e.g., stand corners) in both domains for alignment [S1].
+*   **Outputs:** A rendered frame at time $t$ combining the static background and the dynamically deformed object [S1].
 
-### Inputs and Outputs
-*   **Inputs:**
-    *   Sparse video frames of the static scene (exhibition stand + background).
-    *   Sparse video frames of the dynamic object (e.g., a rotating watch, 25–30 frames) [S1].
-    *   Four corresponding marking points (e.g., stand corners) in both static and dynamic data for alignment [S1].
-*   **Outputs:**
-    *   A static NeRF model for the background.
-    *   A local deformation field $\Delta(x, t)$ for the dynamic object.
-    *   Final rendered frames with alpha-blended dynamic objects [S1].
+**Data Structures:**
+1.  **Static NeRF Model:** A standard NeRF representation for the static scene. It has fixed parameters and no time dimension [S1].
+2.  **Deformation Field ($\Delta$):** A 3-layer Multi-Layer Perceptron (MLP) with a hidden layer dimension of 128. It takes spatial coordinates $x$ and time $t$ as input and outputs a displacement vector $\Delta(x, t)$ [S1].
+    *   **Size:** 5 million parameters [S1].
+    *   **Note:** This is 95% fewer parameters than DyNeRF [S1].
 
-### Data Structures
-1.  **Static NeRF Model:** A standard NeRF representation with fixed parameters and no time dimension. It maps 3D coordinates $(x, y, z)$ and viewing direction $(d_x, d_y, d_z)$ to density $\sigma$ and color $c$ [S1].
-2.  **Deformation Field $\Delta(x, t)$:** A 3-layer Multi-Layer Perceptron (MLP) that predicts displacement.
-    *   **Architecture:** 3 layers.
-    *   **Hidden Dimension:** 128.
-    *   **Input:** Spatial coordinates $x$ and time $t$.
-    *   **Output:** Displacement vector $\Delta x$.
-    *   **Parameter Count:** 5 million parameters [S1].
+**Numbered Steps:**
 
-### Steps
-1.  **Static Scene Reconstruction:** Generate a static NeRF model for the advertising scene using sparse input reconstruction. The model parameters are fixed, and no time dimension calculation is required [S1].
-2.  **Dynamic Object Modeling:** Train a local deformation field model on the dynamic object's sparse video frames (25–30 frames). This models the motion displacement of the object [S1].
-3.  **Spatial Alignment:** Align the coordinate system of the dynamic object with the static scene to ensure perspective consistency.
-    *   Select four marking points in both the static scene and the dynamic object.
-    *   Use the RANSAC algorithm to compute the transformation [S1].
-    *   Target alignment error: <1 pixel [S1].
-4.  **Joint Rendering:** For a given time $t$ and camera ray:
-    *   Calculate the deformation position of the dynamic object using $\Delta(x, t)$.
-    *   Compute the deformed coordinates: $x' = x + \Delta(x, t)$.
-    *   Query the static NeRF at $x'$ to obtain color and density.
+1.  **Static Scene Reconstruction:** Generate a static NeRF model for the advertising scene using sparse input reconstruction. The model parameters are fixed and do not include a time dimension [S1].
+2.  **Dynamic Object Modeling:** Collect 25–30 frames of video for the dynamic object. Train the local deformation field model on this data to model motion displacement [S1].
+3.  **Spatial Alignment:**
+    *   Select four marking points (e.g., exhibition stand corners) in both the static scene and the dynamic object [S1].
+    *   Use the RANSAC algorithm to align the coordinate system of the dynamic object with the static scene [S1].
+    *   **Constraint:** Ensure perspective consistency with an alignment error of less than 1 pixel [S1].
+4.  **Joint Rendering (at time $t$):**
+    *   Calculate the deformation position of the dynamic object using the local deformation field: $\Delta(x, t)$ [S1].
+    *   Compute the deformed coordinates: $x' = x + \Delta(x, t)$ [S1].
+    *   Query the static NeRF model at $x'$ to obtain color and density: $[\sigma, c] = \text{StaticNeRF}(x')$ [S1].
     *   Fuse the dynamic object with the static scene using alpha blending with a blending factor of 0.95 [S1].
+    *   Apply temporal consistency loss to ensure smooth dynamic transitions (target SSIM $\ge$ 0.92) [S1].
 
-### Formulas
+**Formulas:**
 The dynamic radiation field $F(x, t)$ is expressed as [S1]:
 $$ F(x, t) = F_{static}(x + \Delta(x, t)) $$
 Where:
-*   $x$ is the spatial coordinate.
-*   $t$ is the time.
-*   $\Delta(x, t)$ is the displacement predicted by the deformation field.
 *   $F_{static}$ is the static NeRF function.
+*   $x$ is the spatial coordinate.
+*   $\Delta(x, t)$ is the displacement predicted by the deformation field MLP.
 
-### Parameters
-*   **Deformation Field MLP:** 3 layers, hidden dimension 128, 5M parameters [S1].
-*   **Alpha Blending Factor:** 0.95 [S1].
-*   **Temporal Consistency Loss:** Used to ensure smooth dynamic transitions, targeting SSIM $\ge$ 0.92 [S1].
+**Pseudocode:**
 
-### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_frame(static_nerf, deformation_mlp, time_t, camera_ray):
+def render_dynamic_object(static_nerf, deformation_mlp, time_t, object_points):
     """
-    Renders a frame by embedding a dynamic object into a static scene.
+    Renders a dynamic object embedded in a static scene.
     
     Args:
         static_nerf: The pre-trained static NeRF model.
-        deformation_mlp: The 3-layer MLP (5M params) predicting displacement.
+        deformation_mlp: The 3-layer MLP (hidden dim 128) predicting displacement.
         time_t: The current time step.
-        camera_ray: The ray origin and direction.
+        object_points: List of 3D coordinates (x, y, z) of the dynamic object.
         
     Returns:
-        final_color: The blended color of the dynamic object and static scene.
+        Rendered image or color/density values for the object.
     """
-    # 1. Sample points along the ray for the dynamic object region
-    # Note: Specific ray marching logic for the dynamic region is not detailed in [S1],
-    # but typically involves sampling points x along the ray within the object's bounding volume.
+    deformed_points = []
     
-    dynamic_color = 0.0
-    dynamic_accumulated_alpha = 0.0
-    
-    for point_x in dynamic_region_samples:
-        # 2. Calculate deformation using the local deformation field
+    for point in object_points:
+        # Step 1: Calculate displacement using the deformation field
         # Input: spatial coordinates x and time t
-        displacement = deformation_mlp.forward(point_x, time_t)
+        displacement = deformation_mlp.forward(point, time_t)
         
-        # 3. Compute deformed coordinates
-        deformed_x = point_x + displacement
+        # Step 2: Compute deformed coordinates
+        # x' = x + Delta(x, t)
+        deformed_point = point + displacement
+        deformed_points.append(deformed_point)
         
-        # 4. Query static NeRF at deformed coordinates
-        # Output: density sigma and color c
-        sigma, color = static_nerf.forward(deformed_x, camera_ray.direction)
-        
-        # 5. Alpha blending accumulation
-        # Standard volume rendering accumulation
-        alpha = 1.0 - torch.exp(-sigma * delta_depth)
-        weight = alpha * (1.0 - dynamic_accumulated_alpha)
-        dynamic_color += weight * color
-        dynamic_accumulated_alpha += weight
-        
-    # 6. Fuse with static scene using alpha blending
-    # The static scene is rendered separately or queried for the background
-    static_color = static_nerf.render_background(camera_ray)
+    # Step 3: Query static NeRF at deformed coordinates
+    # Obtain color and density from the static scene representation
+    # Note: In a full renderer, this involves ray marching or splatting
+    # Here we assume direct query for the object's contribution
+    colors, densities = static_nerf.query(deformed_points)
     
-    # Blending factor specified as 0.95 in [S1]
-    blending_factor = 0.95
-    final_color = blending_factor * dynamic_color + (1.0 - blending_factor) * static_color
+    # Step 4: Fuse with static scene using alpha blending
+    # Blending factor is 0.95
+    # Note: The exact blending logic depends on the compositing order.
+    # Assuming the dynamic object is composited over the static background.
+    # If 'static_color' is the background color at the same ray intersection:
+    # final_color = alpha * dynamic_color + (1 - alpha) * static_color
+    # The source specifies a blending factor of 0.95, likely applied to the 
+    # dynamic object's contribution or as a weight in the fusion.
+    # [G] Assuming standard alpha compositing where 0.95 is the opacity/weight 
+    # of the dynamic layer relative to the static layer for visual consistency.
     
-    return final_color
+    return colors, densities
 ```
 
-### Edge Cases and Pitfalls
-*   **Alignment Error:** If the RANSAC alignment error exceeds 1 pixel, perspective consistency is lost, leading to visual artifacts [S1].
-*   **Sparse Input:** The method relies on sparse video frames (20–30 frames). Insufficient frames may lead to poor deformation field training [S1].
-*   **Dynamic Region Size:** The method is designed for dynamic regions comprising $\le$20% of the scene. Larger dynamic areas may require more complex modeling [S1].
+**Edge Cases and Pitfalls:**
+*   **Alignment Error:** If the RANSAC alignment error exceeds 1 pixel, perspective consistency is lost [S1].
+*   **Sparse Input:** The method relies on sparse input reconstruction; insufficient frames may degrade the static NeRF or deformation field quality [S1].
+*   **Dynamic Region Size:** The method is designed for dynamic regions comprising $\le$ 20% of the scene [S1].
 
 ## Operating characteristics
-*   **Parameter Efficiency:** Uses 5M parameters, which is 95% less than DyNeRF's 100M+ parameters [S1].
+*   **Parameter Count:** 5 million parameters for the deformation field, which is 95% less than DyNeRF's 100M+ parameters [S1].
 *   **Performance:** PSNR increased by $2.3 \pm 0.2$ dB under sparse input conditions (mean $\pm$ std over 10 trials) [S1].
 *   **Temporal Consistency:** Achieves SSIM $\ge$ 0.92 with temporal consistency loss [S1].
-*   **Suitability:** Designed for VR devices due to lower computational and memory requirements compared to full-scene dynamic NeRFs [S1].
-*   **Limitations:** Limited to scenes where the dynamic region is small ($\le$20%) and can be effectively modeled by a local deformation field [S1].
+*   **Suitability:** Designed for VR devices where traditional dynamic NeRFs are too heavy [S1].
+*   **Limitations:** Only models the dynamic region (up to 20% of the scene); static areas are handled by a separate static NeRF [S1].
 
 ## Background
-This method was proposed in the context of VR advertising, aiming to integrate dynamic advertising objects into static NeRF scenes efficiently. It addresses the limitations of traditional dynamic NeRFs like DyNeRF, which require independent models per time step and excessive parameters [S1]. The approach was developed to support real-time rendering on VR devices using consumer-grade devices for data acquisition [S1].
+This method was proposed to address the limitations of traditional dynamic NeRFs like DyNeRF, which require independent models for each time step and over 100M parameters, making them unsuitable for VR devices [S1]. It introduces a local deformation field model that only models the dynamic region, allowing for efficient integration of dynamic advertising objects into static scenes [S1].
 
 ## Sources
 [S1] Efficient Sparse Input Scene Reconstruction and Real-Time Rendering for VR Advertising Using Optimized NeRF Framework, https://www.informatica.si/index.php/informatica/article/download/12804/6562, fetched 2026-10-29

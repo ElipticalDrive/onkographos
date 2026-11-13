@@ -1,0 +1,201 @@
+--- v014.md
++++ v015.md
+@@ -4,101 +4,135 @@
+ 
+ ## Overview
+-Uniform quantization is a lossy compression method that maps a continuous or high-precision input domain to a discrete, lower-precision set of levels using constant step sizes [S1, S2, unofficial]. It solves the problem of reducing the memory footprint of volume data, typically achieving a 4:1 compression ratio by representing 32-bit floating-point data with 8-bit integers [S1, S2, unofficial]. It differs from [Non-uniform Quantization](5858-non-uniform-quantization.md) by allocating levels with equal spacing across the entire data range, rather than adapting density to data distribution or user-defined importance [S1, S2, unofficial].
++Uniform quantization is a lossy compression method that maps a continuous or high-precision input domain to a discrete set of values using equally spaced intervals (bins) [S1, S2, unofficial]. It solves the problem of reducing the memory footprint of volume data, typically achieving a 4:1 compression ratio by representing 32-bit floating-point data with 8-bit integers [S1, S2, unofficial]. It differs from [Non-uniform Quantization](5858-non-uniform-quantization.md) by using constant step sizes regardless of the data distribution, which makes it simple to implement but prone to losing features in data with wide dynamic ranges [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A volume dataset $V$ where each voxel value $x$ is a real number (typically 32-bit float). The global minimum $x_{min}$ and maximum $x_{max}$ of the dataset are required.
+-*   **Output:** A quantized dataset $V'$ where each voxel value is an integer index $q \in [0, M-1]$, where $M$ is the number of quantization levels.
++*   **Input:** A scalar field of raw data values $x$, defined over a range $[x_{min}, x_{max}]$.
++*   **Output:** A quantized integer index $q$ for each voxel, and optionally the reconstructed value $\hat{x}$.
+ 
+ **Data Structures:**
+-*   The quantized data is stored as a dense array of integers. The bit depth of the integer storage determines $M$. For a standard 4:1 compression, 32-bit floats are mapped to 8-bit unsigned integers, yielding $M = 256$ levels [S1, S2, unofficial].
++The method requires storing the global minimum and maximum of the dataset to define the quantization range.
++*   `min_val`: The minimum value in the dataset (float).
++*   `max_val`: The maximum value in the dataset (float).
++*   `num_levels`: The number of quantization levels, $M = 2^b$, where $b$ is the number of bits per value (e.g., $M=256$ for 8-bit).
+ 
+ **Parameters:**
+-*   $M$: The number of quantization levels. Determined by the target bit depth $b$ as $M = 2^b$. Typical value: $M=256$ (8-bit) [S1, S2, unofficial].
+-*   $x_{min}, x_{max}$: The global minimum and maximum values of the source data [S1, S2, unofficial].
++*   $b$: Number of bits per quantized value. Typical value: 8 [S1, S2, unofficial].
++*   $M$: Number of quantization levels, $M = 2^b$. Typical value: 256 [S1, S2, unofficial].
++*   $\phi$: Step size (bin width), $\phi = (x_{max} - x_{min}) / M$ [S2, unofficial].
+ 
+-**Method Steps:**
+-1.  Determine the global minimum $x_{min}$ and maximum $x_{max}$ of the input volume data.
+-2.  Calculate the step size (quantization interval) $\phi$:
+-    $$ \phi = \frac{x_{max} - x_{min}}{M} $$
+-    where $M$ is the number of quantization levels [S1, S2, unofficial].
+-3.  For each voxel value $x$ in the input volume:
+-    a. Clamp $x$ to the range $[x_{min}, x_{max}]$ to handle values outside the computed bounds.
+-    b. Compute the quantized index $q$:
+-    $$ q = \left\lfloor \frac{x - x_{min}}{\phi} \right\rfloor $$
+-    c. Clamp $q$ to the range $[0, M-1]$.
+-    d. Store $q$ in the output volume.
++**Formulas:**
++The quantization function $Q(x)$ maps an input $x$ to an index $q$:
++$$ q = \left\lfloor \frac{x - x_{min}}{\phi} \right\rfloor $$
++Clamped to the range $[0, M-1]$ [S2, unofficial].
++
++The unquantization function $U(q)$ maps an index $q$ back to an approximate value $\hat{x}$:
++$$ \hat{x} = x_{min} + q \cdot \phi $$
++This corresponds to the lower bound of the bin. Alternatively, the midpoint can be used: $\hat{x} = x_{min} + (q + 0.5) \cdot \phi$ [G].
++
++**Error Metric:**
++For uniformly distributed source data, the Mean Squared Error (MSE) is:
++$$ \sigma^2 = \int_{x_{min}}^{x_{max}} \frac{1}{M} (x - \phi_i)^2 dx $$
++where $f(x) = \frac{1}{x_{max} - x_{min}}$ is the probability density function [S2, unofficial].
++
++For visualization tasks, the error metric incorporates an importance function $\alpha(x)$, typically the opacity transfer function:
++$$ \sigma^2 = E \int (x - \phi(x))^2 f(x) \alpha(x) dx $$
++where $\alpha(x)$ weights the error based on visual importance [S1, S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def uniform_quantize(volume, bits=8):
++def uniform_quantize(data, bits=8):
+     """
+-    Quantizes a volume of 32-bit floats to `bits`-bit integers using uniform quantization.
++    Quantizes a 1D array of float values using uniform quantization.
+     
+     Args:
+-        volume: List or array of 32-bit floats.
+-        bits: Target bit depth (default 8).
++        data: Array of float values.
++        bits: Number of bits for quantization (default 8).
+         
+     Returns:
+-        List or array of integers with `bits` precision.
++        quantized_data: Array of uint8 indices.
++        min_val: Minimum value of the original data.
++        max_val: Maximum value of the original data.
+     """
+-    M = 1 << bits  # Number of levels, e.g., 256 for 8 bits
++    min_val = min(data)
++    max_val = max(data)
+     
+-    # Step 1: Determine global min and max
+-    x_min = min(volume)
+-    x_max = max(volume)
++    # Handle edge case where min equals max to avoid division by zero
++    if min_val == max_val:
++        return zeros_like(data, dtype=uint8), min_val, max_val
++
++    num_levels = 1 << bits  # 2^bits
++    step_size = (max_val - min_val) / num_levels
+     
+-    # Handle degenerate case where all values are identical
+-    if x_max == x_min:
+-        return [0] * len(volume)
++    quantized_data = zeros_like(data, dtype=uint8)
+     
+-    # Step 2: Calculate step size
+-    phi = (x_max - x_min) / M
++    for i in range(len(data)):
++        x = data[i]
++        # Calculate index
++        idx = int((x - min_val) / step_size)
++        
++        # Clamp to valid range [0, num_levels - 1]
++        if idx < 0:
++            idx = 0
++        elif idx >= num_levels:
++            idx = num_levels - 1
++            
++        quantized_data[i] = idx
++        
++    return quantized_data, min_val, max_val
++
++def uniform_unquantize(quantized_data, min_val, max_val, bits=8):
++    """
++    Reconstructs float values from quantized indices.
+     
+-    # Step 3: Quantize each voxel
+-    quantized_volume = []
+-    for x in volume:
+-        # Clamp input to range
+-        x_clamped = max(x_min, min(x, x_max))
++    Args:
++        quantized_data: Array of uint8 indices.
++        min_val: Minimum value used during quantization.
++        max_val: Maximum value used during quantization.
++        bits: Number of bits used during quantization.
+         
+-        # Compute index
+-        q = int((x_clamped - x_min) / phi)
++    Returns:
++        reconstructed_data: Array of float values.
++    """
++    num_levels = 1 << bits
++    step_size = (max_val - min_val) / num_levels
++    
++    reconstructed_data = zeros_like(quantized_data, dtype=float)
++    
++    for i in range(len(quantized_data)):
++        q = quantized_data[i]
++        # Reconstruct using the lower bound of the bin
++        reconstructed_data[i] = min_val + q * step_size
+         
+-        # Clamp index to valid range [0, M-1]
+-        q = max(0, min(q, M - 1))
+-        
+-        quantized_volume.append(q)
+-        
+-    return quantized_volume
++    return reconstructed_data
+ ```
+ 
+-**Error Measure:**
+-For uniformly distributed source data values $x$, the mean squared error (MSE) is given by [S1, S2, unofficial]:
+-$$ \sigma^2 = \int_{x_{min}}^{x_{max}} \frac{1}{M} (x - \phi_i)^2 dx $$
+-where $f(x) = \frac{1}{x_{max} - x_{min}}$ is the probability density function for uniform distribution [S2, unofficial].
+-
+-For visualization tasks, the error measure incorporates an importance function $\alpha(x)$, typically the opacity transfer function provided by the user [S1, S2, unofficial]:
+-$$ \sigma^2 = E \int (x - \phi(x))^2 f(x) \alpha(x) dx $$
+-where $f(x)$ characterizes the general source data distribution and $\alpha(x)$ is the importance function [S1, S2, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Wide Dynamic Range:** If the data has a wide dynamic range (e.g., turbulence flow data), uniform quantization can cause important features in later time steps or lower-magnitude regions to become invisible [S1, S2, unofficial]. This occurs because the fixed step size $\phi$ is large relative to the variations in the low-magnitude regions, causing them to map to the same quantization level [S1, S2, unofficial].
+-*   **Non-Uniform Distribution:** If the data is not uniformly distributed, uniform quantization may waste levels on empty ranges and under-resolve dense regions [S1, S2, unofficial].
++*   **Wide Dynamic Range:** If the data has a wide dynamic range (e.g., turbulence flow), uniform quantization may cause important features in later time steps or low-magnitude regions to become invisible because the step size $\phi$ is too large for those ranges [S1, S2, unofficial].
++*   **Clamping:** Values outside $[x_{min}, x_{max}]$ must be clamped to the nearest bin edge, which introduces distortion [S2, unofficial].
++*   **Precision:** Using 8-bit integers for 32-bit floats results in a 4:1 compression ratio but significant loss of precision [S1, S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Non-uniform Quantization](5858-non-uniform-quantization.md)
+-Allocates more quantization levels to specific ranges of source data values to enhance features and minimize distortion, rather than using uniform spacing. Choose this when data has a wide dynamic range or non-uniform distribution.
++Allocates more levels to specific ranges to handle wide dynamic ranges. Choose when data has significant variation in magnitude.
++
++### [Scalar Quantization](5726-scalar-quantization.md)
++The broader category of mapping scalar values. Uniform is a specific type of scalar quantization.
++
++### [Vector Quantization](907-vector-quantization.md)
++Maps vectors to codewords. Choose when spatial correlation between neighboring voxels is high.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$, where $N$ is the number of voxels, as each voxel requires a constant number of arithmetic operations [S1, S2, unofficial].
+-*   **Memory Complexity:** $O(N)$, storing $N$ quantized integers. The compression ratio is determined by the ratio of input bit depth to output bit depth (e.g., 4:1 for 32-bit to 8-bit) [S1, S2, unofficial].
+-*   **Strengths:** Simple to implement; fast encoding and decoding; predictable memory usage [S1, S2, unofficial].
+-*   **Limitations:** Inefficient for data with wide dynamic ranges or non-uniform distributions, as it cannot adaptively allocate precision to important features [S1, S2, unofficial].
+-*   **When to use:** When data distribution is relatively uniform and dynamic range is narrow, or when computational simplicity is prioritized over fidelity [S1, S2, unofficial].
+-*   **When not to use:** When data has a wide dynamic range (e.g., turbulence flow) or when specific features need enhanced visibility, as uniform quantization may render these features invisible [S1, S2, unofficial].
++*   **Time Complexity:** $O(N)$ for quantization and unquantization, where $N$ is the number of voxels. The operations are simple arithmetic and clamping.
++*   **Memory Complexity:** $O(N)$ for storing the quantized data. The overhead for storing `min_val` and `max_val` is $O(1)$.
++*   **Compression Ratio:** Typically 4:1 when converting from 32-bit float to 8-bit integer [S1, S2, unofficial].
++*   **Strengths:** Simple implementation, fast encoding/decoding, low computational overhead.
++*   **Limitations:** Poor performance on data with wide dynamic ranges or non-uniform distributions. Important features may be lost if the quantization step size is too coarse for those regions [S1, S2, unofficial].
++*   **When to use:** When data has a relatively uniform distribution and dynamic range, or when computational simplicity is prioritized over reconstruction fidelity.
++*   **When not to use:** When data has a wide dynamic range (e.g., turbulence) or when preserving specific features is critical [S1, S2, unofficial].
+ 
+ ## Background
+-Uniform quantization is described as the simplest lossy compression method in the context of volume rendering [S1, S2, unofficial]. It is a well-studied area in general signal processing, but its specific impact on volume rendering was noted as not being carefully studied in the cited sources [S1, S2, unofficial]. The method is often used as a default in renderers, though non-uniform and adaptive quantizers are preferred for minimizing distortion error in complex datasets [S1, S2, unofficial]. The sources reference its use in conjunction with octree encoding for spatial organization after quantization [S1, S2, unofficial].
++Uniform quantization is a well-studied area in signal processing and data compression [S1, unofficial]. In the context of volume rendering, its impact was carefully studied by researchers analyzing time-varying volume data from numerical simulations [S1, S2, unofficial]. The method is often used as a baseline for comparison with more advanced techniques like non-uniform and adaptive quantization, which are preferred for minimizing distortion error in complex datasets [S1, S2, unofficial].
+ 
+ ## Sources

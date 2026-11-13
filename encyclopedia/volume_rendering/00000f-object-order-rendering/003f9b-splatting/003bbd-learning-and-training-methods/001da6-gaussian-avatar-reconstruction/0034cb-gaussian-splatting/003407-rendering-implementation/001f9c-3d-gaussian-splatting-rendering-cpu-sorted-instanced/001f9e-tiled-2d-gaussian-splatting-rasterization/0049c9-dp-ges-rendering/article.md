@@ -1,0 +1,236 @@
+# DP-GES Rendering
+
+Also called: DP-GES depth peeling pass, Depth Peeling for Gaussian-Enhanced Surfels, Depth Peeling for High-Fidelity Gaussian-Enhanced Surfel Rendering, Depth Peeling for Surfel Rendering, Ours
+
+## Overview
+DP-GES is a sort-free rendering method that combines 2D surfels with semi-transparent boundaries and 3D Gaussians to achieve high-fidelity novel view synthesis, eliminating aliasing and popping artifacts while enabling correct transmittance modulation [S1, unofficial]. It sets itself apart from its parent [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md) and sibling [Non-Tiled 2D Gaussian Splatting with Transmittance Culling](2067-non-tiled-2d-gaussian-splatting-with-transmittance-culling.md) by introducing a two-stage pipeline: Stage 1 uses z-buffer-based depth peeling to extract the nearest three layers of depth, color, and opacity from surfels, and Stage 2 splats 3D Gaussians without sorting, modulating their weights by the transmittance from the peeled surfel layers [S1, unofficial]. Unlike GES, which uses fully opaque surfels, DP-GES uses semi-transparent boundaries to mitigate aliasing from depth testing and allow differentiable joint optimization [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of 2D surfels $S$ and a set of 3D Gaussians $G$. Camera parameters (position, orientation, intrinsics).
+*   **Outputs:** Final rendered image color $C$ and weight $W$ (normalized to produce color).
+
+**Data Structures:**
+*   **Surfel Set $S$:** $S = \{p_i, r_i, s_i, B_i\}_{i=1}^N$.
+    *   $p_i \in \mathbb{R}^3$: Position.
+    *   $r_i \in \mathbb{R}^4$: Rotation quaternion.
+    *   $s_i \in \mathbb{R}^2$: Anisotropic scaling.
+    *   $B_i$: Spherical Beta parameters for view-dependent color.
+*   **Gaussian Set $G$:** $G = \{p_i, \sigma_i, r_i, s_i, B_i\}_{i=1}^M$.
+    *   $p_i \in \mathbb{R}^3$: Position.
+    *   $\sigma_i$: Maximum opacity (implied from 3DGS context, though often treated as part of the Gaussian definition in standard 3DGS; here explicitly listed).
+    *   $r_i \in \mathbb{R}^4$: Rotation quaternion.
+    *   $s_i \in \mathbb{R}^2$: Scaling.
+    *   $B_i$: Spherical Beta parameters.
+*   **Texture Buffers:**
+    *   A four-channel texture storing peeled depth maps $\{D_i^s\}_{i=1}^2$ and transmittance maps $\{T_i^s\}_{i=1}^2$. $D_3^s$ and $T_3^s$ are not stored because Gaussians beyond the third layer are culled by hardware depth testing [S1, unofficial].
+    *   Depth buffer for depth peeling passes.
+    *   Color/Opacity buffers for intermediate peeling layers.
+
+**Parameters:**
+*   **Number of depth peeling layers:** 3. This balances quality and efficiency; 2 layers cause background leakage, 4 layers drop FPS significantly due to memory bandwidth issues in OpenGL [S1, unofficial].
+*   **Opacity modulation parameter $w$:** Fixed constant shared by all surfels. Default value is 30. If $w < 1$, the surfel is fully translucent; if $w = 255$, it is completely opaque [S1, unofficial].
+*   **Depth margin $\epsilon_s$:** A tiny depth margin for culling (value not explicitly given, treated as a small constant) [S1, unofficial].
+
+**Steps:**
+
+1.  **Stage 1: Surfel Rasterization via Depth Peeling**
+    *   Initialize depth buffer with far plane.
+    *   For layer $k = 1$ to 3:
+        *   Clear color and opacity buffers for layer $k$.
+        *   Rasterize all surfels $S$.
+        *   For each surfel fragment at pixel $(x,y)$:
+            *   Calculate local coordinates $(x,y)$ on the surfel disc.
+            *   Compute opacity $\alpha_i(x,y) = \min(1, w \cdot G(x,y))$, where $G(x,y) = \exp(-\frac{x^2+y^2}{2})$ [S1, unofficial].
+            *   Perform depth test against the current depth buffer. If the surfel depth $d_i$ is greater than the stored depth $d_{stored}$ by a small margin (to handle interleaved surfels correctly, surfel IDs are also written to identify intersections), discard.
+            *   Write depth $d_i$, color $C_i$ (from $B_i$), opacity $\alpha_i$, and surfel ID to the buffers for layer $k$.
+            *   Update the depth buffer with $d_i$ (or $d_i + \epsilon_s$) for subsequent layers [S1, unofficial].
+        *   After rasterizing all surfels, the buffers contain the $k$-th peeled layer's depth $D_k^s$, color $C_k^s$, and opacity $A_k^s$.
+    *   **Post-processing (Surfel Compositing):**
+        *   Alpha-blend the 3 peeled layers using front-to-back compositing (same as 3DGS) to obtain final surfel color $C_S$ and transmittance maps $\{T_i^s\}_{i=0}^3$:
+            $$ C_S = \sum_{i=1}^3 A_{si} T_{i-1} C_{is} + T_3^s C_b $$
+            $$ T_i^s = \begin{cases} 1 & \text{if } i=0 \\ \prod_{j=1}^i (1 - A_{sj}) & \text{otherwise} \end{cases} $$
+            where $C_b$ is the background color [S1, unofficial].
+        *   Pack $D_1^s, D_2^s, T_1^s, T_2^s$ into a four-channel texture. Note: $T_0^s = 1$ is implicit [S1, unofficial].
+
+2.  **Stage 2: Sort-Free Gaussian Splatting**
+    *   Clear final color and weight accumulators.
+    *   Enable depth testing, disable depth writing.
+    *   For each pixel $\hat{x}$ (or in parallel via fragment shader):
+        *   Initialize $C_G(\hat{x}) = 0$, $W_G(\hat{x}) = 0$.
+        *   For each Gaussian $i$ covering pixel $\hat{x}$:
+            *   Calculate Gaussian weight $\alpha_i(\hat{x})$ (standard 2D Gaussian projection).
+            *   Determine Gaussian center depth $d_i$.
+            *   Query transmittance $t_s(\hat{x})$ based on $d_i$ and peeled depths $\{D_j^s\}$:
+                $$ t_s(\hat{x}) = \begin{cases} T_0^s(\hat{x}) & \text{if } d_i < D_1^s(\hat{x}) \\ T_1^s(\hat{x}) & \text{if } D_1^s(\hat{x}) \le d_i < D_2^s(\hat{x}) \\ T_2^s(\hat{x}) & \text{otherwise} \end{cases} $$
+            *   Perform depth culling: Calculate indicator $1_{dt}(\hat{x}) = 1$ if $d_i < d_s(\hat{x}) + \epsilon_s$, else 0.
+                *   $d_s(\hat{x})$ is the depth of the nearest peeled layer $i$ where $T_i^s(\hat{x}) = 0$. If all $T_i^s > 0$, $d_s(\hat{x}) = D_3^s(\hat{x})$ [S1, unofficial].
+            *   If $1_{dt}(\hat{x}) == 1$ and $t_s(\hat{x}) > 0$:
+                *   Get Gaussian color $c_i$ from $B_i$.
+                *   Accumulate:
+                    $$ C_G(\hat{x}) \leftarrow C_G(\hat{x}) + 1_{dt}(\hat{x}) c_i \alpha_i(\hat{x}) t_s(\hat{x}) $$
+                    $$ W_G(\hat{x}) \leftarrow W_G(\hat{x}) + 1_{dt}(\hat{x}) \alpha_i(\hat{x}) t_s(\hat{x}) $$
+    *   **Final Post-processing:**
+        *   Calculate total weight $W_{total} = W_S + W_G$, where $W_S = \sum_{i=1}^3 C_{bs} A_{si} T_{i-1}$ is a constant sum of surfel color weights (actually $W_S = \sum_{i=1}^3 A_{si} T_{i-1}$, and $C_S$ is weighted by this, but the final formula normalizes by total weight). The text states $C = \frac{C_S + C_G}{W_S + W_G}$ [S1, unofficial].
+        *   Normalize and output final color.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def render_dp_ges(surfels, gaussians, camera, width, height):
+    # Stage 1: Depth Peeling for Surfels
+    # Buffers for 3 layers
+    depths = [None] * 3
+    colors = [None] * 3
+    opacities = [None] * 3
+    
+    # Initialize depth buffer with far plane
+    depth_buffer = np.full((height, width), camera.far_plane)
+    
+    for k in range(3):
+        # Clear buffers for this layer
+        depths[k] = np.full((height, width), np.inf)
+        colors[k] = np.zeros((height, width, 3))
+        opacities[k] = np.zeros((height, width))
+        
+        # Rasterize surfels
+        for surfel in surfels:
+            # Project surfel to screen
+            # Calculate local coordinates for each pixel covered by bounding box
+            # For simplicity, assume we iterate over pixels or use rasterization logic
+            # Here we simulate the fragment shader logic for a pixel (x,y)
+            pass 
+            
+        # Actual implementation would use GPU rasterization
+        # For the purpose of this article, we describe the logic:
+        # For each pixel (x,y):
+        #   For each surfel i:
+        #     if surfel covers (x,y):
+        #       alpha = min(1.0, w * exp(-(x_local^2 + y_local^2)/2))
+        #       if surfel_depth > depth_buffer[x,y]:
+        #         continue # Occluded by previous layer
+        #       # Check for interleaved surfels using ID if necessary
+        #       depths[k][x,y] = surfel_depth
+        #       colors[k][x,y] = surfel_color
+        #       opacities[k][x,y] = alpha
+        #       depth_buffer[x,y] = surfel_depth + epsilon_s # Update for next layer
+        
+        # Note: In OpenGL, this is done via 3 draw calls with depth testing
+        # and reading back buffers or using FBOs.
+        
+    # Post-process: Alpha blend peeled layers
+    T = [1.0] * 4 # T[0] = 1
+    C_S = np.zeros((height, width, 3))
+    
+    for i in range(1, 4):
+        # T[i] = T[i-1] * (1 - A[i-1])
+        # But the formula uses T_{i-1} for the i-th layer contribution
+        # T_i^s = product_{j=1}^i (1 - A_{sj})
+        # So T[0]=1, T[1]=1-A1, T[2]=(1-A1)(1-A2), T[3]=(1-A1)(1-A2)(1-A3)
+        
+        # Accumulate color
+        # C_S += A_i * T_{i-1} * C_i
+        C_S += opacities[i-1] * T[i-1] * colors[i-1]
+        
+        # Update transmittance for next layer
+        if i < 3:
+            T[i] = T[i-1] * (1 - opacities[i-1])
+            
+    # T[3] is the final transmittance
+    # C_S += T[3] * C_b (background color)
+    C_S += T[3] * camera.background_color
+    
+    # Pack D1, D2, T1, T2 into a texture
+    # D3 and T3 are not stored
+    packed_texture = np.stack([depths[0], depths[1], T[1], T[2]], axis=-1)
+    
+    # Stage 2: Gaussian Splatting
+    C_G = np.zeros((height, width, 3))
+    W_G = np.zeros((height, width))
+    
+    # Pre-calculate culling depth threshold for each pixel
+    # d_s(x) is the depth of the nearest layer i where T_i(x) = 0
+    # If all T > 0, d_s = D3
+    culling_depths = np.full((height, width), depths[2][0,0]) # Default D3
+    for y in range(height):
+        for x in range(width):
+            for i in range(3):
+                if T[i+1] < 1e-6: # T_i+1 is effectively 0
+                    culling_depths[y,x] = depths[i][y,x]
+                    break
+                    
+    for gaussian in gaussians:
+        # Project gaussian to screen
+        # Determine bounding box
+        # For each pixel (x,y) in bounding box:
+        #   alpha = gaussian_weight(x,y)
+        #   d_i = gaussian_depth
+        #   t_s = query_transmittance(d_i, depths, T)
+        #   if d_i < culling_depths[x,y] + epsilon_s and t_s > 0:
+        #     C_G[x,y] += gaussian_color * alpha * t_s
+        #     W_G[x,y] += alpha * t_s
+        
+        pass # GPU parallel execution
+
+    # Final Normalization
+    # W_S is constant sum of surfel weights? 
+    # The text says C = (C_S + C_G) / (W_S + W_G)
+    # And W_S = sum(C_bs * A_si * T_{i-1})? No, W_S is sum of weights.
+    # In 3DGS, weight is alpha * transmittance.
+    # Here, surfel weight for layer i is A_si * T_{i-1}.
+    # Total surfel weight W_S = sum_{i=1}^3 A_si * T_{i-1}
+    # Note: C_S is already weighted by A_si * T_{i-1}.
+    # So we need to compute W_S.
+    
+    W_S = np.zeros((height, width))
+    for i in range(1, 4):
+        W_S += opacities[i-1] * T[i-1]
+        
+    Total_W = W_S + W_G
+    # Avoid division by zero
+    Total_W = np.maximum(Total_W, 1e-6)
+    
+    Final_Color = (C_S + C_G) / Total_W
+    
+    return Final_Color
+
+def query_transmittance(d_i, depths, T):
+    D1 = depths[0]
+    D2 = depths[1]
+    D3 = depths[2]
+    
+    # Note: depths are per-pixel arrays
+    # This function assumes scalar d_i and array depths for a specific pixel
+    # In shader, this is done per-fragment
+    
+    if d_i < D1:
+        return T[0] # T[0] is 1
+    elif d_i < D2:
+        return T[1]
+    else:
+        return T[2]
+```
+
+**Edge Cases and Pitfalls:**
+*   **Interleaved Surfels:** Two intersecting surfels might be peeled only once along their intersection line if IDs are not tracked. Solution: Write surfel ID into the buffer during rasterization to correctly identify and handle interleaved surfels [S1, unofficial].
+*   **Background Color Leakage:** If $T_3$ is not zero, background color leaks through. The loss $L_t$ encourages surfels to separate, driving $T_3$ to zero. For pixels covered by fewer than 2 surfel layers, gradients for $L_t$ are masked out [S1, unofficial].
+*   **4-Layer Peeling:** Breaks 4-float alignment packing in OpenGL, increasing memory bandwidth usage and dropping FPS [S1, unofficial].
+*   **Transparent Objects:** Shows artifacts because surfels are mainly opaque [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The surfel rendering is $O(N_s \cdot P)$ where $N_s$ is the number of surfels and $P$ is pixels, but limited by 3 passes. Gaussian rendering is $O(N_g \cdot P)$ but sort-free. Overall, it is faster than sorting-based methods.
+*   **Memory Complexity:** Requires storage for 3 layers of depth/color/opacity during peeling, plus the packed texture for Stage 2. Surfel count is typically <10% of Gaussian count, so peeling cost is negligible [S1, unofficial].
+*   **Measured Performance:** On RTX 4090 for Mip-NeRF360 dataset: >470 FPS at 1080p. 2.5x faster than vanilla 3DGS and 3x faster than DBS [S1, unofficial].
+    *   Ablation FPS (1080p): Full 472, 2 layers 578, 4 layers 278 [S1, unofficial].
+*   **Strengths:** Sort-free, high fidelity, eliminates popping and aliasing, differentiable joint optimization, integrable into existing engines (OpenGL) [S1, unofficial].
+*   **Limitations:** Artifacts on transparent/semi-transparent objects (e.g., glass), slightly higher FLIP error than GES due to view-dependent effects, requires extra initialization and longer training time compared to 2DGS [S1, unofficial].
+
+## Background
+DP-GES was proposed by Keyang Ye, Hongzhi Wu, and Kun Zhou from Zhejiang University and Hangzhou Research Institute of Holographic and AI Technology. It was published on arXiv in May 2026 [S1, unofficial]. It is an improved variant of Gaussian-Enhanced Surfels (GES) [42], addressing GES's limitations of aliasing artifacts and suboptimal reconstruction by introducing semi-transparent surfel boundaries and depth peeling.
+
+## Sources
+[S1] Depth Peeling for High-Fidelity Gaussian-Enhanced Surfel Rendering, https://doi.org/10.48550/arXiv.2605.25345, fetched 2026-10-30 (unofficial)

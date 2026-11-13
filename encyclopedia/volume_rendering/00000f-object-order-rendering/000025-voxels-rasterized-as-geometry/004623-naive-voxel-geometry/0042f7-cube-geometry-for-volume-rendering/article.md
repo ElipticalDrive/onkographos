@@ -1,0 +1,124 @@
+# Cube Geometry for Volume Rendering
+Also called: Axis-Aligned Cube, Voxel Cube Geometry, vzBlock Geometry
+## Overview
+Cube Geometry for Volume Rendering represents a single occupied voxel as a simple axis-aligned cube primitive submitted to the graphics pipeline. It solves the problem of mapping discrete scalar field data to geometric primitives for rasterization. It differs from [Naive Voxel Rendering](1103-naive-voxel-geometry.md) by explicitly generating vertex and index buffers for a 3D box rather than using point sprites or billboarded quads, and from [Base Renderer Geometry](3902-base-renderer-geometry.md) by using a fixed, non-adaptive cube topology for every voxel.
+## How it works
+**Inputs and Outputs**
+Input: Voxel grid data (implicitly handled by the parent [Naive Voxel Geometry](11683-naive-voxel-geometry.md) which determines occupancy).
+Output: A Vertex Array Object (VAO) and Vertex Buffer Object (VBO) containing cube geometry, and an Element Buffer Object (EBO) containing indices.
+
+**Data Structures**
+The geometry is defined by a single cube centered at the origin with side length 2 (extents from -1 to 1 in each axis).
+
+*   **Vertices**: 8 vertices.
+    *   Layout: 6 floats per vertex (3 position floats, 3 texture coordinate floats).
+    *   Stride: 24 bytes (6 * 4 bytes).
+    *   Attribute 0 (Position): Offset 0, Size 3, Type `GL_FLOAT`, Normalized `GL_FALSE`.
+    *   Attribute 1 (TexCoords): Offset 12 bytes (3 * 4 bytes), Size 3, Type `GL_FLOAT`, Normalized `GL_FALSE`.
+*   **Indices**: 36 indices (6 triangles per face * 6 faces).
+    *   Type: `uint32`.
+    *   Defines 6 faces of the cube.
+
+**Steps**
+1.  **Generate Buffers**: Create a VAO and VBO. Bind the VBO and upload the vertex data with usage hint `GL_STATIC_DRAW`. Generate an EBO and upload the index data with usage hint `GL_STATIC_DRAW` [S1, unofficial].
+2.  **Configure Attributes**: Enable vertex attribute arrays. Set Attribute 0 to read from offset 0 with stride 24. Set Attribute 1 to read from offset 12 with stride 24 [S1, unofficial].
+3.  **Create Instance**: Instantiate the geometry object. In the referenced implementation, this is done via `vzGeometry *geometry = new vzBlock()` [S2].
+4.  **Set Extents**: By default, the cube extents are set to (0, 0, 0) and (1, 1, 1) in the abstract parameter space, which maps to the geometric cube defined above [S2].
+5.  **Render**: Bind the VAO and draw the indexed primitives using the configured shader and appearance [S1, unofficial][S2].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def setup_cube_geometry():
+    # 1. Define vertex data: 8 vertices, 6 floats each (pos xyz, tex xyz)
+    # Vertices for a cube from -1 to 1
+    vertices = [
+        # x, y, z, u, v, w (w is often used for volume texture coordinate)
+        -1, -1, -1, 0, 0, 0,
+         1, -1, -1, 1, 0, 0,
+         1,  1, -1, 1, 1, 0,
+        -1,  1, -1, 0, 1, 0,
+        -1, -1,  1, 0, 0, 1,
+         1, -1,  1, 1, 0, 1,
+         1,  1,  1, 1, 1, 1,
+        -1,  1,  1, 0, 1, 1
+    ]
+    
+    # 2. Define indices: 36 indices for 6 faces (2 triangles per face)
+    # Face order: Front, Back, Top, Bottom, Right, Left
+    indices = [
+        0, 1, 2, 0, 2, 3,  # Front (z=-1)
+        4, 6, 5, 4, 7, 6,  # Back (z=1)
+        3, 2, 6, 3, 6, 7,  # Top (y=1)
+        0, 5, 1, 0, 4, 5,  # Bottom (y=-1)
+        1, 5, 6, 1, 6, 2,  # Right (x=1)
+        0, 3, 7, 0, 7, 4   # Left (x=-1)
+    ]
+    
+    # 3. Create and bind VAO
+    vao = glGenVertexArrays(1)
+    glBindVertexArray(vao)
+    
+    # 4. Create and bind VBO
+    vbo = glGenBuffers(1)
+    glBindBuffer(GL_ARRAY_BUFFER, vbo)
+    glBufferData(GL_ARRAY_BUFFER, len(vertices) * 4, vertices, GL_STATIC_DRAW)
+    
+    # 5. Create and bind EBO
+    ebo = glGenBuffers(1)
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo)
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, len(indices) * 4, indices, GL_STATIC_DRAW)
+    
+    # 6. Set up vertex attributes
+    # Attribute 0: Position (offset 0, 3 floats)
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(0))
+    glEnableVertexAttribArray(0)
+    
+    # Attribute 1: TexCoords (offset 12, 3 floats)
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 24, ctypes.c_void_p(12))
+    glEnableVertexAttribArray(1)
+    
+    # 7. Unbind
+    glBindBuffer(GL_ARRAY_BUFFER, 0)
+    glBindVertexArray(0)
+    
+    return vao, ebo
+```
+
+**Edge Cases and Pitfalls**
+*   **Precision**: Using `GL_FLOAT` for coordinates is standard, but for very large voxel grids, world-space transformation should be handled carefully to avoid z-fighting or precision loss in the depth buffer [G].
+*   **Boundaries**: The default extents are (0,0,0) to (1,1,1) in parameter space, but the geometric cube is defined from -1 to 1. The mapping between parameter space and world space is handled by the parent [Naive Voxel Geometry](11683-naive-voxel-geometry.md) via the MVP matrix [S2, G].
+*   **Degenerate Input**: If the voxel grid is empty, no geometry should be generated or drawn. The parent method handles occupancy culling [G].
+
+## Operating characteristics
+**Time and Memory Complexity**
+*   Memory: $O(1)$ per voxel for the geometry data (8 vertices, 36 indices). Total memory is proportional to the number of occupied voxels if instancing is used, or fixed if a single cube is rendered per draw call.
+*   Time: $O(1)$ per voxel for geometry generation. Rasterization cost is proportional to the screen space area of the projected cubes.
+
+**Measured Performance**
+Not given in the sources.
+
+**Scaling**
+Scales linearly with the number of occupied voxels. Performance degrades with overdraw and fragment shader complexity.
+
+**Strengths and Limitations**
+*   Strengths: Simple to implement; provides explicit geometry for shading and normal calculation; compatible with standard rasterization pipelines.
+*   Limitations: High vertex count for large volumes (8 vertices per voxel); significant overdraw for transparent volumes; requires careful culling to be performant.
+
+**When to Use**
+Use when explicit surface geometry is needed for lighting or when the volume is sparse and culling is effective. Not suitable for dense, large-scale volumes without instancing or hierarchical culling.
+
+## Background
+**Origin**
+The `vzBlock` geometry object originates from the SGI OpenGL Volumizer library, introduced in the early 2000s [S2]. It was part of the `vz` toolkit for volume visualization on SGI hardware.
+
+**History and Development**
+The `vzBlock` class was designed to provide a simple, axis-aligned cube representation for volume data, serving as a basic geometry primitive for the `vzShape` node [S2]. It is documented in the SGI OpenGL Volumizer manual [S2].
+
+**Usage**
+Used in early volume rendering applications requiring explicit cube geometry, such as medical imaging visualizers [S1, unofficial][S2].
+
+## Sources
+[S1] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)
+[S2] Chapter 2. Getting Started, https://techpubs.jurassic.nl/library/manuals/4000/007-4389-010/sgi_html/ch02.html, fetched 2026-10-30

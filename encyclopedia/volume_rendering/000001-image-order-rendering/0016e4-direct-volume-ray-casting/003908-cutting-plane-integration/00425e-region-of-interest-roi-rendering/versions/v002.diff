@@ -1,0 +1,162 @@
+--- v001.md
++++ v002.md
+@@ -1,20 +1,22 @@
+ # Region of Interest (ROI) Rendering
++
+ Also called: Clipping in Volume Rendering, ROI Rendering
+ 
+ ## Overview
+-Region of Interest (ROI) rendering is a technique to visualize internal features by defining a specific region and rendering only that portion of the dataset [S1, book]. It solves the problem where full opacity is obtained before reaching internal structures, making them difficult to see [S1, book]. It sets itself apart from standard volume rendering by restricting the integration domain to a user-defined subset, which can be geometric or volumetric, rather than the entire volume extent.
++Region of Interest (ROI) rendering is a technique to visualize internal features by defining a specific region and rendering only that portion of the dataset [S1, book]. It solves the problem where full opacity is obtained before reaching internal structures of interest, such as seeds within pulp, by isolating the target volume [S1, book]. Unlike standard clipping which often uses global planes, ROI rendering supports arbitrary geometric envelopes, masks, and intensity-based automatic detection [S1, book][S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Volumetric dataset, camera parameters, region definition (geometric primitives or binary mask), transfer functions.
+-*   **Outputs:** 2D image with only the ROI visible.
++*   **Input:** Volume dataset $V$, Region of Interest definition (geometric primitives, mask volume, or Point of Interest), rendering parameters (transfer function, ray step size).
++*   **Output:** Rendered image containing only the voxels within the defined ROI.
+ 
+ **Data Structures:**
+-*   **Geometric ROI:** Defined by clipping planes (near/far, orthographic box, half-spaces) or closed meshes.
+-*   **Volumetric ROI:** Auxiliary binary scalar volume (mask) where value $1$ indicates inclusion and $0$ exclusion.
++*   **Geometric ROI:** Defined by clipping planes (camera near/far, six orthographic, or arbitrary half-spaces) or closed geometric objects [S1, book].
++*   **Mask ROI:** Auxiliary binary volume $M$ where $M(x,y,z) \in \{0, 1\}$ indicates inclusion/exclusion [S1, book].
++*   **Intensity ROI:** Defined by a Point of Interest (POI) and a radius $R$ derived from intensity thresholds [S2].
+ 
+ **Steps:**
+ 
+-1.  **Define Region:** Select one of the following methods [S1, book]:
++1.  **Define ROI:** Select one of the following methods [S1, book]:
+     *   Camera near/far clipping planes.
+     *   Six orthographic clipping planes (rectangular subvolume).
+@@ -22,43 +24,57 @@
+     *   Closed geometric objects.
+     *   Auxiliary binary mask volume.
++    *   Intensity-based spherical envelope (see Subtopics).
+ 
+-2.  **Ray Casting (Image-Order):**
+-    *   **Preprocessing:** Clip the ray against all geometric region definitions [S1, book].
+-    *   **Evaluation:** Evaluate the ray function (sample and composite) only along segments of the ray that are within the region of interest [S1, book].
+-    *   **Masking:** If using a mask volume, consult the mask value at each sample to determine if its contribution should be included or excluded [S1, book].
++2.  **Ray Clipping (Image-Order):**
++    *   For each pixel, generate a ray $r(t) = O + tD$.
++    *   Clip the ray against all geometric region definitions as a preprocessing step [S1, book].
++    *   Determine the valid interval $[t_{start}, t_{end}]$ where the ray intersects the ROI. If no intersection, skip the ray.
+ 
+-3.  **Object-Order (Texture Mapping):**
+-    *   Determine for each sample whether it is within the region of interest before incorporating its contribution [S1, book].
+-    *   Utilize hardware clipping planes if available to support regions of interest [S1, book].
++3.  **Sample Evaluation:**
++    *   Evaluate the ray function (transfer function, shading) only along segments of the ray that are within the region of interest [S1, book].
++    *   For each sample point $p$ along the ray:
++        *   If using a mask volume $M$, consult $M(p)$. If $M(p) == 0$, exclude contribution [S1, book].
++        *   If using geometric clipping, check if $p$ is inside the defined geometry.
++        *   If using intensity-based ROI, check if distance from POI $\le R$ and intensity conditions are met [S2].
+ 
+-**Pseudocode (Image-Order Ray Casting with Mask):**
++4.  **Compositing:**
++    *   Accumulate color and opacity for samples that pass the ROI check.
++    *   For object-order methods, determine for each sample whether it is within the ROI before incorporating its contribution [S1, book].
++    *   If hardware clipping planes are available (e.g., in texture mapping approaches), utilize them to support regions of interest [S1, book].
++
++**Pseudocode (Image-Order with Mask):**
+ 
+ ```python
+ def render_roi(volume, mask, ray_origin, ray_direction, transfer_function):
+-    # Assume volume and mask are 3D arrays indexed by (x, y, z)
+-    # Assume ray_origin, ray_direction are 3D vectors
+-    # Assume transfer_function is a function (color, opacity) -> (rgba)
++    # Precompute ray bounds if using geometric clipping
++    # For mask-based ROI, we iterate all samples but check mask
+     
+-    # 1. Clip ray against geometric ROI if defined (not shown here, assumed handled by ray segment bounds)
+-    # Let t_min and t_max be the entry and exit points of the ray within the ROI
++    color = [0.0, 0.0, 0.0, 0.0]
++    t = 0.0
++    step_size = 1.0 # Normalized step size
+     
+-    color = vec3(0.0)
+-    alpha = 0.0
+-    
+-    # 2. Evaluate ray only within ROI segment
+-    t = t_min
+-    while t < t_max:
+-        # Sample position
++    while t < 1.0:
++        # Sample position in volume coordinates
+         pos = ray_origin + t * ray_direction
+         voxel = sample_volume(volume, pos)
+         
+-        # 3. Consult mask
++        # Check ROI mask
+         mask_val = sample_volume(mask, pos)
+         
+-        if mask_val > 0.5: # Include if mask is active
+-            rgba = transfer_function(voxel)
++        if mask_val > 0.5: # Inside ROI
++            # Evaluate transfer function
++            color_val, alpha_val = transfer_function(voxel)
++            
+             # Front-to-back compositing
+-            color = color + rgba.rgb * rgba.a * (1.0 - alpha)
+-            alpha = alpha + rgba.a * (1.0 - alpha)
++            # C_new = C_old + C_new * (1 - A_old)
++            # A_new = A_old + A_new * (1 - A_old)
++            
++            color[0] = color[0] + color_val[0] * alpha_val * (1.0 - color[3])
++            color[1] = color[1] + color_val[1] * alpha_val * (1.0 - color[3])
++            color[2] = color[2] + color_val[2] * alpha_val * (1.0 - color[3])
++            color[3] = color[3] + alpha_val * (1.0 - color[3])
++            
++            if color[3] >= 0.99: # Early ray termination
++                break
+         
+         t += step_size
+@@ -67,28 +83,32 @@
+ ```
+ 
+-**Parameters:**
+-*   **Step Size:** Not given in the sources.
+-*   **Mask Threshold:** Typically $0.5$ for binary masks [G].
+-
+-**Edge Cases:**
+-*   **Precision:** Ray clipping against geometric boundaries may suffer from precision errors at boundaries [G].
+-*   **Degenerate Input:** Empty ROI results in black/transparent output.
++**Edge Cases and Pitfalls:**
++*   **Precision:** Clipping boundaries must be handled carefully to avoid gaps or overlaps, especially with floating-point ray marching [S1, book].
++*   **Degenerate Input:** If the ROI is empty or the ray does not intersect the ROI, the pixel should be transparent or background-colored [S1, book].
++*   **Mask Alignment:** The auxiliary mask volume must be aligned with the data volume to ensure correct sample lookup [S1, book].
+ 
+ ## Subtopics
+ 
+ ### [Front-to-Back Depth Peeling](11218-front-to-back-depth-peeling.md)
+-Defines ROI as a 3D envelope using polygon-based depth peeling and volume ray casting. Interleaves polygon rendering and volume ray casting to handle volume samples inside/outside the envelope. Choose when visualizing internal features bounded by an arbitrary surface.
++Front-to-Back Depth Peeling (FtBDP) is a technique for Region of Interest (ROI) rendering that defines an ROI as a 3D envelope by combining polygon-based depth peeling with volume ray casting. It solves the problem of visualizing internal volume features bounded by an arbitrary surface by breaking the ray casting process into stages synchronized with intermediate peeling results. Unlike standard depth peeling which only handles polygonal models, FtBDP interleaves polygon rendering and volume ray casting to correctly handle volume samples both inside and outside the envelope.
++
++### ROI-based Attenuation of Unimportant Structures
++A technique to attenuate unimportant high-intensity structures (e.g., at the brain surface) by defining a spherical Region of Interest (ROI) around a Point of Interest (POI) in the tumor tissue [S2]. The user marks a POI in the tumor tissue, close to the middle point [S2]. From this POI, $N$ rays are cast: three along the coordinate system axes and three against the direction of the axes [S2]. For each ray, the distance to the POI is computed as soon as the intensity becomes less than an intensity threshold, indicating the ray has exited the suspicious structure [S2]. The maximal distance among the six rays is used to specify the radius of the spherical ROI [S2]. Only voxels inside this ROI are blended with the additional volume [S2]. Typical value: $N = 6$ [S2].
++
++### ROI Computation via Ray Casting
++A method to suppress unimportant structures by automatically computing a Region of Interest (ROI) from a user-marked Point of Interest (POI) using intensity analysis along cast rays [S2]. The user marks a POI, rays are cast from the POI into the volume, and intensity analysis along the cast rays computes the ROI [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Proportional to the number of samples within the ROI. Reduces computation compared to full volume rendering if ROI is small.
+-*   **Memory Complexity:** Requires storage for the auxiliary mask volume if used [S1, book].
+-*   **Strengths:** Allows focused inspection of internal structures; hides occluding outer layers.
+-*   **Limitations:** Requires definition of ROI; geometric clipping may be complex for arbitrary shapes.
+-*   **When to use:** When internal features are obscured by outer layers or when focusing on a specific anatomical/structural region.
+-*   **When not:** When global context is required.
++*   **Time Complexity:** Depends on the ROI definition. Geometric clipping adds minimal overhead per ray [S1, book]. Mask-based rendering requires sampling the mask volume at each step, increasing memory bandwidth usage [S1, book]. Intensity-based ROI requires pre-casting rays to determine radius, adding a one-time cost [S2].
++*   **Memory Complexity:** Mask-based ROI requires an auxiliary binary volume $M$ of the same dimensions as the data volume $V$ [S1, book].
++*   **Strengths:** Allows precise isolation of internal structures; supports arbitrary shapes; reduces visual clutter from occluding high-intensity structures [S1, book][S2].
++*   **Limitations:** Geometric clipping may not fit complex internal structures; mask-based methods require pre-computation or storage of the mask; intensity-based methods depend on threshold selection [S1, book][S2].
++*   **When to Use:** When internal structures are occluded by high-intensity surfaces or when focusing on a specific anatomical region [S1, book][S2].
++*   **When Not to Use:** When the entire volume context is needed; when the ROI definition is ambiguous or difficult to specify [S1, book].
+ 
+ ## Background
+-Originated in the context of VTK (Visualization Toolkit) and advanced computer graphics education [S1, book]. It is used in medical imaging and scientific visualization to reveal internal structures.
++Originated in the context of advanced computer graphics and volume visualization techniques [S1, book]. It is used in medical imaging to visualize internal pathological tissues, such as tumors, by suppressing unimportant surrounding structures [S2]. The technique is supported by various graphics libraries, including VTK [S1, book].
+ 
+ ## Sources
+-[S1] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)+[S1] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)
++[S2] High-Quality Multimodal Volume Visualization of Intracerebral Pathological Tissue, https://doi.org/10.2312/vcbm/vcbm08/167-176, fetched 2026-10-26

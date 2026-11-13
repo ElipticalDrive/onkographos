@@ -1,0 +1,96 @@
+# Weather & Cloud Parameterization
+
+Also called: atmospheric settings, cloud simulation parameters
+
+## Overview
+Weather & Cloud Parameterization defines the physical and visual properties for volumetric cloud rendering, controlling coverage, density, type, geometry, lighting, and noise interaction [S1, S2, unofficial]. It differs from [Volumetric Cloud Raymarching](1248-volumetric-cloud-raymarching.md) by providing the structured data interface that drives those processes rather than handling the integration step, and from [Procedural Volume Cloud Modeling](2256-procedural-volume-cloud-modeling.md) which focuses on the noise generation algorithm [S1, S2, unofficial].
+
+## Shared principles
+The family relies on a set of global parameters that modulate the procedural density field and the radiative transfer integration [S1, unofficial]. These parameters are typically stored in a `Weather` structure or passed as shader uniforms [S1, unofficial].
+
+**Global Physical Parameters:**
+*   **Cloud Type (`cloudType`)**: A float in $[0, 1]$ that interpolates between cloud behaviors, where $0.0$ represents Stratus and $1.0$ represents Cumulonimbus [S1, unofficial]. This value drives the selection of vertical density profiles and noise erosion rates [S1, unofficial].
+*   **Layer Bounds**:
+    *   `baseHeight`: The vertical altitude of the cloud layer base (default 1500.0 meters) [S1, unofficial].
+    *   `thickness`: The vertical extent of the layer (default 2500.0 meters) [S1, unofficial].
+*   **Wind**: Horizontal wind velocity components `windX` and `windZ` used for advection of noise textures over time [S1, unofficial].
+*   **Lighting**:
+    *   `sunAzimuth`: Sun horizontal angle in radians (default 0.9) [S1, unofficial].
+    *   `sunElevation`: Sun vertical angle (default 0.4) [S1, unofficial].
+    *   `sunIntensity`: Sun light multiplier (default 10.0) [S1, unofficial].
+    *   `ambient`: Ambient light multiplier (default 1.0) [S1, unofficial].
+*   **Scattering**:
+    *   `extinction`: Base extinction coefficient per metre at density 1 (default 0.012) [S1, unofficial].
+    *   `anisotropy`: Forward Henyey-Greenstein lobe parameter $g$ (default 0.6) [S1, unofficial].
+*   **Density Modulation**:
+    *   `coverage`: A float in $[0, 1]$ that shifts the weather map's coverage threshold [S1, unofficial].
+    *   `density`: A multiplier for the overall extinction [S1, unofficial].
+    *   `erosion`: Controls how much detail noise erodes cloud edges (default 0.45) [S1, unofficial].
+
+**Rendering Configuration:**
+*   `RenderSettings.scale`: Cloud pass resolution relative to output (1.0, 0.5, or 0.25) [S1, unofficial].
+*   `RenderSettings.temporal`: Boolean enabling reprojection and accumulation [S1, unofficial].
+*   `RenderSettings.maxSteps`: Maximum ray marching steps (default 128) [S1, unofficial].
+
+**Validation Constraints:**
+When generating volume masks, parameters must satisfy specific bounds [6809-cloud-configuration-parameters.md]:
+*   `resolution` must be exactly 64, 128, or 256 [6809-cloud-configuration-parameters.md].
+*   `shape_strength`, `detail_strength`, and `disturbance_strength` must be within $[0.0, 2.0]$ [6809-cloud-configuration-parameters.md].
+*   The volume box height is determined by a multiplier relative to the weather height layer, with a standard multiplier of 4.0 [S2, unofficial].
+
+## Subtopics
+
+### [Volumetric Cloud Raymarching](1248-volumetric-cloud-raymarching.md)
+Renders cumulus and stratiform clouds by tracing rays through a 3D density field defined by procedural noise, integrating light attenuation and scattering using Beer's Law and phase functions. It differs from [Procedural Volume Cloud Modeling](2256-procedural-volume-cloud-modeling.md) by explicitly decoupling the density sampling (via Worley/Perlin noise) from the radiative transfer integration, and from [Atmospheric Height Gradient](4813-atmospheric-height-gradient.md) by simulating full participating media scattering rather than just height-based color gradients.
+
+### [Procedural Volume Cloud Modeling](2256-procedural-volume-cloud-modeling.md)
+Constructs a volumetric density field for clouds by evaluating analytic functions and sampling noise textures at arbitrary world-space coordinates, rather than relying on pre-baked voxel grids or physical simulations. It solves the problem of generating realistic, large-scale cloud formations with varying types (e.g., cumulus, cirrus) and dynamic details (erosion, flow) efficiently on GPU hardware. It differs from [Volumetric Cloud Raymarching](1248-volumetric-cloud-raymarching.md) by focusing on the *generation* of the density values themselves rather than the integration of light through them, and from [Atmospheric Height Gradient](4813-atmospheric-height-gradient.md) by incorporating multi-channel weather maps and specific cloud-type logic rather than a simple vertical falloff.
+
+### [Atmospheric Height Gradient](4813-atmospheric-height-gradient.md)
+Defines the vertical density profile for volumetric cloud layers based on cloud type (Stratus, Cumulus, Cumulonimbus, Cirrus), creating bell-shaped or plateau-shaped density distributions relative to the atmosphere thickness. It differs from [Volumetric Cloud Raymarching](1248-volumetric-cloud-raymarching.md) by providing the analytic shape function rather than the integration step, and from [Procedural Volume Cloud Modeling](2256-procedural-volume-cloud-modeling.md) by focusing specifically on the vertical altitude-based falloff rather than spatial noise or geometry.
+
+### [Cloud Configuration Parameters](6809-cloud-configuration-parameters.md)
+Defines the physical and visual properties for volumetric cloud rendering, controlling coverage, density, type, geometry, lighting, and noise interaction. Unlike [Procedural Volume Cloud Modeling](2256-procedural-volume-cloud-modeling.md) which focuses on the noise generation algorithm, or [Volumetric Cloud Raymarching](1248-volumetric-cloud-raymarching.md) which handles the integration step, this method provides the structured data interface that drives those processes.
+
+### Cloud Coverage Remapping
+A technique to modulate cloud density based on a global coverage parameter [S2, unofficial]. The base cloud shape is remapped using the coverage value to reduce density as coverage increases, then multiplied by the coverage to ensure aesthetic density scaling [S2, unofficial].
+**Step:**
+1.  Read cloud coverage from weather data red channel (default 0.6) [S2, unofficial].
+2.  Apply remapping: `base_cloud_with_coverage = remapClampedBeforeAndAfter(baseCloud, cloud_coverage, 1.0, 0.0, 1.0)` [S2, unofficial].
+3.  Multiply by coverage: `base_cloud_with_coverage *= cloud_coverage` [S2, unofficial].
+
+### Physical Shading
+A per-Gaussian shading calculation that combines scattering albedo, light source intensity, multiple scattering octaves, self-shadowing transmittance, and the Henyey-Greenstein phase function [S3, unofficial].
+**Formula:**
+$$ L = \boldsymbol{\omega} \boldsymbol{L}_{\text{light}} \sum_n w_n \boldsymbol{T}_{\text{light}}^{b^n} \boldsymbol{P}(\boldsymbol{v}_i, \boldsymbol{v}_o; g \boldsymbol{c}^n) $$
+Where:
+*   $\boldsymbol{\omega}$: Scattering albedo (RGB) [S3, unofficial].
+*   $\boldsymbol{L}_{\text{light}}$: Light source intensity [S3, unofficial].
+*   $w_n$: Multiple scattering octave weights [S3, unofficial].
+*   $\boldsymbol{T}_{\text{light}}$: Self-shadow transmittance [S3, unofficial].
+*   $b^n$: Exponent for the n-th octave (implied by context of Frostbite approximation) [S3, unofficial].
+*   $\boldsymbol{P}$: Henyey-Greenstein phase function [S3, unofficial].
+*   $\boldsymbol{v}_i$: Incident direction ($-\boldsymbol{v}_l$) [S3, unofficial].
+*   $\boldsymbol{v}_o$: View direction [S3, unofficial].
+*   $g$: Anisotropy factor [S3, unofficial].
+*   $\boldsymbol{c}^n$: Octave-specific coefficients (implied) [S3, unofficial].
+**Note:** The sun direction $\boldsymbol{v}_l$ is obtained per-frame from the dataset but can be replaced arbitrarily during inference to enable relighting [S3, unofficial].
+
+### Cirrus Cloud Plane Rendering
+Renders thin, high ice clouds on a plane above the eye, using large patches for coverage, stretched noise for strands, and coarser noise for hooks/tufts [S4, unofficial].
+**Parameters:**
+*   `CIRRUS_HEIGHT = 0.15` (height of cloud plane in projection units) [S4, unofficial].
+*   `CIRRUS_SCALE = 14.0` (noise features per unit of plane, controls patch density) [S4, unofficial].
+*   `CIRRUS_WIND = vec2(0.94, 0.34)` (direction strands are combed along on the plane) [S4, unofficial].
+*   `CIRRUS_DRIFT = 0.02` (patch drift speed per second in plane units) [S4, unofficial].
+*   `CIRRUS_COVERAGE = 0.45` (approximate fraction of sky covered by patches) [S4, unofficial].
+**Pitfall:** Too low scale causes the whole visible sky to fall inside one noise cell, resulting in an all-clear or all-cloud appearance [S4, unofficial].
+
+## Background
+The methodology originates from real-time rendering techniques for volumetric clouds in games and simulations, specifically those utilizing procedural noise and ray marching [S1, S2, S4, unofficial]. The parameterization structures (such as `Weather` and `VolumeParameters`) are derived from engine-specific implementations designed to balance visual fidelity with performance constraints like resolution scaling and temporal reprojection [S1, S2, unofficial]. The physical shading model incorporates approximations of multiple scattering and the Henyey-Greenstein phase function to simulate light transport within participating media [S3, unofficial].
+
+## Sources
+[S1] harkawataryan/Volumetric-Cloud-Renderer, https://github.com/harkawataryan/Volumetric-Cloud-Renderer, fetched 2026-10-27 (unofficial)
+[S2] erickTornero/realtime-volumetric-cloudscapes, https://github.com/erickTornero/realtime-volumetric-cloudscapes, fetched 2026-10-27 (unofficial)
+[S3] hsiang0117/4DGS-Volume-Cloud, https://github.com/hsiang0117/4DGS-Volume-Cloud, fetched 2026-10-26 (unofficial)
+[S4] migaelstrydom/VoxelPhase, https://github.com/migaelstrydom/VoxelPhase, fetched 2026-10-28 (unofficial)

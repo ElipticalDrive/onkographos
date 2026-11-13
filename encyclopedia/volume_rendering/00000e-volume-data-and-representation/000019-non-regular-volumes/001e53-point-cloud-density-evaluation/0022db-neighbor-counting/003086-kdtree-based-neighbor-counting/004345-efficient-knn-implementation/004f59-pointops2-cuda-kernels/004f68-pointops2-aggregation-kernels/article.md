@@ -1,0 +1,188 @@
+# PointOps2 Aggregation Kernels
+
+
+## Overview
+The PointOps2 Aggregation Kernels perform a weighted feature aggregation over a set of neighbors for each point in a point cloud, incorporating relative position offsets. It solves the problem of efficiently computing neighbor-wise feature updates on GPU by fusing the lookup, offset addition, and weighted summation into a single CUDA kernel pass. It differs from sibling methods like [Point Grouping](13932-point-grouping.md) by explicitly handling the gradient flow for relative position inputs and performing the weighted sum in a memory-coalesced manner, rather than just extracting sub-tensors.
+
+## How it works
+The method consists of two CUDA kernels: a forward pass that computes the aggregated features and a backward pass that computes gradients for the input features, relative positions, and aggregation weights.
+
+### Inputs and Outputs
+**Forward Pass:**
+*   **Input:** `input` tensor of shape $(n, c)$, containing features for $n$ points with feature dimension $c$.
+*   **Input:** `position` tensor of shape $(n, \text{nsample}, c)$, containing relative position offsets for each of the $\text{nsample}$ neighbors.
+*   **Input:** `weight` tensor of shape $(n, \text{nsample}, w\_c)$, containing learned or computed weights.
+*   **Input:** `idx` tensor of shape $(n, \text{nsample})$, containing the indices of the neighbors in the `input` tensor.
+*   **Output:** `output` tensor of shape $(n, c)$, containing the aggregated features.
+
+**Backward Pass:**
+*   **Input:** `grad_output` tensor of shape $(n, c)$, containing gradients with respect to the output.
+*   **Input:** `input`, `position`, `weight`, `idx` (same as forward).
+*   **Output:** `grad_input` tensor of shape $(n, c)$.
+*   **Output:** `grad_position` tensor of shape $(n, \text{nsample}, c)$.
+*   **Output:** `grad_weight` tensor of shape $(n, \text{nsample}, w\_c)$.
+
+### Data Structures and Indices
+The kernels operate on flat 1D arrays representing the tensors. The indexing logic maps global thread IDs to specific elements in these tensors.
+
+*   $n$: Number of points.
+*   $\text{nsample}$: Number of neighbors per point.
+*   $c$: Feature dimension of input.
+*   $w\_c$: Feature dimension of weight.
+
+For a global thread index `index`:
+*   $c\_idx = \text{index} \pmod c$ (feature index within the output vector).
+*   $n\_idx = \lfloor \text{index} / c \rfloor$ (point index).
+
+For neighbor iteration $k$ from $0$ to $\text{nsample}-1$:
+*   $idx\_idx = n\_idx \times \text{nsample} + k$ (index into `idx` tensor).
+*   $input\_idx = \text{idx}[idx\_idx] \times c + c\_idx$ (index into `input` tensor).
+*   $position\_idx = n\_idx \times \text{nsample} \times c + k \times c + c\_idx$ (index into `position` tensor).
+*   $weight\_idx = n\_idx \times \text{nsample} \times w\_c + k \times w\_c + (c\_idx \pmod {w\_c})$ (index into `weight` tensor).
+
+### Forward Algorithm
+The forward kernel launches $n \times c$ threads. Each thread computes one element of the output feature vector.
+
+1.  Initialize `output[index]` to $0.0$.
+2.  Loop $k$ from $0$ to $\text{nsample}-1$:
+    a. Calculate $input\_idx$, $position\_idx$, and $weight\_idx$ as defined above.
+    b. Compute the term: $val = (\text{input}[input\_idx] + \text{position}[position\_idx]) \times \text{weight}[weight\_idx]$.
+    c. Accumulate: $\text{output}[index] \leftarrow \text{output}[index] + val$.
+
+### Backward Algorithm
+The backward kernel also launches $n \times c$ threads. It computes gradients for `input`, `position`, and `weight`. Note that `grad_input` requires atomic addition because multiple neighbors may map to the same input point index.
+
+1.  Loop $k$ from $0$ to $\text{nsample}-1$:
+    a. Calculate $input\_idx$, $position\_idx$, and $weight\_idx$ as defined above.
+    b. Compute the gradient value flowing from the output: $grad\_val = \text{grad\_output}[index] \times \text{weight}[weight\_idx]$.
+    c. Update gradient for input features: $\text{grad\_input}[input\_idx] \leftarrow \text{grad\_input}[input\_idx] + grad\_val$. (Use `atomicAdd` for thread safety).
+    d. Update gradient for positions: $\text{grad\_position}[position\_idx] \leftarrow grad\_val$.
+    e. Update gradient for weights: $\text{grad\_weight}[weight\_idx] \leftarrow \text{grad\_weight}[weight\_idx] + grad\_val \times (\text{input}[input\_idx] + \text{position}[position\_idx])$. (Use `atomicAdd` for thread safety).
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import math
+
+def aggregation_forward_cuda(input, position, weight, idx):
+    """
+    Computes the forward pass of the aggregation kernel.
+    
+    Args:
+        input (torch.Tensor): (n, c) input features.
+        position (torch.Tensor): (n, nsample, c) relative positions.
+        weight (torch.Tensor): (n, nsample, w_c) weights.
+        idx (torch.Tensor): (n, nsample) neighbor indices.
+        
+    Returns:
+        torch.Tensor: (n, c) aggregated output.
+    """
+    n, c = input.shape
+    nsample = position.shape[1]
+    w_c = weight.shape[2]
+    
+    output = torch.zeros((n, c), device=input.device, dtype=input.dtype)
+    
+    # Launch kernel with n * c threads
+    # Each thread handles one output element (point p, feature f)
+    # The kernel logic is implemented in C++ CUDA, but here is the logical equivalent
+    
+    for p in range(n):
+        for f in range(c):
+            acc = 0.0
+            for k in range(nsample):
+                # Calculate indices
+                idx_idx = p * nsample + k
+                neighbor_idx = idx[idx_idx].item()
+                
+                input_idx = neighbor_idx * c + f
+                position_idx = p * nsample * c + k * c + f
+                weight_idx = p * nsample * w_c + k * w_c + (f % w_c)
+                
+                # Compute contribution
+                val = (input[input_idx] + position[position_idx]) * weight[weight_idx]
+                acc += val
+            
+            output[p * c + f] = acc
+            
+    return output
+
+def aggregation_backward_cuda(grad_output, input, position, weight, idx):
+    """
+    Computes the backward pass of the aggregation kernel.
+    
+    Args:
+        grad_output (torch.Tensor): (n, c) gradients w.r.t output.
+        input (torch.Tensor): (n, c) input features.
+        position (torch.Tensor): (n, nsample, c) relative positions.
+        weight (torch.Tensor): (n, nsample, w_c) weights.
+        idx (torch.Tensor): (n, nsample) neighbor indices.
+        
+    Returns:
+        tuple: (grad_input, grad_position, grad_weight)
+    """
+    n, c = input.shape
+    nsample = position.shape[1]
+    w_c = weight.shape[2]
+    
+    grad_input = torch.zeros((n, c), device=input.device, dtype=input.dtype)
+    grad_position = torch.zeros((n, nsample, c), device=input.device, dtype=input.dtype)
+    grad_weight = torch.zeros((n, nsample, w_c), device=input.device, dtype=input.dtype)
+    
+    # Note: In CUDA, atomicAdd is used for grad_input and grad_weight
+    # because multiple threads (neighbors) might update the same input point or weight.
+    # Here we simulate the logic.
+    
+    for p in range(n):
+        for f in range(c):
+            for k in range(nsample):
+                idx_idx = p * nsample + k
+                neighbor_idx = idx[idx_idx].item()
+                
+                input_idx = neighbor_idx * c + f
+                position_idx = p * nsample * c + k * c + f
+                weight_idx = p * nsample * w_c + k * w_c + (f % w_c)
+                
+                grad_val = grad_output[p * c + f] * weight[weight_idx]
+                
+                # Atomic add for grad_input
+                grad_input[input_idx] += grad_val
+                
+                # Direct assignment for grad_position (unique per thread)
+                grad_position[position_idx] = grad_val
+                
+                # Atomic add for grad_weight
+                grad_weight[weight_idx] += grad_val * (input[input_idx] + position[position_idx])
+                
+    return grad_input, grad_position, grad_weight
+```
+
+### Parameters
+*   `n`: Number of points.
+*   `nsample`: Number of neighbors per point.
+*   `c`: Feature dimension of input.
+*   `w_c`: Feature dimension of weight (often equal to $c$ or $1$).
+
+### Edge Cases and Pitfalls
+*   **Precision:** The accumulation in the forward pass and the atomic additions in the backward pass can suffer from floating-point precision issues if $c$ or $\text{nsample}$ is very large. Using `float32` is standard, but `float16` or `bfloat16` may require careful handling of accumulation registers.
+*   **Boundaries:** The `idx` tensor must contain valid indices within $[0, n-1]$. Invalid indices will cause out-of-bounds memory access.
+*   **Degenerate Input:** If `nsample` is 0, the output is zero (or undefined if not initialized). If `c` is 0, the operation is a no-op.
+*   **Atomic Contention:** In the backward pass, `grad_input` and `grad_weight` use `atomicAdd`. High contention on these atomic operations can reduce performance if many neighbors map to the same input point or weight index.
+
+## Operating characteristics
+*   **Time Complexity:** $O(n \cdot \text{nsample} \cdot c)$ for both forward and backward passes.
+*   **Memory Complexity:** $O(n \cdot c + n \cdot \text{nsample} \cdot c + n \cdot \text{nsample} \cdot w\_c)$ for inputs and outputs.
+*   **Performance:** The kernel is optimized for GPU execution, leveraging coalesced memory access patterns where possible. The use of `atomicAdd` in the backward pass can be a bottleneck if there is significant overlap in neighbor indices.
+*   **Strengths:** Efficiently combines neighbor lookup, offset addition, and weighted summation. Suitable for large-scale point cloud processing.
+*   **Limitations:** Memory bandwidth bound due to the large amount of data accessed (input, position, weight, idx). Atomic operations in the backward pass can limit scalability.
+*   **When to use:** When performing feature aggregation on point clouds with learned or computed weights and relative positions.
+*   **When not to use:** If the number of neighbors is very small and the overhead of kernel launch is significant compared to the computation. If memory bandwidth is the primary bottleneck and alternative methods with less data movement are available.
+
+## Background
+The PointOps2 Aggregation Kernels are part of the PointOps2 library, which provides efficient CUDA kernels for point cloud operations. The library is used in various deep learning models for point cloud analysis, such as [4D Gaussian Splatting](https://github.com/LogosIntelligenceLab/4d-gaussian-splatting). The specific implementation of the aggregation kernel is designed to handle the gradients of relative positions, which is a common requirement in point-based neural networks.
+
+## Sources
+[S1] LogosIntelligenceLab/4d-gaussian-splatting, https://github.com/LogosIntelligenceLab/4d-gaussian-splatting, fetched 2026-10-27 (unofficial)

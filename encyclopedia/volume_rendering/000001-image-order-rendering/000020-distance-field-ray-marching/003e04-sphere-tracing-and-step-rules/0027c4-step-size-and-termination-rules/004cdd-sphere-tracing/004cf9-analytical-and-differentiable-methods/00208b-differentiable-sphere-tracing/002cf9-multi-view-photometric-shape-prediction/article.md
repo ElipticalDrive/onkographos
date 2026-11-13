@@ -1,0 +1,76 @@
+# Multi-View Photometric Shape Prediction
+
+Also called: Latent Code Optimization via Photometric Warping, Photometric Consistency Optimization for Shape, Pix2Vex, Pix2Vex Network, p2v
+
+## Overview
+Predicts 3D shape from multiple color images by minimizing cross-view photometric consistency loss without requiring segmentation masks [S1]. It differs from encoder-based methods like PMO by using random initialization and an implicit representation, making it robust to initialization noise and camera focal length changes [S1].
+
+## How it works
+**Inputs:** A set of $N$ color images $\{I_0, \dots, I_{N-1}\}$ from known camera poses.
+**Outputs:** A latent code $\mathbf{z}$ representing the 3D shape.
+
+**Data Structures:**
+*   $\mathbf{z}$: Latent vector. Initialized randomly [S1].
+*   $f(\mathbf{z})$: Implicit Signed Distance Function (SDF) decoder (e.g., DeepSDF) [S1].
+*   $\mathcal{R}_d^i$: Differentiable depth renderer for view $i$ [S1].
+*   $\mathcal{N}_i$: Set of neighboring views for image $I_i$ [S1].
+
+**Steps:**
+1.  Initialize latent code $\mathbf{z}$ randomly [S1].
+2.  For each view $i$, render a depth image $D_i = \mathcal{R}_d^i(f(\mathbf{z}))$ [S1].
+3.  For each view $i$ and neighbor $j \in \mathcal{N}_i$:
+    a. Warp color image $I_j$ to view $i$ using depth $D_i$ and camera pose to get $I_{j \rightarrow i}$ [S1].
+    b. Compute photometric difference between $I_i$ and $I_{j \rightarrow i}$ [S1].
+4.  Minimize the total photometric loss with respect to $\mathbf{z}$ [S1].
+
+**Formula:**
+$$ \arg \min_{\mathbf{z}} \sum_{i=0}^{N-1} \sum_{j \in \mathcal{N}_i} \| I_i - I_{j \rightarrow i}(\mathcal{R}_d^i(f(\mathbf{z}))) \| $$
+where $\mathcal{R}_d^i$ is the rendered depth image at view $i$, $\mathcal{N}_i$ are the neighboring images of $I_i$, and $I_{j \rightarrow i}$ is the warped image from view $j$ to $i$ using the rendered depth [S1]. No mask is required [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_view_photometric_shape_prediction(images, cameras, sdf_decoder, num_iters=1000):
+    # Initialize latent code randomly [S1]
+    z = random_vector()
+    
+    for step in range(num_iters):
+        # Render depth for each view [S1]
+        depths = []
+        for i, img in enumerate(images):
+            # Render depth using differentiable sphere tracing [S1]
+            d = render_depth(sdf_decoder(z), cameras[i])
+            depths.append(d)
+        
+        loss = 0.0
+        # Compute photometric loss [S1]
+        for i in range(len(images)):
+            for j in neighbors(i, len(images)):
+                # Warp image j to view i using rendered depth [S1]
+                warped_img = warp_image(images[j], cameras[j], cameras[i], depths[i])
+                # Photometric difference [S1]
+                diff = images[i] - warped_img
+                loss += sum_squared_errors(diff)
+        
+        # Update latent code to minimize loss [S1]
+        z = optimize(z, loss)
+        
+    return z
+```
+
+**Edge Cases:**
+*   Initialization: Random initialization is used to ensure robustness against noise [S1].
+*   Masks: No segmentation masks are required [S1].
+
+## Operating characteristics
+*   **Robustness:** More robust to initialization noise and camera focal length changes than PMO [S1].
+*   **Performance:** Maintains accuracy because initialization is randomized and the implicit representation handles details better [S1].
+*   **Comparison:** PMO relies on a trained image encoder and triangular mesh representation, causing significant performance drops with random initialization or domain shifts [S1].
+
+## Background
+Originated from research on differentiable rendering for 3D shape prediction [S1]. It leverages cross-view photometric consistency to optimize shape without supervision [S1].
+
+## Sources
+[S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26
+[S2] Pix2Vex: Image-to-Geometry Reconstruction using a Smooth Differentiable Renderer, https://doi.org/10.48550/arxiv.1903.11149, fetched 2026-10-26 (unofficial)

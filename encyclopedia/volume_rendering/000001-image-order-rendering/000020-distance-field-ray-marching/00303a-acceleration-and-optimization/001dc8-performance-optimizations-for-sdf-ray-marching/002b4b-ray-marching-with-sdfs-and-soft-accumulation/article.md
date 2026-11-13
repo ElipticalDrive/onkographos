@@ -3,99 +3,113 @@
 Also called: Jellyfish Ray Marching with Soft Accumulation, Soft Accumulation for Thin Geometry
 
 ## Overview
-A rendering technique for hair-thin geometry (such as jellyfish tentacles) that prevents flickering by replacing hard surface intersection with soft accumulation. Instead of stopping at the first hit, each ray march step adds a contribution based on the distance to the surface, fading in smoothly via an exponential falloff. This sets it apart from standard SDF ray marching, which typically terminates on hard intersection, and from [Aggressive Ray Marching with SDF](2326-aggressive-ray-marching-with-sdf.md), which focuses on step size optimization rather than anti-aliasing thin strands.
+A rendering technique for hair-thin geometry (such as jellyfish tentacles) that prevents flickering by replacing hard surface intersection with soft accumulation [S1, unofficial]. Instead of stopping at the first hit, each ray march step adds a contribution based on the distance to the surface, fading in smoothly via an exponential falloff [S1, unofficial]. This sets it apart from standard SDF ray marching, which typically terminates on hard intersection, and from [Aggressive Ray Marching with SDF](2326-aggressive-ray-marching-with-sdf.md), which focuses on step size optimization rather than anti-aliasing thin strands [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Ray origin $o$, ray direction $d$, time $t$, phase offset $\phi$, scene parameters (bell radius, tentacle length, school count), and SDF functions for the bell ($sdBell$), tentacles ($sdTentacles$), and arms ($sdArms$).
-*   **Outputs:** Final color $col$ for the pixel.
+*   **Inputs:** Ray origin $ro$, ray direction $d$, time $t$, phase offset $\phi$, scene parameters (bell radius, tentacle length, school count), and SDF functions for the bell ($sdBell$), tentacles ($sdTentacles$), and arms ($sdArms$) [S1, unofficial].
+*   **Outputs:** Final color $col$ for the pixel [S1, unofficial].
 
 **Data Structures:**
-*   **Ray State:** `travel` (float, accumulated distance), `trans` (float, transparency, initialized to 1.0), `rad` (vec3, accumulated radial color), `strands` (float, accumulated strand contribution).
-*   **Scene Constants:** `MARCH_STEPS` (120), `TENT_LEN` (3.0), `ARM_LEN` (1.5), `SCHOOL` (5), `GLOW`, `HOT` (lighting intensity parameters).
+*   **Ray State:** `travel` (float, accumulated distance), `trans` (float, transparency, initialized to 1.0), `rad` (vec3, accumulated radial color), `strands` (float, accumulated strand contribution) [S1, unofficial].
+*   **Scene Constants:** `MARCH_STEPS` (120), `TENT_LEN` (3.0), `ARM_LEN` (1.5), `SCHOOL` (5), `GLOW`, `HOT` (lighting intensity parameters) [S1, unofficial].
 
-**Step-by-Step Method:**
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-1.  **Initialization:**
-    For each jellyfish in the school:
-    *   Compute the jellyfish center with sinusoidal drift.
-    *   Transform the ray origin $o$ relative to the center: $o = (ro - centre) / data.w$.
-    *   Apply tilt rotations to $o$:
-        $$o_{xy} = \text{rot}(\text{tilt}.x) \cdot o_{xy}$$
-        $$o_{zy} = \text{rot}(\text{tilt}.y) \cdot o_{zy}$$
-    *   Compute ray-sphere intersection for marching bounds using the bell center $bo = o - \text{vec3}(0.0, -1.4, 0.0)$:
-        $$b = \text{dot}(bo, d)$$
-        $$\text{disc} = b^2 - \text{dot}(bo, bo) + 2.7^2$$
-        $$t_{max} = -b + \sqrt{\text{disc}}$$
-    *   Initialize marching state:
-        $$pc = \text{pulse}(t \cdot 0.42 + \phi \cdot 0.37)$$
-        $$\text{travel} = \max(-b - \text{sq}, 0.0) + \text{dither}$$
-        $$\text{trans} = 1.0$$
-        $$\text{strands} = 0.0$$
-        $$\text{rad} = \text{vec3}(0.0)$$
+```python
+def ray_march_sdf_soft_accumulation(ro, d, t, ph):
+    # Camera/ray setup (from evidence)
+    ro = vec3(0.0, 0.10 + 0.16 * sin(t * 0.08), 5.60)
+    ro.xz = rot(0.07 * sin(t * 0.11)) * ro.xz
+    uv = (2.0 * gl_FragCoord.xy - u_resolution) / u_resolution.y
+    d = normalize(fw * 1.85 + rt * uv.x + upv * uv.y)
+    
+    col = vec3(0.0)
+    
+    for i in range(SCHOOL):
+        # Compute centre with sinusoidal drift [S1, unofficial]
+        centre = compute_centre_sinusoidal_drift(i, t, ph)
+        
+        # Transform ray origin relative to center
+        o = (ro - centre) / data.w
+        # Apply tilt rotations
+        o.xy = rot(tilt.x) * o.xy
+        o.zy = rot(tilt.y) * o.zy
+        
+        # Ray-sphere intersection for marching bounds
+        bo = o - vec3(0.0, -1.4, 0.0)
+        b = dot(bo, d)
+        disc = b * b - dot(bo, bo) + 2.7 * 2.7
+        tmax = -b + sqrt(disc)
+        
+        # Initialize marching state
+        pc = pulse(t * 0.42 + ph * 0.37)
+        travel = max(-b - sq, 0.0) + dither  # sq and dither not defined in sources [G]
+        trans = 1.0
+        strands = 0.0
+        rad = vec3(0.0)
+        
+        for s in range(MARCH_STEPS):
+            if travel > tmax or trans < 0.05:
+                break
+                
+            p = o + d * travel
+            
+            # SDF evaluation
+            db = sdBell(p, pc, t, ph)
+            dt = sdTentacles(p, pc, t, ph)
+            da = sdArms(p, t, ph)
+            
+            # Step size
+            stride = clamp(min(db, min(dt, da)) * 0.70, 0.010, 0.18)
+            
+            # Soft accumulation for strands
+            taper = 1.0 - smoothstep(0.55, 1.05, -p.y / TENT_LEN)
+            strands += exp(-max(dt, 0.0) * 95.0) * stride * 8.5 * taper
+            strands += exp(-max(da, 0.0) * 45.0) * stride * 3.0
+            
+            # Bell surface shading
+            if db < 0.012:
+                # Compute normal via finite differences
+                n = bellNormal(p, pc, t, ph)  # Uses e = vec2(0.0035, 0.0) [S1, unofficial]
+                fres = pow(1.0 - abs(dot(n, -d)), 2.4)
+                lam = 0.35 + 0.65 * abs(dot(n, normalize(vec3(-0.35, 1.0, 0.45))))
+                ribs = pow(0.5 + 0.5 * cos(16.0 * atan(p.z, p.x)), 14.0)
+                op = 0.075 + 0.42 * fres + ribs * 0.12
+                rad += trans * op * (GLOW * (0.75 + 1.15 * lam) + HOT * (fres * 1.30 + ribs * 0.60))
+                trans *= 1.0 - op
+                stride = 0.026  # Force small step for bell surface detail [S1, unofficial]
+                
+            travel += stride
+            
+        # Apply fog
+        fog = exp(-0.055 * max(length(ro - centre) - 3.0, 0.0))
+        col += (rad + GLOW * strands * 0.16 + HOT * strands * strands * 0.006) * fog
+        
+    # Post-processing
+    col = vec3(1.0) - exp(-col * 1.85)
+    col = max(col - vec3(0.0175, 0.0160, 0.0060), vec3(0.0))
+    output = pow(col, vec3(1.0 / 2.2))
+    return output
 
-2.  **Ray Marching Loop:**
-    Loop $s$ from $0$ to `MARCH_STEPS` - 1:
-    *   **Termination Check:** If $\text{travel} > t_{max}$ or $\text{trans} < 0.05$, break.
-    *   **Position:** $p = o + d \cdot \text{travel}$.
-    *   **SDF Evaluation:**
-        $$db = sdBell(p, pc, t, \phi)$$
-        $$dt = sdTentacles(p, pc, t, \phi)$$
-        $$da = sdArms(p, t, \phi)$$
-    *   **Step Size:**
-        $$\text{stride} = \text{clamp}(\min(db, \min(dt, da)) \cdot 0.70, 0.010, 0.18)$$
-    *   **Soft Accumulation for Strands:**
-        Calculate taper factor:
-        $$\text{taper} = 1.0 - \text{smoothstep}(0.55, 1.05, -p.y / \text{TENT\_LEN})$$
-        Add tentacle contribution:
-        $$\text{strands} += \exp(-\max(dt, 0.0) \cdot 95.0) \cdot \text{stride} \cdot 8.5 \cdot \text{taper}$$
-        Add arm contribution:
-        $$\text{strands} += \exp(-\max(da, 0.0) \cdot 45.0) \cdot \text{stride} \cdot 3.0$$
-    *   **Bell Surface Shading:**
-        If $db < 0.012$:
-        *   Compute normal $n$ via finite differences with $e = \text{vec2}(0.0035, 0.0)$.
-        *   Compute Fresnel term:
-            $$\text{fres} = \text{pow}(1.0 - |\text{dot}(n, -d)|, 2.4)$$
-        *   Compute lighting angle:
-            $$\text{lam} = 0.35 + 0.65 \cdot |\text{dot}(n, \text{normalize}(\text{vec3}(-0.35, 1.0, 0.45)))|$$
-        *   Compute rib pattern:
-            $$\text{ribs} = \text{pow}(0.5 + 0.5 \cdot \cos(16.0 \cdot \text{atan}(p.z, p.x)), 14.0)$$
-        *   Compute opacity:
-            $$\text{op} = 0.075 + 0.42 \cdot \text{fres} + \text{ribs} \cdot 0.12$$
-        *   Accumulate radial color:
-            $$\text{rad} += \text{trans} \cdot \text{op} \cdot (\text{GLOW} \cdot (0.75 + 1.15 \cdot \text{lam}) + \text{HOT} \cdot (\text{fres} \cdot 1.30 + \text{ribs} \cdot 0.60))$$
-        *   Update transparency:
-            $$\text{trans} *= 1.0 - \text{op}$$
-        *   Force small step for bell surface detail:
-            $$\text{stride} = 0.026$$
-    *   **Advance:**
-        $$\text{travel} += \text{stride}$$
+def pulse(x):
+    x = fract(x)
+    if x < 0.28:
+        return smoothstep(0.0, 1.0, x / 0.28)
+    else:
+        return 1.0 - smoothstep(0.0, 1.0, (x - 0.28) / 0.72)
+```
 
-3.  **Final Compositing:**
-    *   Apply fog:
-        $$\text{fog} = \exp(-0.055 \cdot \max(\text{length}(ro - centre) - 3.0, 0.0))$$
-    *   Add accumulated color:
-        $$col += (\text{rad} + \text{GLOW} \cdot \text{strands} \cdot 0.16 + \text{HOT} \cdot \text{strands}^2 \cdot 0.006) \cdot \text{fog}$$
-
-4.  **Post-Processing:**
-    *   Tone mapping:
-        $$col = \text{vec3}(1.0) - \exp(-col \cdot 1.85)$$
-    *   Black point adjustment:
-        $$col = \max(col - \text{vec3}(0.0175, 0.0160, 0.0060), \text{vec3}(0.0))$$
-    *   Gamma correction:
-        $$\text{output} = \text{pow}(col, \text{vec3}(1.0 / 2.2))$$
-
-**Pulse Function:**
-The swim cycle pulse function $pulse(x)$ models a quick contraction followed by a long relaxed glide:
-$$pulse(x) = \text{fract}(x)$$
-If $x < 0.28$:
-$$\text{return } \text{smoothstep}(0.0, 1.0, x / 0.28)$$
-Else:
-$$\text{return } 1.0 - \text{smoothstep}(0.0, 1.0, (x - 0.28) / 0.72)$$
+**Formulas:**
+*   Per-step soft contribution: $e^{-95\,d}$, where $d$ is the distance to the tentacle surface [S1, unofficial].
+*   Pulse function (swim cycle): $pulse(x) = \text{fract}(x)$; if $x < 0.28$ return $\text{smoothstep}(0.0, 1.0, x / 0.28)$; else return $1.0 - \text{smoothstep}(0.0, 1.0, (x - 0.28) / 0.72)$ [S1, unofficial].
+*   Tone mapping and black point: $col = \text{vec3}(1.0) - \exp(-col \cdot 1.85)$; $col = \max(col - \text{vec3}(0.0175, 0.0160, 0.0060), \text{vec3}(0.0))$; $\text{output} = \text{pow}(col, \text{vec3}(1.0 / 2.2))$ [S1, unofficial].
 
 **Pitfalls:**
-*   Hard intersection of thin geometry causes flickering as strands slip between sample points. Soft accumulation solves this by fading in smoothly [S1, unofficial].
-*   Hair-thin tentacles and arms alias severely across frames if rendered with hard SDF hits. Solved by soft accumulation using exponential falloff based on distance to SDF surface, multiplied by stride and a taper factor that fades near the base [S1, unofficial].
+*   Hard intersection of thin geometry causes flickering as strands slip between sample points [S1, unofficial].
+*   Hair-thin tentacles and arms alias severely across frames if rendered with hard SDF hits [S1, unofficial].
+*   Soft accumulation solves these issues by fading contributions in smoothly based on distance to the SDF surface, multiplied by stride and a taper factor that fades near the base [S1, unofficial].
 
 ## Subtopics
 
@@ -103,16 +117,16 @@ $$\text{return } 1.0 - \text{smoothstep}(0.0, 1.0, (x - 0.28) / 0.72)$$
 Renders a swarm of butterflies by combining SDFs for individual anatomical parts with ray marching in a transformed local coordinate space to handle dynamic wing flapping and orientation. It sets itself apart from standard SDF ray marching by using a non-rigid "un-bend" transform to animate wings and a specific stability clamping strategy for step sizes, building on the soft accumulation techniques of [Ray Marching with SDFs and Soft Accumulation](5001-ray-marching-with-sdfs-and-soft-accumulation.md).
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of march steps per ray ($O(MARCH\_STEPS)$) and the number of objects in the school ($O(SCHOOL)$).
-*   **Memory Complexity:** Constant per ray, storing only a few floating-point accumulators.
-*   **Performance:** Roughly one minute of rendering per 10 seconds of output on integrated graphics [S1, unofficial]. Single frames are near-instant, allowing for rapid iteration.
-*   **Strengths:** Eliminates flickering and aliasing artifacts common in rendering hair-thin geometry with hard SDF intersections. Provides smooth, fluid motion for dynamic thin structures.
-*   **Limitations:** Requires careful tuning of exponential falloff constants (e.g., 95.0 for tentacles) to balance visibility and performance. The soft accumulation approach may result in slightly lower contrast or "ghosting" if not properly attenuated by transparency.
-*   **When to Use:** Ideal for rendering thin, strand-like geometry (hair, tentacles, grass) where traditional hard intersection causes temporal instability.
-*   **When Not to Use:** Not suitable for solid, opaque objects where precise surface definition is required without transparency artifacts.
+*   **Time Complexity:** Linear with respect to the number of march steps per ray ($O(MARCH\_STEPS)$) and the number of objects in the school ($O(SCHOOL)$) [G].
+*   **Memory Complexity:** Constant per ray, storing only a few floating-point accumulators [G].
+*   **Performance:** Roughly one minute of rendering per 10 seconds of output on integrated graphics [S1, unofficial]. Single frames are near-instant, allowing for rapid iteration [S1, unofficial].
+*   **Strengths:** Eliminates flickering and aliasing artifacts common in rendering hair-thin geometry with hard SDF intersections [S1, unofficial]. Provides smooth, fluid motion for dynamic thin structures [S1, unofficial].
+*   **Limitations:** Requires careful tuning of exponential falloff constants (e.g., 95.0 for tentacles) to balance visibility and performance [S1, unofficial]. The soft accumulation approach may result in slightly lower contrast or "ghosting" if not properly attenuated by transparency [S1, unofficial].
+*   **When to Use:** Ideal for rendering thin, strand-like geometry (hair, tentacles, grass) where traditional hard intersection causes temporal instability [S1, unofficial].
+*   **When Not to Use:** Not suitable for solid, opaque objects where precise surface definition is required without transparency artifacts [G].
 
 ## Background
-Originating from the `manim-glsl-jellyfish` project by el-bakkali, this technique was developed to render a school of jellyfish using signed distance functions for the bell, tentacles, and arms [S1, unofficial]. It addresses the specific challenge of animating thin, dynamic structures without the visual artifacts associated with discrete ray marching steps. The method is implemented in GLSL shaders and integrated with the Manim animation engine for timeline control [S1, unofficial].
+Originating from the `manim-glsl-jellyfish` project by el-bakkali, this technique was developed to render a school of jellyfish using signed distance functions for the bell, tentacles, and arms [S1, unofficial]. It addresses the specific challenge of animating thin, dynamic structures without the visual artifacts associated with discrete ray marching steps [S1, unofficial]. The method is implemented in GLSL shaders and integrated with the Manim animation engine for timeline control [S1, unofficial].
 
 ## Sources
 [S1] el-bakkali/manim-glsl-jellyfish, https://github.com/el-bakkali/manim-glsl-jellyfish, fetched 2026-10-26 (unofficial)

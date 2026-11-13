@@ -3,105 +3,103 @@
 Also called: Unquantize10, Unquantize7, Unquantize9
 
 ## Overview
-Unquantization functions reconstruct continuous or high-precision floating-point values from discrete, lower-precision integer representations. This process is the inverse of quantization, mapping quantized indices back to their approximate original domain to minimize reconstruction error [S1, unofficial]. In the context of volume rendering and texture compression (specifically BC6H), these functions are critical for converting compressed half-precision or integer data back into formats suitable for rendering or further processing [S1, unofficial].
+Unquantization functions reconstruct continuous or high-precision floating-point values from discrete, integer-quantized representations. In the context of [Wavelet and Transform-based Compression](52-wavelet-and-transform-based-compression.md), specifically [Value compression](53-value-compression.md) using [Quantization](5935-quantization.md), these functions serve as the inverse of the quantization step. Unlike [Scalar Quantization](5726-scalar-quantization.md) which maps uniformly, these specific implementations handle the non-linear or block-based reconstruction required by formats like BC6H, converting stored integer codes back to half-precision or full float ranges.
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** An integer value representing the quantized level (e.g., 10-bit or 7-bit integer).
-*   **Output:** A floating-point value (typically half-precision `float16` or full-precision `float32`) representing the reconstructed value.
+The method operates on integer codes produced by the quantization stage. It supports two primary modes: basic half-precision reconstruction and weighted interpolation for higher precision.
 
-**Data Structures:**
-No complex data structures are required. The operation is a direct mathematical transformation of a scalar integer.
+### Inputs and Outputs
+- **Input**: Integer quantized value(s) $I$, scale factor $S$, and optionally a weight $W$ and endpoint values.
+- **Output**: Reconstructed floating-point value(s) $\hat{x}$.
 
-**Formulas:**
-The core unquantization formula maps an integer `Int(x)` to a half-precision float `Half(x)` using a scale factor and an offset for rounding [S1, unofficial]:
+### Data Structures
+The implementation typically processes blocks of data. For the "Finish Unquantize" variant, inputs include two unquantized endpoints ($E_0, E_1$) and a weight $W$.
 
-$$ \text{Half}(x) = \frac{\text{Int}(x) \times 65536 + 32768}{\text{Scale}} $$
+### Formulas and Steps
+
+#### Basic Unquantization (Half Precision)
+Reconstructs a half-precision float from an integer code.
+
+1.  **Scale and Offset**: Multiply the integer code $I$ by the scale factor $S$. Add an offset of 32768 to center the rounding.
+2.  **Division**: Divide the result by the scale factor $S$.
+3.  **Conversion**: Convert the resulting integer to a half-precision float.
+
+$$ \text{Half}(I) = \frac{I \cdot 65536 + 32768}{S} $$
 
 Where:
-*   `Int(x)` is the quantized integer input.
-*   `65536` is $2^{16}$, scaling the integer to the range of a 16-bit fixed-point representation.
-*   `32768` is $2^{15}$, providing a rounding offset (half of the scaling factor) to ensure nearest-neighbor rounding during the division.
-*   `Scale` is a normalization factor determined by the specific quantization scheme (e.g., the number of levels or the dynamic range).
+- $I$: The integer quantized value.
+- $S$: The scale factor used during quantization.
+- The constant 65536 and 32768 are derived from the bit-depth and rounding requirements for half-precision conversion.
 
-**Pseudocode:**
-The following Python-like pseudocode implements the standard unquantization step. It assumes `int_val` is the input integer and `scale` is the pre-computed normalization factor.
+#### Finish Unquantization (Interpolated)
+Reconstructs a final float3 value by interpolating between two unquantized endpoints using a weight.
+
+1.  **Weighted Sum**: Compute the weighted sum of the two unquantized endpoints $E_0$ and $E_1$ using weight $W$.
+    $$ \text{Sum} = E_0 \cdot (64 - W) + E_1 \cdot W $$
+2.  **Rounding Offset**: Add 32 to the sum for rounding.
+3.  **Scaling**: Multiply by the factor $\frac{31}{4096}$.
+4.  **Conversion**: Convert the result to a full 32-bit float.
+
+$$ \text{Result} = \text{f16tof32}\left( \left( E_0 \cdot (64 - W) + E_1 \cdot W + 32 \right) \cdot \frac{31}{4096} \right) $$
+
+Where:
+- $E_0, E_1$: The unquantized endpoint values (typically half-precision).
+- $W$: The interpolation weight (integer, range 0-63).
+- $\text{f16tof32}$: Conversion from half-precision to single-precision float.
+
+### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def unquantize_half(int_val, scale):
+def unquantize_half(int_val: int, scale: float) -> float:
     """
-    Converts an integer quantized value back to half-precision float range.
-    
-    Args:
-        int_val (int): The quantized integer value.
-        scale (float): The normalization scale factor.
-        
-    Returns:
-        float: The reconstructed half-precision float value.
+    Reconstructs a half-precision float from an integer code.
     """
-    # Apply scaling and rounding offset
-    # 65536 is 2^16, 32768 is 2^15 (rounding half)
-    scaled_value = (int_val * 65536 + 32768) / scale
-    
-    # Convert to half-precision float representation
-    # Note: In a real implementation, this would involve bit-packing 
-    # or using a library function like numpy.float16 or struct.pack
-    return float_to_half(scaled_value)
+    # Formula: (Int(x) * 65536 + 32768) / Scale
+    numerator = int_val * 65536 + 32768
+    result = numerator / scale
+    return result
 
-def float_to_half(f):
+def finish_unquantize(endpoint0: float, endpoint1: float, weight: int) -> float:
     """
-    Converts a standard float to a half-precision float (float16).
-    This is a placeholder for the actual IEEE 754 conversion logic.
+    Interpolates between two unquantized endpoints using a weight and converts to final float3.
     """
-    # Implementation detail: Pack float bits into 16-bit half format
-    # [G] Standard IEEE 754 conversion logic required here
-    import struct
-    # Pack as 32-bit float, then unpack as 16-bit half if available, 
-    # or manually shift bits. For simplicity, we assume a helper exists.
-    # In Python, numpy is often used: np.float16(f)
-    # Here we return the float for demonstration, as true half-packing 
-    # is platform-specific.
-    return f 
+    # Formula: f16tof32( (endpoint0Unq * (64 - weight) + endpoint1Unq * weight + 32) * (31 / 4096) )
+    
+    # Calculate weighted sum
+    weighted_sum = endpoint0 * (64 - weight) + endpoint1 * weight
+    
+    # Add rounding offset
+    rounded_sum = weighted_sum + 32
+    
+    # Apply scaling factor
+    scaled_value = rounded_sum * (31 / 4096)
+    
+    # Convert to float32 (simulated)
+    result = float(scaled_value)
+    return result
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Precision Loss:** The conversion from integer to float is inherently lossy. The `Scale` parameter must be chosen carefully to match the original data range.
-*   **Rounding:** The addition of `32768` ensures that the division rounds to the nearest integer value, minimizing quantization error. Omitting this offset introduces a systematic bias.
-*   **Overflow:** If `int_val` is large and `scale` is small, the intermediate `scaled_value` may overflow standard float ranges before conversion to half-precision.
+### Edge Cases and Pitfalls
+- **Division by Zero**: Ensure the scale factor $S$ is non-zero.
+- **Precision Loss**: The conversion from half to float may introduce minor precision artifacts if not handled correctly.
+- **Weight Range**: The weight $W$ is typically constrained to an integer range (e.g., 0-63). Values outside this range may produce incorrect interpolation results.
 
 ## Subtopics
 
 ### Finish Unquantize
-Interpolates between two unquantized endpoints using a weight and converts to final float3. This variant is used when the quantization scheme involves a base value and a differential weight. The formula is:
-$$ \text{Result} = \text{f16tof32}\left( \frac{(\text{endpoint0Unq} \times (64 - \text{weight}) + \text{endpoint1Unq} \times \text{weight} + 32) \times 31}{4096} \right) $$
-Where:
-*   `endpoint0Unq` and `endpoint1Unq` are the unquantized endpoint values (half-precision).
-*   `weight` is the quantized weight (typically 6-bit, range 0-63).
-*   `31/4096` is a scaling factor to map the interpolated result to the final range.
-*   `f16tof32` converts the half-precision result to full float32 [S1, unofficial].
+Interpolates between two unquantized endpoints using a weight and converts to final float3. It is used when higher precision is required than what single endpoints provide. Choose this when the compression format uses weighted interpolation between endpoints (e.g., BC6H). Link: [Finish Unquantize](#finish-unquantize).
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-*   **Time:** $O(1)$ per value. The operation involves a few arithmetic operations (multiplication, addition, division).
-*   **Memory:** $O(1)$. No additional memory is required beyond the input and output values.
-
-**Measured Performance:**
-Performance is highly dependent on the hardware's ability to perform floating-point arithmetic. On modern GPUs, these operations are typically executed in parallel during texture decompression or volume rendering ray marching.
-
-**Strengths and Limitations:**
-*   **Strengths:** Simple, fast, and deterministic. Suitable for real-time applications.
-*   **Limitations:** Lossy. The quality of reconstruction depends heavily on the quantization step size and the `Scale` parameter. Not suitable for applications requiring exact numerical precision.
-
-**When to Use:**
-Use when decompressing compressed volume data or textures where some loss of precision is acceptable in exchange for reduced memory bandwidth and storage.
-
-**When Not to Use:**
-Avoid when exact numerical reconstruction is required, or when the quantization error is too large for the application's fidelity requirements.
+- **Time Complexity**: $O(1)$ per value.
+- **Memory Complexity**: $O(1)$ auxiliary space.
+- **Performance**: Very fast, suitable for real-time GPU decompression.
+- **Strengths**: Efficient reconstruction of compressed data.
+- **Limitations**: Precision is limited by the original quantization step.
 
 ## Background
-Unquantization functions are a fundamental component of lossy compression schemes, particularly in graphics and volume rendering. The specific formulas cited here are associated with the BC6H compression format, which is used for compressing high-dynamic-range (HDR) images and volumes [S1, unofficial]. BC6H uses a partitioning scheme where each block is divided into subsets, and each subset is represented by a base value and a set of weights. The unquantization functions are used to reconstruct the final pixel or voxel values from these base values and weights. The method was developed as part of the OpenGL Extension to the Khronos Group's specification for BC6H, aiming to provide efficient compression for HDR content [S1, unofficial].
+Originating from real-time BC6H compression implementations, these functions are part of the decompression pipeline for block-compressed textures. They address the need to efficiently convert stored integer codes back to usable floating-point values for rendering.
 
 ## Sources
 [S1] Real-time BC6H compression on GPU, https://github.com/knarkowicz/GPURealTimeBC6H, fetched 2026-10-27 (unofficial)

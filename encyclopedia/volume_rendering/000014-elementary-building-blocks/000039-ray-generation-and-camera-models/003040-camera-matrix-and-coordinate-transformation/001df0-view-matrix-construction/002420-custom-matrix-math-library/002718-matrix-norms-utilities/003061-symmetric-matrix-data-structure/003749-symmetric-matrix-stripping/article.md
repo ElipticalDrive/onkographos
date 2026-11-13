@@ -1,0 +1,84 @@
+# Symmetric Matrix Stripping
+
+Also called: Symmetric Matrix to Vector Conversion
+
+## Overview
+Symmetric Matrix Stripping extracts the 6 unique elements from the lower triangular part of a batch of 3x3 symmetric matrices (typically covariance matrices) into a flat tensor of shape `(N, 6)` [S1, S2, unofficial]. It serves as the inverse operation to matrix reconstruction, enabling efficient storage and transmission of symmetric data by eliminating redundant upper-triangular elements. It is distinct from [Stress Tensor Representation](9783-stress-tensor-representation.md) which may involve additional physical constraints or normalization, whereas stripping is a pure geometric data layout transformation.
+
+## How it works
+**Inputs:** A batch of $N$ symmetric 3x3 matrices, stored as a tensor of shape `(N, 3, 3)` [S2, unofficial].
+**Outputs:** A flat tensor of shape `(N, 6)` containing the unique lower-triangular elements [S1, unofficial].
+
+**Data Structure Layout:**
+The output vector for each matrix $i$ is indexed $0$ to $5$, mapping to the input matrix indices $(r, c)$ as follows:
+- Index 0: $(0, 0)$
+- Index 1: $(0, 1)$
+- Index 2: $(0, 2)$
+- Index 3: $(1, 1)$
+- Index 4: $(1, 2)$
+- Index 5: $(2, 2)$
+
+This order corresponds to row-major traversal of the lower triangular part, including the diagonal [S2, unofficial].
+
+**Steps:**
+1. Initialize an output tensor `uncertainty` of zeros with shape `(N, 6)` on the target device (e.g., CUDA) [S1, unofficial].
+2. Map the input matrix elements to the output vector indices:
+   - `uncertainty[:, 0] = L[:, 0, 0]`
+   - `uncertainty[:, 1] = L[:, 0, 1]`
+   - `uncertainty[:, 2] = L[:, 0, 2]`
+   - `uncertainty[:, 3] = L[:, 1, 1]`
+   - `uncertainty[:, 4] = L[:, 1, 2]`
+   - `uncertainty[:, 5] = L[:, 2, 2]`
+3. Return `uncertainty` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def strip_symmetric(L):
+    """
+    Extracts the 6 unique elements from the lower triangular part of a batch of 3x3 symmetric matrices.
+    
+    Args:
+        L: Tensor of shape (N, 3, 3) containing symmetric matrices.
+        
+    Returns:
+        Tensor of shape (N, 6) with the lower triangular elements.
+    """
+    N = L.shape[0]
+    # Initialize output tensor on the same device as input
+    uncertainty = torch.zeros((N, 6), device=L.device, dtype=L.dtype)
+    
+    # Map lower triangular elements to the 6-element vector
+    # Row 0
+    uncertainty[:, 0] = L[:, 0, 0]
+    uncertainty[:, 1] = L[:, 0, 1]
+    uncertainty[:, 2] = L[:, 0, 2]
+    # Row 1
+    uncertainty[:, 3] = L[:, 1, 1]
+    uncertainty[:, 4] = L[:, 1, 2]
+    # Row 2
+    uncertainty[:, 5] = L[:, 2, 2]
+    
+    return uncertainty
+```
+
+**Edge Cases and Pitfalls:**
+- **Symmetry Assumption:** The method assumes the input matrix is symmetric ($M_{ij} = M_{ji}$). If the input is not symmetric, the upper triangular elements are ignored, and only the lower part is preserved [S1, S2, unofficial].
+- **Precision:** Standard floating-point precision is used. No special handling for near-singular matrices is defined in the sources [S1, S2, unofficial].
+
+## Subtopics
+
+## Operating characteristics
+**Time Complexity:** $O(N)$, where $N$ is the batch size, as it involves a constant number of memory accesses per matrix.
+**Memory Complexity:** $O(N)$, reducing storage from $9N$ elements to $6N$ elements.
+**Performance:** Efficiently implemented using tensor slicing or indexing operations in frameworks like PyTorch [S1, S2, unofficial].
+**Strengths:** Reduces memory footprint by 33% for symmetric 3x3 matrices; simplifies data handling for optimization routines.
+**Limitations:** Requires the matrix to be symmetric; does not enforce symmetry if the input is not symmetric.
+
+## Background
+Symmetric Matrix Stripping is used in 3D Gaussian Splatting implementations to manage covariance matrices efficiently. It appears in projects such as InstantSplat and 4D Gaussian Splatting, where it facilitates the handling of Gaussian parameters during training and rendering [S1, S2, unofficial].
+
+## Sources
+[S1] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
+[S2] LogosIntelligenceLab/4d-gaussian-splatting, https://github.com/LogosIntelligenceLab/4d-gaussian-splatting, fetched 2026-10-27 (unofficial)

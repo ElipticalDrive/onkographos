@@ -1,0 +1,69 @@
+# Adaptive grid data structure (Klimaszewski and Sederberg)
+Also called: Adaptive grid (Klimaszewski and Sederberg), KS97 adaptive grid, Klimaszewski and Sederberg adaptive grid
+
+## Overview
+The adaptive grid data structure, proposed by Klimaszewski and Sederberg [KS97], is a hierarchical grid building method that constructs local grids acting as bounding boxes in densely populated areas [S1]. It is characterized by a fast bottom-up construction approach, contrasting with top-down adaptive subdivision methods [S1]. The resulting structure is viewed as a loosely nested recursive grid [S1].
+
+## How it works
+**Inputs:** A set of geometric primitives.
+**Outputs:** A hierarchical structure of local grids.
+
+**Data Structures:**
+The structure consists of a hierarchy of bounding boxes. Each node in the hierarchy contains a "local grid" [S1]. The hierarchy is built such that boxes act as bounding volumes for the primitives they contain [S1].
+
+**Algorithm Steps:**
+The construction follows a specific bottom-up sequence [S1]:
+
+1.  **Bounding Box Creation:** For each primitive, surround it with a bounding box [S1].
+2.  **Merging:** For all bounding boxes, merge close boxes to form a structured grid [S1].
+3.  **Tree Insertion:** For all remaining boxes, insert the box into the tree using a minimum surface criterion [S1].
+4.  **Local Grid Construction:** For all bounding boxes in the hierarchy, build a local grid [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_ks97_adaptive_grid(primitives):
+    # Step 1: Surround each primitive with a bounding box
+    boxes = []
+    for primitive in primitives:
+        box = compute_bounding_box(primitive)
+        boxes.append(box)
+    
+    # Step 2: Merge close boxes
+    # This step transforms the unstructured set of boxes into a structured grid
+    # by merging spatially close bounding boxes.
+    merged_boxes = merge_close_boxes(boxes)
+    
+    # Step 3: Insert remaining boxes into tree using minimum surface criterion
+    # The minimum surface criterion is used to determine the hierarchy structure.
+    tree = build_hierarchy(merged_boxes, criterion="minimum_surface")
+    
+    # Step 4: Build a local grid for all bounding boxes in hierarchy
+    for node in tree.nodes():
+        node.local_grid = build_local_grid(node.bounding_box)
+        
+    return tree
+```
+
+**Parameters:**
+*   **Minimum Surface Criterion:** Used during tree insertion [S1]. The specific formula or threshold for "minimum surface" is not given in the sources.
+*   **Merge Threshold:** The definition of "close" for merging boxes is not specified [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Build Cost:** The method has a greater build cost compared to general bottom-up strategies [S1].
+*   **Complexity:** The merging and tree insertion steps require careful implementation to maintain the "loosely nested" property [S1].
+
+## Operating characteristics
+*   **Build Cost:** Higher than general bottom-up strategies [S1].
+*   **Memory:** The structure is described as a "loosely nested recursive grid" [S1]. Specific memory layout details (e.g., bricking) are not provided for this specific method, though bricking is mentioned as a general trend for hardware performance [S2, unofficial].
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Fast bottom-up construction; handles densely populated areas via local grids [S1].
+*   **Limitations:** Higher build cost [S1].
+
+## Background
+The adaptive grid data structure was proposed by Klimaszewski and Sederberg in 1997 [S1]. It is part of the broader field of grid-based ray tracing acceleration structures [S1]. The method is distinct from top-down subdivision methods like those by Jevans and Wyvill [JW89], which use recursive hierarchical subdivision and hashtable maintenance for non-empty internal voxels [S1].
+
+## Sources
+[S1] A Survey on Exploiting Grids for Ray Tracing, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/089-096, fetched 2026-10-24
+[S2] Grids in Ray Tracing: A Comprehensive Survey, https://www.scribd.com/document/349616186/GG-400, fetched 2026-10-25 (unofficial)

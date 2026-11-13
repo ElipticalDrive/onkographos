@@ -1,0 +1,125 @@
+--- v004.md
++++ v005.md
+@@ -4,62 +4,82 @@
+ 
+ ## Overview
+-This method renders point-based particle systems as 2D billboarded sprites by expanding single point primitives into quads within a Geometry Shader (GS) [S1, unofficial]. It solves the problem of CPU-side mesh generation for dynamic particles by performing geometry creation on the GPU, allowing for efficient rendering with a single draw call per particle type [S2, unofficial]. Unlike [Geometry Shader Cube Expansion](1074-geometry-shader-cube-expansion.md), which generates 3D volumetric primitives, this technique generates flat 2D quads that always face the camera [S2, unofficial].
++GPU Particle Rendering via Geometry Shader is a technique that generates 2D sprite quads from point primitives using a Geometry Shader (GS), allowing for efficient particle rendering on the GPU without CPU-side mesh generation [S1, unofficial]. It solves the problem of rendering large numbers of billboarded particles efficiently by using a single draw call per particle type, often combined with distance-based culling [S2, unofficial]. Unlike hardware-controlled instancing pipelines which rely on fixed-function repetition, this method performs transformations programmatically within the geometry stage, keeping the geometry description in a user-defined shader program [S1, unofficial]. It builds on [Geometry Shader Processing](2524-geometry-shader-processing.md) by converting scalar point data into visible 2D geometry.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-The input is a stream of point primitives where each point represents a particle [S1, unofficial]. The input vertex structure (`vs_in`) contains `pos` (float4), `uv` (float4), `size` (float4), and `col` (float4) [S1, unofficial]. The output is a stream of triangle strip primitives representing a quad [S1, unofficial]. The output vertex structure (`gs_out`) contains `pos` (float4), `uv` (float2), and `col` (float4) [S1, unofficial].
++The method takes a stream of point primitives as input, where each point represents a particle. The input vertex structure (`vs_in`) contains:
++- `pos`: `float4` (Position)
++- `uv`: `float4` (UV coordinates, typically unused or set to 0 in the vertex shader)
++- `size`: `float4` (Particle size, typically stored in x or y component)
++- `col`: `float4` (Color)
++
++The Geometry Shader outputs a stream of vertices for a quad (`gs_out`), containing:
++- `pos`: `float4` (Clip-space position, `SV_POSITION`)
++- `uv`: `float2` (Interpolated UVs for texture sampling)
++- `col`: `float4` (Interpolated color)
+ 
+ **Data Structures:**
+-A particle buffer stores positions and colors, updated on the CPU rendering thread before each frame [S2, unofficial]. A texture atlas is a 2D texture containing multiple sprite frames, where a single integer tracks the current atlas index and interpolates with the next index for smooth animation transitions [S2, unofficial]. Parameters include `_Size` (controls sprite size, range (0, 0.3), default 0.1) [S1, unofficial], `_Sprite` (the 2D sprite texture) [S1, unofficial], and `_ScreenParams` (screen resolution for aspect ratio correction) [S1, unofficial].
++- **Particle Buffer:** A structured buffer (e.g., `StructuredBuffer<float3>`) storing particle positions and potentially other attributes like size or color, updated on the CPU or via Compute Shaders before rendering [S1, unofficial].
++- **Texture Atlas:** Each particle references a texture atlas (e.g., `GLTexture`). An integer tracks the current atlas texture index, which is interpolated with the next index to create smooth animation transitions [S2, unofficial].
+ 
+ **Steps:**
+-1. The vertex shader passes input position, UV, size, and color directly to the output structure [S1, unofficial].
+-2. The geometry shader receives a single point primitive (`input[1]`) [S1, unofficial].
+-3. The clip space transformation converts the input point position to clip space using the Model-View-Projection (MVP) matrix: `corLoc = mul(UNITY_MATRIX_MVP, input[1].pos)` [S1, unofficial].
+-4. The screen-space offset calculation computes horizontal (`dx`) and vertical (`dy`) offsets to form a square sprite in screen space: `dx = Size`, `dy = Size * _ScreenParams.x / _ScreenParams.y` [S1, unofficial].
+-5. The quad generation appends four vertices for a triangle strip in the order `(-dx, dy)` with UV `(0,0)`, `(dx, dy)` with UV `(1,0)`, `(-dx, -dy)` with UV `(0,1)`, and `(dx, -dy)` with UV `(1,1)` [S1, unofficial].
+-6. The primitive emission calls `outStream.RestartStrip()` after appending all four vertices to form an independent triangle strip [S1, unofficial].
+-7. The fragment shader samples the sprite texture using the interpolated UVs and multiplies by the vertex color: `col = tex2D(_Sprite, i.uv) * i.col` [S1, unofficial].
+ 
+-**Pseudocode:**
+-```python
+-def vertex_shader(pos, uv, size, col):
+-    return {'pos': pos, 'uv': uv, 'col': col}
++1.  **Vertex Shader Pass:**
++    The vertex shader passes the input position, UV, size, and color directly to the geometry shader output structure. No transformation to clip space is performed here; the geometry shader handles the projection [S1, unofficial].
+ 
+-def geometry_shader(input_point):
+-    cor_loc = mul(UNITY_MATRIX_MVP, input_point['pos'])
+-    size = input_point['size'][0]
+-    aspect = _ScreenParams[0] / _ScreenParams[1]
+-    dx = size
+-    dy = size * aspect
++2.  **Geometry Shader Processing:**
++    The geometry shader receives a single point (`input[0]`).
++    a.  **Clip Space Position:** Transform the input point position to clip space using the Model-View-Projection (MVP) matrix.
++        $$
++        corLoc = UNITY\_MATRIX\_MVP \times input[0].pos
++        $$
++        [S1, unofficial]
++    b.  **Screen-Space Offsets:** Calculate the screen-space offsets `dx` and `dy` based on the particle `_Size` parameter and screen aspect ratio.
++        $$
++        dx = Size
++        $$
++        $$
++        dy = Size \times \frac{\_ScreenParams.x}{\_ScreenParams.y}
++        $$
++        Where `_ScreenParams.x` is the screen width and `_ScreenParams.y` is the screen height. This ensures the sprite remains square in screen space [S1, unofficial].
++    c.  **Quad Generation:** Generate 4 vertices for a quad by adding/subtracting `dx` and `dy` to `corLoc`. The vertices are appended in the following order to form a triangle strip:
++        1.  `(-dx, dy)` with UV `(0, 0)`
++        2.  `(dx, dy)` with UV `(1, 0)`
++        3.  `(-dx, -dy)` with UV `(0, 1)`
++        4.  `(dx, -dy)` with UV `(1, 1)`
++        [S1, unofficial]
++    d.  **Stream Output:** Call `outStream.RestartStrip()` after appending all 4 vertices to form an independent triangle strip (or two triangles) [S1, unofficial].
+ 
+-    offsets = [(-dx, dy), (dx, dy), (-dx, -dy), (dx, -dy)]
+-    uvs = [(0, 0), (1, 0), (0, 1), (1, 1)]
++3.  **Fragment Shader Sampling:**
++    The fragment shader samples the sprite texture using the interpolated UVs and multiplies by the vertex color.
++    $$
++    col = tex2D(\_Sprite, i.uv) \times i.col
++    $$
++    [S1, unofficial]
+ 
+-    output_vertices = []
+-    for i, (off_x, off_y) in enumerate(offsets):
+-        output_vertices.append({
+-            'pos': cor_loc + (off_x, off_y, 0, 0),
+-            'uv': (uvs[i][0], uvs[i][1]),
+-            'col': input_point['col']
+-        })
++**Parameters:**
++- `_Size`: Controls the size of the particle sprite. Range: $(0, 0.3)$, Default: $0.1$ [S1, unofficial].
++- `_Sprite`: The 2D texture used for the particle sprite [S1, unofficial].
+ 
+-    out_stream.append(output_vertices)
+-    out_stream.restart_strip()
+-    return out_stream
++**Pitfalls:**
++- **Aspect Ratio Distortion:** The `dy` calculation uses the screen aspect ratio (`_ScreenParams.x / _ScreenParams.y`) to maintain square sprites in screen space, while `dx` does not. If not handled consistently, this creates rectangular quads [S1, unofficial].
++- **Topology Mismatch:** Some implementations may incorrectly use `MeshTopology.LineStrip` for drawing, while the GS generates quads/triangles. Ensure the draw call topology matches the generated primitives (e.g., `TriangleStrip` or `TriangleList`) [S1, unofficial].
+ 
+-def fragment_shader(input_vert):
+-    col = tex2D(_Sprite, input_vert['uv']) * input_vert['col']
+-    return col
+-```
++## Subtopics
+ 
+-**Edge Cases and Pitfalls:**
+-Aspect ratio distortion occurs if the aspect ratio correction is applied inconsistently between `dx` and `dy`, resulting in rectangular quads on non-square screens [S1, unofficial]. Not given in the sources.
++### [Geometry Shader Instancing](12567-geometry-shader-instancing.md)
++A variant that amplifies point primitives into surfels or voxels and instances them on the GPU. It offers an alternative to hardware-controlled instancing by performing transformations programmatically within the geometry stage. Choose this when you need to render large point clouds without CPU-side mesh generation and want to keep geometry description in a user-defined shader program.
+ 
+ ## Operating characteristics
+-Time complexity is $O(N)$ where $N$ is the number of particles, as the GS processes each point independently [G]. Memory complexity is $O(N)$ for the particle buffer [G]. Performance is efficient for large particle counts due to reduced CPU-GPU communication and single draw calls per particle type [S2, unofficial]. Strengths include simple implementation and no CPU-side mesh generation [S1, unofficial]. Limitations include being restricted to 2D sprites [S2, unofficial]. Not given in the sources.
++- **Time Complexity:** $O(N)$ where $N$ is the number of particles. The geometry shader processes each particle independently, generating a constant number of vertices (4) per particle.
++- **Memory Complexity:** $O(N)$ for storing particle data in buffers.
++- **Performance:** Efficient for large numbers of particles due to single draw calls per particle type and GPU-side generation. Distance-based culling can further optimize performance by rendering only visible particles [S2, unofficial].
++- **Strengths:** No CPU-side mesh generation required; flexible sprite generation; supports texture atlas interpolation for smooth animations [S2, unofficial].
++- **Limitations:** Geometry shader overhead can be significant on some hardware; aspect ratio distortion if not handled correctly; limited to billboarded particles (unless extended for other orientations) [S1, unofficial].
++- **When to Use:** Real-time particle systems with many simple sprites (smoke, fire, sparks) where CPU overhead for mesh generation is prohibitive.
++- **When Not to Use:** When hardware instancing is available and preferred for simpler cases; when complex particle orientations (not billboards) are required without additional GS logic.
+ 
+ ## Background
+-This technique leverages the Geometry Shader's ability to generate primitives on the fly, reducing CPU overhead for dynamic particle systems [S1, unofficial]. Not given in the sources.
++This technique is part of the broader field of GPU-based particle rendering, leveraging the programmable geometry shader stage introduced in OpenGL 3.2 and DirectX 10. It allows for dynamic geometry generation on the GPU, reducing CPU-GPU communication overhead. The specific implementation described here is based on unofficial examples from Unity and OpenGL projects [S1, unofficial][S2, unofficial].
+ 
+ ## Sources

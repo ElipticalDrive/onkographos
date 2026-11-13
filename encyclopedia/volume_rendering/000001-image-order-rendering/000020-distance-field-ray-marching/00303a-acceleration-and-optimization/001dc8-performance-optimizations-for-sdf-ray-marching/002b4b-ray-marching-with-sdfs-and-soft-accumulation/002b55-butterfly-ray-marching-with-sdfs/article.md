@@ -3,94 +3,90 @@
 Also called: Butterfly SDF Ray Marching, Swarm SDF Rendering
 
 ## Overview
-Butterfly Ray Marching with SDFs renders a swarm of butterflies by combining Signed Distance Functions (SDFs) for individual anatomical parts (body, wings, antennae) with ray marching in a transformed local coordinate space to handle dynamic wing flapping and orientation [S1, unofficial]. It sets itself apart from standard SDF ray marching by using a non-rigid "un-bend" transform to animate wings and a specific stability clamping strategy for step sizes, building on the soft accumulation techniques of [Ray Marching with SDFs and Soft Accumulation](5001-ray-marching-with-sdfs-and-soft-accumulation.md).
+Butterfly Ray Marching with SDFs renders a swarm of butterflies by combining Signed Distance Functions (SDFs) for individual anatomical parts (body, wings, antennae) with ray marching in a transformed local coordinate space to handle dynamic wing flapping and orientation [S1, unofficial]. It sets itself apart from standard SDF ray marching by using a non-rigid "un-bend" transform to animate wings and a specific stability clamping strategy for step sizes, building on the soft accumulation techniques of [Ray Marching with SDFs and Soft Accumulation](5001-ray-marching-with-sdfs-and-soft-accumulation.md) [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Ray origin $o$ and direction $d$ in world space.
-- Time $t$ and phase offset.
-- Swarm data array `SWARM` containing position and velocity vectors for each butterfly.
-- Parameters: `MARCH_STEPS` (max iterations), `SWARM_SIZE` (number of butterflies).
+- Ray origin $o$ and direction $d$ in world space [S1, unofficial].
+- Time $t$ and phase offset [S1, unofficial].
+- Swarm data array `SWARM` containing position and velocity vectors for each butterfly [S1, unofficial].
+- Parameters: `MARCH_STEPS` (maximum iterations per butterfly) and `SWARM_SIZE` (number of butterflies) [S1, unofficial].
 
 **Outputs:**
-- Final pixel color $C_{out}$.
+- Final pixel color $C_{out}$ [S1, unofficial].
 
 **Data Structures:**
-- `SWARM[i]`: A 4-component vector (or similar structure) storing the base position and velocity/orientation data for butterfly $i$.
-- `mapButterfly(p, t, phase)`: Returns a 2-component vector `h` where `h.x` is the signed distance and `h.y` is the material ID (0 for wings, 1 for body).
+- `SWARM[i]`: A 4-component vector storing the base position and velocity/orientation data for butterfly $i$ [S1, unofficial].
+- `mapButterfly(p, t, phase)`: Returns a 2-component vector `h` where `h.x` is the signed distance and `h.y` is the material ID (0 for wings, 1 for body) [S1, unofficial].
 
 **Step-by-Step Method:**
 
 1.  **Local Space Transformation:**
     For each butterfly $i$ in the swarm:
-    - Retrieve velocity vector $v$ and base position from `SWARM[i]`.
+    - Retrieve velocity vector $v$ and base position from `SWARM[i]` [S1, unofficial].
     - Determine the forward vector. If $|v_{xy}| < 10^{-4}$, derive forward from the cross product of the dorsal axis and $(1, 0, 0)$ to avoid singularity [S1, unofficial].
-    - Construct a basis matrix from the velocity vector and a dorsal axis (interpolated between world up and camera direction).
-    - Apply a roll rotation to the basis.
-    - Transform the world ray origin $o$ and direction $d$ into the butterfly's local space:
-      $$ o_{local} = B^{-1} (o - p_{butterfly}) / s $$
-      $$ d_{local} = B^{-1} d $$
-      where $B$ is the basis matrix and $s$ is the scale factor [S1, unofficial].
+    - Construct a basis matrix from the velocity vector and a dorsal axis (interpolated between world up and camera direction) [S1, unofficial].
+    - Apply a roll rotation to the basis [S1, unofficial].
+    - Transform the world ray origin $o$ and direction $d$ into the butterfly's local space by applying the basis and dividing the origin by a scale factor [S1, unofficial].
 
 2.  **Sphere Intersection:**
     - Compute the intersection of the transformed ray with a unit sphere bounding the butterfly:
       $$ b = \text{dot}(o_{local}, d_{local}) $$
       $$ disc = b^2 - \text{dot}(o_{local}, o_{local}) + 1.45^2 $$
-    - If $disc < 0$, skip this butterfly.
-    - Calculate $t_{max} = -b + \sqrt{disc}$. If $t_{max} \le 0$, skip.
+    - If $disc < 0$, skip this butterfly [S1, unofficial].
+    - Calculate $t_{max} = -b + \sqrt{disc}$ [S1, unofficial]. If $t_{max} \le 0$, skip.
 
 3.  **Ray Marching Loop:**
-    - Initialize $travel = \max(-b - \sqrt{disc}, 0) + \text{dither}$.
+    - Initialize $travel = \max(-b - \sqrt{disc}, 0) + \text{dither}$ [G].
     - Iterate $k$ from 0 to `MARCH_STEPS`:
-      - If $travel > t_{max}$, break.
-      - Compute point $p = o_{local} + d_{local} \cdot travel$.
-      - Evaluate $h = \text{mapButterfly}(p, t, \text{phase})$.
-      - If $h.x < 0.0022$, a hit is found. Set $hit = travel$, $hp = p$, $mat = h.y$, and break.
+      - If $travel > t_{max}$, break [S1, unofficial].
+      - Compute point $p = o_{local} + d_{local} \cdot travel$ [S1, unofficial].
+      - Evaluate $h = \text{mapButterfly}(p, t, \text{phase})$ [S1, unofficial].
+      - If $h.x < 0.0022$, a hit is found. Set $hit = travel$, $hp = p$, $mat = h.y$, and break [S1, unofficial].
       - Advance step:
         $$ travel \leftarrow travel + \text{clamp}(h.x \cdot 0.62, 0.0035, 0.22) $$
       - Note: The step size is clamped because the un-bend transform is not rigid [S1, unofficial].
 
 4.  **SDF Evaluation (`mapButterfly`):**
     - **Body SDF:**
-      - Clamp $z$ to $[-0.38, 0.30]$.
-      - Compute normalized height $u$.
-      - Calculate radius $r$ using a base term, a Gaussian bump for the thorax, and an offset.
-      - Return distance to cylinder surface defined by $x, y \cdot 1.12, z - z_{offset}$.
+      - Clamp $z$ to $[-0.38, 0.30]$ [S1, unofficial].
+      - Compute normalized height $u$ [G].
+      - Calculate radius $r$ using a base term, a Gaussian bump for the thorax, and an offset [S1, unofficial].
+      - Return distance to cylinder surface defined by $x, y \cdot 1.12, z - z_{offset}$ [S1, unofficial].
     - **Antenna SDF:**
-      - Take absolute $x$.
-      - Clamp normalized $z$ to $[0, 1]$.
-      - Compute cubic Bezier-like control point $c$.
-      - Return distance to line segment with radius interpolating between 0.0045 and 0.014 based on $u$.
+      - Take absolute $x$ [S1, unofficial].
+      - Clamp normalized $z$ to $[0, 1]$ [S1, unofficial].
+      - Compute cubic Bezier-like control point $c$ [G].
+      - Return distance to line segment with radius interpolating between 0.0045 and 0.014 based on $u$ [S1, unofficial].
     - **Wing SDF:**
-      - Compute wing distance.
+      - Compute wing distance [G].
     - **Combine:**
-      - Body SDF = $\min(\text{Body}, \text{Antenna})$.
-      - If $\text{Wing} < \text{Body}$, return $(\text{Wing}, 0)$.
-      - Else, return $(\text{Body}, 1)$.
+      - Body SDF = $\min(\text{Body}, \text{Antenna})$ [S1, unofficial].
+      - If $\text{Wing} < \text{Body}$, return $(\text{Wing}, 0)$ [S1, unofficial].
+      - Else, return $(\text{Body}, 1)$ [S1, unofficial].
 
 5.  **Normal Calculation:**
     - Compute normal $n$ using central differences on `mapButterfly` with $\epsilon = 0.0018$ [S1, unofficial].
 
 6.  **Shading:**
-    - Transform hit point $hp$ back to world space if necessary for lighting.
     - **Wings (Material 0):**
-      - Transform to wing space.
-      - Calculate outline and base color.
-      - Lambertian lighting: $L = 0.22 + 0.78 \max(\text{dot}(n, \text{sun}), 0)$.
-      - Subsurface scattering approximation: $S = \text{base} \cdot \max(-\text{dot}(n, \text{sun}), 0) \cdot \max(\text{dot}(rd, \text{sun}), 0)^{2.2} \cdot 6.0$.
-      - Rim lighting: $R = \text{mix}(\text{SUNCOL}, \text{AMBER\_BRIGHT}, 0.55) \cdot \text{pow}(1.0 - \text{abs}(\text{dot}(n, -d)), 3.0) \cdot 0.24$.
-      - Specular: $Spec = \text{SUNCOL} \cdot \text{pow}(\max(\text{dot}(\text{reflect}(-\text{sun}, n), -d), 0), 28.0) \cdot 0.14$.
-      - Final: $shade = \text{base} \cdot (L + 0.18) + S + \text{base} \cdot \text{through} \cdot 0.60 + R + Spec$.
+      - Transform hit point to wing space [S1, unofficial].
+      - Calculate outline and base color [S1, unofficial].
+      - Lambertian lighting: $L = 0.22 + 0.78 \max(\text{dot}(n, \text{sun}), 0)$ [S1, unofficial].
+      - Subsurface scattering approximation: $S = \text{base} \cdot \max(-\text{dot}(n, \text{sun}), 0) \cdot \max(\text{dot}(rd, \text{sun}), 0)^{2.2} \cdot 6.0$ [S1, unofficial].
+      - Rim lighting: $R = \text{mix}(\text{SUNCOL}, \text{AMBER\_BRIGHT}, 0.55) \cdot \text{pow}(1.0 - \text{abs}(\text{dot}(n, -d)), 3.0) \cdot 0.24$ [S1, unofficial].
+      - Specular: $Spec = \text{SUNCOL} \cdot \text{pow}(\max(\text{dot}(\text{reflect}(-\text{sun}, n), -d), 0), 28.0) \cdot 0.14$ [S1, unofficial].
+      - Final: $shade = \text{base} \cdot (L + 0.18) + S + \text{base} \cdot \text{through} \cdot 0.60 + R + Spec$ [S1, unofficial].
     - **Body (Material 1):**
-      - Lambertian lighting: $L = 0.25 + 0.75 \max(\text{dot}(n, \text{sun}), 0)$.
-      - Fuzz factor: $F = 0.5 + 0.5 \sin(hp.z \cdot 180.0) \sin(hp.x \cdot 150.0)$.
-      - Final: $shade = \text{vec3}(0.070, 0.042, 0.032) \cdot L \cdot (0.8 + 0.3 F) + \text{SUNCOL} \cdot \text{pow}(1.0 - \text{abs}(\text{dot}(n, -d)), 2.5) \cdot 0.55$.
+      - Lambertian lighting: $L = 0.25 + 0.75 \max(\text{dot}(n, \text{sun}), 0)$ [S1, unofficial].
+      - Fuzz factor: $F = 0.5 + 0.5 \sin(hp.z \cdot 180.0) \sin(hp.x \cdot 150.0)$ [S1, unofficial].
+      - Final: $shade = \text{vec3}(0.070, 0.042, 0.032) \cdot L \cdot (0.8 + 0.3 F) + \text{SUNCOL} \cdot \text{pow}(1.0 - \text{abs}(\text{dot}(n, -d)), 2.5) \cdot 0.55$ [S1, unofficial].
 
 7.  **Compositing:**
-    - Calculate distance $dist = |ro - origin|$.
-    - Haze factor: $H = \exp(-0.055 \cdot \max(dist - 2.0, 0.0))$.
-    - $col = \text{mix}(\text{background}(rd, uv), shade, H)$.
-    - Apply tonemapping and gamma correction.
+    - Calculate distance $dist = |ro - origin|$ [S1, unofficial].
+    - Haze factor: $H = \exp(-0.055 \cdot \max(dist - 2.0, 0.0))$ [S1, unofficial].
+    - $col = \text{mix}(\text{background}(rd, uv), shade, H)$ [S1, unofficial].
+    - Apply tonemapping and gamma correction [S1, unofficial].
 
 **Pseudocode:**
 
@@ -111,16 +107,13 @@ def butterfly_ray_march(ro, rd, t, phase, swarm_data, march_steps):
     for i in range(len(swarm_data)):
         data = swarm_data[i]
         pos = data.xyz
-        vel = data.w # Assuming velocity/orientation data is packed here or derived
+        vel = data.w # Packed velocity/orientation data [S1, unofficial]
         
         # 1. Local Space Transformation
-        # Construct basis from velocity and dorsal axis
-        forward = normalize(vel.xy) if length(vel.xy) > 1e-4 else cross(vec3(0,1,0), vec3(1,0,0))
-        dorsal = mix(vec3(0,1,0), normalize(ro - pos), 0.5) # Simplified dorsal logic
-        basis = construct_basis(forward, dorsal)
-        
-        # Transform ray to local space
-        o_local = transform_point(basis, ro - pos) / scale
+        forward = normalize(vel.xy) if length(vel.xy) > 1e-4 else cross(vec3(0,1,0), vec3(1,0,0)) # Pitfall handling [S1, unofficial]
+        dorsal = mix(vec3(0,1,0), normalize(ro - pos), 0.5) # Dorsal axis mixed between up and camera direction [S1, unofficial]
+        basis = construct_basis(forward, dorsal) # Standard orthonormal basis construction [G]
+        o_local = transform_point(basis, ro - pos) / scale # Divide origin by scale [S1, unofficial]
         d_local = transform_vector(basis, rd)
         
         # 2. Sphere Intersection
@@ -135,7 +128,7 @@ def butterfly_ray_march(ro, rd, t, phase, swarm_data, march_steps):
         if t_max <= 0.0:
             continue
             
-        travel = max(-b - sq, 0.0) + dither()
+        travel = max(-b - sq, 0.0) + dither() # Dither initialization [G]
         hit_t = -1.0
         hit_p_local = vec3(0.0)
         hit_mat = 0.0
@@ -154,14 +147,14 @@ def butterfly_ray_march(ro, rd, t, phase, swarm_data, march_steps):
                 hit_mat = h.y
                 break
                 
-            step = clamp(h.x * 0.62, 0.0035, 0.22)
+            step = clamp(h.x * 0.62, 0.0035, 0.22) # Stability clamp for non-rigid transform [S1, unofficial]
             travel += step
             
         if hit_t < 0.0:
             continue
             
         # 4. Normal Calculation
-        n = butterfly_normal(hit_p_local, t, phase)
+        n = butterfly_normal(hit_p_local, t, phase) # Central differences with epsilon 0.0018 [S1, unofficial]
         
         # 5. Shading
         shade = vec3(0.0)
@@ -192,7 +185,7 @@ def butterfly_ray_march(ro, rd, t, phase, swarm_data, march_steps):
         # 6. Compositing
         dist = length(ro - pos)
         haze = exp(-0.055 * max(dist - 2.0, 0.0))
-        bg_col = background(rd, uv)
+        bg_col = compute_background(rd, uv) # Scene-specific background [G]
         final_color = mix(bg_col, shade, haze)
         
     return final_color
@@ -201,20 +194,20 @@ def map_butterfly(p, t, phase):
     """Returns (distance, material_id)"""
     # Body SDF
     z_clamped = clamp(p.z, -0.38, 0.30)
-    u = normalized_height(z_clamped)
-    r = base_radius + gaussian_thorax(u) + offset
-    body_dist = distance_to_cylinder(p.x, p.y * 1.12, z_clamped - z_offset, r)
+    u = (z_clamped - (-0.38)) / (0.30 - (-0.38)) # Normalized height [G]
+    r = base_radius + gaussian_thorax(u) + offset # Base term + Gaussian bump + offset [S1, unofficial]
+    body_dist = sqrt(p.x**2 + (p.y * 1.12)**2) - r # Distance to cylinder surface [S1, unofficial]
     
     # Antenna SDF
     abs_x = abs(p.x)
-    z_norm = clamp(normalized_z(p.z), 0.0, 1.0)
-    c = cubic_bezier_control(z_norm)
-    ant_dist = distance_to_segment(abs_x, z_norm, c, radius_interpolate(u))
+    z_norm = clamp(u, 0.0, 1.0) # Clamp normalized z to [0,1] [S1, unofficial]
+    c = cubic_bezier_point(z_norm) # Cubic Bezier-like control point [G]
+    ant_dist = distance_to_segment(vec2(abs_x, z_norm), c, radius_interpolate(u)) # Radius interpolates 0.0045 to 0.014 [S1, unofficial]
     
     body_sdf = min(body_dist, ant_dist)
     
     # Wing SDF
-    wing_dist = compute_wing_distance(p, t, phase)
+    wing_dist = compute_wing_distance(p, t, phase) # [G] Wing SDF formula not provided in sources.
     
     if wing_dist < body_sdf:
         return vec2(wing_dist, 0.0)
@@ -223,14 +216,14 @@ def map_butterfly(p, t, phase):
 ```
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot M)$, where $N$ is `SWARM_SIZE` and $M$ is `MARCH_STEPS`. Each butterfly requires a separate ray march.
-- **Memory Complexity:** $O(N)$ to store swarm data.
+- **Time Complexity:** $O(N \cdot M)$, where $N$ is `SWARM_SIZE` and $M$ is `MARCH_STEPS`. Each butterfly requires a separate ray march [S1, unofficial].
+- **Memory Complexity:** $O(N)$ to store swarm data [S1, unofficial].
 - **Performance:** Performance is limited by the number of butterflies and the cost of the SDF evaluation and shading per step. The clamping of step sizes ensures stability but may increase the number of steps required for convergence in non-rigid regions [S1, unofficial].
-- **Strengths:** Realistic rendering of complex, animated organic shapes (wings) using SDFs. Handles transparency and subsurface scattering effects effectively.
+- **Strengths:** Realistic rendering of complex, animated organic shapes (wings) using SDFs. Handles transparency and subsurface scattering effects effectively [S1, unofficial].
 - **Limitations:** High computational cost for large swarms. The non-rigid transform can lead to artifacts if step sizes are not carefully clamped. Precision issues may arise with very small distances due to the non-rigid nature of the transform [S1, unofficial].
 
 ## Background
-Butterfly Ray Marching with SDFs is a technique demonstrated in the project "manim-glsl-butterflies" by el-bakkali [S1, unofficial]. It utilizes GLSL shaders within the Manim animation engine to render a swarm of butterflies. The method combines SDFs for geometric representation with ray marching for rendering, specifically addressing the challenge of animating wing flapping through a local coordinate transformation.
+Butterfly Ray Marching with SDFs is a technique demonstrated in the project "manim-glsl-butterflies" by el-bakkali [S1, unofficial]. It utilizes GLSL shaders within the Manim animation engine to render a swarm of butterflies. The method combines SDFs for geometric representation with ray marching for rendering, specifically addressing the challenge of animating wing flapping through a local coordinate transformation [S1, unofficial].
 
 ## Sources
 [S1] el-bakkali/manim-glsl-butterflies, https://github.com/el-bakkali/manim-glsl-butterflies, fetched 2026-10-26 (unofficial)

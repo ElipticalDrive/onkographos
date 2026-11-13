@@ -1,156 +1,156 @@
 # Alpha-to-Weight Computation (Forward)
 
-Also called: Alpha to Weight Conversion (Forward), Alphas2Weights, Alphas2Weights Alpha to Weight Conversion, Transmittance Computation, alpha to weight, alpha2weight
+Also called: Alpha to Weight Conversion (Forward), Alpha-Based Ray Weights, Alphas2Weights, Density-Based Ray Weights, alpha to weight, alpha2weight
 
 ## Overview
-Alpha-to-Weight Computation (Forward) converts per-sample opacity values ($\alpha$) and ray identifiers into rendering weights ($w$) and cumulative transmittance ($T$) for direct volume ray casting [S1, S2, S4, unofficial]. It solves the problem of accumulating light transport along rays by computing the contribution of each sample based on the probability that light reaches it without being absorbed by previous samples [S1, S4, unofficial]. Unlike [Raw2Alpha Density to Alpha Conversion](3052-raw2alpha-density-to-alpha-conversion.md), which maps raw density to opacity, this method operates on already-computed alpha values to produce the final weights used in the compositing equation [S1, S5, S7]. It is distinct from [Opacity Correction for Slice Count Invariance](1277-opacity-correction-for-slice-count-invariance.md) in that it performs the discrete accumulation step rather than adjusting opacity for discretization artifacts [S11, S32].
+Alpha-to-Weight Computation (Forward) calculates the contribution weight $w_i$ for each sample $i$ along a ray, given its opacity $\alpha_i$ and the accumulated transmittance $T_i$ from preceding samples. It solves the problem of mapping per-sample opacity values into the front-to-back compositing equation $\mathbf{C}_{out} = \sum w_i \mathbf{c}_i$, where $w_i = \alpha_i T_i$ [S1, S2, S4, S6, unofficial]. Unlike [Raw2Alpha Density to Alpha Conversion](3052-raw2alpha-density-to-alpha-conversion.md), which converts physical density $\sigma$ to $\alpha$, this method operates on already-computed alphas to determine their effective rendering weights [S1, S2, S8]. It differs from [Opacity Correction for Slice Count Invariance](1277-opacity-correction-for-slice-count-invariance.md) by performing the standard volumetric accumulation rather than correcting for discretization artifacts [S2, S6, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
 *   **Inputs:**
-    *   `alpha`: A 1D tensor of size $N_{pts}$ containing per-sample opacity values, typically bounded in $[0, 1]$ [S2, S4, G, unofficial].
-    *   `ray_id`: A 1D tensor of size $N_{pts}$ containing integer ray identifiers (int64) mapping each sample to a specific ray [S2, S4, unofficial].
-    *   `n_rays`: An integer specifying the total number of rays [S2, S4, unofficial].
-    *   `start_transmittance` (Optional): A tensor of initial transmittance values. If `None`, initialization defaults to ones [S3, unofficial].
+    *   `alpha`: A 1D tensor of size $N_{pts}$ containing opacity values $\alpha_i \in [0, 1]$ for each sample point [S2, S6, unofficial].
+    *   `ray_id`: A 1D tensor of size $N_{pts}$ containing integer ray identifiers, grouping samples into distinct rays [S2, S6, unofficial].
+    *   `n_rays`: An integer specifying the total number of unique rays [S2, S6, unofficial].
+    *   (Optional) `start_transmittance`: Initial transmittance tensor for rays, typically ones of shape $(1, H, W)$ or $(n\_rays)$ [S5, unofficial].
 *   **Outputs:**
-    *   `weight`: A 1D tensor of size $N_{pts}$ containing the rendering weight for each sample [S2, S4, unofficial].
-    *   `T`: A 1D tensor of size $N_{pts}$ containing the transmittance arriving at each sample [S2, S4, unofficial].
-    *   `alphainv_last`: A 1D tensor of size $N_{rays}$ containing the final cumulative transmittance for each ray [S2, S4, unofficial].
-    *   `i_start`: A 1D tensor of size $N_{rays}$ (int64) containing the starting sample index for each ray [S2, S4, unofficial].
-    *   `i_end`: A 1D tensor of size $N_{rays}$ (int64) containing the ending sample index for each ray [S2, S4, unofficial].
+    *   `weight`: A 1D tensor of size $N_{pts}$ where $weight[i] = T_i \cdot \alpha_i$ [S2, S6, unofficial].
+    *   `T`: A 1D tensor of size $N_{pts}$ storing the transmittance $T_i$ arriving at sample $i$ (i.e., before applying $\alpha_i$) [S2, S6, unofficial].
+    *   `alphainv_last`: A 1D tensor of size $n\_rays$ storing the final accumulated transmittance $T_{end}$ for each ray [S2, S6, unofficial].
+    *   `i_start`, `i_end`: 1D tensors of size $n\_rays$ defining the inclusive start and exclusive end indices of samples for each ray in the `alpha` tensor [S2, S6, unofficial].
 
 **Data Structures:**
-The algorithm processes samples grouped by ray ID. The `ray_id` tensor allows for variable-length rays and non-contiguous sample ordering. The output tensors `i_start` and `i_end` define the valid range $[i_{start}, i_{end})$ for each ray, enabling efficient iteration and early termination [S2, S4, unofficial].
+The method typically processes points in a flattened list (e.g., all samples from all rays concatenated). The `ray_id` tensor maps each point index to a ray index. Pre-processing determines `i_start` and `i_end` by identifying where `ray_id` changes value [S2, unofficial].
 
-**Steps:**
-1.  **Pre-processing (Segmentation):** Determine the start and end indices for each ray based on changes in `ray_id`. This segments the flat list of samples into per-ray ranges [S2, unofficial].
-    *   Let $i_{start}[r]$ be the index of the first sample with `ray_id` equal to $r$.
-    *   Let $i_{end}[r]$ be the index of the first sample with `ray_id` greater than $r$ (or $N_{pts}$ for the last ray) [S2, unofficial].
-2.  **Initialization:** Initialize cumulative transmittance $T_{cum} = 1.0$ for each ray [S2, S4, unofficial]. If `start_transmittance` is provided, use it; otherwise, assume full transmittance initially [S3, unofficial].
-3.  **Forward Pass (Accumulation):** For each ray $r$ from $0$ to $N_{rays}-1$:
-    *   Iterate through sample indices $i$ from $i_{start}[r]$ to $i_{end}[r]$ [S4, unofficial].
-    *   Compute the transmittance arriving at sample $i$:
-        $$ T[i] = T_{cum} $$
-    *   Compute the rendering weight for sample $i$:
-        $$ w[i] = T_{cum} \cdot \alpha[i] $$
-    *   Update the cumulative transmittance for the next sample:
-        $$ T_{cum} = T_{cum} \cdot (1.0 - \alpha[i]) $$
-    *   **Early Termination:** If $T_{cum} < \epsilon_{term}$ (typically $10^{-3}$), increment $i$ and break the loop for this ray [S2, S4, unofficial]. This optimization skips samples that contribute negligibly to the final color [S4, unofficial].
-    *   Store the final loop index in $i_{end}[r]$ and the final $T_{cum}$ in $alphainv_last[r]$ [S2, S4, unofficial].
-4.  **Numerical Stability:** Zero out transmittance values below a small threshold (e.g., $10^{-4}$) to prevent numerical noise in downstream operations [S3, unofficial].
+**Step-by-Step Method:**
+
+1.  **Segmentation:** Identify the start and end indices for each ray. For a ray with ID $r$, let $i_{start}[r]$ be the first index where `ray_id` equals $r$, and $i_{end}[r]$ be the last index plus one [S2, unofficial].
+2.  **Initialization:** Initialize cumulative transmittance $T_{cum} = 1.0$ for each ray [S2, S6, unofficial]. If `start_transmittance` is provided, use it instead [S5, unofficial].
+3.  **Iteration:** For each ray $r$, iterate through sample indices $i$ from $i_{start}[r]$ to $i_{end}[r] - 1$:
+    a.  **Store Transmittance:** Set $T[i] = T_{cum}$ [S2, S6, unofficial].
+    b.  **Compute Weight:** Calculate the rendering weight $w_i = T_{cum} \cdot \alpha[i]$ [S2, S6, unofficial].
+    c.  **Update Transmittance:** Update the cumulative transmittance for the next sample: $T_{cum} \leftarrow T_{cum} \cdot (1.0 - \alpha[i])$ [S2, S6, unofficial].
+    d.  **Early Termination:** If $T_{cum}$ drops below a threshold $\epsilon_{term}$ (typically $10^{-3}$), stop processing further samples for this ray [S2, S6, unofficial]. Set $i_{end}[r] = i + 1$ (or the current index + 1) and break the loop [S2, S6, unofficial].
+4.  **Finalization:** For rays that did not terminate early, set $i_{end}[r]$ to the actual end of the segment [S2, unofficial]. Store the final $T_{cum}$ in `alphainv_last[r]` [S2, S6, unofficial].
+
+**Formulas:**
+The core recurrence relations are:
+$$
+T_i = \prod_{j=i_{start}}^{i-1} (1 - \alpha_j)
+$$
+$$
+w_i = T_i \cdot \alpha_i
+$$
+$$
+T_{i+1} = T_i \cdot (1 - \alpha_i)
+$$
+Where $T_{i_{start}} = 1.0$ [S2, S4, S6, unofficial].
+
+**Parameters:**
+*   **Early Termination Threshold ($\epsilon_{term}$):** A small value (e.g., $10^{-3}$) below which transmittance is considered negligible, allowing early exit from the ray loop [S2, S6, unofficial].
+*   **Numerical Stability Epsilon ($\epsilon_{stab}$):** A small value (e.g., $10^{-7}$) added to $(1.0 - \alpha)$ in alternative implementations to prevent numerical instability during cumulative products, though less critical in the iterative multiplicative form [S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Multiplying many values $< 1$ can lead to underflow. Early termination mitigates this by stopping when $T_{cum}$ is small [S2, S6, unofficial].
+*   **Boundaries:** Ensure `i_end` is correctly set for the last ray and for rays terminated early [S2, unofficial].
+*   **NaN Values:** If $\alpha$ contains NaNs, weights may become NaN. Some implementations replace NaN weights with 0 [S4, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def alpha_to_weight_forward(alpha, ray_id, n_rays, start_transmittance=None):
+def alpha_to_weight_forward(alpha, ray_id, n_rays, epsilon_term=1e-3):
     """
-    Computes rendering weights and transmittance from alpha values.
+    Computes rendering weights from alpha values and ray IDs.
     
     Args:
-        alpha: Tensor of shape (N_pts,), float32, per-sample opacity.
-        ray_id: Tensor of shape (N_pts,), int64, ray identifier for each sample.
-        n_rays: int, total number of rays.
-        start_transmittance: Optional Tensor of shape (1, H, W) or similar, initial transmittance.
+        alpha: Tensor of shape (N_pts,), opacity values.
+        ray_id: Tensor of shape (N_pts,), integer ray IDs.
+        n_rays: int, number of rays.
+        epsilon_term: float, threshold for early termination.
         
     Returns:
-        weight: Tensor of shape (N_pts,), float32, rendering weights.
-        T: Tensor of shape (N_pts,), float32, transmittance at each sample.
-        alphainv_last: Tensor of shape (n_rays,), float32, final transmittance per ray.
-        i_start: Tensor of shape (n_rays,), int64, start indices.
-        i_end: Tensor of shape (n_rays,), int64, end indices.
+        weight: Tensor of shape (N_pts,), rendering weights.
+        T: Tensor of shape (N_pts,), transmittance at each sample.
+        alphainv_last: Tensor of shape (n_rays,), final transmittance per ray.
+        i_start: Tensor of shape (n_rays,), start indices.
+        i_end: Tensor of shape (n_rays,), end indices (exclusive).
     """
     N_pts = alpha.shape[0]
     weight = torch.zeros(N_pts, dtype=alpha.dtype, device=alpha.device)
     T = torch.zeros(N_pts, dtype=alpha.dtype, device=alpha.device)
-    alphainv_last = torch.zeros(n_rays, dtype=alpha.dtype, device=alpha.device)
+    alphainv_last = torch.ones(n_rays, dtype=alpha.dtype, device=alpha.device)
     i_start = torch.zeros(n_rays, dtype=torch.int64, device=alpha.device)
     i_end = torch.zeros(n_rays, dtype=torch.int64, device=alpha.device)
     
     # Pre-processing: Determine segment start and end indices
-    # This assumes ray_ids are sorted or we need to group them. 
-    # In many implementations (like DirectVoxGO), ray_ids are contiguous per ray.
-    # We find unique ray_ids and their first/last positions.
-    unique_rays, first_indices = torch.unique(ray_id, return_inverse=False, return_counts=False)
-    # Note: The source [S2, unofficial] mentions __set_i_for_segment_start_end which handles this.
-    # For a self-contained implementation, we assume ray_ids are 0..n_rays-1 and sorted by ray.
-    # If not sorted, we must sort or use scatter. The CUDA code [S4, unofficial] assumes sorted/contiguous.
-    
-    # Initialize start indices
-    # In the CUDA kernel [S4, unofficial], i_start is pre-computed. Here we simulate it for sorted ray_ids.
-    if n_rays > 0:
-        i_start[0] = 0
-        # Find where ray_id changes
-        changes = torch.where(ray_id[1:] != ray_id[:-1])[0] + 1
-        if len(changes) > 0:
-            i_start[1:len(changes)+1] = changes
-        # Set end indices for all but the last ray
-        if len(changes) > 0:
-            i_end[:len(changes)] = changes
-        # Set end index for the last ray
-        i_end[-1] = N_pts
-    else:
-        return weight, T, alphainv_last, i_start, i_end
-
-    # Forward pass
+    # Find unique ray IDs and their first/last occurrences
+    unique_rays = torch.unique(ray_id)
+    for r in unique_rays:
+        indices = torch.where(ray_id == r)[0]
+        i_start[r] = indices[0]
+        i_end[r] = indices[-1] + 1  # Exclusive end
+        
+    # Iterate over each ray
     for r in range(n_rays):
-        i_s = i_start[r]
-        i_e_max = i_end[r]
+        i_s = i_start[r].item()
+        i_e_max = i_end[r].item()
+        
         T_cum = 1.0
-        
-        # If start_transmittance is provided, it might need to be indexed by ray.
-        # The source [S3, unofficial] suggests it's a tensor, but [S4, unofficial] CUDA code uses 1.0.
-        # We assume 1.0 for simplicity unless start_transmittance is ray-specific.
-        
-        for i in range(i_s, i_e_max):
+        i = i_s
+        while i < i_e_max:
+            # Store transmittance arriving at sample i
             T[i] = T_cum
+            
+            # Compute weight
             weight[i] = T_cum * alpha[i]
+            
+            # Update transmittance
             T_cum *= (1.0 - alpha[i])
             
-            # Early termination
-            if T_cum < 1e-3:
+            # Early termination check
+            if T_cum < epsilon_term:
                 i += 1
                 break
-        
-        i_end[r] = i
+            
+            i += 1
+            
+        # Store final indices and transmittance
+        i_end[r] = i  # Update end index if terminated early
         alphainv_last[r] = T_cum
-
-    # Numerical stability: zero out very small transmittance
-    T = torch.where(T < 1e-4, 0.0, T)
-    
+        
     return weight, T, alphainv_last, i_start, i_end
 ```
-
-**Parameters:**
-*   `epsilon_term`: Early termination threshold for transmittance. Typical value: $10^{-3}$ [S4, unofficial].
-*   `epsilon_stability`: Threshold for zeroing out transmittance. Typical value: $10^{-4}$ [S3, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Precision:** Accumulating transmittance can lead to precision loss if many samples have small $\alpha$. Using `float32` is standard, but `float64` may be needed for high-precision applications [G].
-*   **Boundaries:** Ensure `i_start` and `i_end` are correctly computed for rays with no samples or single samples [S2, unofficial].
-*   **Degenerate Input:** If $\alpha[i] = 1.0$, $T_{cum}$ becomes 0, and all subsequent weights are 0. This is handled correctly by the loop [S4, unofficial].
-*   **Unsorted Ray IDs:** The algorithm assumes samples are grouped by ray ID. If not, pre-sorting or a scatter-based approach is required [S2, unofficial].
 
 ## Subtopics
 
 ### [Raw2Alpha Density to Alpha Conversion](3052-raw2alpha-density-to-alpha-conversion.md)
-Converts raw neural network outputs (density $\sigma$) into per-sample opacity ($\alpha$) and ray-space weights ($w$) for volume rendering. It solves the problem of mapping unbounded or arbitrary density values to the bounded $[0, 1]$ opacity range required for front-to-back compositing. It is distinct from its parent [Alpha-to-Weight Computation (Forward)](2373-alpha-to-weight-computation-forward.md) because it performs the initial density-to-opacity transformation, whereas the parent handles the subsequent accumulation of transmittance and weights from already-computed alpha values.
+Converts raw network output density values ($\sigma$) into opacity ($\alpha$) and rendering weights. Choose this when your model outputs density rather than alpha. It solves the incompatibility between unbounded density and bounded opacity.
+
+### [Alpha Computation with Alpha Mask](10549-alpha-computation-with-alpha-mask.md)
+Corrects occlusion for planar surfaces. Choose this when rendering masked planar geometry rather than volumetric data.
+
+### [Arithmetic Alpha Transformation](13389-arithmetic-alpha-transformation.md)
+Post-processes existing alpha channels. Choose this when modifying pre-existing alpha maps rather than computing weights from scratch.
+
+### [Alpha-to-Extinction Conversion](13044-alpha-to-extinction-conversion.md)
+Bridges transfer-function alpha to physical extinction coefficients. Choose this when converting between artistic alpha and physical $\sigma$.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N_{pts})$ for the forward pass, as each sample is processed once [S2, S4, unofficial]. Early termination can reduce the effective number of operations per ray.
-*   **Memory Complexity:** $O(N_{pts} + N_{rays})$ for storing output tensors [S2, S4, unofficial].
-*   **Measured Performance:** Implemented in CUDA (`alpha2weight_cuda`) for GPU acceleration [S1, S2, S4, unofficial]. The CUDA kernel [S4, unofficial] uses a single thread per ray, making it efficient for large numbers of rays.
-*   **Scaling:** Scales linearly with the number of samples and rays. Early termination improves performance for rays that become fully opaque early.
-*   **Strengths:** Simple, efficient, and physically consistent. Early termination reduces computation for opaque regions [S4, unofficial].
-*   **Limitations:** Requires sorted ray IDs or pre-processing to group samples [S2, unofficial]. Precision issues may arise with very long rays or many small alpha values [G].
-*   **When to Use:** Standard direct volume rendering where opacity values are already computed [S1, S2, unofficial].
-*   **When Not to Use:** When density-to-opacity conversion is needed (use [Raw2Alpha](3052-raw2alpha-density-to-alpha-conversion.md)) or when slice-count invariance is critical (use [Opacity Correction](1277-opacity-correction-for-slice-count-invariance.md)) [S11, S32].
+*   **Time Complexity:** $O(N_{pts})$ in the worst case, where $N_{pts}$ is the total number of samples. With early termination, the average case is significantly faster, especially for opaque scenes [S2, S6, unofficial].
+*   **Memory Complexity:** $O(N_{pts} + n_{rays})$ to store `weight`, `T`, `alphainv_last`, `i_start`, and `i_end` [S2, S6, unofficial].
+*   **Performance:** Highly parallelizable on GPUs. The iterative nature per ray allows for efficient CUDA kernel implementation, as seen in `render_utils_cuda.alpha2weight` [S1, S2, S6, unofficial].
+*   **Strengths:** Simple, numerically stable with early termination, and directly compatible with standard front-to-back compositing [S2, S6, unofficial].
+*   **Limitations:** Requires pre-computed alphas. Early termination introduces a dependency on the threshold choice, which may affect gradient flow in training if not handled carefully [S2, S6, unofficial].
+*   **When to Use:** Standard direct volume rendering, NeRF-based rendering, and Gaussian Splatting pipelines where alpha values are available [S1, S2, S4, S6, unofficial].
+*   **When Not to Use:** When working directly with density fields without intermediate alpha computation (use [Raw2Alpha](3052-raw2alpha-density-to-alpha-conversion.md) instead) [S1, S2, S8].
 
 ## Background
-Alpha-to-Weight Computation is a fundamental step in direct volume rendering, rooted in the front-to-back compositing equation [S1, S2, unofficial]. It is widely used in neural radiance fields (NeRF) and voxel-based rendering methods [S1, S2, S4, unofficial]. The method is implemented in various open-source projects, including DirectVoxGO [S2, unofficial] and UnboundedNeRFPytorch [S1, unofficial], often optimized with CUDA kernels [S1, S4, unofficial].
+The method is a fundamental component of direct volume rendering, derived from the front-to-back compositing equation [S17, S43, S68]. It is widely used in modern neural rendering frameworks such as NeRF, DirectVoxGO, and 3D Gaussian Splatting implementations [S1, S2, S4, S5, S6, unofficial]. The specific implementation details, including early termination and CUDA optimization, are documented in unofficial repositories for these frameworks [S1, S2, S4, S5, S6, unofficial].
 
 ## Sources
 [S1] sjtuytc/UnboundedNeRFPytorch, https://github.com/sjtuytc/UnboundedNeRFPytorch, fetched 2026-10-26 (unofficial)
 [S2] sunset1995/DirectVoxGO, https://github.com/sunset1995/DirectVoxGO, fetched 2026-10-26 (unofficial)
-[S3] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)
-[S4] gkouros/ref-dvgo, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 (unofficial)
+[S3] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)
+[S4] Gaussian-Splatting-Toolkit/Gaussian-Splatting-Toolkit, https://github.com/Gaussian-Splatting-Toolkit/Gaussian-Splatting-Toolkit, fetched 2026-10-27 (unofficial)
+[S5] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)
+[S6] gkouros/ref-dvgo, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 (unofficial)

@@ -9,41 +9,22 @@ Opacity Correction by Polygon Clipping eliminates visual artifacts (light/dark b
 
 ### Inputs and Outputs
 **Inputs:**
-*   A hierarchical brick decomposition of the volume data, where each brick is assigned a resolution level $k$.
+*   A hierarchical brick decomposition of the volume data, where each brick is assigned a resolution level $k$ [S1].
 *   Adjacency constraints: The resolution of any two adjacent bricks differs by at most one level ($|k_i - k_j| \le 1$) [S1].
 *   Initial sample slice distance $\Delta_0$, chosen with respect to the width of texture elements [S2].
 *   Color lookup tables (LUTs) mapping color indices $C_i$ to extinction coefficients or opacity values [S1, S2].
 
 **Outputs:**
-*   Correctly rendered frame buffer with continuous opacity transitions across brick boundaries.
+*   Correctly rendered frame buffer with continuous opacity transitions across brick boundaries [S1].
 *   Clipped polygons representing the regions of error that require opacity correction [S1].
 
 ### Data Structures
 *   **Color Lookup Table (LUT):** For each resolution level $k$, a table storing corrected opacity values $\alpha_k$ for each color index $C_i$ [S2].
 *   **Polygon Representation:** Vertices of the cutting planes (slices) projected into screen space or clip space. The algorithm modifies a 3D Sutherland-Hodgman clipping algorithm to compute both the clipped polygon and the area excluded from the original polygon [S1].
 
-### Definitions
-*   **Level $k$:** A resolution level where slices are positioned at distances $n \cdot 2^k \Delta_0$ from the viewing plane ($n \in \mathbb{Z}$) [S1, S2].
-*   **Even-slice:** A slice at position $n \cdot 2^{k+1} \Delta_0$ when bricks at levels $k$ and $k+1$ are adjacent [S1, S2].
-*   **Odd-slice:** A slice at position $(n \cdot 2^{k+1} + 1)\Delta_0$ when bricks at levels $k$ and $k+1$ are adjacent [S1, S2].
-*   **Sample Slice Distance $\Delta_k$:** The distance between consecutive cutting planes at level $k$, where $\Delta_k = 2^k \Delta_0$ [S1, S2].
-
-### Opacity Correction Formula
-The opacity $\alpha_k$ for a color index $C_i$ at sample slice distance $\Delta_k$ is derived from the base opacity $\alpha_0$ at distance $\Delta_0$ [S1, S2]:
-
-$$
-\alpha_k = 1 - e^{-map[C_i] \Delta_k} = 1 - (1 - \alpha_0)^{\frac{\Delta_k}{\Delta_0}}
-$$
-
-Where:
-*   $\alpha_0$ is the opacity entry for color index $C_i$ at distance $\Delta_0$.
-*   $map[C_i]$ is the mapping from color indices to extinction coefficients.
-*   $\Delta_k$ is the new sample slice distance for level $k$.
-
 ### Algorithm Steps
-
 1.  **Identify Adaptation Needs:** Determine which bricks are adjacent to at least one neighbor on a finer resolution level. Only these bricks require opacity correction [S1].
-2.  **Prepare Lookup Tables:** For each brick, select the appropriate color lookup table corresponding to its resolution level $k$, using the corrected opacity values computed via the formula above [S2].
+2.  **Prepare Lookup Tables:** For each brick, select the appropriate color lookup table corresponding to its resolution level $k$, using the corrected opacity values computed via the formula below [S2].
 3.  **Render Back-to-Front:** Render each brick separately in back-to-front order using standard 3D texture slicing techniques [S2].
 4.  **Detect Error Regions:** Identify regions where slice thickness mismatches cause erroneous pixel drawing. Two primary cases exist at the boundary between a coarser brick (level $k$) and a finer brick (level $k+1$) [S1, S2]:
     *   **Case 1 (Coarser to Finer):** One slice of thickness $\Delta_{k+1}$ and one slice of thickness $\Delta_k$ are rendered, but they should only cover a width of $\Delta_{k+1}$. This error occurs in **Region C**, where even-slice $i$ is rendered on the coarser level and odd-slice $i+1$ is rendered on the finer level before even-slice $i+2$ is rendered [S1, S2].
@@ -57,115 +38,143 @@ Where:
     *   Adapt the opacity of clipping polygons according to the level of the neighboring brick [S1].
 7.  **Handle Boundaries:** If a polygon cannot be clipped because the adjacent slice is outside the current brick (volume boundary), insert additional slices with the smallest sample distance ($\Delta_0$) to guarantee correct opacity contribution [S1].
 
-### Pseudocode
+### Opacity Correction Formula
+The opacity $\alpha_k$ for a color index $C_i$ at sample slice distance $\Delta_k$ is derived from the base opacity $\alpha_0$ at distance $\Delta_0$ [S1, S2]:
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+$$
+\alpha_k = 1 - e^{-map[C_i] \Delta_k} = 1 - (1 - \alpha_0)^{\frac{\Delta_k}{\Delta_0}}
+$$
 
-```python
-def render_brick_with_opacity_correction(brick, level, neighbors, view_matrix, projection_matrix):
-    """
-    Renders a single brick with opacity correction for level transitions.
-    
-    Args:
-        brick: The brick data and its assigned level k.
-        level: Integer resolution level k.
-        neighbors: List of adjacent bricks with their levels.
-        view_matrix: Camera view matrix.
-        projection_matrix: Camera projection matrix.
-        
-    Returns:
-        Rendered frame buffer updates.
-    """
-    # 1. Determine if adaptation is needed
-    needs_correction = False
-    for neighbor in neighbors:
-        if neighbor.level == level + 1:
-            needs_correction = True
-            break
-    
-    if not needs_correction:
-        return render_standard_brick(brick, level, view_matrix, projection_matrix)
+Where:
+*   $\alpha_0$ is the opacity entry for color index $C_i$ at distance $\Delta_0$ [S1, S2].
+*   $map[C_i]$ is the mapping from color indices to extinction coefficients [S1, S2].
+*   $\Delta_k$ is the new sample slice distance for level $k$ [S1, S2].
 
-    # 2. Setup correct opacity lookup table
-    delta_k = (2 ** level) * DELTA_0
-    lut = get_corrected_lookup_table(level, DELTA_0)
-    
-    # 3. Identify even and odd slices for this brick
-    # Slices are at n * 2^k * Delta_0
-    even_slices = get_slices_at_positions(brick, level, step=2**level)
-    odd_slices = get_slices_at_positions(brick, level, step=2**level, offset=1)
-    
-    # 4. Collect polygons to render
-    polygons_to_render = []
-    
-    # Standard slices
-    for slice in even_slices + odd_slices:
-        polygons_to_render.append(create_slice_polygon(slice, lut))
-        
-    # 5. Handle Level Transitions (Clipping)
-    # Only bricks adjacent to a finer level need adaptation
-    for neighbor in neighbors:
-        if neighbor.level == level + 1:
-            # Case 1: Coarser (level) to Finer (level+1)
-            # Clip even-slice i in coarser brick with perspective projection of odd-slice i+1 from finer brick
-            for even_slice in even_slices:
-                # Find corresponding odd-slice in finer neighbor
-                # Note: odd-slice i+1 in finer brick corresponds to position (n*2^(k+1)+1)*Delta_0
-                # which aligns with the gap between even-slices in the coarser brick
-                odd_slice_fine = find_corresponding_odd_slice_in_neighbor(even_slice, neighbor)
-                if odd_slice_fine:
-                    # Project odd-slice from finer brick onto the plane of the even-slice in coarser brick
-                    projected_polygon = project_polygon(odd_slice_fine, view_matrix, projection_matrix, target_plane=even_slice.plane)
-                    
-                    # Clip even-slice polygon with projected polygon
-                    clipped_polygon, excluded_area = clip_polygon(even_slice.polygon, projected_polygon)
-                    
-                    # Render excluded area (Region C) with corrected opacity
-                    # In Case 1, the error is in Region C where coarser slice overlaps finer odd slice
-                    # The opacity should match the finer level's contribution for that region
-                    polygons_to_render.append(create_polygon_with_opacity(excluded_area, lut.get_opacity(neighbor.level)))
-                    
-            # Case 2: Finer (level+1) to Coarser (level)
-            # Reconstruct odd-slice i+1 in coarser brick and clip with even-slice i from finer brick
-            # Note: The source describes reconstructing the odd slice in the coarser brick.
-            # This implies interpolating or copying data from the finer neighbor to create a virtual slice in the coarser brick's coordinate space.
-            for odd_slice_coarse in odd_slices:
-                # Find corresponding even-slice in finer neighbor
-                even_slice_fine = find_corresponding_even_slice_in_neighbor(odd_slice_coarse, neighbor)
-                if even_slice_fine:
-                    # Project even-slice from finer brick onto the plane of the odd-slice in coarser brick
-                    projected_polygon = project_polygon(even_slice_fine, view_matrix, projection_matrix, target_plane=odd_slice_coarse.plane)
-                    
-                    # Clip odd-slice polygon (reconstructed in coarser brick) with projected polygon
-                    # The odd slice in coarser brick must be reconstructed/interpolated from finer data
-                    reconstructed_odd_polygon = reconstruct_slice_in_coarser_bricks(odd_slice_coarse, neighbor)
-                    clipped_polygon, excluded_area = clip_polygon(reconstructed_odd_polygon, projected_polygon)
-                    
-                    # Render excluded area (Region C) with corrected opacity alpha_{k+1}
-                    polygons_to_render.append(create_polygon_with_opacity(excluded_area, lut.get_opacity(neighbor.level)))
-
-    # 6. Handle Volume Boundaries
-    # If a polygon cannot be clipped (no neighbor), insert additional slices with smallest sample distance
-    for polygon in polygons_to_render:
-        if is_boundary_polygon(polygon):
-            additional_slices = create_slices_with_delta_0(polygon.bounds)
-            polygons_to_render.extend(additional_slices)
-
-    # 7. Sort and Render
-    # Sort polygons back-to-front and minimize color table reloads
-    sorted_polygons = sort_back_to_front(polygons_to_render)
-    for polygon in sorted_polygons:
-        set_color_table(polygon.opacity_table)
-        rasterize_polygon(polygon)
-
-    return frame_buffer
-```
+### Parameters
+*   $\Delta_0$: The initial sample slice distance between consecutive cutting planes, chosen with respect to the width of texture elements [S2].
+*   $map[C_i]$: The mapping from color indices to extinction coefficients [S2].
+*   Resolution constraint: The resolution of adjacent bricks cannot differ by more than one level [S1].
 
 ### Edge Cases and Pitfalls
 *   **Volume Boundaries:** At the edges of the volume, there may be no adjacent polygons to clip against. The solution is to insert additional slices with the smallest sample distance ($\Delta_0$) to ensure correct opacity contribution [S1].
 *   **Resolution Constraint:** The method assumes the resolution of adjacent bricks does not differ by more than one level. If this constraint is violated, the alignment of even/odd slices breaks down [S1].
 *   **Performance Overhead:** The clipping algorithm must be efficient. A modified 3D Sutherland-Hodgman algorithm is used to compute both the clipped polygon and the excluded area simultaneously to minimize overhead [S1].
 *   **Color Table Switches:** Frequent clipping operations can lead to many color table reloads, which significantly decreases performance. Sorting clipped polygons to minimize these switches is critical [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_brick_with_opacity_correction(brick, level_k, neighbors, delta_0):
+    # 1. Check if brick needs adaptation (adjacent to finer level) [S1]
+    needs_correction = any(n.level == level_k + 1 for n in neighbors)
+    if not needs_correction:
+        return render_standard_brick(brick, level_k, delta_0) # Standard back-to-front 3D texture slicing [S2]
+
+    delta_k = (2 ** level_k) * delta_0
+    polygons_to_render = []
+
+    # 2. Generate slice planes at positions n * 2^k * delta_0 [S1, S2]
+    for n in range(brick.min_n, brick.max_n + 1):
+        z_pos = n * delta_k
+        polygon = create_slice_polygon(z_pos, brick.data) # Project slice plane through volume data [G]
+        polygons_to_render.append({'polygon': polygon, 'z': z_pos, 'opacity_level': level_k})
+
+    # 3. Separate even and odd slices relative to adjacent finer level [S1, S2]
+    # Even-slices: n * 2^(k+1) * delta_0 (n is even)
+    # Odd-slices: (n * 2^(k+1) + 1) * delta_0 (n is odd)
+    even_slices = [p for p in polygons_to_render if p['z'] % (2 * delta_k) == 0]
+    odd_slices = [p for p in polygons_to_render if p['z'] % (2 * delta_k) == delta_k]
+
+    # 4. Handle level transitions via polygon clipping [S1]
+    for neighbor in neighbors:
+        if neighbor.level == level_k + 1:
+            # Case 1: Coarser to Finer [S1]
+            for even_slice in even_slices:
+                # Find corresponding odd-slice in finer neighbor at z + delta_k
+                odd_plane_fine = find_slice_at_z(neighbor, even_slice['z'] + delta_k)
+                if odd_plane_fine:
+                    projected_poly = project_polygon(odd_plane_fine, even_slice['z']) # Perspective projection onto slice plane [G]
+                    clipped_poly, excluded_area = clip_polygon(even_slice['polygon'], projected_poly) # Modified 3D Sutherland-Hodgman [S1]
+                    polygons_to_render.append({'polygon': excluded_area, 'z': even_slice['z'], 'opacity_level': neighbor.level})
+
+            # Case 2: Finer to Coarser [S1]
+            for odd_slice_coarse in odd_slices:
+                # Reconstruct odd-slice in coarser brick from finer neighbor data [S1]
+                reconstructed_odd_poly = reconstruct_slice_in_coarser_bricks(odd_slice_coarse, neighbor)
+                # Find corresponding even-slice in finer neighbor at z - delta_k
+                even_plane_fine = find_slice_at_z(neighbor, odd_slice_coarse['z'] - delta_k)
+                if even_plane_fine:
+                    projected_poly = project_polygon(even_plane_fine, odd_slice_coarse['z'])
+                    clipped_poly, excluded_area = clip_polygon(reconstructed_odd_poly, projected_poly)
+                    polygons_to_render.append({'polygon': excluded_area, 'z': odd_slice_coarse['z'], 'opacity_level': level_k + 1})
+
+    # 5. Handle volume boundaries [S1]
+    for poly in polygons_to_render:
+        if is_boundary_polygon(poly):
+            additional_planes = create_slices_with_delta_0(poly.bounds, delta_0)
+            for plane in additional_planes:
+                polygons_to_render.append({'polygon': create_slice_polygon(plane, brick.data), 'z': plane, 'opacity_level': level_k})
+
+    # 6. Sort polygons back-to-front to minimize color table reloads [S1]
+    sorted_polygons = sort_back_to_front(polygons_to_render)
+
+    # 7. Render with appropriate color tables [S2]
+    frame_buffer = initialize_frame_buffer()
+    for poly in sorted_polygons:
+        set_color_table(poly['opacity_level']) # Load corrected opacity LUT for level [S2]
+        rasterize_polygon(poly['polygon'], frame_buffer) # Rasterize to frame buffer [G]
+
+    return frame_buffer
+
+# Helper definitions (standard operations or source-specified steps)
+def render_standard_brick(brick, level_k, delta_0):
+    # Standard back-to-front 3D texture slicing [S2]
+    return render_standard_brick(brick, level_k, delta_0) # Standard routine [G]
+
+def create_slice_polygon(z_pos, data):
+    # Project slice plane at z_pos through volume data to screen space [G]
+    return Polygon(vertices=project_plane_through_data(z_pos, data))
+
+def find_slice_at_z(neighbor, target_z):
+    # Find slice at exact z position in neighbor brick [G]
+    return neighbor.get_slice_at_z(target_z)
+
+def project_polygon(poly, target_z):
+    # Apply view/projection matrices, then clip to target_z plane [G]
+    return clip_to_plane(transform_with_matrices(poly), target_z)
+
+def clip_polygon(poly_a, poly_b):
+    # Modified 3D Sutherland-Hodgman algorithm computing clipped polygon and excluded area [S1]
+    return modified_sutherland_hodgman(poly_a, poly_b)
+
+def reconstruct_slice_in_coarser_bricks(odd_slice, neighbor):
+    # Interpolate/copy voxels from finer neighbor to coarser brick boundary [S1]
+    return interpolate_from_neighbor(odd_slice, neighbor)
+
+def is_boundary_polygon(poly):
+    # Check if polygon lies at volume edge with no adjacent clipping polygons [S1]
+    return poly.at_volume_boundary
+
+def create_slices_with_delta_0(bounds, delta_0):
+    # Generate slices at smallest sample distance within bounds [S1]
+    return generate_slices(bounds.min, bounds.max, delta_0)
+
+def sort_back_to_front(polygons):
+    # Sort polygons by depth from viewing plane [G]
+    return sorted(polygons, key=lambda p: p.depth, reverse=True)
+
+def initialize_frame_buffer():
+    return FrameBuffer()
+
+def set_color_table(level):
+    # Load corrected opacity LUT for level [S2]
+    load_lut(level)
+
+def rasterize_polygon(poly, frame_buffer):
+    # Rasterize polygon to frame buffer [G]
+    frame_buffer.draw(poly)
+```
 
 ## Operating characteristics
 
@@ -186,20 +195,20 @@ def render_brick_with_opacity_correction(brick, level, neighbors, view_matrix, p
 *   **Limitations:** Requires adjacent bricks to differ by at most one level; performance is sensitive to the number of color table switches; does not account for visual artifacts due to limited texture and frame buffer resolution [S1].
 
 ### When to Use
-*   Use when rendering hierarchical volume data with 3D textures where adjacent bricks have different resolutions (LOD).
-*   Use when visual artifacts at brick boundaries (light/dark bands) are unacceptable.
+*   Use when rendering hierarchical volume data with 3D textures where adjacent bricks have different resolutions (LOD) [S2].
+*   Use when visual artifacts at brick boundaries (light/dark bands) are unacceptable [S1].
 *   Do not use if adjacent bricks differ by more than one resolution level, as the slice alignment logic will fail [S1].
 
 ## Background
 
 ### Origin
-The method was introduced in the paper "Level-Of-Detail Volume Rendering via 3D Textures" by Weiler et al. (2000) [S1, S2]. It was developed to address artifacts caused by incorrect texture interpolation and opacity correction at brick boundaries in hierarchical volume rendering systems.
+The method was introduced in the paper "Level-Of-Detail Volume Rendering via 3D Textures" by Weiler et al. (2000) [S1, S2]. It was developed to address artifacts caused by incorrect texture interpolation and opacity correction at brick boundaries in hierarchical volume rendering systems [S1].
 
 ### History and Development
-The technique is an extension of standard 3D texture-based volume rendering [S2]. It builds upon the concept of level-wise texture merging, which reduces texture memory overhead by sharing textures among bricks [S1]. The polygon clipping approach was specifically designed to handle the geometric mismatches that arise when cutting planes at different resolutions intersect at brick boundaries.
+The technique is an extension of standard 3D texture-based volume rendering [S2]. It builds upon the concept of level-wise texture merging, which reduces texture memory overhead by sharing textures among bricks [S1]. The polygon clipping approach was specifically designed to handle the geometric mismatches that arise when cutting planes at different resolutions intersect at brick boundaries [S1].
 
 ### Usage
-The method is used in real-time volume rendering systems that employ hierarchical decompositions of volume data into bricks. It is particularly relevant for applications requiring interactive frame rates with large datasets, such as medical imaging or scientific visualization, where memory bandwidth and texture memory are limiting factors [S1].
+The method is used in real-time volume rendering systems that employ hierarchical decompositions of volume data into bricks [S2]. It is particularly relevant for applications requiring interactive frame rates with large datasets, such as medical imaging or scientific visualization, where memory bandwidth and texture memory are limiting factors [S1].
 
 ## Sources
 

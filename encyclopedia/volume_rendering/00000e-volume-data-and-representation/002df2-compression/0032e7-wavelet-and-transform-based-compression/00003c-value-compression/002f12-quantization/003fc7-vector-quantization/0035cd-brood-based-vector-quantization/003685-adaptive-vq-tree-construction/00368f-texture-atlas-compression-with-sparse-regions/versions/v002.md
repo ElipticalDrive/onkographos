@@ -1,0 +1,43 @@
+# Texture Atlas Compression with Sparse Regions
+
+Also called: Sparse VQ with Adaptive Tree Pruning
+
+## Overview
+A method to compress texture atlases containing unused space by ignoring undefined regions through adaptive pruning and sparse Vector Quantization (VQ) [S1, unofficial]. It sets itself apart from standard tree compression by modifying the tree structure to exclude empty areas and adapting the VQ codebook search to handle residual blocks with undefined data, preventing boundary artifacts [S1, unofficial].
+
+## How it works
+**Inputs:** A multi-chart texture atlas where charts are separated by unused (empty) regions [S1, unofficial].
+**Outputs:** A compressed tree structure and associated data [S1, unofficial].
+
+**Data Structures:**
+*   **Mipmap Tree ($T$):** A hierarchical tree representing the image at multiple resolutions. Unlike a standard complete tree, this tree is pruned; nodes covering empty regions are removed [S1, unofficial]. Consequently, the tree is no longer complete, and some residual blocks may contain undefined data values [S1, unofficial].
+
+**Formulas:** Not given in the sources.
+**Parameters:** Not given in the sources.
+
+**Steps:**
+1.  **Extrapolation:** Extrapolate data outside the chart boundaries using a pull-push step [S1, unofficial]. This creates a continuous image field for the purpose of mipmap generation, preventing discontinuities at chart edges [S1, unofficial].
+2.  **Mipmap Generation:** Compute the mipmap of desired values using the extrapolated image from Step 1 [S1, unofficial].
+3.  **Adaptive Pruning:** Remove from the mipmap tree $T$ all sub-trees covering empty regions [S1, unofficial].
+4.  **Sparse VQ Encoding:** Encode the remaining tree nodes using the modified VQ approach described in Section 5.2 of the source [S1, unofficial]. This modified VQ handles the fact that some residual blocks contain undefined data values, ensuring codebook quality is not impacted by the boundaries between defined and undefined areas [S1, unofficial].
+
+**Pitfalls:**
+*   The resulting tree is not complete, and some residual blocks contain undefined data values, which requires the specific modified VQ logic to avoid errors or artifacts [S1, unofficial].
+
+## Subtopics
+
+### Feature Texture Map Compression via BC4
+A variant that applies compression principles to feature texture maps for neural rendering [S2]. Prior to rasterization, the mesh is sampled to obtain 8-channel feature vectors [S2]. These, along with opacity $\alpha$, are processed to generate nine single-channel texture maps compressed using BC4 [S2]. It employs a locality strategy: information from nearby regions is collectively inferred and stored, allowing direct access without re-inference when traversing those regions again [S2]. This reduces GPU memory consumption by 2/3 compared to original texture maps without significantly compromising image quality [S2].
+
+## Operating characteristics
+*   **Performance:** The method achieves high visual quality with few color quantization artifacts, even at extreme exposure levels [S1, unofficial].
+*   **Metrics:** In the source example, a 644×874 atlas achieved 2.05 bits per pixel (bpp) with a PSNR of 49.6 dB [S1, unofficial].
+*   **Strengths:** Effectively handles multi-chart atlases with large unused spaces and avoids boundary artifacts between charts [S1, unofficial].
+*   **Limitations:** The source notes that tree compression is most effective on images with large smooth areas [S1, unofficial].
+
+## Background
+Introduced in a paper on compressed random-access trees for spatially coherent data [S1, unofficial]. It addresses the inefficiency of standard compression methods when applied to texture atlases, which inherently contain significant unused space between charts [S1, unofficial].
+
+## Sources
+[S1] Compressed Random-Access Trees for Spatially Coherent Data, https://doi.org/10.2312/egwr/egsr07/339-349, fetched 2026-10-26 (unofficial)
+[S2] UE4-NeRF: Neural Radiance Field for Real-Time Rendering of Large-Scale Scene, https://doi.org/10.48550/arXiv.2310.13263, fetched 2026-10-29

@@ -1,71 +1,86 @@
 # Voxel Prior Loss
 
-
 ## Overview
-Voxel Prior Loss is a regularization term for 3D Gaussian Splatting that aligns the learned Gaussian primitives with a precomputed occupancy grid [S1, unofficial]. It solves the problem of "ghosting" or floating artifacts in empty space and ensures Gaussians in occupied regions have appropriate scale and opacity [S1, unofficial]. It sets itself apart from standard photometric losses by explicitly enforcing geometric priors derived from voxel occupancy, suppressing Gaussians in empty voxels and encouraging dense, correctly scaled Gaussians in occupied ones [S1, unofficial].
+Voxel Prior Loss is a regularization term for 3D Gaussian Splatting that aligns learned Gaussian primitives with a precomputed voxel grid occupancy [S1, unofficial]. It solves the problem of floating artifacts in empty space and ensures Gaussians in occupied regions maintain appropriate scale and opacity [S1, unofficial]. It sets itself apart from standard photometric losses by explicitly enforcing geometric priors derived from voxel occupancy, suppressing Gaussians in empty voxels and encouraging dense, correctly scaled Gaussians in occupied ones [S1, unofficial].
 
 ## How it works
 **Inputs:**
 - `gaussians`: Object containing attributes for $N$ Gaussians.
-  - `position`: Tensor of shape $(N, 3)$, world coordinates.
-  - `opacity`: Tensor of shape $(N,)$, scalar opacity values.
-  - `scale`: Tensor of shape $(N, 3)$, scale factors along principal axes.
-- `voxel_grid`: 3D occupancy grid of dimensions `grid_size` $(D, H, W)$, flattened to 1D for indexing. Values are binary or boolean (occupied vs. empty).
-- `voxel_centers`: Tensor of shape $(D \times H \times W, 3)$, world coordinates of voxel centers.
-- `grid_size`: Tuple $(D, H, W)$ representing the dimensions of the voxel grid.
-- `voxel_size`: Scalar, the physical size of a single voxel edge.
-- `penalty_weight`: Float, weight for empty voxel opacity suppression. Default: $1.0$ [S1, unofficial].
-- `pos_weight`: Float, weight for empty voxel position penalty. Default: $0.2$ [S1, unofficial].
-- `scale_weight`: Float, weight for occupied voxel scale constraint. Default: $0.3$ [S1, unofficial].
-- `encourage_weight`: Float, weight for occupied voxel opacity encouragement. Default: $0.5$ [S1, unofficial].
-- `eps`: Small float for numerical stability in normalization. Default: $1e-8$ [G].
+  - `position`: Tensor of shape $(N, 3)$, world coordinates [S1, unofficial].
+  - `opacity`: Tensor of shape $(N,)$, scalar opacity values [S1, unofficial].
+  - `scale`: Tensor of shape $(N, 3)$, scale factors along principal axes [S1, unofficial].
+  - `voxel_indices`: Tensor of shape $(N, 3)$, integer voxel coordinates $(d, h, w)$ for each Gaussian [S1, unofficial].
+- `voxel_grid`: 3D occupancy grid of dimensions `grid_size` $(D, H, W)$, flattened to 1D for indexing [S1, unofficial]. Values are binary or boolean (occupied vs. empty) [S1, unofficial].
+- `voxel_centers`: Tensor of shape $(D \times H \times W, 3)$, world coordinates of voxel centers [S1, unofficial].
+- `grid_size`: Tuple $(D, H, W)$ representing the dimensions of the voxel grid [S1, unofficial].
+- `voxel_size`: Scalar, the physical size of a single voxel edge [S1, unofficial].
+- `penalty_weight`: Float, weight for empty voxel opacity suppression. Default value: $1.0$ [S1, unofficial].
+- `pos_weight`: Float, weight for empty voxel position penalty. Default value: $0.2$ [S1, unofficial].
+- `scale_weight`: Float, weight for occupied voxel scale constraint. Default value: $0.3$ [S1, unofficial].
+- `encourage_weight`: Float, weight for occupied voxel opacity encouragement. Default value: $0.5$ [S1, unofficial].
+- `eps`: Small float for numerical stability in normalization. Default value: $1e-8$ [G].
 
 **Outputs:**
-- `total_loss`: Scalar, the computed regularization loss.
+- `total_loss`: Scalar, the computed regularization loss [S1, unofficial].
 
 **Data Structures:**
-- `flat_voxel_grid`: 1D tensor of shape $(D \times H \times W)$, containing occupancy status (1 if occupied, 0 if empty).
-- `flat_indices`: 1D tensor of shape $(N)$, mapping each Gaussian to its corresponding voxel index in the flattened grid.
+- `flat_voxel_grid`: 1D tensor of shape $(D \times H \times W)$, containing occupancy status (1 if occupied, 0 if empty) [S1, unofficial].
+- `flat_indices`: 1D tensor of shape $(N)$, mapping each Gaussian to its corresponding voxel index in the flattened grid [S1, unofficial].
 
 **Steps:**
 1. **Map Gaussians to Voxels:**
-   Convert the 3D voxel indices of each Gaussian into a linear index for the flattened grid.
+   Convert the 3D voxel indices of each Gaussian into a linear index for the flattened grid [S1, unofficial].
    $$flat\_indices = indices[:,0] \times (grid\_size[1] \times grid\_size[2]) + indices[:,1] \times grid\_size[2] + indices[:,2]$$
-   where $indices$ is a tensor of shape $(N, 3)$ containing the voxel coordinates $(d, h, w)$ for each Gaussian.
+   where $indices$ is a tensor of shape $(N, 3)$ containing the voxel coordinates $(d, h, w)$ for each Gaussian [S1, unofficial].
 
 2. **Retrieve Voxel Properties:**
-   - Get occupancy status: $is\_occupied = flat\_voxel\_grid[flat\_indices]$.
-   - Get voxel center coordinates: $voxel\_center = voxel\_centers.view(-1, 3)[flat\_indices]$.
+   - Get occupancy status: $is\_occupied = flat\_voxel\_grid[flat\_indices]$ [S1, unofficial].
+   - Get voxel center coordinates: $voxel\_center = voxel\_centers.view(-1, 3)[flat\_indices]$ [S1, unofficial].
 
 3. **Compute Empty Voxel Penalty (Opacity):**
-   Identify Gaussians in empty voxels: $empty\_mask = \neg is\_occupied$.
+   Identify Gaussians in empty voxels: $empty\_mask = \neg is\_occupied$ [S1, unofficial].
    Calculate the penalty for non-zero opacity in empty space:
-   $$penalty\_opacity = penalty\_weight \times \sum_{i \in empty\_mask} opacity[i]$$
+   $$penalty\_opacity = penalty\_weight \times \sum_{i \in empty\_mask} opacity[i]$$ [S1, unofficial].
 
 4. **Compute Empty Voxel Position Penalty:**
-   Calculate an exponential distance penalty for Gaussians located in empty voxels, encouraging them to move closer to the voxel center (or vanish):
-   $$penalty\_position = pos\_weight \times \sum_{i \in empty\_mask} \exp(-5 \times \|position[i] - voxel\_center[i]\|)$$
-   where $\|\cdot\|$ denotes the L2 norm.
+   Calculate an exponential distance penalty for Gaussians located in empty voxels:
+   $$penalty\_position = pos\_weight \times \sum_{i \in empty\_mask} \exp(-5 \times \|position[i]\|)$$ [S1, unofficial].
+   where $\|\cdot\|$ denotes the L2 norm [S1, unofficial].
 
 5. **Compute Occupied Voxel Scale Loss:**
-   Identify Gaussians in occupied voxels: $occupied\_mask = is\_occupied$.
+   Identify Gaussians in occupied voxels: $occupied\_mask = is\_occupied$ [S1, unofficial].
    Penalize Gaussians whose scale exceeds the voxel size, clamping negative differences to zero:
-   $$scale\_loss = scale\_weight \times \sum_{i \in occupied\_mask} \max(0, scale[i] - voxel\_size)$$
-   Note: $scale[i]$ is typically treated as a scalar magnitude or the maximum axis scale in this context, or the formula implies element-wise comparison if `voxel_size` is broadcastable. Based on the source, it sums the clamped difference.
+   $$scale\_loss = scale\_weight \times \sum_{i \in occupied\_mask} \max(0, scale[i] - voxel\_size)$$ [S1, unofficial].
+   The implementation sums over all elements of the clamped difference [S1, unofficial].
 
 6. **Compute Occupied Voxel Opacity Encouragement:**
-   Encourage Gaussians in occupied voxels to have sufficient opacity (specifically $> 0.1$). Penalize those with opacity below this threshold:
-   $$opacity\_loss = encourage\_weight \times \sum_{i \in occupied\_mask} \max(0, 0.1 - opacity[i])$$
+   Encourage Gaussians in occupied voxels to have sufficient opacity (specifically $> 0.1$) [S1, unofficial].
+   Penalize those with opacity below this threshold:
+   $$opacity\_loss = encourage\_weight \times \sum_{i \in occupied\_mask} \max(0, 0.1 - opacity[i])$$ [S1, unofficial].
 
 7. **Normalize and Return:**
    Sum all components and normalize by the number of Gaussians:
-   $$total\_loss = \frac{penalty\_opacity + penalty\_position + scale\_loss + opacity\_loss}{N + eps}$$
+   $$total\_loss = \frac{penalty\_opacity + penalty\_position + scale\_loss + opacity\_loss}{N + eps}$$ [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+def norm(v):
+    return math.sqrt(sum(x**2 for x in v))
+
+def exp(x):
+    return math.exp(x)
+
+def clamp(x, min_val):
+    return max(min_val, x)
+
+def relu(x):
+    return max(0.0, x)
+
 def compute_voxel_prior_loss(gaussians, voxel_grid, voxel_centers, grid_size, voxel_size,
                              penalty_weight=1.0, pos_weight=0.2, scale_weight=0.3,
                              encourage_weight=0.5, eps=1e-8):
@@ -73,9 +88,9 @@ def compute_voxel_prior_loss(gaussians, voxel_grid, voxel_centers, grid_size, vo
     Computes the Voxel Prior Loss for 3D Gaussians.
     
     Args:
-        gaussians: Object with attributes .position (N,3), .opacity (N,), .scale (N,3)
-        voxel_grid: 1D tensor (D*H*W,) of occupancy (1=occupied, 0=empty)
-        voxel_centers: Tensor (D*H*W, 3) of voxel center coordinates
+        gaussians: Object with attributes .position (N,3), .opacity (N,), .scale (N,3), .voxel_indices (N,3)
+        voxel_grid: 1D list/tensor (D*H*W,) of occupancy (1=occupied, 0=empty)
+        voxel_centers: List/tensor (D*H*W, 3) of voxel center coordinates
         grid_size: Tuple (D, H, W)
         voxel_size: Scalar float, edge length of a voxel
         penalty_weight: Weight for empty voxel opacity penalty
@@ -85,24 +100,16 @@ def compute_voxel_prior_loss(gaussians, voxel_grid, voxel_centers, grid_size, vo
         eps: Small constant for numerical stability
         
     Returns:
-        total_loss: Scalar tensor
+        total_loss: Scalar float
     """
     # 1. Map Gaussians to Voxel Indices
-    # Assuming gaussians has a .voxel_indices attribute of shape (N, 3)
-    # If not, this step requires a separate lookup from position to voxel grid
     indices = gaussians.voxel_indices  # Shape (N, 3)
-    
-    # Linear index calculation
-    # flat_indices = indices[:,0] * (grid_size[1] * grid_size[2]) + indices[:,1] * grid_size[2] + indices[:,2]
-    # Using PyTorch-like operations for clarity
     D, H, W = grid_size
-    flat_indices = (indices[:, 0] * (H * W) + 
-                    indices[:, 1] * W + 
-                    indices[:, 2])
+    flat_indices = [int(idx[0] * (H * W) + idx[1] * W + idx[2]) for idx in indices]
     
     # 2. Retrieve Voxel Properties
-    is_occupied = voxel_grid[flat_indices]  # Shape (N,)
-    voxel_centers_flat = voxel_centers.view(-1, 3)[flat_indices]  # Shape (N, 3)
+    is_occupied = [bool(voxel_grid[i]) for i in flat_indices]
+    voxel_centers_flat = [voxel_centers[i] for i in flat_indices]
     
     # Extract Gaussian attributes
     opacity = gaussians.opacity  # Shape (N,)
@@ -110,64 +117,50 @@ def compute_voxel_prior_loss(gaussians, voxel_grid, voxel_centers, grid_size, vo
     scale = gaussians.scale  # Shape (N, 3)
     
     # Masks
-    empty_mask = ~is_occupied.bool()
-    occupied_mask = is_occupied.bool()
+    empty_mask = [not occ for occ in is_occupied]
+    occupied_mask = [occ for occ in is_occupied]
     
     # 3. Empty Voxel Opacity Penalty
-    # Sum of opacity for Gaussians in empty voxels
-    penalty_opacity = penalty_weight * opacity[empty_mask].sum()
+    penalty_opacity = penalty_weight * sum(opacity[i] for i in range(len(opacity)) if empty_mask[i])
     
     # 4. Empty Voxel Position Penalty
-    # Exponential distance penalty
-    # norm(position[empty_mask] - voxel_centers_flat[empty_mask], dim=1)
-    empty_positions = position[empty_mask]
-    empty_centers = voxel_centers_flat[empty_mask]
-    dists_empty = torch.norm(empty_positions - empty_centers, dim=1)
-    penalty_position = pos_weight * torch.exp(-5 * dists_empty).sum()
+    penalty_position = pos_weight * sum(exp(-5 * norm(position[i])) for i in range(len(position)) if empty_mask[i])
     
     # 5. Occupied Voxel Scale Loss
-    # Clamp(scale - voxel_size, min=0)
-    # Note: scale is (N,3). The source formula implies a scalar comparison or reduction.
-    # Assuming we take the max scale or mean scale, or the source implies element-wise.
-    # Given "sum of clamp(scale[occupied_mask] - voxel_size)", and scale is 3D,
-    # we likely sum over all elements or take a representative scalar.
-    # Standard interpretation: compare the magnitude or max axis.
-    # However, strict reading of "scale[occupied_mask] - voxel_size" where scale is (N,3)
-    # suggests broadcasting. We will sum the clamped values over all dimensions.
-    occupied_scales = scale[occupied_mask]  # Shape (K, 3)
-    scale_diff = occupied_scales - voxel_size
-    clamped_scale = torch.clamp(scale_diff, min=0.0)
-    scale_loss = scale_weight * clamped_scale.sum()
+    scale_loss = scale_weight * sum(clamp(scale[i][j] - voxel_size, 0.0) 
+                                    for i in range(len(scale)) if occupied_mask[i] 
+                                    for j in range(3))
     
     # 6. Occupied Voxel Opacity Encouragement
-    # ReLU(0.1 - opacity)
-    occupied_opacity = opacity[occupied_mask]
-    opacity_diff = 0.1 - occupied_opacity
-    clamped_opacity = torch.clamp(opacity_diff, min=0.0)
-    opacity_loss = encourage_weight * clamped_opacity.sum()
+    opacity_loss = encourage_weight * sum(relu(0.1 - opacity[i]) for i in range(len(opacity)) if occupied_mask[i])
     
     # 7. Normalize
-    N = opacity.shape[0]
+    N = len(opacity)
     total_loss = (penalty_opacity + penalty_position + scale_loss + opacity_loss) / (N + eps)
     
     return total_loss
 ```
 
 **Edge Cases and Pitfalls:**
-- **Out-of-bounds Indices:** If a Gaussian's position falls outside the voxel grid bounds, `flat_indices` may be invalid. Ensure `voxel_indices` are clamped or Gaussians outside the grid are excluded from the loss [G].
-- **Scale Interpretation:** The source formula `clamp(scale[occupied_mask] - voxel_size, min=0)` is ambiguous if `scale` is a vector $(N,3)$. The implementation sums over all elements. If the intention was to constrain the volume or max axis, the logic should be adjusted accordingly [S1, unofficial].
-- **Empty Mask Logic:** Ensure `is_occupied` is boolean or castable to boolean. If the grid uses 0/1 integers, `~is_occupied` might invert bits incorrectly if not cast to bool first [G].
+- **Out-of-bounds Indices:** If a Gaussian's position falls outside the voxel grid bounds, `flat_indices` may be invalid [G]. Ensure `voxel_indices` are clamped or Gaussians outside the grid are excluded from the loss [G].
+- **Scale Interpretation:** The source formula `clamp(scale[occupied_mask] - voxel_size, min=0)` is ambiguous if `scale` is a vector $(N,3)$ [S1, unofficial]. The implementation sums over all elements [S1, unofficial].
+- **Empty Mask Logic:** Ensure `is_occupied` is boolean or castable to boolean [G]. If the grid uses 0/1 integers, `~is_occupied` might invert bits incorrectly if not cast to bool first [G].
+
+## Subtopics
+
+### Voxel-Based Planar Distance Loss
+Regularizes visible 3D Gaussians by computing their perpendicular distance to voxel plane boundaries, weighting the distance by voxel complexity, and averaging over all voxels [S1, unofficial]. It filters visible Gaussians using a visibility filter, maps positions to voxel grid coordinates via floor division by 2.0, gathers Gaussians per voxel, computes distances as $|\mathbf{p}_i \cdot \mathbf{n}_v + d_v| / \|\mathbf{n}_v\|$, finds the minimum distance per Gaussian, weights by voxel complexity, and divides by the number of voxels [S1, unofficial]. The loss is defined as $L_{voxel} = \frac{1}{V} \sum_{v \in V} \frac{1}{M_v} \sum_{i=1}^{M_v} c_{v, i} \cdot \min_{j} \frac{|\mathbf{p}_i \cdot \mathbf{n}_v + d_v|}{\|\mathbf{n}_v\|}$, where $V$ is the number of voxels, $M_v$ is Gaussians in voxel $v$, $\mathbf{p}_i$ is Gaussian position, $\mathbf{n}_v$ is voxel normal, $d_v$ is voxel plane offset, and $c_{v, i}$ is voxel complexity [S1, unofficial]. It uses `VOXEL_LOC` to convert voxel grid keys to spatial position identifiers for indexing [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$, where $N$ is the number of Gaussians. The operations are vectorized tensor lookups and reductions.
-- **Memory Complexity:** $O(N)$ for intermediate tensors (masks, distances).
-- **Strengths:** Effectively reduces floating artifacts in empty space and prevents Gaussians from becoming too large in occupied regions, leading to cleaner geometry [S1, unofficial].
-- **Limitations:** Depends heavily on the quality of the precomputed occupancy grid. If the grid is noisy or incomplete, the loss may suppress valid Gaussians or fail to constrain invalid ones [S1, unofficial].
-- **When to Use:** When training 3D Gaussian Splatting with a known scene bounding box and a reliable occupancy prior (e.g., from SfM points or a coarse mesh) [S1, unofficial].
-- **When Not to Use:** In scenes with no clear empty space definition or where the occupancy grid is unavailable [S1, unofficial].
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Not given in the sources.
+- **Limitations:** Not given in the sources.
+- **When to Use:** Not given in the sources.
+- **When Not to Use:** Not given in the sources.
 
 ## Background
-Voxel Prior Loss was introduced in the context of 3D Gaussian Splatting enhancements to improve geometric consistency [S1, unofficial]. It builds on the idea of using voxel grids to accelerate rendering and regularization [S1, unofficial]. The method is part of the AVM-GS (Adaptive Voxel Merging Gaussian Splatting) or similar variants that integrate voxel-based priors into the training loop [S1, unofficial].
+Voxel Prior Loss is a regularization term introduced within 3D Gaussian Splatting training pipelines to enforce geometric consistency via voxel occupancy priors [S1, unofficial]. It operates by constraining Gaussians to align with precomputed voxel grids, suppressing empty space and fitting occupied geometry [S1, unofficial].
 
 ## Sources
 [S1] Yang-SyZng/AVM-GS, https://github.com/Yang-SyZng/AVM-GS, fetched 2026-10-27 (unofficial)

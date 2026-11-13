@@ -1,21 +1,21 @@
 # Gradient-Based Surface Shading
 
-Also called: Gradient Shading, Gradient-Based Shading (Levoy), Gradient-based volumetric shading, Grey-level gradient shading, local region based techniques
+Also called: Gradient-Based Shading (Levoy), Grey-level gradient shading, Gray-level Shading
 
 ## Overview
-Gradient-Based Surface Shading is a local illumination technique for volume rendering that approximates surface normals using the gradient of the scalar field to calculate diffuse, specular, and ambient lighting effects [S3]. Unlike standard emission/absorption models, it makes surface details more prominent by substituting the geometric surface normal used in polygonal graphics with the data gradient [S3]. It sets itself apart from siblings like [Gradient-based Pre-computed Shading](3159-gradient-based-pre-computed-shading.md) by typically computing gradients on-the-fly or trading memory for time via precomputation, whereas pre-computed variants focus on caching these values for specific optimization goals.
+Gradient-Based Surface Shading is a local illumination technique for volume rendering that approximates surface normals using the gradient of the scalar field to calculate diffuse, specular, and ambient lighting effects [S3]. Unlike standard emission/absorption models, it makes surface details more prominent by substituting the geometric surface normal used in polygonal graphics with the data gradient [S3]. It computes gradients locally from voxel values, optionally trading memory for time by precomputing and storing them [S4, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A scalar volume field $f(x)$, a transfer function $\tau(x)$ mapping intensity to color/opacity, and lighting parameters (light position/intensity, material coefficients).
-*   **Output:** The final color $C(x)$ for each voxel or sample point along a ray.
+*   **Input:** A scalar volume field $f(x)$, a transfer function $\tau(x)$ mapping intensity to color/opacity, and lighting parameters (light position/intensity, material coefficients) [S3][S5, unofficial].
+*   **Output:** The final color $C(x)$ and opacity for each voxel or sample point along a ray [S3][S5, unofficial].
 
 **Data Structures:**
-*   **Volume Data:** A 3D grid of scalar values $v_{i,j,k}$.
-*   **Gradient Volume (Optional):** If precomputed, a 3D grid of 3-component vectors $\nabla f$. For a $256 \times 256 \times 256$ dataset, storing both data and gradients requires >200 MB [S4, unofficial].
+*   **Volume Data:** A 3D grid of scalar values $v_{i,j,k}$ [S2, unofficial].
+*   **Gradient Volume (Optional):** If precomputed, a 3D grid of 3-component vectors $\nabla f$ [S4, unofficial]. For a $256 \times 256 \times 256$ dataset, storing both data and gradients requires >200 MB [S4, unofficial].
 
 **Gradient Computation:**
-The surface normal at a voxel is defined as the normalized gradient of the scalar field, which is perpendicular to the isosurface [S5, unofficial]. The gradient $\nabla f(x)$ is computed numerically using finite differences [S5, unofficial]. The most common scheme is central differencing [S2, unofficial][S5, unofficial].
+The surface normal at a voxel is defined as the normalized gradient of the scalar field, which is perpendicular to the isosurface [S5, unofficial]. The gradient $\nabla f(x)$ is computed numerically using finite differences [S5, unofficial]. Central differencing is a standard scheme for this computation [S2, unofficial][S5, unofficial].
 
 For a voxel at indices $(i, j, k)$ with value $v_{i,j,k}$, the gradient components are:
 $$ G_x = \frac{v_{i+1,j,k} - v_{i-1,j,k}}{2} $$
@@ -30,11 +30,11 @@ where $\omega_i$ is the incident light direction and $\omega_o$ is the viewing d
 
 1.  **Diffuse Reflection:**
     $$ L_{diff}(\tilde{x}, \omega_i) = L_l \cdot k_d \cdot \max(|\nabla \tau(f(\tilde{x}))| \cdot \omega_i, 0) $$
-    Here, $L_l$ is the initial light intensity, $k_d$ is the diffuse color coefficient, and $|\nabla \tau(f(\tilde{x}))|$ is the normalized gradient magnitude [S3]. Note: Some sources define the normal simply as $\nabla f$, while others incorporate the transfer function gradient $\nabla \tau$ [S3].
+    Here, $L_l$ is the initial light intensity, $k_d$ is the diffuse color coefficient, and $|\nabla \tau(f(\tilde{x}))|$ is the gradient magnitude [S3]. The term $\omega_i$ represents the dot product between the normal and light direction [G].
 
 2.  **Specular Reflection:**
     $$ L_{spec}(\tilde{x}, \omega_i, \omega_o) = L_l \cdot k_s \cdot \max(|\nabla \tau(f(\tilde{x}))| \cdot \omega_i \cdot \omega_o, 0)^\alpha $$
-    $k_s$ is the specular color coefficient, and $\alpha$ is the shininess exponent. Large $\alpha$ results in small, sharp highlights; smaller $\alpha$ results in bigger, smoother highlights [S3].
+    $k_s$ is the specular color coefficient, and $\alpha$ is the shininess exponent [S3]. Large $\alpha$ results in small, sharp highlights; smaller $\alpha$ results in bigger, smoother highlights [S3]. The term $\omega_i \cdot \omega_o$ represents the dot product between the normal and the half-vector [G].
 
 3.  **Ambient Reflection:**
     $$ L_{amb}(\tilde{x}) = L_l \cdot k_a $$
@@ -52,80 +52,62 @@ where $\omega_i$ is the incident light direction and $\omega_o$ is the viewing d
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_gradient(v, i, j, k, volume_shape):
-    """
-    Compute central difference gradient for voxel (i, j, k).
-    Handles boundary conditions by clamping indices.
-    """
-    # Helper to get voxel value with boundary clamping
-    def get_v(x, y, z):
-        x = max(0, min(x, volume_shape[0] - 1))
-        y = max(0, min(y, volume_shape[1] - 1))
-        z = max(0, min(z, volume_shape[2] - 1))
-        return v[x, y, z]
+import math
 
+def evaluate_transfer_function(intensity):
+    """Returns (color_rgb, opacity) for a given intensity. [G] Standard TF lookup."""
+    # Placeholder for actual transfer function evaluation
+    return (1.0, 1.0)
+
+def dot_product(v1, v2):
+    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+
+def normalize(v):
+    mag = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+    if mag < 1e-6:
+        return (0.0, 0.0, 1.0)
+    return (v[0]/mag, v[1]/mag, v[2]/mag)
+
+def compute_gradient(v, i, j, k, shape):
+    """Compute central difference gradient for voxel (i, j, k) with boundary clamping."""
+    def get_v(x, y, z):
+        x = max(0, min(x, shape[0] - 1))
+        y = max(0, min(y, shape[1] - 1))
+        z = max(0, min(z, shape[2] - 1))
+        return v[x, y, z]
+    
     gx = (get_v(i + 1, j, k) - get_v(i - 1, j, k)) / 2.0
     gy = (get_v(i, j + 1, k) - get_v(i, j - 1, k)) / 2.0
     gz = (get_v(i, j, k + 1) - get_v(i, j, k - 1)) / 2.0
     return (gx, gy, gz)
 
 def gradient_shading(v, i, j, k, light_dir, view_dir, params):
-    """
-    Compute shading for a single voxel using gradient-based surface shading.
-    """
+    """Compute shading for a single voxel using gradient-based surface shading."""
     # 1. Compute Gradient
     gx, gy, gz = compute_gradient(v, i, j, k, v.shape)
     
     # 2. Normalize Gradient to get Surface Normal
-    norm_mag = sqrt(gx**2 + gy**2 + gz**2)
-    if norm_mag < 1e-6:
-        # Fallback for homogeneous regions: use a default normal or zero
-        # [G] Using (0,0,1) as a safe default to avoid division by zero and 
-        # provide consistent shading in flat regions.
-        nx, ny, nz = 0.0, 0.0, 1.0
-        grad_mag = 0.0
-    else:
-        nx, ny, nz = gx / norm_mag, gy / norm_mag, gz / norm_mag
-        grad_mag = norm_mag
-
+    grad_mag = math.sqrt(gx**2 + gy**2 + gz**2)
+    normal = normalize((gx, gy, gz))
+    
     # 3. Retrieve Transfer Function Values
-    # [G] Assuming transfer function returns (color_r, color_g, color_b, opacity)
-    # based on intensity v[i,j,k].
     intensity = v[i, j, k]
-    color, opacity = transfer_function(intensity)
-
+    color, opacity = evaluate_transfer_function(intensity)
+    
     # 4. Compute Lighting Terms
-    # Diffuse
-    # max(dot(normal, light_dir), 0)
-    diff_dot = max(nx * light_dir.x + ny * light_dir.y + nz * light_dir.z, 0.0)
-    l_diff = params.L_l * params.k_d * diff_dot
-
-    # Specular
-    # Reflect vector R = 2 * dot(N, L) * N - L
-    # Or use Blinn-Phong Half Vector H = normalize(L + V)
-    # Using Blinn-Phong as per [S3]
-    half_vec = normalize(light_dir + view_dir)
-    spec_dot = max(nx * half_vec.x + ny * half_vec.y + nz * half_vec.z, 0.0)
-    l_spec = params.L_l * params.k_s * (spec_dot ** params.alpha)
-
-    # Ambient
+    # Diffuse: L_diff = L_l * k_d * max(grad_mag * dot(normal, light_dir), 0)
+    diff_dot = dot_product(normal, light_dir)
+    l_diff = params.L_l * params.k_d * max(grad_mag * diff_dot, 0.0)
+    
+    # Specular: L_spec = L_l * k_s * max(grad_mag * dot(normal, half_vec), 0)^alpha
+    half_vec = normalize((light_dir[0] + view_dir[0], light_dir[1] + view_dir[1], light_dir[2] + view_dir[2]))
+    spec_dot = dot_product(normal, half_vec)
+    l_spec = params.L_l * params.k_s * (max(grad_mag * spec_dot, 0.0) ** params.alpha)
+    
+    # Ambient: L_amb = L_l * k_a
     l_amb = params.L_l * params.k_a
-
-    # 5. Combine
-    # s(x) = tau(x) * (L_diff + L_spec + L_amb)
-    # Note: tau(x) here is the color/opacity from TF. 
-    # The intensity scaling by grad_mag is implicitly handled by the normal direction 
-    # in standard Blinn-Phong, but [S3] suggests using |grad| in the dot product 
-    # for diffuse/specular if not normalized. 
-    # Standard practice: Normalize normal, use dot products. 
-    # If using unnormalized gradient as normal (as implied by |grad| in [S3] formulas):
-    # L_diff = L_l * k_d * max(grad_mag * dot(normalized_grad, L), 0) -> This is equivalent to L_l * k_d * max(dot(grad, L), 0)
     
-    # Re-evaluating [S3] formulas: 
-    # L_diff = L_l * k_d * max(|grad| * omega_i, 0) where omega_i is likely the dot product?
-    # Actually, [S3] eq 7: L_diff = L_l * k_d * max(|grad| * omega_i, 0). 
-    # Context implies omega_i is the cosine of the angle (dot product).
-    
+    # 5. Combine: s(x) = tau(x) * (L_diff + L_spec + L_amb)
     final_color = color * (l_diff + l_spec + l_amb)
     
     return final_color, opacity
@@ -136,15 +118,15 @@ def gradient_shading(v, i, j, k, light_dir, view_dir, params):
 *   **Noise:** Gradient-based shading emphasizes noise in high-frequency data. It is not recommended for modalities with low Signal-to-Noise Ratio (SNR) such as MRI, 3D ultrasound, or seismic data [S3].
 *   **Clipping:** When using clipping geometry, the gradient along the clipping surface must be replaced with the clipping surface normal to avoid artifacts [S5, unofficial][S3].
 *   **Multivariate Fields:** The method is unsuitable for multivariate fields because the eigenvector corresponding to the largest eigenvalue represents only orientation, not absolute direction. The sign can flip in neighboring regions, causing interpolation artifacts [S6, book][S7].
-*   **Thin Objects:** The technique may fail to display thin objects or where grey-levels are inappropriate for locating the surface [S9].
+*   **Thin Objects:** The technique may fail to display thin objects or where grey-levels are inappropriate for locating the surface [S9, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per voxel for gradient computation and shading if precomputed; $O(N)$ for the volume, where $N$ is the number of voxels. On-the-fly computation adds a constant factor for finite differences.
-*   **Memory Complexity:** $O(N)$ for the volume data. If gradients are precomputed, an additional $3 \times N$ components are stored. For a $256^3$ dataset, this exceeds 200 MB [S4, unofficial].
+*   **Time Complexity:** $O(1)$ per voxel for gradient computation and shading if precomputed; $O(N)$ for the volume, where $N$ is the number of voxels [S4, unofficial]. On-the-fly computation adds a constant factor for finite differences [G].
+*   **Memory Complexity:** $O(N)$ for the volume data. If gradients are precomputed, an additional $3 \times N$ components are stored [S4, unofficial].
 *   **Performance:** Highly dependent on the SNR of the data. Precomputing gradients trades memory for rendering time [S4, unofficial].
 *   **Strengths:** Makes surface details prominent; computationally efficient for local illumination; easy to implement [S3].
 *   **Limitations:** No shadows or scattering (local model only); sensitive to noise; fails on homogeneous regions; unsuitable for multivariate data [S3][S6, book].
-*   **When to Use:** High-SNR scalar data (e.g., CT) where surface detail enhancement is desired.
+*   **When to Use:** High-SNR scalar data (e.g., CT) where surface detail enhancement is desired [S3][S6, book].
 *   **When Not to Use:** Low-SNR data (MRI, ultrasound), multivariate fields, or when global illumination effects (shadows) are required [S3][S6, book].
 
 ## Background
@@ -159,4 +141,4 @@ Gradient-based shading was published by Hohne and Bernstein in 1986, using gray-
 [S6] PDF 9 Multi-Dimensional Transfer Functions for Volume Rendering, https://people.cs.uchicago.edu/~glk/pubs/pdf/Kniss-MultidimensionalTransferFunctions-VH-2005.pdf, fetched 2026-10-27 (book)
 [S7] Multidimensional Transfer Functions for Interactive Volume ..., https://www.academia.edu/5403340/Multidimensional_Transfer_Functions_for_Interactive_Volume_Rendering, fetched 2026-11-01
 [S8] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
-[S9] A hardware architecture for video rate smooth shading of volume data, https://doi.org/10.1016/0097-8493(95)00048-8, fetched 2026-10-29
+[S9] A hardware architecture for video rate smooth shading of volume data, https://doi.org/10.1016/0097-8493(95)00048-8, fetched 2026-10-29 (unofficial)

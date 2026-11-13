@@ -2,174 +2,99 @@
 
 
 ## Overview
-`iso_categorical` is a volume rendering method for categorical label datasets that replaces fixed-step sampling with exact voxel traversal to eliminate sawtooth artifacts at grazing angles [S1, unofficial]. Unlike standard isosurface methods that rely on scalar field thresholds, this method tests discrete integer labels and stops at the first non-transparent voxel encountered along the ray [S1, unofficial]. It sets itself apart from its siblings by ensuring that every voxel the ray physically intersects is visited, making the result independent of the sampling step size and preventing rays from skipping thin voxel corners [S1, unofficial].
+`iso_categorical` is a volume rendering method designed for categorical label datasets (e.g., segmented anatomical structures) that replaces fixed-step sampling with exact voxel traversal to eliminate sawtooth artifacts at grazing angles [S1, unofficial]. It sets itself apart from its siblings by ensuring that every voxel intersected by a ray is visited, making the result independent of the sampling step size and preventing rays from missing thin structures or voxel corners between samples [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A 3D categorical label volume (integer grid), camera parameters (origin, direction), clipping planes, and a transparency mask for labels [S1, unofficial].
-- Output: A pixel color (from the hit label) and a depth value (in data coordinates) [S1, unofficial].
+- Input: A categorical volume dataset (integer labels), camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), and clipping planes.
+- Output: The color of the first non-transparent label encountered, and the depth of the entry point into that label's voxel.
 
 **Data Structures:**
-- Volume: A 3D array of integers representing labels [S1, unofficial].
-- Ray: Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [S1, unofficial].
-- Clipping Planes: A set of planes defining the visible volume boundaries [S1, unofficial].
+- The volume is stored as a 3D grid of integer labels.
+- Clipping planes are defined in world space.
 
 **Algorithm Steps:**
-1. **Ray Construction:** Construct the view ray for the current pixel from the camera center through the pixel center [S1, unofficial].
-2. **Initial Marching (Coarse):** March along the ray using a fixed step size (default `relative_step_size` = 0.8 voxels) to find the first sample point that is inside the volume bounds and not clipped by the near/far clipping planes [S1, unofficial]. If no such point is found, the pixel is background [S1, unofficial].
-3. **Exact Voxel Traversal (Fine):** From the first valid sample point, perform an exact voxel traversal using the Amanatides & Woo algorithm [S1, unofficial]. This algorithm walks through every voxel the ray passes through in order, ensuring no voxel is skipped, even if the ray only clips a corner or edge [S1, unofficial].
-4. **Clipping Evaluation:** For each voxel visited, evaluate the entry and exit points of the ray relative to any active clipping planes [S1, unofficial]. If the ray segment within the voxel is entirely outside the clipping volume, skip it [S1, unofficial].
-5. **Label Test:** For each valid voxel segment, read the label value [S1, unofficial]. If the label is non-transparent (and not background/empty), this is the hit voxel [S1, unofficial].
-6. **Ray Shortening (Boundary Guard):** To prevent rounding errors from reading neighboring voxels when a clipping plane starts exactly on a voxel boundary, shorten the ray segment by a tiny margin $\epsilon$ at both the entry and exit points of the voxel [S1, unofficial].
-7. **Depth Calculation:** Set the pixel's depth to the point where the ray *enters* the hit voxel, expressed in data coordinates (voxel indices) [S1, unofficial]. This avoids the half-voxel offset error present in older implementations where depth was calculated as `iloc * u_shape` [S1, unofficial].
-8. **Shading:** Compute the color based on the hit label [S1, unofficial]. The specific shading model (e.g., flat, gradient) depends on the rendering mode (see `translucent_categorical`) [S1, unofficial].
-9. **Termination:** Stop traversal for this pixel [S1, unofficial]. Do not process voxels behind the hit surface [S1, unofficial].
+1. **Ray Definition:** Define the view ray $r(t) = \mathbf{o} + t\mathbf{d}$ for the current pixel.
+2. **Initial Traversal:** March along the ray using a fixed step size (default `relative_step_size` = 0.8 voxel) until the first sample point that is not clipped by the viewing frustum or clipping planes is found [S1, unofficial].
+3. **Exact Voxel Traversal:** From the first valid sample point, perform an exact voxel traversal using the Amanatides & Woo algorithm [S1, unofficial]. This algorithm walks through every voxel the ray passes through in order, ensuring no voxel is skipped regardless of the step size [S1, unofficial].
+4. **Shortening Ray:** Shorten the ray segment by a tiny margin at both ends to prevent rounding errors from reading neighboring voxels when a clipping plane starts exactly on a voxel boundary [S1, unofficial].
+5. **Label Detection:** During traversal, check each voxel for a non-transparent label. Stop at the first voxel containing a non-transparent label [S1, unofficial].
+6. **Clipping Evaluation:** Evaluate clipping planes at the exact entry and exit points of each voxel to ensure cut surfaces remain in their correct positions [S1, unofficial].
+7. **Depth Calculation:** Set the pixel's depth to the point where the ray enters the hit voxel, expressed in data coordinates. This avoids the previous error where depth was shifted by half a voxel along each axis, causing incorrect occlusion between layers with different scales [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def iso_categorical_render(ray_origin, ray_direction, volume_shape, clipping_planes, epsilon=1e-6):
-    """
-    Renders a single pixel using iso_categorical method.
-    Returns (color, depth).
-    """
-    # Step 2: Initial coarse march to find first unclipped sample
+def render_iso_categorical(ray_origin, ray_direction, volume, clipping_planes, step_size=0.8):
+    # 1. Initial march to find first unclipped sample
     t = 0.0
-    step_size = 0.8
-    while t < 1000.0:
-        pos = ray_origin + ray_direction * t
-        if not (0 <= pos[0] < volume_shape[0] and 0 <= pos[1] < volume_shape[1] and 0 <= pos[2] < volume_shape[2]):
-            return (0, 0, 0), 0.0
-        if any(plane_distance(pos, plane) < 0 for plane in clipping_planes):
+    while t < volume.max_depth:
+        pos = ray_origin + t * ray_direction
+        if is_clipped(pos, clipping_planes):
             t += step_size
             continue
         break
-    else:
-        return (0, 0, 0), 0.0
-
-    # Step 3: Amanatides & Woo traversal initialization
-    current_voxel = [int(math.floor(p)) for p in pos]
-    t_max = [0.0, 0.0, 0.0]
-    t_delta = [0.0, 0.0, 0.0]
-    step = [0, 0, 0]
-
-    for i in range(3):
-        if ray_direction[i] > 0:
-            step[i] = 1
-            t_max[i] = (current_voxel[i] + 1.0 - pos[i]) / ray_direction[i]
-        elif ray_direction[i] < 0:
-            step[i] = -1
-            t_max[i] = (current_voxel[i] - pos[i]) / ray_direction[i]
-        else:
-            step[i] = 0
-            t_max[i] = float('inf')
-        t_delta[i] = 1.0 / abs(ray_direction[i]) if ray_direction[i] != 0 else float('inf')
-
-    # Step 3: Exact voxel traversal
-    while 0 <= current_voxel[0] < volume_shape[0] and 0 <= current_voxel[1] < volume_shape[1] and 0 <= current_voxel[2] < volume_shape[2]:
-        # Find next boundary
-        if t_max[0] < t_max[1]:
-            if t_max[0] < t_max[2]:
-                t_hit = t_max[0]
-                axis = 0
-            else:
-                t_hit = t_max[2]
-                axis = 2
-        else:
-            if t_max[1] < t_max[2]:
-                t_hit = t_max[1]
-                axis = 1
-            else:
-                t_hit = t_max[2]
-                axis = 2
-
-        # Step 4 & 6: Clipping and Ray Shortening
-        t_entry = t
-        t_exit = t_hit
-        t_entry += epsilon
-        t_exit -= epsilon
-
-        if t_entry >= t_exit:
-            t = t_hit
-            current_voxel[axis] += step[axis]
-            t_max[axis] += t_delta[axis]
-            continue
-
-        hit_pos_entry = ray_origin + ray_direction * t_entry
-        hit_pos_exit = ray_origin + ray_direction * t_exit
-        if any(plane_distance(hit_pos_entry, plane) < 0 or plane_distance(hit_pos_exit, plane) < 0 for plane in clipping_planes):
-            t = t_hit
-            current_voxel[axis] += step[axis]
-            t_max[axis] += t_delta[axis]
-            continue
-
-        # Step 5: Label Test
-        label = volume[current_voxel[0], current_voxel[1], current_voxel[2]]
-        if label != 0:
-            # Step 7: Depth Calculation
-            depth = current_voxel
-            # Step 8: Shading
-            color = get_label_color(label)
-            return color, depth
-
-        t = t_hit
-        current_voxel[axis] += step[axis]
-        t_max[axis] += t_delta[axis]
-
-    return (0, 0, 0), 0.0
-
-def plane_distance(point, plane):
-    """Returns signed distance from point to plane (ax+by+cz+d)."""
-    return plane[0]*point[0] + plane[1]*point[1] + plane[2]*point[2] + plane[3]
-
-def get_label_color(label):
-    """Returns RGB color for a categorical label."""
-    return (label % 256, (label >> 8) % 256, (label >> 16) % 256)
+    
+    # 2. Exact voxel traversal (Amanatides & Woo)
+    # Shorten ray ends to avoid boundary rounding errors
+    t_start = t + epsilon
+    t_end = volume.max_depth - epsilon
+    
+    # Initialize traversal state for Amanatides & Woo
+    voxel = get_voxel_index(pos)
+    t_max_x, t_max_y, t_max_z = compute_t_max(voxel, ray_direction)
+    t_delta_x, t_delta_y, t_delta_z = compute_t_delta(voxel, ray_direction)
+    
+    while t < t_end:
+        # Check current voxel for non-transparent label
+        label = volume.get_label(voxel)
+        if label is not transparent:
+            # 3. Evaluate clipping planes at entry point
+            entry_point = ray_origin + t * ray_direction
+            if is_inside_clipping_planes(entry_point, clipping_planes):
+                # 4. Set depth to entry point in data coordinates
+                depth = voxel_to_data_coords(voxel)
+                return get_label_color(label), depth
+        
+        # Advance to next voxel
+        t, voxel = advance_amanatides_woo(
+            t, voxel, 
+            t_max_x, t_max_y, t_max_z, 
+            t_delta_x, t_delta_y, t_delta_z
+        )
+    
+    return background_color, None
 ```
 
 **Parameters:**
-- `relative_step_size`: Default 0.8 voxels. Used only for the initial coarse march to find the first valid sample. The final result is independent of this value [S1, unofficial].
-- `epsilon`: Tiny margin for ray shortening. Value not specified in sources [G].
+- `relative_step_size`: Default 0.8 voxel. Used only for the initial march to find the first unclipped sample; the final result is independent of this value [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Sawtooth Edges:** In the old fixed-step method, rays clipping voxel corners between samples were missed, causing shifting sawtooth artifacts at grazing angles [S1, unofficial]. This is eliminated by visiting every voxel [S1, unofficial].
-- **Depth Offset Error:** The old method shifted depth by half a voxel along each axis, causing incorrect occlusion between layers with different scales [S1, unofficial]. The new method uses the voxel entry point in data coordinates, fixing this [S1, unofficial].
-- **Clipping Plane Boundaries:** Without ray shortening, rounding errors could cause the shader to read neighboring voxels when a clipping plane aligns exactly with a voxel boundary [S1, unofficial].
+- **Sawtooth Edges:** The old method caused sawtooth artifacts at grazing angles because rays clipping voxel corners between samples missed them. This new method eliminates this by visiting every voxel [S1, unofficial].
+- **Depth Offset Error:** The old method shifted depth by half a voxel, causing incorrect occlusion for layers with different scales. The new method uses the exact entry point in data coordinates [S1, unofficial].
+- **Rounding Errors:** Clipping planes exactly on voxel boundaries can cause reads from neighboring voxels. Shortening the ray by a tiny margin prevents this [S1, unofficial].
 
 ## Subtopics
 
 ### translucent_categorical
-A variant of `iso_categorical` used when `rendering='translucent'` [S1, unofficial]. It shares the exact voxel traversal logic and depth calculation of `iso_categorical` but differs in the shading model applied to the hit voxel [S1, unofficial]. It is chosen when semi-transparent rendering of categorical labels is required [S1, unofficial]. Performance impact is similar to `iso_categorical`, with frame time increases ranging from 1.1x to 1.8x depending on scene density and view angle [S1, unofficial].
+A variant of `iso_categorical` used when `rendering='translucent'`. It shares the exact voxel traversal logic and clipping evaluation but differs in how the hit voxel is shaded (translucent shading instead of opaque) [S1, unofficial]. Performance impact is similar to `iso_categorical`, with frame time increases ranging from 1.1x to 1.8x depending on scene density and view angle [S1, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-- Time: The traversal visits every voxel along the ray. This is more expensive per visit than the old fixed-step sampling, especially at oblique angles where a ray crosses more voxels than it took samples [S1, unofficial]. The cost is independent of `relative_step_size` [S1, unofficial].
-- Memory: No additional memory structures are required beyond the volume data and traversal state in the current implementation, though a prototype for skipping empty space uses a second texture for 8×8×8 block maps [S1, unofficial].
-
-**Measured Performance:**
-- Hardware: Apple M1 Max, canvas ~2000 × 1800 px [S1, unofficial].
-- Scene: 256³ volume, empty or with 300/1500 nuclei [S1, unofficial].
-- Results:
-    - Empty 256³, axis-aligned: 3.6 ms → 4.3 ms (1.2×) [S1, unofficial].
-    - Empty 256³, oblique: 3.7 ms → 6.3 ms (1.7×) [S1, unofficial].
-    - 300 nuclei, 256³, axis-aligned: 3.1 ms → 3.4 ms (1.1×) [S1, unofficial].
-    - 300 nuclei, 256³, oblique: 3.7 ms → 4.6 ms (1.3×) [S1, unofficial].
-    - 1500 nuclei, 512³, axis-aligned: 6.7 ms → 7.2 ms (1.1×) [S1, unofficial].
-    - 1500 nuclei, 512³, oblique: 8.1 ms → 9.8 ms (1.2×) [S1, unofficial].
-- Dense labels (rays stop immediately) render in under 1 ms [S1, unofficial].
-- Compared to the old method with a finer step (0.4), the new method is as fast or faster (0.66× to 1.0×) [S1, unofficial].
-
-**Strengths and Limitations:**
-- Strengths: Eliminates sawtooth artifacts; depth is accurate across different scales; result is independent of sampling step size [S1, unofficial].
-- Limitations: Higher computational cost per pixel due to voxel traversal, especially at oblique angles; performance degrades with sparse data where rays traverse many empty voxels [S1, unofficial].
-
-**When to Use:**
-- Use for categorical label rendering where visual accuracy at grazing angles is critical [S1, unofficial].
-- Do not use for scalar field isosurfaces (use `iso_scalar` variants) or when performance is paramount and artifacts are acceptable [S1, unofficial].
+- **Time Complexity:** The traversal visits every voxel along the ray. This costs more per visit than the old sample loop, especially at oblique angles where a ray crosses more voxels than it took samples [S1, unofficial].
+- **Memory Complexity:** No additional memory structures are required beyond the volume data and clipping plane definitions [S1, unofficial].
+- **Measured Performance:** On an M1 Max (canvas ~2000x1800 px, iso_categorical, default step 0.8):
+  - Empty 256³ volume: 3.6 ms (main) → 4.3 ms (new) in axis-aligned view; 3.7 ms → 6.3 ms in oblique view [S1, unofficial].
+  - 300 nuclei, 256³: 3.1 ms → 3.4 ms (axis-aligned); 3.7 ms → 4.6 ms (oblique) [S1, unofficial].
+  - 1500 nuclei, 512³: 6.7 ms → 7.2 ms (axis-aligned); 8.1 ms → 9.8 ms (oblique) [S1, unofficial].
+  - Dense labels (rays stop immediately): <1 ms [S1, unofficial].
+- **Strengths:** Eliminates sawtooth artifacts; depth is accurate across different scales; result is independent of `relative_step_size` [S1, unofficial].
+- **Limitations:** Higher computational cost per ray than fixed-step sampling, particularly at oblique angles [S1, unofficial].
+- **When to Use:** When rendering categorical label data (e.g., segmented anatomical features) where visual accuracy at grazing angles and correct depth ordering are critical [S1, unofficial].
+- **When Not to Use:** When performance is paramount and slight visual artifacts are acceptable, or when rendering non-categorical scalar data (use standard volume raycasting) [S1, unofficial].
 
 ## Background
-`iso_categorical` was developed as part of the napari project to fix rendering artifacts in 3D label layers [S1, unofficial]. It was implemented in a pull request to the napari repository (PR #9674) and subsequently ported to the vispy library (PR #2807) [S1, unofficial]. The method addresses limitations in the previous fixed-step sampling approach used in `iso_categorical` and `translucent_categorical` within `src/napari/_vispy/visuals/volume.py` [S1, unofficial].
+`iso_categorical` was developed as part of the napari project to fix rendering artifacts in 3D labels layers. It was introduced in a pull request to the napari repository (PR #9674) and subsequently applied to the vispy library (PR #2807) to provide a robust solution for categorical volume rendering [S1, unofficial]. The method addresses specific issues in the previous implementation where fixed-step sampling led to visual inaccuracies [S1, unofficial].
 
 ## Sources
 [S1] Fix sawtooth edges and depth of iso_categorical labels rendering, https://github.com/napari/napari/pull/9674, fetched 2026-10-25 (unofficial)

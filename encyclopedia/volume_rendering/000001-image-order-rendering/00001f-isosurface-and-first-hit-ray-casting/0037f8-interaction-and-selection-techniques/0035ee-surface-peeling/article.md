@@ -3,78 +3,90 @@
 Also called: Peeling Buffer
 
 ## Overview
-Surface peeling is an interaction technique that exposes internal structures of a volume by skipping the first $N$ ray-isosurface intersection points within specific regions of the image plane, known as peeling windows [S1, unofficial]. It differs from standard isosurface rendering by selectively discarding front-most layers to reveal deeper geometry, and from cropping by allowing non-rectangular, localized exposure of internal features rather than truncating the entire volume [S1, unofficial].
+Surface peeling is an interaction technique used to expose internal structures within a volume by selectively skipping the first $N$ ray-isosurface intersection points within specific regions of the image plane [S1, unofficial]. It differs from general isosurface rendering by introducing a per-pixel skip count that discards outer layers, allowing the viewer to see deeper geometric shells without modifying the underlying volume data or transfer functions [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A volume dataset, an isosurface value, a camera view, and a set of peeling windows defined on the image plane.
-*   **Output:** A rendered image where internal layers are visible within the peeling windows, while the rest of the image shows the standard outer surface.
+*   **Input:** A volume dataset, a defined isosurface value, a set of "peeling windows" (rectangular regions on the image plane), and a peeling depth parameter $N$ for each window.
+*   **Output:** A rendered image where isosurface layers within the peeling windows are hidden up to depth $N$, revealing subsequent layers.
 
 **Data Structures:**
-*   **Peeling Buffer:** An integer array initialized to 0. Each element corresponds to a pixel (or region) in the image plane. The value at each index represents the number of intersection layers to skip for that pixel [S1, unofficial].
+*   **Peeling Buffer:** An integer array with dimensions matching the image plane resolution ($W \times H$). Each element `buffer[x][y]` stores the number of intersection points to skip for the ray passing through pixel $(x, y)$ [S1, unofficial].
+    *   **Initialization:** All elements are initialized to 0 [S1, unofficial].
+    *   **Update:** For each pixel $(x, y)$ inside a defined peeling window, the value is incremented by the desired peeling depth $N$ (or by 1 for each layer peeled) [S1, unofficial].
 
 **Algorithm Steps:**
-1.  **Initialize Buffer:** Create an integer array `peeling_buffer` of size $W \times H$ (image width and height) and initialize all elements to 0 [S1, unofficial].
-2.  **Define Windows:** Identify the rectangular regions on the image plane designated as peeling windows [S1, unofficial].
-3.  **Set Peeling Depth:** For each pixel $(x, y)$ within a peeling window, increment `peeling_buffer[x][y]` by 1 for each layer intended to be exposed. If exposing the second layer, the value is 1; for the third, it is 2, etc. [S1, unofficial]. Pixels outside windows remain 0.
-4.  **Ray Casting:** For each pixel $(x, y)$ in the image plane, cast a ray through the volume [S1, unofficial].
-5.  **Intersection Counting:** Traverse the ray and count the number of intersections with the isosurface. Let $C$ be the current count of intersections found so far [S1, unofficial].
-6.  **Skip Logic:** For each intersection found:
-    *   If $C \le \text{peeling\_buffer}[x][y]$, skip this intersection (do not render or shade it) [S1, unofficial].
-    *   If $C > \text{peeling\_buffer}[x][y]$, render this intersection as the visible surface for this ray [S1, unofficial].
-    *   Increment $C$ after processing each intersection [S1, unofficial].
+1.  **Initialize Buffer:** Create an integer array `peeling_buffer` of size $W \times H$ and set all values to 0.
+2.  **Define Windows:** Identify the rectangular regions (peeling windows) on the image plane where peeling should occur.
+3.  **Set Peeling Values:** For each pixel $(x, y)$ within a peeling window, set `peeling_buffer[x][y] = N`, where $N$ is the number of layers to skip [S1, unofficial]. Pixels outside windows remain 0.
+4.  **Ray Casting Loop:** For each pixel $(x, y)$ in the image plane:
+    a.  Cast a ray through the volume.
+    b.  Perform ray traversal and compute all intersections with the isosurface along the ray.
+    c.  Maintain a counter `intersection_count`, initialized to 0.
+    d.  For each intersection point found:
+        i.  Increment `intersection_count`.
+        ii. Check if `intersection_count <= peeling_buffer[x][y]`.
+        iii. If true, skip rendering this intersection (discard its color/normal).
+        iv. If false, render this intersection (compute shading, color, and depth) and terminate the ray for this pixel (assuming first-hit shading for the visible surface) [S1, unofficial].
+5.  **Composite:** Accumulate the rendered color for each pixel into the final image buffer.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 # Initialization
-peeling_buffer = [0] * (width * height)
+peeling_buffer = IntegerArray(width, height, 0)
 
-# Define peeling windows (example: window at x=[100,200], y=[100,200])
-# Set peeling depth to 1 (skip 1 layer, show 2nd)
-for x in range(100, 201):
-    for y in range(100, 201):
-        peeling_buffer[x + y * width] = 1
+# Define peeling windows
+# Example: window covers pixels x in [x1, x2], y in [y1, y2]
+# N is the number of layers to skip
+for x in range(x1, x2 + 1):
+    for y in range(y1, y2 + 1):
+        peeling_buffer[x][y] = N
 
-# Rendering pass
-for y in range(height):
-    for x in range(width):
-        ray = generate_ray(x, y, camera)
-        intersections = find_isosurface_intersections(ray, volume)
-        intersection_count = 0
+# Rendering
+for x in range(width):
+    for y in range(height):
+        ray = cast_ray_through_pixel(x, y)
+        intersections = find_isosurface_intersections(ray)
         
-        for point in intersections:
+        intersection_count = 0
+        visible_color = transparent_color
+        
+        for intersection in intersections:
             intersection_count += 1
-            skip_threshold = peeling_buffer[x + y * width]
             
-            if intersection_count <= skip_threshold:
-                continue # Skip this intersection
+            # Skip if within the peeling depth
+            if intersection_count <= peeling_buffer[x][y]:
+                continue
             
-            # Render the first intersection that exceeds the threshold
-            color = shade(point, normal_at(point, volume))
-            set_pixel_color(x, y, color)
-            break # Stop after finding the visible surface
+            # Render the first visible intersection
+            color = compute_shading(intersection)
+            visible_color = color
+            break # Stop after finding the first visible surface layer
+            
+        image_buffer[x][y] = visible_color
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** Accurate ray-traversal and ray-isosurface intersection search are required to identify the exact intersecting voxel for each ray, which enables the correct counting logic [S1, unofficial].
-*   **Boundaries:** Peeling windows must be clearly defined to avoid ambiguity in which pixels are subject to peeling [S1, unofficial].
+*   **Boundary Conditions:** If a ray intersects fewer than $N$ times within a peeling window, no surface is rendered for that pixel, potentially resulting in a transparent or background-colored pixel. This must be handled to avoid visual artifacts if the interior structure is expected [S1, unofficial].
+*   **Precision:** Accurate ray-isosurface intersection calculation is critical. Inaccurate intersection positions may lead to incorrect voxel identification or skipped layers [S1, unofficial].
 
 ## Subtopics
 
-### Opacity Peeling
-A technique employed by Rezk-Salama and Kolb in the rendering pipeline to reveal interior hidden spatial structures [S2]. Unlike surface peeling which skips discrete intersection points, opacity peeling typically modulates the opacity or transmission along the ray to gradually reveal internal structures, often used in conjunction with other partitioning or importance-driven strategies [S2].
+### [Opacity Peeling](8428-opacity-peeling.md)
+Opacity peeling is an interaction technique used to reveal interior hidden spatial structures within a volume by selectively discarding or modifying the opacity of surface layers along the viewing ray. It serves as a specific implementation of surface peeling, differing from general surface peeling by focusing on the attenuation of ray-marched contributions rather than explicit geometric intersection skipping. While surface peeling explicitly skips the first $N$ intersection points, opacity peeling typically achieves the "peeling" effect by adjusting the transfer function or compositing weights to ignore the outermost layers, thereby exposing deeper structures without requiring explicit geometric primitives.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(W \cdot H \cdot L)$, where $W$ and $H$ are image dimensions and $L$ is the average number of isosurface intersections per ray. The peeling logic adds negligible overhead to the standard ray-casting loop [S1, unofficial].
-*   **Memory Complexity:** $O(W \cdot H)$ for the peeling buffer [S1, unofficial].
-*   **Strengths:** Allows for interactive exploration of internal structures without modifying the volume data or performing complex multi-pass rendering [S1, unofficial]. It is efficient as it can be implemented in a single pass [S2].
-*   **Limitations:** Only exposes layers sequentially; cannot reveal arbitrary internal volumes without multiple peeling operations or windows [S1, unofficial].
+*   **Time Complexity:** The core ray casting complexity remains $O(R \cdot M)$, where $R$ is the number of rays and $M$ is the average number of intersections per ray. The peeling logic adds $O(1)$ overhead per intersection for the counter check.
+*   **Memory Complexity:** Requires $O(W \cdot H)$ additional memory for the peeling buffer, where $W$ and $H$ are the image dimensions.
+*   **Strengths:** Provides intuitive, interactive exploration of internal volume structures without altering the volume data or transfer functions. It is computationally inexpensive compared to full volume clipping or boolean operations.
+*   **Limitations:** Only works for isosurface rendering (not direct volume rendering). It assumes distinct, separable isosurface layers. It does not provide depth information for the skipped layers, which may be required for some interaction tasks.
+*   **When to Use:** When users need to quickly inspect internal structures of a complex isosurface without the computational cost of full volume clipping or the complexity of transfer function editing.
+*   **When Not to Use:** When the volume does not have a clear isosurface structure, or when depth information for the hidden layers is required.
 
 ## Background
-Surface peeling was introduced as an interaction technique for efficient and effective volume visualization with enhanced isosurface rendering [S1, unofficial]. It builds on the principles of isosurface and first-hit ray casting, utilizing accurate intersection counts to manage visibility [S1, unofficial]. Opacity peeling was similarly employed by Rezk-Salama and Kolb to reveal hidden spatial structures [S2].
+Surface peeling was introduced as an efficient interaction technique for volume visualization, particularly in the context of isosurface rendering. It allows for the brief exploration of internal structures by cropping and peeling layers [S1, unofficial]. The technique relies on the accurate identification of intersecting voxels and the use of buffers to store interaction metadata, such as peeling counts [S1, unofficial].
 
 ## Sources
 [S1] Efficient and Effective Volume Visualization with Enhanced Isosurface Rendering, https://doi.org/10.48550/arxiv.1202.5360, fetched 2026-10-26 (unofficial)
-[S2] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27

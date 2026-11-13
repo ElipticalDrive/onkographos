@@ -22,7 +22,7 @@ The input data is typically stored in a Vertex Buffer Object (VBO) containing in
 2.  **Transform to Clip Space:** Multiply the view-space position by the Projection matrix and perform perspective division to normalize coordinates [S1, unofficial].
     $$ \mathbf{p}_{clip} = P \cdot \mathbf{p}_{view} $$
     $$ \mathbf{p}_{ndc} = \frac{\mathbf{p}_{clip}}{\mathbf{p}_{clip}.w} $$
-3.  **Calculate Splat Offset:** Compute the physical offset for the quad size in view space. The offset is scaled by the ratio of the entity scale to the grid length and multiplied by $\sqrt{2}$ to account for diagonal coverage [S1, unofficial].
+3.  **Calculate Splat Offset:** Compute the physical offset for the quad size in view space [S1, unofficial]. The offset is scaled by the ratio of the entity scale to the grid length and multiplied by $\sqrt{2}$ to account for diagonal coverage [S1, unofficial].
     $$ offset = splatSize \times \frac{scale}{gridLength} \times \sqrt{2} $$
     Where $\sqrt{2} \approx 1.414213$ [S1, unofficial].
 4.  **Compute Clip-Space Half-Edge:** Determine the distance in clip space between the center of the splat and the midpoint of its right edge to establish the culling boundary [S1, unofficial].
@@ -30,10 +30,10 @@ The input data is typically stored in a Vertex Buffer Object (VBO) containing in
     *   Transform this midpoint to clip space: $\mathbf{p}_{right\_clip} = P \cdot \mathbf{p}_{right\_view}$ [S1, unofficial].
     *   Normalize: $\mathbf{p}_{right\_ndc} = \frac{\mathbf{p}_{right\_clip}}{\mathbf{p}_{right\_clip}.w}$ [S1, unofficial].
     *   Compute distance: $d_{half} = \text{distance}(\mathbf{p}_{ndc}, \mathbf{p}_{right\_ndc})$ [S1, unofficial].
-5.  **Frustum Culling:** Define a culling border in normalized device coordinates (NDC) as $1 + d_{half}$. Discard the primitive if the NDC center position exceeds this border in any axis [S1, unofficial].
+5.  **Frustum Culling:** Define a culling border in normalized device coordinates (NDC) as $1 + d_{half}$ [S1, unofficial]. Discard the primitive if the NDC center position exceeds this border in any axis [S1, unofficial].
     $$ \text{if } |x_{ndc}| > 1 + d_{half} \lor |y_{ndc}| > 1 + d_{half} \text{ then discard} $$
 6.  **Back-Face Culling (Optional):** If enabled, compute the view-space normal $\mathbf{n}_{view} = MV \cdot (\mathbf{n}, 0)$ and discard if the dot product with the view direction (vector from camera to voxel) is negative [S1, unofficial].
-7.  **Emit Quad Vertices:** Generate a triangle strip consisting of four vertices representing the quad. The vertices are defined in view space by offsetting the center position by $\pm 0.5 \times offset$ in X and Y, then transformed to clip space for `gl_Position` [S1, unofficial].
+7.  **Emit Quad Vertices:** Generate a triangle strip consisting of four vertices representing the quad [S1, unofficial]. The vertices are defined in view space by offsetting the center position by $\pm 0.5 \times offset$ in X and Y, then transformed to clip space for `gl_Position` [S1, unofficial].
     *   Bottom-Left: $\mathbf{p}_{view} + (-0.5 \cdot offset, -0.5 \cdot offset, 0)$ [S1, unofficial].
     *   Bottom-Right: $\mathbf{p}_{view} + (0.5 \cdot offset, -0.5 \cdot offset, 0)$ [S1, unofficial].
     *   Top-Left: $\mathbf{p}_{view} + (-0.5 \cdot offset, 0.5 \cdot offset, 0)$ [S1, unofficial].
