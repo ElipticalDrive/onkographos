@@ -1,0 +1,196 @@
+# GauFRe
+
+Also called: Gaussian Deformation Fields
+
+## Overview
+GauFRe is a method for real-time dynamic novel view synthesis that represents dynamic scenes using deformable 3D Gaussian primitives [S2]. It solves the problem of reconstructing non-rigid motion from monocular video by employing a forward-warping deformation field, which explicitly models the temporal evolution of scene geometry [S2]. Unlike backward-warping approaches common in NeRFs that require querying a canonical space, GauFRe predicts the deformed primitive system at a specific time directly, making it efficient for explicit primitive-based rendering [S2]. It distinguishes itself by decoupling static and dynamic regions into separate Gaussian sets and applying exponential/normalization constraints to scale and rotation parameters for stable optimization [S1, S2].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A sequence of monocular RGB images (video) of a dynamic scene. Optionally, a Structure-from-Motion (SfM) point cloud for initialization [S2].
+*   **Outputs:** A set of 3D Gaussian primitives representing the scene at any queried time $t$, allowing for novel view synthesis at arbitrary viewpoints and timestamps [S2].
+
+**Data Structures**
+The scene is represented by two disjoint sets of Gaussian primitives:
+1.  **Dynamic Set:** Resides in a canonical space. Each primitive $i$ is defined by:
+    *   Position $\mathbf{x}_i \in \mathbb{R}^3$
+    *   Covariance $\Sigma_i \in \mathbb{R}^{3\times3}$, factored into rotation $R_i$ and scale $s_i$
+    *   Scalar density $\sigma_i \in \mathbb{R}$
+    *   View-dependent color $c_i$ (represented by $m$-order spherical harmonics) [S2]
+2.  **Static Set:** A non-deforming set of Gaussians initialized around SfM-derived 3D points [S2].
+
+The deformation is modeled by a time-conditioned Multi-Layer Perceptron (MLP) $\mathcal{F}_{DF}$, which takes canonical position $\mathbf{x}_i$ and time $t$ as input and outputs delta values for position, rotation, and scale [S1, S2].
+
+**Formulas**
+1.  **Covariance Factorization:** To ensure positive semi-definiteness, the covariance matrix is factored as [S2]:
+    $$ \Sigma_i = R_i \text{Exp}(s_i) \text{Exp}(s_i)^T R_i^T $$
+    where $R_i$ is derived from a unit-length quaternion $q_i \in \mathbb{R}^4$, and $\text{Exp}(s_i)$ is a diagonal matrix with entries $e^{s_{i,j}}$ [S2].
+
+2.  **Forward-Warping Deformation:** The MLP predicts deltas $\Delta \mathbf{x}, \Delta q, \Delta s$. The deformed attributes at time $t$ are computed as [S1, S2]:
+    *   Position: $\mathbf{x}_i(t) = \mathbf{x}_i + \Delta \mathbf{x}(\mathbf{x}_i, t)$
+    *   Rotation: $q_i(t) = \text{Normalize}(q_i + \Delta q(\mathbf{x}_i, t))$
+    *   Scale: $s_i(t) = \text{Exp}(s_i + \Delta s(\mathbf{x}_i, t))$
+    Note: The exponential operation is applied to the scale delta to ensure positive scales, and normalization is applied to the rotation delta to maintain unit quaternions [S1].
+
+3.  **Screen-Space Projection:** For a camera with view transformation $V$ and projection matrix $K$, the 2D mean and covariance are [S2]:
+    $$ \mathbf{u}_i = K V \mathbf{x}_i(t) $$
+    $$ \Sigma'_i = J V \Sigma_i(t) V^T J^T $$
+    where $J$ is the Jacobian of the projection matrix $K$ evaluated at the transformed point [S2].
+
+**Parameters**
+*   **Resolution:** Experiments reported at 480x270 [S2].
+*   **Hardware:** NVIDIA RTX 3090 [S2].
+*   **Training Time:** Approximately 20 minutes for real-world scenes [S2].
+
+**Pseudocode**
+The following pseudocode outlines the optimization loop and rendering process.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def initialize_gaussians(image_sequence, use_sfm=True):
+    """
+    Initialize the two sets of Gaussians.
+    """
+    if use_sfm:
+        # Initialize static set positions from SfM point cloud
+        static_positions = get_sfm_points()
+        static_gaussians = create_gaussians_from_points(static_positions)
+    else:
+        static_gaussians = []
+        
+    # Initialize dynamic set randomly or from sparse points
+    dynamic_positions = random_initialization(len(image_sequence[0]))
+    dynamic_gaussians = create_gaussians(dynamic_positions)
+    
+    # Initialize Deformation Field MLP
+    df_mlp = MLP()
+    
+    return dynamic_gaussians, static_gaussians, df_mlp
+
+def compute_deformed_attributes(dynamic_gaussian, df_mlp, time_t):
+    """
+    Apply forward-warping deformation to a single dynamic Gaussian.
+    """
+    x = dynamic_gaussian.position
+    q = dynamic_gaussian.quaternion
+    s = dynamic_gaussian.scale_log # Stored as log-scale for optimization
+    
+    # Predict deltas
+    delta_x, delta_q, delta_s = df_mlp(x, time_t)
+    
+    # Update position
+    new_x = x + delta_x
+    
+    # Update rotation (normalize to ensure unit quaternion)
+    new_q = normalize(q + delta_q)
+    
+    # Update scale (exponential to ensure positive scale)
+    # Note: s is log-scale, so we add delta_s and then exp
+    new_s_log = s + delta_s
+    new_s = np.exp(new_s_log)
+    
+    # Recompute covariance from new q and s
+    R = quaternion_to_rotation_matrix(new_q)
+    S_diag = np.diag(new_s)
+    Sigma = R @ S_diag @ S_diag.T @ R.T
+    
+    return {
+        'position': new_x,
+        'covariance': Sigma,
+        'density': dynamic_gaussian.density,
+        'color': dynamic_gaussian.color
+    }
+
+def render_frame(dynamic_gaussians, static_gaussians, df_mlp, camera_params, time_t):
+    """
+    Render a single frame at time t.
+    """
+    # 1. Deform dynamic Gaussians
+    deformed_dynamic = []
+    for g in dynamic_gaussians:
+        deformed_g = compute_deformed_attributes(g, df_mlp, time_t)
+        deformed_dynamic.append(deformed_g)
+        
+    # 2. Combine with static Gaussians (no deformation)
+    all_gaussians = deformed_dynamic + static_gaussians
+    
+    # 3. Project to 2D
+    projected_gaussians = []
+    for g in all_gaussians:
+        # Compute 2D mean and covariance
+        u = project_mean(g['position'], camera_params)
+        Sigma_prime = project_covariance(g['covariance'], camera_params)
+        projected_gaussians.append({
+            'mean': u,
+            'covariance': Sigma_prime,
+            'density': g['density'],
+            'color': g['color']
+        })
+        
+    # 4. Sort by depth
+    projected_gaussians.sort(key=lambda g: g['depth'])
+    
+    # 5. Rasterize using elliptical weighted average splatting
+    image = rasterize(projected_gaussians, camera_params.resolution)
+    
+    return image
+
+def optimize(image_sequence, dynamic_gaussians, static_gaussians, df_mlp):
+    """
+    End-to-end optimization loop.
+    """
+    optimizer = Adam([dynamic_gaussians, static_gaussians, df_mlp.parameters()])
+    
+    for epoch in range(max_epochs):
+        for frame_idx, (image, camera_params, time_t) in enumerate(image_sequence):
+            # Render
+            rendered_image = render_frame(
+                dynamic_gaussians, static_gaussians, df_mlp, 
+                camera_params, time_t
+            )
+            
+            # Compute loss (e.g., L1 + SSIM)
+            loss = compute_loss(rendered_image, image)
+            
+            # Backpropagate
+            loss.backward()
+            optimizer.step()
+            
+            # Periodic cloning, splitting, pruning
+            if epoch % prune_interval == 0:
+                dynamic_gaussians = prune_and_clone(dynamic_gaussians, threshold=0.01)
+                static_gaussians = prune_and_clone(static_gaussians, threshold=0.01)
+                
+    return dynamic_gaussians, static_gaussians, df_mlp
+```
+
+**Edge Cases and Pitfalls**
+*   **Precision:** The exponential activation on scale deltas is critical; without it, negative scales could arise, leading to invalid covariance matrices [S2].
+*   **Boundaries:** The static component is initialized using SfM points. If SfM fails or is sparse, the static regions may be poorly represented [S2].
+*   **Degenerate Input:** Random initialization of the dynamic point cloud is used if SfM is not available, which may lead to slower convergence or local minima [S2].
+
+## Subtopics
+
+### Foreground Gaussian Scale Residual Learning
+A variant that improves convergence and model capacity by learning scale residuals rather than absolute scales [S3]. It initializes the scale vector $\mathbf{s}_{init}$ using the average distance of $K$ nearest neighbors via the KNN algorithm [S3]. A decoder $\mathcal{D}_{cov}$ predicts the scale residual $\Delta \mathbf{s}$ from volume latent features $\mathbf{f}_i$ [S3]. The final scale is computed as $\mathbf{s} = \mathbf{s}_{init} + \Delta \mathbf{s}$ [S3]. This allows independent optimization of scaling (via vector $\mathbf{s}$) and rotation (via quaternion $\mathbf{q}$) [S3].
+
+## Operating characteristics
+*   **Time Complexity:** Optimization is significantly faster than NeRF-based methods due to the efficiency of 3D Gaussian Splatting. Training takes approximately 20 minutes for real-world scenes [S2].
+*   **Memory Complexity:** Depends on the number of Gaussians $N$. The method maintains two sets of Gaussians (dynamic and static), potentially increasing memory usage compared to single-set methods, but the static set avoids deformation field queries [S2].
+*   **Measured Performance:** Achieves 96 FPS real-time rendering on an NVIDIA RTX 3090 GPU at 480x270 resolution [S2].
+*   **Quality:** On the D-NeRF dataset, GauFRe achieves a PSNR of 34.80, SSIM of 0.985, and LPIPS of 0.028 [S1].
+*   **Strengths:** Real-time rendering capability; explicit modeling of non-rigid transformations via forward-warping; efficient handling of static regions via a separate component [S2].
+*   **Limitations:** Requires a deformation field MLP, which adds complexity to the optimization; performance depends on the quality of the initial point cloud (SfM or random) [S2].
+*   **When to use:** Real-time dynamic novel view synthesis from monocular video where high efficiency is required [S2].
+*   **When not to use:** Static scene reconstruction (use standard 3DGS); scenes with extremely complex non-rigid motion that cannot be captured by a forward-warping field [S2].
+
+## Background
+GauFRe (Gaussian Deformation Fields) was proposed to address the challenges of real-time dynamic scene reconstruction from monocular video [S2]. Traditional NeRF-based methods use backward-warping deformation fields, which are inefficient for explicit primitive-based systems like 3D Gaussian Splatting because they require querying a canonical space for every ray sample [S2]. GauFRe introduces a forward-warping deformation field that predicts the deformed primitive system at a given time, aligning with the explicit nature of Gaussians [S2]. It also incorporates a GS-specific static component to handle static regions separately, improving reconstruction quality in dynamic scenes [S2]. The method builds on the 3D Gaussian Splatting framework [3761-3d-gaussian-splatting-training.md] and optimizes end-to-end with a self-supervised rendering loss [S2].
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] GauFRe: Gaussian Deformation Fields for Real-Time Dynamic Novel View Synthesis, https://doi.org/10.1109/wacv61041.2025.00262, fetched 2026-10-26
+[S3] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03

@@ -1,9 +1,9 @@
 # Step Size and Termination Rules
 
-Also called: Ray Marching Step Control, Marching Termination
+Also called: Ray Marching Step Control, Marching Convergence
 
 ## Overview
-This family defines the logic for determining the distance $\Delta t$ to advance a ray along its direction $\mathbf{d}$ and the conditions under which the marching loop terminates. It solves the problem of balancing rendering accuracy (avoiding missed geometry or aliasing) against computational cost (minimizing samples in empty space). It is distinguished from [Sphere Tracing](1674-sphere-tracing.md) by relaxing the strict Lipschitz safety constraint ($\Delta t \le f(\mathbf{p})$) in favor of heuristic, error-based, or geometric bounds that allow larger steps in safe regions, and from [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md) by dynamically varying $\Delta t$ per sample rather than using a global constant.
+This family defines the logic for determining the distance $\Delta t$ to advance a ray along its direction $\mathbf{d}$ and the conditions under which the marching loop terminates. It solves the problem of balancing rendering accuracy against computational cost, ensuring that rays do not overshoot geometry, get trapped in infinite loops, or waste samples in empty space. What sets this family apart from its siblings is its focus on the *step size calculation* and *exit criteria* themselves, rather than the acceleration structures (like BVHs) or the specific SDF composition methods. It builds on [Sphere Tracing and Step Rules](9643-sphere-tracing-and-step-rules.md).
 
 ## Shared principles
 All methods in this family operate on a ray $r(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the origin and $\mathbf{d}$ is the normalized direction vector. The core loop iteratively updates the accumulated distance $t$ and evaluates a scene function $f(\mathbf{p})$ at the current position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$.
@@ -73,7 +73,7 @@ Interval Raymarching is a technique for accelerating Signed Distance Field (SDF)
 - [S3, unofficial] Simply stopping and ignoring the remaining volume contribution is statistically incorrect and introduces bias. It is acceptable for visual rendering but not for high-precision scientific simulation (e.g., thermonuclear engineering).
 
 ## Background
-The concept of ray marching with variable step sizes originates from the work on implicit surfaces and Signed Distance Functions (SDFs) in the early 1990s. John Hart introduced sphere tracing as a space-leaping technique that uses the SDF value as a safe lower bound for the step size, ensuring no geometry is missed [S2, unofficial]. This method was popularized in real-time graphics by William Donnelly for per-pixel displacement mapping [S2, unofficial]. The specific optimizations for volumetric rendering, such as adaptive step sizes based on density and distance, were later developed for cloud rendering and other volumetric effects to manage the high computational cost of sampling dense media [S1, unofficial]. Early termination thresholds are a standard optimization in volumetric ray marching to prune samples that contribute negligibly to the final image, though they introduce statistical bias [S3, unofficial].
+The concept of sphere tracing was introduced by John Hart in 1996 [S2, unofficial]. It is widely used in real-time rendering of implicit surfaces, procedural geometry, and volumetric effects such as clouds. The specific optimizations like adaptive step sizes for clouds and early termination thresholds are common in shader programming for games and interactive applications [S1, unofficial][S3, unofficial].
 
 ## Sources
 [S1] Volumetric Cloud Rendering - Jack Tollenaar, https://www.jacktollenaar.top/articles/clouds.html, fetched 2026-10-29 (unofficial)

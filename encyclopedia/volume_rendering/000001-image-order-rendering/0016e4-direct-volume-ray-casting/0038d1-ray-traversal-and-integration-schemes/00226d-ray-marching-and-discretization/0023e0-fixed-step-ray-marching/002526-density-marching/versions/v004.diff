@@ -1,0 +1,159 @@
+--- v003.md
++++ v004.md
+@@ -1,48 +1,49 @@
+ # Density Marching
+ 
+-Also called: Front-to-Back Ray Marching, Simple Ray Marching, Standard Ray Casting
++Also called: Front-to-Back Ray Marching, Simple Ray Marching
+ 
+ ## Overview
+-Density Marching is a direct volume rendering technique that samples a 3D density field along rays cast from the camera, accumulating color and opacity using front-to-back blending to produce the final pixel color [S1, S2, unofficial]. It differs from adaptive or hierarchical traversal methods by using a fixed number of sampling steps per ray, making it simple to implement but potentially inefficient for sparse volumes [S1, S2, unofficial].
++Density Marching is a direct volume rendering technique that samples a 3D density field along rays cast from the camera, accumulating color and opacity using front-to-back blending to produce the final pixel color [S1, S2, unofficial]. It differs from adaptive or hierarchical traversal methods by using a fixed number of sampling steps per ray, making it straightforward to implement [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-The method takes a 3D volume texture (density field), camera parameters (position, direction), and a bounding box defining the volume extent [S1, S2, unofficial]. It outputs a 2D image buffer where each pixel contains the accumulated color and transmittance [S1, S2, unofficial].
++The method takes a 3D volume texture (density field), camera position, ray direction, bounding box intersection distances (`t_min`, `t_max`), and a step count `N` [S1, S2, unofficial]. It outputs an accumulated color and transmittance per pixel [S1, S2, unofficial].
+ 
+ **Data Structures:**
+ *   **Image Buffer:** A 2D array of shape `[height, width, 3]` with `uint8` data type, storing the final RGB color [S1, unofficial].
+-*   **Ray Data:** For each pixel, a ray origin (camera position) and ray direction (normalized vector from camera to pixel) [S1, S2, unofficial].
+-*   **Accumulators:** Per-pixel variables for `render_color` (RGB), `T_` (transmittance, scalar), and optionally `accum` (RGBA) [S1, S2, unofficial].
++*   **Ray Data:** Per-pixel ray origin (camera position) and ray direction (normalized vector) [S1, S2, unofficial].
++*   **Accumulators:** Per-pixel variables for `render_color` (RGB float), `T` (transmittance scalar), and optionally `accum` (RGBA) [S1, S2, unofficial].
+ 
+ **Parameters:**
+-*   `num_points` or `STEPS`: The number of sampling steps along each ray. Typical values are 128 [S1, S2, unofficial].
+-*   `DENSITY_MULTIPLIER`: Scales sampled density to produce alpha. Value: 5.0 [S2, unofficial].
++*   `N` (or `num_points`/`STEPS`): The number of sampling steps along each ray. Typical values are 128 [S1, S2, unofficial].
++*   `DENSITY_MULTIPLIER`: Scales sampled density to produce alpha in linear approximations. Value: 5.0 [S2, unofficial].
+ *   `background_color`: Color for non-intersecting rays. Value: `[157., 204., 224.]` [S1, unofficial].
+ *   `cell_color`: Color of volume cells. Value: `[255, 255, 255]` (white) [S1, unofficial].
+-*   `tmin`, `tmax`: Entry and exit distances of the ray within the bounding box [S1, S2, unofficial].
++*   `t_min`, `t_max`: Entry and exit distances of the ray within the bounding box [S1, S2, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Initialization:** For each pixel, initialize `render_color` to `[0., 0., 0.]` and transmittance `T_` to `1.` [S1, unofficial].
+-2.  **Ray Setup:** Calculate the ray direction by normalizing the vector from the camera position to the pixel's world position [S1, unofficial].
++1.  **Initialization:** For each pixel, initialize `render_color` to `[0., 0., 0.]` and transmittance `T` to `1.` [S1, unofficial].
++2.  **Ray Setup:** Calculate the ray direction by normalizing the vector from the camera position to the pixel's world position [S1, S2, unofficial].
+ 3.  **Bounding Box Intersection:** Intersect the ray with the volume's Axis-Aligned Bounding Box (AABB) using the slab method to determine entry (`tNear`) and exit (`tFar`) distances [S1, S2, unofficial]. If the ray does not intersect, discard the pixel [S2, unofficial].
+-4.  **Step Size Calculation:** Compute the step size $\delta = \frac{t_{max} - t_{min}}{N}$, where $N$ is the number of steps (`num_points` or `STEPS`) [S1, S2, unofficial].
+-5.  **Marching Loop:** Iterate $i$ from $0$ to $N-1$:
++4.  **Boundary Clamping:** Clamp the entry distance to the camera plane: `t_min = max(t_min, 0.0)` to handle rays originating inside the volume [G].
++5.  **Step Size Calculation:** Compute the step size $\delta = \frac{t_{max} - t_{min}}{N}$, where $N$ is the number of steps (`num_points` or `STEPS`) [S1, S2, unofficial].
++6.  **Marching Loop:** Iterate $i$ from $0$ to $N-1$:
+     a.  **Sample Position:** Calculate the current position along the ray: $p_i = \text{rayOrigin} + (t_{min} + i \cdot \delta) \cdot \text{rayDirection}$ [S1, S2, unofficial].
+     b.  **Density Sampling:** Read the density value $\rho_i$ from the 3D texture at $p_i$ [S1, S2, unofficial].
+     c.  **Alpha Calculation:** Compute the alpha for the current step: $\alpha_i = 1 - e^{-\rho_i \cdot \delta}$ [S1, unofficial]. Note: Some implementations use a linear approximation $\alpha_i = \rho_i \cdot \text{DENSITY\_MULTIPLIER} \cdot \delta$ [S2, unofficial].
+-    d.  **Transmittance Update:** Update the accumulated transmittance: $T_{new} = T_{old} \cdot e^{-\rho_i \cdot \delta}$ [S1, unofficial].
+-    e.  **Color Accumulation:** Calculate the contribution weight. *Note: Standard front-to-back blending uses the transmittance **before** the current step ($T_{old}$). However, some implementations update $T$ first and then use the new $T$ for weighting, which is non-standard [S1, unofficial]. The standard formula is:*
+-        $$ w_i = T_{old} \cdot \alpha_i $$
+-        $$ \text{render\_color} += w_i \cdot \text{cell\_color} $$
+-        $$ T_{old} = T_{new} $$
+-    f.  **Boundary Fading (Optional):** Apply fade factors at the top and bottom boundaries of the box to prevent abrupt cutoffs [S3, unofficial].
+-6.  **Final Compositing:** Composite the accumulated color with the background:
+-    $$ \text{final\_color} = T_{final} \cdot \text{background\_color} + \text{render\_color} $$
+-    [S1, unofficial]. If the accumulated alpha is below a threshold (e.g., 0.001), discard the fragment [S2, unofficial].
++    d.  **Weight Calculation:** Calculate the contribution weight using the transmittance *before* the current step: $w_i = T \cdot \alpha_i$ [S1, unofficial].
++    e.  **Color Accumulation:** Add the weighted color: $\text{render\_color} \leftarrow \text{render\_color} + w_i \cdot \text{cell\_color}$ [S1, unofficial].
++    f.  **Transmittance Update:** Update the accumulated transmittance: $T \leftarrow T \cdot e^{-\rho_i \cdot \delta}$ [S1, unofficial].
++    g.  **Early Exit:** If $T < 0.001$, break the loop [S2, unofficial].
++7.  **Final Compositing:** Composite the accumulated color with the background:
++    $$ \text{final\_color} = T \cdot \text{background\_color} + \text{render\_color} $$
++    [S1, unofficial]. If the accumulated opacity $1 - T$ is below a threshold (e.g., 0.001), discard the fragment [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
++import math
++
+ def density_marching(camera_pos, ray_dir, t_min, t_max, num_points, volume_texture, background_color, cell_color):
+     """
+@@ -53,8 +54,13 @@
+     T = 1.0
+     
+-    # 2. Step Size
++    # 2. Boundary Clamping & Intersection Check
++    t_min = max(t_min, 0.0)
++    if t_max <= t_min:
++        return [0.0, 0.0, 0.0]
++        
++    # 3. Step Size
+     delta = (t_max - t_min) / num_points
+     
+-    # 3. Marching Loop
++    # 4. Marching Loop
+     for i in range(num_points):
+         # Sample Position
+@@ -68,9 +74,11 @@
+         alpha = 1.0 - math.exp(-density * delta)
+         
+-        # Transmittance Update (Standard: Update T after calculating weight using old T)
+-        # Note: Some implementations update T first, which is incorrect for standard DVR.
+-        # Correct order:
++        # Weight Calculation (Standard: use T before update)
+         weight = T * alpha
+-        render_color += weight * cell_color
++        render_color[0] += weight * cell_color[0]
++        render_color[1] += weight * cell_color[1]
++        render_color[2] += weight * cell_color[2]
++        
++        # Transmittance Update
+         T *= math.exp(-density * delta)
+         
+@@ -79,6 +87,10 @@
+             break
+             
+-    # 4. Final Compositing
+-    final_color = T * background_color + render_color
++    # 5. Final Compositing
++    final_color = [
++        T * background_color[0] + render_color[0],
++        T * background_color[1] + render_color[1],
++        T * background_color[2] + render_color[2]
++    ]
+     return final_color
+ ```
+@@ -87,33 +99,14 @@
+ *   **Transmittance Order:** Updating transmittance before calculating the weight for the current step leads to incorrect lighting and opacity accumulation [S1, unofficial].
+ *   **Boundary Artifacts:** Abrupt cutoffs at the volume boundaries can be mitigated by applying fade factors based on distance to the box edges [S3, unofficial].
++*   **Ray Origin Inside Volume:** Failing to clamp `t_min` to 0 causes sampling points to fall behind the camera, resulting in zero density reads and black output [G].
+ *   **Precision:** Using fixed step sizes may lead to aliasing or missing thin structures if the step size is too large relative to the volume features [S1, S2, unofficial].
+ 
+-## Subtopics
+-
+-### [Ray Marching Volume Rendering](1735-ray-marching-volume-rendering.md)
+-A general overview of ray marching techniques for volume rendering.
+-
+-### [Ray Evaluation Stepping DVR](3461-ray-evaluation-stepping-dvr.md)
+-A variant that may use adaptive stepping or different evaluation strategies.
+-
+-### [Discrete Volume Rendering Integral (VRI)](3552-discrete-volume-rendering-integral-vri.md)
+-Focuses on the discrete integration of the volume rendering integral.
+-
+-### [Volumetric Light Shafts (URP Raymarching)](3873-volumetric-light-shafts-urp-raymarching.md)
+-Specialized for light shafts, often using screen-space techniques.
+-
+-### [Cloud Volume Rendering](4877-cloud-volume-rendering.md)
+-Optimized for cloud-like volumes, often using specific noise functions.
+-
+-### [Ray Marching Volume Rendering (GLSL)](5184-ray-marching-volume-rendering-glsl.md)
+-GLSL-specific implementation details.
+-
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of steps per ray [S1, S2, unofficial].
+-*   **Memory Complexity:** $O(V)$ for the volume texture, where $V$ is the number of voxels [S1, S2, unofficial].
+-*   **Strengths:** Simple to implement, predictable memory usage, easy to parallelize [S1, S2, unofficial].
+-*   **Limitations:** Inefficient for sparse volumes due to fixed step size, potential aliasing artifacts [S1, S2, unofficial].
+-*   **When to Use:** Suitable for dense volumes or when simplicity is prioritized over performance [S1, S2, unofficial].
+-*   **When Not to Use:** Unsuitable for sparse volumes or high-resolution requirements where adaptive methods are preferred [S1, S2, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Not given in the sources.
++*   **Limitations:** Not given in the sources.
++*   **When to Use:** Not given in the sources.
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background

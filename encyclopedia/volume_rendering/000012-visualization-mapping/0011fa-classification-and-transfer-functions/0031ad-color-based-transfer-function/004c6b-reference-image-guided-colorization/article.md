@@ -1,64 +1,38 @@
 # Reference Image Guided Colorization
 
-Also called: Reference-Based Color Transfer, Deep Image Analogy Colorization, Semantic Color Transfer
+Also called: Reference-Based Color Transfer, Deep Image Analogy for Volume Rendering
 
 ## Overview
-Reference Image Guided Colorization automates the assignment of color to monochromatic volume data (such as CT or MRI scans) by transferring visual attributes from a database of semantically similar, manually colored reference images (e.g., histological sections) [S1, unofficial]. It distinguishes itself from traditional volume rendering by replacing manual transfer function tuning with automatic deep semantic correspondence, and from other learning-based methods by requiring only a small set of reference images rather than large-scale training datasets [S1, unofficial].
+Reference Image Guided Colorization automates the colorization of monochromatic volume data (e.g., CT/MRI) by transferring semantic color attributes from a database of semantically similar reference images, such as histological sections [S1, unofficial]. It distinguishes itself from traditional volume rendering by replacing manual transfer function tuning with automatic deep semantic correspondence, and from other learning-based methods by requiring only a small set of reference images rather than large-scale training datasets [S1, unofficial].
 
 ## Shared principles
-The family operates on the principle of transferring color attributes from a source (reference) image to a target (monochromatic volume slice) while preserving the structural integrity and opacity information of the target. The core mechanism involves three stages:
-1.  **Semantic Matching:** Identifying the most appropriate reference image for a given target slice using deep feature extraction (e.g., VGG-19) [S1, unofficial].
-2.  **Attribute Transfer:** Generating an intermediate image that combines the structure of the target with the color/style of the reference, typically using deep image analogy or patch-based matching in feature space [S1, unofficial].
-3.  **Color Isolation:** Extracting only the color information from the intermediate image, discarding texture and style artifacts, often using guided filtering [S1, unofficial].
-4.  **Volume Construction:** Constructing an RGBA volume where RGB components come from the isolated color and the Alpha component is derived directly from the target's luminance/intensity [S1, unofficial].
+The family operates on the principle of transferring visual attributes (color, texture, style) from a source reference image to a target monochromatic image using deep feature matching, followed by isolation of color components for volumetric mapping.
+
+1.  **Deep Feature Extraction:** Both target ($T$) and reference ($R$) images are processed through a pre-trained Convolutional Neural Network (CNN), typically VGG-19, to extract multi-level feature maps [S1, unofficial].
+2.  **Semantic Correspondence:** A dense matching algorithm (e.g., PatchMatch) aligns features from $T$ and $R$ in the deep feature domain to construct an intermediate image $T'$ that retains the structure of $T$ but adopts the visual attributes of $R$ [S1, unofficial].
+3.  **Color Isolation:** A filtering technique (e.g., Guided Image Filter) is applied to $T'$ to discard texture/style artifacts from $R$, preserving only the transferred color information as the final colorized image $C$ [S1, unofficial].
+4.  **Volumetric Mapping:** The RGB channels of the volume are derived from $C$, while the alpha (opacity) channel is derived directly from the luminance of the original target data $T$ [S1, unofficial].
 
 ## Subtopics
 
 ### [Reference Based Color Transfer for Medical Volume Rendering](11552-reference-based-color-transfer-for-medical-volume-rendering.md)
-This method automates the colorization of monochromatic medical volume data (CT/MRI) by transferring color attributes from a database of semantically similar colored reference images, such as histological cryosections. It distinguishes itself from traditional volume rendering by replacing user-defined color/opacity parameters with automatic deep semantic correspondence and luminance-based alpha mapping, and from other learning-based colorization methods by requiring only a small set of reference images rather than large-scale training datasets. See [Reference Based Color Transfer for Medical Volume Rendering](11552-reference-based-color-transfer-for-medical-volume-rendering.md).
+This method automates the colorization of monochromatic medical volume data (CT/MRI) by transferring color attributes from a database of semantically similar colored reference images, such as histological cryosections, thereby eliminating the need for manual transfer function tuning. It distinguishes itself from traditional volume rendering by replacing user-defined color/opacity parameters with automatic deep semantic correspondence and luminance-based alpha mapping, and from other learning-based colorization methods by requiring only a small set of reference images rather than large-scale training datasets. See [Reference Based Color Transfer for Medical Volume Rendering](11552-reference-based-color-transfer-for-medical-volume-rendering.md).
+
+### [Trained Exposure Application](13959-trained-exposure-application.md)
+Trained Exposure Application is a post-processing step in volume rendering that applies a learned per-image 3x3 color transform and 3D bias vector to the rendered RGB image. It serves to match the exposure conditions of the rendered output to those present in the training data, ensuring visual consistency. It differs from its parent, Reference Image Guided Colorization, by applying a direct linear color correction rather than a complex semantic style transfer, and from its sibling, Reference Based Color Transfer, by relying on pre-computed per-viewpoint parameters rather than real-time reference image matching. See [Trained Exposure Application](13959-trained-exposure-application.md).
 
 ### Guided Image Filter Colorization
-A colorization technique applied after gamma encoding to transfer color from a reference image to a target image [S1, unofficial]. It uses a guided image filter to preserve edges while smoothing color.
-**Parameters:**
-*   Radius: $r = 16$ [S1, unofficial].
-*   Regularization term: $\epsilon = 2$ [S1, unofficial].
+A colorization technique applied after gamma encoding to transfer color from a reference image to a target image [S1, unofficial]. Parameters: Radius $r = 16$, regularization term $\epsilon = 2$ [S1, unofficial].
 
 ### Fast Global Smoother Filter Colorization
-A colorization technique applied after gamma encoding to transfer color from a reference image to a target image [S1, unofficial]. It uses a fast global smoother to achieve color transfer with specific regularization constraints.
-**Parameters:**
-*   Lambda: $\lambda = 0.2$ [S1, unofficial].
-*   Alpha: $\alpha = 1.8$ [S1, unofficial].
-*   Lambda: $\lambda = 32$ [S1, unofficial].
+A colorization technique applied after gamma encoding to transfer color from a reference image to a target image [S1, unofficial]. Parameters: Lambda $\lambda = 0.2$, Alpha $\alpha = 1.8$, and Lambda $\lambda = 32$ [S1, unofficial].
 
 ### Color Transfer
-A simple technique applied to improve the color match between final renderings and the input style image [S2]. It is often used in conjunction with style losses to ensure the rendered output aligns with the aesthetic properties of the reference.
-
-### Trained Exposure Application
-Applies a learned per-image 3x3 color transform and 3D bias vector to the rendered RGB image to match training-time exposure conditions [S3, unofficial]. This post-processing step adjusts the color balance and intensity of the final rendered image based on learned exposure parameters.
-**Step:**
-Retrieve exposure matrix by image name. Permute rendered image to $(H, W, 3)$. Multiply by $E_{3\times3}$. Add $E_{3}$ as a broadcasted bias. Permute back to $(3, H, W)$ [S3, unofficial].
-**Formula:**
-$$I_{out} = (I_{in} \cdot E_{3\times3})^T + E_{3}$$
-where $I_{in}$ is $(H, W, 3)$, $E_{3\times3}$ is the 3x3 color transform, and $E_{3}$ is the 3D bias vector [S3, unofficial].
-**Layout:**
-Exposure tensor shape $(4, 4)$ or similar, where $E_{3\times3}$ holds the 3x3 color transform and $E_{3}$ holds the 3D bias [S3, unofficial].
-**Code:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-exposure = pc.get_exposure_from_name(viewpoint_camera.image_name)
-return (
-    torch.matmul(rendered_image.permute(1, 2, 0), exposure[:3, :3]).permute(2, 0, 1)
-    + exposure[:3, 3, None, None]
-)
-```
-**Pitfall:**
-Requires exposure data to be stored and retrievable by image name. Permutation operations must match tensor dimensions exactly to avoid shape mismatches [S3, unofficial].
+A simple technique applied to improve the color match between final renderings and the input style image [S2].
 
 ## Background
-The concept of reference-based colorization in volume rendering emerged from the need to provide anatomically plausible colors to grayscale medical images without manual intervention. The primary method, "Reference Based Color Transfer for Medical Volume Rendering," was proposed by researchers utilizing deep learning techniques (specifically Deep Image Analogy and VGG-19 features) to map CT/MRI slices to histological cryosections [S1, unofficial]. This approach addresses the limitation of traditional transfer functions which rely on subjective user input. The technique of using guided filters for color isolation was adapted from image processing literature [S1, unofficial]. The application of trained exposure adjustments is associated with recent advancements in neural radiance fields and 3D Gaussian Splatting, where exposure parameters are learned during training to match real-world lighting conditions [S3, unofficial]. The use of color transfer in artistic radiance fields highlights the broader application of these techniques in non-photorealistic rendering [S2].
+The core methodology originates from "Deep Image Analogy," which uses deep features for image-to-image translation [S1, unofficial]. The application to medical volume rendering was proposed to address the lack of ground-truth colorization and the difficulty of manual transfer function tuning [S1, unofficial]. The reference database often utilizes visible human project data, such as 696 cryosection images for thorax/abdomen [S1, unofficial].
 
 ## Sources
 [S1] Reference Based Color Transfer for Medical Volume Rendering, https://doi.org/10.48550/arxiv.2210.08083, fetched 2026-10-26 (unofficial)
 [S2] ARF: Artistic Radiance Fields, https://core.ac.uk/works/391332776, fetched 2026-10-30
-[S3] XiaoBin2001/Improved-GS, https://github.com/XiaoBin2001/Improved-GS, fetched 2026-10-27 (unofficial)

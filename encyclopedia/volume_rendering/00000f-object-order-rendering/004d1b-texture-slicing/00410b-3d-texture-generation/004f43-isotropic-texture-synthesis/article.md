@@ -1,85 +1,86 @@
 # Isotropic Texture Synthesis
-
 Also called: 2D Texture Synthesis for Volumetric Impression
-
 ## Overview
-Isotropic Texture Synthesis generates a volumetric appearance where the material properties are uniform in 3D space, independent of position or orientation [S1]. It solves the problem of creating a consistent "volumetric impression" for materials like sponges or sausages by synthesizing a single 2D texture patch that represents any cross-section of the volume [S1]. Unlike layered or oriented texture methods, it does not require depth maps or flow vectors, relying instead on standard 2D texture synthesis algorithms to ensure all cross-sections look similar regardless of their location or orientation [S1].
-
+Isotropic Texture Synthesis generates volumetric textures that exhibit uniform distribution in 3D space, with no dependency on position or orientation [S1]. It solves the problem of creating internal structures for materials like sponges or sausages where cross-sections appear similar regardless of location or cutting angle [S1]. It sets itself apart from oriented or layered variants by using standard 2D texture synthesis on a single cross-section, avoiding the complexity and performance costs of full 3D volumetric synthesis [S1].
 ## How it works
-**Inputs:**
-1.  A 2D reference image containing the source material pattern.
-2.  A selected region (patch) within the reference image, defined by the user or system, which serves as the exemplar for synthesis [S1].
-3.  Target dimensions for the resulting 2D texture image [S1].
-
-**Outputs:**
-1.  A 2D texture image (width $W$, height $H$) containing the synthesized isotropic pattern [S1].
+**Inputs and Outputs:**
+- Input: A 2D reference image region selected by the user, defining the statistical properties of the texture.
+- Output: A 3D texture object (volume) where every slice is synthesized independently using the 2D reference.
 
 **Data Structures:**
-*   **Reference Patch:** A 2D array of pixels extracted from the original reference image.
-*   **Synthesized Texture:** A 2D array of pixels of the target size, initialized and filled by the synthesis algorithm.
+- The system maintains a "reference cube" for user feedback, but the core data is the 2D reference patch [S1].
+- The resulting 3D texture stores RGBA values per texel, consistent with the parent [3D Texture Generation](10399-3d-texture-generation.md) principles [S1].
 
 **Steps:**
-1.  **Select Reference Region:** Identify a contiguous region in the original reference image that exhibits the desired isotropic texture characteristics [S1].
-2.  **Initialize Synthesis:** Configure a standard 2D texture-synthesis algorithm. Valid algorithms cited include Wei and Levoy (2000), Cohen et al. (2003), and Kwatra et al. (2003) [S1].
-3.  **Synthesize Texture:** Run the 2D synthesis algorithm using the selected reference region as the exemplar to generate the target 2D texture image [S1].
-4.  **Store in 3D Texture:** The resulting 2D texture is mapped into the 3D texture volume. Since the texture is isotropic, the same 2D pattern is effectively applied to all cross-sections [S1].
+1.  **Selection:** The user selects a boundary on the 3D model surface and defines a stroke to constrain the cross-section plane [S1].
+2.  **Reference Extraction:** The system extracts a 2D region from the original reference image corresponding to the desired texture appearance [S1].
+3.  **2D Synthesis:** A standard 2D texture synthesis algorithm (e.g., [Wei and Levoy 2000], [Cohen et al. 2003], or [Kwatra et al. 2003]) is applied to the extracted reference region to generate a 2D texture image for the cross-section [S1].
+4.  **Volume Population:** The synthesized 2D texture is used to populate the 3D volume. Since the texture is isotropic, the same synthesis logic applies to any cross-section [S1].
+5.  **Feedback:** The system renders the reference cube to provide visual feedback, though this cube is not the final volumetric data [S1].
+
+**Pitfalls:**
+- There is no guarantee of obtaining exactly the same image when a model is cut twice at the same cross-section [S1]. This inconsistency is accepted because the goal is a volumetric impression rather than consistent volumetric data [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def synthesize_isotropic_texture(reference_image, patch_coords, target_width, target_height):
+def synthesize_isotropic_volume(reference_image, cross_section_params):
     """
-    Synthesizes a 2D texture for isotropic volumetric impression.
+    Synthesize an isotropic 3D texture volume.
     
     Args:
-        reference_image: 2D array of pixels (source material).
-        patch_coords: Tuple (x, y, w, h) defining the region in reference_image.
-        target_width: Width of the output texture.
-        target_height: Height of the output texture.
+        reference_image: 2D array of pixels representing the source texture.
+        cross_section_params: Parameters defining the cross-section plane.
         
     Returns:
-        2D array of pixels representing the synthesized texture.
+        3D texture volume (W x H x D).
     """
-    # Extract the reference patch from the original image
-    x, y, w, h = patch_coords
-    reference_patch = reference_image[y:y+h, x:x+w]
+    # 1. Extract reference patch from the original reference image
+    # The user selects a region; we assume this is handled by the UI layer.
+    reference_patch = extract_region(reference_image, user_selection)
     
-    # Initialize the output texture with zeros or random noise
-    # depending on the specific synthesis algorithm's requirements.
-    synthesized_texture = initialize_output(target_width, target_height)
+    # 2. Synthesize a 2D texture for the cross-section
+    # Using a standard 2D synthesis algorithm (e.g., Wei & Levoy 2000)
+    synthesized_2d_slice = synthesize_2d_texture(reference_patch)
     
-    # Apply a standard 2D texture synthesis algorithm.
-    # The algorithm iteratively fills synthesized_texture using pixels 
-    # from reference_patch to match local neighborhood statistics.
-    # Common algorithms: Wei & Levoy (2000), Cohen et al. (2003), Kwatra et al. (2003).
-    synthesized_texture = apply_2d_texture_synthesis(
-        reference_patch, 
-        synthesized_texture
-    )
+    # 3. Populate the 3D volume
+    # For isotropic textures, the distribution is uniform.
+    # The volume is filled such that cross-sections look similar.
+    # Note: The source does not specify if every slice is identical 
+    # or independently synthesized. Given the "no guarantee" pitfall,
+    # independent synthesis per slice is implied or the volume is 
+    # constructed by tiling the 2D result.
+    # We assume a simple tiling or repeated synthesis for the volume depth.
+    volume_depth = cross_section_params.depth
+    volume_width = synthesized_2d_slice.width
+    volume_height = synthesized_2d_slice.height
     
-    return synthesized_texture
+    volume = empty_3d_texture(volume_width, volume_height, volume_depth)
+    
+    for z in range(volume_depth):
+        # Synthesize a new slice for each depth layer to allow variation
+        # or reuse the same slice if strict uniformity is desired.
+        # The source implies variability ("no guarantee of same image").
+        slice_2d = synthesize_2d_texture(reference_patch)
+        volume.set_slice(z, slice_2d)
+        
+    return volume
 ```
-
-**Edge Cases and Pitfalls:**
-*   **Non-Determinism:** There is no guarantee that cutting a model at the same cross-section twice will yield the exact same image [S1]. This is an accepted limitation because the goal is a volumetric impression rather than consistent volumetric data [S1].
-*   **Reference Selection:** The quality of the result depends heavily on the selected reference region. If the region does not exhibit true isotropy, the resulting volume will not appear uniform [S1].
-
 ## Subtopics
 
 ### [Cross-section Texture Synthesis with Flow Vectors](13944-cross-section-texture-synthesis-with-flow-vectors.md)
-This method synthesizes cross-sectional images for 3D models by mapping pixels from a 2D control map containing flow vectors to a 3D reference volume, ensuring the synthesized texture matches the local neighborhood structure and orientation defined by the flow. It differs from standard texture synthesis by incorporating spatial orientation constraints via flow vectors, and from layered or oriented texture methods by assuming isotropic structure on cross-sections perpendicular to the flow, thereby avoiding the per-pixel rotation of neighbors or slicing of the reference volume required by those alternatives.
+This method synthesizes internal textures for 3D models by generating cross-sectional images on demand using 2D reference images, rather than storing explicit 3D volumetric data. It solves the problem of manually defining complex internal structures for volumetric illustrations by mapping pixels from a 2D control map (containing flow vectors) to a reference volume, ensuring the synthesized texture matches the local neighborhood structure and orientation defined by the flow. Unlike [Isotropic Texture Synthesis](13939-isotropic-texture-synthesis.md), which assumes uniform distribution without orientation dependency, this method supports layered and oriented textures by using flow vectors to guide the sampling geometry in the reference volume.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the underlying 2D texture synthesis algorithm. Standard 2D synthesis is generally faster than 3D volumetric synthesis. The source notes that alternative volumetric synthesis techniques (e.g., Wei 2001) were deemed "too slow" [S1].
-*   **Memory Complexity:** Requires storage for the reference patch and the resulting 2D texture. The 3D texture volume stores this 2D pattern, but the synthesis process itself is 2D [S1].
-*   **Strengths:** Simple to implement; fast compared to full 3D synthesis; effective for materials with uniform internal structure (e.g., sponges, sausages) [S1].
-*   **Limitations:** Cannot represent depth-dependent variations (layered) or direction-dependent variations (oriented) [S1]. Lacks spatial consistency across different cuts [S1].
-*   **When to use:** When the material is isotropic and a consistent volumetric impression is sufficient, and performance is a concern.
-*   **When not to use:** When the material has distinct layers, gradients, or directional features (e.g., wood grain, skin) [S1].
-
+- **Time Complexity:** Faster than volumetric texture synthesis techniques. The 2D approach is preferred because volumetric approaches were found to be too slow [S1].
+- **Memory Complexity:** Depends on the resolution of the 3D texture object. Since it uses 2D synthesis, it avoids the overhead of volumetric synthesis algorithms [S1].
+- **Strengths:** Simple to implement; fast; sufficient for conveying volumetric impression [S1].
+- **Limitations:** No guarantee of consistency across cuts; cannot represent directional or layered structures [S1].
+- **When to use:** For materials with uniform internal structure (e.g., sponges, sausages) where orientation does not matter [S1].
+- **When not to use:** For layered (e.g., kiwi, skin) or oriented textures [S1].
 ## Background
-Isotropic Texture Synthesis was introduced in the context of volumetric illustration, specifically as part of a system supporting isotropic, layered, and oriented textures [S1]. The method leverages existing 2D texture synthesis techniques (Wei and Levoy 2000; Cohen et al. 2003; Kwatra et al. 2003) to avoid the computational cost and quality issues associated with direct 3D volumetric synthesis (such as Wei 2001) [S1]. It is used in computer graphics for creating realistic volumetric appearances for 3D models where the internal structure is uniform.
-
+- **Origin:** The method is described in the context of "Volumetric illustration" [S1].
+- **History:** The authors experimented with specifying side/top faces and using Wei’s [2001] volumetric texture-synthesis technique but did not pursue it further due to slowness and unsatisfactory quality [S1]. The 2D approach was adopted as the primary method for isotropic textures [S1].
 ## Sources
 [S1] Volumetric illustration, https://doi.org/10.1145/1186562.1015723, fetched 2026-10-30

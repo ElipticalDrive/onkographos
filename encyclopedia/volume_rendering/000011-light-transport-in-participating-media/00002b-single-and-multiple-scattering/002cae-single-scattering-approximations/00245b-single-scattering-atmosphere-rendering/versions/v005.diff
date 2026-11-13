@@ -1,0 +1,455 @@
+--- v004.md
++++ v005.md
+@@ -4,185 +4,232 @@
+ 
+ ## Overview
+-This method renders the sky and atmospheric scattering by numerically integrating single scattering along a ray through a spherical atmosphere shell, accumulating Rayleigh and Mie contributions weighted by view and light transmittance [S1, unofficial][S2, unofficial]. It solves the Radiative Transfer Equation (RTE) for a single distant light source (the sun), accounting for Rayleigh scattering, Mie scattering, and optionally Ozone absorption [S6, unofficial]. It sets itself apart from generic linear parameterizations by using non-linear sampling distributions to better distribute density near the camera [S1, unofficial], and from full multiple scattering models by ignoring indirect light bounces, making it suitable for real-time sky rendering [S6, unofficial].
++Single-Scattering Atmosphere Rendering computes the color of the sky and atmospheric haze by numerically integrating the in-scattered light from a single distant light source (the sun) along a view ray passing through a spherical atmosphere shell [S1, S6, unofficial]. It solves the Radiative Transfer Equation (RTE) under the assumption that light scatters only once before reaching the observer, accounting for Rayleigh (gas) and Mie (aerosol) scattering, as well as ozone absorption [S6, unofficial]. It sets itself apart from [Multiple Scattering Models](10687-multiple-scattering-models.md) by ignoring indirect light bounces, making it computationally efficient but inaccurate for deep atmospheres or high optical depths [S6, unofficial]. It differs from [Single Scattering Approximation](5264-single-scattering-approximation.md) by specifically modeling the spherical geometry of a planetary atmosphere with exponential density profiles [S1, S6, unofficial].
+ 
+ ## How it works
+-**Inputs:** Camera position $\mathbf{o}$, view direction $\boldsymbol{\omega}$, sun direction $\boldsymbol{\omega}_{sun}$, planet radius $R_p$, atmosphere radius $R_a$, integration step count $N$, and physical constants (scale heights, scattering coefficients).
+-**Outputs:** Scattered radiance $L_{scat}$ and transmittance $T_{view}$.
++**Inputs:**
++*   Observer position $P_O$ (typically inside the atmosphere).
++*   View direction $\omega$ (normalized vector from camera to fragment).
++*   Sun direction $\omega_{sun}$ (normalized vector from observer to sun).
++*   Planet radius $R_p$ and Atmosphere outer radius $R_a$.
++*   Scattering coefficients for Rayleigh ($\sigma_s^R$), Mie ($\sigma_s^M$), and Ozone ($\sigma_a^O$) at sea level.
++*   Scale heights for Rayleigh ($H_R$), Mie ($H_M$), and Ozone ($H_O$).
++*   Sun luminance $L_{sun}$ or ground illuminance to derive outer space luminance.
++*   Integration step count $N$ (e.g., 32–64).
++
++**Outputs:**
++*   Scattered radiance $L_{sky}$ (RGB).
++*   Transmittance $T_{view}$ (RGB, optional, for ground visibility).
+ 
+ **Data Structures:**
+-*   `sky_radiance_and_transmittance`: Struct containing `radiance` (float3) and `transmittance` (float3).
+-
+-**Physical Constants & Parameters:**
+-*   Rayleigh scale height $H_R = 8000$ m [S6, unofficial].
+-*   Mie scale height $H_M = 1200$ m [S6, unofficial].
+-*   Rayleigh scattering coefficient at sea level $\sigma_{s,R} = (5.8, 13.5, 33.1) \times 10^{-6} \text{ m}^{-1}$ [S6, unofficial].
+-*   Mie scattering coefficient at sea level $\sigma_{s,M} = 21 \times 10^{-6} \text{ m}^{-1}$ [S6, unofficial].
+-*   Ozone absorption coefficient at sea level $\sigma_{a,O} = (3.426, 8.298, 0.356) \times 0.06 \times 10^{-5} \text{ m}^{-1}$ [S6, unofficial].
+-*   Ozone scale height $H_O = 8000$ m [S6, unofficial].
+-*   Mie asymmetry factor $g = 0.76$ [S6, unofficial].
+-
+-**Step 1: Ray-Atmosphere Intersection**
+-Compute the entry ($t_{in}$) and exit ($t_{out}$) distances of the view ray $\mathbf{r}(t) = \mathbf{o} + t\boldsymbol{\omega}$ intersecting the atmosphere sphere of radius $R_a$.
+-If the ray originates inside the planet ($t_{in} < 0$), advance the start point to the planet exit and clamp $t_{out}$ to the planet intersection if the ray hits the planet [S1, unofficial][S2, unofficial].
+-If the ray misses the atmosphere ($t_{in} > t_{out}$), return zero radiance [S1, unofficial].
+-
+-**Step 2: Sampling Distribution**
+-To handle steep density gradients, use a power-law distribution for sample positions $t_i$ along the ray length $L = t_{out} - t_{in}$ [S1, unofficial]:
+-$$ t_i = \left(\frac{i}{N}\right)^E \cdot L, \quad i = 0 \dots N-1 $$
+-where the exponent $E$ depends on the ray height $h$ above the planet surface:
+-$$ E = 1 + \max\left(0, 1 - \frac{h}{H_{mod}}\right) \cdot 8 $$
+-$H_{mod}$ is a modulation height (e.g., atmosphere thickness) [S1, unofficial].
+-
+-**Step 3: Integration Loop**
+-Initialize accumulators: `optical_depth` = 0, `rayleigh` = 0, `mie` = 0.
+-For each step $i$ from 0 to $N-1$:
+-1.  **Position:** $\mathbf{p} = \mathbf{o} + t_i \boldsymbol{\omega}$.
+-2.  **Height:** $h = \|\mathbf{p}\| - R_p$.
+-3.  **Density:** Calculate exponential density profiles [S6, unofficial]:
+-    $$ \rho_R(h) = \exp\left(-\frac{\max(0, h)}{H_R}\right) $$
+-    $$ \rho_M(h) = \exp\left(-\frac{\max(0, h)}{H_M}\right) $$
+-    $$ \rho_O(h) = \exp\left(-\frac{\max(0, h)}{H_O}\right) $$
+-4.  **Coefficients:**
+-    $$ \sigma_R = \sigma_{s,R} \cdot \rho_R(h) $$
+-    $$ \sigma_M = \sigma_{s,M} \cdot \rho_M(h) $$
+-    $$ \sigma_O = \sigma_{a,O} \cdot \rho_O(h) $$
+-5.  **Optical Depth Step:**
+-    $$ \Delta \tau = (\sigma_R + 1.11 \sigma_M + \sigma_O) \cdot \Delta t $$
+-    where $\Delta t = t_i - t_{i-1}$ (with $t_{-1}=0$) [S6, unofficial].
+-    Update `optical_depth` += $\Delta \tau$.
+-6.  **Transmittances:**
+-    *   View transmittance from camera to $\mathbf{p}$: $T_{view} = \exp(-\text{optical\_depth})$.
+-    *   Light transmittance from $\mathbf{p}$ to sun: Compute the optical depth along the sun direction from $\mathbf{p}$ to the atmosphere exit $t_{sun\_out}$ (intersection of ray from $\mathbf{p}$ in direction $\boldsymbol{\omega}_{sun}$ with $R_a$). Sum the extinction coefficients along this path to get $\tau_{light}$. Then $T_{light} = \exp(-\tau_{light})$.
+-7.  **Phase Functions:**
+-    *   Cosine of scattering angle: $\mu = \boldsymbol{\omega} \cdot \boldsymbol{\omega}_{sun}$.
+-    *   Rayleigh phase: $P_R(\mu) = \frac{3}{16\pi}(1 + \mu^2)$ [S6, unofficial].
+-    *   Mie phase (Henyey-Greenstein): $P_M(\mu) = \frac{1-g^2}{4\pi(1+g^2-2g\mu)^{1.5}}$ [S6, unofficial].
+-8.  **Accumulation:**
+-    $$ \text{rayleigh} += T_{view} \cdot T_{light} \cdot P_R(\mu) \cdot \sigma_R \cdot \Delta t $$
+-    $$ \text{mie} += T_{view} \cdot T_{light} \cdot P_M(\mu) \cdot \sigma_M \cdot \Delta t $$
+-
+-**Step 4: Final Radiance**
+-$$ L_{scat} = (\text{rayleigh} \cdot \mathbf{C}_{sun} + \text{mie} \cdot \mathbf{C}_{sun}) $$
+-where $\mathbf{C}_{sun}$ is the sun color/intensity [S1, unofficial].
+-Final transmittance: $T_{final} = \exp(-\text{optical\_depth})$.
++*   `AtmosphereParams`: Struct containing $R_p, R_a, H_R, H_M, H_O, \sigma_s^R, \sigma_s^M, \sigma_a^O$.
++*   `Ray`: Origin $O$, Direction $D$, Length $L$.
++
++**Formulas:**
++1.  **Density Profile:** The density of species $i \in \{R, M, O\}$ at height $h$ above the planet surface is exponential:
++    $$ \rho_i(h) = \exp\left(-\frac{\max(0, h)}{H_i}\right) $$
++    where $h = \|P\| - R_p$ [S1, S6, unofficial].
++
++2.  **Extinction Coefficient:** The total extinction coefficient at height $h$ is:
++    $$ \sigma_t(h) = \sigma_s^R(h) + 1.11 \cdot \sigma_s^M(h) + \sigma_a^O(h) $$
++    The factor 1.11 scales Mie scattering to account for extinction differences [S6, unofficial].
++    $$ \sigma_s^R(h) = \sigma_{s,0}^R e^{-h/H_R}, \quad \sigma_s^M(h) = \sigma_{s,0}^M e^{-h/H_M}, \quad \sigma_a^O(h) = \sigma_{a,0}^O e^{-h/H_O} $$
++    Typical sea-level values: $\sigma_{s,0}^R = (5.8, 13.5, 33.1) \times 10^{-6} \, m^{-1}$, $\sigma_{s,0}^M = 21 \times 10^{-6} \, m^{-1}$, $\sigma_{a,0}^O = (3.426, 8.298, 0.356) \times 0.06 \times 10^{-5} \, m^{-1}$ [S6, unofficial]. Scale heights: $H_R=8000m, H_M=1200m, H_O=8000m$ [S6, unofficial].
++
++3.  **Phase Functions:**
++    *   Rayleigh: $P_R(\cos\theta) = \frac{3}{16\pi}(1 + \cos^2\theta)$ [S1, S6, unofficial].
++    *   Mie (Henyey-Greenstein): $P_M(\cos\theta) = \frac{1-g^2}{4\pi(1+g^2-2g\cos\theta)^{1.5}}$ with asymmetry factor $g=0.76$ [S6, unofficial].
++    *   $\cos\theta = \omega \cdot \omega_{sun}$ [S1, unofficial].
++
++4.  **Transmittance:** The transmittance from point $A$ to $B$ is:
++    $$ Tr(A \rightarrow B) = \exp\left(-\int_A^B \sigma_t(s) ds\right) $$
++    This is computed numerically by summing $\sigma_t$ at sample midpoints [S6, unofficial].
++
++5.  **Source Term:** The in-scattered source term $j(x)$ at position $x$ is:
++    $$ j(x) = L_{outerspace} \cdot Tr(outerspace \rightarrow x) \cdot \Omega_{sun} \cdot (\sigma_s^R(x)P_R + \sigma_s^M(x)P_M) $$
++    where $\Omega_{sun} \approx 0.0000664 \, sr$ [S6, unofficial]. $L_{outerspace}$ is derived from ground illuminance $E_{ground} \approx 120,000$ lux and zenith transmittance $Tr_{Zenith}$ [S6, unofficial].
++
++**Algorithm Steps:**
++1.  **Ray-Atmosphere Intersection:** Compute the entry ($t_{in}$) and exit ($t_{out}$) distances of the view ray from the atmosphere sphere. If the ray originates inside the planet, advance the start point to the planet exit [S1, S5, unofficial].
++2.  **Sample Distribution:** Generate sample positions $t_i$ along the ray. Uniform spacing is common, but power-law distribution $t_i = (\frac{i}{N})^E \cdot L$ with exponent $E$ improves convergence near the camera [S1, unofficial].
++3.  **Loop Integration:** For each sample $i$ from $0$ to $N-1$:
++    a. Calculate position $P_i = O + D \cdot t_i$.
++    b. Calculate height $h_i = \|P_i\| - R_p$.
++    c. Compute local extinction $\sigma_t(h_i)$ and scattering coefficients $\sigma_s^R(h_i), \sigma_s^M(h_i)$ [S6, unofficial].
++    d. Compute optical depth from $P_i$ to the sun's outer boundary ($\tau_{sun}$) and from $P_i$ to the observer ($\tau_{view}$) [S1, S6, unofficial].
++    e. Compute transmittances $Tr_{sun} = \exp(-\tau_{sun})$ and $Tr_{view} = \exp(-\tau_{view})$ [S1, unofficial].
++    f. Compute source term contribution: $C_i = Tr_{view} \cdot Tr_{sun} \cdot (\sigma_s^R(h_i)P_R + \sigma_s^M(h_i)P_M) \cdot \Delta t$ [S6, unofficial].
++    g. Accumulate scattered light: $L_{sky} += C_i \cdot L_{outerspace} \cdot \Omega_{sun}$ [S6, unofficial].
++4.  **Direct Sun:** Add direct sun disk luminance if visible: $L_{sun} = disk(\theta) \cdot L_{outerspace} \cdot Tr(O \rightarrow outerspace)$ [S6, unofficial].
++5.  **Composite:** Final color $C = L_{sky} + L_{sun}$ [S6, unofficial]. Apply tone mapping (e.g., ACES Filmic) [S1, S5, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def single_scattering_atmosphere(ray_origin, ray_dir, sun_dir, planet_radius, atmosphere_radius, step_count):
+-    # 1. Intersect with atmosphere
+-    t_in, t_out = ray_sphere_intersection(ray_origin, ray_dir, atmosphere_radius)
+-    
+-    # Handle ray starting inside planet
++def compute_single_scattering_atmosphere(observer_pos, view_dir, sun_dir, params):
++    """
++    observer_pos: vec3, position of the camera/observer
++    view_dir: vec3, normalized view direction
++    sun_dir: vec3, normalized direction to the sun
++    params: dict containing R_p, R_a, H_R, H_M, H_O, sigma_s_R0, sigma_s_M0, sigma_a_O0, L_outerspace, Omega_sun, N
++    """
++    R_p = params['R_p']
++    R_a = params['R_a']
++    H_R = params['H_R']
++    H_M = params['H_M']
++    H_O = params['H_O']
++    sigma_s_R0 = params['sigma_s_R0']
++    sigma_s_M0 = params['sigma_s_M0']
++    sigma_a_O0 = params['sigma_a_O0']
++    L_outerspace = params['L_outerspace']
++    Omega_sun = params['Omega_sun']
++    N = params['N']
++
++    # 1. Ray-Atmosphere Intersection
++    # Solve ||observer_pos + t * view_dir||^2 = R_a^2
++    # a = 1, b = 2 * dot(observer_pos, view_dir), c = dot(observer_pos, observer_pos) - R_a^2
++    a = 1.0
++    b = 2.0 * dot(observer_pos, view_dir)
++    c = dot(observer_pos, observer_pos) - R_a * R_a
++    discriminant = b * b - 4 * a * c
++    
++    if discriminant < 0:
++        return vec3(0.0) # No intersection
++
++    sqrt_disc = sqrt(discriminant)
++    t_in = (-b - sqrt_disc) / (2 * a)
++    t_out = (-b + sqrt_disc) / (2 * a)
++
++    # Handle observer inside planet or atmosphere
+     if t_in < 0:
+-        # Advance to planet surface if hitting planet, else clamp to 0
+-        t_planet_in, t_planet_out = ray_sphere_intersection(ray_origin, ray_dir, planet_radius)
++        t_in = 0.0 # Start from observer if inside atmosphere
++    
++    # If observer is inside planet, advance to surface exit (simplified)
++    # Check intersection with planet surface
++    c_planet = dot(observer_pos, observer_pos) - R_p * R_p
++    disc_planet = b * b - 4 * a * c_planet
++    if disc_planet >= 0:
++        t_planet_in = (-b - sqrt(disc_planet)) / (2 * a)
++        t_planet_out = (-b + sqrt(disc_planet)) / (2 * a)
+         if t_planet_out > 0:
+-            t_in = max(t_in, t_planet_out) # Start from planet exit
++            # Observer inside planet, start at exit
++            t_in = max(t_in, t_planet_out)
++            t_out = max(t_out, t_planet_out)
++    
++    if t_in >= t_out:
++        return vec3(0.0)
++
++    ray_length = t_out - t_in
++    if ray_length <= 0:
++        return vec3(0.0)
++
++    # 2. Integration
++    scattered_light = vec3(0.0)
++    
++    # Precompute phase functions
++    cos_theta = dot(view_dir, sun_dir)
++    P_R = (3.0 / (16.0 * PI)) * (1.0 + cos_theta * cos_theta)
++    g = 0.76
++    denom = 1.0 + g * g - 2.0 * g * cos_theta
++    P_M = (1.0 - g * g) / (4.0 * PI * pow(denom, 1.5))
++
++    for i in range(N):
++        # Sample position (uniform)
++        t = t_in + (i + 0.5) * (ray_length / N)
++        pos = observer_pos + view_dir * t
++        height = length(pos) - R_p
++        
++        # Density and Coefficients
++        rho_R = exp(-max(0.0, height) / H_R)
++        rho_M = exp(-max(0.0, height) / H_M)
++        rho_O = exp(-max(0.0, height) / H_O)
++        
++        sigma_s_R = sigma_s_R0 * rho_R
++        sigma_s_M = sigma_s_M0 * rho_M
++        sigma_a_O = sigma_a_O0 * rho_O
++        
++        sigma_t = sigma_s_R + 1.11 * sigma_s_M + sigma_a_O
++        
++        # Optical Depth to Sun
++        # Ray from pos in sun_dir to atmosphere boundary
++        b_sun = 2.0 * dot(pos, sun_dir)
++        c_sun = dot(pos, pos) - R_a * R_a
++        disc_sun = b_sun * b_sun - 4 * c_sun
++        if disc_sun > 0:
++            t_sun = (-b_sun - sqrt(disc_sun)) / 2.0
++            if t_sun > 0:
++                dist_to_sun = t_sun
++            else:
++                dist_to_sun = 0.0 # Sun direction doesn't exit atmosphere forward?
+         else:
+-            t_in = 0
++            dist_to_sun = 0.0
+             
+-    if t_in >= t_out:
+-        return 0.0, 1.0 # Missed atmosphere or inside planet without exit
+-
+-    ray_length = t_out - t_in
+-    current_t = t_in
+-    
+-    # 2. Setup constants
+-    Hr = 8000.0
+-    Hm = 1200.0
+-    Ho = 8000.0
+-    sigma_s_R = vec3(5.8, 13.5, 33.1) * 1e-6
+-    sigma_s_M = vec3(21.0, 21.0, 21.0) * 1e-6
+-    sigma_a_O = vec3(3.426, 8.298, 0.356) * 0.06 * 1e-5
+-    g = 0.76
+-    pi = 3.14159265359
+-    
+-    # Modulation height for sampling exponent (e.g., atmosphere thickness)
+-    H_mod = atmosphere_radius - planet_radius
+-    
+-    # 3. Integration
+-    optical_depth = 0.0
+-    rayleigh_acc = vec3(0.0)
+-    mie_acc = vec3(0.0)
+-    
+-    # Pre-calculate sun intersection from origin to get light path length? 
+-    # No, light transmittance is per sample point.
+-    
+-    for i in range(step_count):
+-        # Power-law sampling
+-        exponent = 1.0 + max(0.0, 1.0 - (length(ray_origin + current_t * ray_dir) - planet_radius) / H_mod) * 8.0
+-        t_sample = t_in + pow(float(i) / float(step_count), exponent) * ray_length
+-        
+-        # Step size
+-        dt = t_sample - current_t
+-        current_t = t_sample
+-        
+-        # Position and Height
+-        p = ray_origin + current_t * ray_dir
+-        h = length(p) - planet_radius
+-        
+-        # Densities
+-        rho_R = exp(-max(0.0, h) / Hr)
+-        rho_M = exp(-max(0.0, h) / Hm)
+-        rho_O = exp(-max(0.0, h) / Ho)
+-        
+-        # Coefficients
+-        s_R = sigma_s_R * rho_R
+-        s_M = sigma_s_M * rho_M
+-        s_O = sigma_a_O * rho_O
+-        
+-        # Optical depth step
+-        sigma_t = s_R + 1.11 * s_M + s_O
+-        optical_depth += dot(sigma_t, vec3(1.0)) * dt # Assuming scalar OD for T, but T is vec3 exp(-OD)
+-        # Note: Transmittance is component-wise exp(-OD)
+-        
+-        # View Transmittance
+-        T_view = exp(-optical_depth) # Component-wise
+-        
+-        # Light Transmittance
+-        # Intersect ray from p in sun_dir with atmosphere
+-        t_sun_in, t_sun_out = ray_sphere_intersection(p, sun_dir, atmosphere_radius)
+-        # If sun is behind, t_sun_in might be negative, but we only care about path out
+-        # If ray misses, T_light = 1 (no attenuation) or 0? Usually 1 if no atmosphere in path.
+-        if t_sun_out > 0:
+-            # Integrate optical depth from p to t_sun_out
+-            # Simplified: assume constant sigma_t over small step? No, need integration.
+-            # For implementation, use a fixed number of steps for light path or analytical approximation.
+-            # Here we use a simplified single-step approximation for the light path from p to exit
+-            # Or use the same density profile logic.
+-            # Let's use a helper function for light OD
+-            tau_light = integrate_optical_depth(p, sun_dir, t_sun_out, planet_radius, Hr, Hm, Ho, sigma_s_R, sigma_s_M, sigma_a_O)
+-            T_light = exp(-tau_light)
++        # Integrate sigma_t from pos to sun_exit
++        # Simplified: assume sigma_t is constant over the short segment or use midpoint
++        # For accuracy, integrate along sun ray. Here we approximate with one step or loop.
++        # Using one step for simplicity as per [S6, unofficial] snippet logic for j(x)
++        sun_exit_pos = pos + sun_dir * dist_to_sun
++        # Average sigma_t along sun path (midpoint)
++        mid_sun = (pos + sun_exit_pos) / 2.0
++        h_mid_sun = length(mid_sun) - R_p
++        rho_R_mid = exp(-max(0.0, h_mid_sun) / H_R)
++        rho_M_mid = exp(-max(0.0, h_mid_sun) / H_M)
++        rho_O_mid = exp(-max(0.0, h_mid_sun) / H_O)
++        sigma_t_mid = sigma_s_R0 * rho_R_mid + 1.11 * sigma_s_M0 * rho_M_mid + sigma_a_O0 * rho_O_mid
++        
++        tau_sun = sigma_t_mid * dist_to_sun
++        Tr_sun = exp(-tau_sun)
++        
++        # Optical Depth to Observer (from pos to observer)
++        # Distance is t (since observer is at 0 relative to ray start? No, observer is at origin of ray)
++        # Distance from pos to observer is t
++        tau_view = sigma_t * t # Approximation using local sigma_t
++        Tr_view = exp(-tau_view)
++        
++        # Source Term Contribution
++        # j(x) * Tr_view * dt
++        # j(x) = L_outerspace * Tr_sun * Omega_sun * (sigma_s_R * P_R + sigma_s_M * P_M)
++        # Note: Tr_sun in j(x) is from outer space to x. We approximated it as Tr(pos->sun_exit).
++        # Actually, Tr(outerspace->x) = Tr(pos->sun_exit) if pos is on the ray from sun_exit to observer?
++        # Standard formulation: Tr(outerspace->x) is transmittance from sun direction.
++        
++        scattering_coeff = sigma_s_R * P_R + sigma_s_M * P_M
++        source = L_outerspace * Tr_sun * Omega_sun * scattering_coeff
++        contribution = source * Tr_view * (ray_length / N)
++        
++        scattered_light += contribution
++
++    # Direct Sun
++    # Check if sun is visible
++    angle = acos(clamp(cos_theta, -1.0, 1.0))
++    sun_radius = radians(0.53 / 2.0)
++    disk = 1.0 - smoothstep(sun_radius * 0.95, sun_radius * 1.05, angle)
++    
++    # Transmittance from observer to outer space in sun direction
++    # Reuse dist_to_sun calculation logic
++    b_sun_obs = 2.0 * dot(observer_pos, sun_dir)
++    c_sun_obs = dot(observer_pos, observer_pos) - R_a * R_a
++    disc_sun_obs = b_sun_obs * b_sun_obs - 4 * c_sun_obs
++    if disc_sun_obs > 0:
++        t_sun_obs = (-b_sun_obs - sqrt(disc_sun_obs)) / 2.0
++        if t_sun_obs > 0:
++            dist_obs_sun = t_sun_obs
+         else:
+-            T_light = vec3(1.0)
+-            
+-        # Phase Functions
+-        mu = dot(ray_dir, sun_dir)
+-        P_R = (3.0 / (16.0 * pi)) * (1.0 + mu * mu)
+-        denom = 1.0 + g*g - 2.0*g*mu
+-        P_M = (1.0 - g*g) / (4.0 * pi * pow(denom, 1.5))
+-        
+-        # Accumulate
+-        rayleigh_acc += T_view * T_light * P_R * s_R * dt
+-        mie_acc += T_view * T_light * P_M * s_M * dt
+-        
+-    # Final Radiance
+-    # Sun intensity/color is applied here
+-    return rayleigh_acc + mie_acc, exp(-optical_depth)
+-
+-def integrate_optical_depth(start_pos, dir, max_t, planet_radius, Hr, Hm, Ho, sigma_s_R, sigma_s_M, sigma_a_O):
+-    # Simplified integration: sample midpoints
+-    steps = 8
+-    ds = max_t / steps
+-    tau = vec3(0.0)
+-    for i in range(steps):
+-        s = start_pos + (i + 0.5) * ds * dir
+-        h = length(s) - planet_radius
+-        rho_R = exp(-max(0.0, h) / Hr)
+-        rho_M = exp(-max(0.0, h) / Hm)
+-        rho_O = exp(-max(0.0, h) / Ho)
+-        sigma_t = sigma_s_R * rho_R + 1.11 * sigma_s_M * rho_M + sigma_a_O * rho_O
+-        tau += sigma_t * ds
+-    return tau
++            dist_obs_sun = 0.0
++    else:
++        dist_obs_sun = 0.0
++        
++    # Integrate sigma_t from observer to sun_exit
++    sun_exit_obs = observer_pos + sun_dir * dist_obs_sun
++    mid_obs = (observer_pos + sun_exit_obs) / 2.0
++    h_mid_obs = length(mid_obs) - R_p
++    rho_R_mid_obs = exp(-max(0.0, h_mid_obs) / H_R)
++    rho_M_mid_obs = exp(-max(0.0, h_mid_obs) / H_M)
++    rho_O_mid_obs = exp(-max(0.0, h_mid_obs) / H_O)
++    sigma_t_mid_obs = sigma_s_R0 * rho_R_mid_obs + 1.11 * sigma_s_M0 * rho_M_mid_obs + sigma_a_O0 * rho_O_mid_obs
++    tau_obs = sigma_t_mid_obs * dist_obs_sun
++    Tr_obs = exp(-tau_obs)
++    
++    direct_sun = disk * L_outerspace * Tr_obs
++    
++    return scattered_light + direct_sun
+ ```
+ 
+@@ -190,35 +237,35 @@
+ 
+ ### [Sky View LUT with Angular Compression](6648-sky-view-lut-with-angular-compression.md)
+-A technique for rendering sky and atmosphere using a precomputed Look-Up Table (LUT) with angular compression, ported from a reference implementation. It sets itself apart from generic linear parameterizations by using non-linear mappings for altitude and angles to better distribute sampling density according to the physical behavior of light scattering in spherical atmospheres, building on [Single-Scattering Atmosphere Rendering](3289-single-scattering-atmosphere-rendering.md).
++A technique for rendering sky and atmosphere using a precomputed Look-Up Table (LUT) with angular compression, ported from a reference implementation. It builds on [Single-Scattering Atmosphere Rendering](3289-single-scattering-atmosphere-rendering.md) by storing precomputed radiance values in a compressed texture space for efficient runtime lookup.
+ 
+ ### [Spectral Scattering Model for Atmosphere](9399-spectral-scattering-model-for-atmosphere.md)
+-This method provides a physically-based, fully spectral real-time rendering model for planetary atmospheres and large-scale water bodies, accounting for direct illumination, indirect scattered light, interreflections between surface and volume, and seabed reflections. It distinguishes itself from its siblings by utilizing fully spectral computations (rather than RGB) and supporting arbitrarily dense atmospheres and water bodies within a single precomputation framework, whereas [Sky View LUT with Angular Compression](6648-sky-view-lut-with-angular-compression.md) focuses on angular compression for sky views without the coupled water body simulation.
++This method visualizes the Earth from outer space by simulating light transport through a planetary atmosphere and large water bodies, accounting for Rayleigh and Mie scattering, direct illumination, indirect scattered light, interreflections between surface and volume, and seabed reflections. It sets itself apart from its siblings by employing fully spectral computations (precomputed into lookup tables) to achieve high realism in color reproduction, supporting arbitrarily dense atmospheres and water surfaces within a single precomputation framework for real-time GPU rendering. Unlike [Single-Scattering Atmosphere Rendering](3289-single-scattering-atmosphere-rendering.md), which focuses on single scattering approximations, this method computes multiple scattering orders (typically up to 6) and integrates water body optics.
+ 
+ ### Water Scattering Precomputation
+-Uses different physical constants and parameterization for the water texture compared to atmospheric scattering [S3]. Incident light for water is attenuated through the atmosphere: $I_0^I(\lambda) = I^I(\lambda)e^{-t(P_g P, \lambda)}$ [S3]. The 4D water scattering texture is reduced to a 3D texture for rendering by using only the subset corresponding to observer depth $d=0$m [S3]. If observers below the water surface are needed, the full 4D texture can be used [S3]. For low accuracy requirements, only the first scattering order is needed because water is a weakly scattering medium [S3].
++Uses different physical constants and parameterization for the water texture compared to atmospheric scattering [S3]. Incident light for water is attenuated through the atmosphere: $I_0^I(\lambda) = I^I(\lambda)e^{-t(P_g P, \lambda)}$ [S3]. The 4D water scattering texture is reduced to a 3D texture for rendering by using only the subset corresponding to observer depth $d=0$m [S3]. If observers below the water surface are needed, the full 4D texture can be used, fetching based on observer depth $d$ [S3]. For low accuracy requirements, only the first scattering order is needed for water because it is a weakly scattering medium [S3].
+ 
+ ### Water Scattering Model
+-Similar to atmospheric scattering but the volume is between water level and seabed. Water has significant absorption (mainly red) and constant density, so the density scale function $\rho$ is removed [S3]. Attenuation coefficient: $t^{\text{water}}(S, \lambda) = \|S\| (\zeta^a + \zeta^b)(\lambda)$ [S3]. Mie scattering is not explicitly modeled in water because data for seawater is unavailable and it is strongly anisotropic [S3].
++Water scattering model is similar to atmospheric but volume is between water level and seabed. Water has significant absorption (mainly red) and constant density [S3]. Terms for water are indicated with superscript 'water'. Density scale function $\rho$ is removed from equations [S3]. Water attenuation coefficient: $t^{\text{water}}(S, \lambda) = \|S\| (\zeta^a + \zeta^b)(\lambda)$ [S3]. Absorption and scattering coefficients for clear water ($\zeta_a, \zeta_s$) from [Buiteveld et al. 1994], sampled at 2nm [S3]. Mie scattering is not explicitly modeled in water because data for seawater is unavailable and it is strongly anisotropic (forward lobe), only noticeable looking towards light source. Since observers are above water level, it is neglected [S3].
+ 
+ ### Jackèl and Walter Atmospheric Rendering
+-Highly realistic atmospheric rendering, allowing modeling of real world atmospheres (composed by ozone, haze, dust, soot, sulphur acid, etc.) [S8]. Combines four sub-models (clear air, aerosol, ozone, rain layer) to determine atmospheric model [S8]. Accounts for both Rayleigh and Mie scattering and approximates second order scattering [S8]. Authors do not explain how the second order scattering approximation is performed [S8].
++Highly realistic atmospheric rendering, allowing modeling of real world atmospheres (composed by ozone, haze, dust, soot, sulphur acid, etc.) [S8]. Combine four sub-models, consisting of a number of concentric shells, to determine atmospheric model: clear air, aerosol, ozone and rain layer [S8]. Account for both Rayleigh and Mie scattering [S8]. Approximate second order scattering to obtain more accurate results [S8]. Authors do not explain how the second order scattering approximation is performed [S8].
+ 
+ ### Preetham Sky Model
+-Considers the rendering of outdoor scenes including sunlight and skylight, and the effects of aerial perspective [S8]. Computes the sky spectral radiance function for a set of sun positions and turbidities (using the method of Nishita et al. [59]), then fits a parametric function [S8]. Wilkie et al. propose a simple analytical model for skylight polarisation to be added to Preetham’s skylight model [S8].
++Considered the rendering of outdoor scenes including sunlight and skylight, and the effects of aerial perspective (de-saturation and color shift of distant objects). Two inexpensive analytic models are developed [S8]. Compute the sky spectral radiance function for a set of sun positions and turbidities (using the method of Nishita et al. [59]), then fit a parametric function [S8]. Wilkie et al. propose a simple analytical model for skylight polarisation to be added to Preetham’s skylight model [S8].
+ 
+ ### Jensen Nighttime Sky Rendering
+-Rendering of nighttime sky including illumination from the Moon, stars, zodiacal light, and atmosphere [S8]. Uses the atmospheric model and scattering phase functions of Nishita [59] [S8]. Simulates transport with multiple scattering combining distribution ray-tracing and ray-marching [S8].
++Rendering of nighttime sky including illumination from the Moon, stars, zodiacal light, and atmosphere [S8]. Use the atmospheric model and scattering phase functions of Nishita [59] [S8]. Simulate transport with multiple scattering combining distribution ray-tracing and ray-marching [S8]. As the ray traverses the atmosphere, use ray-marching to integrate optical-depth sampling the in-scattered indirect radiance and the direct illumination in random positions [S8].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(STEPS)$ per pixel for the luminance integral and $O(STEPS)$ for transmittance calculations, where STEPS is the number of integration segments [S6, unofficial].
+-*   **Memory Complexity:** $O(1)$ if computed per-pixel; $O(N)$ if precomputed into a LUT.
+-*   **Performance:** Real-time capable with low step counts (e.g., 18-64 steps) [S1, unofficial][S2, unofficial].
+-*   **Strengths:** Physically plausible sky colors, handles sun position dynamically, efficient for single scattering.
+-*   **Limitations:** Ignores multiple scattering, which causes inaccuracies in deep atmospheres or high optical depths [S6, unofficial]. Approximations in light transmittance integration can introduce errors.
+-*   **When to use:** Real-time sky rendering, planetary visualization.
+-*   **When not to use:** Scenes requiring accurate deep atmospheric scattering or volumetric fog within the atmosphere.
++*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of integration steps (typically 32–64) [S6, unofficial].
++*   **Memory Complexity:** $O(1)$ if computed per-pixel; $O(1)$ for LUT variants if texture size is fixed [S1, S6, unofficial].
++*   **Performance:** Real-time on modern GPUs for $N \le 64$ [S6, unofficial].
++*   **Strengths:** Physically plausible colors, efficient, handles sun position and atmospheric depth correctly [S6, unofficial].
++*   **Limitations:** Ignores multiple scattering, leading to dark skies in deep atmospheres or near the horizon in high optical depth scenarios [S6, unofficial].
++*   **When to Use:** Real-time sky rendering, games, VR [S6, unofficial].
++*   **When Not to Use:** Cinematic rendering requiring high dynamic range and deep atmosphere realism, underwater scenes (use Water Scattering Model) [S3][S6, unofficial].
+ 
+ ## Background
+-Originated from Nishita et al.'s physical sky model [S3][S8]. Used in real-time sky rendering, specifically referenced in Sébastien Hillaire's 2016 course and 2020 paper, and Scratch a Pixel tutorial [S6, unofficial].
++Originated from Nishita et al. (1993) "Display of the Earth from Space" [S3, S8]. It is a foundational method for realistic sky rendering in computer graphics. Used in real-time sky rendering, specifically referenced in Sébastien Hillaire's 2016 course and 2020 paper, and Scratch a Pixel tutorial [S6, unofficial].
+ 
+ ## Sources

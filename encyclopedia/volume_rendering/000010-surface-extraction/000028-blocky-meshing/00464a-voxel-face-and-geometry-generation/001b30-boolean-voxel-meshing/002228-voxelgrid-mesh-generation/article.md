@@ -3,21 +3,21 @@
 Also called: getAllCellMeshWithCond, getAllCellMeshWithIds
 
 ## Overview
-VoxelGrid Mesh Generation constructs a combined triangle mesh from a sparse set of voxels within a `VoxelGrid` by instantiating a base cell geometry for each selected voxel and transforming it into world space. It solves the problem of converting a boolean voxel occupancy grid or a filtered subset of voxels into an explicit triangular mesh representation. Unlike [Boolean Voxel Meshing](971-boolean-voxel-meshing.md), which detects shared faces at voxel boundaries to produce a watertight manifold, this method treats each voxel as an independent object, resulting in a non-manifold mesh where vertices are not shared between adjacent voxels. This approach is distinct from [Voxel Grid to Triangle Mesh Conversion](6291-voxel-grid-to-triangle-mesh-conversion.md) and [Blocky Surface Extraction](6418-blocky-surface-extraction.md) in its explicit duplication of geometry per voxel rather than merging boundary surfaces.
+VoxelGrid Mesh Generation constructs a combined triangle mesh from a sparse set of voxels within a `VoxelGrid` by instantiating a base cell geometry for each selected voxel and transforming it into world space [S1, S2, unofficial]. It solves the problem of converting a boolean voxel occupancy grid or a filtered subset of voxels into an explicit triangular mesh representation [S2, unofficial]. Unlike [Boolean Voxel Meshing](971-boolean-voxel-meshing.md), which detects shared faces at voxel boundaries to produce a watertight manifold, this method treats each voxel as an independent object, resulting in a non-manifold mesh where vertices are not shared between adjacent voxels [G]. This approach is distinct from [Voxel Grid to Triangle Mesh Conversion](6291-voxel-grid-to-triangle-mesh-conversion.md) and [Blocky Surface Extraction](6418-blocky-surface-extraction.md) in its explicit duplication of geometry per voxel rather than merging boundary surfaces [G].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input**: A `VoxelGrid` data structure containing voxel data, a list of voxel linear IDs (`cell_ids`) or a predicate function (`func`) to identify active voxels, and a base cell mesh geometry (`baseCellMesh` or `baseCellMeshFilled`).
-*   **Output**: A `Mesh` object containing a flattened vertex array and a triangle index array representing the union of all selected voxel meshes.
+*   **Input**: A `VoxelGrid` data structure containing voxel data, a list of voxel linear IDs (`cell_ids`) or a predicate function (`func`) to identify active voxels, and a base cell mesh geometry (`baseCellMesh` or `baseCellMeshFilled`) [S1, S2, unofficial].
+*   **Output**: A `Mesh` object containing a flattened vertex array and a triangle index array representing the union of all selected voxel meshes [S1, S2, unofficial].
 
 **Data Structures**
 *   **VoxelGrid**: Stores voxels in a linear `std::vector<CellType> data`. Access is provided via linear index `operator[](size_t)` or 3D coordinates `operator()(int x, int y, int z)`, where the latter computes the linear ID internally [S2, unofficial].
 *   **Base Cell Mesh**: A static mesh definition for a single voxel cell. It contains:
     *   `vertices()`: An array of $N_v$ 3D vertices (typically unit cube vertices).
-    *   `triangles()`: An array of $N_t$ triangles, where each triangle is defined by 3 vertex indices.
+    *   `triangles()`: An array of $N_t$ triangles, where each triangle is defined by 3 vertex indices [S1, S2, unofficial].
 *   **Output Mesh**:
     *   `vs`: A flat array of size $N_{v,total} = N_{nonZero} \times N_v$.
-    *   `ts`: A flat array of size $N_{t,total} = N_{nonZero} \times N_t$.
+    *   `ts`: A flat array of size $N_{t,total} = N_{nonZero} \times N_t$ [S1, S2, unofficial].
 
 **Parameters**
 *   `filled`: Boolean flag. If `true`, uses the faceted (solid) base mesh; if `false`, uses the wireframe base mesh [S1, S2, unofficial].
@@ -45,14 +45,31 @@ VoxelGrid Mesh Generation constructs a combined triangle mesh from a sparse set 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def generate_voxel_grid_mesh(voxel_grid, cell_ids, base_mesh, cell_size, filled):
+class Mesh:
+    def __init__(self, vertices, triangles):
+        self.vertices = vertices
+        self.triangles = triangles
+
+class VoxelGrid:
+    def __init__(self, width, height, depth):
+        self.width = width
+        self.height = height
+        self.depth = depth
+    def get_coords(self, linear_id):
+        x = linear_id % self.width
+        y = (linear_id // self.width) % self.height
+        z = linear_id // (self.width * self.height)
+        return (x, y, z)
+
+def generate_voxel_grid_mesh(voxel_grid, cell_ids, base_vertices, base_triangles, cell_size, filled):
     """
     Generates a combined triangle mesh from a list of voxel linear IDs.
     
     Args:
-        voxel_grid: Object with operator[](size_t) returning CellType.
+        voxel_grid: Grid object providing get_coords(linear_id).
         cell_ids: List of linear voxel indices to process.
-        base_mesh: Object with vertices() and triangles() methods.
+        base_vertices: List of 3D tuples for the base cell mesh.
+        base_triangles: List of 3-tuples of vertex indices for the base cell mesh.
         cell_size: Float, size of one voxel in world units.
         filled: Boolean, if True use faceted mesh, else wireframe.
         
@@ -64,14 +81,11 @@ def generate_voxel_grid_mesh(voxel_grid, cell_ids, base_mesh, cell_size, filled)
     num_non_zero = len(active_ids)
     
     # Step 2: Select base geometry
-    # Note: In a real implementation, base_mesh would be swapped based on 'filled'
-    base_vertices = base_mesh.vertices()
-    base_triangles = base_mesh.triangles()
+    # Note: In a real implementation, base_vertices/base_triangles would be swapped based on 'filled'
     num_v = len(base_vertices)
     num_t = len(base_triangles)
     
     # Step 3: Allocate output arrays
-    # Flattened arrays: [voxel_0_v0, voxel_0_v1, ..., voxel_1_v0, ...]
     output_vertices = [None] * (num_non_zero * num_v)
     output_triangles = [None] * (num_non_zero * num_t)
     
@@ -82,13 +96,9 @@ def generate_voxel_grid_mesh(voxel_grid, cell_ids, base_mesh, cell_size, filled)
     # Step 5: Iterate and transform
     for i, cell_id in enumerate(active_ids):
         # a. Retrieve 3D coordinates
-        # Assuming voxel_grid provides a method to get 3D coords from linear ID
-        # If not, this step requires inverse mapping or grid traversal.
-        # Based on [S2, unofficial], we assume we can get cell coordinates.
-        cell_coords = voxel_grid.get_cell_coordinates(cell_id)
+        cell_coords = voxel_grid.get_coords(cell_id)
         
         # b. Compute world-space vertex offset
-        # offsetV = cell.cast<float>() * cell_size
         offset_v = (
             cell_coords[0] * cell_size,
             cell_coords[1] * cell_size,
@@ -97,9 +107,8 @@ def generate_voxel_grid_mesh(voxel_grid, cell_ids, base_mesh, cell_size, filled)
         
         # c. Transform Vertices
         for j in range(num_v):
-            # v_out[i * num_v + j] = base_vertices[j] + offset_v
             base_v = base_vertices[j]
-            output_vertices[i * num_v + j] = (
+            output_vertices[i * num_v + j] (
                 base_v[0] + offset_v[0],
                 base_v[1] + offset_v[1],
                 base_v[2] + offset_v[2]
@@ -107,7 +116,6 @@ def generate_voxel_grid_mesh(voxel_grid, cell_ids, base_mesh, cell_size, filled)
             
         # d. Transform Triangles
         for k in range(num_t):
-            # t_out[i * num_t + k] = base_triangles[k] + offset_t
             base_t = base_triangles[k]
             output_triangles[i * num_t + k] = (
                 base_t[0] + offset_t[0],
@@ -121,25 +129,25 @@ def generate_voxel_grid_mesh(voxel_grid, cell_ids, base_mesh, cell_size, filled)
 
 **Edge Cases and Pitfalls**
 *   **Index Collision**: Triangle vertex indices must be incremented by $i \times N_v$ for the $i$-th voxel. Failure to do so causes all voxels to reference the same set of vertices (those of the first voxel), resulting in a collapsed or incorrect mesh [S1, S2, unofficial].
-*   **Coordinate Mapping**: The method assumes efficient retrieval of 3D integer coordinates from linear voxel IDs. If the `VoxelGrid` does not support direct coordinate lookup, an inverse mapping or grid traversal is required [S2, unofficial].
-*   **Non-Manifold Geometry**: Because vertices are not shared, adjacent voxels will have duplicate vertices at their boundaries. This produces a non-watertight, non-manifold mesh, which may be unsuitable for physics simulations or boolean operations but is efficient for visualization [S1, unofficial].
+*   **Coordinate Mapping**: The method assumes efficient retrieval of 3D integer coordinates from linear voxel IDs. The `VoxelGrid` data structure explicitly supports direct coordinate lookup via `operator()(int x, int y, int z)` or equivalent methods, avoiding the need for inverse mapping [S2, unofficial].
+*   **Non-Manifold Geometry**: Because vertices are not shared, adjacent voxels will have duplicate vertices at their boundaries [G].
 
 ## Subtopics
 
 ### [Voxels Grid to Mesh Conversion (Uncolored/Expanded)](8733-voxels-grid-to-mesh-conversion-uncolored-expanded.md)
-Converts a voxel grid into an expanded mesh where each occupied voxel is an independent cube. Unlike marching cubes, it does not share vertices, creating a blocky, non-manifold mesh suitable for visualization or collision detection where vertex sharing is undesirable.
+Converts a voxel grid into an expanded mesh representation where each occupied voxel is converted into a full cube with 8 vertices and 12 faces (6 sides, 2 triangles per side). This method does not share vertices between voxels, resulting in a "blocky" or faceted appearance distinct from smooth surface extraction methods like Marching Cubes. It serves as the foundational geometry generation step for [RealityKit Voxel Mesh Generation](8784-realitykit-voxel-mesh-generation.md), which packs this expanded geometry into a single draw call.
 
 ## Operating characteristics
-*   **Time Complexity**: $O(N \cdot V)$, where $N$ is the number of active voxels and $V$ is the number of vertices in the base cell mesh. The process is linear with respect to the number of selected voxels.
-*   **Memory Complexity**: $O(N \cdot V)$ for vertices and $O(N \cdot T)$ for triangles, where $T$ is the number of triangles in the base cell mesh. Memory usage scales linearly with the number of voxels.
-*   **Performance**: The method is computationally inexpensive as it involves simple arithmetic transformations and array copying without complex geometric intersection calculations or topological merging.
-*   **Strengths**: Simple implementation, fast execution, no need for complex boundary detection or mesh merging algorithms.
-*   **Limitations**: Produces non-manifold geometry with redundant vertices at voxel boundaries. Not suitable for applications requiring watertight meshes or smooth surface approximations.
-*   **When to Use**: Visualization of voxel data, simple collision detection where individual voxel boundaries are not critical, or as an intermediate step in more complex pipelines.
-*   **When Not to Use**: When a watertight, manifold mesh is required, or when memory efficiency is critical for large voxel grids (due to vertex duplication).
+*   **Time Complexity**: $O(N \cdot V)$, where $N$ is the number of active voxels and $V$ is the number of vertices in the base cell mesh [G].
+*   **Memory Complexity**: $O(N \cdot V)$ for vertices and $O(N \cdot T)$ for triangles, where $T$ is the number of triangles in the base cell mesh [G].
+*   **Performance**: The method is computationally inexpensive as it involves simple arithmetic transformations and array copying without complex geometric intersection calculations or topological merging [G].
+*   **Strengths**: Simple implementation, fast execution, no need for complex boundary detection or mesh merging algorithms [G].
+*   **Limitations**: Produces non-manifold geometry with redundant vertices at voxel boundaries [G].
+*   **When to Use**: Visualization of voxel data, simple collision detection where individual voxel boundaries are not critical, or as an intermediate step in more complex pipelines [G].
+*   **When Not to Use**: When a watertight, manifold mesh is required, or when memory efficiency is critical for large voxel grids (due to vertex duplication) [G].
 
 ## Background
-VoxelGrid Mesh Generation is a technique used in voxel-based rendering and processing pipelines, particularly in contexts where explicit mesh representation of voxel data is needed without the overhead of manifold extraction. It is associated with implementations in libraries such as `sibr` (Simple Interactive Rendering) and has been referenced in unofficial repositories related to Gaussian Splatting optimizations (e.g., `3DGS-FLoD`, `whu-lyh/flod`) for generating blocky mesh representations of voxelized data [S1, S2, unofficial]. The method relies on the fundamental property of voxel grids that each cell is an independent unit, allowing for straightforward instantiation and transformation.
+VoxelGrid Mesh Generation is a technique used in voxel-based rendering and processing pipelines, particularly in contexts where explicit mesh representation of voxel data is needed without the overhead of manifold extraction [S1, S2, unofficial]. It is associated with implementations in libraries such as `sibr` (Simple Interactive Rendering) [S1, S2, unofficial]. The method relies on the fundamental property of voxel grids that each cell is an independent unit, allowing for straightforward instantiation and transformation [S1, S2, unofficial]. Not given in the sources.
 
 ## Sources
 [S1] 3DGS-FLoD/flod, https://github.com/3DGS-FLoD/flod, fetched 2026-10-27 (unofficial)

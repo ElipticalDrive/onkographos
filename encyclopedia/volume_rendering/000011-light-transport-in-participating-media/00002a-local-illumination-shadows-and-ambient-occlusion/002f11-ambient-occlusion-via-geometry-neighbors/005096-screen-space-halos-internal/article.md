@@ -1,0 +1,151 @@
+# Screen-space Halos (Internal)
+
+Also called: Depth-based Halo Generation, Internal Halos, VOM Halo Rendering, Vicinity Occlusion Map Halo Rendering
+
+## Overview
+Screen-space Halos (Internal) is a post-processing technique that enhances the perception of volume structure by rendering halos over non-background (internal) pixels based on local depth discontinuities [S1, unofficial]. Unlike basic halos which highlight object boundaries against the background, internal halos emphasize depth variations within the volume itself, such as the edges of internal structures or spikes [S1, unofficial]. It sets itself apart from sibling methods like [Voxel Ambient Occlusion](6646-voxel-ambient-occlusion.md) by operating entirely in screen space using depth maps rather than volumetric data, allowing for real-time performance without volumetric precomputation [S1, unofficial].
+
+## How it works
+The method operates on a depth map and a pre-shaded color buffer (typically Phong-shaded). It computes a "Vicinity Occlusion Map" (VOM) or average depth for each pixel to determine halo intensity [S1, unofficial].
+
+**Inputs:**
+*   `depth[x, y]`: Depth map of the volume rendering. Background pixels have `depth = 0` [S1, unofficial].
+*   `Phong[x, y]`: Pre-shaded color buffer [S1, unofficial].
+*   `sizex`, `sizey`: User-defined radius of the vicinity neighborhood [S1, unofficial].
+*   `factorhalo`: User-defined weight scaling the halo intensity [S1, unofficial].
+*   `Colorhalo`: User-defined color for the halo [S1, unofficial].
+*   `threshold`: Depth variation threshold to filter noise [S1, unofficial].
+
+**Outputs:**
+*   `Color[x, y]`: Final pixel color with halo applied [S1, unofficial].
+
+**Data Structures:**
+*   2D arrays for `depth`, `Phong`, and `avgdepth` of resolution $W \times H$.
+
+**Steps:**
+
+1.  **Compute Average Depth (Vicinity):**
+    For every pixel $[x, y]$, calculate the average depth of its neighbors within the window defined by `sizex` and `sizey`. The number of elements is $NElems = (2 \cdot sizex + 1) \times (2 \cdot sizey + 1)$.
+    $$ avgdepth[x, y] = \frac{1}{NElems} \sum_{i=x-sizex}^{x+sizex} \sum_{j=y-sizey}^{y+sizey} depth[i, j] $$
+    [S1, unofficial]
+
+2.  **Calculate Halo Intensity:**
+    For **internal halos** (non-background pixels where `depth[x, y] > 0`), the intensity is based on the difference between the local average depth and the current pixel's depth:
+    $$ inthalo = (avgdepth[x, y] - depth[x, y]) \cdot factorhalo $$
+    [S1, unofficial]
+    
+    *Note:* For background pixels (`depth[x, y] = 0`), this formula yields `avgdepth * factorhalo`, which corresponds to the "basic halo" logic. However, the internal halo method specifically targets non-background pixels. The text notes that for background pixels, the depth does not affect the intensity function in the internal halo calculation context, effectively treating them separately or ignoring them for internal halo generation [S1, unofficial].
+
+3.  **Apply Thresholding:**
+    To avoid rendering halos at every pixel with minor depth variation, a threshold based on pixel depth is used. Only elements above this threshold that contribute to the average depth are considered to decrease the intensity of the halo conveniently [S1, unofficial]. This prevents noise from generating false halos in flat regions [S1, unofficial].
+
+4.  **Composite Color:**
+    Blend the original Phong color with the halo color based on the intensity:
+    $$ Color[x, y] = (1 - inthalo) \cdot Phong[x, y] + inthalo \cdot Colorhalo $$
+    [S1, unofficial]
+
+**Parameters:**
+*   `factorhalo`: Controls intensity. Typical values mentioned in results include 0.39 and 0.78, where higher values make the effect more perceptible [S1, unofficial].
+*   `Colorhalo`: Should be chosen to provide shape cues. Black is discouraged as it is difficult to distinguish from lighting darkening [S1, unofficial].
+*   `sizex`, `sizey`: Define the resolution of the vicinity. Can be changed interactively [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Semi-transparent pixels:** In the depth map, semi-transparent pixels often have a depth of zero. Consequently, they are not emphasized with halos [S1, unofficial].
+*   **Black Halos:** Using a black `Colorhalo` reduces shape perception because it is hard to judge if darkening is due to lighting or the halo [S1, unofficial].
+*   **Occlusion in Structure Enhancement:** When using segmented structures, foreground structures (e.g., ribs) must correctly occlude halos behind them. If not handled, halos may appear incorrectly on occluded surfaces [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_internal_halos(depth_map, phong_buffer, sizex, sizey, factorhalo, colorhalo, threshold):
+    """
+    Computes internal halos for a depth map.
+    
+    Args:
+        depth_map: 2D array of depth values. Background is 0.
+        phong_buffer: 2D array of RGB colors.
+        sizex: Half-width of the vicinity window.
+        sizey: Half-height of the vicinity window.
+        factorhalo: Scaling factor for halo intensity.
+        colorhalo: RGB color for the halo.
+        threshold: Minimum depth difference to trigger halo.
+        
+    Returns:
+        final_color: 2D array of RGB colors with halos applied.
+    """
+    height, width = depth_map.shape
+    final_color = np.zeros_like(phong_buffer)
+    
+    # Precompute neighborhood size
+    nelems = (2 * sizex + 1) * (2 * sizey + 1)
+    
+    # Compute average depth using a box filter (integral image could optimize this, 
+    # but direct summation is described in source)
+    avgdepth = np.zeros((height, width))
+    
+    for y in range(height):
+        for x in range(width):
+            sum_depth = 0.0
+            count = 0
+            # Define bounds
+            x_start = max(0, x - sizex)
+            x_end = min(width, x + sizex + 1)
+            y_start = max(0, y - sizey)
+            y_end = min(height, y + sizey + 1)
+            
+            for i in range(x_start, x_end):
+                for j in range(y_start, y_end):
+                    sum_depth += depth_map[j, i]
+                    count += 1
+            
+            avgdepth[y, x] = sum_depth / count if count > 0 else 0
+
+    # Apply halo logic
+    for y in range(height):
+        for x in range(width):
+            current_depth = depth_map[y, x]
+            
+            # Skip background pixels for internal halos as per definition
+            # Note: Source implies internal halos are for non-background pixels.
+            if current_depth == 0:
+                final_color[y, x] = phong_buffer[y, x]
+                continue
+            
+            # Calculate intensity
+            # Source: inthalo = (avgdepth[x, y] - depth[x, y]) * factorhalo
+            intensity = (avgdepth[y, x] - current_depth) * factorhalo
+            
+            # Apply thresholding
+            # Source: "define a threshold... to avoid rendering the halo at every pixel 
+            # where there is a depth variation"
+            # Implementation detail: If intensity is below threshold, set to 0.
+            if intensity < threshold:
+                intensity = 0.0
+            
+            # Clamp intensity to [0, 1] for blending
+            intensity = np.clip(intensity, 0.0, 1.0)
+            
+            # Blend colors
+            # Source: Color[x, y] = (1 - inthalo) * Phong[x, y] + inthalo * Colorhalo
+            final_color[y, x] = (1 - intensity) * phong_buffer[y, x] + intensity * colorhalo
+
+    return final_color
+```
+
+## Subtopics
+
+### Structure Enhancement via Segmented Halos
+A variant that generates local halos around specific segmented structures [S1, unofficial]. It uses the depth of segmented structures to compute the Vicinity Occlusion Map (VOM) while using the depth of non-segmented (other) elements only for occlusion checks [S1, unofficial]. If a halo pixel is occluded by a closer structure (from the non-segmented set), its color remains untouched [S1, unofficial]. This is useful for highlighting specific anatomical features like a vascular tree while ignoring surrounding noise [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(W \cdot H \cdot sizex \cdot sizey)$ per frame if implemented naively with box filtering. Can be optimized to $O(W \cdot H)$ using Summed Area Tables (Integral Images) for the average depth calculation [S1, unofficial].
+*   **Memory Complexity:** $O(W \cdot H)$ for storing the depth map, average depth map, and color buffers.
+*   **Performance:** Real-time frame rates are achieved on hardware such as an Intel Core 2 Duo CPU and NVIDIA GeForce GTX 280 GPU for volumes up to $512 \times 512 \times 512$ voxels [S1, unofficial]. The penalty for generating halos is low compared to the cost of the ray-casting process [S1, unofficial].
+*   **Strengths:** Real-time, interactive parameter adjustment (vicinity size, halo color, intensity) [S1, unofficial]. Enhances shape perception without volumetric computation [S1, unofficial].
+*   **Limitations:** Relies on accurate depth maps. Semi-transparent pixels (depth 0) are ignored. Requires post-processing of a rendered image, so it does not affect the actual light transport simulation [S1, unofficial].
+
+## Background
+The method was developed as part of a screen-space approach for ambient occlusion and halos in volume visualization, specifically within the context of Depth-enhanced Direct Volume Rendering (DVR) [S1, unofficial]. It was presented in a dissertation by an author associated with the University of Valencia (indicated by the DOI and institutional context) [S1, unofficial]. The work builds upon the concept of Summed Area Tables (Integral Images) for efficient neighborhood filtering [S1, unofficial].
+
+## Sources
+[S1] Enhanced perception in volume visualization, https://doi.org/10.5821/dissertation-2117-94929, fetched 2026-10-26 (unofficial)

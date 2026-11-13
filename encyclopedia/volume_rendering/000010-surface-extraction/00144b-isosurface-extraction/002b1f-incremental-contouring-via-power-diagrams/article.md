@@ -3,329 +3,258 @@
 Also called: Power Diagram Surface Extraction, Regular Triangulation Contouring, Incremental Power Diagram Extraction, Power Diagram-based Isosurface Extraction
 
 ## Overview
-Incremental Contouring via Power Diagrams is a progressive isosurface extraction algorithm that constructs a mesh from a Signed Distance Field (SDF) by iteratively refining a weighted triangulation (regular triangulation or power diagram) [S1][S2, unofficial]. Unlike static methods like Marching Cubes or Dual Contouring that operate on a fixed grid, this method starts with a coarse set of samples and incrementally inserts new vertices at locations of high geometric deviation, updating the local triangulation and surface mesh without global recomputation [S1]. It leverages the dual relationship between power diagrams and regular Delaunay tetrahedralizations to ensure topological correctness and geometric fidelity, particularly for complex or high-genus surfaces [S1].
+Incremental Contouring via Power Diagrams is a progressive isosurface extraction algorithm that constructs a mesh from Signed Distance Fields (SDFs) by iteratively refining a regular Delaunay tetrahedralization (the dual of a power diagram) [S1]. Unlike static methods like Marching Cubes or Dual Contouring that operate on uniform grids, this method starts with a coarse set of samples and adaptively inserts new vertices at locations of high geometric deviation, ensuring topological correctness and high-fidelity detail preservation with fewer points [S1]. It distinguishes itself by using the squared SDF values as weights in a regular triangulation to encode distance information, and by incorporating surface projection points to maintain tangency with the zero-level set [S1][S2, unofficial].
 
 ## How it works
+
 ### Inputs and Outputs
 **Inputs:**
-1.  A Signed Distance Function (SDF) $\phi(\mathbf{x})$ and its gradient $\nabla \phi(\mathbf{x})$ [S1].
-2.  An initial uniform grid of resolution $N \times N \times N$ (default $N=10$) [S2, unofficial].
-3.  Parameters: `max_refinement` (default 1000), `is_delaunay` (boolean, default false), and optionally a target point count $k_{max}$ [S1][S2, unofficial].
+1.  A Signed Distance Function $\phi(\mathbf{x})$ and its gradient $\nabla \phi(\mathbf{x})$ [S1].
+2.  Initial sampling resolution $N$ (default 10) [S2, unofficial].
+3.  Maximum refinement steps $k_{max}$ (default 1000) [S2, unofficial].
+4.  Boolean flag `is_delaunay`: if true, uses pure Delaunay ($w=0$); if false, uses Regular Triangulation/Power Diagram ($w=d^2$) [S2, unofficial].
 
 **Outputs:**
-1.  A triangular mesh $V_{mt}, F_{mt}$ representing the zero-level set of the SDF [S2, unofficial].
+1.  A triangular mesh $V_{mt}, F_{mt}$ representing the zero-level set $\phi(\mathbf{x}) = 0$ [S2, unofficial].
 
 ### Data Structures
-The algorithm maintains a weighted triangulation $T$ [S2, unofficial].
 
 **Weighted Point:**
 A point $\mathbf{p}$ with an associated weight $w$.
-*   If `is_delaunay` is true: $w = 0$ [S2, unofficial].
-*   If `is_delaunay` is false (Power Diagram mode): $w = \phi(\mathbf{p})^2$ [S2, unofficial].
+*   $\mathbf{p} \in \mathbb{R}^3$: Position.
+*   $w \in \mathbb{R}$: Weight. For SDF samples, $w = \phi(\mathbf{p})^2$ if `is_delaunay` is false, else $w=0$ [S2, unofficial].
 
 **Candidate:**
-Used in the refinement priority queue.
-*   `m_v0, m_v1, m_v2, m_v3`: Handles to the four vertices of the tetrahedron containing the sign flip [S2, unofficial].
-*   `m_point`: The 3D position of the dual point (circumcenter) of the tetrahedron [S2, unofficial].
-*   `m_score`: A priority value (e.g., deviation metric) for sorting the queue [S2, unofficial].
+Used in the priority queue for refinement.
+*   `m_v0`, `m_v1`, `m_v2`, `m_v3`: Handles/indices of the four vertices of the tetrahedron containing the sign flip.
+*   `m_point`: The 3D position of the dual point (circumcenter) to be inserted.
+*   `m_score`: Priority value (higher score = higher priority for refinement) [S2, unofficial].
 
-**Site Classification:**
-Sites are categorized into four types to guide surface extraction:
-1.  $P^-$: Interior points ($\phi < 0$).
-2.  $P^+$: Exterior points ($\phi > 0$).
-3.  $P^\perp_-$: Surface projections of interior points.
-4.  $P^\perp_+$: Surface projections of exterior points [S1].
+**Global State:**
+*   `m_T`: The weighted triangulation (CGAL `Regular_triangulation_3` or equivalent) [S2, unofficial].
+*   `m_refinement_candidates`: A max-priority queue of `Candidate` objects [S2, unofficial].
+*   `Q`: A max-priority queue of triangles in the current mesh, ordered by deviation metric $\delta$ [S1].
 
-### Algorithm Steps
+### Steps
 
-#### 1. Initialization
-1.  **Normalize Input Mesh:** If the SDF is derived from a mesh, normalize vertices $\mathbf{V}$ by subtracting the minimum coordinate, dividing by the maximum coordinate, centering at the origin, and scaling by $0.75/0.5$ [S2, unofficial].
-2.  **Sample SDF:** Evaluate $\phi$ on a regular grid of resolution $N$. For each grid index $(x,y,z)$, compute normalized coordinates $\mathbf{x}_i = (x/(N-1))*2 - 1$, $\mathbf{y}_i = (y/(N-1))*2 - 1$, $\mathbf{z}_i = (z/(N-1))*2 - 1$, evaluate the SDF, and store $(\mathbf{x}_i, \mathbf{y}_i, \mathbf{z}_i, \phi_i)$ [S2, unofficial].
-3.  **Construct Initial Triangulation:**
-    *   For each grid point $\mathbf{p}_i$, compute weight $w_i = \phi_i^2$ (if `is_delaunay` is false) or $0$ (if true) [S2, unofficial].
-    *   Insert weighted points $(\mathbf{p}_i, w_i)$ into $T$ [S2, unofficial].
-    *   *Optional:* If using the full Power Diagram method, compute surface projections for initial points and insert them as additional sites [S1].
-4.  **Extract Initial Surface:**
-    *   Iterate over all tetrahedra in $T$.
-    *   Identify tetrahedra containing sites of different types (e.g., $P^-$ and $P^+$) [S1].
-    *   For each edge connecting different site types, compute a dual vertex $\mathbf{v}_{dual}$ using the rules below [S1].
-    *   Connect dual vertices to form the initial mesh $M$ [S1].
+1.  **Initialization:**
+    *   Sample the SDF on a regular $N \times N \times N$ grid. Normalize coordinates to $[-1, 1]$ [S2, unofficial].
+    *   For each grid point $\mathbf{p}_i$, compute weight $w_i = \phi(\mathbf{p}_i)^2$ (if `is_delaunay` is false) or $0$ (if true) [S2, unofficial].
+    *   Insert all weighted points into `m_T` [S2, unofficial].
+    *   *Note:* If using the full power diagram method with projections, compute surface projections for initial points and insert them as additional sites with weight 0 (or appropriate distance) [S1]. The sources describe two variants: one using only grid samples [S2, unofficial] and one using grid samples + projections [S1]. The implementation below follows the [S2, unofficial] structure for the core loop, noting the projection enhancement from [S1].
 
-#### 2. Deviation Metric Calculation
-For each triangle $\Delta$ in the current mesh $M$, calculate the deviation $\delta(\Delta)$ from the ideal isosurface alignment:
-$$ \delta(\Delta) \approx \sum_{i=1}^3 A_i \left| \nabla \phi(\mathbf{c}_i) - (\nabla \phi(\mathbf{c}_i) \cdot \hat{\mathbf{n}}) \hat{\mathbf{n}} \right| $$
+2.  **Initial Surface Extraction (Dual Contouring / Marching Tets):**
+    *   Iterate over all finite tetrahedra in `m_T`.
+    *   Check for sign flips: A tetrahedron contains the surface if the SDF values at its vertices have mixed signs (some $\ge 0$, some $< 0$) [S2, unofficial].
+    *   For tetrahedra with sign flips, extract the contour. The [S2, unofficial] implementation uses a "Primal Contouring" step via `IC.to_ifs()` followed by marching tetrahedra with threshold 0.0 to generate the initial mesh $V_{mt}, F_{mt}$ [S2, unofficial].
+    *   *Alternative (S1):* Extract dual vertices directly from the regular Delaunay using specific rules based on site types ($P^-, P^+, P^\perp_-, P^\perp_+$) to form triangular/quadrilateral faces [S1].
+
+3.  **Refinement Loop:**
+    *   **Evaluate Deviation:** For each triangle in the current mesh, calculate the deviation metric $\delta$ [S1].
+    *   **Populate Queue:** Insert triangles into max-heap $Q$ sorted by $\delta$ [S1].
+    *   **Iterate:** While $k < k_{max}$ and $Q$ is not empty:
+        1.  Pop triangle $\Delta_c$ with maximum deviation $\delta_c$ from $Q$ [S1].
+        2.  If $\delta_c < \epsilon$ (convergence threshold), break [S1].
+        3.  **Identify Insertion Point:**
+            *   Calculate the dual point (circumcenter) of the tetrahedron in `m_T` that contains $\Delta_c$ (or the relevant cell) [S2, unofficial].
+            *   Create a `Candidate` with the tetrahedron's vertex handles, the dual point position, and a score derived from $\delta_c$ [S2, unofficial].
+            *   Push `Candidate` to `m_refinement_candidates` [S2, unofficial].
+        4.  **Insert Point:**
+            *   Pop highest-scoring `Candidate` from `m_refinement_candidates` [S2, unofficial].
+            *   Let the candidate point be $\mathbf{p}_{new}$ and its SDF value be $d_{new} = \phi(\mathbf{p}_{new})$ [S2, unofficial].
+            *   Compute weight $w_{new} = d_{new}^2$ (if `is_delaunay` is false) or $0$ [S2, unofficial].
+            *   Insert weighted point $(\mathbf{p}_{new}, w_{new})$ into `m_T` [S2, unofficial].
+        5.  **Update:**
+            *   Find all finite cells incident to the new vertex in `m_T` [S2, unofficial].
+            *   For each incident cell, check for sign flips in SDF values [S2, unofficial].
+            *   If a sign flip exists, compute its dual point, create a new `Candidate`, and push to `m_refinement_candidates` [S2, unofficial].
+            *   Re-evaluate the deviation $\delta$ for affected triangles in the mesh and update $Q$ [S1].
+
+### Formulas
+
+**Weight Assignment:**
+$$
+w = \begin{cases} 
+\phi(\mathbf{p})^2 & \text{if } \text{is\_delaunay} = \text{false} \\
+0 & \text{if } \text{is\_delaunay} = \text{true}
+\end{cases}
+$$
+where $\phi(\mathbf{p})$ is the signed distance value at point $\mathbf{p}$ [S2, unofficial].
+
+**Deviation Metric:**
+The deviation of a triangle $\Delta$ from the zero-level set is approximated by:
+$$
+\delta(\Delta) \approx \sum_{i=1}^3 A_i \left| \nabla \phi(\mathbf{c}_i) - (\nabla \phi(\mathbf{c}_i) \cdot \hat{\mathbf{n}}) \hat{\mathbf{n}} \right|
+$$
 where:
-*   $\hat{\mathbf{n}}$ is the triangle normal [S1].
-*   The triangle is partitioned into three sub-triangles by angle bisectors [S1].
-*   $A_i$ is the area of the $i$-th sub-triangle [S1].
-*   $\mathbf{c}_i$ is the centroid of the $i$-th sub-triangle [S1].
-*   $\nabla \phi(\mathbf{c}_i)$ is the SDF gradient at the centroid [S1].
+*   $A_i$ is the area of the $i$-th sub-triangle formed by partitioning $\Delta$ with angle bisectors.
+*   $\mathbf{c}_i$ is the centroid of the $i$-th sub-triangle.
+*   $\nabla \phi(\mathbf{c}_i)$ is the SDF gradient at $\mathbf{c}_i$.
+*   $\hat{\mathbf{n}}$ is the unit normal of triangle $\Delta$ [S1].
 
-Store triangles in a max-heap $Q$ ordered by $\delta$ [S1].
-
-#### 3. Incremental Refinement Loop
-Repeat up to `max_refinement` times or until $Q$ is empty/deviation is negligible:
-
-1.  **Select Candidate:** Pop the triangle $\Delta_c$ with the maximum deviation $\delta_c$ from $Q$ [S1].
-2.  **Identify Insertion Point:**
-    *   Determine the dual point (circumcenter) $\mathbf{p}_{dual}$ of the tetrahedron in $T$ that contains $\Delta_c$ [S2, unofficial].
-    *   *Power Diagram Mode:* Calculate the weight for the new point. If using the specific "Incremental Contouring" implementation from [S2, unofficial], the weight is computed as:
-        $$ w_{dual} = \frac{1}{4} \sum_{j=0}^3 \left( \| \mathbf{p}_{dual} - \mathbf{p}_j \|^2 - w_j \right) $$
-        where $\mathbf{p}_j$ are the vertices of the tetrahedron and $w_j$ their weights [S2, unofficial].
-    *   *Alternative Strategy (S1):* Insert the dual point $\mathbf{p}_c$ and its surface projection $\mathbf{q}_c$ as new sites [S1].
-3.  **Insert Point:**
-    *   Insert the weighted point $(\mathbf{p}_{dual}, w_{dual})$ into $T$ [S2, unofficial].
-    *   This triggers a localized update of the triangulation [S1].
-4.  **Update State:**
-    *   Assign a unique index to the new vertex [S2, unofficial].
-    *   Find all incident cells (tetrahedra) to the new vertex [S2, unofficial].
-5.  **Re-evaluate Neighbors:**
-    *   For each incident tetrahedron, check if it contains a sign flip in SDF values (vertices with $\phi \ge 0$ and $\phi < 0$) [S2, unofficial].
-    *   If a sign flip exists, compute its dual point, create a `Candidate` object with the tetrahedron handles, dual point, and score, and push it to $Q$ [S2, unofficial].
-    *   *Note:* If `is_delaunay` is true, skip weight calculation and use $w=0$ [S2, unofficial].
-
-#### 4. Final Surface Extraction
-1.  **Extract Dual Contour:**
-    *   Iterate over all finite edges in the final triangulation $T$ [S2, unofficial].
-    *   For each edge with endpoints having opposite SDF signs, traverse adjacent cells to form a facet (contour cell handles) [S2, unofficial].
-2.  **Map to Dual Vertices:**
-    *   For each facet, map unique cell handles to dual vertex indices [S2, unofficial].
-    *   Calculate dual vertex positions using the triangulation's dual function [S2, unofficial].
-3.  **Triangulate Facets:**
-    *   For each polygonal facet, create a central vertex by averaging the facet's vertices [S2, unofficial].
-    *   Connect the central vertex to each edge of the polygon to form triangles [S2, unofficial].
-4.  **Marching Tetrahedra (Primal):**
-    *   Alternatively, extract the primal contouring mesh by calling a marching tetrahedra routine on the final triangulation with threshold 0.0 to generate the final vertex set $V_{mt}$ and face set $F_{mt}$ [S2, unofficial].
-
-### Dualization Rules for Surface Extraction (S1 Method)
-When extracting the mesh from the regular Delaunay tetrahedralization $D$, for an edge connecting vertices $v_1$ and $v_2$ of different types:
-*   If $v_1 \in P^-$ and $v_2 \in P^\perp_-$: Vertex is $v_2$.
-*   If $v_1 \in P^+$ and $v_2 \in P^\perp_+$: Vertex is $v_2$.
-*   If $v_1 \in P^-$ and $v_2 \in P^+$: Vertex is $\frac{v_1 \phi(v_2) - v_2 \phi(v_1)}{\phi(v_2) - \phi(v_1)}$.
-*   If $v_1 \in P^\perp_-$ and $v_2 \in P^\perp_+$: Vertex is $v_1 + v_2$ [S1].
+**Dual Vertex Weight (for Regular Triangulation):**
+When computing the dual point for a cell, the weight associated with the dual vertex in the power diagram context is:
+$$
+w_{dual} = \frac{1}{4} \sum_{i=0}^3 \left( \| \mathbf{p}_{dual} - \mathbf{p}_i \|^2 - w_i \right)
+$$
+where $\mathbf{p}_{dual}$ is the dual point, $\mathbf{p}_i$ are the cell vertices, and $w_i$ are their weights [S2, unofficial].
 
 ### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-import heapq
-
-class Vector3:
-    def __init__(self, x, y, z):
-        self.x, self.y, self.z = x, y, z
-    def __add__(self, other): return Vector3(self.x+other.x, self.y+other.y, self.z+other.z)
-    def __sub__(self, other): return Vector3(self.x-other.x, self.y-other.y, self.z-other.z)
-    def __mul__(self, s): return Vector3(self.x*s, self.y*s, self.z*s)
-    def dot(self, other): return self.x*other.x + self.y*other.y + self.z*other.z
-    def length_sq(self): return self.dot(self)
-    def length(self): return math.sqrt(self.length_sq())
-    def __repr__(self): return f"({self.x:.3f}, {self.y:.3f}, {self.z:.3f})"
-
-class WeightedPoint:
-    def __init__(self, pos, weight):
-        self.pos = pos
-        self.weight = weight
-
-class Candidate:
-    def __init__(self, tet_handles, dual_point, score):
-        self.tet_handles = tet_handles
-        self.dual_point = dual_point
-        self.score = score
-    def __lt__(self, other): return self.score < other.score
-
-class RegularTriangulation:
-    def __init__(self):
-        self.vertices = []
-        self.tetrahedra = []
-    def insert(self, wp):
-        self.vertices.append(wp)
-        # Simplified: rebuild uniform tet mesh for demonstration
-        self._build_uniform_tet_mesh()
-        return len(self.vertices) - 1
-    def _build_uniform_tet_mesh(self):
-        # Placeholder for actual Delaunay/Regular triangulation logic
-        # In practice, use a standard library or incremental insertion algorithm
-        pass
-    def dual_vertex(self, tet_idx):
-        # Returns circumcenter of tetrahedron
-        return self.vertices[tet_idx].pos # Simplified for brevity
-    def incident_tetrahedra(self, vh_idx):
-        return [i for i, t in enumerate(self.tetrahedra) if vh_idx in t]
-    def find_tetrahedron_containing_triangle(self, tri):
-        # Returns tetrahedron index containing the triangle
-        return 0 # Simplified
-
-def build_uniform_tet_mesh(grid_points):
-    # Generates a regular tetrahedralization from a 3D grid
-    # Returns a list of tetrahedra, each defined by 4 vertex indices
-    tets = []
-    N = int(len(grid_points)**(1/3))
-    for x in range(N-1):
-        for y in range(N-1):
-            for z in range(N-1):
-                i000 = x*N*N + y*N + z
-                i100 = (x+1)*N*N + y*N + z
-                i010 = x*N*N + (y+1)*N + z
-                i110 = (x+1)*N*N + (y+1)*N + z
-                i001 = x*N*N + y*N + (z+1)
-                i101 = (x+1)*N*N + y*N + (z+1)
-                i011 = x*N*N + (y+1)*N + (z+1)
-                i111 = (x+1)*N*N + (y+1)*N + (z+1)
-                tets.append([i000, i100, i010, i110])
-                tets.append([i000, i100, i110, i001])
-                tets.append([i000, i110, i011, i001])
-                tets.append([i000, i011, i101, i001])
-    return tets
-
-def calculate_deviation(tri, sdf_func, grad_func):
-    v0, v1, v2 = tri
-    n_hat = Vector3(0,0,0)
-    e1 = v1 - v0
-    e2 = v2 - v0
-    n_hat = Vector3(e1.y*e2.z - e1.z*e2.y, e1.z*e2.x - e1.x*e2.z, e1.x*e2.y - e1.y*e2.x)
-    l = n_hat.length()
-    if l == 0: return 0.0
-    n_hat = Vector3(n_hat.x/l, n_hat.y/l, n_hat.z/l)
-    
-    # Partition triangle into 3 sub-triangles via angle bisectors
-    sub_tris = []
-    # Simplified: use centroid and midpoints for demonstration
-    m01 = Vector3((v0.x+v1.x)/2, (v0.y+v1.y)/2, (v0.z+v1.z)/2)
-    m12 = Vector3((v1.x+v2.x)/2, (v1.y+v2.y)/2, (v1.z+v2.z)/2)
-    m20 = Vector3((v2.x+v0.x)/2, (v2.y+v0.y)/2, (v2.z+v0.z)/2)
-    c = Vector3((v0.x+v1.x+v2.x)/3, (v0.y+v1.y+v2.y)/3, (v0.z+v1.z+v2.z)/3)
-    sub_tris.append([v0, m01, c])
-    sub_tris.append([v1, m12, c])
-    sub_tris.append([v2, m20, c])
-    
-    total_dev = 0.0
-    for sub_tri in sub_tris:
-        c_i = Vector3((sub_tri[0].x+sub_tri[1].x+sub_tri[2].x)/3,
-                      (sub_tri[0].y+sub_tri[1].y+sub_tri[2].y)/3,
-                      (sub_tri[0].z+sub_tri[1].z+sub_tri[2].z)/3)
-        grad = grad_func(c_i.x, c_i.y, c_i.z)
-        proj = n_hat * grad.dot(n_hat)
-        ortho = grad - proj
-        area_i = 0.5 * (Vector3(sub_tri[1].x-sub_tri[0].x, sub_tri[1].y-sub_tri[0].y, sub_tri[1].z-sub_tri[0].z) * 
-                        Vector3(sub_tri[2].x-sub_tri[0].x, sub_tri[2].y-sub_tri[0].y, sub_tri[2].z-sub_tri[0].z)).length()
-        total_dev += area_i * ortho.length()
-    return total_dev
-
-def contains_sign_flip(tet, sdf_func):
-    signs = []
-    for vh in tet:
-        phi = sdf_func(vh.x, vh.y, vh.z)
-        signs.append(1 if phi >= 0.0 else -1)
-    return not all(s == signs[0] for s in signs)
-
-def incremental_contouring_via_power_diagrams(sdf_func, grad_func, N=10, max_refinement=1000, is_delaunay=False):
+def incremental_contouring(sdf_function, gradient_function, N=10, max_refinement=1000, is_delaunay=False):
+    """
+    Extracts isosurface from SDF using incremental power diagram refinement.
+    """
     # 1. Initialization
+    # Sample grid
     grid_points = []
-    grid_weights = []
     for x in range(N):
         for y in range(N):
             for z in range(N):
-                x_norm = (x / (N - 1)) * 2 - 1
-                y_norm = (y / (N - 1)) * 2 - 1
-                z_norm = (z / (N - 1)) * 2 - 1
-                p = Vector3(x_norm, y_norm, z_norm)
-                phi = sdf_func(p.x, p.y, p.z)
-                w = 0.0 if is_delaunay else phi * phi
-                grid_points.append(p)
-                grid_weights.append(w)
-
-    T = RegularTriangulation()
-    for i, p in enumerate(grid_points):
-        T.insert(WeightedPoint(p, grid_weights[i]))
-
-    # 2. Initial Surface Extraction (Dual Contouring style from [S2, unofficial])
-    M = []
-    for tet_idx in range(len(T.tetrahedra)):
-        tet_verts = [grid_points[v] for v in T.tetrahedra[tet_idx]]
-        if contains_sign_flip(tet_verts, sdf_func):
-            # Find sign-flip edges
-            edges = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
-            for i, j in edges:
-                phi_i = sdf_func(tet_verts[i].x, tet_verts[i].y, tet_verts[i].z)
-                phi_j = sdf_func(tet_verts[j].x, tet_verts[j].y, tet_verts[j].z)
-                if (phi_i >= 0.0 and phi_j < 0.0) or (phi_i < 0.0 and phi_j >= 0.0):
-                    # Create dual vertex for this edge
-                    dual_v = T.dual_vertex(tet_idx)
-                    M.append([dual_v])
+                # Normalize to [-1, 1]
+                px = (x / (N - 1)) * 2 - 1
+                py = (y / (N - 1)) * 2 - 1
+                pz = (z / (N - 1)) * 2 - 1
+                grid_points.append((px, py, pz))
     
-    # 3. Deviation Metric & Priority Queue
-    Q = []
-    for tri_verts in M:
-        dev = calculate_deviation(tri_verts, sdf_func, grad_func)
-        heapq.heappush(Q, (-dev, tri_verts))
-
-    # 4. Refinement Loop
+    # Insert into triangulation
+    triangulation = WeightedTriangulation()
+    for i, p in enumerate(grid_points):
+        d = sdf_function(p)
+        w = d * d if not is_delaunay else 0.0
+        triangulation.insert(p, w, index=i)
+        
+    # 2. Initial Mesh Extraction (Primal Contouring / Marching Tets)
+    # This step generates the initial mesh V_mt, F_mt from the coarse grid
+    current_mesh = extract_primal_contour(triangulation, threshold=0.0)
+    
+    # 3. Refinement Loop
+    deviation_queue = PriorityQueue(max=True)
+    
+    # Initial evaluation
+    for triangle in current_mesh.triangles:
+        delta = compute_deviation(triangle, gradient_function)
+        deviation_queue.push(triangle, delta)
+        
+    refinement_queue = PriorityQueue(max=True)
+    
     for step in range(max_refinement):
-        if not Q:
+        if deviation_queue.empty():
             break
-        neg_dev, best_tri = heapq.heappop(Q)
-        best_dev = -neg_dev
-        
-        tet = T.find_tetrahedron_containing_triangle(best_tri)
-        if tet is None:
-            continue
             
-        dual_point = T.dual_vertex(tet)
+        # Get worst triangle
+        worst_triangle, max_delta = deviation_queue.pop()
         
-        if is_delaunay:
-            new_weight = 0.0
-        else:
-            sum_val = 0.0
-            for vh in T.tetrahedra[tet]:
-                v_pos = grid_points[vh]
-                v_weight = grid_weights[vh]
-                dist_sq = (dual_point - v_pos).length_sq()
-                sum_val += (dist_sq - v_weight)
-            new_weight = sum_val / 4.0
+        # Convergence check
+        if max_delta < epsilon:
+            break
             
-        new_vh = T.insert(WeightedPoint(dual_point, new_weight))
-        grid_points.append(dual_point)
-        grid_weights.append(new_weight)
+        # Identify the tetrahedron in triangulation that contains this triangle
+        # Note: In a dual contouring setup, the triangle is part of the mesh 
+        # derived from the triangulation. We need to find the cell(s) 
+        # associated with the error.
+        tet_handles = find_incident_tetrahedra(triangulation, worst_triangle)
         
-        incident_tets = T.incident_tetrahedra(new_vh)
-        for inc_tet in incident_tets:
-            inc_tet_verts = [grid_points[v] for v in T.tetrahedra[inc_tet]]
-            if contains_sign_flip(inc_tet_verts, sdf_func):
-                inc_dual = T.dual_vertex(inc_tet)
-                inc_dev = calculate_deviation([inc_dual], sdf_func, grad_func)
-                heapq.heappush(Q, (-inc_dev, [inc_dual]))
-
-    # 5. Final Extraction
-    vertices = []
-    faces = []
-    for tri in M:
-        vertices.extend(tri)
-        faces.append([len(vertices)-3, len(vertices)-2, len(vertices)-1])
-    return vertices, faces
+        for tet_handle in tet_handles:
+            tet_vertices = triangulation.get_tetrahedron_vertices(tet_handle)
+            
+            # Check for sign flip in the tetrahedron
+            if has_sign_flip(tet_vertices, triangulation):
+                # Compute dual point (circumcenter)
+                dual_point = triangulation.dual(tet_handle)
+                
+                # Create candidate
+                score = max_delta # Or a function of delta
+                candidate = Candidate(
+                    v0=tet_vertices[0], v1=tet_vertices[1],
+                    v2=tet_vertices[2], v3=tet_vertices[3],
+                    point=dual_point, score=score
+                )
+                refinement_queue.push(candidate)
+                
+        # Insert best candidate
+        if not refinement_queue.empty():
+            best_candidate = refinement_queue.pop()
+            
+            # Evaluate SDF at new point
+            new_point = best_candidate.point
+            new_d = sdf_function(new_point)
+            new_w = new_d * new_d if not is_delaunay else 0.0
+            
+            # Insert into triangulation
+            new_index = triangulation.insert(new_point, new_w)
+            
+            # Update state: find incident cells
+            incident_cells = triangulation.get_incident_cells(new_index)
+            
+            # Re-evaluate neighbors
+            for cell in incident_cells:
+                if has_sign_flip(cell, triangulation):
+                    cell_dual = triangulation.dual(cell)
+                    cell_score = compute_cell_deviation(cell, gradient_function)
+                    new_candidate = Candidate(
+                        v0=cell.v0, v1=cell.v1, v2=cell.v2, v3=cell.v3,
+                        point=cell_dual, score=cell_score
+                    )
+                    refinement_queue.push(new_candidate)
+                    
+            # Update mesh and deviation queue
+            # The mesh needs to be updated to reflect the new topology
+            # This typically involves re-running the contour extraction 
+            # locally or globally for affected regions
+            update_mesh_with_new_vertex(triangulation, new_index, current_mesh)
+            update_deviation_queue(deviation_queue, current_mesh)
+            
+    return current_mesh
 ```
 
+### Parameters
+*   `N`: Initial grid resolution per dimension. Default: 10 [S2, unofficial].
+*   `max_refinement`: Maximum number of refinement steps. Default: 1000 [S2, unofficial].
+*   `is_delaunay`: Boolean. If true, uses pure Delaunay ($w=0$). If false, uses Regular Triangulation ($w=d^2$). Default: false [S2, unofficial].
+*   `k_max`: Maximum number of inserted points. Not explicitly used as a loop counter in [S2, unofficial] but mentioned in [S1] as a convergence criterion.
+
 ### Edge Cases and Pitfalls
-1.  **Geometric Instabilities:** Direct dualization of power diagrams can produce zigzag artifacts. The method avoids this by extracting the mesh from the regular Delaunay tetrahedralization (the dual of the power diagram) rather than the power diagram itself [S1].
-2.  **Neural SDF Gradients:** Neural SDFs (e.g., SIREN, VolSDF) do not guarantee unit-length gradients, making surface projections inaccurate. The method remains robust because adaptive sampling prioritizes the zero-level set, balancing approximation errors [S1].
-3.  **Gradient-Alignment Metric Bias:** The deviation metric may favor triangles far from the zero-level set if they are normal-aligned. This is mitigated by the surface projection step, which keeps triangles close to the surface, and by adjacent high-energy triangles triggering insertion [S1].
-4.  **Sign Flip Detection:** Must check all four vertices of a tetrahedron. The implementation uses $\phi \ge 0.0$ for the positive threshold [S2, unofficial].
+*   **Geometric Instabilities:** Direct dualization of the power diagram can produce zigzag artifacts. The method avoids this by extracting the mesh from the regular Delaunay tetrahedralization (dual) or using primal contouring/marching tets on the triangulation [S1][S2, unofficial].
+*   **Gradient Accuracy:** For neural SDFs, gradients are not strictly unit-length, making surface projections inaccurate. The method remains robust because adaptive sampling prioritizes the zero-level set [S1].
+*   **Sign Flip Detection:** Must check all four vertices of a tetrahedron. Use a threshold (e.g., $\ge 0$) for positive classification [S2, unofficial].
+*   **Grid Normalization:** Input mesh vertices must be normalized (centered and scaled) before SDF evaluation to ensure consistent coordinate ranges [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Scales approximately linearly with the number of points $O(n)$ due to the localized update strategy of the Delaunay triangulation [S1].
-*   **Memory Complexity:** Proportional to the number of vertices and tetrahedra in the triangulation.
-*   **Performance:** Outperforms Marching Cubes, Dual Contouring, and RFTA in reconstruction quality (Chamfer Distance) for both low-genus and high-genus models at comparable or lower sample counts [S1].
-*   **Strengths:**
-    *   Adaptive resolution: Focuses sampling on complex features.
-    *   Topology preservation: Successfully handles high-genus models and intricate cavities [S1].
-    *   Incremental: Supports batch processing for neural SDFs to reduce query overhead [S1].
-*   **Limitations:**
-    *   Requires SDF gradients for the deviation metric and projection points [S1].
-    *   More complex to implement than uniform grid methods due to dynamic triangulation management [S2, unofficial].
+
+**Time and Memory Complexity:**
+*   Time complexity scales approximately linearly with the number of points $O(n)$ due to the localized update strategy of the Delaunay triangulation [S1].
+*   Memory usage is proportional to the number of vertices and tetrahedra in the triangulation [S1].
+
+**Performance:**
+*   Outperforms Marching Cubes, Dual Contouring, and RFTA in reconstruction quality (Chamfer Distance) for the same number of points or resolution [S1].
+*   Successfully captures intricate details and cavities that RFTA misses [S1].
+*   Better topology preservation than McGrids, especially for high-genus models and small radii [S1].
+
+**Strengths:**
+*   Adaptive refinement focuses computational resources on complex areas.
+*   Preserves topology and fine geometric details.
+*   Supports incremental updates efficiently.
+
+**Limitations:**
+*   Requires SDF gradient information for the deviation metric and projection points [S1].
+*   More complex implementation than uniform grid methods [S1].
 
 ## Background
-The method was introduced in "Power Diagram Enhanced Adaptive Isosurface Extraction From Signed Distance Fields" (2026) [S1]. It builds on the theoretical foundation that power diagrams with sphere sites (centers at samples, radii equal to distances) form boundaries that do not intersect the spheres, providing a valid surface approximation [S1]. The implementation details and code repository were provided by Max Kohlbrenner (2025) [S2, unofficial]. It addresses limitations of static methods like Marching Cubes (aliasing, topology issues) and other adaptive methods like McGrids (which relies only on sign changes) [S1].
+
+**Origin:**
+The method was introduced in "Power Diagram Enhanced Adaptive Isosurface Extraction From Signed Distance Fields" [S1]. It builds on the concept of using power diagrams (regular triangulations) to encode distance information from SDF samples [S2, unofficial].
+
+**History:**
+It addresses limitations of static extraction methods (Marching Cubes, Dual Contouring) which struggle with detail preservation and topology at low resolutions. It also improves upon progressive methods like McGrids by utilizing gradient information and power diagram weights for more accurate surface inference [S1].
+
+**Usage:**
+Implemented in C++ using CGAL for triangulation and libigl for SDF evaluation [S2, unofficial]. Applied to SIREN-based SDFs and VolSDF [S1].
 
 ## Sources
+
 [S1] Power Diagram Enhanced Adaptive Isosurface Extraction From Signed Distance Fields., https://doi.org/10.1109/tvcg.2026.3685989, fetched 2026-10-26
 [S2] maxkohlbrenner/sdf-weighted-delaunay, https://github.com/maxkohlbrenner/sdf-weighted-delaunay, fetched 2026-10-27 (unofficial)

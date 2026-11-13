@@ -1,0 +1,73 @@
+# Dynamic Scene Representation
+
+Also called: Dynamic Neural Radiance Fields
+
+## Overview
+Dynamic Scene Representation extends static Neural Radiance Fields (NeRF) to handle time-varying content, solving the problem of novel view synthesis for video sequences [S1]. It sets itself apart from static NeRF by incorporating temporal information into the radiance field prediction, distinguishing it from its sibling [Deformation Field Parametrization](12731-deformation-field-parametrization.md) which focuses on the geometric mapping, and from [Deformable Neural Radiance Fields (Nerfies)](13428-deformable-neural-radiance-fields-nerfies.md) which specifically targets non-rigid human deformation using canonical space warping [S1].
+
+## Shared principles
+The core mechanism involves conditioning the radiance field prediction on a temporal variable $t$. For a given camera pose and time $t$, points $\mathbf{x}_i$ are sampled along the ray. A temporal embedding is constructed for $t$ and concatenated with the spatial coordinate $\mathbf{x}_i$. This combined vector is passed through a neural network (typically an MLP) to predict volume density $\sigma_i$ and view-dependent color $\mathbf{c}_i$ [S1]. Standard volume rendering integration is then performed to compute the final pixel color [S1].
+
+## Subtopics
+
+### DyNeRF
+DyNeRF is a baseline method for representing volumetric video by extending the static NeRF architecture to handle dynamic scenes [S1]. It solves the problem of novel view synthesis for time-varying content by predicting the radiance field at a specific video frame using a single shared Multi-Layer Perceptron (MLP) [S1]. It sets itself apart from its sibling [Neural Rendering of Variable Scenes](12734-neural-rendering-of-variable-scenes.md) and the [Decomposed Spatiotemporal Representation](7525-decomposed-spatiotemporal-representation.md) variant by relying on a monolithic network structure rather than decomposing the scene into specialized static, deformation, or newness fields [S1, 7525-decomposed-spatiotemporal-representation.md].
+
+**Inputs and Outputs:**
+*   **Input:** A 3D spatial coordinate $\mathbf{x} = (x, y, z)$ and a temporal embedding $t$ representing the specific video frame index or time.
+*   **Output:** The volume density $\sigma$ and view-dependent color $\mathbf{c}$ for the ray at that specific time [S1].
+
+**Data Structures:**
+*   **MLP:** A single shared Multi-Layer Perceptron. The exact layer dimensions, activation functions, and hidden sizes are not given in the sources [S1].
+*   **Temporal Embedding:** A vector representation of time $t$. The method of generating this embedding (e.g., positional encoding, learned lookup) is not specified in the sources [S1].
+
+**Steps:**
+1.  For a given camera pose and time $t$, sample points $\mathbf{x}_i$ along the ray.
+2.  Construct the temporal embedding for time $t$. [G: Typically involves positional encoding or a learned time vector, but specific implementation is not in sources].
+3.  Concatenate the spatial coordinate $\mathbf{x}_i$ and the temporal embedding $t$.
+4.  Pass the concatenated vector through the single shared MLP to predict density $\sigma_i$ and color $\mathbf{c}_i$ [S1].
+5.  Perform standard volume rendering integration to compute the final pixel color [S1].
+
+**Formulas:**
+The sources do not provide the specific mathematical formulation of the MLP or the temporal embedding function [S1].
+
+**Parameters:**
+Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **High-Frequency Detail Loss:** The single shared MLP structure tends to lose details in high-frequency regions of the image [S1].
+*   **Complex Motion:** While not explicitly detailed as a failure mode for DyNeRF itself in the text, the comparison notes that similar single-MLP approaches (like C-NeRF) struggle with complex scene motions [S1].
+
+### [Neural Rendering of Variable Scenes](12734-neural-rendering-of-variable-scenes.md)
+Neural Rendering of Variable Scenes is a method for dynamic scene representation that explicitly incorporates scene variation into the training phase by encoding predefined scene parameters into a structured vector. Unlike methods that constrain learning to a single manifold or assume static geometry, these approaches learn a surface radiance field capable of handling all possible permutations of the specified scene variables. This distinguishes them from NeRF-based Inverse Volume (NIV) methods, which do not explicitly model higher-order interactions between dynamic objects and the surrounding scene.
+
+**Inputs and Outputs:**
+*   **Inputs:** A set of predefined scene variables (e.g., emitter positions, object transforms) encoded into a structured vector, and static scene geometry or appearance data.
+*   **Outputs:** A neural model (typically a neural radiance field or irradiance field) that predicts radiance or irradiance values conditioned on the variable scene parameters.
+
+**Data Structures:**
+*   **Scene Variable Vector:** A structured representation (usually a vector) encoding the range of each variable scene element.
+*   **Neural Model:** A neural network (e.g., MLP or hash-based encoding) that takes spatial coordinates and the scene variable vector as input.
+
+**Steps:**
+1.  **Encode Scene Variables:** Define the predefined range for each variable scene element and encode them into a structured vector. This vector can be used directly as input to the neural model or processed through a learned encoding layer.
+2.  **Train Radiance Field:** Train the neural model to learn a surface radiance field for all possible permutations of the scene variables. During training, the variable scene parameters are randomly sampled to ensure the model generalizes across the defined range.
+
+**Parameters:**
+*   **Number of Variables:** Typically limited to 1-2 variables modeling dynamic phenomena to maintain performance and avoid visible reconstruction error at fixed representational capacity.
+*   **Encoding Method:** Frequency encoding can be applied to parameter changes to add little inference overhead.
+
+**Pitfalls:**
+*   **Retraining Requirement:** The model requires retraining whenever the set of scene parameters changes (e.g., objects added, removed, or modified).
+*   **Performance:** Inference times exceed 100 ms, failing to achieve real-time performance.
+*   **Scaling:** Inference time scales with the number of dynamic objects, limiting the use of primitives with many scene variables, such as animated meshes.
+*   **Capacity Limits:** Scaling to more than two scene variables at the same representational capacity causes visible reconstruction error.
+
+#### Generalizable Dynamic Neural Radiance Field
+A neural radiance field that takes transformed 3D location, view direction, and aggregated features as input to predict volume density and color [S1].
+
+## Background
+The concept of dynamic scene representation in the context of neural radiance fields is primarily associated with the HumanNeRF method, which efficiently generates human radiance fields from sparse inputs [S1]. This approach addresses the challenge of modeling non-rigid human dynamics by warping the human body from the current time frame to a common canonical pose, allowing the NeRF to receive static sampling queries [S1]. The method utilizes an MLP module to handle large deformations, distinguishing it from approaches that rely solely on subtle displacement learning [S1].
+
+## Sources
+[S1] HumanNeRF: Efficiently Generated Human Radiance Field from Sparse Inputs, https://doi.org/10.1109/cvpr52688.2022.00759, fetched 2026-10-26

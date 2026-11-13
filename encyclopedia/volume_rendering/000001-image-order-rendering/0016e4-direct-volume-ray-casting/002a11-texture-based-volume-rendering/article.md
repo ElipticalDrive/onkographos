@@ -3,168 +3,138 @@
 Also called: Geometry-based volume visualization, Proxy Geometry Rendering, Slice-based rendering, TBVR, Texture Based Ray Casting
 
 ## Overview
-Texture-Based Volume Rendering (TBVR) is a direct volume rendering technique that accelerates image-order ray casting by decomposing the 3D volume into a set of 2D planar slices, treating them as proxy geometry primitives (polygons) that are rasterized by the GPU [S1, unofficial][S2, unofficial]. It solves the performance bottleneck of software-based ray casting by leveraging the graphics pipeline's texture sampling and hardware alpha blending to perform compositing in parallel [S1, unofficial][S7, unofficial]. Unlike pure ray marching which computes samples per pixel, TBVR computes samples per slice vertex, making it significantly faster on older hardware but historically prone to sampling artifacts when viewing angles deviate from slice normals [S1, unofficial][S3, book].
+Texture-Based Volume Rendering (TBVR) is a direct volume ray casting technique that accelerates rendering by mapping volumetric data to GPU texture memory and using proxy geometry (polygonal slices) to sample the volume [S1, S2, S7, unofficial]. Unlike standard ray marching which computes samples per pixel, TBVR rasterizes a set of polygons intersecting the volume, using fragment shaders to perform texture lookups and compositing [S3, book][S9]. It distinguishes itself from [2D Visualization from 3D Grid (Slow)](1507-2d-visualization-from-3d-grid-slow.md) by leveraging hardware-accelerated texture interpolation and blending, and from [Neural volume rendering](1576-neural-volume-rendering.md) by relying on explicit geometric primitives and traditional transfer functions rather than learned implicit fields [S1, S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D scalar volume dataset (regular grid), a camera position and orientation, and a transfer function (mapping scalar values to color/opacity).
-*   **Output:** A 2D color image composited in the frame buffer.
+*   **Input:** A 3D scalar volume dataset $V$, a transfer function $T$ mapping scalar values to color $\mathbf{c}$ and opacity $\alpha$, and camera parameters (view matrix, projection matrix).
+*   **Output:** A 2D image where each pixel contains the composited color and accumulated opacity.
 
 **Data Structures:**
-1.  **Volume Texture:** The scalar data is stored in GPU texture memory.
-    *   *3D Texture:* A single `sampler3D` (or equivalent) containing the entire volume. Dimensions match the volume grid $(D_x, D_y, D_z)$. Format is typically single-channel (e.g., `GL_RED`, `GL_R8`) with linear filtering [S2, unofficial][S5, unofficial].
-    *   *2D Texture Stack (Legacy):* Three separate stacks of 2D textures aligned with the X, Y, and Z axes. This requires data replication [S2, unofficial][S3, book].
-2.  **Transfer Function Texture:** A 1D texture (`sampler1D`) mapping scalar intensity to RGBA color/opacity [S3, book].
-3.  **Proxy Geometry:** A set of polygons (quads or triangle fans) representing slices through the volume.
-    *   *Vertices:* Defined by the intersection of slicing planes with the volume bounding box.
-    *   *Texture Coordinates:* Each vertex is assigned 3D texture coordinates $(u, v, w)$ that map directly to the volume texture space [S2, unofficial][S3, book].
+1.  **Volume Texture:** The scalar data is stored in GPU memory as either a 3D texture or a stack of 2D textures.
+    *   *3D Texture:* A single volume texture object (e.g., `sampler3D`) with dimensions $(D_x, D_y, D_z)$. Format is typically single-channel (e.g., `GL_RED`, `UnsignedByte` or `Float`) [S2, S5, S8, unofficial].
+    *   *2D Texture Stack:* Three separate stacks of 2D textures, one for each principal axis (X, Y, Z), to support object-aligned slicing [S2, S6, unofficial].
+2.  **Transfer Function Texture:** A 1D texture (`sampler1D`) mapping scalar values to RGBA color/opacity [S2, unofficial][S3, book].
+3.  **Proxy Geometry:** A set of polygons (typically quads or triangle fans) representing slices through the volume bounding box. Vertices are defined in world or view space [S2, S6, unofficial].
 
-**Numbered Steps:**
+**Algorithm Steps:**
 
-1.  **Initialize:**
+1.  **Initialization:**
     *   Load volume data into CPU memory.
-    *   Process data if necessary (e.g., compute gradients for lighting, downsample) [S3, book].
-    *   Create the transfer function lookup table (texture) [S3, book].
-    *   Upload volume data to GPU as a 3D texture (or 2D stack) [S2, unofficial].
-    *   Compile fragment shaders [S3, book].
+    *   Process data if necessary (e.g., compute gradients for shading, downsample) [S3, book][S9].
+    *   Create the transfer function lookup table (texture) [S3, book][S9].
+    *   Upload the volume data to GPU texture memory. If using 2D slices, replicate data along all three principal axes to allow fast axis-aligned slicing [S2, unofficial][S3, book][S7, unofficial].
 
-2.  **Update (Per Frame/View Change):**
-    *   **Compute Proxy Geometry:**
-        *   Define a series of parallel slicing planes orthogonal to the viewing direction (view-aligned) or aligned with principal axes (object-aligned) [S2, unofficial][S7, unofficial].
-        *   Intersect these planes with the volume bounding box to determine polygon vertices [S2, unofficial].
-        *   Sort vertices in counter-clockwise order around the polygon centroid to form a triangle fan or quad [S2, unofficial].
-        *   Assign 3D texture coordinates to each vertex. For a view-aligned slice, these coordinates map the slice plane into the 3D texture space [S3, book].
-    *   **Sort Slices:** Sort the proxy geometry polygons back-to-front relative to the camera [S2, unofficial][S3, book].
+2.  **Proxy Geometry Construction (Update Stage):**
+    *   Define a set of parallel slicing planes. The spacing between planes determines the sampling rate.
+    *   Intersect these planes with the volume's bounding box to determine the polygon vertices [S2, S6, unofficial].
+    *   **Object-Aligned Slices:** Planes are aligned with the X, Y, or Z axes. The stack closest to the camera viewpoint is selected. Vertices are sorted in counter-clockwise order to form a triangle fan from the centroid [S2, S6, unofficial].
+    *   **View-Aligned Slices:** Planes are orthogonal to the viewing direction. Vertices are computed by intersecting the view-aligned planes with the bounding box [S2, S6, unofficial].
+    *   Assign texture coordinates to each vertex. For a 3D texture, coordinates map the polygon to the volume space $[0, 1]^3$ [S2, unofficial][S3, book].
 
-3.  **Draw (Rasterization and Compositing):**
-    *   Set rendering state:
-        *   Disable lighting and depth testing (or disable depth writing if blending with opaque geometry) [S3, book][S5, unofficial].
-        *   Enable alpha blending. For the "Over" operator (standard alpha blending), set source factor to `GL_ONE` and destination factor to `GL_ONE_MINUS_SRC_ALPHA` [S2, unofficial][S3, book].
-        *   Bind the volume texture and transfer function texture [S3, book].
-    *   **Render Loop (for each sorted slice):**
-        *   Draw the proxy geometry polygon.
-        *   **Vertex Shader:** Interpolates the 3D texture coordinates across the polygon [S3, book].
-        *   **Fragment Shader:**
-            1.  Sample the volume texture at the interpolated 3D coordinates to get scalar value $v$ [S2, unofficial][S3, book].
-            2.  Use $v$ as a texture coordinate to sample the 1D transfer function texture, obtaining color $C$ and opacity $\alpha$ [S3, book].
-            3.  (Optional) Apply illumination (e.g., Phong shading) using gradients computed from neighboring volume samples [S2, unofficial][S5, unofficial].
-            4.  Output the resulting color and opacity to the frame buffer, where hardware blending accumulates the result [S2, unofficial].
+3.  **Rendering (Draw Stage):**
+    *   Set up rendering state: Disable lighting and depth testing (or disable depth writing if blending with opaque geometry). Enable alpha blending [S3, book][S9].
+    *   Bind the volume texture and transfer function texture.
+    *   Draw the proxy geometry polygons in **back-to-front** order (for the Over operator) or **front-to-back** order (for the Under operator) [S2, unofficial][S3, book][S9].
 
-**Formulas:**
+4.  **Fragment Shader Execution:**
+    For each fragment generated by the rasterized proxy geometry:
+    *   **Interpolate Texture Coordinates:** Receive interpolated 3D texture coordinates $(u, v, w)$ from the vertex shader [S3, book][S9].
+    *   **Data Lookup:** Sample the volume texture to get the scalar value $s = \text{tex3D}(u, v, w)$ [S2, unofficial][S3, book].
+    *   **Transfer Function Lookup:** Map $s$ to color $\mathbf{c}$ and opacity $\alpha$ using the transfer function texture: $(\mathbf{c}, \alpha) = \text{tex1D}(s)$ [S2, unofficial][S3, book].
+    *   **Shading (Optional):** Compute the gradient $\nabla V$ using finite differences (e.g., central differences) to estimate the surface normal $\mathbf{n}$. Apply a shading model (e.g., Blinn-Phong) to modulate $\mathbf{c}$ [S2, S5, unofficial].
+    *   **Compositing:** The fragment shader outputs the color $\mathbf{c}$ and opacity $\alpha$. The GPU hardware performs the blending into the frame buffer.
+        *   *Over Operator (Back-to-Front):*
+            $$ \mathbf{C}_{out} = \mathbf{C}_{src} + \mathbf{C}_{dst} (1 - \alpha_{src}) $$
+            $$ \alpha_{out} = \alpha_{src} + \alpha_{dst} (1 - \alpha_{src}) $$
+            Hardware blending state: `GL_SRC_ALPHA`, `GL_ONE_MINUS_SRC_ALPHA` [S2, unofficial].
+        *   *Under Operator (Front-to-Back):*
+            $$ \mathbf{C}_{out} = \mathbf{C}_{src} (1 - \alpha_{dst}) + \mathbf{C}_{dst} $$
+            $$ \alpha_{out} = \alpha_{src} (1 - \alpha_{dst}) + \alpha_{dst} $$
+            Hardware blending state: `GL_ONE_MINUS_DST_ALPHA`, `GL_ONE` [S2, unofficial].
 
-*   **Volume Rendering Integral (Discrete Approximation):**
-    The color $C$ and opacity $\alpha$ for a ray segment are accumulated. In TBVR, this is handled by the hardware blend function. For the "Over" operator:
-    $$ C_{out} = C_{in} + C_{src} \cdot \alpha_{src} \cdot (1 - \alpha_{in}) $$
-    $$ \alpha_{out} = \alpha_{in} + \alpha_{src} \cdot (1 - \alpha_{in}) $$
-    Where $C_{in}, \alpha_{in}$ are the current frame buffer values, and $C_{src}, \alpha_{src}$ are the fragment shader outputs [S2, unofficial][S3, book].
-
-*   **Transfer Function Lookup:**
-    $$ (C, \alpha) = \text{TF}(v) $$
-    Where $v$ is the scalar value sampled from the volume texture [S3, book].
-
-*   **Gradient Estimation (for Lighting):**
-    Using central differences with step size $\delta$ (e.g., $1/256$ in normalized texture space):
-    $$ \mathbf{N} \approx \frac{\text{Tex}(u+\delta, v, w) - \text{Tex}(u-\delta, v, w)}{2\delta} \mathbf{i} + \dots $$
-    The normal $\mathbf{N}$ is normalized and used in the Phong shading model [S5, unofficial].
-
-**Parameters:**
-*   **Slice Spacing:** Controls the number of slices. Finer spacing increases accuracy but reduces frame rate [S5, unofficial].
-*   **Threshold:** A scalar value below which fragments are discarded (e.g., background) [S5, unofficial].
-*   **Alpha Scale:** Multiplier for fragment opacity to adjust visibility [S5, unofficial].
-*   **Lighting Constants:** Ambient ($K_a$), Diffuse ($K_d$), Specular ($K_s$), Shininess, Light positions [S5, unofficial].
-
-**Pseudocode:**
+**Pseudocode (Fragment Shader):**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Vertex Shader
-def vertex_shader(position, model_matrix, view_matrix, projection_matrix):
-    # Compute world position for texture coordinate mapping
-    world_pos = model_matrix * vec4(position, 1.0)
-    # Pass world position to fragment shader for texture lookup
-    gl_Position = projection_matrix * view_matrix * vec4(position, 1.0)
-    return world_pos
+# Pseudocode for a standard TBVR fragment shader
+# Inputs:
+#   texCoord: vec3, interpolated 3D texture coordinates from vertex shader
+#   dataTex: sampler3D, the volume data
+#   tfTex: sampler1D, the transfer function
+#   emissiveColor: vec3, optional base color if no TF is used
+#   useShading: bool, flag to enable gradient-based shading
 
-# Fragment Shader
-def fragment_shader(tex_coords_3d, volume_tex, tf_tex, alpha_scale, threshold):
-    # 1. Sample volume data
-    scalar_value = texture(volume_tex, tex_coords_3d).r
+vec4 main(vec3 texCoord) {
+    // 1. Sample volume data
+    float scalar = texture(dataTex, texCoord).r;
     
-    # 2. Discard background/low-value voxels
-    if scalar_value < threshold:
-        discard()
+    // 2. Apply Transfer Function
+    // Assuming TF maps scalar [0,1] to RGBA
+    vec4 tfResult = texture(tfTex, scalar);
+    vec3 color = tfResult.rgb;
+    float alpha = tfResult.a;
+    
+    // 3. Optional Shading
+    if (useShading) {
+        // Compute gradient using central differences
+        // Note: In a real shader, this requires multiple texture lookups
+        // or a pre-computed gradient texture.
+        // Here we assume a helper function getGradient(texCoord) exists
+        // which returns the normalized gradient vector.
+        vec3 normal = getGradient(texCoord);
         
-    # 3. Apply Transfer Function
-    # tf_tex is a 1D texture mapping scalar -> RGBA
-    tf_color = texture(tf_tex, vec2(scalar_value, 0.5)).rgba
+        // Blinn-Phong shading
+        vec3 lightDir = normalize(vec3(0.0, 1.0, 1.0)); // Example light
+        vec3 viewDir = normalize(cameraPosition - worldPosition);
+        vec3 halfDir = normalize(lightDir + viewDir);
+        
+        float diff = max(dot(normal, lightDir), 0.0);
+        float spec = pow(max(dot(normal, halfDir), 0.0), 32.0);
+        
+        color = color * (0.2 + 0.6 * diff + 0.2 * spec);
+    }
     
-    # 4. Optional: Illumination (Phong)
-    # Compute normal via finite differences in volume texture
-    delta = 1.0 / 256.0
-    grad_x = texture(volume_tex, tex_coords_3d + vec3(delta, 0, 0)).r - \
-             texture(volume_tex, tex_coords_3d - vec3(delta, 0, 0)).r
-    grad_y = texture(volume_tex, tex_coords_3d + vec3(0, delta, 0)).r - \
-             texture(volume_tex, tex_coords_3d - vec3(0, delta, 0)).r
-    grad_z = texture(volume_tex, tex_coords_3d + vec3(0, 0, delta)).r - \
-             texture(volume_tex, tex_coords_3d - vec3(0, 0, delta)).r
-    normal = normalize(vec3(grad_x, grad_y, grad_z))
-    
-    # Simple diffuse lighting (assuming light_dir and view_dir are available)
-    # color = tf_color.rgb * (ambient + diffuse * max(dot(normal, light_dir), 0))
-    color = tf_color.rgb # Simplified: no lighting in basic TBVR
-    
-    # 5. Set Alpha
-    final_alpha = tf_color.a * alpha_scale
-    
-    # 6. Output
-    return vec4(color, final_alpha)
-
-# Main Render Loop
-def render(volume_tex, tf_tex, camera, volume_bounds):
-    # 1. Setup Blending
-    enable_blend()
-    set_blend_func(GL_ONE, GL_ONE_MINUS_SRC_ALPHA) # Over operator
-    disable_depth_write()
-    
-    # 2. Generate Slices
-    slices = generate_slices(camera, volume_bounds)
-    
-    # 3. Sort Slices Back-to-Front
-    slices.sort(key=lambda s: s.distance_to_camera, reverse=True)
-    
-    # 4. Draw Slices
-    for slice in slices:
-        draw_polygon(slice.vertices, slice.tex_coords, fragment_shader)
+    // 4. Output for Hardware Blending
+    return vec4(color, alpha);
+}
 ```
 
+**Parameters:**
+*   **Plane Increment (`PLANE_INC`):** The distance between proxy slices. Initialized to 1.0 in voxel units. Smaller increments increase quality but reduce performance [S5, unofficial].
+*   **Texture Dimensions (`u_slices`):** Uniform `vec3` containing $(D_x, D_y, D_z)$ used to normalize coordinates if necessary [S5, unofficial].
+*   **Threshold (`u_thresh`):** Uniform float. Fragments with scalar values below this threshold are discarded (`discard`) to optimize rendering of sparse volumes [S5, unofficial].
+*   **Alpha Scale (`u_alphaScale`):** Uniform float multiplier for fragment alpha, allowing global opacity adjustment [S5, unofficial].
+
 **Edge Cases and Pitfalls:**
-*   **Precision:** Trilinear interpolation in 3D textures can cause blurring if the volume resolution is low. [S1, unofficial]
-*   **Boundary Conditions:** Texture coordinates must be clamped or wrapped correctly to avoid sampling outside the volume bounds. [S5, unofficial]
-*   **Degenerate Input:** If the camera is parallel to a slice plane, the slice may degenerate to a line or point, causing rendering artifacts. [S2, unofficial]
+*   **Viewing Artifacts:** Object-aligned slices suffer from "popping" artifacts and intensity variations when the camera rotates past 45 degrees relative to the slice planes, as the sampling distance changes and the active texture stack swaps [S1, S2, S7, unofficial].
+*   **Memory Usage:** Object-aligned slices require replicating the volume data three times (once for each axis), tripling memory consumption [S2, unofficial][S3, book][S7, unofficial].
+*   **Interpolation Artifacts:** 2D texture stacks use bilinear interpolation within slices, causing artifacts at slice boundaries. 3D textures use trilinear interpolation, which is smoother but may be slower [S1, S8, unofficial].
+*   **Sampling Rate Dependency:** The visual quality depends on the fixed number of slices. If the slice spacing is too large relative to the volume features, aliasing occurs. This can be mitigated by adding intermediate slices and using trilinear filtering [S3, book][S7, unofficial].
 
 ## Subtopics
 
 ### 2D Slice Replication Approach
-Stores volume as three stacks of 2D textures (X, Y, Z aligned). Proxy geometry is simple rectangles. **Pros:** Fast, bilinear interpolation. **Cons:** 3x memory usage, data replication, "popping" artifacts when switching stacks, intensity variations as camera moves. **When to use:** Legacy hardware, fixed viewpoints. [S2, unofficial][S3, book][S9]
+A variant where the volume is stored as a stack of 2D textures. Proxy polygons are simple rectangles aligned with the slices. It is fast but requires 3x memory due to data replication along principal axes. It suffers from intensity variations and popping artifacts as the camera moves. To avoid replication, slices can be reconstructed on-the-fly, but this incurs performance overhead [S9].
 
-### View-Aligned Slicing
-Slices are generated orthogonal to the viewing direction. **Pros:** Consistent sampling distance, no popping artifacts, better image quality. **Cons:** Slower geometry generation, requires 3D textures. **When to use:** Interactive applications with arbitrary camera movement. [S2, unofficial][S3, book]
+### View-Aligned Slices
+A variant where proxy geometry planes are orthogonal to the viewing direction. This ensures consistent sampling distance and eliminates the 45-degree viewing artifacts associated with object-aligned slices. It is more memory efficient (no replication) but requires computing new proxy geometry vertices for every frame/view change, making it slower than object-aligned approaches [S2, S6, unofficial].
 
-### Object-Aligned Slicing
-Slices are aligned with the principal axes of the volume. **Pros:** Simple geometry, fast. **Cons:** Artifacts at oblique angles, requires 3D texture stacks or replication. **When to use:** Orthographic views, static scenes. [S2, unofficial][S6, unofficial]
+### 3D Texture Based Rendering
+A variant using modern GPU 3D textures. It allows view-aligned slicing without data replication. It provides excellent image quality via trilinear interpolation and eliminates viewing artifacts. It is slightly slower than 2D texture approaches due to texture access latency but is the standard for high-quality TBVR on modern hardware [S1, S8, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of slices and $M$ is the number of fragments per slice. The complexity is independent of the number of pixels, unlike ray marching. [S3, book]
-*   **Memory Complexity:** $O(V)$ for 3D textures, where $V$ is the volume size. $O(3V)$ for 2D texture stacks. [S2, unofficial][S3, book]
-*   **Measured Performance:** On modern GPUs, TBVR achieves interactive frame rates (30+ FPS) for volumes up to $512^3$ with 3D textures. 2D texture approaches are faster on older hardware but suffer from quality degradation. [S1, unofficial][S3, book]
-*   **Strengths:** High performance on GPUs, simple implementation, leverages hardware blending. [S1, unofficial][S3, book]
-*   **Limitations:** Sampling artifacts (stair-stepping, blurring) if slice spacing is too large or interpolation is poor. View-dependent artifacts in object-aligned modes. [S1, unofficial][S2, unofficial]
-*   **When to use:** Interactive visualization, medical imaging, legacy hardware. [S1, unofficial][S5, unofficial]
-*   **When not to use:** High-fidelity offline rendering, volumes with extreme anisotropy, or when view-independent sampling is critical. [S3, book]
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of proxy slices. The cost is dominated by rasterization and fragment shading.
+*   **Memory Complexity:** $O(V)$ for 3D textures, where $V$ is the volume size. $O(3V)$ for object-aligned 2D texture stacks [S2, unofficial][S3, book].
+*   **Performance:** Provides interactive frame rates on consumer hardware by leveraging GPU parallelism for texture sampling and blending [S1, S4, unofficial].
+*   **Strengths:** Simple implementation, leverages standard graphics pipeline, good image quality with 3D textures, supports interactive rotation [S1, S2, unofficial].
+*   **Limitations:** Fixed sampling rate can cause aliasing; object-aligned variants have severe artifacts and memory overhead; view-aligned variants require per-frame geometry updates [S2, S7, unofficial].
+*   **When to use:** Interactive visualization of dense, regular grid data on GPUs.
+*   **When not to use:** Sparse data (use ray casting or sparse voxel octrees), or when adaptive sampling is required [S2, S7, unofficial].
 
 ## Background
-Texture-Based Volume Rendering was developed in the late 1990s and early 2000s as GPUs began to support 3D textures and fragment shaders. Key papers include Krüger and Westermann (2003) on GPU acceleration, and the NVIDIA GPU Gems Chapter 39 (2004) which detailed the implementation. It evolved from 2D texture slice approaches to 3D texture view-aligned slicing to address artifacts and memory issues. [S2, unofficial][S3, book][S7, unofficial]
+Texture-Based Volume Rendering was developed in the early 2000s to exploit the emerging texture hardware of GPUs for interactive visualization. Key early works include Krüger and Westermann (2003) and the NVIDIA GPU Gems Chapter 39 [S2, unofficial][S3, book]. It evolved from earlier software-based ray casting and splatting methods, which were too slow for real-time interaction [S1, S7, unofficial]. The technique became a standard for medical imaging and scientific visualization on consumer hardware [S5, S8, unofficial].
 
 ## Sources
 [S1] Direct Volume Rendering Data, https://www.scribd.com/document/1050958395/Direct-Volume-Rendering-Data, fetched 2026-10-25 (unofficial)

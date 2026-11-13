@@ -1,92 +1,65 @@
 # Multi-Resolution Rendering for Clouds
 Also called: Low-resolution first rendering for clouds, Progressive resolution cloud rendering
 ## Overview
-Multi-resolution rendering for clouds is a technique to limit the total number of samples by rendering clouds at a low resolution first to identify areas needing fewer samples, then accumulating the result with higher resolution passes [S1, unofficial]. It solves the problem of expensive high-resolution ray-marching by deferring detailed computation to regions that contribute significantly to the final image. Unlike its siblings, which focus on temporal coherence or spatial checkerboard patterns, this method varies the spatial resolution of the rendering pass itself across iterations [S1, unofficial].
+Multi-resolution rendering for clouds is a technique to limit the total number of volume samples by initially rendering the cloud field at a low resolution to identify regions requiring detailed sampling, then accumulating the final image with higher-resolution passes [S1, unofficial]. It solves the problem of expensive high-resolution ray-marching in volumetric clouds by deferring costly computations to areas of high visual complexity, distinguishing itself from sibling methods like [Temporal and Progressive Rendering](11267-temporal-and-progressive-rendering.md) by varying the spatial resolution of the rendering pass itself rather than just the sampling density or temporal reuse.
 ## How it works
-Inputs: A cloud volume or height-field representation, a camera, and a target resolution.
-Outputs: The final accumulated cloud color and opacity.
+Inputs: A volumetric cloud density field $\rho(x,y,z)$, a camera configuration, and a target resolution $R_{target}$.
+Outputs: The final accumulated cloud image $I$.
 
-Data structures:
-- `low_res_image`: A buffer storing the accumulated color and opacity at the initial low resolution.
-- `high_res_image`: A buffer storing the accumulated color and opacity at the target high resolution.
-- `mask`: A boolean or float buffer indicating which pixels require refinement (e.g., where opacity is non-zero or gradients are high).
+Data Structures:
+- $I_{low}$: A framebuffer of size $R_{low} \times R_{low}$ storing the initial low-resolution accumulation.
+- $I_{high}$: A framebuffer of size $R_{target} \times R_{target}$ storing the final high-resolution accumulation.
+- $M_{mask}$: A binary or scalar mask derived from $I_{low}$ indicating regions needing refinement.
 
 Steps:
-1. Initialize `low_res_image` and `high_res_image` to zero.
-2. Render the cloud scene at a low resolution (e.g., 1/4 or 1/8 of the target width/height). This involves standard ray-marching or ray-surface intersection at the lower sample density. Store the result in `low_res_image`.
-3. Analyze `low_res_image` to determine which pixels need higher resolution. A common heuristic is to mark pixels where the accumulated opacity exceeds a threshold or where the gradient of opacity is significant. Store this in `mask`.
-4. For each pixel marked in `mask`, perform ray-marching at the target high resolution. Accumulate the result into `high_res_image`.
-5. For pixels not marked in `mask`, copy the values from `low_res_image` to `high_res_image`, potentially upscaling via bilinear or nearest-neighbor interpolation if the resolutions differ.
-6. The final image is `high_res_image`.
+1. **Low-Resolution Pass:** Render the cloud volume at resolution $R_{low}$ (where $R_{low} \ll R_{target}$). This involves casting rays and performing volume integration with a coarse step size or fewer samples per ray to produce $I_{low}$ [S1, unofficial].
+2. **Analysis:** Compute a metric from $I_{low}$ to determine which pixels require higher resolution. This metric typically identifies areas with high density gradients or significant alpha coverage [S1, unofficial].
+3. **High-Resolution Pass:** Render the cloud volume at resolution $R_{target}$. For pixels identified in the analysis step, perform full high-resolution ray marching. For other pixels, either reuse the low-resolution value or perform a lighter high-resolution pass [S1, unofficial].
+4. **Accumulation:** Combine the results from the low-resolution and high-resolution passes to form the final image $I$. This may involve simple blending or weighted averaging based on the confidence of the low-resolution pass [S1, unofficial].
+
+Parameters:
+- $R_{low}$: The initial low resolution. Typical values are not given in the sources.
+- $R_{target}$: The final target resolution.
+- Threshold for refinement: Not given in the sources.
+
+Edge Cases:
+- **Boundary Artifacts:** Sharp transitions between low and high-resolution regions may cause visible seams. The sources do not specify how to handle this [S1, unofficial].
+- **Temporal Coherence:** The technique may suffer from flickering if the low-resolution analysis changes rapidly between frames. The author noted difficulties in applying temporal accumulation to clouds [S1, unofficial].
 
 Pseudocode:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def multi_resolution_cloud_rendering(camera, cloud_volume, target_width, target_height, low_res_factor=4):
-    low_w = target_width // low_res_factor
-    low_h = target_height // low_res_factor
+def multi_resolution_cloud_rendering(camera, cloud_field, R_low, R_target):
+    # Step 1: Low-resolution pass
+    I_low = render_cloud_at_resolution(camera, cloud_field, R_low, samples_per_ray=coarse)
     
-    # Step 2: Low resolution render
-    low_res_image = render_cloud_at_resolution(camera, cloud_volume, low_w, low_h)
+    # Step 2: Analysis to determine mask
+    # Metric based on density or gradient from I_low
+    M_mask = compute_refinement_mask(I_low)
     
-    # Step 3: Determine mask for refinement
-    # Heuristic: refine if opacity > 0.01 or gradient is high
-    mask = compute_refinement_mask(low_res_image, threshold=0.01)
+    # Step 3: High-resolution pass
+    # Render at target resolution, but only fully sample where needed
+    I_high = render_cloud_at_resolution(camera, cloud_field, R_target, samples_per_ray=full)
     
-    # Step 4 & 5: High resolution render and accumulation
-    high_res_image = create_empty_image(target_width, target_height)
+    # Step 4: Accumulation
+    # Blend I_low and I_high based on M_mask
+    # Note: Exact blending formula not specified in sources
+    I_final = blend(I_low, I_high, M_mask)
     
-    for y in range(target_height):
-        for x in range(target_width):
-            # Map high-res coordinates to low-res coordinates
-            low_x = x // low_res_factor
-            low_y = y // low_res_factor
-            
-            # Check if this high-res pixel corresponds to a masked low-res pixel
-            # Note: mask is defined on low-res grid
-            if mask[low_y, low_x]:
-                # Step 4: Render at high resolution for this pixel
-                color, opacity = render_cloud_at_resolution(camera, cloud_volume, 1, 1, start_x=x, start_y=y)
-                high_res_image[y, x] = (color, opacity)
-            else:
-                # Step 5: Upscale from low resolution
-                # Simple nearest neighbor or bilinear interpolation
-                high_res_image[y, x] = low_res_image[low_y, low_x]
-                
-    return high_res_image
-
-def render_cloud_at_resolution(camera, cloud_volume, width, height, start_x=0, start_y=0):
-    # Placeholder for actual ray-marching logic
-    # Returns color and opacity for the given resolution
-    # If width=1, height=1, it renders a single pixel
-    pass
-
-def compute_refinement_mask(low_res_image, threshold):
-    mask = create_empty_boolean_image(low_res_image.width, low_res_image.height)
-    for y in range(low_res_image.height):
-        for x in range(low_res_image.width):
-            color, opacity = low_res_image[y, x]
-            if opacity > threshold:
-                mask[y, x] = True
-    return mask
+    return I_final
 ```
-
-Parameters:
-- `low_res_factor`: The ratio between target and low resolution. Typical values are 4 or 8. Not given in the sources.
-- `threshold`: The opacity threshold for refinement. Typical value is 0.01. Not given in the sources.
-
-Edge cases and pitfalls:
-- If the low-resolution render misses thin cloud structures due to undersampling, the mask may fail to trigger refinement for those areas, leading to visual artifacts.
-- The transition between low and high resolution regions may be visible if interpolation is not handled carefully.
-- The method assumes that low-resolution rendering is significantly faster, which may not hold if the volume evaluation is the bottleneck rather than the number of samples.
-
 ## Subtopics
 ## Operating characteristics
-Time complexity: The total time is proportional to the number of pixels in the low-resolution pass plus the number of pixels in the high-resolution pass that are masked. If the mask covers a small fraction of the image, this is significantly faster than full high-resolution rendering. Memory complexity: Requires storage for both low and high-resolution buffers, plus the mask. This is roughly 2-3 times the memory of a single high-resolution buffer. Strengths: Reduces computation for empty or uniform background areas. Limitations: May introduce aliasing or blurring at the boundaries of refined regions. When to use: When clouds are sparse or have large empty areas. When not to use: When clouds are dense and cover the entire screen, as the overhead of masking and upscaling may outweigh the savings.
-
+Time Complexity: The method reduces the average number of samples per pixel by performing expensive high-resolution calculations only in selected regions. The total cost is approximately $O(R_{low}^2 \cdot N_{low} + R_{target}^2 \cdot N_{high} \cdot f)$, where $f$ is the fraction of pixels requiring high resolution [S1, unofficial].
+Memory Complexity: Requires storage for two framebuffers ($I_{low}$ and $I_{high}$) and the mask $M_{mask}$ [S1, unofficial].
+Strengths: Significantly reduces computation time for scenes with large empty or uniform cloud regions [S1, unofficial].
+Limitations: Potential for visual artifacts at resolution boundaries; complexity in implementation; temporal instability [S1, unofficial].
+When to use: When rendering large cloud volumes with significant empty space and where performance is critical [S1, unofficial].
+When not to use: When uniform high fidelity is required across the entire image or when temporal coherence is paramount and difficult to maintain [S1, unofficial].
 ## Background
-Origin: The technique was proposed by an author in the three.js forum who considered it for efficient volumetric clouds but did not implement it [S1, unofficial]. History: The author suspected it could be very effective for limiting samples in cloud rendering [S1, unofficial]. Usage: It is a conceptual optimization strategy discussed in the context of real-time cloud rendering, particularly in web-based 3D environments using three.js.
-
+Origin: The technique was proposed by an author in the three.js forum who considered it for efficient volumetric cloud rendering but did not implement it [S1, unofficial].
+History: The author suspected the technique could be very effective but ultimately gave up on temporal accumulation approaches for clouds due to difficulty [S1, unofficial].
+Usage: Discussed in the context of optimizing volumetric cloud rendering in web-based 3D graphics [S1, unofficial].
 ## Sources
 [S1] Efficient volumetric clouds - Resources - three.js forum, https://discourse.threejs.org/t/efficient-volumetric-clouds/66067, fetched 2026-10-29 (unofficial)

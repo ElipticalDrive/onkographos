@@ -3,146 +3,130 @@
 Also called: Modified Marching Cubes
 
 ## Overview
-Marching Cubes Revisited is a modified marching cubes algorithm for meshing implicit surfaces on a regular grid [S1]. It guarantees topological correctness by resolving face ambiguities via specific diagonal connections and enforcing interval constraints that eliminate impossible sign configurations [S1].
+Marching Cubes Revisited is a topologically correct variant of the Marching Cubes algorithm designed to eliminate surface holes and ambiguities inherent in the original Lorensen and Cline formulation [S1]. It achieves this by enforcing an interval condition on the implicit function's gradient within each grid cell, which restricts the possible vertex sign configurations to 9 valid cases and resolves the remaining topological ambiguities in cases 4 and 6 through specific geometric constraints [S1].
 
 ## How it works
 **Inputs:**
-- A smooth scalar field function $F: \mathbb{R}^3 \to \mathbb{R}$ defining the implicit surface $S = F^{-1}(0)$ [S1].
-- A uniform cubic grid where $S$ does not pass through vertices and intersects each edge at most once [S1].
+*   $F: \mathbb{R}^3 \to \mathbb{R}$: A smooth implicit function defining the surface $S = F^{-1}(0)$ [S1].
+*   Grid: A uniform cubic grid.
+*   Isovalue: 0 [S1].
 
 **Outputs:**
-- A triangulated mesh approximating $S$.
+*   A triangle mesh approximating the surface $S$ [S1].
 
 **Data Structures:**
-- Grid vertices: Uniformly spaced points in $\mathbb{R}^3$ [G].
-- Cell configuration: An 8-bit integer representing the sign of $F$ at the 8 vertices of a cell, mapped to one of 14 topological types up to rotation, mirroring, and sign change [S1].
+*   **Grid Cell:** A cube defined by 8 vertices. Each vertex $v_i$ has a sign $s_i = \text{sign}(F(v_i))$.
+*   **Case Index:** An integer derived from the 8 vertex signs, identifying the intersection configuration.
+*   **Edge Midpoints:** For each intersected edge, a vertex is placed at the geometric center of the edge [S1].
 
-**Constraints and Assumptions:**
-1. **Regular Value:** $0$ is a regular value of $F$, meaning $\nabla F \neq 0$ at every point on $S$ [S1].
-2. **Vertex Exclusion:** $S$ does not contain any grid vertices ($F(v) \neq 0$ for all vertices $v$) [S1].
-3. **Single Intersection:** $S$ intersects each grid edge at most once [S1].
-4. **Interval Condition:** For each cell $C$, one of the following must hold:
-   $$0 \notin \Box F(C) \quad \vee \quad 0 \notin \langle \Box \nabla F(C), \Box \nabla F(C) \rangle$$
-   where $\Box F(C)$ is the interval enclosure of $F$ over $C$, and $\Box \nabla F(C)$ is the interval enclosure of the gradient [S1]. The second clause implies that for all $x, y \in C$:
-   $$\langle \nabla F(x), \nabla F(y) \rangle > 0$$
-   This ensures the surface is parametrizable in at least one axis direction for cells containing the surface [S1].
+**Assumptions and Constraints:**
+1.  **Regular Value:** 0 is a regular value of $F$, meaning $\nabla F \neq 0$ at every point on $S$ [S1].
+2.  **Vertex Exclusion:** $S$ does not contain any grid vertices [S1].
+3.  **Single Intersection:** $S$ intersects each grid edge at most once [S1].
+4.  **Interval Condition:** For every cell $C$, one of the following must hold:
+    $$0 \notin \Box F(C) \quad \vee \quad 0 \notin \langle \Box \nabla F(C), \Box \nabla F(C) \rangle$$
+    where $\Box F(C)$ is the range of $F$ over $C$, and $\Box \nabla F(C)$ is the range of the gradient. The second clause implies that for all $x, y \in C$:
+    $$\langle \nabla F(x), \nabla F(y) \rangle > 0$$
+    This ensures the gradient direction does not flip within the cell, guaranteeing the surface is parametrizable along at least one axis [S1].
 
 **Algorithm Steps:**
-1. **Evaluate:** Compute $F(v)$ for all grid vertices $v$ [G].
-2. **Classify:** For each cell, determine the sign configuration (14 possible types up to rotation, mirroring, and sign change) [S1].
-3. **Filter:** Discard cells where the sign configuration is 5, 8, 12, 13, or 14. These are impossible under the interval condition [S1]. Configuration 5, for example, implies sign changes in opposite directions on edges $cd$ and $ef$, and non-parametrizability in other axes, contradicting the inner product condition [S1].
-4. **Triangulate:** For the remaining 9 configurations:
-   - Place the isosurface vertex at the **center** of the intersected edge, not via linear interpolation. This ensures topological correctness [S1].
-   - Resolve ambiguities in configurations 4 and 6. These cases have a single face where the function changes sign along all four edges, creating four vertices on that face. Connect these vertices pairwise such that the resulting segments are parallel to $(1,1,0)$, $(1,0,1)$, or $(0,1,1)$, depending on the face orientation [S1].
+1.  **Evaluate Signs:** For each grid cell, compute the sign of $F$ at all 8 vertices.
+2.  **Check Interval Condition:** Verify if the cell satisfies the interval condition. If not, the method's topological guarantees do not apply (though the source notes this is a constraint for the *validity* of the reduced case set, the algorithm proceeds by assuming valid inputs or handling invalid cases via the octree refinement mentioned in the overview) [S1].
+3.  **Determine Case Index:** Map the 8 vertex signs to one of the 14 possible configurations (up to rotation, mirroring, and sign change) [S1].
+4.  **Filter Invalid Cases:** Discard configurations 5, 8, 12, 13, and 14. These are impossible under the interval condition because they require the gradient to change direction or fail the inner product condition [S1].
+5.  **Triangulate Valid Cases:** For the remaining 9 configurations, generate triangles using edge midpoints:
+    *   **Standard Cases:** Connect edge midpoints according to the standard connectivity for the specific case index.
+    *   **Ambiguous Cases (4 and 6):** These cases have a single face where the function changes sign along all four edges, resulting in four potential vertices. To resolve the ambiguity, connect the vertices such that the resulting segments are parallel to $(1,1,0)$, $(1,0,1)$, or $(0,1,1)$, depending on the orientation of the ambiguous face [S1].
+6.  **Refinement (Optional):** For higher accuracy, the algorithm can be extended using a balanced octree to remove the initial grid constraints, but the core topological correctness relies on the steps above [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def marching_cubes_revisited(grid_vertices, grid_cells, F):
+def march_cubes_revisited(grid, F):
     """
-    Extracts isosurface using Marching Cubes Revisited.
-    grid_vertices: list of (x,y,z) tuples
-    grid_cells: list of lists of 8 vertex indices per cell
-    F: callable F(x,y,z) -> float
-    Returns: list of triangles, each triangle is ((x,y,z), (x,y,z), (x,y,z))
+    grid: 3D array of shape (Nx, Ny, Nz) containing vertex positions or indices.
+    F: Function returning scalar value at a 3D point.
+    Returns: List of triangles (each triangle is a tuple of 3 vertex indices).
     """
     triangles = []
-    # Precompute signs: 1 for positive, -1 for negative
-    signs = [1 if F(v[0], v[1], v[2]) > 0 else -1 for v in grid_vertices]
-
-    # Standard MC edge definitions (vertex indices per edge)
-    MC_EDGES = [
-        (0,1), (1,3), (3,2), (2,0), # Face z=0
-        (4,5), (5,7), (7,6), (6,4), # Face z=1
-        (0,4), (1,5), (3,7), (2,6)  # Vertical edges
-    ]
-
-    # Standard MC triangle lookup for non-ambiguous configs
-    MC_TABLE = {
-        1: [(0,8,3),(0,4,8)], 2: [(0,1,5),(0,5,4)], 3: [(0,1,5),(0,5,4)],
-        7: [(0,1,5),(0,5,4)], 8: [(0,8,3),(0,4,8)], 9: [(0,1,5),(0,5,4)],
-        11: [(0,1,5),(0,5,4)], 13: [(0,1,5),(0,5,4)], 14: [(0,1,5),(0,5,4)]
-    }
-    # Note: Standard MC tables vary by vertex ordering; this implements a consistent mapping [G].
-
-    for cell_indices in grid_cells:
-        cell_signs = [signs[i] for i in cell_indices]
-        # Build config index: bit i set if sign is positive
-        config = 0
-        for i, s in enumerate(cell_signs):
-            if s > 0:
-                config |= (1 << i)
-
-        # Skip impossible configurations (5, 8, 12, 13, 14) and empty/full (0, 15)
-        if config in (0, 5, 8, 12, 13, 14, 15):
-            continue
-
-        # Get edge intersection points (centers)
-        edge_points = []
-        for e_idx, (v0_idx, v1_idx) in enumerate(MC_EDGES):
-            if cell_signs[v0_idx] != cell_signs[v1_idx]:
-                v0 = grid_vertices[v0_idx]
-                v1 = grid_vertices[v1_idx]
-                edge_points.append(((v0[0]+v1[0])/2.0, (v0[1]+v1[1])/2.0, (v0[2]+v1[2])/2.0))
-
-        if config == 4 or config == 6:
-            tri = resolve_ambiguity(cell_indices, cell_signs, edge_points)
-            triangles.append(tri)
+    
+    # Predefined connectivity for the 9 valid cases (excluding 5,8,12,13,14)
+    # Case 4 and 6 require special handling for ambiguity.
+    # Standard MC lookup tables are modified to exclude invalid cases and define
+    # specific connections for 4 and 6 based on face orientation.
+    
+    for each cell in grid:
+        # 1. Evaluate signs
+        signs = []
+        for vertex in cell.vertices:
+            val = F(vertex)
+            if val > 0:
+                signs.append(1)
+            else:
+                signs.append(-1) # Assuming 0 is not on vertex per assumption
+        
+        # 2. Compute case index (bitmask of signs)
+        case_index = compute_case_index(signs)
+        
+        # 3. Check for invalid configurations
+        if case_index in [5, 8, 12, 13, 14]:
+            # These configurations violate the interval condition.
+            # In a strict implementation, this indicates the input F does not
+            # satisfy the assumptions for this method.
+            continue 
+            
+        # 4. Triangulate
+        if case_index == 4:
+            # Ambiguous case: resolve based on face orientation
+            # Identify the face with sign changes on all 4 edges.
+            # Connect vertices such that segments are parallel to (1,1,0), (1,0,1), or (0,1,1).
+            triangles.extend(resolve_ambiguity_case_4(cell, signs))
+        elif case_index == 6:
+            # Ambiguous case: resolve based on face orientation
+            triangles.extend(resolve_ambiguity_case_6(cell, signs))
         else:
-            tri = standard_triangulation(config, edge_points)
-            triangles.append(tri)
-
+            # Standard triangulation for the other 7 valid cases
+            triangles.extend(triangulate_standard_case(case_index, cell))
+            
     return triangles
 
-def resolve_ambiguity(cell_indices, cell_signs, edge_points):
-    # Face definitions (vertex indices) and their corresponding MC_EDGES indices
-    FACES = [
-        [0,1,3,2], [4,5,7,6], [0,1,5,4], [2,3,7,6], [0,2,6,4], [1,3,7,5]
-    ]
-    FACE_EDGES = [
-        [0,1,2,3], [8,9,10,11], [4,5,12,13], [14,15,6,7], [0,4,8,12], [1,5,9,13]
-    ]
+def resolve_ambiguity_case_4(cell, signs):
+    """
+    Case 4 has a specific ambiguous face.
+    The rule is to connect vertices such that the segment is parallel to
+    (1,1,0), (1,0,1), or (0,1,1) depending on the face normal/orientation.
+    """
+    # Identify the ambiguous face (e.g., xy, xz, or yz plane)
+    # Based on the face orientation, select the diagonal connection.
+    # Example: If ambiguous face is normal to z (xy plane), connect parallel to (1,1,0) or (1,-1,0)?
+    # Source specifies (1,1,0), (1,0,1), (0,1,1). These correspond to diagonals on xy, xz, yz faces.
+    # We must determine which diagonal is chosen. The source implies a deterministic choice
+    # based on the face orientation to ensure topological correctness.
+    pass # Implementation detail depends on exact face identification logic.
 
-    for f_idx, face_verts in enumerate(FACES):
-        # Check if all 4 edges of this face cross the isosurface
-        all_cross = True
-        for e_rel in FACE_EDGES[f_idx]:
-            e_abs = MC_EDGES[e_rel]
-            if cell_signs[e_abs[0]] == cell_signs[e_abs[1]]:
-                all_cross = False
-                break
-        if all_cross:
-            # Ambiguous face found. Connect vertices on this face.
-            # The rule: connect such that resulting segments are parallel to (1,1,0), (1,0,1), or (0,1,1).
-            # This corresponds to connecting opposite vertices on the face.
-            pts = [edge_points[e_rel] for e_rel in FACE_EDGES[f_idx]]
-            # Connect pts[0]-pts[2] and pts[1]-pts[3] (main diagonals)
-            return [
-                (pts[0], pts[1], pts[2]),
-                (pts[1], pts[3], pts[2])
-            ]
-    return []
-
-def standard_triangulation(config, edge_points):
-    # Standard MC lookup table for non-ambiguous configs
-    MC_TABLE = {
-        1: [(0,8,3),(0,4,8)], 2: [(0,1,5),(0,5,4)], 3: [(0,1,5),(0,5,4)],
-        7: [(0,1,5),(0,5,4)], 8: [(0,8,3),(0,4,8)], 9: [(0,1,5),(0,5,4)],
-        11: [(0,1,5),(0,5,4)], 13: [(0,1,5),(0,5,4)], 14: [(0,1,5),(0,5,4)]
-    }
-    # Note: Standard MC tables vary by vertex ordering; this implements a consistent mapping [G].
-    tri_indices = MC_TABLE.get(config, [])
-    return [(edge_points[i], edge_points[j], edge_points[k]) for i, j, k in tri_indices]
+def resolve_ambiguity_case_6(cell, signs):
+    """
+    Similar to Case 4, resolve ambiguity for Case 6.
+    """
+    pass
 ```
 
+**Parameters:**
+*   **Isosurface Definition:** $S = F^{-1}(0)$ [S1].
+*   **Grid Resolution:** Not specified, but the method assumes a uniform grid [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Invalid Configurations:** Configurations 5, 8, 12, 13, and 14 are impossible under the interval condition. If they occur, the input function $F$ violates the assumption that $\langle \nabla F(x), \nabla F(y) \rangle > 0$ for all $x,y$ in the cell [S1].
+*   **Ambiguity Resolution:** In cases 4 and 6, the choice of connection is critical. The source specifies connecting vertices parallel to $(1,1,0)$, $(1,0,1)$, or $(0,1,1)$ depending on face orientation. This specific geometric constraint is what guarantees topological correctness, unlike the original MC which leaves this ambiguous [S1].
+
 ## Operating characteristics
-- **Correctness:** Guarantees topological correctness for surfaces satisfying the interval condition, unlike original MC [S1].
-- **Complexity:** Linear in the number of grid cells. Each cell is processed independently [G].
-- **Limitations:** Requires the interval condition to hold. The method assumes single intersections per edge [S1].
+*   **Topological Correctness:** Guarantees topological correctness by resolving ambiguities and using interval constraints, unlike the original MC [S1].
+*   **Complexity:** Not explicitly stated in terms of Big-O, but operates on a structured 3D grid similar to standard MC. The use of a balanced octree is mentioned as a later step to remove grid constraints, implying adaptive refinement capabilities [S1].
+*   **Limitations:** The method relies on the interval condition. If the function $F$ does not satisfy the condition (e.g., gradient changes sign within a cell), the method's guarantees fail. The source notes that these constraints can be removed later using an octree, but the core algorithm described assumes them [S1].
 
 ## Background
-The method was introduced in "Isotopic approximation of implicit curves and surfaces" [S1]. It builds on the original Marching Cubes by Lorensen and Cline [S1] but modifies the vertex placement and ambiguity resolution to ensure isotopic equivalence (topological correctness) [S1]. It serves as a precursor to octree-based meshing algorithms [S1].
+The method was introduced in the paper "Isotopic approximation of implicit curves and surfaces" [S1]. It builds on the original Marching Cubes algorithm by Lorensen and Cline [LC87], addressing its inability to guarantee topological correctness due to ambiguities in sign configurations [S1]. The key innovation is the introduction of the interval condition on the gradient, which reduces the number of valid cases and provides a deterministic rule for resolving the remaining ambiguities.
 
 ## Sources
 [S1] Isotopic approximation of implicit curves and surfaces, https://doi.org/10.1145/1057432.1057465, fetched 2026-10-29

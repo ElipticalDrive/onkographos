@@ -1,0 +1,147 @@
+# VoxelMesher::build_mesh
+
+Also called: Chunk Mesh Assembly::build_mesh
+
+## Overview
+`VoxelMesher::build_mesh` is the core method in the Godot Voxel plugin that constructs a Godot `ArrayMesh` from voxel buffer data, handling material assignment, surface assembly, and optional Transvoxel detail normal map generation [S1, unofficial]. It serves as the final assembly step in the blocky meshing pipeline, converting abstract voxel topology into renderable geometry [S1, unofficial]. It differs from [Section-based Mesh Generation](4220-section-based-mesh-generation.md) by assembling complete `ArrayMesh` objects with material handling rather than generating raw vertex buffers, and from [Chunk Region Meshing with Dirty Regions](4402-chunk-region-meshing-with-dirty-regions.md) by focusing on the mesh construction logic itself rather than the culling or region management [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A `VoxelMesher::Input` struct containing the voxel buffer, an optional generator (for Transvoxel), origin in voxels, LOD index, and flags for detail rendering.
+*   **Output:** A `VoxelMesher::Output` struct containing a list of surfaces, each with primitive type, arrays (vertices, normals, indices, etc.), material index, and mesh flags.
+*   **Return:** A Godot `ArrayMesh` instance.
+
+**Data Structures:**
+The method relies on internal lookup tables defined in the `Cube` class for topology. Key constants include:
+*   `g_side_normals[SIDE_COUNT]`: Normal vectors for the 6 cube faces. Note: The source contains a documented bug where `LEFT` is defined as `(1, 0, 0)` instead of `(-1, 0, 0)` and `BACK` as `(0, 0, -1)` instead of `(0, 0, 1)` [S1, unofficial].
+*   `g_side_corners[SIDE_COUNT][4]`: Vertex indices for each face.
+*   `g_side_edges[SIDE_COUNT][4]`: Edge indices for each face.
+*   `g_corner_inormals[CORNER_COUNT]`: Inverse normals for corners.
+*   `g_edge_inormals[EDGE_COUNT]`: Inverse normals for edges.
+*   `g_ordered_moore_area_3d[MOORE_AREA_3D_COUNT]`: 27 relative offsets for neighbor checks, ordered to avoid deadlocks in multithreaded contexts [S1, unofficial].
+
+**Steps:**
+1.  **Initialize Input:** Create `VoxelMesher::Input` with the voxel buffer, null generator, origin `(0,0,0)`, LOD index `0`, and three false flags [S1, unofficial].
+2.  **Process Additional Data:** If `additional_data` is provided:
+    *   Extract `generator`, `origin_in_voxels`, and detail rendering settings [S1, unofficial].
+    *   Clamp `normalmap_max_deviation_degrees` to `MIN_DEVIATION_DEGREES` and `MAX_DEVIATION_DEGREES` [S1, unofficial].
+    *   Set `input.detail_texture_hint` based on the enabled flag [S1, unofficial].
+3.  **Core Build:** Invoke the core build function with the prepared `input` and `output` structs [S1, unofficial].
+4.  **Empty Check:** If `output.surfaces` is empty, return an empty `ArrayMesh` reference [S1, unofficial].
+5.  **Mesh Assembly:**
+    *   Instantiate a new `ArrayMesh` [S1, unofficial].
+    *   Iterate over `output.surfaces`. Skip surfaces with empty arrays or non-triangulated data [S1, unofficial].
+    *   **Material Assignment:** Prefer materials from the input array if the index is valid; otherwise, fall back to `get_material_by_index(surface.material_index)` [S1, unofficial].
+    *   Add the surface to the mesh using `output.primitive_type`, arrays, empty extra arrays/dictionary, and `output.mesh_flags` [S1, unofficial].
+    *   Set the surface material and increment the material index [S1, unofficial].
+6.  **Transvoxel Detail (Optional):** If smooth meshing is enabled, detail textures are enabled, and a generator exists:
+    *   Cast the mesher to `VoxelMesherTransvoxel` [S1, unofficial].
+    *   Retrieve `mesh_arrays` and `cell_infos` from thread-local cache [S1, unofficial].
+    *   Create `TransvoxelCellIterator` [S1, unofficial].
+    *   Call `compute_detail_texture_data` with vertex/normal/index spans, tile resolution, generator, origin, voxel size, LOD, octahedral flag, and max deviation in radians [S1, unofficial].
+7.  **Block Size Calculation:** Calculate `block_size` by subtracting minimum and maximum padding from the voxel buffer size [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_mesh(input_data, additional_data=None):
+    # Step 1: Initialize Input
+    input = VoxelMesherInput()
+    input.voxel_buffer = input_data.voxel_buffer
+    input.generator = None
+    input.origin = Vector3i(0, 0, 0)
+    input.lod_index = 0
+    input.flags = [False, False, False]
+
+    # Step 2: Process Additional Data
+    if additional_data is not None:
+        input.generator = additional_data.generator
+        input.origin = additional_data.origin_in_voxels
+        # Clamp deviation
+        input.detail_texture_hint = additional_data.detail_enabled
+        deviation = additional_data.normalmap_max_deviation_degrees
+        input.detail_max_deviation = clamp(deviation, MIN_DEVIATION_DEGREES, MAX_DEVIATION_DEGREES)
+
+    # Step 3: Core Build
+    output = VoxelMesherOutput()
+    core_build(input, output)
+
+    # Step 4: Empty Check
+    if not output.surfaces:
+        return ArrayMesh()
+
+    # Step 5: Mesh Assembly
+    mesh = ArrayMesh()
+    material_index = 0
+    for surface in output.surfaces:
+        if not surface.arrays or not is_triangulated(surface.arrays):
+            continue
+
+        # Material Assignment
+        if input.materials and surface.material_index < len(input.materials):
+            material = input.materials[surface.material_index]
+        else:
+            material = get_material_by_index(surface.material_index)
+
+        # Add Surface
+        mesh.add_surface(
+            primitive_type=output.primitive_type,
+            arrays=surface.arrays,
+            arrays_extra=[],
+            arrays_dictionary={},
+            mesh_flags=output.mesh_flags,
+            material=material
+        )
+        material_index += 1
+
+    # Step 6: Transvoxel Detail
+    if is_smooth_meshing_enabled() and is_detail_textures_enabled() and input.generator:
+        transvoxel_mesher = cast_to_VoxelMesherTransvoxel(self)
+        mesh_arrays, cell_infos = get_thread_local_cache()
+        iterator = TransvoxelCellIterator()
+        compute_detail_texture_data(
+            vertices=surface.vertices,
+            normals=surface.normals,
+            indices=surface.indices,
+            tile_resolution=transvoxel_mesher.tile_resolution,
+            generator=input.generator,
+            origin=input.origin,
+            voxel_size=input.voxel_buffer.voxel_size,
+            lod=input.lod_index,
+            octahedral=transvoxel_mesher.octahedral,
+            max_deviation_radians=radians(input.detail_max_deviation)
+        )
+
+    # Step 7: Block Size Calculation
+    block_size = input.voxel_buffer.size - input.voxel_buffer.min_padding - input.voxel_buffer.max_padding
+
+    return mesh
+```
+
+**Edge Cases and Pitfalls:**
+*   **Bug in Normals:** The `g_side_normals` array has swapped signs for LEFT and BACK sides, which may cause incorrect culling or lighting if relied upon directly [S1, unofficial].
+*   **Multithreading:** Neighbor checks use `g_ordered_moore_area_3d` to prevent deadlocks in multithreaded contexts [S1, unofficial].
+*   **GDScript Limitation:** Custom meshers cannot be implemented in GDScript due to performance constraints [S2].
+
+## Subtopics
+
+### Custom Mesher Implementation
+Custom meshing allows interpreting voxel data differently than standard ID-to-model mapping, supporting complex states, runtime rotations, separated properties, procedural shapes, or custom vertex packing [S2]. To create a custom mesher, one must create a C++ module inheriting the base class `VoxelMesher` and implement its virtual methods [S2]. This approach is ideal for full control and assumptions but requires compiling Godot [S2]. In contrast, a generic baked asset mesher is easier for asset management (one voxel = one model, variants for rotations/states) but requires bending needs to fit the pipeline and generating variants [S2]. GDScript cannot be used for custom meshers because scripts are too slow for individual polygonization; a development branch `mesher_script` exists but is not ready [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Handles material assignment and surface assembly in a single pass; supports optional Transvoxel detail normal map generation [S1, unofficial].
+*   **Limitations:** Relies on internal lookup tables with known bugs (normals); cannot be extended via GDScript [S1, unofficial][S2].
+*   **When to use:** When using the standard Godot Voxel plugin and needing to convert voxel buffers to `ArrayMesh` objects.
+*   **When not to use:** When custom vertex packing or procedural shape generation is required without C++ compilation [S2].
+
+## Background
+`VoxelMesher::build_mesh` is part of the Godot Voxel plugin, an unofficial voxel toolset for the Godot engine [S1, unofficial]. It was developed by Zylann and is documented in the plugin's source code and associated documentation [S1, unofficial][S2]. The method is designed to integrate with Godot's rendering pipeline, specifically `ArrayMesh`, allowing for efficient rendering of voxel-based terrain [S1, unofficial].
+
+## Sources
+[S1] Zylann/godot_voxel, https://github.com/Zylann/godot_voxel, fetched 2026-10-26 (unofficial)
+[S2] Blocky terrains - Voxel Tools documentation, https://voxel-tools.readthedocs.io/en/latest/blocky_terrain/, fetched 2026-10-27

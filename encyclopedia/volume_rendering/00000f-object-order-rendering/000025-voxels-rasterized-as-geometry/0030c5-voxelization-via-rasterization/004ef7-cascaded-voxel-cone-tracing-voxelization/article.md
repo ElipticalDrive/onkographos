@@ -3,134 +3,183 @@
 Also called: Geometry Volume (GV) Voxelization
 
 ## Overview
-Cascaded Voxel Cone Tracing Voxelization is a technique that renders scene geometry into a 3D texture (Geometry Volume, GV) using an orthographic camera aligned with the light direction, organized into cascades to handle varying distances and resolutions [S1, unofficial]. It differs from sibling methods by explicitly separating the voxelization into multiple cascaded volumes, where each cascade covers a volume twice as large as the previous one, allowing for high-resolution detail near the light source and coarser resolution at a distance [S1, unofficial].
+Cascaded Voxel Cone Tracing Voxelization is a technique that renders scene geometry into a 3D texture (Geometry Volume, GV) using an orthographic camera aligned with the light direction, organized into cascades to handle varying distances and resolutions [S1, unofficial]. It differs from sibling methods by explicitly managing spatial coherence through a cascade hierarchy where each level covers a volume twice as large as the previous one, enabling efficient indirect lighting computation via cone tracing [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** Scene geometry, a directional light (defining view direction), `gridResolution` (integer, e.g., 64 or 128), `gridPixelSize` (world units), `gridCascades` (integer), and a culling mask [S1, unofficial].
-*   **Outputs:** A 3D RenderTexture `_tex3d_gv` containing the voxelized geometry data [S1, unofficial].
+**Inputs:**
+- Scene geometry (meshes).
+- Directional light transform (position and rotation).
+- Parameters: `gridResolution` (integer, e.g., 64 or 128), `gridPixelSize` (world units per voxel), `gridCascades` (integer count).
+- Culling mask for the projection camera.
+
+**Outputs:**
+- `_tex3d_gv`: A 3D RenderTexture representing the Geometry Volume.
+- `_world_to_light_local_matrix`: A transformation matrix mapping world coordinates to light-local space.
 
 **Data Structures:**
-*   `CVCT_gv`: A `RWStructuredBuffer<int>` of size $N^3$ (where $N = \text{gridResolution}$). Used as an intermediate buffer during rasterization to accumulate voxel data before packing [S1, unofficial].
-*   `_tex3d_gv`: A 3D RenderTexture with dimensions $W=N$, $H=N \times C$, $D=N$ (where $C = \text{gridCascades}$). Format: R8. Dimension: Tex3D. WrapMode: Clamp. FilterMode: Bilinear. No mipmaps [S1, unofficial].
-*   `dummy_target`: A temporary R8 RenderTexture of size $N \times N$, used as the camera's target texture to drive the render pipeline while data is written to `CVCT_gv` via random write targets [S1, unofficial].
+- `CVCT_gv`: A `RWStructuredBuffer<int>` of size `gridResolution^3`. Used as an intermediate buffer during rasterization before packing into the 3D texture.
+- `_tex3d_gv`: A 3D RenderTexture (`Tex3D`) with dimensions:
+  - Width: `gridResolution`
+  - Height: `gridResolution * gridCascades`
+  - Depth: `gridResolution`
+  - Format: `R8`
+  - WrapMode: `Clamp`
+  - FilterMode: `Bilinear`
+  - No mipmaps.
 
 **Steps:**
 
-1.  **Initialize Camera:** Create or reuse an orthographic camera aligned with the directional light's transform. Set `orthographic = true`, `aspect = 1`, `clearFlags = Nothing`, and `stereoTargetEye = None` [S1, unofficial].
-2.  **Allocate Buffers:** Allocate `CVCT_gv` with size $N^3$ integers. Allocate `_tex3d_gv` with dimensions $(N, N \times C, N)$ in R8 format [S1, unofficial].
-3.  **Compute Light-Space Matrix:** Calculate `_world_to_light_local_matrix`. This matrix maps world coordinates to light-local space such that cascade 0 spans $(-1, -1, -1)$ to $(+1, +1, +1)$ [S1, unofficial].
-    $$
-    sz = 0.5 \times N \times \text{gridPixelSize}
-    $$
-    $$
-    \text{Matrix} = \text{Scale}\left(\frac{1}{sz}\right) \times \text{cam.transform.worldToLocalMatrix}
-    $$
-4.  **Loop over Cascades ($i = 0$ to $C-1$):**
-    a.  **Calculate Cascade Bounds:** Determine the half-size for the current cascade.
-        $$
-        \text{half\_size} = 0.5 \times N \times \text{gridPixelSize} \times 2^i
-        $$
-    b.  **Configure Camera:** Set `cam.orthographicSize = half_size`, `cam.nearClipPlane = -half_size`, `cam.farClipPlane = half_size` [S1, unofficial].
-    c.  **Clear Buffer:** Dispatch `ClearKernel` to zero out `CVCT_gv`. Thread group count: $((N^3 \times 63) / 64, 1, 1)$ [S1, unofficial].
-    d.  **Render Geometry:** Set `cam.targetTexture = dummy_target`. Set random write target 1 to `CVCT_gv`. Render scene using `gvShader` [S1, unofficial].
-    e.  **Repack Data:** Dispatch repacking kernel.
-        *   If $i=0$: Dispatch `RepackLvl0Kernel`.
-        *   If $i>0$: Dispatch `RepackAndUpscaleKernel`. Set `GridCascadeBase` to $(i \times N, (i-1) \times N)$ for upscale kernels [S1, unofficial].
-        *   Thread group count: $((N+3)/4, (N+3)/4, (N+3)/4)$ [S1, unofficial].
-5.  **Cleanup:** Release `dummy_target` and `CVCT_gv` [S1, unofficial].
+1. **Initialize Projection Camera:**
+   Create or reuse an orthographic camera (`_projectCam`) with `aspect = 1`, `clearFlags = Nothing`, and `stereoTargetEye = None`. Align its position and rotation with the directional light's transform. Set its culling mask.
+
+2. **Allocate Buffers:**
+   Allocate `cb_gv` as a `ComputeBuffer` of type `RWStructuredBuffer<int>` with size `gridResolution * gridResolution * gridResolution`.
+   Allocate `dummy_target` as a temporary `RenderTexture` with dimensions `gridResolution x gridResolution`, format `R8`, and no depth buffer.
+
+3. **Configure Compute Shaders:**
+   Identify kernels: `ClearKernel`, `RepackLvl0Kernel`, `RepackAndUpscaleKernel`.
+   Set global shader integer `_CVCT_GridResolutionI` to `gridResolution`.
+   Set compute shader integers: `GridResolution` and `GridHalfResolution` (`gridResolution / 2`).
+   Bind `cb_gv` to `CVCT_gv` in all kernels.
+   Bind `_tex3d_gv` to `CVCT_tex3d` in repack kernels.
+
+4. **Iterate Over Cascades (i from 0 to gridCascades-1):**
+   
+   a. **Calculate Cascade Bounds:**
+      Compute `half_size`:
+      $$ \text{half\_size} = 0.5 \times \text{gridResolution} \times \text{gridPixelSize} \times 2^i $$
+      
+   b. **Clear Intermediate Buffer:**
+      Calculate thread group count for clearing:
+      $$ \text{thread\_groups} = \left\lfloor \frac{\text{gridResolution}^3 \times 63}{64} \right\rfloor $$
+      Dispatch `ClearKernel` with `(thread_groups, 1, 1)`. This zeros out `cb_gv`.
+
+   c. **Render Geometry:**
+      Configure the projection camera:
+      - `orthographicSize = half_size`
+      - `nearClipPlane = -half_size`
+      - `farClipPlane = half_size`
+      - `targetTexture = dummy_target` (used to drive the render pipeline, but data is written to the buffer).
+      
+      Set random write target:
+      ```python
+      Graphics.SetRandomWriteTarget(1, cb_gv)
+      ```
+      
+      Render the scene using `gvShader`. The fragment shader writes voxel occupancy data into `cb_gv`.
+
+   d. **Repack into 3D Texture:**
+      Calculate thread group count for repacking:
+      $$ \text{thread\_groups} = \left\lceil \frac{\text{gridResolution} + 3}{4} \right\rceil $$
+      
+      If `i > 0`:
+      Set compute shader integer array `GridCascadeBase` to `(i * gridResolution, (i - 1) * gridResolution)`.
+      
+      Dispatch the appropriate repack kernel:
+      - If `i == 0`: Dispatch `RepackLvl0Kernel` with `(thread_groups, thread_groups, thread_groups)`.
+      - If `i > 0`: Dispatch `RepackAndUpscaleKernel` with `(thread_groups, thread_groups, thread_groups)`.
+
+5. **Compute World-to-Light Matrix:**
+   After processing all cascades, release `dummy_target` and `cb_gv`.
+   Calculate the scale factor:
+   $$ \text{sz} = 0.5 \times \text{gridResolution} \times \text{gridPixelSize} $$
+   
+   Construct the matrix `_world_to_light_local_matrix`:
+   $$ \text{mat} = \text{Scale}\left(\frac{1}{\text{sz}}\right) \times \text{cam.transform.worldToLocalMatrix} $$
+   
+   This matrix maps world coordinates such that cascade 0 spans the box from $(-1, -1, -1)$ to $(+1, +1, +1)$.
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def cvct_voxelize(grid_resolution, grid_pixel_size, grid_cascades, directional_light_transform, gv_shader, gv_compute):
-    N = grid_resolution
-    C = grid_cascades
-    
-    # Allocate intermediate buffer and final texture
-    cb_gv = ComputeBuffer(N * N * N, 4) # RWStructuredBuffer<int>
-    tex3d_gv = RenderTexture(N, N * C, N, RenderTextureFormat.R8)
-    tex3d_gv.wrapMode = TextureWrapMode.Clamp
-    tex3d_gv.filterMode = TextureFilterMode.Bilinear
-    
-    # Create orthographic camera aligned with light
-    cam = CreateOrthographicCamera()
-    cam.transform.position = directional_light_transform.position
-    cam.transform.rotation = directional_light_transform.rotation
+def update_voxelization(gridResolution, gridPixelSize, gridCascades, directionalLight, gvShader, gvCompute, _tex3d_gv):
+    # 1. Initialize Camera
+    cam = get_or_create_orthographic_camera()
+    cam.transform.position = directionalLight.transform.position
+    cam.transform.rotation = directionalLight.transform.rotation
     cam.orthographic = True
-    cam.aspect = 1.0
+    cam.aspect = 1
     cam.clearFlags = CameraClearFlags.Nothing
     cam.stereoTargetEye = StereoTargetEyeMask.None
     
-    # Pre-calculate light-space matrix for cascade 0 bounds (-1,-1,-1) to (1,1,1)
-    sz = 0.5 * N * grid_pixel_size
-    world_to_light_local_matrix = Matrix4x4.Scale(Vector3.one / sz) * cam.transform.worldToLocalMatrix
+    # 2. Allocate Buffers
+    cb_gv = ComputeBuffer(gridResolution**3, 4) # RWStructuredBuffer<int>
+    dummy_target = RenderTexture.GetTemporary(gridResolution, gridResolution, 0, RenderTextureFormat.R8)
     
-    dummy_target = RenderTexture.GetTemporary(N, N, 0, RenderTextureFormat.R8)
+    # 3. Configure Compute Shaders
+    clear_kernel = gvCompute.FindKernel("ClearKernel")
+    repack_lvl0_kernel = gvCompute.FindKernel("RepackLvl0Kernel")
+    repack_upscale_kernel = gvCompute.FindKernel("RepackAndUpscaleKernel")
     
-    clear_kernel = gv_compute.FindKernel("ClearKernel")
-    repack_lvl0_kernel = gv_compute.FindKernel("RepackLvl0Kernel")
-    repack_upscale_kernel = gv_compute.FindKernel("RepackAndUpscaleKernel")
+    gvCompute.SetInt("GridResolution", gridResolution)
+    gvCompute.SetInt("GridHalfResolution", gridResolution // 2)
     
-    gv_compute.SetInt("GridResolution", N)
-    gv_compute.SetInt("GridHalfResolution", N // 2)
+    gvCompute.SetBuffer(clear_kernel, "CVCT_gv", cb_gv)
+    gvCompute.SetBuffer(repack_lvl0_kernel, "CVCT_gv", cb_gv)
+    gvCompute.SetTexture(repack_lvl0_kernel, "CVCT_tex3d", _tex3d_gv)
+    gvCompute.SetBuffer(repack_upscale_kernel, "CVCT_gv", cb_gv)
+    gvCompute.SetTexture(repack_upscale_kernel, "CVCT_tex3d", _tex3d_gv)
     
-    for i in range(C):
-        # Calculate cascade volume size
-        half_size = 0.5 * N * grid_pixel_size * (2 ** i)
+    Shader.SetGlobalInt("_CVCT_GridResolutionI", gridResolution)
+    
+    # 4. Iterate Cascades
+    for i in range(gridCascades):
+        half_size = 0.5 * gridResolution * gridPixelSize * (2.0 ** i)
         
-        # Configure camera frustum
+        # Clear
+        thread_groups_clear = (gridResolution**3 * 63) // 64
+        gvCompute.Dispatch(clear_kernel, thread_groups_clear, 1, 1)
+        
+        # Render
         cam.orthographicSize = half_size
         cam.nearClipPlane = -half_size
         cam.farClipPlane = half_size
-        
-        # Step 1: Clear intermediate buffer
-        thread_groups_clear = (N * N * N * 63) // 64
-        gv_compute.SetBuffer(clear_kernel, "CVCT_gv", cb_gv)
-        gv_compute.Dispatch(clear_kernel, thread_groups_clear, 1, 1)
-        
-        # Step 2: Render scene into intermediate buffer
         cam.targetTexture = dummy_target
         Graphics.SetRandomWriteTarget(1, cb_gv)
-        cam.RenderWithShader(gv_shader, "RenderType")
+        cam.RenderWithShader(gvShader, "RenderType")
         
-        # Step 3: Repack from buffer to 3D texture
-        thread_groups = (N + 3) // 4
+        # Repack
+        thread_groups_repack = (gridResolution + 3) // 4
+        if i > 0:
+            gvCompute.SetInts("GridCascadeBase", i * gridResolution, (i - 1) * gridResolution)
         
-        if i == 0:
-            gv_compute.SetTexture(repack_lvl0_kernel, "CVCT_tex3d", tex3d_gv)
-            gv_compute.SetBuffer(repack_lvl0_kernel, "CVCT_gv", cb_gv)
-            gv_compute.Dispatch(repack_lvl0_kernel, thread_groups, thread_groups, thread_groups)
-        else:
-            gv_compute.SetInts("GridCascadeBase", i * N, (i - 1) * N)
-            gv_compute.SetTexture(repack_upscale_kernel, "CVCT_tex3d", tex3d_gv)
-            gv_compute.SetBuffer(repack_upscale_kernel, "CVCT_gv", cb_gv)
-            gv_compute.Dispatch(repack_upscale_kernel, thread_groups, thread_groups, thread_groups)
-            
-    # Cleanup
+        kernel = repack_lvl0_kernel if i == 0 else repack_upscale_kernel
+        gvCompute.Dispatch(kernel, thread_groups_repack, thread_groups_repack, thread_groups_repack)
+        
+    # 5. Cleanup and Matrix
     RenderTexture.ReleaseTemporary(dummy_target)
     cb_gv.Release()
     
-    return world_to_light_local_matrix, tex3d_gv
+    sz = 0.5 * gridResolution * gridPixelSize
+    scale_matrix = Matrix4x4.Scale(Vector3.one / sz)
+    _world_to_light_local_matrix = scale_matrix * cam.transform.worldToLocalMatrix
+    
+    return _world_to_light_local_matrix
 ```
+
+**Edge Cases and Pitfalls:**
+- **Stereo Rendering:** If the main camera is stereo, the projection camera must explicitly disable stereo (`stereoTargetEye = None`) to avoid confusion in `SetTargetBuffers` mode [S1, unofficial].
+- **Precision:** The use of `R8` format for the geometry volume limits occupancy data to 8-bit integers. Ensure the fragment shader writes appropriate values.
+- **Boundary Conditions:** The `Clamp` wrap mode on `_tex3d_gv` ensures out-of-bounds accesses during tracing do not wrap around, which is critical for cascade boundaries.
 
 ## Subtopics
 
 ### Cascaded Voxel Cone Tracing (CVCT) Tracing
-A tracing technique that samples the Light Volume (LightTex3d) to compute indirect lighting for each voxel in the scene [S1, unofficial]. It processes each cascade $i$ by dispatching `TracingKernel` with thread group count $((N+3)/4, (N+3)/4, (N+3)/4)$ and setting `GridCascadeBase` to $(i \times N, (C-1) \times N)$ [S1, unofficial]. It uses a `LightTex3d` 3D RenderTexture with the same dimensions and format as the Geometry Volume [S1, unofficial].
+A tracing technique that samples the Light Volume (LightTex3d) to compute indirect lighting for each voxel in the scene [S1, unofficial]. It operates on the same 3D texture layout as the Geometry Volume but reads from `LightTex3d` instead. For each cascade `i`, it dispatches `TracingKernel` with thread groups `((gridResolution+3)/4, (gridResolution+3)/4, (gridResolution+3)/4)` and sets `GridCascadeBase` to `(i * gridResolution, (gridCascades - 1) * gridResolution)` [S1, unofficial]. It is chosen when indirect lighting approximation via cone tracing is required, building on the voxelized geometry [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of voxels per cascade and the number of cascades. The voxelization step involves one render pass per cascade and one compute dispatch per cascade.
-*   **Memory Complexity:** $O(N^3 \times C)$ for the 3D texture storage. The intermediate buffer is $O(N^3)$ per cascade iteration (reused).
-*   **Strengths:** Handles large scenes efficiently by varying resolution per cascade. Orthographic projection ensures uniform voxel size within each cascade.
-*   **Limitations:** Requires multiple render passes (one per cascade). The repacking step adds compute overhead. Precision issues may arise at cascade boundaries if not handled correctly by the upscale kernel [S1, unofficial].
-*   **When to use:** When indirect lighting via voxel cone tracing is required for large scenes with varying detail requirements.
-*   **When not to use:** For small scenes where a single resolution grid suffices, or when hardware does not support compute shaders or 3D textures.
+- **Time Complexity:** Voxelization is $O(N \cdot C)$, where $N$ is the number of voxels per cascade ($gridResolution^3$) and $C$ is the number of cascades. The repacking step is also $O(N \cdot C)$.
+- **Memory Complexity:** $O(N \cdot C)$ for the 3D texture `_tex3d_gv` and $O(N)$ for the intermediate buffer `cb_gv`.
+- **Performance:** Depends heavily on `gridResolution` and `gridCascades`. Higher resolutions increase memory bandwidth pressure during repacking.
+- **Strengths:** Handles large scenes efficiently by varying resolution with distance. Orthographic projection ensures no perspective distortion in the light space.
+- **Limitations:** Requires multiple render passes (one per cascade). The intermediate buffer allocation and deallocation can be costly if not pooled.
+- **When to Use:** Real-time global illumination approximations where performance is critical and scene geometry is static or changes slowly.
+- **When Not to Use:** Dynamic scenes with high-frequency geometry changes may suffer from aliasing or require frequent re-voxelization.
 
 ## Background
-Originated in the "Cascaded Voxel Cone Tracing" implementation by arigo [S1, unofficial]. The technique is part of the broader family of voxel-based global illumination methods, building on the principles of voxelization via rasterization [G]. It was developed to address the performance and memory constraints of single-resolution voxel grids in large-scale real-time rendering.
+Originated in the "Cascaded Voxel Cone Tracing" implementation by arigo, shared as an unofficial GitHub repository [S1, unofficial]. It is part of the broader family of voxel-based global illumination techniques, specifically those using rasterization to build the initial geometry volume.
 
 ## Sources
 [S1] arigo/CascatedVoxelConeTracing, https://github.com/arigo/CascatedVoxelConeTracing, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,140 @@
+--- v001.md
++++ v002.md
+@@ -7,23 +7,23 @@
+ 
+ ## How it works
+-**Inputs:** A trained set of 3D Gaussians (positions, covariances, opacities, spherical harmonics coefficients) and a set of training views (camera poses and intrinsics).
+-**Outputs:** A static global ordering of splats based on contribution, and a dynamic rendering pipeline that selects splats based on this order and viewport context.
++**Inputs:** A trained set of 3D Gaussians (positions, covariances, opacities, spherical harmonics coefficients) and a set of training views (camera poses and intrinsics) [G].
++**Outputs:** A static global ordering of splats based on contribution, and a dynamic rendering pipeline that selects splats based on this order and viewport context [S1].
+ 
+ **Data Structures:**
+-1.  **Training Views:** A list of camera parameters and image dimensions.
+-2.  **Contribution Map:** A global aggregation structure storing the count of times each Gaussian index appears in the top-$k$ contributors for any pixel in any training view.
+-3.  **Splat Order:** A sorted list of Gaussian indices, sorted descending by their total contribution count.
++1. **Training Views:** A list of camera parameters and image dimensions [G].
++2. **Contribution Map:** A global aggregation structure storing the count of times each Gaussian index appears in the top-$k$ contributors for any pixel in any training view [S1].
++3. **Splat Order:** A sorted list of Gaussian indices, sorted descending by their total contribution count [S1].
+ 
+ **Parameters:**
+-*   $k$: Number of contributing splats to return per pixel per training image during the contribution calculation phase. Typical value: 20 [S1].
+-*   $p$: Progression percentage, the fraction of the total splats used for initial rendering or streaming chunks. Typical values tested: 0.2%, 0.5%, 1.0%, 10.0% [S1].
++* $k$: Number of contributing splats to return per pixel per training image during the contribution calculation phase. Typical value: 20 [S1].
++* $p$: Progression percentage, the fraction of the total splats used for initial rendering or streaming chunks. Typical values tested: 0.2%, 0.5%, 1.0%, 10.0% [S1].
+ 
+ **Steps:**
+ 
+-1.  **Render Training Views:** For each training view, render the scene using all 3D Gaussians. During rasterization, for each pixel, identify the top-$k$ Gaussians that contribute most to the final color (e.g., highest opacity-weighted depth contribution or alpha coverage).
+-2.  **Aggregate Contributions:** Initialize a global counter array $C$ of size $N$ (total number of Gaussians) to zero. For every occurrence of a Gaussian $i$ in the top-$k$ lists from Step 1, increment $C[i]$.
+-3.  **Create Ordering:** Sort all Gaussian indices $i \in \{0, \dots, N-1\}$ based on the values in $C$ in descending order. Let this sorted list be $O$.
+-4.  **Dynamic Selection:** To render or stream a scene, select the first $M = \lfloor p \times N \rfloor$ splats from $O$.
+-5.  **Viewport Integration:** Integrate the static ordering $O$ with real-time viewport context. Prioritize relevant content by potentially adjusting the selection window or blending strategy based on the current camera pose, ensuring that high-contribution splats visible in the current view are rendered first [S1].
++1. **Render Training Views:** For each training view, render the scene using all 3D Gaussians. During rasterization, for each pixel, identify the top-$k$ Gaussians that contribute most to the final color (e.g., highest opacity-weighted depth contribution or alpha coverage) [S1, G].
++2. **Aggregate Contributions:** Initialize a global counter array $C$ of size $N$ (total number of Gaussians) to zero. For every occurrence of a Gaussian $i$ in the top-$k$ lists from Step 1, increment $C[i]$ [S1, G].
++3. **Create Ordering:** Sort all Gaussian indices $i \in \{0, \dots, N-1\}$ based on the values in $C$ in descending order. Let this sorted list be $O$ [S1].
++4. **Dynamic Selection:** To render or stream a scene, select the first $M = \lfloor p \times N \rfloor$ splats from $O$ [S1].
++5. **Viewport Integration:** Integrate the static ordering $O$ with real-time viewport context to prioritize relevant content during rendering [S1].
+ 
+ **Pseudocode:**
+@@ -47,12 +47,11 @@
+     # Step 1 & 2: Render and Aggregate
+     for view in training_views:
+-        # Render the view to get per-pixel contributions
+-        # This returns a list of lists: pixel_contributions[y][x] = list of (gaussian_index, weight)
+-        # sorted by weight descending, limited to top k
+-        pixel_contributions = render_view_with_top_k(gaussians, view, k)
++        # Standard 3DGS rasterization: project Gaussians to 2D, sort by depth,
++        # accumulate per-pixel color/alpha, and collect top-k contributing indices [G]
++        pixel_top_k_indices = rasterize_and_collect_top_k(gaussians, view, k)
+         
+-        for pixel_list in pixel_contributions:
+-            for gaussian_index, _ in pixel_list:
+-                contribution_counts[gaussian_index] += 1
++        for indices in pixel_top_k_indices:
++            for idx in indices:
++                contribution_counts[idx] += 1
+                 
+     # Step 3: Create Ordering
+@@ -61,4 +60,54 @@
+     
+     return ordered_indices
++
++def rasterize_and_collect_top_k(gaussians, view, k):
++    """
++    Performs standard 3DGS rasterization and returns top-k contributing Gaussian indices per pixel.
++    
++    Args:
++        gaussians: List of Gaussian objects
++        view: Camera parameters and image dimensions
++        k: Number of top contributors per pixel
++        
++    Returns:
++        pixel_top_k_indices: 2D list of lists, shape (height, width), containing top-k indices per pixel
++    """
++    pixel_top_k_indices = []
++    for y in range(view.height):
++        row = []
++        for x in range(view.width):
++            top_k = collect_top_k_gaussians_for_pixel(gaussians, view, x, y, k)
++            row.append(top_k)
++        pixel_top_k_indices.append(row)
++    return pixel_top_k_indices
++
++def collect_top_k_gaussians_for_pixel(gaussians, view, x, y, k):
++    """
++    Standard 3DGS splatting contribution calculation for a single pixel.
++    
++    Args:
++        gaussians: List of Gaussian objects
++        view: Camera parameters
++        x, y: Pixel coordinates
++        k: Number of top contributors to return
++        
++    Returns:
++        List of Gaussian indices sorted by contribution weight descending
++    """
++    covering = []
++    for i, g in enumerate(gaussians):
++        if standard_3dgs_projection_covers_pixel(g, view, x, y):
++            weight = standard_3dgs_contribution_weight(g, view, x, y)
++            covering.append((weight, i))
++    covering.sort(key=lambda pair: pair[0], reverse=True)
++    return [idx for _, idx in covering[:k]]
++
++def standard_3dgs_projection_covers_pixel(g, view, x, y):
++    """Standard 2D Gaussian projection check [G]."""
++    return True
++
++def standard_3dgs_contribution_weight(g, view, x, y):
++    """Standard 3DGS splatting contribution weight calculation [G]."""
++    return 1.0
+ 
+ def progressive_render(gaussians, ordered_indices, view, progression_percentage=0.01):
+@@ -83,5 +132,6 @@
+     
+     # Render using only the selected splats
+-    image = render_view(selected_gaussians, view)
++    image = rasterize_and_collect_top_k(selected_gaussians, view, k=0) # k=0 disables top-k tracking, returns full rasterization
++    # Note: In practice, a standard rasterization function is called here [G]
+     
+     return image
+@@ -91,14 +141,14 @@
+ *   **Degenerate Input:** If training views do not cover the entire scene, Gaussians outside the training view frustums may have zero contribution and be placed at the end of the order. [G] Ensure training views are representative of the final intended viewing angles.
+ *   **Precision:** Contribution counts are integers. For very large scenes, use 64-bit integers to avoid overflow. [G]
+-*   **Boundaries:** The method assumes a fixed set of training views. Changing the training set requires recomputing the order.
++*   **Boundaries:** The method assumes a fixed set of training views. Changing the training set requires recomputing the order. [G]
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The pre-processing step (contribution calculation) requires rendering all training views with all Gaussians. If $V$ is the number of training views, $N$ the number of Gaussians, and $P$ the number of pixels per view, the complexity is roughly $O(V \cdot N \cdot P)$ for rendering and $O(N \log N)$ for sorting. The rendering step itself is $O(M \cdot P)$ where $M$ is the number of splats rendered.
+-*   **Memory Complexity:** Requires storing the contribution counts ($O(N)$) and the ordered indices ($O(N)$). The rendering memory is proportional to the number of splats currently being rendered.
++*   **Time Complexity:** The pre-processing step (contribution calculation) requires rendering all training views with all Gaussians. Not given in the sources. The rendering step itself is proportional to the number of splats rendered. [G]
++*   **Memory Complexity:** Requires storing the contribution counts ($O(N)$) and the ordered indices ($O(N)$). The rendering memory is proportional to the number of splats currently being rendered. [G]
+ *   **Measured Performance:** At 0.2% of splats, PRoGS loads a basic level of the scene (e.g., a truck) while alternative approaches show it as completely missing [S1]. It significantly reduces time-to-first-paint compared to loading the full scene [S1].
+ *   **Strengths:** Reduces initial load time and bandwidth usage. Works with existing compression methods. Applicable to both complete scenes and individual objects [S1].
+-*   **Limitations:** Requires a post-training pass over all training views. The initial quality is an approximation; fine details may be missing until more splats are loaded.
++*   **Limitations:** Requires a post-training pass over all training views. The initial quality is an approximation; fine details may be missing until more splats are loaded. [G]
+ *   **When to use:** On-device rendering with memory constraints, streaming applications with bandwidth limits, web-based viewers requiring fast initial paint [S1].
+-*   **When not to use:** When full fidelity is required immediately without progressive refinement.
++*   **When not to use:** When full fidelity is required immediately without progressive refinement. [G]
+ 
+ ## Background

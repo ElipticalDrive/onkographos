@@ -1,0 +1,112 @@
+# Image Plane Sweep Volume Illumination
+
+Also called: Image Plane Sweep, Sundén et al
+
+## Overview
+Image Plane Sweep Volume Illumination is a GPU-based volume ray-casting technique that reduces illumination computation complexity by exploiting the plane sweep paradigm [S1]. It enables interactive frame rates while supporting advanced effects such as scattering and shadowing [S1]. Unlike standard ray casting which casts viewing rays directly from the viewpoint, this method computes illumination for a screen-space line first, then casts viewing rays line by line [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Scalar volume data $V$, light direction $\mathbf{l}$, view direction $\mathbf{v}$, camera parameters, and transfer functions for color $C_{base}$ and opacity $\alpha$.
+*   **Output:** Final composited image with volumetric illumination (shadows and scattering).
+
+**Data Structures:**
+*   **Illumination Buffer:** A 2D texture or buffer storing precomputed illumination values for each pixel (or screen-space line segment). The layout corresponds to the screen resolution.
+*   **Volume Texture:** 3D texture storing the scalar field $V$.
+
+**Steps:**
+1.  **Project Light Direction:** Project the light direction vector $\mathbf{l}$ onto the image plane to determine the sweep direction [S2, unofficial].
+2.  **Line-Sweep Illumination Computation:** Perform a line-sweep computation in image space along the projected light direction [S2, unofficial]. This step calculates illumination information (such as shadowing and scattering contributions) for each screen-space line [S2, unofficial].
+    *   The optical model considers either single scattering with a single light direction or multiple scattering resulting from high albedo [S1].
+    *   To capture high-frequency shadows and diffuse scattering simultaneously, these two formulations are combined [S1].
+3.  **Viewing Ray Casting:** Once illumination information for a line is computed, cast viewing rays from the image plane line by line [S2, unofficial].
+4.  **Shading Modification:** Modify the shading of the samples using the ray casting algorithm based on the precomputed line lighting [S2, unofficial]. The base color $C_{base}$ and opacity $\alpha$ are computed as per standard direct volume ray casting, and the final color is modulated by the precomputed illumination term [S1][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def image_plane_sweep_volume_illumination(volume, light_dir, view_dir, camera):
+    # Step 1: Project light direction to screen
+    sweep_direction = project_light_to_screen(light_dir, camera)
+    
+    # Step 2: Line-sweep illumination computation
+    # Initialize illumination buffer with zeros
+    illumination_buffer = create_2d_buffer(camera.resolution)
+    
+    # Iterate over each line in the sweep direction
+    for line in get_lines_in_direction(sweep_direction, camera.resolution):
+        # Compute illumination for the line (shadows, scattering)
+        # This involves integrating along the light direction in screen space
+        line_illumination = compute_line_illumination(line, volume, light_dir, camera)
+        
+        # Store in buffer
+        for pixel in line:
+            illumination_buffer[pixel.x][pixel.y] = line_illumination[pixel.index]
+            
+    # Step 3 & 4: Cast viewing rays line by line and apply shading
+    image = create_empty_image(camera.resolution)
+    
+    for line in get_lines_in_direction(sweep_direction, camera.resolution):
+        for pixel in line:
+            # Cast ray from camera through pixel
+            ray = camera.get_ray(pixel.x, pixel.y)
+            
+            # Standard front-to-back compositing
+            accumulated_color = 0.0
+            accumulated_alpha = 0.0
+            
+            for sample in ray.samples_in_volume():
+                # Map scalar value to base color and opacity
+                val = volume.sample(sample.position)
+                base_color, alpha = transfer_function(val)
+                
+                # Get precomputed illumination for this pixel
+                light_term = illumination_buffer[pixel.x][pixel.y]
+                
+                # Modulate base color with illumination
+                shaded_color = base_color * light_term
+                
+                # Composite
+                weight = alpha * (1.0 - accumulated_alpha)
+                accumulated_color += shaded_color * weight
+                accumulated_alpha += weight
+                
+            image[pixel.x][pixel.y] = accumulated_color
+            
+    return image
+```
+
+**Parameters:**
+*   **Sweep Resolution:** Not given in the sources.
+*   **Scattering Model:** Combines single scattering and multiple scattering approximations [S1].
+*   **Lighting Model:** Typically uses Phong illumination or simplified intensity models as per the parent article [S1, S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** Not given in the sources.
+*   **Degenerate Input:** If the light direction is parallel to the image plane, the sweep direction may become degenerate. Not given in the sources.
+
+## Subtopics
+
+### Single Scattering Approximation
+Focuses on high-frequency shadowing effects. Choose when lighting is dominated by direct light and sharp shadows are required. [S1]
+
+### Multiple Scattering Approximation
+Focuses on diffuse scattering effects for high albedo volumes. Choose when volumetric fog or haze effects are prominent. [S1]
+
+## Operating characteristics
+*   **Time Complexity:** Reduces illumination computation complexity compared to standard ray casting by leveraging the plane sweep paradigm [S1].
+*   **Memory Complexity:** Requires additional storage for the illumination buffer [S2, unofficial].
+*   **Measured Performance:** Achieves interactive frame rates [S1].
+*   **Strengths:** Supports scattering and shadowing interactively; combines high-frequency shadows with diffuse scattering [S1].
+*   **Limitations:** Limited to specific lighting configurations (single light direction for single scattering) [S1].
+*   **When to Use:** When interactive performance is required for volumes with complex lighting effects like shadows and scattering [S1].
+*   **When Not to Use:** When global illumination with multiple lights is required without approximation [S1].
+
+## Background
+Image Plane Sweep Volume Illumination was proposed by Sundén et al. [S1][S2, unofficial]. It is based on a reformulation of the optical model to integrate advanced illumination effects into GPU-based volume ray-casters [S1]. The method was developed to address the computational cost of volumetric lighting in real-time applications [S1].
+
+## Sources
+[S1] Interactive Volume Rendering with Volumetric Illumination, https://doi.org/10.2312/conf/eg2012/stars/053-074, fetched 2026-10-26
+[S2] Enhanced perception in volume visualization, https://doi.org/10.5821/dissertation-2117-94929, fetched 2026-10-26 (unofficial)

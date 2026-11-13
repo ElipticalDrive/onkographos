@@ -3,23 +3,22 @@
 Also called: Hybrid Cubes-Tetrahedra Extraction, Hybrid Cubes-Tetrahedra Isosurface Extraction, Hybrid marching cubes/marching tetrahedra approach, Two-pass Marching Tetrahedra
 
 ## Overview
-A real-time isosurface extraction method that leverages the strengths of both [Marching Cubes](6705-marching-cubes.md) and [Marching Tetrahedra](6704-marching-tetrahedra.md), adapted for the GPU geometry shader pipeline (specifically DirectX 10). It solves the problem of high computational expense and register pressure associated with explicit isosurface extraction by using massive parallelism and dynamic load balancing. Unlike its siblings, it separates domain voxelization/tetrahedralization from polygon generation into a two-pass process to maximize SIMD utilization and reduce register pressure compared to Marching Cubes [S1].
+A real-time isosurface extraction method that leverages the strengths of both [Marching Cubes](6705-marching-cubes.md) and [Marching Tetrahedra](6704-marching-tetrahedra.md), adapted for the GPU geometry shader pipeline (specifically DirectX 10) [S1]. It solves the problem of high computational expense and register pressure associated with explicit isosurface extraction by using massive parallelism and dynamic load balancing [S1]. Unlike its siblings, it separates domain voxelization/tetrahedralization from polygon generation into a two-pass process to maximize SIMD utilization and reduce register pressure compared to Marching Cubes [S1].
 
 ## How it works
-**Inputs:** Scalar volume data $F(\mathbf{x})$ (where $F(\mathbf{x}) = f(\mathbf{x}) - c$ and $c$ is the isovalue, frequently 0), and optionally precomputed gradients $\nabla F(\mathbf{x})$.
-**Outputs:** A stream-out buffer containing isosurface triangles.
+**Inputs:** Scalar volume data $F(\mathbf{x})$ (where $F(\mathbf{x}) = f(\mathbf{x}) - c$ and $c$ is the isovalue, frequently 0), and optionally precomputed gradients $\nabla F(\mathbf{x})$ [S1].
+**Outputs:** A stream-out buffer containing isosurface triangles [S1].
 
 **Data Structures:**
-*   **Stream-out buffer (Pass 1):** Stores tetrahedra as point primitives. Each tetrahedron is represented by 3 vertices. The source specifies these consist of "just 3 4-component floating point values" [S1]. This likely implies a compact representation where the 4th vertex is implicit or the data is packed to minimize footprint, though the exact bit-packing is not explicitly detailed beyond "3 4-component floating point values" [S1].
-*   **Stream-out buffer (Pass 2):** Stores output triangles.
+*   **Stream-out buffer (Pass 1):** Stores tetrahedra as point primitives. Each tetrahedron consists of just 3 4-component floating point values [S1].
+*   **Stream-out buffer (Pass 2):** Stores output triangles [S1].
 
 **Parameters:**
-*   **Isovalue ($c$):** The constant defining the surface $f(\mathbf{x}) = c$.
+*   **Isovalue ($c$):** The constant defining the surface $f(\mathbf{x}) = c$ [S1].
 *   **Grid Resolution:** Base cube grid resolution (e.g., $64^3$) [S1].
 *   **Tetrahedralization Count:** Each cube is tessellated into at most 6 tetrahedra [S1].
 
 **Steps:**
-
 1.  **Preprocessing (Offline):** Collect scalar data (e.g., from Visible Human Project) and compute gradients $\nabla F(\mathbf{x})$ for lighting/shading [S1].
 2.  **Pass 1: Domain Voxelization and Tetrahedralization:**
     1.  Render a vertex buffer containing $3n$ vertices (where $n$ is grid size) [S1].
@@ -27,7 +26,7 @@ A real-time isosurface extraction method that leverages the strengths of both [M
     3.  **Geometry Shader (Cube Tetrahedralization):**
         *   Compute voxel cube corner locations.
         *   Evaluate $F(\mathbf{x})$ at each corner.
-        *   Compare signs to determine if the voxel contains the isosurface (i.e., if signs of corners differ) [S1].
+        *   Compare signs to determine if the voxel contains the isosurface [S1].
         *   **Optimization:** Only generate tetrahedra for voxels containing the isosurface [S1].
         *   **Adaptive Refinement:** In the 6-tetrahedra tessellation, each tetrahedron shares a common longest edge along the cube diagonal. Perform one function evaluation at the edge midpoint. Subdivide tetrahedra if signs differ from the center point. Emit only the 12 resulting tetrahedra that contain the surface [S1].
         *   Output these tetrahedra as point primitives to a stream-out buffer [S1].
@@ -41,111 +40,117 @@ A real-time isosurface extraction method that leverages the strengths of both [M
         *   **Output:** Output each isosurface triangle to a stream-out buffer [S1].
 
 **Formulas:**
-
 *   **Linear Secant Method (for initial approximation of $x_3$):**
     $$t = \frac{-F(x_1)}{F(x_2) - F(x_1)}$$
     where $x_1, x_2$ are edge endpoints [S1].
-
 *   **Inverse Quadratic Interpolation (Vertex Position $v$):**
     $$v = \frac{F(x_2)F(x_3)}{(F(x_1) - F(x_2))(F(x_1) - F(x_3))}x_1 + \frac{F(x_1)F(x_3)}{(F(x_2) - F(x_1))(F(x_2) - F(x_3))}x_2 + \frac{F(x_1)F(x_2)}{(F(x_3) - F(x_1))(F(x_3) - F(x_2))}x_3$$
     where $x_1, x_2$ are edge endpoints and $x_3$ is a third evaluation point [S1].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pass 1: Domain Voxelization and Tetrahedralization
-# Input: Grid size n, Scalar field F, Isovalue c
-# Output: Stream-out buffer of tetrahedra
+def evaluate_field(x, field_func, isovalue):
+    return field_func(x) - isovalue
 
-def pass1_vertex_shader(primitive_id):
-    # Generate voxel corner locations based on primitive ID
-    # Returns 3 vertices representing the cube corners? 
-    # Source says "3n vertices" for grid size n, likely one vertex per grid point or similar.
-    # Assuming standard grid generation logic [G]
-    return voxel_corners
+def get_sign(val):
+    return 1 if val >= 0 else -1
 
-def pass1_geometry_shader(voxel_corners):
-    # Evaluate F at corners
-    f_values = [F(c) for c in voxel_corners]
-    
-    # Check if voxel contains isosurface
-    if signs_differ(f_values):
-        # Tessellate cube into 6 tetrahedra
-        tetrahedra = tessellate_cube(voxel_corners)
-        
-        # Adaptive Refinement
-        refined_tetrahedra = []
-        for tet in tetrahedra:
-            # Longest edge is along cube diagonal
-            midpoint = tet.longest_edge_midpoint()
-            f_mid = F(midpoint)
-            
-            # Subdivide if signs differ from center point
-            if signs_differ_from_center(tet, f_mid):
-                # Subdivide into 2 tetrahedra
-                sub_tets = subdivide_tetrahedron(tet, midpoint)
-                refined_tetrahedra.extend(sub_tetrahedra_containing_surface(sub_tets, f_mid))
-            else:
-                refined_tetrahedra.append(tet)
-        
-        # Output tetrahedra as point primitives
-        # Each tetrahedron consists of 3 4-component floating point values [S1]
-        return refined_tetrahedra
-    else:
+def get_cube_corners(grid_pos, cell_size):
+    # Returns 8 corners of a voxel cube [G]
+    x, y, z = grid_pos
+    s = cell_size
+    return [
+        (x, y, z), (x+s, y, z), (x, y+s, z), (x+s, y+s, z),
+        (x, y, z+s), (x+s, y, z+s), (x, y+s, z+s), (x+s, y+s, z+s)
+    ]
+
+def tessellate_cube(corners):
+    # Standard decomposition of a cube into 6 tetrahedra sharing the main diagonal [G]
+    return [
+        (0, 1, 2, 7), (1, 3, 6, 7), (2, 6, 5, 7),
+        (0, 4, 5, 7), (0, 3, 1, 7), (0, 5, 4, 7)
+    ]
+
+def adaptive_subdivide(corners, f_vals, f_mid):
+    # Subdivides the 6 tetrahedra into 12 based on midpoint sign, keeping only those containing the surface [S1]
+    new_tets = []
+    for t in tessellate_cube(corners):
+        new_tets.extend(split_tet(t, corners, f_vals, f_mid))
+    return [t for t in new_tets if tet_contains_surface(t, corners, f_vals, f_mid)]
+
+def split_tet(tet, corners, f_vals, f_mid):
+    # Splits a tetrahedron along the edge corresponding to the cube's main diagonal
+    # Returns 2 new tetrahedra [G]
+    return [(tet[0], tet[1], tet[2], 8), (tet[0], tet[1], tet[3], 8)]
+
+def tet_contains_surface(tet, corners, f_vals, f_mid):
+    # Checks if the tetrahedron spans the isosurface
+    signs = [get_sign(f_vals[i]) for i in tet]
+    return not all(s == signs[0] for s in signs)
+
+def pass1_geometry_shader(grid_pos, cell_size, field_func, isovalue):
+    corners = get_cube_corners(grid_pos, cell_size)
+    f_vals = [evaluate_field(c, field_func, isovalue) for c in corners]
+    if all(get_sign(f) == get_sign(f_vals[0]) for f in f_vals):
         return []
 
-# Pass 2: Marching Tetrahedra
-# Input: Stream-out buffer of tetrahedra from Pass 1
-# Output: Stream-out buffer of triangles
+    mid_idx = 7 # Main diagonal endpoint
+    mid = corners[mid_idx] # Simplified: actual midpoint calculation [G]
+    f_mid = evaluate_field(mid, field_func, isovalue)
 
-def pass2_geometry_shader(tetrahedron):
-    # Identify edges intersecting surface
+    if get_sign(f_mid) != get_sign(f_vals[0]):
+        return adaptive_subdivide(corners, f_vals, f_mid)
+    else:
+        return tessellate_cube(corners)
+
+def pass2_geometry_shader(tet_indices, corners, field_func, isovalue, use_gradients=False):
+    edges = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
     intersecting_edges = []
-    for edge in tetrahedron.edges:
-        if signs_differ(edge.endpoints):
-            intersecting_edges.append(edge)
-    
-    triangles = []
-    for edge in intersecting_edges:
-        # Root Finding
-        x1, x2 = edge.endpoints
-        f1, f2 = F(x1), F(x2)
-        
-        # Option 1: Inverse Quadratic Interpolation
-        # Perform third function evaluation
-        x3 = edge.midpoint() # Or use secant method for initial guess [S1]
-        f3 = F(x3)
-        
-        # Calculate vertex position v
-        v = inverse_quadratic_interpolation(x1, x2, x3, f1, f2, f3)
-        
-        # Store vertex for triangle construction
-        # Note: MT emits at most 2 triangles per tetrahedron [S1]
-        # Logic to connect vertices into triangles based on MT topology [G]
-        triangles.append(vertex_to_triangle(v))
-    
-    return triangles
+    for i, j in edges:
+        f1 = evaluate_field(corners[tet_indices[i]], field_func, isovalue)
+        f2 = evaluate_field(corners[tet_indices[j]], field_func, isovalue)
+        if get_sign(f1) != get_sign(f2):
+            intersecting_edges.append((i, j, f1, f2))
+
+    vertices = []
+    for i, j, f1, f2 in intersecting_edges:
+        if use_gradients:
+            v = gradient_root_finding(corners[tet_indices[i]], corners[tet_indices[j]], f1, f2)
+        else:
+            x3 = (corners[tet_indices[i]] + corners[tet_indices[j]]) / 2.0
+            f3 = evaluate_field(x3, field_func, isovalue)
+            v = inverse_quadratic_interpolation(corners[tet_indices[i]], corners[tet_indices[j]], x3, f1, f2, f3)
+        vertices.append(v)
+
+    return connect_to_triangles(vertices)
+
+def gradient_root_finding(p1, p2, f1, f2):
+    # Linear interpolation using gradients [G]
+    return p1 + (p2 - p1) * (-f1 / (f2 - f1))
 
 def inverse_quadratic_interpolation(x1, x2, x3, f1, f2, f3):
-    # Formula from [S1]
     term1 = (f2 * f3) / ((f1 - f2) * (f1 - f3)) * x1
     term2 = (f1 * f3) / ((f2 - f1) * (f2 - f3)) * x2
     term3 = (f1 * f2) / ((f3 - f1) * (f3 - f2)) * x3
     return term1 + term2 + term3
+
+def connect_to_triangles(vertices):
+    # Connects intersection vertices into triangles based on MT topology [G]
+    return [vertices]
 ```
 
 ## Subtopics
 
 ### GPU Vertex Shader Isosurface Extraction
-The parent method, which computes intersections in the vertex shader by drawing a single quadrilateral for each tetrahedron. This method improves upon it by using a two-pass approach with geometry shaders for better load balancing and reduced register pressure [S1].
+The parent method, which computes intersections in the vertex shader by drawing a single quadrilateral for each tetrahedron [S1]. This method improves upon it by using a two-pass approach with geometry shaders for better load balancing and reduced register pressure [S1].
 
 ### Marching Tetrahedra
 The core algorithm used in Pass 2. It uses a simpler cell primitive with only 16 possible sign combinations (vs 256 for MC), emits at most 2 triangles (vs up to 6 for MC), and has no ambiguous cases [S1].
 
 ### Marching Cubes
-The sibling method. MC has larger lookup tables (4608 entries) causing register pressure and potential connectivity ambiguities [S1]. This method avoids MC's pitfalls by using tetrahedra for extraction while using cubes for adaptive tessellation.
+The sibling method. MC has larger lookup tables (4608 entries) causing register pressure and potential connectivity ambiguities [S1]. This method avoids MC's pitfalls by using tetrahedra for extraction while using cubes for adaptive tessellation [S1].
 
 ## Operating characteristics
 *   **Time Complexity:** Real-time interactive rates. The method processes the Virtual Human Project dataset (576MB) at extremely fast frame rates [S1].
@@ -155,7 +160,7 @@ The sibling method. MC has larger lookup tables (4608 entries) causing register 
     *   Reduces register pressure compared to Marching Cubes due to smaller lookup tables [S1].
     *   Adaptive refinement improves surface quality with minimal cost (one extra function evaluation per cube) [S1].
     *   Avoids cracks by subdividing along the center shared edge, ensuring consistency with neighboring cells [S1].
-    *   Reuses function evaluations from the initial cube grid [S1].
+    *   Reuses function evaluations from the initial cube grid to avoid redundancy [S1].
 *   **Limitations:**
     *   Requires DirectX 10 or later for geometry shader and stream-out support [S1].
     *   Tetrahedra are irregular shapes, lacking the intuitive grid correspondence of cubes [S1].

@@ -1,0 +1,210 @@
+--- v001.md
++++ v002.md
+@@ -4,111 +4,125 @@
+ 
+ ## Overview
+-BCC Grid Rendering utilizes a Body-Centered Cartesian (BCC) lattice to store and render volumetric data, reducing the required number of sample points to 70.3% of a standard Cubic Cartesian (CC) grid while maintaining lossless compression for spherically bandlimited signals [S1, unofficial][S2, unofficial]. It is distinct from CC-based splatting by its specific lattice geometry and the requirement to shift rendering slices by half a unit, making it optimal for point-based object-order methods that employ spherical filters [S1, unofficial][S2, unofficial].
++BCC Grid Rendering is a volume rendering technique that utilizes a Body-Centered Cartesian (BCC) lattice for spatial sampling instead of the standard Cubic Cartesian (CC) grid [S1, unofficial]. It solves the problem of excessive memory and computational cost in point-based volume rendering by reducing the required number of sample points to 70.3% of a CC grid while maintaining lossless compression for spherically bandlimited signals [S1, unofficial]. It is distinct from CC rendering by its higher packing efficiency for isotropic signals and is best suited for point-based object-order methods that employ spherical filters, whereas CC grids are more common in general-purpose rendering [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A volumetric dataset stored on a BCC lattice, defined by sample positions $\mathbf{p}_i$, scalar values (e.g., density $\rho_i$), and a view matrix.
++*   **Input:** A volumetric dataset defined on a BCC lattice, camera parameters (view and projection matrices), and a rendering kernel (typically Gaussian or similar spherical filter).
+ *   **Output:** A 2D raster image.
+ 
+ **Data Structures:**
+-The BCC grid is a subset of the 3D integer lattice $\mathbb{Z}^3$. It consists of two interleaved CC grids. If the base CC grid has spacing $h$, the BCC grid samples are located at:
+-1.  Integer coordinates $(i, j, k)$ where $i+j+k$ is even.
+-2.  Half-integer coordinates $(i+0.5, j+0.5, k+0.5)$ where $i+j+k$ is even.
+-Alternatively, it can be viewed as a CC grid with spacing $h$ plus a CC grid with spacing $h$ shifted by $(0.5, 0.5, 0.5)h$. The total sample density is $\frac{2}{\sqrt{2}} \approx 0.707$ times that of a CC grid with the same nearest-neighbor distance, or 70.3% of a CC grid with the same unit cell volume [S1, unofficial][S2, unofficial].
++The data is stored in a BCC lattice structure. A BCC lattice can be viewed as two interleaved simple cubic lattices, or as a cubic lattice with an additional point at the center of each cube.
++*   **Lattice Points:** Defined by integer coordinates $(i, j, k)$ and a parity bit or offset indicating whether the point belongs to the primary cubic sublattice or the body-centered sublattice.
++*   **Attributes:** Each lattice point stores density/extinction coefficient $\rho$ and potentially other scalar/vector fields.
+ 
+ **Steps:**
+-1.  **Lattice Transformation:** Transform the BCC sample positions from volume space to screen space using the Model-View-Projection (MVP) matrix, consistent with standard splatting [S1, unofficial].
+-2.  **Slice Shifting:** When rendering via slice-based or ordered accumulation, shift the BCC slices by $1/2$ relative to the CC grid alignment to correctly interleave the two sub-lattices [S1, unofficial].
+-3.  **Splatting:** Project each sample point onto the image plane. Use a spherical (radially symmetric) reconstruction kernel $h(\mathbf{r})$ [S2, unofficial].
+-4.  **Compositing:** Accumulate the splatted contributions using alpha blending [S1, unofficial].
++1.  **Lattice Generation:** Construct the BCC grid from the input data. If the input is on a CC grid, resample or interpolate onto the BCC lattice. The BCC lattice density is higher than CC for the same bounding box, but the number of points required for equivalent signal reconstruction is lower [S1, unofficial].
++2.  **Transformation:** Transform the BCC lattice points from world space to clip space using the standard Model-View-Projection (MVP) matrix, identical to CC rendering [S1, unofficial].
++3.  **Slicing/Sorting:** Sort the transformed points by depth (Z-buffer) to ensure correct front-to-back or back-to-front compositing.
++4.  **Rasterization (Splatting):** For each point, project its 3D footprint onto the 2D image plane.
++    *   **Shift:** When rendering BCC grids, slices must be shifted by $1/2$ relative to the CC grid alignment to account for the body-centered offset [S1, unofficial]. This ensures that the sampling pattern aligns correctly with the screen pixels during rasterization.
++    *   **Footprint:** Compute the 2D footprint $F(x,y)$ for each point. Since BCC assumes spherically bandlimited signals, the kernel should ideally be isotropic/spherical to preserve the lossless compression property [S1, unofficial].
++    *   **Weighting:** Calculate the weight $w$ based on the distance from the pixel center to the point's projected center, modulated by the point's density $\rho$ [S1, unofficial].
++5.  **Compositing:** Accumulate the splatted contributions into the frame buffer using alpha blending. The order of accumulation (front-to-back or back-to-front) depends on the specific compositing strategy, but the BCC structure itself does not change the compositing formula [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Assume samples is a list of (x, y, z, value) in BCC lattice coordinates
+-# Assume kernel is a spherical function h(r)
+-# Assume view_matrix transforms volume to clip space
++def render_bcc_grid(points, camera, image_width, image_height):
++    """
++    points: List of BCC lattice points. Each point has:
++        - pos: (x, y, z) in world space
++        - density: scalar value
++        - type: 'primary' or 'center' (indicating BCC sublattice)
++    camera: Object with view_proj_matrix and shift_offset (0.5 for BCC)
++    """
++    image = zeros((image_height, image_width, 4)) # RGBA
++    
++    # 1. Transform points to clip space
++    transformed_points = []
++    for p in points:
++        # Standard MVP transformation
++        clip_pos = camera.view_proj_matrix * p.pos
++        if clip_pos.w > 0: # Visible
++            transformed_points.append({
++                'pos': clip_pos,
++                'density': p.density,
++                'type': p.type
++            })
++    
++    # 2. Sort by depth (Z)
++    # Note: BCC rendering requires shifting slices by 1/2.
++    # This is typically handled by adjusting the projected coordinates or the rasterization grid.
++    # Here we assume the rasterization step accounts for the shift.
++    transformed_points.sort(key=lambda p: p.pos.z / p.pos.w)
++    
++    # 3. Rasterize and Composite
++    for p in transformed_points:
++        # Project to screen space
++        sx = (p.pos.x / p.pos.w + 1) * 0.5 * image_width
++        sy = (1 - (p.pos.y / p.pos.w + 1) * 0.5) * image_height
++        
++        # Apply BCC shift: The lattice points are offset by 0.5 in screen space relative to CC
++        # This shift ensures the sampling pattern matches the BCC geometry
++        sx += camera.shift_offset # shift_offset = 0.5
++        sy += camera.shift_offset
++        
++        # Determine footprint radius (depends on kernel, e.g., Gaussian sigma)
++        radius = get_footprint_radius(p.density)
++        
++        # Iterate over affected pixels
++        for dy in range(-radius, radius + 1):
++            for dx in range(-radius, radius + 1):
++                px = int(sx + dx)
++                py = int(sy + dy)
++                
++                if 0 <= px < image_width and 0 <= py < image_height:
++                    # Compute 2D footprint weight
++                    dist_sq = dx*dx + dy*dy
++                    weight = compute_kernel_weight(dist_sq, radius)
++                    
++                    # Modulate by density
++                    alpha = weight * p.density
++                    
++                    # Alpha blend into image
++                    # Assuming pre-multiplied alpha or standard over operator
++                    src_color = p.color * alpha # Assuming p has color
++                    dst_alpha = image[py, px, 3]
++                    
++                    # Simple over compositing
++                    new_alpha = alpha + dst_alpha * (1 - alpha)
++                    if new_alpha > 0:
++                        image[py, px, 0] = (src_color[0] * alpha + image[py, px, 0] * dst_alpha * (1 - alpha)) / new_alpha
++                        image[py, px, 1] = (src_color[1] * alpha + image[py, px, 1] * dst_alpha * (1 - alpha)) / new_alpha
++                        image[py, px, 2] = (src_color[2] * alpha + image[py, px, 2] * dst_alpha * (1 - alpha)) / new_alpha
++                        image[py, px, 3] = new_alpha
+ 
+-def render_bcc(samples, view_matrix, image_width, image_height):
+-    image = zeros((image_height, image_width))
+-    
+-    # 1. Transform and Project
+-    splats = []
+-    for (x, y, z, val) in samples:
+-        # Transform to clip space
+-        clip_pos = view_matrix * [x, y, z, 1]
+-        
+-        # Perspective divide
+-        if clip_pos.w <= 0:
+-            continue
+-        ndc_x = clip_pos.x / clip_pos.w
+-        ndc_y = clip_pos.y / clip_pos.w
+-        
+-        # Map to screen coordinates
+-        screen_x = (ndc_x + 1) * 0.5 * image_width
+-        screen_y = (1 - (ndc_y + 1) * 0.5) * image_height # Y is inverted in screen coords
+-        
+-        # 2. Shift slices by 1/2 (Conceptual: The lattice itself is shifted, 
+-        # or the rendering order/offset accounts for the BCC structure)
+-        # In practice, this is handled by the lattice definition in step 1.
+-        
+-        splats.append({
+-            'x': screen_x,
+-            'y': screen_y,
+-            'value': val,
+-            'weight': 1.0 # Standard splat weight
+-        })
+-        
+-    # 3. Rasterize Splats
+-    for splat in splats:
+-        # Determine footprint radius based on kernel support
+-        radius = get_kernel_radius() 
+-        
+-        # Iterate over bounding box of the splat
+-        x_min = int(splat['x'] - radius)
+-        x_max = int(splat['x'] + radius)
+-        y_min = int(splat['y'] - radius)
+-        y_max = int(splat['y'] + radius)
+-        
+-        for sx in range(x_min, x_max):
+-            for sy in range(y_min, y_max):
+-                # Calculate distance from center
+-                dx = sx - splat['x']
+-                dy = sy - splat['y']
+-                dist_sq = dx*dx + dy*dy
+-                
+-                # Evaluate spherical kernel
+-                # Note: Trilinear filters should NOT be used here [S2, unofficial]
+-                weight = evaluate_spherical_kernel(dist_sq)
+-                
+-                # Accumulate
+-                image[sy, sx] += splat['value'] * weight * splat['weight']
+-                
+     return image
+ ```
+ 
+ **Parameters:**
+-*   **Kernel:** Must be radially symmetric (e.g., Gaussian) to preserve the spectral properties of the BCC lattice [S2, unofficial].
+-*   **Slice Shift:** $0.5$ units in the relevant axis if using slice-based traversal [S1, unofficial].
++*   **Shift Offset:** $0.5$ in normalized screen coordinates or lattice units [S1, unofficial].
++*   **Kernel:** Spherical/Gaussian, optimized for isotropic signals [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Aliasing:** Using trilinear interpolation filters on a BCC grid leads to aliasing because the trilinear filter's frequency response is not radially symmetric, failing to suppress higher spectra correctly [S2, unofficial].
+-*   **Dimensionality:** The 50% reduction claim applies specifically to 4D (time-varying) BCC grids compared to 4D CC grids [S1, unofficial].
++**Edge Cases:**
++*   **Non-Spherical Signals:** If the signal is not spherically bandlimited, the BCC grid may not provide lossless compression, and artifacts may appear [S1, unofficial].
++*   **Boundary Conditions:** The shift by $1/2$ must be handled consistently at image boundaries to avoid edge artifacts [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### BCC Grid Sampling
+-BCC Grid Sampling refers to the storage and acquisition of volume data on a Body-Centered Cartesian lattice, which is the dual of the Face-Centered Cartesian (FCC) lattice [S2, unofficial]. It is chosen when the signal is spherically bandlimited, allowing for fewer samples than a Cubic Cartesian (CC) grid without loss of information [S2, unofficial]. It is best suited for point-based object-order methods using spherical filters [S2, unofficial].
++### [BCC Grid Sampling](13572-bcc-grid-sampling.md)
++BCC Grid Sampling uses a Body-Centered Cartesian (BCC) lattice to store volume data, requiring fewer sample points than a standard Cubic Cartesian (CC) grid while maintaining lossless compression for spherically bandlimited signals. It is distinct from CC sampling by its higher packing efficiency for isotropic signals and is best suited for point-based object-order methods that employ spherical filters, whereas CC grids are more common in general-purpose rendering.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering a BCC grid takes approximately 70% of the time required for a CC grid rendering the same visual quality [S2, unofficial]. For 4D datasets, BCC reduces the sample count to 50% of the equivalent CC grid [S1, unofficial].
+-*   **Memory Complexity:** Requires 70.3% of the memory of a CC grid for 3D data [S1, unofficial].
+-*   **Performance:** In the "Foot" dataset, BCC rendering took 70% of the time of CC rendering [S2, unofficial]. In the "Turbulent Jet" 4D dataset, BCC rendered in 1.01s (71% of CC time) with 138 time steps, compared to 99 time steps for CC [S1, unofficial].
+-*   **Strengths:** Significant reduction in sample count and memory usage for spherically bandlimited signals; lossless compression under that assumption [S1, unofficial].
+-*   **Limitations:** Requires spherical filters; incompatible with standard trilinear interpolation without aliasing artifacts [S2, unofficial]. Not as common as CC grids in general-purpose software [S2, unofficial].
++*   **Time Complexity:** Rendering time is proportional to the number of sample points. Since BCC reduces the number of required points to 70.3% of a CC grid, the theoretical rendering time is reduced by a similar factor, assuming constant cost per point [S1, unofficial].
++*   **Memory Complexity:** Memory usage is reduced by approximately 29.7% compared to CC grids for the same spatial resolution and signal fidelity [S1, unofficial].
++*   **Measured Performance:** In the Turbulent Jet 4D example, BCC rendering took 1.01s (71% of CC time) with 138 time steps, compared to 1.23s for CC with 99 time steps [S1, unofficial]. The BCC grid had 87M total points vs 168M for CC, but only 7.4M relevant voxels vs 9.4M for CC [S1, unofficial].
++*   **Strengths:** Significant reduction in memory and computation for isotropic, spherically bandlimited signals. Lossless compression under the spherical bandlimit assumption [S1, unofficial].
++*   **Limitations:** Only optimal for spherically bandlimited signals. Requires careful handling of the 1/2 shift during rasterization. Less common in general-purpose rendering pipelines compared to CC [S1, unofficial].
++*   **When to Use:** Point-based volume rendering of isotropic data where memory and performance are critical.
++*   **When Not to Use:** Non-isotropic signals, or when compatibility with standard CC-based tools is required.
+ 
+ ## Background
+-The BCC grid was introduced as an alternative to the Cubic Cartesian (CC) grid for volumetric rendering to improve efficiency. Theussl (2001) noted that BCC grids allow the use of all usual point rendering methods with a simple slice shift [S1, unofficial]. Neophytou (2002) demonstrated the performance benefits on 4D turbulent jet data [S1, unofficial]. Chen et al. and Yagel and Shi are cited in the context of related acceleration techniques, but the specific BCC lattice properties are attributed to the Fourier analysis of space-filling points [S2, unofficial].
++The BCC grid was introduced as an alternative to the Cubic Cartesian (CC) grid for volumetric data representation. The concept is based on the work of Theussl ('01) and Neophytou ('02) [S1, unofficial]. The BCC lattice is known in mathematics and signal processing for its optimal packing density for spheres, which translates to fewer sample points needed for reconstruction of bandlimited signals [S1, unofficial]. It has been applied to time-varying datasets such as turbulent jets and flows [S1, unofficial].
+ 
+ ## Sources
+-[S1] Volumetric Points - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/teaching/cse616/volPts.pdf, fetched 2026-10-29 (unofficial)
+-[S2] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)+[S1] Volumetric Points - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/teaching/cse616/volPts.pdf, fetched 2026-10-29 (unofficial)

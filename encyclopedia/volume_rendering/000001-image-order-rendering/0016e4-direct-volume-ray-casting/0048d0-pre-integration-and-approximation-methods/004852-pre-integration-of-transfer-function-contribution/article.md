@@ -3,150 +3,66 @@
 Also called: Pre-integrated transfer function tables
 
 ## Overview
-Pre-integration of transfer function contribution is a technique that replaces on-the-fly interpolation with pre-integrated transfer function tables to perform fully-shaded semi-transparent and iso-surface volume rendering [S1, unofficial]. It addresses the dichotomy between image quality and performance by smoothing image imperfections caused by low sampling frequencies, effectively decoupling the integration of the transfer function's contribution from the sampling process [S2, unofficial]. Unlike standard ray casting where the transfer function is evaluated at discrete sample points, this method integrates the optical properties over the segment between samples, ensuring that transfer function details falling between interpolated density pairs are not missed [S1, unofficial].
+Pre-integration of Transfer Function Contribution is a technique that replaces on-the-fly transfer function evaluation with pre-computed lookup tables to perform fully-shaded semi-transparent and iso-surface volume rendering [S1, unofficial]. It solves the aliasing artifacts and image imperfections caused by low sampling frequencies in direct volume ray casting, where narrow peaks in a transfer function are missed by discrete ray samples [S2, unofficial]. It sets itself apart from standard ray casting by decoupling the integration of the transfer function's contribution from the sampling process, allowing the sampling rate to satisfy the Nyquist criterion for the volume geometry rather than the transfer function's frequency [S1, S6, unofficial].
 
 ## How it works
-The method relies on the assumption that the scalar field varies linearly between sample points and that the transfer functions (color and extinction coefficient) are piecewise linear within the density pairs [S1, unofficial].
-
 **Inputs and Outputs:**
-*   **Input:** A 1D scalar volume dataset, a color transfer function $C(d)$, and an extinction coefficient transfer function $\lambda(d)$.
-*   **Output:** A 2D lookup table (LUT) mapping pairs of endpoint densities $(d_f, d_b)$ to pre-integrated color $\mathbf{C}_{seg}$ and opacity $\alpha_{seg}$ contributions.
+*   **Input:** Scalar volume data $V$, gradient volume data $\nabla V$ (optional, for shading), transfer functions for color $C(d)$ and extinction $\lambda(d)$, and ray segment endpoints defined by scalar values $d_f$ (front) and $d_b$ (back).
+*   **Output:** Pre-integrated color $\mathbf{C}_{seg}$ and opacity $\alpha_{seg}$ for each segment, which are then composited front-to-back.
 
 **Data Structures:**
-*   **Pre-integration Table:** A 2D texture or array indexed by $(d_f, d_b)$.
-    *   Dimensions: $N \times N$, where $N$ is the number of discrete density levels (e.g., 256 for 8-bit data).
-    *   Fields per entry: $\mathbf{C}_{seg}$ (RGB color), $\alpha_{seg}$ (opacity).
-    *   Note: Due to symmetry in the integration of linear segments, the table is often symmetric, allowing storage of only the upper or lower triangle, though full $N \times N$ is standard for simplicity [S1, unofficial].
+*   **Pre-integrated Transfer Function Table (LUT):** A 2D texture or array indexed by $(d_f, d_b)$. Each entry stores a 4-component vector $(R, G, B, \alpha)$ representing the integrated color and opacity contribution of the segment between densities $d_f$ and $d_b$.
+*   **Gradient Volume:** A 3D texture storing gradient vectors $\nabla V$ for shading calculations. Note: Interpolating gradients without subsequent normalization is generally incorrect, though artifacts may not always be visible [S1, unofficial].
 
 **Formulas:**
-The standard volume rendering equation for a segment of length $\Delta s$ between densities $d_f$ (front) and $d_b$ (back) is approximated by assuming linear variation of density $d(s)$ and piecewise linear transfer functions.
-
-The pre-integrated opacity $\alpha_{seg}$ and color $\mathbf{C}_{seg}$ for a segment are computed as:
-
+The standard volume rendering integral for color is:
 $$
-\alpha_{seg}(d_f, d_b) = 1 - \exp\left( - \int_{0}^{\Delta s} \lambda(d(s)) \, ds \right)
+C_{res} = \int_{l_i}^{l_o} C(V(R(l))) \times \exp \left( - \int_{l_i}^l \lambda(V(R(j))) \times dj \right) \times dl
 $$
-
+The opacity contribution is:
 $$
-\mathbf{C}_{seg}(d_f, d_b) = \int_{0}^{\Delta s} \mathbf{C}(d(s)) \exp\left( - \int_{0}^{s} \lambda(d(j)) \, dj \right) \, ds
+\alpha = 1 - \exp \left( - \int_{l_i}^{l_o} \lambda(V(R(l))) \times dl \right)
 $$
-
-Where:
-*   $d(s)$ is the linearly interpolated density: $d(s) = d_f + \frac{s}{\Delta s}(d_b - d_f)$.
-*   $\lambda(d)$ is the extinction coefficient transfer function.
-*   $\mathbf{C}(d)$ is the color transfer function.
-
-**Parameters:**
-*   **Segment Length ($\Delta s$):** The distance between consecutive samples. In the original implementation, this corresponds to the physical spacing of the volume data or the interpolated step size [S1, unofficial].
-*   **Table Resolution:** Determined by the bit-depth of the scalar data (e.g., 256 entries for 8-bit) [S1, unofficial].
+In pre-integration, the ray is decomposed into segments of homogeneous length. The color and extinction transfer function values, which are normally ratios per unit length, become absolute values for the segment due to this decomposition [S2, unofficial]. The table stores the result of the analytical or numerical integration of these equations over the segment $[d_f, d_b]$.
 
 **Steps:**
-1.  **Pre-computation:**
-    *   Iterate over all possible pairs of density values $(d_i, d_j)$ from the discrete domain of the scalar field.
-    *   For each pair, numerically or analytically integrate the color and opacity contributions over the segment length $\Delta s$, assuming linear density variation between $d_i$ and $d_j$.
-    *   Store the resulting $\mathbf{C}_{seg}$ and $\alpha_{seg}$ in the 2D table at index $(i, j)$.
-2.  **Rendering (Ray Casting):**
-    *   For each ray, sample the volume at regular intervals to obtain density values $d_k$ and $d_{k+1}$.
-    *   Use $d_k$ and $d_{k+1}$ as indices to look up the pre-computed $\mathbf{C}_{seg}$ and $\alpha_{seg}$ from the table.
-    *   If the density values fall between table entries, perform bilinear interpolation on the table values [S1, unofficial].
-    *   Composite the retrieved segment contributions using front-to-back compositing:
-        $$
-        \mathbf{C}_{out} = \sum_{k} \mathbf{C}_{seg, k} \prod_{j < k} (1 - \alpha_{seg, j})
-        $$
-        $$
-        \alpha_{out} = 1 - \prod_{k} (1 - \alpha_{seg, k})
-        $$
+1.  **Pre-computation:** For all relevant pairs of scalar values $(d_f, d_b)$, compute the integrated color $\mathbf{C}_{seg}$ and opacity $\alpha_{seg}$ by integrating the transfer functions over the segment length, assuming linear variation of the scalar field between endpoints. Store these in the 2D LUT.
+2.  **Ray Casting:** For each pixel, cast a ray through the volume.
+3.  **Segment Sampling:** Sample the volume at discrete points to define segments. For each segment between sample points $i$ and $i+1$, retrieve the scalar values $d_i$ and $d_{i+1}$.
+4.  **Lookup:** Use $d_i$ and $d_{i+1}$ as indices into the pre-integrated transfer function table to retrieve $\mathbf{C}_{seg}$ and $\alpha_{seg}$.
+5.  **Shading (Optional):** If shading is required, sample the gradient volume at the segment midpoint. Normalize the interpolated gradient vector before use to avoid artifacts [S1, unofficial].
+6.  **Compositing:** Composite the retrieved segment contributions using front-to-back alpha blending:
+    $$
+    \mathbf{C}_{out} = \sum_{i} \mathbf{C}_{seg, i} \prod_{j < i} (1 - \alpha_{seg, j})
+    $$
+    $$
+    \alpha_{out} = 1 - \prod_{i} (1 - \alpha_{seg, i})
+    $$
 
-**Pseudocode:**
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def precompute_table(density_levels, color_tf, extinction_tf, delta_s):
-    """
-    Pre-compute the 2D lookup table for segment contributions.
-    density_levels: list of scalar values [d_min, ..., d_max]
-    color_tf: function C(d) returning RGB
-    extinction_tf: function lambda(d) returning scalar
-    delta_s: segment length
-    """
-    n = len(density_levels)
-    table = zeros((n, n, 4)) # Store R, G, B, alpha
-    
-    for i in range(n):
-        for j in range(n):
-            d_f = density_levels[i]
-            d_b = density_levels[j]
-            
-            # Analytical or numerical integration for segment from d_f to d_b
-            # Assuming linear density variation d(s) = d_f + (s/delta_s)*(d_b - d_f)
-            # This step requires solving the integrals defined in the formulas above.
-            # For piecewise linear TFs, closed-form solutions exist.
-            # Here we denote the result of the integration as C_seg and alpha_seg.
-            
-            c_seg, alpha_seg = integrate_segment(d_f, d_b, color_tf, extinction_tf, delta_s)
-            
-            table[i, j, 0] = c_seg.r
-            table[i, j, 1] = c_seg.g
-            table[i, j, 2] = c_seg.b
-            table[i, j, 3] = alpha_seg
-            
-    return table
-
-def render_ray(ray, volume, table, density_levels):
-    """
-    Render a single ray using the pre-integrated table.
-    """
-    c_out = (0, 0, 0)
-    alpha_out = 0.0
-    transmittance = 1.0
-    
-    # Sample the volume along the ray
-    samples = sample_volume(ray, volume)
-    
-    for k in range(len(samples) - 1):
-        d_f = samples[k]
-        d_b = samples[k+1]
-        
-        # Map densities to table indices
-        i = density_to_index(d_f, density_levels)
-        j = density_to_index(d_b, density_levels)
-        
-        # Bilinear interpolation in the table if necessary
-        # For simplicity, assuming integer indices or nearest neighbor in this basic form
-        # In practice, fractional indices are used for smoothness
-        c_seg, alpha_seg = interpolate_table(table, i, j, d_f, d_b, density_levels)
-        
-        # Front-to-back compositing
-        c_out += c_seg * transmittance
-        alpha_out += alpha_seg * transmittance
-        transmittance *= (1.0 - alpha_seg)
-        
-        if transmittance < epsilon:
-            break
-            
-    return c_out, alpha_out
-```
+**Parameters:**
+*   **Table Resolution:** Determined by the number of discrete scalar values. Higher resolution reduces quantization artifacts but increases memory usage. Not given in the sources.
+*   **Segment Length:** Determined by the sampling rate of the volume data. Must satisfy Nyquist for geometry, not transfer function [S1, S6, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The decomposition of view rays into segments of homogeneous length means that color and extinction coefficient values in the table are absolute values rather than ratios per unit length [S2, unofficial]. This requires careful handling of the segment length $\Delta s$ during pre-computation to match the rendering geometry.
-*   **Boundary Conditions:** The table must cover the full range of possible density values in the volume. Out-of-bounds densities should be clamped or handled with a default entry [G].
-*   **Memory:** The 2D table size grows quadratically with the number of density levels. For 8-bit data (256 levels), the table has $256 \times 256$ entries, which is manageable, but higher bit-depths may require compression or sparse storage [S1, unofficial].
+*   **Gradient Interpolation:** Interpolating gradient volumes without normalization leads to incorrect shading artifacts [S1, unofficial].
+*   **Memory Usage:** 2D tables require $N^2$ entries, where $N$ is the number of scalar bins. This can be large for high-resolution volumes.
+*   **Transfer Function Design:** The transfer function must be designed with the pre-integration assumption in mind, as the values are integrated over segments rather than evaluated at points.
 
 ## Subtopics
 
-### Pre-integrated Transfer Functions
-A technique to solve transfer function aliasing in post-classified rendering by pre-computing a 2D table storing analytical volume rendering integration for all possible density pairs [S1, unofficial]. It guarantees that no transfer function detail falling between two interpolated density pairs fails to be considered in the discrete ray integration [S1, unofficial]. The assumption is that the transfer function is piecewise linear within the density pairs [S1, unofficial]. During rendering, the table is indexed with each ray sample pair $(d_b, d_f)$, and values are interpolated at sample locations $\Delta s$ apart [S1, unofficial].
+### [Pre-integrated Transfer Functions](13633-pre-integrated-transfer-functions.md)
+Solves aliasing artifacts in direct volume ray casting caused by low sampling frequencies. Sets itself apart by pre-computing the analytical integration of the transfer function over the segment between two adjacent samples, mapping the pair of scalar density values directly to a pre-integrated color and opacity. Choose when image quality at low sampling rates is critical.
 
 ## Operating characteristics
-*   **Performance:** The original implementation achieved 1-4 frames per second for $256^3$ volumes on an NVidia GeForce3 [S1, unofficial].
-*   **Complexity:** The pre-computation is $O(N^2)$ where $N$ is the number of density levels. Rendering complexity is $O(L)$ where $L$ is the number of samples per ray, with constant-time table lookups.
-*   **Memory:** Requires $O(N^2)$ storage for the table. For 8-bit data, this is $256^2 \times 4$ bytes (assuming 4 floats per entry) $\approx 1$ MB, which is small for modern GPUs.
-*   **Strengths:** Eliminates aliasing artifacts caused by low sampling rates relative to the transfer function's frequency. Allows for coarser sampling without losing transfer function detail [S1, unofficial].
-*   **Limitations:** The method assumes linear density variation and piecewise linear transfer functions. Non-linear variations or complex transfer functions may require higher-order integration or smaller segment sizes [S1, unofficial]. The table size grows quadratically with density resolution.
+*   **Performance:** Can perform fully-shaded semi-transparent and iso-surface volume rendering at 1-4 frames per second for $256^3$ volumes on an NVidia GeForce3 [S1, unofficial].
+*   **Memory:** Requires storage for the pre-integrated transfer function table (2D LUT) and potentially a gradient volume.
+*   **Strengths:** Decouples sampling from transfer function evaluation, allowing coarser sampling without transfer-function-related aliasing. Smooths image imperfections caused by low sampling frequencies [S2, unofficial].
+*   **Limitations:** Performance is dependent on the size of the lookup table and the complexity of the transfer functions. The technique assumes a specific variation of the scalar field (typically linear) between samples.
+*   **When to use:** When high image quality is required at lower sampling rates, or when the transfer function has narrow peaks that are prone to aliasing.
+*   **When not to use:** When memory is constrained, or when the scalar field variation is highly non-linear and cannot be approximated well by linear segments.
 
 ## Background
-The technique was proposed by Engel et al. in 2001 [S2, unofficial]. It was introduced to overcome undersampling problems associated with large inter-slice distances at off-angles, replacing earlier techniques that interpolated intermediate slices on-the-fly using fragment shaders [S1, unofficial]. It is a key method in the family of pre-integration and approximation methods for direct volume ray casting.
+Pre-integration of Transfer Function Contribution was proposed by Engel et al. [ENG 2001] to smooth image imperfections caused by low sampling frequencies [S2, unofficial]. It addresses the dichotomy between image quality and performance in volume rendering by pre-integrating the transfer function's contribution along ray segments [S2, unofficial]. The technique replaced earlier methods that used register combiners in fragment shaders to interpolate intermediate slices [S1, unofficial].
 
 ## Sources
 [S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)

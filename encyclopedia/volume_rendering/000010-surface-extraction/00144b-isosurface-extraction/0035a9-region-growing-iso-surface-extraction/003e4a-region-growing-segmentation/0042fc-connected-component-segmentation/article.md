@@ -1,0 +1,92 @@
+# Connected Component Segmentation
+
+Also called: Largest Connected Component Extraction, Spine Segmentation via Otsu Thresholding and Connected Components
+
+## Overview
+This method isolates a specific anatomical structure (e.g., the spine) from a 3D medical volume by combining global intensity thresholding with topological connectivity analysis. It differs from sibling methods like [Valley Cell Construction](9747-valley-cell-construction.md) or [Graph-based Isosurface Segmentation (Min-Cut)](9748-graph-based-isosurface-segmentation-min-cut.md) by relying on simple binary connectivity rather than complex graph cuts or geometric valley detection. It builds on [Region Growing Segmentation](9712-region-growing-segmentation.md) by using a global threshold to define the initial seed region before extracting the largest contiguous component.
+
+## How it works
+**Inputs:**
+- `volume`: A 3D numpy array of intensity values (e.g., float32 or uint16).
+- `connectivity`: Integer defining neighborhood connectivity. In the reference implementation, `connectivity=1` is used, which typically implies 6-connectivity (face-sharing neighbors) in 3D grid terminology, though the term "connectivity=1" can be ambiguous in some libraries (e.g., scikit-image uses `connectivity=1` for 6-connectivity in 3D). [S1, unofficial]
+
+**Outputs:**
+- `mask`: A 3D binary mask (uint8) where voxels belonging to the largest connected component are 1, and all others are 0.
+
+**Data Structures:**
+- `binary_mask`: 3D array of same shape as `volume`, dtype bool or uint8.
+- `labeled_mask`: 3D array of same shape as `volume`, dtype uint32 or int32, storing component IDs.
+- `label_counts`: Dictionary or array mapping label ID to voxel count.
+
+**Steps:**
+1. **Thresholding:** Apply Otsu’s method to compute a global threshold $T$ that minimizes the intra-class variance between foreground and background voxels.
+   - Let $p_i$ be the probability of intensity level $i$.
+   - Otsu’s method finds $T$ that maximizes the between-class variance:
+     $$ \sigma_B^2(T) = w_0(T)w_1(T)(\mu_0(T) - \mu_1(T))^2 $$
+     where $w_0, w_1$ are class probabilities and $\mu_0, \mu_1$ are class means. [S1, unofficial]
+2. **Binary Mask Creation:** Create `binary_mask` where:
+   $$ \text{binary\_mask}[v] = \begin{cases} 1 & \text{if } \text{volume}[v] > T \\ 0 & \text{otherwise} \end{cases} $$
+   [S1, unofficial]
+3. **Connected Component Labeling:** Label connected components in `binary_mask` using the specified `connectivity`. Return `labeled_mask` and the total number of labels $N$.
+   - Connectivity=1 in 3D usually means 6-connectivity (neighbors along x, y, z axes). [S1, unofficial]
+4. **Identify Largest Component:** Compute the area (voxel count) for each label $l \in \{1, \dots, N\}$. Find the label $L_{max}$ with the maximum area.
+   $$ L_{max} = \arg\max_{l} \sum_{v} (\text{labeled\_mask}[v] == l) $$
+   [S1, unofficial]
+5. **Final Mask:** Create `mask` where:
+   $$ \text{mask}[v] = \begin{cases} 1 & \text{if } \text{labeled\_mask}[v] == L_{max} \\ 0 & \text{otherwise} \end{cases} $$
+   Cast `mask` to uint8. [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from skimage.filters import threshold_otsu
+from skimage.measure import label
+
+def connected_component_segmentation(volume: np.ndarray, connectivity: int = 1) -> np.ndarray:
+    # Step 1: Compute Otsu threshold
+    threshold = threshold_otsu(volume.flatten())
+    
+    # Step 2: Create binary mask
+    binary_mask = volume > threshold
+    
+    # Step 3: Label connected components
+    # connectivity=1 in 3D typically means 6-connectivity
+    labeled_mask, num_labels = label(binary_mask, connectivity=connectivity, return_num=True)
+    
+    # Step 4: Find largest component
+    if num_labels == 0:
+        return np.zeros_like(binary_mask, dtype=np.uint8)
+    
+    # Calculate area for each label
+    label_areas = np.bincount(labeled_mask.ravel())
+    # Label 0 is background, so start from 1
+    largest_label = np.argmax(label_areas[1:]) + 1
+    
+    # Step 5: Create final mask
+    mask = (labeled_mask == largest_label).astype(np.uint8)
+    return mask
+```
+
+**Edge Cases:**
+- If Otsu’s threshold results in no foreground voxels, return an empty mask. [S1, unofficial]
+- If multiple components share the same maximum area, `np.argmax` returns the first one encountered. [G]
+- Connectivity definition must be consistent with the labeling algorithm’s documentation. [S1, unofficial]
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, for both Otsu’s histogram computation and connected component labeling.
+- **Memory Complexity:** $O(N)$ for storing the binary mask, labeled mask, and label counts.
+- **Performance:** Fast and efficient for large volumes. Otsu’s method is $O(H)$ where $H$ is the number of intensity levels (typically 256 or 4096). Labeling is linear in voxel count.
+- **Strengths:** Simple, robust for high-contrast structures, no parameter tuning beyond connectivity.
+- **Limitations:** Fails if the structure is not the largest component or if noise creates larger spurious components. Sensitive to intensity inhomogeneities.
+- **When to use:** When the target structure is significantly larger than other foreground objects and has distinct intensity.
+- **When not to use:** When the target is small or fragmented, or when intensity overlap with other structures is high.
+
+## Background
+Originated in medical image processing for spine segmentation. The method combines Otsu’s thresholding with connected component analysis to isolate the spine from CT or MRI volumes. It is used in GPU-based visualization pipelines for high-resolution medical images. [S1, unofficial]
+
+## Sources
+[S1] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)

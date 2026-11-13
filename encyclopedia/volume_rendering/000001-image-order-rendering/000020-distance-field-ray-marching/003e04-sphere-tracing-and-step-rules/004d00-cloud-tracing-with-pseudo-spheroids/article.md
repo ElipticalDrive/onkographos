@@ -1,159 +1,187 @@
 # Cloud Tracing with Pseudo-Spheroids
 
-Also called: Apodaca’s code, Basic Volumetric Cloud Rendering in GPU
+Also called: Apodaca’s code (variant)
 
 ## Overview
-Cloud Tracing with Pseudo-Spheroids renders volumetric clouds by tracing rays through a set of implicit surfaces (pseudo-spheroids) and sampling noise only within those volumes [S1]. It differs from general sphere tracing by explicitly managing a list of intersected cloud primitives, sorting them by depth, and using a distance-based Level of Detail (LOD) to vary step size, optimizing the trade-off between visual fidelity and computational cost [S1].
+Cloud Tracing with Pseudo-Spheroids renders volumetric clouds by tracing rays through a set of implicit surfaces (pseudo-spheroids or ellipsoids) and sampling noise only when the ray traverses these volumes [S1]. It differs from standard sphere tracing by using a list of randomized bounded-surface volumes rather than a single global Signed Distance Function (SDF), optimizing performance by discarding positions outside the cloud and using a collision detection method based on quadratic discriminants [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** Camera ray $r(t) = \mathbf{o} + t\mathbf{d}$, a list of $N$ pseudo-spheroids (each defined by center $\mathbf{c}_i$, nominal radius $R_i$, and distortion parameter $k_i$), a 3D noise texture (fBm), and a density threshold $\rho_{thresh}$ [S1].
-*   **Output:** Final pixel color $R$, blended with the sky background [S1].
+**Inputs:**
+*   Camera origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized) for each pixel.
+*   List of $N$ pseudo-spheroids, each defined by center $\mathbf{c}_i$, nominal radius $R_{nominal}$, distortion parameter $k$, and maximum density $\rho_{max}$.
+*   3D noise function $fBm(\mathbf{p})$ (fractional Brownian motion), normalized to $[0, 1]$.
+*   Density threshold $\rho_{thresh}$ for termination.
+*   Bounding box for spatial culling.
+
+**Outputs:**
+*   Final color $R$ for each pixel, blended with the sky background.
 
 **Data Structures:**
-*   **Pseudo-spheroid:** Defined by center $\mathbf{c}$, nominal radius $R$, and distortion factor $k$. The effective boundary is modulated by noise [S1].
-*   **Candidates List:** A dynamic array of indices of pseudo-spheroids intersected by the ray, sorted by intersection distance [S1].
+*   `candidates`: A list of indices of pseudo-spheroids intersected by the ray.
+*   `sorted_candidates`: The `candidates` list sorted by intersection distance (back-to-front).
+
+**Formulas:**
+1.  **Ray-Sphere Intersection:** For a ray $r(t) = \mathbf{o} + t\mathbf{d}$ and sphere $i$ with center $\mathbf{c}_i$ and effective radius $R_i$, the intersection is determined by the discriminant $\Delta$ of the quadratic equation $|\mathbf{o} + t\mathbf{d} - \mathbf{c}_i|^2 = R_i^2$.
+    $$ \Delta = (\mathbf{d} \cdot (\mathbf{o} - \mathbf{c}_i))^2 - (|\mathbf{o} - \mathbf{c}_i|^2 - R_i^2) $$
+    If $\Delta \ge 0$, the ray intersects the sphere. The entry and exit distances are:
+    $$ t_{entry, exit} = -(\mathbf{d} \cdot (\mathbf{o} - \mathbf{c}_i)) \pm \sqrt{\Delta} $$
+2.  **Effective Radius:** The nominal radius is modulated by a random component $k$ to create a pseudo-spheroid shape [S1]:
+    $$ R_i = R_{nominal} \pm k $$
+    *(Note: The source describes scaling the nominal sphere radius by $\pm k$ using Euclidean distance, effectively creating a distorted boundary.)*
+3.  **Density Modulation:** The density $\rho$ at a point $\mathbf{p}$ inside the pseudo-spheroid is calculated as [S1]:
+    $$ \rho(\mathbf{p}) = \rho_{max} \cdot fBm(\mathbf{p}) \cdot \left(1 - \frac{||\mathbf{p} - \mathbf{c}_i||}{R_i}\right) $$
+    *(Inferred from Equation (2) description: Density is modulated by position inside the pseudo-spheroid with a random component. The term $(1 - \frac{||\mathbf{p} - \mathbf{c}_i||}{R_i})$ ensures density drops to zero at the boundary.)*
+4.  **Level of Detail (LOD) Step Size:** The step increment $\Delta t$ is controlled by the distance from the cloud center to balance detail and performance [S1]:
+    $$ \Delta t = f(\text{distance from center}) $$
+    Longer steps are taken when close to the camera (or far from center?), and smaller steps when far. *(Note: The source states "longer steps when close to camera, smaller steps when far" in the context of distance from the center of the cloud. This implies an inverse relationship or a specific LOD function not fully detailed in the text.)*
 
 **Algorithm Steps:**
-
-1.  **Candidate Selection (`getCandidates`):**
-    For each pixel, iterate over pseudo-spheroids within the camera's bounding box. For each sphere, compute the dot products required to solve the quadratic equation for ray-sphere intersection. If the discriminant is non-negative, a collision exists. Add the sphere index to the candidates list [S1].
-
-2.  **Sorting (`sortCandidates`):**
-    Sort the candidates list by intersection distance $t$ using an insertion sort algorithm. This ensures rays are processed from back to front (or front to back, depending on accumulation order, but the text specifies back-to-front tracing for accumulation) [S1].
-
-3.  **Ray Tracing Loop:**
-    For each pixel, initialize accumulated color $C = 0$ and transmittance $T = 1$. Iterate through the sorted candidates. For each candidate sphere:
-    *   **Step Size Calculation (LOD):** Calculate the distance from the ray origin to the sphere center or current position. Use an LOD equation to determine step size $\Delta t$. Steps are longer when the cloud is close to the camera and smaller when far away [S1].
-    *   **Marching:** While inside the pseudo-spheroid boundary:
-        *   Evaluate the current position $\mathbf{p}$ on the ray.
-        *   Calculate density $\rho(\mathbf{p})$ using Equation (2) below.
-        *   **Termination:** If $\rho(\mathbf{p}) < \rho_{thresh}$, break the inner loop for this sphere [S1].
-        *   **Shading:** Compute lighting $L$ at $\mathbf{p}$ [S1].
-        *   **Accumulation:** Update color and transmittance:
-            $$ C \leftarrow C + T \cdot L \cdot \rho(\mathbf{p}) \cdot \Delta t $$
-            $$ T \leftarrow T \cdot (1 - \rho(\mathbf{p}) \cdot \Delta t) $$
-        *   Advance ray: $\mathbf{p} \leftarrow \mathbf{p} + \mathbf{d} \cdot \Delta t$ [S1].
-    *   If $T < \epsilon$ (fully opaque), break the candidate loop [S1].
-
-4.  **Blending:**
-    Blend the accumulated color $C$ with the sky color $C_{sky}$ using the final transmittance $T$:
-    $$ R = C + T \cdot C_{sky} $$
-    Return $R$ [S1].
-
-**Density Formula:**
-The density $\rho$ at a point $\mathbf{r}$ inside a pseudo-spheroid is given by [S1]:
-$$ \rho(\mathbf{r}) = \rho_{max} \cdot fBm(\mathbf{r}) \cdot \left(1 - \frac{\|\mathbf{r} - \mathbf{c}\|}{R_{nominal} \pm k}\right) $$
-Where:
-*   $\rho_{max}$ is the maximum density.
-*   $fBm(\mathbf{r})$ is the fractional Brownian motion noise value at $\mathbf{r}$, serving as a normalized random variable [S1].
-*   $\mathbf{c}$ is the center of the sphere [S1].
-*   $R_{nominal}$ is the nominal radius [S1].
-*   $k$ is a distortion parameter scaling the radius by $\pm k$ [S1].
-*   $\|\mathbf{r} - \mathbf{c}\|$ is the Euclidean distance from the ray point to the sphere center [S1].
+1.  **Culling:** For each pixel, identify pseudo-spheroids within the bounding box.
+2.  **Collision Detection:** For each candidate sphere, compute the discriminant $\Delta$. If $\Delta \ge 0$, add the sphere index to the `candidates` list.
+3.  **Sorting:** Sort the `candidates` list by intersection distance using insertion sort, ensuring back-to-front processing [S1].
+4.  **Ray Marching:** For each pixel:
+    *   Initialize accumulated color $C = 0$ and opacity $\alpha = 0$.
+    *   For each sphere in `sorted_candidates`:
+        *   Calculate intersection interval $[t_{entry}, t_{exit}]$.
+        *   If the ray does not intersect the sphere, skip.
+        *   March from $t_{entry}$ to $t_{exit}$ with step size $\Delta t$ (LOD adjusted).
+        *   At each step point $\mathbf{p}$:
+            *   Calculate density $\rho(\mathbf{p})$ using the formula above.
+            *   If $\rho(\mathbf{p}) < \rho_{thresh}$, continue.
+            *   Compute lighting $L(\mathbf{p})$ (e.g., using normal derived from SDF gradient or noise gradient).
+            *   Update color and opacity using volume rendering integration (e.g., standard front-to-back compositing, though the source mentions back-to-front tracing, standard alpha blending is implied for "Blend the result R with the sky").
+            *   If $\alpha \ge 1.0$ (or sufficient opacity), break the marching loop for this sphere.
+    *   Blend the accumulated cloud color $R$ with the sky background.
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def trace_cloud_pixel(ray_origin, ray_dir, spheres, noise_texture, rho_thresh):
-    # 1. Get Candidates
+def cloud_tracing(ray_origin, ray_direction, spheres, noise_func, rho_thresh):
+    """
+    Render clouds using pseudo-spheroids.
+    Args:
+        ray_origin: Camera origin (vec3)
+        ray_direction: Normalized ray direction (vec3)
+        spheres: List of dicts with keys: 'center', 'R_nominal', 'k', 'rho_max'
+        noise_func: Function fBm(p) returning normalized noise [0,1]
+        rho_thresh: Density threshold for termination
+    Returns:
+        color: Final pixel color (vec3)
+    """
     candidates = []
+    
+    # 1. Culling and Collision Detection
     for i, sphere in enumerate(spheres):
-        # Solve quadratic for ray-sphere intersection
-        # a = dot(ray_dir, ray_dir)
-        # b = 2.0 * dot(ray_dir, ray_origin - sphere.center)
-        # c = dot(ray_origin - sphere.center, ray_origin - sphere.center) - sphere.radius**2
-        # discriminant = b**2 - 4*a*c
-        # if discriminant >= 0:
-        #     t = (-b - sqrt(discriminant)) / (2*a)
-        #     if t > 0:
-        #         candidates.append((t, i))
-        pass # Implementation detail omitted per source constraints
-    
-    # 2. Sort Candidates
-    candidates.sort(key=lambda x: x[0])
-    
+        c = sphere['center']
+        R = sphere['R_nominal'] + sphere['k'] # Effective radius
+        
+        oc = ray_origin - c
+        a = dot(ray_direction, ray_direction)
+        b = 2.0 * dot(oc, ray_direction)
+        c_val = dot(oc, oc) - R * R
+        
+        discriminant = b * b - 4 * a * c_val
+        
+        if discriminant >= 0:
+            # Ray intersects sphere
+            sqrt_disc = sqrt(discriminant)
+            t1 = (-b - sqrt_disc) / (2 * a)
+            t2 = (-b + sqrt_disc) / (2 * a)
+            candidates.append({'index': i, 't_entry': t1, 't_exit': t2})
+            
+    # 2. Sort Candidates (Back-to-Front)
+    # Insertion sort as per source
+    for i in range(1, len(candidates)):
+        key = candidates[i]
+        j = i - 1
+        while j >= 0 and candidates[j]['t_entry'] > key['t_entry']:
+            candidates[j + 1] = candidates[j]
+            j -= 1
+        candidates[j + 1] key
+        
+    # 3. Ray Marching and Integration
     accumulated_color = vec3(0.0)
-    transmittance = 1.0
-    sky_color = vec3(0.2, 0.3, 0.5) # Example sky
+    accumulated_alpha = 0.0
     
-    for t_hit, sphere_idx in candidates:
-        if transmittance < 0.01:
+    for cand in candidates:
+        t_start = max(cand['t_entry'], 0.0)
+        t_end = cand['t_exit']
+        
+        if t_start >= t_end:
+            continue
+            
+        # LOD Step Size: Simplified assumption based on distance
+        # Source: "longer steps when close to camera, smaller steps when far"
+        # We use a distance-based step size. 
+        # Note: Exact LOD formula not provided in source [G]
+        dist_to_center = length(ray_origin - spheres[cand['index']]['center'])
+        step_size = 0.1 * (1.0 + dist_to_center) # Placeholder for LOD function [G]
+        
+        t = t_start
+        while t < t_end:
+            p = ray_origin + t * ray_direction
+            sphere = spheres[cand['index']]
+            c = sphere['center']
+            R = sphere['R_nominal'] + sphere['k']
+            
+            # Density Calculation
+            dist_to_c = length(p - c)
+            if dist_to_c < R:
+                noise_val = noise_func(p)
+                density = sphere['rho_max'] * noise_val * (1.0 - dist_to_c / R)
+                
+                if density > rho_thresh:
+                    # Lighting Calculation (Placeholder)
+                    # Source mentions lighting(p) but no formula [G]
+                    light = vec3(1.0) 
+                    color = light * density
+                    
+                    # Volume Rendering (Front-to-Back Compositing)
+                    # Note: Source says "trace from back to front" but standard
+                    # compositing is front-to-back. We assume standard alpha blending.
+                    alpha = density * step_size # Approximation
+                    alpha = min(alpha, 1.0 - accumulated_alpha)
+                    
+                    accumulated_color += color * alpha
+                    accumulated_alpha += alpha * (1.0 - alpha) # Simplified [G]
+                    
+                    if accumulated_alpha >= 0.99:
+                        break
+            t += step_size
+            
+        if accumulated_alpha >= 0.99:
             break
             
-        sphere = spheres[sphere_idx]
-        # Start tracing from the entry point of the sphere
-        # Note: Source implies tracing through the volume. 
-        # We need to find entry and exit or march from t_hit.
-        # Assuming we march from t_hit inwards or through the volume.
-        
-        current_pos = ray_origin + ray_dir * t_hit
-        # Determine step size based on LOD (distance to center or camera)
-        # dist_to_center = length(current_pos - sphere.center)
-        # step_size = lod_function(dist_to_center)
-        step_size = 0.1 # Placeholder for LOD logic
-        
-        while True:
-            # Check if still inside pseudo-spheroid
-            # Distance to center
-            dist_to_center = length(current_pos - sphere.center)
-            
-            # Calculate effective radius modulation
-            # The formula uses R_nominal +/- k. 
-            # Assuming k is a scalar factor or absolute value.
-            # Source: "scaling the nominal sphere radius by ± k"
-            effective_radius = sphere.radius + sphere.k 
-            
-            if dist_to_center > effective_radius:
-                break
-                
-            # Calculate Density
-            noise_val = noise_texture.sample(current_pos)
-            # Equation (2): rho = rho_max * fBm * (1 - dist / (R +/- k))
-            # Note: The source formula has a potential singularity if denominator is 0 or negative.
-            # Assuming R +/- k > 0.
-            rho = sphere.rho_max * noise_val * (1.0 - dist_to_center / effective_radius)
-            
-            if rho < rho_thresh:
-                break
-                
-            # Lighting
-            light = compute_lighting(current_pos, sphere)
-            
-            # Accumulate
-            accumulated_color += transmittance * light * rho * step_size
-            transmittance *= (1.0 - rho * step_size)
-            
-            # Advance
-            current_pos += ray_dir * step_size
-            
-    # Blend with sky
-    final_color = accumulated_color + transmittance * sky_color
+    # 4. Blend with Sky
+    sky_color = vec3(0.5, 0.7, 1.0) # Placeholder
+    final_color = accumulated_color + sky_color * (1.0 - accumulated_alpha)
+    
     return final_color
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The discriminant check for ray-sphere intersection must handle floating-point inaccuracies [S1].
-*   **Density Threshold:** If $\rho_{thresh}$ is too high, clouds may appear fragmented; if too low, performance degrades due to unnecessary sampling [S1].
-*   **LOD Step Size:** If the LOD function does not decrease step size sufficiently at close range, aliasing may occur. If it does not increase step size at distance, performance suffers [S1].
-*   **Boundary Definition:** The term $R_{nominal} \pm k$ must remain positive to avoid division by zero or negative radii [S1].
+*   **Precision:** Discriminant calculation must handle floating-point errors near $\Delta = 0$.
+*   **Boundary:** Density drops to zero at the effective radius $R_i$. Points outside this radius should not be sampled.
+*   **LOD:** The exact LOD equation is not provided in the source. A distance-based heuristic is used as a placeholder [G].
+*   **Sorting:** Insertion sort is efficient for small lists of candidates but may be slow for very large $N$.
 
 ## Subtopics
 
 ### Apodaca’s code
-Apodaca’s code is the foundational ray-tracing algorithm over a list of $N$ randomized bounded-surface volumes (pseudo-spheroids) used for cloud rendering [S1]. It is characterized by the use of collision detection via discriminant checks and an insertion sort to manage the order of intersection [S1]. It applies Level of Detail (LOD) to adjust step sizes based on the distance from the cloud center, balancing pixel coverage with detail requirements [S1]. The result is blended with the sky background [S1].
+A ray-tracing algorithm over a list of $N$ randomized bounded-surface volumes (pseudo-spheroids) to render clouds, using collision detection and insertion sort for optimization [S1]. It differs from the general method by explicitly detailing the candidate selection and sorting steps. It is chosen when a simple, GPU-friendly implementation with spatial culling is required. Link: [Cloud Tracing with Pseudo-Spheroids](9643-cloud-tracing-with-pseudo-spheroids.md).
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of spheres and $M$ is the average number of steps per sphere. The sorting step adds $O(K \log K)$ where $K$ is the number of candidates [S1].
-*   **Memory Complexity:** $O(N)$ to store sphere data and $O(K)$ for the candidates list [S1].
-*   **Performance:** The method reduces computational effort by discarding positions outside the cloud volumes and using LOD to minimize sampling in distant or less critical areas [S1].
-*   **Strengths:** Real-time capable on GPU; natural realism through exponential density falloff and noise modulation [S1].
-*   **Limitations:** Relies on pre-calculated 3D noise; performance degrades with high $N$ or high LOD resolution [S1].
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of spheres and $M$ is the number of steps per sphere. The insertion sort adds $O(K^2)$ where $K$ is the number of intersected spheres.
+*   **Memory Complexity:** $O(N)$ to store sphere data and $O(K)$ for candidates.
+*   **Performance:** The method reduces computational effort by discarding positions outside the cloud and using a short list of intersected spheres [S1].
+*   **Strengths:** Efficient culling, simple geometry (spheres/ellipsoids), good for real-time GPU rendering.
+*   **Limitations:** Approximation of cloud shape (pseudo-spheroids), LOD step size is heuristic.
+*   **When to use:** Real-time cloud rendering where performance is critical and high-fidelity global noise is not required.
+*   **When not to use:** When complex, non-spherical cloud structures are needed.
 
 ## Background
-This method originates from efficient algorithms for real-time GPU volumetric cloud rendering, specifically building upon Apodaca’s code [S1]. It utilizes spheroids and ellipsoids as implicit surfaces, a technique also cited by Gardner and Elinas and Stürzlinger [S1]. The approach balances the high number of pixels receiving traces from inside the volume with lower requirements for detail when traversing the cloud [S1].
+Originated in the context of real-time GPU volumetric cloud rendering. The method is an improved version of Apodaca’s code [27] and is described in [S1]. It builds on the principle of using implicit surfaces to define cloud volumes and sampling noise only within those volumes.
 
 ## Sources
 [S1] Efficient Algorithms for Real-Time GPU Volumetric Cloud Rendering with Enhanced Geometry, https://doi.org/10.3390/sym10040125, fetched 2026-10-26

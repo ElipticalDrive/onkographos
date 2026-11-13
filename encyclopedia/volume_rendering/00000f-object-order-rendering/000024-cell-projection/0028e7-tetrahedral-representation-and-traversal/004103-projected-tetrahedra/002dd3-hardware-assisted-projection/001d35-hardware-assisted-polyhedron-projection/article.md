@@ -1,16 +1,16 @@
 # Hardware-Assisted Polyhedron Projection
 
-Also called: Approximate Volume Rendering for Curvilinear and Unstructured Grids by Hardware-Assisted Polyhedron Projection, CP scheme, Cell-Projection Volume Rendering, Parallel Cell-Projection Volume Rendering, Polyhedron Projection
+Also called: Approximate Volume Rendering for Curvilinear and Unstructured Grids by Hardware-Assisted Polyhedron Projection, CP scheme, Parallel Cell-Projection Volume Rendering, Polyhedron Projection
 
 ## Overview
 Hardware-Assisted Polyhedron Projection is a technique for volume rendering arbitrary unstructured grids composed of convex polyhedral cells by projecting 3D cells to 2D screen space and using hardware polygon rendering pipelines for scan conversion and compositing [S1][S4, unofficial]. It solves the problem of efficiently rendering complex, non-uniform meshes by avoiding the irregular memory access patterns of raycasting, instead relying on global back-to-front sorting of cells and hardware-accelerated interpolation [S1][S4, unofficial]. Unlike sibling methods that may use local sorting or additive accumulation, this method requires explicit depth sorting of all cells to ensure correct alpha blending [S1][S4, unofficial].
 
 ## How it works
-The method projects each convex polyhedral cell onto the image plane, subdivides the resulting 2D projection into regions where optical thickness varies linearly, and uses texture mapping to compute non-linear opacity per pixel.
+The method projects each convex polyhedral cell onto the image plane, subdivides the resulting 2D projection into regions where optical thickness varies linearly, and uses texture mapping to compute non-linear opacity per pixel [S1].
 
 ### Inputs and Outputs
-*   **Input**: A set of convex polyhedral cells defined by their 3D vertices and scalar field values (extinction coefficient $\tau$).
-*   **Output**: A 2D image with color and opacity values for each pixel.
+*   **Input**: A set of convex polyhedral cells defined by their 3D vertices and scalar field values (extinction coefficient $\tau$) [S1][S3].
+*   **Output**: A 2D image with color and opacity values for each pixel [S1][S2, unofficial].
 
 ### Data Structures
 
@@ -29,8 +29,8 @@ Used to manage the projection of an arbitrary polyhedron [S1]:
 
 **Spatial Partitioning Tree (Parallel Variant)**
 Used in parallel implementations to optimize compositing and reduce memory consumption [S3]:
-*   Hierarchical representation of the data space.
-*   Guides rendering and cell searching.
+*   Hierarchical representation of the data space [S3].
+*   Guides rendering and cell searching [S3].
 
 ### Steps
 
@@ -98,29 +98,16 @@ $$ T = \exp\left(-\int_0^l \tau(s) \, ds\right) $$
 
 ```python
 def hardware_assisted_polyhedron_projection(cells, view_matrix, projection_matrix, texture_map):
-    """
-    Renders unstructured grid cells using hardware-assisted polyhedron projection.
-    
-    Args:
-        cells: List of convex polyhedral cells. Each cell has vertices and extinction coefficient tau.
-        view_matrix: 4x4 view matrix.
-        projection_matrix: 4x4 projection matrix.
-        texture_map: 1D or 2D texture map for exponential lookup.
-        
-    Returns:
-        Image buffer.
-    """
-    # Step 1: Global Sorting (Single-Processor Variant)
-    # Sort cells back-to-front relative to viewpoint
-    sorted_cells = sort_cells_back_to_front(cells, view_matrix)
+    # Step 1: Global Sorting
+    sorted_cells = sorted(cells, key=lambda c: centroid_depth(c, view_matrix), reverse=True)
     
     # Initialize image buffer
-    image = initialize_image_buffer()
+    image = [[None for _ in range(height)] for _ in range(width)]
     
     # Step 2-5: Process each cell
     for cell in sorted_cells:
         # Project vertices to screen space
-        screen_vertices = project_vertices(cell.vertices, view_matrix, projection_matrix)
+        screen_vertices = [project_3d_to_2d(v, view_matrix, projection_matrix) for v in cell.vertices]
         
         # Construct winged-edge subdivision for the projection
         subdivision = construct_winged_edge_subdivision(screen_vertices, cell.edges)
@@ -128,24 +115,24 @@ def hardware_assisted_polyhedron_projection(cells, view_matrix, projection_matri
         # For each polygonal region Q in the subdivision
         for region in subdivision.polygons:
             # Identify front and back faces of the polyhedron for this region
-            front_face, back_face = identify_faces(region, cell)
+            front_face, back_face = identify_faces_for_region(region, cell)
             
             # Compute thickness at vertices of the region
-            # Thickness is zero at profile vertices, computed from geometry otherwise
-            thicknesses = compute_thickness(region.vertices, front_face, back_face, view_matrix)
+            thicknesses = []
+            for vertex in region.vertices:
+                if is_profile_vertex(vertex, front_face, back_face):
+                    thicknesses.append(0.0)
+                else:
+                    thicknesses.append(compute_thickness(vertex, front_face, back_face, view_matrix))
             
             # Compute color and opacity at vertices
-            # Use analytic integration for opacity
             vertex_colors = []
             vertex_opacities = []
             for i, vertex in enumerate(region.vertices):
-                # Analytic integration of tau along the ray through the vertex
-                tau_at_vertex = get_tau_at_vertex(vertex, cell)
+                tau_at_vertex = get_tau(vertex, cell)
                 l = thicknesses[i]
                 
                 # Transparency T = exp(-integral(tau ds))
-                # For constant tau: T = exp(-l * tau)
-                # Use texture map for exponential lookup
                 if is_constant_tau(cell):
                     tex_coord = l * tau_at_vertex
                     T = texture_map.lookup_1d(tex_coord)
@@ -159,58 +146,72 @@ def hardware_assisted_polyhedron_projection(cells, view_matrix, projection_matri
                 vertex_opacities.append(opacity)
             
             # Render region using hardware
-            # Use texture mapping to avoid Mach bands
             render_region_hardware(region, vertex_colors, vertex_opacities, texture_map)
             
             # Composite onto image buffer
-            # Note: Hardware compositing assumes correct depth order
             composite_region_into_image(region, image)
             
     return image
 
+def centroid_depth(cell, view_matrix):
+    centroid = sum(cell.vertices) / len(cell.vertices)
+    return project_3d_to_2d(centroid, view_matrix, projection_matrix).z
+
+def project_3d_to_2d(vertex, view_matrix, projection_matrix):
+    # Standard transformation and perspective divide [G]
+    return apply_matrix(vertex, view_matrix)
+
 def construct_winged_edge_subdivision(screen_vertices, edges):
-    """
-    Constructs a winged-edge subdivision structure for the projected polyhedron.
-    """
     structure = WingedEdgeStructure()
-    
-    # Add projected edges one by one
     for edge in edges:
-        # Find intersections with existing edges
         intersections = find_edge_intersections(edge, structure)
-        
-        # Create new vertices at intersections
         for intersection in intersections:
             structure.add_vertex(intersection)
-            
-        # Modify structure, potentially dividing existing polygons
         structure.add_edge(edge)
-        
     return structure
 
-def compute_thickness(vertices, front_face, back_face, view_matrix):
-    """
-    Computes the thickness (length of viewing ray segment) at each vertex.
-    """
-    thicknesses = []
-    for vertex in vertices:
-        # Check if vertex is a profile vertex (silhouette)
-        if is_profile_vertex(vertex, front_face, back_face):
-            thickness = 0.0
-        else:
-            # Compute thickness from geometry of P and viewing ray
-            # Project vertex to 3D space if needed
-            thickness = compute_ray_length(vertex, front_face, back_face, view_matrix)
-        thicknesses.append(thickness)
-    return thicknesses
+class WingedEdgeStructure:
+    def __init__(self):
+        self.vertices = []
+        self.edges = []
+        self.polygons = []
+    def add_vertex(self, v):
+        self.vertices.append(v)
+    def add_edge(self, e):
+        self.edges.append(e)
+        # Modify structure, potentially dividing existing polygons [G]
+    def find_edge_intersections(self, edge, structure):
+        # Find intersections with existing edges [G]
+        return []
+
+def identify_faces_for_region(region, cell):
+    # Determine which faces of the polyhedron project to this region [G]
+    return cell.front_face, cell.back_face
 
 def is_profile_vertex(vertex, front_face, back_face):
-    """
-    Determines if a vertex is a profile vertex (silhouette edge).
-    """
-    # A vertex is a profile vertex if the viewing direction is tangent to the surface
-    # or if it lies on the silhouette boundary
-    return False # Implementation detail depends on specific geometry
+    # Check if vertex lies on silhouette boundary [G]
+    return False
+
+def compute_thickness(vertex, front_face, back_face, view_matrix):
+    # Compute length of ray segment through cell at vertex [G]
+    return 0.0
+
+def get_tau(vertex, cell):
+    return cell.tau
+
+def is_constant_tau(cell):
+    return cell.tau is not None
+
+def interpolate_color(vertex, cell):
+    return cell.color
+
+def render_region_hardware(region, vertex_colors, vertex_opacities, texture_map):
+    # Hardware rasterization with texture coordinates [G]
+    pass
+
+def composite_region_into_image(region, image):
+    # Porter-Duff over operation [G]
+    pass
 ```
 
 ## Subtopics
